@@ -1,83 +1,180 @@
 ---
-title: "Budgets — hierarchical, live-enforced"
+title: "Budget"
 description: "Cap tool calls and wall-clock per agent and per team, enforced while the run is in flight. — Clojure."
 sidebar:
-  label: "runtime / budgets"
+  label: "Budget"
 ---
 
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Clojure (JVM) + cljgo</strong> · package <code>net.clojars.muthuishere/toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7D</a>
+<strong>Clojure (JVM) + cljgo</strong> · package <code>net.clojars.muthuishere/toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7D</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/clojure/src/toolnexus/agents/runtime.cljc">clojure/src/toolnexus/agents/runtime.cljc:512</a>
 </p>
 
-<Aside type="caution" title="Not available in Clojure">
-There are no §7D budgets in this port — no per-agent or per-team caps on tool calls and wall-clock,
-because there is no sub-agent runtime to enforce them across. The caps that do exist are per-run and
-per-call: `:max-turns` on the client, and `:timeout` on the sources that reach the network.
+```clojure
+;; a Budget is a PLAIN MAP of any of these keys — all optional, money deliberately absent
+{:max-turns      6      ; lifetime turn cap for this handle (default 6)
+ :max-tokens     20000  ; token pool shared by this handle and its whole subtree
+ :max-tool-calls 50     ; tool-call cap for this handle
+ :max-wall-ms    60000  ; wall-clock cap since spawn
+ :max-children   4      ; how many DIRECT children this handle may spawn
+ :max-concurrent 8      ; how many of this handle's children may be "running" at once (default 8)
+ :max-depth      3}     ; how many delegation levels below THIS handle are allowed (default 3)
+
+;; set on an AgentDef, carved from the parent's pool at spawn time
+{:name "worker" :model "m" :budget {:max-tokens 20000 :max-depth 5}}
+
+;; the host callback, given ONLY when a limit would stop the NEXT turn
+(fn [info] "stop") ; or "extend" or "suspend" — anything else is read as "stop"
+;; info = {:handle id :limit "maxTurns" :prompt "…" :turns n :tokens n :tool-calls n :pool {...}}
+```
+
+`Budget` caps tool calls and wall-clock time per agent and per team, **enforced while the run is
+in flight** — not just checked once at spawn. "A Budget is a map of any of `:max-turns
+:max-tokens :max-tool-calls :max-wall-ms :max-children :max-concurrent :max-depth`. Money is
+deliberately absent — it is vendor data, and a host converts tokens to money itself"
+(`clojure/src/toolnexus/agents/runtime.cljc:512-513`).
+
+## Hierarchical enforcement — the carve is not the whole story
+
+A child's budget is **carved** from its parent's shared pool at [`spawn`](/api/clojure/runtime/runtime/)
+time, but that carve alone would miss a sibling draining the same pool first. "Usage roll-up IS
+the budget ledger: a child's spend drains every ancestor's" pool
+(`clojure/src/toolnexus/agents/runtime.cljc:~296`), and both `spawn` and `wake` do a **live walk**
+up the ancestor chain before admitting new work — so a handle whose own carved `:pool-tokens`
+(visible via [`inspect`](/api/clojure/runtime/handle/)) still looks untouched can still be refused
+because a sibling elsewhere in the tree already spent the shared pool down. `maxDepth` and
+`maxChildren` are checked only at `spawn`, against the **spawning parent's own** effective cap —
+not an ancestor's — so a child with no `:budget` of its own inherits a fresh default `maxDepth 3`
+for ITS OWN children, counted from itself.
+
+Nine named limit strings exist across the whole §7D vocabulary — the seven budget fields above
+plus `"completion"` and `"timeout"` — spelled once as `toolnexus.agents.runtime/limit-max-turns`
+etc. and documented in full on
+[`agents.runtime/statuses / agents.runtime/limits`](/api/clojure/runtime/vocabulary/); `maxChildren`
+/ `maxConcurrent` / `maxDepth` are the three that surface as a **thrown `spawn` refusal** rather
+than a settled `TaskResult` (A17), because they are admission refusals, not turn stops.
+
+## The `:on-budget` host callback
+
+`create-runtime`'s optional `:on-budget` is consulted **only** when a limit would stop the next
+turn — absent, the limit always stops it, byte-identically to every other port. When present, it
+is `(fn [info] "stop"|"extend"|"suspend")` and the three decisions are:
+
+- **`"stop"`** — settle `{:status "incomplete" :limit "<name>"}`, naming the limit. What happens
+  by default with no hook at all.
+- **`"extend"`** — grant **exactly one** more turn past the limit (a one-shot `:budget-grant`
+  flag), then re-run `wake` so gate 2's concurrency queue is honoured unchanged. The pool itself is
+  not rewritten — the host is asked again before the turn after that. The host owns the loop bound,
+  never the runtime.
+- **`"suspend"`** — park the limit as a §10 `"approval"` `Request` (`idle→suspended`, never
+  `running→suspended`, because the suspension happens *before* the turn admits). The classic
+  "402 → top-up → resume" story: the host answers with [`resume`](/api/clojure/runtime/runtime/)
+  and an `Answer`; `ok=true` runs the turn the approval bought, `ok=false` settles the same
+  `"incomplete"` a `"stop"` would have.
+
+Anything else the callback returns — `nil`, a typo, a thrown exception — is read as `"stop"`. An
+unrecognised decision must never become a silent grant, which is the one way an `:on-budget` hook
+could turn a bounded run into an unbounded one.
+
+## Defaults
+
+Three ceilings are pinned across every port when an `AgentDef` sets no `:budget` of its own
+(`clojure/src/toolnexus/agents/runtime.cljc:130-135`):
+
+- `default-max-turns` = **6**
+- `default-max-concurrent` = **8** (also the default `:max-concurrent-turns` tree-wide gate on
+  `create-runtime` itself — same number, two different scopes)
+- `default-max-depth` = **3**
+
+## When to use it
+
+- **Bounding how far a delegation tree can grow** — `:max-depth` and `:max-children` stop a
+  runaway `task` chain before it spawns unboundedly.
+- **Capping spend per team**, not just per agent — put `:max-tokens` on a coordinator's def and
+  every child it spawns draws from that one shared pool, live, not just at carve time.
+- **Turning a hard stop into a host decision** — set `:on-budget` on `create-runtime` when you want
+  a top-up flow, a one-shot grace turn, or a metered escalation instead of an unconditional
+  `"incomplete"`.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="A plain map, no money, no separate Budget type">
+`Budget` is a map like `AgentDef`, `Guardrail`, and `Verdict` elsewhere in this port — no
+defrecord, because a fixed set of optional numeric ceilings needs no type beyond what a map
+already is. It deliberately excludes any monetary field: token counts are portable across
+providers, dollar costs are vendor pricing data the library has no business hardcoding, so a host
+that wants a dollar ceiling converts tokens to money itself inside its own `:on-budget` callback,
+where it has the pricing table.
 </Aside>
 
-Cap tool calls and wall-clock per agent and per team, enforced while the run is in flight.
+## Examples
 
-Hierarchical budgets are about a *team*: a parent hands a child a share of its remaining allowance,
-the child cannot exceed it, and the parent's own ceiling accounts for everything its children spent.
-That arithmetic needs a runtime that owns the children. What this port has instead is a set of
-independent, single-scope limits.
+### 1. The smallest useful call — a hard turn cap with no host hook
 
-## What to use instead
+```clojure
+(require '[toolnexus.agents.runtime :as rt])
 
-`:max-turns` bounds the loop — each turn is one provider call plus whatever tools it asked for — and
-the run comes back with `:status "incomplete"` and `:limit? true` rather than an exception:
+(def runtime
+  (rt/create-runtime {:registry {"w" {:name "w" :does "…" :model "wm" :budget {:max-turns 1}}}
+                      :llm {:base-url "http://mock.local" :model "default"}}))
+
+(let [h (rt/spawn runtime rt/root "w")]
+  (rt/wake runtime h "first") (rt/wait runtime h)          ; => "done", turn 1 of 1 spent
+  (let [refusal (rt/wake runtime h "second")]
+    (:ok refusal))                                          ; => false — the SECOND wake exceeds the cap
+  (:status (rt/wait runtime h)))                            ; => "incomplete", :limit "maxTurns"
+```
+
+The handle is never closed or crashed by a limit stop — it stays `"idle"`, ready to be woken
+again once the host raises the budget or spawns a successor.
+
+### 2. The realistic case — a shared pool a sibling can drain out from under you
+
+```clojure
+(let [boss (rt/spawn runtime rt/root "boss")   ; boss's def sets :budget {:max-tokens 20 :max-depth 5}
+      a    (rt/spawn runtime boss "w")
+      b    (rt/spawn runtime boss "w")]
+  ;; b was carved BEFORE a spent anything — its own view still says the full 20
+  (:pool-tokens (rt/inspect runtime b))          ; => 20
+
+  (rt/wake runtime a "burn it") (rt/wait runtime a)
+  (:tokens (rt/inspect runtime a))                ; => 30 (spent more than the pool alone allowed)
+  (:pool-tokens (rt/inspect runtime b))           ; => 20, UNCHANGED — the carve alone would say "fine"
+
+  ;; but the LIVE ancestor walk at wake time catches it anyway
+  (:ok (rt/wake runtime b "my turn"))              ; => false
+  (:status (rt/wait runtime b)))                   ; => "incomplete", :limit "maxTokens"
+```
+
+### 3. The full surface — an `:on-budget` top-up flow via `"suspend"` and `resume`
 
 ```clojure
 (require '[toolnexus.client :as client])
 
-(def c (client/create-client {:base-url  "https://api.anthropic.com"
-                              :style     "anthropic"
-                              :model     "claude-sonnet-4-6"
-                              :max-turns 8}))          ; default is 10
+(def runtime
+  (rt/create-runtime
+   {:registry {"w" {:name "w" :does "…" :model "wm" :budget {:max-turns 1}}}
+    :llm      {:base-url "http://mock.local" :model "default"}
+    :on-budget (fn [_info] "suspend")}))          ; route every limit hit through §10 approval
 
-(def r (client/run c "audit the repo" {:toolkit tk}))
+(let [h (rt/spawn runtime rt/root "w")]
+  (rt/wake runtime h "one") (rt/wait runtime h)
+  (rt/wake runtime h "two")                        ; parks rather than failing outright
+  (:state (rt/inspect runtime h))                  ; => "suspended"
+  (let [req (:pending (rt/wait runtime h))]
+    (:kind req))                                   ; => "approval"
 
-(:turns r)           ;; how many were actually used
-(:tool-call-count r) ;; total tool calls across the run
-(:limit? r)          ;; true when the turn cap ended the run
-(:status r)          ;; "done" | "pending" | "incomplete"
-(:usage r)           ;; {:prompt-tokens ... :completion-tokens ... :total-tokens ...}
+  ;; the host tops up: an Answer with ok=true buys the exact one turn the limit blocked
+  (rt/resume runtime (client/make-answer (:id (:pending (rt/wait runtime h))) true))
+  (:status (rt/wait runtime h))                    ; => "done" — turns GREW to 2, never reset
+  )
 ```
-
-Wall-clock is bounded per network call, not per run: `:timeout` on
-[`remote-agent`](/api/clojure/agents/agent/) and on HTTP tools, and each MCP server's own timeout.
-There is no single knob that stops a run after N seconds.
-
-For anything tighter, `:on-event` is the live seam. It is called synchronously inside the loop, so a
-counter kept there sees every tool call as it happens:
-
-```clojure
-(require '[toolnexus.client :as client]
-         '[koine.time :as time])
-
-(def spent (atom {:calls 0 :started (time/mono-ms)}))
-
-(client/run c "audit the repo"
-  {:toolkit  tk
-   :on-event (fn [e]
-               (when (= "tool_call" (:type e))
-                 (swap! spent update :calls inc))
-               (let [{:keys [calls started]} @spent]
-                 (when (or (> calls 40) (> (time/elapsed-ms started) 120000))
-                   ;; your policy, your signal — the loop does not enforce this for you
-                   (deliver over-budget true))))})
-```
-
-Note the honest limit: `:on-event` can *observe* and can flip a flag your own tools check, but it
-cannot abort the loop mid-turn. The two enforcement points the port actually owns are `:max-turns`
-and the per-call timeouts. To cap a delegated child, give it its own client with its own
-`:max-turns` — the child's spend is then bounded, but it is not deducted from the parent's.
 
 ## See also
 
-- [`toolnexus.client/create-client`](/api/clojure/client/create/) — where `:max-turns` is set
-- [`toolnexus.client/run`](/api/clojure/client/run/) — `:turns`, `:tool-call-count`, `:limit?`, `:usage`, `:on-event`
-- [`client / metrics`](/api/clojure/client/metrics/) — `:on-metric`, for spend you want to record rather than cap
-- [`runtime / runtime`](/api/clojure/runtime/runtime/) — the missing runtime these budgets would belong to
+- [`AgentDef`](/api/clojure/runtime/agent/) — Where `:budget` is set per registered agent.
+- [`create-runtime`](/api/clojure/runtime/runtime/) — `spawn` carves the budget and walks the
+  ancestor chain; `wake` re-checks it live; `resume` is how a `"suspend"` decision is answered.
+- [`agents.runtime/statuses / agents.runtime/limits`](/api/clojure/runtime/vocabulary/) — The nine
+  named limit strings (`limit-max-turns` etc.) a stopped `TaskResult`'s `:limit` field names.

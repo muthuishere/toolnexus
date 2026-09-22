@@ -1,0 +1,151 @@
+---
+title: "answer_output"
+description: "Wraps a human's typed string reply into the Answer a suspended run resumes with — the success counterpart to answerDeclined. — Python."
+sidebar:
+  label: "answer_output"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Python</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §10</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/python/src/toolnexus/types.py">python/src/toolnexus/types.py</a>
+</p>
+
+```python
+def answer_output(id: str, output: str) -> Answer
+```
+
+Wraps a human's typed string reply into the `Answer` a suspended run resumes with — the success
+counterpart to [`answer_declined`](/api/python/suspension/answer-declined/). Builds
+`Answer(id=id, ok=True, data={"output": output})` — the one recognised key under `Answer.data`
+for a plain-text resolution, so a `wait_for` implementation stops guessing whether the payload
+lives at `value`, `answers`, or `output`. `output` must be a `str`; a non-string raises
+`TypeError` immediately rather than silently degrading to `""` and handing the model a
+fabricated result under a `done` status.
+
+## When to use it
+
+- Your `wait_for` resolves a `pending(kind="input", ...)` or `pending(kind="approval", ...)`
+  suspension with a human's typed answer — "which environment?", "what's the order number?" —
+  and you want the recognised, cross-port `Answer.data["output"]` shape rather than inventing
+  your own key.
+- You are wiring a durable queue or a chat UI's reply back into a suspended run: the operator's
+  reply text is exactly what `answer_output` wraps.
+- You are unit-testing a tool's `ctx.answer` handling without a real human in the loop — pass
+  `wait_for=lambda req: answer_output(req.id, "staging")` and assert the tool reads it back.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Reach for answer_declined for a refusal">
+`answer_output` is for a RESULT — the human answered. When the human refuses, dismisses, or the
+request goes stale, build the `Answer` with
+[`answer_declined`](/api/python/suspension/answer-declined/) instead (`ok=False`, a `reason`),
+never `answer_output` with an empty or sentinel string — `ok` is what the loop actually branches
+on, not the shape of `data`.
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call — build the `Answer` directly
+
+```python test
+from toolnexus import answer_output
+
+a = answer_output("pnd-1", "staging")
+
+assert a.ok is True
+assert a.id == "pnd-1"
+assert a.data == {"output": "staging"}  # the one recognised key — no guessing
+
+print("ok:", a.id, "|", a.data)
+```
+
+### 2. The realistic case — a non-string output errors loudly, not silently
+
+```python test
+import pytest
+
+from toolnexus import answer_output
+
+with pytest.raises(TypeError):
+    answer_output("pnd-1", {"value": "staging"})  # type: ignore[arg-type]
+
+# The correct call always carries a plain str:
+a = answer_output("pnd-1", "staging")
+assert isinstance(a.data["output"], str)
+
+print("ok: non-string output rejected before it ever reaches the tool")
+```
+
+### 3. The full surface — a suspended run resumes through `wait_for`
+
+```python test
+import asyncio
+
+from toolnexus import ToolResult, answer_output, create_client, create_toolkit, define_tool, pending
+
+
+class RecordingTransport:
+    def __init__(self, responses):
+        self._responses = list(responses)
+
+    def post(self, url, headers, payload, timeout):
+        return self._responses.pop(0)
+
+    def open(self, url, headers, payload, timeout):  # noqa: A003
+        raise NotImplementedError
+
+
+seen = {}
+
+
+async def ask_human(args=None, ctx=None):
+    if ctx is not None and ctx.answer is not None:
+        seen["answer"] = ctx.answer
+        return ToolResult(output=ctx.answer.data["output"], is_error=False)
+    return pending(kind="input", prompt="which environment?")
+
+
+async def main():
+    transport = RecordingTransport([
+        {
+            "choices": [{
+                "message": {
+                    "role": "assistant", "content": None,
+                    "tool_calls": [{"id": "c1", "type": "function",
+                                     "function": {"name": "ask_human", "arguments": "{}"}}],
+                },
+            }],
+            "usage": {"total_tokens": 5},
+        },
+        {"choices": [{"message": {"role": "assistant", "content": "ok"}}], "usage": {"total_tokens": 5}},
+    ])
+    tk = await create_toolkit(builtins=False, extra_tools=[
+        define_tool(ask_human, name="ask_human", description="asks")
+    ])
+    try:
+        client = create_client(
+            base_url="http://mock.local/v1", style="openai", model="mock", api_key="unused",
+            http_transport=transport,
+            wait_for=lambda req: answer_output(req.id, "staging"),
+        )
+        result = await client.run("go", tk)
+
+        assert result.status == "done"
+        assert seen["answer"].data["output"] == "staging"
+
+        print("ok:", seen["answer"].data)
+    finally:
+        await tk.close()
+
+
+asyncio.run(main())
+```
+
+## See also
+
+- [`pending`](/api/python/suspension/pending/) — Return a Pending from a tool to park the run until someone answers.
+- [`answer_declined`](/api/python/suspension/answer-declined/) — The refusal counterpart: wraps a decline/cancel/expiry into the same `Answer` shape.
+- [`auth_required`](/api/python/suspension/auth-required/) — The auth-shaped suspension: hand back a URL, resume once the user has granted access.
+- [`WaitFor`](/api/python/suspension/wait-for/) — The single hook where the host resolves a suspension — in-process prompt or durable queue, same contract.
+- [`pending_of`](/api/python/suspension/pending-of/) — Detect that a RunResult is parked rather than finished, and get the Request that parked it.

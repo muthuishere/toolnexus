@@ -1,86 +1,178 @@
 ---
-title: "AgentRuntime — spawn, wait, interrupt"
+title: "create-runtime"
 description: "The six host verbs that drive sub-agents, plus the read-only list and inspect views. — Clojure."
 sidebar:
-  label: "runtime / runtime"
+  label: "create-runtime"
 ---
 
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Clojure (JVM) + cljgo</strong> · package <code>net.clojars.muthuishere/toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7D</a>
+<strong>Clojure (JVM) + cljgo</strong> · package <code>net.clojars.muthuishere/toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7D</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/clojure/src/toolnexus/agents/runtime.cljc">clojure/src/toolnexus/agents/runtime.cljc</a>
 </p>
 
-<Aside type="caution" title="Not available in Clojure">
-There is no §7D agent runtime in this port — no spawn, no wait, no interrupt, and no registry of
-running children to list or inspect. Delegation here is cross-process: `toolnexus.serve/serve` on one
-side, `toolnexus.a2a/remote-agent` on the other.
+```clojure
+(require '[toolnexus.agents.runtime :as rt])
+
+;; build the runtime — one process-local tree of handles
+(def runtime
+  (rt/create-runtime {:registry   {"writer" {:name "writer" :does "writes" :model "gpt-4.1"}}
+                      :llm        {:base-url "https://api.example.com" :model "gpt-4.1"}
+                      :clock      nil                ; default: system-clock; pass rt/virtual-clock in tests
+                      :inbox-cap  8                    ; gate 1 — per-handle inbox capacity
+                      :max-concurrent-turns 8          ; gate 3 — LLM calls in flight, tree-wide
+                      :shutdown-ms 200                 ; graceful-close bound before an abort escalates
+                      :on-budget  nil}))                ; (fn [info] "stop"|"extend"|"suspend")
+
+;; the six host verbs
+(rt/spawn     runtime rt/root "writer")     ; => child id, or {:error "…"}
+(rt/post      runtime child-id item)        ; => {:ok true} | {:ok false :error "…"}
+(rt/wake      runtime child-id "prompt")    ; => {:ok true} | {:ok false :error "…"} — does NOT block
+(rt/wait      runtime child-id)             ; => TaskResult — blocks for the next result
+(rt/interrupt runtime child-id)             ; => nil — abort in place, handle stays alive
+(rt/close     runtime child-id)             ; => nil — graceful shutdown, leaf-first
+(rt/resume    runtime answer)               ; => TaskResult of the topmost re-run handle
+
+;; read-only views
+(rt/handles runtime)          ; => [{:id :state :tokens :inbox} ...] tree order, root excluded
+(rt/inspect runtime child-id) ; => {:id :state :tokens :inbox :turns :pool-tokens :pending}
+(rt/trace   runtime)          ; => the §0 conformance artifact: every transition, in order
+```
+
+The six host verbs that drive sub-agents — `spawn`, `post`, `wake`, `wait`, `interrupt`, `close`
+— plus `resume` for §10 durable suspension, and the read-only `handles`/`inspect` views. This is
+the core of the §7D runtime: everything a host needs to create, drive, observe and tear down a
+tree of delegated agents, built once as `create-runtime` and threaded through every call after.
+
+## The state machine
+
+Every handle is `idle → running → idle|suspended|closed`, and `suspended → running` **only** via
+the `Answer` to its pending `Request` (`clojure/src/toolnexus/agents/runtime.cljc:10-11`):
+
+- **`idle`** — alive, no turn in flight. A fresh handle starts here; a settled one returns here.
+- **`running`** — `wake` admitted a turn (subject to gate 1's inbox cap, gate 2's per-parent
+  concurrency, and gate 3's tree-wide LLM-call cap).
+- **`suspended`** — the turn hit a §10 `Request` (or a budget routed through `"suspend"`); only
+  `resume` with the matching `Answer` moves it, and it resumes with turns/tokens **growing**, never
+  resetting.
+- **`closed`** — torn down by `close`; still queryable by `inspect` and `wait` (its last recorded
+  result), and a successor may be spawned fresh from the registry.
+
+`spawn` checks `maxDepth`/`maxChildren` and does a **live** budget walk up the ancestor chain (not
+just the carve at spawn time — a sibling that has already drained the shared pool stops the next
+spawn too). `wake` is non-blocking; call `wait` to block for the settled `TaskResult`, optionally
+with `:timeout-ms` (the child keeps running past a wait timeout) or `:by` (only the spawner may
+wait on a handle — handles are capabilities). `interrupt` aborts an in-flight turn or cancels a
+pending request, cooperatively, leaving the handle alive. `close` is graceful and **leaf-first**:
+children close before their parent, a running turn gets `:shutdown-ms` to finish before being
+aborted, and `(close rt rt/root)` is stop-all.
+
+## Two delegation mechanisms — do not conflate them
+
+<Aside type="caution" title="In-process runtime vs. cross-process A2A — different mechanisms, different page">
+`toolnexus.agents.runtime` delegates **in-process**: `spawn` creates a handle inside the SAME
+runtime, sharing its clock, its conversation store, and its turn gate — this is what `task-tool`
+and `agent-tool` are built on. It has nothing to do with `toolnexus.serve`/`toolnexus.a2a`'s
+**remote** delegation, where an entire separate process is exposed as a remote A2A agent (Agent
+Card + JSON-RPC, SPEC §7B) and invoked over the network. Use this runtime when one process needs
+a tree of sub-agents sharing budgets and a transcript store; reach for the A2A serve/remote-agent
+path when the "sub-agent" is actually a different deployment, a different team's service, or
+anything that must cross a process boundary. The two are not interchangeable and this page covers
+only the in-process one.
 </Aside>
 
-The six host verbs that drive sub-agents, plus the read-only list and inspect views.
+## When to use it
 
-The runtime is what makes §7D more than a function call: it owns the children, so a host can spawn
-one and keep going, wait on it later, interrupt it, list what is running and inspect a specific one.
-Without a runtime there is no registry — and without a registry, "what is my agent doing right now"
-has no answer.
+- **You need a sub-agent tree with real backpressure** — bounded inboxes, per-parent concurrency,
+  a tree-wide cap on LLM calls in flight — rather than hand-rolling coroutines around `client/run`.
+- **You need hierarchical budgets enforced live**, not just carved once at spawn: a sibling that
+  overspends the shared pool must stop the next sibling's `wake`, and `create-runtime`'s
+  `:on-budget` hook lets the host decide `"stop"`/`"extend"`/`"suspend"` instead of always hard
+  stopping. See [`Budget`](/api/clojure/runtime/budgets/).
+- **You need the model itself to delegate**, via [`task-tool`](/api/clojure/runtime/task-tool/) —
+  which is `spawn`→`wake`→`wait`→`close` fused into one tool call and reattached by task key on
+  replay.
+- **You need a deterministic transition trace** for tests or conformance — `trace` records every
+  transition, refusal and escalation in commit order, which is what §0 conformance is actually
+  measured against, not the return values alone.
 
-## What to use instead
+## Why this and not the alternative
 
-The A2A pair is the one place in this port where a delegated unit of work has an identity you can
-query after starting it. `SendMessage` returns immediately with a task id; `GetTask` is your
-inspect verb; the store is your registry.
+<Aside type="tip" title="Reach for the plain client, or the gated loop, when there is no tree">
+If your agent never delegates — no `:team`, no child handles — `create-runtime` is overhead.
+[`toolnexus.client/run`](/api/clojure/client/run/) or, when you want a completion gate,
+[`toolnexus.agents.loop`](/api/clojure/runtime/loop/) is the right size. Reach for this runtime
+specifically when an agent's `AgentDef` sets `:team`, `:budget` shared across children, or
+`:wait-for`/`:on-metric` routing that must cross a handle boundary — those are the loop's
+documented structural ceiling (see [`toolnexus.agents.loop`](/api/clojure/runtime/loop/)'s own
+"Why this and not the alternative"), not a bug to route around by hand.
+</Aside>
+
+`create-runtime` throws (`ex-info`) at construction time if more than one of `:http-client`,
+`:llm`, and `:in-process` (ADR 0030 — a model running in the same process, wired through the same
+turn gate as any HTTP transport) is set — never silently resolved by precedence, because a
+runtime with an ambiguous transport is exactly the kind of drift the ports exist to prevent.
+
+## Examples
+
+### 1. The smallest useful call — spawn, wake, wait
 
 ```clojure
-(require '[toolnexus.core :as core]
-         '[toolnexus.serve :as serve])
+(require '[toolnexus.agents.runtime :as rt])
 
-;; the child, as a real agent with a durable task store
-(def child-tk (core/build {:skills "examples/skills"}))
+(def runtime
+  (rt/create-runtime {:registry {"w" {:name "w" :does "writes" :model "wm"}}
+                      :llm {:base-url "http://mock.local" :model "default"}}))
 
-(def child
-  (serve/serve child-tk {:port    8081
-                         :a2a     {:name "researcher"}
-                         :skills  (:skills child-tk)
-                         :store   "file:./tasks"
-                         :client  child-client
-                         :on-task (fn [t] (println "settled" (:id t) (:state t)))}))
-
-;; "list" and "inspect": the store is the registry
-(def store (:store child))
-((:get store) "some-task-id")
-;; => {:id "..." :status {:state "working"}}   or completed / failed, with :artifacts
+(def h (rt/spawn runtime rt/root "w"))     ; => "root/w.1"
+(rt/wake runtime h "go")                   ; => {:ok true}
+(let [r (rt/wait runtime h)]
+  (:status r))                             ; => "done"
 ```
 
-From the parent side, calling the peer's tool blocks until the task is terminal, and `:metadata` on
-the result carries the task id, the final state, the poll count and elapsed ms:
+The full trace for this run is exactly three lines — `"root/w.1: spawned (depth 1, tokens
+Infinity)"`, `"root/w.1: idle→running (wake)"`, `"root/w.1: running→idle (done, turns=1,
+tokens=15)"` — an extra transition is as wrong as a missing one.
+
+### 2. The realistic case — a bounded wait, then interrupt or close
 
 ```clojure
-(require '[toolnexus.a2a :as a2a]
-         '[toolnexus.tool :as tool])
-
-(def peer (a2a/remote-agent {:card "http://127.0.0.1:8081/.well-known/agent-card.json"
-                             :timeout 60000 :poll-every 500}))
-
-(tool/execute (tool/toolkit (:tools peer))
-              (:name (first (:tools peer)))
-              {:task "summarise the changelog"}
-              ;; the closest thing to `interrupt`: an abort predicate the poll loop checks
-              {:aborted? (fn [] @cancelled?)})
+(let [h (rt/spawn runtime rt/root "w")]
+  (rt/wake runtime h "start the long job")
+  (let [r (rt/wait runtime h {:timeout-ms 5000})]
+    (if (= "timeout" (:status r))
+      ;; the child keeps running — a wait deadline is the WAITER's deadline
+      (rt/interrupt runtime h)               ; abort in place; handle stays idle, alive
+      (println (:text r))))
+  ;; tear the whole tree down gracefully when done — leaf-first, :shutdown-ms grace period
+  (rt/close runtime rt/root))
 ```
 
-Map the verbs honestly: **spawn** is `SendMessage` (which the peer tool does for you), **wait** is
-the poll loop, **inspect** is `GetTask` or a direct store read, **list** is whatever your store can
-enumerate — `memory-store` has `:all`, `file-store` is a directory of JSON files. **Interrupt** is
-only local: `:aborted?` stops your side from waiting and reports the task as `canceled`, but the peer
-keeps working. There is no remote cancel.
+### 3. The full surface — spawn errors, capability checks, and the read-only views
 
-For work that is not worth a server, [`toolnexus.client/run`](/api/clojure/client/run/) called
-directly is a synchronous child with no handle at all — see
-[`runtime / agent`](/api/clojure/runtime/agent/).
+```clojure
+(let [boss (rt/spawn runtime rt/root "boss")   ; assumes "boss" is registered with a :budget
+      a    (rt/spawn runtime boss "w")
+      b    (rt/spawn runtime boss "w")]
+  ;; a spawn past maxDepth/maxChildren, or over a live budget walk, is a verb-error map
+  (rt/verb-error? (rt/spawn runtime boss "unknown-name"))  ; => true
+
+  ;; handles are capabilities: only the spawner may wait on what it spawned
+  (rt/wait runtime a {:by boss})   ; ok — boss spawned a
+  ;; (rt/wait runtime a {:by b})   would settle with :status "error", "only the spawner may wait…"
+
+  ;; read-only observability, no verbs involved
+  (rt/handles runtime)             ; => tree-order snapshot of every live handle under boss
+  (rt/inspect runtime a)           ; => {:id :state :tokens :inbox :turns :pool-tokens :pending}
+  (rt/trace runtime))              ; => every transition, refusal and escalation, in commit order
+```
 
 ## See also
 
-- [`toolnexus.serve/serve`](/api/clojure/serve/a2a/) — the host side: a child with an addressable task lifecycle
-- [`toolnexus.serve/file-store`](/api/clojure/serve/task-store/) — the registry that outlives the process
-- [`toolnexus.a2a/remote-agent`](/api/clojure/agents/agent/) — spawn and wait, from the parent
-- [`runtime / handle`](/api/clojure/runtime/handle/) — the per-child state machine, also absent
+- [`AgentDef`](/api/clojure/runtime/agent/) — The registry entries `spawn` resolves names against.
+- [`Handle`](/api/clojure/runtime/handle/) — The state machine one `spawn` call produces, and what
+  `handles`/`inspect` read off it.
+- [`Budget`](/api/clojure/runtime/budgets/) — The hierarchical, live-enforced limits `spawn` and
+  `wake` check before admitting work.
+- [`task-tool`](/api/clojure/runtime/task-tool/) — The opt-in, model-facing fusion of `spawn` +
+  `wake` + `wait` + `close` built on these same six verbs.

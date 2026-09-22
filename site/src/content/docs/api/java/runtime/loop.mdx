@@ -1,0 +1,277 @@
+---
+title: "Loop"
+description: "Agent.Loop(...).Run drives the agent under a Guardrail policy that vets every tool call and a Completion check that decides when the task is done — the gated door beside the plain Agent.Run, with unsupported spec fields (tools, team, waitFor, onMetric) named explicitly rather than silently dropped. — Java."
+sidebar:
+  label: "Loop"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Java</strong> · package <code>io.github.muthuishere:toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7D</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/java/src/main/java/io/github/muthuishere/toolnexus/Loop.java">Loop.java</a>
+</p>
+
+```java
+public final class Loop {
+    // Built from an AgentSpec via Agents.Agent#loop(options, toolkit) — the spec-aware
+    // constructor; a loose-field constructor also exists for hosts without an AgentSpec.
+    public Outcome run(String prompt);
+    public Outcome run(String prompt, RunOptions opts);
+    public Outcome run(List<ContentPart> prompt);              // §1B multimodal entry
+    public Outcome run(List<ContentPart> prompt, RunOptions opts);
+    public String status();   // observed, never set by the caller
+    public int turns();       // model round trips this loop has spent
+
+    public interface Guardrail {
+        String check(LlmClient.BeforeToolEvent ev); // null/"allow" permits; any other string denies
+    }
+
+    public static final class Verdict {
+        public final boolean ok;
+        public final String reason;
+        public static Verdict pass();
+        public static Verdict fail(String reason);
+    }
+
+    public static final class Completion {
+        public final Function<LlmClient.RunResult, Verdict> verify;
+        public final int maxAttempts; // REQUIRED — an unbounded verify loop is a DoS on the bill
+        public Completion(Function<LlmClient.RunResult, Verdict> verify, int maxAttempts);
+    }
+
+    public static final class RunOptions {
+        public String model; // overrides the agent's model for THIS call only
+        public RunOptions model(String v);
+    }
+
+    public static final class Outcome {
+        public final String text;
+        public final String status;      // done | incomplete | pending | error
+        public final String stoppedBy;   // named whenever status is not "done" — never silent
+        public final int attempts;
+        public final int turns;
+        public final LlmClient.RunResult result;
+    }
+
+    public static List<String> loopUnsupported(Agents.AgentSpec spec); // "tools"/"team"/"waitFor"/"onMetric"
+    public static Verdict allTodosDone(LlmClient.RunResult result);    // built-in completion verifier
+    public static LlmClient.Hooks guardedHooks(List<Guardrail> guardrails, LlmClient.Hooks hooks);
+    public static LlmClient.RunResult runGated(Ask ask, String prompt, Completion completion);
+}
+```
+
+`Agent.Loop(...).Run` — spelled `agent.loop(options, toolkit).run(prompt)` in Java — drives the
+agent under a `Guardrail` policy that vets every tool call and a `Completion` check that decides
+when the task is done: the gated door beside the plain `Agent.run`. `Loop` takes **no options of
+its own** — it answers "DID it?" (status, turns), never "MAY it?" (that's the `AgentSpec`, "the
+harness") or "with WHAT?" (that's `RunOptions`, per call). A `Loop` is built from a spec via
+`Agents.Agent#loop(LlmClient.Options, Toolkit)`, which is the spec-aware constructor (ADR 0024):
+it applies the agent's `soul` (unless the caller already set a `systemPrompt`), compiles its
+`guardrails` into `beforeTool`, and defaults `model`/`budget.maxTurns` from the spec — all of which
+a driver built from four loose fields would silently drop.
+
+## When to use it
+
+Reach for `agent.loop(...)` instead of `agent.run(...)` whenever the caller needs the **live,
+turn-by-turn shape** of one agent's execution rather than the one-shot tree result: reading
+`loop.status()`/`loop.turns()` between calls, overriding the model for a single call via
+`RunOptions.model(...)`, or gating completion with a `Completion` so the agent cannot claim `done`
+before its own declared plan (`todowrite`) is actually finished — `Loop.allTodosDone` is the
+built-in, domain-blind verifier for exactly that. Guardrails (`Loop.Guardrail`) are a policy check,
+"may it?" — never a correctness check; use `Completion` for "is it right?".
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Loop for a directly-driven agent; run()/asTool() for team, waitFor, tools, onMetric">
+`Loop` is a thin layer over the shipped §8 client — it drives ONE agent with no delegation tree,
+so four `AgentSpec` fields genuinely cannot be honoured through it: `tools` (the loop is HANDED a
+toolkit rather than building one), `team`, `waitFor`, and `onMetric` (all need the §7D runtime's
+handle tree, escalation chain, and per-agent sinks). `Loop.loopUnsupported(spec)` names exactly
+these four, by field name, rather than silently dropping them — an `AgentSpec` that sets any of
+them is legal to build, and legal to drive through `Loop`, but the driver tells you plainly which
+capability you gave up. Reach for `agent.run(rtOpts, prompt)` / `agent.asTool()` (the full §7D
+runtime) the moment you need delegation, a wait-for hook, or a metric sink; reach for `Loop` for
+everything else — a single, directly-driven agent is the common case and does not need the
+runtime's tree machinery.
+</Aside>
+
+<Aside type="note" title="Java has no standalone harness() factory — a deliberate idiom difference">
+Every port narrates "harness = capability (per problem), loop = live execution (observed,
+unconfigurable)" (see the [narrative doc](/harness/)), and most ports back that with a literal
+`harness(spec)` identity function purely so the word appears in code. **Java does not ship one.**
+`AgentSpec` is already built through a fluent builder (`new Agents.AgentSpec().does(...).completion(...)`),
+so wrapping it in a same-typed identity function would add a call with no effect — the builder
+already IS the harness. This is a deliberate per-language idiom choice, not a missing feature; only
+a doc comment on `Loop` retains the word "harness" to name the concept.
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call — drive an agent and read its Outcome
+
+```java test
+import com.sun.net.httpserver.HttpServer;
+import io.github.muthuishere.toolnexus.*;
+import io.github.muthuishere.toolnexus.agents.Agents;
+import java.io.OutputStream;
+import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
+
+public class Example {
+    public static void main(String[] args) throws Exception {
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/", ex -> {
+            byte[] b = "{\"choices\":[{\"message\":{\"content\":\"hello\"},\"finish_reason\":\"stop\"}]}"
+                    .getBytes(StandardCharsets.UTF_8);
+            ex.getResponseHeaders().add("Content-Type", "application/json");
+            ex.sendResponseHeaders(200, b.length);
+            try (OutputStream os = ex.getResponseBody()) { os.write(b); }
+        });
+        server.start();
+
+        LlmClient.Options opts = new LlmClient.Options();
+        opts.baseUrl = "http://127.0.0.1:" + server.getAddress().getPort();
+        opts.style = "openai";
+        opts.model = "test-model";
+        opts.apiKey = "unused";
+
+        Toolkit.Options tkOpts = new Toolkit.Options();
+        tkOpts.builtins = false;
+
+        try (Toolkit tk = Toolkit.create(tkOpts)) {
+            Agents.Agent agent = Agents.agent("plain", new Agents.AgentSpec().does("answers"));
+            Loop loop = agent.loop(opts, tk);
+
+            Loop.Outcome out = loop.run("hi");
+
+            if (!"done".equals(out.status)) throw new AssertionError(out.status);
+            if (!"hello".equals(out.text)) throw new AssertionError(out.text);
+            if (out.stoppedBy != null) throw new AssertionError("a done run names no stop reason");
+            if (!"idle".equals(loop.status())) throw new AssertionError(loop.status());
+
+            System.out.println("ok: status=" + out.status + " attempts=" + out.attempts);
+        } finally {
+            server.stop(0);
+        }
+    }
+}
+```
+
+### 2. The realistic case — a Completion gate retries an agent that left work open
+
+```java test
+import com.sun.net.httpserver.HttpServer;
+import io.github.muthuishere.toolnexus.*;
+import io.github.muthuishere.toolnexus.agents.Agents;
+import java.io.OutputStream;
+import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
+import java.util.concurrent.atomic.AtomicInteger;
+
+public class Example {
+    static String todoCall(String id, String text, boolean done) {
+        return "{\"role\":\"assistant\",\"tool_calls\":[{\"id\":\"t1\",\"type\":\"function\","
+                + "\"function\":{\"name\":\"todowrite\",\"arguments\":\"{\\\"todos\\\":[{\\\"id\\\":\\\""
+                + id + "\\\",\\\"text\\\":\\\"" + text + "\\\",\\\"completed\\\":" + done + "}]}\"}}]}";
+    }
+
+    static String say(String content) {
+        return "{\"role\":\"assistant\",\"content\":\"" + content + "\"}";
+    }
+
+    public static void main(String[] args) throws Exception {
+        // Attempt 1 leaves the todo open; the gate retries; attempt 2 closes it.
+        String[] messages = { todoCall("1", "proofread", false), say("done for real") };
+        AtomicInteger i = new AtomicInteger();
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/", ex -> {
+            String message = messages[Math.min(i.getAndIncrement(), messages.length - 1)];
+            String finish = message.contains("tool_calls") ? "tool_calls" : "stop";
+            byte[] b = ("{\"choices\":[{\"message\":" + message + ",\"finish_reason\":\""
+                    + finish + "\"}]}").getBytes(StandardCharsets.UTF_8);
+            ex.getResponseHeaders().add("Content-Type", "application/json");
+            ex.sendResponseHeaders(200, b.length);
+            try (OutputStream os = ex.getResponseBody()) { os.write(b); }
+        });
+        server.start();
+
+        LlmClient.Options opts = new LlmClient.Options();
+        opts.baseUrl = "http://127.0.0.1:" + server.getAddress().getPort();
+        opts.style = "openai";
+        opts.model = "test-model";
+        opts.apiKey = "unused";
+
+        Toolkit.Options tkOpts = new Toolkit.Options();
+        tkOpts.builtins = java.util.Map.of("tools", java.util.Map.of("todowrite", true));
+
+        try (Toolkit tk = Toolkit.create(tkOpts)) {
+            Agents.Agent agent = Agents.agent("gated", new Agents.AgentSpec().does("plans")
+                    .completion(new Loop.Completion(Loop::allTodosDone, 3)));
+
+            Loop.Outcome out = agent.loop(opts, tk).run("do the thing");
+
+            if (!"done".equals(out.status)) throw new AssertionError(out.status);
+            if (out.attempts < 2) throw new AssertionError("expected a retry, got " + out.attempts);
+
+            System.out.println("ok: verified after " + out.attempts + " attempt(s)");
+        } finally {
+            server.stop(0);
+        }
+    }
+}
+```
+
+### 3. The full surface — a Guardrail denies a tool call, and loopUnsupported names the gap
+
+```java test
+import io.github.muthuishere.toolnexus.*;
+import io.github.muthuishere.toolnexus.agents.Agents;
+import java.util.List;
+import java.util.Map;
+
+public class Example {
+    public static void main(String[] args) {
+        // guardedHooks compiles a first-deny-wins policy chain into a beforeTool hook.
+        LlmClient.Hooks hooks = Loop.guardedHooks(List.of(
+                ev -> "danger".equals(ev.name()) ? "policy: no" : "allow"), null);
+
+        LlmClient.ToolOverride denied = hooks.beforeTool.apply(
+                new LlmClient.BeforeToolEvent("danger", Map.of(), null, 1));
+        if (!denied.result().isError()) throw new AssertionError("expected a denial");
+        if (!denied.result().output().contains("policy: no")) throw new AssertionError(denied.result().output());
+
+        LlmClient.ToolOverride allowed = hooks.beforeTool.apply(
+                new LlmClient.BeforeToolEvent("safe", Map.of(), null, 1));
+        if (allowed != null) throw new AssertionError("an allowed call must not be overridden");
+
+        // loopUnsupported names, by field, exactly what a Loop-driven agent gives up.
+        Agents.AgentSpec teamSpec = new Agents.AgentSpec().does("x")
+                .team(Agents.agent("helper", new Agents.AgentSpec().does("helps")));
+        List<String> gaps = Loop.loopUnsupported(teamSpec);
+        if (!gaps.contains("team")) throw new AssertionError(gaps);
+
+        Agents.AgentSpec plainSpec = new Agents.AgentSpec().does("x");
+        if (!Loop.loopUnsupported(plainSpec).isEmpty()) {
+            throw new AssertionError("a plain spec has nothing unsupported");
+        }
+
+        System.out.println("ok: denied a tool call, unsupported=" + gaps);
+    }
+}
+```
+
+## Notes
+
+- `Loop.Outcome.status` reuses the SHIPPED `TaskResult` vocabulary rather than minting a new one —
+  see [`TaskResult.STATUSES` / `TaskResult.LIMITS`](/api/java/runtime/vocabulary/).
+- The narrative page at [`/harness/`](/harness/) covers the placement law
+  (`AgentSpec` = capability, `RunOptions` = per-call, `Loop` = observed) across all seven ports;
+  this page is the Java API surface for it.
+
+## See also
+
+- [`TaskResult.STATUSES` / `TaskResult.LIMITS`](/api/java/runtime/vocabulary/) — The closed status/limit vocabularies `Loop.Outcome.status` and a gated run's `limit` reuse.
+- [`agents.Agent`](/api/java/runtime/agent/) — Define a sub-agent with its own toolkit, prompt and budget, callable as a tool by its parent.
+- [`agents.Runtime`](/api/java/runtime/runtime/) — The six host verbs that drive sub-agents, plus the read-only list and inspect views.
+- [`agents.Handle`](/api/java/runtime/handle/) — The state machine for one spawned agent: pending, running, suspended, done.
+- [`agents.Budget`](/api/java/runtime/budgets/) — Cap tool calls and wall-clock per agent and per team, enforced while the run is in flight.

@@ -8,48 +8,196 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Java</strong> · package <code>io.github.muthuishere:toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a>
+<strong>Java</strong> · package <code>io.github.muthuishere:toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/java/src/main/java/io/github/muthuishere/toolnexus/LlmClient.java">LlmClient.java</a>
 </p>
 
 ```java
-{/* TODO:signature */}
+public static LlmClient create(Options opts)
+
+// LlmClient.Options — the full surface, grouped:
+public Options baseUrl(String v)          // provider endpoint
+public Options style(String v)            // "openai" | "anthropic" — wire format
+public Options model(String v)
+public Options apiKey(String v)           // falls back to env if null
+public Options headers(Map<String, String> v)
+public Options systemPrompt(String v)
+public Options maxTurns(int v)            // default 10
+
+// resilience (SPEC §8 / see LlmClient.ErrorInfo)
+public Options retries(int v)             // default 2
+public Options retryBaseMs(int v)         // default 500
+public Options retryableStatuses(List<Integer> v)
+public Options timeoutMs(long v)
+public Options onError(Function<ErrorInfo, Tier> v)
+
+// memory, hooks, observability
+public Options store(ConversationStore v)         // default: in-memory
+public Options hooks(Hooks v)
+public Options onMetric(Consumer<MetricEvent> v)
+
+// request shaping / transport
+public Options requestParams(Map<String, Object> v)
+public Options bodyTransform(Function<Map<String, Object>, Map<String, Object>> v)
+public Options httpClient(HttpClient v)
+
+// §10 suspension + §1B/§8A content parts
+public Options waitFor(Function<Request, Answer> v)
+public Options maxPartBytes(long v)
+public Options onUnsupportedPart(String v)
 ```
 
-The unified client: system prompt, skills injection, parallel and chained tool calls, retries, memory.
+`LlmClient` is the unified client: it takes your model config once and gives you `run`/`ask`/
+`stream` — a tool-calling loop that injects the system prompt and the skill catalog, calls tools
+in parallel, chains follow-up turns until the model stops, retries transient provider failures,
+and (optionally) remembers a conversation across calls. `create` is the one constructor: every
+other client entry point (`run`, `ask`, `stream`) is a method on the `LlmClient` it returns.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+Call `LlmClient.create` once per model/provider configuration you talk to — typically once per
+process, or once per tenant if you're multiplexing API keys. The only two options you need to get
+a working client are `model` and `style` (the provider wire format: `"openai"` or `"anthropic"`);
+everything else — `baseUrl`, `apiKey`, retries, hooks, a conversation store, metrics, request
+shaping — has a sane default and can be layered on later without changing the call sites that use
+the client.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="One client, not one call per concern">
+The alternative is wiring your own HTTP calls to the provider, your own retry loop, your own
+message-history bookkeeping, and your own tool-calling dispatch by hand — which is exactly the
+byte-for-byte-identical-across-providers problem this library exists to remove. `LlmClient.create`
+is worth it whenever you want the loop (`run`/`stream`) to own turn-taking and tool execution
+against a `Toolkit`. Skip it, and use [`Translate.translate`](/api/java/translate/translate/)
+instead, when you want to declare tools to a provider and get back the raw tool calls **without**
+toolnexus ever executing them or owning the conversation — a pure pass-through/proxy posture.
 </Aside>
+
+Each option group is documented in depth on its own page — this page is the map, not the
+territory: [`LlmClient.ErrorInfo`](/api/java/client/resilience/) (retries, `onError`, timeout,
+cancellation), [`LlmClient.ConversationStore`](/api/java/client/store/) (persisting `ask`
+transcripts), [`LlmClient.Conversation`](/api/java/client/conversation/) (turn-by-turn memory),
+[`LlmClient.MetricEvent`](/api/java/client/metrics/) (observability), [`LlmClient.Hooks`](/api/java/client/hooks/)
+(intercept before/after model + tool calls), [`LlmClient.stream`](/api/java/client/stream/)
+(the streaming loop), and [`LlmClient.ProviderException`](/api/java/client/provider-error/) (the
+typed error a non-2xx response raises).
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. The smallest useful call — model + style, everything else defaulted
 
-{/* TODO:example1 */}
-```java
-// TODO
+```java test
+import io.github.muthuishere.toolnexus.*;
+
+public class Example {
+    public static void main(String[] args) {
+        LlmClient client = LlmClient.create(new LlmClient.Options()
+                .model("gpt-4o-mini")
+                .style("openai")
+                .apiKey("test-key"));
+
+        if (client == null) throw new AssertionError("expected a client");
+        System.out.println("ok: client created with only model + style set");
+    }
+}
 ```
 
-### 2. TODO — the realistic case
+### 2. The realistic case — a self-hosted/proxied endpoint with a tuned retry budget
 
-{/* TODO:example2 */}
-```java
-// TODO
+```java test
+import com.sun.net.httpserver.HttpServer;
+import io.github.muthuishere.toolnexus.*;
+import java.io.OutputStream;
+import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
+
+public class Example {
+    public static void main(String[] args) throws Exception {
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/", ex -> {
+            byte[] b = "{\"choices\":[{\"message\":{\"content\":\"ok\"}}]}".getBytes(StandardCharsets.UTF_8);
+            ex.getResponseHeaders().add("Content-Type", "application/json");
+            ex.sendResponseHeaders(200, b.length);
+            try (OutputStream os = ex.getResponseBody()) { os.write(b); }
+        });
+        server.start();
+        int port = server.getAddress().getPort();
+
+        try (Toolkit tk = Toolkit.create(new Toolkit.Options())) {
+            LlmClient client = LlmClient.create(new LlmClient.Options()
+                    .baseUrl("http://127.0.0.1:" + port)   // e.g. a self-hosted gateway or LiteLLM proxy
+                    .style("openai")
+                    .model("test-model")
+                    .apiKey("test-key")
+                    .retries(3)
+                    .retryBaseMs(5)
+                    .maxTurns(4));
+
+            LlmClient.RunResult res = client.run("hi", tk);
+            if (!"ok".equals(res.text)) throw new AssertionError(res.text);
+            System.out.println("ok: " + res.text);
+        } finally {
+            server.stop(0);
+        }
+    }
+}
 ```
 
-### 3. TODO — the full surface
+### 3. The full surface — hooks, metrics, a conversation store, and request shaping together
 
-{/* TODO:example3 */}
-```java
-// TODO
+```java test
+import com.sun.net.httpserver.HttpServer;
+import io.github.muthuishere.toolnexus.*;
+import java.io.OutputStream;
+import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
+import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
+
+public class Example {
+    public static void main(String[] args) throws Exception {
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/", ex -> {
+            byte[] b = "{\"choices\":[{\"message\":{\"content\":\"ok\"}}]}".getBytes(StandardCharsets.UTF_8);
+            ex.getResponseHeaders().add("Content-Type", "application/json");
+            ex.sendResponseHeaders(200, b.length);
+            try (OutputStream os = ex.getResponseBody()) { os.write(b); }
+        });
+        server.start();
+        int port = server.getAddress().getPort();
+
+        AtomicInteger metricEvents = new AtomicInteger(0);
+        AtomicInteger llmCalls = new AtomicInteger(0);
+        LlmClient.ConversationStore store = new LlmClient.InMemoryConversationStore();
+
+        try (Toolkit tk = Toolkit.create(new Toolkit.Options())) {
+            LlmClient client = LlmClient.create(new LlmClient.Options()
+                    .baseUrl("http://127.0.0.1:" + port)
+                    .style("openai")
+                    .model("test-model")
+                    .apiKey("test-key")
+                    .retries(1)
+                    .retryBaseMs(5)
+                    .store(store)                                    // persist ask() transcripts
+                    .onMetric(ev -> metricEvents.incrementAndGet())   // observability sink
+                    .requestParams(Map.of("temperature", 0))          // shallow-merged into every request body
+                    .hooks(new LlmClient.Hooks()
+                            // each hook is independently optional — set only what you need
+                            .afterLLM(ev -> llmCalls.incrementAndGet())));
+
+            LlmClient.RunResult res = client.ask("hi", tk, "conv-1");
+            if (!"ok".equals(res.text)) throw new AssertionError(res.text);
+            if (store.get("conv-1") == null) throw new AssertionError("expected the transcript to be stored");
+            if (metricEvents.get() == 0) throw new AssertionError("expected at least one metric event");
+            if (llmCalls.get() == 0) throw new AssertionError("expected afterLLM to fire");
+
+            System.out.println("ok: stored=" + (store.get("conv-1") != null)
+                    + " metricEvents=" + metricEvents.get() + " llmCalls=" + llmCalls.get());
+        } finally {
+            server.stop(0);
+        }
+    }
+}
 ```
 
 ## See also

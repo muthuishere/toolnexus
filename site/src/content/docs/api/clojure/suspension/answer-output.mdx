@@ -1,0 +1,122 @@
+---
+title: "answer-output"
+description: "Wraps a human's typed string reply into the Answer a suspended run resumes with — the success counterpart to answerDeclined. — Clojure."
+sidebar:
+  label: "answer-output"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Clojure (JVM) + cljgo</strong> · package <code>net.clojars.muthuishere/toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §10</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/clojure/src/toolnexus/client.cljc">clojure/src/toolnexus/client.cljc</a>
+</p>
+
+```clojure
+(answer-output id output)
+(answer-output id output is-error)
+
+;; => {:id id :ok true :data {:output "…"}}
+;; => {:id id :ok true :data {:output "…" :isError true}}   ; is-error true
+
+;; a non-string output THROWS — it never silently degrades to ""
+(answer-output "sus-1" {:city "Chennai"})
+;; => ExceptionInfo "toolnexus: Answer output must be a string"
+```
+
+Wraps a human's typed string reply into the `Answer` a suspended run resumes with — the success
+counterpart to [`answer-declined`](/api/clojure/suspension/answer-declined/). It exists so a host
+building an `Answer` by hand never has a key to get wrong (ADR 0026): before this constructor
+shipped, the recognised payload shape had to be reconstructed at every call site, and a mistyped
+key there is silent — the loop would treat a malformed answer as an unrecognised one rather than
+failing loudly.
+
+`output` **must be a string**. A non-string argument throws immediately rather than being coerced
+or blanked to `""`: degrading a wrong answer to an empty string is exactly how a bad payload used
+to reach the model quietly, with no error and no log — the class of defect ADR 0026 exists to
+close.
+
+`is-error` (default `false`) sets `:isError true` in the payload, the same flag a
+[`ToolResult`](/api/clojure/types/tool-result/) uses to mark its own output as a failure — a host
+resuming a tool that itself failed while the human was answering a *different* question can carry
+that failure through in the same shape.
+
+## When to use it
+
+- **Resuming a `"input"`-kind suspension** where the human typed or picked something the tool
+  needs — a city, a confirmation code, a chosen account — and you have it as a string in hand.
+- **Inside a `:wait-for` hook**, to build the return value once you have resolved a human's reply
+  (from a chat message, a form submission, a durable queue) into a plain string.
+- **Not** for an `"authorization"` suspension where the answer carries no meaningful payload — see
+  [`auth-required`](/api/clojure/suspension/auth-required/), whose retry arity typically checks
+  `(:ok answer)` alone and never reads `:data`.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Use answer-declined when the human refuses, not an empty answer-output">
+An empty or placeholder string passed to `answer-output` still reads as `:ok true` — the tool's
+retry arity will see a granted answer with vacuous data, not a refusal. If the human said no,
+cancelled, or the request timed out unanswered, build an `answer-declined` instead: the loop
+branches on `:ok` alone, and only a decline carries a `:reason` (R1) that explains why.
+</Aside>
+
+Hand-building `{:id id :ok true :data {:output s}}` yourself works too — `answer-output` is not a
+new mechanism, just the one call site that cannot typo a key or forget the string check. Prefer it
+over hand-rolling the map for exactly the reason ADR 0026 exists.
+
+## Examples
+
+### 1. The smallest useful call — answer a plain question
+
+```clojure
+(require '[toolnexus.client :as client])
+
+(client/answer-output "sus-1" "Chennai")
+;; => {:id "sus-1" :ok true :data {:output "Chennai"}}
+```
+
+### 2. The realistic case — inside a :wait-for hook, resolving a queued human reply
+
+```clojure
+(def llm
+  (client/create-client
+    {:base-url "https://api.anthropic.com"
+     :style    "anthropic"
+     :model    "claude-sonnet-4-5"
+     :wait-for (fn [request]
+                 ;; blocks until a human answers via chat, then wraps the reply
+                 (let [reply (block-until-chat-reply! (:id request))]
+                   (client/answer-output (:id request) reply)))}))
+
+(client/run llm "Which city should I check the weather for?"
+            {:toolkit (tool/toolkit [ask-city-tool])})
+```
+
+### 3. The full surface — marking the resumed answer itself as an error result
+
+```clojure
+;; the tool being resumed will see :isError true on the answer's :data,
+;; so its retry arity can distinguish "granted, but the value failed validation"
+;; from "granted, and the value is good"
+(client/answer-output "sus-2" "not-a-real-city" true)
+;; => {:id "sus-2" :ok true :data {:output "not-a-real-city" :isError true}}
+
+;; a non-string output is refused rather than silently coerced
+(try
+  (client/answer-output "sus-3" 42)
+  (catch Throwable e
+    (ex-message e)))
+;; => "toolnexus: Answer output must be a string"
+```
+
+## See also
+
+- [`toolnexus.client/suspend`](/api/clojure/suspension/pending/) — Return a Pending from a tool to
+  park the run until someone answers.
+- [`answer-declined`](/api/clojure/suspension/answer-declined/) — The refusal counterpart: wraps a
+  human's decline into an `Answer` carrying a `:reason`.
+- [`toolnexus.client/auth-required`](/api/clojure/suspension/auth-required/) — The auth-shaped
+  suspension: hand back a URL, resume once the user has granted access.
+- [`toolnexus.client/create-client`](/api/clojure/suspension/wait-for/) — The single hook where the
+  host resolves a suspension — in-process prompt or durable queue, same contract.
+- [`toolnexus.client/pending-of`](/api/clojure/suspension/pending-of/) — Detect that a RunResult is
+  parked rather than finished, and get the Request that parked it.

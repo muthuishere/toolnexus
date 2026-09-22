@@ -1,0 +1,196 @@
+---
+title: "Answer.Declined"
+description: "Wraps a human's refusal into the Answer a suspended run resumes with, carrying a reason string that defaults to \"declined\". — C#."
+sidebar:
+  label: "Answer.Declined"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>C#</strong> · package <code>Toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §10</a>
+</p>
+
+```csharp
+public static Answer Declined(string id, string reason = "declined");
+```
+
+Wraps a human's refusal into the `Answer` a suspended run resumes with, carrying a reason string
+that defaults to `"declined"`. It sets `Ok = false` — the field the loop actually branches on — and
+`Reason` as an advisory string a host may show in a log or a UI, but never as the resume decision
+itself.
+
+## When to use it
+
+Whenever the out-of-band resolution of a [`Request`](/api/csharp/suspension/pending/) is a refusal
+rather than an answer: a human clicked "deny," an approval expired, or a durable queue's consumer
+timed out waiting for input. Pass it to `Options.WaitFor`'s return, or to
+`AgentRuntime.ResumeAsync`, wherever the tool that suspended should be told "no" rather than given a
+value to work with.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Reason is advisory only — the loop rule branches on Ok, never on the string">
+`declined` | `cancelled` | `expired` are the three reasons the MCP elicitation bridge maps onto
+(`declined`→`decline`, everything else→`cancel`), but `Answer.Declined` accepts **any** string —
+nothing validates it against that set. Do not write code that branches on `Reason`'s value; the
+client loop, the runtime, and every consumer of `Answer` decide purely from `Ok`. Reach for
+[`Answer.Output`](/api/csharp/suspension/answer-output/) instead when the human actually supplied a
+result — `Answer.Declined` is never the right shape for "here is the value, but late" or "here is a
+partial answer."
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call — the default reason
+
+```csharp test
+using Toolnexus;
+
+var d = Answer.Declined("req-1", "declined");
+if (d.Ok) throw new Exception("Answer.Declined always sets Ok = false");
+if (d.Reason != "declined") throw new Exception(d.Reason);
+
+// The parameter default is the same string — Declined(id) alone means the same thing.
+var withDefault = Answer.Declined("req-2");
+if (withDefault.Reason != "declined") throw new Exception(withDefault.Reason);
+if (withDefault.Ok) throw new Exception("Ok must be false regardless of the reason text");
+
+Console.WriteLine($"ok: {d.Id} declined ({d.Reason}), {withDefault.Id} declined ({withDefault.Reason})");
+```
+
+### 2. The realistic case — a declined answer feeds back as a tool error, the loop keeps going
+
+```csharp test
+using System.Net;
+using System.Text;
+using Toolnexus;
+
+var httpCalls = 0;
+using var stub = new Stub(ctx =>
+{
+    httpCalls++;
+    if (httpCalls == 1)
+    {
+        Stub.Json(ctx, 200, """
+        {"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"approve_purchase","arguments":"{\"item\":\"gpu\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}
+        """);
+    }
+    else
+    {
+        Stub.Json(ctx, 200, """
+        {"choices":[{"message":{"role":"assistant","content":"The purchase was declined."},"finish_reason":"stop"}],"usage":{"prompt_tokens":15,"completion_tokens":4,"total_tokens":19}}
+        """);
+    }
+});
+
+var approve = NativeTool.Of("approve_purchase", "Requests spend approval before proceeding",
+    new Dictionary<string, object?>
+    {
+        ["type"] = "object",
+        ["properties"] = new Dictionary<string, object?> { ["item"] = new Dictionary<string, object?> { ["type"] = "string" } },
+    },
+    (IDictionary<string, object?> a, ToolContext? ctx) => ctx?.Answer != null
+        ? (object)ToolResult.Error("declined")
+        : (object)ToolResult.Pending(new Request { Kind = "approval", Prompt = $"Approve purchase of {a["item"]}?" }));
+
+var client = LlmClient.Create(new LlmClient.Options
+{
+    BaseUrl = stub.BaseUrl, Style = "openai", Model = "gpt-4o-mini", ApiKey = "test-key",
+    // A human said no.
+    WaitFor = req => Task.FromResult(Answer.Declined(req.Id, "declined")),
+});
+
+await using var tk = await Toolkit.CreateAsync(new Toolkit.Options { ExtraTools = new List<ITool> { approve } });
+var result = await client.RunAsync("buy a gpu", tk);
+
+if (result.Status != "done") throw new Exception($"status: {result.Status}"); // NOT "pending" — WaitFor resolved it
+if (!result.ToolCalls[0].IsError) throw new Exception("the fed-back tool result must carry the decline");
+
+Console.WriteLine($"ok: {result.Text} (tool result: {result.ToolCalls[0].Output})");
+
+sealed class Stub : IDisposable
+{
+    readonly HttpListener _listener = new();
+    readonly CancellationTokenSource _cts = new();
+    public int Port { get; }
+    public string BaseUrl => $"http://127.0.0.1:{Port}";
+
+    public Stub(Action<HttpListenerContext> handler)
+    {
+        var probe = new System.Net.Sockets.TcpListener(IPAddress.Loopback, 0);
+        probe.Start();
+        Port = ((IPEndPoint)probe.LocalEndpoint).Port;
+        probe.Stop();
+        _listener.Prefixes.Add($"http://127.0.0.1:{Port}/");
+        _listener.Start();
+        _ = Task.Run(async () =>
+        {
+            while (!_cts.IsCancellationRequested)
+            {
+                HttpListenerContext ctx;
+                try { ctx = await _listener.GetContextAsync(); }
+                catch { break; }
+                try { handler(ctx); } catch { }
+            }
+        });
+    }
+
+    public static void Json(HttpListenerContext ctx, int status, string body)
+    {
+        var bytes = Encoding.UTF8.GetBytes(body);
+        ctx.Response.StatusCode = status;
+        ctx.Response.ContentType = "application/json";
+        ctx.Response.ContentLength64 = bytes.Length;
+        ctx.Response.OutputStream.Write(bytes, 0, bytes.Length);
+        ctx.Response.OutputStream.Close();
+    }
+
+    public void Dispose()
+    {
+        _cts.Cancel();
+        try { _listener.Stop(); } catch { }
+        try { _listener.Close(); } catch { }
+    }
+}
+```
+
+### 3. Full surface — a custom reason string, and why `Reason` is advisory-only
+
+```csharp test
+using Toolnexus;
+
+// Any string is accepted — none of "declined"/"cancelled"/"expired" is enforced here.
+var expired = Answer.Declined("req-3", "expired");
+var cancelled = Answer.Declined("req-4", "cancelled");
+var custom = Answer.Declined("req-5", "manager rejected: over budget");
+
+foreach (var a in new[] { expired, cancelled, custom })
+    if (a.Ok) throw new Exception($"{a.Id}: Ok must be false regardless of the reason text");
+
+// Nothing in this port validates Reason against the R1 vocabulary — only Ok drives the loop.
+// A host that wants the MCP-elicitation-bridge mapping applies it itself:
+static string ToElicitAction(Answer a) => a.Ok
+    ? "accept"
+    : a.Reason == "declined" ? "decline" : "cancel"; // everything else maps to "cancel"
+
+if (ToElicitAction(expired) != "cancel") throw new Exception(ToElicitAction(expired));
+if (ToElicitAction(custom) != "cancel") throw new Exception(ToElicitAction(custom));
+if (ToElicitAction(Answer.Declined("req-6")) != "decline") throw new Exception("default reason maps to decline");
+
+Console.WriteLine($"ok: {expired.Reason}, {cancelled.Reason}, and \"{custom.Reason}\" are all just Ok=false");
+```
+
+## Parameters
+
+| Parameter | Type | What it is |
+|---|---|---|
+| `id` | `string` | Echoes the [`Request.Id`](/api/csharp/suspension/pending/) being answered. |
+| `reason` | `string` | Default `"declined"`. Advisory only — stored on `Answer.Reason`; distinguishes an explicit refusal from a dismissal/timeout for logging, but the loop and the runtime branch only on `Ok`. |
+
+## See also
+
+- [`Suspension.Pending`](/api/csharp/suspension/pending/) — Return a Pending from a tool to park the run until someone answers.
+- [`Suspension.AuthRequired`](/api/csharp/suspension/auth-required/) — The auth-shaped suspension: hand back a URL, resume once the user has granted access.
+- [`LlmClient.WaitFor`](/api/csharp/suspension/wait-for/) — The single hook where the host resolves a suspension — in-process prompt or durable queue, same contract.
+- [`Suspension.PendingOf`](/api/csharp/suspension/pending-of/) — Detect that a RunResult is parked rather than finished, and get the Request that parked it.

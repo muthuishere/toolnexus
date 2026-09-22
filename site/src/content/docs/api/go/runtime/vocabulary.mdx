@@ -1,0 +1,228 @@
+---
+title: "agents.TaskStatus* / RunStatus* / agents.Limit*"
+description: "The canonical, byte-identical-across-ports string constants a host branches on: task statuses, run statuses, and the nine stop-limit reasons a task can end on, plus the helper that canonicalizes a limit name. — Go."
+sidebar:
+  label: "agents.TaskStatus* / RunStatus* / agents.Limit*"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Go</strong> · package <code>github.com/muthuishere/toolnexus/golang</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7D</a>
+</p>
+
+```go
+// package agents (golang/agents/statusvocab.go) — the §7D task/agent vocabulary.
+const (
+	TaskStatusDone        = "done"
+	TaskStatusPending     = "pending"
+	TaskStatusIncomplete  = "incomplete"
+	TaskStatusInterrupted = "interrupted"
+	TaskStatusClosed      = "closed"
+	TaskStatusTimeout     = "timeout" // exclusively agents.Wait's — never a §8 RunResult status
+	TaskStatusError       = "error"
+)
+
+const (
+	LimitMaxTurns      = "maxTurns"
+	LimitMaxTokens     = "maxTokens"
+	LimitMaxToolCalls  = "maxToolCalls"
+	LimitMaxWallMs     = "maxWallMs"
+	LimitMaxChildren   = "maxChildren"
+	LimitMaxConcurrent = "maxConcurrent"
+	LimitMaxDepth      = "maxDepth"
+	LimitCompletion    = "completion"
+	LimitTimeout       = "timeout"
+)
+
+// package toolnexus (golang/statusvocab.go) — the SEPARATE, smaller §8 client vocabulary.
+const (
+	RunStatusDone       = "done"
+	RunStatusPending    = "pending"
+	RunStatusIncomplete = "incomplete" // "timeout" never appears here — see below
+)
+
+const (
+	RunLimitMaxTurns   = "maxTurns"
+	RunLimitCompletion = "completion"
+	RunLimitTimeout    = "timeout"
+)
+```
+
+Two closed string sets, deliberately kept apart even though they share a field name (`Status`) and
+overlapping vocabulary words. Confusing them is a real, previously-shipped bug (issue #92): a host
+that read `agents.TaskStatus*`'s documentation and then branched a `toolnexus.RunResult.Status`
+against `"timeout"` was matching a value that set can **never** produce.
+
+| | Package | Values | `"timeout"` means |
+|---|---|---|---|
+| **task/agent** (`TaskResult.Status`) | `agents` | 7: done, pending, incomplete, interrupted, closed, timeout, error | a `Wait(handle, timeout)` deadline expired while the **child kept running** |
+| **client/run** (`RunResult.Status`) | `toolnexus` (root package) | 3: done, pending, incomplete | never appears — a §8 whole-run deadline is reported as `RunStatusIncomplete` + `RunLimitTimeout` instead |
+
+The **limit** vocabulary follows the same split, at two different granularities:
+
+| | Package | Values |
+|---|---|---|
+| **task/agent limits** (`TaskResult.Limit`, paired with `TaskStatusIncomplete`) | `agents` | 9: `maxTurns, maxTokens, maxToolCalls, maxWallMs, maxChildren, maxConcurrent, maxDepth, completion, timeout` |
+| **client/run limits** (`RunResult.Limit`, paired with `RunStatusIncomplete`) | `toolnexus` (root package) | 3: `maxTurns, completion, timeout` — its OWN, smaller set; not a subset alias of the 9-value set |
+
+Go keeps no exported `CanonicalLimit`/canonicalization helper the way some sibling ports do — the
+mapping from a `Budget` field name to its `agents.Limit*` string is done inline where the limit is
+set, since Go's `Budget` struct field names already match the wire spelling one-for-one.
+
+## When to use it
+
+Use the constants — never a bare string literal — whenever you branch on `TaskResult.Status`,
+`TaskResult.Limit`, `RunResult.Status`, or `RunResult.Limit`. A literal `"timeout"` compiles against
+either vocabulary and silently reads the wrong one if you branch on the wrong result type; the
+named constant at least makes which vocabulary you meant visible at the call site, and a rename
+anywhere in the closed set becomes a compile error instead of a silent drift.
+
+```go
+if r.Status == agents.TaskStatusIncomplete && r.Limit == agents.LimitMaxToolCalls {
+    // this child ran out of tool-call budget — not the same string as RunLimitMaxTurns
+}
+```
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Don't reach for the §8 client constants from agent code, or vice versa">
+It is tempting to treat `RunLimitTimeout` and `LimitTimeout` as interchangeable because they're
+both the string `"timeout"` — they are not the same **vocabulary**, and only one of them ever pairs
+with `TaskStatusTimeout` (which has no client-side equivalent at all: a §8 run deadline is always
+reported as `incomplete`, never `timeout`). If you're driving [`agents.Runtime`](/api/go/runtime/runtime/)
+(`Spawn`/`Wake`/`Wait`/`Resume`), read `TaskResult.Status`/`.Limit` against the `agents.*` constants.
+If you're driving the bare [`Client.Run`/`Ask`](/api/go/client/run/), read `RunResult.Status`/`.Limit`
+against the root-package `RunStatus*`/`RunLimit*` constants. Mixing the two is exactly the bug this
+page's constants exist to make harder to write by accident.
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call — branch on the §8 client vocabulary
+
+```go test
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"net/http"
+	"net/http/httptest"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		// Always emits a tool call, so MaxTurns is exhausted before "done".
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"c1","type":"function","function":{"name":"noop","arguments":"{}"}}]}}],"usage":{"prompt_tokens":2,"completion_tokens":2,"total_tokens":4}}`))
+	}))
+	defer srv.Close()
+
+	noop := toolnexus.Tool{
+		Name: "noop", Description: "does nothing", Source: toolnexus.SourceCustom,
+		InputSchema: toolnexus.JSONSchema{"type": "object", "properties": map[string]any{}},
+		Execute: func(_ map[string]any, _ *toolnexus.ToolContext) (toolnexus.ToolResult, error) {
+			return toolnexus.ToolResult{Output: "ok"}, nil
+		},
+	}
+	tk, err := toolnexus.CreateToolkit(context.Background(), toolnexus.Options{Builtins: false, ExtraTools: []toolnexus.Tool{noop}})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer tk.Close()
+
+	client := toolnexus.CreateClient(toolnexus.ClientOptions{BaseURL: srv.URL, Style: toolnexus.StyleOpenAI, Model: "stub", APIKey: "k", MaxTurns: 2})
+	r, err := client.Run(context.Background(), "go", tk)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	if r.Status != toolnexus.RunStatusIncomplete || r.Limit != toolnexus.RunLimitMaxTurns {
+		log.Fatalf("got status=%q limit=%q, want %q/%q", r.Status, r.Limit, toolnexus.RunStatusIncomplete, toolnexus.RunLimitMaxTurns)
+	}
+
+	fmt.Println("ok:", r.Status, r.Limit)
+}
+```
+
+### 2. The realistic case — branch on the §7D task/agent vocabulary from a spawned handle
+
+```go test
+package main
+
+import (
+	"fmt"
+	"log"
+
+	"github.com/muthuishere/toolnexus/golang/agents"
+)
+
+func main() {
+	// A task that ran out of its own tool-call budget reports at the AGENT level,
+	// distinct from the client-level vocabulary above.
+	tr := agents.TaskResult{Status: agents.TaskStatusIncomplete, Limit: agents.LimitMaxToolCalls, Text: "stopped: tool-call budget"}
+
+	switch tr.Status {
+	case agents.TaskStatusIncomplete:
+		fmt.Println("ok: incomplete, limit =", tr.Limit)
+	case agents.TaskStatusTimeout:
+		log.Fatal("this branch would be a WAIT deadline, not this scenario")
+	default:
+		log.Fatalf("unexpected status %q", tr.Status)
+	}
+
+	if tr.Limit != agents.LimitMaxToolCalls {
+		log.Fatalf("Limit = %q, want %q", tr.Limit, agents.LimitMaxToolCalls)
+	}
+}
+```
+
+### 3. The full surface — the two "timeout" strings side by side, and why they never collide
+
+```go test
+package main
+
+import (
+	"fmt"
+	"log"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+	"github.com/muthuishere/toolnexus/golang/agents"
+)
+
+func main() {
+	// Same literal string, two closed vocabularies, two different meanings.
+	if agents.TaskStatusTimeout != "timeout" || agents.LimitTimeout != "timeout" || toolnexus.RunLimitTimeout != "timeout" {
+		log.Fatal("the shared literal is the whole point of the confusion this page documents")
+	}
+
+	// But RunStatus* has NO timeout member at all — a §8 run deadline is always
+	// reported as incomplete, never as a fourth RunStatus value.
+	runStatuses := []string{toolnexus.RunStatusDone, toolnexus.RunStatusPending, toolnexus.RunStatusIncomplete}
+	for _, s := range runStatuses {
+		if s == "timeout" {
+			log.Fatal("RunStatus* must never contain \"timeout\"")
+		}
+	}
+
+	// A §8 whole-run deadline pairs incomplete with RunLimitTimeout, not with a
+	// RunStatus of its own.
+	deadline := toolnexus.RunResult{Status: toolnexus.RunStatusIncomplete, Limit: toolnexus.RunLimitTimeout}
+	if deadline.Status != toolnexus.RunStatusIncomplete {
+		log.Fatal("unexpected")
+	}
+
+	fmt.Println("ok: agent-level timeout and client-level run-deadline are two different things")
+}
+```
+
+## See also
+
+- [`agents.New`](/api/go/runtime/agent/) — Define a sub-agent with its own toolkit, prompt and budget, callable as a tool by its parent.
+- [`NewRuntime`](/api/go/runtime/runtime/) — The six host verbs that drive sub-agents, plus the read-only list and inspect views.
+- [`agents.Handle`](/api/go/runtime/handle/) — The state machine for one spawned agent: pending, running, suspended, done.
+- [`agents.Budget`](/api/go/runtime/budgets/) — Cap tool calls and wall-clock per agent and per team, enforced while the run is in flight.

@@ -12,46 +12,157 @@ import { Aside } from '@astrojs/starlight/components';
 </p>
 
 ```elixir
-{/* TODO:signature */}
+@spec create_toolkit(keyword() | map()) :: {:ok, Toolnexus.Toolkit.t()} | {:error, Exception.t()}
+def create_toolkit(opts \\ [])
+
+@spec create_toolkit!(keyword() | map()) :: Toolnexus.Toolkit.t()
+def create_toolkit!(opts \\ [])
+
+Toolnexus.create_toolkit(
+  mcp_config: "mcp.json",       # path, raw JSON, or a parsed map
+  skills_dir: ["skills"],       # one or more skill roots
+  skills: nil,                  # skills supplied as data, bypassing the filesystem (§3, S1)
+  skill_provider: nil,          # 0-arity fun lazily supplying data skills (§3, S1)
+  skills_filter: nil,           # per-agent skill allowlist keyed on name (§3, S2)
+  skill_sample_limit: nil,      # sibling-file cap: 0 = default 10, n>0 = cap, -1 = omit
+  disable_tools: [],            # drop tools by final exposed name, across every source
+  disable_skills: [],           # drop skills by name from the skill catalog
+  extra_tools: [],              # your own tools, always added to the toolkit
+  builtins: true,               # default ON; also readable from a parsed config's top-level `builtins` key
+  agents: [],                   # remote A2A agent descriptors (§7A)
+  wait_for: nil,                # §10 host resolver; bridges MCP elicitation
+  deadline: nil                 # ms — bounds the MCP load (§2 Gap 3)
+)
 ```
 
 Collapse MCP servers, skills, built-ins, A2A agents and your own functions into one tool list.
 
+`Toolnexus.create_toolkit/1` (`elixir/lib/toolnexus.ex:28`) is a thin `{:ok, _} | {:error, _}`
+wrapper over `Toolnexus.Toolkit.build/1` — the toolkit's actual assembly logic
+(`elixir/lib/toolnexus/toolkit.ex:62`). `create_toolkit!/1` calls `Toolkit.build/1` directly and
+raises instead of returning a tuple. Either way you get back a `%Toolnexus.Toolkit{}` struct that
+exposes `:tools` (the assembled `Toolnexus.Tool` list) and `:prompt` (the skill catalog for your
+system prompt) directly, so it plugs straight into
+[`Toolnexus.Client.run/4`](/api/elixir/client/run/).
+
+Assembly is deterministic (SPEC §4): first, any builtin whose name a host `:extra_tools` entry
+also provides is dropped — a host can shadow a builtin. Then every remaining source is
+concatenated in the order **MCP → skill → builtin → agents → extra_tools**, deduped by name with
+**first wins** (a warning is logged for every dropped duplicate). `:disable_tools` runs last,
+dropping tools by their *final* exposed name regardless of which source produced them.
+
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+- **You are wiring up "zero to agent"** — one call here for every tool source (MCP servers, a
+  skills folder, the built-in shell/file tools, remote A2A agents, your own functions), one
+  [`Toolnexus.Client.create/1`](/api/elixir/client/create/) for the model connection, then
+  `Client.run/4` with both.
+- **You want to mix tool sources without hand-merging lists** — an MCP server that happens to
+  expose a tool named `bash` and the built-in `bash` don't collide silently; the dedupe order and
+  the warning log make the collision visible and its resolution deterministic.
+- **You need to turn a tool or a skill off without touching its source config** — `:disable_tools`
+  and `:disable_skills` are host-side subtraction, so a shared `mcp.json` or a shared skills
+  folder can still be trimmed per-deployment (e.g. hide a destructive MCP tool in a read-only
+  environment) without forking the config file.
+- **A host is going to resolve MCP elicitation or a suspended tool** — pass `:wait_for` here, not
+  to the client; it is the toolkit that owns the MCP connection an elicitation request comes from.
+  See [`Toolnexus.Client.create` — wait_for](/api/elixir/suspension/wait-for/).
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="One options map, not five separate builders">
+MCP, skills, built-ins, A2A agents and your own functions are five genuinely different tool
+*sources*, but to an LLM they are the same thing — a named, described, schema'd callable (see
+the repo-level `CLAUDE.md`). `create_toolkit/1` reflects that: one options map, one assembled
+`Tool` list, one `execute/4` router. The alternative — five separate "toolkit" types the caller
+merges by hand — would make every consumer (the client loop, the adapters, `to_openai/1`) branch
+on tool source, which is exactly the drift this design exists to prevent.
 </Aside>
+
+`create_toolkit/1` versus `create_toolkit!/1` is the one real choice here: use the tupled version
+when a bad `mcp_config` path or a load-deadline timeout is a recoverable condition you want to
+handle (log it, retry, fall back to a smaller toolkit); use the bang version — the common case in
+scripts and examples — when a build failure should just crash loudly, because there is nothing
+sensible to do with a half-built toolkit anyway.
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. The smallest useful call — skills only, builtins on by default
 
-{/* TODO:example1 */}
-```elixir
-// TODO
+```elixir test
+{:ok, toolkit} = Toolnexus.create_toolkit(skills_dir: ["../examples/skills"])
+
+IO.puts("Tools: " <> inspect(Enum.map(Toolnexus.Toolkit.tools(toolkit), & &1.name)))
+IO.puts(Toolnexus.Toolkit.skills_prompt(toolkit))
+
+Toolnexus.Toolkit.close(toolkit)
 ```
 
-### 2. TODO — the realistic case
+### 2. The realistic case — MCP + skills + your own function, wired to the client
 
-{/* TODO:example2 */}
-```elixir
-// TODO
+```elixir test
+add =
+  Toolnexus.define_tool(
+    name: "add",
+    description: "Add two numbers and return the sum.",
+    input_schema: %{
+      "type" => "object",
+      "properties" => %{"a" => %{"type" => "number"}, "b" => %{"type" => "number"}},
+      "required" => ["a", "b"]
+    },
+    execute: fn %{"a" => a, "b" => b}, _ctx -> to_string(a + b) end
+  )
+
+{:ok, toolkit} =
+  Toolnexus.create_toolkit(
+    mcp_config: "../examples/mcp.json",
+    skills_dir: ["../examples/skills"],
+    extra_tools: [add]
+  )
+
+client =
+  Toolnexus.Client.create(
+    base_url: "https://openrouter.ai/api/v1",
+    style: "openai",
+    model: "openai/gpt-4o-mini",
+    api_key: System.get_env("OPENROUTER_API_KEY") || "test-key"
+  )
+
+# result = Toolnexus.Client.run(client, "Use the add tool to add 21 and 21.", toolkit)
+# IO.puts(result.text)
+
+IO.puts("ok: toolkit assembled (#{length(Toolnexus.Toolkit.tools(toolkit))} tools), MCP status #{inspect(Toolnexus.Toolkit.mcp_status(toolkit))}")
+Toolnexus.Toolkit.close(toolkit)
 ```
 
-### 3. TODO — the full surface
+### 3. The full surface — disable_tools/disable_skills, a trimmed builtins map, an A2A agent
 
-{/* TODO:example3 */}
-```elixir
-// TODO
+```elixir test
+{:ok, toolkit} =
+  Toolnexus.create_toolkit(
+    skills_dir: ["../examples/skills"],
+    disable_skills: ["hello-world"],
+    builtins: %{"tools" => %{"bash" => false}},
+    disable_tools: ["write"],
+    agents: [Toolnexus.agent(card: "https://example.com/.well-known/agent-card.json")],
+    skill_sample_limit: 5,
+    deadline: 5_000
+  )
+
+names = Enum.map(Toolnexus.Toolkit.tools(toolkit), & &1.name)
+false = "bash" in names
+false = "write" in names
+false = Toolnexus.Toolkit.skills_prompt(toolkit) =~ "hello-world"
+
+IO.puts("ok: trimmed toolkit -> " <> inspect(names))
+Toolnexus.Toolkit.close(toolkit)
 ```
 
 ## See also
 
-- _TODO: related entry points_
+- [`Toolnexus.Client.create`](/api/elixir/client/create/) — The unified client: system prompt, skills injection, parallel and chained tool calls, retries, memory.
+- [`Toolnexus.Mcp.load`](/api/elixir/mcp/load/) — Read an mcp.json, connect every enabled server, and expose each server tool as a Tool.
+- [`Toolnexus.Skill.load`](/api/elixir/skills/load/) — Glob a skills directory and expose one skill tool with progressive disclosure.
+- [`Toolnexus.Skill.list`](/api/elixir/skills/list/) — Enumerate discovered skills and, crucially, the ones that were skipped and why.
+- [`Toolnexus.Builtin.tools`](/api/elixir/builtins/create/) — Construct every built-in tool directly, outside a toolkit — no config, no toggles.
+- [`Toolnexus.Client.create` — wait_for](/api/elixir/suspension/wait-for/) — The single hook where the host resolves a suspension — in-process prompt or durable queue, same contract.

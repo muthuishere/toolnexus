@@ -1,0 +1,192 @@
+---
+title: "from_path"
+description: "The authoring side of multimodal content: constructors that turn a path, bytes, a blob, a data URL, or a remote URL into the ContentPart a prompt or tool result carries — the write half of the read-only ContentPart shape. — Elixir."
+sidebar:
+  label: "from_path"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Elixir</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §1B</a>
+</p>
+
+```elixir
+# The generic constructor every typed helper below dispatches through:
+@spec new(String.t(), term(), keyword()) :: {:ok, t()} | {:error, Exception.t()}
+def new(type, source, opts \\ [])          # type: "image" | "file" | "audio"
+@spec new!(String.t(), term(), keyword()) :: t()
+def new!(type, source, opts \\ [])         # raises Toolnexus.ContentPart.Error on failure
+
+# Per-type sugar over new/new! — this is what callers actually reach for:
+ContentPart.image(source, opts \\ [])   / ContentPart.image!(source, opts \\ [])
+ContentPart.file(source, opts \\ [])    / ContentPart.file!(source, opts \\ [])
+ContentPart.audio(source, opts \\ [])   / ContentPart.audio!(source, opts \\ [])
+ContentPart.text(binary)                                    # always succeeds
+
+# opts: :mime_type (required for bytes/iodata/enumerables/URL, overrides the extension
+#       table for a path or a File.Stream), :name, :max_part_bytes (cap on DECODED bytes)
+```
+
+The authoring side of multimodal content: constructors that turn a path, bytes, a blob, a data URL, or a remote URL into the ContentPart a prompt or tool result carries — the write half of the read-only ContentPart shape.
+
+Elixir does not expose separate `from_path/1`, `from_bytes/2`, `from_data_url/1` and `from_url/1`
+functions as public API — those are private clauses of `build/3`
+(`elixir/lib/toolnexus/content_part.ex:169-290`) that `new/3` dispatches to by inspecting the
+shape of `source`: a `data:` prefix, an `http(s)://` prefix, `{:bytes, binary}`, iodata (a proper
+or improper list), a `File.Stream`, any other `Enumerable`, or — falling through all of those —
+a bare binary treated as a filesystem path. The public surface a caller actually reaches for is
+the generic `new/3` / `new!/3` (`content_part.ex:169,183`) plus the three typed conveniences that
+wrap them one per part type: `image/2` / `image!/2`, `file/2` / `file!/2`, `audio/2` / `audio!/2`
+(`content_part.ex:124-148`), and the always-succeeding `text/1` (`content_part.ex:124`) for a
+plain string part. `byte_size_of/1` (`content_part.ex:390`) reads back the decoded byte size of
+whatever a non-text part is carrying, for a caller that wants to price or cap it after the fact.
+
+A bare binary is **always** read as a path (or a `data:`/`https:` URL) — never as raw bytes — so
+raw content must be passed explicitly tagged as `{:bytes, binary}`; see the `Toolnexus.ContentPart`
+module doc for why (`"abc"` is both a plausible filename and plausible bytes, and guessing would
+silently turn a caller's file into its own name).
+
+## When to use it
+
+- **Attaching an image, PDF or audio clip to a prompt** — `ContentPart.image!(path)` (or
+  `file!`/`audio!`) reads the bytes, base64-encodes them, and fills `mime_type` from the fixed
+  extension table (SPEC §6) at construction time; pass a list of parts as the prompt instead of a
+  plain string.
+- **You already hold the bytes, an iolist, or a stream, not a path** — pass `{:bytes, bin}` (with
+  a required `:mime_type`), any iodata, or a `File.Stream`/`Enumerable`; every shape is consumed
+  **eagerly**, so what lands in the struct is always already-decoded bytes plus a mime type, never
+  an unread handle.
+- **The source is a remote URL** — `https://...` is kept as `url` (never downloaded), and
+  `data:<mime>;base64,<b64>` is decoded into `{mime_type, data}` immediately — both dispatch
+  through the same `new/3`/`image!` call, no separate function to remember.
+- **You need failure to be a value, not a crash** — use the non-`!` form (`new/3`, `image/2`, …),
+  which returns `{:ok, part} | {:error, exception}`; reach for the `!` form only where a
+  construction failure should stop the caller outright.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="A ContentPart never holds a path — even though the constructors accept one">
+The constructors accept a path as input, but the struct that comes out never carries one: the
+bytes are read and base64-encoded **at construction time**, then the path is discarded. A part
+holding `%{path: "shot.png"}` would resolve to nothing (or the wrong file) once the transcript is
+persisted, replayed, handed to a sub-agent, or served over `toolkit.serve/2` — the path only ever
+made sense inside the process that first saw it. "Accept broadly, store narrowly" is the rule:
+whatever shape the caller hands in, what lands in the part is always bytes (or a `url`) plus a
+`mime_type`.
+</Aside>
+
+`:on_unsupported_part` is a separate, client-level concern from these constructors — it decides
+what happens at request-assembly time to a part whose type the target provider style cannot
+represent, not at construction time. It is a
+[`Toolnexus.Client.create/1`](/api/elixir/client/create/) option
+(`elixir/lib/toolnexus/client.ex:290`, documented at `:337`, consumed at `:1623`), taking
+`"error"` or `"text"`. Absent, the default follows the part's *provenance* (SPEC §8A): a part the
+caller attached directly to a prompt errors before any HTTP call is made (a caller-authored
+mistake should fail loudly), while a part a **tool result** produced degrades to a text
+placeholder with a warn-once (a model-driven tool call should not crash the whole run over one
+unsupported attachment). Setting `on_unsupported_part: "text"` forces the text-placeholder
+behavior everywhere, overriding that provenance-based default for BOTH origins.
+
+## Examples
+
+### 1. The smallest useful call — attach an image built from raw bytes
+
+```elixir test
+alias Toolnexus.ContentPart
+
+part = ContentPart.image!({:bytes, "\x89PNG\r\n"}, mime_type: "image/png")
+
+true = part.type == "image"
+true = part.mime_type == "image/png"
+true = is_binary(part.data)
+true = is_nil(part.url)
+
+IO.puts("ok: built a #{part.type} part, #{ContentPart.byte_size_of(part)} decoded bytes")
+```
+
+### 2. The realistic case — a prompt mixing text and an attached file, sent to the model
+
+```elixir test
+alias Toolnexus.{Client, ContentPart}
+
+pdf = ContentPart.file!({:bytes, "%PDF-1.4 fake"}, mime_type: "application/pdf", name: "report.pdf")
+
+plug = fn conn ->
+  {:ok, raw, conn} = Plug.Conn.read_body(conn)
+  body = Jason.decode!(raw)
+  user_msg = Enum.find(body["messages"], &(&1["role"] == "user"))
+
+  # the file part reached the wire as a file-content block, not a bare string
+  true = is_list(user_msg["content"])
+  true = Enum.any?(user_msg["content"], &(&1["type"] == "file"))
+
+  resp = %{"choices" => [%{"message" => %{"role" => "assistant", "content" => "got the file"}}],
+           "usage" => %{"prompt_tokens" => 3, "completion_tokens" => 2, "total_tokens" => 5}}
+  conn |> Plug.Conn.put_resp_content_type("application/json") |> Plug.Conn.send_resp(200, Jason.encode!(resp))
+end
+
+client = Client.create(base_url: "http://localhost", style: "openai", model: "gpt-x", api_key: "test-key", http_options: [plug: plug])
+
+result = Client.run(client, [ContentPart.text("summarize this"), pdf], [])
+
+true = result.text == "got the file"
+
+IO.puts("ok: #{result.text}")
+```
+
+### 3. The full surface — a data: URL, a remote URL, and an unsupported-part fallback from a tool
+
+```elixir test
+alias Toolnexus.{Client, Context, Tool, ToolResult, ContentPart}
+
+golden = Base.encode64("\x89PNG\r\n")
+
+data_url_part = ContentPart.image!("data:image/png;base64," <> golden)
+true = data_url_part.data == golden
+true = is_nil(data_url_part.url)
+
+remote_part = ContentPart.image!("https://example.com/a.png", mime_type: "image/png")
+true = remote_part.url == "https://example.com/a.png"
+true = is_nil(remote_part.data)
+
+# A tool that returns audio via anthropic (which has no audio block) degrades to text
+# instead of erroring, because the part's PROVENANCE is a tool result, not a direct attach.
+clip_tool = %Tool{
+  name: "record_clip",
+  description: "returns a recorded audio clip",
+  input_schema: %{"type" => "object", "properties" => %{}},
+  source: "native",
+  execute: fn _args, %Context{} ->
+    %ToolResult{output: "recorded", parts: [ContentPart.audio!({:bytes, "ID3"}, mime_type: "audio/mpeg")]}
+  end
+}
+
+plug = fn conn ->
+  {:ok, _raw, conn} = Plug.Conn.read_body(conn)
+  resp = %{"content" => [%{"type" => "tool_use", "id" => "c1", "name" => "record_clip", "input" => %{}}],
+           "usage" => %{"input_tokens" => 1, "output_tokens" => 1}}
+  conn |> Plug.Conn.put_resp_content_type("application/json") |> Plug.Conn.send_resp(200, Jason.encode!(resp))
+end
+
+client =
+  Client.create(
+    base_url: "http://localhost", style: "anthropic", model: "claude-x", api_key: "test-key",
+    max_turns: 1, http_options: [plug: plug]
+  )
+
+result = Client.run(client, "record a clip", [clip_tool])
+
+# max_turns: 1 stops right after the tool call, so we only need the run not to raise —
+# an unsupported audio part on anthropic degrades to text rather than erroring by default.
+true = result.status in ["done", "incomplete"]
+
+IO.puts("ok: data-url=#{data_url_part.mime_type}, remote=#{remote_part.url}, run status=#{result.status}")
+```
+
+## See also
+
+- [`Toolnexus.Tool`](/api/elixir/types/tool/) — The uniform shape every tool source collapses to: name, description, JSON-Schema parameters, execute.
+- [`Toolnexus.ToolResult`](/api/elixir/types/tool-result/) — The result envelope: output text, optional error flag, optional non-text parts, and optional metadata that can carry a suspension.
+- [`Toolnexus.ContentPart`](/api/elixir/types/content-part/) — The non-text half of a message: text | image | file | audio, carrying base64 bytes or a URL plus a mimeType — never a path.
+- [`Toolnexus.Context`](/api/elixir/types/context/) — Optional per-call context handed to execute: cancellation, identity, and host-supplied state.

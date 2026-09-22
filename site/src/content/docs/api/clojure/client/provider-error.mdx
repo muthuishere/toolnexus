@@ -1,0 +1,151 @@
+---
+title: "toolnexus.client/provider-error"
+description: "A non-2xx response from the model endpoint raises a typed provider error carrying the status code, a redacted+capped body, and the retry-after signal — never a bare unstructured exception. — Clojure."
+sidebar:
+  label: "toolnexus.client/provider-error"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Clojure (JVM) + cljgo</strong> · package <code>net.clojars.muthuishere/toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/clojure/src/toolnexus/client.cljc">clojure/src/toolnexus/client.cljc</a>
+</p>
+
+```clojure
+(provider-error status body retry-after)
+;; => an ex-info whose DATA is
+;;    {:toolnexus/error :provider
+;;     :status       402                 ; the HTTP status, verbatim
+;;     :body         "…"                 ; redacted, UNCAPPED — the cap is message-only
+;;     :retry-after  3000}               ; ms — present only when the header parsed; omitted otherwise
+;; and whose MESSAGE is "LLM 402: <redacted body, capped at 200 chars>"
+
+;; catch it with ex-data, the idiomatic Clojure way — there is no exception CLASS to catch
+(try
+  (client/run llm prompt {:toolkit tk})
+  (catch Throwable e
+    (when (= :provider (:toolnexus/error (ex-data e)))
+      (:status (ex-data e)))))
+```
+
+A non-2xx response from the model endpoint raises a typed provider error carrying the status
+code, a redacted+capped body, and the retry-after signal — never a bare unstructured exception.
+`provider-error` is the constructor `run` calls internally the moment an HTTP attempt exhausts its
+retry budget on a terminal status; you do not normally call it yourself, but its shape is exactly
+what your `catch` sees.
+
+There is no `ProviderError` record or exception class in this port — unlike js/python/golang/
+java/csharp, which each define a named type (`LlmHttpError`, `ProviderError`, `ProviderException`).
+Clojure represents the same failure as a plain `ex-info` (`clojure.lang.ExceptionInfo`) tagged with
+a namespaced key, `{:toolnexus/error :provider ...}`, in its `ex-data`. That is an idiomatic choice,
+not a lesser one: `ex-info` + `ex-data` *is* how this language spells "a typed, structured
+failure" — a host branches with `(= :provider (:toolnexus/error (ex-data e)))` instead of an
+`instanceof`/`isinstance` check, and the same tagging convention already carries `:timeout` (see
+[`timeout-error`](/api/clojure/client/create/)) and every other client-thrown failure in this
+namespace.
+
+<Aside type="note" title="A real, minor drift: no named cap constant">
+Five of the seven ports (js, python, golang, java, csharp) give the 200-character message cap a
+named constant — `ERROR_BODY_CAP`, `MAX_ERROR_BODY`, `providerBodyCap`, `ErrorBodyCap`. Clojure (like
+elixir) inlines the literal `200` directly in `cap-message` (`clojure/src/toolnexus/client.cljc:591`)
+rather than naming it. The *value* is identical everywhere — this is a naming/maintainability gap,
+not a behavioral one, and it is called out here rather than hidden.
+</Aside>
+
+## When to use it
+
+- **Catching a failed LLM call** without regexing a raw exception message. Before this shape
+  existed, a host's only signal was the message string itself, account identifiers and all
+  (issues #91/#92, ADR 0027) — now `ex-data` gives you `:status`, `:body` and `:retry-after` as
+  data.
+- **Deciding whether to surface a status to a user** (e.g. show "rate limited, retrying" on 429)
+  without parsing prose.
+- **Building your own retry/alerting layer above `:retries`** — read `:retry-after` off a caught
+  error the same way `:on-error`'s `info` map exposes it per attempt, if you need the value after
+  the budget is already exhausted and the call has thrown.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Use :on-error when you want to react DURING the retry budget">
+`provider-error` (and the exception it builds) is what you get **after** the retry budget in
+[`create-client`](/api/clojure/client/resilience/)'s `:retries` is exhausted — it is the terminal
+failure, not a per-attempt hook. If you want to inspect or override the retry decision on *every*
+failed attempt — including ones that end up retried successfully — use `:on-error`, which receives
+the same `:status`/`:retryable?` shape per attempt and can return `:retry` or `:fail`. Reach for
+`ex-data` on a caught throw when the run is already over; reach for `:on-error` when it is still in
+flight.
+</Aside>
+
+Keeping this as an `ex-info` rather than inventing a `defrecord` and a matching `deftype` predicate
+also keeps the port to one `.cljc` file compiled for two hosts (JVM + cljgo): `ex-info`/`ex-data`
+are core Clojure on both, whereas a custom exception class is exactly the kind of host-specific
+surface this port avoids.
+
+## Examples
+
+### 1. The smallest useful call — catch and branch on status
+
+```clojure
+(require '[toolnexus.client :as client])
+
+(try
+  (client/run llm "Summarise the incident" {:toolkit toolkit})
+  (catch Throwable e
+    (let [d (ex-data e)]
+      (if (= :provider (:toolnexus/error d))
+        (println "provider failed with status" (:status d))
+        (throw e)))))
+```
+
+### 2. The realistic case — surface a rate-limit to the caller with the retry hint
+
+```clojure
+(defn run-and-report [llm prompt toolkit]
+  (try
+    {:status "done" :result (client/run llm prompt {:toolkit toolkit})}
+    (catch Throwable e
+      (let [d (ex-data e)]
+        (if (= :provider (:toolnexus/error d))
+          {:status       "provider-error"
+           :http-status  (:status d)
+           :retry-after  (:retry-after d)   ; ms, or nil if the header didn't parse
+           :detail       (:body d)}          ; already redacted, safe to log or show
+          (throw e))))))
+```
+
+`:body` here is safe to log or return to a caller as-is — account identifiers (`user_id`,
+`account_id`, `org_id`, `organization`) are already replaced with `«redacted»`, and a 401/403 body
+is blanked to `""` entirely rather than redacted, per the credentials guarantee (ADR 0027, D5).
+
+### 3. The full surface — every field, and the message-vs-data split
+
+```clojure
+(require '[clojure.string :as str])
+
+(try
+  (client/run llm "hi" {:toolkit toolkit})
+  (catch Throwable e
+    (let [d (ex-data e)]
+      (when (= :provider (:toolnexus/error d))
+        {:status      (:status d)          ; e.g. 402 — verbatim HTTP status
+         :body        (:body d)            ; redacted, UNCAPPED — the full body, minus identifiers
+         :retry-after (:retry-after d)     ; ms, present only if the header parsed and was in range
+         :message     (ex-message e)       ; "LLM 402: <redacted body>", CAPPED at 200 chars + "…"
+         :message-len (count (ex-message e))}))))
+```
+
+The cap applies to the exception **message only** — `(:body (ex-data e))` is the whole redacted
+body, however long, because a host that opted into a typed error asked for the full diagnostic, not
+a truncated one (addendum A5). Only the human-readable message string is bounded.
+
+## See also
+
+- [`toolnexus.client/create-client`](/api/clojure/client/resilience/) — Classify an LLM error into
+  retry / fail, bound a run with a deadline, and cancel cleanly — the resilience policy that decides
+  whether a failing call ever reaches `provider-error` at all.
+- [`toolnexus.client/run`](/api/clojure/client/run/) — Send a prompt, let the loop call tools until
+  the model stops, get a RunResult.
+- [`toolnexus.client/create-client`](/api/clojure/client/hooks/) — Intercept before/after model calls
+  and tool calls: audit, redact, veto, or rewrite.
+- [`toolnexus.client/run`](/api/clojure/client/conversation/) — Keep a transcript across turns so the
+  model remembers what it already did.

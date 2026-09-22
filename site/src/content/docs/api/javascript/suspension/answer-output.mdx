@@ -1,0 +1,131 @@
+---
+title: "answerOutput"
+description: "Wraps a human's typed string reply into the Answer a suspended run resumes with — the success counterpart to answerDeclined. — JavaScript."
+sidebar:
+  label: "answerOutput"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>JavaScript</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §10</a>
+</p>
+
+```ts
+function answerOutput(id: string, output: string): Answer
+// => { id, ok: true, data: { output } }
+```
+
+Wraps a human's typed string reply into the `Answer` a suspended run resumes with — the success
+counterpart to [`answerDeclined`](/api/javascript/suspension/answer-declined/). `output` **must**
+be a string; a non-string is a thrown `TypeError`, never a silent degrade to `""` — a fabricated
+empty result would be indistinguishable from an answer the human never actually gave (ADR 0026
+D2). `id` is required and must match the `Request.id` the suspension carried.
+
+## When to use it
+
+Use `answerOutput` wherever a host resumes a run that a tool suspended with
+[`pending()`](/api/javascript/suspension/pending/) — a human approved something, typed a
+value, or provided a token — and you now have that string in hand. It exists specifically
+because hand-building `{ id, ok: true, data: { output } }` is where hosts get the key wrong
+(`output` vs `value` vs `answer`); `answerOutput` removes the key from the host's hands entirely.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="answerDeclined is the refusal counterpart, not a variant of this">
+`answerOutput` is for a **successful** reply — the human answered. When the human refuses,
+cancels, or the request expires, build the `Answer` with
+[`answerDeclined`](/api/javascript/suspension/answer-declined/) instead, which sets `ok: false`
+and carries an advisory `reason` string. The loop rule branches only on `ok`; `reason` is never
+required, but declining is what it is for.
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call — build the Answer for a resume
+
+```ts test
+import assert from "node:assert"
+import { answerOutput } from "toolnexus"
+
+const answer = answerOutput("req-1", "staging")
+assert.deepEqual(answer, { id: "req-1", ok: true, data: { output: "staging" } })
+console.log("ok:", JSON.stringify(answer))
+```
+
+### 2. The realistic case — resuming a suspended sub-agent runtime
+
+A tool suspends with `pending()`, the run comes back `status: "pending"`, and the host resumes it
+once it has the human's answer in hand.
+
+```ts test
+import assert from "node:assert"
+import { agents, defineTool, pending } from "toolnexus"
+
+const { AgentRuntime } = agents as any
+
+let asked = 0
+const suspendFetch: any = async (_u: string, init: any) => {
+  const body = JSON.parse(String(init.body))
+  const toolMsgs = body.messages.filter((m: any) => m.role === "tool")
+  const approved = toolMsgs.some((m: any) => String(m.content).includes("secret-token"))
+  const reply = approved
+    ? { role: "assistant", content: "final: secret-token" }
+    : { role: "assistant", tool_calls: [{ id: "a1", type: "function", function: { name: "check_secret", arguments: "{}" } }] }
+  return new Response(
+    JSON.stringify({
+      choices: [{ index: 0, message: reply, finish_reason: reply.tool_calls ? "tool_calls" : "stop" }],
+      usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+    }),
+    { status: 200, headers: { "content-type": "application/json" } },
+  )
+}
+
+const checkSecret = defineTool({
+  name: "check_secret",
+  description: "needs approval",
+  inputSchema: { type: "object", properties: {} },
+  run: async (_a: any, ctx: any) => (ctx?.answer?.ok ? "secret-token" : pending({ kind: "approval", prompt: "approve?" })),
+})
+
+const rt = new AgentRuntime({
+  fetch: suspendFetch,
+  registry: { asker: { name: "asker", does: "asks", model: "m", tools: [checkSecret] } },
+})
+const h = rt.spawn(rt.root, "asker")
+rt.wake(h, "go")
+const halted = await rt.wait(h)
+assert.equal(halted.status, "pending")
+
+// The human approved — resume with the typed constructor, never a hand-built object.
+const resumed = await rt.resume(answerOutput(halted.pending.id, "approved"))
+assert.equal(resumed.status, "done")
+assert.equal(resumed.text, "final: secret-token")
+await rt.close(rt.root)
+console.log("ok:", resumed.status, resumed.text)
+```
+
+### 3. The full surface — the guard that keeps a fabricated empty answer impossible
+
+```ts test
+import assert from "node:assert"
+import { answerOutput } from "toolnexus"
+
+// A non-string output is an ERROR, never a silent "" — a fabricated empty answer is
+// indistinguishable from an answer the human never gave.
+assert.throws(() => answerOutput("req-1", { value: "staging" } as any), /output must be a string, got object/)
+assert.throws(() => answerOutput("req-1", 42 as any), /output must be a string, got number/)
+assert.throws(() => answerOutput("req-1", null as any), /output must be a string, got null/)
+
+// id is required — it must match the Request's id the suspension carried.
+assert.throws(() => answerOutput("", "x"), /id is required/)
+
+console.log("ok: guards hold")
+```
+
+## See also
+
+- [`pending`](/api/javascript/suspension/pending/) — Return a Pending from a tool to park the run until someone answers.
+- [`authRequired`](/api/javascript/suspension/auth-required/) — The auth-shaped suspension: hand back a URL, resume once the user has granted access.
+- [`waitFor`](/api/javascript/suspension/wait-for/) — The single hook where the host resolves a suspension — in-process prompt or durable queue, same contract.
+- [`pendingOf`](/api/javascript/suspension/pending-of/) — Detect that a RunResult is parked rather than finished, and get the Request that parked it.

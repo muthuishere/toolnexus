@@ -1,0 +1,124 @@
+---
+title: "Answer.output"
+description: "Wraps a human's typed string reply into the Answer a suspended run resumes with — the success counterpart to answerDeclined. — Java."
+sidebar:
+  label: "Answer.output"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Java</strong> · package <code>io.github.muthuishere:toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §10</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/java/src/main/java/io/github/muthuishere/toolnexus/Answer.java">Answer.java</a>
+</p>
+
+```java
+public static Answer output(String id, String output)
+```
+
+Wraps a human's typed string reply into the `Answer` a suspended run resumes with — the success
+counterpart to [`Answer.declined`](/api/java/suspension/answer-declined/). `output` builds
+`new Answer(id, true, Map.of(Answer.OUTPUT_KEY, output), null)` — `ok:true`, and the payload lives
+under the ONE `data` key (`"output"`) the loop actually reads back out (`Answer.outputOf()`). A
+`null` output throws `IllegalArgumentException` rather than letting an `ok:true` answer carry no
+determinable result — an answer that claims success but hands the loop nothing to resume with
+would otherwise fabricate a tool result for the model.
+
+## When to use it
+
+Any time a host's `waitFor` (or a durable resume path) has a real string result for the
+[`Request`](/api/java/suspension/pending/) a tool parked — a human typed an answer, an approval
+was granted with no extra data, an upload finished and its path is the result. Build the `Answer`
+with `Answer.output(request.id(), theResult)` and hand it back from `waitFor`, or pass it to
+whatever the host's durable-resume path calls to settle a parked `Request` by id.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="output for a result, declined for a refusal">
+`Answer.output` and `Answer.declined` are the only two constructors most hosts need — `ok` is
+never set directly. Reach for `Answer.output` when the human/host actually answered; reach for
+[`Answer.declined`](/api/java/suspension/answer-declined/) when they refused, dismissed, or the
+wait itself timed out. Building an `Answer` record directly (`new Answer(id, true, Map.of(...))`)
+is legal but bypasses the null-guard `output` gives you for free — prefer the named constructor
+unless the payload is something other than a single string.
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call — build the Answer for a resolved Request
+
+```java test
+import io.github.muthuishere.toolnexus.Answer;
+
+public class Example {
+    public static void main(String[] args) {
+        Answer answer = Answer.output("req-1", "blue");
+
+        if (!answer.ok()) throw new AssertionError("output() must be ok:true");
+        if (!"blue".equals(answer.outputOf())) throw new AssertionError(answer.outputOf());
+        if (answer.reason() != null) throw new AssertionError("no reason on a success");
+
+        System.out.println("ok: " + answer.id() + " -> " + answer.outputOf());
+    }
+}
+```
+
+### 2. The realistic case — a `waitFor` that resolves a pending Request with a human's typed reply
+
+```java test
+import io.github.muthuishere.toolnexus.*;
+import java.util.Scanner;
+
+public class Example {
+    /** Stands in for a real prompt/durable-queue lookup keyed by request.id(). */
+    static String humanReplyFor(Request request) {
+        return "staging"; // pretend a human typed this in response to request.prompt()
+    }
+
+    public static void main(String[] args) {
+        Request request = new Request("", "input", "Which environment?");
+
+        // This is the shape a real client.Options.waitFor(...) callback returns.
+        Answer resolved = Answer.output(request.id(), humanReplyFor(request));
+
+        if (!resolved.ok()) throw new AssertionError(resolved);
+        if (!resolved.id().equals(request.id())) throw new AssertionError("id must echo the Request's");
+        System.out.println("ok: resumed with " + resolved.outputOf());
+    }
+}
+```
+
+### 3. The full surface — a null output is refused, never a fabricated success
+
+```java test
+import io.github.muthuishere.toolnexus.Answer;
+
+public class Example {
+    public static void main(String[] args) {
+        try {
+            Answer.output("req-1", null);
+            throw new AssertionError("expected a rejection");
+        } catch (IllegalArgumentException e) {
+            if (!e.getMessage().contains("requires a result")) throw new AssertionError(e.getMessage());
+        }
+
+        // The RECOGNISED data keys, in precedence order — `results` (multi-call relay) before
+        // `output` (single value). hasRecognisedKey() is how a host tells "a real answer" from
+        // "ok:true with nothing determinable" before treating it as a tool result.
+        Answer a = Answer.output("req-1", "ok");
+        if (!a.hasRecognisedKey()) throw new AssertionError("output() must set a recognised key");
+        if (!Answer.RECOGNISED_KEYS.get(1).equals(Answer.OUTPUT_KEY)) {
+            throw new AssertionError(Answer.RECOGNISED_KEYS);
+        }
+
+        System.out.println("ok: null is rejected, output() sets a recognised key");
+    }
+}
+```
+
+## See also
+
+- [`Request.pending`](/api/java/suspension/pending/) — Return a Pending from a tool to park the run until someone answers.
+- [`Answer.declined`](/api/java/suspension/answer-declined/) — The refusal counterpart: wrap a human's "no" into an Answer.
+- [`Request.authRequired`](/api/java/suspension/auth-required/) — The auth-shaped suspension: hand back a URL, resume once the user has granted access.
+- [`LlmClient.waitFor`](/api/java/suspension/wait-for/) — The single hook where the host resolves a suspension — in-process prompt or durable queue, same contract.
+- [`Request.pendingOf`](/api/java/suspension/pending-of/) — Detect that a RunResult is parked rather than finished, and get the Request that parked it.

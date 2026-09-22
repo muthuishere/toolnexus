@@ -1,0 +1,275 @@
+---
+title: "image"
+description: "The authoring side of multimodal content: constructors that turn a path, bytes, a blob, a data URL, or a remote URL into the ContentPart a prompt or tool result carries — the write half of the read-only ContentPart shape. — Python."
+sidebar:
+  label: "image"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Python</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §1B</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/python/src/toolnexus/content.py">python/src/toolnexus/content.py</a>
+</p>
+
+```python
+from toolnexus import audio, file, image, text
+
+def text(value: str) -> ContentPart
+
+def image(
+    source: str | os.PathLike | bytes | bytearray | memoryview | BinaryReadable,
+    *,
+    mime_type: str | None = None,
+    name: str | None = None,
+    max_part_bytes: int | None = None,
+) -> ContentPart
+
+def file(   # part type "file" — same accepted sources as image()
+    source, *, mime_type=None, name=None, max_part_bytes=None,
+) -> ContentPart
+
+def audio(  # same accepted sources as image()
+    source, *, mime_type=None, name=None, max_part_bytes=None,
+) -> ContentPart
+
+# create_client(..., on_unsupported_part: Literal["error", "text"] | None = None)
+```
+
+The authoring side of multimodal content: constructors that turn a path, bytes, a blob, a data
+URL, or a remote URL into the `ContentPart` a prompt or tool result carries — the write half of
+the read-only [`ContentPart`](/api/python/types/content-part/) shape. `image`/`file`/`audio` all
+share one accepted-source surface (a filesystem path, an `os.PathLike`, raw `bytes` /
+`bytearray` / `memoryview`, any **binary file-like object** exposing `.read()`, a `data:` URL,
+or an `https:` URL) and differ only in the `type` discriminator they stamp on the result.
+`text(value)` is the plain-string counterpart — a prompt is just a list of parts wherever it
+accepts a string, so `[text("what is this?"), image("./shot.png")]` is a valid prompt.
+
+Everything but an `https:` URL is read and base64-encoded **at construction time** — a part
+never holds a path, a handle, or an unread stream, because none of those survive being persisted
+by a `ConversationStore`, replayed on the next turn, handed to a subagent, or sent across a
+served toolkit or an A2A peer. A file-like source is consumed eagerly and is **not** closed;
+closing it stays the caller's business.
+
+## When to use it
+
+- **Attaching media to a prompt** — `client.run([text("describe this"), image("./shot.png")],
+  toolkit)` — anywhere a prompt takes a plain string, it also takes a list of parts.
+- **Returning media from a tool** — a screenshot tool, a chart renderer, or a document fetcher
+  sets `ToolResult.parts=[image(...)]` (or `file`/`audio`) and leaves `output` as the
+  human-readable description.
+- **Handling a provider style that cannot represent a part** — pass `on_unsupported_part` to
+  `create_client` to force one behavior (`"error"` or `"text"`) uniformly, instead of the
+  default provenance-based rule (an attached part errors; a tool/MCP-derived part degrades to a
+  text placeholder and warns once).
+
+## Why this and not the alternative
+
+<Aside type="tip" title="A part never holds a filesystem path">
+`image("./shot.png")` reads the file right there and keeps only `mimeType` + base64 `data` —
+it does not keep the path around for "later". If you need the convenience of pointing at a file
+without deciding when it's read, that convenience already lives at this edge: call `image()`
+(or `file`/`audio`) once, at the moment you build the prompt or return the tool result, and pass
+the resulting `ContentPart` onward. There is no lazy/deferred variant to reach for instead.
+</Aside>
+
+<Aside type="caution" title="on_unsupported_part changes strictness for BOTH provenances at once">
+Left at its default (`None`), an attached part that the provider style cannot represent raises
+immediately (you asked for it, so silence would hide a real gap), while a tool/MCP-derived part
+degrades to a text placeholder and warns once (failing a whole run over a part the caller never
+chose would be a regression). Passing `"error"` or `"text"` overrides BOTH cases uniformly —
+reach for it only when you specifically want one strictness level everywhere, not per call.
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call — a text part and an image part in one prompt
+
+```python test
+from toolnexus import ContentPart, image, text
+
+prompt = [text("What is in this image?"), image("examples/media/fixture.png")]
+
+hello, shot = prompt
+assert hello.type == "text" and hello.text == "What is in this image?"
+
+assert isinstance(shot, ContentPart)
+assert shot.type == "image"
+assert shot.mimeType == "image/png"   # from the fixed §6 extension table
+assert shot.url is None               # exactly one of data / url
+assert shot.name == "fixture.png"     # a label, not a path you can open
+
+print("ok:", shot.type, shot.mimeType, "|", hello.type, repr(hello.text))
+```
+
+### 2. The realistic case — `file`/`audio` from bytes, and a tool handing back an image
+
+```python test
+import asyncio
+
+from toolnexus import ToolResult, audio, create_client, create_toolkit, define_tool, file, image
+
+
+def screenshot() -> ToolResult:
+    """Capture the current screen and return it as a PNG."""
+    part = image("examples/media/fixture.png")
+    return ToolResult(
+        output="screenshot captured, 8x8 png",
+        is_error=False,
+        parts=[part],
+    )
+
+
+async def main():
+    # file() and audio() share image()'s source surface — here, raw bytes.
+    doc = file(b"%PDF-1.4 ...", mime_type="application/pdf", name="report.pdf")
+    clip = audio(b"ID3...", mime_type="audio/mpeg", name="clip.mp3")
+
+    assert doc.type == "file" and doc.mimeType == "application/pdf"
+    assert clip.type == "audio" and clip.mimeType == "audio/mpeg"
+
+    tool = define_tool(screenshot, name="screenshot")
+    tk = await create_toolkit(builtins=False, extra_tools=[tool])
+    try:
+        result = await tool.execute({})
+        assert result.parts[0].type == "image"
+        print("ok:", doc.type, clip.type, "| tool part:", result.parts[0].type)
+    finally:
+        await tk.close()
+
+
+asyncio.run(main())
+```
+
+### 3. The full surface — `on_unsupported_part` forces uniform strictness
+
+A style with no shape for a part (an `image` sent to a text-only endpoint here, simulated by a
+stub) degrades to a text placeholder by default when it came from a tool — but
+`on_unsupported_part="error"` makes it raise instead, for both provenances alike.
+
+```python test
+import asyncio
+import json
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+from toolnexus import ToolResult, audio, create_client, create_toolkit, define_tool
+from toolnexus.content import UnsupportedPartError
+
+
+class StubServer:
+    def __init__(self, handler):
+        outer = self
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_POST(self):  # noqa: N802
+                length = int(self.headers.get("Content-Length", 0))
+                body = json.loads(self.rfile.read(length) or b"{}")
+                outer._send(self, handler(body))
+
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.port = self._server.server_address[1]
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+
+    @staticmethod
+    def _send(req, payload):
+        body = json.dumps(payload).encode("utf-8")
+        req.send_response(200)
+        req.send_header("Content-Type", "application/json")
+        req.send_header("Content-Length", str(len(body)))
+        req.end_headers()
+        req.wfile.write(body)
+
+    @property
+    def base_url(self) -> str:
+        return f"http://127.0.0.1:{self.port}/v1"
+
+    def __enter__(self):
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self._server.shutdown()
+        self._server.server_close()
+
+
+def clip_tool() -> ToolResult:
+    """Returns an audio part — a style-carrying "openai" text style has no shape for it here."""
+    return ToolResult(
+        output="clip captured", is_error=False,
+        parts=[audio(b"ID3...", mime_type="audio/mpeg", name="clip.mp3")],
+    )
+
+
+def tool_call_then_done(body):
+    if not any(m.get("role") == "tool" for m in body["messages"]):
+        return {
+            "choices": [{
+                "message": {
+                    "role": "assistant", "content": None,
+                    "tool_calls": [{"id": "c1", "type": "function",
+                                     "function": {"name": "clip_tool", "arguments": "{}"}}],
+                },
+                "finish_reason": "tool_calls",
+            }],
+            "usage": {"prompt_tokens": 5, "completion_tokens": 1, "total_tokens": 6},
+        }
+    return {
+        "choices": [{"message": {"role": "assistant", "content": "done"}}],
+        "usage": {"prompt_tokens": 3, "completion_tokens": 1, "total_tokens": 4},
+    }
+
+
+async def main():
+    tool = define_tool(clip_tool, name="clip_tool")
+
+    # Default: a tool-derived unsupported part degrades to a placeholder, run completes.
+    with StubServer(tool_call_then_done) as srv:
+        tk = await create_toolkit(builtins=False, extra_tools=[tool])
+        client = create_client(base_url=srv.base_url, style="openai", model="test-model", api_key="test-key")
+        result = await client.run("call the clip tool", tk)
+        assert result.status == "done"
+        await tk.close()
+
+    # on_unsupported_part="error": force strictness, even for a tool-derived part.
+    with StubServer(tool_call_then_done) as srv2:
+        tk2 = await create_toolkit(builtins=False, extra_tools=[tool])
+        strict_client = create_client(
+            base_url=srv2.base_url, style="openai", model="test-model", api_key="test-key",
+            on_unsupported_part="error",
+        )
+        raised = False
+        try:
+            await strict_client.run("call the clip tool", tk2)
+        except UnsupportedPartError:
+            raised = True
+        await tk2.close()
+
+    assert raised, "on_unsupported_part='error' overrides the default degrade-and-warn behavior"
+    print("ok: default degrades; on_unsupported_part='error' raises instead")
+
+
+asyncio.run(main())
+```
+
+## `on_unsupported_part` (client option)
+
+| Value | Behavior |
+|---|---|
+| `None` (default) | By provenance: an **attached** part (the caller put it in the prompt) raises `UnsupportedPartError`; a **tool/MCP-derived** part degrades to a text placeholder and warns once (`stderr`, keyed by part type + style, so at most once per pair). |
+| `"error"` | Always raise `UnsupportedPartError`, regardless of provenance. |
+| `"text"` | Always degrade to a text placeholder, regardless of provenance. |
+
+Also on `create_client`: `max_part_bytes` (an `int`), the per-request ceiling on a part's
+**decoded** byte size, enforced at request assembly over every part regardless of where it came
+from. `image`/`file`/`audio` accept their own `max_part_bytes=` too, as a per-call fast-fail
+at construction time — before any HTTP call is made.
+
+## See also
+
+- [`Tool`](/api/python/types/tool/) — The uniform shape every tool source collapses to: name, description, JSON-Schema parameters, execute.
+- [`ToolResult`](/api/python/types/tool-result/) — The result envelope: output text, optional error flag, optional non-text parts, and optional metadata that can carry a suspension.
+- [`ContentPart`](/api/python/types/content-part/) — The non-text half of a message: text | image | file | audio, carrying base64 bytes or a URL plus a mimeType — never a path.
+- [`ToolContext`](/api/python/types/context/) — Optional per-call context handed to execute: cancellation, identity, and host-supplied state.

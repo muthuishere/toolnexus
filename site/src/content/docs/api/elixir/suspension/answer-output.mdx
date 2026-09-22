@@ -1,0 +1,154 @@
+---
+title: "Toolnexus.Answer.answer_output/2"
+description: "Wraps a human's typed string reply into the Answer a suspended run resumes with — the success counterpart to answerDeclined. — Elixir."
+sidebar:
+  label: "Toolnexus.Answer.answer_output/2"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Elixir</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §10</a>
+</p>
+
+```elixir
+@spec answer_output(String.t(), String.t()) :: Toolnexus.Answer.t()
+def answer_output(id, output) when is_binary(output)
+
+# %Toolnexus.Answer{id: id, ok: true, data: %{"output" => output}}
+```
+
+Wraps a human's typed string reply into the Answer a suspended run resumes with — the success counterpart to answerDeclined.
+
+## When to use it
+
+- **A [`pending`](/api/elixir/suspension/pending/) suspension asked for free-form input** — a
+  name, a confirmation string, an approved value — and a human (or an upstream service standing
+  in for one) typed a reply. `answer_output/2` is the one place that builds the string-keyed
+  `data` payload every port's suspension contract expects, so a caller never has to hand-write
+  `%{"output" => value}` and risk an atom-keyed miss after a JSON round-trip.
+- **You're about to call [`Toolnexus.Agents.Runtime.resume/2`](/api/elixir/suspension/resume/)
+  or answer a [`:wait_for`](/api/elixir/suspension/wait-for/) callback** — both take an `Answer`
+  (or an equivalent plain map), and `answer_output/2` is the constructor that gets the shape
+  right on the first try.
+- **`output` must be a string** — passing anything else (a map, a number, `nil`) raises an
+  `ArgumentError` immediately rather than silently coercing or degrading to `""`; the suspension
+  contract is a string in, a string out, on every port.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Use answer_declined/2 when the human refuses, not when they answer">
+`answer_output/2` is for a suspension the human RESOLVED — `ok: true`, with the typed reply as
+data. If the human refused or cancelled instead, reach for
+[`Toolnexus.Answer.answer_declined/2`](/api/elixir/suspension/answer-declined/), which builds
+`ok: false` with a `reason` string. The two are the full pair the §10 contract expects; there is
+no third "partial" shape.
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call — build the Answer
+
+```elixir test
+alias Toolnexus.Answer
+
+answer = Answer.answer_output("req-1", "42")
+
+true = answer.id == "req-1"
+true = answer.ok == true
+true = answer.data == %{"output" => "42"}
+
+IO.puts("ok: #{inspect(answer)}")
+```
+
+### 2. The realistic case — a non-string output raises rather than degrading
+
+```elixir test
+alias Toolnexus.Answer
+
+raised? =
+  try do
+    Answer.answer_output("req-1", %{a: 1})
+    false
+  rescue
+    e in ArgumentError -> Exception.message(e) =~ "must be a string"
+  end
+
+true = raised?
+
+IO.puts("ok: non-string output raised ArgumentError")
+```
+
+### 3. The full surface — surviving a JSON round-trip and resolving a suspension
+
+An `Answer` built with `answer_output/2` uses STRING keys throughout, so it is unchanged by a
+JSON encode/decode round-trip — the shape a host resuming out of a database column or a queue
+message actually holds.
+
+```elixir test
+alias Toolnexus.{Client, Context, Tool, ToolResult, Request, Answer}
+
+ask_human = %Tool{
+  name: "ask_human",
+  description: "asks the human a question",
+  input_schema: %{"type" => "object", "properties" => %{}},
+  source: "custom",
+  execute: fn _args, %Context{} = ctx ->
+    case ctx.answer do
+      nil ->
+        %ToolResult{
+          output: "",
+          metadata: %{pending: %Request{id: "q1", kind: "input", prompt: "your name?"}}
+        }
+
+      answer ->
+        ToolResult.ok("got: " <> Answer.get(answer, :data)["output"])
+    end
+  end
+}
+
+{:ok, calls} = Agent.start_link(fn -> 0 end)
+
+plug = fn conn ->
+  {:ok, _raw, conn} = Plug.Conn.read_body(conn)
+  n = Agent.get_and_update(calls, fn c -> {c, c + 1} end)
+
+  message =
+    if n == 0 do
+      %{"role" => "assistant", "content" => nil, "tool_calls" => [
+        %{"id" => "c1", "type" => "function", "function" => %{"name" => "ask_human", "arguments" => "{}"}}
+      ]}
+    else
+      %{"role" => "assistant", "content" => "thanks"}
+    end
+
+  resp = %{"choices" => [%{"message" => message}], "usage" => %{"prompt_tokens" => 1, "completion_tokens" => 1, "total_tokens" => 2}}
+  conn |> Plug.Conn.put_resp_content_type("application/json") |> Plug.Conn.send_resp(200, Jason.encode!(resp))
+end
+
+# The answer, built with answer_output/2, surviving a JSON round-trip like a host would store it.
+round_tripped = Answer.answer_output("q1", "Ada") |> Jason.encode!() |> Jason.decode!()
+
+client =
+  Client.create(
+    base_url: "http://localhost",
+    style: "openai",
+    model: "gpt-x",
+    api_key: "test-key",
+    http_options: [plug: plug],
+    wait_for: fn _req -> round_tripped end
+  )
+
+result = Client.run(client, "ask my name", [ask_human])
+
+true = result.status == "done"
+true = result.text == "thanks"
+
+IO.puts("ok: resumed with a round-tripped answer_output payload")
+```
+
+## See also
+
+- [`Toolnexus.Client.create`](/api/elixir/suspension/wait-for/) — The single hook where the host resolves a suspension — in-process prompt or durable queue, same contract.
+- [`Toolnexus.Agents.Runtime.resume`](/api/elixir/suspension/resume/) — Route an Answer to the deepest suspended sub-agent handle and resume it in place.
+- [`Toolnexus.Answer.answer_declined/2`](/api/elixir/suspension/answer-declined/) — Wraps a human's refusal into the Answer a suspended run resumes with, carrying a reason string that defaults to "declined".

@@ -1,0 +1,182 @@
+---
+title: "Loop"
+description: "Agent.Loop(...).Run drives the agent under a Guardrail policy that vets every tool call and a Completion check that decides when the task is done — the gated door beside the plain Agent.Run, with unsupported spec fields (tools, team, waitFor, onMetric) named explicitly rather than silently dropped. — JavaScript."
+sidebar:
+  label: "Loop"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>JavaScript</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7D</a>
+</p>
+
+```ts
+// under agents.*
+function harness(spec: AgentSpec): AgentSpec  // identity — a name, not a wrapper
+
+class Loop {
+  constructor(agent: Agent, options: ClientOptions, toolkit: Toolkit)
+  get status(): string
+  get turns(): number
+  run(prompt: PromptInput, opts?: { model?: string }): Promise<Outcome>
+}
+
+type Guardrail = (ev: { name: string; args: Record<string, unknown>; id?: string; turn: number }) => string | undefined | void
+
+interface Verdict { ok: boolean; reason?: string }
+interface Completion {
+  verify: (result: RunResult) => Verdict | Promise<Verdict>
+  maxAttempts: number  // REQUIRED — an unbounded verify loop is a denial-of-service on the bill
+}
+interface Outcome {
+  text: string
+  status: "done" | "incomplete" | "pending" | "error"
+  stoppedBy?: string  // named whenever status is not "done" — never a silent stop
+  attempts: number
+  turns: number
+  result?: RunResult
+}
+
+function allTodosDone(result: RunResult): Verdict
+function loopUnsupported(spec: { uses?: { tools?: unknown[] }; team?: unknown[]; waitFor?: unknown; onMetric?: unknown }): string[]
+```
+
+`Agent.Loop(...).Run` drives the agent under a `Guardrail` policy that vets every tool call and a
+`Completion` check that decides when the task is done — the gated door beside the plain
+`Agent.Run`, with unsupported spec fields (`tools`, `team`, `waitFor`, `onMetric`) named
+explicitly rather than silently dropped. A `Loop` takes client options and a toolkit the
+**caller** already built, not a constructed client — because a per-call `model` override has to
+be able to change the model, and the model is fixed the moment a client is constructed. See the
+[harness & loop guide](/harness/) for the full walkthrough of the placement law this encodes; this
+page is the symbol reference.
+
+## When to use it
+
+Reach for `Loop` when an agent needs a policy gate on its tool calls (a `Guardrail` that can deny
+a call before it runs) or a verification gate on its completion (a `Completion` that keeps
+re-prompting until the work actually checks out, up to `maxAttempts`) — and the agent does **not**
+need to delegate to a team, suspend on a human via `waitFor`, or route its own metrics. Those four
+spec fields are exactly what `loopUnsupported` names: a `Loop`-driven agent has no `task` tool and
+cannot delegate at all.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Agent.Run honours the full spec; Loop honours a subset, named">
+[`agents.Agent.run`](/api/javascript/runtime/agent/) goes through the full `AgentRuntime` — handle,
+budget carve, conversation store, escalating `waitFor` — and honours `tools`, `team`, `waitFor`
+and `onMetric`. `Loop` is a driver over a client and toolkit the caller already owns, so none of
+those four can reach it: there is no handle tree to spawn a `team` into, no suspension ledger for
+`waitFor`, no per-agent metric sink to route `onMetric` through. Use `Agent.run` when the agent
+needs any of those four; use `Loop` when it only needs a guardrail and/or a completion check over
+a plain client run. `loopUnsupported(spec)` returns exactly which of the four this agent's spec
+would lose, so the gap is detectable rather than a guardrail that silently never runs (issue #87).
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call — `harness()` is a name, not a wrapper
+
+```ts test
+import assert from "node:assert"
+import { agents } from "toolnexus"
+
+const { harness } = agents as any
+
+const spec = { does: "drafts release notes", soul: "You write terse, factual release notes." }
+assert.equal(harness(spec), spec, "harness is a name, not a wrapper — the identical object comes back")
+console.log("ok:", harness(spec).does)
+```
+
+### 2. The realistic case — a Guardrail denies a call, and Completion gates on `allTodosDone`
+
+An agent's `guardrails` (compiled into `beforeTool` via `guardedHooks` internally) deny a
+dangerous tool call outright; its `completion` re-prompts until every declared todo is checked
+off, judging the ACCUMULATED work across retries so a later attempt cannot escape by dropping
+the plan.
+
+```ts test
+import assert from "node:assert"
+import { agents, createToolkit } from "toolnexus"
+
+const { agent, allTodosDone } = agents as any
+
+const say = (content: string) => ({ role: "assistant", content })
+const callTodo = (todos: any[]) => ({
+  role: "assistant",
+  tool_calls: [{ id: "t1", type: "function", function: { name: "todowrite", arguments: JSON.stringify({ todos }) } }],
+})
+
+function scripted(messages: any[]) {
+  let i = 0
+  return async (_url: string, init: any) => {
+    const message = messages[Math.min(i, messages.length - 1)]
+    i++
+    return new Response(
+      JSON.stringify({
+        choices: [{ index: 0, message, finish_reason: message.tool_calls ? "tool_calls" : "stop" }],
+        usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+      }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    )
+  }
+}
+
+// Attempt 1 ends with an open todo (retried); attempt 2 closes it.
+const fetchImpl = scripted([
+  callTodo([{ id: "1", text: "draft", completed: false }]),
+  say("I think I am finished"),
+  callTodo([{ id: "1", text: "draft", completed: true }]),
+  say("all done"),
+])
+
+const tk = await createToolkit({
+  builtins: { tools: { todowrite: true, bash: false, read: false, write: false, edit: false, glob: false, grep: false, webfetch: false, apply_patch: false, question: false } },
+})
+const a = agent("gated", {
+  does: "plans",
+  guardrails: [(ev: any) => (ev.name === "bash" ? "policy: no shell in this agent" : "allow")],
+  completion: { verify: allTodosDone, maxAttempts: 3 },
+})
+const out = await a.loop(
+  { baseUrl: "http://scripted.invalid", style: "openai", model: "test-model", apiKey: "unused", fetch: fetchImpl },
+  tk,
+).run("do the thing")
+
+assert.equal(out.status, "done")
+assert.ok(out.attempts >= 2, "the open todo forced a retry")
+await tk.close()
+console.log("ok:", out.status, out.attempts)
+```
+
+### 3. The full surface — `loopUnsupported` names exactly what a Loop cannot honour
+
+```ts test
+import assert from "node:assert"
+import { agents } from "toolnexus"
+
+const { loopUnsupported } = agents as any
+
+// A spec with all four Loop-unsupported fields set.
+const spec = {
+  uses: { tools: ["some_tool"] },
+  team: ["helper"],
+  waitFor: async () => ({ id: "x", ok: true }),
+  onMetric: () => {},
+}
+const unsupported = loopUnsupported(spec)
+assert.deepEqual([...unsupported].sort(), ["onMetric", "team", "tools", "waitFor"])
+
+// An empty spec loses nothing — the vocabulary is additive and advisory, never fatal.
+assert.deepEqual(loopUnsupported({}), [])
+
+console.log("ok:", unsupported.join(", "))
+```
+
+## See also
+
+- The [harness & loop guide](/harness/) — the placement law (MAY it? / with WHAT? / DID it? / is it RIGHT?) and the full narrative walkthrough.
+- [`agents.Agent`](/api/javascript/runtime/agent/) — Define a sub-agent with its own toolkit, prompt and budget, callable as a tool by its parent.
+- [`agents.AgentRuntime`](/api/javascript/runtime/runtime/) — The six host verbs that drive sub-agents, plus the read-only list and inspect views.
+- [`agents.Handle`](/api/javascript/runtime/handle/) — The state machine for one spawned agent: pending, running, suspended, done.
+- [`agents.Budget`](/api/javascript/runtime/budgets/) — Cap tool calls and wall-clock per agent and per team, enforced while the run is in flight.

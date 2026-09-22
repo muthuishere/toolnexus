@@ -8,48 +8,308 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Python</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a>
+<strong>Python</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/python/src/toolnexus/client.py">python/src/toolnexus/client.py</a>
 </p>
 
 ```python
-{/* TODO:signature */}
+def create_client(
+    *,
+    base_url: str,
+    style: ClientStyle,               # "openai" | "anthropic"
+    model: str,
+    api_key: str | None = None,
+    headers: dict[str, str] | None = None,
+    system_prompt: str | None = None,
+    max_turns: int = 10,
+    hooks: Hooks = None,
+    retries: int = 2,
+    retry_base_ms: int = 500,
+    retryable_statuses: Iterable[int] | None = None,
+    timeout_ms: int | None = None,
+    store: ConversationStore | None = None,
+    on_metric: OnMetric | None = None,
+    wait_for: WaitFor | None = None,
+    request_params: dict[str, Any] | None = None,
+    body_transform: Callable[[dict[str, Any]], dict[str, Any] | None] | None = None,
+    http_transport: HttpTransport | None = None,
+    on_error: ErrorClassifier | None = None,
+    on_unsupported_part: Literal["error", "text"] | None = None,
+    max_part_bytes: int | None = None,
+) -> Client
 ```
 
-The unified client: system prompt, skills injection, parallel and chained tool calls, retries, memory.
+`create_client` is the one entry point for talking to a model: point it at a provider endpoint,
+give it a `style` so it knows the wire shape to speak, and you get back a `Client` with `run`,
+`stream`, and `conversation` — a tool-calling loop with retries, hooks, metrics, and suspension
+already wired in, byte-identical to every other toolnexus port.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+- You're about to call an LLM and want the tool-calling loop (parallel calls, chained calls
+  across turns, automatic re-prompt with tool results) instead of hand-rolling the request/parse/
+  re-request cycle yourself.
+- You want the surrounding concerns — retry on 429/5xx, a request timeout, a metrics sink, a
+  conversation store, a place to intercept every model/tool call — solved once, not per call site.
+- You're pointing at any OpenAI-compatible endpoint (OpenRouter, a local vLLM/Ollama server, Azure
+  OpenAI) or an Anthropic-compatible one — `style` is the wire format, `base_url` is where it lives,
+  so switching providers is a two-field change, not a rewrite.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="create_client vs. calling the provider SDK directly">
+Use the provider's own SDK when you need a feature `create_client` doesn't expose (a bleeding-edge
+endpoint, a provider-specific response field) and you're willing to hand-roll the tool loop
+yourself. Use `create_client` when you want the loop — tool calls resolved and fed back
+automatically, retries, hooks, metrics, suspension — for free, and you're fine speaking to the
+model over its OpenAI- or Anthropic-shaped HTTP API (which is what `http_transport` and
+`body_transform` exist to bend when the endpoint isn't quite standard).
 </Aside>
+
+<Aside type="caution" title="Python port: no Gemini wire style">
+`ClientStyle` in this port is `Literal["openai", "anthropic"]` — there is no `"gemini"` client
+style here, unlike what the tool-schema adapters (`to_gemini` / `Toolkit.to_gemini`) might
+suggest. To talk to Gemini directly you currently need its OpenAI-compatible endpoint (`style="openai"`
+against Gemini's `/openai/` base URL) or a Gemini-speaking `http_transport`. This is a real gap in
+the Python port relative to the cross-language schema-adapter surface — verify against the other
+ports before assuming parity here.
+</Aside>
+
+## The option surface
+
+`create_client` takes every option as a keyword argument. Each one below is documented in depth on
+its own page — this page is the map, not the manual:
+
+| Option | What it's for | Depth |
+|---|---|---|
+| `base_url`, `style`, `model`, `api_key`, `headers` | Where the model lives, which wire shape it speaks, which model, how to authenticate. | — |
+| `system_prompt` | Prepended once; toolkit skill/tool catalogs are injected alongside it. | — |
+| `max_turns` | Hard cap on tool-call round-trips in one `run`/`stream` before the loop stops. | — |
+| `hooks` | Intercept before/after every model call and every tool call — audit, redact, veto, rewrite. | [`Hooks`](/api/python/client/hooks/) |
+| `retries`, `retry_base_ms`, `retryable_statuses`, `on_error`, `timeout_ms` | Retry/backoff policy for transient provider failures, and a deadline for the whole run. | [`ErrorClassifier`](/api/python/client/resilience/) |
+| `store` | Persist conversation history somewhere other than in-process memory. | [`InMemoryConversationStore`](/api/python/client/store/) |
+| `on_metric` | A sink called once per `llm`/`tool`/`run` event; also feeds `client.metrics()`. | [`MetricEvent`](/api/python/client/metrics/) |
+| `wait_for` | Resolve a §10 suspension (a tool that needs a human answer) synchronously or by resuming later. | [`WaitFor`](/api/python/suspension/wait-for/) |
+| `request_params` | Extra top-level fields merged into every outbound request body (e.g. `temperature`). | — |
+| `body_transform` | Last-mile hook to rewrite (or veto) the outbound request body before it's sent. | — |
+| `http_transport` | Swap the HTTP layer entirely — point the client at an in-process model, a test double, a non-standard endpoint. | — |
+| `on_unsupported_part`, `max_part_bytes` | How to handle a content part the target provider can't carry, and a size cap on attachments. | [`ContentPart`](/api/python/types/content-part/) |
+
+`ProviderError` (a non-2xx response from the endpoint, raised as a typed exception carrying status,
+a redacted body, and any `Retry-After`) is what `retries`/`on_error` classify — see
+[`ProviderError`](/api/python/client/provider-error/).
+
+Once you have a `Client`, the loop itself is [`Client.run`](/api/python/client/run/) (one-shot) or
+[`Client.stream`](/api/python/client/stream/) (incremental events); `client.conversation(toolkit)`
+gives you the same loop with memory across turns.
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+<Aside type="note" title="Hermetic on purpose">
+Examples 1–2 point `create_client` at a local `http.server` stub instead of a real LLM endpoint —
+no network, no API key. Example 3 shows the shape of a live call (adapted from
+`python/examples/memory.py`), gated on an env var so it's a no-op without one.
+</Aside>
 
-{/* TODO:example1 */}
-```python
-// TODO
+### 1. The smallest useful call — one prompt, no tools
+
+```python test
+import asyncio
+import json
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+from toolnexus import create_client, create_toolkit
+
+
+class StubServer:
+    def __init__(self, handler):
+        outer = self
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_POST(self):  # noqa: N802
+                length = int(self.headers.get("Content-Length", 0))
+                body = json.loads(self.rfile.read(length) or b"{}")
+                outer._send(self, handler(body))
+
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.port = self._server.server_address[1]
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+
+    @staticmethod
+    def _send(req, payload):
+        body = json.dumps(payload).encode("utf-8")
+        req.send_response(200)
+        req.send_header("Content-Type", "application/json")
+        req.send_header("Content-Length", str(len(body)))
+        req.end_headers()
+        req.wfile.write(body)
+
+    @property
+    def base_url(self) -> str:
+        return f"http://127.0.0.1:{self.port}/v1"
+
+    def __enter__(self):
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self._server.shutdown()
+        self._server.server_close()
+
+
+def reply(body):
+    return {
+        "choices": [{"message": {"role": "assistant", "content": "ok"}}],
+        "usage": {"prompt_tokens": 3, "completion_tokens": 1, "total_tokens": 4},
+    }
+
+
+async def main():
+    tk = await create_toolkit()
+    try:
+        with StubServer(reply) as srv:
+            client = create_client(base_url=srv.base_url, style="openai", model="test-model", api_key="test-key")
+            result = await client.run("hi", tk)
+        print("ok:", result.text)
+    finally:
+        await tk.close()
+
+
+asyncio.run(main())
 ```
 
-### 2. TODO — the realistic case
+### 2. The realistic case — resilience, hooks, and metrics wired together
 
-{/* TODO:example2 */}
-```python
-// TODO
+```python test
+import asyncio
+import json
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+from toolnexus import create_client, create_toolkit
+
+
+class StubServer:
+    def __init__(self, handler):
+        outer = self
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_POST(self):  # noqa: N802
+                length = int(self.headers.get("Content-Length", 0))
+                body = json.loads(self.rfile.read(length) or b"{}")
+                outer._send(self, handler(body))
+
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.port = self._server.server_address[1]
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+
+    @staticmethod
+    def _send(req, payload):
+        body = json.dumps(payload).encode("utf-8")
+        req.send_response(200)
+        req.send_header("Content-Type", "application/json")
+        req.send_header("Content-Length", str(len(body)))
+        req.end_headers()
+        req.wfile.write(body)
+
+    @property
+    def base_url(self) -> str:
+        return f"http://127.0.0.1:{self.port}/v1"
+
+    def __enter__(self):
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self._server.shutdown()
+        self._server.server_close()
+
+
+def reply(body):
+    return {
+        "choices": [{"message": {"role": "assistant", "content": "ok"}}],
+        "usage": {"prompt_tokens": 4, "completion_tokens": 2, "total_tokens": 6},
+    }
+
+
+async def main():
+    tk = await create_toolkit()
+    events = []
+    audit = []
+    try:
+        with StubServer(reply) as srv:
+            client = create_client(
+                base_url=srv.base_url,
+                style="openai",
+                model="test-model",
+                api_key="test-key",
+                system_prompt="Be concise.",
+                max_turns=4,
+                retries=3,
+                retry_base_ms=250,
+                timeout_ms=10_000,
+                request_params={"temperature": 0.2},
+                on_metric=events.append,
+                hooks={"before_llm": lambda ctx: audit.append(ctx["messages"][-1]["content"])},
+            )
+            result = await client.run("hi", tk)
+
+        assert result.text == "ok"
+        assert audit == ["hi"]
+        assert [e["event"] for e in events] == ["llm", "run"]
+        print("ok:", result.text, "| hook saw:", audit, "| events:", [e["event"] for e in events])
+    finally:
+        await tk.close()
+
+
+asyncio.run(main())
 ```
 
-### 3. TODO — the full surface
+### 3. The full surface — a live provider call, gated on an API key
 
-{/* TODO:example3 */}
 ```python
-// TODO
+import asyncio
+import os
+
+from toolnexus import create_client, create_toolkit
+
+
+async def main() -> None:
+    tk = await create_toolkit()
+
+    key = os.environ.get("OPENROUTER_API_KEY")
+    if not key:
+        print("no OPENROUTER_API_KEY — skipping (imports OK)")
+        await tk.close()
+        return
+
+    client = create_client(
+        base_url="https://openrouter.ai/api/v1",
+        style="openai",
+        model=os.environ.get("OPENROUTER_MODEL", "openai/gpt-4o-mini"),
+        api_key=key,
+        system_prompt="Reply in one short sentence.",
+        retries=2,
+        on_unsupported_part="text",
+        max_part_bytes=5_000_000,
+    )
+
+    convo = client.conversation(tk)
+    a = await convo.send("My name is Muthu and my favorite number is 7. Reply with just 'noted'.")
+    print("turn 1:", a.text)
+    b = await convo.send("What is my name and favorite number?")
+    print("turn 2:", b.text)
+
+    await tk.close()
+
+
+asyncio.run(main())
 ```
 
 ## See also
@@ -58,3 +318,9 @@ _TODO: name the alternative and when to prefer it._
 - [`Client.stream`](/api/python/client/stream/) — The streaming loop: text deltas, tool-call events, and suspension events as they happen.
 - [`Hooks`](/api/python/client/hooks/) — Intercept before/after model calls and tool calls: audit, redact, veto, or rewrite.
 - [`Conversation`](/api/python/client/conversation/) — Keep a transcript across turns so the model remembers what it already did.
+- [`ErrorClassifier`](/api/python/client/resilience/) — Classify an LLM error into retry / fail, bound a run with a deadline, and cancel cleanly.
+- [`InMemoryConversationStore`](/api/python/client/store/) — Swap in-memory history for your own store so a conversation survives a process restart.
+- [`MetricEvent`](/api/python/client/metrics/) — Emit one metric event per model call and per tool call: tokens, latency, outcome.
+- [`ProviderError`](/api/python/client/provider-error/) — The typed exception raised for a non-2xx provider response.
+- [`WaitFor`](/api/python/suspension/wait-for/) — The single hook where the host resolves a suspension.
+- [`create_toolkit`](/api/python/toolkit/create/) — The other entry point: collapse MCP servers, skills, built-ins, and your own functions into one tool list.

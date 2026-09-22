@@ -1,0 +1,155 @@
+---
+title: "answer_declined"
+description: "Wraps a human's refusal into the Answer a suspended run resumes with, carrying a reason string that defaults to \"declined\". — Python."
+sidebar:
+  label: "answer_declined"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Python</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §10</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/python/src/toolnexus/types.py">python/src/toolnexus/types.py</a>
+</p>
+
+```python
+def answer_declined(id: str, reason: str = "declined") -> Answer
+```
+
+Wraps a human's refusal into the `Answer` a suspended run resumes with, carrying a `reason`
+string that defaults to `"declined"`. Builds `Answer(id=id, ok=False, reason=reason)` — the
+refusal counterpart to [`answer_output`](/api/python/suspension/answer-output/). `reason` is a
+closed, advisory vocabulary: `"declined"`, `"cancelled"`, or `"expired"`; anything else raises
+`ValueError` immediately. The loop itself branches only on `Answer.ok`, never on `reason` — the
+string is there so a host can tell an explicit "no" from a dismissal or a stale request apart
+when it later inspects why a run stopped.
+
+## When to use it
+
+- A human explicitly refuses a `pending(kind="approval", ...)` — "not OK to deploy to prod" —
+  and you want that refusal to reach the tool as `ctx.answer.ok is False`, distinct from a
+  successful reply.
+- A `Request` goes stale before anyone answers it — resolve it with
+  `answer_declined(request.id, "expired")` rather than leaving the run parked forever.
+- Your UI lets a user dismiss a prompt without answering it — `answer_declined(request.id,
+  "cancelled")` distinguishes that from a considered "no".
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Reach for answer_output when the human actually answered">
+`answer_declined` is for a REFUSAL — nothing to hand the tool but the fact that it was refused
+and (advisory) why. When the human supplied a real value, use
+[`answer_output`](/api/python/suspension/answer-output/) instead so the tool receives
+`ctx.answer.data["output"]`; building a declined `Answer` with the reply stuffed into `reason`
+would put the answer somewhere no tool reads it.
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call — the default reason
+
+```python test
+from toolnexus import answer_declined
+
+a = answer_declined("pnd-1")
+
+assert a.ok is False
+assert a.id == "pnd-1"
+assert a.reason == "declined"  # the default when none is given
+
+print("ok:", a.id, "|", a.reason)
+```
+
+### 2. The realistic case — an explicit reason, and an invalid one rejected
+
+```python test
+import pytest
+
+from toolnexus import answer_declined
+
+cancelled = answer_declined("pnd-1", "cancelled")
+assert cancelled.ok is False and cancelled.reason == "cancelled"
+
+expired = answer_declined("pnd-1", "expired")
+assert expired.reason == "expired"
+
+with pytest.raises(ValueError):
+    answer_declined("pnd-1", "nope")  # not in the closed vocabulary
+
+print("ok:", cancelled.reason, "/", expired.reason, "| invalid reason rejected")
+```
+
+### 3. The full surface — a suspended run resumes with a decline, `ok` decides the branch
+
+```python test
+import asyncio
+
+from toolnexus import ToolResult, answer_declined, create_client, create_toolkit, define_tool, pending
+
+
+class RecordingTransport:
+    def __init__(self, responses):
+        self._responses = list(responses)
+
+    def post(self, url, headers, payload, timeout):
+        return self._responses.pop(0)
+
+    def open(self, url, headers, payload, timeout):  # noqa: A003
+        raise NotImplementedError
+
+
+seen = {}
+
+
+async def approve_deploy(args=None, ctx=None):
+    if ctx is not None and ctx.answer is not None:
+        seen["answer"] = ctx.answer
+        if ctx.answer.ok:
+            return ToolResult(output="deployed", is_error=False)
+        return ToolResult(output=f"deploy skipped: {ctx.answer.reason}", is_error=False)
+    return pending(kind="approval", prompt="OK to deploy to prod?")
+
+
+async def main():
+    transport = RecordingTransport([
+        {
+            "choices": [{
+                "message": {
+                    "role": "assistant", "content": None,
+                    "tool_calls": [{"id": "c1", "type": "function",
+                                     "function": {"name": "deploy", "arguments": "{}"}}],
+                },
+            }],
+            "usage": {"total_tokens": 5},
+        },
+        {"choices": [{"message": {"role": "assistant", "content": "ok"}}], "usage": {"total_tokens": 5}},
+    ])
+    tk = await create_toolkit(builtins=False, extra_tools=[
+        define_tool(approve_deploy, name="deploy", description="Deploy to prod.")
+    ])
+    try:
+        client = create_client(
+            base_url="http://mock.local/v1", style="openai", model="mock", api_key="unused",
+            http_transport=transport,
+            wait_for=lambda req: answer_declined(req.id, "declined"),
+        )
+        result = await client.run("deploy the latest build", tk)
+
+        assert result.status == "done"
+        assert seen["answer"].ok is False
+        assert result.tool_calls[0]["output"] == "deploy skipped: declined"
+
+        print("ok:", result.tool_calls[0]["output"])
+    finally:
+        await tk.close()
+
+
+asyncio.run(main())
+```
+
+## See also
+
+- [`pending`](/api/python/suspension/pending/) — Return a Pending from a tool to park the run until someone answers.
+- [`answer_output`](/api/python/suspension/answer-output/) — The success counterpart: wraps a human's typed reply into the same `Answer` shape.
+- [`auth_required`](/api/python/suspension/auth-required/) — The auth-shaped suspension: hand back a URL, resume once the user has granted access.
+- [`WaitFor`](/api/python/suspension/wait-for/) — The single hook where the host resolves a suspension — in-process prompt or durable queue, same contract.
+- [`pending_of`](/api/python/suspension/pending-of/) — Detect that a RunResult is parked rather than finished, and get the Request that parked it.

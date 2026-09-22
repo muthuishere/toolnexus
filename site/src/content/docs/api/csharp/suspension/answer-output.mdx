@@ -1,0 +1,184 @@
+---
+title: "Answer.Output"
+description: "Wraps a human's typed string reply into the Answer a suspended run resumes with — the success counterpart to answerDeclined. — C#."
+sidebar:
+  label: "Answer.Output"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>C#</strong> · package <code>Toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §10</a>
+</p>
+
+```csharp
+public static Answer Output(string id, string output);
+```
+
+Wraps a human's typed string reply into the `Answer` a suspended run resumes with — the success
+counterpart to [`Answer.Declined`](/api/csharp/suspension/answer-declined/). Building the payload
+by hand (`new Answer { Id = …, Ok = true, Data = new Dictionary<string, object?> { ["output"] = … } }`)
+is what this removes: the `"output"` key stops being something a host can spell wrong on the way
+back out of a durable store, because there is no hand-built map left to spell it wrong in.
+
+## When to use it
+
+Anywhere you resolve a [`Request`](/api/csharp/suspension/pending/) with a plain string answer —
+the most common shape by far: a human typed a value, approved with a note, or a durable queue
+handed back a single string result. Pass it to `Options.WaitFor`'s return, or to
+`AgentRuntime.ResumeAsync`, wherever the resolution is "here is the output," not a refusal.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Reach for Answer.Declined when the human said no">
+`Answer.Output` always sets `Ok = true` — it is not the vehicle for a refusal, a timeout, or an
+expired request. Use [`Answer.Declined`](/api/csharp/suspension/answer-declined/) for those; the
+loop rule branches only on `Ok`, so getting this one right is what determines whether the paused
+tool sees success or failure on the resumed retry. For anything richer than a single string result
+(structured `Data`, no explicit `output` key), build an `Answer` record literal directly — the
+typed constructor exists for the single-result shape specifically, not as the only way to build one.
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call — build and read the pinned payload
+
+```csharp test
+using Toolnexus;
+
+var a = Answer.Output("req-1", "the result");
+
+if (a.Id != "req-1") throw new Exception(a.Id);
+if (!a.Ok) throw new Exception("Answer.Output always sets Ok = true");
+if ((string?)a.Data!["output"] != "the result") throw new Exception(a.Data["output"]?.ToString());
+
+// A non-string output cannot silently degrade to "" — the type is the contract.
+try { Answer.Output("req-1", null!); throw new Exception("expected ArgumentNullException"); }
+catch (ArgumentNullException) { /* expected */ }
+
+Console.WriteLine($"ok: {a.Id} -> {a.Data["output"]}");
+```
+
+### 2. The realistic case — resolving a paused tool via `WaitFor`
+
+```csharp test
+using System.Net;
+using System.Text;
+using Toolnexus;
+
+string? seen = null;
+var tool = NativeTool.Of("ask", "asks a human",
+    new Dictionary<string, object?> { ["type"] = "object", ["properties"] = new Dictionary<string, object?>() },
+    (IDictionary<string, object?> _, ToolContext? ctx) =>
+    {
+        // First call: no resolution yet — park the run.
+        if (ctx?.Answer?.Ok != true)
+            return ToolResult.Pending(new Request { Id = "r1", Kind = "input", Prompt = "what's the value?" });
+        // Resumed retry: ctx.Answer carries the Answer.Output payload.
+        seen = ctx.Answer.Data!["output"]?.ToString();
+        return (object)("got " + seen);
+    });
+
+var httpCalls = 0;
+using var stub = new Stub(ctx =>
+{
+    httpCalls++;
+    var body = httpCalls == 1
+        ? """{"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"c1","type":"function","function":{"name":"ask","arguments":"{}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}}"""
+        : """{"choices":[{"message":{"role":"assistant","content":"got the answer"},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}}""";
+    Stub.Json(ctx, 200, body);
+});
+
+var client = LlmClient.Create(new LlmClient.Options
+{
+    BaseUrl = stub.BaseUrl, Style = "openai", Model = "gpt-4o-mini", ApiKey = "test-key",
+    // The out-of-band resolution: a human typed "42".
+    WaitFor = req => Task.FromResult(Answer.Output(req.Id, "42")),
+});
+
+await using var tk = await Toolkit.CreateAsync(new Toolkit.Options().WithBuiltins(false));
+tk.Register(tool);
+await client.RunAsync("go", tk);
+
+if (seen != "42") throw new Exception($"seen: {seen}");
+Console.WriteLine($"ok: the paused tool resumed with \"{seen}\"");
+
+sealed class Stub : IDisposable
+{
+    readonly HttpListener _listener = new();
+    readonly CancellationTokenSource _cts = new();
+    public int Port { get; }
+    public string BaseUrl => $"http://127.0.0.1:{Port}";
+
+    public Stub(Action<HttpListenerContext> handler)
+    {
+        var probe = new System.Net.Sockets.TcpListener(IPAddress.Loopback, 0);
+        probe.Start();
+        Port = ((IPEndPoint)probe.LocalEndpoint).Port;
+        probe.Stop();
+        _listener.Prefixes.Add($"http://127.0.0.1:{Port}/");
+        _listener.Start();
+        _ = Task.Run(async () =>
+        {
+            while (!_cts.IsCancellationRequested)
+            {
+                HttpListenerContext ctx;
+                try { ctx = await _listener.GetContextAsync(); }
+                catch { break; }
+                try { handler(ctx); } catch { }
+            }
+        });
+    }
+
+    public static void Json(HttpListenerContext ctx, int status, string body)
+    {
+        var bytes = Encoding.UTF8.GetBytes(body);
+        ctx.Response.StatusCode = status;
+        ctx.Response.ContentType = "application/json";
+        ctx.Response.ContentLength64 = bytes.Length;
+        ctx.Response.OutputStream.Write(bytes, 0, bytes.Length);
+        ctx.Response.OutputStream.Close();
+    }
+
+    public void Dispose()
+    {
+        _cts.Cancel();
+        try { _listener.Stop(); } catch { }
+        try { _listener.Close(); } catch { }
+    }
+}
+```
+
+### 3. Full surface — resuming a suspended sub-agent through the §7D runtime
+
+```csharp test
+using Toolnexus;
+using Toolnexus.Agents;
+
+// (Illustrative shape — see AgentRuntimeTests.cs `ResumeReturnsTheResumedResult` for the full
+// hermetic fixture with a scripted MockLlm.) A tool inside a spawned agent suspended; the caller
+// resolves it with a plain string, exactly as it would for the top-level client's WaitFor.
+Answer BuildResolution(string pendingId) => Answer.Output(pendingId, "approved");
+
+var resolution = BuildResolution("agent-req-9");
+if (!resolution.Ok) throw new Exception("Answer.Output must always be Ok = true");
+if ((string?)resolution.Data!["output"] != "approved") throw new Exception("output key");
+
+// rt.ResumeAsync(resolution) would route this to the deepest suspended handle waiting on
+// "agent-req-9" and return the resumed AgentResult once the agent's turn completes.
+Console.WriteLine($"ok: resolution for {resolution.Id} carries output=\"{resolution.Data["output"]}\"");
+```
+
+## Parameters
+
+| Parameter | Type | What it is |
+|---|---|---|
+| `id` | `string` | Echoes the [`Request.Id`](/api/csharp/suspension/pending/) being answered. Throws `ArgumentNullException` if `null`. |
+| `output` | `string` | The tool's result, stored at `Data["output"]`. Throws `ArgumentNullException` if `null` — a non-string result is rejected rather than silently degraded to `""`. |
+
+## See also
+
+- [`Suspension.Pending`](/api/csharp/suspension/pending/) — Return a Pending from a tool to park the run until someone answers.
+- [`Suspension.AuthRequired`](/api/csharp/suspension/auth-required/) — The auth-shaped suspension: hand back a URL, resume once the user has granted access.
+- [`LlmClient.WaitFor`](/api/csharp/suspension/wait-for/) — The single hook where the host resolves a suspension — in-process prompt or durable queue, same contract.
+- [`Suspension.PendingOf`](/api/csharp/suspension/pending-of/) — Detect that a RunResult is parked rather than finished, and get the Request that parked it.

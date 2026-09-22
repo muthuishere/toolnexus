@@ -8,50 +8,153 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Java</strong> · package <code>io.github.muthuishere:toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §4</a>
+<strong>Java</strong> · package <code>io.github.muthuishere:toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §4</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/java/src/main/java/io/github/muthuishere/toolnexus/Toolkit.java">Toolkit.java</a>
 </p>
 
 ```java
-{/* TODO:signature */}
+public static Toolkit create(Options opts)
+
+// Toolkit.Options — the full surface, grouped:
+public Options mcpConfig(Object v)              // path, raw JSON string, or a parsed Map
+
+public Options skillsDir(String... v)           // one or more filesystem skill roots
+public Options skills(List<SkillSource.SkillDef> v)                       // skills as data (§3 S1)
+public Options skillProvider(Supplier<List<SkillSource.SkillDef>> v)      // lazy data skills, failure-isolated
+public Options skillsFilter(Map<String, Boolean> v)                       // per-agent skill allowlist (§3 S2)
+public Options skillSampleLimit(int v)                                    // sibling-file sample cap (§3 S5)
+
+public Options extraTools(Tool... v)            // custom/native/http tools
+public Options annotatedObjects(Object... v)    // objects scanned via Tools.fromObject
+public Options builtins(Object v)               // on by default; false | {disabled:true} | {enabled:false} => off
+public Options agents(A2A.Agent... v)           // remote A2A agents — each skill becomes a tool
+
+public Options waitFor(Function<Request, Answer> v)   // §10 — bridges MCP elicitation onto the suspension contract
+public Options disableTools(List<String> v)           // drop tools by final exposed name, across every source
+public Options disableSkills(List<String> v)          // drop skills by name (sugar over skillsFilter)
+public Options cancelSignal(McpSource.CancelSignal v) // §2 Gap 3 — cancel a slow/hung MCP connect
 ```
 
-Collapse MCP servers, skills, built-ins, A2A agents and your own functions into one tool list.
+Collapse MCP servers, skills, built-ins, A2A agents and your own functions into **one** tool list
+behind a single `Toolkit`. It connects every enabled MCP server (in parallel, failures isolated),
+globs and parses the skill directories, resolves the built-in file/shell/web tools, fetches each
+configured A2A agent's card, and de-dupes everything by final tool name (first source wins) into
+one `Map<String, Tool>` you can hand straight to `LlmClient.run`/`stream`, or adapt to any
+provider's tool schema.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+Call `Toolkit.create` once per agent configuration — wherever you'd otherwise wire MCP, skills,
+built-ins and your own functions up separately. It is the toolkit's only constructor: every
+option is optional, so `Toolkit.create(new Toolkit.Options())` alone still gives you a working
+(empty, all-builtins-on) toolkit. `Toolkit` is `AutoCloseable` — closing it disconnects every
+connected MCP client, so build it in a try-with-resources (or hold it for the process lifetime
+and close it on shutdown).
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+<Aside type="tip" title="Reach for the single-source constructor when Toolkit is one source too many">
+`Toolkit.create` is worth it the moment you combine two or more of \{MCP, skills, built-ins, extra
+tools, A2A agents\} — it does the aggregation, precedence (builtins are lowest-precedence; an
+`extraTools` entry with the same name shadows a builtin) and dedupe for you. If MCP is the
+*only* source you need, [`McpSource.load`](/api/java/mcp/load/) directly is lighter — you get the
+`McpSource` itself (its `status()` map) without the toolkit wrapper. Same story for skills alone:
+[`SkillSource.load`](/api/java/skills/load/) gives you just the `skill` tool. Reach for
+`BuiltinTools.select`/`create` directly only if you want the built-ins with no toggle logic and no
+other source at all.
 </Aside>
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. The smallest useful call — built-ins only, no MCP, no skills
 
-{/* TODO:example1 */}
-```java
-// TODO
+```java test
+import io.github.muthuishere.toolnexus.*;
+
+public class Example {
+    public static void main(String[] args) {
+        try (Toolkit tk = Toolkit.create(new Toolkit.Options())) {
+            // No mcpConfig / skillsDir set — builtins default to ON, so the ten
+            // built-in tools (bash/read/write/edit/grep/glob/webfetch/question/
+            // apply_patch/todowrite) are the whole list.
+            if (tk.tools().isEmpty()) throw new AssertionError("expected the built-ins");
+            if (tk.get("bash") == null) throw new AssertionError("expected the bash builtin");
+            System.out.println("ok: " + tk.tools().size() + " tools, no MCP/skills configured");
+        }
+    }
+}
 ```
 
-### 2. TODO — the realistic case
+### 2. The realistic case — skills from disk plus a hand-written tool, builtins off
 
-{/* TODO:example2 */}
-```java
-// TODO
+```java test
+import io.github.muthuishere.toolnexus.*;
+import java.util.Map;
+
+public class Example {
+    public static void main(String[] args) {
+        Tool add = NativeTool.of("add", "Add two numbers", null, args -> {
+            Number a = (Number) args.get("a");
+            Number b = (Number) args.get("b");
+            return String.valueOf(a.intValue() + b.intValue());
+        });
+
+        try (Toolkit tk = Toolkit.create(new Toolkit.Options()
+                .skillsDir("examples/skills")   // the shared cross-language fixture
+                .extraTools(add)
+                .builtins(false))) {
+
+            if (tk.get("skill") == null) throw new AssertionError("expected the skill tool");
+            if (tk.get("add") == null) throw new AssertionError("expected the custom tool");
+            if (tk.get("bash") != null) throw new AssertionError("builtins(false) should drop bash");
+
+            ToolResult r = tk.execute("add", Map.of("a", 2, "b", 3));
+            System.out.println("ok: skillsPrompt has hello-world="
+                    + tk.skillsPrompt().contains("hello-world") + ", add(2,3)=" + r.output());
+        }
+    }
+}
 ```
 
-### 3. TODO — the full surface
+### 3. The full surface — MCP, disableTools/disableSkills, and a per-agent skills filter together
 
-{/* TODO:example3 */}
-```java
-// TODO
+```java test
+import io.github.muthuishere.toolnexus.*;
+import java.util.List;
+import java.util.Map;
+
+public class Example {
+    public static void main(String[] args) {
+        // A bare server map, every server disabled — hermetic: no process spawned, no network reached.
+        Map<String, Object> mcpConfig = Map.of(
+                "srv", Map.of("type", "remote", "url", "https://example.invalid/mcp", "enabled", false));
+
+        try (Toolkit tk = Toolkit.create(new Toolkit.Options()
+                .mcpConfig(mcpConfig)
+                .builtins(false)
+                .skills(List.of(
+                        new SkillSource.SkillDef("keep", "Keep this one", "body"),
+                        new SkillSource.SkillDef("drop", "Dropped via disableSkills", "body")))
+                .disableSkills("drop")
+                .disableTools("nonexistent_tool"))) {
+
+            // MCP: config parsed, server disabled, no tools contributed — no network reached.
+            if (!"disabled".equals(tk.mcpStatus().get("srv"))) throw new AssertionError(tk.mcpStatus());
+
+            String prompt = tk.skillsPrompt();
+            if (!prompt.contains("keep")) throw new AssertionError("expected \"keep\" in: " + prompt);
+            if (prompt.contains("**drop**")) throw new AssertionError("disableSkills should drop it: " + prompt);
+
+            System.out.println("ok: mcpStatus=" + tk.mcpStatus() + ", skills filtered as expected");
+        }
+    }
+}
 ```
 
 ## See also
 
-- _TODO: related entry points_
+- [`McpSource.load`](/api/java/mcp/load/) — Read an mcp.json, connect every local stdio and remote streamable-HTTP server, expose each server tool as a Tool.
+- [`SkillSource.load`](/api/java/skills/load/) — Glob a skills directory and expose one skill tool with progressive disclosure.
+- [`SkillSource.loadWith`](/api/java/skills/load-with/) — The data/provider/filter/sample-limit surface `Toolkit` wires skills through.
+- [`BuiltinTools.select`](/api/java/builtins/select/) — Pick which built-in file/shell/web tools are in play, by name or by source toggle.
+- [`LlmClient.waitFor`](/api/java/suspension/wait-for/) — The single hook where a suspension (including bridged MCP elicitation) is resolved.
+- [`LlmClient.create`](/api/java/client/create/) — The unified client this toolkit's tools get called through.

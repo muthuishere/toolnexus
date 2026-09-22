@@ -1,0 +1,162 @@
+---
+title: "LlmHttpError"
+description: "A non-2xx response from the model endpoint raises a typed provider error carrying the status code, a redacted+capped body, and the retry-after signal — never a bare unstructured exception. — JavaScript."
+sidebar:
+  label: "LlmHttpError"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>JavaScript</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a>
+</p>
+
+```ts
+class LlmHttpError extends Error {
+  readonly name: "LlmHttpError"
+  readonly status: number       // the HTTP status the provider answered with
+  readonly body: string         // FULL redacted body; "" on 401/403; uncapped
+  readonly retryAfter?: string  // the Retry-After header, verbatim, when the provider sent one
+}
+
+function llmHttpError(res: Response): Promise<LlmHttpError>
+
+const REDACTED_BODY_KEYS: readonly string[]  // ["user_id", "account_id", "org_id", "organization"]
+const REDACTION_PLACEHOLDER: string          // "«redacted»"
+const ERROR_BODY_CAP: number                 // 200
+
+function redactErrorBody(body: string): string
+function capErrorBody(body: string): string
+```
+
+A non-2xx response from the model endpoint raises a typed provider error carrying the status
+code, a redacted+capped body, and the retry-after signal — never a bare unstructured exception.
+`status`/`body`/`retryAfter` are fields on a value a host can read, not a sentence it has to
+parse (ADR 0027 D3.1). `body` is already redacted and capped for the `message`; the typed field
+carries the full redacted body, uncapped, and is `""` on a `401`/`403` — an auth failure's body
+routinely echoes the credential or header that was sent, so it is never even in the value to
+begin with.
+
+## When to use it
+
+Catch `LlmHttpError` wherever your host branches on *why* an LLM call failed: retry logic beyond
+what `onError` already covers, a status-code-specific user message, or a structured log/metric
+line. Reach for the module-level `redactErrorBody`/`capErrorBody` directly when you build your own
+error value from a raw provider body — for example, translating a caught error into your own
+event schema before it reaches a log sink.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="onError classifies; LlmHttpError is what gets thrown">
+[`onError`](/api/javascript/client/resilience/) decides retry-or-fail for each failed attempt —
+it never sees a fully-formed error, only `status`/`error`/`attempt`. `LlmHttpError` is what the
+client ultimately **throws** once retries are exhausted (or immediately, on a non-retryable
+status). Don't reach for `onError` to shape what a caught error looks like; that's `LlmHttpError`
+and the redaction helpers around it.
+</Aside>
+
+Account-identifying fields are redacted and the body is capped at 200 characters in the
+`message` — not because the data is uninteresting, but because it used to leak. A raw OpenRouter
+error body carried a live `user_id` straight into a host's event log and rendered UI (issue #92,
+[ADR 0027](https://github.com/muthuishere/toolnexus/blob/main/docs/adr/0027-what-the-library-hands-back-when-it-fails.md)):
+a 96-byte body, well inside any reasonable cap, so redaction and capping are two independent
+steps and redaction runs **first** — capping first could split a `"user_id":"…"` pair in the
+middle and hide it from the regex. The shape of the body survives; the value does not.
+
+## Examples
+
+### 1. The smallest useful call — catch it and read the fields
+
+```ts test
+import assert from "node:assert"
+import { createClient } from "toolnexus"
+import { LlmHttpError } from "toolnexus"
+
+const client = createClient({
+  baseUrl: "http://127.0.0.1:1", // nothing listening — but a real 4xx is simpler to script below
+  style: "openai",
+  model: "stub",
+  apiKey: "test-key",
+  fetch: async () => new Response('{"error":"bad request"}', { status: 400 }),
+  retries: 0,
+})
+
+const err = await client.run("hi").then(
+  () => null,
+  (e: unknown) => e,
+)
+assert.ok(err instanceof LlmHttpError)
+assert.equal((err as LlmHttpError).status, 400)
+console.log("ok:", (err as LlmHttpError).status, (err as LlmHttpError).message)
+```
+
+### 2. The realistic case — an account id is redacted, and a 401 body is blanked entirely
+
+```ts test
+import assert from "node:assert"
+import { createClient, LlmHttpError } from "toolnexus"
+
+const fail = (status: number, body: string, headers: Record<string, string> = {}) =>
+  async () => new Response(body, { status, headers })
+
+// A body that leaked a live account id in issue #92 — the shape must survive, the value must not.
+const client = createClient({
+  baseUrl: "http://never.invalid", style: "openai", model: "stub", apiKey: "test-key",
+  fetch: fail(400, '{"error":"bad","user_id":"user_2FAKEfakefakefake"}'),
+  retries: 0,
+})
+const e = (await client.run("hi").then(() => null, (x: unknown) => x)) as LlmHttpError
+assert.ok(e instanceof LlmHttpError)
+assert.equal(e.body.includes("user_2FAKE"), false, "the account id never survives")
+assert.equal(e.message.includes("user_2FAKE"), false, "and nothing leaks via the message either")
+
+// A 401 body routinely echoes the credential that was sent — blank it entirely, not just redact.
+const auth = createClient({
+  baseUrl: "http://never.invalid", style: "openai", model: "stub", apiKey: "test-key",
+  fetch: fail(401, "Authorization: Bearer sk-LEAKED"),
+  retries: 0,
+})
+const e2 = (await auth.run("hi").then(() => null, (x: unknown) => x)) as LlmHttpError
+assert.equal(e2.status, 401)
+assert.equal(e2.body, "")
+assert.equal(e2.message.includes("sk-LEAKED"), false)
+
+console.log("ok:", e.status, e2.status)
+```
+
+### 3. The full surface — `retryAfter`, the cap, and the redaction helpers standalone
+
+```ts test
+import assert from "node:assert"
+import { createClient, LlmHttpError, redactErrorBody, REDACTION_PLACEHOLDER, ERROR_BODY_CAP } from "toolnexus"
+
+// retryAfter is a FIELD, not something to parse out of a sentence.
+const throttled = createClient({
+  baseUrl: "http://never.invalid", style: "openai", model: "stub", apiKey: "test-key",
+  fetch: async () => new Response("slow down", { status: 429, headers: { "retry-after": "3" } }),
+  retries: 0,
+})
+const e3 = (await throttled.run("hi").then(() => null, (x: unknown) => x)) as LlmHttpError
+assert.equal(e3.status, 429)
+assert.equal(e3.retryAfter, "3")
+
+// The typed body field is uncapped; only `message` is capped, at ERROR_BODY_CAP (200).
+assert.equal(new LlmHttpError(400, "x".repeat(500)).body.length, 500)
+assert.ok(new LlmHttpError(400, "x".repeat(500)).message.length < ERROR_BODY_CAP + 60)
+
+// The redaction helper is exported standalone, for building your own error value.
+const red = redactErrorBody('{"org_id":"org_SECRET","error":"not a valid model ID"}')
+assert.equal(red.includes("org_SECRET"), false)
+assert.ok(red.includes(`"org_id":"${REDACTION_PLACEHOLDER}"`))
+assert.ok(red.includes("not a valid model ID"), "the actual cause is untouched")
+
+console.log("ok:", e3.retryAfter, red)
+```
+
+## See also
+
+- [`createClient`](/api/javascript/client/create/) — The unified client: system prompt, skills injection, parallel and chained tool calls, retries, memory.
+- [`Client.run`](/api/javascript/client/run/) — Send a prompt, let the loop call tools until the model stops, get a RunResult.
+- [`Client.stream`](/api/javascript/client/stream/) — The streaming loop: text deltas, tool-call events, and suspension events as they happen.
+- [`Hooks`](/api/javascript/client/hooks/) — Intercept before/after model calls and tool calls: audit, redact, veto, or rewrite.
+- [`ErrorInfo` / resilience](/api/javascript/client/resilience/) — Classify an LLM error into retry / fail before it ever becomes an `LlmHttpError`.

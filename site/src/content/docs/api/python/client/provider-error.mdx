@@ -1,0 +1,379 @@
+---
+title: "ProviderError"
+description: "A non-2xx response from the model endpoint raises a typed provider error carrying the status code, a redacted+capped body, and the retry-after signal — never a bare unstructured exception. — Python."
+sidebar:
+  label: "ProviderError"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Python</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/python/src/toolnexus/client.py">python/src/toolnexus/client.py</a>
+</p>
+
+```python
+class ProviderError(Exception):
+    status: int                  # the HTTP status the provider answered with
+    body: str                    # the FULL provider body, redacted, never capped
+    text: str                    # deprecated alias of `body` — kept for back-compat
+    retry_after: float | None    # seconds, parsed from Retry-After; None if absent
+
+# raised in place of a bare exception on any non-2xx LLM response
+def __init__(self, status: int, text: str, retry_after: float | None) -> None: ...
+
+# back-compat alias — the type was private before it was worth catching
+_HttpError = ProviderError
+```
+
+A non-2xx response from the model endpoint raises a typed `ProviderError` carrying the status
+code, a redacted+capped body, and the retry-after signal — never a bare unstructured exception.
+`str(error)` is the capped, presentational message (`"LLM {status}: {shown}"`); `error.body`
+(and its deprecated alias `error.text`) carries the *whole* redacted body, uncapped, for a host
+that caught the typed error and asked for all of it.
+
+Two independent things happen to the body before it ever reaches your `except` clause:
+**redaction** — account-identifying fields (`user_id`, `account_id`, `org_id`, `organization`)
+are replaced with `«redacted»`, values only, keys intact — and, for the message form only, a
+**200-byte cap**. A `401`/`403` body is dropped entirely rather than redacted, because a gateway
+will happily reflect back the credential or `Authorization` header it was just sent. See
+[ADR 0027](https://github.com/muthuishere/toolnexus/blob/main/docs/adr/0027-what-the-library-hands-back-when-it-fails.md)
+for why this became part of the contract rather than "whatever `str(exc)` happens to contain":
+a provider error was previously carrying a live `user_id` into whatever a host logged or
+rendered, and a cap alone would not have caught it — the leak that motivated this was 96 bytes,
+well under any reasonable cap.
+
+## When to use it
+
+- **Branching on `status`** without string-matching an error message — retry a `429` yourself
+  outside the built-in resilience layer, surface a `402` as "add billing", treat a `5xx` as
+  transient.
+- **Logging or rendering the failure to a user-facing surface** (an event log, a support UI, a
+  webhook) — `error.body` is already safe to persist and display; it does not need its own
+  redaction pass before it leaves the process.
+- **Reading `retry_after`** to decide how long to back off yourself, when you have disabled the
+  built-in retry (`retries=0`) and are driving resilience from the outside.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Don't redact the message yourself">
+Before this, a caller who wanted to log provider errors safely had to parse `str(exc)` and
+re-implement the account-identifier redaction on their own — and a naive implementation reaches
+for a length cap, which is not redaction: a 96-byte body with a live `user_id` sails under any
+cap you'd pick. `ProviderError.body` is already redacted; only reach past it to the raw HTTP
+response (via a custom `http_transport=`) if you specifically need the provider's unredacted
+bytes, e.g. to feed them into your own compliance pipeline that expects the original payload.
+</Aside>
+
+## Examples
+
+<Aside type="note" title="Hermetic on purpose">
+Every example points `create_client` at a local `http.server` stub instead of a real LLM
+endpoint — no network, no API key.
+</Aside>
+
+### 1. The smallest useful call — catch it and branch on `status`
+
+```python test
+import asyncio
+import json
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+from toolnexus import create_client, create_toolkit
+from toolnexus.client import ProviderError
+
+
+class StubServer:
+    def __init__(self, handler):
+        outer = self
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_POST(self):  # noqa: N802
+                length = int(self.headers.get("Content-Length", 0))
+                self.rfile.read(length)
+                outer._handler(self)
+
+        self._handler = handler
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.port = self._server.server_address[1]
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+
+    @property
+    def base_url(self) -> str:
+        return f"http://127.0.0.1:{self.port}/v1"
+
+    def __enter__(self):
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self._server.shutdown()
+        self._server.server_close()
+
+
+def _send(req, status, payload, headers=None):
+    body = json.dumps(payload).encode("utf-8")
+    req.send_response(status)
+    req.send_header("Content-Type", "application/json")
+    req.send_header("Content-Length", str(len(body)))
+    for k, v in (headers or {}).items():
+        req.send_header(k, v)
+    req.end_headers()
+    req.wfile.write(body)
+
+
+async def main():
+    tk = await create_toolkit()
+
+    def handler(req):
+        _send(req, 402, {"error": {"message": "add billing to continue"}})
+
+    try:
+        with StubServer(handler) as srv:
+            client = create_client(
+                base_url=srv.base_url, style="openai", model="test-model", api_key="test-key",
+                retries=0,
+            )
+            try:
+                await client.run("hi", tk)
+                raised = None
+            except ProviderError as e:
+                raised = e
+
+        assert raised is not None
+        assert raised.status == 402
+        assert "add billing" in raised.body
+
+        print("ok: status", raised.status, "|", raised.body)
+    finally:
+        await tk.close()
+
+
+asyncio.run(main())
+```
+
+### 2. The realistic case — account identifiers are redacted, not merely capped
+
+```python test
+import asyncio
+import json
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+from toolnexus import create_client, create_toolkit
+from toolnexus.client import ProviderError
+
+
+class StubServer:
+    def __init__(self, handler):
+        outer = self
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_POST(self):  # noqa: N802
+                length = int(self.headers.get("Content-Length", 0))
+                self.rfile.read(length)
+                outer._handler(self)
+
+        self._handler = handler
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.port = self._server.server_address[1]
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+
+    @property
+    def base_url(self) -> str:
+        return f"http://127.0.0.1:{self.port}/v1"
+
+    def __enter__(self):
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self._server.shutdown()
+        self._server.server_close()
+
+
+def _send(req, status, payload):
+    body = json.dumps(payload).encode("utf-8")
+    req.send_response(status)
+    req.send_header("Content-Type", "application/json")
+    req.send_header("Content-Length", str(len(body)))
+    req.end_headers()
+    req.wfile.write(body)
+
+
+async def main():
+    tk = await create_toolkit()
+
+    def handler(req):
+        _send(req, 400, {
+            "error": {"message": "no credit", "user_id": "user_2abc", "org_id": "org_9"}
+        })
+
+    try:
+        with StubServer(handler) as srv:
+            client = create_client(
+                base_url=srv.base_url, style="openai", model="test-model", api_key="test-key",
+                retries=0,
+            )
+            try:
+                await client.run("hi", tk)
+                raised = None
+            except ProviderError as e:
+                raised = e
+
+        assert raised is not None
+        assert "user_2abc" not in raised.body and "org_9" not in raised.body
+        assert raised.body.count("«redacted»") == 2
+        assert raised.text == raised.body  # `text` is a deprecated alias, same value
+
+        print("ok:", raised.body)
+    finally:
+        await tk.close()
+
+
+asyncio.run(main())
+```
+
+### 3. The full surface — `retry_after`, the 200-byte message cap, and a `401` dropped entirely
+
+```python test
+import asyncio
+import json
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+from toolnexus import create_client, create_toolkit
+from toolnexus.client import ProviderError
+
+
+class StubServer:
+    def __init__(self, handler):
+        outer = self
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_POST(self):  # noqa: N802
+                length = int(self.headers.get("Content-Length", 0))
+                self.rfile.read(length)
+                outer._handler(self)
+
+        self._handler = handler
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.port = self._server.server_address[1]
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+
+    @property
+    def base_url(self) -> str:
+        return f"http://127.0.0.1:{self.port}/v1"
+
+    def __enter__(self):
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self._server.shutdown()
+        self._server.server_close()
+
+
+def _send(req, status, payload, headers=None):
+    body = json.dumps(payload).encode("utf-8")
+    req.send_response(status)
+    req.send_header("Content-Type", "application/json")
+    req.send_header("Content-Length", str(len(body)))
+    for k, v in (headers or {}).items():
+        req.send_header(k, v)
+    req.end_headers()
+    req.wfile.write(body)
+
+
+async def main():
+    tk = await create_toolkit()
+
+    # --- retry_after: parsed from the header, in seconds ---
+    def rate_limited(req):
+        _send(req, 429, {"error": "slow down"}, headers={"Retry-After": "2"})
+
+    try:
+        with StubServer(rate_limited) as srv:
+            client = create_client(
+                base_url=srv.base_url, style="openai", model="test-model", api_key="test-key",
+                retries=0,
+            )
+            try:
+                await client.run("hi", tk)
+                raised = None
+            except ProviderError as e:
+                raised = e
+        assert raised.retry_after == 2.0
+
+        # --- the 200-byte cap applies to the MESSAGE only, never to `.body` ---
+        long_body = json.dumps({"error": "x" * 600})
+
+        def long_error(req):
+            _send(req, 500, {"error": "x" * 600})
+
+        with StubServer(long_error) as srv2:
+            client2 = create_client(
+                base_url=srv2.base_url, style="openai", model="test-model", api_key="test-key",
+                retries=0,
+            )
+            try:
+                await client2.run("hi", tk)
+                raised2 = None
+            except ProviderError as e:
+                raised2 = e
+        assert len(raised2.body) > 200        # the typed field carries all of it
+        assert "…" in str(raised2)             # the printed message is capped + ellipsis
+
+        # --- a 401 body never surfaces at all, even redacted ---
+        def unauthorized(req):
+            _send(req, 401, {"error": "Bearer sk-live-xyz rejected"})
+
+        with StubServer(unauthorized) as srv3:
+            client3 = create_client(
+                base_url=srv3.base_url, style="openai", model="test-model", api_key="test-key",
+                retries=0,
+            )
+            try:
+                await client3.run("hi", tk)
+                raised3 = None
+            except ProviderError as e:
+                raised3 = e
+        assert raised3.body == ""
+        assert "sk-live" not in str(raised3)
+
+        print("ok: retry_after", raised.retry_after, "| capped:", str(raised2)[-20:])
+    finally:
+        await tk.close()
+
+
+asyncio.run(main())
+```
+
+## `ProviderError` fields
+
+| Field | Type | What it is |
+|---|---|---|
+| `status` | `int` | The HTTP status the provider answered with. |
+| `body` | `str` | The FULL provider body, account identifiers redacted to `«redacted»`, never capped. Empty for `401`/`403`. |
+| `text` | `str` | Deprecated alias of `body` — identical value, kept for back-compat. |
+| `retry_after` | `float \| None` | Seconds, parsed from the `Retry-After` header. `None` if the header was absent or unparseable. |
+
+`str(error)` is `"LLM {status}: {shown}"` where `shown` is `body` capped at 200 characters
+(`MAX_ERROR_BODY`) with a trailing `…` — the presentational form. Reach into `.body` (or the
+deprecated `.text`) for the whole redacted body.
+
+## See also
+
+- [`ErrorClassifier`](/api/python/client/resilience/) — the resilience layer this error type feeds: `on_error` receives an `ErrorInfo` with the same `status`/`retryable` facts and decides retry-vs-fail per attempt.
+- [`create_client`](/api/python/client/create/) — The unified client: system prompt, skills injection, parallel and chained tool calls, retries, memory.
+- [`Client.run`](/api/python/client/run/) — Send a prompt, let the loop call tools until the model stops, get a RunResult.
+- [`Hooks`](/api/python/client/hooks/) — Intercept before/after model calls and tool calls: audit, redact, veto, or rewrite.

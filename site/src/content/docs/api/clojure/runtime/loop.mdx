@@ -1,0 +1,165 @@
+---
+title: "toolnexus.agents.loop"
+description: "Agent.Loop(...).Run drives the agent under a Guardrail policy that vets every tool call and a Completion check that decides when the task is done — the gated door beside the plain Agent.Run, with unsupported spec fields (tools, team, waitFor, onMetric) named explicitly rather than silently dropped. — Clojure."
+sidebar:
+  label: "toolnexus.agents.loop"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Clojure (JVM) + cljgo</strong> · package <code>net.clojars.muthuishere/toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7D</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/clojure/src/toolnexus/agents/loop.cljc">clojure/src/toolnexus/agents/loop.cljc</a>
+</p>
+
+```clojure
+(require '[toolnexus.agents.loop :as tnloop])
+
+;; harness is a NAME, not a wrapper — identity function
+(tnloop/harness agent-def)          ; => agent-def, unchanged
+
+;; open a live execution
+(def lp (tnloop/create agent-def options toolkit))
+;; => {:def agent-def :options options :toolkit toolkit
+;;     :status "idle" :turns 0 :history []}
+
+;; run one request — returns [outcome loop']
+(let [[outcome lp'] (tnloop/run lp "do the thing")]
+  outcome)   ; a RunResult, same shape client/run returns
+
+;; the built-in completion verifier: reads the shipped `todowrite` builtin's
+;; result metadata, requires every item checked
+(tnloop/all-todos-done result)       ; => {:ok true} | {:ok false :reason "…"}
+
+;; which agent-def fields THIS driver cannot honour, by name (present-only, order-pinned)
+(tnloop/loop-unsupported agent-def) ; => (subset of) ["tools" "team" "waitFor" "onMetric"]
+tnloop/loop-unsupported-fields      ; => ["tools" "team" "waitFor" "onMetric"]  — the canonical order
+
+;; shared gate primitive — a client run wrapped with the completion check
+(tnloop/run-gated ask prompt completion state)
+```
+
+`Agent.Loop(...).Run` drives the agent under a `Guardrail` policy that vets every tool call and a
+`Completion` check that decides when the task is done — the gated door beside the plain
+`Agent.Run`, with unsupported spec fields (`tools`, `team`, `waitFor`, `onMetric`) named explicitly
+rather than silently dropped. See the narrative doc, [Harness & loop](/harness/), for the placement
+law this namespace encodes — this page is the Clojure API surface for it, not a restatement.
+
+The placement law, briefly: the **harness** (an agent def — tools, soul, team, budget, model,
+policy, ceilings) answers *"MAY it?"*, fixed per problem. Run options answer *"with WHAT?"* — the
+model for this call. The **loop** answers *"DID it?"* — status, turns, stop reason — and is
+observed, never configured; a loop takes no options of its own.
+
+## When to use it
+
+- **You want a completion gate** — retry the model automatically while a `:completion` check keeps
+  failing, up to `:max-attempts`, feeding back *why* it failed on each retry prompt — without
+  hand-writing that retry loop yourself.
+- **You want the built-in `todowrite`-based completion check** (`all-todos-done`) rather than
+  writing your own `:verify` — a plan-using agent is only "done" once every declared todo item is
+  checked off.
+- **You want to know, up front, which parts of an agent def a plain loop cannot honour** — `:tools`
+  (child delegation), `:team`, `:wait-for`, `:on-metric` — rather than have them silently ignored.
+  An agent def whose `:team` matters belongs on
+  [`toolnexus.agents.runtime`](/api/clojure/runtime/runtime/) instead, which honours all four.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Use the plain client/run when there is nothing to gate">
+`toolnexus.agents.loop` exists entirely for the completion gate and the loop-unsupported check. If
+your agent def has no `:completion`, no `:guardrails`, and does not touch `:tools`/`:team`/
+`:wait-for`/`:on-metric`, calling `tnloop/run` degenerates to exactly one `client/run` — reach
+straight for [`client/run`](/api/clojure/client/run/) instead and skip the extra concept. Reach for
+`toolnexus.agents.runtime` instead of the loop when the agent genuinely needs child delegation,
+budgets shared across a team, or `waitFor`/metric routing — those four are the loop's structural
+ceiling, not a bug to work around.
+</Aside>
+
+`Guardrail` and `Verdict`/`Completion` are carried as **plain data** here — `guarded-hooks` compiles
+a vector of guardrail functions into one `:before-tool` hook (first-deny-wins), and a verdict is
+just `{:ok bool :reason str}`, not a defrecord or a named protocol. That is deliberate, idiomatic
+Clojure: a guardrail is "a function from an event to a string or nil," which needs no type beyond
+what `fn?` already checks, and a verdict is "two keys," which needs no type beyond what a map
+already is. Other ports name these as an interface (`Guardrail` in js/python/java/csharp) or a
+struct (`Verdict` in js/java/csharp/elixir) because their type systems make that the idiomatic
+spelling of the same contract — this is a language-shape difference, not a missing feature.
+
+## Examples
+
+### 1. The smallest useful call — a loop with no gate at all
+
+```clojure
+(require '[toolnexus.agents.loop :as tnloop]
+         '[toolnexus.tool :as tool])
+
+(def agent-def (tnloop/harness {:soul "You are concise." :model "gpt-4.1"}))
+(def lp (tnloop/create agent-def {} (tool/toolkit [])))
+
+(let [[outcome lp'] (tnloop/run lp "Summarise the incident in one sentence")]
+  (:text outcome))
+```
+
+No `:completion`, no `:guardrails` — this is byte-identical to calling `client/run` directly, which
+is the point: absent gating costs nothing.
+
+### 2. The realistic case — gate on the built-in todo-completion check
+
+```clojure
+(def agent-def
+  (tnloop/harness
+    {:soul       "You plan your work with todowrite before finishing."
+     :model      "gpt-4.1"
+     :completion {:verify       tnloop/all-todos-done
+                  :max-attempts 3}}))
+
+(def lp (tnloop/create agent-def {} (tool/toolkit [todowrite-tool])))
+
+(let [[outcome _] (tnloop/run lp "Migrate the config schema")]
+  (case (:status outcome)
+    "done"       (println "finished, all todos checked off:" (:text outcome))
+    "incomplete" (println "gate failed" (:limit outcome) "-" (:text outcome))
+    (println (:status outcome))))
+```
+
+If the model claims done with open todo items, the gate re-prompts with
+`"Your work did not verify: <n> item(s) still open: <...>. Fix it and finish."` up to
+`:max-attempts` times before giving up with `:status "incomplete" :limit "completion"`.
+
+### 3. The full surface — a guardrail policy plus checking what the loop cannot honour
+
+```clojure
+(def agent-def
+  (tnloop/harness
+    {:soul        "You may read files but never delete them without asking."
+     :model       "gpt-4.1"
+     :guardrails  [(fn [ev] (when (= "delete_file" (:tool ev)) "deletion requires human approval"))]
+     :completion  {:verify tnloop/all-todos-done :max-attempts 2}
+     ;; these four are NOT honoured by a Loop — see loop-unsupported below
+     :tools       [child-agent-def]
+     :wait-for    (fn [request] (client/answer-declined (:id request) "no loop-level routing"))}))
+
+;; find out, before running, which fields this driver will ignore
+(tnloop/loop-unsupported agent-def)
+;; => ["tools" "waitFor"]   -- present on the def, but not honoured by a plain Loop
+
+(def lp (tnloop/create agent-def {} (tool/toolkit [delete-file-tool])))
+(let [[outcome _] (tnloop/run lp "Clean up the temp directory")]
+  (:text outcome))
+;; a guardrail denial never reaches the model as a tool result silently allowed —
+;; it comes back as "denied: deletion requires human approval"
+```
+
+`loop-unsupported` returns only the fields **actually present** on the def, in the canonical order
+pinned by `loop-unsupported-fields` — an agent def with no `:team` and no `:on-metric` reports
+neither, so the check is additive: it never claims a problem the def does not actually have.
+
+## See also
+
+- [`agents.runtime/statuses / agents.runtime/limits`](/api/clojure/runtime/vocabulary/) — The
+  canonical status/limit strings `all-todos-done` and a `:completion` verify function read off a
+  run's result.
+- [Harness & loop](/harness/) — The narrative doc: the placement law (MAY it? / with WHAT? / DID
+  it? / is it RIGHT?) this namespace's split between agent def, run options, and loop encodes.
+- [`toolnexus.agents.runtime`](/api/clojure/runtime/runtime/) — The full runtime this loop sits
+  beside: honours `:tools`, `:team`, `:wait-for` and `:on-metric` where a plain `Loop` cannot.
+- [`toolnexus.client/run`](/api/clojure/client/run/) — The unwrapped §8 client run a gate-free loop
+  degenerates to.

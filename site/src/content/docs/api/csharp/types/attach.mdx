@@ -1,0 +1,310 @@
+---
+title: "FromFile"
+description: "The authoring side of multimodal content: constructors that turn a path, bytes, a blob, a data URL, or a remote URL into the ContentPart a prompt or tool result carries — the write half of the read-only ContentPart shape. — C#."
+sidebar:
+  label: "FromFile"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>C#</strong> · package <code>Toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §1B</a>
+</p>
+
+```csharp
+public static ContentPart FromFile(string path, string? mimeType = null, long? maxPartBytes = null);
+public static ContentPart FromFile(FileInfo file, string? mimeType = null, long? maxPartBytes = null);
+public static Task<ContentPart> FromFileAsync(string path, string? mimeType = null,
+    long? maxPartBytes = null, CancellationToken ct = default);
+public static Task<ContentPart> FromFileAsync(FileInfo file, string? mimeType = null,
+    long? maxPartBytes = null, CancellationToken ct = default);
+
+public static ContentPart FromStream(Stream stream, string? mimeType = null, string? name = null,
+    long? maxPartBytes = null);                          // reads forward, eagerly — does NOT dispose
+public static Task<ContentPart> FromStreamAsync(Stream stream, string? mimeType = null,
+    string? name = null, long? maxPartBytes = null, CancellationToken ct = default);
+
+public static ContentPart FromBytes(byte[] bytes, string mimeType, string? name = null, long? maxPartBytes = null);
+public static ContentPart FromBytes(ReadOnlySpan<byte> bytes, string mimeType, string? name = null, long? maxPartBytes = null);
+public static ContentPart FromBytes(ReadOnlyMemory<byte> bytes, string mimeType, string? name = null, long? maxPartBytes = null);
+
+public static ContentPart FromUrl(string url, string? mimeType = null, string? name = null, long? maxPartBytes = null);
+public static ContentPart FromText(string text);
+public static implicit operator ContentPart(string text);  // a bare string lifts to a text part
+
+public long ByteLength { get; }  // decoded byte length; 0 for a url/text part
+
+// On LlmClient.Options — governs how an UNREPRESENTABLE part is handled at request assembly:
+public string? OnUnsupportedPart { get; set; }  // null (default) | "error" | "text"
+```
+
+The authoring side of multimodal content: constructors that turn a path, bytes, a stream, a data
+URL, or a remote URL into the [`ContentPart`](/api/csharp/types/content-part/) a prompt or tool
+result carries — the write half of that read-only shape. Every edge constructor here **reads and
+base64s at construction time**: a path, a `FileInfo` handle, or a `Stream` never enters the part
+itself, only `mimeType` + `Data` do, because those are what survive a persisted transcript, a
+subagent boundary, or an A2A hop — none of which share your filesystem or your open handles.
+
+## When to use it
+
+Use `FromFile`/`FromFileAsync` when you have a path or a `FileInfo` on disk; `FromStream`/
+`FromStreamAsync` for a `Stream` you already hold open (a `FileStream`, a `MemoryStream`, a network
+stream — read forward, never seeked, so a non-seekable pipe works); `FromBytes` when you already
+have `byte[]`/`ReadOnlySpan<byte>`/`ReadOnlyMemory<byte>` in hand and `mimeType` is not something to
+infer; `FromUrl` for an `https:` URL to keep by reference, or a `data:` URL to normalize into
+`mimeType`+`Data` at construction so two spellings of the same bytes never diverge downstream.
+Reach for `Options.OnUnsupportedPart` — not any of the constructors above — when you need to change
+what happens to a part the *provider style itself* cannot represent (an audio part sent to a
+provider whose adapter has no audio block).
+
+## Why this and not the alternative
+
+<Aside type="tip" title="OnUnsupportedPart overrides the provenance rule uniformly — it does not change what a constructor produces">
+The full explanation of *why* a part holds bytes and not a path lives on
+[`ContentPart`](/api/csharp/types/content-part/) — read that page for the constructor-level
+rationale. What belongs here is the **provenance split** `OnUnsupportedPart` controls, because none
+of the edge constructors above know or care about it:
+
+- **The default (`OnUnsupportedPart` unset, `null`)**: a part **you attached** to a prompt is a
+  typed `ContentPart.InvalidPartException` *before any HTTP call* if the target provider style
+  cannot represent it — you asked for something specific and it is refused loudly, not silently
+  downgraded. A part **derived from a tool or MCP result** instead degrades to a text placeholder
+  (`"[unsupported audio part (audio/mpeg, 3 bytes)]"`) with a warning emitted **at most once** per
+  client — the run is not failed by something a tool volunteered.
+- **`"error"`**: forces the strict (attached) behavior uniformly, even for tool-derived parts —
+  every unrepresentable part throws.
+- **`"text"`**: forces the lenient (tool-derived) behavior uniformly, even for parts you attached
+  yourself — nothing ever throws; everything unrepresentable becomes the placeholder text instead.
+
+A part is never silently dropped in any of the three settings.
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call — a path becomes bytes, never a path
+
+```csharp test
+using Toolnexus;
+
+var repo = Environment.GetEnvironmentVariable("TOOLNEXUS_REPO") ?? ".";
+var png = Path.Combine(repo, "examples/media/fixture.png");
+
+var image = ContentPart.FromFile(png);
+if (image.Type != "image") throw new Exception(image.Type);
+if (image.MimeType != "image/png") throw new Exception(image.MimeType!);
+if (image.Url is not null) throw new Exception("a path becomes bytes, never a url");
+if (string.IsNullOrEmpty(image.Data)) throw new Exception("Data must be populated at construction");
+
+// A bare string in a prompt list lifts implicitly to a text part — no explicit FromText needed.
+List<ContentPart> prompt = ["What is in this image?", image];
+if (prompt[0].Type != "text") throw new Exception("implicit string lift");
+
+Console.WriteLine($"ok: {image.Type} part, {image.ByteLength} decoded bytes");
+```
+
+### 2. The realistic case — the read side of `OnUnsupportedPart`: attached errors, tool-derived degrades
+
+```csharp test
+using System.Net;
+using System.Text;
+using Toolnexus;
+
+// An audio part ATTACHED directly to a prompt, sent to a style whose adapter has no audio block,
+// is a typed refusal BEFORE any HTTP call — the default (OnUnsupportedPart unset) is strict for
+// what the caller explicitly attached.
+var audio = ContentPart.FromBytes(new byte[] { 1, 2, 3 }, "audio/mpeg");
+using var up1 = new Upstream(_ => throw new Exception("must not be reached"));
+try
+{
+    await Client(up1.BaseUrl, "anthropic").RunAsync(new List<ContentPart> { "listen", audio }, await EmptyToolkit());
+    throw new Exception("expected InvalidPartException for an attached unsupported part");
+}
+catch (ContentPart.InvalidPartException e) { if (!e.Message.Contains("audio")) throw new Exception(e.Message); }
+
+// The SAME kind of part, but DERIVED from a tool result, degrades to a placeholder instead —
+// the run is not failed by something a tool volunteered.
+using var up2 = new Upstream(
+    """{"content":[{"type":"tool_use","id":"t1","name":"listen","input":{}}],"stop_reason":"tool_use"}""",
+    """{"content":[{"type":"text","text":"heard it"}],"stop_reason":"end_turn"}""");
+await using var tk = await ToolkitReturning("listen", "a clip", ContentPart.FromBytes(new byte[] { 1, 2, 3 }, "audio/mpeg"));
+var r = await Client(up2.BaseUrl, "anthropic").RunAsync("hear it", tk);
+if (r.Status != "done") throw new Exception($"a volunteered part must not fail the run, got {r.Status}");
+
+Console.WriteLine("ok: an attached unsupported part errors; a tool-derived one degrades to a placeholder");
+
+// --- fixture plumbing shared by this example ---
+static async Task<Toolkit> EmptyToolkit() => await Toolkit.CreateAsync(new Toolkit.Options { Builtins = false });
+static LlmClient Client(string baseUrl, string style, Action<LlmClient.Options>? tweak = null)
+{
+    var o = new LlmClient.Options { BaseUrl = baseUrl, Style = style, Model = "m", ApiKey = "k", Retries = 0 };
+    tweak?.Invoke(o);
+    return LlmClient.Create(o);
+}
+static async Task<Toolkit> ToolkitReturning(string name, string output, ContentPart part)
+{
+    var tk = await Toolkit.CreateAsync(new Toolkit.Options { Builtins = false });
+    tk.Register(NativeTool.Of(name, "returns a part",
+        new Dictionary<string, object?> { ["type"] = "object", ["properties"] = new Dictionary<string, object?>() },
+        (IDictionary<string, object?> _, ToolContext? __) =>
+            (object)ToolResult.OkWithParts(output, new List<ContentPart> { part })));
+    return tk;
+}
+
+sealed class Upstream : IDisposable
+{
+    readonly HttpListener _listener = new();
+    readonly CancellationTokenSource _cts = new();
+    readonly string[] _bodies;
+    int _i;
+    public int Port { get; }
+    public string BaseUrl => $"http://127.0.0.1:{Port}";
+
+    public Upstream(params string[] bodies) : this(_ => { }, bodies) { }
+    public Upstream(Action<HttpListenerContext> onRequest, params string[] bodies)
+    {
+        _bodies = bodies;
+        var probe = new System.Net.Sockets.TcpListener(IPAddress.Loopback, 0);
+        probe.Start();
+        Port = ((IPEndPoint)probe.LocalEndpoint).Port;
+        probe.Stop();
+        _listener.Prefixes.Add($"http://127.0.0.1:{Port}/");
+        _listener.Start();
+        _ = Task.Run(async () =>
+        {
+            while (!_cts.IsCancellationRequested)
+            {
+                HttpListenerContext ctx;
+                try { ctx = await _listener.GetContextAsync(); } catch { break; }
+                try
+                {
+                    onRequest(ctx);
+                    var body = _bodies.Length == 0 ? "" : _bodies[Math.Min(_i++, _bodies.Length - 1)];
+                    var bytes = Encoding.UTF8.GetBytes(body);
+                    ctx.Response.StatusCode = 200;
+                    ctx.Response.ContentType = "application/json";
+                    ctx.Response.ContentLength64 = bytes.Length;
+                    ctx.Response.OutputStream.Write(bytes, 0, bytes.Length);
+                    ctx.Response.OutputStream.Close();
+                }
+                catch { }
+            }
+        });
+    }
+    public void Dispose() { _cts.Cancel(); try { _listener.Stop(); } catch { } try { _listener.Close(); } catch { } }
+}
+```
+
+### 3. Full surface — forcing uniform strictness with `OnUnsupportedPart = "error"`
+
+```csharp test
+using System.Net;
+using System.Text;
+using Toolnexus;
+
+// The SAME tool-derived audio part that degraded in example 2 now throws too, because the
+// override forces uniform strictness across BOTH provenances — attached and tool-derived alike.
+using var up = new Upstream(
+    """{"content":[{"type":"tool_use","id":"t1","name":"listen","input":{}}],"stop_reason":"tool_use"}""",
+    """{"content":[{"type":"text","text":"n/a"}],"stop_reason":"end_turn"}""");
+await using var tk = await ToolkitReturning("listen", "a clip", ContentPart.FromBytes(new byte[] { 1, 2, 3 }, "audio/mpeg"));
+
+try
+{
+    await Client(up.BaseUrl, "anthropic", o => o.OnUnsupportedPart = "error").RunAsync("hear it", tk);
+    throw new Exception("expected InvalidPartException — the override forces strictness on a tool-derived part too");
+}
+catch (ContentPart.InvalidPartException) { /* expected */ }
+
+// ByteLength is DECODED bytes — the figure a size cap and the token estimate are both derived
+// from, never the base64 string's own (33% larger) length.
+var bytes = new byte[82];
+var part = ContentPart.FromBytes(bytes, "image/png");
+if (part.ByteLength != 82) throw new Exception($"expected 82 decoded bytes, got {part.ByteLength}");
+if (ContentPart.FromUrl("https://example.com/shot.png").ByteLength != 0)
+    throw new Exception("a url part has no local bytes to count");
+
+Console.WriteLine($"ok: OnUnsupportedPart=\"error\" forces strictness uniformly; ByteLength={part.ByteLength}");
+
+static LlmClient Client(string baseUrl, string style, Action<LlmClient.Options>? tweak = null)
+{
+    var o = new LlmClient.Options { BaseUrl = baseUrl, Style = style, Model = "m", ApiKey = "k", Retries = 0 };
+    tweak?.Invoke(o);
+    return LlmClient.Create(o);
+}
+static async Task<Toolkit> ToolkitReturning(string name, string output, ContentPart part)
+{
+    var tk = await Toolkit.CreateAsync(new Toolkit.Options { Builtins = false });
+    tk.Register(NativeTool.Of(name, "returns a part",
+        new Dictionary<string, object?> { ["type"] = "object", ["properties"] = new Dictionary<string, object?>() },
+        (IDictionary<string, object?> _, ToolContext? __) =>
+            (object)ToolResult.OkWithParts(output, new List<ContentPart> { part })));
+    return tk;
+}
+
+sealed class Upstream : IDisposable
+{
+    readonly HttpListener _listener = new();
+    readonly CancellationTokenSource _cts = new();
+    readonly string[] _bodies;
+    int _i;
+    public int Port { get; }
+    public string BaseUrl => $"http://127.0.0.1:{Port}";
+    public Upstream(params string[] bodies)
+    {
+        _bodies = bodies;
+        var probe = new System.Net.Sockets.TcpListener(IPAddress.Loopback, 0);
+        probe.Start();
+        Port = ((IPEndPoint)probe.LocalEndpoint).Port;
+        probe.Stop();
+        _listener.Prefixes.Add($"http://127.0.0.1:{Port}/");
+        _listener.Start();
+        _ = Task.Run(async () =>
+        {
+            while (!_cts.IsCancellationRequested)
+            {
+                HttpListenerContext ctx;
+                try { ctx = await _listener.GetContextAsync(); } catch { break; }
+                try
+                {
+                    var body = _bodies.Length == 0 ? "" : _bodies[Math.Min(_i++, _bodies.Length - 1)];
+                    var bytes = Encoding.UTF8.GetBytes(body);
+                    ctx.Response.StatusCode = 200;
+                    ctx.Response.ContentType = "application/json";
+                    ctx.Response.ContentLength64 = bytes.Length;
+                    ctx.Response.OutputStream.Write(bytes, 0, bytes.Length);
+                    ctx.Response.OutputStream.Close();
+                }
+                catch { }
+            }
+        });
+    }
+    public void Dispose() { _cts.Cancel(); try { _listener.Stop(); } catch { } try { _listener.Close(); } catch { } }
+}
+```
+
+## Constructors
+
+| Method | What it does |
+|---|---|
+| `FromText(text)` / implicit `string` | A `text` part. A bare `string` in a prompt list lifts to one automatically. |
+| `FromFile(path \| FileInfo, mimeType?, maxPartBytes?)` | Reads and base64s **now**; mime type from the §6 extension table when omitted. An unknown extension with no explicit `mimeType` is a typed error naming the extension. |
+| `FromFileAsync(…)` | Async sibling, with a `CancellationToken`. |
+| `FromStream(stream, mimeType?, name?, maxPartBytes?)` | Reads forward, eagerly, to the end. **Never disposes** the stream — that stays the caller's responsibility. Works with non-seekable streams. |
+| `FromStreamAsync(…)` | Async sibling, same contract. |
+| `FromBytes(byte[] \| ReadOnlySpan<byte> \| ReadOnlyMemory<byte>, mimeType, name?, maxPartBytes?)` | Base64s native bytes; `mimeType` is required — there is nothing to infer it from. |
+| `FromUrl(url, mimeType?, name?, maxPartBytes?)` | Keeps an `https:` URL by reference; parses a `data:` URL into `mimeType` + `Data` at construction so the two spellings never diverge downstream. |
+
+## `Options.OnUnsupportedPart`
+
+| Value | Attached part (caller-supplied) | Tool/MCP-derived part |
+|---|---|---|
+| `null` (default) | Typed `InvalidPartException`, before any HTTP call | Degrades to `"[unsupported <type> part (<mimeType>, <n> bytes)]"`, warned at most once per client |
+| `"error"` | Same as default | Also throws — the override forces strictness uniformly |
+| `"text"` | Degrades to the placeholder instead of throwing | Same as default |
+
+## See also
+
+- [`ContentPart`](/api/csharp/types/content-part/) — The full read/write shape, its members, and the fuller rationale for why a part holds bytes and never a path or a caller's `Stream`.
+- [`ITool`](/api/csharp/types/tool/) — The uniform shape every tool source collapses to: name, description, JSON-Schema parameters, execute.
+- [`ToolResult`](/api/csharp/types/tool-result/) — The result envelope: output text, optional error flag, optional non-text parts, and optional metadata that can carry a suspension.
+- [`ToolContext`](/api/csharp/types/context/) — Optional per-call context handed to execute: cancellation, identity, and host-supplied state.

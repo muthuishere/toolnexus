@@ -760,7 +760,7 @@
 				"java": "agents.Agent",
 				"csharp": "Agent",
 				"elixir": "Toolnexus.Agents",
-				"clojure": null
+				"clojure": "AgentDef"
 			},
 			"sources": [
 				"js/examples/agent.ts",
@@ -768,7 +768,7 @@
 				"golang/examples/agent",
 				"elixir/examples/agent.exs"
 			],
-			"parityNote": "The Clojure port has no §7D sub-agent runtime (recorded parity debt). Remote A2A peers via toolnexus.a2a/remote-agent are the delegation this port does ship."
+			"parityNote": null
 		},
 		{
 			"id": "runtime/runtime",
@@ -784,13 +784,13 @@
 				"java": "agents.Runtime",
 				"csharp": "AgentRuntime",
 				"elixir": "Toolnexus.Agents.Runtime",
-				"clojure": null
+				"clojure": "create-runtime"
 			},
 			"sources": [
 				"examples/subagent-lifecycle",
 				"examples/subagent-fanout"
 			],
-			"parityNote": "The Clojure port has no §7D agent runtime (recorded parity debt)."
+			"parityNote": null
 		},
 		{
 			"id": "runtime/handle",
@@ -806,9 +806,9 @@
 				"java": "agents.Handle",
 				"csharp": "Handle",
 				"elixir": "Toolnexus.Agents.Handle",
-				"clojure": null
+				"clojure": "Handle"
 			},
-			"parityNote": "The Clojure port has no §7D handle type (recorded parity debt)."
+			"parityNote": null
 		},
 		{
 			"id": "runtime/budgets",
@@ -824,12 +824,12 @@
 				"java": "agents.Budget",
 				"csharp": "Budget",
 				"elixir": "Toolnexus.Agents budget",
-				"clojure": null
+				"clojure": "Budget"
 			},
 			"sources": [
 				"examples/subagent-budgets"
 			],
-			"parityNote": "The Clojure port has no §7D budgets (recorded parity debt)."
+			"parityNote": null
 		},
 		{
 			"id": "runtime/task-tool",
@@ -845,9 +845,9 @@
 				"java": null,
 				"csharp": null,
 				"elixir": null,
-				"clojure": null
+				"clojure": "task-tool"
 			},
-			"parityNote": "Only JS exposes a constructible task tool symbol; elsewhere it is the `task` builtin, toggled on the runtime. Clojure has no task tool: it ships no sub-agent runtime for one to drive."
+			"parityNote": "Only JS exposes a constructible task tool symbol; elsewhere it is the `task` builtin, toggled on the runtime."
 		},
 		{
 			"id": "persona/compose-soul",
@@ -1075,6 +1075,108 @@
 				"clojure": "toolnexus.translate/openai-messages-to-anthropic"
 			},
 			"parityNote": "Go keeps openAIMessagesToAnthropic unexported (golang/translate.go:283) — inbound translation is reachable only through Translate."
+		},
+		{
+			"id": "client/provider-error",
+			"group": "client",
+			"member": "provider-error",
+			"title": "The typed error a failed LLM call raises — the host loop, made catchable",
+			"spec": "§8",
+			"summary": "A non-2xx response from the model endpoint raises a typed provider error carrying the status code, a redacted+capped body, and the retry-after signal — never a bare unstructured exception.",
+			"symbols": {
+				"javascript": "LlmHttpError",
+				"python": "ProviderError",
+				"golang": "ProviderError",
+				"java": "LlmClient.ProviderException",
+				"csharp": "ProviderException",
+				"elixir": "Toolnexus.ProviderError",
+				"clojure": "toolnexus.client/provider-error"
+			}
+		},
+		{
+			"id": "suspension/answer-output",
+			"group": "suspension",
+			"member": "answer-output",
+			"title": "Build the Answer a human's plain-text reply resumes a suspended run with",
+			"spec": "§10",
+			"summary": "Wraps a human's typed string reply into the Answer a suspended run resumes with — the success counterpart to answerDeclined.",
+			"symbols": {
+				"javascript": "answerOutput",
+				"python": "answer_output",
+				"golang": "AnswerOutput",
+				"java": "Answer.output",
+				"csharp": "Answer.Output",
+				"elixir": "Toolnexus.Answer.answer_output/2",
+				"clojure": "answer-output"
+			}
+		},
+		{
+			"id": "suspension/answer-declined",
+			"group": "suspension",
+			"member": "answer-declined",
+			"title": "Build the Answer that resumes a run after a human declines to respond",
+			"spec": "§10",
+			"summary": "Wraps a human's refusal into the Answer a suspended run resumes with, carrying a reason string that defaults to \"declined\".",
+			"symbols": {
+				"javascript": "answerDeclined",
+				"python": "answer_declined",
+				"golang": "AnswerDeclined",
+				"java": "Answer.declined",
+				"csharp": "Answer.Declined",
+				"elixir": "Toolnexus.Answer.answer_declined/2",
+				"clojure": "answer-declined"
+			}
+		},
+		{
+			"id": "runtime/vocabulary",
+			"group": "runtime",
+			"member": "vocabulary",
+			"title": "The closed status and stop-limit vocabularies every task/run result uses",
+			"spec": "§7D",
+			"summary": "The canonical, byte-identical-across-ports string constants a host branches on: task statuses, run statuses, and the nine stop-limit reasons a task can end on, plus the helper that canonicalizes a limit name.",
+			"symbols": {
+				"javascript": "TASK_STATUSES / RUN_STATUSES / TASK_LIMITS / canonicalLimit",
+				"python": "TASK_STATUSES",
+				"golang": "agents.TaskStatus* / RunStatus* / agents.Limit*",
+				"java": "TaskResult.STATUSES / TaskResult.LIMITS / TaskResult.canonicalLimit",
+				"csharp": "AgentStatus.All / RunStatus.All / StopLimit.All / StopLimit.FromPool",
+				"elixir": "Toolnexus.Status.task/0 / run/0 / limits/0 / canonical_limit/1",
+				"clojure": "agents.runtime/statuses / agents.runtime/limits"
+			}
+		},
+		{
+			"id": "runtime/loop",
+			"group": "runtime",
+			"member": "loop",
+			"title": "The other door on an agent — run it under a harness with guardrails, a soul, and a budget",
+			"spec": "§7D",
+			"summary": "Agent.Loop(...).Run drives the agent under a Guardrail policy that vets every tool call and a Completion check that decides when the task is done — the gated door beside the plain Agent.Run, with unsupported spec fields (tools, team, waitFor, onMetric) named explicitly rather than silently dropped.",
+			"symbols": {
+				"javascript": "Loop",
+				"python": "Loop",
+				"golang": "Loop",
+				"java": "Loop",
+				"csharp": "Loop",
+				"elixir": "Toolnexus.Agents.Loop",
+				"clojure": "toolnexus.agents.loop"
+			}
+		},
+		{
+			"id": "types/attach",
+			"group": "types",
+			"member": "attach",
+			"title": "Build a ContentPart — attach a file, image, or bytes to a prompt",
+			"spec": "§1B",
+			"summary": "The authoring side of multimodal content: constructors that turn a path, bytes, a blob, a data URL, or a remote URL into the ContentPart a prompt or tool result carries — the write half of the read-only ContentPart shape.",
+			"symbols": {
+				"javascript": "attach",
+				"python": "image",
+				"golang": "File",
+				"java": "ofFile",
+				"csharp": "FromFile",
+				"elixir": "from_path",
+				"clojure": "attach"
+			}
 		}
 	]
 }

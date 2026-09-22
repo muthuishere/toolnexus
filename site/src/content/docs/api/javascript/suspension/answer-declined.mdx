@@ -1,0 +1,100 @@
+---
+title: "answerDeclined"
+description: "Wraps a human's refusal into the Answer a suspended run resumes with, carrying a reason string that defaults to \"declined\". — JavaScript."
+sidebar:
+  label: "answerDeclined"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>JavaScript</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §10</a>
+</p>
+
+```ts
+function answerDeclined(id: string, reason?: "declined" | "cancelled" | "expired"): Answer
+// reason defaults to "declined" => { id, ok: false, reason }
+```
+
+Wraps a human's refusal into the `Answer` a suspended run resumes with, carrying a reason string
+that defaults to `"declined"` — the refusal counterpart to
+[`answerOutput`](/api/javascript/suspension/answer-output/). `reason` is **advisory only**: the
+loop rule that decides what happens next branches on `Answer.ok`, never on `reason`, so a host
+never has to enumerate every refusal shape correctly to keep the run behaving. `id` is required
+and must match the `Request.id` the suspension carried.
+
+## When to use it
+
+Use `answerDeclined` wherever a human refuses, dismisses, or lets a suspended request time out —
+a login the user closed without completing, an approval they said no to, an input prompt that
+expired unanswered. Pass a `reason` (`"declined"`, `"cancelled"`, or `"expired"`) when you can
+distinguish the cases; omit it when you can't, since `"declined"` is a safe, honest default.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="answerOutput is the success counterpart, not a variant of this">
+`answerDeclined` is for when the human did **not** provide what was asked for. When they did,
+build the `Answer` with [`answerOutput`](/api/javascript/suspension/answer-output/) instead,
+which sets `ok: true` and carries the typed `output` string. Don't reach for
+`answerDeclined(id, "some string that isn't really a refusal")` to smuggle a successful value
+through — `data.output` on `answerOutput` is where that belongs.
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call — the default reason
+
+```ts test
+import assert from "node:assert"
+import { answerDeclined } from "toolnexus"
+
+const answer = answerDeclined("req-1")
+assert.deepEqual(answer, { id: "req-1", ok: false, reason: "declined" })
+console.log("ok:", JSON.stringify(answer))
+```
+
+### 2. The realistic case — an explicit reason distinguishing expiry from refusal
+
+```ts test
+import assert from "node:assert"
+import { answerDeclined } from "toolnexus"
+
+// A human actively said no.
+const declined = answerDeclined("req-1")
+assert.equal(declined.reason, "declined")
+
+// The request expired before anyone answered — a different reason, same shape, same `ok:false`.
+const expired = answerDeclined("req-1", "expired")
+assert.deepEqual(expired, { id: "req-1", ok: false, reason: "expired" })
+
+// A caller that only checks `.ok` needs no reason-specific branch to behave correctly.
+for (const a of [declined, expired]) {
+  assert.equal(a.ok, false)
+}
+
+console.log("ok:", declined.reason, expired.reason)
+```
+
+### 3. The full surface — id is required, and reason is purely advisory
+
+```ts test
+import assert from "node:assert"
+import { answerDeclined } from "toolnexus"
+
+// id is required — it must match the Request's id the suspension carried.
+assert.throws(() => answerDeclined(""), /id is required/)
+
+// Any reason string is accepted; the loop never branches on its value, only on `ok`.
+const cancelled = answerDeclined("req-1", "cancelled")
+assert.equal(cancelled.ok, false)
+assert.equal(cancelled.reason, "cancelled")
+
+console.log("ok:", cancelled.reason)
+```
+
+## See also
+
+- [`pending`](/api/javascript/suspension/pending/) — Return a Pending from a tool to park the run until someone answers.
+- [`authRequired`](/api/javascript/suspension/auth-required/) — The auth-shaped suspension: hand back a URL, resume once the user has granted access.
+- [`waitFor`](/api/javascript/suspension/wait-for/) — The single hook where the host resolves a suspension — in-process prompt or durable queue, same contract.
+- [`pendingOf`](/api/javascript/suspension/pending-of/) — Detect that a RunResult is parked rather than finished, and get the Request that parked it.

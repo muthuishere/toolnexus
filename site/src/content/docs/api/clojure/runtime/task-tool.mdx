@@ -1,68 +1,182 @@
 ---
-title: "The task tool — model-facing delegation"
+title: "task-tool"
 description: "The opt-in tool that lets the model itself spawn a teammate. Default OFF. — Clojure."
 sidebar:
-  label: "runtime / task-tool"
+  label: "task-tool"
 ---
 
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Clojure (JVM) + cljgo</strong> · package <code>net.clojars.muthuishere/toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7D</a>
+<strong>Clojure (JVM) + cljgo</strong> · package <code>net.clojars.muthuishere/toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7D</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/clojure/src/toolnexus/agents/runtime.cljc">clojure/src/toolnexus/agents/runtime.cljc:1548-1554</a>
 </p>
 
-<Aside type="caution" title="Not available in Clojure">
-There is no `task` tool among this port's ten built-ins, because there is no sub-agent runtime for one
-to drive. The built-ins are bash, read, write, edit, grep, glob, webfetch, question, apply_patch and
-todowrite.
-</Aside>
-
-The opt-in tool that lets the model itself spawn a teammate. Default OFF.
-
-The `task` tool is what turns delegation from something the *host* arranges into something the
-*model* decides: given a description of an available agent type, the model calls `task` and a child
-run happens. It is off by default in every port for the obvious reason — a model that can spawn
-agents can spawn a lot of them.
-
-## What to use instead
-
-Delegation the model can reach has to be an ordinary tool. Which means you choose the delegates up
-front, name them, and describe them — the model picks between named collaborators rather than
-inventing one:
-
 ```clojure
-(require '[toolnexus.core :as core])
+;; NOT called directly — the runtime builds one per handle, IFF the AgentDef has a :team
+(toolnexus.agents.runtime/task-tool rt parent-id def-map)
+;; => a native Tool named "task", input {:agent "…" :prompt "…"}, :ctx? true
 
-;; each reachable peer becomes one tool per advertised skill,
-;; named <card-name>_<skill-id> and taking a single string `task`
-(def tk
-  (core/build
-    {:skills "examples/skills"
-     :agents [{:card "http://127.0.0.1:8081/.well-known/agent-card.json"}   ; researcher
-              {:card "http://127.0.0.1:8082/.well-known/agent-card.json"}]  ; writer
-     ;; and if one of them should not be model-callable after all:
-     :disable-tools ["writer_draft"]}))
+;; the input schema the model sees
+{:type       "object"
+ :properties {:agent  {:type "string" :description "Team agent to delegate to"}
+              :prompt {:type "string" :description "The subtask prompt"}}
+ :required   ["agent" "prompt"]}
 
-(core/tool-names tk)
-;; => [... "researcher_summarise"]
+;; the sibling: an AgentDef exposed AS a Tool, droppable into ANY toolkit
+(toolnexus.agents.runtime/agent-tool rt def-name)
+;; => a native Tool named after def-name, input {:prompt "…"}
 ```
 
-From the model's point of view that is the same affordance `task` offers — "hand this sentence to a
-teammate and get their answer back" — with the agent chosen at build time instead of at call time.
-The peer's schema is deliberately minimal: an object with one required string, `task`.
+The `task {agent, prompt}` tool is `spawn`→`wake`→`wait`→`close`, fused into one tool call — the
+opt-in surface that lets the **model itself** delegate to a teammate, rather than only the host
+calling [`spawn`](/api/clojure/runtime/runtime/) by hand.
 
-For an in-process delegate, wrap a scoped client in a native tool, as shown on
-[`runtime / agent`](/api/clojure/runtime/agent/). Either way you keep the control that the `task`
-tool's default-OFF stance exists to protect: nothing is delegable unless you registered it, and
-`:disabled true` on a peer's config entry, `:disable-tools` on the build, or simply omitting the
-peer takes the option away again.
+## Opt-in, and how it turns on
 
-If what you actually want is the model pausing to ask a *human* rather than an agent, that ships:
-the `question` built-in raises a §10 suspension answered through the client's `:wait-for`.
+`task-tool` is never something you construct and hand to a toolkit yourself — the runtime's
+private `toolkit-for` adds it to a handle's toolkit automatically, and **only** when that handle's
+[`AgentDef`](/api/clojure/runtime/agent/) sets a non-empty `:team`
+(`clojure/src/toolnexus/agents/runtime.cljc:842-850`):
+
+```clojure
+;; no :team ⇒ no task tool at all — this agent CANNOT delegate, full stop
+{:name "solo" :does "…" :model "m"}
+
+;; :team present ⇒ toolkit-for adds exactly one "task" tool, advertising only these names
+{:name "boss" :does "…" :model "m" :team ["writer" "auditor"]}
+```
+
+"Delegation, like recursion, is OPT-IN" — an agent with no `:team` is offered no delegation tool
+at all, no matter how many other agents exist in the runtime's registry. This is enforced at the
+toolkit-construction boundary, not by a runtime-wide flag: two agents in the same runtime can have
+completely different delegation rights, because the switch lives on each `AgentDef`.
+
+The tool's model-facing **description** is composed only from the caller's own `:team`, sorted by
+name, using each teammate's `:does` — e.g. `"Delegate a subtask to an isolated subagent … —
+Available agents — auditor: checks numbers; writer: writes prose"` — never from the whole
+registry. Calling `task` with an `:agent` outside the team is a tool **error** naming the allowed
+team, not a silent reach into the registry.
+
+## What one `task` call actually does
+
+- **Fresh transcript, one tool message back.** The child runs with no system prompt and no parent
+  history; the parent's own transcript gains exactly one `tool` message containing the child's
+  final text — never the child's turn-by-turn conversation.
+- **Usage rolls up.** The child's token spend adds to the parent's own `:tokens` on
+  [`inspect`](/api/clojure/runtime/handle/) — a 15-token child turn inside a 30-token parent turn
+  reports 45 on the parent.
+- **The child is closed when it settles**, so a later reattach can still answer from its recorded
+  result — "…→CLOSE fused. The child's final state stays queryable."
+- **Reattachment by task key, not a cache.** A re-invoked call with the same `{agent, prompt}` key
+  finds the existing child by that key on the parent's own children, rather than spawning a
+  duplicate: settled ⇒ its recorded result, `"suspended"` ⇒ its pending request (or an inline
+  resume when the retry carries the matching `Answer`), `"running"` ⇒ `wait`s on it. This is what
+  makes an upward §10 resume cascade safe when a model replays the same tool call off a rewound
+  transcript.
+- **A suspending child presents to its parent as an ordinary suspending tool** — §10's shape
+  verbatim, one hop at a time, with the handle path already stamped into the request's `:data`. No
+  new pending type exists for "this came from a delegated child."
+
+## `agent-tool` — the same axiom, the other direction
+
+`task-tool` lets a model **inside** the runtime spawn a teammate; `agent-tool` is "the axiom's
+other direction: an AgentDef AS a Tool, droppable into any toolkit's `:tools`"
+(`clojure/src/toolnexus/agents/runtime.cljc:1654-1660`). It wraps `run-agent` (one-shot
+`spawn`→`wake`→`wait`, closing on settlement, leaving a `"pending"` result open for a later
+`resume`) as `{:name (sanitized def-name) :description (:does d) :input-schema {:prompt}}`, and
+returns only the agent's final text plus `{:agent :turns :total-tokens}`. From the outside, a
+caller sees an ordinary tool; behind it is a whole agent with its own soul, its own toolkit view,
+and its own budget — the caller cannot tell the difference. There is no separate manifest entry
+for `agent-tool` because it is the same primitive as `task-tool`, aimed the other way — use
+`task-tool` when a whole runtime's worth of agents delegate to each other by team; reach for
+`agent-tool` when you just want to drop ONE named agent into some other toolkit as a single
+callable tool.
+
+## When to use it
+
+- **You want the model to choose which teammate handles a subtask**, rather than the host
+  hard-coding a `spawn` call for every possible delegation.
+- **You want an agent usable as a plain tool from outside the runtime's own toolkit-building** —
+  `agent-tool` for a single named agent, wherever a `Tool` is accepted.
+- **You want reattachment for free** across a §10 suspend/resume cascade, rather than hand-rolling
+  idempotency around repeated tool calls on a replayed transcript.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Reach for spawn/wake/wait/close directly when the HOST decides, not the model">
+`task-tool` exists specifically for model-driven delegation — the LLM decides whom to delegate to
+and with what prompt, inside its own tool-calling turn. When the host itself decides which
+sub-agent to run and when (not the model), call
+[`spawn`](/api/clojure/runtime/runtime/)/`wake`/`wait`/`close` directly, or use `run-agent` for the
+one-shot case — there is no tool-schema, no team-advertising, and no reattachment-by-task-key
+machinery to reason about, because none of it is needed when nothing is replaying a tool call off
+a rewound transcript.
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call — a boss delegating to one teammate
+
+```clojure
+(require '[toolnexus.agents.runtime :as rt])
+
+(def runtime
+  (rt/create-runtime
+   {:registry {"boss"   {:name "boss" :does "coordinates" :model "bm"
+                         :team ["writer"] :budget {:max-depth 5}}
+               "writer" {:name "writer" :does "writes" :model "wm"}}
+    :llm      {:base-url "http://mock.local" :model "default"}}))
+
+;; the model, inside boss's own turn, calls: task {:agent "writer" :prompt "the intro"}
+;; — the runtime does NOT expose that call to you directly; it happens through the
+;; client loop when boss's toolkit includes the task tool `toolkit-for` added for it.
+(let [h (rt/spawn runtime rt/root "boss")]
+  (rt/wake runtime h "write me a post")
+  (:text (rt/wait runtime h)))     ; => whatever boss's final turn says, e.g. "shipped"
+```
+
+The child appears as `"root/boss.1/writer.1"`, is `"closed"` once its result settles, and its
+token spend is already rolled into `boss`'s own totals by the time `wait` returns.
+
+### 2. The realistic case — an out-of-team target is refused, not a silent reach
+
+```clojure
+;; boss's :team is ["writer"] only — "other" is registered but not on the team
+(let [h (rt/spawn runtime rt/root "boss")]
+  (rt/wake runtime h "go")     ; the model's turn calls task {:agent "other" :prompt "sneak"}
+  (rt/wait runtime h)
+  ;; nothing was spawned for "other" at all — the refusal is a plain tool error
+  ;; the model sees inline, listing the team it actually has, not a crash
+  (rt/handles runtime))        ; => only ["root/boss.1"], no "other" handle anywhere
+```
+
+### 3. The full surface — a suspending delegation, and `agent-tool` used standalone
+
+```clojure
+(require '[toolnexus.client :as client]
+         '[toolnexus.tool :as tool])
+
+;; a delegated child whose own tool call suspends on a §10 approval request
+;; presents to boss (and boss's own caller) as an ordinary pending tool result:
+(let [h (rt/spawn runtime rt/root "boss")]
+  (rt/wake runtime h "go")
+  (let [r (rt/wait runtime h)]
+    (:status r))              ; => "pending" — not an error; both boss and the child are "suspended"
+  ;; the host answers with the matching Answer id, and the cascade resumes both levels
+  (rt/resume runtime (client/make-answer "r1" true)))
+
+;; agent-tool: drop ONE named agent into a toolkit as a plain callable, outside any team
+(def writer-as-tool (rt/agent-tool runtime "writer"))
+(def toolkit (tool/toolkit [writer-as-tool]))
+;; a caller of `toolkit` sees a tool named "writer" with {:prompt "…"} — nothing about
+;; teams, task keys, or reattachment leaks through; it is run-agent under the hood
+```
 
 ## See also
 
-- [`toolnexus.a2a/agent-tools`](/api/clojure/agents/agent-tools/) — peers as ordinary, model-callable tools
-- [`runtime / agent`](/api/clojure/runtime/agent/) — an in-process delegate wrapped as a native tool
-- [`toolnexus.builtin/builtin-tools`](/api/clojure/builtins/create/) — the ten built-ins that do ship
-- [`toolnexus.client/wait-for`](/api/clojure/suspension/wait-for/) — delegating to a human instead
+- [`AgentDef`](/api/clojure/runtime/agent/) — `:team` is the only switch that turns `task-tool` on
+  for a given agent.
+- [`create-runtime`](/api/clojure/runtime/runtime/) — The six verbs `task-tool` fuses
+  (`spawn`/`wake`/`wait`/`close`) and the runtime it is built against.
+- [`Handle`](/api/clojure/runtime/handle/) — What a delegated child looks like via `inspect` while
+  it runs, suspends, or after `task-tool` closes it.

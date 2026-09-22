@@ -1,0 +1,195 @@
+---
+title: "AnswerOutput"
+description: "Wraps a human's typed string reply into the Answer a suspended run resumes with — the success counterpart to answerDeclined. — Go."
+sidebar:
+  label: "AnswerOutput"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Go</strong> · package <code>github.com/muthuishere/toolnexus/golang</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §10</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/golang/relay.go">golang/relay.go</a>
+</p>
+
+```go
+func AnswerOutput(id, output string) Answer
+
+type Answer struct {
+	ID     string         `json:"id"`             // echoes the pending Request.ID
+	Ok     bool           `json:"ok"`              // satisfied, vs declined/aborted/expired
+	Data   map[string]any `json:"data,omitempty"`  // kind-specific payload
+	Reason string         `json:"reason,omitempty"`
+}
+```
+
+`AnswerOutput(id, output)` builds the `Answer` for a **single outstanding relayed tool call**:
+`Ok: true` and the tool's output stored under the one key ([`RelayOutputKey`](/api/go/suspension/relay/))
+the resume path reads. It exists so a caller never has to hand-build
+`Answer{ID: id, Ok: true, Data: map[string]any{"output": output}}` and get that one required key
+wrong or misspelled — which used to be exactly how a malformed answer got `Ok: true` with no
+determinable result and turned into a fabricated tool result reaching the model (issue #89,
+ADR 0026).
+
+## When to use it
+
+Reach for `AnswerOutput` whenever you're the host resolving a suspended
+[`RelayTool`](/api/go/suspension/relay/) call with the tool's real output — inline through
+`WaitFor`, or out-of-band through [`Client.RunWithAnswer`/`AskWithAnswer`](/api/go/suspension/resume/).
+It is the success half of the pair; use [`AnswerDeclined`](/api/go/suspension/answer-declined/)
+instead when the human refused rather than executed the call.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Multiple outstanding calls in one turn? Use RelayAnswer instead">
+`AnswerOutput` covers the common case: exactly one relayed call parked the turn. When a single
+assistant turn issued **several** tool calls and more than one of them relayed, build the answer
+with `RelayAnswer(requestID, []RelayResult{...})` instead — one `{id, output, isError}` per call,
+keyed by the call's own id rather than the single implicit slot `AnswerOutput` fills. Both
+constructors are sugar over the same `Answer{ID, Ok, Data}` shape; nothing stops you from building
+it by hand, but then you own getting the key name and the `Ok`/`Data` pairing right yourself.
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call — build the Answer and inspect its shape
+
+```go test
+package main
+
+import (
+	"fmt"
+	"log"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	ans := toolnexus.AnswerOutput("req-1", "staging")
+
+	if ans.ID != "req-1" || !ans.Ok {
+		log.Fatalf("unexpected answer: %+v", ans)
+	}
+	out, ok := ans.Data[toolnexus.RelayOutputKey].(string)
+	if !ok || out != "staging" {
+		log.Fatalf("expected output %q under %q, got %+v", "staging", toolnexus.RelayOutputKey, ans.Data)
+	}
+
+	fmt.Println("ok:", ans.ID, out)
+}
+```
+
+### 2. The realistic case — halt on a relayed tool call, then resume with the host's real output
+
+```go test
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"net/http"
+	"net/http/httptest"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	turn := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		turn++
+		w.Header().Set("Content-Type", "application/json")
+		if turn == 1 {
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"c1","type":"function","function":{"name":"weather","arguments":"{}"}}]}}],"usage":{"prompt_tokens":2,"completion_tokens":2,"total_tokens":4}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"it is sunny"}}],"usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}}`))
+	}))
+	defer srv.Close()
+
+	// A relay tool declares the call; only the HOST can actually execute it.
+	weather := toolnexus.RelayTool("weather", "look up the weather", nil)
+	tk, err := toolnexus.CreateToolkit(context.Background(), toolnexus.Options{Builtins: false, ExtraTools: []toolnexus.Tool{weather}})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer tk.Close()
+
+	client := toolnexus.CreateClient(toolnexus.ClientOptions{BaseURL: srv.URL, Style: toolnexus.StyleOpenAI, Model: "stub", APIKey: "k"})
+
+	halted, err := client.Run(context.Background(), "what's the weather?", tk)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if halted.Status != "pending" {
+		log.Fatalf("expected a durable halt, got %q", halted.Status)
+	}
+
+	// The host executed the real lookup out-of-band; hand its output back.
+	resumed, err := client.RunWithAnswer(context.Background(), tk, halted.Messages, *halted.Pending,
+		toolnexus.AnswerOutput(halted.Pending.ID, "sunny, 24C"))
+	if err != nil {
+		log.Fatal(err)
+	}
+	if resumed.Status != "done" {
+		log.Fatalf("expected done, got %q", resumed.Status)
+	}
+
+	fmt.Println("ok:", resumed.Text)
+}
+```
+
+### 3. The full surface — a malformed hand-built Answer errors instead of fabricating a result
+
+```go test
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"net/http"
+	"net/http/httptest"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"c1","type":"function","function":{"name":"weather","arguments":"{}"}}]}}],"usage":{"prompt_tokens":2,"completion_tokens":2,"total_tokens":4}}`))
+	}))
+	defer srv.Close()
+
+	weather := toolnexus.RelayTool("weather", "look up the weather", nil)
+	tk, err := toolnexus.CreateToolkit(context.Background(), toolnexus.Options{Builtins: false, ExtraTools: []toolnexus.Tool{weather}})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer tk.Close()
+
+	client := toolnexus.CreateClient(toolnexus.ClientOptions{BaseURL: srv.URL, Style: toolnexus.StyleOpenAI, Model: "stub", APIKey: "k"})
+
+	halted, err := client.Run(context.Background(), "what's the weather?", tk)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// Hand-built, wrong key ("value" instead of "output") — NOT what AnswerOutput builds.
+	badAnswer := toolnexus.Answer{ID: halted.Pending.ID, Ok: true, Data: map[string]any{"value": "sunny"}}
+	_, err = client.RunWithAnswer(context.Background(), tk, halted.Messages, *halted.Pending, badAnswer)
+	if err == nil {
+		log.Fatal("a malformed Ok:true answer must error to the host, never resume silently")
+	}
+
+	fmt.Println("ok: rejected malformed answer:", err)
+}
+```
+
+## See also
+
+- [`Pending`](/api/go/suspension/pending/) — Return a Pending from a tool to park the run until someone answers.
+- [`AuthRequired`](/api/go/suspension/auth-required/) — The auth-shaped suspension: hand back a URL, resume once the user has granted access.
+- [`WaitFor`](/api/go/suspension/wait-for/) — The single hook where the host resolves a suspension — in-process prompt or durable queue, same contract.
+- [`PendingOf`](/api/go/suspension/pending-of/) — Detect that a RunResult is parked rather than finished, and get the Request that parked it.
+- [`AnswerDeclined`](/api/go/suspension/answer-declined/) — The refusal counterpart: `Ok: false` plus a reason, when the human said no rather than supplied a result.
+- [`Runtime.Resume` / `RunWithAnswer`](/api/go/suspension/resume/) — Where a built `Answer` actually gets applied to a halted run.

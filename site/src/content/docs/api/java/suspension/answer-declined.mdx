@@ -1,0 +1,125 @@
+---
+title: "Answer.declined"
+description: "Wraps a human's refusal into the Answer a suspended run resumes with, carrying a reason string that defaults to \"declined\". — Java."
+sidebar:
+  label: "Answer.declined"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Java</strong> · package <code>io.github.muthuishere:toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §10</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/java/src/main/java/io/github/muthuishere/toolnexus/Answer.java">Answer.java</a>
+</p>
+
+```java
+public static Answer declined(String id, String reason)
+```
+
+Wraps a human's refusal into the `Answer` a suspended run resumes with, carrying a reason string
+that defaults to `"declined"`. `declined` builds `new Answer(id, false, null, reason)` — `ok:false`,
+no payload — and normalises a `null`/empty `reason` to the literal string `"declined"` so the field
+is never blank. `reason` is **advisory only**: the loop rule branches solely on `ok`, never on the
+text of `reason`. It exists for a host, or the MCP elicitation bridge, that wants to distinguish an
+explicit refusal (`"declined"`) from a dismissal or a timeout (`"cancelled"` / `"expired"`).
+
+## When to use it
+
+Any time a suspended [`Request`](/api/java/suspension/pending/) must resume as a **refusal**
+rather than a result — a human declined an approval, dismissed a prompt without answering, or the
+wait itself expired before anyone responded. Build the `Answer` with
+`Answer.declined(request.id(), "declined")` (or `"cancelled"` / `"expired"`, or any reason string
+your host wants to record) and hand it back from `waitFor`, or pass it to whatever the host's
+durable-resume path calls to settle a parked `Request` by id.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="declined for a refusal, output for a result">
+Reach for `Answer.declined` when the human/host said no, walked away, or ran out of time; reach for
+[`Answer.output`](/api/java/suspension/answer-output/) when they actually answered. Don't try to
+smuggle a refusal through `Answer.output` with a sentinel string like `"no"` — the loop can only
+tell an answer from a decline by `ok`, and a "successful" answer whose value happens to mean no is
+exactly the ambiguity `declined` exists to remove. The `reason` argument is for *your* host's
+bookkeeping (an MCP elicitation bridge maps `"declined"` → `decline` and everything else →
+`cancel`) — never branch loop-level logic on its text.
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call — the reason defaults to "declined"
+
+```java test
+import io.github.muthuishere.toolnexus.Answer;
+
+public class Example {
+    public static void main(String[] args) {
+        Answer nullReason = Answer.declined("req-1", null);
+        Answer emptyReason = Answer.declined("req-1", "");
+
+        if (nullReason.ok()) throw new AssertionError("declined() must be ok:false");
+        if (!"declined".equals(nullReason.reason())) throw new AssertionError(nullReason.reason());
+        if (!"declined".equals(emptyReason.reason())) throw new AssertionError(emptyReason.reason());
+
+        System.out.println("ok: both default to reason=" + nullReason.reason());
+    }
+}
+```
+
+### 2. The realistic case — a `waitFor` that resolves a pending Request with a refusal
+
+```java test
+import io.github.muthuishere.toolnexus.*;
+
+public class Example {
+    /** Stands in for a real approval-desk lookup keyed by request.id(). */
+    static boolean humanApproved(Request request) {
+        return false; // the approver said no
+    }
+
+    public static void main(String[] args) {
+        Request request = new Request("", "approval", "Approve the refund?");
+
+        // This is the shape a real client.Options.waitFor(...) callback returns.
+        Answer resolved = humanApproved(request)
+                ? Answer.output(request.id(), "approved")
+                : Answer.declined(request.id(), "declined");
+
+        if (resolved.ok()) throw new AssertionError("expected a refusal");
+        if (!"declined".equals(resolved.reason())) throw new AssertionError(resolved.reason());
+        System.out.println("ok: resumed with reason=" + resolved.reason());
+    }
+}
+```
+
+### 3. The full surface — distinguishing an explicit refusal from a timeout
+
+```java test
+import io.github.muthuishere.toolnexus.Answer;
+
+public class Example {
+    public static void main(String[] args) {
+        Answer refused = Answer.declined("req-1", "declined");
+        Answer timedOut = Answer.declined("req-2", "expired");
+        Answer dismissed = Answer.declined("req-3", "cancelled");
+
+        // `ok` is the ONLY field the loop rule branches on — all three resume the run as
+        // "not answered", identically. `reason` is carried through for a host (or the MCP
+        // elicitation bridge) that wants to tell them apart afterwards.
+        for (Answer a : java.util.List.of(refused, timedOut, dismissed)) {
+            if (a.ok()) throw new AssertionError("all three must be ok:false: " + a);
+        }
+        if (!"declined".equals(refused.reason())) throw new AssertionError(refused.reason());
+        if (!"expired".equals(timedOut.reason())) throw new AssertionError(timedOut.reason());
+        if (!"cancelled".equals(dismissed.reason())) throw new AssertionError(dismissed.reason());
+
+        System.out.println("ok: three distinct reasons, one uniform ok:false");
+    }
+}
+```
+
+## See also
+
+- [`Request.pending`](/api/java/suspension/pending/) — Return a Pending from a tool to park the run until someone answers.
+- [`Answer.output`](/api/java/suspension/answer-output/) — The success counterpart: wrap a human's typed reply into an Answer.
+- [`Request.authRequired`](/api/java/suspension/auth-required/) — The auth-shaped suspension: hand back a URL, resume once the user has granted access.
+- [`LlmClient.waitFor`](/api/java/suspension/wait-for/) — The single hook where the host resolves a suspension — in-process prompt or durable queue, same contract.
+- [`Request.pendingOf`](/api/java/suspension/pending-of/) — Detect that a RunResult is parked rather than finished, and get the Request that parked it.

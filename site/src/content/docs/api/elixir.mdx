@@ -1,12 +1,12 @@
 ---
 title: API Reference — Elixir
-description: The toolnexus (Hex) public surface — toolkit, client, skills, MCP, adapters — with each symbol's equivalents in the other five ports.
+description: The toolnexus (Hex) public surface — toolkit, client, skills, MCP, adapters — with each symbol's equivalents in the other six ports.
 ---
 
 import { Aside } from '@astrojs/starlight/components';
 
 Package **`toolnexus`** (Hex), Elixir ≥ 1.16 / OTP 26. See the [combined API Reference](/api/) for
-every symbol shown in six-language synced tabs.
+every symbol shown in seven-language synced tabs.
 
 <Aside type="note" title="Why the BEAM port exists">
 Long-running agents want supervision, isolation, and cheap concurrency — and that is exactly what
@@ -14,7 +14,7 @@ Long-running agents want supervision, isolation, and cheap concurrency — and t
 budgets, and durable suspension feel native (every MCP connection is a supervised process; a
 crashed stdio server is isolated as `"failed"` without taking the toolkit down; parallel tool
 calls ride `Task.async_stream`). Proving that shape on the BEAM is the reason toolnexus carries
-**agentic orchestration across all six languages** — same contract everywhere, native OTP
+**agentic orchestration across all seven languages** — same contract everywhere, native OTP
 underneath. The MCP client is in-house on OTP (no third-party SDK), which is also why this port
 ships the **full** elicitation bridge (form *and* URL mode).
 </Aside>
