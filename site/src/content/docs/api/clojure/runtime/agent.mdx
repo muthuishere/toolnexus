@@ -79,14 +79,19 @@ one `client/run` and is the smaller concept for that case.
 
 ### 1. The smallest useful call — a registry entry that just answers
 
-```clojure
+```clojure test
 (require '[toolnexus.agents.runtime :as rt])
+
+(println)
 
 (def agent-def
   {:name "writer" :does "writes prose" :model "gpt-4.1"})
 
 (def runtime (rt/create-runtime {:registry {"writer" agent-def}
                                   :llm {:base-url "https://api.example.com" :model "gpt-4.1"}}))
+
+(assert (= agent-def (get (:registry runtime) "writer")))
+(println "OK")
 ```
 
 No `:team`, no `:tools`, no `:budget` — this agent can be spawned and woken, but it can never
@@ -94,7 +99,11 @@ delegate: its toolkit view is empty of `task`.
 
 ### 2. The realistic case — a def with a team, a budget, and lifecycle hooks
 
-```clojure
+```clojure test
+(require '[toolnexus.agents.runtime :as rt])
+
+(println)
+
 (def boss-def
   {:name       "boss"
    :does       "coordinates the writing team"
@@ -110,6 +119,9 @@ delegate: its toolkit view is empty of `task`.
 (def runtime
   (rt/create-runtime {:registry {"boss" boss-def "writer" writer-def "auditor" auditor-def}
                       :llm {:base-url "https://api.example.com" :model "gpt-4.1"}}))
+
+(assert (= #{"boss" "writer" "auditor"} (set (keys (:registry runtime)))))
+(println "OK")
 ```
 
 The `task` tool's model-facing description is composed ONLY from `boss`'s own `:team`, sorted by
@@ -119,8 +131,10 @@ writer: writes prose"` — never from the whole registry, so an agent outside th
 
 ### 3. The full surface — a guarded, gated def whose fields travel through delegation
 
-```clojure
+```clojure test
 (require '[toolnexus.agents.loop :as tnloop])
+
+(println)
 
 (def worker-def
   {:name        "worker"
@@ -130,6 +144,12 @@ writer: writes prose"` — never from the whole registry, so an agent outside th
    :completion  {:verify tnloop/all-todos-done :max-attempts 2}
    :budget      {:max-turns 6 :max-tool-calls 20 :max-wall-ms 60000}
    :wait-for    (fn [request] nil)}) ; this level does not interpret §10 requests; they escalate
+
+(assert (fn? (:verify (:completion worker-def))))
+(assert (= 2 (:max-attempts (:completion worker-def))))
+(assert (fn? (first (:guardrails worker-def))))
+(assert (fn? (:wait-for worker-def)))
+(println "OK")
 ```
 
 `:guardrails` and `:completion` here are honoured whether `worker` is spawned directly, or

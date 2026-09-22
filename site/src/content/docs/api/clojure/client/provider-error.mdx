@@ -85,21 +85,41 @@ surface this port avoids.
 
 ### 1. The smallest useful call — catch and branch on status
 
-```clojure
-(require '[toolnexus.client :as client])
+```clojure test
+(require '[toolnexus.client :as client]
+         '[toolnexus.tool :as tool])
 
-(try
-  (client/run llm "Summarise the incident" {:toolkit toolkit})
-  (catch Throwable e
-    (let [d (ex-data e)]
-      (if (= :provider (:toolnexus/error d))
-        (println "provider failed with status" (:status d))
-        (throw e)))))
+(println)
+
+(def llm
+  (client/create-client
+    {:base-url "http://mock.local" :style "openai" :model "gpt-4o-mini"
+     :http-client (fn [_url _headers _body]
+                    {:status 402 :headers {} :body "{\"error\":\"insufficient_quota\"}"})}))
+
+(def toolkit (tool/toolkit []))
+
+(def caught
+  (try
+    (client/run llm "Summarise the incident" {:toolkit toolkit})
+    (catch Throwable e
+      (let [d (ex-data e)]
+        (if (= :provider (:toolnexus/error d))
+          (do (println "provider failed with status" (:status d)) (:status d))
+          (throw e))))))
+
+(assert (= 402 caught))
+(println "OK")
 ```
 
 ### 2. The realistic case — surface a rate-limit to the caller with the retry hint
 
-```clojure
+```clojure test
+(require '[toolnexus.client :as client]
+         '[toolnexus.tool :as tool])
+
+(println)
+
 (defn run-and-report [llm prompt toolkit]
   (try
     {:status "done" :result (client/run llm prompt {:toolkit toolkit})}
@@ -111,6 +131,21 @@ surface this port avoids.
            :retry-after  (:retry-after d)   ; ms, or nil if the header didn't parse
            :detail       (:body d)}          ; already redacted, safe to log or show
           (throw e))))))
+
+(def llm
+  (client/create-client
+    {:base-url "http://mock.local" :style "openai" :model "gpt-4o-mini" :retries 0
+     :http-client (fn [_url _headers _body]
+                    {:status 429 :headers {"retry-after" "2"}
+                     :body "{\"error\":\"rate limited\"}"})}))
+
+(def toolkit (tool/toolkit []))
+(def report (run-and-report llm "hi" toolkit))
+
+(assert (= "provider-error" (:status report)))
+(assert (= 429 (:http-status report)))
+(assert (= 2000 (:retry-after report)))
+(println "OK")
 ```
 
 `:body` here is safe to log or return to a caller as-is — account identifiers (`user_id`,
@@ -119,19 +154,41 @@ is blanked to `""` entirely rather than redacted, per the credentials guarantee 
 
 ### 3. The full surface — every field, and the message-vs-data split
 
-```clojure
-(require '[clojure.string :as str])
+```clojure test
+(require '[toolnexus.client :as client]
+         '[toolnexus.tool :as tool]
+         '[clojure.string :as str])
 
-(try
-  (client/run llm "hi" {:toolkit toolkit})
-  (catch Throwable e
-    (let [d (ex-data e)]
-      (when (= :provider (:toolnexus/error d))
-        {:status      (:status d)          ; e.g. 402 — verbatim HTTP status
-         :body        (:body d)            ; redacted, UNCAPPED — the full body, minus identifiers
-         :retry-after (:retry-after d)     ; ms, present only if the header parsed and was in range
-         :message     (ex-message e)       ; "LLM 402: <redacted body>", CAPPED at 200 chars + "…"
-         :message-len (count (ex-message e))}))))
+(println)
+
+(def llm
+  (client/create-client
+    {:base-url "http://mock.local" :style "openai" :model "gpt-4o-mini" :retries 0
+     :http-client (fn [_url _headers _body]
+                    {:status 402
+                     :headers {"retry-after" "3"}
+                     :body "{\"account_id\":\"acct_9\",\"user_id\":\"u-42\",\"message\":\"over quota\"}"})}))
+
+(def toolkit (tool/toolkit []))
+
+(def surface
+  (try
+    (client/run llm "hi" {:toolkit toolkit})
+    (catch Throwable e
+      (let [d (ex-data e)]
+        (when (= :provider (:toolnexus/error d))
+          {:status      (:status d)          ; e.g. 402 — verbatim HTTP status
+           :body        (:body d)            ; redacted, UNCAPPED — the full body, minus identifiers
+           :retry-after (:retry-after d)     ; ms, present only if the header parsed and was in range
+           :message     (ex-message e)       ; "LLM 402: <redacted body>", CAPPED at 200 chars + "…"
+           :message-len (count (ex-message e))})))))
+
+(assert (= 402 (:status surface)))
+(assert (= 3000 (:retry-after surface)))
+(assert (str/includes? (:body surface) "«redacted»"))
+(assert (not (str/includes? (:body surface) "acct_9")))
+(assert (str/starts-with? (:message surface) "LLM 402:"))
+(println "OK")
 ```
 
 The cap applies to the exception **message only** — `(:body (ex-data e))` is the whole redacted

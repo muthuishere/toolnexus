@@ -92,9 +92,9 @@ import java.util.Map;
 
 public class Example {
     public static void main(String[] args) {
-        Tool add = NativeTool.of("add", "Add two numbers", null, args -> {
-            Number a = (Number) args.get("a");
-            Number b = (Number) args.get("b");
+        Tool add = NativeTool.of("add", "Add two numbers", null, callArgs -> {
+            Number a = (Number) callArgs.get("a");
+            Number b = (Number) callArgs.get("b");
             return String.valueOf(a.intValue() + b.intValue());
         });
 

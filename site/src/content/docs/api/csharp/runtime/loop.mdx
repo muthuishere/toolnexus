@@ -113,7 +113,7 @@ var handler = new Scripted(Say("hello"));
 var toolkitOpts = new Toolkit.Options { Builtins = false };
 await using var tk = await Toolkit.CreateAsync(toolkitOpts);
 
-var agent = new Agent("plain", new AgentSpec { Does = "answers" });
+var agent = new Toolnexus.Agents.Agent("plain", new AgentSpec { Does = "answers" });
 var clientOpts = new LlmClient.Options
 {
     BaseUrl = "http://scripted.invalid", Style = "openai", Model = "test-model",
@@ -180,7 +180,7 @@ await using var tk = await Toolkit.CreateAsync(new Toolkit.Options
     },
 });
 
-var agent = new Agent("gated", new AgentSpec
+var agent = new Toolnexus.Agents.Agent("gated", new AgentSpec
 {
     Does = "plans",
     // AllTodosDone is structural, not domain: it counts unchecked boxes in the LATEST todowrite
@@ -246,7 +246,7 @@ var clientOpts = new LlmClient.Options
 
 // (a) A completion check that never passes exhausts MaxAttempts and reports "incomplete" with
 // Limit == "completion" — structured, so a caller branches on Limit rather than parsing StoppedBy.
-var never = new Agent("never", new AgentSpec
+var never = new Toolnexus.Agents.Agent("never", new AgentSpec
 {
     Does = "never verifies",
     Completion = new Completion { Verify = _ => new Verdict(false, "always red"), MaxAttempts = 2 },
@@ -258,7 +258,7 @@ if (outcome.Result!.Limit != "completion") throw new Exception(outcome.Result.Li
 if (!outcome.StoppedBy!.Contains("always red")) throw new Exception(outcome.StoppedBy);
 
 // (b) MaxAttempts is REQUIRED — an unbounded verify loop is a denial-of-service on the caller's bill.
-var bad = new Agent("bad", new AgentSpec
+var bad = new Toolnexus.Agents.Agent("bad", new AgentSpec
 {
     Does = "x",
     Completion = new Completion { Verify = _ => new Verdict(true), MaxAttempts = 0 },
@@ -271,10 +271,10 @@ try
 catch (ArgumentException) { /* expected */ }
 
 // (c) Unsupported names exactly which spec fields THIS Loop cannot honour — advisory, not thrown.
-var delegator = new Agent("delegator", new AgentSpec
+var delegator = new Toolnexus.Agents.Agent("delegator", new AgentSpec
 {
     Does = "x",
-    Team = new List<Agent> { new("child", new AgentSpec { Does = "helps" }) },
+    Team = new List<Toolnexus.Agents.Agent> { new("child", new AgentSpec { Does = "helps" }) },
 });
 var unsupported = delegator.Loop(clientOpts, tk).Unsupported;
 if (!unsupported.Contains("team")) throw new Exception(string.Join(",", unsupported));

@@ -113,10 +113,13 @@ add =
     execute: fn %{"a" => a, "b" => b}, _ctx -> to_string(a + b) end
   )
 
+## TOOLNEXUS_REPO is set by the docs test runner; in your own code just use a path.
+repo = System.get_env("TOOLNEXUS_REPO") || "."
+
 {:ok, toolkit} =
   Toolnexus.create_toolkit(
-    mcp_config: "../examples/mcp.json",
-    skills_dir: ["../examples/skills"],
+    mcp_config: Path.join(repo, "examples/mcp.json"),
+    skills_dir: [Path.join(repo, "examples/skills")],
     extra_tools: [add]
   )
 

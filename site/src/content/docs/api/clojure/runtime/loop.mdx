@@ -87,15 +87,27 @@ spelling of the same contract — this is a language-shape difference, not a mis
 
 ### 1. The smallest useful call — a loop with no gate at all
 
-```clojure
+```clojure test
 (require '[toolnexus.agents.loop :as tnloop]
-         '[toolnexus.tool :as tool])
+         '[toolnexus.tool :as tool]
+         '[koine.json :as json])
+
+(println)
+
+(defn- text-response [t]
+  {:choices [{:message {:role "assistant" :content t}}]
+   :usage {:prompt_tokens 10 :completion_tokens 5 :total_tokens 15}})
 
 (def agent-def (tnloop/harness {:soul "You are concise." :model "gpt-4.1"}))
-(def lp (tnloop/create agent-def {} (tool/toolkit [])))
+(def opts {:base-url "http://mock.local"
+           :http-client (fn [_url _headers _body]
+                          {:status 200 :headers {} :body (json/write-str (text-response "Node offline: rebooted the switch."))})})
+(def lp (tnloop/create agent-def opts (tool/toolkit [])))
 
 (let [[outcome lp'] (tnloop/run lp "Summarise the incident in one sentence")]
-  (:text outcome))
+  (assert (= "done" (:status outcome)))
+  (assert (= "Node offline: rebooted the switch." (:text outcome))))
+(println "OK")
 ```
 
 No `:completion`, no `:guardrails` — this is byte-identical to calling `client/run` directly, which
@@ -103,7 +115,45 @@ is the point: absent gating costs nothing.
 
 ### 2. The realistic case — gate on the built-in todo-completion check
 
-```clojure
+```clojure test
+(require '[toolnexus.agents.loop :as tnloop]
+         '[toolnexus.tool :as tool]
+         '[toolnexus.builtin :as builtin]
+         '[koine.json :as json])
+
+(println)
+
+(defn- calls-response [calls]
+  {:choices [{:message {:role "assistant" :content nil
+                        :tool_calls (mapv (fn [c] {:id (:id c) :type "function"
+                                                   :function {:name (:name c)
+                                                              :arguments (json/write-str (or (:args c) {}))}})
+                                          calls)}}]
+   :usage {:prompt_tokens 10 :completion_tokens 5 :total_tokens 15}})
+
+(defn- text-response [t]
+  {:choices [{:message {:role "assistant" :content t}}]
+   :usage {:prompt_tokens 10 :completion_tokens 5 :total_tokens 15}})
+
+;; turn 1: the model claims done with an OPEN todo — the gate re-prompts;
+;; turn 2 (after the re-prompt): it checks the item off, and the gate passes
+(def script (atom [{:calls [{:id "t1" :name "todowrite"
+                             :args {:todos [{:text "migrate schema" :completed false}]}}]}
+                    {:text "done, schema migrated"}
+                    {:calls [{:id "t2" :name "todowrite"
+                             :args {:todos [{:text "migrate schema" :completed true}]}}]}
+                    {:text "done, all checked off"}]))
+
+(defn- mock-http []
+  (let [n (atom 0)]
+    (fn [_url _headers _body]
+      (let [i    (swap! n inc)
+            spec (get @script (dec i))]
+        {:status 200 :headers {}
+         :body (json/write-str (if (seq (:calls spec)) (calls-response (:calls spec)) (text-response (:text spec))))}))))
+
+(def todowrite-tool (first (filter #(= "todowrite" (:name %)) builtin/builtin-tools)))
+
 (def agent-def
   (tnloop/harness
     {:soul       "You plan your work with todowrite before finishing."
@@ -111,13 +161,17 @@ is the point: absent gating costs nothing.
      :completion {:verify       tnloop/all-todos-done
                   :max-attempts 3}}))
 
-(def lp (tnloop/create agent-def {} (tool/toolkit [todowrite-tool])))
+(def opts {:base-url "http://mock.local" :http-client (mock-http)})
+(def lp (tnloop/create agent-def opts (tool/toolkit [todowrite-tool])))
 
 (let [[outcome _] (tnloop/run lp "Migrate the config schema")]
   (case (:status outcome)
     "done"       (println "finished, all todos checked off:" (:text outcome))
     "incomplete" (println "gate failed" (:limit outcome) "-" (:text outcome))
-    (println (:status outcome))))
+    (println (:status outcome)))
+  (assert (= "done" (:status outcome)))
+  (assert (= "done, all checked off" (:text outcome))))
+(println "OK")
 ```
 
 If the model claims done with open todo items, the gate re-prompts with
@@ -126,26 +180,64 @@ If the model claims done with open todo items, the gate re-prompts with
 
 ### 3. The full surface — a guardrail policy plus checking what the loop cannot honour
 
-```clojure
+```clojure test
+(require '[toolnexus.agents.loop :as tnloop]
+         '[toolnexus.tool :as tool]
+         '[koine.json :as json])
+
+(println)
+
+(defn- calls-response [calls]
+  {:choices [{:message {:role "assistant" :content nil
+                        :tool_calls (mapv (fn [c] {:id (:id c) :type "function"
+                                                   :function {:name (:name c)
+                                                              :arguments (json/write-str (or (:args c) {}))}})
+                                          calls)}}]
+   :usage {:prompt_tokens 10 :completion_tokens 5 :total_tokens 15}})
+
+(defn- text-response [t]
+  {:choices [{:message {:role "assistant" :content t}}]
+   :usage {:prompt_tokens 10 :completion_tokens 5 :total_tokens 15}})
+
+(def script (atom [{:calls [{:id "d1" :name "delete_file" :args {:path "/tmp/x"}}]}
+                    {:text "could not delete, denied"}]))
+
+(defn- mock-http []
+  (let [n (atom 0)]
+    (fn [_url _headers _body]
+      (let [i    (swap! n inc)
+            spec (get @script (dec i))]
+        {:status 200 :headers {}
+         :body (json/write-str (if (seq (:calls spec)) (calls-response (:calls spec)) (text-response (:text spec))))}))))
+
+(def delete-file-tool
+  (tool/tool {:name "delete_file" :description "deletes a file"
+              :execute (fn [_args] (tool/success "deleted"))}))
+
+(def child-agent-def {:name "child" :does "helps" :model "m"})
+
 (def agent-def
   (tnloop/harness
     {:soul        "You may read files but never delete them without asking."
      :model       "gpt-4.1"
      :guardrails  [(fn [ev] (when (= "delete_file" (:tool ev)) "deletion requires human approval"))]
      :completion  {:verify tnloop/all-todos-done :max-attempts 2}
-     ;; these four are NOT honoured by a Loop — see loop-unsupported below
+     ;; these two are NOT honoured by a Loop — see loop-unsupported below
      :tools       [child-agent-def]
-     :wait-for    (fn [request] (client/answer-declined (:id request) "no loop-level routing"))}))
+     :team        ["writer" "auditor"]}))
 
 ;; find out, before running, which fields this driver will ignore
-(tnloop/loop-unsupported agent-def)
-;; => ["tools" "waitFor"]   -- present on the def, but not honoured by a plain Loop
+(def unsupported (tnloop/loop-unsupported agent-def))
+;; => ["tools" "team"]   -- present on the def, but not honoured by a plain Loop
+(assert (= ["tools" "team"] unsupported))
 
-(def lp (tnloop/create agent-def {} (tool/toolkit [delete-file-tool])))
+(def opts {:base-url "http://mock.local" :http-client (mock-http)})
+(def lp (tnloop/create agent-def opts (tool/toolkit [delete-file-tool])))
 (let [[outcome _] (tnloop/run lp "Clean up the temp directory")]
-  (:text outcome))
+  (assert (= "could not delete, denied" (:text outcome))))
 ;; a guardrail denial never reaches the model as a tool result silently allowed —
 ;; it comes back as "denied: deletion requires human approval"
+(println "OK")
 ```
 
 `loop-unsupported` returns only the fields **actually present** on the def, in the canonical order

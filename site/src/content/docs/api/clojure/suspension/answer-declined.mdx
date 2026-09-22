@@ -57,11 +57,16 @@ to the user instead of the whole run dying on a refusal.
 
 ### 1. The smallest useful call — the default reason
 
-```clojure
+```clojure test
 (require '[toolnexus.client :as client])
 
-(client/answer-declined "sus-1")
+(println)
+
+(def a (client/answer-declined "sus-1"))
 ;; => {:id "sus-1" :ok false}
+
+(assert (= {:id "sus-1" :ok false} a))
+(println "OK")
 ```
 
 Note there is no `:reason` key at all here — `make-answer` only assigns it when one is given, so a
@@ -69,30 +74,113 @@ bare decline is not `{:reason "declined"}` on the wire; it is simply `:ok false`
 
 ### 2. The realistic case — a human explicitly says no, inside :wait-for
 
-```clojure
+```clojure test
+(require '[toolnexus.client :as client]
+         '[toolnexus.tool :as tool]
+         '[koine.json :as json])
+
+(println)
+
+(defn- calls-response [calls]
+  {:choices [{:message {:role "assistant" :content nil
+                        :tool_calls (mapv (fn [c] {:id (:id c) :type "function"
+                                                   :function {:name (:name c)
+                                                              :arguments (json/write-str (or (:args c) {}))}})
+                                          calls)}}]
+   :usage {:prompt_tokens 10 :completion_tokens 5 :total_tokens 15}})
+
+(defn- text-response [t]
+  {:choices [{:message {:role "assistant" :content t}}]
+   :usage {:prompt_tokens 10 :completion_tokens 5 :total_tokens 15}})
+
+(def script (atom [{:calls [{:id "c1" :name "confirm_delete" :args {}}]}
+                    {:text "OK, I left the branches alone."}]))
+
+(defn- mock-http []
+  (let [n (atom 0)]
+    (fn [_url _headers _body]
+      (let [i    (swap! n inc)
+            spec (get @script (dec i))]
+        {:status 200 :headers {}
+         :body (json/write-str (if (seq (:calls spec)) (calls-response (:calls spec)) (text-response (:text spec))))}))))
+
+(def confirm-delete-tool
+  (tool/tool {:name "confirm_delete" :description "confirm branch deletion"
+              :execute (fn ([_args] (client/suspend (client/make-request "approval" "Delete the stale branches?")))
+                         ([_args ctx] (if (get-in ctx [:answer :ok])
+                                        (tool/success "deleted")
+                                        (tool/failure (str "declined: " (get-in ctx [:answer :reason]))))))}))
+
+(defn ask-human! [_prompt] {:approved? false})
+
 (def llm
   (client/create-client
-    {:base-url "https://api.anthropic.com"
-     :style    "anthropic"
-     :model    "claude-sonnet-4-5"
+    {:base-url "http://mock.local"
+     :style    "openai"
+     :model    "gpt-4o-mini"
+     :http-client (mock-http)
      :wait-for (fn [request]
                  (let [reply (ask-human! (:prompt request))]
                    (if (:approved? reply)
                      (client/answer-output (:id request) (:value reply))
                      (client/answer-declined (:id request) "not today"))))}))
 
-(client/run llm "Should I delete the stale branches?"
-            {:toolkit (tool/toolkit [confirm-delete-tool])})
+(def rr
+  (client/run llm "Should I delete the stale branches?"
+              {:toolkit (tool/toolkit [confirm-delete-tool])}))
+
+(assert (= "done" (:status rr)))
+(assert (= "OK, I left the branches alone." (:text rr)))
+(println "OK")
 ```
 
 ### 3. The full surface — an unroutable request, declined with a diagnostic reason
 
-```clojure
+```clojure test
+(require '[toolnexus.client :as client]
+         '[toolnexus.tool :as tool]
+         '[koine.json :as json])
+
+(println)
+
+(defn- calls-response [calls]
+  {:choices [{:message {:role "assistant" :content nil
+                        :tool_calls (mapv (fn [c] {:id (:id c) :type "function"
+                                                   :function {:name (:name c)
+                                                              :arguments (json/write-str (or (:args c) {}))}})
+                                          calls)}}]
+   :usage {:prompt_tokens 10 :completion_tokens 5 :total_tokens 15}})
+
+(defn- text-response [t]
+  {:choices [{:message {:role "assistant" :content t}}]
+   :usage {:prompt_tokens 10 :completion_tokens 5 :total_tokens 15}})
+
+(def script (atom [{:calls [{:id "c1" :name "mystery" :args {}}]}
+                    {:text "I could not route that request."}]))
+
+(defn- mock-http []
+  (let [n (atom 0)]
+    (fn [_url _headers _body]
+      (let [i    (swap! n inc)
+            spec (get @script (dec i))]
+        {:status 200 :headers {}
+         :body (json/write-str (if (seq (:calls spec)) (calls-response (:calls spec)) (text-response (:text spec))))}))))
+
+(defn route-to-oauth! [_req] nil)
+(defn route-to-form! [_req] nil)
+
+;; a suspending tool whose :kind is not one the host recognises
+(def mystery-tool
+  (tool/tool {:name "mystery" :description "an unroutable kind"
+              :execute (fn ([_args] (client/suspend (client/make-request "carrier-pigeon" "deliver a message")))
+                         ([_args ctx] (tool/success "n/a")))}))
+
 (def llm
   (client/create-client
-    {:base-url "https://api.anthropic.com"
-     :style    "anthropic"
-     :model    "claude-sonnet-4-5"
+    {:base-url "http://mock.local"
+     :style    "openai"
+     :model    "gpt-4o-mini"
+     :http-client (mock-http)
      :wait-for (fn [request]
                  (case (:kind request)
                    "authorization" (route-to-oauth! request)
@@ -101,6 +189,15 @@ bare decline is not `{:reason "declined"}` on the wire; it is simply `:ok false`
                    (client/answer-declined
                      (:id request)
                      (str "unsupported suspension kind: " (:kind request)))))}))
+
+(def rr (client/run llm "do the thing" {:toolkit (tool/toolkit [mystery-tool])}))
+(assert (= "done" (:status rr)))
+(assert (= "I could not route that request." (:text rr)))
+
+;; a string-keyed Answer a host round-trips through JSON is normalised the same
+;; way regardless of which constructor built it
+(assert (= false (:ok (client/as-answer {"id" "x" "ok" false "reason" "no"}))))
+(println "OK")
 ```
 
 A string-keyed `Answer` a host round-trips through JSON is normalised the same way regardless of
