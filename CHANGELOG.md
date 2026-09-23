@@ -10,6 +10,48 @@ GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
 
 ## 0.20.0 — 2026-09-22
 
+**The built-in tools no longer close over the host process. `bash` runs on native Windows, relative
+paths can be scoped to a directory, and a timeout actually kills the job.** Three issues (#100,
+#101, #102) arrived as three bugs in one file; they measured as one defect in three places, in all
+seven ports — every builtin inherited an ambient property of the host process that no host could
+inspect or set. Three new options on the builtin source close that, each defaulting to exactly
+today's behaviour:
+
+- **`shell`** — the argv prefix `bash` runs a command with (`["sh","-c"]`,
+  `["cmd","/d","/s","/c"]`, `["powershell","-NoProfile","-Command"]`, `["bash","-lc"]`). Given, it
+  is used verbatim; absent, it is detected when the toolkit is built — `sh -c` on POSIX, and on
+  Windows `%COMSPEC%`, then `pwsh`, then `powershell`, then a POSIX `bash` if one resolves —
+  and the interpreter that won is reported. Construction now fails, naming what it tried, rather
+  than producing a toolkit whose `bash` cannot run. This was worse than reported: on Windows
+  go/java/csharp/elixir/clojure hard-failed with `"sh": executable file not found`, while **js and
+  python quietly got `cmd.exe`** — `echo $HOME` printed the literal `$HOME` and exited 0. One call,
+  two different wrong answers.
+- **`baseDir`** — the directory relative paths resolve against, honoured by `read`, `write`,
+  `edit`, `glob`, `grep`, the paths *inside* `apply_patch`'s patch text, and as the default
+  `workdir` for `bash`. `""` keeps the process cwd, i.e. today. Without it a host that gives each
+  run its own directory had no way to say so: the reporting consumer had an 18 KB test file written
+  into their platform's own repository instead of the run's worktree, and the run reported success.
+- **`confineToBaseDir`** — opt-in refusal of any path whose *canonical* form lands outside
+  `baseDir`, through symlinks and through Windows directory junctions (`mklink /J` needs no
+  privilege and defeats lexical canonicalisation), plus outright refusal of Windows reserved device
+  names — `CON`, `NUL`, `COM1`… pass a containment check and never write into the directory at all.
+
+**Two behaviour changes come with it, deliberately.** A timeout or cancellation now kills the whole
+job — process group on POSIX, Job Object / `taskkill /T /F` on Windows, SIGTERM then a grace window
+then SIGKILL — where before it killed only the interpreter and orphaned the real command, in all
+seven ports. And **Go's `grep` now emits the walk-root-relative `/`-separated path** that `SPEC.md`
+§4A has always required, instead of the joined host path; Go sorted on one string and printed
+another, which is the exact failure §4A's own note warns about. `output` shape is unchanged — which
+interpreter ran, and whether the tree was killed, are reported in `metadata`, so no conformance
+golden moves.
+
+**What this does NOT do, named rather than implied.** Java, C#, Elixir and Clojure are **unverified
+on Windows** — those runtimes are not installed on the Windows machine available to us, so their
+implementations are written against documented platform APIs and tested everywhere else. And
+nothing here confines `bash` *itself*: `cd ..`, `env -C` and an absolute path all still leave
+`baseDir`, measured, not assumed. `confineToBaseDir` bounds the file builtins, not the shell — a
+real sandbox is ADR 0033's subject, not this change's.
+
 **`retryAfter` on the typed provider error now means the same thing in all seven ports — the raw
 `Retry-After` header, verbatim.** *Breaking for python, elixir, csharp and clojure hosts that read
 this field.* 0.19.0 shipped the field without pinning its representation, and the seven ports
