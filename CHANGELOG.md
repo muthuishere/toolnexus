@@ -36,7 +36,7 @@ today's behaviour:
   privilege and defeats lexical canonicalisation), plus outright refusal of Windows reserved device
   names — `CON`, `NUL`, `COM1`… pass a containment check and never write into the directory at all.
 
-**Two behaviour changes come with it, deliberately.** A timeout or cancellation now kills the whole
+Two behaviour changes come with it, deliberately. A timeout or cancellation now kills the whole
 job — process group on POSIX, Job Object / `taskkill /T /F` on Windows, SIGTERM then a grace window
 then SIGKILL — where before it killed only the interpreter and orphaned the real command, in all
 seven ports. And **Go's `grep` now emits the walk-root-relative `/`-separated path** that `SPEC.md`
@@ -45,7 +45,7 @@ another, which is the exact failure §4A's own note warns about. `output` shape 
 interpreter ran, and whether the tree was killed, are reported in `metadata`, so no conformance
 golden moves.
 
-**What this does NOT do, named rather than implied.** Java, C#, Elixir and Clojure are **unverified
+What this release does NOT do, named rather than implied: Java, C#, Elixir and Clojure are **unverified
 on Windows** — those runtimes are not installed on the Windows machine available to us, so their
 implementations are written against documented platform APIs and tested everywhere else. And
 nothing here confines `bash` *itself*: `cd ..`, `env -C` and an absolute path all still leave

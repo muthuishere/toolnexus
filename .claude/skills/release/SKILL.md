@@ -104,12 +104,38 @@ eight of nine.
 
 ### 5. Merge, then cut the Release
 
-The GitHub Release **is** the trigger. Its body is the changelog section — extract it, never
-hand-write a second account:
+The GitHub Release **is** the trigger. Its body is **generated from** the changelog section —
+never hand-written, and never the raw section either:
 
 ```sh
-gh release create v<version> --title "v<version>" --notes-file <extracted-section> --target main
+node site/scripts/release-notes.mjs --body <version> > /tmp/rel-<version>.md
+gh release create v<version> --title "v<version>" --notes-file /tmp/rel-<version>.md --target main
 ```
+
+That prints one scannable line per entry, a breaking-change callout when the section contains
+one, the contributors for `<prev-tag>..v<version>`, and links to the full changelog entry and the
+`/releases` page. It is **derived**, so it cannot say something the changelog does not — which is
+the property the older "the body IS the section" rule was protecting. What changed is only the
+verbosity: v0.19.0's section is 267 lines, which is the right amount of detail to look something
+up in and far too much to open a release to.
+
+It reads two shapes, because both are in the file: `### ` subheadings where a release has them
+(0.19.0 and earlier), otherwise the bold lead of each paragraph (0.20.0 onward). So in a changelog
+entry, **a paragraph that opens in bold is a headline** and becomes a bullet; a sub-point inside an
+entry must not open in bold, or it will be announced as a feature of its own.
+
+Contributors are commit authors in the range. The assistant's `Co-Authored-By` trailer is
+deliberately excluded — it is on every commit, so listing it would say nothing about who worked on
+a given release.
+
+### 5b. Refresh the releases page
+
+```sh
+node site/scripts/release-notes.mjs --page   # writes site/src/content/docs/releases.mdx
+```
+
+Commit it with the release (or in the follow-up PR). The page is generated, so never edit
+`releases.mdx` by hand — the next run overwrites it.
 
 ### 6. Verify every registry from outside
 

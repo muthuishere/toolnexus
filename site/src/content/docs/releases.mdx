@@ -1,0 +1,131 @@
+---
+title: Releases
+description: Every toolnexus release, newest first — what changed, in one line each, with a link to the full entry.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+What changed in each release, one line per item. The [CHANGELOG](https://github.com/muthuishere/toolnexus/blob/main/CHANGELOG.md)
+is the full record — it carries the reasoning, the per-port detail, and what each release
+deliberately does **not** do.
+
+## 0.20.0 — 2026-09-22
+
+<Aside type="caution" title="Contains a breaking change">
+The [full changelog entry](https://github.com/muthuishere/toolnexus/blob/main/CHANGELOG.md#0200--2026-09-22) names the ports affected and what moves.
+</Aside>
+
+- The built-in tools no longer close over the host process. bash runs on native Windows, relative paths can be scoped to a directory, and a timeout actually kills the job.
+- retryAfter on the typed provider error now means the same thing in all seven ports — the raw Retry-After header, verbatim.
+- Java can now parse an mcp.json without connecting to anything.
+- Four API-reference pages documented signatures that do not exist, and one documented the wrong rule.
+- The API reference now has a coverage gate, and it blocks CI.
+
+[Full changelog](https://github.com/muthuishere/toolnexus/blob/main/CHANGELOG.md#0200--2026-09-22) · [GitHub release](https://github.com/muthuishere/toolnexus/releases/tag/v0.20.0)
+
+## 0.19.0 — 2026-09-22
+
+- Eight things that went wrong for people building on 0.18.x, fixed in all seven ports
+- retries: 0 now reliably means zero retries, in every port, pinned by a test
+- One model function now serves a top-level client and its sub-agents
+- ACP: talk to devin, Gemini CLI or Zed's agents as a model, over one warm session
+- Not done
+
+[Full changelog](https://github.com/muthuishere/toolnexus/blob/main/CHANGELOG.md#0190--2026-09-22) · [GitHub release](https://github.com/muthuishere/toolnexus/releases/tag/v0.19.0)
+
+## 0.18.1 — 2026-09-21
+
+- A documentation release no longer pays for a live model call
+- The READMEs are a front page again, not a second copy of the manual
+- Jev, on the typed-decisions page
+- A real call you can watch
+
+[Full changelog](https://github.com/muthuishere/toolnexus/blob/main/CHANGELOG.md#0181--2026-09-21) · [GitHub release](https://github.com/muthuishere/toolnexus/releases/tag/v0.18.1)
+
+## 0.18.0 — 2026-09-21
+
+<Aside type="caution" title="Contains a breaking change">
+The [full changelog entry](https://github.com/muthuishere/toolnexus/blob/main/CHANGELOG.md#0180--2026-09-21) names the ports affected and what moves.
+</Aside>
+
+- Fixed — a classifier retry backoff no longer lets Node exit out from under it (javascript)
+- Four quiet disagreements between the ports, closed
+- The classifier's retry backoff is yours to set, in every port
+- TypeSafe's own API is a documented way to run a Classifier — and two defects it exposed
+- Typed decisions — a Classifier, in all seven ports
+- Spec — a beforeTool hook can raise a suspension, and now the contract says so
+- Fixed — a guardrail that is not a plain string is refused, loudly, in every port
+- Fixed — Run/Ask accept a nil toolkit as "no tools" (golang)
+- Docs — the coding-agent scenario no longer says the agent runtime hides the hooks
+
+[Full changelog](https://github.com/muthuishere/toolnexus/blob/main/CHANGELOG.md#0180--2026-09-21) · [GitHub release](https://github.com/muthuishere/toolnexus/releases/tag/v0.18.0)
+
+## 0.17.0 — 2026-09-02
+
+- Fixed — an aborted A2A call reports a cancel, not a transport error (all ports)
+- Fixed — MCP tools no longer lose their images (all ports)
+- Added — attachments: images, PDFs and audio, in and out (all ports)
+- Added — a tool that returns an image reaches the model on every provider
+- Changed — an unsupported part is never dropped, and never breaks a working run
+- Changed — content parts survive translation (SPEC.md §11)
+- Known upstream hazard — OpenRouter drops images to Anthropic models
+- Not done, and where it is tracked
+
+[Full changelog](https://github.com/muthuishere/toolnexus/blob/main/CHANGELOG.md#0170--2026-09-02) · [GitHub release](https://github.com/muthuishere/toolnexus/releases/tag/v0.17.0)
+
+## 0.16.0 — 2026-08-17
+
+- Fixed — an in-process client no longer needs an API key
+- Added — createInProcessClient: a model in your process, with no wire to configure (all ports)
+
+[Full changelog](https://github.com/muthuishere/toolnexus/blob/main/CHANGELOG.md#0160--2026-08-17) · [GitHub release](https://github.com/muthuishere/toolnexus/releases/tag/v0.16.0)
+
+## 0.15.0 — 2026-08-17
+
+- Added — a harness, a loop, and a completion gate that survives delegation (all ports)
+- Fixed — todowrite did not return its \{todos\} metadata (clojure)
+- Fixed — Retry-After meant seven different things in seven ports (all ports)
+
+[Full changelog](https://github.com/muthuishere/toolnexus/blob/main/CHANGELOG.md#0150--2026-08-17) · [GitHub release](https://github.com/muthuishere/toolnexus/releases/tag/v0.15.0)
+
+## 0.14.0 — 2026-08-15
+
+- Fixed — cancelling an A2A call reports canceled reliably (js)
+- Fixed — compaction no longer orphans a tool result under the Anthropic style
+- Changed — performance benchmarks re-run in full, and Clojure joins the table
+- Fixed
+
+[Full changelog](https://github.com/muthuishere/toolnexus/blob/main/CHANGELOG.md#0140--2026-08-15) · [GitHub release](https://github.com/muthuishere/toolnexus/releases/tag/v0.14.0)
+
+## 0.13.0 — 2026-08-02
+
+- Added — Clojure, the 7th language (tier full, not yet published)
+- Added — §7F context compaction and §7E agent home, in Clojure
+- Added — Clojure: the §7D runtime completed, and an adversarial audit paid for itself
+- Changed — cross-port conformance gate
+- Changed — docs
+- Known gaps
+
+[Full changelog](https://github.com/muthuishere/toolnexus/blob/main/CHANGELOG.md#0130--2026-08-02) · [GitHub release](https://github.com/muthuishere/toolnexus/releases/tag/v0.13.0)
+
+## 0.12.0 — 2026-07-30
+
+- Relay tools + durable resume — golang ONLY, a preview
+
+[Full changelog](https://github.com/muthuishere/toolnexus/blob/main/CHANGELOG.md#0120--2026-07-30) · [GitHub release](https://github.com/muthuishere/toolnexus/releases/tag/v0.12.0)
+
+## 0.11.0 — 2026-07-26
+
+- Added
+- Specified (behavior was already correct, but unpinned)
+- Fixed
+- Not included
+
+[Full changelog](https://github.com/muthuishere/toolnexus/blob/main/CHANGELOG.md#0110--2026-07-26) · [GitHub release](https://github.com/muthuishere/toolnexus/releases/tag/v0.11.0)
+
+## 0.10.0 — 2026-07-19
+
+- Added
+- Changed — action may be required
+
+[Full changelog](https://github.com/muthuishere/toolnexus/blob/main/CHANGELOG.md#0100--2026-07-19) · [GitHub release](https://github.com/muthuishere/toolnexus/releases/tag/v0.10.0)
