@@ -19,11 +19,16 @@ inspection. The §8B wire request is byte-identical to hand-written maps (tested
 
 - **`gate` declines to decide.** Rules (`below` / `at_least` / `is`) are first-match; an uncertain,
   unsure or missing answer returns `needs_input` with a §10 `input` Request (question, reason,
-  answers; a missing answer's reason is exactly `missing answer "<key>"` in every port) your host routes through `waitFor` or its own queue — it never acts on a guess.
+  answers; the reason is exactly `missing answer "<key>"` or `uncertain answer "<key>"` in every
+  port — before this, seven ports used six different wordings for uncertainty and only two named
+  the question — and the Request id is `gate:<i>:<key>`, `i` being the rule's index as given) your host routes through `waitFor` or its own queue — it never acts on a guess.
   Cut-points default to 0.30/0.70, exclusive (exactly 0.70 is uncertain), overridable per call.
 - **`Policy{rules, default, bands, skipUncertain}`** declares the fall-through: an empty `default`
   escalates with `no rule fired`; `skipUncertain` skips an uncertain rule but a *missing* answer
-  still escalates.
+  still escalates. Checks run missing → uncertain → rule fit, so `skipUncertain` skips an uncertain answer
+  even under a mis-typed rule, and a mis-typed rule (`is` on a noul, `below` on a choice) escalates
+  instead of silently not firing (js and elixir used to evaluate it to false). golang's
+  `SkipUncertain` used to renumber the rules, so a later escalation carried the wrong `gate:<i>` id.
 - **`State(role, data)`** puts the role next to your data — the wire has no system prompt. And
   **each question names the state field it judges**. Measured live on TypeSafe `jev-1.13.0`: with
   the role in state and a vague question an insult read 0.55 (inside the uncertain band); naming
@@ -42,7 +47,7 @@ Per-port names: golang `tn.Ask` / `tn.State` / `tn.JudgeAnswer` (`Answer` is alr
 `skip_uncertain`, `evaluate_batch`; java `Judge.*` with `State.of`, `Rule.atLeast`; csharp
 `Judge.AskAsync` / `GateAsync`, `EvaluateBatchAsync`, and `Decision.FromJson` is now public;
 elixir `Toolnexus.Judge` (bands as atoms, `evaluate_batch`); clojure `toolnexus.judge` with `:at-least`,
-`j/picked`, `jev/evaluate-batch`. All seven pass the 16 shared cases in `examples/judge/`.
+`j/picked`, `jev/evaluate-batch`. All seven pass every shared case in `examples/judge/` and `examples/judge/adapters/`, which now pin the escalation reason, id and question, each answer's value/band/sure, Policy cases and `State(role, data)` as data. The clojure suite now finds `examples/` on its own (no `TN_EXAMPLES` needed).
 
 **What is NOT done.** The batteries (ToolGuard, SkillRelevance, ContentGuard and friends) follow as
 `add-judge-batteries`; a ModelRouter awaits an owner decision; no port attempts a native batch wire

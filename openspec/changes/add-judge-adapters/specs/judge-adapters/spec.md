@@ -65,6 +65,19 @@ i SHALL win over later rules.
 - **THEN** the outcome is escalated `needs_input`, the reason is exactly `missing answer "<name>"`
   naming that question's key, and the Request's `data.question` is that question's name
 
+#### Scenario: An uncertain answer escalates with a pinned reason
+
+- **WHEN** rule i's answer is present but an uncertain noul or an unsure choice/score
+- **THEN** the outcome is escalated `needs_input`, the reason is exactly `uncertain answer "<name>"`
+  naming that question's key, `data.question` is that key, and the Request id is exactly
+  `gate:<i>:<name>` with `i` the rule's index in the rules as given
+
+#### Scenario: A no-rule-fired Policy escalation has a pinned shape
+
+- **WHEN** a Policy with an empty `default` fires no rule
+- **THEN** the outcome is escalated `needs_input` with reason `no rule fired`, `data.question` `""`
+  and Request id `gate:default`
+
 #### Scenario: Every shared gate case holds in every port
 
 - **WHEN** each case of `examples/judge/gate-cases.json` is run through the `static` style
@@ -120,6 +133,16 @@ SHALL be skipped instead of escalating; a rule whose answer is missing SHALL sti
 
 - **WHEN** rule 1 names a question absent from the decision and `skipUncertain` is set
 - **THEN** the outcome is escalated `needs_input` on rule 1
+
+#### Scenario: A mis-typed rule escalates and is never skipped
+
+- **WHEN** an `is` rule names a confident noul answer
+- **THEN** the outcome is escalated `needs_input` on that rule, with or without `skipUncertain`
+
+#### Scenario: Uncertainty is checked before rule fit
+
+- **WHEN** an `is` rule names an uncertain noul answer and `skipUncertain` is set
+- **THEN** the rule is skipped and a later confident matching rule fires
 
 ### Requirement: Decisions can be recorded and replayed
 

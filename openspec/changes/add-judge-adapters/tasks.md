@@ -32,6 +32,13 @@
 - [x] 5.2 Missing-answer reason names the key in every port (O2)
 - [x] 5.3 One Policy entry-point shape (O3), picked-option accessor (O4), static one-liner name (O5) — or record them as idiom
 
+## 6. Parity sweep (design.md O6–O8, parity-matrix.md)
+- [x] 6.1 Uncertain-answer reason pinned as `uncertain answer "<key>"` in SPEC §8B + spec delta, all 7 ports
+- [x] 6.2 Escalation id/question and check order pinned; golang skip index, default `question`, misfit rules fixed
+- [x] 6.3 Shared fixtures extended (reason/requestId/question, wantAnswers, policy, per-case rules, roleState); asserted by all 7 ports
+- [x] 6.4 Each port mutation-checked against the new fixtures
+- [x] 6.5 clojure suite defaults to the repo `examples/` when `TN_EXAMPLES` is unset
+
 ## Follow-ups (not this change)
 - `add-judge-batteries` — ToolGuard / ToolRelevance / SkillRelevance / ToolResultFilter /
   IsComplete / AgentRouter / ContentGuard (ADR 0035)

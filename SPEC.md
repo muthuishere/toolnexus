@@ -2096,6 +2096,17 @@ gate(classifier, state, questions, rules, bands?) -> { action, target, escalated
   question, reason, answers). A gate never authorises; it only declines to decide.
 - A missing answer's reason is exactly `missing answer "<key>"` (the question key in double
   quotes), and `data.question` is that key.
+- An uncertain noul, or an unsure choice/score, escalates with reason exactly
+  `uncertain answer "<key>"` (same quoting; no value or confidence in the reason, the answers
+  travel in `data.answers`), and `data.question` is that key.
+- A rule escalation's Request id is exactly `gate:<i>:<key>` (`i` = the rule's 0-based index in
+  the rules as given, even when `skipUncertain` skipped earlier rules); the no-rule-fired
+  escalation's id is `gate:default`, its `data.question` is `""`, its reason `no rule fired`.
+  The Request `prompt` is free text and not part of this contract.
+- Per rule, the checks run in this order: missing answer, then uncertain/unsure answer, then
+  rule fit. So `skipUncertain` skips an uncertain answer even under a mis-typed rule. A rule that
+  does not fit its answer's type (`is` on a noul/score, `below`/`at_least` on a choice, or no
+  condition) escalates with a port-specific reason and is never skipped.
 - `State(role, data)` puts `role` next to the data's fields at the top level (non-object data goes
   under `data`). The wire has no role field; the state carries it. **Each question names the state
   field it judges** ("Does `message_received` contain insults…"), and the role is never copied into

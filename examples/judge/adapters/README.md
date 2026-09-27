@@ -25,5 +25,8 @@ d.is_appropriate.band   // "yes" | "no" | "uncertain"
   - Cut points are EXCLUSIVE on the confident side: exactly low or exactly high is uncertain.
   - A choice is sure only if confidence > high AND not nearUniform. A score is sure only if confidence > high.
   - A missing or uncertain answer escalates to `needs_input` with a §10-shaped request (kind "input"; data has question, reason, answers).
+  - An escalated `want` also pins `question` (data.question), `reason` (exact: `missing answer "<key>"`, `uncertain answer "<key>"`, or `no rule fired`) and `requestId` (`gate:<i>:<key>` or `gate:default`). Every port asserts them.
+  - A case with its own `rules` uses them instead of the top-level list. A rule that does not fit its answer's type escalates; its `reason` is port-specific, so such a case omits `want.reason` (assert reason only when present). Check order per rule: missing, uncertain, fit.
+  - A case with `policy: {default, skipUncertain}` runs through the port's Policy instead of the bare rule list.
   - Rules are first-match, in order. An escalation on rule i wins over later rules.
 - The spike lives in the port's spike area, does NOT modify library code, and runs hermetically.

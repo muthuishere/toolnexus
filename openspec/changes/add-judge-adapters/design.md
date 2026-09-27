@@ -72,6 +72,26 @@ Evidence: ADR 0035 and `spikes/judge-adapters/` (Go original + six ports + `shar
 - **O5 Static one-liner — RESOLVED as idiom.** Each port's existing helper is recorded in the table;
   no rename.
 
+- **O6 Uncertain-answer reason — RESOLVED.** Seven ports had six wordings (`noul answer is
+  uncertain` js/clojure, `uncertain noul answer` go, `noul answer is in the uncertain band` java,
+  `fixable=0.5 uncertain` python, three value-bearing variants in csharp, `uncertain: "fixable"`
+  elixir); only two named the key and none agreed on a value format. Pinned: exactly
+  `uncertain answer "<key>"`, parallel to O2's `missing answer "<key>"`; no value or confidence in
+  the reason, since `data.answers` already carries them and a formatted float is a parity trap.
+- **O7 Escalation shape — RESOLVED.** All seven already used `gate:<i>:<key>` / `gate:default`;
+  now pinned. golang's `SkipUncertain` pre-filtered the rule list, so `<i>` was the filtered index;
+  it now skips inside the loop. golang omitted and elixir nil'd `data.question` on `gate:default`;
+  both now `""`. The prompt stays free text.
+- **O8 Check order and misfit rules — RESOLVED (owner asleep; sensible call).** Per rule: missing,
+  then uncertain, then fit. A rule that does not fit its answer's type escalates (reason
+  port-specific) and is never skipped. java and python checked fit first; csharp and elixir let
+  `skipUncertain` skip a misfit; js and elixir evaluated a misfit silently to false. Uncertain-first
+  was the majority and the only order in which `skipUncertain` means what its name says.
+- **Parity by data.** `gate-cases.json` now pins `question` / `reason` / `requestId` on every
+  escalation, `wantAnswers` (value, band/sure, choice) on every case, Policy cases
+  (`policy: {default, skipUncertain}`) and per-case `rules`; `state-cases.json` pins `State(role,
+  data)`. Every port asserts all of it; each port was mutation-checked (see `parity-matrix.md`).
+
 ## Risks
 
 - Cut-points tuned on one backend do not transfer; `Decision.calibrated` stays visible
