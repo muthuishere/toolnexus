@@ -24,6 +24,7 @@
             [koine.env :as env]
             [koine.http :as khttp]
             [koine.json :as json]
+            [koine.process :as proc]
             [koine.time :as ktime]
             [toolnexus.client :as client]))
 
@@ -706,3 +707,63 @@
                 :prompt_tokens     (get-in d [:usage :input-tokens])
                 :completion_tokens (get-in d [:usage :output-tokens])})
       d)))
+
+;; ---------------------------------------------------------------------------
+;; static in one line, and the batch
+;; ---------------------------------------------------------------------------
+
+(defn static-classifier
+  "A `static` classifier from recorded decisions in ONE call — what a hermetic
+  test wants. Each entry is `{:state … :questions … :response <parsed body>}`,
+  or `{:state … :questions … :answers <wire answers>}` as shorthand for a body
+  that is only its answers. `opts` merges into `create-classifier` (e.g.
+  `:model`)."
+  ([decisions] (static-classifier decisions {}))
+  ([decisions opts]
+   (create-classifier
+    (merge opts
+           {:style     "static"
+            :decisions (mapv (fn [d]
+                               {:state     (:state d)
+                                :questions (:questions d)
+                                :response  (or (:response d) {"answers" (:answers d)})})
+                             decisions)}))))
+
+(def default-batch-concurrency
+  "At most this many `evaluate` calls in flight in one batch (§8B Batch)."
+  16)
+
+(defn evaluate-batch
+  "§8B Batch — the SAME questions over many states. Each state goes through the
+  per-state `evaluate` (every style), at most `:concurrency` (default 16) in
+  flight, and the decisions come back IN STATE ORDER regardless of completion
+  order. FAIL CLOSED: if any state fails, this throws naming the first failing
+  state's index and returns no decisions. No states is an error and sends
+  nothing.
+
+  `koine.process/run-async!` + a promise, not `future` — the same reason as the
+  client's parallel tool calls: library code never holds its host's process
+  open."
+  ([c states questions] (evaluate-batch c states questions {}))
+  ([c states questions opts]
+   (when (empty? states)
+     (throw (ex-info "classifier: evaluateBatch: no states to evaluate" {})))
+   (let [n        (max 1 (or (:concurrency opts) default-batch-concurrency))
+         outcomes (into []
+                        (mapcat
+                         (fn [wave]
+                           (->> wave
+                                (mapv (fn [st]
+                                        (let [p (promise)]
+                                          (proc/run-async!
+                                           (fn []
+                                             (deliver p (try {:value (evaluate c st questions)}
+                                                             (catch Throwable e {:thrown e})))))
+                                          p)))
+                                (mapv deref))))
+                        (partition-all n states))]
+     (doseq [[i o] (map-indexed vector outcomes)]
+       (when-let [e (:thrown o)]
+         (throw (ex-info (str "classifier: evaluateBatch: state " i " failed: " (ex-message e))
+                         {:index i} e))))
+     (mapv :value outcomes))))
