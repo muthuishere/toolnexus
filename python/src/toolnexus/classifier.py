@@ -33,7 +33,7 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
-from typing import Any, Callable, Iterable, Literal, Mapping, Optional, Protocol, Union
+from typing import Any, Callable, Iterable, Literal, Mapping, Optional, Protocol, Sequence, Union
 
 from .client import (
     Client,
@@ -243,6 +243,16 @@ def _question_wire(key: str, q: Question) -> dict[str, Any]:
     if isinstance(q, ScoreQuestion):
         return {"type": "score", "instructions": q.instructions, "criteria": list(q.criteria)}
     raise ClassifierError(f"classifier: question {key!r} is not a noul, choice or score question")
+
+
+def question_wire(q: Question) -> dict[str, Any]:
+    """Public question -> §8B wire dict (the exact projection the request uses)."""
+    return _question_wire("question", q)
+
+
+def questions_wire(questions: Mapping[str, Question]) -> dict[str, dict[str, Any]]:
+    """Public question map -> §8B wire ``questions`` map."""
+    return {k: _question_wire(k, q) for k, q in questions.items()}
 
 
 def _validate_question(key: str, q: Question) -> None:
@@ -694,6 +704,31 @@ class Classifier:
             }
         )
         return d
+
+    async def evaluate_batch(
+        self, states: Sequence[Any], questions: Mapping[str, Question], *, concurrency: int = 16
+    ) -> list[Decision]:
+        """The same questions over many states (§8B Batch).
+
+        Each state goes through :meth:`evaluate`, at most ``concurrency`` in flight,
+        decisions returned in STATE order. Fails closed: the first failing state's
+        index is named and no decisions are returned. No states is an error and
+        sends nothing.
+        """
+        states = list(states)
+        if not states:
+            raise ClassifierError("classifier: evaluate_batch: no states to evaluate")
+        sem = asyncio.Semaphore(max(1, concurrency))
+
+        async def one(st: Any) -> Decision:
+            async with sem:
+                return await self.evaluate(st, questions)
+
+        results = await asyncio.gather(*(one(st) for st in states), return_exceptions=True)
+        for i, r in enumerate(results):
+            if isinstance(r, BaseException):
+                raise ClassifierError(f"classifier: evaluate_batch: state {i}: {r}") from r
+        return list(results)  # type: ignore[arg-type]
 
     # ----------------------------------------------------------------------- #
     # Degenerate criteria

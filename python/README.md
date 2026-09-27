@@ -53,6 +53,30 @@ tk = await create_toolkit(mcp_config="mcp.json", skills_dir=["skills"])
 - `skills/` is a folder of `**/SKILL.md` files, loaded on demand through one `skill` tool.
 - Remote MCP `headers` values expand `${ENV_VAR}` at call time and are never logged.
 
+## Simple judgments
+
+A thin layer over any `Classifier` (SPEC §8B); the wire request is unchanged.
+
+```python
+from toolnexus import ask, gate, noul, choice, state, Rule, Policy
+
+st = state("You are Donkey Kong, you want to win.", {"message_received": msg})
+a = await ask(classifier, st, [
+    noul("is_appropriate", "Does message_received contain inappropriate language?"),
+    noul("does_this_help", "Does message_received help donkey kong win?"),
+])
+a["is_appropriate"].band      # "yes" | "no" | "uncertain"   (Bands(0.30, 0.70), exclusive)
+a["does_this_help"].value()   # the probability
+
+out = await gate(classifier, st, qs, Policy([Rule("fixable", "fail", below=0.3),
+                                             Rule("component", "skip_to", is_="pricing", target="fix-pricing")]))
+out.escalated, out.request    # unsure / missing -> a §10 Request(kind="input")
+```
+
+Also: `context(ctx, message, extra)`, `score(...)`, `Tape` (record live, replay offline by call
+name), `static_classifier((state, questions, response), ...)`, `questions_wire(...)`, and
+`classifier.evaluate_batch(states, questions)` (state order, fail-closed, 16 in flight).
+
 ## Documentation
 
 Everything else — the full surface, with runnable examples — lives on the docs site:
