@@ -173,7 +173,7 @@ public static class Judge
             var (fired, reason) = Check(d, r, b);
             if (reason != null)
             {
-                if (!(policy.SkipUncertain && reason != "missing answer")) return Escalate(d, r.Question, reason, $"gate:{i}:{r.Question}",
+                if (!(policy.SkipUncertain && d.Answers.ContainsKey(r.Question))) return Escalate(d, r.Question, reason, $"gate:{i}:{r.Question}",
                     $"Classifier is unsure about \"{r.Question}\" ({reason}). Decide rule {i} ({r.Action}).");
             }
             else if (fired) return new GateOutcome(r.Action, r.Target);
@@ -197,7 +197,7 @@ public static class Judge
 
     private static (bool Fired, string? Reason) Check(Decision d, Rule r, Bands b)
     {
-        if (!d.Answers.TryGetValue(r.Question, out var a)) return (false, "missing answer");
+        if (!d.Answers.TryGetValue(r.Question, out var a)) return (false, $"missing answer \"{r.Question}\"");
         if (r.IsValue is { } opt)
             return a is ChoiceAnswer c
                 ? b.Sure(c) ? (c.Choice == opt, null) : (false, $"choice \"{c.Choice}\" confidence {F(c.Confidence)} nearUniform={(c.NearUniform ? "true" : "false")}")

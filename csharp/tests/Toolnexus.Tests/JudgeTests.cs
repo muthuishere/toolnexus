@@ -177,7 +177,7 @@ public class JudgeTests
         Assert.True(Judge.Apply(d, new Policy { Rules = rules }).Escalated);
         Assert.Equal("two", Judge.Apply(d, new Policy { Rules = rules, SkipUncertain = true }).Action);
         var missing = Judge.Apply(d, new Policy { Rules = new[] { Rule.Is("zz", "x", "go") } });
-        Assert.Equal("missing answer", missing.Request!.Data!["reason"]);
+        Assert.Equal("missing answer \"zz\"", missing.Request!.Data!["reason"]);
     }
 
     [Fact]
