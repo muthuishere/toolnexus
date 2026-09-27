@@ -187,7 +187,7 @@ defmodule Toolnexus.Judge do
   def decide(answers, %Policy{} = p) do
     case run(answers, p.rules, p.skip_uncertain) do
       nil when p.default in [nil, ""] ->
-        escalate(-1, nil, "no rule fired", answers)
+        escalate(-1, "", "no rule fired", answers)
 
       nil ->
         %Outcome{action: to_string(p.default)}
@@ -204,40 +204,42 @@ defmodule Toolnexus.Judge do
       r = Map.new(r, fn {k, v} -> {to_string(k), v} end)
       q = to_string(r["question"])
 
-      case check(answers[q], r) do
-        {:unsure, _} when skip? and is_map_key(answers, q) -> nil
-        {:unsure, why} -> escalate(i, q, why, answers)
+      case check(answers[q], q, r) do
+        {:uncertain, _} when skip? -> nil
+        {_, why} -> escalate(i, q, why, answers)
         true -> %Outcome{action: to_string(r["action"]), target: to_string(r["target"] || "")}
         false -> nil
       end
     end)
   end
 
-  defp check(nil, _), do: {:unsure, :missing}
+  # Per rule, in order: missing, then uncertain, then fit (SPEC §8B). Only an
+  # :uncertain escalation may be skipped by `skip_uncertain`; a missing answer or
+  # a rule that does not fit its answer's type always escalates.
+  defp check(nil, _q, _r), do: {:missing, :missing}
 
-  defp check(%Answer{} = a, r) do
+  defp check(%Answer{} = a, q, r) do
+    choice? = a.type == "choice"
+
     cond do
-      Answer.uncertain?(a) -> {:unsure, "uncertain"}
-      Map.has_key?(r, "is") -> Answer.choice(a) == r["is"]
+      Answer.uncertain?(a) -> {:uncertain, ~s(uncertain answer "#{q}")}
+      Map.has_key?(r, "is") and choice? -> Answer.choice(a) == r["is"]
+      Map.has_key?(r, "is") -> {:misfit, "is-rule on #{a.type} answer #{inspect(q)}"}
+      choice? -> {:misfit, "numeric rule on choice answer #{inspect(q)}"}
       Map.has_key?(r, "below") -> Answer.value(a) < r["below"]
       Map.has_key?(r, "at_least") -> Answer.value(a) >= r["at_least"]
-      true -> {:unsure, "rule has no below/at_least/is"}
+      true -> {:misfit, "rule on #{inspect(q)} has no below/at_least/is"}
     end
   end
 
   defp escalate(i, q, why, answers) do
-    reason =
-      cond do
-        why == :missing -> ~s(missing answer "#{q}")
-        q -> "#{why}: #{inspect(q)}"
-        true -> why
-      end
+    reason = if why == :missing, do: ~s(missing answer "#{q}"), else: why
 
     %Outcome{
       action: "needs_input",
       escalated: true,
       request: %Toolnexus.Request{
-        id: if(q, do: "gate:#{i}:#{q}", else: "gate:default"),
+        id: if(q == "", do: "gate:default", else: "gate:#{i}:#{q}"),
         kind: "input",
         prompt: "The classifier is unsure (#{reason}); decide the next action.",
         data: %{"question" => q, "reason" => reason, "answers" => answers}

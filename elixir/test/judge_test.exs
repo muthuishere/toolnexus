@@ -32,6 +32,7 @@ defmodule Toolnexus.JudgeTest do
       st =
         case k do
           %{"context" => cx} -> context(cx["context"], cx["message"], cx["extra"] || %{})
+          %{"roleState" => rs} -> state(rs["role"], rs["data"])
           %{"state" => s} -> state(s)
         end
 
@@ -100,13 +101,52 @@ defmodule Toolnexus.JudgeTest do
       st = %{"case" => k["name"]}
       {:ok, c} = Judge.static(st, qs, %{"answers" => k["answers"]})
       opts = if k["bands"], do: [bands: k["bands"]], else: []
-      assert {:ok, %Outcome{} = o} = gate(c, st, qs, g["rules"], opts)
-      assert {o.action, o.target, o.escalated} == {k["want"]["action"], k["want"]["target"], k["want"]["escalated"]}
+      rules = k["rules"] || g["rules"]
+
+      rules =
+        case k["policy"] do
+          nil -> rules
+          p -> %Policy{rules: rules, default: p["default"], bands: k["bands"], skip_uncertain: p["skipUncertain"]}
+        end
+
+      assert {:ok, %Outcome{} = o} = gate(c, st, qs, rules, opts)
+      w = k["want"]
+      assert {o.action, o.target, o.escalated} == {w["action"], w["target"], w["escalated"]}
+
+      {:ok, as} = ask(c, st, qs, opts)
+
+      for {n, wa} <- k["wantAnswers"] || %{} do
+        a = as[n]
+        assert Answer.value(a) == wa["value"], n
+        if Map.has_key?(wa, "band"), do: assert(to_string(a.band) == wa["band"], n)
+        if Map.has_key?(wa, "sure"), do: assert(a.sure == wa["sure"], n)
+        if Map.has_key?(wa, "choice"), do: assert(Answer.choice(a) == wa["choice"], n)
+      end
 
       if o.escalated do
-        assert %Toolnexus.Request{kind: "input", data: %{"reason" => _, "answers" => _}} = o.request
+        assert %Toolnexus.Request{kind: "input", data: %{"answers" => _} = data} = o.request
+        assert data["question"] == w["question"]
+        assert o.request.id == w["requestId"]
+        if Map.has_key?(w, "reason"), do: assert(data["reason"] == w["reason"])
       end
     end
+  end
+
+  test "uncertain answer reason is pinned; misfit rules escalate and are never skipped" do
+    a = %{"q" => noul_ans(0.5), "y" => noul_ans(0.9)}
+    o = apply_rules(a, [%{question: "q", below: 0.1, action: "x"}])
+    assert o.request.data["reason"] == ~s(uncertain answer "q")
+    assert o.request.id == "gate:0:q"
+
+    for bad <- [%{question: "y", is: "a", action: "x"}, %{question: "y", action: "x"}] do
+      o = decide(a, %Policy{rules: [bad], skip_uncertain: true, default: "d"})
+      assert %Outcome{escalated: true} = o
+      assert o.request.id == "gate:0:y"
+    end
+
+    o = decide(%{}, %Policy{rules: []})
+    assert o.request.id == "gate:default"
+    assert o.request.data["question"] == ""
   end
 
   test "missing answer reason names it" do
@@ -175,7 +215,7 @@ defmodule Toolnexus.JudgeTest do
     assert {:ok, ^a1} = ask(rep, %{anything: true}, qs)
     {:ok, miss} = Tape.replay(tape, "other")
     assert {:error, msg} = ask(miss, %{}, qs)
-    assert msg =~ "\"other\""
+    assert msg == ~s(tape: no recorded decision for call "other")
   end
 
   # ------------------------------------------------------------ evaluateBatch
@@ -186,7 +226,8 @@ defmodule Toolnexus.JudgeTest do
         style: "custom",
         evaluate: fn %{"i" => i}, _ ->
           if i == 1, do: Process.sleep(20)
-          if i == 99, do: {:error, "boom"}, else: C.decode_decision(%{"answers" => %{"q" => %{"type" => "noul", "noul" => i / 10}}})
+          if i == 98, do: Process.sleep(30)
+          if i in [98, 99], do: {:error, "boom"}, else: C.decode_decision(%{"answers" => %{"q" => %{"type" => "noul", "noul" => i / 10}}})
         end
       )
 
@@ -203,6 +244,13 @@ defmodule Toolnexus.JudgeTest do
     qs = %{"q" => %C.Noul{instructions: "q?"}}
     assert {:error, msg} = C.evaluate_batch(batch_classifier(), [%{"i" => 1}, %{"i" => 99}, %{"i" => 3}], qs)
     assert msg =~ "state 1"
+  end
+
+  test "evaluate_batch names the lowest failing index whatever the completion order" do
+    qs = %{"q" => %C.Noul{instructions: "q?"}}
+    assert {:error, msg} = C.evaluate_batch(batch_classifier(), [%{"i" => 98}, %{"i" => 2}, %{"i" => 99}], qs, concurrency: 3)
+    assert msg =~ "state 0"
+    refute msg =~ "state 2"
   end
 
   test "evaluate_batch with no states errors and sends nothing" do
