@@ -35,6 +35,33 @@ IO.puts(result.text)
 - `skills/` is a folder of `**/SKILL.md` files, loaded on demand through one `skill` tool.
 - Remote MCP `headers` values expand `${ENV_VAR}` at call time and are never logged.
 
+## Simple judgments
+
+`Toolnexus.Judge` is a thin layer over any `Toolnexus.Classifier` (SPEC §8B); the wire is unchanged.
+
+```elixir
+import Toolnexus.Judge
+
+st = state("You are Donkey Kong, you want to win.", %{message_received: "jump off the stage now"})
+
+{:ok, answers} =
+  ask(classifier, st, [
+    noul(:is_appropriate, "Does message_received contain harmful language or topics?"),
+    noul(:does_this_help, "Does message_received help Donkey Kong win?")
+  ])
+
+answers["is_appropriate"].band            #=> :yes | :no | :uncertain (cut-points 0.30 / 0.70, exclusive)
+Toolnexus.Judge.Answer.value(answers["does_this_help"])
+
+{:ok, outcome} =
+  gate(classifier, st, questions, [%{question: "fixable", below: 0.3, action: "fail"}])
+# outcome.escalated => a §10 `input` Request instead of a guess
+```
+
+The role lives in the state, and each question names the state field it judges. Also: `Policy`
+(`default`, `skip_uncertain`), `Tape` (record / replay by call name), `Judge.static/4` (one-line
+static classifier), and `Classifier.evaluate_batch/4` (many states, state order, fail-closed, 16 in flight).
+
 ## Why the BEAM port
 
 Long-running agents want supervision. Every MCP connection is a supervised process; a crashed

@@ -330,6 +330,17 @@ defmodule Toolnexus.Classifier do
 
   defp wire_questions(questions), do: Map.new(questions, fn {k, q} -> {to_string(k), wire(q)} end)
 
+  @doc """
+  The public question -> wire conversion: one `Noul` / `Choice` / `Score` struct as
+  the JSON-shaped map §8B transmits (`type`, `instructions`, `criteria`).
+  """
+  @spec question_to_wire(question()) :: map()
+  def question_to_wire(question), do: wire(question)
+
+  @doc "A questions map (caller key -> question) as its §8B wire map."
+  @spec questions_to_wire(%{String.t() => question()}) :: map()
+  def questions_to_wire(questions), do: wire_questions(questions)
+
   defp wire(%Noul{instructions: i, criteria: nil}), do: %{"type" => "noul", "instructions" => i}
 
   defp wire(%Noul{instructions: i, criteria: c}),
@@ -587,6 +598,39 @@ defmodule Toolnexus.Classifier do
       {:error, reason} ->
         emit_error(c, t0, reason)
         {:error, reason}
+    end
+  end
+
+  @default_batch_concurrency 16
+
+  @doc """
+  The same questions over many states (§8B "Batch"). Each state goes through
+  `evaluate/3`, at most `:concurrency` (default 16) in flight; decisions come back
+  in STATE order. Fails closed: the first failing state's index is named and no
+  decisions are returned. An empty states list is an error and sends nothing.
+  """
+  @spec evaluate_batch(t(), [term()], %{String.t() => question()}, keyword()) ::
+          {:ok, [Decision.t()]} | {:error, String.t()}
+  def evaluate_batch(c, states, questions, opts \\ [])
+
+  def evaluate_batch(%__MODULE__{}, [], _questions, _opts),
+    do: {:error, "classifier: evaluateBatch: no states to evaluate"}
+
+  def evaluate_batch(%__MODULE__{} = c, states, questions, opts) when is_list(states) do
+    states
+    |> Enum.with_index()
+    |> Task.async_stream(fn {state, i} -> {i, evaluate(c, state, questions)} end,
+      max_concurrency: Keyword.get(opts, :concurrency, @default_batch_concurrency),
+      ordered: true,
+      timeout: :infinity
+    )
+    |> Enum.reduce_while({:ok, []}, fn
+      {:ok, {_i, {:ok, d}}}, {:ok, acc} -> {:cont, {:ok, [d | acc]}}
+      {:ok, {i, {:error, why}}}, _ -> {:halt, {:error, "classifier: evaluateBatch: state #{i}: #{why}"}}
+    end)
+    |> case do
+      {:ok, ds} -> {:ok, Enum.reverse(ds)}
+      err -> err
     end
   end
 
