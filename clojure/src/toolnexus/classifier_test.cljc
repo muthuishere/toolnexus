@@ -379,10 +379,14 @@
 
 (deftest credentials-and-expanded-headers-never-leak
   ;; The suite cannot set an environment variable in-process on either host, so
-  ;; the credential is a variable every runner ALREADY exports: HOME (the gate
-  ;; scripts pass it even under `env -i`). It is not a real secret; it is a value
-  ;; that must behave exactly like one — reach the wire and nowhere else.
-  (let [secret (env/get-env "HOME")
+  ;; the credential is a variable the runner ALREADY exports: HOME (the gate
+  ;; scripts pass it even under `env -i`), else USERPROFILE (Windows has no HOME).
+  ;; It is not a real secret; it is a value that must behave exactly like one —
+  ;; reach the wire and nowhere else. A value shorter than 8 characters (HOME=/ in
+  ;; some containers) would be a substring of any error text, making "never leaks"
+  ;; fail for a reason that has nothing to do with leaking, so it is refused.
+  (let [evar   (first (filter #(<= 8 (count (env/get-env %))) ["HOME" "USERPROFILE"]))
+        secret (some-> evar env/get-env)
         seen   (atom nil)
         events (atom [])
         http   (fn [_ headers _]
@@ -392,14 +396,14 @@
                   :body (str "{\"error\":\"bad credential " (get headers "authorization")
                              " for " (get headers "x-tenant") "\"}")})
         c      (jev/create-classifier {:base-url "https://judge.example/v1"
-                                       :api-key-env "HOME"
-                                       :headers {"X-Tenant" "${HOME}"}
+                                       :api-key-env evar
+                                       :headers {"X-Tenant" (str "${" evar "}")}
                                        :retries 1
                                        :http-client http
                                        :on-metric (fn [ev] (swap! events conj ev))})
         err    (try (jev/evaluate c "s" {"q" (jev/noul-question "?")}) nil
                     (catch Throwable t t))]
-    (is (some? secret) "HOME must be set")
+    (is (some? secret) "HOME or USERPROFILE must be set to at least 8 characters")
     (is (some? err) "a 401 fails")
     (testing "the credential and the ${ENV} header DID reach the wire — they are use-only, not unused"
       (is (= (str "Bearer " secret) (get @seen "authorization")))
