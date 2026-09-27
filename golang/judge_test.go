@@ -371,6 +371,11 @@ func TestJudge_Tape(t *testing.T) {
 	if err == nil || err.Error() != `tape: no recorded decision for call "plan"` {
 		t.Fatalf("miss should be the shared text naming plan: %v", err)
 	}
+	// The name is quoted verbatim, never Go-escaped (%q would turn " into \").
+	_, err = Ask(WithCallName(context.Background(), `a"b\c`), rp, state, qs)
+	if err == nil || err.Error() != `tape: no recorded decision for call "a"b\c"` {
+		t.Fatalf("miss should quote the name verbatim: %v", err)
+	}
 }
 
 // Builders vs hand-written maps: the transmitted request bodies are byte-identical.

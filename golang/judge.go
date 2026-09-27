@@ -8,6 +8,7 @@ package toolnexus
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"sort"
@@ -293,10 +294,10 @@ func rawAnswers(a Answers) map[string]DecisionAnswer {
 func checkRule(as Answers, r *Rule) (bool, string) {
 	a, ok := as[r.Question]
 	if !ok {
-		return false, fmt.Sprintf("missing answer %q", r.Question)
+		return false, `missing answer "` + r.Question + `"`
 	}
 	if a.Band == BandUncertain {
-		return false, fmt.Sprintf("uncertain answer %q", r.Question)
+		return false, `uncertain answer "` + r.Question + `"`
 	}
 	switch a.DecisionAnswer.(type) {
 	case NoulAnswer, ScoreAnswer:
@@ -440,7 +441,7 @@ func (t *Tape) Replayer() (*Classifier, error) {
 			raw, ok := t.Decisions[k]
 			t.mu.Unlock()
 			if !ok {
-				return Decision{}, fmt.Errorf("tape: no recorded decision for call %q", k)
+				return Decision{}, errors.New(`tape: no recorded decision for call "` + k + `"`)
 			}
 			var d Decision
 			return d, json.Unmarshal(raw, &d)

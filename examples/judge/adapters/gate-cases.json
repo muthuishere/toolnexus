@@ -1290,6 +1290,72 @@
     "default": "",
     "skipUncertain": true
    }
+  },
+  {
+   "name": "missing-key-quoted-verbatim",
+   "answers": {
+    "fixable": {
+     "type": "noul",
+     "noul": 0.9
+    },
+    "component": {
+     "type": "choice",
+     "choice": "pricing",
+     "confidence": 0.85,
+     "probabilities": {
+      "pricing": 0.9,
+      "checkout": 0.08,
+      "frontend": 0.01,
+      "infra": 0.01
+     }
+    },
+    "fixability": {
+     "type": "score",
+     "score": 1.8,
+     "confidence": 0.9,
+     "probabilities": {
+      "0": 0.05,
+      "1": 0.15,
+      "2": 0.8
+     },
+     "legend": {
+      "0": "needs product input",
+      "1": "needs investigation",
+      "2": "fixable from the report"
+     }
+    }
+   },
+   "bands": null,
+   "want": {
+    "action": "needs_input",
+    "target": "",
+    "escalated": true,
+    "question": "a\"b\\c",
+    "reason": "missing answer \"a\"b\\c\"",
+    "requestId": "gate:0:a\"b\\c"
+   },
+   "wantAnswers": {
+    "fixable": {
+     "value": 0.9,
+     "band": "yes"
+    },
+    "component": {
+     "value": 0.85,
+     "sure": true,
+     "choice": "pricing"
+    },
+    "fixability": {
+     "value": 1.8,
+     "sure": true
+    }
+   },
+   "rules": [
+    {
+     "question": "a\"b\\c",
+     "below": 0.3,
+     "action": "fail"
+    }
+   ]
   }
  ]
 }

@@ -21,7 +21,8 @@ inspection. The §8B wire request is byte-identical to hand-written maps (tested
   unsure or missing answer returns `needs_input` with a §10 `input` Request (question, reason,
   answers; the reason is exactly `missing answer "<key>"` or `uncertain answer "<key>"` in every
   port — before this, seven ports used six different wordings for uncertainty and only two named
-  the question — and the Request id is `gate:<i>:<key>`, `i` being the rule's index as given) your host routes through `waitFor` or its own queue — it never acts on a guess.
+  the question — with the key verbatim between the quotes, never escaped (golang `%q` and js
+  `JSON.stringify` used to escape a `"` or `\` in the key, and in the Tape miss name) — and the Request id is `gate:<i>:<key>`, `i` being the rule's index as given) your host routes through `waitFor` or its own queue — it never acts on a guess.
   Cut-points default to 0.30/0.70, exclusive (exactly 0.70 is uncertain), overridable per call.
 - **`Policy{rules, default, bands, skipUncertain}`** declares the fall-through: an empty `default`
   escalates with `no rule fired`; `skipUncertain` skips an uncertain rule but a *missing* answer

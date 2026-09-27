@@ -16,6 +16,7 @@ Every requirement and scenario in the spec delta and SPEC §8B, checked in each 
 | Custom bands | F | F | F | F | F | F | F |
 | value() / band / sure / choice per answer (`wantAnswers`) | F (new) | F (new) | F (new) | F (new) | F (new) | F (new) | F (new) |
 | Missing → `missing answer "<key>"`, id, question | F | F | F | F | F | F | F |
+| Key quoted verbatim (`a"b\c`, no escaping) | F fixed (JSON-escaped) | F | F fixed (`%q`) | F | F | F | F |
 | Uncertain → `uncertain answer "<key>"` | F fixed | F fixed | F fixed | F fixed | F fixed | F fixed | F fixed |
 | Request id `gate:<i>:<key>` | F | F | F fixed (skip renumbered) | F | F | F | F |
 | Default escalation: `no rule fired`, `gate:default`, question `""` | F | F | F fixed (no question) | F | F | F fixed (nil) | F |
@@ -31,7 +32,7 @@ Every requirement and scenario in the spec delta and SPEC §8B, checked in each 
 | evaluateBatch empty → error, nothing sent | T | T | T | T | T | T | T |
 | Canonical request byte-identical | T | T | T | T | T | T | T |
 
-Fixture size after the sweep: gate-cases 21 cases; state-cases 5 cases.
+Fixture size after the sweep: gate-cases 22 cases; state-cases 5 cases.
 
 **Mutation check.** Each port was broken on purpose and the tests were confirmed to fail, then the
 break was reverted.

@@ -2094,8 +2094,10 @@ gate(classifier, state, questions, rules, bands?) -> { action, target, escalated
 - `gate` rules (`below` / `at_least` / `is`) are first-match. An uncertain, unsure or missing
   answer escalates to `needs_input` with a §10 `Request` (`kind: "input"`, data:
   question, reason, answers). A gate never authorises; it only declines to decide.
-- A missing answer's reason is exactly `missing answer "<key>"` (the question key in double
-  quotes), and `data.question` is that key.
+- A missing answer's reason is exactly `missing answer "<key>"` (the question key verbatim
+  between double quotes, never escaped: a key `a"b` gives `missing answer "a"b"`), and
+  `data.question` is that key. The same verbatim quoting holds for every `"<key>"` / `"<name>"`
+  below.
 - An uncertain noul, or an unsure choice/score, escalates with reason exactly
   `uncertain answer "<key>"` (same quoting; no value or confidence in the reason, the answers
   travel in `data.answers`), and `data.question` is that key.

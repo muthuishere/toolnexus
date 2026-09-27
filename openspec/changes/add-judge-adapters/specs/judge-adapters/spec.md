@@ -65,6 +65,13 @@ i SHALL win over later rules.
 - **THEN** the outcome is escalated `needs_input`, the reason is exactly `missing answer "<name>"`
   naming that question's key, and the Request's `data.question` is that question's name
 
+#### Scenario: A question key is quoted verbatim
+
+- **WHEN** a rule names an absent question whose key is `a"b\c`
+- **THEN** the reason is exactly `missing answer "a"b\c"` — the key between double quotes with no
+  escaping — in every port, and a Tape miss for a call named `a"b\c` reads
+  `tape: no recorded decision for call "a"b\c"`
+
 #### Scenario: An uncertain answer escalates with a pinned reason
 
 - **WHEN** rule i's answer is present but an uncertain noul or an unsure choice/score

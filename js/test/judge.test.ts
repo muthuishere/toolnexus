@@ -174,6 +174,8 @@ test("Tape records by call name and replays offline; a miss names the key", asyn
   assert.equal(a.x.band, "yes")
   const miss = Tape.replay({}).classifier("plan") // building never fails; the miss is reported on evaluate
   await assert.rejects(ask(miss, ST, qs), (e: Error) => e.message === 'tape: no recorded decision for call "plan"')
+  // verbatim, not JSON-escaped: every port prints the same bytes
+  await assert.rejects(ask(Tape.replay({}).classifier('a"b\\c'), ST, qs), (e: Error) => e.message === 'tape: no recorded decision for call "a"b\\c"')
 })
 
 test("byte-identity: builder request body == hand-written §8B body", async () => {
