@@ -54,6 +54,32 @@ await using var tk = await Toolkit.CreateAsync(new Toolkit.Options
 });
 ```
 
+## Simple judgments
+
+A thin layer over `Classifier` (SPEC §8B): an ordered question list, a state, bands, and a gate
+that escalates (a §10 `input` Request) instead of deciding when unsure. The wire is unchanged.
+
+```csharp
+var qs = new[] {
+    Judge.Noul("is_appropriate", "Does `message_received` contain inappropriate language?"),
+    Judge.Noul("does_this_help", "Does `message_received` help donkey kong win?"),
+};
+var state = Judge.State("You are Donkey Kong, you want to win.",
+    new Dictionary<string, object?> { ["message_received"] = "jump off the stage now" });
+var a = await Judge.AskAsync(classifier, state, qs);          // bands default 0.30 / 0.70
+a["is_appropriate"].Band;                                      // "yes" | "no" | "uncertain"
+
+var o = await Judge.GateAsync(classifier, state, qs, new Policy {
+    Rules = new[] { Rule.Below("does_this_help", 0.3, "ignore") }, Default = "obey" });
+// o.Escalated => o.Request is a §10 input Request
+
+var ds = await classifier.EvaluateBatchAsync(states, Judge.Questions(qs)); // in order, fail-closed
+```
+
+Also: `Judge.Context(ctx, message, extra)`, `Judge.Choice` / `Judge.Score`, `answer.Value()` /
+`answer.Choice()`, `Tape` (record by call name, replay offline), `Classifier.FromRecorded(...)`,
+`Question.ToWire()`, public `Decision.FromJson`.
+
 ## Documentation
 
 Everything else — the full surface, with runnable examples — lives on the docs site:
