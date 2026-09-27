@@ -168,7 +168,7 @@ function applyRules(answers: Answers, rules: readonly Rule[], skipUncertain: boo
     const a = answers[r.question]
     if (!a || unsure(a)) {
       if (a && skipUncertain) continue
-      const reason = a ? `${a.type} answer is uncertain` : "missing answer"
+      const reason = a ? `${a.type} answer is uncertain` : `missing answer ${JSON.stringify(r.question)}`
       return escalate(
         answers,
         `gate:${i}:${r.question}`,
@@ -277,9 +277,15 @@ export class Tape {
         },
       })
     }
-    const rec = this.entries[name]
-    if (!rec) throw new Error(`tape: no recorded decision for call ${JSON.stringify(name)}`)
-    const raw = rec.response as { model?: string }
-    return staticClassifier(rec, raw?.model)
+    // Replay: resolved when evaluated (a miss fails then, naming the key, and sends nothing).
+    return new Classifier({
+      style: "custom",
+      evaluate: async (state, questions, signal) => {
+        const rec = this.entries[name]
+        if (!rec) throw new Error(`tape: no recorded decision for call ${JSON.stringify(name)}`)
+        const raw = rec.response as { model?: string }
+        return staticClassifier(rec, raw?.model).evaluate(state, questions, signal)
+      },
+    })
   }
 }

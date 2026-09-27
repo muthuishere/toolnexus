@@ -75,7 +75,7 @@ test("missing answer escalates naming it", async () => {
   const c = gateCases.cases.find((x: any) => x.name === "missing-component")
   const cl = staticClassifier({ state: ST, questions: questionMap(gq), response: { answers: c.answers } })
   const out = await gate(cl, ST, gq, gateCases.rules)
-  assert.equal((out.request?.data as any).reason, "missing answer")
+  assert.equal((out.request?.data as any).reason, 'missing answer "component"')
   assert.equal((out.request?.data as any).question, "component")
 })
 
@@ -143,7 +143,8 @@ test("Tape records by call name and replays offline; a miss names the key", asyn
   const replay = Tape.replay(JSON.parse(JSON.stringify(rec.entries)))
   const a = await ask(replay.classifier("plan"), ST, qs)
   assert.equal(a.x.band, "yes")
-  assert.throws(() => Tape.replay({}).classifier("plan"), /"plan"/)
+  const miss = Tape.replay({}).classifier("plan") // building never fails; the miss is reported on evaluate
+  await assert.rejects(ask(miss, ST, qs), /tape: no recorded decision for call "plan"/)
 })
 
 test("byte-identity: builder request body == hand-written §8B body", async () => {
