@@ -23,6 +23,8 @@ export const DEFAULT_CLASSIFIER_MODEL = "jev-latest"
 export const DEFAULT_CLASSIFIER_API_KEY_ENV = "TYPESAFE_API_KEY"
 /** Bounds ONE request; a classifier has no loop to bound. */
 export const DEFAULT_CLASSIFIER_TIMEOUT_MS = 10_000
+/** `evaluateBatch`: at most this many states in flight by default. */
+export const DEFAULT_BATCH_CONCURRENCY = 16
 
 /**
  * A named BACKEND: `baseUrl`, `model` and `apiKeyEnv` are only jointly valid, so they travel as
@@ -123,7 +125,7 @@ export function choiceOver(instructions: string, items: Record<string, string>):
 }
 
 /** The wire form of one question — the object itself, minus an absent `criteria`. */
-function questionWire(q: Question): Record<string, unknown> {
+export function questionWire(q: Question): Record<string, unknown> {
   switch (q.type) {
     case "noul":
       return q.criteria === undefined
@@ -562,6 +564,39 @@ export class Classifier {
       completionTokens: decision.usage.outputTokens,
     })
     return decision
+  }
+
+  /**
+   * The same questions over many states (SPEC §8B "Batch"). Each state goes through
+   * `evaluate`, at most `concurrency` (default 16) in flight; decisions come back in STATE
+   * order. Fails closed: the first failing state's index is named and no decisions return.
+   * No states is an error and sends nothing.
+   */
+  async evaluateBatch(
+    states: readonly unknown[],
+    questions: Record<string, Question>,
+    opts: { signal?: AbortSignal; concurrency?: number } = {},
+  ): Promise<Decision[]> {
+    if (!states || states.length === 0) throw new Error("classifier: no states to evaluate")
+    const limit = Math.max(1, opts.concurrency ?? DEFAULT_BATCH_CONCURRENCY)
+    const out: Decision[] = new Array(states.length)
+    const errs: unknown[] = new Array(states.length)
+    let next = 0
+    const worker = async () => {
+      while (next < states.length) {
+        const i = next++
+        try {
+          out[i] = await this.evaluate(states[i], questions, opts.signal)
+        } catch (e) {
+          errs[i] = e
+        }
+      }
+    }
+    await Promise.all(Array.from({ length: Math.min(limit, states.length) }, worker))
+    for (let i = 0; i < states.length; i++) {
+      if (i in errs) throw new Error(`classifier: state ${i}: ${errText(errs[i])}`, { cause: errs[i] })
+    }
+    return out
   }
 
   // ---------------------------------------------------------------- degenerate
