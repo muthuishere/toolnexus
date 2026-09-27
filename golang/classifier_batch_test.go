@@ -3,8 +3,10 @@ package toolnexus
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // TestEvaluateBatch_OrderPreserved: results come back in the SAME order as
@@ -79,18 +81,47 @@ func TestEvaluateBatch_FailsClosedOnAnyError(t *testing.T) {
 	}
 }
 
+// TestEvaluateBatch_LowestIndexWins: states 2 and 0 both fail, state 0 last;
+// the error names state 0.
+func TestEvaluateBatch_LowestIndexWins(t *testing.T) {
+	c, err := CreateClassifier(ClassifierOptions{
+		Style: StyleCustom,
+		Evaluate: func(_ context.Context, state any, _ map[string]Question) (Decision, error) {
+			switch state.(int) {
+			case 0:
+				time.Sleep(20 * time.Millisecond)
+				return Decision{}, errors.New("boom 0")
+			case 2:
+				return Decision{}, errors.New("boom 2")
+			}
+			return Decision{Model: "test"}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = c.EvaluateBatch(context.Background(), []any{0, 1, 2}, map[string]Question{"q": NoulQuestion{Instructions: "?"}})
+	if err == nil || !strings.HasPrefix(err.Error(), "state 0:") {
+		t.Fatalf("error should name state 0: %v", err)
+	}
+}
+
 // TestEvaluateBatch_EmptyStates: an empty batch is a caller mistake, not a
 // silent no-op — same posture as Evaluate's "no questions" guard.
 func TestEvaluateBatch_EmptyStates(t *testing.T) {
+	calls := 0
 	c, err := CreateClassifier(ClassifierOptions{
 		Style:    StyleCustom,
-		Evaluate: func(context.Context, any, map[string]Question) (Decision, error) { return Decision{}, nil },
+		Evaluate: func(context.Context, any, map[string]Question) (Decision, error) { calls++; return Decision{}, nil },
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := c.EvaluateBatch(context.Background(), nil, map[string]Question{"q": NoulQuestion{Instructions: "?"}}); err == nil {
 		t.Fatal("want an error for an empty states slice, got nil")
+	}
+	if calls != 0 {
+		t.Fatalf("empty batch sent %d requests", calls)
 	}
 }
 

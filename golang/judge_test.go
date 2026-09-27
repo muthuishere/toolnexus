@@ -96,6 +96,10 @@ func TestJudge_StateCases(t *testing.T) {
 				Context, Message string
 				Extra            map[string]any
 			}
+			RoleState *struct {
+				Role string
+				Data any
+			}
 			Questions     []map[string]any
 			WantState     map[string]any
 			WantQuestions map[string]any
@@ -125,6 +129,9 @@ func TestJudge_StateCases(t *testing.T) {
 			state := c.State
 			if c.Context != nil {
 				state = MessageState(c.Context.Context, c.Context.Message, c.Context.Extra)
+			}
+			if c.RoleState != nil {
+				state = State(c.RoleState.Role, c.RoleState.Data)
 			}
 			if !reflect.DeepEqual(state, c.WantState) {
 				t.Fatalf("state = %v, want %v", state, c.WantState)
@@ -160,9 +167,21 @@ type gateFixture struct {
 		Name    string
 		Answers map[string]any
 		Bands   *Bands
-		Want    struct {
-			Action, Target string
-			Escalated      bool
+		Rules   []Rule
+		Policy  *struct {
+			Default       string
+			SkipUncertain bool
+		}
+		WantAnswers map[string]struct {
+			Value  float64
+			Band   *string
+			Sure   *bool
+			Choice *string
+		}
+		Want struct {
+			Action, Target              string
+			Escalated                   bool
+			Question, Reason, RequestID string
 		}
 	}
 }
@@ -203,7 +222,21 @@ func TestJudge_GateCases(t *testing.T) {
 			if c.Bands != nil {
 				b = append(b, *c.Bands)
 			}
-			o, err := Gate(context.Background(), cl, map[string]any{"case": c.Name}, qs, fx.Rules, b...)
+			rules := fx.Rules
+			if c.Rules != nil {
+				rules = c.Rules
+			}
+			var o Outcome
+			var err error
+			if c.Policy != nil {
+				p := Policy{Rules: rules, Default: c.Policy.Default, SkipUncertain: c.Policy.SkipUncertain}
+				if c.Bands != nil {
+					p.Bands = *c.Bands
+				}
+				o, err = p.Gate(context.Background(), cl, map[string]any{"case": c.Name}, qs)
+			} else {
+				o, err = Gate(context.Background(), cl, map[string]any{"case": c.Name}, qs, rules, b...)
+			}
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -214,6 +247,26 @@ func TestJudge_GateCases(t *testing.T) {
 				r := o.Request
 				if r == nil || r.Kind != "input" || r.Data["question"] == nil || r.Data["reason"] == nil || r.Data["answers"] == nil {
 					t.Fatalf("escalation request not §10 input shaped: %+v", r)
+				}
+				if r.Data["question"] != c.Want.Question || (c.Want.Reason != "" && r.Data["reason"] != c.Want.Reason) || r.ID != c.Want.RequestID {
+					t.Fatalf("escalation {%q %q %q}, want {%q %q %q}", r.Data["question"], r.Data["reason"], r.ID,
+						c.Want.Question, c.Want.Reason, c.Want.RequestID)
+				}
+			}
+			a, err := Ask(context.Background(), cl, map[string]any{"case": c.Name}, qs, b...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(a) != len(c.WantAnswers) {
+				t.Fatalf("answers %v, want %v", a, c.WantAnswers)
+			}
+			for name, wa := range c.WantAnswers {
+				got, ok := a[name]
+				if !ok || got.Value() != wa.Value ||
+					(wa.Band != nil && got.Band != *wa.Band) ||
+					(wa.Sure != nil && got.Sure != *wa.Sure) ||
+					(wa.Choice != nil && got.Choice() != *wa.Choice) {
+					t.Fatalf("answer %s = %+v, want %+v", name, got, wa)
 				}
 			}
 			if c.Name == "missing-component" && !strings.Contains(o.Request.Data["reason"].(string), `"component"`) {
@@ -306,14 +359,17 @@ func TestJudge_Tape(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rp, _ := loaded.Replayer()
+	rp, err := loaded.Replayer()
+	if err != nil {
+		t.Fatalf("obtaining a replayer never fails: %v", err)
+	}
 	a, err := Ask(WithCallName(context.Background(), "triage"), rp, map[string]any{"message": "changed"}, qs)
 	if err != nil || a["ok"].Value() != 0.9 || a["ok"].Band != BandYes {
 		t.Fatalf("%v %v", a, err)
 	}
 	_, err = Ask(WithCallName(context.Background(), "plan"), rp, state, qs)
-	if err == nil || !strings.Contains(err.Error(), `"plan"`) {
-		t.Fatalf("miss should name plan: %v", err)
+	if err == nil || err.Error() != `tape: no recorded decision for call "plan"` {
+		t.Fatalf("miss should be the shared text naming plan: %v", err)
 	}
 }
 

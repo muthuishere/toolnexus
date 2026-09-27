@@ -250,9 +250,18 @@ func Gate(ctx context.Context, c *Classifier, state any, qs []JudgeQuestion, rul
 
 // ApplyRules is the pure half of Gate.
 func ApplyRules(a Answers, rules []Rule) Outcome {
+	return applyRules(a, rules, false)
+}
+
+// applyRules: with skipUncertain, a rule whose answer is PRESENT and uncertain
+// is skipped in place, so gate:<i> keeps the rule's original index.
+func applyRules(a Answers, rules []Rule, skipUncertain bool) Outcome {
 	out := Outcome{Answers: a}
 	for i := range rules {
 		r := &rules[i]
+		if x, ok := a[r.Question]; skipUncertain && ok && x.Band == BandUncertain {
+			continue
+		}
 		fired, reason := checkRule(a, r)
 		if reason != "" {
 			out.Escalated, out.Action, out.Rule = true, "needs_input", r
@@ -287,7 +296,7 @@ func checkRule(as Answers, r *Rule) (bool, string) {
 		return false, fmt.Sprintf("missing answer %q", r.Question)
 	}
 	if a.Band == BandUncertain {
-		return false, "uncertain " + a.AnswerType() + " answer"
+		return false, fmt.Sprintf("uncertain answer %q", r.Question)
 	}
 	switch a.DecisionAnswer.(type) {
 	case NoulAnswer, ScoreAnswer:
@@ -318,17 +327,7 @@ type Policy struct {
 
 // Decide applies the rules, then the declared default.
 func (p Policy) Decide(a Answers) Outcome {
-	rules := p.Rules
-	if p.SkipUncertain {
-		rules = nil
-		for _, r := range p.Rules {
-			if x, ok := a[r.Question]; ok && x.Band == BandUncertain {
-				continue
-			}
-			rules = append(rules, r)
-		}
-	}
-	o := ApplyRules(a, rules)
+	o := applyRules(a, p.Rules, p.SkipUncertain)
 	if o.Action != "" || o.Escalated {
 		return o
 	}
@@ -339,7 +338,7 @@ func (p Policy) Decide(a Answers) Outcome {
 	o.Escalated, o.Action = true, "needs_input"
 	o.Request = &Request{ID: "gate:default", Kind: "input",
 		Prompt: "No rule fired: the answers are confident but in between. Decide.",
-		Data:   map[string]any{"reason": "no rule fired", "answers": rawAnswers(a)}}
+		Data:   map[string]any{"question": "", "reason": "no rule fired", "answers": rawAnswers(a)}}
 	return o
 }
 
