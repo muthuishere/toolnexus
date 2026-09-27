@@ -2,6 +2,7 @@ package judge
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 
 	tn "github.com/muthuishere/toolnexus/golang"
@@ -42,6 +43,26 @@ func Questions(qs ...Q) (map[string]tn.Question, error) {
 		m[q.Name] = q.Q
 	}
 	return m, nil
+}
+
+// State is the one thing every judgment needs: a role (the instructions that
+// frame the whole state, like the system prompt of a chat call) plus the data,
+// however big. data may be a map or any JSON-serialisable struct; its fields
+// sit next to "role" at the top level. A non-object value goes under "data".
+//
+//	j.State("You are Donkey Kong, you want to win.", map[string]any{"message_received": msg})
+func State(role string, data any) map[string]any {
+	s := map[string]any{}
+	if b, err := json.Marshal(data); err == nil {
+		if json.Unmarshal(b, &s) != nil {
+			s = map[string]any{"data": data}
+		}
+	}
+	if s == nil {
+		s = map[string]any{}
+	}
+	s["role"] = role
+	return s
 }
 
 // Msg is state sugar: {"context": ctx, "message": msg} plus any extra keys.

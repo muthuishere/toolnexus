@@ -80,9 +80,14 @@ var verifyPolicy = j.Policy{Rules: []j.Rule{
 	{Question: "asserts_behaviour", AtLeast: f(0.70), Action: "accepted"},
 }}
 
-func funcState(fn Fn) map[string]any {
+// The role frames every judgment in this pipeline; the function is the data.
+const role = "You are a senior Go engineer on a shop's checkout team, deciding which untested " +
+	"functions deserve a test and whether a proposed test really protects customers."
+
+func funcData(fn Fn) map[string]any {
 	return map[string]any{"name": fn.Name, "signature": fn.Sig, "source": fn.Body, "coverage_pct": fn.Cov}
 }
+func funcState(fn Fn) map[string]any { return j.State(role, funcData(fn)) }
 
 // Stage 1 — Understand. Pure code: run the existing tests, read per-func coverage.
 func understand(shop string) ([]Fn, float64, error) {
@@ -129,7 +134,7 @@ func gate(ctx context.Context, c *tn.Classifier, fn Fn, first j.Answers) (string
 		return o.Action, why(first), nil
 	}
 	votes := []string{o.Action}
-	views := []map[string]any{funcState(fn), {"open_bug_reports": []string{bugReport}, "function": funcState(fn)}}
+	views := []map[string]any{funcState(fn), j.State(role, map[string]any{"open_bug_reports": []string{bugReport}, "function": funcData(fn)})}
 	for i, st := range views {
 		a, err := j.Ask(j.WithKey(ctx, fmt.Sprintf("gate:%s:%d", fn.Name, i+2)), c, st, triageQs(fn.Name))
 		if err != nil {
@@ -162,7 +167,7 @@ func verify(ctx context.Context, c *tn.Classifier, shop string, before float64, 
 		v.Test, v.Why = "rejected", v.Why+", coverage-only: no mutant killed"
 		return nil
 	}
-	o, err := verifyPolicy.Gate(j.WithKey(ctx, "verify:"+v.Name), c, map[string]any{"function": v.Body, "test": test}, verifyQs)
+	o, err := verifyPolicy.Gate(j.WithKey(ctx, "verify:"+v.Name), c, j.State(role, map[string]any{"function": v.Body, "test": test}), verifyQs)
 	if err != nil {
 		return err
 	}
