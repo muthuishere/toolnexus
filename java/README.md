@@ -47,6 +47,31 @@ Toolkit tk = Toolkit.create(new Toolkit.Options()
         .skillsDir(List.of("skills")));
 ```
 
+## Simple judgments
+
+A thin layer over `Classifier` (SPEC.md §8B); the wire is unchanged.
+
+```java
+import static io.github.muthuishere.toolnexus.Judge.*;
+
+var state = State.of("You are Donkey Kong, you want to win.",
+        Map.of("message_received", "jump off the stage now"));
+var a = ask(classifier, state, List.of(
+        noul("is_appropriate", "Does message_received contain insults or harmful topics?"),
+        noul("does_this_help", "Does message_received help donkey kong win?")));
+a.get("is_appropriate").band();   // YES | NO | UNCERTAIN (cut-points 0.30 / 0.70, exclusive)
+
+Outcome o = gate(classifier, state, questions, List.of(
+        Rule.below("fixable", 0.3, "fail"),
+        Rule.is("component", "pricing", "skip_to", "fix-pricing")));
+// unsure or missing answer -> o.action() == "needs_input", o.request() is a §10 input Request
+```
+
+`Policy` adds a default action and `skipUncertain`; `Tape` records live decisions by call name
+and replays them offline; `Classifier.fromRecorded(...)` is the one-line hermetic classifier;
+`classifier.evaluateBatch(states, questions)` asks the same questions of many states (state order,
+fail-closed, 16 in flight). Name the state field each question judges; never copy the role into it.
+
 ## Documentation
 
 Everything else — the full surface, with runnable examples — lives on the docs site:
