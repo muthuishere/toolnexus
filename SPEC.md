@@ -2063,6 +2063,32 @@ not asserted.
 
 ---
 
+### Simple judgments — `ask` / `gate` (change `add-judge-adapters`)
+
+A thin layer over any `Classifier`; the wire is unchanged.
+
+```
+state     = map | context(ctx, message, extra?)            // sugar merges extra into the map
+questions = [ noul(name, instructions),                     // ordered list; duplicate name = error
+              choice(name, instructions, options),          //   naming the key, before any request
+              score(name, instructions, levels) ]
+bands     = { low: 0.30, high: 0.70 }                       // default; overridable per call
+
+ask(classifier, state, questions, bands?)  -> { name: answer + (noul: band yes|no|uncertain,
+                                                                choice/score: sure bool) }
+gate(classifier, state, questions, rules, bands?) -> { action, target, escalated, request }
+```
+
+- Builders produce exactly the §8B `evaluate` inputs; the request body is byte-identical to
+  hand-written maps.
+- Cut-points are exclusive on the confident side: `p < low` → no, `p > high` → yes, else
+  uncertain. A choice is sure iff `confidence > high` and not `nearUniform`; a score is sure
+  iff `confidence > high`.
+- `gate` rules (`below` / `at_least` / `is`) are first-match. An uncertain, unsure or missing
+  answer escalates to `needs_input` with a §10 `Request` (`kind: "input"`, data:
+  question, reason, answers). A gate never authorises; it only declines to decide.
+- Conformance: `examples/judge/state-cases.json`, `examples/judge/gate-cases.json`.
+
 ## 9. Go CLI (`toolnexus`)
 
 A single binary that wraps the library into a continuous interactive agent loop —

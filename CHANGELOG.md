@@ -8,6 +8,18 @@ GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
 
 ## Unreleased
 
+### Proposed — a simple `ask` / `gate` over `Classifier` (`openspec/changes/add-judge-adapters`)
+
+Not shipped yet; this records the design and the evidence. Asking a classifier two yes/no
+questions took ~16 lines of nested question maps, and every caller re-derived the same
+0.30/0.70 cut-offs — the first real consumer's gates had no uncertain band at all, so a
+0.62 reading failed a run. The proposal: state from a map (or context + message), questions
+as an ordered list, `ask` returning a band (noul) or `sure` (choice/score) per answer, and a
+`gate` that escalates to a §10 `input` request instead of acting when unsure. The wire is
+unchanged. A seven-port spike (`spikes/judge-adapters/`) passes all 16 shared cases in every
+port. **Not done:** the library implementation (all ports), and the batteries
+(`ToolGuardClassifier` and friends), which follow as `add-judge-batteries` per ADR 0035.
+
 ## 0.20.0 — 2026-09-22
 
 **The built-in tools no longer close over the host process. `bash` runs on native Windows, relative
