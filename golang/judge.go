@@ -441,7 +441,7 @@ func (t *Tape) Replayer() (*Classifier, error) {
 			raw, ok := t.Decisions[k]
 			t.mu.Unlock()
 			if !ok {
-				return Decision{}, fmt.Errorf("tape: no recording for call %q", k)
+				return Decision{}, fmt.Errorf("tape: no recorded decision for call %q", k)
 			}
 			var d Decision
 			return d, json.Unmarshal(raw, &d)
