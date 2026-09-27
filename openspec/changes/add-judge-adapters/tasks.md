@@ -2,7 +2,7 @@
 
 ## 1. Contract
 - [ ] 1.1 SPEC.md §8B "Simple judgments — ask / gate" subsection (done in this change)
-- [ ] 1.2 Promote `spikes/judge-adapters/shared/{state,gate}-cases.json` to `examples/judge/`
+- [x] 1.2 Promote `spikes/judge-adapters/shared/{state,gate}-cases.json` to `examples/judge/`
 - [ ] 1.3 CHANGELOG `## Unreleased` entry (done in this change)
 
 ## 2. Library fixes the spikes hit
@@ -12,7 +12,8 @@
 - [ ] 2.4 csharp: make `Decision.FromJson` public
 - [ ] 2.5 golang: answer type marshals flat (no `DecisionAnswer` nesting)
 
-## 3. Per-language parity (builders + ask + Bands + gate + both fixtures)
+## 3. Per-language parity (builders + State + ask + Bands + Answer.Value + Policy + gate + Tape + evaluateBatch + both fixtures in examples/judge/adapters/)
+(golang: evaluateBatch already landed in ec22311)
 - [ ] 3.1 js
 - [ ] 3.2 python
 - [ ] 3.3 golang

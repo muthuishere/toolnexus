@@ -2063,6 +2063,13 @@ not asserted.
 
 ---
 
+### Batch — `evaluateBatch(states, questions)`
+
+The same questions over many states: each state goes through the per-state `evaluate` (every style),
+at most 16 in flight by default, decisions returned **in state order**. It fails closed: the first
+failing state's index is named and no decisions are returned. No states is an error and sends nothing.
+A native batch wire call per backend is not part of this contract.
+
 ### Simple judgments — `ask` / `gate` (change `add-judge-adapters`)
 
 A thin layer over any `Classifier`; the wire is unchanged.

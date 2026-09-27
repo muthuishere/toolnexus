@@ -125,6 +125,24 @@ for an unrecorded key SHALL fail with an error naming the key.
 - **WHEN** a replaying classifier is asked under call name `plan` that the tape lacks
 - **THEN** it fails with an error naming `plan` and sends no request
 
+### Requirement: evaluateBatch asks the same questions of many states
+Every port SHALL expose `evaluateBatch(states, questions)` on the Classifier. It SHALL evaluate each
+state with the existing per-state `evaluate`, with at most 16 in flight by default, and return the
+decisions in state order. It SHALL fail closed: if any state fails, the call returns an error naming
+that state's index and no decisions. An empty states list SHALL be an error, and no request is sent.
+
+#### Scenario: Decisions come back in state order
+- **WHEN** a host batches three states whose recorded answers differ
+- **THEN** decision i corresponds to state i, regardless of completion order
+
+#### Scenario: One failure fails the batch
+- **WHEN** the second of three states has no recorded decision
+- **THEN** the call returns an error naming state 1 and no decisions
+
+#### Scenario: Empty batch
+- **WHEN** a host calls evaluateBatch with no states
+- **THEN** it returns an error and sends no request
+
 ### Requirement: Absent is byte-identical
 
 A host that uses no builder, `ask` or `gate` SHALL observe byte-identical behaviour to a
