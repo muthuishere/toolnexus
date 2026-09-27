@@ -193,7 +193,7 @@ def _check(ans: Mapping[str, JudgeAnswer], r: Rule) -> tuple[bool, str, bool]:
     """-> (fired, reason, uncertain). A non-empty reason means escalate."""
     a = ans.get(r.question)
     if a is None:
-        return False, f"missing answer {r.question!r}", False
+        return False, f'missing answer "{r.question}"', False
     if r.is_ is not None:
         if not isinstance(a.raw, ChoiceAnswer):
             return False, f"is-rule on {a.type} answer {r.question!r}", False
@@ -321,7 +321,7 @@ class Tape:
         entry = self.recorded.get(name)
         if entry is None:
             async def miss(st: Any, qs: Mapping[str, Question]) -> Decision:
-                raise ClassifierError(f"judge: tape has no recorded decision for call {name!r}")
+                raise ClassifierError(f'tape: no recorded decision for call "{name}"')
 
             return create_classifier(style="custom", model=self.model, evaluate=miss)
         return static_classifier(

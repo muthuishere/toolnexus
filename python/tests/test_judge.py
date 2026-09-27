@@ -152,6 +152,15 @@ def test_policy_skip_uncertain():
     assert (out.action, out.escalated) == ("go", False)
 
 
+def test_missing_answer_reason_names_the_key():
+    qs = [noul("x", "q")]
+    c = static_classifier(({}, qs, _noul(0.9)), model=MODEL)
+    out = run(gate(c, {}, qs, [Rule("zz", "go", at_least=0.5)]))
+    assert out.escalated
+    assert out.request.data["reason"] == 'missing answer "zz"'
+    assert out.request.data["question"] == "zz"
+
+
 def test_tape_record_replay_and_miss():
     qs = [noul("x", "q")]
     live = static_classifier(({"s": 1}, qs, _noul(0.96)), model=MODEL)
@@ -159,7 +168,7 @@ def test_tape_record_replay_and_miss():
     run(ask(tape.call("plan"), {"s": 1}, qs))
     replay = Tape(recorded=json.loads(json.dumps(tape.recorded)), model=MODEL)
     assert run(ask(replay.call("plan"), {"s": 1}, qs))["x"].value() == 0.96
-    with pytest.raises(ClassifierError, match="'act'"):
+    with pytest.raises(ClassifierError, match='tape: no recorded decision for call "act"'):
         run(ask(replay.call("act"), {"s": 1}, qs))
 
 
