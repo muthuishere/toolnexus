@@ -91,3 +91,12 @@ The LLM writer is ~3.8 s per draft and dominates wall time.
 4. No empty toolkit: `client.Run(ctx, prompt, nil)` works (Toolkit methods are nil-safe) — undocumented.
 5. (new) `Policy.SkipUncertain` — with first-match, one unsure rule blocked every later confident
    rule; now uncertain rules are skipped and only "nothing confident decided" escalates.
+
+## Note: the recording predates `State(role, data)`
+
+`testdata/recorded` is from the run before every state gained a `role`. Replay matches by call
+name, so it still drives the offline test. A live `--record` run with the role (2026-09-27) went
+differently: gpt-4.1-mini drafted an `ApplyCoupon` test that did not fail on the shipped bug, Jev
+scored `asserts_behaviour` 0.59, and the gate sent it to a human instead of accepting it. That is
+the pipeline working, but it is not the outcome the offline test pins. The role costs about 220
+input tokens per classifier call.

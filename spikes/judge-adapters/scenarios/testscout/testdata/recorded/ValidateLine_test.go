@@ -6,42 +6,37 @@ import (
 
 func TestValidateLine_Valid(t *testing.T) {
 	tests := []struct {
-		name    string
-		line    Line
-		wantErr bool
-		errMsg  string
+		name string
+		line Line
+		want error
 	}{
 		{
-			name: "Typical valid line",
-			line: Line{SKU: "ABC123", Price: 1999, Qty: 2},
+			name: "normal valid product",
+			line: Line{SKU: "ABC123", Price: 1999, Qty: 1},
+			want: nil,
 		},
 		{
-			name: "SKU with spaces inside but trimmed valid",
-			line: Line{SKU: "  ABC123  ", Price: 1000, Qty: 1},
+			name: "valid multiple quantity",
+			line: Line{SKU: "XYZ789", Price: 500, Qty: 10},
+			want: nil,
 		},
 		{
-			name: "Qty minimum 1",
-			line: Line{SKU: "X1", Price: 50, Qty: 1},
+			name: "valid maximum quantity",
+			line: Line{SKU: "MAXQTY", Price: 100, Qty: 99},
+			want: nil,
 		},
 		{
-			name: "Qty maximum 99",
-			line: Line{SKU: "X2", Price: 50, Qty: 99},
-		},
-		{
-			name: "Price zero allowed",
-			line: Line{SKU: "FREE", Price: 0, Qty: 1},
+			name: "valid trimmed SKU",
+			line: Line{SKU: " TRIMSKU ", Price: 2500, Qty: 2},
+			want: nil,
 		},
 	}
 
 	for _, tt := range tests {
-		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
-			err := ValidateLine(tt.line)
-			if (err != nil) != tt.wantErr {
-				t.Fatalf("ValidateLine() error = %v, wantErr %v", err, tt.wantErr)
-			}
-			if err != nil && tt.errMsg != "" && err.Error() != tt.errMsg {
-				t.Errorf("ValidateLine() error message = %q, wanted %q", err.Error(), tt.errMsg)
+			got := ValidateLine(tt.line)
+			if got != tt.want {
+				t.Errorf("ValidateLine(%+v) = %v; want %v", tt.line, got, tt.want)
 			}
 		})
 	}
