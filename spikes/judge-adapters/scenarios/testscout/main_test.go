@@ -3,35 +3,39 @@ package main
 import (
 	"context"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
+
+	j "toolnexus.spike/judgeadapters/judge"
 )
 
-// The whole pipeline, offline and hermetic, with its decisions pinned.
-func TestPipelineOffline(t *testing.T) {
-	c, write, err := offline("testdata/shop")
+// The whole pipeline, hermetic: replays the tape recorded from a LIVE run
+// (go run . --record), matched by call name, not by exact state bytes.
+func TestPipelineReplaysLiveRun(t *testing.T) {
+	m, err := replayMode()
 	if err != nil {
 		t.Fatal(err)
 	}
-	vs, err := run(context.Background(), c, "testdata/shop", write)
+	vs, err := run(context.Background(), m.c, "testdata/shop", m.w)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := map[string][2]string{ // func -> {triage, test}
-		"Code":        {"skip", ""},         // getter, already covered
-		"String":      {"skip", ""},         // trivial formatting
-		"percentOf":   {"needs_input", ""},  // classifier unsure -> §10 human
-		"ApplyCoupon": {"keep", "accepted"}, // money + user-facing error path
-		"RoundCents":  {"keep", "rejected"}, // kept, but the draft only chases coverage
+	want := map[string][3]string{ // func -> {triage, plan, test}
+		"Code":         {"skip", "", ""},                      // already covered, never asked
+		"String":       {"skip", "happy_path", ""},            // trivial formatting
+		"percentOf":    {"needs_input", "regression", ""},     // re-asked, views split -> human
+		"ApplyCoupon":  {"keep", "regression", "accepted"},    // the bug report steers the plan
+		"RoundCents":   {"needs_input", "happy_path", ""},     // unsure in every view
+		"Total":        {"needs_input", "happy_path", ""},     //
+		"ValidateLine": {"keep", "happy_path", "needs_input"}, // re-asked views agree -> keep
 	}
 	for _, v := range vs {
 		w, ok := want[v.Name]
-		if !ok || v.Triage != w[0] || v.Test != w[1] {
-			t.Errorf("%s: got triage=%q test=%q, want %v", v.Name, v.Triage, v.Test, w)
+		if !ok || v.Triage != w[0] || v.Plan != w[1] || v.Test != w[2] {
+			t.Errorf("%s: got %q/%q/%q, want %v (%s)", v.Name, v.Triage, v.Plan, v.Test, w, v.Why)
 		}
-		if v.Name == "ApplyCoupon" && !strings.Contains(v.Note, "caught a real bug") {
-			t.Errorf("good test should FAIL on the buggy code: %s", v.Note)
+		if v.Name == "ApplyCoupon" && !strings.Contains(v.Why, "caught the bug") {
+			t.Errorf("accepted test must fail on shipped code and pass on the fix: %s", v.Why)
 		}
 	}
 	if len(vs) != len(want) {
@@ -39,22 +43,27 @@ func TestPipelineOffline(t *testing.T) {
 	}
 }
 
-// The accepted test is only worth keeping if it goes green once the bug is fixed.
-func TestGoodTestPassesOnFixedCode(t *testing.T) {
-	fixed := t.TempDir()
-	if err := os.CopyFS(fixed, os.DirFS("testdata/shop")); err != nil {
+// A test that executes lines but asserts nothing is vetoed by CODE (no mutant
+// dies) before the classifier is ever asked.
+func TestCoverageOnlyTestIsRejectedByMutation(t *testing.T) {
+	test, err := os.ReadFile("testdata/coverage_only_test.go.txt")
+	if err != nil {
 		t.Fatal(err)
 	}
-	p := filepath.Join(fixed, "coupon.go")
-	src, _ := os.ReadFile(p)
-	patched := strings.Replace(string(src), `strings.TrimPrefix(code, "SAVE")`, `strings.TrimSpace(strings.TrimPrefix(code, "SAVE"))`, 1)
-	if patched == string(src) {
-		t.Fatal("fix did not apply")
+	v := Verdict{Fn: Fn{Name: "RoundCents"}}
+	if err := verify(context.Background(), nil, "testdata/shop", 16, &v, string(test)); err != nil {
+		t.Fatal(err)
 	}
-	os.WriteFile(p, []byte(patched), 0o644)
-	test, _ := recordedTest(Fn{Name: "ApplyCoupon"})
-	passed, _, err := runWith(fixed, "ApplyCoupon", test)
-	if err != nil || !passed {
-		t.Fatalf("good test should pass on fixed code: passed=%v err=%v", passed, err)
+	if v.Test != "rejected" || !strings.Contains(v.Why, "no mutant killed") {
+		t.Fatalf("got %q: %s", v.Test, v.Why)
+	}
+}
+
+// A replay miss names the call instead of "no recorded decision".
+func TestTapeMissNamesTheKey(t *testing.T) {
+	c, _ := (&j.Tape{}).Replayer()
+	_, err := j.Ask(j.WithKey(context.Background(), "plan"), c, map[string]any{}, []j.Q{planQ("X")})
+	if err == nil || !strings.Contains(err.Error(), `"plan"`) {
+		t.Fatalf("want a miss naming the key, got %v", err)
 	}
 }

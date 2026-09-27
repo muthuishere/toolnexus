@@ -1,0 +1,500 @@
+{
+  "decisions": {
+    "gate:RoundCents:2": {
+      "answers": {
+        "noticed:RoundCents": {
+          "noul": 0.64,
+          "type": "noul"
+        },
+        "value:RoundCents": {
+          "confidence": 0,
+          "legend": {
+            "0": "trivial accessor or formatting",
+            "1": "internal glue",
+            "2": "business rule with branches",
+            "3": "money or user-facing error path"
+          },
+          "probabilities": {
+            "0": 0.38,
+            "1": 0.13,
+            "2": 0.01,
+            "3": 0.48
+          },
+          "score": 1.57,
+          "type": "score"
+        }
+      },
+      "calibrated": true,
+      "model": "jev-1.13.0",
+      "usage": {
+        "input_tokens": 455,
+        "output_tokens": 41
+      }
+    },
+    "gate:RoundCents:3": {
+      "answers": {
+        "noticed:RoundCents": {
+          "noul": 0.67,
+          "type": "noul"
+        },
+        "value:RoundCents": {
+          "confidence": 0,
+          "legend": {
+            "0": "trivial accessor or formatting",
+            "1": "internal glue",
+            "2": "business rule with branches",
+            "3": "money or user-facing error path"
+          },
+          "probabilities": {
+            "0": 0.45,
+            "1": 0.16,
+            "2": 0.01,
+            "3": 0.38
+          },
+          "score": 1.33,
+          "type": "score"
+        }
+      },
+      "calibrated": true,
+      "model": "jev-1.13.0",
+      "usage": {
+        "input_tokens": 512,
+        "output_tokens": 41
+      }
+    },
+    "gate:Total:2": {
+      "answers": {
+        "noticed:Total": {
+          "noul": 0.78,
+          "type": "noul"
+        },
+        "value:Total": {
+          "confidence": 0.28,
+          "legend": {
+            "0": "trivial accessor or formatting",
+            "1": "internal glue",
+            "2": "business rule with branches",
+            "3": "money or user-facing error path"
+          },
+          "probabilities": {
+            "0": 0.04,
+            "1": 0.28,
+            "2": 0.06,
+            "3": 0.62
+          },
+          "score": 2.28,
+          "type": "score"
+        }
+      },
+      "calibrated": true,
+      "model": "jev-1.13.0",
+      "usage": {
+        "input_tokens": 460,
+        "output_tokens": 37
+      }
+    },
+    "gate:Total:3": {
+      "answers": {
+        "noticed:Total": {
+          "noul": 0.73,
+          "type": "noul"
+        },
+        "value:Total": {
+          "confidence": 0.28,
+          "legend": {
+            "0": "trivial accessor or formatting",
+            "1": "internal glue",
+            "2": "business rule with branches",
+            "3": "money or user-facing error path"
+          },
+          "probabilities": {
+            "0": 0.05,
+            "1": 0.26,
+            "2": 0.03,
+            "3": 0.66
+          },
+          "score": 2.28,
+          "type": "score"
+        }
+      },
+      "calibrated": true,
+      "model": "jev-1.13.0",
+      "usage": {
+        "input_tokens": 517,
+        "output_tokens": 37
+      }
+    },
+    "gate:ValidateLine:2": {
+      "answers": {
+        "noticed:ValidateLine": {
+          "noul": 0.69,
+          "type": "noul"
+        },
+        "value:ValidateLine": {
+          "confidence": 0.83,
+          "legend": {
+            "0": "trivial accessor or formatting",
+            "1": "internal glue",
+            "2": "business rule with branches",
+            "3": "money or user-facing error path"
+          },
+          "probabilities": {
+            "0": 0.01,
+            "1": 0,
+            "2": 0.14,
+            "3": 0.85
+          },
+          "score": 2.83,
+          "type": "score"
+        }
+      },
+      "calibrated": true,
+      "model": "jev-1.13.0",
+      "usage": {
+        "input_tokens": 534,
+        "output_tokens": 43
+      }
+    },
+    "gate:ValidateLine:3": {
+      "answers": {
+        "noticed:ValidateLine": {
+          "noul": 0.84,
+          "type": "noul"
+        },
+        "value:ValidateLine": {
+          "confidence": 0.91,
+          "legend": {
+            "0": "trivial accessor or formatting",
+            "1": "internal glue",
+            "2": "business rule with branches",
+            "3": "money or user-facing error path"
+          },
+          "probabilities": {
+            "0": 0.01,
+            "1": 0,
+            "2": 0.06,
+            "3": 0.93
+          },
+          "score": 2.91,
+          "type": "score"
+        }
+      },
+      "calibrated": true,
+      "model": "jev-1.13.0",
+      "usage": {
+        "input_tokens": 591,
+        "output_tokens": 43
+      }
+    },
+    "gate:percentOf:2": {
+      "answers": {
+        "noticed:percentOf": {
+          "noul": 0.73,
+          "type": "noul"
+        },
+        "value:percentOf": {
+          "confidence": 0,
+          "legend": {
+            "0": "trivial accessor or formatting",
+            "1": "internal glue",
+            "2": "business rule with branches",
+            "3": "money or user-facing error path"
+          },
+          "probabilities": {
+            "0": 0.28,
+            "1": 0.25,
+            "2": 0.09,
+            "3": 0.38
+          },
+          "score": 1.57,
+          "type": "score"
+        }
+      },
+      "calibrated": true,
+      "model": "jev-1.13.0",
+      "usage": {
+        "input_tokens": 469,
+        "output_tokens": 41
+      }
+    },
+    "gate:percentOf:3": {
+      "answers": {
+        "noticed:percentOf": {
+          "noul": 0.92,
+          "type": "noul"
+        },
+        "value:percentOf": {
+          "confidence": 0.85,
+          "legend": {
+            "0": "trivial accessor or formatting",
+            "1": "internal glue",
+            "2": "business rule with branches",
+            "3": "money or user-facing error path"
+          },
+          "probabilities": {
+            "0": 0.04,
+            "1": 0.01,
+            "2": 0,
+            "3": 0.95
+          },
+          "score": 2.85,
+          "type": "score"
+        }
+      },
+      "calibrated": true,
+      "model": "jev-1.13.0",
+      "usage": {
+        "input_tokens": 526,
+        "output_tokens": 41
+      }
+    },
+    "plan": {
+      "answers": {
+        "scenario:ApplyCoupon": {
+          "choice": "regression",
+          "confidence": 0.83,
+          "probabilities": {
+            "boundary": 0,
+            "happy_path": 0.11,
+            "invalid": 0.01,
+            "regression": 0.88
+          },
+          "type": "choice"
+        },
+        "scenario:RoundCents": {
+          "choice": "happy_path",
+          "confidence": 0.62,
+          "probabilities": {
+            "boundary": 0.27,
+            "happy_path": 0.71,
+            "invalid": 0,
+            "regression": 0.02
+          },
+          "type": "choice"
+        },
+        "scenario:String": {
+          "choice": "happy_path",
+          "confidence": 0.94,
+          "probabilities": {
+            "boundary": 0.04,
+            "happy_path": 0.96,
+            "invalid": 0,
+            "regression": 0
+          },
+          "type": "choice"
+        },
+        "scenario:Total": {
+          "choice": "happy_path",
+          "confidence": 0.98,
+          "probabilities": {
+            "boundary": 0.01,
+            "happy_path": 0.99,
+            "invalid": 0,
+            "regression": 0
+          },
+          "type": "choice"
+        },
+        "scenario:ValidateLine": {
+          "choice": "happy_path",
+          "confidence": 0.63,
+          "probabilities": {
+            "boundary": 0.01,
+            "happy_path": 0.72,
+            "invalid": 0.25,
+            "regression": 0.02
+          },
+          "type": "choice"
+        },
+        "scenario:percentOf": {
+          "choice": "regression",
+          "confidence": 0.88,
+          "probabilities": {
+            "boundary": 0,
+            "happy_path": 0.08,
+            "invalid": 0.02,
+            "regression": 0.9
+          },
+          "type": "choice"
+        }
+      },
+      "calibrated": true,
+      "model": "jev-1.13.0",
+      "usage": {
+        "input_tokens": 1747,
+        "output_tokens": 302
+      }
+    },
+    "triage": {
+      "answers": {
+        "noticed:ApplyCoupon": {
+          "noul": 0.86,
+          "type": "noul"
+        },
+        "noticed:RoundCents": {
+          "noul": 0.83,
+          "type": "noul"
+        },
+        "noticed:String": {
+          "noul": 0.66,
+          "type": "noul"
+        },
+        "noticed:Total": {
+          "noul": 0.83,
+          "type": "noul"
+        },
+        "noticed:ValidateLine": {
+          "noul": 0.72,
+          "type": "noul"
+        },
+        "noticed:percentOf": {
+          "noul": 0.79,
+          "type": "noul"
+        },
+        "value:ApplyCoupon": {
+          "confidence": 0.96,
+          "legend": {
+            "0": "trivial accessor or formatting",
+            "1": "internal glue",
+            "2": "business rule with branches",
+            "3": "money or user-facing error path"
+          },
+          "probabilities": {
+            "0": 0,
+            "1": 0,
+            "2": 0.03,
+            "3": 0.97
+          },
+          "score": 2.96,
+          "type": "score"
+        },
+        "value:RoundCents": {
+          "confidence": 0.38,
+          "legend": {
+            "0": "trivial accessor or formatting",
+            "1": "internal glue",
+            "2": "business rule with branches",
+            "3": "money or user-facing error path"
+          },
+          "probabilities": {
+            "0": 0.12,
+            "1": 0.62,
+            "2": 0.03,
+            "3": 0.23
+          },
+          "score": 1.37,
+          "type": "score"
+        },
+        "value:String": {
+          "confidence": 0.85,
+          "legend": {
+            "0": "trivial accessor or formatting",
+            "1": "internal glue",
+            "2": "business rule with branches",
+            "3": "money or user-facing error path"
+          },
+          "probabilities": {
+            "0": 0.95,
+            "1": 0,
+            "2": 0,
+            "3": 0.05
+          },
+          "score": 0.15,
+          "type": "score"
+        },
+        "value:Total": {
+          "confidence": 0.57,
+          "legend": {
+            "0": "trivial accessor or formatting",
+            "1": "internal glue",
+            "2": "business rule with branches",
+            "3": "money or user-facing error path"
+          },
+          "probabilities": {
+            "0": 0.01,
+            "1": 0.72,
+            "2": 0.11,
+            "3": 0.16
+          },
+          "score": 1.42,
+          "type": "score"
+        },
+        "value:ValidateLine": {
+          "confidence": 0.56,
+          "legend": {
+            "0": "trivial accessor or formatting",
+            "1": "internal glue",
+            "2": "business rule with branches",
+            "3": "money or user-facing error path"
+          },
+          "probabilities": {
+            "0": 0,
+            "1": 0,
+            "2": 0.43,
+            "3": 0.5700000000000001
+          },
+          "score": 2.56,
+          "type": "score"
+        },
+        "value:percentOf": {
+          "confidence": 0.05,
+          "legend": {
+            "0": "trivial accessor or formatting",
+            "1": "internal glue",
+            "2": "business rule with branches",
+            "3": "money or user-facing error path"
+          },
+          "probabilities": {
+            "0": 0.03,
+            "1": 0.37,
+            "2": 0.15,
+            "3": 0.45
+          },
+          "score": 2.05,
+          "type": "score"
+        }
+      },
+      "calibrated": true,
+      "model": "jev-1.13.0",
+      "usage": {
+        "input_tokens": 1700,
+        "output_tokens": 220
+      }
+    },
+    "verify:ApplyCoupon": {
+      "answers": {
+        "asserts_behaviour": {
+          "noul": 0.82,
+          "type": "noul"
+        },
+        "name_describes_scenario": {
+          "noul": 0.86,
+          "type": "noul"
+        }
+      },
+      "calibrated": true,
+      "model": "jev-1.13.0",
+      "usage": {
+        "input_tokens": 1025,
+        "output_tokens": 46
+      }
+    },
+    "verify:ValidateLine": {
+      "answers": {
+        "asserts_behaviour": {
+          "noul": 0.68,
+          "type": "noul"
+        },
+        "name_describes_scenario": {
+          "noul": 0.66,
+          "type": "noul"
+        }
+      },
+      "calibrated": true,
+      "model": "jev-1.13.0",
+      "usage": {
+        "input_tokens": 716,
+        "output_tokens": 46
+      }
+    }
+  }
+}

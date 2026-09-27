@@ -1,5 +1,5 @@
 // Package shop is the tiny target testscout scouts. ApplyCoupon carries the
-// checkout-500 bug: a coupon code with a trailing space fails to parse.
+// checkout-500 bug: a pasted coupon code with a trailing space fails to parse.
 package shop
 
 import (
@@ -15,6 +15,13 @@ type Money int64
 
 // Coupon is a percentage-off code such as "SAVE10".
 type Coupon struct{ code string }
+
+// Line is one cart line: a unit price and a quantity.
+type Line struct {
+	SKU   string
+	Price Money
+	Qty   int
+}
 
 // Code returns the coupon code.
 func (c Coupon) Code() string { return c.code }
@@ -47,3 +54,26 @@ func ApplyCoupon(total Money, code string) (Money, error) {
 
 // RoundCents rounds a fractional cent amount half away from zero.
 func RoundCents(c float64) Money { return Money(math.Round(c)) }
+
+// Total sums price x quantity over every line of the cart.
+func Total(lines []Line) Money {
+	var sum Money
+	for _, l := range lines {
+		sum += l.Price * Money(l.Qty)
+	}
+	return sum
+}
+
+// ValidateLine returns the error message shown to the shopper, or nil.
+func ValidateLine(l Line) error {
+	if strings.TrimSpace(l.SKU) == "" {
+		return errors.New("please pick a product")
+	}
+	if l.Qty < 1 || l.Qty > 99 {
+		return fmt.Errorf("quantity must be between 1 and 99, got %d", l.Qty)
+	}
+	if l.Price < 0 {
+		return errors.New("price cannot be negative")
+	}
+	return nil
+}

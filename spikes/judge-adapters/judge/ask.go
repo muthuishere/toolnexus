@@ -118,3 +118,25 @@ func Ask(ctx context.Context, c *tn.Classifier, state any, qs []Q, bands ...Band
 	}
 	return out, nil
 }
+
+// Value is the one number a rule reads, so callers never type-assert by hand:
+// noul -> probability, score -> expected level, choice -> confidence.
+func (a Answer) Value() float64 {
+	switch x := a.DecisionAnswer.(type) {
+	case tn.NoulAnswer:
+		return x.Noul
+	case tn.ScoreAnswer:
+		return x.Score
+	case tn.ChoiceAnswer:
+		return x.Confidence
+	}
+	return 0
+}
+
+// Choice is the picked option id ("" for noul/score answers).
+func (a Answer) Choice() string {
+	if x, ok := a.DecisionAnswer.(tn.ChoiceAnswer); ok {
+		return x.Choice
+	}
+	return ""
+}

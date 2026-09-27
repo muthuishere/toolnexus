@@ -7,3 +7,9 @@ func TestCode(t *testing.T) {
 		t.Fatal("Code")
 	}
 }
+
+func TestTotalEmpty(t *testing.T) { // touches Total, asserts only the empty cart
+	if Total(nil) != 0 {
+		t.Fatal("empty cart")
+	}
+}
