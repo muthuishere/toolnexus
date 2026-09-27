@@ -1,13 +1,13 @@
 (ns toolnexus.core-test
-  (:require [clojure.string :as str]
+  (:require [toolnexus.shared-examples-test :as te]
+            [clojure.string :as str]
             [clojure.test :refer [deftest is testing use-fixtures]]
-            [koine.env :as env]
             [koine.json :as json]
             [koine.server :as server]
             [toolnexus.core :as tn]
             [toolnexus.tool :as tool]))
 
-(defn- skills-root [] (str (env/get-env "TN_EXAMPLES") "/skills"))
+(defn- skills-root [] (str (te/examples-dir) "/skills"))
 
 (deftest builds-from-several-sources-at-once
   (let [tk (tn/build {:skills   (skills-root)

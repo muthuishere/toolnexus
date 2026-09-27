@@ -119,7 +119,7 @@
   (let [a (get answers (qname question))]
     (cond
       (nil? a)    [false (str "missing answer \"" (qname question) "\"")]
-      (unsure? a) [false (str (:type a) " answer is uncertain")]
+      (unsure? a) [false (str "uncertain answer \"" (qname question) "\"")]
       (some? is)  (if (= "choice" (:type a))
                     [(= (qname is) (:choice a)) nil]
                     [false "is-rule on a non-choice answer"])

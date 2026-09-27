@@ -11,6 +11,7 @@
 ;; both trees — that is a different mechanism. Measured 2026-07-31.)
 (ns toolnexus.test-main
   (:require [clojure.test :as t]
+            [toolnexus.shared-examples-test :as te]
             [koine.env :as env]
             [koine.json :as json]
             [koine.host :as host]
@@ -159,16 +160,14 @@
   (if (= "1" (env/get-env "ACP_FAKE_SERVER"))
     (acp-test/run-fake-server!)
     (do
-      ;; Four suites read the shared fixture tree through TN_EXAMPLES. Unset, it
-      ;; concatenates into "/subagent-lifecycle/fixture.json" and the run reports ten
-      ;; FileInputStream errors and six golden-byte failures — sixteen symptoms of one
-      ;; missing variable, none of which name it. Say it once, before anything runs.
-      ;; `./all-modes-check.sh` exports it; running the entry point by hand does not.
-      (when (empty? (env/get-env "TN_EXAMPLES"))
-        (throw (ex-info (str "TN_EXAMPLES is not set: it must point at the repo's shared "
-                             "examples/ directory, which four suites read fixtures from. "
-                             "Run ./all-modes-check.sh, or set it explicitly.")
-                        {:gate "FAILED: TN_EXAMPLES is not set"})))
+      ;; Several suites read the shared fixture tree via toolnexus.shared-examples-test:
+      ;; TN_EXAMPLES when set, else the repo's examples/ found from the working
+      ;; directory. Found nowhere, every fixture read fails with a path that names
+      ;; nothing — so say it once, before anything runs.
+      (when-not (te/examples-dir)
+        (throw (ex-info (str "shared examples/ not found: set TN_EXAMPLES to the repo's "
+                             "examples/ directory, or run from clojure/ or the repo root.")
+                        {:gate "FAILED: shared examples/ not found"})))
       (let [r (run)]
         (println (json/write-str r))
         ;; The suite uses `future` for parallel tool calls. On the JVM the agent

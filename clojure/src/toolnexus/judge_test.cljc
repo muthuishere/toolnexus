@@ -1,16 +1,16 @@
 ;; add-judge-adapters — every case of examples/judge/adapters/{state,gate}-cases.json,
 ;; the byte-identity claim, the batch, and the policy/tape behaviours.
 (ns toolnexus.judge-test
-  (:require [clojure.string :as str]
+  (:require [toolnexus.shared-examples-test :as te]
+            [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
-            [koine.env :as env]
             [koine.fs :as fs]
             [koine.json :as json]
             [toolnexus.classifier :as jev]
             [toolnexus.judge :as j]))
 
 (defn- fixture [name]
-  (json/read-str (fs/read-file (str (env/get-env "TN_EXAMPLES") "/judge/adapters/" name ".json"))
+  (json/read-str (fs/read-file (str (te/examples-dir) "/judge/adapters/" name ".json"))
                  {:key-fn str}))
 
 (defn- ->q [q]
@@ -39,9 +39,12 @@
           (let [e (try (j/wire-questions qs) nil (catch Throwable t t))]
             (is (some? e))
             (is (= want-err (ex-message e))))
-          (let [st (if-let [cx (get c "context")]
-                     (j/context (get cx "context") (get cx "message") (get cx "extra"))
-                     (get c "state"))]
+          (let [st (cond
+                     (get c "context") (let [cx (get c "context")]
+                                         (j/context (get cx "context") (get cx "message") (get cx "extra")))
+                     (get c "roleState") (let [rs (get c "roleState")]
+                                           (j/state (get rs "role") (get rs "data")))
+                     :else (get c "state"))]
             (is (= (get c "wantState") st))
             (is (= (json/write-str (get c "wantQuestions")) (json/write-str (j/wire-questions qs))))))))))
 
@@ -56,21 +59,35 @@
                      qmap)
         rules  (mapv ->rule (get f "rules"))
         cases  (get f "cases")]
-    (is (= 13 (count cases)))
+    (is (<= 20 (count cases)) "the shared gate cases are all present")
     (doseq [c cases]
       (testing (get c "name")
         (let [st {"case" (get c "name")}
               cl (jev/static-classifier [{:state st :questions (j/wire-questions qs)
                                           :answers (get c "answers")}])
-              o  (j/gate cl st qs rules (->bands (get c "bands")))
+              b  (->bands (get c "bands"))
+              p  (get c "policy")
+              rules (if-let [rs (get c "rules")] (mapv ->rule rs) rules)
+              o  (if p
+                   (j/decide cl st qs {:rules rules :bands b :default (get p "default")
+                                       :skip-uncertain (get p "skipUncertain")})
+                   (j/gate cl st qs rules b))
               w  (get c "want")]
+          (doseq [[n wa] (get c "wantAnswers")]
+            (let [a (get (:answers o) n)]
+              (is (= (get wa "value") (j/value a)) n)
+              (when (contains? wa "band") (is (= (get wa "band") (:band a)) n))
+              (when (contains? wa "sure") (is (= (get wa "sure") (:sure a)) n))
+              (when (contains? wa "choice") (is (= (get wa "choice") (j/picked a)) n))))
           (is (= (get w "action") (:action o)))
           (is (= (get w "target") (:target o)))
           (is (= (get w "escalated") (:escalated o)))
           (when (:escalated o)
             (is (= "input" (get-in o [:request :kind])))
-            (is (string? (get-in o [:request :data :question])))
-            (is (string? (get-in o [:request :data :reason])))
+            (is (= (get w "question") (get-in o [:request :data :question])))
+            (when (contains? w "reason")
+              (is (= (get w "reason") (get-in o [:request :data :reason]))))
+            (is (= (get w "requestId") (get-in o [:request :id])))
             (is (map? (get-in o [:request :data :answers])))))))))
 
 ;; ---------------------------------------------------------------------------
@@ -147,7 +164,7 @@
     (is (= "yes" (:band (get (j/ask (j/replaying t "plan") "other state" qs) "a"))))
     (let [e (try (j/ask (j/replaying t "review") "s" qs) nil (catch Throwable x x))]
       (is (some? e))
-      (is (str/includes? (ex-message e) "review")))))
+      (is (= "tape: no recorded decision for call \"review\"" (ex-message e))))))
 
 ;; ---------------------------------------------------------------------------
 
@@ -164,6 +181,11 @@
         (is (some? e))
         (is (str/includes? (ex-message e) "state 1"))
         (is (= 1 (:index (ex-data e))))))
+    (testing "several failures name the lowest index"
+      (let [e (try (jev/evaluate-batch c [{"i" 0.42} {"i" 0.1} {"i" 0.43}] qs {:concurrency 3}) nil
+                   (catch Throwable x x))]
+        (is (str/includes? (ex-message e) "state 0"))
+        (is (= 0 (:index (ex-data e))))))
     (testing "empty is an error and sends nothing"
       (let [calls (atom 0)
             live  (jev/create-classifier {:http-client (fn [_ _ _] (swap! calls inc) {:status 200 :body "{}"})})

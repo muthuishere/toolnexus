@@ -12,9 +12,9 @@
 ;;     used to be a fixed relative path; see the note at `fixture-base` for the
 ;;     concurrency defect that cost.
 (ns toolnexus.skill-test
-  (:require [clojure.test :refer [deftest is testing use-fixtures]]
+  (:require [toolnexus.shared-examples-test :as te]
+            [clojure.test :refer [deftest is testing use-fixtures]]
             [clojure.string :as str]
-            [koine.env :as env]
             [koine.fs :as fs]
             [toolnexus.skill :as skill]
             [toolnexus.tool :as tool]))
@@ -455,7 +455,7 @@
   109)
 
 (deftest shared-hello-world-is-995-bytes
-  (let [examples (env/get-env "TN_EXAMPLES")]
+  (let [examples (te/examples-dir)]
     (is (some? examples) "TN_EXAMPLES must point at the repo's shared examples/ directory")
     (when examples
       (let [ld    (skill/load-skills (str examples "/skills"))

@@ -21,9 +21,9 @@
 ;;
 ;; No java.*, no `future`, no reader conditionals.
 (ns toolnexus.agents.runtime-fixture-test
-  (:require [clojure.string :as str]
+  (:require [toolnexus.shared-examples-test :as te]
+            [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
-            [koine.env :as env]
             [koine.fs :as fs]
             [koine.json :as json]
             [koine.time :as ktime]
@@ -52,7 +52,7 @@
 (defn- fixture
   "One shared fixture, parsed. `examples/<name>/fixture.json`."
   [nm]
-  (json/read-str (fs/read-file (str (env/get-env "TN_EXAMPLES") "/" nm "/fixture.json"))))
+  (json/read-str (fs/read-file (str (te/examples-dir) "/" nm "/fixture.json"))))
 
 ;; ---------------------------------------------------------------------------
 ;; The fixtures' tools
