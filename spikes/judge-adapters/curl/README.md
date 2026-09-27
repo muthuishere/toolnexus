@@ -9,6 +9,7 @@ Question `instructions` may be an object too. Variants of the video's Donkey Kon
 | B state = object with role | 0.02 / 0.78 | **0.55** / 0.02 |
 | C state = object, no role | 0.06 / 0.64 | 0.90 / 0.12 |
 | D state = plain text message | 0.06 / 0.70 | 0.84 / 0.13 |
+| **F role in state + the moderation question names the field it judges** | **0.02 / 0.79** | **0.96 / 0.02** |
 | E role inside the one question that needs it | 0.06 / 0.62 | 0.90 / 0.05 |
 
 `is_appropriate` asks "does the message contain inappropriate language" (so high = inappropriate).
@@ -20,5 +21,9 @@ Question `instructions` may be an object too. Variants of the video's Donkey Kon
   a less confident "helps" on the good message (0.62).
 - A role costs about 40 input tokens here.
 
-Conclusion: a role is a per-question-group decision, not one global setting.
+Conclusion (after F): **keep the role in the state**, as the video does. The 0.55 came from a vague
+question ("does the message contain…"), not from where the role sat. F asks "Does message_received
+contain insults, profanity or harmful topics?", which points at the exact field, and it is the sharpest
+row in the table on both messages. So: role goes in state, and each question names the state field it
+judges.
 One sample per cell; Jev is near-deterministic, but these are not averages.

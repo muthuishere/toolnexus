@@ -1,0 +1,17 @@
+{
+  "model": "jev-latest",
+  "state": {
+    "role": "You are playing a game of Super Smash brothers and are receiving messages from other people on what to do. You are Donkey Kong, you want to win.",
+    "message_received": "Grab the ledge and wait for Mario to jump, then punch him off stage."
+  },
+  "questions": {
+    "is_appropriate": {
+      "type": "noul",
+      "instructions": "Does message_received contain insults, profanity or harmful topics?"
+    },
+    "does_this_help": {
+      "type": "noul",
+      "instructions": "Does this help donkey kong win?"
+    }
+  }
+}
