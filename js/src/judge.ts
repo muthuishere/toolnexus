@@ -168,7 +168,7 @@ function applyRules(answers: Answers, rules: readonly Rule[], skipUncertain: boo
     const a = answers[r.question]
     if (!a || unsure(a)) {
       if (a && skipUncertain) continue
-      const reason = a ? `${a.type} answer is uncertain` : `missing answer ${JSON.stringify(r.question)}`
+      const reason = `${a ? "uncertain" : "missing"} answer ${JSON.stringify(r.question)}`
       return escalate(
         answers,
         `gate:${i}:${r.question}`,
@@ -177,15 +177,29 @@ function applyRules(answers: Answers, rules: readonly Rule[], skipUncertain: boo
         `Classifier is unsure about "${r.question}" (${reason}). Decide rule ${i} (${r.action}).`,
       )
     }
-    const v = a.type === "noul" ? a.noul : a.type === "score" ? a.score : NaN
-    const fired =
-      r.is !== undefined
-        ? a.type === "choice" && a.choice === r.is
-        : r.below !== undefined
-          ? v < r.below
-          : r.at_least !== undefined
-            ? v >= r.at_least
-            : false
+    const key = JSON.stringify(r.question)
+    let fired = false
+    let misfit = ""
+    if (r.is !== undefined) {
+      if (a.type === "choice") fired = a.choice === r.is
+      else misfit = `is-rule on ${a.type} answer ${key}`
+    } else if (a.type === "choice") {
+      misfit = `numeric rule on choice answer ${key}`
+    } else {
+      const v = a.type === "noul" ? a.noul : a.score
+      if (r.below !== undefined) fired = v < r.below
+      else if (r.at_least !== undefined) fired = v >= r.at_least
+      else misfit = `rule on ${key} has no below / at_least / is`
+    }
+    // A rule that does not fit its answer escalates; it is never skipped.
+    if (misfit)
+      return escalate(
+        answers,
+        `gate:${i}:${r.question}`,
+        r.question,
+        misfit,
+        `Rule ${i} (${r.action}) does not fit its answer (${misfit}). Decide.`,
+      )
     if (fired) return { action: r.action, target: r.target ?? "", escalated: false, answers }
   }
   return undefined

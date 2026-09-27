@@ -43,7 +43,11 @@ for (const c of stateCases.cases) {
       assert.throws(() => questionMap(qs), (e: Error) => e.message.includes(c.wantError))
       return
     }
-    const st = c.context ? context(c.context.context, c.context.message, c.context.extra) : c.state
+    const st = c.roleState
+      ? State(c.roleState.role, c.roleState.data)
+      : c.context
+        ? context(c.context.context, c.context.message, c.context.extra)
+        : c.state
     assert.deepEqual(st, c.wantState)
     assert.deepEqual(wire(questionMap(qs)), c.wantQuestions)
   })
@@ -61,13 +65,38 @@ const ST = { report: "gate case" }
 for (const c of gateCases.cases) {
   test(`gate case: ${c.name}`, async () => {
     const cl = staticClassifier({ state: ST, questions: questionMap(gq), response: { answers: c.answers } })
-    const out = await gate(cl, ST, gq, gateCases.rules, c.bands ?? undefined)
-    assert.deepEqual({ action: out.action, target: out.target, escalated: out.escalated }, c.want)
+    const out = c.policy
+      ? await decide(cl, ST, gq, {
+          rules: c.rules ?? gateCases.rules,
+          default: c.policy.default,
+          skipUncertain: c.policy.skipUncertain,
+          bands: c.bands ?? undefined,
+        })
+      : await gate(cl, ST, gq, c.rules ?? gateCases.rules, c.bands ?? undefined)
+    const w = c.want
+    assert.deepEqual(
+      { action: out.action, target: out.target, escalated: out.escalated },
+      { action: w.action, target: w.target, escalated: w.escalated },
+    )
     if (out.escalated) {
       assert.equal(out.request?.kind, "input")
       const d = out.request?.data as any
-      assert.ok(d.question && d.reason && d.answers)
+      assert.ok(d.answers)
+      assert.equal(d.question, w.question)
+      if (w.reason !== undefined) assert.equal(d.reason, w.reason)
+      else assert.ok(d.reason)
+      assert.equal(out.request?.id, w.requestId)
     } else assert.equal(out.request, undefined)
+    const a = await ask(cl, ST, gq, c.bands ?? undefined)
+    for (const [name, wa] of Object.entries(c.wantAnswers as Record<string, any>)) {
+      const got: any = a[name]
+      assert.ok(got, `answer ${name}`)
+      assert.equal(got.value(), wa.value, `${name}.value`)
+      if ("band" in wa) assert.equal(got.band, wa.band, `${name}.band`)
+      if ("sure" in wa) assert.equal(got.sure, wa.sure, `${name}.sure`)
+      if ("choice" in wa) assert.equal(got.pick(), wa.choice, `${name}.choice`)
+    }
+    assert.deepEqual(Object.keys(a).sort(), Object.keys(c.wantAnswers).sort())
   })
 }
 
@@ -144,7 +173,7 @@ test("Tape records by call name and replays offline; a miss names the key", asyn
   const a = await ask(replay.classifier("plan"), ST, qs)
   assert.equal(a.x.band, "yes")
   const miss = Tape.replay({}).classifier("plan") // building never fails; the miss is reported on evaluate
-  await assert.rejects(ask(miss, ST, qs), /tape: no recorded decision for call "plan"/)
+  await assert.rejects(ask(miss, ST, qs), (e: Error) => e.message === 'tape: no recorded decision for call "plan"')
 })
 
 test("byte-identity: builder request body == hand-written §8B body", async () => {
@@ -182,6 +211,18 @@ test("evaluateBatch returns decisions in state order", async () => {
 test("evaluateBatch fails closed naming the state index", async () => {
   const c = staticClassifier([rec("a", 0.1), rec("c", 0.9)])
   await assert.rejects(() => c.evaluateBatch(["a", "b", "c"], bq), /state 1/)
+})
+
+test("evaluateBatch: several failures name the lowest index", async () => {
+  const c = createClassifier({
+    style: "custom",
+    evaluate: async (s) => {
+      if (s === "a") await new Promise((r) => setTimeout(r, 20)) // state 0 fails LAST
+      if (s === "a" || s === "c") throw new Error(`boom ${s}`)
+      return decision({ x: { type: "noul", noul: 0.5 } })
+    },
+  })
+  await assert.rejects(() => c.evaluateBatch(["a", "b", "c"], bq), /^Error: classifier: state 0: /)
 })
 
 test("evaluateBatch: empty states is an error and sends nothing", async () => {
