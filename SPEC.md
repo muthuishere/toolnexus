@@ -2066,8 +2066,8 @@ not asserted.
 ### Batch — `evaluateBatch(states, questions)`
 
 The same questions over many states: each state goes through the per-state `evaluate` (every style),
-at most 16 in flight by default, decisions returned **in state order**. It fails closed: the first
-failing state's index is named and no decisions are returned. No states is an error and sends nothing.
+at most 16 in flight by default, decisions returned **in state order**. It fails closed: the
+**lowest** failing state's index is named (deterministic under concurrency) and no decisions are returned. No states is an error and sends nothing.
 A native batch wire call per backend is not part of this contract.
 
 ### Simple judgments — `ask` / `gate` (change `add-judge-adapters`)
@@ -2102,8 +2102,18 @@ gate(classifier, state, questions, rules, bands?) -> { action, target, escalated
   `answer.choice()` is the picked option.
 - `Policy{rules, default, bands, skipUncertain}`: a non-empty `default` is the no-rule-fired action;
   empty escalates (`reason: "no rule fired"`). `skipUncertain` skips uncertain rules instead of
-  escalating on the first.
-- `Tape` records live decisions by call name and replays them through `static`; a miss names the key.
+  escalating on the first. It skips only a *present* uncertain/unsure answer; a missing answer
+  still escalates.
+- `Tape` records live decisions by call name and replays them by call name with no network. Replay
+  is keyed by call name, not by the canonical request, so the replaying classifier is a
+  `custom`-style classifier over the tape (a port may hand a recorded hit to `static`); a miss
+  names the key and sends nothing.
+- Permitted naming idiom (behaviour identical): golang `JudgeAnswer` (`Answer` is §10); js named
+  builders under `judge.` and `pick()` for the picked option (§8B's `choice` field would be
+  shadowed); python rule field `is_`; clojure `:at-least`.
+- Open (ports disagree, tracked in `openspec/changes/add-judge-adapters` design O1–O5): the Tape
+  API surface, whether the missing-answer reason names the key, the Policy entry point, the
+  picked-option accessor name, and the one-line static classifier name.
 - Conformance: `examples/judge/state-cases.json`, `examples/judge/gate-cases.json`.
 
 ## 9. Go CLI (`toolnexus`)

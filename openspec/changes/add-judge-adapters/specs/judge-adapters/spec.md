@@ -62,7 +62,8 @@ i SHALL win over later rules.
 #### Scenario: A missing answer escalates
 
 - **WHEN** a rule names a question absent from the decision
-- **THEN** the outcome is escalated `needs_input` with reason naming the missing answer
+- **THEN** the outcome is escalated `needs_input`, the reason starts `missing answer`, and the
+  Request's `data.question` is that question's name
 
 #### Scenario: Every shared gate case holds in every port
 
@@ -102,7 +103,8 @@ choice answer.
 `Policy{rules, default, bands, skipUncertain}` SHALL apply `gate`'s rules and then its
 default. A non-empty `default` SHALL be the action when no rule fires; an empty `default`
 SHALL escalate with a §10 `input` Request whose reason is `no rule fired`. With
-`skipUncertain`, a rule whose answer is uncertain SHALL be skipped instead of escalating.
+`skipUncertain`, a rule whose answer is present but uncertain (noul) or not sure (choice/score)
+SHALL be skipped instead of escalating; a rule whose answer is missing SHALL still escalate.
 
 #### Scenario: No rule fired escalates by default
 
@@ -114,11 +116,18 @@ SHALL escalate with a §10 `input` Request whose reason is `no rule fired`. With
 - **WHEN** rule 1's answer is uncertain, rule 2's answer is confident and matches, and `skipUncertain` is set
 - **THEN** the outcome is rule 2's action, not an escalation
 
+#### Scenario: SkipUncertain does not skip a missing answer
+
+- **WHEN** rule 1 names a question absent from the decision and `skipUncertain` is set
+- **THEN** the outcome is escalated `needs_input` on rule 1
+
 ### Requirement: Decisions can be recorded and replayed
 
-A `Tape` SHALL wrap a live classifier to record each decision keyed by a caller-given call
-name, and SHALL produce a classifier that replays those decisions with no network. A replay
-for an unrecorded key SHALL fail with an error naming the key.
+A `Tape` SHALL record each live decision keyed by a caller-given call name, and SHALL produce a
+classifier that replays those decisions by call name with no network. Because replay is keyed
+by call name rather than by the canonical request, the replaying classifier SHALL be a
+`custom`-style classifier over the tape (a port MAY hand a recorded hit to `static`). A replay
+for an unrecorded key SHALL fail with an error naming the key and send no request.
 
 #### Scenario: A replay miss names the key
 
@@ -129,7 +138,7 @@ for an unrecorded key SHALL fail with an error naming the key.
 Every port SHALL expose `evaluateBatch(states, questions)` on the Classifier. It SHALL evaluate each
 state with the existing per-state `evaluate`, with at most 16 in flight by default, and return the
 decisions in state order. It SHALL fail closed: if any state fails, the call returns an error naming
-that state's index and no decisions. An empty states list SHALL be an error, and no request is sent.
+the lowest failing state index and no decisions. An empty states list SHALL be an error, and no request is sent.
 
 #### Scenario: Decisions come back in state order
 - **WHEN** a host batches three states whose recorded answers differ
@@ -139,9 +148,25 @@ that state's index and no decisions. An empty states list SHALL be an error, and
 - **WHEN** the second of three states has no recorded decision
 - **THEN** the call returns an error naming state 1 and no decisions
 
+#### Scenario: Several failures name the lowest index
+- **WHEN** states 2 and 0 of three both fail, in any completion order
+- **THEN** the error names state 0
+
 #### Scenario: Empty batch
 - **WHEN** a host calls evaluateBatch with no states
 - **THEN** it returns an error and sends no request
+
+### Requirement: Native naming is permitted where the shared name collides
+
+A port SHALL keep the shared behaviour and MAY rename where the shared name collides with an
+existing symbol or keyword: golang `JudgeAnswer` (`Answer` is the §10 type); js named builders
+under `judge.` and `pick()` for the picked option (a choice answer's `choice` field would be
+shadowed); python rule field `is_`; clojure `:at-least`.
+
+#### Scenario: A renamed port still passes the shared cases
+
+- **WHEN** a port with a permitted rename runs `examples/judge/gate-cases.json`
+- **THEN** it yields every case's `want` action, target and escalated flag
 
 ### Requirement: Absent is byte-identical
 

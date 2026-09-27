@@ -21,7 +21,193 @@ distribution. `Tool` is the contract for an **action**; `Classifier` is the cont
 **judgment**. The concepts live in [Typed decisions](/toolnexus/judge/); this page is the recipe.
 </Aside>
 
-## Run it first
+## Start here: ask & gate
+
+<Aside type="note" title="Unreleased — lands in the next release">
+`State`, `ask`, `gate`, `Policy`, `Tape` and `evaluateBatch` are implemented in all seven ports and
+land in the next release (OpenSpec change `add-judge-adapters`, ADR 0035) and pass the 16 shared cases
+in `examples/judge/`. They are not in a published package yet. The numbers below are real.
+</Aside>
+
+Most hosts do the same thing with a classifier: build a state, ask a few named questions, read a
+band, then act or ask a human. That is the whole layer. Two yes/no questions went from ~16 lines of
+nested question maps to five, and the wire request is byte-identical to the hand-written one.
+
+<Tabs syncKey="lang">
+<TabItem label="JavaScript">
+```ts
+import { createClassifier, judge, State, ask, gate, decide } from "toolnexus"
+
+const c = createClassifier()
+const st = State("You are Donkey Kong. You want to win the game.", { message_received: msg })
+const qs = [
+  judge.noul("is_appropriate", "Does `message_received` contain insults, profanity or harmful topics?"),
+  judge.noul("does_this_help", "Does `message_received` help Donkey Kong win the game?"),
+]
+const a = await ask(c, st, qs)
+a.is_appropriate.band      // "yes" | "no" | "uncertain"
+a.does_this_help.value()   // one number; a choice answer's option is .pick()
+
+const out = await decide(c, st, qs, {
+  rules: [{ question: "is_appropriate", at_least: 0.7, action: "fail" }],
+  default: "",            // "" = nothing fired -> a §10 input Request (ask a human)
+  skipUncertain: true,    // an uncertain rule is skipped; a missing answer still escalates
+})
+out.action; out.escalated; out.request
+```
+</TabItem>
+<TabItem label="Python">
+```python
+from toolnexus import ask, gate, noul, state, Rule, Policy
+
+st = state("You are Donkey Kong. You want to win the game.", {"message_received": msg})
+qs = [
+    noul("is_appropriate", "Does message_received contain insults, profanity or harmful topics?"),
+    noul("does_this_help", "Does message_received help Donkey Kong win the game?"),
+]
+a = await ask(classifier, st, qs)
+a["is_appropriate"].band        # "yes" | "no" | "uncertain"
+a["does_this_help"].value()
+
+out = await gate(classifier, st, qs, Policy(
+    [Rule("is_appropriate", "fail", at_least=0.7)],
+    default="", skip_uncertain=True))
+out.action, out.escalated, out.request
+```
+</TabItem>
+<TabItem label="Go">
+```go
+st := tn.State("You are Donkey Kong. You want to win the game.",
+	map[string]any{"message_received": msg})
+qs := []tn.JudgeQuestion{
+	tn.Noul("is_appropriate", "Does `message_received` contain insults, profanity or harmful topics?"),
+	tn.Noul("does_this_help", "Does `message_received` help Donkey Kong win the game?"),
+}
+a, err := tn.Ask(ctx, c, st, qs)  // a["is_appropriate"].Band: yes | no | uncertain
+fmt.Println(a["does_this_help"].Value())
+
+block := 0.7
+out, err := tn.Policy{
+	Rules:         []tn.Rule{{Question: "is_appropriate", AtLeast: &block, Action: "fail"}},
+	Default:       "",
+	SkipUncertain: true,
+}.Gate(ctx, c, st, qs)            // out.Action, out.Escalated, out.Request
+```
+</TabItem>
+<TabItem label="Java">
+```java
+import static io.github.muthuishere.toolnexus.Judge.*;
+
+var st = State.of("You are Donkey Kong. You want to win the game.",
+        Map.of("message_received", msg));
+var qs = List.of(
+        noul("is_appropriate", "Does message_received contain insults, profanity or harmful topics?"),
+        noul("does_this_help", "Does message_received help Donkey Kong win the game?"));
+var a = ask(classifier, st, qs);
+a.get("is_appropriate").band();   // YES | NO | UNCERTAIN
+
+Outcome out = new Policy(List.of(Rule.atLeast("is_appropriate", 0.7, "fail")),
+        "", Bands.DEFAULT, true).decide(classifier, st, qs);
+out.action(); out.escalated(); out.request();
+```
+</TabItem>
+<TabItem label="C#">
+```csharp
+var st = Judge.State("You are Donkey Kong. You want to win the game.",
+    new Dictionary<string, object?> { ["message_received"] = msg });
+var qs = new[] {
+    Judge.Noul("is_appropriate", "Does `message_received` contain insults, profanity or harmful topics?"),
+    Judge.Noul("does_this_help", "Does `message_received` help Donkey Kong win the game?"),
+};
+var a = await Judge.AskAsync(classifier, st, qs);
+a["is_appropriate"].Band;          // "yes" | "no" | "uncertain"
+a["does_this_help"].Value();
+
+var out = await Judge.GateAsync(classifier, st, qs, new Policy {
+    Rules = new[] { Rule.AtLeast("is_appropriate", 0.7, "fail") },
+    Default = "", SkipUncertain = true });
+// out.Action, out.Escalated, out.Request
+```
+</TabItem>
+<TabItem label="Elixir">
+```elixir
+import Toolnexus.Judge
+alias Toolnexus.Judge.Policy
+
+st = state("You are Donkey Kong. You want to win the game.", %{message_received: msg})
+qs = [
+  noul(:is_appropriate, "Does message_received contain insults, profanity or harmful topics?"),
+  noul(:does_this_help, "Does message_received help Donkey Kong win the game?")
+]
+{:ok, a} = ask(classifier, st, qs)
+a["is_appropriate"].band                      #=> :yes | :no | :uncertain
+Toolnexus.Judge.Answer.value(a["does_this_help"])
+
+{:ok, out} =
+  gate(classifier, st, qs, %Policy{
+    rules: [%{question: "is_appropriate", at_least: 0.7, action: "fail"}],
+    default: "", skip_uncertain: true})
+```
+</TabItem>
+<TabItem label="Clojure">
+```clojure
+(require '[toolnexus.judge :as j])
+
+(def st (j/state "You are Donkey Kong. You want to win the game."
+                 {"message_received" msg}))
+(def qs [(j/noul :is_appropriate "Does message_received contain insults, profanity or harmful topics?")
+         (j/noul :does_this_help "Does message_received help Donkey Kong win the game?")])
+
+(def a (j/ask classifier st qs))
+(:band (get a "is_appropriate"))   ;=> "yes" | "no" | "uncertain"
+(j/value (get a "does_this_help"))
+
+(j/decide classifier st qs {:rules [{:question :is_appropriate :at-least 0.7 :action "fail"}]
+                            :default "" :skip-uncertain true})
+;=> {:action … :escalated … :request …}
+```
+</TabItem>
+</Tabs>
+
+- **Bands** default to 0.30 / 0.70 and are exclusive: exactly 0.70 is `uncertain`. A choice or
+  score answer carries `sure` instead (a near-uniform choice is never sure).
+- **`gate` declines to decide.** An uncertain, unsure or missing answer returns `needs_input` with
+  a §10 `input` Request — route it through `waitFor` or your own queue. It never authorises.
+- **`Tape`** records live decisions by call name and replays them offline, so tests run on real
+  answers. **`evaluateBatch`** asks the same questions of many states (state order, 16 in flight,
+  fail-closed on the lowest failing index). Names per port are in each port's README.
+
+Two rules come from measuring it, not from taste:
+
+- **The role goes in the state.** The wire has only `model`, `state` and `questions`, so there is
+  no system prompt to put it in. `State(role, data)` puts `role` next to your data.
+- **Each question names the state field it judges.** "Does the message contain…" is vague;
+  "Does `message_received` contain…" points at a field.
+
+Live on TypeSafe `jev-1.13.0`, 2026-09-27, one good message and one insult
+(`is_appropriate` asks about inappropriate language, so high means inappropriate):
+
+| variant | good: inappropriate / helps | bad: inappropriate / helps |
+|---|---|---|
+| A state = JSON string with role | 0.02 / 0.76 | **0.57** / 0.02 |
+| B state = object with role | 0.02 / 0.78 | **0.55** / 0.02 |
+| C state = object, no role | 0.06 / 0.64 | 0.90 / 0.12 |
+| D state = plain text message | 0.06 / 0.70 | 0.84 / 0.13 |
+| E role inside the one question that needs it | 0.06 / 0.62 | 0.90 / 0.05 |
+| **F role in state + question names its field** | **0.02 / 0.79** | **0.96 / 0.02** |
+
+A string and an object state behave the same (A ≈ B). With the role in state and a vague question,
+the insult blurred to 0.55, right in the uncertain band. Naming the field (F) made it the sharpest
+row on both messages. Putting the role into the question instead (E) is rejected: it costs the
+question that needs the role. One sample per cell; Jev is near-deterministic, but these are
+readings, not averages. A full pipeline built on this is the
+[test-scout scenario](/toolnexus/scenarios/testscout/).
+
+## Under the hood: the raw `Classifier`
+
+`ask` and `gate` are a thin layer over the map-in, typed-answers-out API below.
+
+### Run it first
 
 Every tab below is an excerpt from a **real file in the repo**, and every one of these commands was
 run to produce the output at the bottom of this page. Each one picks its backend from the
@@ -383,67 +569,6 @@ hands over the conclusion rather than shipping raw numbers.
 **[The encoding rules](/toolnexus/judge/encoding/)** has the four rules with the measurement behind
 each, the degenerate-criteria warning the library emits when you get this wrong, and the precise
 limits of `nearUniform`, confidence and `calibrated` as health signals.
-
-## Simple judgments: ask & gate
-
-<Aside type="caution" title="Proposed — in spike, not yet released">
-Everything in this section lives in `spikes/judge-adapters/` and the OpenSpec change
-`add-judge-adapters` (ADR 0035). No released port ships `State`, `ask`, `gate` or `Policy` yet.
-The shape may still change; the numbers below are real.
-</Aside>
-
-The raw API above takes a map of questions and hands back typed answers. Most hosts then write
-the same ten lines: build a state, read a band, decide or ask a human. The proposed layer is
-those ten lines:
-
-```go
-st := judge.State("You are Donkey Kong. You want to win the game.",
-	map[string]any{"message_received": msg})
-
-qs := []judge.Q{
-	judge.Noul("is_appropriate",
-		"Does message_received contain insults, profanity or harmful topics?"),
-	judge.Noul("does_this_help",
-		"Does message_received help Donkey Kong win the game?"),
-}
-
-a, err := judge.Ask(ctx, classifier, st, qs)   // a["is_appropriate"].Band: yes | no | uncertain
-fmt.Println(a["is_appropriate"].Value())       // one number, no type assertions
-
-block := 0.7
-p := judge.Policy{
-	Rules:   []judge.Rule{{Question: "is_appropriate", AtLeast: &block, Action: "fail"}},
-	Default: "",            // "" = nothing fired -> a §10 input Request (ask a human)
-	SkipUncertain: true,    // an unsure rule is skipped, not a blocker for later rules
-}
-out, err := p.Gate(ctx, classifier, st, qs)    // out.Action, out.Escalated, out.Request
-```
-
-Two rules come from measuring it, not from taste:
-
-- **The role goes in the state.** The wire has only `model`, `state` and `questions`, so there is
-  no system prompt to put it in. `State(role, data)` puts `role` next to your data.
-- **Each question names the state field it judges.** "Does the message contain…" is vague;
-  "Does `message_received` contain…" points at a field.
-
-Live on TypeSafe `jev-1.13.0`, 2026-09-27, one good message and one insult
-(`is_appropriate` asks about inappropriate language, so high means inappropriate):
-
-| variant | good: inappropriate / helps | bad: inappropriate / helps |
-|---|---|---|
-| A state = JSON string with role | 0.02 / 0.76 | **0.57** / 0.02 |
-| B state = object with role | 0.02 / 0.78 | **0.55** / 0.02 |
-| C state = object, no role | 0.06 / 0.64 | 0.90 / 0.12 |
-| D state = plain text message | 0.06 / 0.70 | 0.84 / 0.13 |
-| E role inside the one question that needs it | 0.06 / 0.62 | 0.90 / 0.05 |
-| **F role in state + question names its field** | **0.02 / 0.79** | **0.96 / 0.02** |
-
-A string and an object state behave the same (A ≈ B). With the role in state and a vague question,
-the insult blurred to 0.55, right in the uncertain band. Naming the field (F) made it the sharpest
-row on both messages. Putting the role into the question instead (E) is rejected: it costs the
-question that needs the role. One sample per cell; Jev is near-deterministic, but these are
-readings, not averages. The full pipeline built on this is the
-[test-scout scenario](/toolnexus/scenarios/testscout/).
 
 ## Where to go next
 

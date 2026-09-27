@@ -8,17 +8,46 @@ GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
 
 ## Unreleased
 
-### Proposed — a simple `ask` / `gate` over `Classifier` (`openspec/changes/add-judge-adapters`)
+### Simple judgments: `ask`, `gate`, `State`, `Policy`, `Tape` and `evaluateBatch`, in all seven ports
 
-Not shipped yet; this records the design and the evidence. Asking a classifier two yes/no
-questions took ~16 lines of nested question maps, and every caller re-derived the same
-0.30/0.70 cut-offs — the first real consumer's gates had no uncertain band at all, so a
-0.62 reading failed a run. The proposal: state from a map (or context + message), questions
-as an ordered list, `ask` returning a band (noul) or `sure` (choice/score) per answer, and a
-`gate` that escalates to a §10 `input` request instead of acting when unsure. The wire is
-unchanged. A seven-port spike (`spikes/judge-adapters/`) passes all 16 shared cases in every
-port. **Not done:** the library implementation (all ports), and the batteries
-(`ToolGuardClassifier` and friends), which follow as `add-judge-batteries` per ADR 0035.
+Asking a classifier two yes/no questions used to take ~16 lines of nested question-type maps
+(Go), and every caller re-derived the same 0.30/0.70 cut-offs by hand — the first real consumer's
+gates had no uncertain band at all, so a 0.62 reading failed a run. Now it is five lines: a state,
+an ordered list of named questions, and `ask`, which returns each answer by name with a `band`
+(`yes`/`no`/`uncertain`, noul) or `sure` (choice/score) and a `value()` — one number, no type
+inspection. The §8B wire request is byte-identical to hand-written maps (tested in every port).
+
+- **`gate` declines to decide.** Rules (`below` / `at_least` / `is`) are first-match; an uncertain,
+  unsure or missing answer returns `needs_input` with a §10 `input` Request (question, reason,
+  answers) your host routes through `waitFor` or its own queue — it never acts on a guess.
+  Cut-points default to 0.30/0.70, exclusive (exactly 0.70 is uncertain), overridable per call.
+- **`Policy{rules, default, bands, skipUncertain}`** declares the fall-through: an empty `default`
+  escalates with `no rule fired`; `skipUncertain` skips an uncertain rule but a *missing* answer
+  still escalates.
+- **`State(role, data)`** puts the role next to your data — the wire has no system prompt. And
+  **each question names the state field it judges**. Measured live on TypeSafe `jev-1.13.0`: with
+  the role in state and a vague question an insult read 0.55 (inside the uncertain band); naming
+  `message_received` in the question gave 0.96 / 0.02 on the insult and 0.02 / 0.79 on the good
+  message. Copying the role into the question instead was rejected.
+- **`Tape`** records live decisions by call name and replays them offline, so a hermetic test runs
+  on real answers; a miss is an error naming the key. **`evaluateBatch(states, questions)`** asks
+  the same questions of many states: state order, at most 16 in flight, fail-closed on the lowest
+  failing index, empty list is an error. Plus a one-line static classifier from a recorded decision.
+
+Per-port names: golang `tn.Ask` / `tn.State` / `tn.JudgeAnswer` (`Answer` is already §10),
+`Tape.Recording` / `Replayer` with `WithCallName(ctx)`; js named builders are `judge.noul/choice/score`
+(bare `noul` stays the §8B wire builder) and the picked option is `pick()`; python `state`, `Rule(is_=…)`,
+`skip_uncertain`, `evaluate_batch`; java `Judge.*` with `State.of`, `Rule.atLeast`; csharp
+`Judge.AskAsync` / `GateAsync`, `EvaluateBatchAsync`, and `Decision.FromJson` is now public;
+elixir `Toolnexus.Judge` (bands as atoms, `evaluate_batch`); clojure `toolnexus.judge` with `:at-least`,
+`j/picked`, `jev/evaluate-batch`. All seven pass the 16 shared cases in `examples/judge/`.
+
+**What is NOT done.** The batteries (ToolGuard, SkillRelevance, ContentGuard and friends) follow as
+`add-judge-batteries`; a ModelRouter awaits an owner decision; no port attempts a native batch wire
+call (`evaluateBatch` is per-state `evaluate`). Tape replays by call name through a `custom`-style
+classifier, not `static`. The ports still disagree on the Tape API surface, whether the
+missing-answer reason names the key, the Policy entry point and a few accessor names — tracked as
+O1–O5 in `openspec/changes/add-judge-adapters`.
 
 ## 0.20.0 — 2026-09-22
 

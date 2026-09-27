@@ -1,14 +1,16 @@
 ---
 title: Test scout — a judge pipeline that writes tests that matter
-description: Six stages where code counts, a classifier judges and an LLM writes. Real live output, per-stage latency and tokens, and what surprised us. Built on the proposed ask/gate layer (in spike, not yet released).
+description: Six stages where code counts, a classifier judges and an LLM writes. Real live output, per-stage latency and tokens, and what surprised us. Built on the ask/gate layer (unreleased — lands in the next release).
 ---
 
 import { Aside } from '@astrojs/starlight/components';
 
-<Aside type="caution" title="Proposed — in spike, not yet released">
-This scenario lives in `spikes/judge-adapters/scenarios/testscout/` and uses the spike's `judge`
-package (`State`, `Ask`, `Policy`, `Tape`). None of that ships in a released port yet; see
-[Simple judgments: ask & gate](/toolnexus/cookbook/judge/#simple-judgments-ask--gate).
+<Aside type="note" title="Spike code over an unreleased layer">
+This scenario's code lives in `spikes/judge-adapters/scenarios/testscout/` and still uses the
+spike's own `judge` package (`judge.State`, `judge.Ask`, `judge.Policy`, `judge.Tape`). The same
+layer is now in the Go library as `tn.State`, `tn.Ask`, `tn.Policy` and `tn.Tape` (and in the other
+six ports), unreleased — it lands in the next release. See
+[Start here: ask & gate](/toolnexus/cookbook/judge/#start-here-ask--gate).
 </Aside>
 
 A coverage tool tells you which lines ran. It cannot tell you which tests are worth writing.
