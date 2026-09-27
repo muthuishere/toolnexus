@@ -36,7 +36,7 @@ public class JudgeTests
     public void StateCases_AllHold()
     {
         var cases = Load("state-cases.json").GetProperty("cases").EnumerateArray().ToList();
-        Assert.Equal(3, cases.Count);
+        Assert.True(cases.Count >= 5);
         foreach (var c in cases)
         {
             var asks = c.GetProperty("questions").EnumerateArray().Select(FromFixture).ToList();
@@ -50,6 +50,14 @@ public class JudgeTests
             if (c.TryGetProperty("context", out var cx))
                 state = Judge.Context(cx.GetProperty("context").GetString()!, cx.GetProperty("message").GetString()!,
                     cx.GetProperty("extra").EnumerateObject().ToDictionary(p => p.Name, p => (object?)p.Value.GetString()));
+            else if (c.TryGetProperty("roleState", out var rs))
+            {
+                var d = rs.GetProperty("data");
+                object? data = d.ValueKind == JsonValueKind.Object
+                    ? d.EnumerateObject().ToDictionary(p => p.Name, p => (object?)p.Value.GetString())
+                    : d.GetString();
+                state = Judge.State(rs.GetProperty("role").GetString()!, data);
+            }
             else
             {
                 var st = c.GetProperty("state");
@@ -120,24 +128,47 @@ public class JudgeTests
     public async Task GateCases_AllHold()
     {
         var root = Load("gate-cases.json");
-        var rules = Rules(root);
+        var topRules = Rules(root);
         var n = 0;
         foreach (var c in root.GetProperty("cases").EnumerateArray())
         {
             var state = Judge.Context("triage bugs", "case " + c.GetProperty("name").GetString());
             var (cls, asks) = GateFixture(root, c, state);
+            var rules = c.TryGetProperty("rules", out _) ? Rules(c) : topRules;
             Bands? bands = c.GetProperty("bands").ValueKind == JsonValueKind.Null ? null
                 : new Bands(c.GetProperty("bands").GetProperty("low").GetDouble(), c.GetProperty("bands").GetProperty("high").GetDouble());
-            var o = await Judge.GateAsync(cls, state, asks, rules, bands);
+            var o = c.TryGetProperty("policy", out var pol)
+                ? await Judge.GateAsync(cls, state, asks, new Policy { Rules = rules, Bands = bands,
+                    Default = pol.GetProperty("default").GetString()!, SkipUncertain = pol.GetProperty("skipUncertain").GetBoolean() })
+                : await Judge.GateAsync(cls, state, asks, rules, bands);
+            var got = await Judge.AskAsync(cls, state, asks, bands);
+            var wantAnswers = c.GetProperty("wantAnswers");
+            Assert.Equal(wantAnswers.EnumerateObject().Count(), got.Count);
+            foreach (var wa in wantAnswers.EnumerateObject())
+            {
+                var a = got[wa.Name];
+                var at = $"{c.GetProperty("name").GetString()}/{wa.Name}";
+                Assert.True(wa.Value.GetProperty("value").GetDouble() == a.Value(), at);
+                if (wa.Value.TryGetProperty("band", out var wb)) Assert.True(wb.GetString() == a.Band, at);
+                if (wa.Value.TryGetProperty("sure", out var ws)) Assert.True(ws.GetBoolean() == a.Sure, at);
+                if (wa.Value.TryGetProperty("choice", out var wc)) Assert.True(wc.GetString() == a.Choice(), at);
+            }
             var want = c.GetProperty("want");
             var label = c.GetProperty("name").GetString();
             Assert.True(want.GetProperty("action").GetString() == o.Action, $"{label}: action {o.Action}");
             Assert.Equal(want.GetProperty("target").GetString(), o.Target);
             Assert.Equal(want.GetProperty("escalated").GetBoolean(), o.Escalated);
-            if (o.Escalated) { Assert.Equal("input", o.Request!.Kind); Assert.True(o.Request.Data!.ContainsKey("reason")); }
+            if (o.Escalated)
+            {
+                Assert.Equal("input", o.Request!.Kind);
+                Assert.Equal(want.GetProperty("question").GetString(), o.Request.Data!["question"]);
+                if (want.TryGetProperty("reason", out var wr)) Assert.Equal(wr.GetString(), o.Request.Data!["reason"]);
+                Assert.Equal(want.GetProperty("requestId").GetString(), o.Request.Id);
+            }
             n++;
         }
-        Assert.Equal(13, n);
+        Assert.Equal(root.GetProperty("cases").GetArrayLength(), n);
+        Assert.True(n >= 18);
     }
 
     private static Decision D(string answers) => Decision.FromJson("{\"answers\":" + answers + "}");
@@ -178,6 +209,17 @@ public class JudgeTests
         Assert.Equal("two", Judge.Apply(d, new Policy { Rules = rules, SkipUncertain = true }).Action);
         var missing = Judge.Apply(d, new Policy { Rules = new[] { Rule.Is("zz", "x", "go") } });
         Assert.Equal("missing answer \"zz\"", missing.Request!.Data!["reason"]);
+        Assert.Equal("uncertain answer \"a\"", Judge.Apply(d, new Policy { Rules = rules }).Request!.Data!["reason"]);
+    }
+
+    [Fact]
+    public void Policy_SkipUncertain_DoesNotSkipAMisfitRule()
+    {
+        // An is-rule on a present, confident noul is a config error, not uncertainty: it still escalates.
+        var d = D("{\"a\":{\"type\":\"noul\",\"noul\":0.9},\"b\":{\"type\":\"noul\",\"noul\":0.9}}");
+        var o = Judge.Apply(d, new Policy { Rules = new[] { Rule.Is("a", "x", "one"), Rule.AtLeast("b", 0.8, "two") }, SkipUncertain = true });
+        Assert.True(o.Escalated);
+        Assert.Equal("gate:0:a", o.Request!.Id);
     }
 
     [Fact]
@@ -189,8 +231,9 @@ public class JudgeTests
         await tape.RecordAsync("triage", live, "s", qs);
         var d = await tape.Replay("triage").EvaluateAsync("anything", qs);
         Assert.Equal(0.2, d.Noul("ok").Noul);
-        var ex = await Assert.ThrowsAsync<ClassifierException>(() => tape.Replay("plan").EvaluateAsync("s", qs));
-        Assert.Contains("plan", ex.Message);
+        var miss = tape.Replay("plan"); // obtaining a replayer for an unrecorded name never fails
+        var ex = await Assert.ThrowsAsync<ClassifierException>(() => miss.EvaluateAsync("s", qs));
+        Assert.Equal("tape: no recorded decision for call \"plan\"", ex.Message);
     }
 
     private static Classifier Batch(IReadOnlyDictionary<string, Question> qs, params (string State, double P)[] recs)
@@ -207,6 +250,46 @@ public class JudgeTests
         var ex = await Assert.ThrowsAsync<ClassifierException>(() => c.EvaluateBatchAsync(new object?[] { "a", "missing", "c" }, qs));
         Assert.Contains("state 1", ex.Message);
 
-        await Assert.ThrowsAsync<ClassifierException>(() => c.EvaluateBatchAsync(Array.Empty<object?>(), qs));
+        var calls = 0;
+        var counting = new Classifier(new ClassifierOptions
+        {
+            Style = ClassifierStyle.Custom,
+            Evaluate = (_, _, _) => { Interlocked.Increment(ref calls); return Task.FromResult(new Decision()); },
+        });
+        await Assert.ThrowsAsync<ClassifierException>(() => counting.EvaluateBatchAsync(Array.Empty<object?>(), qs));
+        Assert.Equal(0, calls);
+    }
+
+    [Fact]
+    public async Task EvaluateBatch_SeveralFailuresNameLowestIndex()
+    {
+        // state 2 fails fast, state 0 fails late: the error still names state 0.
+        var qs = Judge.Questions(new[] { Judge.Noul("ok", "?") });
+        var c = new Classifier(new ClassifierOptions
+        {
+            Style = ClassifierStyle.Custom,
+            Evaluate = async (st, _, _) =>
+            {
+                if ((string?)st == "late") await Task.Delay(40);
+                throw new ClassifierException("boom " + st);
+            },
+        });
+        var ex = await Assert.ThrowsAsync<ClassifierException>(() => c.EvaluateBatchAsync(new object?[] { "late", "s1", "fast" }, qs));
+        Assert.Contains("state 0", ex.Message);
+    }
+
+    [Fact]
+    public void Policy_UncertainBeforeFit_AndSkipDoesNotSkipMissing()
+    {
+        var d = D("{\"a\":{\"type\":\"noul\",\"noul\":0.5},\"b\":{\"type\":\"noul\",\"noul\":0.9}}");
+        var rules = new[] { Rule.Is("a", "x", "one"), Rule.AtLeast("b", 0.8, "two") };
+        var e = Judge.Apply(d, new Policy { Rules = rules });
+        Assert.Equal("uncertain answer \"a\"", e.Request!.Data!["reason"]);
+        Assert.Equal("gate:0:a", e.Request.Id);
+        Assert.Equal("two", Judge.Apply(d, new Policy { Rules = rules, SkipUncertain = true }).Action);
+        var m = Judge.Apply(d, new Policy { Rules = new[] { Rule.Below("zz", 0.3, "fail"), Rule.AtLeast("b", 0.5, "go") }, SkipUncertain = true });
+        Assert.Equal("missing answer \"zz\"", m.Request!.Data!["reason"]);
+        Assert.Equal("zz", m.Request.Data!["question"]);
+        Assert.Equal("gate:0:zz", m.Request.Id);
     }
 }

@@ -1,5 +1,4 @@
 using System.Collections.Concurrent;
-using System.Globalization;
 using System.Text.Json;
 
 namespace Toolnexus;
@@ -170,10 +169,10 @@ public static class Judge
         var i = 0;
         foreach (var r in policy.Rules)
         {
-            var (fired, reason) = Check(d, r, b);
+            var (fired, reason, unsure) = Check(d, r, b);
             if (reason != null)
             {
-                if (!(policy.SkipUncertain && d.Answers.ContainsKey(r.Question))) return Escalate(d, r.Question, reason, $"gate:{i}:{r.Question}",
+                if (!(policy.SkipUncertain && unsure)) return Escalate(d, r.Question, reason, $"gate:{i}:{r.Question}",
                     $"Classifier is unsure about \"{r.Question}\" ({reason}). Decide rule {i} ({r.Action}).");
             }
             else if (fired) return new GateOutcome(r.Action, r.Target);
@@ -193,30 +192,31 @@ public static class Judge
             Data = new Dictionary<string, object?> { ["question"] = question, ["reason"] = reason, ["answers"] = d.Answers },
         });
 
-    private static string F(double v) => v.ToString("0.00", CultureInfo.InvariantCulture);
-
-    private static (bool Fired, string? Reason) Check(Decision d, Rule r, Bands b)
+    // Per rule, in this order (SPEC §8B): missing, then uncertain, then fit. A misfit rule escalates
+    // and is never skipped by SkipUncertain.
+    private static (bool Fired, string? Reason, bool Unsure) Check(Decision d, Rule r, Bands b)
     {
-        if (!d.Answers.TryGetValue(r.Question, out var a)) return (false, $"missing answer \"{r.Question}\"");
+        if (!d.Answers.TryGetValue(r.Question, out var a)) return (false, $"missing answer \"{r.Question}\"", false);
+        var sure = a switch
+        {
+            NoulAnswer n => b.Noul(n.Noul) != "uncertain",
+            ChoiceAnswer c => b.Sure(c),
+            ScoreAnswer s => b.Sure(s),
+            _ => true,
+        };
+        if (!sure) return (false, $"uncertain answer \"{r.Question}\"", true);
         if (r.IsValue is { } opt)
-            return a is ChoiceAnswer c
-                ? b.Sure(c) ? (c.Choice == opt, null) : (false, $"choice \"{c.Choice}\" confidence {F(c.Confidence)} nearUniform={(c.NearUniform ? "true" : "false")}")
-                : (false, $"is-rule on {a.AnswerType} answer");
-
+            return a is ChoiceAnswer c2 ? (c2.Choice == opt, null, false) : (false, $"is-rule on {a.AnswerType} answer", false);
         double v;
         switch (a)
         {
-            case NoulAnswer n when b.Noul(n.Noul) == "uncertain":
-                return (false, $"noul {F(n.Noul)} in uncertain band [{F(b.Low)},{F(b.High)}]");
             case NoulAnswer n: v = n.Noul; break;
-            case ScoreAnswer s when !b.Sure(s):
-                return (false, $"score confidence {F(s.Confidence)} <= {F(b.High)}");
             case ScoreAnswer s: v = s.Score; break;
-            default: return (false, $"numeric rule on {a.AnswerType} answer");
+            default: return (false, $"numeric rule on {a.AnswerType} answer", false);
         }
-        if (r.BelowValue is { } lo) return (v < lo, null);
-        if (r.AtLeastValue is { } hi) return (v >= hi, null);
-        return (false, "rule has no condition");
+        if (r.BelowValue is { } lo) return (v < lo, null, false);
+        if (r.AtLeastValue is { } hi) return (v >= hi, null, false);
+        return (false, "rule has no condition", false);
     }
 }
 
