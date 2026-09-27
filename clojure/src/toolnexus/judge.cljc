@@ -207,5 +207,5 @@
     :evaluate (fn [_ _]
                 (let [k (qname call-name)]
                   (or (get @t k)
-                      (throw (ex-info (str "tape: no recorded decision for \"" k "\"")
+                      (throw (ex-info (str "tape: no recorded decision for call \"" k "\"")
                                       {:call k})))))}))
