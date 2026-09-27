@@ -62,8 +62,8 @@ i SHALL win over later rules.
 #### Scenario: A missing answer escalates
 
 - **WHEN** a rule names a question absent from the decision
-- **THEN** the outcome is escalated `needs_input`, the reason starts `missing answer`, and the
-  Request's `data.question` is that question's name
+- **THEN** the outcome is escalated `needs_input`, the reason is exactly `missing answer "<name>"`
+  naming that question's key, and the Request's `data.question` is that question's name
 
 #### Scenario: Every shared gate case holds in every port
 
@@ -126,13 +126,20 @@ SHALL be skipped instead of escalating; a rule whose answer is missing SHALL sti
 A `Tape` SHALL record each live decision keyed by a caller-given call name, and SHALL produce a
 classifier that replays those decisions by call name with no network. Because replay is keyed
 by call name rather than by the canonical request, the replaying classifier SHALL be a
-`custom`-style classifier over the tape (a port MAY hand a recorded hit to `static`). A replay
-for an unrecorded key SHALL fail with an error naming the key and send no request.
+`custom`-style classifier over the tape (a port MAY hand a recorded hit to `static`). Obtaining
+a replaying classifier for an unrecorded key SHALL NOT fail; evaluating it SHALL fail with the
+error `tape: no recorded decision for call "<key>"` and send no request. Per-port spellings of
+the Tape API are the sanctioned idiom mapping in SPEC §8B.
 
 #### Scenario: A replay miss names the key
 
 - **WHEN** a replaying classifier is asked under call name `plan` that the tape lacks
-- **THEN** it fails with an error naming `plan` and sends no request
+- **THEN** it fails with `tape: no recorded decision for call "plan"` and sends no request
+
+#### Scenario: A replay miss is reported on evaluate, not on construction
+
+- **WHEN** a caller obtains the replaying classifier for an unrecorded call name `plan`
+- **THEN** obtaining it succeeds, and the error is raised only when it is evaluated
 
 ### Requirement: evaluateBatch asks the same questions of many states
 Every port SHALL expose `evaluateBatch(states, questions)` on the Classifier. It SHALL evaluate each

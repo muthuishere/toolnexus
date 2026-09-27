@@ -48,28 +48,29 @@ Evidence: ADR 0035 and `spikes/judge-adapters/` (Go original + six ports + `shar
   decisions in state order; when several states fail, the error names the lowest failing index
   (every port scans results in state order), so the error is deterministic under concurrency.
 
-## Open items — where the ports disagree (not papered over)
+## Open items — resolved
 
-- **O1 Tape surface.** golang: one `Tape` with `Recording(live)` / `Replayer()`, call name carried
-  on `ctx` (`WithCallName`). js: `new Tape(live).classifier(name)` / `Tape.replay(entries).classifier(name)`;
-  a replay hit goes through `static`, a replay miss throws when the classifier is *built*, not
-  when it is evaluated. python: `Tape(live).call(name)` / `Tape(recorded=…).call(name)`; hit via
-  `static`, miss is a `custom` classifier that errors on evaluate. java: `record(call)` / `replay(call)`,
-  `custom`. csharp: records via `RecordAsync(call, live, state, qs)` (a method, not a wrapping
-  classifier), replays via `Replay(call)`, `custom`. elixir `Tape.record/3` / `Tape.replay/2`,
-  clojure `recording` / `replaying`, both `custom`. Tape file format is also per-port.
-- **O2 Missing-answer reason text.** golang, java, python and clojure name the question
-  (`missing answer "x"`); js, csharp and elixir say `missing answer` (the key is still on the
-  Request's `data.question`).
-- **O3 How a Policy is applied.** golang `Policy.Gate(ctx, c, …)` / `Policy.Decide(answers)`;
-  js `decide(c, state, qs, policy)`; python `gate(c, st, qs, Policy(...))`; java
-  `policy.decide(c, state, qs)`; csharp `Judge.GateAsync(…, Policy)`; elixir `gate(…, %Policy{})`;
-  clojure `j/decide`. Behaviour agrees (shared gate cases); the entry point does not.
-- **O4 Picked-option accessor.** `Choice()` (golang, csharp), `pick()` (js, permitted), `choice()`
-  (python, java via the raw answer, elixir `Answer.choice/1`), clojure `j/picked`.
-- **O5 One-line static classifier name.** `StaticClassifier(Recorded(…))` (golang),
-  `staticClassifier` (js), `static_classifier` (python), `Classifier.fromRecorded` (java),
-  `Classifier.FromRecorded` (csharp), `Judge.static/4` (elixir), `jev/static-classifier` (clojure).
+- **O1 Tape surface — RESOLVED (semantics converged, spelling is idiom).** Majority behaviour
+  (golang, python, java, csharp, elixir, clojure) is pinned in SPEC §8B: obtaining a replaying
+  classifier never fails; a miss is reported on **evaluate** as
+  `tape: no recorded decision for call "<name>"` and sends nothing. js previously threw when the
+  replaying classifier was *built*; it now returns a `custom` classifier that fails on evaluate.
+  golang, python and clojure miss messages were aligned to the shared text. API spellings stay
+  per-port (idiom table in SPEC §8B); the on-disk tape format is explicitly out of contract.
+- **O2 Missing-answer reason — RESOLVED (rule restored).** The reason is exactly
+  `missing answer "<key>"` in every port. js, csharp and elixir said `missing answer`
+  (elixir actually emitted `missing answer: "<key>"`); python used `repr` (single quotes). All four
+  fixed, each with a test pinning the exact string; csharp's skipUncertain check now tests
+  presence of the answer instead of comparing the reason text.
+- **O3 Policy entry point — RESOLVED as idiom.** Overloading `gate` (python, csharp, elixir),
+  a `decide` function/method (js, java, clojure) and a method on `Policy` (golang) are each the
+  natural shape of their language; behaviour is pinned by the shared gate cases. Recorded in the
+  SPEC §8B mapping table; no rename.
+- **O4 Picked-option accessor — RESOLVED as idiom.** `choice()` / `Choice()` in five ports; js
+  `pick()` (the §8B `choice` field would be shadowed) and clojure `j/picked` (`j/choice` is the
+  builder) are sanctioned in the table.
+- **O5 Static one-liner — RESOLVED as idiom.** Each port's existing helper is recorded in the table;
+  no rename.
 
 ## Risks
 

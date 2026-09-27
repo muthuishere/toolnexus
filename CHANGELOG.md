@@ -19,7 +19,7 @@ inspection. The §8B wire request is byte-identical to hand-written maps (tested
 
 - **`gate` declines to decide.** Rules (`below` / `at_least` / `is`) are first-match; an uncertain,
   unsure or missing answer returns `needs_input` with a §10 `input` Request (question, reason,
-  answers) your host routes through `waitFor` or its own queue — it never acts on a guess.
+  answers; a missing answer's reason is exactly `missing answer "<key>"` in every port) your host routes through `waitFor` or its own queue — it never acts on a guess.
   Cut-points default to 0.30/0.70, exclusive (exactly 0.70 is uncertain), overridable per call.
 - **`Policy{rules, default, bands, skipUncertain}`** declares the fall-through: an empty `default`
   escalates with `no rule fired`; `skipUncertain` skips an uncertain rule but a *missing* answer
@@ -30,7 +30,9 @@ inspection. The §8B wire request is byte-identical to hand-written maps (tested
   `message_received` in the question gave 0.96 / 0.02 on the insult and 0.02 / 0.79 on the good
   message. Copying the role into the question instead was rejected.
 - **`Tape`** records live decisions by call name and replays them offline, so a hermetic test runs
-  on real answers; a miss is an error naming the key. **`evaluateBatch(states, questions)`** asks
+  on real answers. Getting a replayer for an unrecorded name never fails; evaluating it fails with
+  `tape: no recorded decision for call "<name>"` and sends nothing — the same in every port (js
+  used to throw when the replayer was built). **`evaluateBatch(states, questions)`** asks
   the same questions of many states: state order, at most 16 in flight, fail-closed on the lowest
   failing index, empty list is an error. Plus a one-line static classifier from a recorded decision.
 
@@ -45,9 +47,9 @@ elixir `Toolnexus.Judge` (bands as atoms, `evaluate_batch`); clojure `toolnexus.
 **What is NOT done.** The batteries (ToolGuard, SkillRelevance, ContentGuard and friends) follow as
 `add-judge-batteries`; a ModelRouter awaits an owner decision; no port attempts a native batch wire
 call (`evaluateBatch` is per-state `evaluate`). Tape replays by call name through a `custom`-style
-classifier, not `static`. The ports still disagree on the Tape API surface, whether the
-missing-answer reason names the key, the Policy entry point and a few accessor names — tracked as
-O1–O5 in `openspec/changes/add-judge-adapters`.
+classifier, not `static`. The Policy entry point, the picked-option accessor, the static
+one-liner and the Tape method names keep per-language spellings (behaviour identical); they are
+listed in the SPEC §8B idiom table. The on-disk tape file format is per-port and not portable.
 
 ## 0.20.0 — 2026-09-22
 

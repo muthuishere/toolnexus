@@ -2094,6 +2094,8 @@ gate(classifier, state, questions, rules, bands?) -> { action, target, escalated
 - `gate` rules (`below` / `at_least` / `is`) are first-match. An uncertain, unsure or missing
   answer escalates to `needs_input` with a §10 `Request` (`kind: "input"`, data:
   question, reason, answers). A gate never authorises; it only declines to decide.
+- A missing answer's reason is exactly `missing answer "<key>"` (the question key in double
+  quotes), and `data.question` is that key.
 - `State(role, data)` puts `role` next to the data's fields at the top level (non-object data goes
   under `data`). The wire has no role field; the state carries it. **Each question names the state
   field it judges** ("Does `message_received` contain insults…"), and the role is never copied into
@@ -2106,14 +2108,26 @@ gate(classifier, state, questions, rules, bands?) -> { action, target, escalated
   still escalates.
 - `Tape` records live decisions by call name and replays them by call name with no network. Replay
   is keyed by call name, not by the canonical request, so the replaying classifier is a
-  `custom`-style classifier over the tape (a port may hand a recorded hit to `static`); a miss
-  names the key and sends nothing.
+  `custom`-style classifier over the tape (a port may hand a recorded hit to `static`).
+  Obtaining a replaying classifier for an unrecorded name never fails; the miss is reported when
+  that classifier is **evaluated**, as an error whose message is
+  `tape: no recorded decision for call "<name>"`, and no request is sent. Recording forwards to
+  the live classifier and stores the decision under the name. The on-disk tape format is not part
+  of this contract.
 - Permitted naming idiom (behaviour identical): golang `JudgeAnswer` (`Answer` is §10); js named
   builders under `judge.` and `pick()` for the picked option (§8B's `choice` field would be
   shadowed); python rule field `is_`; clojure `:at-least`.
-- Open (ports disagree, tracked in `openspec/changes/add-judge-adapters` design O1–O5): the Tape
-  API surface, whether the missing-answer reason names the key, the Policy entry point, the
-  picked-option accessor name, and the one-line static classifier name.
+- Sanctioned idiom mapping (spelling differs, behaviour identical; `add-judge-adapters` O1/O3–O5):
+
+  | port | apply a Policy | picked option | one-line static classifier | Tape record / replay |
+  |---|---|---|---|---|
+  | golang | `policy.Gate(ctx, c, st, qs)` (pure: `policy.Decide(answers)`) | `Choice()` | `StaticClassifier(Recorded(…))` | `tape.Recording(live)` / `tape.Replayer()`, name via `WithCallName(ctx, …)` |
+  | js | `decide(c, st, qs, policy)` | `pick()` | `staticClassifier(…)` | `new Tape(live).classifier(name)` / `Tape.replay(entries).classifier(name)` |
+  | python | `gate(c, st, qs, Policy(…))` | `choice()` | `static_classifier(…)` | `Tape(live).call(name)` / `Tape(recorded=…).call(name)` |
+  | java | `policy.decide(c, st, qs)` | `choice()` | `Classifier.fromRecorded(…)` | `tape.record(call)` / `tape.replay(call)` |
+  | csharp | `Judge.GateAsync(c, st, qs, policy)` | `Choice()` | `Classifier.FromRecorded(…)` | `tape.RecordAsync(call, live, st, qs)` / `tape.Replay(call)` |
+  | elixir | `Judge.gate(c, st, qs, %Policy{})` | `Answer.choice/1` | `Judge.static/4` | `Tape.record/3` / `Tape.replay/2` |
+  | clojure | `j/decide` | `j/picked` (`choice` is the builder) | `jev/static-classifier` | `j/recording` / `j/replaying` |
 - Conformance: `examples/judge/state-cases.json`, `examples/judge/gate-cases.json`.
 
 ## 9. Go CLI (`toolnexus`)

@@ -27,10 +27,10 @@
 - [x] 4.2 Byte-identity test: builder vs hand-written request body, every port
 - [x] 4.3 Docs: Cookbook "Typed decisions" rewritten on `ask` / `gate`
 
-## 5. Open items (ports disagree — see design.md O1–O5)
-- [ ] 5.1 Converge the Tape surface and replay path (O1)
-- [ ] 5.2 Missing-answer reason names the key in every port (O2)
-- [ ] 5.3 One Policy entry-point shape (O3), picked-option accessor (O4), static one-liner name (O5) — or record them as idiom
+## 5. Open items (resolved — see design.md O1–O5)
+- [x] 5.1 Converge the Tape surface and replay path (O1)
+- [x] 5.2 Missing-answer reason names the key in every port (O2)
+- [x] 5.3 One Policy entry-point shape (O3), picked-option accessor (O4), static one-liner name (O5) — or record them as idiom
 
 ## Follow-ups (not this change)
 - `add-judge-batteries` — ToolGuard / ToolRelevance / SkillRelevance / ToolResultFilter /
