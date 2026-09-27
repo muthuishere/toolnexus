@@ -45,3 +45,36 @@ confidence ≤ High is a guess), or that live Jev is ever uncertain on this fixt
 3. Static setup needs hand-written wire JSON per state, keyed on state+questions+model; no way to
    build a `Decision` with derived `NearUniform` in-process.
 4. A missing answer is an accessor error, so wfnexus fails the whole step instead of asking.
+
+## Ask / Gate API (shared contract `shared/`) — the video's Donkey Kong example
+
+Before (today's `tn.Classifier`, 16 lines):
+
+```go
+d, err := c.Evaluate(ctx, map[string]any{
+	"role":             role,
+	"message_received": msg,
+}, map[string]tn.Question{
+	"is_appropriate": tn.NoulQuestion{
+		Instructions: "Does the message contain inappropriate language or topics that are considered harmful.",
+	},
+	"does_this_help": tn.NoulQuestion{
+		Instructions: "Does this help donkey kong win?",
+	},
+})
+a, err := d.Noul("is_appropriate")
+ok := a.Noul > 0.70 // every caller re-derives cut-offs and the "exactly on the cut" rule
+```
+
+After (`ask.go`, 5 lines):
+
+```go
+d, err := Ask(ctx, c, map[string]any{"role": role, "message_received": msg}, []Q{
+	Noul("is_appropriate", "Does the message contain inappropriate language or topics that are considered harmful."),
+	Noul("does_this_help", "Does this help donkey kong win?"),
+})
+d["is_appropriate"].Band // "yes" | "no" | "uncertain"; cut-offs: Ask(..., Bands{0.2, 0.5})
+```
+
+Also: `Choice(name, instr, options)`, `Score(name, instr, levels...)`, `Msg(context, message, extra)`,
+`Gate(ctx, c, state, qs, rules, bands)`. `shared_test.go` asserts every case in both shared JSON files.

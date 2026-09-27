@@ -22,16 +22,16 @@ func main() {
 		fmt.Println("SKIP: CreateClassifier:", err)
 		return
 	}
-	o, err := Gate(context.Background(), c, bug, questions(), rules, DefaultBands)
+	o, err := Gate(context.Background(), c, bug, qs, rules, DefaultBands)
 	if err != nil {
 		fmt.Println("SKIP: live evaluate failed (no key or backend unreachable):", err)
 		return
 	}
-	if _, ok := o.Answers["fixable"].(tn.NoulAnswer); !ok {
+	if _, ok := o.Answers["fixable"].DecisionAnswer.(tn.NoulAnswer); !ok {
 		fmt.Println("SHAPE FAIL: fixable not a noul answer")
 		os.Exit(1)
 	}
-	ch, ok := o.Answers["component"].(tn.ChoiceAnswer)
+	ch, ok := o.Answers["component"].DecisionAnswer.(tn.ChoiceAnswer)
 	if !ok || len(ch.Probabilities) == 0 {
 		fmt.Println("SHAPE FAIL: component not a choice answer with probabilities")
 		os.Exit(1)
@@ -41,5 +41,5 @@ func main() {
 		os.Exit(1)
 	}
 	fmt.Printf("OK shape. fixable=%.2f component=%s conf=%.2f nearUniform=%v -> action=%q target=%q escalated=%v\n",
-		o.Answers["fixable"].(tn.NoulAnswer).Noul, ch.Choice, ch.Confidence, ch.NearUniform, o.Action, o.Target, o.Escalated)
+		o.Answers["fixable"].DecisionAnswer.(tn.NoulAnswer).Noul, ch.Choice, ch.Confidence, ch.NearUniform, o.Action, o.Target, o.Escalated)
 }

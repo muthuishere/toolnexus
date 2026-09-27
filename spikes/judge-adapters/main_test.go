@@ -80,7 +80,7 @@ func TestGateVsBaseline(t *testing.T) {
 			if ba != r.wantBase {
 				t.Errorf("baseline = %q, want %q", ba, r.wantBase)
 			}
-			o, err := Gate(ctx, c, stateFor(r), questions(), rules, DefaultBands)
+			o, err := Gate(ctx, c, stateFor(r), qs, rules, DefaultBands)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -108,15 +108,14 @@ func TestGateVsBaseline(t *testing.T) {
 
 // The real wfnexus fixability gate is a score. Pins the score-confidence branch of check.
 func TestGateScore(t *testing.T) {
-	qs := map[string]tn.Question{"fixability": tn.ScoreQuestion{
-		Instructions: "How fixable is this bug from the report alone?",
-		Criteria:     []string{"needs product input", "needs investigation", "fixable from the report"},
-	}}
+	sq := []Q{Score("fixability", "How fixable is this bug from the report alone?",
+		"needs product input", "needs investigation", "fixable from the report")}
+	qs, _ := Questions(sq...)
 	sr := []Rule{{Question: "fixability", AtLeast: f(1.5), Action: "skip_to", Target: "draft-pr"}}
 	score := func(s, conf float64) map[string]any {
 		return map[string]any{"type": "score", "score": s, "confidence": conf,
 			"probabilities": map[string]float64{"0": 0.05, "1": 0.15, "2": 0.8},
-			"legend": map[string]string{"0": "needs product input", "1": "needs investigation", "2": "fixable from the report"}}
+			"legend":        map[string]string{"0": "needs product input", "1": "needs investigation", "2": "fixable from the report"}}
 	}
 	cases := []struct {
 		name, want string
@@ -140,7 +139,7 @@ func TestGateScore(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			o, err := Gate(context.Background(), cl, map[string]any{"case": c.name}, qs, sr, DefaultBands)
+			o, err := Gate(context.Background(), cl, map[string]any{"case": c.name}, sq, sr, DefaultBands)
 			if err != nil {
 				t.Fatal(err)
 			}

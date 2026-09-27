@@ -1,0 +1,5 @@
+;; clojure -M:test
+{:paths ["src"]
+ :deps  {io.github.muthuishere/toolnexus {:local/root "../../../clojure"}}
+ :aliases {:test {:extra-paths ["test"]
+                  :main-opts ["-e" "(require 'judge.core-test) (let [r (clojure.test/run-tests 'judge.core-test)] (System/exit (if (zero? (+ (:fail r) (:error r))) 0 1)))"]}}}

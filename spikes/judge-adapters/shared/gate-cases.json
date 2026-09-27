@@ -1,0 +1,584 @@
+{
+ "defaultBands": {
+  "low": 0.3,
+  "high": 0.7
+ },
+ "questions": {
+  "fixable": {
+   "type": "noul",
+   "instructions": "An autonomous agent can fix this bug from the report alone.",
+   "criteria": {
+    "true": "the report names a reproducible trigger, a file or endpoint, and the failure",
+    "false": "the report is vague, needs product input, or has no reproducible failure"
+   }
+  },
+  "component": {
+   "type": "choice",
+   "instructions": "Which component owns the fix for this bug report?",
+   "criteria": {
+    "pricing": "the defect is in coupon/discount calculation code and a pricing engineer should own the fix",
+    "checkout": "the defect is in the HTTP checkout handler or its request validation",
+    "frontend": "the defect is in the browser client and no server change is needed",
+    "infra": "the defect is in deployment, config or capacity and no application code changes"
+   }
+  },
+  "fixability": {
+   "type": "score",
+   "instructions": "How fixable is this bug from the report alone?",
+   "criteria": [
+    "needs product input",
+    "needs investigation",
+    "fixable from the report"
+   ]
+  }
+ },
+ "rules": [
+  {
+   "question": "fixable",
+   "below": 0.3,
+   "action": "fail"
+  },
+  {
+   "question": "component",
+   "is": "pricing",
+   "action": "skip_to",
+   "target": "fix-pricing"
+  },
+  {
+   "question": "fixability",
+   "at_least": 1.5,
+   "action": "skip_to",
+   "target": "draft-pr"
+  }
+ ],
+ "cases": [
+  {
+   "name": "unfixable",
+   "answers": {
+    "fixable": {
+     "type": "noul",
+     "noul": 0.12
+    },
+    "component": {
+     "type": "choice",
+     "choice": "pricing",
+     "confidence": 0.85,
+     "probabilities": {
+      "pricing": 0.9,
+      "checkout": 0.08,
+      "frontend": 0.01,
+      "infra": 0.01
+     }
+    },
+    "fixability": {
+     "type": "score",
+     "score": 0.2,
+     "confidence": 0.9,
+     "probabilities": {
+      "0": 0.05,
+      "1": 0.15,
+      "2": 0.8
+     },
+     "legend": {
+      "0": "needs product input",
+      "1": "needs investigation",
+      "2": "fixable from the report"
+     }
+    }
+   },
+   "bands": null,
+   "want": {
+    "action": "fail",
+    "target": "",
+    "escalated": false
+   }
+  },
+  {
+   "name": "sure-pricing",
+   "answers": {
+    "fixable": {
+     "type": "noul",
+     "noul": 0.9
+    },
+    "component": {
+     "type": "choice",
+     "choice": "pricing",
+     "confidence": 0.85,
+     "probabilities": {
+      "pricing": 0.9,
+      "checkout": 0.08,
+      "frontend": 0.01,
+      "infra": 0.01
+     }
+    },
+    "fixability": {
+     "type": "score",
+     "score": 1.8,
+     "confidence": 0.9,
+     "probabilities": {
+      "0": 0.05,
+      "1": 0.15,
+      "2": 0.8
+     },
+     "legend": {
+      "0": "needs product input",
+      "1": "needs investigation",
+      "2": "fixable from the report"
+     }
+    }
+   },
+   "bands": null,
+   "want": {
+    "action": "skip_to",
+    "target": "fix-pricing",
+    "escalated": false
+   }
+  },
+  {
+   "name": "unsure-both",
+   "answers": {
+    "fixable": {
+     "type": "noul",
+     "noul": 0.55
+    },
+    "component": {
+     "type": "choice",
+     "choice": "pricing",
+     "confidence": 0.4,
+     "probabilities": {
+      "pricing": 0.4,
+      "checkout": 0.35,
+      "frontend": 0.15,
+      "infra": 0.1
+     }
+    },
+    "fixability": {
+     "type": "score",
+     "score": 1.8,
+     "confidence": 0.9,
+     "probabilities": {
+      "0": 0.05,
+      "1": 0.15,
+      "2": 0.8
+     },
+     "legend": {
+      "0": "needs product input",
+      "1": "needs investigation",
+      "2": "fixable from the report"
+     }
+    }
+   },
+   "bands": null,
+   "want": {
+    "action": "needs_input",
+    "target": "",
+    "escalated": true
+   }
+  },
+  {
+   "name": "noul-at-low",
+   "answers": {
+    "fixable": {
+     "type": "noul",
+     "noul": 0.3
+    },
+    "component": {
+     "type": "choice",
+     "choice": "checkout",
+     "confidence": 0.9,
+     "probabilities": {
+      "pricing": 0.9,
+      "checkout": 0.08,
+      "frontend": 0.01,
+      "infra": 0.01
+     }
+    },
+    "fixability": {
+     "type": "score",
+     "score": 1.8,
+     "confidence": 0.9,
+     "probabilities": {
+      "0": 0.05,
+      "1": 0.15,
+      "2": 0.8
+     },
+     "legend": {
+      "0": "needs product input",
+      "1": "needs investigation",
+      "2": "fixable from the report"
+     }
+    }
+   },
+   "bands": null,
+   "want": {
+    "action": "needs_input",
+    "target": "",
+    "escalated": true
+   }
+  },
+  {
+   "name": "noul-at-high",
+   "answers": {
+    "fixable": {
+     "type": "noul",
+     "noul": 0.7
+    },
+    "component": {
+     "type": "choice",
+     "choice": "checkout",
+     "confidence": 0.9,
+     "probabilities": {
+      "pricing": 0.9,
+      "checkout": 0.08,
+      "frontend": 0.01,
+      "infra": 0.01
+     }
+    },
+    "fixability": {
+     "type": "score",
+     "score": 1.8,
+     "confidence": 0.9,
+     "probabilities": {
+      "0": 0.05,
+      "1": 0.15,
+      "2": 0.8
+     },
+     "legend": {
+      "0": "needs product input",
+      "1": "needs investigation",
+      "2": "fixable from the report"
+     }
+    }
+   },
+   "bands": null,
+   "want": {
+    "action": "needs_input",
+    "target": "",
+    "escalated": true
+   }
+  },
+  {
+   "name": "fall-through",
+   "answers": {
+    "fixable": {
+     "type": "noul",
+     "noul": 0.71
+    },
+    "component": {
+     "type": "choice",
+     "choice": "checkout",
+     "confidence": 0.9,
+     "probabilities": {
+      "pricing": 0.9,
+      "checkout": 0.08,
+      "frontend": 0.01,
+      "infra": 0.01
+     }
+    },
+    "fixability": {
+     "type": "score",
+     "score": 0.4,
+     "confidence": 0.9,
+     "probabilities": {
+      "0": 0.05,
+      "1": 0.15,
+      "2": 0.8
+     },
+     "legend": {
+      "0": "needs product input",
+      "1": "needs investigation",
+      "2": "fixable from the report"
+     }
+    }
+   },
+   "bands": null,
+   "want": {
+    "action": "",
+    "target": "",
+    "escalated": false
+   }
+  },
+  {
+   "name": "choice-conf-at-high",
+   "answers": {
+    "fixable": {
+     "type": "noul",
+     "noul": 0.9
+    },
+    "component": {
+     "type": "choice",
+     "choice": "pricing",
+     "confidence": 0.7,
+     "probabilities": {
+      "pricing": 0.9,
+      "checkout": 0.08,
+      "frontend": 0.01,
+      "infra": 0.01
+     }
+    },
+    "fixability": {
+     "type": "score",
+     "score": 1.8,
+     "confidence": 0.9,
+     "probabilities": {
+      "0": 0.05,
+      "1": 0.15,
+      "2": 0.8
+     },
+     "legend": {
+      "0": "needs product input",
+      "1": "needs investigation",
+      "2": "fixable from the report"
+     }
+    }
+   },
+   "bands": null,
+   "want": {
+    "action": "needs_input",
+    "target": "",
+    "escalated": true
+   }
+  },
+  {
+   "name": "near-uniform-high-conf",
+   "answers": {
+    "fixable": {
+     "type": "noul",
+     "noul": 0.9
+    },
+    "component": {
+     "type": "choice",
+     "choice": "pricing",
+     "confidence": 0.8,
+     "probabilities": {
+      "pricing": 0.27,
+      "checkout": 0.25,
+      "frontend": 0.24,
+      "infra": 0.24
+     }
+    },
+    "fixability": {
+     "type": "score",
+     "score": 1.8,
+     "confidence": 0.9,
+     "probabilities": {
+      "0": 0.05,
+      "1": 0.15,
+      "2": 0.8
+     },
+     "legend": {
+      "0": "needs product input",
+      "1": "needs investigation",
+      "2": "fixable from the report"
+     }
+    }
+   },
+   "bands": null,
+   "want": {
+    "action": "needs_input",
+    "target": "",
+    "escalated": true
+   }
+  },
+  {
+   "name": "missing-component",
+   "answers": {
+    "fixable": {
+     "type": "noul",
+     "noul": 0.9
+    },
+    "fixability": {
+     "type": "score",
+     "score": 1.8,
+     "confidence": 0.9,
+     "probabilities": {
+      "0": 0.05,
+      "1": 0.15,
+      "2": 0.8
+     },
+     "legend": {
+      "0": "needs product input",
+      "1": "needs investigation",
+      "2": "fixable from the report"
+     }
+    }
+   },
+   "bands": null,
+   "want": {
+    "action": "needs_input",
+    "target": "",
+    "escalated": true
+   }
+  },
+  {
+   "name": "score-sure-high",
+   "answers": {
+    "fixable": {
+     "type": "noul",
+     "noul": 0.9
+    },
+    "component": {
+     "type": "choice",
+     "choice": "checkout",
+     "confidence": 0.9,
+     "probabilities": {
+      "pricing": 0.9,
+      "checkout": 0.08,
+      "frontend": 0.01,
+      "infra": 0.01
+     }
+    },
+    "fixability": {
+     "type": "score",
+     "score": 1.8,
+     "confidence": 0.9,
+     "probabilities": {
+      "0": 0.05,
+      "1": 0.15,
+      "2": 0.8
+     },
+     "legend": {
+      "0": "needs product input",
+      "1": "needs investigation",
+      "2": "fixable from the report"
+     }
+    }
+   },
+   "bands": null,
+   "want": {
+    "action": "skip_to",
+    "target": "draft-pr",
+    "escalated": false
+   }
+  },
+  {
+   "name": "score-conf-at-high",
+   "answers": {
+    "fixable": {
+     "type": "noul",
+     "noul": 0.9
+    },
+    "component": {
+     "type": "choice",
+     "choice": "checkout",
+     "confidence": 0.9,
+     "probabilities": {
+      "pricing": 0.9,
+      "checkout": 0.08,
+      "frontend": 0.01,
+      "infra": 0.01
+     }
+    },
+    "fixability": {
+     "type": "score",
+     "score": 1.8,
+     "confidence": 0.7,
+     "probabilities": {
+      "0": 0.05,
+      "1": 0.15,
+      "2": 0.8
+     },
+     "legend": {
+      "0": "needs product input",
+      "1": "needs investigation",
+      "2": "fixable from the report"
+     }
+    }
+   },
+   "bands": null,
+   "want": {
+    "action": "needs_input",
+    "target": "",
+    "escalated": true
+   }
+  },
+  {
+   "name": "custom-cutoffs-sure",
+   "answers": {
+    "fixable": {
+     "type": "noul",
+     "noul": 0.55
+    },
+    "component": {
+     "type": "choice",
+     "choice": "checkout",
+     "confidence": 0.9,
+     "probabilities": {
+      "pricing": 0.9,
+      "checkout": 0.08,
+      "frontend": 0.01,
+      "infra": 0.01
+     }
+    },
+    "fixability": {
+     "type": "score",
+     "score": 0.4,
+     "confidence": 0.9,
+     "probabilities": {
+      "0": 0.05,
+      "1": 0.15,
+      "2": 0.8
+     },
+     "legend": {
+      "0": "needs product input",
+      "1": "needs investigation",
+      "2": "fixable from the report"
+     }
+    }
+   },
+   "bands": {
+    "low": 0.2,
+    "high": 0.5
+   },
+   "want": {
+    "action": "",
+    "target": "",
+    "escalated": false
+   }
+  },
+  {
+   "name": "custom-cutoffs-uncertain",
+   "answers": {
+    "fixable": {
+     "type": "noul",
+     "noul": 0.45
+    },
+    "component": {
+     "type": "choice",
+     "choice": "checkout",
+     "confidence": 0.9,
+     "probabilities": {
+      "pricing": 0.9,
+      "checkout": 0.08,
+      "frontend": 0.01,
+      "infra": 0.01
+     }
+    },
+    "fixability": {
+     "type": "score",
+     "score": 0.4,
+     "confidence": 0.9,
+     "probabilities": {
+      "0": 0.05,
+      "1": 0.15,
+      "2": 0.8
+     },
+     "legend": {
+      "0": "needs product input",
+      "1": "needs investigation",
+      "2": "fixable from the report"
+     }
+    }
+   },
+   "bands": {
+    "low": 0.2,
+    "high": 0.5
+   },
+   "want": {
+    "action": "needs_input",
+    "target": "",
+    "escalated": true
+   }
+  }
+ ]
+}
