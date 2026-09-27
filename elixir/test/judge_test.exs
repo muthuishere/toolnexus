@@ -111,8 +111,7 @@ defmodule Toolnexus.JudgeTest do
 
   test "missing answer reason names it" do
     o = apply_rules(%{}, [%{question: "component", is: "pricing", action: "skip_to"}])
-    assert o.request.data["reason"] =~ "missing answer"
-    assert o.request.data["reason"] =~ "component"
+    assert o.request.data["reason"] == ~s(missing answer "component")
   end
 
   # ------------------------------------------------------------ bands / answers

@@ -124,11 +124,12 @@ defmodule Toolnexus.Judge do
   end
 
   defp answer(k, %C.NoulAnswer{noul: p} = a, %{low: lo, high: hi}) do
-    band = cond do
-      p < lo -> :no
-      p > hi -> :yes
-      true -> :uncertain
-    end
+    band =
+      cond do
+        p < lo -> :no
+        p > hi -> :yes
+        true -> :uncertain
+      end
 
     %Answer{name: k, type: "noul", raw: a, band: band}
   end
@@ -212,7 +213,7 @@ defmodule Toolnexus.Judge do
     end)
   end
 
-  defp check(nil, _), do: {:unsure, "missing answer"}
+  defp check(nil, _), do: {:unsure, :missing}
 
   defp check(%Answer{} = a, r) do
     cond do
@@ -225,7 +226,12 @@ defmodule Toolnexus.Judge do
   end
 
   defp escalate(i, q, why, answers) do
-    reason = if q, do: "#{why}: #{inspect(q)}", else: why
+    reason =
+      cond do
+        why == :missing -> ~s(missing answer "#{q}")
+        q -> "#{why}: #{inspect(q)}"
+        true -> why
+      end
 
     %Outcome{
       action: "needs_input",
@@ -242,7 +248,11 @@ defmodule Toolnexus.Judge do
   defp bands(nil), do: @default_bands
 
   defp bands(b),
-    do: Map.merge(@default_bands, Map.new(b, fn {k, v} -> {String.to_existing_atom(to_string(k)), v} end))
+    do:
+      Map.merge(
+        @default_bands,
+        Map.new(b, fn {k, v} -> {String.to_existing_atom(to_string(k)), v} end)
+      )
 
   defp stringify(m), do: Map.new(m, fn {k, v} -> {to_string(k), v} end)
 end
