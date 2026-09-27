@@ -194,17 +194,15 @@ def _check(ans: Mapping[str, JudgeAnswer], r: Rule) -> tuple[bool, str, bool]:
     a = ans.get(r.question)
     if a is None:
         return False, f'missing answer "{r.question}"', False
+    if a.uncertain:
+        return False, f'uncertain answer "{r.question}"', True
     if r.is_ is not None:
         if not isinstance(a.raw, ChoiceAnswer):
             return False, f"is-rule on {a.type} answer {r.question!r}", False
-        if not a.sure:
-            return False, f"choice {r.question}={a.raw.choice!r} not sure", True
         return a.raw.choice == r.is_, "", False
     if isinstance(a.raw, ChoiceAnswer):
         return False, f"numeric rule on choice answer {r.question!r}", False
     v = a.raw.noul if isinstance(a.raw, NoulAnswer) else a.raw.score
-    if a.uncertain:
-        return False, f"{r.question}={v} uncertain", True
     if r.below is not None:
         return v < r.below, "", False
     if r.at_least is not None:

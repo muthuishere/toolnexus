@@ -53,7 +53,9 @@ def test_state_cases(case):
         with pytest.raises(ClassifierError, match=case["wantError"]):
             questions(qs)
         return
-    if "context" in case:
+    if "roleState" in case:
+        st = state(case["roleState"]["role"], case["roleState"]["data"])
+    elif "context" in case:
         c = case["context"]
         st = context(c["context"], c["message"], c.get("extra"))
     else:
@@ -66,11 +68,11 @@ def gate_questions():
     return [(k, question_from_wire(v)) for k, v in GATE["questions"].items()]
 
 
-def gate_rules():
+def gate_rules(src=None):
     return [
         Rule(r["question"], r["action"], below=r.get("below"), at_least=r.get("at_least"),
              is_=r.get("is"), target=r.get("target", ""))
-        for r in GATE["rules"]
+        for r in (src or GATE["rules"])
     ]
 
 
@@ -80,12 +82,33 @@ def test_gate_cases(case):
     qs = gate_questions()
     c = static_classifier((st, qs, {"model": MODEL, "answers": case["answers"]}), model=MODEL)
     bands = Bands(**case["bands"]) if case["bands"] else None
-    out = run(gate(c, st, qs, gate_rules(), bands))
+    if "policy" in case:
+        p = case["policy"]
+        rules = Policy(rules=gate_rules(case.get("rules")), default=p["default"], bands=bands,
+                       skip_uncertain=p["skipUncertain"])
+    else:
+        rules = gate_rules(case.get("rules"))
+    got = {}
+    for k, a in run(ask(c, st, qs, bands)).items():
+        e = {"value": a.value()}
+        if a.type == "noul":
+            e["band"] = a.band
+        else:
+            e["sure"] = a.sure
+        if a.type == "choice":
+            e["choice"] = a.choice()
+        got[k] = e
+    assert got == case["wantAnswers"]
+    out = run(gate(c, st, qs, rules, bands))
     w = case["want"]
     assert (out.action, out.target, out.escalated) == (w["action"], w["target"], w["escalated"])
     if out.escalated:
         assert out.request.kind == "input"
         assert set(out.request.data) == {"question", "reason", "answers"}
+        assert out.request.data["question"] == w["question"]
+        if "reason" in w:
+            assert out.request.data["reason"] == w["reason"]
+        assert out.request.id == w["requestId"]
 
 
 def test_builders_byte_identical_to_hand_written():
@@ -198,3 +221,31 @@ def test_evaluate_batch_empty_sends_nothing():
     with pytest.raises(ClassifierError):
         run(c.evaluate_batch([], questions([noul("x", "q")])))
     assert calls == []
+
+
+def test_tape_miss_on_evaluate_not_construction_sends_nothing():
+    replayer = Tape(recorded={}, model=MODEL).call("plan")  # never fails; replay has no live
+    with pytest.raises(ClassifierError, match='^tape: no recorded decision for call "plan"$'):
+        run(ask(replayer, {"s": 1}, [noul("x", "q")]))
+
+
+def _delayed_batch(fail: set[int]):
+    async def ev(st, q):
+        await asyncio.sleep(0.01 * (3 - st["i"]))  # later states finish first
+        if st["i"] in fail:
+            raise ClassifierError(f"boom {st['i']}")
+        from toolnexus.classifier import Decision, NoulAnswer
+        return Decision(model=MODEL, answers={"x": NoulAnswer(noul=st["i"] / 10)})
+    return create_classifier(style="custom", evaluate=ev)
+
+
+def test_evaluate_batch_order_regardless_of_completion():
+    ds = run(_delayed_batch(set()).evaluate_batch([{"i": 0}, {"i": 1}, {"i": 2}],
+                                                  questions([noul("x", "q")])))
+    assert [d.noul("x").noul for d in ds] == [0.0, 0.1, 0.2]
+
+
+def test_evaluate_batch_names_lowest_failing_index():
+    with pytest.raises(ClassifierError, match="state 0"):
+        run(_delayed_batch({0, 2}).evaluate_batch([{"i": 0}, {"i": 1}, {"i": 2}],
+                                                  questions([noul("x", "q")])))
