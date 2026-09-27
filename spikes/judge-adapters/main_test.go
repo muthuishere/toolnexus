@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	. "toolnexus.spike/judgeadapters/judge"
 
 	tn "github.com/muthuishere/toolnexus/golang"
 )

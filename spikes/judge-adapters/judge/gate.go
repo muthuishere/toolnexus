@@ -1,6 +1,6 @@
-// Package main is a spike: a Layer-1 "confidence-gated escalation" adapter over
+// Package judge is a spike: a Layer-1 "confidence-gated escalation" adapter over
 // tn.Classifier — Ask (banded answers) + Gate (rules over them, §10 escalation).
-package main
+package judge
 
 import (
 	"context"

@@ -1,6 +1,9 @@
 package main
 
-import tn "github.com/muthuishere/toolnexus/golang"
+import (
+	tn "github.com/muthuishere/toolnexus/golang"
+	. "toolnexus.spike/judgeadapters/judge"
+)
 
 // The bug-fixer-platform spikes/04-classifier fixture: the checkout-500 bug.
 var bug = map[string]any{

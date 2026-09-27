@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"time"
+	. "toolnexus.spike/judgeadapters/judge"
 
 	tn "github.com/muthuishere/toolnexus/golang"
 )

@@ -6,6 +6,7 @@ import (
 	"os"
 	"reflect"
 	"testing"
+	. "toolnexus.spike/judgeadapters/judge"
 
 	tn "github.com/muthuishere/toolnexus/golang"
 )

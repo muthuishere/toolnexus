@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	. "toolnexus.spike/judgeadapters/judge"
 
 	tn "github.com/muthuishere/toolnexus/golang"
 )
@@ -11,6 +12,7 @@ import (
 //     (noul -> float, choice -> string ONLY, confidence/nearUniform dropped from vals)
 //   - decideGate + asFloat: decide.go:139-171
 //   - applyDecideGates first-match loop: engine.go:865-892
+//
 // Returns the fired action/target, or "" to fall through, or the step error.
 // decide.go returns the accessor error (a missing answer fails the step), so we do too.
 func baselineFlatten(d tn.Decision, types map[string]string) (map[string]any, error) {
