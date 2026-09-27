@@ -73,6 +73,7 @@
                                        :skip-uncertain (get p "skipUncertain")})
                    (j/gate cl st qs rules b))
               w  (get c "want")]
+          (is (= (set (keys (get c "wantAnswers"))) (set (keys (:answers o)))))
           (doseq [[n wa] (get c "wantAnswers")]
             (let [a (get (:answers o) n)]
               (is (= (get wa "value") (j/value a)) n)
@@ -88,7 +89,9 @@
             (when (contains? w "reason")
               (is (= (get w "reason") (get-in o [:request :data :reason]))))
             (is (= (get w "requestId") (get-in o [:request :id])))
-            (is (map? (get-in o [:request :data :answers])))))))))
+            (is (map? (get-in o [:request :data :answers]))))
+          (when-not (:escalated o)
+            (is (nil? (:request o)))))))))
 
 ;; ---------------------------------------------------------------------------
 

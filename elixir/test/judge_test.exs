@@ -115,7 +115,9 @@ defmodule Toolnexus.JudgeTest do
 
       {:ok, as} = ask(c, st, qs, opts)
 
-      for {n, wa} <- k["wantAnswers"] || %{} do
+      assert Enum.sort(Map.keys(as)) == Enum.sort(Map.keys(k["wantAnswers"]))
+
+      for {n, wa} <- k["wantAnswers"] do
         a = as[n]
         assert Answer.value(a) == wa["value"], n
         if Map.has_key?(wa, "band"), do: assert(to_string(a.band) == wa["band"], n)
@@ -128,6 +130,8 @@ defmodule Toolnexus.JudgeTest do
         assert data["question"] == w["question"]
         assert o.request.id == w["requestId"]
         if Map.has_key?(w, "reason"), do: assert(data["reason"] == w["reason"])
+      else
+        assert o.request == nil
       end
     end
   end
@@ -147,6 +151,11 @@ defmodule Toolnexus.JudgeTest do
     o = decide(%{}, %Policy{rules: []})
     assert o.request.id == "gate:default"
     assert o.request.data["question"] == ""
+  end
+
+  test "context/2 is context/3 with no extra fields; extra keys are stringified" do
+    assert Judge.context("support chat", "hi") == %{"context" => "support chat", "message" => "hi"}
+    assert Judge.context("c", "m", %{tier: "gold"}) == %{"context" => "c", "message" => "m", "tier" => "gold"}
   end
 
   test "missing answer reason names it" do
