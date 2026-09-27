@@ -384,6 +384,67 @@ hands over the conclusion rather than shipping raw numbers.
 each, the degenerate-criteria warning the library emits when you get this wrong, and the precise
 limits of `nearUniform`, confidence and `calibrated` as health signals.
 
+## Simple judgments: ask & gate
+
+<Aside type="caution" title="Proposed — in spike, not yet released">
+Everything in this section lives in `spikes/judge-adapters/` and the OpenSpec change
+`add-judge-adapters` (ADR 0035). No released port ships `State`, `ask`, `gate` or `Policy` yet.
+The shape may still change; the numbers below are real.
+</Aside>
+
+The raw API above takes a map of questions and hands back typed answers. Most hosts then write
+the same ten lines: build a state, read a band, decide or ask a human. The proposed layer is
+those ten lines:
+
+```go
+st := judge.State("You are Donkey Kong. You want to win the game.",
+	map[string]any{"message_received": msg})
+
+qs := []judge.Q{
+	judge.Noul("is_appropriate",
+		"Does message_received contain insults, profanity or harmful topics?"),
+	judge.Noul("does_this_help",
+		"Does message_received help Donkey Kong win the game?"),
+}
+
+a, err := judge.Ask(ctx, classifier, st, qs)   // a["is_appropriate"].Band: yes | no | uncertain
+fmt.Println(a["is_appropriate"].Value())       // one number, no type assertions
+
+block := 0.7
+p := judge.Policy{
+	Rules:   []judge.Rule{{Question: "is_appropriate", AtLeast: &block, Action: "fail"}},
+	Default: "",            // "" = nothing fired -> a §10 input Request (ask a human)
+	SkipUncertain: true,    // an unsure rule is skipped, not a blocker for later rules
+}
+out, err := p.Gate(ctx, classifier, st, qs)    // out.Action, out.Escalated, out.Request
+```
+
+Two rules come from measuring it, not from taste:
+
+- **The role goes in the state.** The wire has only `model`, `state` and `questions`, so there is
+  no system prompt to put it in. `State(role, data)` puts `role` next to your data.
+- **Each question names the state field it judges.** "Does the message contain…" is vague;
+  "Does `message_received` contain…" points at a field.
+
+Live on TypeSafe `jev-1.13.0`, 2026-09-27, one good message and one insult
+(`is_appropriate` asks about inappropriate language, so high means inappropriate):
+
+| variant | good: inappropriate / helps | bad: inappropriate / helps |
+|---|---|---|
+| A state = JSON string with role | 0.02 / 0.76 | **0.57** / 0.02 |
+| B state = object with role | 0.02 / 0.78 | **0.55** / 0.02 |
+| C state = object, no role | 0.06 / 0.64 | 0.90 / 0.12 |
+| D state = plain text message | 0.06 / 0.70 | 0.84 / 0.13 |
+| E role inside the one question that needs it | 0.06 / 0.62 | 0.90 / 0.05 |
+| **F role in state + question names its field** | **0.02 / 0.79** | **0.96 / 0.02** |
+
+A string and an object state behave the same (A ≈ B). With the role in state and a vague question,
+the insult blurred to 0.55, right in the uncertain band. Naming the field (F) made it the sharpest
+row on both messages. Putting the role into the question instead (E) is rejected: it costs the
+question that needs the role. One sample per cell; Jev is near-deterministic, but these are
+readings, not averages. The full pipeline built on this is the
+[test-scout scenario](/toolnexus/scenarios/testscout/).
+
 ## Where to go next
 
 | page | what it answers |

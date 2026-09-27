@@ -69,6 +69,62 @@ i SHALL win over later rules.
 - **WHEN** each case of `examples/judge/gate-cases.json` is run through the `static` style
 - **THEN** each port yields that case's `want` action, target and escalated flag
 
+### Requirement: State carries the role and each question names its field
+
+The library SHALL provide `State(role, data)` returning the data's fields at the top level
+plus a `role` field; a data value that is not an object SHALL be placed under `data`. The
+role SHALL NOT be copied into any question's instructions. Documentation and default
+question text SHALL name the state field each question judges.
+
+#### Scenario: Role sits next to the data
+
+- **WHEN** a caller builds `State("You are Donkey Kong, you want to win.", {message_received: "…"})`
+- **THEN** the state is exactly `{role, message_received}` and the question map is unchanged
+
+#### Scenario: A non-object value is wrapped
+
+- **WHEN** a caller builds `State("r", "plain text")`
+- **THEN** the state is `{role: "r", data: "plain text"}`
+
+### Requirement: Answers expose one value
+
+Every answer returned by `ask` SHALL expose `value()` — the noul probability, the score
+value, or the choice confidence — and `choice()` SHALL return the picked option of a
+choice answer.
+
+#### Scenario: Value reads a noul without type inspection
+
+- **WHEN** a noul answer has probability `0.96`
+- **THEN** `value()` returns `0.96`
+
+### Requirement: A policy declares its fall-through
+
+`Policy{rules, default, bands, skipUncertain}` SHALL apply `gate`'s rules and then its
+default. A non-empty `default` SHALL be the action when no rule fires; an empty `default`
+SHALL escalate with a §10 `input` Request whose reason is `no rule fired`. With
+`skipUncertain`, a rule whose answer is uncertain SHALL be skipped instead of escalating.
+
+#### Scenario: No rule fired escalates by default
+
+- **WHEN** every answer is confident and no rule matches and `default` is empty
+- **THEN** the outcome is escalated `needs_input` with reason `no rule fired`
+
+#### Scenario: SkipUncertain lets a later confident rule fire
+
+- **WHEN** rule 1's answer is uncertain, rule 2's answer is confident and matches, and `skipUncertain` is set
+- **THEN** the outcome is rule 2's action, not an escalation
+
+### Requirement: Decisions can be recorded and replayed
+
+A `Tape` SHALL wrap a live classifier to record each decision keyed by a caller-given call
+name, and SHALL produce a classifier that replays those decisions with no network. A replay
+for an unrecorded key SHALL fail with an error naming the key.
+
+#### Scenario: A replay miss names the key
+
+- **WHEN** a replaying classifier is asked under call name `plan` that the tape lacks
+- **THEN** it fails with an error naming `plan` and sends no request
+
 ### Requirement: Absent is byte-identical
 
 A host that uses no builder, `ask` or `gate` SHALL observe byte-identical behaviour to a

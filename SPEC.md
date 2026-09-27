@@ -2087,6 +2087,16 @@ gate(classifier, state, questions, rules, bands?) -> { action, target, escalated
 - `gate` rules (`below` / `at_least` / `is`) are first-match. An uncertain, unsure or missing
   answer escalates to `needs_input` with a §10 `Request` (`kind: "input"`, data:
   question, reason, answers). A gate never authorises; it only declines to decide.
+- `State(role, data)` puts `role` next to the data's fields at the top level (non-object data goes
+  under `data`). The wire has no role field; the state carries it. **Each question names the state
+  field it judges** ("Does `message_received` contain insults…"), and the role is never copied into
+  question instructions (live evidence: ADR 0035 D7).
+- `answer.value()` is the one number (noul probability, score value, choice confidence);
+  `answer.choice()` is the picked option.
+- `Policy{rules, default, bands, skipUncertain}`: a non-empty `default` is the no-rule-fired action;
+  empty escalates (`reason: "no rule fired"`). `skipUncertain` skips uncertain rules instead of
+  escalating on the first.
+- `Tape` records live decisions by call name and replays them through `static`; a miss names the key.
 - Conformance: `examples/judge/state-cases.json`, `examples/judge/gate-cases.json`.
 
 ## 9. Go CLI (`toolnexus`)

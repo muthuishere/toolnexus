@@ -1,8 +1,8 @@
 # ADR 0035 — Judge adapters: patterns first, batteries on top, recipes in the docs
 
-- **Status:** **Proposed** (2026-09-27). Pending the Go spike at `spikes/judge-adapters/`.
-  Nothing below is accepted until the spike's numbers go into *Evidence*. Every "SHALL" is
-  a claim that the spike can still refute.
+- **Status:** **Accepted** for Layer 1 and the simple API (`State`, `ask`, `gate`, `Policy`,
+  `Answer.Value()`, `Tape`), on the spike's live evidence (D7, D8). **Proposed** for the
+  batteries (D3): nothing in D3 is accepted until its own evidence lands.
 - **Date:** 2026-09-27
 - **Driver:** 0.18.0 shipped `Classifier` (SPEC §8B) in all seven ports and told users plainly
   that there are **"no adapters and no batteries"** (`CHANGELOG.md`, 0.18.0, *What is NOT done*).
@@ -163,6 +163,72 @@ memo.
   router", and transmits the configured `model` verbatim (conformance-tested).
 - Adding the battery means amending that paragraph. **That is the owner's decision**, and this
   ADR records it as open rather than settling it by building the battery.
+
+### D7 — State carries the role; questions name their field
+
+Measured live against TypeSafe `jev-1.13.0` on 2026-09-27 with curl
+(`spikes/judge-adapters/curl/README.md`), on the video's Donkey Kong request: one good message
+and one insult, two questions (`is_appropriate`, where high means inappropriate, and
+`does_this_help`).
+
+- **The wire has no role field.** A request carries only `model`, `state` and `questions`. The
+  "system prompt" of a judgment has to live in one of those.
+- **A JSON string and an object are the same state.** A (string) and B (object) differ by ≤ 0.02,
+  so the library sends objects.
+
+| variant | good: inappropriate / helps | bad: inappropriate / helps |
+|---|---|---|
+| A state = JSON **string** with role (the video) | 0.02 / 0.76 | **0.57** / 0.02 |
+| B state = object with role | 0.02 / 0.78 | **0.55** / 0.02 |
+| C state = object, no role | 0.06 / 0.64 | 0.90 / 0.12 |
+| D state = plain text message | 0.06 / 0.70 | 0.84 / 0.13 |
+| E role inside the one question that needs it | 0.06 / 0.62 | 0.90 / 0.05 |
+| **F role in state + the question names the field it judges** | **0.02 / 0.79** | **0.96 / 0.02** |
+
+What we read from it:
+
+- With the role in state and a vague question ("does the message contain…"), the insult's
+  moderation read **blurred to 0.55**, into the uncertain band. It looked like the role was
+  dragging an unrelated question.
+- It was the question, not the role. F asks "Does `message_received` contain insults, profanity
+  or harmful topics?", which points at the exact state field. It gave **0.96 / 0.02** on the
+  insult and **0.02 / 0.79** on the good message, the sharpest row in the table on both.
+- **Decision:** the role goes in the state (`State(role, data)` puts it next to the data at the
+  top level), and **each question names the state field it judges**. This is ADR 0021 again: the
+  sentence is the product.
+- **Rejected: the role in the question's instructions (E).** It keeps moderation sharp (0.90) but
+  costs confidence where the role is needed ("helps" 0.62), and it spreads one framing across
+  many questions. F beats it on every cell.
+- A role costs about 40 input tokens here (about 220 in testscout's larger states).
+- **Caveat:** one sample per cell. Jev is near-deterministic (repeat runs moved ≤ 0.1), but these
+  are single readings, not averages.
+
+### D8 — What the testscout scenario taught (live, 2026-09-27)
+
+`spikes/judge-adapters/scenarios/testscout/` runs a six-stage pipeline (understand → triage →
+plan → gate → write → verify) where code counts, the classifier judges and an LLM writes. 12
+classifier calls, about 3.9 s and 9.3k input tokens per run. Lessons that change the design:
+
+- **Code verification catches what a classifier cannot.** In run 1 the LLM wrote a "regression"
+  test that pinned the bug as correct. It passed on shipped code; only the code check (the test
+  must fail on shipped code and pass on the fix) rejected it. Classifier questions about the test
+  ("does it assert behaviour?") scored it fine. Batteries stay advisory; verdicts that code can
+  compute are computed in code.
+- **Re-asking the same state is pointless.** Jev is near-deterministic (runs differ by ≤ 0.1), so
+  `consistent(c, n, agree)` over an identical state measures nothing. Self-consistency re-asks with
+  **different views** of the case (the function alone; the function plus the bug report). That is
+  where percentOf split and ValidateLine agreed. D2's `consistent` is amended accordingly.
+- **Batching lowers confidence.** Many keyed questions over one shared state is cheap (one call
+  for six functions, ~370 ms), but ValidateLine's value confidence was 0.56 batched against
+  0.83 / 0.91 asked alone. Speculative fan-out is cheap, not free.
+- **`Policy.SkipUncertain`.** With first-match rules, one unsure rule escalated and blocked every
+  later confident rule; mid-rubric scores came back unsure almost always. With `SkipUncertain`, an
+  uncertain answer skips its rule, and escalation happens only when nothing confident decided
+  (`Policy.Default == ""`).
+- The spike's `judge` package also added `Answer.Value()` (no more type-asserting the answer),
+  `Policy.Default` (the no-rule-fired outcome is declared: an action, or `""` for a §10
+  escalation) and `Tape` (record live decisions by call name, replay offline; a miss names the
+  key). All three move into the OpenSpec change.
 
 ---
 
