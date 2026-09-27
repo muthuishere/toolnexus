@@ -92,6 +92,10 @@ class JudgeTest {
                 JsonNode x = c.get("context");
                 state = State.context(x.get("context").asText(), x.get("message").asText(),
                         x.has("extra") ? plain(x.get("extra"), Map.class) : Map.of());
+            } else if (c.has("roleState")) {
+                JsonNode rs = c.get("roleState");
+                Object data = rs.get("data").isObject() ? plain(rs.get("data"), Map.class) : rs.get("data").asText();
+                state = State.of(rs.get("role").asText(), data);
             } else {
                 state = State.of(plain(c.get("state"), Map.class));
             }
@@ -100,7 +104,8 @@ class JudgeTest {
             assertEquals(plain(c.get("wantQuestions"), Map.class), Classifier.toWire(qs));
             assertEquals(List.copyOf(plain(c.get("wantQuestions"), LinkedHashMap.class).keySet()), List.copyOf(qs.keySet()));
         }
-        assertEquals(3, n);
+        assertEquals(fixture("state-cases").get("cases").size(), n);
+        assertTrue(n >= 5);
     }
 
     @Test
@@ -143,14 +148,32 @@ class JudgeTest {
     void everyGateCaseHolds() throws Exception {
         JsonNode f = fixture("gate-cases");
         Map<String, Question> qs = wireQuestions(f.get("questions"));
-        List<Rule> rules = rules(f.get("rules"));
+        List<Rule> topRules = rules(f.get("rules"));
         int n = 0;
         for (JsonNode c : f.get("cases")) {
             n++;
             String name = c.get("name").asText();
+            List<Rule> rules = c.has("rules") ? rules(c.get("rules")) : topRules;
             JsonNode bn = c.get("bands");
             Bands bands = bn == null || bn.isNull() ? null : new Bands(bn.get("low").asDouble(), bn.get("high").asDouble());
-            Outcome o = gate(recorded(qs, c.get("answers")), GATE_STATE, asNamed(qs), rules, bands);
+            JsonNode pn = c.get("policy");
+            Outcome o = pn == null || pn.isNull()
+                    ? gate(recorded(qs, c.get("answers")), GATE_STATE, asNamed(qs), rules, bands)
+                    : new Policy(rules, pn.get("default").asText(), bands, pn.get("skipUncertain").asBoolean())
+                            .decide(recorded(qs, c.get("answers")), GATE_STATE, asNamed(qs));
+            var got = ask(recorded(qs, c.get("answers")), GATE_STATE, asNamed(qs), bands);
+            JsonNode wa = c.get("wantAnswers");
+            assertEquals(wa.size(), got.size(), name);
+            wa.fields().forEachRemaining(e -> {
+                Judge.Answer a = got.get(e.getKey());
+                JsonNode x = e.getValue();
+                String at = name + "/" + e.getKey();
+                assertNotNull(a, at);
+                assertEquals(x.get("value").asDouble(), a.value(), at);
+                if (x.has("band")) assertEquals(x.get("band").asText(), a.band().name().toLowerCase(), at);
+                if (x.has("sure")) assertEquals(x.get("sure").asBoolean(), a.sure(), at);
+                if (x.has("choice")) assertEquals(x.get("choice").asText(), a.choice(), at);
+            });
             JsonNode w = c.get("want");
             assertEquals(w.get("action").asText(), o.action(), name);
             assertEquals(w.get("target").asText(), o.target(), name);
@@ -159,8 +182,10 @@ class JudgeTest {
                 assertEquals("input", o.request().kind(), name);
                 assertTrue(o.request().data().keySet().containsAll(List.of("question", "reason", "answers")), name);
             }
-            if (name.equals("missing-component")) {
-                assertTrue(o.request().data().get("reason").toString().contains("component"));
+            if (o.escalated()) {
+                assertEquals(w.get("question").asText(), o.request().data().get("question"), name);
+                if (w.has("reason")) assertEquals(w.get("reason").asText(), o.request().data().get("reason"), name);
+                assertEquals(w.get("requestId").asText(), o.request().id(), name);
             }
         }
         assertEquals(f.get("cases").size(), n);
@@ -234,9 +259,40 @@ class JudgeTest {
         ask(tape.record("route"), "s", qs);
         assertEquals(0.8, ask(tape.replay("route"), "s", qs).get("x").value());
         assertEquals(1, calls.get());
-        var e = assertThrows(ClassifierException.class, () -> ask(tape.replay("plan"), "s", qs));
-        assertTrue(e.getMessage().contains("\"plan\""));
+        Classifier miss = tape.replay("plan"); // obtaining a replayer for an unrecorded name never fails
+        var e = assertThrows(ClassifierException.class, () -> ask(miss, "s", qs));
+        assertEquals("tape: no recorded decision for call \"plan\"", e.getMessage());
         assertEquals(1, calls.get());
+    }
+
+    @Test
+    void uncertaintyIsCheckedBeforeRuleFit() {
+        // An is-rule on an uncertain noul: the uncertainty wins, so skipUncertain skips it.
+        List<Rule> rs = List.of(Rule.is("a", "x", "one"), Rule.atLeast("b", 0.8, "two"));
+        Outcome e = new Policy(rs, "", null, false).apply(answers(0.5, 0.9));
+        assertEquals("uncertain answer \"a\"", e.request().data().get("reason"));
+        assertEquals("gate:0:a", e.request().id());
+        assertEquals("two", new Policy(rs, "", null, true).apply(answers(0.5, 0.9)).action());
+    }
+
+    @Test
+    void misfitRulesEscalateAndAreNeverSkipped() {
+        var noCondition = new Rule("a", null, null, null, "x", "");
+        for (Rule r : List.of(noCondition, Rule.is("a", "x", "one"))) {
+            Outcome o = new Policy(List.of(r, Rule.atLeast("b", 0.5, "go")), "", null, true).apply(answers(0.9, 0.9));
+            assertTrue(o.escalated());
+            assertEquals("gate:0:a", o.request().id());
+        }
+    }
+
+    @Test
+    void skipUncertainDoesNotSkipAMissingAnswer() {
+        Outcome o = new Policy(List.of(Rule.below("zz", 0.3, "fail"), Rule.atLeast("b", 0.5, "go")), "", null, true)
+                .apply(answers(0.5, 0.9));
+        assertTrue(o.escalated());
+        assertEquals("missing answer \"zz\"", o.request().data().get("reason"));
+        assertEquals("zz", o.request().data().get("question"));
+        assertEquals("gate:0:zz", o.request().id());
     }
 
     // ------------------------------------------------------------------ byte identity
@@ -296,6 +352,18 @@ class JudgeTest {
         var e = assertThrows(ClassifierException.class,
                 () -> byState().evaluateBatch(List.of("s0", "boom", "s2"), questions(List.of(noul("x", "?")))));
         assertTrue(e.getMessage().contains("state 1"), e.getMessage());
+    }
+
+    @Test
+    void batchWithSeveralFailuresNamesLowestIndex() {
+        // state 2 fails fast, state 0 fails late: the error still names state 0.
+        Classifier c = Classifier.create(new Classifier.Options().style(Classifier.STYLE_CUSTOM).evaluate((s, q) -> {
+            if ("late".equals(s)) { try { Thread.sleep(40); } catch (InterruptedException ignored) { } }
+            throw new ClassifierException("boom " + s);
+        }));
+        var e = assertThrows(ClassifierException.class,
+                () -> c.evaluateBatch(List.of("late", "s1", "fast"), questions(List.of(noul("x", "?")))));
+        assertTrue(e.getMessage().contains("state 0"), e.getMessage());
     }
 
     @Test

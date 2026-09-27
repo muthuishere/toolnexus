@@ -231,11 +231,12 @@ public final class Judge {
             DecisionAnswer a = answers.get(r.question());
             String why;
             if (a == null) why = "missing answer \"" + r.question() + "\"";
-            else if ((r.is() != null) != (a instanceof ChoiceAnswer)) why = "rule does not fit a " + a.type() + " answer";
             else if (!b.sure(a)) {
                 if (skipUncertain) continue;
-                why = a.type() + " answer is in the uncertain band";
-            } else why = null;
+                why = "uncertain answer \"" + r.question() + "\"";
+            } else if ((r.is() != null) != (a instanceof ChoiceAnswer)) why = "rule does not fit a " + a.type() + " answer";
+            else if (r.is() == null && r.below() == null && r.atLeast() == null) why = "rule has no condition";
+            else why = null;
             if (why != null) return escalate("gate:" + i + ":" + r.question(), r.question(), why, answers);
             boolean fired = switch (a) {
                 case ChoiceAnswer ch -> ch.choice().equals(r.is());
