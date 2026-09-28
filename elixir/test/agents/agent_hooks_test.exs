@@ -1,6 +1,6 @@
 defmodule Toolnexus.Agents.AgentHooksTest do
   @moduledoc """
-  Shared fixture: `examples/agent-hooks/fixture.json` (scenarios H1-H6).
+  Shared fixture: `examples/agent-hooks/fixture.json` (scenarios H1-H6; H7 — a failing before_llm on an agent run — is in `before_llm_contract_test.exs`).
 
   §7D "The §8 seams on an agent run": `:hooks` / `:on_metric` forwarded verbatim
   into each handle's client, resolved def-over-runtime (replace, never merge), so
