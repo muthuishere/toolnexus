@@ -54,6 +54,7 @@ export default defineConfig({
 									label: 'Start here',
 									items: [
 										{ label: 'Quickstart', slug: 'quickstart' },
+										{ label: 'Releases', slug: 'releases' },
 									],
 								},
 								{

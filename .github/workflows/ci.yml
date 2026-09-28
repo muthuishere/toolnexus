@@ -40,6 +40,14 @@ jobs:
       #    Content depth (when/why/3 examples) is reported but not yet blocking; see the
       #    script header for the outstanding backlog and why it is tiered.
       - run: node site/scripts/coverage-gate.mjs --strict
+      # 3. The /releases page is GENERATED from CHANGELOG.md. Fail if it is stale or was edited
+      #    by hand — a release announcement that disagrees with the changelog is exactly the
+      #    second, divergent account the generated-not-written rule exists to prevent.
+      - name: releases page is in sync with CHANGELOG
+        run: |
+          node site/scripts/release-notes.mjs --page
+          git diff --exit-code -- site/src/content/docs/releases.mdx \
+            || { echo "::error::site/src/content/docs/releases.mdx is stale — run: node site/scripts/release-notes.mjs --page"; exit 1; }
 
   js:
     name: JS (node)

@@ -154,7 +154,13 @@ the point of use.
 2. **Move the changelog**: `## Unreleased` becomes `## X.Y.Z — YYYY-MM-DD`, with a fresh empty
    `## Unreleased` above it.
 3. **Cut a GitHub Release `vX.Y.Z`.** That is the trigger. `workflow_dispatch` also works for a
-   re-run. **The release body IS the changelog section** — not a second, divergent account.
+   re-run. **The release body is GENERATED from the changelog section** — never hand-written, and
+   never the raw section either:
+   `node site/scripts/release-notes.mjs --body <version> > /tmp/rel.md`. One scannable line per
+   entry, a breaking-change callout, the contributors, and links to the full entry and
+   `/releases`. Derived, so it cannot say something the changelog does not — which is what the
+   older "the body IS the section" rule protected; only the verbosity changed. Refresh the site
+   page in the same PR: `node site/scripts/release-notes.mjs --page`.
 4. **Watch the run and read the job list.** A green workflow with three skipped legs is not a
    release; confirm each enabled registry actually published.
 5. **Verify from the outside, as a consumer would** — install the published artifact from the
@@ -207,8 +213,13 @@ being mentioned is indistinguishable from something that was finished.
 
 **On release**, `## Unreleased` becomes `## X.Y.Z — YYYY-MM-DD` and a fresh empty `## Unreleased`
 goes above it. The version must match the GitHub Release tag and every port manifest — the
-`preflight` job in `release.yml` fails the run on drift. The GitHub Release body should be the
-changelog section, not a second, divergent account of the same work.
+`preflight` job in `release.yml` fails the run on drift. The GitHub Release body is **generated
+from** that section by `site/scripts/release-notes.mjs`, never a second account of the same work.
+
+That generator is also why **a changelog paragraph that opens in bold is a headline**: it becomes
+one bullet in the announcement. A sub-point inside an entry must not open in bold, or it will be
+announced as a feature of its own. Releases through 0.19.0 use `### ` subheadings instead, and the
+generator reads both shapes.
 
 **Per-port notes** belong in the shared entry, named inline (e.g. "golang only"), never in a
 per-port changelog — six parallel changelogs is exactly the drift this repo exists to prevent.
