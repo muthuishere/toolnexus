@@ -81,6 +81,10 @@ public static class Judge
     public static Ask Noul(string name, string instructions)
         => new(name, new NoulQuestion { Instructions = instructions });
 
+    /// <summary>A noul with criteria: what the true and the false case mean.</summary>
+    public static Ask Noul(string name, string instructions, string whenTrue, string whenFalse)
+        => new(name, new NoulQuestion { Instructions = instructions, Criteria = new NoulCriteria { True = whenTrue, False = whenFalse } });
+
     public static Ask Choice(string name, string instructions, IReadOnlyDictionary<string, string> options)
         => new(name, new ChoiceQuestion { Instructions = instructions, Criteria = options });
 

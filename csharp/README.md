@@ -80,6 +80,13 @@ Also: `Judge.Context(ctx, message, extra)`, `Judge.Choice` / `Judge.Score`, `ans
 `answer.Choice()`, `Tape` (record by call name, replay offline), `Classifier.FromRecorded(...)`,
 `Question.ToWire()`, public `Decision.FromJson`.
 
+Batteries (§8B): `ToolGuardClassifier`, `ToolRelevanceClassifier`, `SkillRelevanceClassifier`,
+`ToolResultFilterClassifier`, `IsCompleteClassifier`, `AgentRouterClassifier`,
+`ContentGuardClassifier`, `ModelRouterClassifier` — e.g.
+`new ToolGuardClassifier(classifier, new ToolGuardOptions { OnError = OnError.Closed })`, then
+`CheckAsync(...)` standalone or `AsHook(next)` as a client hook. A `BeforeLLM` override may carry
+`Model` for that turn only (the opt-in `ModelRouterClassifier` sets it).
+
 ## Documentation
 
 Everything else — the full surface, with runnable examples — lives on the docs site:
