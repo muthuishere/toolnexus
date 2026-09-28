@@ -544,3 +544,58 @@ func TestLatestUserTextNativeParts(t *testing.T) {
 		t.Fatalf("got %q", got)
 	}
 }
+
+// TestBatteries_ToolRelevanceHookCases: tool-relevance.json `hookCases` — the
+// beforeLLM hook (no next) over provider entries; a nameless entry reads as "".
+func TestBatteries_ToolRelevanceHookCases(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join("..", "examples", "judge", "batteries", "tool-relevance.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fx struct {
+		HookCases []struct {
+			batteryCase
+			Event struct {
+				Model    string `json:"model"`
+				Turn     int    `json:"turn"`
+				Messages []any  `json:"messages"`
+				Tools    []any  `json:"tools"`
+			} `json:"event"`
+		} `json:"hookCases"`
+	}
+	if err := json.Unmarshal(b, &fx); err != nil {
+		t.Fatal(err)
+	}
+	if len(fx.HookCases) == 0 {
+		t.Fatal("tool-relevance.json: no hookCases")
+	}
+	for _, c := range fx.HookCases {
+		t.Run(c.Name, func(t *testing.T) {
+			r, err := NewToolRelevance(batteryClassifier(t, c.batteryCase), RelevanceOptions{OnError: OnError(optStr(c.Options, "onError")), Bands: optBands(c.Options), Role: optStr(c.Options, "role")})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ev := BeforeLLMEvent{Model: c.Event.Model, Turn: c.Event.Turn, Messages: c.Event.Messages, Tools: c.Event.Tools}
+			ov, err := r.AsHook(nil)(context.Background(), ev)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got any
+			if ov != nil && ov.Tools != nil {
+				idx := []any{}
+				for _, kept := range ov.Tools {
+					for i, orig := range c.Event.Tools {
+						if reflect.DeepEqual(kept, orig) {
+							idx = append(idx, float64(i))
+							break
+						}
+					}
+				}
+				got = idx
+			}
+			if want := c.Want["tools"]; !reflect.DeepEqual(got, want) {
+				t.Fatalf("tools = %#v, want %#v", got, want)
+			}
+		})
+	}
+}

@@ -552,6 +552,9 @@ func (r *AgentRouterClassifier) Pick(ctx context.Context, task string, agents []
 	for len(level) > 0 {
 		opts := make(map[string]string, len(level))
 		for _, a := range level {
+			if _, dup := opts[a.Name]; dup {
+				continue // duplicate name at one level: the FIRST node wins (SPEC §8B)
+			}
 			opts[a.Name] = a.Description
 		}
 		a, cal, err := askBattery(ctx, r.c, st, []JudgeQuestion{Choice("agent", "Which agent should handle `task`?", opts)}, bandsOr(r.opts.Bands))
@@ -573,6 +576,7 @@ func (r *AgentRouterClassifier) Pick(ctx context.Context, task string, agents []
 		for i := range level {
 			if level[i].Name == x.Choice() {
 				picked = &level[i]
+				break // first node with the name wins
 			}
 		}
 		if picked == nil {

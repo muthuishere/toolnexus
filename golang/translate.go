@@ -115,7 +115,10 @@ func (c *Client) translateOpenAI(ctx context.Context, req TranslateRequest) (Tra
 	if req.Toolkit != nil {
 		declared = append(req.Toolkit.ToOpenAI(), declared...)
 	}
-	messages, tools, model := c.translateHooks(ctx, normalizeMessages(req.Messages), declared)
+	messages, tools, model, err := c.translateHooks(ctx, normalizeMessages(req.Messages), declared)
+	if err != nil {
+		return TranslateResult{}, err
+	}
 
 	body := map[string]any{"model": model, "messages": messages}
 	if sys := c.translateSystem(req); sys != "" && !hasSystemMessage(messages) {
@@ -135,7 +138,7 @@ func (c *Client) translateOpenAI(ctx context.Context, req TranslateRequest) (Tra
 	t0 := time.Now()
 	raw, err := c.postJSON(ctx, endpoint, map[string]string{"authorization": "Bearer " + key}, body)
 	if err != nil {
-		c.emitLLM("error", t0, 0, 0)
+		c.emitLLM(model, "error", t0, 0, 0)
 		return TranslateResult{}, err
 	}
 	var data struct {
@@ -155,12 +158,12 @@ func (c *Client) translateOpenAI(ctx context.Context, req TranslateRequest) (Tra
 		Usage map[string]any `json:"usage"`
 	}
 	if err := json.Unmarshal(raw, &data); err != nil {
-		c.emitLLM("error", t0, 0, 0)
+		c.emitLLM(model, "error", t0, 0, 0)
 		return TranslateResult{}, err
 	}
 	p, cp := perCall(data.Usage, string(StyleOpenAI))
-	c.emitLLM("ok", t0, p, cp)
-	out := TranslateResult{Model: c.opts.Model, Raw: decodeResponse(raw)}
+	c.emitLLM(model, "ok", t0, p, cp)
+	out := TranslateResult{Model: model, Raw: decodeResponse(raw)}
 	addUsage(&out.Usage, data.Usage, string(StyleOpenAI))
 	c.afterLLMHook(ctx, out.Raw, model)
 	if len(data.Choices) == 0 {
@@ -202,7 +205,10 @@ func (c *Client) translateAnthropic(ctx context.Context, req TranslateRequest) (
 	if req.Toolkit != nil {
 		declared = append(req.Toolkit.ToAnthropic(), declared...)
 	}
-	messages, tools, model := c.translateHooks(ctx, msgs, declared)
+	messages, tools, model, err := c.translateHooks(ctx, msgs, declared)
+	if err != nil {
+		return TranslateResult{}, err
+	}
 
 	maxTokens := req.MaxTokens
 	if maxTokens <= 0 {
@@ -225,7 +231,7 @@ func (c *Client) translateAnthropic(ctx context.Context, req TranslateRequest) (
 		"x-api-key": key, "anthropic-version": "2023-06-01",
 	}, body)
 	if err != nil {
-		c.emitLLM("error", t0, 0, 0)
+		c.emitLLM(model, "error", t0, 0, 0)
 		return TranslateResult{}, err
 	}
 	var data struct {
@@ -240,12 +246,12 @@ func (c *Client) translateAnthropic(ctx context.Context, req TranslateRequest) (
 		Usage      map[string]any `json:"usage"`
 	}
 	if err := json.Unmarshal(raw, &data); err != nil {
-		c.emitLLM("error", t0, 0, 0)
+		c.emitLLM(model, "error", t0, 0, 0)
 		return TranslateResult{}, err
 	}
 	p, cp := perCall(data.Usage, string(StyleAnthropic))
-	c.emitLLM("ok", t0, p, cp)
-	out := TranslateResult{Model: c.opts.Model, Raw: decodeResponse(raw)}
+	c.emitLLM(model, "ok", t0, p, cp)
+	out := TranslateResult{Model: model, Raw: decodeResponse(raw)}
 	addUsage(&out.Usage, data.Usage, string(StyleAnthropic))
 	c.afterLLMHook(ctx, out.Raw, model)
 
@@ -527,16 +533,20 @@ func (c *Client) translateSystem(req TranslateRequest) string {
 }
 
 // translateHooks runs BeforeLLM for the single call, honoring message/tool/model overrides.
-func (c *Client) translateHooks(ctx context.Context, messages, tools []any) ([]any, []any, string) {
+// A hook error stops the call (SPEC §8): it is returned and no provider request is sent.
+func (c *Client) translateHooks(ctx context.Context, messages, tools []any) ([]any, []any, string, error) {
 	model := c.opts.Model
 	if c.opts.Hooks == nil || c.opts.Hooks.BeforeLLM == nil {
-		return messages, tools, model
+		return messages, tools, model, nil
 	}
 	ov, err := c.opts.Hooks.BeforeLLM(ctx, BeforeLLMEvent{
 		Messages: messages, Tools: tools, Model: c.opts.Model, Turn: 0,
 	})
-	if err != nil || ov == nil {
-		return messages, tools, model
+	if err != nil {
+		return nil, nil, model, err
+	}
+	if ov == nil {
+		return messages, tools, model, nil
 	}
 	if ov.Messages != nil {
 		messages = ov.Messages
@@ -547,7 +557,7 @@ func (c *Client) translateHooks(ctx context.Context, messages, tools []any) ([]a
 	if ov.Model != "" {
 		model = ov.Model
 	}
-	return messages, tools, model
+	return messages, tools, model, nil
 }
 
 // afterLLMHook fires AfterLLM for the single call. A hook error is not fatal to a
