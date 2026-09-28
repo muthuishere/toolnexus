@@ -1483,9 +1483,18 @@ observe; the noted ones may mutate or short-circuit.
   transcript for the rest of the run — the canonical use is **context compaction** (§7F).
   It may also return `model` (change `add-judge-batteries`): a non-empty `model` is transmitted
   for **that turn only** (request body and the `afterLLM` event), in every loop and style, run,
-  stream and the single-call `translate`; absent, null or empty ⇒ the configured model, verbatim. Metric events keep the configured model. This is the seam an
+  stream and the single-call `translate`; absent, null or empty ⇒ the configured model, verbatim.
+  **The model reported is the model transmitted**: that turn's `llm` metric event carries the
+  override; `RunResult.model` and the `run` metric event carry the model of the **last model call
+  the run made** (the configured model when no call was made or none was overridden, including a
+  pending or failed run); `translate`'s `result.model` carries the transmitted model. This is the seam an
   opt-in `ModelRouterClassifier` (§8B *Batteries*) uses; nothing in the library returns it unless
   the host attached one.
+  **A `beforeLLM` hook that fails stops the call** — in every loop (run, stream, the §7D agent
+  run) and in `translate`: the error (a thrown exception, a rejected promise, Go's returned
+  `error`, an Elixir `{:error, _}`/raise) propagates to the caller as that entry point's failure,
+  and **no provider request is sent** for that turn. It is never swallowed, logged-and-ignored, or
+  retried.
 - `afterLLM({ response, model, turn })` → observe (logging, cost, tracing). `response` is
   the raw provider payload (carries `usage`).
 - `beforeTool({ name, args, id, turn })` → return `{ result }` to **short-circuit** the tool
@@ -2194,6 +2203,12 @@ on `systemone`, `llm`, `custom` and `static`. Every battery:
   `Request {id: "toolguard:<call id>", kind: "approval", prompt: "Approve the call to <name>? (<reason>)",
   data: {tool, arguments, reason, risk}}` — §10 path B. `next` is not called on deny or ask. An
   approved Request runs the tool directly (§10 does not re-enter `beforeTool`).
+- AgentRouter with **duplicate names at one level**: the **first** node carrying a name is the one
+  that counts — its description is that name's criterion and it is the node descended into; later
+  duplicates are ignored (`agent-router.json` `duplicate-name-first-wins`). Never last-wins.
+- A provider tool entry (openai `{function: {name, description}}` or anthropic `{name, description}`)
+  whose `name` or `description` is absent or not a string reads as `""` for that field — never
+  null/nil/`"null"`; a nameless tool is judged under the key `""` (`tool-relevance.json` `hookCases`).
 - `beforeLLM` batteries judge the **latest user text** (walk back to the first `role: "user"`
   message with text; string content, or every `{type: "text"}` part joined with `"\n"`; a
   tool_result-only user message is skipped; `examples/judge/batteries/user-text-cases.json`). No
@@ -2668,7 +2683,7 @@ result {
   toolCalls:    [{ id, name, arguments }]   // arguments is a JSON **string**
   finishReason: "stop" | "tool_calls" | "length" | "content_filter"
   usage:        Usage
-  model:        string
+  model:        string         // the model transmitted (a beforeLLM override when one applied)
   raw:          object?        // the provider's decoded response
 }
 ```

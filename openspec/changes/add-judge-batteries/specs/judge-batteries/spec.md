@@ -69,13 +69,19 @@ ToolRelevance and SkillRelevance SHALL ask one `noul` per item keyed by the item
 ToolResultFilter one `noul` per chunk keyed by its decimal index. Only a band `no` answer drops an
 item; yes, uncertain and missing keep it. Error: `open` keeps all, `closed` keeps none. The
 ToolRelevance `beforeLLM` hook SHALL override `tools` with the kept provider entries in their
-original order only when something was dropped; the ToolResultFilter `afterTool` hook SHALL filter
+original order only when something was dropped, reading a provider entry's absent or non-string
+`name`/`description` as `""`; the ToolResultFilter `afterTool` hook SHALL filter
 only a non-error text output with ≥ 2 chunks split on `"\n\n"`.
 
 #### Scenario: Exactly the low cut-point is kept
 
 - **WHEN** a chunk's noul is exactly 0.30 under default bands
 - **THEN** that chunk is kept
+
+#### Scenario: A nameless provider tool is judged under the empty name
+
+- **WHEN** the hook is offered a provider tool entry with no `name`
+- **THEN** its question is keyed `""` with name and description read as `""`, never null
 
 #### Scenario: Tool relevance hook swaps tools
 
@@ -88,7 +94,13 @@ IsComplete SHALL report `complete` iff its `complete` noul is band yes. AgentRou
 `choice` keyed `agent` per level, descend into a picked group, and return `fallback` when a level
 is unsure, missing or errors. ContentGuard SHALL ask one `noul` per dimension and return `block`
 if any is band yes, else `review` if any is uncertain or missing, else `allow`; its `beforeLLM`
-hook SHALL raise `content guard blocked: <flagged names joined by ", ">` on block.
+hook SHALL raise `content guard blocked: <flagged names joined by ", ">` on block. Duplicate
+agent names at one level SHALL resolve to the first node carrying the name.
+
+#### Scenario: Duplicate agent names resolve to the first
+
+- **WHEN** two nodes at one level share a name and the classifier picks that name
+- **THEN** the criterion carries the first node's description and the router descends into the first node's agents
 
 #### Scenario: A router falls back on a near-uniform pick
 

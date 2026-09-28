@@ -754,6 +754,125 @@
     "calibrated": false,
     "error": false
    }
+  },
+  {
+   "name": "duplicate-name-first-wins",
+   "why": "Two nodes at one level share a name. The FIRST is the one that counts: its description is the criterion and it is the node descended into. A last-wins port builds a different criterion or descends into the wrong group, misses the corpus and falls back.",
+   "options": {},
+   "input": {
+    "task": "I was charged twice for March, please refund one.",
+    "agents": [
+     {
+      "name": "support",
+      "description": "Anything a paying customer needs fixed.",
+      "agents": [
+       {
+        "name": "billing",
+        "description": "Refunds, invoices and payment failures."
+       },
+       {
+        "name": "tech",
+        "description": "Bugs, errors and outages in the product."
+       }
+      ]
+     },
+     {
+      "name": "growth",
+      "description": "Leads, pricing and partnerships."
+     },
+     {
+      "name": "support",
+      "description": "A duplicate that must be ignored.",
+      "agents": [
+       {
+        "name": "sales",
+        "description": "Pricing questions and new contracts."
+       },
+       {
+        "name": "partners",
+        "description": "Resellers and integration partners."
+       }
+      ]
+     }
+    ],
+    "fallback": "triage"
+   },
+   "calls": [
+    {
+     "state": {
+      "task": "I was charged twice for March, please refund one.",
+      "role": "You route a task to the agent best suited to do it."
+     },
+     "questions": {
+      "agent": {
+       "type": "choice",
+       "instructions": "Which agent should handle `task`?",
+       "criteria": {
+        "support": "Anything a paying customer needs fixed.",
+        "growth": "Leads, pricing and partnerships."
+       }
+      }
+     },
+     "response": {
+      "model": "m",
+      "answers": {
+       "agent": {
+        "type": "choice",
+        "choice": "support",
+        "confidence": 0.9,
+        "probabilities": {
+         "support": 0.9,
+         "growth": 0.1
+        }
+       }
+      }
+     }
+    },
+    {
+     "state": {
+      "task": "I was charged twice for March, please refund one.",
+      "role": "You route a task to the agent best suited to do it."
+     },
+     "questions": {
+      "agent": {
+       "type": "choice",
+       "instructions": "Which agent should handle `task`?",
+       "criteria": {
+        "billing": "Refunds, invoices and payment failures.",
+        "tech": "Bugs, errors and outages in the product."
+       }
+      }
+     },
+     "response": {
+      "model": "m",
+      "answers": {
+       "agent": {
+        "type": "choice",
+        "choice": "billing",
+        "confidence": 0.88,
+        "probabilities": {
+         "billing": 0.88,
+         "tech": 0.12
+        }
+       }
+      }
+     }
+    }
+   ],
+   "want": {
+    "agent": "billing",
+    "path": [
+     "support",
+     "billing"
+    ],
+    "sure": true,
+    "probabilities": {
+     "billing": 0.88,
+     "tech": 0.12
+    },
+    "calibrated": true,
+    "error": false
+   }
   }
  ]
 }

@@ -15,5 +15,9 @@ Each case:
 - `want` — the verdict. `error` is a boolean (verdict carries an error or not); `null` means
   absent/nil/none in the port's idiom.
 
+`tool-relevance.json` also carries `hookCases`: the `beforeLLM` hook driven with a provider-entry
+`event` (no `next`); `want.tools` is the kept entries' indices, or `null` for no override. It pins
+that a nameless provider entry is judged under the key `""`.
+
 `user-text-cases.json` pins the latest-user-text extraction the beforeLLM hooks use.
 Hook behaviour (`hook` blocks in tool-guard / content-guard) is asserted by port-local tests.
