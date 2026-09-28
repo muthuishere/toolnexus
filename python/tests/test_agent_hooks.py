@@ -1,6 +1,6 @@
 """The §8 seams on a §7D agent run — ``hooks`` / ``on_metric`` (SPEC.md §7D).
 
-Shared fixture: ``examples/agent-hooks/fixture.json`` (scenarios H1-H6).
+Shared fixture: ``examples/agent-hooks/fixture.json`` (scenarios H1-H7).
 
 The runtime builds each handle's client itself, so the §8 seams reach an agent run
 only by being handed to it. Both the runtime options and :class:`AgentDef` carry the
@@ -226,4 +226,45 @@ async def test_compaction_then_durable_pending_rewinds_full_transcript():
 
     assert r.pending is not None
     await rt.resume(Answer(id=r.pending.id, ok=True))
+    await rt.close(rt.root)
+
+
+# --------------------------------------------------------------------------- #
+# 7 — H7: a failing before_llm stops an agent run. The level-1 loop run RAISES;
+#     a runtime handle turn resolves the §7D boundary result (is_error, "error").
+#     Neither sends a provider request.
+# --------------------------------------------------------------------------- #
+class _HookBoom(Exception):
+    pass
+
+
+def _boom(ev):
+    raise _HookBoom("hook boom")
+
+
+async def test_h7_failing_before_llm_raises_from_the_loop_run_no_request():
+    from toolnexus import create_toolkit
+    from toolnexus.agents import agent
+
+    mock = RecordingTransport()
+    tk = await create_toolkit(builtins=False)
+    a = agent("failing", does="x", hooks={"before_llm": _boom})
+    lp = a.loop({"base_url": "http://scripted.invalid", "style": "openai", "model": "configured",
+                 "api_key": "unused", "http_transport": mock}, tk)
+    try:
+        await lp.run("go")
+        raise AssertionError("the loop run must raise the hook's error")
+    except _HookBoom as e:
+        assert str(e) == "hook boom"
+    assert mock.sent == {}
+    await tk.close()
+
+
+async def test_h7_failing_before_llm_is_an_error_result_at_the_handle_boundary():
+    mock = RecordingTransport()
+    rt = AgentRuntime(transport=mock, registry=_defs(peer={"model": "m-a", "hooks": {"before_llm": _boom}}))
+    h = _spawn(rt, "peer")
+    r = await rt.run_turn(h, "hello")
+    assert r.is_error and r.status == "error" and "hook boom" in r.text, r
+    assert mock.sent == {}
     await rt.close(rt.root)

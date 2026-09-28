@@ -697,6 +697,69 @@ public final class Classifier {
         return d;
     }
 
+    /** The default number of states {@link #evaluateBatch} keeps in flight. */
+    public static final int DEFAULT_BATCH_CONCURRENCY = 16;
+
+    /**
+     * The same questions over many states (SPEC.md §8B "Batch"): each state goes through
+     * {@link #evaluate}, at most {@value #DEFAULT_BATCH_CONCURRENCY} in flight, and the decisions
+     * come back in STATE order. Fails closed: any failure throws naming that state's index and
+     * returns no decisions. An empty list is an error and sends nothing.
+     */
+    public List<Decision> evaluateBatch(List<?> states, Map<String, Question> questions) {
+        return evaluateBatch(states, questions, DEFAULT_BATCH_CONCURRENCY);
+    }
+
+    /** {@link #evaluateBatch(List, Map)} with an explicit in-flight bound. */
+    public List<Decision> evaluateBatch(List<?> states, Map<String, Question> questions, int concurrency) {
+        if (states == null || states.isEmpty()) {
+            throw new ClassifierException("classifier: evaluateBatch: no states to evaluate");
+        }
+        int n = states.size();
+        java.util.concurrent.Semaphore gate = new java.util.concurrent.Semaphore(Math.max(1, concurrency));
+        List<java.util.concurrent.Future<Decision>> futures = new ArrayList<>(n);
+        try (var pool = java.util.concurrent.Executors.newVirtualThreadPerTaskExecutor()) {
+            for (Object state : states) {
+                futures.add(pool.submit(() -> {
+                    gate.acquire();
+                    try { return evaluate(state, questions); } finally { gate.release(); }
+                }));
+            }
+            List<Decision> out = new ArrayList<>(n);
+            for (int i = 0; i < n; i++) {
+                try {
+                    out.add(futures.get(i).get());
+                } catch (java.util.concurrent.ExecutionException e) {
+                    for (var f : futures) f.cancel(true);
+                    Throwable c = e.getCause() == null ? e : e.getCause();
+                    throw new ClassifierException("classifier: evaluateBatch: state " + i + ": "
+                            + c.getMessage(), c);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new ClassifierException("classifier: evaluateBatch: interrupted", e);
+                }
+            }
+            return List.copyOf(out);
+        }
+    }
+
+    /**
+     * One-line {@code static} classifier from recorded decisions — the hermetic backend CI runs.
+     */
+    public static Classifier fromRecorded(String model, List<RecordedDecision> decisions) {
+        return create(new Options().style(STYLE_STATIC).model(model).decisions(decisions));
+    }
+
+    /** {@link #fromRecorded(String, List)} under {@link #DEFAULT_MODEL}. */
+    public static Classifier fromRecorded(List<RecordedDecision> decisions) {
+        return fromRecorded(DEFAULT_MODEL, decisions);
+    }
+
+    /** The public question → wire conversion: the §8B {@code questions} object, in the caller's order. */
+    public static Map<String, Object> toWire(Map<String, Question> questions) {
+        return questionsWire(questions);
+    }
+
     private static List<String> sortedKeys(Map<String, Question> questions) {
         List<String> keys = new ArrayList<>(questions.keySet());
         keys.sort(Comparator.naturalOrder());

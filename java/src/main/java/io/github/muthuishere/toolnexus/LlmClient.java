@@ -415,8 +415,17 @@ public final class LlmClient {
     public record BeforeLLMEvent(List<Object> messages, List<Map<String, Object>> tools,
                                  String model, int turn) {}
 
-    /** Return value of {@link Hooks#beforeLLM}: non-null fields replace the request's. */
-    public record LLMOverride(List<Object> messages, List<Map<String, Object>> tools) {}
+    /**
+     * Return value of {@link Hooks#beforeLLM}: non-null fields replace the request's.
+     * {@code model}, when non-empty, is transmitted for THIS turn only (request body and the
+     * {@code afterLLM} event); null/empty ⇒ the configured model, verbatim (SPEC §8).
+     */
+    public record LLMOverride(List<Object> messages, List<Map<String, Object>> tools, String model) {
+        public LLMOverride(List<Object> messages, List<Map<String, Object>> tools) { this(messages, tools, null); }
+
+        /** An override that only routes this turn to {@code model}. */
+        public static LLMOverride withModel(String model) { return new LLMOverride(null, null, model); }
+    }
 
     /** Event passed to {@link Hooks#afterLLM}: the raw provider response (carries usage). */
     public record AfterLLMEvent(Map<String, Object> response, String model, int turn) {}
@@ -1088,9 +1097,10 @@ public final class LlmClient {
         Object[] hooked = translateBeforeLLM(messages, declared);
         messages = (List<Object>) hooked[0];
         declared = (List<Map<String, Object>>) hooked[1];
+        String turnModel = (String) hooked[2];
 
         Map<String, Object> body = new LinkedHashMap<>();
-        body.put("model", opts.model);
+        body.put("model", turnModel);
         body.put("messages", messages);
         if (!declared.isEmpty()) body.put("tools", declared);
         if (req.toolChoice != null) body.put("tool_choice", req.toolChoice);
@@ -1103,10 +1113,10 @@ public final class LlmClient {
         if (opts.headers != null) headers.putAll(opts.headers);
 
         Map<String, Object> data = llmCallJson(url, headers, body, newDeadline(), "openai");
-        translateAfterLLM(data);
+        translateAfterLLM(data, turnModel);
 
         Translate.Result out = new Translate.Result();
-        out.model = opts.model;
+        out.model = turnModel;
         out.raw = data;
         addUsage(out.usage, (Map<String, Object>) data.get("usage"), "openai");
 
@@ -1158,9 +1168,10 @@ public final class LlmClient {
         Object[] hooked = translateBeforeLLM(messages, declared);
         messages = (List<Object>) hooked[0];
         declared = (List<Map<String, Object>>) hooked[1];
+        String turnModel = (String) hooked[2];
 
         Map<String, Object> body = new LinkedHashMap<>();
-        body.put("model", opts.model);
+        body.put("model", turnModel);
         body.put("max_tokens", req.maxTokens > 0 ? req.maxTokens : 4096);
         if (sys != null && !sys.isEmpty()) body.put("system", sys);
         body.put("messages", messages);
@@ -1176,10 +1187,10 @@ public final class LlmClient {
         if (opts.headers != null) headers.putAll(opts.headers);
 
         Map<String, Object> data = llmCallJson(endpoint, headers, body, newDeadline(), "anthropic");
-        translateAfterLLM(data);
+        translateAfterLLM(data, turnModel);
 
         Translate.Result out = new Translate.Result();
-        out.model = opts.model;
+        out.model = turnModel;
         out.raw = data;
         addUsage(out.usage, (Map<String, Object>) data.get("usage"), "anthropic");
 
@@ -1208,19 +1219,21 @@ public final class LlmClient {
 
     /** Runs {@code beforeLLM} for the single translate call, honoring overrides. */
     private Object[] translateBeforeLLM(List<Object> messages, List<Map<String, Object>> tools) {
-        if (opts.hooks == null || opts.hooks.beforeLLM == null) return new Object[]{messages, tools};
+        if (opts.hooks == null || opts.hooks.beforeLLM == null) return new Object[]{messages, tools, opts.model};
         LLMOverride ov = opts.hooks.beforeLLM.apply(new BeforeLLMEvent(messages, tools, opts.model, 0));
+        String model = opts.model;
         if (ov != null) {
             if (ov.messages() != null) messages = ov.messages();
             if (ov.tools() != null) tools = new ArrayList<>(ov.tools());
+            if (ov.model() != null && !ov.model().isEmpty()) model = ov.model();
         }
-        return new Object[]{messages, tools};
+        return new Object[]{messages, tools, model};
     }
 
     /** Runs {@code afterLLM} for the single translate call. */
-    private void translateAfterLLM(Map<String, Object> data) {
+    private void translateAfterLLM(Map<String, Object> data, String model) {
         if (opts.hooks != null && opts.hooks.afterLLM != null) {
-            opts.hooks.afterLLM.accept(new AfterLLMEvent(data, opts.model, 0));
+            opts.hooks.afterLLM.accept(new AfterLLMEvent(data, model, 0));
         }
     }
 
@@ -1423,37 +1436,37 @@ public final class LlmClient {
     }
 
     /** Emit the terminal {@code run} metric event and build the {@link RunResult}. */
-    private RunResult endRun(long runStart, String text, List<Object> messages,
+    private RunResult endRun(String model, long runStart, String text, List<Object> messages,
                              List<ToolCall> toolCalls, int turns, Usage usage) {
-        emit(new MetricEvent.Run(opts.model, turns, toolCalls.size(), usage.totalTokens,
+        emit(new MetricEvent.Run(model, turns, toolCalls.size(), usage.totalTokens,
                 System.currentTimeMillis() - runStart, null));
-        return new RunResult(text, messages, toolCalls, turns, usage, opts.model);
+        return new RunResult(text, messages, toolCalls, turns, usage, model);
     }
 
     /** §7D/§8 addendum: the run hit its turn cap while the model was still emitting tool calls —
      * a loud limit stop ({@code status="incomplete"}), never a silent {@code "done"}. The partial
      * transcript and tool calls are preserved. */
-    private RunResult incompleteRun(long runStart, String text, List<Object> messages,
+    private RunResult incompleteRun(String model, long runStart, String text, List<Object> messages,
                                     List<ToolCall> toolCalls, int turns, Usage usage) {
-        emit(new MetricEvent.Run(opts.model, turns, toolCalls.size(), usage.totalTokens,
+        emit(new MetricEvent.Run(model, turns, toolCalls.size(), usage.totalTokens,
                 System.currentTimeMillis() - runStart, null));
-        return new RunResult(text, messages, toolCalls, turns, usage, opts.model, "incomplete", null,
+        return new RunResult(text, messages, toolCalls, turns, usage, model, "incomplete", null,
                 "maxTurns");
     }
 
     /** §10: a run halted because a tool suspended and no {@code waitFor} was configured. Returns a
      * {@link RunResult} with {@code status="pending"} and the {@code request} to resume later. */
-    private RunResult pendingRun(long runStart, Request request, List<Object> messages,
+    private RunResult pendingRun(String model, long runStart, Request request, List<Object> messages,
                                  List<ToolCall> toolCalls, int turns, Usage usage) {
-        emit(new MetricEvent.Run(opts.model, turns, toolCalls.size(), usage.totalTokens,
+        emit(new MetricEvent.Run(model, turns, toolCalls.size(), usage.totalTokens,
                 System.currentTimeMillis() - runStart, null));
-        return new RunResult(request.prompt(), messages, toolCalls, turns, usage, opts.model,
+        return new RunResult(request.prompt(), messages, toolCalls, turns, usage, model,
                 "pending", request);
     }
 
     /** Emit a {@code run} error metric event (once, on a thrown run). */
-    private void emitRunError(long runStart, List<ToolCall> toolCalls, int turns, Usage usage, RuntimeException e) {
-        emit(new MetricEvent.Run(opts.model, turns, toolCalls.size(), usage.totalTokens,
+    private void emitRunError(String model, long runStart, List<ToolCall> toolCalls, int turns, Usage usage, RuntimeException e) {
+        emit(new MetricEvent.Run(model, turns, toolCalls.size(), usage.totalTokens,
                 System.currentTimeMillis() - runStart, e.getMessage() != null ? e.getMessage() : e.toString()));
     }
 
@@ -1475,6 +1488,7 @@ public final class LlmClient {
         Usage usage = new Usage();
         int turns = 0;
         long runStart = System.currentTimeMillis();
+        String[] lastModel = {opts.model}; // §8: the model of the last model call (reported)
         // §8A: tool message -> the synthetic user message spliced in after it on the wire only.
         java.util.IdentityHashMap<Object, Object> relocated = new java.util.IdentityHashMap<>();
 
@@ -1483,14 +1497,17 @@ public final class LlmClient {
         try {
             for (int turn = 0; turn < maxTurns(); turn++) {
                 turns++;
+                String turnModel = opts.model;
                 if (opts.hooks != null && opts.hooks.beforeLLM != null) {
                     LLMOverride ov = opts.hooks.beforeLLM.apply(
                             new BeforeLLMEvent(messages, tools, opts.model, turn));
                     if (ov != null && ov.messages() != null) messages = ov.messages();
                     if (ov != null && ov.tools() != null) tools = ov.tools();
+                    if (ov != null && ov.model() != null && !ov.model().isEmpty()) turnModel = ov.model();
                 }
+                lastModel[0] = turnModel;
                 Map<String, Object> body = new LinkedHashMap<>();
-                body.put("model", opts.model);
+                body.put("model", turnModel);
                 body.put("messages", wireMessages(messages, relocated));
                 // §8 Gap 5: omit tools/tool_choice when the effective tool list is empty.
                 if (tools != null && !tools.isEmpty()) {
@@ -1508,7 +1525,7 @@ public final class LlmClient {
                 Map<String, Object> data = llmCallJson(url, headers, body, deadline, "openai");
                 addUsage(usage, (Map<String, Object>) data.get("usage"), "openai");
                 if (opts.hooks != null && opts.hooks.afterLLM != null) {
-                    opts.hooks.afterLLM.accept(new AfterLLMEvent(data, opts.model, turn));
+                    opts.hooks.afterLLM.accept(new AfterLLMEvent(data, turnModel, turn));
                 }
                 List<Object> choices = (List<Object>) data.get("choices");
                 Map<String, Object> message =
@@ -1517,7 +1534,7 @@ public final class LlmClient {
                 List<Object> calls = (List<Object>) message.get("tool_calls");
                 if (calls == null || calls.isEmpty()) {
                     Object content = message.get("content");
-                    return endRun(runStart, content == null ? "" : String.valueOf(content),
+                    return endRun(lastModel[0], runStart, content == null ? "" : String.valueOf(content),
                             messages, toolCalls, turns, usage);
                 }
 
@@ -1569,7 +1586,7 @@ public final class LlmClient {
                     messages.add(toolMsgs[i]);
                     collectRelocated(relocatedBlocks, callNames[i], callIds[i], results[i]);
                     if (haltedAt[i] != null) {
-                        return pendingRun(runStart, haltedAt[i], messages, toolCalls, turns, usage);
+                        return pendingRun(lastModel[0], runStart, haltedAt[i], messages, toolCalls, turns, usage);
                     }
                 }
                 // §8A: ONE synthetic user message per assistant turn, in tool-call order, spliced
@@ -1578,9 +1595,9 @@ public final class LlmClient {
                     relocated.put(toolMsgs[n - 1], syntheticUserMessage(relocatedBlocks));
                 }
             }
-            return incompleteRun(runStart, lastAssistantText(messages), messages, toolCalls, turns, usage);
+            return incompleteRun(lastModel[0], runStart, lastAssistantText(messages), messages, toolCalls, turns, usage);
         } catch (RuntimeException e) {
-            emitRunError(runStart, toolCalls, turns, usage, e);
+            emitRunError(lastModel[0], runStart, toolCalls, turns, usage, e);
             throw e;
         } finally {
             executor.shutdown();
@@ -1604,20 +1621,24 @@ public final class LlmClient {
         Usage usage = new Usage();
         int turns = 0;
         long runStart = System.currentTimeMillis();
+        String[] lastModel = {opts.model}; // §8: the model of the last model call (reported)
 
         // One virtual-thread executor for the whole run; tool calls in a turn run on it.
         ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
         try {
             for (int turn = 0; turn < maxTurns(); turn++) {
                 turns++;
+                String turnModel = opts.model;
                 if (opts.hooks != null && opts.hooks.beforeLLM != null) {
                     LLMOverride ov = opts.hooks.beforeLLM.apply(
                             new BeforeLLMEvent(messages, tools, opts.model, turn));
                     if (ov != null && ov.messages() != null) messages = ov.messages();
                     if (ov != null && ov.tools() != null) tools = ov.tools();
+                    if (ov != null && ov.model() != null && !ov.model().isEmpty()) turnModel = ov.model();
                 }
+                lastModel[0] = turnModel;
                 Map<String, Object> body = new LinkedHashMap<>();
-                body.put("model", opts.model);
+                body.put("model", turnModel);
                 body.put("max_tokens", 4096);
                 if (!system.isEmpty()) body.put("system", system);
                 body.put("messages", messages);
@@ -1634,7 +1655,7 @@ public final class LlmClient {
                 Map<String, Object> data = llmCallJson(endpoint, headers, body, deadline, "anthropic");
                 addUsage(usage, (Map<String, Object>) data.get("usage"), "anthropic");
                 if (opts.hooks != null && opts.hooks.afterLLM != null) {
-                    opts.hooks.afterLLM.accept(new AfterLLMEvent(data, opts.model, turn));
+                    opts.hooks.afterLLM.accept(new AfterLLMEvent(data, turnModel, turn));
                 }
                 List<Object> content = (List<Object>) data.get("content");
                 if (content == null) content = new ArrayList<>();
@@ -1654,7 +1675,7 @@ public final class LlmClient {
                         Map<String, Object> block = (Map<String, Object>) b;
                         if ("text".equals(block.get("type"))) text.append(String.valueOf(block.get("text")));
                     }
-                    return endRun(runStart, text.toString(), messages, toolCalls, turns, usage);
+                    return endRun(lastModel[0], runStart, text.toString(), messages, toolCalls, turns, usage);
                 }
 
                 // Execute all tool_use blocks in this turn concurrently (true parallel tool calling).
@@ -1711,12 +1732,12 @@ public final class LlmClient {
                 userMsg.put("content", resultTurn);
                 messages.add(userMsg);
                 if (halted != null) {
-                    return pendingRun(runStart, halted, messages, toolCalls, turns, usage);
+                    return pendingRun(lastModel[0], runStart, halted, messages, toolCalls, turns, usage);
                 }
             }
-            return incompleteRun(runStart, "", messages, toolCalls, turns, usage);
+            return incompleteRun(lastModel[0], runStart, "", messages, toolCalls, turns, usage);
         } catch (RuntimeException e) {
-            emitRunError(runStart, toolCalls, turns, usage, e);
+            emitRunError(lastModel[0], runStart, toolCalls, turns, usage, e);
             throw e;
         } finally {
             executor.shutdown();
@@ -1741,6 +1762,7 @@ public final class LlmClient {
         Usage usage = new Usage();
         int turns = 0;
         long runStart = System.currentTimeMillis();
+        String[] lastModel = {opts.model}; // §8: the model of the last model call (reported)
         // §8A: tool message -> the synthetic user message spliced in after it on the wire only.
         java.util.IdentityHashMap<Object, Object> relocated = new java.util.IdentityHashMap<>();
 
@@ -1748,13 +1770,16 @@ public final class LlmClient {
         try {
             for (int turn = 0; turn < maxTurns(); turn++) {
                 turns++;
+                String turnModel = opts.model;
                 if (opts.hooks != null && opts.hooks.beforeLLM != null) {
                     LLMOverride ov = opts.hooks.beforeLLM.apply(new BeforeLLMEvent(messages, tools, opts.model, turn));
                     if (ov != null && ov.messages() != null) messages = ov.messages();
                     if (ov != null && ov.tools() != null) tools = ov.tools();
+                    if (ov != null && ov.model() != null && !ov.model().isEmpty()) turnModel = ov.model();
                 }
+                lastModel[0] = turnModel;
                 Map<String, Object> body = new LinkedHashMap<>();
-                body.put("model", opts.model);
+                body.put("model", turnModel);
                 body.put("messages", wireMessages(messages, relocated));
                 // §8 Gap 5: omit tools/tool_choice when the effective tool list is empty.
                 if (tools != null && !tools.isEmpty()) {
@@ -1823,22 +1848,22 @@ public final class LlmClient {
                         }
                     }
                 } catch (RuntimeException e) {
-                    emit(new MetricEvent.Llm(opts.model, "error", System.currentTimeMillis() - t0, 0, 0));
+                    emit(new MetricEvent.Llm(turnModel, "error", System.currentTimeMillis() - t0, 0, 0));
                     throw e;
                 }
-                emit(new MetricEvent.Llm(opts.model, "ok", System.currentTimeMillis() - t0,
+                emit(new MetricEvent.Llm(turnModel, "ok", System.currentTimeMillis() - t0,
                         usage.promptTokens - beforeP, usage.completionTokens - beforeC));
                 if (opts.hooks != null && opts.hooks.afterLLM != null) {
                     Map<String, Object> resp = new LinkedHashMap<>();
                     resp.put("streamed", true);
                     resp.put("usage", null);
-                    opts.hooks.afterLLM.accept(new AfterLLMEvent(resp, opts.model, turn));
+                    opts.hooks.afterLLM.accept(new AfterLLMEvent(resp, turnModel, turn));
                 }
 
                 if (order.isEmpty()) {
                     messages.add(msg("assistant", content.toString()));
                     onEvent.accept(StreamEvent.usage(copyUsage(usage)));
-                    RunResult done = endRun(runStart, content.toString(), messages, toolCalls, turns, usage);
+                    RunResult done = endRun(lastModel[0], runStart, content.toString(), messages, toolCalls, turns, usage);
                     onEvent.accept(StreamEvent.done(done));
                     return done;
                 }
@@ -1910,16 +1935,16 @@ public final class LlmClient {
                     relocated.put(lastToolMsg, syntheticUserMessage(relocatedBlocks));
                 }
                 if (halted != null) {
-                    RunResult done = pendingRun(runStart, halted, messages, toolCalls, turns, usage);
+                    RunResult done = pendingRun(lastModel[0], runStart, halted, messages, toolCalls, turns, usage);
                     onEvent.accept(StreamEvent.done(done));
                     return done;
                 }
             }
-            RunResult done = incompleteRun(runStart, lastAssistantText(messages), messages, toolCalls, turns, usage);
+            RunResult done = incompleteRun(lastModel[0], runStart, lastAssistantText(messages), messages, toolCalls, turns, usage);
             onEvent.accept(StreamEvent.done(done));
             return done;
         } catch (RuntimeException e) {
-            emitRunError(runStart, toolCalls, turns, usage, e);
+            emitRunError(lastModel[0], runStart, toolCalls, turns, usage, e);
             throw e;
         } finally {
             executor.shutdown();
@@ -1942,18 +1967,22 @@ public final class LlmClient {
         Usage usage = new Usage();
         int turns = 0;
         long runStart = System.currentTimeMillis();
+        String[] lastModel = {opts.model}; // §8: the model of the last model call (reported)
 
         ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
         try {
             for (int turn = 0; turn < maxTurns(); turn++) {
                 turns++;
+                String turnModel = opts.model;
                 if (opts.hooks != null && opts.hooks.beforeLLM != null) {
                     LLMOverride ov = opts.hooks.beforeLLM.apply(new BeforeLLMEvent(messages, tools, opts.model, turn));
                     if (ov != null && ov.messages() != null) messages = ov.messages();
                     if (ov != null && ov.tools() != null) tools = ov.tools();
+                    if (ov != null && ov.model() != null && !ov.model().isEmpty()) turnModel = ov.model();
                 }
+                lastModel[0] = turnModel;
                 Map<String, Object> body = new LinkedHashMap<>();
-                body.put("model", opts.model);
+                body.put("model", turnModel);
                 body.put("max_tokens", 4096);
                 if (!system.isEmpty()) body.put("system", system);
                 body.put("messages", messages);
@@ -2025,15 +2054,15 @@ public final class LlmClient {
                         }
                     }
                 } catch (RuntimeException e) {
-                    emit(new MetricEvent.Llm(opts.model, "error", System.currentTimeMillis() - t0, 0, 0));
+                    emit(new MetricEvent.Llm(turnModel, "error", System.currentTimeMillis() - t0, 0, 0));
                     throw e;
                 }
-                emit(new MetricEvent.Llm(opts.model, "ok", System.currentTimeMillis() - t0,
+                emit(new MetricEvent.Llm(turnModel, "ok", System.currentTimeMillis() - t0,
                         usage.promptTokens - beforeP, usage.completionTokens - beforeC));
                 if (opts.hooks != null && opts.hooks.afterLLM != null) {
                     Map<String, Object> resp = new LinkedHashMap<>();
                     resp.put("streamed", true);
-                    opts.hooks.afterLLM.accept(new AfterLLMEvent(resp, opts.model, turn));
+                    opts.hooks.afterLLM.accept(new AfterLLMEvent(resp, turnModel, turn));
                 }
 
                 // Build the assistant content blocks from what we assembled.
@@ -2069,7 +2098,7 @@ public final class LlmClient {
                         if ("text".equals(blk.get("type"))) text.append(String.valueOf(blk.get("text")));
                     }
                     onEvent.accept(StreamEvent.usage(copyUsage(usage)));
-                    RunResult done = endRun(runStart, text.toString(), messages, toolCalls, turns, usage);
+                    RunResult done = endRun(lastModel[0], runStart, text.toString(), messages, toolCalls, turns, usage);
                     onEvent.accept(StreamEvent.done(done));
                     return done;
                 }
@@ -2126,16 +2155,16 @@ public final class LlmClient {
                 userMsg.put("content", results);
                 messages.add(userMsg);
                 if (halted != null) {
-                    RunResult done = pendingRun(runStart, halted, messages, toolCalls, turns, usage);
+                    RunResult done = pendingRun(lastModel[0], runStart, halted, messages, toolCalls, turns, usage);
                     onEvent.accept(StreamEvent.done(done));
                     return done;
                 }
             }
-            RunResult done = incompleteRun(runStart, "", messages, toolCalls, turns, usage);
+            RunResult done = incompleteRun(lastModel[0], runStart, "", messages, toolCalls, turns, usage);
             onEvent.accept(StreamEvent.done(done));
             return done;
         } catch (RuntimeException e) {
-            emitRunError(runStart, toolCalls, turns, usage, e);
+            emitRunError(lastModel[0], runStart, toolCalls, turns, usage, e);
             throw e;
         } finally {
             executor.shutdown();
@@ -2454,14 +2483,15 @@ public final class LlmClient {
     @SuppressWarnings("unchecked")
     private Map<String, Object> llmCallJson(String url, Map<String, String> headers,
                                             Map<String, Object> body, Deadline deadline, String style) {
+        String turnModel = String.valueOf(body.get("model"));
         long t0 = System.currentTimeMillis();
         try {
             Map<String, Object> data = postJson(url, headers, body, deadline);
             long[] tok = perCall((Map<String, Object>) data.get("usage"), style);
-            emit(new MetricEvent.Llm(opts.model, "ok", System.currentTimeMillis() - t0, tok[0], tok[1]));
+            emit(new MetricEvent.Llm(turnModel, "ok", System.currentTimeMillis() - t0, tok[0], tok[1]));
             return data;
         } catch (RuntimeException e) {
-            emit(new MetricEvent.Llm(opts.model, "error", System.currentTimeMillis() - t0, 0, 0));
+            emit(new MetricEvent.Llm(turnModel, "error", System.currentTimeMillis() - t0, 0, 0));
             throw e;
         }
     }

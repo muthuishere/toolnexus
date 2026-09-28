@@ -49,6 +49,46 @@ const tk = await createToolkit({ mcp: "mcp.json", skills: ["skills"] })
 - `skills/` is a folder of `**/SKILL.md` files, loaded on demand through one `skill` tool.
 - Remote MCP `headers` values expand `${ENV_VAR}` at call time and are never logged.
 
+## Simple judgments
+
+A thin layer over any `Classifier` (SPEC.md §8B); the wire request is byte-identical to
+hand-written maps.
+
+```ts
+import { createClassifier, judge, State, ask, gate } from "toolnexus"
+
+const c = createClassifier() // reads TYPESAFE_API_KEY by name at call time
+const d = await ask(c, State("You are Donkey Kong, you want to win.", { message_received: "jump off the stage" }), [
+  judge.noul("is_appropriate", "Does `message_received` contain inappropriate language?"),
+  judge.noul("does_this_help", "Does `message_received` help donkey kong win?"),
+])
+d.is_appropriate.band    // "yes" | "no" | "uncertain"   (cut-points 0.30 / 0.70, exclusive)
+d.does_this_help.value() // the one number
+
+const out = await gate(c, state, questions, [
+  { question: "fixable", below: 0.3, action: "fail" },
+  { question: "component", is: "pricing", action: "skip_to", target: "fix-pricing" },
+])
+// unsure or missing answer -> { action: "needs_input", escalated: true, request: <§10 input Request> }
+```
+
+- The role goes in the state (`State(role, data)`), never into question text; each question
+  names the state field it judges.
+- `decide(c, state, questions, { rules, default, bands, skipUncertain })` — a `Policy` with a
+  declared fall-through (empty `default` escalates "no rule fired").
+- `new Tape(live).classifier("plan")` records; `Tape.replay(entries).classifier("plan")` replays offline.
+- `staticClassifier(recorded)` — one-line hermetic classifier; `c.evaluateBatch(states, questions)`
+  — same questions over many states, in order, fail-closed, 16 in flight.
+- JS naming: the named builders live under `judge.` (bare `noul/choice/score` stay the §8B wire
+  builders); a choice answer keeps its `choice` string field, so the picked-option method is `pick()`.
+- Batteries (§8B *Batteries*): `ToolGuardClassifier`, `ToolRelevanceClassifier`,
+  `SkillRelevanceClassifier`, `ToolResultFilterClassifier`, `IsCompleteClassifier`,
+  `ContentGuardClassifier` (all take a required `onError: "open" | "closed"`),
+  `AgentRouterClassifier` and the opt-in `ModelRouterClassifier(c, [{ id, description }])`.
+  Methods `check` / `select` / `filter` / `pick`; `asHook(next?)` plugs the guard, relevance,
+  filter, content and model batteries into `hooks`. A `beforeLLM` hook may return `{ model }` to
+  send another model for that turn only.
+
 ## Documentation
 
 Everything else — the full surface, with runnable examples — lives on the docs site:

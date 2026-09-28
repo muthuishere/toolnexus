@@ -8,6 +8,139 @@ GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
 
 ## Unreleased
 
+### Judge batteries: eight ready-made judgments, wired into the agent loop, in all seven ports
+
+`ask` / `gate` made one judgment short; a host still hand-wrote the same hook glue around it every
+time — rate a tool call before it runs, trim the tools offered to the model, drop irrelevant tool
+output, screen what a user typed, route a task. Those now ship as eight **batteries**: each takes
+any `Classifier` (so the same battery runs on `systemone`, `llm`, or a recorded `static` corpus in
+CI), has a standalone method that returns a typed verdict, and where the loop has a seam, an
+`asHook(next)` that composes with your own hook instead of replacing it.
+
+- **`ToolGuardClassifier`** rates a call on a 4-level risk rubric and returns `allow`, `ask` or
+  `deny`. As a `beforeTool` hook, `ask` suspends the run with a §10 `approval` Request
+  (`toolguard:<call id>`) so a human decides and the tool is never reached until they do; `deny`
+  short-circuits with `denied by tool guard: <reason>`. An unsure rating always asks.
+- **`ToolRelevanceClassifier`** (`beforeLLM`, swaps `tools`) and **`SkillRelevanceClassifier`**
+  drop only what the classifier is *confident* is not needed; uncertain keeps it.
+- **`ToolResultFilterClassifier`** (`afterTool`) keeps the paragraphs of a tool's text output that
+  are relevant to the call.
+- **`IsCompleteClassifier`** checks a final answer against its task (standalone: the client loop
+  has no completion seam).
+- **`AgentRouterClassifier`** picks an agent, walking a host-supplied tree past 255 options.
+- **`ContentGuardClassifier`** screens text on `harmful` and `prompt_injection` (your own
+  dimensions if you prefer) into `allow` / `review` / `block`; as a `beforeLLM` hook a block stops
+  the run before any model request.
+- **`ModelRouterClassifier`** — **opt-in** per-query model routing. You give it your models, each
+  described in a sentence ("short factual answers; cheapest"); attached as a `beforeLLM` hook it
+  sends a turn to the model it is *sure* of and otherwise leaves your configured model alone.
+  Nothing changes unless you attach one: SPEC §8 *Right-size routing* still transmits the
+  configured model verbatim, and its conformance test is unchanged (owner decision, ADR 0035 D6).
+
+To make the router possible, a **`beforeLLM` hook may now return `model`** for that turn (request
+body and `afterLLM` event). Absent or empty, the configured model is sent exactly as before, in
+every client style and in streaming.
+
+When a hook does route a turn, **everything that reports a model now reports the one that was
+sent**: that turn's `llm` metric event, `RunResult.model` and the `run` metric event (the last
+model call's model), and `translate`'s `result.model`. Without an override they report the
+configured model, as before. Before this, a routed run was billed and graphed under a model it
+never called.
+
+**A failing `beforeLLM` hook now stops the call in every port and every entry point.** Go's
+`Translate` ignored the hook's error and sent the request anyway; each port's run, stream, agent
+and translate loops are now tested to return the hook's error with no provider request sent. This
+is what makes a blocking ContentGuard actually block under `translate`.
+
+Two battery edge cases now agree across ports, each pinned by a shared fixture case:
+**AgentRouter with duplicate names at one level uses the first node** (its description, its
+subtree; Go, Java, C# and Clojure took the last node, js, Python and Elixir the last
+description), and **a provider tool entry whose name or description is missing or not a string
+reads as `""`** in the ToolRelevance hook (Clojure read nil; Python and Elixir stringified `5` to
+`"5"`). Elixir: a `before_llm` hook returning `{:error, reason}` was treated as "no override" and
+now raises `Toolnexus.HookError`. Clojure: a pending run now emits its `run` metric event.
+
+**On a §7D agent, a failing hook now has one pinned shape in all seven ports** (SPEC §8 + §7D
+*Errors*, fixture `examples/agent-hooks` H7): the agent's level-1 **loop run throws** the hook's
+error, and a **runtime handle turn** (`runTurn`, `wake` + `wait`, the one-shot agent run) resolves
+the §7D boundary result — `isError: true`, `status: "error"`, the hook's message — so a hook
+failing inside a child agent reaches the parent's model like any other failure. No request is
+sent either way. This was already the behaviour everywhere; what differed was which entry point
+each port tested (C# and Python covered only the handle turn, Go none, js/Java/Clojure only the
+loop), so it could have drifted unseen. Every port now tests both. Clojure has no streaming loop,
+so its streaming rows do not apply.
+
+**Clojure: a per-call model is serialised once.** A string key in `:request-params` (including
+the `"model"` the agent Loop sets for `(run lp prompt {:model …})`) sat beside the body's own
+keyword key, so the request JSON carried `"model"` twice; which one a provider honoured was up to
+its parser. Param keys are now canonicalised before the merge, so a param replaces the built-in
+field. The same fix makes a string `"messages"`/`"tools"`/`"stream"` param as forbidden as the
+keyword spelling (before, it silently replaced the conversation).
+
+Every battery requires you to say what a classifier error means — `onError: "open"` or `"closed"`,
+no default — because failing open or closed is your policy, not ours; the routers fall back to your
+fallback instead. Verdicts carry `calibrated`, since a threshold tuned on one backend does not
+transfer to another. They are advisory: ToolGuard's `deny` is a policy aid, not a security control,
+and allowlists stay in your code. The default role and question wording is part of the contract
+(ADR 0021: the sentence is the product), pinned byte-for-byte by the shared fixtures in
+`examples/judge/batteries/`, which every port runs against a recorded `static` classifier.
+
+**What is NOT done.** `SkillRelevance`, `IsComplete` and `AgentRouter` have no hook: skills live in
+the system prompt (outside `messages` in the anthropic style), there is no completion seam, and
+there is no uniform subagent seam. Question text can be overridden only through `role` (and
+`dimensions` for ContentGuard). Hooks re-judge every turn (one classifier call per attached battery
+per turn). None of
+the thresholds has been tuned against a live backend; ADR 0035's live evidence items are still open.
+
+### Simple judgments: `ask`, `gate`, `State`, `Policy`, `Tape` and `evaluateBatch`, in all seven ports
+
+Asking a classifier two yes/no questions used to take ~16 lines of nested question-type maps
+(Go), and every caller re-derived the same 0.30/0.70 cut-offs by hand — the first real consumer's
+gates had no uncertain band at all, so a 0.62 reading failed a run. Now it is five lines: a state,
+an ordered list of named questions, and `ask`, which returns each answer by name with a `band`
+(`yes`/`no`/`uncertain`, noul) or `sure` (choice/score) and a `value()` — one number, no type
+inspection. The §8B wire request is byte-identical to hand-written maps (tested in every port).
+
+- **`gate` declines to decide.** Rules (`below` / `at_least` / `is`) are first-match; an uncertain,
+  unsure or missing answer returns `needs_input` with a §10 `input` Request (question, reason,
+  answers; the reason is exactly `missing answer "<key>"` or `uncertain answer "<key>"` in every
+  port — before this, seven ports used six different wordings for uncertainty and only two named
+  the question — with the key verbatim between the quotes, never escaped (golang `%q` and js
+  `JSON.stringify` used to escape a `"` or `\` in the key, and in the Tape miss name) — and the Request id is `gate:<i>:<key>`, `i` being the rule's index as given) your host routes through `waitFor` or its own queue — it never acts on a guess.
+  Cut-points default to 0.30/0.70, exclusive (exactly 0.70 is uncertain), overridable per call.
+- **`Policy{rules, default, bands, skipUncertain}`** declares the fall-through: an empty `default`
+  escalates with `no rule fired`; `skipUncertain` skips an uncertain rule but a *missing* answer
+  still escalates. Checks run missing → uncertain → rule fit, so `skipUncertain` skips an uncertain answer
+  even under a mis-typed rule, and a mis-typed rule (`is` on a noul, `below` on a choice) escalates
+  instead of silently not firing (js and elixir used to evaluate it to false). golang's
+  `SkipUncertain` used to renumber the rules, so a later escalation carried the wrong `gate:<i>` id.
+- **`State(role, data)`** puts the role next to your data — the wire has no system prompt. And
+  **each question names the state field it judges**. Measured live on TypeSafe `jev-1.13.0`: with
+  the role in state and a vague question an insult read 0.55 (inside the uncertain band); naming
+  `message_received` in the question gave 0.96 / 0.02 on the insult and 0.02 / 0.79 on the good
+  message. Copying the role into the question instead was rejected.
+- **`Tape`** records live decisions by call name and replays them offline, so a hermetic test runs
+  on real answers. Getting a replayer for an unrecorded name never fails; evaluating it fails with
+  `tape: no recorded decision for call "<name>"` and sends nothing — the same in every port (js
+  used to throw when the replayer was built). **`evaluateBatch(states, questions)`** asks
+  the same questions of many states: state order, at most 16 in flight, fail-closed on the lowest
+  failing index, empty list is an error. Plus a one-line static classifier from a recorded decision.
+
+Per-port names: golang `tn.Ask` / `tn.State` / `tn.JudgeAnswer` (`Answer` is already §10),
+`Tape.Recording` / `Replayer` with `WithCallName(ctx)`; js named builders are `judge.noul/choice/score`
+(bare `noul` stays the §8B wire builder) and the picked option is `pick()`; python `state`, `Rule(is_=…)`,
+`skip_uncertain`, `evaluate_batch`; java `Judge.*` with `State.of`, `Rule.atLeast`; csharp
+`Judge.AskAsync` / `GateAsync`, `EvaluateBatchAsync`, and `Decision.FromJson` is now public;
+elixir `Toolnexus.Judge` (bands as atoms, `evaluate_batch`); clojure `toolnexus.judge` with `:at-least`,
+`j/picked`, `jev/evaluate-batch`. All seven pass every shared case in `examples/judge/` and `examples/judge/adapters/`, which now pin the escalation reason, id and question, each answer's value/band/sure, Policy cases and `State(role, data)` as data. The clojure suite now finds `examples/` on its own (no `TN_EXAMPLES` needed).
+
+**What is NOT done.** (The batteries, including an opt-in ModelRouter, now ship: see the entry
+above.) No port attempts a native batch wire
+call (`evaluateBatch` is per-state `evaluate`). Tape replays by call name through a `custom`-style
+classifier, not `static`. The Policy entry point, the picked-option accessor, the static
+one-liner and the Tape method names keep per-language spellings (behaviour identical); they are
+listed in the SPEC §8B idiom table. The on-disk tape file format is per-port and not portable.
+
 ## 0.20.0 — 2026-09-22
 
 **The built-in tools no longer close over the host process. `bash` runs on native Windows, relative

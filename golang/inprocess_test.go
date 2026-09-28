@@ -4,10 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"time"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // CreateInProcessClient — a model in this process, with no wire configuration.

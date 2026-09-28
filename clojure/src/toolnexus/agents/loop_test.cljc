@@ -293,3 +293,44 @@
         [out _] (tnloop/run lp "do it")]
     (is (= 0 @entered) "the denied tool's execute must NEVER be entered")
     (is (= "done" (:status out)))))
+
+(deftest agent-run-before-llm-model-override-and-failure
+  (testing "a beforeLLM :model override reaches the wire; absent => configured"
+    (let [[http models] (scripted [(say "a")])
+          lp (tnloop/create {:name "m" :does "x"}
+                            (assoc (base-opts http) :hooks {:before-llm (fn [_] {:model "small-fast"})})
+                            (bare-toolkit))
+          [out _] (tnloop/run lp "one")]
+      (is (= ["small-fast"] (models)))
+      (is (= "small-fast" (:model (:result out)))))
+    (let [[http models] (scripted [(say "a")])
+          lp (tnloop/create {:name "m" :does "x"} (base-opts http) (bare-toolkit))
+          [out _] (tnloop/run lp "one")]
+      (is (= ["test-model"] (models)))
+      (is (= "test-model" (:model (:result out))))))
+  (testing "per-call :model beats a beforeLLM override (as js): wire and result agree"
+    (let [[http models] (scripted [(say "a")])
+          lp (tnloop/create {:name "m" :does "x"}
+                            (assoc (base-opts http) :hooks {:before-llm (fn [_] {:model "small-fast"})})
+                            (bare-toolkit))
+          [out _] (tnloop/run lp "one" {:model "per-call"})]
+      (is (= ["per-call"] (models)))
+      (is (= "per-call" (:model (:result out))))))
+  (testing "a per-call :model is serialised exactly once (the body carries no second model key)"
+    (let [raw  (atom [])
+          http (fn [_url _headers body]
+                 (swap! raw conj (if (string? body) body (json/write-str body)))
+                 {:status 200 :headers {"content-type" "application/json"}
+                  :body (json/write-str {:choices [{:index 0 :message (say "a") :finish_reason "stop"}]})})
+          lp   (tnloop/create {:name "m" :does "x"} (base-opts http) (bare-toolkit))]
+      (tnloop/run lp "one" {:model "per-call"})
+      (is (= [["per-call"]]
+             (mapv (fn [b] (mapv second (re-seq #"\"model\"\s*:\s*\"([^\"]*)\"" b))) @raw)))))
+  (testing "a failing beforeLLM stops the call: error propagates, no request"
+    (let [[http models] (scripted [(say "a")])
+          lp (tnloop/create {:name "m" :does "x"}
+                            (assoc (base-opts http) :hooks {:before-llm (fn [_] (throw (ex-info "hook boom" {})))})
+                            (bare-toolkit))
+          e  (try (tnloop/run lp "one") nil (catch Throwable t (ex-message t)))]
+      (is (= "hook boom" e))
+      (is (= [] (models))))))

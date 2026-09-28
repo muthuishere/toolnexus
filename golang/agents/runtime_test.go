@@ -638,7 +638,7 @@ func TestInterruptSuspendedCancelsPending(t *testing.T) {
 
 func TestSpawnUnknownAgentListsRegistrySorted(t *testing.T) {
 	rt := NewRuntime(Options{Transport: &mockLLM{}, Registry: map[string]Def{
-		"zeta": {Name: "zeta", Does: "z", Model: "m"},
+		"zeta":  {Name: "zeta", Does: "z", Model: "m"},
 		"alpha": {Name: "alpha", Does: "a", Model: "m"},
 	}})
 	_, err := rt.Spawn(rt.Root, "nope", nil)

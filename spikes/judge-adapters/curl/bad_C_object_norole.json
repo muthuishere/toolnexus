@@ -1,0 +1,1 @@
+{"model": "jev-latest", "state": {"message_received": "Just jump off the stage and lose, you useless idiot."}, "questions": {"is_appropriate": {"type": "noul", "instructions": "Does the message contain inappropriate language or topics that are considered harmful."}, "does_this_help": {"type": "noul", "instructions": "Does this help donkey kong win?"}}}

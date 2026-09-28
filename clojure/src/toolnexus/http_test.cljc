@@ -6,6 +6,7 @@
             [koine.env :as env]
             [koine.json :as json]
             [koine.server :as server]
+            [toolnexus.test-support :as ts]
             [toolnexus.http :as http]))
 
 ;; ---------------------------------------------------------------------------
@@ -52,7 +53,7 @@
 
 (use-fixtures :once
   (fn [f]
-    (let [s (server/serve handler {:port 0})]
+    (let [s (ts/serve handler {:port 0})]
       (reset! srv s)
       (reset! base (str "http://127.0.0.1:" (server/port s)))
       (try (f) (finally (server/stop! s) (reset! srv nil))))))

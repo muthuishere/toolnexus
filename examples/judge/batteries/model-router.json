@@ -1,0 +1,348 @@
+{
+ "note": "ModelRouterClassifier(models).pick(prompt, fallback) -> {model, routed, sure, probabilities, calibrated}. OPT-IN (SPEC §8 Right-size routing). One choice keyed `model` over the user's model options (id -> prose description). Sure (confidence > high and not nearUniform) -> model = the pick, routed true. Unsure, missing or error -> model = fallback (the configured model), routed false. No models -> no call, fallback. The beforeLLM hook uses the turn's configured model as fallback and returns an override `model` only when routed to a different id.",
+ "defaults": {
+  "role": "You pick the cheapest model that can handle the user's request well.",
+  "instructions": "Which model should answer `user_request`?"
+ },
+ "cases": [
+  {
+   "name": "sure-routes",
+   "options": {},
+   "input": {
+    "prompt": "What is the capital of France?",
+    "models": [
+     {
+      "id": "small-fast",
+      "description": "Short factual answers, lookups and simple rewrites; cheapest."
+     },
+     {
+      "id": "large-reasoning",
+      "description": "Multi-step reasoning, code changes across files and long documents; most expensive."
+     }
+    ],
+    "fallback": "configured-model"
+   },
+   "calls": [
+    {
+     "state": {
+      "user_request": "What is the capital of France?",
+      "role": "You pick the cheapest model that can handle the user's request well."
+     },
+     "questions": {
+      "model": {
+       "type": "choice",
+       "instructions": "Which model should answer `user_request`?",
+       "criteria": {
+        "small-fast": "Short factual answers, lookups and simple rewrites; cheapest.",
+        "large-reasoning": "Multi-step reasoning, code changes across files and long documents; most expensive."
+       }
+      }
+     },
+     "response": {
+      "model": "m",
+      "answers": {
+       "model": {
+        "type": "choice",
+        "choice": "small-fast",
+        "confidence": 0.91,
+        "probabilities": {
+         "small-fast": 0.91,
+         "large-reasoning": 0.09
+        }
+       }
+      }
+     }
+    }
+   ],
+   "want": {
+    "model": "small-fast",
+    "routed": true,
+    "sure": true,
+    "probabilities": {
+     "small-fast": 0.91,
+     "large-reasoning": 0.09
+    },
+    "calibrated": true,
+    "error": false
+   }
+  },
+  {
+   "name": "unsure-falls-back",
+   "options": {},
+   "input": {
+    "prompt": "Refactor the auth module",
+    "models": [
+     {
+      "id": "small-fast",
+      "description": "Short factual answers, lookups and simple rewrites; cheapest."
+     },
+     {
+      "id": "large-reasoning",
+      "description": "Multi-step reasoning, code changes across files and long documents; most expensive."
+     }
+    ],
+    "fallback": "configured-model"
+   },
+   "calls": [
+    {
+     "state": {
+      "user_request": "Refactor the auth module",
+      "role": "You pick the cheapest model that can handle the user's request well."
+     },
+     "questions": {
+      "model": {
+       "type": "choice",
+       "instructions": "Which model should answer `user_request`?",
+       "criteria": {
+        "small-fast": "Short factual answers, lookups and simple rewrites; cheapest.",
+        "large-reasoning": "Multi-step reasoning, code changes across files and long documents; most expensive."
+       }
+      }
+     },
+     "response": {
+      "model": "m",
+      "answers": {
+       "model": {
+        "type": "choice",
+        "choice": "small-fast",
+        "confidence": 0.6,
+        "probabilities": {
+         "small-fast": 0.6,
+         "large-reasoning": 0.4
+        }
+       }
+      }
+     }
+    }
+   ],
+   "want": {
+    "model": "configured-model",
+    "routed": false,
+    "sure": false,
+    "probabilities": {
+     "small-fast": 0.6,
+     "large-reasoning": 0.4
+    },
+    "calibrated": true,
+    "error": false
+   }
+  },
+  {
+   "name": "near-uniform-falls-back",
+   "options": {},
+   "input": {
+    "prompt": "hmm",
+    "models": [
+     {
+      "id": "small-fast",
+      "description": "Short factual answers, lookups and simple rewrites; cheapest."
+     },
+     {
+      "id": "large-reasoning",
+      "description": "Multi-step reasoning, code changes across files and long documents; most expensive."
+     }
+    ],
+    "fallback": "configured-model"
+   },
+   "calls": [
+    {
+     "state": {
+      "user_request": "hmm",
+      "role": "You pick the cheapest model that can handle the user's request well."
+     },
+     "questions": {
+      "model": {
+       "type": "choice",
+       "instructions": "Which model should answer `user_request`?",
+       "criteria": {
+        "small-fast": "Short factual answers, lookups and simple rewrites; cheapest.",
+        "large-reasoning": "Multi-step reasoning, code changes across files and long documents; most expensive."
+       }
+      }
+     },
+     "response": {
+      "model": "m",
+      "answers": {
+       "model": {
+        "type": "choice",
+        "choice": "small-fast",
+        "confidence": 0.8,
+        "probabilities": {
+         "small-fast": 0.52,
+         "large-reasoning": 0.48
+        }
+       }
+      }
+     }
+    }
+   ],
+   "want": {
+    "model": "configured-model",
+    "routed": false,
+    "sure": false,
+    "probabilities": {
+     "small-fast": 0.52,
+     "large-reasoning": 0.48
+    },
+    "calibrated": true,
+    "error": false
+   }
+  },
+  {
+   "name": "missing-falls-back",
+   "options": {},
+   "input": {
+    "prompt": "hmm",
+    "models": [
+     {
+      "id": "small-fast",
+      "description": "Short factual answers, lookups and simple rewrites; cheapest."
+     },
+     {
+      "id": "large-reasoning",
+      "description": "Multi-step reasoning, code changes across files and long documents; most expensive."
+     }
+    ],
+    "fallback": "configured-model"
+   },
+   "calls": [
+    {
+     "state": {
+      "user_request": "hmm",
+      "role": "You pick the cheapest model that can handle the user's request well."
+     },
+     "questions": {
+      "model": {
+       "type": "choice",
+       "instructions": "Which model should answer `user_request`?",
+       "criteria": {
+        "small-fast": "Short factual answers, lookups and simple rewrites; cheapest.",
+        "large-reasoning": "Multi-step reasoning, code changes across files and long documents; most expensive."
+       }
+      }
+     },
+     "response": {
+      "model": "m",
+      "answers": {}
+     }
+    }
+   ],
+   "want": {
+    "model": "configured-model",
+    "routed": false,
+    "sure": false,
+    "probabilities": null,
+    "calibrated": true,
+    "error": false
+   }
+  },
+  {
+   "name": "error-falls-back",
+   "options": {},
+   "input": {
+    "prompt": "hmm",
+    "models": [
+     {
+      "id": "small-fast",
+      "description": "Short factual answers, lookups and simple rewrites; cheapest."
+     },
+     {
+      "id": "large-reasoning",
+      "description": "Multi-step reasoning, code changes across files and long documents; most expensive."
+     }
+    ],
+    "fallback": "configured-model"
+   },
+   "error": true,
+   "calls": [],
+   "want": {
+    "model": "configured-model",
+    "routed": false,
+    "sure": false,
+    "probabilities": null,
+    "calibrated": false,
+    "error": true
+   }
+  },
+  {
+   "name": "no-models-no-call",
+   "options": {},
+   "input": {
+    "prompt": "hmm",
+    "models": [],
+    "fallback": "configured-model"
+   },
+   "calls": [],
+   "want": {
+    "model": "configured-model",
+    "routed": false,
+    "sure": false,
+    "probabilities": null,
+    "calibrated": true,
+    "error": false
+   }
+  },
+  {
+   "name": "uncalibrated-reported",
+   "options": {},
+   "input": {
+    "prompt": "What is 2+2?",
+    "models": [
+     {
+      "id": "small-fast",
+      "description": "Short factual answers, lookups and simple rewrites; cheapest."
+     },
+     {
+      "id": "large-reasoning",
+      "description": "Multi-step reasoning, code changes across files and long documents; most expensive."
+     }
+    ],
+    "fallback": "configured-model"
+   },
+   "calls": [
+    {
+     "state": {
+      "user_request": "What is 2+2?",
+      "role": "You pick the cheapest model that can handle the user's request well."
+     },
+     "questions": {
+      "model": {
+       "type": "choice",
+       "instructions": "Which model should answer `user_request`?",
+       "criteria": {
+        "small-fast": "Short factual answers, lookups and simple rewrites; cheapest.",
+        "large-reasoning": "Multi-step reasoning, code changes across files and long documents; most expensive."
+       }
+      }
+     },
+     "response": {
+      "model": "m",
+      "answers": {
+       "model": {
+        "type": "choice",
+        "choice": "small-fast",
+        "confidence": 0.91,
+        "probabilities": {
+         "small-fast": 0.91,
+         "large-reasoning": 0.09
+        }
+       }
+      },
+      "calibrated": false
+     }
+    }
+   ],
+   "want": {
+    "model": "small-fast",
+    "routed": true,
+    "sure": true,
+    "probabilities": {
+     "small-fast": 0.91,
+     "large-reasoning": 0.09
+    },
+    "calibrated": false,
+    "error": false
+   }
+  }
+ ]
+}

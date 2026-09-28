@@ -310,12 +310,13 @@
         hooked   (client/before-llm! client messages declared 0)
         messages (first hooked)
         declared (second hooked)
-        body     (cond-> {:model (:model client) :messages messages}
+        model    (nth hooked 2)
+        body     (cond-> {:model model :messages messages}
                    (seq declared)             (assoc :tools declared)
                    (some? (:toolChoice req))  (assoc :tool_choice (:toolChoice req))
                    (positive-max-tokens req)  (assoc :max_tokens (positive-max-tokens req)))
-        data     (client/call-provider client body)
-        _        (client/after-llm! client data 0)
+        [data sent] (client/call-provider* client body)
+        _        (client/after-llm! client data 0 sent)
         choice   (get-in data [:choices 0])
         message  (or (:message choice) {})
         calls    (tool-calls-of message)
@@ -329,7 +330,7 @@
                      (finish-reason-for (seq calls) nil)
                      stated)
      :usage        (client/add-usage client/zero-usage client (:usage data))
-     :model        (:model client)
+     :model        sent
      :raw          data}))
 
 (defn- translate-anthropic
@@ -347,14 +348,15 @@
         hooked    (client/before-llm! client (:messages converted) declared 0)
         messages  (first hooked)
         declared  (second hooked)
-        body      (cond-> {:model      (:model client)
+        model     (nth hooked 2)
+        body      (cond-> {:model      model
                            :max_tokens (or (positive-max-tokens req) 4096)
                            :messages   messages}
                     (not (str/blank? sys)) (assoc :system sys)
                     (seq declared)         (assoc :tools declared)
                     choice                 (assoc :tool_choice choice))
-        data      (client/call-provider client body)
-        _         (client/after-llm! client data 0)
+        [data sent] (client/call-provider* client body)
+        _         (client/after-llm! client data 0 sent)
         blocks    (filter map? (:content data))
         calls     (->> blocks
                        (filter (fn [b] (= "tool_use" (:type b))))
@@ -368,7 +370,7 @@
      :toolCalls    calls
      :finishReason (finish-reason-for (seq calls) (:stop_reason data))
      :usage        (client/add-usage client/zero-usage client (:usage data))
-     :model        (:model client)
+     :model        sent
      :raw          data}))
 
 (defn translate

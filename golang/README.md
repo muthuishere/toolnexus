@@ -72,6 +72,27 @@ func main() {
 **Embedding toolnexus in an existing Go service?** [`GUIDE.md`](GUIDE.md) is a step-by-step on
 making a running app MCP- and skills-enabled.
 
+## Simple judgments
+
+A thin layer over any `Classifier` (SPEC §8B); the wire request is unchanged.
+
+```go
+a, err := tn.Ask(ctx, c,
+	tn.State("You are Donkey Kong, you want to win.", map[string]any{"message_received": msg}),
+	[]tn.JudgeQuestion{
+		tn.Noul("is_appropriate", "Does `message_received` contain harmful language?"),
+		tn.Noul("does_this_help", "Does `message_received` help donkey kong win?"),
+	})
+a["is_appropriate"].Band // "yes" | "no" | "uncertain" (default bands 0.30 / 0.70, exclusive)
+
+o, err := tn.Policy{Rules: rules, Default: "continue"}.Gate(ctx, c, state, qs)
+// o.Escalated => o.Request is a §10 input Request: the gate declines to decide
+```
+
+`Choice` / `Score` build the other question kinds; `Tape` records live decisions by call name
+(`WithCallName`) and replays them offline; `StaticClassifier(Recorded(...))` is a one-line test
+double; `EvaluateBatch` asks the same questions of many states.
+
 ## Documentation
 
 Everything else — the full surface, with runnable examples — lives on the docs site:

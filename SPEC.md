@@ -1198,7 +1198,9 @@ prose that names a status value must say which vocabulary it is drawing from (is
 Mechanical retry/backoff (§8) runs at the level where the failure occurred. A failed
 child Run crosses the handle boundary as a uniform `isError` result — **never an
 exception** — for the parent's model to judge (reprompt / respawn / reroute / abandon).
-Only the root may throw to the host.
+Only the root may throw to the host. A failing `beforeLLM` hook (§8) follows this rule too: it
+throws from a level-1 loop run and is an `isError`/`status:"error"` result at a handle boundary,
+with no provider request sent in either case.
 
 ### Lifecycle & runtime obligations
 
@@ -1481,6 +1483,24 @@ observe; the noted ones may mutate or short-circuit.
 - `beforeLLM({ messages, tools, model, turn })` → optionally return `{ messages?, tools? }`
   to replace them (trim/inject history, swap tools). Returning `messages` replaces the working
   transcript for the rest of the run — the canonical use is **context compaction** (§7F).
+  It may also return `model` (change `add-judge-batteries`): a non-empty `model` is transmitted
+  for **that turn only** (request body and the `afterLLM` event), in every loop and style, run,
+  stream and the single-call `translate`; absent, null or empty ⇒ the configured model, verbatim.
+  **The model reported is the model transmitted**: that turn's `llm` metric event carries the
+  override; `RunResult.model` and the `run` metric event carry the model of the **last model call
+  the run made** (the configured model when no call was made or none was overridden, including a
+  pending or failed run); `translate`'s `result.model` carries the transmitted model. This is the seam an
+  opt-in `ModelRouterClassifier` (§8B *Batteries*) uses; nothing in the library returns it unless
+  the host attached one.
+  **A `beforeLLM` hook that fails stops the call** — in every loop (run, stream, the §7D agent
+  run) and in `translate`: the error (a thrown exception, a rejected promise, Go's returned
+  `error`, an Elixir `{:error, _}`/raise) propagates to the caller as that entry point's failure,
+  and **no provider request is sent** for that turn. It is never swallowed, logged-and-ignored, or
+  retried. On a §7D agent the same failure has exactly two shapes, identical in all seven ports:
+  the agent's **level-1 loop run throws/raises** the hook's error, and a **runtime handle turn**
+  (`runTurn`, `wake` + `wait`, the one-shot agent run) resolves the §7D *one boundary rule*
+  result — `isError: true`, `status: "error"`, text = the hook's message. Neither sends a request
+  (fixture `examples/agent-hooks` H7).
 - `afterLLM({ response, model, turn })` → observe (logging, cost, tracing). `response` is
   the raw provider payload (carries `usage`).
 - `beforeTool({ name, args, id, turn })` → return `{ result }` to **short-circuit** the tool
@@ -1707,6 +1727,15 @@ Two properties are contractual and conformance-tested:
   returns `guaranteed`. toolnexus does **not** hard-depend on `brain`; the adapter is
   host-supplied. Hard veto at the *tool* layer is `add-governed-execution-layer`; the two compose
   (route-gate at the model call, tool-veto at `execute()`).
+- **Opt-in per-query routing (owner decision, ADR 0035 D6, 2026-09-28).** The default stays the
+  deterministic point above: with no router attached the configured `model` is transmitted
+  verbatim, and the model-faithfulness test keeps passing unchanged. A host MAY attach a
+  `ModelRouterClassifier` (§8B *Batteries*) as a `beforeLLM` hook. It picks one model per query
+  from a **user-supplied** list of model options, each described in prose (ADR 0021: the option
+  sentences carry the judgment), and returns it as that turn's `model` override only when the pick
+  is **sure** (confidence > high and not nearUniform). An unsure, missing or failed pick falls back
+  to the configured model. The router is the host's choice, its option list is the host's data,
+  and the model it names is still transmitted verbatim.
 
 **Routing-tier registry contract (fleet interop).** `fleet-nexus` / `huddle-nexus` drive toolnexus
 from a runtime registry (`~/.config/deemwar-one-os/openrouter.json`) with this shape — the
@@ -2062,6 +2091,157 @@ section**, and constructing one alters no request the client loop makes. This is
 not asserted.
 
 ---
+
+### Batch — `evaluateBatch(states, questions)`
+
+The same questions over many states: each state goes through the per-state `evaluate` (every style),
+at most 16 in flight by default, decisions returned **in state order**. It fails closed: the
+**lowest** failing state's index is named (deterministic under concurrency) and no decisions are returned. No states is an error and sends nothing.
+A native batch wire call per backend is not part of this contract.
+
+### Simple judgments — `ask` / `gate` (change `add-judge-adapters`)
+
+A thin layer over any `Classifier`; the wire is unchanged.
+
+```
+state     = map | context(ctx, message, extra?)            // sugar merges extra into the map
+questions = [ noul(name, instructions),                     // ordered list; duplicate name = error
+              choice(name, instructions, options),          //   naming the key, before any request
+              score(name, instructions, levels) ]
+bands     = { low: 0.30, high: 0.70 }                       // default; overridable per call
+
+ask(classifier, state, questions, bands?)  -> { name: answer + (noul: band yes|no|uncertain,
+                                                                choice/score: sure bool) }
+gate(classifier, state, questions, rules, bands?) -> { action, target, escalated, request }
+```
+
+- Builders produce exactly the §8B `evaluate` inputs; the request body is byte-identical to
+  hand-written maps.
+- Cut-points are exclusive on the confident side: `p < low` → no, `p > high` → yes, else
+  uncertain. A choice is sure iff `confidence > high` and not `nearUniform`; a score is sure
+  iff `confidence > high`.
+- `gate` rules (`below` / `at_least` / `is`) are first-match. An uncertain, unsure or missing
+  answer escalates to `needs_input` with a §10 `Request` (`kind: "input"`, data:
+  question, reason, answers). A gate never authorises; it only declines to decide.
+- A missing answer's reason is exactly `missing answer "<key>"` (the question key verbatim
+  between double quotes, never escaped: a key `a"b` gives `missing answer "a"b"`), and
+  `data.question` is that key. The same verbatim quoting holds for every `"<key>"` / `"<name>"`
+  below.
+- An uncertain noul, or an unsure choice/score, escalates with reason exactly
+  `uncertain answer "<key>"` (same quoting; no value or confidence in the reason, the answers
+  travel in `data.answers`), and `data.question` is that key.
+- A rule escalation's Request id is exactly `gate:<i>:<key>` (`i` = the rule's 0-based index in
+  the rules as given, even when `skipUncertain` skipped earlier rules); the no-rule-fired
+  escalation's id is `gate:default`, its `data.question` is `""`, its reason `no rule fired`.
+  The Request `prompt` is free text and not part of this contract.
+- Per rule, the checks run in this order: missing answer, then uncertain/unsure answer, then
+  rule fit. So `skipUncertain` skips an uncertain answer even under a mis-typed rule. A rule that
+  does not fit its answer's type (`is` on a noul/score, `below`/`at_least` on a choice, or no
+  condition) escalates with a port-specific reason and is never skipped.
+- `State(role, data)` puts `role` next to the data's fields at the top level (non-object data goes
+  under `data`). The wire has no role field; the state carries it. **Each question names the state
+  field it judges** ("Does `message_received` contain insults…"), and the role is never copied into
+  question instructions (live evidence: ADR 0035 D7).
+- `answer.value()` is the one number (noul probability, score value, choice confidence);
+  `answer.choice()` is the picked option.
+- `Policy{rules, default, bands, skipUncertain}`: a non-empty `default` is the no-rule-fired action;
+  empty escalates (`reason: "no rule fired"`). `skipUncertain` skips uncertain rules instead of
+  escalating on the first. It skips only a *present* uncertain/unsure answer; a missing answer
+  still escalates.
+- `Tape` records live decisions by call name and replays them by call name with no network. Replay
+  is keyed by call name, not by the canonical request, so the replaying classifier is a
+  `custom`-style classifier over the tape (a port may hand a recorded hit to `static`).
+  Obtaining a replaying classifier for an unrecorded name never fails; the miss is reported when
+  that classifier is **evaluated**, as an error whose message is
+  `tape: no recorded decision for call "<name>"`, and no request is sent. Recording forwards to
+  the live classifier and stores the decision under the name. The on-disk tape format is not part
+  of this contract.
+- Permitted naming idiom (behaviour identical): golang `JudgeAnswer` (`Answer` is §10); js named
+  builders under `judge.` and `pick()` for the picked option (§8B's `choice` field would be
+  shadowed); python rule field `is_`; clojure `:at-least`.
+- Sanctioned idiom mapping (spelling differs, behaviour identical; `add-judge-adapters` O1/O3–O5):
+
+  | port | apply a Policy | picked option | one-line static classifier | Tape record / replay |
+  |---|---|---|---|---|
+  | golang | `policy.Gate(ctx, c, st, qs)` (pure: `policy.Decide(answers)`) | `Choice()` | `StaticClassifier(Recorded(…))` | `tape.Recording(live)` / `tape.Replayer()`, name via `WithCallName(ctx, …)` |
+  | js | `decide(c, st, qs, policy)` | `pick()` | `staticClassifier(…)` | `new Tape(live).classifier(name)` / `Tape.replay(entries).classifier(name)` |
+  | python | `gate(c, st, qs, Policy(…))` | `choice()` | `static_classifier(…)` | `Tape(live).call(name)` / `Tape(recorded=…).call(name)` |
+  | java | `policy.decide(c, st, qs)` | `choice()` | `Classifier.fromRecorded(…)` | `tape.record(call)` / `tape.replay(call)` |
+  | csharp | `Judge.GateAsync(c, st, qs, policy)` | `Choice()` | `Classifier.FromRecorded(…)` | `tape.RecordAsync(call, live, st, qs)` / `tape.Replay(call)` |
+  | elixir | `Judge.gate(c, st, qs, %Policy{})` | `Answer.choice/1` | `Judge.static/4` | `Tape.record/3` / `Tape.replay/2` |
+  | clojure | `j/decide` | `j/picked` (`choice` is the builder) | `jev/static-classifier` | `j/recording` / `j/replaying` |
+- Conformance: `examples/judge/state-cases.json`, `examples/judge/gate-cases.json`.
+
+### Batteries — `*Classifier` values (change `add-judge-batteries`, ADR 0035 D3)
+
+A battery is a `Classifier` plus a fixed question set and a fixed reading of its answers. It is
+built on the simple-judgment layer above, never on a vendor, URL or model, so the same battery runs
+on `systemone`, `llm`, `custom` and `static`. Every battery:
+
+- builds `State(role, data)` with a default role sentence (overridable as `role`) and questions
+  that name the state field they judge; **the default role and question text are contract**,
+  pinned byte-for-byte by the static corpus in `examples/judge/batteries/`;
+- accepts `bands` (default 0.30 / 0.70);
+- has a standalone method returning a typed verdict carrying `calibrated` (false on error) and
+  `error` (the classifier's error, or absent). A classifier error never propagates from a
+  standalone method;
+- takes a **required** `onError: "open" | "closed"` with no default when its error outcome is a
+  policy choice (a missing one is a constructor error naming `onError`); the two routers take a
+  `fallback` instead, which is their error outcome;
+- is advisory: ToolGuard's `deny` is a policy aid, not a security control. Allowlists stay in code.
+
+| battery | standalone → verdict | questions | reading | hook |
+|---|---|---|---|---|
+| ToolGuard | `check({name, arguments, description?})` → `action` allow\|ask\|deny, `reason`, `risk`, `sure` | one `score` `risk` (4-level rubric) | missing ⇒ ask `missing answer`; unsure ⇒ ask `uncertain`; `< askAt` (1.5) ⇒ allow `low risk`; `< denyAt` (2.5) ⇒ ask `medium risk`; else deny `high risk`; error ⇒ open: allow, closed: deny, `classifier error` | `beforeTool` |
+| ToolRelevance | `select(prompt, [{name, description}])` → `selected`, `dropped` | one `noul` per tool, keyed by name | band no drops; yes/uncertain/missing keep; error ⇒ open: all, closed: none | `beforeLLM` → `tools` |
+| SkillRelevance | `select(prompt, [{name, description}])` → `selected`, `dropped` | one `noul` per skill | as ToolRelevance | none (feed the S2 allowlist; never pass an empty `selected`, empty ⇒ all) |
+| ToolResultFilter | `filter(query, chunks)` → `kept`, `dropped` (indices) | one `noul` per chunk, keyed `"0"`, `"1"`, … | as ToolRelevance | `afterTool` |
+| IsComplete | `check(task, answer)` → `complete`, `p`, `band` | one `noul` `complete` | complete ⇔ band yes; missing ⇒ false, p null; error ⇒ open: true, closed: false | none (ADR 0035) |
+| AgentRouter | `pick(task, agents, fallback)` → `agent`, `path`, `sure`, `probabilities` | one `choice` `agent` per level; a picked node with `agents` descends | unsure/missing/error at any level ⇒ `fallback` | none (host dispatches) |
+| ContentGuard | `check(text)` → `action` allow\|review\|block, `flagged`, `uncertain`, `scores` | one `noul` per dimension (default `harmful`, `prompt_injection`; overridable as `dimensions`) | any yes ⇒ block; else any uncertain/missing ⇒ review; else allow; error ⇒ open: allow, closed: block | `beforeLLM` (block raises `content guard blocked: <names joined by ", ">`) |
+| ModelRouter | constructed with the user's ordered `[{id, description}]` options; `pick(prompt, fallback)` → `model`, `routed`, `sure`, `probabilities` | one `choice` `model` | sure ⇒ the pick; else `fallback`. **Opt-in** (§8 *Right-size routing*) | `beforeLLM` → `model` |
+
+**`asHook(next)`.** `next` may be absent and is never discarded (ADR 0035 D3.3).
+
+- ToolGuard (`beforeTool`): allow ⇒ `next(ev)`. deny ⇒ short-circuit
+  `{output: "denied by tool guard: <reason>", isError: true}`. ask ⇒ short-circuit
+  `{output: "approval required: <name>", isError: true, metadata: {pending: Request}}` with
+  `Request {id: "toolguard:<call id>", kind: "approval", prompt: "Approve the call to <name>? (<reason>)",
+  data: {tool, arguments, reason, risk}}` — §10 path B. `next` is not called on deny or ask. An
+  approved Request runs the tool directly (§10 does not re-enter `beforeTool`).
+- AgentRouter with **duplicate names at one level**: the **first** node carrying a name is the one
+  that counts — its description is that name's criterion and it is the node descended into; later
+  duplicates are ignored (`agent-router.json` `duplicate-name-first-wins`). Never last-wins.
+- A provider tool entry (openai `{function: {name, description}}` or anthropic `{name, description}`)
+  whose `name` or `description` is absent or not a string reads as `""` for that field — never
+  null/nil/`"null"`; a nameless tool is judged under the key `""` (`tool-relevance.json` `hookCases`).
+- `beforeLLM` batteries judge the **latest user text** (walk back to the first `role: "user"`
+  message with text; string content, or every `{type: "text"}` part joined with `"\n"`; a
+  tool_result-only user message is skipped; `examples/judge/batteries/user-text-cases.json`). No
+  text ⇒ plain delegation, no classifier call. The battery computes its override, calls `next` with
+  the event as that override leaves it, and merges field by field: `next`'s fields win. ToolRelevance
+  overrides `tools` (the kept provider entries, original order) only when it dropped one; ModelRouter
+  overrides `model` only when routed to an id other than the turn's configured model.
+- ToolResultFilter (`afterTool`): only a non-error result whose text output splits on the exact
+  separator `"\n\n"` into ≥ 2 chunks, and which carries no non-text content parts, is filtered; kept
+  chunks re-join with `"\n\n"`; the query is `{tool, arguments}`; `next` sees the filtered result and
+  its override wins.
+- Hooks judge every turn (no run identity to cache on).
+
+Idiom (behaviour identical; constructor and method spelling follow each port):
+
+| port | construct | methods | hook |
+|---|---|---|---|
+| golang | `NewToolGuard(c, ToolGuardOptions{OnError: OnErrorClosed})`, `NewModelRouter(c, models, RouterOptions{})`; input `GuardedCall`, `Item`, `AgentNode`, `ModelOption` | `Check` / `Select` / `Filter` / `Pick` | `AsHook(next)`; `LatestUserText` |
+| js | `new ToolGuardClassifier(c, { onError: "closed" })`, `new ModelRouterClassifier(c, models, opts?)` | `check` / `select` / `filter` / `pick` (async) | `asHook(next?)`; `latestUserText` |
+| python | `ToolGuardClassifier(c, on_error="closed", ask_at=…)`, `ModelRouterClassifier(c, models)` | `check` / `select` / `filter` / `pick` (async) | `as_hook(next=None)`; `latest_user_text`; block raises `ContentGuardBlocked` |
+| java | `new ToolGuardClassifier(c, new ToolGuardClassifier.Options().onError(Batteries.OnError.CLOSED))`, `new ModelRouterClassifier(c, models)` | `check` / `select` / `filter` / `pick` | `asHook(next)`; `Batteries.latestUserText`; block throws `ContentGuardClassifier.BlockedException` |
+| csharp | `new ToolGuardClassifier(c, new ToolGuardOptions { OnError = OnError.Closed })`, `new ModelRouterClassifier(c, models)` | `CheckAsync` / `SelectAsync` / `FilterAsync` / `PickAsync` | `AsHook(next)` (hooks are sync delegates and block on the call); `Batteries.LatestUserText`; block throws `ContentBlockedException` |
+| elixir | `Toolnexus.Judge.ToolGuard.new(c, on_error: :closed)` → `{:ok, g}`; `AgentRouter.new/2`, `ModelRouter.new(c, models, opts)` return the struct | `check/2` / `select/3` / `filter/3` / `pick/4` (`ModelRouter.pick/3`); actions and bands are atoms | `as_hook(battery, next \\ nil)`; `Batteries.latest_user_text/1`; block raises `ContentGuard.BlockedError` |
+| clojure | `toolnexus.batteries`: `(b/tool-guard c {:on-error :closed})`, `(b/model-router c models)` | `b/check` / `b/select` / `b/filter-chunks` / `b/pick` | `(b/as-hook battery next)`; `b/latest-user-text`; block throws `ex-info` |
+
+- Conformance: `examples/judge/batteries/*.json` (recorded `static` calls → verdict) and
+  `user-text-cases.json`.
 
 ## 9. Go CLI (`toolnexus`)
 
@@ -2509,7 +2689,7 @@ result {
   toolCalls:    [{ id, name, arguments }]   // arguments is a JSON **string**
   finishReason: "stop" | "tool_calls" | "length" | "content_filter"
   usage:        Usage
-  model:        string
+  model:        string         // the model transmitted (a beforeLLM override when one applied)
   raw:          object?        // the provider's decoded response
 }
 ```

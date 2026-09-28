@@ -1,6 +1,6 @@
 {
   "$schema": "toolnexus-agent-hooks-fixture/v1",
-  "description": "SPEC §7D 'The §8 seams on an agent run': the agent runtime forwards `hooks` and `onMetric` verbatim into the client it builds for each handle, resolved def-over-runtime (replace, never merge). This is how §7F compaction reaches a §7E persona agent. Every port asserts these six scenarios; unset must stay byte-identical.",
+  "description": "SPEC §7D 'The §8 seams on an agent run': the agent runtime forwards `hooks` and `onMetric` verbatim into the client it builds for each handle, resolved def-over-runtime (replace, never merge). This is how §7F compaction reaches a §7E persona agent. Every port asserts these seven scenarios; unset must stay byte-identical.",
 
   "scenarios": [
     {
@@ -83,6 +83,18 @@
         "status": "pending",
         "storedMessagesAfter": 81,
         "comment": "the stored transcript returns to its FULL pre-turn checkpoint and the compaction is discarded — the resumed replay compacts again. A port that persists the compacted head across a suspension is non-conformant."
+      }
+    },
+    {
+      "id": "H7",
+      "name": "a failing beforeLLM stops an agent run: it throws from the loop, and crosses a handle boundary as an error result",
+      "given": "an agent whose hooks.beforeLLM fails with the message 'hook boom' (a throw / raise / rejected promise, Go's returned error, Elixir's {:error, _})",
+      "when": "(a) the agent's level-1 loop runs one prompt; (b) a runtime handle for the agent runs one turn (runTurn, or wake + wait / the one-shot agent run)",
+      "expect": {
+        "loopRunThrows": "hook boom",
+        "handleResult": { "isError": true, "status": "error", "textContains": "hook boom" },
+        "providerRequests": 0,
+        "comment": "identical in all seven ports. (a) is the hook-failure rule of §8: the error propagates to the caller of the loop and is never swallowed or retried. (b) is the §7D one boundary rule: a failed Run crosses the handle boundary as a uniform isError result, never an exception, so a hook failure inside a child agent reaches the parent's model like any other failure. In both, no provider request is sent for the turn."
       }
     }
   ],

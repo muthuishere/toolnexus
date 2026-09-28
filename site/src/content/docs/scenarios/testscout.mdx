@@ -1,0 +1,88 @@
+---
+title: Test scout — a judge pipeline that writes tests that matter
+description: Six stages where code counts, a classifier judges and an LLM writes. Real live output, per-stage latency and tokens, and what surprised us. Built on the ask/gate layer (unreleased — lands in the next release).
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<Aside type="note" title="Spike code over an unreleased layer">
+This scenario's code lives in `spikes/judge-adapters/scenarios/testscout/` and still uses the
+spike's own `judge` package (`judge.State`, `judge.Ask`, `judge.Policy`, `judge.Tape`). The same
+layer is now in the Go library as `tn.State`, `tn.Ask`, `tn.Policy` and `tn.Tape` (and in the other
+six ports), unreleased — it lands in the next release. See
+[Start here: ask & gate](/toolnexus/cookbook/judge/#start-here-ask--gate).
+</Aside>
+
+A coverage tool tells you which lines ran. It cannot tell you which tests are worth writing.
+Test scout splits that job three ways: **code counts** (coverage, mutants, pass/fail),
+**the classifier judges** (is this worth a test, would a customer notice a bug), **the LLM writes**
+the test. No number a program can compute is ever asked of a model.
+
+```
+testdata/shop ─▶ 1 Understand ─▶ 2 Triage ─────▶ 3 Plan ────────▶ 4 Gate ───keep──▶ 5 Write ─▶ 6 Verify ─▶ accepted
+                 (code: cover)   (clf, ONE call  (clf, ONE call   (policy)   │       (LLM via    (code: shipped / fixed /   rejected
+                                  for all funcs:  choice per func:           │        toolnexus    mutants; clf: asserts? needs_input
+                                  value+noticed)  bug report in state)       │        client)      named?)
+                                                                             ├─skip─▶ reason printed
+                                                                             └─unsure▶ re-ask 2 more VIEWS ─agree─▶ decided
+                                                                                                          └split─▶ §10 needs_input
+```
+
+| stage | who | what |
+|---|---|---|
+| 1 Understand | code | `go test -coverprofile` per function |
+| 2 Triage | classifier, one call | `value` (score) and `noticed` (noul) for every function |
+| 3 Plan | classifier, one call | `choice` of test kind per function, bug report in state |
+| 4 Gate | policy | keep / skip; unsure re-asks with two different views, a split goes to a human |
+| 5 Write | LLM (toolnexus client) | drafts the test |
+| 6 Verify | code + classifier | fails on shipped code, passes on the fix, kills mutants; classifier checks asserts / naming |
+
+## Real live output
+
+Run 2, 2026-09-27, TypeSafe `jev-1.13.0` + `openai/gpt-4.1-mini` as the writer.
+
+| func | cov % | triage | plan | test | why |
+|---|---|---|---|---|---|
+| Code | 100.0 | skip | | | already covered |
+| String | 0.0 | skip | happy_path | | value=0.1 (yes), noticed=0.66 |
+| percentOf | 0.0 | needs_input | regression | | value=2.0 (uncertain); re-asked [needs_input, needs_input, keep] → split, ask a human |
+| ApplyCoupon | 0.0 | keep | regression | **accepted** | value=3.0; cov 16→64%, mutants 4/6, **fails on shipped code, passes on fix: caught the bug** |
+| RoundCents | 0.0 | needs_input | happy_path | | value=1.4 (uncertain); unsure in every view → human |
+| Total | 75.0 | needs_input | happy_path | | value=1.4 (uncertain); unsure in every view → human |
+| ValidateLine | 0.0 | keep | happy_path | needs_input | value=2.6; re-asked → agreed keep; cov 16→32%, mutants 4/6, asserts=0.68 |
+
+| stage | calls | wall ms | in tok | out tok |
+|---|---|---|---|---|
+| gate | 8 | 2614 | 4064 | 324 |
+| plan | 1 | 302 | 1747 | 302 |
+| triage | 1 | 373 | 1700 | 220 |
+| verify | 2 | 658 | 1741 | 92 |
+| write (LLM) | 2 | 7601 | 1390 | 784 |
+
+Classifier total: 12 calls, ~3.9 s, ~9.3k input / ~0.9k output tokens. TypeSafe reports no cost, so
+none is printed: absent is not $0. The LLM writer (~3.8 s a draft) dominates wall time; the
+self-consistency re-asks are the most expensive classifier stage.
+
+## Honest notes
+
+- **The code check caught what the classifier could not.** In run 1 the LLM wrote a "regression"
+  test that asserted the bug as correct. It passed on shipped code and failed on the fix, so
+  stage 6 rejected it. The classifier's "does it assert behaviour?" would have let it through.
+- **Re-ask with different views, not the same state.** Jev is near-deterministic (runs differ by
+  ≤ 0.1), so asking the same state three times measures nothing. The gate re-asks with the function
+  alone and with the bug report.
+- **Batching lowers confidence.** One triage call for six functions costs ~370 ms, but ValidateLine's
+  confidence was 0.56 batched against 0.83 / 0.91 asked alone.
+- **`SkipUncertain`.** Mid-rubric scores almost always came back unsure, and with first-match rules one
+  unsure rule blocked every later confident one. Uncertain rules are now skipped; only "nothing
+  confident decided" escalates.
+- **Encoding moved `noticed` from 0.23 to 0.72** for ValidateLine once the question listed what a
+  customer would actually see. The sentence is the product.
+- **Plan picked `happy_path` for ValidateLine**, a function that exists only to produce errors.
+  Not every pick is right; that is why stage 6 exists.
+- The offline recording predates `State(role, data)`. A later live run with the role sent the
+  ApplyCoupon draft to a human instead (`asserts_behaviour` 0.59) — the pipeline working, but not
+  the outcome the offline test pins. The role costs ~220 input tokens per call.
+
+Run it: `cd spikes/judge-adapters/scenarios/testscout && go test -race .` (replays the recorded live
+answers, no network). Source: ADR 0035 D7–D8.

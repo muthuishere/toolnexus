@@ -16,3 +16,29 @@ export * from "./toolkit.js"
 export * from "./client.js"
 export * from "./classifier.js"
 export * as agents from "./agents/index.js"
+// Simple judgments (§8B, add-judge-adapters). `judge.noul/choice/score` are the NAMED builders
+// (the bare `noul/choice/score` above stay the §8B wire builders); the rest is also top-level.
+export * as judge from "./judge.js"
+// Judge batteries (§8B "Batteries", add-judge-batteries): eight `*Classifier` values + latestUserText.
+export * from "./batteries.js"
+export {
+  State,
+  context,
+  questionMap,
+  ask,
+  gate,
+  decide,
+  applyGate,
+  applyPolicy,
+  answersOf,
+  staticClassifier,
+  Tape,
+  DEFAULT_BANDS,
+  type NamedQuestion,
+  type Band,
+  type Bands,
+  type Answers,
+  type Rule,
+  type GateOutcome,
+  type Policy,
+} from "./judge.js"

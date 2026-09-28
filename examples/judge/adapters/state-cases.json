@@ -1,0 +1,178 @@
+{
+ "note": "State is built from a map (or context+message sugar). Questions are an ordered LIST of named questions. Builders must produce EXACTLY wantState / wantQuestions, the existing SPEC 8B evaluate(state, questions) inputs.",
+ "cases": [
+  {
+   "name": "video-donkey-kong",
+   "state": {
+    "role": "You are playing a game of Super Smash brothers and are receiving messages from other people on what to do. You are Donkey Kong, you want to win.",
+    "message_received": "jump off the stage now"
+   },
+   "questions": [
+    {
+     "kind": "noul",
+     "name": "is_appropriate",
+     "instructions": "Does the message contain inappropriate language or topics that are considered harmful."
+    },
+    {
+     "kind": "noul",
+     "name": "does_this_help",
+     "instructions": "Does this help donkey kong win?"
+    }
+   ],
+   "wantState": {
+    "role": "You are playing a game of Super Smash brothers and are receiving messages from other people on what to do. You are Donkey Kong, you want to win.",
+    "message_received": "jump off the stage now"
+   },
+   "wantQuestions": {
+    "is_appropriate": {
+     "type": "noul",
+     "instructions": "Does the message contain inappropriate language or topics that are considered harmful."
+    },
+    "does_this_help": {
+     "type": "noul",
+     "instructions": "Does this help donkey kong win?"
+    }
+   }
+  },
+  {
+   "name": "context-message-sugar",
+   "context": {
+    "context": "triage bugs",
+    "message": "checkout 500",
+    "extra": {
+     "reporter": "support-team"
+    }
+   },
+   "questions": [
+    {
+     "kind": "choice",
+     "name": "component",
+     "instructions": "Which component owns the fix?",
+     "options": {
+      "pricing": "coupon/discount code",
+      "checkout": "the HTTP checkout handler"
+     }
+    },
+    {
+     "kind": "score",
+     "name": "fixability",
+     "instructions": "How fixable is it?",
+     "levels": [
+      "needs product input",
+      "fixable from the report"
+     ]
+    }
+   ],
+   "wantState": {
+    "context": "triage bugs",
+    "message": "checkout 500",
+    "reporter": "support-team"
+   },
+   "wantQuestions": {
+    "component": {
+     "type": "choice",
+     "instructions": "Which component owns the fix?",
+     "criteria": {
+      "pricing": "coupon/discount code",
+      "checkout": "the HTTP checkout handler"
+     }
+    },
+    "fixability": {
+     "type": "score",
+     "instructions": "How fixable is it?",
+     "criteria": [
+      "needs product input",
+      "fixable from the report"
+     ]
+    }
+   }
+  },
+  {
+   "name": "role-state",
+   "roleState": {
+    "role": "You are playing a game of Super Smash brothers and are receiving messages from other people on what to do. You are Donkey Kong, you want to win.",
+    "data": {
+     "message_received": "jump off the stage now"
+    }
+   },
+   "questions": [
+    {
+     "kind": "noul",
+     "name": "is_appropriate",
+     "instructions": "Does the message contain inappropriate language or topics that are considered harmful."
+    },
+    {
+     "kind": "noul",
+     "name": "does_this_help",
+     "instructions": "Does this help donkey kong win?"
+    }
+   ],
+   "wantState": {
+    "role": "You are playing a game of Super Smash brothers and are receiving messages from other people on what to do. You are Donkey Kong, you want to win.",
+    "message_received": "jump off the stage now"
+   },
+   "wantQuestions": {
+    "is_appropriate": {
+     "type": "noul",
+     "instructions": "Does the message contain inappropriate language or topics that are considered harmful."
+    },
+    "does_this_help": {
+     "type": "noul",
+     "instructions": "Does this help donkey kong win?"
+    }
+   }
+  },
+  {
+   "name": "role-non-object",
+   "roleState": {
+    "role": "r",
+    "data": "plain text"
+   },
+   "questions": [
+    {
+     "kind": "noul",
+     "name": "is_appropriate",
+     "instructions": "Does the message contain inappropriate language or topics that are considered harmful."
+    },
+    {
+     "kind": "noul",
+     "name": "does_this_help",
+     "instructions": "Does this help donkey kong win?"
+    }
+   ],
+   "wantState": {
+    "role": "r",
+    "data": "plain text"
+   },
+   "wantQuestions": {
+    "is_appropriate": {
+     "type": "noul",
+     "instructions": "Does the message contain inappropriate language or topics that are considered harmful."
+    },
+    "does_this_help": {
+     "type": "noul",
+     "instructions": "Does this help donkey kong win?"
+    }
+   }
+  },
+  {
+   "name": "duplicate-name-rejected",
+   "state": {
+    "a": 1
+   },
+   "questions": [
+    {
+     "kind": "noul",
+     "name": "x",
+     "instructions": "one"
+    },
+    {
+     "kind": "noul",
+     "name": "x",
+     "instructions": "two"
+    }
+   ],
+   "wantError": "duplicate question name \"x\""
+  }
+ ]
+}

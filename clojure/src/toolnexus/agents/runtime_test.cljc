@@ -1093,6 +1093,21 @@
     (is (= [:def-hook] @seen)
         "a def that sets :hooks REPLACES the runtime's — composing two transcript rewrites has no defined order")))
 
+(deftest failing-before-llm-is-an-error-result-at-the-handle-boundary
+  ;; fixture examples/agent-hooks H7 (the loop-run half — it THROWS — is in
+  ;; loop_test `agent-run-before-llm-model-override-and-failure`).
+  (let [{:keys [rt requests]} (runtime-with
+                               {"w" (adef "w" "wm" :hooks {:before-llm (fn [_e] (throw (ex-info "hook boom" {})))})}
+                               {"wm" [{:text "never"}]}
+                               {})
+        h (rt/spawn rt rt/root "w")]
+    (rt/wake rt h "x")
+    (let [r (rt/wait rt h)]
+      (is (true? (:isError r)))
+      (is (= "error" (:status r)))
+      (is (str/includes? (str (:text r)) "hook boom")))
+    (is (= 0 (count @requests)) "no provider request may be sent")))
+
 (deftest hooks-and-on-metric-resolve-independently
   (let [hooks-seen (atom 0) metric-seen (atom 0)
         {:keys [rt]} (runtime-with

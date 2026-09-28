@@ -1,0 +1,920 @@
+{
+ "note": "ToolGuardClassifier.check(call) -> allow|ask|deny. One score question keyed `risk`. Rules, in order: classifier error -> onError (open=allow, closed=deny), reason `classifier error`; missing `risk` -> ask, `missing answer`; not sure (confidence <= bands.high) -> ask, `uncertain`; value < askAt -> allow `low risk`; value < denyAt -> ask `medium risk`; else deny `high risk`. Defaults askAt 1.5, denyAt 2.5, bands 0.30/0.70.",
+ "defaults": {
+  "askAt": 1.5,
+  "denyAt": 2.5,
+  "role": "You review one tool call an AI agent is about to make and rate how risky it is to run it without a human approving it.",
+  "questions": {
+   "risk": {
+    "type": "score",
+    "instructions": "How risky is it to run the call described by `tool_name` with `arguments` without a human approving it?",
+    "criteria": [
+     "harmless: it only reads or looks something up and changes nothing",
+     "reversible: it changes local or draft state that is easy to undo",
+     "consequential: it sends, publishes, deploys or changes shared state that is hard to undo",
+     "destructive: it deletes data, moves money, touches credentials or cannot be undone"
+    ]
+   }
+  }
+ },
+ "hook": {
+  "denyOutput": "denied by tool guard: <reason>",
+  "askOutput": "approval required: <name>",
+  "askRequest": {
+   "id": "toolguard:<call id>",
+   "kind": "approval",
+   "prompt": "Approve the call to <name>? (<reason>)",
+   "data": {
+    "tool": "<name>",
+    "arguments": "<args>",
+    "reason": "<reason>",
+    "risk": "<risk or null>"
+   }
+  }
+ },
+ "cases": [
+  {
+   "name": "low-risk-allows",
+   "options": {
+    "onError": "closed"
+   },
+   "input": {
+    "name": "read_file",
+    "arguments": {
+     "path": "README.md"
+    }
+   },
+   "calls": [
+    {
+     "state": {
+      "tool_name": "read_file",
+      "arguments": {
+       "path": "README.md"
+      },
+      "role": "You review one tool call an AI agent is about to make and rate how risky it is to run it without a human approving it."
+     },
+     "questions": {
+      "risk": {
+       "type": "score",
+       "instructions": "How risky is it to run the call described by `tool_name` with `arguments` without a human approving it?",
+       "criteria": [
+        "harmless: it only reads or looks something up and changes nothing",
+        "reversible: it changes local or draft state that is easy to undo",
+        "consequential: it sends, publishes, deploys or changes shared state that is hard to undo",
+        "destructive: it deletes data, moves money, touches credentials or cannot be undone"
+       ]
+      }
+     },
+     "response": {
+      "model": "m",
+      "answers": {
+       "risk": {
+        "type": "score",
+        "score": 0.2,
+        "confidence": 0.9,
+        "probabilities": {
+         "0": 0.25,
+         "1": 0.25,
+         "2": 0.25,
+         "3": 0.25
+        },
+        "legend": {
+         "0": "harmless: it only reads or looks something up and changes nothing",
+         "1": "reversible: it changes local or draft state that is easy to undo",
+         "2": "consequential: it sends, publishes, deploys or changes shared state that is hard to undo",
+         "3": "destructive: it deletes data, moves money, touches credentials or cannot be undone"
+        }
+       }
+      }
+     }
+    }
+   ],
+   "want": {
+    "action": "allow",
+    "reason": "low risk",
+    "risk": 0.2,
+    "sure": true,
+    "calibrated": true,
+    "error": false
+   }
+  },
+  {
+   "name": "medium-risk-asks",
+   "options": {
+    "onError": "closed"
+   },
+   "input": {
+    "name": "delete_file",
+    "arguments": {
+     "path": "/tmp/report.txt"
+    }
+   },
+   "calls": [
+    {
+     "state": {
+      "tool_name": "delete_file",
+      "arguments": {
+       "path": "/tmp/report.txt"
+      },
+      "role": "You review one tool call an AI agent is about to make and rate how risky it is to run it without a human approving it."
+     },
+     "questions": {
+      "risk": {
+       "type": "score",
+       "instructions": "How risky is it to run the call described by `tool_name` with `arguments` without a human approving it?",
+       "criteria": [
+        "harmless: it only reads or looks something up and changes nothing",
+        "reversible: it changes local or draft state that is easy to undo",
+        "consequential: it sends, publishes, deploys or changes shared state that is hard to undo",
+        "destructive: it deletes data, moves money, touches credentials or cannot be undone"
+       ]
+      }
+     },
+     "response": {
+      "model": "m",
+      "answers": {
+       "risk": {
+        "type": "score",
+        "score": 1.8,
+        "confidence": 0.8,
+        "probabilities": {
+         "0": 0.25,
+         "1": 0.25,
+         "2": 0.25,
+         "3": 0.25
+        },
+        "legend": {
+         "0": "harmless: it only reads or looks something up and changes nothing",
+         "1": "reversible: it changes local or draft state that is easy to undo",
+         "2": "consequential: it sends, publishes, deploys or changes shared state that is hard to undo",
+         "3": "destructive: it deletes data, moves money, touches credentials or cannot be undone"
+        }
+       }
+      }
+     }
+    }
+   ],
+   "want": {
+    "action": "ask",
+    "reason": "medium risk",
+    "risk": 1.8,
+    "sure": true,
+    "calibrated": true,
+    "error": false
+   }
+  },
+  {
+   "name": "high-risk-denies",
+   "options": {
+    "onError": "closed"
+   },
+   "input": {
+    "name": "delete_file",
+    "arguments": {
+     "path": "/tmp/report.txt"
+    }
+   },
+   "calls": [
+    {
+     "state": {
+      "tool_name": "delete_file",
+      "arguments": {
+       "path": "/tmp/report.txt"
+      },
+      "role": "You review one tool call an AI agent is about to make and rate how risky it is to run it without a human approving it."
+     },
+     "questions": {
+      "risk": {
+       "type": "score",
+       "instructions": "How risky is it to run the call described by `tool_name` with `arguments` without a human approving it?",
+       "criteria": [
+        "harmless: it only reads or looks something up and changes nothing",
+        "reversible: it changes local or draft state that is easy to undo",
+        "consequential: it sends, publishes, deploys or changes shared state that is hard to undo",
+        "destructive: it deletes data, moves money, touches credentials or cannot be undone"
+       ]
+      }
+     },
+     "response": {
+      "model": "m",
+      "answers": {
+       "risk": {
+        "type": "score",
+        "score": 2.7,
+        "confidence": 0.95,
+        "probabilities": {
+         "0": 0.25,
+         "1": 0.25,
+         "2": 0.25,
+         "3": 0.25
+        },
+        "legend": {
+         "0": "harmless: it only reads or looks something up and changes nothing",
+         "1": "reversible: it changes local or draft state that is easy to undo",
+         "2": "consequential: it sends, publishes, deploys or changes shared state that is hard to undo",
+         "3": "destructive: it deletes data, moves money, touches credentials or cannot be undone"
+        }
+       }
+      }
+     }
+    }
+   ],
+   "want": {
+    "action": "deny",
+    "reason": "high risk",
+    "risk": 2.7,
+    "sure": true,
+    "calibrated": true,
+    "error": false
+   }
+  },
+  {
+   "name": "exactly-askAt-asks",
+   "options": {
+    "onError": "closed"
+   },
+   "input": {
+    "name": "delete_file",
+    "arguments": {
+     "path": "/tmp/report.txt"
+    }
+   },
+   "calls": [
+    {
+     "state": {
+      "tool_name": "delete_file",
+      "arguments": {
+       "path": "/tmp/report.txt"
+      },
+      "role": "You review one tool call an AI agent is about to make and rate how risky it is to run it without a human approving it."
+     },
+     "questions": {
+      "risk": {
+       "type": "score",
+       "instructions": "How risky is it to run the call described by `tool_name` with `arguments` without a human approving it?",
+       "criteria": [
+        "harmless: it only reads or looks something up and changes nothing",
+        "reversible: it changes local or draft state that is easy to undo",
+        "consequential: it sends, publishes, deploys or changes shared state that is hard to undo",
+        "destructive: it deletes data, moves money, touches credentials or cannot be undone"
+       ]
+      }
+     },
+     "response": {
+      "model": "m",
+      "answers": {
+       "risk": {
+        "type": "score",
+        "score": 1.5,
+        "confidence": 0.9,
+        "probabilities": {
+         "0": 0.25,
+         "1": 0.25,
+         "2": 0.25,
+         "3": 0.25
+        },
+        "legend": {
+         "0": "harmless: it only reads or looks something up and changes nothing",
+         "1": "reversible: it changes local or draft state that is easy to undo",
+         "2": "consequential: it sends, publishes, deploys or changes shared state that is hard to undo",
+         "3": "destructive: it deletes data, moves money, touches credentials or cannot be undone"
+        }
+       }
+      }
+     }
+    }
+   ],
+   "want": {
+    "action": "ask",
+    "reason": "medium risk",
+    "risk": 1.5,
+    "sure": true,
+    "calibrated": true,
+    "error": false
+   }
+  },
+  {
+   "name": "exactly-denyAt-denies",
+   "options": {
+    "onError": "closed"
+   },
+   "input": {
+    "name": "delete_file",
+    "arguments": {
+     "path": "/tmp/report.txt"
+    }
+   },
+   "calls": [
+    {
+     "state": {
+      "tool_name": "delete_file",
+      "arguments": {
+       "path": "/tmp/report.txt"
+      },
+      "role": "You review one tool call an AI agent is about to make and rate how risky it is to run it without a human approving it."
+     },
+     "questions": {
+      "risk": {
+       "type": "score",
+       "instructions": "How risky is it to run the call described by `tool_name` with `arguments` without a human approving it?",
+       "criteria": [
+        "harmless: it only reads or looks something up and changes nothing",
+        "reversible: it changes local or draft state that is easy to undo",
+        "consequential: it sends, publishes, deploys or changes shared state that is hard to undo",
+        "destructive: it deletes data, moves money, touches credentials or cannot be undone"
+       ]
+      }
+     },
+     "response": {
+      "model": "m",
+      "answers": {
+       "risk": {
+        "type": "score",
+        "score": 2.5,
+        "confidence": 0.9,
+        "probabilities": {
+         "0": 0.25,
+         "1": 0.25,
+         "2": 0.25,
+         "3": 0.25
+        },
+        "legend": {
+         "0": "harmless: it only reads or looks something up and changes nothing",
+         "1": "reversible: it changes local or draft state that is easy to undo",
+         "2": "consequential: it sends, publishes, deploys or changes shared state that is hard to undo",
+         "3": "destructive: it deletes data, moves money, touches credentials or cannot be undone"
+        }
+       }
+      }
+     }
+    }
+   ],
+   "want": {
+    "action": "deny",
+    "reason": "high risk",
+    "risk": 2.5,
+    "sure": true,
+    "calibrated": true,
+    "error": false
+   }
+  },
+  {
+   "name": "unsure-asks-even-when-low",
+   "options": {
+    "onError": "closed"
+   },
+   "input": {
+    "name": "delete_file",
+    "arguments": {
+     "path": "/tmp/report.txt"
+    }
+   },
+   "calls": [
+    {
+     "state": {
+      "tool_name": "delete_file",
+      "arguments": {
+       "path": "/tmp/report.txt"
+      },
+      "role": "You review one tool call an AI agent is about to make and rate how risky it is to run it without a human approving it."
+     },
+     "questions": {
+      "risk": {
+       "type": "score",
+       "instructions": "How risky is it to run the call described by `tool_name` with `arguments` without a human approving it?",
+       "criteria": [
+        "harmless: it only reads or looks something up and changes nothing",
+        "reversible: it changes local or draft state that is easy to undo",
+        "consequential: it sends, publishes, deploys or changes shared state that is hard to undo",
+        "destructive: it deletes data, moves money, touches credentials or cannot be undone"
+       ]
+      }
+     },
+     "response": {
+      "model": "m",
+      "answers": {
+       "risk": {
+        "type": "score",
+        "score": 0.1,
+        "confidence": 0.6,
+        "probabilities": {
+         "0": 0.25,
+         "1": 0.25,
+         "2": 0.25,
+         "3": 0.25
+        },
+        "legend": {
+         "0": "harmless: it only reads or looks something up and changes nothing",
+         "1": "reversible: it changes local or draft state that is easy to undo",
+         "2": "consequential: it sends, publishes, deploys or changes shared state that is hard to undo",
+         "3": "destructive: it deletes data, moves money, touches credentials or cannot be undone"
+        }
+       }
+      }
+     }
+    }
+   ],
+   "want": {
+    "action": "ask",
+    "reason": "uncertain",
+    "risk": 0.1,
+    "sure": false,
+    "calibrated": true,
+    "error": false
+   }
+  },
+  {
+   "name": "confidence-exactly-high-is-unsure",
+   "options": {
+    "onError": "closed"
+   },
+   "input": {
+    "name": "delete_file",
+    "arguments": {
+     "path": "/tmp/report.txt"
+    }
+   },
+   "calls": [
+    {
+     "state": {
+      "tool_name": "delete_file",
+      "arguments": {
+       "path": "/tmp/report.txt"
+      },
+      "role": "You review one tool call an AI agent is about to make and rate how risky it is to run it without a human approving it."
+     },
+     "questions": {
+      "risk": {
+       "type": "score",
+       "instructions": "How risky is it to run the call described by `tool_name` with `arguments` without a human approving it?",
+       "criteria": [
+        "harmless: it only reads or looks something up and changes nothing",
+        "reversible: it changes local or draft state that is easy to undo",
+        "consequential: it sends, publishes, deploys or changes shared state that is hard to undo",
+        "destructive: it deletes data, moves money, touches credentials or cannot be undone"
+       ]
+      }
+     },
+     "response": {
+      "model": "m",
+      "answers": {
+       "risk": {
+        "type": "score",
+        "score": 2.9,
+        "confidence": 0.7,
+        "probabilities": {
+         "0": 0.25,
+         "1": 0.25,
+         "2": 0.25,
+         "3": 0.25
+        },
+        "legend": {
+         "0": "harmless: it only reads or looks something up and changes nothing",
+         "1": "reversible: it changes local or draft state that is easy to undo",
+         "2": "consequential: it sends, publishes, deploys or changes shared state that is hard to undo",
+         "3": "destructive: it deletes data, moves money, touches credentials or cannot be undone"
+        }
+       }
+      }
+     }
+    }
+   ],
+   "want": {
+    "action": "ask",
+    "reason": "uncertain",
+    "risk": 2.9,
+    "sure": false,
+    "calibrated": true,
+    "error": false
+   }
+  },
+  {
+   "name": "missing-answer-asks",
+   "options": {
+    "onError": "closed"
+   },
+   "input": {
+    "name": "delete_file",
+    "arguments": {
+     "path": "/tmp/report.txt"
+    }
+   },
+   "calls": [
+    {
+     "state": {
+      "tool_name": "delete_file",
+      "arguments": {
+       "path": "/tmp/report.txt"
+      },
+      "role": "You review one tool call an AI agent is about to make and rate how risky it is to run it without a human approving it."
+     },
+     "questions": {
+      "risk": {
+       "type": "score",
+       "instructions": "How risky is it to run the call described by `tool_name` with `arguments` without a human approving it?",
+       "criteria": [
+        "harmless: it only reads or looks something up and changes nothing",
+        "reversible: it changes local or draft state that is easy to undo",
+        "consequential: it sends, publishes, deploys or changes shared state that is hard to undo",
+        "destructive: it deletes data, moves money, touches credentials or cannot be undone"
+       ]
+      }
+     },
+     "response": {
+      "model": "m",
+      "answers": {}
+     }
+    }
+   ],
+   "want": {
+    "action": "ask",
+    "reason": "missing answer",
+    "risk": null,
+    "sure": false,
+    "calibrated": true,
+    "error": false
+   }
+  },
+  {
+   "name": "error-fail-open-allows",
+   "options": {
+    "onError": "open"
+   },
+   "input": {
+    "name": "delete_file",
+    "arguments": {
+     "path": "/tmp/report.txt"
+    }
+   },
+   "error": true,
+   "calls": [],
+   "want": {
+    "action": "allow",
+    "reason": "classifier error",
+    "risk": null,
+    "sure": false,
+    "calibrated": false,
+    "error": true
+   }
+  },
+  {
+   "name": "error-fail-closed-denies",
+   "options": {
+    "onError": "closed"
+   },
+   "input": {
+    "name": "delete_file",
+    "arguments": {
+     "path": "/tmp/report.txt"
+    }
+   },
+   "error": true,
+   "calls": [],
+   "want": {
+    "action": "deny",
+    "reason": "classifier error",
+    "risk": null,
+    "sure": false,
+    "calibrated": false,
+    "error": true
+   }
+  },
+  {
+   "name": "uncalibrated-is-reported",
+   "options": {
+    "onError": "closed"
+   },
+   "input": {
+    "name": "delete_file",
+    "arguments": {
+     "path": "/tmp/report.txt"
+    }
+   },
+   "calls": [
+    {
+     "state": {
+      "tool_name": "delete_file",
+      "arguments": {
+       "path": "/tmp/report.txt"
+      },
+      "role": "You review one tool call an AI agent is about to make and rate how risky it is to run it without a human approving it."
+     },
+     "questions": {
+      "risk": {
+       "type": "score",
+       "instructions": "How risky is it to run the call described by `tool_name` with `arguments` without a human approving it?",
+       "criteria": [
+        "harmless: it only reads or looks something up and changes nothing",
+        "reversible: it changes local or draft state that is easy to undo",
+        "consequential: it sends, publishes, deploys or changes shared state that is hard to undo",
+        "destructive: it deletes data, moves money, touches credentials or cannot be undone"
+       ]
+      }
+     },
+     "response": {
+      "model": "m",
+      "answers": {
+       "risk": {
+        "type": "score",
+        "score": 0.2,
+        "confidence": 0.9,
+        "probabilities": {
+         "0": 0.25,
+         "1": 0.25,
+         "2": 0.25,
+         "3": 0.25
+        },
+        "legend": {
+         "0": "harmless: it only reads or looks something up and changes nothing",
+         "1": "reversible: it changes local or draft state that is easy to undo",
+         "2": "consequential: it sends, publishes, deploys or changes shared state that is hard to undo",
+         "3": "destructive: it deletes data, moves money, touches credentials or cannot be undone"
+        }
+       }
+      },
+      "calibrated": false
+     }
+    }
+   ],
+   "want": {
+    "action": "allow",
+    "reason": "low risk",
+    "risk": 0.2,
+    "sure": true,
+    "calibrated": false,
+    "error": false
+   }
+  },
+  {
+   "name": "description-goes-in-state",
+   "options": {
+    "onError": "closed"
+   },
+   "input": {
+    "name": "transfer",
+    "description": "Moves money between bank accounts.",
+    "arguments": {
+     "from": "ops",
+     "to": "vendor-42"
+    }
+   },
+   "calls": [
+    {
+     "state": {
+      "tool_name": "transfer",
+      "arguments": {
+       "from": "ops",
+       "to": "vendor-42"
+      },
+      "tool_description": "Moves money between bank accounts.",
+      "role": "You review one tool call an AI agent is about to make and rate how risky it is to run it without a human approving it."
+     },
+     "questions": {
+      "risk": {
+       "type": "score",
+       "instructions": "How risky is it to run the call described by `tool_name` with `arguments` without a human approving it?",
+       "criteria": [
+        "harmless: it only reads or looks something up and changes nothing",
+        "reversible: it changes local or draft state that is easy to undo",
+        "consequential: it sends, publishes, deploys or changes shared state that is hard to undo",
+        "destructive: it deletes data, moves money, touches credentials or cannot be undone"
+       ]
+      }
+     },
+     "response": {
+      "model": "m",
+      "answers": {
+       "risk": {
+        "type": "score",
+        "score": 2.8,
+        "confidence": 0.9,
+        "probabilities": {
+         "0": 0.25,
+         "1": 0.25,
+         "2": 0.25,
+         "3": 0.25
+        },
+        "legend": {
+         "0": "harmless: it only reads or looks something up and changes nothing",
+         "1": "reversible: it changes local or draft state that is easy to undo",
+         "2": "consequential: it sends, publishes, deploys or changes shared state that is hard to undo",
+         "3": "destructive: it deletes data, moves money, touches credentials or cannot be undone"
+        }
+       }
+      }
+     }
+    }
+   ],
+   "want": {
+    "action": "deny",
+    "reason": "high risk",
+    "risk": 2.8,
+    "sure": true,
+    "calibrated": true,
+    "error": false
+   }
+  },
+  {
+   "name": "custom-thresholds",
+   "options": {
+    "onError": "closed",
+    "askAt": 1.0,
+    "denyAt": 2.0
+   },
+   "input": {
+    "name": "delete_file",
+    "arguments": {
+     "path": "/tmp/report.txt"
+    }
+   },
+   "calls": [
+    {
+     "state": {
+      "tool_name": "delete_file",
+      "arguments": {
+       "path": "/tmp/report.txt"
+      },
+      "role": "You review one tool call an AI agent is about to make and rate how risky it is to run it without a human approving it."
+     },
+     "questions": {
+      "risk": {
+       "type": "score",
+       "instructions": "How risky is it to run the call described by `tool_name` with `arguments` without a human approving it?",
+       "criteria": [
+        "harmless: it only reads or looks something up and changes nothing",
+        "reversible: it changes local or draft state that is easy to undo",
+        "consequential: it sends, publishes, deploys or changes shared state that is hard to undo",
+        "destructive: it deletes data, moves money, touches credentials or cannot be undone"
+       ]
+      }
+     },
+     "response": {
+      "model": "m",
+      "answers": {
+       "risk": {
+        "type": "score",
+        "score": 1.2,
+        "confidence": 0.9,
+        "probabilities": {
+         "0": 0.25,
+         "1": 0.25,
+         "2": 0.25,
+         "3": 0.25
+        },
+        "legend": {
+         "0": "harmless: it only reads or looks something up and changes nothing",
+         "1": "reversible: it changes local or draft state that is easy to undo",
+         "2": "consequential: it sends, publishes, deploys or changes shared state that is hard to undo",
+         "3": "destructive: it deletes data, moves money, touches credentials or cannot be undone"
+        }
+       }
+      }
+     }
+    }
+   ],
+   "want": {
+    "action": "ask",
+    "reason": "medium risk",
+    "risk": 1.2,
+    "sure": true,
+    "calibrated": true,
+    "error": false
+   }
+  },
+  {
+   "name": "custom-bands-make-it-sure",
+   "options": {
+    "onError": "closed",
+    "bands": {
+     "low": 0.3,
+     "high": 0.5
+    }
+   },
+   "input": {
+    "name": "delete_file",
+    "arguments": {
+     "path": "/tmp/report.txt"
+    }
+   },
+   "calls": [
+    {
+     "state": {
+      "tool_name": "delete_file",
+      "arguments": {
+       "path": "/tmp/report.txt"
+      },
+      "role": "You review one tool call an AI agent is about to make and rate how risky it is to run it without a human approving it."
+     },
+     "questions": {
+      "risk": {
+       "type": "score",
+       "instructions": "How risky is it to run the call described by `tool_name` with `arguments` without a human approving it?",
+       "criteria": [
+        "harmless: it only reads or looks something up and changes nothing",
+        "reversible: it changes local or draft state that is easy to undo",
+        "consequential: it sends, publishes, deploys or changes shared state that is hard to undo",
+        "destructive: it deletes data, moves money, touches credentials or cannot be undone"
+       ]
+      }
+     },
+     "response": {
+      "model": "m",
+      "answers": {
+       "risk": {
+        "type": "score",
+        "score": 0.2,
+        "confidence": 0.6,
+        "probabilities": {
+         "0": 0.25,
+         "1": 0.25,
+         "2": 0.25,
+         "3": 0.25
+        },
+        "legend": {
+         "0": "harmless: it only reads or looks something up and changes nothing",
+         "1": "reversible: it changes local or draft state that is easy to undo",
+         "2": "consequential: it sends, publishes, deploys or changes shared state that is hard to undo",
+         "3": "destructive: it deletes data, moves money, touches credentials or cannot be undone"
+        }
+       }
+      }
+     }
+    }
+   ],
+   "want": {
+    "action": "allow",
+    "reason": "low risk",
+    "risk": 0.2,
+    "sure": true,
+    "calibrated": true,
+    "error": false
+   }
+  },
+  {
+   "name": "custom-role",
+   "options": {
+    "onError": "closed",
+    "role": "You guard a CI runner."
+   },
+   "input": {
+    "name": "delete_file",
+    "arguments": {
+     "path": "/tmp/report.txt"
+    }
+   },
+   "calls": [
+    {
+     "state": {
+      "tool_name": "delete_file",
+      "arguments": {
+       "path": "/tmp/report.txt"
+      },
+      "role": "You guard a CI runner."
+     },
+     "questions": {
+      "risk": {
+       "type": "score",
+       "instructions": "How risky is it to run the call described by `tool_name` with `arguments` without a human approving it?",
+       "criteria": [
+        "harmless: it only reads or looks something up and changes nothing",
+        "reversible: it changes local or draft state that is easy to undo",
+        "consequential: it sends, publishes, deploys or changes shared state that is hard to undo",
+        "destructive: it deletes data, moves money, touches credentials or cannot be undone"
+       ]
+      }
+     },
+     "response": {
+      "model": "m",
+      "answers": {
+       "risk": {
+        "type": "score",
+        "score": 0.4,
+        "confidence": 0.9,
+        "probabilities": {
+         "0": 0.25,
+         "1": 0.25,
+         "2": 0.25,
+         "3": 0.25
+        },
+        "legend": {
+         "0": "harmless: it only reads or looks something up and changes nothing",
+         "1": "reversible: it changes local or draft state that is easy to undo",
+         "2": "consequential: it sends, publishes, deploys or changes shared state that is hard to undo",
+         "3": "destructive: it deletes data, moves money, touches credentials or cannot be undone"
+        }
+       }
+      }
+     }
+    }
+   ],
+   "want": {
+    "action": "allow",
+    "reason": "low risk",
+    "risk": 0.4,
+    "sure": true,
+    "calibrated": true,
+    "error": false
+   }
+  }
+ ]
+}

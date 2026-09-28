@@ -308,6 +308,10 @@ type AfterToolEvent struct {
 type LLMOverride struct {
 	Messages []any
 	Tools    []any
+	// Model, when non-empty, is transmitted for THIS turn only (request body and
+	// the AfterLLM event). Empty ⇒ the configured model, verbatim (SPEC §8
+	// "Right-size routing"; an opt-in ModelRouterClassifier sets it).
+	Model string
 }
 
 // ToolOverride is returned by Hooks.BeforeTool / Hooks.AfterTool. In BeforeTool,
@@ -466,15 +470,15 @@ func (c *Client) emit(ev MetricEvent) {
 }
 
 // emitLLM emits an "llm" metric event for one model call.
-func (c *Client) emitLLM(status string, start time.Time, prompt, completion int) {
-	c.emit(MetricEvent{Event: "llm", Model: c.opts.Model, Status: status, Ms: msSince(start), PromptTokens: prompt, CompletionTokens: completion})
+func (c *Client) emitLLM(model, status string, start time.Time, prompt, completion int) {
+	c.emit(MetricEvent{Event: "llm", Model: model, Status: status, Ms: msSince(start), PromptTokens: prompt, CompletionTokens: completion})
 }
 
 // endRun emits the terminal (success) "run" metric event and builds the
 // RunResult. Mirrors js Client.endRun.
-func (c *Client) endRun(start time.Time, text string, messages []any, toolCalls []ToolCall, turns int, usage Usage) RunResult {
-	c.emit(MetricEvent{Event: "run", Model: c.opts.Model, Turns: turns, ToolCalls: len(toolCalls), TotalTokens: usage.TotalTokens, Ms: msSince(start)})
-	return c.result(text, messages, toolCalls, turns, usage)
+func (c *Client) endRun(model string, start time.Time, text string, messages []any, toolCalls []ToolCall, turns int, usage Usage) RunResult {
+	c.emit(MetricEvent{Event: "run", Model: model, Turns: turns, ToolCalls: len(toolCalls), TotalTokens: usage.TotalTokens, Ms: msSince(start)})
+	return c.result(model, text, messages, toolCalls, turns, usage)
 }
 
 // endRunExhausted is endRun for the maxTurns loop exit (§8 addendum): the turn
@@ -482,8 +486,8 @@ func (c *Client) endRun(start time.Time, text string, messages []any, toolCalls 
 // final text that is a LOUD "incomplete" naming the limit — never a silent
 // "done"; a capped turn that still produced text stays "done" with that text
 // (mirrors js: `exhausted && text === ""`).
-func (c *Client) endRunExhausted(start time.Time, text string, messages []any, toolCalls []ToolCall, turns int, usage Usage) RunResult {
-	res := c.endRun(start, text, messages, toolCalls, turns, usage)
+func (c *Client) endRunExhausted(model string, start time.Time, text string, messages []any, toolCalls []ToolCall, turns int, usage Usage) RunResult {
+	res := c.endRun(model, start, text, messages, toolCalls, turns, usage)
 	if text == "" {
 		res.Status = "incomplete"
 		res.Limit = "maxTurns"
@@ -493,12 +497,12 @@ func (c *Client) endRunExhausted(start time.Time, text string, messages []any, t
 
 // emitRunError emits the terminal "run" metric event for a failed run (once).
 // Mirrors js Client.emitRunError.
-func (c *Client) emitRunError(start time.Time, toolCalls []ToolCall, turns int, usage Usage, err error) {
+func (c *Client) emitRunError(model string, start time.Time, toolCalls []ToolCall, turns int, usage Usage, err error) {
 	msg := ""
 	if err != nil {
 		msg = err.Error()
 	}
-	c.emit(MetricEvent{Event: "run", Model: c.opts.Model, Turns: turns, ToolCalls: len(toolCalls), TotalTokens: usage.TotalTokens, Ms: msSince(start), Error: msg})
+	c.emit(MetricEvent{Event: "run", Model: model, Turns: turns, ToolCalls: len(toolCalls), TotalTokens: usage.TotalTokens, Ms: msSince(start), Error: msg})
 }
 
 // msSince returns milliseconds elapsed since start (integer, like js Date.now()).
@@ -586,8 +590,8 @@ func (c *Client) isRunTimeout(ctx context.Context, err error) bool {
 // The error still comes back non-nil, and it now NAMES THE BUDGET
 // (`run timeout after <n>ms`) instead of being indistinguishable from caller
 // cancellation.
-func (c *Client) timedOutRun(messages []any, toolCalls []ToolCall, turns int, usage Usage) (RunResult, error) {
-	res := c.result("", messages, toolCalls, turns, usage)
+func (c *Client) timedOutRun(model string, messages []any, toolCalls []ToolCall, turns int, usage Usage) (RunResult, error) {
+	res := c.result(model, "", messages, toolCalls, turns, usage)
 	res.Status = "incomplete"
 	res.Limit = "timeout"
 	return res, &RunTimeoutError{TimeoutMs: c.opts.TimeoutMs}
@@ -981,19 +985,21 @@ func (c *Client) runOpenAI(ctx context.Context, prompt any, tk *Toolkit, history
 	var usage Usage
 	turns := 0
 	runStart := time.Now()
+	lastModel := c.opts.Model // the model of the last call made (SPEC §8: reported = transmitted)
 	// Any error path emits the terminal "run" error event exactly once; success
 	// paths emit via endRun (so err is nil here and this is a no-op).
 	defer func() {
 		if err != nil {
-			c.emitRunError(runStart, toolCalls, turns, usage, err)
+			c.emitRunError(lastModel, runStart, toolCalls, turns, usage, err)
 			if c.isRunTimeout(ctx, err) {
-				res, err = c.timedOutRun(messages, toolCalls, turns, usage)
+				res, err = c.timedOutRun(lastModel, messages, toolCalls, turns, usage)
 			}
 		}
 	}()
 
 	for turn := 0; turn < c.maxTurns(); turn++ {
 		turns++
+		turnModel := c.opts.Model
 		if c.opts.Hooks != nil && c.opts.Hooks.BeforeLLM != nil {
 			ov, err := c.opts.Hooks.BeforeLLM(ctx, BeforeLLMEvent{Messages: messages, Tools: tools, Model: c.opts.Model, Turn: turn})
 			if err != nil {
@@ -1006,6 +1012,9 @@ func (c *Client) runOpenAI(ctx context.Context, prompt any, tk *Toolkit, history
 				if ov.Tools != nil {
 					tools = ov.Tools
 				}
+				if ov.Model != "" {
+					turnModel = ov.Model
+				}
 			}
 		}
 		wire, err := c.emitMessages(messages)
@@ -1013,7 +1022,7 @@ func (c *Client) runOpenAI(ctx context.Context, prompt any, tk *Toolkit, history
 			return RunResult{}, err
 		}
 		body := map[string]any{
-			"model":    c.opts.Model,
+			"model":    turnModel,
 			"messages": wire,
 		}
 		if len(tools) > 0 {
@@ -1022,9 +1031,10 @@ func (c *Client) runOpenAI(ctx context.Context, prompt any, tk *Toolkit, history
 		}
 		body = c.finalizeBody(body)
 		t0 := time.Now()
+		lastModel = turnModel
 		raw, err := c.postJSON(ctx, endpoint, map[string]string{"Authorization": "Bearer " + key}, body)
 		if err != nil {
-			c.emitLLM("error", t0, 0, 0)
+			c.emitLLM(turnModel, "error", t0, 0, 0)
 			return RunResult{}, err
 		}
 		var data struct {
@@ -1045,19 +1055,19 @@ func (c *Client) runOpenAI(ctx context.Context, prompt any, tk *Toolkit, history
 			Usage map[string]any `json:"usage"`
 		}
 		if err := json.Unmarshal(raw, &data); err != nil {
-			c.emitLLM("error", t0, 0, 0)
+			c.emitLLM(turnModel, "error", t0, 0, 0)
 			return RunResult{}, err
 		}
 		p, cp := perCall(data.Usage, string(StyleOpenAI))
-		c.emitLLM("ok", t0, p, cp)
+		c.emitLLM(turnModel, "ok", t0, p, cp)
 		addUsage(&usage, data.Usage, string(StyleOpenAI))
 		if c.opts.Hooks != nil && c.opts.Hooks.AfterLLM != nil {
-			if err := c.opts.Hooks.AfterLLM(ctx, AfterLLMEvent{Response: decodeResponse(raw), Model: c.opts.Model, Turn: turn}); err != nil {
+			if err := c.opts.Hooks.AfterLLM(ctx, AfterLLMEvent{Response: decodeResponse(raw), Model: turnModel, Turn: turn}); err != nil {
 				return RunResult{}, err
 			}
 		}
 		if len(data.Choices) == 0 {
-			return c.endRun(runStart, "", messages, toolCalls, turns, usage), nil
+			return c.endRun(lastModel, runStart, "", messages, toolCalls, turns, usage), nil
 		}
 		msg := data.Choices[0].Message
 
@@ -1080,7 +1090,7 @@ func (c *Client) runOpenAI(ctx context.Context, prompt any, tk *Toolkit, history
 		messages = append(messages, asst)
 
 		if len(msg.ToolCalls) == 0 {
-			return c.endRun(runStart, msg.Content, messages, toolCalls, turns, usage), nil
+			return c.endRun(lastModel, runStart, msg.Content, messages, toolCalls, turns, usage), nil
 		}
 
 		// Execute all tool calls in this turn concurrently (true parallel tool
@@ -1149,15 +1159,15 @@ func (c *Client) runOpenAI(ctx context.Context, prompt any, tk *Toolkit, history
 			toolCalls = append(toolCalls, records[i])
 			messages = append(messages, results[i])
 			if haltedAt[i] != nil {
-				return c.pendingRun(runStart, *haltedAt[i], messages, toolCalls, turns, usage), nil
+				return c.pendingRun(lastModel, runStart, *haltedAt[i], messages, toolCalls, turns, usage), nil
 			}
 		}
 	}
-	return c.endRunExhausted(runStart, lastText(messages), messages, toolCalls, turns, usage), nil
+	return c.endRunExhausted(lastModel, runStart, lastText(messages), messages, toolCalls, turns, usage), nil
 }
 
 // result assembles a RunResult, filling in the derived telemetry fields.
-func (c *Client) result(text string, messages []any, toolCalls []ToolCall, turns int, usage Usage) RunResult {
+func (c *Client) result(model, text string, messages []any, toolCalls []ToolCall, turns int, usage Usage) RunResult {
 	return RunResult{
 		Text:          text,
 		Messages:      messages,
@@ -1165,15 +1175,15 @@ func (c *Client) result(text string, messages []any, toolCalls []ToolCall, turns
 		ToolCallCount: len(toolCalls),
 		Turns:         turns,
 		Usage:         usage,
-		Model:         c.opts.Model,
+		Model:         model,
 		Status:        "done",
 	}
 }
 
 // pendingRun builds the terminal RunResult for a run that halted because a tool
 // suspended and no WaitFor was configured (§10). Mirrors js Client.pendingRun.
-func (c *Client) pendingRun(runStart time.Time, request Request, messages []any, toolCalls []ToolCall, turns int, usage Usage) RunResult {
-	c.emit(MetricEvent{Event: "run", Model: c.opts.Model, Turns: turns, ToolCalls: len(toolCalls), TotalTokens: usage.TotalTokens, Ms: msSince(runStart)})
+func (c *Client) pendingRun(model string, runStart time.Time, request Request, messages []any, toolCalls []ToolCall, turns int, usage Usage) RunResult {
+	c.emit(MetricEvent{Event: "run", Model: model, Turns: turns, ToolCalls: len(toolCalls), TotalTokens: usage.TotalTokens, Ms: msSince(runStart)})
 	req := request
 	return RunResult{
 		Text:          request.Prompt,
@@ -1182,7 +1192,7 @@ func (c *Client) pendingRun(runStart time.Time, request Request, messages []any,
 		ToolCallCount: len(toolCalls),
 		Turns:         turns,
 		Usage:         usage,
-		Model:         c.opts.Model,
+		Model:         model,
 		Status:        "pending",
 		Pending:       &req,
 	}
@@ -1256,11 +1266,12 @@ func (c *Client) runAnthropic(ctx context.Context, prompt any, tk *Toolkit, hist
 	var usage Usage
 	turns := 0
 	runStart := time.Now()
+	lastModel := c.opts.Model // the model of the last call made (SPEC §8: reported = transmitted)
 	defer func() {
 		if err != nil {
-			c.emitRunError(runStart, toolCalls, turns, usage, err)
+			c.emitRunError(lastModel, runStart, toolCalls, turns, usage, err)
 			if c.isRunTimeout(ctx, err) {
-				res, err = c.timedOutRun(messages, toolCalls, turns, usage)
+				res, err = c.timedOutRun(lastModel, messages, toolCalls, turns, usage)
 			}
 		}
 	}()
@@ -1272,6 +1283,7 @@ func (c *Client) runAnthropic(ctx context.Context, prompt any, tk *Toolkit, hist
 
 	for turn := 0; turn < c.maxTurns(); turn++ {
 		turns++
+		turnModel := c.opts.Model
 		if c.opts.Hooks != nil && c.opts.Hooks.BeforeLLM != nil {
 			ov, err := c.opts.Hooks.BeforeLLM(ctx, BeforeLLMEvent{Messages: messages, Tools: tools, Model: c.opts.Model, Turn: turn})
 			if err != nil {
@@ -1284,6 +1296,9 @@ func (c *Client) runAnthropic(ctx context.Context, prompt any, tk *Toolkit, hist
 				if ov.Tools != nil {
 					tools = ov.Tools
 				}
+				if ov.Model != "" {
+					turnModel = ov.Model
+				}
 			}
 		}
 		wire, err := c.emitMessages(messages)
@@ -1291,7 +1306,7 @@ func (c *Client) runAnthropic(ctx context.Context, prompt any, tk *Toolkit, hist
 			return RunResult{}, err
 		}
 		body := map[string]any{
-			"model":      c.opts.Model,
+			"model":      turnModel,
 			"max_tokens": 4096,
 			"messages":   wire,
 		}
@@ -1303,9 +1318,10 @@ func (c *Client) runAnthropic(ctx context.Context, prompt any, tk *Toolkit, hist
 		}
 		body = c.finalizeBody(body)
 		t0 := time.Now()
+		lastModel = turnModel
 		raw, err := c.postJSON(ctx, endpoint, headers, body)
 		if err != nil {
-			c.emitLLM("error", t0, 0, 0)
+			c.emitLLM(turnModel, "error", t0, 0, 0)
 			return RunResult{}, err
 		}
 		var data struct {
@@ -1319,14 +1335,14 @@ func (c *Client) runAnthropic(ctx context.Context, prompt any, tk *Toolkit, hist
 			Usage map[string]any `json:"usage"`
 		}
 		if err := json.Unmarshal(raw, &data); err != nil {
-			c.emitLLM("error", t0, 0, 0)
+			c.emitLLM(turnModel, "error", t0, 0, 0)
 			return RunResult{}, err
 		}
 		p, cp := perCall(data.Usage, string(StyleAnthropic))
-		c.emitLLM("ok", t0, p, cp)
+		c.emitLLM(turnModel, "ok", t0, p, cp)
 		addUsage(&usage, data.Usage, string(StyleAnthropic))
 		if c.opts.Hooks != nil && c.opts.Hooks.AfterLLM != nil {
-			if err := c.opts.Hooks.AfterLLM(ctx, AfterLLMEvent{Response: decodeResponse(raw), Model: c.opts.Model, Turn: turn}); err != nil {
+			if err := c.opts.Hooks.AfterLLM(ctx, AfterLLMEvent{Response: decodeResponse(raw), Model: turnModel, Turn: turn}); err != nil {
 				return RunResult{}, err
 			}
 		}
@@ -1361,7 +1377,7 @@ func (c *Client) runAnthropic(ctx context.Context, prompt any, tk *Toolkit, hist
 		messages = append(messages, map[string]any{"role": "assistant", "content": content})
 
 		if len(uses) == 0 {
-			return c.endRun(runStart, strings.Join(textParts, ""), messages, toolCalls, turns, usage), nil
+			return c.endRun(lastModel, runStart, strings.Join(textParts, ""), messages, toolCalls, turns, usage), nil
 		}
 
 		// Execute all tool_use blocks in this turn concurrently. Each block writes its
@@ -1441,10 +1457,10 @@ func (c *Client) runAnthropic(ctx context.Context, prompt any, tk *Toolkit, hist
 		}
 		messages = append(messages, map[string]any{"role": "user", "content": blocks})
 		if haltReq != nil {
-			return c.pendingRun(runStart, *haltReq, messages, toolCalls, turns, usage), nil
+			return c.pendingRun(lastModel, runStart, *haltReq, messages, toolCalls, turns, usage), nil
 		}
 	}
-	return c.endRunExhausted(runStart, "", messages, toolCalls, turns, usage), nil
+	return c.endRunExhausted(lastModel, runStart, "", messages, toolCalls, turns, usage), nil
 }
 
 // decodeResponse decodes a raw provider response body into a map for AfterLLM.
@@ -1566,9 +1582,10 @@ func (c *Client) streamOpenAI(ctx context.Context, prompt any, tk *Toolkit, hist
 	var usage Usage
 	turns := 0
 	runStart := time.Now()
+	lastModel := c.opts.Model // the model of the last call made (SPEC §8: reported = transmitted)
 	defer func() {
 		if err != nil {
-			c.emitRunError(runStart, toolCalls, turns, usage, err)
+			c.emitRunError(lastModel, runStart, toolCalls, turns, usage, err)
 			if c.isRunTimeout(ctx, err) {
 				// The streaming paths have no RunResult to populate here (the
 				// terminal one rides the channel), but the message must still
@@ -1580,6 +1597,7 @@ func (c *Client) streamOpenAI(ctx context.Context, prompt any, tk *Toolkit, hist
 
 	for turn := 0; turn < c.maxTurns(); turn++ {
 		turns++
+		turnModel := c.opts.Model
 		if c.opts.Hooks != nil && c.opts.Hooks.BeforeLLM != nil {
 			ov, err := c.opts.Hooks.BeforeLLM(ctx, BeforeLLMEvent{Messages: messages, Tools: tools, Model: c.opts.Model, Turn: turn})
 			if err != nil {
@@ -1592,6 +1610,9 @@ func (c *Client) streamOpenAI(ctx context.Context, prompt any, tk *Toolkit, hist
 				if ov.Tools != nil {
 					tools = ov.Tools
 				}
+				if ov.Model != "" {
+					turnModel = ov.Model
+				}
 			}
 		}
 		wire, err := c.emitMessages(messages)
@@ -1599,7 +1620,7 @@ func (c *Client) streamOpenAI(ctx context.Context, prompt any, tk *Toolkit, hist
 			return err
 		}
 		sbody := map[string]any{
-			"model":          c.opts.Model,
+			"model":          turnModel,
 			"messages":       wire,
 			"stream":         true,
 			"stream_options": map[string]any{"include_usage": true},
@@ -1613,17 +1634,18 @@ func (c *Client) streamOpenAI(ctx context.Context, prompt any, tk *Toolkit, hist
 			return err
 		}
 		t0 := time.Now()
+		lastModel = turnModel
 		beforeP, beforeC := usage.PromptTokens, usage.CompletionTokens
 		resp, err := c.llmFetch(ctx, endpoint, map[string]string{"Authorization": "Bearer " + key}, body)
 		if err != nil {
-			c.emitLLM("error", t0, 0, 0)
+			c.emitLLM(turnModel, "error", t0, 0, 0)
 			return err
 		}
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 			out, _ := io.ReadAll(resp.Body)
 			ra := resp.Header.Get("Retry-After")
 			resp.Body.Close()
-			c.emitLLM("error", t0, 0, 0)
+			c.emitLLM(turnModel, "error", t0, 0, 0)
 			return newProviderError(resp.StatusCode, out, ra)
 		}
 
@@ -1687,12 +1709,12 @@ func (c *Client) streamOpenAI(ctx context.Context, prompt any, tk *Toolkit, hist
 		})
 		resp.Body.Close()
 		if sErr != nil {
-			c.emitLLM("error", t0, 0, 0)
+			c.emitLLM(turnModel, "error", t0, 0, 0)
 			return sErr
 		}
-		c.emitLLM("ok", t0, usage.PromptTokens-beforeP, usage.CompletionTokens-beforeC)
+		c.emitLLM(turnModel, "ok", t0, usage.PromptTokens-beforeP, usage.CompletionTokens-beforeC)
 		if c.opts.Hooks != nil && c.opts.Hooks.AfterLLM != nil {
-			if err := c.opts.Hooks.AfterLLM(ctx, AfterLLMEvent{Response: map[string]any{"streamed": true}, Model: c.opts.Model, Turn: turn}); err != nil {
+			if err := c.opts.Hooks.AfterLLM(ctx, AfterLLMEvent{Response: map[string]any{"streamed": true}, Model: turnModel, Turn: turn}); err != nil {
 				return err
 			}
 		}
@@ -1706,7 +1728,7 @@ func (c *Client) streamOpenAI(ctx context.Context, prompt any, tk *Toolkit, hist
 			messages = append(messages, map[string]any{"role": "assistant", "content": text})
 			u := usage
 			ch <- StreamEvent{Type: "usage", Usage: &u}
-			res := c.endRun(runStart, text, messages, toolCalls, turns, usage)
+			res := c.endRun(lastModel, runStart, text, messages, toolCalls, turns, usage)
 			ch <- StreamEvent{Type: "done", Result: &res, Usage: &u}
 			return nil
 		}
@@ -1780,7 +1802,7 @@ func (c *Client) streamOpenAI(ctx context.Context, prompt any, tk *Toolkit, hist
 			toolCalls = append(toolCalls, records[i])
 			messages = append(messages, results[i])
 			if haltedAt[i] != nil {
-				res := c.pendingRun(runStart, *haltedAt[i], messages, toolCalls, turns, usage)
+				res := c.pendingRun(lastModel, runStart, *haltedAt[i], messages, toolCalls, turns, usage)
 				u := usage
 				ch <- StreamEvent{Type: "done", Result: &res, Usage: &u}
 				return nil
@@ -1788,7 +1810,7 @@ func (c *Client) streamOpenAI(ctx context.Context, prompt any, tk *Toolkit, hist
 			ch <- events[i]
 		}
 	}
-	res := c.endRunExhausted(runStart, lastText(messages), messages, toolCalls, turns, usage)
+	res := c.endRunExhausted(lastModel, runStart, lastText(messages), messages, toolCalls, turns, usage)
 	u := usage
 	ch <- StreamEvent{Type: "done", Result: &res, Usage: &u}
 	return nil
@@ -1833,9 +1855,10 @@ func (c *Client) streamAnthropic(ctx context.Context, prompt any, tk *Toolkit, h
 	var usage Usage
 	turns := 0
 	runStart := time.Now()
+	lastModel := c.opts.Model // the model of the last call made (SPEC §8: reported = transmitted)
 	defer func() {
 		if err != nil {
-			c.emitRunError(runStart, toolCalls, turns, usage, err)
+			c.emitRunError(lastModel, runStart, toolCalls, turns, usage, err)
 			if c.isRunTimeout(ctx, err) {
 				// The streaming paths have no RunResult to populate here (the
 				// terminal one rides the channel), but the message must still
@@ -1849,6 +1872,7 @@ func (c *Client) streamAnthropic(ctx context.Context, prompt any, tk *Toolkit, h
 
 	for turn := 0; turn < c.maxTurns(); turn++ {
 		turns++
+		turnModel := c.opts.Model
 		if c.opts.Hooks != nil && c.opts.Hooks.BeforeLLM != nil {
 			ov, err := c.opts.Hooks.BeforeLLM(ctx, BeforeLLMEvent{Messages: messages, Tools: tools, Model: c.opts.Model, Turn: turn})
 			if err != nil {
@@ -1861,6 +1885,9 @@ func (c *Client) streamAnthropic(ctx context.Context, prompt any, tk *Toolkit, h
 				if ov.Tools != nil {
 					tools = ov.Tools
 				}
+				if ov.Model != "" {
+					turnModel = ov.Model
+				}
 			}
 		}
 		wire, err := c.emitMessages(messages)
@@ -1868,7 +1895,7 @@ func (c *Client) streamAnthropic(ctx context.Context, prompt any, tk *Toolkit, h
 			return err
 		}
 		reqBody := map[string]any{
-			"model":      c.opts.Model,
+			"model":      turnModel,
 			"max_tokens": 4096,
 			"messages":   wire,
 			"stream":     true,
@@ -1884,17 +1911,18 @@ func (c *Client) streamAnthropic(ctx context.Context, prompt any, tk *Toolkit, h
 			return err
 		}
 		t0 := time.Now()
+		lastModel = turnModel
 		beforeP, beforeC := usage.PromptTokens, usage.CompletionTokens
 		resp, err := c.llmFetch(ctx, endpoint, headers, body)
 		if err != nil {
-			c.emitLLM("error", t0, 0, 0)
+			c.emitLLM(turnModel, "error", t0, 0, 0)
 			return err
 		}
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 			out, _ := io.ReadAll(resp.Body)
 			ra := resp.Header.Get("Retry-After")
 			resp.Body.Close()
-			c.emitLLM("error", t0, 0, 0)
+			c.emitLLM(turnModel, "error", t0, 0, 0)
 			return newProviderError(resp.StatusCode, out, ra)
 		}
 
@@ -1959,12 +1987,12 @@ func (c *Client) streamAnthropic(ctx context.Context, prompt any, tk *Toolkit, h
 		})
 		resp.Body.Close()
 		if sErr != nil {
-			c.emitLLM("error", t0, 0, 0)
+			c.emitLLM(turnModel, "error", t0, 0, 0)
 			return sErr
 		}
-		c.emitLLM("ok", t0, usage.PromptTokens-beforeP, usage.CompletionTokens-beforeC)
+		c.emitLLM(turnModel, "ok", t0, usage.PromptTokens-beforeP, usage.CompletionTokens-beforeC)
 		if c.opts.Hooks != nil && c.opts.Hooks.AfterLLM != nil {
-			if err := c.opts.Hooks.AfterLLM(ctx, AfterLLMEvent{Response: map[string]any{"streamed": true}, Model: c.opts.Model, Turn: turn}); err != nil {
+			if err := c.opts.Hooks.AfterLLM(ctx, AfterLLMEvent{Response: map[string]any{"streamed": true}, Model: turnModel, Turn: turn}); err != nil {
 				return err
 			}
 		}
@@ -1993,7 +2021,7 @@ func (c *Client) streamAnthropic(ctx context.Context, prompt any, tk *Toolkit, h
 			text := strings.Join(textParts, "")
 			u := usage
 			ch <- StreamEvent{Type: "usage", Usage: &u}
-			res := c.endRun(runStart, text, messages, toolCalls, turns, usage)
+			res := c.endRun(lastModel, runStart, text, messages, toolCalls, turns, usage)
 			ch <- StreamEvent{Type: "done", Result: &res, Usage: &u}
 			return nil
 		}
@@ -2056,7 +2084,7 @@ func (c *Client) streamAnthropic(ctx context.Context, prompt any, tk *Toolkit, h
 			resultBlocks = append(resultBlocks, results[i])
 			if haltedAt[i] != nil {
 				messages = append(messages, map[string]any{"role": "user", "content": resultBlocks})
-				res := c.pendingRun(runStart, *haltedAt[i], messages, toolCalls, turns, usage)
+				res := c.pendingRun(lastModel, runStart, *haltedAt[i], messages, toolCalls, turns, usage)
 				u := usage
 				ch <- StreamEvent{Type: "done", Result: &res, Usage: &u}
 				return nil
@@ -2065,7 +2093,7 @@ func (c *Client) streamAnthropic(ctx context.Context, prompt any, tk *Toolkit, h
 		}
 		messages = append(messages, map[string]any{"role": "user", "content": resultBlocks})
 	}
-	res := c.endRunExhausted(runStart, "", messages, toolCalls, turns, usage)
+	res := c.endRunExhausted(lastModel, runStart, "", messages, toolCalls, turns, usage)
 	u := usage
 	ch <- StreamEvent{Type: "done", Result: &res, Usage: &u}
 	return nil

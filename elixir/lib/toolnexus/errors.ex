@@ -218,3 +218,19 @@ defmodule Toolnexus.Status do
     def timeout, do: "timeout"
   end
 end
+
+defmodule Toolnexus.HookError do
+  @moduledoc """
+  A hook returned `{:error, reason}` (SPEC §8: a failing `before_llm` stops the call —
+  it propagates, and no provider request is sent). A hook that raises propagates its own
+  exception unchanged.
+  """
+  defexception [:hook, :reason, :message]
+
+  @impl true
+  def exception(opts) when is_list(opts) do
+    reason = opts[:reason]
+    text = if is_binary(reason), do: reason, else: inspect(reason)
+    %__MODULE__{hook: opts[:hook], reason: reason, message: "#{opts[:hook]} hook failed: #{text}"}
+  end
+end

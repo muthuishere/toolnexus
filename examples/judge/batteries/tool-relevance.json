@@ -1,0 +1,673 @@
+{
+ "note": "ToolRelevanceClassifier. select(prompt, items) -> selected/dropped (names, in input order). One noul per item keyed by its name. Only a confident no (p < low) drops an item; yes, uncertain and missing keep it. Error: onError open keeps all, closed keeps none. No items: no classifier call, both lists empty.",
+ "defaults": {
+  "role": "You decide which tools an AI agent needs for the user's request, so the tools it does not need can be left out."
+ },
+ "cases": [
+  {
+   "name": "drops-confident-no",
+   "options": {
+    "onError": "open"
+   },
+   "input": {
+    "prompt": "Summarise README.md and check the web for the latest release notes.",
+    "tools": [
+     {
+      "name": "read_file",
+      "description": "Reads a file from the workspace and returns its text."
+     },
+     {
+      "name": "send_email",
+      "description": "Sends an email to any address."
+     },
+     {
+      "name": "search_web",
+      "description": "Searches the public web and returns result snippets."
+     }
+    ]
+   },
+   "calls": [
+    {
+     "state": {
+      "user_request": "Summarise README.md and check the web for the latest release notes.",
+      "role": "You decide which tools an AI agent needs for the user's request, so the tools it does not need can be left out."
+     },
+     "questions": {
+      "read_file": {
+       "type": "noul",
+       "instructions": "Is the tool `read_file` needed for the request in `user_request`? The tool: Reads a file from the workspace and returns its text.",
+       "criteria": {
+        "true": "the request cannot be done well without this tool",
+        "false": "the request can be done without this tool"
+       }
+      },
+      "send_email": {
+       "type": "noul",
+       "instructions": "Is the tool `send_email` needed for the request in `user_request`? The tool: Sends an email to any address.",
+       "criteria": {
+        "true": "the request cannot be done well without this tool",
+        "false": "the request can be done without this tool"
+       }
+      },
+      "search_web": {
+       "type": "noul",
+       "instructions": "Is the tool `search_web` needed for the request in `user_request`? The tool: Searches the public web and returns result snippets.",
+       "criteria": {
+        "true": "the request cannot be done well without this tool",
+        "false": "the request can be done without this tool"
+       }
+      }
+     },
+     "response": {
+      "model": "m",
+      "answers": {
+       "read_file": {
+        "type": "noul",
+        "noul": 0.93
+       },
+       "send_email": {
+        "type": "noul",
+        "noul": 0.04
+       },
+       "search_web": {
+        "type": "noul",
+        "noul": 0.81
+       }
+      }
+     }
+    }
+   ],
+   "want": {
+    "selected": [
+     "read_file",
+     "search_web"
+    ],
+    "dropped": [
+     "send_email"
+    ],
+    "calibrated": true,
+    "error": false
+   }
+  },
+  {
+   "name": "uncertain-and-boundary-kept",
+   "options": {
+    "onError": "open"
+   },
+   "input": {
+    "prompt": "Summarise README.md and check the web for the latest release notes.",
+    "tools": [
+     {
+      "name": "read_file",
+      "description": "Reads a file from the workspace and returns its text."
+     },
+     {
+      "name": "send_email",
+      "description": "Sends an email to any address."
+     },
+     {
+      "name": "search_web",
+      "description": "Searches the public web and returns result snippets."
+     }
+    ]
+   },
+   "calls": [
+    {
+     "state": {
+      "user_request": "Summarise README.md and check the web for the latest release notes.",
+      "role": "You decide which tools an AI agent needs for the user's request, so the tools it does not need can be left out."
+     },
+     "questions": {
+      "read_file": {
+       "type": "noul",
+       "instructions": "Is the tool `read_file` needed for the request in `user_request`? The tool: Reads a file from the workspace and returns its text.",
+       "criteria": {
+        "true": "the request cannot be done well without this tool",
+        "false": "the request can be done without this tool"
+       }
+      },
+      "send_email": {
+       "type": "noul",
+       "instructions": "Is the tool `send_email` needed for the request in `user_request`? The tool: Sends an email to any address.",
+       "criteria": {
+        "true": "the request cannot be done well without this tool",
+        "false": "the request can be done without this tool"
+       }
+      },
+      "search_web": {
+       "type": "noul",
+       "instructions": "Is the tool `search_web` needed for the request in `user_request`? The tool: Searches the public web and returns result snippets.",
+       "criteria": {
+        "true": "the request cannot be done well without this tool",
+        "false": "the request can be done without this tool"
+       }
+      }
+     },
+     "response": {
+      "model": "m",
+      "answers": {
+       "read_file": {
+        "type": "noul",
+        "noul": 0.5
+       },
+       "send_email": {
+        "type": "noul",
+        "noul": 0.3
+       },
+       "search_web": {
+        "type": "noul",
+        "noul": 0.29
+       }
+      }
+     }
+    }
+   ],
+   "want": {
+    "selected": [
+     "read_file",
+     "send_email"
+    ],
+    "dropped": [
+     "search_web"
+    ],
+    "calibrated": true,
+    "error": false
+   }
+  },
+  {
+   "name": "missing-answer-kept",
+   "options": {
+    "onError": "open"
+   },
+   "input": {
+    "prompt": "Summarise README.md and check the web for the latest release notes.",
+    "tools": [
+     {
+      "name": "read_file",
+      "description": "Reads a file from the workspace and returns its text."
+     },
+     {
+      "name": "send_email",
+      "description": "Sends an email to any address."
+     },
+     {
+      "name": "search_web",
+      "description": "Searches the public web and returns result snippets."
+     }
+    ]
+   },
+   "calls": [
+    {
+     "state": {
+      "user_request": "Summarise README.md and check the web for the latest release notes.",
+      "role": "You decide which tools an AI agent needs for the user's request, so the tools it does not need can be left out."
+     },
+     "questions": {
+      "read_file": {
+       "type": "noul",
+       "instructions": "Is the tool `read_file` needed for the request in `user_request`? The tool: Reads a file from the workspace and returns its text.",
+       "criteria": {
+        "true": "the request cannot be done well without this tool",
+        "false": "the request can be done without this tool"
+       }
+      },
+      "send_email": {
+       "type": "noul",
+       "instructions": "Is the tool `send_email` needed for the request in `user_request`? The tool: Sends an email to any address.",
+       "criteria": {
+        "true": "the request cannot be done well without this tool",
+        "false": "the request can be done without this tool"
+       }
+      },
+      "search_web": {
+       "type": "noul",
+       "instructions": "Is the tool `search_web` needed for the request in `user_request`? The tool: Searches the public web and returns result snippets.",
+       "criteria": {
+        "true": "the request cannot be done well without this tool",
+        "false": "the request can be done without this tool"
+       }
+      }
+     },
+     "response": {
+      "model": "m",
+      "answers": {
+       "read_file": {
+        "type": "noul",
+        "noul": 0.9
+       },
+       "search_web": {
+        "type": "noul",
+        "noul": 0.1
+       }
+      }
+     }
+    }
+   ],
+   "want": {
+    "selected": [
+     "read_file",
+     "send_email"
+    ],
+    "dropped": [
+     "search_web"
+    ],
+    "calibrated": true,
+    "error": false
+   }
+  },
+  {
+   "name": "no-description",
+   "options": {
+    "onError": "open"
+   },
+   "input": {
+    "prompt": "list files",
+    "tools": [
+     {
+      "name": "ls",
+      "description": ""
+     }
+    ]
+   },
+   "calls": [
+    {
+     "state": {
+      "user_request": "list files",
+      "role": "You decide which tools an AI agent needs for the user's request, so the tools it does not need can be left out."
+     },
+     "questions": {
+      "ls": {
+       "type": "noul",
+       "instructions": "Is the tool `ls` needed for the request in `user_request`?",
+       "criteria": {
+        "true": "the request cannot be done well without this tool",
+        "false": "the request can be done without this tool"
+       }
+      }
+     },
+     "response": {
+      "model": "m",
+      "answers": {
+       "ls": {
+        "type": "noul",
+        "noul": 0.95
+       }
+      }
+     }
+    }
+   ],
+   "want": {
+    "selected": [
+     "ls"
+    ],
+    "dropped": [],
+    "calibrated": true,
+    "error": false
+   }
+  },
+  {
+   "name": "error-fail-open-keeps-all",
+   "options": {
+    "onError": "open"
+   },
+   "input": {
+    "prompt": "Summarise README.md and check the web for the latest release notes.",
+    "tools": [
+     {
+      "name": "read_file",
+      "description": "Reads a file from the workspace and returns its text."
+     },
+     {
+      "name": "send_email",
+      "description": "Sends an email to any address."
+     },
+     {
+      "name": "search_web",
+      "description": "Searches the public web and returns result snippets."
+     }
+    ]
+   },
+   "error": true,
+   "calls": [],
+   "want": {
+    "selected": [
+     "read_file",
+     "send_email",
+     "search_web"
+    ],
+    "dropped": [],
+    "calibrated": false,
+    "error": true
+   }
+  },
+  {
+   "name": "error-fail-closed-keeps-none",
+   "options": {
+    "onError": "closed"
+   },
+   "input": {
+    "prompt": "Summarise README.md and check the web for the latest release notes.",
+    "tools": [
+     {
+      "name": "read_file",
+      "description": "Reads a file from the workspace and returns its text."
+     },
+     {
+      "name": "send_email",
+      "description": "Sends an email to any address."
+     },
+     {
+      "name": "search_web",
+      "description": "Searches the public web and returns result snippets."
+     }
+    ]
+   },
+   "error": true,
+   "calls": [],
+   "want": {
+    "selected": [],
+    "dropped": [
+     "read_file",
+     "send_email",
+     "search_web"
+    ],
+    "calibrated": false,
+    "error": true
+   }
+  },
+  {
+   "name": "no-tools-no-call",
+   "options": {
+    "onError": "open"
+   },
+   "input": {
+    "prompt": "Summarise README.md and check the web for the latest release notes.",
+    "tools": []
+   },
+   "calls": [],
+   "want": {
+    "selected": [],
+    "dropped": [],
+    "calibrated": true,
+    "error": false
+   }
+  },
+  {
+   "name": "uncalibrated-reported",
+   "options": {
+    "onError": "open"
+   },
+   "input": {
+    "prompt": "Summarise README.md and check the web for the latest release notes.",
+    "tools": [
+     {
+      "name": "read_file",
+      "description": "Reads a file from the workspace and returns its text."
+     }
+    ]
+   },
+   "calls": [
+    {
+     "state": {
+      "user_request": "Summarise README.md and check the web for the latest release notes.",
+      "role": "You decide which tools an AI agent needs for the user's request, so the tools it does not need can be left out."
+     },
+     "questions": {
+      "read_file": {
+       "type": "noul",
+       "instructions": "Is the tool `read_file` needed for the request in `user_request`? The tool: Reads a file from the workspace and returns its text.",
+       "criteria": {
+        "true": "the request cannot be done well without this tool",
+        "false": "the request can be done without this tool"
+       }
+      }
+     },
+     "response": {
+      "model": "m",
+      "answers": {
+       "read_file": {
+        "type": "noul",
+        "noul": 0.9
+       }
+      },
+      "calibrated": false
+     }
+    }
+   ],
+   "want": {
+    "selected": [
+     "read_file"
+    ],
+    "dropped": [],
+    "calibrated": false,
+    "error": false
+   }
+  },
+  {
+   "name": "custom-bands",
+   "options": {
+    "onError": "open",
+    "bands": {
+     "low": 0.1,
+     "high": 0.9
+    }
+   },
+   "input": {
+    "prompt": "Summarise README.md and check the web for the latest release notes.",
+    "tools": [
+     {
+      "name": "read_file",
+      "description": "Reads a file from the workspace and returns its text."
+     },
+     {
+      "name": "send_email",
+      "description": "Sends an email to any address."
+     }
+    ]
+   },
+   "calls": [
+    {
+     "state": {
+      "user_request": "Summarise README.md and check the web for the latest release notes.",
+      "role": "You decide which tools an AI agent needs for the user's request, so the tools it does not need can be left out."
+     },
+     "questions": {
+      "read_file": {
+       "type": "noul",
+       "instructions": "Is the tool `read_file` needed for the request in `user_request`? The tool: Reads a file from the workspace and returns its text.",
+       "criteria": {
+        "true": "the request cannot be done well without this tool",
+        "false": "the request can be done without this tool"
+       }
+      },
+      "send_email": {
+       "type": "noul",
+       "instructions": "Is the tool `send_email` needed for the request in `user_request`? The tool: Sends an email to any address.",
+       "criteria": {
+        "true": "the request cannot be done well without this tool",
+        "false": "the request can be done without this tool"
+       }
+      }
+     },
+     "response": {
+      "model": "m",
+      "answers": {
+       "read_file": {
+        "type": "noul",
+        "noul": 0.9
+       },
+       "send_email": {
+        "type": "noul",
+        "noul": 0.15
+       }
+      }
+     }
+    }
+   ],
+   "want": {
+    "selected": [
+     "read_file",
+     "send_email"
+    ],
+    "dropped": [],
+    "calibrated": true,
+    "error": false
+   }
+  }
+ ],
+ "hookNote": "hookCases drive ToolRelevanceClassifier.asHook() with no next. event = the beforeLLM event (messages, tools as provider entries). A provider entry's absent or non-string name/description reads as \"\" (SPEC 8B). want.tools = indices of the kept provider entries (the override), or null for no tools override.",
+ "hookCases": [
+  {
+   "name": "nameless-provider-tool-is-empty-name",
+   "why": "A provider entry with no name must be judged under the key \"\" with an empty description, as js does. A port reading nil/null builds a different question (or key) and misses the corpus.",
+   "options": {
+    "onError": "open"
+   },
+   "event": {
+    "model": "m",
+    "turn": 0,
+    "messages": [
+     {
+      "role": "user",
+      "content": "list files"
+     }
+    ],
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "ls",
+       "description": "Lists files."
+      }
+     },
+     {
+      "type": "function",
+      "function": {
+       "parameters": {
+        "type": "object"
+       }
+      }
+     }
+    ]
+   },
+   "calls": [
+    {
+     "state": {
+      "user_request": "list files",
+      "role": "You decide which tools an AI agent needs for the user's request, so the tools it does not need can be left out."
+     },
+     "questions": {
+      "ls": {
+       "type": "noul",
+       "instructions": "Is the tool `ls` needed for the request in `user_request`? The tool: Lists files.",
+       "criteria": {
+        "true": "the request cannot be done well without this tool",
+        "false": "the request can be done without this tool"
+       }
+      },
+      "": {
+       "type": "noul",
+       "instructions": "Is the tool `` needed for the request in `user_request`?",
+       "criteria": {
+        "true": "the request cannot be done well without this tool",
+        "false": "the request can be done without this tool"
+       }
+      }
+     },
+     "response": {
+      "model": "m",
+      "answers": {
+       "ls": {
+        "type": "noul",
+        "noul": 0.95
+       },
+       "": {
+        "type": "noul",
+        "noul": 0.02
+       }
+      }
+     }
+    }
+   ],
+   "want": {
+    "tools": [
+     0
+    ]
+   }
+  },
+  {
+   "name": "non-string-name-and-description-read-as-empty",
+   "why": "An anthropic-style entry whose name and description are numbers must read as \"\" for both. A port that stringifies (5 -> \"5\") keys the question \"5\" and appends \"The tool: 7\", missing the corpus.",
+   "options": {
+    "onError": "open"
+   },
+   "event": {
+    "model": "m",
+    "turn": 0,
+    "messages": [
+     {
+      "role": "user",
+      "content": "list files"
+     }
+    ],
+    "tools": [
+     {
+      "name": "ls",
+      "description": "Lists files."
+     },
+     {
+      "name": 5,
+      "description": 7,
+      "input_schema": {
+       "type": "object"
+      }
+     }
+    ]
+   },
+   "calls": [
+    {
+     "state": {
+      "user_request": "list files",
+      "role": "You decide which tools an AI agent needs for the user's request, so the tools it does not need can be left out."
+     },
+     "questions": {
+      "ls": {
+       "type": "noul",
+       "instructions": "Is the tool `ls` needed for the request in `user_request`? The tool: Lists files.",
+       "criteria": {
+        "true": "the request cannot be done well without this tool",
+        "false": "the request can be done without this tool"
+       }
+      },
+      "": {
+       "type": "noul",
+       "instructions": "Is the tool `` needed for the request in `user_request`?",
+       "criteria": {
+        "true": "the request cannot be done well without this tool",
+        "false": "the request can be done without this tool"
+       }
+      }
+     },
+     "response": {
+      "model": "m",
+      "answers": {
+       "ls": {
+        "type": "noul",
+        "noul": 0.95
+       },
+       "": {
+        "type": "noul",
+        "noul": 0.02
+       }
+      }
+     }
+    }
+   ],
+   "want": {
+    "tools": [
+     0
+    ]
+   }
+  }
+ ]
+}

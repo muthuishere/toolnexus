@@ -39,6 +39,7 @@
             [koine.http :as http]
             [koine.json :as json]
             [koine.server :as server]
+            [toolnexus.test-support :as ts]
             [toolnexus.mcp :as mcp]))
 
 ;; ---------------------------------------------------------------------------
@@ -161,7 +162,7 @@
 (def ^:private ctx (atom {}))
 
 (defn- with-peer [f]
-  (let [h (server/serve handler {:port 0})]
+  (let [h (ts/serve handler {:port 0})]
     (reset! ctx {:handle h :base (str "http://127.0.0.1:" (server/port h))})
     (try (f) (finally (server/stop! h)))))
 

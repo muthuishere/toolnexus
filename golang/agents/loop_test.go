@@ -16,7 +16,10 @@ import (
 	"github.com/muthuishere/toolnexus/golang/agents"
 )
 
-type scripted struct{ replies []map[string]any; n int }
+type scripted struct {
+	replies []map[string]any
+	n       int
+}
 
 func (s *scripted) RoundTrip(_ *http.Request) (*http.Response, error) {
 	msg := s.replies[min(s.n, len(s.replies)-1)]
@@ -28,7 +31,12 @@ func (s *scripted) RoundTrip(_ *http.Request) (*http.Response, error) {
 	return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(string(body))),
 		Header: http.Header{"Content-Type": []string{"application/json"}}}, nil
 }
-func min(a, b int) int { if a < b { return a }; return b }
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
 
 // modelRec is `scripted` plus a record of the `model` each request carried, so a
 // test can assert what actually reached the wire rather than what was configured.
@@ -56,7 +64,6 @@ func (m *modelRec) RoundTrip(req *http.Request) (*http.Response, error) {
 	return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(string(body))),
 		Header: http.Header{"Content-Type": []string{"application/json"}}}, nil
 }
-
 
 func text(s string) map[string]any { return map[string]any{"role": "assistant", "content": s} }
 func callTodo(todos []any) map[string]any {
@@ -92,7 +99,9 @@ func todoToolkit(t *testing.T) *tn.Toolkit {
 	tk, err := tn.CreateToolkit(nil, tn.Options{Builtins: tn.BuiltinsConfig{Tools: map[string]bool{
 		"todowrite": true, "bash": false, "read": false, "write": false, "edit": false,
 		"glob": false, "grep": false, "webfetch": false, "apply_patch": false, "question": false}}})
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	return tk
 }
 
@@ -102,7 +111,9 @@ func TestLoopWithoutCompletionIsUnchanged(t *testing.T) {
 	tk, _ := tn.CreateToolkit(nil, tn.Options{Builtins: false})
 	l := a.Loop(clientWith(&scripted{replies: []map[string]any{text("hi")}}), tk)
 	out, err := l.Run(context.Background(), "hello", agents.RunOpts{})
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	if out.Status != "done" || out.Attempts != 1 || out.StoppedBy != "" {
 		t.Fatalf("got status=%s attempts=%d stoppedBy=%q", out.Status, out.Attempts, out.StoppedBy)
 	}
@@ -120,9 +131,15 @@ func TestCompletionGateBlocksThenPasses(t *testing.T) {
 	a := agents.New("worker", agents.Spec{Does: "works",
 		Completion: &agents.Completion{Verify: agents.AllTodosDone, MaxAttempts: 3}})
 	out, err := a.Loop(clientWith(rt), todoToolkit(t)).Run(context.Background(), "do it", agents.RunOpts{})
-	if err != nil { t.Fatal(err) }
-	if out.Status != "done" { t.Fatalf("status=%s stoppedBy=%q", out.Status, out.StoppedBy) }
-	if out.Attempts != 2 { t.Fatalf("expected the gate to force a 2nd attempt, got %d", out.Attempts) }
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Status != "done" {
+		t.Fatalf("status=%s stoppedBy=%q", out.Status, out.StoppedBy)
+	}
+	if out.Attempts != 2 {
+		t.Fatalf("expected the gate to force a 2nd attempt, got %d", out.Attempts)
+	}
 }
 
 // A gate that can never pass stops BOUNDED and NAMED — never a silent done.
@@ -133,9 +150,15 @@ func TestCompletionGateStopsLoudly(t *testing.T) {
 	a := agents.New("worker", agents.Spec{Does: "works",
 		Completion: &agents.Completion{Verify: agents.AllTodosDone, MaxAttempts: 2}})
 	out, err := a.Loop(clientWith(rt), todoToolkit(t)).Run(context.Background(), "do it", agents.RunOpts{})
-	if err != nil { t.Fatal(err) }
-	if out.Status != "incomplete" { t.Fatalf("status=%s", out.Status) }
-	if out.Attempts != 2 { t.Fatalf("attempts=%d, want 2", out.Attempts) }
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Status != "incomplete" {
+		t.Fatalf("status=%s", out.Status)
+	}
+	if out.Attempts != 2 {
+		t.Fatalf("attempts=%d, want 2", out.Attempts)
+	}
 	if !strings.Contains(out.StoppedBy, "failed 2×") || !strings.Contains(out.StoppedBy, "never") {
 		t.Fatalf("stop reason not named: %q", out.StoppedBy)
 	}
@@ -160,7 +183,9 @@ func TestNoPlanPasses(t *testing.T) {
 	tk, _ := tn.CreateToolkit(nil, tn.Options{Builtins: false})
 	out, err := a.Loop(clientWith(&scripted{replies: []map[string]any{text("no plan here")}}), tk).
 		Run(context.Background(), "go", agents.RunOpts{})
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	if out.Status != "done" || out.Attempts != 1 {
 		t.Fatalf("status=%s attempts=%d", out.Status, out.Attempts)
 	}
@@ -186,14 +211,18 @@ func TestGuardrailFirstDenyWins(t *testing.T) {
 		t.Fatal("guardrails did not reach the registry Def — delegation would bypass them")
 	}
 	ov, err := def.Hooks.BeforeTool(context.Background(), tn.BeforeToolEvent{Name: "deploy"})
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	if ov == nil || ov.Result == nil || !ov.Result.IsError {
 		t.Fatal("expected a denial short-circuit")
 	}
 	if !strings.Contains(ov.Result.Output, "blocked by policy") {
 		t.Fatalf("wrong denial surfaced: %q", ov.Result.Output)
 	}
-	if executed { t.Fatal("the tool executed despite the denial") }
+	if executed {
+		t.Fatal("the tool executed despite the denial")
+	}
 }
 
 // THE point of putting Completion on the agent: a DELEGATED child inherits its
@@ -211,7 +240,9 @@ func TestCompletionGateReachesDelegatedChild(t *testing.T) {
 		LLM: &agents.LLMOptions{BaseURL: "http://mock/v1", Style: tn.StyleOpenAI, APIKey: "x", Model: "m"},
 	})
 	h, err := r.Spawn(r.Root, "child", nil)
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	r.Wake(h, "do the work")
 	res := r.Wait(h, 0)
 	defer r.Close(h, nil)
@@ -287,7 +318,9 @@ func TestSuspensionIsNotReJudgedByTheGate(t *testing.T) {
 	h, _ := r.Spawn(r.Root, "child", nil)
 	r.Wake(h, "go")
 	res := r.Wait(h, 0)
-	if !asked { t.Fatal("the suspending tool never ran") }
+	if !asked {
+		t.Fatal("the suspending tool never ran")
+	}
 	if res.Status != "pending" {
 		t.Fatalf("status=%s, want pending — the gate re-judged a suspension; text=%q", res.Status, res.Text)
 	}
@@ -326,8 +359,12 @@ func TestRunOptsModelReachesTheWire(t *testing.T) {
 	l := a.Loop(tn.ClientOptions{BaseURL: "http://mock/v1", Style: tn.StyleOpenAI,
 		Model: "default-model", APIKey: "x", HTTPClient: &http.Client{Transport: rec}}, tk)
 
-	if _, err := l.Run(context.Background(), "a", agents.RunOpts{}); err != nil { t.Fatal(err) }
-	if _, err := l.Run(context.Background(), "b", agents.RunOpts{Model: "per-run-model"}); err != nil { t.Fatal(err) }
+	if _, err := l.Run(context.Background(), "a", agents.RunOpts{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := l.Run(context.Background(), "b", agents.RunOpts{Model: "per-run-model"}); err != nil {
+		t.Fatal(err)
+	}
 
 	if len(rec.models) != 2 || rec.models[0] != "default-model" || rec.models[1] != "per-run-model" {
 		t.Fatalf("models on the wire = %v; want [default-model per-run-model]", rec.models)
@@ -338,7 +375,9 @@ func TestRunOptsModelReachesTheWire(t *testing.T) {
 // learn BOTH reasons — otherwise the budget stop masks the verification failure.
 func TestBudgetStopCarriesTheVerificationReason(t *testing.T) {
 	rec := &modelRec{reply: func(n int) map[string]any {
-		if n == 1 { return callTodo([]any{todo("1", "never", false)}) }
+		if n == 1 {
+			return callTodo([]any{todo("1", "never", false)})
+		}
 		return text("claiming done")
 	}}
 	tw := todowriteTool(t)
@@ -351,7 +390,9 @@ func TestBudgetStopCarriesTheVerificationReason(t *testing.T) {
 	res := r.Wait(h, 0)
 	defer r.Close(h, nil)
 
-	if res.Status == "done" { t.Fatal("silently done despite an open todo") }
+	if res.Status == "done" {
+		t.Fatal("silently done despite an open todo")
+	}
 	// The caller must be told the reason that ACTUALLY stopped the run. Before
 	// the Limit field was threaded, the runtime hardcoded "hit maxTurns without a
 	// final answer" for every incomplete — masking a completion-gate stop behind

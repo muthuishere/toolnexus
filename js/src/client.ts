@@ -240,9 +240,26 @@ function delay(ms: number, signal: AbortSignal): Promise<void> {
  * Lifecycle hooks around the agent loop. Each may observe, and (where noted)
  * mutate or short-circuit. All may be async.
  */
+/** The `beforeLLM` hook event. */
+export interface BeforeLLMEvent {
+  messages: any[]
+  tools: any[]
+  model: string
+  turn: number
+}
+
+/** What a `beforeLLM` hook may return. `model` (non-empty) applies to that turn only. */
+export interface LLMOverride {
+  messages?: any[]
+  tools?: any[]
+  model?: string | null
+}
+
 export interface Hooks {
-  /** Before each model call. Return { messages?, tools? } to replace them. */
-  beforeLLM?(ev: { messages: any[]; tools: any[]; model: string; turn: number }): void | { messages?: any[]; tools?: any[] } | Promise<void | { messages?: any[]; tools?: any[] }>
+  /** Before each model call. Return { messages?, tools? } to replace them, and { model } to send a
+   * different model for THIS turn only (request body + afterLLM event); absent/null/empty keeps the
+   * configured model verbatim (SPEC §8, e.g. a ModelRouterClassifier). */
+  beforeLLM?(ev: BeforeLLMEvent): void | LLMOverride | Promise<void | LLMOverride>
   /** After each model call (observe: logging, cost, tracing). */
   afterLLM?(ev: { response: any; model: string; turn: number }): void | Promise<void>
   /** Before a tool runs. Return { result } to SHORT-CIRCUIT (deny/cache), { args } to rewrite. */
@@ -476,8 +493,8 @@ export class Client {
 
   /** §8 Gap 5. OpenAI-style body; omits tools/tool_choice when the tool list is empty. Key order
    * matches the pre-change body so a no-options call is byte-identical. */
-  private openaiBody(messages: any[], tools: any[], stream: boolean): Record<string, any> {
-    const b: Record<string, any> = { model: this.opts.model, messages: toOpenAIWire(messages, this.wireOpts()) }
+  private openaiBody(messages: any[], tools: any[], stream: boolean, model: string = this.opts.model): Record<string, any> {
+    const b: Record<string, any> = { model, messages: toOpenAIWire(messages, this.wireOpts()) }
     if (tools.length) {
       b.tools = tools
       b.tool_choice = "auto"
@@ -490,8 +507,8 @@ export class Client {
   }
 
   /** §8 Gap 5. Anthropic-style body; omits tools when the tool list is empty. */
-  private anthropicBody(system: string, messages: any[], tools: any[], stream: boolean): Record<string, any> {
-    const b: Record<string, any> = { model: this.opts.model, max_tokens: 4096, system, messages: toAnthropicWire(messages, this.wireOpts()) }
+  private anthropicBody(system: string, messages: any[], tools: any[], stream: boolean, model: string = this.opts.model): Record<string, any> {
+    const b: Record<string, any> = { model, max_tokens: 4096, system, messages: toAnthropicWire(messages, this.wireOpts()) }
     if (tools.length) b.tools = tools
     if (stream) b.stream = true
     return this.finalizeBody(b)
@@ -515,14 +532,14 @@ export class Client {
 
   /** Emit the terminal `run` metric event and build the RunResult. `exhausted` marks a
    * maxTurns loop exit — with no final text that is a LOUD "incomplete", never "done" (§7D). */
-  private endRun(runStart: number, text: string, messages: any[], toolCalls: ToolCallRecord[], turns: number, usage: Usage, exhausted = false): RunResult {
-    this.emit({ event: "run", model: this.opts.model, turns, toolCalls: toolCalls.length, totalTokens: usage.totalTokens, ms: Date.now() - runStart })
-    return this.result(text, messages, toolCalls, turns, usage, exhausted)
+  private endRun(runStart: number, model: string, text: string, messages: any[], toolCalls: ToolCallRecord[], turns: number, usage: Usage, exhausted = false): RunResult {
+    this.emit({ event: "run", model, turns, toolCalls: toolCalls.length, totalTokens: usage.totalTokens, ms: Date.now() - runStart })
+    return this.result(model, text, messages, toolCalls, turns, usage, exhausted)
   }
 
   /** Emit a `run` error metric event (once, on a thrown run). */
-  private emitRunError(runStart: number, toolCalls: ToolCallRecord[], turns: number, usage: Usage, e: unknown): void {
-    this.emit({ event: "run", model: this.opts.model, turns, toolCalls: toolCalls.length, totalTokens: usage.totalTokens, ms: Date.now() - runStart, error: e instanceof Error ? e.message : String(e) })
+  private emitRunError(runStart: number, model: string, toolCalls: ToolCallRecord[], turns: number, usage: Usage, e: unknown): void {
+    this.emit({ event: "run", model, turns, toolCalls: toolCalls.length, totalTokens: usage.totalTokens, ms: Date.now() - runStart, error: e instanceof Error ? e.message : String(e) })
   }
 
   /**
@@ -563,13 +580,15 @@ export class Client {
     if (sys && !hasSystemMessage(messages)) messages = [{ role: "system", content: sys }, ...messages]
 
     let tools = declared
+    let turnModel = this.opts.model
     if (this.opts.hooks?.beforeLLM) {
       const ov = await this.opts.hooks.beforeLLM({ messages, tools, model: this.opts.model, turn: 0 })
       if (ov?.messages) messages = ov.messages
       if (ov?.tools) tools = ov.tools
+      if (ov?.model) turnModel = ov.model
     }
 
-    const body: Record<string, any> = { model: this.opts.model, messages }
+    const body: Record<string, any> = { model: turnModel, messages }
     if (tools.length) body.tools = tools
     if (req.toolChoice !== undefined) body.tool_choice = req.toolChoice
     if (req.maxTokens) body.max_tokens = req.maxTokens
@@ -585,8 +604,9 @@ export class Client {
         },
         signal,
         "openai",
+        turnModel,
       )
-      if (this.opts.hooks?.afterLLM) await this.opts.hooks.afterLLM({ response: data, model: this.opts.model, turn: 0 })
+      if (this.opts.hooks?.afterLLM) await this.opts.hooks.afterLLM({ response: data, model: turnModel, turn: 0 })
       const usage: Usage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 }
       addUsage(usage, data.usage, "openai")
       const choice = data.choices?.[0]
@@ -600,7 +620,7 @@ export class Client {
         toolCalls,
         finishReason: choice?.finish_reason ?? finishReasonFor(toolCalls.length > 0),
         usage,
-        model: this.opts.model,
+        model: turnModel,
         raw: data,
       }
     } finally {
@@ -622,14 +642,16 @@ export class Client {
       ...openAIToolsToAnthropic(req.tools),
     ]
 
+    let turnModel = this.opts.model
     if (this.opts.hooks?.beforeLLM) {
       const ov = await this.opts.hooks.beforeLLM({ messages, tools, model: this.opts.model, turn: 0 })
       if (ov?.messages) messages = ov.messages
       if (ov?.tools) tools = ov.tools
+      if (ov?.model) turnModel = ov.model
     }
 
     const body: Record<string, any> = {
-      model: this.opts.model,
+      model: turnModel,
       max_tokens: req.maxTokens && req.maxTokens > 0 ? req.maxTokens : 4096,
       messages,
     }
@@ -654,8 +676,9 @@ export class Client {
         },
         signal,
         "anthropic",
+        turnModel,
       )
-      if (this.opts.hooks?.afterLLM) await this.opts.hooks.afterLLM({ response: data, model: this.opts.model, turn: 0 })
+      if (this.opts.hooks?.afterLLM) await this.opts.hooks.afterLLM({ response: data, model: turnModel, turn: 0 })
       const usage: Usage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 }
       addUsage(usage, data.usage, "anthropic")
       const text: string[] = []
@@ -675,7 +698,7 @@ export class Client {
         toolCalls,
         finishReason: finishReasonFor(toolCalls.length > 0, data.stop_reason),
         usage,
-        model: this.opts.model,
+        model: turnModel,
         raw: data,
       }
     } finally {
@@ -848,17 +871,17 @@ export class Client {
   }
 
   /** One non-streaming LLM call, with an `llm` metric event (ok/error + per-call tokens + ms). */
-  private async llmCallJson(url: string, init: RequestInit, signal: AbortSignal, style: ClientStyle): Promise<any> {
+  private async llmCallJson(url: string, init: RequestInit, signal: AbortSignal, style: ClientStyle, model: string): Promise<any> {
     const t0 = Date.now()
     try {
       const res = await this.llmFetch(url, init, signal)
       if (!res.ok) throw await llmHttpError(res)
       const data: any = await res.json()
       const tok = perCall(data.usage, style)
-      this.emit({ event: "llm", model: this.opts.model, status: "ok", ms: Date.now() - t0, promptTokens: tok.prompt, completionTokens: tok.completion })
+      this.emit({ event: "llm", model, status: "ok", ms: Date.now() - t0, promptTokens: tok.prompt, completionTokens: tok.completion })
       return data
     } catch (e) {
-      this.emit({ event: "llm", model: this.opts.model, status: "error", ms: Date.now() - t0, promptTokens: 0, completionTokens: 0 })
+      this.emit({ event: "llm", model, status: "error", ms: Date.now() - t0, promptTokens: 0, completionTokens: 0 })
       throw e
     }
   }
@@ -915,26 +938,31 @@ export class Client {
     const toolCalls: ToolCallRecord[] = []
     const usage: Usage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 }
     let turns = 0
+    // The model of the last call this run made (a beforeLLM override when one applied) — §8.
+    let lastModel = this.opts.model
 
     try {
       for (let turn = 0; turn < (this.opts.maxTurns ?? 10); turn++) {
         turns++
+        let turnModel = this.opts.model
         if (this.opts.hooks?.beforeLLM) {
           const ov = await this.opts.hooks.beforeLLM({ messages, tools, model: this.opts.model, turn })
           if (ov?.messages) messages = ov.messages
           if (ov?.tools) tools = ov.tools
+          if (ov?.model) turnModel = ov.model
         }
+        lastModel = turnModel
         const data: any = await this.llmCallJson(`${this.opts.baseUrl.replace(/\/$/, "")}/chat/completions`, {
           method: "POST",
           headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json", ...this.opts.headers },
-          body: JSON.stringify(this.openaiBody(messages, tools, false)),
-        }, signal, "openai")
+          body: JSON.stringify(this.openaiBody(messages, tools, false, turnModel)),
+        }, signal, "openai", turnModel)
         addUsage(usage, data.usage, "openai")
-        if (this.opts.hooks?.afterLLM) await this.opts.hooks.afterLLM({ response: data, model: this.opts.model, turn })
+        if (this.opts.hooks?.afterLLM) await this.opts.hooks.afterLLM({ response: data, model: turnModel, turn })
         const msg = data.choices[0].message
         messages.push(msg)
         const calls = msg.tool_calls ?? []
-        if (calls.length === 0) return this.endRun(runStart, msg.content ?? "", messages, toolCalls, turns, usage)
+        if (calls.length === 0) return this.endRun(runStart, lastModel, msg.content ?? "", messages, toolCalls, turns, usage)
         // execute all tool calls in this turn concurrently (true parallel tool calling)
         const settled = await Promise.all(
           calls.map(async (call: any) => {
@@ -955,27 +983,27 @@ export class Client {
         for (const s of settled) {
           toolCalls.push({ name: s.call.function.name, args: s.args, output: s.result.output, isError: s.result.isError, metadata: s.result.metadata })
           messages.push(toolMessage(s.call.id, s.call.function.name, s.result))
-          if (s.halted) return this.pendingRun(runStart, s.halted, messages, toolCalls, turns, usage)
+          if (s.halted) return this.pendingRun(runStart, lastModel, s.halted, messages, toolCalls, turns, usage)
         }
       }
-      return this.endRun(runStart, lastText(messages), messages, toolCalls, turns, usage, true)
+      return this.endRun(runStart, lastModel, lastText(messages), messages, toolCalls, turns, usage, true)
     } catch (e) {
-      this.emitRunError(runStart, toolCalls, turns, usage, e)
+      this.emitRunError(runStart, lastModel, toolCalls, turns, usage, e)
       throw e
     }
   }
 
-  private result(text: string, messages: any[], toolCalls: ToolCallRecord[], turns: number, usage: Usage, exhausted = false): RunResult {
+  private result(model: string, text: string, messages: any[], toolCalls: ToolCallRecord[], turns: number, usage: Usage, exhausted = false): RunResult {
     const incomplete = exhausted && text === ""
-    const r: RunResult = { text, messages, toolCalls, toolCallCount: toolCalls.length, turns, usage, model: this.opts.model, status: incomplete ? "incomplete" : "done" }
+    const r: RunResult = { text, messages, toolCalls, toolCallCount: toolCalls.length, turns, usage, model, status: incomplete ? "incomplete" : "done" }
     if (incomplete) r.limit = "maxTurns"
     return r
   }
 
   /** §10: a run halted because a tool suspended and no `waitFor` was configured. */
-  private pendingRun(runStart: number, request: Request, messages: any[], toolCalls: ToolCallRecord[], turns: number, usage: Usage): RunResult {
-    this.emit({ event: "run", model: this.opts.model, turns, toolCalls: toolCalls.length, totalTokens: usage.totalTokens, ms: Date.now() - runStart })
-    return { text: request.prompt, messages, toolCalls, toolCallCount: toolCalls.length, turns, usage, model: this.opts.model, status: "pending", pending: request }
+  private pendingRun(runStart: number, model: string, request: Request, messages: any[], toolCalls: ToolCallRecord[], turns: number, usage: Usage): RunResult {
+    this.emit({ event: "run", model, turns, toolCalls: toolCalls.length, totalTokens: usage.totalTokens, ms: Date.now() - runStart })
+    return { text: request.prompt, messages, toolCalls, toolCallCount: toolCalls.length, turns, usage, model, status: "pending", pending: request }
   }
 
   /**
@@ -1014,15 +1042,20 @@ export class Client {
     const toolCalls: ToolCallRecord[] = []
     const usage: Usage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 }
     let turns = 0
+    // The model of the last call this run made (a beforeLLM override when one applied) — §8.
+    let lastModel = this.opts.model
 
     try {
       for (let turn = 0; turn < (this.opts.maxTurns ?? 10); turn++) {
         turns++
+        let turnModel = this.opts.model
         if (this.opts.hooks?.beforeLLM) {
           const ov = await this.opts.hooks.beforeLLM({ messages, tools, model: this.opts.model, turn })
           if (ov?.messages) messages = ov.messages
           if (ov?.tools) tools = ov.tools
+          if (ov?.model) turnModel = ov.model
         }
+        lastModel = turnModel
         const data: any = await this.llmCallJson(endpoint, {
           method: "POST",
           headers: {
@@ -1031,15 +1064,15 @@ export class Client {
             "Content-Type": "application/json",
             ...this.opts.headers,
           },
-          body: JSON.stringify(this.anthropicBody(system, messages, tools, false)),
-        }, signal, "anthropic")
+          body: JSON.stringify(this.anthropicBody(system, messages, tools, false, turnModel)),
+        }, signal, "anthropic", turnModel)
         addUsage(usage, data.usage, "anthropic")
-        if (this.opts.hooks?.afterLLM) await this.opts.hooks.afterLLM({ response: data, model: this.opts.model, turn })
+        if (this.opts.hooks?.afterLLM) await this.opts.hooks.afterLLM({ response: data, model: turnModel, turn })
         messages.push({ role: "assistant", content: data.content })
         const uses = (data.content ?? []).filter((b: any) => b.type === "tool_use")
         if (uses.length === 0) {
           const text = (data.content ?? []).filter((b: any) => b.type === "text").map((b: any) => b.text).join("")
-          return this.endRun(runStart, text, messages, toolCalls, turns, usage)
+          return this.endRun(runStart, lastModel, text, messages, toolCalls, turns, usage)
         }
         // execute all tool_use blocks in this turn concurrently (true parallel tool calling)
         const settled = await Promise.all(
@@ -1066,11 +1099,11 @@ export class Client {
           if (s.halted) { halted = s.halted; break }
         }
         messages.push({ role: "user", content })
-        if (halted) return this.pendingRun(runStart, halted, messages, toolCalls, turns, usage)
+        if (halted) return this.pendingRun(runStart, lastModel, halted, messages, toolCalls, turns, usage)
       }
-      return this.endRun(runStart, "", messages, toolCalls, turns, usage, true)
+      return this.endRun(runStart, lastModel, "", messages, toolCalls, turns, usage, true)
     } catch (e) {
-      this.emitRunError(runStart, toolCalls, turns, usage, e)
+      this.emitRunError(runStart, lastModel, toolCalls, turns, usage, e)
       throw e
     }
   }
@@ -1089,15 +1122,20 @@ export class Client {
     const toolCalls: ToolCallRecord[] = []
     const usage: Usage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 }
     let turns = 0
+    // The model of the last call this run made (a beforeLLM override when one applied) — §8.
+    let lastModel = this.opts.model
 
     try {
       for (let turn = 0; turn < (this.opts.maxTurns ?? 10); turn++) {
         turns++
+        let turnModel = this.opts.model
         if (this.opts.hooks?.beforeLLM) {
           const ov = await this.opts.hooks.beforeLLM({ messages, tools, model: this.opts.model, turn })
           if (ov?.messages) messages = ov.messages
           if (ov?.tools) tools = ov.tools
+          if (ov?.model) turnModel = ov.model
         }
+        lastModel = turnModel
         const t0 = Date.now()
         const beforeP = usage.promptTokens, beforeC = usage.completionTokens
         let content = ""
@@ -1106,7 +1144,7 @@ export class Client {
           const res = await this.llmFetch(`${this.opts.baseUrl.replace(/\/$/, "")}/chat/completions`, {
             method: "POST",
             headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json", ...this.opts.headers },
-            body: JSON.stringify(this.openaiBody(messages, tools, true)),
+            body: JSON.stringify(this.openaiBody(messages, tools, true, turnModel)),
           }, signal)
           if (!res.ok || !res.body) throw await llmHttpError(res)
           for await (const line of sseLines(res.body)) {
@@ -1127,17 +1165,17 @@ export class Client {
             }
           }
         } catch (e) {
-          this.emit({ event: "llm", model: this.opts.model, status: "error", ms: Date.now() - t0, promptTokens: 0, completionTokens: 0 })
+          this.emit({ event: "llm", model: turnModel, status: "error", ms: Date.now() - t0, promptTokens: 0, completionTokens: 0 })
           throw e
         }
-        this.emit({ event: "llm", model: this.opts.model, status: "ok", ms: Date.now() - t0, promptTokens: usage.promptTokens - beforeP, completionTokens: usage.completionTokens - beforeC })
-        if (this.opts.hooks?.afterLLM) await this.opts.hooks.afterLLM({ response: { streamed: true, usage }, model: this.opts.model, turn })
+        this.emit({ event: "llm", model: turnModel, status: "ok", ms: Date.now() - t0, promptTokens: usage.promptTokens - beforeP, completionTokens: usage.completionTokens - beforeC })
+        if (this.opts.hooks?.afterLLM) await this.opts.hooks.afterLLM({ response: { streamed: true, usage }, model: turnModel, turn })
 
         const calls = [...acc.values()]
         if (calls.length === 0) {
           messages.push({ role: "assistant", content })
           yield { type: "usage", usage }
-          yield { type: "done", result: this.endRun(runStart, content, messages, toolCalls, turns, usage) }
+          yield { type: "done", result: this.endRun(runStart, lastModel, content, messages, toolCalls, turns, usage) }
           return
         }
         messages.push({ role: "assistant", content: content || null, tool_calls: calls.map((c) => ({ id: c.id, type: "function", function: { name: c.name, arguments: c.args } })) })
@@ -1154,7 +1192,7 @@ export class Client {
             if (r.halted) {
               toolCalls.push({ name: c.name, args, output: result.output, isError: result.isError, metadata: result.metadata })
               messages.push(toolMessage(c.id, c.name, result))
-              yield { type: "done", result: this.pendingRun(runStart, r.halted, messages, toolCalls, turns, usage) }
+              yield { type: "done", result: this.pendingRun(runStart, lastModel, r.halted, messages, toolCalls, turns, usage) }
               return
             }
           }
@@ -1163,9 +1201,9 @@ export class Client {
           yield { type: "tool_result", id: c.id, name: c.name, output: result.output, isError: result.isError }
         }
       }
-      yield { type: "done", result: this.endRun(runStart, lastText(messages), messages, toolCalls, turns, usage, true) }
+      yield { type: "done", result: this.endRun(runStart, lastModel, lastText(messages), messages, toolCalls, turns, usage, true) }
     } catch (e) {
-      this.emitRunError(runStart, toolCalls, turns, usage, e)
+      this.emitRunError(runStart, lastModel, toolCalls, turns, usage, e)
       throw e
     }
   }
@@ -1182,15 +1220,20 @@ export class Client {
     const toolCalls: ToolCallRecord[] = []
     const usage: Usage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 }
     let turns = 0
+    // The model of the last call this run made (a beforeLLM override when one applied) — §8.
+    let lastModel = this.opts.model
 
     try {
       for (let turn = 0; turn < (this.opts.maxTurns ?? 10); turn++) {
         turns++
+        let turnModel = this.opts.model
         if (this.opts.hooks?.beforeLLM) {
           const ov = await this.opts.hooks.beforeLLM({ messages, tools, model: this.opts.model, turn })
           if (ov?.messages) messages = ov.messages
           if (ov?.tools) tools = ov.tools
+          if (ov?.model) turnModel = ov.model
         }
+        lastModel = turnModel
         const t0 = Date.now()
         const beforeP = usage.promptTokens, beforeC = usage.completionTokens
         const blocks = new Map<number, { type: string; text?: string; id?: string; name?: string; json?: string }>()
@@ -1199,7 +1242,7 @@ export class Client {
           const res = await this.llmFetch(endpoint, {
             method: "POST",
             headers: { "x-api-key": key, "anthropic-version": "2023-06-01", "Content-Type": "application/json", ...this.opts.headers },
-            body: JSON.stringify(this.anthropicBody(system, messages, tools, true)),
+            body: JSON.stringify(this.anthropicBody(system, messages, tools, true, turnModel)),
           }, signal)
           if (!res.ok || !res.body) throw await llmHttpError(res)
           for await (const line of sseLines(res.body)) {
@@ -1215,11 +1258,11 @@ export class Client {
             } else if (j.type === "message_delta") { stopReason = j.delta?.stop_reason ?? stopReason; addUsage(usage, j.usage, "anthropic") }
           }
         } catch (e) {
-          this.emit({ event: "llm", model: this.opts.model, status: "error", ms: Date.now() - t0, promptTokens: 0, completionTokens: 0 })
+          this.emit({ event: "llm", model: turnModel, status: "error", ms: Date.now() - t0, promptTokens: 0, completionTokens: 0 })
           throw e
         }
-        this.emit({ event: "llm", model: this.opts.model, status: "ok", ms: Date.now() - t0, promptTokens: usage.promptTokens - beforeP, completionTokens: usage.completionTokens - beforeC })
-        if (this.opts.hooks?.afterLLM) await this.opts.hooks.afterLLM({ response: { streamed: true, usage }, model: this.opts.model, turn })
+        this.emit({ event: "llm", model: turnModel, status: "ok", ms: Date.now() - t0, promptTokens: usage.promptTokens - beforeP, completionTokens: usage.completionTokens - beforeC })
+        if (this.opts.hooks?.afterLLM) await this.opts.hooks.afterLLM({ response: { streamed: true, usage }, model: turnModel, turn })
 
         const content = [...blocks.values()].map((b) => b.type === "tool_use" ? { type: "tool_use", id: b.id, name: b.name, input: safeJson(b.json || "{}") } : { type: "text", text: b.text })
         messages.push({ role: "assistant", content })
@@ -1227,7 +1270,7 @@ export class Client {
         if (stopReason !== "tool_use" || uses.length === 0) {
           const text = content.filter((b: any) => b.type === "text").map((b: any) => b.text).join("")
           yield { type: "usage", usage }
-          yield { type: "done", result: this.endRun(runStart, text, messages, toolCalls, turns, usage) }
+          yield { type: "done", result: this.endRun(runStart, lastModel, text, messages, toolCalls, turns, usage) }
           return
         }
         for (const u of uses as any[]) yield { type: "tool_call", id: u.id, name: u.name, args: u.input }
@@ -1245,7 +1288,7 @@ export class Client {
               toolCalls.push({ name: u.name, args, output: result.output, isError: result.isError, metadata: result.metadata })
               results.push(toolResultBlock(u.id, result))
               messages.push({ role: "user", content: results })
-              yield { type: "done", result: this.pendingRun(runStart, r.halted, messages, toolCalls, turns, usage) }
+              yield { type: "done", result: this.pendingRun(runStart, lastModel, r.halted, messages, toolCalls, turns, usage) }
               return
             }
           }
@@ -1255,9 +1298,9 @@ export class Client {
         }
         messages.push({ role: "user", content: results })
       }
-      yield { type: "done", result: this.endRun(runStart, "", messages, toolCalls, turns, usage, true) }
+      yield { type: "done", result: this.endRun(runStart, lastModel, "", messages, toolCalls, turns, usage, true) }
     } catch (e) {
-      this.emitRunError(runStart, toolCalls, turns, usage, e)
+      this.emitRunError(runStart, lastModel, toolCalls, turns, usage, e)
       throw e
     }
   }

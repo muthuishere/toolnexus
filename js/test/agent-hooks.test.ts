@@ -1,7 +1,7 @@
 /**
  * The §8 seams on an agent run (SPEC.md §7D, "The §8 seams on an agent run").
  *
- * Shared fixture: `examples/agent-hooks/fixture.json` (scenarios H1-H6).
+ * Shared fixture: `examples/agent-hooks/fixture.json` (scenarios H1-H7).
  *
  * `hooks` and `onMetric` are optional on BOTH `RuntimeOptions` and `AgentDef`,
  * resolved def-over-runtime (replace, never merge; each field independently) and
@@ -284,5 +284,31 @@ test("§7D seams: a turn that compacts and THEN suspends is rewound to its FULL 
   const post = (await runtime.store.get(h.id)) ?? []
   assert.equal(post.length, pre.length, "a compacted turn that suspends must rewind to the full pre-turn transcript")
   assert.deepEqual(post, pre, "the rewound transcript must be the pre-turn one, compaction discarded")
+  await runtime.close(runtime.root)
+})
+
+// ---------------------------------------------------------------------------
+// H7 — a failing beforeLLM stops an agent run. The level-1 loop run THROWS
+// (test/batteries.test.ts "agent loop run"); a runtime handle turn resolves the
+// §7D boundary result (isError, "error"). Neither sends a request.
+// ---------------------------------------------------------------------------
+
+test("§7D seams H7: a failing beforeLLM is an error result at the handle boundary, no request", async () => {
+  const mock = new RecordingLLM()
+  const runtime = new AgentRuntime({
+    fetch: mock.fetch,
+    registry: reg({
+      name: "a", does: "x", model: "m-a",
+      hooks: { beforeLLM: async () => { throw new Error("hook boom") } },
+    }),
+  })
+  const h = runtime.spawn(runtime.root, "a")
+  assert.ok(!isVerbError(h))
+  runtime.wake(h, "hello")
+  const r = await runtime.wait(h)
+  assert.equal(r.isError, true)
+  assert.equal(r.status, "error")
+  assert.match(r.text, /hook boom/)
+  assert.deepEqual(mock.sent, {})
   await runtime.close(runtime.root)
 })

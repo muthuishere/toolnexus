@@ -20,6 +20,7 @@
             [koine.host :as host]
             [koine.json :as json]
             [koine.server :as server]
+            [toolnexus.test-support :as ts]
             [koine.time :as ktime]
             [toolnexus.mcp :as mcp]
             [toolnexus.tool :as tool]))
@@ -125,7 +126,7 @@
     (reset! echoed-session (str (val e)))))
 
 (defn- start-fake! []
-  (server/serve
+  (ts/serve
    (fn [req]
      (let [path (:path req)]
        (cond
@@ -177,7 +178,7 @@
   free port and releasing it is the only portable way to be SURE it is dead; a
   hardcoded number is a coin flip."
   []
-  (let [h (server/serve (fn [_req] {:status 200 :body "ok"}) {:port 0})
+  (let [h (ts/serve (fn [_req] {:status 200 :body "ok"}) {:port 0})
         p (server/port h)]
     (server/stop! h)
     (str "http://127.0.0.1:" p "/mcp")))
@@ -460,7 +461,7 @@
 (deftest transport-failure-becomes-an-error-result
   ;; A tool whose server dies AFTER listing must hand the model an error
   ;; ToolResult (§0.1), never an exception.
-  (let [h (server/serve (fn [req]
+  (let [h (ts/serve (fn [req]
                           {:status 200 :headers {"content-type" "application/json"}
                            :body (json/write-str (rpc-response (:body req) false))})
                         {:port 0})

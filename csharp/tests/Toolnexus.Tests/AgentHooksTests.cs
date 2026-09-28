@@ -5,7 +5,7 @@ using Toolnexus.Agents;
 namespace Toolnexus.Tests;
 
 /// <summary>
-/// Shared fixture: <c>examples/agent-hooks/fixture.json</c> (scenarios H1-H6).
+/// Shared fixture: <c>examples/agent-hooks/fixture.json</c> (scenarios H1-H7).
 /// SPEC §7D "The §8 seams on an agent run" — <c>Hooks</c> / <c>OnMetric</c> reach an agent run only
 /// by being handed to the runtime (runtime-wide) or to an <see cref="AgentDef"/> (per agent).
 /// Def-over-runtime, REPLACE never merge, each field independently, forwarded verbatim.
@@ -36,6 +36,8 @@ public class AgentHooksTests
             }
             return MockLlm.Text("ok");
         }
+
+        public int Count { get { lock (_l) return _sent.Values.Sum(r => r.Count); } }
 
         public List<Dictionary<string, object?>> Last(string model)
         {
@@ -252,5 +254,51 @@ public class AgentHooksTests
         Assert.True(post.Count == pre.Count,
             $"a compacted turn that suspends must rewind to the {pre.Count}-message pre-turn checkpoint, got {post.Count}");
         Assert.Equal("SOUL-VERBATIM", (post[0] as IDictionary<string, object?>)?["content"] as string);
+    }
+    // ── H7: a failing BeforeLLM stops an agent run. The level-1 loop run THROWS; a runtime handle
+    //    turn resolves the §7D boundary result (IsError, "error"). Neither sends a request. ──
+
+    private sealed class HookBoom : Exception { public HookBoom() : base("hook boom") { } }
+
+    [Fact]
+    public async Task H7_FailingBeforeLLM_ThrowsFromTheLoopRun_NoRequest()
+    {
+        var mock = new RecordingHandler();
+        var agent = new Toolnexus.Agents.Agent("failing", new AgentSpec
+        {
+            Does = "x",
+            Hooks = new LlmClient.Hooks { BeforeLLM = _ => throw new HookBoom() },
+        });
+        await using var tk = await Toolkit.CreateAsync(new Toolkit.Options().WithBuiltins(false));
+        var opts = new LlmClient.Options
+        {
+            BaseUrl = "http://scripted.invalid", Style = "openai",
+            Model = "configured", ApiKey = "not-a-real-key", HttpHandler = mock,
+        };
+        var ex = await Assert.ThrowsAsync<HookBoom>(() => agent.Loop(opts, tk).RunAsync("go"));
+        Assert.Equal("hook boom", ex.Message);
+        Assert.Equal(0, mock.Count);
+    }
+
+    [Fact]
+    public async Task H7_FailingBeforeLLM_IsAnErrorResultAtTheHandleBoundary_NoRequest()
+    {
+        var mock = new RecordingHandler();
+        var rt = new AgentRuntime(new RuntimeOptions
+        {
+            Handler = mock, ApiKey = "test",
+            Registry = Reg(new AgentDef
+            {
+                Name = "a", Does = "x", Model = "m-a",
+                Hooks = new LlmClient.Hooks { BeforeLLM = _ => throw new HookBoom() },
+            }),
+        });
+        var h = rt.Spawn(rt.Root, "a").Handle!;
+        var r = await rt.RunTurnAsync(h, "hello");
+        Assert.True(r.IsError);
+        Assert.Equal("error", r.Status);
+        Assert.Contains("hook boom", r.Text);
+        Assert.Equal(0, mock.Count);
+        await rt.CloseAsync(rt.Root);
     }
 }

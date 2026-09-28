@@ -61,6 +61,10 @@ public abstract record Question
     /// wire carries that distinction (§8B).</summary>
     internal abstract IReadOnlyDictionary<string, object?> Wire();
 
+    /// <summary>The §8B wire form of this question (<c>type</c>, <c>instructions</c>, optional
+    /// <c>criteria</c>) — exactly what goes into the request body.</summary>
+    public IReadOnlyDictionary<string, object?> ToWire() => Wire();
+
     /// <summary>Enforce the client-side limits, naming the offending key.</summary>
     internal virtual void Validate(string key) { }
 }
@@ -270,7 +274,7 @@ public sealed record Decision
 
     /// <summary>Decode a backend response body. This is the single place
     /// <see cref="ChoiceAnswer.NearUniform"/> is derived.</summary>
-    internal static Decision FromJson(string json)
+    public static Decision FromJson(string json)
     {
         using var doc = JsonDocument.Parse(json);
         var root = doc.RootElement;
@@ -696,6 +700,41 @@ public sealed class Classifier
         });
         return d;
     }
+
+    /// <summary>Default in-flight bound of <see cref="EvaluateBatchAsync"/>.</summary>
+    public const int BatchConcurrency = 16;
+
+    /// <summary>
+    /// §8B Batch: the same questions over many states, each through <see cref="EvaluateAsync"/>,
+    /// at most <see cref="BatchConcurrency"/> in flight, decisions returned IN STATE ORDER. Fails
+    /// closed: if any state fails, throws naming the lowest failing index and returns nothing.
+    /// No states is an error and sends nothing.
+    /// </summary>
+    public async Task<IReadOnlyList<Decision>> EvaluateBatchAsync(IReadOnlyList<object?> states,
+        IReadOnlyDictionary<string, Question> questions, CancellationToken cancellationToken = default)
+    {
+        if (states == null || states.Count == 0)
+            throw new ClassifierException("classifier: evaluateBatch: no states to evaluate");
+        using var gate = new SemaphoreSlim(BatchConcurrency);
+        var tasks = states.Select(async st =>
+        {
+            await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+            try { return await EvaluateAsync(st, questions, cancellationToken).ConfigureAwait(false); }
+            finally { gate.Release(); }
+        }).ToArray();
+        try { await Task.WhenAll(tasks).ConfigureAwait(false); } catch { /* inspected below */ }
+        for (var i = 0; i < tasks.Length; i++)
+            if (!tasks[i].IsCompletedSuccessfully)
+            {
+                var e = tasks[i].Exception?.InnerException ?? new OperationCanceledException();
+                throw new ClassifierException($"classifier: evaluateBatch: state {i}: {e.Message}", e);
+            }
+        return tasks.Select(t => t.Result).ToList();
+    }
+
+    /// <summary>One-line <see cref="ClassifierStyle.Static"/> classifier over recorded decisions.</summary>
+    public static Classifier FromRecorded(IEnumerable<RecordedDecision> decisions, string? model = null)
+        => new(new ClassifierOptions { Style = ClassifierStyle.Static, Model = model, Decisions = decisions.ToList() });
 
     private static IEnumerable<string> SortedKeys<T>(IReadOnlyDictionary<string, T> map)
         => map.Keys.OrderBy(k => k, StringComparer.Ordinal);

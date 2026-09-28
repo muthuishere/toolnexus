@@ -668,6 +668,68 @@ func (c *Classifier) Evaluate(ctx context.Context, state any, questions map[stri
 	return d, nil
 }
 
+// DefaultClassifierBatchConcurrency bounds how many states EvaluateBatch has
+// in flight at once for backends with no native batch call of their own
+// (ADR-pending: "batch the classifier" follow-up to §8B). It exists so one
+// EvaluateBatch call cannot itself become a self-inflicted thundering herd
+// against a backend that never asked to be batched.
+const DefaultClassifierBatchConcurrency = 16
+
+// EvaluateBatch runs the SAME questions over MANY states and returns one
+// Decision per state, in the SAME ORDER as states — order is a promise, exactly
+// as Evaluate's callers rely on question-key order today.
+//
+// This is the bounded-concurrency fallback path: it fans out to the existing,
+// already-correct Evaluate for every backend (StyleSystemOne/StyleCustom/
+// StyleLLM/StyleStatic all keep behaving exactly as a caller doing this loop
+// itself would see — EvaluateBatch changes nothing about what goes over the
+// wire per state). A backend-native batch call (one HTTP round trip for many
+// states — e.g. an openjev-style /v1/predict pairs request, or one structured
+// LLM call scoring N states) is real future work per backend and is
+// deliberately NOT attempted here: StyleSystemOne's wire (SPEC.md §8B) has no
+// documented multi-state request shape, and building one without a spec'd
+// contract risks silently drifting the calibrated numbers a caller already
+// trusts. Track that as a follow-up, per-backend, behind its own tests that
+// prove byte-identical scores against the single-state path — never guessed.
+//
+// Fails CLOSED: the first per-state error aborts the whole batch (an error
+// names its state's index), the same as a caller's own loop stopping on the
+// first error would.
+func (c *Classifier) EvaluateBatch(ctx context.Context, states []any, questions map[string]Question) ([]Decision, error) {
+	if len(states) == 0 {
+		return nil, fmt.Errorf("classifier: no states to evaluate")
+	}
+	concurrency := DefaultClassifierBatchConcurrency
+	if concurrency > len(states) {
+		concurrency = len(states)
+	}
+	out := make([]Decision, len(states))
+	errs := make([]error, len(states))
+	sem := make(chan struct{}, concurrency)
+	var wg sync.WaitGroup
+	for i, st := range states {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(i int, st any) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			d, err := c.Evaluate(ctx, st, questions)
+			if err != nil {
+				errs[i] = fmt.Errorf("state %d: %w", i, err)
+				return
+			}
+			out[i] = d
+		}(i, st)
+	}
+	wg.Wait()
+	for _, err := range errs {
+		if err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
 func sortedQuestionKeys(questions map[string]Question) []string {
 	keys := make([]string, 0, len(questions))
 	for k := range questions {

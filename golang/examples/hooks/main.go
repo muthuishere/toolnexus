@@ -85,7 +85,7 @@ func main() {
 	// Hook counters. beforeTool/afterTool can fire concurrently within a turn, so
 	// guard the counts.
 	var (
-		countMu                                                     sync.Mutex
+		countMu                                            sync.Mutex
 		beforeLLM, afterLLM, beforeTool, afterTool, denied int
 	)
 

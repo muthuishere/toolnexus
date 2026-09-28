@@ -1,0 +1,277 @@
+{
+ "note": "IsCompleteClassifier.check(task, answer) -> {complete, p, band}. One noul keyed `complete`. complete iff band yes. Missing -> complete false, p null, band uncertain. Error -> open: complete true, closed: false; p null, band uncertain. Standalone only (no loop seam).",
+ "defaults": {
+  "role": "You check whether an AI agent's final answer completes the task it was given.",
+  "questions": {
+   "complete": {
+    "type": "noul",
+    "instructions": "Does `answer` fully complete the request in `task`?",
+    "criteria": {
+     "true": "every part of the task is done and nothing asked for is missing",
+     "false": "part of the task is missing, wrong or only promised"
+    }
+   }
+  }
+ },
+ "cases": [
+  {
+   "name": "complete",
+   "options": {
+    "onError": "closed"
+   },
+   "input": {
+    "task": "Rename the config key and update every caller.",
+    "answer": "Renamed the key in config.go; callers still use the old name."
+   },
+   "calls": [
+    {
+     "state": {
+      "task": "Rename the config key and update every caller.",
+      "answer": "Renamed the key in config.go; callers still use the old name.",
+      "role": "You check whether an AI agent's final answer completes the task it was given."
+     },
+     "questions": {
+      "complete": {
+       "type": "noul",
+       "instructions": "Does `answer` fully complete the request in `task`?",
+       "criteria": {
+        "true": "every part of the task is done and nothing asked for is missing",
+        "false": "part of the task is missing, wrong or only promised"
+       }
+      }
+     },
+     "response": {
+      "model": "m",
+      "answers": {
+       "complete": {
+        "type": "noul",
+        "noul": 0.91
+       }
+      }
+     }
+    }
+   ],
+   "want": {
+    "complete": true,
+    "p": 0.91,
+    "band": "yes",
+    "calibrated": true,
+    "error": false
+   }
+  },
+  {
+   "name": "incomplete",
+   "options": {
+    "onError": "closed"
+   },
+   "input": {
+    "task": "Rename the config key and update every caller.",
+    "answer": "Renamed the key in config.go; callers still use the old name."
+   },
+   "calls": [
+    {
+     "state": {
+      "task": "Rename the config key and update every caller.",
+      "answer": "Renamed the key in config.go; callers still use the old name.",
+      "role": "You check whether an AI agent's final answer completes the task it was given."
+     },
+     "questions": {
+      "complete": {
+       "type": "noul",
+       "instructions": "Does `answer` fully complete the request in `task`?",
+       "criteria": {
+        "true": "every part of the task is done and nothing asked for is missing",
+        "false": "part of the task is missing, wrong or only promised"
+       }
+      }
+     },
+     "response": {
+      "model": "m",
+      "answers": {
+       "complete": {
+        "type": "noul",
+        "noul": 0.08
+       }
+      }
+     }
+    }
+   ],
+   "want": {
+    "complete": false,
+    "p": 0.08,
+    "band": "no",
+    "calibrated": true,
+    "error": false
+   }
+  },
+  {
+   "name": "uncertain-is-not-complete",
+   "options": {
+    "onError": "closed"
+   },
+   "input": {
+    "task": "Rename the config key and update every caller.",
+    "answer": "Renamed the key in config.go; callers still use the old name."
+   },
+   "calls": [
+    {
+     "state": {
+      "task": "Rename the config key and update every caller.",
+      "answer": "Renamed the key in config.go; callers still use the old name.",
+      "role": "You check whether an AI agent's final answer completes the task it was given."
+     },
+     "questions": {
+      "complete": {
+       "type": "noul",
+       "instructions": "Does `answer` fully complete the request in `task`?",
+       "criteria": {
+        "true": "every part of the task is done and nothing asked for is missing",
+        "false": "part of the task is missing, wrong or only promised"
+       }
+      }
+     },
+     "response": {
+      "model": "m",
+      "answers": {
+       "complete": {
+        "type": "noul",
+        "noul": 0.7
+       }
+      }
+     }
+    }
+   ],
+   "want": {
+    "complete": false,
+    "p": 0.7,
+    "band": "uncertain",
+    "calibrated": true,
+    "error": false
+   }
+  },
+  {
+   "name": "missing",
+   "options": {
+    "onError": "closed"
+   },
+   "input": {
+    "task": "Rename the config key and update every caller.",
+    "answer": "Renamed the key in config.go; callers still use the old name."
+   },
+   "calls": [
+    {
+     "state": {
+      "task": "Rename the config key and update every caller.",
+      "answer": "Renamed the key in config.go; callers still use the old name.",
+      "role": "You check whether an AI agent's final answer completes the task it was given."
+     },
+     "questions": {
+      "complete": {
+       "type": "noul",
+       "instructions": "Does `answer` fully complete the request in `task`?",
+       "criteria": {
+        "true": "every part of the task is done and nothing asked for is missing",
+        "false": "part of the task is missing, wrong or only promised"
+       }
+      }
+     },
+     "response": {
+      "model": "m",
+      "answers": {}
+     }
+    }
+   ],
+   "want": {
+    "complete": false,
+    "p": null,
+    "band": "uncertain",
+    "calibrated": true,
+    "error": false
+   }
+  },
+  {
+   "name": "error-open",
+   "options": {
+    "onError": "open"
+   },
+   "input": {
+    "task": "Rename the config key and update every caller.",
+    "answer": "Renamed the key in config.go; callers still use the old name."
+   },
+   "error": true,
+   "calls": [],
+   "want": {
+    "complete": true,
+    "p": null,
+    "band": "uncertain",
+    "calibrated": false,
+    "error": true
+   }
+  },
+  {
+   "name": "error-closed",
+   "options": {
+    "onError": "closed"
+   },
+   "input": {
+    "task": "Rename the config key and update every caller.",
+    "answer": "Renamed the key in config.go; callers still use the old name."
+   },
+   "error": true,
+   "calls": [],
+   "want": {
+    "complete": false,
+    "p": null,
+    "band": "uncertain",
+    "calibrated": false,
+    "error": true
+   }
+  },
+  {
+   "name": "uncalibrated",
+   "options": {
+    "onError": "closed"
+   },
+   "input": {
+    "task": "Rename the config key and update every caller.",
+    "answer": "Renamed the key in config.go; callers still use the old name."
+   },
+   "calls": [
+    {
+     "state": {
+      "task": "Rename the config key and update every caller.",
+      "answer": "Renamed the key in config.go; callers still use the old name.",
+      "role": "You check whether an AI agent's final answer completes the task it was given."
+     },
+     "questions": {
+      "complete": {
+       "type": "noul",
+       "instructions": "Does `answer` fully complete the request in `task`?",
+       "criteria": {
+        "true": "every part of the task is done and nothing asked for is missing",
+        "false": "part of the task is missing, wrong or only promised"
+       }
+      }
+     },
+     "response": {
+      "model": "m",
+      "answers": {
+       "complete": {
+        "type": "noul",
+        "noul": 0.95
+       }
+      },
+      "calibrated": false
+     }
+    }
+   ],
+   "want": {
+    "complete": true,
+    "p": 0.95,
+    "band": "yes",
+    "calibrated": false,
+    "error": false
+   }
+  }
+ ]
+}

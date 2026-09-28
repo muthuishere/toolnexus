@@ -22,8 +22,8 @@ func (l *loopingTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 			"role":    "assistant",
 			"content": nil,
 			"tool_calls": []any{map[string]any{
-				"id":   "c1",
-				"type": "function",
+				"id":       "c1",
+				"type":     "function",
 				"function": map[string]any{"name": "noop", "arguments": "{}"},
 			}},
 		}}},

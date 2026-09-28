@@ -370,7 +370,9 @@
 ;; §8 hooks — lifecycle middleware
 ;; ---------------------------------------------------------------------------
 ;;
-;;   :before-llm  {:messages :tools :model :turn}  -> {:messages? :tools?}
+;;   :before-llm  {:messages :tools :model :turn}  -> {:messages? :tools? :model?}
+;;                  a non-empty :model is sent for THAT turn only (body +
+;;                  :after-llm event); nil/"" => the configured model verbatim
 ;;   :after-llm   {:response :model :turn}         -> observe only
 ;;   :before-tool {:name :args :id :turn}          -> {:result} short-circuits,
 ;;                                                    {:args} rewrites
@@ -386,8 +388,10 @@
 (defn- hook-of [client k] (get-in client [:hooks k]))
 
 (defn before-llm!
-  "§8 `beforeLLM`, applied to ONE round trip. Returns `[messages tools]` — the
-  hook's replacements when it returned them, the originals otherwise.
+  "§8 `beforeLLM`, applied to ONE round trip. Returns `[messages tools model]` —
+  the hook's replacements when it returned them, the originals otherwise.
+  `model` is the hook's non-empty `:model` for THIS turn only (change
+  add-judge-batteries), else the configured model verbatim.
 
   Public because §11 `toolnexus.translate` must fire this hook exactly once for
   its single call, and a second copy of the rule in that namespace is exactly
@@ -402,18 +406,21 @@
   the same empty-list omission (Gap 5) the toolkit's own list does."
   [client messages tools turn]
   (if-let [f (hook-of client :before-llm)]
-    (let [ov (f {:messages messages :tools tools :model (:model client) :turn turn})]
-      [(or (:messages ov) messages) (or (:tools ov) tools)])
-    [messages tools]))
+    (let [ov (f {:messages messages :tools tools :model (:model client) :turn turn})
+          m  (:model ov)]
+      [(or (:messages ov) messages) (or (:tools ov) tools)
+       (if (and (string? m) (not= "" m)) m (:model client))])
+    [messages tools (:model client)]))
 
 (defn after-llm!
   "§8 `afterLLM` — observe only (logging, cost, tracing). `:response` is the
   provider's decoded payload, so it carries `usage`. Returns nil; a return value
   from an observer would be a silent contract nobody could rely on."
-  [client response turn]
-  (when-let [f (hook-of client :after-llm)]
-    (f {:response response :model (:model client) :turn turn}))
-  nil)
+  ([client response turn] (after-llm! client response turn (:model client)))
+  ([client response turn model]
+   (when-let [f (hook-of client :after-llm)]
+     (f {:response response :model model :turn turn}))
+   nil))
 
 (defn- system-message
   "§0.10 — system = systemPrompt + \"\\n\\n\" + skillsPrompt. Empty parts are
@@ -452,6 +459,16 @@
   deliberately rather than by collision."
   #{:messages :tools :stream})
 
+(defn- canonical-param-key
+  "A `:request-params` key in the body's own spelling: a string that round-trips
+  as a plain keyword becomes that keyword; anything else (a keyword, or a string
+  like \"a/b\" that a keyword would split) is kept as given."
+  [k]
+  (if (string? k)
+    (let [kw (keyword k)]
+      (if (and (nil? (namespace kw)) (= k (name kw))) kw k))
+    k))
+
 (defn- shape-body
   "§client-request-shaping — the ordering contract, and the order is the spec:
 
@@ -465,9 +482,17 @@
   drop keys the merge added.
 
   With neither set the body is unchanged, which is the spec's own guarantee and
-  the reason both are applied through `cond->` rather than always-on `merge`."
+  the reason both are applied through `cond->` rather than always-on `merge`.
+
+  Param keys are CANONICALISED first (`canonical-param-key`): the body is built
+  with keyword keys, so a string \"model\" (the agent Loop's per-call override, or
+  any caller's) must REPLACE `:model`, not sit beside it — two keys that marshal
+  to the same JSON name put `model` on the wire twice. Canonicalising before the
+  forbidden-key filter also makes a string \"messages\" as forbidden as `:messages`."
   [client body]
   (let [params (:request-params client)
+        params (when (seq params)
+                 (into {} (map (fn [[k v]] [(canonical-param-key k) v])) params))
         params (when (seq params)
                  (let [kept (apply dissoc params forbidden-request-params)]
                    (when (not= (count kept) (count params))
@@ -478,13 +503,13 @@
         merged (if (seq params) (merge body params) body)]
     (if-let [f (:body-transform client)] (f merged) merged)))
 
-(defn- body-map [client system messages tools]
+(defn- body-map [client model system messages tools]
   (shape-body
    client
    (if (= "anthropic" (:style client))
-     (cond-> {:model (:model client) :max_tokens 4096 :system system :messages messages}
+     (cond-> {:model model :max_tokens 4096 :system system :messages messages}
        (seq tools) (assoc :tools tools))
-     (cond-> {:model (:model client) :messages messages}
+     (cond-> {:model model :messages messages}
        (seq tools) (assoc :tools tools :tool_choice "auto")))))
 
 (def ^:private default-retryable-statuses
@@ -688,7 +713,7 @@
   transport failure and a non-2xx both become a thrown ex-info — unlike a TOOL
   error, an LLM failure is not something the model can be shown and asked to
   retry. `body` is the already-marshalled request string."
-  [client url headers body]
+  [client url headers body model]
   (let [budget  (or (:retries client) 0)
         base-ms (or (:retry-base-ms client) 500)]
     (loop [attempt 0]
@@ -708,7 +733,7 @@
             ok?     (and (not failed?) status (<= 200 status) (< status 300))]
         (if ok?
           (do (metric! client
-                       (fn [] {:event "llm" :model (:model client) :status status
+                       (fn [] {:event "llm" :model model :status status
                                :ms (- (ktime/now-ms) t0)
                                :prompt_tokens (get-in res [:usage :prompt_tokens])
                                :completion_tokens (get-in res [:usage :completion_tokens])}))
@@ -767,13 +792,39 @@
   {:role "user"
    :content (if (sequential? prompt) (vec prompt) prompt)})
 
+(defn- model-of [shaped fallback]
+  ;; :request-params keys are canonicalised to keywords (shape-body), so a string
+  ;; "model" here can only come from a :body-transform — and then it is the one
+  ;; the transform chose to send.
+  (let [m (if (contains? shaped "model") (get shaped "model") (get shaped :model))]
+    (if (string? m) m fallback)))
+
 (defn- llm-call
   "The agent loop's round trip: build the loop's body, then post it."
-  [client system messages tools]
-  (post-with-retry client
-                   (endpoint client)
-                   (merge {"content-type" "application/json"} (request-headers client))
-                   (json/write-str (body-map client system messages tools))))
+  [client model system messages tools]
+  (let [shaped (body-map client model system messages tools)
+        ;; §8 — report the model TRANSMITTED: a :request-params / :body-transform
+        ;; model (the agent Loop's per-call override) wins over the hook's.
+        sent   (model-of shaped model)]
+    [(post-with-retry client
+                      (endpoint client)
+                      (merge {"content-type" "application/json"} (request-headers client))
+                      (json/write-str shaped)
+                      sent)
+     sent]))
+
+(defn call-provider*
+  "`call-provider`, returning `[decoded-response transmitted-model]` — the model
+  the shaped body actually carried (§8/§11: the model reported is the model sent)."
+  [client body]
+  (let [shaped (shape-body client body)
+        m      (model-of shaped (or (:model body) (:model client)))]
+    [(post-with-retry client
+                      (endpoint client)
+                      (merge {"content-type" "application/json"} (request-headers client))
+                      (json/write-str shaped)
+                      m)
+     m]))
 
 (defn call-provider
   "ONE provider round trip for a CALLER-BUILT body map, through exactly the
@@ -784,10 +835,7 @@
   must lose neither resilience nor metrics, and the only way to guarantee that
   is to share the code rather than copy it."
   [client body]
-  (post-with-retry client
-                   (endpoint client)
-                   (merge {"content-type" "application/json"} (request-headers client))
-                   (json/write-str (shape-body client body))))
+  (first (call-provider* client body)))
 
 ;; ---------------------------------------------------------------------------
 ;; per-style response reading
@@ -1110,16 +1158,18 @@
         ;; call sites return from this loop, and a save wired into only one of
         ;; them is the classic half-fix — the turn-limit exit would silently
         ;; forget the conversation.
-        finish!    (fn [r]
-                     (when (and conversation-id (:store client))
-                       ((:save (:store client)) conversation-id (:messages r)))
+        run-metric! (fn [r]
                      (metric! client
-                              (fn [] {:event "run" :model (:model client)
+                              (fn [] {:event "run" :model (:model r)
                                       :turns (:turns r) :tool_calls (:tool-call-count r)
                                       :total_tokens (get-in r [:usage :total-tokens])
                                       :ms (- (ktime/now-ms) run-t0)
                                       :error (:limit? r)}))
                      r)
+        finish!    (fn [r]
+                     (when (and conversation-id (:store client))
+                       ((:save (:store client)) conversation-id (:messages r)))
+                     (run-metric! r))
         seed       (cond
                      (seq history)    (vec history)
                      (seq remembered) (vec remembered)
@@ -1135,10 +1185,13 @@
            turn       0
            turns      0
            tool-calls []
-           usage      zero-usage]
+           usage      zero-usage
+           ;; §8 — RunResult.model / the `run` metric report the model of the
+           ;; LAST call the run made (configured until a call is made).
+           last-model (:model client)]
       (if (>= turn max-turns)
         (let [text (if anthropic? "" (last-assistant-text messages))
-              r    (finish! (run-result client text messages tool-calls turns usage true))]
+              r    (finish! (assoc (run-result client text messages tool-calls turns usage true) :model last-model))]
           (emit! on-event {:type "done" :result r})
           r)
         ;; §8 ordering: the hook sees (and may replace) the transcript and the
@@ -1147,6 +1200,7 @@
         (let [hooked  (before-llm! client messages tools turn)
               messages (first hooked)
               tools    (second hooked)
+              turn-model (nth hooked 2)
               ;; §8A: the canonical transcript becomes wire messages HERE, so
               ;; `messages` (and therefore RunResult.messages, the store and
               ;; `translate`) never sees a synthetic user turn or a provider
@@ -1154,19 +1208,19 @@
               ;; HTTP call, as DATA.
               wire    (content/build-wire messages (wire-opts client))]
           (if (:error wire)
-            (let [r (finish! (content-error-result client wire messages tool-calls turns usage))]
+            (let [r (finish! (assoc (content-error-result client wire messages tool-calls turns usage) :model last-model))]
               (emit! on-event {:type "done" :result r})
               r)
-            (let [body    (llm-call client system (:messages wire) tools)
+            (let [[body turn-model] (llm-call client turn-model system (:messages wire) tools)
                   usage   (add-usage usage client (:usage body))
-                  _       (after-llm! client body turn)
+                  _       (after-llm! client body turn turn-model)
                   _       (emit! on-event {:type "usage" :usage usage})
                   turns   (inc turns)
                   msg     (assistant-message client body)
                   calls   (tool-calls-of client body)
                   messages (conj messages msg)]
               (if (empty? calls)
-                (let [r (finish! (run-result client (final-text client body) messages tool-calls turns usage false))]
+                (let [r (finish! (assoc (run-result client (final-text client body) messages tool-calls turns usage false) :model turn-model))]
                   (emit! on-event {:type "done" :result r})
                   r)
                 (let [_       (doseq [c calls]
@@ -1210,10 +1264,10 @@
                       halted  (first (keep :halt settled))
                       msgs    (into messages (tool-result-messages client settled))]
                   (if halted
-                    (let [r (pending-result client halted msgs (into tool-calls records) turns usage)]
+                    (let [r (run-metric! (assoc (pending-result client halted msgs (into tool-calls records) turns usage) :model turn-model))]
                       (emit! on-event {:type "done" :result r})
                       r)
-                    (recur msgs tools (inc turn) turns (into tool-calls records) usage)))))))))))
+                    (recur msgs tools (inc turn) turns (into tool-calls records) usage turn-model)))))))))))
 
 
 (defn ask

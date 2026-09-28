@@ -1,0 +1,878 @@
+{
+ "note": "AgentRouterClassifier.pick(task, agents, fallback) -> {agent, path, sure, probabilities, calibrated}. One choice keyed `agent` per level; a picked node with `agents` descends. Not sure (confidence <= high or nearUniform), missing, or error at any level -> agent = fallback, sure false, path = the sure picks so far. probabilities = the last evaluated level's map (null if none). calibrated = AND over evaluated levels (false on error). No onError: the fallback IS the error outcome.",
+ "defaults": {
+  "role": "You route a task to the agent best suited to do it.",
+  "instructions": "Which agent should handle `task`?"
+ },
+ "cases": [
+  {
+   "name": "flat-sure",
+   "options": {},
+   "input": {
+    "task": "I was charged twice for March, please refund one.",
+    "agents": [
+     {
+      "name": "billing",
+      "description": "Refunds, invoices and payment failures."
+     },
+     {
+      "name": "tech",
+      "description": "Bugs, errors and outages in the product."
+     },
+     {
+      "name": "sales",
+      "description": "Pricing questions and new contracts."
+     }
+    ],
+    "fallback": "triage"
+   },
+   "calls": [
+    {
+     "state": {
+      "task": "I was charged twice for March, please refund one.",
+      "role": "You route a task to the agent best suited to do it."
+     },
+     "questions": {
+      "agent": {
+       "type": "choice",
+       "instructions": "Which agent should handle `task`?",
+       "criteria": {
+        "billing": "Refunds, invoices and payment failures.",
+        "tech": "Bugs, errors and outages in the product.",
+        "sales": "Pricing questions and new contracts."
+       }
+      }
+     },
+     "response": {
+      "model": "m",
+      "answers": {
+       "agent": {
+        "type": "choice",
+        "choice": "billing",
+        "confidence": 0.86,
+        "probabilities": {
+         "billing": 0.86,
+         "tech": 0.1,
+         "sales": 0.04
+        }
+       }
+      }
+     }
+    }
+   ],
+   "want": {
+    "agent": "billing",
+    "path": [
+     "billing"
+    ],
+    "sure": true,
+    "probabilities": {
+     "billing": 0.86,
+     "tech": 0.1,
+     "sales": 0.04
+    },
+    "calibrated": true,
+    "error": false
+   }
+  },
+  {
+   "name": "flat-unsure-falls-back",
+   "options": {},
+   "input": {
+    "task": "I was charged twice for March, please refund one.",
+    "agents": [
+     {
+      "name": "billing",
+      "description": "Refunds, invoices and payment failures."
+     },
+     {
+      "name": "tech",
+      "description": "Bugs, errors and outages in the product."
+     },
+     {
+      "name": "sales",
+      "description": "Pricing questions and new contracts."
+     }
+    ],
+    "fallback": "triage"
+   },
+   "calls": [
+    {
+     "state": {
+      "task": "I was charged twice for March, please refund one.",
+      "role": "You route a task to the agent best suited to do it."
+     },
+     "questions": {
+      "agent": {
+       "type": "choice",
+       "instructions": "Which agent should handle `task`?",
+       "criteria": {
+        "billing": "Refunds, invoices and payment failures.",
+        "tech": "Bugs, errors and outages in the product.",
+        "sales": "Pricing questions and new contracts."
+       }
+      }
+     },
+     "response": {
+      "model": "m",
+      "answers": {
+       "agent": {
+        "type": "choice",
+        "choice": "billing",
+        "confidence": 0.5,
+        "probabilities": {
+         "billing": 0.5,
+         "tech": 0.4,
+         "sales": 0.1
+        }
+       }
+      }
+     }
+    }
+   ],
+   "want": {
+    "agent": "triage",
+    "path": [],
+    "sure": false,
+    "probabilities": {
+     "billing": 0.5,
+     "tech": 0.4,
+     "sales": 0.1
+    },
+    "calibrated": true,
+    "error": false
+   }
+  },
+  {
+   "name": "near-uniform-falls-back",
+   "options": {},
+   "input": {
+    "task": "I was charged twice for March, please refund one.",
+    "agents": [
+     {
+      "name": "billing",
+      "description": "Refunds, invoices and payment failures."
+     },
+     {
+      "name": "tech",
+      "description": "Bugs, errors and outages in the product."
+     },
+     {
+      "name": "sales",
+      "description": "Pricing questions and new contracts."
+     }
+    ],
+    "fallback": "triage"
+   },
+   "calls": [
+    {
+     "state": {
+      "task": "I was charged twice for March, please refund one.",
+      "role": "You route a task to the agent best suited to do it."
+     },
+     "questions": {
+      "agent": {
+       "type": "choice",
+       "instructions": "Which agent should handle `task`?",
+       "criteria": {
+        "billing": "Refunds, invoices and payment failures.",
+        "tech": "Bugs, errors and outages in the product.",
+        "sales": "Pricing questions and new contracts."
+       }
+      }
+     },
+     "response": {
+      "model": "m",
+      "answers": {
+       "agent": {
+        "type": "choice",
+        "choice": "billing",
+        "confidence": 0.9,
+        "probabilities": {
+         "billing": 0.34,
+         "tech": 0.33,
+         "sales": 0.33
+        }
+       }
+      }
+     }
+    }
+   ],
+   "want": {
+    "agent": "triage",
+    "path": [],
+    "sure": false,
+    "probabilities": {
+     "billing": 0.34,
+     "tech": 0.33,
+     "sales": 0.33
+    },
+    "calibrated": true,
+    "error": false
+   }
+  },
+  {
+   "name": "missing-falls-back",
+   "options": {},
+   "input": {
+    "task": "I was charged twice for March, please refund one.",
+    "agents": [
+     {
+      "name": "billing",
+      "description": "Refunds, invoices and payment failures."
+     },
+     {
+      "name": "tech",
+      "description": "Bugs, errors and outages in the product."
+     },
+     {
+      "name": "sales",
+      "description": "Pricing questions and new contracts."
+     }
+    ],
+    "fallback": "triage"
+   },
+   "calls": [
+    {
+     "state": {
+      "task": "I was charged twice for March, please refund one.",
+      "role": "You route a task to the agent best suited to do it."
+     },
+     "questions": {
+      "agent": {
+       "type": "choice",
+       "instructions": "Which agent should handle `task`?",
+       "criteria": {
+        "billing": "Refunds, invoices and payment failures.",
+        "tech": "Bugs, errors and outages in the product.",
+        "sales": "Pricing questions and new contracts."
+       }
+      }
+     },
+     "response": {
+      "model": "m",
+      "answers": {}
+     }
+    }
+   ],
+   "want": {
+    "agent": "triage",
+    "path": [],
+    "sure": false,
+    "probabilities": null,
+    "calibrated": true,
+    "error": false
+   }
+  },
+  {
+   "name": "error-falls-back",
+   "options": {},
+   "input": {
+    "task": "I was charged twice for March, please refund one.",
+    "agents": [
+     {
+      "name": "billing",
+      "description": "Refunds, invoices and payment failures."
+     },
+     {
+      "name": "tech",
+      "description": "Bugs, errors and outages in the product."
+     },
+     {
+      "name": "sales",
+      "description": "Pricing questions and new contracts."
+     }
+    ],
+    "fallback": "triage"
+   },
+   "error": true,
+   "calls": [],
+   "want": {
+    "agent": "triage",
+    "path": [],
+    "sure": false,
+    "probabilities": null,
+    "calibrated": false,
+    "error": true
+   }
+  },
+  {
+   "name": "tree-two-levels",
+   "options": {},
+   "input": {
+    "task": "I was charged twice for March, please refund one.",
+    "agents": [
+     {
+      "name": "support",
+      "description": "Anything a paying customer needs fixed.",
+      "agents": [
+       {
+        "name": "billing",
+        "description": "Refunds, invoices and payment failures."
+       },
+       {
+        "name": "tech",
+        "description": "Bugs, errors and outages in the product."
+       }
+      ]
+     },
+     {
+      "name": "growth",
+      "description": "Leads, pricing and partnerships.",
+      "agents": [
+       {
+        "name": "sales",
+        "description": "Pricing questions and new contracts."
+       },
+       {
+        "name": "partners",
+        "description": "Resellers and integration partners."
+       }
+      ]
+     }
+    ],
+    "fallback": "triage"
+   },
+   "calls": [
+    {
+     "state": {
+      "task": "I was charged twice for March, please refund one.",
+      "role": "You route a task to the agent best suited to do it."
+     },
+     "questions": {
+      "agent": {
+       "type": "choice",
+       "instructions": "Which agent should handle `task`?",
+       "criteria": {
+        "support": "Anything a paying customer needs fixed.",
+        "growth": "Leads, pricing and partnerships."
+       }
+      }
+     },
+     "response": {
+      "model": "m",
+      "answers": {
+       "agent": {
+        "type": "choice",
+        "choice": "support",
+        "confidence": 0.9,
+        "probabilities": {
+         "support": 0.9,
+         "growth": 0.1
+        }
+       }
+      }
+     }
+    },
+    {
+     "state": {
+      "task": "I was charged twice for March, please refund one.",
+      "role": "You route a task to the agent best suited to do it."
+     },
+     "questions": {
+      "agent": {
+       "type": "choice",
+       "instructions": "Which agent should handle `task`?",
+       "criteria": {
+        "billing": "Refunds, invoices and payment failures.",
+        "tech": "Bugs, errors and outages in the product."
+       }
+      }
+     },
+     "response": {
+      "model": "m",
+      "answers": {
+       "agent": {
+        "type": "choice",
+        "choice": "billing",
+        "confidence": 0.88,
+        "probabilities": {
+         "billing": 0.88,
+         "tech": 0.12
+        }
+       }
+      }
+     }
+    }
+   ],
+   "want": {
+    "agent": "billing",
+    "path": [
+     "support",
+     "billing"
+    ],
+    "sure": true,
+    "probabilities": {
+     "billing": 0.88,
+     "tech": 0.12
+    },
+    "calibrated": true,
+    "error": false
+   }
+  },
+  {
+   "name": "tree-second-level-unsure",
+   "options": {},
+   "input": {
+    "task": "I was charged twice for March, please refund one.",
+    "agents": [
+     {
+      "name": "support",
+      "description": "Anything a paying customer needs fixed.",
+      "agents": [
+       {
+        "name": "billing",
+        "description": "Refunds, invoices and payment failures."
+       },
+       {
+        "name": "tech",
+        "description": "Bugs, errors and outages in the product."
+       }
+      ]
+     },
+     {
+      "name": "growth",
+      "description": "Leads, pricing and partnerships.",
+      "agents": [
+       {
+        "name": "sales",
+        "description": "Pricing questions and new contracts."
+       },
+       {
+        "name": "partners",
+        "description": "Resellers and integration partners."
+       }
+      ]
+     }
+    ],
+    "fallback": "triage"
+   },
+   "calls": [
+    {
+     "state": {
+      "task": "I was charged twice for March, please refund one.",
+      "role": "You route a task to the agent best suited to do it."
+     },
+     "questions": {
+      "agent": {
+       "type": "choice",
+       "instructions": "Which agent should handle `task`?",
+       "criteria": {
+        "support": "Anything a paying customer needs fixed.",
+        "growth": "Leads, pricing and partnerships."
+       }
+      }
+     },
+     "response": {
+      "model": "m",
+      "answers": {
+       "agent": {
+        "type": "choice",
+        "choice": "support",
+        "confidence": 0.9,
+        "probabilities": {
+         "support": 0.9,
+         "growth": 0.1
+        }
+       }
+      }
+     }
+    },
+    {
+     "state": {
+      "task": "I was charged twice for March, please refund one.",
+      "role": "You route a task to the agent best suited to do it."
+     },
+     "questions": {
+      "agent": {
+       "type": "choice",
+       "instructions": "Which agent should handle `task`?",
+       "criteria": {
+        "billing": "Refunds, invoices and payment failures.",
+        "tech": "Bugs, errors and outages in the product."
+       }
+      }
+     },
+     "response": {
+      "model": "m",
+      "answers": {
+       "agent": {
+        "type": "choice",
+        "choice": "billing",
+        "confidence": 0.55,
+        "probabilities": {
+         "billing": 0.55,
+         "tech": 0.45
+        }
+       }
+      },
+      "calibrated": true
+     }
+    }
+   ],
+   "want": {
+    "agent": "triage",
+    "path": [
+     "support"
+    ],
+    "sure": false,
+    "probabilities": {
+     "billing": 0.55,
+     "tech": 0.45
+    },
+    "calibrated": true,
+    "error": false
+   }
+  },
+  {
+   "name": "tree-uncalibrated-level",
+   "options": {},
+   "input": {
+    "task": "I was charged twice for March, please refund one.",
+    "agents": [
+     {
+      "name": "support",
+      "description": "Anything a paying customer needs fixed.",
+      "agents": [
+       {
+        "name": "billing",
+        "description": "Refunds, invoices and payment failures."
+       },
+       {
+        "name": "tech",
+        "description": "Bugs, errors and outages in the product."
+       }
+      ]
+     },
+     {
+      "name": "growth",
+      "description": "Leads, pricing and partnerships.",
+      "agents": [
+       {
+        "name": "sales",
+        "description": "Pricing questions and new contracts."
+       },
+       {
+        "name": "partners",
+        "description": "Resellers and integration partners."
+       }
+      ]
+     }
+    ],
+    "fallback": "triage"
+   },
+   "calls": [
+    {
+     "state": {
+      "task": "I was charged twice for March, please refund one.",
+      "role": "You route a task to the agent best suited to do it."
+     },
+     "questions": {
+      "agent": {
+       "type": "choice",
+       "instructions": "Which agent should handle `task`?",
+       "criteria": {
+        "support": "Anything a paying customer needs fixed.",
+        "growth": "Leads, pricing and partnerships."
+       }
+      }
+     },
+     "response": {
+      "model": "m",
+      "answers": {
+       "agent": {
+        "type": "choice",
+        "choice": "support",
+        "confidence": 0.9,
+        "probabilities": {
+         "support": 0.9,
+         "growth": 0.1
+        }
+       }
+      }
+     }
+    },
+    {
+     "state": {
+      "task": "I was charged twice for March, please refund one.",
+      "role": "You route a task to the agent best suited to do it."
+     },
+     "questions": {
+      "agent": {
+       "type": "choice",
+       "instructions": "Which agent should handle `task`?",
+       "criteria": {
+        "billing": "Refunds, invoices and payment failures.",
+        "tech": "Bugs, errors and outages in the product."
+       }
+      }
+     },
+     "response": {
+      "model": "m",
+      "answers": {
+       "agent": {
+        "type": "choice",
+        "choice": "billing",
+        "confidence": 0.88,
+        "probabilities": {
+         "billing": 0.88,
+         "tech": 0.12
+        }
+       }
+      },
+      "calibrated": false
+     }
+    }
+   ],
+   "want": {
+    "agent": "billing",
+    "path": [
+     "support",
+     "billing"
+    ],
+    "sure": true,
+    "probabilities": {
+     "billing": 0.88,
+     "tech": 0.12
+    },
+    "calibrated": false,
+    "error": false
+   }
+  },
+  {
+   "name": "tree-first-level-uncalibrated",
+   "options": {},
+   "input": {
+    "task": "I was charged twice for March, please refund one.",
+    "agents": [
+     {
+      "name": "support",
+      "description": "Anything a paying customer needs fixed.",
+      "agents": [
+       {
+        "name": "billing",
+        "description": "Refunds, invoices and payment failures."
+       },
+       {
+        "name": "tech",
+        "description": "Bugs, errors and outages in the product."
+       }
+      ]
+     },
+     {
+      "name": "growth",
+      "description": "Leads, pricing and partnerships.",
+      "agents": [
+       {
+        "name": "sales",
+        "description": "Pricing questions and new contracts."
+       },
+       {
+        "name": "partners",
+        "description": "Resellers and integration partners."
+       }
+      ]
+     }
+    ],
+    "fallback": "triage"
+   },
+   "calls": [
+    {
+     "state": {
+      "task": "I was charged twice for March, please refund one.",
+      "role": "You route a task to the agent best suited to do it."
+     },
+     "questions": {
+      "agent": {
+       "type": "choice",
+       "instructions": "Which agent should handle `task`?",
+       "criteria": {
+        "support": "Anything a paying customer needs fixed.",
+        "growth": "Leads, pricing and partnerships."
+       }
+      }
+     },
+     "response": {
+      "model": "m",
+      "answers": {
+       "agent": {
+        "type": "choice",
+        "choice": "support",
+        "confidence": 0.9,
+        "probabilities": {
+         "support": 0.9,
+         "growth": 0.1
+        }
+       }
+      },
+      "calibrated": false
+     }
+    },
+    {
+     "state": {
+      "task": "I was charged twice for March, please refund one.",
+      "role": "You route a task to the agent best suited to do it."
+     },
+     "questions": {
+      "agent": {
+       "type": "choice",
+       "instructions": "Which agent should handle `task`?",
+       "criteria": {
+        "billing": "Refunds, invoices and payment failures.",
+        "tech": "Bugs, errors and outages in the product."
+       }
+      }
+     },
+     "response": {
+      "model": "m",
+      "answers": {
+       "agent": {
+        "type": "choice",
+        "choice": "billing",
+        "confidence": 0.88,
+        "probabilities": {
+         "billing": 0.88,
+         "tech": 0.12
+        }
+       }
+      },
+      "calibrated": true
+     }
+    }
+   ],
+   "want": {
+    "agent": "billing",
+    "path": [
+     "support",
+     "billing"
+    ],
+    "sure": true,
+    "probabilities": {
+     "billing": 0.88,
+     "tech": 0.12
+    },
+    "calibrated": false,
+    "error": false
+   }
+  },
+  {
+   "name": "duplicate-name-first-wins",
+   "why": "Two nodes at one level share a name. The FIRST is the one that counts: its description is the criterion and it is the node descended into. A last-wins port builds a different criterion or descends into the wrong group, misses the corpus and falls back.",
+   "options": {},
+   "input": {
+    "task": "I was charged twice for March, please refund one.",
+    "agents": [
+     {
+      "name": "support",
+      "description": "Anything a paying customer needs fixed.",
+      "agents": [
+       {
+        "name": "billing",
+        "description": "Refunds, invoices and payment failures."
+       },
+       {
+        "name": "tech",
+        "description": "Bugs, errors and outages in the product."
+       }
+      ]
+     },
+     {
+      "name": "growth",
+      "description": "Leads, pricing and partnerships."
+     },
+     {
+      "name": "support",
+      "description": "A duplicate that must be ignored.",
+      "agents": [
+       {
+        "name": "sales",
+        "description": "Pricing questions and new contracts."
+       },
+       {
+        "name": "partners",
+        "description": "Resellers and integration partners."
+       }
+      ]
+     }
+    ],
+    "fallback": "triage"
+   },
+   "calls": [
+    {
+     "state": {
+      "task": "I was charged twice for March, please refund one.",
+      "role": "You route a task to the agent best suited to do it."
+     },
+     "questions": {
+      "agent": {
+       "type": "choice",
+       "instructions": "Which agent should handle `task`?",
+       "criteria": {
+        "support": "Anything a paying customer needs fixed.",
+        "growth": "Leads, pricing and partnerships."
+       }
+      }
+     },
+     "response": {
+      "model": "m",
+      "answers": {
+       "agent": {
+        "type": "choice",
+        "choice": "support",
+        "confidence": 0.9,
+        "probabilities": {
+         "support": 0.9,
+         "growth": 0.1
+        }
+       }
+      }
+     }
+    },
+    {
+     "state": {
+      "task": "I was charged twice for March, please refund one.",
+      "role": "You route a task to the agent best suited to do it."
+     },
+     "questions": {
+      "agent": {
+       "type": "choice",
+       "instructions": "Which agent should handle `task`?",
+       "criteria": {
+        "billing": "Refunds, invoices and payment failures.",
+        "tech": "Bugs, errors and outages in the product."
+       }
+      }
+     },
+     "response": {
+      "model": "m",
+      "answers": {
+       "agent": {
+        "type": "choice",
+        "choice": "billing",
+        "confidence": 0.88,
+        "probabilities": {
+         "billing": 0.88,
+         "tech": 0.12
+        }
+       }
+      }
+     }
+    }
+   ],
+   "want": {
+    "agent": "billing",
+    "path": [
+     "support",
+     "billing"
+    ],
+    "sure": true,
+    "probabilities": {
+     "billing": 0.88,
+     "tech": 0.12
+    },
+    "calibrated": true,
+    "error": false
+   }
+  }
+ ]
+}

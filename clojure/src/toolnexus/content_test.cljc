@@ -14,13 +14,14 @@
 ;;
 ;; No java.*, no reader conditionals.
 (ns toolnexus.content-test
-  (:require [clojure.string :as str]
+  (:require [toolnexus.shared-examples-test :as te]
+            [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
-            [koine.env :as env]
             [koine.codec :as codec]
             [koine.fs :as fs]
             [koine.json :as json]
             [koine.server :as server]
+            [toolnexus.test-support :as ts]
             [toolnexus.builtin :as builtin]
             [toolnexus.client :as client]
             [toolnexus.content :as content]
@@ -34,7 +35,7 @@
 ;; fixtures
 ;; ---------------------------------------------------------------------------
 
-(defn- examples-dir [] (env/get-env "TN_EXAMPLES"))
+(defn- examples-dir [] (te/examples-dir))
 
 (defn- fixture-path [] (str (examples-dir) "/media/fixture.png"))
 
@@ -453,7 +454,7 @@
   [style script f]
   (let [n        (atom 0)
         requests (atom [])
-        srv      (server/serve
+        srv      (ts/serve
                   (fn [req]
                     (swap! requests conj (json/read-str (str (:body req))))
                     {:status 200
