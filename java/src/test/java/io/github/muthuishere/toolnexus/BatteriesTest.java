@@ -187,6 +187,34 @@ class BatteriesTest {
     }
 
     @Test
+    @SuppressWarnings("unchecked")
+    void toolRelevanceHookFixtures() throws Exception {
+        JsonNode cases = load("tool-relevance.json").get("hookCases");
+        assertTrue(cases != null && cases.size() > 0, "tool-relevance.json: no hookCases");
+        for (JsonNode c : cases) {
+            String name = "tool-relevance.json/hookCases/" + c.get("name").asText();
+            JsonNode o = c.has("options") ? c.get("options") : M.createObjectNode();
+            JsonNode e = c.get("event");
+            List<Object> messages = M.convertValue(e.get("messages"), List.class);
+            List<Map<String, Object>> tools = M.convertValue(e.get("tools"), List.class);
+            var hook = new ToolRelevanceClassifier(classifierFor(c),
+                    new ToolRelevanceClassifier.Options().onError(onError(o)).bands(bands(o)).role(role(o))).asHook(null);
+            LlmClient.LLMOverride ov = hook.apply(new LlmClient.BeforeLLMEvent(messages, tools,
+                    e.path("model").asText(null), e.path("turn").asInt(0)));
+            JsonNode want = c.get("want").get("tools");
+            if (want == null || want.isNull()) {
+                assertTrue(ov == null || ov.tools() == null, name + ": want no tools override, got " + (ov == null ? null : ov.tools()));
+                continue;
+            }
+            assertNotNull(ov, name + ": want a tools override");
+            assertNotNull(ov.tools(), name + ": want a tools override");
+            List<Map<String, Object>> expected = new ArrayList<>();
+            for (JsonNode i : want) expected.add(tools.get(i.asInt()));
+            assertEquals(expected, ov.tools(), name);
+        }
+    }
+
+    @Test
     void skillRelevanceFixtures() throws Exception {
         runFixture("skill-relevance.json", (cl, o, in) -> new SkillRelevanceClassifier(cl,
                 new SkillRelevanceClassifier.Options().onError(onError(o)).bands(bands(o)).role(role(o)))

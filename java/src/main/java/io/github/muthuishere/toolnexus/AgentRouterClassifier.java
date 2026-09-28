@@ -47,7 +47,7 @@ public final class AgentRouterClassifier {
         List<Node> level = agents == null ? List.of() : agents;
         while (!level.isEmpty()) {
             Map<String, String> options = new LinkedHashMap<>();
-            for (Node n : level) options.put(n.name(), n.description());
+            for (Node n : level) options.putIfAbsent(n.name(), n.description());
             Batteries.Asked a;
             try {
                 a = Batteries.ask(c, st, List.of(Judge.choice("agent", "Which agent should handle `task`?", options)), opts.bands);
@@ -60,7 +60,7 @@ public final class AgentRouterClassifier {
             probs = x.raw() instanceof Classifier.ChoiceAnswer ca ? ca.probabilities() : null;
             if (!x.sure()) return new Verdict(fallback, path, false, probs, calibrated, null);
             Node picked = null;
-            for (Node n : level) if (n.name().equals(x.choice())) picked = n;
+            for (Node n : level) if (n.name().equals(x.choice())) { picked = n; break; }
             if (picked == null) return new Verdict(fallback, path, false, probs, calibrated, null);
             path.add(picked.name());
             if (picked.agents().isEmpty()) return new Verdict(picked.name(), path, true, probs, calibrated, null);
