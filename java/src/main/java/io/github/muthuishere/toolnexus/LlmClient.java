@@ -415,8 +415,17 @@ public final class LlmClient {
     public record BeforeLLMEvent(List<Object> messages, List<Map<String, Object>> tools,
                                  String model, int turn) {}
 
-    /** Return value of {@link Hooks#beforeLLM}: non-null fields replace the request's. */
-    public record LLMOverride(List<Object> messages, List<Map<String, Object>> tools) {}
+    /**
+     * Return value of {@link Hooks#beforeLLM}: non-null fields replace the request's.
+     * {@code model}, when non-empty, is transmitted for THIS turn only (request body and the
+     * {@code afterLLM} event); null/empty ⇒ the configured model, verbatim (SPEC §8).
+     */
+    public record LLMOverride(List<Object> messages, List<Map<String, Object>> tools, String model) {
+        public LLMOverride(List<Object> messages, List<Map<String, Object>> tools) { this(messages, tools, null); }
+
+        /** An override that only routes this turn to {@code model}. */
+        public static LLMOverride withModel(String model) { return new LLMOverride(null, null, model); }
+    }
 
     /** Event passed to {@link Hooks#afterLLM}: the raw provider response (carries usage). */
     public record AfterLLMEvent(Map<String, Object> response, String model, int turn) {}
@@ -1088,9 +1097,10 @@ public final class LlmClient {
         Object[] hooked = translateBeforeLLM(messages, declared);
         messages = (List<Object>) hooked[0];
         declared = (List<Map<String, Object>>) hooked[1];
+        String turnModel = (String) hooked[2];
 
         Map<String, Object> body = new LinkedHashMap<>();
-        body.put("model", opts.model);
+        body.put("model", turnModel);
         body.put("messages", messages);
         if (!declared.isEmpty()) body.put("tools", declared);
         if (req.toolChoice != null) body.put("tool_choice", req.toolChoice);
@@ -1103,7 +1113,7 @@ public final class LlmClient {
         if (opts.headers != null) headers.putAll(opts.headers);
 
         Map<String, Object> data = llmCallJson(url, headers, body, newDeadline(), "openai");
-        translateAfterLLM(data);
+        translateAfterLLM(data, turnModel);
 
         Translate.Result out = new Translate.Result();
         out.model = opts.model;
@@ -1158,9 +1168,10 @@ public final class LlmClient {
         Object[] hooked = translateBeforeLLM(messages, declared);
         messages = (List<Object>) hooked[0];
         declared = (List<Map<String, Object>>) hooked[1];
+        String turnModel = (String) hooked[2];
 
         Map<String, Object> body = new LinkedHashMap<>();
-        body.put("model", opts.model);
+        body.put("model", turnModel);
         body.put("max_tokens", req.maxTokens > 0 ? req.maxTokens : 4096);
         if (sys != null && !sys.isEmpty()) body.put("system", sys);
         body.put("messages", messages);
@@ -1176,7 +1187,7 @@ public final class LlmClient {
         if (opts.headers != null) headers.putAll(opts.headers);
 
         Map<String, Object> data = llmCallJson(endpoint, headers, body, newDeadline(), "anthropic");
-        translateAfterLLM(data);
+        translateAfterLLM(data, turnModel);
 
         Translate.Result out = new Translate.Result();
         out.model = opts.model;
@@ -1208,19 +1219,21 @@ public final class LlmClient {
 
     /** Runs {@code beforeLLM} for the single translate call, honoring overrides. */
     private Object[] translateBeforeLLM(List<Object> messages, List<Map<String, Object>> tools) {
-        if (opts.hooks == null || opts.hooks.beforeLLM == null) return new Object[]{messages, tools};
+        if (opts.hooks == null || opts.hooks.beforeLLM == null) return new Object[]{messages, tools, opts.model};
         LLMOverride ov = opts.hooks.beforeLLM.apply(new BeforeLLMEvent(messages, tools, opts.model, 0));
+        String model = opts.model;
         if (ov != null) {
             if (ov.messages() != null) messages = ov.messages();
             if (ov.tools() != null) tools = new ArrayList<>(ov.tools());
+            if (ov.model() != null && !ov.model().isEmpty()) model = ov.model();
         }
-        return new Object[]{messages, tools};
+        return new Object[]{messages, tools, model};
     }
 
     /** Runs {@code afterLLM} for the single translate call. */
-    private void translateAfterLLM(Map<String, Object> data) {
+    private void translateAfterLLM(Map<String, Object> data, String model) {
         if (opts.hooks != null && opts.hooks.afterLLM != null) {
-            opts.hooks.afterLLM.accept(new AfterLLMEvent(data, opts.model, 0));
+            opts.hooks.afterLLM.accept(new AfterLLMEvent(data, model, 0));
         }
     }
 
@@ -1483,14 +1496,16 @@ public final class LlmClient {
         try {
             for (int turn = 0; turn < maxTurns(); turn++) {
                 turns++;
+                String turnModel = opts.model;
                 if (opts.hooks != null && opts.hooks.beforeLLM != null) {
                     LLMOverride ov = opts.hooks.beforeLLM.apply(
                             new BeforeLLMEvent(messages, tools, opts.model, turn));
                     if (ov != null && ov.messages() != null) messages = ov.messages();
                     if (ov != null && ov.tools() != null) tools = ov.tools();
+                    if (ov != null && ov.model() != null && !ov.model().isEmpty()) turnModel = ov.model();
                 }
                 Map<String, Object> body = new LinkedHashMap<>();
-                body.put("model", opts.model);
+                body.put("model", turnModel);
                 body.put("messages", wireMessages(messages, relocated));
                 // §8 Gap 5: omit tools/tool_choice when the effective tool list is empty.
                 if (tools != null && !tools.isEmpty()) {
@@ -1508,7 +1523,7 @@ public final class LlmClient {
                 Map<String, Object> data = llmCallJson(url, headers, body, deadline, "openai");
                 addUsage(usage, (Map<String, Object>) data.get("usage"), "openai");
                 if (opts.hooks != null && opts.hooks.afterLLM != null) {
-                    opts.hooks.afterLLM.accept(new AfterLLMEvent(data, opts.model, turn));
+                    opts.hooks.afterLLM.accept(new AfterLLMEvent(data, turnModel, turn));
                 }
                 List<Object> choices = (List<Object>) data.get("choices");
                 Map<String, Object> message =
@@ -1610,14 +1625,16 @@ public final class LlmClient {
         try {
             for (int turn = 0; turn < maxTurns(); turn++) {
                 turns++;
+                String turnModel = opts.model;
                 if (opts.hooks != null && opts.hooks.beforeLLM != null) {
                     LLMOverride ov = opts.hooks.beforeLLM.apply(
                             new BeforeLLMEvent(messages, tools, opts.model, turn));
                     if (ov != null && ov.messages() != null) messages = ov.messages();
                     if (ov != null && ov.tools() != null) tools = ov.tools();
+                    if (ov != null && ov.model() != null && !ov.model().isEmpty()) turnModel = ov.model();
                 }
                 Map<String, Object> body = new LinkedHashMap<>();
-                body.put("model", opts.model);
+                body.put("model", turnModel);
                 body.put("max_tokens", 4096);
                 if (!system.isEmpty()) body.put("system", system);
                 body.put("messages", messages);
@@ -1634,7 +1651,7 @@ public final class LlmClient {
                 Map<String, Object> data = llmCallJson(endpoint, headers, body, deadline, "anthropic");
                 addUsage(usage, (Map<String, Object>) data.get("usage"), "anthropic");
                 if (opts.hooks != null && opts.hooks.afterLLM != null) {
-                    opts.hooks.afterLLM.accept(new AfterLLMEvent(data, opts.model, turn));
+                    opts.hooks.afterLLM.accept(new AfterLLMEvent(data, turnModel, turn));
                 }
                 List<Object> content = (List<Object>) data.get("content");
                 if (content == null) content = new ArrayList<>();
@@ -1748,13 +1765,15 @@ public final class LlmClient {
         try {
             for (int turn = 0; turn < maxTurns(); turn++) {
                 turns++;
+                String turnModel = opts.model;
                 if (opts.hooks != null && opts.hooks.beforeLLM != null) {
                     LLMOverride ov = opts.hooks.beforeLLM.apply(new BeforeLLMEvent(messages, tools, opts.model, turn));
                     if (ov != null && ov.messages() != null) messages = ov.messages();
                     if (ov != null && ov.tools() != null) tools = ov.tools();
+                    if (ov != null && ov.model() != null && !ov.model().isEmpty()) turnModel = ov.model();
                 }
                 Map<String, Object> body = new LinkedHashMap<>();
-                body.put("model", opts.model);
+                body.put("model", turnModel);
                 body.put("messages", wireMessages(messages, relocated));
                 // §8 Gap 5: omit tools/tool_choice when the effective tool list is empty.
                 if (tools != null && !tools.isEmpty()) {
@@ -1832,7 +1851,7 @@ public final class LlmClient {
                     Map<String, Object> resp = new LinkedHashMap<>();
                     resp.put("streamed", true);
                     resp.put("usage", null);
-                    opts.hooks.afterLLM.accept(new AfterLLMEvent(resp, opts.model, turn));
+                    opts.hooks.afterLLM.accept(new AfterLLMEvent(resp, turnModel, turn));
                 }
 
                 if (order.isEmpty()) {
@@ -1947,13 +1966,15 @@ public final class LlmClient {
         try {
             for (int turn = 0; turn < maxTurns(); turn++) {
                 turns++;
+                String turnModel = opts.model;
                 if (opts.hooks != null && opts.hooks.beforeLLM != null) {
                     LLMOverride ov = opts.hooks.beforeLLM.apply(new BeforeLLMEvent(messages, tools, opts.model, turn));
                     if (ov != null && ov.messages() != null) messages = ov.messages();
                     if (ov != null && ov.tools() != null) tools = ov.tools();
+                    if (ov != null && ov.model() != null && !ov.model().isEmpty()) turnModel = ov.model();
                 }
                 Map<String, Object> body = new LinkedHashMap<>();
-                body.put("model", opts.model);
+                body.put("model", turnModel);
                 body.put("max_tokens", 4096);
                 if (!system.isEmpty()) body.put("system", system);
                 body.put("messages", messages);
@@ -2033,7 +2054,7 @@ public final class LlmClient {
                 if (opts.hooks != null && opts.hooks.afterLLM != null) {
                     Map<String, Object> resp = new LinkedHashMap<>();
                     resp.put("streamed", true);
-                    opts.hooks.afterLLM.accept(new AfterLLMEvent(resp, opts.model, turn));
+                    opts.hooks.afterLLM.accept(new AfterLLMEvent(resp, turnModel, turn));
                 }
 
                 // Build the assistant content blocks from what we assembled.

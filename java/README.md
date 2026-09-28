@@ -72,6 +72,21 @@ and replays them offline; `Classifier.fromRecorded(...)` is the one-line hermeti
 `classifier.evaluateBatch(states, questions)` asks the same questions of many states (state order,
 fail-closed, 16 in flight). Name the state field each question judges; never copy the role into it.
 
+Eight ready-made batteries (SPEC.md §8B *Batteries*) wrap a `Classifier`: `ToolGuardClassifier`,
+`ToolRelevanceClassifier`, `SkillRelevanceClassifier`, `ToolResultFilterClassifier`,
+`IsCompleteClassifier`, `AgentRouterClassifier`, `ContentGuardClassifier`, `ModelRouterClassifier`.
+Each has a standalone method returning a typed `Verdict` and, where a seam exists, `asHook(next)`:
+
+```java
+var guard = new ToolGuardClassifier(classifier, new ToolGuardClassifier.Options().onError(Batteries.OnError.CLOSED));
+var router = new ModelRouterClassifier(classifier, List.of(
+        new ModelRouterClassifier.Model("small-fast", "Short factual answers; cheapest."),
+        new ModelRouterClassifier.Model("large-reasoning", "Multi-step reasoning; most expensive.")));
+new LlmClient.Hooks().beforeTool(guard.asHook(null)).beforeLLM(router.asHook(null));
+```
+
+A `beforeLLM` hook may return `LLMOverride.withModel(id)`: that turn only is sent to `id`.
+
 ## Documentation
 
 Everything else — the full surface, with runnable examples — lives on the docs site:
