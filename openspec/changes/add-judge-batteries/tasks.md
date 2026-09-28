@@ -21,3 +21,13 @@
 - [x] 3.2 New test per port: override `model` is transmitted for that turn; absent ⇒ configured
 - [x] 3.3 Every port's full suite green
 - [x] 3.4 Adversarial review of the diff
+
+## 4. Follow-up gaps (review of the batteries diff)
+- [x] 4.1 beforeLLM failure stops the call in every loop + translate (Go `Translate` bug; Elixir `{:error,_}`); SPEC §8 + delta; tests in all 7 ports
+- [x] 4.2 AgentRouter duplicate names: first node wins (criterion + descent); SPEC §8B; fixture `duplicate-name-first-wins`; fixed go/java/csharp/clojure (descent) and js/python/elixir (criterion)
+- [x] 4.3 Provider tool entry absent/non-string name/description ⇒ `""`; SPEC §8B; `tool-relevance.json` `hookCases` (2 cases); fixed clojure/python/elixir
+- [x] 4.4 Reported model = transmitted model (`llm`/`run` metrics, RunResult.model, translate result.model); SPEC §8/§11 + delta; all 7 ports
+- [x] 4.5 Model-override tests for every loop (run/stream × openai/anthropic, translate, agent run) in all 7 ports (clojure: no streaming loop)
+- [x] 4.6 Cookbook Batteries tabs for Java, C#, Elixir, Clojure (Java + C# snippets compile-checked)
+- [x] 4.7 js package-lock version 0.20.0
+- [x] 4.8 Mutation check of the new fixture cases in every port

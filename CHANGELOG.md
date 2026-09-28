@@ -41,6 +41,29 @@ To make the router possible, a **`beforeLLM` hook may now return `model`** for t
 body and `afterLLM` event). Absent or empty, the configured model is sent exactly as before, in
 every client style and in streaming.
 
+When a hook does route a turn, **everything that reports a model now reports the one that was
+sent**: that turn's `llm` metric event, `RunResult.model` and the `run` metric event (the last
+model call's model), and `translate`'s `result.model`. Without an override they report the
+configured model, as before. Before this, a routed run was billed and graphed under a model it
+never called.
+
+**A failing `beforeLLM` hook now stops the call in every port and every entry point.** Go's
+`Translate` ignored the hook's error and sent the request anyway; each port's run, stream, agent
+and translate loops are now tested to return the hook's error with no provider request sent. This
+is what makes a blocking ContentGuard actually block under `translate`.
+
+Two battery edge cases now agree across ports, each pinned by a shared fixture case:
+**AgentRouter with duplicate names at one level uses the first node** (its description, its
+subtree; Go, Java, C# and Clojure took the last node, js, Python and Elixir the last
+description), and **a provider tool entry whose name or description is missing or not a string
+reads as `""`** in the ToolRelevance hook (Clojure read nil; Python and Elixir stringified `5` to
+`"5"`). Elixir: a `before_llm` hook returning `{:error, reason}` was treated as "no override" and
+now raises `Toolnexus.HookError`. Clojure: a pending run now emits its `run` metric event.
+
+Not changed: in the §7D agent run (C#, Python, Elixir) a hook failure surfaces as the runtime's
+error result rather than a raised exception, as every agent-run failure does; no request is sent.
+Clojure has no streaming loop, so its streaming rows do not apply.
+
 Every battery requires you to say what a classifier error means — `onError: "open"` or `"closed"`,
 no default — because failing open or closed is your policy, not ours; the routers fall back to your
 fallback instead. Verdicts carry `calibrated`, since a threshold tuned on one backend does not
@@ -53,7 +76,7 @@ and allowlists stay in your code. The default role and question wording is part 
 the system prompt (outside `messages` in the anthropic style), there is no completion seam, and
 there is no uniform subagent seam. Question text can be overridden only through `role` (and
 `dimensions` for ContentGuard). Hooks re-judge every turn (one classifier call per attached battery
-per turn). Metric events keep reporting the configured model when a router overrides it. None of
+per turn). None of
 the thresholds has been tuned against a live backend; ADR 0035's live evidence items are still open.
 
 ### Simple judgments: `ask`, `gate`, `State`, `Policy`, `Tape` and `evaluateBatch`, in all seven ports
