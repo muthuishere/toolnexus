@@ -20,4 +20,4 @@
 - [x] 3.1 Existing verbatim-model conformance tests still pass in every port
 - [x] 3.2 New test per port: override `model` is transmitted for that turn; absent ⇒ configured
 - [x] 3.3 Every port's full suite green
-- [ ] 3.4 Adversarial review of the diff
+- [x] 3.4 Adversarial review of the diff
