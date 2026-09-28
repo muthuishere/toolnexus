@@ -31,7 +31,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/** Shared fixture: {@code examples/agent-hooks/fixture.json} (scenarios H1-H6). */
+/** Shared fixture: {@code examples/agent-hooks/fixture.json} (scenarios H1-H7). */
 /**
  * SPEC §7D "The §8 seams on an agent run" — {@code hooks} / {@code onMetric} on
  * {@link RuntimeOptions} and {@link AgentDef}: forwarded verbatim into the client the runtime
@@ -304,6 +304,26 @@ class AgentHooksTest {
             } finally {
                 rt.close(rt.root);
             }
+        }
+    }
+
+    // ---------- 7. H7: a failing beforeLLM is an error result at the handle boundary ----------
+    // (the level-1 loop run THROWS — BeforeLLMContractTest, Entry.AGENT). Neither sends a request.
+
+    @Test
+    void h7_failingBeforeLLM_isAnErrorResultAtTheHandleBoundary_noRequest() {
+        Map<String, AgentDef> registry = reg(new AgentDef("a", "x", "", "m-hooks-7")
+                .hooks(new LlmClient.Hooks().beforeLLM(ev -> { throw new IllegalStateException("hook boom"); })));
+        AgentRuntime rt = new AgentRuntime(opts(registry));
+        try {
+            Handle h = rt.spawn(rt.root, "a").handle();
+            TaskResult r = rt.runTurn(h, "hello");
+            assertTrue(r.isError(), r.text());
+            assertEquals("error", r.status());
+            assertTrue(r.text().contains("hook boom"), r.text());
+            assertEquals(null, mock.sent.get("m-hooks-7"), "no provider request may be sent");
+        } finally {
+            rt.close(rt.root);
         }
     }
 }
