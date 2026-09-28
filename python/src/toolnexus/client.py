@@ -1303,9 +1303,9 @@ class Client:
         declared = list(toolkit.to_openai()) if toolkit is not None else []
         declared.extend(tools or [])
 
-        msgs, declared = await self._translate_before_llm(msgs, declared)
+        msgs, declared, turn_model = await self._translate_before_llm(msgs, declared)
 
-        payload: dict[str, Any] = {"model": self.model, "messages": msgs}
+        payload: dict[str, Any] = {"model": turn_model, "messages": msgs}
         if declared:
             payload["tools"] = declared
         if tool_choice is not None:
@@ -1315,7 +1315,7 @@ class Client:
         payload = self._finalize_body(payload)
 
         data = await self._llm_call_json(endpoint, req_headers, payload, self._deadline(), cancel, "openai")
-        await self._translate_after_llm(data)
+        await self._translate_after_llm(data, turn_model)
 
         usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         _add_usage(usage, data.get("usage"), "openai")
@@ -1368,10 +1368,10 @@ class Client:
         declared = list(toolkit.to_anthropic()) if toolkit is not None else []
         declared.extend(openai_tools_to_anthropic(tools))
 
-        msgs, declared = await self._translate_before_llm(msgs, declared)
+        msgs, declared, turn_model = await self._translate_before_llm(msgs, declared)
 
         payload: dict[str, Any] = {
-            "model": self.model,
+            "model": turn_model,
             "max_tokens": max_tokens if max_tokens > 0 else 4096,
             "messages": msgs,
         }
@@ -1385,7 +1385,7 @@ class Client:
         payload = self._finalize_body(payload)
 
         data = await self._llm_call_json(endpoint, req_headers, payload, self._deadline(), cancel, "anthropic")
-        await self._translate_after_llm(data)
+        await self._translate_after_llm(data, turn_model)
 
         usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         _add_usage(usage, data.get("usage"), "anthropic")
@@ -1415,24 +1415,28 @@ class Client:
 
     async def _translate_before_llm(
         self, messages: list[Any], tools: list[Any]
-    ) -> tuple[list[Any], list[Any]]:
-        """Run ``before_llm`` for the single translate call, honoring overrides."""
+    ) -> tuple[list[Any], list[Any], str]:
+        """Run ``before_llm`` for the single translate call, honoring overrides
+        (a non-empty ``model`` applies to this call only)."""
+        model = self.model
         before = _get_hook(self.hooks, "before_llm")
         if before is None:
-            return messages, tools
+            return messages, tools, model
         ov = await _call_hook(before, {"messages": messages, "tools": tools, "model": self.model, "turn": 0})
         if ov:
             if ov.get("messages") is not None:
                 messages = ov["messages"]
             if ov.get("tools") is not None:
                 tools = ov["tools"]
-        return messages, tools
+            if ov.get("model"):
+                model = ov["model"]
+        return messages, tools, model
 
-    async def _translate_after_llm(self, data: dict[str, Any]) -> None:
+    async def _translate_after_llm(self, data: dict[str, Any], model: str) -> None:
         """Run ``after_llm`` for the single translate call."""
         after = _get_hook(self.hooks, "after_llm")
         if after is not None:
-            await _call_hook(after, {"response": data, "model": self.model, "turn": 0})
+            await _call_hook(after, {"response": data, "model": model, "turn": 0})
 
     async def run(
         self,
