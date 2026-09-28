@@ -2053,6 +2053,18 @@ configured one client has configured the other. Idiomatic names per port, as eve
   provider exposes token probabilities the backend reads them; otherwise the model's self-reported
   number passes through with `calibrated: false`. This is what makes the seam vendor-neutral: a host
   with no System One credential runs the same questions on a cheap chat model.
+  **Model profile (`llmProfile`, optional; Go first, other ports to follow).** Absent ⇒ the legacy
+  prompt-only request. Present, it is per-model data, never model-specific code:
+  `response_format` (`json_schema` built from the questions — default — | `json_object` | `none`),
+  `probability` (`self` — default — | `logprobs`: noul answers are asked as a boolean `verdict` and
+  P(true) is read from that token's `top_logprobs`; `calibrated` is true only when every noul came
+  from its token), `max_tokens`, `temperature` (default 0), and `request_params` (e.g.
+  `{"reasoning_effort":"none"}` switches thinking off on reasoning models). In every mode the answer
+  is read from the message **content, never a reasoning field**; the first complete JSON object is
+  taken (fences and trailing text ignored); an answer is normalised to the asked type only when that
+  is unambiguous (a yes/no choice, a bare number or boolean, a missing `answers` envelope) and
+  otherwise the evaluate fails closed naming the key, with `finish_reason` appended when it was not
+  `stop`.
 - **`custom`** — the host's `evaluate`: a fine-tuned encoder, a rules engine, or a cache in front of
   either.
 - **`static`** — recorded decisions, keyed by the canonical request. **This is what CI runs**: no

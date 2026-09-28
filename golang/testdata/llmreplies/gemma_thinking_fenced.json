@@ -1,0 +1,37 @@
+{
+ "choices": [
+  {
+   "index": 0,
+   "message": {
+    "role": "assistant",
+    "content": "{\"answers\":{\"supported\":{\"type\":\"noul\",\"verdict\":true}}}",
+    "refusal": null,
+    "annotations": null,
+    "audio": null,
+    "function_call": null,
+    "reasoning": "*   Premise: \"Employees get 25 vacation days per year.\"\n    *   Hypothesis: \"Employees get 25 vacation days.\"\n    *   Question: Does the premise support the hypothesis?\n\n    *   Premise: 25 vacation days *per year*.\n    *   Hypothesis: 25 vacation days.\n\n    *   The premise specifies the frequency (per year).\n    *   The hypothesis states the amount (25 vacation days).\n    *   If someone gets 25 vacation days per year, it is true that they get 25 vacation days (within that context).\n    *   In NLI (Natural Language Inference) tasks, if the hypothesis is a subset or a direct implication of the premise, it is \"supported\" (entailment).\n    *   The hypothesis \"Employees get 25 vacation days\" is a direct consequence of \"Employees get 25 vacation days per year.\"\n\n    *   The verdict should be `true`."
+   },
+   "logprobs": null,
+   "finish_reason": "stop",
+   "stop_reason": 106,
+   "token_ids": null,
+   "routed_experts": null
+  }
+ ],
+ "created": 1790559899,
+ "ec_transfer_params": null,
+ "metrics": null,
+ "model": "gemma-4-26b-a4b-it",
+ "object": "chat.completion",
+ "service_tier": null,
+ "system_fingerprint": null,
+ "usage": {
+  "prompt_tokens": 89,
+  "total_tokens": 322,
+  "completion_tokens": 233,
+  "prompt_tokens_details": null,
+  "completion_tokens_details": {
+   "reasoning_tokens": 215
+  }
+ }
+}

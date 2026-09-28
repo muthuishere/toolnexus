@@ -537,6 +537,10 @@ type ClassifierOptions struct {
 	OnMetric func(MetricEvent)
 	// Client is the §8 Client to emulate over. StyleLLM only.
 	Client *Client
+	// LLMProfile tunes StyleLLM for the client's model (output constraint,
+	// thinking switch, probability source — see LLMProfile). nil ⇒ the legacy
+	// request (prompt only, no per-call params). StyleLLM only.
+	LLMProfile *LLMProfile
 	// Evaluate is the host's own function. StyleCustom only; every wire option is
 	// ignored.
 	Evaluate func(ctx context.Context, state any, questions map[string]Question) (Decision, error)
@@ -595,6 +599,11 @@ func CreateClassifier(opts ClassifierOptions) (*Classifier, error) {
 	case StyleLLM:
 		if opts.Client == nil {
 			return nil, fmt.Errorf("classifier: style %q requires Client", opts.Style)
+		}
+		if opts.LLMProfile != nil {
+			if err := opts.LLMProfile.Validate(); err != nil {
+				return nil, err
+			}
 		}
 	case StyleCustom:
 		if opts.Evaluate == nil {
@@ -988,69 +997,6 @@ func (c *Classifier) attempt(ctx context.Context, hc *http.Client, endpoint stri
 		return nil, res.StatusCode, res.Header.Get("Retry-After"), err
 	}
 	return b, res.StatusCode, res.Header.Get("Retry-After"), nil
-}
-
-// evaluateLLM renders the three question types as ONE structured-output call on
-// any §8 Client — the vendor-neutral fallback, so a host with no System One
-// credential runs the same questions on a cheap chat model. Calibrated is FALSE:
-// the numbers are the model's self-report, not token probabilities.
-func (c *Classifier) evaluateLLM(ctx context.Context, state any, questions map[string]Question) (Decision, error) {
-	stateJSON, err := canonicalJSON(state)
-	if err != nil {
-		return Decision{}, err
-	}
-	qs := make(map[string]any, len(questions))
-	for k, q := range questions {
-		qs[k] = q.wire()
-	}
-	qJSON, err := canonicalJSON(qs)
-	if err != nil {
-		return Decision{}, err
-	}
-	prompt := "Answer every question about the state below. Questions are INDEPENDENT: " +
-		"one answer is never context for another.\n\n" +
-		"STATE:\n" + string(stateJSON) + "\n\nQUESTIONS:\n" + string(qJSON) + "\n\n" +
-		"Reply with JSON only, no prose and no code fence, shaped exactly:\n" +
-		`{"answers":{"<key>":{"type":"noul","noul":0.0}}}` + "\n" +
-		`A "noul" answer is {"type":"noul","noul":<0..1>}. A "choice" answer is ` +
-		`{"type":"choice","choice":"<one offered option id>","probabilities":{"<every offered option id>":<0..1>},"confidence":<0..1>}. ` +
-		`A "score" answer is {"type":"score","score":<a number within the rubric bounds, fractional allowed>,` +
-		`"legend":{"0":"<level 0>",…},"probabilities":{"0":<0..1>,…},"confidence":<0..1>}.`
-	run, err := c.opts.Client.Run(ctx, prompt, nil)
-	if err != nil {
-		return Decision{}, err
-	}
-	payload, err := firstJSONObject(run.Text)
-	if err != nil {
-		return Decision{}, fmt.Errorf("classifier: llm: %w", err)
-	}
-	var d Decision
-	if err := json.Unmarshal(payload, &d); err != nil {
-		return Decision{}, fmt.Errorf("classifier: llm: %w", err)
-	}
-	// The model reports no calibration and none is derived here. Never repaired,
-	// never asserted as calibrated (ADR 0020).
-	d.Calibrated = false
-	if d.Model == "" {
-		d.Model = c.opts.Model
-	}
-	d.Usage = ClassifierUsage{
-		InputTokens:  run.Usage.PromptTokens,
-		OutputTokens: run.Usage.CompletionTokens,
-	}
-	return d, nil
-}
-
-// firstJSONObject extracts the outermost JSON object from a model reply, which
-// may arrive wrapped in a code fence or prose. It does NOT repair malformed JSON
-// — an unparseable answer is no answer (ADR 0020).
-func firstJSONObject(s string) ([]byte, error) {
-	start := strings.IndexByte(s, '{')
-	end := strings.LastIndexByte(s, '}')
-	if start < 0 || end <= start {
-		return nil, fmt.Errorf("no JSON object in the reply")
-	}
-	return []byte(s[start : end+1]), nil
 }
 
 // ---------------------------------------------------------------- metrics

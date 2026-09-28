@@ -1,0 +1,37 @@
+{
+ "choices": [
+  {
+   "index": 0,
+   "message": {
+    "role": "assistant",
+    "content": "\n\n{\"answers\":{\"supported\":{\"type\":\"noul\",\"verdict\":true}}}",
+    "refusal": null,
+    "annotations": null,
+    "audio": null,
+    "function_call": null,
+    "reasoning": "The user wants to determine if the premise supports the hypothesis.\nPremise: \"Employees get 25 vacation days per year.\"\nHypothesis: \"Employees get 25 vacation days.\"\n\nThe premise explicitly states that employees get 25 vacation days per year. The hypothesis states that employees get 25 vacation days. The hypothesis is directly supported by the premise.\nTherefore, the verdict should be true.\n\nFormat required: JSON only: {\"answers\":{\"supported\":{\"type\":\"noul\",\"verdict\":<true|false>}}}\nSo, {\"answers\":{\"supported\":{\"type\":\"noul\",\"verdict\":true}}}\nCheck constraints: \"Reply JSON only: {\"answers\":{\"supported\":{\"type\":\"noul\",\"verdict\":<true|false>}}}\"\nMatches exactly.\nDone. \nOutput matches requirement.\u2705\n"
+   },
+   "logprobs": null,
+   "finish_reason": "stop",
+   "stop_reason": null,
+   "token_ids": null,
+   "routed_experts": null
+  }
+ ],
+ "created": 1790559899,
+ "ec_transfer_params": null,
+ "metrics": null,
+ "model": "qwen3.6-35b-a3b",
+ "object": "chat.completion",
+ "service_tier": null,
+ "system_fingerprint": null,
+ "usage": {
+  "prompt_tokens": 85,
+  "total_tokens": 277,
+  "completion_tokens": 192,
+  "prompt_tokens_details": null,
+  "completion_tokens_details": {
+   "reasoning_tokens": 174
+  }
+ }
+}
