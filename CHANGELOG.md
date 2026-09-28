@@ -60,9 +60,22 @@ reads as `""`** in the ToolRelevance hook (Clojure read nil; Python and Elixir s
 `"5"`). Elixir: a `before_llm` hook returning `{:error, reason}` was treated as "no override" and
 now raises `Toolnexus.HookError`. Clojure: a pending run now emits its `run` metric event.
 
-Not changed: in the §7D agent run (C#, Python, Elixir) a hook failure surfaces as the runtime's
-error result rather than a raised exception, as every agent-run failure does; no request is sent.
-Clojure has no streaming loop, so its streaming rows do not apply.
+**On a §7D agent, a failing hook now has one pinned shape in all seven ports** (SPEC §8 + §7D
+*Errors*, fixture `examples/agent-hooks` H7): the agent's level-1 **loop run throws** the hook's
+error, and a **runtime handle turn** (`runTurn`, `wake` + `wait`, the one-shot agent run) resolves
+the §7D boundary result — `isError: true`, `status: "error"`, the hook's message — so a hook
+failing inside a child agent reaches the parent's model like any other failure. No request is
+sent either way. This was already the behaviour everywhere; what differed was which entry point
+each port tested (C# and Python covered only the handle turn, Go none, js/Java/Clojure only the
+loop), so it could have drifted unseen. Every port now tests both. Clojure has no streaming loop,
+so its streaming rows do not apply.
+
+**Clojure: a per-call model is serialised once.** A string key in `:request-params` (including
+the `"model"` the agent Loop sets for `(run lp prompt {:model …})`) sat beside the body's own
+keyword key, so the request JSON carried `"model"` twice; which one a provider honoured was up to
+its parser. Param keys are now canonicalised before the merge, so a param replaces the built-in
+field. The same fix makes a string `"messages"`/`"tools"`/`"stream"` param as forbidden as the
+keyword spelling (before, it silently replaced the conversation).
 
 Every battery requires you to say what a classifier error means — `onError: "open"` or `"closed"`,
 no default — because failing open or closed is your policy, not ours; the routers fall back to your

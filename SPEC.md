@@ -1198,7 +1198,9 @@ prose that names a status value must say which vocabulary it is drawing from (is
 Mechanical retry/backoff (§8) runs at the level where the failure occurred. A failed
 child Run crosses the handle boundary as a uniform `isError` result — **never an
 exception** — for the parent's model to judge (reprompt / respawn / reroute / abandon).
-Only the root may throw to the host.
+Only the root may throw to the host. A failing `beforeLLM` hook (§8) follows this rule too: it
+throws from a level-1 loop run and is an `isError`/`status:"error"` result at a handle boundary,
+with no provider request sent in either case.
 
 ### Lifecycle & runtime obligations
 
@@ -1494,7 +1496,11 @@ observe; the noted ones may mutate or short-circuit.
   run) and in `translate`: the error (a thrown exception, a rejected promise, Go's returned
   `error`, an Elixir `{:error, _}`/raise) propagates to the caller as that entry point's failure,
   and **no provider request is sent** for that turn. It is never swallowed, logged-and-ignored, or
-  retried.
+  retried. On a §7D agent the same failure has exactly two shapes, identical in all seven ports:
+  the agent's **level-1 loop run throws/raises** the hook's error, and a **runtime handle turn**
+  (`runTurn`, `wake` + `wait`, the one-shot agent run) resolves the §7D *one boundary rule*
+  result — `isError: true`, `status: "error"`, text = the hook's message. Neither sends a request
+  (fixture `examples/agent-hooks` H7).
 - `afterLLM({ response, model, turn })` → observe (logging, cost, tracing). `response` is
   the raw provider payload (carries `usage`).
 - `beforeTool({ name, args, id, turn })` → return `{ result }` to **short-circuit** the tool

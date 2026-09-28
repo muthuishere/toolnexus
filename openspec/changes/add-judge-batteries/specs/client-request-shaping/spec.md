@@ -34,7 +34,9 @@ the model transmitted: the turn's `llm` metric event, `RunResult.model` and the 
 When a `beforeLLM` hook fails (throws, rejects, or returns an error in the port's idiom), the entry
 point SHALL fail with that error and SHALL NOT send a provider request for that turn. This holds in
 every loop — run, stream, the agent run — in every client style, and in the single-call
-`translate`. The failure SHALL NOT be swallowed, ignored or retried.
+`translate`. The failure SHALL NOT be swallowed, ignored or retried. On a §7D agent, a level-1
+loop run SHALL throw the hook's error, and a runtime handle turn SHALL resolve it as the §7D
+boundary result (`isError: true`, `status: "error"`) — identically in all seven ports.
 
 #### Scenario: Translate stops on a hook error
 
@@ -45,3 +47,13 @@ every loop — run, stream, the agent run — in every client style, and in the 
 
 - **WHEN** `beforeLLM` fails on the first turn of a streamed run
 - **THEN** the stream ends with that error and the provider receives no request
+
+#### Scenario: A level-1 agent loop run throws on a hook error
+
+- **WHEN** an agent's `beforeLLM` fails with "hook boom" and the agent's level-1 loop runs a prompt
+- **THEN** the loop run throws or raises that error in every port and the provider receives no request
+
+#### Scenario: A handle turn resolves a hook error as an error result
+
+- **WHEN** an agent's `beforeLLM` fails with "hook boom" and a runtime handle for that agent runs one turn
+- **THEN** the turn resolves `isError: true`, `status: "error"`, text containing "hook boom", never an exception, and the provider receives no request

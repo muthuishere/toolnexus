@@ -31,3 +31,9 @@
 - [x] 4.6 Cookbook Batteries tabs for Java, C#, Elixir, Clojure (Java + C# snippets compile-checked)
 - [x] 4.7 js package-lock version 0.20.0
 - [x] 4.8 Mutation check of the new fixture cases in every port
+
+## 5. Follow-up gaps (owner, 2026-09-28)
+- [x] 5.1 Agent-run hook-failure parity pinned: loop run throws, handle turn = `isError`/`"error"`, no request; SPEC §8 + §7D *Errors* + delta scenarios; fixture `examples/agent-hooks` H7; both entry points tested in all 7 ports (behaviour already agreed — no library change)
+- [x] 5.2 Clojure translate-model-override flake: root cause = cljgo's koine/bri server binds the wildcard `:0`, and macOS hands it ports another process holds on 127.0.0.1 (which then receives the requests → Go "404 page not found"); fixed with a probe handshake in test-only `toolnexus.test-support/serve`, used by every test server; 50/50 green under a deliberate port-shadowing load (was 3/3 red), 50/50 quiet
+- [x] 5.3 Clojure `:request-params` keys canonicalised: exactly one `model` on the wire for a per-call model (run, translate, agent Loop); string-spelled forbidden keys now forbidden
+- [x] 5.4 golang gofmt clean; CI go job fails on `gofmt -l` output
