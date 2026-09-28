@@ -466,7 +466,7 @@ defmodule Toolnexus.Client do
 
     data =
       llm_call_json(
-        client,
+        %{client | model: tmodel},
         openai_url(client),
         headers_for(client, key),
         finalize_body(client, body)
@@ -490,7 +490,7 @@ defmodule Toolnexus.Client do
       tool_calls: calls,
       finish_reason: finish,
       usage: usage,
-      model: client.model,
+      model: tmodel,
       raw: data
     }
   end
@@ -535,7 +535,7 @@ defmodule Toolnexus.Client do
 
     data =
       llm_call_json(
-        client,
+        %{client | model: tmodel},
         anthropic_url(client),
         headers_for(client, key),
         finalize_body(client, body)
@@ -568,7 +568,7 @@ defmodule Toolnexus.Client do
       tool_calls: calls,
       finish_reason: Translate.finish_reason_for(calls != [], data["stop_reason"]),
       usage: usage,
-      model: client.model,
+      model: tmodel,
       raw: data
     }
   end
@@ -1300,6 +1300,10 @@ defmodule Toolnexus.Client do
             {Map.get(ov, :messages) || messages, Map.get(ov, :tools) || tools,
              turn_model(client, Map.get(ov, :model))}
 
+          {:error, reason} ->
+            # SPEC §8: a failing before_llm stops the call — never swallowed.
+            raise Toolnexus.HookError, hook: "before_llm", reason: reason
+
           _ ->
             {messages, tools, client.model}
         end
@@ -1313,6 +1317,9 @@ defmodule Toolnexus.Client do
   # after_llm event); absent/nil/empty => the configured model verbatim.
   defp turn_model(_client, m) when is_binary(m) and m != "", do: m
   defp turn_model(client, _), do: client.model
+
+  # The client as the run reports it: `model` = the last model call's transmitted model.
+  defp rc(client, st), do: %{client | model: Map.get(st, :model) || client.model}
 
   defp after_llm(client, response, turn, model) do
     case hook(client, :after_llm) do
@@ -1660,7 +1667,16 @@ defmodule Toolnexus.Client do
 
     messages = messages ++ [user_message(prompt)]
     tools = Enum.map(tools_of(toolkit), &to_openai_schema/1)
-    st = %{messages: messages, tools: tools, tool_calls: [], usage: zero_usage(), turns: 0}
+
+    st = %{
+      messages: messages,
+      tools: tools,
+      tool_calls: [],
+      usage: zero_usage(),
+      turns: 0,
+      model: client.model
+    }
+
     loop_openai(client, toolkit, key, run_start, st, 0)
   end
 
@@ -1668,7 +1684,7 @@ defmodule Toolnexus.Client do
   # LIMIT stop — status "incomplete", never a silent "done".
   defp loop_openai(client, _toolkit, _key, run_start, st, turn) when turn >= client.max_turns do
     end_run(
-      client,
+      rc(client, st),
       run_start,
       last_text(st.messages),
       st.messages,
@@ -1682,19 +1698,19 @@ defmodule Toolnexus.Client do
   defp loop_openai(client, toolkit, key, run_start, st, turn) do
     st = %{st | turns: st.turns + 1}
     {messages, tools, tmodel} = before_llm(client, st.messages, st.tools, turn)
-    st = %{st | messages: messages, tools: tools}
+    st = %{st | messages: messages, tools: tools, model: tmodel}
 
     data =
       try do
         llm_call_json(
-          client,
+          %{client | model: tmodel},
           openai_url(client),
           headers_for(client, key),
           openai_body(%{client | model: tmodel}, messages, tools, false)
         )
       rescue
         e ->
-          emit_run_error(client, run_start, st.tool_calls, st.turns, st.usage, e)
+          emit_run_error(rc(client, st), run_start, st.tool_calls, st.turns, st.usage, e)
           reraise e, __STACKTRACE__
       end
 
@@ -1706,7 +1722,7 @@ defmodule Toolnexus.Client do
 
     if calls == [] do
       end_run(
-        client,
+        rc(client, st),
         run_start,
         msg["content"] || "",
         st.messages,
@@ -1726,7 +1742,15 @@ defmodule Toolnexus.Client do
       # later suspensions' placeholder results never enter the transcript.
       case fold_openai_results(st, settled) do
         {:halted, st, request} ->
-          pending_run(client, run_start, request, st.messages, st.tool_calls, st.turns, st.usage)
+          pending_run(
+            rc(client, st),
+            run_start,
+            request,
+            st.messages,
+            st.tool_calls,
+            st.turns,
+            st.usage
+          )
 
         {:ok, st} ->
           loop_openai(client, toolkit, key, run_start, st, turn + 1)
@@ -1759,31 +1783,49 @@ defmodule Toolnexus.Client do
         else: [user_message(prompt)]
 
     tools = Enum.map(tools_of(toolkit), &to_anthropic_schema/1)
-    st = %{messages: messages, tools: tools, tool_calls: [], usage: zero_usage(), turns: 0}
+
+    st = %{
+      messages: messages,
+      tools: tools,
+      tool_calls: [],
+      usage: zero_usage(),
+      turns: 0,
+      model: client.model
+    }
+
     loop_anthropic(client, toolkit, key, sys, run_start, st, 0)
   end
 
   defp loop_anthropic(client, _toolkit, _key, _sys, run_start, st, turn)
        when turn >= client.max_turns do
-    end_run(client, run_start, "", st.messages, st.tool_calls, st.turns, st.usage, "incomplete")
+    end_run(
+      rc(client, st),
+      run_start,
+      "",
+      st.messages,
+      st.tool_calls,
+      st.turns,
+      st.usage,
+      "incomplete"
+    )
   end
 
   defp loop_anthropic(client, toolkit, key, sys, run_start, st, turn) do
     st = %{st | turns: st.turns + 1}
     {messages, tools, tmodel} = before_llm(client, st.messages, st.tools, turn)
-    st = %{st | messages: messages, tools: tools}
+    st = %{st | messages: messages, tools: tools, model: tmodel}
 
     data =
       try do
         llm_call_json(
-          client,
+          %{client | model: tmodel},
           anthropic_url(client),
           headers_for(client, key),
           anthropic_body(%{client | model: tmodel}, sys, messages, tools, false)
         )
       rescue
         e ->
-          emit_run_error(client, run_start, st.tool_calls, st.turns, st.usage, e)
+          emit_run_error(rc(client, st), run_start, st.tool_calls, st.turns, st.usage, e)
           reraise e, __STACKTRACE__
       end
 
@@ -1795,7 +1837,7 @@ defmodule Toolnexus.Client do
 
     if uses == [] do
       text = content |> Enum.filter(&(&1["type"] == "text")) |> Enum.map_join("", & &1["text"])
-      end_run(client, run_start, text, st.messages, st.tool_calls, st.turns, st.usage)
+      end_run(rc(client, st), run_start, text, st.messages, st.tool_calls, st.turns, st.usage)
     else
       call_specs = Enum.map(uses, fn use -> {use["id"], use["name"], use["input"] || %{}} end)
       settled = exec_calls(client, toolkit, call_specs, turn)
@@ -1822,7 +1864,15 @@ defmodule Toolnexus.Client do
       }
 
       if halted do
-        pending_run(client, run_start, halted, st.messages, st.tool_calls, st.turns, st.usage)
+        pending_run(
+          rc(client, st),
+          run_start,
+          halted,
+          st.messages,
+          st.tool_calls,
+          st.turns,
+          st.usage
+        )
       else
         loop_anthropic(client, toolkit, key, sys, run_start, st, turn + 1)
       end
@@ -1867,7 +1917,16 @@ defmodule Toolnexus.Client do
 
     messages = messages ++ [user_message(prompt)]
     tools = Enum.map(tools_of(toolkit), &to_openai_schema/1)
-    st = %{messages: messages, tools: tools, tool_calls: [], usage: zero_usage(), turns: 0}
+
+    st = %{
+      messages: messages,
+      tools: tools,
+      tool_calls: [],
+      usage: zero_usage(),
+      turns: 0,
+      model: client.model
+    }
+
     stream_loop_openai(client, toolkit, key, run_start, st, 0, emit)
   end
 
@@ -1877,7 +1936,7 @@ defmodule Toolnexus.Client do
       type: "done",
       result:
         end_run(
-          client,
+          rc(client, st),
           run_start,
           last_text(st.messages),
           st.messages,
@@ -1892,7 +1951,7 @@ defmodule Toolnexus.Client do
   defp stream_loop_openai(client, toolkit, key, run_start, st, turn, emit) do
     st = %{st | turns: st.turns + 1}
     {messages, tools, tmodel} = before_llm(client, st.messages, st.tools, turn)
-    st = %{st | messages: messages, tools: tools}
+    st = %{st | messages: messages, tools: tools, model: tmodel}
     t0 = now_ms()
     %{prompt_tokens: before_p, completion_tokens: before_c} = st.usage
 
@@ -1911,14 +1970,14 @@ defmodule Toolnexus.Client do
         e ->
           emit(client, %{
             event: "llm",
-            model: client.model,
+            model: tmodel,
             status: "error",
             ms: now_ms() - t0,
             prompt_tokens: 0,
             completion_tokens: 0
           })
 
-          emit_run_error(client, run_start, st.tool_calls, st.turns, st.usage, e)
+          emit_run_error(rc(client, st), run_start, st.tool_calls, st.turns, st.usage, e)
           reraise e, __STACKTRACE__
       end
 
@@ -1926,7 +1985,7 @@ defmodule Toolnexus.Client do
 
     emit(client, %{
       event: "llm",
-      model: client.model,
+      model: tmodel,
       status: "ok",
       ms: now_ms() - t0,
       prompt_tokens: usage.prompt_tokens - before_p,
@@ -1942,7 +2001,15 @@ defmodule Toolnexus.Client do
       emit.(%{
         type: "done",
         result:
-          end_run(client, run_start, content, st.messages, st.tool_calls, st.turns, st.usage)
+          end_run(
+            rc(client, st),
+            run_start,
+            content,
+            st.messages,
+            st.tool_calls,
+            st.turns,
+            st.usage
+          )
       })
     else
       assistant = %{
@@ -2026,7 +2093,7 @@ defmodule Toolnexus.Client do
             type: "done",
             result:
               pending_run(
-                client,
+                rc(client, st),
                 run_start,
                 request,
                 st.messages,
@@ -2107,7 +2174,16 @@ defmodule Toolnexus.Client do
         else: [user_message(prompt)]
 
     tools = Enum.map(tools_of(toolkit), &to_anthropic_schema/1)
-    st = %{messages: messages, tools: tools, tool_calls: [], usage: zero_usage(), turns: 0}
+
+    st = %{
+      messages: messages,
+      tools: tools,
+      tool_calls: [],
+      usage: zero_usage(),
+      turns: 0,
+      model: client.model
+    }
+
     stream_loop_anthropic(client, toolkit, key, sys, run_start, st, 0, emit)
   end
 
@@ -2117,7 +2193,7 @@ defmodule Toolnexus.Client do
       type: "done",
       result:
         end_run(
-          client,
+          rc(client, st),
           run_start,
           "",
           st.messages,
@@ -2132,7 +2208,7 @@ defmodule Toolnexus.Client do
   defp stream_loop_anthropic(client, toolkit, key, sys, run_start, st, turn, emit) do
     st = %{st | turns: st.turns + 1}
     {messages, tools, tmodel} = before_llm(client, st.messages, st.tools, turn)
-    st = %{st | messages: messages, tools: tools}
+    st = %{st | messages: messages, tools: tools, model: tmodel}
     t0 = now_ms()
     %{prompt_tokens: before_p, completion_tokens: before_c} = st.usage
 
@@ -2151,14 +2227,14 @@ defmodule Toolnexus.Client do
         e ->
           emit(client, %{
             event: "llm",
-            model: client.model,
+            model: tmodel,
             status: "error",
             ms: now_ms() - t0,
             prompt_tokens: 0,
             completion_tokens: 0
           })
 
-          emit_run_error(client, run_start, st.tool_calls, st.turns, st.usage, e)
+          emit_run_error(rc(client, st), run_start, st.tool_calls, st.turns, st.usage, e)
           reraise e, __STACKTRACE__
       end
 
@@ -2166,7 +2242,7 @@ defmodule Toolnexus.Client do
 
     emit(client, %{
       event: "llm",
-      model: client.model,
+      model: tmodel,
       status: "ok",
       ms: now_ms() - t0,
       prompt_tokens: usage.prompt_tokens - before_p,
@@ -2198,7 +2274,8 @@ defmodule Toolnexus.Client do
 
       emit.(%{
         type: "done",
-        result: end_run(client, run_start, text, st.messages, st.tool_calls, st.turns, st.usage)
+        result:
+          end_run(rc(client, st), run_start, text, st.messages, st.tool_calls, st.turns, st.usage)
       })
     else
       Enum.each(uses, fn u ->
@@ -2270,7 +2347,7 @@ defmodule Toolnexus.Client do
             type: "done",
             result:
               pending_run(
-                client,
+                rc(client, st),
                 run_start,
                 request,
                 st.messages,

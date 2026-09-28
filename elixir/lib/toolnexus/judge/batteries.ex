@@ -138,10 +138,14 @@ defmodule Toolnexus.Judge.Batteries do
       end
 
     %{
-      name: to_string(field(m, :name) || ""),
-      description: to_string(field(m, :description) || "")
+      name: str_or_empty(field(m, :name)),
+      description: str_or_empty(field(m, :description))
     }
   end
+
+  # SPEC §8B: an absent or non-string name/description reads as "" — never "nil"/"5".
+  defp str_or_empty(v) when is_binary(v), do: v
+  defp str_or_empty(_), do: ""
 end
 
 defmodule Toolnexus.Judge.ToolGuard do
@@ -613,12 +617,15 @@ defmodule Toolnexus.Judge.AgentRouter do
   defp walk(_r, _st, [], out), do: out
 
   defp walk(r, st, level, out) do
+    # SPEC §8B: duplicate names at one level — the FIRST node wins (never last-wins).
     opts =
-      Map.new(
-        level,
-        &{to_string(Batteries.field(&1, :name)),
-         to_string(Batteries.field(&1, :description) || "")}
-      )
+      Enum.reduce(level, %{}, fn node, acc ->
+        Map.put_new(
+          acc,
+          to_string(Batteries.field(node, :name)),
+          to_string(Batteries.field(node, :description) || "")
+        )
+      end)
 
     q = Judge.choice("agent", "Which agent should handle `task`?", opts)
 

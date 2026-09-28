@@ -166,6 +166,37 @@ defmodule Toolnexus.JudgeBatteriesTest do
     end
   end
 
+  test "fixture tool-relevance.json: every hookCase (as_hook, no next)" do
+    cases = load("tool-relevance.json")["hookCases"]
+    assert cases != []
+
+    for k <- cases do
+      {:ok, r} = ToolRelevance.new(battery_classifier(k), opts(k["options"]))
+      ev = k["event"]
+      tools = ev["tools"]
+
+      out =
+        ToolRelevance.as_hook(r).(%{
+          messages: ev["messages"],
+          tools: tools,
+          model: ev["model"],
+          turn: ev["turn"]
+        })
+
+      got =
+        case out do
+          %{tools: kept} when is_list(kept) ->
+            Enum.map(kept, fn t -> Enum.find_index(tools, &(&1 === t)) end)
+
+          _ ->
+            nil
+        end
+
+      assert got == k["want"]["tools"], "#{k["name"]}: tools #{inspect(got)}"
+      refute_received {:unexpected_call, _}
+    end
+  end
+
   test "latest_user_text: user-text-cases.json" do
     cases = load("user-text-cases.json")["cases"]
     assert cases != []
