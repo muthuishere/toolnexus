@@ -268,11 +268,72 @@ router := tn.NewModelRouter(c, []tn.ModelOption{
 hooks := &tn.Hooks{BeforeTool: guard.AsHook(nil), BeforeLLM: router.AsHook(nil)}
 ```
 </TabItem>
+<TabItem label="Java">
+```java
+import io.github.muthuishere.toolnexus.*;
+import java.util.List;
+
+ToolGuardClassifier guard = new ToolGuardClassifier(c,
+        new ToolGuardClassifier.Options().onError(Batteries.OnError.CLOSED));
+ModelRouterClassifier router = new ModelRouterClassifier(c, List.of(
+        new ModelRouterClassifier.Model("small-fast", "Short factual answers, lookups and simple rewrites; cheapest."),
+        new ModelRouterClassifier.Model("large-reasoning", "Multi-step reasoning and code changes across files; most expensive.")));
+
+LlmClient.Hooks hooks = new LlmClient.Hooks()
+        .beforeTool(guard.asHook(myBeforeTool))   // your hook still runs when the guard allows
+        .beforeLLM(router.asHook(null));          // sure pick routes this turn
+```
+</TabItem>
+<TabItem label="C#">
+```csharp
+using Toolnexus;
+
+var guard = new ToolGuardClassifier(c, new ToolGuardOptions { OnError = OnError.Closed });
+var router = new ModelRouterClassifier(c, new[]
+{
+    new ModelOption("small-fast", "Short factual answers, lookups and simple rewrites; cheapest."),
+    new ModelOption("large-reasoning", "Multi-step reasoning and code changes across files; most expensive."),
+});
+
+var hooks = new LlmClient.Hooks
+{
+    BeforeTool = guard.AsHook(),   // hooks are sync delegates; the battery blocks on the call
+    BeforeLLM = router.AsHook(),
+};
+```
+</TabItem>
+<TabItem label="Elixir">
+```elixir
+alias Toolnexus.Judge.{ToolGuard, ModelRouter}
+
+{:ok, guard} = ToolGuard.new(c, on_error: :closed)
+
+router =
+  ModelRouter.new(c, [
+    %{id: "small-fast", description: "Short factual answers, lookups and simple rewrites; cheapest."},
+    %{id: "large-reasoning", description: "Multi-step reasoning and code changes across files; most expensive."}
+  ])
+
+hooks = %{before_tool: ToolGuard.as_hook(guard), before_llm: ModelRouter.as_hook(router)}
+```
+</TabItem>
+<TabItem label="Clojure">
+```clojure
+(require '[toolnexus.batteries :as b])
+
+(def guard  (b/tool-guard c {:on-error :closed}))
+(def router (b/model-router c [{:id "small-fast"
+                                :description "Short factual answers, lookups and simple rewrites; cheapest."}
+                               {:id "large-reasoning"
+                                :description "Multi-step reasoning and code changes across files; most expensive."}]))
+
+(def hooks {:before-tool (b/as-hook guard nil)
+            :before-llm  (b/as-hook router nil)})
+```
+</TabItem>
 </Tabs>
 
-The other ports' spellings (java `new ToolGuardClassifier(c, new ToolGuardClassifier.Options().onError(…))`,
-csharp `CheckAsync`/`AsHook`, elixir `Toolnexus.Judge.ToolGuard.new(c, on_error: :closed)`, clojure
-`toolnexus.batteries/tool-guard`) are listed in the SPEC §8B idiom table.
+The full per-port spelling of every battery is in the SPEC §8B idiom table.
 
 ## Under the hood: the raw `Classifier`
 
