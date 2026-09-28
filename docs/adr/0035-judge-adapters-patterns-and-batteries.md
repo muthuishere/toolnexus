@@ -1,8 +1,9 @@
 # ADR 0035 — Judge adapters: patterns first, batteries on top, recipes in the docs
 
 - **Status:** **Accepted** for Layer 1 and the simple API (`State`, `ask`, `gate`, `Policy`,
-  `Answer.Value()`, `Tape`), on the spike's live evidence (D7, D8). **Proposed** for the
-  batteries (D3): nothing in D3 is accepted until its own evidence lands.
+  `Answer.Value()`, `Tape`), on the spike's live evidence (D7, D8). The batteries (D3) are built
+  in all seven ports by `add-judge-batteries` on the owner's instruction (2026-09-28), with D6
+  decided; the live evidence items below are still open.
 - **Date:** 2026-09-27
 - **Driver:** 0.18.0 shipped `Classifier` (SPEC §8B) in all seven ports and told users plainly
   that there are **"no adapters and no batteries"** (`CHANGELOG.md`, 0.18.0, *What is NOT done*).
@@ -103,7 +104,7 @@ Every battery follows the same four rules:
 | `IsCompleteClassifier` | `check(task, answer) → p` | **no seam today** (see below) | `noul`, optionally one `noul` per claim |
 | `AgentRouterClassifier` | `pick(task, agents) → agent + probabilities` | subagent dispatch / A2A outbound | `choice`; hierarchical beyond 255 |
 | `ContentGuardClassifier` | `check(text) → p per dimension` | `serve` inbound, `beforeLLM`, `afterLLM` (observe only) | composite `noul`s |
-| `ModelRouterClassifier` | — | — | **OPEN: owner decision** (D6) |
+| `ModelRouterClassifier` | `pick(prompt, fallback) → model` (options given at construction) | `beforeLLM`, via an `LLMOverride` `model` (opt-in, D6) | `choice` over prose model options |
 
 Three of these depend on facts in the code, not on taste:
 
@@ -163,6 +164,15 @@ memo.
   router", and transmits the configured `model` verbatim (conformance-tested).
 - Adding the battery means amending that paragraph. **That is the owner's decision**, and this
   ADR records it as open rather than settling it by building the battery.
+- **Decided by the owner (2026-09-28): build it as an OPT-IN battery** (change
+  `add-judge-batteries`). SPEC §8 *Right-size routing* is amended, not reversed:
+  - the default stays deterministic: with no router attached, the configured `model` is still
+    transmitted verbatim, and the existing model-faithfulness conformance test keeps passing;
+  - only a user-attached `ModelRouterClassifier` picks a model per query, from a **user-supplied**
+    list of model options described in prose (ADR 0021: the option sentences carry the judgment);
+  - it routes only on a sure pick and falls back to the configured model when the pick is unsure,
+    missing or fails;
+  - the seam is a `beforeLLM` override `model`, valid for that turn only.
 
 ### D7 — State carries the role; questions name their field
 

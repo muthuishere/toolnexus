@@ -1,0 +1,118 @@
+{
+ "note": "The hooks (ToolRelevance, ContentGuard, ModelRouter) judge the LATEST USER TEXT of the beforeLLM messages: walk messages from the end; take the first message with role \"user\" that has text. String content is the text. Array content: the `text` of every part with type \"text\", joined with \"\\n\". A user message with no text (e.g. only tool_result blocks) is skipped. No user text -> \"\" and the hook delegates to next without asking.",
+ "cases": [
+  {
+   "name": "string",
+   "messages": [
+    {
+     "role": "system",
+     "content": "s"
+    },
+    {
+     "role": "user",
+     "content": "hello"
+    }
+   ],
+   "want": "hello"
+  },
+  {
+   "name": "latest-wins",
+   "messages": [
+    {
+     "role": "user",
+     "content": "first"
+    },
+    {
+     "role": "assistant",
+     "content": "ok"
+    },
+    {
+     "role": "user",
+     "content": "second"
+    }
+   ],
+   "want": "second"
+  },
+  {
+   "name": "parts-joined",
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "a"
+      },
+      {
+       "type": "image_url",
+       "image_url": {
+        "url": "data:x"
+       }
+      },
+      {
+       "type": "text",
+       "text": "b"
+      }
+     ]
+    }
+   ],
+   "want": "a\nb"
+  },
+  {
+   "name": "skips-tool-results",
+   "messages": [
+    {
+     "role": "user",
+     "content": "do it"
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "tool_use",
+       "id": "t1",
+       "name": "x",
+       "input": {}
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "t1",
+       "content": "done"
+      }
+     ]
+    }
+   ],
+   "want": "do it"
+  },
+  {
+   "name": "openai-tool-role-ignored",
+   "messages": [
+    {
+     "role": "user",
+     "content": "go"
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "c1",
+     "content": "r"
+    }
+   ],
+   "want": "go"
+  },
+  {
+   "name": "none",
+   "messages": [
+    {
+     "role": "system",
+     "content": "s"
+    }
+   ],
+   "want": ""
+  }
+ ]
+}

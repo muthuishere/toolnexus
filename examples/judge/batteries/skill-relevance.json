@@ -1,0 +1,191 @@
+{
+ "note": "SkillRelevanceClassifier. select(prompt, items) -> selected/dropped (names, in input order). One noul per item keyed by its name. Only a confident no (p < low) drops an item; yes, uncertain and missing keep it. Error: onError open keeps all, closed keeps none. No items: no classifier call, both lists empty.",
+ "defaults": {
+  "role": "You decide which agent skills are relevant to the user's request, so the skills it does not need can be left out."
+ },
+ "cases": [
+  {
+   "name": "drops-confident-no",
+   "options": {
+    "onError": "open"
+   },
+   "input": {
+    "prompt": "pull the tables out of invoice.pdf",
+    "skills": [
+     {
+      "name": "pdf",
+      "description": "Extract text and tables from PDF files."
+     },
+     {
+      "name": "release",
+      "description": "Cut and verify a release across all registries."
+     }
+    ]
+   },
+   "calls": [
+    {
+     "state": {
+      "user_request": "pull the tables out of invoice.pdf",
+      "role": "You decide which agent skills are relevant to the user's request, so the skills it does not need can be left out."
+     },
+     "questions": {
+      "pdf": {
+       "type": "noul",
+       "instructions": "Is the skill `pdf` relevant to the request in `user_request`? The skill: Extract text and tables from PDF files.",
+       "criteria": {
+        "true": "the skill's instructions would help with this request",
+        "false": "the skill is unrelated to this request"
+       }
+      },
+      "release": {
+       "type": "noul",
+       "instructions": "Is the skill `release` relevant to the request in `user_request`? The skill: Cut and verify a release across all registries.",
+       "criteria": {
+        "true": "the skill's instructions would help with this request",
+        "false": "the skill is unrelated to this request"
+       }
+      }
+     },
+     "response": {
+      "model": "m",
+      "answers": {
+       "pdf": {
+        "type": "noul",
+        "noul": 0.97
+       },
+       "release": {
+        "type": "noul",
+        "noul": 0.02
+       }
+      }
+     }
+    }
+   ],
+   "want": {
+    "selected": [
+     "pdf"
+    ],
+    "dropped": [
+     "release"
+    ],
+    "calibrated": true,
+    "error": false
+   }
+  },
+  {
+   "name": "uncertain-kept",
+   "options": {
+    "onError": "open"
+   },
+   "input": {
+    "prompt": "ship it",
+    "skills": [
+     {
+      "name": "pdf",
+      "description": "Extract text and tables from PDF files."
+     },
+     {
+      "name": "release",
+      "description": "Cut and verify a release across all registries."
+     }
+    ]
+   },
+   "calls": [
+    {
+     "state": {
+      "user_request": "ship it",
+      "role": "You decide which agent skills are relevant to the user's request, so the skills it does not need can be left out."
+     },
+     "questions": {
+      "pdf": {
+       "type": "noul",
+       "instructions": "Is the skill `pdf` relevant to the request in `user_request`? The skill: Extract text and tables from PDF files.",
+       "criteria": {
+        "true": "the skill's instructions would help with this request",
+        "false": "the skill is unrelated to this request"
+       }
+      },
+      "release": {
+       "type": "noul",
+       "instructions": "Is the skill `release` relevant to the request in `user_request`? The skill: Cut and verify a release across all registries.",
+       "criteria": {
+        "true": "the skill's instructions would help with this request",
+        "false": "the skill is unrelated to this request"
+       }
+      }
+     },
+     "response": {
+      "model": "m",
+      "answers": {
+       "pdf": {
+        "type": "noul",
+        "noul": 0.1
+       },
+       "release": {
+        "type": "noul",
+        "noul": 0.6
+       }
+      }
+     }
+    }
+   ],
+   "want": {
+    "selected": [
+     "release"
+    ],
+    "dropped": [
+     "pdf"
+    ],
+    "calibrated": true,
+    "error": false
+   }
+  },
+  {
+   "name": "error-fail-closed",
+   "options": {
+    "onError": "closed"
+   },
+   "input": {
+    "prompt": "ship it",
+    "skills": [
+     {
+      "name": "pdf",
+      "description": "Extract text and tables from PDF files."
+     },
+     {
+      "name": "release",
+      "description": "Cut and verify a release across all registries."
+     }
+    ]
+   },
+   "error": true,
+   "calls": [],
+   "want": {
+    "selected": [],
+    "dropped": [
+     "pdf",
+     "release"
+    ],
+    "calibrated": false,
+    "error": true
+   }
+  },
+  {
+   "name": "no-skills-no-call",
+   "options": {
+    "onError": "open"
+   },
+   "input": {
+    "prompt": "ship it",
+    "skills": []
+   },
+   "calls": [],
+   "want": {
+    "selected": [],
+    "dropped": [],
+    "calibrated": true,
+    "error": false
+   }
+  }
+ ]
+}

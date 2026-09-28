@@ -1481,6 +1481,11 @@ observe; the noted ones may mutate or short-circuit.
 - `beforeLLM({ messages, tools, model, turn })` → optionally return `{ messages?, tools? }`
   to replace them (trim/inject history, swap tools). Returning `messages` replaces the working
   transcript for the rest of the run — the canonical use is **context compaction** (§7F).
+  It may also return `model` (change `add-judge-batteries`): a non-empty `model` is transmitted
+  for **that turn only** (request body and the `afterLLM` event); absent, null or empty ⇒ the
+  configured model, verbatim. Metric events keep the configured model. This is the seam an
+  opt-in `ModelRouterClassifier` (§8B *Batteries*) uses; nothing in the library returns it unless
+  the host attached one.
 - `afterLLM({ response, model, turn })` → observe (logging, cost, tracing). `response` is
   the raw provider payload (carries `usage`).
 - `beforeTool({ name, args, id, turn })` → return `{ result }` to **short-circuit** the tool
@@ -1707,6 +1712,15 @@ Two properties are contractual and conformance-tested:
   returns `guaranteed`. toolnexus does **not** hard-depend on `brain`; the adapter is
   host-supplied. Hard veto at the *tool* layer is `add-governed-execution-layer`; the two compose
   (route-gate at the model call, tool-veto at `execute()`).
+- **Opt-in per-query routing (owner decision, ADR 0035 D6, 2026-09-28).** The default stays the
+  deterministic point above: with no router attached the configured `model` is transmitted
+  verbatim, and the model-faithfulness test keeps passing unchanged. A host MAY attach a
+  `ModelRouterClassifier` (§8B *Batteries*) as a `beforeLLM` hook. It picks one model per query
+  from a **user-supplied** list of model options, each described in prose (ADR 0021: the option
+  sentences carry the judgment), and returns it as that turn's `model` override only when the pick
+  is **sure** (confidence > high and not nearUniform). An unsure, missing or failed pick falls back
+  to the configured model. The router is the host's choice, its option list is the host's data,
+  and the model it names is still transmitted verbatim.
 
 **Routing-tier registry contract (fleet interop).** `fleet-nexus` / `huddle-nexus` drive toolnexus
 from a runtime registry (`~/.config/deemwar-one-os/openrouter.json`) with this shape — the
@@ -2142,6 +2156,71 @@ gate(classifier, state, questions, rules, bands?) -> { action, target, escalated
   | elixir | `Judge.gate(c, st, qs, %Policy{})` | `Answer.choice/1` | `Judge.static/4` | `Tape.record/3` / `Tape.replay/2` |
   | clojure | `j/decide` | `j/picked` (`choice` is the builder) | `jev/static-classifier` | `j/recording` / `j/replaying` |
 - Conformance: `examples/judge/state-cases.json`, `examples/judge/gate-cases.json`.
+
+### Batteries — `*Classifier` values (change `add-judge-batteries`, ADR 0035 D3)
+
+A battery is a `Classifier` plus a fixed question set and a fixed reading of its answers. It is
+built on the simple-judgment layer above, never on a vendor, URL or model, so the same battery runs
+on `systemone`, `llm`, `custom` and `static`. Every battery:
+
+- builds `State(role, data)` with a default role sentence (overridable as `role`) and questions
+  that name the state field they judge; **the default role and question text are contract**,
+  pinned byte-for-byte by the static corpus in `examples/judge/batteries/`;
+- accepts `bands` (default 0.30 / 0.70);
+- has a standalone method returning a typed verdict carrying `calibrated` (false on error) and
+  `error` (the classifier's error, or absent). A classifier error never propagates from a
+  standalone method;
+- takes a **required** `onError: "open" | "closed"` with no default when its error outcome is a
+  policy choice (a missing one is a constructor error naming `onError`); the two routers take a
+  `fallback` instead, which is their error outcome;
+- is advisory: ToolGuard's `deny` is a policy aid, not a security control. Allowlists stay in code.
+
+| battery | standalone → verdict | questions | reading | hook |
+|---|---|---|---|---|
+| ToolGuard | `check({name, arguments, description?})` → `action` allow\|ask\|deny, `reason`, `risk`, `sure` | one `score` `risk` (4-level rubric) | missing ⇒ ask `missing answer`; unsure ⇒ ask `uncertain`; `< askAt` (1.5) ⇒ allow `low risk`; `< denyAt` (2.5) ⇒ ask `medium risk`; else deny `high risk`; error ⇒ open: allow, closed: deny, `classifier error` | `beforeTool` |
+| ToolRelevance | `select(prompt, [{name, description}])` → `selected`, `dropped` | one `noul` per tool, keyed by name | band no drops; yes/uncertain/missing keep; error ⇒ open: all, closed: none | `beforeLLM` → `tools` |
+| SkillRelevance | `select(prompt, [{name, description}])` → `selected`, `dropped` | one `noul` per skill | as ToolRelevance | none (feed the S2 allowlist; never pass an empty `selected`, empty ⇒ all) |
+| ToolResultFilter | `filter(query, chunks)` → `kept`, `dropped` (indices) | one `noul` per chunk, keyed `"0"`, `"1"`, … | as ToolRelevance | `afterTool` |
+| IsComplete | `check(task, answer)` → `complete`, `p`, `band` | one `noul` `complete` | complete ⇔ band yes; missing ⇒ false, p null; error ⇒ open: true, closed: false | none (ADR 0035) |
+| AgentRouter | `pick(task, agents, fallback)` → `agent`, `path`, `sure`, `probabilities` | one `choice` `agent` per level; a picked node with `agents` descends | unsure/missing/error at any level ⇒ `fallback` | none (host dispatches) |
+| ContentGuard | `check(text)` → `action` allow\|review\|block, `flagged`, `uncertain`, `scores` | one `noul` per dimension (default `harmful`, `prompt_injection`; overridable as `dimensions`) | any yes ⇒ block; else any uncertain/missing ⇒ review; else allow; error ⇒ open: allow, closed: block | `beforeLLM` (block raises `content guard blocked: <names joined by ", ">`) |
+| ModelRouter | constructed with the user's ordered `[{id, description}]` options; `pick(prompt, fallback)` → `model`, `routed`, `sure`, `probabilities` | one `choice` `model` | sure ⇒ the pick; else `fallback`. **Opt-in** (§8 *Right-size routing*) | `beforeLLM` → `model` |
+
+**`asHook(next)`.** `next` may be absent and is never discarded (ADR 0035 D3.3).
+
+- ToolGuard (`beforeTool`): allow ⇒ `next(ev)`. deny ⇒ short-circuit
+  `{output: "denied by tool guard: <reason>", isError: true}`. ask ⇒ short-circuit
+  `{output: "approval required: <name>", isError: true, metadata: {pending: Request}}` with
+  `Request {id: "toolguard:<call id>", kind: "approval", prompt: "Approve the call to <name>? (<reason>)",
+  data: {tool, arguments, reason, risk}}` — §10 path B. `next` is not called on deny or ask. An
+  approved Request runs the tool directly (§10 does not re-enter `beforeTool`).
+- `beforeLLM` batteries judge the **latest user text** (walk back to the first `role: "user"`
+  message with text; string content, or every `{type: "text"}` part joined with `"\n"`; a
+  tool_result-only user message is skipped; `examples/judge/batteries/user-text-cases.json`). No
+  text ⇒ plain delegation, no classifier call. The battery computes its override, calls `next` with
+  the event as that override leaves it, and merges field by field: `next`'s fields win. ToolRelevance
+  overrides `tools` (the kept provider entries, original order) only when it dropped one; ModelRouter
+  overrides `model` only when routed to an id other than the turn's configured model.
+- ToolResultFilter (`afterTool`): only a non-error result whose text output splits on the exact
+  separator `"\n\n"` into ≥ 2 chunks, and which carries no non-text content parts, is filtered; kept
+  chunks re-join with `"\n\n"`; the query is `{tool, arguments}`; `next` sees the filtered result and
+  its override wins.
+- Hooks judge every turn (no run identity to cache on).
+
+Idiom (behaviour identical; constructor and method spelling follow each port):
+
+| port | construct | methods | hook |
+|---|---|---|---|
+| golang | `NewToolGuard(c, ToolGuardOptions{OnError: OnErrorClosed})` … | `Check` / `Select` / `Filter` / `Pick` | `AsHook(next)` returns the hook func |
+| js | `new ToolGuardClassifier(c, { onError: "closed" })` … | `check` / `select` / `filter` / `pick` | `asHook(next?)` |
+| python | `ToolGuardClassifier(c, on_error="closed")` … | `check` / `select` / `filter` / `pick` (async) | `as_hook(next=None)` |
+| java | `new ToolGuardClassifier(c, ToolGuardClassifier.Options…)` | `check` / `select` / `filter` / `pick` | `asHook(next)` |
+| csharp | `new ToolGuardClassifier(c, new ToolGuardOptions { OnError = OnError.Closed })` | `CheckAsync` / `SelectAsync` / `FilterAsync` / `PickAsync` | `AsHook(next)` |
+| elixir | `Toolnexus.Judge.ToolGuard.new(c, on_error: :closed)` | `check/2` / `select/3` / `filter/3` / `pick/4` | `as_hook(guard, next \\ nil)` |
+| clojure | `(b/tool-guard c {:on-error :closed})` | `b/check` / `b/select` / `b/filter-chunks` / `b/pick` | `b/as-hook` |
+
+- Conformance: `examples/judge/batteries/*.json` (recorded `static` calls → verdict) and
+  `user-text-cases.json`.
 
 ## 9. Go CLI (`toolnexus`)
 

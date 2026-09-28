@@ -1,0 +1,378 @@
+{
+ "note": "ToolResultFilterClassifier.filter(query, chunks) -> kept/dropped chunk INDICES in order. One noul per chunk keyed by its decimal index; state carries `query` and `chunks` as {\"0\": text, ...}. Only a confident no drops. Error: open keeps all, closed keeps none. The hook splits a text output on the exact separator \"\\n\\n\" (no trimming), filters only when there are >= 2 chunks, and re-joins kept chunks with \"\\n\\n\"; its query is {\"tool\": name, \"arguments\": args}.",
+ "defaults": {
+  "role": "You decide which parts of a tool's output are relevant to the query, so the irrelevant parts can be dropped.",
+  "separator": "\n\n"
+ },
+ "cases": [
+  {
+   "name": "drops-irrelevant",
+   "options": {
+    "onError": "open"
+   },
+   "input": {
+    "query": "what changed in 2.4.0?",
+    "chunks": [
+     "Release 2.4.0 fixes the checkout timeout.",
+     "Our office moves in March.",
+     "Upgrade with `npm i pkg@2.4.0`."
+    ]
+   },
+   "calls": [
+    {
+     "state": {
+      "query": "what changed in 2.4.0?",
+      "chunks": {
+       "0": "Release 2.4.0 fixes the checkout timeout.",
+       "1": "Our office moves in March.",
+       "2": "Upgrade with `npm i pkg@2.4.0`."
+      },
+      "role": "You decide which parts of a tool's output are relevant to the query, so the irrelevant parts can be dropped."
+     },
+     "questions": {
+      "0": {
+       "type": "noul",
+       "instructions": "Is `chunks.0` relevant to `query`?",
+       "criteria": {
+        "true": "this part helps answer the query",
+        "false": "this part does not help answer the query"
+       }
+      },
+      "1": {
+       "type": "noul",
+       "instructions": "Is `chunks.1` relevant to `query`?",
+       "criteria": {
+        "true": "this part helps answer the query",
+        "false": "this part does not help answer the query"
+       }
+      },
+      "2": {
+       "type": "noul",
+       "instructions": "Is `chunks.2` relevant to `query`?",
+       "criteria": {
+        "true": "this part helps answer the query",
+        "false": "this part does not help answer the query"
+       }
+      }
+     },
+     "response": {
+      "model": "m",
+      "answers": {
+       "0": {
+        "type": "noul",
+        "noul": 0.95
+       },
+       "1": {
+        "type": "noul",
+        "noul": 0.03
+       },
+       "2": {
+        "type": "noul",
+        "noul": 0.72
+       }
+      }
+     }
+    }
+   ],
+   "want": {
+    "kept": [
+     0,
+     2
+    ],
+    "dropped": [
+     1
+    ],
+    "calibrated": true,
+    "error": false
+   }
+  },
+  {
+   "name": "boundary-kept",
+   "options": {
+    "onError": "open"
+   },
+   "input": {
+    "query": "what changed in 2.4.0?",
+    "chunks": [
+     "Release 2.4.0 fixes the checkout timeout.",
+     "Our office moves in March.",
+     "Upgrade with `npm i pkg@2.4.0`."
+    ]
+   },
+   "calls": [
+    {
+     "state": {
+      "query": "what changed in 2.4.0?",
+      "chunks": {
+       "0": "Release 2.4.0 fixes the checkout timeout.",
+       "1": "Our office moves in March.",
+       "2": "Upgrade with `npm i pkg@2.4.0`."
+      },
+      "role": "You decide which parts of a tool's output are relevant to the query, so the irrelevant parts can be dropped."
+     },
+     "questions": {
+      "0": {
+       "type": "noul",
+       "instructions": "Is `chunks.0` relevant to `query`?",
+       "criteria": {
+        "true": "this part helps answer the query",
+        "false": "this part does not help answer the query"
+       }
+      },
+      "1": {
+       "type": "noul",
+       "instructions": "Is `chunks.1` relevant to `query`?",
+       "criteria": {
+        "true": "this part helps answer the query",
+        "false": "this part does not help answer the query"
+       }
+      },
+      "2": {
+       "type": "noul",
+       "instructions": "Is `chunks.2` relevant to `query`?",
+       "criteria": {
+        "true": "this part helps answer the query",
+        "false": "this part does not help answer the query"
+       }
+      }
+     },
+     "response": {
+      "model": "m",
+      "answers": {
+       "0": {
+        "type": "noul",
+        "noul": 0.3
+       },
+       "1": {
+        "type": "noul",
+        "noul": 0.29999
+       },
+       "2": {
+        "type": "noul",
+        "noul": 0.7
+       }
+      }
+     }
+    }
+   ],
+   "want": {
+    "kept": [
+     0,
+     2
+    ],
+    "dropped": [
+     1
+    ],
+    "calibrated": true,
+    "error": false
+   }
+  },
+  {
+   "name": "missing-kept",
+   "options": {
+    "onError": "open"
+   },
+   "input": {
+    "query": "what changed in 2.4.0?",
+    "chunks": [
+     "Release 2.4.0 fixes the checkout timeout.",
+     "Our office moves in March."
+    ]
+   },
+   "calls": [
+    {
+     "state": {
+      "query": "what changed in 2.4.0?",
+      "chunks": {
+       "0": "Release 2.4.0 fixes the checkout timeout.",
+       "1": "Our office moves in March."
+      },
+      "role": "You decide which parts of a tool's output are relevant to the query, so the irrelevant parts can be dropped."
+     },
+     "questions": {
+      "0": {
+       "type": "noul",
+       "instructions": "Is `chunks.0` relevant to `query`?",
+       "criteria": {
+        "true": "this part helps answer the query",
+        "false": "this part does not help answer the query"
+       }
+      },
+      "1": {
+       "type": "noul",
+       "instructions": "Is `chunks.1` relevant to `query`?",
+       "criteria": {
+        "true": "this part helps answer the query",
+        "false": "this part does not help answer the query"
+       }
+      }
+     },
+     "response": {
+      "model": "m",
+      "answers": {
+       "1": {
+        "type": "noul",
+        "noul": 0.01
+       }
+      }
+     }
+    }
+   ],
+   "want": {
+    "kept": [
+     0
+    ],
+    "dropped": [
+     1
+    ],
+    "calibrated": true,
+    "error": false
+   }
+  },
+  {
+   "name": "object-query",
+   "options": {
+    "onError": "open"
+   },
+   "input": {
+    "query": {
+     "tool": "fetch_changelog",
+     "arguments": {
+      "version": "2.4.0"
+     }
+    },
+    "chunks": [
+     "Release 2.4.0 fixes the checkout timeout.",
+     "Our office moves in March."
+    ]
+   },
+   "calls": [
+    {
+     "state": {
+      "query": {
+       "tool": "fetch_changelog",
+       "arguments": {
+        "version": "2.4.0"
+       }
+      },
+      "chunks": {
+       "0": "Release 2.4.0 fixes the checkout timeout.",
+       "1": "Our office moves in March."
+      },
+      "role": "You decide which parts of a tool's output are relevant to the query, so the irrelevant parts can be dropped."
+     },
+     "questions": {
+      "0": {
+       "type": "noul",
+       "instructions": "Is `chunks.0` relevant to `query`?",
+       "criteria": {
+        "true": "this part helps answer the query",
+        "false": "this part does not help answer the query"
+       }
+      },
+      "1": {
+       "type": "noul",
+       "instructions": "Is `chunks.1` relevant to `query`?",
+       "criteria": {
+        "true": "this part helps answer the query",
+        "false": "this part does not help answer the query"
+       }
+      }
+     },
+     "response": {
+      "model": "m",
+      "answers": {
+       "0": {
+        "type": "noul",
+        "noul": 0.9
+       },
+       "1": {
+        "type": "noul",
+        "noul": 0.05
+       }
+      }
+     }
+    }
+   ],
+   "want": {
+    "kept": [
+     0
+    ],
+    "dropped": [
+     1
+    ],
+    "calibrated": true,
+    "error": false
+   }
+  },
+  {
+   "name": "error-open-keeps-all",
+   "options": {
+    "onError": "open"
+   },
+   "input": {
+    "query": "q",
+    "chunks": [
+     "Release 2.4.0 fixes the checkout timeout.",
+     "Our office moves in March.",
+     "Upgrade with `npm i pkg@2.4.0`."
+    ]
+   },
+   "error": true,
+   "calls": [],
+   "want": {
+    "kept": [
+     0,
+     1,
+     2
+    ],
+    "dropped": [],
+    "calibrated": false,
+    "error": true
+   }
+  },
+  {
+   "name": "error-closed-keeps-none",
+   "options": {
+    "onError": "closed"
+   },
+   "input": {
+    "query": "q",
+    "chunks": [
+     "Release 2.4.0 fixes the checkout timeout.",
+     "Our office moves in March.",
+     "Upgrade with `npm i pkg@2.4.0`."
+    ]
+   },
+   "error": true,
+   "calls": [],
+   "want": {
+    "kept": [],
+    "dropped": [
+     0,
+     1,
+     2
+    ],
+    "calibrated": false,
+    "error": true
+   }
+  },
+  {
+   "name": "no-chunks-no-call",
+   "options": {
+    "onError": "open"
+   },
+   "input": {
+    "query": "q",
+    "chunks": []
+   },
+   "calls": [],
+   "want": {
+    "kept": [],
+    "dropped": [],
+    "calibrated": true,
+    "error": false
+   }
+  }
+ ]
+}
