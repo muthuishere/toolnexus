@@ -491,7 +491,7 @@ public sealed class AgentRouterClassifier
         while (level is { Count: > 0 })
         {
             var opts = new Dictionary<string, string>();
-            foreach (var n in level) opts[n.Name] = n.Description;
+            foreach (var n in level) opts.TryAdd(n.Name, n.Description); // SPEC §8B: first node with a name wins
             Dictionary<string, JudgeAnswer> a;
             bool cal;
             try
@@ -506,7 +506,7 @@ public sealed class AgentRouterClassifier
             if (!a.TryGetValue("agent", out var x)) return new AgentVerdict(fallback, path, false, null, calibrated);
             probs = (x.Raw as ChoiceAnswer)?.Probabilities;
             if (!x.Sure) return new AgentVerdict(fallback, path, false, probs, calibrated);
-            var picked = x.Raw is ChoiceAnswer ca ? level.LastOrDefault(n => n.Name == ca.Choice) : null;
+            var picked = x.Raw is ChoiceAnswer ca ? level.FirstOrDefault(n => n.Name == ca.Choice) : null;
             if (picked == null) return new AgentVerdict(fallback, path, false, probs, calibrated);
             path.Add(picked.Name);
             if (picked.Agents is not { Count: > 0 }) return new AgentVerdict(picked.Name, path, true, probs, calibrated);

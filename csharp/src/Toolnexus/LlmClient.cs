@@ -159,16 +159,16 @@ public sealed class LlmClient
     /// <paramref name="status"/> is <c>"done"</c> for a final answer, <c>"incomplete"</c> when the
     /// loop stopped at <c>MaxTurns</c> still emitting tool calls (SPEC §8 addendum — loud, never a
     /// silent done).</summary>
-    private RunResult EndRun(long runStart, string text, List<object?> messages, List<ToolCall> toolCalls, int turns, Usage usage, string status = "done")
+    private RunResult EndRun(long runStart, string text, List<object?> messages, List<ToolCall> toolCalls, int turns, Usage usage, string model, string status = "done")
     {
-        Emit(MetricEvent.Run(_opts.Model, turns, toolCalls.Count, usage.TotalTokens, NowMs() - runStart));
-        return new RunResult(text, messages, toolCalls, turns, usage, _opts.Model, status,
+        Emit(MetricEvent.Run(model, turns, toolCalls.Count, usage.TotalTokens, NowMs() - runStart));
+        return new RunResult(text, messages, toolCalls, turns, usage, model, status,
             limit: status == "incomplete" ? "maxTurns" : null);
     }
 
     /// <summary>Emit a <c>run</c> error metric event (once, on a thrown run).</summary>
-    private void EmitRunError(long runStart, List<ToolCall> toolCalls, int turns, Usage usage, Exception e)
-        => Emit(MetricEvent.Run(_opts.Model, turns, toolCalls.Count, usage.TotalTokens, NowMs() - runStart, e.Message));
+    private void EmitRunError(long runStart, List<ToolCall> toolCalls, int turns, Usage usage, Exception e, string model)
+        => Emit(MetricEvent.Run(model, turns, toolCalls.Count, usage.TotalTokens, NowMs() - runStart, e.Message));
 
     // ---------------------------------------------------------------- options
 
@@ -521,10 +521,10 @@ public sealed class LlmClient
     }
 
     /// <summary>§10: build the terminal <see cref="RunResult"/> for a run halted by an unresolved suspension.</summary>
-    private RunResult PendingRun(long runStart, Request request, List<object?> messages, List<ToolCall> toolCalls, int turns, Usage usage)
+    private RunResult PendingRun(long runStart, Request request, List<object?> messages, List<ToolCall> toolCalls, int turns, Usage usage, string model)
     {
-        Emit(MetricEvent.Run(_opts.Model, turns, toolCalls.Count, usage.TotalTokens, NowMs() - runStart));
-        return new RunResult(request.Prompt, messages, toolCalls, turns, usage, _opts.Model, "pending", request);
+        Emit(MetricEvent.Run(model, turns, toolCalls.Count, usage.TotalTokens, NowMs() - runStart));
+        return new RunResult(request.Prompt, messages, toolCalls, turns, usage, model, "pending", request);
     }
 
     // ---------------------------------------------------------------- results
@@ -672,7 +672,7 @@ public sealed class LlmClient
         var data = await LlmCallJsonAsync(url, BaseHeaders(key, false), body, deadline, external, "openai").ConfigureAwait(false);
         _opts.Hooks?.AfterLLM?.Invoke(new AfterLLMEvent(data, turnModel, 0));
 
-        var result = new Translate.Result { Model = _opts.Model, Raw = data };
+        var result = new Translate.Result { Model = turnModel, Raw = data };
         AddUsage(result.Usage, data.Get("usage") as IDictionary<string, object?>, "openai");
 
         if (data.Get("choices") is not List<object?> choices || choices.Count == 0
@@ -725,7 +725,7 @@ public sealed class LlmClient
         var data = await LlmCallJsonAsync(endpoint, BaseHeaders(key, true), body, deadline, external, "anthropic").ConfigureAwait(false);
         _opts.Hooks?.AfterLLM?.Invoke(new AfterLLMEvent(data, turnModel, 0));
 
-        var result = new Translate.Result { Model = _opts.Model, Raw = data };
+        var result = new Translate.Result { Model = turnModel, Raw = data };
         AddUsage(result.Usage, data.Get("usage") as IDictionary<string, object?>, "anthropic");
 
         var text = new StringBuilder();
@@ -1054,6 +1054,7 @@ public sealed class LlmClient
         var usage = new Usage();
         var turns = 0;
         var runStart = NowMs();
+        var lastModel = _opts.Model; // §8: the model of the last call this run made
         var relocated = new Relocated(); // §8A adapter artifact — never enters `messages`
 
         try
@@ -1062,6 +1063,7 @@ public sealed class LlmClient
             {
                 turns++;
                 var turnModel = ApplyBeforeLLM(ref messages, ref tools, turn);
+                lastModel = turnModel;
 
                 var body = new Dictionary<string, object?>
                 {
@@ -1087,7 +1089,7 @@ public sealed class LlmClient
                 if (calls == null || calls.Count == 0)
                 {
                     var content = message.Get("content");
-                    return EndRun(runStart, content?.ToString() ?? "", messages, toolCalls, turns, usage);
+                    return EndRun(runStart, content?.ToString() ?? "", messages, toolCalls, turns, usage, lastModel);
                 }
 
                 // Execute all tool calls in this turn concurrently.
@@ -1134,17 +1136,17 @@ public sealed class LlmClient
                     if (halted != null)
                     {
                         RecordRelocation(relocated, relocations, messages.Count);
-                        return PendingRun(runStart, halted, messages, toolCalls, turns, usage);
+                        return PendingRun(runStart, halted, messages, toolCalls, turns, usage, lastModel);
                     }
                 }
                 RecordRelocation(relocated, relocations, messages.Count);
             }
             // MaxTurns exhausted while the model was still emitting tool calls (§8 addendum).
-            return EndRun(runStart, LastAssistantText(messages), messages, toolCalls, turns, usage, "incomplete");
+            return EndRun(runStart, LastAssistantText(messages), messages, toolCalls, turns, usage, lastModel, "incomplete");
         }
         catch (Exception e)
         {
-            EmitRunError(runStart, toolCalls, turns, usage, e);
+            EmitRunError(runStart, toolCalls, turns, usage, e, lastModel);
             throw;
         }
     }
@@ -1164,6 +1166,7 @@ public sealed class LlmClient
         var usage = new Usage();
         var turns = 0;
         var runStart = NowMs();
+        var lastModel = _opts.Model; // §8: the model of the last call this run made
 
         try
         {
@@ -1171,6 +1174,7 @@ public sealed class LlmClient
             {
                 turns++;
                 var turnModel = ApplyBeforeLLM(ref messages, ref tools, turn);
+                lastModel = turnModel;
 
                 var body = new Dictionary<string, object?>
                 {
@@ -1198,7 +1202,7 @@ public sealed class LlmClient
                     foreach (var b in content.OfType<IDictionary<string, object?>>())
                         if ((b.Get("type") as string) == "text")
                             text.Append(b.Get("text"));
-                    return EndRun(runStart, text.ToString(), messages, toolCalls, turns, usage);
+                    return EndRun(runStart, text.ToString(), messages, toolCalls, turns, usage, lastModel);
                 }
 
                 var n = uses.Count;
@@ -1245,17 +1249,17 @@ public sealed class LlmClient
                     if (halted != null)
                     {
                         messages.Add(new Dictionary<string, object?> { ["role"] = "user", ["content"] = resultBlocks });
-                        return PendingRun(runStart, halted, messages, toolCalls, turns, usage);
+                        return PendingRun(runStart, halted, messages, toolCalls, turns, usage, lastModel);
                     }
                 }
                 messages.Add(new Dictionary<string, object?> { ["role"] = "user", ["content"] = resultBlocks });
             }
             // MaxTurns exhausted while the model was still emitting tool calls (§8 addendum).
-            return EndRun(runStart, "", messages, toolCalls, turns, usage, "incomplete");
+            return EndRun(runStart, "", messages, toolCalls, turns, usage, lastModel, "incomplete");
         }
         catch (Exception e)
         {
-            EmitRunError(runStart, toolCalls, turns, usage, e);
+            EmitRunError(runStart, toolCalls, turns, usage, e, lastModel);
             throw;
         }
     }
@@ -1298,6 +1302,7 @@ public sealed class LlmClient
         var usage = new Usage();
         var turns = 0;
         var runStart = NowMs();
+        var lastModel = _opts.Model; // §8: the model of the last call this run made
         var relocated = new Relocated(); // §8A adapter artifact — never enters `messages`
 
         try
@@ -1306,6 +1311,7 @@ public sealed class LlmClient
             {
                 turns++;
                 var turnModel = ApplyBeforeLLM(ref messages, ref tools, turn);
+                lastModel = turnModel;
                 var body = new Dictionary<string, object?>
                 {
                     ["model"] = turnModel,
@@ -1364,17 +1370,17 @@ public sealed class LlmClient
                 }
                 catch (Exception)
                 {
-                    Emit(MetricEvent.Llm(_opts.Model, "error", NowMs() - t0, 0, 0));
+                    Emit(MetricEvent.Llm(turnModel, "error", NowMs() - t0, 0, 0));
                     throw;
                 }
-                Emit(MetricEvent.Llm(_opts.Model, "ok", NowMs() - t0, usage.PromptTokens - beforeP, usage.CompletionTokens - beforeC));
+                Emit(MetricEvent.Llm(turnModel, "ok", NowMs() - t0, usage.PromptTokens - beforeP, usage.CompletionTokens - beforeC));
                 _opts.Hooks?.AfterLLM?.Invoke(new AfterLLMEvent(new Dictionary<string, object?> { ["streamed"] = true }, turnModel, turn));
 
                 if (order.Count == 0)
                 {
                     messages.Add(Msg("assistant", content.ToString()));
                     onEvent(StreamEvent.UsageEvent(usage.Copy()));
-                    var done0 = EndRun(runStart, content.ToString(), messages, toolCalls, turns, usage);
+                    var done0 = EndRun(runStart, content.ToString(), messages, toolCalls, turns, usage, lastModel);
                     onEvent(StreamEvent.DoneEvent(done0));
                     return done0;
                 }
@@ -1436,7 +1442,7 @@ public sealed class LlmClient
                     if (halted != null)
                     {
                         RecordRelocation(relocated, relocations, messages.Count);
-                        var p = PendingRun(runStart, halted, messages, toolCalls, turns, usage);
+                        var p = PendingRun(runStart, halted, messages, toolCalls, turns, usage, lastModel);
                         onEvent(StreamEvent.DoneEvent(p));
                         return p;
                     }
@@ -1445,13 +1451,13 @@ public sealed class LlmClient
                 RecordRelocation(relocated, relocations, messages.Count);
             }
             // MaxTurns exhausted while the model was still emitting tool calls (§8 addendum).
-            var done = EndRun(runStart, LastAssistantText(messages), messages, toolCalls, turns, usage, "incomplete");
+            var done = EndRun(runStart, LastAssistantText(messages), messages, toolCalls, turns, usage, lastModel, "incomplete");
             onEvent(StreamEvent.DoneEvent(done));
             return done;
         }
         catch (Exception e)
         {
-            EmitRunError(runStart, toolCalls, turns, usage, e);
+            EmitRunError(runStart, toolCalls, turns, usage, e, lastModel);
             throw;
         }
     }
@@ -1471,6 +1477,7 @@ public sealed class LlmClient
         var usage = new Usage();
         var turns = 0;
         var runStart = NowMs();
+        var lastModel = _opts.Model; // §8: the model of the last call this run made
 
         try
         {
@@ -1478,6 +1485,7 @@ public sealed class LlmClient
             {
                 turns++;
                 var turnModel = ApplyBeforeLLM(ref messages, ref tools, turn);
+                lastModel = turnModel;
                 var body = new Dictionary<string, object?>
                 {
                     ["model"] = turnModel,
@@ -1550,10 +1558,10 @@ public sealed class LlmClient
                 }
                 catch (Exception)
                 {
-                    Emit(MetricEvent.Llm(_opts.Model, "error", NowMs() - t0, 0, 0));
+                    Emit(MetricEvent.Llm(turnModel, "error", NowMs() - t0, 0, 0));
                     throw;
                 }
-                Emit(MetricEvent.Llm(_opts.Model, "ok", NowMs() - t0, usage.PromptTokens - beforeP, usage.CompletionTokens - beforeC));
+                Emit(MetricEvent.Llm(turnModel, "ok", NowMs() - t0, usage.PromptTokens - beforeP, usage.CompletionTokens - beforeC));
                 _opts.Hooks?.AfterLLM?.Invoke(new AfterLLMEvent(new Dictionary<string, object?> { ["streamed"] = true }, turnModel, turn));
 
                 var contentBlocks = new List<object?>();
@@ -1588,7 +1596,7 @@ public sealed class LlmClient
                         if ((b.Get("type") as string) == "text")
                             text.Append(b.Get("text"));
                     onEvent(StreamEvent.UsageEvent(usage.Copy()));
-                    var done0 = EndRun(runStart, text.ToString(), messages, toolCalls, turns, usage);
+                    var done0 = EndRun(runStart, text.ToString(), messages, toolCalls, turns, usage, lastModel);
                     onEvent(StreamEvent.DoneEvent(done0));
                     return done0;
                 }
@@ -1638,7 +1646,7 @@ public sealed class LlmClient
                     if (halted != null)
                     {
                         messages.Add(new Dictionary<string, object?> { ["role"] = "user", ["content"] = results });
-                        var p = PendingRun(runStart, halted, messages, toolCalls, turns, usage);
+                        var p = PendingRun(runStart, halted, messages, toolCalls, turns, usage, lastModel);
                         onEvent(StreamEvent.DoneEvent(p));
                         return p;
                     }
@@ -1647,13 +1655,13 @@ public sealed class LlmClient
                 messages.Add(new Dictionary<string, object?> { ["role"] = "user", ["content"] = results });
             }
             // MaxTurns exhausted while the model was still emitting tool calls (§8 addendum).
-            var done = EndRun(runStart, "", messages, toolCalls, turns, usage, "incomplete");
+            var done = EndRun(runStart, "", messages, toolCalls, turns, usage, lastModel, "incomplete");
             onEvent(StreamEvent.DoneEvent(done));
             return done;
         }
         catch (Exception e)
         {
-            EmitRunError(runStart, toolCalls, turns, usage, e);
+            EmitRunError(runStart, toolCalls, turns, usage, e, lastModel);
             throw;
         }
     }
@@ -1790,17 +1798,18 @@ public sealed class LlmClient
     private async Task<Dictionary<string, object?>> LlmCallJsonAsync(string url, Dictionary<string, string> headers,
         Dictionary<string, object?> body, Deadline deadline, CancellationToken external, string style)
     {
+        var callModel = body.Get("model")?.ToString() ?? _opts.Model;
         var t0 = NowMs();
         try
         {
             var data = await PostJsonAsync(url, headers, body, deadline, external).ConfigureAwait(false);
             var tok = PerCall(data.Get("usage") as IDictionary<string, object?>, style);
-            Emit(MetricEvent.Llm(_opts.Model, "ok", NowMs() - t0, tok.Prompt, tok.Completion));
+            Emit(MetricEvent.Llm(callModel, "ok", NowMs() - t0, tok.Prompt, tok.Completion));
             return data;
         }
         catch (Exception)
         {
-            Emit(MetricEvent.Llm(_opts.Model, "error", NowMs() - t0, 0, 0));
+            Emit(MetricEvent.Llm(callModel, "error", NowMs() - t0, 0, 0));
             throw;
         }
     }

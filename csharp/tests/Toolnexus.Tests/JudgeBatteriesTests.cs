@@ -38,6 +38,34 @@ public class JudgeBatteriesTests
         foreach (var f in Files) Assert.True(Load(f).GetProperty("cases").GetArrayLength() > 0, f);
     }
 
+    public static IEnumerable<object[]> HookCases()
+    {
+        var hc = Load("tool-relevance.json").GetProperty("hookCases").EnumerateArray().ToList();
+        Assert.NotEmpty(hc);
+        foreach (var c in hc) yield return new object[] { c.GetProperty("name").GetString()! };
+    }
+
+    /// <summary>tool-relevance.json <c>hookCases</c>: AsHook() with no next over a provider-entry event;
+    /// want.tools = kept entries' indices, or null for no tools override.</summary>
+    [Theory]
+    [MemberData(nameof(HookCases))]
+    public void ToolRelevanceHookFixture(string name)
+    {
+        var c = Load("tool-relevance.json").GetProperty("hookCases").EnumerateArray().Single(x => x.GetProperty("name").GetString() == name);
+        var called = false;
+        var hook = new ToolRelevanceClassifier(ClassifierFor(c, () => called = true), RelOpts(c.GetProperty("options"))).AsHook();
+        var e = c.GetProperty("event");
+        var tools = e.GetProperty("tools").EnumerateArray().Select(t => (Dictionary<string, object?>)Json.FromElement(t)!).ToList();
+        var ov = hook(new LlmClient.BeforeLLMEvent(((List<object?>)Json.FromElement(e.GetProperty("messages"))!),
+            tools, e.GetProperty("model").GetString()!, e.GetProperty("turn").GetInt32()));
+        Assert.False(called, name);
+        var want = c.GetProperty("want").GetProperty("tools");
+        if (want.ValueKind == JsonValueKind.Null) { Assert.Null(ov?.Tools); return; }
+        Assert.NotNull(ov?.Tools);
+        var kept = ov!.Tools!.Select(t => tools.FindIndex(x => ReferenceEquals(x, t) || Json.Stringify(x) == Json.Stringify(t))).ToList();
+        Assert.Equal(want.EnumerateArray().Select(x => x.GetInt32()), kept);
+    }
+
     [Theory]
     [MemberData(nameof(Cases))]
     public async Task Fixture(string file, string name)
