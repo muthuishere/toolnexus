@@ -20,9 +20,9 @@ import (
 // ---- the shared fixture ----------------------------------------------------
 
 type personaFixture struct {
-	BootstrapDir  map[string]string `json:"bootstrapDir"`
-	BootstrapOrder []string         `json:"bootstrapOrder"`
-	MaxFileBytes  int               `json:"maxFileBytes"`
+	BootstrapDir   map[string]string `json:"bootstrapDir"`
+	BootstrapOrder []string          `json:"bootstrapOrder"`
+	MaxFileBytes   int               `json:"maxFileBytes"`
 }
 
 func loadFixture(t *testing.T) personaFixture {

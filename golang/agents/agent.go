@@ -104,19 +104,19 @@ func (a *Agent) registryInto(acc map[string]Def) {
 		team = append(team, t.Name)
 	}
 	acc[a.Name] = Def{
-		Name:     a.Name,
-		Does:     a.Spec.Does,
-		Soul:     soul,
-		Model:    model,
-		Tools:    a.Spec.Tools,
-		Team:     team,
-		Budget:   a.Spec.Budget,
-		WaitFor:  a.Spec.WaitFor,
-		OnSpawn:  a.Spec.OnSpawn,
-		OnClose:  a.Spec.OnClose,
+		Name:       a.Name,
+		Does:       a.Spec.Does,
+		Soul:       soul,
+		Model:      model,
+		Tools:      a.Spec.Tools,
+		Team:       team,
+		Budget:     a.Spec.Budget,
+		WaitFor:    a.Spec.WaitFor,
+		OnSpawn:    a.Spec.OnSpawn,
+		OnClose:    a.Spec.OnClose,
 		Hooks:      guardedHooks(a.Spec),
 		Completion: a.Spec.Completion,
-		OnMetric: a.Spec.OnMetric,
+		OnMetric:   a.Spec.OnMetric,
 	}
 	for _, t := range a.Spec.Team {
 		t.registryInto(acc)

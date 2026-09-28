@@ -3,23 +3,23 @@
 // session-start injection point via Def.Soul, the six verbs, the injectable
 // Clock) — NO runtime changes:
 //
-//   1. FromDir(dir) — the directory IS the agent: the ordered bootstrap files
-//      (AGENTS/SOUL/IDENTITY/USER/TOOLS/HEARTBEAT/MEMORY.md) compose the soul as
-//      "## <file>" sections, each read with a 2 MB cap. Composition happens once,
-//      at session start; the soul is fixed for the run (frozen snapshot — the
-//      cache-stability rule, for free).
-//   2. MemoryTool(dir) — one add|replace|remove tool over MEMORY.md / USER.md.
-//      All actions write to DISK. It NEVER mutates the live session's prompt:
-//      persisted memory loads at the START of the next session (the frozen
-//      snapshot keeps a long-lived persona cache-stable). A replace/remove of a
-//      substring that is absent is a loud isError. Omittable per persona.
-//   3. StartAgent(agent, …) — a heartbeat: each interval posts a tick to the
-//      agent's OWN inbox (the unsolicited rail — ticks coalesce) and, when idle,
-//      wakes it with a "read HEARTBEAT.md and act, else HEARTBEAT_OK" prompt. A
-//      HEARTBEAT_OK reply stays silent (only a substantive reply reaches onBeat).
-//      All timing goes through the runtime's injectable Clock (fixtures run on a
-//      virtual clock). Inbound channels are the HOST's job — deliver external
-//      events by calling Post/Wake.
+//  1. FromDir(dir) — the directory IS the agent: the ordered bootstrap files
+//     (AGENTS/SOUL/IDENTITY/USER/TOOLS/HEARTBEAT/MEMORY.md) compose the soul as
+//     "## <file>" sections, each read with a 2 MB cap. Composition happens once,
+//     at session start; the soul is fixed for the run (frozen snapshot — the
+//     cache-stability rule, for free).
+//  2. MemoryTool(dir) — one add|replace|remove tool over MEMORY.md / USER.md.
+//     All actions write to DISK. It NEVER mutates the live session's prompt:
+//     persisted memory loads at the START of the next session (the frozen
+//     snapshot keeps a long-lived persona cache-stable). A replace/remove of a
+//     substring that is absent is a loud isError. Omittable per persona.
+//  3. StartAgent(agent, …) — a heartbeat: each interval posts a tick to the
+//     agent's OWN inbox (the unsolicited rail — ticks coalesce) and, when idle,
+//     wakes it with a "read HEARTBEAT.md and act, else HEARTBEAT_OK" prompt. A
+//     HEARTBEAT_OK reply stays silent (only a substantive reply reaches onBeat).
+//     All timing goes through the runtime's injectable Clock (fixtures run on a
+//     virtual clock). Inbound channels are the HOST's job — deliver external
+//     events by calling Post/Wake.
 //
 // Higher patterns are recipes over the above, no new surface: dream/consolidation
 // = a StartAgent whose HEARTBEAT.md folds notes into MEMORY.md via the memory
