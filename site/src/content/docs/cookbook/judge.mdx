@@ -203,6 +203,77 @@ question that needs the role. One sample per cell; Jev is near-deterministic, bu
 readings, not averages. A full pipeline built on this is the
 [test-scout scenario](/toolnexus/scenarios/testscout/).
 
+## Batteries: judgments already wired into the loop
+
+<Aside type="note" title="Unreleased — lands in the next release">
+Eight batteries ship in all seven ports (OpenSpec change `add-judge-batteries`, ADR 0035). Each
+takes any `Classifier`, has a standalone method returning a typed verdict, and where the loop has a
+seam an `asHook(next)` that wraps your own hook instead of replacing it. Every port runs the shared
+cases in `examples/judge/batteries/` against a recorded `static` classifier. No threshold here has
+been tuned on a live backend yet.
+</Aside>
+
+| battery | what it decides | hook |
+|---|---|---|
+| `ToolGuardClassifier` | allow / ask / deny a tool call from a 0–3 risk rating; unsure always asks | `beforeTool` (ask = §10 `approval` suspension) |
+| `ToolRelevanceClassifier` | which tools this turn needs; only a confident "no" drops one | `beforeLLM` (swaps `tools`) |
+| `SkillRelevanceClassifier` | which skills are relevant | none; feed `selected` to the skill allowlist (never an empty list: empty means all) |
+| `ToolResultFilterClassifier` | which paragraphs of a tool's output matter | `afterTool` |
+| `IsCompleteClassifier` | does the final answer complete the task | none |
+| `AgentRouterClassifier` | which agent handles a task (walks your tree past 255) | none |
+| `ContentGuardClassifier` | allow / review / block text on `harmful` and `prompt_injection` | `beforeLLM` (block stops the run) |
+| `ModelRouterClassifier` | **opt-in** per-query model from your described list | `beforeLLM` (overrides `model` for that turn) |
+
+You must say what a classifier error means (`onError: "open" | "closed"`, no default); the routers
+fall back to your configured model or fallback instead. ToolGuard's `deny` is a policy aid, not a
+security control: keep allowlists in code in front of it.
+
+<Tabs syncKey="lang">
+<TabItem label="JavaScript">
+```ts
+import { createClassifier, createClient, ToolGuardClassifier, ModelRouterClassifier } from "toolnexus"
+
+const c = createClassifier()
+const guard = new ToolGuardClassifier(c, { onError: "closed" })
+const router = new ModelRouterClassifier(c, [
+  { id: "small-fast", description: "Short factual answers, lookups and simple rewrites; cheapest." },
+  { id: "large-reasoning", description: "Multi-step reasoning and code changes across files; most expensive." },
+])
+
+const client = createClient({ model: "large-reasoning", /* … */ hooks: {
+  beforeTool: guard.asHook(myBeforeTool),   // your hook still runs when the guard allows
+  beforeLLM: router.asHook(),               // sure pick routes this turn; otherwise "large-reasoning"
+}})
+```
+</TabItem>
+<TabItem label="Python">
+```python
+from toolnexus import ToolGuardClassifier, ContentGuardClassifier
+
+guard = ToolGuardClassifier(classifier, on_error="closed")
+v = await guard.check({"name": "delete_file", "arguments": {"path": "/tmp/x"}})
+v.action, v.reason, v.risk          # "deny", "high risk", 2.7
+
+hooks = {"before_tool": guard.as_hook(),
+         "before_llm": ContentGuardClassifier(classifier, on_error="open").as_hook()}
+```
+</TabItem>
+<TabItem label="Go">
+```go
+guard, _ := tn.NewToolGuard(c, tn.ToolGuardOptions{OnError: tn.OnErrorClosed})
+router := tn.NewModelRouter(c, []tn.ModelOption{
+	{ID: "small-fast", Description: "Short factual answers, lookups and simple rewrites; cheapest."},
+	{ID: "large-reasoning", Description: "Multi-step reasoning and code changes across files; most expensive."},
+}, tn.RouterOptions{})
+hooks := &tn.Hooks{BeforeTool: guard.AsHook(nil), BeforeLLM: router.AsHook(nil)}
+```
+</TabItem>
+</Tabs>
+
+The other ports' spellings (java `new ToolGuardClassifier(c, new ToolGuardClassifier.Options().onError(…))`,
+csharp `CheckAsync`/`AsHook`, elixir `Toolnexus.Judge.ToolGuard.new(c, on_error: :closed)`, clojure
+`toolnexus.batteries/tool-guard`) are listed in the SPEC §8B idiom table.
+
 ## Under the hood: the raw `Classifier`
 
 `ask` and `gate` are a thin layer over the map-in, typed-answers-out API below.

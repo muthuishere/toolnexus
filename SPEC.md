@@ -1482,8 +1482,8 @@ observe; the noted ones may mutate or short-circuit.
   to replace them (trim/inject history, swap tools). Returning `messages` replaces the working
   transcript for the rest of the run — the canonical use is **context compaction** (§7F).
   It may also return `model` (change `add-judge-batteries`): a non-empty `model` is transmitted
-  for **that turn only** (request body and the `afterLLM` event); absent, null or empty ⇒ the
-  configured model, verbatim. Metric events keep the configured model. This is the seam an
+  for **that turn only** (request body and the `afterLLM` event), in every loop and style, run,
+  stream and the single-call `translate`; absent, null or empty ⇒ the configured model, verbatim. Metric events keep the configured model. This is the seam an
   opt-in `ModelRouterClassifier` (§8B *Batteries*) uses; nothing in the library returns it unless
   the host attached one.
 - `afterLLM({ response, model, turn })` → observe (logging, cost, tracing). `response` is
@@ -2211,13 +2211,13 @@ Idiom (behaviour identical; constructor and method spelling follow each port):
 
 | port | construct | methods | hook |
 |---|---|---|---|
-| golang | `NewToolGuard(c, ToolGuardOptions{OnError: OnErrorClosed})` … | `Check` / `Select` / `Filter` / `Pick` | `AsHook(next)` returns the hook func |
-| js | `new ToolGuardClassifier(c, { onError: "closed" })` … | `check` / `select` / `filter` / `pick` | `asHook(next?)` |
-| python | `ToolGuardClassifier(c, on_error="closed")` … | `check` / `select` / `filter` / `pick` (async) | `as_hook(next=None)` |
-| java | `new ToolGuardClassifier(c, ToolGuardClassifier.Options…)` | `check` / `select` / `filter` / `pick` | `asHook(next)` |
-| csharp | `new ToolGuardClassifier(c, new ToolGuardOptions { OnError = OnError.Closed })` | `CheckAsync` / `SelectAsync` / `FilterAsync` / `PickAsync` | `AsHook(next)` |
-| elixir | `Toolnexus.Judge.ToolGuard.new(c, on_error: :closed)` | `check/2` / `select/3` / `filter/3` / `pick/4` | `as_hook(guard, next \\ nil)` |
-| clojure | `(b/tool-guard c {:on-error :closed})` | `b/check` / `b/select` / `b/filter-chunks` / `b/pick` | `b/as-hook` |
+| golang | `NewToolGuard(c, ToolGuardOptions{OnError: OnErrorClosed})`, `NewModelRouter(c, models, RouterOptions{})`; input `GuardedCall`, `Item`, `AgentNode`, `ModelOption` | `Check` / `Select` / `Filter` / `Pick` | `AsHook(next)`; `LatestUserText` |
+| js | `new ToolGuardClassifier(c, { onError: "closed" })`, `new ModelRouterClassifier(c, models, opts?)` | `check` / `select` / `filter` / `pick` (async) | `asHook(next?)`; `latestUserText` |
+| python | `ToolGuardClassifier(c, on_error="closed", ask_at=…)`, `ModelRouterClassifier(c, models)` | `check` / `select` / `filter` / `pick` (async) | `as_hook(next=None)`; `latest_user_text`; block raises `ContentGuardBlocked` |
+| java | `new ToolGuardClassifier(c, new ToolGuardClassifier.Options().onError(Batteries.OnError.CLOSED))`, `new ModelRouterClassifier(c, models)` | `check` / `select` / `filter` / `pick` | `asHook(next)`; `Batteries.latestUserText`; block throws `ContentGuardClassifier.BlockedException` |
+| csharp | `new ToolGuardClassifier(c, new ToolGuardOptions { OnError = OnError.Closed })`, `new ModelRouterClassifier(c, models)` | `CheckAsync` / `SelectAsync` / `FilterAsync` / `PickAsync` | `AsHook(next)` (hooks are sync delegates and block on the call); `Batteries.LatestUserText`; block throws `ContentBlockedException` |
+| elixir | `Toolnexus.Judge.ToolGuard.new(c, on_error: :closed)` → `{:ok, g}`; `AgentRouter.new/2`, `ModelRouter.new(c, models, opts)` return the struct | `check/2` / `select/3` / `filter/3` / `pick/4` (`ModelRouter.pick/3`); actions and bands are atoms | `as_hook(battery, next \\ nil)`; `Batteries.latest_user_text/1`; block raises `ContentGuard.BlockedError` |
+| clojure | `toolnexus.batteries`: `(b/tool-guard c {:on-error :closed})`, `(b/model-router c models)` | `b/check` / `b/select` / `b/filter-chunks` / `b/pick` | `(b/as-hook battery next)`; `b/latest-user-text`; block throws `ex-info` |
 
 - Conformance: `examples/judge/batteries/*.json` (recorded `static` calls → verdict) and
   `user-text-cases.json`.
