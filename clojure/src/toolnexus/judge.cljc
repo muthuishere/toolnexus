@@ -97,14 +97,21 @@
 ;; ask
 ;; ---------------------------------------------------------------------------
 
+(defn band-answers
+  "A decision's answers by name, read against `bands` (merged over the
+  default): noul answers gain `:band`, choice/score answers gain `:sure`. The
+  pure half of `ask`, public so a caller that also needs the decision's
+  `:calibrated` (the §8B batteries) reads answers by the same rule."
+  [decision bands]
+  (let [b (merge default-bands bands)]
+    (reduce-kv (fn [m k a] (assoc m k (read-answer b a))) {} (:answers decision))))
+
 (defn ask
   "Answers by name. A noul answer carries `:band` (yes | no | uncertain); a
   choice or score answer carries `:sure`. `bands` merges over the default."
   ([c st qs] (ask c st qs nil))
   ([c st qs bands]
-   (let [b (merge default-bands bands)
-         d (jev/evaluate c st (wire-questions qs))]
-     (reduce-kv (fn [m k a] (assoc m k (read-answer b a))) {} (:answers d)))))
+   (band-answers (jev/evaluate c st (wire-questions qs)) bands)))
 
 ;; ---------------------------------------------------------------------------
 ;; gate / policy

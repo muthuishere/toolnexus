@@ -34,7 +34,7 @@ net.clojars.muthuishere/koine     {:mvn/version "0.11.0"}   ; its only dependenc
 
 ## Verified on both hosts, in five execution modes
 
-565 tests / 2518 assertions, 0 failures, identical in every mode — and the gate fails on any
+581 tests / 3470 assertions, 0 failures, identical in every mode — and the gate fails on any
 divergence between them:
 
 | runtime | how |
@@ -74,6 +74,29 @@ five run on every change (`./all-modes-check.sh`).
 - `j/tape` + `j/recording` / `j/replaying` record live decisions by call name and replay them offline.
 - `jev/static-classifier` builds a hermetic classifier in one call; `jev/evaluate-batch` runs the
   same questions over many states (state order, fail-closed, 16 in flight).
+
+### Batteries
+
+`toolnexus.batteries` ships eight ready-made judgments (SPEC §8B *Batteries*): `tool-guard`,
+`tool-relevance`, `skill-relevance`, `tool-result-filter`, `is-complete`, `agent-router`,
+`content-guard`, `model-router`. Each constructor returns plain data; use it with `b/check`,
+`b/select`, `b/filter-chunks` or `b/pick`, or attach it as a §8 hook with `b/as-hook`
+(`(b/as-hook battery next)`, `next` may be nil). Six of them require `:on-error :open | :closed`.
+
+```clojure
+(require '[toolnexus.batteries :as b])
+
+(def guard (b/tool-guard classifier {:on-error :closed}))
+(b/check guard {:name "delete_file" :arguments {"path" "/tmp/x"}})
+;=> {:action "ask" :reason "medium risk" :risk 1.8 :sure true :calibrated true}
+
+(client/create-client {… :hooks {:before-tool (b/as-hook guard)
+                                 :before-llm  (b/as-hook (b/model-router classifier
+                                                          [{:id "small-fast" :description "Short factual answers; cheapest."}
+                                                           {:id "large-reasoning" :description "Multi-step reasoning and code."}]))}})
+```
+
+A `:before-llm` hook may return `:model`: a non-empty value is sent for that turn only.
 
 ## Documentation
 

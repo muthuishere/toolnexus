@@ -370,7 +370,9 @@
 ;; §8 hooks — lifecycle middleware
 ;; ---------------------------------------------------------------------------
 ;;
-;;   :before-llm  {:messages :tools :model :turn}  -> {:messages? :tools?}
+;;   :before-llm  {:messages :tools :model :turn}  -> {:messages? :tools? :model?}
+;;                  a non-empty :model is sent for THAT turn only (body +
+;;                  :after-llm event); nil/"" => the configured model verbatim
 ;;   :after-llm   {:response :model :turn}         -> observe only
 ;;   :before-tool {:name :args :id :turn}          -> {:result} short-circuits,
 ;;                                                    {:args} rewrites
@@ -386,8 +388,10 @@
 (defn- hook-of [client k] (get-in client [:hooks k]))
 
 (defn before-llm!
-  "§8 `beforeLLM`, applied to ONE round trip. Returns `[messages tools]` — the
-  hook's replacements when it returned them, the originals otherwise.
+  "§8 `beforeLLM`, applied to ONE round trip. Returns `[messages tools model]` —
+  the hook's replacements when it returned them, the originals otherwise.
+  `model` is the hook's non-empty `:model` for THIS turn only (change
+  add-judge-batteries), else the configured model verbatim.
 
   Public because §11 `toolnexus.translate` must fire this hook exactly once for
   its single call, and a second copy of the rule in that namespace is exactly
@@ -402,18 +406,21 @@
   the same empty-list omission (Gap 5) the toolkit's own list does."
   [client messages tools turn]
   (if-let [f (hook-of client :before-llm)]
-    (let [ov (f {:messages messages :tools tools :model (:model client) :turn turn})]
-      [(or (:messages ov) messages) (or (:tools ov) tools)])
-    [messages tools]))
+    (let [ov (f {:messages messages :tools tools :model (:model client) :turn turn})
+          m  (:model ov)]
+      [(or (:messages ov) messages) (or (:tools ov) tools)
+       (if (and (string? m) (not= "" m)) m (:model client))])
+    [messages tools (:model client)]))
 
 (defn after-llm!
   "§8 `afterLLM` — observe only (logging, cost, tracing). `:response` is the
   provider's decoded payload, so it carries `usage`. Returns nil; a return value
   from an observer would be a silent contract nobody could rely on."
-  [client response turn]
-  (when-let [f (hook-of client :after-llm)]
-    (f {:response response :model (:model client) :turn turn}))
-  nil)
+  ([client response turn] (after-llm! client response turn (:model client)))
+  ([client response turn model]
+   (when-let [f (hook-of client :after-llm)]
+     (f {:response response :model model :turn turn}))
+   nil))
 
 (defn- system-message
   "§0.10 — system = systemPrompt + \"\\n\\n\" + skillsPrompt. Empty parts are
@@ -478,13 +485,13 @@
         merged (if (seq params) (merge body params) body)]
     (if-let [f (:body-transform client)] (f merged) merged)))
 
-(defn- body-map [client system messages tools]
+(defn- body-map [client model system messages tools]
   (shape-body
    client
    (if (= "anthropic" (:style client))
-     (cond-> {:model (:model client) :max_tokens 4096 :system system :messages messages}
+     (cond-> {:model model :max_tokens 4096 :system system :messages messages}
        (seq tools) (assoc :tools tools))
-     (cond-> {:model (:model client) :messages messages}
+     (cond-> {:model model :messages messages}
        (seq tools) (assoc :tools tools :tool_choice "auto")))))
 
 (def ^:private default-retryable-statuses
@@ -769,11 +776,11 @@
 
 (defn- llm-call
   "The agent loop's round trip: build the loop's body, then post it."
-  [client system messages tools]
+  [client model system messages tools]
   (post-with-retry client
                    (endpoint client)
                    (merge {"content-type" "application/json"} (request-headers client))
-                   (json/write-str (body-map client system messages tools))))
+                   (json/write-str (body-map client model system messages tools))))
 
 (defn call-provider
   "ONE provider round trip for a CALLER-BUILT body map, through exactly the
@@ -1147,6 +1154,7 @@
         (let [hooked  (before-llm! client messages tools turn)
               messages (first hooked)
               tools    (second hooked)
+              turn-model (nth hooked 2)
               ;; §8A: the canonical transcript becomes wire messages HERE, so
               ;; `messages` (and therefore RunResult.messages, the store and
               ;; `translate`) never sees a synthetic user turn or a provider
@@ -1157,9 +1165,9 @@
             (let [r (finish! (content-error-result client wire messages tool-calls turns usage))]
               (emit! on-event {:type "done" :result r})
               r)
-            (let [body    (llm-call client system (:messages wire) tools)
+            (let [body    (llm-call client turn-model system (:messages wire) tools)
                   usage   (add-usage usage client (:usage body))
-                  _       (after-llm! client body turn)
+                  _       (after-llm! client body turn turn-model)
                   _       (emit! on-event {:type "usage" :usage usage})
                   turns   (inc turns)
                   msg     (assistant-message client body)

@@ -628,6 +628,20 @@
         (is (= [{:role "user" :content "rewritten"}] (:messages body)))
         (is (nil? (:tools body)) "an empty tool list omits the key entirely")))))
 
+(deftest translate-before-llm-model-override-applies-to-the-call
+  ;; add-judge-batteries: a non-empty :model rides the body and the afterLLM
+  ;; event; absent => the configured model verbatim.
+  (doseq [style ["openai" "anthropic"]]
+    (let [seen (atom [])]
+      (with-provider [(if (= "openai" style) openai-text-turn anthropic-tool-turn)]
+        (fn [{:keys [base requests]}]
+          (tr/translate (client-for style base
+                                    {:hooks {:before-llm (fn [_] {:model "small-fast"})
+                                             :after-llm (fn [ev] (swap! seen conj (:model ev)) nil)}})
+                        {:messages [{:role "user" :content "hi"}]})
+          (is (= "small-fast" (:model (first @requests))) style)
+          (is (= ["small-fast"] @seen) style))))))
+
 (deftest translate-before-llm-runs-before-request-params-and-body-transform
   ;; SPEC.md §8 Gap 1 ordering, on the §11 path:
   ;;   base body -> beforeLLM -> :request-params -> :body-transform -> wire
