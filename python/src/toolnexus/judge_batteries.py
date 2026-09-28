@@ -129,7 +129,9 @@ def _provider_tool(t: Any) -> tuple[str, str]:
     """name/description from an openai ``{function: {...}}`` or anthropic ``{name, ...}`` entry."""
     f = _field(t, "function", None)
     src = f if f is not None else t
-    return str(_field(src, "name")), str(_field(src, "description"))
+    # SPEC §8B: an absent or non-string name/description reads as "" (never "None").
+    n, d = _field(src, "name", None), _field(src, "description", None)
+    return (n if isinstance(n, str) else ""), (d if isinstance(d, str) else "")
 
 
 # --------------------------------------------------------------------------- #
@@ -430,7 +432,10 @@ class AgentRouterClassifier:
         st = state(self.role or ROLE_AGENT_ROUTER, {"task": task})
         level = list(agents or [])
         while level:
-            opts = {str(_field(n, "name")): str(_field(n, "description")) for n in level}
+            # SPEC §8B: duplicate names at one level — the FIRST node wins (never last).
+            opts: dict[str, str] = {}
+            for n in level:
+                opts.setdefault(str(_field(n, "name")), str(_field(n, "description")))
             try:
                 a, cal = await _ask(self.classifier, st,
                                     [choice("agent", "Which agent should handle `task`?", opts)], self.bands)

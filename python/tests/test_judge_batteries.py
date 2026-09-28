@@ -118,6 +118,27 @@ def test_every_fixture_file_is_covered():
     assert len(names) == 8 and len(ALL_CASES) >= 8
 
 
+HOOK_CASES = _load("tool-relevance.json").get("hookCases") or []
+
+
+def test_tool_relevance_hook_cases_present():
+    assert HOOK_CASES, "tool-relevance.json hookCases must not be empty"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", HOOK_CASES, ids=lambda c: c["name"])
+async def test_tool_relevance_hook_case(case):
+    """SPEC §8B: the before_llm hook over provider entries (no next); a nameless entry is ""."""
+    ev = case["event"]
+    hook = ToolRelevanceClassifier(_classifier_for(case), **_opts(case.get("options") or {})).as_hook()
+    out = await hook(ev)
+    want = case["want"]["tools"]
+    if want is None:
+        assert out is None or out.get("tools") is None
+    else:
+        assert out is not None and out.get("tools") == [ev["tools"][i] for i in want]
+
+
 @pytest.mark.parametrize("case", _load("user-text-cases.json")["cases"], ids=lambda c: c["name"])
 def test_latest_user_text(case):
     assert latest_user_text(case["messages"]) == case["want"]

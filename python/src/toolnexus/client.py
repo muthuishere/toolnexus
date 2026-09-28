@@ -888,6 +888,7 @@ class Client:
         turns: int,
         usage: dict[str, int],
         at_limit: bool = False,
+        model: Optional[str] = None,
     ) -> RunResult:
         """Emit the terminal ``run`` metric event and build the RunResult.
 
@@ -898,14 +899,14 @@ class Client:
         self._emit(
             {
                 "event": "run",
-                "model": self.model,
+                "model": model or self.model,
                 "turns": turns,
                 "tool_calls": len(tool_calls),
                 "total_tokens": usage["total_tokens"],
                 "ms": _ms_since(run_start),
             }
         )
-        return self._result(text, messages, tool_calls, turns, usage, at_limit=at_limit)
+        return self._result(text, messages, tool_calls, turns, usage, at_limit=at_limit, model=model)
 
     def _emit_run_error(
         self,
@@ -914,12 +915,13 @@ class Client:
         turns: int,
         usage: dict[str, int],
         e: BaseException,
+        model: Optional[str] = None,
     ) -> None:
         """Emit a ``run`` error metric event (once, on a thrown run)."""
         self._emit(
             {
                 "event": "run",
-                "model": self.model,
+                "model": model or self.model,
                 "turns": turns,
                 "tool_calls": len(tool_calls),
                 "total_tokens": usage["total_tokens"],
@@ -944,6 +946,7 @@ class Client:
         turns: int,
         usage: dict[str, int],
         at_limit: bool = False,
+        model: Optional[str] = None,
     ) -> RunResult:
         return RunResult(
             text=text,
@@ -952,7 +955,7 @@ class Client:
             tool_call_count=len(tool_calls),
             turns=turns,
             usage=usage,
-            model=self.model,
+            model=model or self.model,
             status="incomplete" if at_limit and not text else "done",
             limit="maxTurns" if at_limit and not text else None,
         )
@@ -968,6 +971,7 @@ class Client:
         tool_calls: list[dict[str, Any]],
         turns: int,
         usage: dict[str, int],
+        model: Optional[str] = None,
     ) -> RunResult:
         """A run halted because a tool suspended and no ``wait_for`` was configured.
         Emits the terminal ``run`` event and returns status="pending". Mirrors JS
@@ -975,7 +979,7 @@ class Client:
         self._emit(
             {
                 "event": "run",
-                "model": self.model,
+                "model": model or self.model,
                 "turns": turns,
                 "tool_calls": len(tool_calls),
                 "total_tokens": usage["total_tokens"],
@@ -989,7 +993,7 @@ class Client:
             tool_call_count=len(tool_calls),
             turns=turns,
             usage=usage,
-            model=self.model,
+            model=model or self.model,
             status="pending",
             pending=request,
         )
@@ -1235,21 +1239,23 @@ class Client:
         cancel: Optional[asyncio.Event],
         style: ClientStyle,
         parts: Optional[list[dict[str, Any]]] = None,
+        model: Optional[str] = None,
     ) -> dict[str, Any]:
         """One non-streaming LLM call, with an ``llm`` metric event (ok/error + per-call
         tokens + ms). Mirrors JS ``llmCallJson``. ``parts`` describes the §1B content the
         request carries as ``{type, mimeType, bytes}`` — never the bytes themselves."""
         t0 = _now()
+        model = model or self.model
         try:
             data = await self._llm_fetch(self._transport.post, url, headers, payload, deadline, cancel)
             prompt, completion = _per_call(data.get("usage"), style)
-            ev: dict[str, Any] = {"event": "llm", "model": self.model, "status": "ok", "ms": _ms_since(t0), "prompt_tokens": prompt, "completion_tokens": completion}
+            ev: dict[str, Any] = {"event": "llm", "model": model, "status": "ok", "ms": _ms_since(t0), "prompt_tokens": prompt, "completion_tokens": completion}
             if parts:
                 ev["parts"] = parts
             self._emit(ev)
             return data
         except Exception:
-            self._emit({"event": "llm", "model": self.model, "status": "error", "ms": _ms_since(t0), "prompt_tokens": 0, "completion_tokens": 0})
+            self._emit({"event": "llm", "model": model, "status": "error", "ms": _ms_since(t0), "prompt_tokens": 0, "completion_tokens": 0})
             raise
 
     async def translate(
@@ -1314,14 +1320,14 @@ class Client:
             payload["max_tokens"] = max_tokens
         payload = self._finalize_body(payload)
 
-        data = await self._llm_call_json(endpoint, req_headers, payload, self._deadline(), cancel, "openai")
+        data = await self._llm_call_json(endpoint, req_headers, payload, self._deadline(), cancel, "openai", model=turn_model)
         await self._translate_after_llm(data, turn_model)
 
         usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         _add_usage(usage, data.get("usage"), "openai")
         choices = data.get("choices") or []
         if not choices:
-            return TranslateResult(finish_reason="stop", usage=usage, model=self.model, raw=data)
+            return TranslateResult(finish_reason="stop", usage=usage, model=turn_model, raw=data)
         message = (choices[0].get("message") or {}) if isinstance(choices[0], dict) else {}
         calls = [
             TranslatedToolCall(
@@ -1337,7 +1343,7 @@ class Client:
             tool_calls=calls,
             finish_reason=choices[0].get("finish_reason") or finish_reason_for(bool(calls)),
             usage=usage,
-            model=self.model,
+            model=turn_model,
             raw=data,
         )
 
@@ -1384,7 +1390,7 @@ class Client:
             payload["tool_choice"] = native_choice
         payload = self._finalize_body(payload)
 
-        data = await self._llm_call_json(endpoint, req_headers, payload, self._deadline(), cancel, "anthropic")
+        data = await self._llm_call_json(endpoint, req_headers, payload, self._deadline(), cancel, "anthropic", model=turn_model)
         await self._translate_after_llm(data, turn_model)
 
         usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
@@ -1409,7 +1415,7 @@ class Client:
             tool_calls=calls,
             finish_reason=finish_reason_for(bool(calls), data.get("stop_reason")),
             usage=usage,
-            model=self.model,
+            model=turn_model,
             raw=data,
         )
 
@@ -1568,6 +1574,7 @@ class Client:
         usage = _empty_usage()
         turns = 0
         run_start = _now()
+        last_model = self.model
 
         try:
             for turn in range(self.max_turns):
@@ -1597,7 +1604,8 @@ class Client:
                     payload["tools"] = tools
                     payload["tool_choice"] = "auto"
                 payload = self._finalize_body(payload)
-                data = await self._llm_call_json(url, req_headers, payload, deadline, cancel, "openai", self._part_summaries(messages))
+                last_model = turn_model
+                data = await self._llm_call_json(url, req_headers, payload, deadline, cancel, "openai", self._part_summaries(messages), model=turn_model)
                 _add_usage(usage, data.get("usage"), "openai")
                 after = _get_hook(self.hooks, "after_llm")
                 if after is not None:
@@ -1607,7 +1615,7 @@ class Client:
                 calls = msg.get("tool_calls") or []
                 if not calls:
                     return self._end_run(
-                        run_start, msg.get("content") or "", messages, tool_calls, turns, usage
+                        run_start, msg.get("content") or "", messages, tool_calls, turns, usage, model=last_model
                     )
 
                 # Parse the tool calls in order, then execute them concurrently (true
@@ -1645,13 +1653,13 @@ class Client:
                     )
                     messages.append(_tool_message(call_id, name, result))
                     if halted is not None:
-                        return self._pending_run(run_start, halted, messages, tool_calls, turns, usage)
+                        return self._pending_run(run_start, halted, messages, tool_calls, turns, usage, model=last_model)
 
             return self._end_run(
-                run_start, _last_text(messages), messages, tool_calls, turns, usage, at_limit=True
+                run_start, _last_text(messages), messages, tool_calls, turns, usage, at_limit=True, model=last_model
             )
         except Exception as e:
-            self._emit_run_error(run_start, tool_calls, turns, usage, e)
+            self._emit_run_error(run_start, tool_calls, turns, usage, e, model=last_model)
             raise
 
     # ----------------------------------------------------------------------- #
@@ -1685,6 +1693,7 @@ class Client:
         usage = _empty_usage()
         turns = 0
         run_start = _now()
+        last_model = self.model
 
         try:
             for turn in range(self.max_turns):
@@ -1714,7 +1723,8 @@ class Client:
                 if tools:
                     payload["tools"] = tools
                 payload = self._finalize_body(payload)
-                data = await self._llm_call_json(endpoint, req_headers, payload, deadline, cancel, "anthropic", self._part_summaries(messages))
+                last_model = turn_model
+                data = await self._llm_call_json(endpoint, req_headers, payload, deadline, cancel, "anthropic", self._part_summaries(messages), model=turn_model)
                 _add_usage(usage, data.get("usage"), "anthropic")
                 after = _get_hook(self.hooks, "after_llm")
                 if after is not None:
@@ -1724,7 +1734,7 @@ class Client:
                 uses = [b for b in content if b.get("type") == "tool_use"]
                 if not uses:
                     text = "".join(b.get("text", "") for b in content if b.get("type") == "text")
-                    return self._end_run(run_start, text, messages, tool_calls, turns, usage)
+                    return self._end_run(run_start, text, messages, tool_calls, turns, usage, model=last_model)
 
                 # Execute the tool_use blocks concurrently (true parallel tool calling).
                 # Each result is mapped back to its originating block by index so
@@ -1761,11 +1771,11 @@ class Client:
                         break
                 messages.append({"role": "user", "content": results})
                 if halted is not None:
-                    return self._pending_run(run_start, halted, messages, tool_calls, turns, usage)
+                    return self._pending_run(run_start, halted, messages, tool_calls, turns, usage, model=last_model)
 
-            return self._end_run(run_start, "", messages, tool_calls, turns, usage, at_limit=True)
+            return self._end_run(run_start, "", messages, tool_calls, turns, usage, at_limit=True, model=last_model)
         except Exception as e:
-            self._emit_run_error(run_start, tool_calls, turns, usage, e)
+            self._emit_run_error(run_start, tool_calls, turns, usage, e, model=last_model)
             raise
 
     # ----------------------------------------------------------------------- #
@@ -1797,6 +1807,7 @@ class Client:
         usage = _empty_usage()
         turns = 0
         run_start = _now()
+        last_model = self.model
 
         try:
             for turn in range(self.max_turns):
@@ -1828,6 +1839,7 @@ class Client:
                     payload["tool_choice"] = "auto"
                 payload = self._finalize_body(payload)
 
+                model = last_model = turn_model
                 t0 = _now()
                 before_p, before_c = usage["prompt_tokens"], usage["completion_tokens"]
                 content = ""
@@ -1862,9 +1874,9 @@ class Client:
                             if fn.get("arguments"):
                                 slot["args"] += fn["arguments"]
                 except Exception:
-                    self._emit({"event": "llm", "model": self.model, "status": "error", "ms": _ms_since(t0), "prompt_tokens": 0, "completion_tokens": 0})
+                    self._emit({"event": "llm", "model": model, "status": "error", "ms": _ms_since(t0), "prompt_tokens": 0, "completion_tokens": 0})
                     raise
-                _ev: dict[str, Any] = {"event": "llm", "model": self.model, "status": "ok", "ms": _ms_since(t0), "prompt_tokens": usage["prompt_tokens"] - before_p, "completion_tokens": usage["completion_tokens"] - before_c}
+                _ev: dict[str, Any] = {"event": "llm", "model": model, "status": "ok", "ms": _ms_since(t0), "prompt_tokens": usage["prompt_tokens"] - before_p, "completion_tokens": usage["completion_tokens"] - before_c}
                 _parts = self._part_summaries(messages)
                 if _parts:
                     _ev["parts"] = _parts
@@ -1880,7 +1892,7 @@ class Client:
                 if not calls:
                     messages.append({"role": "assistant", "content": content})
                     yield {"type": "usage", "usage": usage}
-                    yield {"type": "done", "result": self._end_run(run_start, content, messages, tool_calls, turns, usage)}
+                    yield {"type": "done", "result": self._end_run(run_start, content, messages, tool_calls, turns, usage, model=last_model)}
                     return
 
                 messages.append(
@@ -1918,7 +1930,7 @@ class Client:
                                 }
                             )
                             messages.append(_tool_message(c["id"], c["name"], result))
-                            yield {"type": "done", "result": self._pending_run(run_start, halted, messages, tool_calls, turns, usage)}
+                            yield {"type": "done", "result": self._pending_run(run_start, halted, messages, tool_calls, turns, usage, model=last_model)}
                             return
                     tool_calls.append(
                         {
@@ -1938,9 +1950,9 @@ class Client:
                         "is_error": result.is_error,
                     }
 
-            yield {"type": "done", "result": self._end_run(run_start, _last_text(messages), messages, tool_calls, turns, usage, at_limit=True)}
+            yield {"type": "done", "result": self._end_run(run_start, _last_text(messages), messages, tool_calls, turns, usage, at_limit=True, model=last_model)}
         except Exception as e:
-            self._emit_run_error(run_start, tool_calls, turns, usage, e)
+            self._emit_run_error(run_start, tool_calls, turns, usage, e, model=last_model)
             raise
 
     # ----------------------------------------------------------------------- #
@@ -1974,6 +1986,7 @@ class Client:
         usage = _empty_usage()
         turns = 0
         run_start = _now()
+        last_model = self.model
 
         try:
             for turn in range(self.max_turns):
@@ -2005,6 +2018,7 @@ class Client:
                     payload["tools"] = tools
                 payload = self._finalize_body(payload)
 
+                model = last_model = turn_model
                 t0 = _now()
                 before_p, before_c = usage["prompt_tokens"], usage["completion_tokens"]
                 blocks: dict[int, dict[str, Any]] = {}
@@ -2042,9 +2056,9 @@ class Client:
                             stop_reason = (j.get("delta") or {}).get("stop_reason") or stop_reason
                             _add_usage(usage, j.get("usage"), "anthropic")
                 except Exception:
-                    self._emit({"event": "llm", "model": self.model, "status": "error", "ms": _ms_since(t0), "prompt_tokens": 0, "completion_tokens": 0})
+                    self._emit({"event": "llm", "model": model, "status": "error", "ms": _ms_since(t0), "prompt_tokens": 0, "completion_tokens": 0})
                     raise
-                _ev: dict[str, Any] = {"event": "llm", "model": self.model, "status": "ok", "ms": _ms_since(t0), "prompt_tokens": usage["prompt_tokens"] - before_p, "completion_tokens": usage["completion_tokens"] - before_c}
+                _ev: dict[str, Any] = {"event": "llm", "model": model, "status": "ok", "ms": _ms_since(t0), "prompt_tokens": usage["prompt_tokens"] - before_p, "completion_tokens": usage["completion_tokens"] - before_c}
                 _parts = self._part_summaries(messages)
                 if _parts:
                     _ev["parts"] = _parts
@@ -2067,7 +2081,7 @@ class Client:
                 if stop_reason != "tool_use" or not uses:
                     text = "".join(b["text"] for b in content if b["type"] == "text")
                     yield {"type": "usage", "usage": usage}
-                    yield {"type": "done", "result": self._end_run(run_start, text, messages, tool_calls, turns, usage)}
+                    yield {"type": "done", "result": self._end_run(run_start, text, messages, tool_calls, turns, usage, model=last_model)}
                     return
 
                 for u in uses:
@@ -2101,13 +2115,13 @@ class Client:
                     }
                     if halted is not None:
                         messages.append({"role": "user", "content": results})
-                        yield {"type": "done", "result": self._pending_run(run_start, halted, messages, tool_calls, turns, usage)}
+                        yield {"type": "done", "result": self._pending_run(run_start, halted, messages, tool_calls, turns, usage, model=last_model)}
                         return
                 messages.append({"role": "user", "content": results})
 
-            yield {"type": "done", "result": self._end_run(run_start, "", messages, tool_calls, turns, usage, at_limit=True)}
+            yield {"type": "done", "result": self._end_run(run_start, "", messages, tool_calls, turns, usage, at_limit=True, model=last_model)}
         except Exception as e:
-            self._emit_run_error(run_start, tool_calls, turns, usage, e)
+            self._emit_run_error(run_start, tool_calls, turns, usage, e, model=last_model)
             raise
 
     # ----------------------------------------------------------------------- #
