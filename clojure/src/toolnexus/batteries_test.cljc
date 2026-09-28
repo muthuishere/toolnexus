@@ -11,7 +11,8 @@
             [toolnexus.classifier :as jev]
             [toolnexus.client :as client]
             [toolnexus.client-test :as ct]
-            [toolnexus.tool :as tool]))
+            [toolnexus.tool :as tool]
+            [toolnexus.translate :as tr]))
 
 (defn- fixture [name]
   (json/read-str (fs/read-file (str (te/examples-dir) "/judge/batteries/" name))
@@ -304,3 +305,141 @@
                                        "x" deploy-tk)]
         (is (= "small-fast" @saw))
         (is (= "pinned" (:model (first bodies))))))))
+
+;; ---------------------------------------------------------------------------
+;; tool-relevance.json hookCases — the beforeLLM hook with a provider-entry event
+;; ---------------------------------------------------------------------------
+
+(deftest tool-relevance-hook-cases
+  (let [cs (get (fixture "tool-relevance.json") "hookCases")]
+    (is (seq cs) "tool-relevance.json: no hookCases")
+    (doseq [c cs]
+      (testing (get c "name")
+        (let [o   (get c "options")
+              ev  (json/read-str (json/write-str (get c "event")))
+              h   (b/as-hook (b/tool-relevance (battery-classifier c)
+                                               {:on-error (on-error o) :bands (bands o) :role (get o "role")}))
+              ov  (h ev)
+              want (get-in c ["want" "tools"])]
+          (if (nil? want)
+            (is (nil? (:tools ov)))
+            (is (= (json/write-str (mapv #(nth (:tools ev) %) want))
+                   (json/write-str (:tools ov))))))))))
+
+;; ---------------------------------------------------------------------------
+;; §8 beforeLLM — failure stops the call; the reported model is the transmitted one
+;; ---------------------------------------------------------------------------
+
+(defn- run-style
+  "Run `style` with a scripted tool turn then a text turn; returns
+  {:result :bodies :metrics} or {:error :bodies}."
+  [style hooks tk]
+  (let [out (atom nil)]
+    (ct/with-llm style [{:calls [{:id "c1" :name "deploy" :args {}}]} {:text "done"}]
+      (fn [{:keys [base requests]}]
+        (let [ms (atom [])
+              c  (client/create-client {:base-url base :style style :model "configured"
+                                        :max-turns 4 :hooks hooks
+                                        :on-metric (fn [m] (swap! ms conj m))})
+              r  (try {:result (client/run c "go" {:toolkit tk})}
+                      (catch Throwable t {:error (ex-message t)}))]
+          (reset! out (assoc r :bodies @requests :metrics @ms)))))
+    @out))
+
+(defn- boom [_] (throw (ex-info "hook boom" {})))
+
+(deftest before-llm-failure-stops-every-run-style
+  (doseq [style ["openai" "anthropic"]]
+    (testing style
+      (let [{:keys [error bodies result]} (run-style style {:before-llm boom} deploy-tk)]
+        (is (nil? result))
+        (is (= "hook boom" error))
+        (is (= 0 (count bodies)))))
+    (testing (str style " — failing on turn 1 stops before the second request")
+      (let [{:keys [error bodies]} (run-style style {:before-llm (fn [ev] (when (= 1 (:turn ev)) (boom ev)))} deploy-tk)]
+        (is (= "hook boom" error))
+        (is (= 1 (count bodies)))))))
+
+(deftest before-llm-failure-stops-translate
+  (doseq [style ["openai" "anthropic"]]
+    (testing style
+      (ct/with-llm style [{:text "x"}]
+        (fn [{:keys [base requests]}]
+          (let [c (client/create-client {:base-url base :style style :model "configured"
+                                         :hooks {:before-llm boom}})
+                e (try (tr/translate c {:messages [{:role "user" :content "hi"}]}) nil
+                       (catch Throwable t (ex-message t)))]
+            (is (= "hook boom" e))
+            (is (= 0 (count @requests)))))))))
+
+(deftest reported-model-is-the-transmitted-model
+  (doseq [style ["openai" "anthropic"]]
+    (testing (str style " — override on turn 0 only: last call used the configured model")
+      (let [{:keys [result bodies metrics]}
+            (run-style style {:before-llm (fn [ev] (when (= 0 (:turn ev)) {:model "small-fast"}))} deploy-tk)]
+        (is (= ["small-fast" "configured"] (mapv :model bodies)))
+        (is (= ["small-fast" "configured"] (mapv :model (filter #(= "llm" (:event %)) metrics))))
+        (is (= "configured" (:model result)))
+        (is (= ["configured"] (mapv :model (filter #(= "run" (:event %)) metrics))))))
+    (testing (str style " — override on every turn: run reports it")
+      (let [{:keys [result bodies metrics]}
+            (run-style style {:before-llm (fn [_] {:model "small-fast"})} deploy-tk)]
+        (is (= ["small-fast" "small-fast"] (mapv :model bodies)))
+        (is (= "small-fast" (:model result)))
+        (is (= ["small-fast"] (mapv :model (filter #(= "run" (:event %)) metrics))))))
+    (testing (str style " — absent override: configured, verbatim")
+      (let [{:keys [result bodies metrics]} (run-style style {} deploy-tk)]
+        (is (= ["configured" "configured"] (mapv :model bodies)))
+        (is (= "configured" (:model result)))
+        (is (every? (fn [m] (= "configured" (:model m))) (filter (fn [m] (#{"llm" "run"} (:event m))) metrics)))))
+    (testing (str style " — pending run reports the last call's model")
+      (let [g (b/tool-guard (risk 1.8) {:on-error :closed})
+            {:keys [result bodies metrics]}
+            (run-style style {:before-llm (fn [_] {:model "small-fast"})
+                              :before-tool (b/as-hook g)} deploy-tk)]
+        (is (= "pending" (:status result)))
+        (is (= 1 (count bodies)))
+        (is (= "small-fast" (:model result)))
+        (is (= ["small-fast"] (mapv :model (filter #(= "run" (:event %)) metrics)))
+            "a pending run emits exactly one run metric")))))
+
+(deftest request-params-model-is-reported-as-sent
+  (testing "run: a :request-params model beats the hook's on the wire, and is what is reported"
+    (let [out (atom nil)]
+      (ct/with-llm "openai" [{:text "done"}]
+        (fn [{:keys [base requests]}]
+          (let [ms (atom [])
+                c  (client/create-client {:base-url base :style "openai" :model "configured"
+                                          :request-params {"model" "per-call"}
+                                          :hooks {:before-llm (fn [_] {:model "small-fast"})}
+                                          :on-metric (fn [m] (swap! ms conj m))})
+                r  (client/run c "go" {:toolkit deploy-tk})]
+            (reset! out [r @requests @ms]))))
+      (let [[r bodies ms] @out]
+        (is (= ["per-call"] (mapv :model bodies)))
+        (is (= "per-call" (:model r)))
+        (is (= ["per-call" "per-call"] (mapv :model (filter #(#{"llm" "run"} (:event %)) ms)))))))
+  (testing "translate reports the :request-params model it sent"
+    (ct/with-llm "openai" [{:text "x"}]
+      (fn [{:keys [base requests]}]
+        (let [c (client/create-client {:base-url base :style "openai" :model "configured"
+                                       :request-params {"model" "per-call"}})
+              r (tr/translate c {:messages [{:role "user" :content "hi"}]})]
+          (is (= ["per-call"] (mapv :model @requests)))
+          (is (= "per-call" (:model r))))))))
+
+(deftest translate-model-override
+  (doseq [style ["openai" "anthropic"]
+          [hooks want] [[{:before-llm (fn [_] {:model "small-fast"})} "small-fast"]
+                        [{} "configured"]
+                        [{:before-llm (fn [_] {:model ""})} "configured"]]]
+    (testing (str style " " want)
+      (ct/with-llm style [{:text "x"}]
+        (fn [{:keys [base requests]}]
+          (let [ms (atom [])
+                c  (client/create-client {:base-url base :style style :model "configured" :hooks hooks
+                                          :on-metric (fn [m] (swap! ms conj m))})
+                r  (tr/translate c {:messages [{:role "user" :content "hi"}]})]
+            (is (= [want] (mapv :model @requests)))
+            (is (= want (:model r)))
+            (is (= [want] (mapv :model (filter #(= "llm" (:event %)) @ms))))))))))

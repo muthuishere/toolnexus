@@ -305,7 +305,9 @@
            out   {:agent fallback :path [] :sure false :probabilities nil :calibrated true}]
       (if (empty? level)
         out
-        (let [opts (reduce (fn [m n] (assoc m (:name n) (:description n))) {} level)
+        (let [;; SPEC §8B — duplicate names at one level: the FIRST node wins,
+              ;; for the criterion here and for descent below.
+              opts (reduce (fn [m n] (if (contains? m (:name n)) m (assoc m (:name n) (:description n)))) {} level)
               [a cal err] (ask-battery (:classifier b) st
                                        [(j/choice "agent" "Which agent should handle `task`?" opts)]
                                        (:bands b))]
@@ -316,7 +318,7 @@
               (if (nil? x)
                 (assoc out :probabilities nil)
                 (let [out    (assoc out :probabilities (:probabilities x))
-                      picked (when (:sure x) (last (filter #(= (j/picked x) (:name %)) level)))]
+                      picked (when (:sure x) (first (filter #(= (j/picked x) (:name %)) level)))]
                   (cond
                     (nil? picked)          out
                     (seq (:agents picked)) (recur (vec (:agents picked))
@@ -418,9 +420,14 @@
 ;; hooks
 ;; ---------------------------------------------------------------------------
 
-(defn- provider-tool-name [t]
-  (let [f (kget t :function)]
-    (kget (if (map? f) f t) :name)))
+(defn- provider-tool-field
+  "SPEC §8B — a provider entry's absent or non-string field reads as \"\"."
+  [t k]
+  (let [f (kget t :function)
+        v (kget (if (map? f) f t) k)]
+    (if (string? v) v "")))
+
+(defn- provider-tool-name [t] (provider-tool-field t :name))
 
 (defn- guard-hook [g next]
   (fn [ev]
@@ -444,9 +451,7 @@
         (merge-llm ev nil next)
         (let [names (mapv provider-tool-name tools)
               v     (relevance-select t text (mapv (fn [tl n]
-                                                     {:name n :description
-                                                      (let [f (kget tl :function)]
-                                                        (kget (if (map? f) f tl) :description))})
+                                                     {:name n :description (provider-tool-field tl :description)})
                                                    tools names))]
           (if (empty? (:dropped v))
             (merge-llm ev nil next)

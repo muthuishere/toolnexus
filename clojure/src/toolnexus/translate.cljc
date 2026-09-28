@@ -315,8 +315,8 @@
                    (seq declared)             (assoc :tools declared)
                    (some? (:toolChoice req))  (assoc :tool_choice (:toolChoice req))
                    (positive-max-tokens req)  (assoc :max_tokens (positive-max-tokens req)))
-        data     (client/call-provider client body)
-        _        (client/after-llm! client data 0 model)
+        [data sent] (client/call-provider* client body)
+        _        (client/after-llm! client data 0 sent)
         choice   (get-in data [:choices 0])
         message  (or (:message choice) {})
         calls    (tool-calls-of message)
@@ -330,7 +330,7 @@
                      (finish-reason-for (seq calls) nil)
                      stated)
      :usage        (client/add-usage client/zero-usage client (:usage data))
-     :model        (:model client)
+     :model        sent
      :raw          data}))
 
 (defn- translate-anthropic
@@ -355,8 +355,8 @@
                     (not (str/blank? sys)) (assoc :system sys)
                     (seq declared)         (assoc :tools declared)
                     choice                 (assoc :tool_choice choice))
-        data      (client/call-provider client body)
-        _         (client/after-llm! client data 0 model)
+        [data sent] (client/call-provider* client body)
+        _         (client/after-llm! client data 0 sent)
         blocks    (filter map? (:content data))
         calls     (->> blocks
                        (filter (fn [b] (= "tool_use" (:type b))))
@@ -370,7 +370,7 @@
      :toolCalls    calls
      :finishReason (finish-reason-for (seq calls) (:stop_reason data))
      :usage        (client/add-usage client/zero-usage client (:usage data))
-     :model        (:model client)
+     :model        sent
      :raw          data}))
 
 (defn translate

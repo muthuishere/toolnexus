@@ -695,7 +695,7 @@
   transport failure and a non-2xx both become a thrown ex-info — unlike a TOOL
   error, an LLM failure is not something the model can be shown and asked to
   retry. `body` is the already-marshalled request string."
-  [client url headers body]
+  [client url headers body model]
   (let [budget  (or (:retries client) 0)
         base-ms (or (:retry-base-ms client) 500)]
     (loop [attempt 0]
@@ -715,7 +715,7 @@
             ok?     (and (not failed?) status (<= 200 status) (< status 300))]
         (if ok?
           (do (metric! client
-                       (fn [] {:event "llm" :model (:model client) :status status
+                       (fn [] {:event "llm" :model model :status status
                                :ms (- (ktime/now-ms) t0)
                                :prompt_tokens (get-in res [:usage :prompt_tokens])
                                :completion_tokens (get-in res [:usage :completion_tokens])}))
@@ -774,13 +774,38 @@
   {:role "user"
    :content (if (sequential? prompt) (vec prompt) prompt)})
 
+(defn- model-of [shaped fallback]
+  ;; a string "model" can only come from :request-params / :body-transform, and
+  ;; it is the one the wire carries (it is written after the keyword key).
+  (let [m (if (contains? shaped "model") (get shaped "model") (get shaped :model))]
+    (if (string? m) m fallback)))
+
 (defn- llm-call
   "The agent loop's round trip: build the loop's body, then post it."
   [client model system messages tools]
-  (post-with-retry client
-                   (endpoint client)
-                   (merge {"content-type" "application/json"} (request-headers client))
-                   (json/write-str (body-map client model system messages tools))))
+  (let [shaped (body-map client model system messages tools)
+        ;; §8 — report the model TRANSMITTED: a :request-params / :body-transform
+        ;; model (the agent Loop's per-call override) wins over the hook's.
+        sent   (model-of shaped model)]
+    [(post-with-retry client
+                      (endpoint client)
+                      (merge {"content-type" "application/json"} (request-headers client))
+                      (json/write-str shaped)
+                      sent)
+     sent]))
+
+(defn call-provider*
+  "`call-provider`, returning `[decoded-response transmitted-model]` — the model
+  the shaped body actually carried (§8/§11: the model reported is the model sent)."
+  [client body]
+  (let [shaped (shape-body client body)
+        m      (model-of shaped (or (:model body) (:model client)))]
+    [(post-with-retry client
+                      (endpoint client)
+                      (merge {"content-type" "application/json"} (request-headers client))
+                      (json/write-str shaped)
+                      m)
+     m]))
 
 (defn call-provider
   "ONE provider round trip for a CALLER-BUILT body map, through exactly the
@@ -791,10 +816,7 @@
   must lose neither resilience nor metrics, and the only way to guarantee that
   is to share the code rather than copy it."
   [client body]
-  (post-with-retry client
-                   (endpoint client)
-                   (merge {"content-type" "application/json"} (request-headers client))
-                   (json/write-str (shape-body client body))))
+  (first (call-provider* client body)))
 
 ;; ---------------------------------------------------------------------------
 ;; per-style response reading
@@ -1117,16 +1139,18 @@
         ;; call sites return from this loop, and a save wired into only one of
         ;; them is the classic half-fix — the turn-limit exit would silently
         ;; forget the conversation.
-        finish!    (fn [r]
-                     (when (and conversation-id (:store client))
-                       ((:save (:store client)) conversation-id (:messages r)))
+        run-metric! (fn [r]
                      (metric! client
-                              (fn [] {:event "run" :model (:model client)
+                              (fn [] {:event "run" :model (:model r)
                                       :turns (:turns r) :tool_calls (:tool-call-count r)
                                       :total_tokens (get-in r [:usage :total-tokens])
                                       :ms (- (ktime/now-ms) run-t0)
                                       :error (:limit? r)}))
                      r)
+        finish!    (fn [r]
+                     (when (and conversation-id (:store client))
+                       ((:save (:store client)) conversation-id (:messages r)))
+                     (run-metric! r))
         seed       (cond
                      (seq history)    (vec history)
                      (seq remembered) (vec remembered)
@@ -1142,10 +1166,13 @@
            turn       0
            turns      0
            tool-calls []
-           usage      zero-usage]
+           usage      zero-usage
+           ;; §8 — RunResult.model / the `run` metric report the model of the
+           ;; LAST call the run made (configured until a call is made).
+           last-model (:model client)]
       (if (>= turn max-turns)
         (let [text (if anthropic? "" (last-assistant-text messages))
-              r    (finish! (run-result client text messages tool-calls turns usage true))]
+              r    (finish! (assoc (run-result client text messages tool-calls turns usage true) :model last-model))]
           (emit! on-event {:type "done" :result r})
           r)
         ;; §8 ordering: the hook sees (and may replace) the transcript and the
@@ -1162,10 +1189,10 @@
               ;; HTTP call, as DATA.
               wire    (content/build-wire messages (wire-opts client))]
           (if (:error wire)
-            (let [r (finish! (content-error-result client wire messages tool-calls turns usage))]
+            (let [r (finish! (assoc (content-error-result client wire messages tool-calls turns usage) :model last-model))]
               (emit! on-event {:type "done" :result r})
               r)
-            (let [body    (llm-call client turn-model system (:messages wire) tools)
+            (let [[body turn-model] (llm-call client turn-model system (:messages wire) tools)
                   usage   (add-usage usage client (:usage body))
                   _       (after-llm! client body turn turn-model)
                   _       (emit! on-event {:type "usage" :usage usage})
@@ -1174,7 +1201,7 @@
                   calls   (tool-calls-of client body)
                   messages (conj messages msg)]
               (if (empty? calls)
-                (let [r (finish! (run-result client (final-text client body) messages tool-calls turns usage false))]
+                (let [r (finish! (assoc (run-result client (final-text client body) messages tool-calls turns usage false) :model turn-model))]
                   (emit! on-event {:type "done" :result r})
                   r)
                 (let [_       (doseq [c calls]
@@ -1218,10 +1245,10 @@
                       halted  (first (keep :halt settled))
                       msgs    (into messages (tool-result-messages client settled))]
                   (if halted
-                    (let [r (pending-result client halted msgs (into tool-calls records) turns usage)]
+                    (let [r (run-metric! (assoc (pending-result client halted msgs (into tool-calls records) turns usage) :model turn-model))]
                       (emit! on-event {:type "done" :result r})
                       r)
-                    (recur msgs tools (inc turn) turns (into tool-calls records) usage)))))))))))
+                    (recur msgs tools (inc turn) turns (into tool-calls records) usage turn-model)))))))))))
 
 
 (defn ask
