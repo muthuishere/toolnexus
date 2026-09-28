@@ -1,4 +1,4 @@
-// Shared fixture: examples/agent-hooks/fixture.json (scenarios H1-H6).
+// Shared fixture: examples/agent-hooks/fixture.json (scenarios H1-H7).
 // §7D "The §8 seams on an agent run": Hooks/OnMetric forwarded verbatim into the
 // client the runtime builds, resolved def-over-runtime (replace, never merge),
 // so a §7F compactor reaches a long-lived agent. Unset stays byte-identical.
@@ -7,6 +7,7 @@ package agents
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"sync"
@@ -285,5 +286,60 @@ func TestAgentHooks_CompactionThenPendingRewind(t *testing.T) {
 	}
 	if len(post) != len(pre) {
 		t.Fatalf("SPEC GAP: a compacted turn that suspends left the store at %d, not the %d-message pre-turn checkpoint", len(post), len(pre))
+	}
+}
+
+// 7. H7: a failing BeforeLLM stops an agent run. The level-1 loop run returns the
+// hook's error; a runtime handle turn resolves the §7D boundary result (IsError,
+// "error"). Neither sends a provider request.
+func failingHooks() *tn.Hooks {
+	return &tn.Hooks{BeforeLLM: func(ctx context.Context, e tn.BeforeLLMEvent) (*tn.LLMOverride, error) {
+		return nil, errors.New("hook boom")
+	}}
+}
+
+func (r *recordingLLM) count() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	n := 0
+	for _, runs := range r.sent {
+		n += len(runs)
+	}
+	return n
+}
+
+func TestAgentHooks_H7_FailingBeforeLLMFailsTheLoopRun(t *testing.T) {
+	mock := newRecordingLLM()
+	tk, _ := tn.CreateToolkit(nil, tn.Options{Builtins: false})
+	defer tk.Close()
+	a := New("failing", Spec{Does: "x", Hooks: failingHooks()})
+	_, err := a.Loop(tn.ClientOptions{BaseURL: "http://mock/v1", Style: tn.StyleOpenAI,
+		Model: "configured", APIKey: "x", HTTPClient: &http.Client{Transport: mock}}, tk).
+		Run(context.Background(), "go", RunOpts{})
+	if err == nil || !strings.Contains(err.Error(), "hook boom") {
+		t.Fatalf("the loop run must return the hook's error, got %v", err)
+	}
+	if n := mock.count(); n != 0 {
+		t.Fatalf("no provider request may be sent, got %d", n)
+	}
+}
+
+func TestAgentHooks_H7_FailingBeforeLLMIsAnErrorResultAtTheHandleBoundary(t *testing.T) {
+	mock := newRecordingLLM()
+	rt := NewRuntime(Options{
+		Transport: mock,
+		Registry:  hooksReg(Def{Name: "a", Does: "x", Model: "m-a", Hooks: failingHooks()}),
+	})
+	defer rt.Close(rt.Root, nil)
+	h, err := rt.Spawn(rt.Root, "a", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := rt.RunTurn(h, "hello")
+	if !r.IsError || r.Status != "error" || !strings.Contains(r.Text, "hook boom") {
+		t.Fatalf("want isError/error/hook boom, got %+v", r)
+	}
+	if n := mock.count(); n != 0 {
+		t.Fatalf("no provider request may be sent, got %d", n)
 	}
 }
