@@ -62,6 +62,11 @@ The role lives in the state, and each question names the state field it judges. 
 (`default`, `skip_uncertain`), `Tape` (record / replay by call name), `Judge.static/4` (one-line
 static classifier), and `Classifier.evaluate_batch/4` (many states, state order, fail-closed, 16 in flight).
 
+Batteries (SPEC §8B): `Toolnexus.Judge.ToolGuard`, `ToolRelevance`, `SkillRelevance`,
+`ToolResultFilter`, `IsComplete`, `AgentRouter`, `ContentGuard`, `ModelRouter` — each a typed
+verdict from `check`/`select`/`filter`/`pick`, and `as_hook(battery, next)` where a hook seam
+exists. A `before_llm` hook may also return `%{model: "id"}` to override the model for that turn.
+
 ## Why the BEAM port
 
 Long-running agents want supervision. Every MCP connection is a supervised process; a crashed

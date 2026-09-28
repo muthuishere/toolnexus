@@ -447,9 +447,9 @@ defmodule Toolnexus.Client do
         tk -> Enum.map(tools_of(tk), &to_openai_schema/1)
       end ++ (opts[:tools] || [])
 
-    {messages, declared} = before_llm(client, messages, declared, 0)
+    {messages, declared, tmodel} = before_llm(client, messages, declared, 0)
 
-    body = %{"model" => client.model, "messages" => messages}
+    body = %{"model" => tmodel, "messages" => messages}
     body = if declared != [], do: Map.put(body, "tools", declared), else: body
 
     body =
@@ -472,7 +472,7 @@ defmodule Toolnexus.Client do
         finalize_body(client, body)
       )
 
-    after_llm(client, data, 0)
+    after_llm(client, data, 0, tmodel)
 
     usage = add_usage(zero_usage(), data["usage"], "openai")
     choice = data |> Map.get("choices", []) |> List.first() || %{}
@@ -515,7 +515,7 @@ defmodule Toolnexus.Client do
         tk -> Enum.map(tools_of(tk), &to_anthropic_schema/1)
       end ++ Translate.openai_tools_to_anthropic(opts[:tools])
 
-    {converted, declared} = before_llm(client, converted, declared, 0)
+    {converted, declared, tmodel} = before_llm(client, converted, declared, 0)
 
     max_tokens =
       case opts[:max_tokens] do
@@ -523,7 +523,7 @@ defmodule Toolnexus.Client do
         _ -> 4096
       end
 
-    body = %{"model" => client.model, "max_tokens" => max_tokens, "messages" => converted}
+    body = %{"model" => tmodel, "max_tokens" => max_tokens, "messages" => converted}
     body = if sys not in [nil, ""], do: Map.put(body, "system", sys), else: body
     body = if declared != [], do: Map.put(body, "tools", declared), else: body
 
@@ -541,7 +541,7 @@ defmodule Toolnexus.Client do
         finalize_body(client, body)
       )
 
-    after_llm(client, data, 0)
+    after_llm(client, data, 0, tmodel)
 
     usage = add_usage(zero_usage(), data["usage"], "anthropic")
     content = data["content"] || []
@@ -1296,18 +1296,27 @@ defmodule Toolnexus.Client do
 
       f when is_function(f, 1) ->
         case f.(%{messages: messages, tools: tools, model: client.model, turn: turn}) do
-          %{} = ov -> {Map.get(ov, :messages) || messages, Map.get(ov, :tools) || tools}
-          _ -> {messages, tools}
+          %{} = ov ->
+            {Map.get(ov, :messages) || messages, Map.get(ov, :tools) || tools,
+             turn_model(client, Map.get(ov, :model))}
+
+          _ ->
+            {messages, tools, client.model}
         end
 
       _ ->
-        {messages, tools}
+        {messages, tools, client.model}
     end
   end
 
-  defp after_llm(client, response, turn) do
+  # SPEC §8: a non-empty `model` override applies to THIS turn only (request body +
+  # after_llm event); absent/nil/empty => the configured model verbatim.
+  defp turn_model(_client, m) when is_binary(m) and m != "", do: m
+  defp turn_model(client, _), do: client.model
+
+  defp after_llm(client, response, turn, model) do
     case hook(client, :after_llm) do
-      f when is_function(f, 1) -> f.(%{response: response, model: client.model, turn: turn})
+      f when is_function(f, 1) -> f.(%{response: response, model: model, turn: turn})
       _ -> :ok
     end
   end
@@ -1672,7 +1681,7 @@ defmodule Toolnexus.Client do
 
   defp loop_openai(client, toolkit, key, run_start, st, turn) do
     st = %{st | turns: st.turns + 1}
-    {messages, tools} = before_llm(client, st.messages, st.tools, turn)
+    {messages, tools, tmodel} = before_llm(client, st.messages, st.tools, turn)
     st = %{st | messages: messages, tools: tools}
 
     data =
@@ -1681,7 +1690,7 @@ defmodule Toolnexus.Client do
           client,
           openai_url(client),
           headers_for(client, key),
-          openai_body(client, messages, tools, false)
+          openai_body(%{client | model: tmodel}, messages, tools, false)
         )
       rescue
         e ->
@@ -1690,7 +1699,7 @@ defmodule Toolnexus.Client do
       end
 
     st = %{st | usage: add_usage(st.usage, data["usage"], client.style)}
-    after_llm(client, data, turn)
+    after_llm(client, data, turn, tmodel)
     msg = data["choices"] |> List.first() |> Map.get("message")
     st = %{st | messages: st.messages ++ [msg]}
     calls = msg["tool_calls"] || []
@@ -1761,7 +1770,7 @@ defmodule Toolnexus.Client do
 
   defp loop_anthropic(client, toolkit, key, sys, run_start, st, turn) do
     st = %{st | turns: st.turns + 1}
-    {messages, tools} = before_llm(client, st.messages, st.tools, turn)
+    {messages, tools, tmodel} = before_llm(client, st.messages, st.tools, turn)
     st = %{st | messages: messages, tools: tools}
 
     data =
@@ -1770,7 +1779,7 @@ defmodule Toolnexus.Client do
           client,
           anthropic_url(client),
           headers_for(client, key),
-          anthropic_body(client, sys, messages, tools, false)
+          anthropic_body(%{client | model: tmodel}, sys, messages, tools, false)
         )
       rescue
         e ->
@@ -1779,7 +1788,7 @@ defmodule Toolnexus.Client do
       end
 
     st = %{st | usage: add_usage(st.usage, data["usage"], client.style)}
-    after_llm(client, data, turn)
+    after_llm(client, data, turn, tmodel)
     content = data["content"] || []
     st = %{st | messages: st.messages ++ [%{"role" => "assistant", "content" => content}]}
     uses = Enum.filter(content, &(&1["type"] == "tool_use"))
@@ -1882,7 +1891,7 @@ defmodule Toolnexus.Client do
 
   defp stream_loop_openai(client, toolkit, key, run_start, st, turn, emit) do
     st = %{st | turns: st.turns + 1}
-    {messages, tools} = before_llm(client, st.messages, st.tools, turn)
+    {messages, tools, tmodel} = before_llm(client, st.messages, st.tools, turn)
     st = %{st | messages: messages, tools: tools}
     t0 = now_ms()
     %{prompt_tokens: before_p, completion_tokens: before_c} = st.usage
@@ -1894,7 +1903,7 @@ defmodule Toolnexus.Client do
             client,
             openai_url(client),
             headers_for(client, key),
-            openai_body(client, messages, tools, true)
+            openai_body(%{client | model: tmodel}, messages, tools, true)
           )
 
         parse_openai_sse(sse, st.usage, emit)
@@ -1924,7 +1933,7 @@ defmodule Toolnexus.Client do
       completion_tokens: usage.completion_tokens - before_c
     })
 
-    after_llm(client, %{streamed: true, usage: usage}, turn)
+    after_llm(client, %{streamed: true, usage: usage}, turn, tmodel)
 
     if calls == [] do
       st = %{st | messages: st.messages ++ [%{"role" => "assistant", "content" => content}]}
@@ -2122,7 +2131,7 @@ defmodule Toolnexus.Client do
 
   defp stream_loop_anthropic(client, toolkit, key, sys, run_start, st, turn, emit) do
     st = %{st | turns: st.turns + 1}
-    {messages, tools} = before_llm(client, st.messages, st.tools, turn)
+    {messages, tools, tmodel} = before_llm(client, st.messages, st.tools, turn)
     st = %{st | messages: messages, tools: tools}
     t0 = now_ms()
     %{prompt_tokens: before_p, completion_tokens: before_c} = st.usage
@@ -2134,7 +2143,7 @@ defmodule Toolnexus.Client do
             client,
             anthropic_url(client),
             headers_for(client, key),
-            anthropic_body(client, sys, messages, tools, true)
+            anthropic_body(%{client | model: tmodel}, sys, messages, tools, true)
           )
 
         parse_anthropic_sse(sse, st.usage, emit)
@@ -2164,7 +2173,7 @@ defmodule Toolnexus.Client do
       completion_tokens: usage.completion_tokens - before_c
     })
 
-    after_llm(client, %{streamed: true, usage: usage}, turn)
+    after_llm(client, %{streamed: true, usage: usage}, turn, tmodel)
 
     content =
       Enum.map(blocks, fn b ->
