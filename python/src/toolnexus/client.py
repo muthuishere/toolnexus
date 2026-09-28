@@ -114,7 +114,8 @@ def _is_retryable_status(status: int, extra: Optional[Iterable[int]] = None) -> 
 # Lifecycle hooks (see ../../SPEC.md §8 "Hooks"). ``hooks`` is any object/mapping
 # carrying optional callables under snake_case keys — each async-OR-sync:
 #   before_llm({"messages", "tools", "model", "turn"})
-#       -> optionally {"messages"?, "tools"?} to replace them.
+#       -> optionally {"messages"?, "tools"?, "model"?} to replace them; a non-empty
+#          "model" is sent for THAT turn only (body + after_llm event).
 #   after_llm({"response", "model", "turn"})  -> observe (response carries usage).
 #   before_tool({"name", "args", "id", "turn"})
 #       -> {"result": ToolResult} to SHORT-CIRCUIT, or {"args": {...}} to rewrite.
@@ -1567,6 +1568,7 @@ class Client:
         try:
             for turn in range(self.max_turns):
                 turns += 1
+                turn_model = self.model
                 before = _get_hook(self.hooks, "before_llm")
                 if before is not None:
                     ov = await _call_hook(
@@ -1578,8 +1580,11 @@ class Client:
                             messages = ov["messages"]
                         if ov.get("tools") is not None:
                             tools = ov["tools"]
+                        # SPEC §8: a non-empty ``model`` applies to THIS turn only.
+                        if ov.get("model"):
+                            turn_model = ov["model"]
                 payload: dict[str, Any] = {
-                    "model": self.model,
+                    "model": turn_model,
                     "messages": self._wire_messages(messages, "openai"),
                 }
                 # Gap 5: omit tools/tool_choice entirely when the effective list is empty
@@ -1592,7 +1597,7 @@ class Client:
                 _add_usage(usage, data.get("usage"), "openai")
                 after = _get_hook(self.hooks, "after_llm")
                 if after is not None:
-                    await _call_hook(after, {"response": data, "model": self.model, "turn": turn})
+                    await _call_hook(after, {"response": data, "model": turn_model, "turn": turn})
                 msg = data["choices"][0]["message"]
                 messages.append(msg)
                 calls = msg.get("tool_calls") or []
@@ -1680,6 +1685,7 @@ class Client:
         try:
             for turn in range(self.max_turns):
                 turns += 1
+                turn_model = self.model
                 before = _get_hook(self.hooks, "before_llm")
                 if before is not None:
                     ov = await _call_hook(
@@ -1691,8 +1697,11 @@ class Client:
                             messages = ov["messages"]
                         if ov.get("tools") is not None:
                             tools = ov["tools"]
+                        # SPEC §8: a non-empty ``model`` applies to THIS turn only.
+                        if ov.get("model"):
+                            turn_model = ov["model"]
                 payload: dict[str, Any] = {
-                    "model": self.model,
+                    "model": turn_model,
                     "max_tokens": 4096,
                     "system": system,
                     "messages": self._wire_messages(messages, "anthropic"),
@@ -1705,7 +1714,7 @@ class Client:
                 _add_usage(usage, data.get("usage"), "anthropic")
                 after = _get_hook(self.hooks, "after_llm")
                 if after is not None:
-                    await _call_hook(after, {"response": data, "model": self.model, "turn": turn})
+                    await _call_hook(after, {"response": data, "model": turn_model, "turn": turn})
                 content = data.get("content") or []
                 messages.append({"role": "assistant", "content": content})
                 uses = [b for b in content if b.get("type") == "tool_use"]
@@ -1788,6 +1797,7 @@ class Client:
         try:
             for turn in range(self.max_turns):
                 turns += 1
+                turn_model = self.model
                 before = _get_hook(self.hooks, "before_llm")
                 if before is not None:
                     ov = await _call_hook(
@@ -1799,8 +1809,11 @@ class Client:
                             messages = ov["messages"]
                         if ov.get("tools") is not None:
                             tools = ov["tools"]
+                        # SPEC §8: a non-empty ``model`` applies to THIS turn only.
+                        if ov.get("model"):
+                            turn_model = ov["model"]
                 payload: dict[str, Any] = {
-                    "model": self.model,
+                    "model": turn_model,
                     "messages": self._wire_messages(messages, "openai"),
                     "stream": True,
                     "stream_options": {"include_usage": True},
@@ -1856,7 +1869,7 @@ class Client:
                 after = _get_hook(self.hooks, "after_llm")
                 if after is not None:
                     await _call_hook(
-                        after, {"response": {"streamed": True, "usage": usage}, "model": self.model, "turn": turn}
+                        after, {"response": {"streamed": True, "usage": usage}, "model": turn_model, "turn": turn}
                     )
 
                 calls = [acc[i] for i in sorted(acc)]
@@ -1961,6 +1974,7 @@ class Client:
         try:
             for turn in range(self.max_turns):
                 turns += 1
+                turn_model = self.model
                 before = _get_hook(self.hooks, "before_llm")
                 if before is not None:
                     ov = await _call_hook(
@@ -1972,8 +1986,11 @@ class Client:
                             messages = ov["messages"]
                         if ov.get("tools") is not None:
                             tools = ov["tools"]
+                        # SPEC §8: a non-empty ``model`` applies to THIS turn only.
+                        if ov.get("model"):
+                            turn_model = ov["model"]
                 payload: dict[str, Any] = {
-                    "model": self.model,
+                    "model": turn_model,
                     "max_tokens": 4096,
                     "system": system,
                     "messages": self._wire_messages(messages, "anthropic"),
@@ -2032,7 +2049,7 @@ class Client:
                 after = _get_hook(self.hooks, "after_llm")
                 if after is not None:
                     await _call_hook(
-                        after, {"response": {"streamed": True, "usage": usage}, "model": self.model, "turn": turn}
+                        after, {"response": {"streamed": True, "usage": usage}, "model": turn_model, "turn": turn}
                     )
 
                 content = [
