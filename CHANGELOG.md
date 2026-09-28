@@ -8,6 +8,8 @@ GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
 
 ## Unreleased
 
+## 0.21.0 — 2026-09-28
+
 ### Judge batteries: eight ready-made judgments, wired into the agent loop, in all seven ports
 
 `ask` / `gate` made one judgment short; a host still hand-wrote the same hook glue around it every
