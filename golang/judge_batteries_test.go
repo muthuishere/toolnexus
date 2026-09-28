@@ -532,3 +532,15 @@ func TestBatteries_ToolResultFilterHook(t *testing.T) {
 		}
 	}
 }
+
+// A RunParts prompt sits in the transcript as native []ContentPart, not []any.
+func TestLatestUserTextNativeParts(t *testing.T) {
+	msgs := []any{userMessage([]ContentPart{Text("a"), {Type: PartImage, URL: "https://x/y.png"}, Text("b")})}
+	if got := LatestUserText(msgs); got != "a\nb" {
+		t.Fatalf("got %q", got)
+	}
+	mixed := []any{map[string]any{"role": "user", "content": []any{Text("c")}}}
+	if got := LatestUserText(mixed); got != "c" {
+		t.Fatalf("got %q", got)
+	}
+}

@@ -780,9 +780,25 @@ func LatestUserText(messages []any) string {
 			if c != "" {
 				return c
 			}
+		case []ContentPart: // a RunParts prompt keeps its native parts in the transcript
+			var parts []string
+			for _, p := range c {
+				if p.Type == PartText {
+					parts = append(parts, p.Text)
+				}
+			}
+			if len(parts) > 0 {
+				return strings.Join(parts, "\n")
+			}
 		case []any:
 			var parts []string
 			for _, p := range c {
+				if cp, ok := p.(ContentPart); ok {
+					if cp.Type == PartText {
+						parts = append(parts, cp.Text)
+					}
+					continue
+				}
 				pm, ok := p.(map[string]any)
 				if !ok {
 					continue
