@@ -316,6 +316,16 @@
           [out _] (tnloop/run lp "one" {:model "per-call"})]
       (is (= ["per-call"] (models)))
       (is (= "per-call" (:model (:result out))))))
+  (testing "a per-call :model is serialised exactly once (the body carries no second model key)"
+    (let [raw  (atom [])
+          http (fn [_url _headers body]
+                 (swap! raw conj (if (string? body) body (json/write-str body)))
+                 {:status 200 :headers {"content-type" "application/json"}
+                  :body (json/write-str {:choices [{:index 0 :message (say "a") :finish_reason "stop"}]})})
+          lp   (tnloop/create {:name "m" :does "x"} (base-opts http) (bare-toolkit))]
+      (tnloop/run lp "one" {:model "per-call"})
+      (is (= [["per-call"]]
+             (mapv (fn [b] (mapv second (re-seq #"\"model\"\s*:\s*\"([^\"]*)\"" b))) @raw)))))
   (testing "a failing beforeLLM stops the call: error propagates, no request"
     (let [[http models] (scripted [(say "a")])
           lp (tnloop/create {:name "m" :does "x"}

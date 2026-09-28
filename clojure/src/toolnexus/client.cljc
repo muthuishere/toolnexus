@@ -459,6 +459,16 @@
   deliberately rather than by collision."
   #{:messages :tools :stream})
 
+(defn- canonical-param-key
+  "A `:request-params` key in the body's own spelling: a string that round-trips
+  as a plain keyword becomes that keyword; anything else (a keyword, or a string
+  like \"a/b\" that a keyword would split) is kept as given."
+  [k]
+  (if (string? k)
+    (let [kw (keyword k)]
+      (if (and (nil? (namespace kw)) (= k (name kw))) kw k))
+    k))
+
 (defn- shape-body
   "§client-request-shaping — the ordering contract, and the order is the spec:
 
@@ -472,9 +482,17 @@
   drop keys the merge added.
 
   With neither set the body is unchanged, which is the spec's own guarantee and
-  the reason both are applied through `cond->` rather than always-on `merge`."
+  the reason both are applied through `cond->` rather than always-on `merge`.
+
+  Param keys are CANONICALISED first (`canonical-param-key`): the body is built
+  with keyword keys, so a string \"model\" (the agent Loop's per-call override, or
+  any caller's) must REPLACE `:model`, not sit beside it — two keys that marshal
+  to the same JSON name put `model` on the wire twice. Canonicalising before the
+  forbidden-key filter also makes a string \"messages\" as forbidden as `:messages`."
   [client body]
   (let [params (:request-params client)
+        params (when (seq params)
+                 (into {} (map (fn [[k v]] [(canonical-param-key k) v])) params))
         params (when (seq params)
                  (let [kept (apply dissoc params forbidden-request-params)]
                    (when (not= (count kept) (count params))
@@ -775,8 +793,9 @@
    :content (if (sequential? prompt) (vec prompt) prompt)})
 
 (defn- model-of [shaped fallback]
-  ;; a string "model" can only come from :request-params / :body-transform, and
-  ;; it is the one the wire carries (it is written after the keyword key).
+  ;; :request-params keys are canonicalised to keywords (shape-body), so a string
+  ;; "model" here can only come from a :body-transform — and then it is the one
+  ;; the transform chose to send.
   (let [m (if (contains? shaped "model") (get shaped "model") (get shaped :model))]
     (if (string? m) m fallback)))
 

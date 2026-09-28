@@ -428,6 +428,47 @@
           (is (= ["per-call"] (mapv :model @requests)))
           (is (= "per-call" (:model r))))))))
 
+(defn- model-fields
+  "Every `\"model\":` occurrence in a raw JSON body, as its string value."
+  [raw]
+  (mapv second (re-seq #"\"model\"\s*:\s*\"([^\"]*)\"" raw)))
+
+(deftest a-per-call-model-is-serialised-exactly-once
+  ;; the body is built with :model; a string "model" in :request-params (what the
+  ;; agent Loop's per-call override sets) must REPLACE it, not sit beside it.
+  (doseq [style ["openai" "anthropic"]]
+    (testing (str style " run")
+      (ct/with-llm style [{:text "done"}]
+        (fn [{:keys [base raw]}]
+          (client/run (client/create-client {:base-url base :style style :model "configured"
+                                             :request-params {"model" "per-call"}})
+                      "go" {:toolkit deploy-tk})
+          (is (= [["per-call"]] (mapv model-fields @raw))))))
+    (testing (str style " translate")
+      (ct/with-llm style [{:text "x"}]
+        (fn [{:keys [base raw]}]
+          (tr/translate (client/create-client {:base-url base :style style :model "configured"
+                                               :request-params {"model" "per-call"}})
+                        {:messages [{:role "user" :content "hi"}]})
+          (is (= [["per-call"]] (mapv model-fields @raw))))))
+    (testing (str style " keyword :model param and a hook override: still one field")
+      (ct/with-llm style [{:text "done"}]
+        (fn [{:keys [base raw]}]
+          (client/run (client/create-client {:base-url base :style style :model "configured"
+                                             :request-params {:model "per-call"}
+                                             :hooks {:before-llm (fn [_] {:model "small-fast"})}})
+                      "go" {:toolkit deploy-tk})
+          (is (= [["per-call"]] (mapv model-fields @raw)))))))
+  (testing "a forbidden key is forbidden in either spelling"
+    (ct/with-llm "openai" [{:text "done"}]
+      (fn [{:keys [base requests]}]
+        (client/run (client/create-client {:base-url base :style "openai" :model "configured"
+                                           :request-params {"messages" [] "temperature" 0.5}})
+                    "go" {:toolkit deploy-tk})
+        (let [body (first @requests)]
+          (is (seq (:messages body)) "a string \"messages\" param must not replace the conversation")
+          (is (= 0.5 (:temperature body))))))))
+
 (deftest translate-model-override
   (doseq [style ["openai" "anthropic"]
           [hooks want] [[{:before-llm (fn [_] {:model "small-fast"})} "small-fast"]
