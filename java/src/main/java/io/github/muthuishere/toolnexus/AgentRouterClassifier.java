@@ -57,7 +57,7 @@ public final class AgentRouterClassifier {
             calibrated = calibrated && a.calibrated();
             Answer x = a.answers().get("agent");
             if (x == null) return new Verdict(fallback, path, false, null, calibrated, null);
-            probs = ((Classifier.ChoiceAnswer) x.raw()).probabilities();
+            probs = x.raw() instanceof Classifier.ChoiceAnswer ca ? ca.probabilities() : null;
             if (!x.sure()) return new Verdict(fallback, path, false, probs, calibrated, null);
             Node picked = null;
             for (Node n : level) if (n.name().equals(x.choice())) picked = n;

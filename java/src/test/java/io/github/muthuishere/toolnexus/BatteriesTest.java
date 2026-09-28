@@ -461,6 +461,26 @@ class BatteriesTest {
     }
 
     @Test
+    void routersNeverThrowOnAWrongTypeAnswer() {
+        // A custom classifier answering the choice question with a noul: a fallback, not a ClassCastException.
+        String noul = "{\"model\":{\"type\":\"noul\",\"noul\":0.9},\"agent\":{\"type\":\"noul\",\"noul\":0.9}}";
+        var mv = assertDoesNotThrow(() -> new ModelRouterClassifier(fixed(noul), MODELS).pick("x", "configured"));
+        assertEquals("configured", mv.model());
+        assertFalse(mv.routed());
+        var av = assertDoesNotThrow(() -> new AgentRouterClassifier(fixed(noul), null)
+                .pick("x", List.of(new AgentRouterClassifier.Node("a", "A", List.of())), "fb"));
+        assertEquals("fb", av.agent());
+    }
+
+    @Test
+    void toolGuardPendingIdWithoutACallId() {
+        var g = new ToolGuardClassifier(fixed("{\"risk\":{\"type\":\"score\",\"score\":2.0,\"confidence\":0.95}}"),
+                new ToolGuardClassifier.Options().onError(OnError.OPEN));
+        var ov = g.asHook(null).apply(new LlmClient.BeforeToolEvent("deploy", Map.of(), null, 0));
+        assertEquals("toolguard:", ((Request) ov.result().metadata().get("pending")).id());
+    }
+
+    @Test
     @SuppressWarnings("unchecked")
     void toolRelevanceHookDropsATool() throws Exception {
         try (Stub s = new Stub(); Toolkit tk = toolkit(tool("deploy", new AtomicInteger(), "D"), tool("send_email", new AtomicInteger(), "E"))) {

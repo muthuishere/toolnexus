@@ -49,8 +49,8 @@ public final class ModelRouterClassifier {
         }
         Answer x = a.answers().get("model");
         if (x == null) return new Verdict(fallback, false, false, null, a.calibrated(), null);
-        Map<String, Double> probs = ((Classifier.ChoiceAnswer) x.raw()).probabilities();
-        if (x.sure()) return new Verdict(x.choice(), true, true, probs, a.calibrated(), null);
+        Map<String, Double> probs = x.raw() instanceof Classifier.ChoiceAnswer ca ? ca.probabilities() : null;
+        if (x.sure() && x.choice() != null) return new Verdict(x.choice(), true, true, probs, a.calibrated(), null);
         return new Verdict(fallback, false, false, probs, a.calibrated(), null);
     }
 

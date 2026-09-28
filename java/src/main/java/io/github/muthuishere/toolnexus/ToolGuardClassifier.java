@@ -97,7 +97,7 @@ public final class ToolGuardClassifier {
                     data.put("arguments", args);
                     data.put("reason", v.reason());
                     data.put("risk", v.risk());
-                    Request req = new Request("toolguard:" + ev.id(), "approval",
+                    Request req = new Request("toolguard:" + (ev.id() == null ? "" : ev.id()), "approval",
                             "Approve the call to " + ev.name() + "? (" + v.reason() + ")", null, data, null);
                     Map<String, Object> meta = new LinkedHashMap<>();
                     meta.put("pending", req);
