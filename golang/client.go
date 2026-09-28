@@ -308,6 +308,10 @@ type AfterToolEvent struct {
 type LLMOverride struct {
 	Messages []any
 	Tools    []any
+	// Model, when non-empty, is transmitted for THIS turn only (request body and
+	// the AfterLLM event). Empty ⇒ the configured model, verbatim (SPEC §8
+	// "Right-size routing"; an opt-in ModelRouterClassifier sets it).
+	Model string
 }
 
 // ToolOverride is returned by Hooks.BeforeTool / Hooks.AfterTool. In BeforeTool,
@@ -994,6 +998,7 @@ func (c *Client) runOpenAI(ctx context.Context, prompt any, tk *Toolkit, history
 
 	for turn := 0; turn < c.maxTurns(); turn++ {
 		turns++
+		turnModel := c.opts.Model
 		if c.opts.Hooks != nil && c.opts.Hooks.BeforeLLM != nil {
 			ov, err := c.opts.Hooks.BeforeLLM(ctx, BeforeLLMEvent{Messages: messages, Tools: tools, Model: c.opts.Model, Turn: turn})
 			if err != nil {
@@ -1006,6 +1011,9 @@ func (c *Client) runOpenAI(ctx context.Context, prompt any, tk *Toolkit, history
 				if ov.Tools != nil {
 					tools = ov.Tools
 				}
+				if ov.Model != "" {
+					turnModel = ov.Model
+				}
 			}
 		}
 		wire, err := c.emitMessages(messages)
@@ -1013,7 +1021,7 @@ func (c *Client) runOpenAI(ctx context.Context, prompt any, tk *Toolkit, history
 			return RunResult{}, err
 		}
 		body := map[string]any{
-			"model":    c.opts.Model,
+			"model":    turnModel,
 			"messages": wire,
 		}
 		if len(tools) > 0 {
@@ -1052,7 +1060,7 @@ func (c *Client) runOpenAI(ctx context.Context, prompt any, tk *Toolkit, history
 		c.emitLLM("ok", t0, p, cp)
 		addUsage(&usage, data.Usage, string(StyleOpenAI))
 		if c.opts.Hooks != nil && c.opts.Hooks.AfterLLM != nil {
-			if err := c.opts.Hooks.AfterLLM(ctx, AfterLLMEvent{Response: decodeResponse(raw), Model: c.opts.Model, Turn: turn}); err != nil {
+			if err := c.opts.Hooks.AfterLLM(ctx, AfterLLMEvent{Response: decodeResponse(raw), Model: turnModel, Turn: turn}); err != nil {
 				return RunResult{}, err
 			}
 		}
@@ -1272,6 +1280,7 @@ func (c *Client) runAnthropic(ctx context.Context, prompt any, tk *Toolkit, hist
 
 	for turn := 0; turn < c.maxTurns(); turn++ {
 		turns++
+		turnModel := c.opts.Model
 		if c.opts.Hooks != nil && c.opts.Hooks.BeforeLLM != nil {
 			ov, err := c.opts.Hooks.BeforeLLM(ctx, BeforeLLMEvent{Messages: messages, Tools: tools, Model: c.opts.Model, Turn: turn})
 			if err != nil {
@@ -1284,6 +1293,9 @@ func (c *Client) runAnthropic(ctx context.Context, prompt any, tk *Toolkit, hist
 				if ov.Tools != nil {
 					tools = ov.Tools
 				}
+				if ov.Model != "" {
+					turnModel = ov.Model
+				}
 			}
 		}
 		wire, err := c.emitMessages(messages)
@@ -1291,7 +1303,7 @@ func (c *Client) runAnthropic(ctx context.Context, prompt any, tk *Toolkit, hist
 			return RunResult{}, err
 		}
 		body := map[string]any{
-			"model":      c.opts.Model,
+			"model":      turnModel,
 			"max_tokens": 4096,
 			"messages":   wire,
 		}
@@ -1326,7 +1338,7 @@ func (c *Client) runAnthropic(ctx context.Context, prompt any, tk *Toolkit, hist
 		c.emitLLM("ok", t0, p, cp)
 		addUsage(&usage, data.Usage, string(StyleAnthropic))
 		if c.opts.Hooks != nil && c.opts.Hooks.AfterLLM != nil {
-			if err := c.opts.Hooks.AfterLLM(ctx, AfterLLMEvent{Response: decodeResponse(raw), Model: c.opts.Model, Turn: turn}); err != nil {
+			if err := c.opts.Hooks.AfterLLM(ctx, AfterLLMEvent{Response: decodeResponse(raw), Model: turnModel, Turn: turn}); err != nil {
 				return RunResult{}, err
 			}
 		}
@@ -1580,6 +1592,7 @@ func (c *Client) streamOpenAI(ctx context.Context, prompt any, tk *Toolkit, hist
 
 	for turn := 0; turn < c.maxTurns(); turn++ {
 		turns++
+		turnModel := c.opts.Model
 		if c.opts.Hooks != nil && c.opts.Hooks.BeforeLLM != nil {
 			ov, err := c.opts.Hooks.BeforeLLM(ctx, BeforeLLMEvent{Messages: messages, Tools: tools, Model: c.opts.Model, Turn: turn})
 			if err != nil {
@@ -1592,6 +1605,9 @@ func (c *Client) streamOpenAI(ctx context.Context, prompt any, tk *Toolkit, hist
 				if ov.Tools != nil {
 					tools = ov.Tools
 				}
+				if ov.Model != "" {
+					turnModel = ov.Model
+				}
 			}
 		}
 		wire, err := c.emitMessages(messages)
@@ -1599,7 +1615,7 @@ func (c *Client) streamOpenAI(ctx context.Context, prompt any, tk *Toolkit, hist
 			return err
 		}
 		sbody := map[string]any{
-			"model":          c.opts.Model,
+			"model":          turnModel,
 			"messages":       wire,
 			"stream":         true,
 			"stream_options": map[string]any{"include_usage": true},
@@ -1692,7 +1708,7 @@ func (c *Client) streamOpenAI(ctx context.Context, prompt any, tk *Toolkit, hist
 		}
 		c.emitLLM("ok", t0, usage.PromptTokens-beforeP, usage.CompletionTokens-beforeC)
 		if c.opts.Hooks != nil && c.opts.Hooks.AfterLLM != nil {
-			if err := c.opts.Hooks.AfterLLM(ctx, AfterLLMEvent{Response: map[string]any{"streamed": true}, Model: c.opts.Model, Turn: turn}); err != nil {
+			if err := c.opts.Hooks.AfterLLM(ctx, AfterLLMEvent{Response: map[string]any{"streamed": true}, Model: turnModel, Turn: turn}); err != nil {
 				return err
 			}
 		}
@@ -1849,6 +1865,7 @@ func (c *Client) streamAnthropic(ctx context.Context, prompt any, tk *Toolkit, h
 
 	for turn := 0; turn < c.maxTurns(); turn++ {
 		turns++
+		turnModel := c.opts.Model
 		if c.opts.Hooks != nil && c.opts.Hooks.BeforeLLM != nil {
 			ov, err := c.opts.Hooks.BeforeLLM(ctx, BeforeLLMEvent{Messages: messages, Tools: tools, Model: c.opts.Model, Turn: turn})
 			if err != nil {
@@ -1861,6 +1878,9 @@ func (c *Client) streamAnthropic(ctx context.Context, prompt any, tk *Toolkit, h
 				if ov.Tools != nil {
 					tools = ov.Tools
 				}
+				if ov.Model != "" {
+					turnModel = ov.Model
+				}
 			}
 		}
 		wire, err := c.emitMessages(messages)
@@ -1868,7 +1888,7 @@ func (c *Client) streamAnthropic(ctx context.Context, prompt any, tk *Toolkit, h
 			return err
 		}
 		reqBody := map[string]any{
-			"model":      c.opts.Model,
+			"model":      turnModel,
 			"max_tokens": 4096,
 			"messages":   wire,
 			"stream":     true,
@@ -1964,7 +1984,7 @@ func (c *Client) streamAnthropic(ctx context.Context, prompt any, tk *Toolkit, h
 		}
 		c.emitLLM("ok", t0, usage.PromptTokens-beforeP, usage.CompletionTokens-beforeC)
 		if c.opts.Hooks != nil && c.opts.Hooks.AfterLLM != nil {
-			if err := c.opts.Hooks.AfterLLM(ctx, AfterLLMEvent{Response: map[string]any{"streamed": true}, Model: c.opts.Model, Turn: turn}); err != nil {
+			if err := c.opts.Hooks.AfterLLM(ctx, AfterLLMEvent{Response: map[string]any{"streamed": true}, Model: turnModel, Turn: turn}); err != nil {
 				return err
 			}
 		}
