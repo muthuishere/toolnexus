@@ -21,6 +21,7 @@
             [koine.fs :as fs]
             [koine.json :as json]
             [koine.server :as server]
+            [toolnexus.test-support :as ts]
             [toolnexus.builtin :as builtin]
             [toolnexus.client :as client]
             [toolnexus.content :as content]
@@ -453,7 +454,7 @@
   [style script f]
   (let [n        (atom 0)
         requests (atom [])
-        srv      (server/serve
+        srv      (ts/serve
                   (fn [req]
                     (swap! requests conj (json/read-str (str (:body req))))
                     {:status 200

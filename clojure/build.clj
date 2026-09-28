@@ -68,7 +68,7 @@
                 :pom-data  (pom-template nil)})
   (b/copy-dir {:src-dirs   ["src"]
                :target-dir class-dir
-               :ignores    [#".*_test\.cljc" #".*test_main\.cljc" #".*run_tests\.cljc"]})
+               :ignores    [#".*_test\.cljc" #".*test_main\.cljc" #".*run_tests\.cljc" #".*test_support\.cljc"]})
   (b/jar {:class-dir class-dir :jar-file jar-file})
   (println "wrote" jar-file))
 

@@ -16,6 +16,7 @@
   (:require [clojure.test :refer [deftest is testing]]
             [koine.json :as json]
             [koine.server :as server]
+            [toolnexus.test-support :as ts]
             [toolnexus.client :as client]
             [toolnexus.tool :as tool]
             [toolnexus.translate :as tr]))
@@ -32,7 +33,7 @@
   (let [n        (atom 0)
         requests (atom [])
         paths    (atom [])
-        srv      (server/serve
+        srv      (ts/serve
                   (fn [req]
                     (swap! paths conj (:path req))
                     (swap! requests conj (json/read-str (str (:body req))))
@@ -527,7 +528,7 @@
 
 (deftest translate-retries-like-the-loop
   (let [n (atom 0)
-        srv (server/serve
+        srv (ts/serve
              (fn [_req]
                (if (= 1 (swap! n inc))
                  {:status 503 :headers {} :body "busy"}
@@ -544,7 +545,7 @@
       (finally (server/stop! srv)))))
 
 (deftest translate-throws-on-a-terminal-provider-error
-  (let [srv (server/serve (fn [_req] {:status 400 :headers {} :body "bad request"}) {:port 0})]
+  (let [srv (ts/serve (fn [_req] {:status 400 :headers {} :body "bad request"}) {:port 0})]
     (try
       (let [c (client/create-client {:base-url (str "http://127.0.0.1:" (server/port srv))
                                      :style "openai" :model "mock-model"})]

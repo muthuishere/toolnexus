@@ -20,7 +20,7 @@ while IFS= read -r rel; do
   if   [ ! -f "$b" ];                  then missing+=("$rel")
   elif ! diff -q "$a" "$b" >/dev/null; then stale+=("$rel")
   fi
-done < <(cd src && find toolnexus -name '*.cljc' ! -name '*_test.cljc' ! -name 'test_main.cljc' | sort)
+done < <(cd src && find toolnexus -name '*.cljc' ! -name '*_test.cljc' ! -name 'test_main.cljc' ! -name 'test_support.cljc' | sort)
 
 if [ ${#missing[@]} -eq 0 ] && [ ${#stale[@]} -eq 0 ]; then
   echo '  ok   examples/src mirrors src/toolnexus'

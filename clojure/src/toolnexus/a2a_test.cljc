@@ -11,6 +11,7 @@
             [clojure.string :as str]
             [koine.json :as json]
             [koine.server :as server]
+            [toolnexus.test-support :as ts]
             [toolnexus.a2a :as a2a]))
 
 ;; ---------------------------------------------------------------------------
@@ -110,7 +111,7 @@
 (defn- start-peer! []
   (let [polls (atom {})
         base  (atom "")
-        h     (server/serve
+        h     (ts/serve
                 (fn [req]
                   (let [p (:path req)]
                     (cond
@@ -206,7 +207,7 @@
     (is (= "HTTP 404: no card here" (:error missing)))
     (is (nil? (:card missing))))
   (testing "a dead port is data, not a throw (koine transport failures)"
-    (let [h    (server/serve (fn [_] {:status 200 :body "{}"}) {:port 0})
+    (let [h    (ts/serve (fn [_] {:status 200 :body "{}"}) {:port 0})
           dead (str "http://127.0.0.1:" (server/port h))
           _    (server/stop! h)
           r    (a2a/remote-agent {:card (str dead "/.well-known/agent-card.json")

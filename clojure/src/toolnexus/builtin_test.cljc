@@ -9,6 +9,7 @@
             [koine.fs :as fs]
             [koine.json :as json]
             [koine.server :as server]
+            [toolnexus.test-support :as ts]
             [toolnexus.builtin :as builtin]
             [toolnexus.tool :as tool]))
 
@@ -25,7 +26,7 @@
 (use-fixtures :once
   (fn [f]
     (let [d (fs/temp-dir! "tn-builtin")
-          s (server/serve page-handler {:port 0})]
+          s (ts/serve page-handler {:port 0})]
       (reset! root d)
       (reset! srv s)
       (reset! base (str "http://127.0.0.1:" (server/port s)))

@@ -14,6 +14,7 @@
             [koine.http :as http]
             [koine.json :as json]
             [koine.server :as server]
+            [toolnexus.test-support :as ts]
             [koine.time :as ktime]
             [toolnexus.builtin :as builtin]
             [toolnexus.client :as client]
@@ -68,14 +69,18 @@
   it after. `:requests` is an atom of the PARSED request bodies, in arrival
   order — the only way to assert on what the client actually fed back;
   `:headers` is the matching atom of REQUEST headers (lowercased), which is what
-  makes the auth / api-key path observable at all."
+  makes the auth / api-key path observable at all. `:raw` is the matching atom of
+  the UNPARSED body strings — parsing collapses a duplicated key, so only the raw
+  bytes can show a field serialised twice."
   [style script f]
   (let [n        (atom 0)
         requests (atom [])
         paths    (atom [])
         headers  (atom [])
-        srv      (server/serve
+        raw      (atom [])
+        srv      (ts/serve
                    (fn [req]
+                     (swap! raw conj (str (:body req)))
                      (swap! paths conj (:path req))
                      (swap! headers conj (lower-keys (:headers req)))
                      (swap! requests conj (json/read-str (str (:body req))))
@@ -87,7 +92,8 @@
       (f {:base (str "http://127.0.0.1:" (server/port srv))
           :requests requests
           :paths paths
-          :headers headers})
+          :headers headers
+          :raw raw})
       (finally (server/stop! srv)))))
 
 ;; ---------------------------------------------------------------------------
@@ -689,7 +695,7 @@
   Returns {:base :hits}; :hits counts requests actually received."
   [statuses f]
   (let [hits (atom 0)
-        srv  (server/serve
+        srv  (ts/serve
               (fn [_req]
                 (let [n (swap! hits inc)
                       s (get statuses (dec n))]
@@ -838,7 +844,7 @@
   Same class as the `sh :timeout-ms` defect koine fixed in 0.7.1 — a timeout
   that reports rather than enforces. Reported upstream with this repro."
   []
-  (let [srv (server/serve (fn [_] (ktime/sleep! 800) {:status 200 :body "late"}) {:port 0})]
+  (let [srv (ts/serve (fn [_] (ktime/sleep! 800) {:status 200 :body "late"}) {:port 0})]
     (try
       (let [t0  (ktime/now-ms)
             res (http/request {:method :post
@@ -859,7 +865,7 @@
     (println "toolnexus TEST GAP: koine does not BOUND an HTTP call on this host"
              "(:timeout-ms accepted and ignored) — upstream. The client passes the"
              "budget through, which is all this port can do.")
-    (let [srv (server/serve (fn [_req]
+    (let [srv (ts/serve (fn [_req]
                             (ktime/sleep! 2000)
                             {:status 200 :headers {"content-type" "application/json"}
                              :body (json/write-str (text-response "openai" "late"))})

@@ -4,6 +4,7 @@
             [clojure.test :refer [deftest is testing use-fixtures]]
             [koine.json :as json]
             [koine.server :as server]
+            [toolnexus.test-support :as ts]
             [toolnexus.core :as tn]
             [toolnexus.tool :as tool]))
 
@@ -26,7 +27,7 @@
   "A streamable-HTTP MCP peer whose ONLY tool is named `read` — the same name as
   the §4A builtin. Minimal on purpose: initialize, tools/list, tools/call."
   []
-  (server/serve
+  (ts/serve
    (fn [req]
      ;; koine's json/read-str yields KEYWORD keys — `(get msg "method")` is
      ;; always nil, which shows up as a peer that connects and registers nothing.
@@ -153,7 +154,7 @@
 
 (defn- start-card-peer! []
   (let [base (atom "")
-        h    (server/serve
+        h    (ts/serve
               (fn [req]
                 (if (str/includes? (str (:path req)) "agent-card.json")
                   {:status 200 :headers {"content-type" "application/json"}
@@ -178,7 +179,7 @@
 (defn- card-url [] (str (:base @peer) "/.well-known/agent-card.json"))
 
 (defn- dead-card-url []
-  (let [h (server/serve (fn [_] {:status 200 :body "ok"}) {:port 0})
+  (let [h (ts/serve (fn [_] {:status 200 :body "ok"}) {:port 0})
         p (server/port h)]
     (server/stop! h)
     (str "http://127.0.0.1:" p "/.well-known/agent-card.json")))
