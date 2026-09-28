@@ -504,9 +504,9 @@ public sealed class AgentRouterClassifier
             }
             calibrated = calibrated && cal;
             if (!a.TryGetValue("agent", out var x)) return new AgentVerdict(fallback, path, false, null, calibrated);
-            probs = ((ChoiceAnswer)x.Raw).Probabilities;
+            probs = (x.Raw as ChoiceAnswer)?.Probabilities;
             if (!x.Sure) return new AgentVerdict(fallback, path, false, probs, calibrated);
-            var picked = level.LastOrDefault(n => n.Name == x.Choice());
+            var picked = x.Raw is ChoiceAnswer ca ? level.LastOrDefault(n => n.Name == ca.Choice) : null;
             if (picked == null) return new AgentVerdict(fallback, path, false, probs, calibrated);
             path.Add(picked.Name);
             if (picked.Agents is not { Count: > 0 }) return new AgentVerdict(picked.Name, path, true, probs, calibrated);
@@ -640,9 +640,9 @@ public sealed class ModelRouterClassifier
             return new ModelVerdict(fallback, false, false, null, false, e.Message);
         }
         if (!a.TryGetValue("model", out var x)) return new ModelVerdict(fallback, false, false, null, cal);
-        var probs = ((ChoiceAnswer)x.Raw).Probabilities;
-        return x.Sure
-            ? new ModelVerdict(x.Choice(), true, true, probs, cal)
+        var probs = (x.Raw as ChoiceAnswer)?.Probabilities;
+        return x.Sure && x.Raw is ChoiceAnswer ca
+            ? new ModelVerdict(ca.Choice, true, true, probs, cal)
             : new ModelVerdict(fallback, false, false, probs, cal);
     }
 

@@ -439,4 +439,15 @@ public class JudgeBatteriesTests
         })
             Assert.Null(fe.AsHook()(new LlmClient.AfterToolEvent("t", new Dictionary<string, object?>(), r, "c1", 0)));
     }
+    [Fact]
+    public async Task RoutersNeverThrowOnAWrongTypeAnswer()
+    {
+        // A custom classifier answering the choice question with a noul: a fallback, not an InvalidCastException.
+        var noul = "{\"model\":{\"type\":\"noul\",\"noul\":0.9},\"agent\":{\"type\":\"noul\",\"noul\":0.9}}";
+        var mv = await new ModelRouterClassifier(Fixed(noul), new[] { new ModelOption("small-fast", "cheap") }).PickAsync("x", "configured");
+        Assert.Equal("configured", mv.Model);
+        Assert.False(mv.Routed);
+        var av = await new AgentRouterClassifier(Fixed(noul)).PickAsync("x", new[] { new AgentNode("a", "A") }, "fb");
+        Assert.Equal("fb", av.Agent);
+    }
 }
