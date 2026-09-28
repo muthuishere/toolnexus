@@ -240,9 +240,26 @@ function delay(ms: number, signal: AbortSignal): Promise<void> {
  * Lifecycle hooks around the agent loop. Each may observe, and (where noted)
  * mutate or short-circuit. All may be async.
  */
+/** The `beforeLLM` hook event. */
+export interface BeforeLLMEvent {
+  messages: any[]
+  tools: any[]
+  model: string
+  turn: number
+}
+
+/** What a `beforeLLM` hook may return. `model` (non-empty) applies to that turn only. */
+export interface LLMOverride {
+  messages?: any[]
+  tools?: any[]
+  model?: string | null
+}
+
 export interface Hooks {
-  /** Before each model call. Return { messages?, tools? } to replace them. */
-  beforeLLM?(ev: { messages: any[]; tools: any[]; model: string; turn: number }): void | { messages?: any[]; tools?: any[] } | Promise<void | { messages?: any[]; tools?: any[] }>
+  /** Before each model call. Return { messages?, tools? } to replace them, and { model } to send a
+   * different model for THIS turn only (request body + afterLLM event); absent/null/empty keeps the
+   * configured model verbatim (SPEC §8, e.g. a ModelRouterClassifier). */
+  beforeLLM?(ev: BeforeLLMEvent): void | LLMOverride | Promise<void | LLMOverride>
   /** After each model call (observe: logging, cost, tracing). */
   afterLLM?(ev: { response: any; model: string; turn: number }): void | Promise<void>
   /** Before a tool runs. Return { result } to SHORT-CIRCUIT (deny/cache), { args } to rewrite. */
@@ -476,8 +493,8 @@ export class Client {
 
   /** §8 Gap 5. OpenAI-style body; omits tools/tool_choice when the tool list is empty. Key order
    * matches the pre-change body so a no-options call is byte-identical. */
-  private openaiBody(messages: any[], tools: any[], stream: boolean): Record<string, any> {
-    const b: Record<string, any> = { model: this.opts.model, messages: toOpenAIWire(messages, this.wireOpts()) }
+  private openaiBody(messages: any[], tools: any[], stream: boolean, model: string = this.opts.model): Record<string, any> {
+    const b: Record<string, any> = { model, messages: toOpenAIWire(messages, this.wireOpts()) }
     if (tools.length) {
       b.tools = tools
       b.tool_choice = "auto"
@@ -490,8 +507,8 @@ export class Client {
   }
 
   /** §8 Gap 5. Anthropic-style body; omits tools when the tool list is empty. */
-  private anthropicBody(system: string, messages: any[], tools: any[], stream: boolean): Record<string, any> {
-    const b: Record<string, any> = { model: this.opts.model, max_tokens: 4096, system, messages: toAnthropicWire(messages, this.wireOpts()) }
+  private anthropicBody(system: string, messages: any[], tools: any[], stream: boolean, model: string = this.opts.model): Record<string, any> {
+    const b: Record<string, any> = { model, max_tokens: 4096, system, messages: toAnthropicWire(messages, this.wireOpts()) }
     if (tools.length) b.tools = tools
     if (stream) b.stream = true
     return this.finalizeBody(b)
@@ -563,13 +580,15 @@ export class Client {
     if (sys && !hasSystemMessage(messages)) messages = [{ role: "system", content: sys }, ...messages]
 
     let tools = declared
+    let turnModel = this.opts.model
     if (this.opts.hooks?.beforeLLM) {
       const ov = await this.opts.hooks.beforeLLM({ messages, tools, model: this.opts.model, turn: 0 })
       if (ov?.messages) messages = ov.messages
       if (ov?.tools) tools = ov.tools
+      if (ov?.model) turnModel = ov.model
     }
 
-    const body: Record<string, any> = { model: this.opts.model, messages }
+    const body: Record<string, any> = { model: turnModel, messages }
     if (tools.length) body.tools = tools
     if (req.toolChoice !== undefined) body.tool_choice = req.toolChoice
     if (req.maxTokens) body.max_tokens = req.maxTokens
@@ -586,7 +605,7 @@ export class Client {
         signal,
         "openai",
       )
-      if (this.opts.hooks?.afterLLM) await this.opts.hooks.afterLLM({ response: data, model: this.opts.model, turn: 0 })
+      if (this.opts.hooks?.afterLLM) await this.opts.hooks.afterLLM({ response: data, model: turnModel, turn: 0 })
       const usage: Usage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 }
       addUsage(usage, data.usage, "openai")
       const choice = data.choices?.[0]
@@ -622,14 +641,16 @@ export class Client {
       ...openAIToolsToAnthropic(req.tools),
     ]
 
+    let turnModel = this.opts.model
     if (this.opts.hooks?.beforeLLM) {
       const ov = await this.opts.hooks.beforeLLM({ messages, tools, model: this.opts.model, turn: 0 })
       if (ov?.messages) messages = ov.messages
       if (ov?.tools) tools = ov.tools
+      if (ov?.model) turnModel = ov.model
     }
 
     const body: Record<string, any> = {
-      model: this.opts.model,
+      model: turnModel,
       max_tokens: req.maxTokens && req.maxTokens > 0 ? req.maxTokens : 4096,
       messages,
     }
@@ -655,7 +676,7 @@ export class Client {
         signal,
         "anthropic",
       )
-      if (this.opts.hooks?.afterLLM) await this.opts.hooks.afterLLM({ response: data, model: this.opts.model, turn: 0 })
+      if (this.opts.hooks?.afterLLM) await this.opts.hooks.afterLLM({ response: data, model: turnModel, turn: 0 })
       const usage: Usage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 }
       addUsage(usage, data.usage, "anthropic")
       const text: string[] = []
@@ -919,18 +940,20 @@ export class Client {
     try {
       for (let turn = 0; turn < (this.opts.maxTurns ?? 10); turn++) {
         turns++
+        let turnModel = this.opts.model
         if (this.opts.hooks?.beforeLLM) {
           const ov = await this.opts.hooks.beforeLLM({ messages, tools, model: this.opts.model, turn })
           if (ov?.messages) messages = ov.messages
           if (ov?.tools) tools = ov.tools
+          if (ov?.model) turnModel = ov.model
         }
         const data: any = await this.llmCallJson(`${this.opts.baseUrl.replace(/\/$/, "")}/chat/completions`, {
           method: "POST",
           headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json", ...this.opts.headers },
-          body: JSON.stringify(this.openaiBody(messages, tools, false)),
+          body: JSON.stringify(this.openaiBody(messages, tools, false, turnModel)),
         }, signal, "openai")
         addUsage(usage, data.usage, "openai")
-        if (this.opts.hooks?.afterLLM) await this.opts.hooks.afterLLM({ response: data, model: this.opts.model, turn })
+        if (this.opts.hooks?.afterLLM) await this.opts.hooks.afterLLM({ response: data, model: turnModel, turn })
         const msg = data.choices[0].message
         messages.push(msg)
         const calls = msg.tool_calls ?? []
@@ -1018,10 +1041,12 @@ export class Client {
     try {
       for (let turn = 0; turn < (this.opts.maxTurns ?? 10); turn++) {
         turns++
+        let turnModel = this.opts.model
         if (this.opts.hooks?.beforeLLM) {
           const ov = await this.opts.hooks.beforeLLM({ messages, tools, model: this.opts.model, turn })
           if (ov?.messages) messages = ov.messages
           if (ov?.tools) tools = ov.tools
+          if (ov?.model) turnModel = ov.model
         }
         const data: any = await this.llmCallJson(endpoint, {
           method: "POST",
@@ -1031,10 +1056,10 @@ export class Client {
             "Content-Type": "application/json",
             ...this.opts.headers,
           },
-          body: JSON.stringify(this.anthropicBody(system, messages, tools, false)),
+          body: JSON.stringify(this.anthropicBody(system, messages, tools, false, turnModel)),
         }, signal, "anthropic")
         addUsage(usage, data.usage, "anthropic")
-        if (this.opts.hooks?.afterLLM) await this.opts.hooks.afterLLM({ response: data, model: this.opts.model, turn })
+        if (this.opts.hooks?.afterLLM) await this.opts.hooks.afterLLM({ response: data, model: turnModel, turn })
         messages.push({ role: "assistant", content: data.content })
         const uses = (data.content ?? []).filter((b: any) => b.type === "tool_use")
         if (uses.length === 0) {
@@ -1093,10 +1118,12 @@ export class Client {
     try {
       for (let turn = 0; turn < (this.opts.maxTurns ?? 10); turn++) {
         turns++
+        let turnModel = this.opts.model
         if (this.opts.hooks?.beforeLLM) {
           const ov = await this.opts.hooks.beforeLLM({ messages, tools, model: this.opts.model, turn })
           if (ov?.messages) messages = ov.messages
           if (ov?.tools) tools = ov.tools
+          if (ov?.model) turnModel = ov.model
         }
         const t0 = Date.now()
         const beforeP = usage.promptTokens, beforeC = usage.completionTokens
@@ -1106,7 +1133,7 @@ export class Client {
           const res = await this.llmFetch(`${this.opts.baseUrl.replace(/\/$/, "")}/chat/completions`, {
             method: "POST",
             headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json", ...this.opts.headers },
-            body: JSON.stringify(this.openaiBody(messages, tools, true)),
+            body: JSON.stringify(this.openaiBody(messages, tools, true, turnModel)),
           }, signal)
           if (!res.ok || !res.body) throw await llmHttpError(res)
           for await (const line of sseLines(res.body)) {
@@ -1131,7 +1158,7 @@ export class Client {
           throw e
         }
         this.emit({ event: "llm", model: this.opts.model, status: "ok", ms: Date.now() - t0, promptTokens: usage.promptTokens - beforeP, completionTokens: usage.completionTokens - beforeC })
-        if (this.opts.hooks?.afterLLM) await this.opts.hooks.afterLLM({ response: { streamed: true, usage }, model: this.opts.model, turn })
+        if (this.opts.hooks?.afterLLM) await this.opts.hooks.afterLLM({ response: { streamed: true, usage }, model: turnModel, turn })
 
         const calls = [...acc.values()]
         if (calls.length === 0) {
@@ -1186,10 +1213,12 @@ export class Client {
     try {
       for (let turn = 0; turn < (this.opts.maxTurns ?? 10); turn++) {
         turns++
+        let turnModel = this.opts.model
         if (this.opts.hooks?.beforeLLM) {
           const ov = await this.opts.hooks.beforeLLM({ messages, tools, model: this.opts.model, turn })
           if (ov?.messages) messages = ov.messages
           if (ov?.tools) tools = ov.tools
+          if (ov?.model) turnModel = ov.model
         }
         const t0 = Date.now()
         const beforeP = usage.promptTokens, beforeC = usage.completionTokens
@@ -1199,7 +1228,7 @@ export class Client {
           const res = await this.llmFetch(endpoint, {
             method: "POST",
             headers: { "x-api-key": key, "anthropic-version": "2023-06-01", "Content-Type": "application/json", ...this.opts.headers },
-            body: JSON.stringify(this.anthropicBody(system, messages, tools, true)),
+            body: JSON.stringify(this.anthropicBody(system, messages, tools, true, turnModel)),
           }, signal)
           if (!res.ok || !res.body) throw await llmHttpError(res)
           for await (const line of sseLines(res.body)) {
@@ -1219,7 +1248,7 @@ export class Client {
           throw e
         }
         this.emit({ event: "llm", model: this.opts.model, status: "ok", ms: Date.now() - t0, promptTokens: usage.promptTokens - beforeP, completionTokens: usage.completionTokens - beforeC })
-        if (this.opts.hooks?.afterLLM) await this.opts.hooks.afterLLM({ response: { streamed: true, usage }, model: this.opts.model, turn })
+        if (this.opts.hooks?.afterLLM) await this.opts.hooks.afterLLM({ response: { streamed: true, usage }, model: turnModel, turn })
 
         const content = [...blocks.values()].map((b) => b.type === "tool_use" ? { type: "tool_use", id: b.id, name: b.name, input: safeJson(b.json || "{}") } : { type: "text", text: b.text })
         messages.push({ role: "assistant", content })

@@ -81,6 +81,13 @@ const out = await gate(c, state, questions, [
   — same questions over many states, in order, fail-closed, 16 in flight.
 - JS naming: the named builders live under `judge.` (bare `noul/choice/score` stay the §8B wire
   builders); a choice answer keeps its `choice` string field, so the picked-option method is `pick()`.
+- Batteries (§8B *Batteries*): `ToolGuardClassifier`, `ToolRelevanceClassifier`,
+  `SkillRelevanceClassifier`, `ToolResultFilterClassifier`, `IsCompleteClassifier`,
+  `ContentGuardClassifier` (all take a required `onError: "open" | "closed"`),
+  `AgentRouterClassifier` and the opt-in `ModelRouterClassifier(c, [{ id, description }])`.
+  Methods `check` / `select` / `filter` / `pick`; `asHook(next?)` plugs the guard, relevance,
+  filter, content and model batteries into `hooks`. A `beforeLLM` hook may return `{ model }` to
+  send another model for that turn only.
 
 ## Documentation
 
