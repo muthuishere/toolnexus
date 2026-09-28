@@ -45,14 +45,20 @@ defmodule Toolnexus.Judge.Batteries do
   end
 
   @doc false
-  # Evaluate once; {:ok, banded answers, calibrated} | {:error, message}.
+  # Evaluate once; {:ok, banded answers, calibrated} | {:error, message}. Never raises:
+  # a classifier that raises (or returns off-contract) is a classifier error (§8B).
   def ask(c, state, qs, bands) do
     with {:ok, qmap} <- Judge.questions(qs),
          {:ok, d} <- Toolnexus.Classifier.evaluate(c, state, qmap) do
       {:ok, Judge.answers(d, bands), d.calibrated != false}
     else
       {:error, e} -> {:error, message(e)}
+      other -> {:error, message(other)}
     end
+  rescue
+    e -> {:error, message(e)}
+  catch
+    :exit, reason -> {:error, message(reason)}
   end
 
   defp message(e) when is_binary(e), do: e

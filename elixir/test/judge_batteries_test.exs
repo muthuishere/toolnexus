@@ -211,6 +211,11 @@ defmodule Toolnexus.JudgeBatteriesTest do
     v = IsComplete.check(ic, "t", "a")
     refute v.complete
     assert v.error == ":nope"
+
+    {:ok, c} = C.create(style: "custom", evaluate: fn _, _ -> raise "kaboom" end)
+    {:ok, g} = ToolGuard.new(c, on_error: :closed)
+    v = ToolGuard.check(g, %{name: "x", arguments: %{}})
+    assert v.action == :deny and v.error == "kaboom" and v.calibrated == false
   end
 
   test "default role accessors" do
