@@ -407,7 +407,7 @@ export class AgentRouterClassifier {
     let level: readonly AgentNode[] = agents
     while (level.length > 0) {
       const options: Record<string, string> = {}
-      for (const a of level) options[a.name] = a.description
+      for (const a of level) if (!(a.name in options)) options[a.name] = a.description // first node wins (§8B)
       let r: { a: Answers; cal: boolean }
       try {
         r = await askBattery(this.classifier, st, [choice("agent", "Which agent should handle `task`?", options)], this.opts.bands ?? DEFAULT_BANDS)

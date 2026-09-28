@@ -23,6 +23,7 @@ import {
   AgentRouterClassifier,
   ContentGuardClassifier,
   ModelRouterClassifier,
+  agents,
 } from "../dist/index.js"
 
 const dir = fileURLToPath(new URL("../../examples/judge/batteries/", import.meta.url))
@@ -359,4 +360,121 @@ test("beforeLLM model override: openai stream", async () => {
   for await (const _ of c.stream("go")) { /* drain */ }
   assert.deepEqual(sent.map((b) => b.model), ["override"])
   assert.deepEqual(seen, ["override"])
+})
+
+// ---------------------------------------------------------------- tool-relevance hookCases (§8B)
+
+for (const c of load("tool-relevance.json").hookCases ?? []) {
+  test(`battery tool-relevance.json hookCase: ${c.name}`, async () => {
+    const hook = new ToolRelevanceClassifier(classifierFor(c, c.name), c.options ?? {}).asHook()
+    const ov: any = await hook(structuredClone(c.event))
+    const got = ov?.tools ? ov.tools.map((t: any) => c.event.tools.findIndex((e: any) => JSON.stringify(e) === JSON.stringify(t))) : null
+    assert.deepEqual(got, c.want.tools, `${c.name}: kept tool indices`)
+  })
+}
+
+// ------------------------------------------- beforeLLM failure + model reporting, every entry point (§8, §11)
+
+type Entry = { name: string; style: "openai" | "anthropic"; body: () => Response; go: (c: any) => Promise<any> }
+
+const jsonRes = (o: any) => new Response(JSON.stringify(o), { status: 200, headers: { "content-type": "application/json" } })
+const sseRes = (s: string) => new Response(s, { status: 200, headers: { "content-type": "text/event-stream" } })
+const oaiJson = () => jsonRes({ choices: [{ index: 0, message: { role: "assistant", content: "hi" }, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } })
+const antJson = () => jsonRes({ content: [{ type: "text", text: "hi" }], stop_reason: "end_turn", usage: { input_tokens: 1, output_tokens: 1 } })
+const oaiSse = () => sseRes(`data: ${JSON.stringify({ choices: [{ index: 0, delta: { content: "hi" }, finish_reason: "stop" }] })}\n\ndata: [DONE]\n\n`)
+const antSse = () => sseRes([
+  { type: "message_start", message: { usage: { input_tokens: 1 } } },
+  { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
+  { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "hi" } },
+  { type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 1 } },
+].map((e) => `data: ${JSON.stringify(e)}\n\n`).join(""))
+
+const drain = async (c: any) => { let r: any; for await (const e of c.stream("go")) if (e.type === "done") r = e.result; return r }
+
+const entries: Entry[] = [
+  { name: "run openai", style: "openai", body: oaiJson, go: (c) => c.run("go") },
+  { name: "run anthropic", style: "anthropic", body: antJson, go: (c) => c.run("go") },
+  { name: "stream openai", style: "openai", body: oaiSse, go: drain },
+  { name: "stream anthropic", style: "anthropic", body: antSse, go: drain },
+  { name: "translate openai", style: "openai", body: oaiJson, go: (c) => c.translate({ messages: [{ role: "user", content: "go" }] }) },
+  { name: "translate anthropic", style: "anthropic", body: antJson, go: (c) => c.translate({ messages: [{ role: "user", content: "go" }] }) },
+]
+
+function entryClient(e: Entry, hooks: any) {
+  const sent: any[] = []
+  const metrics: any[] = []
+  const fetchImpl = async (_u: string, init: any) => { sent.push(JSON.parse(init.body)); return e.body() }
+  const c = createClient({ baseUrl: "http://scripted.invalid", style: e.style, model: "configured", apiKey: "unused", fetch: fetchImpl as any, hooks, onMetric: (m: any) => metrics.push(m) })
+  return { c, sent, metrics }
+}
+
+for (const e of entries) {
+  test(`beforeLLM failure stops the call, no request sent: ${e.name}`, async () => {
+    const { c, sent } = entryClient(e, { beforeLLM: async () => { throw new Error("hook boom") } })
+    await assert.rejects(e.go(c), /hook boom/)
+    assert.equal(sent.length, 0)
+  })
+
+  test(`beforeLLM model override is transmitted and reported: ${e.name}`, async () => {
+    const { c, sent, metrics } = entryClient(e, { beforeLLM: () => ({ model: "override" }) })
+    const r = await e.go(c)
+    assert.deepEqual(sent.map((b) => b.model), ["override"])
+    assert.equal(r.model, "override")
+    assert.deepEqual(metrics.filter((m) => m.event === "llm").map((m) => m.model), ["override"])
+    if (!e.name.startsWith("translate")) assert.deepEqual(metrics.filter((m) => m.event === "run").map((m) => m.model), ["override"])
+  })
+
+  test(`beforeLLM with no model keeps the configured model: ${e.name}`, async () => {
+    const { c, sent, metrics } = entryClient(e, { beforeLLM: () => ({ model: "" }) })
+    const r = await e.go(c)
+    assert.deepEqual(sent.map((b) => b.model), ["configured"])
+    assert.equal(r.model, "configured")
+    assert.ok(metrics.filter((m) => m.event === "llm" || m.event === "run").every((m) => m.model === "configured"))
+  })
+}
+
+test("model reporting: run result + run metric carry the LAST call's model; llm metric per turn", async () => {
+  const { fetchImpl } = scripted([callTool("danger"), say("done")])
+  const metrics: any[] = []
+  const r = await client(fetchImpl, {
+    onMetric: (m: any) => metrics.push(m),
+    hooks: { beforeLLM: (e: any) => (e.turn === 0 ? undefined : { model: "late" }) },
+  }).run("go", { toolkit: await toolkitWith({ n: 0 }) })
+  assert.deepEqual(metrics.filter((m) => m.event === "llm").map((m) => m.model), ["configured", "late"])
+  assert.equal(r.model, "late")
+  assert.deepEqual(metrics.filter((m) => m.event === "run").map((m) => m.model), ["late"])
+})
+
+test("model reporting: a pending run reports the overridden model", async () => {
+  const guard = new ToolGuardClassifier(answering(riskAns(1.8)), { onError: "closed" })
+  const { fetchImpl } = scripted([callTool("danger"), say("done")])
+  const metrics: any[] = []
+  const r = await client(fetchImpl, { onMetric: (m: any) => metrics.push(m), hooks: { beforeLLM: () => ({ model: "override" }), beforeTool: guard.asHook() } })
+    .run("go", { toolkit: await toolkitWith({ n: 0 }) })
+  assert.equal(r.status, "pending")
+  assert.equal(r.model, "override")
+  assert.deepEqual(metrics.filter((m) => m.event === "run").map((m) => m.model), ["override"])
+})
+
+test("model reporting: a failed run's run metric carries the transmitted model; a hook failure before any call carries configured", async () => {
+  const metrics: any[] = []
+  const failFetch = async () => new Response("nope", { status: 400 })
+  await assert.rejects(client(failFetch, { retries: 0, onMetric: (m: any) => metrics.push(m), hooks: { beforeLLM: () => ({ model: "override" }) } }).run("go"))
+  assert.deepEqual(metrics.filter((m) => m.event === "llm" || m.event === "run").map((m) => [m.event, m.model]), [["llm", "override"], ["run", "override"]])
+  const m2: any[] = []
+  await assert.rejects(client(failFetch, { onMetric: (m: any) => m2.push(m), hooks: { beforeLLM: () => { throw new Error("x") } } }).run("go"))
+  assert.deepEqual(m2.filter((m) => m.event === "run").map((m) => m.model), ["configured"])
+})
+
+test("beforeLLM failure stops the call, no request sent: agent loop run", async () => {
+  const sent: any[] = []
+  const fetchImpl = async (_u: string, init: any) => { sent.push(init.body); return oaiJson() }
+  const tk = await createToolkit({ builtins: false })
+  const a = agents.agent("failing", { does: "x", hooks: { beforeLLM: async () => { throw new Error("hook boom") } } })
+  await assert.rejects(
+    a.loop({ baseUrl: "http://scripted.invalid", style: "openai", model: "configured", apiKey: "unused", fetch: fetchImpl as any }, tk).run("go"),
+    /hook boom/,
+  )
+  assert.equal(sent.length, 0)
+  await tk.close()
 })
