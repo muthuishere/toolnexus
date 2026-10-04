@@ -1583,13 +1583,14 @@ rendered the same way; with no messages, empty.
 Only `agent_message_chunk` text is accumulated. It is parsed into **one** assistant message:
 
 1. `s` = text trimmed; if `s` starts with ```, drop its first line, then a trailing ```, trim.
-2. Parse `s` as JSON; failing that (or not an object), and if `s` has a `{` with a `}` after it,
+2. Parse `s` as JSON (the **whole** string — trailing text is a failure, never ignored); failing that (or not an object), and if `s` has a `{` with a `}` after it,
    parse first-`{`..last-`}`. No object → **content = the original text**.
 3. Unwrap `choices[0].message` (non-empty `choices`, object `message`), else an object `message`.
 4. `tool_calls` array → per object element: `fn` = its object `function`, else the element; skip
    unless `fn.name` is a non-empty string; `arguments` absent/null → `{}`, a string → pre-encoded,
    else structured; `id` kept only if a non-empty string. ≥ 1 call → **toolCalls**.
-5. Else a `content` key → string as is, null → `""`, other → compact JSON → **content**.
+5. Else a `content` key → string as is, null → `""`, other → compact JSON (key order and number
+   spelling are the library's, not pinned) → **content**.
 6. Else → **content = the original text** (not an envelope: e.g. structured output the host asked for).
 
 `session/request_permission` is answered immediately from the read loop, never awaited: by default
