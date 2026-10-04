@@ -1,3 +1,4 @@
+using System.Text.Json;
 using System.IO;
 using System.Text.RegularExpressions;
 using Toolnexus.Acp;
@@ -36,9 +37,12 @@ public class AcpClientTests
         return candidates.OrderByDescending(File.GetLastWriteTimeUtc).First();
     }
 
-    private static Task<AcpClient> StartAsync(string scenario, CancellationToken ct = default) =>
-        AcpClient.StartAsync("dotnet", new[] { FakeServerDllPath(), $"--scenario={scenario}" },
-            cwd: Directory.GetCurrentDirectory(), ct: ct);
+    private static Task<AcpClient> StartAsync(string scenario, CancellationToken ct = default, string? outFile = null)
+    {
+        var args = new List<string> { FakeServerDllPath(), $"--scenario={scenario}" };
+        if (outFile is not null) args.Add($"--out={outFile}");
+        return AcpClient.StartAsync("dotnet", args, cwd: Directory.GetCurrentDirectory(), ct: ct);
+    }
 
     private static InProcess.Request UserRequest(string text) => new()
     {
@@ -137,11 +141,32 @@ public class AcpClientTests
             var reply = await client.PromptAsync("delete the database");
             sw.Stop();
 
-            Assert.Equal("PERMITTED:delete the database", reply);
+            // Default: the client executes tools, so the agent's own tool is refused — the first
+            // reject-kind option is selected, not the allow one listed after it.
+            Assert.Equal("PERMITTED[reject]:delete the database", reply);
             // Well under AcpClient's own PromptTimeout (default 10s) — proves the permission
             // request was answered inline rather than the turn riding out any timeout.
             Assert.True(sw.Elapsed < TimeSpan.FromSeconds(3),
                 $"turn took {sw.Elapsed}, expected well under 3s if permission was answered promptly");
+        }
+        finally
+        {
+            client.Dispose();
+        }
+    }
+
+    [Fact]
+    public async Task PermissionRequest_AllowAgentTools_SelectsFirstAllowOption()
+    {
+        var client = await StartAsync("permission");
+        client.AllowAgentTools = true;
+        try
+        {
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            var reply = await client.PromptAsync("go");
+            sw.Stop();
+            Assert.Equal("PERMITTED[allow-once]:go", reply);
+            Assert.True(sw.Elapsed < TimeSpan.FromSeconds(3), $"permission was awaited, not answered ({sw.Elapsed})");
         }
         finally
         {
@@ -276,5 +301,186 @@ public class AcpClientTests
         {
             client.Dispose();
         }
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // ACP as a real tool-calling model (SPEC §8 "ACP model source",
+    // openspec/changes/add-acp-tool-calling)
+    // ---------------------------------------------------------------------------------------
+
+    /// <summary>Splits a rendered prompt back into its preamble and REQUEST object.</summary>
+    private static (string Preamble, JsonElement Request) SplitPrompt(string prompt)
+    {
+        var i = prompt.IndexOf("\nREQUEST:\n", StringComparison.Ordinal);
+        var j = prompt.LastIndexOf("\n\n" + AcpClient.SupersedesMarker + " ", StringComparison.Ordinal);
+        Assert.True(i >= 0 && j > i, $"prompt does not split: {prompt}");
+        using var doc = JsonDocument.Parse(prompt[(i + "\nREQUEST:\n".Length)..j]);
+        return (prompt[..i], doc.RootElement.Clone());
+    }
+
+    [Fact]
+    public async Task ToolCallingLoop_EndToEnd_AgentCallsAddThenAnswersFromItsResult()
+    {
+        var outFile = Path.Combine(Path.GetTempPath(), $"acp-toolloop-{Guid.NewGuid():N}.ndjson");
+        var client = await StartAsync("toolloop", outFile: outFile);
+        try
+        {
+            await using var toolkit = await Toolkit.CreateAsync(new Toolkit.Options { Builtins = false });
+            var ran = new List<string>();
+            toolkit.Register(NativeTool.Of("add", "Add two numbers", new Dictionary<string, object?>
+            {
+                ["type"] = "object",
+                ["properties"] = new Dictionary<string, object?>
+                {
+                    ["a"] = new Dictionary<string, object?> { ["type"] = "number" },
+                    ["b"] = new Dictionary<string, object?> { ["type"] = "number" },
+                },
+                ["required"] = new List<object?> { "a", "b" },
+            }, args =>
+            {
+                var sum = (Convert.ToDouble(args["a"]) + Convert.ToDouble(args["b"])).ToString(System.Globalization.CultureInfo.InvariantCulture);
+                lock (ran) ran.Add(sum);
+                return sum;
+            }));
+
+            var llm = InProcess.CreateClient(new InProcess.Options { Model = "acp", Generate = client.Generate });
+            var result = await llm.RunAsync("What is 2 + 3?", toolkit);
+
+            Assert.Equal("The answer is 5.", result.Text);
+            var call = Assert.Single(result.ToolCalls);
+            Assert.Equal("add", call.Name);
+            Assert.Equal("5", call.Output);
+            Assert.Equal(new[] { "5" }, ran);
+        }
+        finally
+        {
+            client.Dispose();
+        }
+
+        var requests = File.ReadAllLines(outFile).Where(l => l.Length > 0)
+            .Select(l => JsonDocument.Parse(l).RootElement).ToList();
+        File.Delete(outFile);
+        Assert.Equal(2, requests.Count); // ask, then answer
+
+        // Turn 1: add's OpenAI-shaped schema reached the agent.
+        Assert.Contains(requests[0].GetProperty("tools").EnumerateArray(), t =>
+            t.TryGetProperty("function", out var fn) &&
+            fn.GetProperty("name").GetString() == "add" &&
+            fn.TryGetProperty("parameters", out var ps) && ps.ValueKind == JsonValueKind.Object);
+
+        // Turn 2: the assistant tool_calls message and the tool result are both in the REQUEST.
+        var msgs = requests[1].GetProperty("messages").EnumerateArray().ToList();
+        Assert.Contains(msgs, m => m.GetProperty("role").GetString() == "assistant" &&
+                                   m.TryGetProperty("tool_calls", out var tc) && tc.ValueKind == JsonValueKind.Array);
+        Assert.Contains(msgs, m => m.GetProperty("role").GetString() == "tool" &&
+                                   m.TryGetProperty("tool_call_id", out var id) && id.GetString() == "c1" &&
+                                   m.TryGetProperty("content", out var c) && c.GetString() == "5");
+    }
+
+    [Fact]
+    public void PromptShape_PreambleRequestJsonAndMarker()
+    {
+        var prompt = AcpClient.BuildPromptText(new InProcess.Request
+        {
+            Messages = new List<object?>
+            {
+                new Dictionary<string, object?> { ["role"] = "system", ["content"] = "be terse" },
+                new Dictionary<string, object?>
+                {
+                    ["role"] = "user",
+                    ["content"] = new List<object?>
+                    {
+                        new Dictionary<string, object?> { ["type"] = "text", ["text"] = "a <b> & c" },
+                        new Dictionary<string, object?> { ["type"] = "image_url" },
+                        new Dictionary<string, object?> { ["type"] = "text", ["text"] = "d" },
+                    },
+                },
+            },
+        });
+
+        var (preamble, request) = SplitPrompt(prompt);
+        Assert.Equal(AcpClient.Preamble, preamble);
+        Assert.EndsWith("\n\nSUPERSEDES-ALL-PRIOR: a <b> & c d", prompt);
+        Assert.DoesNotContain("\\u003c", prompt); // REQUEST JSON is not HTML-escaped
+        Assert.DoesNotContain("\\u0026", prompt);
+        Assert.Equal(JsonValueKind.Array, request.GetProperty("tools").ValueKind);
+        Assert.Equal(0, request.GetProperty("tools").GetArrayLength()); // absent tools ⇒ []
+        Assert.Contains("\nREQUEST:\n{\"messages\":", prompt);      // JSON leads with messages
+    }
+
+    [Fact]
+    public void PromptShape_NoUserMessage_FallsBackToLastMessage_NoMessagesIsEmpty()
+    {
+        var p1 = AcpClient.BuildPromptText(new InProcess.Request
+        {
+            Messages = new List<object?> { new Dictionary<string, object?> { ["role"] = "system", ["content"] = "sys" } },
+        });
+        Assert.EndsWith("\n\nSUPERSEDES-ALL-PRIOR: sys", p1);
+        var p2 = AcpClient.BuildPromptText(new InProcess.Request());
+        Assert.EndsWith("\nREQUEST:\n{\"messages\":[],\"tools\":[]}\n\nSUPERSEDES-ALL-PRIOR: ", p2);
+    }
+
+    /// <summary>The preamble is byte-pinned by SPEC.md §8; read it back from the spec so the
+    /// constant cannot drift from the contract every port is held to. Skipped (passes) when the
+    /// spec is not reachable from the test's working directory.</summary>
+    [Fact]
+    public void Preamble_MatchesSpecBytes()
+    {
+        string? specPath = null;
+        for (var dir = new DirectoryInfo(AppContext.BaseDirectory); dir is not null; dir = dir.Parent)
+        {
+            var candidate = Path.Combine(dir.FullName, "SPEC.md");
+            if (File.Exists(candidate)) { specPath = candidate; break; }
+        }
+        if (specPath is null) return; // SPEC.md not reachable — nothing to compare against
+
+        var spec = File.ReadAllText(specPath).Replace("\r\n", "\n");
+        var i = spec.IndexOf("`PREAMBLE` is these seven lines", StringComparison.Ordinal);
+        Assert.True(i >= 0, "SPEC.md has no ACP preamble block");
+        spec = spec[i..];
+        var start = spec.IndexOf("```\n", StringComparison.Ordinal) + "```\n".Length;
+        var end = spec.IndexOf("```", start, StringComparison.Ordinal);
+        Assert.Equal(AcpClient.Preamble, spec[start..end]);
+    }
+
+    public static IEnumerable<object?[]> ParseReplyCases()
+    {
+        var add = "[{\"id\":\"c1\",\"name\":\"add\",\"arguments\":{\"a\":2,\"b\":3}}]";
+        var addStr = "[{\"id\":\"c1\",\"name\":\"add\",\"arguments\":\"{\\\"a\\\":2,\\\"b\\\":3}\"}]";
+        // name, input, expected tool calls (JSON of {id,name,arguments}, null = none), expected content
+        yield return new object?[] { "plain prose passes through", "just text {not json", null, "just text {not json" };
+        yield return new object?[] { "content envelope", "{\"content\":\"The answer is 5.\"}", null, "The answer is 5." };
+        yield return new object?[] { "null content", "{\"content\":null}", null, "" };
+        yield return new object?[] { "non-string content encodes", "{\"content\":{\"x\":1}}", null, "{\"x\":1}" };
+        yield return new object?[] { "string arguments pre-encoded", "{\"tool_calls\":[{\"id\":\"c1\",\"type\":\"function\",\"function\":{\"name\":\"add\",\"arguments\":\"{\\\"a\\\":2,\\\"b\\\":3}\"}}]}", addStr, null };
+        yield return new object?[] { "object arguments", "{\"tool_calls\":[{\"id\":\"c1\",\"function\":{\"name\":\"add\",\"arguments\":{\"a\":2,\"b\":3}}}]}", add, null };
+        yield return new object?[] { "fenced", "```json\n{\"tool_calls\":[{\"id\":\"c1\",\"function\":{\"name\":\"add\",\"arguments\":{\"a\":2,\"b\":3}}}]}\n```", add, null };
+        yield return new object?[] { "prose around", "Calling now: {\"tool_calls\":[{\"id\":\"c1\",\"function\":{\"name\":\"add\",\"arguments\":{\"a\":2,\"b\":3}}}]} done", add, null };
+        yield return new object?[] { "choices envelope", "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"tool_calls\":[{\"id\":\"c1\",\"function\":{\"name\":\"add\",\"arguments\":{\"a\":2,\"b\":3}}}]}}]}", add, null };
+        yield return new object?[] { "message envelope", "{\"message\":{\"content\":\"hi\"}}", null, "hi" };
+        yield return new object?[] { "flat call, no id, no arguments", "{\"tool_calls\":[{\"name\":\"ping\"}]}", "[{\"id\":null,\"name\":\"ping\",\"arguments\":{}}]", null };
+        yield return new object?[] { "nameless call skipped, falls to content", "{\"tool_calls\":[{\"function\":{\"arguments\":\"{}\"}}],\"content\":\"fallback\"}", null, "fallback" };
+        yield return new object?[] { "structured output passes through", " {\"answer\":true} ", null, " {\"answer\":true} " };
+    }
+
+    [Theory]
+    [MemberData(nameof(ParseReplyCases))]
+    public void ParseReply_Table(string name, string input, string? expectedCalls, string? expectedContent)
+    {
+        var got = AcpClient.ParseReply(input);
+        if (expectedCalls is null)
+        {
+            Assert.True(got.ToolCalls is null || got.ToolCalls.Count == 0, $"{name}: unexpected tool calls");
+            Assert.Equal(expectedContent, got.Content);
+            return;
+        }
+        Assert.Null(got.Content);
+        var actual = Json.Stringify(got.ToolCalls!.Select(c => new Dictionary<string, object?>
+        {
+            ["id"] = c.Id, ["name"] = c.Name, ["arguments"] = c.Arguments,
+        }).ToList());
+        Assert.Equal(expectedCalls, actual);
+        // A string argument stays a string (pre-encoded); an object stays structured.
+        if (name == "string arguments pre-encoded") Assert.IsType<string>(got.ToolCalls![0].Arguments);
     }
 }
