@@ -249,6 +249,58 @@ One warning worth inheriting: **pick a model actually trained for tool calling.*
 135M instruct model will hallucinate an answer rather than call, and no amount of
 transport code fixes that.
 
+## An ACP agent as the model
+
+An agent CLI that speaks [ACP](https://agentclientprotocol.com) — `devin acp`,
+`opencode acp`, Gemini CLI, Zed's agents — is one more thing `generate` can be. Give
+toolnexus the command; it starts the agent **once**, keeps one warm session, and sends each
+turn of the loop to it:
+
+<Tabs syncKey="lang">
+<TabItem label="JavaScript">
+```ts
+import { createInProcessClient, createToolkit, loadACP } from "toolnexus"
+
+const acp = await loadACP({ command: "opencode", args: ["acp"] })
+const client = createInProcessClient({ model: "opencode", generate: acp.generate })
+
+const toolkit = await createToolkit({ mcpConfig: "./mcp.json", skillsDir: "./skills" })
+const r = await client.run("What changed in the last release?", { toolkit })
+await acp.close()
+```
+</TabItem>
+<TabItem label="Go">
+```go
+acp, err := toolnexus.LoadACP(ctx, toolnexus.ACPOptions{Command: "opencode", Args: []string{"acp"}})
+if err != nil { log.Fatal(err) }
+defer acp.Close()
+
+client := toolnexus.CreateInProcessClient(toolnexus.InProcessOptions{Model: "opencode", Generate: acp.Generate})
+r, err := client.Run(ctx, "What changed in the last release?", tk)
+```
+</TabItem>
+</Tabs>
+
+The agent is a **tool-calling model**, not a text box. Each turn it receives the same
+OpenAI-shaped request an HTTP model would — the conversation, including earlier tool calls and
+their results, plus your tool schemas — as JSON under a fixed instruction, and it answers with an
+OpenAI-shaped message: `{"content": …}` or `{"tool_calls": [ … ]}`. toolnexus runs the calls
+itself, through your toolkit, so hooks, suspension, metrics, MCP servers and skills behave exactly
+as they do against a hosted model. Fences, prose around the JSON and object-valued `arguments`
+are tolerated; a reply that is not a tool-calling envelope comes back as content untouched. The
+exact preamble and parser are in `SPEC.md §8`.
+
+<Aside type="caution" title="The agent's own tools are refused">
+toolnexus is the tool executor, so a permission request from the agent is answered with its
+*reject* option. Set `allowAgentTools` to let the agent run its own tools instead — knowing they
+then run on your machine, outside every toolnexus hook. Tools an agent runs without asking cannot
+be refused by any ACP client; use the agent's read-only or plan `mode` for those.
+</Aside>
+
+Local agents only, for now: the agent is a child process, and must already be logged in (ACP's
+`authenticate` / browser login is not implemented). The win is the agent's startup cost, paid once
+instead of every turn — not a faster protocol.
+
 ## Still want the raw transport?
 
 It has not gone anywhere. `fetch` / `httpClient` / `transport` remains the answer when
