@@ -21,11 +21,16 @@
 //
 // The hard part is that toolnexus assembles a COMPLETE request every turn
 // (the full message array), while an ACP session is STATEFUL — it already
-// has the transcript. Sending the whole thing again each turn makes a naive
-// agent answer a stale, near-duplicate prompt from its own history. The
-// mitigation (default, per ADR 0031): render the full transcript into the
-// prompt text every turn, and append an explicit "this supersedes every
-// earlier prompt" marker naming the latest turn — see renderACPPrompt.
+// has the transcript. Resending everything each turn grows the agent's
+// context quadratically. So (ADR 0036, openspec/changes/add-acp-session-delta)
+// the first prompt of a session carries preamble + system + tools + messages,
+// and every later prompt carries only the messages appended since — after
+// checking that the request really is the conversation this session already
+// holds plus our last reply plus something new. Any mismatch (tools changed,
+// history edited or compacted, a different conversation, a retry, a failed
+// turn) opens a fresh session on the same warm process instead. The record
+// kept for that check is never used to BUILD a request, so it cannot drift
+// into a wrong answer — the worst a mismatch costs is a fresh session.
 //
 // Everything else is mechanical: demultiplex stdout by JSON-RPC id because
 // `session/update` notifications interleave with our own request replies;
@@ -48,16 +53,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
 )
-
-// acpSupersedesMarker names the current/latest user turn as superseding all
-// earlier prompts in the (stateful) ACP session's own transcript. The exact
-// text is a client-side convention, not part of the ACP protocol; kept
-// recognizable and stable so an agent (or a test fixture) can key off it.
-const acpSupersedesMarker = "SUPERSEDES-ALL-PRIOR:"
 
 // ---------------------------------------------------------------------------
 // Wire types (JSON-RPC 2.0, one object per line — identical framing to local
@@ -134,6 +134,20 @@ type ACPOptions struct {
 	// an agent that runs `bash` itself has escaped every hook and any
 	// builtin execution seam (ADR 0033).
 	AllowAgentTools bool
+
+	// Config is applied, in order, with `session/set_config_option` after
+	// every `session/new` (and after Mode) — e.g. {ID: "model", Value:
+	// "openai/gpt-5"}. A pass-through: toolnexus neither knows nor validates
+	// the ids. The agent advertises them (ACPClient.ConfigOptions) and
+	// rejects bad ones; a rejection fails LoadACP, or the turn that reset.
+	Config []ACPConfig
+}
+
+// ACPConfig is one ACP session config option. Value is a string (a `select`
+// option's value id) or a bool (a `boolean` option).
+type ACPConfig struct {
+	ID    string
+	Value any
 }
 
 // ACPClient is one warm ACP session: one child process, one session id,
@@ -148,7 +162,19 @@ type ACPClient struct {
 	nextID  int64
 	pending map[string]chan acpMsg
 
-	sessionID string
+	// Session state — guarded by promptMu (only touched during setup and
+	// inside Generate). See planTurn for how it decides opening vs
+	// continuation.
+	sessionID     string
+	sessionFresh  bool // the current session has not been prompted yet
+	sentTools     []any
+	sentMessages  []any
+	lastReply     *InProcessResponse
+	configOptions json.RawMessage
+
+	cwd    string
+	mode   string
+	config []ACPConfig
 
 	// promptMu serialises turns: one ACP session is one conversation, and
 	// concurrent session/prompt calls would interleave into one transcript.
@@ -226,6 +252,9 @@ func LoadACP(ctx context.Context, opts ACPOptions) (*ACPClient, error) {
 		permissionTimeout: permissionTimeout,
 		requestTimeout:    requestTimeout,
 		allowAgentTools:   opts.AllowAgentTools,
+		cwd:               cwd,
+		mode:              opts.Mode,
+		config:            opts.Config,
 	}
 	c.stdout.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
 	go c.readLoop()
@@ -240,31 +269,71 @@ func LoadACP(ctx context.Context, opts ACPOptions) (*ACPClient, error) {
 		return nil, fmt.Errorf("toolnexus: acp: initialize: %w", err)
 	}
 
-	res, err := c.call(ctx, "session/new", map[string]any{"cwd": cwd, "mcpServers": []any{}})
-	if err != nil {
+	if err := c.openSession(ctx); err != nil {
 		_ = c.Close()
-		return nil, fmt.Errorf("toolnexus: acp: session/new: %w", err)
-	}
-	var sn struct {
-		SessionID string `json:"sessionId"`
-	}
-	if err := json.Unmarshal(res, &sn); err != nil || sn.SessionID == "" {
-		_ = c.Close()
-		return nil, fmt.Errorf("toolnexus: acp: session/new: no sessionId in response")
-	}
-	c.sessionID = sn.SessionID
-
-	if opts.Mode != "" {
-		if _, err := c.call(ctx, "session/set_mode", map[string]any{
-			"sessionId": c.sessionID,
-			"modeId":    opts.Mode,
-		}); err != nil {
-			_ = c.Close()
-			return nil, fmt.Errorf("toolnexus: acp: session/set_mode: %w", err)
-		}
+		return nil, err
 	}
 
 	return c, nil
+}
+
+// openSession runs `session/new` (absolute cwd, mcpServers: [] — the host's
+// MCP servers and skills stay toolnexus tools, executed by the loop, never
+// handed to the agent), then the optional `session/set_mode`, then every
+// Config entry. It replaces the current session and clears the turn record.
+func (c *ACPClient) openSession(ctx context.Context) error {
+	res, err := c.call(ctx, "session/new", map[string]any{"cwd": c.cwd, "mcpServers": []any{}})
+	if err != nil {
+		return fmt.Errorf("toolnexus: acp: session/new: %w", err)
+	}
+	var sn struct {
+		SessionID     string          `json:"sessionId"`
+		ConfigOptions json.RawMessage `json:"configOptions"`
+	}
+	if err := json.Unmarshal(res, &sn); err != nil || sn.SessionID == "" {
+		return fmt.Errorf("toolnexus: acp: session/new: no sessionId in response")
+	}
+	c.sessionID = sn.SessionID
+	c.configOptions = sn.ConfigOptions
+	c.sessionFresh = true
+	c.sentTools, c.sentMessages, c.lastReply = nil, nil, nil
+
+	if c.mode != "" {
+		if _, err := c.call(ctx, "session/set_mode", map[string]any{
+			"sessionId": c.sessionID,
+			"modeId":    c.mode,
+		}); err != nil {
+			return fmt.Errorf("toolnexus: acp: session/set_mode: %w", err)
+		}
+	}
+	for _, opt := range c.config {
+		params := map[string]any{"sessionId": c.sessionID, "configId": opt.ID, "value": opt.Value}
+		if _, isBool := opt.Value.(bool); isBool {
+			params["type"] = "boolean"
+		}
+		res, err := c.call(ctx, "session/set_config_option", params)
+		if err != nil {
+			return fmt.Errorf("toolnexus: acp: session/set_config_option %q: %w", opt.ID, err)
+		}
+		// The agent answers with the complete, current option state.
+		var so struct {
+			ConfigOptions json.RawMessage `json:"configOptions"`
+		}
+		if json.Unmarshal(res, &so) == nil && len(so.ConfigOptions) > 0 {
+			c.configOptions = so.ConfigOptions
+		}
+	}
+	return nil
+}
+
+// ConfigOptions returns the agent's advertised session config options, raw
+// and unmodified, from the latest session/new or set_config_option answer —
+// how a host discovers valid Config ids (models, modes, reasoning levels).
+// Nil when the agent advertises none.
+func (c *ACPClient) ConfigOptions() json.RawMessage {
+	c.promptMu.Lock()
+	defer c.promptMu.Unlock()
+	return c.configOptions
 }
 
 // ---------------------------------------------------------------------------
@@ -477,22 +546,160 @@ func (c *ACPClient) sendPrompt(text string) (string, error) {
 // Generate: the seam into InProcessOptions.Generate / CreateInProcessClient.
 // ---------------------------------------------------------------------------
 
-// Generate sends the assembled OpenAI-shaped request (messages + tools) as
-// one session/prompt on the warm session and parses the accumulated
+// Generate sends one turn on the warm session and parses the accumulated
 // agent_message_chunk text into one assistant message — tool calls or
-// content (SPEC §8 "ACP model source"). Turns are serialised: only one
-// session/prompt is ever in flight at a time on this client.
+// content (SPEC §8 "ACP model source"). A turn that extends the session's
+// conversation sends only the new messages; anything else opens a fresh
+// session first (planTurn). Turns are serialised: only one session/prompt is
+// ever in flight at a time on this client.
 func (c *ACPClient) Generate(req InProcessRequest) (InProcessResponse, error) {
-	prompt := renderACPPrompt(req)
-
 	c.promptMu.Lock()
 	defer c.promptMu.Unlock()
 
+	messages := acpNormalizeList(req.Messages)
+	tools := acpNormalizeList(req.Tools)
+
+	continuing, appended, fresh := c.planTurn(messages, tools)
+	var prompt string
+	if continuing {
+		prompt = renderACPContinuation(fresh)
+	} else {
+		if !c.sessionFresh {
+			ctx, cancel := context.WithTimeout(context.Background(), c.requestTimeout)
+			err := c.openSession(ctx)
+			cancel()
+			if err != nil {
+				c.discardTurnState()
+				return InProcessResponse{}, err
+			}
+		}
+		prompt = renderACPOpening(messages, tools)
+	}
+
 	text, err := c.sendPrompt(prompt)
 	if err != nil {
+		c.discardTurnState()
 		return InProcessResponse{}, err
 	}
-	return parseACPReply(text), nil
+	resp := parseACPReply(text)
+
+	if continuing {
+		c.sentMessages = append(c.sentMessages, appended...)
+	} else {
+		c.sentTools, c.sentMessages = tools, messages
+	}
+	c.sessionFresh = false
+	c.lastReply = &resp
+	return resp, nil
+}
+
+// discardTurnState forgets what the current session holds, so the next turn
+// opens a fresh session — after any failed turn, nothing about the session's
+// contents can be trusted.
+func (c *ACPClient) discardTurnState() {
+	c.sentTools, c.sentMessages, c.lastReply = nil, nil, nil
+	c.sessionFresh = false
+}
+
+// planTurn decides opening vs continuation (add-acp-session-delta design):
+// continue only when the tools are unchanged, the request's messages begin
+// with everything already sent, the next message is an assistant message
+// equivalent to our last reply (the agent already has it), and at least one
+// message follows. It returns the messages to append to the record
+// (the reply plus the new ones) and the new ones alone (what is sent).
+func (c *ACPClient) planTurn(messages, tools []any) (continuing bool, appended, fresh []any) {
+	if c.sessionFresh || c.lastReply == nil || c.sentMessages == nil {
+		return false, nil, nil
+	}
+	if !reflect.DeepEqual(tools, c.sentTools) {
+		return false, nil, nil
+	}
+	n := len(c.sentMessages)
+	if len(messages) < n+2 {
+		return false, nil, nil
+	}
+	if !reflect.DeepEqual(messages[:n], c.sentMessages) {
+		return false, nil, nil
+	}
+	if !acpReplyMatches(messages[n], *c.lastReply) {
+		return false, nil, nil
+	}
+	return true, messages[n:], messages[n+1:]
+}
+
+// acpReplyMatches reports whether msg is the assistant message the in-process
+// layer built from reply: equal content, or the same tool calls in order by
+// name and decoded arguments. Ids are ignored — the layer assigns call_<i>
+// when the agent gave none.
+func acpReplyMatches(msg any, reply InProcessResponse) bool {
+	m, ok := msg.(map[string]any)
+	if !ok || m["role"] != "assistant" {
+		return false
+	}
+	calls, _ := m["tool_calls"].([]any)
+	if len(reply.ToolCalls) == 0 {
+		if len(calls) > 0 {
+			return false
+		}
+		content, _ := m["content"].(string)
+		return content == reply.Content
+	}
+	if len(calls) != len(reply.ToolCalls) {
+		return false
+	}
+	for i, want := range reply.ToolCalls {
+		cm, _ := calls[i].(map[string]any)
+		fn, _ := cm["function"].(map[string]any)
+		if fn == nil || fn["name"] != want.Name {
+			return false
+		}
+		if !reflect.DeepEqual(acpDecodeArgs(fn["arguments"]), acpDecodeArgs(want.Arguments)) {
+			return false
+		}
+	}
+	return true
+}
+
+// acpDecodeArgs brings tool arguments to one comparable shape: a JSON string
+// is decoded, anything else normalised through a JSON round trip.
+func acpDecodeArgs(v any) any {
+	switch a := v.(type) {
+	case string:
+		var out any
+		if json.Unmarshal([]byte(a), &out) == nil {
+			return out
+		}
+		return a
+	case json.RawMessage:
+		var out any
+		if json.Unmarshal(a, &out) == nil {
+			return out
+		}
+		return string(a)
+	}
+	return acpNormalize(v)
+}
+
+// acpNormalize round-trips a value through JSON so typed Go values
+// ([]map[string]any, structs, ints) compare structurally with what was sent.
+func acpNormalize(v any) any {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return v
+	}
+	var out any
+	if json.Unmarshal(b, &out) != nil {
+		return v
+	}
+	return out
+}
+
+func acpNormalizeList(v []any) []any {
+	out := make([]any, len(v))
+	for i, e := range v {
+		out[i] = acpNormalize(e)
+	}
+	return out
 }
 
 // acpPreamble is byte-pinned by SPEC §8 — identical in all seven ports.
@@ -504,64 +711,35 @@ const acpPreamble = "You are the language model behind a tool-calling client. Th
 	"To call tools: {\"tool_calls\": [{\"id\": \"<unique id>\", \"type\": \"function\", \"function\": {\"name\": \"<tool name>\", \"arguments\": \"<JSON-encoded arguments>\"}}]}\n" +
 	"Never both. Use tool results already in \"messages\" instead of calling the same tool again.\n"
 
-// renderACPPrompt assembles PREAMBLE + "\nREQUEST:\n" + JSON + "\n\n" +
-// marker + " " + latest user text. The FULL request goes every turn (an ACP
-// session is stateful; a delta would make the client a shadow copy of
-// conversation state), and the supersedes marker keeps a stateful agent off
-// an earlier near-duplicate in its own history (ADR 0031).
-func renderACPPrompt(req InProcessRequest) string {
-	messages := req.Messages
-	if messages == nil {
-		messages = []any{}
-	}
-	tools := req.Tools
-	if tools == nil {
-		tools = []any{}
-	}
-	var buf strings.Builder
-	enc := json.NewEncoder(&buf)
-	enc.SetEscapeHTML(false)
-	// A struct, not a map, so the key order is messages-then-tools.
-	_ = enc.Encode(struct {
+// acpContinuation is byte-pinned by SPEC §8 (session delta).
+const acpContinuation = "Continue the same conversation. NEW MESSAGES below are appended to it in the same OpenAI chat-completions format; the system prompt and tools are unchanged.\n" +
+	"Reply with exactly one JSON object and nothing else: no prose, no markdown fences.\n" +
+	"{\"content\": \"<answer>\"} for the final answer, or {\"tool_calls\": [...]} in the format given at the start, never both.\n"
+
+// renderACPOpening is a session's first prompt: PREAMBLE + "\nREQUEST:\n" +
+// compact {"messages":[...],"tools":[...]}.
+func renderACPOpening(messages, tools []any) string {
+	return acpPreamble + "\nREQUEST:\n" + acpCompactJSON(struct {
 		Messages []any `json:"messages"`
 		Tools    []any `json:"tools"`
 	}{messages, tools})
-	payload := strings.TrimRight(buf.String(), "\n")
-
-	latest, found := "", false
-	for i := len(messages) - 1; i >= 0; i-- {
-		if mm, ok := messages[i].(map[string]any); ok && mm["role"] == "user" {
-			latest, found = acpContentText(mm["content"]), true
-			break
-		}
-	}
-	if !found && len(messages) > 0 {
-		if mm, ok := messages[len(messages)-1].(map[string]any); ok {
-			latest = acpContentText(mm["content"])
-		}
-	}
-	return acpPreamble + "\nREQUEST:\n" + payload + "\n\n" + acpSupersedesMarker + " " + latest
 }
 
-// acpContentText renders a message's content for the supersedes line: a
-// string as is; an array of parts ⇒ the text of its type:"text" parts joined
-// by one space; anything else ⇒ "".
-func acpContentText(content any) string {
-	switch v := content.(type) {
-	case string:
-		return v
-	case []any:
-		var texts []string
-		for _, p := range v {
-			if pm, ok := p.(map[string]any); ok && pm["type"] == "text" {
-				if t, ok := pm["text"].(string); ok {
-					texts = append(texts, t)
-				}
-			}
-		}
-		return strings.Join(texts, " ")
-	}
-	return ""
+// renderACPContinuation is every later prompt: CONTINUATION +
+// "\nNEW MESSAGES:\n" + compact {"messages":[...new only]}.
+func renderACPContinuation(fresh []any) string {
+	return acpContinuation + "\nNEW MESSAGES:\n" + acpCompactJSON(struct {
+		Messages []any `json:"messages"`
+	}{fresh})
+}
+
+// acpCompactJSON encodes without HTML escaping (a struct keeps key order).
+func acpCompactJSON(v any) string {
+	var buf strings.Builder
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	_ = enc.Encode(v)
+	return strings.TrimRight(buf.String(), "\n")
 }
 
 // parseACPReply turns the agent's reply text into one assistant message, by

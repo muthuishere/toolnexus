@@ -17,17 +17,37 @@ import (
 	"time"
 )
 
-// acpSplitPrompt pulls the REQUEST JSON back out of a rendered prompt.
-func acpSplitPrompt(prompt string) (preamble string, request map[string]any, ok bool) {
-	i := strings.Index(prompt, "\nREQUEST:\n")
-	j := strings.LastIndex(prompt, "\n\n"+acpSupersedesMarker+" ")
-	if i < 0 || j < i {
-		return "", nil, false
+// acpSplitPrompt classifies a rendered prompt as "opening" (REQUEST JSON with
+// messages + tools) or "continuation" (NEW MESSAGES JSON) and decodes its body.
+func acpSplitPrompt(prompt string) (kind string, body map[string]any, ok bool) {
+	for _, k := range []struct{ kind, marker string }{
+		{"opening", "\nREQUEST:\n"},
+		{"continuation", "\nNEW MESSAGES:\n"},
+	} {
+		if i := strings.Index(prompt, k.marker); i >= 0 {
+			if json.Unmarshal([]byte(prompt[i+len(k.marker):]), &body) != nil {
+				return "", nil, false
+			}
+			return k.kind, body, true
+		}
 	}
-	if err := json.Unmarshal([]byte(prompt[i+len("\nREQUEST:\n"):j]), &request); err != nil {
-		return "", nil, false
+	return "", nil, false
+}
+
+// acpCountSessions returns the number of session/new calls and the session
+// id each prompt was sent on, in order.
+func acpCountSessions(t *testing.T, outFile string) (news int, promptSessions []string) {
+	t.Helper()
+	for _, ev := range readACPEvents(t, outFile) {
+		switch ev.Type {
+		case "session/new":
+			news++
+		case "session/prompt":
+			sid, _ := ev.Data["sessionId"].(string)
+			promptSessions = append(promptSessions, sid)
+		}
 	}
-	return prompt[:i], request, true
+	return news, promptSessions
 }
 
 // acpHandleToolLoopForTest is a scripted tool-calling model: with no tool
@@ -35,10 +55,10 @@ func acpSplitPrompt(prompt string) (preamble string, request map[string]any, ok 
 // with object arguments, to exercise the tolerant parser — and once a tool
 // result is present it answers from it.
 func acpHandleToolLoopForTest(sendNotification func(string, any), reply func(json.RawMessage, any), emit func(acpEvent), id json.RawMessage, sessionID, prompt string) {
-	_, req, ok := acpSplitPrompt(prompt)
+	kind, req, ok := acpSplitPrompt(prompt)
 	answer := "unparseable prompt"
 	if ok {
-		emit(acpEvent{Type: "request", Data: req})
+		emit(acpEvent{Type: "request", Data: map[string]any{"kind": kind, "body": req}})
 		toolResult := ""
 		msgs, _ := req["messages"].([]any)
 		for _, m := range msgs {
@@ -89,17 +109,19 @@ func TestACP_ToolCallingLoopEndToEnd(t *testing.T) {
 		t.Fatalf("tool calls = %+v", r.ToolCalls)
 	}
 
-	var requests []map[string]any
+	var kinds []string
+	var bodies []map[string]any
 	for _, ev := range readACPEvents(t, outFile) {
 		if ev.Type == "request" {
-			requests = append(requests, ev.Data)
+			kinds = append(kinds, ev.Data["kind"].(string))
+			bodies = append(bodies, ev.Data["body"].(map[string]any))
 		}
 	}
-	if len(requests) != 2 {
-		t.Fatalf("expected 2 prompts (ask, then answer), got %d", len(requests))
+	if len(bodies) != 2 || kinds[0] != "opening" || kinds[1] != "continuation" {
+		t.Fatalf("expected an opening prompt then a continuation, got %v", kinds)
 	}
 	// Turn 1: the tool schema reached the agent, OpenAI-shaped.
-	tools, _ := requests[0]["tools"].([]any)
+	tools, _ := bodies[0]["tools"].([]any)
 	var sawAdd bool
 	for _, tl := range tools {
 		fn, _ := tl.(map[string]any)["function"].(map[string]any)
@@ -110,72 +132,72 @@ func TestACP_ToolCallingLoopEndToEnd(t *testing.T) {
 	if !sawAdd {
 		t.Fatalf("turn 1 tools did not carry add's schema: %v", tools)
 	}
-	// Turn 2: the assistant tool_calls message and the tool result are both there.
-	var sawCall, sawResult bool
-	for _, m := range requests[1]["messages"].([]any) {
-		mm := m.(map[string]any)
-		if mm["role"] == "assistant" && mm["tool_calls"] != nil {
-			sawCall = true
-		}
-		if mm["role"] == "tool" && mm["tool_call_id"] == "c1" && mm["content"] == "5" {
-			sawResult = true
-		}
+	// Turn 2: ONLY the tool result — no tools, no system, no history, not the
+	// agent's own tool-call message (it already has that).
+	if _, hasTools := bodies[1]["tools"]; hasTools {
+		t.Fatal("continuation must not resend tools")
 	}
-	if !sawCall || !sawResult {
-		t.Fatalf("turn 2 messages missing the call (%v) or its result (%v): %v", sawCall, sawResult, requests[1]["messages"])
+	msgs := bodies[1]["messages"].([]any)
+	if len(msgs) != 1 {
+		t.Fatalf("continuation must carry only the tool result, got %v", msgs)
+	}
+	if m := msgs[0].(map[string]any); m["role"] != "tool" || m["tool_call_id"] != "c1" || m["content"] != "5" {
+		t.Fatalf("continuation message = %v", m)
 	}
 }
 
 func TestACP_PromptShape(t *testing.T) {
-	req := InProcessRequest{
-		Messages: []any{
-			map[string]any{"role": "system", "content": "be terse"},
-			map[string]any{"role": "user", "content": []any{
-				map[string]any{"type": "text", "text": "a <b> & c"},
-				map[string]any{"type": "image_url"},
-				map[string]any{"type": "text", "text": "d"},
-			}},
-		},
+	msgs := acpNormalizeList([]any{
+		map[string]any{"role": "system", "content": "be terse"},
+		map[string]any{"role": "user", "content": "a <b> & c"},
+	})
+	p := renderACPOpening(msgs, acpNormalizeList(nil))
+	if !strings.HasPrefix(p, acpPreamble+"\nREQUEST:\n{\"messages\":") {
+		t.Fatalf("opening prompt shape wrong: %q", p)
 	}
-	p := renderACPPrompt(req)
-	pre, body, ok := acpSplitPrompt(p)
-	if !ok {
-		t.Fatalf("prompt does not split: %q", p)
-	}
-	if pre != acpPreamble {
-		t.Fatalf("preamble drifted:\n%q", pre)
-	}
-	if !strings.HasSuffix(p, "\n\nSUPERSEDES-ALL-PRIOR: a <b> & c d") {
-		t.Fatalf("marker line wrong: %q", p[len(p)-60:])
+	if strings.Contains(p, "SUPERSEDES") {
+		t.Fatal("the supersedes marker is gone (add-acp-session-delta)")
 	}
 	if strings.Contains(p, "\\u003c") {
 		t.Fatal("REQUEST JSON is HTML-escaped")
 	}
+	kind, body, ok := acpSplitPrompt(p)
+	if !ok || kind != "opening" {
+		t.Fatalf("opening prompt does not split: %q", p)
+	}
 	if tools, isArr := body["tools"].([]any); !isArr || len(tools) != 0 {
 		t.Fatalf("absent tools must render as [], got %v", body["tools"])
 	}
-	if !strings.Contains(p, "\nREQUEST:\n{\"messages\":") {
-		t.Fatal("REQUEST JSON must lead with messages")
+
+	c := renderACPContinuation(msgs[1:])
+	if c != acpContinuation+"\nNEW MESSAGES:\n{\"messages\":[{\"content\":\"a <b> & c\",\"role\":\"user\"}]}" {
+		t.Fatalf("continuation prompt shape wrong: %q", c)
 	}
 }
 
-// The preamble is byte-pinned by SPEC.md §8; read it back from the spec so the
-// constant cannot drift from the contract every port is held to.
+// The preambles are byte-pinned by SPEC.md §8; read them back from the spec
+// so the constants cannot drift from the contract every port is held to.
 func TestACP_PreambleMatchesSpec(t *testing.T) {
 	spec, err := os.ReadFile(filepath.Join("..", "SPEC.md"))
 	if err != nil {
 		t.Skipf("SPEC.md not reachable: %v", err)
 	}
-	s := string(spec)
-	i := strings.Index(s, "`PREAMBLE` is these seven lines")
-	if i < 0 {
-		t.Fatal("SPEC.md has no ACP preamble block")
+	block := func(lead string) string {
+		s := string(spec)
+		i := strings.Index(s, lead)
+		if i < 0 {
+			t.Fatalf("SPEC.md has no block introduced by %q", lead)
+		}
+		s = s[i:]
+		start := strings.Index(s, "```\n") + len("```\n")
+		end := strings.Index(s[start:], "```")
+		return s[start : start+end]
 	}
-	s = s[i:]
-	start := strings.Index(s, "```\n") + len("```\n")
-	end := strings.Index(s[start:], "```")
-	if got := s[start : start+end]; got != acpPreamble {
+	if got := block("`PREAMBLE` is these seven lines"); got != acpPreamble {
 		t.Fatalf("acpPreamble differs from SPEC.md:\nspec: %q\ncode: %q", got, acpPreamble)
+	}
+	if got := block("`CONTINUATION` is these three lines"); got != acpContinuation {
+		t.Fatalf("acpContinuation differs from SPEC.md:\nspec: %q\ncode: %q", got, acpContinuation)
 	}
 }
 
@@ -237,4 +259,220 @@ func TestACP_PermissionAllowedOnOptIn(t *testing.T) {
 		}
 	}
 	t.Fatal("no permission answer observed")
+}
+
+// --- session delta: every case that must open a fresh session --------------
+
+// acpLoopTurn runs one Generate and appends the assistant message the
+// in-process layer would build, so conv grows exactly like a real loop's.
+func acpLoopTurn(t *testing.T, c *ACPClient, conv []any, tools []any) []any {
+	t.Helper()
+	resp, err := c.Generate(InProcessRequest{Messages: conv, Tools: tools})
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	return append(conv, map[string]any{"role": "assistant", "content": resp.Content})
+}
+
+func acpUser(text string) map[string]any { return map[string]any{"role": "user", "content": text} }
+
+var acpToolA = []any{map[string]any{"type": "function", "function": map[string]any{"name": "a", "parameters": map[string]any{"type": "object"}}}}
+var acpToolB = []any{map[string]any{"type": "function", "function": map[string]any{"name": "b", "parameters": map[string]any{"type": "object"}}}}
+
+func TestACP_SessionResets(t *testing.T) {
+	cases := []struct {
+		name string
+		// turn2 builds the second request from the first conversation.
+		turn2     func(conv []any) ([]any, []any)
+		wantFresh bool
+	}{
+		{"appended user message continues", func(conv []any) ([]any, []any) {
+			return append(conv, acpUser("next")), acpToolA
+		}, false},
+		{"changed tools reset", func(conv []any) ([]any, []any) {
+			return append(conv, acpUser("next")), acpToolB
+		}, true},
+		{"edited history resets", func(conv []any) ([]any, []any) {
+			edited := append([]any{acpUser("rewritten first turn")}, conv[1:]...)
+			return append(edited, acpUser("next")), acpToolA
+		}, true},
+		{"compacted history resets", func(conv []any) ([]any, []any) {
+			return []any{acpUser("summary of earlier turns"), acpUser("next")}, acpToolA
+		}, true},
+		{"rewritten agent reply resets", func(conv []any) ([]any, []any) {
+			out := append([]any{}, conv[:len(conv)-1]...)
+			out = append(out, map[string]any{"role": "assistant", "content": "something the agent never said"})
+			return append(out, acpUser("next")), acpToolA
+		}, true},
+		{"retry of the same request resets", func(conv []any) ([]any, []any) {
+			return conv[:len(conv)-1], acpToolA
+		}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			outFile := filepath.Join(t.TempDir(), "events.ndjson")
+			c, err := LoadACP(context.Background(), acpTestOptions(t, "warm", outFile))
+			if err != nil {
+				t.Fatalf("LoadACP: %v", err)
+			}
+			conv := acpLoopTurn(t, c, []any{acpUser("first")}, acpToolA)
+			msgs, tools := tc.turn2(conv)
+			if _, err := c.Generate(InProcessRequest{Messages: msgs, Tools: tools}); err != nil {
+				t.Fatalf("Generate #2: %v", err)
+			}
+			c.Close()
+
+			news, sessions := acpCountSessions(t, outFile)
+			fresh := news == 2 && sessions[0] != sessions[1]
+			if fresh != tc.wantFresh {
+				t.Fatalf("fresh session = %v (session/new=%d, prompt sessions %v), want %v", fresh, news, sessions, tc.wantFresh)
+			}
+			var texts []string
+			for _, ev := range readACPEvents(t, outFile) {
+				if ev.Type == "session/prompt" {
+					texts = append(texts, ev.Data["text"].(string))
+				}
+			}
+			kind, _, _ := acpSplitPrompt(texts[1])
+			if want := map[bool]string{true: "opening", false: "continuation"}[tc.wantFresh]; kind != want {
+				t.Fatalf("turn 2 prompt kind = %q, want %q", kind, want)
+			}
+		})
+	}
+}
+
+func TestACP_FailedTurnDiscardsSessionState(t *testing.T) {
+	outFile := filepath.Join(t.TempDir(), "events.ndjson")
+	c, err := LoadACP(context.Background(), acpTestOptions(t, "warm", outFile))
+	if err != nil {
+		t.Fatalf("LoadACP: %v", err)
+	}
+	conv := acpLoopTurn(t, c, []any{acpUser("first")}, nil)
+	if _, err := c.Generate(InProcessRequest{Messages: append(conv, acpUser("FAIL-THIS-TURN"))}); err == nil {
+		t.Fatal("expected the scripted failure")
+	}
+	// The same conversation again: after a failure nothing about the session
+	// can be trusted, so this must open a fresh one.
+	if _, err := c.Generate(InProcessRequest{Messages: append(conv, acpUser("try again"))}); err != nil {
+		t.Fatalf("Generate after failure: %v", err)
+	}
+	c.Close()
+	news, sessions := acpCountSessions(t, outFile)
+	if news != 2 || sessions[len(sessions)-1] == sessions[0] {
+		t.Fatalf("expected a fresh session after the failed turn: session/new=%d, prompt sessions %v", news, sessions)
+	}
+}
+
+func TestACP_ConfigAppliedAtLoadAndOnReset(t *testing.T) {
+	outFile := filepath.Join(t.TempDir(), "events.ndjson")
+	opts := acpTestOptions(t, "warm", outFile)
+	opts.Config = []ACPConfig{{ID: "model", Value: "m-2"}, {ID: "fast", Value: true}}
+	c, err := LoadACP(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("LoadACP: %v", err)
+	}
+	if !strings.Contains(string(c.ConfigOptions()), `"currentValue":"m-2"`) {
+		t.Fatalf("ConfigOptions must reflect the agent's latest answer, got %s", c.ConfigOptions())
+	}
+	acpLoopTurn(t, c, []any{acpUser("one")}, nil)
+	acpLoopTurn(t, c, []any{acpUser("an unrelated conversation")}, nil) // resets
+	c.Close()
+
+	var sets []map[string]any
+	for _, ev := range readACPEvents(t, outFile) {
+		if ev.Type == "session/set_config_option" {
+			sets = append(sets, ev.Data)
+		}
+	}
+	if len(sets) != 4 {
+		t.Fatalf("expected 2 options x 2 sessions = 4 set_config_option calls, got %d: %v", len(sets), sets)
+	}
+	if sets[0]["configId"] != "model" || sets[0]["value"] != "m-2" || sets[0]["sessionId"] != "sess-1" {
+		t.Fatalf("first set = %v", sets[0])
+	}
+	if sets[1]["value"] != true || sets[1]["type"] != "boolean" {
+		t.Fatalf("a boolean option must carry type:boolean, got %v", sets[1])
+	}
+	if sets[2]["sessionId"] != "sess-2" || sets[2]["configId"] != "model" {
+		t.Fatalf("config must be re-applied on the fresh session, got %v", sets[2])
+	}
+}
+
+func TestACP_RejectedConfigFailsLoad(t *testing.T) {
+	opts := acpTestOptions(t, "warm", "")
+	opts.Config = []ACPConfig{{ID: "bad", Value: "x"}}
+	c, err := LoadACP(context.Background(), opts)
+	if err == nil {
+		c.Close()
+		t.Fatal("expected LoadACP to fail on a rejected config option")
+	}
+	if !strings.Contains(err.Error(), "unknown config option: bad") {
+		t.Fatalf("the agent's own error must surface, got %v", err)
+	}
+}
+
+func TestACP_ConfigOptionsReadableWithoutConfig(t *testing.T) {
+	c, err := LoadACP(context.Background(), acpTestOptions(t, "warm", ""))
+	if err != nil {
+		t.Fatalf("LoadACP: %v", err)
+	}
+	defer c.Close()
+	var opts []map[string]any
+	if err := json.Unmarshal(c.ConfigOptions(), &opts); err != nil || len(opts) != 1 || opts[0]["id"] != "model" {
+		t.Fatalf("ConfigOptions = %s (%v)", c.ConfigOptions(), err)
+	}
+}
+
+func TestACP_ToolCallReplyMatching(t *testing.T) {
+	reply := InProcessResponse{ToolCalls: []InProcessToolCall{{ID: "c1", Name: "add", Arguments: map[string]any{"a": float64(2)}}}}
+	built := map[string]any{"role": "assistant", "tool_calls": []any{map[string]any{
+		"id": "call_0", "type": "function",
+		"function": map[string]any{"name": "add", "arguments": `{"a":2}`},
+	}}}
+	if !acpReplyMatches(built, reply) {
+		t.Fatal("same name + decoded arguments must match, ids ignored")
+	}
+	other := map[string]any{"role": "assistant", "tool_calls": []any{map[string]any{
+		"function": map[string]any{"name": "add", "arguments": `{"a":3}`},
+	}}}
+	if acpReplyMatches(other, reply) {
+		t.Fatal("different arguments must not match")
+	}
+	if acpReplyMatches(map[string]any{"role": "user", "content": "x"}, InProcessResponse{Content: "x"}) {
+		t.Fatal("a non-assistant message never matches")
+	}
+}
+
+// Conversation memory through the real in-process client (Ask with an id):
+// the second Ask extends the stored transcript, so it must continue the same
+// ACP session rather than reset — the case the token saving is for.
+func TestACP_AskWithMemoryContinuesSession(t *testing.T) {
+	outFile := filepath.Join(t.TempDir(), "events.ndjson")
+	acp, err := LoadACP(context.Background(), acpTestOptions(t, "warm", outFile))
+	if err != nil {
+		t.Fatalf("LoadACP: %v", err)
+	}
+	tk := bareToolkit(t)
+	defer tk.Close()
+	tk.Register(addTool(t))
+
+	c := CreateInProcessClient(InProcessOptions{Model: "acp", Generate: acp.Generate, SystemPrompt: "Be terse."})
+	for _, q := range []string{"first question", "second question", "third question"} {
+		if _, err := c.Ask(context.Background(), q, tk, "conv-1"); err != nil {
+			t.Fatalf("Ask(%q): %v", q, err)
+		}
+	}
+	acp.Close()
+
+	news, _ := acpCountSessions(t, outFile)
+	var kinds []string
+	for _, ev := range readACPEvents(t, outFile) {
+		if ev.Type == "session/prompt" {
+			k, _, _ := acpSplitPrompt(ev.Data["text"].(string))
+			kinds = append(kinds, k)
+		}
+	}
+	if news != 1 || len(kinds) != 3 || kinds[1] != "continuation" || kinds[2] != "continuation" {
+		t.Fatalf("Ask with memory must continue one session: session/new=%d, prompt kinds %v", news, kinds)
+	}
 }

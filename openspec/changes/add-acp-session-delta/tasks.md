@@ -1,15 +1,19 @@
 # Tasks — add-acp-session-delta
 
-**Spec-only change.** Nothing below is implemented. Every port box is open on purpose.
+**Implemented in `golang/` only, hermetically tested, not yet run against a live agent.** The
+other six ports are open on purpose.
 
 ## Spec
 
 - [x] `proposal.md`, `design.md`, spec delta `specs/acp-session-delta/spec.md`
 - [x] `openspec validate add-acp-session-delta --strict`
 - [x] ADR 0036 — the delta reversal of ADR 0031's state decision (Proposed)
-- [ ] With the first port's code: move `design.md`'s pinned texts into `SPEC.md §8` (continuation
-      preamble, opening/continuation rules, `config`), and remove the supersedes line from it
-- [ ] With the code: `CHANGELOG.md` `## Unreleased` entry (token saving, `config`, marker removed,
+- [x] With the first port's code: `SPEC.md §8` gains a "Session delta — golang only so far"
+      subsection pinning the continuation preamble, the opening/continuation rules and `config`
+- [ ] When the last port lands: fold that subsection into the main ACP text, drop the
+      "golang only" status, and remove the supersedes line from the base formula
+- [x] `CHANGELOG.md` `## Unreleased` — the Go implementation and what is still open
+- [ ] When every port lands: the full `CHANGELOG.md` entry (token saving, `config`, marker removed,
       the per-turn-system-prompt caveat)
 
 ## Per-language parity checklist
@@ -23,7 +27,8 @@ tests over real pipes against the port's fake ACP server for every scenario in t
 retried request → `session/new` · failed turn → `session/new` · config at load and on reset ·
 rejected config fails load · configOptions readable) · the existing tool-calling tests still green.
 
-- [ ] `golang/`
+- [x] `golang/` — `acp.go` (planTurn, openSession, ConfigOptions, Config), tests in
+      `acp_test.go` / `acp_toolcall_test.go`, incl. `Ask` with memory continuing one session
 - [ ] `js/`
 - [ ] `python/`
 - [ ] `java/`
@@ -33,8 +38,10 @@ rejected config fails load · configOptions readable) · the existing tool-calli
 
 ## Examples (each port's existing ACP example)
 
-- [ ] Default `opencode acp`; document codex and devin as alternatives; show `config` with a model
-- [ ] Run each example once against the real agent and correct the commands/package names if they
+- [x] Go: default `opencode acp`; codex and devin documented; `TOOLNEXUS_ACP_MODEL` → `config`;
+      prints the agent's config options; uses `Ask` so turn 2 is a continuation
+- [ ] The other six ports' examples
+- [ ] Run the Go example once against each real agent and correct the commands/package names if they
       differ from `design.md`
 - [ ] Cookbook (`site/.../local-and-in-process-models.mdx`): `config`, the three example commands,
       and the caveat that a per-turn-changing system prompt or tool list forfeits the saving

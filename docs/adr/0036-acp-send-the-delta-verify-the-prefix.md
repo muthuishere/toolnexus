@@ -1,6 +1,11 @@
 # ADR 0036 — ACP: send the delta, verify the prefix
 
-- **Status:** Proposed (spec only — `openspec/changes/add-acp-session-delta`). No port implements it.
+- **Status:** Accepted for trial — **implemented in `golang/` only**
+  (`openspec/changes/add-acp-session-delta`). Hermetic tests pass against a fake ACP agent; it has
+  **not been run against a live agent** yet. To verify on a machine with an agent installed and
+  logged in: `cd golang && go run ./examples/acp` (opencode by default; codex and devin commands are
+  in the example header; `TOOLNEXUS_ACP_MODEL` selects a model). Turn 2 should go out as a
+  continuation on the same session. Other ports follow once that holds.
 - **Date:** 2026-10-04
 - **Revises:** ADR 0031's state decision ("full request every turn plus a supersedes marker").
 - **Related:** `openspec/changes/add-acp-tool-calling` (the ACP agent as a tool-calling model).
@@ -37,3 +42,12 @@ session, which this design never creates.
 - Abandoned sessions stay alive inside the agent process (ACP v1 has no stable session close).
 - Model choice rides on ACP's own session config options as a pass-through (`config`), so the
   library still contains nothing specific to any agent.
+
+## How to check it live
+
+1. `cd golang && go run ./examples/acp` with opencode installed and logged in (or set
+   `TOOLNEXUS_ACP_CMD` to the codex or devin command from the example header).
+2. Expect: the agent's config options printed; turn 1 calls `clock`; turn 2 answers from the
+   earlier result. Both turns run on one process and one session.
+3. What would falsify the design: the agent ignoring the continuation preamble (prose instead of
+   JSON), or losing the tools between turns — record which agent and the reply, and bring it back.

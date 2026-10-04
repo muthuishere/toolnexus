@@ -1599,6 +1599,41 @@ the agent must not. An **allow-agent-tools** option (idiomatic spelling per port
 `allow`-kind option instead. `session/new` sends an absolute `cwd` and `mcpServers: []`. Local
 process only; ACP `authenticate` and remote agents are not part of this contract.
 
+##### Session delta — **golang only so far** (change `add-acp-session-delta`, ADR 0036)
+
+> **Parity status:** implemented in `golang/` only, not yet verified against a live agent. The
+> other six ports still send the full request plus the supersedes line on every turn, as above.
+> Tracked in `openspec/changes/add-acp-session-delta/tasks.md`; this subsection becomes the rule
+> for every port as each one lands.
+
+A port implementing session delta sends the prompt above (without the supersedes line) only as a
+session's **opening** prompt. Every later prompt on the same session is a **continuation**:
+
+```
+CONTINUATION + "\nNEW MESSAGES:\n" + JSON{messages: NEW}
+```
+
+`CONTINUATION` is these three lines, each terminated by `\n`:
+
+```
+Continue the same conversation. NEW MESSAGES below are appended to it in the same OpenAI chat-completions format; the system prompt and tools are unchanged.
+Reply with exactly one JSON object and nothing else: no prose, no markdown fences.
+{"content": "<answer>"} for the final answer, or {"tool_calls": [...]} in the format given at the start, never both.
+```
+
+A turn **continues** only when: the session has been prompted and the previous turn succeeded; the
+request's `tools` are structurally equal to the opening prompt's; its `messages` begin with every
+message the session has been sent; the next message is an `assistant` message equivalent to the
+last reply (equal `content`, or the same tool calls in order by `name` and decoded `arguments`, ids
+ignored); and at least one message follows it. `NEW` is the messages after that assistant message.
+Otherwise the client opens a **fresh session** on the same process — `session/new` (absolute `cwd`,
+`mcpServers: []`), then `session/set_mode` if set, then one `session/set_config_option` per host
+`config` entry in order (a boolean value adds `"type": "boolean"`) — and sends an opening prompt. A
+failed turn discards the record, so the next turn opens fresh. The host's tools — MCP servers,
+skills, native, HTTP, builtin — reach the agent only as schemas, never as its MCP config. The latest
+`configOptions` the agent returned is readable, raw, on the client; `config` ids are not
+interpreted or validated by the library, and an agent's rejection fails the load (or the turn).
+
 ### Resilience (retries + timeout/cancel)
 
 `ClientOptions`: `retries` (default 2), `retryBaseMs` (default 500), `retryableStatuses` (optional,

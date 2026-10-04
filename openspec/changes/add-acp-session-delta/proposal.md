@@ -1,9 +1,9 @@
 # ACP: send what changed, not everything, on every turn
 
-**Status: proposed — spec only. No port implements this yet.** The tool-calling half
-(`add-acp-tool-calling`) is implemented in all seven ports; this change is its follow-up and is
-written ahead of the code on purpose, so implementation can be driven from a machine with real ACP
-agents installed.
+**Status: implemented in `golang/` only — hermetic tests pass, never run against a live agent.**
+The other six ports are tracked in `tasks.md`. The tool-calling half (`add-acp-tool-calling`) is
+implemented in all seven ports; this change is its follow-up, landed in Go first so it can be
+verified against real ACP agents (opencode, codex, devin) before it is ported.
 
 ## Why
 
