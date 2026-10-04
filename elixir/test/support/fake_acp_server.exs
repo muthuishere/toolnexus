@@ -14,9 +14,22 @@
 #   stale       - stateful session; answers a near-duplicate prompt with a
 #                 STALE answer unless the new prompt carries
 #                 "SUPERSEDES-ALL-PRIOR:", in which case it answers fresh.
-#   permission  - sends session/request_permission mid-turn and blocks until
-#                 answered before finishing (proves the client answers
-#                 inline rather than never answering / hanging).
+#   permission  - sends session/request_permission mid-turn (options: a
+#                 reject_once then an allow_once) and blocks until answered
+#                 before finishing (proves the client answers inline rather
+#                 than never answering / hanging). Replies
+#                 "PERMITTED(<optionId or cancelled>):<text>" so a test can
+#                 see WHICH option the client selected.
+#   permission_allow_only - as permission, but offers only an allow_once
+#                 option (proves the default answers "cancelled" when no
+#                 reject-kind option exists).
+#   toolloop    - a scripted tool-calling model (SPEC §8 "ACP model
+#                 source"): with no role:"tool" message in the prompt's
+#                 REQUEST JSON it asks for add(2,3) — wrapped in prose and
+#                 ```json fences, object arguments — and once a tool result
+#                 is present answers {"content":"The answer is <result>."}.
+#                 With a second CLI arg (a file path) it appends each
+#                 decoded REQUEST as one JSON line, for the test to inspect.
 #   noisy       - emits agent_thought_chunk + tool_call/tool_call_update
 #                 narration interleaved with the real agent_message_chunk
 #                 payload, to prove naive accumulation corrupts structured
@@ -25,7 +38,7 @@
 #                 session are serialised (never sent concurrently).
 #
 # Launch (Jason comes from the project's build):
-#   elixir -pa _build/test/lib/jason/ebin test/support/fake_acp_server.exs <scenario>
+#   elixir -pa _build/test/lib/jason/ebin test/support/fake_acp_server.exs <scenario> [events-file]
 
 defmodule FakeAcpServer do
   def run do
@@ -103,8 +116,49 @@ defmodule FakeAcpServer do
     reply(id, %{"stopReason" => "end_turn"})
   end
 
-  defp dispatch("permission", id, text, _state) do
+  defp dispatch("toolloop", id, text, _state) do
+    answer =
+      case split_request(text) do
+        {:ok, req} ->
+          case Enum.at(System.argv(), 1) do
+            nil -> :ok
+            path -> File.write!(path, Jason.encode!(req) <> "\n", [:append])
+          end
+
+          tool_result =
+            (req["messages"] || [])
+            |> Enum.filter(&(&1["role"] == "tool"))
+            |> Enum.map(& &1["content"])
+            |> List.last()
+
+          if tool_result in [nil, ""] do
+            "Sure, calling the tool.\n```json\n" <>
+              ~s({"tool_calls":[{"id":"c1","type":"function","function":{"name":"add","arguments":{"a":2,"b":3}}}]}) <>
+              "\n```"
+          else
+            Jason.encode!(%{"content" => "The answer is #{tool_result}."})
+          end
+
+        :error ->
+          "unparseable prompt"
+      end
+
+    emit_chunk(answer)
+    reply(id, %{"stopReason" => "end_turn"})
+  end
+
+  defp dispatch("permission" <> _ = scenario, id, text, _state) do
     req_id = "srv-1"
+
+    options =
+      if scenario == "permission_allow_only" do
+        [%{"optionId" => "allow-once", "kind" => "allow_once", "name" => "Allow"}]
+      else
+        [
+          %{"optionId" => "reject", "kind" => "reject_once", "name" => "Reject"},
+          %{"optionId" => "allow-once", "kind" => "allow_once", "name" => "Allow"}
+        ]
+      end
 
     send_msg(%{
       "jsonrpc" => "2.0",
@@ -112,15 +166,13 @@ defmodule FakeAcpServer do
       "method" => "session/request_permission",
       "params" => %{
         "sessionId" => "sess-1",
-        "options" => [
-          %{"optionId" => "reject", "kind" => "reject_once", "name" => "Reject"},
-          %{"optionId" => "allow-once", "kind" => "allow_once", "name" => "Allow"}
-        ]
+        "options" => options
       }
     })
 
-    await_permission_reply(req_id)
-    emit_chunk("PERMITTED:" <> text)
+    outcome = await_permission_reply(req_id)
+    chosen = get_in(outcome, ["outcome", "optionId"]) || get_in(outcome, ["outcome", "outcome"])
+    emit_chunk("PERMITTED(#{chosen}):" <> text)
     reply(id, %{"stopReason" => "end_turn"})
   end
 
@@ -149,16 +201,30 @@ defmodule FakeAcpServer do
   defp await_permission_reply(want_id) do
     case read_line() do
       :eof ->
-        :eof
+        %{}
 
       "" ->
         await_permission_reply(want_id)
 
       line ->
         case Jason.decode!(line) do
-          %{"id" => ^want_id} -> :ok
+          %{"id" => ^want_id} = msg -> msg["result"] || %{}
           _ -> await_permission_reply(want_id)
         end
+    end
+  end
+
+  # Pull the REQUEST JSON back out of a rendered prompt: between
+  # "\nREQUEST:\n" and the LAST "\n\nSUPERSEDES-ALL-PRIOR: ".
+  defp split_request(prompt) do
+    with [_preamble, rest] <- String.split(prompt, "\nREQUEST:\n", parts: 2),
+         [_ | _] = parts <- String.split(rest, "\n\nSUPERSEDES-ALL-PRIOR: "),
+         true <- length(parts) >= 2,
+         json = parts |> Enum.drop(-1) |> Enum.join("\n\nSUPERSEDES-ALL-PRIOR: "),
+         {:ok, %{} = req} <- Jason.decode(json) do
+      {:ok, req}
+    else
+      _ -> :error
     end
   end
 
