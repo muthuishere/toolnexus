@@ -51,6 +51,11 @@ containment for those.
 - The toolkit is **not** offered to the agent as an MCP server (`session/new.mcpServers` stays
   empty); toolnexus runs the loop, by design.
 - Streaming through ACP is still refused, and delta mode is still not offered.
+- **Every turn still resends the system prompt, all tool schemas and the whole conversation** into
+  a session that keeps every prompt, so the agent's context grows quadratically over a long tool
+  loop. The fix — send the fixed part once per session, then only new messages, opening a fresh
+  session on any mismatch — and a pass-through `config` for model selection are specified but
+  **not implemented in any port**: `openspec/changes/add-acp-session-delta`, ADR 0036.
 
 ## 0.21.0 — 2026-09-28
 
