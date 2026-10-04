@@ -9,18 +9,26 @@ wants (``client.py`` around ``InProcessTransport``/``create_in_process_client``)
 the tool-calling loop, skills, MCP tools, adapters and sub-agents are untouched. ACP
 is a model source, not a new tool source and not a new client.
 
-The hard part isn't the wire protocol (mechanical: ``initialize`` -> ``session/new``
--> ``session/prompt``, demultiplexed by JSON-RPC id because ``session/update``
-notifications interleave with responses). It's two behaviors the spike at
-``spikes/acp/`` proved matter:
+The agent is a real **tool-calling model** (``openspec/changes/add-acp-tool-calling``,
+SPEC §8 "ACP model source"): each prompt carries the OpenAI-shaped request — messages,
+including earlier tool calls and their results, plus the tool schemas — and the
+agent's JSON reply is parsed back into content or tool calls (``_parse_reply``), which
+the loop executes through the toolkit.
+
+The wire protocol is mechanical (``initialize`` -> ``session/new`` ->
+``session/prompt``, demultiplexed by JSON-RPC id because ``session/update``
+notifications interleave with responses). Two behaviors the spike at ``spikes/acp/``
+proved matter:
 
 * **Only ``agent_message_chunk`` forms the reply.** ``agent_thought_chunk`` and tool
   narration must be dropped, or they corrupt structured output the host expects to
   parse.
 * **A permission request is answered, never awaited.** ``session/request_permission``
   left unanswered hangs a turn forever, even in an agent's "bypass" mode — so this
-  client answers inline, from the same thread that demultiplexes the wire, with the
-  first option whose ``kind`` starts with ``allow``.
+  client answers inline, from the same thread that demultiplexes the wire: the first
+  option whose ``kind`` starts with ``reject`` by default (toolnexus executes the
+  tools, the agent must not), or the first ``allow``-kind option with
+  ``ACPOptions.allow_agent_tools``.
 
 toolnexus assembles a *complete* request every turn (the full message array), but an
 ACP session is *stateful* — it already holds the transcript. Sending the whole thing
@@ -110,6 +118,12 @@ class ACPOptions:
     agents (``devin acp`` confirmed live in the spike) reject ``session/new`` with
     ``-32602 Invalid params`` without an *absolute* ``cwd``, so this is resolved to an
     absolute path unconditionally, never left relative.
+
+    ``allow_agent_tools`` lets the agent run tools of its OWN: a
+    ``session/request_permission`` is then answered with the first ``allow``-kind
+    option. Default ``False`` — the first ``reject``-kind option — because toolnexus
+    is the tool executor (SPEC §8, add-acp-tool-calling): an agent that runs ``bash``
+    itself has escaped every hook and any builtin execution seam (ADR 0033).
     """
 
     command: str
@@ -119,58 +133,129 @@ class ACPOptions:
     protocol_version: int = 1
     permission_timeout: float = 5.0
     mode: Optional[str] = None
+    allow_agent_tools: bool = False
+
+
+# Byte-pinned by SPEC §8 "ACP model source" — identical in all seven ports.
+_PREAMBLE = (
+    "You are the language model behind a tool-calling client. The client executes tools; you never do.\n"
+    "Do not run commands, read or edit files, or use any tool of your own.\n"
+    'The REQUEST below is the complete conversation in OpenAI chat-completions format: "messages" holds every message so far, including earlier tool calls and their results; "tools" lists the only tools you may call.\n'
+    "Reply with exactly one JSON object and nothing else: no prose, no markdown fences.\n"
+    'To give the final answer: {"content": "<answer>"}\n'
+    'To call tools: {"tool_calls": [{"id": "<unique id>", "type": "function", "function": {"name": "<tool name>", "arguments": "<JSON-encoded arguments>"}}]}\n'
+    'Never both. Use tool results already in "messages" instead of calling the same tool again.\n'
+)
+
+
+def _compact_json(value: Any) -> str:
+    # Compact, and never escaping non-ASCII; Python's json never HTML-escapes.
+    return json.dumps(value, separators=(",", ":"), ensure_ascii=False)
 
 
 def _content_to_text(content: Any) -> str:
-    """Flatten a message's ``content`` — a plain string, or a §1B content-part list
-    — to text. Non-text parts (image/audio/file) are silently skipped: ACP's prompt
-    turn is text-only in this client, matching the ``session/prompt`` shape used
-    throughout the spike and the ADR."""
-    if content is None:
-        return ""
+    """Render a message's ``content`` for the supersedes line: a string as is; a
+    list of parts -> the ``text`` of its ``type: "text"`` parts joined by one space;
+    anything else -> ``""``."""
     if isinstance(content, str):
         return content
     if isinstance(content, list):
-        parts: list[str] = []
-        for item in content:
-            if isinstance(item, dict):
-                text = item.get("text")
-                if text is None and item.get("type") == "text":
-                    text = item.get("value")
-                if text is not None:
-                    parts.append(str(text))
-            elif isinstance(item, str):
-                parts.append(item)
-        return "".join(parts)
-    return str(content)
+        return " ".join(
+            p["text"] for p in content
+            if isinstance(p, dict) and p.get("type") == "text" and isinstance(p.get("text"), str)
+        )
+    return ""
 
 
 def _render_prompt(request: dict[str, Any]) -> str:
-    """Render the full accumulated transcript as one prompt string, per ADR 0031's
-    chosen default (full request every turn, not a delta), and append the
-    supersedes marker naming the latest user turn.
+    """``PREAMBLE + "\\nREQUEST:\\n" + JSON + "\\n\\n" + marker + " " + latest user text``.
 
-    This is deliberately the library's job, not the caller's — ADR 0031 rejected
-    leaving the marker to be bolted on by hand ("ship the supersedes marker as part
-    of the default `Generate`'s prompt assembly (not left to the caller)",
-    ``spikes/acp/SPIKE.md``).
+    The FULL request goes every turn (ADR 0031: an ACP session is stateful, and a
+    delta would make the client a shadow copy of conversation state), and the
+    supersedes marker keeps a stateful agent off an earlier near-duplicate in its own
+    history. This is deliberately the library's job, not the caller's.
     """
     messages = request.get("messages") or []
-    lines: list[str] = []
-    last_user_text = ""
-    for message in messages:
-        if not isinstance(message, dict):
-            continue
-        role = message.get("role", "")
-        text = _content_to_text(message.get("content"))
-        if text:
-            lines.append(f"{role}: {text}")
-            if role == "user":
-                last_user_text = text
-    if not last_user_text and lines:
-        last_user_text = lines[-1]
-    lines.append(f"{_SUPERSEDES_MARKER}: {last_user_text}")
-    return "\n".join(lines)
+    tools = request.get("tools") or []
+    # A dict literal keeps insertion order, so the JSON leads with "messages".
+    payload = _compact_json({"messages": messages, "tools": tools})
+
+    latest = None
+    for message in reversed(messages):
+        if isinstance(message, dict) and message.get("role") == "user":
+            latest = _content_to_text(message.get("content"))
+            break
+    if latest is None:
+        last = messages[-1] if messages else None
+        latest = _content_to_text(last.get("content")) if isinstance(last, dict) else ""
+    return f"{_PREAMBLE}\nREQUEST:\n{payload}\n\n{_SUPERSEDES_MARKER}: {latest}"
+
+
+def _parse_object(s: str) -> Optional[dict[str, Any]]:
+    try:
+        value = json.loads(s)
+    except ValueError:
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _parse_reply(text: str) -> dict[str, Any]:
+    """Turn the agent's reply text into one assistant message, by the algorithm SPEC
+    §8 pins: strip fences, parse (or the first-``{``..last-``}`` slice), unwrap
+    ``choices[0].message`` / ``message``, then ``tool_calls`` -> ``{"tool_calls": ...}``,
+    ``content`` -> ``{"content": ...}``, anything else -> the original text untouched
+    (it is not an envelope — most often structured output the host asked for).
+    """
+    s = text.strip()
+    if s.startswith("```"):
+        nl = s.find("\n")
+        s = s[nl + 1:].strip() if nl >= 0 else ""
+        if s.endswith("```"):
+            s = s[:-3]
+        s = s.strip()
+
+    obj = _parse_object(s)
+    if obj is None:
+        i, j = s.find("{"), s.rfind("}")
+        if i >= 0 and j > i:
+            obj = _parse_object(s[i:j + 1])
+    if obj is None:
+        return {"content": text}
+
+    choices = obj.get("choices")
+    if isinstance(choices, list) and choices:
+        first = choices[0]
+        if isinstance(first, dict) and isinstance(first.get("message"), dict):
+            obj = first["message"]
+    elif isinstance(obj.get("message"), dict):
+        obj = obj["message"]
+
+    raw_calls = obj.get("tool_calls")
+    if isinstance(raw_calls, list):
+        calls: list[dict[str, Any]] = []
+        for el in raw_calls:
+            if not isinstance(el, dict):
+                continue
+            fn = el["function"] if isinstance(el.get("function"), dict) else el
+            name = fn.get("name")
+            if not isinstance(name, str) or not name:
+                continue
+            args = fn.get("arguments")
+            # A string passes through as pre-encoded; anything else is structured and
+            # encoded by the in-process layer.
+            call: dict[str, Any] = {"name": name, "arguments": {} if args is None else args}
+            if isinstance(el.get("id"), str) and el["id"]:
+                call["id"] = el["id"]
+            calls.append(call)
+        if calls:
+            return {"tool_calls": calls}
+
+    if "content" in obj:
+        content = obj["content"]
+        if isinstance(content, str):
+            return {"content": content}
+        return {"content": "" if content is None else _compact_json(content)}
+    return {"content": text}
 
 
 class ACPClient:
@@ -309,12 +394,18 @@ class ACPClient:
                 self._accum.append(str(text))
 
     def _answer_permission(self, request: dict[str, Any]) -> None:
+        # The first reject-kind option by default (the client executes tools, the
+        # agent must not), the first allow-kind one with allow_agent_tools; no
+        # matching option -> cancelled.
+        want = "allow" if self._opts.allow_agent_tools else "reject"
         params = request.get("params") or {}
         options = params.get("options") or []
         chosen: Optional[str] = None
         for option in options:
-            kind = (option or {}).get("kind") or ""
-            if kind.startswith("allow"):
+            if not isinstance(option, dict):
+                continue
+            kind = option.get("kind") or ""
+            if isinstance(kind, str) and kind.startswith(want):
                 chosen = option.get("optionId")
                 break
         if chosen is not None:
@@ -345,9 +436,12 @@ class ACPClient:
 
     def generate(self, request: dict[str, Any]) -> dict[str, Any]:
         """``Callable[[dict], dict]`` — the exact shape ``create_in_process_client``
-        wants. Sends exactly one ``session/prompt`` on the warm session, accumulates
-        only ``agent_message_chunk`` text, and blocks (synchronously) until the
-        reader thread delivers the reply or ``permission_timeout`` elapses.
+        wants. Sends the assembled OpenAI-shaped request (messages + tools) as exactly
+        one ``session/prompt`` on the warm session, accumulates only
+        ``agent_message_chunk`` text, and blocks (synchronously) until the reader
+        thread delivers the reply or ``permission_timeout`` elapses. The reply is
+        parsed into one assistant message: ``{"tool_calls": [...]}`` or
+        ``{"content": ...}`` (SPEC §8 "ACP model source").
         """
         with self._turn_lock:
             prompt_text = _render_prompt(request)
@@ -386,8 +480,8 @@ class ACPClient:
                 raise ACPError(f"acp error {error.get('code')}: {error.get('message')}")
 
             with self._state_lock:
-                content = "".join(self._accum)
-            return {"content": content}
+                text = "".join(self._accum)
+            return _parse_reply(text)
 
     def is_alive(self) -> bool:
         """True while the child process is still running."""
