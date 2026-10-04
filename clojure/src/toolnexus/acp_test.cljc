@@ -29,7 +29,8 @@
             [koine.time :as ktime]
             [toolnexus.acp :as acp]
             [toolnexus.client :as client]
-            [toolnexus.core :as toolnexus]))
+            [toolnexus.core :as toolnexus]
+            [toolnexus.native :as native]))
 
 ;; ===========================================================================
 ;; the fake ACP agent — see toolnexus.test-main/-main for how it is reached
@@ -145,9 +146,44 @@
       (fake-reply! ctx id {:stopReason "end_turn"})
       (reset! (:busy ctx) false))))
 
+(defn split-prompt
+  "Pull the preamble and the REQUEST JSON back out of a rendered prompt —
+  [preamble request] (request keyword-keyed), or nil when it does not split.
+  Mirrors golang/acp_toolcall_test.go's acpSplitPrompt."
+  [prompt]
+  ;; A regex, not str/index-of + subs: on cljgo index-of is a BYTE offset and
+  ;; subs a rune offset, so they disagree on any non-ASCII prompt.
+  (when-let [[_ pre body] (re-find #"(?s)^(.*?)\nREQUEST:\n(.*)\n\nSUPERSEDES-ALL-PRIOR: " prompt)]
+    (let [req (try (json/read-str body) (catch Throwable _ nil))]
+      (when (map? req) [pre req]))))
+
+(defn- fake-handle-toolloop!
+  "A scripted tool-calling model (golang's acpHandleToolLoopForTest): with no
+  tool result in the REQUEST it asks for add(2,3) — wrapped in prose and
+  fences, with object arguments, to exercise the tolerant parser — and once a
+  role:\"tool\" message is present it answers from it."
+  [ctx id sid text]
+  (let [[_ req] (split-prompt text)
+        answer  (if-not req
+                  "unparseable prompt"
+                  (let [_      (fake-emit! ctx {:type "request" :data req})
+                        result (some (fn [m] (when (= "tool" (:role m)) (:content m)))
+                                     (reverse (:messages req)))]
+                    (if (str/blank? (str result))
+                      (str "Sure, calling the tool.\n```json\n"
+                           "{\"tool_calls\":[{\"id\":\"c1\",\"type\":\"function\",\"function\":{\"name\":\"add\",\"arguments\":{\"a\":2,\"b\":3}}}]}"
+                           "\n```")
+                      (json/write-str {:content (str "The answer is " result ".")}))))]
+    (fake-notify! ctx "session/update"
+                  {:sessionId sid
+                   :update {:sessionUpdate "agent_message_chunk"
+                            :content       {:type "text" :text answer}}})
+    (fake-reply! ctx id {:stopReason "end_turn"})))
+
 (defn- fake-handle-prompt! [scenario ctx id sid text]
   (case scenario
     "stale"      (fake-handle-stale! ctx id sid text)
+    "toolloop"   (fake-handle-toolloop! ctx id sid text)
     "permission" (fake-handle-permission! ctx id sid text)
     "noisy"      (fake-handle-noisy! ctx id sid text)
     "serialize"  (fake-handle-serialize! ctx id sid text)
@@ -310,10 +346,13 @@
 
 ;; 3. permission answered inline, never awaited by the caller -----------------
 
-(deftest a-permission-request-is-answered-with-the-first-allow-kind-option-inline
+(defn- permission-answer
+  "Drive the \"permission\" scenario once and return the answer the fake
+  agent observed, asserting it was answered inline, not awaited."
+  [opts]
   (let [dir      (fs/temp-dir! "acp")
         out-file (str dir "/events.ndjson")
-        c        (connect! "permission" :out-file out-file)
+        c        (connect! "permission" :out-file out-file :opts opts)
         start    (ktime/mono-ms)
         res      (acp/prompt c "delete the db")
         elapsed  (- (ktime/mono-ms) start)]
@@ -323,8 +362,18 @@
         "answered inline from the reader thread, not routed through the caller — should complete in well under a second")
     (let [ev (first (filter #(= "permission-answer" (:type %)) (read-events out-file)))]
       (is (some? ev) "the fake server never observed a permission answer")
-      (is (= "selected" (get-in ev [:data :outcome])))
-      (is (= "allow-once" (get-in ev [:data :optionId]))))))
+      (:data ev))))
+
+(deftest a-permission-request-is-answered-with-the-first-reject-kind-option-inline
+  ;; The client executes tools; the agent must not (SPEC §8, add-acp-tool-calling).
+  (let [ans (permission-answer {})]
+    (is (= "selected" (:outcome ans)))
+    (is (= "reject" (:optionId ans)))))
+
+(deftest allow-agent-tools-selects-the-first-allow-kind-option
+  (let [ans (permission-answer {:allow-agent-tools true})]
+    (is (= "selected" (:outcome ans)))
+    (is (= "allow-once" (:optionId ans)))))
 
 ;; 4. the supersedes marker prevents a stale answer ----------------------------
 
@@ -396,3 +445,94 @@
       (is (nil? (:error r2)))
       (is (str/includes? (:ok r2) "second")))
     (acp/close c)))
+
+
+;; 7. ACP as a real tool-calling model (SPEC §8 "ACP model source",
+;;    openspec/changes/add-acp-tool-calling) -----------------------------------
+
+(defn- add-tool []
+  (native/native-tool
+   {:name "add" :description "Add two numbers."
+    :input-schema {:type "object"
+                   :properties {:a {:type "number"} :b {:type "number"}}
+                   :required ["a" "b"]}
+    :run (fn [args] (str (long (+ (:a args) (:b args)))))}))
+
+(deftest the-tool-calling-loop-runs-end-to-end-over-acp
+  (let [dir      (fs/temp-dir! "acp")
+        out-file (str dir "/events.ndjson")
+        c        (connect! "toolloop" :out-file out-file)
+        tk       (toolnexus/build {:builtins false :tools [(add-tool)]})
+        llm      (client/create-in-process-client {:model "acp" :generate (acp/generate c)})
+        r        (client/run llm "What is 2 + 3?" {:toolkit tk})]
+    (acp/close c)
+    (is (= "The answer is 5." (:text r)))
+    (is (= 1 (count (:tool-calls r))))
+    (is (= "add" (:name (first (:tool-calls r)))))
+    (is (= "5" (:output (first (:tool-calls r)))))
+    (let [requests (map :data (filter #(= "request" (:type %)) (read-events out-file)))]
+      (is (= 2 (count requests)) "two prompts: ask, then answer")
+      (is (some (fn [t] (and (= "add" (get-in t [:function :name]))
+                             (some? (get-in t [:function :parameters]))))
+                (:tools (first requests)))
+          "turn 1 tools carry add's OpenAI schema")
+      (let [msgs (:messages (second requests))]
+        (is (some #(and (= "assistant" (:role %)) (some? (:tool_calls %))) msgs)
+            "turn 2 carries the assistant tool_calls message")
+        (is (some #(and (= "tool" (:role %)) (= "c1" (:tool_call_id %)) (= "5" (:content %))) msgs)
+            "turn 2 carries the tool result")))))
+
+(deftest the-prompt-is-preamble-request-json-and-the-supersedes-line
+  (let [p (acp/render-prompt
+           {:messages [{:role "system" :content "be terse"}
+                       {:role "user" :content [{:type "text" :text "a <b> & c"}
+                                               {:type "image_url"}
+                                               {:type "text" :text "d"}]}]})
+        [pre body] (split-prompt p)]
+    (is (some? body) "prompt does not split")
+    (is (= acp/prompt-preamble pre))
+    (is (str/ends-with? p "\n\nSUPERSEDES-ALL-PRIOR: a <b> & c d"))
+    (is (not (str/includes? p "\\u003c")) "REQUEST JSON is not HTML-escaped")
+    (is (= [] (:tools body)) "absent tools render as []")
+    (is (str/includes? p "\nREQUEST:\n{\"messages\":") "REQUEST JSON leads with messages")))
+
+(deftest the-supersedes-line-falls-back-to-the-last-message-then-empty
+  (is (str/ends-with? (acp/render-prompt {:messages [{:role "system" :content "sys"}]})
+                      "\n\nSUPERSEDES-ALL-PRIOR: sys"))
+  (is (str/ends-with? (acp/render-prompt {}) "\n\nSUPERSEDES-ALL-PRIOR: ")))
+
+(deftest the-preamble-matches-spec-md
+  ;; Byte-pinned by SPEC.md §8; read it back so the constant cannot drift from
+  ;; the contract every port is held to. Skipped when SPEC.md is unreachable
+  ;; (the suite runs from clojure/, so it is ../SPEC.md).
+  ;; A regex rather than index-of + subs, which disagree on cljgo for a
+  ;; non-ASCII file (SPEC.md is full of them).
+  (let [spec (try (fs/read-file "../SPEC.md") (catch Throwable _ nil))]
+    (when spec
+      (let [[_ block] (re-find #"(?s)`PREAMBLE` is these seven lines.*?```\n(.*?)```" spec)]
+        (is (some? block) "SPEC.md has no ACP preamble block")
+        (is (= block acp/prompt-preamble))))))
+
+(deftest parse-reply-follows-the-six-steps
+  (let [add     [{:id "c1" :name "add" :arguments {:a 2 :b 3}}]
+        add-str [{:id "c1" :name "add" :arguments "{\"a\":2,\"b\":3}"}]
+        cases   [["plain prose passes through" "just text {not json" nil "just text {not json"]
+                 ["content envelope" "{\"content\":\"The answer is 5.\"}" nil "The answer is 5."]
+                 ["null content" "{\"content\":null}" nil ""]
+                 ["non-string content encodes" "{\"content\":{\"x\":1}}" nil "{\"x\":1}"]
+                 ["string arguments pre-encoded" "{\"tool_calls\":[{\"id\":\"c1\",\"type\":\"function\",\"function\":{\"name\":\"add\",\"arguments\":\"{\\\"a\\\":2,\\\"b\\\":3}\"}}]}" add-str nil]
+                 ["object arguments" "{\"tool_calls\":[{\"id\":\"c1\",\"function\":{\"name\":\"add\",\"arguments\":{\"a\":2,\"b\":3}}}]}" add nil]
+                 ["fenced" "```json\n{\"tool_calls\":[{\"id\":\"c1\",\"function\":{\"name\":\"add\",\"arguments\":{\"a\":2,\"b\":3}}}]}\n```" add nil]
+                 ["prose around" "Calling now: {\"tool_calls\":[{\"id\":\"c1\",\"function\":{\"name\":\"add\",\"arguments\":{\"a\":2,\"b\":3}}}]} done" add nil]
+                 ["choices envelope" "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"tool_calls\":[{\"id\":\"c1\",\"function\":{\"name\":\"add\",\"arguments\":{\"a\":2,\"b\":3}}}]}}]}" add nil]
+                 ["message envelope" "{\"message\":{\"content\":\"hi\"}}" nil "hi"]
+                 ["flat call, no id, no arguments" "{\"tool_calls\":[{\"name\":\"ping\"}]}" [{:name "ping" :arguments {}}] nil]
+                 ["nameless call skipped, falls to content" "{\"tool_calls\":[{\"function\":{\"arguments\":\"{}\"}}],\"content\":\"fallback\"}" nil "fallback"]
+                 ["structured output passes through" " {\"answer\":true} " nil " {\"answer\":true} "]
+                 ;; Beyond golang's 13: non-ASCII before the braces — on cljgo
+                 ;; str/index-of is a byte offset and subs a rune offset.
+                 ["prose around, non-ASCII before the braces" "Calling — ünïcode: {\"content\":\"ok\"} ✓" nil "ok"]]]
+    (doseq [[label in calls text] cases]
+      (testing label
+        (is (= (if calls {:tool-calls calls} {:content text})
+               (acp/parse-reply in)))))))

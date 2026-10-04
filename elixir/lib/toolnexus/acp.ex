@@ -1,7 +1,8 @@
 defmodule Toolnexus.Acp do
   @moduledoc """
-  ACP (Agent Client Protocol) model source — issue #96, ADR 0031, proposal
-  `openspec/changes/add-acp-model-source`.
+  ACP (Agent Client Protocol) model source — issue #96, ADR 0031, proposals
+  `openspec/changes/add-acp-model-source` and
+  `openspec/changes/add-acp-tool-calling` (SPEC §8 "ACP model source").
 
   Connects to a running agent (`devin acp`, Gemini CLI, Zed's agents, ...) over
   a child process's stdin/stdout, speaking JSON-RPC 2.0, one object per line —
@@ -21,22 +22,28 @@ defmodule Toolnexus.Acp do
     * Responses to OUR calls and `session/update` notifications interleave on
       the same stream, so replies are demultiplexed by JSON-RPC id.
     * `session/request_permission` is answered INLINE, from the read loop,
-      with the first `allow`-kind option, the instant it arrives — never
-      exposed to the caller and never awaited. An unanswered permission
-      request hangs the turn forever (even in bypass mode); answering
-      immediately is what this module is FOR.
+      the instant it arrives — never exposed to the caller and never
+      awaited. By default it selects the first `reject`-kind option (the
+      client executes tools, the agent must not); `allow_agent_tools: true`
+      selects the first `allow`-kind option instead; no matching option ⇒
+      `cancelled`. An unanswered permission request hangs the turn forever
+      (even in bypass mode); answering immediately is what this module is FOR.
     * Turns are serialised: one ACP session is one conversation, so a second
       concurrent `generate/1` call is queued rather than interleaved into the
       same transcript.
     * The child process's lifetime is independent of any one turn — a failed
       or errored turn does not kill the session — and `close/1` is
       idempotent.
-    * Every turn sends the FULL assembled request (every message, every
-      turn — matching every other toolnexus model source, which is
-      stateless by default) PLUS an explicit supersedes marker built by this
-      library (not left to the caller), naming the current turn's content —
-      the mitigation `spikes/acp/SPIKE.md` gate 1 proved against a stateful
-      session that otherwise answers a near-duplicate, stale prompt.
+    * The agent is a real tool-calling MODEL, not a text oracle: every turn
+      sends a pinned preamble plus the FULL OpenAI-shaped request as JSON —
+      every message (including earlier tool calls and their results) and
+      every tool schema — PLUS an explicit supersedes marker built by this
+      library (not left to the caller), naming the latest user text — the
+      mitigation `spikes/acp/SPIKE.md` gate 1 proved against a stateful
+      session that otherwise answers a near-duplicate, stale prompt. The
+      agent's JSON reply is parsed back into content or tool calls, which
+      the ordinary loop executes through the toolkit (`render_prompt/1`,
+      `parse_reply/1`).
 
   `generate/1` returns the exact `(map() -> map())` shape
   `Toolnexus.Client.create_in_process/1` and `Toolnexus.Agents.Runtime`'s
@@ -72,6 +79,10 @@ defmodule Toolnexus.Acp do
     * `:timeout` — per-RPC-call timeout in ms (default 30000), covering
       `initialize` and `session/new` during connect, and each
       `session/prompt` reply.
+    * `:allow_agent_tools` — let the agent run tools of its OWN: a
+      `session/request_permission` then selects the first `allow`-kind
+      option instead of the default first `reject`-kind option (default
+      `false` — the client executes tools, the agent must not).
 
   Returns `{:ok, pid}` or `{:error, reason}`.
   """
@@ -88,6 +99,10 @@ defmodule Toolnexus.Acp do
       {:ok, acp} = Toolnexus.Acp.connect(["devin", "acp"])
       client = Toolnexus.Client.create_in_process(model: "devin", generate: Toolnexus.Acp.generate(acp))
 
+  Each call sends the assembled request (`render_prompt/1`) as one
+  `session/prompt` and parses the accumulated reply (`parse_reply/1`) into
+  `%{content: ...}` or `%{tool_calls: [...]}`.
+
   Raises on an ACP-level failure (a closed session, a timed-out call, an RPC
   error) — the same failure shape any other `generate` function raising
   surfaces to the caller.
@@ -95,11 +110,9 @@ defmodule Toolnexus.Acp do
   @spec generate(pid()) :: (map() -> map())
   def generate(pid) do
     fn req ->
-      text = assemble_prompt_text(Map.get(req, :messages) || Map.get(req, "messages") || [])
-
-      case prompt(pid, text) do
+      case prompt(pid, render_prompt(req)) do
         {:ok, answer} ->
-          %{content: answer}
+          parse_reply(answer)
 
         {:error, reason} ->
           raise "toolnexus: ACP generate failed: #{inspect(reason)}"
@@ -137,41 +150,196 @@ defmodule Toolnexus.Acp do
   defp exit_brief(reason), do: reason
 
   # --------------------------------------------------------------------------
-  # prompt assembly — full request every turn + the library-built supersedes
-  # marker (ADR 0031's proposed default; spikes/acp/SPIKE.md gate 1).
+  # prompt assembly — the pinned preamble + the FULL OpenAI-shaped request
+  # every turn + the library-built supersedes marker (SPEC §8 "ACP model
+  # source"; ADR 0031; spikes/acp/SPIKE.md gate 1).
   # --------------------------------------------------------------------------
 
+  # Byte-pinned by SPEC §8 — identical in all seven ports.
+  @preamble ~S"""
+  You are the language model behind a tool-calling client. The client executes tools; you never do.
+  Do not run commands, read or edit files, or use any tool of your own.
+  The REQUEST below is the complete conversation in OpenAI chat-completions format: "messages" holds every message so far, including earlier tool calls and their results; "tools" lists the only tools you may call.
+  Reply with exactly one JSON object and nothing else: no prose, no markdown fences.
+  To give the final answer: {"content": "<answer>"}
+  To call tools: {"tool_calls": [{"id": "<unique id>", "type": "function", "function": {"name": "<tool name>", "arguments": "<JSON-encoded arguments>"}}]}
+  Never both. Use tool results already in "messages" instead of calling the same tool again.
+  """
+
   @doc false
-  def assemble_prompt_text(messages) do
-    transcript =
-      messages
-      |> Enum.map(fn m -> "#{msg_role(m)}: #{msg_text(m)}" end)
-      |> Enum.join("\n")
+  def preamble, do: @preamble
 
-    latest = messages |> List.last() |> then(fn m -> (m && msg_text(m)) || "" end)
-    marker = @supersedes_marker <> " " <> latest
+  @doc """
+  Render one turn's prompt text: `PREAMBLE <> "\\nREQUEST:\\n" <> JSON <>
+  "\\n\\nSUPERSEDES-ALL-PRIOR: " <> latest_user`.
 
-    case transcript do
-      "" -> marker
-      t -> t <> "\n" <> marker
+  `JSON` is a compact `{"messages": [...], "tools": [...]}` (messages first,
+  `[]` when absent, never HTML-escaped). The FULL request goes every turn —
+  an ACP session is stateful, and a delta would make the client a shadow copy
+  of conversation state — and the supersedes marker keeps a stateful agent
+  off an earlier near-duplicate in its own history (ADR 0031).
+  """
+  @spec render_prompt(map()) :: String.t()
+  def render_prompt(req) do
+    messages = field(req, :messages) || []
+    tools = field(req, :tools) || []
+
+    # Built by hand, not from a map, so the key order is messages-then-tools.
+    # Jason's default `escape: :json` never HTML-escapes `<`, `>`, `&`.
+    payload =
+      IO.iodata_to_binary([
+        ~s({"messages":),
+        Jason.encode_to_iodata!(messages),
+        ~s(,"tools":),
+        Jason.encode_to_iodata!(tools),
+        "}"
+      ])
+
+    @preamble <>
+      "\nREQUEST:\n" <> payload <> "\n\n" <> @supersedes_marker <> " " <> latest_user(messages)
+  end
+
+  # The last `user` message's content; with none, the last message's; with no
+  # messages, "".
+  defp latest_user(messages) do
+    case Enum.find(Enum.reverse(messages), &(field(&1, :role) in ["user", :user])) ||
+           List.last(messages) do
+      nil -> ""
+      m -> content_text(field(m, :content))
     end
   end
 
-  defp msg_role(m), do: to_string(Map.get(m, "role") || Map.get(m, :role) || "user")
+  # A string as is; an array of parts ⇒ the text of its type:"text" parts
+  # joined by one space; anything else ⇒ "".
+  defp content_text(content) when is_binary(content), do: content
 
-  defp msg_text(m) do
-    content = Map.get(m, "content") || Map.get(m, :content)
+  defp content_text(content) when is_list(content) do
+    content
+    |> Enum.filter(fn p -> field(p, :type) in ["text", :text] and is_binary(field(p, :text)) end)
+    |> Enum.map_join(" ", &field(&1, :text))
+  end
+
+  defp content_text(_), do: ""
+
+  # Messages arrive string-keyed off the wire, atom-keyed from a direct
+  # `generate` caller; accept either.
+  defp field(m, key) when is_map(m) do
+    case Map.fetch(m, Atom.to_string(key)) do
+      {:ok, v} -> v
+      :error -> Map.get(m, key)
+    end
+  end
+
+  defp field(_, _), do: nil
+
+  # --------------------------------------------------------------------------
+  # reply parsing — the agent's text becomes ONE assistant message.
+  # --------------------------------------------------------------------------
+
+  @doc """
+  Parse the agent's accumulated reply text into one assistant message, by the
+  algorithm SPEC §8 pins: strip fences, parse (or the first-`{`..last-`}`
+  slice), unwrap `choices[0].message` / `message`, then `tool_calls` ⇒
+  `%{tool_calls: [...]}`, `content` ⇒ `%{content: ...}`, anything else ⇒
+  `%{content: text}` with the ORIGINAL text untouched (e.g. structured output
+  the host asked for).
+
+  A tool call is `%{name: ..., arguments: ...}` plus `:id` only when the
+  agent sent a non-empty string id; `arguments` is a string (pre-encoded) as
+  sent, `%{}` when absent/null, else the structured value.
+  """
+  @spec parse_reply(String.t()) :: map()
+  def parse_reply(text) do
+    s = text |> String.trim() |> strip_fences()
+
+    case parse_object(s) || parse_braced(s) do
+      nil -> %{content: text}
+      obj -> obj |> unwrap_envelope() |> from_envelope(text)
+    end
+  end
+
+  defp strip_fences("```" <> _ = s) do
+    rest =
+      case :binary.split(s, "\n") do
+        [_first_line, rest] -> rest
+        [_] -> ""
+      end
+
+    rest |> String.trim() |> String.replace_suffix("```", "") |> String.trim()
+  end
+
+  defp strip_fences(s), do: s
+
+  defp parse_object(s) do
+    case Jason.decode(s) do
+      {:ok, obj} when is_map(obj) -> obj
+      _ -> nil
+    end
+  end
+
+  defp parse_braced(s) do
+    case {:binary.match(s, "{"), :binary.matches(s, "}")} do
+      {{i, _}, [_ | _] = ends} ->
+        {j, _} = List.last(ends)
+        if j > i, do: parse_object(binary_part(s, i, j - i + 1))
+
+      _ ->
+        nil
+    end
+  end
+
+  defp unwrap_envelope(%{"choices" => [%{"message" => %{} = msg} | _]}), do: msg
+  defp unwrap_envelope(%{"choices" => [_ | _]} = obj), do: obj
+  defp unwrap_envelope(%{"message" => %{} = msg}), do: msg
+  defp unwrap_envelope(obj), do: obj
+
+  defp from_envelope(obj, text) do
+    calls =
+      case obj do
+        %{"tool_calls" => raw} when is_list(raw) -> Enum.flat_map(raw, &tool_call/1)
+        _ -> []
+      end
 
     cond do
-      is_binary(content) -> content
-      is_list(content) -> content |> Enum.map(&extract_part_text/1) |> Enum.join("")
-      true -> ""
+      calls != [] -> %{tool_calls: calls}
+      Map.has_key?(obj, "content") -> %{content: envelope_content(obj["content"])}
+      true -> %{content: text}
     end
   end
 
-  defp extract_part_text(%{"text" => t}), do: to_string(t)
-  defp extract_part_text(%{text: t}), do: to_string(t)
-  defp extract_part_text(_), do: ""
+  defp tool_call(%{} = el) do
+    func =
+      case el do
+        %{"function" => %{} = f} -> f
+        _ -> el
+      end
+
+    case func do
+      %{"name" => name} when is_binary(name) and name != "" ->
+        args =
+          case Map.get(func, "arguments") do
+            nil -> %{}
+            a -> a
+          end
+
+        case el do
+          %{"id" => id} when is_binary(id) and id != "" ->
+            [%{id: id, name: name, arguments: args}]
+
+          _ ->
+            [%{name: name, arguments: args}]
+        end
+
+      _ ->
+        []
+    end
+  end
+
+  defp tool_call(_), do: []
+
+  defp envelope_content(c) when is_binary(c), do: c
+  defp envelope_content(nil), do: ""
+  defp envelope_content(c), do: Jason.encode!(c)
 
   # --------------------------------------------------------------------------
   # GenServer
@@ -202,6 +370,7 @@ defmodule Toolnexus.Acp do
                chunks: [],
                queue: :queue.new(),
                timeout: timeout,
+               allow_agent_tools: Keyword.get(opts, :allow_agent_tools, false) == true,
                closed: false
              }}
 
@@ -347,7 +516,7 @@ defmodule Toolnexus.Acp do
   end
 
   defp route(%{"method" => "session/request_permission", "id" => id, "params" => params}, state) do
-    answer_permission(state.stdio, id, params)
+    answer_permission(state, id, params)
     state
   end
 
@@ -360,13 +529,17 @@ defmodule Toolnexus.Acp do
 
   defp accumulate(state, _params), do: state
 
-  defp answer_permission(stdio, id, params) do
+  # The first `reject`-kind option by default (the client executes tools, the
+  # agent must not), or the first `allow`-kind option with
+  # `allow_agent_tools: true`; no matching option ⇒ cancelled.
+  defp answer_permission(state, id, params) do
     options = params["options"] || []
+    want = if state.allow_agent_tools, do: "allow", else: "reject"
 
     chosen =
       Enum.find_value(options, fn o ->
         kind = to_string(o["kind"] || "")
-        if String.starts_with?(kind, "allow"), do: o["optionId"]
+        if String.starts_with?(kind, want), do: o["optionId"]
       end)
 
     result =
@@ -376,7 +549,7 @@ defmodule Toolnexus.Acp do
         %{"outcome" => %{"outcome" => "cancelled"}}
       end
 
-    Stdio.send_msg(stdio, %{"jsonrpc" => "2.0", "id" => id, "result" => result})
+    Stdio.send_msg(state.stdio, %{"jsonrpc" => "2.0", "id" => id, "result" => result})
   end
 
   defp join_chunks(state), do: state.chunks |> Enum.reverse() |> Enum.join("")

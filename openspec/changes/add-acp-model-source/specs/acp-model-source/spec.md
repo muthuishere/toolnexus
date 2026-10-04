@@ -22,8 +22,9 @@ tool-calling loop, skills, MCP tools and sub-agents operate unchanged.
 #### Scenario: A permission request is answered rather than awaited
 
 - **WHEN** the agent sends a permission request during a turn
-- **THEN** the client answers with the first permitting option and the turn completes,
-  rather than blocking until a timeout
+- **THEN** the client answers immediately and the turn completes, rather than blocking until a
+  timeout (which option it selects — reject by default, allow on opt-in — is pinned by
+  `add-acp-tool-calling`)
 
 #### Scenario: A superseding prompt is not answered from stale history
 

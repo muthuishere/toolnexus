@@ -7,7 +7,9 @@ export * from "./builtin.js"
 export * from "./native.js"
 export * from "./http.js"
 export * from "./a2a.js"
-export * from "./acp.js"
+// ACP: only the public surface — renderACPPrompt/parseACPReply/ACP_PREAMBLE stay internal
+// (exported from acp.ts for its tests), matching the other ports.
+export { loadACP, type ACPOptions, type ACPClient } from "./acp.js"
 export * from "./serve.js"
 export * from "./mcpserve.js"
 export * from "./adapters.js"

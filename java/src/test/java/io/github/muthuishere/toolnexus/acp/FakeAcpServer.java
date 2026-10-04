@@ -34,9 +34,15 @@ import java.util.concurrent.atomic.AtomicLong;
  *   <li>{@code hang} — sends {@code session/request_permission} and then never replies to
  *       {@code session/prompt}; proves an unanswered permission request hangs a turn.</li>
  *   <li>{@code permission} — sends {@code session/request_permission} and blocks until the
- *       client answers before finishing the turn.</li>
+ *       client answers before finishing the turn, replying {@code PERMITTED:<optionId>} (or
+ *       {@code PERMITTED:cancelled}) so a test can see which option the client chose.</li>
  *   <li>{@code noisy} — emits {@code agent_thought_chunk} and tool-call narration interleaved
- *       with the real {@code agent_message_chunk}s.</li>
+ *       with the real {@code agent_message_chunk}s, which together spell {@code {"answer":true}}.</li>
+ *   <li>{@code toolloop} — a scripted tool-calling model: with no {@code role:"tool"} message in
+ *       the REQUEST it asks for {@code add(2,3)} (wrapped in prose and a {@code ```json} fence,
+ *       object arguments, to exercise the tolerant parser); once a tool result is present it
+ *       answers {@code {"content":"The answer is <result>."}}. Each parsed REQUEST is appended as
+ *       one JSON line to the {@code --events=<path>} file.</li>
  * </ul>
  */
 public final class FakeAcpServer {
@@ -55,6 +61,7 @@ public final class FakeAcpServer {
     private static final AtomicLong nextReqId = new AtomicLong();
     private static final BlockingQueue<Map<String, Object>> permReplies = new LinkedBlockingQueue<>();
     private static volatile int sessionNewCount = 0;
+    private static volatile String eventsPath;
 
     private FakeAcpServer() {}
 
@@ -62,6 +69,7 @@ public final class FakeAcpServer {
         String scenario = "warm";
         for (String a : args) {
             if (a.startsWith("--scenario=")) scenario = a.substring("--scenario=".length());
+            if (a.startsWith("--events=")) eventsPath = a.substring("--events=".length());
         }
 
         List<String> history = Collections.synchronizedList(new ArrayList<>());
@@ -131,8 +139,9 @@ public final class FakeAcpServer {
             case "stale" -> handleStale(id, userText, history);
             case "hang" -> sendRequest("session/request_permission", permissionParams(sid));
             // ^ deliberately never replies to session/prompt after this.
-            case "permission" -> handlePermission(id, sid, userText);
-            case "noisy" -> handleNoisy(id, sid, userText);
+            case "permission" -> handlePermission(id, sid);
+            case "noisy" -> handleNoisy(id, sid);
+            case "toolloop" -> handleToolLoop(id, sid, userText);
             default -> {
                 sendUpdate(sid, "agent_message_chunk", "echo:" + userText + " sessionNewCount=" + sessionNewCount);
                 reply(id, Map.of("stopReason", "end_turn"));
@@ -164,8 +173,9 @@ public final class FakeAcpServer {
         reply(id, Map.of("stopReason", "end_turn"));
     }
 
-    private static void handlePermission(Object id, Object sid, String userText) {
+    private static void handlePermission(Object id, Object sid) {
         String reqId = sendRequest("session/request_permission", permissionParams(sid));
+        Map<String, Object> answer;
         while (true) {
             Map<String, Object> m;
             try {
@@ -175,20 +185,77 @@ public final class FakeAcpServer {
                 return;
             }
             Object mid = m.get("id");
-            if (mid != null && String.valueOf(mid).equals(reqId)) break;
+            if (mid != null && String.valueOf(mid).equals(reqId)) {
+                answer = m;
+                break;
+            }
         }
-        sendUpdate(sid, "agent_message_chunk", "PERMITTED:" + userText);
+        String chosen = "cancelled";
+        if (answer.get("result") instanceof Map<?, ?> r && r.get("outcome") instanceof Map<?, ?> o
+                && "selected".equals(o.get("outcome"))) {
+            chosen = String.valueOf(o.get("optionId"));
+        }
+        sendUpdate(sid, "agent_message_chunk", "PERMITTED:" + chosen);
         reply(id, Map.of("stopReason", "end_turn"));
     }
 
-    private static void handleNoisy(Object id, Object sid, String userText) {
+    private static void handleNoisy(Object id, Object sid) {
         sendUpdate(sid, "agent_thought_chunk", "Let me think about this... ");
         sendToolCall(sid, "t1", "reading files", "in_progress");
         sendUpdate(sid, "agent_message_chunk", "{\"answer\":");
         sendToolCallUpdate(sid, "t1", "completed");
         sendUpdate(sid, "agent_thought_chunk", "now double-checking the number... ");
-        sendUpdate(sid, "agent_message_chunk", "\"" + userText + "\"}");
+        sendUpdate(sid, "agent_message_chunk", "true}");
         reply(id, Map.of("stopReason", "end_turn"));
+    }
+
+    private static void handleToolLoop(Object id, Object sid, String prompt) {
+        String answer = "unparseable prompt";
+        Map<String, Object> request = splitRequest(prompt);
+        if (request != null) {
+            recordEvent(request);
+            String toolResult = null;
+            if (request.get("messages") instanceof List<?> msgs) {
+                for (Object m : msgs) {
+                    if (m instanceof Map<?, ?> mm && "tool".equals(mm.get("role"))) {
+                        toolResult = String.valueOf(mm.get("content"));
+                    }
+                }
+            }
+            if (toolResult == null) {
+                answer = "Sure, calling the tool.\n```json\n"
+                        + "{\"tool_calls\":[{\"id\":\"c1\",\"type\":\"function\",\"function\":"
+                        + "{\"name\":\"add\",\"arguments\":{\"a\":2,\"b\":3}}}]}"
+                        + "\n```";
+            } else {
+                answer = Json.stringify(Map.of("content", "The answer is " + toolResult + "."));
+            }
+        }
+        sendUpdate(sid, "agent_message_chunk", answer);
+        reply(id, Map.of("stopReason", "end_turn"));
+    }
+
+    /** Pulls the REQUEST JSON back out of an assembled prompt; null when it does not split. */
+    static Map<String, Object> splitRequest(String prompt) {
+        int i = prompt.indexOf("\nREQUEST:\n");
+        int j = prompt.lastIndexOf("\n\n" + AcpClient.SUPERSEDES_MARKER + " ");
+        if (i < 0 || j < i) return null;
+        try {
+            return Json.toMap(prompt.substring(i + "\nREQUEST:\n".length(), j));
+        } catch (RuntimeException e) {
+            return null;
+        }
+    }
+
+    private static synchronized void recordEvent(Object event) {
+        if (eventsPath == null) return;
+        try {
+            java.nio.file.Files.writeString(java.nio.file.Path.of(eventsPath), Json.stringify(event) + "\n",
+                    StandardCharsets.UTF_8, java.nio.file.StandardOpenOption.CREATE,
+                    java.nio.file.StandardOpenOption.APPEND);
+        } catch (IOException e) {
+            throw new java.io.UncheckedIOException(e);
+        }
     }
 
     // ---- wire helpers -----------------------------------------------------------------

@@ -25,10 +25,13 @@
 ;;     reader thread files a reply in `:inbox`, keyed by id — same shape as
 ;;     `toolnexus.mcp`'s stdio reader);
 ;;   - `session/request_permission` is answered INLINE, from the reader
-;;     thread, with the first `allow`-kind option, the instant it arrives —
-;;     never exposed to the caller, never awaited. An unanswered permission
-;;     request hangs the turn forever, even in bypass mode; answering
-;;     immediately is what this module is FOR;
+;;     thread, the instant it arrives — never exposed to the caller, never
+;;     awaited. By default with the first `reject`-kind option (toolnexus
+;;     executes the tools, the agent must not — openspec/changes/
+;;     add-acp-tool-calling), or the first `allow`-kind option with
+;;     `:allow-agent-tools`. An unanswered permission request hangs the turn
+;;     forever, even in bypass mode; answering immediately is what this
+;;     module is FOR;
 ;;   - turns are serialised with a spin-lock (`:prompt-lock`, the same
 ;;     compare-and-set! pattern `toolnexus.mcp` uses to serialise stdin
 ;;     writes): one ACP session is one conversation, so a second concurrent
@@ -44,7 +47,14 @@
 ;;     the mitigation `spikes/acp/SPIKE.md` gate 1 proved against a stateful
 ;;     session that otherwise answers a near-duplicate, stale prompt.
 ;;
-;; `generate` returns the exact `(fn [req] -> {:content ...})` shape
+;; The agent is a real TOOL-CALLING model (openspec/changes/
+;; add-acp-tool-calling, SPEC §8 "ACP model source"): each prompt carries the
+;; OpenAI-shaped request — messages, including earlier tool calls and their
+;; results, plus the tool schemas — under a byte-pinned preamble, and the
+;; agent's JSON reply is parsed back into content or tool calls, which the
+;; loop executes through the toolkit. See `render-prompt` / `parse-reply`.
+;;
+;; `generate` returns the exact `(fn [req] -> {:content ...} | {:tool-calls ...})` shape
 ;; `toolnexus.client/create-in-process-client` and
 ;; `toolnexus.agents.runtime/create-runtime`'s `:in-process` option already
 ;; accept (see `toolnexus.agents.inprocess-test`), so the tool-calling loop,
@@ -103,44 +113,131 @@
   (str "c-" (swap! counter inc)))
 
 ;; ---------------------------------------------------------------------------
-;; prompt assembly — full request every turn + the library-built supersedes
-;; marker (ADR 0031's default; spikes/acp/SPIKE.md gate 1).
+;; prompt assembly — PREAMBLE + the full OpenAI-shaped request every turn +
+;; the library-built supersedes marker (SPEC §8 "ACP model source"; ADR 0031;
+;; spikes/acp/SPIKE.md gate 1).
 ;; ---------------------------------------------------------------------------
 
-(defn- msg-role [m]
-  (str (or (:role m) (get m "role") "user")))
+(def prompt-preamble
+  "Byte-pinned by SPEC §8 — identical in all seven ports (golang/acp.go's
+  acpPreamble). Seven lines, each terminated by \\n."
+  (str "You are the language model behind a tool-calling client. The client executes tools; you never do.\n"
+       "Do not run commands, read or edit files, or use any tool of your own.\n"
+       "The REQUEST below is the complete conversation in OpenAI chat-completions format: \"messages\" holds every message so far, including earlier tool calls and their results; \"tools\" lists the only tools you may call.\n"
+       "Reply with exactly one JSON object and nothing else: no prose, no markdown fences.\n"
+       "To give the final answer: {\"content\": \"<answer>\"}\n"
+       "To call tools: {\"tool_calls\": [{\"id\": \"<unique id>\", \"type\": \"function\", \"function\": {\"name\": \"<tool name>\", \"arguments\": \"<JSON-encoded arguments>\"}}]}\n"
+       "Never both. Use tool results already in \"messages\" instead of calling the same tool again.\n"))
 
-(defn- part-text
-  "One element of a multimodal `:content` list rendered as text."
-  [p]
+(defn- field
+  "A message/part field under either key form — keyword (what the in-process
+  client hands `generate`, parsed with koine.json) or string."
+  [m k]
+  (when (map? m) (let [v (get m k)] (if (some? v) v (get m (name k))))))
+
+(defn- content-text
+  "A message's content for the supersedes line: a string as is; a list of
+  parts => the text of its type:\"text\" parts joined by one space; anything
+  else => \"\"."
+  [c]
   (cond
-    (string? p) p
-    (map? p)    (str (or (:text p) (get p "text") ""))
-    :else       ""))
+    (string? c)     c
+    (sequential? c) (str/join " " (keep (fn [p]
+                                          (when (= "text" (field p :type))
+                                            (let [t (field p :text)] (when (string? t) t))))
+                                        c))
+    :else           ""))
 
-(defn- msg-text
-  "A message's `:content` (string, a list of parts, or absent) as plain
-  text."
-  [m]
-  (let [c (or (:content m) (get m "content"))]
-    (cond
-      (string? c)     c
-      (sequential? c) (str/join "" (map part-text c))
-      (nil? c)        ""
-      :else           (json/write-str c))))
-
-(defn assemble-prompt-text
-  "Flatten `messages` into \"role: content\" lines — the FULL request, every
-  turn (an ACP session is stateful, so sending only the delta would make this
-  client a second, shadow copy of conversation state) — and append the
-  supersedes marker naming the latest message's text, so a stateful agent
-  answers the CURRENT request rather than an earlier near-duplicate already
-  sitting in its own session history (ADR 0031)."
+(defn- latest-user-text
+  "The last `user` message's content; with none, the last message's; with no
+  messages, \"\"."
   [messages]
-  (let [transcript (str/join "\n" (map (fn [m] (str (msg-role m) ": " (msg-text m))) messages))
-        latest     (if (seq messages) (msg-text (last messages)) "")
-        marker     (str supersedes-marker " " latest)]
-    (if (str/blank? transcript) marker (str transcript "\n" marker))))
+  (if-let [u (last (filter #(= "user" (field % :role)) messages))]
+    (content-text (field u :content))
+    (if (seq messages) (content-text (field (last messages) :content)) "")))
+
+(defn render-prompt
+  "PREAMBLE + \"\\nREQUEST:\\n\" + compact JSON {messages, tools} + \"\\n\\n\" +
+  marker + \" \" + the latest user text. The FULL request goes every turn (an
+  ACP session is stateful; a delta would make this client a second, shadow
+  copy of conversation state), and the supersedes marker keeps a stateful
+  agent off an earlier near-duplicate in its own history (ADR 0031).
+  koine.json sorts keys (so `messages` leads `tools`) and never HTML-escapes."
+  [{:keys [messages tools]}]
+  (let [messages (vec (or messages []))
+        payload  (json/write-str {:messages messages :tools (vec (or tools []))})]
+    (str prompt-preamble "\nREQUEST:\n" payload "\n\n" supersedes-marker " "
+         (latest-user-text messages))))
+
+;; ---------------------------------------------------------------------------
+;; reply parsing — SPEC §8's six steps, verbatim.
+;; ---------------------------------------------------------------------------
+
+(defn- parse-object
+  "`s` parsed as JSON when it is an object, else nil."
+  [s]
+  (let [v (try (json/read-str s) (catch Throwable _ nil))]
+    (when (map? v) v)))
+
+(defn- char-indexes
+  "Every index of `ch` in `s`, in `subs`/`count` units — scanned, NOT
+  `clojure.string/index-of` / `last-index-of`, which return a BYTE offset on
+  cljgo while `subs` slices in runes (see `toolnexus.tool/last-index-of-char`):
+  one non-ASCII character before the `{` and the slice lands in the wrong
+  place. A single linear pass on both hosts."
+  [s ch]
+  (keep-indexed (fn [i c] (when (= c ch) i)) s))
+
+(defn- strip-fence
+  "Trim; if it opens with ```, drop that first line, then a trailing ```, trim."
+  [text]
+  (let [s (str/trim text)]
+    (if (str/starts-with? s "```")
+      (let [lines (str/split s #"\n" 2)
+            body  (str/trim (if (= 2 (count lines)) (second lines) ""))
+            body  (if (str/ends-with? body "```") (subs body 0 (- (count body) 3)) body)]
+        (str/trim body))
+      s)))
+
+(defn- reply-tool-call
+  "One `tool_calls` element => {:id? :name :arguments}, or nil to skip it."
+  [el]
+  (when (map? el)
+    (let [fn-m (if (map? (:function el)) (:function el) el)
+          nm   (:name fn-m)
+          args (:arguments fn-m)
+          id   (:id el)]
+      (when (and (string? nm) (not= "" nm))
+        ;; A string passes through as pre-encoded; anything else is structured.
+        (cond-> {:name nm :arguments (if (nil? args) {} args)}
+          (and (string? id) (not= "" id)) (assoc :id id))))))
+
+(defn parse-reply
+  "The agent's reply text => ONE assistant message, by the algorithm SPEC §8
+  pins: strip fences, parse (or the first-{..last-} slice), unwrap
+  choices[0].message / message, then tool_calls => {:tool-calls [...]},
+  content => {:content ...}, anything else => {:content <the original text>}
+  untouched (e.g. structured output the host asked for)."
+  [text]
+  (let [s   (strip-fence text)
+        obj (or (parse-object s)
+                (let [i (first (char-indexes s \{)) j (last (char-indexes s \}))]
+                  (when (and i j (> j i)) (parse-object (subs s i (inc j))))))]
+    (if-not obj
+      {:content text}
+      (let [choices (:choices obj)
+            obj     (if (and (sequential? choices) (seq choices))
+                      (let [m (field (first choices) :message)] (if (map? m) m obj))
+                      (if (map? (:message obj)) (:message obj) obj))
+            calls   (when (sequential? (:tool_calls obj))
+                      (vec (keep reply-tool-call (:tool_calls obj))))]
+        (cond
+          (seq calls)               {:tool-calls calls}
+          (contains? obj :content)  (let [c (:content obj)]
+                                      {:content (cond (string? c) c
+                                                      (nil? c)    ""
+                                                      :else       (json/write-str c))})
+          :else                     {:content text})))))
 
 ;; ---------------------------------------------------------------------------
 ;; wire I/O
@@ -156,12 +253,15 @@
     (fn [] (proc/send-line! (:child client) (json/write-str msg)))))
 
 (defn- answer-permission!
-  "Answer a `session/request_permission` request with the first `allow`-kind
-  option, inline — an unanswered permission request hangs the turn forever,
-  even in bypass mode (ADR 0031)."
+  "Answer a `session/request_permission` request inline — an unanswered
+  permission request hangs the turn forever, even in bypass mode (ADR 0031).
+  The first `reject`-kind option by default (the client executes tools, the
+  agent must not), or the first `allow`-kind option with :allow-agent-tools;
+  no matching option => cancelled."
   [client req]
-  (let [options (get-in req [:params :options])
-        chosen  (some (fn [o] (when (str/starts-with? (str (:kind o)) "allow") (:optionId o)))
+  (let [want    (if (:allow-agent-tools client) "allow" "reject")
+        options (get-in req [:params :options])
+        chosen  (some (fn [o] (when (str/starts-with? (str (:kind o)) want) (:optionId o)))
                        options)
         result  (if chosen
                   {:outcome {:outcome "selected" :optionId chosen}}
@@ -283,10 +383,17 @@
     :timeout               per-call timeout ms for the setup handshake.
                           Default 30000.
     :permission-timeout    the safety net bounding a `session/prompt` reply
-                          — see default-permission-timeout-ms. Default 30000."
+                          — see default-permission-timeout-ms. Default 30000.
+    :allow-agent-tools     let the agent run tools of its OWN: a
+                          `session/request_permission` is then answered with
+                          the first `allow`-kind option. Default false — the
+                          first `reject`-kind option — because toolnexus is the
+                          tool executor (SPEC §8): an agent that runs `bash`
+                          itself has escaped every hook (ADR 0033)."
   ([command] (connect command {}))
   ([command opts]
-   (let [{:keys [cwd mcp-servers environment env mode timeout permission-timeout]} opts
+   (let [{:keys [cwd mcp-servers environment env mode timeout permission-timeout
+                 allow-agent-tools]} opts
          timeout-ms            (or timeout default-timeout-ms)
          permission-timeout-ms (or permission-timeout default-permission-timeout-ms)
          cwd                   (or cwd (fs/real-path "."))]
@@ -305,6 +412,7 @@
                        :session-id          nil
                        :timeout-ms          timeout-ms
                        :permission-timeout-ms permission-timeout-ms
+                       :allow-agent-tools   (boolean allow-agent-tools)
                        :close-once          (atom false)}]
        (start-reader! client)
        (let [init-res (call! client "initialize"
@@ -355,10 +463,13 @@
   (with-lock! (:prompt-lock client) (fn [] (send-prompt! client text))))
 
 (defn generate
-  "Build a semantic `generate` fn — (fn [req] -> {:content ...}) — backed by
-  this warm ACP client, in the exact shape
+  "Build a semantic `generate` fn — (fn [req] -> {:content ...} |
+  {:tool-calls [...]}) — backed by this warm ACP client, in the exact shape
   `toolnexus.client/create-in-process-client` and
   `toolnexus.agents.runtime/create-runtime`'s `:in-process` option accept.
+  Each call sends the assembled request (messages + tools, `render-prompt`)
+  as one session/prompt and parses the reply into one assistant message
+  (`parse-reply`) — SPEC §8 \"ACP model source\".
 
     (let [c (toolnexus.acp/connect [\"devin\" \"acp\"])]
       (toolnexus.client/create-in-process-client
@@ -369,12 +480,11 @@
   the caller."
   [client]
   (fn [req]
-    (let [text (assemble-prompt-text (:messages req))
-          res  (prompt client text)]
+    (let [res (prompt client (render-prompt req))]
       (if (:error res)
         (throw (ex-info (str "toolnexus: acp: generate failed: " (pr-str (:error res)))
                         {:acp-error (:error res)}))
-        {:content (:ok res)}))))
+        (parse-reply (:ok res))))))
 
 ;; ---------------------------------------------------------------------------
 ;; close

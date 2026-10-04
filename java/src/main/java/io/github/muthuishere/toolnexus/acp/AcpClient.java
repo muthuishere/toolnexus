@@ -1,5 +1,8 @@
 package io.github.muthuishere.toolnexus.acp;
 
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.DeserializationFeature;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.muthuishere.toolnexus.InProcess;
 import io.github.muthuishere.toolnexus.Json;
 
@@ -32,11 +35,15 @@ import java.util.function.Function;
  * {@code openspec/changes/add-acp-model-source}).
  *
  * <p>{@link #start} spawns the agent, negotiates {@code initialize}, and opens ONE
- * {@code session/new} — a warm session that every subsequent {@link #generate} reuses. Because
+ * {@code session/new} — a warm session that every subsequent {@link #generate} reuses. The
+ * agent is a real tool-calling model ({@code openspec/changes/add-acp-tool-calling}, SPEC §8
+ * "ACP model source"): each prompt carries the OpenAI-shaped request — messages, including
+ * earlier tool calls and their results, plus the tool schemas — and the agent's JSON reply is
+ * parsed back into content or tool calls, which the loop executes through the toolkit. Because
  * an ACP session is stateful and toolnexus assembles a complete request every turn, each
- * {@code generate} appends an explicit {@code SUPERSEDES-ALL-PRIOR:} marker naming the current
- * turn, so a stateful agent answers the fresh prompt rather than a near-duplicate earlier one
- * (ADR 0031's spike gate).
+ * {@code generate} also appends an explicit {@code SUPERSEDES-ALL-PRIOR:} marker naming the
+ * latest user turn, so a stateful agent answers the fresh prompt rather than a near-duplicate
+ * earlier one (ADR 0031's spike gate).
  *
  * <p>Implements {@code Function<InProcess.Request, InProcess.Response>} so an instance plugs
  * directly into {@link InProcess.Options#generate} or {@code RuntimeOptions.inProcess} with no
@@ -70,12 +77,22 @@ public final class AcpClient implements Closeable, Function<InProcess.Request, I
     private volatile java.util.function.Consumer<Map<String, Object>> updateSink;
 
     /**
-     * When true (the default), {@code session/request_permission} is answered immediately with
-     * the first option whose {@code kind} starts with {@code allow}. An unanswered permission
-     * request hangs the turn forever — see ADR 0031 gate item #2. Set false only to reproduce
-     * that hang deliberately (tests).
+     * When true (the default), {@code session/request_permission} is answered immediately from
+     * the reader thread — with the first {@code reject}-kind option, or the first
+     * {@code allow}-kind option when {@link #allowAgentTools} is set; no matching option ⇒
+     * {@code cancelled}. An unanswered permission request hangs the turn forever — see ADR 0031
+     * gate item #2. Set false only to reproduce that hang deliberately (tests).
      */
     public volatile boolean autoAnswerPermission = true;
+
+    /**
+     * Lets the agent run tools of its OWN: a {@code session/request_permission} is then answered
+     * with the first {@code allow}-kind option. Default false — the first {@code reject}-kind
+     * option — because toolnexus is the tool executor (SPEC §8, {@code add-acp-tool-calling}):
+     * an agent that runs {@code bash} itself has escaped every hook and any builtin execution
+     * seam (ADR 0033).
+     */
+    public volatile boolean allowAgentTools = false;
 
     /** Bounds how long {@link #generate} waits for a {@code session/prompt} reply (and how long
      * {@code initialize}/{@code session/new} wait during {@link #start}). Configurable so a
@@ -170,9 +187,12 @@ public final class AcpClient implements Closeable, Function<InProcess.Request, I
 
     /**
      * One {@code session/prompt} on the already-open, warm session — never spawns, never
-     * re-initializes, never opens a new session. Assembles the FULL request (per ADR 0031's
-     * chosen default: stateless-by-default, matching every other toolnexus model source) plus
-     * the supersedes marker, then returns the accumulated {@code agent_message_chunk} text.
+     * re-initializes, never opens a new session. Sends the FULL OpenAI-shaped request (messages,
+     * including earlier tool calls and their results, plus the tool schemas — see
+     * {@link #assemblePrompt}) and parses the accumulated {@code agent_message_chunk} text into
+     * one assistant message: tool calls or content ({@link #parseReply}, SPEC §8 "ACP model
+     * source"). The loop then executes those tool calls through the toolkit, exactly as for any
+     * other model.
      *
      * <p>Turns on this client are serialized: a single {@code AcpClient} is one ACP session, and
      * one session is one conversation, so concurrent callers are gated onto one turn at a time.
@@ -181,54 +201,144 @@ public final class AcpClient implements Closeable, Function<InProcess.Request, I
         String assembled = assemblePrompt(request);
         turnLock.lock();
         try {
-            String reply = prompt(assembled);
-            return InProcess.Response.content(reply);
+            return parseReply(prompt(assembled));
         } finally {
             turnLock.unlock();
         }
     }
 
+    /** Byte-pinned by SPEC §8 "ACP model source" — identical in all seven ports. */
+    static final String PREAMBLE =
+            "You are the language model behind a tool-calling client. The client executes tools; you never do.\n"
+            + "Do not run commands, read or edit files, or use any tool of your own.\n"
+            + "The REQUEST below is the complete conversation in OpenAI chat-completions format: \"messages\" holds every message so far, including earlier tool calls and their results; \"tools\" lists the only tools you may call.\n"
+            + "Reply with exactly one JSON object and nothing else: no prose, no markdown fences.\n"
+            + "To give the final answer: {\"content\": \"<answer>\"}\n"
+            + "To call tools: {\"tool_calls\": [{\"id\": \"<unique id>\", \"type\": \"function\", \"function\": {\"name\": \"<tool name>\", \"arguments\": \"<JSON-encoded arguments>\"}}]}\n"
+            + "Never both. Use tool results already in \"messages\" instead of calling the same tool again.\n";
+
+    /** Strict: one JSON value and nothing after it, so prose after an object falls through to
+     * the first-{@code {}..last-{@code }} slice exactly as in every other port. */
+    private static final ObjectMapper STRICT = new ObjectMapper()
+            .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
+
     /**
-     * Builds the full assembled request text from {@code request.messages} (deterministic,
-     * one line per message: {@code "<role>: <content>"}) plus the literal
-     * {@code SUPERSEDES-ALL-PRIOR: <current turn's text>} marker, where "current turn's text" is
-     * the last message's content — the convention proven against the Go spike's fakeagent
-     * ({@code stale} scenario).
+     * Assembles {@code PREAMBLE + "\nREQUEST:\n" + JSON + "\n\nSUPERSEDES-ALL-PRIOR: " + latest
+     * user text}, where JSON is the compact {@code {"messages":[...],"tools":[...]}} object
+     * (absent arrays render as {@code []}; Jackson never HTML-escapes). The FULL request goes
+     * every turn (an ACP session is stateful; a delta would make the client a shadow copy of
+     * conversation state), and the supersedes marker keeps a stateful agent off an earlier
+     * near-duplicate in its own history (ADR 0031).
      */
     static String assemblePrompt(InProcess.Request request) {
-        StringBuilder sb = new StringBuilder();
-        String currentText = "";
-        if (request != null && request.messages != null) {
-            for (Object m : request.messages) {
-                if (sb.length() > 0) sb.append('\n');
-                sb.append(formatMessage(m));
-                Object content = extractContent(m);
-                if (content != null) currentText = contentToText(content);
+        List<Object> messages = request != null && request.messages != null ? request.messages : List.of();
+        List<Object> tools = request != null && request.tools != null ? request.tools : List.of();
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("messages", messages);
+        payload.put("tools", tools);
+
+        String latest = "";
+        boolean found = false;
+        for (int i = messages.size() - 1; i >= 0; i--) {
+            if (messages.get(i) instanceof Map<?, ?> m && "user".equals(m.get("role"))) {
+                latest = contentText(m.get("content"));
+                found = true;
+                break;
             }
         }
-        if (sb.length() > 0) sb.append('\n');
-        sb.append(SUPERSEDES_MARKER).append(' ').append(currentText);
-        return sb.toString();
+        if (!found && !messages.isEmpty() && messages.get(messages.size() - 1) instanceof Map<?, ?> m) {
+            latest = contentText(m.get("content"));
+        }
+        return PREAMBLE + "\nREQUEST:\n" + Json.stringify(payload) + "\n\n" + SUPERSEDES_MARKER + " " + latest;
     }
 
-    @SuppressWarnings("unchecked")
-    private static String formatMessage(Object m) {
-        if (!(m instanceof Map)) return String.valueOf(m);
-        Map<String, Object> map = (Map<String, Object>) m;
-        String role = String.valueOf(map.getOrDefault("role", "user"));
-        return role + ": " + contentToText(map.get("content"));
-    }
-
-    @SuppressWarnings("unchecked")
-    private static Object extractContent(Object m) {
-        if (!(m instanceof Map)) return null;
-        return ((Map<String, Object>) m).get("content");
-    }
-
-    private static String contentToText(Object content) {
-        if (content == null) return "";
+    /** A message's content for the supersedes line: a string as is; an array of parts ⇒ the
+     * text of its {@code type:"text"} parts joined by one space; anything else ⇒ "". */
+    private static String contentText(Object content) {
         if (content instanceof String s) return s;
-        return Json.stringify(content);
+        if (content instanceof List<?> parts) {
+            List<String> texts = new ArrayList<>();
+            for (Object p : parts) {
+                if (p instanceof Map<?, ?> pm && "text".equals(pm.get("type")) && pm.get("text") instanceof String t) {
+                    texts.add(t);
+                }
+            }
+            return String.join(" ", texts);
+        }
+        return "";
+    }
+
+    /**
+     * Turns the agent's reply text into one assistant message, by the algorithm SPEC §8 pins:
+     * strip fences, parse (or the first-{@code {}..last-{@code }} slice), unwrap
+     * {@code choices[0].message} / {@code message}, then {@code tool_calls} ⇒ tool calls,
+     * {@code content} ⇒ content, anything else ⇒ the original text untouched (e.g. structured
+     * output the host asked for).
+     */
+    static InProcess.Response parseReply(String text) {
+        String s = text.strip();
+        if (s.startsWith("```")) {
+            int nl = s.indexOf('\n');
+            s = nl >= 0 ? s.substring(nl + 1).strip() : "";
+            if (s.endsWith("```")) s = s.substring(0, s.length() - 3);
+            s = s.strip();
+        }
+
+        Map<String, Object> obj = parseObject(s);
+        if (obj == null) {
+            int i = s.indexOf('{');
+            int j = s.lastIndexOf('}');
+            if (i >= 0 && j > i) obj = parseObject(s.substring(i, j + 1));
+        }
+        if (obj == null) return InProcess.Response.content(text);
+
+        if (obj.get("choices") instanceof List<?> choices && !choices.isEmpty()) {
+            if (choices.get(0) instanceof Map<?, ?> first && first.get("message") instanceof Map<?, ?> msg) {
+                obj = asStringMap(msg);
+            }
+        } else if (obj.get("message") instanceof Map<?, ?> msg) {
+            obj = asStringMap(msg);
+        }
+
+        if (obj.get("tool_calls") instanceof List<?> raw) {
+            List<InProcess.ToolCall> calls = new ArrayList<>();
+            for (Object el : raw) {
+                if (!(el instanceof Map<?, ?> em)) continue;
+                Map<?, ?> fn = em.get("function") instanceof Map<?, ?> f ? f : em;
+                if (!(fn.get("name") instanceof String name) || name.isEmpty()) continue;
+                // a string passes through as pre-encoded; anything else is structured
+                Object args = fn.get("arguments") != null ? fn.get("arguments") : new LinkedHashMap<String, Object>();
+                InProcess.ToolCall call = new InProcess.ToolCall(name, args);
+                if (em.get("id") instanceof String id && !id.isEmpty()) call.id(id);
+                calls.add(call);
+            }
+            if (!calls.isEmpty()) {
+                InProcess.Response r = new InProcess.Response();
+                r.toolCalls = calls;
+                return r;
+            }
+        }
+
+        if (obj.containsKey("content")) {
+            Object c = obj.get("content");
+            if (c instanceof String str) return InProcess.Response.content(str);
+            if (c == null) return InProcess.Response.content("");
+            return InProcess.Response.content(Json.stringify(c));
+        }
+        return InProcess.Response.content(text);
+    }
+
+    private static Map<String, Object> parseObject(String s) {
+        try {
+            return STRICT.readValue(s, new TypeReference<Map<String, Object>>() {});
+        } catch (Exception e) {
+            return null; // not JSON, not an object, or trailing content
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> asStringMap(Map<?, ?> m) {
+        return (Map<String, Object>) m;
     }
 
     private String prompt(String text) throws IOException {
@@ -353,13 +463,16 @@ public final class AcpClient implements Closeable, Function<InProcess.Request, I
         if (!autoAnswerPermission) {
             return; // deliberately dropped on the floor — the caller's own timeout is what fires
         }
+        // Reject by default: toolnexus is the tool executor (SPEC §8, add-acp-tool-calling); an
+        // agent that runs a tool itself has escaped every hook. allowAgentTools opts back in.
+        String want = allowAgentTools ? "allow" : "reject";
         String chosen = null;
         Object optionsObj = params == null ? null : params.get("options");
         if (optionsObj instanceof List<?> options) {
             for (Object o : options) {
                 if (o instanceof Map<?, ?> opt) {
                     Object kind = opt.get("kind");
-                    if (kind != null && String.valueOf(kind).startsWith("allow")) {
+                    if (kind != null && String.valueOf(kind).startsWith(want)) {
                         chosen = String.valueOf(opt.get("optionId"));
                         break;
                     }

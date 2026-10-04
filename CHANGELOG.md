@@ -8,6 +8,58 @@ GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
 
 ## Unreleased
 
+### ACP agents now actually call your tools
+
+Since 0.19.0 an ACP agent (`devin acp`, `opencode acp`, Gemini CLI, Zed's agents) could be the
+model behind a client, and the changelog said MCP tools and skills "work through it unchanged".
+They did not: every port's ACP `generate` flattened the conversation to `role: text` lines,
+**dropped the tool schemas**, and only ever returned text. The agent was never told your tools
+existed, so it either answered with tools of its own — running on your machine, outside every
+toolnexus hook — or made the answer up.
+
+Now the ACP agent is a real tool-calling model, in all seven ports. Each turn it receives the same
+OpenAI-shaped request an HTTP model would: the conversation, including earlier tool calls and their
+results, plus the tool schemas, as JSON under a fixed instruction preamble. It replies with an
+OpenAI-shaped assistant message — `{"content": …}` or `{"tool_calls": [ … ]}` — and toolnexus runs
+the calls itself, through the toolkit, so `beforeTool`/`afterTool` hooks, suspension, metrics and
+your MCP servers, skills and native tools all apply exactly as they do with a hosted model. Nothing
+in your setup changes: the same `loadAcp(...)` + `createInProcessClient({ generate })` pair now
+does what it always claimed to.
+
+The reply parser is forgiving where real agents are sloppy — markdown fences, prose around the
+JSON, a full `choices[0].message` envelope, `arguments` as an object instead of a string — and
+strict where it matters: a reply that is not a tool-calling envelope (plain prose, or a JSON object
+you asked for as structured output) comes back as content **exactly as received**. The preamble
+bytes and the parsing algorithm are pinned in `SPEC.md §8`, so every port reads an agent's reply
+the same way.
+
+**Changed default — the agent's own tools are refused.** A `session/request_permission` is now
+answered with the agent's first *reject* option (still immediately; an unanswered request hangs a
+turn forever). toolnexus is the tool executor; an agent CLI that runs `bash` on its own has already
+escaped any hook or sandbox around your builtins (ADR 0033). If you relied on the agent doing its
+own work, set **`allowAgentTools`** (`allow_agent_tools` in Python and Elixir, `:allow-agent-tools`
+in Clojure, `AllowAgentTools` in Go and C#) to get the 0.19.0 behaviour back. Tools an agent runs
+*without* asking cannot be refused by any ACP client; an agent's read-only or plan `mode` is the
+containment for those.
+
+### Not done
+
+- **Local agents only.** The agent is a child process on your machine. ACP's `authenticate` flow
+  (browser or terminal login), remote agents, and passing a login through to your own endpoint are
+  not implemented — log the agent CLI in locally first. Tracked as follow-up to
+  `openspec/changes/add-acp-tool-calling`.
+- The toolkit is **not** offered to the agent as an MCP server (`session/new.mcpServers` stays
+  empty); toolnexus runs the loop, by design.
+- Streaming through ACP is still refused, and delta mode is still not offered.
+- **Every turn still resends the system prompt, all tool schemas and the whole conversation** into
+  a session that keeps every prompt, so the agent's context grows quadratically over a long tool
+  loop. The fix — send the fixed part once per session, then only new messages, opening a fresh
+  session on any mismatch — and a pass-through `config` for model selection are **implemented in
+  golang only** (`ACPOptions.Config`, `ACPClient.ConfigOptions()`), hermetically tested but never
+  run against a live agent; the other six ports still resend everything:
+  `openspec/changes/add-acp-session-delta`, ADR 0036. The Go example now defaults to
+  `opencode acp` and documents codex and devin.
+
 ## 0.21.0 — 2026-09-28
 
 ### Judge batteries: eight ready-made judgments, wired into the agent loop, in all seven ports

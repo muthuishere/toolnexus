@@ -25,16 +25,26 @@
 //                while busy, replies with an error instead of processing it
 //                normally, so a client that fails to serialise turns is
 //                caught red-handed.
+//   toolloop   - a scripted tool-calling model: with no role:"tool" message in
+//                the prompt's REQUEST it asks for add(2,3) (wrapped in prose and
+//                ```json fences, object arguments, to exercise the tolerant
+//                parser); once a tool result is present it answers
+//                {"content":"The answer is <result>."}.
 //
 // If ACP_RECORD_FILE is set, every session/new call appends its raw params
 // as one JSON line to that file — used to assert the real client sends an
 // absolute cwd + an mcpServers array (the -32602 trap real `devin acp`
 // enforces).
+//
+// If ACP_REQUEST_FILE is set, every session/prompt appends the REQUEST JSON
+// pulled back out of the rendered prompt as one line — used to assert what
+// the agent actually saw (tool schemas, tool calls, tool results).
 import readline from "node:readline"
 import fs from "node:fs"
 
 const scenario = process.env.ACP_SCENARIO || "default"
 const recordFile = process.env.ACP_RECORD_FILE
+const requestFile = process.env.ACP_REQUEST_FILE
 
 function send(msg) {
   process.stdout.write(JSON.stringify(msg) + "\n")
@@ -143,6 +153,9 @@ function handlePrompt(id, sessionId, userText) {
     case "serialize":
       handleSerialize(id, sessionId, userText)
       return
+    case "toolloop":
+      handleToolLoop(id, sessionId, userText)
+      return
     default:
       sendNotification("session/update", {
         sessionId,
@@ -222,4 +235,39 @@ function handleSerialize(id, sessionId, userText) {
     reply(id, { stopReason: "end_turn" })
     busy = false
   }, 50)
+}
+
+// Pulls the REQUEST JSON back out of a rendered prompt:
+// PREAMBLE + "\nREQUEST:\n" + JSON + "\n\nSUPERSEDES-ALL-PRIOR: " + latest.
+function splitRequest(prompt) {
+  const i = prompt.indexOf("\nREQUEST:\n")
+  const j = prompt.lastIndexOf(`\n\n${MARKER} `)
+  if (i < 0 || j < i) return null
+  try {
+    return JSON.parse(prompt.slice(i + "\nREQUEST:\n".length, j))
+  } catch {
+    return null
+  }
+}
+
+function handleToolLoop(id, sessionId, userText) {
+  const request = splitRequest(userText)
+  let answer = "unparseable prompt"
+  if (request) {
+    if (requestFile) fs.appendFileSync(requestFile, JSON.stringify(request) + "\n")
+    const toolMsg = (request.messages ?? []).filter((m) => m?.role === "tool").pop()
+    if (!toolMsg) {
+      answer =
+        "Sure, calling the tool.\n```json\n" +
+        JSON.stringify({ tool_calls: [{ id: "c1", type: "function", function: { name: "add", arguments: { a: 2, b: 3 } } }] }) +
+        "\n```"
+    } else {
+      answer = JSON.stringify({ content: `The answer is ${toolMsg.content}.` })
+    }
+  }
+  sendNotification("session/update", {
+    sessionId,
+    update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: answer } },
+  })
+  reply(id, { stopReason: "end_turn" })
 }

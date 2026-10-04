@@ -19,7 +19,13 @@
  * a near-duplicate prompt from stale history (reproduced in `spikes/acp/`).
  * The mitigation (kept as the default, not left to the caller) is an explicit
  * "this supersedes everything earlier" marker appended to every rendered
- * prompt — see {@link renderPrompt}.
+ * prompt — see {@link renderACPPrompt}.
+ *
+ * The agent is a real tool-calling model (openspec/changes/add-acp-tool-calling,
+ * SPEC §8 "ACP model source"): each prompt carries the OpenAI-shaped request —
+ * messages, including earlier tool calls and their results, plus the tool
+ * schemas — and the agent's JSON reply is parsed back into content or tool calls
+ * ({@link parseACPReply}), which the loop executes through the toolkit.
  *
  * Three more traps this client exists to close, all proven in the spike:
  *  - `session/update` notifications interleave with JSON-RPC replies on the
@@ -28,14 +34,16 @@
  *    `agent_thought_chunk` and tool-call narration wrap prose around
  *    structured output and corrupt it if mixed in.
  *  - An unanswered `session/request_permission` hangs the turn FOREVER, even
- *    in an agent's bypass mode. The client answers with the first `allow`-kind
- *    option the instant the request arrives; `permissionTimeoutMs` is only a
- *    safety net for a broken agent that never asks and never replies at all.
+ *    in an agent's bypass mode. The client answers the instant the request
+ *    arrives — the first `reject`-kind option by default (toolnexus executes
+ *    the tools), the first `allow`-kind option with `allowAgentTools`;
+ *    `permissionTimeoutMs` is only a safety net for a broken agent that never
+ *    asks and never replies at all.
  */
 import { spawn } from "node:child_process"
 import { createInterface } from "node:readline"
 import path from "node:path"
-import type { InProcessRequest, InProcessResponse } from "./client.js"
+import type { InProcessRequest, InProcessResponse, InProcessToolCall } from "./client.js"
 
 /** Options for {@link loadACP}. `command`/`args` spawn the ACP agent as a child
  *  process; everything else tunes the session handshake. */
@@ -60,6 +68,12 @@ export interface ACPOptions {
   permissionTimeoutMs?: number
   /** Optional `session/set_mode` sent once, right after `session/new`. */
   mode?: string
+  /** Lets the agent run tools of its OWN: a `session/request_permission` is then
+   *  answered with the first `allow`-kind option. Default `false` — the first
+   *  `reject`-kind option — because toolnexus is the tool executor (SPEC §8,
+   *  add-acp-tool-calling): an agent that runs `bash` itself has escaped every
+   *  hook and any builtin execution seam. */
+  allowAgentTools?: boolean
 }
 
 /** One warm ACP connection: one child process, one session, alive across many
@@ -86,41 +100,119 @@ interface RpcMessage {
   error?: { code: number; message: string }
 }
 
-function renderContentPart(part: any): string {
-  if (typeof part === "string") return part
-  if (part == null) return ""
-  if (typeof part === "object" && "text" in part && typeof part.text === "string") return part.text
-  return JSON.stringify(part)
-}
+/** Byte-pinned by SPEC.md §8 "ACP model source" — identical in all seven ports
+ *  (seven lines, each ending in a newline). Exported for tests only; not part of
+ *  the package's public surface (see index.ts). */
+export const ACP_PREAMBLE =
+  "You are the language model behind a tool-calling client. The client executes tools; you never do.\n" +
+  "Do not run commands, read or edit files, or use any tool of your own.\n" +
+  'The REQUEST below is the complete conversation in OpenAI chat-completions format: "messages" holds every message so far, including earlier tool calls and their results; "tools" lists the only tools you may call.\n' +
+  "Reply with exactly one JSON object and nothing else: no prose, no markdown fences.\n" +
+  'To give the final answer: {"content": "<answer>"}\n' +
+  'To call tools: {"tool_calls": [{"id": "<unique id>", "type": "function", "function": {"name": "<tool name>", "arguments": "<JSON-encoded arguments>"}}]}\n' +
+  'Never both. Use tool results already in "messages" instead of calling the same tool again.\n'
 
-/** Flattens `content` (a string, or an array of content parts) to plain text. */
-function renderContent(content: any): string {
+/** A message's content for the supersedes line: a string as is; an array of parts ⇒
+ *  the `text` of its `type:"text"` parts joined by one space; anything else ⇒ "". */
+function contentText(content: any): string {
   if (typeof content === "string") return content
-  if (Array.isArray(content)) return content.map(renderContentPart).join(" ")
-  return renderContentPart(content)
+  if (Array.isArray(content)) {
+    return content
+      .filter((p) => p && typeof p === "object" && p.type === "text" && typeof p.text === "string")
+      .map((p) => p.text)
+      .join(" ")
+  }
+  return ""
 }
 
-/** Renders the FULL assembled request as one prompt string — role + content
- *  per message — then appends the supersedes marker naming the latest user
- *  turn, per ADR 0031's proposed (and spike-confirmed) default: full request
- *  every turn, not a delta, so this stays stateless like every other
- *  toolnexus model source and never risks a shadow transcript drifting from
- *  the caller's own conversation state. */
-function renderPrompt(request: InProcessRequest): string {
+/** Renders the FULL assembled request as one prompt (SPEC §8):
+ *  PREAMBLE + "\nREQUEST:\n" + {"messages","tools"} JSON + "\n\n" + marker + " " +
+ *  latest user text. The whole request goes every turn, not a delta — an ACP session
+ *  is stateful, and a delta would make this client a shadow copy of conversation
+ *  state — and the supersedes marker keeps a stateful agent off an earlier
+ *  near-duplicate in its own history (ADR 0031). `JSON.stringify` never HTML-escapes
+ *  and keeps insertion order, so `messages` leads. Exported for tests only. */
+export function renderACPPrompt(request: InProcessRequest): string {
   const messages = request.messages ?? []
-  const lines = messages.map((m) => `${m?.role ?? "user"}: ${renderContent(m?.content)}`)
+  const payload = JSON.stringify({ messages, tools: request.tools ?? [] })
 
   let latest = ""
+  let found = false
   for (let i = messages.length - 1; i >= 0; i--) {
     if (messages[i]?.role === "user") {
-      latest = renderContent(messages[i].content)
+      latest = contentText(messages[i].content)
+      found = true
       break
     }
   }
-  if (!latest && messages.length > 0) latest = renderContent(messages[messages.length - 1]?.content)
+  if (!found && messages.length > 0) latest = contentText(messages[messages.length - 1]?.content)
 
-  lines.push(`${SUPERSEDES_MARKER} ${latest}`)
-  return lines.join("\n")
+  return `${ACP_PREAMBLE}\nREQUEST:\n${payload}\n\n${SUPERSEDES_MARKER} ${latest}`
+}
+
+function isObject(v: unknown): v is Record<string, any> {
+  return typeof v === "object" && v !== null && !Array.isArray(v)
+}
+
+function parseObject(s: string): Record<string, any> | undefined {
+  try {
+    const v = JSON.parse(s)
+    return isObject(v) ? v : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/** Turns the agent's reply text into one assistant message by the algorithm SPEC §8
+ *  pins: strip fences, parse (or the first-`{`..last-`}` slice), unwrap
+ *  `choices[0].message` / `message`, then `tool_calls` ⇒ toolCalls, `content` ⇒
+ *  content, anything else ⇒ the original text untouched (e.g. structured output the
+ *  host asked for). Exported for tests only. */
+export function parseACPReply(text: string): InProcessResponse {
+  let s = text.trim()
+  if (s.startsWith("```")) {
+    const nl = s.indexOf("\n")
+    s = nl >= 0 ? s.slice(nl + 1).trim() : ""
+    if (s.endsWith("```")) s = s.slice(0, -3)
+    s = s.trim()
+  }
+
+  let obj = parseObject(s)
+  if (!obj) {
+    const i = s.indexOf("{")
+    const j = s.lastIndexOf("}")
+    if (i >= 0 && j > i) obj = parseObject(s.slice(i, j + 1))
+  }
+  if (!obj) return { content: text }
+
+  if (Array.isArray(obj.choices) && obj.choices.length > 0) {
+    if (isObject(obj.choices[0]) && isObject(obj.choices[0].message)) obj = obj.choices[0].message
+  } else if (isObject(obj.message)) {
+    obj = obj.message
+  }
+  const msg = obj as Record<string, any>
+
+  if (Array.isArray(msg.tool_calls)) {
+    const calls: InProcessToolCall[] = []
+    for (const el of msg.tool_calls) {
+      if (!isObject(el)) continue
+      const fn = isObject(el.function) ? el.function : el
+      if (typeof fn.name !== "string" || fn.name === "") continue
+      // A string passes through as pre-encoded; anything else is structured.
+      const call: InProcessToolCall = { name: fn.name, arguments: fn.arguments ?? {} }
+      if (typeof el.id === "string" && el.id !== "") call.id = el.id
+      calls.push(call)
+    }
+    if (calls.length > 0) return { toolCalls: calls }
+  }
+
+  if ("content" in msg) {
+    const c = msg.content
+    if (typeof c === "string") return { content: c }
+    if (c === null) return { content: "" }
+    return { content: JSON.stringify(c) }
+  }
+  return { content: text }
 }
 
 /**
@@ -129,11 +221,12 @@ function renderPrompt(request: InProcessRequest): string {
  * trap real `devin acp` enforces with `-32602` otherwise) → an optional
  * `session/set_mode`, then returns a client whose `.generate` sends exactly
  * one `session/prompt` per call, accumulating only `agent_message_chunk`
- * text.
+ * text and parsing it into content or tool calls.
  */
 export async function loadACP(opts: ACPOptions): Promise<ACPClient> {
   const cwd = opts.cwd ? path.resolve(opts.cwd) : process.cwd()
   const permissionTimeoutMs = opts.permissionTimeoutMs ?? 30000
+  const wantKind = opts.allowAgentTools ? "allow" : "reject"
 
   const child = spawn(opts.command, opts.args ?? [], {
     cwd,
@@ -204,13 +297,15 @@ export async function loadACP(opts: ACPOptions): Promise<ACPClient> {
     if (msg.id !== undefined) reply(msg.id, {})
   }
 
-  /** Answers with the FIRST option whose `kind` starts with `allow` — an
+  /** Answers with the FIRST option whose `kind` starts with `reject` — the client
+   *  executes tools, the agent must not — or with the first `allow`-kind option
+   *  when `allowAgentTools` is set; no matching option ⇒ `cancelled`. An
    *  unanswered permission request hangs the turn forever (proven in
-   *  spikes/acp). This runs the instant the request arrives, never waiting
+   *  spikes/acp), so this runs the instant the request arrives, never waiting
    *  for anything else. */
   function answerPermission(req: RpcMessage): void {
     const options: Array<{ optionId: string; kind?: string }> = req.params?.options ?? []
-    const chosen = options.find((o) => typeof o.kind === "string" && o.kind.startsWith("allow"))
+    const chosen = options.find((o) => typeof o.kind === "string" && o.kind.startsWith(wantKind))
     const result = chosen
       ? { outcome: { outcome: "selected", optionId: chosen.optionId } }
       : { outcome: { outcome: "cancelled" } }
@@ -236,7 +331,7 @@ export async function loadACP(opts: ACPOptions): Promise<ACPClient> {
   let turnQueue: Promise<unknown> = Promise.resolve()
 
   async function promptOnce(request: InProcessRequest): Promise<InProcessResponse> {
-    const text = renderPrompt(request)
+    const text = renderACPPrompt(request)
     const id = `c-${++nextId}`
 
     let content = ""
@@ -264,7 +359,7 @@ export async function loadACP(opts: ACPOptions): Promise<ACPClient> {
     try {
       const msg = await Promise.race([replyPromise, timeout])
       if (msg.error) throw new Error(`toolnexus: ACP error ${msg.error.code}: ${msg.error.message}`)
-      return { content }
+      return parseACPReply(content)
     } finally {
       clearTimeout(timer)
       pending.delete(id)

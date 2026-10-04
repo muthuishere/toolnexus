@@ -23,6 +23,11 @@ Scenarios:
   noisy      - interleaves ``agent_thought_chunk`` and ``tool_call``/
                ``tool_call_update`` notifications around the real
                ``agent_message_chunk`` content, split across >= 2 notifications.
+  toolloop   - a scripted tool-calling model: parses the client's ``REQUEST:`` JSON,
+               records it (``requests`` in diagnostics), and with no ``role: "tool"``
+               message asks for ``add(2, 3)`` (wrapped in prose + a ```json fence,
+               object arguments, to exercise the tolerant reply parser); once a
+               tool result is present it answers ``{"content": "The answer is <r>."}``.
   serialize  - records reentrancy (a "busy" flag) if a second ``session/prompt``
                arrives while one is already being handled on this session — proves
                the client serialises turns.
@@ -49,6 +54,27 @@ def _send(obj: dict) -> None:
         sys.stdout.flush()
 
 
+_MARKER = "SUPERSEDES-ALL-PRIOR:"
+
+
+def _latest(prompt: str) -> str:
+    """The text the client's supersedes marker names (the whole prompt if absent)."""
+    idx = prompt.rfind(_MARKER)
+    return prompt[idx + len(_MARKER):].strip() if idx >= 0 else prompt
+
+
+def _split_request(prompt: str):
+    """Pull the REQUEST JSON back out of a rendered prompt, or None."""
+    i = prompt.find("\nREQUEST:\n")
+    j = prompt.rfind("\n\n" + _MARKER + " ")
+    if i < 0 or j < i:
+        return None
+    try:
+        return json.loads(prompt[i + len("\nREQUEST:\n"):j])
+    except json.JSONDecodeError:
+        return None
+
+
 def main() -> None:
     args = sys.argv[1:]
     scenario = "default"
@@ -65,6 +91,7 @@ def main() -> None:
         "last_option_id": None,
         "received_cwd": None,
         "received_mcp_servers": None,
+        "requests": [],
     }
     next_srv_id = [0]
     perm_replies: dict[str, dict] = {}
@@ -152,7 +179,7 @@ def main() -> None:
                     "update": {"sessionUpdate": "agent_thought_chunk", "content": {"type": "text", "text": "now double-checking the number... "}},
                 },
             )
-            send_message_chunk(session_id, f'"{user_text}"}}')
+            send_message_chunk(session_id, json.dumps(_latest(user_text)) + "}")
             reply(msg_id, {"stopReason": "end_turn"})
             return
 
@@ -169,6 +196,25 @@ def main() -> None:
                         matched = h
                         break
                 answer = f"STALE-ANSWER-TO:{matched}"
+            send_message_chunk(session_id, answer)
+            reply(msg_id, {"stopReason": "end_turn"})
+            return
+
+        if scenario == "toolloop":
+            req = _split_request(user_text)
+            answer = "unparseable prompt"
+            if isinstance(req, dict):
+                with state_lock:
+                    state["requests"].append(req)
+                tool_result = ""
+                for m in req.get("messages") or []:
+                    if isinstance(m, dict) and m.get("role") == "tool":
+                        tool_result = m.get("content") or ""
+                if not tool_result:
+                    call = {"id": "c1", "type": "function", "function": {"name": "add", "arguments": {"a": 2, "b": 3}}}
+                    answer = "Sure, calling the tool.\n```json\n" + json.dumps({"tool_calls": [call]}) + "\n```"
+                else:
+                    answer = json.dumps({"content": f"The answer is {tool_result}."})
             send_message_chunk(session_id, answer)
             reply(msg_id, {"stopReason": "end_turn"})
             return

@@ -11,7 +11,13 @@
 //                fresh.
 //   hang       - sends session/request_permission and then never replies to session/prompt.
 //   permission - like hang, but DOES wait for the client's reply to session/request_permission
-//                before finishing the turn.
+//                before finishing the turn, and replies `PERMITTED[<optionId|cancelled>]:<prompt>`
+//                so a test can see which option the client chose.
+//   toolloop   - a scripted tool-calling model (openspec/changes/add-acp-tool-calling): with no
+//                role:"tool" message in the prompt's REQUEST it asks for add{a:2,b:3} (id "c1"),
+//                wrapped in prose + a ```json fence with object arguments; once a tool result is
+//                present it answers {"content":"The answer is <result>."}. Each parsed REQUEST is
+//                appended as one JSON line to the file named by `--out=<path>`.
 //   noisy      - emits agent_thought_chunk + tool-call narration interleaved with the real
 //                agent_message_chunk, to prove naive accumulation corrupts structured output.
 //   warm       - trivial echo. Every reply is prefixed with `sessionNewCalls=<n>;promptN=<n>;`
@@ -27,9 +33,12 @@ using System.Text;
 using System.Text.Json;
 
 var scenario = "warm";
+string? outPath = null;
 foreach (var a in args)
 {
-    if (a.StartsWith("--scenario=", StringComparison.Ordinal))
+    if (a.StartsWith("--out=", StringComparison.Ordinal))
+        outPath = a["--out=".Length..];
+    else if (a.StartsWith("--scenario=", StringComparison.Ordinal))
         scenario = a["--scenario=".Length..];
     else if (a.StartsWith("-scenario=", StringComparison.Ordinal))
         scenario = a["-scenario=".Length..];
@@ -59,9 +68,10 @@ void Send(object value)
 void SendNotification(string method, object? @params) =>
     Send(new Dictionary<string, object?> { ["jsonrpc"] = "2.0", ["method"] = method, ["params"] = @params });
 
-string SendRequest(string method, object? @params)
+string SendRequest(string method, object? @params, Action<string>? beforeSend = null)
 {
     var id = "srv-" + Interlocked.Increment(ref nextServerReqId);
+    beforeSend?.Invoke(id);
     Send(new Dictionary<string, object?> { ["jsonrpc"] = "2.0", ["id"] = id, ["method"] = method, ["params"] = @params });
     return id;
 }
@@ -116,7 +126,10 @@ void HandleStale(object id, string userText, List<string> hist)
 
 async Task HandlePermissionAsync(object id, string sessionId, string userText)
 {
-    var reqId = SendRequest("session/request_permission", new Dictionary<string, object?>
+    // The waiter is registered BEFORE the request goes out: a fast client can answer before
+    // SendRequest even returns, and the main loop drops replies nobody is waiting on.
+    var tcs = new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously);
+    SendRequest("session/request_permission", new Dictionary<string, object?>
     {
         ["sessionId"] = sessionId,
         ["options"] = new List<object?>
@@ -124,9 +137,13 @@ async Task HandlePermissionAsync(object id, string sessionId, string userText)
             new Dictionary<string, object?> { ["optionId"] = "reject", ["kind"] = "reject_once", ["name"] = "Reject" },
             new Dictionary<string, object?> { ["optionId"] = "allow-once", ["kind"] = "allow_once", ["name"] = "Allow" },
         },
-    });
-    var tcs = permReplies.GetOrAdd(reqId, _ => new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously));
-    await tcs.Task.ConfigureAwait(false); // blocks until the client answers, mirroring a real agent
+    }, reqId => permReplies[reqId] = tcs);
+    var answer = await tcs.Task.ConfigureAwait(false); // blocks until the client answers, mirroring a real agent
+    var chosen = "cancelled";
+    if (answer.TryGetProperty("result", out var res) && res.ValueKind == JsonValueKind.Object &&
+        res.TryGetProperty("outcome", out var oc) && oc.ValueKind == JsonValueKind.Object &&
+        oc.TryGetProperty("optionId", out var oid) && oid.ValueKind == JsonValueKind.String)
+        chosen = oid.GetString()!;
 
     SendNotification("session/update", new Dictionary<string, object?>
     {
@@ -134,7 +151,7 @@ async Task HandlePermissionAsync(object id, string sessionId, string userText)
         ["update"] = new Dictionary<string, object?>
         {
             ["sessionUpdate"] = "agent_message_chunk",
-            ["content"] = new Dictionary<string, object?> { ["type"] = "text", ["text"] = "PERMITTED:" + userText },
+            ["content"] = new Dictionary<string, object?> { ["type"] = "text", ["text"] = $"PERMITTED[{chosen}]:" + userText },
         },
     });
     Reply(id, new Dictionary<string, object?> { ["stopReason"] = "end_turn" });
@@ -174,6 +191,42 @@ void HandleNoisy(object id, string sessionId, string userText)
     Reply(id, new Dictionary<string, object?> { ["stopReason"] = "end_turn" });
 
     static Dictionary<string, object?> Text(string t) => new() { ["type"] = "text", ["text"] = t };
+}
+
+void HandleToolLoop(object id, string sessionId, string prompt)
+{
+    const string head = "\nREQUEST:\n";
+    const string tail = "\n\nSUPERSEDES-ALL-PRIOR: ";
+    var answer = "unparseable prompt";
+    int i = prompt.IndexOf(head, StringComparison.Ordinal), j = prompt.LastIndexOf(tail, StringComparison.Ordinal);
+    if (i >= 0 && j > i)
+    {
+        var requestJson = prompt[(i + head.Length)..j];
+        using var req = JsonDocument.Parse(requestJson);
+        if (outPath is not null)
+            lock (outLock) File.AppendAllText(outPath, requestJson + "\n"); // compact JSON: one line
+        string? toolResult = null;
+        if (req.RootElement.TryGetProperty("messages", out var msgs) && msgs.ValueKind == JsonValueKind.Array)
+            foreach (var m in msgs.EnumerateArray())
+                if (m.TryGetProperty("role", out var r) && r.GetString() == "tool" &&
+                    m.TryGetProperty("content", out var c) && c.ValueKind == JsonValueKind.String)
+                    toolResult = c.GetString();
+        answer = toolResult is null
+            ? "Sure, calling the tool.\n```json\n"
+              + "{\"tool_calls\":[{\"id\":\"c1\",\"type\":\"function\",\"function\":{\"name\":\"add\",\"arguments\":{\"a\":2,\"b\":3}}}]}"
+              + "\n```"
+            : JsonSerializer.Serialize(new Dictionary<string, object?> { ["content"] = $"The answer is {toolResult}." });
+    }
+    SendNotification("session/update", new Dictionary<string, object?>
+    {
+        ["sessionId"] = sessionId,
+        ["update"] = new Dictionary<string, object?>
+        {
+            ["sessionUpdate"] = "agent_message_chunk",
+            ["content"] = new Dictionary<string, object?> { ["type"] = "text", ["text"] = answer },
+        },
+    });
+    Reply(id, new Dictionary<string, object?> { ["stopReason"] = "end_turn" });
 }
 
 var stdin = Console.OpenStandardInput();
@@ -269,6 +322,9 @@ while ((line = await reader.ReadLineAsync().ConfigureAwait(false)) is not null)
                         break;
                     case "permission":
                         _ = Task.Run(() => HandlePermissionAsync(id, sessionId, userText));
+                        break;
+                    case "toolloop":
+                        HandleToolLoop(id, sessionId, userText);
                         break;
                     case "noisy":
                         _ = Task.Run(() => HandleNoisy(id, sessionId, userText));

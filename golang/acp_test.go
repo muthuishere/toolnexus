@@ -99,9 +99,9 @@ func runACPFakeServer() {
 		send(acpMsg{JSONRPC: "2.0", ID: id, Error: &acpError{Code: code, Message: msg}})
 	}
 
-	var historyMu sync.Mutex
-	var history []string
 	var busy int32
+	sessions := 0
+	currentModel := "m-1"
 
 	permReplies := make(chan acpMsg, 8)
 
@@ -136,7 +136,24 @@ func runACPFakeServer() {
 			var params map[string]any
 			_ = json.Unmarshal(msg.Params, &params)
 			emit(acpEvent{Type: "session/new", Data: params})
-			reply(msg.ID, map[string]any{"sessionId": "sess-1"})
+			sessions++
+			reply(msg.ID, map[string]any{
+				"sessionId":     fmt.Sprintf("sess-%d", sessions),
+				"configOptions": acpFakeConfigOptions(currentModel),
+			})
+
+		case "session/set_config_option":
+			var params map[string]any
+			_ = json.Unmarshal(msg.Params, &params)
+			emit(acpEvent{Type: "session/set_config_option", Data: params})
+			if params["configId"] == "bad" {
+				replyErr(msg.ID, -32602, "unknown config option: bad")
+				continue
+			}
+			if v, isStr := params["value"].(string); isStr && params["configId"] == "model" {
+				currentModel = v
+			}
+			reply(msg.ID, map[string]any{"configOptions": acpFakeConfigOptions(currentModel)})
 
 		case "session/set_mode":
 			reply(msg.ID, map[string]any{})
@@ -155,22 +172,18 @@ func runACPFakeServer() {
 				text.WriteString(p.Text)
 			}
 			userText := text.String()
-			emit(acpEvent{Type: "session/prompt", Data: map[string]any{"text": userText}})
+			emit(acpEvent{Type: "session/prompt", Data: map[string]any{"text": userText, "sessionId": params.SessionID}})
 
 			id, sid, ut := msg.ID, params.SessionID, userText
 			switch scenario {
-			case "stale":
-				wg.Add(1)
-				go func() {
-					defer wg.Done()
-					acpHandleStaleForTest(send, reply, &historyMu, &history, id, sid, ut)
-				}()
 			case "permission":
 				wg.Add(1)
 				go func() {
 					defer wg.Done()
 					acpHandlePermissionForTest(sendRequest, reply, emit, id, sid, ut, permReplies)
 				}()
+			case "toolloop":
+				acpHandleToolLoopForTest(sendNotification, reply, emit, id, sid, ut)
 			case "noisy":
 				wg.Add(1)
 				go func() {
@@ -201,6 +214,10 @@ func runACPFakeServer() {
 					atomic.StoreInt32(&busy, 0)
 				}()
 			default: // warm
+				if strings.Contains(ut, "FAIL-THIS-TURN") {
+					replyErr(id, -32603, "scripted failure")
+					continue
+				}
 				sendNotification("session/update", map[string]any{
 					"sessionId": sid,
 					"update": map[string]any{
@@ -223,38 +240,17 @@ func runACPFakeServer() {
 	wg.Wait()
 }
 
-// acpHandleStaleForTest mirrors spikes/acp/fakeagent's handleStale: a naive
-// stateful agent answers the FIRST history entry that is a substring of the
-// current prompt, UNLESS the current prompt carries acpSupersedesMarker, in
-// which case it answers only the text after the marker.
-func acpHandleStaleForTest(send func(any), reply func(json.RawMessage, any), historyMu *sync.Mutex, history *[]string, id json.RawMessage, sessionID, userText string) {
-	historyMu.Lock()
-	*history = append(*history, userText)
-	snapshot := append([]string(nil), *history...)
-	historyMu.Unlock()
-
-	var answer string
-	if idx := strings.Index(userText, acpSupersedesMarker); idx >= 0 {
-		fresh := strings.TrimSpace(userText[idx+len(acpSupersedesMarker):])
-		answer = "FRESH-ANSWER-TO:" + fresh
-	} else {
-		matched := snapshot[0]
-		for _, h := range snapshot {
-			if strings.Contains(userText, h) {
-				matched = h
-				break
-			}
-		}
-		answer = "STALE-ANSWER-TO:" + matched
-	}
-	send(acpMsg{JSONRPC: "2.0", Method: "session/update", Params: acpMustJSON(map[string]any{
-		"sessionId": sessionID,
-		"update": map[string]any{
-			"sessionUpdate": "agent_message_chunk",
-			"content":       map[string]any{"type": "text", "text": answer},
+// acpFakeConfigOptions is a minimal ACP configOptions payload advertising
+// one `model` select option, with `current` as its current value.
+func acpFakeConfigOptions(current string) []any {
+	return []any{map[string]any{
+		"id": "model", "name": "Model", "category": "model", "type": "select",
+		"currentValue": current,
+		"options": []any{
+			map[string]any{"value": "m-1", "name": "Model 1"},
+			map[string]any{"value": "m-2", "name": "Model 2"},
 		},
-	})})
-	reply(id, map[string]any{"stopReason": "end_turn"})
+	}}
 }
 
 func acpHandlePermissionForTest(sendRequest func(string, any) string, reply func(json.RawMessage, any), emit func(acpEvent), id json.RawMessage, sessionID, userText string, permReplies chan acpMsg) {
@@ -364,8 +360,9 @@ func acpUserMessage(text string) InProcessRequest {
 // Tests
 // ---------------------------------------------------------------------------
 
-// 1. Warm session reuse: the agent process starts once, the session is
-// created once, and each of several Generate calls is only a session/prompt.
+// 1. Warm session reuse: one process, one session, and a conversation that
+// grows turn by turn is sent as one opening prompt followed by continuation
+// prompts carrying only the new messages (add-acp-session-delta).
 func TestACP_WarmSessionReuse(t *testing.T) {
 	outFile := filepath.Join(t.TempDir(), "events.ndjson")
 	c, err := LoadACP(context.Background(), acpTestOptions(t, "warm", outFile))
@@ -374,32 +371,49 @@ func TestACP_WarmSessionReuse(t *testing.T) {
 	}
 	defer c.Close()
 
+	var conv []any
 	for i := 0; i < 3; i++ {
-		resp, err := c.Generate(acpUserMessage(fmt.Sprintf("turn %d", i)))
+		conv = append(conv, map[string]any{"role": "user", "content": fmt.Sprintf("turn %d", i)})
+		resp, err := c.Generate(InProcessRequest{Messages: conv})
 		if err != nil {
 			t.Fatalf("Generate #%d: %v", i, err)
 		}
 		if !strings.Contains(resp.Content, "echo:") {
 			t.Fatalf("Generate #%d: unexpected content %q", i, resp.Content)
 		}
+		conv = append(conv, map[string]any{"role": "assistant", "content": resp.Content})
 	}
 	c.Close()
 
 	events := readACPEvents(t, outFile)
-	sessionNewCount, promptCount := 0, 0
+	sessionNewCount := 0
+	var prompts []string
 	for _, ev := range events {
 		switch ev.Type {
 		case "session/new":
 			sessionNewCount++
 		case "session/prompt":
-			promptCount++
+			prompts = append(prompts, ev.Data["text"].(string))
 		}
 	}
 	if sessionNewCount != 1 {
 		t.Fatalf("expected exactly 1 session/new, got %d", sessionNewCount)
 	}
-	if promptCount != 3 {
-		t.Fatalf("expected 3 session/prompt calls, got %d", promptCount)
+	if len(prompts) != 3 {
+		t.Fatalf("expected 3 session/prompt calls, got %d", len(prompts))
+	}
+	if !strings.HasPrefix(prompts[0], acpPreamble) {
+		t.Fatal("turn 1 must be an opening prompt")
+	}
+	for i, p := range prompts[1:] {
+		kind, body, ok := acpSplitPrompt(p)
+		if !ok || kind != "continuation" {
+			t.Fatalf("turn %d must be a continuation prompt, got %q", i+2, p)
+		}
+		msgs := body["messages"].([]any)
+		if len(msgs) != 1 || msgs[0].(map[string]any)["content"] != fmt.Sprintf("turn %d", i+1) {
+			t.Fatalf("turn %d continuation must carry only the new user message, got %v", i+2, msgs)
+		}
 	}
 }
 
@@ -461,7 +475,8 @@ func TestACP_ThoughtAndToolNarrationFiltered(t *testing.T) {
 	}
 }
 
-// 3. A permission request is answered (first allow-kind option) rather than
+// 3. A permission request is answered (first reject-kind option by default —
+// the client executes tools, the agent must not) rather than
 // awaited: the turn completes quickly, and the server observed the answer.
 func TestACP_PermissionAnsweredNotAwaited(t *testing.T) {
 	outFile := filepath.Join(t.TempDir(), "events.ndjson")
@@ -492,8 +507,8 @@ func TestACP_PermissionAnsweredNotAwaited(t *testing.T) {
 			if outcome, _ := ev.Data["outcome"].(string); outcome != "selected" {
 				t.Fatalf("expected outcome selected, got %v", ev.Data["outcome"])
 			}
-			if optID, _ := ev.Data["optionId"].(string); optID != "allow-once" {
-				t.Fatalf("expected first allow-kind option 'allow-once', got %v", ev.Data["optionId"])
+			if optID, _ := ev.Data["optionId"].(string); optID != "reject" {
+				t.Fatalf("expected the first reject-kind option 'reject' by default, got %v", ev.Data["optionId"])
 			}
 		}
 	}
@@ -502,37 +517,28 @@ func TestACP_PermissionAnsweredNotAwaited(t *testing.T) {
 	}
 }
 
-// 4. The supersedes marker prevents a stale answer: a second Generate call's
-// content reflects the NEW turn, not a near-duplicate answer keyed off the
-// first turn still sitting in the (stateful) session's own history.
-func TestACP_SupersedesMarkerPreventsStaleAnswer(t *testing.T) {
-	c, err := LoadACP(context.Background(), acpTestOptions(t, "stale", ""))
+// 4. An unrelated conversation is never answered from the old session: it
+// opens a fresh session and is sent as an opening prompt.
+func TestACP_UnrelatedConversationOpensFreshSession(t *testing.T) {
+	outFile := filepath.Join(t.TempDir(), "events.ndjson")
+	c, err := LoadACP(context.Background(), acpTestOptions(t, "warm", outFile))
 	if err != nil {
 		t.Fatalf("LoadACP: %v", err)
 	}
-	defer c.Close()
-
-	resp1, err := c.Generate(acpUserMessage("what color is the sky"))
-	if err != nil {
+	if _, err := c.Generate(acpUserMessage("what color is the sky")); err != nil {
 		t.Fatalf("Generate #1: %v", err)
 	}
-	if !strings.HasPrefix(resp1.Content, "FRESH-ANSWER-TO:") || !strings.Contains(resp1.Content, "sky") {
-		t.Fatalf("turn 1: unexpected content %q", resp1.Content)
-	}
-
-	// Turn 2's FULL assembled request (by construction of InProcessRequest
-	// here) does not literally repeat turn 1's text, but the point under
-	// test is the marker: the fake server keys its answer off whatever
-	// follows acpSupersedesMarker, so it must be turn 2's own text.
-	resp2, err := c.Generate(acpUserMessage("what color is grass"))
+	resp, err := c.Generate(acpUserMessage("what color is grass"))
 	if err != nil {
 		t.Fatalf("Generate #2: %v", err)
 	}
-	if !strings.HasPrefix(resp2.Content, "FRESH-ANSWER-TO:") {
-		t.Fatalf("turn 2: expected a FRESH answer via the supersedes marker, got %q", resp2.Content)
+	c.Close()
+	if strings.Contains(resp.Content, "sky") {
+		t.Fatalf("turn 2 carried turn-1 content: %q", resp.Content)
 	}
-	if !strings.Contains(resp2.Content, "grass") || strings.Contains(resp2.Content, "sky") {
-		t.Fatalf("turn 2: answered from stale turn-1 history instead of the new turn: %q", resp2.Content)
+	news, sessions := acpCountSessions(t, outFile)
+	if news != 2 || len(sessions) != 2 || sessions[0] == sessions[1] {
+		t.Fatalf("expected two sessions (one per conversation), got session/new=%d prompts on %v", news, sessions)
 	}
 }
 
