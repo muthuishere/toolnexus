@@ -17,13 +17,13 @@ agent asks for a tool, the loop executes it, and the agent answers from the resu
 nameless call skipped) · permission rejected by default, allowed on opt-in · existing ACP tests
 still green.
 
-- [ ] `golang/`
-- [ ] `js/`
-- [ ] `python/`
-- [ ] `java/`
-- [ ] `csharp/`
-- [ ] `elixir/`
-- [ ] `clojure/`
+- [x] `golang/`
+- [x] `js/`
+- [x] `python/`
+- [x] `java/`
+- [x] `csharp/`
+- [x] `elixir/`
+- [x] `clojure/`
 
 ## Deliberately out of scope
 
