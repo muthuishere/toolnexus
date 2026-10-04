@@ -171,6 +171,8 @@ func runACPFakeServer() {
 					defer wg.Done()
 					acpHandlePermissionForTest(sendRequest, reply, emit, id, sid, ut, permReplies)
 				}()
+			case "toolloop":
+				acpHandleToolLoopForTest(sendNotification, reply, emit, id, sid, ut)
 			case "noisy":
 				wg.Add(1)
 				go func() {
@@ -461,7 +463,8 @@ func TestACP_ThoughtAndToolNarrationFiltered(t *testing.T) {
 	}
 }
 
-// 3. A permission request is answered (first allow-kind option) rather than
+// 3. A permission request is answered (first reject-kind option by default —
+// the client executes tools, the agent must not) rather than
 // awaited: the turn completes quickly, and the server observed the answer.
 func TestACP_PermissionAnsweredNotAwaited(t *testing.T) {
 	outFile := filepath.Join(t.TempDir(), "events.ndjson")
@@ -492,8 +495,8 @@ func TestACP_PermissionAnsweredNotAwaited(t *testing.T) {
 			if outcome, _ := ev.Data["outcome"].(string); outcome != "selected" {
 				t.Fatalf("expected outcome selected, got %v", ev.Data["outcome"])
 			}
-			if optID, _ := ev.Data["optionId"].(string); optID != "allow-once" {
-				t.Fatalf("expected first allow-kind option 'allow-once', got %v", ev.Data["optionId"])
+			if optID, _ := ev.Data["optionId"].(string); optID != "reject" {
+				t.Fatalf("expected the first reject-kind option 'reject' by default, got %v", ev.Data["optionId"])
 			}
 		}
 	}

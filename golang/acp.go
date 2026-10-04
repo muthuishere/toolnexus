@@ -8,6 +8,12 @@
 // sub-agents are untouched. It is NOT a new tool source and NOT a new
 // client — see ADR 0031 and openspec/changes/add-acp-model-source.
 //
+// The agent is a real tool-calling model (openspec/changes/add-acp-tool-calling,
+// SPEC §8 "ACP model source"): each prompt carries the OpenAI-shaped request —
+// messages, including earlier tool calls and their results, plus the tool
+// schemas — and the agent's JSON reply is parsed back into content or tool
+// calls, which the loop executes through the toolkit.
+//
 // The warm session is the feature (ADR 0031's measurements): the agent
 // process and its ACP session are created once by LoadACP and then serve
 // every turn as a `session/prompt` on that same session — amortising the
@@ -25,9 +31,10 @@
 // `session/update` notifications interleave with our own request replies;
 // accumulate ONLY `agent_message_chunk` text (thoughts and tool narration
 // must be dropped or they corrupt structured output the host expects back);
-// answer `session/request_permission` with the first `allow`-kind option —
-// an unanswered permission request hangs the turn forever, even in bypass
-// mode; serialise turns on one session (one ACP session is one conversation,
+// answer `session/request_permission` immediately — the first `reject`-kind
+// option by default, since toolnexus executes the tools, or the first
+// `allow`-kind option with AllowAgentTools — because an unanswered permission
+// request hangs the turn forever, even in bypass mode; serialise turns on one session (one ACP session is one conversation,
 // concurrent prompts must not interleave into one transcript); and keep the
 // child process's lifetime independent of any one turn's cancellation.
 package toolnexus
@@ -119,6 +126,14 @@ type ACPOptions struct {
 	// RequestTimeout bounds `initialize` / `session/new` / `session/set_mode`
 	// and the reply half of `session/prompt`. Defaults to 30s.
 	RequestTimeout time.Duration
+
+	// AllowAgentTools lets the agent run tools of its OWN: a
+	// session/request_permission is then answered with the first
+	// `allow`-kind option. Default false — the first `reject`-kind option —
+	// because toolnexus is the tool executor (SPEC §8, add-acp-tool-calling):
+	// an agent that runs `bash` itself has escaped every hook and any
+	// builtin execution seam (ADR 0033).
+	AllowAgentTools bool
 }
 
 // ACPClient is one warm ACP session: one child process, one session id,
@@ -143,6 +158,7 @@ type ACPClient struct {
 
 	permissionTimeout time.Duration
 	requestTimeout    time.Duration
+	allowAgentTools   bool
 
 	closeOnce sync.Once
 	closeErr  error
@@ -209,6 +225,7 @@ func LoadACP(ctx context.Context, opts ACPOptions) (*ACPClient, error) {
 		pending:           make(map[string]chan acpMsg),
 		permissionTimeout: permissionTimeout,
 		requestTimeout:    requestTimeout,
+		allowAgentTools:   opts.AllowAgentTools,
 	}
 	c.stdout.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
 	go c.readLoop()
@@ -290,7 +307,7 @@ func (c *ACPClient) readLoop() {
 			// Answered inline, from the read loop itself, so it can never be
 			// held up behind whatever sendPrompt is doing — an unanswered
 			// permission request hangs the turn forever (ADR 0031).
-			c.answerPermissionFirstAllow(msg)
+			c.answerPermission(msg)
 
 		default:
 			// Unhandled server->client notification/request; nothing this
@@ -300,7 +317,10 @@ func (c *ACPClient) readLoop() {
 	}
 }
 
-func (c *ACPClient) answerPermissionFirstAllow(req acpMsg) {
+// answerPermission selects the first `reject`-kind option by default (the
+// client executes tools, the agent must not), or the first `allow`-kind
+// option when AllowAgentTools is set; no matching option ⇒ cancelled.
+func (c *ACPClient) answerPermission(req acpMsg) {
 	var params struct {
 		Options []struct {
 			OptionID string `json:"optionId"`
@@ -308,9 +328,13 @@ func (c *ACPClient) answerPermissionFirstAllow(req acpMsg) {
 		} `json:"options"`
 	}
 	_ = json.Unmarshal(req.Params, &params)
+	want := "reject"
+	if c.allowAgentTools {
+		want = "allow"
+	}
 	chosen := ""
 	for _, o := range params.Options {
-		if strings.HasPrefix(o.Kind, "allow") {
+		if strings.HasPrefix(o.Kind, want) {
 			chosen = o.OptionID
 			break
 		}
@@ -453,72 +477,179 @@ func (c *ACPClient) sendPrompt(text string) (string, error) {
 // Generate: the seam into InProcessOptions.Generate / CreateInProcessClient.
 // ---------------------------------------------------------------------------
 
-// Generate renders the full assembled request (req.Messages, flattened to
-// role+content text) as the prompt for this turn, appends the
-// acpSupersedesMarker naming the latest user turn, sends exactly one
-// session/prompt on the warm session, and returns the accumulated
-// agent_message_chunk text. Turns are serialised: only one session/prompt is
-// ever in flight at a time on this client.
+// Generate sends the assembled OpenAI-shaped request (messages + tools) as
+// one session/prompt on the warm session and parses the accumulated
+// agent_message_chunk text into one assistant message — tool calls or
+// content (SPEC §8 "ACP model source"). Turns are serialised: only one
+// session/prompt is ever in flight at a time on this client.
 func (c *ACPClient) Generate(req InProcessRequest) (InProcessResponse, error) {
 	prompt := renderACPPrompt(req)
 
 	c.promptMu.Lock()
 	defer c.promptMu.Unlock()
 
-	content, err := c.sendPrompt(prompt)
+	text, err := c.sendPrompt(prompt)
 	if err != nil {
 		return InProcessResponse{}, err
 	}
-	return InProcessResponse{Content: content}, nil
+	return parseACPReply(text), nil
 }
 
-// renderACPPrompt flattens req.Messages into "role: content" lines (the
-// FULL request, per turn — an ACP session is stateful, so sending only the
-// delta would make the client a second, shadow copy of conversation state)
-// and appends the supersedes marker naming the latest user turn, so a
-// stateful agent answers the current request rather than an earlier
-// near-duplicate already sitting in its own session history (ADR 0031).
+// acpPreamble is byte-pinned by SPEC §8 — identical in all seven ports.
+const acpPreamble = "You are the language model behind a tool-calling client. The client executes tools; you never do.\n" +
+	"Do not run commands, read or edit files, or use any tool of your own.\n" +
+	"The REQUEST below is the complete conversation in OpenAI chat-completions format: \"messages\" holds every message so far, including earlier tool calls and their results; \"tools\" lists the only tools you may call.\n" +
+	"Reply with exactly one JSON object and nothing else: no prose, no markdown fences.\n" +
+	"To give the final answer: {\"content\": \"<answer>\"}\n" +
+	"To call tools: {\"tool_calls\": [{\"id\": \"<unique id>\", \"type\": \"function\", \"function\": {\"name\": \"<tool name>\", \"arguments\": \"<JSON-encoded arguments>\"}}]}\n" +
+	"Never both. Use tool results already in \"messages\" instead of calling the same tool again.\n"
+
+// renderACPPrompt assembles PREAMBLE + "\nREQUEST:\n" + JSON + "\n\n" +
+// marker + " " + latest user text. The FULL request goes every turn (an ACP
+// session is stateful; a delta would make the client a shadow copy of
+// conversation state), and the supersedes marker keeps a stateful agent off
+// an earlier near-duplicate in its own history (ADR 0031).
 func renderACPPrompt(req InProcessRequest) string {
-	var b strings.Builder
-	lastUser := ""
-	for _, m := range req.Messages {
-		role, content := acpFlattenMessage(m)
-		if role == "" && content == "" {
-			continue
-		}
-		fmt.Fprintf(&b, "%s: %s\n", role, content)
-		if role == "user" && content != "" {
-			lastUser = content
+	messages := req.Messages
+	if messages == nil {
+		messages = []any{}
+	}
+	tools := req.Tools
+	if tools == nil {
+		tools = []any{}
+	}
+	var buf strings.Builder
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	// A struct, not a map, so the key order is messages-then-tools.
+	_ = enc.Encode(struct {
+		Messages []any `json:"messages"`
+		Tools    []any `json:"tools"`
+	}{messages, tools})
+	payload := strings.TrimRight(buf.String(), "\n")
+
+	latest, found := "", false
+	for i := len(messages) - 1; i >= 0; i-- {
+		if mm, ok := messages[i].(map[string]any); ok && mm["role"] == "user" {
+			latest, found = acpContentText(mm["content"]), true
+			break
 		}
 	}
-	if lastUser == "" && len(req.Messages) > 0 {
-		_, lastUser = acpFlattenMessage(req.Messages[len(req.Messages)-1])
+	if !found && len(messages) > 0 {
+		if mm, ok := messages[len(messages)-1].(map[string]any); ok {
+			latest = acpContentText(mm["content"])
+		}
 	}
-	fmt.Fprintf(&b, "\n%s %s", acpSupersedesMarker, lastUser)
-	return b.String()
+	return acpPreamble + "\nREQUEST:\n" + payload + "\n\n" + acpSupersedesMarker + " " + latest
 }
 
-// acpFlattenMessage renders one message's role + content as plain text.
-// Content is usually a string; anything else (multimodal parts, etc.) is
-// JSON-encoded so it still renders as recognizable text rather than being
-// silently dropped.
-func acpFlattenMessage(m any) (role, content string) {
-	mm, ok := m.(map[string]any)
-	if !ok {
-		return "", ""
-	}
-	role, _ = mm["role"].(string)
-	switch v := mm["content"].(type) {
+// acpContentText renders a message's content for the supersedes line: a
+// string as is; an array of parts ⇒ the text of its type:"text" parts joined
+// by one space; anything else ⇒ "".
+func acpContentText(content any) string {
+	switch v := content.(type) {
 	case string:
-		content = v
-	case nil:
-		content = ""
-	default:
-		if b, err := json.Marshal(v); err == nil {
-			content = string(b)
+		return v
+	case []any:
+		var texts []string
+		for _, p := range v {
+			if pm, ok := p.(map[string]any); ok && pm["type"] == "text" {
+				if t, ok := pm["text"].(string); ok {
+					texts = append(texts, t)
+				}
+			}
+		}
+		return strings.Join(texts, " ")
+	}
+	return ""
+}
+
+// parseACPReply turns the agent's reply text into one assistant message, by
+// the algorithm SPEC §8 pins: strip fences, parse (or the first-{..last-}
+// slice), unwrap choices[0].message / message, then tool_calls ⇒ ToolCalls,
+// content ⇒ Content, anything else ⇒ the original text untouched.
+func parseACPReply(text string) InProcessResponse {
+	s := strings.TrimSpace(text)
+	if strings.HasPrefix(s, "```") {
+		if nl := strings.IndexByte(s, '\n'); nl >= 0 {
+			s = s[nl+1:]
+		} else {
+			s = ""
+		}
+		s = strings.TrimSpace(s)
+		s = strings.TrimSpace(strings.TrimSuffix(s, "```"))
+	}
+
+	obj, ok := acpParseObject(s)
+	if !ok {
+		if i, j := strings.IndexByte(s, '{'), strings.LastIndexByte(s, '}'); i >= 0 && j > i {
+			obj, ok = acpParseObject(s[i : j+1])
 		}
 	}
-	return role, content
+	if !ok {
+		return InProcessResponse{Content: text}
+	}
+
+	if choices, isArr := obj["choices"].([]any); isArr && len(choices) > 0 {
+		if first, isObj := choices[0].(map[string]any); isObj {
+			if msg, isObj := first["message"].(map[string]any); isObj {
+				obj = msg
+			}
+		}
+	} else if msg, isObj := obj["message"].(map[string]any); isObj {
+		obj = msg
+	}
+
+	if raw, isArr := obj["tool_calls"].([]any); isArr {
+		var calls []InProcessToolCall
+		for _, el := range raw {
+			em, isObj := el.(map[string]any)
+			if !isObj {
+				continue
+			}
+			fn := em
+			if f, isObj := em["function"].(map[string]any); isObj {
+				fn = f
+			}
+			name, _ := fn["name"].(string)
+			if name == "" {
+				continue
+			}
+			var args any = map[string]any{}
+			if a, present := fn["arguments"]; present && a != nil {
+				args = a // a string passes through as pre-encoded; else structured
+			}
+			id, _ := em["id"].(string)
+			calls = append(calls, InProcessToolCall{ID: id, Name: name, Arguments: args})
+		}
+		if len(calls) > 0 {
+			return InProcessResponse{ToolCalls: calls}
+		}
+	}
+
+	if content, present := obj["content"]; present {
+		switch v := content.(type) {
+		case string:
+			return InProcessResponse{Content: v}
+		case nil:
+			return InProcessResponse{Content: ""}
+		default:
+			var buf strings.Builder
+			enc := json.NewEncoder(&buf)
+			enc.SetEscapeHTML(false)
+			_ = enc.Encode(v)
+			return InProcessResponse{Content: strings.TrimRight(buf.String(), "\n")}
+		}
+	}
+	return InProcessResponse{Content: text}
+}
+
+func acpParseObject(s string) (map[string]any, bool) {
+	var obj map[string]any
+	if err := json.Unmarshal([]byte(s), &obj); err != nil || obj == nil {
+		return nil, false
+	}
+	return obj, true
 }
 
 // ---------------------------------------------------------------------------

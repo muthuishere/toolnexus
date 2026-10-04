@@ -1550,6 +1550,54 @@ content or delta count; the exception is Clojure, which has no streaming entry p
 The injectable transport (Gap 2) is unchanged and remains the answer for proxy, mTLS and
 record-replay — this is a second constructor over it, not a second seam.
 
+#### ACP model source (change `add-acp-tool-calling`)
+
+An ACP (Agent Client Protocol) agent — a local child process speaking JSON-RPC 2.0, one object per
+line — MAY serve as the `generate` above (`loadAcp(...).generate`, ADR 0031). It is a **tool-calling
+model**, not a text oracle: each turn is one `session/prompt` on one warm session whose single text
+block is, byte for byte,
+
+```
+PREAMBLE + "\nREQUEST:\n" + JSON + "\n\nSUPERSEDES-ALL-PRIOR: " + LATEST_USER
+```
+
+`PREAMBLE` is these seven lines, each terminated by `\n`:
+
+```
+You are the language model behind a tool-calling client. The client executes tools; you never do.
+Do not run commands, read or edit files, or use any tool of your own.
+The REQUEST below is the complete conversation in OpenAI chat-completions format: "messages" holds every message so far, including earlier tool calls and their results; "tools" lists the only tools you may call.
+Reply with exactly one JSON object and nothing else: no prose, no markdown fences.
+To give the final answer: {"content": "<answer>"}
+To call tools: {"tool_calls": [{"id": "<unique id>", "type": "function", "function": {"name": "<tool name>", "arguments": "<JSON-encoded arguments>"}}]}
+Never both. Use tool results already in "messages" instead of calling the same tool again.
+```
+
+`JSON` is a compact object with keys `messages` then `tools` — the assembled request's arrays,
+unmodified (`[]` when absent). Its bytes are **not** pinned (key order and escaping are the JSON
+library's); it MUST parse to those two arrays, and MUST NOT HTML-escape where that is optional.
+`LATEST_USER` is the last `user` message's content (a string as is; an array of parts → the `text`
+of its `type:"text"` parts joined by one space); with no user message, the last message's content
+rendered the same way; with no messages, empty.
+
+Only `agent_message_chunk` text is accumulated. It is parsed into **one** assistant message:
+
+1. `s` = text trimmed; if `s` starts with ```, drop its first line, then a trailing ```, trim.
+2. Parse `s` as JSON; failing that (or not an object), and if `s` has a `{` with a `}` after it,
+   parse first-`{`..last-`}`. No object → **content = the original text**.
+3. Unwrap `choices[0].message` (non-empty `choices`, object `message`), else an object `message`.
+4. `tool_calls` array → per object element: `fn` = its object `function`, else the element; skip
+   unless `fn.name` is a non-empty string; `arguments` absent/null → `{}`, a string → pre-encoded,
+   else structured; `id` kept only if a non-empty string. ≥ 1 call → **toolCalls**.
+5. Else a `content` key → string as is, null → `""`, other → compact JSON → **content**.
+6. Else → **content = the original text** (not an envelope: e.g. structured output the host asked for).
+
+`session/request_permission` is answered immediately from the read loop, never awaited: by default
+the first option whose `kind` starts with `reject`, else `cancelled` — the client executes tools,
+the agent must not. An **allow-agent-tools** option (idiomatic spelling per port) selects the first
+`allow`-kind option instead. `session/new` sends an absolute `cwd` and `mcpServers: []`. Local
+process only; ACP `authenticate` and remote agents are not part of this contract.
+
 ### Resilience (retries + timeout/cancel)
 
 `ClientOptions`: `retries` (default 2), `retryBaseMs` (default 500), `retryableStatuses` (optional,
