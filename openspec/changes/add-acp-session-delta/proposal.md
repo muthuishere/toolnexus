@@ -54,7 +54,9 @@ what it sent, and **any** mismatch opens a fresh session rather than guessing.
 
 ## Not in scope
 
-- MCP passthrough of the toolkit to the agent — tools stay ordinary tool calls (`mcpServers: []`).
+- MCP passthrough of the toolkit to the agent. Deliberate, and now a requirement: MCP servers and
+  skills stay toolnexus tools executed by our loop (`mcpServers: []`), so hooks, approvals and
+  metrics keep applying — handing the agent our MCP config would cede that control.
 - ACP `authenticate`, remote agents, streaming — unchanged from `add-acp-tool-calling`.
 - Closing abandoned sessions: ACP v1 has no stable session-close; a reset abandons the old session
   inside the still-running agent process. A host that resets constantly can `close` and reload.

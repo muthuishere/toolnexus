@@ -71,3 +71,17 @@ mode), surfacing an agent's rejection unchanged, without interpreting or validat
 
 - **WHEN** the agent's `session/new` response contains `configOptions`
 - **THEN** the host can read them, unmodified, from the client
+
+### Requirement: The host's tool sources stay in the host loop
+
+The ACP model source SHALL send `mcpServers: []` on every `session/new` and SHALL offer the host's
+tools — MCP servers, skills, native, HTTP and builtin tools alike — only as tool schemas in the
+prompt, so that every tool call is executed by the toolnexus loop and never handed to the agent's
+own MCP client.
+
+#### Scenario: MCP config is not passed to the agent
+
+- **WHEN** a host builds its toolkit from an `mcp.json` and a skills directory and runs it over an
+  ACP client
+- **THEN** every `session/new` carries `mcpServers: []`, and those tools reach the agent only as
+  schemas in the opening prompt, executed by the toolnexus loop when the agent calls them
