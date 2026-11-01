@@ -221,7 +221,8 @@ public sealed class Loop
         BaseUrl = o.BaseUrl, Style = o.Style, Model = o.Model, ApiKey = o.ApiKey,
         Headers = o.Headers, SystemPrompt = o.SystemPrompt, MaxTurns = o.MaxTurns,
         Hooks = o.Hooks, Retries = o.Retries, RetryBaseMs = o.RetryBaseMs, TimeoutMs = o.TimeoutMs,
-        Store = o.Store, OnMetric = o.OnMetric, WaitFor = o.WaitFor,
+        Store = o.Store, OnMetric = o.OnMetric, WaitFor = o.WaitFor, WaitForCtx = o.WaitForCtx,
+        ApiKeyEnv = o.ApiKeyEnv, PromptCache = o.PromptCache, ToolTiers = o.ToolTiers,
         RequestParams = o.RequestParams, BodyTransform = o.BodyTransform,
         HttpClient = o.HttpClient, HttpHandler = o.HttpHandler, OnError = o.OnError,
     };

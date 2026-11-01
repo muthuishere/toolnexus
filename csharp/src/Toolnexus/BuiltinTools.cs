@@ -85,7 +85,7 @@ public static partial class BuiltinTools
     public static List<ITool> Create(object? cfg)
     {
         var env = new BuiltinEnv(cfg);
-        return new()
+        var tools = new List<ITool>
         {
             BashTool(env),
             ReadTool(env),
@@ -98,7 +98,39 @@ public static partial class BuiltinTools
             ApplyPatchTool(env),
             TodowriteTool(),
         };
+        // Opt-in tools (SPEC §4C): absent unless the host configures them, so the default ten are unchanged.
+        if (env.Background != null)
+        {
+            tools.Add(BashOutputTool(env.Background));
+            tools.Add(KillShellTool(env.Background));
+        }
+        if (env.WebSearch != null) tools.Add(WebSearchTool(env.WebSearch));
+        if (env.NotebookEdit) tools.Add(NotebookEditTool(env));
+        return tools;
     }
+
+    /// <summary>
+    /// (SPEC §4C) Hints for host permission gates. <c>bash</c> can do anything, so it is
+    /// destructive and open-world. <c>todowrite</c> and <c>question</c> only touch the agent's own
+    /// state / ask the human, so they count as read-only for the host's files and systems.
+    /// </summary>
+    private static readonly Dictionary<string, ToolHints> BuiltinHints = new()
+    {
+        ["bash"] = new(Destructive: true, OpenWorld: true),
+        ["read"] = new(ReadOnly: true),
+        ["write"] = new(Destructive: true),
+        ["edit"] = new(Destructive: true),
+        ["grep"] = new(ReadOnly: true),
+        ["glob"] = new(ReadOnly: true),
+        ["webfetch"] = new(ReadOnly: true, OpenWorld: true),
+        ["question"] = new(ReadOnly: true),
+        ["apply_patch"] = new(Destructive: true),
+        ["todowrite"] = new(ReadOnly: true),
+        ["bash_output"] = new(ReadOnly: true),
+        ["kill_shell"] = new(Destructive: true),
+        ["websearch"] = new(ReadOnly: true, OpenWorld: true),
+        ["notebook_edit"] = new(Destructive: true),
+    };
 
     // -----------------------------------------------------------------------
     // schema helpers
@@ -154,6 +186,7 @@ public static partial class BuiltinTools
         public string Description { get; }
         public IDictionary<string, object?> InputSchema { get; }
         public string Source => "builtin";
+        public ToolHints? Hints { get; }
 
         public BuiltinTool(string name, string description, Dictionary<string, object?> inputSchema,
             Func<IDictionary<string, object?>, ToolContext?, Task<ToolResult>> run)
@@ -161,6 +194,7 @@ public static partial class BuiltinTools
             Name = name;
             Description = description;
             InputSchema = inputSchema;
+            Hints = BuiltinHints.GetValueOrDefault(name);
             _run = run;
         }
 
@@ -262,16 +296,24 @@ public static partial class BuiltinTools
     // individual tools
     // -----------------------------------------------------------------------
 
-    private static ITool BashTool(BuiltinEnv env) => Builtin(
-        "bash",
-        "Run a shell command and return its combined stdout+stderr. Non-zero exit is an error.",
-        Schema(new()
+    private static Dictionary<string, object?> BashProps(BuiltinEnv env)
+    {
+        var props = new Dictionary<string, object?>
         {
             ["command"] = StrProp("The shell command to run"),
             ["workdir"] = StrProp("Working directory (default: process cwd)"),
             ["timeout"] = NumProp("Timeout in milliseconds (default 60000)"),
             ["description"] = StrProp("Human-readable description of the command"),
-        }, "command"),
+        };
+        if (env.Background != null)
+            props["run_in_background"] = BoolProp("Start the command and return at once with a background shell id; read it with bash_output, stop it with kill_shell. No timeout applies.");
+        return props;
+    }
+
+    private static ITool BashTool(BuiltinEnv env) => Builtin(
+        "bash",
+        "Run a shell command and return its combined stdout+stderr. Non-zero exit is an error.",
+        Schema(BashProps(env), "command"),
         async (args, ctx) =>
         {
             var command = Str(args, "command");
@@ -292,6 +334,16 @@ public static partial class BuiltinTools
             }
             var timeout = NumOrNull(args.Get("timeout")) ?? 60_000;
             var meta = new Dictionary<string, object?> { ["shell"] = env.ShellLabel };
+            if (env.Background != null && args.Get("run_in_background") is true)
+            {
+                try
+                {
+                    var id = env.Background.Start(argv, command, workdir, env.KillGraceMs);
+                    meta["backgroundId"] = id;
+                    return ToolResult.Ok($"Started background shell {id}. Read its output with bash_output, stop it with kill_shell.", meta);
+                }
+                catch (Exception e) { return ToolResult.Error($"bash: {e.Message}", meta); }
+            }
 
             var psi = new ProcessStartInfo
             {
@@ -430,7 +482,18 @@ public static partial class BuiltinTools
             if (start > lines.Length) start = lines.Length;
             var count = Math.Min(limit, lines.Length - start);
             if (count < 0) count = 0;
-            return Task.FromResult(ToolResult.Ok(string.Join("\n", lines.Skip(start).Take(count))));
+            var window = string.Join("\n", lines.Skip(start).Take(count));
+            // (SPEC §4C) A window that stops before the end of the file says so in metadata, with
+            // the offset to continue from. The text stays the pinned cross-port bytes. A trailing
+            // newline does not count as a line.
+            var total = lines.Length > 0 && lines[^1].Length == 0 ? lines.Length - 1 : lines.Length;
+            var end = start + count;
+            if (end < total)
+                return Task.FromResult(ToolResult.Ok(window, new Dictionary<string, object?>
+                {
+                    ["truncated"] = true, ["totalLines"] = (long)total, ["nextOffset"] = (long)(end + 1),
+                }));
+            return Task.FromResult(ToolResult.Ok(window));
         });
 
     private static ITool WriteTool(BuiltinEnv env) => Builtin(
@@ -535,6 +598,9 @@ public static partial class BuiltinTools
             ["path"] = StrProp("Directory to search (default: process cwd)"),
             ["include"] = StrProp("Glob filter for file names"),
             ["limit"] = NumProp("Maximum number of matches (default 100)"),
+            ["context"] = NumProp("Lines of context before and after each match"),
+            ["before"] = NumProp("Lines of context before each match (overrides context)"),
+            ["after"] = NumProp("Lines of context after each match (overrides context)"),
         }, "pattern"),
         (args, _) =>
         {
@@ -557,6 +623,11 @@ public static partial class BuiltinTools
             // sort at all, so the FILESYSTEM chose which matches the model saw. Never break at the
             // cap during the walk: truncating an unordered collection is a CONTENT bug, not a
             // cosmetic one.
+            int before = 0, after = 0;
+            if (NumOrNull(args.Get("context")) is { } cx && cx > 0) before = after = (int)cx;
+            if (NumOrNull(args.Get("before")) is { } bx && bx >= 0) before = (int)bx;
+            if (NumOrNull(args.Get("after")) is { } ax && ax >= 0) after = (int)ax;
+            var fileLines = new Dictionary<string, string[]>(); // only filled when context is asked for
             var hits = new List<(string Rel, int Line, string Text)>();
             foreach (var file in WalkFiles(root))
             {
@@ -566,6 +637,7 @@ public static partial class BuiltinTools
                 try { text = File.ReadAllText(file); }
                 catch { continue; }
                 var lines = text.Split('\n');
+                if (before > 0 || after > 0) fileLines[rel] = lines;
                 // (A28) The emitted path is the RELATIVE, `/`-separated one — the SAME string the
                 // sort keys on. Emitting the native absolute path while sorting on the relative
                 // one would order by one thing and display another, and `\` on Windows would
@@ -580,9 +652,20 @@ public static partial class BuiltinTools
                 var c = SkillSource.CompareCodePoints(a.Rel, b.Rel);
                 return c != 0 ? c : a.Line.CompareTo(b.Line);
             });
-            var matches = hits.Take(limit).Select(h => h.Text).ToList();
-            var meta = new Dictionary<string, object?> { ["count"] = (long)matches.Count };
-            return Task.FromResult(ToolResult.Ok(string.Join("\n", matches), meta));
+            var total = hits.Count;
+            var kept = hits.Take(limit).ToList();
+            var outLines = before == 0 && after == 0
+                ? kept.Select(h => h.Text).ToList()
+                : GrepWithContext(kept, fileLines, before, after);
+            var meta = new Dictionary<string, object?> { ["count"] = (long)kept.Count };
+            if (total > kept.Count)
+            {
+                // (SPEC §4C) Say the list was cut, and by how much, in metadata. The text stays the
+                // pinned cross-port output.
+                meta["truncated"] = true;
+                meta["total"] = (long)total;
+            }
+            return Task.FromResult(ToolResult.Ok(string.Join("\n", outLines), meta));
         });
 
     private static ITool GlobTool(BuiltinEnv env) => Builtin(

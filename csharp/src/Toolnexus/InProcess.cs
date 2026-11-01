@@ -70,6 +70,8 @@ public static class InProcess
         public IConversationStore? Store { get; set; }
         public Action<MetricEvent>? OnMetric { get; set; }
         public Func<Toolnexus.Request, Task<Answer>>? WaitFor { get; set; }
+        /// <summary>(SPEC §4C) <c>WaitFor</c> with the turn's cancellation token; wins over <c>WaitFor</c>.</summary>
+        public Func<Toolnexus.Request, CancellationToken, Task<Answer>>? WaitForCtx { get; set; }
         public IDictionary<string, object?>? RequestParams { get; set; }
         /// <summary>Defaults to 0 for an in-process client. Set only if your model is genuinely flaky.</summary>
         public int? Retries { get; set; }
@@ -101,6 +103,7 @@ public static class InProcess
             Store = opts.Store,
             OnMetric = opts.OnMetric,
             WaitFor = opts.WaitFor,
+            WaitForCtx = opts.WaitForCtx,
             RequestParams = opts.RequestParams is null ? null : new Dictionary<string, object?>(opts.RequestParams),
             // Zero retries by default: there is no wire, so there is no transient failure to ride
             // out, and retrying only buys backoff before the caller sees their own bug.

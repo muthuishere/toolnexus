@@ -65,11 +65,16 @@ public sealed partial class McpSource : IAsyncDisposable
     private readonly Dictionary<string, string> _status;
     private readonly List<McpClient> _clients;
 
-    private McpSource(List<ITool> tools, Dictionary<string, string> status, List<McpClient> clients)
+    /// <summary>The connected clients by server name, with each server's timeout (for <see cref="ResourceTools"/>).</summary>
+    private readonly Dictionary<string, (McpClient Client, long TimeoutMs)> _servers;
+
+    private McpSource(List<ITool> tools, Dictionary<string, string> status, List<McpClient> clients,
+        Dictionary<string, (McpClient Client, long TimeoutMs)> servers)
     {
         _tools = tools;
         _status = status;
         _clients = clients;
+        _servers = servers;
     }
 
     public IReadOnlyList<ITool> Tools => _tools;
@@ -233,14 +238,34 @@ public sealed partial class McpSource : IAsyncDisposable
     /// within budget marks only that server <c>failed</c> and the build continues, but parent-token
     /// cancellation/deadline aborts the WHOLE load and throws <see cref="OperationCanceledException"/>.
     /// </param>
-    public static async Task<McpSource> LoadAsync(object input, Func<Request, Task<Answer>>? waitFor = null,
+    public static Task<McpSource> LoadAsync(object input, Func<Request, Task<Answer>>? waitFor = null,
+        CancellationToken cancellationToken = default)
+        => LoadAsync(input, new McpLoadOptions { WaitFor = waitFor }, cancellationToken);
+
+    /// <summary>
+    /// (SPEC §4C) <see cref="LoadAsync(object, Func{Request, Task{Answer}}?, CancellationToken)"/> plus
+    /// per-server readiness: <see cref="McpLoadOptions.OnServer"/> fires once per server the moment it is
+    /// connected, failed or found disabled — never waiting for a slower server — so a host can
+    /// <see cref="Toolkit.Register"/> a fast server's tools while a slow one is still connecting. The
+    /// load still returns only after every server finishes; parent cancellation still aborts the load
+    /// and disposes every client, including ones whose tools were already handed out.
+    /// </summary>
+    public static async Task<McpSource> LoadAsync(object input, McpLoadOptions options,
         CancellationToken cancellationToken = default)
     {
+        var waitFor = options.WaitFor;
         var config = ParseConfig(input);
         var tools = new List<ITool>();
         var status = new Dictionary<string, string>();
         var clients = new List<McpClient>();
+        var servers = new Dictionary<string, (McpClient Client, long TimeoutMs)>();
         var gate = new object();
+        var cbGate = new object();
+        void Report(McpServerResult r)
+        {
+            if (options.OnServer == null) return;
+            lock (cbGate) options.OnServer(r); // serialized: never concurrent with itself
+        }
 
         var tasks = new List<Task>();
         foreach (var (name, value) in config)
@@ -252,6 +277,7 @@ public sealed partial class McpSource : IAsyncDisposable
                 if (!IsEnabled(cfg))
                 {
                     lock (gate) status[name] = "disabled";
+                    Report(new McpServerResult(name, "disabled", Array.Empty<ITool>(), null));
                     return;
                 }
                 var timeout = TimeoutOf(cfg);
@@ -276,8 +302,10 @@ public sealed partial class McpSource : IAsyncDisposable
                     {
                         tools.AddRange(converted);
                         clients.Add(client);
+                        servers[name] = (client, timeout);
                         status[name] = "connected";
                     }
+                    Report(new McpServerResult(name, "connected", converted, null));
                 }
                 catch (Exception e)
                 {
@@ -287,6 +315,7 @@ public sealed partial class McpSource : IAsyncDisposable
                         try { await client.DisposeAsync().ConfigureAwait(false); } catch { }
                     }
                     Console.Error.WriteLine($"[toolnexus] MCP server \"{name}\" failed: {e.Message}");
+                    Report(new McpServerResult(name, "failed", Array.Empty<ITool>(), e));
                 }
             }));
         }
@@ -303,7 +332,7 @@ public sealed partial class McpSource : IAsyncDisposable
             }
             cancellationToken.ThrowIfCancellationRequested();
         }
-        return new McpSource(tools, status, clients);
+        return new McpSource(tools, status, clients, servers);
     }
 
     /// <summary>
@@ -588,6 +617,7 @@ public sealed partial class McpSource : IAsyncDisposable
         public string Description { get; }
         public IDictionary<string, object?> InputSchema { get; }
         public string Source => "mcp";
+        public ToolHints? Hints { get; }
 
         private readonly long _timeoutMs;
 
@@ -601,6 +631,8 @@ public sealed partial class McpSource : IAsyncDisposable
             Description = def.Description ?? "";
 
             InputSchema = BuildInputSchema(def);
+            var a = def.ProtocolTool.Annotations;
+            Hints = McpHints(a?.ReadOnlyHint, a?.DestructiveHint, a?.OpenWorldHint);
         }
 
         public async Task<ToolResult> ExecuteAsync(IDictionary<string, object?> args, ToolContext? ctx = null)

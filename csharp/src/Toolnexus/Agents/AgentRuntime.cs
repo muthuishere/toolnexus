@@ -391,7 +391,8 @@ public sealed class AgentRuntime
     {
         var chain = new List<Handle>();
         for (var p = h; p != null; p = p.Parent) chain.Add(p);
-        if (!chain.Any(a => a.Def.WaitFor != null)) return null;
+        var runtimeWaitFor = _opts.WaitFor;
+        if (!chain.Any(a => a.Def.WaitFor != null) && runtimeWaitFor == null) return null;
         return async req =>
         {
             lock (_sync)
@@ -411,7 +412,15 @@ public sealed class AgentRuntime
                 }
                 return ans;
             }
-            throw new InvalidOperationException("unreachable");
+            // No agent on the chain holds authority: the runtime-level interpreter answers (§4C).
+            lock (_sync) T($"{h.Id}: escalate → runtime answers (\"nearest interpreter\")");
+            var answer = await runtimeWaitFor!(req).ConfigureAwait(false);
+            lock (_sync)
+            {
+                h.State = "running";
+                T($"{h.Id}: suspended→running (Answer ok={(answer.Ok ? "true" : "false")})");
+            }
+            return answer;
         };
     }
 
