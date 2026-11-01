@@ -98,6 +98,18 @@ public final class Compaction {
         return message;
     }
 
+    /**
+     * One compaction, for {@link Options#onCompact} (SPEC §4C). Token counts come from
+     * {@link Options#countTokens} (default {@link #estimateTokens}).
+     *
+     * @param summarized how many messages were folded into the summary
+     * @param summary    the text {@code summarize} returned (without the header line)
+     * @param folded     the summarized messages, verbatim, so a host can persist them (the loop
+     *                   only saves the compacted transcript)
+     */
+    public record CompactInfo(int tokensBefore, int tokensAfter, int messagesBefore, int messagesAfter,
+                              int summarized, String summary, List<Object> folded) {}
+
     /** Options for {@link #compactor(Options)}. Fluent setters; {@link #summarize} is required. */
     public static final class Options {
         /** Compact only when the transcript estimate exceeds this many tokens. */
@@ -113,7 +125,13 @@ public final class Compaction {
          * {@code memory} tool before the head is summarized. Off by default.
          */
         public boolean flushToMemory;
+        /**
+         * When set, called after each compaction with what changed, so a host can tell its UI or
+         * log. Never called on a no-op (SPEC §4C).
+         */
+        public java.util.function.Consumer<CompactInfo> onCompact;
 
+        public Options onCompact(java.util.function.Consumer<CompactInfo> v) { this.onCompact = v; return this; }
         public Options maxTokens(int v) { this.maxTokens = v; return this; }
         public Options keepTail(Integer v) { this.keepTail = v; return this; }
         public Options summarize(Function<List<Object>, String> v) { this.summarize = v; return this; }
@@ -136,7 +154,8 @@ public final class Compaction {
 
         return ev -> {
             List<Object> msgs = ev.messages();
-            if (count.apply(msgs) <= opts.maxTokens) {
+            int before = count.apply(msgs);
+            if (before <= opts.maxTokens) {
                 return null; // under budget → byte-identical no-op
             }
 
@@ -174,6 +193,15 @@ public final class Compaction {
 
             List<Object> older = new ArrayList<>(msgs.subList(head0, split));
             List<Object> tail = new ArrayList<>(msgs.subList(split, msgs.size()));
+            // The latest user prompt is never summarized away (SPEC §4C). When the only clean
+            // boundary is the first message after the system prompt (one prompt followed by a long
+            // agentic run), keep that prompt verbatim and summarize the work after it:
+            // [system, prompt, summary].
+            List<Object> pinned = List.of();
+            if (split == msgs.size() && head0 < msgs.size() && isBoundary(msgs.get(head0))) {
+                pinned = List.of(msgs.get(head0));
+                older = new ArrayList<>(msgs.subList(head0 + 1, msgs.size()));
+            }
             if (older.isEmpty()) {
                 return null;
             }
@@ -181,6 +209,7 @@ public final class Compaction {
             String summary = opts.summarize.apply(older);
 
             List<Object> result = new ArrayList<>(system);
+            result.addAll(pinned);
             result.add(systemMessage("[Summary of earlier conversation]\n" + summary));
             if (opts.flushToMemory) {
                 result.add(systemMessage("Before continuing: if anything from earlier is worth"
@@ -188,6 +217,14 @@ public final class Compaction {
                         + " about to be summarized."));
             }
             result.addAll(tail);
+            int after = count.apply(result);
+            if (after >= before) {
+                return null; // compaction would not shrink the transcript → no-op
+            }
+            if (opts.onCompact != null) {
+                opts.onCompact.accept(new CompactInfo(before, after, msgs.size(), result.size(),
+                        older.size(), summary, List.copyOf(older)));
+            }
             return new LlmClient.LLMOverride(result, null);
         };
     }

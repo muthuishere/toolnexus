@@ -813,10 +813,10 @@ test, or example fixture. The global toggle is the supported off-switch for lock
 
 ---
 
-## 4C. Host runtime additions (golang only — other ports pending)
+## 4C. Host runtime additions (golang, java — other ports pending)
 
-Change `add-go-host-asks`. These ship in the Go port first for go-agent-cli; the
-six other ports are tracked as unchecked tasks there and MUST land before the
+Change `add-go-host-asks`. These ship in the Go port first for go-agent-cli, then java; the
+five other ports are tracked as unchecked tasks there and MUST land before the
 next release. Absent options are byte-identical to today.
 
 - **Concurrent `register`.** `Toolkit.register` is safe while a turn reads the
@@ -875,7 +875,7 @@ next release. Absent options are byte-identical to today.
   `api.openai.com` → `OPENAI_API_KEY`, `api.anthropic.com` → `ANTHROPIC_API_KEY`,
   `openrouter.ai` (and subdomains) → `OPENROUTER_API_KEY`. Any other host, or plain http,
   without `apiKey`/`apiKeyEnv` is an error. No cross-provider fallback. (Supersedes the env
-  list in §8 for golang; other ports still fall back and are tracked.)
+  list in §8 for golang and java; other ports still fall back and are tracked.)
 - **`listModels(ctx, clientOptions)`** → `[{id, name?, contextLength?}]` sorted by id:
   openai style `GET {base}/models` (OpenRouter's `context_length` read when present),
   anthropic `GET {base}/v1/models` following `has_more`/`last_id`. Same key rules.
@@ -884,7 +884,7 @@ next release. Absent options are byte-identical to today.
   continues); ask = return `pending(request)` (path B, §10), which `waitFor` /
   `waitForCtx` resolves. Rules and modes stay in the host.
 
-### Prompt caching (change `add-prompt-cache`, golang only — other ports pending)
+### Prompt caching (change `add-prompt-cache`, golang, java — other ports pending)
 
 - `Usage` gains `cacheReadTokens` and `cacheWriteTokens` (anthropic
   `cache_read_input_tokens` / `cache_creation_input_tokens`; openai

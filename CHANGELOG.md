@@ -25,7 +25,7 @@ HTTP/TLS stack is an optional feature (`mcp-http`, on by default). Not done yet:
 builtins, client loop and suspension; for MCP, the legacy-SSE fallback and non-text content parts
 (`openspec/changes/add-rust-port`). Rust is not in the option-parity check until it has a client.
 
-**Security (Go only for now): an API key is no longer sent to a host it does not belong to.**
+**Security (Go and Java for now): an API key is no longer sent to a host it does not belong to.**
 Before, with no `APIKey` set, the Go client took the first of `OPENROUTER_API_KEY`,
 `OPENAI_API_KEY`, `ANTHROPIC_API_KEY` that was set and sent it to whatever `BaseURL` was
 configured, so with several keys in the environment an OpenRouter key could go to
@@ -33,14 +33,16 @@ api.openai.com, or any key to a local or third-party server. Now the environment
 for the env var that matches the host (`api.openai.com` → `OPENAI_API_KEY`, `api.anthropic.com`
 → `ANTHROPIC_API_KEY`, `openrouter.ai` → `OPENROUTER_API_KEY`, https only); any other host needs
 `APIKey` or the new `APIKeyEnv` (the name of the env var to read). **This can break a host that
-relied on the fallback** for a custom or local `BaseURL`: set `APIKey` or `APIKeyEnv`. The other
-six ports still have the old fallback and are tracked in `openspec/changes/add-go-host-asks`.
+relied on the fallback** for a custom or local `BaseURL`: set `APIKey` or `APIKeyEnv` (Java:
+`Options.apiKey` / `Options.apiKeyEnv`, same rules). The other five ports still have the old
+fallback and are tracked in `openspec/changes/add-go-host-asks`.
 
-**Go only for now: hosts can add tools mid-turn, use each MCP server as soon as it is ready,
+**Go and Java for now: hosts can add tools mid-turn, use each MCP server as soon as it is ready,
 cancel a pending question with its turn, hear about compactions, and gate tools by what they
-do.** Asked for by go-agent-cli, which builds on the Go port directly. The other six ports are
-not done yet and are tracked in `openspec/changes/add-go-host-asks`; they land before the next
-release.
+do.** Asked for by go-agent-cli, which builds on the Go port directly. The other five ports (js,
+python, csharp, elixir, clojure) are not done yet and are tracked in
+`openspec/changes/add-go-host-asks` and `openspec/changes/add-prompt-cache`; they land before the
+next release.
 
 - `Toolkit.Register` is now safe while a turn is running. Before, a host had to rebuild the
   whole toolkit to add tools. A tool added mid-turn is offered from the next model call.
@@ -51,7 +53,7 @@ release.
   when the turn is cancelled. It is used instead of `WaitFor` when both are set.
 - `agents.CompactorOptions.OnCompact` is called after each compaction with token and message
   counts before and after, and the summary — enough to show "context compacted" in a UI.
-- Compactor fixes (Go only for now): it no longer summarizes away the user's prompt when a turn
+- Compactor fixes (Go and Java for now): it no longer summarizes away the user's prompt when a turn
   is one prompt followed by a long run of tool calls (it keeps the prompt and summarizes the work
   after it); it does nothing when the result would not be smaller (it could grow, e.g. 206 → 211
   tokens); and `CompactInfo.Folded` hands the host the summarized messages verbatim, because the
@@ -96,7 +98,21 @@ release.
 - `ListModels(ctx, ClientOptions)` lists a provider's models (id, display name, and context
   length when the provider reports it, as OpenRouter does), for model switching.
 - Fixed: loading MCP config with a disabled server could race with the other servers' loading
-  (`go test -race` found it). Go only so far; the other ports have not been checked.
+  (`go test -race` found it). Java already wrote that status under its lock, so it had no race;
+  the other ports have not been checked.
+- Java spellings of the above: `Toolkit.register` (read/write lock), `McpSource.load(cfg,
+  new McpSource.LoadOptions().onServer(...))` with `McpSource.ServerResult`,
+  `LlmClient.Options.waitForCtx((request, cancelToken) -> answer)` (the token is the run's
+  `CancelToken`, and a cancel also interrupts the thread running it), `Compaction.Options.onCompact`
+  with `Compaction.CompactInfo`, `Tool.hints()` / `Tool.withHints(tool, hints)` and
+  `BeforeToolEvent.hints()`, the builtins config keys `background` (a `BackgroundShells`),
+  `webSearch` (a `WebSearch`) and `notebookEdit`, `McpSource.resourceTools()` (also reachable as
+  `Toolkit.mcpSource()`), `ToolContext.callId()`, `Agent.asToolWith(ctx -> runtimeOptions)` and
+  `RuntimeOptions.waitFor`, `LlmClient.listModels(options)`, `Usage.cacheReadTokens` /
+  `cacheWriteTokens`, `Options.promptCache(new PromptCache())`, `Options.toolTiers(new ToolTiers())`
+  with `toolTierPlan` / `resetToolTiers`, and `StreamEvent.via()`. Java has no context object, so
+  a `WebSearch` provider and `asTool` see cancellation as a thread interrupt (`asTool` also honours
+  `ToolContext.cancel()`).
 
 **A cancelled turn no longer forgets what it did, cancel can kill a stubborn command in about 100 ms,
 and file edits come back with a diff.** Found by go-agent-cli's real server integration; all seven

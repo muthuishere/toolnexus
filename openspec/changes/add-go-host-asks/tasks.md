@@ -22,7 +22,7 @@ the event. Revisit if a port cannot express it.
 ## 2. Other ports (pending — before the next release)
 - [ ] 2.1 js
 - [ ] 2.2 python
-- [ ] 2.3 java
+- [x] 2.3 java (2026-11-01: all of 1.1-1.5g; HostEngineAsksTest, HostBuiltinExtrasTest, CompactorOnCompactTest, agents/AsToolCtxTest; mcp-progress-server resource exercised; disabled-status write was already under the lock)
 - [ ] 2.4 csharp
 - [ ] 2.5 elixir
 - [ ] 2.6 clojure

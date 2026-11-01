@@ -114,9 +114,18 @@ public final class BuiltinTools {
         final boolean confine;
         /** SIGTERM→SIGKILL wait ({@code killGraceMs}; absent/0 = 2000). No effect on Windows. */
         final long killGraceMs;
+        /** Opt-in (SPEC §4C): {@code background} — a host-owned {@link BackgroundShells}. */
+        final BackgroundShells background;
+        /** Opt-in (SPEC §4C): {@code webSearch} — the host's {@link WebSearch} provider. */
+        final WebSearch webSearch;
+        /** Opt-in (SPEC §4C): {@code notebookEdit: true}. */
+        final boolean notebookEdit;
 
         Env(Object cfg) {
             Map<?, ?> m = cfg instanceof Map ? (Map<?, ?>) cfg : Map.of();
+            this.background = m.get("background") instanceof BackgroundShells b ? b : null;
+            this.webSearch = m.get("webSearch") instanceof WebSearch w ? w : null;
+            this.notebookEdit = Boolean.TRUE.equals(m.get("notebookEdit"));
             Object base = m.get("baseDir");
             this.baseDir = base == null ? "" : String.valueOf(base);
             this.confine = Boolean.TRUE.equals(m.get("confineToBaseDir"));
@@ -295,8 +304,39 @@ public final class BuiltinTools {
         tools.add(questionTool());
         tools.add(applyPatchTool(env));
         tools.add(todowriteTool());
+        // Opt-in coding builtins (SPEC §4C): absent unless the host configures them.
+        if (env.background != null) {
+            tools.add(bashOutputTool(env));
+            tools.add(killShellTool(env));
+        }
+        if (env.webSearch != null) tools.add(webSearchTool(env.webSearch));
+        if (env.notebookEdit) tools.add(notebookEditTool(env));
+        for (Tool t : tools) {
+            if (t instanceof BuiltinTool b) b.hints = BUILTIN_HINTS.get(b.name());
+        }
         return tools;
     }
+
+    /**
+     * Hints for host permission gates (SPEC §4C). {@code bash} can do anything, so it is
+     * mutating, destructive and open-world. {@code todowrite} and {@code question} only touch the
+     * agent's own state / ask the human, so they count as read-only for the host.
+     */
+    private static final Map<String, ToolHints> BUILTIN_HINTS = Map.ofEntries(
+            Map.entry("bash", new ToolHints(false, true, true)),
+            Map.entry("read", ToolHints.READ_ONLY),
+            Map.entry("write", ToolHints.DESTRUCTIVE),
+            Map.entry("edit", ToolHints.DESTRUCTIVE),
+            Map.entry("grep", ToolHints.READ_ONLY),
+            Map.entry("glob", ToolHints.READ_ONLY),
+            Map.entry("webfetch", new ToolHints(true, false, true)),
+            Map.entry("question", ToolHints.READ_ONLY),
+            Map.entry("apply_patch", ToolHints.DESTRUCTIVE),
+            Map.entry("todowrite", ToolHints.READ_ONLY),
+            Map.entry("bash_output", ToolHints.READ_ONLY),
+            Map.entry("kill_shell", ToolHints.DESTRUCTIVE),
+            Map.entry("websearch", new ToolHints(true, false, true)),
+            Map.entry("notebook_edit", ToolHints.DESTRUCTIVE));
 
     /**
      * The interpreter the builtins resolved for {@code bash} — what a host prints,
@@ -381,6 +421,13 @@ public final class BuiltinTools {
         private final String description;
         private final Map<String, Object> inputSchema;
         private final Runner run;
+        /** Set once by {@link #create(Object)} from {@link #BUILTIN_HINTS}. */
+        private volatile ToolHints hints;
+
+        @Override
+        public ToolHints hints() {
+            return hints;
+        }
 
         BuiltinTool(String name, String description, Map<String, Object> inputSchema, Runner run) {
             this.name = name;
@@ -466,6 +513,10 @@ public final class BuiltinTools {
         props.put("workdir", prop("string", "Working directory (default: process cwd)"));
         props.put("timeout", prop("number", "Timeout in milliseconds (default 60000)"));
         props.put("description", prop("string", "Human-readable description of the command"));
+        if (env.background != null) {
+            props.put("run_in_background", prop("boolean", "Start the command and return at once with a background shell id; "
+                    + "read it with bash_output, stop it with kill_shell. No timeout applies."));
+        }
         return builtin(
                 "bash",
                 "Run a shell command and return its combined stdout+stderr. Non-zero exit is an error.",
@@ -483,7 +534,18 @@ public final class BuiltinTools {
                     } catch (RuntimeException e) {
                         return err("bash: " + e.getMessage());
                     }
-                    long timeout = isNumber(args.get("timeout")) ? truncToLong(args.get("timeout")) : 60_000L;
+                    if (env.background != null && Boolean.TRUE.equals(args.get("run_in_background"))) {
+                        String id;
+                        try {
+                            id = env.background.start(argv, command, workdir, env.killGraceMs);
+                        } catch (IOException e) {
+                            return err("bash: " + e.getMessage(), meta("shell", env.shellLabel()));
+                        }
+                        return ok("Started background shell " + id
+                                        + ". Read its output with bash_output, stop it with kill_shell.",
+                                meta("shell", env.shellLabel(), "backgroundId", id));
+                    }
+                    long timeout =isNumber(args.get("timeout")) ? truncToLong(args.get("timeout")) : 60_000L;
                     Map<String, Object> metadata = meta("shell", env.shellLabel());
 
                     List<String> full = new ArrayList<>(argv);
@@ -619,6 +681,15 @@ public final class BuiltinTools {
                     if (end < start) end = start;
                     List<String> window = new ArrayList<>();
                     for (int i = start; i < end; i++) window.add(lines[i]);
+                    // A window that stops before the end of the file says so in metadata, with
+                    // the offset to continue from (SPEC §4C). The text stays the pinned
+                    // cross-port bytes. A trailing newline does not count as a line.
+                    int total = lines.length;
+                    if (total > 0 && lines[total - 1].isEmpty()) total--;
+                    if (end < total) {
+                        return ok(String.join("\n", window),
+                                meta("truncated", true, "totalLines", total, "nextOffset", end + 1));
+                    }
                     return ok(String.join("\n", window));
                 });
     }
@@ -723,6 +794,9 @@ public final class BuiltinTools {
         props.put("path", prop("string", "Directory to search (default: process cwd)"));
         props.put("include", prop("string", "Glob filter for file names"));
         props.put("limit", prop("number", "Maximum number of matches (default 100)"));
+        props.put("context", prop("number", "Lines of context before and after each match"));
+        props.put("before", prop("number", "Lines of context before each match (overrides context)"));
+        props.put("after", prop("number", "Lines of context after each match (overrides context)"));
         return builtin(
                 "grep",
                 "Search file contents by regex under a directory. Output is file:line:text matches.",
@@ -754,6 +828,17 @@ public final class BuiltinTools {
                     // line 10 before line 2). A28: the emitted string is the same relative
                     // `/`-path the sort ran on — ordering by one thing and showing another is how
                     // a port displays an order it does not have.
+                    int before = 0, after = 0;
+                    if (isNumber(args.get("context")) && truncToLong(args.get("context")) > 0) {
+                        before = after = (int) truncToLong(args.get("context"));
+                    }
+                    if (isNumber(args.get("before")) && truncToLong(args.get("before")) >= 0) {
+                        before = (int) truncToLong(args.get("before"));
+                    }
+                    if (isNumber(args.get("after")) && truncToLong(args.get("after")) >= 0) {
+                        after = (int) truncToLong(args.get("after"));
+                    }
+                    Map<String, String[]> fileLines = new java.util.HashMap<>(); // only when context is asked for
                     List<String[]> hits = new ArrayList<>(); // [rel, lineNo, text]
                     for (Path file : walkFiles(root)) {
                         String rel = relativize(root, file);
@@ -765,6 +850,7 @@ public final class BuiltinTools {
                             continue;
                         }
                         String[] lines = text.split("\n", -1);
+                        if (before > 0 || after > 0) fileLines.put(rel, lines);
                         for (int i = 0; i < lines.length; i++) {
                             if (re.matcher(lines[i]).find()) {
                                 hits.add(new String[] {rel, String.valueOf(i + 1), lines[i]});
@@ -775,12 +861,48 @@ public final class BuiltinTools {
                         int c = compareCodePoints(a[0], b[0]);
                         return c != 0 ? c : Integer.compare(Integer.parseInt(a[1]), Integer.parseInt(b[1]));
                     });
-                    List<String> matches = new ArrayList<>();
-                    for (String[] hit : hits) {
-                        if (matches.size() >= limit) break;
-                        matches.add(hit[0] + ":" + hit[1] + ":" + hit[2]);
+                    int total = hits.size();
+                    List<String[]> kept = hits.subList(0, (int) Math.max(0, Math.min(limit, total)));
+                    List<String> outLines = new ArrayList<>();
+                    if (before == 0 && after == 0) {
+                        for (String[] hit : kept) outLines.add(hit[0] + ":" + hit[1] + ":" + hit[2]);
+                    } else {
+                        // ripgrep-style: match lines path:N:text, context lines path-N-text,
+                        // "--" between groups that do not touch (SPEC §4C).
+                        Map<String, java.util.Set<Integer>> matchAt = new java.util.HashMap<>();
+                        for (String[] hit : kept) {
+                            matchAt.computeIfAbsent(hit[0], k -> new java.util.HashSet<>()).add(Integer.parseInt(hit[1]));
+                        }
+                        String lastRel = "";
+                        int lastLine = 0;
+                        for (String[] hit : kept) {
+                            String[] lines = fileLines.get(hit[0]);
+                            int n = lines.length;
+                            if (n > 0 && lines[n - 1].isEmpty()) n--; // a trailing newline is not a line
+                            int line = Integer.parseInt(hit[1]);
+                            int from = Math.max(1, line - before);
+                            int to = Math.min(n, line + after);
+                            if (hit[0].equals(lastRel) && from <= lastLine + 1) {
+                                from = lastLine + 1;
+                            } else if (!lastRel.isEmpty()) {
+                                outLines.add("--");
+                            }
+                            for (int k = from; k <= to; k++) {
+                                String sep = matchAt.get(hit[0]).contains(k) ? ":" : "-";
+                                outLines.add(hit[0] + sep + k + sep + lines[k - 1]);
+                            }
+                            if (to > lastLine || !hit[0].equals(lastRel)) lastLine = to;
+                            lastRel = hit[0];
+                        }
                     }
-                    return ok(String.join("\n", matches), meta("count", matches.size()));
+                    Map<String, Object> md = meta("count", kept.size());
+                    if (total > kept.size()) {
+                        // Say the list was cut, and by how much, in metadata (SPEC §4C). The
+                        // text stays the pinned cross-port output.
+                        md.put("truncated", true);
+                        md.put("total", total);
+                    }
+                    return ok(String.join("\n", outLines), md);
                 });
     }
 
@@ -1327,6 +1449,208 @@ public final class BuiltinTools {
             return re.matcher(base).matches();
         }
         return re.matcher(rel).matches();
+    }
+
+    // -----------------------------------------------------------------------
+    // opt-in coding builtins (SPEC §4C): bash_output, kill_shell, websearch, notebook_edit
+    // -----------------------------------------------------------------------
+
+    private static Map<String, Object> idSchema() {
+        Map<String, Object> props = new LinkedHashMap<>();
+        props.put("id", prop("string", "The background shell id bash returned"));
+        return schema(props, List.of("id"));
+    }
+
+    private static Tool bashOutputTool(Env env) {
+        return builtin(
+                "bash_output",
+                "Read the output a background bash command (started with run_in_background) produced since the last read, and whether it is still running.",
+                idSchema(),
+                (args, ctx) -> {
+                    String id = str(args.get("id"));
+                    BackgroundShells.Job j = env.background.get(id);
+                    if (j == null) return err("bash_output: no background shell \"" + id + "\"");
+                    String fresh = j.fresh();
+                    BackgroundShells.Info info = j.info();
+                    String status = j.status();
+                    Map<String, Object> md = meta("id", id, "status", status.split(" ", 2)[0]);
+                    if (!info.running() && !info.killed()) md.put("exitCode", info.exitCode());
+                    return ok(fresh + "\n[status: " + status + "]", md);
+                });
+    }
+
+    private static Tool killShellTool(Env env) {
+        return builtin(
+                "kill_shell",
+                "Stop a background bash command and everything it started.",
+                idSchema(),
+                (args, ctx) -> {
+                    String id = str(args.get("id"));
+                    BackgroundShells.Job j = env.background.get(id);
+                    if (j == null) return err("kill_shell: no background shell \"" + id + "\"");
+                    if (!j.kill()) {
+                        return ok("Background shell " + id + " had already " + j.status(), meta("id", id, "killed", false));
+                    }
+                    return ok("Killed background shell " + id, meta("id", id, "killed", true));
+                });
+    }
+
+    private static Tool webSearchTool(WebSearch search) {
+        Map<String, Object> props = new LinkedHashMap<>();
+        props.put("query", prop("string", "The search query"));
+        props.put("limit", prop("number", "Maximum number of results (default 5)"));
+        return builtin(
+                "websearch",
+                "Search the web. Returns numbered results with title, URL and snippet.",
+                schema(props, List.of("query")),
+                (args, ctx) -> {
+                    String q = str(args.get("query"));
+                    if (q.trim().isEmpty()) return err("websearch: query is required");
+                    int limit = 5;
+                    if (isNumber(args.get("limit")) && ((Number) args.get("limit")).doubleValue() >= 1) {
+                        limit = (int) truncToLong(args.get("limit"));
+                    }
+                    List<WebSearch.Result> results;
+                    try {
+                        results = search.search(q, limit);
+                    } catch (Exception e) {
+                        return err("websearch: " + (e.getMessage() == null ? String.valueOf(e) : e.getMessage()));
+                    }
+                    if (results == null) results = List.of();
+                    if (results.size() > limit) results = results.subList(0, limit);
+                    if (results.isEmpty()) return ok("No results.", meta("count", 0));
+                    StringBuilder sb = new StringBuilder();
+                    List<Object> items = new ArrayList<>();
+                    for (int i = 0; i < results.size(); i++) {
+                        WebSearch.Result r = results.get(i);
+                        if (i > 0) sb.append("\n\n");
+                        sb.append(i + 1).append(". ").append(r.title()).append("\n   ").append(r.url());
+                        if (r.snippet() != null && !r.snippet().isEmpty()) sb.append("\n   ").append(r.snippet());
+                        items.add(meta("title", r.title(), "url", r.url(), "snippet", r.snippet() == null ? "" : r.snippet()));
+                    }
+                    return ok(sb.toString(), meta("count", results.size(), "results", items));
+                });
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Tool notebookEditTool(Env env) {
+        Map<String, Object> props = new LinkedHashMap<>();
+        props.put("path", prop("string", "Path to the .ipynb file"));
+        props.put("cell_id", prop("string", "The cell's id (or use cell_index)"));
+        props.put("cell_index", prop("number", "0-based cell position (used when cell_id is absent)"));
+        props.put("new_source", prop("string", "The new cell source (replace/insert)"));
+        Map<String, Object> cellType = prop("string", "Cell type for insert (default code) or to change on replace");
+        cellType.put("enum", List.of("code", "markdown"));
+        props.put("cell_type", cellType);
+        Map<String, Object> mode = prop("string", "Default replace. insert adds the new cell AFTER the given cell, or first when none is given");
+        mode.put("enum", List.of("replace", "insert", "delete"));
+        props.put("edit_mode", mode);
+        return builtin(
+                "notebook_edit",
+                "Edit a Jupyter notebook (.ipynb) cell: replace its source, insert a new cell after it, or delete it. Replacing a code cell clears its outputs.",
+                schema(props, List.of("path")),
+                (args, ctx) -> {
+                    String p = str(args.get("path"));
+                    if (p.isEmpty()) return err("notebook_edit: path is required");
+                    Path full;
+                    try {
+                        full = env.resolvePath(p);
+                    } catch (RuntimeException e) {
+                        return err("notebook_edit: " + e.getMessage());
+                    }
+                    String raw;
+                    try {
+                        raw = Files.readString(full);
+                    } catch (IOException e) {
+                        return err("notebook_edit: " + e.getMessage());
+                    }
+                    Map<String, Object> nb;
+                    try {
+                        nb = Json.MAPPER.readValue(raw, new com.fasterxml.jackson.core.type.TypeReference<LinkedHashMap<String, Object>>() {});
+                    } catch (Exception e) {
+                        return err("notebook_edit: " + p + " is not a notebook: " + e.getMessage());
+                    }
+                    List<Object> cells = nb.get("cells") instanceof List<?> l ? new ArrayList<>((List<Object>) l) : new ArrayList<>();
+                    String editMode = str(args.get("edit_mode"));
+                    if (editMode.isEmpty()) editMode = "replace";
+                    int idx = -1;
+                    String cellId = str(args.get("cell_id"));
+                    if (!cellId.isEmpty()) {
+                        for (int i = 0; i < cells.size(); i++) {
+                            if (cells.get(i) instanceof Map<?, ?> cm && cellId.equals(cm.get("id"))) {
+                                idx = i;
+                                break;
+                            }
+                        }
+                        if (idx < 0) return err("notebook_edit: no cell with id \"" + cellId + "\"");
+                    } else if (isNumber(args.get("cell_index"))) {
+                        idx = (int) truncToLong(args.get("cell_index"));
+                        if (idx < 0 || idx >= cells.size()) {
+                            return err("notebook_edit: cell_index " + idx + " out of range (0-" + (cells.size() - 1) + ")");
+                        }
+                    } else if (!"insert".equals(editMode)) {
+                        return err("notebook_edit: cell_id or cell_index is required");
+                    }
+                    String src = str(args.get("new_source"));
+                    String type = str(args.get("cell_type"));
+                    String summary;
+                    switch (editMode) {
+                        case "replace" -> {
+                            Map<String, Object> cm = (Map<String, Object>) cells.get(idx);
+                            cm.put("source", notebookSource(src));
+                            if (!type.isEmpty()) cm.put("cell_type", type);
+                            if ("code".equals(cm.get("cell_type"))) {
+                                cm.put("outputs", new ArrayList<>());
+                                cm.put("execution_count", null);
+                            } else {
+                                cm.remove("outputs");
+                                cm.remove("execution_count");
+                            }
+                            summary = "Replaced cell " + idx + " in " + p;
+                        }
+                        case "insert" -> {
+                            if (type.isEmpty()) type = "code";
+                            Map<String, Object> cell = new LinkedHashMap<>();
+                            cell.put("cell_type", type);
+                            cell.put("metadata", new LinkedHashMap<>());
+                            cell.put("source", notebookSource(src));
+                            if ("code".equals(type)) {
+                                cell.put("outputs", new ArrayList<>());
+                                cell.put("execution_count", null);
+                            }
+                            int at = idx + 1;
+                            cells.add(at, cell);
+                            summary = "Inserted " + type + " cell at " + at + " in " + p;
+                        }
+                        case "delete" -> {
+                            cells.remove(idx);
+                            summary = "Deleted cell " + idx + " from " + p;
+                        }
+                        default -> {
+                            return err("notebook_edit: unknown edit_mode \"" + editMode + "\"");
+                        }
+                    }
+                    nb.put("cells", cells);
+                    String out = Json.pretty(nb) + "\n";
+                    Files.writeString(full, out);
+                    Map<String, Object> md = meta("cells", cells.size());
+                    attachDiff(md, List.of(new FileChange(env.displayPath(p, full), raw, out)));
+                    return ok(summary, md);
+                });
+    }
+
+    /** Split text into nbformat's list of lines, each keeping its {@code "\n"}. */
+    private static List<Object> notebookSource(String s) {
+        List<Object> out = new ArrayList<>();
+        int start = 0;
+        for (int i = 0; i < s.length(); i++) {
+            if (s.charAt(i) == '\n') {
+                out.add(s.substring(start, i + 1));
+                start = i + 1;
+            }
+        }
+        if (start < s.length()) out.add(s.substring(start));
+        return out;
     }
 
     /** Recursively list files under {@code root} (skips node_modules/.git). Returns absolute paths. */
