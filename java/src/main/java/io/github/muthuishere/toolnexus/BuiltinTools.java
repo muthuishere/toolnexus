@@ -43,10 +43,11 @@ public final class BuiltinTools {
     private static final List<String> IGNORE_DIRS = List.of("node_modules", ".git");
 
     /**
-     * How long a job gets between "please stop" and "stop". Fixed, and identical
-     * in every port, so a timeout means the same thing everywhere.
+     * How long a job gets between "please stop" and "stop" when the host sets no
+     * {@code killGraceMs}. Identical in every port, so a timeout means the same
+     * thing everywhere.
      */
-    private static final long KILL_GRACE_MS = 2000L;
+    private static final long DEFAULT_KILL_GRACE_MS = 2000L;
 
     private static final java.util.Set<String> WIN_RESERVED = java.util.Set.of(
             "CON", "PRN", "AUX", "NUL",
@@ -111,12 +112,17 @@ public final class BuiltinTools {
         final RuntimeException shellError;
         final String baseDir;
         final boolean confine;
+        /** SIGTERM→SIGKILL wait ({@code killGraceMs}; absent/0 = 2000). No effect on Windows. */
+        final long killGraceMs;
 
         Env(Object cfg) {
             Map<?, ?> m = cfg instanceof Map ? (Map<?, ?>) cfg : Map.of();
             Object base = m.get("baseDir");
             this.baseDir = base == null ? "" : String.valueOf(base);
             this.confine = Boolean.TRUE.equals(m.get("confineToBaseDir"));
+            Object grace = m.get("killGraceMs");
+            long g = grace instanceof Number ? ((Number) grace).longValue() : 0L;
+            this.killGraceMs = g > 0 ? g : DEFAULT_KILL_GRACE_MS;
 
             Object given = m.get("shell");
             if (given instanceof List && !((List<?>) given).isEmpty()) {
@@ -152,6 +158,17 @@ public final class BuiltinTools {
 
         String dir() {
             return baseDir.isEmpty() ? System.getProperty("user.dir") : baseDir;
+        }
+
+        /** The path a diff names: relative to {@code baseDir} when set, else as the tool was given it. */
+        String displayPath(String given, java.nio.file.Path resolved) {
+            String out = given;
+            if (!baseDir.isEmpty()) {
+                java.nio.file.Path base = Paths.get(baseDir).toAbsolutePath().normalize();
+                java.nio.file.Path full = resolved.toAbsolutePath().normalize();
+                out = full.startsWith(base) ? base.relativize(full).toString() : full.toString();
+            }
+            return out.replace('\\', '/');
         }
 
         /**
@@ -494,7 +511,16 @@ public final class BuiltinTools {
                         }
                     });
                     reader.start();
-                    boolean finished = proc.waitFor(timeout, TimeUnit.MILLISECONDS);
+                    boolean finished;
+                    boolean cancelled = false;
+                    try {
+                        finished = proc.waitFor(timeout, TimeUnit.MILLISECONDS);
+                    } catch (InterruptedException ie) {
+                        // The run was cancelled (its tool thread interrupted): stop the job the
+                        // same way a timeout does — graceful, then forced after killGraceMs.
+                        finished = false;
+                        cancelled = true;
+                    }
                     if (!finished) {
                         // Snapshot the tree BEFORE anything is asked to stop: once the
                         // parent dies its children are reparented and are unreachable
@@ -505,11 +531,18 @@ public final class BuiltinTools {
                         // SIGKILL; both were measured rather than assumed.
                         List<ProcessHandle> descendants = proc.descendants().toList();
                         killJob(proc, descendants, true);
-                        if (!proc.waitFor(KILL_GRACE_MS, TimeUnit.MILLISECONDS)) {
+                        if (!proc.waitFor(env.killGraceMs, TimeUnit.MILLISECONDS)) {
                             killJob(proc, descendants, false);
                             proc.waitFor();
                         }
                         reader.join(500);
+                        if (cancelled) {
+                            metadata.put("killedTree", true);
+                            Thread.currentThread().interrupt();
+                            synchronized (out) {
+                                return err("bash: command cancelled\n" + out, metadata);
+                            }
+                        }
                         metadata.put("timedOut", true);
                         metadata.put("killedTree", true);
                         synchronized (out) {
@@ -614,11 +647,14 @@ public final class BuiltinTools {
                     } catch (RuntimeException e) {
                         return err("write: " + e.getMessage());
                     }
+                    String before = Files.isRegularFile(pp) ? readForDiff(pp) : null;
                     Path parent = pp.toAbsolutePath().getParent();
                     if (parent != null) Files.createDirectories(parent);
                     Files.writeString(pp, content);
                     int bytes = content.getBytes(StandardCharsets.UTF_8).length;
-                    return ok("Wrote " + bytes + " bytes to " + p, meta("bytes", bytes));
+                    Map<String, Object> md = meta("bytes", bytes);
+                    attachDiff(md, List.of(new FileChange(env.displayPath(p, pp), before, content)));
+                    return ok("Wrote " + bytes + " bytes to " + p, md);
                 });
     }
 
@@ -670,8 +706,10 @@ public final class BuiltinTools {
                     }
                     Files.writeString(target, next);
                     int replacements = replaceAll ? count : 1;
+                    Map<String, Object> md = meta("replacements", replacements);
+                    attachDiff(md, List.of(new FileChange(env.displayPath(p, target), content, next)));
                     return ok("Edited " + p + " (" + replacements + " replacement"
-                            + (replacements == 1 ? "" : "s") + ")", meta("replacements", replacements));
+                            + (replacements == 1 ? "" : "s") + ")", md);
                 });
     }
 
@@ -1075,6 +1113,7 @@ public final class BuiltinTools {
                     // The paths live INSIDE the patch text, not in the arguments, so a
                     // host cannot rewrite them from a hook — the one case that genuinely
                     // needs the base directory to be library-side (ADR 0034 D2).
+                    List<PatchOp> given = ops;
                     List<PatchOp> resolved = new ArrayList<>(ops.size());
                     try {
                         for (PatchOp op : ops) {
@@ -1087,21 +1126,28 @@ public final class BuiltinTools {
                     // Stage every write/delete first; only touch the filesystem once all hunks apply.
                     List<String[]> writes = new ArrayList<>(); // [path, content]
                     List<String> deletes = new ArrayList<>();
+                    List<FileChange> changes = new ArrayList<>();
                     try {
-                        for (PatchOp op : ops) {
+                        for (int oi = 0; oi < ops.size(); oi++) {
+                            PatchOp op = ops.get(oi);
+                            String shown = env.displayPath(given.get(oi).path, Path.of(op.path));
                             if (op.type.equals("add")) {
                                 if (Files.exists(Path.of(op.path))) {
                                     throw new RuntimeException("file already exists: " + op.path);
                                 }
                                 writes.add(new String[]{op.path, op.content});
+                                changes.add(new FileChange(shown, null, op.content));
                             } else if (op.type.equals("delete")) {
                                 if (!Files.exists(Path.of(op.path))) {
                                     throw new RuntimeException("file not found: " + op.path);
                                 }
                                 deletes.add(op.path);
+                                changes.add(new FileChange(shown, readForDiff(Path.of(op.path)), null));
                             } else {
                                 String content = Files.readString(Path.of(op.path));
-                                writes.add(new String[]{op.path, applyUpdate(content, op.body)});
+                                String next = applyUpdate(content, op.body);
+                                writes.add(new String[]{op.path, next});
+                                changes.add(new FileChange(shown, content, next));
                             }
                         }
                     } catch (Exception e) {
@@ -1122,9 +1168,127 @@ public final class BuiltinTools {
                         else if (op.type.equals("update")) updated++;
                         else deleted++;
                     }
-                    return ok("Applied patch: " + ops.size() + " file operation" + (ops.size() == 1 ? "" : "s"),
-                            meta("added", added, "updated", updated, "deleted", deleted));
+                    Map<String, Object> md = meta("added", added, "updated", updated, "deleted", deleted);
+                    attachDiff(md, changes);
+                    return ok("Applied patch: " + ops.size() + " file operation" + (ops.size() == 1 ? "" : "s"), md);
                 });
+    }
+
+    // -----------------------------------------------------------------------
+    // edit diffs (SPEC §5 "Edit diffs"): metadata.files + metadata.diff
+    // -----------------------------------------------------------------------
+
+    /** One file's change: {@code before == null} ⇒ added, {@code after == null} ⇒ deleted. */
+    record FileChange(String path, String before, String after) {}
+
+    private static String readForDiff(Path p) {
+        try {
+            return Files.readString(p);
+        } catch (IOException | RuntimeException e) {
+            return "";
+        }
+    }
+
+    private static List<String> diffLines(String text) {
+        if (text == null || text.isEmpty()) return List.of();
+        List<String> lines = new ArrayList<>(Arrays.asList(text.split("\n", -1)));
+        if (text.endsWith("\n")) lines.remove(lines.size() - 1);
+        return lines;
+    }
+
+    /** Add {@code files} and {@code diff} to a result's metadata; {@code output} is untouched. */
+    static void attachDiff(Map<String, Object> md, List<FileChange> changes) {
+        List<Map<String, Object>> files = new ArrayList<>();
+        StringBuilder diff = new StringBuilder();
+        for (FileChange c : changes) {
+            List<String> a = diffLines(c.before());
+            List<String> b = diffLines(c.after());
+            List<int[]> script = editScript(a, b); // {op, aIndex, bIndex}: op 0 keep, -1 del, +1 add
+            int adds = 0, dels = 0;
+            for (int[] e : script) {
+                if (e[0] > 0) adds++;
+                else if (e[0] < 0) dels++;
+            }
+            String status = c.before() == null ? "added" : c.after() == null ? "deleted" : "modified";
+            Map<String, Object> f = new LinkedHashMap<>();
+            f.put("path", c.path());
+            f.put("status", status);
+            f.put("additions", adds);
+            f.put("deletions", dels);
+            files.add(f);
+            diff.append("--- ").append(c.before() == null ? "/dev/null" : "a/" + c.path()).append('\n');
+            diff.append("+++ ").append(c.after() == null ? "/dev/null" : "b/" + c.path()).append('\n');
+            appendHunks(diff, script, a, b);
+        }
+        md.put("files", files);
+        md.put("diff", diff.toString());
+    }
+
+    /** A minimal line edit script (Myers O(ND)), in order. */
+    private static List<int[]> editScript(List<String> a, List<String> b) {
+        int n = a.size(), m = b.size(), max = n + m;
+        int off = max + 1;
+        int[] v = new int[2 * max + 3];
+        List<int[]> trace = new ArrayList<>();
+        int dFound = -1;
+        outer:
+        for (int d = 0; d <= max; d++) {
+            trace.add(v.clone());
+            for (int k = -d; k <= d; k += 2) {
+                int x = (k == -d || (k != d && v[off + k - 1] < v[off + k + 1])) ? v[off + k + 1] : v[off + k - 1] + 1;
+                int y = x - k;
+                while (x < n && y < m && a.get(x).equals(b.get(y))) { x++; y++; }
+                v[off + k] = x;
+                if (x >= n && y >= m) { dFound = d; break outer; }
+            }
+        }
+        List<int[]> rev = new ArrayList<>();
+        int x = n, y = m;
+        for (int d = dFound; d > 0; d--) {
+            int[] pv = trace.get(d);
+            int k = x - y;
+            int prevK = (k == -d || (k != d && pv[off + k - 1] < pv[off + k + 1])) ? k + 1 : k - 1;
+            int prevX = pv[off + prevK], prevY = prevX - prevK;
+            while (x > prevX && y > prevY) { x--; y--; rev.add(new int[]{0, x, y}); }
+            if (x == prevX) { y--; rev.add(new int[]{1, x, y}); } else { x--; rev.add(new int[]{-1, x, y}); }
+        }
+        while (x > 0 && y > 0) { x--; y--; rev.add(new int[]{0, x, y}); }
+        Collections.reverse(rev);
+        return rev;
+    }
+
+    /** Unified-diff hunks with 3 lines of context. */
+    private static void appendHunks(StringBuilder out, List<int[]> script, List<String> a, List<String> b) {
+        final int ctx = 3;
+        int i = 0, len = script.size();
+        while (i < len) {
+            if (script.get(i)[0] == 0) { i++; continue; }
+            int start = Math.max(0, i - ctx);
+            int end = i;
+            int lastChange = i;
+            while (end < len) {
+                if (script.get(end)[0] != 0) lastChange = end;
+                else if (end - lastChange > 2 * ctx) break;
+                end++;
+            }
+            end = Math.min(len, lastChange + ctx + 1);
+            int aStart = -1, bStart = -1, aLen = 0, bLen = 0;
+            StringBuilder body = new StringBuilder();
+            for (int j = start; j < end; j++) {
+                int[] e = script.get(j);
+                if (e[0] <= 0) { if (aStart < 0) aStart = e[1]; aLen++; }
+                if (e[0] >= 0) { if (bStart < 0) bStart = e[2]; bLen++; }
+                String line = e[0] > 0 ? b.get(e[2]) : a.get(e[1]);
+                body.append(e[0] == 0 ? ' ' : e[0] > 0 ? '+' : '-').append(line).append('\n');
+            }
+            int[] first = script.get(start);
+            if (aStart < 0) aStart = first[1];
+            if (bStart < 0) bStart = first[2];
+            out.append("@@ -").append(aLen == 0 ? aStart : aStart + 1).append(',').append(aLen)
+                    .append(" +").append(bLen == 0 ? bStart : bStart + 1).append(',').append(bLen)
+                    .append(" @@\n").append(body);
+            i = end;
+        }
     }
 
     // -----------------------------------------------------------------------

@@ -337,7 +337,7 @@ public static partial class BuiltinTools
                 killedTree = JobControl.RequestStop(proc, descendants);
                 try
                 {
-                    using var grace = new CancellationTokenSource(BuiltinEnv.KillGraceMs);
+                    using var grace = new CancellationTokenSource(env.KillGraceMs);
                     await proc.WaitForExitAsync(grace.Token).ConfigureAwait(false);
                 }
                 catch (OperationCanceledException)
@@ -451,9 +451,12 @@ public static partial class BuiltinTools
             catch (Exception e) { return Task.FromResult(ToolResult.Error($"write: {e.Message}")); }
             var dir = Path.GetDirectoryName(Path.GetFullPath(full));
             if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
+            string? before = null;
+            try { if (File.Exists(full)) before = File.ReadAllText(full); } catch { /* unreadable: report as added */ }
             File.WriteAllText(full, content);
             var bytes = Encoding.UTF8.GetByteCount(content);
             var meta = new Dictionary<string, object?> { ["bytes"] = (long)bytes };
+            AddDiffMeta(meta, new[] { ComputeChange(DiffPath(env, p, full), before, content) });
             return Task.FromResult(ToolResult.Ok($"Wrote {bytes} bytes to {p}", meta));
         });
 
@@ -506,6 +509,7 @@ public static partial class BuiltinTools
             }
             File.WriteAllText(full, next);
             var meta = new Dictionary<string, object?> { ["replacements"] = (long)replacements };
+            AddDiffMeta(meta, new[] { ComputeChange(DiffPath(env, p, full), content, next) });
             return Task.FromResult(ToolResult.Ok(
                 $"Edited {p} ({replacements} replacement{(replacements == 1 ? "" : "s")})", meta));
         });
@@ -885,6 +889,13 @@ public static partial class BuiltinTools
             // The paths live INSIDE the patch text, not in the arguments, so a host cannot
             // rewrite them from a hook — the one case that genuinely needs the base directory
             // to be library-side (ADR 0034 D2).
+            var given = ops.Select(op => op switch
+            {
+                AddOp a => a.Path,
+                DeleteOp d => d.Path,
+                UpdateOp u => u.Path,
+                _ => "",
+            }).ToList();
             try
             {
                 ops = ops.Select(op => op switch
@@ -900,23 +911,28 @@ public static partial class BuiltinTools
             // Stage every write/delete first; only touch the filesystem once all hunks apply.
             var writes = new List<(string Path, string Content)>();
             var deletes = new List<string>();
+            var changes = new List<FileChange>();
             try
             {
-                foreach (var op in ops)
+                for (var oi = 0; oi < ops.Count; oi++)
                 {
-                    switch (op)
+                    switch (ops[oi])
                     {
                         case AddOp a:
                             if (File.Exists(a.Path)) throw new Exception($"file already exists: {a.Path}");
                             writes.Add((a.Path, a.Content));
+                            changes.Add(ComputeChange(DiffPath(env, given[oi], a.Path), null, a.Content));
                             break;
                         case DeleteOp d:
                             if (!File.Exists(d.Path)) throw new Exception($"file not found: {d.Path}");
                             deletes.Add(d.Path);
+                            changes.Add(ComputeChange(DiffPath(env, given[oi], d.Path), File.ReadAllText(d.Path), null));
                             break;
                         case UpdateOp u:
                             var content = File.ReadAllText(u.Path);
-                            writes.Add((u.Path, ApplyUpdate(content, u.Body)));
+                            var updated = ApplyUpdate(content, u.Body);
+                            writes.Add((u.Path, updated));
+                            changes.Add(ComputeChange(DiffPath(env, given[oi], u.Path), content, updated));
                             break;
                     }
                 }
@@ -943,6 +959,7 @@ public static partial class BuiltinTools
                 ["updated"] = (long)ops.Count(o => o is UpdateOp),
                 ["deleted"] = (long)ops.Count(o => o is DeleteOp),
             };
+            AddDiffMeta(meta, changes);
             return Task.FromResult(ToolResult.Ok(
                 $"Applied patch: {ops.Count} file operation{(ops.Count == 1 ? "" : "s")}", meta));
         });

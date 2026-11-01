@@ -88,12 +88,38 @@ function isEnabled(cfg: ServerConfig): boolean {
 export function parseMcpConfig(input: string | object): McpConfig {
   const raw: any = typeof input === "string" ? JSON.parse(readFileSync(input, "utf8")) : input
   const wrapped = raw.mcpServers ?? raw.servers ?? raw.mcp
-  if (wrapped !== undefined) return wrapped as McpConfig
+  if (wrapped !== undefined) return normalizeServers(wrapped)
   // Bare map of servers — but strip sibling top-level config keys (builtins/
   // agents/a2a/mcpServer) so they are not mistaken for MCP servers when no
   // wrapper key is present.
   const { builtins: _builtins, agents: _agents, a2a: _a2a, mcpServer: _mcpServer, ...servers } = raw
-  return servers as McpConfig
+  return normalizeServers(servers)
+}
+
+/**
+ * §2 `command` + `args`. A local server's `command` may be a non-empty string or a non-empty
+ * string array; an optional `args` string array is appended. The result is always the argv form
+ * (`command: string[]`, no `args`). Spawned with no shell. A remote server ignores `args`.
+ */
+function normalizeServers(servers: Record<string, any>): McpConfig {
+  const out: McpConfig = {}
+  for (const [name, cfg] of Object.entries(servers ?? {})) {
+    if (cfg === null || typeof cfg !== "object" || isRemote(cfg as ServerConfig)) {
+      out[name] = cfg
+      continue
+    }
+    const { args, command, ...rest } = cfg as any
+    const head: unknown[] | undefined =
+      typeof command === "string" ? [command] : Array.isArray(command) ? command : undefined
+    if (!head || head.length === 0 || head[0] === "" || head.some((c) => typeof c !== "string")) {
+      throw new Error(`mcp server "${name}": invalid command`)
+    }
+    if (args !== undefined && (!Array.isArray(args) || args.some((a: unknown) => typeof a !== "string"))) {
+      throw new Error(`mcp server "${name}": invalid args`)
+    }
+    out[name] = { ...rest, command: [...(head as string[]), ...((args as string[] | undefined) ?? [])] }
+  }
+  return out
 }
 
 /**
@@ -245,7 +271,10 @@ function convertTool(server: string, def: McpToolDef, client: Client, timeout: n
         const result: any = await client.callTool(
           { name: def.name, arguments: args ?? {} },
           undefined,
-          { resetTimeoutOnProgress: true, signal: ctx?.signal, timeout: ctx?.timeout ?? timeout },
+          // The SDK only attaches `_meta.progressToken` when `onprogress` is supplied; without it
+          // `resetTimeoutOnProgress` never fires (add-mcp-progress-timeout). Notifications for a
+          // token that matches no in-flight request are dropped by the SDK, so they never reset.
+          { onprogress: () => {}, resetTimeoutOnProgress: true, signal: ctx?.signal, timeout: ctx?.timeout ?? timeout },
         )
         // Parts are collected BEFORE any branch returns: the isError and structuredContent
         // short-circuits both read `content[]` on the way past, so neither reintroduces the

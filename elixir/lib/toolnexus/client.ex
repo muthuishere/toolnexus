@@ -23,12 +23,40 @@ defmodule Toolnexus.Client.InMemoryConversationStore do
     %__MODULE__{pid: pid}
   end
 
-  @impl true
-  def get(%__MODULE__{pid: pid}, id), do: Agent.get(pid, &Map.get(&1, id))
+  # State: id => {messages, updated_at, seq}. `seq` is a monotonic save counter
+  # so `list/1` orders saves made within the same clock tick deterministically.
 
   @impl true
-  def save(%__MODULE__{pid: pid}, id, messages),
-    do: Agent.update(pid, &Map.put(&1, id, messages))
+  def get(%__MODULE__{pid: pid}, id) do
+    Agent.get(pid, fn m ->
+      case Map.get(m, id) do
+        {messages, _at, _seq} -> messages
+        nil -> nil
+      end
+    end)
+  end
+
+  @impl true
+  def save(%__MODULE__{pid: pid}, id, messages) do
+    seq = System.unique_integer([:monotonic])
+    Agent.update(pid, &Map.put(&1, id, {messages, DateTime.utc_now(), seq}))
+  end
+
+  @doc """
+  Every remembered conversation as `%{id, updated_at}` (a `DateTime`), newest
+  first, ties by id ascending (SPEC §8 `list()`).
+  """
+  @spec list(t()) :: [%{id: String.t(), updated_at: DateTime.t()}]
+  def list(%__MODULE__{pid: pid}) do
+    pid
+    |> Agent.get(& &1)
+    |> Enum.sort_by(fn {id, {_m, _at, seq}} -> {-seq, id} end)
+    |> Enum.map(fn {id, {_m, at, _seq}} -> %{id: id, updated_at: at} end)
+  end
+
+  @doc "Forget a conversation; succeeds when it is absent (SPEC §8 `delete(id)`)."
+  @spec delete(t(), String.t()) :: :ok
+  def delete(%__MODULE__{pid: pid}, id), do: Agent.update(pid, &Map.delete(&1, id))
 end
 
 defmodule Toolnexus.Client.RunResult do
@@ -254,7 +282,7 @@ defmodule Toolnexus.Client do
   require Logger
 
   alias Toolnexus.{Answer, ContentPart, Context, Request, Tool, ToolResult}
-  alias Toolnexus.Client.{InMemoryConversationStore, MetricsRegistry, RunResult}
+  alias Toolnexus.Client.{InMemoryConversationStore, MetricsRegistry, RunResult, TurnGuard}
 
   # The default retryable set: `429` plus the 5xx worth another try — and `529 Overloaded`,
   # which TypeSafe documents as "retry with backoff" and which this enumeration once made
@@ -609,17 +637,21 @@ defmodule Toolnexus.Client do
         run(client, prompt, toolkit)
 
       true ->
-        history = store_get(client.store, id) || []
-        result = run(client, prompt, toolkit, history: history)
-        store_save(client.store, id, result.messages)
-        result
+        # On an error or a cancellation the guard saves the partial transcript
+        # (SPEC §8 "Interrupted turns are saved"); the error still propagates.
+        TurnGuard.run(id, client.store, client.style, fn ->
+          history = store_get(client.store, id) || []
+          result = run(client, prompt, toolkit, history: history)
+          store_save(client.store, id, result.messages)
+          result
+        end)
     end
   end
 
   @doc """
   Streaming variant: returns an `Enumerable` of event maps —
   `%{type: "text", delta}`, `%{type: "tool_call", id, name, args}`,
-  `%{type: "tool_result", id, name, output, is_error}`, `%{type: "usage", usage}`,
+  `%{type: "tool_result", id, name, output, is_error, metadata}`, `%{type: "usage", usage}`,
   `%{type: "pending", request}` (§10), `%{type: "done", result}`.
 
   With an `:id` it is stateful like `ask`: history is loaded before streaming and the
@@ -1457,10 +1489,13 @@ defmodule Toolnexus.Client do
 
   # Execute all tool calls of a turn concurrently; results come back in original call order.
   defp exec_calls(client, toolkit, calls, turn) do
+    guard = TurnGuard.current()
+
     calls
     |> Task.async_stream(
       fn {call_id, name, args} ->
         {args, result} = run_tool(client, toolkit, name, args, call_id, turn)
+        report_tool(client, guard, call_id, name, result)
 
         {result, halted} =
           case pending_of(result) do
@@ -1503,6 +1538,23 @@ defmodule Toolnexus.Client do
         |> Map.put("parts", Enum.map(parts, &ContentPart.to_map/1))
         |> Map.put("tool_name", name)
     end
+  end
+
+  # Hand a finished (non-suspended) tool result to the turn guard, encoded in the
+  # active dialect, so a turn cancelled mid-batch keeps the results that finished.
+  defp report_tool(_client, nil, _id, _name, _result), do: :ok
+
+  defp report_tool(client, guard, id, name, result) do
+    if pending_of(result) == nil do
+      entry =
+        if client.style == "anthropic",
+          do: tool_result_block(id, result),
+          else: tool_message(id, name, result)
+
+      TurnGuard.tool_done(guard, id, entry)
+    end
+
+    :ok
   end
 
   defp tool_result_block(id, result) do
@@ -1696,6 +1748,7 @@ defmodule Toolnexus.Client do
   end
 
   defp loop_openai(client, toolkit, key, run_start, st, turn) do
+    TurnGuard.checkpoint(st.messages)
     st = %{st | turns: st.turns + 1}
     {messages, tools, tmodel} = before_llm(client, st.messages, st.tools, turn)
     st = %{st | messages: messages, tools: tools, model: tmodel}
@@ -1718,6 +1771,7 @@ defmodule Toolnexus.Client do
     after_llm(client, data, turn, tmodel)
     msg = data["choices"] |> List.first() |> Map.get("message")
     st = %{st | messages: st.messages ++ [msg]}
+    TurnGuard.checkpoint(st.messages)
     calls = msg["tool_calls"] || []
 
     if calls == [] do
@@ -1811,6 +1865,7 @@ defmodule Toolnexus.Client do
   end
 
   defp loop_anthropic(client, toolkit, key, sys, run_start, st, turn) do
+    TurnGuard.checkpoint(st.messages)
     st = %{st | turns: st.turns + 1}
     {messages, tools, tmodel} = before_llm(client, st.messages, st.tools, turn)
     st = %{st | messages: messages, tools: tools, model: tmodel}
@@ -1833,6 +1888,7 @@ defmodule Toolnexus.Client do
     after_llm(client, data, turn, tmodel)
     content = data["content"] || []
     st = %{st | messages: st.messages ++ [%{"role" => "assistant", "content" => content}]}
+    TurnGuard.checkpoint(st.messages)
     uses = Enum.filter(content, &(&1["type"] == "tool_use"))
 
     if uses == [] do
@@ -1888,17 +1944,25 @@ defmodule Toolnexus.Client do
 
     emit_ev = fn
       %{type: "done", result: result} = ev ->
-        if id, do: store_save(client.store, id, result.messages)
+        if id do
+          store_save(client.store, id, result.messages)
+          TurnGuard.complete()
+        end
+
         emit.(ev)
 
       ev ->
         emit.(ev)
     end
 
-    case client.style do
-      "anthropic" -> stream_anthropic(client, prompt, toolkit, history, emit_ev)
-      _ -> stream_openai(client, prompt, toolkit, history, emit_ev)
-    end
+    # A stream is cancelled by halting it (its worker is killed) or by an error;
+    # either way the guard saves the partial transcript (SPEC §8).
+    TurnGuard.run(id, client.store, client.style, fn ->
+      case client.style do
+        "anthropic" -> stream_anthropic(client, prompt, toolkit, history, emit_ev)
+        _ -> stream_openai(client, prompt, toolkit, history, emit_ev)
+      end
+    end)
   end
 
   # ---- streaming: openai ----
@@ -1949,6 +2013,7 @@ defmodule Toolnexus.Client do
   end
 
   defp stream_loop_openai(client, toolkit, key, run_start, st, turn, emit) do
+    TurnGuard.checkpoint(st.messages)
     st = %{st | turns: st.turns + 1}
     {messages, tools, tmodel} = before_llm(client, st.messages, st.tools, turn)
     st = %{st | messages: messages, tools: tools, model: tmodel}
@@ -2026,6 +2091,8 @@ defmodule Toolnexus.Client do
       }
 
       st = %{st | messages: st.messages ++ [assistant]}
+      TurnGuard.checkpoint(st.messages)
+      guard = TurnGuard.current()
 
       Enum.each(calls, fn c ->
         emit.(%{type: "tool_call", id: c.id, name: c.name, args: safe_json(c.args)})
@@ -2034,7 +2101,11 @@ defmodule Toolnexus.Client do
       settled =
         calls
         |> Task.async_stream(
-          fn c -> run_tool(client, toolkit, c.name, safe_json(c.args), c.id, turn) end,
+          fn c ->
+            r = run_tool(client, toolkit, c.name, safe_json(c.args), c.id, turn)
+            report_tool(client, guard, c.id, c.name, elem(r, 1))
+            r
+          end,
           ordered: true,
           timeout: :infinity,
           max_concurrency: max(length(calls), 1)
@@ -2080,7 +2151,8 @@ defmodule Toolnexus.Client do
               id: c.id,
               name: c.name,
               output: result.output,
-              is_error: result.is_error
+              is_error: result.is_error,
+              metadata: result.metadata
             })
 
             {:cont, {:ok, st}}
@@ -2206,6 +2278,7 @@ defmodule Toolnexus.Client do
   end
 
   defp stream_loop_anthropic(client, toolkit, key, sys, run_start, st, turn, emit) do
+    TurnGuard.checkpoint(st.messages)
     st = %{st | turns: st.turns + 1}
     {messages, tools, tmodel} = before_llm(client, st.messages, st.tools, turn)
     st = %{st | messages: messages, tools: tools, model: tmodel}
@@ -2266,6 +2339,7 @@ defmodule Toolnexus.Client do
       end)
 
     st = %{st | messages: st.messages ++ [%{"role" => "assistant", "content" => content}]}
+    TurnGuard.checkpoint(st.messages)
     uses = Enum.filter(content, &(&1["type"] == "tool_use"))
 
     if stop_reason != "tool_use" or uses == [] do
@@ -2282,10 +2356,16 @@ defmodule Toolnexus.Client do
         emit.(%{type: "tool_call", id: u["id"], name: u["name"], args: u["input"]})
       end)
 
+      guard = TurnGuard.current()
+
       settled =
         uses
         |> Task.async_stream(
-          fn u -> run_tool(client, toolkit, u["name"], u["input"] || %{}, u["id"], turn) end,
+          fn u ->
+            r = run_tool(client, toolkit, u["name"], u["input"] || %{}, u["id"], turn)
+            report_tool(client, guard, u["id"], u["name"], elem(r, 1))
+            r
+          end,
           ordered: true,
           timeout: :infinity,
           max_concurrency: max(length(uses), 1)
@@ -2334,7 +2414,8 @@ defmodule Toolnexus.Client do
               id: u["id"],
               name: u["name"],
               output: result.output,
-              is_error: result.is_error
+              is_error: result.is_error,
+              metadata: result.metadata
             })
 
             {:cont, {:ok, st, results}}

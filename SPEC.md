@@ -292,6 +292,13 @@ Superset of the Claude-desktop / opencode format. The top-level key may be
 Type inference when `type` is omitted: presence of `url` ⇒ `remote`, presence of
 `command` ⇒ `local`.
 
+**`command` + `args` (Claude shape).** A local server's `command` MAY be a non-empty **string** or a
+non-empty **array of strings**; an optional `args` array of strings is appended:
+`{"command":"node","args":["server.mjs"]}` ⇒ argv `["node","server.mjs"]`, exactly as
+`{"command":["node","server.mjs"]}`. The argv is spawned with **no shell interpretation**. An empty
+command, a non-string element, or an `args` that is not an array of strings fails the parse with an
+error naming the server. A remote server ignores `args`.
+
 **Reserved sibling keys:** when no `mcpServers`/`servers`/`mcp` wrapper is present and the object is
 used as the raw server map, the parser MUST ignore the reserved top-level keys **`builtins`** (§4A),
 **`agents`** (§7A, outbound), **`a2a`** (§7B, inbound card config), and **`mcpServer`** (§7C, inbound
@@ -320,6 +327,15 @@ server.)
   protects slow servers), always **bounded and isolated** (`failed`, never fatal, never
   a hang), and a port MAY bound tighter (≤ per-phase) as long as it never exceeds it.
   Set a smaller per-server `timeout` if a faster give-up on an unresponsive server matters.
+- **`tools/call` is bounded by an idle timeout.** Every call carries a fresh
+  `_meta.progressToken`; the server `timeout` is time since the call started or since the last
+  `notifications/progress` whose token matches that call. A non-matching token never resets it; a
+  server that reports nothing times out after `timeout`, as before. There is no absolute cap — an
+  endlessly-reporting call is bounded by caller cancellation (§1 `Context`) and the run-level
+  `timeoutMs` (§8). The timeout error text is per-port. **Known gaps:** elixir and clojure have no
+  per-call cancellation path (clojure: disconnect only); clojure's plain-JSON HTTP responses keep a
+  hard deadline. C# previously had no per-call deadline at all, so a silent C# call longer than
+  `timeout` now fails.
 - After connect, **list tools** (paginate via `nextCursor`) and convert each.
 - Tool name = `sanitize(server) + "_" + sanitize(toolName)` where
   `sanitize(x) = x.replace(/[^a-zA-Z0-9_-]/g, "_")`.
@@ -782,11 +798,128 @@ group, it captures that enumeration **before** terminating the parent — after 
 been reparented and are unreachable from its pid. The outcome is reported in `metadata`
 (`timedOut`, `killedTree`); **`output` does not change**, so no conformance golden moves.
 
+**`killGraceMs`** (builtin option, default **2000**) is the POSIX wait between SIGTERM and SIGKILL of
+the group; a host with a tight cancel bar sets it lower (e.g. 100). It has no effect on Windows.
+
+**Edit diffs.** `edit`, `write` and `apply_patch` results carry `metadata.files`, a list of
+`{path, status: "added"|"modified"|"deleted", additions, deletions}` (identical across ports), and
+`metadata.diff`, a unified diff with paths relative to `baseDir` when set (valid, not byte-identical
+across ports). `output` does not change. The streaming `tool_result` event carries the result's
+`metadata`.
+
 Safety: `bash`, `write`, `edit`, `apply_patch` execute commands / mutate the filesystem. Command
 output and `${ENV}`-expanded values are **never logged**; no secret value is written into any spec,
 test, or example fixture. The global toggle is the supported off-switch for locked-down hosts.
 
 ---
+
+## 4C. Host runtime additions (golang only — other ports pending)
+
+Change `add-go-host-asks`. These ship in the Go port first for go-agent-cli; the
+six other ports are tracked as unchecked tasks there and MUST land before the
+next release. Absent options are byte-identical to today.
+
+- **Concurrent `register`.** `Toolkit.register` is safe while a turn reads the
+  toolkit (`tools`/`get`/`execute`) and while other `register` calls run. A tool
+  registered mid-turn is offered from the next LLM call; a call already
+  dispatched is unaffected.
+- **Per-server MCP readiness.** `loadMcp(config, { waitFor?, onServer? })`:
+  `onServer({ name, status, tools, error })` fires once per server the moment it
+  is connected, failed or found disabled — never waiting for a slower server.
+  Calls are serialized. The load still returns only after every server finishes;
+  parent cancellation still aborts the load and closes every client, including
+  ones whose tools were already handed out.
+- **`waitFor` with the turn context.** `ClientOptions.waitForCtx(ctx, request)`
+  receives the turn's cancellation context so a pending ask ends with the turn;
+  it wins over `waitFor` when both are set.
+- **Compaction notice.** `CompactorOptions.onCompact(ctx, { tokensBefore,
+  tokensAfter, messagesBefore, messagesAfter, summarized, summary })` fires after
+  each compaction (token counts from `countTokens`), never on a no-op; `folded` is the
+  summarized messages verbatim. The compactor never summarizes the sole user prompt of a
+  turn (one prompt then only tool traffic ⇒ `[system?, prompt, summary]`) and is a no-op
+  when the result would not be smaller than the input.
+- **Tool hints.** `Tool.hints = { readOnly, destructive, openWorld }` (nil =
+  unknown; treat as mutating) is passed on `beforeTool` events as `hints`.
+  Builtins: `read`, `grep`, `glob`, `question`, `todowrite` are read-only;
+  `webfetch` is read-only and open-world; `write`, `edit`, `apply_patch` are
+  destructive; `bash` is destructive and open-world. MCP tools map
+  `readOnlyHint`/`destructiveHint`/`openWorldHint` with MCP's defaults (absent
+  destructive and open-world ⇒ true); no annotations ⇒ nil. Hints are advisory and
+  are not serialized into any adapter or wire output.
+- **Opt-in coding builtins** (absent unless configured; the default ten are
+  unchanged). `background` (a host-owned registry with `list`/`kill`/`closeAll`):
+  `bash` gains `run_in_background` and returns a background id;
+  `bash_output(id)` returns output produced since the last read plus
+  `[status: running|killed|exited with code N]`; `kill_shell(id)` stops the
+  process group (SIGTERM, `killGraceMs`, SIGKILL). `webSearch(ctx, query, limit)`
+  adds `websearch` (numbered title/URL/snippet). `notebookEdit` adds
+  `notebook_edit` (replace/insert/delete a cell by id or index; replacing a code
+  cell clears its outputs). `McpSource.resourceTools()` returns
+  `list_mcp_resources` / `read_mcp_resource` (read-only).
+- **grep context.** `grep` takes `context`, `before`, `after`: match lines
+  `path:N:text`, context lines `path-N-text`, `--` between groups that do not
+  touch. Absent ⇒ output unchanged.
+- **Truncation is reported in metadata.** A `read` window that stops before the
+  end sets `truncated`, `totalLines`, `nextOffset`; a `grep` cut by `limit` sets
+  `truncated`, `total`. The text output stays the pinned cross-port bytes.
+- **Agents as tools under the parent's gates.** `agent.asTool(opts)` cancels the
+  child when the calling turn is cancelled. `agent.asToolWith(toolContext ⇒ opts)`
+  builds options per call; runtime `Options.waitFor` answers a child's
+  suspension when no agent on its chain has its own `waitFor`; `Options.hooks`
+  gate and observe the child's tool calls (a `Def.hooks` replaces them).
+- **Call id on the tool context.** A tool run by the client loop gets `toolContext.callId`
+  = the model's id for that call (empty outside the loop). A message's calls run
+  concurrently, so this is how a tool tells its sibling calls apart.
+- **API key by host (security).** `apiKey` set ⇒ only it. Else `apiKeyEnv` (an env var
+  NAME) if set. Else ONLY the env var belonging to the `baseURL` host, over https:
+  `api.openai.com` → `OPENAI_API_KEY`, `api.anthropic.com` → `ANTHROPIC_API_KEY`,
+  `openrouter.ai` (and subdomains) → `OPENROUTER_API_KEY`. Any other host, or plain http,
+  without `apiKey`/`apiKeyEnv` is an error. No cross-provider fallback. (Supersedes the env
+  list in §8 for golang; other ports still fall back and are tracked.)
+- **`listModels(ctx, clientOptions)`** → `[{id, name?, contextLength?}]` sorted by id:
+  openai style `GET {base}/models` (OpenRouter's `context_length` read when present),
+  anthropic `GET {base}/v1/models` following `has_more`/`last_id`. Same key rules.
+- **Permission gates use `beforeTool`, not a new option.** Allow = return
+  nothing; deny = return an error `result` (the model sees it, the run
+  continues); ask = return `pending(request)` (path B, §10), which `waitFor` /
+  `waitForCtx` resolves. Rules and modes stay in the host.
+
+### Prompt caching (change `add-prompt-cache`, golang only — other ports pending)
+
+- `Usage` gains `cacheReadTokens` and `cacheWriteTokens` (anthropic
+  `cache_read_input_tokens` / `cache_creation_input_tokens`; openai
+  `prompt_tokens_details.cached_tokens`, read only). Existing counts are unchanged;
+  under anthropic `promptTokens` excludes cached tokens, as the provider reports it.
+  **Context size:** anthropic total input = `promptTokens + cacheReadTokens +
+  cacheWriteTokens`; openai `promptTokens` already includes `cacheReadTokens`. A host that
+  shows context usage from `promptTokens` alone under-reports a cached anthropic session.
+- `ClientOptions.promptCache = { key?, longTTL? }`. Anthropic: `cache_control`
+  `{type:"ephemeral"}` (plus `ttl:"1h"` with longTTL) on the last tool, on the system
+  prompt (a string becomes one text block) and on the last content block of the latest
+  message. OpenAI: `prompt_cache_key = key`. Gemini: nothing yet. Applied before
+  `requestParams` and `bodyTransform`. The transcript is never mutated. Absent ⇒
+  byte-identical.
+- The engine adds no volatile data to the system prompt (host prompt + skills catalog
+  only). A tool registered mid-session changes the tools array and so breaks the cached
+  prefix; tool tiers with `tool_search` are the fix.
+- **Tool tiers.** `ClientOptions.toolTiers = { core, deferred, budgetTokens?,
+  contextWindow?, usageCount?, countTokens? }`. The tools array is the core tools sorted
+  by name, then `tool_search` and `call_tool`. Every other tool is *listed* (`- name — first
+  line` inside `tool_search`'s description) or *deferred* (name only there). The plan is
+  built on a toolkit's first request and then frozen; `resetToolTiers(tk)` rebuilds it (call
+  at session start). A tool registered later is deferred, absent from the description, and
+  found by search. Budget (`budgetTokens`, else 5% of `contextWindow`): while the core
+  schemas plus the two meta tools exceed it, the least-used core tool moves to listed (ties:
+  larger schema, then name), then the least-used listed tool to deferred.
+  `tool_search {query, limit?}`: `select:a,b` for exact names, else keyword scoring (name
+  match 3, description match 1; default 5 results); returns the definitions as JSON in the
+  tool result — a message, never a change to the tools array. It is engine-internal and
+  read-only (no `beforeTool`). Loaded tools are called by name, or as `call_tool {name,
+  arguments}`, which the loop unwraps BEFORE hooks, so gates and hints see the real tool. Stream
+  `tool_call`/`tool_result` events carry the real name and inner args, with `via: "call_tool"`.
+- **Gemini** explicit `cachedContent`: not built (the Go client reaches Gemini only
+  through its OpenAI-compatible endpoint; creating a cache needs the native API). Gemini's
+  implicit prefix caching benefits from the stable prefix above.
 
 ## 5. Reference usage (pseudocode, identical shape in all 3 langs)
 
@@ -1657,6 +1790,40 @@ peer's turns are remembered through the client's `ConversationStore`; no `contex
 
 Each language exposes the idiomatic equivalent (a `ConversationStore` interface + an in-memory default
 + `ask`).
+
+**`FileConversationStore(root)` (durable, shipped).** Root is required — never a default home dir.
+Each id is one file `<root>/<id>.json` holding `{"version":1,"messages":[...]}` (writer whitespace is
+not normative). `save` writes a temp file in root (mode 0600), fsyncs, and renames it over the old
+file, so a reader sees the old or the new transcript, never a torn one; power-loss durability of the
+rename is best-effort. `get` of a missing id ⇒ none; corrupt JSON or an unknown `version` ⇒ an
+error, never silently none. Ids must match `^[A-Za-z0-9._-]{1,128}$` and not be `.`/`..`; anything
+else is rejected by every operation. Same-id saves are serialized in-process; across processes the
+last rename wins.
+
+**Durability mode (`sync`).** An option on the file store: `full` (default — the strongest flush
+the OS offers, `F_FULLFSYNC` on macOS, then a best-effort directory fsync), `fsync` (a plain
+`fsync(2)`, no directory fsync; equal to `full` off macOS), `none` (no flush). Every mode keeps
+temp-then-rename, so a process crash never tears a file; modes differ only in what survives power
+loss. An unknown mode is a construction error. (Measured, macOS, 200 KB save: full ≈ 7.9 ms,
+fsync ≈ 0.4 ms, none ≈ 0.3 ms.)
+
+**`list()` / `delete(id)`.** Both shipped stores provide them: `list()` returns `{id, updatedAt}`
+newest first (ties by id ascending; the file store uses file mtime and does not parse bodies);
+`delete(id)` removes the conversation and succeeds when it is absent. The `ConversationStore`
+contract itself stays `get`/`save` — a custom store need not implement them.
+
+**Interrupted turns are saved.** A stateful run (`ask` with an id, or streaming with an id) that ends
+in an error or a cancellation still saves: the prior transcript, the new user prompt, and every
+complete assistant/tool message. Every assistant tool call without a result first gets a synthetic
+result with `isError: true` and output `interrupted: the turn ended before this tool returned. Whether its side effects happened is unknown. Do not re-run it automatically; check first.`, so the transcript stays valid in both dialects. No rollback is claimed and nothing re-executes the call. The
+original error is still returned or emitted.
+
+Pinned details: the in-memory store's `updatedAt` is the time of the last `save`; `list()` on a
+root that does not exist yet is empty; a `command` array with an empty FIRST element is invalid
+(later empty elements pass through as arguments); `"args": null` is treated as absent; a server
+with no `command` key at all still fails at connect (status `failed`), not at parse. **Permitted
+gaps:** elixir reads file mtimes at whole-second resolution, so saves within one second list by id;
+clojure's file store shells out to POSIX tools (`mv`, `stat`, `sync`) and is not Windows-capable.
 
 ### Observability (metrics)
 

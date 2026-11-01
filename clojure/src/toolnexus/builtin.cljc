@@ -245,9 +245,14 @@
 ;; ---------------------------------------------------------------------------
 
 (def kill-grace-ms
-  "How long a job gets between \"please stop\" and \"stop\". Fixed, and identical in
-  every port, so a timeout means the same thing everywhere."
+  "The DEFAULT wait between \"please stop\" and \"stop\" (SPEC §4A `killGraceMs`),
+  identical in every port. A host overrides it with `:kill-grace-ms` /
+  `:killGraceMs` on the builtins config; absent or 0 means this value."
   2000)
+
+(defn- grace-of [m]
+  (let [v (or (:kill-grace-ms m) (:killGraceMs m))]
+    (if (and (number? v) (pos? v)) (long v) kill-grace-ms)))
 
 (def ^:private win-reserved
   #{"CON" "PRN" "AUX" "NUL"
@@ -300,9 +305,11 @@
   (let [m        (if (map? cfg) cfg {})
         base-dir (str (or (:base-dir m) (:baseDir m) ""))
         confine  (boolean (or (:confine-to-base-dir m) (:confineToBaseDir m)))
-        given    (:shell m)]
+        given    (:shell m)
+        grace    (grace-of m)]
     (if (seq given)
-      {:shell (mapv str given) :shell-error nil :base-dir base-dir :confine confine}
+      {:shell (mapv str given) :shell-error nil :base-dir base-dir :confine confine
+       :kill-grace-ms grace}
       (let [cands (shell-candidates)
             found (first (filter (fn [argv] (resolves-on-path? (first argv))) cands))]
         {:shell (or found [])
@@ -312,7 +319,8 @@
                              "); set :shell on the builtins config, or disable the bash "
                              "builtin with {:tools {\"bash\" false}}"))
          :base-dir base-dir
-         :confine confine}))))
+         :confine confine
+         :kill-grace-ms grace}))))
 
 (defn shell
   "The interpreter the builtins resolved for `bash` — what a host prints, and
@@ -524,7 +532,7 @@
                   ;; SIGTERM in 5 ms must not cost its caller two seconds.
                   ;; Measured parity break — five ports returned a 1 s timeout in
                   ;; ~1.0 s while this one took ~3.05 s.
-                  (when (and (seq pids) (not (await-exit pids kill-grace-ms)))
+                  (when (and (seq pids) (not (await-exit pids (or (:kill-grace-ms e) kill-grace-ms))))
                     (signal-job pids "-KILL"))
                   (tool/failure (str "command timed out after " ms "ms")
                                 (assoc meta :timedOut true :killedTree (boolean (seq pids)))))
@@ -622,15 +630,108 @@
                 win   (if lim (take (long lim) win) win)]
             (tool/success (str/join "\n" win))))))))
 
+;; ---------------------------------------------------------------------------
+;; SPEC §4A edit diffs — metadata.files + metadata.diff
+;; ---------------------------------------------------------------------------
+
+(defn- lines-of
+  "Text as diff lines. A trailing newline ends the last line rather than adding
+  an empty one; nil (no file) is no lines."
+  [t]
+  (if (or (nil? t) (= "" t)) [] (vec (str/split-lines (str t)))))
+
+(defn- lcs-ops
+  "Line ops [[\\space l] [\\- l] [\\+ l]] for `a` -> `b`, by LCS. Called on the
+  CHANGED middle only (common prefix/suffix trimmed first), so a one-line edit
+  of a large file stays cheap."
+  [a b]
+  (let [n (count a) m (count b)
+        ;; table[i][j] = LCS length of a[i..] and b[j..], built bottom-up
+        table (reduce (fn [rows i]
+                        (let [below (first rows)
+                              row (reduce (fn [row j]
+                                            (assoc row j
+                                                   (if (= (nth a i) (nth b j))
+                                                     (inc (nth below (inc j)))
+                                                     (max (nth below j) (nth row (inc j))))))
+                                          (vec (repeat (inc m) 0))
+                                          (range (dec m) -1 -1))]
+                          (cons row rows)))
+                      (list (vec (repeat (inc m) 0)))
+                      (range (dec n) -1 -1))
+        table (vec table)]
+    (loop [i 0 j 0 ops []]
+      (cond
+        (and (< i n) (< j m) (= (nth a i) (nth b j)))
+        (recur (inc i) (inc j) (conj ops [\space (nth a i)]))
+
+        (and (< i n) (or (>= j m)
+                         (>= (nth (nth table (inc i)) j) (nth (nth table i) (inc j)))))
+        (recur (inc i) j (conj ops [\- (nth a i)]))
+
+        (< j m)
+        (recur i (inc j) (conj ops [\+ (nth b j)]))
+
+        :else ops))))
+
+(def ^:private diff-context 3)
+
+(defn- file-diff
+  "{:file {:path :status :additions :deletions} :diff unified-text} for one file.
+  `before`/`after` nil = absent (added / deleted). One hunk spanning the change,
+  with up to three lines of context either side."
+  [path before after]
+  (let [a (lines-of before) b (lines-of after)
+        na (count a) nb (count b)
+        pre (loop [k 0] (if (and (< k na) (< k nb) (= (nth a k) (nth b k))) (recur (inc k)) k))
+        suf (loop [k 0] (if (and (< k (- na pre)) (< k (- nb pre))
+                                 (= (nth a (- na 1 k)) (nth b (- nb 1 k))))
+                          (recur (inc k)) k))
+        mid (lcs-ops (subvec a pre (- na suf)) (subvec b pre (- nb suf)))
+        dels (count (filter #(= \- (first %)) mid))
+        adds (count (filter #(= \+ (first %)) mid))
+        status (cond (nil? before) "added" (nil? after) "deleted" :else "modified")
+        lead (max 0 (- pre diff-context))
+        tail (min suf diff-context)
+        ops (concat (map (fn [l] [\space l]) (subvec a lead pre))
+                    mid
+                    (map (fn [l] [\space l]) (subvec a (- na suf) (+ (- na suf) tail))))
+        old-n (count (remove #(= \+ (first %)) ops))
+        new-n (count (remove #(= \- (first %)) ops))
+        rng (fn [start cnt] (str (if (zero? cnt) (max 0 (dec start)) start) "," cnt))
+        diff (if (and (zero? adds) (zero? dels))
+               ""
+               (str "--- " (if (nil? before) "/dev/null" (str "a/" path)) "\n"
+                    "+++ " (if (nil? after) "/dev/null" (str "b/" path)) "\n"
+                    "@@ -" (rng (inc lead) old-n) " +" (rng (inc lead) new-n) " @@\n"
+                    (apply str (map (fn [[t l]] (str t l "\n")) ops))))]
+    {:file {:path path :status status :additions adds :deletions dels}
+     :diff diff}))
+
+(defn- diff-path
+  "The path a diff names: relative to `:base-dir` when one is set."
+  [e p]
+  (if (str/blank? (:base-dir e)) (str p) (rel-path (:base-dir e) p)))
+
+(defn- diff-meta
+  "metadata {:files [...] :diff \"...\"} for [[path before after] ...]."
+  [e changes]
+  (let [ds (mapv (fn [[p before after]] (file-diff (diff-path e p) before after)) changes)]
+    {:files (mapv :file ds) :diff (apply str (map :diff ds))}))
+
+(defn- read-if-exists [p] (when (fs/exists? p) (str (fs/read-file p))))
+
 (defn- t-write [e args _ctx]
   (let [raw (str (:path args))
         [st p] (resolve-path e raw)
         c (str (:content args))]
     (if (= st :error)
       (tool/failure (str "write: " p))
-      (do (when-let [d (parent-of p)] (fs/mkdirs! d))
-          (fs/write-file p c)
-          (tool/success (str "Wrote " (utf8-count c) " bytes to " raw))))))
+      (let [before (read-if-exists p)]
+        (when-let [d (parent-of p)] (fs/mkdirs! d))
+        (fs/write-file p c)
+        (tool/success (str "Wrote " (utf8-count c) " bytes to " raw)
+                      (diff-meta e [[p before c]]))))))
 
 (defn- t-edit [e args _ctx]
   (let [[st p] (resolve-path e (str (:path args)))]
@@ -656,7 +757,8 @@
                       (replace-first-literal text old new))]
             (fs/write-file p out)
             (tool/success (str "Replaced " (if (true? (:replaceAll args)) (count hits) 1)
-                          " occurrence(s) in " p)))))))))
+                          " occurrence(s) in " p)
+                          (diff-meta e [[p text out]])))))))))
 
 (defn- grep-file-hits
   "`rel:line:text` for every matching line in `f`, in ASCENDING LINE ORDER.
@@ -896,14 +998,19 @@
           ;; Atomic: everything was planned from READS, so nothing has been
           ;; written and there is no partial state to unwind.
           (tool/failure (:error bad))
-          (do (doseq [pl plans]
+          (let [befores (mapv (fn [pl] (when-not (= "add" (:kind pl)) (read-if-exists (:path pl)))) plans)]
+              (doseq [pl plans]
                 (if (= "delete" (:kind pl))
                   (fs/delete! (:path pl))
                   (do (when-let [d (parent-of (:path pl))] (fs/mkdirs! d))
                       (fs/write-file (:path pl) (:content pl)))))
               (tool/success (str "Applied " (count plans) " file change(s): "
                             (str/join ", " (map (fn [pl] (str (:kind pl) " " (:path pl)))
-                                                plans))))))))))
+                                                plans)))
+                            (diff-meta e (mapv (fn [pl before]
+                                                 [(:path pl) before
+                                                  (when-not (= "delete" (:kind pl)) (:content pl))])
+                                               plans befores)))))))))
 
 (defn- t-todowrite
   "Stateless in v1 — it echoes the list back. The RENDERING is not pinned by

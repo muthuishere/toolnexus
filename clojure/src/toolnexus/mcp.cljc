@@ -165,13 +165,54 @@
       (:command m)   "local"
       :else          "unknown")))
 
+(defn- config-error [server-name field why]
+  (ex-info (str "mcp server \"" server-name "\": invalid " field ": " why)
+           {:error "config" :server server-name :field field}))
+
+(defn- string-vec
+  "`xs` as a vector of strings, or nil when it is not a sequential of strings."
+  [xs]
+  (when (and (sequential? xs) (every? string? xs)) (vec xs)))
+
+(defn normalize-command
+  "SPEC §2 `command` + `args` (the Claude shape) — the argv to spawn.
+
+  `command` is a non-empty string or a non-empty vector of strings; `args`, when
+  present, is a vector of strings appended to it. A remote server ignores
+  `args`. No shell is involved: the argv goes to the spawner as-is. An absent
+  command is nil (a local server without one fails at connect, as before).
+  Anything else throws, naming the server and the field."
+  [server-name {:keys [command args]} remote?]
+  (when (some? command)
+    (let [argv (cond
+                 (string? command)
+                 (if (= "" command)
+                   (throw (config-error server-name "command" "empty string"))
+                   [command])
+
+                 (sequential? command)
+                 (cond
+                   (empty? command)
+                   (throw (config-error server-name "command" "empty array"))
+                   (string-vec command) (string-vec command)
+                   :else
+                   (throw (config-error server-name "command" "array elements must be strings")))
+
+                 :else
+                 (throw (config-error server-name "command" "must be a string or an array of strings")))]
+      (cond
+        (or remote? (nil? args)) argv
+        (string-vec args)        (into argv args)
+        :else (throw (config-error server-name "args" "must be an array of strings"))))))
+
 (defn- one-server [server-name m]
-  (let [raw-headers (:headers m)]
+  (let [raw-headers (:headers m)
+        kind        (server-kind m)]
     {:name        (key-str server-name)
-     :kind        (server-kind m)
+     :kind        kind
      ;; `disabled:true` and `enabled:false` are the same statement.
      :enabled     (not (or (true? (:disabled m)) (false? (:enabled m))))
-     :command     (vec (:command m))
+     :command     (vec (normalize-command (key-str server-name) m (= "remote" kind)))
      :cwd         (:cwd m)
      ;; `environment` with `env` as the documented alias.
      :environment (or (:environment m) (:env m) {})
@@ -185,7 +226,10 @@
   server maps, sorted by name so two hosts cannot disagree about order.
 
   Accepts `mcpServers` | `servers` | `mcp`; with no wrapper the object itself is
-  the server map, minus the reserved sibling keys."
+  the server map, minus the reserved sibling keys.
+
+  Throws ex-info naming the server for an invalid `command` / `args` shape —
+  a config error is the caller's to fix, not a server to isolate."
   [config]
   (let [cfg     (if (string? config) (json/read-str config {:key-fn keyword}) config)
         servers (or (:mcpServers cfg) (:servers cfg) (:mcp cfg)
@@ -304,7 +348,17 @@
                   (swap! state update :junk inc)
 
                   (nil? (:id msg))
-                  (swap! state update :notifications conj (str (:method msg)))
+                  (let [method (str (:method msg))
+                        token  (get-in msg [:params :progressToken])]
+                    (swap! state
+                           (fn [s]
+                             (cond-> (update s :notifications conj method)
+                               ;; §2 idle timeout: ONLY a progress notification
+                               ;; carrying an in-flight call's own token resets
+                               ;; that call's budget. Any other token is noise.
+                               (and (= "notifications/progress" method)
+                                    (contains? (:progress s) token))
+                               (assoc-in [:progress token] (ktime/mono-ms))))))
 
                   (contains? (:pending (deref state)) (:id msg))
                   (swap! state assoc-in [:inbox (:id msg)] msg)
@@ -323,33 +377,47 @@
   "Poll for this id's response until it lands, the transport closes, or the
   budget runs out. Polling rather than `promise`/`deref`-with-timeout because a
   timed deref is the one concurrency primitive whose portability across these
-  hosts is not established; an atom and `koine.time/sleep!` are."
-  [state id timeout-ms]
-  (let [deadline (+ (ktime/mono-ms) (long timeout-ms))]
+  hosts is not established; an atom and `koine.time/sleep!` are.
+
+  With a progress `token` (§2, tools/call) the budget is an IDLE timeout: the
+  deadline is `timeout-ms` after the later of the call's start and the last
+  matching `notifications/progress` the reader recorded under that token. A
+  closed transport (disconnect = cancellation) still wins over any progress."
+  ([state id timeout-ms] (await-response! state id timeout-ms nil))
+  ([state id timeout-ms token]
+  (let [started (ktime/mono-ms)
+        budget  (long timeout-ms)]
     (loop []
       (let [s   (deref state)
-            msg (get-in s [:inbox id])]
+            msg (get-in s [:inbox id])
+            last-seen (max started (long (or (when token (get-in s [:progress token])) 0)))]
         (cond
           (some? msg) {:ok msg}
           (:closed? s) {:error (or (:close-reason s) "closed")}
-          (>= (ktime/mono-ms) deadline) {:error "timeout" :timeout-ms timeout-ms}
-          :else (do (ktime/sleep! 2) (recur)))))))
+          (>= (ktime/mono-ms) (+ last-seen budget)) {:error "timeout" :timeout-ms timeout-ms}
+          :else (do (ktime/sleep! 2) (recur))))))))
 
 (defn- stdio-rpc!
   "One request/response over stdio. Registers the id BEFORE writing — a fast
   peer can answer before `send-line!` has returned, and an unregistered id is
   dropped as unmatched."
   [child state lock method params timeout-ms]
-  (let [id (next-id!)]
+  (let [id    (next-id!)
+        ;; §2 — every tools/call asks for progress, so a server is PERMITTED to
+        ;; report liveness. A fresh opaque token per call: a notification for any
+        ;; other token must not keep this call alive.
+        token (when (= "tools/call" method) (str "tn-progress-" id))
+        params (if token (assoc-in params [:_meta :progressToken] token) params)]
     (if (:closed? @state)
       {:error (or (:close-reason @state) "closed")}
       (do
-        (swap! state update :pending conj id)
+        (swap! state (fn [s] (cond-> (update s :pending conj id)
+                               token (assoc-in [:progress token] 0))))
         (try
           (with-write-lock! lock
             (fn [] (proc/send-line! child (json/write-str (cond-> {:jsonrpc "2.0" :id id :method method}
                                                             params (assoc :params params))))))
-          (let [res (await-response! state id timeout-ms)]
+          (let [res (await-response! state id timeout-ms token)]
             (cond
               (rpc-failed? res) res
               (get-in res [:ok :error]) {:error "rpc-error"
@@ -361,7 +429,8 @@
           (finally
             (swap! state (fn [s] (-> s
                                      (update :pending disj id)
-                                     (update :inbox dissoc id))))))))))
+                                     (update :inbox dissoc id)
+                                     (update :progress dissoc token))))))))))
 
 (defn stdio-transport
   "Spawn the child and hand back a transport. §2: merged env = process env +
@@ -374,7 +443,7 @@
                           (cond-> {}
                             cwd          (assoc :dir cwd)
                             (seq environment) (assoc :env environment)))
-        state (atom {:pending #{} :inbox {} :closed? false :close-reason nil
+        state (atom {:pending #{} :inbox {} :progress {} :closed? false :close-reason nil
                      :notifications [] :server-requests [] :unmatched 0 :junk 0})
         lock  (atom false)
         respond! (fn [msg]
@@ -568,7 +637,11 @@
   failure, and §0.3 does not allow that to cross this boundary."
   [url headers session wait-for method params timeout-ms]
   (let [id   (next-id!)
-        st   (atom {:msgs [] :head nil :done false :error nil})
+        ;; §2 idle timeout, same contract as stdio: a fresh token per tools/call,
+        ;; and only a progress notification for THAT token extends the deadline.
+        token  (when (= "tools/call" method) (str "tn-progress-" id))
+        params (if token (assoc-in params [:_meta :progressToken] token) params)
+        st   (atom {:msgs [] :head nil :done false :error nil :progress-at 0})
         body (json/write-str (cond-> {:jsonrpc "2.0" :id id :method method}
                                params (assoc :params params)))
         hdrs (request-headers headers session)
@@ -583,10 +656,18 @@
                        ;; discrimination — ids cannot do it, since the server
                        ;; numbers its requests in its own space and may well
                        ;; reuse one of ours.
-                       (if (and (some? (:id m)) (:method m))
+                       (cond
+                         (and (some? (:id m)) (:method m))
                          (when-let [reply (server-request-response wait-for m)]
                            (try (post-server-response! url headers session reply)
                                 (catch Throwable _ nil)))
+
+                         (and token (nil? (:id m))
+                              (= "notifications/progress" (:method m))
+                              (= token (get-in m [:params :progressToken])))
+                         (swap! st assoc :progress-at (ktime/mono-ms))
+
+                         :else
                          (swap! st update :msgs conj m)))))]
     ;; run-async!, not `future` — same reason as `start-reader!`: library code
     ;; must not hold a consumer's process open on a non-daemon pool thread.
@@ -595,7 +676,8 @@
        (try (stream/sse-post url hdrs body on-event {:on-open on-open})
             (catch Throwable e (swap! st assoc :error (or (ex-message e) (str e))))
             (finally (swap! st assoc :done true)))))
-    (let [deadline (+ (ktime/mono-ms) (long timeout-ms))
+    (let [started  (ktime/mono-ms)
+          budget   (long timeout-ms)
           ;; Stop at OUR answer, not at end-of-stream: a server is entitled to
           ;; hold the stream open with keep-alives after it has responded, and
           ;; waiting for the close would spend the caller's whole budget on a
@@ -605,7 +687,8 @@
                        (cond
                          (some (fn [m] (= id (:id m))) (:msgs s)) s
                          (:done s)                                s
-                         (>= (ktime/mono-ms) deadline)            (assoc s :timed-out true)
+                         (>= (ktime/mono-ms) (+ (max started (long (:progress-at s))) budget))
+                         (assoc s :timed-out true)
                          :else (do (ktime/sleep! 2) (recur)))))]
       (cond
         (:timed-out final) {:error "timeout" :timeout-ms timeout-ms}

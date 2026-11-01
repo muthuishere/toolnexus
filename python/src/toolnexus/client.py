@@ -33,6 +33,7 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any, AsyncGenerator, Callable, Iterable, Literal, Mapping, Optional, Protocol, TypedDict, Union
 
 from .content import (
@@ -397,6 +398,57 @@ def _tool_result_block(use_id: Any, result: ToolResult) -> dict[str, Any]:
     return block
 
 
+class _TurnLog:
+    """What a stateful turn has produced so far: the live transcript and every
+    tool result that finished, by call id — so an interrupted turn can be saved."""
+
+    def __init__(self) -> None:
+        self.messages: Optional[list[dict[str, Any]]] = None
+        self.done: dict[Any, ToolResult] = {}
+
+
+_INTERRUPTED = ToolResult(output="interrupted: the turn ended before this tool returned. Whether its side effects happened is unknown. Do not re-run it automatically; check first.", is_error=True)
+
+
+def _close_tool_calls(
+    messages: list[dict[str, Any]], done: dict[Any, ToolResult], style: str
+) -> list[dict[str, Any]]:
+    """Give every trailing assistant tool call a result: the finished one when it
+    completed, else a synthetic ``{is_error: True, output: "interrupted: the turn ended before this tool returned. ..."}`` — in
+    the active dialect's shape — so the saved transcript stays valid."""
+    out = list(messages)
+    idx = next((i for i in range(len(out) - 1, -1, -1) if out[i].get("role") == "assistant"), -1)
+    if idx < 0:
+        return out
+    asst = out[idx]
+    if style == "anthropic":
+        content = asst.get("content")
+        uses = [b for b in content if isinstance(b, dict) and b.get("type") == "tool_use"] if isinstance(content, list) else []
+        if not uses:
+            return out
+        answered: set[Any] = set()
+        for m in out[idx + 1:]:
+            c = m.get("content")
+            if isinstance(c, list):
+                answered |= {b.get("tool_use_id") for b in c if isinstance(b, dict) and b.get("type") == "tool_result"}
+        missing = [
+            _tool_result_block(u.get("id"), done.get(u.get("id"), _INTERRUPTED))
+            for u in uses
+            if u.get("id") not in answered
+        ]
+        if missing:
+            out.append({"role": "user", "content": missing})
+        return out
+    calls = asst.get("tool_calls") or []
+    answered = {m.get("tool_call_id") for m in out[idx + 1:] if m.get("role") == "tool"}
+    for c in calls:
+        cid = c.get("id")
+        if cid not in answered:
+            name = (c.get("function") or {}).get("name", "")
+            out.append(_tool_message(cid, name, done.get(cid, _INTERRUPTED)))
+    return out
+
+
 def _prompt_content(prompt: Union[str, list[Any]]) -> Any:
     """§7 loop input: a string stays a string (the assembled user message is
     byte-identical to a pre-0.17 port); a list of §1B parts is normalised into canonical
@@ -598,6 +650,7 @@ class InMemoryConversationStore:
 
     def __init__(self) -> None:
         self._map: dict[str, list[dict[str, Any]]] = {}
+        self._updated: dict[str, datetime] = {}
 
     async def get(self, id: str) -> Optional[list[dict[str, Any]]]:  # noqa: A002
         m = self._map.get(id)
@@ -605,6 +658,191 @@ class InMemoryConversationStore:
 
     async def save(self, id: str, messages: list[dict[str, Any]]) -> None:  # noqa: A002
         self._map[id] = list(messages)
+        self._updated[id] = datetime.now(timezone.utc)
+
+    async def list(self) -> list["ConversationEntry"]:
+        """Every stored conversation, newest first (ties by id ascending)."""
+        return _sort_entries(ConversationEntry(i, t) for i, t in self._updated.items())
+
+    async def delete(self, id: str) -> None:  # noqa: A002
+        """Remove ``id``; absent is not an error."""
+        self._map.pop(id, None)
+        self._updated.pop(id, None)
+
+
+@dataclass(frozen=True)
+class ConversationEntry:
+    """One ``list()`` row of a shipped conversation store (SPEC.md "Conversation memory")."""
+
+    id: str
+    updated_at: datetime
+
+
+def _sort_entries(entries: Iterable[ConversationEntry]) -> list[ConversationEntry]:
+    """Newest first; ties broken by id ascending (stable two-pass sort)."""
+    by_id = sorted(entries, key=lambda e: e.id)
+    return sorted(by_id, key=lambda e: e.updated_at, reverse=True)
+
+
+_CONV_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
+_CONV_VERSION = 1
+
+
+def _check_conv_id(id: str) -> None:  # noqa: A002
+    if not isinstance(id, str) or not _CONV_ID_RE.match(id) or id in (".", ".."):
+        raise ValueError(f"invalid conversation id: {id!r}")
+
+
+def _full_fsync(fd: int) -> None:
+    """Strongest flush the OS offers: F_FULLFSYNC on macOS, else fsync."""
+    try:
+        import fcntl
+    except ImportError:  # Windows
+        fcntl = None  # type: ignore[assignment]
+    full = getattr(fcntl, "F_FULLFSYNC", None)
+    if full is not None:
+        try:
+            fcntl.fcntl(fd, full)
+            return
+        except OSError:
+            pass  # filesystem without F_FULLFSYNC support: fall back
+    os.fsync(fd)
+
+
+class FileConversationStore:
+    """Durable conversation provider — one JSON file per id under ``root``.
+
+    ``<root>/<id>.json`` holds ``{"version": 1, "messages": [...]}``. ``save`` writes
+    a temp file (0600) in ``root``, fsyncs and renames it over the old file, so a
+    reader sees the old or the new transcript, never a torn one (power-loss
+    durability of the rename is best-effort). Same-id saves are serialized within
+    a process; across processes the last rename wins. Ids must match
+    ``^[A-Za-z0-9._-]{1,128}$`` (not ``.``/``..``) — anything else is rejected.
+    """
+
+    def __init__(self, root: Union[str, "os.PathLike[str]"], sync: str = "full") -> None:
+        """``sync`` is the durability mode: ``"full"`` (default — ``F_FULLFSYNC`` on
+        macOS, else ``fsync``, then a best-effort directory fsync), ``"fsync"`` (plain
+        ``fsync``, no directory fsync) or ``"none"`` (no flush). Temp-then-rename holds
+        in every mode; an unknown mode raises ``ValueError``."""
+        if root is None or not os.fspath(root):
+            raise ValueError("FileConversationStore: root is required")
+        if sync not in ("full", "fsync", "none"):
+            raise ValueError(f"FileConversationStore: unknown sync mode {sync!r}")
+        self.root = os.fspath(root)
+        self.sync = sync
+        self._locks: dict[str, threading.Lock] = {}
+        self._thread_lock = threading.Lock()
+
+    def _path(self, id: str) -> str:  # noqa: A002
+        _check_conv_id(id)
+        return os.path.join(self.root, id + ".json")
+
+    def _lock(self, id: str) -> threading.Lock:  # noqa: A002
+        with self._thread_lock:
+            lk = self._locks.get(id)
+            if lk is None:
+                lk = self._locks[id] = threading.Lock()
+            return lk
+
+    async def get(self, id: str) -> Optional[list[dict[str, Any]]]:  # noqa: A002
+        path = self._path(id)
+        return await asyncio.to_thread(self._read, id, path)
+
+    @staticmethod
+    def _read(id: str, path: str) -> Optional[list[dict[str, Any]]]:  # noqa: A002
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                raw = f.read()
+        except FileNotFoundError:
+            return None
+        try:
+            body = json.loads(raw)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"conversation {id!r}: corrupt file {path}: {e}") from e
+        if not isinstance(body, dict) or body.get("version") != _CONV_VERSION:
+            ver = body.get("version") if isinstance(body, dict) else None
+            raise ValueError(f"conversation {id!r}: unsupported version {ver!r} in {path}")
+        msgs = body.get("messages")
+        if not isinstance(msgs, list):
+            raise ValueError(f"conversation {id!r}: corrupt file {path}: messages is not a list")
+        return msgs
+
+    async def save(self, id: str, messages: list[dict[str, Any]]) -> None:  # noqa: A002
+        path = self._path(id)
+        data = json.dumps({"version": _CONV_VERSION, "messages": list(messages)})
+        await asyncio.to_thread(self._write, id, path, data)
+
+    def _write(self, id: str, path: str, data: str) -> None:  # noqa: A002
+        with self._lock(id):
+            os.makedirs(self.root, mode=0o700, exist_ok=True)
+            tmp = os.path.join(self.root, f".{id}.{os.urandom(8).hex()}.tmp")
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    f.write(data)
+                    f.flush()
+                    if self.sync == "full":
+                        _full_fsync(f.fileno())
+                    elif self.sync == "fsync":
+                        os.fsync(f.fileno())
+                os.replace(tmp, path)
+            except BaseException:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+                raise
+            if self.sync != "full":
+                return
+            try:  # best-effort: make the rename itself durable
+                dfd = os.open(self.root, os.O_RDONLY)
+                try:
+                    os.fsync(dfd)
+                finally:
+                    os.close(dfd)
+            except OSError:
+                pass
+
+    async def list(self) -> list[ConversationEntry]:
+        """Every ``<id>.json`` with a valid id, by file mtime newest first (ties by id).
+        Temp files and invalid names are skipped; bodies are not parsed."""
+        return await asyncio.to_thread(self._list)
+
+    def _list(self) -> list[ConversationEntry]:
+        out: list[ConversationEntry] = []
+        try:
+            it = os.scandir(self.root)
+        except FileNotFoundError:
+            return []
+        with it:
+            for de in it:
+                n = de.name
+                if not n.endswith(".json"):
+                    continue
+                cid = n[: -len(".json")]
+                if not _CONV_ID_RE.match(cid) or cid in (".", ".."):
+                    continue
+                try:
+                    if not de.is_file():
+                        continue
+                    mt = de.stat().st_mtime
+                except FileNotFoundError:
+                    continue
+                out.append(ConversationEntry(cid, datetime.fromtimestamp(mt, timezone.utc)))
+        return _sort_entries(out)
+
+    async def delete(self, id: str) -> None:  # noqa: A002
+        path = self._path(id)
+
+        def _rm() -> None:
+            with self._lock(id):
+                try:
+                    os.unlink(path)
+                except FileNotFoundError:
+                    pass
+
+        await asyncio.to_thread(_rm)
 
 
 class Client:
@@ -1178,9 +1416,26 @@ class Client:
         args: dict[str, Any],
         call_id: Optional[str],
         turn: int,
+        log: Optional["_TurnLog"] = None,
     ) -> tuple[dict[str, Any], ToolResult]:
         """Run one tool through before_tool/after_tool hooks: rewrite args,
-        short-circuit, or transform the result. Mirrors JS ``runTool``."""
+        short-circuit, or transform the result. Mirrors JS ``runTool``.
+
+        With a ``log`` (a stateful turn), the finished result is recorded by call
+        id, so a turn interrupted while a SIBLING call still runs keeps it."""
+        a, result = await self._run_tool_inner(toolkit, name, args, call_id, turn)
+        if log is not None and call_id is not None and pending_of(result) is None:
+            log.done[call_id] = result
+        return a, result
+
+    async def _run_tool_inner(
+        self,
+        toolkit: Optional[Toolkit],
+        name: str,
+        args: dict[str, Any],
+        call_id: Optional[str],
+        turn: int,
+    ) -> tuple[dict[str, Any], ToolResult]:
         a = args
         if toolkit is None:
             # D1: a toolkit-less run declares no tools; a model that calls one anyway
@@ -1513,9 +1768,39 @@ class Client:
         if not id:
             return await self.run(prompt, toolkit, cancel=cancel)
         history = await self.store.get(id) or []
-        result = await self.run(prompt, toolkit, history=history, cancel=cancel)
+        log = _TurnLog()
+        try:
+            if self.style == "anthropic":
+                result = await self._run_anthropic(prompt, toolkit, history, cancel, log)
+            else:
+                result = await self._run_openai(prompt, toolkit, history, cancel, log)
+        except BaseException:
+            # Interrupted turns are saved (SPEC §7): the prompt and every finished
+            # message survive a failure or a cancel; the original error still raises.
+            await self._save_interrupted(id, log, prompt, toolkit, history)
+            raise
         await self.store.save(id, result.messages)
         return result
+
+    async def _save_interrupted(
+        self,
+        id: str,  # noqa: A002
+        log: "_TurnLog",
+        prompt: Union[str, list[Any]],
+        toolkit: Optional[Toolkit],
+        history: list[dict[str, Any]],
+    ) -> None:
+        """Save the transcript of a turn that ended in an error or a cancel. A
+        failure before the loop built any message still saves prior + prompt."""
+        messages = log.messages
+        if messages is None:
+            messages = list(history)
+            if self.style != "anthropic" and not messages:
+                system = self._system(toolkit)
+                if system:
+                    messages.append({"role": "system", "content": system})
+            messages.append({"role": "user", "content": _prompt_content(prompt)})
+        await self.store.save(id, _close_tool_calls(messages, log.done, self.style))
 
     def conversation(self, toolkit: Optional[Toolkit] = None, cancel: Optional[asyncio.Event] = None) -> "Conversation":
         """A stateful multi-turn conversation that retains history across sends."""
@@ -1536,14 +1821,25 @@ class Client:
         No ``id`` ⇒ stateless. Mirrors the JS ``stream``.
         """
         history = (await self.store.get(id) or []) if id else None
+        log = _TurnLog() if id else None
         if self.style == "anthropic":
-            gen = self._stream_anthropic(prompt, toolkit, cancel, history)
+            gen = self._stream_anthropic(prompt, toolkit, cancel, history, log)
         else:
-            gen = self._stream_openai(prompt, toolkit, cancel, history)
-        async for ev in gen:
-            if ev["type"] == "done" and id:
-                await self.store.save(id, ev["result"].messages)
-            yield ev
+            gen = self._stream_openai(prompt, toolkit, cancel, history, log)
+        saved = False
+        try:
+            async for ev in gen:
+                if ev["type"] == "done" and id:
+                    await self.store.save(id, ev["result"].messages)
+                    saved = True
+                yield ev
+        except BaseException:
+            # An error, a cancel, or the consumer abandoning the stream mid-turn
+            # (GeneratorExit): the interrupted turn is still saved, then re-raised.
+            if id and not saved and log is not None:
+                await gen.aclose()
+                await self._save_interrupted(id, log, prompt, toolkit, history or [])
+            raise
 
     # ----------------------------------------------------------------------- #
     # OpenAI-style: POST {base_url}/chat/completions
@@ -1554,6 +1850,7 @@ class Client:
         toolkit: Optional[Toolkit],
         history: Optional[list[dict[str, Any]]],
         cancel: Optional[asyncio.Event],
+        log: Optional["_TurnLog"] = None,
     ) -> RunResult:
         key = _resolve_key(self.api_key, self.style)
         url = self.base_url.rstrip("/") + "/chat/completions"
@@ -1570,6 +1867,8 @@ class Client:
                 messages.append({"role": "system", "content": system})
         messages.append({"role": "user", "content": _prompt_content(prompt)})
         tools = toolkit.to_openai() if toolkit is not None else []
+        if log is not None:
+            log.messages = messages
         tool_calls: list[dict[str, Any]] = []
         usage = _empty_usage()
         turns = 0
@@ -1589,6 +1888,8 @@ class Client:
                     if ov:
                         if ov.get("messages") is not None:
                             messages = ov["messages"]
+                            if log is not None:
+                                log.messages = messages
                         if ov.get("tools") is not None:
                             tools = ov["tools"]
                         # SPEC §8: a non-empty ``model`` applies to THIS turn only.
@@ -1630,7 +1931,7 @@ class Client:
 
                 results = await asyncio.gather(
                     *(
-                        self._run_tool(toolkit, name, args, call_id, turn)
+                        self._run_tool(toolkit, name, args, call_id, turn, log)
                         for (call_id, name, args) in parsed
                     )
                 )
@@ -1671,6 +1972,7 @@ class Client:
         toolkit: Optional[Toolkit],
         history: Optional[list[dict[str, Any]]],
         cancel: Optional[asyncio.Event],
+        log: Optional["_TurnLog"] = None,
     ) -> RunResult:
         key = _resolve_key(self.api_key, self.style)
         base = self.base_url.rstrip("/")
@@ -1689,6 +1991,8 @@ class Client:
         else:
             messages = [{"role": "user", "content": seed}]
         tools = toolkit.to_anthropic() if toolkit is not None else []
+        if log is not None:
+            log.messages = messages
         tool_calls: list[dict[str, Any]] = []
         usage = _empty_usage()
         turns = 0
@@ -1708,6 +2012,8 @@ class Client:
                     if ov:
                         if ov.get("messages") is not None:
                             messages = ov["messages"]
+                            if log is not None:
+                                log.messages = messages
                         if ov.get("tools") is not None:
                             tools = ov["tools"]
                         # SPEC §8: a non-empty ``model`` applies to THIS turn only.
@@ -1743,7 +2049,7 @@ class Client:
                 outputs = await asyncio.gather(
                     *(
                         self._run_tool(
-                            toolkit, use["name"], use.get("input") or {}, use.get("id"), turn
+                            toolkit, use["name"], use.get("input") or {}, use.get("id"), turn, log
                         )
                         for use in uses
                     )
@@ -1787,6 +2093,7 @@ class Client:
         toolkit: Optional[Toolkit],
         cancel: Optional[asyncio.Event],
         history: Optional[list[dict[str, Any]]] = None,
+        log: Optional["_TurnLog"] = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
         key = _resolve_key(self.api_key, self.style)
         url = self.base_url.rstrip("/") + "/chat/completions"
@@ -1803,6 +2110,8 @@ class Client:
                 messages.append({"role": "system", "content": system})
         messages.append({"role": "user", "content": _prompt_content(prompt)})
         tools = toolkit.to_openai() if toolkit is not None else []
+        if log is not None:
+            log.messages = messages
         tool_calls: list[dict[str, Any]] = []
         usage = _empty_usage()
         turns = 0
@@ -1822,6 +2131,8 @@ class Client:
                     if ov:
                         if ov.get("messages") is not None:
                             messages = ov["messages"]
+                            if log is not None:
+                                log.messages = messages
                         if ov.get("tools") is not None:
                             tools = ov["tools"]
                         # SPEC §8: a non-empty ``model`` applies to THIS turn only.
@@ -1912,7 +2223,7 @@ class Client:
                 for c in calls:
                     yield {"type": "tool_call", "id": c["id"], "name": c["name"], "args": _safe_json(c["args"])}
                 settled = await asyncio.gather(
-                    *(self._run_tool(toolkit, c["name"], _safe_json(c["args"]), c["id"], turn) for c in calls)
+                    *(self._run_tool(toolkit, c["name"], _safe_json(c["args"]), c["id"], turn, log) for c in calls)
                 )
                 for c, (args, result) in zip(calls, settled):
                     req = pending_of(result)
@@ -1948,6 +2259,7 @@ class Client:
                         "name": c["name"],
                         "output": result.output,
                         "is_error": result.is_error,
+                        "metadata": result.metadata,
                     }
 
             yield {"type": "done", "result": self._end_run(run_start, _last_text(messages), messages, tool_calls, turns, usage, at_limit=True, model=last_model)}
@@ -1964,6 +2276,7 @@ class Client:
         toolkit: Optional[Toolkit],
         cancel: Optional[asyncio.Event],
         history: Optional[list[dict[str, Any]]] = None,
+        log: Optional["_TurnLog"] = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
         key = _resolve_key(self.api_key, self.style)
         base = self.base_url.rstrip("/")
@@ -1982,6 +2295,8 @@ class Client:
         else:
             messages = [{"role": "user", "content": seed}]
         tools = toolkit.to_anthropic() if toolkit is not None else []
+        if log is not None:
+            log.messages = messages
         tool_calls: list[dict[str, Any]] = []
         usage = _empty_usage()
         turns = 0
@@ -2001,6 +2316,8 @@ class Client:
                     if ov:
                         if ov.get("messages") is not None:
                             messages = ov["messages"]
+                            if log is not None:
+                                log.messages = messages
                         if ov.get("tools") is not None:
                             tools = ov["tools"]
                         # SPEC §8: a non-empty ``model`` applies to THIS turn only.
@@ -2087,7 +2404,7 @@ class Client:
                 for u in uses:
                     yield {"type": "tool_call", "id": u["id"], "name": u["name"], "args": u["input"]}
                 settled = await asyncio.gather(
-                    *(self._run_tool(toolkit, u["name"], u.get("input") or {}, u["id"], turn) for u in uses)
+                    *(self._run_tool(toolkit, u["name"], u.get("input") or {}, u["id"], turn, log) for u in uses)
                 )
                 results: list[dict[str, Any]] = []
                 halted: Optional[Request] = None
@@ -2112,6 +2429,7 @@ class Client:
                         "name": u["name"],
                         "output": result.output,
                         "is_error": result.is_error,
+                        "metadata": result.metadata,
                     }
                     if halted is not None:
                         messages.append({"role": "user", "content": results})

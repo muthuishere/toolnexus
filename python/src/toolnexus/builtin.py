@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import difflib
 import json
 import os
 import re
@@ -39,8 +40,9 @@ from .types import JSONSchema, Tool, ToolContext, ToolResult, pending
 #                      base_dir, plus Windows reserved device names
 BuiltinsConfig = Union[bool, dict]
 
-# How long a job gets between "please stop" and "stop". Fixed, and identical in
-# every port, so a timeout means the same thing everywhere.
+# How long a job gets between "please stop" and "stop" when the host sets no
+# ``kill_grace_ms`` / ``killGraceMs``. Identical in every port, so a timeout
+# means the same thing everywhere unless the host says otherwise.
 KILL_GRACE_MS = 2000
 
 _WIN_RESERVED = {
@@ -109,6 +111,10 @@ class _BuiltinEnv:
         obj = cfg if isinstance(cfg, dict) else {}
         self.base_dir: str = str(obj.get("base_dir") or obj.get("baseDir") or "")
         self.confine: bool = bool(obj.get("confine_to_base_dir") or obj.get("confineToBaseDir"))
+        # SIGTERM -> SIGKILL wait on POSIX; absent or 0 means the default. No
+        # effect on Windows, where the job is terminated at once.
+        grace = _num(obj.get("kill_grace_ms") or obj.get("killGraceMs"))
+        self.kill_grace_s: float = (grace if grace and grace > 0 else KILL_GRACE_MS) / 1000
         given = obj.get("shell")
         self.shell_error: Optional[Exception] = None
         if given:
@@ -373,7 +379,7 @@ def _bash_tool(env: _BuiltinEnv) -> Tool:
                 # SIGTERM removes its temp directories; one that gets SIGKILL does not.
                 killed = _kill_job(proc, True)
                 try:
-                    out_bytes, _ = proc.communicate(timeout=KILL_GRACE_MS / 1000)
+                    out_bytes, _ = proc.communicate(timeout=env.kill_grace_s)
                 except subprocess.TimeoutExpired:
                     killed = _kill_job(proc, False) or killed
                     out_bytes, _ = proc.communicate()
@@ -396,7 +402,7 @@ def _bash_tool(env: _BuiltinEnv) -> Tool:
             # communicate() return and the thread finish, instead of leaving the
             # machine loaded with work from a run that was cancelled.
             _kill_job(holder.get("proc"), True)
-            await asyncio.sleep(KILL_GRACE_MS / 1000)
+            await asyncio.sleep(env.kill_grace_s)
             _kill_job(holder.get("proc"), False)
             raise
 
@@ -501,11 +507,14 @@ def _write_tool(env: _BuiltinEnv) -> Tool:
             full = env.resolve_path(p)
         except Exception as e:  # noqa: BLE001
             return _err(f"write: {e}")
+        before = _read_or_none(full)
         os.makedirs(os.path.dirname(os.path.abspath(full)), exist_ok=True)
         with open(full, "w", encoding="utf-8") as f:
             f.write(content)
         byte_len = len(content.encode("utf-8"))
-        return _ok(f"Wrote {byte_len} bytes to {p}", {"bytes": byte_len})
+        meta: dict[str, Any] = {"bytes": byte_len}
+        meta.update(_diff_metadata([_file_change(env, p, full, before, content)]))
+        return _ok(f"Wrote {byte_len} bytes to {p}", meta)
 
     return _builtin(
         "write",
@@ -557,7 +566,9 @@ def _edit_tool(env: _BuiltinEnv) -> Tool:
         with open(full, "w", encoding="utf-8") as f:
             f.write(nxt)
         plural = "" if n == 1 else "s"
-        return _ok(f"Edited {p} ({n} replacement{plural})", {"replacements": n})
+        meta: dict[str, Any] = {"replacements": n}
+        meta.update(_diff_metadata([_file_change(env, p, full, content, nxt)]))
+        return _ok(f"Edited {p} ({n} replacement{plural})", meta)
 
     return _builtin(
         "edit",
@@ -919,6 +930,56 @@ def _apply_update(content: str, body: list[str]) -> str:
     return result
 
 
+def _read_or_none(full: str) -> Optional[str]:
+    try:
+        with open(full, "r", encoding="utf-8") as f:
+            return f.read()
+    except (OSError, UnicodeDecodeError):
+        return None
+
+
+def _file_change(
+    env: _BuiltinEnv, given: str, full: str, before: Optional[str], after: Optional[str]
+) -> dict[str, Any]:
+    """One file's entry for ``metadata.files`` plus its unified-diff hunk.
+    ``before`` None means the file did not exist (added); ``after`` None means
+    it was removed (deleted). Paths are relative to ``base_dir`` when set.
+    """
+    if env.base_dir:
+        rel = os.path.relpath(os.path.abspath(full), os.path.abspath(env.base_dir))
+    else:
+        rel = given
+    rel = rel.replace(os.sep, "/")
+    a_lines = (before or "").splitlines(keepends=True)
+    b_lines = (after or "").splitlines(keepends=True)
+    # Ensure every line ends in a newline so the diff stays a valid unified diff.
+    a_lines = [ln if ln.endswith("\n") else ln + "\n" for ln in a_lines]
+    b_lines = [ln if ln.endswith("\n") else ln + "\n" for ln in b_lines]
+    diff_lines = list(
+        difflib.unified_diff(
+            a_lines,
+            b_lines,
+            fromfile="/dev/null" if before is None else "a/" + rel,
+            tofile="/dev/null" if after is None else "b/" + rel,
+        )
+    )
+    additions = deletions = 0
+    for ln in diff_lines[2:]:
+        if ln.startswith("+"):
+            additions += 1
+        elif ln.startswith("-"):
+            deletions += 1
+    status = "added" if before is None else ("deleted" if after is None else "modified")
+    return {
+        "file": {"path": rel, "status": status, "additions": additions, "deletions": deletions},
+        "diff": "".join(diff_lines),
+    }
+
+
+def _diff_metadata(changes: list[dict[str, Any]]) -> dict[str, Any]:
+    return {"files": [c["file"] for c in changes], "diff": "".join(c["diff"] for c in changes)}
+
+
 def _apply_patch_tool(env: _BuiltinEnv) -> Tool:
     async def run(args: dict[str, Any], ctx: Optional[ToolContext]) -> ToolResult:
         patch_text = str(args.get("patchText") or "")
@@ -934,6 +995,7 @@ def _apply_patch_tool(env: _BuiltinEnv) -> Tool:
         # base directory to be library-side (ADR 0034 D2).
         try:
             for op in ops:
+                op["given"] = op["path"]
                 op["path"] = env.resolve_path(op["path"])
         except Exception as e:  # noqa: BLE001
             return _err(f"apply_patch: {e}")
@@ -941,20 +1003,27 @@ def _apply_patch_tool(env: _BuiltinEnv) -> Tool:
         # Stage every write/delete first; touch the filesystem only if all apply.
         writes: list[tuple[str, str]] = []
         deletes: list[str] = []
+        changes: list[dict[str, Any]] = []
         try:
             for op in ops:
                 if op["type"] == "add":
                     if os.path.exists(op["path"]):
                         raise ValueError(f"file already exists: {op['path']}")
                     writes.append((op["path"], op["content"]))
+                    changes.append(_file_change(env, op["given"], op["path"], None, op["content"]))
                 elif op["type"] == "delete":
                     if not os.path.exists(op["path"]):
                         raise ValueError(f"file not found: {op['path']}")
                     deletes.append(op["path"])
+                    changes.append(
+                        _file_change(env, op["given"], op["path"], _read_or_none(op["path"]) or "", None)
+                    )
                 else:
                     with open(op["path"], "r", encoding="utf-8") as f:
                         current = f.read()
-                    writes.append((op["path"], _apply_update(current, op["body"])))
+                    updated = _apply_update(current, op["body"])
+                    writes.append((op["path"], updated))
+                    changes.append(_file_change(env, op["given"], op["path"], current, updated))
         except Exception as e:  # noqa: BLE001
             return _err(f"apply_patch: {e}")
 
@@ -969,14 +1038,13 @@ def _apply_patch_tool(env: _BuiltinEnv) -> Tool:
                 pass
 
         plural = "" if len(ops) == 1 else "s"
-        return _ok(
-            f"Applied patch: {len(ops)} file operation{plural}",
-            {
-                "added": sum(1 for o in ops if o["type"] == "add"),
-                "updated": sum(1 for o in ops if o["type"] == "update"),
-                "deleted": sum(1 for o in ops if o["type"] == "delete"),
-            },
-        )
+        meta = {
+            "added": sum(1 for o in ops if o["type"] == "add"),
+            "updated": sum(1 for o in ops if o["type"] == "update"),
+            "deleted": sum(1 for o in ops if o["type"] == "delete"),
+        }
+        meta.update(_diff_metadata(changes))
+        return _ok(f"Applied patch: {len(ops)} file operation{plural}", meta)
 
     return _builtin(
         "apply_patch",

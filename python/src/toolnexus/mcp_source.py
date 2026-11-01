@@ -25,7 +25,8 @@ from mcp import ClientSession
 from mcp.client.sse import sse_client
 from mcp.client.stdio import StdioServerParameters, stdio_client
 from mcp.client.streamable_http import streamablehttp_client
-from mcp.types import ElicitResult
+from mcp.shared.exceptions import McpError
+from mcp.types import ElicitResult, ErrorData
 from mcp.types import Tool as McpToolDef
 
 from .content import describe_part
@@ -116,6 +117,39 @@ def _to_seconds(value: Any) -> float:
         return DEFAULT_TIMEOUT
 
 
+def normalize_command(name: str, cfg: ServerConfig) -> list[str]:
+    """Normalize a local server's ``command`` (+ optional ``args``) into an argv list.
+
+    ``command`` may be a string (the executable) or a non-empty list of strings;
+    ``args`` (a list of strings, default ``[]``) is appended. No shell is involved.
+    Raises :class:`ValueError` naming the server and field for any invalid shape
+    (SPEC.md §2; design D1 of ``add-host-engine-needs``).
+    """
+    command = cfg.get("command")
+    if isinstance(command, str):
+        if not command:
+            raise ValueError(f'mcp server "{name}": invalid command (empty string)')
+        argv = [command]
+    elif isinstance(command, list):
+        if not command:
+            raise ValueError(f'mcp server "{name}": invalid command (empty array)')
+        if not all(isinstance(c, str) for c in command):
+            raise ValueError(
+                f'mcp server "{name}": invalid command (every element must be a string)'
+            )
+        argv = list(command)
+    else:
+        raise ValueError(
+            f'mcp server "{name}": invalid command (expected a string or array of strings)'
+        )
+    args = cfg.get("args", [])
+    if args is None:
+        args = []
+    if not isinstance(args, list) or not all(isinstance(a, str) for a in args):
+        raise ValueError(f'mcp server "{name}": invalid args (expected an array of strings)')
+    return argv + list(args)
+
+
 def is_remote(cfg: ServerConfig) -> bool:
     t = cfg.get("type")
     if t == "remote":
@@ -141,20 +175,29 @@ def parse_mcp_config(input: str | dict[str, Any]) -> McpConfig:
     else:
         raw = dict(input)
     if "mcpServers" in raw:
-        return raw["mcpServers"]  # type: ignore[return-value]
+        return _validate_commands(raw["mcpServers"])
     if "servers" in raw:
-        return raw["servers"]  # type: ignore[return-value]
+        return _validate_commands(raw["servers"])
     if "mcp" in raw:
-        return raw["mcp"]  # type: ignore[return-value]
+        return _validate_commands(raw["mcp"])
     # Bare map of servers — but strip sibling top-level config keys (builtins/agents/
     # a2a/mcpServer) so they are not mistaken for MCP servers when no wrapper key is
     # present. `mcpServer` (singular) is the inbound MCP-serve profile (§7C), distinct
     # from the `mcpServers` (plural) client wrapper stripped above.
-    return {
+    return _validate_commands({
         k: v
         for k, v in raw.items()
         if k not in ("builtins", "agents", "a2a", "mcpServer")
-    }
+    })
+
+
+def _validate_commands(servers: Any) -> McpConfig:
+    """Fail the parse, naming the server, on a malformed local ``command``/``args`` (SPEC.md §2)."""
+    if isinstance(servers, dict):
+        for name, cfg in servers.items():
+            if isinstance(cfg, dict) and "command" in cfg and not is_remote(cfg):
+                normalize_command(name, cfg)
+    return servers  # type: ignore[return-value]
 
 
 def _is_text_content(item: Any) -> bool:
@@ -303,6 +346,65 @@ def apply_tools_filter(
     return out
 
 
+# The SDK's own per-request deadline is disabled for tools/call (it cannot be
+# extended); our watchdog below enforces the idle budget instead.
+_NO_SDK_DEADLINE = timedelta(days=3650)
+
+
+async def _call_with_idle_timeout(
+    session: ClientSession, name: str, arguments: dict[str, Any], timeout: float
+) -> Any:
+    """``tools/call`` bounded by an IDLE timeout (SPEC.md §2, add-mcp-progress-timeout).
+
+    The SDK attaches a progress token (the request id) when a ``progress_callback``
+    is given and routes only matching ``notifications/progress`` to it, so a
+    foreign token never resets the budget. Each matching notification pushes the
+    deadline out to ``now + timeout``; silence for ``timeout`` cancels the call.
+    Caller cancellation propagates unchanged (the task is awaited, not shielded).
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+
+    async def _on_progress(progress: float, total: Optional[float], message: Optional[str]) -> None:
+        nonlocal deadline
+        deadline = loop.time() + timeout
+
+    task = asyncio.ensure_future(
+        session.call_tool(
+            name,
+            arguments=arguments,
+            read_timeout_seconds=_NO_SDK_DEADLINE,
+            progress_callback=_on_progress,
+        )
+    )
+    try:
+        while True:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                task.cancel()
+                try:
+                    await task
+                except BaseException:  # noqa: BLE001 - we are discarding it
+                    pass
+                # Same error, same text as the SDK's own deadline used to raise, so a
+                # silent server fails exactly as before this change.
+                raise McpError(
+                    ErrorData(
+                        code=408,
+                        message=(
+                            "Timed out while waiting for response to ClientRequest. "
+                            f"Waited {timeout} seconds."
+                        ),
+                    )
+                )
+            done, _ = await asyncio.wait({task}, timeout=remaining)
+            if done:
+                return task.result()
+    except asyncio.CancelledError:
+        task.cancel()
+        raise
+
+
 def _convert_tool(
     server: str, defn: McpToolDef, session: ClientSession, timeout: float
 ) -> Tool:
@@ -313,11 +415,7 @@ def _convert_tool(
     ) -> ToolResult:
         eff_timeout = ctx.timeout if (ctx and ctx.timeout is not None) else timeout
         try:
-            result = await session.call_tool(
-                defn.name,
-                arguments=args or {},
-                read_timeout_seconds=timedelta(seconds=eff_timeout),
-            )
+            result = await _call_with_idle_timeout(session, defn.name, args or {}, eff_timeout)
             # Parts are collected BEFORE any branch returns — the error path and the
             # structuredContent short-circuit both keep their non-text content (§0.4).
             parts = _collect_parts(result.content)
@@ -399,8 +497,8 @@ async def _connect_session(
                 sse_client(url, headers=headers)
             )
     else:
-        command = cfg["command"]
-        cmd, args = command[0], list(command[1:])
+        argv = normalize_command(name, cfg)
+        cmd, args = argv[0], argv[1:]
         merged_env = {**os.environ, **(cfg.get("environment") or cfg.get("env") or {})}
         params = StdioServerParameters(
             command=cmd,

@@ -8,6 +8,156 @@ GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
 
 ## Unreleased
 
+**New, in progress: a Rust port (`rust/`, crate `toolnexus`, not published).** It is being built
+for a native Rust desktop host, in that host's priority order. The first piece is an ACP client:
+spawn a coding agent over stdio, keep one warm session, stream every `session/update` (message
+and thought chunks, tool calls and their updates, plans) to the host, answer
+`session/request_permission` through a host callback (default: the first allow option, as in
+Go), cancel a running turn, and end the turn cleanly when the agent exits mid-stream. Closing
+stops the agent's whole process group on POSIX; Windows kills only the direct child for now.
+Also done: skills, byte-identical to Go (checked by running both over the same corpus and
+comparing every output); an MCP client on the official `rmcp` SDK (stdio and streamable HTTP,
+`${ENV}` headers, failure isolation, the tools allowlist, and an idle timeout that progress
+resets); and the core `Tool` types, native tools and OpenAI/Anthropic/Gemini schema adapters. The
+ACP agent and stdio MCP servers run in their own process group (POSIX) or Job Object (Windows),
+so closing stops everything they started; the Windows path compiles but has not been run. The
+HTTP/TLS stack is an optional feature (`mcp-http`, on by default). Not done yet: the toolkit,
+builtins, client loop and suspension; for MCP, the legacy-SSE fallback and non-text content parts
+(`openspec/changes/add-rust-port`). Rust is not in the option-parity check until it has a client.
+
+**Security (Go only for now): an API key is no longer sent to a host it does not belong to.**
+Before, with no `APIKey` set, the Go client took the first of `OPENROUTER_API_KEY`,
+`OPENAI_API_KEY`, `ANTHROPIC_API_KEY` that was set and sent it to whatever `BaseURL` was
+configured, so with several keys in the environment an OpenRouter key could go to
+api.openai.com, or any key to a local or third-party server. Now the environment is used only
+for the env var that matches the host (`api.openai.com` → `OPENAI_API_KEY`, `api.anthropic.com`
+→ `ANTHROPIC_API_KEY`, `openrouter.ai` → `OPENROUTER_API_KEY`, https only); any other host needs
+`APIKey` or the new `APIKeyEnv` (the name of the env var to read). **This can break a host that
+relied on the fallback** for a custom or local `BaseURL`: set `APIKey` or `APIKeyEnv`. The other
+six ports still have the old fallback and are tracked in `openspec/changes/add-go-host-asks`.
+
+**Go only for now: hosts can add tools mid-turn, use each MCP server as soon as it is ready,
+cancel a pending question with its turn, hear about compactions, and gate tools by what they
+do.** Asked for by go-agent-cli, which builds on the Go port directly. The other six ports are
+not done yet and are tracked in `openspec/changes/add-go-host-asks`; they land before the next
+release.
+
+- `Toolkit.Register` is now safe while a turn is running. Before, a host had to rebuild the
+  whole toolkit to add tools. A tool added mid-turn is offered from the next model call.
+- `LoadMcpWithOptions(ctx, cfg, McpLoadOptions{OnServer: ...})` reports each MCP server the
+  moment it connects, fails or is found disabled, so one slow server no longer holds up the
+  tools of the rest.
+- `ClientOptions.WaitForCtx(ctx, request)` gets the turn's context, so a pending question ends
+  when the turn is cancelled. It is used instead of `WaitFor` when both are set.
+- `agents.CompactorOptions.OnCompact` is called after each compaction with token and message
+  counts before and after, and the summary — enough to show "context compacted" in a UI.
+- Compactor fixes (Go only for now): it no longer summarizes away the user's prompt when a turn
+  is one prompt followed by a long run of tool calls (it keeps the prompt and summarizes the work
+  after it); it does nothing when the result would not be smaller (it could grow, e.g. 206 → 211
+  tokens); and `CompactInfo.Folded` hands the host the summarized messages verbatim, because the
+  loop saves only the compacted transcript.
+- Tools carry `Hints{ReadOnly, Destructive, OpenWorld}`: set on every builtin, read from MCP
+  tool annotations, and passed to `BeforeTool`. A host can now let read-only tools run and ask the user before anything else.
+  Permission gates use `BeforeTool` (allow / deny with an error result / ask via `Pending`);
+  there is no separate permit option. Hints are advisory and never sent to the model.
+- New opt-in builtins, off unless the host turns them on: background shells (`bash`
+  with `run_in_background`, then `bash_output` to read new output and `kill_shell` to stop the
+  whole process group; the host owns a `BackgroundShells` and calls `CloseAll` on shutdown),
+  `websearch` over a search provider the host supplies (the library ships none),
+  `notebook_edit` for `.ipynb` cells, and `McpSource.ResourceTools()` for listing and reading
+  MCP resources.
+- `grep` takes `context` / `before` / `after` lines. `read` and `grep` now say in metadata when
+  output was cut (`truncated`, plus where to continue); the text itself is unchanged.
+- Subagents: `Agent.AsTool` now stops the child run when the calling turn is cancelled, and
+  `Agent.AsToolWith` lets the host give each call the same permission hook and question bridge
+  as the parent turn (new runtime `Options.WaitFor`), so a child's `bash` cannot skip the gate.
+  The child's tool calls and replies reach those hooks, which is enough for a nested UI row;
+  there is no token-by-token stream of the child's text.
+- Prompt caching, first step: usage now reports `CacheReadTokens` and `CacheWriteTokens`, so a
+  drop in cache hits is visible. `ClientOptions.PromptCache` marks the stable prefix for the
+  provider: Anthropic gets cache breakpoints after the tools, after the system prompt and on the
+  latest message (optionally the 1-hour lifetime); OpenAI gets `prompt_cache_key`. Off unless set.
+  A replay test with a simulated cache checks that hits start on the second request and never
+  drop. Under Anthropic the real context size is `PromptTokens + CacheReadTokens +
+  CacheWriteTokens` (Anthropic's input count excludes cached tokens); under OpenAI
+  `PromptTokens` already includes them.
+- Tool tiers (`ClientOptions.ToolTiers`): send only the core tool schemas, and let the model
+  load the rest with a `tool_search` tool whose description lists them (name and one line, or
+  name only). Loaded schemas arrive as a tool result, so the tools array, and the cached
+  prefix, never change mid-session. Loaded tools are called by name or through `call_tool`,
+  which the loop unwraps so permission hooks still see the real tool. An optional token budget
+  (default 5% of the context window) moves the least-used tools down a tier when the plan is
+  built; the plan is then frozen until `ResetToolTiers`. Streamed `tool_call` / `tool_result`
+  events name the real tool for a `call_tool` call (with `Via: "call_tool"`). Not done: Gemini explicit cached
+  content (`openspec/changes/add-prompt-cache`).
+- `ToolContext.CallID` is the model's id for the tool call. The loop runs one message's tool calls
+  concurrently, so a host (for example one tracking which subagent call is the parent) can tell
+  sibling calls apart.
+- `ListModels(ctx, ClientOptions)` lists a provider's models (id, display name, and context
+  length when the provider reports it, as OpenRouter does), for model switching.
+- Fixed: loading MCP config with a disabled server could race with the other servers' loading
+  (`go test -race` found it). Go only so far; the other ports have not been checked.
+
+**A cancelled turn no longer forgets what it did, cancel can kill a stubborn command in about 100 ms,
+and file edits come back with a diff.** Found by go-agent-cli's real server integration; all seven
+ports (`openspec/changes/add-host-turn-durability`).
+
+- **Interrupted turns are saved.** `ask` with an id and streaming with an id used to save only on
+  success, so a cancelled or failed turn lost the user's prompt and every tool call that had already
+  finished. They now save on error, cancellation and run timeout too. A tool call that never
+  returned gets a synthetic error result saying its side effects are unknown and that it must not be
+  re-run automatically, so the saved transcript stays valid in both dialects. The original error is
+  still returned. Nothing claims a rollback, and nothing re-executes the call. Under openai-style
+  transcripts the error flag is not carried (that dialect has none), so the text is the marker.
+  Edge: a tool finishing within milliseconds of the cancel may be recorded as interrupted.
+- **`killGraceMs`** (builtin option, default 2000, unchanged) is the wait between SIGTERM and
+  SIGKILL. Measured with 100, from cancel until a job that ignores SIGTERM and its TERM-ignoring
+  background child were all gone, 10 runs on macOS: golang 101–102 ms, js 101–104, python 102–107,
+  java 103–111, elixir 137–141, csharp 165–188, clojure 175–228 (median 204). With the default,
+  elixir measured 2036 ms.
+- **Edit diffs.** `edit`, `write` and `apply_patch` results carry `metadata.files`
+  (`{path, status, additions, deletions}`) and a unified `metadata.diff`; the streaming
+  `tool_result` event now carries the result's `metadata`. java: adding the field changes the
+  `StreamEvent` record constructor.
+- **Fixed along the way:** js `edit` with `baseDir` set wrote back to the unresolved path (wrong
+  file); java `bash` ignored thread interruption, leaving the job running; csharp tools never
+  received the run's cancellation; js/java/csharp now stop waiting on running tools when a turn is
+  cancelled.
+
+Not done: java streaming and clojure have no cancel entry point (only errors interrupt them); elixir
+saves nothing early if the process reading a stream is killed, a leak older than this change.
+Follow-ups not started: a lock on `Toolkit.register`, per-server MCP readiness, a cancellable
+`waitFor`.
+
+**Claude Code's MCP configs now load, conversations can live on disk, and an MCP tool that reports
+progress is no longer killed by its timeout.** All three were found by go-agent-cli, a per-folder
+agent server built on the Go port, and land in all seven ports
+(`openspec/changes/add-host-engine-needs`, `openspec/changes/add-mcp-progress-timeout`).
+
+- **`command` + `args`.** Claude writes `{"command":"node","args":["server.mjs"]}`; every port typed
+  `command` as an argv array, so the Go port failed the *whole* config on it. A local `command` may
+  now be a string or an array, with `args` appended, spawned with no shell. A malformed command or
+  args fails the parse with an error naming the server.
+- **`FileConversationStore(root)`.** One `<root>/<id>.json` per conversation, atomic
+  temp-fsync-rename on save, ids validated against traversal, corrupt files reported as errors
+  rather than silently empty. Both shipped stores gain `list()` (newest first) and `delete(id)`;
+  `ConversationStore` itself is still `get`/`save`, so custom stores are unaffected. A `sync`
+  option (`full` default, `fsync`, `none`) trades power-loss durability for speed: on macOS a 200 KB
+  save is ~7.9 ms under `full` (F_FULLFSYNC) and ~0.4 ms under `fsync`. `fsync` is a true plain fsync only in
+  golang, python and csharp; in js, java, elixir and clojure the runtime offers nothing weaker, so
+  `fsync` flushes like `full` minus the directory fsync.
+- **MCP idle timeout (#63).** Every `tools/call` now sends a progress token, and the per-server
+  `timeout` counts silence, not total time. A server that never reports progress behaves as before
+  — except in C#, which had no per-call deadline at all and now enforces one. The timeout error
+  text changed in golang and java.
+- **golang only:** stdio MCP clients never started their notification handler, so progress *and*
+  server-initiated elicitation over stdio never arrived. Both now do.
+
+Not done: elixir and clojure still cannot cancel an in-flight MCP call (clojure: disconnect only);
+clojure's file store needs POSIX tools and does not run on Windows; elixir lists saves made within
+the same second in id order; there is no context-window field yet. A python shutdown error when a
+server answers after its call timed out predates this change and is not fixed here.
+
 ## 0.21.0 — 2026-09-28
 
 ### Judge batteries: eight ready-made judgments, wired into the agent loop, in all seven ports

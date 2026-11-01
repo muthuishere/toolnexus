@@ -47,13 +47,19 @@ export type BuiltinsConfig =
        * builtins, NOT a sandbox — `bash` still reaches the whole filesystem.
        */
       confineToBaseDir?: boolean
+      /**
+       * POSIX wait in ms between SIGTERM and SIGKILL of a timed-out or cancelled
+       * `bash` job's process group. Absent or 0 ⇒ 2000. No effect on Windows,
+       * which has no graceful stop for a console process (SPEC §4A).
+       */
+      killGraceMs?: number
     }
 
 /**
- * How long a job gets between "please stop" and "stop". Fixed, and identical in
- * every port, so a timeout means the same thing everywhere.
+ * How long a job gets between "please stop" and "stop" when `killGraceMs` is
+ * not set. Identical in every port, so a timeout means the same thing everywhere.
  */
-const KILL_GRACE_MS = 2000
+const DEFAULT_KILL_GRACE_MS = 2000
 
 const WIN_RESERVED = new Set([
   "CON", "PRN", "AUX", "NUL",
@@ -109,9 +115,11 @@ class BuiltinEnv {
   readonly shellError?: Error
   readonly baseDir: string
   readonly confine: boolean
+  readonly killGraceMs: number
 
   constructor(cfg?: BuiltinsConfig) {
     const obj = typeof cfg === "object" && cfg !== null ? cfg : {}
+    this.killGraceMs = typeof obj.killGraceMs === "number" && obj.killGraceMs > 0 ? obj.killGraceMs : DEFAULT_KILL_GRACE_MS
     this.baseDir = obj.baseDir ?? ""
     this.confine = obj.confineToBaseDir === true
     if (obj.shell && obj.shell.length > 0) {
@@ -408,7 +416,7 @@ function bashTool(env: BuiltinEnv): Tool {
           killedTree = killJob(true)
           graceTimer = setTimeout(() => {
             if (killJob(false)) killedTree = true
-          }, KILL_GRACE_MS)
+          }, env.killGraceMs)
         }
 
         let graceTimer: NodeJS.Timeout | undefined
@@ -539,10 +547,11 @@ function writeTool(env: BuiltinEnv): Tool {
       } catch (e) {
         return err(`write: ${e instanceof Error ? e.message : String(e)}`)
       }
+      const before = await readIfExists(full)
       await fs.mkdir(path.dirname(path.resolve(full)), { recursive: true })
       await fs.writeFile(full, content, "utf8")
       const bytes = Buffer.byteLength(content, "utf8")
-      return ok(`Wrote ${bytes} bytes to ${p}`, { bytes })
+      return ok(`Wrote ${bytes} bytes to ${p}`, { bytes, ...editMetadata(env, [{ path: full, before, after: content }]) })
     },
   )
 }
@@ -587,9 +596,10 @@ function editTool(env: BuiltinEnv): Tool {
         if (count > 1) return err(`edit: oldString is not unique in ${p} (${count} occurrences); use replaceAll`)
         next = content.replace(oldString, newString)
       }
-      await fs.writeFile(p, next, "utf8")
+      await fs.writeFile(full, next, "utf8")
       return ok(`Edited ${p} (${args.replaceAll === true ? count : 1} replacement${(args.replaceAll === true ? count : 1) === 1 ? "" : "s"})`, {
         replacements: args.replaceAll === true ? count : 1,
+        ...editMetadata(env, [{ path: full, before: content, after: next }]),
       })
     },
   )
@@ -946,17 +956,22 @@ function applyPatchTool(env: BuiltinEnv): Tool {
       // Stage every write/delete first; only touch the filesystem once all hunks apply.
       const writes: Array<{ path: string; content: string }> = []
       const deletes: string[] = []
+      const changes: FileChange[] = []
       try {
         for (const op of ops) {
           if (op.type === "add") {
             if (existsSync(op.path)) throw new Error(`file already exists: ${op.path}`)
             writes.push({ path: op.path, content: op.content })
+            changes.push({ path: op.path, before: undefined, after: op.content })
           } else if (op.type === "delete") {
             if (!existsSync(op.path)) throw new Error(`file not found: ${op.path}`)
             deletes.push(op.path)
+            changes.push({ path: op.path, before: await fs.readFile(op.path, "utf8"), after: undefined })
           } else {
             const content = await fs.readFile(op.path, "utf8")
-            writes.push({ path: op.path, content: applyUpdate(content, op.body) })
+            const next = applyUpdate(content, op.body)
+            writes.push({ path: op.path, content: next })
+            changes.push({ path: op.path, before: content, after: next })
           }
         }
       } catch (e) {
@@ -973,9 +988,113 @@ function applyPatchTool(env: BuiltinEnv): Tool {
         added: ops.filter((o) => o.type === "add").length,
         updated: ops.filter((o) => o.type === "update").length,
         deleted: ops.filter((o) => o.type === "delete").length,
+        ...editMetadata(env, changes),
       })
     },
   )
+}
+
+// ---------------------------------------------------------------------------
+// edit diffs (SPEC §4A "Edit diffs"): metadata.files + metadata.diff
+// ---------------------------------------------------------------------------
+
+/** One file a builtin changed; `undefined` before = created, `undefined` after = deleted. */
+type FileChange = { path: string; before: string | undefined; after: string | undefined }
+
+async function readIfExists(p: string): Promise<string | undefined> {
+  try {
+    return await fs.readFile(p, "utf8")
+  } catch {
+    return undefined
+  }
+}
+
+/** Lines of a file's text; a trailing newline does not make an extra empty line. */
+function diffLines(text: string | undefined): string[] {
+  if (!text) return []
+  const lines = text.split("\n")
+  if (lines[lines.length - 1] === "") lines.pop()
+  return lines
+}
+
+type DiffOp = { kind: " " | "-" | "+"; line: string }
+
+/** Line diff by longest common subsequence — minimal, so the counts agree across ports. */
+function lineDiff(a0: string[], b0: string[]): DiffOp[] {
+  // Common prefix/suffix first: an edit touches a few lines, so the LCS table stays small.
+  let pre = 0
+  while (pre < a0.length && pre < b0.length && a0[pre] === b0[pre]) pre++
+  let suf = 0
+  while (suf < a0.length - pre && suf < b0.length - pre && a0[a0.length - 1 - suf] === b0[b0.length - 1 - suf]) suf++
+  const head: DiffOp[] = a0.slice(0, pre).map((line) => ({ kind: " ", line }))
+  const tail: DiffOp[] = a0.slice(a0.length - suf).map((line) => ({ kind: " ", line }))
+  const a = a0.slice(pre, a0.length - suf), b = b0.slice(pre, b0.length - suf)
+  const n = a.length, m = b.length
+  const lcs: number[][] = Array.from({ length: n + 1 }, () => new Array<number>(m + 1).fill(0))
+  for (let i = n - 1; i >= 0; i--) {
+    for (let j = m - 1; j >= 0; j--) {
+      lcs[i][j] = a[i] === b[j] ? lcs[i + 1][j + 1] + 1 : Math.max(lcs[i + 1][j], lcs[i][j + 1])
+    }
+  }
+  const ops: DiffOp[] = []
+  let i = 0, j = 0
+  while (i < n && j < m) {
+    if (a[i] === b[j]) { ops.push({ kind: " ", line: a[i] }); i++; j++ }
+    else if (lcs[i + 1][j] >= lcs[i][j + 1]) ops.push({ kind: "-", line: a[i++] })
+    else ops.push({ kind: "+", line: b[j++] })
+  }
+  while (i < n) ops.push({ kind: "-", line: a[i++] })
+  while (j < m) ops.push({ kind: "+", line: b[j++] })
+  return [...head, ...ops, ...tail]
+}
+
+/** Unified hunks with 3 lines of context. */
+function unifiedHunks(ops: DiffOp[]): string[] {
+  const CTX = 3
+  const out: string[] = []
+  const changed = ops.map((o, k) => (o.kind === " " ? -1 : k)).filter((k) => k >= 0)
+  if (!changed.length) return out
+  // group change indices whose gap of context is <= 2*CTX
+  const groups: Array<[number, number]> = []
+  for (const k of changed) {
+    const g = groups[groups.length - 1]
+    if (g && k - g[1] <= 2 * CTX) g[1] = k
+    else groups.push([k, k])
+  }
+  // old/new line number before each op
+  const oldAt: number[] = [], newAt: number[] = []
+  let o = 1, nn = 1
+  for (const op of ops) {
+    oldAt.push(o); newAt.push(nn)
+    if (op.kind !== "+") o++
+    if (op.kind !== "-") nn++
+  }
+  for (const [s0, e0] of groups) {
+    const s = Math.max(0, s0 - CTX), e = Math.min(ops.length - 1, e0 + CTX)
+    const slice = ops.slice(s, e + 1)
+    const oldLen = slice.filter((x) => x.kind !== "+").length
+    const newLen = slice.filter((x) => x.kind !== "-").length
+    const oldStart = oldLen ? oldAt[s] : oldAt[s] - 1
+    const newStart = newLen ? newAt[s] : newAt[s] - 1
+    out.push(`@@ -${oldStart},${oldLen} +${newStart},${newLen} @@`)
+    for (const x of slice) out.push(x.kind + x.line)
+  }
+  return out
+}
+
+function editMetadata(env: BuiltinEnv, changes: FileChange[]): { files: unknown[]; diff: string } {
+  const files: unknown[] = []
+  const diff: string[] = []
+  for (const c of changes) {
+    const rel = toPosixPath(env.baseDir ? path.relative(path.resolve(env.baseDir), path.resolve(c.path)) : c.path, path.sep)
+    const ops = lineDiff(diffLines(c.before), diffLines(c.after))
+    const additions = ops.filter((x) => x.kind === "+").length
+    const deletions = ops.filter((x) => x.kind === "-").length
+    const status = c.before === undefined ? "added" : c.after === undefined ? "deleted" : "modified"
+    files.push({ path: rel, status, additions, deletions })
+    diff.push(`--- ${c.before === undefined ? "/dev/null" : `a/${rel}`}`, `+++ ${c.after === undefined ? "/dev/null" : `b/${rel}`}`, ...unifiedHunks(ops))
+  }
+  return { files, diff: diff.length ? diff.join("\n") + "\n" : "" }
 }
 
 /**

@@ -191,7 +191,10 @@ public final class McpSource implements AutoCloseable {
         Object servers = raw.get("mcpServers");
         if (servers == null) servers = raw.get("servers");
         if (servers == null) servers = raw.get("mcp");
-        if (servers != null) return (Map<String, Object>) servers;
+        if (servers != null) {
+            validateCommands((Map<String, Object>) servers);
+            return (Map<String, Object>) servers;
+        }
         // Bare map of servers — but strip sibling top-level config keys
         // (builtins/agents/a2a/mcpServer) so they are not mistaken for MCP servers
         // when no wrapper key is present. Copy so the caller's map is left untouched.
@@ -200,7 +203,57 @@ public final class McpSource implements AutoCloseable {
         stripped.remove("agents");
         stripped.remove("a2a");
         stripped.remove("mcpServer");
+        validateCommands(stripped);
         return stripped;
+    }
+
+    /** Fail the parse (naming the server) for any local server whose {@code command}/{@code args} is malformed. */
+    @SuppressWarnings("unchecked")
+    private static void validateCommands(Map<String, Object> servers) {
+        for (Map.Entry<String, Object> e : servers.entrySet()) {
+            if (!(e.getValue() instanceof Map)) continue;
+            Map<String, Object> cfg = (Map<String, Object>) e.getValue();
+            if (isRemote(cfg) || !cfg.containsKey("command")) continue;
+            commandArgv(e.getKey(), cfg);
+        }
+    }
+
+    /**
+     * §2 {@code command} + {@code args} (Claude shape): normalize a local server's config into the
+     * argv to spawn. {@code command} may be a non-empty string or a non-empty array of strings; an
+     * optional {@code args} array of strings is appended. No shell interpretation is applied.
+     *
+     * @throws IllegalArgumentException {@code mcp server "<name>": invalid command} /
+     *         {@code mcp server "<name>": invalid args} for an empty or non-string shape
+     */
+    public static List<String> commandArgv(String server, Map<String, Object> cfg) {
+        List<String> argv = new ArrayList<>();
+        Object command = cfg.get("command");
+        if (command instanceof String str) {
+            if (str.isEmpty()) throw invalid(server, "command");
+            argv.add(str);
+        } else if (command instanceof List<?> list) {
+            if (list.isEmpty()) throw invalid(server, "command");
+            for (Object el : list) {
+                if (!(el instanceof String str) || (argv.isEmpty() && str.isEmpty())) throw invalid(server, "command");
+                argv.add(str);
+            }
+        } else {
+            throw invalid(server, "command");
+        }
+        Object args = cfg.get("args");
+        if (args != null) {
+            if (!(args instanceof List<?> list)) throw invalid(server, "args");
+            for (Object el : list) {
+                if (!(el instanceof String str)) throw invalid(server, "args");
+                argv.add(str);
+            }
+        }
+        return argv;
+    }
+
+    private static IllegalArgumentException invalid(String server, String field) {
+        return new IllegalArgumentException("mcp server \"" + server + "\": invalid " + field);
     }
 
     /**
@@ -310,9 +363,14 @@ public final class McpSource implements AutoCloseable {
                 try {
                     McpClientTransport transport = isRemote(cfg)
                             ? buildRemoteTransport(cfg)
-                            : buildLocalTransport(cfg);
+                            : buildLocalTransport(name, cfg);
+                    // §2 idle timeout: the SDK's requestTimeout is a hard per-request deadline, so it
+                    // is lifted out of the way and the budget is enforced by us — tools/list keeps a
+                    // per-phase `timeout` deadline (bounded()), tools/call an idle one (progress-reset).
+                    ProgressRegistry progress = new ProgressRegistry();
                     McpClient.SyncSpec spec = McpClient.sync(transport)
-                            .requestTimeout(Duration.ofMillis(timeout))
+                            .requestTimeout(UNBOUNDED_REQUEST)
+                            .progressConsumer(progress::onProgress)
                             .initializationTimeout(Duration.ofMillis(timeout))
                             .clientInfo(new McpSchema.Implementation("toolnexus", "0.1.0"));
                     // Advertise elicitation + register the bridge ONLY when a waitFor exists to
@@ -327,10 +385,12 @@ public final class McpSource implements AutoCloseable {
                     client.initialize();
                     // §2 Gap 7: apply the per-server tool allowlist (keyed on ORIGINAL name) to the
                     // listed defs BEFORE sanitize/prefix, same semantics as the builtins/skills filter.
-                    List<McpSchema.Tool> defs = applyToolsFilter(name, paginateTools(client), toolsFilterOf(cfg));
+                    final McpSyncClient listing = client;
+                    List<McpSchema.Tool> defs = applyToolsFilter(name,
+                            bounded(() -> paginateTools(listing), timeout), toolsFilterOf(cfg));
                     List<Tool> converted = new ArrayList<>();
                     for (McpSchema.Tool def : defs) {
-                        converted.add(convertTool(name, def, client, timeout));
+                        converted.add(convertTool(name, def, client, timeout, progress));
                     }
                     synchronized (lock) {
                         tools.addAll(converted);
@@ -409,7 +469,7 @@ public final class McpSource implements AutoCloseable {
                 try {
                     McpClientTransport transport = isRemote(cfg)
                             ? buildRemoteTransport(cfg)
-                            : buildLocalTransport(cfg);
+                            : buildLocalTransport(name, cfg);
                     client = McpClient.sync(transport)
                             .requestTimeout(Duration.ofMillis(timeout))
                             .initializationTimeout(Duration.ofMillis(timeout))
@@ -530,14 +590,13 @@ public final class McpSource implements AutoCloseable {
     }
 
     @SuppressWarnings("unchecked")
-    private static McpClientTransport buildLocalTransport(Map<String, Object> cfg) {
-        List<Object> command = (List<Object>) cfg.get("command");
-        if (command == null || command.isEmpty()) {
+    private static McpClientTransport buildLocalTransport(String server, Map<String, Object> cfg) {
+        if (cfg.get("command") == null) {
             throw new IllegalArgumentException("local server has no command");
         }
-        String cmd = String.valueOf(command.get(0));
-        List<String> args = new ArrayList<>();
-        for (int i = 1; i < command.size(); i++) args.add(String.valueOf(command.get(i)));
+        List<String> argv = commandArgv(server, cfg);
+        String cmd = argv.get(0);
+        List<String> args = new ArrayList<>(argv.subList(1, argv.size()));
 
         Map<String, String> env = new HashMap<>();
         // merge process env + configured environment/env
@@ -640,7 +699,98 @@ public final class McpSource implements AutoCloseable {
         return base;
     }
 
-    private static Tool convertTool(String server, McpSchema.Tool def, McpSyncClient client, long timeout) {
+    /** Effectively-unbounded SDK request timeout; our own budgets (bounded / idle) govern instead. */
+    private static final Duration UNBOUNDED_REQUEST = Duration.ofDays(1);
+
+    /**
+     * Per-client correlation of {@code notifications/progress} to in-flight calls. The official SDK
+     * exposes progress only as a client-wide consumer, so each {@code tools/call} attaches its own
+     * fresh token in {@code _meta.progressToken} and registers it here; only a notification whose
+     * token matches a registered call stamps that call's last-activity time (D4).
+     */
+    static final class ProgressRegistry {
+        private final java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.atomic.AtomicLong> live =
+                new java.util.concurrent.ConcurrentHashMap<>();
+
+        void onProgress(McpSchema.ProgressNotification n) {
+            if (n == null || n.progressToken() == null) return;
+            java.util.concurrent.atomic.AtomicLong last = live.get(String.valueOf(n.progressToken()));
+            if (last != null) last.set(System.nanoTime());
+        }
+
+        java.util.concurrent.atomic.AtomicLong register(String token) {
+            java.util.concurrent.atomic.AtomicLong last = new java.util.concurrent.atomic.AtomicLong(System.nanoTime());
+            live.put(token, last);
+            return last;
+        }
+
+        void unregister(String token) {
+            live.remove(token);
+        }
+    }
+
+    /** Run {@code work} with a hard {@code timeoutMs} deadline (load phases keep per-phase budgets). */
+    private static <T> T bounded(java.util.concurrent.Callable<T> work, long timeoutMs) throws Exception {
+        java.util.concurrent.FutureTask<T> task = new java.util.concurrent.FutureTask<>(work);
+        Thread.ofVirtual().name("toolnexus-mcp-bounded").start(task);
+        try {
+            return task.get(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS);
+        } catch (java.util.concurrent.TimeoutException te) {
+            task.cancel(true);
+            throw new RuntimeException("MCP request timed out after " + timeoutMs + "ms");
+        } catch (java.util.concurrent.ExecutionException ee) {
+            Throwable c = ee.getCause();
+            if (c instanceof Exception ex) throw ex;
+            throw new RuntimeException(c);
+        }
+    }
+
+    /**
+     * §2 idle timeout for {@code tools/call}: the call is abandoned after {@code timeoutMs} with no
+     * matching progress notification (each one resets the budget), or promptly when {@code ctx} is
+     * cancelled (cancellation wins over progress).
+     */
+    static McpSchema.CallToolResult callWithIdleTimeout(McpSyncClient client, String mcpName,
+                                                        Map<String, Object> args, long timeoutMs,
+                                                        ProgressRegistry progress, ToolContext ctx) throws Exception {
+        String token = "toolnexus-" + java.util.UUID.randomUUID();
+        Map<String, Object> meta = new LinkedHashMap<>();
+        meta.put("progressToken", token);
+        McpSchema.CallToolRequest req = new McpSchema.CallToolRequest(mcpName, args, meta);
+        java.util.concurrent.atomic.AtomicLong last = progress.register(token);
+        java.util.concurrent.FutureTask<McpSchema.CallToolResult> task =
+                new java.util.concurrent.FutureTask<>(() -> client.callTool(req));
+        Thread.ofVirtual().name("toolnexus-mcp-call-" + mcpName).start(task);
+        long budget = java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(timeoutMs);
+        try {
+            while (true) {
+                if (ctx != null && ctx.isCancelled()) {
+                    task.cancel(true);
+                    throw new java.util.concurrent.CancellationException("MCP tool call cancelled");
+                }
+                long remaining = budget - (System.nanoTime() - last.get());
+                if (remaining <= 0) {
+                    task.cancel(true);
+                    throw new RuntimeException("MCP tool call timed out after " + timeoutMs + "ms without progress");
+                }
+                try {
+                    return task.get(Math.min(remaining, java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(20)),
+                            java.util.concurrent.TimeUnit.NANOSECONDS);
+                } catch (java.util.concurrent.TimeoutException ignored) {
+                    // re-check cancellation + idle budget
+                } catch (java.util.concurrent.ExecutionException ee) {
+                    Throwable c = ee.getCause();
+                    if (c instanceof Exception ex) throw ex;
+                    throw new RuntimeException(c);
+                }
+            }
+        } finally {
+            progress.unregister(token);
+        }
+    }
+
+    private static Tool convertTool(String server, McpSchema.Tool def, McpSyncClient client, long timeout,
+                                    ProgressRegistry progress) {
         final Map<String, Object> inputSchema = normalizeSchema(def);
         final String description = def.description() == null ? "" : def.description();
         final String toolName = Tool.sanitize(server) + "_" + Tool.sanitize(def.name());
@@ -673,8 +823,8 @@ public final class McpSource implements AutoCloseable {
                 meta.put("server", server);
                 try {
                     Map<String, Object> argMap = args == null ? new LinkedHashMap<>() : args;
-                    McpSchema.CallToolRequest req = new McpSchema.CallToolRequest(mcpName, argMap);
-                    McpSchema.CallToolResult result = client.callTool(req);
+                    McpSchema.CallToolResult result =
+                            callWithIdleTimeout(client, mcpName, argMap, timeout, progress, ctx);
                     // §2: parts are collected BEFORE the isError / structuredContent
                     // short-circuits — a server returning structured content *and* an image
                     // must keep the image. Nothing non-text is ever dropped silently.

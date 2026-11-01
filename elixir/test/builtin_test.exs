@@ -270,7 +270,8 @@ defmodule Toolnexus.BuiltinTest do
     test "creates parent dirs and reports byte count", %{tmp_dir: tmp} do
       p = Path.join([tmp, "a", "b", "out.txt"])
       result = run("write", %{"path" => p, "content" => "hello"})
-      assert result == %ToolResult{output: "Wrote 5 bytes to #{p}", is_error: false, metadata: %{bytes: 5}}
+      assert {result.output, result.is_error} == {"Wrote 5 bytes to #{p}", false}
+      assert Map.drop(result.metadata, [:files, :diff]) == %{bytes: 5}
       assert File.read!(p) == "hello"
     end
   end
@@ -281,7 +282,8 @@ defmodule Toolnexus.BuiltinTest do
       p = Path.join(tmp, "f.txt")
       File.write!(p, "alpha beta gamma")
       result = run("edit", %{"path" => p, "oldString" => "beta", "newString" => "BETA"})
-      assert result == %ToolResult{output: "Edited #{p} (1 replacement)", is_error: false, metadata: %{replacements: 1}}
+      assert {result.output, result.is_error} == {"Edited #{p} (1 replacement)", false}
+      assert Map.drop(result.metadata, [:files, :diff]) == %{replacements: 1}
       assert File.read!(p) == "alpha BETA gamma"
     end
 
@@ -301,7 +303,7 @@ defmodule Toolnexus.BuiltinTest do
 
       result = run("edit", %{"path" => p, "oldString" => "x", "newString" => "w", "replaceAll" => true})
       assert result.output == "Edited #{p} (2 replacements)"
-      assert result.metadata == %{replacements: 2}
+      assert Map.drop(result.metadata, [:files, :diff]) == %{replacements: 2}
       assert File.read!(p) == "w y w"
     end
 
@@ -477,7 +479,10 @@ defmodule Toolnexus.BuiltinTest do
 
       result = run("apply_patch", %{"patchText" => patch})
       assert result.output == "Applied patch: 3 file operations"
-      assert result.metadata == %{added: 1, updated: 1, deleted: 1}
+      assert Map.drop(result.metadata, [:files, :diff]) == %{added: 1, updated: 1, deleted: 1}
+
+      assert Enum.map(result.metadata.files, &{&1.status, &1.additions, &1.deletions}) ==
+               [{"added", 2, 0}, {"modified", 1, 1}, {"deleted", 0, 1}]
       assert File.read!(new) == "hello\nworld"
       assert File.read!(upd) == "keep\nnew line\nend\n"
       refute File.exists?(del)

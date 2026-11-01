@@ -14,10 +14,10 @@ namespace Toolnexus;
 internal sealed class BuiltinEnv
 {
     /// <summary>
-    /// How long a job gets between "please stop" and "stop". Fixed, and identical
-    /// in every port, so a timeout means the same thing everywhere.
+    /// Default wait between "please stop" (SIGTERM) and "stop" (SIGKILL), identical in every
+    /// port, so a timeout means the same thing everywhere. The <c>killGraceMs</c> option overrides it.
     /// </summary>
-    internal const int KillGraceMs = 2000;
+    internal const int DefaultKillGraceMs = 2000;
 
     private static readonly HashSet<string> WinReserved = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -31,9 +31,15 @@ internal sealed class BuiltinEnv
     internal string BaseDir { get; }
     internal bool Confine { get; }
 
+    /// <summary>The POSIX SIGTERM-to-SIGKILL wait (<c>killGraceMs</c>; absent or 0 = 2000). No effect on Windows.</summary>
+    internal int KillGraceMs { get; }
+
     internal BuiltinEnv(object? cfg)
     {
         var map = cfg as IDictionary<string, object?>;
+        KillGraceMs = map is not null && map.TryGetValue("killGraceMs", out var g) && g is IConvertible
+            && g is not string && g is not bool && Convert.ToDouble(g) is var gd && gd > 0
+            ? (int)Math.Min(gd, int.MaxValue) : DefaultKillGraceMs;
         BaseDir = map is not null && map.TryGetValue("baseDir", out var b) && b is string bs ? bs : "";
         Confine = map is not null && map.TryGetValue("confineToBaseDir", out var c) && c is true;
 

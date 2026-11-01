@@ -220,13 +220,35 @@ export interface ConversationStore {
 /** Default conversation provider — keeps transcripts in memory for the client's lifetime. */
 export class InMemoryConversationStore implements ConversationStore {
   private readonly map = new Map<string, any[]>()
+  private readonly updated = new Map<string, Date>()
   async get(id: string): Promise<any[] | undefined> {
     const m = this.map.get(id)
     return m ? [...m] : undefined
   }
   async save(id: string, messages: any[]): Promise<void> {
     this.map.set(id, [...messages])
+    this.updated.set(id, new Date())
   }
+  /** Every stored conversation, newest first (ties by id ascending). */
+  async list(): Promise<ConversationEntry[]> {
+    return sortEntries([...this.updated].map(([id, updatedAt]) => ({ id, updatedAt })))
+  }
+  /** Remove a conversation; absent ids are not an error. */
+  async delete(id: string): Promise<void> {
+    this.map.delete(id)
+    this.updated.delete(id)
+  }
+}
+
+/** One `list()` row of a shipped conversation store. */
+export interface ConversationEntry {
+  id: string
+  updatedAt: Date
+}
+
+/** @internal Newest first, ties by id ascending (SPEC.md "Conversation memory"). */
+export function sortEntries(entries: ConversationEntry[]): ConversationEntry[] {
+  return entries.sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime() || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
 }
 
 function delay(ms: number, signal: AbortSignal): Promise<void> {
@@ -311,7 +333,7 @@ export interface RunResult {
 export type StreamEvent =
   | { type: "text"; delta: string }
   | { type: "tool_call"; id: string; name: string; args: Record<string, unknown> }
-  | { type: "tool_result"; id: string; name: string; output: string; isError: boolean }
+  | { type: "tool_result"; id: string; name: string; output: string; isError: boolean; metadata?: Record<string, unknown> }
   | { type: "usage"; usage: Usage }
   | { type: "pending"; request: Request }
   | { type: "done"; result: RunResult }
@@ -736,9 +758,22 @@ export class Client {
       return result!
     }
     if (!ctx?.id) return this.run(prompt, { toolkit: ctx?.toolkit, signal: ctx?.signal })
-    const history = (await this.store.get(ctx.id)) ?? []
-    const result = await this.run(prompt, { toolkit: ctx.toolkit, signal: ctx.signal, history })
-    await this.store.save(ctx.id, result.messages)
+    checkPromptParts(prompt, this.wireOpts())
+    const id = ctx.id
+    const history = (await this.store.get(id)) ?? []
+    // §8: an interrupted turn is saved too — the loop hands back its transcript, repaired.
+    let partial: any[] | undefined
+    const onInterrupt: OnInterrupt = (m) => { partial = m }
+    let result: RunResult
+    try {
+      result = this.opts.style === "anthropic"
+        ? await this.runAnthropic(prompt, ctx.toolkit, ctx.signal, history, onInterrupt)
+        : await this.runOpenAI(prompt, ctx.toolkit, ctx.signal, history, onInterrupt)
+    } catch (e) {
+      if (partial) await this.store.save(id, partial)
+      throw e
+    }
+    await this.store.save(id, result.messages)
     return result
   }
 
@@ -755,12 +790,20 @@ export class Client {
   async *stream(prompt: PromptInput, ctx?: { toolkit?: Toolkit; id?: string; signal?: AbortSignal }): AsyncGenerator<StreamEvent, void, unknown> {
     checkPromptParts(prompt, this.wireOpts())
     const history = ctx?.id ? (await this.store.get(ctx.id)) ?? [] : undefined
+    // §8: with an id, an interrupted stream saves its repaired transcript before the error surfaces.
+    let partial: any[] | undefined
+    const onInterrupt: OnInterrupt | undefined = ctx?.id ? (m) => { partial = m } : undefined
     const gen = this.opts.style === "anthropic"
-      ? this.streamAnthropic(prompt, ctx?.toolkit, ctx?.signal, history)
-      : this.streamOpenAI(prompt, ctx?.toolkit, ctx?.signal, history)
-    for await (const ev of gen) {
-      if (ev.type === "done" && ctx?.id) await this.store.save(ctx.id, ev.result.messages)
-      yield ev
+      ? this.streamAnthropic(prompt, ctx?.toolkit, ctx?.signal, history, onInterrupt)
+      : this.streamOpenAI(prompt, ctx?.toolkit, ctx?.signal, history, onInterrupt)
+    try {
+      for await (const ev of gen) {
+        if (ev.type === "done" && ctx?.id) await this.store.save(ctx.id, ev.result.messages)
+        yield ev
+      }
+    } catch (e) {
+      if (partial && ctx?.id) await this.store.save(ctx.id, partial)
+      throw e
     }
   }
 
@@ -888,44 +931,44 @@ export class Client {
 
   // The run-scoped timeout timer is owned by these four wrappers, so it is cleared however the
   // run leaves: return, throw, or a consumer abandoning the stream half-way.
-  private async runOpenAI(prompt: PromptInput, toolkit: Toolkit | undefined, external?: AbortSignal, history?: any[]): Promise<RunResult> {
+  private async runOpenAI(prompt: PromptInput, toolkit: Toolkit | undefined, external?: AbortSignal, history?: any[], onInterrupt?: OnInterrupt): Promise<RunResult> {
     const signal = this.makeSignal(external)
     try {
-      return await this.runOpenAIWithSignal(signal, prompt, toolkit, history)
+      return await this.runOpenAIWithSignal(signal, prompt, toolkit, history, onInterrupt)
     } finally {
       this.releaseSignal(signal)
     }
   }
 
-  private async runAnthropic(prompt: PromptInput, toolkit: Toolkit | undefined, external?: AbortSignal, history?: any[]): Promise<RunResult> {
+  private async runAnthropic(prompt: PromptInput, toolkit: Toolkit | undefined, external?: AbortSignal, history?: any[], onInterrupt?: OnInterrupt): Promise<RunResult> {
     const signal = this.makeSignal(external)
     try {
-      return await this.runAnthropicWithSignal(signal, prompt, toolkit, history)
+      return await this.runAnthropicWithSignal(signal, prompt, toolkit, history, onInterrupt)
     } finally {
       this.releaseSignal(signal)
     }
   }
 
-  private async *streamOpenAI(prompt: PromptInput, toolkit: Toolkit | undefined, external?: AbortSignal, history?: any[]): AsyncGenerator<StreamEvent, void, unknown> {
+  private async *streamOpenAI(prompt: PromptInput, toolkit: Toolkit | undefined, external?: AbortSignal, history?: any[], onInterrupt?: OnInterrupt): AsyncGenerator<StreamEvent, void, unknown> {
     const signal = this.makeSignal(external)
     try {
-      yield* this.streamOpenAIWithSignal(signal, prompt, toolkit, history)
+      yield* this.streamOpenAIWithSignal(signal, prompt, toolkit, history, onInterrupt)
     } finally {
       this.releaseSignal(signal)
     }
   }
 
-  private async *streamAnthropic(prompt: PromptInput, toolkit: Toolkit | undefined, external?: AbortSignal, history?: any[]): AsyncGenerator<StreamEvent, void, unknown> {
+  private async *streamAnthropic(prompt: PromptInput, toolkit: Toolkit | undefined, external?: AbortSignal, history?: any[], onInterrupt?: OnInterrupt): AsyncGenerator<StreamEvent, void, unknown> {
     const signal = this.makeSignal(external)
     try {
-      yield* this.streamAnthropicWithSignal(signal, prompt, toolkit, history)
+      yield* this.streamAnthropicWithSignal(signal, prompt, toolkit, history, onInterrupt)
     } finally {
       this.releaseSignal(signal)
     }
   }
 
   // ---- OpenAI-style: POST {baseUrl}/chat/completions ----
-  private async runOpenAIWithSignal(signal: AbortSignal, prompt: PromptInput, toolkit: Toolkit | undefined, history?: any[]): Promise<RunResult> {
+  private async runOpenAIWithSignal(signal: AbortSignal, prompt: PromptInput, toolkit: Toolkit | undefined, history?: any[], onInterrupt?: OnInterrupt): Promise<RunResult> {
     const key = resolveKey(this.opts)
     const runStart = Date.now()
     let messages: any[] = history && history.length ? [...history] : []
@@ -940,6 +983,8 @@ export class Client {
     let turns = 0
     // The model of the last call this run made (a beforeLLM override when one applied) — §8.
     let lastModel = this.opts.model
+    // Results finished in the current tool phase, by call id — what an interrupted save keeps.
+    const done = new Map<string, ToolResult>()
 
     try {
       for (let turn = 0; turn < (this.opts.maxTurns ?? 10); turn++) {
@@ -964,7 +1009,8 @@ export class Client {
         const calls = msg.tool_calls ?? []
         if (calls.length === 0) return this.endRun(runStart, lastModel, msg.content ?? "", messages, toolCalls, turns, usage)
         // execute all tool calls in this turn concurrently (true parallel tool calling)
-        const settled = await Promise.all(
+        done.clear()
+        const settled = await untilAborted(signal, Promise.all(
           calls.map(async (call: any) => {
             let { args, result } = await this.runTool(toolkit, call.function.name, safeJson(call.function.arguments), call.id, turn)
             let halted: Request | undefined
@@ -974,9 +1020,10 @@ export class Client {
               result = r.result
               halted = r.halted
             }
+            if (!halted && call.id) done.set(call.id, result)
             return { call, args, result, halted }
           }),
-        )
+        ))
         // Record in tool-call order; on the FIRST durable halt, surface it and stop — deterministic,
         // and the later suspensions' placeholder results never enter the transcript (they re-suspend
         // on resume). Mirrors the streaming path.
@@ -989,6 +1036,7 @@ export class Client {
       return this.endRun(runStart, lastModel, lastText(messages), messages, toolCalls, turns, usage, true)
     } catch (e) {
       this.emitRunError(runStart, lastModel, toolCalls, turns, usage, e)
+      onInterrupt?.(interruptedTranscript(messages, this.opts.style === "anthropic", done))
       throw e
     }
   }
@@ -1031,7 +1079,7 @@ export class Client {
   }
 
   // ---- Anthropic-style: POST {baseUrl}/messages ----
-  private async runAnthropicWithSignal(signal: AbortSignal, prompt: PromptInput, toolkit: Toolkit | undefined, history?: any[]): Promise<RunResult> {
+  private async runAnthropicWithSignal(signal: AbortSignal, prompt: PromptInput, toolkit: Toolkit | undefined, history?: any[], onInterrupt?: OnInterrupt): Promise<RunResult> {
     const key = resolveKey(this.opts)
     const base = this.opts.baseUrl.replace(/\/$/, "")
     const endpoint = base.endsWith("/v1") ? `${base}/messages` : `${base}/v1/messages`
@@ -1044,6 +1092,8 @@ export class Client {
     let turns = 0
     // The model of the last call this run made (a beforeLLM override when one applied) — §8.
     let lastModel = this.opts.model
+    // Results finished in the current tool phase, by call id — what an interrupted save keeps.
+    const done = new Map<string, ToolResult>()
 
     try {
       for (let turn = 0; turn < (this.opts.maxTurns ?? 10); turn++) {
@@ -1075,7 +1125,8 @@ export class Client {
           return this.endRun(runStart, lastModel, text, messages, toolCalls, turns, usage)
         }
         // execute all tool_use blocks in this turn concurrently (true parallel tool calling)
-        const settled = await Promise.all(
+        done.clear()
+        const settled = await untilAborted(signal, Promise.all(
           uses.map(async (use: any) => {
             let { args, result } = await this.runTool(toolkit, use.name, use.input ?? {}, use.id, turn)
             let halted: Request | undefined
@@ -1085,9 +1136,10 @@ export class Client {
               result = r.result
               halted = r.halted
             }
+            if (!halted && use.id) done.set(use.id, result)
             return { use, args, result, halted }
           }),
-        )
+        ))
         // Record in tool-call order; on the FIRST durable halt, include that tool_result block, stop
         // building the content, and surface it — deterministic (G3), later suspensions re-suspend on
         // resume. Mirrors the OpenAI path and the streaming loops.
@@ -1104,12 +1156,13 @@ export class Client {
       return this.endRun(runStart, lastModel, "", messages, toolCalls, turns, usage, true)
     } catch (e) {
       this.emitRunError(runStart, lastModel, toolCalls, turns, usage, e)
+      onInterrupt?.(interruptedTranscript(messages, this.opts.style === "anthropic", done))
       throw e
     }
   }
 
   // ---- Streaming: OpenAI-style ----
-  private async *streamOpenAIWithSignal(signal: AbortSignal, prompt: PromptInput, toolkit: Toolkit | undefined, history?: any[]): AsyncGenerator<StreamEvent, void, unknown> {
+  private async *streamOpenAIWithSignal(signal: AbortSignal, prompt: PromptInput, toolkit: Toolkit | undefined, history?: any[], onInterrupt?: OnInterrupt): AsyncGenerator<StreamEvent, void, unknown> {
     const key = resolveKey(this.opts)
     const runStart = Date.now()
     let messages: any[] = history && history.length ? [...history] : []
@@ -1124,6 +1177,8 @@ export class Client {
     let turns = 0
     // The model of the last call this run made (a beforeLLM override when one applied) — §8.
     let lastModel = this.opts.model
+    // Results finished in the current tool phase, by call id — what an interrupted save keeps.
+    const done = new Map<string, ToolResult>()
 
     try {
       for (let turn = 0; turn < (this.opts.maxTurns ?? 10); turn++) {
@@ -1180,7 +1235,12 @@ export class Client {
         }
         messages.push({ role: "assistant", content: content || null, tool_calls: calls.map((c) => ({ id: c.id, type: "function", function: { name: c.name, arguments: c.args } })) })
         for (const c of calls) yield { type: "tool_call", id: c.id, name: c.name, args: safeJson(c.args) }
-        const settled = await Promise.all(calls.map((c) => this.runTool(toolkit, c.name, safeJson(c.args), c.id, turn)))
+        done.clear()
+        const settled = await untilAborted(signal, Promise.all(calls.map(async (c) => {
+          const r = await this.runTool(toolkit, c.name, safeJson(c.args), c.id, turn)
+          if (!pendingOf(r.result) && c.id) done.set(c.id, r.result)
+          return r
+        })))
         for (let i = 0; i < calls.length; i++) {
           const c = calls[i]
           let { args, result } = settled[i]
@@ -1198,18 +1258,19 @@ export class Client {
           }
           toolCalls.push({ name: c.name, args, output: result.output, isError: result.isError, metadata: result.metadata })
           messages.push(toolMessage(c.id, c.name, result))
-          yield { type: "tool_result", id: c.id, name: c.name, output: result.output, isError: result.isError }
+          yield { type: "tool_result", id: c.id, name: c.name, output: result.output, isError: result.isError, ...(result.metadata ? { metadata: result.metadata } : {}) }
         }
       }
       yield { type: "done", result: this.endRun(runStart, lastModel, lastText(messages), messages, toolCalls, turns, usage, true) }
     } catch (e) {
       this.emitRunError(runStart, lastModel, toolCalls, turns, usage, e)
+      onInterrupt?.(interruptedTranscript(messages, this.opts.style === "anthropic", done))
       throw e
     }
   }
 
   // ---- Streaming: Anthropic-style ----
-  private async *streamAnthropicWithSignal(signal: AbortSignal, prompt: PromptInput, toolkit: Toolkit | undefined, history?: any[]): AsyncGenerator<StreamEvent, void, unknown> {
+  private async *streamAnthropicWithSignal(signal: AbortSignal, prompt: PromptInput, toolkit: Toolkit | undefined, history?: any[], onInterrupt?: OnInterrupt): AsyncGenerator<StreamEvent, void, unknown> {
     const key = resolveKey(this.opts)
     const runStart = Date.now()
     const base = this.opts.baseUrl.replace(/\/$/, "")
@@ -1222,6 +1283,8 @@ export class Client {
     let turns = 0
     // The model of the last call this run made (a beforeLLM override when one applied) — §8.
     let lastModel = this.opts.model
+    // Results finished in the current tool phase, by call id — what an interrupted save keeps.
+    const done = new Map<string, ToolResult>()
 
     try {
       for (let turn = 0; turn < (this.opts.maxTurns ?? 10); turn++) {
@@ -1274,7 +1337,12 @@ export class Client {
           return
         }
         for (const u of uses as any[]) yield { type: "tool_call", id: u.id, name: u.name, args: u.input }
-        const settled = await Promise.all((uses as any[]).map((u) => this.runTool(toolkit, u.name, u.input ?? {}, u.id, turn)))
+        done.clear()
+        const settled = await untilAborted(signal, Promise.all((uses as any[]).map(async (u) => {
+          const r = await this.runTool(toolkit, u.name, u.input ?? {}, u.id, turn)
+          if (!pendingOf(r.result) && u.id) done.set(u.id, r.result)
+          return r
+        })))
         const results: any[] = []
         for (let i = 0; i < uses.length; i++) {
           const u = uses[i] as any
@@ -1294,13 +1362,14 @@ export class Client {
           }
           toolCalls.push({ name: u.name, args, output: result.output, isError: result.isError, metadata: result.metadata })
           results.push(toolResultBlock(u.id, result))
-          yield { type: "tool_result", id: u.id, name: u.name, output: result.output, isError: result.isError }
+          yield { type: "tool_result", id: u.id, name: u.name, output: result.output, isError: result.isError, ...(result.metadata ? { metadata: result.metadata } : {}) }
         }
         messages.push({ role: "user", content: results })
       }
       yield { type: "done", result: this.endRun(runStart, lastModel, "", messages, toolCalls, turns, usage, true) }
     } catch (e) {
       this.emitRunError(runStart, lastModel, toolCalls, turns, usage, e)
+      onInterrupt?.(interruptedTranscript(messages, this.opts.style === "anthropic", done))
       throw e
     }
   }
@@ -1529,6 +1598,52 @@ function toolResultBlock(id: string | undefined, result: ToolResult): any {
   const b: any = { type: "tool_result", tool_use_id: id, content: result.output, is_error: result.isError }
   if (result.parts?.length) b.parts = result.parts
   return b
+}
+
+/** Receives the repaired transcript of a run that ended in an error or cancellation. */
+type OnInterrupt = (messages: any[]) => void
+
+const INTERRUPTED: ToolResult = { output: "interrupted: the turn ended before this tool returned. Whether its side effects happened is unknown. Do not re-run it automatically; check first.", isError: true }
+
+/** Settle with `p`, or reject with the abort reason as soon as `signal` aborts. */
+function untilAborted<T>(signal: AbortSignal, p: Promise<T>): Promise<T> {
+  if (signal.aborted) return Promise.reject(signal.reason ?? new Error("aborted"))
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(signal.reason ?? new Error("aborted"))
+    signal.addEventListener("abort", onAbort, { once: true })
+    p.then(
+      (v) => { signal.removeEventListener("abort", onAbort); resolve(v) },
+      (e) => { signal.removeEventListener("abort", onAbort); reject(e) },
+    )
+  })
+}
+
+/**
+ * §8 "Interrupted turns are saved": a copy of `messages` in which every tool call of the LAST
+ * assistant message has a result — the finished one from `done`, else `interrupted` (isError) —
+ * in the dialect's own shape, so the saved transcript replays on either API.
+ */
+function interruptedTranscript(messages: any[], anthropic: boolean, done: Map<string, ToolResult>): any[] {
+  const out = [...messages]
+  let ai = -1
+  for (let i = out.length - 1; i >= 0; i--) if (out[i]?.role === "assistant") { ai = i; break }
+  if (ai < 0) return out
+  const resultFor = (id: string) => done.get(id) ?? INTERRUPTED
+  if (!anthropic) {
+    const calls: any[] = out[ai].tool_calls ?? []
+    const have = new Set(out.slice(ai + 1).filter((m) => m?.role === "tool").map((m) => m.tool_call_id))
+    for (const c of calls) if (!have.has(c.id)) out.push(toolMessage(c.id, c.function?.name ?? "", resultFor(c.id)))
+    return out
+  }
+  const uses = Array.isArray(out[ai].content) ? out[ai].content.filter((b: any) => b?.type === "tool_use") : []
+  if (!uses.length) return out
+  const next = out[ai + 1]
+  const blocks: any[] = next?.role === "user" && Array.isArray(next.content) ? [...next.content] : []
+  const have = new Set(blocks.filter((b) => b?.type === "tool_result").map((b) => b.tool_use_id))
+  for (const u of uses) if (!have.has(u.id)) blocks.push(toolResultBlock(u.id, resultFor(u.id)))
+  if (next?.role === "user" && Array.isArray(next.content)) out[ai + 1] = { ...next, content: blocks }
+  else out.splice(ai + 1, 0, { role: "user", content: blocks })
+  return out
 }
 
 function lastText(messages: any[]): string {

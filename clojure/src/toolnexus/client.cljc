@@ -29,6 +29,7 @@
 (ns toolnexus.client
   (:require [clojure.string :as str]
             [koine.env :as env]
+            [koine.fs :as fs]
             [koine.http :as http]
             [koine.json :as json]
             [koine.process :as proc]
@@ -185,14 +186,182 @@
       (env/get-env "OPENROUTER_API_KEY")
       ""))
 
+(defn- newest-first
+  "§conversation-store list order: newest first, ties by id ascending."
+  [entries]
+  (vec (sort (fn [a b]
+               (let [c (compare (:updated-at b) (:updated-at a))]
+                 (if (zero? c) (tool/compare-strings (:id a) (:id b)) c)))
+             entries)))
+
 (defn in-memory-store
   "§conversation-store — the shipped default: per-client, process lifetime.
-  A store is exactly two operations, `:get` and `:save`, so a host can swap in
-  a file or a database without this namespace knowing anything about it."
+  The CONTRACT is exactly two operations, `:get` and `:save`, so a host can swap
+  in a file or a database without this namespace knowing anything about it. The
+  shipped stores also carry `:list` (`[{:id :updated-at}]`, newest first, ties
+  by id; `:updated-at` is epoch ms) and `:delete` (absent id is not an error)."
   []
   (let [a (atom {})]
-    {:get  (fn [id] (get @a id))
-     :save (fn [id msgs] (swap! a assoc id msgs) nil)}))
+    {:get    (fn [id] (get-in @a [id :messages]))
+     :save   (fn [id msgs] (swap! a assoc id {:messages msgs :updated-at (ktime/now-ms)}) nil)
+     :list   (fn [] (newest-first (map (fn [[id v]] {:id id :updated-at (:updated-at v)}) @a)))
+     :delete (fn [id] (swap! a dissoc id) nil)}))
+
+;; ---------------------------------------------------------------------------
+;; §conversation-store — the durable file store
+;; ---------------------------------------------------------------------------
+;;
+;; koine has no rename, no mtime, no chmod and no fsync, and this namespace may
+;; not branch per host, so those four go through POSIX tools (`mv`, `stat`,
+;; `chmod` via umask, `sync`) with an argv and no shell interpretation of any
+;; value. POSIX only — the same boundary the `bash` builtin already has.
+
+(def ^:private id-chars
+  (set "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-"))
+
+(defn valid-conversation-id?
+  "SPEC §conversation-store — `^[A-Za-z0-9._-]{1,128}$` and not `.`/`..`."
+  [id]
+  (and (string? id)
+       (<= 1 (count id) 128)
+       (every? id-chars id)
+       (not (#{"." ".."} id))))
+
+(defn- check-id! [id]
+  (when-not (valid-conversation-id? id)
+    (throw (ex-info (str "file-store: invalid conversation id: " (pr-str id))
+                    {:error "invalid-id" :id id})))
+  id)
+
+(defn- sh! [argv what]
+  (let [r (proc/sh argv {:timeout-ms 10000})]
+    (when-not (= 0 (:exit r))
+      (throw (ex-info (str "file-store: " what " failed: " (str/trim (str (:err r))))
+                      {:error "io" :argv argv})))
+    r))
+
+(def ^:private digit-val
+  {\0 0 \1 1 \2 2 \3 3 \4 4 \5 5 \6 6 \7 7 \8 8 \9 9})
+
+(defn- seconds->ms
+  "`stat`'s \"1792818339.694926003\" as epoch ms. Hand-rolled: `parse-double`
+  is unverified on cljgo and this namespace may not branch per host."
+  [s]
+  (let [[whole frac] (str/split (str/trim s) #"\." 2)
+        num (fn [cs] (reduce (fn [n c] (+ (* 10 n) (long (digit-val c 0)))) 0 cs))
+        ms  (take 3 (concat (seq (or frac "")) (repeat \0)))]
+    (+ (* 1000 (num whole)) (num ms))))
+
+(defn- mtimes-ms
+  "File mtimes in epoch ms, one per path, in order. GNU `stat -c`, then BSD
+  `stat -f` — the two spellings of the same question."
+  [paths]
+  (if (empty? paths)
+    []
+    (let [gnu (proc/sh (into ["stat" "-c" "%.9Y" "--"] paths) {:timeout-ms 10000})
+          r   (if (= 0 (:exit gnu))
+                gnu
+                (sh! (into ["stat" "-f" "%Fm" "--"] paths) "stat"))]
+      (mapv seconds->ms (remove str/blank? (str/split-lines (:out r)))))))
+
+(def ^:private save-lock
+  "In-process serialization of saves — the same compare-and-set! spin the MCP
+  writer uses, because `locking` is a JVM special form."
+  (atom false))
+
+(defn- with-save-lock! [f]
+  (loop []
+    (if (compare-and-set! save-lock false true)
+      (try (f) (finally (reset! save-lock false)))
+      (do (ktime/sleep! 1) (recur)))))
+
+(defn file-store
+  "§conversation-store `FileConversationStore(root)` — durable, one file per id:
+  `<root>/<id>.json` holding `{\"version\":1,\"messages\":[...]}`.
+
+  `root` is required and never defaulted; it is created (0700) on first save.
+  `:save` writes `<root>/.<id>.<random>.tmp` (0600), syncs, and renames it over
+  the target, so a reader sees the old or the new transcript, never a torn one
+  (power-loss durability of the rename is best-effort). `:get` of a missing id
+  is nil; corrupt JSON or an unknown `version` THROWS. `:list` returns
+  `[{:id :updated-at}]` (file mtime, epoch ms) newest first, ties by id, without
+  parsing bodies. `:delete` of an absent id is not an error. An id outside
+  `^[A-Za-z0-9._-]{1,128}$` (or `.`/`..`) is rejected by every operation.
+  Same-process saves are serialized; across processes the last rename wins.
+
+  Opts `{:sync mode}` (SPEC §8 \"Durability mode\"): `:full` (default) runs
+  `sync FILE` before the rename and `sync ROOT` after it (best-effort);
+  `:fsync` only `sync FILE`; `:none` no flush. Temp-then-rename holds in every
+  mode; an unknown mode throws. GNU `sync FILE` is an fsync(2) of that file;
+  BSD/macOS `sync` ignores its argument and runs a global sync(2) — no
+  F_FULLFSYNC is reachable from a POSIX tool."
+  ([root] (file-store root {}))
+  ([root {:keys [sync] :or {sync :full}}]
+  (when-not (and (string? root) (not (str/blank? root)))
+    (throw (ex-info "file-store: root is required" {:error "config"})))
+  (when-not (#{:full :fsync :none} sync)
+    (throw (ex-info (str "file-store: unknown sync mode " (pr-str sync))
+                    {:error "config" :sync sync})))
+  (let [path (fn [id] (str root "/" (check-id! id) ".json"))]
+    {:get
+     (fn [id]
+       (let [p (path id)]
+         (when (fs/exists? p)
+           (let [doc (try (json/read-str (fs/read-file p))
+                          (catch Throwable e
+                            (throw (ex-info (str "file-store: corrupt conversation " id ": "
+                                                 (or (ex-message e) (str e)))
+                                            {:error "corrupt" :id id}))))]
+             (when-not (and (map? doc) (= 1 (:version doc)))
+               (throw (ex-info (str "file-store: conversation " id " has unsupported version "
+                                    (pr-str (when (map? doc) (:version doc))))
+                               {:error "version" :id id})))
+             (vec (:messages doc))))))
+
+     :save
+     (fn [id msgs]
+       (let [target (path id)
+             tmp    (str root "/." id "." (ktime/mono-ms) "-" (rand-int 1000000000) ".tmp")
+             body   (json/write-str {:version 1 :messages (vec msgs)})]
+         (with-save-lock!
+          (fn []
+            (when-not (fs/directory? root)
+              (sh! ["mkdir" "-p" "-m" "700" "--" root] "mkdir"))
+            (try
+              ;; created 0600 BEFORE any content lands in it
+              (sh! ["sh" "-c" "umask 077 && : > \"$1\"" "sh" tmp] "create temp")
+              (fs/write-file tmp body)
+              ;; best-effort flush: GNU `sync FILE`; BSD `sync` ignores the arg
+              (when-not (= :none sync)
+                (proc/sh ["sync" tmp] {:timeout-ms 10000}))
+              (sh! ["mv" "-f" "--" tmp target] "rename")
+              (catch Throwable e
+                (try (fs/delete! tmp) (catch Throwable _ nil))
+                (throw e)))
+            ;; best-effort directory flush so the rename survives power loss
+            (when (= :full sync)
+              (proc/sh ["sync" root] {:timeout-ms 10000}))))
+         nil))
+
+     :list
+     (fn []
+       (if-not (fs/directory? root)
+         []
+         (let [prefix (str root "/")
+               ids    (->> (fs/list-tree root)
+                           (keep (fn [p]
+                                   (when (and (str/starts-with? p prefix)
+                                              (str/ends-with? p ".json"))
+                                     (let [n (subs p (count prefix) (- (count p) 5))]
+                                       (when (valid-conversation-id? n) n)))))
+                           (filter #(not (fs/directory? (str prefix % ".json"))))
+                           distinct
+                           vec)
+               times  (mtimes-ms (mapv #(str prefix % ".json") ids))]
+           (newest-first (map (fn [id t] {:id id :updated-at t}) ids times)))))
+
+     :delete
+     (fn [id] (fs/delete! (path id)) nil)})))
 
 (defn create-client
   "Build a client. Options (idiomatic kebab-case — these never hit the wire):
@@ -988,7 +1157,8 @@
   tool hooks, which are host code and are invoked outside that conversion. A
   throw from a hook is rethrown on the calling thread, matching the shipped
   ports, where an unguarded hook rejects the run."
-  [client toolkit calls turn]
+  ([client toolkit calls turn] (execute-calls client toolkit calls turn nil))
+  ([client toolkit calls turn on-settled]
   (->> calls
        (mapv (fn [c]
                (let [p (promise)
@@ -1023,7 +1193,10 @@
                                   :source (:source (get (:tools toolkit) (:name r)))
                                   :is_error (boolean (:isError (:result r)))
                                   :ms (- (ktime/now-ms) (second pair))}))
-                 r)))))
+                 ;; recorded as it lands, in call order, so an interrupted turn
+                 ;; can still save the results that DID finish.
+                 (when on-settled (on-settled r))
+                 r))))))
 
 (defn- emit! [on-event ev] (when on-event (on-event ev)) nil)
 
@@ -1112,6 +1285,30 @@
    :status "pending"
    :pending request})
 
+(def ^:private interrupted-result
+  "The synthetic result an unanswered tool call gets when a turn is interrupted —
+  so every call keeps its result in both dialects."
+  {:isError true :output "interrupted: the turn ended before this tool returned. Whether its side effects happened is unknown. Do not re-run it automatically; check first."})
+
+(defn- interrupted-transcript
+  "The transcript as it stood when a turn was interrupted: every complete
+  message, plus — when the last assistant message's tool calls had not all been
+  answered — one tool result per call: the real one if it finished, else
+  `interrupted-result`. A pending §10 placeholder is not a real result, so it
+  counts as interrupted too."
+  [client {:keys [messages calls done]}]
+  (if (seq calls)
+    (into (vec messages)
+          (tool-result-messages
+           client
+           (mapv (fn [c]
+                   (let [d (get done (:id c))]
+                     (assoc c :result (if (and d (not (pending-of (:result d))))
+                                        (:result d)
+                                        interrupted-result))))
+                 calls)))
+    (vec messages)))
+
 (defn- last-assistant-text [messages]
   (or (->> messages
            (filter (fn [m] (and (= "assistant" (:role m)) (string? (:content m)))))
@@ -1154,6 +1351,9 @@
         remembered (when (and conversation-id (:store client))
                      ((:get (:store client)) conversation-id))
         run-t0     (ktime/now-ms)
+        ;; §conversation-store — the turn as it stands, for the interrupted-turn
+        ;; save: {:messages complete-so-far :calls unanswered :done {id settled}}.
+        progress   (atom nil)
         ;; ONE exit path for the store save and the run metric. Two `run-result`
         ;; call sites return from this loop, and a save wired into only one of
         ;; them is the classic half-fix — the turn-limit exit would silently
@@ -1167,6 +1367,7 @@
                                       :error (:limit? r)}))
                      r)
         finish!    (fn [r]
+                     (reset! progress nil)
                      (when (and conversation-id (:store client))
                        ((:save (:store client)) conversation-id (:messages r)))
                      (run-metric! r))
@@ -1180,6 +1381,7 @@
     ;; `tools` is loop state, not a constant: §8 says a `:before-llm` hook that
     ;; returns `:messages`/`:tools` replaces them FOR THE REST OF THE RUN, so a
     ;; turn-0 override must still be in force on turn 1.
+    (try
     (loop [messages   (conj seed (user-message prompt))
            tools      tools
            turn       0
@@ -1189,6 +1391,7 @@
            ;; §8 — RunResult.model / the `run` metric report the model of the
            ;; LAST call the run made (configured until a call is made).
            last-model (:model client)]
+      (reset! progress {:messages messages})
       (if (>= turn max-turns)
         (let [text (if anthropic? "" (last-assistant-text messages))
               r    (finish! (assoc (run-result client text messages tool-calls turns usage true) :model last-model))]
@@ -1218,7 +1421,8 @@
                   turns   (inc turns)
                   msg     (assistant-message client body)
                   calls   (tool-calls-of client body)
-                  messages (conj messages msg)]
+                  messages (conj messages msg)
+                  _       (reset! progress {:messages messages :calls calls :done {}})]
               (if (empty? calls)
                 (let [r (finish! (assoc (run-result client (final-text client body) messages tool-calls turns usage false) :model turn-model))]
                   (emit! on-event {:type "done" :result r})
@@ -1226,7 +1430,8 @@
                 (let [_       (doseq [c calls]
                                 (emit! on-event {:type "tool_call" :id (:id c) :name (:name c) :args (:args c)}))
                       ;; parallel execution, results in call order …
-                      settled (execute-calls client toolkit calls turn)
+                      settled (execute-calls client toolkit calls turn
+                                             (fn [r] (swap! progress assoc-in [:done (:id r)] r)))
                       ;; … then §10 resolution, sequential and in the same order.
                       settled (reduce (fn [acc s]
                                         (if (some :halt acc)
@@ -1255,7 +1460,11 @@
                                                 :isError (boolean (:isError (:result s)))}
                                          (seq (:parts (:result s)))
                                          (assoc :parts (mapv content/describe-part
-                                                             (:parts (:result s)))))))
+                                                             (:parts (:result s))))
+                                         ;; SPEC §4A edit diffs: the event carries
+                                         ;; the result's metadata.
+                                         (some? (:metadata (:result s)))
+                                         (assoc :metadata (:metadata (:result s))))))
                       records (mapv (fn [s] {:name (:name s) :args (:args s)
                                              :output (:output (:result s))
                                              :isError (boolean (:isError (:result s)))
@@ -1267,7 +1476,17 @@
                     (let [r (run-metric! (assoc (pending-result client halted msgs (into tool-calls records) turns usage) :model turn-model))]
                       (emit! on-event {:type "done" :result r})
                       r)
-                    (recur msgs tools (inc turn) turns (into tool-calls records) usage turn-model)))))))))))
+                    (recur msgs tools (inc turn) turns (into tool-calls records) usage turn-model)))))))))
+    ;; SPEC §8 "Interrupted turns are saved": an error or a cancellation still
+    ;; saves the prompt and every complete message, unanswered tool calls
+    ;; closed with an `interrupted` result. The ORIGINAL error is rethrown; a
+    ;; store that fails here must not replace it.
+    (catch Throwable e
+      (when-let [st @progress]
+        (when (and conversation-id (:store client))
+          (try ((:save (:store client)) conversation-id (interrupted-transcript client st))
+               (catch Throwable _ nil))))
+      (throw e)))))
 
 
 (defn ask

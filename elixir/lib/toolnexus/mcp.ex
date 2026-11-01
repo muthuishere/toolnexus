@@ -60,9 +60,58 @@ defmodule Toolnexus.Mcp do
   end
 
   defp unwrap(raw) do
-    case raw["mcpServers"] || raw["servers"] || raw["mcp"] do
-      nil -> Map.drop(raw, @reserved_keys)
-      wrapped -> wrapped
+    servers =
+      case raw["mcpServers"] || raw["servers"] || raw["mcp"] do
+        nil -> Map.drop(raw, @reserved_keys)
+        wrapped -> wrapped
+      end
+
+    Map.new(servers, fn {name, cfg} -> {name, normalize_command(name, cfg)} end)
+  end
+
+  # SPEC §2 "command + args (Claude shape)": a local server's `command` is a
+  # non-empty string or non-empty list of strings; an optional `args` list of
+  # strings is appended. The result is one argv list under "command" (no
+  # shell). A remote server ignores `args`; a server without `command` is left
+  # as-is (it fails at connect, isolated, as before).
+  defp normalize_command(name, %{"command" => command} = cfg) do
+    if remote_cfg?(cfg) do
+      cfg
+    else
+      head =
+        case command do
+          c when is_binary(c) and c != "" ->
+            [c]
+
+          [first | _] = list when first != "" ->
+            if Enum.all?(list, &is_binary/1), do: list, else: nil
+
+          _ ->
+            nil
+        end
+
+      args =
+        case Map.get(cfg, "args", []) do
+          nil -> []
+          list when is_list(list) -> if Enum.all?(list, &is_binary/1), do: list, else: :invalid
+          _ -> :invalid
+        end
+
+      cond do
+        head == nil -> raise ArgumentError, ~s(mcp server "#{name}": invalid command)
+        args == :invalid -> raise ArgumentError, ~s(mcp server "#{name}": invalid args)
+        true -> cfg |> Map.delete("args") |> Map.put("command", head ++ args)
+      end
+    end
+  end
+
+  defp normalize_command(_name, cfg), do: cfg
+
+  defp remote_cfg?(cfg) do
+    case cfg["type"] do
+      "remote" -> true
+      "local" -> false
+      _ -> is_binary(cfg["url"]) and cfg["url"] != ""
     end
   end
 
@@ -357,7 +406,11 @@ defmodule Toolnexus.Mcp do
           %ToolResult{output: format_error_content(content), is_error: true, metadata: metadata}
 
         result["structuredContent"] != nil ->
-          %ToolResult{output: Jason.encode!(result["structuredContent"]), is_error: false, metadata: metadata}
+          %ToolResult{
+            output: Jason.encode!(result["structuredContent"]),
+            is_error: false,
+            metadata: metadata
+          }
 
         true ->
           %ToolResult{output: join_text_content(content), is_error: false, metadata: metadata}
@@ -387,8 +440,9 @@ defmodule Toolnexus.Mcp do
   defp content_part(%{"type" => "resource_link", "uri" => uri} = c) when is_binary(uri),
     do: [%ContentPart{type: "file", mime_type: c["mimeType"], url: uri, name: c["name"]}]
 
-  defp content_part(%{"type" => "resource", "resource" => %{"blob" => blob} = r}) when is_binary(blob),
-    do: [%ContentPart{type: "file", mime_type: r["mimeType"], data: blob, name: r["uri"]}]
+  defp content_part(%{"type" => "resource", "resource" => %{"blob" => blob} = r})
+       when is_binary(blob),
+       do: [%ContentPart{type: "file", mime_type: r["mimeType"], data: blob, name: r["uri"]}]
 
   defp content_part(_), do: []
 
@@ -412,7 +466,8 @@ defmodule Toolnexus.Mcp do
   defp text_part(%{"type" => "text", "text" => text}) when is_binary(text), do: [text]
 
   # SPEC §2: an embedded resource carrying text is appended to `output`, never a part.
-  defp text_part(%{"type" => "resource", "resource" => %{"text" => text}}) when is_binary(text), do: [text]
+  defp text_part(%{"type" => "resource", "resource" => %{"text" => text}}) when is_binary(text),
+    do: [text]
 
   defp text_part(_), do: []
 

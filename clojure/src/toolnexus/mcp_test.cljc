@@ -19,7 +19,9 @@
             [clojure.test :refer [deftest is testing use-fixtures]]
             [koine.host :as host]
             [koine.json :as json]
+            [koine.process :as proc]
             [koine.server :as server]
+            [toolnexus.shared-examples-test :as te]
             [toolnexus.test-support :as ts]
             [koine.time :as ktime]
             [toolnexus.mcp :as mcp]
@@ -711,3 +713,85 @@
     (is (= {"one" "connected"} (:statuses res)))
     (is (= {:elicitation {}} @seen-capabilities))
     (mcp/disconnect-all res)))
+
+;; ---------------------------------------------------------------------------
+;; §2  `command` + `args` (the Claude shape)
+;; ---------------------------------------------------------------------------
+
+(defn- argv-of [entry]
+  (:command (first (mcp/parse-config {:mcpServers {"s" entry}}))))
+
+(defn- config-error-message [entry]
+  (try (mcp/parse-config {:mcpServers {"bad srv" entry}}) nil
+       (catch Throwable e (ex-message e))))
+
+(deftest config-command-string-plus-args
+  (is (= ["node" "server.mjs"] (argv-of {:command "node" :args ["server.mjs"]})))
+  (is (= ["node"] (argv-of {:command "node"})) "args absent is []")
+  (is (= ["node" "a" "b"] (argv-of {:command ["node" "a"] :args ["b"]})) "array ++ args")
+  (is (= ["node" "server.mjs"] (argv-of {:command ["node" "server.mjs"]})) "argv form unchanged")
+  (is (= ["x y; rm -rf /"] (argv-of {:command "x y; rm -rf /"})) "no shell splitting")
+  (is (= "local" (:kind (first (mcp/parse-config {:mcpServers {"s" {:command "node"}}}))))))
+
+(deftest config-command-remote-ignores-args
+  (let [s (first (mcp/parse-config {:mcpServers {"r" {:url "http://127.0.0.1:1/mcp" :args 5}}}))]
+    (is (= "remote" (:kind s)))
+    (is (= [] (:command s)))))
+
+(deftest config-command-invalid-shapes-name-the-server
+  (doseq [[entry field] [[{:command ""} "invalid command"]
+                         [{:command []} "invalid command"]
+                         [{:command ["node" 1]} "invalid command"]
+                         [{:command 7} "invalid command"]
+                         [{:command "node" :args "a"} "invalid args"]
+                         [{:command "node" :args ["a" 2]} "invalid args"]]]
+    (let [m (config-error-message entry)]
+      (is (some? m) (str "must fail: " (pr-str entry)))
+      (is (str/includes? (str m) "\"bad srv\"") "names the server")
+      (is (str/includes? (str m) field) (str "names the field: " m)))))
+
+;; ---------------------------------------------------------------------------
+;; §2  idle timeout on tools/call — the shared examples/mcp-progress-server.mjs
+;; ---------------------------------------------------------------------------
+
+(defn- node-available? []
+  (try (= 0 (:exit (proc/sh ["node" "--version"] {:timeout-ms 10000})))
+       (catch Throwable _ false)))
+
+(defn- with-progress-server [f]
+  (let [dir (te/examples-dir)]
+    (if-not (and dir (node-available?))
+      (println "  skip: node or examples/ not found — idle-timeout fixture tests skipped")
+      (let [c (mcp/connect {:name "progress" :kind "local" :enabled true
+                            :command ["node" (str dir "/mcp-progress-server.mjs")]
+                            :timeout 300})]
+        (try
+          (is (= "connected" (:status c)) (str (:message c)))
+          (f (first (filter #(= "progress_slow" (:name %)) (:tools c))))
+          (finally (mcp/disconnect c)))))))
+
+(defn- call-slow [t args]
+  ((:execute t) args))
+
+(deftest idle-timeout-progress-keeps-a-long-call-alive
+  (with-progress-server
+    (fn [t]
+      (let [r (call-slow t {:totalMs 1200 :intervalMs 100})]
+        (is (not (:isError r)) (pr-str r))
+        (let [body (json/read-str (:output r))]
+          (is (true? (:progressTokenReceived body)) "every tools/call carries a progressToken")
+          (is (pos? (long (:notificationsSent body)))))))))
+
+(deftest idle-timeout-silence-times-out
+  (with-progress-server
+    (fn [t]
+      (let [r (call-slow t {:totalMs 1200 :intervalMs 0})]
+        (is (:isError r) "no progress: the 300ms budget is spent in silence")
+        (is (str/includes? (str (:output r)) "timeout") (pr-str r))))))
+
+(deftest idle-timeout-wrong-token-does-not-reset
+  (with-progress-server
+    (fn [t]
+      (let [r (call-slow t {:totalMs 1200 :intervalMs 100 :wrongToken true})]
+        (is (:isError r) "a progress notification for another token is not liveness")
+        (is (str/includes? (str (:output r)) "timeout") (pr-str r))))))

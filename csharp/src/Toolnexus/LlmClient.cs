@@ -22,17 +22,36 @@ public interface IConversationStore
 /// <summary>Default conversation provider — keeps transcripts in memory for the client's lifetime.</summary>
 public sealed class InMemoryConversationStore : IConversationStore
 {
-    private readonly ConcurrentDictionary<string, List<object?>> _map = new();
+    private readonly ConcurrentDictionary<string, (List<object?> Messages, DateTimeOffset UpdatedAt, long Seq)> _map = new();
+    private long _seq;
 
     public Task<List<object?>?> GetAsync(string id)
-        => Task.FromResult(_map.TryGetValue(id, out var m) ? new List<object?>(m) : null);
+        => Task.FromResult(_map.TryGetValue(id, out var m) ? new List<object?>(m.Messages) : null);
 
     public Task SaveAsync(string id, List<object?> messages)
     {
-        _map[id] = new List<object?>(messages);
+        _map[id] = (new List<object?>(messages), DateTimeOffset.UtcNow, Interlocked.Increment(ref _seq));
+        return Task.CompletedTask;
+    }
+
+    /// <summary>Every stored conversation, newest first (ties by id ascending).</summary>
+    public Task<List<ConversationInfo>> ListAsync()
+        => Task.FromResult(_map
+            .OrderByDescending(kv => kv.Value.Seq)
+            .ThenBy(kv => kv.Key, StringComparer.Ordinal)
+            .Select(kv => new ConversationInfo(kv.Key, kv.Value.UpdatedAt))
+            .ToList());
+
+    /// <summary>Remove a conversation; succeeds when it is absent.</summary>
+    public Task DeleteAsync(string id)
+    {
+        _map.TryRemove(id, out _);
         return Task.CompletedTask;
     }
 }
+
+/// <summary>One entry of a conversation store's <c>ListAsync</c>: the id and when it was last saved.</summary>
+public sealed record ConversationInfo(string Id, DateTimeOffset UpdatedAt);
 
 /// <summary>
 /// Unified LLM client — the host loop. Give it a base URL + a style
@@ -448,7 +467,8 @@ public sealed class LlmClient
     }
 
     private async Task<(IDictionary<string, object?> Args, ToolResult Result)> RunToolAsync(
-        Toolkit? toolkit, string name, IDictionary<string, object?> args, string? id, int turn)
+        Toolkit? toolkit, string name, IDictionary<string, object?> args, string? id, int turn,
+        CancellationToken cancellationToken = default)
     {
         var h = _opts.Hooks;
         var source = toolkit?.Get(name)?.Source ?? "custom";
@@ -468,7 +488,7 @@ public sealed class LlmClient
         }
         var result = toolkit == null
             ? ToolResult.Error($"tool \"{name}\" not found: this run declared no toolkit")
-            : await toolkit.ExecuteAsync(name, a).ConfigureAwait(false);
+            : await toolkit.ExecuteAsync(name, a, cancellationToken.CanBeCanceled ? new ToolContext(cancellationToken: cancellationToken) : null).ConfigureAwait(false);
         // A suspension (§10) is not a real result: skip afterTool's failure path on it — the resolved
         // result (post-WaitFor) still flows through afterTool in ResolvePendingAsync — and never count
         // it as a tool error.
@@ -587,15 +607,17 @@ public sealed class LlmClient
     public sealed record StreamEvent(
         StreamKind Type, string? Delta = null, string? Id = null, string? Name = null,
         IDictionary<string, object?>? Args = null, string? Output = null, bool IsError = false,
-        Usage? Usage = null, RunResult? Result = null, Request? Request = null)
+        Usage? Usage = null, RunResult? Result = null, Request? Request = null,
+        IDictionary<string, object?>? Metadata = null)
     {
         /// <summary>§10: a tool is waiting on an out-of-band resolution (emitted before <c>WaitFor</c> runs).</summary>
         internal static StreamEvent PendingEvent(Request request) => new(StreamKind.Pending, Request: request);
         internal static StreamEvent Text(string delta) => new(StreamKind.Text, Delta: delta);
         internal static StreamEvent ToolCallEvent(string? id, string name, IDictionary<string, object?> args)
             => new(StreamKind.ToolCall, Id: id, Name: name, Args: args);
-        internal static StreamEvent ToolResultEvent(string? id, string name, string output, bool isError)
-            => new(StreamKind.ToolResult, Id: id, Name: name, Output: output, IsError: isError);
+        internal static StreamEvent ToolResultEvent(string? id, string name, string output, bool isError,
+            IDictionary<string, object?>? metadata = null)
+            => new(StreamKind.ToolResult, Id: id, Name: name, Output: output, IsError: isError, Metadata: metadata);
         internal static StreamEvent UsageEvent(Usage usage) => new(StreamKind.Usage, Usage: usage);
         internal static StreamEvent DoneEvent(RunResult result) => new(StreamKind.Done, Result: result);
     }
@@ -779,7 +801,20 @@ public sealed class LlmClient
         if (id == null)
             return await RunAsync(prompt, toolkit, (List<object?>?)null, cancellationToken).ConfigureAwait(false);
         var history = await _store.GetAsync(id).ConfigureAwait(false) ?? new List<object?>();
-        var result = await RunAsync(prompt, toolkit, history, cancellationToken).ConfigureAwait(false);
+        var intr = new Interrupt();
+        RunResult result;
+        try
+        {
+            var deadline = new Deadline(_opts.TimeoutMs);
+            result = _opts.Style == "anthropic"
+                ? await RunAnthropicAsync(prompt, toolkit, history, deadline, cancellationToken, intr).ConfigureAwait(false)
+                : await RunOpenAIAsync(prompt, toolkit, history, deadline, cancellationToken, intr).ConfigureAwait(false);
+        }
+        catch
+        {
+            await SaveInterruptedAsync(id, intr, history, prompt, toolkit).ConfigureAwait(false);
+            throw;
+        }
         await _store.SaveAsync(id, result.Messages).ConfigureAwait(false);
         return result;
     }
@@ -807,11 +842,115 @@ public sealed class LlmClient
     {
         var deadline = new Deadline(_opts.TimeoutMs);
         var history = id != null ? (await _store.GetAsync(id).ConfigureAwait(false) ?? new List<object?>()) : null;
-        var result = _opts.Style == "anthropic"
-            ? await StreamAnthropicAsync(prompt, toolkit, onEvent, history, deadline, cancellationToken).ConfigureAwait(false)
-            : await StreamOpenAIAsync(prompt, toolkit, onEvent, history, deadline, cancellationToken).ConfigureAwait(false);
+        var intr = id != null ? new Interrupt() : null;
+        RunResult result;
+        try
+        {
+            result = _opts.Style == "anthropic"
+                ? await StreamAnthropicAsync(prompt, toolkit, onEvent, history, deadline, cancellationToken, intr).ConfigureAwait(false)
+                : await StreamOpenAIAsync(prompt, toolkit, onEvent, history, deadline, cancellationToken, intr).ConfigureAwait(false);
+        }
+        catch when (id != null)
+        {
+            await SaveInterruptedAsync(id, intr!, history!, prompt, toolkit).ConfigureAwait(false);
+            throw;
+        }
         if (id != null) await _store.SaveAsync(id, result.Messages).ConfigureAwait(false);
         return result;
+    }
+
+    // ---------------------------------------------------------------- interrupted turns (SPEC §7 memory)
+
+    /// <summary>Carries the transcript a failed/cancelled loop had built, out of its catch block.</summary>
+    private sealed class Interrupt { public List<object?>? Messages; }
+
+    /// <summary>
+    /// Save an interrupted stateful turn: the loop's sealed transcript, or — when it failed before
+    /// building one — the prior transcript plus the user prompt. A store failure never masks the
+    /// original error.
+    /// </summary>
+    private async Task SaveInterruptedAsync(string id, Interrupt intr, List<object?> history, object prompt, Toolkit? toolkit)
+    {
+        var messages = intr.Messages;
+        if (messages == null)
+        {
+            messages = new List<object?>(history);
+            if (history.Count == 0 && _opts.Style != "anthropic")
+            {
+                var system = System(toolkit);
+                if (system.Length > 0) messages.Add(Msg("system", system));
+            }
+            AddUser(messages, prompt);
+        }
+        try { await _store.SaveAsync(id, messages).ConfigureAwait(false); }
+        catch { /* the run's own error is the one the caller needs */ }
+    }
+
+    private const string InterruptedOutput = "interrupted: the turn ended before this tool returned. Whether its side effects happened is unknown. Do not re-run it automatically; check first.";
+
+    /// <summary>
+    /// Close every unanswered tool call of the last assistant turn so the transcript stays valid in
+    /// the active dialect: a finished (non-pending) result is used as-is, anything else gets
+    /// <c>{isError:true, output:"interrupted: the turn ended before this tool returned. ..."}</c>.
+    /// </summary>
+    private List<object?> SealInterrupted(List<object?> source, IReadOnlyDictionary<string, ToolResult> done)
+    {
+        var messages = new List<object?>(source);
+        ToolResult ResultFor(string? callId)
+            => callId != null && done.TryGetValue(callId, out var r) && ToolResult.PendingOf(r) == null
+                ? r : ToolResult.Error(InterruptedOutput);
+
+        var last = messages.FindLastIndex(m => m is IDictionary<string, object?> d && (d.Get("role") as string) == "assistant");
+        if (last < 0) return messages;
+        var assistant = (IDictionary<string, object?>)messages[last]!;
+        if (_opts.Style == "anthropic")
+        {
+            var useIds = (assistant.Get("content") as List<object?> ?? new List<object?>())
+                .OfType<IDictionary<string, object?>>()
+                .Where(b => (b.Get("type") as string) == "tool_use")
+                .Select(b => b.Get("id")?.ToString()).ToList();
+            if (useIds.Count == 0) return messages;
+            var blocks = new List<object?>();
+            if (last + 1 < messages.Count && messages[last + 1] is IDictionary<string, object?> next
+                && (next.Get("role") as string) == "user" && next.Get("content") is List<object?> existing)
+            {
+                blocks.AddRange(existing);
+                messages.RemoveAt(last + 1);
+            }
+            var answered = blocks.OfType<IDictionary<string, object?>>()
+                .Where(b => (b.Get("type") as string) == "tool_result")
+                .Select(b => b.Get("tool_use_id")?.ToString()).ToHashSet();
+            foreach (var uid in useIds)
+            {
+                if (answered.Contains(uid)) continue;
+                var r = ResultFor(uid);
+                blocks.Add(new Dictionary<string, object?>
+                {
+                    ["type"] = "tool_result",
+                    ["tool_use_id"] = uid,
+                    ["content"] = AnthropicToolResultContent(r),
+                    ["is_error"] = r.IsError,
+                });
+            }
+            messages.Insert(last + 1, new Dictionary<string, object?> { ["role"] = "user", ["content"] = blocks });
+            return messages;
+        }
+        if (assistant.Get("tool_calls") is not List<object?> { Count: > 0 } calls) return messages;
+        var have = messages.Skip(last + 1).OfType<IDictionary<string, object?>>()
+            .Where(m => (m.Get("role") as string) == "tool")
+            .Select(m => m.Get("tool_call_id")?.ToString()).ToHashSet();
+        foreach (var c in calls.OfType<IDictionary<string, object?>>())
+        {
+            var cid = c.Get("id")?.ToString();
+            if (have.Contains(cid)) continue;
+            messages.Add(new Dictionary<string, object?>
+            {
+                ["role"] = "tool",
+                ["tool_call_id"] = cid,
+                ["content"] = ToolMessageContent(ResultFor(cid)),
+            });
+        }
+        return messages;
     }
 
     // ---------------------------------------------------------------- helpers
@@ -1035,7 +1174,7 @@ public sealed class LlmClient
 
     // ---------------------------------------------------------------- OpenAI run
 
-    private async Task<RunResult> RunOpenAIAsync(object prompt, Toolkit? toolkit, List<object?>? history, Deadline deadline, CancellationToken external)
+    private async Task<RunResult> RunOpenAIAsync(object prompt, Toolkit? toolkit, List<object?>? history, Deadline deadline, CancellationToken external, Interrupt? intr = null)
     {
         var key = ResolveKey();
         var messages = new List<object?>();
@@ -1055,6 +1194,7 @@ public sealed class LlmClient
         var turns = 0;
         var runStart = NowMs();
         var lastModel = _opts.Model; // §8: the model of the last call this run made
+        var finished = new ConcurrentDictionary<string, ToolResult>(); // finished tool results, for an interrupted save
         var relocated = new Relocated(); // §8A adapter artifact — never enters `messages`
 
         try
@@ -1106,9 +1246,10 @@ public sealed class LlmClient
                     names[idx] = fn.Get("name")?.ToString() ?? "";
                     callIds[idx] = call.Get("id")?.ToString();
                     var args = Json.ParseObjectLoose(fn.Get("arguments")?.ToString() ?? "{}");
-                    tasks[idx] = Task.Run(async () => runs[idx] = await RunToolAsync(toolkit, names[idx], args, callIds[idx], turn).ConfigureAwait(false));
+                    tasks[idx] = Task.Run(async () => { runs[idx] = await RunToolAsync(toolkit, names[idx], args, callIds[idx], turn, external).ConfigureAwait(false); if (!external.IsCancellationRequested && callIds[idx] is { } k) finished[k] = runs[idx].Result; });
                 }
-                await Task.WhenAll(tasks).ConfigureAwait(false);
+                await Task.WhenAll(tasks).WaitAsync(external).ConfigureAwait(false);
+                external.ThrowIfCancellationRequested(); // a cancelled turn records no tool results; the save marks them interrupted
 
                 // §10: resolve any suspensions (serially — WaitFor is a human-in-the-loop slot). Record
                 // in tool-call order; on the FIRST durable halt, surface it and stop — deterministic, and
@@ -1146,6 +1287,7 @@ public sealed class LlmClient
         }
         catch (Exception e)
         {
+            if (intr != null) intr.Messages = SealInterrupted(messages, finished);
             EmitRunError(runStart, toolCalls, turns, usage, e, lastModel);
             throw;
         }
@@ -1153,7 +1295,7 @@ public sealed class LlmClient
 
     // ---------------------------------------------------------------- Anthropic run
 
-    private async Task<RunResult> RunAnthropicAsync(object prompt, Toolkit? toolkit, List<object?>? history, Deadline deadline, CancellationToken external)
+    private async Task<RunResult> RunAnthropicAsync(object prompt, Toolkit? toolkit, List<object?>? history, Deadline deadline, CancellationToken external, Interrupt? intr = null)
     {
         var key = ResolveKey();
         var endpoint = AnthropicEndpoint();
@@ -1167,6 +1309,7 @@ public sealed class LlmClient
         var turns = 0;
         var runStart = NowMs();
         var lastModel = _opts.Model; // §8: the model of the last call this run made
+        var finished = new ConcurrentDictionary<string, ToolResult>(); // finished tool results, for an interrupted save
 
         try
         {
@@ -1217,9 +1360,10 @@ public sealed class LlmClient
                     var input = use.Get("input") as IDictionary<string, object?> ?? new Dictionary<string, object?>();
                     names[idx] = use.Get("name")?.ToString() ?? "";
                     useIds[idx] = use.Get("id")?.ToString();
-                    tasks[idx] = Task.Run(async () => runs[idx] = await RunToolAsync(toolkit, names[idx], input, useIds[idx], turn).ConfigureAwait(false));
+                    tasks[idx] = Task.Run(async () => { runs[idx] = await RunToolAsync(toolkit, names[idx], input, useIds[idx], turn, external).ConfigureAwait(false); if (!external.IsCancellationRequested && useIds[idx] is { } k) finished[k] = runs[idx].Result; });
                 }
-                await Task.WhenAll(tasks).ConfigureAwait(false);
+                await Task.WhenAll(tasks).WaitAsync(external).ConfigureAwait(false);
+                external.ThrowIfCancellationRequested(); // a cancelled turn records no tool results; the save marks them interrupted
 
                 // §10: resolve any suspensions serially. Record in tool-call order; on the FIRST durable
                 // halt, push the results so far (incl. the halted one) and surface it — later concurrent
@@ -1259,6 +1403,7 @@ public sealed class LlmClient
         }
         catch (Exception e)
         {
+            if (intr != null) intr.Messages = SealInterrupted(messages, finished);
             EmitRunError(runStart, toolCalls, turns, usage, e, lastModel);
             throw;
         }
@@ -1283,7 +1428,7 @@ public sealed class LlmClient
 
     // ---------------------------------------------------------------- OpenAI stream
 
-    private async Task<RunResult> StreamOpenAIAsync(object prompt, Toolkit? toolkit, Action<StreamEvent> onEvent, List<object?>? history, Deadline deadline, CancellationToken external)
+    private async Task<RunResult> StreamOpenAIAsync(object prompt, Toolkit? toolkit, Action<StreamEvent> onEvent, List<object?>? history, Deadline deadline, CancellationToken external, Interrupt? intr = null)
     {
         var key = ResolveKey();
         var messages = new List<object?>();
@@ -1303,6 +1448,7 @@ public sealed class LlmClient
         var turns = 0;
         var runStart = NowMs();
         var lastModel = _opts.Model; // §8: the model of the last call this run made
+        var finished = new ConcurrentDictionary<string, ToolResult>(); // finished tool results, for an interrupted save
         var relocated = new Relocated(); // §8A adapter artifact — never enters `messages`
 
         try
@@ -1416,9 +1562,10 @@ public sealed class LlmClient
                     var idx = i;
                     var slot = acc[order[i]];
                     var args = Json.ParseObjectLoose(slot[2]);
-                    tasks[idx] = Task.Run(async () => runs[idx] = await RunToolAsync(toolkit, slot[1], args, slot[0], turn).ConfigureAwait(false));
+                    tasks[idx] = Task.Run(async () => { runs[idx] = await RunToolAsync(toolkit, slot[1], args, slot[0], turn, external).ConfigureAwait(false); if (!external.IsCancellationRequested && slot[0] is { Length: > 0 } k) finished[k] = runs[idx].Result; });
                 }
-                await Task.WhenAll(tasks).ConfigureAwait(false);
+                await Task.WhenAll(tasks).WaitAsync(external).ConfigureAwait(false);
+                external.ThrowIfCancellationRequested(); // a cancelled turn records no tool results; the save marks them interrupted
                 // §10: resolve any suspensions in tool-call order; on the FIRST durable halt, record that
                 // one tool result, surface the pending run and stop — later concurrent suspensions'
                 // placeholder results never enter the transcript (they re-suspend on resume). Mirrors JS.
@@ -1446,7 +1593,7 @@ public sealed class LlmClient
                         onEvent(StreamEvent.DoneEvent(p));
                         return p;
                     }
-                    onEvent(StreamEvent.ToolResultEvent(slot[0], slot[1], rr.Result.Output, rr.Result.IsError));
+                    onEvent(StreamEvent.ToolResultEvent(slot[0], slot[1], rr.Result.Output, rr.Result.IsError, rr.Result.Metadata));
                 }
                 RecordRelocation(relocated, relocations, messages.Count);
             }
@@ -1457,6 +1604,7 @@ public sealed class LlmClient
         }
         catch (Exception e)
         {
+            if (intr != null) intr.Messages = SealInterrupted(messages, finished);
             EmitRunError(runStart, toolCalls, turns, usage, e, lastModel);
             throw;
         }
@@ -1464,7 +1612,7 @@ public sealed class LlmClient
 
     // ---------------------------------------------------------------- Anthropic stream
 
-    private async Task<RunResult> StreamAnthropicAsync(object prompt, Toolkit? toolkit, Action<StreamEvent> onEvent, List<object?>? history, Deadline deadline, CancellationToken external)
+    private async Task<RunResult> StreamAnthropicAsync(object prompt, Toolkit? toolkit, Action<StreamEvent> onEvent, List<object?>? history, Deadline deadline, CancellationToken external, Interrupt? intr = null)
     {
         var key = ResolveKey();
         var endpoint = AnthropicEndpoint();
@@ -1478,6 +1626,7 @@ public sealed class LlmClient
         var turns = 0;
         var runStart = NowMs();
         var lastModel = _opts.Model; // §8: the model of the last call this run made
+        var finished = new ConcurrentDictionary<string, ToolResult>(); // finished tool results, for an interrupted save
 
         try
         {
@@ -1613,9 +1762,10 @@ public sealed class LlmClient
                     var input = u.Get("input") as IDictionary<string, object?> ?? new Dictionary<string, object?>();
                     var name = u.Get("name")?.ToString() ?? "";
                     var id = u.Get("id")?.ToString();
-                    tasks[idx] = Task.Run(async () => runs[idx] = await RunToolAsync(toolkit, name, input, id, turn).ConfigureAwait(false));
+                    tasks[idx] = Task.Run(async () => { runs[idx] = await RunToolAsync(toolkit, name, input, id, turn, external).ConfigureAwait(false); if (!external.IsCancellationRequested && id is { } k) finished[k] = runs[idx].Result; });
                 }
-                await Task.WhenAll(tasks).ConfigureAwait(false);
+                await Task.WhenAll(tasks).WaitAsync(external).ConfigureAwait(false);
+                external.ThrowIfCancellationRequested(); // a cancelled turn records no tool results; the save marks them interrupted
                 // §10: resolve any suspensions in tool-call order; on the FIRST durable halt, push the
                 // results so far (incl. the halted one), surface the pending run and stop — later
                 // concurrent suspensions' placeholders never enter the transcript. Mirrors JS.
@@ -1650,7 +1800,7 @@ public sealed class LlmClient
                         onEvent(StreamEvent.DoneEvent(p));
                         return p;
                     }
-                    onEvent(StreamEvent.ToolResultEvent(id, name, r.Result.Output, r.Result.IsError));
+                    onEvent(StreamEvent.ToolResultEvent(id, name, r.Result.Output, r.Result.IsError, r.Result.Metadata));
                 }
                 messages.Add(new Dictionary<string, object?> { ["role"] = "user", ["content"] = results });
             }
@@ -1661,6 +1811,7 @@ public sealed class LlmClient
         }
         catch (Exception e)
         {
+            if (intr != null) intr.Messages = SealInterrupted(messages, finished);
             EmitRunError(runStart, toolCalls, turns, usage, e, lastModel);
             throw;
         }

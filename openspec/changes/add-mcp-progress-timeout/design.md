@@ -134,3 +134,11 @@ optional `_meta.progressToken` that spec-compliant servers already ignore when u
 3. **Should `timeout` be renamed** in docs to `idleTimeout` to match its new meaning? It would be
    clearer but is a config-surface change across seven ports and every example; the recommendation is
    to keep the key and document the semantics.
+
+## Resolutions (2026-10-25, at apply)
+
+1. Absolute cap: **deferred**. No `maxTotalMs` in v1; caller cancellation and run `timeoutMs` bound it.
+2. Java/C#: **resolved**. C#'s SDK scopes progress per call. Java's official SDK only has a
+   client-wide progress consumer, so Java correlates its own per-call token (`ProgressRegistry`)
+   and replaces the SDK's fixed `requestTimeout` with its own idle budget. Neither stays on a hard deadline.
+3. Rename `timeout`: **no**. The key is kept, and its idle meaning is documented in SPEC.md §2.

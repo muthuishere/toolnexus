@@ -104,17 +104,70 @@ public sealed partial class McpSource : IAsyncDisposable
         var servers = raw.Get("mcpServers")
                       ?? raw.Get("servers")
                       ?? raw.Get("mcp");
+        Dictionary<string, object?> result;
         if (servers is IDictionary<string, object?> sd)
-            return new Dictionary<string, object?>(sd);
-        // Bare map of servers — but strip sibling top-level config keys (builtins/agents/a2a/
-        // mcpServer) so they are not mistaken for MCP servers when no wrapper key is present (SPEC §2).
-        var stripped = new Dictionary<string, object?>(raw);
-        stripped.Remove("builtins");
-        stripped.Remove("agents");
-        stripped.Remove("a2a");
-        stripped.Remove("mcpServer");
-        return stripped;
+        {
+            result = new Dictionary<string, object?>(sd);
+        }
+        else
+        {
+            // Bare map of servers — but strip sibling top-level config keys (builtins/agents/a2a/
+            // mcpServer) so they are not mistaken for MCP servers when no wrapper key is present (SPEC §2).
+            result = new Dictionary<string, object?>(raw);
+            result.Remove("builtins");
+            result.Remove("agents");
+            result.Remove("a2a");
+            result.Remove("mcpServer");
+        }
+        // SPEC §2 `command` + `args`: a malformed local command fails the parse, naming the server.
+        foreach (var (name, value) in result)
+        {
+            if (value is IDictionary<string, object?> cfg && !IsRemote(cfg) && cfg.ContainsKey("command"))
+                ResolveCommand(name, cfg);
+        }
+        return result;
     }
+
+    /// <summary>
+    /// SPEC §2 <c>command</c> + <c>args</c>: <c>command</c> is a non-empty string or a non-empty
+    /// array of strings; an optional <c>args</c> array of strings is appended. Returns the argv
+    /// (spawned with no shell). Throws <see cref="ArgumentException"/> naming the server otherwise.
+    /// </summary>
+    public static List<string> ResolveCommand(string name, IDictionary<string, object?> cfg)
+    {
+        var argv = new List<string>();
+        switch (cfg.Get("command"))
+        {
+            case string s when s.Length > 0:
+                argv.Add(s);
+                break;
+            case IEnumerable<object?> list:
+                foreach (var o in list)
+                {
+                    if (o is not string part)
+                        throw new ArgumentException($"mcp server \"{name}\": invalid command (non-string element)");
+                    argv.Add(part);
+                }
+                if (argv.Count == 0)
+                    throw new ArgumentException($"mcp server \"{name}\": invalid command (empty)");
+                break;
+            default:
+                throw new ArgumentException($"mcp server \"{name}\": invalid command");
+        }
+        if (cfg.TryGetValue("args", out var args) && args != null)
+        {
+            if (args is string || args is not IEnumerable<object?> argList)
+                throw new ArgumentException($"mcp server \"{name}\": invalid args (must be an array of strings)");
+            foreach (var o in argList)
+            {
+                if (o is not string a)
+                    throw new ArgumentException($"mcp server \"{name}\": invalid args (non-string element)");
+                argv.Add(a);
+            }
+        }
+        return argv;
+    }
+
 
     /// <summary>
     /// Expand <c>${ENV_VAR}</c> in each header VALUE from the environment so tokens
@@ -209,7 +262,7 @@ public sealed partial class McpSource : IAsyncDisposable
                     // token so a parent cancel/deadline propagates through (§2 Gap 3).
                     using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
                     cts.CancelAfter(TimeSpan.FromMilliseconds(timeout));
-                    IClientTransport transport = IsRemote(cfg) ? BuildRemoteTransport(cfg) : BuildLocalTransport(cfg);
+                    IClientTransport transport = IsRemote(cfg) ? BuildRemoteTransport(cfg) : BuildLocalTransport(name, cfg);
                     client = await McpClient.CreateAsync(transport, BuildClientOptions(waitFor), cancellationToken: cts.Token).ConfigureAwait(false);
                     var defs = await client.ListToolsAsync(cancellationToken: cts.Token).ConfigureAwait(false);
 
@@ -217,7 +270,7 @@ public sealed partial class McpSource : IAsyncDisposable
                     var kept = ApplyToolsFilter(name, defs, d => d.ProtocolTool.Name, ToolsFilterOf(cfg));
                     var converted = new List<ITool>();
                     foreach (var def in kept)
-                        converted.Add(new McpTool(name, def));
+                        converted.Add(new McpTool(name, def, timeout));
 
                     lock (gate)
                     {
@@ -356,7 +409,7 @@ public sealed partial class McpSource : IAsyncDisposable
                 {
                     using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
                     cts.CancelAfter(TimeSpan.FromMilliseconds(timeout));
-                    IClientTransport transport = IsRemote(cfg) ? BuildRemoteTransport(cfg) : BuildLocalTransport(cfg);
+                    IClientTransport transport = IsRemote(cfg) ? BuildRemoteTransport(cfg) : BuildLocalTransport(name, cfg);
                     client = await McpClient.CreateAsync(transport, null, cancellationToken: cts.Token).ConfigureAwait(false);
                     var defs = await client.ListToolsAsync(cancellationToken: cts.Token).ConfigureAwait(false);
                     var infos = defs
@@ -412,12 +465,11 @@ public sealed partial class McpSource : IAsyncDisposable
         };
     }
 
-    private static IClientTransport BuildLocalTransport(IDictionary<string, object?> cfg)
+    private static IClientTransport BuildLocalTransport(string name, IDictionary<string, object?> cfg)
     {
-        if (cfg.Get("command") is not IEnumerable<object?> commandList)
+        if (!cfg.ContainsKey("command"))
             throw new ArgumentException("local server has no command");
-        var command = commandList.Select(o => o?.ToString() ?? "").ToList();
-        if (command.Count == 0) throw new ArgumentException("local server has no command");
+        var command = ResolveCommand(name, cfg);
 
         var opts = new StdioClientTransportOptions
         {
@@ -537,9 +589,12 @@ public sealed partial class McpSource : IAsyncDisposable
         public IDictionary<string, object?> InputSchema { get; }
         public string Source => "mcp";
 
-        public McpTool(string server, McpClientTool def)
+        private readonly long _timeoutMs;
+
+        public McpTool(string server, McpClientTool def, long timeoutMs)
         {
             _server = server;
+            _timeoutMs = timeoutMs;
             _def = def;
             _mcpName = def.ProtocolTool.Name;
             Name = global::Toolnexus.Tools.Sanitize(server) + "_" + global::Toolnexus.Tools.Sanitize(_mcpName);
@@ -554,8 +609,27 @@ public sealed partial class McpSource : IAsyncDisposable
             try
             {
                 var argMap = (IReadOnlyDictionary<string, object?>)(args ?? new Dictionary<string, object?>());
-                var result = await _def.CallAsync(argMap, cancellationToken: ctx?.CancellationToken ?? default)
-                    .ConfigureAwait(false);
+                // SPEC §2 idle timeout: the server `timeout` bounds SILENCE, not total duration.
+                // Passing an IProgress makes the SDK attach a fresh per-call progressToken and route
+                // only notifications matching THAT token to it; each one re-arms the budget.
+                var caller = ctx?.CancellationToken ?? default;
+                using var idle = CancellationTokenSource.CreateLinkedTokenSource(caller);
+                var budget = TimeSpan.FromMilliseconds(_timeoutMs);
+                idle.CancelAfter(budget);
+                var progress = new IdleReset(idle, budget);
+                CallToolResult result;
+                try
+                {
+                    result = await _def.CallAsync(argMap, progress, cancellationToken: idle.Token)
+                        .ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (!caller.IsCancellationRequested && idle.IsCancellationRequested)
+                {
+                    // Caller cancellation wins: only an idle expiry with a live caller token is a timeout.
+                    return new ToolResult(
+                        $"MCP tool \"{_mcpName}\" on server \"{_server}\" timed out after {_timeoutMs}ms without progress",
+                        true, meta);
+                }
 
                 // §0.4 / D5: collect the non-text content parts BEFORE any branch returns —
                 // the structuredContent short-circuit and the error path would otherwise each
@@ -579,6 +653,15 @@ public sealed partial class McpSource : IAsyncDisposable
             catch (Exception e)
             {
                 return new ToolResult(e.Message ?? e.ToString(), true, meta);
+            }
+        }
+
+        /// <summary>Synchronous progress sink: re-arms the idle budget on each matching notification.</summary>
+        private sealed class IdleReset(CancellationTokenSource cts, TimeSpan budget) : IProgress<ModelContextProtocol.ProgressNotificationValue>
+        {
+            public void Report(ModelContextProtocol.ProgressNotificationValue value)
+            {
+                try { cts.CancelAfter(budget); } catch (ObjectDisposedException) { }
             }
         }
 

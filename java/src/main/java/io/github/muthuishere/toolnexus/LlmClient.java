@@ -255,6 +255,7 @@ public final class LlmClient {
     /** Default conversation provider — keeps transcripts in memory for the client's lifetime. */
     public static final class InMemoryConversationStore implements ConversationStore {
         private final Map<String, List<Object>> map = new ConcurrentHashMap<>();
+        private final Map<String, java.time.Instant> updated = new ConcurrentHashMap<>();
 
         @Override
         public List<Object> get(String id) {
@@ -263,8 +264,243 @@ public final class LlmClient {
         }
 
         @Override
-        public void save(String id, List<Object> messages) {
+        public synchronized void save(String id, List<Object> messages) {
             map.put(id, new ArrayList<>(messages));
+            updated.put(id, java.time.Instant.now());
+        }
+
+        /** Every stored conversation, newest first (ties by id ascending). */
+        public synchronized List<ConversationInfo> list() {
+            List<ConversationInfo> out = new ArrayList<>();
+            for (Map.Entry<String, java.time.Instant> e : updated.entrySet()) {
+                out.add(new ConversationInfo(e.getKey(), e.getValue()));
+            }
+            out.sort(ConversationInfo.NEWEST_FIRST);
+            return out;
+        }
+
+        /** Remove {@code id}; succeeds when it is absent. */
+        public synchronized void delete(String id) {
+            map.remove(id);
+            updated.remove(id);
+        }
+    }
+
+    /** One entry of a store's {@code list()}: the conversation id and when it was last saved. */
+    public record ConversationInfo(String id, java.time.Instant updatedAt) {
+        /** Newest first, ties by id ascending (§8 Conversation memory). */
+        public static final java.util.Comparator<ConversationInfo> NEWEST_FIRST =
+                java.util.Comparator.comparing(ConversationInfo::updatedAt).reversed()
+                        .thenComparing(ConversationInfo::id);
+    }
+
+    /**
+     * Durable {@link ConversationStore}: one file {@code <root>/<id>.json} per conversation holding
+     * {@code {"version":1,"messages":[...]}}. Saves go through a temp file in {@code root} (0600 where
+     * POSIX), fsync, then an atomic rename, so a reader sees the old or the new transcript, never a
+     * torn one (power-loss durability of the rename is best-effort: the parent dir is fsynced where the
+     * OS allows). Same-id saves are serialized in-process; across processes the last rename wins.
+     * Ids must match {@code ^[A-Za-z0-9._-]{1,128}$} and not be {@code .}/{@code ..}.
+     */
+    public static final class FileConversationStore implements ConversationStore {
+        private static final java.util.regex.Pattern ID = java.util.regex.Pattern.compile("^[A-Za-z0-9._-]{1,128}$");
+        private final java.nio.file.Path root;
+        private final Sync sync;
+        private final ConcurrentHashMap<String, Object> locks = new ConcurrentHashMap<>();
+
+        /**
+         * Durability mode (SPEC §8). Every mode keeps temp-then-rename; they differ only in what
+         * survives power loss. {@code FULL} (default): {@code FileChannel.force} (on macOS the JDK
+         * issues {@code F_FULLFSYNC}) then a best-effort directory fsync. {@code FSYNC}: the same
+         * file flush, no directory fsync (the JDK exposes no plainer flush). {@code NONE}: no flush.
+         */
+        public enum Sync {
+            FULL, FSYNC, NONE;
+
+            /** Parses {@code full|fsync|none}; anything else is an {@link IllegalArgumentException}. */
+            public static Sync of(String mode) {
+                if (mode != null) {
+                    switch (mode) {
+                        case "full": return FULL;
+                        case "fsync": return FSYNC;
+                        case "none": return NONE;
+                        default: break;
+                    }
+                }
+                throw new IllegalArgumentException("FileConversationStore: unknown sync mode " + mode);
+            }
+        }
+
+        /** @param root required, non-empty; created (0700 where POSIX) on first save. */
+        public FileConversationStore(java.nio.file.Path root) {
+            this(root, Sync.FULL);
+        }
+
+        /** @param sync durability mode; null means {@link Sync#FULL}. */
+        public FileConversationStore(java.nio.file.Path root, Sync sync) {
+            if (root == null || root.toString().isEmpty()) {
+                throw new IllegalArgumentException("FileConversationStore: root is required");
+            }
+            this.root = root;
+            this.sync = sync == null ? Sync.FULL : sync;
+        }
+
+        /** @param sync {@code "full"|"fsync"|"none"}; anything else throws. */
+        public FileConversationStore(java.nio.file.Path root, String sync) {
+            this(root, Sync.of(sync));
+        }
+
+        /** @param root required, non-empty directory path. */
+        public FileConversationStore(String root) {
+            this(root == null || root.isEmpty() ? null : java.nio.file.Path.of(root));
+        }
+
+        public java.nio.file.Path root() {
+            return root;
+        }
+
+        private static String checkId(String id) {
+            if (id == null || !ID.matcher(id).matches() || id.equals(".") || id.equals("..")) {
+                throw new IllegalArgumentException("FileConversationStore: invalid conversation id: " + id);
+            }
+            return id;
+        }
+
+        private java.nio.file.Path fileOf(String id) {
+            return root.resolve(checkId(id) + ".json");
+        }
+
+        @Override
+        @SuppressWarnings("unchecked")
+        public List<Object> get(String id) {
+            java.nio.file.Path f = fileOf(id);
+            String text;
+            try {
+                text = java.nio.file.Files.readString(f, StandardCharsets.UTF_8);
+            } catch (java.nio.file.NoSuchFileException e) {
+                return null;
+            } catch (IOException e) {
+                throw new RuntimeException("FileConversationStore: cannot read " + f + ": " + e.getMessage(), e);
+            }
+            Object parsed;
+            try {
+                parsed = Json.MAPPER.readValue(text, Object.class);
+            } catch (Exception e) {
+                throw new RuntimeException("FileConversationStore: corrupt conversation file " + f, e);
+            }
+            if (!(parsed instanceof Map<?, ?> body)) {
+                throw new RuntimeException("FileConversationStore: corrupt conversation file " + f);
+            }
+            Object version = body.get("version");
+            if (!(version instanceof Number n) || n.doubleValue() != 1.0) {
+                throw new RuntimeException("FileConversationStore: unsupported version " + version + " in " + f);
+            }
+            if (!(body.get("messages") instanceof List<?> messages)) {
+                throw new RuntimeException("FileConversationStore: corrupt conversation file " + f);
+            }
+            return new ArrayList<>((List<Object>) messages);
+        }
+
+        @Override
+        public void save(String id, List<Object> messages) {
+            java.nio.file.Path target = fileOf(id);
+            Object lock = locks.computeIfAbsent(id, k -> new Object());
+            synchronized (lock) {
+                java.nio.file.Path tmp = null;
+                try {
+                    createRoot();
+                    Map<String, Object> body = new LinkedHashMap<>();
+                    body.put("version", 1);
+                    body.put("messages", messages == null ? List.of() : messages);
+                    byte[] bytes = Json.stringify(body).getBytes(StandardCharsets.UTF_8);
+                    String rnd = Long.toHexString(java.util.concurrent.ThreadLocalRandom.current().nextLong());
+                    tmp = root.resolve("." + id + "." + rnd + ".tmp");
+                    if (posix()) {
+                        java.nio.file.Files.createFile(tmp, java.nio.file.attribute.PosixFilePermissions.asFileAttribute(
+                                java.nio.file.attribute.PosixFilePermissions.fromString("rw-------")));
+                    } else {
+                        java.nio.file.Files.createFile(tmp);
+                    }
+                    try (java.nio.channels.FileChannel ch = java.nio.channels.FileChannel.open(tmp,
+                            java.nio.file.StandardOpenOption.WRITE)) {
+                        java.nio.ByteBuffer buf = java.nio.ByteBuffer.wrap(bytes);
+                        while (buf.hasRemaining()) ch.write(buf);
+                        if (sync != Sync.NONE) ch.force(true);
+                    }
+                    java.nio.file.Files.move(tmp, target, java.nio.file.StandardCopyOption.ATOMIC_MOVE,
+                            java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                    tmp = null;
+                    if (sync == Sync.FULL) fsyncDir();
+                } catch (IOException e) {
+                    throw new RuntimeException("FileConversationStore: cannot save " + target + ": " + e.getMessage(), e);
+                } finally {
+                    if (tmp != null) {
+                        try {
+                            java.nio.file.Files.deleteIfExists(tmp);
+                        } catch (IOException ignored) {
+                        }
+                    }
+                }
+            }
+        }
+
+        /** Every {@code <id>.json} with a valid id, newest mtime first (ties by id). Bodies are not parsed. */
+        public List<ConversationInfo> list() {
+            List<ConversationInfo> out = new ArrayList<>();
+            if (!java.nio.file.Files.isDirectory(root)) return out;
+            try (java.nio.file.DirectoryStream<java.nio.file.Path> ds = java.nio.file.Files.newDirectoryStream(root, "*.json")) {
+                for (java.nio.file.Path f : ds) {
+                    String name = f.getFileName().toString();
+                    String id = name.substring(0, name.length() - ".json".length());
+                    if (!ID.matcher(id).matches() || id.equals(".") || id.equals("..")) continue;
+                    if (!java.nio.file.Files.isRegularFile(f)) continue;
+                    try {
+                        out.add(new ConversationInfo(id, java.nio.file.Files.getLastModifiedTime(f).toInstant()));
+                    } catch (java.nio.file.NoSuchFileException gone) {
+                        // deleted while listing
+                    }
+                }
+            } catch (IOException e) {
+                throw new RuntimeException("FileConversationStore: cannot list " + root + ": " + e.getMessage(), e);
+            }
+            out.sort(ConversationInfo.NEWEST_FIRST);
+            return out;
+        }
+
+        /** Remove {@code id}'s file; succeeds when it is absent. */
+        public void delete(String id) {
+            java.nio.file.Path f = fileOf(id);
+            Object lock = locks.computeIfAbsent(id, k -> new Object());
+            synchronized (lock) {
+                try {
+                    java.nio.file.Files.deleteIfExists(f);
+                } catch (IOException e) {
+                    throw new RuntimeException("FileConversationStore: cannot delete " + f + ": " + e.getMessage(), e);
+                }
+            }
+        }
+
+        private boolean posix() {
+            return java.nio.file.FileSystems.getDefault().supportedFileAttributeViews().contains("posix");
+        }
+
+        private void createRoot() throws IOException {
+            if (java.nio.file.Files.isDirectory(root)) return;
+            if (posix()) {
+                java.nio.file.Files.createDirectories(root, java.nio.file.attribute.PosixFilePermissions.asFileAttribute(
+                        java.nio.file.attribute.PosixFilePermissions.fromString("rwx------")));
+            } else {
+                java.nio.file.Files.createDirectories(root);
+            }
+        }
+
+        private void fsyncDir() {
+            try (java.nio.channels.FileChannel ch = java.nio.channels.FileChannel.open(root,
+                    java.nio.file.StandardOpenOption.READ)) {
+                ch.force(true);
+            } catch (Exception ignored) {
+                // best-effort: not every OS lets a directory be opened/fsynced
+            }
         }
     }
 
@@ -659,7 +895,7 @@ public final class LlmClient {
      *   <li>{@code TEXT} — an assistant text token delta ({@code delta} set).</li>
      *   <li>{@code TOOL_CALL} — a tool about to run ({@code id}, {@code name}, {@code args} set).</li>
      *   <li>{@code TOOL_RESULT} — after it ran ({@code id}, {@code name}, {@code output},
-     *       {@code isError} set).</li>
+     *       {@code isError}, {@code metadata} set).</li>
      *   <li>{@code USAGE} — token usage so far ({@code usage} set).</li>
      *   <li>{@code DONE} — terminal event carrying the final {@link RunResult} ({@code result} set).</li>
      * </ul>
@@ -667,14 +903,14 @@ public final class LlmClient {
     public record StreamEvent(Kind type, String delta, String id, String name,
                               Map<String, Object> args, String output, boolean isError,
                               Usage usage, RunResult result, Request request,
-                              List<Map<String, Object>> parts) {
+                              List<Map<String, Object>> parts, Map<String, Object> metadata) {
         public enum Kind { TEXT, TOOL_CALL, TOOL_RESULT, USAGE, PENDING, DONE }
 
         static StreamEvent text(String delta) {
-            return new StreamEvent(Kind.TEXT, delta, null, null, null, null, false, null, null, null, null);
+            return new StreamEvent(Kind.TEXT, delta, null, null, null, null, false, null, null, null, null, null);
         }
         static StreamEvent toolCall(String id, String name, Map<String, Object> args) {
-            return new StreamEvent(Kind.TOOL_CALL, null, id, name, args, null, false, null, null, null, null);
+            return new StreamEvent(Kind.TOOL_CALL, null, id, name, args, null, false, null, null, null, null, null);
         }
         static StreamEvent toolResult(String id, String name, String output, boolean isError) {
             return toolResult(id, name, output, isError, null);
@@ -683,19 +919,24 @@ public final class LlmClient {
          * never appears in an event payload. */
         static StreamEvent toolResult(String id, String name, String output, boolean isError,
                                       List<ContentPart> parts) {
+            return toolResult(id, name, output, isError, parts, null);
+        }
+        /** The result's {@code metadata} rides on the event (e.g. edit diffs, SPEC §5). */
+        static StreamEvent toolResult(String id, String name, String output, boolean isError,
+                                      List<ContentPart> parts, Map<String, Object> metadata) {
             return new StreamEvent(Kind.TOOL_RESULT, null, id, name, null, output, isError, null, null,
-                    null, ContentPart.describeAll(parts));
+                    null, ContentPart.describeAll(parts), metadata);
         }
         static StreamEvent usage(Usage usage) {
-            return new StreamEvent(Kind.USAGE, null, null, null, null, null, false, usage, null, null, null);
+            return new StreamEvent(Kind.USAGE, null, null, null, null, null, false, usage, null, null, null, null);
         }
         /** §10: a tool is waiting on an out-of-band resolution — emitted BEFORE {@code waitFor}
          * runs so a channel handler can push the link in real time. */
         static StreamEvent pending(Request request) {
-            return new StreamEvent(Kind.PENDING, null, null, null, null, null, false, null, null, request, null);
+            return new StreamEvent(Kind.PENDING, null, null, null, null, null, false, null, null, request, null, null);
         }
         static StreamEvent done(RunResult result) {
-            return new StreamEvent(Kind.DONE, null, null, null, null, null, false, null, result, null, null);
+            return new StreamEvent(Kind.DONE, null, null, null, null, null, false, null, result, null, null, null);
         }
     }
 
@@ -1049,11 +1290,7 @@ public final class LlmClient {
     /** §1B multimodal {@link #ask(String, Toolkit, String)}. */
     public RunResult ask(List<ContentPart> prompt, Toolkit toolkit, String id) {
         if (id == null || id.isEmpty()) return run(prompt, toolkit);
-        List<Object> history = store.get(id);
-        if (history == null) history = new ArrayList<>();
-        RunResult result = run(prompt, toolkit, history);
-        store.save(id, result.messages);
-        return result;
+        return statefulRun(prompt, toolkit, id, null);
     }
 
     /**
@@ -1262,11 +1499,7 @@ public final class LlmClient {
             }, id);
         }
         if (id == null || id.isEmpty()) return run(prompt, toolkit);
-        List<Object> history = store.get(id);
-        if (history == null) history = new ArrayList<>();
-        RunResult result = run(prompt, toolkit, history);
-        store.save(id, result.messages);
-        return result;
+        return statefulRun(prompt, toolkit, id, null);
     }
 
     /**
@@ -1281,22 +1514,181 @@ public final class LlmClient {
 
     /** The one run seam both prompt shapes go through ({@code prompt} = String | List&lt;ContentPart&gt;). */
     private RunResult runAny(Object prompt, Toolkit toolkit, List<Object> history, CancelToken cancel) {
+        return runAny(prompt, toolkit, history, cancel, null);
+    }
+
+    private RunResult runAny(Object prompt, Toolkit toolkit, List<Object> history, CancelToken cancel,
+                             Consumer<List<Object>> onAbort) {
         if (cancel == null) {
             Deadline deadline = newDeadline();
             return "anthropic".equals(opts.style)
-                    ? runAnthropic(prompt, toolkit, history, deadline)
-                    : runOpenAI(prompt, toolkit, history, deadline);
+                    ? runAnthropic(prompt, toolkit, history, deadline, onAbort)
+                    : runOpenAI(prompt, toolkit, history, deadline, onAbort);
         }
         cancel.register(Thread.currentThread());
         try {
             Deadline deadline = newDeadline(cancel);
             return "anthropic".equals(opts.style)
-                    ? runAnthropic(prompt, toolkit, history, deadline)
-                    : runOpenAI(prompt, toolkit, history, deadline);
+                    ? runAnthropic(prompt, toolkit, history, deadline, onAbort)
+                    : runOpenAI(prompt, toolkit, history, deadline, onAbort);
         } finally {
             cancel.unregister();
             // A cancel that landed after the run finished must not leak the interrupt flag.
             if (cancel.isCancelled()) Thread.interrupted();
+        }
+    }
+
+    /**
+     * Stateful run: load {@code id}'s transcript, run, save. A run that ends in an error or a
+     * cancellation STILL saves (SPEC §8 "Interrupted turns are saved"): the prior transcript, the
+     * user prompt and every complete message, each unanswered tool call closed with a synthetic
+     * {@code interrupted} error result. The original exception is rethrown unchanged.
+     */
+    private RunResult statefulRun(Object prompt, Toolkit toolkit, String id, CancelToken cancel) {
+        List<Object> history = store.get(id);
+        if (history == null) history = new ArrayList<>();
+        List<Object>[] partial = new List[1];
+        RunResult result;
+        try {
+            result = runAny(prompt, toolkit, history, cancel, m -> partial[0] = m);
+        } catch (RuntimeException e) {
+            saveInterrupted(id, prompt, toolkit, history, partial[0]);
+            throw e;
+        }
+        store.save(id, result.messages);
+        return result;
+    }
+
+    /** Persist an interrupted turn; a failure to save never masks the run's own error. */
+    private void saveInterrupted(String id, Object prompt, Toolkit toolkit, List<Object> history,
+                                 List<Object> partial) {
+        try {
+            List<Object> transcript = partial;
+            if (transcript == null) {
+                // Failed before the loop built its transcript: prior + (system) + user prompt.
+                transcript = new ArrayList<>();
+                if (history != null && !history.isEmpty()) {
+                    transcript.addAll(history);
+                } else if (!"anthropic".equals(opts.style)) {
+                    String system = system(toolkit);
+                    if (!system.isEmpty()) transcript.add(msg("system", system));
+                }
+                transcript.add(msg("user", seed(prompt)));
+            }
+            store.save(id, transcript);
+        } catch (RuntimeException ignored) {
+            // the original error is what the caller must see
+        }
+    }
+
+    /** Hand the loop's transcript, repaired for interruption, to a stateful caller. */
+    private void reportAbort(Consumer<List<Object>> onAbort, List<Object> messages,
+                             Map<String, ToolResult> inflight) {
+        if (onAbort == null) return;
+        try {
+            onAbort.accept(interruptedTranscript(messages, inflight));
+        } catch (RuntimeException ignored) {
+            // never mask the run's own error
+        }
+    }
+
+    /**
+     * The transcript as it stood, with every tool call of the last assistant message that has no
+     * result closed — by its finished result when it completed, else a synthetic
+     * {@code {isError:true, output:"interrupted: the turn ended before this tool returned. ..."}} — in the active dialect's shape.
+     */
+    @SuppressWarnings("unchecked")
+    private List<Object> interruptedTranscript(List<Object> messages, Map<String, ToolResult> inflight) {
+        List<Object> out = new ArrayList<>(messages);
+        if (out.isEmpty() || !(out.get(out.size() - 1) instanceof Map<?, ?> last)) return out;
+        if (!"assistant".equals(last.get("role"))) {
+            // openai: trailing tool messages may already answer part of the last assistant turn.
+            if (!"anthropic".equals(opts.style) && "tool".equals(last.get("role"))) {
+                return closeOpenAI(out, inflight);
+            }
+            return out;
+        }
+        if ("anthropic".equals(opts.style)) {
+            if (!(last.get("content") instanceof List<?> blocks)) return out;
+            List<Object> results = new ArrayList<>();
+            for (Object b : blocks) {
+                if (b instanceof Map<?, ?> blk && "tool_use".equals(blk.get("type"))) {
+                    String useId = String.valueOf(blk.get("id"));
+                    ToolResult r = finishedOrInterrupted(inflight, useId);
+                    Map<String, Object> tr = new LinkedHashMap<>();
+                    tr.put("type", "tool_result");
+                    tr.put("tool_use_id", useId);
+                    Object content;
+                    try { content = anthropicToolContent(r); } catch (RuntimeException e) { content = r.output(); }
+                    tr.put("content", content);
+                    tr.put("is_error", r.isError());
+                    results.add(tr);
+                }
+            }
+            if (!results.isEmpty()) {
+                Map<String, Object> userMsg = new LinkedHashMap<>();
+                userMsg.put("role", "user");
+                userMsg.put("content", results);
+                out.add(userMsg);
+            }
+            return out;
+        }
+        return closeOpenAI(out, inflight);
+    }
+
+    @SuppressWarnings("unchecked")
+    private List<Object> closeOpenAI(List<Object> out, Map<String, ToolResult> inflight) {
+        Set<String> answered = new java.util.HashSet<>();
+        Map<?, ?> assistant = null;
+        for (int i = out.size() - 1; i >= 0; i--) {
+            if (!(out.get(i) instanceof Map<?, ?> m)) break;
+            if ("tool".equals(m.get("role"))) { answered.add(String.valueOf(m.get("tool_call_id"))); continue; }
+            if ("assistant".equals(m.get("role"))) assistant = m;
+            break;
+        }
+        if (assistant == null || !(assistant.get("tool_calls") instanceof List<?> calls)) return out;
+        for (Object c : calls) {
+            if (!(c instanceof Map<?, ?> call)) continue;
+            String callId = String.valueOf(call.get("id"));
+            if (answered.contains(callId)) continue;
+            ToolResult r = finishedOrInterrupted(inflight, callId);
+            Map<String, Object> toolMsg = new LinkedHashMap<>();
+            toolMsg.put("role", "tool");
+            toolMsg.put("tool_call_id", call.get("id"));
+            toolMsg.put("content", openAIToolContent(r));
+            out.add(toolMsg);
+        }
+        return out;
+    }
+
+    private static ToolResult finishedOrInterrupted(Map<String, ToolResult> inflight, String id) {
+        ToolResult r = inflight.get(id);
+        if (r == null || ToolResult.pendingOf(r) != null) return ToolResult.error("interrupted: the turn ended before this tool returned. Whether its side effects happened is unknown. Do not re-run it automatically; check first.");
+        return r;
+    }
+
+    /**
+     * Wait for a turn's tool futures. Interruptible by the run's {@link CancelToken}: a cancel
+     * while tools run surfaces as {@link CancelledException} at once (in-flight tool threads are
+     * interrupted). Otherwise identical to {@code allOf(...).join()}.
+     */
+    private static void awaitTools(CompletableFuture<?>[] futures, Deadline deadline, ExecutorService executor) {
+        CompletableFuture<Void> all = CompletableFuture.allOf(futures);
+        while (true) {
+            try {
+                all.get();
+                return;
+            } catch (InterruptedException ie) {
+                if (deadline.cancelled()) {
+                    executor.shutdownNow();
+                    throw new CancelledException("run cancelled");
+                }
+                all.join();
+                Thread.currentThread().interrupt();
+                return;
+            } catch (java.util.concurrent.ExecutionException ee) {
+                throw new java.util.concurrent.CompletionException(ee.getCause());
+            }
         }
     }
 
@@ -1309,10 +1701,23 @@ public final class LlmClient {
             history = store.get(id);
             if (history == null) history = new ArrayList<>();
         }
-        RunResult result = "anthropic".equals(opts.style)
-                ? streamAnthropic(prompt, toolkit, onEvent, deadline, history)
-                : streamOpenAI(prompt, toolkit, onEvent, deadline, history);
-        if (stateful) store.save(id, result.messages);
+        if (!stateful) {
+            return "anthropic".equals(opts.style)
+                    ? streamAnthropic(prompt, toolkit, onEvent, deadline, history, null)
+                    : streamOpenAI(prompt, toolkit, onEvent, deadline, history, null);
+        }
+        List<Object>[] partial = new List[1];
+        Consumer<List<Object>> abort = m -> partial[0] = m;
+        RunResult result;
+        try {
+            result = "anthropic".equals(opts.style)
+                ? streamAnthropic(prompt, toolkit, onEvent, deadline, history, abort)
+                : streamOpenAI(prompt, toolkit, onEvent, deadline, history, abort);
+        } catch (RuntimeException e) {
+            saveInterrupted(id, prompt, toolkit, history, partial[0]);
+            throw e;
+        }
+        store.save(id, result.messages);
         return result;
     }
 
@@ -1330,17 +1735,13 @@ public final class LlmClient {
     /**
      * §7D cancellation seam: {@link #ask(String, Toolkit, String)} with an external
      * {@link CancelToken}. On cancellation the run throws {@link CancelledException} and the
-     * conversation store is NOT updated (an aborted turn is never persisted — the transactional
-     * posture the agent runtime's {@code interrupt} relies on).
+     * interrupted turn IS persisted (SPEC §8 "Interrupted turns are saved"): the prompt and every
+     * complete message, each unanswered tool call closed with an {@code interrupted} error result.
      */
     public RunResult ask(String prompt, Toolkit toolkit, String id, CancelToken cancel) {
         if (cancel == null) return ask(prompt, toolkit, id);
         if (id == null || id.isEmpty()) return run(prompt, toolkit, null, cancel);
-        List<Object> history = store.get(id);
-        if (history == null) history = new ArrayList<>();
-        RunResult result = run(prompt, toolkit, history, cancel);
-        store.save(id, result.messages);
-        return result;
+        return statefulRun(prompt, toolkit, id, cancel);
     }
 
     /** A stateful multi-turn conversation that retains history across {@link Conversation#send} calls. */
@@ -1472,7 +1873,8 @@ public final class LlmClient {
 
     // ---- OpenAI-style: POST {baseUrl}/chat/completions ----
     @SuppressWarnings("unchecked")
-    private RunResult runOpenAI(Object prompt, Toolkit toolkit, List<Object> history, Deadline deadline) {
+    private RunResult runOpenAI(Object prompt, Toolkit toolkit, List<Object> history, Deadline deadline,
+                                Consumer<List<Object>> onAbort) {
         String key = resolveKey();
         List<Object> messages = new ArrayList<>();
         if (history != null && !history.isEmpty()) {
@@ -1485,6 +1887,8 @@ public final class LlmClient {
         messages.add(msg("user", seed(prompt)));
         List<Map<String, Object>> tools = declaredOpenAI(toolkit);
         List<ToolCall> toolCalls = new ArrayList<>();
+        // Finished tool results by call id, so an interrupted turn keeps them (SPEC §8).
+        Map<String, ToolResult> inflight = new ConcurrentHashMap<>();
         Usage usage = new Usage();
         int turns = 0;
         long runStart = System.currentTimeMillis();
@@ -1567,6 +1971,7 @@ public final class LlmClient {
                         recorded[idx] = new ToolCall(fnName, run.args(),
                                 run.result().output(), run.result().isError(), run.result().metadata());
                         results[idx] = run.result();
+                        if (!deadline.cancelled()) inflight.put(String.valueOf(callId), run.result());
                         Map<String, Object> toolMsg = new LinkedHashMap<>();
                         toolMsg.put("role", "tool");
                         toolMsg.put("tool_call_id", callId);
@@ -1575,7 +1980,7 @@ public final class LlmClient {
                         toolMsgs[idx] = toolMsg;
                     });
                 }
-                CompletableFuture.allOf(futures).join();
+                awaitTools(futures, deadline, executor);
 
                 // Record in tool-call order; on the FIRST durable halt, surface it and stop —
                 // deterministic, and the later suspensions' placeholder results never enter the
@@ -1598,6 +2003,7 @@ public final class LlmClient {
             return incompleteRun(lastModel[0], runStart, lastAssistantText(messages), messages, toolCalls, turns, usage);
         } catch (RuntimeException e) {
             emitRunError(lastModel[0], runStart, toolCalls, turns, usage, e);
+            reportAbort(onAbort, messages, inflight);
             throw e;
         } finally {
             executor.shutdown();
@@ -1606,7 +2012,8 @@ public final class LlmClient {
 
     // ---- Anthropic-style: POST {baseUrl}/messages ----
     @SuppressWarnings("unchecked")
-    private RunResult runAnthropic(Object prompt, Toolkit toolkit, List<Object> history, Deadline deadline) {
+    private RunResult runAnthropic(Object prompt, Toolkit toolkit, List<Object> history, Deadline deadline,
+                                   Consumer<List<Object>> onAbort) {
         String key = resolveKey();
         String base = stripTrailingSlash(opts.baseUrl);
         String endpoint = base.endsWith("/v1") ? base + "/messages" : base + "/v1/messages";
@@ -1618,6 +2025,8 @@ public final class LlmClient {
         messages.add(msg("user", seed(prompt)));
         List<Map<String, Object>> tools = declaredAnthropic(toolkit);
         List<ToolCall> toolCalls = new ArrayList<>();
+        // Finished tool results by call id, so an interrupted turn keeps them (SPEC §8).
+        Map<String, ToolResult> inflight = new ConcurrentHashMap<>();
         Usage usage = new Usage();
         int turns = 0;
         long runStart = System.currentTimeMillis();
@@ -1703,6 +2112,7 @@ public final class LlmClient {
                         recorded[idx] = new ToolCall(useName, run.args(),
                                 run.result().output(), run.result().isError(), run.result().metadata());
                         results[idx] = run.result();
+                        if (!deadline.cancelled()) inflight.put(String.valueOf(useId), run.result());
                         Map<String, Object> tr = new LinkedHashMap<>();
                         tr.put("type", "tool_result");
                         tr.put("tool_use_id", useId);
@@ -1710,7 +2120,7 @@ public final class LlmClient {
                         resultBlocks[idx] = tr;
                     });
                 }
-                CompletableFuture.allOf(futures).join();
+                awaitTools(futures, deadline, executor);
 
                 // Record in tool-call order; on the FIRST durable halt, surface it and stop — the
                 // later suspensions' placeholder results never enter the transcript (they re-suspend
@@ -1738,6 +2148,7 @@ public final class LlmClient {
             return incompleteRun(lastModel[0], runStart, "", messages, toolCalls, turns, usage);
         } catch (RuntimeException e) {
             emitRunError(lastModel[0], runStart, toolCalls, turns, usage, e);
+            reportAbort(onAbort, messages, inflight);
             throw e;
         } finally {
             executor.shutdown();
@@ -1747,7 +2158,8 @@ public final class LlmClient {
     // ---- Streaming: OpenAI-style (SSE, line-by-line) ----
     @SuppressWarnings("unchecked")
     private RunResult streamOpenAI(Object prompt, Toolkit toolkit, Consumer<StreamEvent> onEvent,
-                                   Deadline deadline, List<Object> history) {
+                                   Deadline deadline, List<Object> history,
+                                   Consumer<List<Object>> onAbort) {
         String key = resolveKey();
         List<Object> messages = new ArrayList<>();
         if (history != null && !history.isEmpty()) {
@@ -1759,6 +2171,8 @@ public final class LlmClient {
         messages.add(msg("user", seed(prompt)));
         List<Map<String, Object>> tools = declaredOpenAI(toolkit);
         List<ToolCall> toolCalls = new ArrayList<>();
+        // Finished tool results by call id, so an interrupted turn keeps them (SPEC §8).
+        Map<String, ToolResult> inflight = new ConcurrentHashMap<>();
         Usage usage = new Usage();
         int turns = 0;
         long runStart = System.currentTimeMillis();
@@ -1901,9 +2315,9 @@ public final class LlmClient {
                     final int t = turn;
                     futures[idx] = CompletableFuture.supplyAsync(
                             () -> runTool(toolkit, slot[1], args, slot[0], t), executor)
-                            .thenAccept(r -> runs[idx] = r);
+                            .thenAccept(r -> { runs[idx] = r; if (!deadline.cancelled()) inflight.put(slot[0], r.result()); });
                 }
-                CompletableFuture.allOf(futures).join();
+                awaitTools(futures, deadline, executor);
                 Request halted = null;
                 List<Object> relocatedBlocks = new ArrayList<>();
                 Map<String, Object> lastToolMsg = null;
@@ -1928,7 +2342,7 @@ public final class LlmClient {
                     lastToolMsg = toolMsg;
                     collectRelocated(relocatedBlocks, slot[1], slot[0], r.result());
                     onEvent.accept(StreamEvent.toolResult(slot[0], slot[1], r.result().output(),
-                            r.result().isError(), r.result().parts()));
+                            r.result().isError(), r.result().parts(), r.result().metadata()));
                 }
                 // §8A: ONE synthetic user message per assistant turn — wire only, never persisted.
                 if (!relocatedBlocks.isEmpty() && lastToolMsg != null) {
@@ -1945,6 +2359,7 @@ public final class LlmClient {
             return done;
         } catch (RuntimeException e) {
             emitRunError(lastModel[0], runStart, toolCalls, turns, usage, e);
+            reportAbort(onAbort, messages, inflight);
             throw e;
         } finally {
             executor.shutdown();
@@ -1954,7 +2369,8 @@ public final class LlmClient {
     // ---- Streaming: Anthropic-style (SSE content_block_* / message_delta) ----
     @SuppressWarnings("unchecked")
     private RunResult streamAnthropic(Object prompt, Toolkit toolkit, Consumer<StreamEvent> onEvent,
-                                      Deadline deadline, List<Object> history) {
+                                      Deadline deadline, List<Object> history,
+                                   Consumer<List<Object>> onAbort) {
         String key = resolveKey();
         String base = stripTrailingSlash(opts.baseUrl);
         String endpoint = base.endsWith("/v1") ? base + "/messages" : base + "/v1/messages";
@@ -1964,6 +2380,8 @@ public final class LlmClient {
         messages.add(msg("user", seed(prompt)));
         List<Map<String, Object>> tools = declaredAnthropic(toolkit);
         List<ToolCall> toolCalls = new ArrayList<>();
+        // Finished tool results by call id, so an interrupted turn keeps them (SPEC §8).
+        Map<String, ToolResult> inflight = new ConcurrentHashMap<>();
         Usage usage = new Usage();
         int turns = 0;
         long runStart = System.currentTimeMillis();
@@ -2121,9 +2539,9 @@ public final class LlmClient {
                     final int t = turn;
                     futures[idx] = CompletableFuture.supplyAsync(
                             () -> runTool(toolkit, name, in, id, t), executor)
-                            .thenAccept(r -> runs[idx] = r);
+                            .thenAccept(r -> { runs[idx] = r; if (!deadline.cancelled()) inflight.put(id, r.result()); });
                 }
-                CompletableFuture.allOf(futures).join();
+                awaitTools(futures, deadline, executor);
                 List<Object> results = new ArrayList<>(n);
                 Request halted = null;
                 for (int i = 0; i < n; i++) {
@@ -2148,7 +2566,7 @@ public final class LlmClient {
                     tr.put("is_error", r.result().isError());
                     results.add(tr);
                     onEvent.accept(StreamEvent.toolResult(id, name, r.result().output(),
-                            r.result().isError(), r.result().parts()));
+                            r.result().isError(), r.result().parts(), r.result().metadata()));
                 }
                 Map<String, Object> userMsg = new LinkedHashMap<>();
                 userMsg.put("role", "user");
@@ -2165,6 +2583,7 @@ public final class LlmClient {
             return done;
         } catch (RuntimeException e) {
             emitRunError(lastModel[0], runStart, toolCalls, turns, usage, e);
+            reportAbort(onAbort, messages, inflight);
             throw e;
         } finally {
             executor.shutdown();

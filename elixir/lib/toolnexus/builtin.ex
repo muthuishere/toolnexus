@@ -87,8 +87,9 @@ defmodule Toolnexus.Builtin do
   # the host boundary: interpreter, base directory, confinement (SPEC §4A, ADR 0034)
   # ---------------------------------------------------------------------------
 
-  # How long a job gets between "please stop" and "stop". Fixed, and identical in
-  # every port, so a timeout means the same thing everywhere.
+  # How long a job gets between "please stop" and "stop" when the host sets no
+  # `kill_grace_ms` / `killGraceMs` (0 or absent). Identical in every port, so a
+  # timeout means the same thing everywhere; a host with a tight cancel bar lowers it.
   @kill_grace_ms 2000
 
   @win_reserved ~w(CON PRN AUX NUL COM1 COM2 COM3 COM4 COM5 COM6 COM7 COM8 COM9
@@ -155,7 +156,19 @@ defmodule Toolnexus.Builtin do
           detect_shell()
       end
 
-    %{shell: shell, shell_error: shell_error, base_dir: to_string(base_dir), confine: confine}
+    grace =
+      case cfg_get(map, :kill_grace_ms) || cfg_get(map, :killGraceMs) do
+        n when is_number(n) and n > 0 -> round(n)
+        _ -> @kill_grace_ms
+      end
+
+    %{
+      shell: shell,
+      shell_error: shell_error,
+      base_dir: to_string(base_dir),
+      confine: confine,
+      kill_grace_ms: grace
+    }
   end
 
   defp detect_shell do
@@ -464,16 +477,18 @@ defmodule Toolnexus.Builtin do
 
     deadline = System.monotonic_time(:millisecond) + timeout
     meta = %{shell: Enum.join(env.shell, " ")}
-    result = collect_shell(port, "", deadline, timeout, os_pid, meta, caller, caller_ref)
+    grace = Map.get(env, :kill_grace_ms, @kill_grace_ms)
+    kill = fn -> kill_job(port, os_pid, grace) end
+    result = collect_shell(port, "", deadline, timeout, kill, meta, caller, caller_ref)
     send(caller, {:job_result, self(), result})
   end
 
-  defp collect_shell(port, out, deadline, timeout, os_pid, meta, caller, caller_ref) do
+  defp collect_shell(port, out, deadline, timeout, kill, meta, caller, caller_ref) do
     remaining = max(deadline - System.monotonic_time(:millisecond), 0)
 
     receive do
       {^port, {:data, d}} ->
-        collect_shell(port, out <> d, deadline, timeout, os_pid, meta, caller, caller_ref)
+        collect_shell(port, out <> d, deadline, timeout, kill, meta, caller, caller_ref)
 
       {^port, {:exit_status, 0}} ->
         ok(out, Map.put(meta, :exitCode, 0))
@@ -484,15 +499,15 @@ defmodule Toolnexus.Builtin do
       # The caller went away — cancelled, crashed, or shut down. Stop the job on
       # the way out; nobody is left to receive a result.
       {:DOWN, ^caller_ref, :process, _pid, _reason} ->
-        kill_job(port, os_pid)
+        kill.()
         err("bash: command cancelled\n#{out}", Map.merge(meta, %{timedOut: false, killedTree: true}))
 
       {:EXIT, _from, _reason} ->
-        kill_job(port, os_pid)
+        kill.()
         err("bash: command cancelled\n#{out}", Map.merge(meta, %{timedOut: false, killedTree: true}))
     after
       remaining ->
-        killed = kill_job(port, os_pid)
+        killed = kill.()
 
         err(
           "bash: command timed out after #{timeout}ms\n#{out}",
@@ -506,12 +521,12 @@ defmodule Toolnexus.Builtin do
   # WHILE THE PARENT IS STILL ALIVE — after it dies its children are reparented
   # and are no longer reachable from its pid. Ask first, wait out the grace
   # window, then insist.
-  defp kill_job(port, nil) do
-    if Port.info(port), do: Port.close(port)
+  defp kill_job(port, nil, _grace_ms) do
+    close_port(port)
     false
   end
 
-  defp kill_job(port, os_pid) do
+  defp kill_job(port, os_pid, grace_ms) do
     pids = [os_pid | descendants(os_pid)]
     signal(pids, "-TERM")
     # WAIT for the job to go, up to the grace window — do not SLEEP through it.
@@ -519,12 +534,19 @@ defmodule Toolnexus.Builtin do
     # waits: a command that dies on SIGTERM in 5 ms must not cost its caller two
     # seconds. Measured parity break — five ports returned a 1 s timeout in
     # ~1.0 s while this one took ~3.05 s.
-    unless await_exit(pids, @kill_grace_ms) do
+    unless await_exit(pids, grace_ms) do
       signal(pids, "-KILL")
     end
 
-    if Port.info(port), do: Port.close(port)
+    close_port(port)
     true
+  end
+
+  # The job may exit between the check and the close; that race is not an error.
+  defp close_port(port) do
+    if Port.info(port), do: Port.close(port)
+  rescue
+    ArgumentError -> :ok
   end
 
   # Poll until every pid is gone or the deadline passes. `kill -0` is the
@@ -697,10 +719,15 @@ defmodule Toolnexus.Builtin do
               err("write: #{message}")
 
             {:ok, full} ->
+              before = if File.regular?(full), do: File.read!(full), else: nil
               File.mkdir_p!(Path.dirname(Path.expand(full)))
               File.write!(full, content)
               bytes = byte_size(content)
-              ok("Wrote #{bytes} bytes to #{p}", %{bytes: bytes})
+
+              ok(
+                "Wrote #{bytes} bytes to #{p}",
+                Map.merge(%{bytes: bytes}, edit_metadata(env, [{full, before, content}]))
+              )
           end
         end
       end
@@ -763,7 +790,10 @@ defmodule Toolnexus.Builtin do
                     File.write!(full, next)
                     n = if replace_all, do: count, else: 1
                     plural = if n == 1, do: "", else: "s"
-                    ok("Edited #{p} (#{n} replacement#{plural})", %{replacements: n})
+                    ok(
+                      "Edited #{p} (#{n} replacement#{plural})",
+                      Map.merge(%{replacements: n}, edit_metadata(env, [{full, content, next}]))
+                    )
                 end
             end
         end
@@ -1058,6 +1088,100 @@ defmodule Toolnexus.Builtin do
   end
 
   # ---------------------------------------------------------------------------
+  # edit diffs (SPEC §4 "Edit diffs"): metadata.files + metadata.diff
+  # ---------------------------------------------------------------------------
+
+  # `changes` is a list of `{full_path, before | nil, after | nil}` — nil before is
+  # an added file, nil after a deleted one. The counts come from a MINIMAL line
+  # diff (Myers), so they agree with every port; the diff text need only be valid.
+  defp edit_metadata(env, changes) do
+    {files, diff} =
+      Enum.map_reduce(changes, [], fn {full, before, after_}, diff ->
+        rel = diff_path(env, full)
+        ops = line_ops(diff_lines(before), diff_lines(after_))
+        additions = Enum.count(ops, &(elem(&1, 0) == :ins))
+        deletions = Enum.count(ops, &(elem(&1, 0) == :del))
+
+        status =
+          cond do
+            before == nil -> "added"
+            after_ == nil -> "deleted"
+            true -> "modified"
+          end
+
+        header = [
+          "--- " <> if(before == nil, do: "/dev/null", else: "a/" <> rel),
+          "+++ " <> if(after_ == nil, do: "/dev/null", else: "b/" <> rel)
+        ]
+
+        {%{path: rel, status: status, additions: additions, deletions: deletions},
+         diff ++ header ++ unified_hunks(ops)}
+      end)
+
+    %{files: files, diff: if(diff == [], do: "", else: Enum.join(diff, "\n") <> "\n")}
+  end
+
+  defp diff_path(%{base_dir: ""}, full), do: full
+
+  defp diff_path(%{base_dir: base}, full) do
+    full |> Path.expand() |> Path.relative_to(Path.expand(base)) |> String.replace("\\", "/")
+  end
+
+  defp diff_lines(nil), do: []
+  defp diff_lines(""), do: []
+
+  defp diff_lines(text) do
+    lines = String.split(text, "\n")
+    if List.last(lines) == "", do: Enum.drop(lines, -1), else: lines
+  end
+
+  # Flatten List.myers_difference/2 into one op per line.
+  defp line_ops(a, b) do
+    List.myers_difference(a, b)
+    |> Enum.flat_map(fn {kind, lines} -> Enum.map(lines, &{kind, &1}) end)
+  end
+
+  # Unified hunks with 3 lines of context.
+  defp unified_hunks(ops) do
+    ctx = 3
+    indexed = Enum.with_index(ops)
+    changed = for {{k, _}, i} <- indexed, k != :eq, do: i
+
+    groups =
+      Enum.reduce(changed, [], fn
+        i, [{s, e} | rest] when i - e <= 2 * ctx -> [{s, i} | rest]
+        i, acc -> [{i, i} | acc]
+      end)
+      |> Enum.reverse()
+
+    {positions, _} =
+      Enum.map_reduce(ops, {1, 1}, fn {k, _}, {o, n} ->
+        {{o, n}, {if(k == :ins, do: o, else: o + 1), if(k == :del, do: n, else: n + 1)}}
+      end)
+
+    positions = List.to_tuple(positions)
+    last = length(ops) - 1
+
+    Enum.flat_map(groups, fn {s0, e0} ->
+      s = max(0, s0 - ctx)
+      e = min(last, e0 + ctx)
+      slice = Enum.slice(ops, s..e)
+      old_len = Enum.count(slice, &(elem(&1, 0) != :ins))
+      new_len = Enum.count(slice, &(elem(&1, 0) != :del))
+      {o_at, n_at} = elem(positions, s)
+      old_start = if old_len > 0, do: o_at, else: o_at - 1
+      new_start = if new_len > 0, do: n_at, else: n_at - 1
+
+      ["@@ -#{old_start},#{old_len} +#{new_start},#{new_len} @@"] ++
+        Enum.map(slice, fn
+          {:eq, l} -> " " <> l
+          {:del, l} -> "-" <> l
+          {:ins, l} -> "+" <> l
+        end)
+    end)
+  end
+
+  # ---------------------------------------------------------------------------
   # apply_patch (opencode Begin/End Patch grammar)
   # ---------------------------------------------------------------------------
 
@@ -1214,16 +1338,17 @@ defmodule Toolnexus.Builtin do
                 end
               end)
 
-            {writes, deletes} =
-              Enum.reduce(ops, {[], []}, fn op, {writes, deletes} ->
+            {writes, deletes, changes} =
+              Enum.reduce(ops, {[], [], []}, fn op, {writes, deletes, changes} ->
                 case op do
                   {:add, p, content} ->
                     if File.exists?(p), do: raise("file already exists: #{p}")
-                    {[{p, content} | writes], deletes}
+                    {[{p, content} | writes], deletes, [{p, nil, content} | changes]}
 
                   {:delete, p} ->
                     if not File.exists?(p), do: raise("file not found: #{p}")
-                    {writes, [p | deletes]}
+                    before = if File.regular?(p), do: File.read!(p), else: ""
+                    {writes, [p | deletes], [{p, before, nil} | changes]}
 
                   {:update, p, body} ->
                     content =
@@ -1232,7 +1357,8 @@ defmodule Toolnexus.Builtin do
                         {:error, reason} -> raise "#{p}: #{:file.format_error(reason)}"
                       end
 
-                    {[{p, apply_update(content, body)} | writes], deletes}
+                    next = apply_update(content, body)
+                    {[{p, next} | writes], deletes, [{p, content, next} | changes]}
                 end
               end)
 
@@ -1246,11 +1372,17 @@ defmodule Toolnexus.Builtin do
             n = length(ops)
             plural = if n == 1, do: "", else: "s"
 
-            ok("Applied patch: #{n} file operation#{plural}", %{
-              added: Enum.count(ops, &match?({:add, _, _}, &1)),
-              updated: Enum.count(ops, &match?({:update, _, _}, &1)),
-              deleted: Enum.count(ops, &match?({:delete, _}, &1))
-            })
+            ok(
+              "Applied patch: #{n} file operation#{plural}",
+              Map.merge(
+                %{
+                  added: Enum.count(ops, &match?({:add, _, _}, &1)),
+                  updated: Enum.count(ops, &match?({:update, _, _}, &1)),
+                  deleted: Enum.count(ops, &match?({:delete, _}, &1))
+                },
+                edit_metadata(env, Enum.reverse(changes))
+              )
+            )
           rescue
             e in RuntimeError -> err("apply_patch: #{e.message}")
           end
