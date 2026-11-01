@@ -108,7 +108,7 @@ surface this port avoids.
 
 (def llm
   (client/create-client
-    {:base-url "http://mock.local" :style "openai" :model "gpt-4o-mini"
+    {:base-url "http://mock.local" :api-key "test-key" :style "openai" :model "gpt-4o-mini"
      :http-client (fn [_url _headers _body]
                     {:status 402 :headers {} :body "{\"error\":\"insufficient_quota\"}"})}))
 
@@ -149,7 +149,7 @@ surface this port avoids.
 
 (def llm
   (client/create-client
-    {:base-url "http://mock.local" :style "openai" :model "gpt-4o-mini" :retries 0
+    {:base-url "http://mock.local" :api-key "test-key" :style "openai" :model "gpt-4o-mini" :retries 0
      :http-client (fn [_url _headers _body]
                     {:status 429 :headers {"retry-after" "2"}
                      :body "{\"error\":\"rate limited\"}"})}))
@@ -178,7 +178,7 @@ is blanked to `""` entirely rather than redacted, per the credentials guarantee 
 
 (def llm
   (client/create-client
-    {:base-url "http://mock.local" :style "openai" :model "gpt-4o-mini" :retries 0
+    {:base-url "http://mock.local" :api-key "test-key" :style "openai" :model "gpt-4o-mini" :retries 0
      :http-client (fn [_url _headers _body]
                     {:status 402
                      :headers {"retry-after" "3"}

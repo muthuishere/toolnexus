@@ -146,10 +146,15 @@ assert.deepEqual(good.problems, [])
 const bad = validate({
   mcpServers: {
     broken_remote: { type: "remote" },
-    broken_local: { type: "local", command: [] },
   },
 })
-assert.equal(bad.problems.length, 2)
+assert.equal(bad.problems.length, 1)
+
+// An empty local command fails the parse itself, naming the server (SPEC §2).
+assert.throws(
+  () => parseMcpConfig({ mcpServers: { broken_local: { type: "local", command: [] } } }),
+  /broken_local/,
+)
 
 // Malformed JSON throws rather than returning a half-config.
 assert.throws(() => parseMcpConfig("does-not-exist.json"))

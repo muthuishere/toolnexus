@@ -129,7 +129,7 @@ runtime with an ambiguous transport is exactly the kind of drift the ports exist
 
 (def runtime
   (rt/create-runtime {:registry {"w" {:name "w" :does "writes" :model "wm"}}
-                      :llm {:base-url "http://mock.local" :model "default"}
+                      :llm {:base-url "http://mock.local" :api-key "test-key" :model "default"}
                       :http-client (fn [_url _headers _body]
                                      {:status 200 :headers {} :body (json/write-str (text-response "done"))})}))
 
@@ -159,7 +159,7 @@ tokens=15)"` — an extra transition is as wrong as a missing one.
 
 (def runtime
   (rt/create-runtime {:registry {"w" {:name "w" :does "writes" :model "wm"}}
-                      :llm {:base-url "http://mock.local" :model "default"}
+                      :llm {:base-url "http://mock.local" :api-key "test-key" :model "default"}
                       :http-client (fn [_url _headers _body]
                                      {:status 200 :headers {} :body (json/write-str (text-response "done"))})}))
 
@@ -191,7 +191,7 @@ tokens=15)"` — an extra transition is as wrong as a missing one.
   (rt/create-runtime
    {:registry {"boss" {:name "boss" :does "coordinates" :model "bm"}
                "w"    {:name "w"    :does "writes"      :model "wm"}}
-    :llm      {:base-url "http://mock.local" :model "default"}
+    :llm      {:base-url "http://mock.local" :api-key "test-key" :model "default"}
     :http-client (fn [_url _headers _body]
                    {:status 200 :headers {} :body (json/write-str (text-response "done"))})}))
 

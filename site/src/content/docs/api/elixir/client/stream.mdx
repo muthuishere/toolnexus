@@ -164,7 +164,7 @@ events = client |> Client.stream("add 2 and 3", [add_tool]) |> Enum.to_list()
 [call_ev, result_ev, text_ev, usage_ev, done_ev] = events
 
 true = call_ev == %{type: "tool_call", id: "c1", name: "add", args: %{"a" => 2, "b" => 3}}
-true = result_ev == %{type: "tool_result", id: "c1", name: "add", output: "5", is_error: false}
+true = result_ev == %{type: "tool_result", id: "c1", name: "add", output: "5", is_error: false, metadata: nil}
 true = text_ev == %{type: "text", delta: "the sum is 5"}
 true = usage_ev.type == "usage"
 true = done_ev.result.text == "the sum is 5"

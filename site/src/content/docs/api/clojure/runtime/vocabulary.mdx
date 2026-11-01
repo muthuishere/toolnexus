@@ -106,7 +106,7 @@ no additional API to learn.
 (def runtime
   (rt/create-runtime
    {:registry {"w" {:name "w" :does "writes" :model "wm"}}
-    :llm      {:base-url "http://mock.local" :model "default"}
+    :llm      {:base-url "http://mock.local" :api-key "test-key" :model "default"}
     :http-client (fn [_url _headers _body]
                    {:status 200 :headers {} :body (json/write-str (text-response "done writing"))})}))
 
@@ -153,7 +153,7 @@ no additional API to learn.
 (def runtime
   (rt/create-runtime
    {:registry {"w" {:name "w" :does "writes" :model "wm" :budget {:max-turns 1}}}
-    :llm      {:base-url "http://mock.local" :model "default"}
+    :llm      {:base-url "http://mock.local" :api-key "test-key" :model "default"}
     :http-client (fn [_url _headers _body]
                    {:status 200 :headers {} :body (json/write-str (text-response "ok"))})}))
 

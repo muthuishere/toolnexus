@@ -138,6 +138,7 @@ import (
 	"fmt"
 	"log"
 	"sort"
+	"strings"
 
 	toolnexus "github.com/muthuishere/toolnexus/golang"
 )
@@ -182,13 +183,17 @@ func main() {
 	}
 
 	_, badProblems, err := validate(`{"mcpServers":{
-		"broken_remote":{"type":"remote"},
-		"broken_local":{"type":"local","command":[]}}}`)
+		"broken_remote":{"type":"remote"}}}`)
 	if err != nil {
 		log.Fatal(err)
 	}
-	if len(badProblems) != 2 {
+	if len(badProblems) != 1 {
 		log.Fatalf("expected 2 problems, got %v", badProblems)
+	}
+
+	// An empty local command fails the parse itself, naming the server (SPEC §2).
+	if _, err := toolnexus.ParseMcpConfig([]byte(`{"mcpServers":{"broken_local":{"type":"local","command":[]}}}`)); err == nil || !strings.Contains(err.Error(), "broken_local") {
+		log.Fatalf("expected an invalid-command error, got %v", err)
 	}
 
 	// Malformed JSON is an error, not a panic and not a partial config.

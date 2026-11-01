@@ -154,10 +154,18 @@ true = good_problems == []
 
 {_, bad_problems} =
   validate.(~s({"mcpServers":{
-    "broken_remote":{"type":"remote"},
-    "broken_local":{"type":"local","command":[]}}}))
+    "broken_remote":{"type":"remote"}}}))
 
-true = length(bad_problems) == 2
+true = length(bad_problems) == 1
+
+# An empty local command fails the parse itself, naming the server (SPEC §2).
+true =
+  try do
+    Mcp.parse_config(~s({"mcpServers":{"broken_local":{"type":"local","command":[]}}}))
+    false
+  rescue
+    e in ArgumentError -> String.contains?(Exception.message(e), "broken_local")
+  end
 
 # Malformed JSON raises rather than returning a half-config.
 true =

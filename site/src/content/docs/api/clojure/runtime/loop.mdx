@@ -99,7 +99,7 @@ spelling of the same contract — this is a language-shape difference, not a mis
    :usage {:prompt_tokens 10 :completion_tokens 5 :total_tokens 15}})
 
 (def agent-def (tnloop/harness {:soul "You are concise." :model "gpt-4.1"}))
-(def opts {:base-url "http://mock.local"
+(def opts {:base-url "http://mock.local" :api-key "test-key"
            :http-client (fn [_url _headers _body]
                           {:status 200 :headers {} :body (json/write-str (text-response "Node offline: rebooted the switch."))})})
 (def lp (tnloop/create agent-def opts (tool/toolkit [])))
@@ -161,7 +161,7 @@ is the point: absent gating costs nothing.
      :completion {:verify       tnloop/all-todos-done
                   :max-attempts 3}}))
 
-(def opts {:base-url "http://mock.local" :http-client (mock-http)})
+(def opts {:base-url "http://mock.local" :api-key "test-key" :http-client (mock-http)})
 (def lp (tnloop/create agent-def opts (tool/toolkit [todowrite-tool])))
 
 (let [[outcome _] (tnloop/run lp "Migrate the config schema")]
@@ -231,7 +231,7 @@ If the model claims done with open todo items, the gate re-prompts with
 ;; => ["tools" "team"]   -- present on the def, but not honoured by a plain Loop
 (assert (= ["tools" "team"] unsupported))
 
-(def opts {:base-url "http://mock.local" :http-client (mock-http)})
+(def opts {:base-url "http://mock.local" :api-key "test-key" :http-client (mock-http)})
 (def lp (tnloop/create agent-def opts (tool/toolkit [delete-file-tool])))
 (let [[outcome _] (tnloop/run lp "Clean up the temp directory")]
   (assert (= "could not delete, denied" (:text outcome))))

@@ -124,7 +124,7 @@ where it has the pricing table.
 
 (def runtime
   (rt/create-runtime {:registry {"w" {:name "w" :does "…" :model "wm" :budget {:max-turns 1}}}
-                      :llm {:base-url "http://mock.local" :model "default"}
+                      :llm {:base-url "http://mock.local" :api-key "test-key" :model "default"}
                       :http-client (fn [_url _headers _body]
                                      {:status 200 :headers {} :body (json/write-str (text-response "hi"))})}))
 
@@ -156,7 +156,7 @@ again once the host raises the budget or spawns a successor.
 (def runtime
   (rt/create-runtime {:registry {"boss" {:name "boss" :does "…" :model "bm" :budget {:max-tokens 10 :max-depth 5}}
                                   "w"    {:name "w"    :does "…" :model "wm"}}
-                      :llm {:base-url "http://mock.local" :model "default"}
+                      :llm {:base-url "http://mock.local" :api-key "test-key" :model "default"}
                       :http-client (fn [_url _headers _body]
                                      {:status 200 :headers {} :body (json/write-str (text-response "hi"))})}))
 
@@ -194,7 +194,7 @@ again once the host raises the budget or spawns a successor.
 (def runtime
   (rt/create-runtime
    {:registry {"w" {:name "w" :does "…" :model "wm" :budget {:max-turns 1}}}
-    :llm      {:base-url "http://mock.local" :model "default"}
+    :llm      {:base-url "http://mock.local" :api-key "test-key" :model "default"}
     :http-client (fn [_url _headers _body]
                    {:status 200 :headers {} :body (json/write-str (text-response "hi"))})
     :on-budget (fn [_info] "suspend")}))          ; route every limit hit through §10 approval

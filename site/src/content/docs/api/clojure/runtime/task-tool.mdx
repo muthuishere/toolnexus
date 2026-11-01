@@ -156,7 +156,7 @@ a rewound transcript.
    {:registry {"boss"   {:name "boss" :does "coordinates" :model "bm"
                          :team ["writer"] :budget {:max-depth 5}}
                "writer" {:name "writer" :does "writes" :model "wm"}}
-    :llm      {:base-url "http://mock.local" :model "default"}
+    :llm      {:base-url "http://mock.local" :api-key "test-key" :model "default"}
     :http-client (mock-http)}))
 
 ;; the model, inside boss's own turn, calls: task {:agent "writer" :prompt "the intro"}
@@ -213,7 +213,7 @@ token spend is already rolled into `boss`'s own totals by the time `wait` return
                          :team ["writer"] :budget {:max-depth 5}}
                "writer" {:name "writer" :does "writes" :model "wm"}
                "other"  {:name "other"  :does "?"        :model "om"}}
-    :llm      {:base-url "http://mock.local" :model "default"}
+    :llm      {:base-url "http://mock.local" :api-key "test-key" :model "default"}
     :http-client (mock-http)}))
 
 (let [h (rt/spawn runtime rt/root "boss")]
@@ -271,7 +271,7 @@ token spend is already rolled into `boss`'s own totals by the time `wait` return
    {:registry {"boss"   {:name "boss" :does "coordinates" :model "bm"
                          :team ["worker"] :budget {:max-depth 5}}
                "worker" {:name "worker" :does "does the risky part" :model "wm" :tools [approve-tool]}}
-    :llm      {:base-url "http://mock.local" :model "default"}
+    :llm      {:base-url "http://mock.local" :api-key "test-key" :model "default"}
     :http-client (mock-http)}))
 
 ;; a delegated child whose own tool call suspends on a §10 approval request
