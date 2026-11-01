@@ -34,9 +34,21 @@ internal sealed class BuiltinEnv
     /// <summary>The POSIX SIGTERM-to-SIGKILL wait (<c>killGraceMs</c>; absent or 0 = 2000). No effect on Windows.</summary>
     internal int KillGraceMs { get; }
 
+    /// <summary>(SPEC §4C) Opt-in background shells — the <c>background</c> key; null ⇒ none.</summary>
+    internal BackgroundShells? Background { get; }
+
+    /// <summary>(SPEC §4C) Opt-in websearch provider — the <c>webSearch</c> key; null ⇒ no websearch tool.</summary>
+    internal WebSearchFn? WebSearch { get; }
+
+    /// <summary>(SPEC §4C) Opt-in <c>notebook_edit</c> — the <c>notebookEdit</c> key.</summary>
+    internal bool NotebookEdit { get; }
+
     internal BuiltinEnv(object? cfg)
     {
         var map = cfg as IDictionary<string, object?>;
+        Background = map?.Get("background") as BackgroundShells;
+        WebSearch = map?.Get("webSearch") as WebSearchFn;
+        NotebookEdit = map?.Get("notebookEdit") is true;
         KillGraceMs = map is not null && map.TryGetValue("killGraceMs", out var g) && g is IConvertible
             && g is not string && g is not bool && Convert.ToDouble(g) is var gd && gd > 0
             ? (int)Math.Min(gd, int.MaxValue) : DefaultKillGraceMs;

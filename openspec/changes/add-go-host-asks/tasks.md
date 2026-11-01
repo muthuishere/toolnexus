@@ -23,7 +23,7 @@ the event. Revisit if a port cannot express it.
 - [ ] 2.1 js
 - [ ] 2.2 python
 - [ ] 2.3 java
-- [ ] 2.4 csharp
+- [x] 2.4 csharp (2026-11-01: all of 1.1–1.5g + prompt cache + tool tiers; C# MCP load already locked status, no race; Compactor OnCompact takes no token — the C# BeforeLLM hook carries none)
 - [ ] 2.5 elixir
 - [ ] 2.6 clojure
 - [ ] 2.6b Re-run every port against the extended examples/mcp-progress-server.mjs (now also offers a resource)

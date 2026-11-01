@@ -113,22 +113,44 @@ public sealed class Agent
 
     /// <summary>One-shot: build a runtime, run to completion, tear down (kept alive on a durable
     /// pending so the host can <see cref="AgentRuntime.ResumeAsync"/>).</summary>
-    public async Task<AgentResult> RunAsync(RuntimeOptions rtOpts, string prompt)
+    public Task<AgentResult> RunAsync(RuntimeOptions rtOpts, string prompt) => RunAsync(rtOpts, prompt, default);
+
+    /// <summary><see cref="RunAsync(RuntimeOptions, string)"/> that force-closes the child runtime when
+    /// <paramref name="cancellationToken"/> is cancelled (the result is then <c>closed</c>).</summary>
+    public async Task<AgentResult> RunAsync(RuntimeOptions rtOpts, string prompt, CancellationToken cancellationToken)
     {
+        if (cancellationToken.IsCancellationRequested)
+            return new AgentResult("The operation was canceled.", true, AgentStatus.Closed, 0, 0);
         var rt = new AgentRuntime(rtOpts.CloneWithRegistry(Registry()));
         var spawned = rt.Spawn(rt.Root, Name);
         if (spawned.Error != null) return new AgentResult(spawned.Error, true, AgentStatus.Error, 0, 0);
         var wait = rt.WaitAsync(spawned.Handle!);
+        await using var reg = cancellationToken.Register(() => _ = rt.CloseAsync(rt.Root, force: true, reason: "cancelled"));
         rt.Wake(spawned.Handle!, prompt);
         var r = await wait.ConfigureAwait(false);
+        if (cancellationToken.IsCancellationRequested)
+            return r with { Text = "The operation was canceled.", IsError = true };
         if (r.Status != "pending") await rt.CloseAsync(rt.Root).ConfigureAwait(false);
         return r;
     }
 
     /// <summary>The bridge: this agent as a uniform <see cref="ITool"/> for the classic API's
     /// extra tools. Each invocation runs the agent's own loop in isolation and returns one tool
-    /// result carrying the final text + metadata.</summary>
-    public ITool AsTool(RuntimeOptions rtOpts)
+    /// result carrying the final text + metadata.
+    /// <para>The calling turn's cancellation token (<see cref="ToolContext.CancellationToken"/>)
+    /// cancels the child run; the tool then returns a <c>cancelled: …</c> error result.</para></summary>
+    public ITool AsTool(RuntimeOptions rtOpts) => AsToolWith(_ => rtOpts);
+
+    /// <summary>
+    /// (SPEC §4C) <see cref="AsTool"/> with <see cref="RuntimeOptions"/> built per call from the calling
+    /// tool's context, so the child runs under the parent turn's gates: set <c>Hooks</c> (the same
+    /// <c>BeforeTool</c> permission gate — it also sees the child's tool calls and results, and
+    /// <c>AfterLLM</c> its replies, for a nested UI row), <c>WaitFor</c> (the same ask bridge) and
+    /// <c>OnMetric</c>. A <c>Spec.Hooks</c> on the agent replaces <c>Hooks</c> for that agent, so leave it
+    /// unset when the gate must hold. When the calling token is cancelled the child is interrupted
+    /// and the tool returns a cancelled error result.
+    /// </summary>
+    public ITool AsToolWith(Func<ToolContext?, RuntimeOptions> perCall)
         => NativeTool.OfAsync(Name, Spec.Does,
             new Dictionary<string, object?>
             {
@@ -139,13 +161,16 @@ public sealed class Agent
                 },
                 ["required"] = new List<object?> { "prompt" },
             },
-            async (args, _) =>
+            async (args, ctx) =>
             {
                 var prompt = args.TryGetValue("prompt", out var p) ? p?.ToString() ?? "" : "";
-                var r = await RunAsync(rtOpts, prompt).ConfigureAwait(false);
-                return new ToolResult(r.Text, r.IsError, new Dictionary<string, object?>
+                var r = await RunAsync(perCall(ctx), prompt, ctx?.CancellationToken ?? default).ConfigureAwait(false);
+                var meta = new Dictionary<string, object?>
                 {
                     ["agent"] = Name, ["turns"] = r.Turns, ["totalTokens"] = r.TotalTokens,
-                });
+                };
+                if (ctx?.CancellationToken.IsCancellationRequested == true)
+                    return new ToolResult("cancelled: " + r.Text, true, meta);
+                return new ToolResult(r.Text, r.IsError, meta);
             });
 }

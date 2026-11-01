@@ -58,7 +58,7 @@ public sealed record ConversationInfo(string Id, DateTimeOffset UpdatedAt);
 /// (<c>"openai" | "anthropic"</c>) and it runs the tool-calling agent loop against a
 /// <see cref="Toolkit"/>. Mirrors the JS/Java reference.
 /// </summary>
-public sealed class LlmClient
+public sealed partial class LlmClient
 {
     private static readonly HttpClient DefaultHttp = new() { Timeout = Timeout.InfiniteTimeSpan };
     /// <summary>
@@ -131,6 +131,8 @@ public sealed class LlmClient
     /// </summary>
     private Dictionary<string, object?> FinalizeBody(Dictionary<string, object?> body)
     {
+        // Prompt caching (SPEC §4C) runs first, so RequestParams and BodyTransform can override it.
+        if (_opts.PromptCache != null) ApplyPromptCache(body, _opts.Style, _opts.PromptCache);
         if (_opts.RequestParams != null)
         {
             foreach (var (k, v) in _opts.RequestParams)
@@ -196,7 +198,19 @@ public sealed class LlmClient
         public string BaseUrl { get; set; } = "";
         public string Style { get; set; } = "openai"; // "openai" | "anthropic"
         public string Model { get; set; } = "";
-        public string? ApiKey { get; set; }           // from env if null
+        /// <summary>
+        /// The API key. When null/empty it is read from <see cref="ApiKeyEnv"/>, else from the ONE env
+        /// var that belongs to the <see cref="BaseUrl"/> host over https: <c>api.openai.com</c> →
+        /// <c>OPENAI_API_KEY</c>, <c>api.anthropic.com</c> → <c>ANTHROPIC_API_KEY</c>,
+        /// <c>openrouter.ai</c> (and subdomains) → <c>OPENROUTER_API_KEY</c>. Any other host, or plain
+        /// http, needs <see cref="ApiKey"/> or <see cref="ApiKeyEnv"/> — a key is never sent to a host
+        /// it does not belong to (SPEC §4C). Never printed.
+        /// </summary>
+        public string? ApiKey { get; set; }
+
+        /// <summary>The NAME (never the value) of the env var to read the key from when
+        /// <see cref="ApiKey"/> is empty — for a host not in the table above.</summary>
+        public string? ApiKeyEnv { get; set; }
         public IDictionary<string, string>? Headers { get; set; }
         public string? SystemPrompt { get; set; }
         public int? MaxTurns { get; set; }             // default 10
@@ -234,6 +248,28 @@ public sealed class LlmClient
         /// <c>{ Status = "pending", Pending = request }</c> to resume later.
         /// </summary>
         public Func<Request, Task<Answer>>? WaitFor { get; set; }
+
+        /// <summary>
+        /// (SPEC §4C) <see cref="WaitFor"/> that also receives the turn's
+        /// <see cref="CancellationToken"/>, so a pending ask ends when the turn is cancelled (throw
+        /// <see cref="OperationCanceledException"/>). Wins over <see cref="WaitFor"/> when both are
+        /// set. Same §10 contract otherwise.
+        /// </summary>
+        public Func<Request, CancellationToken, Task<Answer>>? WaitForCtx { get; set; }
+
+        /// <summary>
+        /// (SPEC §4C prompt caching) When set, mark the stable request prefix for the provider's
+        /// prompt cache (see <see cref="PromptCacheOptions"/>). Null ⇒ body byte-identical. Applied
+        /// before <see cref="RequestParams"/> and <see cref="BodyTransform"/>, so both can override it.
+        /// </summary>
+        public PromptCacheOptions? PromptCache { get; set; }
+
+        /// <summary>
+        /// (SPEC §4C tool tiers) When set, send only core tool schemas up front plus a
+        /// <c>tool_search</c> tool that loads the rest on demand (see <see cref="ToolTierOptions"/>).
+        /// Null ⇒ every tool is sent, as before.
+        /// </summary>
+        public ToolTierOptions? ToolTiers { get; set; }
 
         /// <summary>
         /// (§8 Gap 1) Extra top-level keys shallow-merged into EVERY LLM request body after the client
@@ -296,6 +332,10 @@ public sealed class LlmClient
 
         public Options WithOnError(Func<ErrorInfo, Tier> v) { OnError = v; return this; }
         public Options WithWaitFor(Func<Request, Task<Answer>> v) { WaitFor = v; return this; }
+        public Options WithWaitForCtx(Func<Request, CancellationToken, Task<Answer>> v) { WaitForCtx = v; return this; }
+        public Options WithApiKeyEnv(string v) { ApiKeyEnv = v; return this; }
+        public Options WithPromptCache(PromptCacheOptions v) { PromptCache = v; return this; }
+        public Options WithToolTiers(ToolTierOptions v) { ToolTiers = v; return this; }
         public Options WithRequestParams(IReadOnlyDictionary<string, object?> v) { RequestParams = v; return this; }
         public Options WithBodyTransform(Func<IDictionary<string, object?>, IDictionary<string, object?>?> v) { BodyTransform = v; return this; }
         public Options WithHttpClient(HttpClient v) { HttpClient = v; return this; }
@@ -449,7 +489,10 @@ public sealed class LlmClient
     /// <see cref="ModelRouterClassifier"/> sets it).</summary>
     public sealed record LLMOverride(List<object?>? Messages = null, List<Dictionary<string, object?>>? Tools = null, string? Model = null);
     public sealed record AfterLLMEvent(Dictionary<string, object?> Response, string Model, int Turn);
-    public sealed record BeforeToolEvent(string Name, IDictionary<string, object?> Args, string? Id, int Turn);
+    /// <summary>A <see cref="Hooks.BeforeTool"/> event. <paramref name="Hints"/> are the called tool's
+    /// <see cref="ITool.Hints"/> (null = unknown, or no such tool), for permission gates (SPEC §4C).
+    /// For a ToolTiers <c>call_tool</c> call, Name/Args/Hints are the REAL tool's.</summary>
+    public sealed record BeforeToolEvent(string Name, IDictionary<string, object?> Args, string? Id, int Turn, ToolHints? Hints = null);
     public sealed record AfterToolEvent(string Name, IDictionary<string, object?> Args, ToolResult Result, string? Id, int Turn);
 
     public sealed record ToolOverride(IDictionary<string, object?>? Args = null, ToolResult? Result = null)
@@ -470,13 +513,35 @@ public sealed class LlmClient
         Toolkit? toolkit, string name, IDictionary<string, object?> args, string? id, int turn,
         CancellationToken cancellationToken = default)
     {
+        if (_opts.ToolTiers != null && name == "tool_search" && toolkit != null)
+        {
+            // Engine-internal and read-only: no BeforeTool/AfterTool (SPEC §4C tool tiers).
+            var ts = NowMs();
+            var sr = ToolSearch(toolkit, args);
+            EmitTool(name, "builtin", sr, ts);
+            return (args, sr);
+        }
+        // call_tool (ToolTiers) is unwrapped HERE, so hooks, hints and permission gates see the
+        // real tool. The returned args keep the wrapper shape (with any BeforeTool rewrite inside),
+        // so a §10 re-run unwraps the same way.
+        var (real, inner, wrapped) = UnwrapCall(name, args);
+        var (ra, rr) = await RunToolDirectAsync(toolkit, real, inner, id, turn, cancellationToken).ConfigureAwait(false);
+        if (wrapped) ra = new Dictionary<string, object?> { ["name"] = real, ["arguments"] = ra };
+        return (ra, rr);
+    }
+
+    private async Task<(IDictionary<string, object?> Args, ToolResult Result)> RunToolDirectAsync(
+        Toolkit? toolkit, string name, IDictionary<string, object?> args, string? id, int turn,
+        CancellationToken cancellationToken)
+    {
         var h = _opts.Hooks;
-        var source = toolkit?.Get(name)?.Source ?? "custom";
+        var tool = toolkit?.Get(name);
+        var source = tool?.Source ?? "custom";
         var t0 = NowMs();
         var a = args;
         if (h?.BeforeTool != null)
         {
-            var ov = h.BeforeTool(new BeforeToolEvent(name, a, id, turn));
+            var ov = h.BeforeTool(new BeforeToolEvent(name, a, id, turn, tool?.Hints));
             if (ov?.Result != null)
             {
                 // short-circuit (deny/cache/dry-run, or a guard-raised suspension — path B); still a
@@ -488,7 +553,7 @@ public sealed class LlmClient
         }
         var result = toolkit == null
             ? ToolResult.Error($"tool \"{name}\" not found: this run declared no toolkit")
-            : await toolkit.ExecuteAsync(name, a, cancellationToken.CanBeCanceled ? new ToolContext(cancellationToken: cancellationToken) : null).ConfigureAwait(false);
+            : await toolkit.ExecuteAsync(name, a, new ToolContext(cancellationToken: cancellationToken, callId: id)).ConfigureAwait(false);
         // A suspension (§10) is not a real result: skip afterTool's failure path on it — the resolved
         // result (post-WaitFor) still flows through afterTool in ResolvePendingAsync — and never count
         // it as a tool error.
@@ -515,12 +580,16 @@ public sealed class LlmClient
     /// <c>Halted</c> when no <c>WaitFor</c> is configured (the run should stop and surface the request).
     /// </summary>
     private async Task<(ToolResult Result, Request? Halted)> ResolvePendingAsync(
-        Toolkit? toolkit, string name, IDictionary<string, object?> args, Request request, string? id, int turn)
+        Toolkit? toolkit, string name, IDictionary<string, object?> args, Request request, string? id, int turn,
+        CancellationToken cancellationToken = default)
     {
-        if (_opts.WaitFor == null)
+        (name, args, _) = UnwrapCall(name, args);
+        if (_opts.WaitFor == null && _opts.WaitForCtx == null)
             return (ToolResult.Error(request.Prompt), request); // halt: durable host resumes later
 
-        var answer = await _opts.WaitFor(request).ConfigureAwait(false);
+        var answer = _opts.WaitForCtx != null
+            ? await _opts.WaitForCtx(request, cancellationToken).ConfigureAwait(false)
+            : await _opts.WaitFor!(request).ConfigureAwait(false);
         if (answer == null || !answer.Ok)
             return (ToolResult.Error($"declined/expired: {request.Prompt}"), null);
 
@@ -528,7 +597,7 @@ public sealed class LlmClient
         var t0 = NowMs();
         var result = toolkit == null
             ? ToolResult.Error($"tool \"{name}\" not found: this run declared no toolkit")
-            : await toolkit.ExecuteAsync(name, args, new ToolContext(answer: answer)).ConfigureAwait(false);
+            : await toolkit.ExecuteAsync(name, args, new ToolContext(cancellationToken: cancellationToken, answer: answer, callId: id)).ConfigureAwait(false);
         if (_opts.Hooks?.AfterTool != null)
         {
             var ov = _opts.Hooks.AfterTool(new AfterToolEvent(name, args, result, id, turn));
@@ -557,7 +626,24 @@ public sealed class LlmClient
         public long CompletionTokens;
         public long TotalTokens;
 
-        public Usage Copy() => new() { PromptTokens = PromptTokens, CompletionTokens = CompletionTokens, TotalTokens = TotalTokens };
+        /// <summary>
+        /// (SPEC §4C prompt caching) Prompt tokens served from the provider's prompt cache
+        /// (anthropic <c>cache_read_input_tokens</c>; openai <c>prompt_tokens_details.cached_tokens</c>).
+        /// Under anthropic <see cref="PromptTokens"/> EXCLUDES cached tokens, so the context actually
+        /// sent is <c>PromptTokens + CacheReadTokens + CacheWriteTokens</c>; under openai
+        /// <see cref="PromptTokens"/> already includes this (do not add it again).
+        /// </summary>
+        public long CacheReadTokens;
+
+        /// <summary>Tokens written to the prompt cache (anthropic <c>cache_creation_input_tokens</c>;
+        /// openai reports none).</summary>
+        public long CacheWriteTokens;
+
+        public Usage Copy() => new()
+        {
+            PromptTokens = PromptTokens, CompletionTokens = CompletionTokens, TotalTokens = TotalTokens,
+            CacheReadTokens = CacheReadTokens, CacheWriteTokens = CacheWriteTokens,
+        };
     }
 
     public sealed class RunResult
@@ -608,16 +694,11 @@ public sealed class LlmClient
         StreamKind Type, string? Delta = null, string? Id = null, string? Name = null,
         IDictionary<string, object?>? Args = null, string? Output = null, bool IsError = false,
         Usage? Usage = null, RunResult? Result = null, Request? Request = null,
-        IDictionary<string, object?>? Metadata = null)
+        IDictionary<string, object?>? Metadata = null, string? Via = null)
     {
         /// <summary>§10: a tool is waiting on an out-of-band resolution (emitted before <c>WaitFor</c> runs).</summary>
         internal static StreamEvent PendingEvent(Request request) => new(StreamKind.Pending, Request: request);
         internal static StreamEvent Text(string delta) => new(StreamKind.Text, Delta: delta);
-        internal static StreamEvent ToolCallEvent(string? id, string name, IDictionary<string, object?> args)
-            => new(StreamKind.ToolCall, Id: id, Name: name, Args: args);
-        internal static StreamEvent ToolResultEvent(string? id, string name, string output, bool isError,
-            IDictionary<string, object?>? metadata = null)
-            => new(StreamKind.ToolResult, Id: id, Name: name, Output: output, IsError: isError, Metadata: metadata);
         internal static StreamEvent UsageEvent(Usage usage) => new(StreamKind.Usage, Usage: usage);
         internal static StreamEvent DoneEvent(RunResult result) => new(StreamKind.Done, Result: result);
     }
@@ -955,21 +1036,6 @@ public sealed class LlmClient
 
     // ---------------------------------------------------------------- helpers
 
-    private string ResolveKey()
-    {
-        if (!string.IsNullOrEmpty(_opts.ApiKey)) return _opts.ApiKey!;
-        var openrouter = Environment.GetEnvironmentVariable("OPENROUTER_API_KEY");
-        var openai = Environment.GetEnvironmentVariable("OPENAI_API_KEY");
-        var anthropic = Environment.GetEnvironmentVariable("ANTHROPIC_API_KEY");
-        var key = FirstNonEmpty(openrouter, _opts.Style == "anthropic" ? anthropic : openai, openai, anthropic);
-        if (key == null)
-            throw new InvalidOperationException(
-                "No API key: set ApiKey or OPENROUTER_API_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY");
-        return key;
-    }
-
-    private static string? FirstNonEmpty(params string?[] vals) => vals.FirstOrDefault(v => !string.IsNullOrEmpty(v));
-
     private string System(Toolkit? toolkit)
     {
         var parts = new List<string>();
@@ -1122,9 +1188,13 @@ public sealed class LlmClient
             acc.PromptTokens += inp;
             acc.CompletionTokens += outp;
             acc.TotalTokens += inp + outp;
+            acc.CacheReadTokens += AsLong(raw.Get("cache_read_input_tokens"));
+            acc.CacheWriteTokens += AsLong(raw.Get("cache_creation_input_tokens"));
         }
         else
         {
+            if (raw.Get("prompt_tokens_details") is IDictionary<string, object?> details)
+                acc.CacheReadTokens += AsLong(details.Get("cached_tokens"));
             var inp = AsLong(raw.Get("prompt_tokens"));
             var outp = AsLong(raw.Get("completion_tokens"));
             var total = raw.Get("total_tokens");
@@ -1188,7 +1258,7 @@ public sealed class LlmClient
             if (system.Length > 0) messages.Add(Msg("system", system));
         }
         AddUser(messages, prompt);
-        var tools = toolkit?.ToOpenAI() ?? new List<Dictionary<string, object?>>();
+        var tools = toolkit != null ? Adapters.ToOpenAI(RequestTools(toolkit)) : new List<Dictionary<string, object?>>();
         var toolCalls = new List<ToolCall>();
         var usage = new Usage();
         var turns = 0;
@@ -1262,7 +1332,7 @@ public sealed class LlmClient
                     Request? halted = null;
                     if (req != null)
                     {
-                        var r = await ResolvePendingAsync(toolkit, names[i], runs[i].Args, req, callIds[i], turn).ConfigureAwait(false);
+                        var r = await ResolvePendingAsync(toolkit, names[i], runs[i].Args, req, callIds[i], turn, external).ConfigureAwait(false);
                         runs[i] = (runs[i].Args, r.Result);
                         halted = r.Halted;
                     }
@@ -1303,7 +1373,7 @@ public sealed class LlmClient
         var messages = new List<object?>();
         if (history is { Count: > 0 }) messages.AddRange(history);
         AddUser(messages, prompt);
-        var tools = toolkit?.ToAnthropic() ?? new List<Dictionary<string, object?>>();
+        var tools = toolkit != null ? Adapters.ToAnthropic(RequestTools(toolkit)) : new List<Dictionary<string, object?>>();
         var toolCalls = new List<ToolCall>();
         var usage = new Usage();
         var turns = 0;
@@ -1375,7 +1445,7 @@ public sealed class LlmClient
                     Request? halted = null;
                     if (req != null)
                     {
-                        var r = await ResolvePendingAsync(toolkit, names[i], runs[i].Args, req, useIds[i], turn).ConfigureAwait(false);
+                        var r = await ResolvePendingAsync(toolkit, names[i], runs[i].Args, req, useIds[i], turn, external).ConfigureAwait(false);
                         runs[i] = (runs[i].Args, r.Result);
                         halted = r.Halted;
                     }
@@ -1442,7 +1512,7 @@ public sealed class LlmClient
             if (system.Length > 0) messages.Add(Msg("system", system));
         }
         AddUser(messages, prompt);
-        var tools = toolkit?.ToOpenAI() ?? new List<Dictionary<string, object?>>();
+        var tools = toolkit != null ? Adapters.ToOpenAI(RequestTools(toolkit)) : new List<Dictionary<string, object?>>();
         var toolCalls = new List<ToolCall>();
         var usage = new Usage();
         var turns = 0;
@@ -1552,7 +1622,7 @@ public sealed class LlmClient
                 foreach (var index in order)
                 {
                     var slot = acc[index];
-                    onEvent(StreamEvent.ToolCallEvent(slot[0], slot[1], Json.ParseObjectLoose(slot[2])));
+                    onEvent(CallEvent(slot[0], slot[1], Json.ParseObjectLoose(slot[2])));
                 }
                 var n = order.Count;
                 var runs = new (IDictionary<string, object?> Args, ToolResult Result)[n];
@@ -1578,7 +1648,7 @@ public sealed class LlmClient
                     if (req != null)
                     {
                         onEvent(StreamEvent.PendingEvent(req)); // surface BEFORE WaitFor so a channel can push the link
-                        var r = await ResolvePendingAsync(toolkit, slot[1], runs[i].Args, req, slot[0], turn).ConfigureAwait(false);
+                        var r = await ResolvePendingAsync(toolkit, slot[1], runs[i].Args, req, slot[0], turn, external).ConfigureAwait(false);
                         runs[i] = (runs[i].Args, r.Result);
                         halted = r.Halted;
                     }
@@ -1593,7 +1663,7 @@ public sealed class LlmClient
                         onEvent(StreamEvent.DoneEvent(p));
                         return p;
                     }
-                    onEvent(StreamEvent.ToolResultEvent(slot[0], slot[1], rr.Result.Output, rr.Result.IsError, rr.Result.Metadata));
+                    onEvent(ResultEvent(slot[0], slot[1], Json.ParseObjectLoose(slot[2]), rr.Result));
                 }
                 RecordRelocation(relocated, relocations, messages.Count);
             }
@@ -1620,7 +1690,7 @@ public sealed class LlmClient
         var messages = new List<object?>();
         if (history is { Count: > 0 }) messages.AddRange(history);
         AddUser(messages, prompt);
-        var tools = toolkit?.ToAnthropic() ?? new List<Dictionary<string, object?>>();
+        var tools = toolkit != null ? Adapters.ToAnthropic(RequestTools(toolkit)) : new List<Dictionary<string, object?>>();
         var toolCalls = new List<ToolCall>();
         var usage = new Usage();
         var turns = 0;
@@ -1752,7 +1822,7 @@ public sealed class LlmClient
 
                 var n = uses.Count;
                 foreach (var u in uses)
-                    onEvent(StreamEvent.ToolCallEvent(u["id"]?.ToString(), u["name"]?.ToString() ?? "", (IDictionary<string, object?>)u["input"]!));
+                    onEvent(CallEvent(u["id"]?.ToString(), u["name"]?.ToString() ?? "", (IDictionary<string, object?>)u["input"]!));
                 var runs = new (IDictionary<string, object?> Args, ToolResult Result)[n];
                 var tasks = new Task[n];
                 for (var i = 0; i < n; i++)
@@ -1780,7 +1850,7 @@ public sealed class LlmClient
                     if (req != null)
                     {
                         onEvent(StreamEvent.PendingEvent(req)); // surface BEFORE WaitFor
-                        var rp = await ResolvePendingAsync(toolkit, name, runs[i].Args, req, id, turn).ConfigureAwait(false);
+                        var rp = await ResolvePendingAsync(toolkit, name, runs[i].Args, req, id, turn, external).ConfigureAwait(false);
                         runs[i] = (runs[i].Args, rp.Result);
                         halted = rp.Halted;
                     }
@@ -1800,7 +1870,7 @@ public sealed class LlmClient
                         onEvent(StreamEvent.DoneEvent(p));
                         return p;
                     }
-                    onEvent(StreamEvent.ToolResultEvent(id, name, r.Result.Output, r.Result.IsError, r.Result.Metadata));
+                    onEvent(ResultEvent(id, name, u.Get("input") as IDictionary<string, object?> ?? new Dictionary<string, object?>(), r.Result));
                 }
                 messages.Add(new Dictionary<string, object?> { ["role"] = "user", ["content"] = results });
             }

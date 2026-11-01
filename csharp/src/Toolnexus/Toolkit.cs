@@ -11,6 +11,13 @@ public sealed class Toolkit : IAsyncDisposable
     private readonly SkillSource? _skill;
     private readonly Dictionary<string, ITool> _byName = new();
 
+    /// <summary>
+    /// (SPEC §4C) Guards <see cref="_byName"/> so <see cref="Register"/> may run while a turn reads
+    /// the tool list (<see cref="Tools"/>/<see cref="Get"/>/<see cref="ExecuteAsync"/>) and while
+    /// other Register calls run. A tool registered mid-turn is offered from the next LLM call.
+    /// </summary>
+    private readonly object _gate = new();
+
     /// <summary>A2A profile read from a top-level <c>a2a</c> config block (ServeAsync falls back to this).</summary>
     private readonly A2AConfig? _a2aConfig;
 
@@ -244,6 +251,11 @@ public sealed class Toolkit : IAsyncDisposable
 
     private void Add(ITool t)
     {
+        lock (_gate) AddLocked(t);
+    }
+
+    private void AddLocked(ITool t)
+    {
         if (_byName.ContainsKey(t.Name))
         {
             Console.Error.WriteLine($"[toolnexus] duplicate tool name \"{t.Name}\" — keeping first");
@@ -252,14 +264,25 @@ public sealed class Toolkit : IAsyncDisposable
         _byName[t.Name] = t;
     }
 
-    public List<ITool> Tools() => _byName.Values.ToList();
+    public List<ITool> Tools()
+    {
+        lock (_gate) return _byName.Values.ToList();
+    }
 
-    public ITool? Get(string name) => _byName.GetValueOrDefault(name);
+    public ITool? Get(string name)
+    {
+        lock (_gate) return _byName.GetValueOrDefault(name);
+    }
 
-    /// <summary>Add native/http/custom tools at runtime. First-name-wins; warn on dup. Chainable.</summary>
+    /// <summary>
+    /// Add native/http/custom tools at runtime. First-name-wins; warn on dup. Chainable. Safe to
+    /// call while a turn is running and concurrently with other Register calls (SPEC §4C); a tool
+    /// added mid-turn is offered from the next LLM call.
+    /// </summary>
     public Toolkit Register(params ITool[] tools)
     {
-        foreach (var t in tools) Add(t);
+        lock (_gate)
+            foreach (var t in tools) AddLocked(t);
         return this;
     }
 
@@ -332,7 +355,8 @@ public sealed class Toolkit : IAsyncDisposable
 
     public async Task<ToolResult> ExecuteAsync(string name, IDictionary<string, object?>? args, ToolContext? ctx = null)
     {
-        if (!_byName.TryGetValue(name, out var tool))
+        var tool = Get(name);
+        if (tool == null)
             return ToolResult.Error($"Unknown tool: {name}");
         return await tool.ExecuteAsync(args ?? new Dictionary<string, object?>(), ctx).ConfigureAwait(false);
     }
