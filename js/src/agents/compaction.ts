@@ -102,6 +102,26 @@ export interface CompactorOptions {
    * default. Composes with the memory builtin.
    */
   flushToMemory?: boolean
+  /**
+   * Called after each compaction with what changed, so a host can tell its UI or log (SPEC §4C).
+   * Never called on a no-op. Awaited before the next model call.
+   */
+  onCompact?: (info: CompactInfo) => void | Promise<void>
+}
+
+/** One compaction, for {@link CompactorOptions.onCompact}. Token counts come from `countTokens`. */
+export interface CompactInfo {
+  tokensBefore: number
+  tokensAfter: number
+  messagesBefore: number
+  messagesAfter: number
+  /** How many messages were folded into the summary. */
+  summarized: number
+  /** The text `summarize` returned (without the header line). */
+  summary: string
+  /** The summarized messages, verbatim, so a host can persist them (the loop saves only the
+   * compacted transcript). */
+  folded: Message[]
 }
 
 /** The event a `beforeLLM` hook receives (§8). */
@@ -134,7 +154,8 @@ export function compactor(
 
   return async (ev: BeforeLLMEvent): Promise<{ messages: Message[] } | undefined> => {
     const msgs = ev.messages
-    if (count(msgs) <= opts.maxTokens) return undefined // under budget → no-op
+    const before = count(msgs)
+    if (before <= opts.maxTokens) return undefined // under budget → no-op
 
     // Preserve a leading system prompt verbatim (identity / soul / skills — never summarized).
     const headEnd = msgs[0]?.role === "system" ? 1 : 0
@@ -143,9 +164,17 @@ export function compactor(
     const split = findTailStart(msgs, headEnd, keepTail, count)
     if (split <= headEnd) return undefined // nothing safely compactible
 
-    const older = msgs.slice(headEnd, split)
-    if (older.length === 0) return undefined
+    let older = msgs.slice(headEnd, split)
     const tail = msgs.slice(split)
+    // The latest user prompt is never summarized away. When the only clean boundary is the first
+    // message after the system prompt (one prompt followed by a long agentic run), keep that
+    // prompt verbatim and summarize the work after it: [system, prompt, summary].
+    let pinned: Message[] = []
+    if (split === msgs.length && headEnd < msgs.length && isBoundary(msgs[headEnd])) {
+      pinned = msgs.slice(headEnd, headEnd + 1)
+      older = msgs.slice(headEnd + 1)
+    }
+    if (older.length === 0) return undefined
 
     const flushNote: Message[] = opts.flushToMemory
       ? [{ role: "system", content: FLUSH_TO_MEMORY_REMINDER }]
@@ -154,7 +183,19 @@ export function compactor(
     const summary = await opts.summarize(older)
     const summaryMsg: Message = { role: "system", content: `${SUMMARY_PREFIX}${summary}` }
 
-    return { messages: [...system, summaryMsg, ...flushNote, ...tail] }
+    const out = [...system, ...pinned, summaryMsg, ...flushNote, ...tail]
+    const after = count(out)
+    if (after >= before) return undefined // compaction would not shrink the transcript → no-op
+    await opts.onCompact?.({
+      tokensBefore: before,
+      tokensAfter: after,
+      messagesBefore: msgs.length,
+      messagesAfter: out.length,
+      summarized: older.length,
+      summary,
+      folded: older,
+    })
+    return { messages: out }
   }
 }
 

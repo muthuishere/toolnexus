@@ -10,7 +10,7 @@
 import type { PromptInput } from "../content.js"
 import fs from "node:fs"
 import { defineTool } from "../native.js"
-import type { Answer, Request, Tool } from "../types.js"
+import type { Answer, Request, Tool, ToolContext } from "../types.js"
 import { AgentRuntime, isVerbError, S, type AgentDef, type Budget, type Handle, type RuntimeOptions, type TaskResult } from "./runtime.js"
 import { Loop, guardedHooks, type Completion, type Guardrail } from "./loop.js"
 import type { ClientOptions } from "../client.js"
@@ -141,6 +141,27 @@ export class Agent {
     return { ...r, runtime }
   }
 
+  /** `run` that interrupts the child when `signal` aborts. */
+  private async runSignal(prompt: string, opts: AgentRunOptions, signal?: AbortSignal): Promise<{ text: string; isError: boolean; turns: number; totalTokens: number; cancelled?: boolean }> {
+    if (!signal) return this.run(prompt, opts)
+    const reason = () => (signal.reason instanceof Error ? signal.reason.message : String(signal.reason ?? "aborted"))
+    if (signal.aborted) return { text: reason(), isError: true, turns: 0, totalTokens: 0, cancelled: true }
+    const runtime = this.createRuntime(opts)
+    const h = runtime.spawn(runtime.root, this.name)
+    if (isVerbError(h)) return { text: h.error, isError: true, turns: 0, totalTokens: 0 }
+    const onAbort = () => void runtime.close(runtime.root, { force: true }).catch(() => {})
+    signal.addEventListener("abort", onAbort, { once: true })
+    try {
+      const woke = runtime.wake(h, prompt)
+      const r = await runtime.wait(h as Handle)
+      if (signal.aborted) return { text: reason(), isError: true, turns: r.turns, totalTokens: r.totalTokens, cancelled: true }
+      if (woke.ok && r.status !== "pending") await runtime.close(runtime.root)
+      return r
+    } finally {
+      signal.removeEventListener("abort", onAbort)
+    }
+  }
+
   /**
    * The bridge: an Agent IS a Tool. Drop the result into the classic API's
    * `extraTools`; the agent's own loop runs in isolation and the classic run
@@ -148,6 +169,18 @@ export class Agent {
    * `{agent, turns, totalTokens}`.
    */
   asTool(opts: AgentRunOptions = {}): Tool {
+    return this.asToolWith(() => opts)
+  }
+
+  /**
+   * `asTool` with options built per call from the calling tool's context (SPEC §4C), so the
+   * child runs under the parent turn's gates: set `hooks` (the same beforeTool permission gate —
+   * it also sees the child's tool calls), `waitFor` (the same ask bridge) and `onMetric`. A
+   * `hooks` on the agent's own spec replaces `opts.hooks` for that agent, so leave it unset when
+   * the gate must hold. When the calling turn is cancelled (`ctx.signal`), the child is
+   * interrupted and the tool returns a `cancelled:` error result.
+   */
+  asToolWith(per: (ctx?: ToolContext) => AgentRunOptions): Tool {
     return defineTool({
       name: this.name,
       description: this.spec.does,
@@ -156,13 +189,11 @@ export class Agent {
         properties: { prompt: { type: "string", description: "The task for this agent" } },
         required: ["prompt"],
       },
-      run: async (args: Record<string, unknown>) => {
-        const r = await this.run(String(args.prompt), opts)
-        return {
-          output: r.text,
-          isError: r.isError,
-          metadata: { agent: this.name, turns: r.turns, totalTokens: r.totalTokens },
-        }
+      run: async (args: Record<string, unknown>, ctx?: ToolContext) => {
+        const r = await this.runSignal(String(args.prompt), per(ctx), ctx?.signal)
+        const metadata = { agent: this.name, turns: r.turns, totalTokens: r.totalTokens }
+        if (r.cancelled) return { output: `cancelled: ${r.text}`, isError: true, metadata }
+        return { output: r.text, isError: r.isError, metadata }
       },
     })
   }

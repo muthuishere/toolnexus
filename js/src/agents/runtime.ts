@@ -390,6 +390,11 @@ export interface RuntimeOptions {
   /** §8 observability sink applied to EVERY agent's client, unless that agent's def
    * sets its own `onMetric`. Resolves independently of `hooks`. Forwarded verbatim. */
   onMetric?: (ev: MetricEvent) => void
+  /** The runtime-level §10 interpreter (SPEC §4C): answers a suspension when no agent on the
+   * handle's chain has its own `waitFor`. Absent ⇒ unchanged (the suspension goes durable). A
+   * host running an agent as a tool (`asToolWith`) sets it so the child's asks reach the same
+   * bridge as the parent turn. */
+  waitFor?: (request: Request) => Promise<Answer>
 }
 
 interface GateWaiter {
@@ -855,11 +860,20 @@ export class AgentRuntime {
    * escalation traced (nearest interpreter wins; the Request's `data.path` names
    * the suspended subtree that is asking). */
   private wrapWaitFor(h: Handle): ((req: Request) => Promise<Answer>) | undefined {
-    const waitFor = h.def.waitFor
+    const own = h.def.waitFor
+    let waitFor = own
+    if (!waitFor && this.opts.waitFor) {
+      // The runtime-level bridge answers only when NO agent on the chain has its own waitFor;
+      // otherwise the ask escalates to that nearest interpreter, as before.
+      let a: Handle | null = h.parent
+      while (a && !a.def.waitFor) a = a.parent
+      if (!a) waitFor = this.opts.waitFor
+    }
     if (!waitFor) return undefined
+    const answerer = own ? h.id : this.root.id
     return async (req: Request): Promise<Answer> => {
       const path = Array.isArray(req.data?.path) ? (req.data!.path as string[]).join("/") : h.id
-      this.t(`${path}: escalate → ${h.id} answers ("nearest interpreter")`)
+      this.t(`${path}: escalate → ${answerer} answers ("nearest interpreter")`)
       return waitFor(req)
     }
   }

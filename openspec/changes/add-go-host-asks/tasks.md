@@ -21,7 +21,7 @@ the event. Revisit if a port cannot express it.
 - [x] 1.6 Tests: host_engine_asks_test.go, agents TestCompactorOnCompact; `go test -race ./...` green
 
 ## 2. Other ports (pending — before the next release)
-- [ ] 2.1 js
+- [x] 2.1 js (waitFor gets `{signal}` as a 2nd arg instead of a separate waitForCtx; Toolkit.register needs no lock and the disabled-status race does not exist on a single thread)
 - [ ] 2.2 python
 - [ ] 2.3 java
 - [ ] 2.4 csharp

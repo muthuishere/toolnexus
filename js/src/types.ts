@@ -32,6 +32,23 @@ export interface ToolContext {
   timeout?: number
   /** Present ONLY on a post-waitFor retry (§10): the resolution of a prior suspension. */
   answer?: Answer
+  /** The model's id for this tool call, set by the client loop (§4C). A message's calls run
+   * concurrently, so this is how a tool tells its sibling calls apart. Absent outside the loop. */
+  callId?: string
+}
+
+/**
+ * Advisory behavior hints (named after MCP tool annotations, §4C), for host permission gates
+ * built on `hooks.beforeTool`. Absent on a tool = unknown; treat it as mutating. Never sent to
+ * the model: no adapter or wire output carries them.
+ */
+export interface ToolHints {
+  /** The tool does not change its environment. */
+  readOnly: boolean
+  /** The tool may overwrite or delete things (meaningful when not readOnly). */
+  destructive: boolean
+  /** The tool reaches outside the host (network, external systems). */
+  openWorld: boolean
 }
 
 /**
@@ -110,6 +127,9 @@ export interface Tool {
   inputSchema: JSONSchema
   source: ToolSource
   execute(args: Record<string, unknown>, ctx?: ToolContext): Promise<ToolResult>
+  /** What the tool may do (§4C). Builtins always carry hints; MCP tools carry them when the
+   * server sends annotations. Advisory: a server can mislabel its tools. */
+  hints?: ToolHints
 }
 
 export type McpStatus = "connected" | "disabled" | "failed"
