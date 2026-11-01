@@ -12,5 +12,5 @@
 - [x] 2.6 tool_tiers_test.go (plan, late register, budget demotion, call_tool unwrap + stable array)
 - [ ] 2.7 (was 2.4) Align usage field names with go-agent-cli's usage frame (go-agent-cli-57)
 
-## 3. Other ports (pending — before the next release)
-- [x] 3.1 js  - [x] 3.2 python  - [x] 3.3 java  - [x] 3.4 csharp  - [x] 3.5 elixir  - [ ] 3.6 clojure
+## 3. Other ports (done 2026-11-01)
+- [x] 3.1 js  - [x] 3.2 python  - [x] 3.3 java  - [x] 3.4 csharp  - [x] 3.5 elixir  - [x] 3.6 clojure

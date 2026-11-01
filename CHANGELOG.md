@@ -40,22 +40,30 @@ HTTP/TLS stack is an optional feature (`mcp-http`, on by default). Not done yet:
 builtins, client loop and suspension; for MCP, the legacy-SSE fallback and non-text content parts
 (`openspec/changes/add-rust-port`). Rust is not in the option-parity check until it has a client.
 
-**Security (Go only for now): an API key is no longer sent to a host it does not belong to.**
-Before, with no `APIKey` set, the Go client took the first of `OPENROUTER_API_KEY`,
+**BREAKING, all seven ports (golang, js, python, java, csharp, elixir, clojure): a local or
+custom `baseUrl` without `apiKey` now needs `apiKey` or `apiKeyEnv`.** This is the API-key-by-host
+security fix below; a host that relied on the old environment fallback for a local server or a
+proxy must set one of the two (Go `APIKey`/`APIKeyEnv`, js `apiKey`/`apiKeyEnv`, python
+`api_key`/`api_key_env`, Java `Options.apiKey`/`Options.apiKeyEnv`, C# `ApiKey`/`ApiKeyEnv`,
+elixir `api_key`/`api_key_env`, clojure `:api-key`/`:api-key-env`).
+
+**Security: an API key is no longer sent to a host it does not belong to (all seven ports).**
+Before, with no `APIKey` set, the client took the first of `OPENROUTER_API_KEY`,
 `OPENAI_API_KEY`, `ANTHROPIC_API_KEY` that was set and sent it to whatever `BaseURL` was
 configured, so with several keys in the environment an OpenRouter key could go to
 api.openai.com, or any key to a local or third-party server. Now the environment is used only
 for the env var that matches the host (`api.openai.com` → `OPENAI_API_KEY`, `api.anthropic.com`
 → `ANTHROPIC_API_KEY`, `openrouter.ai` → `OPENROUTER_API_KEY`, https only); any other host needs
 `APIKey` or the new `APIKeyEnv` (the name of the env var to read). **This can break a host that
-relied on the fallback** for a custom or local `BaseURL`: set `APIKey` or `APIKeyEnv`. The other
-six ports still have the old fallback and are tracked in `openspec/changes/add-go-host-asks`.
+relied on the fallback** for a custom or local `BaseURL`: set `APIKey` or `APIKeyEnv`.
 
-**Go only for now: hosts can add tools mid-turn, use each MCP server as soon as it is ready,
-cancel a pending question with its turn, hear about compactions, and gate tools by what they
-do.** Asked for by go-agent-cli, which builds on the Go port directly. The other six ports are
-not done yet and are tracked in `openspec/changes/add-go-host-asks`; they land before the next
-release.
+**All seven ports (golang, js, python, java, csharp, elixir, clojure): hosts can add tools
+mid-turn, use each MCP server as soon as it is ready, cancel a pending question with its turn,
+hear about compactions, and gate tools by what they do.** Asked for by go-agent-cli, which builds
+on the Go port directly; Go names are used below, per-port spellings follow the list. Not done:
+the ACP host hooks (above) are Go only, other ports tracked in `openspec/changes/add-go-host-asks`
+task 2.6d; Gemini explicit `cachedContent` is deferred (`openspec/changes/add-prompt-cache`
+2.3); the Rust port is not published and has none of this yet.
 
 - `Toolkit.Register` is now safe while a turn is running. Before, a host had to rebuild the
   whole toolkit to add tools. A tool added mid-turn is offered from the next model call.
@@ -66,7 +74,7 @@ release.
   when the turn is cancelled. It is used instead of `WaitFor` when both are set.
 - `agents.CompactorOptions.OnCompact` is called after each compaction with token and message
   counts before and after, and the summary — enough to show "context compacted" in a UI.
-- Compactor fixes (Go only for now): it no longer summarizes away the user's prompt when a turn
+- Compactor fixes: it no longer summarizes away the user's prompt when a turn
   is one prompt followed by a long run of tool calls (it keeps the prompt and summarizes the work
   after it); it does nothing when the result would not be smaller (it could grow, e.g. 206 → 211
   tokens); and `CompactInfo.Folded` hands the host the summarized messages verbatim, because the
@@ -111,7 +119,8 @@ release.
 - `ListModels(ctx, ClientOptions)` lists a provider's models (id, display name, and context
   length when the provider reports it, as OpenRouter does), for model switching.
 - Fixed: loading MCP config with a disabled server could race with the other servers' loading
-  (`go test -race` found it). Go only so far; the other ports have not been checked.
+  (`go test -race` found it). Java and C# already wrote that status under their lock; js,
+  python, elixir and clojure cannot have it (one thread, or an immutable toolkit).
 - **js now has all of the above too**, including the API-key-by-host security fix (with the
   same break for hosts that relied on the fallback: set `apiKey` or `apiKeyEnv`). JS shapes:
   `waitFor(request, { signal })` takes the turn's abort signal as a second argument (there is
@@ -122,7 +131,29 @@ release.
   `resetToolTiers`. Not needed in js: a lock on `Toolkit.register` (one thread) and the
   disabled-status race (it cannot happen there). Also in js: the loop now passes the turn's
   abort signal to every tool it runs, so a cancelled turn reaches the tool (Go already did).
-  Python, java, csharp, elixir and clojure are still pending.
+- **python spellings:** `load_mcp(cfg, on_server=...)`, `wait_for_ctx`, `api_key_env`,
+  compactor `on_compact`, `BackgroundShells`, `resource_tools()`, `as_tool_with`, `list_models`,
+  usage `cache_read_tokens` / `cache_write_tokens`, `prompt_cache` and `tool_tiers` with
+  `tool_tier_plan` / `reset_tool_tiers`. MCP servers load concurrently only when `on_server` is
+  given; the disabled-status race does not apply (one asyncio loop).
+- **Java spellings of the above:** `Toolkit.register` (read/write lock), `McpSource.load(cfg,
+  new McpSource.LoadOptions().onServer(...))` with `McpSource.ServerResult`,
+  `LlmClient.Options.waitForCtx((request, cancelToken) -> answer)` (the token is the run's
+  `CancelToken`, and a cancel also interrupts the thread running it), `Compaction.Options.onCompact`
+  with `Compaction.CompactInfo`, `Tool.hints()` / `Tool.withHints(tool, hints)` and
+  `BeforeToolEvent.hints()`, the builtins config keys `background` (a `BackgroundShells`),
+  `webSearch` (a `WebSearch`) and `notebookEdit`, `McpSource.resourceTools()` (also reachable as
+  `Toolkit.mcpSource()`), `ToolContext.callId()`, `Agent.asToolWith(ctx -> runtimeOptions)` and
+  `RuntimeOptions.waitFor`, `LlmClient.listModels(options)`, `Usage.cacheReadTokens` /
+  `cacheWriteTokens`, `Options.promptCache(new PromptCache())`, `Options.toolTiers(new ToolTiers())`
+  with `toolTierPlan` / `resetToolTiers`, and `StreamEvent.via()`. Java has no context object, so
+  a `WebSearch` provider and `asTool` see cancellation as a thread interrupt (`asTool` also honours
+  `ToolContext.cancel()`).
+- **csharp spellings:** the Go names in PascalCase (`OnServer`, `WaitForCtx`, `ApiKeyEnv`,
+  `OnCompact`, `BackgroundShells`, `ResourceTools`, `AsToolWith`, `ListModels`,
+  `CacheReadTokens` / `CacheWriteTokens`, `PromptCache`, `ToolTiers` with `ToolTierPlan` /
+  `ResetToolTiers`). Not applicable: `OnCompact` gets no cancellation token (the C# `BeforeLLM`
+  hook carries none).
 
 **Elixir has the same host additions now, starting with the API-key fix.** With no `api_key`,
 the Elixir client no longer falls back across `OPENROUTER_API_KEY` / `OPENAI_API_KEY` /
@@ -197,8 +228,8 @@ ports (`openspec/changes/add-host-turn-durability`).
 Not done: java streaming has no cancel entry point (only errors interrupt it; clojure now has a
 cooperative `:cancel` token, see above); elixir
 saves nothing early if the process reading a stream is killed, a leak older than this change.
-Follow-ups not started: a lock on `Toolkit.register`, per-server MCP readiness, a cancellable
-`waitFor`.
+The follow-ups named here (a lock on `Toolkit.register`, per-server MCP readiness, a
+cancellable `waitFor`) have since shipped in all seven ports (see the host additions above).
 
 **Claude Code's MCP configs now load, conversations can live on disk, and an MCP tool that reports
 progress is no longer killed by its timeout.** All three were found by go-agent-cli, a per-folder
