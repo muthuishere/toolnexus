@@ -8,6 +8,8 @@ GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
 
 ## Unreleased
 
+## 0.22.0 — 2026-11-02
+
 **ACP host hooks: decide permissions, watch every update, cancel a turn, and stream (golang first;
 the other ports are pending).** Before, the Go ACP source always picked the first allow option on a
 permission request, showed the host nothing but the final text, could not be cancelled mid-turn,
