@@ -220,7 +220,10 @@ public class McpIdleTimeoutTests
     {
         if (!NodeAvailable()) return null; // skip: fixture needs node
         var fixture = TestFixtures.Fixture("mcp-progress-server.mjs");
-        var cfg = "{\"mcp\":{\"p\":{\"command\":\"node\",\"args\":[" + Json.Stringify(fixture) + "],\"timeout\":300}}}";
+        // The server `timeout` also bounds connect+list (SPEC §2), and a cold `node` spawn plus the
+        // SDK handshake can exceed a few hundred ms on a CI runner, so the idle budget is 1500ms and
+        // each call runs well past it (4000ms) to keep proving "idle, not total".
+        var cfg = "{\"mcp\":{\"p\":{\"command\":\"node\",\"args\":[" + Json.Stringify(fixture) + "],\"timeout\":1500}}}";
         await using var src = await McpSource.LoadAsync(cfg);
         Assert.Equal("connected", src.Status["p"]);
         var tool = Assert.Single(src.Tools);
@@ -230,7 +233,7 @@ public class McpIdleTimeoutTests
     [Fact]
     public async Task ProgressKeepsCallAlivePastTimeout()
     {
-        var r = await CallSlow(new() { ["totalMs"] = 1200, ["intervalMs"] = 100 });
+        var r = await CallSlow(new() { ["totalMs"] = 4000, ["intervalMs"] = 100 });
         if (r == null) return;
         Assert.False(r.IsError, r.Output);
         Assert.Equal(true, Json.ToMap(r.Output)["progressTokenReceived"]);
@@ -239,7 +242,7 @@ public class McpIdleTimeoutTests
     [Fact]
     public async Task SilenceTimesOut()
     {
-        var r = await CallSlow(new() { ["totalMs"] = 1200, ["intervalMs"] = 0 });
+        var r = await CallSlow(new() { ["totalMs"] = 4000, ["intervalMs"] = 0 });
         if (r == null) return;
         Assert.True(r.IsError);
         Assert.Contains("timed out", r.Output);
@@ -248,7 +251,7 @@ public class McpIdleTimeoutTests
     [Fact]
     public async Task WrongTokenDoesNotReset()
     {
-        var r = await CallSlow(new() { ["totalMs"] = 1200, ["intervalMs"] = 100, ["wrongToken"] = true });
+        var r = await CallSlow(new() { ["totalMs"] = 4000, ["intervalMs"] = 100, ["wrongToken"] = true });
         if (r == null) return;
         Assert.True(r.IsError);
         Assert.Contains("timed out", r.Output);
