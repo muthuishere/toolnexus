@@ -149,21 +149,38 @@ defmodule Toolnexus.Tool do
 
   `execute` is `(args :: map, ctx :: Toolnexus.Context.t()) -> Toolnexus.ToolResult.t()`.
   `source` is one of `"mcp" | "skill" | "native" | "http" | "builtin" | "a2a" | "custom"`.
+
+  `hints` (`Toolnexus.ToolHints`, SPEC §4C) say what the tool may do, for a host
+  permission gate in `hooks.before_tool` (the event carries them as `:hints`).
+  `nil` = unknown; treat as mutating. Builtins always carry hints; MCP tools carry
+  them when the server sends annotations. Advisory, and never sent to the model.
   """
   @enforce_keys [:name, :description, :input_schema, :source, :execute]
-  defstruct [:name, :description, :input_schema, :source, :execute]
+  defstruct [:name, :description, :input_schema, :source, :execute, :hints]
 
   @type t :: %__MODULE__{
           name: String.t(),
           description: String.t(),
           input_schema: map(),
           source: String.t(),
-          execute: (map(), Toolnexus.Context.t() -> Toolnexus.ToolResult.t())
+          execute: (map(), Toolnexus.Context.t() -> Toolnexus.ToolResult.t()),
+          hints: Toolnexus.ToolHints.t() | nil
         }
 
   @doc "sanitize(x): replace every character outside [a-zA-Z0-9_-] with `_` (SPEC §0.2)."
   @spec sanitize(String.t()) :: String.t()
   def sanitize(name), do: String.replace(name, ~r/[^a-zA-Z0-9_-]/, "_")
+end
+
+defmodule Toolnexus.ToolHints do
+  @moduledoc """
+  Advisory tool behavior hints (SPEC §4C), named after MCP tool annotations:
+  `read_only` (does not change its environment), `destructive` (may overwrite or
+  delete; meaningful when not read-only), `open_world` (reaches outside the host).
+  """
+  defstruct read_only: false, destructive: false, open_world: false
+
+  @type t :: %__MODULE__{read_only: boolean(), destructive: boolean(), open_world: boolean()}
 end
 
 defmodule Toolnexus.ToolResult do

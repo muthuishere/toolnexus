@@ -37,6 +37,15 @@ defmodule Toolnexus.Agents.Compaction do
       (`ceil(byte_size(json)/4)` summed over messages — an estimator, not a tokenizer).
     * `:flush_to_memory` — when set, inject a pre-compact system reminder to persist durable
       facts via the §7E `memory` tool before the head is summarized (off by default).
+    * `:on_compact` — `(info -> any)`, called after each compaction (never on a no-op) with
+      `%{tokens_before, tokens_after, messages_before, messages_after, summarized, summary,
+      folded}` (token counts from `:count_tokens`; `summary` without the header line;
+      `folded` = the summarized messages verbatim, since the loop saves only the compacted
+      transcript) — enough for a host to show "context compacted" (SPEC §4C).
+
+  The latest user prompt is never summarized away: when a turn is one prompt followed by a
+  long run of tool traffic, the result is `[system?, prompt, summary]`. A compaction that
+  would not make the transcript smaller is a no-op.
   """
 
   @flush_note "Before continuing: if anything from earlier is worth keeping, save it with the memory tool now — the earlier transcript is about to be summarized."
@@ -108,17 +117,20 @@ defmodule Toolnexus.Agents.Compaction do
     count = Keyword.get(opts, :count_tokens, &estimate_tokens/1)
     keep_tail = Keyword.get(opts, :keep_tail, div(max_tokens, 2))
     flush? = Keyword.get(opts, :flush_to_memory, false)
+    on_compact = Keyword.get(opts, :on_compact)
 
     fn %{messages: msgs} ->
-      compact(msgs, max_tokens, keep_tail, count, summarize, flush?)
+      compact(msgs, max_tokens, keep_tail, count, summarize, flush?, on_compact)
     end
   end
 
   # --- internals ---------------------------------------------------------------
 
-  defp compact(msgs, max_tokens, keep_tail, count, summarize, flush?) do
+  defp compact(msgs, max_tokens, keep_tail, count, summarize, flush?, on_compact) do
+    before = count.(msgs)
+
     # Under budget → byte-identical no-op.
-    if count.(msgs) <= max_tokens do
+    if before <= max_tokens do
       nil
     else
       len = length(msgs)
@@ -131,13 +143,47 @@ defmodule Toolnexus.Agents.Compaction do
         # Nothing safely compactible above the preserved head.
         nil
       else
-        # split > head0 ⇒ `older` is always non-empty.
-        older = Enum.slice(msgs, head0, split - head0)
         tail = Enum.drop(msgs, split)
         system = Enum.take(msgs, head0)
-        summary_msg = %{"role" => "system", "content" => @summary_prefix <> summarize.(older)}
-        flush = if flush?, do: [%{"role" => "system", "content" => @flush_note}], else: []
-        %{messages: system ++ [summary_msg] ++ flush ++ tail}
+
+        # The latest user prompt is never summarized away: when the only clean boundary
+        # is the first message after the system prompt (one prompt, then a long agentic
+        # run), keep that prompt verbatim and summarize the work after it.
+        {pinned, older} =
+          if split == len and boundary_at?(msgs, head0),
+            do: {[Enum.at(msgs, head0)], Enum.drop(msgs, head0 + 1)},
+            else: {[], Enum.slice(msgs, head0, split - head0)}
+
+        if older == [] do
+          nil
+        else
+          summary = summarize.(older)
+          summary_msg = %{"role" => "system", "content" => @summary_prefix <> summary}
+          flush = if flush?, do: [%{"role" => "system", "content" => @flush_note}], else: []
+          out = system ++ pinned ++ [summary_msg] ++ flush ++ tail
+          after_ = count.(out)
+
+          cond do
+            # Compaction that would not shrink the transcript is a no-op.
+            after_ >= before ->
+              nil
+
+            true ->
+              if is_function(on_compact, 1) do
+                on_compact.(%{
+                  tokens_before: before,
+                  tokens_after: after_,
+                  messages_before: len,
+                  messages_after: length(out),
+                  summarized: length(older),
+                  summary: summary,
+                  folded: older
+                })
+              end
+
+              %{messages: out}
+          end
+        end
       end
     end
   end

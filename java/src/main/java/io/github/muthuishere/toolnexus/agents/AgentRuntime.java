@@ -430,11 +430,22 @@ public final class AgentRuntime {
         List<Handle> chain = new ArrayList<>();
         for (Handle p = h; p != null; p = p.parent) chain.add(p);
         boolean any = chain.stream().anyMatch(a -> a.def.waitFor != null);
-        if (!any) return null; // no interpreter anywhere ⇒ durable posture
+        // No agent on the chain answers ⇒ the runtime-level waitFor does, as the root (SPEC §4C);
+        // without one either ⇒ durable posture.
+        if (!any && opts.waitFor == null) return null;
         return req -> {
             synchronized (lock) {
                 h.state = Handle.State.SUSPENDED;
                 t(h.id + ": running→suspended (pending \"" + req.kind() + "\": " + req.prompt() + ")");
+            }
+            if (!any) {
+                t(h.id + ": escalate → " + root.id + " answers (\"nearest interpreter\")");
+                Answer ans = opts.waitFor.apply(req);
+                synchronized (lock) {
+                    h.state = Handle.State.RUNNING;
+                    t(h.id + ": suspended→running (Answer ok=" + (ans != null && ans.ok()) + ")");
+                }
+                return ans;
             }
             for (Handle a : chain) {
                 if (a.def.waitFor != null) {

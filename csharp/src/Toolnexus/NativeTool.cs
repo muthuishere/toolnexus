@@ -16,6 +16,9 @@ public sealed class NativeTool : ITool
     public IDictionary<string, object?> InputSchema { get; }
     public string Source { get; }
 
+    /// <summary>(SPEC §4C) Advisory hints for a host permission gate; <c>null</c> = unknown. Settable.</summary>
+    public ToolHints? Hints { get; set; }
+
     private NativeTool(string name, string description, IDictionary<string, object?>? inputSchema,
         Func<IDictionary<string, object?>, ToolContext?, Task<object?>> fn)
     {

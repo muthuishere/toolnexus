@@ -85,7 +85,7 @@ public static partial class BuiltinTools
     public static List<ITool> Create(object? cfg)
     {
         var env = new BuiltinEnv(cfg);
-        return new()
+        var tools = new List<ITool>
         {
             BashTool(env),
             ReadTool(env),
@@ -98,7 +98,39 @@ public static partial class BuiltinTools
             ApplyPatchTool(env),
             TodowriteTool(),
         };
+        // Opt-in tools (SPEC §4C): absent unless the host configures them, so the default ten are unchanged.
+        if (env.Background != null)
+        {
+            tools.Add(BashOutputTool(env.Background));
+            tools.Add(KillShellTool(env.Background));
+        }
+        if (env.WebSearch != null) tools.Add(WebSearchTool(env.WebSearch));
+        if (env.NotebookEdit) tools.Add(NotebookEditTool(env));
+        return tools;
     }
+
+    /// <summary>
+    /// (SPEC §4C) Hints for host permission gates. <c>bash</c> can do anything, so it is
+    /// destructive and open-world. <c>todowrite</c> and <c>question</c> only touch the agent's own
+    /// state / ask the human, so they count as read-only for the host's files and systems.
+    /// </summary>
+    private static readonly Dictionary<string, ToolHints> BuiltinHints = new()
+    {
+        ["bash"] = new(Destructive: true, OpenWorld: true),
+        ["read"] = new(ReadOnly: true),
+        ["write"] = new(Destructive: true),
+        ["edit"] = new(Destructive: true),
+        ["grep"] = new(ReadOnly: true),
+        ["glob"] = new(ReadOnly: true),
+        ["webfetch"] = new(ReadOnly: true, OpenWorld: true),
+        ["question"] = new(ReadOnly: true),
+        ["apply_patch"] = new(Destructive: true),
+        ["todowrite"] = new(ReadOnly: true),
+        ["bash_output"] = new(ReadOnly: true),
+        ["kill_shell"] = new(Destructive: true),
+        ["websearch"] = new(ReadOnly: true, OpenWorld: true),
+        ["notebook_edit"] = new(Destructive: true),
+    };
 
     // -----------------------------------------------------------------------
     // schema helpers
@@ -154,6 +186,7 @@ public static partial class BuiltinTools
         public string Description { get; }
         public IDictionary<string, object?> InputSchema { get; }
         public string Source => "builtin";
+        public ToolHints? Hints { get; }
 
         public BuiltinTool(string name, string description, Dictionary<string, object?> inputSchema,
             Func<IDictionary<string, object?>, ToolContext?, Task<ToolResult>> run)
@@ -161,6 +194,7 @@ public static partial class BuiltinTools
             Name = name;
             Description = description;
             InputSchema = inputSchema;
+            Hints = BuiltinHints.GetValueOrDefault(name);
             _run = run;
         }
 
@@ -262,16 +296,24 @@ public static partial class BuiltinTools
     // individual tools
     // -----------------------------------------------------------------------
 
-    private static ITool BashTool(BuiltinEnv env) => Builtin(
-        "bash",
-        "Run a shell command and return its combined stdout+stderr. Non-zero exit is an error.",
-        Schema(new()
+    private static Dictionary<string, object?> BashProps(BuiltinEnv env)
+    {
+        var props = new Dictionary<string, object?>
         {
             ["command"] = StrProp("The shell command to run"),
             ["workdir"] = StrProp("Working directory (default: process cwd)"),
             ["timeout"] = NumProp("Timeout in milliseconds (default 60000)"),
             ["description"] = StrProp("Human-readable description of the command"),
-        }, "command"),
+        };
+        if (env.Background != null)
+            props["run_in_background"] = BoolProp("Start the command and return at once with a background shell id; read it with bash_output, stop it with kill_shell. No timeout applies.");
+        return props;
+    }
+
+    private static ITool BashTool(BuiltinEnv env) => Builtin(
+        "bash",
+        "Run a shell command and return its combined stdout+stderr. Non-zero exit is an error.",
+        Schema(BashProps(env), "command"),
         async (args, ctx) =>
         {
             var command = Str(args, "command");
@@ -292,6 +334,16 @@ public static partial class BuiltinTools
             }
             var timeout = NumOrNull(args.Get("timeout")) ?? 60_000;
             var meta = new Dictionary<string, object?> { ["shell"] = env.ShellLabel };
+            if (env.Background != null && args.Get("run_in_background") is true)
+            {
+                try
+                {
+                    var id = env.Background.Start(argv, command, workdir, env.KillGraceMs);
+                    meta["backgroundId"] = id;
+                    return ToolResult.Ok($"Started background shell {id}. Read its output with bash_output, stop it with kill_shell.", meta);
+                }
+                catch (Exception e) { return ToolResult.Error($"bash: {e.Message}", meta); }
+            }
 
             var psi = new ProcessStartInfo
             {
@@ -337,7 +389,7 @@ public static partial class BuiltinTools
                 killedTree = JobControl.RequestStop(proc, descendants);
                 try
                 {
-                    using var grace = new CancellationTokenSource(BuiltinEnv.KillGraceMs);
+                    using var grace = new CancellationTokenSource(env.KillGraceMs);
                     await proc.WaitForExitAsync(grace.Token).ConfigureAwait(false);
                 }
                 catch (OperationCanceledException)
@@ -430,7 +482,18 @@ public static partial class BuiltinTools
             if (start > lines.Length) start = lines.Length;
             var count = Math.Min(limit, lines.Length - start);
             if (count < 0) count = 0;
-            return Task.FromResult(ToolResult.Ok(string.Join("\n", lines.Skip(start).Take(count))));
+            var window = string.Join("\n", lines.Skip(start).Take(count));
+            // (SPEC §4C) A window that stops before the end of the file says so in metadata, with
+            // the offset to continue from. The text stays the pinned cross-port bytes. A trailing
+            // newline does not count as a line.
+            var total = lines.Length > 0 && lines[^1].Length == 0 ? lines.Length - 1 : lines.Length;
+            var end = start + count;
+            if (end < total)
+                return Task.FromResult(ToolResult.Ok(window, new Dictionary<string, object?>
+                {
+                    ["truncated"] = true, ["totalLines"] = (long)total, ["nextOffset"] = (long)(end + 1),
+                }));
+            return Task.FromResult(ToolResult.Ok(window));
         });
 
     private static ITool WriteTool(BuiltinEnv env) => Builtin(
@@ -451,9 +514,12 @@ public static partial class BuiltinTools
             catch (Exception e) { return Task.FromResult(ToolResult.Error($"write: {e.Message}")); }
             var dir = Path.GetDirectoryName(Path.GetFullPath(full));
             if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
+            string? before = null;
+            try { if (File.Exists(full)) before = File.ReadAllText(full); } catch { /* unreadable: report as added */ }
             File.WriteAllText(full, content);
             var bytes = Encoding.UTF8.GetByteCount(content);
             var meta = new Dictionary<string, object?> { ["bytes"] = (long)bytes };
+            AddDiffMeta(meta, new[] { ComputeChange(DiffPath(env, p, full), before, content) });
             return Task.FromResult(ToolResult.Ok($"Wrote {bytes} bytes to {p}", meta));
         });
 
@@ -506,6 +572,7 @@ public static partial class BuiltinTools
             }
             File.WriteAllText(full, next);
             var meta = new Dictionary<string, object?> { ["replacements"] = (long)replacements };
+            AddDiffMeta(meta, new[] { ComputeChange(DiffPath(env, p, full), content, next) });
             return Task.FromResult(ToolResult.Ok(
                 $"Edited {p} ({replacements} replacement{(replacements == 1 ? "" : "s")})", meta));
         });
@@ -531,6 +598,9 @@ public static partial class BuiltinTools
             ["path"] = StrProp("Directory to search (default: process cwd)"),
             ["include"] = StrProp("Glob filter for file names"),
             ["limit"] = NumProp("Maximum number of matches (default 100)"),
+            ["context"] = NumProp("Lines of context before and after each match"),
+            ["before"] = NumProp("Lines of context before each match (overrides context)"),
+            ["after"] = NumProp("Lines of context after each match (overrides context)"),
         }, "pattern"),
         (args, _) =>
         {
@@ -553,6 +623,11 @@ public static partial class BuiltinTools
             // sort at all, so the FILESYSTEM chose which matches the model saw. Never break at the
             // cap during the walk: truncating an unordered collection is a CONTENT bug, not a
             // cosmetic one.
+            int before = 0, after = 0;
+            if (NumOrNull(args.Get("context")) is { } cx && cx > 0) before = after = (int)cx;
+            if (NumOrNull(args.Get("before")) is { } bx && bx >= 0) before = (int)bx;
+            if (NumOrNull(args.Get("after")) is { } ax && ax >= 0) after = (int)ax;
+            var fileLines = new Dictionary<string, string[]>(); // only filled when context is asked for
             var hits = new List<(string Rel, int Line, string Text)>();
             foreach (var file in WalkFiles(root))
             {
@@ -562,6 +637,7 @@ public static partial class BuiltinTools
                 try { text = File.ReadAllText(file); }
                 catch { continue; }
                 var lines = text.Split('\n');
+                if (before > 0 || after > 0) fileLines[rel] = lines;
                 // (A28) The emitted path is the RELATIVE, `/`-separated one — the SAME string the
                 // sort keys on. Emitting the native absolute path while sorting on the relative
                 // one would order by one thing and display another, and `\` on Windows would
@@ -576,9 +652,20 @@ public static partial class BuiltinTools
                 var c = SkillSource.CompareCodePoints(a.Rel, b.Rel);
                 return c != 0 ? c : a.Line.CompareTo(b.Line);
             });
-            var matches = hits.Take(limit).Select(h => h.Text).ToList();
-            var meta = new Dictionary<string, object?> { ["count"] = (long)matches.Count };
-            return Task.FromResult(ToolResult.Ok(string.Join("\n", matches), meta));
+            var total = hits.Count;
+            var kept = hits.Take(limit).ToList();
+            var outLines = before == 0 && after == 0
+                ? kept.Select(h => h.Text).ToList()
+                : GrepWithContext(kept, fileLines, before, after);
+            var meta = new Dictionary<string, object?> { ["count"] = (long)kept.Count };
+            if (total > kept.Count)
+            {
+                // (SPEC §4C) Say the list was cut, and by how much, in metadata. The text stays the
+                // pinned cross-port output.
+                meta["truncated"] = true;
+                meta["total"] = (long)total;
+            }
+            return Task.FromResult(ToolResult.Ok(string.Join("\n", outLines), meta));
         });
 
     private static ITool GlobTool(BuiltinEnv env) => Builtin(
@@ -885,6 +972,13 @@ public static partial class BuiltinTools
             // The paths live INSIDE the patch text, not in the arguments, so a host cannot
             // rewrite them from a hook — the one case that genuinely needs the base directory
             // to be library-side (ADR 0034 D2).
+            var given = ops.Select(op => op switch
+            {
+                AddOp a => a.Path,
+                DeleteOp d => d.Path,
+                UpdateOp u => u.Path,
+                _ => "",
+            }).ToList();
             try
             {
                 ops = ops.Select(op => op switch
@@ -900,23 +994,28 @@ public static partial class BuiltinTools
             // Stage every write/delete first; only touch the filesystem once all hunks apply.
             var writes = new List<(string Path, string Content)>();
             var deletes = new List<string>();
+            var changes = new List<FileChange>();
             try
             {
-                foreach (var op in ops)
+                for (var oi = 0; oi < ops.Count; oi++)
                 {
-                    switch (op)
+                    switch (ops[oi])
                     {
                         case AddOp a:
                             if (File.Exists(a.Path)) throw new Exception($"file already exists: {a.Path}");
                             writes.Add((a.Path, a.Content));
+                            changes.Add(ComputeChange(DiffPath(env, given[oi], a.Path), null, a.Content));
                             break;
                         case DeleteOp d:
                             if (!File.Exists(d.Path)) throw new Exception($"file not found: {d.Path}");
                             deletes.Add(d.Path);
+                            changes.Add(ComputeChange(DiffPath(env, given[oi], d.Path), File.ReadAllText(d.Path), null));
                             break;
                         case UpdateOp u:
                             var content = File.ReadAllText(u.Path);
-                            writes.Add((u.Path, ApplyUpdate(content, u.Body)));
+                            var updated = ApplyUpdate(content, u.Body);
+                            writes.Add((u.Path, updated));
+                            changes.Add(ComputeChange(DiffPath(env, given[oi], u.Path), content, updated));
                             break;
                     }
                 }
@@ -943,6 +1042,7 @@ public static partial class BuiltinTools
                 ["updated"] = (long)ops.Count(o => o is UpdateOp),
                 ["deleted"] = (long)ops.Count(o => o is DeleteOp),
             };
+            AddDiffMeta(meta, changes);
             return Task.FromResult(ToolResult.Ok(
                 $"Applied patch: {ops.Count} file operation{(ops.Count == 1 ? "" : "s")}", meta));
         });

@@ -157,16 +157,24 @@ public class Example {
             {"mcpServers":{
               "ok_local":{"type":"local","command":["npx","server"]},
               "ok_remote":{"type":"remote","url":"https://example.com/mcp"},
-              "off":{"type":"local","command":[],"enabled":false}}}
+              "off":{"type":"local","command":["x"],"enabled":false}}}
             """);
         if (!good.isEmpty()) throw new AssertionError(good);
 
         List<String> bad = problems("""
             {"mcpServers":{
-              "broken_remote":{"type":"remote"},
-              "broken_local":{"type":"local","command":[]}}}
+              "broken_remote":{"type":"remote"}}}
             """);
-        if (bad.size() != 2) throw new AssertionError(bad);
+        if (bad.size() != 1) throw new AssertionError(bad);
+
+        // An empty local command fails the parse itself, naming the server (SPEC §2).
+        boolean rejected = false;
+        try {
+            McpSource.parseConfig("{\"mcpServers\":{\"broken_local\":{\"type\":\"local\",\"command\":[]}}}");
+        } catch (IllegalArgumentException e) {
+            rejected = e.getMessage().contains("broken_local");
+        }
+        if (!rejected) throw new AssertionError("expected an invalid-command failure");
 
         // Malformed JSON is a hard failure, not a silently empty config.
         boolean threw = false;

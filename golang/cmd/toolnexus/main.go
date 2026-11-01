@@ -31,7 +31,7 @@ run flags:
   --style string      "openai" | "anthropic" (default "openai").
   --model string      Model id, e.g. openai/gpt-4o-mini
   --system string     System prompt prepended to the skills catalog.
-  --api-key string    API key (else env: OPENROUTER_API_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY).
+  --api-key string    API key (else the env var for the --base-url host: OPENAI_API_KEY for api.openai.com, ANTHROPIC_API_KEY for api.anthropic.com, OPENROUTER_API_KEY for openrouter.ai).
   --once string       Run a single prompt then exit (no REPL).
 
 tools flags:

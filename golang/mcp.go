@@ -7,6 +7,7 @@ package toolnexus
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -185,8 +186,8 @@ func parseMcpBytes(data []byte) (McpConfig, error) {
 	// as the server map.
 	for _, key := range []string{"mcpServers", "servers", "mcp"} {
 		if servers, ok := raw[key]; ok {
-			var cfg McpConfig
-			if err := json.Unmarshal(servers, &cfg); err != nil {
+			cfg, err := decodeServers(servers)
+			if err != nil {
 				return nil, fmt.Errorf("parse mcp config %q: %w", key, err)
 			}
 			return cfg, nil
@@ -203,11 +204,93 @@ func parseMcpBytes(data []byte) (McpConfig, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parse mcp config: %w", err)
 	}
-	var cfg McpConfig
-	if err := json.Unmarshal(stripped, &cfg); err != nil {
+	cfg, err := decodeServers(stripped)
+	if err != nil {
 		return nil, fmt.Errorf("parse mcp config: %w", err)
 	}
 	return cfg, nil
+}
+
+// decodeServers decodes the server map, normalizing each entry's `command`
+// (a string or an array of strings) plus optional `args` (array of strings,
+// appended) into the Command argv. Errors name the server. A remote entry
+// ignores `args`. No shell is involved: the argv is spawned as-is. (§2)
+func decodeServers(data []byte) (McpConfig, error) {
+	var rawServers map[string]json.RawMessage
+	if err := json.Unmarshal(data, &rawServers); err != nil {
+		return nil, err
+	}
+	if rawServers == nil {
+		return nil, nil
+	}
+	cfg := make(McpConfig, len(rawServers))
+	for name, body := range rawServers {
+		var entry struct {
+			ServerConfig
+			Command json.RawMessage `json:"command"`
+			Args    json.RawMessage `json:"args"`
+		}
+		if err := json.Unmarshal(body, &entry); err != nil {
+			return nil, fmt.Errorf("mcp server %q: %w", name, err)
+		}
+		sc := entry.ServerConfig
+		argv, err := normalizeCommand(name, entry.Command, entry.Args, sc.isRemote())
+		if err != nil {
+			return nil, err
+		}
+		sc.Command = argv
+		cfg[name] = sc
+	}
+	return cfg, nil
+}
+
+func isJSONNull(raw json.RawMessage) bool {
+	return len(raw) == 0 || string(raw) == "null"
+}
+
+func normalizeCommand(name string, command, args json.RawMessage, remote bool) ([]string, error) {
+	if isJSONNull(command) {
+		// No command: a local server fails at connect time ("has no command"), as before.
+		return nil, nil
+	}
+	var argv []string
+	var str string
+	if err := json.Unmarshal(command, &str); err == nil {
+		if str == "" {
+			return nil, fmt.Errorf("mcp server %q: invalid command: empty string", name)
+		}
+		argv = []string{str}
+	} else {
+		var arr []any
+		if err := json.Unmarshal(command, &arr); err != nil {
+			return nil, fmt.Errorf("mcp server %q: invalid command: must be a string or an array of strings", name)
+		}
+		if len(arr) == 0 {
+			return nil, fmt.Errorf("mcp server %q: invalid command: empty array", name)
+		}
+		for _, el := range arr {
+			s, ok := el.(string)
+			if !ok {
+				return nil, fmt.Errorf("mcp server %q: invalid command: array elements must be strings", name)
+			}
+			argv = append(argv, s)
+		}
+	}
+	if remote || isJSONNull(args) {
+		return argv, nil
+	}
+	var arr []any
+	if err := json.Unmarshal(args, &arr); err != nil {
+		return nil, fmt.Errorf("mcp server %q: invalid args: must be an array of strings", name)
+	}
+	for _, el := range arr {
+		s, ok := el.(string)
+		if !ok {
+			return nil, fmt.Errorf("mcp server %q: invalid args: elements must be strings", name)
+		}
+		argv = append(argv, s)
+	}
+	return argv, nil
 }
 
 // ExpandEnvHeaders returns a NEW map with each header VALUE having ${ENV_VAR}
@@ -341,13 +424,59 @@ func buildInputSchema(def mcp.Tool) JSONSchema {
 	return schema
 }
 
-func convertTool(server string, def mcp.Tool, client *mcpclient.Client, defTimeout time.Duration) Tool {
+// progressRouter dispatches a client's notifications/progress to the in-flight
+// tools/call that owns the token (§2 idle timeout). One per client; unmatched or
+// unknown tokens are dropped, so one chatty call never holds another open.
+type progressRouter struct {
+	mu      sync.Mutex
+	pending map[string]func()
+}
+
+var progressTokenSeq atomic.Uint64
+
+func newProgressRouter(client *mcpclient.Client) *progressRouter {
+	r := &progressRouter{pending: map[string]func(){}}
+	client.OnNotification(func(n mcp.JSONRPCNotification) {
+		if n.Method != "notifications/progress" {
+			return
+		}
+		tok, ok := n.Params.AdditionalFields["progressToken"]
+		if !ok || tok == nil {
+			return
+		}
+		r.mu.Lock()
+		reset := r.pending[fmt.Sprint(tok)]
+		r.mu.Unlock()
+		if reset != nil {
+			reset()
+		}
+	})
+	return r
+}
+
+func (r *progressRouter) register(token string, reset func()) func() {
+	r.mu.Lock()
+	r.pending[token] = reset
+	r.mu.Unlock()
+	return func() {
+		r.mu.Lock()
+		delete(r.pending, token)
+		r.mu.Unlock()
+	}
+}
+
+// errMcpIdleTimeout is the cancel cause when a tools/call sees `timeout` of
+// silence (no matching progress notification and no response).
+var errMcpIdleTimeout = errors.New("mcp tool call timed out")
+
+func convertTool(server string, def mcp.Tool, client *mcpclient.Client, defTimeout time.Duration, router *progressRouter) Tool {
 	name := def.Name
 	return Tool{
 		Name:        Sanitize(server) + "_" + Sanitize(def.Name),
 		Description: def.Description,
 		InputSchema: buildInputSchema(def),
 		Source:      SourceMCP,
+		Hints:       mcpHints(def.Annotations),
 		Execute: func(args map[string]any, tctx *ToolContext) (ToolResult, error) {
 			meta := map[string]any{"server": server}
 			parent := context.Background()
@@ -360,8 +489,16 @@ func convertTool(server string, def mcp.Tool, client *mcpclient.Client, defTimeo
 					timeout = time.Duration(tctx.Timeout) * time.Millisecond
 				}
 			}
-			ctx, cancel := context.WithTimeout(parent, timeout)
-			defer cancel()
+			// Idle timeout (§2): a context.WithTimeout deadline cannot be extended,
+			// so a resettable timer cancels the call after `timeout` of silence; each
+			// progress notification carrying this call's token re-arms it. Parent
+			// cancellation still propagates through WithCancelCause.
+			ctx, cancel := context.WithCancelCause(parent)
+			defer cancel(nil)
+			idle := time.AfterFunc(timeout, func() {
+				cancel(fmt.Errorf("%w after %dms without progress", errMcpIdleTimeout, timeout.Milliseconds()))
+			})
+			defer idle.Stop()
 
 			if args == nil {
 				args = map[string]any{}
@@ -369,9 +506,21 @@ func convertTool(server string, def mcp.Tool, client *mcpclient.Client, defTimeo
 			req := mcp.CallToolRequest{}
 			req.Params.Name = name
 			req.Params.Arguments = args
+			token := fmt.Sprintf("toolnexus-%d", progressTokenSeq.Add(1))
+			req.Params.Meta = &mcp.Meta{ProgressToken: token}
+			if router != nil {
+				defer router.register(token, func() {
+					if ctx.Err() == nil {
+						idle.Reset(timeout)
+					}
+				})()
+			}
 
 			result, err := client.CallTool(ctx, req)
 			if err != nil {
+				if cause := context.Cause(ctx); cause != nil && errors.Is(cause, errMcpIdleTimeout) {
+					return ToolResult{Output: cause.Error(), IsError: true, Metadata: meta}, nil
+				}
 				return ToolResult{Output: err.Error(), IsError: true, Metadata: meta}, nil
 			}
 			// Collect parts BEFORE any branch: the structuredContent short-circuit
@@ -402,6 +551,13 @@ type McpSource struct {
 	Tools  []Tool
 	Status map[string]McpStatus
 	close  func()
+	// servers are the connected clients by server name (for ResourceTools).
+	servers map[string]mcpServerConn
+}
+
+type mcpServerConn struct {
+	client  *mcpclient.Client
+	timeout time.Duration
 }
 
 // Close disconnects every connected client.
@@ -496,6 +652,12 @@ func connectServer(ctx context.Context, name string, cfg ServerConfig, waitFor f
 		return nil, fmt.Errorf("failed to start stdio transport: %w", err)
 	}
 	client := mcpclient.NewClient(stdioTransport, elicitationOptions(waitFor)...)
+	// client.Start on the already-started transport is idempotent; it is what wires the
+	// transport's notification handler to client.OnNotification (progress, §2 idle timeout).
+	if err := client.Start(context.Background()); err != nil {
+		client.Close()
+		return nil, fmt.Errorf("failed to start stdio client: %w", err)
+	}
 	if err := initClient(ctx, client, timeout); err != nil {
 		client.Close()
 		return nil, err
@@ -590,27 +752,74 @@ func LoadMcp(input any, waitFor ...func(Request) (Answer, error)) (*McpSource, e
 // whole load and returns ctx.Err(). LoadMcp keeps its signature and delegates here
 // with context.Background().
 func LoadMcpWithContext(ctx context.Context, input any, waitFor ...func(Request) (Answer, error)) (*McpSource, error) {
-	config, err := ParseMcpConfig(input)
-	if err != nil {
-		return nil, err
-	}
 	var wf func(Request) (Answer, error)
 	if len(waitFor) > 0 {
 		wf = waitFor[0]
 	}
+	return LoadMcpWithOptions(ctx, input, McpLoadOptions{WaitFor: wf})
+}
+
+// McpServerResult is one server's outcome, reported by McpLoadOptions.OnServer
+// the moment that server finishes — it does not wait for slower servers.
+type McpServerResult struct {
+	Name   string
+	Status McpStatus
+	// Tools are this server's converted tools (nil unless Status is connected).
+	// They stay usable until the returned McpSource is closed.
+	Tools []Tool
+	// Err is why the server failed (nil when connected or disabled).
+	Err error
+}
+
+// McpLoadOptions configures LoadMcpWithOptions.
+type McpLoadOptions struct {
+	// WaitFor bridges MCP elicitation onto §10, as in LoadMcpWithContext.
+	WaitFor func(Request) (Answer, error)
+	// OnServer, when set, is called once per server as soon as it is connected,
+	// failed or found disabled, so a host can register a fast server's tools
+	// (Toolkit.Register) while a slow server is still connecting. Calls are
+	// serialized (never concurrent with each other) but come from load
+	// goroutines; keep them short. golang only for now; other ports pending.
+	OnServer func(McpServerResult)
+}
+
+// LoadMcpWithOptions is LoadMcpWithContext plus per-server readiness
+// (McpLoadOptions.OnServer). It still returns only after every server has
+// finished, with the same McpSource, status and cancellation semantics: if ctx
+// is cancelled the whole load returns ctx.Err() and closes every client —
+// including ones whose tools OnServer already handed out.
+func LoadMcpWithOptions(ctx context.Context, input any, opts McpLoadOptions) (*McpSource, error) {
+	config, err := ParseMcpConfig(input)
+	if err != nil {
+		return nil, err
+	}
+	wf := opts.WaitFor
 
 	var (
 		mu      sync.Mutex
+		cbMu    sync.Mutex
+		servers = map[string]mcpServerConn{}
 		tools   []Tool
 		status  = map[string]McpStatus{}
 		clients []*mcpclient.Client
 		wg      sync.WaitGroup
 	)
+	report := func(r McpServerResult) {
+		if opts.OnServer == nil {
+			return
+		}
+		cbMu.Lock()
+		defer cbMu.Unlock()
+		opts.OnServer(r)
+	}
 
 	for name, cfg := range config {
 		name, cfg := name, cfg
 		if !cfg.isEnabled() {
+			mu.Lock()
 			status[name] = StatusDisabled
+			mu.Unlock()
+			report(McpServerResult{Name: name, Status: StatusDisabled})
 			continue
 		}
 		wg.Add(1)
@@ -622,6 +831,7 @@ func LoadMcpWithContext(ctx context.Context, input any, waitFor ...func(Request)
 				status[name] = StatusFailed
 				mu.Unlock()
 				log.Printf("[toolnexus] MCP server %q failed: %v", name, cErr)
+				report(McpServerResult{Name: name, Status: StatusFailed, Err: cErr})
 				return
 			}
 			defs, lErr := listTools(ctx, client, cfg.timeout())
@@ -631,18 +841,22 @@ func LoadMcpWithContext(ctx context.Context, input any, waitFor ...func(Request)
 				status[name] = StatusFailed
 				mu.Unlock()
 				log.Printf("[toolnexus] MCP server %q list tools failed: %v", name, lErr)
+				report(McpServerResult{Name: name, Status: StatusFailed, Err: lErr})
 				return
 			}
 			defs = applyToolsFilter(name, defs, cfg.Tools)
+			router := newProgressRouter(client)
 			converted := make([]Tool, 0, len(defs))
 			for _, def := range defs {
-				converted = append(converted, convertTool(name, def, client, cfg.timeout()))
+				converted = append(converted, convertTool(name, def, client, cfg.timeout(), router))
 			}
 			mu.Lock()
 			tools = append(tools, converted...)
 			clients = append(clients, client)
+			servers[name] = mcpServerConn{client: client, timeout: cfg.timeout()}
 			status[name] = StatusConnected
 			mu.Unlock()
+			report(McpServerResult{Name: name, Status: StatusConnected, Tools: converted})
 		}()
 	}
 	wg.Wait()
@@ -656,8 +870,9 @@ func LoadMcpWithContext(ctx context.Context, input any, waitFor ...func(Request)
 	}
 
 	return &McpSource{
-		Tools:  tools,
-		Status: status,
+		Tools:   tools,
+		Status:  status,
+		servers: servers,
 		close: func() {
 			for _, c := range clients {
 				_ = c.Close()
@@ -699,7 +914,9 @@ func ListMcpTools(ctx context.Context, input any) (*McpInventory, error) {
 	for name, cfg := range config {
 		name, cfg := name, cfg
 		if !cfg.isEnabled() {
+			mu.Lock()
 			status[name] = StatusDisabled
+			mu.Unlock()
 			continue
 		}
 		wg.Add(1)
@@ -737,4 +954,27 @@ func ListMcpTools(ctx context.Context, input any) (*McpInventory, error) {
 		return nil, ctx.Err()
 	}
 	return &McpInventory{Tools: byServer, Status: status}, nil
+}
+
+// mcpHints maps MCP tool annotations to ToolHints. No hint fields at all ⇒ nil
+// (unknown). Defaults follow the MCP spec: readOnlyHint false, destructiveHint
+// true, openWorldHint true when absent.
+func mcpHints(a mcp.ToolAnnotation) *ToolHints {
+	if a.ReadOnlyHint == nil && a.DestructiveHint == nil && a.OpenWorldHint == nil {
+		return nil
+	}
+	h := ToolHints{Destructive: true, OpenWorld: true}
+	if a.ReadOnlyHint != nil {
+		h.ReadOnly = *a.ReadOnlyHint
+	}
+	if a.DestructiveHint != nil {
+		h.Destructive = *a.DestructiveHint
+	}
+	if a.OpenWorldHint != nil {
+		h.OpenWorld = *a.OpenWorldHint
+	}
+	if h.ReadOnly {
+		h.Destructive = false
+	}
+	return &h
 }

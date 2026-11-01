@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import difflib
 import json
 import os
 import re
@@ -24,7 +25,7 @@ import urllib.request
 from typing import Any, Awaitable, Callable, Optional, Union
 
 from .content import MEDIA_TYPES
-from .types import JSONSchema, Tool, ToolContext, ToolResult, pending
+from .types import JSONSchema, Tool, ToolContext, ToolHints, ToolResult, pending
 
 # A single global builtin toggle (mirrors MCP is_enabled precedence). The dict
 # form also allows a ``tools`` name→bool map for per-tool enable/disable, plus
@@ -39,8 +40,9 @@ from .types import JSONSchema, Tool, ToolContext, ToolResult, pending
 #                      base_dir, plus Windows reserved device names
 BuiltinsConfig = Union[bool, dict]
 
-# How long a job gets between "please stop" and "stop". Fixed, and identical in
-# every port, so a timeout means the same thing everywhere.
+# How long a job gets between "please stop" and "stop" when the host sets no
+# ``kill_grace_ms`` / ``killGraceMs``. Identical in every port, so a timeout
+# means the same thing everywhere unless the host says otherwise.
 KILL_GRACE_MS = 2000
 
 _WIN_RESERVED = {
@@ -109,6 +111,14 @@ class _BuiltinEnv:
         obj = cfg if isinstance(cfg, dict) else {}
         self.base_dir: str = str(obj.get("base_dir") or obj.get("baseDir") or "")
         self.confine: bool = bool(obj.get("confine_to_base_dir") or obj.get("confineToBaseDir"))
+        # SIGTERM -> SIGKILL wait on POSIX; absent or 0 means the default. No
+        # effect on Windows, where the job is terminated at once.
+        grace = _num(obj.get("kill_grace_ms") or obj.get("killGraceMs"))
+        self.kill_grace_s: float = (grace if grace and grace > 0 else KILL_GRACE_MS) / 1000
+        # Opt-in tools (§4C, builtin_extras.py) — all absent unless the host sets them.
+        self.background: Any = obj.get("background")
+        self.web_search: Any = obj.get("web_search") or obj.get("webSearch")
+        self.notebook: bool = bool(obj.get("notebook_edit") or obj.get("notebookEdit"))
         given = obj.get("shell")
         self.shell_error: Optional[Exception] = None
         if given:
@@ -347,6 +357,10 @@ def _bash_tool(env: _BuiltinEnv) -> Tool:
             workdir = env.resolve_path(str(args["workdir"])) if args.get("workdir") else env.dir()
         except Exception as e:  # a builtin reports, it never raises across the boundary
             return _err(f"bash: {e}")
+        if env.background is not None and args.get("run_in_background") is True:
+            from .builtin_extras import bash_background_start
+
+            return bash_background_start(env, argv, command, workdir)
         timeout_ms = _num(args.get("timeout"))
         if timeout_ms is None:
             timeout_ms = 60_000
@@ -373,7 +387,7 @@ def _bash_tool(env: _BuiltinEnv) -> Tool:
                 # SIGTERM removes its temp directories; one that gets SIGKILL does not.
                 killed = _kill_job(proc, True)
                 try:
-                    out_bytes, _ = proc.communicate(timeout=KILL_GRACE_MS / 1000)
+                    out_bytes, _ = proc.communicate(timeout=env.kill_grace_s)
                 except subprocess.TimeoutExpired:
                     killed = _kill_job(proc, False) or killed
                     out_bytes, _ = proc.communicate()
@@ -396,21 +410,30 @@ def _bash_tool(env: _BuiltinEnv) -> Tool:
             # communicate() return and the thread finish, instead of leaving the
             # machine loaded with work from a run that was cancelled.
             _kill_job(holder.get("proc"), True)
-            await asyncio.sleep(KILL_GRACE_MS / 1000)
+            await asyncio.sleep(env.kill_grace_s)
             _kill_job(holder.get("proc"), False)
             raise
 
+    props: dict[str, Any] = {
+        "command": {"type": "string", "description": "The shell command to run"},
+        "workdir": {"type": "string", "description": "Working directory (default: process cwd)"},
+        "timeout": {"type": "number", "description": "Timeout in milliseconds (default 60000)"},
+        "description": {"type": "string", "description": "Human-readable description of the command"},
+    }
+    if env.background is not None:
+        props["run_in_background"] = {
+            "type": "boolean",
+            "description": (
+                "Start the command and return at once with a background shell id; read it with "
+                "bash_output, stop it with kill_shell. No timeout applies."
+            ),
+        }
     return _builtin(
         "bash",
         "Run a shell command and return its combined stdout+stderr. Non-zero exit is an error.",
         {
             "type": "object",
-            "properties": {
-                "command": {"type": "string", "description": "The shell command to run"},
-                "workdir": {"type": "string", "description": "Working directory (default: process cwd)"},
-                "timeout": {"type": "number", "description": "Timeout in milliseconds (default 60000)"},
-                "description": {"type": "string", "description": "Human-readable description of the command"},
-            },
+            "properties": props,
             "required": ["command"],
             "additionalProperties": False,
         },
@@ -464,7 +487,15 @@ def _read_tool(env: _BuiltinEnv) -> Tool:
         start = offset - 1
         lim = _num(args.get("limit"))
         limit = max(0, int(lim)) if lim is not None else len(lines) - start
-        return _ok("\n".join(lines[start : start + limit]))
+        out = "\n".join(lines[start : start + limit])
+        # A window that stops before the end of the file says so in metadata, with the
+        # offset to continue from (§4C). The text stays the pinned cross-port bytes. A
+        # trailing newline does not count as a line.
+        end = min(len(lines), start + limit)
+        total = len(lines) - 1 if lines and lines[-1] == "" else len(lines)
+        if end < total:
+            return _ok(out, {"truncated": True, "totalLines": total, "nextOffset": end + 1})
+        return _ok(out)
 
     return _builtin(
         "read",
@@ -501,11 +532,14 @@ def _write_tool(env: _BuiltinEnv) -> Tool:
             full = env.resolve_path(p)
         except Exception as e:  # noqa: BLE001
             return _err(f"write: {e}")
+        before = _read_or_none(full)
         os.makedirs(os.path.dirname(os.path.abspath(full)), exist_ok=True)
         with open(full, "w", encoding="utf-8") as f:
             f.write(content)
         byte_len = len(content.encode("utf-8"))
-        return _ok(f"Wrote {byte_len} bytes to {p}", {"bytes": byte_len})
+        meta: dict[str, Any] = {"bytes": byte_len}
+        meta.update(_diff_metadata([_file_change(env, p, full, before, content)]))
+        return _ok(f"Wrote {byte_len} bytes to {p}", meta)
 
     return _builtin(
         "write",
@@ -557,7 +591,9 @@ def _edit_tool(env: _BuiltinEnv) -> Tool:
         with open(full, "w", encoding="utf-8") as f:
             f.write(nxt)
         plural = "" if n == 1 else "s"
-        return _ok(f"Edited {p} ({n} replacement{plural})", {"replacements": n})
+        meta: dict[str, Any] = {"replacements": n}
+        meta.update(_diff_metadata([_file_change(env, p, full, content, nxt)]))
+        return _ok(f"Edited {p} ({n} replacement{plural})", meta)
 
     return _builtin(
         "edit",
@@ -593,16 +629,28 @@ def _grep_tool(env: _BuiltinEnv) -> Tool:
         include = str(args["include"]) if args.get("include") else None
         lim = _num(args.get("limit"))
         limit = int(lim) if lim is not None else 100
-        matches: list[str] = []
+        # §4C context lines: `context` sets both sides; `before`/`after` override it.
+        before = after = 0
+        c = _num(args.get("context"))
+        if c is not None and c > 0:
+            before = after = int(c)
+        b = _num(args.get("before"))
+        if b is not None and b >= 0:
+            before = int(b)
+        a = _num(args.get("after"))
+        if a is not None and a >= 0:
+            after = int(a)
+        hits: list[tuple[str, int, str]] = []
+        total = 0
+        file_lines: dict[str, list[str]] = {}  # only filled when context is asked for
         # A28: the emitted path and the ORDERING key are the SAME string — the path
         # relative to `root` with `/` as the separator on every platform — so the tool
         # can never order by one thing and display another. Files come out of
         # `_walk_files` in that order already; within a file, `enumerate` yields lines
         # in LINE-NUMBER ASCENDING order, so the whole `file:line:text` sequence is
-        # pinned, not just which files appear.
+        # pinned, not just which files appear. Matches past `limit` are only COUNTED,
+        # so the metadata can say the list was cut (§4C).
         for file in _walk_files(root):
-            if len(matches) >= limit:
-                break
             rel = os.path.relpath(file, root).replace(os.sep, "/")
             if include and not _match_glob(rel, include):
                 continue
@@ -613,11 +661,39 @@ def _grep_tool(env: _BuiltinEnv) -> Tool:
                 continue
             lines = text.split("\n")
             for i, line in enumerate(lines):
-                if len(matches) >= limit:
-                    break
                 if regex.search(line):
-                    matches.append(f"{rel}:{i + 1}:{line}")
-        return _ok("\n".join(matches), {"count": len(matches)})
+                    total += 1
+                    if len(hits) < limit:
+                        hits.append((rel, i + 1, line))
+                        if before or after:
+                            file_lines[rel] = lines
+        if not before and not after:
+            out_lines = [f"{rel}:{n}:{line}" for rel, n, line in hits]
+        else:
+            # ripgrep-style: match lines path:N:text, context lines path-N-text,
+            # "--" between groups that do not touch.
+            match_at = {(rel, n) for rel, n, _ in hits}
+            out_lines = []
+            last_rel, last_line = "", 0
+            for rel, n, _ in hits:
+                lines = file_lines[rel]
+                count = len(lines) - 1 if lines and lines[-1] == "" else len(lines)
+                lo, hi = max(1, n - before), min(count, n + after)
+                if rel == last_rel and lo <= last_line + 1:
+                    lo = last_line + 1
+                elif last_rel:
+                    out_lines.append("--")
+                for k in range(lo, hi + 1):
+                    sep = ":" if (rel, k) in match_at else "-"
+                    out_lines.append(f"{rel}{sep}{k}{sep}{lines[k - 1]}")
+                if hi > last_line or rel != last_rel:
+                    last_line = hi
+                last_rel = rel
+        meta: dict[str, Any] = {"count": len(hits)}
+        if total > len(hits):
+            meta["truncated"] = True
+            meta["total"] = total
+        return _ok("\n".join(out_lines), meta)
 
     return _builtin(
         "grep",
@@ -629,6 +705,9 @@ def _grep_tool(env: _BuiltinEnv) -> Tool:
                 "path": {"type": "string", "description": "Directory to search (default: process cwd)"},
                 "include": {"type": "string", "description": "Glob filter for file names"},
                 "limit": {"type": "number", "description": "Maximum number of matches (default 100)"},
+                "context": {"type": "number", "description": "Lines of context before and after each match"},
+                "before": {"type": "number", "description": "Lines of context before each match (overrides context)"},
+                "after": {"type": "number", "description": "Lines of context after each match (overrides context)"},
             },
             "required": ["pattern"],
             "additionalProperties": False,
@@ -919,6 +998,56 @@ def _apply_update(content: str, body: list[str]) -> str:
     return result
 
 
+def _read_or_none(full: str) -> Optional[str]:
+    try:
+        with open(full, "r", encoding="utf-8") as f:
+            return f.read()
+    except (OSError, UnicodeDecodeError):
+        return None
+
+
+def _file_change(
+    env: _BuiltinEnv, given: str, full: str, before: Optional[str], after: Optional[str]
+) -> dict[str, Any]:
+    """One file's entry for ``metadata.files`` plus its unified-diff hunk.
+    ``before`` None means the file did not exist (added); ``after`` None means
+    it was removed (deleted). Paths are relative to ``base_dir`` when set.
+    """
+    if env.base_dir:
+        rel = os.path.relpath(os.path.abspath(full), os.path.abspath(env.base_dir))
+    else:
+        rel = given
+    rel = rel.replace(os.sep, "/")
+    a_lines = (before or "").splitlines(keepends=True)
+    b_lines = (after or "").splitlines(keepends=True)
+    # Ensure every line ends in a newline so the diff stays a valid unified diff.
+    a_lines = [ln if ln.endswith("\n") else ln + "\n" for ln in a_lines]
+    b_lines = [ln if ln.endswith("\n") else ln + "\n" for ln in b_lines]
+    diff_lines = list(
+        difflib.unified_diff(
+            a_lines,
+            b_lines,
+            fromfile="/dev/null" if before is None else "a/" + rel,
+            tofile="/dev/null" if after is None else "b/" + rel,
+        )
+    )
+    additions = deletions = 0
+    for ln in diff_lines[2:]:
+        if ln.startswith("+"):
+            additions += 1
+        elif ln.startswith("-"):
+            deletions += 1
+    status = "added" if before is None else ("deleted" if after is None else "modified")
+    return {
+        "file": {"path": rel, "status": status, "additions": additions, "deletions": deletions},
+        "diff": "".join(diff_lines),
+    }
+
+
+def _diff_metadata(changes: list[dict[str, Any]]) -> dict[str, Any]:
+    return {"files": [c["file"] for c in changes], "diff": "".join(c["diff"] for c in changes)}
+
+
 def _apply_patch_tool(env: _BuiltinEnv) -> Tool:
     async def run(args: dict[str, Any], ctx: Optional[ToolContext]) -> ToolResult:
         patch_text = str(args.get("patchText") or "")
@@ -934,6 +1063,7 @@ def _apply_patch_tool(env: _BuiltinEnv) -> Tool:
         # base directory to be library-side (ADR 0034 D2).
         try:
             for op in ops:
+                op["given"] = op["path"]
                 op["path"] = env.resolve_path(op["path"])
         except Exception as e:  # noqa: BLE001
             return _err(f"apply_patch: {e}")
@@ -941,20 +1071,27 @@ def _apply_patch_tool(env: _BuiltinEnv) -> Tool:
         # Stage every write/delete first; touch the filesystem only if all apply.
         writes: list[tuple[str, str]] = []
         deletes: list[str] = []
+        changes: list[dict[str, Any]] = []
         try:
             for op in ops:
                 if op["type"] == "add":
                     if os.path.exists(op["path"]):
                         raise ValueError(f"file already exists: {op['path']}")
                     writes.append((op["path"], op["content"]))
+                    changes.append(_file_change(env, op["given"], op["path"], None, op["content"]))
                 elif op["type"] == "delete":
                     if not os.path.exists(op["path"]):
                         raise ValueError(f"file not found: {op['path']}")
                     deletes.append(op["path"])
+                    changes.append(
+                        _file_change(env, op["given"], op["path"], _read_or_none(op["path"]) or "", None)
+                    )
                 else:
                     with open(op["path"], "r", encoding="utf-8") as f:
                         current = f.read()
-                    writes.append((op["path"], _apply_update(current, op["body"])))
+                    updated = _apply_update(current, op["body"])
+                    writes.append((op["path"], updated))
+                    changes.append(_file_change(env, op["given"], op["path"], current, updated))
         except Exception as e:  # noqa: BLE001
             return _err(f"apply_patch: {e}")
 
@@ -969,14 +1106,13 @@ def _apply_patch_tool(env: _BuiltinEnv) -> Tool:
                 pass
 
         plural = "" if len(ops) == 1 else "s"
-        return _ok(
-            f"Applied patch: {len(ops)} file operation{plural}",
-            {
-                "added": sum(1 for o in ops if o["type"] == "add"),
-                "updated": sum(1 for o in ops if o["type"] == "update"),
-                "deleted": sum(1 for o in ops if o["type"] == "delete"),
-            },
-        )
+        meta = {
+            "added": sum(1 for o in ops if o["type"] == "add"),
+            "updated": sum(1 for o in ops if o["type"] == "update"),
+            "deleted": sum(1 for o in ops if o["type"] == "delete"),
+        }
+        meta.update(_diff_metadata(changes))
+        return _ok(f"Applied patch: {len(ops)} file operation{plural}", meta)
 
     return _builtin(
         "apply_patch",
@@ -999,7 +1135,7 @@ def create_builtin_tools(cfg: Optional[BuiltinsConfig] = None) -> list[Tool]:
     apply_patch, todowrite.
     """
     env = _BuiltinEnv(cfg)
-    return [
+    tools = [
         _bash_tool(env),
         _read_tool(env),
         _write_tool(env),
@@ -1011,6 +1147,40 @@ def create_builtin_tools(cfg: Optional[BuiltinsConfig] = None) -> list[Tool]:
         _apply_patch_tool(env),
         _todowrite_tool(),
     ]
+    # Opt-in tools (§4C), appended after the ten only when the host configures them.
+    from .builtin_extras import bash_output_tool, kill_shell_tool, notebook_edit_tool, websearch_tool
+
+    if env.background is not None:
+        tools += [bash_output_tool(env), kill_shell_tool(env)]
+    if env.web_search is not None:
+        tools.append(websearch_tool(env.web_search))
+    if env.notebook:
+        tools.append(notebook_edit_tool(env))
+    for t in tools:
+        t.hints = ToolHints(**BUILTIN_HINTS[t.name])
+    return tools
+
+
+# What each builtin may do, for host permission gates (§4C). bash can do anything, so
+# it is destructive and open-world. todowrite and question only touch the agent's own
+# state / ask the human, so they count as read-only for the host's files and systems.
+BUILTIN_HINTS: dict[str, dict[str, bool]] = {
+    "bash": {"destructive": True, "open_world": True},
+    "read": {"read_only": True},
+    "write": {"destructive": True},
+    "edit": {"destructive": True},
+    "grep": {"read_only": True},
+    "glob": {"read_only": True},
+    "webfetch": {"read_only": True, "open_world": True},
+    "question": {"read_only": True},
+    "apply_patch": {"destructive": True},
+    "todowrite": {"read_only": True},
+    # opt-in (builtin_extras.py)
+    "bash_output": {"read_only": True},
+    "kill_shell": {"destructive": True},
+    "websearch": {"read_only": True, "open_world": True},
+    "notebook_edit": {"destructive": True},
+}
 
 
 def builtin_shell(cfg: Optional[BuiltinsConfig] = None) -> list[str]:

@@ -165,13 +165,54 @@
       (:command m)   "local"
       :else          "unknown")))
 
+(defn- config-error [server-name field why]
+  (ex-info (str "mcp server \"" server-name "\": invalid " field ": " why)
+           {:error "config" :server server-name :field field}))
+
+(defn- string-vec
+  "`xs` as a vector of strings, or nil when it is not a sequential of strings."
+  [xs]
+  (when (and (sequential? xs) (every? string? xs)) (vec xs)))
+
+(defn normalize-command
+  "SPEC §2 `command` + `args` (the Claude shape) — the argv to spawn.
+
+  `command` is a non-empty string or a non-empty vector of strings; `args`, when
+  present, is a vector of strings appended to it. A remote server ignores
+  `args`. No shell is involved: the argv goes to the spawner as-is. An absent
+  command is nil (a local server without one fails at connect, as before).
+  Anything else throws, naming the server and the field."
+  [server-name {:keys [command args]} remote?]
+  (when (some? command)
+    (let [argv (cond
+                 (string? command)
+                 (if (= "" command)
+                   (throw (config-error server-name "command" "empty string"))
+                   [command])
+
+                 (sequential? command)
+                 (cond
+                   (empty? command)
+                   (throw (config-error server-name "command" "empty array"))
+                   (string-vec command) (string-vec command)
+                   :else
+                   (throw (config-error server-name "command" "array elements must be strings")))
+
+                 :else
+                 (throw (config-error server-name "command" "must be a string or an array of strings")))]
+      (cond
+        (or remote? (nil? args)) argv
+        (string-vec args)        (into argv args)
+        :else (throw (config-error server-name "args" "must be an array of strings"))))))
+
 (defn- one-server [server-name m]
-  (let [raw-headers (:headers m)]
+  (let [raw-headers (:headers m)
+        kind        (server-kind m)]
     {:name        (key-str server-name)
-     :kind        (server-kind m)
+     :kind        kind
      ;; `disabled:true` and `enabled:false` are the same statement.
      :enabled     (not (or (true? (:disabled m)) (false? (:enabled m))))
-     :command     (vec (:command m))
+     :command     (vec (normalize-command (key-str server-name) m (= "remote" kind)))
      :cwd         (:cwd m)
      ;; `environment` with `env` as the documented alias.
      :environment (or (:environment m) (:env m) {})
@@ -185,7 +226,10 @@
   server maps, sorted by name so two hosts cannot disagree about order.
 
   Accepts `mcpServers` | `servers` | `mcp`; with no wrapper the object itself is
-  the server map, minus the reserved sibling keys."
+  the server map, minus the reserved sibling keys.
+
+  Throws ex-info naming the server for an invalid `command` / `args` shape —
+  a config error is the caller's to fix, not a server to isolate."
   [config]
   (let [cfg     (if (string? config) (json/read-str config {:key-fn keyword}) config)
         servers (or (:mcpServers cfg) (:servers cfg) (:mcp cfg)
@@ -304,7 +348,17 @@
                   (swap! state update :junk inc)
 
                   (nil? (:id msg))
-                  (swap! state update :notifications conj (str (:method msg)))
+                  (let [method (str (:method msg))
+                        token  (get-in msg [:params :progressToken])]
+                    (swap! state
+                           (fn [s]
+                             (cond-> (update s :notifications conj method)
+                               ;; §2 idle timeout: ONLY a progress notification
+                               ;; carrying an in-flight call's own token resets
+                               ;; that call's budget. Any other token is noise.
+                               (and (= "notifications/progress" method)
+                                    (contains? (:progress s) token))
+                               (assoc-in [:progress token] (ktime/mono-ms))))))
 
                   (contains? (:pending (deref state)) (:id msg))
                   (swap! state assoc-in [:inbox (:id msg)] msg)
@@ -323,33 +377,47 @@
   "Poll for this id's response until it lands, the transport closes, or the
   budget runs out. Polling rather than `promise`/`deref`-with-timeout because a
   timed deref is the one concurrency primitive whose portability across these
-  hosts is not established; an atom and `koine.time/sleep!` are."
-  [state id timeout-ms]
-  (let [deadline (+ (ktime/mono-ms) (long timeout-ms))]
+  hosts is not established; an atom and `koine.time/sleep!` are.
+
+  With a progress `token` (§2, tools/call) the budget is an IDLE timeout: the
+  deadline is `timeout-ms` after the later of the call's start and the last
+  matching `notifications/progress` the reader recorded under that token. A
+  closed transport (disconnect = cancellation) still wins over any progress."
+  ([state id timeout-ms] (await-response! state id timeout-ms nil))
+  ([state id timeout-ms token]
+  (let [started (ktime/mono-ms)
+        budget  (long timeout-ms)]
     (loop []
       (let [s   (deref state)
-            msg (get-in s [:inbox id])]
+            msg (get-in s [:inbox id])
+            last-seen (max started (long (or (when token (get-in s [:progress token])) 0)))]
         (cond
           (some? msg) {:ok msg}
           (:closed? s) {:error (or (:close-reason s) "closed")}
-          (>= (ktime/mono-ms) deadline) {:error "timeout" :timeout-ms timeout-ms}
-          :else (do (ktime/sleep! 2) (recur)))))))
+          (>= (ktime/mono-ms) (+ last-seen budget)) {:error "timeout" :timeout-ms timeout-ms}
+          :else (do (ktime/sleep! 2) (recur))))))))
 
 (defn- stdio-rpc!
   "One request/response over stdio. Registers the id BEFORE writing — a fast
   peer can answer before `send-line!` has returned, and an unregistered id is
   dropped as unmatched."
   [child state lock method params timeout-ms]
-  (let [id (next-id!)]
+  (let [id    (next-id!)
+        ;; §2 — every tools/call asks for progress, so a server is PERMITTED to
+        ;; report liveness. A fresh opaque token per call: a notification for any
+        ;; other token must not keep this call alive.
+        token (when (= "tools/call" method) (str "tn-progress-" id))
+        params (if token (assoc-in params [:_meta :progressToken] token) params)]
     (if (:closed? @state)
       {:error (or (:close-reason @state) "closed")}
       (do
-        (swap! state update :pending conj id)
+        (swap! state (fn [s] (cond-> (update s :pending conj id)
+                               token (assoc-in [:progress token] 0))))
         (try
           (with-write-lock! lock
             (fn [] (proc/send-line! child (json/write-str (cond-> {:jsonrpc "2.0" :id id :method method}
                                                             params (assoc :params params))))))
-          (let [res (await-response! state id timeout-ms)]
+          (let [res (await-response! state id timeout-ms token)]
             (cond
               (rpc-failed? res) res
               (get-in res [:ok :error]) {:error "rpc-error"
@@ -361,7 +429,8 @@
           (finally
             (swap! state (fn [s] (-> s
                                      (update :pending disj id)
-                                     (update :inbox dissoc id))))))))))
+                                     (update :inbox dissoc id)
+                                     (update :progress dissoc token))))))))))
 
 (defn stdio-transport
   "Spawn the child and hand back a transport. §2: merged env = process env +
@@ -374,7 +443,7 @@
                           (cond-> {}
                             cwd          (assoc :dir cwd)
                             (seq environment) (assoc :env environment)))
-        state (atom {:pending #{} :inbox {} :closed? false :close-reason nil
+        state (atom {:pending #{} :inbox {} :progress {} :closed? false :close-reason nil
                      :notifications [] :server-requests [] :unmatched 0 :junk 0})
         lock  (atom false)
         respond! (fn [msg]
@@ -568,7 +637,11 @@
   failure, and §0.3 does not allow that to cross this boundary."
   [url headers session wait-for method params timeout-ms]
   (let [id   (next-id!)
-        st   (atom {:msgs [] :head nil :done false :error nil})
+        ;; §2 idle timeout, same contract as stdio: a fresh token per tools/call,
+        ;; and only a progress notification for THAT token extends the deadline.
+        token  (when (= "tools/call" method) (str "tn-progress-" id))
+        params (if token (assoc-in params [:_meta :progressToken] token) params)
+        st   (atom {:msgs [] :head nil :done false :error nil :progress-at 0})
         body (json/write-str (cond-> {:jsonrpc "2.0" :id id :method method}
                                params (assoc :params params)))
         hdrs (request-headers headers session)
@@ -583,10 +656,18 @@
                        ;; discrimination — ids cannot do it, since the server
                        ;; numbers its requests in its own space and may well
                        ;; reuse one of ours.
-                       (if (and (some? (:id m)) (:method m))
+                       (cond
+                         (and (some? (:id m)) (:method m))
                          (when-let [reply (server-request-response wait-for m)]
                            (try (post-server-response! url headers session reply)
                                 (catch Throwable _ nil)))
+
+                         (and token (nil? (:id m))
+                              (= "notifications/progress" (:method m))
+                              (= token (get-in m [:params :progressToken])))
+                         (swap! st assoc :progress-at (ktime/mono-ms))
+
+                         :else
                          (swap! st update :msgs conj m)))))]
     ;; run-async!, not `future` — same reason as `start-reader!`: library code
     ;; must not hold a consumer's process open on a non-daemon pool thread.
@@ -595,7 +676,8 @@
        (try (stream/sse-post url hdrs body on-event {:on-open on-open})
             (catch Throwable e (swap! st assoc :error (or (ex-message e) (str e))))
             (finally (swap! st assoc :done true)))))
-    (let [deadline (+ (ktime/mono-ms) (long timeout-ms))
+    (let [started  (ktime/mono-ms)
+          budget   (long timeout-ms)
           ;; Stop at OUR answer, not at end-of-stream: a server is entitled to
           ;; hold the stream open with keep-alives after it has responded, and
           ;; waiting for the close would spend the caller's whole budget on a
@@ -605,7 +687,8 @@
                        (cond
                          (some (fn [m] (= id (:id m))) (:msgs s)) s
                          (:done s)                                s
-                         (>= (ktime/mono-ms) deadline)            (assoc s :timed-out true)
+                         (>= (ktime/mono-ms) (+ (max started (long (:progress-at s))) budget))
+                         (assoc s :timed-out true)
                          :else (do (ktime/sleep! 2) (recur)))))]
       (cond
         (:timed-out final) {:error "timeout" :timeout-ms timeout-ms}
@@ -760,6 +843,22 @@
             (recur nxt acc (inc page))
             {:ok acc}))))))
 
+(defn mcp-hints
+  "SPEC §4C — MCP tool annotations as Tool hints. No hint fields at all ⇒ nil
+  (unknown). MCP's defaults when a field is absent: readOnlyHint false,
+  destructiveHint true, openWorldHint true; a read-only tool is never
+  destructive. Advisory — a server can mislabel its tools."
+  [annotations]
+  (let [a  (if (map? annotations) annotations {})
+        ro (get a :readOnlyHint)
+        de (get a :destructiveHint)
+        ow (get a :openWorldHint)]
+    (when-not (and (nil? ro) (nil? de) (nil? ow))
+      (let [read-only (true? ro)]
+        {:read-only   read-only
+         :destructive (and (not read-only) (if (nil? de) true (true? de)))
+         :open-world  (if (nil? ow) true (true? ow))}))))
+
 (defn- uniform-tool
   "A listed MCP tool def becomes a §0.1 Tool. `execute` closes over the
   transport, so a tool from a stdio server and a tool from a remote server are
@@ -770,6 +869,7 @@
                        :description  (or (:description t) "")
                        :input-schema (or (:inputSchema t) {:type "object"})
                        :source       "mcp"
+                       :hints        (mcp-hints (:annotations t))
                        :execute
                        (fn execute-mcp
                          ([args] (execute-mcp args nil))
@@ -900,6 +1000,7 @@
                     {:name        (:name server)
                      :status      "connected"
                      :transport   transport
+                     :timeout-ms  timeout-ms
                      :server-info (get-in init [:ok :result :serverInfo])
                      ;; Bare `sort-by` is CORRECT here, unlike `parse-config`'s
                      ;; above: every name in this list came out of
@@ -937,6 +1038,39 @@
 ;; the source
 ;; ---------------------------------------------------------------------------
 
+(def ^:private report-lock (atom false))
+
+(defn- connect-reporting
+  "SPEC §4C per-server readiness: connect every server CONCURRENTLY and call
+  `on-server` `{:name :status :tools :error}` the moment each one is connected,
+  failed or found disabled — a fast server never waits for a slow one. Calls
+  are serialized. The result is still collected in name order, so the returned
+  source is exactly what the serial path builds.
+
+  (No disabled-status race to fix here: statuses are built from the returned
+  connections after every server finished, never written to a shared map.)"
+  [servers conn-opts on]
+  (let [report! (fn [c]
+                  (loop []
+                    (if (compare-and-set! report-lock false true)
+                      (try (on (cond-> {:name (:name c) :status (:status c) :tools (vec (:tools c))}
+                                 (:message c) (assoc :error (:message c))))
+                           (catch Throwable _ nil)
+                           (finally (reset! report-lock false)))
+                      (do (ktime/sleep! 1) (recur)))))
+        ps (mapv (fn [srv]
+                   (let [p (promise)]
+                     (proc/run-async!
+                      (fn []
+                        (let [c (try (connect srv conn-opts)
+                                     (catch Throwable e
+                                       {:name (:name srv) :status "failed" :tools []
+                                        :message (or (ex-message e) (str e))}))]
+                          (try (report! c) (finally (deliver p c))))))
+                     p))
+                 servers)]
+    (mapv deref ps)))
+
 (defn from-config
   "SPEC §2 — the whole source in one call. `config` is a JSON string or a map.
 
@@ -947,10 +1081,19 @@
   better — it is slower — but because it is DETERMINISTIC, and §0's whole
   premise is that two runtimes given the same fixture produce the same output.
   A tool-name collision resolved by whichever server answered first is exactly
-  the kind of drift this repo exists to prevent."
+  the kind of drift this repo exists to prevent.
+
+  `conn-opts` may carry `:on-server` (SPEC §4C): `(fn [{:keys [name status tools
+  error]}])`, called once per server as soon as it finishes. With it set the
+  servers connect concurrently; the returned source is still built in name
+  order and is the same value."
   ([config] (from-config config nil))
   ([config conn-opts]
-  (let [conns (mapv (fn [srv] (connect srv conn-opts)) (parse-config config))]
+  (let [servers (parse-config config)
+        on      (:on-server conn-opts)
+        conns   (if on
+                  (connect-reporting servers conn-opts on)
+                  (mapv (fn [srv] (connect srv conn-opts)) servers))]
     ;; Bare `sort-by` again, and again deliberately: `mcp-tool-name` sanitized
     ;; every one of these to `[a-zA-Z0-9_-]+`. See `connect`.
     {:tools       (->> conns (mapcat :tools) (sort-by :name) vec)
@@ -964,3 +1107,101 @@
   [result]
   (doseq [c (:connections result)] (disconnect c))
   nil)
+
+;; ---------------------------------------------------------------------------
+;; SPEC §4C — MCP resource tools (opt-in)
+;; ---------------------------------------------------------------------------
+
+(def ^:private read-only-hints {:read-only true :destructive false :open-world false})
+
+(defn- rpc-error-text [f]
+  (str (:error f)
+       (when-let [m (:message f)] (str ": " m))
+       (when-let [c (:code f)] (str " (code " c ")"))))
+
+(defn resource-tools
+  "`list_mcp_resources` and `read_mcp_resource`, bound to the CONNECTED servers
+  of a `from-config` result (or a seq of connections). Both are read-only. They
+  stop working once the source is disconnected. A source with no connected
+  server still returns both tools; they report that no server is connected."
+  [source]
+  (let [conns (->> (if (map? source) (:connections source) source)
+                   (filter #(= "connected" (:status %)))
+                   (reduce (fn [acc c] (assoc acc (:name c) c)) {}))
+        names (tool/sort-strings (keys conns))
+        missing (fn [server]
+                  (str "no connected MCP server " (pr-str server)
+                       " (connected: " (str/join ", " names) ")"))
+        rpc (fn [c method params]
+              ((:rpc! (:transport c)) method params (or (:timeout-ms c) default-timeout-ms)))
+        list-tool
+        (tool/tool
+         {:name "list_mcp_resources"
+          :description "List the resources MCP servers offer (uri, name, description, mimeType). Optionally for one server."
+          :input-schema {:type "object"
+                         :properties {:server {:type "string" :description "Only this server (default: all)"}}
+                         :additionalProperties false}
+          :source "mcp"
+          :hints read-only-hints
+          :execute
+          (fn list-resources
+            ([args] (list-resources args nil))
+            ([args _ctx]
+             (let [want (str (or (:server args) ""))]
+               (if (and (not= "" want) (not (contains? conns want)))
+                 (tool/failure (str "list_mcp_resources: " (missing want)))
+                 (let [rows (mapcat
+                             (fn [n]
+                               (let [res (rpc (get conns n) "resources/list" {})]
+                                 (if (rpc-failed? res)
+                                   [{:line (str n ": error: " (rpc-error-text res))}]
+                                   (map (fn [r]
+                                          {:line (str n " " (:uri r)
+                                                      (when (seq (str (:name r))) (str " — " (:name r)))
+                                                      (when (seq (str (:mimeType r))) (str " (" (:mimeType r) ")"))
+                                                      (when (seq (str (:description r))) (str ": " (:description r))))
+                                           :item {:server n :uri (str (:uri r)) :name (str (or (:name r) ""))
+                                                  :mimeType (str (or (:mimeType r) ""))
+                                                  :description (str (or (:description r) ""))}})
+                                        (get-in res [:ok :result :resources])))))
+                             (if (= "" want) names [want]))
+                       items (vec (keep :item rows))]
+                   (if (empty? rows)
+                     (tool/success "No resources." {:count 0})
+                     (tool/success (str/join "\n" (map :line rows))
+                                   {:count (count items) :resources items})))))))})
+        read-tool
+        (tool/tool
+         {:name "read_mcp_resource"
+          :description "Read one MCP resource by server and uri. Text comes back as text; binary content is described, not inlined."
+          :input-schema {:type "object"
+                         :properties {:server {:type "string" :description "The MCP server name"}
+                                      :uri    {:type "string" :description "The resource uri"}}
+                         :required ["server" "uri"]
+                         :additionalProperties false}
+          :source "mcp"
+          :hints read-only-hints
+          :execute
+          (fn read-resource
+            ([args] (read-resource args nil))
+            ([args _ctx]
+             (let [server (str (or (:server args) ""))
+                   uri    (str (or (:uri args) ""))
+                   c      (get conns server)]
+               (cond
+                 (nil? c)   (tool/failure (str "read_mcp_resource: " (missing server)))
+                 (= "" uri) (tool/failure "read_mcp_resource: uri is required")
+                 :else
+                 (let [res (rpc c "resources/read" {:uri uri})]
+                   (if (rpc-failed? res)
+                     (tool/failure (str "read_mcp_resource: " (rpc-error-text res)))
+                     (tool/success
+                      (str/join "\n"
+                                (keep (fn [rc]
+                                        (cond
+                                          (string? (:text rc)) (:text rc)
+                                          (string? (:blob rc))
+                                          (str "[binary " (:mimeType rc) ", " (count (:blob rc)) " base64 chars]")))
+                                      (get-in res [:ok :result :contents])))
+                      {:server server :uri uri})))))))})]
+    [list-tool read-tool]))

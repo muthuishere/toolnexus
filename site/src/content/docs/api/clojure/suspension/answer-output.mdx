@@ -121,7 +121,7 @@ over hand-rolling the map for exactly the reason ADR 0026 exists.
 
 (def llm
   (client/create-client
-    {:base-url "http://mock.local"
+    {:base-url "http://mock.local" :api-key "test-key"
      :style    "openai"
      :model    "gpt-4o-mini"
      :http-client (mock-http)

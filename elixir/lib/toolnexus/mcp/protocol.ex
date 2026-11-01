@@ -90,7 +90,18 @@ defmodule Toolnexus.Mcp.Protocol do
     do: request(id, "tools/list", if(cursor, do: %{"cursor" => cursor}, else: %{}))
 
   def tools_call_request(id, name, args),
-    do: request(id, "tools/call", %{"name" => name, "arguments" => args || %{}})
+    do:
+      request(id, "tools/call", %{
+        "name" => name,
+        "arguments" => args || %{},
+        "_meta" => %{"progressToken" => progress_token(id)}
+      })
+
+  @doc """
+  The per-call `progressToken` attached to `tools/call` (SPEC §2 idle timeout):
+  derived from the JSON-RPC id, so it is unique per in-flight call.
+  """
+  def progress_token(id), do: "toolnexus-#{id}"
 
   @doc "Reply to an inbound `ping`."
   def ping_response(id), do: response(id, %{})

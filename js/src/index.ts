@@ -14,6 +14,7 @@ export * from "./adapters.js"
 export * from "./translate.js"
 export * from "./toolkit.js"
 export * from "./client.js"
+export * from "./store.js"
 export * from "./classifier.js"
 export * as agents from "./agents/index.js"
 // Simple judgments (§8B, add-judge-adapters). `judge.noul/choice/score` are the NAMED builders
@@ -42,3 +43,7 @@ export {
   type GateOutcome,
   type Policy,
 } from "./judge.js"
+export * from "./promptcache.js"
+export * from "./tooltiers.js"
+export * from "./models.js"
+export * from "./builtin_extras.js"

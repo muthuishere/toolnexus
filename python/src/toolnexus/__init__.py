@@ -50,6 +50,8 @@ from .client import (
     Hooks,
     HttpTransport,
     InMemoryConversationStore,
+    FileConversationStore,
+    ConversationEntry,
     InProcessTransport,
     MetricEvent,
     OnMetric,
@@ -149,11 +151,19 @@ from .mcp_source import (
     expand_env_headers,
     is_enabled,
     is_remote,
+    normalize_command,
     list_mcp_tools,
     load_mcp,
     load_mcp_with_context,
     parse_mcp_config,
+    McpServerResult,
+    OnServer,
+    mcp_hints,
 )
+from .builtin_extras import BackgroundShellInfo, BackgroundShells, WebSearchResult
+from .client import ModelInfo, list_models
+from .prompt_cache import PromptCacheOptions
+from .tool_tiers import TIER_CORE, TIER_DEFERRED, TIER_LISTED, ToolTier, ToolTierOptions
 from .mcp_serve import (
     MCPServeConfig,
     OnCall,
@@ -190,6 +200,7 @@ from .types import (
     Request,
     Tool,
     ToolContext,
+    ToolHints,
     ToolResult,
     ToolSource,
     auth_required,
@@ -201,6 +212,22 @@ from .types import (
 )
 
 __all__ = [
+    # host engine asks + prompt cache (SPEC §4C, §8)
+    "ToolHints",
+    "McpServerResult",
+    "OnServer",
+    "mcp_hints",
+    "BackgroundShells",
+    "BackgroundShellInfo",
+    "WebSearchResult",
+    "ModelInfo",
+    "list_models",
+    "PromptCacheOptions",
+    "ToolTierOptions",
+    "ToolTier",
+    "TIER_CORE",
+    "TIER_LISTED",
+    "TIER_DEFERRED",
     # acp (ADR 0031, issue #96)
     "ACPClient",
     "ACPError",
@@ -249,6 +276,7 @@ __all__ = [
     "expand_env_headers",
     "is_enabled",
     "is_remote",
+    "normalize_command",
     "list_mcp_tools",
     "load_mcp",
     "load_mcp_with_context",
@@ -317,6 +345,8 @@ __all__ = [
     "ErrorInfo",
     "ErrorTier",
     "InMemoryConversationStore",
+    "FileConversationStore",
+    "ConversationEntry",
     "Hooks",
     "HttpTransport",
     "InProcessTransport",

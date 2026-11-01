@@ -47,6 +47,78 @@ public static class Json
         }
     }
 
+    /// <summary>
+    /// The bytes of Go's <c>json.MarshalIndent(v, "", "  ")</c>: object keys sorted (ordinal) at
+    /// every level, two-space indent, and <c>&lt;</c>, <c>&gt;</c>, <c>&amp;</c>, U+2028, U+2029
+    /// escaped as <c>\u003c</c> etc. Used where a port must print the same bytes as Go (tool_search).
+    /// </summary>
+    public static string GoIndent(object? value)
+    {
+        var sb = new System.Text.StringBuilder();
+        WriteGo(sb, Normalize(value), "");
+        return sb.ToString();
+    }
+
+    private static void WriteGo(System.Text.StringBuilder sb, object? v, string pad)
+    {
+        var inner = pad + "  ";
+        switch (v)
+        {
+            case null: sb.Append("null"); break;
+            case string s: WriteGoString(sb, s); break;
+            case bool b: sb.Append(b ? "true" : "false"); break;
+            case Dictionary<string, object?> d:
+                if (d.Count == 0) { sb.Append("{}"); break; }
+                sb.Append("{\n");
+                var first = true;
+                foreach (var k in d.Keys.OrderBy(k => k, StringComparer.Ordinal))
+                {
+                    if (!first) sb.Append(",\n");
+                    first = false;
+                    sb.Append(inner);
+                    WriteGoString(sb, k);
+                    sb.Append(": ");
+                    WriteGo(sb, d[k], inner);
+                }
+                sb.Append('\n').Append(pad).Append('}');
+                break;
+            case List<object?> l:
+                if (l.Count == 0) { sb.Append("[]"); break; }
+                sb.Append("[\n");
+                for (var i = 0; i < l.Count; i++)
+                {
+                    if (i > 0) sb.Append(",\n");
+                    sb.Append(inner);
+                    WriteGo(sb, l[i], inner);
+                }
+                sb.Append('\n').Append(pad).Append(']');
+                break;
+            default: sb.Append(JsonSerializer.Serialize(v, Compact)); break;
+        }
+    }
+
+    private static void WriteGoString(System.Text.StringBuilder sb, string s)
+    {
+        sb.Append('"');
+        foreach (var c in s)
+        {
+            switch (c)
+            {
+                case '"': sb.Append("\\\""); break;
+                case '\\': sb.Append("\\\\"); break;
+                case '\n': sb.Append("\\n"); break;
+                case '\r': sb.Append("\\r"); break;
+                case '\t': sb.Append("\\t"); break;
+                case '\b': sb.Append("\\b"); break;
+                case '\f': sb.Append("\\f"); break;
+                case '<' or '>' or '&' or '\u2028' or '\u2029' or < (char)0x20:
+                    sb.Append("\\u").Append(((int)c).ToString("x4")); break;
+                default: sb.Append(c); break;
+            }
+        }
+        sb.Append('"');
+    }
+
     /// <summary>Parse a JSON string into the plain CLR object model. Returns the raw text on failure.</summary>
     public static object? ParseLoose(string? text)
     {

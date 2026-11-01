@@ -16,6 +16,9 @@ dist/
 # Go
 golang/bin/
 
+# Rust
+rust/target/
+
 # OS / editor
 .DS_Store
 *.log

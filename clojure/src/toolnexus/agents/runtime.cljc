@@ -487,6 +487,11 @@
                           that agent's def sets its own. Forwarded verbatim
     :on-metric            §8 observability sink, same resolution, resolved
                           INDEPENDENTLY of `:hooks`
+    :wait-for             the runtime-level §10 interpreter (SPEC §4C): answers a
+                          suspension when no agent on the handle's chain has its
+                          own `:wait-for`. Absent ⇒ unchanged (no authority ⇒ the
+                          suspension goes durable). `as-tool-with` sets it so a
+                          child's asks reach the parent turn's bridge
     :on-budget            the optional §7D host budget callback,
                           `(fn [info] \"stop\"|\"extend\"|\"suspend\")`. Consulted
                           ONLY when a limit would stop a turn; absent ⇒ the limit
@@ -864,14 +869,22 @@
   relays its child's Request upward untouched, and the root — with none either —
   returns `pending` to the host."
   [rt id def-map]
-  (when-let [f (:wait-for def-map)]
-    (fn [req]
-      (let [p (get-in req [:data :path])
-            path (if (sequential? p) (str/join "/" p) id)]
-        (transact! rt (fn [st] [(trace-in st (str path ": escalate → " id
-                                                  " answers (\"nearest interpreter\")"))
-                                nil]))
-        (f req)))))
+  (let [own (:wait-for def-map)
+        ;; SPEC §4C: the runtime's own interpreter answers ONLY when no agent on
+        ;; this handle's chain has one, so "nearest interpreter wins" still holds.
+        f   (or own
+                (when-let [rf (:wait-for (:opts rt))]
+                  (when-not (some (fn [h] (:wait-for (:def h)))
+                                  (rest (ancestors-of @(:state rt) id)))
+                    rf)))]
+    (when f
+      (fn [req]
+        (let [p (get-in req [:data :path])
+              path (if (sequential? p) (str/join "/" p) id)]
+          (transact! rt (fn [st] [(trace-in st (str path ": escalate → " (if own id "runtime")
+                                                    " answers (\"nearest interpreter\")"))
+                                  nil]))
+          (f req))))))
 
 (defn- build-client
   "The handle's §8 client. The runtime BUILDS it, which is precisely why `:hooks`
@@ -1676,3 +1689,72 @@
             {:output  (if (= "done" (:status r)) (:text r) (str "[" (:status r) "] " (:text r)))
              :isError (boolean (:isError r))
              :metadata {:agent def-name :turns (:turns r) :total-tokens (:total-tokens r)}})))})))
+
+;; ---------------------------------------------------------------------------
+;; SPEC §4C — an agent as a tool, under the parent turn's gates
+;; ---------------------------------------------------------------------------
+
+(defn- cancel-reason [token]
+  (cond (nil? token) nil
+        (fn? token)  (token)
+        :else        @token))
+
+(defn as-tool-with
+  "An AgentDef (a map with `:name`) as a Tool whose runtime options are built PER
+  CALL from the calling tool's context: `(per tool-ctx)` → `create-runtime`
+  options. Set `:hooks` (the same `:before-tool` permission gate — it also sees
+  the child's tool calls), `:wait-for` (the same ask bridge) and `:on-metric`
+  there. A def's own `:hooks` replaces the runtime's for that agent, so leave it
+  unset when the gate must hold.
+
+  Each call runs the agent once in a fresh runtime and returns ONLY its final
+  text plus `{:agent :turns :total-tokens}`. When the calling turn is cancelled
+  (the ctx's `:cancel` token) the child is closed and the tool returns a
+  `cancelled: …` error result at once."
+  [def-map per]
+  (let [nm (str (:name def-map))]
+    (native/native-tool
+     {:name         (tool/sanitize nm)
+      :description  (or (:does def-map) "")
+      :input-schema {:type "object"
+                     :properties {:prompt {:type "string" :description "The task"}}
+                     :required ["prompt"]}
+      :ctx?         true
+      :run
+      (fn [args ctx]
+        (let [token (:cancel ctx)
+              meta  (fn [r] {:agent nm :turns (or (:turns r) 0) :total-tokens (or (:total-tokens r) 0)})]
+          (if-let [r0 (cancel-reason token)]
+            {:output (str "cancelled: " r0) :isError true :metadata (meta {})}
+            (let [rt   (create-runtime (assoc (or (per ctx) {}) :registry {nm (assoc def-map :name nm)}))
+                  done (promise)]
+              (proc/run-async!
+               (fn [] (deliver done (try (run-agent rt nm (str (:prompt args)))
+                                         (catch Throwable e
+                                           (result "error" (or (ex-message e) (str e)) true 0 0))))))
+              (loop []
+                (cond
+                  (realized? done)
+                  (let [r @done]
+                    (if (= "pending" (:status r))
+                      (client/suspend (:pending r) (:prompt (:pending r)))
+                      {:output   (if (= "done" (:status r)) (:text r) (str "[" (:status r) "] " (:text r)))
+                       :isError  (boolean (:isError r))
+                       :metadata (meta r)}))
+
+                  (cancel-reason token)
+                  (let [reason (cancel-reason token)]
+                    ;; close in the background: a child blocked in a round trip
+                    ;; lands at its next checkpoint, and the caller must not wait
+                    (proc/run-async! (fn [] (try (close rt root {:force true :reason "cancelled"})
+                                                 (catch Throwable _ nil))))
+                    {:output (str "cancelled: " (if (string? reason) reason "the calling turn was cancelled"))
+                     :isError true :metadata (meta {})})
+
+                  :else (do (ktime/sleep! 10) (recur))))))))})))
+
+(defn as-tool
+  "`as-tool-with` with the same runtime options on every call. The calling
+  turn's cancellation still cancels the child."
+  [def-map opts]
+  (as-tool-with def-map (fn [_ctx] opts)))

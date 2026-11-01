@@ -176,3 +176,75 @@
       (is (not (:isError r)) (:output r))
       (is (= "sub/a.txt:1:needle" (:output r)))
       (is (not (str/includes? (:output r) "\\"))))))
+
+;; ---------------------------------------------------------------------------
+;; SPEC §4A killGraceMs (add-host-turn-durability)
+;; ---------------------------------------------------------------------------
+;; A job that ignores SIGTERM, with a TERM-ignoring background descendant. With
+;; killGraceMs 100 the whole job must be gone within 1 s of the deadline. This
+;; port has no cancel token, so the "cancel" is the bash timeout; elapsed is
+;; measured from the deadline to every recorded pid answering `kill -0` = gone.
+
+(defn- alive? [pid]
+  (= 0 (long (or (:exit (proc/sh ["kill" "-0" (str pid)] {:timeout-ms 5000})) -1))))
+
+(defn kill-grace-run
+  "One measured run; returns ms from the timeout deadline to the job being gone."
+  []
+  (let [d   (fresh-dir "grace100")
+        pf  (str d "/pids")
+        ;; the shell ignores TERM and starts a background descendant that also
+        ;; ignores TERM; both record their own pid before sleeping.
+        cmd (str "trap '' TERM; echo $$ >> " pf "; "
+                 "sh -c 'trap \"\" TERM; echo $$ >> " pf "; sleep 30' & sleep 30")
+        timeout 300
+        t0  (ktime/mono-ms)
+        r   (run {:kill-grace-ms 100} "bash" {:command cmd :timeout timeout})
+        pids (->> (str/split (str (fs/read-file pf)) #"\s+") (remove str/blank?) distinct)]
+    (loop []
+      (if (and (some alive? pids) (< (- (ktime/mono-ms) t0) 10000))
+        (do (ktime/sleep! 5) (recur))
+        {:ms (- (ktime/mono-ms) t0 timeout) :r r :pids pids :alive (filter alive? pids)}))))
+
+(deftest a-short-kill-grace-kills-a-term-ignoring-job-fast
+  (let [{:keys [ms r pids alive]} (kill-grace-run)]
+    (is (:isError r))
+    (is (true? (get-in r [:metadata :killedTree])))
+    (is (>= (count pids) 2) "the probe must record the shell and its descendant")
+    (is (empty? alive) "the job outlived SIGKILL")
+    (is (< ms 1000) (str "killGraceMs 100 took " ms " ms from the deadline"))))
+
+;; ---------------------------------------------------------------------------
+;; SPEC §4A edit diffs
+;; ---------------------------------------------------------------------------
+
+(deftest edit-reports-one-modified-file-with-a-diff
+  (let [d (fresh-dir "diff-edit")]
+    (fs/write-file (str d "/f.txt") "one\ntwo\nthree\n")
+    (let [r (run {:base-dir d} "edit" {:path "f.txt" :oldString "two" :newString "TWO"})]
+      (is (not (:isError r)) (:output r))
+      (is (str/starts-with? (:output r) "Replaced 1 occurrence(s)") "output unchanged")
+      (is (= [{:path "f.txt" :status "modified" :additions 1 :deletions 1}]
+             (get-in r [:metadata :files])))
+      (is (str/includes? (get-in r [:metadata :diff]) "\n-two\n"))
+      (is (str/includes? (get-in r [:metadata :diff]) "\n+TWO\n"))
+      (is (str/includes? (get-in r [:metadata :diff]) "--- a/f.txt\n+++ b/f.txt\n@@ -1,3 +1,3 @@\n")))))
+
+(deftest write-of-a-new-file-is-added
+  (let [d (fresh-dir "diff-write")
+        r (run {:base-dir d} "write" {:path "new.txt" :content "a\nb\nc\n"})]
+    (is (= [{:path "new.txt" :status "added" :additions 3 :deletions 0}]
+           (get-in r [:metadata :files])))
+    (is (str/includes? (get-in r [:metadata :diff]) "--- /dev/null\n+++ b/new.txt\n@@ -0,0 +1,3 @@\n+a\n+b\n+c\n"))))
+
+(deftest apply-patch-reports-added-and-deleted-files
+  (let [d (fresh-dir "diff-patch")]
+    (fs/write-file (str d "/old.txt") "x\ny\n")
+    (let [r (run {:base-dir d} "apply_patch"
+                 {:patchText (str "*** Begin Patch\n*** Add File: add.txt\n+hello\n+world\n"
+                                  "*** Delete File: old.txt\n*** End Patch\n")})]
+      (is (not (:isError r)) (:output r))
+      (is (= [{:path "add.txt" :status "added" :additions 2 :deletions 0}
+              {:path "old.txt" :status "deleted" :additions 0 :deletions 2}]
+             (get-in r [:metadata :files])))
+      (is (str/includes? (get-in r [:metadata :diff]) "+++ /dev/null\n@@ -1,2 +0,0 @@\n-x\n-y\n")))))

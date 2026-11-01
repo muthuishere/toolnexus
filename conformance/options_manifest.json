@@ -147,6 +147,27 @@
           "retryablestatuses"
         ],
         "tier": "full"
+      },
+      {
+        "name": "apiKeyEnv",
+        "aliases": [
+          "apikeyenv"
+        ],
+        "tier": "full"
+      },
+      {
+        "name": "promptCache",
+        "aliases": [
+          "promptcache"
+        ],
+        "tier": "full"
+      },
+      {
+        "name": "toolTiers",
+        "aliases": [
+          "tooltiers"
+        ],
+        "tier": "full"
       }
     ]
   },

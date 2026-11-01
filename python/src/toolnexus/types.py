@@ -64,6 +64,9 @@ class ToolContext:
     timeout: Optional[float] = None
     # Present ONLY on a post-waitFor retry (§10): the resolution of a prior suspension.
     answer: Optional[Answer] = None
+    # The model's id for this tool call (§4C). The loop runs one message's calls
+    # concurrently, so this tells sibling calls apart. None outside the client loop.
+    call_id: Optional[str] = None
 
 
 _pending_seq = itertools.count(1)
@@ -134,6 +137,19 @@ ExecuteFn = Callable[..., Awaitable["ToolResult"]]
 
 
 @dataclass
+class ToolHints:
+    """Advisory behavior hints (§4C, named after MCP tool annotations), for a host
+    permission gate on ``before_tool``. Never serialized into any adapter output."""
+
+    # The tool does not change its environment.
+    read_only: bool = False
+    # The tool may overwrite or delete things (meaningful when not read-only).
+    destructive: bool = False
+    # The tool reaches outside the host (network, external systems).
+    open_world: bool = False
+
+
+@dataclass
 class Tool:
     name: str
     description: str
@@ -141,6 +157,9 @@ class Tool:
     source: ToolSource
     # async def execute(args: dict, ctx: ToolContext | None = None) -> ToolResult
     execute: ExecuteFn = field(repr=False)
+    # What the tool may do (§4C). None = unknown; treat as mutating. Builtins always
+    # carry hints; MCP tools carry them when the server sends annotations.
+    hints: Optional[ToolHints] = None
 
 
 _SANITIZE_RE = re.compile(r"[^a-zA-Z0-9_-]")

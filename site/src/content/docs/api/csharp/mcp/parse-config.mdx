@@ -150,10 +150,15 @@ if (good.Enabled.Count != 2 || good.Problems.Count != 0)
 
 var bad = Validate("""
 {"mcpServers":{
-  "broken_remote":{"type":"remote"},
-  "broken_local":{"type":"local","command":[]}}}
+  "broken_remote":{"type":"remote"}}}
 """);
-if (bad.Problems.Count != 2) throw new Exception($"expected 2 problems, got {bad.Problems.Count}");
+if (bad.Problems.Count != 1) throw new Exception($"expected 1 problem, got {bad.Problems.Count}");
+
+// An empty local command fails the parse itself, naming the server (SPEC §2).
+var rejected = false;
+try { McpSource.ParseConfig("""{"mcpServers":{"broken_local":{"type":"local","command":[]}}}"""); }
+catch (ArgumentException e) { rejected = e.Message.Contains("broken_local"); }
+if (!rejected) throw new Exception("expected an invalid-command failure");
 
 Console.WriteLine($"ok: {string.Join(",", good.Enabled)} | problems: {bad.Problems.Count}");
 ```

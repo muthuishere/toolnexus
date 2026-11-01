@@ -36,6 +36,9 @@ defmodule Toolnexus.Mcp.Connection do
   @doc "Call a tool by its ORIGINAL (unprefixed) name."
   def call_tool(pid, name, args), do: rpc(pid, {:tools_call, name, args})
 
+  @doc "Send any other request (e.g. resources/list, resources/read); same per-call timeout."
+  def request(pid, method, params), do: rpc(pid, {:raw, method, params})
+
   @doc "The stdio child's OS pid (for lifetime assertions); :error for remote servers."
   def os_pid(pid) do
     GenServer.call(pid, :os_pid)
@@ -221,8 +224,8 @@ defmodule Toolnexus.Mcp.Connection do
     end
   end
 
-  def handle_info({:rpc_timeout, id}, s) do
-    case pop_pending(s, id) do
+  def handle_info({:rpc_timeout, id, tref}, s) do
+    case pop_pending_timed_out(s, id, tref) do
       {nil, s} ->
         {:noreply, s}
 
@@ -308,6 +311,7 @@ defmodule Toolnexus.Mcp.Connection do
       {:response, id, result} -> resolve(s, id, result)
       {:request, id, method, params} -> handle_server_request(id, method, params, s)
       # Unknown server notifications are tolerated silently (§2).
+      {:notification, "notifications/progress", params} -> progress(s, params)
       {:notification, _method, _params} -> s
       :unknown -> s
     end
@@ -387,6 +391,8 @@ defmodule Toolnexus.Mcp.Connection do
   defp build_request(id, {:tools_call, name, args}),
     do: Protocol.tools_call_request(id, name, args)
 
+  defp build_request(id, {:raw, method, params}), do: Protocol.request(id, method, params)
+
   defp transport_send(%{mode: :stdio, stdio: t}, msg), do: Stdio.send_msg(t, msg)
 
   defp transport_send(%{mode: mode, http: t}, msg) when mode in [:http_legacy, :http_sync] do
@@ -400,9 +406,12 @@ defmodule Toolnexus.Mcp.Connection do
 
   defp next_id(s), do: {s.next_id, %{s | next_id: s.next_id + 1}}
 
+  # Each pending entry carries its own timer ref (`tref`) so a timer that was
+  # superseded by a progress reset can never fire a stale timeout.
   defp put_pending(s, id, tag, timeout) do
-    timer = Process.send_after(self(), {:rpc_timeout, id}, timeout)
-    %{s | pending: Map.put(s.pending, id, {tag, timer})}
+    tref = make_ref()
+    timer = Process.send_after(self(), {:rpc_timeout, id, tref}, timeout)
+    %{s | pending: Map.put(s.pending, id, {tag, timer, tref})}
   end
 
   defp pop_pending(s, id) do
@@ -410,14 +419,42 @@ defmodule Toolnexus.Mcp.Connection do
       {nil, _} ->
         {nil, s}
 
-      {{tag, timer}, rest} ->
+      {{tag, timer, _tref}, rest} ->
         Process.cancel_timer(timer)
         {tag, %{s | pending: rest}}
     end
   end
 
+  defp pop_pending_timed_out(s, id, tref) do
+    case s.pending do
+      %{^id => {_tag, _timer, ^tref}} -> pop_pending(s, id)
+      _ -> {nil, s}
+    end
+  end
+
+  # SPEC §2 idle timeout: a `notifications/progress` whose token matches an
+  # in-flight `tools/call` restarts that call's full `timeout` budget. Any other
+  # token (or a non-call pending entry) is ignored.
+  defp progress(s, %{"progressToken" => token}) do
+    Enum.find_value(s.pending, s, fn
+      {id, {{:call, _} = tag, timer, _tref}} when is_integer(id) ->
+        if Protocol.progress_token(id) == token do
+          Process.cancel_timer(timer)
+          put_pending(%{s | pending: Map.delete(s.pending, id)}, id, tag, call_timeout(s))
+        end
+
+      _ ->
+        nil
+    end)
+  end
+
+  defp progress(s, _params), do: s
+
+  defp call_timeout(%{mode: :http_sync, timeout: t}), do: t + 2_000
+  defp call_timeout(%{timeout: t}), do: t
+
   defp fail_all(s, reason) do
-    Enum.each(s.pending, fn {_id, {tag, timer}} ->
+    Enum.each(s.pending, fn {_id, {tag, timer, _tref}} ->
       Process.cancel_timer(timer)
 
       case tag do

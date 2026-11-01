@@ -147,9 +147,26 @@ defmodule Toolnexus.Agents do
 
   A durable suspension surfaces as a §10 pending tool result; the client's
   retry-with-`ctx.answer` re-runs the agent with that Answer as its interpreter.
+
+  The child run stops with the calling turn: the child runtime is linked to the
+  process running the tool, so killing the turn takes the child down with it, and a
+  tool context `signal` that reports aborted closes it (the tool then returns a
+  `"cancelled: …"` error result).
   """
   @spec as_tool(AgentDef.t(), keyword() | map()) :: Toolnexus.Tool.t()
-  def as_tool(%AgentDef{} = a, rt_opts) do
+  def as_tool(%AgentDef{} = a, rt_opts), do: as_tool_with(a, fn _ctx -> rt_opts end)
+
+  @doc """
+  `as_tool/2` with the runtime options built PER CALL from the calling tool's
+  `Toolnexus.Context` (SPEC §4C), so the child runs under the parent turn's gates: set
+  `:hooks` (the same `before_tool` permission gate — it also sees the child's tool calls
+  and results, and `after_llm` its replies, for a nested UI row), `:wait_for` (the same
+  ask bridge: a runtime-level interpreter used when no agent on the chain has its own)
+  and `:on_metric`. A `:hooks` on the agent itself replaces the runtime's for that
+  agent, so leave it unset when the gate must hold.
+  """
+  @spec as_tool_with(AgentDef.t(), (Toolnexus.Context.t() -> keyword() | map())) :: Toolnexus.Tool.t()
+  def as_tool_with(%AgentDef{} = a, per_call) when is_function(per_call, 1) do
     Toolnexus.define_tool(%{
       name: a.name,
       description: a.spec[:does],
@@ -160,18 +177,31 @@ defmodule Toolnexus.Agents do
       },
       execute: fn args, ctx ->
         prompt = to_string(args["prompt"] || "")
+        rt_opts = per_call.(ctx)
 
         r =
-          if ctx.answer do
-            run_with_answer(a, rt_opts, prompt, ctx.answer)
-          else
-            run(a, rt_opts, prompt)
+          cond do
+            aborted?(ctx.signal) ->
+              %{text: "context canceled", is_error: true, status: "cancelled", turns: 0, total_tokens: 0}
+
+            ctx.answer ->
+              run_with_answer(a, rt_opts, prompt, ctx.answer)
+
+            true ->
+              run_watched(a, rt_opts, prompt, ctx.signal)
           end
 
         case r do
           %{status: "pending", runtime: rt} = r ->
             Runtime.shutdown(rt)
             %ToolResult{output: r.pending.prompt, is_error: true, metadata: %{pending: r.pending}}
+
+          %{status: "cancelled"} = r ->
+            %ToolResult{
+              output: "cancelled: " <> r.text,
+              is_error: true,
+              metadata: %{agent: a.name, turns: r.turns, total_tokens: r.total_tokens}
+            }
 
           r ->
             %ToolResult{
@@ -182,6 +212,63 @@ defmodule Toolnexus.Agents do
         end
       end
     })
+  end
+
+  defp aborted?(nil), do: false
+  defp aborted?(f) when is_function(f, 0), do: f.() == true
+  defp aborted?(pid) when is_pid(pid), do: not Process.alive?(pid)
+  defp aborted?(_), do: false
+
+  # `run/3` plus a watcher on the tool context's signal: once it reports aborted the
+  # child runtime is force-closed and the run reports `"cancelled"`.
+  defp run_watched(a, rt_opts, prompt, nil), do: run(a, rt_opts, prompt)
+
+  defp run_watched(a, rt_opts, prompt, signal) do
+    rt = Runtime.new(rt_opts |> Map.new() |> Map.put(:registry, registry(a)))
+
+    case Runtime.spawn_agent(rt, Runtime.root(rt), a.name) do
+      {:error, msg} ->
+        Runtime.shutdown(rt)
+        %{text: msg, is_error: true, status: "done", pending: nil, turns: 0, total_tokens: 0}
+
+      {:ok, h} ->
+        me = self()
+        watcher = spawn_link(fn -> watch(signal, rt, me) end)
+        Runtime.wake(rt, h, prompt)
+        r = Runtime.wait(rt, h)
+        Process.unlink(watcher)
+        Process.exit(watcher, :kill)
+
+        cancelled? =
+          receive do
+            {:cancelled, ^rt} -> true
+          after
+            0 -> false
+          end
+
+        cond do
+          cancelled? ->
+            Runtime.shutdown(rt)
+            %{r | text: "context canceled", is_error: true, status: "cancelled"}
+
+          r.status == "pending" ->
+            Map.put(r, :runtime, rt)
+
+          true ->
+            Runtime.shutdown(rt)
+            r
+        end
+    end
+  end
+
+  defp watch(signal, rt, owner) do
+    if aborted?(signal) do
+      send(owner, {:cancelled, rt})
+      Runtime.close(rt, force: true, reason: "cancelled")
+    else
+      Process.sleep(20)
+      watch(signal, rt, owner)
+    end
   end
 
   # §10 retry path: the outer host's Answer becomes this run's interpreter.

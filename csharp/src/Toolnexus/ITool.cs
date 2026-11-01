@@ -18,4 +18,21 @@ public interface ITool
     string Source { get; }
 
     Task<ToolResult> ExecuteAsync(IDictionary<string, object?> args, ToolContext? ctx = null);
+
+    /// <summary>
+    /// (SPEC §4C) Advisory behaviour hints for a host permission gate (<c>Hooks.BeforeTool</c>):
+    /// e.g. let read-only tools run in a plan mode. <c>null</c> = unknown; treat as mutating.
+    /// Builtins always carry hints; MCP tools carry them when the server sends annotations.
+    /// Never serialized into any adapter or wire output. Default: <c>null</c>.
+    /// </summary>
+    ToolHints? Hints => null;
 }
+
+/// <summary>
+/// (SPEC §4C) Advisory tool behaviour hints, named after MCP tool annotations. A server can
+/// mislabel its tools, so a gate must treat these as hints, not guarantees.
+/// </summary>
+/// <param name="ReadOnly">The tool does not change its environment.</param>
+/// <param name="Destructive">The tool may overwrite or delete things (meaningful when not read-only).</param>
+/// <param name="OpenWorld">The tool reaches outside the host (network, external systems).</param>
+public sealed record ToolHints(bool ReadOnly = false, bool Destructive = false, bool OpenWorld = false);

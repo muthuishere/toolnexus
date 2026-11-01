@@ -67,6 +67,26 @@ type CompactorOptions struct {
 	// FlushToMemory, when set, injects a pre-compact system reminder to persist
 	// durable facts via the §7E memory tool before the head is summarized. Off by default.
 	FlushToMemory bool
+	// OnCompact, when set, is called after each compaction with what changed,
+	// so a host can tell its UI or log (e.g. send a "compacted" frame). It is
+	// not called when the hook is a no-op. golang only for now; other ports pending.
+	OnCompact func(ctx context.Context, info CompactInfo)
+}
+
+// CompactInfo describes one compaction, for CompactorOptions.OnCompact. Token
+// counts come from CompactorOptions.CountTokens (default EstimateTokens).
+type CompactInfo struct {
+	TokensBefore   int
+	TokensAfter    int
+	MessagesBefore int
+	MessagesAfter  int
+	// Summarized is how many messages were folded into the summary.
+	Summarized int
+	// Summary is the text returned by Summarize (without the header line).
+	Summary string
+	// Folded are the messages that were summarized away, verbatim, so a host can
+	// persist them (the loop only saves the compacted transcript).
+	Folded []any
 }
 
 // Compactor builds a BeforeLLM hook that compacts the transcript when it grows
@@ -83,9 +103,10 @@ func Compactor(opts CompactorOptions) func(context.Context, tn.BeforeLLMEvent) (
 		keepTail = opts.MaxTokens / 2
 	}
 
-	return func(_ context.Context, ev tn.BeforeLLMEvent) (*tn.LLMOverride, error) {
+	return func(ctx context.Context, ev tn.BeforeLLMEvent) (*tn.LLMOverride, error) {
 		msgs := ev.Messages
-		if count(msgs) <= opts.MaxTokens {
+		before := count(msgs)
+		if before <= opts.MaxTokens {
 			return nil, nil // under budget → byte-identical no-op
 		}
 
@@ -131,6 +152,15 @@ func Compactor(opts CompactorOptions) func(context.Context, tn.BeforeLLMEvent) (
 
 		older := msgs[head0:split]
 		tail := msgs[split:]
+		// The latest user prompt is never summarized away. When the only clean
+		// boundary is the first message after the system prompt (one prompt
+		// followed by a long agentic run), keep that prompt verbatim and summarize
+		// the work after it: [system, prompt, summary].
+		var pinned []any
+		if split == len(msgs) && head0 < len(msgs) && isBoundary(msgs[head0]) {
+			pinned = msgs[head0 : head0+1]
+			older = msgs[head0+1:]
+		}
 		if len(older) == 0 {
 			return nil, nil
 		}
@@ -144,8 +174,9 @@ func Compactor(opts CompactorOptions) func(context.Context, tn.BeforeLLMEvent) (
 			"content": "[Summary of earlier conversation]\n" + summary,
 		}
 
-		out := make([]any, 0, len(system)+2+len(tail))
+		out := make([]any, 0, len(system)+3+len(tail))
 		out = append(out, system...)
+		out = append(out, pinned...)
 		out = append(out, summaryMsg)
 		if opts.FlushToMemory {
 			out = append(out, map[string]any{
@@ -154,6 +185,21 @@ func Compactor(opts CompactorOptions) func(context.Context, tn.BeforeLLMEvent) (
 			})
 		}
 		out = append(out, tail...)
+		after := count(out)
+		if after >= before {
+			return nil, nil // compaction would not shrink the transcript → no-op
+		}
+		if opts.OnCompact != nil {
+			opts.OnCompact(ctx, CompactInfo{
+				TokensBefore:   before,
+				TokensAfter:    after,
+				MessagesBefore: len(msgs),
+				MessagesAfter:  len(out),
+				Summarized:     len(older),
+				Summary:        summary,
+				Folded:         older,
+			})
+		}
 		return &tn.LLMOverride{Messages: out}, nil
 	}
 }

@@ -188,7 +188,10 @@
    :properties {:pattern {:type "string" :description "Regular expression to search for"}
                 :path    {:type "string" :description "Directory to search (default: cwd)"}
                 :include {:type "string" :description "Glob filter on file paths"}
-                :limit   {:type "number" :description "Maximum matches" :default 100}}
+                :limit   {:type "number" :description "Maximum matches" :default 100}
+                :context {:type "number" :description "Lines of context before and after each match"}
+                :before  {:type "number" :description "Lines of context before each match (overrides context)"}
+                :after   {:type "number" :description "Lines of context after each match (overrides context)"}}
    :required ["pattern"]})
 
 (def glob-schema
@@ -245,9 +248,14 @@
 ;; ---------------------------------------------------------------------------
 
 (def kill-grace-ms
-  "How long a job gets between \"please stop\" and \"stop\". Fixed, and identical in
-  every port, so a timeout means the same thing everywhere."
+  "The DEFAULT wait between \"please stop\" and \"stop\" (SPEC §4A `killGraceMs`),
+  identical in every port. A host overrides it with `:kill-grace-ms` /
+  `:killGraceMs` on the builtins config; absent or 0 means this value."
   2000)
+
+(defn- grace-of [m]
+  (let [v (or (:kill-grace-ms m) (:killGraceMs m))]
+    (if (and (number? v) (pos? v)) (long v) kill-grace-ms)))
 
 (def ^:private win-reserved
   #{"CON" "PRN" "AUX" "NUL"
@@ -300,11 +308,19 @@
   (let [m        (if (map? cfg) cfg {})
         base-dir (str (or (:base-dir m) (:baseDir m) ""))
         confine  (boolean (or (:confine-to-base-dir m) (:confineToBaseDir m)))
-        given    (:shell m)]
+        given    (:shell m)
+        grace    (grace-of m)
+        ;; SPEC §4C opt-in tools — absent ⇒ none of them exists.
+        extras   {:background   (:background m)
+                  :web-search   (or (:web-search m) (:webSearch m))
+                  :notebook-edit (boolean (or (:notebook-edit m) (:notebookEdit m)))}]
     (if (seq given)
-      {:shell (mapv str given) :shell-error nil :base-dir base-dir :confine confine}
+      (merge extras
+             {:shell (mapv str given) :shell-error nil :base-dir base-dir :confine confine
+              :kill-grace-ms grace})
       (let [cands (shell-candidates)
             found (first (filter (fn [argv] (resolves-on-path? (first argv))) cands))]
+        (merge extras
         {:shell (or found [])
          :shell-error (when-not found
                         (str "no shell interpreter found (tried: "
@@ -312,7 +328,8 @@
                              "); set :shell on the builtins config, or disable the bash "
                              "builtin with {:tools {\"bash\" false}}"))
          :base-dir base-dir
-         :confine confine}))))
+         :confine confine
+         :kill-grace-ms grace})))))
 
 (defn shell
   "The interpreter the builtins resolved for `bash` — what a host prints, and
@@ -461,6 +478,146 @@
         (>= (ktime/mono-ms) deadline) false
         :else (do (ktime/sleep! 20) (recur))))))
 
+;; ---------------------------------------------------------------------------
+;; SPEC §4C opt-in: background shells (bash run_in_background, bash_output,
+;; kill_shell). The host owns the registry and calls `bg-close-all!` on shutdown
+;; — a background command is NOT tied to the turn that started it.
+;; ---------------------------------------------------------------------------
+
+(defn background-shells
+  "An empty background-shell registry. Pass it as the builtins config's
+  `:background`; `bash` then takes `run_in_background` and `bash_output` /
+  `kill_shell` exist. POSIX only (the job is found through its own pid)."
+  []
+  (atom {:next 0 :jobs {}}))
+
+(defn- bg-running? [j] (not (realized? (:done j))))
+
+;; The host reports a shell killed by signal N as 128 + N; Go reports -1 (killed
+;; by a signal). Map 129..159 to -1 so every port prints the same code. Known
+;; limit: a command that itself exits 129..159 also reads as -1.
+(defn- signal-code [code]
+  (if (and (> code 128) (< code 160)) -1 code))
+
+(defn- bg-info [j]
+  (let [running (bg-running? j)
+        r       (when-not running @(:done j))]
+    {:id (:id j) :command (:command j) :started (:started j)
+     :running running
+     :exit-code (when-not running (let [x (:exit r)] (if (number? x) (signal-code (long x)) -1)))
+     :killed @(:killed j)}))
+
+(defn- bg-status [i]
+  (cond (:running i) "running"
+        (:killed i)  "killed"
+        :else        (str "exited with code " (:exit-code i))))
+
+(defn- bg-start!
+  "Start `command` detached from the turn. Output goes to a file so `bash_output`
+  can return what arrived since the last read; the shell records its own pid
+  first, exactly as the foreground `bash` does, so the whole job can be killed."
+  [e command workdir]
+  (let [reg     (:background e)
+        dir     (fs/temp-dir! "tn-bg")
+        pidfile (str dir "/pid")
+        outfile (str dir "/out")
+        _       (fs/write-file outfile "")
+        script  (str "echo $$ > '" pidfile "'; exec > '" outfile "' 2>&1; " command)
+        done    (promise)
+        id      (str "bg" (:next (swap! reg update :next inc)))
+        job     {:id id :command command :started (ktime/now-ms) :done done
+                 :pidfile pidfile :outfile outfile :read (atom 0) :killed (atom false)
+                 :grace (or (:kill-grace-ms e) kill-grace-ms)}]
+    (swap! reg assoc-in [:jobs id] job)
+    (proc/run-async!
+     (fn []
+       (deliver done (try (proc/sh (conj (vec (:shell e)) script)
+                                   (cond-> {} workdir (assoc :dir workdir)))
+                          (catch Throwable t {:exit -1 :err (or (ex-message t) (str t))})))))
+    (tool/success (str "Started background shell " id
+                       ". Read its output with bash_output, stop it with kill_shell.")
+                  {:shell (str/join " " (:shell e)) :backgroundId id})))
+
+(defn- bg-pid [j]
+  (let [deadline (+ (ktime/mono-ms) 2000)]
+    (loop []
+      (let [pid (when (fs/exists? (:pidfile j)) (parse-pid (fs/read-file (:pidfile j))))]
+        (cond pid pid
+              (or (not (bg-running? j)) (>= (ktime/mono-ms) deadline)) nil
+              :else (do (ktime/sleep! 10) (recur)))))))
+
+(defn- bg-kill-job!
+  "Stop the job's whole tree: SIGTERM, the grace window, SIGKILL. Returns whether
+  it was still running."
+  [j]
+  (if-not (bg-running? j)
+    false
+    (let [_    (reset! (:killed j) true)
+          pid  (bg-pid j)
+          pids (when pid (into [pid] (child-pids pid)))]
+      (when (seq pids)
+        (signal-job pids "-TERM")
+        (when-not (await-exit pids (:grace j))
+          (signal-job pids "-KILL")))
+      ;; the shell is gone; let the async sh deliver, bounded
+      (let [deadline (+ (ktime/mono-ms) 5000)]
+        (loop []
+          (when (and (bg-running? j) (< (ktime/mono-ms) deadline))
+            (ktime/sleep! 10) (recur))))
+      true)))
+
+(defn bg-list
+  "Every background command, oldest first: `[{:id :command :started :running
+  :exit-code :killed}]` (`:exit-code` is nil while running, -1 for a signal)."
+  [reg]
+  (->> (vals (:jobs @reg))
+       (sort-by (juxt :started (fn [j] (parse-pid (subs (:id j) 2)))))
+       (mapv bg-info)))
+
+(defn bg-kill!
+  "Stop one background command's tree. Unknown id ⇒ throws."
+  [reg id]
+  (if-let [j (get-in @reg [:jobs id])]
+    (do (bg-kill-job! j) nil)
+    (throw (ex-info (str "no background shell " (pr-str id)) {:id id}))))
+
+(defn bg-close-all!
+  "Stop every background command still running, concurrently."
+  [reg]
+  (let [ps (mapv (fn [j] (let [p (promise)]
+                           (proc/run-async! (fn [] (deliver p (try (bg-kill-job! j) (catch Throwable _ nil)))))
+                           p))
+                 (vals (:jobs @reg)))]
+    (doseq [p ps] (deref p))
+    nil))
+
+(defn- t-bash-output [e args _ctx]
+  (let [id (str (:id args))
+        j  (get-in @(:background e) [:jobs id])]
+    (if-not j
+      (tool/failure (str "bash_output: no background shell " (pr-str id)))
+      ;; status FIRST: when the job has finished, its output file is complete, so
+      ;; a reader that stops on "exited" never misses the last line.
+      (let [info   (bg-info j)
+            all    (str (fs/read-file (:outfile j)))
+            from   (min @(:read j) (count all))
+            fresh  (subs all from)
+            _      (reset! (:read j) (count all))
+            status (bg-status info)]
+        (tool/success (str fresh "\n[status: " status "]")
+                      (cond-> {:id id :status (first (str/split status #" " 2))}
+                        (and (not (:running info)) (not (:killed info)))
+                        (assoc :exitCode (:exit-code info))))))))
+
+(defn- t-kill-shell [e args _ctx]
+  (let [id (str (:id args))
+        j  (get-in @(:background e) [:jobs id])]
+    (cond
+      (nil? j) (tool/failure (str "kill_shell: no background shell " (pr-str id)))
+      (bg-kill-job! j) (tool/success (str "Killed background shell " id) {:id id :killed true})
+      :else (tool/success (str "Background shell " id " had already " (bg-status (bg-info j)))
+                          {:id id :killed false}))))
+
 (defn- t-bash
   "Combined stdout+stderr. Non-zero exit ⇒ isError with the exit code appended.
   A timeout kills THE WHOLE JOB ⇒ isError.
@@ -491,6 +648,8 @@
                                [:ok (env-dir e)])]
         (if (= status :error)
           (tool/failure (str "bash: " workdir))
+          (if (and (:background e) (true? (:run_in_background args)))
+            (bg-start! e command workdir)
           (let [pidfile (str (fs/temp-dir! "tn-bash") "/pid")
                 argv    (:shell e)
                 ;; The shell records its OWN pid before doing anything else, so
@@ -524,7 +683,7 @@
                   ;; SIGTERM in 5 ms must not cost its caller two seconds.
                   ;; Measured parity break — five ports returned a 1 s timeout in
                   ;; ~1.0 s while this one took ~3.05 s.
-                  (when (and (seq pids) (not (await-exit pids kill-grace-ms)))
+                  (when (and (seq pids) (not (await-exit pids (or (:kill-grace-ms e) kill-grace-ms))))
                     (signal-job pids "-KILL"))
                   (tool/failure (str "command timed out after " ms "ms")
                                 (assoc meta :timedOut true :killedTree (boolean (seq pids)))))
@@ -539,7 +698,7 @@
 
                     :else
                     (tool/failure (str out "exit code " (:exit r))
-                                  (assoc meta :exitCode (:exit r)))))))))))))
+                                  (assoc meta :exitCode (:exit r))))))))))))))
 
 (defn- valid-utf8?
   "Is `bs` a well-formed UTF-8 byte sequence?
@@ -619,8 +778,107 @@
           (let [lines (str/split-lines text)
                 start (max 0 (dec (long (or off 1))))
                 win   (drop start lines)
-                win   (if lim (take (long lim) win) win)]
-            (tool/success (str/join "\n" win))))))))
+                win   (if lim (take (long lim) win) win)
+                end   (min (count lines) (+ start (count win)))
+                total (count lines)]
+            ;; SPEC §4C: a window that stops before the end says so in METADATA,
+            ;; with the offset to continue from. The text stays the pinned
+            ;; cross-port bytes — the caller asked for exactly this window.
+            (if (< end total)
+              (tool/success (str/join "\n" win)
+                            {:truncated true :totalLines total :nextOffset (inc end)})
+              (tool/success (str/join "\n" win)))))))))
+
+;; ---------------------------------------------------------------------------
+;; SPEC §4A edit diffs — metadata.files + metadata.diff
+;; ---------------------------------------------------------------------------
+
+(defn- lines-of
+  "Text as diff lines. A trailing newline ends the last line rather than adding
+  an empty one; nil (no file) is no lines."
+  [t]
+  (if (or (nil? t) (= "" t)) [] (vec (str/split-lines (str t)))))
+
+(defn- lcs-ops
+  "Line ops [[\\space l] [\\- l] [\\+ l]] for `a` -> `b`, by LCS. Called on the
+  CHANGED middle only (common prefix/suffix trimmed first), so a one-line edit
+  of a large file stays cheap."
+  [a b]
+  (let [n (count a) m (count b)
+        ;; table[i][j] = LCS length of a[i..] and b[j..], built bottom-up
+        table (reduce (fn [rows i]
+                        (let [below (first rows)
+                              row (reduce (fn [row j]
+                                            (assoc row j
+                                                   (if (= (nth a i) (nth b j))
+                                                     (inc (nth below (inc j)))
+                                                     (max (nth below j) (nth row (inc j))))))
+                                          (vec (repeat (inc m) 0))
+                                          (range (dec m) -1 -1))]
+                          (cons row rows)))
+                      (list (vec (repeat (inc m) 0)))
+                      (range (dec n) -1 -1))
+        table (vec table)]
+    (loop [i 0 j 0 ops []]
+      (cond
+        (and (< i n) (< j m) (= (nth a i) (nth b j)))
+        (recur (inc i) (inc j) (conj ops [\space (nth a i)]))
+
+        (and (< i n) (or (>= j m)
+                         (>= (nth (nth table (inc i)) j) (nth (nth table i) (inc j)))))
+        (recur (inc i) j (conj ops [\- (nth a i)]))
+
+        (< j m)
+        (recur i (inc j) (conj ops [\+ (nth b j)]))
+
+        :else ops))))
+
+(def ^:private diff-context 3)
+
+(defn- file-diff
+  "{:file {:path :status :additions :deletions} :diff unified-text} for one file.
+  `before`/`after` nil = absent (added / deleted). One hunk spanning the change,
+  with up to three lines of context either side."
+  [path before after]
+  (let [a (lines-of before) b (lines-of after)
+        na (count a) nb (count b)
+        pre (loop [k 0] (if (and (< k na) (< k nb) (= (nth a k) (nth b k))) (recur (inc k)) k))
+        suf (loop [k 0] (if (and (< k (- na pre)) (< k (- nb pre))
+                                 (= (nth a (- na 1 k)) (nth b (- nb 1 k))))
+                          (recur (inc k)) k))
+        mid (lcs-ops (subvec a pre (- na suf)) (subvec b pre (- nb suf)))
+        dels (count (filter #(= \- (first %)) mid))
+        adds (count (filter #(= \+ (first %)) mid))
+        status (cond (nil? before) "added" (nil? after) "deleted" :else "modified")
+        lead (max 0 (- pre diff-context))
+        tail (min suf diff-context)
+        ops (concat (map (fn [l] [\space l]) (subvec a lead pre))
+                    mid
+                    (map (fn [l] [\space l]) (subvec a (- na suf) (+ (- na suf) tail))))
+        old-n (count (remove #(= \+ (first %)) ops))
+        new-n (count (remove #(= \- (first %)) ops))
+        rng (fn [start cnt] (str (if (zero? cnt) (max 0 (dec start)) start) "," cnt))
+        diff (if (and (zero? adds) (zero? dels))
+               ""
+               (str "--- " (if (nil? before) "/dev/null" (str "a/" path)) "\n"
+                    "+++ " (if (nil? after) "/dev/null" (str "b/" path)) "\n"
+                    "@@ -" (rng (inc lead) old-n) " +" (rng (inc lead) new-n) " @@\n"
+                    (apply str (map (fn [[t l]] (str t l "\n")) ops))))]
+    {:file {:path path :status status :additions adds :deletions dels}
+     :diff diff}))
+
+(defn- diff-path
+  "The path a diff names: relative to `:base-dir` when one is set."
+  [e p]
+  (if (str/blank? (:base-dir e)) (str p) (rel-path (:base-dir e) p)))
+
+(defn- diff-meta
+  "metadata {:files [...] :diff \"...\"} for [[path before after] ...]."
+  [e changes]
+  (let [ds (mapv (fn [[p before after]] (file-diff (diff-path e p) before after)) changes)]
+    {:files (mapv :file ds) :diff (apply str (map :diff ds))}))
+
+(defn- read-if-exists [p] (when (fs/exists? p) (str (fs/read-file p))))
 
 (defn- t-write [e args _ctx]
   (let [raw (str (:path args))
@@ -628,9 +886,11 @@
         c (str (:content args))]
     (if (= st :error)
       (tool/failure (str "write: " p))
-      (do (when-let [d (parent-of p)] (fs/mkdirs! d))
-          (fs/write-file p c)
-          (tool/success (str "Wrote " (utf8-count c) " bytes to " raw))))))
+      (let [before (read-if-exists p)]
+        (when-let [d (parent-of p)] (fs/mkdirs! d))
+        (fs/write-file p c)
+        (tool/success (str "Wrote " (utf8-count c) " bytes to " raw)
+                      (diff-meta e [[p before c]]))))))
 
 (defn- t-edit [e args _ctx]
   (let [[st p] (resolve-path e (str (:path args)))]
@@ -656,7 +916,8 @@
                       (replace-first-literal text old new))]
             (fs/write-file p out)
             (tool/success (str "Replaced " (if (true? (:replaceAll args)) (count hits) 1)
-                          " occurrence(s) in " p)))))))))
+                          " occurrence(s) in " p)
+                          (diff-meta e [[p text out]])))))))))
 
 (defn- grep-file-hits
   "`rel:line:text` for every matching line in `f`, in ASCENDING LINE ORDER.
@@ -672,11 +933,36 @@
   before line 2."
   [pat root f]
   (let [rel   (rel-path root f)
-        lines (str/split-lines (str (fs/read-file f)))]
+        lines (vec (str/split-lines (str (fs/read-file f))))]
     (->> (map-indexed (fn [i line] [(inc i) line]) lines)
          (filter (fn [pair] (some? (re-find pat (nth pair 1)))))
-         (map (fn [pair] (str rel ":" (nth pair 0) ":" (nth pair 1))))
+         (map (fn [pair] {:rel rel :line (nth pair 0) :lines lines
+                          :text (str rel ":" (nth pair 0) ":" (nth pair 1))}))
          vec)))
+
+(defn- grep-context-lines
+  "SPEC §4C grep context, ripgrep-style: match lines `path:N:text`, context lines
+  `path-N-text`, and `--` between groups that do not touch."
+  [hits before after]
+  (let [match-at (reduce (fn [acc h] (update acc (:rel h) (fnil conj #{}) (:line h))) {} hits)]
+    (loop [hs hits last-rel nil last-line 0 out []]
+      (if-let [h (first hs)]
+        (let [lines (:lines h)
+              n     (count lines)
+              from  (max 1 (- (:line h) before))
+              to    (min n (+ (:line h) after))
+              same? (= (:rel h) last-rel)
+              [from out] (cond
+                           (and same? (<= from (inc last-line))) [(inc last-line) out]
+                           (some? last-rel)                       [from (conj out "--")]
+                           :else                                  [from out])
+              out   (reduce (fn [acc k]
+                              (let [sep (if (contains? (get match-at (:rel h)) k) ":" "-")]
+                                (conj acc (str (:rel h) sep k sep (nth lines (dec k))))))
+                            out (range from (inc to)))
+              last-line (if (or (> to last-line) (not same?)) to last-line)]
+          (recur (rest hs) (:rel h) last-line out))
+        out))))
 
 (defn- t-grep
   "`pattern` is a REGEX, and the dialect differs per host (java.util.regex vs Go
@@ -697,7 +983,21 @@
         hits  (when (= rst :ok) (vec (mapcat (fn [f] (grep-file-hits pat root f)) files)))]
     (if (= rst :error)
       (tool/failure (str "grep: " root))
-      (tool/success (str/join "\n" (take limit hits))))))
+      (let [n      (fn [k] (let [v (get args k)] (when (number? v) (long v))))
+            ctx    (n :context)
+            before (or (when (and (n :before) (>= (n :before) 0)) (n :before))
+                       (when (and ctx (pos? ctx)) ctx) 0)
+            after  (or (when (and (n :after) (>= (n :after) 0)) (n :after))
+                       (when (and ctx (pos? ctx)) ctx) 0)
+            shown  (vec (take limit hits))
+            text   (if (and (zero? before) (zero? after))
+                     (str/join "\n" (map :text shown))
+                     (str/join "\n" (grep-context-lines shown before after)))]
+        ;; SPEC §4C: a list cut by `limit` says so, and by how much, in METADATA.
+        ;; The text stays the pinned cross-port output.
+        (if (> (count hits) (count shown))
+          (tool/success text {:count (count shown) :truncated true :total (count hits)})
+          (tool/success text))))))
 
 (defn- t-glob [e args _ctx]
   (let [[rst root] (if (:path args) (resolve-path e (str (:path args))) [:ok (env-dir e)])
@@ -896,14 +1196,19 @@
           ;; Atomic: everything was planned from READS, so nothing has been
           ;; written and there is no partial state to unwind.
           (tool/failure (:error bad))
-          (do (doseq [pl plans]
+          (let [befores (mapv (fn [pl] (when-not (= "add" (:kind pl)) (read-if-exists (:path pl)))) plans)]
+              (doseq [pl plans]
                 (if (= "delete" (:kind pl))
                   (fs/delete! (:path pl))
                   (do (when-let [d (parent-of (:path pl))] (fs/mkdirs! d))
                       (fs/write-file (:path pl) (:content pl)))))
               (tool/success (str "Applied " (count plans) " file change(s): "
                             (str/join ", " (map (fn [pl] (str (:kind pl) " " (:path pl)))
-                                                plans))))))))))
+                                                plans)))
+                            (diff-meta e (mapv (fn [pl before]
+                                                 [(:path pl) before
+                                                  (when-not (= "delete" (:kind pl)) (:content pl))])
+                                               plans befores)))))))))
 
 (defn- t-todowrite
   "Stateless in v1 — it echoes the list back. The RENDERING is not pinned by
@@ -922,6 +1227,161 @@
                   {:todos todos})))
 
 ;; ---------------------------------------------------------------------------
+;; JSON, indented the way the Go reference marshals it (sorted keys, HTML-safe
+;; escapes) — so a notebook rewrite or a tool_search result is the same bytes
+;; in every port.
+;; ---------------------------------------------------------------------------
+
+(defn- json-key [k]
+  (cond (keyword? k) (if (namespace k) (str (namespace k) "/" (name k)) (name k))
+        :else (str k)))
+
+(defn- go-escape [s]
+  (-> (str s)
+      (str/replace "<" "\\u003c")
+      (str/replace ">" "\\u003e")
+      (str/replace "&" "\\u0026")
+      (str/replace "\u2028" "\\u2028")
+      (str/replace "\u2029" "\\u2029")))
+
+(defn ^:no-doc json-indent
+  "`v` as indented JSON: object keys sorted by code point, `indent` per level,
+  `<`/`>`/`&`/U+2028/U+2029 escaped as \\u003c/\\u003e/\\u0026/\\u2028/\\u2029 — the bytes of Go's
+  `json.MarshalIndent(v, \"\", indent)`. INTERNAL: shared by `notebook_edit` and
+  the client's `tool_search` so the two cannot drift."
+  ([v indent] (json-indent v indent ""))
+  ([v indent pad]
+   (let [pad2 (str pad indent)]
+     (cond
+       (map? v)
+       (if (empty? v)
+         "{}"
+         (let [ks (tool/sort-strings (map json-key (keys v)))
+               by (into {} (map (fn [[k x]] [(json-key k) x]) v))]
+           (str "{\n"
+                (str/join ",\n" (map (fn [k] (str pad2 (go-escape (json/write-str k)) ": "
+                                                  (json-indent (get by k) indent pad2)))
+                                     ks))
+                "\n" pad "}")))
+
+       (or (sequential? v) (set? v))
+       (if (empty? v)
+         "[]"
+         (str "[\n"
+              (str/join ",\n" (map (fn [x] (str pad2 (json-indent x indent pad2))) v))
+              "\n" pad "]"))
+
+       (string? v) (go-escape (json/write-str v))
+       (keyword? v) (go-escape (json/write-str (json-key v)))
+       :else (json/write-str v)))))
+
+;; ---------------------------------------------------------------------------
+;; SPEC §4C opt-in: websearch over a host provider, notebook_edit
+;; ---------------------------------------------------------------------------
+
+(defn- t-websearch [e args _ctx]
+  (let [q     (str (or (:query args) ""))
+        limit (let [l (:limit args)] (if (and (number? l) (>= l 1)) (long l) 5))]
+    (if (str/blank? q)
+      (tool/failure "websearch: query is required")
+      (let [res (try {:ok (vec ((:web-search e) q limit))}
+                     (catch Throwable t {:error (or (ex-message t) (str t))}))]
+        (if (:error res)
+          (tool/failure (str "websearch: " (:error res)))
+          (let [rs (vec (take limit (:ok res)))]
+            (if (empty? rs)
+              (tool/success "No results." {:count 0})
+              (tool/success
+               (str/join "\n\n"
+                         (map-indexed (fn [i r]
+                                        (str (inc i) ". " (:title r) "\n   " (:url r)
+                                             (when-not (str/blank? (str (:snippet r)))
+                                               (str "\n   " (:snippet r)))))
+                                      rs))
+               {:count (count rs) :results rs}))))))))
+
+(defn- notebook-source
+  "Text as nbformat's list of lines, each keeping its newline."
+  [src]
+  (if (= "" src)
+    []
+    (loop [s src acc []]
+      (let [j (str/index-of s "\n")]
+        (if (nil? j)
+          (if (= "" s) acc (conj acc s))
+          (recur (subs s (inc j)) (conj acc (subs s 0 (inc j)))))))))
+
+(defn- notebook-index
+  "The target cell index, -1 for an insert at the top, or [:error msg]."
+  [cells mode cid cix]
+  (cond
+    (not (str/blank? (str (or cid ""))))
+    (or (first (keep-indexed (fn [i c] (when (= (str cid) (:id c)) i)) cells))
+        [:error (str "notebook_edit: no cell with id " (pr-str (str cid)))])
+
+    (number? cix)
+    (let [i (long cix)]
+      (if (or (neg? i) (>= i (count cells)))
+        [:error (str "notebook_edit: cell_index " i " out of range (0-" (dec (count cells)) ")")]
+        i))
+
+    (not= mode "insert") [:error "notebook_edit: cell_id or cell_index is required"]
+    :else -1))
+
+(defn- notebook-apply
+  "{:cells :summary} or {:error}."
+  [cells mode idx src ctype raw]
+  (case mode
+    "replace"
+    (let [c (cond-> (assoc (get cells idx) :source (notebook-source src))
+              ctype (assoc :cell_type ctype))
+          c (if (= "code" (:cell_type c))
+              (assoc c :outputs [] :execution_count nil)
+              (dissoc c :outputs :execution_count))]
+      {:cells (assoc cells idx c) :summary (str "Replaced cell " idx " in " raw)})
+
+    "insert"
+    (let [t    (or ctype "code")
+          cell (cond-> {:cell_type t :metadata {} :source (notebook-source src)}
+                 (= "code" t) (assoc :outputs [] :execution_count nil))
+          at   (inc idx)]
+      {:cells (vec (concat (subvec cells 0 at) [cell] (subvec cells at)))
+       :summary (str "Inserted " t " cell at " at " in " raw)})
+
+    "delete"
+    {:cells (vec (concat (subvec cells 0 idx) (subvec cells (inc idx))))
+     :summary (str "Deleted cell " idx " from " raw)}
+
+    {:error (str "notebook_edit: unknown edit_mode " (pr-str mode))}))
+
+(defn- t-notebook-edit [e args _ctx]
+  (let [raw (str (or (:path args) ""))
+        [st p] (if (str/blank? raw) [:error "path is required"] (resolve-path e raw))]
+    (cond
+      (= st :error) (tool/failure (str "notebook_edit: " p))
+      (not (fs/exists? p)) (tool/failure (str "notebook_edit: file not found: " raw))
+      :else
+      (let [before (str (fs/read-file p))
+            nb     (try (json/read-str before)
+                        (catch Throwable t {::bad (or (ex-message t) (str t))}))]
+        (if (or (not (map? nb)) (::bad nb))
+          (tool/failure (str "notebook_edit: " raw " is not a notebook: " (when (map? nb) (::bad nb))))
+          (let [cells (vec (:cells nb))
+                mode  (if (str/blank? (str (or (:edit_mode args) ""))) "replace" (str (:edit_mode args)))
+                idx   (notebook-index cells mode (:cell_id args) (:cell_index args))
+                ctype (when-not (str/blank? (str (or (:cell_type args) ""))) (str (:cell_type args)))
+                res   (if (vector? idx)
+                        {:error (second idx)}
+                        (notebook-apply cells mode idx (str (or (:new_source args) "")) ctype raw))]
+            (if (:error res)
+              (tool/failure (:error res))
+              (let [out (str (json-indent (assoc nb :cells (:cells res)) " ") "\n")]
+                (fs/write-file p out)
+                (tool/success (:summary res)
+                              (merge {:cells (count (:cells res))}
+                                     (diff-meta e [[p before out]])))))))))))
+
+;; ---------------------------------------------------------------------------
 ;; the builtin source
 ;; ---------------------------------------------------------------------------
 
@@ -936,15 +1396,73 @@
               :execute (fn ([args] (f args nil))
                          ([args ctx] (f args ctx)))}))
 
+(def builtin-hints
+  "SPEC §4C tool hints for every builtin, for a host permission gate. `bash` can
+  do anything, so it is destructive and open-world; `todowrite` and `question`
+  only touch the agent's own state / ask the human, so they count as read-only."
+  {"bash"          {:read-only false :destructive true  :open-world true}
+   "read"          {:read-only true  :destructive false :open-world false}
+   "write"         {:read-only false :destructive true  :open-world false}
+   "edit"          {:read-only false :destructive true  :open-world false}
+   "grep"          {:read-only true  :destructive false :open-world false}
+   "glob"          {:read-only true  :destructive false :open-world false}
+   "webfetch"      {:read-only true  :destructive false :open-world true}
+   "question"      {:read-only true  :destructive false :open-world false}
+   "apply_patch"   {:read-only false :destructive true  :open-world false}
+   "todowrite"     {:read-only true  :destructive false :open-world false}
+   "bash_output"   {:read-only true  :destructive false :open-world false}
+   "kill_shell"    {:read-only false :destructive true  :open-world false}
+   "websearch"     {:read-only true  :destructive false :open-world true}
+   "notebook_edit" {:read-only false :destructive true  :open-world false}})
+
+(def ^:private bg-id-schema
+  {:type "object"
+   :properties {:id {:type "string" :description "The background shell id bash returned"}}
+   :required ["id"]})
+
+(def ^:private websearch-schema
+  {:type "object"
+   :properties {:query {:type "string" :description "The search query"}
+                :limit {:type "number" :description "Maximum number of results (default 5)"}}
+   :required ["query"]})
+
+(def ^:private notebook-schema
+  {:type "object"
+   :properties {:path       {:type "string" :description "Path to the .ipynb file"}
+                :cell_id    {:type "string" :description "The cell's id (or use cell_index)"}
+                :cell_index {:type "number" :description "0-based cell position (used when cell_id is absent)"}
+                :new_source {:type "string" :description "The new cell source (replace/insert)"}
+                :cell_type  {:type "string" :enum ["code" "markdown"]
+                             :description "Cell type for insert (default code) or to change on replace"}
+                :edit_mode  {:type "string" :enum ["replace" "insert" "delete"]
+                             :description "Default replace. insert adds the new cell AFTER the given cell, or first when none is given"}}
+   :required ["path"]})
+
 (defn builtin-tools-for
   "The ten §4A builtins, built against a host boundary — the interpreter, base
   directory and confinement of a builtins config (ADR 0034). A nil config is the
   historical behaviour: the detected interpreter, paths relative to the process
-  working directory, no confinement."
+  working directory, no confinement.
+
+  SPEC §4C opt-ins, each absent unless configured: `:background` (a
+  `background-shells` registry) adds `run_in_background` to bash plus
+  `bash_output` / `kill_shell`; `:web-search` `(fn [query limit] [{:title :url
+  :snippet}])` adds `websearch`; `:notebook-edit true` adds `notebook_edit`.
+  Every builtin carries `:hints` (`builtin-hints`)."
   [cfg]
   (let [e (builtin-env cfg)
-        with-env (fn [f] (fn [args ctx] (f e args ctx)))]
-    [(builtin "bash"        "Run a shell command."                bash-schema        (with-env t-bash))
+        with-env (fn [f] (fn [args ctx] (f e args ctx)))
+        bash-sch (if (:background e)
+                   (assoc-in bash-schema [:properties :run_in_background]
+                             {:type "boolean"
+                              :description (str "Start the command and return at once with a background "
+                                                "shell id; read it with bash_output, stop it with "
+                                                "kill_shell. No timeout applies.")})
+                   bash-schema)]
+    (mapv
+     (fn [t] (assoc t :hints (get builtin-hints (:name t))))
+     (cond->
+    [(builtin "bash"        "Run a shell command."                bash-sch           (with-env t-bash))
      (builtin "read"        (str "Read a file. A known media file (png/jpg/jpeg/gif/webp/pdf/"
                                  "mp3/wav) comes back as a content part; otherwise it is read "
                                  "as UTF-8 text, and with offset/limit only that line window "
@@ -957,7 +1475,22 @@
      (builtin "webfetch"    "HTTP GET a URL and return its body." webfetch-schema    t-webfetch)
      (builtin "question"    "Ask the human one or more questions." question-schema   t-question)
      (builtin "apply_patch" "Apply an add/update/delete patch."   apply-patch-schema (with-env t-apply-patch))
-     (builtin "todowrite"   "Replace the session todo list."      todowrite-schema   t-todowrite)]))
+     (builtin "todowrite"   "Replace the session todo list."      todowrite-schema   t-todowrite)]
+      (:background e)
+      (conj (builtin "bash_output"
+                     (str "Read the output a background bash command (started with run_in_background) "
+                          "produced since the last read, and whether it is still running.")
+                     bg-id-schema (with-env t-bash-output))
+            (builtin "kill_shell" "Stop a background bash command and everything it started."
+                     bg-id-schema (with-env t-kill-shell)))
+      (:web-search e)
+      (conj (builtin "websearch" "Search the web. Returns numbered results with title, URL and snippet."
+                     websearch-schema (with-env t-websearch)))
+      (:notebook-edit e)
+      (conj (builtin "notebook_edit"
+                     (str "Edit a Jupyter notebook (.ipynb) cell: replace its source, insert a new cell "
+                          "after it, or delete it. Replacing a code cell clears its outputs.")
+                     notebook-schema (with-env t-notebook-edit)))))))
 
 (def builtin-tools
   "The ten §4A builtins with the default host boundary, in the order of the SPEC

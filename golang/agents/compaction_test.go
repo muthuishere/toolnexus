@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -290,4 +291,89 @@ func toolCallHasID(m any, id string) bool {
 		}
 	}
 	return false
+}
+
+func TestCompactorOnCompact(t *testing.T) {
+	var got []CompactInfo
+	hook := Compactor(CompactorOptions{MaxTokens: 50, KeepTail: 20, Summarize: summarize,
+		OnCompact: func(_ context.Context, info CompactInfo) { got = append(got, info) }})
+	msgs := transcript(10)
+	out, err := hook(context.Background(), tn.BeforeLLMEvent{Messages: msgs})
+	if err != nil || out == nil {
+		t.Fatalf("expected a compaction, out=%v err=%v", out, err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("OnCompact calls = %d, want 1", len(got))
+	}
+	i := got[0]
+	if i.MessagesBefore != len(msgs) || i.MessagesAfter != len(out.Messages) || i.Summarized == 0 ||
+		i.TokensBefore != EstimateTokens(msgs) || i.TokensAfter != EstimateTokens(out.Messages) ||
+		i.TokensAfter >= i.TokensBefore || i.Summary == "" {
+		t.Fatalf("info = %+v", i)
+	}
+	// under budget ⇒ no callback
+	big := Compactor(CompactorOptions{MaxTokens: 1 << 30, Summarize: summarize,
+		OnCompact: func(context.Context, CompactInfo) { t.Fatal("OnCompact on a no-op") }})
+	if o, _ := big(context.Background(), tn.BeforeLLMEvent{Messages: msgs}); o != nil {
+		t.Fatal("expected no-op")
+	}
+}
+
+// go-agent-cli ask #6 (a): one prompt followed by a long agentic run — the
+// prompt is kept verbatim, only the work after it is summarized.
+func TestCompactorKeepsSoleUserPrompt(t *testing.T) {
+	data := strings.Repeat("data ", 40)
+	prompt := map[string]any{"role": "user", "content": "do the task"}
+	msgs := []any{map[string]any{"role": "system", "content": "SOUL"}, prompt}
+	for i := 0; i < 8; i++ {
+		id := "c" + itoa(i)
+		msgs = append(msgs,
+			map[string]any{"role": "assistant", "content": nil, "tool_calls": []any{
+				map[string]any{"id": id, "type": "function", "function": map[string]any{"name": "lookup", "arguments": "{}"}}}},
+			map[string]any{"role": "tool", "tool_call_id": id, "content": data})
+	}
+	var info CompactInfo
+	hook := Compactor(CompactorOptions{MaxTokens: 100, KeepTail: 20, Summarize: summarize,
+		OnCompact: func(_ context.Context, i CompactInfo) { info = i }})
+	out, err := hook(context.Background(), tn.BeforeLLMEvent{Messages: msgs})
+	if err != nil || out == nil {
+		t.Fatalf("out=%v err=%v", out, err)
+	}
+	if len(out.Messages) != 3 || out.Messages[1].(map[string]any)["content"] != "do the task" {
+		t.Fatalf("want [system, prompt, summary], got %v", out.Messages)
+	}
+	if len(info.Folded) != len(msgs)-2 {
+		t.Fatalf("folded = %d, want %d", len(info.Folded), len(msgs)-2)
+	}
+}
+
+// ask #6 (b): a compaction that would not shrink the transcript is a no-op.
+func TestCompactorNoOpWhenNotSmaller(t *testing.T) {
+	msgs := transcript(2)
+	long := func(older []any) (string, error) { return strings.Repeat("long summary ", 500), nil }
+	hook := Compactor(CompactorOptions{MaxTokens: 10, KeepTail: 5, Summarize: long,
+		OnCompact: func(context.Context, CompactInfo) { t.Fatal("OnCompact on a no-op") }})
+	out, err := hook(context.Background(), tn.BeforeLLMEvent{Messages: msgs})
+	if err != nil || out != nil {
+		t.Fatalf("want no-op, got out=%v err=%v", out, err)
+	}
+}
+
+// ask #6 (c): Folded carries the summarized messages verbatim.
+func TestCompactorFoldedIsVerbatim(t *testing.T) {
+	msgs := transcript(10)
+	var info CompactInfo
+	hook := Compactor(CompactorOptions{MaxTokens: 50, KeepTail: 20, Summarize: summarize,
+		OnCompact: func(_ context.Context, i CompactInfo) { info = i }})
+	if out, _ := hook(context.Background(), tn.BeforeLLMEvent{Messages: msgs}); out == nil {
+		t.Fatal("expected a compaction")
+	}
+	if len(info.Folded) != info.Summarized || len(info.Folded) == 0 {
+		t.Fatalf("folded=%d summarized=%d", len(info.Folded), info.Summarized)
+	}
+	for i, m := range info.Folded {
+		if fmt.Sprint(m) != fmt.Sprint(msgs[1+i]) {
+			t.Fatalf("folded[%d] differs from input[%d]", i, 1+i)
+		}
+	}
 }

@@ -187,8 +187,22 @@ public final class Agents {
 
         /** The bridge: an Agent IS a Tool — drop it into the classic API's {@code extraTools}.
          * The tool takes {@code {prompt}}, runs the agent's own loop in isolation, and returns
-         * ONLY its final text + metadata {@code {agent, turns, totalTokens}}. */
+         * ONLY its final text + metadata {@code {agent, turns, totalTokens}}. Cancelling the calling
+         * turn (the tool thread is interrupted, or {@link ToolContext#cancel()}) interrupts the
+         * child and the tool returns a {@code cancelled: …} error result (SPEC §4C). */
         public Tool asTool(RuntimeOptions rtOpts) {
+            return asToolWith(ctx -> rtOpts);
+        }
+
+        /**
+         * {@link #asTool} with options built per call from the calling tool's context, so the
+         * child runs under the parent turn's gates: set {@code hooks} (the same beforeTool
+         * permission gate — it also sees the child's tool calls), {@code waitFor} (the same ask
+         * bridge, used when no agent on the child's chain has its own) and {@code onMetric}. An
+         * {@link AgentSpec#hooks} on the agent replaces {@code hooks} for that agent, so leave it
+         * unset when the gate must hold (SPEC §4C).
+         */
+        public Tool asToolWith(java.util.function.Function<ToolContext, RuntimeOptions> per) {
             Agent self = this;
             return new Tool() {
                 @Override public String name() { return self.name; }
@@ -200,14 +214,49 @@ public final class Agents {
                 }
                 @Override public String source() { return "custom"; }
                 @Override public ToolResult execute(Map<String, Object> args, ToolContext ctx) {
-                    TaskResult r = self.run(rtOpts, String.valueOf(args.get("prompt")));
                     Map<String, Object> md = new LinkedHashMap<>();
                     md.put("agent", self.name);
+                    TaskResult r = self.runCancellable(per.apply(ctx), String.valueOf(args.get("prompt")), ctx);
+                    if (r == null) { // the calling turn was cancelled
+                        md.put("turns", 0);
+                        md.put("totalTokens", 0L);
+                        return new ToolResult("cancelled: run cancelled", true, md);
+                    }
                     md.put("turns", r.turns());
                     md.put("totalTokens", r.totalTokens());
                     return new ToolResult(r.text(), r.isError(), md);
                 }
             };
+        }
+
+        /** {@link #run} that interrupts the child when the calling thread is interrupted or
+         * {@code ctx} is cancelled; {@code null} = cancelled. */
+        private TaskResult runCancellable(RuntimeOptions rtOpts, String prompt, ToolContext ctx) {
+            if (Thread.currentThread().isInterrupted() || (ctx != null && ctx.isCancelled())) return null;
+            AgentRuntime rt = new AgentRuntime(rtOpts.copyWithRegistry(registry()));
+            AgentRuntime.Spawn sp = rt.spawn(rt.root, name);
+            if (sp.error() != null) return new TaskResult(sp.error(), true, TaskResult.STATUS_ERROR, null, null, 0, 0);
+            var fut = rt.futureResult(sp.handle());
+            rt.wake(sp.handle(), prompt);
+            while (true) {
+                try {
+                    TaskResult r = fut.get(25, java.util.concurrent.TimeUnit.MILLISECONDS);
+                    if (!"pending".equals(r.status())) rt.close(rt.root);
+                    return r;
+                } catch (java.util.concurrent.TimeoutException te) {
+                    if (ctx != null && ctx.isCancelled()) {
+                        rt.close(rt.root, true, "cancelled");
+                        return null;
+                    }
+                } catch (InterruptedException ie) {
+                    rt.close(rt.root, true, "cancelled");
+                    Thread.currentThread().interrupt();
+                    return null;
+                } catch (java.util.concurrent.ExecutionException ee) {
+                    Throwable c = ee.getCause() != null ? ee.getCause() : ee;
+                    return new TaskResult(String.valueOf(c.getMessage()), true, TaskResult.STATUS_ERROR, null, null, 0, 0);
+                }
+            }
         }
     }
 

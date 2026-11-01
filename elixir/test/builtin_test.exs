@@ -3,7 +3,8 @@ defmodule Toolnexus.BuiltinTest do
 
   alias Toolnexus.{Builtin, ToolResult, Request, Context, Answer}
 
-  # Golden input schemas, extracted byte-for-byte from js/src/builtin.ts.
+  # Golden input schemas, extracted byte-for-byte from js/src/builtin.ts; grep gained
+  # context/before/after with SPEC §4C (golang reference, change add-go-host-asks).
   @golden_schemas Jason.decode!("""
   {
     "bash": {
@@ -53,7 +54,10 @@ defmodule Toolnexus.BuiltinTest do
         "pattern": {"type": "string", "description": "Regular expression to search for"},
         "path": {"type": "string", "description": "Directory to search (default: process cwd)"},
         "include": {"type": "string", "description": "Glob filter for file names"},
-        "limit": {"type": "number", "description": "Maximum number of matches (default 100)"}
+        "limit": {"type": "number", "description": "Maximum number of matches (default 100)"},
+        "context": {"type": "number", "description": "Lines of context before and after each match"},
+        "before": {"type": "number", "description": "Lines of context before each match (overrides context)"},
+        "after": {"type": "number", "description": "Lines of context after each match (overrides context)"}
       },
       "required": ["pattern"],
       "additionalProperties": false
@@ -270,7 +274,8 @@ defmodule Toolnexus.BuiltinTest do
     test "creates parent dirs and reports byte count", %{tmp_dir: tmp} do
       p = Path.join([tmp, "a", "b", "out.txt"])
       result = run("write", %{"path" => p, "content" => "hello"})
-      assert result == %ToolResult{output: "Wrote 5 bytes to #{p}", is_error: false, metadata: %{bytes: 5}}
+      assert {result.output, result.is_error} == {"Wrote 5 bytes to #{p}", false}
+      assert Map.drop(result.metadata, [:files, :diff]) == %{bytes: 5}
       assert File.read!(p) == "hello"
     end
   end
@@ -281,7 +286,8 @@ defmodule Toolnexus.BuiltinTest do
       p = Path.join(tmp, "f.txt")
       File.write!(p, "alpha beta gamma")
       result = run("edit", %{"path" => p, "oldString" => "beta", "newString" => "BETA"})
-      assert result == %ToolResult{output: "Edited #{p} (1 replacement)", is_error: false, metadata: %{replacements: 1}}
+      assert {result.output, result.is_error} == {"Edited #{p} (1 replacement)", false}
+      assert Map.drop(result.metadata, [:files, :diff]) == %{replacements: 1}
       assert File.read!(p) == "alpha BETA gamma"
     end
 
@@ -301,7 +307,7 @@ defmodule Toolnexus.BuiltinTest do
 
       result = run("edit", %{"path" => p, "oldString" => "x", "newString" => "w", "replaceAll" => true})
       assert result.output == "Edited #{p} (2 replacements)"
-      assert result.metadata == %{replacements: 2}
+      assert Map.drop(result.metadata, [:files, :diff]) == %{replacements: 2}
       assert File.read!(p) == "w y w"
     end
 
@@ -335,7 +341,10 @@ defmodule Toolnexus.BuiltinTest do
     test "limit caps matches", %{tmp_dir: tmp} do
       File.write!(Path.join(tmp, "a.txt"), "m\nm\nm\nm")
       result = run("grep", %{"pattern" => "m", "path" => tmp, "limit" => 2})
-      assert result.metadata == %{count: 2}
+      # SPEC §4C: the cut is reported in metadata; the text is unchanged.
+      assert result.metadata == %{count: 2, truncated: true, total: 4}
+      assert result.output == "a.txt:1:m
+a.txt:2:m"
     end
 
     test "invalid regex is an error" do
@@ -477,7 +486,10 @@ defmodule Toolnexus.BuiltinTest do
 
       result = run("apply_patch", %{"patchText" => patch})
       assert result.output == "Applied patch: 3 file operations"
-      assert result.metadata == %{added: 1, updated: 1, deleted: 1}
+      assert Map.drop(result.metadata, [:files, :diff]) == %{added: 1, updated: 1, deleted: 1}
+
+      assert Enum.map(result.metadata.files, &{&1.status, &1.additions, &1.deletions}) ==
+               [{"added", 2, 0}, {"modified", 1, 1}, {"deleted", 0, 1}]
       assert File.read!(new) == "hello\nworld"
       assert File.read!(upd) == "keep\nnew line\nend\n"
       refute File.exists?(del)

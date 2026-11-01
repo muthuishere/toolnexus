@@ -273,12 +273,21 @@ public sealed class RuntimeOptions
     /// <see cref="Hooks"/>.</summary>
     public Action<MetricEvent>? OnMetric { get; set; }
 
+    /// <summary>
+    /// (SPEC §4C) The runtime-level §10 interpreter: answers a suspension when no agent on the
+    /// handle's chain has its own <see cref="AgentDef.WaitFor"/>. Null ⇒ unchanged (no authority ⇒
+    /// the suspension goes durable). A host running an agent as a tool
+    /// (<see cref="Agent.AsToolWith"/>) sets it so the child's asks reach the same bridge as the
+    /// parent turn.
+    /// </summary>
+    public Func<Request, Task<Answer>>? WaitFor { get; set; }
+
     internal RuntimeOptions CloneWithRegistry(Dictionary<string, AgentDef> registry) => new()
     {
         Handler = Handler, InProcess = InProcess, Registry = registry, InboxCap = InboxCap,
         MaxConcurrentTurns = MaxConcurrentTurns, ShutdownMs = ShutdownMs,
         Store = Store, Clock = Clock,
         BaseUrl = BaseUrl, Style = Style, ApiKey = ApiKey, Model = Model,
-        Hooks = Hooks, OnMetric = OnMetric,
+        Hooks = Hooks, OnMetric = OnMetric, WaitFor = WaitFor,
     };
 }

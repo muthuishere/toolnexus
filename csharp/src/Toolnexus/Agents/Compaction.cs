@@ -48,7 +48,23 @@ public static class Compaction
 
         /// <summary>Inject a pre-compact reminder to flush durable notes to memory (§7E). Default off.</summary>
         public bool FlushToMemory { get; init; }
+
+        /// <summary>
+        /// (SPEC §4C) Called after each compaction with what changed, so a host can tell its UI or log
+        /// (e.g. a "context compacted" row). Never called on a no-op. The C# <c>BeforeLLM</c> hook
+        /// carries no cancellation token, so neither does this callback.
+        /// </summary>
+        public Action<CompactInfo>? OnCompact { get; init; }
     }
+
+    /// <summary>(SPEC §4C) One compaction, for <see cref="Options.OnCompact"/>. Token counts come from
+    /// <see cref="Options.CountTokens"/> (default <see cref="EstimateTokens"/>).</summary>
+    /// <param name="Summarized">How many messages were folded into the summary.</param>
+    /// <param name="Summary">The text returned by <c>Summarize</c> (without the header line).</param>
+    /// <param name="Folded">The messages summarized away, verbatim, so a host can persist them (the
+    /// loop only saves the compacted transcript).</param>
+    public sealed record CompactInfo(int TokensBefore, int TokensAfter, int MessagesBefore, int MessagesAfter,
+        int Summarized, string Summary, IReadOnlyList<object?> Folded);
 
     // Match JS's ceil(len(JSON.stringify(m))/4): compact (no indentation) and DON'T HTML-escape
     // < > & or non-ASCII, so a byte-length estimate lines up with the other ports.
@@ -87,7 +103,8 @@ public static class Compaction
         return ev =>
         {
             var msgs = ev.Messages;
-            if (count(msgs) <= opts.MaxTokens) return null; // under budget → byte-identical no-op
+            var before = count(msgs);
+            if (before <= opts.MaxTokens) return null; // under budget → byte-identical no-op
 
             // Preserve a leading system prompt verbatim (identity / soul / skills — never summarized).
             var head0 = Role(msgs.Count > 0 ? msgs[0] : null) == "system" ? 1 : 0;
@@ -117,9 +134,19 @@ public static class Compaction
 
             var older = Slice(msgs, head0, split);
             var tail = Slice(msgs, split);
+            // (SPEC §4C) The latest user prompt is never summarized away. When the only clean boundary
+            // is the first message after the system prompt (one prompt followed by a long agentic
+            // run), keep that prompt verbatim and summarize the work after it: [system, prompt, summary].
+            var pinned = new List<object?>();
+            if (split == msgs.Count && head0 < msgs.Count && IsBoundary(msgs[head0]))
+            {
+                pinned.Add(msgs[head0]);
+                older = Slice(msgs, head0 + 1, msgs.Count);
+            }
             if (older.Count == 0) return null;
 
             var result = new List<object?>(system);
+            result.AddRange(pinned);
             var summary = opts.Summarize(older);
             result.Add(new Dictionary<string, object?>
             {
@@ -136,6 +163,9 @@ public static class Compaction
                 });
             }
             result.AddRange(tail);
+            var after = count(result);
+            if (after >= before) return null; // compaction would not shrink the transcript → no-op
+            opts.OnCompact?.Invoke(new CompactInfo(before, after, msgs.Count, result.Count, older.Count, summary, older));
             return new LlmClient.LLMOverride(Messages: result);
         };
     }

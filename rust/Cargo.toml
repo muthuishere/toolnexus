@@ -1,0 +1,39 @@
+[package]
+name = "toolnexus"
+version = "0.21.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Vendor-neutral tool layer for LLM agents: ACP agents, MCP servers, agent skills behind one Tool interface (Rust port of toolnexus)."
+license = "MIT"
+repository = "https://github.com/muthuishere/toolnexus"
+readme = "README.md"
+keywords = ["llm", "agents", "mcp", "acp", "tools"]
+categories = ["api-bindings", "asynchronous"]
+
+[features]
+default = ["mcp-http"]
+# MCP over streamable HTTP (pulls in reqwest + rustls). Off ⇒ stdio servers only;
+# a remote server is then reported failed with a message naming this feature.
+mcp-http = ["rmcp/transport-streamable-http-client-reqwest", "dep:reqwest", "dep:http"]
+
+[dependencies]
+tokio = { version = "1", features = ["process", "io-util", "sync", "time", "rt", "macros"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+yaml-rust2 = "0.13"
+tokio-util = "0.7"
+rmcp = { version = "3.8", default-features = false, features = ["client", "transport-child-process"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls"], optional = true }
+http = { version = "1", optional = true }
+process-wrap = { version = "10", features = ["tokio1"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = ["full"] }
+
+[target.'cfg(unix)'.dev-dependencies]
+libc = "0.2"

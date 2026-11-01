@@ -337,6 +337,12 @@ type Options struct {
 	// OnMetric is the §8 observability sink for every agent's turns, forwarded
 	// verbatim. A Def.OnMetric replaces this for that agent (never merged).
 	OnMetric func(tn.MetricEvent)
+	// WaitFor is the runtime-level §10 interpreter: it answers a suspension when
+	// no agent on the handle's chain has its own WaitFor. Nil ⇒ unchanged
+	// (no authority ⇒ the suspension goes durable). A host running an agent as a
+	// tool (AsToolWith) sets it so the child's asks reach the same bridge as the
+	// parent turn. golang only for now.
+	WaitFor func(tn.Request) (tn.Answer, error)
 }
 
 // HandleView is one read-only row of List/Inspect.
@@ -907,8 +913,13 @@ func (rt *Runtime) escalator(h *Handle) func(tn.Request) (tn.Answer, error) {
 			break
 		}
 	}
+	answer := func(req tn.Request) (tn.Answer, error) { return interpreter.def.WaitFor(req) }
 	if interpreter == nil {
-		return nil
+		if rt.opts.WaitFor == nil {
+			return nil
+		}
+		interpreter = rt.Root
+		answer = rt.opts.WaitFor
 	}
 	return func(req tn.Request) (tn.Answer, error) {
 		rt.mu.Lock()
@@ -920,7 +931,7 @@ func (rt *Runtime) escalator(h *Handle) func(tn.Request) (tn.Answer, error) {
 		}
 		rt.t(fmt.Sprintf("%s: escalate → %s answers (\"nearest interpreter\")", h.ID, target))
 		rt.mu.Unlock()
-		ans, err := interpreter.def.WaitFor(req)
+		ans, err := answer(req)
 		if err != nil {
 			return ans, err
 		}

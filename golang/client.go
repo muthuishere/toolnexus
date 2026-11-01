@@ -16,6 +16,7 @@ import (
 	"math"
 	"math/rand"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -36,9 +37,15 @@ type ClientOptions struct {
 	BaseURL string
 	Style   ClientStyle
 	Model   string
-	// APIKey; if empty, read from env (OPENROUTER_API_KEY / OPENAI_API_KEY /
-	// ANTHROPIC_API_KEY). Never printed.
+	// APIKey; if empty, read from APIKeyEnv, else from the ONE env var that
+	// belongs to the BaseURL host: https://api.openai.com → OPENAI_API_KEY,
+	// https://api.anthropic.com → ANTHROPIC_API_KEY, https://openrouter.ai →
+	// OPENROUTER_API_KEY. Any other host (or plain http) needs APIKey or
+	// APIKeyEnv — a key is never sent to a host it does not belong to. Never printed.
 	APIKey string
+	// APIKeyEnv names the env var to read the key from (the NAME, never the
+	// value) when APIKey is empty — for a host not in the table above.
+	APIKeyEnv string
 	// Headers are extra request headers.
 	Headers map[string]string
 	// SystemPrompt is prepended to the toolkit's SkillsPrompt().
@@ -96,6 +103,11 @@ type ClientOptions struct {
 	// DEFERRED to its own change; it would narrow this requirement, never remove
 	// it. ADR 0025 D4.)
 	WaitFor func(Request) (Answer, error)
+	// WaitForCtx is WaitFor that also receives the turn's context, so a pending
+	// ask can stop when the turn is cancelled (return ctx.Err()). When both are
+	// set, WaitForCtx wins. Same §10 contract otherwise. golang only for now;
+	// other ports pending.
+	WaitForCtx func(context.Context, Request) (Answer, error)
 	// RequestParams (§8 Gap 1) are extra top-level keys shallow-merged into EVERY
 	// LLM request body after the client builds its own — a RequestParams key WINS
 	// on collision (e.g. max_tokens overrides the anthropic default 4096). The keys
@@ -107,6 +119,14 @@ type ClientOptions struct {
 	// to send — the escape hatch for provider-specific rewriting without a proxy.
 	// Returning nil ⇒ unchanged. Runs on every LLM call, all four paths.
 	BodyTransform func(body map[string]any) map[string]any
+	// PromptCache, when set, asks the provider to cache the stable request
+	// prefix (see PromptCacheOptions). Nil ⇒ body byte-identical. Applied before
+	// RequestParams and BodyTransform, so both can still override it. golang only for now.
+	PromptCache *PromptCacheOptions
+	// ToolTiers, when set, sends only core tool schemas up front plus a
+	// tool_search tool that loads the rest on demand (see ToolTierOptions).
+	// Nil ⇒ every tool is sent, as before. golang only for now.
+	ToolTiers *ToolTierOptions
 	// HTTPClient (§8 Gap 2) overrides the HTTP client for LLM requests (retries
 	// included). Nil ⇒ http.DefaultClient. Scope is the LLM path only; MCP transports
 	// use the MCP SDK's own clients.
@@ -292,6 +312,9 @@ type BeforeToolEvent struct {
 	Args map[string]any
 	ID   string
 	Turn int
+	// Hints are the called tool's Tool.Hints (nil = unknown or no such tool),
+	// for permission gates. golang only for now.
+	Hints *ToolHints
 }
 
 // AfterToolEvent is passed to Hooks.AfterTool.
@@ -336,6 +359,17 @@ type Usage struct {
 	PromptTokens     int `json:"promptTokens"`
 	CompletionTokens int `json:"completionTokens"`
 	TotalTokens      int `json:"totalTokens"`
+	// CacheReadTokens are prompt tokens served from the provider's prompt cache
+	// (anthropic cache_read_input_tokens; openai prompt_tokens_details.cached_tokens).
+	// CacheWriteTokens are tokens written to it (anthropic
+	// cache_creation_input_tokens; openai reports none). Under anthropic,
+	// PromptTokens is input_tokens as reported, which EXCLUDES both: the
+	// context actually sent is PromptTokens + CacheReadTokens + CacheWriteTokens
+	// — use that sum for context-window size, or a cached session looks almost
+	// empty. Under openai, PromptTokens already INCLUDES the cached part (do not
+	// add CacheReadTokens again). golang only for now.
+	CacheReadTokens  int `json:"cacheReadTokens,omitempty"`
+	CacheWriteTokens int `json:"cacheWriteTokens,omitempty"`
 }
 
 // RunResult is the outcome of a Run.
@@ -376,8 +410,11 @@ type StreamEvent struct {
 	Type string
 	// Delta is the incremental assistant text (Type == "text").
 	Delta string
-	// Name is the tool name (Type == "tool_call" | "tool_result").
+	// Name is the tool name (Type == "tool_call" | "tool_result"). For a
+	// ToolTiers call_tool call it is the REAL tool, Args are its inner
+	// arguments, and Via is "call_tool" (the transcript keeps the wrapper).
 	Name string
+	Via  string
 	// ID is the tool-call id (Type == "tool_call" | "tool_result").
 	ID string
 	// Args are the parsed tool arguments (Type == "tool_call").
@@ -386,6 +423,9 @@ type StreamEvent struct {
 	Output string
 	// IsError flags a tool error (Type == "tool_result").
 	IsError bool
+	// Metadata is the tool result's metadata (Type == "tool_result"), e.g. the
+	// files/diff of an edit (SPEC §4 Edit diffs).
+	Metadata map[string]any
 	// Usage is the aggregated token usage (Type == "usage" | "done").
 	Usage *Usage
 	// Result is the final RunResult (Type == "done").
@@ -416,7 +456,14 @@ func addUsage(acc *Usage, raw map[string]any, style string) {
 		acc.PromptTokens += in
 		acc.CompletionTokens += out
 		acc.TotalTokens += in + out
+		acc.CacheReadTokens += num("cache_read_input_tokens")
+		acc.CacheWriteTokens += num("cache_creation_input_tokens")
 		return
+	}
+	if d, ok := raw["prompt_tokens_details"].(map[string]any); ok {
+		if v, ok := d["cached_tokens"].(float64); ok {
+			acc.CacheReadTokens += int(v)
+		}
 	}
 	prompt, completion := num("prompt_tokens"), num("completion_tokens")
 	acc.PromptTokens += prompt
@@ -431,7 +478,9 @@ func addUsage(acc *Usage, raw map[string]any, style string) {
 // Client runs the agent loop against a Toolkit.
 type Client struct {
 	opts ClientOptions
-	http *http.Client
+	// tiers holds the frozen ToolTiers plan per toolkit (tool_tiers.go).
+	tiers tierCache
+	http  *http.Client
 	// store is the conversation provider for Ask — from opts.Store, else a fresh
 	// in-memory store.
 	store ConversationStore
@@ -597,24 +646,48 @@ func (c *Client) timedOutRun(model string, messages []any, toolCalls []ToolCall,
 	return res, &RunTimeoutError{TimeoutMs: c.opts.TimeoutMs}
 }
 
-// resolveKey picks the API key from opts or the environment. The value is never
-// logged.
+// resolveKey picks the API key. An explicit APIKey is used as-is. Otherwise
+// the key comes ONLY from the env var that belongs to the BaseURL's host, so a
+// key is never sent to another provider's host (security, go-agent-cli ask #8;
+// golang only for now). Any other host needs an explicit APIKey. The value is
+// never logged.
 func (c *Client) resolveKey() (string, error) {
 	if c.opts.APIKey != "" {
 		return c.opts.APIKey, nil
 	}
-	candidates := []string{os.Getenv("OPENROUTER_API_KEY")}
-	if c.opts.Style == StyleAnthropic {
-		candidates = append(candidates, os.Getenv("ANTHROPIC_API_KEY"), os.Getenv("OPENAI_API_KEY"))
-	} else {
-		candidates = append(candidates, os.Getenv("OPENAI_API_KEY"), os.Getenv("ANTHROPIC_API_KEY"))
+	envName := c.opts.APIKeyEnv
+	if envName == "" {
+		envName = keyEnvForBaseURL(c.opts.BaseURL)
 	}
-	for _, k := range candidates {
-		if k != "" {
-			return k, nil
-		}
+	if envName == "" {
+		return "", fmt.Errorf("no API key: set APIKey or APIKeyEnv (provider env vars are only used for https://api.openai.com, https://api.anthropic.com and https://openrouter.ai, never for %q)", c.opts.BaseURL)
 	}
-	return "", fmt.Errorf("no API key: set APIKey or OPENROUTER_API_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY")
+	if k := os.Getenv(envName); k != "" {
+		return k, nil
+	}
+	return "", fmt.Errorf("no API key: set APIKey or %s", envName)
+}
+
+// keyEnvForBaseURL names the env var whose key may be sent to baseURL's host,
+// or "" when none may.
+func keyEnvForBaseURL(baseURL string) string {
+	switch h := hostOf(baseURL); {
+	case h == "api.openai.com":
+		return "OPENAI_API_KEY"
+	case h == "api.anthropic.com":
+		return "ANTHROPIC_API_KEY"
+	case h == "openrouter.ai" || strings.HasSuffix(h, ".openrouter.ai"):
+		return "OPENROUTER_API_KEY"
+	}
+	return ""
+}
+
+func hostOf(baseURL string) string {
+	u, err := url.Parse(baseURL)
+	if err != nil || u.Scheme != "https" {
+		return "" // a provider key is never sent over plain http
+	}
+	return strings.ToLower(u.Hostname())
 }
 
 func (c *Client) system(tk *Toolkit) string {
@@ -633,15 +706,35 @@ func (c *Client) system(tk *Toolkit) string {
 // may replace the result. It returns the args actually used and the final
 // result. Mirrors js Client.runTool. Hook errors abort the run.
 func (c *Client) runTool(ctx context.Context, tk *Toolkit, name string, args map[string]any, id string, turn int) (map[string]any, ToolResult, error) {
+	if c.opts.ToolTiers != nil && name == "tool_search" {
+		start := time.Now()
+		r := c.toolSearch(tk, args)
+		c.emitTool(name, string(SourceBuiltin), r, start)
+		return args, r, nil
+	}
+	// call_tool (ToolTiers) is unwrapped HERE, so hooks, hints and permission
+	// gates see the real tool. The returned args keep the wrapper shape (with
+	// any BeforeTool rewrite inside), so a §10 re-run unwraps the same way.
+	real, inner, wrapped := c.unwrapCall(name, args)
+	a, r, err := c.runToolDirect(ctx, tk, real, inner, id, turn)
+	if wrapped {
+		a = map[string]any{"name": real, "arguments": a}
+	}
+	return a, r, err
+}
+
+func (c *Client) runToolDirect(ctx context.Context, tk *Toolkit, name string, args map[string]any, id string, turn int) (map[string]any, ToolResult, error) {
 	h := c.opts.Hooks
 	source := "custom"
+	var hints *ToolHints
 	if t, ok := tk.Get(name); ok {
 		source = string(t.Source)
+		hints = t.Hints
 	}
 	start := time.Now()
 	a := args
 	if h != nil && h.BeforeTool != nil {
-		ov, err := h.BeforeTool(ctx, BeforeToolEvent{Name: name, Args: a, ID: id, Turn: turn})
+		ov, err := h.BeforeTool(ctx, BeforeToolEvent{Name: name, Args: a, ID: id, Turn: turn, Hints: hints})
 		if err != nil {
 			return a, ToolResult{}, err
 		}
@@ -658,7 +751,10 @@ func (c *Client) runTool(ctx context.Context, tk *Toolkit, name string, args map
 			}
 		}
 	}
-	result, err := tk.Execute(ctx, name, a)
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	result, err := tk.executeCall(ctx, name, a, id, nil)
 	if err != nil {
 		return a, result, err
 	}
@@ -793,8 +889,10 @@ func (c *Client) AskStream(ctx context.Context, prompt string, tk *Toolkit, id s
 	if err != nil {
 		return RunResult{}, err
 	}
-	res, err := c.RunWithHistory(ctx, prompt, tk, history)
+	sink := &partialTranscript{}
+	res, err := c.RunWithHistory(withPartialSink(ctx, sink), prompt, tk, history)
 	if err != nil {
+		c.savePartial(id, history, prompt, tk, sink) // an interrupted turn is still saved; the error wins
 		return res, err
 	}
 	if err := c.store.Save(id, res.Messages); err != nil {
@@ -929,6 +1027,9 @@ func (c *Client) ConversationStore() ConversationStore {
 // body: strip forbidden keys from RequestParams, shallow-merge RequestParams
 // (caller wins), then run BodyTransform last. Called at every LLM body-build site.
 func (c *Client) finalizeBody(body map[string]any) map[string]any {
+	if c.opts.PromptCache != nil {
+		applyPromptCache(body, c.opts.Style, c.opts.PromptCache)
+	}
 	for k, v := range c.opts.RequestParams {
 		if k == "messages" || k == "tools" || k == "stream" {
 			log.Printf("[toolnexus] requestParams key %q is not allowed — ignored (use BodyTransform)", k)
@@ -980,7 +1081,7 @@ func (c *Client) runOpenAI(ctx context.Context, prompt any, tk *Toolkit, history
 	if prompt != any(resumeNoPrompt) { // a resume continues from the transcript, with no new user turn
 		messages = append(messages, userMessage(prompt))
 	}
-	tools := tk.ToOpenAI()
+	tools := ToOpenAI(c.requestTools(tk))
 	var toolCalls []ToolCall
 	var usage Usage
 	turns := 0
@@ -991,6 +1092,7 @@ func (c *Client) runOpenAI(ctx context.Context, prompt any, tk *Toolkit, history
 	defer func() {
 		if err != nil {
 			c.emitRunError(lastModel, runStart, toolCalls, turns, usage, err)
+			messages = keepPartial(ctx, messages)
 			if c.isRunTimeout(ctx, err) {
 				res, err = c.timedOutRun(lastModel, messages, toolCalls, turns, usage)
 			}
@@ -1123,6 +1225,9 @@ func (c *Client) runOpenAI(ctx context.Context, prompt any, tk *Toolkit, history
 						haltedAt[i] = h
 					}
 				}
+				if err == nil && ctx.Err() != nil {
+					err = ctx.Err() // finished after cancellation: interrupted, not a result
+				}
 				if err != nil {
 					mu.Lock()
 					if hookErr == nil {
@@ -1147,6 +1252,12 @@ func (c *Client) runOpenAI(ctx context.Context, prompt any, tk *Toolkit, history
 		}
 		wg.Wait()
 		if hookErr != nil {
+			for i := range msg.ToolCalls { // keep the finished pairs; the rest are sealed as interrupted
+				if results[i] != nil {
+					toolCalls = append(toolCalls, records[i])
+					messages = append(messages, results[i])
+				}
+			}
 			return RunResult{}, hookErr
 		}
 		// Record in tool-call order; on the FIRST durable halt, surface it and stop —
@@ -1205,11 +1316,17 @@ func (c *Client) pendingRun(model string, runStart time.Time, request Request, m
 // second suspension (unresolved) it returns an error ToolResult — never looping
 // forever on the same request. Mirrors js Client.resolvePending.
 func (c *Client) resolvePending(ctx context.Context, tk *Toolkit, name string, args map[string]any, request Request, id string, turn int) (result ToolResult, halted *Request, err error) {
-	if c.opts.WaitFor == nil {
+	name, args, _ = c.unwrapCall(name, args)
+	if c.opts.WaitFor == nil && c.opts.WaitForCtx == nil {
 		req := request
 		return ToolResult{Output: request.Prompt, IsError: true}, &req, nil
 	}
-	answer, err := c.opts.WaitFor(request)
+	var answer Answer
+	if c.opts.WaitForCtx != nil {
+		answer, err = c.opts.WaitForCtx(ctx, request)
+	} else {
+		answer, err = c.opts.WaitFor(request)
+	}
 	if err != nil {
 		return ToolResult{}, nil, err
 	}
@@ -1217,7 +1334,7 @@ func (c *Client) resolvePending(ctx context.Context, tk *Toolkit, name string, a
 		return ToolResult{Output: "declined/expired: " + request.Prompt, IsError: true}, nil, nil
 	}
 	start := time.Now()
-	result, err = tk.executeWithAnswer(ctx, name, args, &answer)
+	result, err = tk.executeCall(ctx, name, args, id, &answer)
 	if err != nil {
 		return ToolResult{}, nil, err
 	}
@@ -1261,7 +1378,7 @@ func (c *Client) runAnthropic(ctx context.Context, prompt any, tk *Toolkit, hist
 	if prompt != any(resumeNoPrompt) { // a resume continues from the transcript, with no new user turn
 		messages = append(messages, userMessage(prompt))
 	}
-	tools := tk.ToAnthropic()
+	tools := ToAnthropic(c.requestTools(tk))
 	var toolCalls []ToolCall
 	var usage Usage
 	turns := 0
@@ -1270,6 +1387,7 @@ func (c *Client) runAnthropic(ctx context.Context, prompt any, tk *Toolkit, hist
 	defer func() {
 		if err != nil {
 			c.emitRunError(lastModel, runStart, toolCalls, turns, usage, err)
+			messages = keepPartial(ctx, messages)
 			if c.isRunTimeout(ctx, err) {
 				res, err = c.timedOutRun(lastModel, messages, toolCalls, turns, usage)
 			}
@@ -1410,6 +1528,9 @@ func (c *Client) runAnthropic(ctx context.Context, prompt any, tk *Toolkit, hist
 						haltedAt[i] = h
 					}
 				}
+				if err == nil && ctx.Err() != nil {
+					err = ctx.Err() // finished after cancellation: interrupted, not a result
+				}
 				if err != nil {
 					mu.Lock()
 					if hookErr == nil {
@@ -1435,6 +1556,7 @@ func (c *Client) runAnthropic(ctx context.Context, prompt any, tk *Toolkit, hist
 		}
 		wg.Wait()
 		if hookErr != nil {
+			messages = appendFinishedBlocks(messages, results)
 			return RunResult{}, hookErr
 		}
 		// Assemble the tool_result blocks in call order; on the FIRST durable halt,
@@ -1520,6 +1642,19 @@ func (c *Client) StreamWithID(ctx context.Context, prompt string, tk *Toolkit, i
 	}
 	ch := make(chan StreamEvent, 16)
 	stream := func(dctx context.Context, out chan<- StreamEvent) error {
+		// Side channel for in-process GenerateStream events that are not text
+		// (e.g. an ACP agent's own tool calls). Guarded so a late event after
+		// the loop returned is dropped instead of sent on a closed channel.
+		var sideMu sync.Mutex
+		sideOpen := true
+		defer func() { sideMu.Lock(); sideOpen = false; sideMu.Unlock() }()
+		dctx = withStreamSide(dctx, func(ev StreamEvent) {
+			sideMu.Lock()
+			defer sideMu.Unlock()
+			if sideOpen {
+				out <- ev
+			}
+		})
 		if c.opts.Style == StyleAnthropic {
 			return c.streamAnthropic(dctx, prompt, tk, history, out)
 		}
@@ -1539,13 +1674,17 @@ func (c *Client) StreamWithID(ctx context.Context, prompt string, tk *Toolkit, i
 		// Stateful: intercept the terminal "done" event to persist the transcript
 		// (mirrors js stream() saving on done when an id is set).
 		inner := make(chan StreamEvent, 16)
+		sink := &partialTranscript{}
 		go func() {
 			defer close(inner)
-			if err := stream(dctx, inner); err != nil {
+			if err := stream(withPartialSink(dctx, sink), inner); err != nil {
 				inner <- StreamEvent{Type: "error", Err: err}
 			}
 		}()
 		for ev := range inner {
+			if ev.Type == "error" {
+				c.savePartial(id, history, prompt, tk, sink) // interrupted turn: save, still emit the error
+			}
 			if ev.Type == "done" && ev.Result != nil {
 				if err := c.store.Save(id, ev.Result.Messages); err != nil {
 					ch <- StreamEvent{Type: "error", Err: err}
@@ -1577,7 +1716,7 @@ func (c *Client) streamOpenAI(ctx context.Context, prompt any, tk *Toolkit, hist
 	if prompt != any(resumeNoPrompt) { // a resume continues from the transcript, with no new user turn
 		messages = append(messages, userMessage(prompt))
 	}
-	tools := tk.ToOpenAI()
+	tools := ToOpenAI(c.requestTools(tk))
 	var toolCalls []ToolCall
 	var usage Usage
 	turns := 0
@@ -1586,6 +1725,7 @@ func (c *Client) streamOpenAI(ctx context.Context, prompt any, tk *Toolkit, hist
 	defer func() {
 		if err != nil {
 			c.emitRunError(lastModel, runStart, toolCalls, turns, usage, err)
+			messages = keepPartial(ctx, messages)
 			if c.isRunTimeout(ctx, err) {
 				// The streaming paths have no RunResult to populate here (the
 				// terminal one rides the channel), but the message must still
@@ -1751,7 +1891,7 @@ func (c *Client) streamOpenAI(ctx context.Context, prompt any, tk *Toolkit, hist
 		messages = append(messages, asst)
 
 		for _, cc := range calls {
-			ch <- StreamEvent{Type: "tool_call", ID: cc.id, Name: cc.name, Args: safeJSONArgs(cc.args)}
+			ch <- c.callEvent(cc.id, cc.name, safeJSONArgs(cc.args))
 		}
 		// Execute tool calls concurrently; results[] keeps call order.
 		results := make([]any, len(calls))
@@ -1775,6 +1915,9 @@ func (c *Client) streamOpenAI(ctx context.Context, prompt any, tk *Toolkit, hist
 						haltedAt[i] = h
 					}
 				}
+				if err == nil && ctx.Err() != nil {
+					err = ctx.Err() // finished after cancellation: interrupted, not a result
+				}
 				if err != nil {
 					mu.Lock()
 					if hookErr == nil {
@@ -1785,11 +1928,17 @@ func (c *Client) streamOpenAI(ctx context.Context, prompt any, tk *Toolkit, hist
 				}
 				records[i] = ToolCall{Name: cc.name, Args: args, Output: result.Output, IsError: result.IsError, Metadata: result.Metadata}
 				results[i] = withToolParts(map[string]any{"role": "tool", "tool_call_id": cc.id, "content": result.Output}, cc.name, result.Parts)
-				events[i] = StreamEvent{Type: "tool_result", ID: cc.id, Name: cc.name, Output: result.Output, IsError: result.IsError}
+				events[i] = c.resultEvent(cc.id, cc.name, safeJSONArgs(cc.args), result)
 			}(i, cc)
 		}
 		wg.Wait()
 		if hookErr != nil {
+			for i := range calls { // keep the finished pairs; the rest are sealed as interrupted
+				if results[i] != nil {
+					toolCalls = append(toolCalls, records[i])
+					messages = append(messages, results[i])
+				}
+			}
 			return hookErr
 		}
 		// Record in tool-call order; on the FIRST durable halt, append that one tool
@@ -1850,7 +1999,7 @@ func (c *Client) streamAnthropic(ctx context.Context, prompt any, tk *Toolkit, h
 	if prompt != any(resumeNoPrompt) { // a resume continues from the transcript, with no new user turn
 		messages = append(messages, userMessage(prompt))
 	}
-	tools := tk.ToAnthropic()
+	tools := ToAnthropic(c.requestTools(tk))
 	var toolCalls []ToolCall
 	var usage Usage
 	turns := 0
@@ -1859,6 +2008,7 @@ func (c *Client) streamAnthropic(ctx context.Context, prompt any, tk *Toolkit, h
 	defer func() {
 		if err != nil {
 			c.emitRunError(lastModel, runStart, toolCalls, turns, usage, err)
+			messages = keepPartial(ctx, messages)
 			if c.isRunTimeout(ctx, err) {
 				// The streaming paths have no RunResult to populate here (the
 				// terminal one rides the channel), but the message must still
@@ -2027,7 +2177,7 @@ func (c *Client) streamAnthropic(ctx context.Context, prompt any, tk *Toolkit, h
 		}
 
 		for _, u := range uses {
-			ch <- StreamEvent{Type: "tool_call", ID: u.id, Name: u.name, Args: u.input}
+			ch <- c.callEvent(u.id, u.name, u.input)
 		}
 		results := make([]any, len(uses))
 		records := make([]ToolCall, len(uses))
@@ -2054,6 +2204,9 @@ func (c *Client) streamAnthropic(ctx context.Context, prompt any, tk *Toolkit, h
 						haltedAt[i] = h
 					}
 				}
+				if err == nil && ctx.Err() != nil {
+					err = ctx.Err() // finished after cancellation: interrupted, not a result
+				}
 				if err != nil {
 					mu.Lock()
 					if hookErr == nil {
@@ -2064,11 +2217,12 @@ func (c *Client) streamAnthropic(ctx context.Context, prompt any, tk *Toolkit, h
 				}
 				records[i] = ToolCall{Name: u.name, Args: args, Output: result.Output, IsError: result.IsError, Metadata: result.Metadata}
 				results[i] = withToolParts(map[string]any{"type": "tool_result", "tool_use_id": u.id, "content": result.Output, "is_error": result.IsError}, u.name, result.Parts)
-				events[i] = StreamEvent{Type: "tool_result", ID: u.id, Name: u.name, Output: result.Output, IsError: result.IsError}
+				events[i] = c.resultEvent(u.id, u.name, u.input, result)
 			}(i, u)
 		}
 		wg.Wait()
 		if hookErr != nil {
+			messages = appendFinishedBlocks(messages, results)
 			return hookErr
 		}
 		// Assemble tool_result blocks in call order; on the FIRST durable halt, include
@@ -2187,13 +2341,14 @@ type ConversationStore interface {
 // copies on get/save so callers can't mutate stored slices. Mirrors js
 // InMemoryConversationStore.
 type InMemoryConversationStore struct {
-	mu   sync.Mutex
-	msgs map[string][]any
+	mu      sync.Mutex
+	msgs    map[string][]any
+	updated map[string]time.Time
 }
 
 // NewInMemoryConversationStore builds an empty in-memory conversation store.
 func NewInMemoryConversationStore() *InMemoryConversationStore {
-	return &InMemoryConversationStore{msgs: map[string][]any{}}
+	return &InMemoryConversationStore{msgs: map[string][]any{}, updated: map[string]time.Time{}}
 }
 
 // Get returns a copy of the stored transcript for id, or (nil, nil) when absent.
@@ -2216,6 +2371,10 @@ func (s *InMemoryConversationStore) Save(id string, messages []any) error {
 	clone := make([]any, len(messages))
 	copy(clone, messages)
 	s.msgs[id] = clone
+	if s.updated == nil {
+		s.updated = map[string]time.Time{}
+	}
+	s.updated[id] = time.Now()
 	return nil
 }
 
@@ -2248,4 +2407,24 @@ func (conv *Conversation) Send(ctx context.Context, prompt string) (RunResult, e
 // Reset clears the conversation memory.
 func (conv *Conversation) Reset() {
 	conv.Messages = nil
+}
+
+// callEvent / resultEvent build the stream's tool events, naming the real tool
+// for a ToolTiers call_tool call (Via = "call_tool").
+func (c *Client) callEvent(id, name string, args map[string]any) StreamEvent {
+	real, inner, wrapped := c.unwrapCall(name, args)
+	ev := StreamEvent{Type: "tool_call", ID: id, Name: real, Args: inner}
+	if wrapped {
+		ev.Via = "call_tool"
+	}
+	return ev
+}
+
+func (c *Client) resultEvent(id, name string, args map[string]any, result ToolResult) StreamEvent {
+	real, _, wrapped := c.unwrapCall(name, args)
+	ev := StreamEvent{Type: "tool_result", ID: id, Name: real, Output: result.Output, IsError: result.IsError, Metadata: result.Metadata}
+	if wrapped {
+		ev.Via = "call_tool"
+	}
+	return ev
 }

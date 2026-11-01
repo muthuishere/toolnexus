@@ -11,6 +11,8 @@
 (ns toolnexus.client-test
   (:require [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
+            [koine.fs :as fs]
+            [koine.process :as proc]
             [koine.http :as http]
             [koine.json :as json]
             [koine.server :as server]
@@ -143,7 +145,7 @@
 (def toolkit (tool/toolkit tools))
 
 (defn- client-for [style base opts]
-  (client/create-client (merge {:base-url base :style style :model "mock-model"} opts)))
+  (client/create-client (merge {:base-url base :style style :model "mock-model" :api-key "test-key"} opts)))
 
 (defn- wait-ok [request]
   (client/make-answer (:id request) true
@@ -1377,7 +1379,7 @@
   ;; `:on-error`.
   (let [[f n] (stub-http [{:status nil :error :timeout}])
         seen  (atom 0)
-        c     (client/create-client {:base-url "http://127.0.0.1:1" :model "m"
+        c     (client/create-client {:base-url "http://127.0.0.1:1" :model "m" :api-key "k"
                                      :timeout-ms 50 :retries 3
                                      :on-error (fn [_] (swap! seen inc) :retry)
                                      :http-client f})
@@ -1393,7 +1395,7 @@
   ;; Two turns, each slow enough that the SECOND starts past the deadline. A
   ;; per-call timeout would let the run go on forever one call at a time.
   (let [c (client/create-client
-           {:base-url "http://127.0.0.1:1" :model "m" :timeout-ms 40 :retries 0
+           {:base-url "http://127.0.0.1:1" :model "m" :api-key "k" :timeout-ms 40 :retries 0
             :http-client (fn [_u _h _b]
                            (ktime/sleep! 60)
                            {:status 200
@@ -1408,7 +1410,7 @@
   (let [body (str "{\"error\":\"no credit\",\"user_id\":\"u-42\",\"account_id\":17,"
                   "\"organization\":\"acme\",\"org_id\":\"o-9\"}")
         [f _] (stub-http [{:status 402 :body body :headers {"retry-after" "3"}}])
-        c     (client/create-client {:base-url "http://127.0.0.1:1" :model "m"
+        c     (client/create-client {:base-url "http://127.0.0.1:1" :model "m" :api-key "k"
                                      :retries 0 :http-client f})
         e     (try (client/run c "hi" {}) nil (catch Throwable e e))
         d     (ex-data e)]
@@ -1429,7 +1431,7 @@
   (let [raw   "Wed, 21 Oct 2026 07:28:00 GMT"
         [f _] (stub-http [{:status 503 :body "{\"error\":\"later\"}"
                            :headers {"retry-after" raw}}])
-        c     (client/create-client {:base-url "http://127.0.0.1:1" :model "m"
+        c     (client/create-client {:base-url "http://127.0.0.1:1" :model "m" :api-key "k"
                                      :retries 0 :http-client f})
         e     (try (client/run c "hi" {}) nil (catch Throwable e e))]
     (is (= raw (:retry-after (ex-data e))))
@@ -1439,7 +1441,7 @@
 (deftest the-cap-is-message-only
   (let [body  (str "{\"error\":\"" (apply str (repeat 400 "x")) "\"}")
         [f _] (stub-http [{:status 500 :body body}])
-        c     (client/create-client {:base-url "http://127.0.0.1:1" :model "m"
+        c     (client/create-client {:base-url "http://127.0.0.1:1" :model "m" :api-key "k"
                                      :retries 0 :http-client f})
         e     (try (client/run c "hi" {}) nil (catch Throwable e e))]
     (is (< (count (ex-message e)) 260) "the message is capped")
@@ -1449,7 +1451,7 @@
 
 (deftest an-auth-body-is-blanked-entirely
   (let [[f _] (stub-http [{:status 401 :body "{\"authorization\":\"Bearer sk-live-SECRET\"}"}])
-        c     (client/create-client {:base-url "http://127.0.0.1:1" :model "m"
+        c     (client/create-client {:base-url "http://127.0.0.1:1" :model "m" :api-key "k"
                                      :retries 0 :http-client f})
         e     (try (client/run c "hi" {}) nil (catch Throwable e e))]
     (is (= "" (:body (ex-data e))))
@@ -1459,13 +1461,13 @@
 (deftest fail-fast-on-a-non-retryable-4xx
   ;; MUST NOT REGRESS: the retryable set is an ENUMERATION.
   (let [[f n] (stub-http [{:status 400 :body "{\"error\":\"bad request\"}"}])
-        c     (client/create-client {:base-url "http://127.0.0.1:1" :model "m"
+        c     (client/create-client {:base-url "http://127.0.0.1:1" :model "m" :api-key "k"
                                      :retries 3 :retry-base-ms 1 :http-client f})]
     (is (thrown? Throwable (client/run c "hi" {})))
     (is (= 1 @n) "400 is terminal on the first attempt"))
   (doseq [status [429 500 502 503 504 529]]
     (let [[f n] (stub-http [{:status status :body "{}"}])
-          c     (client/create-client {:base-url "http://127.0.0.1:1" :model "m"
+          c     (client/create-client {:base-url "http://127.0.0.1:1" :model "m" :api-key "k"
                                        :retries 2 :retry-base-ms 1 :http-client f})]
       (is (thrown? Throwable (client/run c "hi" {})))
       (is (= 3 @n) (str status " is retryable")))))
@@ -1476,3 +1478,179 @@
   (is (= #{"maxTurns" "contentPart" "timeout"} client/limits))
   (is (not (contains? client/statuses "timeout"))
       "a §8 run never returns \"timeout\"; the agents' 7-value set does"))
+
+;; ---------------------------------------------------------------------------
+;; §conversation-store — list/delete on the in-memory store, and the file store
+;; ---------------------------------------------------------------------------
+
+(defn- with-root [f]
+  (let [d (fs/temp-dir! "tn-store")]
+    (try (f (str d "/convs")) (finally (fs/delete-tree! d)))))
+
+(defn- throws? [f]
+  (try (f) false (catch Throwable _ true)))
+
+(deftest in-memory-store-lists-and-deletes
+  (let [st (client/in-memory-store)]
+    ((:save st) "b" [{:role "user" :content "1"}])
+    (ktime/sleep! 5)
+    ((:save st) "a" [{:role "user" :content "2"}])
+    (is (= ["a" "b"] (mapv :id ((:list st)))) "newest first")
+    (is (every? (comp integer? :updated-at) ((:list st))))
+    ((:delete st) "a")
+    ((:delete st) "a")
+    (is (nil? ((:get st) "a")))
+    (is (= ["b"] (mapv :id ((:list st)))))))
+
+(deftest file-store-roundtrips-across-instances
+  (with-root
+    (fn [root]
+      (let [msgs [{:role "user" :content "hi"} {:role "assistant" :content "yo"}]]
+        (is (nil? ((:get (client/file-store root)) "c1")) "missing root/id is none")
+        ((:save (client/file-store root)) "c1" msgs)
+        (is (= msgs ((:get (client/file-store root)) "c1")) "a NEW instance reads it back")
+        (is (= 1 (:version (json/read-str (fs/read-file (str root "/c1.json"))))))))))
+
+(deftest file-store-sync-modes
+  (is (throws? #(client/file-store "/tmp/x" {:sync :bogus})) "unknown sync mode")
+  (doseq [opts [nil {} {:sync :full} {:sync :fsync} {:sync :none}]]
+    (with-root
+      (fn [root]
+        (let [msgs [{:role "user" :content "hi"}]
+              st   (if (nil? opts) (client/file-store root) (client/file-store root opts))]
+          ((:save st) "c1" msgs)
+          (is (= msgs ((:get (client/file-store root)) "c1")) (str "mode " (pr-str opts)))
+          (is (= [(str root "/c1.json")] (vec (remove #{root} (fs/list-tree root))))
+              (str "no temp file left, mode " (pr-str opts))))))))
+
+(deftest file-store-requires-a-root
+  (is (throws? #(client/file-store nil)))
+  (is (throws? #(client/file-store ""))))
+
+(deftest file-store-rejects-traversal-ids
+  (with-root
+    (fn [root]
+      (let [st (client/file-store root)]
+        (doseq [id ["../x" "." ".." "a/b" "" (apply str (repeat 129 "a")) "a b" nil]]
+          (is (throws? #((:get st) id)) (str "get " (pr-str id)))
+          (is (throws? #((:save st) id [])) (str "save " (pr-str id)))
+          (is (throws? #((:delete st) id)) (str "delete " (pr-str id))))
+        (is (not (fs/exists? root)) "nothing was written")))))
+
+(deftest file-store-corrupt-and-unknown-version-are-errors
+  (with-root
+    (fn [root]
+      (fs/mkdirs! root)
+      (fs/write-file (str root "/bad.json") "{not json")
+      (fs/write-file (str root "/v2.json") "{\"version\":2,\"messages\":[]}")
+      (let [st (client/file-store root)]
+        (is (throws? #((:get st) "bad")) "corrupt is an error, never none")
+        (is (throws? #((:get st) "v2")) "unknown version is an error")))))
+
+(deftest file-store-lists-newest-first-ties-by-id
+  (with-root
+    (fn [root]
+      (let [st (client/file-store root)]
+        (is (= [] ((:list st))) "no root yet")
+        ((:save st) "old" [])
+        (ktime/sleep! 1100)
+        ((:save st) "b" [])
+        ((:save st) "a" [])
+        ;; force a tie on a and b (and keep `old` older)
+        (proc/sh ["touch" "-r" (str root "/b.json") (str root "/a.json")])
+        (fs/write-file (str root "/.x.1.tmp") "junk")
+        (fs/write-file (str root "/bad name.json") "{}")
+        (let [l ((:list st))]
+          (is (= ["a" "b" "old"] (mapv :id l)))
+          (is (every? (comp integer? :updated-at) l)))))))
+
+(deftest file-store-delete-is-idempotent
+  (with-root
+    (fn [root]
+      (let [st (client/file-store root)]
+        ((:save st) "d" [{:role "user" :content "x"}])
+        ((:delete st) "d")
+        ((:delete st) "d")
+        (is (nil? ((:get st) "d")))))))
+
+(deftest file-store-concurrent-saves-leave-a-valid-file-and-no-temps
+  (with-root
+    (fn [root]
+      (let [st   (client/file-store root)
+            done (atom 0)]
+        (doseq [i (range 8)]
+          (proc/run-async! (fn [] (try ((:save st) "same" [{:role "user" :content (str i)}])
+                                       (finally (swap! done inc))))))
+        (loop [n 0] (when (and (< @done 8) (< n 3000)) (ktime/sleep! 5) (recur (inc n))))
+        (is (= 8 @done))
+        (is (= 1 (count ((:get st) "same"))) "a whole transcript, never torn")
+        (is (empty? (filter #(str/ends-with? % ".tmp") (fs/list-tree root))) "no temp files left")))))
+
+;; ---------------------------------------------------------------------------
+;; SPEC §8 "Interrupted turns are saved" (add-host-turn-durability)
+;; ---------------------------------------------------------------------------
+;;
+;; This port has no cancel token: an interruption is any throw out of the loop.
+;; The "cancel" here is a host :before-tool hook throwing on the SECOND call,
+;; which is rethrown on the calling thread exactly as a cancellation would be.
+
+(deftest an-interrupted-turn-saves-prompt-finished-pairs-and-interrupted-results
+  (doseq [style ["openai" "anthropic"]]
+    (with-llm style [{:calls [{:id "c1" :name "upper" :args {:text "a"}}
+                              {:id "c2" :name "upper" :args {:text "b"}}]}
+                     {:text "never"}]
+      (fn [{:keys [base]}]
+        (let [st (client/in-memory-store)
+              c  (client-for style base
+                             {:store st
+                              :hooks {:before-tool (fn [ev]
+                                                     (when (= "c2" (:id ev))
+                                                       (throw (ex-info "cancelled" {}))))}})
+              outcome (try (client/ask c "go" {:toolkit toolkit :id "t1"}) :returned
+                           (catch Throwable e (ex-message e)))
+              saved ((:get st) "t1")]
+          (is (= "cancelled" outcome) (str style ": the original error surfaces"))
+          (is (= {:role "user" :content "go"} (first saved)) style)
+          (is (= "assistant" (:role (second saved))) style)
+          (if (= "openai" style)
+            (do (is (= 4 (count saved)))
+                (is (= {:role "tool" :tool_call_id "c1" :content "A"} (nth saved 2)))
+                (is (= {:role "tool" :tool_call_id "c2" :content "interrupted: the turn ended before this tool returned. Whether its side effects happened is unknown. Do not re-run it automatically; check first."} (nth saved 3))))
+            (let [blocks (:content (nth saved 2))]
+              (is (= 3 (count saved)))
+              (is (= "user" (:role (nth saved 2))))
+              (is (= [{:type "tool_result" :tool_use_id "c1" :content "A" :is_error false}
+                      {:type "tool_result" :tool_use_id "c2" :content "interrupted: the turn ended before this tool returned. Whether its side effects happened is unknown. Do not re-run it automatically; check first." :is_error true}]
+                     blocks)))))))))
+
+(deftest a-provider-error-still-saves-prior-transcript-and-prompt
+  (doseq [style ["openai" "anthropic"]]
+    (let [srv (ts/serve (fn [_] {:status 400 :headers {"content-type" "application/json"}
+                                 :body "{\"error\":\"bad\"}"})
+                        {:port 0})]
+      (try
+        (let [st    (client/in-memory-store)
+              prior [{:role "user" :content "earlier"} {:role "assistant" :content "ok"}]
+              _     ((:save st) "p1" prior)
+              c     (client-for style (str "http://127.0.0.1:" (server/port srv))
+                                {:store st :retries 0})
+              thrown? (try (client/ask c "again" {:toolkit toolkit :id "p1"}) false
+                           (catch Throwable _ true))]
+          (is thrown? (str style ": the provider error surfaces"))
+          (is (= (conj prior {:role "user" :content "again"}) ((:get st) "p1")) style))
+        (finally (server/stop! srv))))))
+
+(deftest the-tool-result-event-carries-the-result-metadata
+  (let [d (fs/temp-dir! "tn-evmeta")]
+    (try
+      (with-llm "openai" [{:calls [{:id "w1" :name "write" :args {:path "n.txt" :content "x\n"}}]}
+                          {:text "done"}]
+        (fn [{:keys [base]}]
+          (let [evs (atom [])
+                c   (client-for "openai" base {})]
+            (client/run c "hi" {:toolkit (builtin/builtin-toolkit {:base-dir d})
+                                :on-event (fn [ev] (swap! evs conj ev))})
+            (let [tr (first (filter #(= "tool_result" (:type %)) @evs))]
+              (is (= [{:path "n.txt" :status "added" :additions 1 :deletions 0}]
+                     (get-in tr [:metadata :files])))))))
+      (finally (fs/delete-tree! d)))))

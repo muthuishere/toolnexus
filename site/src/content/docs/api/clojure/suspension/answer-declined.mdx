@@ -115,7 +115,7 @@ bare decline is not `{:reason "declined"}` on the wire; it is simply `:ok false`
 
 (def llm
   (client/create-client
-    {:base-url "http://mock.local"
+    {:base-url "http://mock.local" :api-key "test-key"
      :style    "openai"
      :model    "gpt-4o-mini"
      :http-client (mock-http)
@@ -177,7 +177,7 @@ bare decline is not `{:reason "declined"}` on the wire; it is simply `:ok false`
 
 (def llm
   (client/create-client
-    {:base-url "http://mock.local"
+    {:base-url "http://mock.local" :api-key "test-key"
      :style    "openai"
      :model    "gpt-4o-mini"
      :http-client (mock-http)

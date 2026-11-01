@@ -7,8 +7,9 @@ the JS reference (``js/src/client.ts``).
 Uses only the standard library (``urllib`` + ``json``); the blocking POST runs in
 a thread via ``asyncio.to_thread``. For streaming, the blocking SSE read runs in a
 worker thread that feeds an :class:`asyncio.Queue`, and the async generator yields
-from that queue (no third-party deps). The API key is read from the ``api_key`` arg
-or the environment and is NEVER printed.
+from that queue (no third-party deps). The API key is read from the ``api_key`` arg,
+the env var named by ``api_key_env``, or ONLY the env var belonging to the
+``base_url`` host (SPEC §4C) — never another provider's — and is NEVER printed.
 
 Resilience: the LLM request retries on 429/500/502/503/504/529 + network errors (widen the set
 with ``retryable_statuses``) with exponential
@@ -31,8 +32,11 @@ import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
+import weakref
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any, AsyncGenerator, Callable, Iterable, Literal, Mapping, Optional, Protocol, TypedDict, Union
 
 from .content import (
@@ -56,7 +60,10 @@ from .translate import (
     openai_tool_choice_to_anthropic,
     openai_tools_to_anthropic,
 )
-from .types import Answer, Request, ToolContext, ToolResult, pending_of
+from .prompt_cache import PromptCacheOptions, apply_prompt_cache
+from .tool_tiers import ToolPlan, ToolTier, ToolTierOptions, build_plan, tool_search
+from .types import Answer, Request, Tool, ToolContext, ToolResult, pending_of
+from .adapters import to_anthropic as _to_anthropic, to_openai as _to_openai
 
 # §10 Suspension resolver: (request) -> answer, idiomatic async per port. May be a
 # plain sync callable or an async coroutine; its interior is unconstrained.
@@ -202,13 +209,28 @@ def _add_usage(acc: dict[str, int], raw: Any, style: ClientStyle) -> None:
     """Accumulate one response's token usage into ``acc`` (mirrors JS ``addUsage``)."""
     if not raw:
         return
+
+    def cache(key: str, n: Any) -> None:
+        # §8 prompt caching: present only once a provider reported cache tokens, so a
+        # response without them leaves the usage dict exactly as before.
+        if isinstance(n, (int, float)) and not isinstance(n, bool) and n:
+            acc[key] = acc.get(key, 0) + int(n)
+
     if style == "anthropic":
         prompt = raw.get("input_tokens") or 0
         completion = raw.get("output_tokens") or 0
         acc["prompt_tokens"] += prompt
         acc["completion_tokens"] += completion
         acc["total_tokens"] += prompt + completion
+        # input_tokens EXCLUDES both: the context actually sent is
+        # prompt_tokens + cache_read_tokens + cache_write_tokens.
+        cache("cache_read_tokens", raw.get("cache_read_input_tokens"))
+        cache("cache_write_tokens", raw.get("cache_creation_input_tokens"))
     else:
+        details = raw.get("prompt_tokens_details")
+        if isinstance(details, dict):
+            # Already INCLUDED in prompt_tokens under openai — do not add it again.
+            cache("cache_read_tokens", details.get("cached_tokens"))
         prompt = raw.get("prompt_tokens") or 0
         completion = raw.get("completion_tokens") or 0
         acc["prompt_tokens"] += prompt
@@ -216,20 +238,47 @@ def _add_usage(acc: dict[str, int], raw: Any, style: ClientStyle) -> None:
         acc["total_tokens"] += raw.get("total_tokens") or (prompt + completion)
 
 
-def _resolve_key(api_key: Optional[str], style: ClientStyle) -> str:
+def _host_of(base_url: str) -> str:
+    """The lowercased host of an https base URL; "" for anything else (a provider
+    key is never sent over plain http)."""
+    try:
+        u = urllib.parse.urlsplit(base_url)
+    except ValueError:
+        return ""
+    if u.scheme != "https":
+        return ""
+    return (u.hostname or "").lower()
+
+
+def _key_env_for_base_url(base_url: str) -> str:
+    """The env var whose key may be sent to ``base_url``'s host, or "" when none may."""
+    h = _host_of(base_url)
+    if h == "api.openai.com":
+        return "OPENAI_API_KEY"
+    if h == "api.anthropic.com":
+        return "ANTHROPIC_API_KEY"
+    if h == "openrouter.ai" or h.endswith(".openrouter.ai"):
+        return "OPENROUTER_API_KEY"
+    return ""
+
+
+def _resolve_key(api_key: Optional[str], base_url: str, api_key_env: Optional[str] = None) -> str:
+    """The API key (SPEC §4C, security). An explicit ``api_key`` is used as-is.
+    Otherwise ONLY ``api_key_env`` (an env var NAME), else the one env var that
+    belongs to the ``base_url`` host — never another provider's key. The value is
+    never logged or put in an error."""
     if api_key:
         return api_key
-    env = os.environ
-    key = (
-        env.get("OPENROUTER_API_KEY")
-        or (env.get("ANTHROPIC_API_KEY") if style == "anthropic" else env.get("OPENAI_API_KEY"))
-        or env.get("OPENAI_API_KEY")
-        or env.get("ANTHROPIC_API_KEY")
-    )
-    if not key:
+    env_name = api_key_env or _key_env_for_base_url(base_url)
+    if not env_name:
         raise RuntimeError(
-            "No API key: set api_key or OPENROUTER_API_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY"
+            "No API key: set api_key or api_key_env (provider env vars are only used for "
+            "https://api.openai.com, https://api.anthropic.com and https://openrouter.ai, "
+            f"never for {base_url!r})"
         )
+    key = os.environ.get(env_name)
+    if not key:
+        raise RuntimeError(f"No API key: set api_key or {env_name}")
     return key
 
 
@@ -395,6 +444,57 @@ def _tool_result_block(use_id: Any, result: ToolResult) -> dict[str, Any]:
     if result.parts:
         block["parts"] = list(result.parts)
     return block
+
+
+class _TurnLog:
+    """What a stateful turn has produced so far: the live transcript and every
+    tool result that finished, by call id — so an interrupted turn can be saved."""
+
+    def __init__(self) -> None:
+        self.messages: Optional[list[dict[str, Any]]] = None
+        self.done: dict[Any, ToolResult] = {}
+
+
+_INTERRUPTED = ToolResult(output="interrupted: the turn ended before this tool returned. Whether its side effects happened is unknown. Do not re-run it automatically; check first.", is_error=True)
+
+
+def _close_tool_calls(
+    messages: list[dict[str, Any]], done: dict[Any, ToolResult], style: str
+) -> list[dict[str, Any]]:
+    """Give every trailing assistant tool call a result: the finished one when it
+    completed, else a synthetic ``{is_error: True, output: "interrupted: the turn ended before this tool returned. ..."}`` — in
+    the active dialect's shape — so the saved transcript stays valid."""
+    out = list(messages)
+    idx = next((i for i in range(len(out) - 1, -1, -1) if out[i].get("role") == "assistant"), -1)
+    if idx < 0:
+        return out
+    asst = out[idx]
+    if style == "anthropic":
+        content = asst.get("content")
+        uses = [b for b in content if isinstance(b, dict) and b.get("type") == "tool_use"] if isinstance(content, list) else []
+        if not uses:
+            return out
+        answered: set[Any] = set()
+        for m in out[idx + 1:]:
+            c = m.get("content")
+            if isinstance(c, list):
+                answered |= {b.get("tool_use_id") for b in c if isinstance(b, dict) and b.get("type") == "tool_result"}
+        missing = [
+            _tool_result_block(u.get("id"), done.get(u.get("id"), _INTERRUPTED))
+            for u in uses
+            if u.get("id") not in answered
+        ]
+        if missing:
+            out.append({"role": "user", "content": missing})
+        return out
+    calls = asst.get("tool_calls") or []
+    answered = {m.get("tool_call_id") for m in out[idx + 1:] if m.get("role") == "tool"}
+    for c in calls:
+        cid = c.get("id")
+        if cid not in answered:
+            name = (c.get("function") or {}).get("name", "")
+            out.append(_tool_message(cid, name, done.get(cid, _INTERRUPTED)))
+    return out
 
 
 def _prompt_content(prompt: Union[str, list[Any]]) -> Any:
@@ -598,6 +698,7 @@ class InMemoryConversationStore:
 
     def __init__(self) -> None:
         self._map: dict[str, list[dict[str, Any]]] = {}
+        self._updated: dict[str, datetime] = {}
 
     async def get(self, id: str) -> Optional[list[dict[str, Any]]]:  # noqa: A002
         m = self._map.get(id)
@@ -605,6 +706,191 @@ class InMemoryConversationStore:
 
     async def save(self, id: str, messages: list[dict[str, Any]]) -> None:  # noqa: A002
         self._map[id] = list(messages)
+        self._updated[id] = datetime.now(timezone.utc)
+
+    async def list(self) -> list["ConversationEntry"]:
+        """Every stored conversation, newest first (ties by id ascending)."""
+        return _sort_entries(ConversationEntry(i, t) for i, t in self._updated.items())
+
+    async def delete(self, id: str) -> None:  # noqa: A002
+        """Remove ``id``; absent is not an error."""
+        self._map.pop(id, None)
+        self._updated.pop(id, None)
+
+
+@dataclass(frozen=True)
+class ConversationEntry:
+    """One ``list()`` row of a shipped conversation store (SPEC.md "Conversation memory")."""
+
+    id: str
+    updated_at: datetime
+
+
+def _sort_entries(entries: Iterable[ConversationEntry]) -> list[ConversationEntry]:
+    """Newest first; ties broken by id ascending (stable two-pass sort)."""
+    by_id = sorted(entries, key=lambda e: e.id)
+    return sorted(by_id, key=lambda e: e.updated_at, reverse=True)
+
+
+_CONV_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
+_CONV_VERSION = 1
+
+
+def _check_conv_id(id: str) -> None:  # noqa: A002
+    if not isinstance(id, str) or not _CONV_ID_RE.match(id) or id in (".", ".."):
+        raise ValueError(f"invalid conversation id: {id!r}")
+
+
+def _full_fsync(fd: int) -> None:
+    """Strongest flush the OS offers: F_FULLFSYNC on macOS, else fsync."""
+    try:
+        import fcntl
+    except ImportError:  # Windows
+        fcntl = None  # type: ignore[assignment]
+    full = getattr(fcntl, "F_FULLFSYNC", None)
+    if full is not None:
+        try:
+            fcntl.fcntl(fd, full)
+            return
+        except OSError:
+            pass  # filesystem without F_FULLFSYNC support: fall back
+    os.fsync(fd)
+
+
+class FileConversationStore:
+    """Durable conversation provider — one JSON file per id under ``root``.
+
+    ``<root>/<id>.json`` holds ``{"version": 1, "messages": [...]}``. ``save`` writes
+    a temp file (0600) in ``root``, fsyncs and renames it over the old file, so a
+    reader sees the old or the new transcript, never a torn one (power-loss
+    durability of the rename is best-effort). Same-id saves are serialized within
+    a process; across processes the last rename wins. Ids must match
+    ``^[A-Za-z0-9._-]{1,128}$`` (not ``.``/``..``) — anything else is rejected.
+    """
+
+    def __init__(self, root: Union[str, "os.PathLike[str]"], sync: str = "full") -> None:
+        """``sync`` is the durability mode: ``"full"`` (default — ``F_FULLFSYNC`` on
+        macOS, else ``fsync``, then a best-effort directory fsync), ``"fsync"`` (plain
+        ``fsync``, no directory fsync) or ``"none"`` (no flush). Temp-then-rename holds
+        in every mode; an unknown mode raises ``ValueError``."""
+        if root is None or not os.fspath(root):
+            raise ValueError("FileConversationStore: root is required")
+        if sync not in ("full", "fsync", "none"):
+            raise ValueError(f"FileConversationStore: unknown sync mode {sync!r}")
+        self.root = os.fspath(root)
+        self.sync = sync
+        self._locks: dict[str, threading.Lock] = {}
+        self._thread_lock = threading.Lock()
+
+    def _path(self, id: str) -> str:  # noqa: A002
+        _check_conv_id(id)
+        return os.path.join(self.root, id + ".json")
+
+    def _lock(self, id: str) -> threading.Lock:  # noqa: A002
+        with self._thread_lock:
+            lk = self._locks.get(id)
+            if lk is None:
+                lk = self._locks[id] = threading.Lock()
+            return lk
+
+    async def get(self, id: str) -> Optional[list[dict[str, Any]]]:  # noqa: A002
+        path = self._path(id)
+        return await asyncio.to_thread(self._read, id, path)
+
+    @staticmethod
+    def _read(id: str, path: str) -> Optional[list[dict[str, Any]]]:  # noqa: A002
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                raw = f.read()
+        except FileNotFoundError:
+            return None
+        try:
+            body = json.loads(raw)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"conversation {id!r}: corrupt file {path}: {e}") from e
+        if not isinstance(body, dict) or body.get("version") != _CONV_VERSION:
+            ver = body.get("version") if isinstance(body, dict) else None
+            raise ValueError(f"conversation {id!r}: unsupported version {ver!r} in {path}")
+        msgs = body.get("messages")
+        if not isinstance(msgs, list):
+            raise ValueError(f"conversation {id!r}: corrupt file {path}: messages is not a list")
+        return msgs
+
+    async def save(self, id: str, messages: list[dict[str, Any]]) -> None:  # noqa: A002
+        path = self._path(id)
+        data = json.dumps({"version": _CONV_VERSION, "messages": list(messages)})
+        await asyncio.to_thread(self._write, id, path, data)
+
+    def _write(self, id: str, path: str, data: str) -> None:  # noqa: A002
+        with self._lock(id):
+            os.makedirs(self.root, mode=0o700, exist_ok=True)
+            tmp = os.path.join(self.root, f".{id}.{os.urandom(8).hex()}.tmp")
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    f.write(data)
+                    f.flush()
+                    if self.sync == "full":
+                        _full_fsync(f.fileno())
+                    elif self.sync == "fsync":
+                        os.fsync(f.fileno())
+                os.replace(tmp, path)
+            except BaseException:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+                raise
+            if self.sync != "full":
+                return
+            try:  # best-effort: make the rename itself durable
+                dfd = os.open(self.root, os.O_RDONLY)
+                try:
+                    os.fsync(dfd)
+                finally:
+                    os.close(dfd)
+            except OSError:
+                pass
+
+    async def list(self) -> list[ConversationEntry]:
+        """Every ``<id>.json`` with a valid id, by file mtime newest first (ties by id).
+        Temp files and invalid names are skipped; bodies are not parsed."""
+        return await asyncio.to_thread(self._list)
+
+    def _list(self) -> list[ConversationEntry]:
+        out: list[ConversationEntry] = []
+        try:
+            it = os.scandir(self.root)
+        except FileNotFoundError:
+            return []
+        with it:
+            for de in it:
+                n = de.name
+                if not n.endswith(".json"):
+                    continue
+                cid = n[: -len(".json")]
+                if not _CONV_ID_RE.match(cid) or cid in (".", ".."):
+                    continue
+                try:
+                    if not de.is_file():
+                        continue
+                    mt = de.stat().st_mtime
+                except FileNotFoundError:
+                    continue
+                out.append(ConversationEntry(cid, datetime.fromtimestamp(mt, timezone.utc)))
+        return _sort_entries(out)
+
+    async def delete(self, id: str) -> None:  # noqa: A002
+        path = self._path(id)
+
+        def _rm() -> None:
+            with self._lock(id):
+                try:
+                    os.unlink(path)
+                except FileNotFoundError:
+                    pass
+
+        await asyncio.to_thread(_rm)
 
 
 class Client:
@@ -632,11 +918,33 @@ class Client:
         on_error: Optional[ErrorClassifier] = None,
         on_unsupported_part: Optional[Literal["error", "text"]] = None,
         max_part_bytes: Optional[int] = None,
+        api_key_env: Optional[str] = None,
+        wait_for_ctx: Optional[Callable[[asyncio.Event, Request], Any]] = None,
+        prompt_cache: Optional[PromptCacheOptions] = None,
+        tool_tiers: Optional[ToolTierOptions] = None,
     ) -> None:
         self.base_url = base_url
         self.style = style
         self.model = model
+        # The key: ``api_key``; else the env var NAMED by ``api_key_env``; else ONLY the
+        # env var that belongs to the base_url host (https api.openai.com →
+        # OPENAI_API_KEY, api.anthropic.com → ANTHROPIC_API_KEY, openrouter.ai →
+        # OPENROUTER_API_KEY). Any other host needs one of the two. Never printed.
         self.api_key = api_key
+        self.api_key_env = api_key_env
+        # §4C: wait_for that also receives the turn's cancel token (an asyncio.Event,
+        # always an Event — a fresh one when the run has none), so a pending ask ends
+        # with the turn. Wins over ``wait_for`` when both are set. When the turn is
+        # cancelled while it waits, its task is cancelled and the run raises RunCancelled.
+        self.wait_for_ctx = wait_for_ctx
+        # §8 prompt caching: mark the stable prefix for the provider. None ⇒ the body
+        # is byte-identical. Applied before request_params and body_transform.
+        self.prompt_cache = prompt_cache
+        # §8 tool tiers: send only core schemas plus tool_search/call_tool. None ⇒
+        # every tool is sent, as before. One frozen plan per toolkit.
+        self.tool_tiers = tool_tiers
+        self._tier_plans: "weakref.WeakKeyDictionary[Toolkit, ToolPlan]" = weakref.WeakKeyDictionary()
+        self._tier_lock = threading.Lock()
         self.headers = headers or {}
         self.system_prompt = system_prompt
         self.max_turns = max_turns
@@ -858,6 +1166,8 @@ class Client:
         forbidden keys from ``request_params``, shallow-merge ``request_params`` (caller
         wins), then run ``body_transform`` last (its return replaces the body; None ⇒
         unchanged). Called at every LLM body-build site. Mirrors Go ``finalizeBody``."""
+        if self.prompt_cache is not None:
+            apply_prompt_cache(body, self.style, self.prompt_cache)
         if self.request_params:
             for k, v in self.request_params.items():
                 if k in ("messages", "tools", "stream"):
@@ -1006,22 +1316,30 @@ class Client:
         request: Request,
         call_id: Optional[str],
         turn: int,
+        cancel: Optional[asyncio.Event] = None,
     ) -> tuple[ToolResult, Optional[Request]]:
-        """Resolve a suspended tool result (§10). Calls ``wait_for(request)``, and on
-        ``ok`` re-executes the SAME tool once with ``ctx.answer`` set. Returns
-        ``(result, halted)`` — ``halted`` is the request when no ``wait_for`` is
-        configured (the run should stop and surface it). Mirrors JS ``resolvePending``.
+        """Resolve a suspended tool result (§10). Calls ``wait_for(request)`` (or
+        ``wait_for_ctx(cancel, request)``), and on ``ok`` re-executes the SAME tool
+        once with ``ctx.answer`` set. Returns ``(result, halted)`` — ``halted`` is the
+        request when no resolver is configured (the run should stop and surface it).
+        Mirrors JS ``resolvePending``.
         """
-        if self.wait_for is None or toolkit is None:
+        name, args, _ = self._unwrap_call(name, args)
+        if (self.wait_for is None and self.wait_for_ctx is None) or toolkit is None:
             return ToolResult(output=request.prompt, is_error=True), request
-        r = self.wait_for(request)
-        if inspect.isawaitable(r):
-            r = await r
-        answer: Optional[Answer] = r
+        if self.wait_for_ctx is not None:
+            answer: Optional[Answer] = await self._wait_with_turn(request, cancel)
+        else:
+            r = self.wait_for(request)  # type: ignore[misc]
+            if inspect.isawaitable(r):
+                r = await r
+            answer = r
         if answer is None or not answer.ok:
             return ToolResult(output=f"declined/expired: {request.prompt}", is_error=True), None
         t0 = _now()
-        result = await toolkit.execute(name, args, ToolContext(answer=answer))
+        result = await toolkit.execute(
+            name, args, ToolContext(answer=answer, call_id=call_id, signal=cancel)
+        )
         after = _get_hook(self.hooks, "after_tool")
         if after is not None:
             ov = await _call_hook(
@@ -1035,6 +1353,103 @@ class Client:
             # never loop forever on the same request
             result = ToolResult(output=f"unresolved: {request.prompt}", is_error=True)
         return result, None
+
+    async def _wait_with_turn(self, request: Request, cancel: Optional[asyncio.Event]) -> Optional[Answer]:
+        """Run ``wait_for_ctx`` against the turn's cancel token (§4C). A cancel that
+        fires while it waits cancels its task and raises :class:`RunCancelled`."""
+        token = cancel if cancel is not None else asyncio.Event()
+        assert self.wait_for_ctx is not None
+        self._check_cancelled(token)
+
+        async def call() -> Any:
+            r = self.wait_for_ctx(token, request)  # type: ignore[misc]
+            if inspect.isawaitable(r):
+                r = await r
+            return r
+
+        waiter = asyncio.ensure_future(call())
+        watcher = asyncio.ensure_future(token.wait())
+        try:
+            await asyncio.wait({waiter, watcher}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            watcher.cancel()
+        if not waiter.done():
+            waiter.cancel()
+            try:
+                await waiter
+            except BaseException:  # noqa: BLE001 - the turn's cancel wins
+                pass
+            raise RunCancelled("run cancelled")
+        answer = waiter.result()  # a resolver error propagates as-is
+        self._check_cancelled(token)  # answered after the cancel: interrupted, not a result
+        return answer
+
+    # ----------------------------------------------------------------------- #
+    # Tool tiers (§8 prompt caching, phase 2)
+    # ----------------------------------------------------------------------- #
+    def _plan(self, toolkit: Optional[Toolkit]) -> Optional[ToolPlan]:
+        if self.tool_tiers is None or toolkit is None:
+            return None
+        with self._tier_lock:
+            p = self._tier_plans.get(toolkit)
+            if p is None:
+                p = build_plan(self.tool_tiers, toolkit.tools())
+                self._tier_plans[toolkit] = p
+            return p
+
+    def tool_tier_plan(self, toolkit: Toolkit) -> Optional[dict[str, ToolTier]]:
+        """The frozen plan for ``toolkit`` (built on first use): tool name → tier,
+        for a host UI or log. None when ``tool_tiers`` is not set."""
+        p = self._plan(toolkit)
+        return dict(p.tier) if p is not None else None
+
+    def reset_tool_tiers(self, toolkit: Toolkit) -> None:
+        """Forget ``toolkit``'s plan so the next request rebuilds it — call it at a
+        new session start (e.g. after updating usage stats). Mid-session it breaks
+        the cached prefix."""
+        with self._tier_lock:
+            self._tier_plans.pop(toolkit, None)
+
+    def _request_tools(self, toolkit: Optional[Toolkit]) -> list[Tool]:
+        """The tools for a request: core tools (sorted) then tool_search and
+        call_tool. Without tiers it is every tool, as before."""
+        if toolkit is None:
+            return []
+        p = self._plan(toolkit)
+        if p is None:
+            return toolkit.tools()
+        out = [t for t in (toolkit.get(n) for n in p.core) if t is not None]
+        return out + [p.search, p.call]
+
+    def _unwrap_call(self, name: str, args: dict[str, Any]) -> tuple[str, dict[str, Any], bool]:
+        """Map ``call_tool {name, arguments}`` to the real call; ``wrapped`` False when
+        tiers are off or ``name`` is not call_tool."""
+        if self.tool_tiers is None or name != "call_tool":
+            return name, args, False
+        real = args.get("name") if isinstance(args, dict) else None
+        inner = args.get("arguments") if isinstance(args, dict) else None
+        return (real if isinstance(real, str) else ""), (inner if isinstance(inner, dict) else {}), True
+
+    def _call_event(self, call_id: Any, name: str, args: dict[str, Any]) -> dict[str, Any]:
+        real, inner, wrapped = self._unwrap_call(name, args)
+        ev: dict[str, Any] = {"type": "tool_call", "id": call_id, "name": real, "args": inner}
+        if wrapped:
+            ev["via"] = "call_tool"
+        return ev
+
+    def _result_event(self, call_id: Any, name: str, args: dict[str, Any], result: ToolResult) -> dict[str, Any]:
+        real, _, wrapped = self._unwrap_call(name, args)
+        ev: dict[str, Any] = {
+            "type": "tool_result",
+            "id": call_id,
+            "name": real,
+            "output": result.output,
+            "is_error": result.is_error,
+            "metadata": result.metadata,
+        }
+        if wrapped:
+            ev["via"] = "call_tool"
+        return ev
 
     # ----------------------------------------------------------------------- #
     # Resilience helpers
@@ -1178,9 +1593,43 @@ class Client:
         args: dict[str, Any],
         call_id: Optional[str],
         turn: int,
+        log: Optional["_TurnLog"] = None,
+        cancel: Optional[asyncio.Event] = None,
     ) -> tuple[dict[str, Any], ToolResult]:
         """Run one tool through before_tool/after_tool hooks: rewrite args,
-        short-circuit, or transform the result. Mirrors JS ``runTool``."""
+        short-circuit, or transform the result. Mirrors JS ``runTool``.
+
+        With a ``log`` (a stateful turn), the finished result is recorded by call
+        id, so a turn interrupted while a SIBLING call still runs keeps it.
+
+        Under ``tool_tiers``, ``tool_search`` is engine-internal (no hooks) and
+        ``call_tool`` is unwrapped HERE, so hooks, hints and permission gates see the
+        real tool; the returned args keep the wrapper shape so a §10 re-run unwraps
+        the same way."""
+        if self.tool_tiers is not None and name == "tool_search" and toolkit is not None:
+            t0 = _now()
+            result = tool_search(toolkit.tools(), toolkit.get, args)
+            self._emit_tool(name, "builtin", result, t0)
+            if log is not None and call_id is not None:
+                log.done[call_id] = result
+            return args, result
+        real, inner, wrapped = self._unwrap_call(name, args)
+        a, result = await self._run_tool_inner(toolkit, real, inner, call_id, turn, cancel)
+        if wrapped:
+            a = {"name": real, "arguments": a}
+        if log is not None and call_id is not None and pending_of(result) is None:
+            log.done[call_id] = result
+        return a, result
+
+    async def _run_tool_inner(
+        self,
+        toolkit: Optional[Toolkit],
+        name: str,
+        args: dict[str, Any],
+        call_id: Optional[str],
+        turn: int,
+        cancel: Optional[asyncio.Event] = None,
+    ) -> tuple[dict[str, Any], ToolResult]:
         a = args
         if toolkit is None:
             # D1: a toolkit-less run declares no tools; a model that calls one anyway
@@ -1191,7 +1640,17 @@ class Client:
         t0 = _now()
         before = _get_hook(self.hooks, "before_tool")
         if before is not None:
-            ov = await _call_hook(before, {"name": name, "args": a, "id": call_id, "turn": turn})
+            # ``hints`` (§4C): the called tool's ToolHints, None = unknown / no such tool.
+            ov = await _call_hook(
+                before,
+                {
+                    "name": name,
+                    "args": a,
+                    "id": call_id,
+                    "turn": turn,
+                    "hints": found.hints if found is not None else None,
+                },
+            )
             if ov:
                 if ov.get("result") is not None:
                     # short-circuit (deny / cache hit / dry-run, or a guard-raised suspension —
@@ -1201,7 +1660,8 @@ class Client:
                     return a, ov["result"]
                 if ov.get("args") is not None:
                     a = ov["args"]
-        result = await toolkit.execute(name, a)
+        # The tool sees its call id (§4C) and the turn's cancel token (ctx.signal).
+        result = await toolkit.execute(name, a, ToolContext(call_id=call_id, signal=cancel))
         # A suspension (§10) is not a real result: skip after_tool's failure path on it — the
         # resolved result (post-wait_for) still flows through after_tool in _resolve_pending — and
         # never count it as a tool error.
@@ -1296,7 +1756,7 @@ class Client:
         cancel: Optional[asyncio.Event],
     ) -> TranslateResult:
         """OpenAI-style upstream: near-passthrough."""
-        key = _resolve_key(self.api_key, self.style)
+        key = _resolve_key(self.api_key, self.base_url, self.api_key_env)
         base = self.base_url.rstrip("/")
         endpoint = f"{base}/chat/completions" if base.endswith("/v1") or "/chat/" in base else f"{base}/v1/chat/completions"
         req_headers = {"content-type": "application/json", "authorization": f"Bearer {key}", **self.headers}
@@ -1358,7 +1818,7 @@ class Client:
         cancel: Optional[asyncio.Event],
     ) -> TranslateResult:
         """Anthropic-style upstream: the real translation."""
-        key = _resolve_key(self.api_key, self.style)
+        key = _resolve_key(self.api_key, self.base_url, self.api_key_env)
         base = self.base_url.rstrip("/")
         endpoint = f"{base}/messages" if base.endswith("/v1") else f"{base}/v1/messages"
         req_headers = {
@@ -1513,9 +1973,39 @@ class Client:
         if not id:
             return await self.run(prompt, toolkit, cancel=cancel)
         history = await self.store.get(id) or []
-        result = await self.run(prompt, toolkit, history=history, cancel=cancel)
+        log = _TurnLog()
+        try:
+            if self.style == "anthropic":
+                result = await self._run_anthropic(prompt, toolkit, history, cancel, log)
+            else:
+                result = await self._run_openai(prompt, toolkit, history, cancel, log)
+        except BaseException:
+            # Interrupted turns are saved (SPEC §7): the prompt and every finished
+            # message survive a failure or a cancel; the original error still raises.
+            await self._save_interrupted(id, log, prompt, toolkit, history)
+            raise
         await self.store.save(id, result.messages)
         return result
+
+    async def _save_interrupted(
+        self,
+        id: str,  # noqa: A002
+        log: "_TurnLog",
+        prompt: Union[str, list[Any]],
+        toolkit: Optional[Toolkit],
+        history: list[dict[str, Any]],
+    ) -> None:
+        """Save the transcript of a turn that ended in an error or a cancel. A
+        failure before the loop built any message still saves prior + prompt."""
+        messages = log.messages
+        if messages is None:
+            messages = list(history)
+            if self.style != "anthropic" and not messages:
+                system = self._system(toolkit)
+                if system:
+                    messages.append({"role": "system", "content": system})
+            messages.append({"role": "user", "content": _prompt_content(prompt)})
+        await self.store.save(id, _close_tool_calls(messages, log.done, self.style))
 
     def conversation(self, toolkit: Optional[Toolkit] = None, cancel: Optional[asyncio.Event] = None) -> "Conversation":
         """A stateful multi-turn conversation that retains history across sends."""
@@ -1536,14 +2026,25 @@ class Client:
         No ``id`` ⇒ stateless. Mirrors the JS ``stream``.
         """
         history = (await self.store.get(id) or []) if id else None
+        log = _TurnLog() if id else None
         if self.style == "anthropic":
-            gen = self._stream_anthropic(prompt, toolkit, cancel, history)
+            gen = self._stream_anthropic(prompt, toolkit, cancel, history, log)
         else:
-            gen = self._stream_openai(prompt, toolkit, cancel, history)
-        async for ev in gen:
-            if ev["type"] == "done" and id:
-                await self.store.save(id, ev["result"].messages)
-            yield ev
+            gen = self._stream_openai(prompt, toolkit, cancel, history, log)
+        saved = False
+        try:
+            async for ev in gen:
+                if ev["type"] == "done" and id:
+                    await self.store.save(id, ev["result"].messages)
+                    saved = True
+                yield ev
+        except BaseException:
+            # An error, a cancel, or the consumer abandoning the stream mid-turn
+            # (GeneratorExit): the interrupted turn is still saved, then re-raised.
+            if id and not saved and log is not None:
+                await gen.aclose()
+                await self._save_interrupted(id, log, prompt, toolkit, history or [])
+            raise
 
     # ----------------------------------------------------------------------- #
     # OpenAI-style: POST {base_url}/chat/completions
@@ -1554,8 +2055,9 @@ class Client:
         toolkit: Optional[Toolkit],
         history: Optional[list[dict[str, Any]]],
         cancel: Optional[asyncio.Event],
+        log: Optional["_TurnLog"] = None,
     ) -> RunResult:
-        key = _resolve_key(self.api_key, self.style)
+        key = _resolve_key(self.api_key, self.base_url, self.api_key_env)
         url = self.base_url.rstrip("/") + "/chat/completions"
         req_headers = {
             "Authorization": f"Bearer {key}",  # value never logged
@@ -1569,7 +2071,9 @@ class Client:
             if system:
                 messages.append({"role": "system", "content": system})
         messages.append({"role": "user", "content": _prompt_content(prompt)})
-        tools = toolkit.to_openai() if toolkit is not None else []
+        tools = _to_openai(self._request_tools(toolkit)) if toolkit is not None else []
+        if log is not None:
+            log.messages = messages
         tool_calls: list[dict[str, Any]] = []
         usage = _empty_usage()
         turns = 0
@@ -1589,6 +2093,8 @@ class Client:
                     if ov:
                         if ov.get("messages") is not None:
                             messages = ov["messages"]
+                            if log is not None:
+                                log.messages = messages
                         if ov.get("tools") is not None:
                             tools = ov["tools"]
                         # SPEC §8: a non-empty ``model`` applies to THIS turn only.
@@ -1630,7 +2136,7 @@ class Client:
 
                 results = await asyncio.gather(
                     *(
-                        self._run_tool(toolkit, name, args, call_id, turn)
+                        self._run_tool(toolkit, name, args, call_id, turn, log, cancel)
                         for (call_id, name, args) in parsed
                     )
                 )
@@ -1641,7 +2147,7 @@ class Client:
                     halted: Optional[Request] = None
                     req = pending_of(result)
                     if req is not None:
-                        result, halted = await self._resolve_pending(toolkit, name, args, req, call_id, turn)
+                        result, halted = await self._resolve_pending(toolkit, name, args, req, call_id, turn, cancel)
                     tool_calls.append(
                         {
                             "name": name,
@@ -1671,8 +2177,9 @@ class Client:
         toolkit: Optional[Toolkit],
         history: Optional[list[dict[str, Any]]],
         cancel: Optional[asyncio.Event],
+        log: Optional["_TurnLog"] = None,
     ) -> RunResult:
-        key = _resolve_key(self.api_key, self.style)
+        key = _resolve_key(self.api_key, self.base_url, self.api_key_env)
         base = self.base_url.rstrip("/")
         endpoint = f"{base}/messages" if base.endswith("/v1") else f"{base}/v1/messages"
         req_headers = {
@@ -1688,7 +2195,9 @@ class Client:
             messages: list[dict[str, Any]] = list(history) + [{"role": "user", "content": seed}]
         else:
             messages = [{"role": "user", "content": seed}]
-        tools = toolkit.to_anthropic() if toolkit is not None else []
+        tools = _to_anthropic(self._request_tools(toolkit)) if toolkit is not None else []
+        if log is not None:
+            log.messages = messages
         tool_calls: list[dict[str, Any]] = []
         usage = _empty_usage()
         turns = 0
@@ -1708,6 +2217,8 @@ class Client:
                     if ov:
                         if ov.get("messages") is not None:
                             messages = ov["messages"]
+                            if log is not None:
+                                log.messages = messages
                         if ov.get("tools") is not None:
                             tools = ov["tools"]
                         # SPEC §8: a non-empty ``model`` applies to THIS turn only.
@@ -1743,7 +2254,7 @@ class Client:
                 outputs = await asyncio.gather(
                     *(
                         self._run_tool(
-                            toolkit, use["name"], use.get("input") or {}, use.get("id"), turn
+                            toolkit, use["name"], use.get("input") or {}, use.get("id"), turn, log, cancel
                         )
                         for use in uses
                     )
@@ -1756,7 +2267,7 @@ class Client:
                 for use, (args, result) in zip(uses, outputs):
                     req = pending_of(result)
                     if req is not None:
-                        result, halted = await self._resolve_pending(toolkit, use["name"], args, req, use.get("id"), turn)
+                        result, halted = await self._resolve_pending(toolkit, use["name"], args, req, use.get("id"), turn, cancel)
                     tool_calls.append(
                         {
                             "name": use["name"],
@@ -1787,8 +2298,9 @@ class Client:
         toolkit: Optional[Toolkit],
         cancel: Optional[asyncio.Event],
         history: Optional[list[dict[str, Any]]] = None,
+        log: Optional["_TurnLog"] = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
-        key = _resolve_key(self.api_key, self.style)
+        key = _resolve_key(self.api_key, self.base_url, self.api_key_env)
         url = self.base_url.rstrip("/") + "/chat/completions"
         req_headers = {
             "Authorization": f"Bearer {key}",  # value never logged
@@ -1802,7 +2314,9 @@ class Client:
             if system:
                 messages.append({"role": "system", "content": system})
         messages.append({"role": "user", "content": _prompt_content(prompt)})
-        tools = toolkit.to_openai() if toolkit is not None else []
+        tools = _to_openai(self._request_tools(toolkit)) if toolkit is not None else []
+        if log is not None:
+            log.messages = messages
         tool_calls: list[dict[str, Any]] = []
         usage = _empty_usage()
         turns = 0
@@ -1822,6 +2336,8 @@ class Client:
                     if ov:
                         if ov.get("messages") is not None:
                             messages = ov["messages"]
+                            if log is not None:
+                                log.messages = messages
                         if ov.get("tools") is not None:
                             tools = ov["tools"]
                         # SPEC §8: a non-empty ``model`` applies to THIS turn only.
@@ -1910,15 +2426,15 @@ class Client:
                     }
                 )
                 for c in calls:
-                    yield {"type": "tool_call", "id": c["id"], "name": c["name"], "args": _safe_json(c["args"])}
+                    yield self._call_event(c["id"], c["name"], _safe_json(c["args"]))
                 settled = await asyncio.gather(
-                    *(self._run_tool(toolkit, c["name"], _safe_json(c["args"]), c["id"], turn) for c in calls)
+                    *(self._run_tool(toolkit, c["name"], _safe_json(c["args"]), c["id"], turn, log, cancel) for c in calls)
                 )
                 for c, (args, result) in zip(calls, settled):
                     req = pending_of(result)
                     if req is not None:
                         yield {"type": "pending", "request": req}  # surface BEFORE wait_for so a channel can push the link
-                        result, halted = await self._resolve_pending(toolkit, c["name"], args, req, c["id"], turn)
+                        result, halted = await self._resolve_pending(toolkit, c["name"], args, req, c["id"], turn, cancel)
                         if halted is not None:
                             tool_calls.append(
                                 {
@@ -1942,13 +2458,7 @@ class Client:
                         }
                     )
                     messages.append(_tool_message(c["id"], c["name"], result))
-                    yield {
-                        "type": "tool_result",
-                        "id": c["id"],
-                        "name": c["name"],
-                        "output": result.output,
-                        "is_error": result.is_error,
-                    }
+                    yield self._result_event(c["id"], c["name"], _safe_json(c["args"]), result)
 
             yield {"type": "done", "result": self._end_run(run_start, _last_text(messages), messages, tool_calls, turns, usage, at_limit=True, model=last_model)}
         except Exception as e:
@@ -1964,8 +2474,9 @@ class Client:
         toolkit: Optional[Toolkit],
         cancel: Optional[asyncio.Event],
         history: Optional[list[dict[str, Any]]] = None,
+        log: Optional["_TurnLog"] = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
-        key = _resolve_key(self.api_key, self.style)
+        key = _resolve_key(self.api_key, self.base_url, self.api_key_env)
         base = self.base_url.rstrip("/")
         endpoint = f"{base}/messages" if base.endswith("/v1") else f"{base}/v1/messages"
         req_headers = {
@@ -1981,7 +2492,9 @@ class Client:
             messages: list[dict[str, Any]] = list(history) + [{"role": "user", "content": seed}]
         else:
             messages = [{"role": "user", "content": seed}]
-        tools = toolkit.to_anthropic() if toolkit is not None else []
+        tools = _to_anthropic(self._request_tools(toolkit)) if toolkit is not None else []
+        if log is not None:
+            log.messages = messages
         tool_calls: list[dict[str, Any]] = []
         usage = _empty_usage()
         turns = 0
@@ -2001,6 +2514,8 @@ class Client:
                     if ov:
                         if ov.get("messages") is not None:
                             messages = ov["messages"]
+                            if log is not None:
+                                log.messages = messages
                         if ov.get("tools") is not None:
                             tools = ov["tools"]
                         # SPEC §8: a non-empty ``model`` applies to THIS turn only.
@@ -2085,9 +2600,9 @@ class Client:
                     return
 
                 for u in uses:
-                    yield {"type": "tool_call", "id": u["id"], "name": u["name"], "args": u["input"]}
+                    yield self._call_event(u["id"], u["name"], u["input"])
                 settled = await asyncio.gather(
-                    *(self._run_tool(toolkit, u["name"], u.get("input") or {}, u["id"], turn) for u in uses)
+                    *(self._run_tool(toolkit, u["name"], u.get("input") or {}, u["id"], turn, log, cancel) for u in uses)
                 )
                 results: list[dict[str, Any]] = []
                 halted: Optional[Request] = None
@@ -2095,7 +2610,7 @@ class Client:
                     req = pending_of(result)
                     if req is not None:
                         yield {"type": "pending", "request": req}  # surface BEFORE wait_for
-                        result, halted = await self._resolve_pending(toolkit, u["name"], args, req, u["id"], turn)
+                        result, halted = await self._resolve_pending(toolkit, u["name"], args, req, u["id"], turn, cancel)
                     tool_calls.append(
                         {
                             "name": u["name"],
@@ -2106,13 +2621,7 @@ class Client:
                         }
                     )
                     results.append(_tool_result_block(u["id"], result))
-                    yield {
-                        "type": "tool_result",
-                        "id": u["id"],
-                        "name": u["name"],
-                        "output": result.output,
-                        "is_error": result.is_error,
-                    }
+                    yield self._result_event(u["id"], u["name"], u["input"], result)
                     if halted is not None:
                         messages.append({"role": "user", "content": results})
                         yield {"type": "done", "result": self._pending_run(run_start, halted, messages, tool_calls, turns, usage, model=last_model)}
@@ -2273,8 +2782,16 @@ def create_client(
     on_error: Optional[ErrorClassifier] = None,
     on_unsupported_part: Optional[Literal["error", "text"]] = None,
     max_part_bytes: Optional[int] = None,
+    api_key_env: Optional[str] = None,
+    wait_for_ctx: Optional[Callable[[asyncio.Event, Request], Any]] = None,
+    prompt_cache: Optional[PromptCacheOptions] = None,
+    tool_tiers: Optional[ToolTierOptions] = None,
 ) -> Client:
     return Client(
+        api_key_env=api_key_env,
+        wait_for_ctx=wait_for_ctx,
+        prompt_cache=prompt_cache,
+        tool_tiers=tool_tiers,
         base_url=base_url,
         style=style,
         model=model,
@@ -2297,6 +2814,73 @@ def create_client(
         on_unsupported_part=on_unsupported_part,
         max_part_bytes=max_part_bytes,
     )
+
+
+# --------------------------------------------------------------------------- #
+# list_models (§4C): the models a provider offers, for model switching.
+# --------------------------------------------------------------------------- #
+@dataclass
+class ModelInfo:
+    id: str
+    # The provider's display name, when it gives one.
+    name: str = ""
+    # Context window in tokens when the provider reports it (OpenRouter does;
+    # OpenAI and Anthropic do not) — 0 = unknown.
+    context_length: int = 0
+
+
+def _get_json(url: str, headers: dict[str, str], timeout: float) -> Any:
+    req = urllib.request.Request(url, headers=headers, method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 - caller's base_url
+            raw = resp.read(32 << 20)
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", "replace")[:300]
+        raise RuntimeError(f"list models: HTTP {e.code}: {body}") from None
+    return json.loads(raw)
+
+
+async def list_models(
+    *,
+    base_url: str,
+    style: ClientStyle = "openai",
+    api_key: Optional[str] = None,
+    api_key_env: Optional[str] = None,
+    timeout_ms: int = 30_000,
+) -> list[ModelInfo]:
+    """List the models at ``base_url`` (§4C), sorted by id, with the same key rules as
+    the client (``api_key``, ``api_key_env``, or the host's own env var). openai
+    style: ``GET {base}/models`` (OpenRouter's ``context_length`` read when present);
+    anthropic: ``GET {base}/v1/models`` following ``has_more``/``last_id``. One GET per
+    page, no retries."""
+    key = _resolve_key(api_key, base_url, api_key_env)
+    base = base_url.rstrip("/")
+    timeout = timeout_ms / 1000
+    out: list[ModelInfo] = []
+    if style == "anthropic":
+        endpoint = f"{base}/models" if base.endswith("/v1") else f"{base}/v1/models"
+        headers = {"x-api-key": key, "anthropic-version": "2023-06-01"}
+        after = ""
+        for _ in range(100):
+            u = endpoint + "?limit=1000" + (f"&after_id={urllib.parse.quote(after)}" if after else "")
+            body = await asyncio.to_thread(_get_json, u, headers, timeout)
+            for m in body.get("data") or []:
+                out.append(ModelInfo(id=str(m.get("id", "")), name=str(m.get("display_name") or "")))
+            if not body.get("has_more") or not body.get("last_id"):
+                break
+            after = str(body["last_id"])
+    else:
+        body = await asyncio.to_thread(_get_json, base + "/models", {"Authorization": f"Bearer {key}"}, timeout)
+        for m in body.get("data") or []:
+            out.append(
+                ModelInfo(
+                    id=str(m.get("id", "")),
+                    name=str(m.get("name") or ""),
+                    context_length=int(m.get("context_length") or 0),
+                )
+            )
+    out.sort(key=lambda m: m.id)
+    return out
 
 
 # --------------------------------------------------------------------------- #

@@ -133,10 +133,16 @@ assert good_problems == []
 _, bad_problems = validate({
     "mcpServers": {
         "broken_remote": {"type": "remote"},
-        "broken_local": {"type": "local", "command": []},
     }
 })
-assert len(bad_problems) == 2
+assert len(bad_problems) == 1
+
+# An empty local command fails the parse itself, naming the server (SPEC §2).
+try:
+    parse_mcp_config({"mcpServers": {"broken_local": {"type": "local", "command": []}}})
+    raise AssertionError("expected an error")
+except ValueError as e:
+    assert "broken_local" in str(e)
 
 # A missing file raises rather than returning a half-config.
 try:

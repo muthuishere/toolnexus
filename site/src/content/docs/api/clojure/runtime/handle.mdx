@@ -109,7 +109,7 @@ silent success.
 
 (def runtime
   (rt/create-runtime {:registry {"w" {:name "w" :does "writes" :model "wm"}}
-                      :llm {:base-url "http://mock.local" :model "default"}
+                      :llm {:base-url "http://mock.local" :api-key "test-key" :model "default"}
                       :http-client (fn [_url _headers _body]
                                      {:status 200 :headers {} :body (json/write-str (text-response "done"))})}))
 
@@ -132,7 +132,7 @@ silent success.
 
 (def runtime
   (rt/create-runtime {:registry {"w" {:name "w" :does "writes" :model "wm"}}
-                      :llm {:base-url "http://mock.local" :model "default"}
+                      :llm {:base-url "http://mock.local" :api-key "test-key" :model "default"}
                       :http-client (fn [_url _headers _body]
                                      {:status 200 :headers {} :body (json/write-str (text-response "done"))})}))
 
@@ -188,7 +188,7 @@ silent success.
   (rt/create-runtime
    {:registry {"boss"   {:name "boss" :does "coordinates" :model "bm" :team ["worker"] :budget {:max-depth 5}}
                "worker" {:name "worker" :does "does the risky part" :model "wm" :tools [approve-tool]}}
-    :llm      {:base-url "http://mock.local" :model "default"}
+    :llm      {:base-url "http://mock.local" :api-key "test-key" :model "default"}
     :http-client (mock-http)}))
 
 ;; after a §10 approval request suspends the handle mid-turn:

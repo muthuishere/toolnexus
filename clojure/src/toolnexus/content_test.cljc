@@ -386,7 +386,9 @@
     (let [all ((:execute (read-tool)) {:path p})
           win ((:execute (read-tool)) {:path p :offset 2 :limit 2})]
       (is (= {:output "one\ntwo\nthree\nfour" :isError false} all) "no :parts key")
-      (is (= {:output "two\nthree" :isError false} win)))
+      ;; the TEXT is the pinned window; SPEC §4C reports the cut in metadata only
+      (is (= {:output "two\nthree" :isError false} (dissoc win :metadata)))
+      (is (= {:truncated true :totalLines 4 :nextOffset 4} (:metadata win))))
     (fs/delete! p)))
 
 (deftest an-unrecognised-binary-yields-an-error-result

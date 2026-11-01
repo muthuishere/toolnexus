@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"sync"
 )
 
 // Options configures CreateToolkit.
@@ -55,6 +56,10 @@ type Options struct {
 
 // Toolkit aggregates all tools and routes execution.
 type Toolkit struct {
+	// mu guards order/byName so Register may run while a turn reads the tool
+	// list (Tools/Get/Execute). A turn sees the tools present at each read; a
+	// tool registered mid-turn shows up from the next LLM call on.
+	mu     sync.RWMutex
 	order  []string
 	byName map[string]Tool
 	mcp    *McpSource
@@ -236,7 +241,12 @@ func CreateToolkit(ctx context.Context, opts Options) (*Toolkit, error) {
 
 // Register adds tools to the toolkit (first-name-wins; duplicates are skipped
 // with a warning). Returns the toolkit for chaining.
+//
+// Register is safe to call concurrently with a running turn and with other
+// Register calls (golang only for now; other ports pending).
 func (tk *Toolkit) Register(tools ...Tool) *Toolkit {
+	tk.mu.Lock()
+	defer tk.mu.Unlock()
 	for _, t := range tools {
 		if _, exists := tk.byName[t.Name]; exists {
 			log.Printf("[toolnexus] duplicate tool name %q — keeping first", t.Name)
@@ -330,6 +340,8 @@ func (tk *Toolkit) Tools() []Tool {
 	if tk == nil {
 		return nil
 	}
+	tk.mu.RLock()
+	defer tk.mu.RUnlock()
 	out := make([]Tool, 0, len(tk.order))
 	for _, name := range tk.order {
 		out = append(out, tk.byName[name])
@@ -342,7 +354,9 @@ func (tk *Toolkit) Get(name string) (Tool, bool) {
 	if tk == nil {
 		return Tool{}, false
 	}
+	tk.mu.RLock()
 	t, ok := tk.byName[name]
+	tk.mu.RUnlock()
 	return t, ok
 }
 
@@ -351,7 +365,9 @@ func (tk *Toolkit) Execute(ctx context.Context, name string, args map[string]any
 	if tk == nil {
 		return ToolResult{Output: fmt.Sprintf("Unknown tool: %s", name), IsError: true}, nil
 	}
+	tk.mu.RLock()
 	tool, ok := tk.byName[name]
+	tk.mu.RUnlock()
 	if !ok {
 		return ToolResult{Output: fmt.Sprintf("Unknown tool: %s", name), IsError: true}, nil
 	}
@@ -369,14 +385,25 @@ func (tk *Toolkit) Execute(ctx context.Context, name string, args map[string]any
 // (ToolContext.Answer). Used by the client loop to re-run a suspended tool once
 // after WaitFor resolves.
 func (tk *Toolkit) executeWithAnswer(ctx context.Context, name string, args map[string]any, answer *Answer) (ToolResult, error) {
+	return tk.executeCall(ctx, name, args, "", answer)
+}
+
+// executeCall runs a tool for the client loop with the call id (and any §10
+// answer) on its ToolContext.
+func (tk *Toolkit) executeCall(ctx context.Context, name string, args map[string]any, callID string, answer *Answer) (ToolResult, error) {
+	if tk == nil {
+		return ToolResult{Output: fmt.Sprintf("Unknown tool: %s", name), IsError: true}, nil
+	}
+	tk.mu.RLock()
 	tool, ok := tk.byName[name]
+	tk.mu.RUnlock()
 	if !ok {
 		return ToolResult{Output: fmt.Sprintf("Unknown tool: %s", name), IsError: true}, nil
 	}
 	if args == nil {
 		args = map[string]any{}
 	}
-	return tool.Execute(args, &ToolContext{Ctx: ctx, Answer: answer})
+	return tool.Execute(args, &ToolContext{Ctx: ctx, Answer: answer, CallID: callID})
 }
 
 // SkillsPrompt returns the markdown skill catalog for the system prompt.

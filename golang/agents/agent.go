@@ -5,6 +5,7 @@
 package agents
 
 import (
+	"context"
 	"os"
 
 	tn "github.com/muthuishere/toolnexus/golang"
@@ -147,7 +148,20 @@ func (a *Agent) Run(opts Options, prompt string) (TaskResult, *Runtime) {
 // callable whose execute runs the agent's own loop in isolation and returns
 // ONLY its final text plus metadata {agent, turns, totalTokens}. Drop it into
 // the classic API's ExtraTools; the classic toolkit/client API is untouched.
+// The calling turn's context cancels the child run.
 func (a *Agent) AsTool(opts Options) tn.Tool {
+	return a.AsToolWith(func(*tn.ToolContext) Options { return opts })
+}
+
+// AsToolWith is AsTool with Options built per call from the calling tool's
+// context, so the child runs under the parent turn's gates: set Hooks (the
+// same BeforeTool permission gate — it also sees the child's tool calls and
+// results, and AfterLLM its replies, for a nested UI row), WaitFor (the same
+// ask bridge) and OnMetric. A Def.Hooks on the agent replaces Options.Hooks
+// for that agent, so leave Def.Hooks unset when the gate must hold. When the
+// calling context is cancelled the child is interrupted and the tool returns a
+// cancelled error result. golang only for now.
+func (a *Agent) AsToolWith(per func(*tn.ToolContext) Options) tn.Tool {
 	return tn.Tool{
 		Name:        a.Name,
 		Description: a.Spec.Does,
@@ -157,16 +171,54 @@ func (a *Agent) AsTool(opts Options) tn.Tool {
 			"required":   []any{"prompt"},
 		},
 		Source: tn.SourceCustom,
-		Execute: func(args map[string]any, _ *tn.ToolContext) (tn.ToolResult, error) {
+		Execute: func(args map[string]any, tctx *tn.ToolContext) (tn.ToolResult, error) {
 			prompt, _ := args["prompt"].(string)
-			r, _ := a.Run(opts, prompt)
-			return tn.ToolResult{
-				Output:   r.Text,
-				IsError:  r.IsError,
-				Metadata: map[string]any{"agent": a.Name, "turns": r.Turns, "totalTokens": r.TotalTokens},
-			}, nil
+			var ctx context.Context
+			if tctx != nil {
+				ctx = tctx.Ctx
+			}
+			r, _ := a.runCtx(ctx, per(tctx), prompt)
+			meta := map[string]any{"agent": a.Name, "turns": r.Turns, "totalTokens": r.TotalTokens}
+			if r.Status == "cancelled" {
+				return tn.ToolResult{Output: "cancelled: " + r.Text, IsError: true, Metadata: meta}, nil
+			}
+			return tn.ToolResult{Output: r.Text, IsError: r.IsError, Metadata: meta}, nil
 		},
 	}
+}
+
+// runCtx is Run that interrupts the child when ctx is cancelled (nil ctx ⇒ Run).
+func (a *Agent) runCtx(ctx context.Context, opts Options, prompt string) (TaskResult, *Runtime) {
+	if ctx == nil {
+		return a.Run(opts, prompt)
+	}
+	if err := ctx.Err(); err != nil {
+		return TaskResult{Text: err.Error(), IsError: true, Status: "cancelled"}, nil
+	}
+	opts.Registry = a.Registry()
+	rt := NewRuntime(opts)
+	h, err := rt.Spawn(rt.Root, a.Name, nil)
+	if err != nil {
+		return TaskResult{Text: err.Error(), IsError: true, Status: "error"}, rt
+	}
+	stop := make(chan struct{})
+	defer close(stop)
+	go func() {
+		select {
+		case <-ctx.Done():
+			rt.Close(rt.Root, &CloseOptions{Force: true, Reason: "cancelled"})
+		case <-stop:
+		}
+	}()
+	rt.Wake(h, prompt)
+	r := rt.Wait(h, 0)
+	if ctx.Err() != nil {
+		return TaskResult{Text: ctx.Err().Error(), IsError: true, Status: "cancelled", Turns: r.Turns, TotalTokens: r.TotalTokens}, rt
+	}
+	if r.Status != "pending" {
+		rt.Close(rt.Root, nil)
+	}
+	return r, rt
 }
 
 // Harness names the capability set an agent needs to COMPLETE its problem, plus

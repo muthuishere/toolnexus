@@ -29,11 +29,13 @@
 (ns toolnexus.client
   (:require [clojure.string :as str]
             [koine.env :as env]
+            [koine.fs :as fs]
             [koine.http :as http]
             [koine.json :as json]
             [koine.process :as proc]
             [koine.time :as ktime]
             [toolnexus.adapter :as adapter]
+            [toolnexus.builtin :as builtin]
             [toolnexus.content :as content]
             [toolnexus.tool :as tool]))
 
@@ -174,25 +176,234 @@
   (let [s (:style opts)]
     (if (= "anthropic" (name (or s "openai"))) "anthropic" "openai")))
 
-(defn- resolve-key
-  "The API key, from the options or the environment. NEVER logged, never put in
-  a result — it only ever reaches a request header."
+(defn ^:no-doc host-of
+  "The lower-cased host of an HTTPS `base-url`, or nil — a provider key is never
+  sent over plain http, so any other scheme has no host here. Userinfo and port
+  are dropped. Hand-rolled: there is no URL parser both hosts share."
+  [base-url]
+  (when-let [m (re-find #"^([A-Za-z][A-Za-z0-9+.-]*)://([^/?#]*)" (str base-url))]
+    (when (= "https" (str/lower-case (nth m 1)))
+      (let [auth (nth m 2)
+            auth (if-let [i (tool/last-index-of-char auth \@)] (subs auth (inc i)) auth)
+            host (if (str/starts-with? auth "[")
+                   (if-let [j (str/index-of auth "]")] (subs auth 0 (inc j)) auth)
+                   (first (str/split auth #":" 2)))]
+        (str/lower-case (str host))))))
+
+(defn ^:no-doc key-env-for-base-url
+  "The NAME of the one env var whose key may be sent to `base-url`'s host, or nil
+  when none may (SPEC §4C, API key by host)."
+  [base-url]
+  (let [h (host-of base-url)]
+    (cond
+      (= h "api.openai.com")    "OPENAI_API_KEY"
+      (= h "api.anthropic.com") "ANTHROPIC_API_KEY"
+      (and h (or (= h "openrouter.ai") (str/ends-with? h ".openrouter.ai"))) "OPENROUTER_API_KEY"
+      :else nil)))
+
+(defn ^:no-doc resolve-key
+  "The API key (SPEC §4C, API key by host — security). An explicit `:api-key` is
+  used as-is. Otherwise the key comes from `:api-key-env` (an env var NAME), else
+  ONLY from the env var that belongs to the `:base-url` host:
+  https://api.openai.com → OPENAI_API_KEY, https://api.anthropic.com →
+  ANTHROPIC_API_KEY, https://openrouter.ai (and subdomains) → OPENROUTER_API_KEY.
+  Any other host, or plain http, without `:api-key`/`:api-key-env` THROWS: a key
+  is never sent to a host it does not belong to, and there is no cross-provider
+  fallback. The value is never logged, never put in a result or an error — it
+  only ever reaches a request header."
   [opts]
-  (or (:api-key opts)
-      (if (= "anthropic" (:style opts))
-        (env/get-env "ANTHROPIC_API_KEY")
-        (env/get-env "OPENAI_API_KEY"))
-      (env/get-env "OPENROUTER_API_KEY")
-      ""))
+  (let [explicit (:api-key opts)]
+    (if (and (string? explicit) (not= "" explicit))
+      explicit
+      (let [given    (:api-key-env opts)
+            env-name (if (and (string? given) (not= "" given)) given (key-env-for-base-url (:base-url opts)))]
+        (if-not env-name
+          (throw (ex-info (str "no API key: set :api-key or :api-key-env (provider env vars are only "
+                               "used for https://api.openai.com, https://api.anthropic.com and "
+                               "https://openrouter.ai, never for " (pr-str (str (:base-url opts))) ")")
+                          {:toolnexus/error :config}))
+          (let [k (env/get-env env-name)]
+            (if (and (string? k) (not= "" k))
+              k
+              (throw (ex-info (str "no API key: set :api-key or " env-name)
+                              {:toolnexus/error :config :api-key-env env-name})))))))))
+
+(defn- newest-first
+  "§conversation-store list order: newest first, ties by id ascending."
+  [entries]
+  (vec (sort (fn [a b]
+               (let [c (compare (:updated-at b) (:updated-at a))]
+                 (if (zero? c) (tool/compare-strings (:id a) (:id b)) c)))
+             entries)))
 
 (defn in-memory-store
   "§conversation-store — the shipped default: per-client, process lifetime.
-  A store is exactly two operations, `:get` and `:save`, so a host can swap in
-  a file or a database without this namespace knowing anything about it."
+  The CONTRACT is exactly two operations, `:get` and `:save`, so a host can swap
+  in a file or a database without this namespace knowing anything about it. The
+  shipped stores also carry `:list` (`[{:id :updated-at}]`, newest first, ties
+  by id; `:updated-at` is epoch ms) and `:delete` (absent id is not an error)."
   []
   (let [a (atom {})]
-    {:get  (fn [id] (get @a id))
-     :save (fn [id msgs] (swap! a assoc id msgs) nil)}))
+    {:get    (fn [id] (get-in @a [id :messages]))
+     :save   (fn [id msgs] (swap! a assoc id {:messages msgs :updated-at (ktime/now-ms)}) nil)
+     :list   (fn [] (newest-first (map (fn [[id v]] {:id id :updated-at (:updated-at v)}) @a)))
+     :delete (fn [id] (swap! a dissoc id) nil)}))
+
+;; ---------------------------------------------------------------------------
+;; §conversation-store — the durable file store
+;; ---------------------------------------------------------------------------
+;;
+;; koine has no rename, no mtime, no chmod and no fsync, and this namespace may
+;; not branch per host, so those four go through POSIX tools (`mv`, `stat`,
+;; `chmod` via umask, `sync`) with an argv and no shell interpretation of any
+;; value. POSIX only — the same boundary the `bash` builtin already has.
+
+(def ^:private id-chars
+  (set "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-"))
+
+(defn valid-conversation-id?
+  "SPEC §conversation-store — `^[A-Za-z0-9._-]{1,128}$` and not `.`/`..`."
+  [id]
+  (and (string? id)
+       (<= 1 (count id) 128)
+       (every? id-chars id)
+       (not (#{"." ".."} id))))
+
+(defn- check-id! [id]
+  (when-not (valid-conversation-id? id)
+    (throw (ex-info (str "file-store: invalid conversation id: " (pr-str id))
+                    {:error "invalid-id" :id id})))
+  id)
+
+(defn- sh! [argv what]
+  (let [r (proc/sh argv {:timeout-ms 10000})]
+    (when-not (= 0 (:exit r))
+      (throw (ex-info (str "file-store: " what " failed: " (str/trim (str (:err r))))
+                      {:error "io" :argv argv})))
+    r))
+
+(def ^:private digit-val
+  {\0 0 \1 1 \2 2 \3 3 \4 4 \5 5 \6 6 \7 7 \8 8 \9 9})
+
+(defn- seconds->ms
+  "`stat`'s \"1792818339.694926003\" as epoch ms. Hand-rolled: `parse-double`
+  is unverified on cljgo and this namespace may not branch per host."
+  [s]
+  (let [[whole frac] (str/split (str/trim s) #"\." 2)
+        num (fn [cs] (reduce (fn [n c] (+ (* 10 n) (long (digit-val c 0)))) 0 cs))
+        ms  (take 3 (concat (seq (or frac "")) (repeat \0)))]
+    (+ (* 1000 (num whole)) (num ms))))
+
+(defn- mtimes-ms
+  "File mtimes in epoch ms, one per path, in order. GNU `stat -c`, then BSD
+  `stat -f` — the two spellings of the same question."
+  [paths]
+  (if (empty? paths)
+    []
+    (let [gnu (proc/sh (into ["stat" "-c" "%.9Y" "--"] paths) {:timeout-ms 10000})
+          r   (if (= 0 (:exit gnu))
+                gnu
+                (sh! (into ["stat" "-f" "%Fm" "--"] paths) "stat"))]
+      (mapv seconds->ms (remove str/blank? (str/split-lines (:out r)))))))
+
+(def ^:private save-lock
+  "In-process serialization of saves — the same compare-and-set! spin the MCP
+  writer uses, because `locking` is a JVM special form."
+  (atom false))
+
+(defn- with-save-lock! [f]
+  (loop []
+    (if (compare-and-set! save-lock false true)
+      (try (f) (finally (reset! save-lock false)))
+      (do (ktime/sleep! 1) (recur)))))
+
+(defn file-store
+  "§conversation-store `FileConversationStore(root)` — durable, one file per id:
+  `<root>/<id>.json` holding `{\"version\":1,\"messages\":[...]}`.
+
+  `root` is required and never defaulted; it is created (0700) on first save.
+  `:save` writes `<root>/.<id>.<random>.tmp` (0600), syncs, and renames it over
+  the target, so a reader sees the old or the new transcript, never a torn one
+  (power-loss durability of the rename is best-effort). `:get` of a missing id
+  is nil; corrupt JSON or an unknown `version` THROWS. `:list` returns
+  `[{:id :updated-at}]` (file mtime, epoch ms) newest first, ties by id, without
+  parsing bodies. `:delete` of an absent id is not an error. An id outside
+  `^[A-Za-z0-9._-]{1,128}$` (or `.`/`..`) is rejected by every operation.
+  Same-process saves are serialized; across processes the last rename wins.
+
+  Opts `{:sync mode}` (SPEC §8 \"Durability mode\"): `:full` (default) runs
+  `sync FILE` before the rename and `sync ROOT` after it (best-effort);
+  `:fsync` only `sync FILE`; `:none` no flush. Temp-then-rename holds in every
+  mode; an unknown mode throws. GNU `sync FILE` is an fsync(2) of that file;
+  BSD/macOS `sync` ignores its argument and runs a global sync(2) — no
+  F_FULLFSYNC is reachable from a POSIX tool."
+  ([root] (file-store root {}))
+  ([root {:keys [sync] :or {sync :full}}]
+  (when-not (and (string? root) (not (str/blank? root)))
+    (throw (ex-info "file-store: root is required" {:error "config"})))
+  (when-not (#{:full :fsync :none} sync)
+    (throw (ex-info (str "file-store: unknown sync mode " (pr-str sync))
+                    {:error "config" :sync sync})))
+  (let [path (fn [id] (str root "/" (check-id! id) ".json"))]
+    {:get
+     (fn [id]
+       (let [p (path id)]
+         (when (fs/exists? p)
+           (let [doc (try (json/read-str (fs/read-file p))
+                          (catch Throwable e
+                            (throw (ex-info (str "file-store: corrupt conversation " id ": "
+                                                 (or (ex-message e) (str e)))
+                                            {:error "corrupt" :id id}))))]
+             (when-not (and (map? doc) (= 1 (:version doc)))
+               (throw (ex-info (str "file-store: conversation " id " has unsupported version "
+                                    (pr-str (when (map? doc) (:version doc))))
+                               {:error "version" :id id})))
+             (vec (:messages doc))))))
+
+     :save
+     (fn [id msgs]
+       (let [target (path id)
+             tmp    (str root "/." id "." (ktime/mono-ms) "-" (rand-int 1000000000) ".tmp")
+             body   (json/write-str {:version 1 :messages (vec msgs)})]
+         (with-save-lock!
+          (fn []
+            (when-not (fs/directory? root)
+              (sh! ["mkdir" "-p" "-m" "700" "--" root] "mkdir"))
+            (try
+              ;; created 0600 BEFORE any content lands in it
+              (sh! ["sh" "-c" "umask 077 && : > \"$1\"" "sh" tmp] "create temp")
+              (fs/write-file tmp body)
+              ;; best-effort flush: GNU `sync FILE`; BSD `sync` ignores the arg
+              (when-not (= :none sync)
+                (proc/sh ["sync" tmp] {:timeout-ms 10000}))
+              (sh! ["mv" "-f" "--" tmp target] "rename")
+              (catch Throwable e
+                (try (fs/delete! tmp) (catch Throwable _ nil))
+                (throw e)))
+            ;; best-effort directory flush so the rename survives power loss
+            (when (= :full sync)
+              (proc/sh ["sync" root] {:timeout-ms 10000}))))
+         nil))
+
+     :list
+     (fn []
+       (if-not (fs/directory? root)
+         []
+         (let [prefix (str root "/")
+               ids    (->> (fs/list-tree root)
+                           (keep (fn [p]
+                                   (when (and (str/starts-with? p prefix)
+                                              (str/ends-with? p ".json"))
+                                     (let [n (subs p (count prefix) (- (count p) 5))]
+                                       (when (valid-conversation-id? n) n)))))
+                           (filter #(not (fs/directory? (str prefix % ".json"))))
+                           distinct
+                           vec)
+               times  (mtimes-ms (mapv #(str prefix % ".json") ids))]
+           (newest-first (map (fn [id t] {:id id :updated-at t}) ids times)))))
+
+     :delete
+     (fn [id] (fs/delete! (path id)) nil)})))
 
 (defn create-client
   "Build a client. Options (idiomatic kebab-case — these never hit the wire):
@@ -200,8 +411,13 @@
     :base-url       required, e.g. \"https://api.anthropic.com\"
     :style          \"openai\" | \"anthropic\"   (default \"openai\")
     :model          required
-    :api-key        optional; falls back to OPENAI_API_KEY / ANTHROPIC_API_KEY
-                    / OPENROUTER_API_KEY
+    :api-key        optional. Absent, the key comes from :api-key-env, else ONLY
+                    from the env var of the :base-url host (https://api.openai.com
+                    → OPENAI_API_KEY, https://api.anthropic.com →
+                    ANTHROPIC_API_KEY, https://openrouter.ai → OPENROUTER_API_KEY).
+                    Any other host, or plain http, needs :api-key or :api-key-env
+                    — a key is never sent to a host it does not belong to.
+    :api-key-env    the NAME of the env var to read the key from (never the value)
     :headers        extra request headers
     :system-prompt  prepended to the toolkit's skills prompt
     :max-turns      default 10
@@ -225,6 +441,17 @@
                     {:before-llm :after-llm :before-tool :after-tool}; see
                     `before-llm!` / `execute-tool`. Absent => nothing changes.
     :wait-for       (fn [request] answer) — the ONE host slot of §10.
+    :wait-for-ctx   (fn [ctx request] answer) — `:wait-for` that also receives
+                    the turn's context `{:cancel :cancelled? :call-id :turn}`, so
+                    a pending ask can stop when the turn is cancelled (throw). Wins
+                    over `:wait-for` when both are set (SPEC §4C).
+    :prompt-cache   {:key :long-ttl} — mark the stable request prefix for the
+                    provider's cache (SPEC §4C prompt caching). Absent ⇒ the body
+                    is byte-identical.
+    :tool-tiers     {:core :deferred :budget-tokens :context-window :usage-count
+                    :count-tokens} — send only core tool schemas plus a
+                    `tool_search`/`call_tool` pair (SPEC §4C tool tiers). Absent ⇒
+                    every tool is sent, as before.
     :max-part-bytes §1B — reject a content part carrying more than this many
                     DECODED bytes (never the +33% base64 string). Unset => no
                     limit, exactly as before.
@@ -252,7 +479,9 @@
       (update :retries #(if (some? %) % default-retries))
       ;; §conversation-store: the default is in-memory and per-client, so two
       ;; clients never share a transcript by accident.
-      (update :store #(or % (in-memory-store)))))
+      (update :store #(or % (in-memory-store)))
+      ;; SPEC §4C tool tiers: one frozen plan per toolkit identity.
+      (cond-> (:tool-tiers opts) (assoc ::tier-plans (atom {})))))
 
 ;; ---------------------------------------------------------------------------
 ;; In-process models (SPEC §8 Gap 2, semantic form)
@@ -469,6 +698,46 @@
       (if (and (nil? (namespace kw)) (= k (name kw))) kw k))
     k))
 
+(defn- with-cache-control [v mark]
+  (if (map? v) (assoc v :cache_control mark) v))
+
+(defn- mark-last [xs mark]
+  (let [v (vec xs)]
+    (if (seq v) (assoc v (dec (count v)) (with-cache-control (peek v) mark)) v)))
+
+(defn ^:no-doc apply-prompt-cache
+  "SPEC §4C prompt caching — mark the cacheable prefix of an assembled body.
+
+    anthropic  `cache_control` {type:\"ephemeral\"} (+ ttl \"1h\" with :long-ttl)
+               on the last tool, the system prompt (a string becomes one text
+               block) and the last content block of the latest message — 3 of
+               the 4 breakpoints the provider allows
+    openai     `prompt_cache_key` = :key, when set (the prefix caches itself)
+    gemini     nothing yet
+
+  Values are immutable here, so the transcript cannot be mutated by this."
+  [body style opts]
+  (if (= "anthropic" style)
+    (let [mark (cond-> {:type "ephemeral"} (:long-ttl opts) (assoc :ttl "1h"))
+          sys  (:system body)
+          msgs (:messages body)]
+      (cond-> body
+        (seq (:tools body)) (assoc :tools (mark-last (:tools body) mark))
+        (and (string? sys) (not= "" sys)) (assoc :system [{:type "text" :text sys :cache_control mark}])
+        (and (sequential? sys) (seq sys)) (assoc :system (mark-last sys mark))
+        (seq msgs)
+        (assoc :messages
+               (let [v    (vec msgs)
+                     last (peek v)
+                     c    (when (map? last) (:content last))]
+                 (cond
+                   (string? c) (assoc v (dec (count v)) (assoc last :content [{:type "text" :text c :cache_control mark}]))
+                   (and (sequential? c) (seq c)) (assoc v (dec (count v)) (assoc last :content (mark-last c mark)))
+                   :else v)))))
+    (if (and (string? (:key opts)) (not= "" (:key opts)))
+      (assoc body :prompt_cache_key (:key opts))
+      body)))
+
 (defn- shape-body
   "§client-request-shaping — the ordering contract, and the order is the spec:
 
@@ -500,6 +769,9 @@
                               (vec (sort (filter forbidden-request-params (keys params))))
                               "— owned by the client loop; use :body-transform"))
                    kept))
+        ;; SPEC §4C: the prompt cache marks go on BEFORE :request-params and
+        ;; :body-transform, so both can still override them.
+        body   (if-let [pc (:prompt-cache client)] (apply-prompt-cache body (:style client) pc) body)
         merged (if (seq params) (merge body params) body)]
     (if-let [f (:body-transform client)] (f merged) merged)))
 
@@ -908,17 +1180,225 @@
   [acc client raw]
   (if-not raw
     acc
-    (if (= "anthropic" (:style client))
-      (let [p (or (:input_tokens raw) 0) c (or (:output_tokens raw) 0)]
-        (-> acc
-            (update :prompt-tokens + p)
-            (update :completion-tokens + c)
-            (update :total-tokens + (+ p c))))
-      (let [p (or (:prompt_tokens raw) 0) c (or (:completion_tokens raw) 0)]
-        (-> acc
-            (update :prompt-tokens + p)
-            (update :completion-tokens + c)
-            (update :total-tokens + (or (:total_tokens raw) (+ p c))))))))
+    ;; SPEC §4C prompt caching: `:cache-read-tokens` / `:cache-write-tokens`,
+    ;; present only once a provider reports one, so an uncached Usage is the same
+    ;; map as before. Under anthropic `:prompt-tokens` EXCLUDES both (the context
+    ;; sent is prompt + cache-read + cache-write); under openai it already
+    ;; INCLUDES the cached part.
+    (let [add (fn [m k n] (if (and (number? n) (pos? n)) (update m k (fnil + 0) n) m))]
+      (if (= "anthropic" (:style client))
+        (let [p (or (:input_tokens raw) 0) c (or (:output_tokens raw) 0)]
+          (-> acc
+              (update :prompt-tokens + p)
+              (update :completion-tokens + c)
+              (update :total-tokens + (+ p c))
+              (add :cache-read-tokens (:cache_read_input_tokens raw))
+              (add :cache-write-tokens (:cache_creation_input_tokens raw))))
+        (let [p (or (:prompt_tokens raw) 0) c (or (:completion_tokens raw) 0)]
+          (-> acc
+              (update :prompt-tokens + p)
+              (update :completion-tokens + c)
+              (update :total-tokens + (or (:total_tokens raw) (+ p c)))
+              (add :cache-read-tokens (get-in raw [:prompt_tokens_details :cached_tokens]))))))))
+
+;; ---------------------------------------------------------------------------
+;; SPEC §4C — cancellation, tool context, tool tiers
+;; ---------------------------------------------------------------------------
+
+(defn- cancel-reason
+  "The run's cancel token (`:cancel` on the run ctx — an atom, cancelled once it
+  holds a truthy value, or a 0-arg fn), read without blocking."
+  [token]
+  (cond (nil? token) nil
+        (fn? token)  (token)
+        :else        @token))
+
+(defn cancelled-error
+  "The typed cancellation failure a cancelled run throws."
+  [reason]
+  (ex-info (str "cancelled" (when (string? reason) (str ": " reason)))
+           {:toolnexus/error :cancelled :reason reason}))
+
+(defn- check-cancel! [client]
+  (when-let [r (cancel-reason (::cancel client))]
+    (throw (cancelled-error r))))
+
+(defn- tool-context
+  "The ToolContext a loop-run tool sees: the model's call id, plus the run's
+  cancel token when there is one (and `:answer` on a §10 re-run)."
+  [client call-id]
+  (cond-> {:call-id (str (or call-id ""))}
+    (::cancel client) (assoc :cancel (::cancel client))))
+
+(defn- tool-def
+  "A tool as tool_search shows it — the shape the Go reference marshals."
+  [t]
+  {"name" (:name t) "description" (or (:description t) "") "inputSchema" (:input-schema t)})
+
+(defn- default-count-tokens [v]
+  (quot (+ (builtin/utf8-count (json/write-str v)) 3) 4))
+
+(defn ^:no-doc first-line
+  "First line of `s`, cut to the longest valid UTF-8 prefix of at most 120
+  BYTES, as Go does — never a split character. A cut at `j` splits a
+  surrogate pair exactly when the two halves' byte counts do not add up to
+  the whole, which needs no host char interop."
+  [s]
+  (let [l     (str (first (str/split (str s) #"\n" 2)))
+        total (builtin/utf8-count l)]
+    (if (<= total 120)
+      l
+      (loop [j (min (count l) 120)]
+        (let [head (subs l 0 j)
+              n    (builtin/utf8-count head)]
+          (if (and (<= n 120) (= total (+ n (builtin/utf8-count (subs l j)))))
+            (str head "…")
+            (recur (dec j))))))))
+
+(defn- plan-lists [tier]
+  (let [of (fn [t] (tool/sort-strings (keep (fn [[n x]] (when (= x t) n)) tier)))]
+    {:core (of "core") :listed (of "listed") :deferred (of "deferred")}))
+
+(defn- meta-tools
+  "tool_search (whose description lists the listed + deferred tools) and call_tool."
+  [lists by-name]
+  (let [listed   (:listed lists)
+        deferred (:deferred lists)
+        desc     (str "Load the full schema of tools that are not shown in full, then call them by "
+                      "name (or with call_tool). Query by keywords, or \"select:a,b\" for exact names."
+                      (when (seq listed)
+                        (str "\n\nAvailable tools:"
+                             (apply str (map (fn [n]
+                                               (let [d (first-line (:description (get by-name n)))]
+                                                 (str "\n- " n (when (not= "" d) (str " — " d)))))
+                                             listed))))
+                      (when (seq deferred)
+                        (str "\n\nMore tools (name only): " (str/join ", " deferred))))]
+    [{:name "tool_search" :description desc :source "builtin"
+      :hints {:read-only true :destructive false :open-world false}
+      :input-schema {:type "object"
+                     :properties {:query {:type "string" :description "Keywords, or select:name1,name2"}
+                                  :limit {:type "number" :description "Maximum results for a keyword query (default 5)"}}
+                     :required ["query"]
+                     :additionalProperties false}}
+     {:name "call_tool" :description "Call a tool loaded with tool_search, by name, with its arguments."
+      :source "builtin"
+      :input-schema {:type "object"
+                     :properties {:name {:type "string"} :arguments {:type "object"}}
+                     :required ["name"]
+                     :additionalProperties false}}]))
+
+(defn ^:no-doc build-tier-plan
+  "SPEC §4C — the tier assignment for `tools`: {:tier {name tier} :core :listed
+  :deferred :search :call}. Core tools are named in `:core`, deferred in
+  `:deferred`, everything else is listed. Over the budget (`:budget-tokens`,
+  else 5% of `:context-window`), the least-used core tool moves to listed (ties:
+  larger schema first, then name), then the least-used listed tool to deferred,
+  until the core schemas plus the two meta tools fit."
+  [opts tools]
+  (let [count-fn (or (:count-tokens opts) default-count-tokens)
+        usage    (fn [n] (if-let [f (:usage-count opts)] (or (f n) 0) 0))
+        by-name  (into {} (map (fn [t] [(:name t) t]) tools))
+        tier0    (as-> (into {} (map (fn [t] [(:name t) "listed"]) tools)) m
+                   (reduce (fn [m n] (if (contains? m (str n)) (assoc m (str n) "deferred") m)) m (:deferred opts))
+                   (reduce (fn [m n] (if (contains? m (str n)) (assoc m (str n) "core") m)) m (:core opts)))
+        build    (fn [tier]
+                   (let [lists (plan-lists tier)
+                         [search call] (meta-tools lists by-name)]
+                     (assoc lists :tier tier :search search :call call)))
+        budget   (or (let [b (:budget-tokens opts)] (when (and (number? b) (pos? b)) b))
+                     (let [w (:context-window opts)] (when (and (number? w) (pos? w)) (quot w 20))))
+        cost     (fn [p] (reduce + (+ (count-fn (tool-def (:search p))) (count-fn (tool-def (:call p))))
+                                 (map (fn [n] (count-fn (tool-def (get by-name n)))) (:core p))))
+        order    (fn [names]
+                   (sort (fn [a b]
+                           (let [ua (usage a) ub (usage b)]
+                             (if (not= ua ub)
+                               (compare ua ub)
+                               (let [sa (count-fn (tool-def (get by-name a)))
+                                     sb (count-fn (tool-def (get by-name b)))]
+                                 (if (not= sa sb) (compare sb sa) (tool/compare-strings a b))))))
+                         names))
+        demote   (fn [p from to]
+                   (reduce (fn [p n] (if (<= (cost p) budget) (reduced p) (build (assoc (:tier p) n to))))
+                           p (order (get p from))))]
+    (cond-> (build tier0)
+      budget (-> (demote :core "listed") (demote :listed "deferred")))))
+
+(defn- tier-key [toolkit] (or (tool/toolkit-id toolkit) ::anonymous))
+
+(defn- tier-plan
+  "The frozen plan for `toolkit`, built on its first request. Nil without tiers."
+  [client toolkit]
+  (when-let [opts (:tool-tiers client)]
+    (let [a (::tier-plans client)
+          k (tier-key toolkit)]
+      (or (get @a k)
+          (get (swap! a (fn [m] (if (contains? m k) m (assoc m k (build-tier-plan opts (tool/all-tools toolkit)))))) k)))))
+
+(defn tool-tier-plan
+  "SPEC §4C — tool name → \"core\" | \"listed\" | \"deferred\" for `toolkit` (built on
+  first use, then frozen), for a host UI or log. Nil when :tool-tiers is unset."
+  [client toolkit]
+  (:tier (tier-plan client toolkit)))
+
+(defn reset-tool-tiers!
+  "Forget the frozen plan for `toolkit` (or every plan) so the next request
+  rebuilds it — call at a new session start. Mid-session it breaks the cached
+  prefix."
+  ([client] (when-let [a (::tier-plans client)] (reset! a {})) nil)
+  ([client toolkit] (when-let [a (::tier-plans client)] (swap! a dissoc (tier-key toolkit))) nil))
+
+(defn ^:no-doc request-tools
+  "The tools a request offers: every tool, or with tiers the core tools (sorted)
+  then tool_search and call_tool."
+  [client toolkit]
+  (if-let [p (tier-plan client toolkit)]
+    (-> (vec (keep (fn [n] (get (:tools toolkit) n)) (:core p)))
+        (conj (:search p) (:call p)))
+    (tool/all-tools toolkit)))
+
+(defn- unwrap-call
+  "call_tool {name, arguments} as the real call: [name args wrapped?]."
+  [client nm args]
+  (if (and (:tool-tiers client) (= "call_tool" nm))
+    [(str (or (:name args) "")) (let [a (:arguments args)] (if (map? a) a {})) true]
+    [nm args false]))
+
+(defn ^:no-doc tool-search
+  "tool_search against every tool in `toolkit`, whatever its tier: `select:a,b`
+  for exact names, else keyword scoring (name match 3, description match 1)."
+  [toolkit args]
+  (let [q (str/trim (str (or (:query args) "")))]
+    (if (= "" q)
+      (tool/failure "tool_search: query is required")
+      (let [picked (if (str/starts-with? q "select:")
+                     (let [ns      (remove #(= "" %) (map str/trim (str/split (subs q 7) #",")))
+                           found   (vec (keep #(get (:tools toolkit) %) ns))
+                           missing (vec (remove #(get (:tools toolkit) %) ns))]
+                       (if (and (seq missing) (empty? found))
+                         {:error (str "tool_search: no such tool: " (str/join ", " missing))}
+                         found))
+                     (let [limit (let [l (:limit args)] (if (and (number? l) (>= l 1)) (long l) 5))
+                           terms (remove #(= "" %) (str/split (str/lower-case q) #"\s+"))
+                           hits  (keep (fn [t]
+                                         (let [nm (str/lower-case (:name t))
+                                               d  (str/lower-case (str (:description t)))
+                                               sc (reduce + (map (fn [term] (+ (if (str/includes? nm term) 3 0)
+                                                                               (if (str/includes? d term) 1 0)))
+                                                                 terms))]
+                                           (when (pos? sc) [sc t])))
+                                       (tool/all-tools toolkit))]
+                       (vec (take limit (map second (sort (fn [[sa ta] [sb tb]]
+                                                            (if (not= sa sb) (compare sb sa)
+                                                                (tool/compare-strings (:name ta) (:name tb))))
+                                                          hits))))))]
+        (cond
+          (:error picked) (tool/failure (:error picked))
+          (empty? picked) (tool/success "No matching tools." {:count 0})
+          :else (tool/success (str "Loaded tools (call by name, or with call_tool):\n"
+                                   (builtin/json-indent (mapv tool-def picked) "  "))
+                              {:count (count picked) :tools (mapv :name picked)}))))))
 
 ;; ---------------------------------------------------------------------------
 ;; tool execution
@@ -949,23 +1429,34 @@
   is wrapped: tool/execute already turns a throw into an isError result and the
   catch here covers the residue."
   [client toolkit call turn]
-  (let [before (hook-of client :before-tool)
-        after  (hook-of client :after-tool)
-        ov     (when before
-                 (before {:name (:name call) :args (:args call)
-                          :id (:id call) :turn turn}))]
-    (if (:result ov)
-      (assoc call :result (:result ov))
-      (let [args   (or (:args ov) (:args call))
-            result (try (tool/execute toolkit (:name call) args)
-                        (catch Throwable e
-                          (tool/failure (or (ex-message e) (str e)))))
-            result (if (and after (not (pending-of result)))
-                     (or (:result (after {:name (:name call) :args args :result result
-                                          :id (:id call) :turn turn}))
-                         result)
-                     result)]
-        (assoc call :args args :result result)))))
+  (if (and (:tool-tiers client) (= "tool_search" (:name call)))
+    ;; SPEC §4C: tool_search is engine-internal and read-only — no hooks.
+    (assoc call :result (tool-search toolkit (:args call)))
+    ;; call_tool is unwrapped HERE, so hooks, hints and permission gates see the
+    ;; REAL tool. The recorded args keep the wrapper shape (with any :before-tool
+    ;; rewrite inside), so a §10 re-run unwraps the same way.
+    (let [[nm args0 wrapped?] (unwrap-call client (:name call) (:args call))
+          t      (get (:tools toolkit) nm)
+          before (hook-of client :before-tool)
+          after  (hook-of client :after-tool)
+          ov     (when before
+                   (before (cond-> {:name nm :args args0 :id (:id call) :turn turn}
+                             ;; SPEC §4C — the called tool's hints, for a permission gate
+                             (:hints t) (assoc :hints (:hints t)))))
+          rewrap (fn [a] (if wrapped? {:name nm :arguments a} a))]
+      (if (:result ov)
+        (assoc call :result (:result ov))
+        (let [args   (or (:args ov) args0)
+              result (try (tool/execute toolkit nm args
+                                        (when (:context? t) (tool-context client (:id call))))
+                          (catch Throwable e
+                            (tool/failure (or (ex-message e) (str e)))))
+              result (if (and after (not (pending-of result)))
+                       (or (:result (after {:name nm :args args :result result
+                                            :id (:id call) :turn turn}))
+                           result)
+                       result)]
+          (assoc call :args (rewrap args) :result result))))))
 
 (defn- execute-calls
   "§8 — the tool calls of one turn, in parallel, with the results in CALL ORDER
@@ -988,7 +1479,8 @@
   tool hooks, which are host code and are invoked outside that conversion. A
   throw from a hook is rethrown on the calling thread, matching the shipped
   ports, where an unguarded hook rejects the run."
-  [client toolkit calls turn]
+  ([client toolkit calls turn] (execute-calls client toolkit calls turn nil))
+  ([client toolkit calls turn on-settled]
   (->> calls
        (mapv (fn [c]
                (let [p (promise)
@@ -1019,11 +1511,14 @@
                  ;; after the result lands so :ms and :is_error are real.
                  (metric! client
                           (fn [] {:event "tool"
-                                  :tool (:name r)
-                                  :source (:source (get (:tools toolkit) (:name r)))
+                                  :tool (first (unwrap-call client (:name r) (:args r)))
+                                  :source (:source (get (:tools toolkit) (first (unwrap-call client (:name r) (:args r)))))
                                   :is_error (boolean (:isError (:result r)))
                                   :ms (- (ktime/now-ms) (second pair))}))
-                 r)))))
+                 ;; recorded as it lands, in call order, so an interrupted turn
+                 ;; can still save the results that DID finish.
+                 (when on-settled (on-settled r))
+                 r))))))
 
 (defn- emit! [on-event ev] (when on-event (on-event ev)) nil)
 
@@ -1048,15 +1543,25 @@
   there is no channel, no core.async and no executor anywhere in this rule."
   [client toolkit call request on-event turn]
   (emit! on-event {:type "pending" :request request})   ; BEFORE wait-for runs
-  (if-let [wait-for (:wait-for client)]
-    (let [answer (as-answer (wait-for request))]
+  (if-let [wait-for (if-let [f (:wait-for-ctx client)]
+                      ;; SPEC §4C: the turn's context, so a pending ask can end
+                      ;; with the turn. Wins over :wait-for.
+                      (let [token (::cancel client)]
+                        (fn [req] (f {:cancel token
+                                      :cancelled? (fn [] (boolean (cancel-reason token)))
+                                      :call-id (:id call) :turn turn}
+                                     req)))
+                      (:wait-for client))]
+    (let [answer (as-answer (wait-for request))
+          [nm args] (unwrap-call client (:name call) (:args call))]
       (if-not (:ok answer)
         {:result {:output (str "declined/expired: " (:prompt request)) :isError true}}
         ;; §8: the RESOLVED result is a real result, so `:after-tool` sees it
         ;; here — the suspension it replaces was skipped in `execute-tool`.
-        (let [retried (tool/execute toolkit (:name call) (:args call) {:answer answer})
+        (let [retried (tool/execute toolkit nm args
+                                    (assoc (tool-context client (:id call)) :answer answer))
               retried (if-let [f (hook-of client :after-tool)]
-                        (or (:result (f {:name (:name call) :args (:args call) :result retried
+                        (or (:result (f {:name nm :args args :result retried
                                          :id (:id call) :turn turn}))
                             retried)
                         retried)]
@@ -1112,6 +1617,30 @@
    :status "pending"
    :pending request})
 
+(def ^:private interrupted-result
+  "The synthetic result an unanswered tool call gets when a turn is interrupted —
+  so every call keeps its result in both dialects."
+  {:isError true :output "interrupted: the turn ended before this tool returned. Whether its side effects happened is unknown. Do not re-run it automatically; check first."})
+
+(defn- interrupted-transcript
+  "The transcript as it stood when a turn was interrupted: every complete
+  message, plus — when the last assistant message's tool calls had not all been
+  answered — one tool result per call: the real one if it finished, else
+  `interrupted-result`. A pending §10 placeholder is not a real result, so it
+  counts as interrupted too."
+  [client {:keys [messages calls done]}]
+  (if (seq calls)
+    (into (vec messages)
+          (tool-result-messages
+           client
+           (mapv (fn [c]
+                   (let [d (get done (:id c))]
+                     (assoc c :result (if (and d (not (pending-of (:result d))))
+                                        (:result d)
+                                        interrupted-result))))
+                 calls)))
+    (vec messages)))
+
 (defn- last-assistant-text [messages]
   (or (->> messages
            (filter (fn [m] (and (= "assistant" (:role m)) (string? (:content m)))))
@@ -1138,15 +1667,19 @@
   loop buffers the whole response, and faking deltas out of a buffered body
   would be a lie. Real SSE streaming is a separate seam (`koine.stream/sse-post`
   exists and is proven on both hosts) and is NOT implemented in this namespace."
-  [client prompt {:keys [toolkit history on-event conversation-id]}]
+  [client prompt {:keys [toolkit history on-event conversation-id cancel]}]
   ;; §8 `timeoutMs` is a WHOLE-RUN deadline, so it is stamped ONCE here and every
   ;; attempt in every turn is measured against that one instant.
-  (let [client     (with-deadline client)
+  (let [client     (cond-> (with-deadline client)
+                     ;; SPEC §4C: the run's cancel token, for wait-for-ctx and tools
+                     cancel (assoc ::cancel cancel))
         anthropic? (= "anthropic" (:style client))
         system     (system-message client toolkit)
         ;; §0.7 schema comes from toolnexus.adapter — one source of truth for
-        ;; the provider shapes, never a second copy in the loop.
-        tools      (if anthropic? (adapter/to-anthropic toolkit) (adapter/to-openai toolkit))
+        ;; the provider shapes, never a second copy in the loop. With SPEC §4C
+        ;; tool tiers the list is the frozen plan's core tools + the meta tools.
+        offered    (request-tools client toolkit)
+        tools      (if anthropic? (adapter/to-anthropic offered) (adapter/to-openai offered))
         max-turns  (or (:max-turns client) default-max-turns)
         ;; §conversation-store — an explicit :history still wins; the store is
         ;; consulted only when a :conversation-id is given. Without an id a run
@@ -1154,6 +1687,9 @@
         remembered (when (and conversation-id (:store client))
                      ((:get (:store client)) conversation-id))
         run-t0     (ktime/now-ms)
+        ;; §conversation-store — the turn as it stands, for the interrupted-turn
+        ;; save: {:messages complete-so-far :calls unanswered :done {id settled}}.
+        progress   (atom nil)
         ;; ONE exit path for the store save and the run metric. Two `run-result`
         ;; call sites return from this loop, and a save wired into only one of
         ;; them is the classic half-fix — the turn-limit exit would silently
@@ -1167,6 +1703,7 @@
                                       :error (:limit? r)}))
                      r)
         finish!    (fn [r]
+                     (reset! progress nil)
                      (when (and conversation-id (:store client))
                        ((:save (:store client)) conversation-id (:messages r)))
                      (run-metric! r))
@@ -1180,6 +1717,7 @@
     ;; `tools` is loop state, not a constant: §8 says a `:before-llm` hook that
     ;; returns `:messages`/`:tools` replaces them FOR THE REST OF THE RUN, so a
     ;; turn-0 override must still be in force on turn 1.
+    (try
     (loop [messages   (conj seed (user-message prompt))
            tools      tools
            turn       0
@@ -1189,6 +1727,8 @@
            ;; §8 — RunResult.model / the `run` metric report the model of the
            ;; LAST call the run made (configured until a call is made).
            last-model (:model client)]
+      (reset! progress {:messages messages})
+      (check-cancel! client)
       (if (>= turn max-turns)
         (let [text (if anthropic? "" (last-assistant-text messages))
               r    (finish! (assoc (run-result client text messages tool-calls turns usage true) :model last-model))]
@@ -1218,15 +1758,24 @@
                   turns   (inc turns)
                   msg     (assistant-message client body)
                   calls   (tool-calls-of client body)
-                  messages (conj messages msg)]
+                  messages (conj messages msg)
+                  _       (reset! progress {:messages messages :calls calls :done {}})]
               (if (empty? calls)
                 (let [r (finish! (assoc (run-result client (final-text client body) messages tool-calls turns usage false) :model turn-model))]
                   (emit! on-event {:type "done" :result r})
                   r)
                 (let [_       (doseq [c calls]
-                                (emit! on-event {:type "tool_call" :id (:id c) :name (:name c) :args (:args c)}))
+                                (emit! on-event
+                                       ;; SPEC §4C: a call_tool call names the REAL tool
+                                       (let [[nm a w?] (unwrap-call client (:name c) (:args c))]
+                                         (cond-> {:type "tool_call" :id (:id c) :name nm :args a}
+                                           w? (assoc :via "call_tool")))))
                       ;; parallel execution, results in call order …
-                      settled (execute-calls client toolkit calls turn)
+                      settled (execute-calls client toolkit calls turn
+                                             (fn [r] (swap! progress assoc-in [:done (:id r)] r)))
+                      ;; a batch that finished after cancellation is interrupted,
+                      ;; not a result (the finished pairs are still saved)
+                      _       (check-cancel! client)
                       ;; … then §10 resolution, sequential and in the same order.
                       settled (reduce (fn [acc s]
                                         (if (some :halt acc)
@@ -1250,12 +1799,19 @@
                                        ;; §1B: a part is rendered {type, mimeType, bytes}.
                                        ;; `data` NEVER reaches an event payload or a log
                                        ;; line — same rule as never-log-headers.
-                                       (cond-> {:type "tool_result" :id (:id s) :name (:name s)
+                                       (cond-> {:type "tool_result" :id (:id s)
+                                                :name (first (unwrap-call client (:name s) (:args s)))
                                                 :output (:output (:result s))
                                                 :isError (boolean (:isError (:result s)))}
+                                         (nth (unwrap-call client (:name s) (:args s)) 2)
+                                         (assoc :via "call_tool")
                                          (seq (:parts (:result s)))
                                          (assoc :parts (mapv content/describe-part
-                                                             (:parts (:result s)))))))
+                                                             (:parts (:result s))))
+                                         ;; SPEC §4A edit diffs: the event carries
+                                         ;; the result's metadata.
+                                         (some? (:metadata (:result s)))
+                                         (assoc :metadata (:metadata (:result s))))))
                       records (mapv (fn [s] {:name (:name s) :args (:args s)
                                              :output (:output (:result s))
                                              :isError (boolean (:isError (:result s)))
@@ -1267,7 +1823,17 @@
                     (let [r (run-metric! (assoc (pending-result client halted msgs (into tool-calls records) turns usage) :model turn-model))]
                       (emit! on-event {:type "done" :result r})
                       r)
-                    (recur msgs tools (inc turn) turns (into tool-calls records) usage turn-model)))))))))))
+                    (recur msgs tools (inc turn) turns (into tool-calls records) usage turn-model)))))))))
+    ;; SPEC §8 "Interrupted turns are saved": an error or a cancellation still
+    ;; saves the prompt and every complete message, unanswered tool calls
+    ;; closed with an `interrupted` result. The ORIGINAL error is rethrown; a
+    ;; store that fails here must not replace it.
+    (catch Throwable e
+      (when-let [st @progress]
+        (when (and conversation-id (:store client))
+          (try ((:save (:store client)) conversation-id (interrupted-transcript client st))
+               (catch Throwable _ nil))))
+      (throw e)))))
 
 
 (defn ask
@@ -1289,3 +1855,67 @@
   (run client prompt (cond-> {:toolkit toolkit :on-event on-event}
                        id (assoc :conversation-id id)
                        (:history ctx) (assoc :history (:history ctx)))))
+
+;; ---------------------------------------------------------------------------
+;; SPEC §4C — list-models
+;; ---------------------------------------------------------------------------
+
+(def ^:private hex-digits "0123456789ABCDEF")
+
+(defn- url-encode
+  "Percent-encode an ASCII query value (a model id). Non-ASCII passes through."
+  [s]
+  (apply str (map (fn [c]
+                    (let [ch (str c) n (int c)]
+                      (if (or (re-matches #"[A-Za-z0-9._~-]" ch) (> n 127))
+                        ch
+                        (str "%" (nth hex-digits (quot n 16)) (nth hex-digits (rem n 16))))))
+                  (str s))))
+
+(defn- get-json [url headers]
+  (let [res (http/request {:method :get :url url :headers headers :timeout-ms 60000})]
+    (cond
+      (http/failed? res)
+      (throw (ex-info (str "list models: transport " (name (:error res)))
+                      {:toolnexus/error :transport :error (:error res)}))
+
+      (not (and (:status res) (<= 200 (:status res) 299)))
+      (let [b (safe-body (:status res) (:body res))]
+        (throw (ex-info (str "list models: HTTP " (:status res) ": "
+                             (if (> (count b) 300) (subs b 0 300) b))
+                        {:toolnexus/error :provider :status (:status res)})))
+
+      :else (json/read-str (str (:body res))))))
+
+(defn list-models
+  "SPEC §4C — the models a provider offers, for model switching:
+  `[{:id :name? :context-length?}]` sorted by id. One GET, no retries.
+
+  openai style: GET {base}/models (OpenRouter's `context_length` is read when
+  present). anthropic style: GET {base}/v1/models (or {base}/models when the base
+  already ends in /v1), following `has_more`/`last_id`. The key follows the
+  client's rules exactly — `:api-key`, `:api-key-env`, or the host's own env var."
+  [opts]
+  (let [key   (resolve-key opts)
+        base  (trim-slashes (:base-url opts))
+        extra (or (:headers opts) {})
+        out   (if (= "anthropic" (style-of opts))
+                (let [endpoint (if (str/ends-with? base "/v1") (str base "/models") (str base "/v1/models"))]
+                  (loop [after nil page 0 acc []]
+                    (let [body (get-json (str endpoint "?limit=1000"
+                                              (when after (str "&after_id=" (url-encode after))))
+                                         (merge {"x-api-key" key "anthropic-version" "2023-06-01"} extra))
+                          acc  (into acc (map (fn [m] (cond-> {:id (str (:id m))}
+                                                        (seq (str (or (:display_name m) ""))) (assoc :name (:display_name m))))
+                                              (:data body)))
+                          nxt  (:last_id body)]
+                      (if (and (true? (:has_more body)) (string? nxt) (not= "" nxt) (< (inc page) 100))
+                        (recur nxt (inc page) acc)
+                        acc))))
+                (let [body (get-json (str base "/models") (merge {"authorization" (str "Bearer " key)} extra))]
+                  (mapv (fn [m] (cond-> {:id (str (:id m))}
+                                  (seq (str (or (:name m) ""))) (assoc :name (:name m))
+                                  (and (number? (:context_length m)) (pos? (:context_length m)))
+                                  (assoc :context-length (long (:context_length m)))))
+                        (:data body))))]
+    (vec (sort (fn [a b] (tool/compare-strings (:id a) (:id b))) out))))

@@ -12,9 +12,12 @@ import fs from "node:fs/promises"
 import { existsSync, readdirSync, realpathSync } from "node:fs"
 import { compareCodePoints, sortEntriesByName, toPosixPath } from "./order.js"
 import path from "node:path"
-import type { JSONSchema, Tool, ToolContext, ToolResult } from "./types.js"
+import type { JSONSchema, Tool, ToolContext, ToolHints, ToolResult } from "./types.js"
 import { pending } from "./types.js"
 import { mediaTypeFor } from "./content.js"
+import {
+  BackgroundShells, bashOutput, killShell, runWebSearch, editNotebook, goJsonIndent, type WebSearchFunc,
+} from "./builtin_extras.js"
 
 /**
  * Config for the single global builtin toggle (mirrors MCP isEnabled precedence),
@@ -47,13 +50,28 @@ export type BuiltinsConfig =
        * builtins, NOT a sandbox — `bash` still reaches the whole filesystem.
        */
       confineToBaseDir?: boolean
+      /**
+       * POSIX wait in ms between SIGTERM and SIGKILL of a timed-out or cancelled
+       * `bash` job's process group. Absent or 0 ⇒ 2000. No effect on Windows,
+       * which has no graceful stop for a console process (SPEC §4A).
+       */
+      killGraceMs?: number
+      /**
+       * Opt-in (SPEC §4C): `bash` takes `run_in_background` and the `bash_output` / `kill_shell`
+       * tools exist. The host owns the registry: call `closeAll()` on shutdown.
+       */
+      background?: BackgroundShells
+      /** Opt-in (SPEC §4C): adds a `websearch` tool backed by this provider. The library ships none. */
+      webSearch?: WebSearchFunc
+      /** Opt-in (SPEC §4C): adds the `notebook_edit` tool for .ipynb cells. */
+      notebookEdit?: boolean
     }
 
 /**
- * How long a job gets between "please stop" and "stop". Fixed, and identical in
- * every port, so a timeout means the same thing everywhere.
+ * How long a job gets between "please stop" and "stop" when `killGraceMs` is
+ * not set. Identical in every port, so a timeout means the same thing everywhere.
  */
-const KILL_GRACE_MS = 2000
+const DEFAULT_KILL_GRACE_MS = 2000
 
 const WIN_RESERVED = new Set([
   "CON", "PRN", "AUX", "NUL",
@@ -109,9 +127,17 @@ class BuiltinEnv {
   readonly shellError?: Error
   readonly baseDir: string
   readonly confine: boolean
+  readonly killGraceMs: number
+  readonly background?: BackgroundShells
+  readonly webSearch?: WebSearchFunc
+  readonly notebookEdit: boolean
 
   constructor(cfg?: BuiltinsConfig) {
     const obj = typeof cfg === "object" && cfg !== null ? cfg : {}
+    this.background = obj.background
+    this.webSearch = obj.webSearch
+    this.notebookEdit = obj.notebookEdit === true
+    this.killGraceMs = typeof obj.killGraceMs === "number" && obj.killGraceMs > 0 ? obj.killGraceMs : DEFAULT_KILL_GRACE_MS
     this.baseDir = obj.baseDir ?? ""
     this.confine = obj.confineToBaseDir === true
     if (obj.shell && obj.shell.length > 0) {
@@ -321,17 +347,24 @@ function walkFiles(root: string): string[] {
 // ---------------------------------------------------------------------------
 
 function bashTool(env: BuiltinEnv): Tool {
+  const properties: Record<string, unknown> = {
+    command: { type: "string", description: "The shell command to run" },
+    workdir: { type: "string", description: "Working directory (default: process cwd)" },
+    timeout: { type: "number", description: "Timeout in milliseconds (default 60000)" },
+    description: { type: "string", description: "Human-readable description of the command" },
+  }
+  if (env.background) {
+    properties.run_in_background = {
+      type: "boolean",
+      description: "Start the command and return at once with a background shell id; read it with bash_output, stop it with kill_shell. No timeout applies.",
+    }
+  }
   return builtin(
     "bash",
     "Run a shell command and return its combined stdout+stderr. Non-zero exit is an error.",
     {
       type: "object",
-      properties: {
-        command: { type: "string", description: "The shell command to run" },
-        workdir: { type: "string", description: "Working directory (default: process cwd)" },
-        timeout: { type: "number", description: "Timeout in milliseconds (default 60000)" },
-        description: { type: "string", description: "Human-readable description of the command" },
-      },
+      properties,
       required: ["command"],
       additionalProperties: false,
     },
@@ -349,6 +382,10 @@ function bashTool(env: BuiltinEnv): Tool {
         }
         const timeout = typeof args.timeout === "number" ? args.timeout : 60_000
         const meta: Record<string, unknown> = { shell: env.shellLabel }
+        if (env.background && args.run_in_background === true) {
+          const j = env.background.start(argv, command, workdir, env.killGraceMs)
+          return resolve(ok(`Started background shell ${j.id}. Read its output with bash_output, stop it with kill_shell.`, { ...meta, backgroundId: j.id }))
+        }
 
         // NOT `shell: true`: on Windows that silently means cmd.exe while every
         // other port fails loudly, and it hides WHICH interpreter ran. `detached`
@@ -408,7 +445,7 @@ function bashTool(env: BuiltinEnv): Tool {
           killedTree = killJob(true)
           graceTimer = setTimeout(() => {
             if (killJob(false)) killedTree = true
-          }, KILL_GRACE_MS)
+          }, env.killGraceMs)
         }
 
         let graceTimer: NodeJS.Timeout | undefined
@@ -511,7 +548,14 @@ function readTool(env: BuiltinEnv): Tool {
       const offset = typeof args.offset === "number" ? Math.max(1, Math.trunc(args.offset)) : 1
       const start = offset - 1
       const limit = typeof args.limit === "number" ? Math.max(0, Math.trunc(args.limit)) : lines.length - start
-      return ok(lines.slice(start, start + limit).join("\n"))
+      const end = Math.min(Math.max(start, start + limit), lines.length)
+      const out = lines.slice(start, start + limit).join("\n")
+      // A window that stops before the end of the file says so in metadata, with the offset to
+      // continue from (SPEC §4C). The text stays byte-identical. A trailing newline is not a line.
+      let total = lines.length
+      if (total > 0 && lines[total - 1] === "") total--
+      if (end < total) return ok(out, { truncated: true, totalLines: total, nextOffset: end + 1 })
+      return ok(out)
     },
   )
 }
@@ -539,10 +583,11 @@ function writeTool(env: BuiltinEnv): Tool {
       } catch (e) {
         return err(`write: ${e instanceof Error ? e.message : String(e)}`)
       }
+      const before = await readIfExists(full)
       await fs.mkdir(path.dirname(path.resolve(full)), { recursive: true })
       await fs.writeFile(full, content, "utf8")
       const bytes = Buffer.byteLength(content, "utf8")
-      return ok(`Wrote ${bytes} bytes to ${p}`, { bytes })
+      return ok(`Wrote ${bytes} bytes to ${p}`, { bytes, ...editMetadata(env, [{ path: full, before, after: content }]) })
     },
   )
 }
@@ -587,9 +632,10 @@ function editTool(env: BuiltinEnv): Tool {
         if (count > 1) return err(`edit: oldString is not unique in ${p} (${count} occurrences); use replaceAll`)
         next = content.replace(oldString, newString)
       }
-      await fs.writeFile(p, next, "utf8")
+      await fs.writeFile(full, next, "utf8")
       return ok(`Edited ${p} (${args.replaceAll === true ? count : 1} replacement${(args.replaceAll === true ? count : 1) === 1 ? "" : "s"})`, {
         replacements: args.replaceAll === true ? count : 1,
+        ...editMetadata(env, [{ path: full, before: content, after: next }]),
       })
     },
   )
@@ -606,6 +652,9 @@ function grepTool(env: BuiltinEnv): Tool {
         path: { type: "string", description: "Directory to search (default: process cwd)" },
         include: { type: "string", description: "Glob filter for file names" },
         limit: { type: "number", description: "Maximum number of matches (default 100)" },
+        context: { type: "number", description: "Lines of context before and after each match" },
+        before: { type: "number", description: "Lines of context before each match (overrides context)" },
+        after: { type: "number", description: "Lines of context after each match (overrides context)" },
       },
       required: ["pattern"],
       additionalProperties: false,
@@ -631,6 +680,11 @@ function grepTool(env: BuiltinEnv): Tool {
       // CONTENT and the order of the results were whatever the walk happened to reach first.
       // Now: collect every match, order by relative path (code point) then line number ascending,
       // and truncate last. The emitted path and the sort key are the same string (A28).
+      let before = 0, after = 0
+      if (typeof args.context === "number" && args.context > 0) before = after = Math.trunc(args.context)
+      if (typeof args.before === "number" && args.before >= 0) before = Math.trunc(args.before)
+      if (typeof args.after === "number" && args.after >= 0) after = Math.trunc(args.after)
+      const fileLines = new Map<string, string[]>() // only filled when context is asked for
       const hits: Array<{ rel: string; line: number; text: string }> = []
       for (const file of walkFiles(root)) {
         const rel = toPosixPath(path.relative(root, file), path.sep)
@@ -642,13 +696,50 @@ function grepTool(env: BuiltinEnv): Tool {
           continue
         }
         const lines = text.split("\n")
+        if (before > 0 || after > 0) fileLines.set(rel, lines)
         for (let i = 0; i < lines.length; i++) {
           if (re.test(lines[i])) hits.push({ rel, line: i + 1, text: lines[i] })
         }
       }
       hits.sort((a, b) => compareCodePoints(a.rel, b.rel) || a.line - b.line)
-      const matches = hits.slice(0, limit).map((h) => `${h.rel}:${h.line}:${h.text}`)
-      return ok(matches.join("\n"), { count: matches.length })
+      const total = hits.length
+      const kept = hits.slice(0, limit)
+      let outLines: string[]
+      if (before === 0 && after === 0) {
+        outLines = kept.map((h) => `${h.rel}:${h.line}:${h.text}`)
+      } else {
+        // ripgrep-style: match lines path:N:text, context lines path-N-text, "--" between
+        // groups that do not touch.
+        outLines = []
+        const matchAt = new Map<string, Set<number>>()
+        for (const h of kept) {
+          if (!matchAt.has(h.rel)) matchAt.set(h.rel, new Set())
+          matchAt.get(h.rel)!.add(h.line)
+        }
+        let lastRel = "", lastLine = 0
+        for (const h of kept) {
+          const lines = fileLines.get(h.rel) ?? []
+          let n = lines.length
+          if (n > 0 && lines[n - 1] === "") n-- // a trailing newline is not a line
+          let from = Math.max(1, h.line - before)
+          const to = Math.min(n, h.line + after)
+          if (h.rel === lastRel && from <= lastLine + 1) from = lastLine + 1
+          else if (lastRel !== "") outLines.push("--")
+          for (let k = from; k <= to; k++) {
+            const sep = matchAt.get(h.rel)!.has(k) ? ":" : "-"
+            outLines.push(`${h.rel}${sep}${k}${sep}${lines[k - 1]}`)
+          }
+          if (to > lastLine || h.rel !== lastRel) lastLine = to
+          lastRel = h.rel
+        }
+      }
+      const meta: Record<string, unknown> = { count: kept.length }
+      // Say the list was cut, and by how much, in metadata (SPEC §4C). The text is unchanged.
+      if (total > kept.length) {
+        meta.truncated = true
+        meta.total = total
+      }
+      return ok(outLines.join("\n"), meta)
     },
   )
 }
@@ -946,17 +1037,22 @@ function applyPatchTool(env: BuiltinEnv): Tool {
       // Stage every write/delete first; only touch the filesystem once all hunks apply.
       const writes: Array<{ path: string; content: string }> = []
       const deletes: string[] = []
+      const changes: FileChange[] = []
       try {
         for (const op of ops) {
           if (op.type === "add") {
             if (existsSync(op.path)) throw new Error(`file already exists: ${op.path}`)
             writes.push({ path: op.path, content: op.content })
+            changes.push({ path: op.path, before: undefined, after: op.content })
           } else if (op.type === "delete") {
             if (!existsSync(op.path)) throw new Error(`file not found: ${op.path}`)
             deletes.push(op.path)
+            changes.push({ path: op.path, before: await fs.readFile(op.path, "utf8"), after: undefined })
           } else {
             const content = await fs.readFile(op.path, "utf8")
-            writes.push({ path: op.path, content: applyUpdate(content, op.body) })
+            const next = applyUpdate(content, op.body)
+            writes.push({ path: op.path, content: next })
+            changes.push({ path: op.path, before: content, after: next })
           }
         }
       } catch (e) {
@@ -973,9 +1069,113 @@ function applyPatchTool(env: BuiltinEnv): Tool {
         added: ops.filter((o) => o.type === "add").length,
         updated: ops.filter((o) => o.type === "update").length,
         deleted: ops.filter((o) => o.type === "delete").length,
+        ...editMetadata(env, changes),
       })
     },
   )
+}
+
+// ---------------------------------------------------------------------------
+// edit diffs (SPEC §4A "Edit diffs"): metadata.files + metadata.diff
+// ---------------------------------------------------------------------------
+
+/** One file a builtin changed; `undefined` before = created, `undefined` after = deleted. */
+type FileChange = { path: string; before: string | undefined; after: string | undefined }
+
+async function readIfExists(p: string): Promise<string | undefined> {
+  try {
+    return await fs.readFile(p, "utf8")
+  } catch {
+    return undefined
+  }
+}
+
+/** Lines of a file's text; a trailing newline does not make an extra empty line. */
+function diffLines(text: string | undefined): string[] {
+  if (!text) return []
+  const lines = text.split("\n")
+  if (lines[lines.length - 1] === "") lines.pop()
+  return lines
+}
+
+type DiffOp = { kind: " " | "-" | "+"; line: string }
+
+/** Line diff by longest common subsequence — minimal, so the counts agree across ports. */
+function lineDiff(a0: string[], b0: string[]): DiffOp[] {
+  // Common prefix/suffix first: an edit touches a few lines, so the LCS table stays small.
+  let pre = 0
+  while (pre < a0.length && pre < b0.length && a0[pre] === b0[pre]) pre++
+  let suf = 0
+  while (suf < a0.length - pre && suf < b0.length - pre && a0[a0.length - 1 - suf] === b0[b0.length - 1 - suf]) suf++
+  const head: DiffOp[] = a0.slice(0, pre).map((line) => ({ kind: " ", line }))
+  const tail: DiffOp[] = a0.slice(a0.length - suf).map((line) => ({ kind: " ", line }))
+  const a = a0.slice(pre, a0.length - suf), b = b0.slice(pre, b0.length - suf)
+  const n = a.length, m = b.length
+  const lcs: number[][] = Array.from({ length: n + 1 }, () => new Array<number>(m + 1).fill(0))
+  for (let i = n - 1; i >= 0; i--) {
+    for (let j = m - 1; j >= 0; j--) {
+      lcs[i][j] = a[i] === b[j] ? lcs[i + 1][j + 1] + 1 : Math.max(lcs[i + 1][j], lcs[i][j + 1])
+    }
+  }
+  const ops: DiffOp[] = []
+  let i = 0, j = 0
+  while (i < n && j < m) {
+    if (a[i] === b[j]) { ops.push({ kind: " ", line: a[i] }); i++; j++ }
+    else if (lcs[i + 1][j] >= lcs[i][j + 1]) ops.push({ kind: "-", line: a[i++] })
+    else ops.push({ kind: "+", line: b[j++] })
+  }
+  while (i < n) ops.push({ kind: "-", line: a[i++] })
+  while (j < m) ops.push({ kind: "+", line: b[j++] })
+  return [...head, ...ops, ...tail]
+}
+
+/** Unified hunks with 3 lines of context. */
+function unifiedHunks(ops: DiffOp[]): string[] {
+  const CTX = 3
+  const out: string[] = []
+  const changed = ops.map((o, k) => (o.kind === " " ? -1 : k)).filter((k) => k >= 0)
+  if (!changed.length) return out
+  // group change indices whose gap of context is <= 2*CTX
+  const groups: Array<[number, number]> = []
+  for (const k of changed) {
+    const g = groups[groups.length - 1]
+    if (g && k - g[1] <= 2 * CTX) g[1] = k
+    else groups.push([k, k])
+  }
+  // old/new line number before each op
+  const oldAt: number[] = [], newAt: number[] = []
+  let o = 1, nn = 1
+  for (const op of ops) {
+    oldAt.push(o); newAt.push(nn)
+    if (op.kind !== "+") o++
+    if (op.kind !== "-") nn++
+  }
+  for (const [s0, e0] of groups) {
+    const s = Math.max(0, s0 - CTX), e = Math.min(ops.length - 1, e0 + CTX)
+    const slice = ops.slice(s, e + 1)
+    const oldLen = slice.filter((x) => x.kind !== "+").length
+    const newLen = slice.filter((x) => x.kind !== "-").length
+    const oldStart = oldLen ? oldAt[s] : oldAt[s] - 1
+    const newStart = newLen ? newAt[s] : newAt[s] - 1
+    out.push(`@@ -${oldStart},${oldLen} +${newStart},${newLen} @@`)
+    for (const x of slice) out.push(x.kind + x.line)
+  }
+  return out
+}
+
+function editMetadata(env: BuiltinEnv, changes: FileChange[]): { files: unknown[]; diff: string } {
+  const files: unknown[] = []
+  const diff: string[] = []
+  for (const c of changes) {
+    const rel = toPosixPath(env.baseDir ? path.relative(path.resolve(env.baseDir), path.resolve(c.path)) : c.path, path.sep)
+    const ops = lineDiff(diffLines(c.before), diffLines(c.after))
+    const additions = ops.filter((x) => x.kind === "+").length
+    const deletions = ops.filter((x) => x.kind === "-").length
+    const status = c.before === undefined ? "added" : c.after === undefined ? "deleted" : "modified"
+    files.push({ path: rel, status, additions, deletions })
+    diff.push(`--- ${c.before === undefined ? "/dev/null" : `a/${rel}`}`, `+++ ${c.after === undefined ? "/dev/null" : `b/${rel}`}`, ...unifiedHunks(ops))
+  }
+  return { files, diff: diff.length ? diff.join("\n") + "\n" : "" }
 }
 
 /**
@@ -985,7 +1185,7 @@ function applyPatchTool(env: BuiltinEnv): Tool {
  */
 export function createBuiltinTools(cfg?: BuiltinsConfig): Tool[] {
   const env = new BuiltinEnv(cfg)
-  return [
+  const tools = [
     bashTool(env),
     readTool(env),
     writeTool(env),
@@ -997,6 +1197,121 @@ export function createBuiltinTools(cfg?: BuiltinsConfig): Tool[] {
     applyPatchTool(env),
     todowriteTool(),
   ]
+  if (env.background) tools.push(bashOutputTool(env.background), killShellTool(env.background))
+  if (env.webSearch) tools.push(webSearchTool(env.webSearch))
+  if (env.notebookEdit) tools.push(notebookEditTool(env))
+  for (const t of tools) t.hints = { ...BUILTIN_HINTS[t.name] }
+  return tools
+}
+
+const hint = (readOnly: boolean, destructive: boolean, openWorld: boolean): ToolHints => ({ readOnly, destructive, openWorld })
+
+/**
+ * Hints on every builtin, for host permission gates (SPEC §4C). bash can do anything, so it is
+ * mutating, destructive and open-world. todowrite and question only touch the agent's own state
+ * or ask the human, so they count as read-only for the host's files and systems.
+ */
+const BUILTIN_HINTS: Record<string, ToolHints> = {
+  bash: hint(false, true, true),
+  read: hint(true, false, false),
+  write: hint(false, true, false),
+  edit: hint(false, true, false),
+  grep: hint(true, false, false),
+  glob: hint(true, false, false),
+  webfetch: hint(true, false, true),
+  question: hint(true, false, false),
+  apply_patch: hint(false, true, false),
+  todowrite: hint(true, false, false),
+  bash_output: hint(true, false, false),
+  kill_shell: hint(false, true, false),
+  websearch: hint(true, false, true),
+  notebook_edit: hint(false, true, false),
+}
+
+const idSchema: JSONSchema = {
+  type: "object",
+  properties: { id: { type: "string", description: "The background shell id bash returned" } },
+  required: ["id"],
+  additionalProperties: false,
+}
+
+function bashOutputTool(bg: BackgroundShells): Tool {
+  return builtin(
+    "bash_output",
+    "Read the output a background bash command (started with run_in_background) produced since the last read, and whether it is still running.",
+    idSchema,
+    async (args) => bashOutput(bg, typeof args.id === "string" ? args.id : ""),
+  )
+}
+
+function killShellTool(bg: BackgroundShells): Tool {
+  return builtin(
+    "kill_shell",
+    "Stop a background bash command and everything it started.",
+    idSchema,
+    async (args) => killShell(bg, typeof args.id === "string" ? args.id : ""),
+  )
+}
+
+function webSearchTool(search: WebSearchFunc): Tool {
+  return builtin(
+    "websearch",
+    "Search the web. Returns numbered results with title, URL and snippet.",
+    {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "The search query" },
+        limit: { type: "number", description: "Maximum number of results (default 5)" },
+      },
+      required: ["query"],
+      additionalProperties: false,
+    },
+    async (args, ctx) => runWebSearch(search, args, ctx?.signal),
+  )
+}
+
+function notebookEditTool(env: BuiltinEnv): Tool {
+  return builtin(
+    "notebook_edit",
+    "Edit a Jupyter notebook (.ipynb) cell: replace its source, insert a new cell after it, or delete it. Replacing a code cell clears its outputs.",
+    {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "Path to the .ipynb file" },
+        cell_id: { type: "string", description: "The cell's id (or use cell_index)" },
+        cell_index: { type: "number", description: "0-based cell position (used when cell_id is absent)" },
+        new_source: { type: "string", description: "The new cell source (replace/insert)" },
+        cell_type: { type: "string", enum: ["code", "markdown"], description: "Cell type for insert (default code) or to change on replace" },
+        edit_mode: { type: "string", enum: ["replace", "insert", "delete"], description: "Default replace. insert adds the new cell AFTER the given cell, or first when none is given" },
+      },
+      required: ["path"],
+      additionalProperties: false,
+    },
+    async (args) => {
+      const p = typeof args.path === "string" ? args.path : ""
+      if (!p) return err("notebook_edit: path is required")
+      let full: string
+      let raw: string
+      try {
+        full = env.resolvePath(p)
+        raw = await fs.readFile(full, "utf8")
+      } catch (e) {
+        return err(`notebook_edit: ${e instanceof Error ? e.message : String(e)}`)
+      }
+      let nb: Record<string, any>
+      try {
+        nb = JSON.parse(raw)
+        if (!nb || typeof nb !== "object" || Array.isArray(nb)) throw new Error("not a JSON object")
+      } catch (e) {
+        return err(`notebook_edit: ${p} is not a notebook: ${e instanceof Error ? e.message : String(e)}`)
+      }
+      const r = editNotebook(nb, args, p)
+      if (!("summary" in r)) return r
+      const out = goJsonIndent(nb) + "\n"
+      await fs.writeFile(full, out, "utf8")
+      return ok(r.summary, { cells: nb.cells.length, ...editMetadata(env, [{ path: full, before: raw, after: out }]) })
+    },
+  )
 }
 
 /**
