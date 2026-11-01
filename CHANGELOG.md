@@ -124,6 +124,28 @@ release.
   abort signal to every tool it runs, so a cancelled turn reaches the tool (Go already did).
   Python, java, csharp, elixir and clojure are still pending.
 
+**Elixir has the same host additions now, starting with the API-key fix.** With no `api_key`,
+the Elixir client no longer falls back across `OPENROUTER_API_KEY` / `OPENAI_API_KEY` /
+`ANTHROPIC_API_KEY`: it reads only the env var of the `base_url` host (https only), or the one
+named by the new `api_key_env`. **A host on a custom or local `base_url` that relied on the
+fallback must now set `api_key` or `api_key_env`.** Also in Elixir: `Mcp.load(cfg, on_server:)`,
+`wait_for_ctx: fn ctx, request -> … end` (`ctx.signal` is the pid running the turn, so a
+resolver waiting elsewhere can monitor it), compactor `on_compact` plus the three compactor
+fixes, `Tool.hints` (`%Toolnexus.ToolHints{}`) on builtins, MCP annotations and the
+`before_tool` event, opt-in `background` / `web_search` / `notebook_edit` builtins
+(`Toolnexus.Builtin.BackgroundShells`), `Mcp.resource_tools/1`, grep context and the
+truncation metadata, `Agents.as_tool_with/2` and runtime `:wait_for`, `Client.list_models/1`,
+usage `cache_read_tokens` / `cache_write_tokens` (present only when the provider reports a
+non-zero count, so uncached usage maps are unchanged), `prompt_cache` and `tool_tiers`
+(`Client.tool_tier_plan/2`, `Client.reset_tool_tiers/2`). `ToolContext.call_id` was already
+set by the Elixir loop. What differs, by design: Elixir's `Toolkit` is an immutable value, so
+"register while a turn runs" does not apply — a running turn keeps the toolkit it started with,
+and the tool-tier plan is keyed by the toolkit's id, which survives `register`. The
+disabled-status race does not exist there (nothing is shared). A turn is cancelled by stopping
+its process, and an agent run as a tool now stops with it: a child run used to outlive its
+handle when the runtime was killed, and now it does not. `web_search` gets `(query, limit)`
+without a context. Not done: Gemini explicit cached content (as in Go).
+
 **A cancelled turn no longer forgets what it did, cancel can kill a stubborn command in about 100 ms,
 and file edits come back with a diff.** Found by go-agent-cli's real server integration; all seven
 ports (`openspec/changes/add-host-turn-durability`).

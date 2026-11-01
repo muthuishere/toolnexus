@@ -299,6 +299,7 @@ defmodule Toolnexus.Client do
             style: "openai",
             model: nil,
             api_key: nil,
+            api_key_env: nil,
             headers: %{},
             system_prompt: nil,
             max_turns: 10,
@@ -310,6 +311,10 @@ defmodule Toolnexus.Client do
             store: nil,
             on_metric: nil,
             wait_for: nil,
+            wait_for_ctx: nil,
+            prompt_cache: nil,
+            tool_tiers: nil,
+            tiers: nil,
             request_params: nil,
             body_transform: nil,
             http_options: [],
@@ -325,8 +330,13 @@ defmodule Toolnexus.Client do
   @doc """
   Create a client. Options (SPEC §8 `ClientOptions`):
 
-  - `:base_url`, `:style` (`"openai"` | `"anthropic"`), `:model`, `:api_key` (env fallback:
-    `OPENROUTER_API_KEY` / `OPENAI_API_KEY` / `ANTHROPIC_API_KEY`), `:headers`
+  - `:base_url`, `:style` (`"openai"` | `"anthropic"`), `:model`, `:headers`
+  - `:api_key` — used as-is when set. Else `:api_key_env` (the NAME of an env var, never
+    the value). Else ONLY the env var that belongs to the `:base_url` host, over https:
+    `api.openai.com` → `OPENAI_API_KEY`, `api.anthropic.com` → `ANTHROPIC_API_KEY`,
+    `openrouter.ai` (and subdomains) → `OPENROUTER_API_KEY`. Any other host, or plain
+    http, needs `:api_key` or `:api_key_env` — a key is never sent to a host it does not
+    belong to (SPEC §4C). Never logged.
   - `:system_prompt` — prepended to the toolkit's skills prompt (joined with `"\\n\\n"`)
   - `:max_turns` (default 10)
   - `:on_error` — `(%{error?, status?, attempt, retryable} -> :retry | :fail)` classifies each
@@ -345,6 +355,14 @@ defmodule Toolnexus.Client do
   - `:store` — a `Toolnexus.Client.ConversationStore` struct (default: in-memory)
   - `:on_metric` — `(event_map -> any)` semantic observability sink
   - `:wait_for` — §10 suspension resolver, `(Request -> Answer)`
+  - `:wait_for_ctx` — `(Context, Request -> Answer)`: `:wait_for` plus the turn's context
+    (SPEC §4C). `ctx.signal` is the pid of the process running the turn — a resolver that
+    waits in another process monitors it, so a pending ask ends with the turn; `ctx.call_id`
+    is the suspended call's id. Wins over `:wait_for` when both are set
+  - `:prompt_cache` — `%{key: String.t(), long_ttl: boolean()}`; marks the stable prefix
+    for the provider's cache (`Toolnexus.PromptCache`). Absent ⇒ body byte-identical
+  - `:tool_tiers` — send only core tool schemas plus `tool_search`/`call_tool`
+    (`Toolnexus.ToolTiers`). Absent ⇒ every tool is sent, as before
   - `:request_params` — map shallow-merged into every LLM body AFTER base keys (caller wins;
     `messages`/`tools`/`stream` forbidden) — §8 Gap 1
   - `:body_transform` — `(body -> body)` run LAST after the merge — §8 Gap 1
@@ -385,8 +403,140 @@ defmodule Toolnexus.Client do
         retry_base_ms: client.retry_base_ms || 500,
         http_options: client.http_options || [],
         store: client.store || InMemoryConversationStore.new(),
-        registry: client.registry || MetricsRegistry.new()
+        registry: client.registry || MetricsRegistry.new(),
+        tiers: if(client.tool_tiers, do: elem(Agent.start(fn -> %{} end), 1))
     }
+  end
+
+  @doc """
+  The frozen `:tool_tiers` plan for `toolkit` (built on first use), as name → tier
+  (`:core | :listed | :deferred`), for a host UI or log. `nil` without `:tool_tiers`.
+  """
+  @spec tool_tier_plan(t(), term()) :: %{String.t() => :core | :listed | :deferred} | nil
+  def tool_tier_plan(%__MODULE__{} = client, toolkit) do
+    case tier_plan(client, toolkit) do
+      nil -> nil
+      plan -> plan.tier
+    end
+  end
+
+  @doc """
+  Forget `toolkit`'s tool-tier plan so the next request rebuilds it — call it at a new
+  session start (e.g. after updating usage stats). Mid-session it breaks the cached prefix.
+  """
+  @spec reset_tool_tiers(t(), term()) :: :ok
+  def reset_tool_tiers(%__MODULE__{tiers: nil}, _toolkit), do: :ok
+
+  def reset_tool_tiers(%__MODULE__{tiers: pid}, toolkit),
+    do: Agent.update(pid, &Map.delete(&1, tier_key(toolkit)))
+
+  # A toolkit's identity survives `register` (its `id`), so a tool added later does
+  # not rebuild the plan; a bare tool list has none and shares one plan.
+  defp tier_key(%{id: id}) when id != nil, do: id
+  defp tier_key(_), do: :default
+
+  defp tier_plan(%__MODULE__{tool_tiers: nil}, _toolkit), do: nil
+
+  defp tier_plan(%__MODULE__{tiers: pid, tool_tiers: opts}, toolkit) do
+    key = tier_key(toolkit)
+
+    Agent.get_and_update(pid, fn plans ->
+      case plans do
+        %{^key => plan} ->
+          {plan, plans}
+
+        _ ->
+          plan = Toolnexus.ToolTiers.build_plan(opts, tools_of(toolkit))
+          {plan, Map.put(plans, key, plan)}
+      end
+    end)
+  end
+
+  # The tools a request offers: every tool, or (tiers) the core tools + the meta tools.
+  defp request_tools(client, toolkit) do
+    case tier_plan(client, toolkit) do
+      nil -> tools_of(toolkit)
+      plan -> Toolnexus.ToolTiers.request_tools(plan, tools_of(toolkit))
+    end
+  end
+
+  defp unwrap_call(%{tool_tiers: nil}, name, args), do: {name, args, false}
+  defp unwrap_call(_client, name, args), do: Toolnexus.ToolTiers.unwrap(name, args)
+
+  # Stream tool events name the REAL tool for a call_tool call (`via: "call_tool"`).
+  defp tool_event(client, ev, name, args) do
+    case unwrap_call(client, name, args) do
+      {real, inner, true} -> Map.merge(ev, %{name: real, args: inner, via: "call_tool"})
+      _ -> Map.merge(ev, %{name: name, args: args})
+    end
+  end
+
+  @doc """
+  List the models a provider offers (SPEC §4C), for model switching. One GET, no retries.
+
+  Takes the same options as `create/1` and the same key rules (`:api_key`, `:api_key_env`,
+  or the host's own env var). openai style: `GET {base}/models` (OpenRouter's
+  `context_length` read when present); anthropic style: `GET {base}/v1/models`, following
+  `has_more`/`last_id`. Returns `{:ok, [%{id, name, context_length}]}` sorted by id
+  (`name`/`context_length` are `nil` when the provider does not report them), or
+  `{:error, message}`.
+  """
+  @spec list_models(keyword() | map()) :: {:ok, [map()]} | {:error, String.t()}
+  def list_models(opts) do
+    client = create(opts)
+
+    try do
+      key = resolve_key(client)
+      base = String.trim_trailing(client.base_url, "/")
+
+      models =
+        if client.style == "anthropic" do
+          endpoint = if String.ends_with?(base, "/v1"), do: base <> "/models", else: base <> "/v1/models"
+          list_anthropic_models(client, endpoint, key, nil, 0, [])
+        else
+          body = get_json!(client, base <> "/models", %{"authorization" => "Bearer " <> key})
+
+          Enum.map(body["data"] || [], fn m ->
+            %{id: m["id"], name: m["name"], context_length: m["context_length"]}
+          end)
+        end
+
+      {:ok, Enum.sort_by(models, & &1.id)}
+    rescue
+      e -> {:error, Exception.message(e)}
+    end
+  end
+
+  defp list_anthropic_models(client, endpoint, key, after_id, page, acc) do
+    url = endpoint <> "?limit=1000" <> if(after_id, do: "&after_id=" <> URI.encode_www_form(after_id), else: "")
+    body = get_json!(client, url, %{"x-api-key" => key, "anthropic-version" => "2023-06-01"})
+    acc = acc ++ Enum.map(body["data"] || [], &%{id: &1["id"], name: &1["display_name"], context_length: nil})
+
+    case body do
+      %{"has_more" => true, "last_id" => last} when is_binary(last) and last != "" and page < 99 ->
+        list_anthropic_models(client, endpoint, key, last, page + 1, acc)
+
+      _ ->
+        acc
+    end
+  end
+
+  defp get_json!(client, url, headers) do
+    resp =
+      case client.transport do
+        f when is_function(f, 1) ->
+          {:ok, r} = f.(%{method: :get, url: url, headers: headers, body: nil, receive_timeout: nil})
+          r
+
+        _ ->
+          Req.get!(url, [headers: headers, retry: false] ++ client.http_options)
+      end
+
+    body = if is_binary(resp.body), do: Jason.decode!(resp.body), else: resp.body
+
+    if div(resp.status, 100) != 2,
+      do: raise("list models: HTTP #{resp.status}: #{String.slice(inspect(body), 0, 300)}"),
+      else: body
   end
 
   @doc """
@@ -891,6 +1041,11 @@ defmodule Toolnexus.Client do
 
   defp finalize_body(client, body) do
     body =
+      if client.prompt_cache,
+        do: Toolnexus.PromptCache.apply(body, client.style, client.prompt_cache),
+        else: body
+
+    body =
       if client.request_params do
         Enum.reduce(client.request_params, body, fn {k, v}, acc ->
           k = to_string(k)
@@ -975,18 +1130,46 @@ defmodule Toolnexus.Client do
 
   defp resolve_key(%{api_key: k}) when is_binary(k) and k != "", do: k
 
+  # SECURITY (SPEC §4C): the environment is read ONLY for the env var named by
+  # `api_key_env`, else the one that belongs to the base_url host — never another
+  # provider's key, never over plain http. The value is never logged.
   defp resolve_key(client) do
-    key =
-      System.get_env("OPENROUTER_API_KEY") ||
-        if(client.style == "anthropic",
-          do: System.get_env("ANTHROPIC_API_KEY"),
-          else: System.get_env("OPENAI_API_KEY")
-        ) ||
-        System.get_env("OPENAI_API_KEY") || System.get_env("ANTHROPIC_API_KEY")
+    env_name =
+      case client.api_key_env do
+        n when is_binary(n) and n != "" -> n
+        _ -> key_env_for_base_url(client.base_url)
+      end
 
-    key ||
-      raise ArgumentError,
-            "No API key: set api_key or OPENROUTER_API_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY"
+    case env_name && System.get_env(env_name) do
+      k when is_binary(k) and k != "" ->
+        k
+
+      _ when env_name == nil ->
+        raise ArgumentError,
+              "No API key: set api_key or api_key_env (provider env vars are only used for " <>
+                "https://api.openai.com, https://api.anthropic.com and https://openrouter.ai, " <>
+                "never for #{inspect(client.base_url)})"
+
+      _ ->
+        raise ArgumentError, "No API key: set api_key or #{env_name}"
+    end
+  end
+
+  @doc false
+  # The env var whose key may be sent to base_url's host, or nil when none may.
+  def key_env_for_base_url(base_url) do
+    case URI.parse(to_string(base_url || "")) do
+      %URI{scheme: "https", host: host} when is_binary(host) ->
+        case String.downcase(host) do
+          "api.openai.com" -> "OPENAI_API_KEY"
+          "api.anthropic.com" -> "ANTHROPIC_API_KEY"
+          "openrouter.ai" -> "OPENROUTER_API_KEY"
+          h -> if String.ends_with?(h, ".openrouter.ai"), do: "OPENROUTER_API_KEY"
+        end
+
+      _ ->
+        nil
+    end
   end
 
   # ---- observability ----
@@ -1078,27 +1261,42 @@ defmodule Toolnexus.Client do
 
   defp add_usage(acc, nil, _style), do: acc
 
+  # Cache counts (SPEC §4C prompt caching): `cache_read_tokens` / `cache_write_tokens`
+  # appear on the usage map only once the provider reports a non-zero count, so a run
+  # without caching keeps the exact pre-cache usage shape. Under anthropic the context
+  # actually sent is prompt + cache_read + cache_write; under openai prompt_tokens
+  # already includes the cached part.
   defp add_usage(acc, raw, "anthropic") do
     input = raw["input_tokens"] || 0
     output = raw["output_tokens"] || 0
 
     %{
-      prompt_tokens: acc.prompt_tokens + input,
-      completion_tokens: acc.completion_tokens + output,
-      total_tokens: acc.total_tokens + input + output
+      acc
+      | prompt_tokens: acc.prompt_tokens + input,
+        completion_tokens: acc.completion_tokens + output,
+        total_tokens: acc.total_tokens + input + output
     }
+    |> add_cache(:cache_read_tokens, raw["cache_read_input_tokens"])
+    |> add_cache(:cache_write_tokens, raw["cache_creation_input_tokens"])
   end
 
   defp add_usage(acc, raw, _openai) do
     p = raw["prompt_tokens"] || 0
     c = raw["completion_tokens"] || 0
 
+    details = if is_map(raw["prompt_tokens_details"]), do: raw["prompt_tokens_details"], else: %{}
+
     %{
-      prompt_tokens: acc.prompt_tokens + p,
-      completion_tokens: acc.completion_tokens + c,
-      total_tokens: acc.total_tokens + (raw["total_tokens"] || p + c)
+      acc
+      | prompt_tokens: acc.prompt_tokens + p,
+        completion_tokens: acc.completion_tokens + c,
+        total_tokens: acc.total_tokens + (raw["total_tokens"] || p + c)
     }
+    |> add_cache(:cache_read_tokens, details["cached_tokens"])
   end
+
+  defp add_cache(acc, key, n) when is_integer(n) and n > 0, do: Map.update(acc, key, n, &(&1 + n))
+  defp add_cache(acc, _key, _n), do: acc
 
   defp per_call(nil, _style), do: {0, 0}
   defp per_call(raw, "anthropic"), do: {raw["input_tokens"] || 0, raw["output_tokens"] || 0}
@@ -1383,11 +1581,33 @@ defmodule Toolnexus.Client do
   end
 
   # Run one tool through before_tool/after_tool hooks (rewrite args, short-circuit, transform).
+  # Under :tool_tiers, tool_search is engine-internal (no hooks), and call_tool is unwrapped
+  # HERE so hooks, hints and gates see the real tool; the returned args keep the wrapper
+  # shape (with any before_tool rewrite inside), so a §10 re-run unwraps the same way.
+  defp run_tool(%{tool_tiers: tiers} = client, toolkit, "tool_search", args, _id, _turn)
+       when tiers != nil do
+    t0 = now_ms()
+    result = Toolnexus.ToolTiers.search(tools_of(toolkit), args)
+    emit_tool(client, "tool_search", "builtin", result, t0)
+    {args, result}
+  end
+
   defp run_tool(client, toolkit, name, args, id, turn) do
-    source =
+    case unwrap_call(client, name, args) do
+      {real, inner, true} ->
+        {a, result} = run_tool_direct(client, toolkit, real, inner, id, turn)
+        {%{"name" => real, "arguments" => a}, result}
+
+      _ ->
+        run_tool_direct(client, toolkit, name, args, id, turn)
+    end
+  end
+
+  defp run_tool_direct(client, toolkit, name, args, id, turn) do
+    {source, hints} =
       case find_tool(toolkit, name) do
-        %Tool{source: s} -> s
-        nil -> "custom"
+        %Tool{source: s, hints: h} -> {s, h}
+        nil -> {"custom", nil}
       end
 
     t0 = now_ms()
@@ -1395,7 +1615,7 @@ defmodule Toolnexus.Client do
     {args, short} =
       case hook(client, :before_tool) do
         f when is_function(f, 1) ->
-          case f.(%{name: name, args: args, id: id, turn: turn}) do
+          case f.(%{name: name, args: args, id: id, turn: turn, hints: hints}) do
             %{result: %ToolResult{} = r} -> {args, r}
             %{args: %{} = a} -> {a, nil}
             _ -> {args, nil}
@@ -1437,13 +1657,18 @@ defmodule Toolnexus.Client do
   end
 
   # §10: resolve a suspended tool result. Returns {result, halted_request | nil}.
-  defp resolve_pending(client, toolkit, name, args, %Request{} = request, id, turn) do
-    case client.wait_for do
-      nil ->
+  defp resolve_pending(client, toolkit, name, args, %Request{} = request, id, turn, owner \\ nil) do
+    {name, args, _} = unwrap_call(client, name, args)
+
+    case {client.wait_for_ctx, client.wait_for} do
+      {nil, nil} ->
         {%ToolResult{output: request.prompt, is_error: true}, request}
 
-      wait_for ->
-        answer = wait_for.(request)
+      {wait_for_ctx, wait_for} ->
+        answer =
+          if wait_for_ctx,
+            do: wait_for_ctx.(%Context{call_id: id, signal: owner || self()}, request),
+            else: wait_for.(request)
 
         if Answer.ok?(answer) do
           t0 = now_ms()
@@ -1490,6 +1715,7 @@ defmodule Toolnexus.Client do
   # Execute all tool calls of a turn concurrently; results come back in original call order.
   defp exec_calls(client, toolkit, calls, turn) do
     guard = TurnGuard.current()
+    owner = self()
 
     calls
     |> Task.async_stream(
@@ -1500,7 +1726,7 @@ defmodule Toolnexus.Client do
         {result, halted} =
           case pending_of(result) do
             nil -> {result, nil}
-            req -> resolve_pending(client, toolkit, name, args, req, call_id, turn)
+            req -> resolve_pending(client, toolkit, name, args, req, call_id, turn, owner)
           end
 
         %{id: call_id, name: name, args: args, result: result, halted: halted}
@@ -1718,7 +1944,7 @@ defmodule Toolnexus.Client do
       end
 
     messages = messages ++ [user_message(prompt)]
-    tools = Enum.map(tools_of(toolkit), &to_openai_schema/1)
+    tools = Enum.map(request_tools(client, toolkit), &to_openai_schema/1)
 
     st = %{
       messages: messages,
@@ -1836,7 +2062,7 @@ defmodule Toolnexus.Client do
         do: history ++ [user_message(prompt)],
         else: [user_message(prompt)]
 
-    tools = Enum.map(tools_of(toolkit), &to_anthropic_schema/1)
+    tools = Enum.map(request_tools(client, toolkit), &to_anthropic_schema/1)
 
     st = %{
       messages: messages,
@@ -1980,7 +2206,7 @@ defmodule Toolnexus.Client do
       end
 
     messages = messages ++ [user_message(prompt)]
-    tools = Enum.map(tools_of(toolkit), &to_openai_schema/1)
+    tools = Enum.map(request_tools(client, toolkit), &to_openai_schema/1)
 
     st = %{
       messages: messages,
@@ -2095,7 +2321,7 @@ defmodule Toolnexus.Client do
       guard = TurnGuard.current()
 
       Enum.each(calls, fn c ->
-        emit.(%{type: "tool_call", id: c.id, name: c.name, args: safe_json(c.args)})
+        emit.(tool_event(client, %{type: "tool_call", id: c.id}, c.name, safe_json(c.args)))
       end)
 
       settled =
@@ -2146,14 +2372,21 @@ defmodule Toolnexus.Client do
           if halted do
             {:halt, {:halted, st, halted}}
           else
-            emit.(%{
-              type: "tool_result",
-              id: c.id,
-              name: c.name,
-              output: result.output,
-              is_error: result.is_error,
-              metadata: result.metadata
-            })
+            emit.(
+              tool_event(
+                client,
+                %{
+                  type: "tool_result",
+                  id: c.id,
+                  output: result.output,
+                  is_error: result.is_error,
+                  metadata: result.metadata
+                },
+                c.name,
+                safe_json(c.args)
+              )
+              |> Map.delete(:args)
+            )
 
             {:cont, {:ok, st}}
           end
@@ -2245,7 +2478,7 @@ defmodule Toolnexus.Client do
         do: history ++ [user_message(prompt)],
         else: [user_message(prompt)]
 
-    tools = Enum.map(tools_of(toolkit), &to_anthropic_schema/1)
+    tools = Enum.map(request_tools(client, toolkit), &to_anthropic_schema/1)
 
     st = %{
       messages: messages,
@@ -2353,7 +2586,7 @@ defmodule Toolnexus.Client do
       })
     else
       Enum.each(uses, fn u ->
-        emit.(%{type: "tool_call", id: u["id"], name: u["name"], args: u["input"]})
+        emit.(tool_event(client, %{type: "tool_call", id: u["id"]}, u["name"], u["input"]))
       end)
 
       guard = TurnGuard.current()
@@ -2409,14 +2642,21 @@ defmodule Toolnexus.Client do
               %{st | messages: st.messages ++ [%{"role" => "user", "content" => results}]},
               halted}}
           else
-            emit.(%{
-              type: "tool_result",
-              id: u["id"],
-              name: u["name"],
-              output: result.output,
-              is_error: result.is_error,
-              metadata: result.metadata
-            })
+            emit.(
+              tool_event(
+                client,
+                %{
+                  type: "tool_result",
+                  id: u["id"],
+                  output: result.output,
+                  is_error: result.is_error,
+                  metadata: result.metadata
+                },
+                u["name"],
+                u["input"]
+              )
+              |> Map.delete(:args)
+            )
 
             {:cont, {:ok, st, results}}
           end
