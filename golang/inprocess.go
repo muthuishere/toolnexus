@@ -2,6 +2,7 @@ package toolnexus
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -68,6 +69,7 @@ type InProcessOptions struct {
 	Store         ConversationStore
 	OnMetric      func(MetricEvent)
 	WaitFor       func(Request) (Answer, error)
+	WaitForCtx    func(context.Context, Request) (Answer, error)
 	RequestParams map[string]any
 	BodyTransform func(map[string]any) map[string]any
 	Headers       map[string]string
@@ -217,6 +219,7 @@ func CreateInProcessClient(opts InProcessOptions) *Client {
 		Store:         opts.Store,
 		OnMetric:      opts.OnMetric,
 		WaitFor:       opts.WaitFor,
+		WaitForCtx:    opts.WaitForCtx,
 		RequestParams: opts.RequestParams,
 		BodyTransform: opts.BodyTransform,
 		Headers:       opts.Headers,

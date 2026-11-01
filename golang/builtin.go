@@ -57,6 +57,24 @@ type BuiltinsConfig struct {
 	// resolution in the file builtins, NOT a sandbox: a command run by `bash`
 	// still reaches the whole filesystem (ADR 0034 D3).
 	ConfineToBaseDir bool `json:"confineToBaseDir"`
+
+	// KillGraceMs is the POSIX wait between SIGTERM and SIGKILL of a timed-out
+	// or cancelled job's process group. 0 ⇒ 2000. A host with a tight cancel
+	// bar sets it lower (e.g. 100). No effect on Windows, which has no graceful
+	// signal. SPEC §4.
+	KillGraceMs int `json:"killGraceMs"`
+
+	// Background, when set, lets `bash` take run_in_background:true and adds
+	// the bash_output and kill_shell tools. The host owns it: call CloseAll on
+	// shutdown. nil ⇒ none of this exists (golang only for now).
+	Background *BackgroundShells `json:"-"`
+
+	// WebSearch, when set, adds a `websearch` tool backed by this provider.
+	// nil ⇒ no websearch tool (golang only for now).
+	WebSearch WebSearchFunc `json:"-"`
+
+	// NotebookEdit adds the `notebook_edit` tool for .ipynb cells (golang only for now).
+	NotebookEdit bool `json:"notebookEdit"`
 }
 
 // BuiltinsEnabled reports whether the builtin source is on. Default ON. Same
@@ -170,10 +188,10 @@ func SelectBuiltinsChecked(cfg any) ([]Tool, error) {
 // the host boundary: interpreter, base directory, confinement (ADR 0034)
 // ---------------------------------------------------------------------------
 
-// builtinKillGraceMs is how long a job gets between "please stop" and "stop".
-// Fixed, and identical in every port, so a timeout means the same thing
-// everywhere: a test runner that gets SIGTERM removes its temp directories, one
-// that gets SIGKILL does not.
+// builtinKillGraceMs is the default wait between "please stop" and "stop"
+// (BuiltinsConfig.KillGraceMs overrides it). Identical in every port, so a
+// timeout means the same thing everywhere: a test runner that gets SIGTERM
+// removes its temp directories, one that gets SIGKILL does not.
 const builtinKillGraceMs = 2000
 
 // builtinEnv is what the builtins may know about the host: which interpreter to
@@ -184,6 +202,20 @@ type builtinEnv struct {
 	shellErr error
 	baseDir  string
 	confine  bool
+	// killGraceMs is the SIGTERM→SIGKILL wait; 0 ⇒ builtinKillGraceMs.
+	killGraceMs int
+	// opt-in tools (builtin_extras.go)
+	bg        *BackgroundShells
+	webSearch WebSearchFunc
+	notebook  bool
+}
+
+// killGrace is the SIGTERM→SIGKILL wait for this env.
+func (e *builtinEnv) killGrace() time.Duration {
+	if e == nil || e.killGraceMs <= 0 {
+		return builtinKillGraceMs * time.Millisecond
+	}
+	return time.Duration(e.killGraceMs) * time.Millisecond
 }
 
 // detectShell returns the first candidate interpreter that resolves on PATH.
@@ -209,10 +241,12 @@ func newBuiltinEnv(cfg any) *builtinEnv {
 	env := &builtinEnv{}
 	switch v := cfg.(type) {
 	case BuiltinsConfig:
-		env.shell, env.baseDir, env.confine = v.Shell, v.BaseDir, v.ConfineToBaseDir
+		env.shell, env.baseDir, env.confine, env.killGraceMs = v.Shell, v.BaseDir, v.ConfineToBaseDir, v.KillGraceMs
+		env.bg, env.webSearch, env.notebook = v.Background, v.WebSearch, v.NotebookEdit
 	case *BuiltinsConfig:
 		if v != nil {
-			env.shell, env.baseDir, env.confine = v.Shell, v.BaseDir, v.ConfineToBaseDir
+			env.shell, env.baseDir, env.confine, env.killGraceMs = v.Shell, v.BaseDir, v.ConfineToBaseDir, v.KillGraceMs
+			env.bg, env.webSearch, env.notebook = v.Background, v.WebSearch, v.NotebookEdit
 		}
 	case map[string]any:
 		if raw, ok := v["shell"].([]any); ok {
@@ -230,6 +264,15 @@ func newBuiltinEnv(cfg any) *builtinEnv {
 		}
 		if b, ok := v["confineToBaseDir"].(bool); ok {
 			env.confine = b
+		}
+		if b, ok := v["notebookEdit"].(bool); ok {
+			env.notebook = b
+		}
+		switch g := v["killGraceMs"].(type) {
+		case float64:
+			env.killGraceMs = int(g)
+		case int:
+			env.killGraceMs = g
 		}
 	}
 	if len(env.shell) == 0 {
@@ -506,17 +549,21 @@ func fileExists(p string) bool {
 // ---------------------------------------------------------------------------
 
 func bashTool(env *builtinEnv) Tool {
+	props := map[string]any{
+		"command":     map[string]any{"type": "string", "description": "The shell command to run"},
+		"workdir":     map[string]any{"type": "string", "description": "Working directory (default: process cwd)"},
+		"timeout":     map[string]any{"type": "number", "description": "Timeout in milliseconds (default 60000)"},
+		"description": map[string]any{"type": "string", "description": "Human-readable description of the command"},
+	}
+	if env != nil && env.bg != nil {
+		props["run_in_background"] = map[string]any{"type": "boolean", "description": "Start the command and return at once with a background shell id; read it with bash_output, stop it with kill_shell. No timeout applies."}
+	}
 	return builtin(
 		"bash",
 		"Run a shell command and return its combined stdout+stderr. Non-zero exit is an error.",
 		JSONSchema{
-			"type": "object",
-			"properties": map[string]any{
-				"command":     map[string]any{"type": "string", "description": "The shell command to run"},
-				"workdir":     map[string]any{"type": "string", "description": "Working directory (default: process cwd)"},
-				"timeout":     map[string]any{"type": "number", "description": "Timeout in milliseconds (default 60000)"},
-				"description": map[string]any{"type": "string", "description": "Human-readable description of the command"},
-			},
+			"type":                 "object",
+			"properties":           props,
 			"required":             []string{"command"},
 			"additionalProperties": false,
 		},
@@ -536,6 +583,14 @@ func bashTool(env *builtinEnv) Tool {
 				return bErr(fmt.Sprintf("bash: %v", err), nil)
 			} else {
 				workdir = resolved
+			}
+			if env != nil && env.bg != nil && argBool(args, "run_in_background") {
+				j, err := env.bg.start(argv, command, workdir, env.killGrace())
+				if err != nil {
+					return bErr(fmt.Sprintf("bash: %v", err), map[string]any{"shell": env.shellLabel()})
+				}
+				return bOk(fmt.Sprintf("Started background shell %s. Read its output with bash_output, stop it with kill_shell.", j.id),
+					map[string]any{"shell": env.shellLabel(), "backgroundId": j.id})
 			}
 			timeoutMs := 60000.0
 			if t, ok := argNumber(args, "timeout"); ok {
@@ -582,7 +637,7 @@ func bashTool(env *builtinEnv) Tool {
 				// SIGTERM cleans up its temp directories; one that gets SIGKILL
 				// does not.
 				killedTree = signalJob(cmd, true) == nil
-				grace := time.NewTimer(builtinKillGraceMs * time.Millisecond)
+				grace := time.NewTimer(env.killGrace())
 				select {
 				case runErr = <-done:
 				case <-grace.C:
@@ -711,7 +766,20 @@ func readTool(env *builtinEnv) Tool {
 			if end > len(lines) {
 				end = len(lines)
 			}
-			return bOk(strings.Join(lines[start:end], "\n"), nil)
+			out := strings.Join(lines[start:end], "\n")
+			// A window that stops before the end of the file says so in metadata,
+			// with the offset to continue from (golang only for now). The text
+			// stays byte-identical: windowed output is a pinned cross-port
+			// contract, and the caller asked for exactly this window. A trailing
+			// newline does not count as a line.
+			total := len(lines)
+			if total > 0 && lines[total-1] == "" {
+				total--
+			}
+			if end < total {
+				return bOk(out, map[string]any{"truncated": true, "totalLines": total, "nextOffset": end + 1})
+			}
+			return bOk(out, nil)
 		},
 	)
 }
@@ -739,6 +807,7 @@ func writeTool(env *builtinEnv) Tool {
 			if rErr != nil {
 				return bErr(fmt.Sprintf("write: %v", rErr), nil)
 			}
+			before, existed := readIfExists(full)
 			if abs, err := filepath.Abs(full); err == nil {
 				_ = os.MkdirAll(filepath.Dir(abs), 0o755)
 			}
@@ -746,7 +815,13 @@ func writeTool(env *builtinEnv) Tool {
 				return bErr(fmt.Sprintf("write: %v", err), nil)
 			}
 			bytes := len(content)
-			return bOk(fmt.Sprintf("Wrote %d bytes to %s", bytes, p), map[string]any{"bytes": bytes})
+			status := "added"
+			if existed {
+				status = "modified"
+			}
+			meta := map[string]any{"bytes": bytes}
+			addDiffMeta(meta, []fileChange{{path: env.diffPath(p, full), status: status, before: before, after: content}})
+			return bOk(fmt.Sprintf("Wrote %d bytes to %s", bytes, p), meta)
 		},
 	)
 }
@@ -808,7 +883,9 @@ func editTool(env *builtinEnv) Tool {
 			if replacements == 1 {
 				plural = ""
 			}
-			return bOk(fmt.Sprintf("Edited %s (%d replacement%s)", p, replacements, plural), map[string]any{"replacements": replacements})
+			meta := map[string]any{"replacements": replacements}
+			addDiffMeta(meta, []fileChange{{path: env.diffPath(p, full), status: "modified", before: content, after: next}})
+			return bOk(fmt.Sprintf("Edited %s (%d replacement%s)", p, replacements, plural), meta)
 		},
 	)
 }
@@ -824,6 +901,9 @@ func grepTool(env *builtinEnv) Tool {
 				"path":    map[string]any{"type": "string", "description": "Directory to search (default: process cwd)"},
 				"include": map[string]any{"type": "string", "description": "Glob filter for file names"},
 				"limit":   map[string]any{"type": "number", "description": "Maximum number of matches (default 100)"},
+				"context": map[string]any{"type": "number", "description": "Lines of context before and after each match"},
+				"before":  map[string]any{"type": "number", "description": "Lines of context before each match (overrides context)"},
+				"after":   map[string]any{"type": "number", "description": "Lines of context after each match (overrides context)"},
 			},
 			"required":             []string{"pattern"},
 			"additionalProperties": false,
@@ -857,6 +937,17 @@ func grepTool(env *builtinEnv) Tool {
 				line int
 				text string
 			}
+			before, after := 0, 0
+			if c, ok := argNumber(args, "context"); ok && c > 0 {
+				before, after = int(c), int(c)
+			}
+			if b, ok := argNumber(args, "before"); ok && b >= 0 {
+				before = int(b)
+			}
+			if a, ok := argNumber(args, "after"); ok && a >= 0 {
+				after = int(a)
+			}
+			fileLines := map[string][]string{} // only filled when context is asked for
 			var hits []grepHit
 			for _, file := range walkBuiltinFiles(root) {
 				rel, relErr := filepath.Rel(root, file)
@@ -870,7 +961,11 @@ func grepTool(env *builtinEnv) Tool {
 				if rErr != nil {
 					continue
 				}
-				for i, line := range strings.Split(string(raw), "\n") {
+				lines := strings.Split(string(raw), "\n")
+				if before > 0 || after > 0 {
+					fileLines[filepath.ToSlash(rel)] = lines
+				}
+				for i, line := range lines {
 					if re.MatchString(line) {
 						// The emitted path is the SORT KEY — `/`-separated and
 						// relative to the walk root (SPEC §4A: "SORT ON THE SAME
@@ -891,14 +986,60 @@ func grepTool(env *builtinEnv) Tool {
 				}
 				return hits[i].line < hits[j].line
 			})
+			total := len(hits)
 			if len(hits) > limit {
 				hits = hits[:limit]
 			}
-			matches := make([]string, 0, len(hits))
-			for _, h := range hits {
-				matches = append(matches, h.text)
+			var outLines []string
+			if before == 0 && after == 0 {
+				for _, h := range hits {
+					outLines = append(outLines, h.text)
+				}
+			} else {
+				// ripgrep-style: match lines path:N:text, context lines path-N-text,
+				// "--" between groups that do not touch.
+				matchAt := map[string]map[int]bool{}
+				for _, h := range hits {
+					if matchAt[h.rel] == nil {
+						matchAt[h.rel] = map[int]bool{}
+					}
+					matchAt[h.rel][h.line] = true
+				}
+				lastRel, lastLine := "", 0
+				for _, h := range hits {
+					lines := fileLines[h.rel]
+					n := len(lines)
+					if n > 0 && lines[n-1] == "" {
+						n-- // a trailing newline is not a line
+					}
+					from := max(1, h.line-before)
+					to := min(n, h.line+after)
+					if h.rel == lastRel && from <= lastLine+1 {
+						from = lastLine + 1
+					} else if lastRel != "" {
+						outLines = append(outLines, "--")
+					}
+					for n := from; n <= to; n++ {
+						sep := "-"
+						if matchAt[h.rel][n] {
+							sep = ":"
+						}
+						outLines = append(outLines, fmt.Sprintf("%s%s%d%s%s", h.rel, sep, n, sep, lines[n-1]))
+					}
+					if to > lastLine || h.rel != lastRel {
+						lastLine = to
+					}
+					lastRel = h.rel
+				}
 			}
-			return bOk(strings.Join(matches, "\n"), map[string]any{"count": len(matches)})
+			meta := map[string]any{"count": len(hits)}
+			if total > len(hits) {
+				// Say the list was cut, and by how much, in metadata (golang only
+				// for now). The text stays the pinned cross-port output.
+				meta["truncated"] = true
+				meta["total"] = total
+			}
+			return bOk(strings.Join(outLines, "\n"), meta)
 		},
 	)
 }
@@ -1318,13 +1459,16 @@ func applyPatchTool(env *builtinEnv) Tool {
 			// The paths live INSIDE the patch text, not in the arguments, so a
 			// host cannot rewrite them from a hook — this is the one case that
 			// genuinely needs the base directory to be library-side (ADR 0034 D2).
+			shown := make([]string, len(ops)) // the path as a diff names it
 			for i := range ops {
 				full, rErr := env.resolvePath(ops[i].path)
 				if rErr != nil {
 					return bErr(fmt.Sprintf("apply_patch: %v", rErr), nil)
 				}
+				shown[i] = env.diffPath(ops[i].path, full)
 				ops[i].path = full
 			}
+			var changes []fileChange
 			// Stage every write/delete first; only touch the filesystem once all
 			// hunks apply.
 			type pendingWrite struct {
@@ -1333,18 +1477,21 @@ func applyPatchTool(env *builtinEnv) Tool {
 			}
 			var writes []pendingWrite
 			var deletes []string
-			for _, op := range ops {
+			for oi, op := range ops {
 				switch op.kind {
 				case "add":
 					if fileExists(op.path) {
 						return bErr(fmt.Sprintf("apply_patch: file already exists: %s", op.path), nil)
 					}
 					writes = append(writes, pendingWrite{op.path, op.content})
+					changes = append(changes, fileChange{path: shown[oi], status: "added", after: op.content})
 				case "delete":
 					if !fileExists(op.path) {
 						return bErr(fmt.Sprintf("apply_patch: file not found: %s", op.path), nil)
 					}
 					deletes = append(deletes, op.path)
+					before, _ := readIfExists(op.path)
+					changes = append(changes, fileChange{path: shown[oi], status: "deleted", before: before})
 				default:
 					raw, rErr := os.ReadFile(op.path)
 					if rErr != nil {
@@ -1355,6 +1502,7 @@ func applyPatchTool(env *builtinEnv) Tool {
 						return bErr(fmt.Sprintf("apply_patch: %v", uErr), nil)
 					}
 					writes = append(writes, pendingWrite{op.path, next})
+					changes = append(changes, fileChange{path: shown[oi], status: "modified", before: string(raw), after: next})
 				}
 			}
 			for _, w := range writes {
@@ -1383,10 +1531,9 @@ func applyPatchTool(env *builtinEnv) Tool {
 			if len(ops) == 1 {
 				plural = ""
 			}
-			return bOk(
-				fmt.Sprintf("Applied patch: %d file operation%s", len(ops), plural),
-				map[string]any{"added": added, "updated": updated, "deleted": deleted},
-			)
+			meta := map[string]any{"added": added, "updated": updated, "deleted": deleted}
+			addDiffMeta(meta, changes)
+			return bOk(fmt.Sprintf("Applied patch: %d file operation%s", len(ops), plural), meta)
 		},
 	)
 }
@@ -1404,7 +1551,7 @@ func CreateBuiltinTools() []Tool {
 // interpreter), paths relative to the process cwd, no confinement.
 func CreateBuiltinToolsWith(cfg any) []Tool {
 	env := newBuiltinEnv(cfg)
-	return []Tool{
+	tools := []Tool{
 		bashTool(env),
 		readTool(env),
 		writeTool(env),
@@ -1416,6 +1563,42 @@ func CreateBuiltinToolsWith(cfg any) []Tool {
 		applyPatchTool(env),
 		todowriteTool(),
 	}
+	if env.bg != nil {
+		tools = append(tools, bashOutputTool(env), killShellTool(env))
+	}
+	if env.webSearch != nil {
+		tools = append(tools, webSearchTool(env.webSearch))
+	}
+	if env.notebook {
+		tools = append(tools, notebookEditTool(env))
+	}
+	for i := range tools {
+		h := builtinHints[tools[i].Name]
+		tools[i].Hints = &h
+	}
+	return tools
+}
+
+// builtinHints tags each builtin for host permission gates. bash can do
+// anything, so it is mutating, destructive and open-world. todowrite and
+// question only touch the agent's own state / ask the human, so they count as
+// read-only for the host's files and systems.
+var builtinHints = map[string]ToolHints{
+	"bash":        {Destructive: true, OpenWorld: true},
+	"read":        {ReadOnly: true},
+	"write":       {Destructive: true},
+	"edit":        {Destructive: true},
+	"grep":        {ReadOnly: true},
+	"glob":        {ReadOnly: true},
+	"webfetch":    {ReadOnly: true, OpenWorld: true},
+	"question":    {ReadOnly: true},
+	"apply_patch": {Destructive: true},
+	"todowrite":   {ReadOnly: true},
+	// opt-in (builtin_extras.go)
+	"bash_output":   {ReadOnly: true},
+	"kill_shell":    {Destructive: true},
+	"websearch":     {ReadOnly: true, OpenWorld: true},
+	"notebook_edit": {Destructive: true},
 }
 
 // BuiltinShell reports the interpreter the builtins resolved for `bash` — what

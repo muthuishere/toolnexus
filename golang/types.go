@@ -54,6 +54,10 @@ type ToolContext struct {
 	// payload (kind:"input"), and ignores it when the world changed out-of-band
 	// (kind:"authorization" — the session is now valid). Mirrors JS ToolContext.answer.
 	Answer *Answer
+	// CallID is the model's id for this tool call (the loop runs a message's
+	// calls concurrently, so it tells sibling calls apart). Empty when the tool
+	// is executed outside the client loop. golang only for now.
+	CallID string
 }
 
 // Request is byte-identical suspension wire data (§10). A tool that needs an
@@ -141,6 +145,22 @@ type Tool struct {
 	Source      ToolSource `json:"source"`
 	// Execute runs the tool. ctx may be nil.
 	Execute func(args map[string]any, ctx *ToolContext) (ToolResult, error) `json:"-"`
+	// Hints say what the tool may do, so a host permission gate (Hooks.BeforeTool)
+	// can treat read-only tools differently (e.g. allow them in a plan mode).
+	// nil = unknown; treat as mutating. Builtins always carry hints; MCP tools carry
+	// them when the server sends annotations. Hints are advisory: a server can
+	// mislabel its tools. golang only for now; other ports pending.
+	Hints *ToolHints `json:"-"`
+}
+
+// ToolHints are advisory behavior hints (named after MCP tool annotations).
+type ToolHints struct {
+	// ReadOnly: the tool does not change its environment.
+	ReadOnly bool `json:"readOnly"`
+	// Destructive: the tool may overwrite or delete things (meaningful when !ReadOnly).
+	Destructive bool `json:"destructive"`
+	// OpenWorld: the tool reaches outside the host (network, external systems).
+	OpenWorld bool `json:"openWorld"`
 }
 
 // McpStatus is the queryable connection state of a server.
