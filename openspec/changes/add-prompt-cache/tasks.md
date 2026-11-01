@@ -13,4 +13,4 @@
 - [ ] 2.7 (was 2.4) Align usage field names with go-agent-cli's usage frame (go-agent-cli-57)
 
 ## 3. Other ports (pending — before the next release)
-- [ ] 3.1 js  - [ ] 3.2 python  - [ ] 3.3 java  - [ ] 3.4 csharp  - [ ] 3.5 elixir  - [ ] 3.6 clojure
+- [x] 3.1 js  - [ ] 3.2 python  - [ ] 3.3 java  - [ ] 3.4 csharp  - [ ] 3.5 elixir  - [ ] 3.6 clojure

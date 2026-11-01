@@ -43,3 +43,7 @@ export {
   type GateOutcome,
   type Policy,
 } from "./judge.js"
+export * from "./promptcache.js"
+export * from "./tooltiers.js"
+export * from "./models.js"
+export * from "./builtin_extras.js"

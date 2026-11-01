@@ -97,6 +97,17 @@ release.
   length when the provider reports it, as OpenRouter does), for model switching.
 - Fixed: loading MCP config with a disabled server could race with the other servers' loading
   (`go test -race` found it). Go only so far; the other ports have not been checked.
+- **js now has all of the above too**, including the API-key-by-host security fix (with the
+  same break for hosts that relied on the fallback: set `apiKey` or `apiKeyEnv`). JS shapes:
+  `waitFor(request, { signal })` takes the turn's abort signal as a second argument (there is
+  no separate `waitForCtx`); `loadMcp(cfg, { onServer })`; `mcpSource.resourceTools()`;
+  builtins `background: new BackgroundShells()` / `webSearch` / `notebookEdit`;
+  `agent.asToolWith(ctx => opts)` and runtime `waitFor`; `compactor({ onCompact })`;
+  `listModels(opts)`; `promptCache` and `toolTiers` on the client with `toolTierPlan` /
+  `resetToolTiers`. Not needed in js: a lock on `Toolkit.register` (one thread) and the
+  disabled-status race (it cannot happen there). Also in js: the loop now passes the turn's
+  abort signal to every tool it runs, so a cancelled turn reaches the tool (Go already did).
+  Python, java, csharp, elixir and clojure are still pending.
 
 **A cancelled turn no longer forgets what it did, cancel can kill a stubborn command in about 100 ms,
 and file edits come back with a diff.** Found by go-agent-cli's real server integration; all seven

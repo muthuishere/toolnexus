@@ -10,7 +10,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js"
 import type { Tool as McpToolDef, ElicitRequest, ElicitResult } from "@modelcontextprotocol/sdk/types.js"
 import { ElicitRequestSchema } from "@modelcontextprotocol/sdk/types.js"
-import { type JSONSchema, type Tool, type ToolContext, type ToolResult, type McpStatus, type Request, type Answer, sanitize } from "./types.js"
+import { type JSONSchema, type Tool, type ToolContext, type ToolHints, type ToolResult, type McpStatus, type Request, type Answer, sanitize } from "./types.js"
 import { type ContentPart, summarizePart } from "./content.js"
 
 // ---------------------------------------------------------------------------
@@ -266,6 +266,7 @@ function convertTool(server: string, def: McpToolDef, client: Client, timeout: n
     description: def.description ?? "",
     inputSchema,
     source: "mcp",
+    ...(mcpHints((def as any).annotations) ? { hints: mcpHints((def as any).annotations) } : {}),
     async execute(args: Record<string, unknown>, ctx?: ToolContext): Promise<ToolResult> {
       try {
         const result: any = await client.callTool(
@@ -300,6 +301,129 @@ export interface McpSource {
   tools: Tool[]
   status: Record<string, McpStatus>
   close(): Promise<void>
+  /**
+   * `list_mcp_resources` and `read_mcp_resource` bound to this source's connected servers
+   * (SPEC §4C). Both read-only. Opt-in: register them on a toolkit. They stop working once the
+   * source is closed.
+   */
+  resourceTools(): Tool[]
+}
+
+/** One server's outcome, reported by `loadMcp`'s `onServer` the moment that server finishes. */
+export interface McpServerResult {
+  name: string
+  status: McpStatus
+  /** This server's converted tools (empty unless connected). Usable until the source closes. */
+  tools: Tool[]
+  /** Why the server failed (absent when connected or disabled). */
+  error?: Error
+}
+
+/**
+ * MCP tool annotations → ToolHints (SPEC §4C). No hint fields at all ⇒ undefined (unknown).
+ * Defaults follow the MCP spec: readOnlyHint false, destructiveHint and openWorldHint true.
+ */
+export function mcpHints(a: { readOnlyHint?: boolean; destructiveHint?: boolean; openWorldHint?: boolean } | undefined): ToolHints | undefined {
+  if (!a || (a.readOnlyHint === undefined && a.destructiveHint === undefined && a.openWorldHint === undefined)) return undefined
+  const h: ToolHints = { readOnly: a.readOnlyHint ?? false, destructive: a.destructiveHint ?? true, openWorld: a.openWorldHint ?? true }
+  if (h.readOnly) h.destructive = false
+  return h
+}
+
+interface ServerConn {
+  client: Client
+  timeout: number
+}
+
+function resourceTools(servers: Map<string, ServerConn>): Tool[] {
+  const ro: ToolHints = { readOnly: true, destructive: false, openWorld: false }
+  const names = () => [...servers.keys()].sort()
+  const conn = (server: string): ServerConn => {
+    const c = servers.get(server)
+    if (!c) throw new Error(`no connected MCP server "${server}" (connected: ${names().join(", ")})`)
+    return c
+  }
+  const list: Tool = {
+    name: "list_mcp_resources",
+    description: "List the resources MCP servers offer (uri, name, description, mimeType). Optionally for one server.",
+    inputSchema: {
+      type: "object",
+      properties: { server: { type: "string", description: "Only this server (default: all)" } },
+      additionalProperties: false,
+    },
+    source: "mcp",
+    hints: ro,
+    async execute(args, ctx) {
+      let targets = names()
+      const s = typeof args?.server === "string" ? args.server : ""
+      if (s) {
+        try {
+          conn(s)
+        } catch (e) {
+          return { output: `list_mcp_resources: ${(e as Error).message}`, isError: true }
+        }
+        targets = [s]
+      }
+      const lines: string[] = []
+      const items: unknown[] = []
+      for (const name of targets) {
+        const c = conn(name)
+        try {
+          const res: any = await c.client.listResources({}, { timeout: c.timeout, signal: ctx?.signal })
+          for (const r of res.resources ?? []) {
+            let line = `${name} ${r.uri}`
+            if (r.name) line += ` — ${r.name}`
+            if (r.mimeType) line += ` (${r.mimeType})`
+            if (r.description) line += `: ${r.description}`
+            lines.push(line)
+            items.push({ server: name, uri: r.uri, name: r.name ?? "", mimeType: r.mimeType ?? "", description: r.description ?? "" })
+          }
+        } catch (e) {
+          lines.push(`${name}: error: ${e instanceof Error ? e.message : String(e)}`)
+        }
+      }
+      if (!lines.length) return { output: "No resources.", isError: false, metadata: { count: 0 } }
+      return { output: lines.join("\n"), isError: false, metadata: { count: items.length, resources: items } }
+    },
+  }
+  const read: Tool = {
+    name: "read_mcp_resource",
+    description: "Read one MCP resource by server and uri. Text comes back as text; binary content is described, not inlined.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        server: { type: "string", description: "The MCP server name" },
+        uri: { type: "string", description: "The resource uri" },
+      },
+      required: ["server", "uri"],
+      additionalProperties: false,
+    },
+    source: "mcp",
+    hints: ro,
+    async execute(args, ctx) {
+      const server = typeof args?.server === "string" ? args.server : ""
+      const uri = typeof args?.uri === "string" ? args.uri : ""
+      let c: ServerConn
+      try {
+        c = conn(server)
+      } catch (e) {
+        return { output: `read_mcp_resource: ${(e as Error).message}`, isError: true }
+      }
+      if (!uri) return { output: "read_mcp_resource: uri is required", isError: true }
+      try {
+        const res: any = await c.client.readResource({ uri }, { timeout: c.timeout, signal: ctx?.signal })
+        const parts: string[] = []
+        for (const rc of res.contents ?? []) {
+          if (typeof rc.text === "string") parts.push(rc.text)
+          else if (typeof rc.blob === "string") parts.push(`[binary ${rc.mimeType ?? ""}, ${rc.blob.length} base64 chars]`)
+        }
+        return { output: parts.join("\n"), isError: false, metadata: { server, uri } }
+      } catch (e) {
+        return { output: `read_mcp_resource: ${e instanceof Error ? e.message : String(e)}`, isError: true }
+      }
+    },
+  }
+  return [list, read]
 }
 
 /** Create a fresh (not-yet-connected) client, with the elicitation bridge attached if a waitFor
@@ -347,19 +471,44 @@ async function connectTransport(client: Client, cfg: ServerConfig): Promise<void
  *  whole load promptly on parent cancellation. */
 export async function loadMcp(
   input: string | object,
-  opts?: { waitFor?: (request: Request) => Promise<Answer>; signal?: AbortSignal },
+  opts?: {
+    waitFor?: (request: Request) => Promise<Answer>
+    signal?: AbortSignal
+    /**
+     * Called once per server the moment it is connected, failed or found disabled (SPEC §4C),
+     * so a host can register a fast server's tools while a slow one is still connecting.
+     * Calls are serialized (an async callback is awaited before the next one runs); the load
+     * still resolves only after every server and every callback has finished.
+     */
+    onServer?: (result: McpServerResult) => void | Promise<void>
+  },
 ): Promise<McpSource> {
   const config = parseMcpConfig(input)
   const tools: Tool[] = []
   const status: Record<string, McpStatus> = {}
   const clients: Client[] = []
+  const servers = new Map<string, ServerConn>()
   const waitFor = opts?.waitFor
   const signal = opts?.signal
+  const onServer = opts?.onServer
+  let reports: Promise<void> = Promise.resolve()
+  let reportError: unknown
+  const report = (r: McpServerResult) => {
+    if (!onServer) return
+    reports = reports.then(async () => {
+      try {
+        await onServer(r)
+      } catch (e) {
+        reportError ??= e
+      }
+    })
+  }
 
-  await Promise.all(
+  const loading = Promise.all(
     Object.entries(config).map(async ([name, cfg]) => {
       if (!isEnabled(cfg)) {
         status[name] = "disabled"
+        report({ name, status: "disabled", tools: [] })
         return
       }
       const timeout = cfg.timeout ?? DEFAULT_TIMEOUT
@@ -370,19 +519,37 @@ export async function loadMcp(
         await raceTimeout(connectTransport(client, cfg), timeout, signal)
         const defs = await raceTimeout(paginateTools(client, timeout), timeout, signal)
         const kept = applyToolsFilter(name, defs, (cfg as { tools?: Record<string, boolean> }).tools)
-        for (const def of kept) tools.push(convertTool(name, def, client, timeout))
+        const converted = kept.map((def) => convertTool(name, def, client, timeout))
+        tools.push(...converted)
         clients.push(client)
+        servers.set(name, { client, timeout })
         status[name] = "connected"
+        report({ name, status: "connected", tools: converted })
       } catch (e) {
         status[name] = "failed"
         await client.close().catch(() => {})
         // Parent cancellation/deadline aborts the whole load (§2 Gap 3, A1); a per-server timeout
         // within budget isolates just this server.
         if (signal?.aborted) throw e
+        report({ name, status: "failed", tools: [], error: e instanceof Error ? e : new Error(String(e)) })
         console.warn(`[toolnexus] MCP server "${name}" failed: ${e instanceof Error ? e.message : String(e)}`)
       }
     }),
   )
+  try {
+    await loading
+  } catch (e) {
+    // Parent cancellation: close every client, including ones whose tools onServer handed out.
+    await reports
+    await Promise.all(clients.map((c) => c.close().catch(() => {})))
+    throw e
+  }
+
+  await reports
+  if (reportError) {
+    await Promise.all(clients.map((c) => c.close().catch(() => {})))
+    throw reportError
+  }
 
   return {
     tools,
@@ -390,6 +557,7 @@ export async function loadMcp(
     async close() {
       await Promise.all(clients.map((c) => c.close().catch(() => {})))
     },
+    resourceTools: () => resourceTools(servers),
   }
 }
 
