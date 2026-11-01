@@ -40,7 +40,8 @@
             [toolnexus.agents.loop-test]
             [toolnexus.agents.runtime-test]
             [toolnexus.agents.runtime-fixture-test]
-            [toolnexus.acp-test :as acp-test]))
+            [toolnexus.acp-test :as acp-test]
+            [toolnexus.host-engine-asks-test]))
 
 (def suites
   '[toolnexus.tool-test
@@ -68,7 +69,8 @@
     toolnexus.agents.loop-test
     toolnexus.agents.runtime-test
     toolnexus.agents.runtime-fixture-test
-    toolnexus.acp-test])
+    toolnexus.acp-test
+    toolnexus.host-engine-asks-test])
 
 ;; A floor, not an exact count — it must fail on an EMPTY collection without
 ;; needing an edit every time a test is added. RAISED from 100 after an audit
@@ -82,7 +84,7 @@
 ;; and the count stays above any floor. Comparing `suites` against a constant is
 ;; the only check that can see the vector shrink, because every count derived
 ;; FROM the vector shrinks with it. Adding a suite is meant to be a two-line diff.
-(def expected-suite-count 26)
+(def expected-suite-count 27)
 
 (defn- declared-tests
   "How many deftests a namespace actually holds, read off its interns rather than

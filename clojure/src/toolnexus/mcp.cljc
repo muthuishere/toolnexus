@@ -843,6 +843,22 @@
             (recur nxt acc (inc page))
             {:ok acc}))))))
 
+(defn mcp-hints
+  "SPEC §4C — MCP tool annotations as Tool hints. No hint fields at all ⇒ nil
+  (unknown). MCP's defaults when a field is absent: readOnlyHint false,
+  destructiveHint true, openWorldHint true; a read-only tool is never
+  destructive. Advisory — a server can mislabel its tools."
+  [annotations]
+  (let [a  (if (map? annotations) annotations {})
+        ro (get a :readOnlyHint)
+        de (get a :destructiveHint)
+        ow (get a :openWorldHint)]
+    (when-not (and (nil? ro) (nil? de) (nil? ow))
+      (let [read-only (true? ro)]
+        {:read-only   read-only
+         :destructive (and (not read-only) (if (nil? de) true (true? de)))
+         :open-world  (if (nil? ow) true (true? ow))}))))
+
 (defn- uniform-tool
   "A listed MCP tool def becomes a §0.1 Tool. `execute` closes over the
   transport, so a tool from a stdio server and a tool from a remote server are
@@ -853,6 +869,7 @@
                        :description  (or (:description t) "")
                        :input-schema (or (:inputSchema t) {:type "object"})
                        :source       "mcp"
+                       :hints        (mcp-hints (:annotations t))
                        :execute
                        (fn execute-mcp
                          ([args] (execute-mcp args nil))
@@ -983,6 +1000,7 @@
                     {:name        (:name server)
                      :status      "connected"
                      :transport   transport
+                     :timeout-ms  timeout-ms
                      :server-info (get-in init [:ok :result :serverInfo])
                      ;; Bare `sort-by` is CORRECT here, unlike `parse-config`'s
                      ;; above: every name in this list came out of
@@ -1020,6 +1038,39 @@
 ;; the source
 ;; ---------------------------------------------------------------------------
 
+(def ^:private report-lock (atom false))
+
+(defn- connect-reporting
+  "SPEC §4C per-server readiness: connect every server CONCURRENTLY and call
+  `on-server` `{:name :status :tools :error}` the moment each one is connected,
+  failed or found disabled — a fast server never waits for a slow one. Calls
+  are serialized. The result is still collected in name order, so the returned
+  source is exactly what the serial path builds.
+
+  (No disabled-status race to fix here: statuses are built from the returned
+  connections after every server finished, never written to a shared map.)"
+  [servers conn-opts on]
+  (let [report! (fn [c]
+                  (loop []
+                    (if (compare-and-set! report-lock false true)
+                      (try (on (cond-> {:name (:name c) :status (:status c) :tools (vec (:tools c))}
+                                 (:message c) (assoc :error (:message c))))
+                           (catch Throwable _ nil)
+                           (finally (reset! report-lock false)))
+                      (do (ktime/sleep! 1) (recur)))))
+        ps (mapv (fn [srv]
+                   (let [p (promise)]
+                     (proc/run-async!
+                      (fn []
+                        (let [c (try (connect srv conn-opts)
+                                     (catch Throwable e
+                                       {:name (:name srv) :status "failed" :tools []
+                                        :message (or (ex-message e) (str e))}))]
+                          (try (report! c) (finally (deliver p c))))))
+                     p))
+                 servers)]
+    (mapv deref ps)))
+
 (defn from-config
   "SPEC §2 — the whole source in one call. `config` is a JSON string or a map.
 
@@ -1030,10 +1081,19 @@
   better — it is slower — but because it is DETERMINISTIC, and §0's whole
   premise is that two runtimes given the same fixture produce the same output.
   A tool-name collision resolved by whichever server answered first is exactly
-  the kind of drift this repo exists to prevent."
+  the kind of drift this repo exists to prevent.
+
+  `conn-opts` may carry `:on-server` (SPEC §4C): `(fn [{:keys [name status tools
+  error]}])`, called once per server as soon as it finishes. With it set the
+  servers connect concurrently; the returned source is still built in name
+  order and is the same value."
   ([config] (from-config config nil))
   ([config conn-opts]
-  (let [conns (mapv (fn [srv] (connect srv conn-opts)) (parse-config config))]
+  (let [servers (parse-config config)
+        on      (:on-server conn-opts)
+        conns   (if on
+                  (connect-reporting servers conn-opts on)
+                  (mapv (fn [srv] (connect srv conn-opts)) servers))]
     ;; Bare `sort-by` again, and again deliberately: `mcp-tool-name` sanitized
     ;; every one of these to `[a-zA-Z0-9_-]+`. See `connect`.
     {:tools       (->> conns (mapcat :tools) (sort-by :name) vec)
@@ -1047,3 +1107,101 @@
   [result]
   (doseq [c (:connections result)] (disconnect c))
   nil)
+
+;; ---------------------------------------------------------------------------
+;; SPEC §4C — MCP resource tools (opt-in)
+;; ---------------------------------------------------------------------------
+
+(def ^:private read-only-hints {:read-only true :destructive false :open-world false})
+
+(defn- rpc-error-text [f]
+  (str (:error f)
+       (when-let [m (:message f)] (str ": " m))
+       (when-let [c (:code f)] (str " (code " c ")"))))
+
+(defn resource-tools
+  "`list_mcp_resources` and `read_mcp_resource`, bound to the CONNECTED servers
+  of a `from-config` result (or a seq of connections). Both are read-only. They
+  stop working once the source is disconnected. A source with no connected
+  server still returns both tools; they report that no server is connected."
+  [source]
+  (let [conns (->> (if (map? source) (:connections source) source)
+                   (filter #(= "connected" (:status %)))
+                   (reduce (fn [acc c] (assoc acc (:name c) c)) {}))
+        names (tool/sort-strings (keys conns))
+        missing (fn [server]
+                  (str "no connected MCP server " (pr-str server)
+                       " (connected: " (str/join ", " names) ")"))
+        rpc (fn [c method params]
+              ((:rpc! (:transport c)) method params (or (:timeout-ms c) default-timeout-ms)))
+        list-tool
+        (tool/tool
+         {:name "list_mcp_resources"
+          :description "List the resources MCP servers offer (uri, name, description, mimeType). Optionally for one server."
+          :input-schema {:type "object"
+                         :properties {:server {:type "string" :description "Only this server (default: all)"}}
+                         :additionalProperties false}
+          :source "mcp"
+          :hints read-only-hints
+          :execute
+          (fn list-resources
+            ([args] (list-resources args nil))
+            ([args _ctx]
+             (let [want (str (or (:server args) ""))]
+               (if (and (not= "" want) (not (contains? conns want)))
+                 (tool/failure (str "list_mcp_resources: " (missing want)))
+                 (let [rows (mapcat
+                             (fn [n]
+                               (let [res (rpc (get conns n) "resources/list" {})]
+                                 (if (rpc-failed? res)
+                                   [{:line (str n ": error: " (rpc-error-text res))}]
+                                   (map (fn [r]
+                                          {:line (str n " " (:uri r)
+                                                      (when (seq (str (:name r))) (str " — " (:name r)))
+                                                      (when (seq (str (:mimeType r))) (str " (" (:mimeType r) ")"))
+                                                      (when (seq (str (:description r))) (str ": " (:description r))))
+                                           :item {:server n :uri (str (:uri r)) :name (str (or (:name r) ""))
+                                                  :mimeType (str (or (:mimeType r) ""))
+                                                  :description (str (or (:description r) ""))}})
+                                        (get-in res [:ok :result :resources])))))
+                             (if (= "" want) names [want]))
+                       items (vec (keep :item rows))]
+                   (if (empty? rows)
+                     (tool/success "No resources." {:count 0})
+                     (tool/success (str/join "\n" (map :line rows))
+                                   {:count (count items) :resources items})))))))})
+        read-tool
+        (tool/tool
+         {:name "read_mcp_resource"
+          :description "Read one MCP resource by server and uri. Text comes back as text; binary content is described, not inlined."
+          :input-schema {:type "object"
+                         :properties {:server {:type "string" :description "The MCP server name"}
+                                      :uri    {:type "string" :description "The resource uri"}}
+                         :required ["server" "uri"]
+                         :additionalProperties false}
+          :source "mcp"
+          :hints read-only-hints
+          :execute
+          (fn read-resource
+            ([args] (read-resource args nil))
+            ([args _ctx]
+             (let [server (str (or (:server args) ""))
+                   uri    (str (or (:uri args) ""))
+                   c      (get conns server)]
+               (cond
+                 (nil? c)   (tool/failure (str "read_mcp_resource: " (missing server)))
+                 (= "" uri) (tool/failure "read_mcp_resource: uri is required")
+                 :else
+                 (let [res (rpc c "resources/read" {:uri uri})]
+                   (if (rpc-failed? res)
+                     (tool/failure (str "read_mcp_resource: " (rpc-error-text res)))
+                     (tool/success
+                      (str/join "\n"
+                                (keep (fn [rc]
+                                        (cond
+                                          (string? (:text rc)) (:text rc)
+                                          (string? (:blob rc))
+                                          (str "[binary " (:mimeType rc) ", " (count (:blob rc)) " base64 chars]")))
+                                      (get-in res [:ok :result :contents])))
+                      {:server server :uri uri})))))))})]
+    [list-tool read-tool]))

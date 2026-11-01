@@ -169,7 +169,7 @@
     (ct/with-llm "openai" [{:calls [{:id "c1" :name "deploy" :args {}}]} {:text "done"}]
       (fn [{:keys [base requests]}]
         (reset! out {:result (client/run (client/create-client
-                                          (merge {:base-url base :style "openai" :model "configured"
+                                          (merge {:base-url base :style "openai" :model "configured" :api-key "k"
                                                   :max-turns 4}
                                                  opts))
                                          prompt {:toolkit tk})
@@ -245,7 +245,7 @@
           err (atom nil)]
       (ct/with-llm "openai" [{:text "done"}]
         (fn [{:keys [base requests]}]
-          (reset! err (try (client/run (client/create-client {:base-url base :style "openai" :model "configured"
+          (reset! err (try (client/run (client/create-client {:base-url base :style "openai" :model "configured" :api-key "k"
                                                               :hooks {:before-llm (b/as-hook g)}})
                                        "idiot" {:toolkit deploy-tk})
                            nil
@@ -338,7 +338,7 @@
     (ct/with-llm style [{:calls [{:id "c1" :name "deploy" :args {}}]} {:text "done"}]
       (fn [{:keys [base requests]}]
         (let [ms (atom [])
-              c  (client/create-client {:base-url base :style style :model "configured"
+              c  (client/create-client {:base-url base :style style :model "configured" :api-key "k"
                                         :max-turns 4 :hooks hooks
                                         :on-metric (fn [m] (swap! ms conj m))})
               r  (try {:result (client/run c "go" {:toolkit tk})}
@@ -365,7 +365,7 @@
     (testing style
       (ct/with-llm style [{:text "x"}]
         (fn [{:keys [base requests]}]
-          (let [c (client/create-client {:base-url base :style style :model "configured"
+          (let [c (client/create-client {:base-url base :style style :model "configured" :api-key "k"
                                          :hooks {:before-llm boom}})
                 e (try (tr/translate c {:messages [{:role "user" :content "hi"}]}) nil
                        (catch Throwable t (ex-message t)))]
@@ -409,7 +409,7 @@
       (ct/with-llm "openai" [{:text "done"}]
         (fn [{:keys [base requests]}]
           (let [ms (atom [])
-                c  (client/create-client {:base-url base :style "openai" :model "configured"
+                c  (client/create-client {:base-url base :style "openai" :model "configured" :api-key "k"
                                           :request-params {"model" "per-call"}
                                           :hooks {:before-llm (fn [_] {:model "small-fast"})}
                                           :on-metric (fn [m] (swap! ms conj m))})
@@ -422,7 +422,7 @@
   (testing "translate reports the :request-params model it sent"
     (ct/with-llm "openai" [{:text "x"}]
       (fn [{:keys [base requests]}]
-        (let [c (client/create-client {:base-url base :style "openai" :model "configured"
+        (let [c (client/create-client {:base-url base :style "openai" :model "configured" :api-key "k"
                                        :request-params {"model" "per-call"}})
               r (tr/translate c {:messages [{:role "user" :content "hi"}]})]
           (is (= ["per-call"] (mapv :model @requests)))
@@ -440,21 +440,21 @@
     (testing (str style " run")
       (ct/with-llm style [{:text "done"}]
         (fn [{:keys [base raw]}]
-          (client/run (client/create-client {:base-url base :style style :model "configured"
+          (client/run (client/create-client {:base-url base :style style :model "configured" :api-key "k"
                                              :request-params {"model" "per-call"}})
                       "go" {:toolkit deploy-tk})
           (is (= [["per-call"]] (mapv model-fields @raw))))))
     (testing (str style " translate")
       (ct/with-llm style [{:text "x"}]
         (fn [{:keys [base raw]}]
-          (tr/translate (client/create-client {:base-url base :style style :model "configured"
+          (tr/translate (client/create-client {:base-url base :style style :model "configured" :api-key "k"
                                                :request-params {"model" "per-call"}})
                         {:messages [{:role "user" :content "hi"}]})
           (is (= [["per-call"]] (mapv model-fields @raw))))))
     (testing (str style " keyword :model param and a hook override: still one field")
       (ct/with-llm style [{:text "done"}]
         (fn [{:keys [base raw]}]
-          (client/run (client/create-client {:base-url base :style style :model "configured"
+          (client/run (client/create-client {:base-url base :style style :model "configured" :api-key "k"
                                              :request-params {:model "per-call"}
                                              :hooks {:before-llm (fn [_] {:model "small-fast"})}})
                       "go" {:toolkit deploy-tk})
@@ -462,7 +462,7 @@
   (testing "a forbidden key is forbidden in either spelling"
     (ct/with-llm "openai" [{:text "done"}]
       (fn [{:keys [base requests]}]
-        (client/run (client/create-client {:base-url base :style "openai" :model "configured"
+        (client/run (client/create-client {:base-url base :style "openai" :model "configured" :api-key "k"
                                            :request-params {"messages" [] "temperature" 0.5}})
                     "go" {:toolkit deploy-tk})
         (let [body (first @requests)]
@@ -478,7 +478,7 @@
       (ct/with-llm style [{:text "x"}]
         (fn [{:keys [base requests]}]
           (let [ms (atom [])
-                c  (client/create-client {:base-url base :style style :model "configured" :hooks hooks
+                c  (client/create-client {:base-url base :style style :model "configured" :api-key "k" :hooks hooks
                                           :on-metric (fn [m] (swap! ms conj m))})
                 r  (tr/translate c {:messages [{:role "user" :content "hi"}]})]
             (is (= [want] (mapv :model @requests)))

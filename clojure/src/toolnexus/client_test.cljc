@@ -145,7 +145,7 @@
 (def toolkit (tool/toolkit tools))
 
 (defn- client-for [style base opts]
-  (client/create-client (merge {:base-url base :style style :model "mock-model"} opts)))
+  (client/create-client (merge {:base-url base :style style :model "mock-model" :api-key "test-key"} opts)))
 
 (defn- wait-ok [request]
   (client/make-answer (:id request) true
@@ -1379,7 +1379,7 @@
   ;; `:on-error`.
   (let [[f n] (stub-http [{:status nil :error :timeout}])
         seen  (atom 0)
-        c     (client/create-client {:base-url "http://127.0.0.1:1" :model "m"
+        c     (client/create-client {:base-url "http://127.0.0.1:1" :model "m" :api-key "k"
                                      :timeout-ms 50 :retries 3
                                      :on-error (fn [_] (swap! seen inc) :retry)
                                      :http-client f})
@@ -1395,7 +1395,7 @@
   ;; Two turns, each slow enough that the SECOND starts past the deadline. A
   ;; per-call timeout would let the run go on forever one call at a time.
   (let [c (client/create-client
-           {:base-url "http://127.0.0.1:1" :model "m" :timeout-ms 40 :retries 0
+           {:base-url "http://127.0.0.1:1" :model "m" :api-key "k" :timeout-ms 40 :retries 0
             :http-client (fn [_u _h _b]
                            (ktime/sleep! 60)
                            {:status 200
@@ -1410,7 +1410,7 @@
   (let [body (str "{\"error\":\"no credit\",\"user_id\":\"u-42\",\"account_id\":17,"
                   "\"organization\":\"acme\",\"org_id\":\"o-9\"}")
         [f _] (stub-http [{:status 402 :body body :headers {"retry-after" "3"}}])
-        c     (client/create-client {:base-url "http://127.0.0.1:1" :model "m"
+        c     (client/create-client {:base-url "http://127.0.0.1:1" :model "m" :api-key "k"
                                      :retries 0 :http-client f})
         e     (try (client/run c "hi" {}) nil (catch Throwable e e))
         d     (ex-data e)]
@@ -1431,7 +1431,7 @@
   (let [raw   "Wed, 21 Oct 2026 07:28:00 GMT"
         [f _] (stub-http [{:status 503 :body "{\"error\":\"later\"}"
                            :headers {"retry-after" raw}}])
-        c     (client/create-client {:base-url "http://127.0.0.1:1" :model "m"
+        c     (client/create-client {:base-url "http://127.0.0.1:1" :model "m" :api-key "k"
                                      :retries 0 :http-client f})
         e     (try (client/run c "hi" {}) nil (catch Throwable e e))]
     (is (= raw (:retry-after (ex-data e))))
@@ -1441,7 +1441,7 @@
 (deftest the-cap-is-message-only
   (let [body  (str "{\"error\":\"" (apply str (repeat 400 "x")) "\"}")
         [f _] (stub-http [{:status 500 :body body}])
-        c     (client/create-client {:base-url "http://127.0.0.1:1" :model "m"
+        c     (client/create-client {:base-url "http://127.0.0.1:1" :model "m" :api-key "k"
                                      :retries 0 :http-client f})
         e     (try (client/run c "hi" {}) nil (catch Throwable e e))]
     (is (< (count (ex-message e)) 260) "the message is capped")
@@ -1451,7 +1451,7 @@
 
 (deftest an-auth-body-is-blanked-entirely
   (let [[f _] (stub-http [{:status 401 :body "{\"authorization\":\"Bearer sk-live-SECRET\"}"}])
-        c     (client/create-client {:base-url "http://127.0.0.1:1" :model "m"
+        c     (client/create-client {:base-url "http://127.0.0.1:1" :model "m" :api-key "k"
                                      :retries 0 :http-client f})
         e     (try (client/run c "hi" {}) nil (catch Throwable e e))]
     (is (= "" (:body (ex-data e))))
@@ -1461,13 +1461,13 @@
 (deftest fail-fast-on-a-non-retryable-4xx
   ;; MUST NOT REGRESS: the retryable set is an ENUMERATION.
   (let [[f n] (stub-http [{:status 400 :body "{\"error\":\"bad request\"}"}])
-        c     (client/create-client {:base-url "http://127.0.0.1:1" :model "m"
+        c     (client/create-client {:base-url "http://127.0.0.1:1" :model "m" :api-key "k"
                                      :retries 3 :retry-base-ms 1 :http-client f})]
     (is (thrown? Throwable (client/run c "hi" {})))
     (is (= 1 @n) "400 is terminal on the first attempt"))
   (doseq [status [429 500 502 503 504 529]]
     (let [[f n] (stub-http [{:status status :body "{}"}])
-          c     (client/create-client {:base-url "http://127.0.0.1:1" :model "m"
+          c     (client/create-client {:base-url "http://127.0.0.1:1" :model "m" :api-key "k"
                                        :retries 2 :retry-base-ms 1 :http-client f})]
       (is (thrown? Throwable (client/run c "hi" {})))
       (is (= 3 @n) (str status " is retryable")))))

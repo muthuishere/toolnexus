@@ -146,6 +146,28 @@ its process, and an agent run as a tool now stops with it: a child run used to o
 handle when the runtime was killed, and now it does not. `web_search` gets `(query, limit)`
 without a context. Not done: Gemini explicit cached content (as in Go).
 
+**Clojure now has all of the above, including the API-key security fix.** A clojure client with
+no `:api-key` reads only the env var of its `:base-url` host (or the one `:api-key-env` names)
+and throws for any other host or plain http, where it used to send `OPENAI_API_KEY` /
+`ANTHROPIC_API_KEY` / `OPENROUTER_API_KEY` to whatever URL was configured, or an empty bearer
+token. A clojure host on a local or proxy URL must now set `:api-key` or `:api-key-env`. The
+rest, by its clojure name: `mcp/from-config` `:on-server` (servers then connect concurrently;
+the returned source is unchanged), `:wait-for-ctx` plus a `:cancel` token on `run`/`ask`,
+compactor `:on-compact` and the three compactor fixes, `:hints` on tools and on `:before-tool`
+events, opt-in `:background` / `:web-search` / `:notebook-edit` builtins, `mcp/resource-tools`,
+grep `context`/`before`/`after` and read/grep truncation metadata (text unchanged),
+`agents.runtime/as-tool` / `as-tool-with` and runtime `:wait-for`, `:call-id` on the tool
+context, `client/list-models`, `:cache-read-tokens` / `:cache-write-tokens` in usage,
+`:prompt-cache`, and `:tool-tiers` (with `tool-tier-plan` / `reset-tool-tiers!`; `:on-event`
+tool events carry `:via "call_tool"`). Differences, by design: a toolkit is an immutable value,
+so "register while a turn runs" has no meaning (`tool/add-tools` returns a new toolkit; the
+tier plan is frozen per toolkit identity, which `add-tools` keeps), and there was no
+disabled-status race to fix. `:call-id` reaches a tool only when it has the two-argument arity
+and says so (`:context? true`, which every `native-tool` sets); a one-argument tool is called
+exactly as before. Cancellation is cooperative: checked before each model call and after each
+batch of tool calls, so an HTTP call already in flight is not aborted. Background shells are
+POSIX only. `list-models` uses koine's HTTP client, not `:http-client` (which only posts).
+
 **A cancelled turn no longer forgets what it did, cancel can kill a stubborn command in about 100 ms,
 and file edits come back with a diff.** Found by go-agent-cli's real server integration; all seven
 ports (`openspec/changes/add-host-turn-durability`).
@@ -172,7 +194,8 @@ ports (`openspec/changes/add-host-turn-durability`).
   received the run's cancellation; js/java/csharp now stop waiting on running tools when a turn is
   cancelled.
 
-Not done: java streaming and clojure have no cancel entry point (only errors interrupt them); elixir
+Not done: java streaming has no cancel entry point (only errors interrupt it; clojure now has a
+cooperative `:cancel` token, see above); elixir
 saves nothing early if the process reading a stream is killed, a leak older than this change.
 Follow-ups not started: a lock on `Toolkit.register`, per-server MCP readiness, a cancellable
 `waitFor`.

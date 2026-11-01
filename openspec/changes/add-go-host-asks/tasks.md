@@ -26,7 +26,7 @@ the event. Revisit if a port cannot express it.
 - [ ] 2.3 java
 - [x] 2.4 csharp (2026-11-01: all of 1.1–1.5g + prompt cache + tool tiers; C# MCP load already locked status, no race; Compactor OnCompact takes no token — the C# BeforeLLM hook carries none)
 - [ ] 2.5 elixir
-- [ ] 2.6 clojure
+- [x] 2.6 clojure (2026-11-01: all asks + hints; no Register race or disabled-status race — toolkit is an immutable value, statuses built after the load; cooperative :cancel; :call-id needs :context? true)
 - [ ] 2.6b Re-run every port against the extended examples/mcp-progress-server.mjs (now also offers a resource)
 - [ ] 2.6c SECURITY: port host-scoped key resolution to every port FIRST (all still fall back across providers)
 - [ ] 2.6d ACP host hooks (onPermission, onUpdate, ctx cancel, streaming generate) in every port that ships an ACP source
