@@ -174,13 +174,23 @@
     :count-tokens     (fn [messages] n) — token estimate (default `estimate-tokens`)
     :flush-to-memory  when true, inject a pre-compact system reminder telling the
                       model to persist durable facts through the §7E `memory` tool
-                      before the head is summarized (off by default)"
-  [{:keys [max-tokens summarize keep-tail count-tokens flush-to-memory]}]
+                      before the head is summarized (off by default)
+    :on-compact       (fn [info]) — called after each compaction (never on a
+                      no-op) with {:tokens-before :tokens-after :messages-before
+                      :messages-after :summarized :summary :folded}; `:folded` is
+                      the summarized messages verbatim, so a host can persist
+                      them (SPEC §4C)
+
+  The sole user prompt of a turn is never summarized: one prompt followed only
+  by tool traffic compacts to [system?, prompt, summary]. A compaction whose
+  result would not be smaller than its input is a no-op."
+  [{:keys [max-tokens summarize keep-tail count-tokens flush-to-memory on-compact]}]
   (let [count-fn  (or count-tokens estimate-tokens)
         keep-tail (or keep-tail (quot max-tokens 2))]
     (fn [{:keys [messages]}]
-      (let [msgs (vec messages)]
-        (when (> (count-fn msgs) max-tokens)      ; at/below budget => no-op
+      (let [msgs   (vec messages)
+            before (count-fn msgs)]
+        (when (> before max-tokens)      ; at/below budget => no-op
           ;; A leading system prompt is preserved verbatim — never summarized.
           (let [head-end (if (= "system" (:role (first msgs))) 1 0)
                 split    (tail-start msgs head-end keep-tail count-fn)]
@@ -188,13 +198,35 @@
             ;; compactible; leaving the transcript alone is the honest answer.
             (when (> split head-end)
               (let [system (subvec msgs 0 head-end)
-                    older  (subvec msgs head-end split)
+                    ;; SPEC §4C: the latest user prompt is never summarized away.
+                    ;; When the only clean boundary is the first message after the
+                    ;; system prompt (one prompt, then a long agentic run), keep
+                    ;; that prompt verbatim and summarize the work after it.
+                    pin?   (and (= split (count msgs)) (< head-end (count msgs))
+                                (boundary? (nth msgs head-end)))
+                    pinned (if pin? (subvec msgs head-end (inc head-end)) [])
+                    older  (if pin? (subvec msgs (inc head-end)) (subvec msgs head-end split))
                     tail   (subvec msgs split)
                     flush  (if flush-to-memory
                              [{:role "system" :content flush-note}]
                              [])]
-                {:messages (vec (concat system
-                                        [{:role    "system"
-                                          :content (str summary-prefix (summarize older))}]
-                                        flush
-                                        tail))}))))))))
+                (when (seq older)
+                  (let [summary (summarize older)
+                        out     (vec (concat system
+                                             pinned
+                                             [{:role    "system"
+                                               :content (str summary-prefix summary)}]
+                                             flush
+                                             tail))
+                        after   (count-fn out)]
+                    ;; a compaction that would not shrink the transcript is a no-op
+                    (when (< after before)
+                      (when on-compact
+                        (on-compact {:tokens-before   before
+                                     :tokens-after    after
+                                     :messages-before (count msgs)
+                                     :messages-after  (count out)
+                                     :summarized      (count older)
+                                     :summary         (str summary)
+                                     :folded          older}))
+                      {:messages out})))))))))))

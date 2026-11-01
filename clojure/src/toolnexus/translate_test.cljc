@@ -49,7 +49,7 @@
       (finally (server/stop! srv)))))
 
 (defn- client-for [style base opts]
-  (client/create-client (merge {:base-url base :style style :model "mock-model"} opts)))
+  (client/create-client (merge {:base-url base :style style :model "mock-model" :api-key "test-key"} opts)))
 
 ;; A toolkit whose tool RECORDS every invocation. §11's central claim is that
 ;; nothing here is ever executed, and the only honest way to assert that is a
@@ -538,7 +538,7 @@
              {:port 0})]
     (try
       (let [c (client/create-client {:base-url (str "http://127.0.0.1:" (server/port srv))
-                                     :style "openai" :model "mock-model"
+                                     :style "openai" :model "mock-model" :api-key "k"
                                      :retries 2 :retry-base-ms 1})]
         (is (= "hello there" (:text (tr/translate c {:messages [{:role "user" :content "hi"}]}))))
         (is (= 2 @n)))
@@ -548,7 +548,7 @@
   (let [srv (ts/serve (fn [_req] {:status 400 :headers {} :body "bad request"}) {:port 0})]
     (try
       (let [c (client/create-client {:base-url (str "http://127.0.0.1:" (server/port srv))
-                                     :style "openai" :model "mock-model"})]
+                                     :style "openai" :model "mock-model" :api-key "k"})]
         (is (thrown? Throwable (tr/translate c {:messages [{:role "user" :content "hi"}]}))))
       (finally (server/stop! srv)))))
 

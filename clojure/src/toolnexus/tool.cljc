@@ -14,14 +14,28 @@
   (str/replace (str s) #"[^a-zA-Z0-9_-]" "_"))
 
 (defn tool
-  "Build a Tool. `execute` takes (args) or (args ctx) and returns a ToolResult."
-  [{:keys [name description input-schema source execute]}]
+  "Build a Tool. `execute` takes (args) or (args ctx) and returns a ToolResult.
+
+  Two optional keys (SPEC §4C, change add-go-host-asks):
+
+    :hints     {:read-only :destructive :open-world} — advisory behaviour hints
+               for a host permission gate; passed on `:before-tool` events as
+               `:hints`. nil = unknown (treat as mutating). Never serialized into
+               any adapter output.
+    :context?  true when `execute` has the (args ctx) arity and wants the loop's
+               ToolContext on EVERY call — `{:call-id :cancel}` (plus `:answer`
+               on a §10 re-run). Absent, the loop calls (execute args) exactly as
+               before: there is no portable way to ask a fn its arity, and a
+               single-arity tool handed a ctx would fail."
+  [{:keys [name description input-schema source execute hints context?]}]
   {:pre [(some? name) (fn? execute)]}
-  {:name        (str name)
-   :description (or description "")
-   :input-schema (or input-schema {:type "object"})
-   :source      (or source "custom")
-   :execute     execute})
+  (cond-> {:name        (str name)
+           :description (or description "")
+           :input-schema (or input-schema {:type "object"})
+           :source      (or source "custom")
+           :execute     execute}
+    hints    (assoc :hints hints)
+    context? (assoc :context? true)))
 
 (defn success
   "A successful ToolResult (SPEC §0.1).
@@ -65,14 +79,28 @@
 ;; the toolkit
 ;; --------------------------------------------------------------------------
 
+(def ^:private toolkit-counter (atom 0))
+
 (defn toolkit
   "A toolkit is {:tools {name -> Tool} :sources {source -> status}}.
   Later tools win on a name collision, which is how SPEC §0.11's MCP precedence
-  over builtins is expressed: register builtins first, MCP after."
+  over builtins is expressed: register builtins first, MCP after.
+
+  Each toolkit carries an IDENTITY in its metadata (`toolkit-id`), kept by
+  `add-tools`/`assoc`/`update` and ignored by `=`. A toolkit is a value, so a
+  later registration is a new value — the identity is what lets a client freeze
+  one SPEC §4C tool-tier plan per toolkit across those values."
   ([tools] (toolkit tools {}))
   ([tools sources]
-   {:tools   (reduce (fn [acc t] (assoc acc (:name t) t)) {} tools)
-    :sources sources}))
+   (with-meta
+     {:tools   (reduce (fn [acc t] (assoc acc (:name t) t)) {} tools)
+      :sources sources}
+     {::id (swap! toolkit-counter inc)})))
+
+(defn toolkit-id
+  "The toolkit's identity (see `toolkit`), or nil for a hand-built map."
+  [tk]
+  (::id (meta tk)))
 
 (defn add-tools [tk tools]
   (update tk :tools #(reduce (fn [acc t] (assoc acc (:name t) t)) % tools)))
