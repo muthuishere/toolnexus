@@ -22,6 +22,7 @@ from __future__ import annotations
 import inspect
 import json
 import math
+from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Optional, Union
 
 Message = dict[str, Any]
@@ -30,7 +31,28 @@ Message = dict[str, Any]
 Summarize = Callable[[list[Message]], Union[str, Awaitable[str]]]
 CountTokens = Callable[[list[Message]], int]
 
-__all__ = ["estimate_tokens", "compactor"]
+__all__ = ["estimate_tokens", "compactor", "CompactInfo"]
+
+
+@dataclass
+class CompactInfo:
+    """One compaction, for ``compactor(on_compact=...)`` (§4C). Token counts come from
+    ``count_tokens`` (default :func:`estimate_tokens`)."""
+
+    tokens_before: int
+    tokens_after: int
+    messages_before: int
+    messages_after: int
+    # How many messages were folded into the summary.
+    summarized: int
+    # The text ``summarize`` returned (without the header line).
+    summary: str
+    # The summarized messages, verbatim and in order, so a host can persist them
+    # (the loop saves only the compacted transcript).
+    folded: list[Message] = field(default_factory=list)
+
+
+OnCompact = Callable[[CompactInfo], Any]
 
 
 def _serialize(message: Message) -> str:
@@ -76,6 +98,7 @@ def compactor(
     keep_tail: Optional[int] = None,
     count_tokens: Optional[CountTokens] = None,
     flush_to_memory: bool = False,
+    on_compact: Optional[OnCompact] = None,
 ) -> Callable[[dict[str, Any]], Awaitable[Optional[dict[str, Any]]]]:
     """Build a ``before_llm`` hook that compacts the transcript when it grows too large.
 
@@ -91,13 +114,16 @@ def compactor(
         count_tokens: token estimator; default :func:`estimate_tokens`.
         flush_to_memory: inject a pre-compact system reminder to persist durable facts
             via the §7E memory tool before summarizing. Default off.
+        on_compact: ``on_compact(info: CompactInfo)`` (sync or async), called after
+            each compaction — never on a no-op — so a host can tell its UI or log (§4C).
     """
     count: CountTokens = count_tokens or estimate_tokens
     tail_budget = keep_tail if keep_tail is not None else max_tokens // 2
 
     async def before_llm(ev: dict[str, Any]) -> Optional[dict[str, Any]]:
         msgs: list[Message] = ev["messages"]
-        if count(msgs) <= max_tokens:
+        before = count(msgs)
+        if before <= max_tokens:
             return None  # under budget → byte-identical no-op
 
         # Preserve a leading system prompt verbatim (identity/soul/skills — never summarized).
@@ -126,6 +152,14 @@ def compactor(
 
         older = msgs[head0:split]
         tail = msgs[split:]
+        # The latest user prompt is never summarized away. When the only clean boundary
+        # is the first message after the system prompt (one prompt followed by a long
+        # agentic run), keep that prompt verbatim and summarize the work after it:
+        # [system, prompt, summary].
+        pinned: list[Message] = []
+        if split == len(msgs) and head0 < len(msgs) and _is_boundary(msgs[head0]):
+            pinned = msgs[head0 : head0 + 1]
+            older = msgs[head0 + 1 :]
         if not older:
             return None
 
@@ -151,6 +185,24 @@ def compactor(
             "role": "system",
             "content": f"[Summary of earlier conversation]\n{result}",
         }
-        return {"messages": [*system, summary_msg, *flush_note, *tail]}
+        out = [*system, *pinned, summary_msg, *flush_note, *tail]
+        after = count(out)
+        if after >= before:
+            return None  # compaction would not shrink the transcript → no-op
+        if on_compact is not None:
+            r = on_compact(
+                CompactInfo(
+                    tokens_before=before,
+                    tokens_after=after,
+                    messages_before=len(msgs),
+                    messages_after=len(out),
+                    summarized=len(older),
+                    summary=str(result),
+                    folded=list(older),
+                )
+            )
+            if inspect.isawaitable(r):
+                await r
+        return {"messages": out}
 
     return before_llm

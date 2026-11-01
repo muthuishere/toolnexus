@@ -448,7 +448,12 @@ class AgentRuntime:
         clock: Optional[Clock] = None,
         hooks: Optional[Any] = None,
         on_metric: Optional[Callable[[dict[str, Any]], None]] = None,
+        wait_for: Optional[Callable[[Request], Any]] = None,
     ) -> None:
+        # ``wait_for`` (§4C): the runtime-level §10 interpreter — it answers a
+        # suspension when no agent on the handle's chain has its own ``wait_for``.
+        # None ⇒ unchanged (no authority ⇒ the suspension goes durable).
+        self._wait_for = wait_for
         # ``in_process`` (ADR 0030 / issue #95) is a model running IN THIS PROCESS —
         # no wire, no `llm` endpoint to dial. Mutually exclusive with `transport`
         # (both configure the HTTP seam) and with `llm` (there is no endpoint an
@@ -798,7 +803,8 @@ class AgentRuntime:
         while p is not None:
             chain.append(p)
             p = p.parent
-        if not any(a.defn.wait_for for a in chain):
+        runtime_wf = self._wait_for
+        if not any(a.defn.wait_for for a in chain) and runtime_wf is None:
             return None
 
         async def wf(req: Request) -> Answer:
@@ -812,7 +818,15 @@ class AgentRuntime:
                     h.state = "running"
                     self._t(f"{h.id}: suspended→running (Answer ok={_bool(ans.ok)})")
                     return ans
-            raise RuntimeError("unreachable")
+            # No agent on the chain holds authority: the runtime-level wait_for
+            # answers (§4C — e.g. an agent run as a tool under the parent's bridge).
+            assert runtime_wf is not None
+            who = "self" if h is self.root else self.root.id
+            self._t(f'{h.id}: escalate → {who} answers ("nearest interpreter")')
+            ans = await _maybe_await(runtime_wf(req))
+            h.state = "running"
+            self._t(f"{h.id}: suspended→running (Answer ok={_bool(ans.ok)})")
+            return ans
 
         return wf
 

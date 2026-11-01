@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import sys
+import threading
 from typing import TYPE_CHECKING, Any, Optional
 
 from .a2a import Agent, agent_tools, parse_agents_config
@@ -49,6 +50,10 @@ class Toolkit:
         # `mcp` over this.
         self._mcp_server_config = mcp_server_config
         self._by_name: dict[str, Tool] = {}
+        # Guards _by_name so register() may run (from any thread) while a turn reads
+        # the tool list (§4C). A tool registered mid-turn is offered from the next
+        # LLM call; a call already dispatched is unaffected.
+        self._lock = threading.RLock()
         # Builtins are the lowest-precedence source: a host extra_tools entry with
         # the same name shadows a builtin (SPEC §4). Drop shadowed builtins up
         # front, then apply the normal first-wins dedupe for MCP/skill/agents/extras.
@@ -194,8 +199,14 @@ class Toolkit:
     def register(self, *tools: Tool) -> "Toolkit":
         """Add native/http/custom tools at runtime. First-name-wins; warn on dup.
 
-        Returns ``self`` so calls can be chained.
+        Returns ``self`` so calls can be chained. Safe to call while a turn is
+        running and concurrently with other ``register`` calls (§4C).
         """
+        with self._lock:
+            self._register_locked(tools)
+        return self
+
+    def _register_locked(self, tools: tuple[Tool, ...]) -> None:
         for t in tools:
             if t.name in self._by_name:
                 print(
@@ -204,7 +215,6 @@ class Toolkit:
                 )
                 continue
             self._by_name[t.name] = t
-        return self
 
     async def add_agent(
         self,
@@ -275,10 +285,12 @@ class Toolkit:
         )
 
     def tools(self) -> list[Tool]:
-        return list(self._by_name.values())
+        with self._lock:
+            return list(self._by_name.values())
 
     def get(self, name: str) -> Optional[Tool]:
-        return self._by_name.get(name)
+        with self._lock:
+            return self._by_name.get(name)
 
     async def execute(
         self,
@@ -286,7 +298,7 @@ class Toolkit:
         args: Optional[dict[str, Any]] = None,
         ctx: Optional[ToolContext] = None,
     ) -> ToolResult:
-        tool = self._by_name.get(name)
+        tool = self.get(name)
         if tool is None:
             return ToolResult(output=f"Unknown tool: {name}", is_error=True)
         return await tool.execute(args or {}, ctx)

@@ -244,11 +244,13 @@ class Agent:
         clock: Optional[Clock] = None,
         hooks: Optional[Any] = None,
         on_metric: Optional[Callable[[dict[str, Any]], None]] = None,
+        wait_for: Optional[Callable[..., Any]] = None,
     ) -> AgentRuntime:
         return AgentRuntime(
             registry=self.registry(),
             **_runtime_options(
                 {
+                    "wait_for": wait_for,
                     "transport": transport,
                     "llm": llm,
                     "inbox_cap": inbox_cap,
@@ -280,19 +282,62 @@ class Agent:
         r.runtime = rt
         return r
 
+    async def _run_cancellable(self, prompt: str, signal: Any, rt_opts: dict[str, Any]) -> TaskResult:
+        """:meth:`run` that interrupts the child when ``signal`` (an asyncio.Event
+        cancel token) fires. No signal ⇒ :meth:`run`."""
+        if signal is None or not hasattr(signal, "wait"):
+            return await self.run(prompt, **rt_opts)
+        if signal.is_set():
+            return TaskResult(text="run cancelled", is_error=True, status="cancelled")
+        rt = self._runtime(**rt_opts)
+        h = rt.spawn(rt.root, self.name)
+        if not isinstance(h, Handle):
+            return TaskResult(text=h.error, is_error=True, status=TASK_STATUS_ERROR, runtime=rt)
+        rt.wake(h, prompt)
+        waiter = asyncio.ensure_future(rt.wait(h))
+        watcher = asyncio.ensure_future(signal.wait())
+        try:
+            await asyncio.wait({waiter, watcher}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            watcher.cancel()
+        if signal.is_set():
+            await rt.close(rt.root, force=True, reason="cancelled")
+            r = await waiter
+            return TaskResult(
+                text="run cancelled", is_error=True, status="cancelled", turns=r.turns,
+                total_tokens=r.total_tokens, runtime=rt,
+            )
+        r = waiter.result()
+        if r.status != "pending":
+            await rt.close(rt.root)
+        r.runtime = rt
+        return r
+
     def as_tool(self, **rt_opts: Any) -> Tool:
         """The bridge (§7D axiom): an Agent IS a Tool — drop it into the classic
         API's ``extra_tools``. Executes the agent's own loop in isolation and
-        returns only its final text + ``{agent, turns, totalTokens}`` metadata."""
+        returns only its final text + ``{agent, turns, totalTokens}`` metadata.
+        The calling turn's cancel token (``ctx.signal``) interrupts the child."""
+        return self.as_tool_with(lambda _ctx: rt_opts)
+
+    def as_tool_with(self, per_call: Callable[[Any], dict[str, Any]]) -> Tool:
+        """:meth:`as_tool` with the runtime options built per call from the calling
+        tool's :class:`ToolContext`, so the child runs under the parent turn's gates
+        (§4C): pass ``hooks`` (the same ``before_tool`` permission gate — it also sees
+        the child's tool calls), ``wait_for`` (the same ask bridge) and ``on_metric``.
+        An agent's own ``hooks`` replaces ``hooks`` for that agent, so leave it unset
+        when the gate must hold. When the calling turn is cancelled the child is
+        interrupted and the tool returns a ``cancelled: ...`` error result."""
         agent_self = self
 
         async def execute(args: Optional[dict[str, Any]] = None, ctx: Any = None) -> ToolResult:
-            r = await agent_self.run(str((args or {}).get("prompt")), **rt_opts)
-            return ToolResult(
-                output=r.text,
-                is_error=r.is_error,
-                metadata={"agent": agent_self.name, "turns": r.turns, "totalTokens": r.total_tokens},
-            )
+            opts = per_call(ctx) or {}
+            signal = getattr(ctx, "signal", None) if ctx is not None else None
+            r = await agent_self._run_cancellable(str((args or {}).get("prompt")), signal, opts)
+            meta = {"agent": agent_self.name, "turns": r.turns, "totalTokens": r.total_tokens}
+            if r.status == "cancelled":
+                return ToolResult(output=f"cancelled: {r.text}", is_error=True, metadata=meta)
+            return ToolResult(output=r.text, is_error=r.is_error, metadata=meta)
 
         return Tool(
             name=self.name,

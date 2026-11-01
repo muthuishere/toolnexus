@@ -19,7 +19,7 @@ import time
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
 from datetime import timedelta
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from mcp import ClientSession
 from mcp.client.sse import sse_client
@@ -37,6 +37,7 @@ from .types import (
     Request,
     Tool,
     ToolContext,
+    ToolHints,
     ToolResult,
     sanitize,
 )
@@ -405,6 +406,27 @@ async def _call_with_idle_timeout(
         raise
 
 
+def mcp_hints(annotations: Any) -> Optional[ToolHints]:
+    """Map MCP tool annotations to :class:`ToolHints` (§4C). No hint fields at all
+    ⇒ ``None`` (unknown). MCP's defaults apply to absent fields: readOnlyHint
+    False, destructiveHint True, openWorldHint True. Read-only is never destructive."""
+    if annotations is None:
+        return None
+    ro = getattr(annotations, "readOnlyHint", None)
+    de = getattr(annotations, "destructiveHint", None)
+    ow = getattr(annotations, "openWorldHint", None)
+    if ro is None and de is None and ow is None:
+        return None
+    h = ToolHints(
+        read_only=bool(ro) if ro is not None else False,
+        destructive=bool(de) if de is not None else True,
+        open_world=bool(ow) if ow is not None else True,
+    )
+    if h.read_only:
+        h.destructive = False
+    return h
+
+
 def _convert_tool(
     server: str, defn: McpToolDef, session: ClientSession, timeout: float
 ) -> Tool:
@@ -451,7 +473,25 @@ def _convert_tool(
         input_schema=input_schema,
         source="mcp",
         execute=execute,
+        hints=mcp_hints(getattr(defn, "annotations", None)),
     )
+
+
+@dataclass
+class McpServerResult:
+    """One server's outcome, reported by ``load_mcp(..., on_server=...)`` the moment
+    that server finishes — never waiting for a slower server (§4C)."""
+
+    name: str
+    status: McpStatus
+    # This server's converted tools (empty unless connected). They stay usable
+    # until the returned McpSource is closed.
+    tools: list[Tool] = field(default_factory=list)
+    # Why the server failed (None when connected or disabled).
+    error: Optional[BaseException] = None
+
+
+OnServer = Callable[[McpServerResult], Any]
 
 
 @dataclass
@@ -459,9 +499,150 @@ class McpSource:
     tools: list[Tool]
     status: dict[str, McpStatus]
     _stack: AsyncExitStack = field(repr=False)
+    # Connected sessions by server name, with each server's timeout (resource_tools).
+    _sessions: dict[str, tuple[ClientSession, float]] = field(default_factory=dict, repr=False)
 
     async def close(self) -> None:
         await self._stack.aclose()
+
+    def resource_tools(self) -> list[Tool]:
+        """``list_mcp_resources`` and ``read_mcp_resource`` over this source's
+        connected servers (§4C). Opt-in: register them yourself. Both are
+        read-only and stop working when the source is closed."""
+        return _resource_tools(self)
+
+
+def _resource_tools(src: "McpSource") -> list[Tool]:
+    ro = ToolHints(read_only=True)
+
+    def names() -> list[str]:
+        return sorted(src._sessions)
+
+    def conn(server: str) -> tuple[ClientSession, float]:
+        c = src._sessions.get(server)
+        if c is None:
+            raise LookupError(
+                f'no connected MCP server "{server}" (connected: {", ".join(names())})'
+            )
+        return c
+
+    async def list_run(
+        args: Optional[dict[str, Any]] = None, ctx: Optional[ToolContext] = None
+    ) -> ToolResult:
+        args = args or {}
+        servers = names()
+        only = args.get("server")
+        if isinstance(only, str) and only:
+            try:
+                conn(only)
+            except LookupError as e:
+                return ToolResult(output=f"list_mcp_resources: {e}", is_error=True)
+            servers = [only]
+        lines: list[str] = []
+        items: list[dict[str, Any]] = []
+        for name in servers:
+            session, timeout = conn(name)
+            try:
+                async with asyncio.timeout(timeout):
+                    res = await session.list_resources()
+            except Exception as e:  # noqa: BLE001 - one server never breaks the list
+                lines.append(f"{name}: error: {e}")
+                continue
+            for r in res.resources:
+                uri = str(r.uri)
+                line = f"{name} {uri}"
+                if r.name:
+                    line += " — " + r.name
+                if r.mimeType:
+                    line += f" ({r.mimeType})"
+                if r.description:
+                    line += ": " + r.description
+                lines.append(line)
+                items.append(
+                    {
+                        "server": name,
+                        "uri": uri,
+                        "name": r.name or "",
+                        "mimeType": r.mimeType or "",
+                        "description": r.description or "",
+                    }
+                )
+        if not lines:
+            return ToolResult(output="No resources.", is_error=False, metadata={"count": 0})
+        return ToolResult(
+            output="\n".join(lines),
+            is_error=False,
+            metadata={"count": len(items), "resources": items},
+        )
+
+    async def read_run(
+        args: Optional[dict[str, Any]] = None, ctx: Optional[ToolContext] = None
+    ) -> ToolResult:
+        args = args or {}
+        server = str(args.get("server") or "")
+        uri = str(args.get("uri") or "")
+        try:
+            session, timeout = conn(server)
+        except LookupError as e:
+            return ToolResult(output=f"read_mcp_resource: {e}", is_error=True)
+        if not uri:
+            return ToolResult(output="read_mcp_resource: uri is required", is_error=True)
+        try:
+            async with asyncio.timeout(timeout):
+                res = await session.read_resource(uri)  # type: ignore[arg-type]
+        except Exception as e:  # noqa: BLE001
+            return ToolResult(output=f"read_mcp_resource: {e}", is_error=True)
+        parts: list[str] = []
+        for rc in res.contents:
+            text = getattr(rc, "text", None)
+            if text is not None:
+                parts.append(text)
+                continue
+            blob = getattr(rc, "blob", None)
+            if blob is not None:
+                parts.append(f"[binary {rc.mimeType or ''}, {len(blob)} base64 chars]")
+        return ToolResult(
+            output="\n".join(parts), is_error=False, metadata={"server": server, "uri": uri}
+        )
+
+    return [
+        Tool(
+            name="list_mcp_resources",
+            description=(
+                "List the resources MCP servers offer (uri, name, description, mimeType). "
+                "Optionally for one server."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "server": {"type": "string", "description": "Only this server (default: all)"}
+                },
+                "additionalProperties": False,
+            },
+            source="mcp",
+            execute=list_run,
+            hints=ro,
+        ),
+        Tool(
+            name="read_mcp_resource",
+            description=(
+                "Read one MCP resource by server and uri. Text comes back as text; "
+                "binary content is described, not inlined."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "server": {"type": "string", "description": "The MCP server name"},
+                    "uri": {"type": "string", "description": "The resource uri"},
+                },
+                "required": ["server", "uri"],
+                "additionalProperties": False,
+            },
+            source="mcp",
+            execute=read_run,
+            hints=ro,
+        ),
+    ]
 
 
 def _make_elicitation_callback(wait_for: Any) -> Any:
@@ -535,14 +716,20 @@ async def _safe_aclose(stack: AsyncExitStack) -> None:
         pass
 
 
-async def load_mcp(input: str | dict[str, Any], wait_for: Any = None) -> McpSource:
+async def load_mcp(
+    input: str | dict[str, Any],
+    wait_for: Any = None,
+    *,
+    on_server: Optional[OnServer] = None,
+) -> McpSource:
     """Connect to every enabled server, list + convert tools. Failures are isolated:
     one bad server records status ``"failed"`` and never breaks the toolkit.
 
     Delegates to :func:`load_mcp_with_context` (parity with Go's ``LoadMcp`` →
     ``LoadMcpWithContext``); a healthy config behaves byte-identically to before.
+    ``on_server`` — see :func:`load_mcp_with_context`.
     """
-    return await load_mcp_with_context(input, wait_for=wait_for)
+    return await load_mcp_with_context(input, wait_for=wait_for, on_server=on_server)
 
 
 async def load_mcp_with_context(
@@ -550,6 +737,7 @@ async def load_mcp_with_context(
     wait_for: Any = None,
     *,
     cancel: Optional[asyncio.Event] = None,
+    on_server: Optional[OnServer] = None,
 ) -> McpSource:
     """Cancellation/timeout-aware MCP load (§2 Gap 3). Mirrors Go
     ``LoadMcpWithContext``: each server's connect + list is bounded by that server's
@@ -558,10 +746,21 @@ async def load_mcp_with_context(
     ``cancel`` :class:`asyncio.Event` (the Python analogue of a parent context being
     cancelled) aborts the WHOLE load, tears down whatever connected so far, and raises
     :class:`asyncio.CancelledError`. Per-server failure isolation is unchanged.
+
+    ``on_server`` (§4C, sync or async ``(McpServerResult) -> None``): called once per
+    server the moment it is connected, failed or found disabled. With it set, the
+    servers connect CONCURRENTLY (each in its own task, which owns that server's
+    transport for its lifetime), so a slow server never holds up a fast one. Calls
+    are serialized. The load still returns only after every server finished, and
+    ``cancel`` still aborts it and closes every client — including ones whose tools
+    were already handed out. Without it the load is byte-identical to before.
     """
     config = parse_mcp_config(input)
+    if on_server is not None:
+        return await _load_mcp_concurrent(config, wait_for, cancel, on_server)
     tools: list[Tool] = []
     status: dict[str, McpStatus] = {}
+    sessions: dict[str, tuple[ClientSession, float]] = {}
     stack = AsyncExitStack()
 
     def _cancelled() -> bool:
@@ -591,6 +790,7 @@ async def load_mcp_with_context(
                     tools.append(_convert_tool(name, defn, session, timeout))
                 # hand the server's lifetime to the parent stack
                 await stack.enter_async_context(server_stack)
+                sessions[name] = (session, timeout)
                 status[name] = "connected"
             except asyncio.CancelledError:
                 # A per-server ``asyncio.timeout`` expiry can surface as a bare
@@ -621,7 +821,120 @@ async def load_mcp_with_context(
             pass
         raise
 
-    return McpSource(tools=tools, status=status, _stack=stack)
+    return McpSource(tools=tools, status=status, _stack=stack, _sessions=sessions)
+
+
+async def _server_worker(
+    name: str,
+    cfg: ServerConfig,
+    wait_for: Any,
+    timeout: float,
+    ready: "asyncio.Future[tuple[Any, Any, Optional[BaseException]]]",
+    close_evt: asyncio.Event,
+) -> None:
+    """Own one server's transport for its whole life (on_server path). The anyio
+    transports must be entered and exited in the same task, so this task connects,
+    reports through ``ready``, then holds the connection until ``close_evt``."""
+    server_stack = AsyncExitStack()
+    try:
+        async with asyncio.timeout(timeout):
+            session = await _connect_session(server_stack, name, cfg, wait_for)
+            defs = await _paginate_tools(session)
+    except BaseException as e:  # noqa: BLE001 - reported as this server's failure
+        await _safe_aclose(server_stack)
+        if not ready.done():
+            err = TimeoutError("timed out") if isinstance(e, asyncio.CancelledError) else e
+            ready.set_result((None, None, err))
+        return
+    ready.set_result((session, defs, None))
+    try:
+        await close_evt.wait()
+    finally:
+        await _safe_aclose(server_stack)
+
+
+async def _load_mcp_concurrent(
+    config: McpConfig,
+    wait_for: Any,
+    cancel: Optional[asyncio.Event],
+    on_server: OnServer,
+) -> McpSource:
+    tools: list[Tool] = []
+    status: dict[str, McpStatus] = {}
+    sessions: dict[str, tuple[ClientSession, float]] = {}
+    close_evt = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    workers: list[tuple[asyncio.Task[None], asyncio.Future[Any]]] = []
+    waiting: dict[asyncio.Future[Any], tuple[str, ServerConfig, float]] = {}
+
+    async def report(r: McpServerResult) -> None:
+        out = on_server(r)
+        if inspect.isawaitable(out):
+            await out
+
+    async def shutdown() -> None:
+        close_evt.set()
+        for task, ready in workers:
+            if not ready.done():
+                task.cancel()
+        for task, _ in workers:
+            try:
+                await task
+            except BaseException:  # noqa: BLE001 - teardown is best-effort
+                pass
+
+    stack = AsyncExitStack()
+    stack.push_async_callback(shutdown)
+    cancel_task: Optional[asyncio.Task[Any]] = (
+        asyncio.ensure_future(cancel.wait()) if cancel is not None else None
+    )
+    try:
+        if cancel is not None and cancel.is_set():
+            raise asyncio.CancelledError()
+        for name, cfg in config.items():
+            if not is_enabled(cfg):
+                status[name] = "disabled"
+                await report(McpServerResult(name=name, status="disabled"))
+                continue
+            timeout = _to_seconds(cfg.get("timeout", DEFAULT_TIMEOUT * 1000))
+            ready: asyncio.Future[Any] = loop.create_future()
+            task = asyncio.ensure_future(
+                _server_worker(name, cfg, wait_for, timeout, ready, close_evt)
+            )
+            workers.append((task, ready))
+            waiting[ready] = (name, cfg, timeout)
+        pending_set: set[Any] = set(waiting)
+        while pending_set:
+            watch = pending_set | ({cancel_task} if cancel_task is not None else set())
+            done, _ = await asyncio.wait(watch, return_when=asyncio.FIRST_COMPLETED)
+            if cancel_task is not None and cancel_task in done:
+                raise asyncio.CancelledError()
+            for fut in done:
+                pending_set.discard(fut)
+                name, cfg, timeout = waiting[fut]
+                session, defs, err = fut.result()
+                if err is not None:
+                    status[name] = "failed"
+                    print(f'[toolnexus] MCP server "{name}" failed: {err}', file=sys.stderr)
+                    await report(McpServerResult(name=name, status="failed", error=err))
+                    continue
+                defs = apply_tools_filter(name, defs, cfg.get("tools"))
+                converted = [_convert_tool(name, d, session, timeout) for d in defs]
+                tools.extend(converted)
+                sessions[name] = (session, timeout)
+                status[name] = "connected"
+                await report(McpServerResult(name=name, status="connected", tools=converted))
+    except BaseException:
+        # Whole-load abort: close every client, including ones already reported.
+        try:
+            await stack.aclose()
+        except Exception:  # noqa: BLE001
+            pass
+        raise
+    finally:
+        if cancel_task is not None:
+            cancel_task.cancel()
+    return McpSource(tools=tools, status=status, _stack=stack, _sessions=sessions)
 
 
 # ---------------------------------------------------------------------------

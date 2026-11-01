@@ -156,7 +156,14 @@ from .mcp_source import (
     load_mcp,
     load_mcp_with_context,
     parse_mcp_config,
+    McpServerResult,
+    OnServer,
+    mcp_hints,
 )
+from .builtin_extras import BackgroundShellInfo, BackgroundShells, WebSearchResult
+from .client import ModelInfo, list_models
+from .prompt_cache import PromptCacheOptions
+from .tool_tiers import TIER_CORE, TIER_DEFERRED, TIER_LISTED, ToolTier, ToolTierOptions
 from .mcp_serve import (
     MCPServeConfig,
     OnCall,
@@ -193,6 +200,7 @@ from .types import (
     Request,
     Tool,
     ToolContext,
+    ToolHints,
     ToolResult,
     ToolSource,
     auth_required,
@@ -204,6 +212,22 @@ from .types import (
 )
 
 __all__ = [
+    # host engine asks + prompt cache (SPEC §4C, §8)
+    "ToolHints",
+    "McpServerResult",
+    "OnServer",
+    "mcp_hints",
+    "BackgroundShells",
+    "BackgroundShellInfo",
+    "WebSearchResult",
+    "ModelInfo",
+    "list_models",
+    "PromptCacheOptions",
+    "ToolTierOptions",
+    "ToolTier",
+    "TIER_CORE",
+    "TIER_LISTED",
+    "TIER_DEFERRED",
     # acp (ADR 0031, issue #96)
     "ACPClient",
     "ACPError",

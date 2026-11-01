@@ -21,7 +21,7 @@ the event. Revisit if a port cannot express it.
 
 ## 2. Other ports (pending — before the next release)
 - [ ] 2.1 js
-- [ ] 2.2 python
+- [x] 2.2 python (2026-11-01: all of 1.1–1.5g; concurrent MCP load only with on_server; disabled-status race N/A — asyncio single loop)
 - [ ] 2.3 java
 - [ ] 2.4 csharp
 - [ ] 2.5 elixir
