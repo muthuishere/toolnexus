@@ -18,7 +18,8 @@ defmodule Toolnexus.Toolkit do
 
   alias Toolnexus.{A2a, Adapters, Builtin, Context, Mcp, Skill, Tool, ToolResult}
 
-  defstruct tools: [],
+  defstruct id: nil,
+            tools: [],
             prompt: "",
             by_name: %{},
             mcp: nil,
@@ -27,6 +28,7 @@ defmodule Toolnexus.Toolkit do
             mcp_server_config: nil
 
   @type t :: %__MODULE__{
+          id: reference() | nil,
           tools: [Tool.t()],
           prompt: String.t(),
           by_name: %{String.t() => Tool.t()},
@@ -120,6 +122,8 @@ defmodule Toolnexus.Toolkit do
       |> Enum.reduce({[], %{}}, &dedupe/2)
 
     %__MODULE__{
+      # Identity that survives `register/2` (keys the client's frozen tool-tier plan).
+      id: make_ref(),
       tools: Enum.reverse(order_rev),
       prompt: if(skill, do: skill.prompt, else: ""),
       by_name: by_name,

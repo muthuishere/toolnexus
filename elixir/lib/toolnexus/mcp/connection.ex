@@ -36,6 +36,9 @@ defmodule Toolnexus.Mcp.Connection do
   @doc "Call a tool by its ORIGINAL (unprefixed) name."
   def call_tool(pid, name, args), do: rpc(pid, {:tools_call, name, args})
 
+  @doc "Send any other request (e.g. resources/list, resources/read); same per-call timeout."
+  def request(pid, method, params), do: rpc(pid, {:raw, method, params})
+
   @doc "The stdio child's OS pid (for lifetime assertions); :error for remote servers."
   def os_pid(pid) do
     GenServer.call(pid, :os_pid)
@@ -387,6 +390,8 @@ defmodule Toolnexus.Mcp.Connection do
 
   defp build_request(id, {:tools_call, name, args}),
     do: Protocol.tools_call_request(id, name, args)
+
+  defp build_request(id, {:raw, method, params}), do: Protocol.request(id, method, params)
 
   defp transport_send(%{mode: :stdio, stdio: t}, msg), do: Stdio.send_msg(t, msg)
 

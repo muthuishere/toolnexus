@@ -10,9 +10,20 @@ defmodule Toolnexus.Builtin do
 
   The ten tools, in fixed parity order: bash, read, write, edit, grep, glob,
   webfetch, question, apply_patch, todowrite.
+
+  Opt-in tools (SPEC §4C), absent unless configured, appended in this order:
+
+    * `background: Toolnexus.Builtin.BackgroundShells.new()` — `bash` gains
+      `run_in_background`, plus `bash_output` and `kill_shell`. The host owns the
+      registry and calls `BackgroundShells.close_all/1` on shutdown.
+    * `web_search: fn query, limit -> {:ok, [%{title, url, snippet}]} | {:error, reason} end`
+      — adds `websearch` over the host's provider (the library ships none).
+    * `notebook_edit: true` — adds `notebook_edit` for `.ipynb` cells.
+
+  Every builtin carries `Toolnexus.ToolHints` for host permission gates.
   """
 
-  alias Toolnexus.{ContentPart, Tool, ToolResult, Request}
+  alias Toolnexus.{ContentPart, Tool, ToolHints, ToolResult, Request}
 
   @ignore_dirs ["node_modules", ".git"]
   @file_marker ~r/^\*\*\* (Add|Update|Delete) File: (.+)$/
@@ -60,6 +71,26 @@ defmodule Toolnexus.Builtin do
 
   defp cfg_get(cfg, key), do: Map.get(cfg, key, Map.get(cfg, Atom.to_string(key)))
 
+  # SPEC §4C: bash can do anything, so it is destructive and open-world. todowrite
+  # and question only touch the agent's own state / ask the human: read-only for the
+  # host's files and systems.
+  @hints %{
+    "bash" => %ToolHints{destructive: true, open_world: true},
+    "read" => %ToolHints{read_only: true},
+    "write" => %ToolHints{destructive: true},
+    "edit" => %ToolHints{destructive: true},
+    "grep" => %ToolHints{read_only: true},
+    "glob" => %ToolHints{read_only: true},
+    "webfetch" => %ToolHints{read_only: true, open_world: true},
+    "question" => %ToolHints{read_only: true},
+    "apply_patch" => %ToolHints{destructive: true},
+    "todowrite" => %ToolHints{read_only: true},
+    "bash_output" => %ToolHints{read_only: true},
+    "kill_shell" => %ToolHints{destructive: true},
+    "websearch" => %ToolHints{read_only: true, open_world: true},
+    "notebook_edit" => %ToolHints{destructive: true}
+  }
+
   @doc """
   Build the ten built-in tools (each `source: "builtin"`). The order is fixed
   for parity: bash, read, write, edit, grep, glob, webfetch, question,
@@ -69,19 +100,24 @@ defmodule Toolnexus.Builtin do
   def tools(cfg \\ nil) do
     e = env(cfg)
 
-    [
-      bash_tool(e),
-      read_tool(e),
-      write_tool(e),
-      edit_tool(e),
-      grep_tool(e),
-      glob_tool(e),
-      webfetch_tool(),
-      question_tool(),
-      apply_patch_tool(e),
-      todowrite_tool()
-    ]
+    ([
+       bash_tool(e),
+       read_tool(e),
+       write_tool(e),
+       edit_tool(e),
+       grep_tool(e),
+       glob_tool(e),
+       webfetch_tool(),
+       question_tool(),
+       apply_patch_tool(e),
+       todowrite_tool()
+     ] ++
+       if(e.background, do: [bash_output_tool(e), kill_shell_tool(e)], else: []) ++
+       if(e.web_search, do: [websearch_tool(e.web_search)], else: []) ++
+       if(e.notebook_edit, do: [notebook_edit_tool(e)], else: []))
+    |> Enum.map(&%{&1 | hints: Map.fetch!(@hints, &1.name)})
   end
+
 
   # ---------------------------------------------------------------------------
   # the host boundary: interpreter, base directory, confinement (SPEC §4A, ADR 0034)
@@ -162,12 +198,21 @@ defmodule Toolnexus.Builtin do
         _ -> @kill_grace_ms
       end
 
+    web_search =
+      case cfg_get(map, :web_search) || cfg_get(map, :webSearch) do
+        f when is_function(f, 2) -> f
+        _ -> nil
+      end
+
     %{
       shell: shell,
       shell_error: shell_error,
       base_dir: to_string(base_dir),
       confine: confine,
-      kill_grace_ms: grace
+      kill_grace_ms: grace,
+      background: cfg_get(map, :background),
+      web_search: web_search,
+      notebook_edit: cfg_get(map, :notebook_edit) == true or cfg_get(map, :notebookEdit) == true
     }
   end
 
@@ -385,17 +430,29 @@ defmodule Toolnexus.Builtin do
   # ---------------------------------------------------------------------------
 
   defp bash_tool(env) do
+    props = %{
+      "command" => %{"type" => "string", "description" => "The shell command to run"},
+      "workdir" => %{"type" => "string", "description" => "Working directory (default: process cwd)"},
+      "timeout" => %{"type" => "number", "description" => "Timeout in milliseconds (default 60000)"},
+      "description" => %{"type" => "string", "description" => "Human-readable description of the command"}
+    }
+
+    props =
+      if env.background,
+        do:
+          Map.put(props, "run_in_background", %{
+            "type" => "boolean",
+            "description" =>
+              "Start the command and return at once with a background shell id; read it with bash_output, stop it with kill_shell. No timeout applies."
+          }),
+        else: props
+
     builtin(
       "bash",
       "Run a shell command and return its combined stdout+stderr. Non-zero exit is an error.",
       %{
         "type" => "object",
-        "properties" => %{
-          "command" => %{"type" => "string", "description" => "The shell command to run"},
-          "workdir" => %{"type" => "string", "description" => "Working directory (default: process cwd)"},
-          "timeout" => %{"type" => "number", "description" => "Timeout in milliseconds (default 60000)"},
-          "description" => %{"type" => "string", "description" => "Human-readable description of the command"}
-        },
+        "properties" => props,
         "required" => ["command"],
         "additionalProperties" => false
       },
@@ -418,8 +475,17 @@ defmodule Toolnexus.Builtin do
                 err("bash: #{message}")
 
               {:ok, workdir} ->
-                timeout = args["timeout"] |> num(60_000) |> round()
-                run_job(env, command, workdir, timeout)
+                if is_pid(env.background) and args["run_in_background"] == true do
+                  id = Toolnexus.Builtin.BackgroundShells.start_job(env.background, env, command, workdir)
+
+                  ok(
+                    "Started background shell #{id}. Read its output with bash_output, stop it with kill_shell.",
+                    %{shell: Enum.join(env.shell, " "), backgroundId: id}
+                  )
+                else
+                  timeout = args["timeout"] |> num(60_000) |> round()
+                  run_job(env, command, workdir, timeout)
+                end
             end
         end
       end
@@ -513,6 +579,78 @@ defmodule Toolnexus.Builtin do
           "bash: command timed out after #{timeout}ms\n#{out}",
           Map.merge(meta, %{timedOut: true, killedTree: killed})
         )
+    end
+  end
+
+  @doc false
+  # A background job (SPEC §4C): the port owner. It traps exits, so whichever way
+  # the registry leaves, the job's process group is stopped on the way out.
+  def background_job(env, command, workdir, owner) do
+    Process.flag(:trap_exit, true)
+    [exe | prefix] = env.shell
+
+    port =
+      Port.open({:spawn_executable, exe}, [
+        :binary,
+        :exit_status,
+        :stderr_to_stdout,
+        args: prefix ++ [command],
+        cd: workdir
+      ])
+
+    os_pid =
+      case Port.info(port, :os_pid) do
+        {:os_pid, pid} -> pid
+        _ -> nil
+      end
+
+    background_loop(%{
+      port: port,
+      os_pid: os_pid,
+      owner: owner,
+      grace: env.kill_grace_ms,
+      out: "",
+      read: 0,
+      status: :running,
+      code: nil
+    })
+  end
+
+  defp background_loop(%{port: port} = j) do
+    receive do
+      {^port, {:data, d}} ->
+        background_loop(%{j | out: j.out <> d})
+
+      {^port, {:exit_status, code}} ->
+        background_loop(%{j | status: if(j.status == :killed, do: :killed, else: :exited), code: code})
+
+      {:read, from, ref} ->
+        fresh = binary_part(j.out, j.read, byte_size(j.out) - j.read)
+        send(from, {ref, fresh, j.status, j.code})
+        background_loop(%{j | read: byte_size(j.out)})
+
+      {:info, from, ref} ->
+        send(from, {ref, j.status, j.code})
+        background_loop(j)
+
+      {:kill, from, ref} ->
+        if j.status == :running do
+          kill_job(port, j.os_pid, j.grace)
+          send(from, {ref, true})
+          background_loop(%{j | status: :killed})
+        else
+          send(from, {ref, false})
+          background_loop(j)
+        end
+
+      # Only the registry leaving stops the job; the port's own link exit and the
+      # links of the System.cmd ports kill_job opens are not that.
+      {:EXIT, owner, _reason} when owner == j.owner ->
+        if j.status == :running, do: kill_job(port, j.os_pid, j.grace)
+        :ok
+
+      {:EXIT, _from, _reason} ->
+        background_loop(j)
     end
   end
 
@@ -685,7 +823,16 @@ defmodule Toolnexus.Builtin do
                         do: max(0, trunc(args["limit"])),
                         else: max(0, length(lines) - start)
 
-                    ok(lines |> Enum.slice(start, limit) |> Enum.join("\n"))
+                    out = lines |> Enum.slice(start, limit) |> Enum.join("\n")
+                    # SPEC §4C: a window that stops before the end says so in metadata,
+                    # with the offset to continue from. The text stays the pinned
+                    # cross-port bytes. A trailing newline does not count as a line.
+                    total = if List.last(lines) == "", do: length(lines) - 1, else: length(lines)
+                    stop = min(start + limit, length(lines))
+
+                    if stop < total,
+                      do: ok(out, %{truncated: true, totalLines: total, nextOffset: stop + 1}),
+                      else: ok(out)
                 end
             end
         end
@@ -811,7 +958,13 @@ defmodule Toolnexus.Builtin do
           "pattern" => %{"type" => "string", "description" => "Regular expression to search for"},
           "path" => %{"type" => "string", "description" => "Directory to search (default: process cwd)"},
           "include" => %{"type" => "string", "description" => "Glob filter for file names"},
-          "limit" => %{"type" => "number", "description" => "Maximum number of matches (default 100)"}
+          "limit" => %{"type" => "number", "description" => "Maximum number of matches (default 100)"},
+          "context" => %{"type" => "number", "description" => "Lines of context before and after each match"},
+          "before" => %{
+            "type" => "number",
+            "description" => "Lines of context before each match (overrides context)"
+          },
+          "after" => %{"type" => "number", "description" => "Lines of context after each match (overrides context)"}
         },
         "required" => ["pattern"],
         "additionalProperties" => false
@@ -835,55 +988,96 @@ defmodule Toolnexus.Builtin do
 
               include = if args["include"], do: str(args["include"])
               limit = args["limit"] |> num(100) |> trunc()
+              ctx_n = fn key -> if is_number(args[key]), do: trunc(args[key]), else: nil end
 
-              matches =
-                # A26: the fold halts at the cap, which is only correct because
-                # `walk_files/1` hands back ONE globally sorted list — the halt then
-                # truncates a sorted sequence instead of letting the walk decide.
+              {before, after_} =
+                case ctx_n.("context") do
+                  c when is_integer(c) and c > 0 -> {c, c}
+                  _ -> {0, 0}
+                end
+
+              before = if (b = ctx_n.("before")) && b >= 0, do: b, else: before
+              after_ = if (a = ctx_n.("after")) && a >= 0, do: a, else: after_
+
+              # A26: `walk_files/1` hands back ONE globally sorted list, so the cap
+              # truncates a sorted sequence instead of letting the walk decide. Every
+              # hit is counted (not halted at the cap) so a cut can be reported.
+              all_hits =
                 walk_files(root)
-                |> Enum.reduce_while([], fn file, acc ->
-                  if length(acc) >= limit do
-                    {:halt, acc}
+                |> Enum.flat_map(fn file ->
+                  # A28/A27c: grep EMITS the same relative `/`-path it sorts on.
+                  # Sorting on one string and displaying another orders by one
+                  # thing and shows the reader another.
+                  rel = Path.relative_to(file, root)
+
+                  with true <- is_nil(include) or match_glob?(rel, include),
+                       {:ok, text} <- File.read(file) do
+                    lines = String.split(text, "\n")
+
+                    lines
+                    |> Enum.with_index(1)
+                    |> Enum.filter(fn {line, _i} -> Regex.match?(re, line) end)
+                    # A27c: line numbers stay in NUMERIC order. They are never
+                    # re-sorted as part of the rendered `path:line:text` string,
+                    # which would put line 10 before line 2. `with_index` already
+                    # ascends and the filter preserves it, so numeric order holds by
+                    # construction — the files above it are ordered by relative
+                    # path, giving (path, line) overall.
+                    |> Enum.map(fn {line, i} -> {rel, i, line, lines} end)
                   else
-                    # A28/A27c: grep EMITS the same relative `/`-path it sorts on.
-                    # Sorting on one string and displaying another orders by one
-                    # thing and shows the reader another.
-                    rel = Path.relative_to(file, root)
-
-                    if include && not match_glob?(rel, include) do
-                      {:cont, acc}
-                    else
-                      case File.read(file) do
-                        {:error, _} ->
-                          {:cont, acc}
-
-                        {:ok, text} ->
-                          hits =
-                            text
-                            |> String.split("\n")
-                            |> Enum.with_index(1)
-                            |> Enum.filter(fn {line, _i} -> Regex.match?(re, line) end)
-                            # A27c: line numbers stay in NUMERIC order. They are
-                            # never re-sorted as part of the rendered
-                            # `path:line:text` string, which would put line 10
-                            # before line 2. `with_index` already ascends and the
-                            # filter preserves it, so numeric order holds by
-                            # construction — the files above it are ordered by
-                            # relative path, giving (path, line) overall.
-                            |> Enum.map(fn {line, i} -> "#{rel}:#{i}:#{line}" end)
-                            |> Enum.take(max(limit - length(acc), 0))
-
-                          {:cont, acc ++ hits}
-                      end
-                    end
+                    _ -> []
                   end
                 end)
 
-              ok(Enum.join(matches, "\n"), %{count: length(matches)})
+              total = length(all_hits)
+              hits = Enum.take(all_hits, max(limit, 0))
+
+              out =
+                if before == 0 and after_ == 0,
+                  do: Enum.map(hits, fn {rel, i, line, _} -> "#{rel}:#{i}:#{line}" end),
+                  else: grep_context(hits, before, after_)
+
+              meta = %{count: length(hits)}
+              meta = if total > length(hits), do: Map.merge(meta, %{truncated: true, total: total}), else: meta
+              ok(Enum.join(out, "\n"), meta)
           end
         end
       end
     )
+  end
+
+  # ripgrep-style (SPEC §4C): match lines `path:N:text`, context lines `path-N-text`,
+  # `--` between groups that do not touch.
+  defp grep_context(hits, before, after_) do
+    match_at = MapSet.new(hits, fn {rel, i, _, _} -> {rel, i} end)
+
+    {out, _} =
+      Enum.reduce(hits, {[], {nil, 0}}, fn {rel, i, _line, lines}, {out, {last_rel, last_line}} ->
+        n = if List.last(lines) == "", do: length(lines) - 1, else: length(lines)
+        from = max(1, i - before)
+        to = min(n, i + after_)
+
+        {from, out} =
+          cond do
+            rel == last_rel and from <= last_line + 1 -> {last_line + 1, out}
+            last_rel != nil -> {from, ["--" | out]}
+            true -> {from, out}
+          end
+
+        out =
+          if from <= to,
+            do:
+              Enum.reduce(from..to//1, out, fn k, acc ->
+                sep = if MapSet.member?(match_at, {rel, k}), do: ":", else: "-"
+                ["#{rel}#{sep}#{k}#{sep}#{Enum.at(lines, k - 1)}" | acc]
+              end),
+            else: out
+
+        last_line = if to > last_line or rel != last_rel, do: to, else: last_line
+        {out, {rel, last_line}}
+      end)
+
+    Enum.reverse(out)
   end
 
   defp glob_tool(env) do
@@ -1390,4 +1584,366 @@ defmodule Toolnexus.Builtin do
       end
     )
   end
+
+  # ---------------------------------------------------------------------------
+  # opt-in builtins (SPEC §4C): background shells, websearch, notebook_edit
+  # ---------------------------------------------------------------------------
+
+  alias Toolnexus.Builtin.BackgroundShells
+
+  defp id_schema do
+    %{
+      "type" => "object",
+      "properties" => %{
+        "id" => %{"type" => "string", "description" => "The background shell id bash returned"}
+      },
+      "required" => ["id"],
+      "additionalProperties" => false
+    }
+  end
+
+  defp bash_output_tool(env) do
+    builtin(
+      "bash_output",
+      "Read the output a background bash command (started with run_in_background) produced since the last read, and whether it is still running.",
+      id_schema(),
+      fn args, _ctx ->
+        id = str(args["id"])
+
+        case BackgroundShells.read(env.background, id) do
+          :error ->
+            err(~s(bash_output: no background shell "#{id}"))
+
+          {:ok, fresh, status, code} ->
+            meta = %{id: id, status: Atom.to_string(status)}
+            meta = if status == :exited, do: Map.put(meta, :exitCode, code), else: meta
+            ok("#{fresh}\n[status: #{BackgroundShells.status_text(status, code)}]", meta)
+        end
+      end
+    )
+  end
+
+  defp kill_shell_tool(env) do
+    builtin(
+      "kill_shell",
+      "Stop a background bash command and everything it started.",
+      id_schema(),
+      fn args, _ctx ->
+        id = str(args["id"])
+
+        case BackgroundShells.kill_job(env.background, id) do
+          :error ->
+            err(~s(kill_shell: no background shell "#{id}"))
+
+          {:ok, true} ->
+            ok("Killed background shell #{id}", %{id: id, killed: true})
+
+          {:ok, false} ->
+            {status, code} = BackgroundShells.info(env.background, id)
+
+            ok(
+              "Background shell #{id} had already #{BackgroundShells.status_text(status, code)}",
+              %{id: id, killed: false}
+            )
+        end
+      end
+    )
+  end
+
+  defp websearch_tool(search) do
+    builtin(
+      "websearch",
+      "Search the web. Returns numbered results with title, URL and snippet.",
+      %{
+        "type" => "object",
+        "properties" => %{
+          "query" => %{"type" => "string", "description" => "The search query"},
+          "limit" => %{"type" => "number", "description" => "Maximum number of results (default 5)"}
+        },
+        "required" => ["query"],
+        "additionalProperties" => false
+      },
+      fn args, _ctx ->
+        q = str(args["query"])
+        limit = if is_number(args["limit"]) and args["limit"] >= 1, do: trunc(args["limit"]), else: 5
+
+        if String.trim(q) == "" do
+          err("websearch: query is required")
+        else
+          case search.(q, limit) do
+            {:ok, results} when is_list(results) ->
+              results = results |> Enum.take(limit) |> Enum.map(&search_hit/1)
+
+              if results == [] do
+                ok("No results.", %{count: 0})
+              else
+                text =
+                  results
+                  |> Enum.with_index(1)
+                  |> Enum.map_join("\n\n", fn {r, i} ->
+                    "#{i}. #{r.title}\n   #{r.url}" <> if(r.snippet != "", do: "\n   #{r.snippet}", else: "")
+                  end)
+
+                ok(text, %{count: length(results), results: results})
+              end
+
+            {:error, reason} ->
+              err("websearch: #{if is_binary(reason), do: reason, else: inspect(reason)}")
+          end
+        end
+      end
+    )
+  end
+
+  defp search_hit(r) do
+    get = fn k -> str(Map.get(r, k) || Map.get(r, Atom.to_string(k)) || "") end
+    %{title: get.(:title), url: get.(:url), snippet: get.(:snippet)}
+  end
+
+  defp notebook_edit_tool(env) do
+    builtin(
+      "notebook_edit",
+      "Edit a Jupyter notebook (.ipynb) cell: replace its source, insert a new cell after it, or delete it. Replacing a code cell clears its outputs.",
+      %{
+        "type" => "object",
+        "properties" => %{
+          "path" => %{"type" => "string", "description" => "Path to the .ipynb file"},
+          "cell_id" => %{"type" => "string", "description" => "The cell's id (or use cell_index)"},
+          "cell_index" => %{"type" => "number", "description" => "0-based cell position (used when cell_id is absent)"},
+          "new_source" => %{"type" => "string", "description" => "The new cell source (replace/insert)"},
+          "cell_type" => %{
+            "type" => "string",
+            "enum" => ["code", "markdown"],
+            "description" => "Cell type for insert (default code) or to change on replace"
+          },
+          "edit_mode" => %{
+            "type" => "string",
+            "enum" => ["replace", "insert", "delete"],
+            "description" => "Default replace. insert adds the new cell AFTER the given cell, or first when none is given"
+          }
+        },
+        "required" => ["path"],
+        "additionalProperties" => false
+      },
+      fn args, _ctx ->
+        p = str(args["path"])
+
+        with {:path, false} <- {:path, p == ""},
+             {:ok, full} <- resolve_path(env, p),
+             {:ok, raw} <- notebook_io(File.read(full)),
+             {:ok, nb} <- decode_notebook(raw, p) do
+          notebook_apply(env, args, p, full, raw, nb)
+        else
+          {:path, true} -> err("notebook_edit: path is required")
+          {:error, message} -> err("notebook_edit: #{message}")
+        end
+      end
+    )
+  end
+
+  defp notebook_io({:ok, raw}), do: {:ok, raw}
+  defp notebook_io({:error, reason}), do: {:error, to_string(:file.format_error(reason))}
+
+  defp decode_notebook(raw, p) do
+    case Jason.decode(raw) do
+      {:ok, %{} = nb} -> {:ok, nb}
+      {:ok, _} -> {:error, "#{p} is not a notebook"}
+      {:error, e} -> {:error, "#{p} is not a notebook: #{Exception.message(e)}"}
+    end
+  end
+
+  defp notebook_apply(env, args, p, full, raw, nb) do
+    cells = if is_list(nb["cells"]), do: nb["cells"], else: []
+    mode = if args["edit_mode"] in [nil, ""], do: "replace", else: str(args["edit_mode"])
+    src = str(args["new_source"])
+    cell_type = str(args["cell_type"])
+
+    idx =
+      cond do
+        is_binary(args["cell_id"]) and args["cell_id"] != "" ->
+          case Enum.find_index(cells, &(is_map(&1) and &1["id"] == args["cell_id"])) do
+            nil -> {:error, ~s(no cell with id "#{args["cell_id"]}")}
+            i -> {:ok, i}
+          end
+
+        is_number(args["cell_index"]) ->
+          i = trunc(args["cell_index"])
+
+          if i < 0 or i >= length(cells),
+            do: {:error, "cell_index #{i} out of range (0-#{length(cells) - 1})"},
+            else: {:ok, i}
+
+        mode == "insert" ->
+          {:ok, -1}
+
+        true ->
+          {:error, "cell_id or cell_index is required"}
+      end
+
+    with {:ok, idx} <- idx,
+         {:ok, cells, summary} <- notebook_edit_cells(mode, cells, idx, src, cell_type, p) do
+      out = Jason.encode!(Map.put(nb, "cells", cells), pretty: [indent: " "]) <> "\n"
+      File.write!(full, out)
+
+      ok(summary, Map.merge(%{cells: length(cells)}, edit_metadata(env, [{full, raw, out}])))
+    else
+      {:error, message} -> err("notebook_edit: #{message}")
+    end
+  end
+
+  defp notebook_edit_cells("replace", cells, idx, src, cell_type, p) do
+    cell = Enum.at(cells, idx)
+    cell = Map.put(cell, "source", notebook_source(src))
+    cell = if cell_type != "", do: Map.put(cell, "cell_type", cell_type), else: cell
+
+    cell =
+      if cell["cell_type"] == "code",
+        do: Map.merge(cell, %{"outputs" => [], "execution_count" => nil}),
+        else: Map.drop(cell, ["outputs", "execution_count"])
+
+    {:ok, List.replace_at(cells, idx, cell), "Replaced cell #{idx} in #{p}"}
+  end
+
+  defp notebook_edit_cells("insert", cells, idx, src, cell_type, p) do
+    cell_type = if cell_type == "", do: "code", else: cell_type
+    cell = %{"cell_type" => cell_type, "metadata" => %{}, "source" => notebook_source(src)}
+
+    cell =
+      if cell_type == "code", do: Map.merge(cell, %{"outputs" => [], "execution_count" => nil}), else: cell
+
+    at = idx + 1
+    {:ok, List.insert_at(cells, at, cell), "Inserted #{cell_type} cell at #{at} in #{p}"}
+  end
+
+  defp notebook_edit_cells("delete", cells, idx, _src, _cell_type, p),
+    do: {:ok, List.delete_at(cells, idx), "Deleted cell #{idx} from #{p}"}
+
+  defp notebook_edit_cells(mode, _cells, _idx, _src, _cell_type, _p),
+    do: {:error, ~s(unknown edit_mode "#{mode}")}
+
+  # nbformat's list of lines, each keeping its "\n".
+  defp notebook_source(""), do: []
+  defp notebook_source(s), do: s |> String.split(~r/(?<=\n)/) |> Enum.reject(&(&1 == ""))
+end
+
+defmodule Toolnexus.Builtin.BackgroundShells do
+  @moduledoc """
+  The registry of commands `bash` started with `run_in_background` (SPEC §4C).
+
+  Create one with `new/0`, pass it as the builtins `:background` option, and call
+  `close_all/1` when the host shuts down — a background command is NOT tied to the
+  turn that started it, so nothing else stops it. `kill/2` stops one command's whole
+  process tree (SIGTERM, the `kill_grace_ms` window, SIGKILL).
+
+  The registry is a process started unlinked, so it outlives the turn that created a
+  job; each job is a port-owning process that stops its tree if the registry exits.
+  """
+  use GenServer
+
+  @doc "Start an empty registry (unlinked). Returns its pid."
+  @spec new() :: pid()
+  def new do
+    {:ok, pid} = GenServer.start(__MODULE__, nil)
+    pid
+  end
+
+  @doc "Every background command, oldest first: `%{id, command, started, running, exit_code, killed}`."
+  @spec list(pid()) :: [map()]
+  def list(reg) do
+    reg
+    |> GenServer.call(:jobs)
+    |> Enum.sort_by(fn {_id, j} -> j.seq end)
+    |> Enum.map(fn {id, j} ->
+      {status, code} = job_call(j.pid, :info)
+
+      %{
+        id: id,
+        command: j.command,
+        started: j.started,
+        running: status == :running,
+        exit_code: code,
+        killed: status == :killed
+      }
+    end)
+  end
+
+  @doc "Stop one background command's process tree. Unknown id ⇒ `{:error, message}`."
+  @spec kill(pid(), String.t()) :: :ok | {:error, String.t()}
+  def kill(reg, id) do
+    case kill_job(reg, id) do
+      :error -> {:error, ~s(no background shell "#{id}")}
+      {:ok, _} -> :ok
+    end
+  end
+
+  @doc "Stop every background command still running, concurrently."
+  @spec close_all(pid()) :: :ok
+  def close_all(reg) do
+    reg
+    |> GenServer.call(:jobs)
+    |> Task.async_stream(fn {_id, j} -> job_call(j.pid, :kill) end, timeout: :infinity)
+    |> Stream.run()
+  end
+
+  @doc false
+  def start_job(reg, env, command, workdir), do: GenServer.call(reg, {:start, env, command, workdir})
+
+  @doc false
+  def read(reg, id) do
+    case lookup(reg, id) do
+      nil -> :error
+      pid -> job_call(pid, :read)
+    end
+  end
+
+  @doc false
+  def kill_job(reg, id) do
+    case lookup(reg, id) do
+      nil -> :error
+      pid -> {:ok, job_call(pid, :kill)}
+    end
+  end
+
+  @doc false
+  def info(reg, id), do: job_call(lookup(reg, id), :info)
+
+  @doc false
+  def status_text(:running, _code), do: "running"
+  def status_text(:killed, _code), do: "killed"
+  def status_text(:exited, code), do: "exited with code #{code}"
+
+  defp lookup(reg, id), do: GenServer.call(reg, {:lookup, id})
+
+  defp job_call(pid, op) do
+    ref = make_ref()
+    send(pid, {op, self(), ref})
+
+    receive do
+      {^ref, fresh, status, code} -> {:ok, fresh, status, code}
+      {^ref, status, code} -> {status, code}
+      {^ref, killed} -> killed
+    end
+  end
+
+  @impl true
+  def init(nil) do
+    Process.flag(:trap_exit, true)
+    {:ok, %{next: 0, jobs: %{}}}
+  end
+
+  @impl true
+  def handle_call({:start, env, command, workdir}, _from, st) do
+    next = st.next + 1
+    id = "bg#{next}"
+    me = self()
+    pid = spawn_link(fn -> Toolnexus.Builtin.background_job(env, command, workdir, me) end)
+    job = %{pid: pid, command: command, started: DateTime.utc_now(), seq: next}
+    {:reply, id, %{st | next: next, jobs: Map.put(st.jobs, id, job)}}
+  end
+
+  def handle_call({:lookup, id}, _from, st), do: {:reply, get_in(st.jobs, [id, :pid]), st}
+  def handle_call(:jobs, _from, st), do: {:reply, Map.to_list(st.jobs), st}
+
+  @impl true
+  def handle_info({:EXIT, _pid, _reason}, st), do: {:noreply, st}
 end

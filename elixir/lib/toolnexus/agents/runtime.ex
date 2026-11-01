@@ -116,6 +116,10 @@ defmodule Toolnexus.Agents.Runtime do
       # NOTE: :registry here is the AGENT registry; the client's :registry is the
       # MetricsRegistry — different things, same key name, one layer apart.
       hooks: opts[:hooks],
+      # Runtime-level §10 interpreter (SPEC §4C): answers a suspension when no agent on
+      # the handle's chain has its own :wait_for. nil ⇒ unchanged (the suspension goes
+      # durable). as_tool_with/2 sets it so a child's asks reach the parent's bridge.
+      wait_for: opts[:wait_for],
       on_metric: opts[:on_metric],
       gated_transport: transport && gated(gate, transport)
     }

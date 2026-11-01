@@ -349,7 +349,7 @@ defmodule Toolnexus.ClientEdgeTest do
     end
   end
 
-  test "api key resolution: env fallbacks per style, ArgumentError when nothing set" do
+  test "api key resolution: api_key_env names the var; a local host never gets a provider key" do
     saved =
       for name <- ~w(OPENROUTER_API_KEY OPENAI_API_KEY ANTHROPIC_API_KEY), into: %{} do
         {name, System.get_env(name)}
@@ -371,12 +371,27 @@ defmodule Toolnexus.ClientEdgeTest do
     end
 
     System.put_env("OPENAI_API_KEY", "env-oai")
-    c = Client.create(base_url: url, style: "openai", model: "m", retries: 0, headers: %{"X-Custom" => "1"})
+
+    # SPEC §4C: a key set in the env is NOT sent to a host it does not belong to.
+    assert_raise ArgumentError, ~r/No API key/, fn ->
+      Client.run(Client.create(base_url: url, style: "openai", model: "m"), "x", [])
+    end
+
+    c =
+      Client.create(
+        base_url: url,
+        style: "openai",
+        model: "m",
+        retries: 0,
+        api_key_env: "OPENAI_API_KEY",
+        headers: %{"X-Custom" => "1"}
+      )
+
     assert Client.run(c, "x", []).text == "via-openai-env"
 
     System.delete_env("OPENAI_API_KEY")
     System.put_env("ANTHROPIC_API_KEY", "env-ant")
-    c = Client.create(base_url: url, style: "anthropic", model: "m", retries: 0)
+    c = Client.create(base_url: url, style: "anthropic", model: "m", retries: 0, api_key_env: "ANTHROPIC_API_KEY")
     assert Client.run(c, "x", []).text == "via-anthropic-env"
 
     [openai_req, anthropic_req] = captured(agent)

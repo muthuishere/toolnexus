@@ -282,4 +282,84 @@ defmodule Toolnexus.Agents.CompactionTest do
   end
 
   defp carries_tool_result?(_), do: false
+
+  # --- SPEC §4C (change add-go-host-asks): on_compact + the compactor fixes ------------
+
+  test "on_compact reports one compaction with consistent counts; never on a no-op" do
+    me = self()
+    msgs = transcript(10)
+
+    hook =
+      Compaction.compactor(
+        max_tokens: 50,
+        keep_tail: 20,
+        summarize: &summarize/1,
+        on_compact: &send(me, {:info, &1})
+      )
+
+    %{messages: out} = hook.(ev(msgs))
+    assert_received {:info, i}
+    refute_received {:info, _}
+    assert i.messages_before == length(msgs) and i.messages_after == length(out)
+    assert i.summarized > 0 and i.summary == "summarized #{i.summarized} messages"
+    assert i.tokens_before == Compaction.estimate_tokens(msgs)
+    assert i.tokens_after == Compaction.estimate_tokens(out)
+    assert i.tokens_after < i.tokens_before
+
+    # folded carries the summarized messages verbatim
+    assert i.folded == Enum.slice(msgs, 1, i.summarized)
+
+    big =
+      Compaction.compactor(
+        max_tokens: 1_000_000_000,
+        summarize: &summarize/1,
+        on_compact: fn _ -> flunk("on_compact on a no-op") end
+      )
+
+    assert big.(ev(msgs)) == nil
+  end
+
+  test "keeps the sole user prompt: one prompt then only tool traffic ⇒ [system, prompt, summary]" do
+    me = self()
+    data = String.duplicate("data ", 40)
+    prompt = %{"role" => "user", "content" => "do the task"}
+
+    work =
+      Enum.flat_map(0..7, fn i ->
+        id = "c#{i}"
+
+        [
+          %{
+            "role" => "assistant",
+            "content" => nil,
+            "tool_calls" => [%{"id" => id, "type" => "function", "function" => %{"name" => "lookup", "arguments" => "{}"}}]
+          },
+          %{"role" => "tool", "tool_call_id" => id, "content" => data}
+        ]
+      end)
+
+    msgs = [%{"role" => "system", "content" => "SOUL"}, prompt] ++ work
+
+    hook =
+      Compaction.compactor(max_tokens: 100, keep_tail: 20, summarize: &summarize/1, on_compact: &send(me, {:info, &1}))
+
+    %{messages: out} = hook.(ev(msgs))
+    assert [%{"role" => "system"}, ^prompt, %{"role" => "system", "content" => "[Summary of earlier conversation]\n" <> _}] = out
+    assert_received {:info, %{folded: folded}}
+    assert length(folded) == length(msgs) - 2
+  end
+
+  test "a compaction that would not shrink the transcript is a no-op" do
+    long = fn _ -> String.duplicate("long summary ", 500) end
+
+    hook =
+      Compaction.compactor(
+        max_tokens: 10,
+        keep_tail: 5,
+        summarize: long,
+        on_compact: fn _ -> flunk("on_compact on a no-op") end
+      )
+
+    assert hook.(ev(transcript(2))) == nil
+  end
 end

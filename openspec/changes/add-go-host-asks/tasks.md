@@ -24,7 +24,7 @@ the event. Revisit if a port cannot express it.
 - [ ] 2.2 python
 - [ ] 2.3 java
 - [ ] 2.4 csharp
-- [ ] 2.5 elixir
+- [x] 2.5 elixir (2026-11-01; Toolkit register concurrency and the disabled-status race are N/A: immutable toolkit, no shared state)
 - [ ] 2.6 clojure
 - [ ] 2.6b Re-run every port against the extended examples/mcp-progress-server.mjs (now also offers a resource)
 - [ ] 2.6c SECURITY: port host-scoped key resolution to every port FIRST (all still fall back across providers)

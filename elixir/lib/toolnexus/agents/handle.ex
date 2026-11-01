@@ -760,6 +760,21 @@ defmodule Toolnexus.Agents.Handle do
     %{client: client0, tools: tools, id: id, ctx: ctx, escalator: escalator, def: defn} = st
 
     spawn_monitor(fn ->
+      # The Run is not linked to its handle (a raw crash is reported by the monitor),
+      # so a handle that dies abruptly — its runtime killed with the turn that ran an
+      # agent as a tool (SPEC §4C) — would orphan it. A sidecar stops it then.
+      run = self()
+
+      spawn(fn ->
+        h = Process.monitor(handle)
+        r = Process.monitor(run)
+
+        receive do
+          {:DOWN, ^h, _, _, _} -> Process.exit(run, :kill)
+          {:DOWN, ^r, _, _, _} -> :ok
+        end
+      end)
+
       outcome =
         try do
           client = %{client0 | wait_for: one_shot || escalator}
@@ -792,17 +807,25 @@ defmodule Toolnexus.Agents.Handle do
   # ---- escalation: nearest interpreter wins (strict one-hop) ---------------
 
   defp build_escalator(handle, id, chain, ctx) do
-    if Enum.any?(chain, fn {_aid, d} -> is_function(d[:wait_for]) end) do
+    interpreter =
+      case Enum.find(chain, fn {_aid, d} -> is_function(d[:wait_for]) end) do
+        {aid, adef} -> {aid, adef[:wait_for]}
+        # SPEC §4C: the runtime-level :wait_for answers when no agent on the chain can.
+        nil -> if is_function(ctx[:wait_for], 1), do: {"root", ctx[:wait_for]}
+      end
+
+    if interpreter do
+      {aid, answer} = interpreter
+
       fn req ->
         GenServer.call(handle, {:mark_suspended, req.kind, req.prompt})
-        {aid, adef} = Enum.find(chain, fn {_aid, d} -> is_function(d[:wait_for]) end)
 
         Trace.add(
           ctx.trace,
           "#{id}: escalate → #{if aid == id, do: "self", else: aid} answers (\"nearest interpreter\")"
         )
 
-        ans = adef[:wait_for].(req)
+        ans = answer.(req)
 
         ok =
           case ans do

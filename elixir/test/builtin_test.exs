@@ -3,7 +3,8 @@ defmodule Toolnexus.BuiltinTest do
 
   alias Toolnexus.{Builtin, ToolResult, Request, Context, Answer}
 
-  # Golden input schemas, extracted byte-for-byte from js/src/builtin.ts.
+  # Golden input schemas, extracted byte-for-byte from js/src/builtin.ts; grep gained
+  # context/before/after with SPEC §4C (golang reference, change add-go-host-asks).
   @golden_schemas Jason.decode!("""
   {
     "bash": {
@@ -53,7 +54,10 @@ defmodule Toolnexus.BuiltinTest do
         "pattern": {"type": "string", "description": "Regular expression to search for"},
         "path": {"type": "string", "description": "Directory to search (default: process cwd)"},
         "include": {"type": "string", "description": "Glob filter for file names"},
-        "limit": {"type": "number", "description": "Maximum number of matches (default 100)"}
+        "limit": {"type": "number", "description": "Maximum number of matches (default 100)"},
+        "context": {"type": "number", "description": "Lines of context before and after each match"},
+        "before": {"type": "number", "description": "Lines of context before each match (overrides context)"},
+        "after": {"type": "number", "description": "Lines of context after each match (overrides context)"}
       },
       "required": ["pattern"],
       "additionalProperties": false
@@ -337,7 +341,10 @@ defmodule Toolnexus.BuiltinTest do
     test "limit caps matches", %{tmp_dir: tmp} do
       File.write!(Path.join(tmp, "a.txt"), "m\nm\nm\nm")
       result = run("grep", %{"pattern" => "m", "path" => tmp, "limit" => 2})
-      assert result.metadata == %{count: 2}
+      # SPEC §4C: the cut is reported in metadata; the text is unchanged.
+      assert result.metadata == %{count: 2, truncated: true, total: 4}
+      assert result.output == "a.txt:1:m
+a.txt:2:m"
     end
 
     test "invalid regex is an error" do
