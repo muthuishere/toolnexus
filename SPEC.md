@@ -1683,6 +1683,27 @@ content or delta count; the exception is Clojure, which has no streaming entry p
 The injectable transport (Gap 2) is unchanged and remains the answer for proxy, mTLS and
 record-replay — this is a second constructor over it, not a second seam.
 
+#### ACP model source — host hooks (golang-first; other ports pending, `openspec/changes/add-go-host-asks`)
+
+An ACP source (one warm `session/prompt` per turn over a child agent; ADR 0031) MAY take three
+opt-in hooks. With none set its behaviour is unchanged: `session/request_permission` is answered
+with the first allow-kind option, and only `agent_message_chunk` text forms the reply.
+
+- **`onPermission(ctx, params) -> optionId`** — called for every permission request with its raw
+  params; the reply is `{outcome:"selected", optionId}`. An error or empty id answers the first
+  reject-kind option, else `{outcome:"cancelled"}`. It runs off the read loop (it may block on a
+  human); the turn's permission timeout still applies.
+- **`onUpdate(params)`** — the raw params of every `session/update`, before filtering; must not block.
+- **Cancellation** — a ctx-taking generate sends the `session/cancel` *notification* (no id) when
+  its context is cancelled, waits up to the request timeout for the turn's reply, and returns the
+  cancellation error. The process and session stay warm.
+- **Streaming** — a streaming generate emits `agent_message_chunk` → `{type:"text", delta}`,
+  `tool_call` → `{type:"tool_call", id, name: title, args: rawInput, via:"acp"}`, and a
+  `completed`/`failed` `tool_call_update` → `{type:"tool_result", id, name, output, isError, via:"acp"}`.
+  An in-process client given a streaming generate (Go: `InProcessOptions.GenerateStream`) streams
+  instead of refusing: text events become the stream's text deltas, other events pass straight to
+  the consumer and are **never executed** by the loop (the agent already ran them).
+
 ### Resilience (retries + timeout/cancel)
 
 `ClientOptions`: `retries` (default 2), `retryBaseMs` (default 500), `retryableStatuses` (optional,

@@ -104,6 +104,7 @@ func runACPFakeServer() {
 	var busy int32
 
 	permReplies := make(chan acpMsg, 8)
+	cancels := make(chan struct{}, 8)
 
 	sc := bufio.NewScanner(os.Stdin)
 	sc.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
@@ -171,6 +172,26 @@ func runACPFakeServer() {
 					defer wg.Done()
 					acpHandlePermissionForTest(sendRequest, reply, emit, id, sid, ut, permReplies)
 				}()
+			case "cancel":
+				// Streams one chunk, then holds the turn open until the
+				// client sends session/cancel, and ends it "cancelled".
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					sendNotification("session/update", map[string]any{
+						"sessionId": sid,
+						"update": map[string]any{
+							"sessionUpdate": "agent_message_chunk",
+							"content":       map[string]any{"type": "text", "text": "partial"},
+						},
+					})
+					select {
+					case <-cancels:
+						reply(id, map[string]any{"stopReason": "cancelled"})
+					case <-time.After(5 * time.Second):
+						reply(id, map[string]any{"stopReason": "end_turn"})
+					}
+				}()
 			case "noisy":
 				wg.Add(1)
 				go func() {
@@ -212,7 +233,9 @@ func runACPFakeServer() {
 			}
 
 		case "session/cancel":
-			reply(msg.ID, map[string]any{})
+			// A notification (no id): record it and release a held turn.
+			emit(acpEvent{Type: "session/cancel", Data: map[string]any{"hasId": len(msg.ID) > 0}})
+			cancels <- struct{}{}
 
 		default:
 			if len(msg.ID) > 0 {
@@ -258,12 +281,17 @@ func acpHandleStaleForTest(send func(any), reply func(json.RawMessage, any), his
 }
 
 func acpHandlePermissionForTest(sendRequest func(string, any) string, reply func(json.RawMessage, any), emit func(acpEvent), id json.RawMessage, sessionID, userText string, permReplies chan acpMsg) {
+	options := []any{
+		map[string]any{"optionId": "reject", "kind": "reject_once", "name": "Reject"},
+		map[string]any{"optionId": "allow-once", "kind": "allow_once", "name": "Allow"},
+	}
+	if os.Getenv("ACP_PERM_NO_REJECT") == "1" {
+		options = options[1:]
+	}
 	reqID := sendRequest("session/request_permission", map[string]any{
 		"sessionId": sessionID,
-		"options": []any{
-			map[string]any{"optionId": "reject", "kind": "reject_once", "name": "Reject"},
-			map[string]any{"optionId": "allow-once", "kind": "allow_once", "name": "Allow"},
-		},
+		"toolCall":  map[string]any{"toolCallId": "t9", "title": "write file"},
+		"options":   options,
 	})
 	for m := range permReplies {
 		var idStr string

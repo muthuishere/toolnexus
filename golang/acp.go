@@ -119,6 +119,22 @@ type ACPOptions struct {
 	// RequestTimeout bounds `initialize` / `session/new` / `session/set_mode`
 	// and the reply half of `session/prompt`. Defaults to 30s.
 	RequestTimeout time.Duration
+
+	// OnPermission, if set, decides every session/request_permission: it is
+	// handed the request's raw params (sessionId, toolCall, options) and the
+	// turn's context, and toolnexus answers with the returned optionId. An
+	// error or an empty optionId answers with the first reject-kind option,
+	// or "cancelled" when the agent offered none. It runs off the read loop,
+	// so it may block (e.g. to ask a human) without stalling session/update
+	// delivery — but the turn's PermissionTimeout still applies.
+	// Unset => the first allow-kind option is picked, unchanged.
+	OnPermission func(ctx context.Context, params json.RawMessage) (optionID string, err error)
+
+	// OnUpdate, if set, is called with the raw params of EVERY session/update
+	// notification (agent_message_chunk, agent_thought_chunk, tool_call,
+	// tool_call_update, plan, ...), before toolnexus' own filtering. It runs
+	// on the read loop: it must not block.
+	OnUpdate func(json.RawMessage)
 }
 
 // ACPClient is one warm ACP session: one child process, one session id,
@@ -140,6 +156,10 @@ type ACPClient struct {
 	promptMu sync.Mutex
 
 	updateSink func(json.RawMessage)
+	turnCtx    context.Context // ctx of the in-flight turn (guarded by mu)
+
+	onPermission func(context.Context, json.RawMessage) (string, error)
+	onUpdate     func(json.RawMessage)
 
 	permissionTimeout time.Duration
 	requestTimeout    time.Duration
@@ -209,6 +229,8 @@ func LoadACP(ctx context.Context, opts ACPOptions) (*ACPClient, error) {
 		pending:           make(map[string]chan acpMsg),
 		permissionTimeout: permissionTimeout,
 		requestTimeout:    requestTimeout,
+		onPermission:      opts.OnPermission,
+		onUpdate:          opts.OnUpdate,
 	}
 	c.stdout.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
 	go c.readLoop()
@@ -279,6 +301,9 @@ func (c *ACPClient) readLoop() {
 			}
 
 		case msg.Method == "session/update":
+			if c.onUpdate != nil {
+				c.onUpdate(msg.Params)
+			}
 			c.mu.Lock()
 			sink := c.updateSink
 			c.mu.Unlock()
@@ -290,7 +315,12 @@ func (c *ACPClient) readLoop() {
 			// Answered inline, from the read loop itself, so it can never be
 			// held up behind whatever sendPrompt is doing — an unanswered
 			// permission request hangs the turn forever (ADR 0031).
-			c.answerPermissionFirstAllow(msg)
+			if c.onPermission != nil {
+				// Off the read loop: a host callback may block on a human.
+				go c.answerPermissionHost(msg)
+			} else {
+				c.answerPermissionFirstAllow(msg)
+			}
 
 		default:
 			// Unhandled server->client notification/request; nothing this
@@ -313,6 +343,40 @@ func (c *ACPClient) answerPermissionFirstAllow(req acpMsg) {
 		if strings.HasPrefix(o.Kind, "allow") {
 			chosen = o.OptionID
 			break
+		}
+	}
+	result := map[string]any{"outcome": map[string]any{"outcome": "cancelled"}}
+	if chosen != "" {
+		result = map[string]any{"outcome": map[string]any{"outcome": "selected", "optionId": chosen}}
+	}
+	c.reply(req.ID, result)
+}
+
+// answerPermissionHost answers a permission request with the optionId the
+// host's OnPermission returned; an error or empty id falls back to the first
+// reject-kind option, else "cancelled".
+func (c *ACPClient) answerPermissionHost(req acpMsg) {
+	c.mu.Lock()
+	ctx := c.turnCtx
+	c.mu.Unlock()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	chosen, err := c.onPermission(ctx, req.Params)
+	if err != nil || chosen == "" {
+		chosen = ""
+		var params struct {
+			Options []struct {
+				OptionID string `json:"optionId"`
+				Kind     string `json:"kind"`
+			} `json:"options"`
+		}
+		_ = json.Unmarshal(req.Params, &params)
+		for _, o := range params.Options {
+			if strings.HasPrefix(o.Kind, "reject") {
+				chosen = o.OptionID
+				break
+			}
 		}
 	}
 	result := map[string]any{"outcome": map[string]any{"outcome": "cancelled"}}
@@ -383,38 +447,75 @@ func (c *ACPClient) call(ctx context.Context, method string, params any) (json.R
 // sendPrompt: one session/prompt turn, accumulating only agent_message_chunk.
 // ---------------------------------------------------------------------------
 
-func (c *ACPClient) sendPrompt(text string) (string, error) {
+func (c *ACPClient) sendPrompt(ctx context.Context, text string, emit func(StreamEvent)) (string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	c.mu.Lock()
 	c.nextID++
 	id := fmt.Sprintf("c-%d", c.nextID)
 	replyCh := make(chan acpMsg, 1)
 	c.pending[id] = replyCh
+	c.turnCtx = ctx
 
 	var accMu sync.Mutex
 	var clean strings.Builder
+	toolNames := map[string]string{}
 	c.updateSink = func(raw json.RawMessage) {
 		var upd struct {
 			Update struct {
-				SessionUpdate string `json:"sessionUpdate"`
-				Content       struct {
-					Type string `json:"type"`
-					Text string `json:"text"`
-				} `json:"content"`
+				SessionUpdate string          `json:"sessionUpdate"`
+				Content       json.RawMessage `json:"content"`
+				ToolCallID    string          `json:"toolCallId"`
+				Title         string          `json:"title"`
+				Kind          string          `json:"kind"`
+				Status        string          `json:"status"`
+				RawInput      map[string]any  `json:"rawInput"`
 			} `json:"update"`
 		}
 		if err := json.Unmarshal(raw, &upd); err != nil {
 			return
 		}
+		u := upd.Update
+		switch u.SessionUpdate {
 		// Only agent_message_chunk forms the reply: agent_thought_chunk and
-		// tool-call narration (tool_call / tool_call_update, which carry no
-		// "content" field this struct decodes anyway) are dropped entirely —
-		// mixing them corrupts structured output (ADR 0031 gate item #3).
-		if upd.Update.SessionUpdate != "agent_message_chunk" {
-			return
+		// tool-call narration never reach the content — mixing them
+		// corrupts structured output (ADR 0031 gate item #3).
+		case "agent_message_chunk":
+			var part struct {
+				Text string `json:"text"`
+			}
+			_ = json.Unmarshal(u.Content, &part)
+			accMu.Lock()
+			clean.WriteString(part.Text)
+			accMu.Unlock()
+			if emit != nil && part.Text != "" {
+				emit(StreamEvent{Type: "text", Delta: part.Text})
+			}
+		case "tool_call":
+			name := u.Title
+			if name == "" {
+				name = u.Kind
+			}
+			accMu.Lock()
+			toolNames[u.ToolCallID] = name
+			accMu.Unlock()
+			if emit != nil {
+				emit(StreamEvent{Type: "tool_call", ID: u.ToolCallID, Name: name, Args: u.RawInput, Via: "acp"})
+			}
+		case "tool_call_update":
+			if emit == nil || (u.Status != "completed" && u.Status != "failed") {
+				return
+			}
+			accMu.Lock()
+			name := toolNames[u.ToolCallID]
+			accMu.Unlock()
+			if u.Title != "" {
+				name = u.Title
+			}
+			emit(StreamEvent{Type: "tool_result", ID: u.ToolCallID, Name: name, Via: "acp",
+				Output: acpToolContentText(u.Content), IsError: u.Status == "failed"})
 		}
-		accMu.Lock()
-		clean.WriteString(upd.Update.Content.Text)
-		accMu.Unlock()
 	}
 	c.mu.Unlock()
 
@@ -428,12 +529,17 @@ func (c *ACPClient) sendPrompt(text string) (string, error) {
 	timer := time.NewTimer(c.permissionTimeout)
 	defer timer.Stop()
 
-	select {
-	case msg := <-replyCh:
+	finish := func() {
 		c.mu.Lock()
 		delete(c.pending, id)
 		c.updateSink = nil
+		c.turnCtx = nil
 		c.mu.Unlock()
+	}
+
+	select {
+	case msg := <-replyCh:
+		finish()
 		if msg.Error != nil {
 			return "", fmt.Errorf("acp error %d: %s", msg.Error.Code, msg.Error.Message)
 		}
@@ -441,12 +547,41 @@ func (c *ACPClient) sendPrompt(text string) (string, error) {
 		defer accMu.Unlock()
 		return clean.String(), nil
 	case <-timer.C:
-		c.mu.Lock()
-		delete(c.pending, id)
-		c.updateSink = nil
-		c.mu.Unlock()
+		finish()
 		return "", &ACPPermissionTimeoutError{Waited: c.permissionTimeout}
+	case <-ctx.Done():
+		// ACP: session/cancel is a notification; the agent then ends the
+		// turn with stopReason "cancelled". Wait (bounded) for that reply so
+		// the next turn never lands on a session still busy with this one.
+		cp, _ := json.Marshal(map[string]any{"sessionId": c.sessionID})
+		c.write(acpMsg{JSONRPC: "2.0", Method: "session/cancel", Params: cp})
+		wait := time.NewTimer(c.requestTimeout)
+		defer wait.Stop()
+		select {
+		case <-replyCh:
+		case <-wait.C:
+		}
+		finish()
+		return "", ctx.Err()
 	}
+}
+
+// acpToolContentText joins the text parts of a tool_call_update's content
+// array ([{type:"content", content:{type:"text", text}}, ...]).
+func acpToolContentText(raw json.RawMessage) string {
+	var parts []struct {
+		Content struct {
+			Text string `json:"text"`
+		} `json:"content"`
+	}
+	if json.Unmarshal(raw, &parts) != nil {
+		return ""
+	}
+	var b strings.Builder
+	for _, p := range parts {
+		b.WriteString(p.Content.Text)
+	}
+	return b.String()
 }
 
 // ---------------------------------------------------------------------------
@@ -460,12 +595,29 @@ func (c *ACPClient) sendPrompt(text string) (string, error) {
 // agent_message_chunk text. Turns are serialised: only one session/prompt is
 // ever in flight at a time on this client.
 func (c *ACPClient) Generate(req InProcessRequest) (InProcessResponse, error) {
+	return c.GenerateStream(context.Background(), req, nil)
+}
+
+// GenerateCtx is Generate bound to ctx: cancelling ctx mid-turn sends
+// session/cancel to the agent, waits (up to RequestTimeout) for the turn to
+// end, and returns ctx.Err(). The process and session stay warm.
+func (c *ACPClient) GenerateCtx(ctx context.Context, req InProcessRequest) (InProcessResponse, error) {
+	return c.GenerateStream(ctx, req, nil)
+}
+
+// GenerateStream is GenerateCtx that also reports the turn as it happens:
+// each agent_message_chunk is emitted as a {Type:"text"} StreamEvent, each
+// tool_call as {Type:"tool_call"} and each completed/failed tool_call_update
+// as {Type:"tool_result"} (both with Via "acp": the AGENT ran these tools,
+// not the toolkit). emit may be nil. Its shape is
+// InProcessOptions.GenerateStream, so a Client built on it streams.
+func (c *ACPClient) GenerateStream(ctx context.Context, req InProcessRequest, emit func(StreamEvent)) (InProcessResponse, error) {
 	prompt := renderACPPrompt(req)
 
 	c.promptMu.Lock()
 	defer c.promptMu.Unlock()
 
-	content, err := c.sendPrompt(prompt)
+	content, err := c.sendPrompt(ctx, prompt, emit)
 	if err != nil {
 		return InProcessResponse{}, err
 	}

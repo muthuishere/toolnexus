@@ -1642,6 +1642,19 @@ func (c *Client) StreamWithID(ctx context.Context, prompt string, tk *Toolkit, i
 	}
 	ch := make(chan StreamEvent, 16)
 	stream := func(dctx context.Context, out chan<- StreamEvent) error {
+		// Side channel for in-process GenerateStream events that are not text
+		// (e.g. an ACP agent's own tool calls). Guarded so a late event after
+		// the loop returned is dropped instead of sent on a closed channel.
+		var sideMu sync.Mutex
+		sideOpen := true
+		defer func() { sideMu.Lock(); sideOpen = false; sideMu.Unlock() }()
+		dctx = withStreamSide(dctx, func(ev StreamEvent) {
+			sideMu.Lock()
+			defer sideMu.Unlock()
+			if sideOpen {
+				out <- ev
+			}
+		})
 		if c.opts.Style == StyleAnthropic {
 			return c.streamAnthropic(dctx, prompt, tk, history, out)
 		}

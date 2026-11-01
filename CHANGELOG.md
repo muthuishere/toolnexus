@@ -8,6 +8,21 @@ GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
 
 ## Unreleased
 
+**ACP host hooks: decide permissions, watch every update, cancel a turn, and stream (golang first;
+the other ports are pending).** Before, the Go ACP source always picked the first allow option on a
+permission request, showed the host nothing but the final text, could not be cancelled mid-turn,
+and a client built on it refused to stream. Now, all opt-in: `ACPOptions.OnPermission` lets the
+host choose the option (an error or empty answer picks a reject option, else cancels), so a plan
+mode or a human approval prompt is possible; `ACPOptions.OnUpdate` receives every `session/update`
+(message and thought chunks, tool calls, plans); `ACPClient.GenerateCtx` sends `session/cancel`
+when its context is cancelled; and `ACPClient.GenerateStream`, passed as the new
+`InProcessOptions.GenerateStream`, makes `Client.Stream` work, with message chunks as text deltas
+and the agent's own tool calls as `tool_call`/`tool_result` events (marked `Via: "acp"`, never run
+by the loop). With no hook set, behaviour is byte-identical. Requested by go-agent-cli/Karya and
+deemwar-spotlight. Not done: js, python, java, csharp, elixir and clojure
+(`openspec/changes/add-go-host-asks`, task 2.6d). The permission timeout still bounds the whole
+turn, so a slow human approval can time out.
+
 **New, in progress: a Rust port (`rust/`, crate `toolnexus`, not published).** It is being built
 for a native Rust desktop host, in that host's priority order. The first piece is an ACP client:
 spawn a coding agent over stdio, keep one warm session, stream every `session/update` (message

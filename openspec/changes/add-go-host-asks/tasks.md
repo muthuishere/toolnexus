@@ -17,6 +17,7 @@ the event. Revisit if a port cannot express it.
 - [x] 1.5e ToolContext.CallID on every loop execution (Karya)
 - [x] 1.5f SECURITY: resolveKey by BaseURL host + APIKeyEnv, no cross-provider fallback (ask #8)
 - [x] 1.5g ListModels (ask #9)
+- [x] 1.5h ACP host hooks: ACPOptions.OnPermission + OnUpdate, ACPClient.GenerateCtx (ctx cancel -> session/cancel) + GenerateStream, InProcessOptions.GenerateStream (in-process client streams) — acp_hooks_test.go
 - [x] 1.6 Tests: host_engine_asks_test.go, agents TestCompactorOnCompact; `go test -race ./...` green
 
 ## 2. Other ports (pending — before the next release)
@@ -28,4 +29,5 @@ the event. Revisit if a port cannot express it.
 - [ ] 2.6 clojure
 - [ ] 2.6b Re-run every port against the extended examples/mcp-progress-server.mjs (now also offers a resource)
 - [ ] 2.6c SECURITY: port host-scoped key resolution to every port FIRST (all still fall back across providers)
+- [ ] 2.6d ACP host hooks (onPermission, onUpdate, ctx cancel, streaming generate) in every port that ships an ACP source
 - [ ] 2.7 Fix the disabled-status race wherever the same pattern exists
