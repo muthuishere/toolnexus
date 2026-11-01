@@ -86,6 +86,34 @@ jobs:
       - run: go vet ./...
       - run: go test -race ./...
 
+  rust:
+    name: Rust (cargo test, in progress — openspec add-rust-port)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test
+      - name: stdio-only build (no HTTP/TLS stack)
+        run: cargo test --no-default-features
+
+  skills-parity:
+    name: Skills byte-parity (Go reference vs Rust)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+      - uses: dtolnay/rust-toolchain@stable
+      - run: conformance/skills_parity/run.sh
+
   java:
     name: Java (gradle)
     runs-on: ubuntu-latest
