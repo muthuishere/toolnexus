@@ -99,6 +99,13 @@ export class BackgroundShells {
   async kill(j: BgJob): Promise<boolean> {
     if (!j.running) return false
     j.killed = true
+    // The child and its pipes are unref'd so an idle job never pins the host. While we are
+    // WAITING on it, though, they must be ref'd: otherwise, once the grace timer is cleared,
+    // nothing holds the event loop open until 'close' fires and Node exits with this promise
+    // still pending (seen on Linux, where 'close' lands an iteration later than on macOS).
+    j.child.ref()
+    ;(j.child.stdout as any)?.ref?.()
+    ;(j.child.stderr as any)?.ref?.()
     this.signal(j, true)
     let t: NodeJS.Timeout | undefined
     const timedOut = await Promise.race([j.done.then(() => false), new Promise<boolean>((r) => (t = setTimeout(() => r(true), j.grace)))])
