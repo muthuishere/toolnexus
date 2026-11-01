@@ -134,12 +134,12 @@ public final class ToolTiers {
         if (s == null) return "";
         int i = s.indexOf('\n');
         if (i >= 0) s = s.substring(0, i);
-        // Go truncates at 120 BYTES; for ASCII descriptions that is 120 chars.
+        // Longest valid UTF-8 prefix of at most 120 BYTES (as Go): never split a character.
         byte[] b = s.getBytes(StandardCharsets.UTF_8);
         if (b.length > 120) {
-            s = new String(b, 0, 120, StandardCharsets.UTF_8);
-            if (s.endsWith("�")) s = s.substring(0, s.length() - 1);
-            s = s + "…";
+            int n = 120;
+            while (n > 0 && (b[n] & 0xC0) == 0x80) n--;
+            s = new String(b, 0, n, StandardCharsets.UTF_8) + "…";
         }
         return s;
     }

@@ -72,7 +72,11 @@ public sealed class BackgroundShells
                 // Like Go's cmd.Wait: done once the process exited AND its output is drained.
                 await Task.WhenAll(outTask, errTask).ConfigureAwait(false);
                 await proc.WaitForExitAsync().ConfigureAwait(false);
-                lock (job.Buf) job.ExitCode = proc.ExitCode;
+                // .NET reports a shell killed by signal N as 128 + N; Go reports -1 (killed by a
+                // signal). Map 129..159 to -1 so every port prints the same code. Known limit: a
+                // command that itself exits 129..159 also reads as -1.
+                var code = proc.ExitCode;
+                lock (job.Buf) job.ExitCode = code > 128 && code < 160 ? -1 : code;
             }
             catch { lock (job.Buf) job.ExitCode = -1; }
             job.Done.TrySetResult();

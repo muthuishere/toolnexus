@@ -197,3 +197,31 @@ func TestMcpResourceTools(t *testing.T) {
 		t.Fatal("resource tools are read-only")
 	}
 }
+
+// A background shell killed by a signal it did not get from kill_shell reports
+// exit code -1 (status "exited", not "killed"). Every port pins -1, not 128+signal.
+func TestBackgroundShellSignalledFromOutsideIsMinusOne(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("posix")
+	}
+	bg := NewBackgroundShells()
+	defer bg.CloseAll()
+	cfg := BuiltinsConfig{Background: bg, KillGraceMs: 100}
+	bash, out := extraTool(t, cfg, "bash"), extraTool(t, cfg, "bash_output")
+	r, _ := bash.Execute(map[string]any{"command": "kill -TERM $$; sleep 5", "run_in_background": true}, nil)
+	id, _ := r.Metadata["backgroundId"].(string)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		o, _ := out.Execute(map[string]any{"id": id}, nil)
+		if o.Metadata["status"] == "exited" {
+			if o.Metadata["exitCode"] != -1 || !strings.Contains(o.Output, "[status: exited with code -1]") {
+				t.Fatalf("got %q %+v", o.Output, o.Metadata)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("never exited")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}

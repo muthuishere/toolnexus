@@ -55,8 +55,20 @@ def _tool_def(t: Tool) -> dict[str, Any]:
 
 
 def _first_line(s: str) -> str:
+    """First line, cut to the longest valid UTF-8 prefix of at most 120 BYTES (as Go)."""
     s = s.split("\n", 1)[0]
-    return s[:120] + "…" if len(s) > 120 else s
+    b = s.encode("utf-8")
+    if len(b) <= 120:
+        return s
+    return b[:120].decode("utf-8", errors="ignore") + "…"
+
+
+_GO_ESCAPES = {"<": "\\u003c", ">": "\\u003e", "&": "\\u0026", "\u2028": "\\u2028", "\u2029": "\\u2029"}
+
+
+def _go_html_escape(text: str) -> str:
+    """Go's json escapes <, >, &, U+2028 and U+2029; they only ever occur inside JSON strings."""
+    return "".join(_GO_ESCAPES.get(c, c) for c in text)
 
 
 class ToolPlan:
@@ -201,7 +213,7 @@ def tool_search(tools: list[Tool], get: Callable[[str], Optional[Tool]], args: d
     defs = [_tool_def(t) for t in picked]
     return ToolResult(
         output="Loaded tools (call by name, or with call_tool):\n"
-        + json.dumps(defs, indent=2, sort_keys=True, ensure_ascii=False),
+        + _go_html_escape(json.dumps(defs, indent=2, sort_keys=True, ensure_ascii=False)),
         is_error=False,
         metadata={"count": len(picked), "tools": [t.name for t in picked]},
     )

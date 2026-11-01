@@ -100,6 +100,17 @@ defmodule Toolnexus.ToolTiers do
     end
   end
 
+  # Go's json escapes <, >, &, U+2028 and U+2029; they only ever occur inside JSON strings.
+  defp go_html_escape(json) do
+    String.replace(json, ["<", ">", "&", "\u2028", "\u2029"], fn
+      "<" -> "\\u003c"
+      ">" -> "\\u003e"
+      "&" -> "\\u0026"
+      "\u2028" -> "\\u2028"
+      "\u2029" -> "\\u2029"
+    end)
+  end
+
   # A byte cut may split a UTF-8 sequence; keep the valid prefix.
   defp valid_prefix(b) do
     if String.valid?(b), do: b, else: valid_prefix(binary_part(b, 0, byte_size(b) - 1))
@@ -248,7 +259,7 @@ defmodule Toolnexus.ToolTiers do
         %ToolResult{output: "No matching tools.", metadata: %{count: 0}}
 
       {:ok, found} ->
-        json = found |> Enum.map(&tool_def/1) |> Jason.encode!(pretty: true)
+        json = found |> Enum.map(&tool_def/1) |> Jason.encode!(pretty: true) |> go_html_escape()
 
         %ToolResult{
           output: "Loaded tools (call by name, or with call_tool):\n" <> json,

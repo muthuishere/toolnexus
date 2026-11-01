@@ -176,4 +176,23 @@ class ToolTiersTest {
         assertTrue(ToolTiers.search(tk, Map.of("query", "select:nope")).isError());
         assertEquals("No matching tools.", ToolTiers.search(tk, Map.of("query", "zzzz")).output());
     }
+
+    /** Same bytes as golang TestToolSearchJSONIsHTMLEscaped: sorted keys, 2-space indent, &lt;&gt;&amp; escaped. */
+    @Test
+    void toolSearchJsonEscapesLikeGo() {
+        Map<String, Object> schema = Map.of("type", "object", "properties", Map.of("x", Map.of("type", "string")));
+        Tool amp = NativeTool.of("amp", "Use <a & b> here", schema, (Map<String, Object> a) -> "");
+        Toolkit tk = Toolkit.create(new Toolkit.Options().builtins(false).extraTools(amp));
+        String want = "Loaded tools (call by name, or with call_tool):\n[\n  {\n    \"description\": \"Use \\u003ca \\u0026 b\\u003e here\",\n"
+                + "    \"inputSchema\": {\n      \"properties\": {\n        \"x\": {\n          \"type\": \"string\"\n"
+                + "        }\n      },\n      \"type\": \"object\"\n    },\n    \"name\": \"amp\"\n  }\n]";
+        assertEquals(want, ToolTiers.search(tk, Map.of("query", "select:amp")).output());
+    }
+
+    @Test
+    void firstLineCutsOnCharacterBoundary() {
+        assertEquals("a".repeat(119) + "…", ToolTiers.firstLine("a".repeat(119) + "é tail"));
+        assertEquals("a".repeat(117) + "€…", ToolTiers.firstLine("a".repeat(117) + "€z"));
+        assertEquals("a".repeat(118) + "…", ToolTiers.firstLine("a".repeat(118) + "\uD83D\uDE00z"));
+    }
 }

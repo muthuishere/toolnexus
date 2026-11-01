@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"unicode/utf8"
 )
 
 // ToolTierOptions configures ClientOptions.ToolTiers.
@@ -194,9 +195,15 @@ func firstLine(s string) string {
 	if i := strings.IndexByte(s, '\n'); i >= 0 {
 		s = s[:i]
 	}
+	// Cut to the longest valid UTF-8 prefix of at most 120 bytes, so a
+	// multibyte character is never split (SPEC §4C tool tiers).
 	const max = 120
 	if len(s) > max {
-		s = s[:max] + "…"
+		n := max
+		for n > 0 && !utf8.RuneStart(s[n]) {
+			n--
+		}
+		s = s[:n] + "…"
 	}
 	return s
 }

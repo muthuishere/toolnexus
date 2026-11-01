@@ -213,6 +213,29 @@ public class ToolTierTests
         return (tk, ran);
     }
 
+    /// <summary>Same bytes as golang TestToolSearchJSONIsHTMLEscaped: sorted keys, 2-space indent, &lt;&gt;&amp; escaped.</summary>
+    [Fact]
+    public async Task ToolSearchJsonEscapesLikeGo()
+    {
+        var amp = NativeTool.Of("amp", "Use <a & b> here", new Dictionary<string, object?>
+        {
+            ["type"] = "object",
+            ["properties"] = new Dictionary<string, object?> { ["x"] = new Dictionary<string, object?> { ["type"] = "string" } },
+        }, _ => "");
+        var tk = await Toolkit.CreateAsync(new Toolkit.Options { Builtins = false, ExtraTools = new List<ITool> { amp } });
+        var c = LlmClient.Create(new LlmClient.Options { BaseUrl = "http://x", Model = "m", ApiKey = "k", ToolTiers = new ToolTierOptions() });
+        var r = c.ToolSearch(tk, new Dictionary<string, object?> { ["query"] = "select:amp" });
+        const string want = "Loaded tools (call by name, or with call_tool):\n[\n  {\n    \"description\": \"Use \\u003ca \\u0026 b\\u003e here\",\n    \"inputSchema\": {\n      \"properties\": {\n        \"x\": {\n          \"type\": \"string\"\n        }\n      },\n      \"type\": \"object\"\n    },\n    \"name\": \"amp\"\n  }\n]";
+        Assert.Equal(want, r.Output);
+    }
+
+    [Fact]
+    public void FirstLineCutsOnCharacterBoundary()
+    {
+        Assert.Equal(new string('a', 119) + "…", LlmClient.FirstLine(new string('a', 119) + "é tail"));
+        Assert.Equal(new string('a', 117) + "€…", LlmClient.FirstLine(new string('a', 117) + "€z"));
+    }
+
     [Fact]
     public async Task PlanAndDescription()
     {

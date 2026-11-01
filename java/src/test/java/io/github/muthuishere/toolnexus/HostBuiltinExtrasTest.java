@@ -49,6 +49,29 @@ class HostBuiltinExtrasTest {
         assertEquals(10, BuiltinTools.create(Map.of()).size());
     }
 
+    /** A shell signalled from outside (not via kill_shell) reports exit code -1, as Go does. */
+    @Test
+    void backgroundShellSignalledFromOutsideIsMinusOne() throws Exception {
+        Assumptions.assumeFalse(windows(), "posix");
+        try (BackgroundShells bg = new BackgroundShells()) {
+            Map<String, Object> cfg = Map.of("background", bg, "killGraceMs", 100);
+            Tool bash = extra(cfg, "bash"), out = extra(cfg, "bash_output");
+            ToolResult r = bash.execute(args("command", "kill -TERM $$; sleep 5", "run_in_background", true), null);
+            String id = (String) r.metadata().get("backgroundId");
+            long deadline = System.currentTimeMillis() + 5000;
+            while (true) {
+                ToolResult o = out.execute(args("id", id), null);
+                if ("exited".equals(o.metadata().get("status"))) {
+                    assertEquals(-1, o.metadata().get("exitCode"), o.metadata().toString());
+                    assertTrue(o.output().contains("[status: exited with code -1]"), o.output());
+                    break;
+                }
+                assertTrue(System.currentTimeMillis() < deadline, "never exited");
+                Thread.sleep(50);
+            }
+        }
+    }
+
     @Test
     void backgroundShellLifecycle() throws Exception {
         Assumptions.assumeFalse(windows(), "posix");

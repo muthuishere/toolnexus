@@ -75,7 +75,7 @@ public final class BackgroundShells implements AutoCloseable {
 
         Info info() {
             boolean running = proc.isAlive();
-            return new Info(id, command, started, running, running ? 0 : proc.exitValue(), killed);
+            return new Info(id, command, started, running, running ? 0 : signalCode(proc.exitValue()), killed);
         }
 
         /** Stop the whole process tree: SIGTERM, the grace window, SIGKILL. Returns whether it was running. */
@@ -166,5 +166,14 @@ public final class BackgroundShells implements AutoCloseable {
     @Override
     public void close() {
         closeAll();
+    }
+
+    /**
+     * The JVM reports a shell killed by signal N as 128 + N; Go reports -1 (killed by a signal).
+     * Map 129..159 to -1 so every port prints the same code. Known limit: a command that itself
+     * exits 129..159 also reads as -1.
+     */
+    static int signalCode(int code) {
+        return code > 128 && code < 160 ? -1 : code;
     }
 }

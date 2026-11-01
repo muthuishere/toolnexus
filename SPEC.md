@@ -849,7 +849,9 @@ Change `add-go-host-asks`. Shipped first in Go for go-agent-cli, now in all seve
   unchanged). `background` (a host-owned registry with `list`/`kill`/`closeAll`):
   `bash` gains `run_in_background` and returns a background id;
   `bash_output(id)` returns output produced since the last read plus
-  `[status: running|killed|exited with code N]`; `kill_shell(id)` stops the
+  `[status: running|killed|exited with code N]` (N is -1 when the shell was killed by a
+  signal not sent by `kill_shell`; ports whose runtime reports 128+signal map 129..159 to -1);
+  `kill_shell(id)` stops the
   process group (SIGTERM, `killGraceMs`, SIGKILL). `webSearch(ctx, query, limit)`
   adds `websearch` (numbered title/URL/snippet). `notebookEdit` adds
   `notebook_edit` (replace/insert/delete a cell by id or index; replacing a code
@@ -904,7 +906,7 @@ Change `add-go-host-asks`. Shipped first in Go for go-agent-cli, now in all seve
 - **Tool tiers.** `ClientOptions.toolTiers = { core, deferred, budgetTokens?,
   contextWindow?, usageCount?, countTokens? }`. The tools array is the core tools sorted
   by name, then `tool_search` and `call_tool`. Every other tool is *listed* (`- name — first
-  line` inside `tool_search`'s description) or *deferred* (name only there). The plan is
+  line`, cut to the longest valid UTF-8 prefix of at most 120 bytes plus `…`, inside `tool_search`'s description) or *deferred* (name only there). The plan is
   built on a toolkit's first request and then frozen; `resetToolTiers(tk)` rebuilds it (call
   at session start). A tool registered later is deferred, absent from the description, and
   found by search. Budget (`budgetTokens`, else 5% of `contextWindow`): while the core
@@ -912,7 +914,8 @@ Change `add-go-host-asks`. Shipped first in Go for go-agent-cli, now in all seve
   larger schema, then name), then the least-used listed tool to deferred.
   `tool_search {query, limit?}`: `select:a,b` for exact names, else keyword scoring (name
   match 3, description match 1; default 5 results); returns the definitions as JSON in the
-  tool result — a message, never a change to the tools array. It is engine-internal and
+  tool result (byte-identical to Go's `json.MarshalIndent(defs, "", "  ")`: keys sorted at every
+  level, and `<` `>` `&` U+2028 U+2029 escaped as `\u003c` `\u003e` `\u0026` `\u2028` `\u2029`) — a message, never a change to the tools array. It is engine-internal and
   read-only (no `beforeTool`). Loaded tools are called by name, or as `call_tool {name,
   arguments}`, which the loop unwraps BEFORE hooks, so gates and hints see the real tool. Stream
   `tool_call`/`tool_result` events carry the real name and inner args, with `via: "call_tool"`.

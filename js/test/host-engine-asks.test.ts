@@ -10,7 +10,7 @@ import { fileURLToPath } from "node:url"
 import {
   createClient, createToolkit, defineTool, createBuiltinTools, loadMcp, mcpHints, pending,
   InMemoryConversationStore, BackgroundShells, resolveKey, listModels, applyPromptCache, buildToolPlan,
-  defaultCountTokens, toolDef, agents,
+  defaultCountTokens, toolDef, toolSearch, agents,
 } from "../dist/index.js"
 
 const PROGRESS_SERVER = path.resolve(fileURLToPath(import.meta.url), "../../../examples/mcp-progress-server.mjs")
@@ -253,6 +253,29 @@ test("opt-in builtins are absent by default", () => {
     if (t.name === "bash") assert.equal("run_in_background" in (t.inputSchema.properties as object), false)
   }
   assert.equal(createBuiltinTools({}).length, 10)
+})
+
+test("background shells: a shell signalled from outside reports exit code -1, as Go", { skip: process.platform === "win32" }, async () => {
+  const bg = new BackgroundShells()
+  try {
+    const cfg = { background: bg, killGraceMs: 100 }
+    const bash = pick(cfg, "bash"), out = pick(cfg, "bash_output")
+    const r = await bash.execute({ command: "kill -TERM $$; sleep 5", run_in_background: true })
+    const id = r.metadata?.backgroundId as string
+    const deadline = Date.now() + 5000
+    for (;;) {
+      const o = await out.execute({ id })
+      if (o.metadata?.status === "exited") {
+        assert.equal(o.metadata.exitCode, -1)
+        assert.ok(o.output.includes("[status: exited with code -1]"), o.output)
+        break
+      }
+      assert.ok(Date.now() < deadline, "never exited")
+      await new Promise((res) => setTimeout(res, 50))
+    }
+  } finally {
+    await bg.closeAll()
+  }
 })
 
 test("background shells: incremental output, group kill, list", { skip: process.platform === "win32" }, async () => {
@@ -620,4 +643,20 @@ test("tool tiers: stream events name the real tool for call_tool", async () => {
   }
   assert.deepEqual(got, ["tool_call:deploy:call_tool:prod", "tool_result:deploy:call_tool"])
   assert.deepEqual(ran, ["deploy(prod)"])
+})
+
+// Same bytes as golang TestToolSearchJSONIsHTMLEscaped: sorted keys, 2-space indent, <>& escaped.
+test("tool_search output escapes <, > and & exactly like Go", () => {
+  const amp = defineTool({ name: "amp", description: "Use <a & b> here", inputSchema: { type: "object", properties: { x: { type: "string" } } }, run: () => "" })
+  const r = toolSearch([amp], (n) => (n === "amp" ? amp : undefined), { query: "select:amp" })
+  const want = "Loaded tools (call by name, or with call_tool):\n[\n  {\n    \"description\": \"Use \\u003ca \\u0026 b\\u003e here\",\n    \"inputSchema\": {\n      \"properties\": {\n        \"x\": {\n          \"type\": \"string\"\n        }\n      },\n      \"type\": \"object\"\n    },\n    \"name\": \"amp\"\n  }\n]"
+  assert.equal(r.output, want)
+})
+
+test("tool_search description cuts at 120 bytes without splitting a character", () => {
+  const mk = (name: string, description: string) => defineTool({ name, description, run: () => "" })
+  const p = buildToolPlan({ core: [] }, [mk("a1", "a".repeat(119) + "é tail"), mk("a2", "a".repeat(117) + "€z")])
+  const desc = p.search.description
+  assert.ok(desc.includes("- a1 — " + "a".repeat(119) + "…\n") || desc.endsWith("- a1 — " + "a".repeat(119) + "…"), desc)
+  assert.ok(desc.includes("- a2 — " + "a".repeat(117) + "€…"), desc)
 })

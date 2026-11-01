@@ -317,6 +317,23 @@
       "bash offers run_in_background only with :background")
   (is (= 10 (count (builtin/builtin-tools-for nil)))))
 
+(deftest background-shell-signalled-from-outside-is-minus-one
+  ;; Not via kill_shell: the shell signals itself. Go reports -1, never 128+signal.
+  (let [bg  (builtin/background-shells)
+        cfg {:background bg :kill-grace-ms 100}
+        bash (builtin-named cfg "bash") out (builtin-named cfg "bash_output")]
+    (try
+      (let [id (get-in (exec bash {:command "kill -TERM $$; sleep 5" :run_in_background true}) [:metadata :backgroundId])
+            deadline (+ (ktime/mono-ms) 5000)
+            o (loop []
+                (let [o (exec out {:id id})]
+                  (cond (= "exited" (get-in o [:metadata :status])) o
+                        (> (ktime/mono-ms) deadline) nil
+                        :else (do (ktime/sleep! 50) (recur)))))]
+        (is (= -1 (get-in o [:metadata :exitCode])) (pr-str o))
+        (is (str/includes? (str (:output o)) "[status: exited with code -1]")))
+      (finally (builtin/bg-close-all! bg)))))
+
 (deftest background-shell-lifecycle
   (let [bg  (builtin/background-shells)
         cfg {:background bg :kill-grace-ms 100}
@@ -692,6 +709,22 @@
     (testing "reset rebuilds at the next session start"
       (client/reset-tool-tiers! c tk)
       (is (= "core" (get (client/tool-tier-plan c tk) "alpha_read"))))))
+
+(deftest tool-search-json-escapes-like-go
+  ;; Same bytes as golang TestToolSearchJSONIsHTMLEscaped.
+  (let [amp (native/native-tool {:name "amp" :description "Use <a & b> here"
+                                 :input-schema {"type" "object" "properties" {"x" {"type" "string"}}}
+                                 :run (fn [_] "")})
+        tk  (tool/add-tools (tier-toolkit (atom [])) [amp])]
+    (is (= (str "Loaded tools (call by name, or with call_tool):\n[\n  {\n    \"description\": \"Use \\u003ca \\u0026 b\\u003e here\",\n"
+                "    \"inputSchema\": {\n      \"properties\": {\n        \"x\": {\n          \"type\": \"string\"\n"
+                "        }\n      },\n      \"type\": \"object\"\n    },\n    \"name\": \"amp\"\n  }\n]")
+           (:output (client/tool-search tk {:query "select:amp"}))))))
+
+(deftest tool-tier-first-line-cuts-on-a-character-boundary
+  (is (= (str (apply str (repeat 119 "a")) "…") (client/first-line (str (apply str (repeat 119 "a")) "é tail"))))
+  (is (= (str (apply str (repeat 117 "a")) "€…") (client/first-line (str (apply str (repeat 117 "a")) "€z"))))
+  (is (= (str (apply str (repeat 118 "a")) "…") (client/first-line (str (apply str (repeat 118 "a")) "😀z")))))
 
 (deftest tool-tier-budget-demotes-the-least-used
   (let [ran   (atom [])

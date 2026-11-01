@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"unicode/utf8"
 )
 
 func tierToolkit(t *testing.T, ran *[]string) *Toolkit {
@@ -196,5 +197,41 @@ func TestToolTierStreamNamesRealTool(t *testing.T) {
 	}
 	if strings.Join(ran, ",") != "deploy(prod)" {
 		t.Fatalf("ran = %v", ran)
+	}
+}
+
+// The 120-byte cut never splits a UTF-8 character: it keeps the longest valid
+// prefix of at most 120 bytes (é is 2 bytes; byte 120 falls inside it).
+func TestToolTierFirstLineCutsOnRuneBoundary(t *testing.T) {
+	in := strings.Repeat("a", 119) + "é tail"
+	got := firstLine(in)
+	if want := strings.Repeat("a", 119) + "…"; got != want {
+		t.Fatalf("firstLine = %q, want %q", got, want)
+	}
+	if !utf8.ValidString(got) {
+		t.Fatal("invalid UTF-8")
+	}
+	// exactly 120 bytes ending on a whole 3-byte rune is kept whole
+	in = strings.Repeat("a", 117) + "€" + "z"
+	if got := firstLine(in); got != strings.Repeat("a", 117)+"€…" {
+		t.Fatalf("firstLine = %q", got)
+	}
+}
+
+// tool_search output is json.MarshalIndent: sorted keys, two-space indent and
+// <, >, & escaped as <, >, &. Every port pins these bytes.
+func TestToolSearchJSONIsHTMLEscaped(t *testing.T) {
+	tk, err := CreateToolkit(context.Background(), Options{Builtins: false, ExtraTools: []Tool{
+		NativeTool("amp", "Use <a & b> here", map[string]any{"type": "object", "properties": map[string]any{"x": map[string]any{"type": "string"}}},
+			func(context.Context, map[string]any) (string, error) { return "", nil }),
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := CreateClient(ClientOptions{BaseURL: "http://x", Model: "m", APIKey: "k", ToolTiers: &ToolTierOptions{}})
+	r := c.toolSearch(tk, map[string]any{"query": "select:amp"})
+	want := "Loaded tools (call by name, or with call_tool):\n[\n  {\n    \"description\": \"Use \\u003ca \\u0026 b\\u003e here\",\n    \"inputSchema\": {\n      \"properties\": {\n        \"x\": {\n          \"type\": \"string\"\n        }\n      },\n      \"type\": \"object\"\n    },\n    \"name\": \"amp\"\n  }\n]"
+	if r.Output != want {
+		t.Fatalf("got:\n%s\nwant:\n%s", r.Output, want)
 	}
 }

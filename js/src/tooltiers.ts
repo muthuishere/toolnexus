@@ -176,6 +176,11 @@ function sortKeys(v: unknown): unknown {
   return v
 }
 
+/** Go's json escapes `<`, `>`, `&`, U+2028 and U+2029 inside strings; they never occur outside one. */
+export function goHtmlEscape(json: string): string {
+  return json.replace(/[<>&\u2028\u2029]/g, (c) => "\\u" + c.charCodeAt(0).toString(16).padStart(4, "0"))
+}
+
 /** Run `tool_search` over every tool (any tier). */
 export function toolSearch(all: Tool[], get: (name: string) => Tool | undefined, args: Record<string, unknown>): ToolResult {
   const q = (typeof args.query === "string" ? args.query : "").trim()
@@ -209,7 +214,7 @@ export function toolSearch(all: Tool[], get: (name: string) => Tool | undefined,
   }
   if (!picked.length) return { output: "No matching tools.", isError: false, metadata: { count: 0 } }
   return {
-    output: "Loaded tools (call by name, or with call_tool):\n" + JSON.stringify(sortKeys(picked.map(toolDef)), null, 2),
+    output: "Loaded tools (call by name, or with call_tool):\n" + goHtmlEscape(JSON.stringify(sortKeys(picked.map(toolDef)), null, 2)),
     isError: false,
     metadata: { count: picked.length, tools: picked.map((t) => t.name) },
   }

@@ -146,3 +146,26 @@ async def test_tool_tier_stream_names_real_tool():
             got.append(f"{ev['type']}:{ev['name']}:{ev.get('via')}:{(ev.get('args') or {}).get('x')}")
     assert got == ["tool_call:deploy:call_tool:prod", "tool_result:deploy:call_tool:None"]
     assert ran == ["deploy(prod)"]
+
+
+def test_tool_search_json_escapes_like_go():
+    # Same bytes as golang TestToolSearchJSONIsHTMLEscaped.
+    async def run(args=None, ctx=None):
+        return ToolResult(output="", is_error=False)
+
+    amp = Tool(name="amp", description="Use <a & b> here", input_schema=SCHEMA, source="native", execute=run)
+    r = tool_search([amp], lambda n: amp if n == "amp" else None, {"query": "select:amp"})
+    want = (
+        "Loaded tools (call by name, or with call_tool):\n[\n  {\n"
+        '    "description": "Use \\u003ca \\u0026 b\\u003e here",\n'
+        '    "inputSchema": {\n      "properties": {\n        "x": {\n          "type": "string"\n'
+        '        }\n      },\n      "type": "object"\n    },\n    "name": "amp"\n  }\n]'
+    )
+    assert r.output == want
+
+
+def test_first_line_cuts_on_a_character_boundary():
+    from toolnexus.tool_tiers import _first_line
+
+    assert _first_line("a" * 119 + "é tail") == "a" * 119 + "…"
+    assert _first_line("a" * 117 + "€z") == "a" * 117 + "€…"

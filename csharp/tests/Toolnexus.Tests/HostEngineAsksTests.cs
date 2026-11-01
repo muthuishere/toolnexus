@@ -418,6 +418,36 @@ public class HostBuiltinExtrasTests : IDisposable
         Assert.False(props.ContainsKey("run_in_background"));
     }
 
+    /// <summary>A shell signalled from outside (not via kill_shell) reports exit code -1, as Go does.</summary>
+    [Fact]
+    public async Task BackgroundShellSignalledFromOutsideIsMinusOne()
+    {
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows)) return;
+        var bg = new BackgroundShells();
+        try
+        {
+            var cfg = new Dictionary<string, object?> { ["background"] = bg, ["killGraceMs"] = 100L };
+            var bash = Extra(cfg, "bash");
+            var output = Extra(cfg, "bash_output");
+            var r = await bash.ExecuteAsync(new Dictionary<string, object?> { ["command"] = "kill -TERM $$; sleep 5", ["run_in_background"] = true });
+            var id = r.Metadata?.Get("backgroundId") as string;
+            var deadline = DateTime.UtcNow.AddSeconds(5);
+            while (true)
+            {
+                var o = await output.ExecuteAsync(new Dictionary<string, object?> { ["id"] = id });
+                if (o.Metadata!["status"] as string == "exited")
+                {
+                    Assert.Equal(-1L, o.Metadata["exitCode"]);
+                    Assert.Contains("[status: exited with code -1]", o.Output);
+                    break;
+                }
+                Assert.True(DateTime.UtcNow < deadline, "never exited");
+                await Task.Delay(50);
+            }
+        }
+        finally { await bg.CloseAllAsync(); }
+    }
+
     [Fact]
     public async Task BackgroundShellLifecycle()
     {

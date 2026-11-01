@@ -199,6 +199,18 @@ exactly as before. Cancellation is cooperative: checked before each model call a
 batch of tool calls, so an HTTP call already in flight is not aborted. Background shells are
 POSIX only. `list-models` uses koine's HTTP client, not `:http-client` (which only posts).
 
+**Fixed: three cross-port byte differences in the new host tools (golang is the reference).**
+- `tool_search` output is now the same bytes in every port: keys sorted at every level and
+  `<`, `>`, `&`, U+2028, U+2029 escaped as Go's json does (`\u003c`...). js, python, elixir and
+  csharp did not escape them, and csharp did not sort nested schema keys.
+- The 120-byte cut of a listed tool's description line now keeps the longest valid UTF-8 prefix
+  in every port. Go cut at a raw byte and could emit a broken character; python, csharp and
+  clojure cut at 120 characters, so a non-ASCII description gave a different line.
+- A background shell killed by a signal it did not get from `kill_shell` now reports
+  `exited with code -1` everywhere. java, csharp, elixir and clojure reported 128+signal (143
+  for SIGTERM). Those runtimes cannot tell a signal from a real exit status, so there a command
+  that itself exits 129..159 also reads as -1.
+
 **A cancelled turn no longer forgets what it did, cancel can kill a stubborn command in about 100 ms,
 and file edits come back with a diff.** Found by go-agent-cli's real server integration; all seven
 ports (`openspec/changes/add-host-turn-durability`).

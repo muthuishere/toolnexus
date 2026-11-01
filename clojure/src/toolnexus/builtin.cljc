@@ -493,12 +493,18 @@
 
 (defn- bg-running? [j] (not (realized? (:done j))))
 
+;; The host reports a shell killed by signal N as 128 + N; Go reports -1 (killed
+;; by a signal). Map 129..159 to -1 so every port prints the same code. Known
+;; limit: a command that itself exits 129..159 also reads as -1.
+(defn- signal-code [code]
+  (if (and (> code 128) (< code 160)) -1 code))
+
 (defn- bg-info [j]
   (let [running (bg-running? j)
         r       (when-not running @(:done j))]
     {:id (:id j) :command (:command j) :started (:started j)
      :running running
-     :exit-code (when-not running (let [x (:exit r)] (if (number? x) (long x) -1)))
+     :exit-code (when-not running (let [x (:exit r)] (if (number? x) (signal-code (long x)) -1)))
      :killed @(:killed j)}))
 
 (defn- bg-status [i]
@@ -1234,11 +1240,13 @@
   (-> (str s)
       (str/replace "<" "\\u003c")
       (str/replace ">" "\\u003e")
-      (str/replace "&" "\\u0026")))
+      (str/replace "&" "\\u0026")
+      (str/replace "\u2028" "\\u2028")
+      (str/replace "\u2029" "\\u2029")))
 
 (defn ^:no-doc json-indent
   "`v` as indented JSON: object keys sorted by code point, `indent` per level,
-  `<`/`>`/`&` escaped as \\u003c/\\u003e/\\u0026 — the bytes of Go's
+  `<`/`>`/`&`/U+2028/U+2029 escaped as \\u003c/\\u003e/\\u0026/\\u2028/\\u2029 — the bytes of Go's
   `json.MarshalIndent(v, \"\", indent)`. INTERNAL: shared by `notebook_edit` and
   the client's `tool_search` so the two cannot drift."
   ([v indent] (json-indent v indent ""))

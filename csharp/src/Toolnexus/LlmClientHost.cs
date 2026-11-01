@@ -286,11 +286,16 @@ public sealed partial class LlmClient
         return p;
     }
 
-    private static string FirstLine(string s)
+    internal static string FirstLine(string s)
     {
         var i = s.IndexOf('\n');
         if (i >= 0) s = s[..i];
-        return s.Length > 120 ? s[..120] + "…" : s;
+        // Longest valid UTF-8 prefix of at most 120 BYTES (as Go): never split a character.
+        var bytes = global::System.Text.Encoding.UTF8.GetBytes(s);
+        if (bytes.Length <= 120) return s;
+        var n = 120;
+        while (n > 0 && (bytes[n] & 0xC0) == 0x80) n--;
+        return global::System.Text.Encoding.UTF8.GetString(bytes, 0, n) + "…";
     }
 
     /// <summary>Recompute the sorted tier lists and the tool_search description.</summary>
@@ -424,7 +429,7 @@ public sealed partial class LlmClient
         if (picked.Count == 0)
             return ToolResult.Ok("No matching tools.", new Dictionary<string, object?> { ["count"] = 0L });
         var defs = picked.Select(t => (object?)ToolDef(t)).ToList();
-        return ToolResult.Ok("Loaded tools (call by name, or with call_tool):\n" + Json.Pretty(defs),
+        return ToolResult.Ok("Loaded tools (call by name, or with call_tool):\n" + Json.GoIndent(defs),
             new Dictionary<string, object?>
             {
                 ["count"] = (long)picked.Count,

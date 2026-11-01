@@ -502,6 +502,27 @@ defmodule Toolnexus.HostEngineAsksTest do
     end
 
     @tag timeout: 30_000
+    test "a background shell signalled from outside reports exit code -1, as Go" do
+      bg = BackgroundShells.new()
+      cfg = %{background: bg, kill_grace_ms: 100}
+      bash = extra(cfg, "bash")
+      out = extra(cfg, "bash_output")
+      r = bash.execute.(%{"command" => "kill -TERM $$; sleep 5", "run_in_background" => true}, nil)
+      id = r.metadata.backgroundId
+
+      o =
+        Enum.reduce_while(1..100, nil, fn _, _ ->
+          o = out.execute.(%{"id" => id}, nil)
+          if o.metadata.status == "exited", do: {:halt, o}, else: (Process.sleep(50) && {:cont, nil})
+        end)
+
+      assert o.metadata.exitCode == -1
+      assert o.output =~ "[status: exited with code -1]"
+      assert Toolnexus.Builtin.signal_code(2) == 2
+      BackgroundShells.close_all(bg)
+    end
+
+    @tag timeout: 30_000
     test "background shell lifecycle" do
       bg = BackgroundShells.new()
       cfg = %{background: bg, kill_grace_ms: 100}
@@ -718,6 +739,24 @@ defmodule Toolnexus.HostEngineAsksTest do
       assert :ok = Client.reset_tool_tiers(Client.create(base_url: "https://x", api_key: "k"), tk)
       # a bare tool list shares one plan
       assert Client.tool_tier_plan(c, tk.tools)["lint"] == :listed
+    end
+
+    test "tool_search output escapes <, > and & exactly like Go" do
+      amp = Toolnexus.define_tool(
+        name: "amp",
+        description: "Use <a & b> here",
+        input_schema: %{"type" => "object", "properties" => %{"x" => %{"type" => "string"}}},
+        execute: fn _ -> "" end
+      )
+
+      r = Toolnexus.ToolTiers.search([amp], %{"query" => "select:amp"})
+
+      want =
+        "Loaded tools (call by name, or with call_tool):\n[\n  {\n    \"description\": \"Use \\u003ca \\u0026 b\\u003e here\",\n" <>
+          "    \"inputSchema\": {\n      \"properties\": {\n        \"x\": {\n          \"type\": \"string\"\n" <>
+          "        }\n      },\n      \"type\": \"object\"\n    },\n    \"name\": \"amp\"\n  }\n]"
+
+      assert r.output == want
     end
 
     test "tool_search: select, missing, keywords + limit, empty query" do

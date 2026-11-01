@@ -36,6 +36,28 @@ def test_opt_in_builtins_absent_by_default():
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="posix")
+async def test_background_shell_signalled_from_outside_is_minus_one():
+    # Go reports -1 for a shell killed by a signal it did not get from kill_shell.
+    bg = BackgroundShells()
+    try:
+        cfg = {"background": bg, "kill_grace_ms": 100}
+        bash, out = _tool(cfg, "bash"), _tool(cfg, "bash_output")
+        r = await bash.execute({"command": "kill -TERM $$; sleep 5", "run_in_background": True})
+        bid = r.metadata["backgroundId"]
+        deadline = time.monotonic() + 5
+        while True:
+            o = await out.execute({"id": bid})
+            if o.metadata["status"] == "exited":
+                assert o.metadata["exitCode"] == -1, o.metadata
+                assert "[status: exited with code -1]" in o.output
+                break
+            assert time.monotonic() < deadline, "never exited"
+            await asyncio.sleep(0.05)
+    finally:
+        bg.close_all()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="posix")
 async def test_background_shell_lifecycle():
     bg = BackgroundShells()
     try:

@@ -1238,10 +1238,22 @@
 (defn- default-count-tokens [v]
   (quot (+ (builtin/utf8-count (json/write-str v)) 3) 4))
 
-(defn- first-line [s]
-  (let [l (first (str/split (str s) #"\n" 2))
-        l (str l)]
-    (if (> (count l) 120) (str (subs l 0 120) "…") l)))
+(defn ^:no-doc first-line
+  "First line of `s`, cut to the longest valid UTF-8 prefix of at most 120
+  BYTES, as Go does — never a split character. A cut at `j` splits a
+  surrogate pair exactly when the two halves' byte counts do not add up to
+  the whole, which needs no host char interop."
+  [s]
+  (let [l     (str (first (str/split (str s) #"\n" 2)))
+        total (builtin/utf8-count l)]
+    (if (<= total 120)
+      l
+      (loop [j (min (count l) 120)]
+        (let [head (subs l 0 j)
+              n    (builtin/utf8-count head)]
+          (if (and (<= n 120) (= total (+ n (builtin/utf8-count (subs l j)))))
+            (str head "…")
+            (recur (dec j))))))))
 
 (defn- plan-lists [tier]
   (let [of (fn [t] (tool/sort-strings (keep (fn [[n x]] (when (= x t) n)) tier)))]

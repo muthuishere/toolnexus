@@ -582,6 +582,13 @@ defmodule Toolnexus.Builtin do
     end
   end
 
+  # An Erlang port reports a shell killed by signal N as 128 + N; Go reports -1
+  # (killed by a signal). Map 129..159 to -1 so every port prints the same code.
+  # Known limit: a command that itself exits 129..159 also reads as -1 here.
+  @doc false
+  def signal_code(code) when is_integer(code) and code > 128 and code < 160, do: -1
+  def signal_code(code), do: code
+
   @doc false
   # A background job (SPEC §4C): the port owner. It traps exits, so whichever way
   # the registry leaves, the job's process group is stopped on the way out.
@@ -622,7 +629,7 @@ defmodule Toolnexus.Builtin do
         background_loop(%{j | out: j.out <> d})
 
       {^port, {:exit_status, code}} ->
-        background_loop(%{j | status: if(j.status == :killed, do: :killed, else: :exited), code: code})
+        background_loop(%{j | status: if(j.status == :killed, do: :killed, else: :exited), code: signal_code(code)})
 
       {:read, from, ref} ->
         fresh = binary_part(j.out, j.read, byte_size(j.out) - j.read)
