@@ -20,6 +20,10 @@ public final class Toolkit implements AutoCloseable {
     /** MCP serve profile read from a top-level {@code mcpServer} (singular) config block. */
     private final McpServe.MCPServeConfig mcpServerConfig; // may be null
     private final Map<String, Tool> byName = new LinkedHashMap<>();
+    /** Guards {@link #byName}: {@link #register} may run while a turn reads the tool list
+     * (SPEC §4C). A tool registered mid-turn is offered from the next LLM call on. */
+    private final java.util.concurrent.locks.ReadWriteLock lock =
+            new java.util.concurrent.locks.ReentrantReadWriteLock();
 
     public static final class Options {
         public Object mcpConfig;            // path string, raw JSON string, or parsed Map
@@ -218,21 +222,39 @@ public final class Toolkit implements AutoCloseable {
     }
 
     public List<Tool> tools() {
-        return new ArrayList<>(byName.values());
+        lock.readLock().lock();
+        try {
+            return new ArrayList<>(byName.values());
+        } finally {
+            lock.readLock().unlock();
+        }
     }
 
     public Tool get(String name) {
-        return byName.get(name);
+        lock.readLock().lock();
+        try {
+            return byName.get(name);
+        } finally {
+            lock.readLock().unlock();
+        }
     }
 
-    /** Add native/http/custom tools at runtime. First-name-wins; warn on dup. Chainable. */
+    /**
+     * Add native/http/custom tools at runtime. First-name-wins; warn on dup. Chainable. Safe to
+     * call concurrently with a running turn and with other {@code register} calls (SPEC §4C).
+     */
     public Toolkit register(Tool... tools) {
-        for (Tool t : tools) {
-            if (byName.containsKey(t.name())) {
-                System.err.println("[toolnexus] duplicate tool name \"" + t.name() + "\" — keeping first");
-                continue;
+        lock.writeLock().lock();
+        try {
+            for (Tool t : tools) {
+                if (byName.containsKey(t.name())) {
+                    System.err.println("[toolnexus] duplicate tool name \"" + t.name() + "\" — keeping first");
+                    continue;
+                }
+                byName.put(t.name(), t);
             }
-            byName.put(t.name(), t);
+        } finally {
+            lock.writeLock().unlock();
         }
         return this;
     }
@@ -302,7 +324,7 @@ public final class Toolkit implements AutoCloseable {
     }
 
     public ToolResult execute(String name, Map<String, Object> args, ToolContext ctx) {
-        Tool tool = byName.get(name);
+        Tool tool = get(name);
         if (tool == null) {
             return ToolResult.error("Unknown tool: " + name);
         }
@@ -321,6 +343,12 @@ public final class Toolkit implements AutoCloseable {
     /** server -> "connected" | "failed" | "disabled". */
     public Map<String, String> mcpStatus() {
         return mcp != null ? mcp.status() : Map.of();
+    }
+
+    /** The MCP source this toolkit loaded, or {@code null} — e.g. for
+     * {@link McpSource#resourceTools()} (SPEC §4C). */
+    public McpSource mcpSource() {
+        return mcp;
     }
 
     public List<Map<String, Object>> toOpenAI() {

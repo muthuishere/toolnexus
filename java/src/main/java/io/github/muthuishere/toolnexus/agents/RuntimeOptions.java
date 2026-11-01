@@ -57,7 +57,13 @@ public final class RuntimeOptions {
     /** §8 observability sink handed to EVERY handle's per-turn client. Forwarded verbatim; an
      * {@link AgentDef#onMetric} REPLACES this for that agent. {@code null} = no sink. */
     public java.util.function.Consumer<LlmClient.MetricEvent> onMetric;
+    /** The runtime-level §10 interpreter: answers a suspension when no agent on the handle's chain
+     * has its own {@code waitFor} (SPEC §4C). {@code null} ⇒ unchanged (no authority ⇒ the
+     * suspension goes durable). A host running an agent as a tool
+     * ({@link Agents.Agent#asToolWith}) sets it so the child's asks reach the parent's bridge. */
+    public Function<io.github.muthuishere.toolnexus.Request, io.github.muthuishere.toolnexus.Answer> waitFor;
 
+    public RuntimeOptions waitFor(Function<io.github.muthuishere.toolnexus.Request, io.github.muthuishere.toolnexus.Answer> v) { this.waitFor = v; return this; }
     public RuntimeOptions baseUrl(String v) { this.baseUrl = v; return this; }
     public RuntimeOptions style(String v) { this.style = v; return this; }
     public RuntimeOptions apiKey(String v) { this.apiKey = v; return this; }
@@ -90,6 +96,7 @@ public final class RuntimeOptions {
         o.clock = clock;
         o.hooks = hooks;
         o.onMetric = onMetric;
+        o.waitFor = waitFor;
         return o;
     }
 }

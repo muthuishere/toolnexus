@@ -82,7 +82,16 @@ public final class LlmClient {
         public String baseUrl;
         public String style; // "openai" | "anthropic"
         public String model;
-        public String apiKey;          // from env if null
+        /** The API key. When null, it is read from {@link #apiKeyEnv}, else from the ONE env var
+         * that belongs to the {@code baseUrl} host: {@code https://api.openai.com} →
+         * {@code OPENAI_API_KEY}, {@code https://api.anthropic.com} → {@code ANTHROPIC_API_KEY},
+         * {@code https://openrouter.ai} (and subdomains) → {@code OPENROUTER_API_KEY}. Any other
+         * host, or plain http, needs {@code apiKey} or {@code apiKeyEnv} — a key is never sent to
+         * a host it does not belong to (SPEC §4C). Never printed. */
+        public String apiKey;
+        /** The NAME of the env var to read the key from (never the value) when {@code apiKey} is
+         * null — for a host not in the table above. */
+        public String apiKeyEnv;
         public Map<String, String> headers;
         public String systemPrompt;
         public Integer maxTurns;       // default 10
@@ -117,6 +126,17 @@ public final class LlmClient {
          * NOT hang: {@link #run} returns {@code status="pending"} + the {@code pending} request so a
          * durable host can resolve it out-of-band and resume by calling {@code run} again later. */
         public Function<Request, Answer> waitFor; // optional; null = durable/halt posture
+        /** {@link #waitFor} that also receives the turn's {@link CancelToken}, so a pending ask can
+         * stop when the turn is cancelled (SPEC §4C). The token is the one passed to
+         * {@code run}/{@code ask}, or a never-cancelled one when the run has none; a cancel also
+         * interrupts the thread running it. Wins over {@code waitFor} when both are set. */
+        public java.util.function.BiFunction<Request, CancelToken, Answer> waitForCtx; // optional
+        /** Ask the provider to cache the stable request prefix (SPEC "Prompt caching"). Null ⇒
+         * body byte-identical. Applied before {@link #requestParams} and {@link #bodyTransform}. */
+        public PromptCache promptCache; // optional
+        /** Send only core tool schemas up front plus a {@code tool_search} tool that loads the
+         * rest on demand (SPEC "Tool tiers"). Null ⇒ every tool is sent, as before. */
+        public ToolTiers toolTiers; // optional
         /** §8 Gap 1: extra top-level keys shallow-merged into EVERY LLM request body after the
          * client builds its own — a {@code requestParams} key WINS on collision (e.g. {@code max_tokens}
          * overrides the anthropic default 4096). The keys {@code messages}/{@code tools}/{@code stream}
@@ -155,6 +175,10 @@ public final class LlmClient {
         public Options style(String v) { this.style = v; return this; }
         public Options model(String v) { this.model = v; return this; }
         public Options apiKey(String v) { this.apiKey = v; return this; }
+        public Options apiKeyEnv(String v) { this.apiKeyEnv = v; return this; }
+        public Options waitForCtx(java.util.function.BiFunction<Request, CancelToken, Answer> v) { this.waitForCtx = v; return this; }
+        public Options promptCache(PromptCache v) { this.promptCache = v; return this; }
+        public Options toolTiers(ToolTiers v) { this.toolTiers = v; return this; }
         public Options headers(Map<String, String> v) { this.headers = v; return this; }
         public Options systemPrompt(String v) { this.systemPrompt = v; return this; }
         public Options maxTurns(int v) { this.maxTurns = v; return this; }
@@ -667,7 +691,12 @@ public final class LlmClient {
     public record AfterLLMEvent(Map<String, Object> response, String model, int turn) {}
 
     /** Event passed to {@link Hooks#beforeTool}: the call the model wants to make. */
-    public record BeforeToolEvent(String name, Map<String, Object> args, String id, int turn) {}
+    public record BeforeToolEvent(String name, Map<String, Object> args, String id, int turn, ToolHints hints) {
+        /** Without hints (unknown tool, or a host building the event by hand). */
+        public BeforeToolEvent(String name, Map<String, Object> args, String id, int turn) {
+            this(name, args, id, turn, null);
+        }
+    }
 
     /** Event passed to {@link Hooks#afterTool}: the call plus the result it produced. */
     public record AfterToolEvent(String name, Map<String, Object> args, ToolResult result,
@@ -711,13 +740,47 @@ public final class LlmClient {
      * executes; afterTool may replace the result.
      */
     private ToolRun runTool(Toolkit toolkit, String name, Map<String, Object> args, String id, int turn) {
+        if (opts.toolTiers != null && "tool_search".equals(name)) {
+            // Engine-internal and read-only: no beforeTool/afterTool (SPEC "Tool tiers").
+            long t0 = System.currentTimeMillis();
+            ToolResult r = ToolTiers.search(toolkit, args);
+            emitTool(name, "builtin", r, t0);
+            return new ToolRun(args, r);
+        }
+        // call_tool (tool tiers) is unwrapped HERE, so hooks, hints and permission gates see the
+        // real tool. The returned args keep the wrapper shape (with any beforeTool rewrite
+        // inside), so a §10 re-run unwraps the same way.
+        Unwrapped u = unwrapCall(name, args);
+        ToolRun run = runToolDirect(toolkit, u.name(), u.args(), id, turn);
+        if (!u.wrapped()) return run;
+        Map<String, Object> wrapper = new LinkedHashMap<>();
+        wrapper.put("name", u.name());
+        wrapper.put("arguments", run.args());
+        return new ToolRun(wrapper, run.result());
+    }
+
+    /** {@code call_tool {name, arguments}} mapped to the real call ({@code wrapped=false} when tiers
+     * are off or the name is not {@code call_tool}). */
+    private record Unwrapped(String name, Map<String, Object> args, boolean wrapped) {}
+
+    @SuppressWarnings("unchecked")
+    private Unwrapped unwrapCall(String name, Map<String, Object> args) {
+        if (opts.toolTiers == null || !"call_tool".equals(name)) return new Unwrapped(name, args, false);
+        String real = args != null && args.get("name") instanceof String s ? s : "";
+        Map<String, Object> inner = args != null && args.get("arguments") instanceof Map<?, ?> m
+                ? (Map<String, Object>) m : new LinkedHashMap<>();
+        return new Unwrapped(real, inner, true);
+    }
+
+    private ToolRun runToolDirect(Toolkit toolkit, String name, Map<String, Object> args, String id, int turn) {
         Hooks h = opts.hooks;
         Tool tool = toolkit.get(name);
         String source = tool != null ? tool.source() : "custom";
+        ToolHints hints = tool != null ? tool.hints() : null;
         long t0 = System.currentTimeMillis();
         Map<String, Object> a = args;
         if (h != null && h.beforeTool != null) {
-            ToolOverride ov = h.beforeTool.apply(new BeforeToolEvent(name, a, id, turn));
+            ToolOverride ov = h.beforeTool.apply(new BeforeToolEvent(name, a, id, turn, hints));
             if (ov != null && ov.result() != null) {
                 // short-circuit (deny/cache/dry-run, or a guard-raised suspension — path B); still a
                 // tool call for metrics, but a suspension is classified pending, never an error.
@@ -726,7 +789,7 @@ public final class LlmClient {
             }
             if (ov != null && ov.args() != null) a = ov.args();
         }
-        ToolResult result = toolkit.execute(name, a);
+        ToolResult result = toolkit.execute(name, a, new ToolContext(null, null, null, id));
         // A suspension (§10) is not a real result: skip afterTool on it — the resolved result
         // (post-waitFor) still flows through afterTool in resolvePending — and never count it as
         // a tool error.
@@ -763,11 +826,11 @@ public final class LlmClient {
      * surfaces the first halt in call order.
      */
     private ToolOutcome runToolResolved(Toolkit toolkit, String name, Map<String, Object> args,
-                                        String id, int turn) {
+                                        String id, int turn, Deadline deadline) {
         ToolRun run = runTool(toolkit, name, args, id, turn);
         Request req = ToolResult.pendingOf(run.result());
         if (req == null) return new ToolOutcome(run, null);
-        Resolved r = resolvePending(toolkit, name, run.args(), req, id, turn);
+        Resolved r = resolvePending(toolkit, name, run.args(), req, id, turn, deadline);
         return new ToolOutcome(new ToolRun(run.args(), r.result()), r.halted());
     }
 
@@ -778,18 +841,28 @@ public final class LlmClient {
      * the request). A second suspension on retry is never looped — it becomes an error result.
      */
     private Resolved resolvePending(Toolkit toolkit, String name, Map<String, Object> args,
-                                    Request request, String id, int turn) {
-        if (opts.waitFor == null) {
+                                    Request request, String id, int turn, Deadline deadline) {
+        Unwrapped u = unwrapCall(name, args);
+        name = u.name();
+        args = u.args();
+        if (opts.waitFor == null && opts.waitForCtx == null) {
             return new Resolved(ToolResult.error(request.prompt()), request);
         }
-        Answer answer = opts.waitFor.apply(request);
+        Answer answer;
+        if (opts.waitForCtx != null) {
+            CancelToken token = deadline != null && deadline.cancel != null ? deadline.cancel : new CancelToken();
+            answer = opts.waitForCtx.apply(request, token);
+            if (token.isCancelled()) throw new CancelledException("run cancelled");
+        } else {
+            answer = opts.waitFor.apply(request);
+        }
         if (answer == null || !answer.ok()) {
             return new Resolved(ToolResult.error("declined/expired: " + request.prompt()), null);
         }
         Tool tool = toolkit.get(name);
         String source = tool != null ? tool.source() : "custom";
         long t0 = System.currentTimeMillis();
-        ToolResult result = toolkit.execute(name, args, new ToolContext(null, null, answer));
+        ToolResult result = toolkit.execute(name, args, new ToolContext(null, null, answer, id));
         if (opts.hooks != null && opts.hooks.afterTool != null) {
             ToolOverride ov = opts.hooks.afterTool.apply(new AfterToolEvent(name, args, result, id, turn));
             if (ov != null && ov.result() != null) result = ov.result();
@@ -824,6 +897,15 @@ public final class LlmClient {
         public long promptTokens;
         public long completionTokens;
         public long totalTokens;
+        /** Prompt tokens served from the provider's prompt cache (anthropic
+         * {@code cache_read_input_tokens}; openai {@code prompt_tokens_details.cached_tokens}).
+         * Under anthropic {@code promptTokens} EXCLUDES cached tokens, so the context actually sent
+         * is {@code promptTokens + cacheReadTokens + cacheWriteTokens}; under openai
+         * {@code promptTokens} already includes them (do not add again). */
+        public long cacheReadTokens;
+        /** Tokens written to the prompt cache (anthropic {@code cache_creation_input_tokens};
+         * openai reports none). */
+        public long cacheWriteTokens;
     }
 
     public static final class RunResult {
@@ -903,8 +985,23 @@ public final class LlmClient {
     public record StreamEvent(Kind type, String delta, String id, String name,
                               Map<String, Object> args, String output, boolean isError,
                               Usage usage, RunResult result, Request request,
-                              List<Map<String, Object>> parts, Map<String, Object> metadata) {
+                              List<Map<String, Object>> parts, Map<String, Object> metadata,
+                              String via) {
         public enum Kind { TEXT, TOOL_CALL, TOOL_RESULT, USAGE, PENDING, DONE }
+
+        /** Without {@code via} (every event that is not a tool-tiers {@code call_tool} call). */
+        public StreamEvent(Kind type, String delta, String id, String name,
+                           Map<String, Object> args, String output, boolean isError,
+                           Usage usage, RunResult result, Request request,
+                           List<Map<String, Object>> parts, Map<String, Object> metadata) {
+            this(type, delta, id, name, args, output, isError, usage, result, request, parts, metadata, null);
+        }
+
+        /** A copy naming the real tool for a tool-tiers {@code call_tool} call: {@code via = "call_tool"}. */
+        StreamEvent viaCallTool(String realName, Map<String, Object> innerArgs) {
+            return new StreamEvent(type, delta, id, realName, type == Kind.TOOL_CALL ? innerArgs : args, output,
+                    isError, usage, result, request, parts, metadata, "call_tool");
+        }
 
         static StreamEvent text(String delta) {
             return new StreamEvent(Kind.TEXT, delta, null, null, null, null, false, null, null, null, null, null);
@@ -954,7 +1051,12 @@ public final class LlmClient {
             acc.promptTokens += in;
             acc.completionTokens += out;
             acc.totalTokens += in + out;
+            acc.cacheReadTokens += asLong(raw.get("cache_read_input_tokens"));
+            acc.cacheWriteTokens += asLong(raw.get("cache_creation_input_tokens"));
         } else {
+            if (raw.get("prompt_tokens_details") instanceof Map<?, ?> d) {
+                acc.cacheReadTokens += asLong(d.get("cached_tokens"));
+            }
             long in = asLong(raw.get("prompt_tokens"));
             long out = asLong(raw.get("completion_tokens"));
             Object total = raw.get("total_tokens");
@@ -1004,6 +1106,9 @@ public final class LlmClient {
      * {@code bodyTransform} last. Called at every LLM body-build site (run/stream × openai/anthropic).
      */
     private Map<String, Object> finalizeBody(Map<String, Object> body) {
+        if (opts.promptCache != null) {
+            PromptCache.apply(body, "anthropic".equals(opts.style) ? "anthropic" : "openai", opts.promptCache);
+        }
         if (opts.requestParams != null) {
             for (Map.Entry<String, Object> e : opts.requestParams.entrySet()) {
                 String k = e.getKey();
@@ -1781,26 +1886,123 @@ public final class LlmClient {
         return events.stream();
     }
 
-    private String resolveKey() {
-        if (opts.apiKey != null && !opts.apiKey.isEmpty()) return opts.apiKey;
-        String openrouter = System.getenv("OPENROUTER_API_KEY");
-        String openai = System.getenv("OPENAI_API_KEY");
-        String anthropic = System.getenv("ANTHROPIC_API_KEY");
-        String key = firstNonEmpty(openrouter,
-                "anthropic".equals(opts.style) ? anthropic : openai,
-                openai, anthropic);
-        if (key == null) {
-            throw new RuntimeException(
-                    "No API key: set apiKey or OPENROUTER_API_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY");
-        }
-        return key;
+    /**
+     * Pick the API key (SPEC §4C, security). An explicit {@code apiKey} is used as-is. Otherwise
+     * the key comes from {@code apiKeyEnv}, else ONLY from the env var that belongs to the
+     * {@code baseUrl}'s host, so a key is never sent to another provider's host. Any other host
+     * needs {@code apiKey} or {@code apiKeyEnv}. The value is never logged.
+     */
+    String resolveKey() {
+        return resolveKey(opts, System::getenv);
     }
 
-    private static String firstNonEmpty(String... vals) {
-        for (String v : vals) {
-            if (v != null && !v.isEmpty()) return v;
+    static String resolveKey(Options opts, Function<String, String> env) {
+        if (opts.apiKey != null && !opts.apiKey.isEmpty()) return opts.apiKey;
+        String envName = opts.apiKeyEnv != null && !opts.apiKeyEnv.isEmpty()
+                ? opts.apiKeyEnv : keyEnvForBaseUrl(opts.baseUrl);
+        if (envName == null) {
+            throw new RuntimeException("No API key: set apiKey or apiKeyEnv (provider env vars are only used for "
+                    + "https://api.openai.com, https://api.anthropic.com and https://openrouter.ai, never for \""
+                    + opts.baseUrl + "\")");
         }
+        String k = env.apply(envName);
+        if (k != null && !k.isEmpty()) return k;
+        throw new RuntimeException("No API key: set apiKey or " + envName);
+    }
+
+    /**
+     * One model a provider lists. {@code name} is the provider's display name ({@code ""} when it
+     * gives none); {@code contextLength} is the window in tokens when reported (OpenRouter does;
+     * OpenAI and Anthropic do not) — 0 = unknown.
+     */
+    public record ModelInfo(String id, String name, int contextLength) {}
+
+    /**
+     * The models a provider offers, for model switching (SPEC §4C). One GET per page, no retries,
+     * the same key rules as the client ({@code apiKey}, {@code apiKeyEnv}, or the host's own env
+     * var) and {@code opts.httpClient}. openai style: {@code GET {base}/models}; anthropic style:
+     * {@code GET {base}/v1/models}, following {@code has_more}/{@code last_id}. Sorted by id.
+     */
+    @SuppressWarnings("unchecked")
+    public static List<ModelInfo> listModels(Options opts) {
+        String key = resolveKey(opts, System::getenv);
+        HttpClient http = opts.httpClient != null ? opts.httpClient : HTTP;
+        String base = opts.baseUrl == null ? "" : opts.baseUrl.replaceAll("/+$", "");
+        List<ModelInfo> out = new ArrayList<>();
+        if ("anthropic".equals(opts.style)) {
+            String endpoint = base.endsWith("/v1") ? base + "/models" : base + "/v1/models";
+            String after = "";
+            for (int page = 0; page < 100; page++) {
+                String u = endpoint + "?limit=1000";
+                if (!after.isEmpty()) u += "&after_id=" + java.net.URLEncoder.encode(after, StandardCharsets.UTF_8);
+                Map<String, Object> body = getJson(http, u, Map.of("x-api-key", key, "anthropic-version", "2023-06-01"));
+                if (body.get("data") instanceof List<?> data) {
+                    for (Object o : data) {
+                        if (!(o instanceof Map<?, ?> m)) continue;
+                        out.add(new ModelInfo(String.valueOf(m.get("id")),
+                                m.get("display_name") instanceof String s ? s : "", 0));
+                    }
+                }
+                String last = body.get("last_id") instanceof String s ? s : "";
+                if (!Boolean.TRUE.equals(body.get("has_more")) || last.isEmpty()) break;
+                after = last;
+            }
+        } else {
+            Map<String, Object> body = getJson(http, base + "/models", Map.of("Authorization", "Bearer " + key));
+            if (body.get("data") instanceof List<?> data) {
+                for (Object o : data) {
+                    if (!(o instanceof Map<?, ?> m)) continue;
+                    out.add(new ModelInfo(String.valueOf(m.get("id")),
+                            m.get("name") instanceof String s ? s : "",
+                            m.get("context_length") instanceof Number n ? n.intValue() : 0));
+                }
+            }
+        }
+        out.sort(java.util.Comparator.comparing(ModelInfo::id));
+        return out;
+    }
+
+    private static Map<String, Object> getJson(HttpClient http, String url, Map<String, String> headers) {
+        HttpRequest.Builder rb = HttpRequest.newBuilder().uri(URI.create(url)).GET();
+        for (Map.Entry<String, String> e : headers.entrySet()) rb.header(e.getKey(), e.getValue());
+        HttpResponse<String> res;
+        try {
+            res = http.send(rb.build(), HttpResponse.BodyHandlers.ofString());
+        } catch (IOException e) {
+            throw new RuntimeException("list models: " + e.getMessage(), e);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new CancelledException("list models interrupted");
+        }
+        if (res.statusCode() / 100 != 2) {
+            String msg = res.body() == null ? "" : res.body();
+            if (msg.length() > 300) msg = msg.substring(0, 300);
+            throw new RuntimeException("list models: HTTP " + res.statusCode() + ": " + msg);
+        }
+        return Json.toMap(res.body());
+    }
+
+    /** The env var whose key may be sent to {@code baseUrl}'s host, or {@code null} when none may. */
+    static String keyEnvForBaseUrl(String baseUrl) {
+        String h = hostOf(baseUrl);
+        if (h == null) return null;
+        if (h.equals("api.openai.com")) return "OPENAI_API_KEY";
+        if (h.equals("api.anthropic.com")) return "ANTHROPIC_API_KEY";
+        if (h.equals("openrouter.ai") || h.endsWith(".openrouter.ai")) return "OPENROUTER_API_KEY";
         return null;
+    }
+
+    /** The lower-cased host of an https URL; {@code null} for anything else (a provider key is
+     * never sent over plain http). */
+    static String hostOf(String baseUrl) {
+        if (baseUrl == null) return null;
+        try {
+            URI u = URI.create(baseUrl.trim());
+            if (!"https".equalsIgnoreCase(u.getScheme()) || u.getHost() == null) return null;
+            return u.getHost().toLowerCase(java.util.Locale.ROOT);
+        } catch (IllegalArgumentException e) {
+            return null;
+        }
     }
 
     /**
@@ -1819,13 +2021,72 @@ public final class LlmClient {
     }
 
     /** The declared tool list for a run; a null toolkit declares none (ADR 0023). */
-    private static List<Map<String, Object>> declaredOpenAI(Toolkit toolkit) {
-        return toolkit == null ? new ArrayList<>() : toolkit.toOpenAI();
+    private List<Map<String, Object>> declaredOpenAI(Toolkit toolkit) {
+        if (toolkit == null) return new ArrayList<>();
+        return opts.toolTiers != null ? Adapters.toOpenAI(requestTools(toolkit)) : toolkit.toOpenAI();
     }
 
     /** The declared tool list for a run; a null toolkit declares none (ADR 0023). */
-    private static List<Map<String, Object>> declaredAnthropic(Toolkit toolkit) {
-        return toolkit == null ? new ArrayList<>() : toolkit.toAnthropic();
+    private List<Map<String, Object>> declaredAnthropic(Toolkit toolkit) {
+        if (toolkit == null) return new ArrayList<>();
+        return opts.toolTiers != null ? Adapters.toAnthropic(requestTools(toolkit)) : toolkit.toAnthropic();
+    }
+
+    // ------------------------------------------------------------------
+    // Tool tiers (SPEC "Tool tiers") — the plan is built on a toolkit's first
+    // request and then frozen, so the tools array never changes mid-session.
+    // ------------------------------------------------------------------
+
+    private final Map<Toolkit, ToolTiers.Plan> tierPlans =
+            java.util.Collections.synchronizedMap(new java.util.WeakHashMap<>());
+
+    private ToolTiers.Plan plan(Toolkit tk) {
+        if (opts.toolTiers == null || tk == null) return null;
+        synchronized (tierPlans) {
+            return tierPlans.computeIfAbsent(tk, k -> ToolTiers.buildPlan(opts.toolTiers, k.tools()));
+        }
+    }
+
+    /** The frozen tier plan for {@code tk} (built on first use), for a host UI or log: tool name →
+     * tier. {@code null} when {@link Options#toolTiers} is not set. */
+    public Map<String, ToolTiers.Tier> toolTierPlan(Toolkit tk) {
+        ToolTiers.Plan p = plan(tk);
+        return p == null ? null : new LinkedHashMap<>(p.tier);
+    }
+
+    /** Forget {@code tk}'s plan so the next request rebuilds it — call it at a new session start
+     * (e.g. after updating usage stats). Mid-session it breaks the cached prefix. */
+    public void resetToolTiers(Toolkit tk) {
+        tierPlans.remove(tk);
+    }
+
+    /** The tools array for a request: core tools (sorted) then {@code tool_search} and
+     * {@code call_tool}. Without tiers it is every tool, as before. */
+    List<Tool> requestTools(Toolkit tk) {
+        ToolTiers.Plan p = plan(tk);
+        if (p == null) return tk.tools();
+        List<Tool> out = new ArrayList<>();
+        for (String n : p.core) {
+            Tool t = tk.get(n);
+            if (t != null) out.add(t);
+        }
+        out.add(p.search);
+        out.add(p.call);
+        return out;
+    }
+
+    /** Stream {@code tool_call} event naming the real tool for a {@code call_tool} call. */
+    private StreamEvent callEvent(String id, String name, Map<String, Object> args) {
+        StreamEvent ev = StreamEvent.toolCall(id, name, args);
+        Unwrapped u = unwrapCall(name, args);
+        return u.wrapped() ? ev.viaCallTool(u.name(), u.args()) : ev;
+    }
+
+    /** Stream {@code tool_result} event naming the real tool for a {@code call_tool} call. */
+    private StreamEvent resultEvent(String id, String name, Map<String, Object> args, ToolResult r) {
+        StreamEvent ev = StreamEvent.toolResult(id, name, r.output(), r.isError(), r.parts(), r.metadata());
+        Unwrapped u = unwrapCall(name, args);
+        return u.wrapped() ? ev.viaCallTool(u.name(), null) : ev;
     }
 
     private int maxTurns() {
@@ -1964,7 +2225,7 @@ public final class LlmClient {
                     final int t = turn;
                     futures[idx] = CompletableFuture.supplyAsync(
                             () -> runToolResolved(toolkit, fnName,
-                                    args, callId == null ? null : String.valueOf(callId), t),
+                                    args, callId == null ? null : String.valueOf(callId), t, deadline),
                             executor).thenAccept(outcome -> {
                         ToolRun run = outcome.run();
                         haltedAt[idx] = outcome.halted();
@@ -2105,7 +2366,7 @@ public final class LlmClient {
                     final int t = turn;
                     futures[idx] = CompletableFuture.supplyAsync(
                             () -> runToolResolved(toolkit, useName, useInput,
-                                    useId == null ? null : String.valueOf(useId), t),
+                                    useId == null ? null : String.valueOf(useId), t, deadline),
                             executor).thenAccept(outcome -> {
                         ToolRun run = outcome.run();
                         haltedAt[idx] = outcome.halted();
@@ -2304,7 +2565,7 @@ public final class LlmClient {
                 int n = order.size();
                 for (int index : order) {
                     String[] slot = acc.get(index);
-                    onEvent.accept(StreamEvent.toolCall(slot[0], slot[1], Json.parseObjectLoose(slot[2])));
+                    onEvent.accept(callEvent(slot[0], slot[1], Json.parseObjectLoose(slot[2])));
                 }
                 ToolRun[] runs = new ToolRun[n];
                 CompletableFuture<Void>[] futures = new CompletableFuture[n];
@@ -2328,7 +2589,7 @@ public final class LlmClient {
                     Request req = ToolResult.pendingOf(r.result());
                     if (req != null) {
                         onEvent.accept(StreamEvent.pending(req)); // surface BEFORE waitFor so a channel can push the link
-                        Resolved res = resolvePending(toolkit, slot[1], r.args(), req, slot[0], turn);
+                        Resolved res = resolvePending(toolkit, slot[1], r.args(), req, slot[0], turn, deadline);
                         if (res.halted() != null) halted = res.halted();
                         r = new ToolRun(r.args(), res.result());
                     }
@@ -2341,8 +2602,7 @@ public final class LlmClient {
                     messages.add(toolMsg);
                     lastToolMsg = toolMsg;
                     collectRelocated(relocatedBlocks, slot[1], slot[0], r.result());
-                    onEvent.accept(StreamEvent.toolResult(slot[0], slot[1], r.result().output(),
-                            r.result().isError(), r.result().parts(), r.result().metadata()));
+                    onEvent.accept(resultEvent(slot[0], slot[1], r.args(), r.result()));
                 }
                 // §8A: ONE synthetic user message per assistant turn — wire only, never persisted.
                 if (!relocatedBlocks.isEmpty() && lastToolMsg != null) {
@@ -2523,7 +2783,7 @@ public final class LlmClient {
 
                 int n = uses.size();
                 for (Map<String, Object> u : uses) {
-                    onEvent.accept(StreamEvent.toolCall(String.valueOf(u.get("id")), String.valueOf(u.get("name")),
+                    onEvent.accept(callEvent(String.valueOf(u.get("id")), String.valueOf(u.get("name")),
                             (Map<String, Object>) u.get("input")));
                 }
                 ToolRun[] runs = new ToolRun[n];
@@ -2553,7 +2813,7 @@ public final class LlmClient {
                     Request req = ToolResult.pendingOf(r.result());
                     if (req != null) {
                         onEvent.accept(StreamEvent.pending(req)); // surface BEFORE waitFor so a channel can push the link
-                        Resolved res = resolvePending(toolkit, name, r.args(), req, id, turn);
+                        Resolved res = resolvePending(toolkit, name, r.args(), req, id, turn, deadline);
                         if (res.halted() != null) halted = res.halted();
                         r = new ToolRun(r.args(), res.result());
                     }
@@ -2565,8 +2825,7 @@ public final class LlmClient {
                     tr.put("content", anthropicToolContent(r.result()));
                     tr.put("is_error", r.result().isError());
                     results.add(tr);
-                    onEvent.accept(StreamEvent.toolResult(id, name, r.result().output(),
-                            r.result().isError(), r.result().parts(), r.result().metadata()));
+                    onEvent.accept(resultEvent(id, name, r.args(), r.result()));
                 }
                 Map<String, Object> userMsg = new LinkedHashMap<>();
                 userMsg.put("role", "user");
@@ -2716,6 +2975,8 @@ public final class LlmClient {
         c.promptTokens = u.promptTokens;
         c.completionTokens = u.completionTokens;
         c.totalTokens = u.totalTokens;
+        c.cacheReadTokens = u.cacheReadTokens;
+        c.cacheWriteTokens = u.cacheWriteTokens;
         return c;
     }
 

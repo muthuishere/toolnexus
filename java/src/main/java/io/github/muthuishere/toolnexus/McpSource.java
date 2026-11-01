@@ -110,10 +110,48 @@ public final class McpSource implements AutoCloseable {
         return new McpSchema.ElicitResult(action, null);
     }
 
-    private McpSource(List<Tool> tools, Map<String, String> status, List<McpSyncClient> clients) {
+    /** The connected clients by server name, for {@link #resourceTools()}. */
+    private final Map<String, ServerConn> servers;
+
+    private record ServerConn(McpSyncClient client, long timeout) {}
+
+    private McpSource(List<Tool> tools, Map<String, String> status, List<McpSyncClient> clients,
+                      Map<String, ServerConn> servers) {
         this.tools = tools;
         this.status = status;
         this.clients = clients;
+        this.servers = servers;
+    }
+
+    /**
+     * One server's outcome, reported by {@link LoadOptions#onServer} the moment that server
+     * finishes — never waiting for a slower server (SPEC §4C).
+     *
+     * @param name   the server name
+     * @param status {@code "connected" | "failed" | "disabled"}
+     * @param tools  this server's converted tools (empty unless connected); usable until the
+     *               returned {@link McpSource} is closed
+     * @param error  why the server failed ({@code null} when connected or disabled)
+     */
+    public record ServerResult(String name, String status, List<Tool> tools, Throwable error) {}
+
+    /** Options for {@link #load(Object, LoadOptions)}. Fluent setters; every field optional. */
+    public static final class LoadOptions {
+        /** Bridges MCP elicitation onto §10, as in {@link #load(Object, Function)}. */
+        public Function<Request, Answer> waitFor;
+        /** §2 Gap 3 cancellation signal, as in {@link #load(Object, Function, CancelSignal)}. */
+        public CancelSignal cancel;
+        /**
+         * Called once per server as soon as it is connected, failed or found disabled, so a host
+         * can {@link Toolkit#register} a fast server's tools while a slow one still connects.
+         * Calls are serialized (never concurrent with each other) but come from load threads;
+         * keep them short.
+         */
+        public java.util.function.Consumer<ServerResult> onServer;
+
+        public LoadOptions waitFor(Function<Request, Answer> v) { this.waitFor = v; return this; }
+        public LoadOptions cancel(CancelSignal v) { this.cancel = v; return this; }
+        public LoadOptions onServer(java.util.function.Consumer<ServerResult> v) { this.onServer = v; return this; }
     }
 
     public List<Tool> tools() {
@@ -314,7 +352,7 @@ public final class McpSource implements AutoCloseable {
 
     /** Connect to every enabled server, list + convert tools. Failures are isolated. */
     public static McpSource load(Object input) {
-        return load(input, null);
+        return load(input, new LoadOptions());
     }
 
     /**
@@ -335,12 +373,33 @@ public final class McpSource implements AutoCloseable {
      * and throws {@link java.util.concurrent.CancellationException} (mirrors Go's parent-ctx abort,
      * ADR A1). A {@code null} {@code cancel} ⇒ today's behavior (join every server).
      */
-    @SuppressWarnings("unchecked")
     public static McpSource load(Object input, Function<Request, Answer> waitFor, CancelSignal cancel) {
+        return load(input, new LoadOptions().waitFor(waitFor).cancel(cancel));
+    }
+
+    /**
+     * {@link #load(Object, Function, CancelSignal)} plus per-server readiness
+     * ({@link LoadOptions#onServer}, SPEC §4C). It still returns only after every server has
+     * finished, with the same source, status and cancellation semantics: a cancelled load throws
+     * and closes every client — including ones whose tools {@code onServer} already handed out.
+     */
+    @SuppressWarnings("unchecked")
+    public static McpSource load(Object input, LoadOptions opts) {
+        LoadOptions o = opts != null ? opts : new LoadOptions();
+        Function<Request, Answer> waitFor = o.waitFor;
+        CancelSignal cancel = o.cancel;
         Map<String, Object> config = parseConfig(input);
         List<Tool> tools = new ArrayList<>();
         Map<String, String> status = new LinkedHashMap<>();
         List<McpSyncClient> clients = new ArrayList<>();
+        Map<String, ServerConn> servers = new LinkedHashMap<>();
+        Object cbLock = new Object();
+        java.util.function.Consumer<ServerResult> report = r -> {
+            if (o.onServer == null) return;
+            synchronized (cbLock) {
+                o.onServer.accept(r);
+            }
+        };
 
         // Connect each server in parallel (failures isolated per server).
         List<Thread> threads = new ArrayList<>();
@@ -356,6 +415,7 @@ public final class McpSource implements AutoCloseable {
                     synchronized (lock) {
                         status.put(name, "disabled");
                     }
+                    report.accept(new ServerResult(name, "disabled", List.of(), null));
                     return;
                 }
                 long timeout = timeoutOf(cfg);
@@ -395,8 +455,10 @@ public final class McpSource implements AutoCloseable {
                     synchronized (lock) {
                         tools.addAll(converted);
                         clients.add(client);
+                        servers.put(name, new ServerConn(client, timeout));
                         status.put(name, "connected");
                     }
+                    report.accept(new ServerResult(name, "connected", List.copyOf(converted), null));
                 } catch (Exception e) {
                     synchronized (lock) {
                         status.put(name, "failed");
@@ -408,6 +470,7 @@ public final class McpSource implements AutoCloseable {
                         }
                     }
                     System.err.println("[toolnexus] MCP server \"" + name + "\" failed: " + e.getMessage());
+                    report.accept(new ServerResult(name, "failed", List.of(), e));
                 }
             }, "toolnexus-mcp-" + name);
             th.setDaemon(true);
@@ -429,7 +492,7 @@ public final class McpSource implements AutoCloseable {
             throw ce;
         }
 
-        return new McpSource(tools, status, clients);
+        return new McpSource(tools, status, clients, servers);
     }
 
     /**
@@ -795,11 +858,17 @@ public final class McpSource implements AutoCloseable {
         final String description = def.description() == null ? "" : def.description();
         final String toolName = Tool.sanitize(server) + "_" + Tool.sanitize(def.name());
         final String mcpName = def.name();
+        final ToolHints hints = mcpHints(def.annotations());
 
         return new Tool() {
             @Override
             public String name() {
                 return toolName;
+            }
+
+            @Override
+            public ToolHints hints() {
+                return hints;
             }
 
             @Override
@@ -852,6 +921,163 @@ public final class McpSource implements AutoCloseable {
                 }
             }
         };
+    }
+
+    /**
+     * Map MCP tool annotations to {@link ToolHints} (SPEC §4C). No hint fields at all ⇒ {@code null}
+     * (unknown). Defaults follow the MCP spec: readOnlyHint false, destructiveHint true,
+     * openWorldHint true when absent; a read-only tool is never destructive.
+     */
+    static ToolHints mcpHints(McpSchema.ToolAnnotations a) {
+        if (a == null || (a.readOnlyHint() == null && a.destructiveHint() == null && a.openWorldHint() == null)) {
+            return null;
+        }
+        boolean readOnly = Boolean.TRUE.equals(a.readOnlyHint());
+        boolean destructive = a.destructiveHint() == null || a.destructiveHint();
+        boolean openWorld = a.openWorldHint() == null || a.openWorldHint();
+        if (readOnly) destructive = false;
+        return new ToolHints(readOnly, destructive, openWorld);
+    }
+
+    // -----------------------------------------------------------------------
+    // MCP resource tools (SPEC §4C): opt-in — a host registers resourceTools().
+    // -----------------------------------------------------------------------
+
+    private List<String> serverNames() {
+        List<String> names = new ArrayList<>(servers.keySet());
+        java.util.Collections.sort(names);
+        return names;
+    }
+
+    private ServerConn conn(String server) {
+        ServerConn c = servers.get(server);
+        if (c == null) {
+            throw new IllegalArgumentException("no connected MCP server \"" + server + "\" (connected: "
+                    + String.join(", ", serverNames()) + ")");
+        }
+        return c;
+    }
+
+    private static String errMsg(Throwable e) {
+        Throwable c = e instanceof java.util.concurrent.ExecutionException && e.getCause() != null ? e.getCause() : e;
+        return c.getMessage() == null ? String.valueOf(c) : c.getMessage();
+    }
+
+    /**
+     * {@code list_mcp_resources} and {@code read_mcp_resource}, bound to this source's connected
+     * servers. Both are read-only and stop working when the source is closed. Opt-in: register
+     * them on a toolkit ({@code tk.register(src.resourceTools().toArray(new Tool[0]))}).
+     */
+    public List<Tool> resourceTools() {
+        McpSource self = this;
+        Map<String, Object> listProps = new LinkedHashMap<>();
+        listProps.put("server", Map.of("type", "string", "description", "Only this server (default: all)"));
+        Map<String, Object> listSchema = new LinkedHashMap<>();
+        listSchema.put("type", "object");
+        listSchema.put("properties", listProps);
+        listSchema.put("additionalProperties", false);
+        Tool list = new Tool() {
+            @Override public String name() { return "list_mcp_resources"; }
+            @Override public String description() {
+                return "List the resources MCP servers offer (uri, name, description, mimeType). Optionally for one server.";
+            }
+            @Override public Map<String, Object> inputSchema() { return listSchema; }
+            @Override public String source() { return "mcp"; }
+            @Override public ToolHints hints() { return ToolHints.READ_ONLY; }
+            @Override public ToolResult execute(Map<String, Object> args, ToolContext ctx) {
+                List<String> names = self.serverNames();
+                Object s = args == null ? null : args.get("server");
+                if (s instanceof String srv && !srv.isEmpty()) {
+                    try {
+                        self.conn(srv);
+                    } catch (IllegalArgumentException e) {
+                        return ToolResult.error("list_mcp_resources: " + e.getMessage());
+                    }
+                    names = List.of(srv);
+                }
+                List<String> lines = new ArrayList<>();
+                List<Object> items = new ArrayList<>();
+                for (String name : names) {
+                    ServerConn c = self.servers.get(name);
+                    McpSchema.ListResourcesResult res;
+                    try {
+                        res = bounded(() -> c.client().listResources(), c.timeout());
+                    } catch (Exception e) {
+                        lines.add(name + ": error: " + errMsg(e));
+                        continue;
+                    }
+                    for (McpSchema.Resource r : res.resources()) {
+                        StringBuilder line = new StringBuilder(name + " " + r.uri());
+                        if (r.name() != null && !r.name().isEmpty()) line.append(" — ").append(r.name());
+                        if (r.mimeType() != null && !r.mimeType().isEmpty()) line.append(" (").append(r.mimeType()).append(")");
+                        if (r.description() != null && !r.description().isEmpty()) line.append(": ").append(r.description());
+                        lines.add(line.toString());
+                        Map<String, Object> item = new LinkedHashMap<>();
+                        item.put("server", name);
+                        item.put("uri", r.uri());
+                        item.put("name", r.name() == null ? "" : r.name());
+                        item.put("mimeType", r.mimeType() == null ? "" : r.mimeType());
+                        item.put("description", r.description() == null ? "" : r.description());
+                        items.add(item);
+                    }
+                }
+                if (lines.isEmpty()) {
+                    return ToolResult.ok("No resources.", new LinkedHashMap<>(Map.of("count", 0)));
+                }
+                Map<String, Object> md = new LinkedHashMap<>();
+                md.put("count", items.size());
+                md.put("resources", items);
+                return ToolResult.ok(String.join("\n", lines), md);
+            }
+        };
+        Map<String, Object> readProps = new LinkedHashMap<>();
+        readProps.put("server", Map.of("type", "string", "description", "The MCP server name"));
+        readProps.put("uri", Map.of("type", "string", "description", "The resource uri"));
+        Map<String, Object> readSchema = new LinkedHashMap<>();
+        readSchema.put("type", "object");
+        readSchema.put("properties", readProps);
+        readSchema.put("required", List.of("server", "uri"));
+        readSchema.put("additionalProperties", false);
+        Tool read = new Tool() {
+            @Override public String name() { return "read_mcp_resource"; }
+            @Override public String description() {
+                return "Read one MCP resource by server and uri. Text comes back as text; binary content is described, not inlined.";
+            }
+            @Override public Map<String, Object> inputSchema() { return readSchema; }
+            @Override public String source() { return "mcp"; }
+            @Override public ToolHints hints() { return ToolHints.READ_ONLY; }
+            @Override public ToolResult execute(Map<String, Object> args, ToolContext ctx) {
+                String server = args != null && args.get("server") instanceof String v ? v : "";
+                String uri = args != null && args.get("uri") instanceof String v ? v : "";
+                ServerConn c;
+                try {
+                    c = self.conn(server);
+                } catch (IllegalArgumentException e) {
+                    return ToolResult.error("read_mcp_resource: " + e.getMessage());
+                }
+                if (uri.isEmpty()) return ToolResult.error("read_mcp_resource: uri is required");
+                McpSchema.ReadResourceResult res;
+                try {
+                    res = bounded(() -> c.client().readResource(new McpSchema.ReadResourceRequest(uri)), c.timeout());
+                } catch (Exception e) {
+                    return ToolResult.error("read_mcp_resource: " + errMsg(e));
+                }
+                List<String> parts = new ArrayList<>();
+                for (McpSchema.ResourceContents rc : res.contents()) {
+                    if (rc instanceof McpSchema.TextResourceContents t) {
+                        parts.add(t.text());
+                    } else if (rc instanceof McpSchema.BlobResourceContents b) {
+                        parts.add("[binary " + b.mimeType() + ", " + (b.blob() == null ? 0 : b.blob().length())
+                                + " base64 chars]");
+                    }
+                }
+                Map<String, Object> md = new LinkedHashMap<>();
+                md.put("server", server);
+                md.put("uri", uri);
+                return ToolResult.ok(String.join("\n", parts), md);
+            }
+        };
+        return List.of(list, read);
     }
 
     /** §2: {@code content[]} split into non-text {@link ContentPart}s and appended resource text. */
