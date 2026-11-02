@@ -1,5 +1,5 @@
 ---
-title: "createClassifier — the judgment seam"
+title: "create_classifier — the judgment seam"
 description: "A sibling of the client: pre-declared typed questions in, calibrated answers out — no messages, no tool calling, no loop. — Rust."
 sidebar:
   label: "judge / classifier"
@@ -8,11 +8,12 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8B</a>
+<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8B</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/rust/src/classifier.rs">rust/src/classifier.rs</a>
 </p>
 
 ```rust
 pub fn create_classifier(opts: ClassifierOptions) -> Result<Classifier, ClassifierError>
+
 impl Classifier {
     pub async fn evaluate(&self, state: Value, questions: &Questions) -> Result<Decision, ClassifierError>;
     pub async fn evaluate_ctx(&self, ctx: EvalContext, state: Value, questions: &Questions)
@@ -22,57 +23,338 @@ impl Classifier {
 }
 ```
 
-A sibling of the client: pre-declared typed questions in, calibrated answers out — no messages, no tool calling, no loop.
+A sibling of the client: pre-declared typed questions in, calibrated answers out — no messages,
+no tool calling, no loop. `state` is any `serde_json::Value` the host already has; `questions` is a
+`BTreeMap` from **caller-chosen keys** to question definitions. The keys are addressing, not
+content — they are never transmitted, so a key may be a tool, skill or agent name verbatim.
+
+Rust returns `Result<_, ClassifierError>` everywhere the other ports throw. `evaluate_ctx` takes an
+`EvalContext` carrying a `CancellationToken` (cancel it and the call returns `context canceled`
+without retrying) and a `call_name` that a `judge::Tape` records under. `evaluate_batch` runs the
+same questions over many states, at most 16 in flight, in input order.
+
+<Aside type="caution" title="A classifier interprets; it never authorises">
+A decision is **advisory**. Schema validity is not correctness: a decision can be confidently
+wrong. Numeric limits, permission checks and allowlists stay in your `if` statements. Nothing on
+this page is a security control.
+</Aside>
 
 ## When to use it
 
-For a JUDGMENT your code then acts on: route, triage, gate a tool call, check an answer. Styles:
-`SystemOne` (POST `{base_url}/systemone`, the default), `Llm` (one structured-output call on a §8
-`Client`, `calibrated: false`), `Custom` (your `evaluate`), `Static` (a recorded corpus — what CI
-runs, no network). `backend: ClassifierBackend::OpenRouter` sets base URL, model and key env together.
+Reach for a classifier when the thing you need is a **judgment**, not an action: *is this command
+risky, does this turn need the billing skill, is this text an injection attempt, how urgent is this
+ticket*. `Tool` is the contract for an action; `Classifier` is the contract for a judgment. The
+concepts live in [Typed decisions](/toolnexus/judge/); this page is the Rust surface.
 
-<Aside type="caution" title="It interprets; it never authorises">
-A decision can be confidently wrong. Limits, permissions and allowlists stay in code.
+A `Classifier` is **not** a model you can hand to `Client::run` — it has no messages, no tool
+calling and no streaming, and it never enters the client loop.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="When NOT to use it">
+If the answer is already decidable in code — a numeric threshold, a regex, an allowlist — use the
+code. If the decision must also *act* (call tools, write prose), you want
+[`create_client`](/api/rust/client/create/) instead. A classifier sits between the two: fractions
+of a cent, one number you can threshold.
 </Aside>
+
+## Defaults
+
+| Setting | Default |
+|---|---|
+| `style` | `ClassifierStyle::SystemOne` |
+| `backend` | `ClassifierBackend::TypeSafe` (`OpenRouter` sets base URL, model and key env as a unit) |
+| `base_url` | `https://api.typesafe.ai/v1` (`DEFAULT_CLASSIFIER_BASE_URL`) |
+| `model` | `jev-latest` (`DEFAULT_CLASSIFIER_MODEL`) — a floating alias; pin it once thresholds are tuned |
+| `api_key_env` | `TYPESAFE_API_KEY` — the **name** of an env var, never a value |
+| `timeout_ms` | `10_000`, bounding **one** request |
+| `retries` | `0` ⇒ 2; `-1` ⇒ none |
+| `retry_base_ms` | `0` ⇒ 500 |
+
+## `ClassifierOptions`
+
+| Field | What it does |
+|---|---|
+| `style` | `SystemOne`, `Llm`, `Custom` or `Static`. |
+| `base_url` | API base. The request goes to `{base_url}/systemone`. |
+| `model` | Model asked for. `Decision.model` echoes what actually answered. |
+| `api_key_env` | NAME of the env var holding the credential, read at call time, never logged. |
+| `headers` | Extra headers; values expand `${ENV_VAR}` at call time, never logged. |
+| `timeout_ms` | Bounds one request. |
+| `http_client` | `Option<reqwest::Client>` transport override. |
+| `retries` / `retry_base_ms` | Retry budget; backoff `base * 2^attempt`, no jitter; `Retry-After` wins. |
+| `retryable_statuses` | **Added** to `{408, 429, 500, 502, 503, 504, 529}` — never narrows it. |
+| `on_error` | `Arc<dyn Fn(&ErrorInfo) -> ErrorTier>` — the §8 tiering, `Retry` or `Fail`. |
+| `request_params` | Shallow-merged into the body; a key here wins. |
+| `body_transform` | Receives the merged body; `None` leaves it unchanged. |
+| `on_metric` | The §8 sink: `classifier.evaluate` per call, `classifier.warning` for degenerate criteria. |
+| `client` | Required for `Llm`. |
+| `evaluate` | Required for `Custom` (`EvaluateFn`); every wire option is ignored. |
+| `decisions` | The recorded corpus, `Static` only. |
+
+A style whose required option is missing is rejected by `create_classifier` before any call.
+
+## The four backends
+
+| `style` | Where the answer comes from | `calibrated` |
+|---|---|---|
+| `SystemOne` | `POST {base_url}/systemone` | `true` |
+| `Llm` | One structured-output call on a §8 `Client` | `false` |
+| `Custom` | Your `evaluate` | whatever you return |
+| `Static` | A recorded corpus, matched on the canonical request **and** the state | whatever was recorded |
+
+A `401`/`403` body is never echoed into an error, a log or a metric.
 
 ## Examples
 
-### 1. System One, key read from the environment at call time
+### 1. The smallest useful call — one question, replayed offline
 
-```rust
+`Static` needs no key and no network, so this is the whole surface in one file.
+
+```rust test
 use serde_json::json;
-use toolnexus::classifier::*;
-let c = create_classifier(ClassifierOptions::default())?; // reads TYPESAFE_API_KEY per call
-let mut qs = Questions::new();
-qs.insert("is_refund".into(), NoulQuestion {
-    instructions: "Is the customer asking for a refund?".into(), criteria: None }.into());
-let d = c.evaluate(json!({"message": "I want my money back"}), &qs).await?;
-println!("{}", d.noul("is_refund")?.noul);
+use toolnexus::classifier::{
+    ClassifierOptions, ClassifierStyle, NoulQuestion, Questions, RecordedDecision,
+    create_classifier,
+};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let state = json!("Ticket 4021: my card was charged twice and the second charge was not refunded.");
+
+    let mut questions = Questions::new();
+    questions.insert(
+        "wants_money_back".into(),
+        NoulQuestion {
+            instructions: "Is the customer asking for money to be returned?".into(),
+            criteria: None,
+        }
+        .into(),
+    );
+
+    let recorded = br#"{"model":"typesafe/jev-1.13-20260917",
+        "answers":{"wants_money_back":{"type":"noul","noul":0.99}},
+        "usage":{"input_tokens":180,"output_tokens":8}}"#;
+
+    let judge = create_classifier(ClassifierOptions {
+        style: ClassifierStyle::Static,
+        model: "typesafe/jev-1.13".into(),
+        decisions: vec![RecordedDecision {
+            state: state.clone(),
+            questions: questions.clone(),
+            response: recorded.to_vec(),
+        }],
+        ..Default::default()
+    })?;
+
+    let d = judge.evaluate(state, &questions).await?;
+    let want = d.noul("wants_money_back")?;
+    assert!(want.noul >= 0.9 && d.calibrated, "unexpected decision: {d:?}");
+
+    println!("ok: wants_money_back = {} model: {}", want.noul, d.model);
+    Ok(())
+}
 ```
 
-### 2. Hermetic tests with the static corpus
+### 2. The realistic case — your own backend, and the degenerate-criteria warning
 
-```rust
-use toolnexus::judge::{recorded, static_classifier};
-let c = static_classifier(vec![recorded(&state, qs.clone(), &recorded_response)])?;
+`Custom` hands the whole evaluation to you; every wire option is ignored. The client-side limits
+and the degenerate-criteria detection still run first, because they are properties of the
+questions, not of the transport.
+
+```rust test
+use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
+
+use serde_json::{Value, json};
+use toolnexus::classifier::{
+    ChoiceAnswer, ChoiceQuestion, ClassifierOptions, ClassifierStyle, Decision, DecisionAnswer,
+    EvalContext, METRIC_CLASSIFIER_WARNING, Questions, create_classifier,
+};
+use toolnexus::client::{BoxFuture, MetricEvent};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let warnings: Arc<Mutex<Vec<String>>> = Arc::default();
+    let sink = warnings.clone();
+
+    let judge = create_classifier(ClassifierOptions {
+        style: ClassifierStyle::Custom,
+        evaluate: Some(Arc::new(|_ctx: EvalContext, _state: Value, _qs: Questions| -> BoxFuture<Result<Decision, String>> {
+            Box::pin(async move {
+                let mut answers = BTreeMap::new();
+                answers.insert(
+                    "desk".to_string(),
+                    DecisionAnswer::Choice(ChoiceAnswer {
+                        choice: "billing".into(),
+                        probabilities: [("billing".into(), 0.5), ("technical".into(), 0.5)].into(),
+                        confidence: 0.5,
+                        near_uniform: true,
+                    }),
+                );
+                Ok(Decision { model: "house-rules-v1".into(), answers, ..Default::default() })
+            })
+        })),
+        on_metric: Some(Arc::new(move |ev: &MetricEvent| {
+            if ev.event == METRIC_CLASSIFIER_WARNING {
+                sink.lock().unwrap().push(ev.question.clone());
+            }
+        })),
+        ..Default::default()
+    })?;
+
+    // Every description is just its own option id — schema-valid, and it tells the
+    // model nothing. Detection, never repair: the request goes out byte-unchanged.
+    let mut questions = Questions::new();
+    questions.insert(
+        "desk".into(),
+        ChoiceQuestion {
+            instructions: "Which desk should own this ticket?".into(),
+            criteria: [("billing".into(), "billing".into()), ("technical".into(), "technical".into())].into(),
+        }
+        .into(),
+    );
+
+    judge.evaluate(json!("charged twice"), &questions).await?;
+    // Once per question key per classifier, so a per-turn judge never floods the sink.
+    judge.evaluate(json!("charged twice"), &questions).await?;
+
+    let w = warnings.lock().unwrap().clone();
+    assert_eq!(w, vec!["desk".to_string()], "expected one warning naming the key");
+    println!("ok: warned once about question {}", w[0]);
+    Ok(())
+}
 ```
 
-### 3. Simple ask / gate and the batteries
+The warning travels in the event's `warning` field and `error` stays empty — a consumer filtering
+the §8 sink on "has an error" must not count one. Why the library refuses to repair the criteria
+is in [The encoding obligation](/toolnexus/judge/encoding/).
 
-```rust
-use toolnexus::judge::{ask, noul, batteries::{OnError, ToolGuard, ToolGuardOptions}};
-let a = ask(&c, &state, &[noul("urgent", "Is `message` urgent?")], None).await?;
-let guard = ToolGuard::new(c.clone(), ToolGuardOptions {
-    on_error: Some(OnError::Closed), ..Default::default() })?;
-// Hooks { before_tool: Some(guard.as_hook(None)), ..Default::default() }
+### 3. The full surface — the `systemone` wire, against a local server
+
+`base_url` points anywhere that serves the wire, so a loopback `TcpListener` exercises the request
+shaping, the retry budget and the metric sink with no network and no credential.
+
+```rust test
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+use serde_json::{Value, json};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
+use tokio::sync::Mutex;
+use toolnexus::classifier::{
+    ClassifierOptions, ClassifierStyle, METRIC_CLASSIFIER_EVALUATE, Questions, ScoreQuestion,
+    create_classifier,
+};
+use toolnexus::client::{ErrorInfo, ErrorTier, MetricEvent};
+
+const ANSWER: &str = r#"{"model":"jev-1.13","calibrated":true,
+  "answers":{"risk":{"type":"score","score":1.21,
+    "legend":{"0":"harmless","1":"reversible","2":"destructive"},
+    "probabilities":{"0":0.10,"1":0.59,"2":0.31},"confidence":0.71}},
+  "usage":{"input_tokens":210,"output_tokens":24}}"#;
+
+/// Read one HTTP request and return its body (Content-Length framing only).
+async fn read_body(sock: &mut tokio::net::TcpStream) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 4096];
+    loop {
+        let n = sock.read(&mut chunk).await.unwrap();
+        buf.extend_from_slice(&chunk[..n]);
+        if let Some(end) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+            let head = String::from_utf8_lossy(&buf[..end]).to_lowercase();
+            let len: usize = head
+                .lines()
+                .find_map(|l| l.strip_prefix("content-length:"))
+                .map(|v| v.trim().parse().unwrap())
+                .unwrap_or(0);
+            while buf.len() < end + 4 + len {
+                let n = sock.read(&mut chunk).await.unwrap();
+                buf.extend_from_slice(&chunk[..n]);
+            }
+            return buf[end + 4..end + 4 + len].to_vec();
+        }
+    }
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let base = format!("http://{}", listener.local_addr()?);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let seen: Arc<Mutex<Value>> = Arc::default();
+
+    let (c, s) = (calls.clone(), seen.clone());
+    tokio::spawn(async move {
+        loop {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let body = read_body(&mut sock).await;
+            let reply = if c.fetch_add(1, Ordering::SeqCst) == 0 {
+                // delay-seconds wins over the computed backoff
+                "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 0\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_string()
+            } else {
+                *s.lock().await = serde_json::from_slice(&body).unwrap();
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{ANSWER}",
+                    ANSWER.len()
+                )
+            };
+            sock.write_all(reply.as_bytes()).await.unwrap();
+            let _ = sock.shutdown().await;
+        }
+    });
+
+    let judge = create_classifier(ClassifierOptions {
+        style: ClassifierStyle::SystemOne,
+        base_url: base,
+        model: "jev-latest".into(),
+        api_key_env: "TYPESAFE_API_KEY".into(), // the NAME of an env var, never the value
+        timeout_ms: 5_000,
+        retries: 2,
+        retryable_statuses: vec![520], // adds only; 429 stays retryable
+        request_params: json!({"tenant": "acme"}).as_object().unwrap().clone(),
+        body_transform: Some(Arc::new(|mut b: Value| {
+            b["trace"] = json!("docs-example");
+            Some(b)
+        })),
+        on_error: Some(Arc::new(|info: &ErrorInfo| {
+            if info.retryable { ErrorTier::Retry } else { ErrorTier::Fail }
+        })),
+        on_metric: Some(Arc::new(|ev: &MetricEvent| {
+            if ev.event == METRIC_CLASSIFIER_EVALUATE {
+                println!("metric: {} {}", ev.event, ev.status);
+            }
+        })),
+        ..Default::default()
+    })?;
+
+    let mut questions = Questions::new();
+    questions.insert(
+        "risk".into(),
+        ScoreQuestion {
+            instructions: "How destructive is this shell command?".into(),
+            criteria: vec!["harmless".into(), "reversible".into(), "destructive".into()],
+        }
+        .into(),
+    );
+
+    let d = judge.evaluate(json!("rm -rf ./build"), &questions).await?;
+
+    let n = calls.load(Ordering::SeqCst);
+    assert_eq!(n, 2, "expected the 429 to be retried once");
+    let body = seen.lock().await.clone();
+    assert_eq!(body["tenant"], "acme");
+    assert_eq!(body["trace"], "docs-example");
+    let risk = d.score("risk")?;
+
+    println!("ok: risk={} calibrated={} after {n} attempts", risk.score, d.calibrated);
+    Ok(())
+}
 ```
-
-The batteries are `ToolGuard`, `ToolRelevance`, `SkillRelevance`, `ToolResultFilter`,
-`IsComplete`, `AgentRouter`, `ContentGuard` and the opt-in `ModelRouter`, each with `as_hook`
-where a loop seam exists. `gate` / `Policy` turn answers into an action or a §10 `input`
-request; `Tape` records live decisions by call name and replays them offline. All advisory,
-none a security control.
 
 ## See also
 
-- [Questions](/api/rust/judge/questions/) · [Decision](/api/rust/judge/decision/)
+- [Questions](/api/rust/judge/questions/) — the three question types, their criteria, and the client-side limits.
+- [Decision](/api/rust/judge/decision/) — typed accessors that fail loudly rather than hand back a zero.
+- [Typed decisions](/toolnexus/judge/) · [Backends](/toolnexus/judge/backends/) · [The encoding obligation](/toolnexus/judge/encoding/) · [Cookbook](/toolnexus/cookbook/judge/)

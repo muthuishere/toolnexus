@@ -31,30 +31,292 @@ Reach for `agent_tools` only when you need the error or the list.
 
 ## Examples
 
-### 1. Resolve a card
+All three examples resolve tools from a local fake A2A peer on `127.0.0.1` (an inline
+`tokio::net::TcpListener`) — no external network, no real agent.
 
-```rust
+### 1. Resolve one card into its tools
+
+```rust test
+use std::sync::{Arc, Mutex};
+
+use serde_json::{Value, json};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
+use toolnexus::ToolSource;
 use toolnexus::a2a::{Agent, agent_tools};
-let tools = agent_tools(&Agent::new("http://127.0.0.1:8080/.well-known/agent-card.json")).await?;
-for t in &tools { println!("{} — {}", t.name, t.description); }
+
+/// A minimal fake A2A peer on 127.0.0.1: the card at any GET, `SendMessage` →
+/// a submitted task, `GetTask` → `last`. Records the last Authorization header.
+async fn start_peer(name: &str, skills: Value, last: Value) -> (String, Arc<Mutex<String>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let card = json!({"name": name, "url": format!("{base}/"), "skills": skills});
+    let auth = Arc::new(Mutex::new(String::new()));
+    let seen = auth.clone();
+    tokio::spawn(async move {
+        while let Ok((mut sock, _)) = listener.accept().await {
+            let (card, last, seen) = (card.clone(), last.clone(), seen.clone());
+            tokio::spawn(async move {
+                let (mut buf, mut chunk) = (Vec::new(), [0u8; 4096]);
+                let mut head_end = None;
+                loop {
+                    if let Some(end) = head_end {
+                        let head = String::from_utf8_lossy(&buf[..end]).to_lowercase();
+                        let len = head.lines().find_map(|l| l.strip_prefix("content-length:"))
+                            .and_then(|v| v.trim().parse::<usize>().ok()).unwrap_or(0);
+                        if buf.len() >= end + len { break; }
+                    }
+                    let n = sock.read(&mut chunk).await.unwrap_or(0);
+                    if n == 0 { return; }
+                    buf.extend_from_slice(&chunk[..n]);
+                    head_end = head_end.or(buf.windows(4).position(|w| w == b"\r\n\r\n").map(|i| i + 4));
+                }
+                let end = head_end.unwrap();
+                let head = String::from_utf8_lossy(&buf[..end]).to_string();
+                if let Some(a) = head.lines().find_map(|l| {
+                    let (k, v) = l.split_once(':')?;
+                    k.eq_ignore_ascii_case("authorization").then(|| v.trim().to_string())
+                }) {
+                    *seen.lock().unwrap() = a;
+                }
+                let reply = if head.starts_with("GET") {
+                    card
+                } else {
+                    let rpc: Value = serde_json::from_slice(&buf[end..]).unwrap_or(Value::Null);
+                    let result = if rpc["method"] == "SendMessage" {
+                        json!({"id": "t1", "status": {"state": "submitted"}})
+                    } else {
+                        last
+                    };
+                    json!({"jsonrpc": "2.0", "id": rpc["id"], "result": result})
+                };
+                let body = reply.to_string();
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+            });
+        }
+    });
+    (base, auth)
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // This example only resolves the card; it never calls SendMessage/GetTask.
+    let (base, _) = start_peer("librarian",
+        json!([{"id": "search", "name": "Search", "description": "Search the catalog"}]), Value::Null).await;
+
+    let tools = agent_tools(&Agent::new(base)).await?;
+    assert_eq!(tools.len(), 1);
+    assert_eq!(tools[0].name, "librarian_search");
+    assert_eq!(tools[0].source, ToolSource::A2a);
+
+    println!("ok: {} {:?}", tools[0].name, tools[0].source);
+    Ok(())
+}
 ```
 
-### 2. Register only some skills
+### 2. Register only some of a peer's tools
 
-```rust
-let tools = agent_tools(&agent).await?;
-tk.register(tools.into_iter().filter(|t| t.name.ends_with("_review")));
+```rust test
+use std::sync::{Arc, Mutex};
+
+use serde_json::{Value, json};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
+use toolnexus::a2a::{Agent, agent_tools};
+use toolnexus::{BuiltinsConfig, Tool, ToolkitOptions, create_toolkit};
+
+/// A minimal fake A2A peer on 127.0.0.1: the card at any GET, `SendMessage` →
+/// a submitted task, `GetTask` → `last`. Records the last Authorization header.
+async fn start_peer(name: &str, skills: Value, last: Value) -> (String, Arc<Mutex<String>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let card = json!({"name": name, "url": format!("{base}/"), "skills": skills});
+    let auth = Arc::new(Mutex::new(String::new()));
+    let seen = auth.clone();
+    tokio::spawn(async move {
+        while let Ok((mut sock, _)) = listener.accept().await {
+            let (card, last, seen) = (card.clone(), last.clone(), seen.clone());
+            tokio::spawn(async move {
+                let (mut buf, mut chunk) = (Vec::new(), [0u8; 4096]);
+                let mut head_end = None;
+                loop {
+                    if let Some(end) = head_end {
+                        let head = String::from_utf8_lossy(&buf[..end]).to_lowercase();
+                        let len = head.lines().find_map(|l| l.strip_prefix("content-length:"))
+                            .and_then(|v| v.trim().parse::<usize>().ok()).unwrap_or(0);
+                        if buf.len() >= end + len { break; }
+                    }
+                    let n = sock.read(&mut chunk).await.unwrap_or(0);
+                    if n == 0 { return; }
+                    buf.extend_from_slice(&chunk[..n]);
+                    head_end = head_end.or(buf.windows(4).position(|w| w == b"\r\n\r\n").map(|i| i + 4));
+                }
+                let end = head_end.unwrap();
+                let head = String::from_utf8_lossy(&buf[..end]).to_string();
+                if let Some(a) = head.lines().find_map(|l| {
+                    let (k, v) = l.split_once(':')?;
+                    k.eq_ignore_ascii_case("authorization").then(|| v.trim().to_string())
+                }) {
+                    *seen.lock().unwrap() = a;
+                }
+                let reply = if head.starts_with("GET") {
+                    card
+                } else {
+                    let rpc: Value = serde_json::from_slice(&buf[end..]).unwrap_or(Value::Null);
+                    let result = if rpc["method"] == "SendMessage" {
+                        json!({"id": "t1", "status": {"state": "submitted"}})
+                    } else {
+                        last
+                    };
+                    json!({"jsonrpc": "2.0", "id": rpc["id"], "result": result})
+                };
+                let body = reply.to_string();
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+            });
+        }
+    });
+    (base, auth)
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let (base, _) = start_peer("ops", json!([
+        {"id": "read", "name": "Read", "description": "Read-only, safe"},
+        {"id": "delete", "name": "Delete", "description": "Destructive"},
+    ]), Value::Null).await;
+
+    let tools = agent_tools(&Agent::new(base)).await?;
+    let total = tools.len();
+
+    // Hand-pick a safe subset into your own toolkit — never blanket-import a
+    // peer's whole surface when you don't trust all of it equally.
+    let safe: Vec<Tool> = tools.into_iter().filter(|t| t.name == "ops_read").collect();
+    let kept = safe.len();
+
+    let tk = create_toolkit(ToolkitOptions {
+        builtins: Some(BuiltinsConfig::off()),
+        ..Default::default()
+    })
+    .await?;
+    tk.register(safe);
+    assert!(tk.get("ops_read").is_some(), "expected ops_read registered");
+    assert!(tk.get("ops_delete").is_none(), "ops_delete should have been left out");
+    tk.close().await;
+
+    println!("ok: registered {kept} of {total} peer tools");
+    Ok(())
+}
 ```
 
-### 3. Call a skill directly
+### 3. The full surface — a bad card fails the resolve, calling a tool needs no toolkit
 
-```rust
-use serde_json::json;
+```rust test
+use std::sync::{Arc, Mutex};
+
+use serde_json::{Value, json};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
 use toolnexus::ToolContext;
-let tool = &agent_tools(&agent).await?[0];
-let r = tool.call(json!({"task": "plan the migration"}), ToolContext { timeout_ms: 30_000, ..Default::default() }).await;
-if r.is_error { eprintln!("{}", r.output); }   // "A2A task t1 failed: <status message>"
+use toolnexus::a2a::{Agent, agent_tools};
+
+/// A minimal fake A2A peer on 127.0.0.1: the card at any GET, `SendMessage` →
+/// a submitted task, `GetTask` → `last`. Records the last Authorization header.
+async fn start_peer(name: &str, skills: Value, last: Value) -> (String, Arc<Mutex<String>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let card = json!({"name": name, "url": format!("{base}/"), "skills": skills});
+    let auth = Arc::new(Mutex::new(String::new()));
+    let seen = auth.clone();
+    tokio::spawn(async move {
+        while let Ok((mut sock, _)) = listener.accept().await {
+            let (card, last, seen) = (card.clone(), last.clone(), seen.clone());
+            tokio::spawn(async move {
+                let (mut buf, mut chunk) = (Vec::new(), [0u8; 4096]);
+                let mut head_end = None;
+                loop {
+                    if let Some(end) = head_end {
+                        let head = String::from_utf8_lossy(&buf[..end]).to_lowercase();
+                        let len = head.lines().find_map(|l| l.strip_prefix("content-length:"))
+                            .and_then(|v| v.trim().parse::<usize>().ok()).unwrap_or(0);
+                        if buf.len() >= end + len { break; }
+                    }
+                    let n = sock.read(&mut chunk).await.unwrap_or(0);
+                    if n == 0 { return; }
+                    buf.extend_from_slice(&chunk[..n]);
+                    head_end = head_end.or(buf.windows(4).position(|w| w == b"\r\n\r\n").map(|i| i + 4));
+                }
+                let end = head_end.unwrap();
+                let head = String::from_utf8_lossy(&buf[..end]).to_string();
+                if let Some(a) = head.lines().find_map(|l| {
+                    let (k, v) = l.split_once(':')?;
+                    k.eq_ignore_ascii_case("authorization").then(|| v.trim().to_string())
+                }) {
+                    *seen.lock().unwrap() = a;
+                }
+                let reply = if head.starts_with("GET") {
+                    card
+                } else {
+                    let rpc: Value = serde_json::from_slice(&buf[end..]).unwrap_or(Value::Null);
+                    let result = if rpc["method"] == "SendMessage" {
+                        json!({"id": "t1", "status": {"state": "submitted"}})
+                    } else {
+                        last
+                    };
+                    json!({"jsonrpc": "2.0", "id": rpc["id"], "result": result})
+                };
+                let body = reply.to_string();
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+            });
+        }
+    });
+    (base, auth)
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // A bad card URL fails the resolve up front — never a partial tool list.
+    let err = agent_tools(&Agent::new("http://127.0.0.1:1/nope")).await;
+    assert!(err.is_err(), "expected an error for an unreachable card");
+
+    let completed = json!({"id": "t1", "status": {"state": "completed"},
+        "artifacts": [{"parts": [{"kind": "text", "text": "42"}]}]});
+    let (base, _) = start_peer("calc",
+        json!([{"id": "double", "name": "Double", "description": "Doubles a number"}]), completed).await;
+
+    let tools = agent_tools(&Agent {
+        poll_every_ms: 5,
+        ..Agent::new(format!("{base}/.well-known/agent-card.json"))
+    })
+    .await?;
+
+    // A resolved Tool is a complete, self-contained callable — call it
+    // directly, no create_toolkit required.
+    let res = tools[0].call(json!({"task": "double 21"}), ToolContext::default()).await;
+    assert!(!res.is_error && res.output == "42", "unexpected: {}", res.output);
+
+    println!("ok: {} -> {}", tools[0].name, res.output);
+    Ok(())
+}
 ```
+
+## Parameters and return value
+
+| | Type | What it holds |
+|---|---|---|
+| `agent` | `&Agent` | The peer descriptor — `card`, `headers`, `timeout_ms` (also bounds the card fetch), `poll_every_ms`. |
+| returns | `Result<Vec<Tool>, String>` | One `Tool` per advertised skill, or the error text if the card could not be fetched/parsed. |
 
 ## See also
 

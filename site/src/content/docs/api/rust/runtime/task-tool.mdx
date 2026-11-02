@@ -11,32 +11,112 @@ import { Aside } from '@astrojs/starlight/components';
 <strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7D</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/rust/src/agents/runtime.rs">rust/src/agents/runtime.rs</a>
 </p>
 
-```rust
-// Not constructed by hand: a Def with a non-empty `team` gets it on every turn.
-// name: "task", input: { "agent": string, "prompt": string }
-// description: "Delegate a subtask to an isolated subagent. Available agents — <name>: <does>; …"
-```
+<Aside type="caution" title="Not available as a constructible symbol in Rust">
+Only JS exposes a public `agents.taskTool(...)` you can build by hand. In Rust, as in Go, the `task`
+tool is a private runtime detail of `toolnexus::agents::Runtime` — you never construct or name it
+directly.
+</Aside>
 
-The model-facing delegation surface. Only an agent that declares a `team` gets a `task` tool
-(recursion is opt-in), and its targets are exactly that team — anything else is an error result
-listing the team. Each call fuses spawn → wake → wait → close into a context-isolated child and
-returns only the child's final text with `{agent, turns, totalTokens}` metadata. A suspending child
-presents exactly as a suspending tool (the §10 Request, with `data.path` naming the leaf). On a
-durable resume, a re-invoked task with the same (agent, prompt) REATTACHES to the existing child
-instead of spawning a duplicate.
+The opt-in tool that lets the model itself spawn a teammate. Default OFF.
 
-## Example
+## What to use instead
+
+Declare [`Spec.team`](/api/rust/runtime/agent/) on an agent — a non-empty `team` is what turns the
+`task` tool on for that agent, scoped to exactly those names. There is nothing further to build:
 
 ```rust
-use toolnexus::agents::{self, Spec};
-let explore = agents::new("explore", Spec { does: "read-only research".into(), ..Default::default() });
 let coordinator = agents::new("coordinator", Spec {
-    does: "splits and delegates".into(),
-    team: vec![explore],   // ⇒ the coordinator's model sees a `task` tool
+    does: "splits work and delegates".into(),
+    team: vec![explorer, coder], // ⇒ a "task" tool appears, targets = these two
     ..Default::default()
 });
 ```
 
+An agent with an EMPTY `team` gets no `task` tool at all — delegation (and recursion) is opt-in,
+never a default. The tool's description is generated for you: each teammate's name plus its `does`
+string, sorted by name — the same pattern the §3 `skill` tool uses to describe what it can load.
+
+## Examples
+
+Hermetic: an in-process model (`Options.in_process`) in place of a real provider.
+
+### The tool the model sees, team scoping, and idempotent reattachment
+
+```rust test
+use std::sync::{Arc, Mutex};
+use serde_json::{Value, json};
+use toolnexus::agents::{self, Options, Spec};
+use toolnexus::client::{InProcessResponse, InProcessToolCall};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let explorer = agents::new("explorer", Spec { does: "read-only research".into(), model: "m-explorer".into(), ..Default::default() });
+    let rogue = agents::new("rogue", Spec {
+        does: "tries to delegate outside its team".into(),
+        model: "m-rogue".into(),
+        team: vec![explorer],
+        ..Default::default()
+    });
+
+    // A def with NO team declared gets no task tool at all.
+    let solo = agents::new("solo", Spec { does: "works alone".into(), model: "m-solo".into(), ..Default::default() });
+    assert_eq!(solo.registry().len(), 1, "a teamless agent's registry holds only itself");
+
+    let seen_tools: Arc<Mutex<Vec<Value>>> = Arc::default();
+    let seen = seen_tools.clone();
+    let opts = Options {
+        // The rogue model tries to delegate to a stranger, then echoes the tool result back
+        // verbatim so the final answer proves what the task tool returned.
+        in_process: Some(Arc::new(move |req| {
+            let seen = seen.clone();
+            Box::pin(async move {
+                let tool_result = req.messages.iter().rev()
+                    .find(|m| m["role"] == "tool")
+                    .and_then(|m| m["content"].as_str().map(String::from));
+                if req.model == "m-rogue" && tool_result.is_none() {
+                    *seen.lock().unwrap() = req.tools.clone();
+                    return Ok(InProcessResponse {
+                        tool_calls: vec![InProcessToolCall {
+                            id: "c1".into(), name: "task".into(),
+                            arguments: json!({"agent": "stranger", "prompt": "hi"}),
+                        }],
+                        ..Default::default()
+                    });
+                }
+                Ok(InProcessResponse { content: tool_result.unwrap_or_default(), ..Default::default() })
+            })
+        })),
+        ..Default::default()
+    };
+
+    let (r, _rt) = rogue.run(opts, "delegate to a stranger").await;
+    assert!(r.text.contains("not in this agent's team") && r.text.contains("explorer"),
+        "expected an out-of-team refusal naming the real team, got {:?}", r.text);
+
+    // The model saw exactly one task tool, described by its team.
+    let tools = seen_tools.lock().unwrap().clone();
+    let task = tools.iter().find(|t| t["function"]["name"] == "task").expect("a task tool");
+    assert!(task["function"]["description"].as_str().unwrap().contains("explorer: read-only research"));
+
+    println!("ok: {}", r.text);
+    Ok(())
+}
+```
+
+## What the tool looks like to the model
+
+| | Value |
+|---|---|
+| `name` | `"task"` |
+| `description` | `"Delegate a subtask to an isolated subagent. Available agents — <name>: <does>; ..."` (team, name-sorted) |
+| `input_schema` | `{agent: string, prompt: string}`, both required |
+
+A call outside the declared team is refused with the team names listed — never silently ignored.
+A repeated call with the same `(agent, prompt)` pair REATTACHES to the existing child (by task
+key) instead of spawning a duplicate: settled ⇒ its recorded result, suspended ⇒ its pending,
+running ⇒ awaited. This is what makes a durable §10 resume idempotent across a re-invoked `task`
+call.
+
 ## See also
 
-- [Agent](/api/rust/runtime/agent/) · [resume](/api/rust/suspension/resume/)
+- [Agent](/api/rust/runtime/agent/) · [Runtime](/api/rust/runtime/runtime/) · [Handle](/api/rust/runtime/handle/) · [Budgets](/api/rust/runtime/budgets/) · [resume](/api/rust/suspension/resume/)

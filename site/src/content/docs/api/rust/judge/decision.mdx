@@ -1,5 +1,5 @@
 ---
-title: "Decision — typed answers, calibration and nearUniform"
+title: "Decision — typed answers, calibration and near_uniform"
 description: "One answer per question under the caller's own keys, read through typed accessors that fail loudly rather than hand back a zero. — Rust."
 sidebar:
   label: "judge / decision"
@@ -8,48 +8,244 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8B</a>
+<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8B</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/rust/src/classifier.rs">rust/src/classifier.rs</a>
 </p>
 
 ```rust
 pub struct Decision {
     pub model: String,
     pub answers: BTreeMap<String, DecisionAnswer>, // Noul | Choice | Score
-    pub usage: ClassifierUsage,                    // cost: Option<f64> — None is NOT zero
+    pub usage: ClassifierUsage,
     pub calibrated: bool,                          // absent/null on the wire ⇒ true
 }
+
 impl Decision {
     pub fn noul(&self, key: &str) -> Result<&NoulAnswer, ClassifierError>;
     pub fn choice(&self, key: &str) -> Result<&ChoiceAnswer, ClassifierError>;
     pub fn score(&self, key: &str) -> Result<&ScoreAnswer, ClassifierError>;
+    pub fn from_slice(b: &[u8]) -> Result<Decision, ClassifierError>;
+    pub fn to_value(&self) -> Value;
 }
+
+pub fn near_uniform(probabilities: &BTreeMap<String, f64>) -> bool;
 ```
 
-One answer per question under the caller's own keys, read through typed accessors that fail loudly rather than hand back a zero.
+One answer per question under the caller's own keys, read through typed accessors that fail loudly
+rather than hand back a zero. `model` echoes what actually answered, which may be more specific
+than the model you asked for.
 
-## What to know
+`DecisionAnswer` is a closed enum and `answer_type()` is the wire discriminator
+(`"noul" | "choice" | "score"`). It is named `DecisionAnswer` rather than `Answer` because §10
+already owns `toolnexus::Answer`.
 
-- A wrong-type or absent read is an `Err`, never a panic and never a default.
-- `ChoiceAnswer.near_uniform` is DERIVED on decode: `max |p - 1/n| <= 0.05` over the map as
-  returned. It flags an encoding that gave the model nothing to rank on; it is advisory.
-- `ScoreAnswer::levels()` returns the legend in level order (`"2"` before `"10"`).
-- `calibrated` is `false` for the `Llm` style. A threshold tuned on one backend does not transfer.
-
-<Aside type="tip" title="Bands">
-`toolnexus::judge::ask` wraps each answer in a `JudgeAnswer` with a `band` (`yes` / `no` /
-`uncertain`, default cuts 0.30 / 0.70, exclusive on the confident side) and `sure`.
-</Aside>
-
-## Example
+## The three answer shapes
 
 ```rust
-let d = c.evaluate(state, &qs).await?;
-let dept = d.choice("department")?;
-if !dept.near_uniform && dept.confidence > 0.7 {
-    route_to(&dept.choice);
+pub struct NoulAnswer   { pub noul: f64 }                  // NO confidence: the number IS the answer
+pub struct ChoiceAnswer { pub choice: String, pub probabilities: BTreeMap<String, f64>,
+                          pub confidence: f64,
+                          pub near_uniform: bool }         // DERIVED on decode, never read from the wire
+pub struct ScoreAnswer  { pub score: f64, pub legend: BTreeMap<String, String>,
+                          pub probabilities: BTreeMap<String, f64>, pub confidence: f64 }
+impl ScoreAnswer { pub fn levels(&self) -> Vec<String> }  // legend in level order ("2" before "10")
+pub struct ClassifierUsage { pub input_tokens: i64, pub output_tokens: i64,
+                             pub cost: Option<f64> }      // None = not reported, NOT zero
+```
+
+`confidence` reports on the **question**, not on the answer.
+
+## When to use it
+
+Read a `Decision` through the typed accessors, not by matching `answers[key]` by hand. The accessor
+is how a wrong-type read becomes a legible error instead of a silent default.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="An Err where the other ports throw">
+`noul`/`choice`/`score` return `Result`. Defaulting a missing answer would hand you `noul: 0.0`,
+which reads as "definitely false", for a key that was never asked. The accessors distinguish the
+two cases by name:
+
+- `classifier: no answer "urgency" in this decision`
+- `classifier: answer "urgency" is a choice answer, not score`
+
+Do **not** `unwrap_or_default()` that away.
+</Aside>
+
+## `calibrated` and `near_uniform`
+
+`SystemOne` reports `calibrated: true`; `Llm` reports `false`. An absent `calibrated` field decodes
+as `true`. `near_uniform` is derived on decode:
+
+```
+near_uniform  ⇔  max over i of |p_i − 1/n|  ≤  0.05   (NEAR_UNIFORM_TOLERANCE, inclusive)
+```
+
+The probabilities are never sorted, renormalised or rounded; `n == 1` ⇒ `true`; an empty map ⇒
+`false`.
+
+<Aside type="caution" title="What neither flag detects">
+Both are **advisory**. `near_uniform` detects an encoding that gave the model nothing to rank on;
+it cannot tell a good encoding from a subtly wrong one. Calibrated is not correct, and **a
+threshold tuned against one backend does not transfer to another**.
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call — typed accessors, and how they fail
+
+```rust test
+use serde_json::json;
+use toolnexus::classifier::{
+    ClassifierOptions, ClassifierStyle, Questions, RecordedDecision, ScoreQuestion,
+    create_classifier,
+};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let state = json!("rm -rf ./build");
+    let mut questions = Questions::new();
+    questions.insert("risk".into(), ScoreQuestion {
+        instructions: "How destructive is this shell command?".into(),
+        criteria: vec!["harmless".into(), "reversible".into(), "destructive".into()],
+    }.into());
+    let recorded = br#"{"model":"typesafe/jev-1.13-20260917","calibrated":true,
+        "answers":{"risk":{"type":"score","score":1.21,
+            "legend":{"0":"harmless","1":"reversible","2":"destructive"},
+            "probabilities":{"0":0.10,"1":0.59,"2":0.31},"confidence":0.71}},
+        "usage":{"input_tokens":210,"output_tokens":24}}"#;
+
+    let judge = create_classifier(ClassifierOptions {
+        style: ClassifierStyle::Static,
+        model: "typesafe/jev-1.13".into(),
+        decisions: vec![RecordedDecision { state: state.clone(), questions: questions.clone(), response: recorded.to_vec() }],
+        ..Default::default()
+    })?;
+
+    let d = judge.evaluate(state, &questions).await?;
+    let risk = d.score("risk")?;
+
+    // Wrong type: named, not a silent zero.
+    let e = d.noul("risk").expect_err("expected a typed read failure");
+    assert!(e.to_string().contains("is a score answer, not noul"), "{e}");
+    // Absent key: a different message, on purpose.
+    let e = d.score("urgency").expect_err("expected an absent-key failure");
+    assert!(e.to_string().contains("no answer"), "{e}");
+
+    // The AUTHORITY stays here, in code — the decision only informs it.
+    if risk.score >= 1.5 {
+        println!("would require approval");
+    }
+
+    println!("ok: score={} confidence={} levels={:?}", risk.score, risk.confidence, risk.levels());
+    Ok(())
 }
 ```
+
+### 2. The realistic case — `near_uniform` at the boundary
+
+```rust test
+use std::collections::BTreeMap;
+
+use toolnexus::classifier::{NEAR_UNIFORM_TOLERANCE, near_uniform};
+
+fn p(pairs: &[(&str, f64)]) -> BTreeMap<String, f64> {
+    pairs.iter().map(|(k, v)| (k.to_string(), *v)).collect()
+}
+
+fn main() {
+    let cases = [
+        // Deviation of exactly 0.05 from 1/n = 0.25: INCLUSIVE, so this IS near-uniform.
+        ("at the tolerance", p(&[("a", 0.30), ("b", 0.25), ("c", 0.25), ("d", 0.20)]), true),
+        // Past it.
+        ("just outside", p(&[("a", 0.56), ("b", 0.44)]), false),
+        // A real answer: the model had something to rank on.
+        ("decisive", p(&[("a", 0.97), ("b", 0.03)]), false),
+        // Never renormalised; a single option is trivially uniform.
+        ("n == 1 is trivially uniform", p(&[("only", 0.02)]), true),
+        // No distribution at all.
+        ("empty", p(&[]), false),
+    ];
+
+    for (name, probs, want) in &cases {
+        assert_eq!(near_uniform(probs), *want, "{name}");
+    }
+
+    // The same rule is applied on decode, so ChoiceAnswer.near_uniform is already set.
+    println!("ok: tolerance {NEAR_UNIFORM_TOLERANCE} inclusive, five cases agree");
+}
+```
+
+### 3. The full surface — a flat decision, `calibrated`, and an unreported cost
+
+A `Custom` backend lets the whole `Decision` be written by hand, which is the clearest way to show
+what the two flags mean when they are *not* the happy values.
+
+```rust test
+use std::collections::BTreeMap;
+use std::sync::Arc;
+
+use serde_json::{Value, json};
+use toolnexus::classifier::{
+    ChoiceAnswer, ClassifierOptions, ClassifierStyle, ClassifierUsage, Decision, DecisionAnswer,
+    EvalContext, Questions, choice_over, create_classifier, near_uniform,
+};
+use toolnexus::client::BoxFuture;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let judge = create_classifier(ClassifierOptions {
+        style: ClassifierStyle::Custom,
+        evaluate: Some(Arc::new(|_ctx: EvalContext, _state: Value, _qs: Questions| -> BoxFuture<Result<Decision, String>> {
+            Box::pin(async {
+                let probs: BTreeMap<String, f64> =
+                    [("billing".into(), 0.34), ("shipping".into(), 0.33), ("technical".into(), 0.33)].into();
+                let mut answers = BTreeMap::new();
+                answers.insert("desk".to_string(), DecisionAnswer::Choice(ChoiceAnswer {
+                    choice: "billing".into(),
+                    near_uniform: near_uniform(&probs),
+                    probabilities: probs,
+                    confidence: 0.95, // round self-reported numbers are an llm-style tell
+                }));
+                Ok(Decision {
+                    model: "gpt-4o-mini".into(),
+                    answers,
+                    // An llm-style backend self-reports; no threshold tuned elsewhere transfers.
+                    calibrated: false,
+                    usage: ClassifierUsage { input_tokens: 516, output_tokens: 72, cost: None },
+                })
+            })
+        })),
+        ..Default::default()
+    })?;
+
+    let qs = Questions::from([("desk".to_string(), choice_over("Which desk owns this?", [
+        ("billing", "own it here when money moved: a duplicate charge, a refund owed"),
+        ("shipping", "own it here when a physical parcel is late or damaged"),
+        ("technical", "own it here when the product itself errors"),
+    ]).into())]);
+
+    let d = judge.evaluate(json!("charged twice"), &qs).await?;
+    let desk = d.choice("desk")?;
+    assert!(desk.near_uniform, "this distribution is flat within 0.05 of 1/3");
+    assert!(!d.calibrated, "an llm-style decision reports calibrated: false");
+
+    // Absent is NOT zero: printing $0.00 here would be a lie about money.
+    let cost = match d.usage.cost {
+        Some(c) => format!("${c}"),
+        None => "not reported by this backend".to_string(),
+    };
+
+    println!("ok: choice={} near_uniform={} calibrated={} cost={cost}", desk.choice, desk.near_uniform, d.calibrated);
+    Ok(())
+}
+```
+
+A flat distribution with a high self-reported confidence is the signature this page exists to make
+legible: the model had nothing to rank on, and said so with numbers that look decisive.
 
 ## See also
 
-- [`create_classifier`](/api/rust/judge/classifier/) · [Questions](/api/rust/judge/questions/)
+- [`create_classifier`](/api/rust/judge/classifier/) — the judgment seam that returns a `Decision`.
+- [Questions](/api/rust/judge/questions/) — the three question types and the client-side limits.
+- [The encoding obligation](/toolnexus/judge/encoding/) · [Typed decisions](/toolnexus/judge/) · [Backends](/toolnexus/judge/backends/) · [Cookbook](/toolnexus/cookbook/judge/)

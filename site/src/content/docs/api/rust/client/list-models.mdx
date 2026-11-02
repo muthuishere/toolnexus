@@ -1,0 +1,284 @@
+---
+title: "list_models"
+description: "List a provider's models (id, display name, context length when reported), sorted by id, under the same key rules as the client. — Rust."
+sidebar:
+  label: "list_models"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a>
+</p>
+
+```rust
+pub async fn list_models(opts: ClientOptions) -> Result<Vec<ModelInfo>, ClientError>;
+
+pub struct ModelInfo {
+    pub id: String,
+    pub name: String,        // display name, when the provider gives one
+    pub context_length: u64, // tokens, when reported (OpenRouter does); 0 = unknown
+}
+```
+
+One listing call against `opts.base_url`, no retries, sorted by `id`:
+
+- `Style::OpenAI` — `GET {base}/models` (OpenRouter's `context_length` is read when present).
+- `Style::Anthropic` — `GET {base}/v1/models`, following `has_more` / `last_id` pagination.
+
+It uses the same key rules as the client ([`api_key` / `api_key_env` / the host's own env
+var](/api/rust/client/api-key/)) and `opts.http_client`. A non-2xx answer is a
+`ClientError::Transport("list models: HTTP <status>: …")`.
+
+## When to use it
+
+A model picker or a `/model` command in a host UI, a startup check that the configured model
+exists, or sizing a context window (`context_length`) before building a
+[`tool_tiers`](/api/rust/client/tool-tiers/) budget.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Know the model already? Skip it">
+`list_models` is a network round trip with its own failure modes. If the model id is fixed in
+config, just set `ClientOptions.model`; a wrong id fails on the first `run` anyway.
+</Aside>
+
+## Examples
+
+Each example serves the listing from a loopback stub — no network, fake key only.
+
+### 1. The smallest useful call — an OpenAI-style server
+
+```rust test
+use std::sync::Arc;
+
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
+use toolnexus::client::{ClientOptions, Style, list_models};
+
+/// A loopback HTTP stub: `reply(n, raw_request)` answers the n-th request (1-based)
+/// with `(status, extra header lines, body)`.
+async fn stub<F>(reply: F) -> String
+where
+    F: Fn(usize, &str) -> (u16, String, String) + Send + Sync + 'static,
+{
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let reply = Arc::new(reply);
+    tokio::spawn(async move {
+        let mut n = 0;
+        while let Ok((mut sock, _)) = listener.accept().await {
+            n += 1;
+            let (reply, i) = (reply.clone(), n);
+            tokio::spawn(async move {
+                let (mut buf, mut chunk) = (Vec::new(), [0u8; 4096]);
+                loop {
+                    let k = sock.read(&mut chunk).await.unwrap_or(0);
+                    if k == 0 {
+                        break;
+                    }
+                    buf.extend_from_slice(&chunk[..k]);
+                    let s = String::from_utf8_lossy(&buf).to_string();
+                    if let Some(h) = s.find("\r\n\r\n") {
+                        let len = s[..h]
+                            .lines()
+                            .find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse().unwrap_or(0)))
+                            .unwrap_or(0);
+                        if buf.len() >= h + 4 + len {
+                            break;
+                        }
+                    }
+                }
+                let (status, extra, body) = reply(i, &String::from_utf8_lossy(&buf));
+                let head = format!(
+                    "HTTP/1.1 {status} STUB\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n{extra}\r\n",
+                    body.len()
+                );
+                let _ = sock.write_all(format!("{head}{body}").as_bytes()).await;
+            });
+        }
+    });
+    url
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let url = stub(|_, raw| {
+        if !raw.starts_with("GET /models ") {
+            return (404, String::new(), String::new());
+        }
+        (200, String::new(), r#"{"data":[{"id":"zeta"},{"id":"alpha"}]}"#.into())
+    })
+    .await;
+
+    let models = list_models(ClientOptions {
+        base_url: url, style: Style::OpenAI, api_key: "YOUR_KEY_HERE".into(),
+        ..Default::default()
+    })
+    .await?;
+    assert_eq!(models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["alpha", "zeta"]);
+    println!("ok: {} {}", models[0].id, models[1].id);
+    Ok(())
+}
+```
+
+### 2. The realistic case — OpenRouter-style names and context lengths
+
+```rust test
+use std::sync::Arc;
+
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
+use toolnexus::client::{ClientOptions, Style, list_models};
+
+/// A loopback HTTP stub: `reply(n, raw_request)` answers the n-th request (1-based)
+/// with `(status, extra header lines, body)`.
+async fn stub<F>(reply: F) -> String
+where
+    F: Fn(usize, &str) -> (u16, String, String) + Send + Sync + 'static,
+{
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let reply = Arc::new(reply);
+    tokio::spawn(async move {
+        let mut n = 0;
+        while let Ok((mut sock, _)) = listener.accept().await {
+            n += 1;
+            let (reply, i) = (reply.clone(), n);
+            tokio::spawn(async move {
+                let (mut buf, mut chunk) = (Vec::new(), [0u8; 4096]);
+                loop {
+                    let k = sock.read(&mut chunk).await.unwrap_or(0);
+                    if k == 0 {
+                        break;
+                    }
+                    buf.extend_from_slice(&chunk[..k]);
+                    let s = String::from_utf8_lossy(&buf).to_string();
+                    if let Some(h) = s.find("\r\n\r\n") {
+                        let len = s[..h]
+                            .lines()
+                            .find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse().unwrap_or(0)))
+                            .unwrap_or(0);
+                        if buf.len() >= h + 4 + len {
+                            break;
+                        }
+                    }
+                }
+                let (status, extra, body) = reply(i, &String::from_utf8_lossy(&buf));
+                let head = format!(
+                    "HTTP/1.1 {status} STUB\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n{extra}\r\n",
+                    body.len()
+                );
+                let _ = sock.write_all(format!("{head}{body}").as_bytes()).await;
+            });
+        }
+    });
+    url
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let url = stub(|_, _| {
+        (200, String::new(), r#"{"data":[{"id":"vendor/big","name":"Big Model","context_length":200000}]}"#.into())
+    })
+    .await;
+
+    let models = list_models(ClientOptions {
+        base_url: url, style: Style::OpenAI, api_key: "YOUR_KEY_HERE".into(),
+        ..Default::default()
+    })
+    .await?;
+    let m = &models[0];
+    assert!(m.name == "Big Model" && m.context_length == 200_000, "{m:?}");
+    println!("ok: {} ({}) {} tokens", m.id, m.name, m.context_length);
+    Ok(())
+}
+```
+
+### 3. The full surface — Anthropic pagination and the key rule
+
+```rust test
+use std::sync::Arc;
+
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
+use toolnexus::client::{ClientError, ClientOptions, Style, list_models};
+
+/// A loopback HTTP stub: `reply(n, raw_request)` answers the n-th request (1-based)
+/// with `(status, extra header lines, body)`.
+async fn stub<F>(reply: F) -> String
+where
+    F: Fn(usize, &str) -> (u16, String, String) + Send + Sync + 'static,
+{
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let reply = Arc::new(reply);
+    tokio::spawn(async move {
+        let mut n = 0;
+        while let Ok((mut sock, _)) = listener.accept().await {
+            n += 1;
+            let (reply, i) = (reply.clone(), n);
+            tokio::spawn(async move {
+                let (mut buf, mut chunk) = (Vec::new(), [0u8; 4096]);
+                loop {
+                    let k = sock.read(&mut chunk).await.unwrap_or(0);
+                    if k == 0 {
+                        break;
+                    }
+                    buf.extend_from_slice(&chunk[..k]);
+                    let s = String::from_utf8_lossy(&buf).to_string();
+                    if let Some(h) = s.find("\r\n\r\n") {
+                        let len = s[..h]
+                            .lines()
+                            .find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse().unwrap_or(0)))
+                            .unwrap_or(0);
+                        if buf.len() >= h + 4 + len {
+                            break;
+                        }
+                    }
+                }
+                let (status, extra, body) = reply(i, &String::from_utf8_lossy(&buf));
+                let head = format!(
+                    "HTTP/1.1 {status} STUB\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n{extra}\r\n",
+                    body.len()
+                );
+                let _ = sock.write_all(format!("{head}{body}").as_bytes()).await;
+            });
+        }
+    });
+    url
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let url = stub(|_, raw| {
+        let first_line = raw.lines().next().unwrap_or("");
+        if !first_line.contains("after_id=") {
+            return (200, String::new(), r#"{"data":[{"id":"claude-b","display_name":"B"}],"has_more":true,"last_id":"claude-b"}"#.into());
+        }
+        (200, String::new(), r#"{"data":[{"id":"claude-a","display_name":"A"}],"has_more":false}"#.into())
+    })
+    .await;
+
+    let models = list_models(ClientOptions {
+        base_url: url.clone(), style: Style::Anthropic, api_key: "YOUR_KEY_HERE".into(),
+        ..Default::default()
+    })
+    .await?;
+    assert!(models.len() == 2 && models[0].id == "claude-a" && models[0].name == "A", "{models:?}");
+
+    // A local host with no api_key / api_key_env is refused, as run would be.
+    let err = list_models(ClientOptions { base_url: url, style: Style::OpenAI, ..Default::default() })
+        .await
+        .unwrap_err();
+    assert!(matches!(err, ClientError::NoApiKey(_)), "{err}");
+    println!("ok: {} models over 2 pages; keyless local call refused", models.len());
+    Ok(())
+}
+```
+
+## See also
+
+- [`ClientOptions.api_key_env`](/api/rust/client/api-key/) — the key rules `list_models` shares with the client.
+- [`tool_tiers`](/api/rust/client/tool-tiers/) — `context_window` sizes the default tier budget.
+- [`create_client`](/api/rust/client/create/) — The unified client: system prompt, skills injection, parallel and chained tool calls, retries, memory.

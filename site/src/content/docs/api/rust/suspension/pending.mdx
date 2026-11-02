@@ -33,50 +33,148 @@ For a link the user must open (OAuth), `auth_required(url, prompt)` is the short
 
 ## Examples
 
-### 1. Ask for approval
+### 1. The smallest useful call — a tool that suspends on first call
 
-```rust
-use std::sync::Arc;
-use toolnexus::{Request, Tool, ToolResult, ToolSource, empty_schema, pending};
-// A suspension must be the tool's whole ToolResult (it carries metadata.pending),
-// so build the Tool directly rather than through define_tool, whose Ok(String) has no metadata.
-let deploy = Tool {
-    name: "deploy".into(), description: "Deploy".into(), input_schema: empty_schema(),
-    source: ToolSource::Custom, hints: None,
-    execute: Arc::new(|_a, ctx| Box::pin(async move {
-        match ctx.answer {
-            Some(a) if a.ok => ToolResult::ok("deployed"),
-            Some(_) => ToolResult::error("declined"),
-            None => pending(Request { kind: "approval".into(), prompt: "Deploy to prod?".into(), ..Default::default() }),
-        }
-    })),
-};
+```rust test
+use toolnexus::{Request, pending, pending_of};
+
+fn main() {
+    let res = pending(Request { kind: "input".into(), prompt: "Which environment?".into(), ..Default::default() });
+    assert!(res.is_error, "a parked call is not a success");
+
+    let req = pending_of(&res).expect("a suspension");
+    assert_eq!(req.kind, "input");
+    assert_eq!(req.prompt, "Which environment?");
+    assert!(!req.id.is_empty(), "expected a generated correlation id");
+    println!("ok: {} {}", req.kind, !req.id.is_empty());
+}
 ```
 
-### 2. Return the pending result itself
+### 2. The realistic case — a tool that suspends until it has a decision
 
-```rust
-use std::sync::Arc;
-use toolnexus::{Request, Tool, ToolSource, empty_schema, pending};
-let t = Tool {
-    name: "ask".into(), description: "Ask the user".into(), input_schema: empty_schema(),
-    source: ToolSource::Custom, hints: None,
-    execute: Arc::new(|_a, ctx| Box::pin(async move {
-        match ctx.answer { Some(a) => toolnexus::ToolResult::ok(format!("{:?}", a.data)),
-            None => pending(Request { kind: "input".into(), prompt: "Your email?".into(), ..Default::default() }) }
-    })),
-};
-```
+`kind` is an open vocabulary — `"approval"` here is just data the host's `wait_for` interprets
+however it likes; the mechanism doesn't care what the string is.
 
-### 3. With extra data
-
-```rust
+```rust test
 use serde_json::{Map, json};
-use toolnexus::{Request, pending};
-let mut data = Map::new();
-data.insert("options".into(), json!(["a", "b"]));
-let r = pending(Request { kind: "choice".into(), prompt: "Pick one".into(), data: Some(data), ..Default::default() });
+use toolnexus::{Request, ToolResult, pending, pending_of};
+
+fn approve_refund(amount: f64) -> ToolResult {
+    if amount > 100.0 {
+        let mut data = Map::new();
+        data.insert("amount".into(), json!(amount));
+        return pending(Request {
+            kind: "approval".into(),
+            prompt: format!("Approve a ${amount:.2} refund?"),
+            data: Some(data),
+            ..Default::default()
+        });
+    }
+    ToolResult::ok("refund processed automatically")
+}
+
+fn main() {
+    let small = approve_refund(20.0);
+    assert!(!small.is_error, "small refunds should not suspend");
+
+    let big = approve_refund(500.0);
+    let req = pending_of(&big).expect("an approval suspension");
+    assert_eq!(req.kind, "approval");
+    assert_eq!(req.data.as_ref().unwrap()["amount"], json!(500.0), "the amount rides data");
+    println!("ok: {} | {}", small.output, req.prompt);
+}
 ```
+
+### 3. The full surface — wired into a live `Client::run`, resolved by `wait_for`
+
+```rust test
+use std::sync::Arc;
+
+use serde_json::json;
+use toolnexus::client::{
+    GenerateFn, InProcessOptions, InProcessRequest, InProcessResponse, InProcessToolCall,
+    WaitForFn, create_in_process_client,
+};
+use toolnexus::{
+    Answer, BuiltinsConfig, Request, Tool, ToolResult, ToolSource, ToolkitOptions, create_toolkit,
+    empty_schema, pending,
+};
+
+// A scripted model: call `pick_env`, then echo the tool result back as the reply.
+fn model() -> GenerateFn {
+    Arc::new(|req: InProcessRequest| {
+        Box::pin(async move {
+            let tool = req.messages.iter().rev().find(|m| m["role"] == "tool");
+            Ok(match tool.and_then(|m| m["content"].as_str()) {
+                Some(out) => InProcessResponse { content: format!("deploying to {out}"), ..Default::default() },
+                None => InProcessResponse {
+                    tool_calls: vec![InProcessToolCall { id: "c1".into(), name: "pick_env".into(), arguments: json!({}) }],
+                    ..Default::default()
+                },
+            })
+        })
+    })
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let pick_env = Tool {
+        name: "pick_env".into(),
+        description: "asks which environment".into(),
+        input_schema: empty_schema(),
+        source: ToolSource::Custom,
+        hints: None,
+        execute: Arc::new(|_args, ctx| {
+            Box::pin(async move {
+                if let Some(env) = ctx.answer.as_ref().and_then(|a| a.data.as_ref()).and_then(|d| d["env"].as_str()) {
+                    return ToolResult::ok(env);
+                }
+                pending(Request { kind: "input".into(), prompt: "Which environment?".into(), ..Default::default() })
+            })
+        }),
+    };
+    let tk = create_toolkit(ToolkitOptions {
+        builtins: Some(BuiltinsConfig::off()),
+        extra_tools: vec![pick_env],
+        ..Default::default()
+    })
+    .await?;
+
+    let wait_for: WaitForFn = Arc::new(|req| {
+        Box::pin(async move {
+            assert_eq!(req.kind, "input", "unexpected request kind");
+            let mut data = serde_json::Map::new();
+            data.insert("env".into(), json!("staging"));
+            Ok(Answer { id: req.id, ok: true, data: Some(data), ..Default::default() })
+        })
+    });
+    let client = create_in_process_client(InProcessOptions {
+        generate: Some(model()),
+        wait_for: Some(wait_for),
+        ..Default::default()
+    });
+
+    let res = client.run("deploy", &tk).await?;
+    assert_eq!(res.status, "done");
+    assert_eq!(res.text, "deploying to staging");
+    println!("ok: {}", res.text);
+    Ok(())
+}
+```
+
+## Request fields
+
+| Field | Type | What it is |
+|---|---|---|
+| `id` | `String` | Unique per suspension; the correlation key. Auto-generated by `pending` when empty (`pnd-<ms36>-<seq>`). |
+| `kind` | `String` | `"authorization"` \| `"approval"` \| `"input"` \| … — open vocabulary. |
+| `prompt` | `String` | What is being asked, in human words. |
+| `url` | `String` (skipped when empty) | Present when the action happens at a link. |
+| `data` | `Option<Map<String, Value>>` | Kind-specific extra (choices, schema, …). |
+| `expires_at` | `String` (wire key `expiresAt`, skipped when empty) | RFC3339; the request is stale after this. |
+
+`Request`/`Answer` wire keys are fixed across all ports (they serialize over the wire and cross
+agent boundaries).
 
 ## See also
 

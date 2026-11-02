@@ -32,38 +32,122 @@ For ad-hoc or loosely typed arguments, `define_tool` with a `Value` is simpler.
 
 ## Examples
 
-### 1. A typed tool
+### 1. A struct in, a schema and a decoded value out
 
-```rust
-use serde::Deserialize;
-use serde_json::json;
-use toolnexus::define_typed_tool;
-#[derive(Deserialize)] struct Mul { a: f64, b: f64 }
-let t = define_typed_tool("multiply", "Multiply", json!({"type":"object","properties":{"a":{"type":"number"},"b":{"type":"number"}},"required":["a","b"]}),
-    |m: Mul, _c| async move { Ok::<_, String>((m.a * m.b).to_string()) });
-```
-
-### 2. Optional fields
-
-```rust
-use serde::Deserialize;
-use serde_json::json;
-use toolnexus::define_typed_tool;
-#[derive(Deserialize)] struct Q { q: String, #[serde(default)] limit: Option<u32> }
-let t = define_typed_tool("search", "Search", json!({"type":"object","properties":{"q":{"type":"string"},"limit":{"type":"number"}},"required":["q"]}),
-    |a: Q, _c| async move { Ok::<_, String>(format!("{} (limit {})", a.q, a.limit.unwrap_or(10))) });
-```
-
-### 3. A decode failure
-
-```rust
+```rust test
 use serde::Deserialize;
 use serde_json::json;
 use toolnexus::{ToolContext, define_typed_tool};
-#[derive(Deserialize)] struct N { n: i64 }
-let t = define_typed_tool("sq", "", json!({"type":"object"}), |x: N, _c| async move { Ok::<_, String>((x.n * x.n).to_string()) });
-let r = t.call(json!({"n": "x"}), ToolContext::default()).await;
-assert!(r.is_error && r.output.starts_with("invalid arguments"));
+
+#[derive(Deserialize)]
+struct Mul {
+    a: f64,
+    b: f64,
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let schema = json!({"type":"object","properties":{"a":{"type":"number"},"b":{"type":"number"}},"required":["a","b"]});
+    let t = define_typed_tool("multiply", "Multiply two numbers", schema.clone(), |m: Mul, _c| async move {
+        Ok::<_, String>((m.a * m.b).to_string())
+    });
+    // The schema is advertised verbatim — Rust derives nothing at runtime.
+    assert_eq!(t.input_schema, schema);
+    let r = t.call(json!({"a": 6, "b": 7}), ToolContext::default()).await;
+    assert_eq!(r.output, "42");
+    println!("ok: {}", r.output);
+    Ok(())
+}
+```
+
+### 2. `#[serde(default)]` controls what's required, `#[serde(skip)]` drops a field
+
+The struct's serde attributes decide what decodes; keep the schema's `required` list in step with
+them by hand.
+
+```rust test
+use serde::Deserialize;
+use serde_json::json;
+use toolnexus::{ToolContext, define_typed_tool};
+
+#[derive(Deserialize)]
+struct Search {
+    q: String,
+    #[serde(default)]
+    limit: Option<u32>,
+    #[serde(skip)]
+    internal: u32, // never read from the model's arguments
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let t = define_typed_tool(
+        "search",
+        "Search",
+        json!({"type":"object","properties":{"q":{"type":"string"},"limit":{"type":"number"}},"required":["q"]}),
+        |a: Search, _c| async move {
+            Ok::<_, String>(format!("{} (limit {}, internal {})", a.q, a.limit.unwrap_or(10), a.internal))
+        },
+    );
+    let dflt = t.call(json!({"q": "rust"}), ToolContext::default()).await;
+    let set = t.call(json!({"q": "rust", "limit": 3, "internal": 99}), ToolContext::default()).await;
+    assert_eq!(dflt.output, "rust (limit 10, internal 0)");
+    assert_eq!(set.output, "rust (limit 3, internal 0)");
+    let missing = t.call(json!({"limit": 3}), ToolContext::default()).await;
+    assert!(missing.is_error && missing.output.contains("missing field `q`"));
+    println!("ok: {} | {}", dflt.output, missing.output);
+    Ok(())
+}
+```
+
+### 3. Numbers, nested structs, and registering on a toolkit
+
+A decode failure never reaches your function: it is an `isError` result starting `invalid
+arguments:` that names the problem, so the model can correct its call.
+
+```rust test
+use serde::Deserialize;
+use serde_json::json;
+use toolnexus::{BuiltinsConfig, ToolContext, ToolkitOptions, create_toolkit, define_typed_tool};
+
+#[derive(Deserialize)]
+struct Point {
+    x: i64,
+    y: i64,
+}
+
+#[derive(Deserialize)]
+struct Segment {
+    from: Point,
+    to: Point,
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let point = json!({"type":"object","properties":{"x":{"type":"integer"},"y":{"type":"integer"}},"required":["x","y"]});
+    let length = define_typed_tool(
+        "manhattan",
+        "Manhattan length of a segment",
+        json!({"type":"object","properties":{"from": point, "to": point},"required":["from","to"]}),
+        |s: Segment, _c| async move {
+            Ok::<_, String>(((s.to.x - s.from.x).abs() + (s.to.y - s.from.y).abs()).to_string())
+        },
+    );
+    let tk = create_toolkit(ToolkitOptions {
+        extra_tools: vec![length],
+        builtins: Some(BuiltinsConfig::off()),
+        ..Default::default()
+    })
+    .await?;
+    assert_eq!(tk.to_openai()[0]["function"]["parameters"]["properties"]["from"]["required"][0], "x");
+
+    let ok = tk.execute("manhattan", json!({"from": {"x": 0, "y": 0}, "to": {"x": 3, "y": -4}}), ToolContext::default()).await;
+    assert_eq!(ok.output, "7");
+    let bad = tk.execute("manhattan", json!({"from": {"x": "0", "y": 0}, "to": {"x": 1, "y": 1}}), ToolContext::default()).await;
+    assert!(bad.is_error && bad.output.starts_with("invalid arguments:"));
+    println!("ok: {} | {}", ok.output, bad.output);
+    Ok(())
+}
 ```
 
 ## See also

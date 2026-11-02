@@ -1,6 +1,6 @@
 ---
 title: Multi-turn memory
-description: Keep a conversation across turns — a conversation object or ask-with-id, in all seven languages.
+description: Keep a conversation across turns — a conversation object or ask-with-id, in all eight languages.
 ---
 
 import { Tabs, TabItem, Aside } from '@astrojs/starlight/components';
@@ -73,10 +73,31 @@ IO.puts(r.text)   # recalls "Muthu"
 ```
 </TabItem>
 <TabItem label="Rust">
-```rust
-let first = client.ask("My name is Ada.", &tk, "user-42").await?;
-let again = client.ask("What is my name?", &tk, "user-42").await?;   // same id ⇒ same transcript
-// ClientOptions { store: Some(Arc::new(FileConversationStore::new("./convos")?)), .. } persists it
+```rust test
+use std::sync::Arc;
+use toolnexus::client::{GenerateFn, InProcessOptions, InProcessResponse, create_in_process_client};
+use toolnexus::{BuiltinsConfig, ToolkitOptions, create_toolkit};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // A stand-in model that answers from the transcript it is sent.
+    let generate: GenerateFn = Arc::new(|req| Box::pin(async move {
+        let said = req.messages.iter().filter_map(|m| m["content"].as_str())
+            .find_map(|c| c.strip_prefix("My name is ")).map(|n| n.trim_end_matches('.').to_string());
+        Ok(InProcessResponse { content: format!("You are {}", said.unwrap_or("unknown".into())), ..Default::default() })
+    }));
+    let client = create_in_process_client(InProcessOptions { generate: Some(generate), ..Default::default() });
+    let tk = create_toolkit(ToolkitOptions { builtins: Some(BuiltinsConfig::off()), ..Default::default() }).await?;
+
+    client.ask("My name is Ada.", &tk, "user-42").await?;
+    let again = client.ask("What is my name?", &tk, "user-42").await?; // same id => same transcript
+    let other = client.ask("What is my name?", &tk, "user-7").await?;  // new id => fresh transcript
+    assert_eq!(again.text, "You are Ada");
+    assert_eq!(other.text, "You are unknown");
+    // ClientOptions { store: Some(Arc::new(FileConversationStore::new("./convos")?)), .. } persists it
+    println!("ok: {}", again.text);
+    Ok(())
+}
 ```
 </TabItem>
 </Tabs>

@@ -38,41 +38,262 @@ the `llm` metric and `before_llm` / `after_llm` (once, turn 0) are shared with t
 
 ## Examples
 
-### 1. One turn, tool calls handed back
+Each example points the client at a tiny loopback provider written inline with
+`tokio::net::TcpListener` — no network, no real key.
 
-```rust
+### 1. The smallest useful call — no tools, one OpenAI-style round trip
+
+```rust test
+use std::sync::{Arc, Mutex};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use serde_json::json;
-use toolnexus::client::{ClientOptions, TranslateRequest, create_client};
-let client = create_client(ClientOptions {
-    base_url: "https://openrouter.ai/api/v1".into(),
-    model: "openai/gpt-4o-mini".into(),
-    ..Default::default()
-});
-let res = client.translate(TranslateRequest {
-    messages: vec![json!({"role": "user", "content": "weather in Paris?"})],
-    tools: vec![json!({"type": "function", "function": {
-        "name": "get_weather", "parameters": {"type": "object"}}})],
-    ..Default::default()
-}).await?;
-for tc in &res.tool_calls {
-    println!("{} {}", tc.name, tc.arguments); // you run it, then send the result back
+use toolnexus::client::{ClientOptions, Style, TranslateRequest, create_client};
+
+/// A one-shot loopback provider: answers each request with `reply`, keeps the last body.
+async fn stub(reply: &'static str) -> (String, Arc<Mutex<String>>) {
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", l.local_addr().unwrap());
+    let seen = Arc::new(Mutex::new(String::new()));
+    let keep = seen.clone();
+    tokio::spawn(async move {
+        while let Ok((mut s, _)) = l.accept().await {
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 8192];
+            loop {
+                let n = s.read(&mut chunk).await.unwrap_or(0);
+                if n == 0 { break; }
+                buf.extend_from_slice(&chunk[..n]);
+                let text = String::from_utf8_lossy(&buf).to_string();
+                if let Some(i) = text.find("\r\n\r\n") {
+                    let len = text[..i].lines()
+                        .find_map(|h| h.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse().unwrap_or(0)))
+                        .unwrap_or(0usize);
+                    if buf.len() >= i + 4 + len {
+                        *keep.lock().unwrap() = String::from_utf8_lossy(&buf[i + 4..i + 4 + len]).into();
+                        break;
+                    }
+                }
+            }
+            let resp = format!("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{reply}", reply.len());
+            let _ = s.write_all(resp.as_bytes()).await;
+        }
+    });
+    (url, seen)
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let (url, _) = stub(r#"{"choices":[{"message":{"role":"assistant","content":"Paris"},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":1,"total_tokens":6}}"#).await;
+    let client = create_client(ClientOptions {
+        base_url: url, style: Style::OpenAI, model: "gpt-4o-mini".into(), api_key: "test-key".into(),
+        ..Default::default()
+    });
+
+    let res = client
+        .translate(TranslateRequest {
+            messages: vec![json!({"role": "user", "content": "capital of France?"})],
+            ..Default::default()
+        })
+        .await?;
+
+    assert_eq!(res.text, "Paris");
+    assert_eq!(res.finish_reason, "stop");
+    assert!(res.tool_calls.is_empty());
+    assert_eq!(res.usage.total_tokens, 6);
+    println!("ok: {}", res.text);
+    Ok(())
 }
 ```
 
-### 2. Declare a whole toolkit without executing it
+### 2. The realistic case — tool calls come back, nothing executes
 
-```rust
-let res = client.translate(TranslateRequest {
-    messages,
-    toolkit: Some(tk.clone()), // MCP tools, skills, builtins — declared, never run
-    ..Default::default()
-}).await?;
-let envelope = res.tool_calls_json(); // ready for an assistant message
+The model asks for a tool; `translate` hands the calls straight back to the caller, who owns
+execution — the toolkit's tool is declared to the provider but never run.
+
+```rust test
+use std::sync::{Arc, Mutex};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use std::sync::atomic::{AtomicBool, Ordering};
+use serde_json::json;
+use toolnexus::client::{ClientOptions, Style, TranslateRequest, create_client};
+use toolnexus::{BuiltinsConfig, ToolkitOptions, create_toolkit, define_tool};
+
+/// A one-shot loopback provider: answers each request with `reply`, keeps the last body.
+async fn stub(reply: &'static str) -> (String, Arc<Mutex<String>>) {
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", l.local_addr().unwrap());
+    let seen = Arc::new(Mutex::new(String::new()));
+    let keep = seen.clone();
+    tokio::spawn(async move {
+        while let Ok((mut s, _)) = l.accept().await {
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 8192];
+            loop {
+                let n = s.read(&mut chunk).await.unwrap_or(0);
+                if n == 0 { break; }
+                buf.extend_from_slice(&chunk[..n]);
+                let text = String::from_utf8_lossy(&buf).to_string();
+                if let Some(i) = text.find("\r\n\r\n") {
+                    let len = text[..i].lines()
+                        .find_map(|h| h.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse().unwrap_or(0)))
+                        .unwrap_or(0usize);
+                    if buf.len() >= i + 4 + len {
+                        *keep.lock().unwrap() = String::from_utf8_lossy(&buf[i + 4..i + 4 + len]).into();
+                        break;
+                    }
+                }
+            }
+            let resp = format!("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{reply}", reply.len());
+            let _ = s.write_all(resp.as_bytes()).await;
+        }
+    });
+    (url, seen)
+}
+
+static RAN: AtomicBool = AtomicBool::new(false);
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let add = define_tool(
+        "add",
+        "add two numbers",
+        Some(json!({"type": "object", "properties": {"a": {"type": "number"}, "b": {"type": "number"}}})),
+        |_args, _ctx| async {
+            RAN.store(true, Ordering::SeqCst);
+            Ok::<_, String>("5".to_string())
+        },
+    );
+    let tk = create_toolkit(ToolkitOptions {
+        builtins: Some(BuiltinsConfig::off()),
+        extra_tools: vec![add],
+        ..Default::default()
+    })
+    .await?;
+
+    let (url, body) = stub(r#"{"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"c1","type":"function","function":{"name":"add","arguments":"{\"a\":2,\"b\":3}"}}]}}],"usage":{"prompt_tokens":8,"completion_tokens":6,"total_tokens":14}}"#).await;
+    let client = create_client(ClientOptions {
+        base_url: url, style: Style::OpenAI, model: "gpt-4o-mini".into(), api_key: "test-key".into(),
+        ..Default::default()
+    });
+
+    // The toolkit declares "add" to the provider — nothing runs.
+    let res = client
+        .translate(TranslateRequest {
+            messages: vec![json!({"role": "user", "content": "what is 2+3?"})],
+            toolkit: Some(tk.clone()),
+            ..Default::default()
+        })
+        .await?;
+
+    assert_eq!(res.finish_reason, "tool_calls");
+    assert_eq!(res.tool_calls.len(), 1);
+    assert_eq!(res.tool_calls[0].name, "add");
+    assert_eq!(res.tool_calls[0].arguments, r#"{"a":2,"b":3}"#);
+    assert!(body.lock().unwrap().contains(r#""name":"add""#), "add was declared");
+    assert!(!RAN.load(Ordering::SeqCst), "translate must never execute a tool");
+    // Ready to append as the assistant message of the caller's transcript.
+    assert_eq!(res.tool_calls_json()[0]["function"]["name"], "add");
+
+    tk.close().await;
+    println!("ok: {} declared via toolkit, arguments: {} - never executed", res.tool_calls[0].name, res.tool_calls[0].arguments);
+    Ok(())
+}
+```
+
+### 3. The full surface — Anthropic upstream doing real inbound translation
+
+Against an Anthropic-style upstream, `translate` performs the real inbound conversion — OpenAI
+`tool_calls` / `tool` messages become native `tool_use` / `tool_result` content blocks, and a prior
+`system` message is hoisted into Anthropic's separate `system` field.
+
+```rust test
+use std::sync::{Arc, Mutex};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use serde_json::{Value, json};
+use toolnexus::client::{ClientOptions, Style, TranslateRequest, create_client};
+
+/// A one-shot loopback provider: answers each request with `reply`, keeps the last body.
+async fn stub(reply: &'static str) -> (String, Arc<Mutex<String>>) {
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", l.local_addr().unwrap());
+    let seen = Arc::new(Mutex::new(String::new()));
+    let keep = seen.clone();
+    tokio::spawn(async move {
+        while let Ok((mut s, _)) = l.accept().await {
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 8192];
+            loop {
+                let n = s.read(&mut chunk).await.unwrap_or(0);
+                if n == 0 { break; }
+                buf.extend_from_slice(&chunk[..n]);
+                let text = String::from_utf8_lossy(&buf).to_string();
+                if let Some(i) = text.find("\r\n\r\n") {
+                    let len = text[..i].lines()
+                        .find_map(|h| h.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse().unwrap_or(0)))
+                        .unwrap_or(0usize);
+                    if buf.len() >= i + 4 + len {
+                        *keep.lock().unwrap() = String::from_utf8_lossy(&buf[i + 4..i + 4 + len]).into();
+                        break;
+                    }
+                }
+            }
+            let resp = format!("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{reply}", reply.len());
+            let _ = s.write_all(resp.as_bytes()).await;
+        }
+    });
+    (url, seen)
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let (url, body) = stub(r#"{"content":[{"type":"text","text":"got it"}],"stop_reason":"end_turn","usage":{"input_tokens":6,"output_tokens":2}}"#).await;
+    let client = create_client(ClientOptions {
+        base_url: url, style: Style::Anthropic, model: "claude-x".into(), api_key: "test-key".into(),
+        ..Default::default()
+    });
+
+    let res = client
+        .translate(TranslateRequest {
+            messages: vec![
+                json!({"role": "system", "content": "You are terse."}),
+                json!({"role": "user", "content": "call echo with hi"}),
+                json!({"role": "assistant", "content": null, "tool_calls": [
+                    {"id": "c1", "type": "function", "function": {"name": "echo", "arguments": "{\"text\":\"hi\"}"}}
+                ]}),
+                json!({"role": "tool", "tool_call_id": "c1", "content": "hi"}),
+            ],
+            ..Default::default()
+        })
+        .await?;
+    assert_eq!(res.text, "got it");
+    assert_eq!(res.finish_reason, "stop");
+
+    let sent: Value = serde_json::from_str(&body.lock().unwrap())?;
+    assert_eq!(sent["system"], "You are terse.", "system hoisted");
+    let msgs = sent["messages"].to_string();
+    for want in [r#""tool_use""#, r#""tool_result""#, r#""tool_use_id":"c1""#] {
+        assert!(msgs.contains(want), "missing {want} in {msgs}");
+    }
+
+    println!("ok: {} - system hoisted, tool_calls became tool_use/tool_result blocks", res.text);
+    Ok(())
+}
 ```
 
 <Aside type="tip" title="When not to use it">
 If toolnexus should own the conversation and execute tools, use the client loop (`run` / `ask`).
 </Aside>
+
+## Behavior
+
+| Aspect | Detail |
+|---|---|
+| One call, no loop | Exactly one provider call per `translate`, ever — no re-execution. |
+| Nothing executes | `toolkit` / `tools` are declaration-only inputs. |
+| `tools` + `toolkit` compose | Toolkit declarations come first, then `tools`. |
+| `arguments` | Always a JSON **string** on the way out — the OpenAI wire form. |
+| `finish_reason` | A turn emitting any tool call is always `"tool_calls"`. |
+| Cancellation | `translate_ctx(cancel, req)` takes a `CancellationToken`; `timeout_ms` bounds the call. |
 
 ## See also
 

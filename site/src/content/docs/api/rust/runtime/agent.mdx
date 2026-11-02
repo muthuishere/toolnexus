@@ -27,27 +27,222 @@ impl Agent {
 }
 ```
 
-One new noun. Declaring agents in each other's `team` IS the sub-agent wiring (a `task` tool
-appears only when a team is declared). `run` is the one-shot; when the run parks durably
-(`status: "pending"`) the returned runtime is kept alive so you can `resume`. An Agent IS a Tool:
-`as_tool` drops it into a classic toolkit's `extra_tools`, returning only the final text plus
-`{agent, turns, totalTokens}` metadata; the calling turn's cancellation cancels the child.
-`as_tool_with` builds the child's Options from the calling `ToolContext`, so the child runs under
-the parent turn's `hooks` gate, `wait_for` bridge and `on_metric`.
+`agents::new` is the SPEC §7D axiom made concrete: **an Agent is a Tool** — identity (`soul`) ×
+a filtered toolkit view (`tools`) × the shipped client loop, invocable either as a one-shot
+(`run`) or, via `as_tool`, dropped straight into a classic toolkit's `extra_tools`. Declaring
+agents in each other's `team` IS the sub-agent wiring (a `task` tool appears only when a team is
+declared). When a run parks durably (`status: "pending"`) the returned runtime is kept alive so
+you can `resume`. `as_tool` returns only the final text plus `{agent, turns, totalTokens}`
+metadata; the calling turn's cancellation cancels the child.
 
-## Example
+<Aside type="note" title="Distinct from agents/agent — this one never leaves the process">
+[`agents/agent`](/api/rust/agents/agent/) (§7A) calls a REMOTE peer over HTTP/JSON-RPC — a URL, a
+poll loop, a network boundary. `agents::new` (§7D, this page) composes a LOCAL sub-agent — its own
+soul, its own scoped tools, its own budget — that runs in-process against the [`Runtime`](/api/rust/runtime/runtime/)
+and never makes an HTTP call to reach its parent. They happen to share the word "agent"; the
+mechanisms are unrelated.
+</Aside>
+
+## When to use it
+
+Reach for `agents::new` to build a coding-agent-style team — a coordinator that delegates focused
+subtasks to specialists, each scoped to only the tools and soul it needs — without standing up a
+server, a URL, or a protocol. Use `run` for a one-shot; use `as_tool` to make the agent callable
+from an ordinary `Client::run` loop, exactly like any other tool.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Need more than one run, or fine control over spawn/wake/wait?">
+`Agent::run` builds a fresh [`Runtime`](/api/rust/runtime/runtime/) and tears it down (unless the run
+suspends). Reach for [`Runtime::new`](/api/rust/runtime/runtime/) directly — with `Agent::registry()` —
+when you need to keep multiple handles alive, fan work out concurrently, or drive the six host
+verbs (`spawn`/`post`/`wake`/`wait`/`interrupt`/`close`) yourself.
+</Aside>
+
+## Examples
+
+All three use an in-process model (`Options.in_process`, a host function in place of a provider)
+— the runtime's documented hermetic seam, the same mechanism the port's own tests use. No network
+call is ever made, no real API key required.
+
+### 1. The smallest useful call — one agent, one answer
+
+```rust test
+use std::sync::Arc;
+use toolnexus::agents::{self, Options, Spec};
+use toolnexus::client::{BoxFuture, InProcessRequest, InProcessResponse};
+
+#[tokio::main]
+async fn main() {
+    // A model that answers every request with the same fixed text.
+    let model = Arc::new(|_req: InProcessRequest| -> BoxFuture<Result<InProcessResponse, String>> {
+        Box::pin(async { Ok(InProcessResponse { content: "hello!".into(), ..Default::default() }) })
+    });
+    let greeter = agents::new("greeter", Spec { does: "says hello".into(), model: "m-greeter".into(), ..Default::default() });
+
+    let (r, _rt) = greeter.run(Options { in_process: Some(model), ..Default::default() }, "say hi").await;
+    assert_eq!(r.status, "done", "{r:?}");
+    assert_eq!(r.text, "hello!");
+
+    println!("ok: {}", r.text);
+}
+```
+
+### 2. The realistic case — a coordinator delegating to a teammate
+
+`team` is what makes delegation possible: a def with a non-empty `team` gets an auto-added `task`
+tool scoped to exactly those names (see [`runtime/task-tool`](/api/rust/runtime/task-tool/)).
+
+```rust test
+use std::sync::Arc;
+use serde_json::json;
+use toolnexus::agents::{self, Options, Spec};
+use toolnexus::client::{BoxFuture, InProcessRequest, InProcessResponse, InProcessToolCall};
+
+#[tokio::main]
+async fn main() {
+    // One model function scripts BOTH agents, keyed by the model name each agent sends.
+    let model = Arc::new(|req: InProcessRequest| -> BoxFuture<Result<InProcessResponse, String>> {
+        let saw_tool_result = req.messages.iter().any(|m| m["role"] == "tool");
+        let resp = match (req.model.as_str(), saw_tool_result) {
+            ("m-coordinator", false) => InProcessResponse {
+                tool_calls: vec![InProcessToolCall {
+                    id: "c1".into(),
+                    name: "task".into(),
+                    arguments: json!({"agent": "explorer", "prompt": "find the answer"}),
+                }],
+                ..Default::default()
+            },
+            ("m-coordinator", true) => InProcessResponse { content: "delegation complete".into(), ..Default::default() },
+            ("m-explorer", _) => InProcessResponse { content: "found it".into(), ..Default::default() },
+            _ => InProcessResponse { content: "ok".into(), ..Default::default() },
+        };
+        Box::pin(async move { Ok(resp) })
+    });
+
+    let explorer = agents::new("explorer", Spec { does: "read-only research".into(), model: "m-explorer".into(), ..Default::default() });
+    let coordinator = agents::new("coordinator", Spec {
+        does: "splits work and delegates".into(),
+        model: "m-coordinator".into(),
+        team: vec![explorer],
+        ..Default::default()
+    });
+
+    let (r, _rt) = coordinator.run(Options { in_process: Some(model), ..Default::default() }, "answer the question").await;
+    assert_eq!(r.status, "done", "{r:?}");
+    assert!(r.text.contains("delegation complete"), "{}", r.text);
+
+    println!("ok: {}", r.text);
+}
+```
+
+### 3. The full surface — `as_tool` bridging into the classic client loop
+
+`as_tool` is the axiom's other direction: an `Agent` dropped into an ordinary toolkit's
+`extra_tools`, invisible from an LLM's point of view — the model just sees one more tool named
+`explorer`.
+
+```rust test
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use serde_json::json;
+use toolnexus::agents::{self, Options, Spec};
+use toolnexus::client::{BoxFuture, InProcessOptions, InProcessRequest, InProcessResponse, InProcessToolCall, create_in_process_client};
+use toolnexus::{BuiltinsConfig, ToolkitOptions, create_toolkit};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // The sub-agent's own model answers directly, no tool calls needed.
+    let sub_model = Arc::new(|_req: InProcessRequest| -> BoxFuture<Result<InProcessResponse, String>> {
+        Box::pin(async { Ok(InProcessResponse { content: "the answer is 42".into(), ..Default::default() }) })
+    });
+    let explorer = agents::new("explorer", Spec { does: "finds facts".into(), model: "m-explorer".into(), ..Default::default() });
+    let explorer_tool = explorer.as_tool(Options { in_process: Some(sub_model), ..Default::default() });
+
+    // The TOP-LEVEL loop is an ordinary client with its own model — it just sees
+    // "explorer" as one more tool.
+    let turn = Arc::new(AtomicUsize::new(0));
+    let top_model = Arc::new(move |_req: InProcessRequest| -> BoxFuture<Result<InProcessResponse, String>> {
+        let n = turn.fetch_add(1, Ordering::SeqCst);
+        Box::pin(async move {
+            Ok(if n == 0 {
+                InProcessResponse {
+                    tool_calls: vec![InProcessToolCall {
+                        id: "c1".into(),
+                        name: "explorer".into(),
+                        arguments: json!({"prompt": "what is the answer?"}),
+                    }],
+                    ..Default::default()
+                }
+            } else {
+                InProcessResponse { content: "done".into(), ..Default::default() }
+            })
+        })
+    });
+
+    let tk = create_toolkit(ToolkitOptions {
+        builtins: Some(BuiltinsConfig::off()),
+        extra_tools: vec![explorer_tool],
+        ..Default::default()
+    })
+    .await?;
+    let client = create_in_process_client(InProcessOptions { model: "top".into(), generate: Some(top_model), ..Default::default() });
+    let res = client.run("what is the answer?", &tk).await?;
+
+    assert_eq!(res.tool_calls.len(), 1, "{:?}", res.tool_calls);
+    let call = &res.tool_calls[0];
+    assert_eq!(call.name, "explorer");
+    assert_eq!(call.output, "the answer is 42");
+    let meta = call.metadata.as_ref().expect("as_tool attaches metadata");
+    assert_eq!(meta["agent"], "explorer");
+
+    println!("ok: {} via sub-agent output: {}", res.text, call.output);
+    Ok(())
+}
+```
+
+## `as_tool_with` — a subagent under the parent's gates
 
 ```rust
-use toolnexus::agents::{self, Options, Spec};
-let explore = agents::new("explore", Spec { does: "read-only research".into(), tools: vec![lookup], ..Default::default() });
-let coder = agents::new("coder", Spec { does: "implements changes".into(), soul_file: "AGENTS.md".into(),
-                                         team: vec![explore.clone()], ..Default::default() });
-let (r, _rt) = coder.run(Options { in_process: Some(model), ..Default::default() }, "fix the failing test").await;
-
-// or inside the classic API:
-let tk = toolnexus::create_toolkit(toolnexus::ToolkitOptions { extra_tools: vec![explore.as_tool(opts)], ..Default::default() }).await?;
+pub fn as_tool(&self, opts: Options) -> Tool
+pub fn as_tool_with(&self, per: AsToolOptionsFn) -> Tool  // Arc<dyn Fn(&ToolContext) -> Options>
 ```
+
+`as_tool` stops the child run when the calling turn is cancelled (the tool returns a cancelled
+error result). `as_tool_with` builds the runtime `Options` per call from the calling tool's
+context, so the child runs under the **same** gates as the parent turn: `Options.hooks` (the same
+`before_tool` permission gate), `Options.wait_for` (answers a child's suspension when no agent on
+its chain has its own `wait_for`) and `on_metric`. A `Spec.hooks` on the agent replaces
+`Options.hooks`, so leave it unset when the gate must hold.
+
+```rust
+let tool = child.as_tool_with(Arc::new(move |_ctx: &ToolContext| Options {
+    hooks: Some(gate.clone()),
+    wait_for: Some(ask_the_user.clone()),
+    ..Default::default()
+}));
+```
+
+## Spec fields
+
+| Field | Type | What it does |
+|---|---|---|
+| `does` | `String` | The routing description the delegating model (or a parent's `task` tool) sees. |
+| `tools` | `Vec<Tool>` | The scoped toolkit view — scoping IS the security model; builtins are never added implicitly. |
+| `soul` / `soul_file` | `String` | The system prompt, inline or from a file (`soul_file` wins when both are set and readable). |
+| `team` | `Vec<Agent>` | Delegation targets. Empty ⇒ no `task` tool — recursion is opt-in. |
+| `budget` | `Option<Budget>` | Caps this agent's subtree — see [`Budget`](/api/rust/runtime/budgets/). |
+| `model` | `String` | `""` ⇒ `"inherit"` (the runtime's LLM default). |
+| `wait_for` | `Option<WaitForFn>` | This agent's §10 interpreter authority for its subtree. |
+| `hooks` / `on_metric` | `Option<Hooks>` / `Option<OnMetricFn>` | The §8 seams for this agent's turns. |
+| `guardrails` / `completion` | `Vec<Guardrail>` / `Option<Completion>` | Tool-call refusals and the completion gate (see [`Loop`](/api/rust/runtime/loop/)). |
+
+`Agent::registry()` collects the agent plus the TRANSITIVE CLOSURE of its team graph — unreachable
+agents are never present.
 
 ## See also
 
-- [Loop](/api/rust/runtime/loop/) · [task tool](/api/rust/runtime/task-tool/) · [runtime](/api/rust/runtime/runtime/)
+- [`Runtime::new`](/api/rust/runtime/runtime/) — The six host verbs that drive sub-agents, plus the read-only list and inspect views.
+- [`Handle`](/api/rust/runtime/handle/) — The state machine for one spawned agent: pending, running, suspended, done.
+- [`Budget`](/api/rust/runtime/budgets/) — Cap tool calls and wall-clock per agent and per team, enforced while the run is in flight.
+- [`a2a::Agent` (§7A, remote)](/api/rust/agents/agent/) — the REMOTE counterpart: call a peer over HTTP instead of composing one in-process.

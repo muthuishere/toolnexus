@@ -222,21 +222,33 @@ r = Toolnexus.Client.run(client, "What is 2 + 3?", tk)
 ```
 </TabItem>
 <TabItem label="Rust">
-```rust
+```rust test
 use std::sync::Arc;
 use toolnexus::client::{GenerateFn, InProcessOptions, InProcessResponse, create_in_process_client};
+use toolnexus::{ToolkitOptions, create_toolkit};
 
-let generate: GenerateFn = Arc::new(|req| Box::pin(async move {
-    // run your own model on req.messages / req.tools
-    Ok(InProcessResponse { content: format!("{} messages seen", req.messages.len()), ..Default::default() })
-}));
-let client = create_in_process_client(InProcessOptions { generate: Some(generate), ..Default::default() });
-// an ACP coding agent works the same way: acp_generate(agent) / acp_generate_stream(agent)
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let generate: GenerateFn = Arc::new(|req| Box::pin(async move {
+        // run your own model on req.messages / req.tools
+        Ok(InProcessResponse {
+            content: format!("{} messages, {} tools seen", req.messages.len(), req.tools.len()),
+            ..Default::default()
+        })
+    }));
+    let client = create_in_process_client(InProcessOptions { generate: Some(generate), ..Default::default() });
+    let tk = create_toolkit(ToolkitOptions::default()).await?;
+    let res = client.run("hello", &tk).await?;
+    assert!(res.text.ends_with("tools seen"), "{}", res.text);
+    // an ACP coding agent works the same way: acp_generate(agent) / acp_generate_stream(agent)
+    println!("ok: {}", res.text);
+    Ok(())
+}
 ```
 </TabItem>
 </Tabs>
 
-<Aside type="note" title="All seven were executed, not written from memory">
+<Aside type="note" title="All eight were executed, not written from memory">
 Each tab was run against its port before publication. Every port also ships a test
 suite for this constructor covering the same seven behaviours: no wire config needed ·
 generate sees messages/tools/model · tool calls loop back · arguments structured **or**

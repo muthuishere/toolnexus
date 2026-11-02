@@ -38,46 +38,109 @@ If you only want to expose a function, use `define_tool`; a raw `Tool` literal i
 
 ## Examples
 
-### 1. Inspect a toolkit's tools
+### 1. The smallest possible tool
 
-```rust
-use toolnexus::{BuiltinsConfig, ToolkitOptions, create_toolkit};
-let tk = create_toolkit(ToolkitOptions {
-    builtins: Some(BuiltinsConfig::off()),
-    ..Default::default()
-}).await?;
-for t in tk.tools() {
-    println!("{} {:?} {}", t.name, t.source, t.description);
+```rust test
+use std::sync::Arc;
+
+use serde_json::json;
+use toolnexus::{Tool, ToolContext, ToolResult, ToolSource, empty_schema};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Every field is public; `execute` returns a boxed future of a ToolResult.
+    let ping = Tool {
+        name: "ping".into(),
+        description: "Reply pong".into(),
+        input_schema: empty_schema(),
+        source: ToolSource::Custom,
+        hints: None,
+        execute: Arc::new(|_args, _ctx| Box::pin(async { ToolResult::ok("pong") })),
+    };
+    // `call` passes a null args value through as `{}`.
+    let r = ping.call(json!(null), ToolContext::default()).await;
+    assert_eq!(r.output, "pong");
+    assert!(!r.is_error);
+    println!("ok: {} -> {}", ping.name, r.output);
+    Ok(())
 }
 ```
 
-### 2. Call a tool directly
+### 2. Error result vs panic — the distinction that matters
 
-```rust
+A Rust tool has one return channel: the `ToolResult`. A failure the model should read and recover
+from is `ToolResult::error(..)`; `define_tool` maps an `Err(e)` to exactly that. Nothing you return
+is an exception — panicking inside `execute` is a bug in your code, not a tool outcome.
+
+```rust test
 use serde_json::json;
 use toolnexus::{ToolContext, define_tool};
-let t = define_tool("ping", "Reply pong", None, |_a, _c| async { Ok::<_, String>("pong".to_string()) });
-let r = t.call(json!({}), ToolContext::default()).await;
-assert_eq!(r.output, "pong");
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let divide = define_tool(
+        "divide",
+        "Divide a by b",
+        Some(json!({"type":"object","properties":{"a":{"type":"number"},"b":{"type":"number"}},"required":["a","b"]})),
+        |args, _ctx| async move {
+            let a = args["a"].as_f64().ok_or("a must be a number")?;
+            let b = args["b"].as_f64().ok_or("b must be a number")?;
+            if b == 0.0 {
+                return Err("cannot divide by zero");
+            }
+            Ok((a / b).to_string())
+        },
+    );
+    let ok = divide.call(json!({"a": 6, "b": 3}), ToolContext::default()).await;
+    let bad = divide.call(json!({"a": 1, "b": 0}), ToolContext::default()).await;
+    assert_eq!((ok.output.as_str(), ok.is_error), ("2", false));
+    // The error is data: the loop sends this text back to the model as the tool's answer.
+    assert_eq!((bad.output.as_str(), bad.is_error), ("cannot divide by zero", true));
+    println!("ok: {} / {}", ok.output, bad.output);
+    Ok(())
+}
 ```
 
-### 3. Wrap a tool's execute
+### 3. A generated tool source — the real reason this type is public
 
-```rust
+Producing many tools from data is where you build `Tool` directly. `sanitize` makes each name
+schema-safe.
+
+```rust test
 use std::sync::Arc;
-use toolnexus::{Tool, ToolResult};
-fn read_only_guard(inner: Tool) -> Tool {
-    let exec = inner.execute.clone();
-    Tool {
-        execute: Arc::new(move |args, ctx| {
-            let exec = exec.clone();
-            Box::pin(async move {
-                if ctx.cancel.is_cancelled() { return ToolResult::error("cancelled"); }
-                exec(args, ctx).await
-            })
-        }),
-        ..inner
-    }
+
+use serde_json::json;
+use toolnexus::{Tool, ToolContext, ToolResult, ToolSource, sanitize};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let endpoints = [("get user", "/users/:id"), ("list orders", "/orders")];
+    let tools: Vec<Tool> = endpoints
+        .iter()
+        .map(|&(key, path)| Tool {
+            // Names must match [a-zA-Z0-9_-]; sanitize does exactly that.
+            name: sanitize(key),
+            description: format!("Call {path}"),
+            input_schema: json!({"type":"object","properties":{"id":{"type":"string"}}}),
+            source: ToolSource::Custom,
+            hints: None,
+            execute: Arc::new(move |args, ctx| {
+                Box::pin(async move {
+                    if ctx.cancel.is_cancelled() {
+                        return ToolResult::error("cancelled");
+                    }
+                    ToolResult::ok(format!("{path} <- {}", args["id"].as_str().unwrap_or("")))
+                })
+            }),
+        })
+        .collect();
+
+    assert_eq!(tools[0].name, "get_user");
+    assert_eq!(tools[1].name, "list_orders");
+    let r = tools[0].call(json!({"id": "42"}), ToolContext::default()).await;
+    assert_eq!(r.output, "/users/:id <- 42");
+    println!("ok: {}, {}", tools[0].name, tools[1].name);
+    Ok(())
 }
 ```
 

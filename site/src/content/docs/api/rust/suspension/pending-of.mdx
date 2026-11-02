@@ -31,37 +31,117 @@ With the client, `RunResult.pending` already carries the request.
 
 ## Examples
 
-### 1. Check a result
+### 1. The smallest useful call — suspension vs plain result
 
-```rust
+```rust test
+use toolnexus::{Request, ToolResult, pending, pending_of};
+
+fn main() {
+    let suspended = pending(Request { kind: "input".into(), prompt: "which env?".into(), ..Default::default() });
+    let plain = ToolResult::ok("done");
+
+    assert!(pending_of(&suspended).is_some(), "expected a suspension");
+    assert!(pending_of(&plain).is_none(), "expected no suspension on a plain result");
+    println!("ok: suspension detected, plain result is not");
+}
+```
+
+### 2. The realistic case — telling a real error apart from a suspension
+
+Both set `is_error: true`; only `pending_of` tells them apart.
+
+```rust test
 use toolnexus::{ToolResult, auth_required, pending_of};
-assert!(pending_of(&ToolResult::ok("x")).is_none());
-assert_eq!(pending_of(&auth_required("https://x", "")).unwrap().kind, "authorization");
+
+fn classify(res: &ToolResult) -> String {
+    if let Some(req) = pending_of(res) {
+        return format!("suspended: {}", req.kind);
+    }
+    if res.is_error {
+        return format!("failed: {}", res.output);
+    }
+    format!("ok: {}", res.output)
+}
+
+fn main() {
+    let suspended = auth_required("https://example.com/login", "");
+    let failed = ToolResult::error("connection refused");
+    let ok = ToolResult::ok("42");
+
+    let got: Vec<String> = [&suspended, &failed, &ok].into_iter().map(classify).collect();
+    assert_eq!(got, ["suspended: authorization", "failed: connection refused", "ok: 42"]);
+    println!("ok: {got:?}");
+}
 ```
 
-### 2. In an after_tool hook
+### 3. The full surface — reading `RunResult.pending` after a durable halt
 
-```rust
-use std::sync::Arc;
-use toolnexus::client::Hooks;
-use toolnexus::pending_of;
-let hooks = Hooks {
-    after_tool: Some(Arc::new(|ev| Box::pin(async move {
-        if let Some(r) = pending_of(&ev.result) { println!("{} suspended: {}", ev.name, r.prompt); }
-        Ok(None)
-    }))),
-    ..Default::default()
-};
-```
+`pending_of` works the same on a `ToolResult` you built by hand or one that flowed all the way
+through a real `Client::run` — this reads the request back off the halted `RunResult` and off
+the underlying `ToolResult` that produced it.
 
-### 3. Your own loop
+```rust test
+use std::sync::{Arc, Mutex};
 
-```rust
 use serde_json::json;
-use toolnexus::{BuiltinsConfig, ToolContext, ToolkitOptions, create_toolkit, pending_of};
-let tk = create_toolkit(ToolkitOptions::default()).await?;
-let r = tk.execute("question", json!({"questions":[{"question":"Name?"}]}), ToolContext::default()).await;
-if let Some(req) = pending_of(&r) { println!("ask: {}", req.prompt); }
+use toolnexus::client::{
+    GenerateFn, InProcessOptions, InProcessRequest, InProcessResponse, InProcessToolCall,
+    create_in_process_client,
+};
+use toolnexus::{
+    BuiltinsConfig, Request, Tool, ToolResult, ToolSource, ToolkitOptions, create_toolkit,
+    empty_schema, pending, pending_of,
+};
+
+fn model() -> GenerateFn {
+    Arc::new(|_req: InProcessRequest| {
+        Box::pin(async move {
+            Ok(InProcessResponse {
+                tool_calls: vec![InProcessToolCall { id: "c1".into(), name: "pick_env".into(), arguments: json!({}) }],
+                ..Default::default()
+            })
+        })
+    })
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let last: Arc<Mutex<Option<ToolResult>>> = Arc::new(Mutex::new(None));
+    let seen = last.clone();
+    let pick_env = Tool {
+        name: "pick_env".into(),
+        description: "asks which environment".into(),
+        input_schema: empty_schema(),
+        source: ToolSource::Custom,
+        hints: None,
+        execute: Arc::new(move |_args, _ctx| {
+            let seen = seen.clone();
+            Box::pin(async move {
+                let r = pending(Request { kind: "input".into(), prompt: "which env?".into(), ..Default::default() });
+                *seen.lock().unwrap() = Some(r.clone());
+                r
+            })
+        }),
+    };
+    let tk = create_toolkit(ToolkitOptions {
+        builtins: Some(BuiltinsConfig::off()),
+        extra_tools: vec![pick_env],
+        ..Default::default()
+    })
+    .await?;
+    let client = create_in_process_client(InProcessOptions { generate: Some(model()), ..Default::default() });
+
+    let res = client.run("deploy", &tk).await?;
+    assert_eq!(res.status, "pending", "expected a durable halt");
+
+    // pending_of on the tool's own ToolResult, and RunResult.pending, describe the same suspension.
+    let from_tool = pending_of(last.lock().unwrap().as_ref().unwrap()).expect("tool view");
+    let from_run = res.pending.expect("run view");
+    assert_eq!(from_tool.id, from_run.id);
+    assert_eq!(from_tool.prompt, from_run.prompt);
+    println!("ok: {} - {} id matches: {}", from_tool.kind, from_tool.prompt, from_tool.id == from_run.id);
+    Ok(())
+}
 ```
 
 ## See also

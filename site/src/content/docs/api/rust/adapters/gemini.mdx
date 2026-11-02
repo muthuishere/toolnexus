@@ -32,35 +32,100 @@ If you use the toolnexus client, you never call this; the loop does.
 
 ## Examples
 
-### 1. From a toolkit
+### 1. One tool, and the wrapper that surprises everyone
 
-```rust
-use toolnexus::{BuiltinsConfig, ToolkitOptions, create_toolkit};
-let tk = create_toolkit(ToolkitOptions {
-    builtins: Some(BuiltinsConfig::off()),
-    ..Default::default()
-}).await?;
-let schema = tk.to_gemini();
-```
-
-### 2. From a vector of tools
-
-```rust
-use toolnexus::{define_tool, to_gemini};
-let t = define_tool("now", "Current time", None, |_a, _c| async { Ok::<_, String>("12:00".to_string()) });
-println!("{}", serde_json::to_string_pretty(&to_gemini(&[t]))?);
-```
-
-### 3. Into a request body
-
-```rust
+```rust test
 use serde_json::json;
-use toolnexus::{BuiltinsConfig, ToolkitOptions, create_toolkit};
-let tk = create_toolkit(ToolkitOptions {
-    builtins: Some(BuiltinsConfig::off()),
-    ..Default::default()
-}).await?;
-let body = json!({"model": "m", "tools": tk.to_gemini()});
+use toolnexus::{define_tool, to_gemini};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let weather = define_tool(
+        "get_weather",
+        "Current weather for a city",
+        Some(json!({"type":"object","properties":{"city":{"type":"string"}},"required":["city"]})),
+        |args, _ctx| async move {
+            let city = args["city"].as_str().ok_or("city is required")?;
+            Ok::<_, String>(format!("{city}: 21C, clear"))
+        },
+    );
+    let now = define_tool("now", "Current time", None, |_a, _c| async { Ok::<_, String>("12:00".to_string()) });
+    let schema = to_gemini(&[weather, now]);
+    // ONE element wrapping ALL declarations — not one element per tool.
+    assert_eq!(schema.len(), 1);
+    let decls = schema[0]["functionDeclarations"].as_array().unwrap();
+    assert_eq!(decls.len(), 2);
+    assert_eq!(decls[0]["name"], "get_weather");
+    assert_eq!(decls[0]["parameters"]["required"][0], "city");
+    println!("{}", serde_json::to_string_pretty(&schema)?);
+    println!("ok: 1 wrapper, {} declarations", decls.len());
+    Ok(())
+}
+```
+
+### 2. Feeding it straight into a generateContent body
+
+```rust test
+use serde_json::json;
+use toolnexus::{BuiltinsConfig, ToolkitOptions, create_toolkit, define_tool};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let now = define_tool("now", "Current time", None, |_a, _c| async { Ok::<_, String>("12:00".to_string()) });
+    let tk = create_toolkit(ToolkitOptions {
+        extra_tools: vec![now],
+        builtins: Some(BuiltinsConfig::off()),
+        ..Default::default()
+    })
+    .await?;
+    let body = json!({
+        "contents": [{"role": "user", "parts": [{"text": "what time is it?"}]}],
+        "tools": tk.to_gemini(),
+    });
+    assert_eq!(body["tools"][0]["functionDeclarations"][0]["name"], "now");
+    println!("ok: {}", body["tools"][0]["functionDeclarations"][0]["name"]);
+    Ok(())
+}
+```
+
+### 3. Round-tripping a `functionCall` part back to the tool
+
+Gemini returns `args` as an object and has no call id — the reply `functionResponse` is matched by `name`.
+
+```rust test
+use serde_json::json;
+use toolnexus::{BuiltinsConfig, ToolContext, ToolkitOptions, create_toolkit, define_tool};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let weather = define_tool(
+        "get_weather",
+        "Current weather for a city",
+        Some(json!({"type":"object","properties":{"city":{"type":"string"}},"required":["city"]})),
+        |args, _ctx| async move {
+            let city = args["city"].as_str().ok_or("city is required")?;
+            Ok::<_, String>(format!("{city}: 21C, clear"))
+        },
+    );
+    let tk = create_toolkit(ToolkitOptions {
+        extra_tools: vec![weather],
+        builtins: Some(BuiltinsConfig::off()),
+        ..Default::default()
+    })
+    .await?;
+
+    // candidates[0].content.parts[0] of a generateContent response.
+    let part = json!({"functionCall": {"name": "get_weather", "args": {"city": "Chennai"}}});
+    let call = &part["functionCall"];
+    let r = tk
+        .execute(call["name"].as_str().unwrap(), call["args"].clone(), ToolContext::default())
+        .await;
+    let reply = json!({"role": "user", "parts": [{"functionResponse": {
+        "name": call["name"], "response": {"output": r.output},
+    }}]});
+    assert_eq!(reply["parts"][0]["functionResponse"]["response"]["output"], "Chennai: 21C, clear");
+    println!("ok: {}", reply["parts"][0]["functionResponse"]["name"]);
+    Ok(())
+}
 ```
 
 ## See also

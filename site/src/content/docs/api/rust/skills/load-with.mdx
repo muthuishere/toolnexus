@@ -37,34 +37,113 @@ For plain directories, `load_skills` is shorter.
 
 ## Examples
 
-### 1. Skills as data
+### 1. Skills supplied as data, no filesystem involved
 
-```rust
+```rust test
+use serde_json::json;
+use toolnexus::ToolContext;
 use toolnexus::skills::{LoadSkillsOptions, SkillDef, load_skills_with};
-let src = load_skills_with(LoadSkillsOptions {
-    skills: vec![SkillDef { name: "greet".into(), description: "Say hi".into(), content: "Say hi.".into(), ..Default::default() }],
-    ..Default::default()
-});
+
+#[tokio::main]
+async fn main() {
+    let src = load_skills_with(LoadSkillsOptions {
+        skills: vec![SkillDef {
+            name: "deploy".into(),
+            description: "Ship a release".into(),
+            content: "Run the release checklist.".into(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    });
+
+    assert_eq!(src.skills.len(), 1);
+    assert!(src.skills.contains_key("deploy"));
+
+    let res = src.tool.call(json!({"name": "deploy"}), ToolContext::default()).await;
+    assert!(!res.is_error, "{}", res.output);
+    assert!(res.output.contains("Run the release checklist."));
+
+    println!("ok: {}", src.skills["deploy"].name);
+}
 ```
 
-### 2. An allowlist
+### 2. The shared fixture, filtered down for one agent
 
-```rust
+Loaded from `examples/skills`, then narrowed via `filter` — the allowlist is per call, not global,
+so a second `load_skills_with` over the same directory can see a different set.
+
+```rust test
 use std::collections::HashMap;
+use std::path::Path;
 use toolnexus::skills::{LoadSkillsOptions, load_skills_with};
-let src = load_skills_with(LoadSkillsOptions {
-    dirs: vec!["skills".into()],
-    filter: HashMap::from([("deploy".to_string(), false)]),
-    ..Default::default()
-});
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = Path::new(&std::env::var("TOOLNEXUS_REPO")?).join("examples/skills");
+
+    let all = load_skills_with(LoadSkillsOptions { dirs: vec![dir.clone()], ..Default::default() });
+    assert!(all.skills.contains_key("hello-world"));
+
+    // An allowlist naming a skill that doesn't exist filters everything out —
+    // it does not fall back to "all".
+    let narrowed = load_skills_with(LoadSkillsOptions {
+        dirs: vec![dir],
+        filter: HashMap::from([("some-other-skill".to_string(), true)]),
+        ..Default::default()
+    });
+    assert!(narrowed.skills.is_empty());
+
+    println!("ok: unfiltered={} filtered={}", all.skills.len(), narrowed.skills.len());
+    Ok(())
+}
 ```
 
-### 3. A larger sample cap
+### 3. Directories and data merged, with a sample cap
 
-```rust
-use toolnexus::skills::{LoadSkillsOptions, load_skills_with};
-let src = load_skills_with(LoadSkillsOptions { dirs: vec!["skills".into()], sample_limit: 25, ..Default::default() });
+`dirs` and `skills` combine into one catalog; `sample_limit` bounds how many sibling files the
+loader tool reports per skill (`0` ⇒ default 10, `-1` ⇒ omit the file list entirely).
+
+```rust test
+use std::path::Path;
+use serde_json::json;
+use toolnexus::ToolContext;
+use toolnexus::skills::{LoadSkillsOptions, SkillDef, load_skills_with};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = Path::new(&std::env::var("TOOLNEXUS_REPO")?).join("examples/skills");
+
+    let src = load_skills_with(LoadSkillsOptions {
+        dirs: vec![dir],
+        skills: vec![SkillDef {
+            name: "from-data".into(),
+            description: "Supplied directly, not from disk".into(),
+            content: "Body.".into(),
+            ..Default::default()
+        }],
+        sample_limit: -1, // omit <skill_files> entirely
+        ..Default::default()
+    });
+    assert_eq!(src.skills.len(), 2, "fs + data");
+
+    let res = src.tool.call(json!({"name": "hello-world"}), ToolContext::default()).await;
+    assert!(!res.is_error, "{}", res.output);
+    assert!(!res.output.contains("<skill_files>"), "sample_limit -1 omits the file list");
+
+    println!("ok: {} skills, no file sampling", src.skills.len());
+    Ok(())
+}
 ```
+
+## Options (`LoadSkillsOptions`)
+
+| Field | Type | What it does |
+|---|---|---|
+| `dirs` | `Vec<PathBuf>` | Skill roots to glob for `**/SKILL.md`. |
+| `skills` | `Vec<SkillDef>` | Skills supplied directly as data — no filesystem involved. |
+| `filter` | `HashMap<String, bool>` | Per-agent allowlist. Empty ⇒ all; ≥1 `true` ⇒ allowlist; only-`false` ⇒ drop-list. |
+| `sample_limit` | `i64` | `0` ⇒ default 10 sibling files sampled, `n>0` ⇒ that cap, `-1` ⇒ omit `<skill_files>`. |
+
+A lazy skill provider is a toolkit option, not a field here: `ToolkitOptions.skill_provider`.
 
 ## See also
 

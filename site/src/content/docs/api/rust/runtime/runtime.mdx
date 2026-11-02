@@ -31,42 +31,176 @@ pub async fn resume(&self, answer: Answer) -> Result<TaskResult, String>
 `Runtime::new` builds the substrate `Agent::run` rides on: a handle table rooted at `root()`, the
 three backpressure gates (bounded inbox, per-parent concurrency with FIFO slot transfer, a global
 turn gate around ONLY the provider call), hierarchical budgets, and one runtime-wide
-`ConversationStore` (conversation id = handle id). `Options` takes the model as `http_client` +
-`llm` (a real provider) or `in_process` (a host function) — never both. `wake` runs the turn as a
-tokio task; call it inside a runtime.
+`ConversationStore` (conversation id = handle id). The six verbs are the **entire** host surface —
+everything else (`Agent::run`, `as_tool`, the `task` tool) compiles down to these. `Options` takes
+the model as `http_client` + `llm` (a real provider) or `in_process` (a host function). `wake`
+runs the turn as a tokio task; call it inside a runtime.
 
 ## When to use it
 
-When you need more than one handle alive: fan work out to several children, keep a long-lived
-agent between calls, post unsolicited events into its inbox, or drive interrupt/close yourself.
-For one agent to completion, `agents::new(..).run(opts, prompt)` already does spawn + wake + wait +
-close.
+Reach for `Runtime::new` directly — over the `Agent::run` one-shot — when you need more than one
+handle alive at a time: fan work out to several children concurrently, keep a long-lived agent
+between calls, post unsolicited events into a running agent's inbox, or drive
+interrupt/close yourself instead of letting `run` do it implicitly.
 
-## Example
+## Why this and not the alternative
 
-```rust
+<Aside type="tip" title="Just running one agent to completion? Agent::run already does this">
+`agents::new(..).run(opts, prompt)` builds a `Runtime` from the agent's `registry()`, spawns it at
+`root()`, wakes it, waits, and closes — exactly `Runtime::new` + `spawn` + `wake` + `wait` +
+`close` under the hood. Reach for `Runtime::new` when that one-shot lifecycle doesn't fit.
+</Aside>
+
+## Examples
+
+All three run against an in-process model (`Options.in_process`) — the runtime's documented
+hermetic seam, zero network, zero real API key.
+
+### 1. The smallest useful call — spawn, wake, wait
+
+```rust test
+use std::collections::HashMap;
 use std::sync::Arc;
-use toolnexus::agents::{Def, InboxItem, Options, Runtime};
-use toolnexus::client::InProcessResponse;
+use toolnexus::agents::{Def, Options, Runtime};
+use toolnexus::client::{BoxFuture, InProcessRequest, InProcessResponse};
 
-let mut registry = std::collections::HashMap::new();
-registry.insert("peer".to_string(), Def { name: "peer".into(), does: "team member".into(), ..Default::default() });
-let rt = Runtime::new(Options {
-    in_process: Some(Arc::new(|_req| Box::pin(async {
-        Ok(InProcessResponse { content: "ok".into(), ..Default::default() })
-    }))),
-    registry,
-    ..Default::default()
-});
-let h = rt.spawn(&rt.root(), "peer", None)?;
-rt.post(&h, InboxItem::new("external", "external", "webhook payload")); // drained at the next wake
-rt.wake(&h, "process your inbox");
-let r = rt.wait(&h, None).await;          // r.status == "done"
-rt.close(&rt.root(), None).await;          // stop-all, leaf-first
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let model = Arc::new(|_req: InProcessRequest| -> BoxFuture<Result<InProcessResponse, String>> {
+        Box::pin(async { Ok(InProcessResponse { content: "done work".into(), ..Default::default() }) })
+    });
+    let registry = HashMap::from([(
+        "peer".to_string(),
+        Def { name: "peer".into(), does: "a worker".into(), model: "m-peer".into(), ..Default::default() },
+    )]);
+    let rt = Runtime::new(Options { in_process: Some(model), registry, ..Default::default() });
+
+    let h = rt.spawn(&rt.root(), "peer", None)?;
+    rt.wake(&h, "go");
+    let r = rt.wait(&h, None).await;
+    assert_eq!(r.status, "done", "{r:?}");
+    assert_eq!(r.text, "done work");
+    rt.close(&rt.root(), None).await;
+
+    println!("ok: {}", r.text);
+    Ok(())
+}
 ```
 
-Runnable: `cargo run --example agents`.
+### 2. The realistic case — fan two children out concurrently
+
+Ids are deterministic and parent-scoped (`root/worker.1`, `root/worker.2`) — never random.
+
+```rust test
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Duration;
+use toolnexus::agents::{Def, Options, Runtime};
+use toolnexus::client::{BoxFuture, InProcessRequest, InProcessResponse};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let model = Arc::new(|_req: InProcessRequest| -> BoxFuture<Result<InProcessResponse, String>> {
+        Box::pin(async {
+            tokio::time::sleep(Duration::from_millis(2)).await; // makes concurrency observable
+            Ok(InProcessResponse { content: "ok".into(), ..Default::default() })
+        })
+    });
+    let registry = HashMap::from([(
+        "worker".to_string(),
+        Def { name: "worker".into(), does: "does a slice of the job".into(), model: "m-worker".into(), ..Default::default() },
+    )]);
+    let rt = Runtime::new(Options { in_process: Some(model), registry, ..Default::default() });
+
+    let h1 = rt.spawn(&rt.root(), "worker", None)?;
+    let h2 = rt.spawn(&rt.root(), "worker", None)?;
+    assert_ne!(h1.id, h2.id, "expected distinct deterministic ids");
+
+    rt.wake(&h1, "task A");
+    rt.wake(&h2, "task B");
+    let (r1, r2) = tokio::join!(rt.wait(&h1, None), rt.wait(&h2, None));
+    assert_eq!((r1.status.as_str(), r2.status.as_str()), ("done", "done"));
+
+    assert_eq!(rt.list().len(), 2, "expected 2 handles listed");
+    rt.close(&rt.root(), None).await;
+
+    println!("ok: {} {}", h1.id, h2.id);
+    Ok(())
+}
+```
+
+### 3. The full surface — post to the inbox, interrupt mid-flight, trace, close
+
+```rust test
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Duration;
+use toolnexus::agents::{Def, InboxItem, Options, Runtime, State};
+use toolnexus::client::{BoxFuture, InProcessRequest, InProcessResponse};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // A model that never answers: the turn only ends when Interrupt aborts it —
+    // proving Interrupt aborts the TURN, not the agent.
+    let model = Arc::new(|_req: InProcessRequest| -> BoxFuture<Result<InProcessResponse, String>> {
+        Box::pin(async {
+            std::future::pending::<()>().await;
+            Ok(InProcessResponse::default())
+        })
+    });
+    let registry = HashMap::from([(
+        "slow".to_string(),
+        Def { name: "slow".into(), does: "takes a while".into(), model: "m-slow".into(), ..Default::default() },
+    )]);
+    let rt = Runtime::new(Options { in_process: Some(model), registry, ..Default::default() });
+
+    let h = rt.spawn(&rt.root(), "slow", None)?;
+
+    // An unsolicited post lands in the inbox — no state transition on its own.
+    let pr = rt.post(&h, InboxItem::new("external", "peer", "heads up"));
+    assert!(pr.ok, "post should succeed: {}", pr.err);
+
+    rt.wake(&h, "start the slow task");
+    for _ in 0..200 {
+        if rt.state_of(&h) == State::Running { break; }
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+
+    rt.interrupt(&h); // aborts the TURN — the agent returns to idle, inbox intact
+    let r = rt.wait(&h, None).await;
+    assert_eq!(r.status, "interrupted", "{r:?}");
+    assert_eq!(rt.state_of(&h), State::Idle);
+    assert_eq!(rt.inbox_len(&h), 1, "the posted item should survive the aborted turn");
+
+    rt.close(&rt.root(), None).await;
+    assert_eq!(rt.state_of(&h), State::Closed);
+    let trace = rt.trace();
+    assert!(trace.iter().any(|l| l.contains("interrupt")), "{trace:?}");
+
+    println!("ok: interrupted then closed, {} trace lines recorded", trace.len());
+    Ok(())
+}
+```
+
+## Options fields
+
+| Field | Type | Default |
+|---|---|---|
+| `in_process` | `Option<GenerateFn>` | `None` — a host function standing in for the provider; makes fixtures hermetic |
+| `http_client` / `llm` | `Option<reqwest::Client>` / `Option<LlmOptions>` | `None` — a real provider (`base_url`, `style`, `api_key`, `model`) |
+| `registry` | `HashMap<String, Def>` | required — prefer `Agent::registry()` over hand-building it |
+| `inbox_cap` | `usize` | 8 |
+| `max_concurrent_turns` | `usize` | 8 — the global turn gate, wraps only the provider call |
+| `shutdown` | `Duration` | 200ms — how long a graceful `close` waits before escalating to interrupt |
+| `store` | `Option<Arc<dyn ConversationStore>>` | `None` ⇒ in-memory |
+| `clock` | `Option<Arc<dyn Clock>>` | `None` ⇒ the real clock; inject a virtual one for deterministic fixtures |
+| `hooks` / `on_metric` / `wait_for` | — | the §8/§10 seams, applied to every agent unless a `Def` overrides them |
+
+`run_turn(&h, prompt)` is `wake` + `wait` in one call; `resume(answer)` continues a durable
+suspension (see [`Handle`](/api/rust/runtime/handle/)).
 
 ## See also
 
-- [`Agent`](/api/rust/runtime/agent/) · [`Handle`](/api/rust/runtime/handle/) · [Budgets](/api/rust/runtime/budgets/) · [`resume`](/api/rust/suspension/resume/)
+- [`agents::new`](/api/rust/runtime/agent/) — Define a sub-agent with its own toolkit, prompt and budget, callable as a tool by its parent.
+- [`Handle`](/api/rust/runtime/handle/) — The state machine for one spawned agent: pending, running, suspended, done.
+- [`Budget`](/api/rust/runtime/budgets/) — Cap tool calls and wall-clock per agent and per team, enforced while the run is in flight.

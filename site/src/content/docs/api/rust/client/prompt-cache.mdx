@@ -1,0 +1,330 @@
+---
+title: "ClientOptions.prompt_cache"
+description: "Mark the stable prompt prefix for the provider (Anthropic cache breakpoints, OpenAI prompt_cache_key) and read cacheRead/cacheWrite tokens from usage. — Rust."
+sidebar:
+  label: "ClientOptions.prompt_cache"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a>
+</p>
+
+```rust
+pub struct PromptCacheOptions {
+    pub key: String,    // openai prompt_cache_key (one per session); ignored by anthropic
+    pub long_ttl: bool, // anthropic ttl "1h" instead of the default short lifetime
+}
+
+// ClientOptions.prompt_cache: Option<PromptCacheOptions> — None ⇒ off, request bytes unchanged.
+
+pub struct Usage {
+    pub prompt_tokens: i64, pub completion_tokens: i64, pub total_tokens: i64,
+    pub cache_read_tokens: i64,  // served from the provider's cache
+    pub cache_write_tokens: i64, // written to it (anthropic only)
+}
+```
+
+`prompt_cache` marks the stable request prefix for the provider's cache:
+
+- **Anthropic** — `cache_control: {type: "ephemeral"}` (plus `ttl: "1h"` with `long_ttl`) on the
+  last tool, on the system prompt (a string becomes one text block) and on the last content block
+  of the latest message.
+- **OpenAI** — `prompt_cache_key = key`; the prefix itself is cached automatically.
+- **Gemini** — nothing yet.
+
+It is applied before `request_params` and `body_transform`, and the saved transcript is never
+mutated. Usage reports `cache_read_tokens` / `cache_write_tokens` either way.
+
+<Aside type="caution" title="Context size under Anthropic">
+Anthropic's `input_tokens` excludes cached tokens, so under `Style::Anthropic` the real context
+size is `prompt_tokens + cache_read_tokens + cache_write_tokens`. Under OpenAI `prompt_tokens`
+already includes the cached part — do not add it twice.
+</Aside>
+
+## When to use it
+
+Any multi-turn session with a large stable prefix — a long system prompt, a skills catalog, many
+tool schemas — where you pay for the same input tokens on every request. Turn it on once per client
+and give each session its own `key` under OpenAI.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Pair it with tool_tiers when tools change mid-session">
+The cache only hits while the prefix is byte-identical. Registering a tool mid-session changes the
+tools array and so breaks the cache. If your host adds tools as it goes, also set
+[`tool_tiers`](/api/rust/client/tool-tiers/): loaded tools arrive as tool results and the tools
+array never changes.
+</Aside>
+
+## Examples
+
+Each example captures the request body on a loopback stub — no network, fake key only.
+
+### 1. The smallest useful call — Anthropic breakpoints and cache usage
+
+```rust test
+use std::sync::{Arc, Mutex};
+
+use serde_json::Value;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
+use toolnexus::client::{ClientOptions, PromptCacheOptions, Style, create_client};
+use toolnexus::{ToolkitOptions, create_toolkit};
+
+/// A loopback HTTP stub: `reply(n, raw_request)` answers the n-th request (1-based)
+/// with `(status, extra header lines, body)`.
+async fn stub<F>(reply: F) -> String
+where
+    F: Fn(usize, &str) -> (u16, String, String) + Send + Sync + 'static,
+{
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let reply = Arc::new(reply);
+    tokio::spawn(async move {
+        let mut n = 0;
+        while let Ok((mut sock, _)) = listener.accept().await {
+            n += 1;
+            let (reply, i) = (reply.clone(), n);
+            tokio::spawn(async move {
+                let (mut buf, mut chunk) = (Vec::new(), [0u8; 4096]);
+                loop {
+                    let k = sock.read(&mut chunk).await.unwrap_or(0);
+                    if k == 0 {
+                        break;
+                    }
+                    buf.extend_from_slice(&chunk[..k]);
+                    let s = String::from_utf8_lossy(&buf).to_string();
+                    if let Some(h) = s.find("\r\n\r\n") {
+                        let len = s[..h]
+                            .lines()
+                            .find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse().unwrap_or(0)))
+                            .unwrap_or(0);
+                        if buf.len() >= h + 4 + len {
+                            break;
+                        }
+                    }
+                }
+                let (status, extra, body) = reply(i, &String::from_utf8_lossy(&buf));
+                let head = format!(
+                    "HTTP/1.1 {status} STUB\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n{extra}\r\n",
+                    body.len()
+                );
+                let _ = sock.write_all(format!("{head}{body}").as_bytes()).await;
+            });
+        }
+    });
+    url
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let body = Arc::new(Mutex::new(Value::Null));
+    let seen = body.clone();
+    let url = stub(move |_, raw| {
+        *seen.lock().unwrap() = serde_json::from_str(raw.split("\r\n\r\n").nth(1).unwrap_or("")).unwrap_or_default();
+        (200, String::new(), r#"{"content":[{"type":"text","text":"hi"}],"stop_reason":"end_turn",
+            "usage":{"input_tokens":12,"output_tokens":3,"cache_read_input_tokens":900,"cache_creation_input_tokens":40}}"#.into())
+    })
+    .await;
+
+    let tk = create_toolkit(ToolkitOptions::default()).await?;
+    let client = create_client(ClientOptions {
+        base_url: url, style: Style::Anthropic, model: "claude".into(), api_key: "YOUR_KEY_HERE".into(),
+        system_prompt: "You are a careful assistant.".into(),
+        prompt_cache: Some(PromptCacheOptions::default()),
+        ..Default::default()
+    });
+    let res = client.run("hello", &tk).await?;
+
+    let body = body.lock().unwrap().clone();
+    let sys = body["system"].as_array().expect("system becomes a block list");
+    assert!(sys.len() == 1 && !sys[0]["cache_control"].is_null(), "system not marked: {}", body["system"]);
+    let u = &res.usage;
+    assert!(u.cache_read_tokens == 900 && u.cache_write_tokens == 40, "{u:?}");
+    println!("ok: context = {} tokens", u.prompt_tokens + u.cache_read_tokens + u.cache_write_tokens);
+    Ok(())
+}
+```
+
+### 2. The realistic case — OpenAI `prompt_cache_key` per session
+
+```rust test
+use std::sync::{Arc, Mutex};
+
+use serde_json::Value;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
+use toolnexus::client::{ClientOptions, PromptCacheOptions, Style, create_client};
+use toolnexus::{ToolkitOptions, create_toolkit};
+
+/// A loopback HTTP stub: `reply(n, raw_request)` answers the n-th request (1-based)
+/// with `(status, extra header lines, body)`.
+async fn stub<F>(reply: F) -> String
+where
+    F: Fn(usize, &str) -> (u16, String, String) + Send + Sync + 'static,
+{
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let reply = Arc::new(reply);
+    tokio::spawn(async move {
+        let mut n = 0;
+        while let Ok((mut sock, _)) = listener.accept().await {
+            n += 1;
+            let (reply, i) = (reply.clone(), n);
+            tokio::spawn(async move {
+                let (mut buf, mut chunk) = (Vec::new(), [0u8; 4096]);
+                loop {
+                    let k = sock.read(&mut chunk).await.unwrap_or(0);
+                    if k == 0 {
+                        break;
+                    }
+                    buf.extend_from_slice(&chunk[..k]);
+                    let s = String::from_utf8_lossy(&buf).to_string();
+                    if let Some(h) = s.find("\r\n\r\n") {
+                        let len = s[..h]
+                            .lines()
+                            .find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse().unwrap_or(0)))
+                            .unwrap_or(0);
+                        if buf.len() >= h + 4 + len {
+                            break;
+                        }
+                    }
+                }
+                let (status, extra, body) = reply(i, &String::from_utf8_lossy(&buf));
+                let head = format!(
+                    "HTTP/1.1 {status} STUB\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n{extra}\r\n",
+                    body.len()
+                );
+                let _ = sock.write_all(format!("{head}{body}").as_bytes()).await;
+            });
+        }
+    });
+    url
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let body = Arc::new(Mutex::new(Value::Null));
+    let seen = body.clone();
+    let url = stub(move |_, raw| {
+        *seen.lock().unwrap() = serde_json::from_str(raw.split("\r\n\r\n").nth(1).unwrap_or("")).unwrap_or_default();
+        (200, String::new(), r#"{"choices":[{"message":{"role":"assistant","content":"hi"}}],
+            "usage":{"prompt_tokens":1000,"completion_tokens":2,"total_tokens":1002,"prompt_tokens_details":{"cached_tokens":896}}}"#.into())
+    })
+    .await;
+
+    let tk = create_toolkit(ToolkitOptions::default()).await?;
+    let client = create_client(ClientOptions {
+        base_url: url, style: Style::OpenAI, model: "m".into(), api_key: "YOUR_KEY_HERE".into(),
+        prompt_cache: Some(PromptCacheOptions { key: "session-42".into(), ..Default::default() }),
+        ..Default::default()
+    });
+    let res = client.run("hello", &tk).await?;
+    assert_eq!(body.lock().unwrap()["prompt_cache_key"], "session-42");
+    // Under OpenAI prompt_tokens already includes the cached part.
+    assert_eq!(res.usage.cache_read_tokens, 896);
+    println!("ok: {} of {} prompt tokens cached", res.usage.cache_read_tokens, res.usage.prompt_tokens);
+    Ok(())
+}
+```
+
+### 3. The full surface — 1-hour lifetime on a turn with tools
+
+```rust test
+use std::sync::{Arc, Mutex};
+
+use serde_json::{Value, json};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
+use toolnexus::client::{ClientOptions, PromptCacheOptions, Style, create_client};
+use toolnexus::{ToolkitOptions, create_toolkit, define_tool};
+
+/// A loopback HTTP stub: `reply(n, raw_request)` answers the n-th request (1-based)
+/// with `(status, extra header lines, body)`.
+async fn stub<F>(reply: F) -> String
+where
+    F: Fn(usize, &str) -> (u16, String, String) + Send + Sync + 'static,
+{
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let reply = Arc::new(reply);
+    tokio::spawn(async move {
+        let mut n = 0;
+        while let Ok((mut sock, _)) = listener.accept().await {
+            n += 1;
+            let (reply, i) = (reply.clone(), n);
+            tokio::spawn(async move {
+                let (mut buf, mut chunk) = (Vec::new(), [0u8; 4096]);
+                loop {
+                    let k = sock.read(&mut chunk).await.unwrap_or(0);
+                    if k == 0 {
+                        break;
+                    }
+                    buf.extend_from_slice(&chunk[..k]);
+                    let s = String::from_utf8_lossy(&buf).to_string();
+                    if let Some(h) = s.find("\r\n\r\n") {
+                        let len = s[..h]
+                            .lines()
+                            .find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse().unwrap_or(0)))
+                            .unwrap_or(0);
+                        if buf.len() >= h + 4 + len {
+                            break;
+                        }
+                    }
+                }
+                let (status, extra, body) = reply(i, &String::from_utf8_lossy(&buf));
+                let head = format!(
+                    "HTTP/1.1 {status} STUB\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n{extra}\r\n",
+                    body.len()
+                );
+                let _ = sock.write_all(format!("{head}{body}").as_bytes()).await;
+            });
+        }
+    });
+    url
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let echo = define_tool(
+        "echo",
+        "echo text",
+        Some(json!({"type": "object", "properties": {"text": {"type": "string"}}})),
+        |a: Value, _| async move { Ok::<_, String>(a["text"].as_str().unwrap_or("").to_owned()) },
+    );
+    let tk = create_toolkit(ToolkitOptions { extra_tools: vec![echo], ..Default::default() }).await?;
+
+    let body = Arc::new(Mutex::new(Value::Null));
+    let seen = body.clone();
+    let url = stub(move |_, raw| {
+        *seen.lock().unwrap() = serde_json::from_str(raw.split("\r\n\r\n").nth(1).unwrap_or("")).unwrap_or_default();
+        (200, String::new(), r#"{"content":[{"type":"text","text":"done"}],"stop_reason":"end_turn","usage":{"input_tokens":5,"output_tokens":1}}"#.into())
+    })
+    .await;
+
+    let client = create_client(ClientOptions {
+        base_url: url, style: Style::Anthropic, model: "claude".into(), api_key: "YOUR_KEY_HERE".into(),
+        prompt_cache: Some(PromptCacheOptions { long_ttl: true, ..Default::default() }),
+        ..Default::default()
+    });
+    client.run("hello", &tk).await?;
+
+    let body = body.lock().unwrap().clone();
+    let tools = body["tools"].as_array().expect("tools sent");
+    assert_eq!(tools.last().unwrap()["cache_control"]["ttl"], "1h", "last tool not marked");
+    let msgs = body["messages"].as_array().unwrap();
+    let content = msgs.last().unwrap()["content"].as_array().expect("content blocks");
+    assert_eq!(content.last().unwrap()["cache_control"]["ttl"], "1h", "latest message not marked");
+    println!("ok: last tool and latest message marked, ttl 1h");
+    Ok(())
+}
+```
+
+## See also
+
+- [`tool_tiers`](/api/rust/client/tool-tiers/) — keep the tools array, and so the cached prefix, stable.
+- [`on_metric`](/api/rust/client/metrics/) — per-call token counts, including cache reads and writes.
+- [`create_client`](/api/rust/client/create/) — The unified client: system prompt, skills injection, parallel and chained tool calls, retries, memory.
+- [`Client.run`](/api/rust/client/run/) — Send a prompt, let the loop call tools until the model stops, get a RunResult.

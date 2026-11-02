@@ -33,31 +33,120 @@ Parse once and keep the typed `McpConfig` (`McpConfigInput::Parsed`) when you bu
 
 ## Examples
 
-### 1. From JSON
+### 1. Parse the shared fixture from disk
 
-```rust
-use serde_json::json;
-use toolnexus::mcp::parse_mcp_config;
-let cfg = parse_mcp_config(&json!({"mcpServers": {"fs": {"command": ["npx", "-y", "server-fs"]}}}))?;
-assert!(!cfg["fs"].is_remote());
-```
+This is `examples/mcp.json`, the fixture every port is tested against.
 
-### 2. A remote server with env headers
-
-```rust
-use toolnexus::mcp::parse_mcp_config_str;
-let cfg = parse_mcp_config_str(r#"{"servers":{"api":{"url":"https://example.com/mcp","headers":{"Authorization":"Bearer ${API_TOKEN}"}}}}"#)?;
-assert!(cfg["api"].is_remote());
-```
-
-### 3. Feed a toolkit
-
-```rust
+```rust test
+use std::path::Path;
 use toolnexus::mcp::parse_mcp_config_file;
-use toolnexus::{McpConfigInput, ToolkitOptions, create_toolkit};
-let cfg = parse_mcp_config_file("mcp.json")?;
-let tk = create_toolkit(ToolkitOptions { mcp_config: Some(McpConfigInput::Parsed(cfg)), ..Default::default() }).await?;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // TOOLNEXUS_REPO is set by the docs test runner; in your own code just use a path.
+    let repo = std::env::var("TOOLNEXUS_REPO")?;
+    let cfg = parse_mcp_config_file(Path::new(&repo).join("examples/mcp.json"))?;
+
+    // The `mcpServers` wrapper is unwrapped — you get the servers directly, in name order.
+    let names: Vec<&str> = cfg.keys().map(String::as_str).collect();
+    assert_eq!(names, ["everything", "example-remote"]);
+
+    // Disabled servers are still returned — parsing does not filter.
+    assert!(!cfg["example-remote"].is_enabled());
+    assert!(cfg["example-remote"].is_remote());
+    println!("ok: {names:?}");
+    Ok(())
+}
 ```
+
+<Aside type="caution">
+Parsing does **not** drop disabled servers. `enabled: false` is preserved in the returned config
+(`ServerConfig::is_enabled()` reports it) and is honoured later, by `load_mcp`. If you are counting
+servers, count the enabled ones yourself.
+</Aside>
+
+### 2. Wrapper spellings and raw text
+
+`mcpServers`, `servers` and `mcp` all mean the same thing; a command may be a string with `args`
+or an array.
+
+```rust test
+use toolnexus::mcp::parse_mcp_config_str;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    for raw in [
+        r#"{"mcpServers":{"a":{"type":"local","command":["echo","hi"]}}}"#,
+        r#"{"servers":{"a":{"type":"local","command":["echo","hi"]}}}"#,
+        r#"{"mcp":{"a":{"type":"local","command":"echo","args":["hi"]}}}"#,
+    ] {
+        let cfg = parse_mcp_config_str(raw)?;
+        assert_eq!(cfg.len(), 1);
+        assert_eq!(cfg["a"].command, ["echo", "hi"]);
+    }
+    println!("ok: 3 spellings -> a");
+    Ok(())
+}
+```
+
+### 3. Validate before loading, and surface the error
+
+The pattern this function exists for — check the config, then decide whether to connect.
+
+```rust test
+use toolnexus::mcp::{McpError, parse_mcp_config_str};
+
+fn validate(raw: &str) -> Result<(Vec<String>, Vec<String>), McpError> {
+    let cfg = parse_mcp_config_str(raw)?;
+    let (mut enabled, mut problems) = (Vec::new(), Vec::new());
+    for (name, sc) in &cfg {
+        if !sc.is_enabled() {
+            continue;
+        }
+        enabled.push(name.clone());
+        if sc.is_remote() {
+            if sc.url.as_deref().unwrap_or("").is_empty() {
+                problems.push(format!("{name}: remote server without a url"));
+            }
+        } else if sc.command.is_empty() {
+            problems.push(format!("{name}: local server without a command"));
+        }
+    }
+    Ok((enabled, problems))
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let (enabled, problems) = validate(r#"{"mcpServers":{
+        "ok_local":{"type":"local","command":["npx","server"]},
+        "ok_remote":{"type":"remote","url":"https://example.com/mcp"},
+        "off":{"type":"local","command":["x"],"enabled":false}}}"#)?;
+    assert_eq!(enabled, ["ok_local", "ok_remote"]);
+    assert!(problems.is_empty());
+
+    let (_, bad) = validate(r#"{"mcpServers":{"broken_remote":{"type":"remote"}}}"#)?;
+    assert_eq!(bad.len(), 1);
+
+    // An empty local command fails the parse itself, naming the server (SPEC §2).
+    let err = parse_mcp_config_str(r#"{"mcpServers":{"broken_local":{"type":"local","command":[]}}}"#)
+        .unwrap_err();
+    assert!(err.to_string().contains("broken_local"), "{err}");
+
+    // Malformed JSON is an error, not a panic and not a partial config.
+    assert!(parse_mcp_config_str("{not json").is_err());
+
+    println!("ok: {enabled:?} | problems: {}", bad.len());
+    Ok(())
+}
+```
+
+## Accepted input
+
+| Function | Input |
+|---|---|
+| `parse_mcp_config_file(path)` | Read from disk, then parsed. `McpError::Read` if missing. |
+| `parse_mcp_config_str(text)` | Raw JSON text. `McpError::Parse` if malformed. |
+| `parse_mcp_config(&value)` | An already-parsed `serde_json::Value`. |
+
+Wrapped under `mcpServers`, `servers` or `mcp` — all three are unwrapped. A bare map is accepted
+too, with the reserved sibling keys (`builtins`, `agents`, `a2a`, `mcpServer`) removed.
 
 ## See also
 

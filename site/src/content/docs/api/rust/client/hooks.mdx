@@ -36,48 +36,281 @@ Hooks are async and run on the loop's path; keep them fast, and return `Ok(None)
 
 ## Examples
 
-### 1. Log every tool call
+Each example is a complete program. The model is an in-process stand-in ([`create_in_process_client`](/api/rust/client/create/)): the loop is exactly the one `create_client` runs, with a host function in place of the HTTP call, so no network and no API key are involved.
 
-```rust
+### 1. The smallest useful call — deny a tool call with `before_tool`
+
+Returning a `ToolOverride` with `result` set short-circuits the tool: the real function never runs.
+
+```rust test
 use std::sync::Arc;
-use toolnexus::client::{ClientOptions, Hooks, create_client};
-let client = create_client(ClientOptions {
-    hooks: Hooks {
-        before_tool: Some(Arc::new(|ev| Box::pin(async move { println!("{} {}", ev.name, ev.args); Ok(None) }))),
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use serde_json::json;
+use toolnexus::client::{GenerateFn, Hooks, InProcessOptions, InProcessResponse, InProcessToolCall, ToolOverride, create_in_process_client};
+use toolnexus::{BuiltinsConfig, ToolResult, ToolkitOptions, create_toolkit, define_tool};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let ran = Arc::new(AtomicBool::new(false));
+    let r = ran.clone();
+    let delete_all = define_tool("delete_all", "delete everything", None, move |_, _| {
+        r.store(true, Ordering::SeqCst); // must never fire: the hook denies it first
+        async { Ok::<_, String>("deleted".into()) }
+    });
+    let tk = create_toolkit(ToolkitOptions {
+        extra_tools: vec![delete_all], builtins: Some(BuiltinsConfig::off()), ..Default::default()
+    }).await?;
+
+    let model: GenerateFn = Arc::new(|req| Box::pin(async move {
+        Ok(if req.messages.iter().any(|m| m["role"] == "tool") {
+            InProcessResponse { content: "done".into(), ..Default::default() }
+        } else {
+            InProcessResponse {
+                tool_calls: vec![InProcessToolCall { id: "c1".into(), name: "delete_all".into(), arguments: json!({}) }],
+                ..Default::default()
+            }
+        })
+    }));
+    let client = create_in_process_client(InProcessOptions {
+        model: "m".into(),
+        generate: Some(model),
+        hooks: Hooks {
+            before_tool: Some(Arc::new(|ev| Box::pin(async move {
+                if ev.name == "delete_all" {
+                    return Ok(Some(ToolOverride { result: Some(ToolResult::error("denied by policy")), ..Default::default() }));
+                }
+                Ok(None)
+            }))),
+            ..Default::default()
+        },
         ..Default::default()
-    },
-    ..Default::default()
-});
+    });
+
+    let res = client.run("delete everything", &tk).await?;
+    assert!(!ran.load(Ordering::SeqCst), "before_tool should have short-circuited the real tool");
+    assert_eq!((res.tool_calls[0].output.as_str(), res.tool_calls[0].is_error), ("denied by policy", true));
+    println!("ok: {}", res.tool_calls[0].output);
+    Ok(())
+}
 ```
 
-### 2. Deny anything that is not read-only
+### 2. The realistic case — audit with `after_llm`, redact with `after_tool`
 
-```rust
+`after_llm` observes each raw model response (useful for cost/tracing); `after_tool` can rewrite a tool's output
+before it goes back to the model — here, redacting a secret leaking out of a tool.
+
+```rust test
 use std::sync::Arc;
-use toolnexus::ToolResult;
-use toolnexus::client::{Hooks, ToolOverride};
-let hooks = Hooks {
-    before_tool: Some(Arc::new(|ev| Box::pin(async move {
-        if ev.hints.map(|h| h.read_only).unwrap_or(false) { return Ok(None); }
-        Ok(Some(ToolOverride { result: Some(ToolResult::error(format!("{} needs approval", ev.name))), ..Default::default() }))
-    }))),
-    ..Default::default()
-};
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+use serde_json::json;
+use toolnexus::client::{GenerateFn, Hooks, InProcessOptions, InProcessResponse, InProcessToolCall, ToolOverride, create_in_process_client};
+use toolnexus::{BuiltinsConfig, ToolkitOptions, create_toolkit, define_tool};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // A tool that accidentally over-shares.
+    let lookup = define_tool("lookup_config", "lookup a config value", None, |_, _| async {
+        Ok::<_, String>("db_password=hunter2".into())
+    });
+    let tk = create_toolkit(ToolkitOptions {
+        extra_tools: vec![lookup], builtins: Some(BuiltinsConfig::off()), ..Default::default()
+    }).await?;
+
+    let model: GenerateFn = Arc::new(|req| Box::pin(async move {
+        Ok(if req.messages.iter().any(|m| m["role"] == "tool") {
+            InProcessResponse { content: "done".into(), ..Default::default() }
+        } else {
+            InProcessResponse {
+                tool_calls: vec![InProcessToolCall { id: "c1".into(), name: "lookup_config".into(), arguments: json!({}) }],
+                ..Default::default()
+            }
+        })
+    }));
+    let llm_calls = Arc::new(AtomicUsize::new(0));
+    let counter = llm_calls.clone();
+    let client = create_in_process_client(InProcessOptions {
+        model: "m".into(),
+        generate: Some(model),
+        hooks: Hooks {
+            // Audit hook: just counts, changes nothing.
+            after_llm: Some(Arc::new(move |_ev| {
+                counter.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async { Ok(()) })
+            })),
+            after_tool: Some(Arc::new(|ev| Box::pin(async move {
+                if !ev.result.output.contains("password=") {
+                    return Ok(None);
+                }
+                let mut redacted = ev.result.clone();
+                redacted.output = "db_password=***REDACTED***".into();
+                Ok(Some(ToolOverride { result: Some(redacted), ..Default::default() }))
+            }))),
+            ..Default::default()
+        },
+        ..Default::default()
+    });
+
+    let res = client.run("what's the db password?", &tk).await?;
+    assert_eq!(llm_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(res.tool_calls[0].output, "db_password=***REDACTED***");
+    println!("ok: redacted -> {}", res.tool_calls[0].output);
+    Ok(())
+}
 ```
 
-### 3. Redact tool output before the model sees it
+### 3. The full surface — all four hooks in one run
 
-```rust
+`before_llm` sees the outgoing messages (an `LlmOverride` could replace them, the tools or the model);
+`before_tool` rewrites the call's arguments; the loop still runs the same request/response cycle underneath.
+
+```rust test
 use std::sync::Arc;
-use toolnexus::client::{Hooks, ToolOverride};
-let hooks = Hooks {
-    after_tool: Some(Arc::new(|ev| Box::pin(async move {
-        let mut r = ev.result.clone();
-        r.output = r.output.replace("SECRET", "[redacted]");
-        Ok(Some(ToolOverride { result: Some(r), ..Default::default() }))
-    }))),
-    ..Default::default()
-};
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+use serde_json::json;
+use toolnexus::client::{GenerateFn, Hooks, InProcessOptions, InProcessResponse, InProcessToolCall, ToolOverride, create_in_process_client};
+use toolnexus::{BuiltinsConfig, ToolkitOptions, create_toolkit, define_tool};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let echo = define_tool("echo", "echo a value", None, |a, _| async move {
+        Ok::<_, String>(a["v"].as_str().unwrap_or("").to_string())
+    });
+    let tk = create_toolkit(ToolkitOptions {
+        extra_tools: vec![echo], builtins: Some(BuiltinsConfig::off()), ..Default::default()
+    }).await?;
+
+    let model: GenerateFn = Arc::new(|req| Box::pin(async move {
+        Ok(if req.messages.iter().any(|m| m["role"] == "tool") {
+            InProcessResponse { content: "ok".into(), ..Default::default() }
+        } else {
+            InProcessResponse {
+                tool_calls: vec![InProcessToolCall { id: "c1".into(), name: "echo".into(), arguments: json!({"v": "original"}) }],
+                ..Default::default()
+            }
+        })
+    }));
+
+    // One counter per hook: [before_llm, after_llm, before_tool, after_tool].
+    let counts: Arc<[AtomicUsize; 4]> = Arc::new(Default::default());
+    let (c0, c1, c2, c3) = (counts.clone(), counts.clone(), counts.clone(), counts.clone());
+    let client = create_in_process_client(InProcessOptions {
+        model: "m".into(),
+        generate: Some(model),
+        system_prompt: "SYS".into(),
+        hooks: Hooks {
+            before_llm: Some(Arc::new(move |_ev| {
+                c0[0].fetch_add(1, Ordering::SeqCst);
+                Box::pin(async { Ok(None) }) // observe only: Some(LlmOverride) would replace messages/tools/model
+            })),
+            after_llm: Some(Arc::new(move |_ev| {
+                c1[1].fetch_add(1, Ordering::SeqCst);
+                Box::pin(async { Ok(()) })
+            })),
+            before_tool: Some(Arc::new(move |_ev| {
+                c2[2].fetch_add(1, Ordering::SeqCst);
+                // Rewrite the call's arguments before it runs.
+                Box::pin(async { Ok(Some(ToolOverride { args: Some(json!({"v": "rewritten"})), ..Default::default() })) })
+            })),
+            after_tool: Some(Arc::new(move |_ev| {
+                c3[3].fetch_add(1, Ordering::SeqCst);
+                Box::pin(async { Ok(None) }) // observe only
+            })),
+        },
+        ..Default::default()
+    });
+
+    let res = client.run("echo original", &tk).await?;
+    let got: Vec<usize> = counts.iter().map(|c| c.load(Ordering::SeqCst)).collect();
+    assert_eq!(got, [2, 2, 1, 1]);
+    assert_eq!(res.tool_calls[0].output, "rewritten");
+    println!("ok: {}", res.tool_calls[0].output);
+    Ok(())
+}
+```
+
+## Event and override types
+
+| Type | Passed to | Fields |
+|---|---|---|
+| `BeforeLlmEvent` | `before_llm` | `messages`, `tools`, `model`, `turn`. |
+| `LlmOverride` | returned from `before_llm` | `messages`, `tools`, `model` — each `Some` replaces that value. |
+| `AfterLlmEvent` | `after_llm` | `response` (decoded provider payload, carries usage), `model`, `turn`. |
+| `BeforeToolEvent` | `before_tool` | `name`, `args`, `id`, `turn`, `hints`. |
+| `AfterToolEvent` | `after_tool` | `name`, `args`, `result`, `id`, `turn`. |
+| `ToolOverride` | returned from `before_tool` / `after_tool` | In `before_tool`: `result` short-circuits (the real tool never runs), else `args` rewrites the call. In `after_tool`: `result` replaces the result. |
+
+Every hook returns a future; an `Err` fails the run with `ClientError::Hook`.
+
+## Tool hints and permission gates
+
+`BeforeToolEvent.hints` is the called tool's `Option<ToolHints>` (`read_only`, `destructive`, `open_world`) —
+`None` when unknown (treat as mutating). The builtins set them (`write`, `edit` destructive; `read`, `grep`
+read-only; …), and MCP tools map their annotations. Hints are advisory and never sent to the model.
+
+A permission gate is just `before_tool`: **allow** = `Ok(None)`; **deny** = an error `result` (the model sees it,
+the run continues); **ask** = a `pending(...)` result, which `wait_for` / `wait_for_ctx` resolves.
+
+```rust test
+use std::sync::{Arc, Mutex};
+
+use serde_json::json;
+use toolnexus::client::{GenerateFn, Hooks, InProcessOptions, InProcessResponse, InProcessToolCall, ToolOverride, create_in_process_client};
+use toolnexus::{ToolHints, ToolResult, ToolkitOptions, create_toolkit};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = std::env::temp_dir().join(format!("toolnexus-gate-{}", std::process::id()));
+    std::fs::create_dir_all(&dir)?;
+    let target = dir.join("x.txt");
+
+    // builtins: None => the builtin tools are on, including the destructive `write`.
+    let tk = create_toolkit(ToolkitOptions::default()).await?;
+
+    let path = target.to_string_lossy().to_string();
+    let model: GenerateFn = Arc::new(move |req| {
+        let path = path.clone();
+        Box::pin(async move {
+            Ok(if req.messages.iter().any(|m| m["role"] == "tool") {
+                InProcessResponse { content: "ok".into(), ..Default::default() }
+            } else {
+                InProcessResponse {
+                    tool_calls: vec![InProcessToolCall { id: "c1".into(), name: "write".into(), arguments: json!({"path": path, "content": "hi"}) }],
+                    ..Default::default()
+                }
+            })
+        })
+    });
+    let seen: Arc<Mutex<Option<ToolHints>>> = Arc::default();
+    let s = seen.clone();
+    let client = create_in_process_client(InProcessOptions {
+        model: "m".into(),
+        generate: Some(model),
+        hooks: Hooks {
+            before_tool: Some(Arc::new(move |ev| {
+                *s.lock().unwrap() = ev.hints.clone();
+                Box::pin(async move {
+                    if ev.hints.map(|h| h.read_only).unwrap_or(false) {
+                        return Ok(None); // read-only: let it run
+                    }
+                    Ok(Some(ToolOverride { result: Some(ToolResult::error("denied: read-only mode")), ..Default::default() }))
+                })
+            })),
+            ..Default::default()
+        },
+        ..Default::default()
+    });
+
+    client.run("write a file", &tk).await?;
+    let hints = seen.lock().unwrap().clone().expect("write carries hints");
+    assert!(hints.destructive, "write should be hinted destructive");
+    assert!(!target.exists(), "the gate should have stopped the write");
+    std::fs::remove_dir_all(&dir)?;
+    println!("ok: write denied, hints = {hints:?}");
+    Ok(())
+}
 ```
 
 ## See also

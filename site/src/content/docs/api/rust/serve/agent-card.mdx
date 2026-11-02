@@ -33,28 +33,111 @@ a card: peers delegate tasks to skills.
 
 ## Examples
 
-### 1. Default card
+### 1. Defaults — no config, no skills
 
-```rust
+```rust test
+use serde_json::json;
 use toolnexus::serve::build_agent_card;
-let skills: Vec<_> = tk.skill_source().map(|s| s.skills.values().cloned().collect()).unwrap_or_default();
-let card = build_agent_card(None, &skills, "http://127.0.0.1:8080/");
-println!("{}", serde_json::to_string(&card)?);
+
+fn main() {
+    let card = build_agent_card(None, &[], "http://localhost:8080/");
+    let got = serde_json::to_value(&card).unwrap();
+
+    assert_eq!(got["name"], "toolnexus-agent");
+    assert_eq!(got["version"], "0.1.0");
+    assert_eq!(got["protocolVersion"], "0.3.0");
+    assert_eq!(got["capabilities"], json!({"streaming": false, "pushNotifications": false}));
+    assert_eq!(got["skills"], json!([]), "an empty skills array, not null");
+    println!("ok: defaults — {} {}", got["name"], got["version"]);
+}
 ```
 
-### 2. Named, versioned, filtered
+### 2. Named agent, filtered to a subset of skills
 
-```rust
+```rust test
+use serde_json::json;
 use toolnexus::serve::{A2aConfig, build_agent_card};
-let cfg = A2aConfig { name: "video-desk".into(), version: "2.1.0".into(), skills: Some(vec!["transcribe".into()]), ..Default::default() };
-let card = build_agent_card(Some(&cfg), &skills, "https://desk.example/");
+use toolnexus::skills::SkillInfo;
+
+fn skill(name: &str, description: &str) -> SkillInfo {
+    SkillInfo {
+        name: name.into(),
+        description: description.into(),
+        location: String::new(),
+        content: String::new(),
+        origin: "logical".into(),
+        resources: Vec::new(),
+        base: String::new(),
+    }
+}
+
+fn main() {
+    let skills = vec![skill("search", "Search the docs"), skill("admin", "Dangerous — internal only")];
+    let cfg = A2aConfig {
+        name: "video-desk".into(),
+        description: "Transcribes and summarizes video".into(),
+        skills: Some(vec!["search".into()]), // never advertise "admin"
+        ..Default::default()
+    };
+
+    let got = serde_json::to_value(build_agent_card(Some(&cfg), &skills, "http://localhost:8080/")).unwrap();
+    assert_eq!(got["name"], "video-desk");
+    let card_skills = got["skills"].as_array().unwrap();
+    assert_eq!(card_skills.len(), 1, "exactly the filtered skill");
+    assert_eq!(card_skills[0], json!({"id": "search", "name": "search", "description": "Search the docs"}));
+    println!("ok: {} advertises {} of {} skills", got["name"], card_skills.len(), skills.len());
+}
 ```
 
-### 3. Fetch the served one
+### 3. The full surface — provider, version override, and the URL param
 
-```rust
-let body = reqwest::get(format!("{}/.well-known/agent-card.json", h.url)).await?.text().await?;
+```rust test
+use toolnexus::serve::{A2aConfig, A2aProvider, build_agent_card};
+use toolnexus::skills::SkillInfo;
+
+fn main() {
+    let skills = vec![SkillInfo {
+        name: "hello-world".into(),
+        description: "says hello".into(),
+        location: String::new(),
+        content: String::new(),
+        origin: "logical".into(),
+        resources: Vec::new(),
+        base: String::new(),
+    }];
+    let cfg = A2aConfig {
+        name: "greeter".into(),
+        version: "2.3.1".into(),
+        provider: Some(A2aProvider { organization: "acme corp".into(), url: "https://acme.example".into() }),
+        ..Default::default()
+    };
+
+    let got = serde_json::to_value(build_agent_card(Some(&cfg), &skills, "http://localhost:9090/")).unwrap();
+    assert_eq!(got["version"], "2.3.1", "the version override");
+    assert_eq!(got["url"], "http://localhost:9090/", "url is exactly the caller-supplied endpoint");
+    assert_eq!(got["provider"]["organization"], "acme corp");
+    assert_eq!(got["provider"]["url"], "https://acme.example");
+
+    // Omitting provider omits it from the JSON — not a null field.
+    let bare_cfg = A2aConfig { name: "bare".into(), ..Default::default() };
+    let bare = serde_json::to_value(build_agent_card(Some(&bare_cfg), &[], "http://x/")).unwrap();
+    assert!(bare.get("provider").is_none(), "provider omitted when not configured");
+    println!("ok: {} {} by {}", got["name"], got["version"], got["provider"]["organization"]);
+}
 ```
+
+## Parameters and defaults
+
+| Field | Default | Notes |
+|---|---|---|
+| `name` | `"toolnexus-agent"` | `A2aConfig.name`; empty ⇒ default. |
+| `description` | `""` | `A2aConfig.description`. |
+| `version` | `"0.1.0"` | `A2aConfig.version`; empty ⇒ default. |
+| `protocolVersion` | `"0.3.0"` | Fixed. |
+| `capabilities` | `{streaming: false, pushNotifications: false}` | Fixed. |
+| `skills` | every skill | `A2aConfig.skills = Some(..)` ⇒ exactly those (even empty); `None` ⇒ all. Each is `{id, name, description}`. |
+| `url` | — | The `url` argument verbatim; `serve` passes its base URL plus `/`. |
+| `provider` | omitted | Present only when `A2aConfig.provider` is set. |
 
 ## See also
 

@@ -70,7 +70,7 @@ pass=0
 fail=0
 failed_names=()
 for name in "${names[@]}"; do
-	bin="$WORK/target/debug/examples/$name"
+	bin="${CARGO_TARGET_DIR:-$WORK/target}/debug/examples/$name"
 	if [ ! -x "$bin" ] || grep -q "examples/$name.rs:.*error" "$LOG"; then
 		fail=$((fail + 1))
 		failed_names+=("$name")

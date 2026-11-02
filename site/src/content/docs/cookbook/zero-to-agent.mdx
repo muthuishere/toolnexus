@@ -1,6 +1,6 @@
 ---
 title: Zero to agent
-description: A toolkit with the ten built-in tools, a client pointed at any OpenAI- or Anthropic-style endpoint, and one run — in all seven languages.
+description: A toolkit with the ten built-in tools, a client pointed at any OpenAI- or Anthropic-style endpoint, and one run — in all eight languages.
 ---
 
 import { Tabs, TabItem, Aside } from '@astrojs/starlight/components';
@@ -104,19 +104,31 @@ IO.puts(res.text)
 ```
 </TabItem>
 <TabItem label="Rust">
-```rust
+```rust test
 use toolnexus::client::{ClientOptions, Style, create_client};
 use toolnexus::{ToolkitOptions, create_toolkit};
 
-let tk = create_toolkit(ToolkitOptions::default()).await?;   // 10 built-ins, on by default
-let agent = create_client(ClientOptions {
-    base_url: "https://openrouter.ai/api/v1".into(),
-    style: Style::OpenAI,
-    model: "openai/gpt-4o-mini".into(),                        // key from OPENROUTER_API_KEY
-    ..Default::default()
-});
-let res = agent.run("List the files here, then read the largest one.", &tk).await?;
-println!("{}", res.text);
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let tk = create_toolkit(ToolkitOptions::default()).await?; // 10 built-ins, on by default
+    let names: Vec<String> = tk.tools().into_iter().map(|t| t.name).collect();
+    assert!(names.iter().any(|n| n == "bash") && names.iter().any(|n| n == "read"));
+    println!("tools: {}", names.join(" "));
+
+    if std::env::var("OPENROUTER_API_KEY").is_err() {
+        println!("skip: OPENROUTER_API_KEY not set");
+        return Ok(());
+    }
+    let agent = create_client(ClientOptions {
+        base_url: "https://openrouter.ai/api/v1".into(),
+        style: Style::OpenAI,
+        model: "openai/gpt-4o-mini".into(), // key from OPENROUTER_API_KEY
+        ..Default::default()
+    });
+    let res = agent.run("List the files here, then read the largest one.", &tk).await?;
+    println!("{}", res.text);
+    Ok(())
+}
 ```
 </TabItem>
 </Tabs>

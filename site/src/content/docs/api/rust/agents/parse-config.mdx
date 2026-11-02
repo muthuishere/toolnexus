@@ -33,43 +33,173 @@ Declaring agents in config keeps URLs and `${ENV}` header references out of code
 
 ## Examples
 
-### 1. The block create_toolkit reads
+### 1. One enabled entry
 
-```rust
-use serde_json::json;
-use toolnexus::{McpConfigInput, ToolkitOptions, create_toolkit};
-let tk = create_toolkit(ToolkitOptions {
-    mcp_config: Some(McpConfigInput::Json(json!({
-        "agents": {"rev": {"card": "https://reviewer.example/.well-known/agent-card.json", "pollEvery": 500}}
-    }))),
-    ..Default::default()
-}).await?;
-```
-
-### 2. Precedence
-
-```rust
-use serde_json::json;
-use toolnexus::a2a::parse_agents_value;
-let agents = parse_agents_value(&json!({
-    "a": {"card": "http://x/1"},
-    "b": {"card": "http://x/2", "disabled": true},
-    "c": {"card": "http://x/3", "enabled": false},
-    "d": {"card": "http://x/4", "enabled": true, "disabled": true},
-}));
-assert_eq!(agents.len(), 1);   // only "a"
-```
-
-### 3. Typed entries
-
-```rust
+```rust test
 use std::collections::BTreeMap;
+
 use toolnexus::a2a::{AgentConfig, parse_agents_config};
-let agents = parse_agents_config(&BTreeMap::from([(
-    "rev".to_string(),
-    AgentConfig { card: "http://x/1".into(), timeout: 60_000, ..Default::default() },
-)]));
+
+fn main() {
+    let parsed = parse_agents_config(&BTreeMap::from([(
+        "reviewer".to_string(),
+        AgentConfig {
+            card: "https://peer.example/.well-known/agent-card.json".into(),
+            poll_every: 500,
+            ..Default::default()
+        },
+    )]));
+    assert_eq!(parsed.len(), 1);
+    assert_eq!(parsed[0].card, "https://peer.example/.well-known/agent-card.json");
+    assert_eq!(parsed[0].poll_every_ms, 500);
+
+    println!("ok: {}", parsed[0].card);
+}
 ```
+
+### 2. `enabled`/`disabled` precedence — mirrors the MCP rule
+
+`disabled: Some(true)` always wins; else `enabled: Some(false)` skips the entry; both `None` ⇒
+enabled. An entry with an empty `card` is skipped too.
+
+```rust test
+use std::collections::BTreeMap;
+
+use toolnexus::a2a::{AgentConfig, parse_agents_config};
+
+fn entry(card: &str, enabled: Option<bool>, disabled: Option<bool>) -> AgentConfig {
+    AgentConfig { card: card.into(), enabled, disabled, ..Default::default() }
+}
+
+fn main() {
+    let parsed = parse_agents_config(&BTreeMap::from([
+        ("a".to_string(), entry("http://x/1", None, None)),              // default: enabled
+        ("b".to_string(), entry("http://x/2", None, Some(true))),        // disabled wins
+        ("c".to_string(), entry("http://x/3", Some(false), None)),       // enabled:false skips
+        ("d".to_string(), entry("http://x/4", Some(true), Some(true))),  // disabled still wins
+        ("e".to_string(), entry("", None, None)),                        // no card: nothing to resolve
+    ]));
+    assert_eq!(parsed.len(), 1, "expected only 1 survivor");
+    assert_eq!(parsed[0].card, "http://x/1");
+
+    println!("ok: only {} survived", parsed[0].card);
+}
+```
+
+### 3. The full surface — driven straight from `create_toolkit`'s config
+
+The same precedence applies when the `agents` block arrives inside `mcp_config` — the path
+`create_toolkit` itself uses (via `parse_agents_value`).
+
+```rust test
+use std::sync::{Arc, Mutex};
+
+use serde_json::{Value, json};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
+use toolnexus::{BuiltinsConfig, McpConfigInput, ToolkitOptions, create_toolkit};
+
+/// A minimal fake A2A peer on 127.0.0.1: the card at any GET, `SendMessage` →
+/// a submitted task, `GetTask` → `last`. Records the last Authorization header.
+async fn start_peer(name: &str, skills: Value, last: Value) -> (String, Arc<Mutex<String>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let card = json!({"name": name, "url": format!("{base}/"), "skills": skills});
+    let auth = Arc::new(Mutex::new(String::new()));
+    let seen = auth.clone();
+    tokio::spawn(async move {
+        while let Ok((mut sock, _)) = listener.accept().await {
+            let (card, last, seen) = (card.clone(), last.clone(), seen.clone());
+            tokio::spawn(async move {
+                let (mut buf, mut chunk) = (Vec::new(), [0u8; 4096]);
+                let mut head_end = None;
+                loop {
+                    if let Some(end) = head_end {
+                        let head = String::from_utf8_lossy(&buf[..end]).to_lowercase();
+                        let len = head.lines().find_map(|l| l.strip_prefix("content-length:"))
+                            .and_then(|v| v.trim().parse::<usize>().ok()).unwrap_or(0);
+                        if buf.len() >= end + len { break; }
+                    }
+                    let n = sock.read(&mut chunk).await.unwrap_or(0);
+                    if n == 0 { return; }
+                    buf.extend_from_slice(&chunk[..n]);
+                    head_end = head_end.or(buf.windows(4).position(|w| w == b"\r\n\r\n").map(|i| i + 4));
+                }
+                let end = head_end.unwrap();
+                let head = String::from_utf8_lossy(&buf[..end]).to_string();
+                if let Some(a) = head.lines().find_map(|l| {
+                    let (k, v) = l.split_once(':')?;
+                    k.eq_ignore_ascii_case("authorization").then(|| v.trim().to_string())
+                }) {
+                    *seen.lock().unwrap() = a;
+                }
+                let reply = if head.starts_with("GET") {
+                    card
+                } else {
+                    let rpc: Value = serde_json::from_slice(&buf[end..]).unwrap_or(Value::Null);
+                    let result = if rpc["method"] == "SendMessage" {
+                        json!({"id": "t1", "status": {"state": "submitted"}})
+                    } else {
+                        last
+                    };
+                    json!({"jsonrpc": "2.0", "id": rpc["id"], "result": result})
+                };
+                let body = reply.to_string();
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+            });
+        }
+    });
+    (base, auth)
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let completed = json!({"id": "t1", "status": {"state": "completed"},
+        "artifacts": [{"parts": [{"kind": "text", "text": "LGTM"}]}]});
+    let (base, _) = start_peer("rev",
+        json!([{"id": "review", "name": "Review", "description": "Review code"}]), completed).await;
+    let card = format!("{base}/.well-known/agent-card.json");
+
+    let off = create_toolkit(ToolkitOptions {
+        builtins: Some(BuiltinsConfig::off()),
+        mcp_config: Some(McpConfigInput::Json(
+            json!({"agents": {"rev": {"card": card, "disabled": true}}}),
+        )),
+        ..Default::default()
+    })
+    .await?;
+    assert!(off.get("rev_review").is_none(), "disabled agent should be skipped");
+    off.close().await;
+
+    let on = create_toolkit(ToolkitOptions {
+        builtins: Some(BuiltinsConfig::off()),
+        mcp_config: Some(McpConfigInput::Json(
+            json!({"agents": {"rev": {"card": card, "pollEvery": 5}}}),
+        )),
+        ..Default::default()
+    })
+    .await?;
+    assert!(on.get("rev_review").is_some(), "enabled agent should resolve from config");
+    on.close().await;
+
+    println!("ok: config-driven agent resolved to rev_review");
+    Ok(())
+}
+```
+
+## Precedence
+
+| `disabled` | `enabled` | Result |
+|---|---|---|
+| `Some(true)` | any | skipped |
+| `None`/`Some(false)` | `Some(false)` | skipped |
+| `None`/`Some(false)` | `None`/`Some(true)` | included |
+
+`card` empty is also skipped — an entry with no card has nothing to resolve.
 
 ## See also
 

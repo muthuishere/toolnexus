@@ -25,21 +25,201 @@ pub struct HandleView { pub id: String, pub state: State, pub tokens: i64,
 
 A handle is one live agent with a deterministic, parent-scoped id (`root/coordinator.1/explore.2`).
 Its state machine is pinned: idle → running → idle | suspended | closed; suspended → running only
-through the Answer to its pending Request. `turns` and `total_tokens` are cumulative on every
-status; `own_tokens` excludes children. What crosses a handle boundary is always a `TaskResult`,
-never an exception.
-
-## Example
+through the Answer to its pending Request. Every field past `id` is private and mutated under the
+runtime's own lock; you never poke a `Handle` directly. Instead, the `Runtime` that spawned it
+exposes race-safe read views: `state_of` for the raw transition state, `inspect`/`list` for the
+fuller `HandleView` (tokens, turns, inbox depth, the pending Request's kind when suspended), plus
+`inbox_len`, `pool_tokens` and `usage_tokens`. What crosses a handle boundary is always a
+`TaskResult`, never a panic.
 
 ```rust
-let h = rt.spawn(&rt.root(), "slow", None)?;
-rt.wake(&h, "work");
-let r = rt.wait(&h, Some(std::time::Duration::from_millis(30))).await;
-// r.status == "timeout", r.limit == "timeout" — the child keeps running
-rt.interrupt(&h);                         // aborts the turn, not the agent; inbox restored
-assert_eq!(rt.state_of(&h), toolnexus::agents::State::Idle);
+pub fn state_of(&self, h: &Handle) -> State
+pub fn inspect(&self, h: &Handle) -> HandleView
+pub fn inbox_len(&self, h: &Handle) -> usize
+pub fn pool_tokens(&self, h: &Handle) -> i64
+pub fn usage_tokens(&self, h: &Handle) -> i64
 ```
+
+## When to use it
+
+Read a handle's state to build observability (a dashboard of running sub-agents), to poll for a
+suspension before deciding whether to answer it, or to assert on transition traces in tests. You
+obtain a `Handle` from [`spawn`](/api/rust/runtime/runtime/) — never construct one yourself.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Handles are capabilities, not a registry">
+There's no global "list all handles anywhere" — `Runtime::list()` walks only the handles under
+`root()` for THAT runtime, and a `Handle` value itself is meaningless outside the `Runtime` that
+returned it (SPEC §7D: "post/wake what you hold, wait only what you spawned"). Reach for
+[`agents::new`](/api/rust/runtime/agent/) if what you actually want is to CREATE and run an agent,
+not inspect one that already exists.
+</Aside>
+
+## Examples
+
+### 1. `idle` right after spawn, before any wake
+
+```rust test
+use std::collections::HashMap;
+use toolnexus::agents::{Def, Options, Runtime, State};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let registry = HashMap::from([(
+        "peer".to_string(),
+        Def { name: "peer".into(), does: "a worker".into(), model: "m-peer".into(), ..Default::default() },
+    )]);
+    let rt = Runtime::new(Options { registry, ..Default::default() }); // no wake — no model needed
+
+    let h = rt.spawn(&rt.root(), "peer", None)?;
+    assert_eq!(rt.state_of(&h), State::Idle);
+    let v = rt.inspect(&h);
+    assert!(v.state == State::Idle && v.turns == 0 && v.pending_kind.is_empty(), "{v:?}");
+
+    println!("ok: {} is {}", h.id, v.state);
+    Ok(())
+}
+```
+
+### 2. `idle → running → idle (done)`, observed live
+
+```rust test
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::Notify;
+use toolnexus::agents::{Def, Options, Runtime, State};
+use toolnexus::client::{BoxFuture, InProcessRequest, InProcessResponse, InProcessUsage};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // The model blocks until released, so we can OBSERVE `running` before the turn completes.
+    let gate = Arc::new(Notify::new());
+    let g = gate.clone();
+    let model = Arc::new(move |_req: InProcessRequest| -> BoxFuture<Result<InProcessResponse, String>> {
+        let g = g.clone();
+        Box::pin(async move {
+            g.notified().await;
+            Ok(InProcessResponse {
+                content: "finished".into(),
+                usage: Some(InProcessUsage { prompt_tokens: 3, completion_tokens: 3, total_tokens: 6 }),
+                ..Default::default()
+            })
+        })
+    });
+    let registry = HashMap::from([(
+        "worker".to_string(),
+        Def { name: "worker".into(), does: "a worker".into(), model: "m-worker".into(), ..Default::default() },
+    )]);
+    let rt = Runtime::new(Options { in_process: Some(model), registry, ..Default::default() });
+
+    let h = rt.spawn(&rt.root(), "worker", None)?;
+    rt.wake(&h, "go");
+    for _ in 0..200 {
+        if rt.state_of(&h) == State::Running { break; }
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    assert_eq!(rt.state_of(&h), State::Running, "expected to observe running before completion");
+
+    gate.notify_one(); // let the turn finish
+    let r = rt.wait(&h, None).await;
+    assert_eq!(r.status, "done");
+    assert_eq!(rt.state_of(&h), State::Idle);
+    let v = rt.inspect(&h);
+    assert_eq!((v.turns, v.tokens), (1, 6), "{v:?}");
+
+    println!("ok: idle -> running -> idle, turns = {} tokens = {}", v.turns, v.tokens);
+    Ok(())
+}
+```
+
+### 3. The full surface — `suspended`, `pending_kind`, and durable `resume`
+
+No `wait_for` anywhere in the chain ⇒ the suspension goes durable: the handle parks in
+`State::Suspended` and `Runtime::resume` is the ONLY way back to `running`.
+
+```rust test
+use std::collections::HashMap;
+use std::sync::Arc;
+use serde_json::json;
+use toolnexus::agents::{Def, Options, Runtime, State};
+use toolnexus::client::{BoxFuture, InProcessRequest, InProcessResponse, InProcessToolCall};
+use toolnexus::{Answer, Request, Tool, ToolResult, ToolSource, pending};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // check_secret needs approval the first time; once ctx.answer is satisfied, it succeeds.
+    let check_secret = Tool {
+        name: "check_secret".into(),
+        description: "needs approval".into(),
+        input_schema: json!({"type": "object", "properties": {}}),
+        source: ToolSource::Custom,
+        hints: None,
+        execute: Arc::new(|_args, ctx| {
+            Box::pin(async move {
+                if ctx.answer.as_ref().is_some_and(|a| a.ok) {
+                    return ToolResult::ok("secret-token");
+                }
+                pending(Request { kind: "approval".into(), prompt: "approve secret access?".into(), ..Default::default() })
+            })
+        }),
+    };
+    let model = Arc::new(|req: InProcessRequest| -> BoxFuture<Result<InProcessResponse, String>> {
+        let saw_tool_result = req.messages.iter().any(|m| m["role"] == "tool");
+        Box::pin(async move {
+            Ok(if !saw_tool_result {
+                InProcessResponse {
+                    tool_calls: vec![InProcessToolCall { id: "c1".into(), name: "check_secret".into(), arguments: json!({}) }],
+                    ..Default::default()
+                }
+            } else {
+                InProcessResponse { content: "approved and done".into(), ..Default::default() }
+            })
+        })
+    });
+    // No wait_for on this def, and none higher in the chain: the suspension goes durable.
+    let registry = HashMap::from([(
+        "asker".to_string(),
+        Def { name: "asker".into(), does: "needs approvals".into(), model: "m-asker".into(), tools: vec![check_secret], ..Default::default() },
+    )]);
+    let rt = Runtime::new(Options { in_process: Some(model), registry, ..Default::default() });
+
+    let h = rt.spawn(&rt.root(), "asker", None)?;
+    rt.wake(&h, "get the secret");
+    let r = rt.wait(&h, None).await;
+    assert_eq!(r.status, "pending", "{r:?}");
+    assert_eq!(rt.state_of(&h), State::Suspended);
+    let v = rt.inspect(&h);
+    assert_eq!(v.pending_kind, "approval");
+
+    // The out-of-band Answer resumes the DEEPEST suspended handle; resume hands back the
+    // result of the topmost handle the cascade re-ran.
+    let id = r.pending.expect("a pending request").id;
+    let done = rt.resume(Answer { id, ok: true, ..Default::default() }).await?;
+    assert_eq!(done.status, "done", "{done:?}");
+    assert_eq!(rt.state_of(&h), State::Idle);
+
+    println!("ok: suspended ({}) -> resumed -> {}", v.pending_kind, rt.state_of(&h));
+    Ok(())
+}
+```
+
+## HandleView fields
+
+| Field | Type | What it holds |
+|---|---|---|
+| `id` | `String` | The handle's deterministic id. |
+| `state` | `State` | `Idle` \| `Running` \| `Suspended` \| `Closed` (`as_str()` gives the lowercase spelling). |
+| `tokens` | `i64` | Rolled-up token usage of the subtree — the budget ledger. |
+| `turns` | `usize` | Cumulative LLM round trips. |
+| `inbox` | `usize` | Current inbox depth. |
+| `pending_kind` | `String` | The suspended Request's `kind`; `""` unless `state == Suspended`. |
+
+`TaskResult` carries `turns` and `total_tokens` cumulatively on every status; `own_tokens`
+excludes children; `limit` names the stop on `incomplete`/`timeout`.
 
 ## See also
 
-- [runtime](/api/rust/runtime/runtime/) · [vocabulary](/api/rust/runtime/vocabulary/)
+- [`agents::new`](/api/rust/runtime/agent/) — Define a sub-agent with its own toolkit, prompt and budget, callable as a tool by its parent.
+- [`Runtime::new`](/api/rust/runtime/runtime/) — The six host verbs that drive sub-agents, plus the read-only list and inspect views.
+- [`Budget`](/api/rust/runtime/budgets/) — Cap tool calls and wall-clock per agent and per team, enforced while the run is in flight.

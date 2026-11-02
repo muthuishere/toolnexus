@@ -12,14 +12,23 @@ import { Aside } from '@astrojs/starlight/components';
 </p>
 
 <Aside type="caution" title="Not available in Rust">
-No port exposes a collect-from-annotations helper under this name, and Rust has no annotations to collect from. Tracked in `openspec/changes/add-rust-port`.
+Rust has no collector: JS (`collectTools`), Java and C# (`Tools.fromObject` / `Tools.FromObject`) sweep an object for marked methods, but Rust has no runtime reflection or method annotations to sweep (Python, Go, Elixir and Clojure have no collector either).
 </Aside>
 
 Sweep a module or class and collect every function marked as a tool.
 
 ## What to use instead
 
-Build a `Vec<Tool>` with `define_tool` / `define_typed_tool` and pass it as `extra_tools`.
+Build a `Vec<Tool>` with `define_tool` / `define_typed_tool` and pass it as `ToolkitOptions.extra_tools` (or `Toolkit::register` it later). A function that returns the vector is the Rust spelling of a collector:
+
+```rust
+fn math_tools() -> Vec<Tool> {
+    vec![
+        define_tool("add", "Add a and b", None, |a, _c| async move { Ok::<_, String>((a["a"].as_f64().unwrap_or(0.0) + a["b"].as_f64().unwrap_or(0.0)).to_string()) }),
+        define_tool("neg", "Negate n", None, |a, _c| async move { Ok::<_, String>((-a["n"].as_f64().unwrap_or(0.0)).to_string()) }),
+    ]
+}
+```
 
 ## See also
 

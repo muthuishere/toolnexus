@@ -17,18 +17,137 @@ pub const BOOTSTRAP_ORDER: [&str; 7] =
     ["AGENTS.md", "SOUL.md", "IDENTITY.md", "USER.md", "TOOLS.md", "HEARTBEAT.md", "MEMORY.md"];
 ```
 
-Reads the bootstrap files present under `dir`, in canonical order, each capped at 2 MB (an
-over-cap file is truncated with a notice; the file on disk is untouched), and joins them as
-`## <file>` sections. Returns the soul and the files found. Composed once, at session start: the
-soul is a frozen snapshot for the run.
+`compose_soul` is the directory-is-the-agent primitive: it reads `BOOTSTRAP_ORDER`'s seven
+well-known filenames out of `dir`, in openclaw convention order (identity first, memory last),
+and joins each present one into a single soul string as a `"## <filename>"` section. Absent
+files are skipped silently. Each file is read with a 2 MB byte cap — a larger file is truncated
+with a notice appended, and the on-disk file is untouched. The returned `Vec<String>` lists
+exactly which files were present, in the order they were composed.
 
-## Example
+## When to use it
 
-```rust
-let (soul, found) = toolnexus::agents::compose_soul("./ava");
-// found == ["SOUL.md", "USER.md", "HEARTBEAT.md", "MEMORY.md"]
+Reach for `compose_soul` when you're building a persona-shaped agent by hand — composing the
+soul yourself into `agents::Spec.soul` — rather than going through
+[`from_dir`](/api/rust/persona/from-dir/), which calls it for you. It's also the right call when
+you only want the composed prompt text (to log it, hash it for cache-stability checks, or feed
+it to a different agent constructor) without building a full `Agent`.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Want a runnable Agent, not just the prompt string?">
+`compose_soul` only builds the soul text — it doesn't construct an agent, wire the `memory`
+tool, or pick a name. [`from_dir`](/api/rust/persona/from-dir/) does all three in one call and is
+what nearly every persona should use; reach for `compose_soul` directly only when you need the
+composed string on its own or are assembling a `Spec` with non-default pieces.
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call — compose from two files
+
+```rust test
+use toolnexus::agents::compose_soul;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = std::env::temp_dir().join(format!("persona-cs1-{}", std::process::id()));
+    std::fs::create_dir_all(&dir)?;
+    std::fs::write(dir.join("SOUL.md"), "You are Kip, a terse assistant.")?;
+    std::fs::write(dir.join("MEMORY.md"), "- prefers metric units")?;
+
+    let (soul, found) = compose_soul(&dir);
+    assert_eq!(found, vec!["SOUL.md", "MEMORY.md"]);
+    assert!(soul.contains("## SOUL.md"), "{soul}");
+
+    std::fs::remove_dir_all(&dir)?;
+    println!("ok: composed from {found:?}");
+    Ok(())
+}
 ```
+
+### 2. The realistic case — absent files skip silently, order is fixed
+
+Only `AGENTS.md` and `USER.md` exist here; `compose_soul` still walks the full
+`BOOTSTRAP_ORDER`, composing only what it finds, in that canonical order — not directory
+listing order or creation order.
+
+```rust test
+use toolnexus::agents::compose_soul;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = std::env::temp_dir().join(format!("persona-cs2-{}", std::process::id()));
+    std::fs::create_dir_all(&dir)?;
+    // Write USER.md first, on disk, but BOOTSTRAP_ORDER still puts AGENTS.md ahead of it.
+    std::fs::write(dir.join("USER.md"), "The user is Muthu.")?;
+    std::fs::write(dir.join("AGENTS.md"), "Reply in one line.")?;
+
+    let (soul, found) = compose_soul(&dir);
+    assert_eq!(found, vec!["AGENTS.md", "USER.md"]);
+    assert!(soul.find("AGENTS.md").unwrap() < soul.find("USER.md").unwrap());
+
+    std::fs::remove_dir_all(&dir)?;
+    println!("ok: composed {found:?} - SOUL.md/IDENTITY.md/etc were absent and skipped");
+    Ok(())
+}
+```
+
+### 3. The full surface — wired into an agent as `Spec.soul`, and a truncation notice
+
+`compose_soul`'s output is exactly what `from_dir` assigns to `agents::Spec.soul` — this example
+does that assembly explicitly, and also shows the 2 MB truncation notice on an oversized file.
+The model is an in-process stand-in (`Options.in_process`), so nothing leaves the process.
+
+```rust test
+use std::sync::Arc;
+
+use toolnexus::agents::{Options, Spec, compose_soul, new};
+use toolnexus::client::{GenerateFn, InProcessRequest, InProcessResponse};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = std::env::temp_dir().join(format!("persona-cs3-{}", std::process::id()));
+    std::fs::create_dir_all(&dir)?;
+    std::fs::write(dir.join("IDENTITY.md"), "You are Archivist.")?;
+    // One byte over the 2 MB cap: compose_soul truncates with a notice, on-disk file untouched.
+    let oversized = vec![b'x'; 2 * 1024 * 1024 + 1];
+    std::fs::write(dir.join("TOOLS.md"), &oversized)?;
+
+    let (soul, found) = compose_soul(&dir);
+    assert_eq!(found, vec!["IDENTITY.md", "TOOLS.md"]);
+    assert!(soul.contains("[truncated: exceeds 2 MB bootstrap cap]"));
+    assert_eq!(std::fs::read(dir.join("TOOLS.md"))?.len(), oversized.len());
+
+    // Assign the composed soul exactly as from_dir does.
+    let archivist = new(
+        "archivist",
+        Spec { does: "keeps records".into(), soul, model: "m-archivist".into(), ..Default::default() },
+    );
+    let model: GenerateFn = Arc::new(|_req: InProcessRequest| {
+        Box::pin(async { Ok(InProcessResponse { content: "archived".into(), ..Default::default() }) })
+    });
+    let (r, _rt) = archivist
+        .run(Options { in_process: Some(model), ..Default::default() }, "file this")
+        .await;
+    assert_eq!((r.status.as_str(), r.text.as_str()), ("done", "archived"));
+
+    std::fs::remove_dir_all(&dir)?;
+    println!("ok: soul carries {} sections and truncates oversized files safely", found.len());
+    Ok(())
+}
+```
+
+## Fields and behavior
+
+| Aspect | Behavior |
+|---|---|
+| `BOOTSTRAP_ORDER` | `AGENTS.md`, `SOUL.md`, `IDENTITY.md`, `USER.md`, `TOOLS.md`, `HEARTBEAT.md`, `MEMORY.md` — fixed, identity-first, memory-last. |
+| Absent files | Skipped silently — no error, no placeholder section. |
+| Per-file cap | 2 MB (`2097152` bytes), byte-based (a split multibyte character is decoded lossily). Larger ⇒ truncated + `"\n[truncated: exceeds 2 MB bootstrap cap]"` appended; on-disk file is never modified. |
+| Section format | Each present file becomes `"## <filename>\n\n<trimmed body>"`, joined with `"\n\n"`. |
+| found (second tuple element) | The ordered list of filenames that were actually present — use it to know what shaped the soul. |
+| Timing | Composition happens once, at session start — the soul is a **frozen snapshot** for the run (the cache-stability rule). |
 
 ## See also
 
-- [from_dir](/api/rust/persona/from-dir/) · [memory tool](/api/rust/persona/memory-tool/)
+- [`from_dir`](/api/rust/persona/from-dir/) — Point at an agent home directory and get a configured agent back.
+- [`memory_tool`](/api/rust/persona/memory-tool/) — The opt-in built-in that lets a persona write durable notes to its own home.
+- [`agents::new`](/api/rust/runtime/agent/) — the constructor `Spec.soul` feeds into.

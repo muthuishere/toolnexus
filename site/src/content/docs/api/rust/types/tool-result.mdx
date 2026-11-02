@@ -36,32 +36,110 @@ Do not put data the model must see in `metadata` — it is not sent to the model
 
 ## Examples
 
-### 1. Success and failure
+### 1. Success and failure on the same tool
 
-```rust
-use toolnexus::ToolResult;
-let ok = ToolResult::ok("42");
-let bad = ToolResult::error("divide by zero");
-assert!(!ok.is_error && bad.is_error);
+```rust test
+use serde_json::json;
+use toolnexus::{ToolContext, define_tool};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let sqrt = define_tool("sqrt", "Square root", None, |args, _ctx| async move {
+        let n = args["n"].as_f64().ok_or("n is required")?;
+        if n < 0.0 {
+            return Err(format!("cannot take the square root of {n}"));
+        }
+        Ok(n.sqrt().to_string())
+    });
+    let ok = sqrt.call(json!({"n": 16}), ToolContext::default()).await;
+    let bad = sqrt.call(json!({"n": -1}), ToolContext::default()).await;
+    assert!(!ok.is_error && ok.output == "4");
+    assert!(bad.is_error && bad.output == "cannot take the square root of -1");
+    println!("ok: {} | {}", ok.output, bad.output);
+    Ok(())
+}
 ```
 
-### 2. Attach metadata
+### 2. Structured output and metadata
 
-```rust
-use serde_json::{Map, json};
+`output` is the text the model reads, so structured data goes in as JSON text. `metadata` is for
+the host only — it is never sent to the model.
+
+```rust test
+use serde_json::{Map, Value, json};
 use toolnexus::ToolResult;
-let mut meta = Map::new();
-meta.insert("exitCode".into(), json!(0));
-let r = ToolResult::ok("built").with_metadata(meta);
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let rows = json!([{"id": 1, "name": "ada"}, {"id": 2, "name": "linus"}]);
+    let mut meta = Map::new();
+    meta.insert("rowCount".into(), json!(2));
+    meta.insert("elapsedMs".into(), json!(12));
+    let r = ToolResult::ok(serde_json::to_string(&rows)?).with_metadata(meta);
+
+    let parsed: Value = serde_json::from_str(&r.output)?;
+    assert_eq!(parsed[1]["name"], "linus");
+    assert_eq!(r.metadata.as_ref().unwrap()["rowCount"], 2);
+
+    // The wire shape: camelCase isError, parts omitted when empty.
+    let wire = serde_json::to_value(&r)?;
+    assert_eq!(wire["isError"], false);
+    assert!(wire.get("parts").is_none());
+    println!("ok: {} rows, wire keys {:?}", parsed.as_array().unwrap().len(), wire.as_object().unwrap().keys().collect::<Vec<_>>());
+    Ok(())
+}
 ```
 
-### 3. Serialize the wire shape
+### 3. The reserved key — `metadata["pending"]` is a suspension
 
-```rust
-use toolnexus::ToolResult;
-let wire = serde_json::to_value(ToolResult::error("nope"))?;
-assert_eq!(wire["isError"], true);
-assert!(wire.get("parts").is_none());
+Build a suspension with `pending(..)` / `auth_required(..)` rather than by hand; `pending_of` reads
+it back. The loop treats such a result as a §10 request, not as a tool error.
+
+```rust test
+use toolnexus::{Request, ToolResult, auth_required, pending, pending_of};
+
+fn main() {
+    let r = pending(Request {
+        kind: "approval".into(),
+        prompt: "Delete 3 files?".into(),
+        ..Default::default()
+    });
+    assert!(r.is_error);
+    assert_eq!(r.output, "Delete 3 files?");
+    let req = pending_of(&r).expect("a suspension");
+    assert_eq!(req.kind, "approval");
+    assert!(req.id.starts_with("pnd-"), "an empty id is generated");
+
+    let auth = auth_required("https://example.com/login", "");
+    assert_eq!(auth.output, "Authorization required to continue\nhttps://example.com/login");
+    assert_eq!(pending_of(&auth).unwrap().kind, "authorization");
+
+    // An ordinary error is not a suspension.
+    assert!(pending_of(&ToolResult::error("boom")).is_none());
+    println!("ok: {} {}", req.kind, req.id);
+}
+```
+
+### 4. Non-text output — `parts` alongside `output`
+
+```rust test
+use std::path::PathBuf;
+
+use toolnexus::{ContentPart, ToolResult};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // TOOLNEXUS_REPO is set by the docs test runner; in your own code just use a path.
+    let png = PathBuf::from(std::env::var("TOOLNEXUS_REPO")?).join("examples/media/fixture.png");
+    let mut r = ToolResult::ok("fixture.png (image/png)");
+    r.parts.push(ContentPart::from_path(&png)?);
+
+    assert_eq!(r.parts[0].kind, "image");
+    assert_eq!(r.parts[0].mime_type, "image/png");
+    assert!(!r.parts[0].data.is_empty());
+    let wire = serde_json::to_value(&r)?;
+    assert_eq!(wire["parts"][0]["mimeType"], "image/png");
+    println!("ok: {} + {} part(s)", r.output, r.parts.len());
+    Ok(())
+}
 ```
 
 ## See also

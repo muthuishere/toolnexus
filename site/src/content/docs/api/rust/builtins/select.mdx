@@ -31,35 +31,85 @@ Inside a toolkit, set `ToolkitOptions.builtins` instead.
 
 ## Examples
 
-### 1. Everything on
+Rust takes a typed `BuiltinsConfig` (or `BuiltinsConfig::from_value` for the JSON spelling), and
+returns `Err` only when `bash` is enabled and no shell resolves.
 
-```rust
+### 1. Default is on, `off()` is off
+
+```rust test
 use toolnexus::{BuiltinsConfig, select_builtins};
-let tools = select_builtins(&BuiltinsConfig::default())?;
-assert_eq!(tools.len(), 10);
+
+fn main() -> Result<(), String> {
+    let def = select_builtins(&BuiltinsConfig::default())?;
+    assert_eq!(def.len(), 10);
+
+    let off = select_builtins(&BuiltinsConfig::off())?;
+    assert!(off.is_empty(), "a whole-source off yields no tools");
+
+    let on = select_builtins(&BuiltinsConfig { enabled: Some(true), ..Default::default() })?;
+    assert_eq!(on.len(), 10);
+
+    println!("ok: default={} off={} on={}", def.len(), off.len(), on.len());
+    Ok(())
+}
 ```
 
-### 2. Drop bash and write
+### 2. A `BuiltinsConfig` drops individual tools
 
-```rust
+```rust test
 use std::collections::BTreeMap;
 use toolnexus::{BuiltinsConfig, select_builtins};
-let tools = select_builtins(&BuiltinsConfig {
-    tools: BTreeMap::from([("bash".to_string(), false), ("write".to_string(), false)]),
-    ..Default::default()
-})?;
+
+fn main() -> Result<(), String> {
+    let filtered = select_builtins(&BuiltinsConfig {
+        tools: BTreeMap::from([("bash".to_string(), false), ("apply_patch".to_string(), false)]),
+        ..Default::default()
+    })?;
+    assert_eq!(filtered.len(), 8, "10 minus 2");
+    assert!(filtered.iter().all(|t| t.name != "bash" && t.name != "apply_patch"));
+
+    // disabled: Some(true) wins over an unset enabled, same precedence as MCP.
+    let whole = select_builtins(&BuiltinsConfig { disabled: Some(true), ..Default::default() })?;
+    assert!(whole.is_empty());
+
+    println!("ok: {} built-ins after dropping 2", filtered.len());
+    Ok(())
+}
 ```
 
-### 3. Confined to a workspace
+### 3. The JSON spelling — `BuiltinsConfig::from_value`
 
-```rust
+The same config a top-level `builtins` key in a parsed `mcp.json`-style document produces.
+
+```rust test
+use serde_json::json;
 use toolnexus::{BuiltinsConfig, select_builtins};
-let tools = select_builtins(&BuiltinsConfig {
-    base_dir: "/work/project".into(), confine_to_base_dir: true, kill_grace_ms: 200,
-    ..Default::default()
-})?;
+
+fn main() -> Result<(), String> {
+    let cfg = BuiltinsConfig::from_value(&json!({"enabled": true, "tools": {"webfetch": false}}));
+    let got = select_builtins(&cfg)?;
+    assert_eq!(got.len(), 9, "10 minus webfetch");
+    assert!(got.iter().all(|t| t.name != "webfetch"));
+
+    // enabled:false — or a bare `false` — disables the whole source.
+    assert!(select_builtins(&BuiltinsConfig::from_value(&json!({"enabled": false})))?.is_empty());
+    assert!(select_builtins(&BuiltinsConfig::from_value(&json!(false)))?.is_empty());
+
+    println!("ok: {} built-ins from a parsed JSON config", got.len());
+    Ok(())
+}
 ```
+
+## `BuiltinsConfig`
+
+| Field | Type | What it does |
+|---|---|---|
+| `enabled` | `Option<bool>` | `None` ⇒ on; `Some(false)` ⇒ off (unless overridden by `disabled`). |
+| `disabled` | `Option<bool>` | `Some(true)` ⇒ off, and wins over `enabled`. |
+| `tools` | `BTreeMap<String, bool>` | Per-tool override. A name mapped to `false` is dropped; `true`/absent stays on; unknown names are ignored. |
+| `shell`, `base_dir`, `confine_to_base_dir`, `kill_grace_ms` | | The §4A host boundary: the `bash` argv, what a relative path means, confinement, TERM→KILL grace. |
 
 ## See also
 
 - [`create_builtin_tools`](/api/rust/builtins/create/) — Construct every built-in tool directly, outside a toolkit.
+- [`BackgroundShells`](/api/rust/builtins/background-shells/) — the opt-in background-shell registry.

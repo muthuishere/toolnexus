@@ -31,53 +31,141 @@ When you need tokens as they arrive, use `stream`.
 
 ## Examples
 
-### 1. One task
+Each example is a complete program. The model is an in-process stand-in ([`create_in_process_client`](/api/rust/client/create/)): the loop is exactly the one `create_client` runs, with a host function in place of the HTTP call, so no network and no API key are involved.
 
-```rust
-use toolnexus::client::{ClientOptions, Style, create_client};
-use toolnexus::{ToolkitOptions, create_toolkit};
-let tk = create_toolkit(ToolkitOptions::default()).await?;
-let client = create_client(ClientOptions {
-    base_url: "https://openrouter.ai/api/v1".into(),
-    style: Style::OpenAI,
-    model: "openai/gpt-4o-mini".into(),
-    ..Default::default()
-});
-let r = client.run("List the files here", &tk).await?;
-println!("{} ({} turns)", r.text, r.turns);
+### 1. The smallest useful call — a plain text answer
+
+No tools, one round trip: the model answers directly and the loop stops.
+
+```rust test
+use std::sync::Arc;
+
+use toolnexus::client::{GenerateFn, InProcessOptions, InProcessResponse, InProcessUsage, create_in_process_client};
+use toolnexus::{BuiltinsConfig, ToolkitOptions, create_toolkit};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // An in-process stand-in for the model: it answers directly, no tool calls.
+    let model: GenerateFn = Arc::new(|_req| Box::pin(async {
+        Ok(InProcessResponse {
+            content: "Paris".into(),
+            usage: Some(InProcessUsage { prompt_tokens: 4, completion_tokens: 1, total_tokens: 5 }),
+            ..Default::default()
+        })
+    }));
+    let client = create_in_process_client(InProcessOptions {
+        model: "gpt-4o-mini".into(), generate: Some(model), ..Default::default()
+    });
+    let tk = create_toolkit(ToolkitOptions { builtins: Some(BuiltinsConfig::off()), ..Default::default() }).await?;
+
+    let res = client.run("capital of France?", &tk).await?;
+    assert_eq!((res.text.as_str(), res.status.as_str(), res.turns), ("Paris", "done", 1));
+    println!("ok: {}", res.text);
+    Ok(())
+}
 ```
 
-### 2. Inspect tool calls
+### 2. The realistic case — a tool call in the loop
 
-```rust
-use toolnexus::client::{ClientOptions, Style, create_client};
-use toolnexus::{ToolkitOptions, create_toolkit};
-let tk = create_toolkit(ToolkitOptions::default()).await?;
-let client = create_client(ClientOptions {
-    base_url: "https://openrouter.ai/api/v1".into(),
-    style: Style::OpenAI,
-    model: "openai/gpt-4o-mini".into(),
-    ..Default::default()
-});
-let r = client.run("Read README.md", &tk).await?;
-for c in &r.tool_calls { println!("{} -> error={}", c.name, c.is_error); }
+The model asks for `add`, the loop executes it, feeds the result back, and the model answers on the second turn.
+This is the shape of nearly every real agent call.
+
+```rust test
+use std::sync::Arc;
+
+use serde_json::json;
+use toolnexus::client::{GenerateFn, InProcessOptions, InProcessResponse, InProcessToolCall, create_in_process_client};
+use toolnexus::{BuiltinsConfig, ToolkitOptions, create_toolkit, define_tool};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Turn 1: the model asks for add(2, 3). Turn 2: it has the tool result and answers.
+    let model: GenerateFn = Arc::new(|req| Box::pin(async move {
+        let tool = req.messages.iter().rev().find(|m| m["role"] == "tool").cloned();
+        Ok(match tool {
+            None => InProcessResponse {
+                tool_calls: vec![InProcessToolCall { id: "c1".into(), name: "add".into(), arguments: json!({"a": 2, "b": 3}) }],
+                ..Default::default()
+            },
+            Some(m) => InProcessResponse { content: m["content"].as_str().unwrap_or("").into(), ..Default::default() },
+        })
+    }));
+    let add = define_tool("add", "add two numbers",
+        Some(json!({"type":"object","properties":{"a":{"type":"number"},"b":{"type":"number"}}})),
+        |a, _| async move { Ok::<_, String>((a["a"].as_f64().unwrap_or(0.0) + a["b"].as_f64().unwrap_or(0.0)).to_string()) });
+    let tk = create_toolkit(ToolkitOptions {
+        extra_tools: vec![add], builtins: Some(BuiltinsConfig::off()), ..Default::default()
+    }).await?;
+    let client = create_in_process_client(InProcessOptions {
+        model: "gpt-4o-mini".into(), generate: Some(model), ..Default::default()
+    });
+
+    let res = client.run("what is 2+3?", &tk).await?;
+    assert_eq!((res.text.as_str(), res.turns, res.tool_call_count), ("5", 2, 1));
+    assert_eq!((res.tool_calls[0].name.as_str(), res.tool_calls[0].output.as_str()), ("add", "5"));
+    println!("ok: {} in {} turns", res.text, res.turns);
+    Ok(())
+}
 ```
 
-### 3. Handle a suspension
+### 3. The full surface — options and the whole `RunResult`
 
-```rust
-use toolnexus::client::{ClientOptions, Style, create_client};
-use toolnexus::{ToolkitOptions, create_toolkit};
-let tk = create_toolkit(ToolkitOptions::default()).await?;
-let client = create_client(ClientOptions {
-    base_url: "https://openrouter.ai/api/v1".into(),
-    style: Style::OpenAI,
-    model: "openai/gpt-4o-mini".into(),
-    ..Default::default()
-});
-let r = client.run("Ask me which environment, then deploy", &tk).await?;
-if r.status == "pending" { println!("waiting on: {}", r.pending.unwrap().prompt); }
+`system_prompt` is prepended to the toolkit's skills prompt; `max_turns` caps the loop and, when hit mid-tool-call
+with no final answer, the run comes back loudly as `"incomplete"` rather than silently `"done"`.
+
+```rust test
+use std::sync::Arc;
+
+use serde_json::json;
+use toolnexus::client::{GenerateFn, InProcessOptions, InProcessResponse, InProcessToolCall, InProcessUsage, create_in_process_client};
+use toolnexus::{BuiltinsConfig, ToolkitOptions, create_toolkit, define_tool};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // The model NEVER stops calling the tool, to exercise the max_turns cap.
+    let model: GenerateFn = Arc::new(|_req| Box::pin(async {
+        Ok(InProcessResponse {
+            tool_calls: vec![InProcessToolCall { id: "c1".into(), name: "ping".into(), arguments: json!({}) }],
+            usage: Some(InProcessUsage { prompt_tokens: 2, completion_tokens: 2, total_tokens: 4 }),
+            ..Default::default()
+        })
+    }));
+    let ping = define_tool("ping", "ping", None, |_, _| async { Ok::<_, String>("pong".into()) });
+    let tk = create_toolkit(ToolkitOptions {
+        extra_tools: vec![ping], builtins: Some(BuiltinsConfig::off()), ..Default::default()
+    }).await?;
+    let client = create_in_process_client(InProcessOptions {
+        model: "gpt-4o-mini".into(),
+        generate: Some(model),
+        system_prompt: "Be terse.".into(),
+        max_turns: 2, // hit the cap while the model is still mid tool-call
+        ..Default::default()
+    });
+
+    let res = client.run("keep pinging", &tk).await?;
+    assert_eq!((res.status.as_str(), res.limit.as_str()), ("incomplete", "maxTurns"));
+    assert_eq!((res.turns, res.tool_call_count, res.model.as_str()), (2, 2, "gpt-4o-mini"));
+    // Partial work is preserved even on a loud stop.
+    assert!(!res.messages.is_empty() && res.usage.total_tokens > 0);
+    println!("ok: stopped at {} after {} turns, {} tool calls", res.limit, res.turns, res.tool_call_count);
+    Ok(())
+}
 ```
+
+## RunResult fields
+
+| Field | Type | What it holds |
+|---|---|---|
+| `text` | `String` | The model's final answer text (`""` on an incomplete run with no text yet). |
+| `messages` | `Vec<Value>` | The full transcript — system/user/assistant/tool messages, provider-native shape. |
+| `tool_calls` | `Vec<ToolCall>` | One record per tool call: `name`, `args`, `output`, `is_error`, `metadata`. |
+| `tool_call_count` | `usize` | `tool_calls.len()`. |
+| `turns` | `usize` | Number of LLM round trips this run took. |
+| `usage` | `Usage` | `prompt_tokens` / `completion_tokens` / `total_tokens` (+ cache tokens), summed across every turn. |
+| `model` | `String` | The model used. |
+| `status` | `String` | `"done"` normally; `"pending"` iff a tool suspended with no `wait_for` configured (§10); `"incomplete"` iff a limit was hit. |
+| `limit` | `String` | Set (`"maxTurns"`, `"timeout"`) only when `status == "incomplete"`. |
+| `pending` | `Option<Request>` | Set only when `status == "pending"`. |
 
 ## See also
 

@@ -32,31 +32,102 @@ If you want the arguments decoded into a struct, use `define_typed_tool`.
 
 ## Examples
 
-### 1. No arguments
+### 1. A function and four arguments
 
-```rust
-use toolnexus::define_tool;
-let t = define_tool("now", "Current time", None, |_a, _c| async { Ok::<_, String>("12:00".to_string()) });
+The four arguments are the name, the description, the JSON schema (`Option<Value>`), and an async
+closure taking the arguments as a `serde_json::Value` plus the `ToolContext`.
+
+```rust test
+use serde_json::json;
+use toolnexus::{ToolContext, ToolSource, define_tool};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let greet = define_tool(
+        "greet",
+        "Greet someone by name",
+        Some(json!({"type":"object","properties":{"name":{"type":"string"}},"required":["name"]})),
+        |args, _ctx| async move {
+            args["name"].as_str().map(|n| format!("Hello, {n}!")).ok_or("name is required")
+        },
+    );
+    assert_eq!(greet.source, ToolSource::Native);
+    let r = greet.call(json!({"name": "Rust"}), ToolContext::default()).await;
+    assert_eq!(r.output, "Hello, Rust!");
+    println!("ok: {}", r.output);
+    Ok(())
+}
 ```
 
-### 2. With a schema
+### 2. Returning an error, and the schema-less case
 
-```rust
+`Err(e)` becomes an `isError` result carrying `e.to_string()` — the model reads it and can retry.
+`schema: None` advertises the empty-object schema.
+
+```rust test
 use serde_json::json;
-use toolnexus::define_tool;
-let t = define_tool("greet", "Greet someone",
-    Some(json!({"type":"object","properties":{"name":{"type":"string"}},"required":["name"]})),
-    |a, _c| async move { a["name"].as_str().map(|n| format!("Hello, {n}!")).ok_or("name is required") });
+use toolnexus::{ToolContext, define_tool, empty_schema};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let fail = define_tool("fail", "Always fails", None, |_a, _c| async { Err::<String, _>("boom") });
+    assert_eq!(fail.input_schema, empty_schema());
+    assert_eq!(fail.input_schema, json!({"type":"object","properties":{},"additionalProperties":false}));
+
+    let r = fail.call(json!({}), ToolContext::default()).await;
+    assert!(r.is_error && r.output == "boom");
+
+    // Any E: Display works — including std::io::Error from `?`.
+    let read = define_tool("read_missing", "", None, |_a, _c| async {
+        let s = std::fs::read_to_string("/definitely/not/here.txt")?;
+        Ok::<_, std::io::Error>(s)
+    });
+    let r2 = read.call(json!({}), ToolContext::default()).await;
+    assert!(r2.is_error && !r2.output.is_empty());
+    println!("ok: {} | {}", r.output, r2.output);
+    Ok(())
+}
 ```
 
-### 3. Errors are results
+### 3. Context, cancellation, and registering on a toolkit
 
-```rust
+```rust test
+use std::time::Duration;
+
 use serde_json::json;
-use toolnexus::{ToolContext, define_tool};
-let t = define_tool("fail", "", None, |_a, _c| async { Err::<String, _>("boom") });
-let r = t.call(json!({}), ToolContext::default()).await;
-assert!(r.is_error && r.output == "boom");
+use toolnexus::{BuiltinsConfig, ToolContext, ToolkitOptions, create_toolkit, define_tool};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let wait = define_tool("wait", "Sleep for ms milliseconds", None, |args, ctx| async move {
+        let ms = args["ms"].as_u64().unwrap_or(1000);
+        tokio::select! {
+            _ = ctx.cancel.cancelled() => Err("cancelled".to_string()),
+            _ = tokio::time::sleep(Duration::from_millis(ms)) => Ok(format!("slept {ms}ms")),
+        }
+    });
+    let tk = create_toolkit(ToolkitOptions {
+        extra_tools: vec![wait],
+        builtins: Some(BuiltinsConfig::off()),
+        ..Default::default()
+    })
+    .await?;
+    assert!(tk.get("wait").is_some());
+
+    let r = tk.execute("wait", json!({"ms": 5}), ToolContext::default()).await;
+    assert_eq!(r.output, "slept 5ms");
+
+    let ctx = ToolContext::default();
+    ctx.cancel.cancel();
+    let c = tk.execute("wait", json!({"ms": 5000}), ctx).await;
+    assert!(c.is_error && c.output == "cancelled");
+
+    // `register` adds tools to a live toolkit (safe mid-turn).
+    tk.register([define_tool("ping", "", None, |_a, _c| async { Ok::<_, String>("pong".into()) })]);
+    assert_eq!(tk.execute("ping", json!({}), ToolContext::default()).await.output, "pong");
+    println!("ok: {} | {} | {} tools", r.output, c.output, tk.tools().len());
+    Ok(())
+}
 ```
 
 ## See also

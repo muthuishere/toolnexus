@@ -12,78 +12,280 @@ import { Aside } from '@astrojs/starlight/components';
 </p>
 
 ```rust
-pub struct ProviderError { pub status: u16, pub body: String, pub retry_after: String }
-// returned as ClientError::Provider(ProviderError)
+pub struct ProviderError {
+    pub status: u16,         // the HTTP status of the failed response
+    pub body: String,        // whole body, already redacted; NOT capped (Display caps it)
+    pub retry_after: String, // the raw Retry-After header, empty when absent
+}
+// returned as ClientError::Provider(ProviderError); Display: "LLM <status>: <capped body>"
+
+pub fn redact_provider_body(status: u16, body: &str) -> String;
+pub const REDACTED_MARKER: &str = "«redacted»";
 ```
 
-A non-2xx response from the model endpoint raises a typed provider error carrying the status code, a redacted+capped body, and the retry-after signal — never a bare unstructured exception.
+A non-2xx response from the model endpoint returns `ClientError::Provider(ProviderError)` carrying
+the status code, a redacted body, and the raw `Retry-After` — never a bare string a host has to
+parse. The shape is the same whether the failure came from OpenAI, Anthropic or a proxy in front of
+either.
 
 ## When to use it
 
-When a run fails on the provider's side: match `ClientError::Provider` to get the HTTP status, the (redacted) body and any `Retry-After`.
+When you need to branch on **why** an LLM call failed: rate limiting (429) with `retry_after`, a
+billing failure (402), an account-suspended body worth surfacing to an operator. Match
+`ClientError::Provider(p)` on whatever `run` / `ask` / `stream` returned.
 
 ## Why this and not the alternative
 
-Match the typed error instead of parsing the message string; the body is already redacted of account identifiers.
+Match the typed variant instead of parsing the `Display` string.
 
-<Aside type="tip" title="When not to use it">
+<Aside type="tip" title="Just logging the error? The body is already safe to print">
+`p.body` and the `Display` text already have account identifiers (`user_id`, `account_id`,
+`org_id`, `organization`) replaced with `«redacted»`, and a 401/403 body is dropped to `""`
+entirely (an auth failure routinely echoes the credential back). `Display` additionally caps the
+message at 200 characters; the `body` field is uncapped. If you log your **own** provider calls,
+call `toolnexus::client::redact_provider_body(status, body)` rather than re-deriving the rules.
 Transport failures are `ClientError::Transport`, not this.
 </Aside>
 
+A `ProviderError` is what you get **after** retries are exhausted. While a call is still being
+retried, [`on_error`](/api/rust/client/resilience/) sees the same status as `ErrorInfo.status`.
+
 ## Examples
 
-### 1. Branch on the status
+Each example points the client at a loopback stub — no network, fake key only.
 
-```rust
-use toolnexus::client::{ClientOptions, Style, create_client};
-use toolnexus::client::ClientError;
+### 1. The smallest useful call — match the variant and read `status`
+
+```rust test
+use std::sync::Arc;
+
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
+use toolnexus::client::{ClientError, ClientOptions, Style, create_client};
 use toolnexus::{ToolkitOptions, create_toolkit};
-let tk = create_toolkit(ToolkitOptions::default()).await?;
-let client = create_client(ClientOptions {
-    base_url: "https://openrouter.ai/api/v1".into(),
-    style: Style::OpenAI,
-    model: "openai/gpt-4o-mini".into(),
-    ..Default::default()
-});
-match client.run("hi", &tk).await {
-    Err(ClientError::Provider(p)) if p.status == 402 => println!("top up credits"),
-    Err(e) => println!("failed: {e}"),
-    Ok(r) => println!("{}", r.text),
+
+/// A loopback HTTP stub: `reply(n, raw_request)` answers the n-th request (1-based)
+/// with `(status, extra header lines, body)`.
+async fn stub<F>(reply: F) -> String
+where
+    F: Fn(usize, &str) -> (u16, String, String) + Send + Sync + 'static,
+{
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let reply = Arc::new(reply);
+    tokio::spawn(async move {
+        let mut n = 0;
+        while let Ok((mut sock, _)) = listener.accept().await {
+            n += 1;
+            let (reply, i) = (reply.clone(), n);
+            tokio::spawn(async move {
+                let (mut buf, mut chunk) = (Vec::new(), [0u8; 4096]);
+                loop {
+                    let k = sock.read(&mut chunk).await.unwrap_or(0);
+                    if k == 0 {
+                        break;
+                    }
+                    buf.extend_from_slice(&chunk[..k]);
+                    let s = String::from_utf8_lossy(&buf).to_string();
+                    if let Some(h) = s.find("\r\n\r\n") {
+                        let len = s[..h]
+                            .lines()
+                            .find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse().unwrap_or(0)))
+                            .unwrap_or(0);
+                        if buf.len() >= h + 4 + len {
+                            break;
+                        }
+                    }
+                }
+                let (status, extra, body) = reply(i, &String::from_utf8_lossy(&buf));
+                let head = format!(
+                    "HTTP/1.1 {status} STUB\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n{extra}\r\n",
+                    body.len()
+                );
+                let _ = sock.write_all(format!("{head}{body}").as_bytes()).await;
+            });
+        }
+    });
+    url
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let url = stub(|_, _| (429, String::new(), r#"{"error":"rate limited"}"#.into())).await;
+    let tk = create_toolkit(ToolkitOptions::default()).await?;
+    let client = create_client(ClientOptions {
+        base_url: url, style: Style::OpenAI, model: "stub".into(), api_key: "k".into(),
+        retries: -1,
+        ..Default::default()
+    });
+    match client.run("hi", &tk).await {
+        Err(ClientError::Provider(p)) => {
+            assert_eq!(p.status, 429);
+            println!("ok: status {}", p.status);
+        }
+        other => panic!("expected ClientError::Provider, got {other:?}"),
+    }
+    Ok(())
 }
 ```
 
-### 2. Respect Retry-After yourself
+### 2. The realistic case — reading `retry_after` to back off
 
-```rust
-use toolnexus::client::{ClientOptions, Style, create_client};
-use toolnexus::client::ClientError;
+```rust test
+use std::sync::Arc;
+
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
+use toolnexus::client::{ClientError, ClientOptions, Style, create_client};
 use toolnexus::{ToolkitOptions, create_toolkit};
-let tk = create_toolkit(ToolkitOptions::default()).await?;
-let client = create_client(ClientOptions {
-    base_url: "https://openrouter.ai/api/v1".into(),
-    style: Style::OpenAI,
-    model: "openai/gpt-4o-mini".into(),
-    ..Default::default()
-});
-if let Err(ClientError::Provider(p)) = client.run("hi", &tk).await {
-    println!("retry after {}s", p.retry_after);
+
+/// A loopback HTTP stub: `reply(n, raw_request)` answers the n-th request (1-based)
+/// with `(status, extra header lines, body)`.
+async fn stub<F>(reply: F) -> String
+where
+    F: Fn(usize, &str) -> (u16, String, String) + Send + Sync + 'static,
+{
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let reply = Arc::new(reply);
+    tokio::spawn(async move {
+        let mut n = 0;
+        while let Ok((mut sock, _)) = listener.accept().await {
+            n += 1;
+            let (reply, i) = (reply.clone(), n);
+            tokio::spawn(async move {
+                let (mut buf, mut chunk) = (Vec::new(), [0u8; 4096]);
+                loop {
+                    let k = sock.read(&mut chunk).await.unwrap_or(0);
+                    if k == 0 {
+                        break;
+                    }
+                    buf.extend_from_slice(&chunk[..k]);
+                    let s = String::from_utf8_lossy(&buf).to_string();
+                    if let Some(h) = s.find("\r\n\r\n") {
+                        let len = s[..h]
+                            .lines()
+                            .find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse().unwrap_or(0)))
+                            .unwrap_or(0);
+                        if buf.len() >= h + 4 + len {
+                            break;
+                        }
+                    }
+                }
+                let (status, extra, body) = reply(i, &String::from_utf8_lossy(&buf));
+                let head = format!(
+                    "HTTP/1.1 {status} STUB\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n{extra}\r\n",
+                    body.len()
+                );
+                let _ = sock.write_all(format!("{head}{body}").as_bytes()).await;
+            });
+        }
+    });
+    url
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let url = stub(|_, _| (429, "retry-after: 20\r\n".into(), r#"{"error":"rate limited"}"#.into())).await;
+    let tk = create_toolkit(ToolkitOptions::default()).await?;
+    let client = create_client(ClientOptions {
+        base_url: url, style: Style::OpenAI, model: "stub".into(), api_key: "k".into(),
+        retries: -1,
+        ..Default::default()
+    });
+    let Err(ClientError::Provider(p)) = client.run("hi", &tk).await else {
+        panic!("expected ClientError::Provider");
+    };
+    assert_eq!(p.retry_after, "20");
+    println!("ok: retry after {} seconds", p.retry_after);
+    Ok(())
 }
 ```
 
-### 3. Log the body
+### 3. The full surface — an account-identifier body gets redacted, an auth body gets dropped
 
-```rust
-use toolnexus::client::{ClientOptions, Style, create_client};
-use toolnexus::client::ClientError;
+```rust test
+use std::sync::Arc;
+
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
+use toolnexus::client::{ClientError, ClientOptions, REDACTED_MARKER, Style, create_client};
 use toolnexus::{ToolkitOptions, create_toolkit};
-let tk = create_toolkit(ToolkitOptions::default()).await?;
-let client = create_client(ClientOptions {
-    base_url: "https://openrouter.ai/api/v1".into(),
-    style: Style::OpenAI,
-    model: "openai/gpt-4o-mini".into(),
-    ..Default::default()
-});
-if let Err(ClientError::Provider(p)) = client.run("hi", &tk).await { eprintln!("{}: {}", p.status, p.body); }
+
+/// A loopback HTTP stub: `reply(n, raw_request)` answers the n-th request (1-based)
+/// with `(status, extra header lines, body)`.
+async fn stub<F>(reply: F) -> String
+where
+    F: Fn(usize, &str) -> (u16, String, String) + Send + Sync + 'static,
+{
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let reply = Arc::new(reply);
+    tokio::spawn(async move {
+        let mut n = 0;
+        while let Ok((mut sock, _)) = listener.accept().await {
+            n += 1;
+            let (reply, i) = (reply.clone(), n);
+            tokio::spawn(async move {
+                let (mut buf, mut chunk) = (Vec::new(), [0u8; 4096]);
+                loop {
+                    let k = sock.read(&mut chunk).await.unwrap_or(0);
+                    if k == 0 {
+                        break;
+                    }
+                    buf.extend_from_slice(&chunk[..k]);
+                    let s = String::from_utf8_lossy(&buf).to_string();
+                    if let Some(h) = s.find("\r\n\r\n") {
+                        let len = s[..h]
+                            .lines()
+                            .find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse().unwrap_or(0)))
+                            .unwrap_or(0);
+                        if buf.len() >= h + 4 + len {
+                            break;
+                        }
+                    }
+                }
+                let (status, extra, body) = reply(i, &String::from_utf8_lossy(&buf));
+                let head = format!(
+                    "HTTP/1.1 {status} STUB\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n{extra}\r\n",
+                    body.len()
+                );
+                let _ = sock.write_all(format!("{head}{body}").as_bytes()).await;
+            });
+        }
+    });
+    url
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let url = stub(|n, _| {
+        if n == 1 {
+            // A 500 with an account_id in the body: redacted, not dropped.
+            (500, String::new(), r#"{"error":"internal","account_id":"acct_12345"}"#.into())
+        } else {
+            // A 401: the whole body is dropped, since it routinely echoes the credential.
+            (401, String::new(), r#"{"error":"invalid api key sk-abc123"}"#.into())
+        }
+    })
+    .await;
+    let tk = create_toolkit(ToolkitOptions::default()).await?;
+    let client = create_client(ClientOptions {
+        base_url: url, style: Style::OpenAI, model: "stub".into(), api_key: "k".into(),
+        retries: -1,
+        ..Default::default()
+    });
+
+    let Err(ClientError::Provider(p)) = client.run("hi", &tk).await else { panic!("expected Provider") };
+    assert!(!p.body.contains("acct_12345") && p.body.contains(REDACTED_MARKER), "{}", p.body);
+
+    let Err(ClientError::Provider(p)) = client.run("hi", &tk).await else { panic!("expected Provider") };
+    assert_eq!(p.status, 401);
+    assert!(p.body.is_empty(), "a 401 body must be dropped in full, got {:?}", p.body);
+
+    println!("ok: redacted, and auth body dropped");
+    Ok(())
+}
 ```
 
 ## See also
@@ -92,3 +294,4 @@ if let Err(ClientError::Provider(p)) = client.run("hi", &tk).await { eprintln!("
 - [`Client.run`](/api/rust/client/run/) — Send a prompt, let the loop call tools until the model stops, get a RunResult.
 - [`Client.stream`](/api/rust/client/stream/) — The streaming loop: text deltas, tool-call events, and suspension events as they happen.
 - [`Hooks`](/api/rust/client/hooks/) — Intercept before/after model calls and tool calls: audit, redact, veto, or rewrite.
+- [`ErrorInfo`](/api/rust/client/resilience/) — The retry/fail policy that classifies the same status mid-retry.

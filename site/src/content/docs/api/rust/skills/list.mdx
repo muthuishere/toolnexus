@@ -32,29 +32,155 @@ To actually expose skills to a model, load them; this only lists.
 
 ## Examples
 
-### 1. List names
+### 1. Inventory the shared fixture
 
-```rust
+```rust test
+use std::path::Path;
 use toolnexus::skills::{LoadSkillsOptions, list_skills};
-let inv = list_skills(&LoadSkillsOptions { dirs: vec!["skills".into()], ..Default::default() });
-for s in &inv.skills { println!("{}: {}", s.name, s.description); }
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // TOOLNEXUS_REPO is set by the docs test runner; in your own code just use a path.
+    let dir = Path::new(&std::env::var("TOOLNEXUS_REPO")?).join("examples/skills");
+
+    let inv = list_skills(&LoadSkillsOptions { dirs: vec![dir], ..Default::default() });
+
+    assert_eq!(inv.skills.len(), 1);
+    assert_eq!(inv.skills[0].name, "hello-world");
+    // A clean directory skips nothing.
+    assert!(inv.skipped.is_empty(), "{:?}", inv.skipped);
+
+    println!("ok: {} | skipped: {}", inv.skills[0].name, inv.skipped.len());
+    Ok(())
+}
 ```
 
-### 2. Report skips
+### 2. The reason a `SKILL.md` did not load
 
-```rust
-use toolnexus::skills::{LoadSkillsOptions, list_skills};
-let inv = list_skills(&LoadSkillsOptions { dirs: vec!["skills".into()], ..Default::default() });
-for s in &inv.skipped { println!("{} {} {}", s.location, s.reason.as_str(), s.detail); }
+Four typed reasons, and this is how each one shows up.
+
+```rust test
+use std::path::Path;
+use toolnexus::skills::{LoadSkillsOptions, SkillSkipReason, list_skills};
+
+fn write(root: &Path, name: &str, body: &str) {
+    std::fs::create_dir_all(root.join(name)).unwrap();
+    std::fs::write(root.join(name).join("SKILL.md"), body).unwrap();
+}
+
+fn main() {
+    let root = std::env::temp_dir().join(format!("skills-list-{}", std::process::id()));
+    write(&root, "good", "---\nname: good\ndescription: Fine.\n---\n\nBody.\n");
+    // Fences present, YAML invalid — and `[` opens a construct the lenient
+    // rescue refuses, so no name can be recovered.
+    write(&root, "broken", "---\nname: [oops\n---\n\nBody.\n");
+    // Parses, but has no name — nothing to call it by.
+    write(&root, "unnamed", "---\ndescription: No name here.\n---\n\nBody.\n");
+
+    let inv = list_skills(&LoadSkillsOptions { dirs: vec![root.clone()], ..Default::default() });
+    std::fs::remove_dir_all(&root).ok();
+
+    assert_eq!(inv.skills.len(), 1);
+    assert_eq!(inv.skills[0].name, "good");
+    let reasons: Vec<SkillSkipReason> = inv.skipped.iter().map(|s| s.reason).collect();
+    assert!(reasons.contains(&SkillSkipReason::MalformedFrontmatter), "{:?}", inv.skipped);
+    assert!(reasons.contains(&SkillSkipReason::MissingName), "{:?}", inv.skipped);
+    // Reasons are typed variants with stable string values.
+    assert_eq!(SkillSkipReason::MalformedFrontmatter.as_str(), "malformed-frontmatter");
+
+    println!("ok: 1 skill, {} skips", inv.skipped.len());
+}
 ```
 
-### 3. Fail a CI lint on any skip
+<Aside type="caution">
+A file with **no** frontmatter fences at all is not "malformed" — it parses to an empty header and
+is skipped as `missing-name`. `malformed-frontmatter` means the fences were there, the YAML
+inside them failed to parse, **and** the lenient line-wise rescue could not recover a `name`
+either. A near-miss like `name: "oops` is rescued and loads (as `"oops`); only a value that opens
+a YAML construct the rescue declines — `| > & * [ { !` — leaves nothing to recover.
+</Aside>
 
-```rust
-use toolnexus::skills::{LoadSkillsOptions, list_skills};
-let inv = list_skills(&LoadSkillsOptions { dirs: vec!["skills".into()], ..Default::default() });
-assert!(inv.skipped.is_empty(), "{:?}", inv.skipped);
+### 3. Every source, duplicate detection, and authoring the allowlist
+
+Directories and data skills go into the same inventory, and the second skill to claim a name is
+reported as `duplicate-name` — first one wins.
+
+```rust test
+use std::collections::HashMap;
+use std::path::Path;
+use toolnexus::skills::{LoadSkillsOptions, SkillDef, SkillSkipReason, list_skills, load_skills_with};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let shared = Path::new(&std::env::var("TOOLNEXUS_REPO")?).join("examples/skills");
+
+    let opts = LoadSkillsOptions {
+        dirs: vec![shared],
+        skills: vec![
+            SkillDef {
+                name: "deploy".into(),
+                description: "Ship the service to prod.".into(),
+                content: "Run the taskfile.".into(),
+                resources: vec!["skill://deploy/checklist.md".into()],
+                ..Default::default()
+            },
+            // Collides with the fixture on disk — dirs are collected first, so this loses.
+            SkillDef { name: "hello-world".into(), description: "A shadow.".into(), content: "Ignored.".into(), ..Default::default() },
+            // No name at all.
+            SkillDef { description: "Anonymous.".into(), content: "Ignored.".into(), ..Default::default() },
+        ],
+        // filter is accepted but has NO effect on the inventory.
+        filter: HashMap::from([("deploy".to_string(), true)]),
+        ..Default::default()
+    };
+
+    let inv = list_skills(&opts);
+
+    let mut names: Vec<&str> = inv.skills.iter().map(|s| s.name.as_str()).collect();
+    names.sort();
+    assert_eq!(names, ["deploy", "hello-world"], "unfiltered inventory expected");
+
+    let count = |r| inv.skipped.iter().filter(|s| s.reason == r).count();
+    assert_eq!(count(SkillSkipReason::DuplicateName), 1);
+    assert_eq!(count(SkillSkipReason::MissingName), 1);
+
+    // The fixture on disk won: hello-world is still the fs-sourced one.
+    for s in &inv.skills {
+        match s.name.as_str() {
+            "hello-world" => assert_eq!(s.origin, "fs"),
+            "deploy" => assert_eq!(s.origin, "logical"),
+            _ => {}
+        }
+    }
+
+    // Now author the allowlist from what you actually found, and load for real.
+    let allow: HashMap<String, bool> =
+        inv.skills.iter().map(|s| (s.name.clone(), s.name == "deploy")).collect();
+    let src = load_skills_with(LoadSkillsOptions { filter: allow, ..opts.clone() });
+    assert_eq!(src.skills.len(), 1);
+
+    println!("ok: {names:?} | skipped: {}", inv.skipped.len());
+    Ok(())
+}
 ```
+
+## Options and results
+
+`LoadSkillsOptions` — the same struct [`load_skills_with`](/api/rust/skills/load-with/) takes:
+
+| Field | Type | Effect on `list_skills` |
+|---|---|---|
+| `dirs` | `Vec<PathBuf>` | Roots walked for `**/SKILL.md`. A missing root contributes nothing. |
+| `skills` | `Vec<SkillDef>` | Skills supplied as data. Collected **after** `dirs`, so directories win a name clash. |
+| `filter` | `HashMap<String, bool>` | **Ignored** — the inventory is always unfiltered. |
+| `sample_limit` | `i64` | **Ignored** — no tool is built, so nothing is sampled. |
+
+`SkillSkipReason` — the typed values in `skipped`:
+
+| Variant | `as_str()` | Means |
+|---|---|---|
+| `MissingName` | `missing-name` | Frontmatter parsed but carried no `name` (including "no frontmatter at all"). |
+| `MalformedFrontmatter` | `malformed-frontmatter` | `---` fences present, YAML inside failed to parse. |
+| `DuplicateName` | `duplicate-name` | Another candidate already claimed that name; the first one is kept. |
+| `Unreadable` | `unreadable` | The `SKILL.md` could not be read (permissions, broken link). |
 
 ## See also
 

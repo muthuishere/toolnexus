@@ -24,21 +24,107 @@ Form mode becomes `kind: "input"` with the requested schema in `data.schema`; UR
 or `{}`), `reason: "declined"` → `decline`, anything else → `cancel`. Without a `wait_for` the
 capability is not advertised, so a compliant server never elicits.
 
-## Example
+## When to use it
 
-```rust
-use std::sync::Arc;
-use toolnexus::{Answer, McpConfigInput, ToolkitOptions, create_toolkit};
-let ask: toolnexus::client::WaitForFn = Arc::new(|req| Box::pin(async move {
-    // show req.prompt (and req.data["schema"] / req.url) to the user
-    Ok(Answer { id: req.id, ok: true, data: None, ..Default::default() })
-}));
-let tk = create_toolkit(ToolkitOptions {
-    mcp_config: Some(McpConfigInput::Path("mcp.json".into())),
-    wait_for: Some(ask.clone()),   // typically the same function given to the client
-    ..Default::default()
-}).await?;
+Mostly you do not call these yourself: give the toolkit (or `McpLoadOptions`) a `wait_for` and the
+bridge runs inline whenever a server elicits. Call the two functions directly when you host your
+own MCP client loop, or when you test how your `wait_for` will see a server's request.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="One resolver for every question">
+The bridge turns a server's elicitation into the same §10 `Request` a tool's `pending(...)` produces,
+so one `wait_for` answers both. Handling `elicitation/create` per server would mean a second,
+divergent prompt path for the same human.
+</Aside>
+
+## Examples
+
+### 1. Form-mode elicitation becomes a `kind:"input"` Request
+
+```rust test
+use serde_json::json;
+use toolnexus::mcp::elicitation_to_request;
+
+fn main() {
+    let params = json!({
+        "mode": "form",
+        "message": "What is your deployment region?",
+        "requestedSchema": {"type": "object", "properties": {"region": {"type": "string"}}},
+    });
+
+    let req = elicitation_to_request(&params);
+
+    assert_eq!(req.kind, "input");
+    assert_eq!(req.prompt, "What is your deployment region?");
+    assert!(req.id.starts_with("elc-"), "a generated, unique request id");
+    let schema = req.data.as_ref().and_then(|d| d.get("schema"));
+    assert!(schema.is_some(), "the requested schema rides under data.schema");
+
+    println!("ok: {} | {}", req.kind, req.prompt);
+}
 ```
+
+### 2. URL-mode elicitation becomes a `kind:"authorization"` Request
+
+```rust test
+use serde_json::json;
+use toolnexus::mcp::elicitation_to_request;
+
+fn main() {
+    let params = json!({
+        "mode": "url",
+        "message": "Sign in to continue",
+        "url": "https://example.com/oauth/authorize",
+    });
+
+    let req = elicitation_to_request(&params);
+
+    assert_eq!(req.kind, "authorization");
+    assert_eq!(req.url, "https://example.com/oauth/authorize");
+    println!("ok: {} | {}", req.kind, req.url);
+}
+```
+
+### 3. Round-tripping an Answer back to an elicitation result
+
+`answer_to_elicit_result` covers three outcomes: accepted (with data), explicitly declined, and
+everything else treated as a cancellation — a dismissal, a timeout, an unspecified reason.
+
+```rust test
+use serde_json::json;
+use toolnexus::Answer;
+use toolnexus::mcp::answer_to_elicit_result;
+
+fn main() {
+    let data = json!({"region": "apac"}).as_object().cloned();
+    let accepted = answer_to_elicit_result(&Answer { ok: true, data, ..Default::default() });
+    assert_eq!(accepted, json!({"action": "accept", "content": {"region": "apac"}}));
+
+    let declined = answer_to_elicit_result(&Answer { reason: "declined".into(), ..Default::default() });
+    assert_eq!(declined["action"], "decline");
+
+    let cancelled = answer_to_elicit_result(&Answer { reason: "expired".into(), ..Default::default() });
+    assert_eq!(cancelled["action"], "cancel");
+
+    println!("ok: {} {} {}", accepted["action"], declined["action"], cancelled["action"]);
+}
+```
+
+## Mapping
+
+| elicitation params | `Request` |
+|---|---|
+| `mode == "url"` | `kind: "authorization"`, `url: params.url` |
+| `mode != "url"` (form, default) | `kind: "input"`, `data["schema"]: params.requestedSchema` |
+| `message` | `prompt` |
+| — | `id` — freshly generated (`elc-…`), unique per call |
+
+| `Answer` | result |
+|---|---|
+| `ok: true` | `{"action":"accept","content": answer.data}` (or `{}` if `None`) |
+| `ok: false, reason: "declined"` | `{"action":"decline"}` |
+| `ok: false`, any other reason | `{"action":"cancel"}` |
 
 ## See also
 

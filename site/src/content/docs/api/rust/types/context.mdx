@@ -36,45 +36,195 @@ Outside a loop, pass `ToolContext::default()` — every field is optional.
 
 ## Examples
 
-### 1. Honour cancellation
+### 1. Respecting cancellation
 
-```rust
-use toolnexus::define_tool;
-let slow = define_tool("slow", "Waits", None, |_a, ctx| async move {
-    tokio::select! {
-        _ = ctx.cancel.cancelled() => Err("cancelled".to_string()),
-        _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => Ok("done".to_string()),
-    }
-});
-```
+```rust test
+use std::time::{Duration, Instant};
 
-### 2. Use the call id
+use serde_json::json;
+use toolnexus::{ToolContext, define_tool};
 
-```rust
-use toolnexus::define_tool;
-let t = define_tool("who", "", None, |_a, ctx| async move {
-    Ok::<_, String>(ctx.call_id.unwrap_or_else(|| "direct".into()))
-});
-```
-
-### 3. Read a §10 answer
-
-```rust
-use std::sync::Arc;
-use toolnexus::{Request, Tool, ToolResult, ToolSource, empty_schema, pending};
-// A suspension must be the tool's whole ToolResult (it carries metadata.pending),
-// so build the Tool directly rather than through define_tool, whose Ok(String) has no metadata.
-let ask = Tool {
-    name: "confirm".into(), description: "Ask first".into(), input_schema: empty_schema(),
-    source: ToolSource::Custom, hints: None,
-    execute: Arc::new(|_a, ctx| Box::pin(async move {
-        match ctx.answer {
-            Some(a) if a.ok => ToolResult::ok("confirmed"),
-            Some(_) => ToolResult::error("declined"),
-            None => pending(Request { kind: "approval".into(), prompt: "Proceed?".into(), ..Default::default() }),
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let slow = define_tool("slow", "Waits five seconds", None, |_a, ctx| async move {
+        tokio::select! {
+            _ = ctx.cancel.cancelled() => Err("cancelled".to_string()),
+            _ = tokio::time::sleep(Duration::from_secs(5)) => Ok("done".to_string()),
         }
-    })),
+    });
+    let ctx = ToolContext::default();
+    let token = ctx.cancel.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        token.cancel();
+    });
+    let t0 = Instant::now();
+    let r = slow.call(json!({}), ctx).await;
+    assert!(r.is_error && r.output == "cancelled");
+    assert!(t0.elapsed() < Duration::from_secs(2), "returned promptly");
+    println!("ok: {} after {:?}", r.output, t0.elapsed());
+    Ok(())
+}
+```
+
+### 2. Honouring the caller's timeout
+
+`timeout_ms` is this call's budget in milliseconds; `0` means unset. A tool that does its own
+waiting should bound itself by it.
+
+```rust test
+use std::time::Duration;
+
+use serde_json::json;
+use toolnexus::{ToolContext, define_tool};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let fetch = define_tool("fetch", "Simulates a 200 ms call", None, |_a, ctx| async move {
+        let work = tokio::time::sleep(Duration::from_millis(200));
+        if ctx.timeout_ms == 0 {
+            work.await;
+            return Ok("finished".to_string());
+        }
+        tokio::time::timeout(Duration::from_millis(ctx.timeout_ms), work)
+            .await
+            .map(|_| "finished".to_string())
+            .map_err(|_| format!("timed out after {}ms", ctx.timeout_ms))
+    });
+    let tight = fetch
+        .call(json!({}), ToolContext { timeout_ms: 20, ..Default::default() })
+        .await;
+    let loose = fetch.call(json!({}), ToolContext::default()).await;
+    assert_eq!((tight.is_error, tight.output.as_str()), (true, "timed out after 20ms"));
+    assert_eq!((loose.is_error, loose.output.as_str()), (false, "finished"));
+    println!("ok: {} / {}", tight.output, loose.output);
+    Ok(())
+}
+```
+
+### 3. `answer` — the second half of a suspension
+
+The first call suspends with `pending(..)`; the loop asks `wait_for`, then re-runs the same call with
+`ctx.answer` set. A suspension must be the tool's whole `ToolResult` (it carries
+`metadata.pending`), so this tool is built as a `Tool` literal rather than through `define_tool`.
+
+```rust test
+use std::sync::Arc;
+
+use toolnexus::client::{InProcessOptions, InProcessResponse, InProcessToolCall, create_in_process_client};
+use toolnexus::{
+    Answer, BuiltinsConfig, Request, Tool, ToolResult, ToolSource, ToolkitOptions, create_toolkit,
+    empty_schema, pending,
 };
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let confirm = Tool {
+        name: "confirm".into(),
+        description: "Ask first".into(),
+        input_schema: empty_schema(),
+        source: ToolSource::Custom,
+        hints: None,
+        execute: Arc::new(|_a, ctx| {
+            Box::pin(async move {
+                match ctx.answer {
+                    Some(a) if a.ok => ToolResult::ok("confirmed"),
+                    Some(a) => ToolResult::error(format!("declined: {}", a.reason)),
+                    None => pending(Request {
+                        kind: "approval".into(),
+                        prompt: "Proceed?".into(),
+                        ..Default::default()
+                    }),
+                }
+            })
+        }),
+    };
+    let tk = create_toolkit(ToolkitOptions {
+        extra_tools: vec![confirm],
+        builtins: Some(BuiltinsConfig::off()),
+        ..Default::default()
+    })
+    .await?;
+
+    // Scripted model: call `confirm` once, then repeat the tool's answer.
+    let client = create_in_process_client(InProcessOptions {
+        model: "scripted".into(),
+        generate: Some(Arc::new(|req| {
+            Box::pin(async move {
+                let last = req.messages.last().cloned().unwrap_or_default();
+                if last["role"] == "tool" {
+                    let out = last["content"].as_str().unwrap_or("").to_string();
+                    return Ok(InProcessResponse { content: format!("tool said: {out}"), ..Default::default() });
+                }
+                Ok(InProcessResponse {
+                    tool_calls: vec![InProcessToolCall { name: "confirm".into(), ..Default::default() }],
+                    ..Default::default()
+                })
+            })
+        })),
+        // The host's human-in-the-loop: approve every request.
+        wait_for: Some(Arc::new(|req: Request| {
+            Box::pin(async move { Ok(Answer { id: req.id, ok: true, ..Default::default() }) })
+        })),
+        ..Default::default()
+    });
+    let res = client.run("delete the build dir", &tk).await?;
+    assert_eq!(res.text, "tool said: confirmed");
+    println!("ok: {}", res.text);
+    Ok(())
+}
+```
+
+## `call_id` — tell sibling calls apart
+
+A tool run by the client loop gets `ToolContext.call_id` = the model's id for that call (`None`
+outside the loop). The loop runs one message's tool calls concurrently, so this is how a tool — or
+a host tracking which subagent call is the parent of which UI row — tells sibling calls apart.
+
+```rust test
+use std::sync::{Arc, Mutex};
+
+use toolnexus::client::{InProcessOptions, InProcessResponse, InProcessToolCall, create_in_process_client};
+use toolnexus::{BuiltinsConfig, ToolkitOptions, create_toolkit, define_tool};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let ids = Arc::new(Mutex::new(Vec::<String>::new()));
+    let seen = ids.clone();
+    let probe = define_tool("probe", "records its call id", None, move |_a, ctx| {
+        let seen = seen.clone();
+        async move {
+            seen.lock().unwrap().push(ctx.call_id.unwrap_or_else(|| "direct".into()));
+            Ok::<_, String>("ok".to_string())
+        }
+    });
+    let tk = create_toolkit(ToolkitOptions {
+        extra_tools: vec![probe],
+        builtins: Some(BuiltinsConfig::off()),
+        ..Default::default()
+    })
+    .await?;
+
+    let client = create_in_process_client(InProcessOptions {
+        model: "scripted".into(),
+        generate: Some(Arc::new(|req| {
+            Box::pin(async move {
+                if req.messages.iter().any(|m| m["role"] == "tool") {
+                    return Ok(InProcessResponse { content: "done".into(), ..Default::default() });
+                }
+                let call = |id: &str| InProcessToolCall { id: id.into(), name: "probe".into(), ..Default::default() };
+                Ok(InProcessResponse { tool_calls: vec![call("call_a"), call("call_b")], ..Default::default() })
+            })
+        })),
+        ..Default::default()
+    });
+    client.run("probe twice", &tk).await?;
+    let mut got = ids.lock().unwrap().clone();
+    got.sort();
+    assert_eq!(got, ["call_a", "call_b"]);
+    println!("ok: {got:?}");
+    Ok(())
+}
 ```
 
 ## See also

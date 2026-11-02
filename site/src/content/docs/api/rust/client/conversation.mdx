@@ -33,56 +33,108 @@ For an independent task, `run` keeps no state.
 
 ## Examples
 
-### 1. Two turns
+Each example is a complete program. The model is an in-process stand-in ([`create_in_process_client`](/api/rust/client/create/)): the loop is exactly the one `create_client` runs, with a host function in place of the HTTP call, so no network and no API key are involved.
 
-```rust
-use toolnexus::client::{ClientOptions, Style, create_client};
-use toolnexus::{ToolkitOptions, create_toolkit};
-let tk = create_toolkit(ToolkitOptions::default()).await?;
-let client = create_client(ClientOptions {
-    base_url: "https://openrouter.ai/api/v1".into(),
-    style: Style::OpenAI,
-    model: "openai/gpt-4o-mini".into(),
-    ..Default::default()
-});
-let mut chat = client.conversation(&tk);
-chat.send("My name is Ada").await?;
-let r = chat.send("What is my name?").await?;
+### 1. The smallest useful call — two turns, transcript grows
+
+```rust test
+use std::sync::Arc;
+
+use toolnexus::client::{GenerateFn, InProcessOptions, InProcessResponse, create_in_process_client};
+use toolnexus::{BuiltinsConfig, ToolkitOptions, create_toolkit};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let model: GenerateFn = Arc::new(|_req| Box::pin(async {
+        Ok(InProcessResponse { content: "ack".into(), ..Default::default() })
+    }));
+    let client = create_in_process_client(InProcessOptions { model: "m".into(), generate: Some(model), ..Default::default() });
+    let tk = create_toolkit(ToolkitOptions { builtins: Some(BuiltinsConfig::off()), ..Default::default() }).await?;
+
+    let mut conv = client.conversation(&tk);
+    conv.send("one").await?;
+    let after_first = conv.messages.len();
+    conv.send("two").await?;
+    assert!(conv.messages.len() > after_first, "transcript did not grow");
+    println!("ok: transcript grew from {} to {}", after_first, conv.messages.len());
+    Ok(())
+}
 ```
 
-### 2. Inspect the transcript
+### 2. The realistic case — the system prompt is sent once, not per turn
 
-```rust
-use toolnexus::client::{ClientOptions, Style, create_client};
-use toolnexus::{ToolkitOptions, create_toolkit};
-let tk = create_toolkit(ToolkitOptions::default()).await?;
-let client = create_client(ClientOptions {
-    base_url: "https://openrouter.ai/api/v1".into(),
-    style: Style::OpenAI,
-    model: "openai/gpt-4o-mini".into(),
-    ..Default::default()
-});
-let mut chat = client.conversation(&tk);
-chat.send("hi").await?;
-println!("{} messages", chat.messages.len());
+```rust test
+use std::sync::{Arc, Mutex};
+
+use toolnexus::client::{GenerateFn, InProcessOptions, InProcessResponse, create_in_process_client};
+use toolnexus::{BuiltinsConfig, ToolkitOptions, create_toolkit};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Record the roles of every message the model is sent.
+    let last_roles: Arc<Mutex<Vec<String>>> = Arc::default();
+    let seen = last_roles.clone();
+    let model: GenerateFn = Arc::new(move |req| {
+        *seen.lock().unwrap() = req.messages.iter().map(|m| m["role"].as_str().unwrap_or("").to_string()).collect();
+        Box::pin(async { Ok(InProcessResponse { content: "ok".into(), ..Default::default() }) })
+    });
+    let client = create_in_process_client(InProcessOptions {
+        model: "m".into(), generate: Some(model), system_prompt: "You are terse.".into(), ..Default::default()
+    });
+    let tk = create_toolkit(ToolkitOptions { builtins: Some(BuiltinsConfig::off()), ..Default::default() }).await?;
+    let mut conv = client.conversation(&tk);
+
+    conv.send("first").await?;
+    assert_eq!(*last_roles.lock().unwrap(), ["system", "user"]);
+
+    conv.send("second").await?;
+    // Turn 2: [system, user, assistant, user]; the system message is NOT repeated.
+    let roles = last_roles.lock().unwrap().clone();
+    assert_eq!(roles, ["system", "user", "assistant", "user"]);
+    println!("ok: system sent once, transcript on turn 2 = {roles:?}");
+    Ok(())
+}
 ```
 
-### 3. Reset
+### 3. The full surface — `reset` clears memory, then continues fresh
 
-```rust
-use toolnexus::client::{ClientOptions, Style, create_client};
-use toolnexus::{ToolkitOptions, create_toolkit};
-let tk = create_toolkit(ToolkitOptions::default()).await?;
-let client = create_client(ClientOptions {
-    base_url: "https://openrouter.ai/api/v1".into(),
-    style: Style::OpenAI,
-    model: "openai/gpt-4o-mini".into(),
-    ..Default::default()
-});
-let mut chat = client.conversation(&tk);
-chat.send("remember 7").await?;
-chat.messages.clear();
+```rust test
+use std::sync::Arc;
+
+use toolnexus::client::{GenerateFn, InProcessOptions, InProcessResponse, create_in_process_client};
+use toolnexus::{BuiltinsConfig, ToolkitOptions, create_toolkit};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let model: GenerateFn = Arc::new(|_req| Box::pin(async {
+        Ok(InProcessResponse { content: "ack".into(), ..Default::default() })
+    }));
+    let client = create_in_process_client(InProcessOptions { model: "m".into(), generate: Some(model), ..Default::default() });
+    let tk = create_toolkit(ToolkitOptions { builtins: Some(BuiltinsConfig::off()), ..Default::default() }).await?;
+    let mut conv = client.conversation(&tk);
+
+    conv.send("hello").await?;
+    assert!(!conv.messages.is_empty());
+
+    conv.reset();
+    assert!(conv.messages.is_empty());
+
+    // A fresh send after reset starts a new transcript from scratch.
+    let res = conv.send("hello again").await?;
+    assert_eq!((res.turns, conv.messages.len()), (1, 2)); // [user, assistant]
+    println!("ok: reset then {} messages after one fresh turn", conv.messages.len());
+    Ok(())
+}
 ```
+
+## Conversation surface
+
+| Member | What it does |
+|---|---|
+| `Client::conversation(&self, tk: &Toolkit) -> Conversation` | Builds a `Conversation` bound to this client and toolkit. |
+| `messages: Vec<Value>` | The full running transcript — a public field; read it to inspect or persist it yourself. |
+| `send(&mut self, prompt) -> Result<RunResult, ClientError>` | Sends the next user turn with prior history retained; updates `messages` to the returned `RunResult.messages`. |
+| `reset(&mut self)` | Clears `messages` — the next `send` starts a brand-new transcript. |
 
 ## See also
 

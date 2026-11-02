@@ -13,7 +13,7 @@ import { Aside } from '@astrojs/starlight/components';
 
 ```rust
 pub async fn load_mcp_with(config: &McpConfig, opts: McpLoadOptions) -> McpSource
-pub struct McpLoadOptions { pub on_server: Option<OnServer> }
+pub struct McpLoadOptions { pub on_server: Option<OnServer>, pub wait_for: Option<WaitForFn> }
 pub type OnServer = Arc<dyn Fn(McpServerResult) + Send + Sync>;
 ```
 
@@ -33,38 +33,112 @@ Cancellation of the whole load is not a parameter in Rust; wrap the call in `tok
 
 ## Examples
 
-### 1. Log readiness
+Rust has no context parameter: each server is bounded by its own `timeout` (milliseconds in the
+config, 30 s by default), and the whole load can be bounded with `tokio::time::timeout`. The
+examples use the repo's dependency-free stdio fixture `examples/mcp-progress-server.mjs` (plain
+`node`, no network).
 
-```rust
-use std::sync::Arc;
-use toolnexus::mcp::{McpLoadOptions, load_mcp_with, parse_mcp_config_file};
-let cfg = parse_mcp_config_file("mcp.json")?;
-let src = load_mcp_with(&cfg, McpLoadOptions {
-    on_server: Some(Arc::new(|r| println!("{} -> {}", r.name, r.status.as_str()))),
-}).await;
+### 1. A generous budget for the shared fixture, with readiness reported
+
+```rust test
+use std::path::Path;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+use serde_json::json;
+use toolnexus::mcp::{McpLoadOptions, McpStatus, load_mcp_with, parse_mcp_config};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let repo = std::env::var("TOOLNEXUS_REPO")?;
+    let server = Path::new(&repo).join("examples/mcp-progress-server.mjs");
+    let cfg = parse_mcp_config(&json!({"mcpServers": {
+        "progress": {"command": ["node", server.to_string_lossy()]},
+        "example-remote": {"url": "https://example.com/mcp", "enabled": false},
+    }}))?;
+
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let log = seen.clone();
+    let opts = McpLoadOptions {
+        on_server: Some(Arc::new(move |r| {
+            log.lock().unwrap().push(format!("{}={}", r.name, r.status.as_str()))
+        })),
+        ..Default::default()
+    };
+    let src = tokio::time::timeout(Duration::from_secs(30), load_mcp_with(&cfg, opts)).await?;
+
+    assert_eq!(src.status["example-remote"], McpStatus::Disabled);
+    assert_eq!(src.status["progress"], McpStatus::Connected, "{:?}", src.errors);
+    let mut seen = seen.lock().unwrap().clone();
+    seen.sort();
+    assert_eq!(seen, ["example-remote=disabled", "progress=connected"]);
+
+    src.close().await;
+    println!("ok: loaded under a bounded budget: {seen:?}");
+    Ok(())
+}
 ```
 
-### 2. Register tools as they arrive
+### 2. A hung server times out alone, not the whole load
 
-```rust
-use std::sync::Arc;
-use toolnexus::mcp::{McpLoadOptions, load_mcp_with, parse_mcp_config_file};
-use toolnexus::{ToolkitOptions, create_toolkit};
-let tk = create_toolkit(ToolkitOptions::default()).await?;
-let live = tk.clone();
-let cfg = parse_mcp_config_file("mcp.json")?;
-let src = load_mcp_with(&cfg, McpLoadOptions {
-    on_server: Some(Arc::new(move |r| { live.register(r.tools); })),
-}).await;
+A server that starts but never answers `initialize` is marked `failed` once its own `timeout`
+elapses; the healthy server beside it still connects.
+
+```rust test
+use std::path::Path;
+use serde_json::json;
+use toolnexus::mcp::{McpLoadOptions, McpStatus, load_mcp_with, parse_mcp_config};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let repo = std::env::var("TOOLNEXUS_REPO")?;
+    let server = Path::new(&repo).join("examples/mcp-progress-server.mjs");
+    let cfg = parse_mcp_config(&json!({"mcpServers": {
+        "hung": {"command": ["node", "-e", "setInterval(() => {}, 1000)"], "timeout": 500},
+        "progress": {"command": ["node", server.to_string_lossy()]},
+    }}))?;
+
+    let src = load_mcp_with(&cfg, McpLoadOptions::default()).await;
+
+    assert_eq!(src.status["hung"], McpStatus::Failed);
+    assert!(src.errors["hung"].contains("timed out after 500ms"), "{:?}", src.errors);
+    assert_eq!(src.status["progress"], McpStatus::Connected);
+
+    src.close().await;
+    println!("ok: hung -> {}", src.errors["hung"]);
+    Ok(())
+}
 ```
 
-### 3. Bound the load
+### 3. A disabled server is reported without ever needing the budget
 
-```rust
-use toolnexus::mcp::{McpLoadOptions, load_mcp_with, parse_mcp_config_file};
-let cfg = parse_mcp_config_file("mcp.json")?;
-let src = tokio::time::timeout(std::time::Duration::from_secs(10),
-    load_mcp_with(&cfg, McpLoadOptions::default())).await?;
+Disabled servers are skipped before any connection attempt — a small deadline is plenty, because
+nothing races against it.
+
+```rust test
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+use toolnexus::mcp::{McpLoadOptions, McpStatus, load_mcp_with, parse_mcp_config_str};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let cfg = parse_mcp_config_str(
+        r#"{"mcpServers":{"off":{"type":"local","command":["unused"],"disabled":true}}}"#,
+    )?;
+
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let log = calls.clone();
+    let opts = McpLoadOptions {
+        on_server: Some(Arc::new(move |r| log.lock().unwrap().push((r.name, r.status)))),
+        ..Default::default()
+    };
+    let src = tokio::time::timeout(Duration::from_millis(500), load_mcp_with(&cfg, opts)).await?;
+
+    assert_eq!(src.status["off"], McpStatus::Disabled);
+    assert_eq!(*calls.lock().unwrap(), [("off".to_string(), McpStatus::Disabled)]);
+
+    println!("ok: disabled server reported as {}", src.status["off"].as_str());
+    Ok(())
+}
 ```
 
 ## See also

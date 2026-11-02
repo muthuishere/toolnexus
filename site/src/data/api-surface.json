@@ -219,7 +219,8 @@
 				"java": "McpSource.resourceTools",
 				"csharp": "McpSource.ResourceTools",
 				"elixir": "Toolnexus.Mcp.resource_tools",
-				"clojure": "toolnexus.mcp/resource-tools"
+				"clojure": "toolnexus.mcp/resource-tools",
+				"rust": "McpSource.resource_tools"
 			}
 		},
 		{
@@ -410,7 +411,8 @@
 				"java": "BackgroundShells",
 				"csharp": "BackgroundShells",
 				"elixir": "Toolnexus.Builtin.BackgroundShells",
-				"clojure": "toolnexus.builtin/background-shells"
+				"clojure": "toolnexus.builtin/background-shells",
+				"rust": "BackgroundShells"
 			}
 		},
 		{
@@ -651,7 +653,7 @@
 				"csharp": "Classifier.Create",
 				"elixir": "Toolnexus.Classifier.create",
 				"clojure": "toolnexus.classifier/create-classifier",
-				"rust": null
+				"rust": "create_classifier"
 			}
 		},
 		{
@@ -669,7 +671,7 @@
 				"csharp": "NoulQuestion",
 				"elixir": "Toolnexus.Classifier.Noul",
 				"clojure": "toolnexus.classifier/noul-question",
-				"rust": null
+				"rust": "NoulQuestion"
 			}
 		},
 		{
@@ -687,7 +689,7 @@
 				"csharp": "Decision",
 				"elixir": "Toolnexus.Classifier.Decision",
 				"clojure": "toolnexus.classifier/parse-decision",
-				"rust": null
+				"rust": "Decision"
 			}
 		},
 		{
@@ -1146,7 +1148,7 @@
 				"csharp": "Translate.Run",
 				"elixir": "Toolnexus.Translate.translate",
 				"clojure": "toolnexus.translate/translate",
-				"rust": null
+				"rust": "Client.translate"
 			}
 		},
 		{
@@ -1200,7 +1202,8 @@
 				"java": "Options.apiKeyEnv",
 				"csharp": "Options.ApiKeyEnv",
 				"elixir": "api_key_env",
-				"clojure": "api-key-env"
+				"clojure": "api-key-env",
+				"rust": "ClientOptions.api_key_env"
 			}
 		},
 		{
@@ -1217,7 +1220,8 @@
 				"java": "Options.promptCache",
 				"csharp": "Options.PromptCache",
 				"elixir": "prompt_cache",
-				"clojure": "prompt-cache"
+				"clojure": "prompt-cache",
+				"rust": "ClientOptions.prompt_cache"
 			}
 		},
 		{
@@ -1234,7 +1238,8 @@
 				"java": "Options.toolTiers",
 				"csharp": "Options.ToolTiers",
 				"elixir": "tool_tiers",
-				"clojure": "tool-tiers"
+				"clojure": "tool-tiers",
+				"rust": "ClientOptions.tool_tiers"
 			}
 		},
 		{
@@ -1251,7 +1256,8 @@
 				"java": "LlmClient.listModels",
 				"csharp": "LlmClient.ListModelsAsync",
 				"elixir": "Toolnexus.Client.list_models",
-				"clojure": "toolnexus.client/list-models"
+				"clojure": "toolnexus.client/list-models",
+				"rust": "list_models"
 			}
 		},
 		{
@@ -1268,9 +1274,10 @@
 				"java": null,
 				"csharp": null,
 				"elixir": null,
-				"clojure": null
+				"clojure": null,
+				"rust": "AcpOptions.on_permission"
 			},
-			"parityNote": "Go-only today (golang/acp.go). The other six ports ship an ACP client without these hooks; tracked in openspec/changes/add-go-host-asks task 2.6d."
+			"parityNote": "Go and Rust today (golang/acp.go, rust/src/acp.rs). The other six ports ship an ACP client without these hooks; tracked in openspec/changes/add-go-host-asks task 2.6d."
 		},
 		{
 			"id": "suspension/answer-output",
@@ -1359,7 +1366,7 @@
 				"csharp": "FromFile",
 				"elixir": "from_path",
 				"clojure": "attach",
-				"rust": null
+				"rust": "ContentPart.from_path"
 			}
 		}
 	]

@@ -31,32 +31,87 @@ If you need each server's tools as soon as it is ready, use `load_mcp_with` and 
 
 ## Examples
 
-### 1. Load from a file
+The shared `examples/mcp.json` fixture has one **enabled** local server (`everything`, spawned via
+`npx`, which needs the network) and one **disabled** remote server (`example-remote`). To stay
+hermetic, these examples swap `everything` for the repo's dependency-free stdio fixture
+`examples/mcp-progress-server.mjs` (plain `node`, no SDK, no network) and assert what `load_mcp`
+guarantees: the disabled server is skipped, a failed connection is isolated rather than fatal, and a
+malformed config errors before any connection is attempted.
 
-```rust
-use toolnexus::mcp::{load_mcp, parse_mcp_config_file};
-let cfg = parse_mcp_config_file("mcp.json")?;
-let src = load_mcp(&cfg).await;
-for t in &src.tools { println!("{}", t.name); }
-src.close().await;
+### 1. Load the shared fixture and read per-server status
+
+```rust test
+use std::path::Path;
+use toolnexus::mcp::{McpStatus, load_mcp, parse_mcp_config_file};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // TOOLNEXUS_REPO is set by the docs test runner; in your own code just use a path.
+    let repo = std::env::var("TOOLNEXUS_REPO")?;
+    let mut cfg = parse_mcp_config_file(Path::new(&repo).join("examples/mcp.json"))?;
+
+    // Hermetic stand-in for the npx server: the same name, a local node fixture.
+    let server = Path::new(&repo).join("examples/mcp-progress-server.mjs");
+    cfg.get_mut("everything").unwrap().command =
+        vec!["node".into(), server.to_string_lossy().into_owned()];
+
+    let src = load_mcp(&cfg).await;
+
+    // The disabled remote server never gets a connection attempt.
+    assert_eq!(src.status["example-remote"], McpStatus::Disabled);
+    // The enabled server connected and its tools are namespaced `server_tool`.
+    assert_eq!(src.status["everything"], McpStatus::Connected, "{:?}", src.errors);
+    assert!(src.tools.iter().any(|t| t.name == "everything_slow"));
+
+    src.close().await;
+    println!("ok: example-remote=disabled, everything=connected");
+    Ok(())
+}
 ```
 
-### 2. Check per-server status
+### 2. A bad server is isolated, not fatal
 
-```rust
-use toolnexus::mcp::{load_mcp, parse_mcp_config_str};
-let cfg = parse_mcp_config_str(r#"{"mcpServers":{"x":{"command":"missing-binary"}}}"#)?;
-let src = load_mcp(&cfg).await;
-println!("{} {:?}", src.status["x"].as_str(), src.errors.get("x"));
+One server that can never start (`command` points at a binary that does not exist). `load_mcp`
+still returns a source — the failure is reported per server in `status` and `errors`.
+
+```rust test
+use toolnexus::mcp::{McpStatus, load_mcp, parse_mcp_config_str};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let cfg = parse_mcp_config_str(
+        r#"{"mcpServers":{"broken":{"type":"local","command":["toolnexus-docs-does-not-exist"]}}}"#,
+    )?;
+
+    let src = load_mcp(&cfg).await; // never fails as a whole
+
+    assert_eq!(src.status["broken"], McpStatus::Failed);
+    assert!(src.errors.contains_key("broken"), "a failed server says why");
+    // A failed server contributes zero tools — the load degrades, it does not abort.
+    assert!(src.tools.is_empty());
+
+    src.close().await;
+    println!("ok: broken server isolated as {}", src.status["broken"].as_str());
+    Ok(())
+}
 ```
 
-### 3. Hand the tools to a toolkit
+### 3. Malformed config fails fast, before any connection
 
-```rust
-use toolnexus::mcp::{load_mcp, parse_mcp_config_file};
-use toolnexus::{ToolkitOptions, create_toolkit};
-let src = load_mcp(&parse_mcp_config_file("mcp.json")?).await;
-let tk = create_toolkit(ToolkitOptions { extra_tools: src.tools.clone(), ..Default::default() }).await?;
+`load_mcp` takes an already-parsed `McpConfig`, so a syntax error surfaces from the parse step —
+it never reaches the network or spawns a process.
+
+```rust test
+use toolnexus::mcp::{parse_mcp_config, parse_mcp_config_str};
+
+fn main() {
+    let err = parse_mcp_config_str("{not valid json").unwrap_err();
+
+    // Well-formed JSON of the wrong shape is also rejected up front.
+    assert!(parse_mcp_config(&serde_json::json!(42)).is_err());
+
+    println!("ok: malformed config rejected before connecting: {err}");
+}
 ```
 
 ## See also

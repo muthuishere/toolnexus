@@ -36,41 +36,151 @@ For per-call control (veto, rewrite), use hooks; metrics are read-only.
 
 ## Examples
 
-### 1. Print every event
+Each example is a complete program. The model is an in-process stand-in ([`create_in_process_client`](/api/rust/client/create/)): the loop is exactly the one `create_client` runs, with a host function in place of the HTTP call, so no network and no API key are involved.
 
-```rust
-use std::sync::Arc;
-use toolnexus::client::{ClientOptions, create_client};
-let client = create_client(ClientOptions {
-    on_metric: Some(Arc::new(|m| println!("{} {} {}ms", m.event, m.status, m.ms))),
-    ..Default::default()
-});
+### 1. The smallest useful call — one `on_metric` sink
+
+```rust test
+use std::sync::{Arc, Mutex};
+
+use toolnexus::client::{GenerateFn, InProcessOptions, InProcessResponse, InProcessUsage, MetricEvent, create_in_process_client};
+use toolnexus::{BuiltinsConfig, ToolkitOptions, create_toolkit};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let model: GenerateFn = Arc::new(|_req| Box::pin(async {
+        Ok(InProcessResponse {
+            content: "hi".into(),
+            usage: Some(InProcessUsage { prompt_tokens: 4, completion_tokens: 1, total_tokens: 5 }),
+            ..Default::default()
+        })
+    }));
+    let events: Arc<Mutex<Vec<MetricEvent>>> = Arc::default();
+    let sink = events.clone();
+    let client = create_in_process_client(InProcessOptions {
+        model: "gpt-x".into(),
+        generate: Some(model),
+        on_metric: Some(Arc::new(move |ev| sink.lock().unwrap().push(ev.clone()))),
+        ..Default::default()
+    });
+    let tk = create_toolkit(ToolkitOptions { builtins: Some(BuiltinsConfig::off()), ..Default::default() }).await?;
+
+    client.run("hi", &tk).await?;
+    let ev = events.lock().unwrap().clone();
+    assert_eq!(ev.len(), 2); // one "llm", one terminal "run"
+    assert_eq!((ev[0].event.as_str(), ev[0].status.as_str(), ev[1].event.as_str()), ("llm", "ok", "run"));
+    println!("ok: {} {}", ev[0].event, ev[1].event);
+    Ok(())
+}
 ```
 
-### 2. Count tool errors
+### 2. The realistic case — `llm`, `tool`, and `run` events for a tool-calling turn
 
-```rust
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
-use toolnexus::client::{ClientOptions, create_client};
-let errors = Arc::new(AtomicU64::new(0));
-let e = errors.clone();
-let client = create_client(ClientOptions {
-    on_metric: Some(Arc::new(move |m| if m.is_error { e.fetch_add(1, Ordering::Relaxed); })),
-    ..Default::default()
-});
+```rust test
+use std::sync::{Arc, Mutex};
+
+use serde_json::json;
+use toolnexus::client::{GenerateFn, InProcessOptions, InProcessResponse, InProcessToolCall, InProcessUsage, MetricEvent, create_in_process_client};
+use toolnexus::{BuiltinsConfig, ToolkitOptions, create_toolkit, define_tool};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let add = define_tool("add", "add two numbers", None, |a, _| async move {
+        Ok::<_, String>((a["a"].as_f64().unwrap_or(0.0) + a["b"].as_f64().unwrap_or(0.0)).to_string())
+    });
+    let tk = create_toolkit(ToolkitOptions {
+        extra_tools: vec![add], builtins: Some(BuiltinsConfig::off()), ..Default::default()
+    }).await?;
+
+    let model: GenerateFn = Arc::new(|req| Box::pin(async move {
+        Ok(if req.messages.iter().any(|m| m["role"] == "tool") {
+            InProcessResponse {
+                content: "5".into(),
+                usage: Some(InProcessUsage { prompt_tokens: 6, completion_tokens: 1, total_tokens: 7 }),
+                ..Default::default()
+            }
+        } else {
+            InProcessResponse {
+                tool_calls: vec![InProcessToolCall { id: "c1".into(), name: "add".into(), arguments: json!({"a": 2, "b": 3}) }],
+                usage: Some(InProcessUsage { prompt_tokens: 5, completion_tokens: 4, total_tokens: 9 }),
+                ..Default::default()
+            }
+        })
+    }));
+    let events: Arc<Mutex<Vec<MetricEvent>>> = Arc::default();
+    let sink = events.clone();
+    let client = create_in_process_client(InProcessOptions {
+        model: "gpt-x".into(),
+        generate: Some(model),
+        on_metric: Some(Arc::new(move |ev| sink.lock().unwrap().push(ev.clone()))),
+        ..Default::default()
+    });
+
+    client.run("add them", &tk).await?;
+    let ev = events.lock().unwrap().clone();
+    let llm = ev.iter().filter(|e| e.event == "llm").count();
+    let tool = ev.iter().find(|e| e.event == "tool").expect("a tool event");
+    assert_eq!((tool.tool.as_str(), tool.source.as_str(), tool.is_error), ("add", "native", false));
+    assert_eq!(llm, 2);
+    let run = ev.last().unwrap();
+    assert_eq!((run.event.as_str(), run.turns, run.tool_calls, run.total_tokens), ("run", 2, 1, 16));
+    println!("ok: llm x {} tool calls: {} tokens: {}", llm, run.tool_calls, run.total_tokens);
+    Ok(())
+}
 ```
 
-### 3. Sum tokens per run
+### 3. The full surface — `Client::metrics()` Prometheus text
 
-```rust
+Every event that reaches `on_metric` also feeds a built-in registry, rendered as Prometheus text exposition
+format — valid (only `# HELP`/`# TYPE` lines) even before any activity.
+
+```rust test
 use std::sync::Arc;
-use toolnexus::client::{ClientOptions, create_client};
-let client = create_client(ClientOptions {
-    on_metric: Some(Arc::new(|m| if m.event == "run" { println!("run used {} tokens", m.total_tokens) })),
-    ..Default::default()
-});
+
+use toolnexus::client::{GenerateFn, InProcessOptions, InProcessResponse, InProcessUsage, create_in_process_client};
+use toolnexus::{BuiltinsConfig, ToolkitOptions, create_toolkit};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let model: GenerateFn = Arc::new(|_req| Box::pin(async {
+        Ok(InProcessResponse {
+            content: "hi".into(),
+            usage: Some(InProcessUsage { prompt_tokens: 3, completion_tokens: 2, total_tokens: 5 }),
+            ..Default::default()
+        })
+    }));
+    let client = create_in_process_client(InProcessOptions { model: "gpt-x".into(), generate: Some(model), ..Default::default() });
+    let tk = create_toolkit(ToolkitOptions { builtins: Some(BuiltinsConfig::off()), ..Default::default() }).await?;
+
+    // Before any activity: empty-but-valid, only comment lines and no samples.
+    let before = client.metrics();
+    assert!(before.starts_with("# HELP"));
+
+    client.run("hi", &tk).await?;
+    let after = client.metrics();
+    assert!(after.contains(r#"toolnexus_llm_requests_total{model="gpt-x",status="ok"} 1"#), "{after}");
+    assert!(after.contains("toolnexus_run_errors_total"));
+    println!("ok: metrics() grew from {} to {} bytes", before.len(), after.len());
+    Ok(())
+}
 ```
+
+## MetricEvent fields
+
+| Field | Populated on | What it holds |
+|---|---|---|
+| `event` | always | `"llm"` \| `"tool"` \| `"run"`. |
+| `model` | `"llm"`, `"run"` | The model used. |
+| `status` | `"llm"` | `"ok"` \| `"error"`. |
+| `ms` | always | Elapsed wall-clock time in milliseconds. |
+| `prompt_tokens`, `completion_tokens` | `"llm"` | Per-call token counts. |
+| `tool`, `source` | `"tool"` | Tool name; its source (`"native"`, `"mcp"`, `"skill"`, `"builtin"`, …). |
+| `is_error` | `"tool"` | Whether the tool call failed. |
+| `pending` | `"tool"` | `true` for a §10 suspension — never an error. |
+| `turns`, `tool_calls`, `total_tokens` | `"run"` | Aggregated across the whole run. |
+| `error` | `"run"` | The failure message, set only on a failed run. |
+
+`Usage` (on `RunResult`) also carries `cache_read_tokens` and `cache_write_tokens` for the provider's prompt cache.
 
 ## See also
 

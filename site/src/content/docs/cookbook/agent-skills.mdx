@@ -1,6 +1,6 @@
 ---
 title: Agent skills
-description: toolnexus reads the open SKILL.md standard — the same agent skills Claude Code, opencode, Codex and the community ship — and gives them to ANY model. In all seven languages.
+description: toolnexus reads the open SKILL.md standard — the same agent skills Claude Code, opencode, Codex and the community ship — and gives them to ANY model. In all eight languages.
 ---
 
 import { Tabs, TabItem, Aside } from '@astrojs/starlight/components';
@@ -105,14 +105,26 @@ IO.puts(res.output)
 ```
 </TabItem>
 <TabItem label="Rust">
-```rust
-use toolnexus::{ToolkitOptions, create_toolkit};
+```rust test
+use serde_json::json;
+use toolnexus::{ToolContext, ToolkitOptions, create_toolkit};
 
-let tk = create_toolkit(ToolkitOptions {
-    skills_dir: vec!["./skills".into()],
-    ..Default::default()
-}).await?;
-let catalog = tk.skills_prompt();   // the client appends this to the system prompt for you
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let repo = std::env::var("TOOLNEXUS_REPO").unwrap_or_else(|_| ".".into());
+    let tk = create_toolkit(ToolkitOptions {
+        skills_dir: vec![format!("{repo}/examples/skills").into()], // your ./skills folder
+        ..Default::default()
+    }).await?;
+    let catalog = tk.skills_prompt(); // the client appends this to the system prompt for you
+    assert!(catalog.contains("hello-world"), "{catalog}");
+
+    // the model loads a skill on demand through the one `skill` tool
+    let res = tk.execute("skill", json!({"name": "hello-world"}), ToolContext::default()).await;
+    assert!(!res.is_error, "{}", res.output);
+    println!("ok: loaded hello-world ({} bytes)", res.output.len());
+    Ok(())
+}
 ```
 </TabItem>
 </Tabs>

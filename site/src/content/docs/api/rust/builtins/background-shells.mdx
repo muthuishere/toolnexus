@@ -1,0 +1,180 @@
+---
+title: "BackgroundShells"
+description: "Opt-in background shells: bash gains run_in_background, bash_output reads new output, kill_shell stops the process group. The host owns the registry and closes it. — Rust."
+sidebar:
+  label: "BackgroundShells"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §4A</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/rust/src/builtins/bash.rs">rust/src/builtins/bash.rs</a>
+</p>
+
+```rust
+impl BackgroundShells {                                    // toolnexus::builtins
+    pub fn new() -> Self
+    pub fn list(&self) -> Vec<BackgroundShellInfo>         // oldest first
+    pub async fn kill(&self, id: &str) -> Result<(), String>
+    pub async fn close_all(&self)
+}
+
+pub struct BackgroundShellInfo {
+    pub id: String,
+    pub command: String,
+    pub started: SystemTime,
+    pub running: bool,
+    pub exit_code: i64, // valid when !running; -1 if killed by a signal
+    pub killed: bool,
+}
+
+// BuiltinsConfig.background: Option<Arc<BackgroundShells>> — None ⇒ none of this exists.
+```
+
+Pass a registry as `BuiltinsConfig.background` and the builtins change in three ways:
+
+- `bash` gains `run_in_background: true`: it returns at once with
+  `Started background shell <id>. …` (`metadata["backgroundId"]`). No timeout applies.
+- `bash_output {id}` returns the output produced **since the last read**, then
+  `[status: running|killed|exited with code N]`. N is `-1` when the shell was killed by a signal it
+  did not get from `kill_shell`.
+- `kill_shell {id}` stops the whole process group (SIGTERM, `kill_grace_ms`, then SIGKILL).
+
+A background command is **not** tied to the turn that started it. The host owns the registry: call
+`close_all` on shutdown, or the commands outlive the process that started them.
+
+<Aside type="note" title="The other opt-in builtins">
+`BuiltinsConfig.web_search` (a `WebSearchFn` the host supplies — the library ships none) adds
+`websearch`, and `BuiltinsConfig.notebook_edit: true` adds `notebook_edit` for `.ipynb` cells. See
+[`create_builtin_tools`](/api/rust/builtins/create/).
+</Aside>
+
+## When to use it
+
+A coding agent that starts a dev server, a watcher or a long test run and keeps working while it
+runs — then checks the output, or stops it.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Short commands? Plain bash is enough">
+A foreground `bash` call waits for the command (with a timeout) and returns everything in one result.
+Use background shells only for commands that must outlive one tool call; each one is a process the
+host must remember to stop.
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call — start, wait, read
+
+```rust test
+use std::sync::Arc;
+use std::time::Duration;
+use serde_json::json;
+use toolnexus::builtins::BackgroundShells;
+use toolnexus::{BuiltinsConfig, ToolContext, ToolkitOptions, create_toolkit};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let bg = Arc::new(BackgroundShells::new());
+    let tk = create_toolkit(ToolkitOptions {
+        builtins: Some(BuiltinsConfig { background: Some(bg.clone()), ..Default::default() }),
+        ..Default::default()
+    })
+    .await?;
+
+    let started = tk
+        .execute("bash", json!({"command": "echo hello", "run_in_background": true}), ToolContext::default())
+        .await;
+    assert!(!started.is_error, "{}", started.output);
+    let id = started.metadata.as_ref().unwrap()["backgroundId"].as_str().unwrap().to_owned();
+
+    for _ in 0..100 {
+        if !bg.list()[0].running {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let out = tk.execute("bash_output", json!({"id": id}), ToolContext::default()).await;
+    assert!(out.output.contains("hello"), "{}", out.output);
+    assert!(out.output.contains("[status: exited with code 0]"), "{}", out.output);
+
+    bg.close_all().await;
+    tk.close().await;
+    println!("ok: {id} -> {:?}", out.output);
+    Ok(())
+}
+```
+
+### 2. The realistic case — a long-running command, stopped with `kill_shell`
+
+```rust test
+use std::sync::Arc;
+use serde_json::json;
+use toolnexus::builtins::BackgroundShells;
+use toolnexus::{BuiltinsConfig, ToolContext, ToolkitOptions, create_toolkit};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let bg = Arc::new(BackgroundShells::new());
+    let tk = create_toolkit(ToolkitOptions {
+        builtins: Some(BuiltinsConfig { background: Some(bg.clone()), kill_grace_ms: 100, ..Default::default() }),
+        ..Default::default()
+    })
+    .await?;
+
+    let started = tk
+        .execute("bash", json!({"command": "sleep 30", "run_in_background": true}), ToolContext::default())
+        .await;
+    let id = started.metadata.as_ref().unwrap()["backgroundId"].as_str().unwrap().to_owned();
+
+    let running = tk.execute("bash_output", json!({"id": id}), ToolContext::default()).await;
+    assert!(running.output.contains("[status: running]"), "{}", running.output);
+
+    let killed = tk.execute("kill_shell", json!({"id": id}), ToolContext::default()).await;
+    assert_eq!(killed.output, format!("Killed background shell {id}"));
+
+    bg.close_all().await;
+    tk.close().await;
+    println!("ok: {}", killed.output);
+    Ok(())
+}
+```
+
+### 3. The full surface — the host's view with `list`, `kill` and `close_all`
+
+```rust test
+use std::sync::Arc;
+use serde_json::json;
+use toolnexus::builtins::{BackgroundShells, create_builtin_tools};
+use toolnexus::{BuiltinsConfig, ToolContext};
+
+#[tokio::main]
+async fn main() {
+    let bg = Arc::new(BackgroundShells::new());
+    let tools = create_builtin_tools(&BuiltinsConfig { background: Some(bg.clone()), kill_grace_ms: 100, ..Default::default() });
+
+    let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+    assert!(names.contains(&"bash_output") && names.contains(&"kill_shell"));
+    let bash = tools.iter().find(|t| t.name == "bash").unwrap();
+
+    for cmd in ["sleep 30", "sleep 31"] {
+        let r = bash.call(json!({"command": cmd, "run_in_background": true}), ToolContext::default()).await;
+        assert!(!r.is_error, "{}", r.output);
+    }
+    let list = bg.list();
+    assert_eq!(list.len(), 2);
+    assert!(list[0].running);
+
+    bg.kill(&list[0].id).await.unwrap(); // the host's own stop button
+    assert!(bg.kill("bg-nope").await.is_err());
+    bg.close_all().await; // on shutdown: stops everything still running
+    assert!(bg.list().iter().all(|s| !s.running && s.killed));
+
+    println!("ok: {} shells started, all stopped", list.len());
+}
+```
+
+## See also
+
+- [`create_builtin_tools`](/api/rust/builtins/create/) — the ten default builtins and the other opt-ins.
+- [`select_builtins`](/api/rust/builtins/select/) — choose which builtins a toolkit gets.

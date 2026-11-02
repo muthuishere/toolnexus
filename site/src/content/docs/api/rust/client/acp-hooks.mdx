@@ -1,0 +1,332 @@
+---
+title: "AcpOptions.on_permission"
+description: "Opt-in hooks on an ACP model source: choose the permission option, watch every session/update, cancel a turn, and stream through an in-process client. — Rust."
+sidebar:
+  label: "AcpOptions.on_permission"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a>
+</p>
+
+```rust
+pub struct AcpOptions {
+    pub command: String,
+    pub args: Vec<String>,
+    // ...
+    pub permission_timeout: Duration,             // default 30s
+    pub on_permission: Option<PermissionHandler>, // async: PermissionRequest -> PermissionOutcome
+    pub on_update: Option<UpdateHandler>,         // Arc<dyn Fn(&Value)>: raw session/update params
+}
+pub fn permission_handler<F, Fut>(f: F) -> PermissionHandler; // wrap an async closure
+pub enum PermissionOutcome { Selected(String), Cancelled, Reject }
+
+impl AcpClient {
+    pub async fn load(opts: AcpOptions) -> Result<Self, AcpError>;
+    pub async fn generate(&self, messages: &[(String, String)]) -> Result<String, AcpError>;
+    pub async fn generate_cancellable(&self, messages: &[(String, String)], cancel: &CancellationToken)
+        -> Result<String, AcpError>;
+    pub async fn generate_stream<F: FnMut(AcpStreamEvent)>(&self, messages: &[(String, String)],
+        cancel: &CancellationToken, emit: F) -> Result<String, AcpError>;
+}
+
+// toolnexus::client::{acp_generate, acp_generate_stream}(Arc<AcpClient>) — the in-process seams:
+// pass acp_generate_stream as InProcessOptions.generate_stream to make Client::stream work.
+```
+
+Four opt-in hooks on an ACP model source (`AcpClient::load`). With none set, behaviour is
+byte-identical to before: a permission request gets the first allow-kind option and only
+`agent_message_chunk` text forms the reply.
+
+- **`on_permission`** — called for every `session/request_permission` with a `PermissionRequest`
+  (`session_id`, raw `tool_call`, `options`); toolnexus answers with the returned outcome.
+  `PermissionOutcome::Reject` (or an empty `Selected` id) answers the first reject-kind option,
+  else `cancelled`. It is async and may wait on a human — but `permission_timeout` still bounds it.
+- **`on_update`** — the raw params of **every** `session/update` (message and thought chunks, tool
+  calls and their updates, plans), before filtering. It runs on the read loop: it must not block.
+- **`generate_cancellable`** — firing its token sends the `session/cancel` notification, waits for
+  the turn's end and returns `AcpError::Cancelled`. The process and session stay warm.
+- **`generate_stream`** — wrapped by `acp_generate_stream` and passed as
+  `InProcessOptions.generate_stream`, `Client::stream` streams instead of refusing: message chunks
+  become text deltas, and the agent's own tool calls arrive as `tool_call` / `tool_result` events
+  with `via: "acp"`. The loop **never executes** them.
+
+<Aside type="caution" title="Go and Rust only today">
+The other six ports ship an ACP client without these hooks (tracked in
+`openspec/changes/add-go-host-asks`, task 2.6d). A slow human approval in `on_permission` can still
+hit `permission_timeout` (default 30s); raise it for interactive approval.
+</Aside>
+
+## When to use it
+
+Building a UI over a coding agent (devin, opencode, …) driven through ACP: a plan mode that rejects
+every write, a human approval prompt, a live transcript of the agent's thoughts and tool calls, or a
+stop button that cancels the turn without killing the warm session.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Want your own gates on every tool? Use an HTTP model instead">
+With ACP the agent runs its own tools; the loop only sees them as `via: "acp"` events and cannot
+gate them with `before_tool`. `on_permission` is the only gate, and only for what the agent asks
+about. If every tool call must pass your hooks, drive an HTTP model with
+[`create_client`](/api/rust/client/create/) and give it your toolkit.
+</Aside>
+
+## Examples
+
+Each example runs a tiny fake ACP agent — the snippet re-runs its own binary with
+`FAKE_ACP_AGENT=1` — so no real agent is spawned and nothing touches the network.
+
+### 1. The smallest useful call — a plan mode with `on_permission`
+
+```rust test
+use std::sync::{Arc, Mutex};
+
+use serde_json::{Value, json};
+use toolnexus::acp::{AcpClient, AcpOptions, PermissionOutcome, PermissionRequest, permission_handler};
+
+/// A tiny ACP agent: this same binary, re-run with FAKE_ACP_AGENT=1. Each turn it
+/// narrates (thought + tool_call), asks one permission, then reports the tool's
+/// result and replies with the option the host picked.
+fn fake_agent() {
+    use std::io::{BufRead, Write};
+    let send = |v: Value| {
+        let mut out = std::io::stdout().lock();
+        let _ = writeln!(out, "{v}");
+        let _ = out.flush();
+    };
+    let update = |u: Value| send(json!({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "s1", "update": u}}));
+    let mut lines = std::io::stdin().lock().lines();
+    while let Some(Ok(line)) = lines.next() {
+        let Ok(m) = serde_json::from_str::<Value>(&line) else { continue };
+        let id = m["id"].clone();
+        match m["method"].as_str().unwrap_or("") {
+            "initialize" => send(json!({"jsonrpc": "2.0", "id": id, "result": {"protocolVersion": 1}})),
+            "session/new" => send(json!({"jsonrpc": "2.0", "id": id, "result": {"sessionId": "s1"}})),
+            "session/prompt" => {
+                update(json!({"sessionUpdate": "agent_thought_chunk", "content": {"type": "text", "text": "thinking"}}));
+                update(json!({"sessionUpdate": "tool_call", "toolCallId": "t1", "title": "ls", "rawInput": {"path": "."}}));
+                send(json!({"jsonrpc": "2.0", "id": "p1", "method": "session/request_permission", "params": {
+                    "sessionId": "s1", "toolCall": {"toolCallId": "t1", "title": "ls"},
+                    "options": [
+                        {"optionId": "allow", "kind": "allow_once", "name": "Allow"},
+                        {"optionId": "reject", "kind": "reject_once", "name": "Reject"},
+                    ],
+                }}));
+                let answer: Value = lines.next().and_then(Result::ok).and_then(|l| serde_json::from_str(&l).ok()).unwrap_or_default();
+                let picked = answer["result"]["outcome"]["optionId"].as_str().unwrap_or("cancelled").to_owned();
+                update(json!({"sessionUpdate": "tool_call_update", "toolCallId": "t1", "status": "completed",
+                    "content": [{"type": "content", "content": {"type": "text", "text": "a.txt"}}]}));
+                update(json!({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": format!("picked {picked}")}}));
+                send(json!({"jsonrpc": "2.0", "id": id, "result": {"stopReason": "end_turn"}}));
+            }
+            _ => {}
+        }
+    }
+}
+
+fn agent_options() -> AcpOptions {
+    let me = std::env::current_exe().expect("own binary").to_string_lossy().into_owned();
+    AcpOptions::new(me).env("FAKE_ACP_AGENT", "1")
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    if std::env::var("FAKE_ACP_AGENT").as_deref() == Ok("1") {
+        fake_agent();
+        return Ok(());
+    }
+    let asked = Arc::new(Mutex::new(String::new()));
+    let record = asked.clone();
+    let opts = agent_options().on_permission(permission_handler(move |req: PermissionRequest| {
+        *record.lock().unwrap() = req.tool_call["title"].as_str().unwrap_or("").to_owned();
+        async { PermissionOutcome::Selected("reject".into()) } // a plan mode: never let the agent act
+    }));
+    let acp = AcpClient::load(opts).await?;
+
+    let text = acp.generate(&[("user".into(), "list files".into())]).await?;
+    acp.close().await;
+    assert_eq!(*asked.lock().unwrap(), "ls");
+    assert_eq!(text, "picked reject");
+    println!("ok: {text}");
+    Ok(())
+}
+```
+
+### 2. The realistic case — a live transcript with `on_update`
+
+```rust test
+use std::sync::{Arc, Mutex};
+
+use serde_json::{Value, json};
+use tokio_util::sync::CancellationToken;
+use toolnexus::acp::{AcpClient, AcpOptions};
+
+/// A tiny ACP agent: this same binary, re-run with FAKE_ACP_AGENT=1. Each turn it
+/// narrates (thought + tool_call), asks one permission, then reports the tool's
+/// result and replies with the option the host picked.
+fn fake_agent() {
+    use std::io::{BufRead, Write};
+    let send = |v: Value| {
+        let mut out = std::io::stdout().lock();
+        let _ = writeln!(out, "{v}");
+        let _ = out.flush();
+    };
+    let update = |u: Value| send(json!({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "s1", "update": u}}));
+    let mut lines = std::io::stdin().lock().lines();
+    while let Some(Ok(line)) = lines.next() {
+        let Ok(m) = serde_json::from_str::<Value>(&line) else { continue };
+        let id = m["id"].clone();
+        match m["method"].as_str().unwrap_or("") {
+            "initialize" => send(json!({"jsonrpc": "2.0", "id": id, "result": {"protocolVersion": 1}})),
+            "session/new" => send(json!({"jsonrpc": "2.0", "id": id, "result": {"sessionId": "s1"}})),
+            "session/prompt" => {
+                update(json!({"sessionUpdate": "agent_thought_chunk", "content": {"type": "text", "text": "thinking"}}));
+                update(json!({"sessionUpdate": "tool_call", "toolCallId": "t1", "title": "ls", "rawInput": {"path": "."}}));
+                send(json!({"jsonrpc": "2.0", "id": "p1", "method": "session/request_permission", "params": {
+                    "sessionId": "s1", "toolCall": {"toolCallId": "t1", "title": "ls"},
+                    "options": [
+                        {"optionId": "allow", "kind": "allow_once", "name": "Allow"},
+                        {"optionId": "reject", "kind": "reject_once", "name": "Reject"},
+                    ],
+                }}));
+                let answer: Value = lines.next().and_then(Result::ok).and_then(|l| serde_json::from_str(&l).ok()).unwrap_or_default();
+                let picked = answer["result"]["outcome"]["optionId"].as_str().unwrap_or("cancelled").to_owned();
+                update(json!({"sessionUpdate": "tool_call_update", "toolCallId": "t1", "status": "completed",
+                    "content": [{"type": "content", "content": {"type": "text", "text": "a.txt"}}]}));
+                update(json!({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": format!("picked {picked}")}}));
+                send(json!({"jsonrpc": "2.0", "id": id, "result": {"stopReason": "end_turn"}}));
+            }
+            _ => {}
+        }
+    }
+}
+
+fn agent_options() -> AcpOptions {
+    let me = std::env::current_exe().expect("own binary").to_string_lossy().into_owned();
+    AcpOptions::new(me).env("FAKE_ACP_AGENT", "1")
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    if std::env::var("FAKE_ACP_AGENT").as_deref() == Ok("1") {
+        fake_agent();
+        return Ok(());
+    }
+    let kinds = Arc::new(Mutex::new(Vec::<String>::new()));
+    let sink = kinds.clone();
+    // Runs on the read loop: never block here.
+    let opts = agent_options().on_update(move |params: &Value| {
+        sink.lock().unwrap().push(params["update"]["sessionUpdate"].as_str().unwrap_or("").to_owned());
+    });
+    let acp = AcpClient::load(opts).await?;
+
+    // generate_cancellable is generate bound to a token: firing it sends session/cancel.
+    let token = CancellationToken::new();
+    let text = acp.generate_cancellable(&[("user".into(), "list files".into())], &token).await?;
+    acp.close().await;
+
+    let got = kinds.lock().unwrap().join(",");
+    assert_eq!(got, "agent_thought_chunk,tool_call,tool_call_update,agent_message_chunk");
+    // Without on_permission the first allow option is picked, as before.
+    assert_eq!(text, "picked allow", "thoughts must never reach the reply");
+    println!("ok: {got}");
+    Ok(())
+}
+```
+
+### 3. The full surface — `Client::stream` over ACP with `acp_generate_stream`
+
+```rust test
+use std::sync::Arc;
+
+use serde_json::{Value, json};
+use toolnexus::acp::{AcpClient, AcpOptions};
+use toolnexus::client::{InProcessOptions, acp_generate_stream, create_in_process_client};
+use toolnexus::{BuiltinsConfig, ToolkitOptions, create_toolkit};
+
+/// A tiny ACP agent: this same binary, re-run with FAKE_ACP_AGENT=1. Each turn it
+/// narrates (thought + tool_call), asks one permission, then reports the tool's
+/// result and replies with the option the host picked.
+fn fake_agent() {
+    use std::io::{BufRead, Write};
+    let send = |v: Value| {
+        let mut out = std::io::stdout().lock();
+        let _ = writeln!(out, "{v}");
+        let _ = out.flush();
+    };
+    let update = |u: Value| send(json!({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "s1", "update": u}}));
+    let mut lines = std::io::stdin().lock().lines();
+    while let Some(Ok(line)) = lines.next() {
+        let Ok(m) = serde_json::from_str::<Value>(&line) else { continue };
+        let id = m["id"].clone();
+        match m["method"].as_str().unwrap_or("") {
+            "initialize" => send(json!({"jsonrpc": "2.0", "id": id, "result": {"protocolVersion": 1}})),
+            "session/new" => send(json!({"jsonrpc": "2.0", "id": id, "result": {"sessionId": "s1"}})),
+            "session/prompt" => {
+                update(json!({"sessionUpdate": "agent_thought_chunk", "content": {"type": "text", "text": "thinking"}}));
+                update(json!({"sessionUpdate": "tool_call", "toolCallId": "t1", "title": "ls", "rawInput": {"path": "."}}));
+                send(json!({"jsonrpc": "2.0", "id": "p1", "method": "session/request_permission", "params": {
+                    "sessionId": "s1", "toolCall": {"toolCallId": "t1", "title": "ls"},
+                    "options": [
+                        {"optionId": "allow", "kind": "allow_once", "name": "Allow"},
+                        {"optionId": "reject", "kind": "reject_once", "name": "Reject"},
+                    ],
+                }}));
+                let answer: Value = lines.next().and_then(Result::ok).and_then(|l| serde_json::from_str(&l).ok()).unwrap_or_default();
+                let picked = answer["result"]["outcome"]["optionId"].as_str().unwrap_or("cancelled").to_owned();
+                update(json!({"sessionUpdate": "tool_call_update", "toolCallId": "t1", "status": "completed",
+                    "content": [{"type": "content", "content": {"type": "text", "text": "a.txt"}}]}));
+                update(json!({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": format!("picked {picked}")}}));
+                send(json!({"jsonrpc": "2.0", "id": id, "result": {"stopReason": "end_turn"}}));
+            }
+            _ => {}
+        }
+    }
+}
+
+fn agent_options() -> AcpOptions {
+    let me = std::env::current_exe().expect("own binary").to_string_lossy().into_owned();
+    AcpOptions::new(me).env("FAKE_ACP_AGENT", "1")
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    if std::env::var("FAKE_ACP_AGENT").as_deref() == Ok("1") {
+        fake_agent();
+        return Ok(());
+    }
+    let acp = Arc::new(AcpClient::load(agent_options()).await?);
+    let client = create_in_process_client(InProcessOptions {
+        model: "fake-acp".into(),
+        generate_stream: Some(acp_generate_stream(acp.clone())), // makes Client::stream work
+        ..Default::default()
+    });
+    let tk = create_toolkit(ToolkitOptions { builtins: Some(BuiltinsConfig::off()), ..Default::default() }).await?;
+
+    let mut rx = client.stream("list files", &tk)?;
+    let (mut text, mut tools) = (String::new(), Vec::new());
+    while let Some(ev) = rx.recv().await {
+        match ev.kind.as_str() {
+            "text" => text.push_str(&ev.delta),
+            // The agent ran this itself: via "acp", never executed by the loop.
+            "tool_call" | "tool_result" => tools.push(format!("{}:{}:{}", ev.kind, ev.name, ev.via)),
+            "error" => panic!("stream error: {:?}", ev.error),
+            _ => {}
+        }
+    }
+    acp.close().await;
+    assert_eq!(text, "picked allow");
+    assert_eq!(tools, ["tool_call:ls:acp", "tool_result:ls:acp"]);
+    println!("ok: {text} {tools:?}");
+    Ok(())
+}
+```
+
+## See also
+
+- [`create_client`](/api/rust/client/create/) — The unified client: system prompt, skills injection, parallel and chained tool calls, retries, memory.
+- [`Client.stream`](/api/rust/client/stream/) — The streaming loop: text deltas, tool-call events, and suspension events as they happen.
+- [`Hooks`](/api/rust/client/hooks/) — Intercept before/after model calls and tool calls: audit, redact, veto, or rewrite.

@@ -31,32 +31,137 @@ Inside an agent, prefer `ToolkitOptions.skills_dir` so the toolkit adds the cata
 
 ## Examples
 
-### 1. One root
+### 1. Load the shared fixture directory
 
-```rust
+`examples/skills` is the fixture every port is tested against.
+
+```rust test
+use std::path::Path;
+use toolnexus::ToolSource;
 use toolnexus::skills::load_skills;
-let src = load_skills(&["skills"]);
-println!("{}", src.prompt());
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // TOOLNEXUS_REPO is set by the docs test runner; in your own code just use a path.
+    let dir = Path::new(&std::env::var("TOOLNEXUS_REPO")?).join("examples/skills");
+
+    let src = load_skills(&[dir]);
+
+    let info = &src.skills["hello-world"];
+    assert!(!info.description.is_empty(), "description comes from the frontmatter");
+    // location is the ABSOLUTE path of the SKILL.md itself, not its directory.
+    assert!(info.location.ends_with("SKILL.md"), "{}", info.location);
+
+    // One tool, always named "skill", regardless of how many skills were found.
+    assert_eq!(src.tool.name, "skill");
+    assert_eq!(src.tool.source, ToolSource::Skill);
+
+    println!("ok: {} | tool: {}", info.name, src.tool.name);
+    Ok(())
+}
 ```
 
-### 2. Several roots, first name wins
+### 2. Actually load a skill — what the model gets back
 
-```rust
-use toolnexus::skills::load_skills;
-let src = load_skills(&["project/skills", "/home/me/.skills"]);
-println!("{:?}", src.skills.keys().collect::<Vec<_>>());
-```
+The `skill` tool takes `{"name": "<skill>"}` and returns the instructions wrapped in
+`<skill_content>`, plus a base directory and a sampled file list.
 
-### 3. Run the skill tool
-
-```rust
+```rust test
+use std::path::Path;
 use serde_json::json;
 use toolnexus::ToolContext;
 use toolnexus::skills::load_skills;
-let src = load_skills(&["skills"]);
-let r = src.tool.call(json!({"name": "hello-world"}), ToolContext::default()).await;
-println!("{}", r.output);
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = Path::new(&std::env::var("TOOLNEXUS_REPO")?).join("examples/skills");
+    let src = load_skills(&[dir]);
+
+    let res = src.tool.call(json!({"name": "hello-world"}), ToolContext::default()).await;
+    assert!(!res.is_error, "{}", res.output);
+    for want in [
+        r#"<skill_content name="hello-world">"#,
+        "# Skill: hello-world",
+        "Base directory for this skill: file://",
+        "<skill_files>",
+        "</skill_content>",
+    ] {
+        assert!(res.output.contains(want), "missing {want:?} in:\n{}", res.output);
+    }
+
+    // Metadata carries the skill name.
+    assert_eq!(res.metadata.as_ref().unwrap()["name"], "hello-world");
+
+    // An unknown name is an error RESULT the model can recover from, not a panic.
+    let miss = src.tool.call(json!({"name": "nope"}), ToolContext::default()).await;
+    assert!(miss.is_error && miss.output.contains("Available skills:"), "{}", miss.output);
+
+    println!("ok: loaded hello-world, {} bytes", res.output.len());
+    Ok(())
+}
 ```
+
+### 3. Catalog, multiple roots, and wiring it into a prompt
+
+`prompt()` is what you paste into the system prompt: a fixed preamble plus one line per
+**described** skill, sorted by name.
+
+```rust test
+use std::path::{Path, PathBuf};
+use serde_json::json;
+use toolnexus::ToolContext;
+use toolnexus::skills::{SKILLS_PROMPT_PREAMBLE, load_skills};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let shared = Path::new(&std::env::var("TOOLNEXUS_REPO")?).join("examples/skills");
+
+    // A second root written on the fly — roots are merged, first name wins.
+    let extra = std::env::temp_dir().join(format!("skills-load-{}", std::process::id()));
+    std::fs::create_dir_all(extra.join("deploy"))?;
+    std::fs::write(
+        extra.join("deploy/SKILL.md"),
+        "---\nname: deploy\ndescription: Ship the service to prod.\n---\n\nRun the taskfile.\n",
+    )?;
+    // A SKILL.md with no name in its frontmatter is skipped.
+    std::fs::create_dir_all(extra.join("nameless"))?;
+    std::fs::write(extra.join("nameless/SKILL.md"), "no frontmatter here\n")?;
+
+    let src = load_skills(&[shared, extra.clone()]);
+    assert_eq!(src.skills.len(), 2, "hello-world + deploy");
+
+    let prompt = src.prompt();
+    assert!(prompt.starts_with(SKILLS_PROMPT_PREAMBLE));
+    assert!(prompt.contains("## Available Skills"));
+    // Sorted by name: deploy before hello-world.
+    assert!(prompt.find("**deploy**") < prompt.find("**hello-world**"), "{prompt}");
+
+    // A skill from the second root loads through the very same tool.
+    let res = src.tool.call(json!({"name": "deploy"}), ToolContext::default()).await;
+    assert!(!res.is_error && res.output.contains("Run the taskfile."), "{}", res.output);
+    std::fs::remove_dir_all(&extra).ok();
+
+    // No skills at all still gives you a usable source and tool.
+    let empty = load_skills::<PathBuf>(&[]);
+    assert!(empty.skills.is_empty() && empty.tool.name == "skill");
+    assert_eq!(empty.prompt(), "No skills are currently available.");
+
+    println!("ok: 2 skills across 2 roots");
+    Ok(())
+}
+```
+
+## What you get back
+
+| Field / method | Type | What it is |
+|---|---|---|
+| `skills` | `BTreeMap<String, SkillInfo>` | Discovered skills keyed by frontmatter `name`, in name order. |
+| `tool` | `Tool` | The single loader tool, always named `skill`, `source: ToolSource::Skill`. |
+| `skipped` | `Vec<SkillSkip>` | Every candidate that did not become a skill. |
+| `prompt()` | `String` | Catalog for the system prompt; `"No skills are currently available."` when empty. |
+
+`SkillInfo` fields: `name`, `description` (skills with none are omitted from `prompt()`),
+`location` (absolute `SKILL.md` path, or the logical base for data skills), `content`, `origin`
+(`"fs"` or `"logical"`), `resources` and `base` (data-sourced skills only).
 
 ## See also
 
