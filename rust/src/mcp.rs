@@ -15,9 +15,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use rmcp::model::{
-    CallToolRequestParams, ClientRequest, ContentBlock, ResourceContents, ServerResult,
-};
+use rmcp::model::{CallToolRequestParams, ClientRequest, ContentBlock, ServerResult};
 use rmcp::service::{PeerRequestOptions, RunningService};
 #[cfg(feature = "mcp-http")]
 use rmcp::transport::StreamableHttpClientTransport;
@@ -28,7 +26,11 @@ use rmcp::{RoleClient, ServiceExt};
 use serde_json::{Map, Value, json};
 use tokio::sync::Mutex;
 
-use crate::tool::{Tool, ToolResult, ToolSource, sanitize};
+use crate::tool::{ContentPart, Tool, ToolHints, ToolResult, ToolSource, sanitize};
+
+mod resources;
+#[cfg(feature = "mcp-http")]
+pub mod sse;
 
 /// Default per-server timeout (connect, list, and the per-call idle timeout).
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -278,6 +280,13 @@ fn is_env_name(s: &str) -> bool {
 
 type Client = RunningService<RoleClient, ()>;
 
+/// One connected server's peer, for [`McpSource::resource_tools`].
+#[derive(Clone)]
+pub(crate) struct ServerConn {
+    pub(crate) peer: Arc<rmcp::Peer<RoleClient>>,
+    pub(crate) timeout: Duration,
+}
+
 /// The connected servers and their tools.
 pub struct McpSource {
     /// All servers' tools, servers in name order, each server's tools in list order.
@@ -286,6 +295,7 @@ pub struct McpSource {
     /// Why each failed server failed (diagnostic).
     pub errors: BTreeMap<String, String>,
     clients: Mutex<Vec<Client>>,
+    servers: BTreeMap<String, ServerConn>,
 }
 
 impl std::fmt::Debug for McpSource {
@@ -304,59 +314,129 @@ impl McpSource {
             let _ = c.cancel().await;
         }
     }
+
+    /// The connected server names, sorted.
+    pub fn server_names(&self) -> Vec<String> {
+        self.servers.keys().cloned().collect()
+    }
+
+    /// `list_mcp_resources` + `read_mcp_resource` over the connected servers
+    /// (opt-in; port of Go `McpSource.ResourceTools`). Both are read-only.
+    pub fn resource_tools(&self) -> Vec<Tool> {
+        resources::resource_tools(self.servers.clone())
+    }
+}
+
+/// One server's outcome, reported by [`McpLoadOptions::on_server`] the moment
+/// that server finishes — it does not wait for slower servers.
+#[derive(Debug, Clone)]
+pub struct McpServerResult {
+    pub name: String,
+    pub status: McpStatus,
+    /// This server's converted tools (empty unless connected). They stay usable
+    /// until the returned [`McpSource`] is closed.
+    pub tools: Vec<Tool>,
+    /// Why the server failed (`None` when connected or disabled).
+    pub error: Option<String>,
+}
+
+/// Per-server readiness callback (calls are serialized; keep it short).
+pub type OnServer = Arc<dyn Fn(McpServerResult) + Send + Sync>;
+
+/// Options for [`load_mcp_with`].
+#[derive(Clone, Default)]
+pub struct McpLoadOptions {
+    /// Called once per server as soon as it is connected, failed or found
+    /// disabled, so a host can register a fast server's tools
+    /// (`Toolkit::register`) while a slow one is still connecting.
+    pub on_server: Option<OnServer>,
 }
 
 /// Connect to every enabled server concurrently. Never fails as a whole: a
 /// server that cannot connect or list is `failed` and the rest load.
 pub async fn load_mcp(config: &McpConfig) -> McpSource {
-    let mut tasks = Vec::new();
+    load_mcp_with(config, McpLoadOptions::default()).await
+}
+
+/// [`load_mcp`] plus per-server readiness ([`McpLoadOptions::on_server`]). It
+/// still returns only after every server has finished, with the same source.
+pub async fn load_mcp_with(config: &McpConfig, opts: McpLoadOptions) -> McpSource {
+    let report = |r: McpServerResult| {
+        if let Some(cb) = &opts.on_server {
+            cb(r);
+        }
+    };
+    let mut set = tokio::task::JoinSet::new();
     let mut status = BTreeMap::new();
     for (name, cfg) in config {
         if !cfg.is_enabled() {
             status.insert(name.clone(), McpStatus::Disabled);
+            report(McpServerResult {
+                name: name.clone(),
+                status: McpStatus::Disabled,
+                tools: Vec::new(),
+                error: None,
+            });
             continue;
         }
         let (name, cfg) = (name.clone(), cfg.clone());
-        tasks.push(tokio::spawn(async move {
+        set.spawn(async move {
             let r = tokio::time::timeout(cfg.timeout(), connect_and_list(&name, &cfg)).await;
             let r = r.unwrap_or_else(|_| {
                 Err(format!("timed out after {}ms", cfg.timeout().as_millis()))
             });
             (name, cfg, r)
-        }));
+        });
     }
-    let mut tools = Vec::new();
+    let mut by_server: BTreeMap<String, Vec<Tool>> = BTreeMap::new();
     let mut errors = BTreeMap::new();
     let mut clients = Vec::new();
-    let mut done = Vec::new();
-    for t in tasks {
-        if let Ok(x) = t.await {
-            done.push(x);
-        }
-    }
-    done.sort_by(|a, b| a.0.cmp(&b.0));
-    for (name, cfg, r) in done {
+    let mut servers = BTreeMap::new();
+    while let Some(joined) = set.join_next().await {
+        let Ok((name, cfg, r)) = joined else { continue };
         match r {
             Ok((client, defs)) => {
                 let peer = Arc::new(client.peer().clone());
-                for def in apply_tools_filter(&name, defs, &cfg.tools) {
-                    tools.push(convert_tool(&name, def, peer.clone(), cfg.timeout()));
-                }
+                let tools: Vec<Tool> = apply_tools_filter(&name, defs, &cfg.tools)
+                    .into_iter()
+                    .map(|def| convert_tool(&name, def, peer.clone(), cfg.timeout()))
+                    .collect();
                 clients.push(client);
-                status.insert(name, McpStatus::Connected);
+                servers.insert(
+                    name.clone(),
+                    ServerConn {
+                        peer,
+                        timeout: cfg.timeout(),
+                    },
+                );
+                status.insert(name.clone(), McpStatus::Connected);
+                report(McpServerResult {
+                    name: name.clone(),
+                    status: McpStatus::Connected,
+                    tools: tools.clone(),
+                    error: None,
+                });
+                by_server.insert(name, tools);
             }
             Err(e) => {
                 eprintln!("[toolnexus] MCP server {name:?} failed: {e}");
                 status.insert(name.clone(), McpStatus::Failed);
+                report(McpServerResult {
+                    name: name.clone(),
+                    status: McpStatus::Failed,
+                    tools: Vec::new(),
+                    error: Some(e.clone()),
+                });
                 errors.insert(name, e);
             }
         }
     }
     McpSource {
-        tools,
+        tools: by_server.into_values().flatten().collect(),
         status,
         errors,
         clients: Mutex::new(clients),
+        servers,
     }
 }
 
@@ -371,19 +451,7 @@ async fn connect_and_list(
         ));
         #[cfg(feature = "mcp-http")]
         {
-            let url = cfg.url.clone().unwrap_or_default();
-            let mut tc = StreamableHttpClientTransportConfig::with_uri(url);
-            for (k, v) in expand_env_headers(&cfg.headers) {
-                let (Ok(k), Ok(v)) = (
-                    http::HeaderName::try_from(k.as_str()),
-                    http::HeaderValue::try_from(v.as_str()),
-                ) else {
-                    return Err(format!("invalid header {k:?}"));
-                };
-                tc.custom_headers.insert(k, v);
-            }
-            let transport = StreamableHttpClientTransport::with_client(reqwest::Client::new(), tc);
-            ().serve(transport).await.map_err(|e| e.to_string())?
+            connect_remote(cfg).await?
         }
     } else {
         let Some((prog, args)) = cfg.command.split_first() else {
@@ -437,6 +505,60 @@ fn apply_tools_filter(
         .collect()
 }
 
+#[cfg(feature = "mcp-http")]
+async fn connect_remote(cfg: &ServerConfig) -> Result<Client, String> {
+    let url = cfg.url.clone().unwrap_or_default();
+    let mut hm = http::HeaderMap::new();
+    for (k, v) in expand_env_headers(&cfg.headers) {
+        let (Ok(k), Ok(v)) = (
+            http::HeaderName::try_from(k.as_str()),
+            http::HeaderValue::try_from(v.as_str()),
+        ) else {
+            return Err(format!("invalid header {k:?}"));
+        };
+        hm.insert(k, v);
+    }
+    // Prefer streamable HTTP, fall back to legacy SSE (as Go does).
+    let mut tc = StreamableHttpClientTransportConfig::with_uri(url.clone());
+    for (k, v) in &hm {
+        tc.custom_headers.insert(k.clone(), v.clone());
+    }
+    let transport = StreamableHttpClientTransport::with_client(reqwest::Client::new(), tc);
+    let http_err = match ().serve(transport).await {
+        Ok(c) => return Ok(c),
+        Err(e) => e.to_string(),
+    };
+    let sse = sse::SseClientTransport::connect(&url, hm)
+        .await
+        .map_err(|e| format!("streamable-http failed ({http_err}) and sse start failed: {e}"))?;
+    ().serve(sse)
+        .await
+        .map_err(|e| format!("streamable-http failed ({http_err}) and sse start failed: {e}"))
+}
+
+/// MCP tool annotations → hints. No hint fields at all ⇒ `None` (unknown).
+/// Absent fields follow the MCP spec defaults (readOnly false, destructive
+/// true, openWorld true); read-only implies not destructive.
+fn mcp_hints(def: &rmcp::model::Tool) -> Option<ToolHints> {
+    let v = serde_json::to_value(def).ok()?;
+    let a = v.get("annotations")?;
+    let get = |k: &str| a.get(k).and_then(Value::as_bool);
+    let (ro, de, ow) = (
+        get("readOnlyHint"),
+        get("destructiveHint"),
+        get("openWorldHint"),
+    );
+    if ro.is_none() && de.is_none() && ow.is_none() {
+        return None;
+    }
+    let read_only = ro.unwrap_or(false);
+    Some(ToolHints {
+        read_only,
+        destructive: de.unwrap_or(true) && !read_only,
+        open_world: ow.unwrap_or(true),
+    })
+}
+
 /// The tool's input schema, normalized like every port: `type: object`,
 /// `properties` (default `{}`), `required` and `$defs` when present,
 /// `additionalProperties: false`.
@@ -481,7 +603,7 @@ fn convert_tool(
         description: def.description.as_deref().unwrap_or("").to_owned(),
         input_schema: build_input_schema(&def),
         source: ToolSource::Mcp,
-        hints: None,
+        hints: mcp_hints(&def),
         execute: Arc::new(move |args, ctx| {
             let (peer, original, server) = (peer.clone(), original.clone(), server.clone());
             Box::pin(async move {
@@ -526,41 +648,114 @@ fn convert_tool(
 
 /// SPEC §0 item 4: isError ⇒ error with the non-blank text parts joined by a
 /// blank line; structuredContent ⇒ its JSON; else text parts joined by "\n"
-/// (an embedded text resource counts as text, in place).
+/// (an embedded text resource counts as text, in place). Every non-text entry
+/// becomes a §1B part on EVERY branch; an output with only parts describes them.
 fn map_result(is_error: bool, structured: Option<Value>, content: &[ContentBlock]) -> ToolResult {
-    let text_of = |c: &ContentBlock| -> Option<String> {
-        match c {
-            ContentBlock::Text(t) => Some(t.text.clone()),
-            _ => None,
-        }
+    let wire: Vec<Value> = content
+        .iter()
+        .filter_map(|c| serde_json::to_value(c).ok())
+        .collect();
+    map_wire_result(is_error, structured, &wire)
+}
+
+/// The §0.4 mapping over wire-shaped `content[]`.
+#[doc(hidden)]
+pub fn map_wire_result(is_error: bool, structured: Option<Value>, content: &[Value]) -> ToolResult {
+    let parts = content_parts(content);
+    let text_of = |c: &Value| -> Option<String> {
+        (c.get("type").and_then(Value::as_str) == Some("text")).then(|| {
+            c.get("text")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_owned()
+        })
     };
-    if is_error {
-        let parts: Vec<String> = content
+    let mut res = if is_error {
+        let texts: Vec<String> = content
             .iter()
             .filter_map(text_of)
             .filter(|t| !t.trim().is_empty())
             .collect();
-        return ToolResult::error(if parts.is_empty() {
+        ToolResult::error(if texts.is_empty() {
             "MCP tool returned an error".to_owned()
         } else {
-            parts.join("\n\n")
-        });
-    }
-    if let Some(s) = structured {
-        return ToolResult::ok(serde_json::to_string(&s).unwrap_or_default());
-    }
-    let parts: Vec<String> = content
-        .iter()
-        .filter_map(|c| match c {
-            ContentBlock::Text(t) => Some(t.text.clone()),
-            ContentBlock::Resource(r) => match &r.resource {
-                ResourceContents::TextResourceContents { text, .. } => Some(text.clone()),
-                _ => None,
-            },
-            _ => None,
+            texts.join("\n\n")
         })
-        .collect();
-    ToolResult::ok(parts.join("\n"))
+    } else if let Some(s) = structured {
+        ToolResult::ok(crate::builtins::go_json(&s))
+    } else {
+        let texts: Vec<String> = content
+            .iter()
+            .filter_map(|c| {
+                text_of(c).or_else(|| {
+                    if c.get("type").and_then(Value::as_str) == Some("resource") {
+                        c["resource"]
+                            .get("text")
+                            .and_then(Value::as_str)
+                            .map(String::from)
+                    } else {
+                        None
+                    }
+                })
+            })
+            .collect();
+        let mut out = texts.join("\n");
+        if out.is_empty() && !parts.is_empty() {
+            out = parts
+                .iter()
+                .map(describe_part)
+                .collect::<Vec<_>>()
+                .join("\n");
+        }
+        ToolResult::ok(out)
+    };
+    res.parts = parts;
+    res
+}
+
+fn content_parts(content: &[Value]) -> Vec<ContentPart> {
+    let s = |v: &Value, k: &str| v.get(k).and_then(Value::as_str).unwrap_or("").to_owned();
+    let mut out = Vec::new();
+    for c in content {
+        match c.get("type").and_then(Value::as_str) {
+            Some(t @ ("image" | "audio")) => out.push(ContentPart {
+                kind: t.into(),
+                mime_type: s(c, "mimeType"),
+                data: s(c, "data"),
+                ..Default::default()
+            }),
+            Some("resource_link") => out.push(ContentPart {
+                kind: "file".into(),
+                mime_type: s(c, "mimeType"),
+                url: s(c, "uri"),
+                name: s(c, "name"),
+                ..Default::default()
+            }),
+            Some("resource") => {
+                let r = &c["resource"];
+                if r.get("blob").is_some() {
+                    out.push(ContentPart {
+                        kind: "file".into(),
+                        mime_type: s(r, "mimeType"),
+                        data: s(r, "blob"),
+                        name: s(r, "uri"),
+                        ..Default::default()
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+fn describe_part(p: &ContentPart) -> String {
+    use base64::Engine as _;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(&p.data)
+        .map(|b| b.len())
+        .unwrap_or(0);
+    format!("{} ({}, {bytes} bytes)", p.kind, p.mime_type)
 }
 
 #[doc(hidden)]
