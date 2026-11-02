@@ -109,6 +109,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let last: Arc<Mutex<Option<ToolResult>>> = Arc::new(Mutex::new(None));
     let seen = last.clone();
     let pick_env = Tool {
+        concurrency_safe: None,
         name: "pick_env".into(),
         description: "asks which environment".into(),
         input_schema: empty_schema(),

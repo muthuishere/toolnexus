@@ -67,6 +67,7 @@ fn model() -> GenerateFn {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ask = Tool {
+        concurrency_safe: None,
         name: "ask".into(),
         description: "asks something".into(),
         input_schema: empty_schema(),
@@ -138,6 +139,7 @@ fn model() -> GenerateFn {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ask = Tool {
+        concurrency_safe: None,
         name: "ask".into(),
         description: "asks something".into(),
         input_schema: empty_schema(),
@@ -204,6 +206,7 @@ fn model() -> GenerateFn {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let del = Tool {
+        concurrency_safe: None,
         name: "delete_record".into(),
         description: "deletes a record".into(),
         input_schema: empty_schema(),
@@ -292,6 +295,7 @@ fn model() -> GenerateFn {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ask = Tool {
+        concurrency_safe: None,
         name: "ask".into(),
         description: "asks the user".into(),
         input_schema: empty_schema(),

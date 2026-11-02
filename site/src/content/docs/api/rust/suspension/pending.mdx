@@ -119,6 +119,7 @@ fn model() -> GenerateFn {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let pick_env = Tool {
+        concurrency_safe: None,
         name: "pick_env".into(),
         description: "asks which environment".into(),
         input_schema: empty_schema(),

@@ -380,6 +380,7 @@ const THRESHOLD: f64 = 50.0;
 // A suspending tool needs the ToolContext (for ctx.answer), so build the Tool
 // directly rather than through the define_tool sugar.
 let issue_refund = Tool {
+    concurrency_safe: None,
     name: "issue_refund".into(),
     description: "Refund an order. Amounts at or above the approval threshold require a human.".into(),
     source: ToolSource::Native,
