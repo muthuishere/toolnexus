@@ -19,6 +19,8 @@ pub enum ToolSource {
     Http,
     Builtin,
     Agent,
+    /// A remote A2A agent's skill (§7A), wire name `a2a`.
+    A2a,
 }
 
 /// What a tool returns. Wire keys match every other port.

@@ -5,12 +5,17 @@
 //! the [`toolkit`] aggregator, schema [`adapters`] and the unified [`client`]
 //! loop with §10 suspension.
 
+pub mod a2a;
 pub mod acp;
 pub mod adapters;
 pub mod builtins;
 pub mod client;
 pub mod http;
 pub mod mcp;
+#[cfg(feature = "serve")]
+pub mod mcp_serve;
+#[cfg(feature = "serve")]
+pub mod serve;
 pub mod skills;
 pub mod store;
 pub mod tool;

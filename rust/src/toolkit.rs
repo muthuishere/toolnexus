@@ -1,4 +1,4 @@
-//! Toolkit — the aggregator (SPEC §4): MCP → skill → builtin → extraTools,
+//! Toolkit — the aggregator (SPEC §4): MCP → skill → builtin → A2A agents → extraTools,
 //! first name wins, an `extraTools` entry shadows a builtin of the same name.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -9,6 +9,7 @@ use std::sync::{Arc, RwLock};
 
 use serde_json::Value;
 
+use crate::a2a::{Agent, agent_tools, parse_agents_value};
 use crate::adapters::{to_anthropic, to_gemini, to_openai};
 use crate::builtins::{BuiltinsConfig, select_builtins};
 use crate::mcp::{self, McpConfig, McpSource, McpStatus};
@@ -46,6 +47,10 @@ pub struct ToolkitOptions {
     pub extra_tools: Vec<Tool>,
     /// `None` ⇒ the config's top-level `builtins` key, else all on.
     pub builtins: Option<BuiltinsConfig>,
+    /// Remote A2A agents (§7A): each advertised skill becomes a `source: "a2a"`
+    /// tool. A top-level `agents` block in the MCP config adds more. A failing
+    /// agent is logged and skipped.
+    pub agents: Vec<Agent>,
 }
 
 /// Construction failure (bad MCP config file, or no shell for an enabled `bash`).
@@ -83,6 +88,9 @@ pub struct Toolkit {
     reg: Arc<RwLock<Registry>>,
     mcp: Option<Arc<McpSource>>,
     skill: Option<Arc<SkillSource>>,
+    /// The parsed MCP config, for the `a2a` / `mcpServer` serve blocks.
+    #[cfg_attr(not(feature = "serve"), allow(dead_code))]
+    raw_config: Option<Arc<Value>>,
 }
 
 impl std::fmt::Debug for Toolkit {
@@ -163,6 +171,16 @@ pub async fn create_toolkit(opts: ToolkitOptions) -> Result<Toolkit, ToolkitErro
             .into_iter()
             .filter(|b| !extra.contains(b.name.as_str())),
     );
+    let mut agents = opts.agents.clone();
+    if let Some(block) = raw_cfg.as_ref().and_then(|v| v.get("agents")) {
+        agents.extend(parse_agents_value(block));
+    }
+    for ag in &agents {
+        match agent_tools(ag).await {
+            Ok(ts) => all.extend(ts),
+            Err(e) => eprintln!("[toolnexus] A2A agent {:?} failed: {e}", ag.card),
+        }
+    }
     all.extend(opts.extra_tools.iter().cloned());
 
     let mut reg = Registry::default();
@@ -175,6 +193,7 @@ pub async fn create_toolkit(opts: ToolkitOptions) -> Result<Toolkit, ToolkitErro
         reg: Arc::new(RwLock::new(reg)),
         mcp,
         skill,
+        raw_config: raw_cfg.map(Arc::new),
     })
 }
 
@@ -186,6 +205,19 @@ impl Toolkit {
             reg.add(t);
         }
         self
+    }
+
+    /// Fetch a remote A2A agent's card at runtime and register its skills as
+    /// tools (first name wins).
+    pub async fn add_agent(&self, agent: impl Into<Agent>) -> Result<&Self, String> {
+        let tools = agent_tools(&agent.into()).await?;
+        Ok(self.register(tools))
+    }
+
+    /// A top-level block of the config this toolkit was built from.
+    #[cfg_attr(not(feature = "serve"), allow(dead_code))]
+    pub(crate) fn config_block(&self, key: &str) -> Option<Value> {
+        self.raw_config.as_ref()?.get(key).cloned()
     }
 
     /// Every tool, in assembly order.

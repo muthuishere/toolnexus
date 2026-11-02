@@ -11,10 +11,19 @@ keywords = ["llm", "agents", "mcp", "acp", "tools"]
 categories = ["api-bindings", "asynchronous"]
 
 [features]
-default = ["mcp-http"]
+default = ["mcp-http", "serve"]
 # MCP over streamable HTTP (pulls in reqwest + rustls). Off ⇒ stdio servers only;
 # a remote server is then reported failed with a message naming this feature.
 mcp-http = ["rmcp/transport-streamable-http-client-reqwest", "dep:http"]
+# Toolkit::serve: the inbound A2A agent (SPEC §7B) and the MCP server profile
+# (§7C) over hyper + rmcp's streamable-HTTP server. Off ⇒ no HTTP server code.
+serve = [
+    "rmcp/server",
+    "rmcp/transport-streamable-http-server",
+    "dep:hyper",
+    "dep:hyper-util",
+    "dep:http-body-util",
+]
 
 [dependencies]
 tokio = { version = "1", features = ["process", "io-util", "sync", "time", "rt", "macros"] }
@@ -30,6 +39,10 @@ base64 = "0.22"
 futures-util = "0.3"
 http = { version = "1", optional = true }
 process-wrap = { version = "10", features = ["tokio1"] }
+uuid = { version = "1", features = ["v4"] }
+hyper = { version = "1", features = ["server", "http1"], optional = true }
+hyper-util = { version = "0.1", features = ["tokio"], optional = true }
+http-body-util = { version = "0.1", optional = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
