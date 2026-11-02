@@ -89,6 +89,29 @@ An API key from the environment is sent only to the host it belongs to: `OPENAI_
 | **Serve** | `tk.serve(addr, ..)` publishes the toolkit as an A2A agent and/or an MCP server. |
 | **Agents** | Sub-agents, a runtime with budgets and durable resume, personas, conversation compaction, and a judge/classifier for guardrails and routing. |
 
+## Media generation
+
+Generate images, video and speech (plus transcription, voice cloning and talking-head video)
+from a **JSON style** instead of provider code. Async jobs are started and polled for you. The same
+verbs become agent tools (`generate_image`, `generate_video`, `generate_speech`, …), and whatever
+they produce lands in `RunResult.files`. `examples/media-styles/a2e.json` ships first and reads
+`A2E_API_KEY` at call time. Its result URLs expire in 3–30 days, so save what you keep. SPEC §7G;
+guide: <https://muthuishere.github.io/toolnexus/media/>.
+
+```rust
+use toolnexus::{ImageInput, MediaOptions, ToolkitOptions, VideoInput, create_media, create_toolkit, load_media_style};
+
+let media = create_media(load_media_style("examples/media-styles/a2e.json")?, MediaOptions::default());
+let img = media.image(ImageInput { prompt: "a red fox in fresh snow".into(),
+    width: Some(1024), height: Some(768), ..Default::default() }).await?;
+let vid = media.video(VideoInput { prompt: "the fox blinks".into(),
+    image: Some(img.files[0].url.clone()), seconds: Some(5), ..Default::default() }).await?;
+
+let tk = create_toolkit(ToolkitOptions { media: Some(media), ..Default::default() }).await?; // generate_image, …
+let res = agent.run("Draw a fox, then animate it.", &tk).await?;
+for f in &res.files { println!("{} {} {}", f.from, f.mime_type, f.url); }
+```
+
 ## Cargo features
 
 | feature | default | what it adds |

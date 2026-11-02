@@ -208,6 +208,43 @@ pub struct ToolCall {
     pub is_error: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata: Option<Map<String, Value>>,
+    /// The tool result's non-text parts (§1B); present iff it had parts.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parts: Vec<ContentPart>,
+}
+
+/// A non-text part produced by a tool call during a run (§8 `RunResult.files`).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct RunFile {
+    #[serde(rename = "type")]
+    pub kind: String,
+    #[serde(rename = "mimeType", default, skip_serializing_if = "String::is_empty")]
+    pub mime_type: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub url: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub data: String,
+    /// The tool's name.
+    pub from: String,
+    /// The model's tool-call id.
+    #[serde(rename = "callId")]
+    pub call_id: String,
+}
+
+/// The `files` entries a tool call contributes: every non-text part, in order.
+pub fn run_files_of(call: &ToolCall, call_id: &str) -> Vec<RunFile> {
+    call.parts
+        .iter()
+        .filter(|p| p.kind != "text")
+        .map(|p| RunFile {
+            kind: p.kind.clone(),
+            mime_type: p.mime_type.clone(),
+            url: p.url.clone(),
+            data: p.data.clone(),
+            from: call.name.clone(),
+            call_id: call_id.to_string(),
+        })
+        .collect()
 }
 
 /// Token usage, summed over a run.
@@ -236,6 +273,9 @@ pub struct RunResult {
     pub messages: Vec<Value>,
     #[serde(rename = "toolCalls")]
     pub tool_calls: Vec<ToolCall>,
+    /// Every non-text part tool calls produced this run, in call order (§8).
+    #[serde(default)]
+    pub files: Vec<RunFile>,
     #[serde(rename = "toolCallCount")]
     pub tool_call_count: usize,
     pub turns: usize,
@@ -553,6 +593,7 @@ struct Call {
 struct RunState {
     messages: Vec<Value>,
     tool_calls: Vec<ToolCall>,
+    files: Vec<RunFile>,
     usage: Usage,
     turns: usize,
     last_model: String,
@@ -1848,6 +1889,7 @@ impl Client {
             text,
             messages: st.messages.clone(),
             tool_calls: st.tool_calls.clone(),
+            files: st.files.clone(),
             tool_call_count: st.tool_calls.len(),
             turns: st.turns,
             usage: st.usage,
@@ -1971,7 +2013,12 @@ impl Client {
                     output: r.output.clone(),
                     is_error: r.is_error,
                     metadata: r.metadata.clone(),
+                    parts: r.parts.clone(),
                 }
+            };
+            let push = |st: &mut RunState, tc: ToolCall, id: &str| {
+                st.files.extend(run_files_of(&tc, id));
+                st.tool_calls.push(tc);
             };
             if let Some(err) = outcomes.iter().find_map(|o| o.as_ref().err()).cloned() {
                 // keep the finished pairs; the rest are sealed as interrupted
@@ -1980,7 +2027,7 @@ impl Client {
                     if let Ok((args, r, _)) = o {
                         match style {
                             Style::OpenAI => {
-                                st.tool_calls.push(record(c, args, r));
+                                push(st, record(c, args, r), &c.id);
                                 st.messages.push(entry(c, r));
                             }
                             Style::Anthropic => blocks.push(entry(c, r)),
@@ -2005,7 +2052,7 @@ impl Client {
             // ADR-0010 F2-a); the first-in-order halt rule below is untouched.
             crate::relay::merge_relay_calls(&mut halts);
             for ((c, (args, r)), h) in calls.iter().zip(done).zip(halts) {
-                st.tool_calls.push(record(c, &args, &r));
+                push(st, record(c, &args, &r), &c.id);
                 match style {
                     Style::OpenAI => st.messages.push(entry(c, &r)),
                     Style::Anthropic => blocks.push(entry(c, &r)),

@@ -127,7 +127,7 @@
                 ;; The gate judges the ACCUMULATED work, so an agent cannot escape it
                 ;; by declining to re-declare its plan on a retry.
                 acc (into acc (:tool-calls r))
-                r   (assoc r :tool-calls acc :tool-call-count (count acc))]
+                r   (assoc r :tool-calls acc :files (client/run-files acc) :tool-call-count (count acc))]
             (if (and (:status r) (not= "done" (:status r)))
               ;; The run stopped for its own reason (suspension, budget). If the gate
               ;; was mid-retry the caller must learn BOTH — otherwise a budget stop

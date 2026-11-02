@@ -14,7 +14,7 @@ got wrong, all now in the contract.
 - Styles are JSON: sync or async (start → auto-poll → result), dot-paths, `${ENV}` headers,
   optional `errorEnvelope`. Presets in `examples/media-styles/` (a2e first). No vendor in any port.
 - §8 `RunResult.files` and `toolCalls[].parts`.
-- `conformance/media/` — `verbs.json`, `cases.json` (15 engine cases), `schemas.json`.
+- `conformance/media/` — `verbs.json`, `cases.json` (19 engine cases), `schemas.json`.
 
 ## Not in this change
 Download of expiring URLs, local uploads, ComfyUI graph injection, webhooks, quotes, §10 suspend

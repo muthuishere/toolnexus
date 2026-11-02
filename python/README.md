@@ -134,6 +134,29 @@ Also: `context(ctx, message, extra)`, `score(...)`, `Tape` (record live, replay 
 name), `static_classifier((state, questions, response), ...)`, `questions_wire(...)`, and
 `classifier.evaluate_batch(states, questions)` (state order, fail-closed, 16 in flight).
 
+## Media generation
+
+Generate images, video and speech (plus transcription, voice cloning and talking-head video)
+from a **JSON style** instead of provider code. Async jobs are started and polled for you. The same
+verbs become agent tools (`generate_image`, `generate_video`, `generate_speech`, …), and whatever
+they produce lands in `RunResult.files`. `examples/media-styles/a2e.json` ships first and reads
+`A2E_API_KEY` at call time. Its result URLs expire in 3–30 days, so save what you keep. SPEC §7G;
+guide: <https://muthuishere.github.io/toolnexus/media/>.
+
+```python
+from toolnexus import load_media_style, create_media, create_toolkit
+
+media = create_media(load_media_style("examples/media-styles/a2e.json"),
+                     on_progress=lambda p: print(p["verb"], p["status"]))
+img = await media.image("a red fox in fresh snow", width=1024, height=768)
+vid = await media.video("the fox blinks", image=img.files[0].url, seconds=5)
+
+tk = await create_toolkit(media=media)               # the agent gets generate_image, …
+res = await agent.run("Draw a fox, then animate it.", tk)
+for f in res.files:
+    print(f["from"], f["mimeType"], f["url"])
+```
+
 ## Documentation
 
 Everything else — the full surface, with runnable examples — lives on the docs site:

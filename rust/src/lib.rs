@@ -18,6 +18,7 @@ pub mod judge;
 pub mod mcp;
 #[cfg(feature = "serve")]
 pub mod mcp_serve;
+pub mod media;
 pub mod relay;
 #[cfg(feature = "serve")]
 pub mod serve;
@@ -31,6 +32,11 @@ pub use builtins::{BuiltinsConfig, select_builtins};
 pub use classifier::{
     Classifier, ClassifierError, ClassifierOptions, ClassifierStyle, Decision, Question, Questions,
     create_classifier,
+};
+pub use media::{
+    CloneVoiceInput, ImageInput, Media, MediaError, MediaFile, MediaOptions, MediaProgress,
+    MediaResult, MediaStyle, SpeechInput, TalkingInput, TranscribeInput, VideoInput, create_media,
+    load_media_style,
 };
 pub use tool::{
     Answer, ContentPart, PartError, Request, Tool, ToolContext, ToolHints, ToolResult, ToolSource,

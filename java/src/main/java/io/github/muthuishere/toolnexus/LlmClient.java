@@ -762,9 +762,10 @@ public final class LlmClient {
     /** The RunResult entry for one executed call: a tool-tiers {@code call_tool} call is recorded
      * as the REAL tool with its inner (post-beforeTool) arguments, as hooks and stream events see
      * it; the transcript keeps the wrapper. */
-    private ToolCall toolCallRecord(String name, ToolRun run) {
+    private ToolCall toolCallRecord(String name, ToolRun run, String callId) {
         Unwrapped u = unwrapCall(name, run.args());
-        return new ToolCall(u.name(), u.args(), run.result().output(), run.result().isError(), run.result().metadata());
+        return new ToolCall(u.name(), u.args(), run.result().output(), run.result().isError(),
+                run.result().metadata(), run.result().parts(), callId);
     }
 
     /** {@code call_tool {name, arguments}} mapped to the real call ({@code wrapped=false} when tiers
@@ -889,16 +890,30 @@ public final class LlmClient {
         public final String output;
         public final boolean isError;
         public final Map<String, Object> metadata;
+        /** §8: the tool result's non-text parts — non-null iff the ToolResult had parts. */
+        public final List<ContentPart> parts;
+        /** The model's tool-call id for this call (may be null when the model sent none). */
+        public final String callId;
 
         ToolCall(String name, Map<String, Object> args,
                  String output, boolean isError, Map<String, Object> metadata) {
+            this(name, args, output, isError, metadata, null, null);
+        }
+
+        ToolCall(String name, Map<String, Object> args, String output, boolean isError,
+                 Map<String, Object> metadata, List<ContentPart> parts, String callId) {
             this.name = name;
             this.args = args;
             this.output = output;
             this.isError = isError;
             this.metadata = metadata;
+            this.parts = parts == null || parts.isEmpty() ? null : List.copyOf(parts);
+            this.callId = callId;
         }
     }
+
+    /** §8 {@code RunResult.files} entry: one non-text part a tool call produced this run. */
+    public record RunFile(String type, String mimeType, String url, String data, String from, String callId) {}
 
     /** Token usage, summed across every LLM round trip in the run. */
     public static final class Usage {
@@ -949,6 +964,9 @@ public final class LlmClient {
         /** §7D: which limit stopped the run (e.g. {@code "maxTurns"}) — set ONLY when
          * {@code status == "incomplete"}; {@code null} otherwise. */
         public final String limit;
+        /** §8/§7G: every non-text part produced by tool calls this run, in call order
+         * ({@code from} = tool name, {@code callId} = the model's tool-call id). Never null. */
+        public final List<RunFile> files;
 
         RunResult(String text, List<Object> messages, List<ToolCall> toolCalls,
                   int turns, Usage usage, String model) {
@@ -973,6 +991,15 @@ public final class LlmClient {
             this.status = status;
             this.pending = pending;
             this.limit = limit;
+            List<RunFile> fs = new ArrayList<>();
+            for (ToolCall c : toolCalls) {
+                if (c.parts == null) continue;
+                for (ContentPart p : c.parts) {
+                    if (ContentPart.TEXT.equals(p.type())) continue;
+                    fs.add(new RunFile(p.type(), p.mimeType(), p.url(), p.data(), c.name, c.callId));
+                }
+            }
+            this.files = List.copyOf(fs);
         }
     }
 
@@ -2237,7 +2264,7 @@ public final class LlmClient {
                             executor).thenAccept(outcome -> {
                         ToolRun run = outcome.run();
                         haltedAt[idx] = outcome.halted();
-                        recorded[idx] = toolCallRecord(fnName, run);
+                        recorded[idx] = toolCallRecord(fnName, run, callId == null ? null : String.valueOf(callId));
                         results[idx] = run.result();
                         if (!deadline.cancelled()) inflight.put(String.valueOf(callId), run.result());
                         Map<String, Object> toolMsg = new LinkedHashMap<>();
@@ -2377,7 +2404,7 @@ public final class LlmClient {
                             executor).thenAccept(outcome -> {
                         ToolRun run = outcome.run();
                         haltedAt[idx] = outcome.halted();
-                        recorded[idx] = toolCallRecord(useName, run);
+                        recorded[idx] = toolCallRecord(useName, run, useId == null ? null : String.valueOf(useId));
                         results[idx] = run.result();
                         if (!deadline.cancelled()) inflight.put(String.valueOf(useId), run.result());
                         Map<String, Object> tr = new LinkedHashMap<>();
@@ -2599,7 +2626,7 @@ public final class LlmClient {
                         if (res.halted() != null) halted = res.halted();
                         r = new ToolRun(r.args(), res.result());
                     }
-                    toolCalls.add(toolCallRecord(slot[1], r));
+                    toolCalls.add(toolCallRecord(slot[1], r, slot[0]));
                     Map<String, Object> toolMsg = new LinkedHashMap<>();
                     toolMsg.put("role", "tool");
                     toolMsg.put("tool_call_id", slot[0]);
@@ -2823,7 +2850,7 @@ public final class LlmClient {
                         if (res.halted() != null) halted = res.halted();
                         r = new ToolRun(r.args(), res.result());
                     }
-                    toolCalls.add(toolCallRecord(name, r));
+                    toolCalls.add(toolCallRecord(name, r, id));
                     Map<String, Object> tr = new LinkedHashMap<>();
                     tr.put("type", "tool_result");
                     tr.put("tool_use_id", id);

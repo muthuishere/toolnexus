@@ -23,6 +23,8 @@ pub enum ToolSource {
     A2a,
     /// Declaration-only: the call is surfaced to the host (§10 relay).
     Relay,
+    /// A media-generation verb (§7G).
+    Media,
 }
 
 /// What a tool returns. Wire keys match every other port.

@@ -134,6 +134,26 @@ never change mid-session. Runnable: `dotnet run --project examples/Toolnexus.Exa
 - `Compaction.Options.OnCompact`, `Agent.AsToolWith(ctx => runtimeOptions)` with `RuntimeOptions.WaitFor`, `ToolContext.CallId`, `LlmClient.ListModelsAsync`.
 - Not in C# yet: the ACP host hooks (Go only; `openspec/changes/add-go-host-asks`).
 
+## Media generation
+
+Generate images, video and speech (plus transcription, voice cloning and talking-head video)
+from a **JSON style** instead of provider code. Async jobs are started and polled for you. The same
+verbs become agent tools (`generate_image`, `generate_video`, `generate_speech`, …), and whatever
+they produce lands in `RunResult.files`. `examples/media-styles/a2e.json` ships first and reads
+`A2E_API_KEY` at call time. Its result URLs expire in 3–30 days, so save what you keep. SPEC §7G;
+guide: <https://muthuishere.github.io/toolnexus/media/>.
+
+```csharp
+var media = Media.Create(MediaStyle.Load("examples/media-styles/a2e.json"),
+    new MediaOptions { OnProgress = p => Console.WriteLine($"{p.Verb} {p.Status}") });
+var img = await media.ImageAsync(new ImageInput("a red fox in fresh snow") { Width = 1024, Height = 768 });
+var vid = await media.VideoAsync(new VideoInput("the fox blinks") { Image = img.Files[0].Url, Seconds = 5 });
+
+await using var tk = await Toolkit.CreateAsync(new Toolkit.Options { Media = media }); // generate_image, …
+var res = await agent.RunAsync("Draw a fox, then animate it.", tk);
+foreach (var f in res.Files) Console.WriteLine($"{f.From} {f.MimeType} {f.Url}");
+```
+
 ## Documentation
 
 Everything else — the full surface, with runnable examples — lives on the docs site:

@@ -148,7 +148,7 @@ defmodule Toolnexus.Tool do
   The uniform tool: a named, described, JSON-Schema'd callable (SPEC §1).
 
   `execute` is `(args :: map, ctx :: Toolnexus.Context.t()) -> Toolnexus.ToolResult.t()`.
-  `source` is one of `"mcp" | "skill" | "native" | "http" | "builtin" | "a2a" | "custom"`.
+  `source` is one of `"mcp" | "skill" | "native" | "http" | "builtin" | "a2a" | "media" | "custom"`.
 
   `hints` (`Toolnexus.ToolHints`, SPEC §4C) say what the tool may do, for a host
   permission gate in `hooks.before_tool` (the event carries them as `:hints`).

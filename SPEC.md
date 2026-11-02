@@ -1642,13 +1642,36 @@ whose top-level keys overwrite the request body last; the tool face never expose
    mp3→audio/mpeg, wav→audio/wav, ogg→audio/ogg, m4a→audio/mp4, flac→audio/flac; else the kind
    default image/png, video/mp4, audio/mpeg.
 
+### Edge rules (pinned after the first port)
+
+- **Headers** — style headers go on **every** request (start and polls); `Content-Type:
+  application/json` only on requests with a body. Polls send no body.
+- **Job id** — only a non-empty string or an integral number counts; anything else (incl. `""`) ⇒ `no job id`.
+- **Envelope code** rendering — string as-is, integral number as integer text, anything else JSON-encoded.
+- **Media result** — arrays flatten to any depth; non-string and empty-string entries are dropped.
+- **Text result** — a string (including `""`, e.g. silence) or a number is a result; absent/null/other ⇒ `no result`.
+- **Args** — an arg whose value is null/nil/None is treated as absent. With several unsupported args,
+  the error names the first in sorted (code-point) order.
+- **Absent `done`/`failed`** lists are empty (the job polls until timeout).
+- **Registration order** — `createToolkit({ media })` registers media tools after A2A agent tools
+  and **before** `extraTools`; first name wins as everywhere else.
+- **Number rendering** — a non-integral number (text result, envelope code) uses the shortest
+  round-trip decimal form (`1.5`).
+- **dotPath write through a scalar** — an existing non-container value on the path is replaced by
+  an object (or an array, when the next segment is numeric).
+- **Transport errors** (no HTTP status, e.g. connection refused) — `<verb>: <port's error message>`;
+  not byte-fixed.
+- **Cancellation** — the function face raises the port's native cancellation error; the tool face
+  returns `isError:true` with that error's message (not byte-fixed across ports) — except **Python**, where
+  `asyncio.CancelledError` must propagate (swallowing it un-cancels the task).
+
 ### Tools (tool face)
 
 `media.tools()` returns one `Tool` (source `"media"`) per verb the media supports, in `verbs.json`
 order, named per `verbs.json` (`generate_image`, `generate_video`, `generate_speech`,
 `transcribe_audio`, `clone_voice`, `talking_video`). `inputSchema = {type:"object", properties,
 required}` where properties are the verb's canonical args **the resolved style maps**, in canonical
-order, and `required` = canonical-required ∩ mapped (always present, possibly `[]`). Array args are
+order where the port's schema type preserves key order (Go's map does not; contents must still match), and `required` = canonical-required ∩ mapped (always present, possibly `[]`). Array args are
 `{type:"array", items:{type:<items>}, description}`. Expected bytes: `conformance/media/schemas.json`.
 `createToolkit({ media })` registers them; `toolkit.register(...media.tools())` is equivalent.
 
@@ -1660,7 +1683,7 @@ Any engine error ⇒ `ToolResult{ isError:true, output:<the error message> }`.
 
 ### Not in v1
 
-Download of expiring result URLs, local-file upload flows, ComfyUI graph injection, webhooks,
+Download of expiring result URLs, provider-side job cancellation, local-file upload flows, ComfyUI graph injection, webhooks,
 price quotes, §10 suspension for long jobs, streaming `file` events. Tracked in
 `openspec/changes/add-media-generation`.
 

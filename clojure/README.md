@@ -135,6 +135,28 @@ five run on every change (`./all-modes-check.sh`).
 
 A `:before-llm` hook may return `:model`: a non-empty value is sent for that turn only.
 
+## Media generation
+
+Generate images, video and speech (plus transcription, voice cloning and talking-head video)
+from a **JSON style** instead of provider code. Async jobs are started and polled for you. The same
+verbs become agent tools (`generate_image`, `generate_video`, `generate_speech`, …), and whatever
+they produce lands in `RunResult.files`. `examples/media-styles/a2e.json` ships first and reads
+`A2E_API_KEY` at call time. Its result URLs expire in 3–30 days, so save what you keep. SPEC §7G;
+guide: <https://muthuishere.github.io/toolnexus/media/>.
+
+```clojure
+(require '[toolnexus.media :as media] '[toolnexus.core :as tn] '[toolnexus.client :as client])
+
+(def m (media/create-media (media/load-style "examples/media-styles/a2e.json")
+                           {:on-progress (fn [{:keys [verb status]}] (println verb status))}))
+(def img (media/image m {:prompt "a red fox in fresh snow" :width 1024 :height 768}))
+(def vid (media/video m {:prompt "the fox blinks" :image (-> img :files first :url) :seconds 5}))
+
+(def tk (tn/build {:media m}))                         ; generate_image, …
+(def res (client/run agent "Draw a fox, then animate it." {:toolkit tk}))
+(doseq [f (:files res)] (println (:from f) (:mimeType f) (:url f)))
+```
+
 ## Documentation
 
 Everything else — the full surface, with runnable examples — lives on the docs site:

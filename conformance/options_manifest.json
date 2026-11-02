@@ -270,6 +270,13 @@
           "disableskills"
         ],
         "tier": "full"
+      },
+      {
+        "name": "media",
+        "aliases": [
+          "media"
+        ],
+        "tier": "full"
       }
     ]
   },

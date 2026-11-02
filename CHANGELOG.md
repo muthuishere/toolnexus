@@ -8,6 +8,35 @@ GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
 
 ## Unreleased
 
+**Media generation: images, video, speech, transcription, voice cloning and talking-head video,
+from a JSON style instead of provider code.** Until now toolnexus could carry an image or audio
+part but not make one; every provider (a2e, Replicate, fal, OpenAI images/TTS, ComfyUI…) made you
+hand-write a request and a polling loop, per endpoint, per language. Now one engine does it:
+
+- **Typed verbs for your code** — `createMedia(style)` gives `image`, `video`, `speech`,
+  `transcribe`, `cloneVoice` and `talking`, with normalised arguments (`prompt`, `seconds`,
+  `voice`, …) and a result of `{files, text?, jobId?, status}`.
+- **Tools for your agent** — the same verbs become `generate_image`, `generate_video`,
+  `generate_speech`, `transcribe_audio`, `clone_voice` and `talking_video`; `createToolkit({ media })`
+  registers them. Tool names never change when you switch provider, so prompts and skills keep working.
+- **Long jobs just work** — async styles start the job and poll for you (default every 5 s, up to
+  10 min), report progress, honour cancellation, and keep polling through statuses a provider
+  never documented.
+- **Providers are data** — a style is a JSON file (endpoints, dot-paths, `${ENV}` headers, an
+  optional error envelope). `examples/media-styles/a2e.json` ships first, live-verified for image,
+  video and speech. The library names no vendor.
+- **`RunResult.files`** — every image, video or audio a run's tools produced, in order, tagged with
+  the tool name and call id; `toolCalls[].parts` carries them per call. The answer text never gets
+  markup — you decide how to render.
+
+Contract: SPEC §7G, ADR 0036, `conformance/media/` (every port replays the same 19 cases and schema set).
+
+**Not done yet** (tracked in `openspec/changes/add-media-generation`): downloading expiring result
+URLs (a2e's last 3–30 days — save them yourself for now), cancelling the job at the provider
+(cancel stops polling; the provider's job keeps running), uploading local files, ComfyUI workflow
+injection, webhooks, price quotes, pausing a long job through `waitFor`, and streaming `file`
+events. Realtime/live voice conversation is deliberately out of scope.
+
 ## 0.23.0 — 2026-11-02
 
 **Docs: Rust is on every page, and the docs now say eight languages.** Every tabbed guide,

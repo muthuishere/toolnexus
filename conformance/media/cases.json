@@ -168,6 +168,53 @@
       "tool": { "name": "transcribe_audio", "isError": false, "output": "hello world",
         "metadata": { "source": "media", "verb": "transcribe", "status": "completed" } } },
 
+    { "name": "error_envelope_string_code_headers_on_polls",
+      "env": { "MEDIA_TEST_KEY": "FAKE_KEY" },
+      "style": { "baseUrl": "{server}", "headers": { "Authorization": "Bearer ${MEDIA_TEST_KEY}" },
+        "errorEnvelope": { "codePath": "code", "okValues": ["OK"], "messagePath": "msg" },
+        "verbs": { "image": {
+        "mode": "async", "kind": "image", "start": { "path": "/s" }, "args": { "prompt": "prompt" }, "idPath": "id",
+        "poll": { "path": "/p/{id}", "statusPath": "st", "done": ["completed"], "failed": ["failed"], "intervalMs": 1, "timeoutMs": 5000 },
+        "resultPath": "u" } } },
+      "verb": "image", "args": { "prompt": "x" },
+      "script": [ { "status": 200, "body": { "code": "OK", "id": "j5" } }, { "status": 200, "body": { "code": "E_QUOTA", "msg": "out of credits" } } ],
+      "expectHeaders": { "Authorization": "Bearer FAKE_KEY" },
+      "expectRequests": [ { "method": "POST", "path": "/s", "body": { "prompt": "x" } }, { "method": "GET", "path": "/p/j5" } ],
+      "error": "API error E_QUOTA: out of credits",
+      "tool": { "name": "generate_image", "isError": true, "output": "API error E_QUOTA: out of credits" } },
+
+    { "name": "nested_result_arrays_flatten_drop_empty",
+      "style": { "baseUrl": "{server}", "verbs": { "image": {
+        "mode": "sync", "kind": "image", "start": { "path": "/s" }, "args": { "prompt": "prompt" }, "resultPath": "u" } } },
+      "verb": "image", "args": { "prompt": "x" },
+      "script": [ { "status": 200, "body": { "u": [ ["https://x/1.gif", ""], [ ["https://x/2.png"] ], 7, null ] } } ],
+      "result": { "files": [
+        { "type": "image", "mimeType": "image/gif", "url": "https://x/1.gif" },
+        { "type": "image", "mimeType": "image/png", "url": "https://x/2.png" } ], "status": "completed" },
+      "tool": { "name": "generate_image", "isError": false, "output": "image ready: https://x/1.gif\nhttps://x/2.png",
+        "parts": [ { "type": "image", "mimeType": "image/gif", "url": "https://x/1.gif" }, { "type": "image", "mimeType": "image/png", "url": "https://x/2.png" } ],
+        "metadata": { "source": "media", "verb": "image", "status": "completed" } } },
+
+    { "name": "text_kind_empty_string_is_a_result",
+      "style": { "baseUrl": "{server}", "verbs": { "transcribe": {
+        "mode": "sync", "kind": "text", "start": { "path": "/stt" }, "args": { "audio": "a" }, "resultPath": "text" } } },
+      "verb": "transcribe", "args": { "audio": "https://x/silence.wav" },
+      "script": [ { "status": 200, "body": { "text": "" } } ],
+      "result": { "files": [], "text": "", "status": "completed" },
+      "tool": { "name": "transcribe_audio", "isError": false, "output": "",
+        "metadata": { "source": "media", "verb": "transcribe", "status": "completed" } } },
+
+    { "name": "job_id_object_is_not_an_id",
+      "style": { "baseUrl": "{server}", "verbs": { "image": {
+        "mode": "async", "kind": "image", "start": { "path": "/s" }, "args": { "prompt": "prompt" }, "idPath": "id",
+        "poll": { "path": "/p/{id}", "statusPath": "st", "done": ["completed"], "failed": ["failed"], "intervalMs": 1, "timeoutMs": 5000 },
+        "resultPath": "u" } } },
+      "verb": "image", "args": { "prompt": "x" },
+      "script": [ { "status": 200, "body": { "id": { "v": 1 } } } ],
+      "expectRequests": [ { "method": "POST", "path": "/s", "body": { "prompt": "x" } } ],
+      "error": "image: no job id at id",
+      "tool": { "name": "generate_image", "isError": true, "output": "image: no job id at id" } },
+
     { "name": "unknown_verb",
       "style": { "baseUrl": "{server}", "verbs": { "image": {
         "mode": "sync", "kind": "image", "start": { "path": "/s" }, "args": { "prompt": "prompt" }, "resultPath": "u" } } },

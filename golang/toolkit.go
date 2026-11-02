@@ -52,6 +52,9 @@ type Options struct {
 	// onto this WaitFor (form→kind:"input", URL→kind:"authorization"). Typically the
 	// same function passed to the client. Omit ⇒ MCP elicitation is not advertised.
 	WaitFor func(Request) (Answer, error)
+	// Media registers the media engine's tools (§7G, source "media") — one per
+	// verb its styles support. Equivalent to tk.Register(media.Tools()...).
+	Media *Media
 }
 
 // Toolkit aggregates all tools and routes execution.
@@ -210,6 +213,9 @@ func CreateToolkit(ctx context.Context, opts Options) (*Toolkit, error) {
 		}
 	}
 	all = append(all, agentTools...)
+	if opts.Media != nil {
+		all = append(all, opts.Media.Tools()...)
+	}
 	all = append(all, opts.ExtraTools...)
 
 	// A relay tool must never share a name with a builtin (ADR-0010 D5). Checked before

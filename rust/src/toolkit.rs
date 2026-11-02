@@ -57,6 +57,9 @@ pub struct ToolkitOptions {
     /// typically the same function given to the client. `None` ⇒ MCP
     /// elicitation is not advertised.
     pub wait_for: Option<crate::client::WaitForFn>,
+    /// Media generation (§7G): its tools register after A2A agent tools and
+    /// before `extra_tools` (first name wins).
+    pub media: Option<crate::media::Media>,
 }
 
 /// Construction failure (bad MCP config file, or no shell for an enabled `bash`).
@@ -198,6 +201,9 @@ pub async fn create_toolkit(opts: ToolkitOptions) -> Result<Toolkit, ToolkitErro
             Ok(ts) => all.extend(ts),
             Err(e) => eprintln!("[toolnexus] A2A agent {:?} failed: {e}", ag.card),
         }
+    }
+    if let Some(m) = &opts.media {
+        all.extend(m.tools());
     }
     all.extend(opts.extra_tools.iter().cloned());
     // A relay tool must never share a name with a builtin — checked

@@ -11,6 +11,7 @@ import { startA2AServer, type A2AConfig, type OnTask, type ServeHandle } from ".
 import { type MCPServeConfig, type OnCall } from "./mcpserve.js"
 import { toAnthropic, toGemini, toOpenAI } from "./adapters.js"
 import type { Client } from "./client.js"
+import type { Media } from "./media.js"
 
 export interface ToolkitOptions {
   mcpConfig?: string | object
@@ -31,6 +32,8 @@ export interface ToolkitOptions {
   /** Sibling-file sample cap: 0 ⇒ default 10, n>0 ⇒ cap, -1 ⇒ omit <skill_files> (§3, S5). */
   skillSampleLimit?: number
   extraTools?: Tool[]
+  /** Media generation (§7G): registers `media.tools()` (source "media"). */
+  media?: Media
   /** Built-in tools (§4A). On by default. false | { disabled:true } | { enabled:false } ⇒ off. */
   builtins?: BuiltinsConfig
   /** Remote A2A agents — each advertised skill becomes a tool (source:"a2a"). */
@@ -137,7 +140,7 @@ export class Toolkit {
         }),
       ),
     )
-    const agentToolsFlat = agentToolLists.flat()
+    const agentToolsFlat = [...agentToolLists.flat(), ...(opts.media ? opts.media.tools() : [])]
 
     // A2A inbound profile: a top-level `a2a` block on a parsed config object
     // (mirrors builtins/agents). serve() prefers its inline `a2a` over this.

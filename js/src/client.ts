@@ -318,6 +318,26 @@ export interface ToolCallRecord {
   output: string
   isError: boolean
   metadata?: Record<string, unknown>
+  /** §8: the ToolResult's parts — present iff the result had parts. */
+  parts?: ContentPart[]
+}
+
+/** §8 RunResult.files entry: a non-text part a tool call produced this run. */
+export type RunFile = { type: "image" | "file" | "audio"; mimeType: string; url?: string; data?: string; name?: string; from: string; callId: string }
+
+/** Model tool-call id of each record, kept off the record itself (§8 shape has no id). */
+const callIds = new WeakMap<ToolCallRecord, string>()
+
+/** RunResult.files: every non-text part of every tool call, in call order (§8). */
+function runFiles(toolCalls: ToolCallRecord[]): RunFile[] {
+  const out: RunFile[] = []
+  for (const r of toolCalls) {
+    for (const p of r.parts ?? []) {
+      if (p.type === "text") continue
+      out.push({ ...p, from: r.name, callId: callIds.get(r) ?? "" })
+    }
+  }
+  return out
 }
 
 /** Token usage, summed across every LLM round trip in the run. */
@@ -340,6 +360,8 @@ export interface RunResult {
   messages: any[]
   /** Every tool call made, with its output, error flag, and metadata. */
   toolCalls: ToolCallRecord[]
+  /** Every non-text part produced by tool calls this run, in call order (§8). Always present. */
+  files: RunFile[]
   /** Total number of tool calls (= toolCalls.length). */
   toolCallCount: number
   /** Number of LLM round trips. */
@@ -997,9 +1019,12 @@ export class Client {
 
   /** The RunResult.toolCalls entry: a `call_tool` call is recorded as the real tool with its
    *  inner arguments, the name hooks and stream events see (the transcript keeps the wrapper). */
-  private toolCallRecord(name: string, args: Record<string, unknown>, result: ToolResult): ToolCallRecord {
+  private toolCallRecord(name: string, args: Record<string, unknown>, result: ToolResult, callId?: string): ToolCallRecord {
     const inner = this.unwrapCall(name, args)
-    return { name: inner ? inner.name : name, args: inner ? inner.args : args, output: result.output, isError: result.isError, metadata: result.metadata }
+    const rec: ToolCallRecord = { name: inner ? inner.name : name, args: inner ? inner.args : args, output: result.output, isError: result.isError, metadata: result.metadata }
+    if (result.parts?.length) rec.parts = result.parts
+    callIds.set(rec, callId ?? "")
+    return rec
   }
 
   /** The stream's tool_call event, naming the real tool for a `call_tool` call. */
@@ -1175,7 +1200,7 @@ export class Client {
         // and the later suspensions' placeholder results never enter the transcript (they re-suspend
         // on resume). Mirrors the streaming path.
         for (const s of settled) {
-          toolCalls.push(this.toolCallRecord(s.call.function.name, s.args, s.result))
+          toolCalls.push(this.toolCallRecord(s.call.function.name, s.args, s.result, s.call.id))
           messages.push(toolMessage(s.call.id, s.call.function.name, s.result))
           if (s.halted) return this.pendingRun(runStart, lastModel, s.halted, messages, toolCalls, turns, usage)
         }
@@ -1190,7 +1215,7 @@ export class Client {
 
   private result(model: string, text: string, messages: any[], toolCalls: ToolCallRecord[], turns: number, usage: Usage, exhausted = false): RunResult {
     const incomplete = exhausted && text === ""
-    const r: RunResult = { text, messages, toolCalls, toolCallCount: toolCalls.length, turns, usage, model, status: incomplete ? "incomplete" : "done" }
+    const r: RunResult = { text, messages, toolCalls, files: runFiles(toolCalls), toolCallCount: toolCalls.length, turns, usage, model, status: incomplete ? "incomplete" : "done" }
     if (incomplete) r.limit = "maxTurns"
     return r
   }
@@ -1198,7 +1223,7 @@ export class Client {
   /** §10: a run halted because a tool suspended and no `waitFor` was configured. */
   private pendingRun(runStart: number, model: string, request: Request, messages: any[], toolCalls: ToolCallRecord[], turns: number, usage: Usage): RunResult {
     this.emit({ event: "run", model, turns, toolCalls: toolCalls.length, totalTokens: usage.totalTokens, ms: Date.now() - runStart })
-    return { text: request.prompt, messages, toolCalls, toolCallCount: toolCalls.length, turns, usage, model, status: "pending", pending: request }
+    return { text: request.prompt, messages, toolCalls, files: runFiles(toolCalls), toolCallCount: toolCalls.length, turns, usage, model, status: "pending", pending: request }
   }
 
   /**
@@ -1295,7 +1320,7 @@ export class Client {
         const content: any[] = []
         let halted: Request | undefined
         for (const s of settled) {
-          toolCalls.push(this.toolCallRecord(s.use.name, s.args, s.result))
+          toolCalls.push(this.toolCallRecord(s.use.name, s.args, s.result, s.use.id))
           content.push(toolResultBlock(s.use.id, s.result))
           if (s.halted) { halted = s.halted; break }
         }
@@ -1399,13 +1424,13 @@ export class Client {
             const r = await this.resolvePending(toolkit, c.name, args, req, c.id, turn, signal)
             result = r.result
             if (r.halted) {
-              toolCalls.push(this.toolCallRecord(c.name, args, result))
+              toolCalls.push(this.toolCallRecord(c.name, args, result, c.id))
               messages.push(toolMessage(c.id, c.name, result))
               yield { type: "done", result: this.pendingRun(runStart, lastModel, r.halted, messages, toolCalls, turns, usage) }
               return
             }
           }
-          toolCalls.push(this.toolCallRecord(c.name, args, result))
+          toolCalls.push(this.toolCallRecord(c.name, args, result, c.id))
           messages.push(toolMessage(c.id, c.name, result))
           yield this.resultEvent(c.id, c.name, safeJson(c.args), result)
         }
@@ -1502,14 +1527,14 @@ export class Client {
             const r = await this.resolvePending(toolkit, u.name, args, req, u.id, turn, signal)
             result = r.result
             if (r.halted) {
-              toolCalls.push(this.toolCallRecord(u.name, args, result))
+              toolCalls.push(this.toolCallRecord(u.name, args, result, u.id))
               results.push(toolResultBlock(u.id, result))
               messages.push({ role: "user", content: results })
               yield { type: "done", result: this.pendingRun(runStart, lastModel, r.halted, messages, toolCalls, turns, usage) }
               return
             }
           }
-          toolCalls.push(this.toolCallRecord(u.name, args, result))
+          toolCalls.push(this.toolCallRecord(u.name, args, result, u.id))
           results.push(toolResultBlock(u.id, result))
           yield this.resultEvent(u.id, u.name, u.input, result)
         }

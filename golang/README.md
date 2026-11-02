@@ -145,6 +145,31 @@ before hooks, so gates see the real tool). Runnable: `go run ./examples/promptca
 
 Each has a runnable page in the [Go API reference](https://muthuishere.github.io/toolnexus/api/go/).
 
+## Media generation
+
+Generate images, video and speech (plus transcription, voice cloning and talking-head video)
+from a **JSON style** instead of provider code. Async jobs are started and polled for you. The same
+verbs become agent tools (`generate_image`, `generate_video`, `generate_speech`, …), and whatever
+they produce lands in `RunResult.files`. `examples/media-styles/a2e.json` ships first and reads
+`A2E_API_KEY` at call time. Its result URLs expire in 3–30 days, so save what you keep. SPEC §7G;
+guide: <https://muthuishere.github.io/toolnexus/media/>.
+
+```go
+style, _ := toolnexus.LoadMediaStyle("examples/media-styles/a2e.json")
+media := toolnexus.CreateMedia([]toolnexus.MediaStyle{style}, toolnexus.MediaOptions{
+    OnProgress: func(p toolnexus.MediaProgress) { fmt.Println(p.Verb, p.Status) },
+})
+img, err := media.Image(ctx, toolnexus.ImageInput{Prompt: "a red fox in fresh snow", Width: 1024, Height: 768})
+vid, err := media.Video(ctx, toolnexus.VideoInput{Prompt: "the fox blinks", Image: img.Files[0].URL, Seconds: 5})
+
+tk, _ := toolnexus.CreateToolkit(ctx, toolnexus.Options{Media: media}) // generate_image, …
+res, _ := agent.Run(ctx, "Draw a fox, then animate it.", tk)
+for _, f := range res.Files { fmt.Println(f.From, f.MimeType, f.URL) }
+```
+
+In the typed inputs a zero value means "not set" (`Seed: 0` is never sent). To send a real
+zero, use `media.Generate(ctx, "image", map[string]any{"prompt": "…", "seed": 0}, nil)`.
+
 ## Documentation
 
 Everything else — the full surface, with runnable examples — lives on the docs site:

@@ -138,6 +138,16 @@ from .builtin import (
 from .http import DEFAULT_TIMEOUT as HTTP_DEFAULT_TIMEOUT
 from .http import http_tool
 from .native import define_tool, tool
+from .media import (
+    Media,
+    MediaError,
+    MediaFile,
+    MediaResult,
+    MediaTransport,
+    UrllibMediaTransport,
+    create_media,
+    load_media_style,
+)
 from .mcp_source import (
     DEFAULT_TIMEOUT,
     McpConfig,
@@ -212,6 +222,15 @@ from .types import (
 )
 
 __all__ = [
+    # media generation (SPEC §7G)
+    "Media",
+    "MediaError",
+    "MediaFile",
+    "MediaResult",
+    "MediaTransport",
+    "UrllibMediaTransport",
+    "create_media",
+    "load_media_style",
     # host engine asks + prompt cache (SPEC §4C, §8)
     "ToolHints",
     "McpServerResult",

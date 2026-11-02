@@ -119,6 +119,28 @@ Long-running agents want supervision. Every MCP connection is a supervised proce
 stdio server is isolated (status `"failed"`) without taking your toolkit down; parallel tool calls
 ride `Task.async_stream`. Same contract as the other six ports, native OTP underneath.
 
+## Media generation
+
+Generate images, video and speech (plus transcription, voice cloning and talking-head video)
+from a **JSON style** instead of provider code. Async jobs are started and polled for you. The same
+verbs become agent tools (`generate_image`, `generate_video`, `generate_speech`, …), and whatever
+they produce lands in `RunResult.files`. `examples/media-styles/a2e.json` ships first and reads
+`A2E_API_KEY` at call time. Its result URLs expire in 3–30 days, so save what you keep. SPEC §7G;
+guide: <https://muthuishere.github.io/toolnexus/media/>.
+
+```elixir
+alias Toolnexus.Media
+
+{:ok, style} = Media.load_style("examples/media-styles/a2e.json")
+media = Media.new(style, on_progress: &IO.inspect/1)
+{:ok, img} = Media.image(media, %{prompt: "a red fox in fresh snow", width: 1024, height: 768})
+{:ok, vid} = Media.video(media, %{prompt: "the fox blinks", image: hd(img.files).url, seconds: 5})
+
+{:ok, tk} = Toolnexus.create_toolkit(media: media)    # generate_image, …
+res = Toolnexus.Client.run(client, "Draw a fox, then animate it.", tk)
+for f <- res.files, do: IO.puts("#{f.from} #{f.mime_type} #{f[:url]}")
+```
+
 ## Documentation
 
 Everything else — the full surface, with runnable examples — lives on the docs site:

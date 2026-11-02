@@ -1577,11 +1577,22 @@
 ;; RunResult
 ;; ---------------------------------------------------------------------------
 
+(defn run-files
+  "§8 `RunResult.files` — every non-text part the run's tool calls produced, in
+  call order, each tagged `:from` (tool name) and `:callId` (the model's
+  tool-call id). Always a vector."
+  [tool-calls]
+  (vec (for [c tool-calls
+             p (:parts c)
+             :when (not= "text" (:type p))]
+         (assoc p :from (:name c) :callId (or (::call-id (meta c)) "")))))
+
 (defn- run-result [client text messages tool-calls turns usage exhausted?]
   (let [incomplete? (and exhausted? (= "" text))]
     (cond-> {:text text
              :messages messages
              :tool-calls tool-calls
+             :files (run-files tool-calls)
              :tool-call-count (count tool-calls)
              :turns turns
              :usage usage
@@ -1598,6 +1609,7 @@
   {:text (:error err)
    :messages messages
    :tool-calls tool-calls
+   :files (run-files tool-calls)
    :tool-call-count (count tool-calls)
    :turns turns
    :usage usage
@@ -1610,6 +1622,7 @@
   {:text (:prompt request)
    :messages messages
    :tool-calls tool-calls
+   :files (run-files tool-calls)
    :tool-call-count (count tool-calls)
    :turns turns
    :usage usage
@@ -1815,11 +1828,19 @@
                       ;; SPEC §4C: the RunResult records a call_tool call as the
                       ;; REAL tool with its inner (post-:before-tool) arguments —
                       ;; what hooks and events see. The transcript keeps the wrapper.
+                      ;; §8 `toolCalls[].parts` iff the result had parts; the
+                      ;; model's call id rides in METADATA (invisible to `=` and
+                      ;; to every serialised shape) so `run-files` can tag
+                      ;; `RunResult.files` with it without changing a record.
                       records (mapv (fn [s] (let [[nm a] (unwrap-call client (:name s) (:args s))]
-                                             {:name nm :args a
-                                             :output (:output (:result s))
-                                             :isError (boolean (:isError (:result s)))
-                                             :metadata (:metadata (:result s))}))
+                                             (with-meta
+                                               (cond-> {:name nm :args a
+                                                        :output (:output (:result s))
+                                                        :isError (boolean (:isError (:result s)))
+                                                        :metadata (:metadata (:result s))}
+                                                 (seq (:parts (:result s)))
+                                                 (assoc :parts (vec (:parts (:result s)))))
+                                               {::call-id (str (or (:id s) ""))})))
                                     settled)
                       halted  (first (keep :halt settled))
                       msgs    (into messages (tool-result-messages client settled))]

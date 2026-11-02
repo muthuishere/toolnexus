@@ -12,7 +12,7 @@ export type JSONSchema = {
 
 import type { ContentPart } from "./content.js"
 
-export type ToolSource = "mcp" | "skill" | "builtin" | "native" | "http" | "a2a" | "custom"
+export type ToolSource = "mcp" | "skill" | "builtin" | "native" | "http" | "a2a" | "media" | "custom"
 
 export interface ToolResult {
   output: string
