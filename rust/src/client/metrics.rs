@@ -4,7 +4,8 @@
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 
-/// One observability event (`llm` | `tool` | `run`).
+/// One observability event (`llm` | `tool` | `run`, plus the classifier's
+/// `classifier.evaluate` / `classifier.warning`, which the registry ignores).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct MetricEvent {
     pub event: String,
@@ -21,6 +22,10 @@ pub struct MetricEvent {
     pub tool_calls: i64,
     pub total_tokens: i64,
     pub error: String,
+    /// The question key a `classifier.warning` names (SPEC §8B).
+    pub question: String,
+    /// The `classifier.warning` text (never a failure: `error` stays empty).
+    pub warning: String,
 }
 
 const BUCKETS: [f64; 10] = [0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0];

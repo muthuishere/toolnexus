@@ -11,16 +11,29 @@ import { Aside } from '@astrojs/starlight/components';
 <strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §11</a>
 </p>
 
-<Aside type="caution" title="Not available in Rust">
-Inbound translation (§11) is not ported to Rust. Tracked in `openspec/changes/add-rust-port`.
+<Aside type="note" title="Reachable through translate">
+As in Go, the converter is crate-private: inbound translation runs inside
+[`Client::translate`](/api/rust/translate/translate/) on an Anthropic-style client.
 </Aside>
 
 Convert an OpenAI-shaped transcript into Anthropic shape, including the tool-result merging a flattening translator gets wrong.
 
-## What to use instead
+## What it does
 
-None yet; see `translate/translate`.
+On `Style::Anthropic`, `translate` converts the OpenAI transcript before its one call:
+
+- `system` / `developer` messages are hoisted into `system` (joined with a blank line); a
+  request `system` override wins.
+- An assistant turn's `tool_calls` become `tool_use` blocks (`id`, `name`, parsed `input`).
+- `tool`-role results become `tool_result` blocks keyed by `tool_call_id`, and consecutive
+  results merge into ONE user turn.
+- A content-parts array keeps its non-text parts (`image_url`, `input_audio`, `file`, §1B parts)
+  as provider blocks; a part Anthropic cannot carry becomes a named text placeholder.
+- OpenAI `tools` become `{name, description, input_schema}`; `tool_choice` `required` → `any`,
+  `none` → `none`, a named function → `{type: "tool", name}`.
+
+The reply's `stop_reason` maps back to an OpenAI `finish_reason`; any tool call wins as `tool_calls`.
 
 ## See also
 
-- [`create_toolkit`](/api/rust/toolkit/create/) — Collapse MCP servers, skills, built-ins, A2A agents and your own functions into one tool list.
+- [`translate`](/api/rust/translate/translate/) — one turn, no loop.

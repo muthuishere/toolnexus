@@ -1,6 +1,8 @@
 //! A tiny hermetic HTTP/1.1 server for client tests (no network beyond loopback).
 #![allow(dead_code)]
 
+pub mod judge;
+
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;

@@ -11,16 +11,46 @@ import { Aside } from '@astrojs/starlight/components';
 <strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8B</a>
 </p>
 
-<Aside type="caution" title="Not available in Rust">
-The §8B question types are not ported to Rust. Tracked in `openspec/changes/add-rust-port`.
-</Aside>
+```rust
+pub enum Question { Noul(NoulQuestion), Choice(ChoiceQuestion), Score(ScoreQuestion) }
+pub type Questions = BTreeMap<String, Question>;
+pub fn canonical_request(model: &str, questions: &Questions) -> String;
+```
 
 The three question types, the criteria each one needs, and the limits enforced client-side before the request.
 
-## What to use instead
+## The types
 
-No Rust equivalent yet; see `judge/classifier`.
+- **noul** — the probability a statement holds. `criteria: Option<NoulCriteria>`: `None` is
+  ABSENT on the wire, `Some(NoulCriteria::default())` is `{"false":"","true":""}`.
+- **choice** — one option of 1..255. `criteria[id]` must say what picking the option would
+  MEAN; ids, empty strings or one repeated sentence rank at chance. A once-per-key
+  `classifier.warning` metric names the key; the request itself is never changed.
+- **score** — a rating on an ORDERED rubric of 2..10 levels, never sorted.
+
+Out-of-range sizes fail before any request, naming the question key. `canonical_request` returns
+the byte-identical `model` + `questions` JSON every port emits (shared fixtures in
+`examples/judge/`).
+
+<Aside type="caution" title="The encoding obligation is yours">
+An option described by its own id is schema-valid, returns HTTP 200, and ranks at chance.
+</Aside>
+
+## Builders
+
+```rust
+use toolnexus::judge::{choice, noul_with, questions, score};
+let qs = questions(&[
+    noul_with("fixable", "Can an agent fix this from the report?",
+              "names a trigger, a file and the failure", "vague or needs product input"),
+    choice("team", "Which team owns it?", [
+        ("billing", "charges and refunds are computed wrong"),
+        ("web", "the page renders or behaves wrong"),
+    ]),
+    score("urgency", "How urgent?", ["routine", "soon", "now"]),
+])?; // a repeated name is an error
+```
 
 ## See also
 
-- [`create_toolkit`](/api/rust/toolkit/create/) — Collapse MCP servers, skills, built-ins, A2A agents and your own functions into one tool list.
+- [`create_classifier`](/api/rust/judge/classifier/) · [Decision](/api/rust/judge/decision/)

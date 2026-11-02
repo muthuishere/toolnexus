@@ -13,6 +13,7 @@ mod inprocess;
 mod metrics;
 mod models;
 mod tiers;
+mod translate;
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -35,6 +36,7 @@ pub use inprocess::{
 pub use metrics::MetricEvent;
 pub use models::{ModelInfo, list_models};
 pub use tiers::{CountTokensFn, ToolTier, ToolTierOptions, UsageCountFn};
+pub use translate::{TranslateRequest, TranslateResult, TranslatedToolCall};
 
 use crate::store::{ConversationStore, InMemoryConversationStore};
 use crate::tool::{Answer, ContentPart, Request, ToolContext, ToolHints, ToolResult, pending_of};

@@ -11,16 +11,45 @@ import { Aside } from '@astrojs/starlight/components';
 <strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8B</a>
 </p>
 
-<Aside type="caution" title="Not available in Rust">
-The §8B decision type is not ported to Rust. Tracked in `openspec/changes/add-rust-port`.
-</Aside>
+```rust
+pub struct Decision {
+    pub model: String,
+    pub answers: BTreeMap<String, DecisionAnswer>, // Noul | Choice | Score
+    pub usage: ClassifierUsage,                    // cost: Option<f64> — None is NOT zero
+    pub calibrated: bool,                          // absent/null on the wire ⇒ true
+}
+impl Decision {
+    pub fn noul(&self, key: &str) -> Result<&NoulAnswer, ClassifierError>;
+    pub fn choice(&self, key: &str) -> Result<&ChoiceAnswer, ClassifierError>;
+    pub fn score(&self, key: &str) -> Result<&ScoreAnswer, ClassifierError>;
+}
+```
 
 One answer per question under the caller's own keys, read through typed accessors that fail loudly rather than hand back a zero.
 
-## What to use instead
+## What to know
 
-No Rust equivalent yet; see `judge/classifier`.
+- A wrong-type or absent read is an `Err`, never a panic and never a default.
+- `ChoiceAnswer.near_uniform` is DERIVED on decode: `max |p - 1/n| <= 0.05` over the map as
+  returned. It flags an encoding that gave the model nothing to rank on; it is advisory.
+- `ScoreAnswer::levels()` returns the legend in level order (`"2"` before `"10"`).
+- `calibrated` is `false` for the `Llm` style. A threshold tuned on one backend does not transfer.
+
+<Aside type="tip" title="Bands">
+`toolnexus::judge::ask` wraps each answer in a `JudgeAnswer` with a `band` (`yes` / `no` /
+`uncertain`, default cuts 0.30 / 0.70, exclusive on the confident side) and `sure`.
+</Aside>
+
+## Example
+
+```rust
+let d = c.evaluate(state, &qs).await?;
+let dept = d.choice("department")?;
+if !dept.near_uniform && dept.confidence > 0.7 {
+    route_to(&dept.choice);
+}
+```
 
 ## See also
 
-- [`create_toolkit`](/api/rust/toolkit/create/) — Collapse MCP servers, skills, built-ins, A2A agents and your own functions into one tool list.
+- [`create_classifier`](/api/rust/judge/classifier/) · [Questions](/api/rust/judge/questions/)

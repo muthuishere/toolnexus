@@ -11,16 +11,68 @@ import { Aside } from '@astrojs/starlight/components';
 <strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8B</a>
 </p>
 
-<Aside type="caution" title="Not available in Rust">
-The §8B classifier is not ported to Rust. Tracked in `openspec/changes/add-rust-port`.
-</Aside>
+```rust
+pub fn create_classifier(opts: ClassifierOptions) -> Result<Classifier, ClassifierError>
+impl Classifier {
+    pub async fn evaluate(&self, state: Value, questions: &Questions) -> Result<Decision, ClassifierError>;
+    pub async fn evaluate_ctx(&self, ctx: EvalContext, state: Value, questions: &Questions)
+        -> Result<Decision, ClassifierError>;
+    pub async fn evaluate_batch(&self, states: Vec<Value>, questions: &Questions)
+        -> Result<Vec<Decision>, ClassifierError>;
+}
+```
 
 A sibling of the client: pre-declared typed questions in, calibrated answers out — no messages, no tool calling, no loop.
 
-## What to use instead
+## When to use it
 
-Call a model with the client and parse its answer, or run the classifier from another port.
+For a JUDGMENT your code then acts on: route, triage, gate a tool call, check an answer. Styles:
+`SystemOne` (POST `{base_url}/systemone`, the default), `Llm` (one structured-output call on a §8
+`Client`, `calibrated: false`), `Custom` (your `evaluate`), `Static` (a recorded corpus — what CI
+runs, no network). `backend: ClassifierBackend::OpenRouter` sets base URL, model and key env together.
+
+<Aside type="caution" title="It interprets; it never authorises">
+A decision can be confidently wrong. Limits, permissions and allowlists stay in code.
+</Aside>
+
+## Examples
+
+### 1. System One, key read from the environment at call time
+
+```rust
+use serde_json::json;
+use toolnexus::classifier::*;
+let c = create_classifier(ClassifierOptions::default())?; // reads TYPESAFE_API_KEY per call
+let mut qs = Questions::new();
+qs.insert("is_refund".into(), NoulQuestion {
+    instructions: "Is the customer asking for a refund?".into(), criteria: None }.into());
+let d = c.evaluate(json!({"message": "I want my money back"}), &qs).await?;
+println!("{}", d.noul("is_refund")?.noul);
+```
+
+### 2. Hermetic tests with the static corpus
+
+```rust
+use toolnexus::judge::{recorded, static_classifier};
+let c = static_classifier(vec![recorded(&state, qs.clone(), &recorded_response)])?;
+```
+
+### 3. Simple ask / gate and the batteries
+
+```rust
+use toolnexus::judge::{ask, noul, batteries::{OnError, ToolGuard, ToolGuardOptions}};
+let a = ask(&c, &state, &[noul("urgent", "Is `message` urgent?")], None).await?;
+let guard = ToolGuard::new(c.clone(), ToolGuardOptions {
+    on_error: Some(OnError::Closed), ..Default::default() })?;
+// Hooks { before_tool: Some(guard.as_hook(None)), ..Default::default() }
+```
+
+The batteries are `ToolGuard`, `ToolRelevance`, `SkillRelevance`, `ToolResultFilter`,
+`IsComplete`, `AgentRouter`, `ContentGuard` and the opt-in `ModelRouter`, each with `as_hook`
+where a loop seam exists. `gate` / `Policy` turn answers into an action or a §10 `input`
+request; `Tape` records live decisions by call name and replays them offline. All advisory,
+none a security control.
 
 ## See also
 
-- [`create_toolkit`](/api/rust/toolkit/create/) — Collapse MCP servers, skills, built-ins, A2A agents and your own functions into one tool list.
+- [Questions](/api/rust/judge/questions/) · [Decision](/api/rust/judge/decision/)

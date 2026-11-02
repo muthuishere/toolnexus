@@ -42,8 +42,9 @@
 - [x] 5.9 docs-site pages (install tab, api/rust 63 pages incl. n/a gap pages, 8 cookbook tabs); site build not run locally (no node_modules)
 
 ## Later (→ `full` tier)
-- [ ] translate (§11)
-- [ ] classifier + judge + batteries (§8B)
-- [ ] agents runtime, personas, compaction (§7D–§7F)
+- [x] A2A outbound + `serve` (§7A/§7B), MCP server profile (§7C)
+- [x] translate (§11) — `Client::translate`, mirrors golang/translate_test.go
+- [x] classifier + judge + batteries (§8B) incl. ModelRouter — shared examples/judge fixtures; classifier group in the options manifest, `unported` entry removed
+- [ ] agents runtime, personas, compaction (§7D–§7F); toolkit `agents` option
 - [ ] relay / resume path; MCP elicitation (3.7)
 - [ ] run the Windows code paths on a Windows host
