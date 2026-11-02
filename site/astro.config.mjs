@@ -100,6 +100,7 @@ export default defineConfig({
 										{ label: 'Local & in-process models', slug: 'cookbook/local-and-in-process-models' },
 										{ label: 'Fail fast, or retry', slug: 'cookbook/fail-fast-or-retry' },
 										{ label: 'API key by host', slug: 'cookbook/api-key-by-host' },
+										{ label: 'Tool scheduling', slug: 'cookbook/tool-scheduling' },
 										{ label: 'Prompt cache & tool tiers', slug: 'cookbook/prompt-cache-and-tool-tiers' },
 										{ label: 'Host hooks & opt-in builtins', slug: 'cookbook/host-hooks' },
 										{ label: 'ACP host hooks (Go)', slug: 'cookbook/acp-hooks' },
