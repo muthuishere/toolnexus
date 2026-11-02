@@ -53,6 +53,63 @@ tk = await create_toolkit(mcp_config="mcp.json", skills_dir=["skills"])
 - `skills/` is a folder of `**/SKILL.md` files, loaded on demand through one `skill` tool.
 - Remote MCP `headers` values expand `${ENV_VAR}` at call time and are never logged.
 
+## API key by host (breaking in 0.22.0)
+
+With no `api_key`, the client reads only the env var that belongs to the `base_url` host, over
+https: `api.openai.com` → `OPENAI_API_KEY`, `api.anthropic.com` → `ANTHROPIC_API_KEY`,
+`openrouter.ai` → `OPENROUTER_API_KEY`. Any other host — a local server, a proxy, plain `http://`
+— needs `api_key` or `api_key_env` (the **name** of the env var to read); otherwise the first
+request raises `No API key`. There is no cross-provider fallback any more, so a key is never sent
+to a host it does not belong to.
+
+```python
+local = create_client(base_url="http://localhost:11434/v1", style="openai",
+                      model="llama3", api_key="YOUR_KEY_HERE")
+proxy = create_client(base_url="https://llm-proxy.internal/v1", style="openai",
+                      model="gpt-4o-mini", api_key_env="MY_PROXY_KEY")
+```
+
+`list_models(base_url=..., api_key_env=...)` follows the same rule and returns `ModelInfo(id,
+name, context_length)` sorted by id.
+
+## Prompt caching and tool tiers
+
+```python
+from toolnexus import PromptCacheOptions, ToolTierOptions
+
+client = create_client(
+    base_url="https://api.anthropic.com", style="anthropic", model="claude-sonnet-4-5",
+    prompt_cache=PromptCacheOptions(long_ttl=True),        # openai: PromptCacheOptions(key="session-1")
+    tool_tiers=ToolTierOptions(core=["read", "grep"], deferred=["deploy"]),
+)
+res = await client.run("…", tk)
+res.usage.get("cache_read_tokens"), res.usage.get("cache_write_tokens")
+client.tool_tier_plan(tk)      # {"read": "core", "bash": "listed", "deploy": "deferred", …}
+client.reset_tool_tiers(tk)    # rebuild the frozen plan at a session boundary
+```
+
+`prompt_cache` marks the stable prefix (anthropic `cache_control` breakpoints on the last tool,
+the system prompt and the latest message; openai `prompt_cache_key`). `tool_tiers` sends only
+the core schemas plus `tool_search` and `call_tool`; the model loads the rest on demand, and the
+tools array (so the cached prefix) never changes. Under anthropic the real context size is
+`prompt_tokens + cache_read_tokens + cache_write_tokens`. Runnable, hermetic:
+[`examples/prompt_cache_tool_tiers.py`](examples/prompt_cache_tool_tiers.py).
+
+## Host hooks (0.22.0)
+
+- `load_mcp(cfg, on_server=fn)` reports each MCP server the moment it connects, fails or is
+  disabled; `source.resource_tools()` adds read-only `list_mcp_resources` / `read_mcp_resource`.
+- `create_client(wait_for_ctx=fn(cancel, request))` — `wait_for` that ends with the turn.
+- `before_tool` events carry `hints` (`ToolHints(read_only, destructive, open_world)`), so a
+  permission gate can allow read-only tools and deny or ask (`pending(...)`) for the rest.
+- Opt-in builtins: `builtins={"background": BackgroundShells(), "web_search": fn,
+  "notebook_edit": True}` adds `bash_output` / `kill_shell`, `websearch`, `notebook_edit`
+  (call `BackgroundShells.close_all()` on shutdown). `grep` takes `context` / `before` / `after`;
+  `read` and `grep` report truncation in `metadata`.
+- `compactor(..., on_compact=fn)` gets a `CompactInfo` after each compaction.
+- `agent.as_tool_with(lambda ctx: {"hooks": ..., "wait_for": ...})` runs a sub-agent under the
+  parent's gates; `ctx.call_id` tells concurrent tool calls apart.
+
 ## Simple judgments
 
 A thin layer over any `Classifier` (SPEC §8B); the wire request is unchanged.
