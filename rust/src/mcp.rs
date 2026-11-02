@@ -28,9 +28,12 @@ use tokio::sync::Mutex;
 
 use crate::tool::{ContentPart, Tool, ToolHints, ToolResult, ToolSource, sanitize};
 
+mod elicit;
 mod resources;
 #[cfg(feature = "mcp-http")]
 pub mod sse;
+
+pub use elicit::{answer_to_elicit_result, elicitation_to_request};
 
 /// Default per-server timeout (connect, list, and the per-call idle timeout).
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -278,7 +281,7 @@ fn is_env_name(s: &str) -> bool {
 // loading
 // ---------------------------------------------------------------------------
 
-type Client = RunningService<RoleClient, ()>;
+type Client = RunningService<RoleClient, elicit::Bridge>;
 
 /// One connected server's peer, for [`McpSource::resource_tools`].
 #[derive(Clone)]
@@ -350,6 +353,11 @@ pub struct McpLoadOptions {
     /// disabled, so a host can register a fast server's tools
     /// (`Toolkit::register`) while a slow one is still connecting.
     pub on_server: Option<OnServer>,
+    /// §10 resolver for MCP elicitation: set ⇒ every client advertises the
+    /// `elicitation` capability and bridges `elicitation/create` onto it
+    /// (form → `kind:"input"`, URL → `kind:"authorization"`). `None` ⇒ not
+    /// advertised, so a compliant server will not elicit.
+    pub wait_for: Option<crate::client::WaitForFn>,
 }
 
 /// Connect to every enabled server concurrently. Never fails as a whole: a
@@ -380,8 +388,12 @@ pub async fn load_mcp_with(config: &McpConfig, opts: McpLoadOptions) -> McpSourc
             continue;
         }
         let (name, cfg) = (name.clone(), cfg.clone());
+        let bridge = elicit::Bridge {
+            wait_for: opts.wait_for.clone(),
+        };
         set.spawn(async move {
-            let r = tokio::time::timeout(cfg.timeout(), connect_and_list(&name, &cfg)).await;
+            let r =
+                tokio::time::timeout(cfg.timeout(), connect_and_list(&name, &cfg, bridge)).await;
             let r = r.unwrap_or_else(|_| {
                 Err(format!("timed out after {}ms", cfg.timeout().as_millis()))
             });
@@ -443,6 +455,7 @@ pub async fn load_mcp_with(config: &McpConfig, opts: McpLoadOptions) -> McpSourc
 async fn connect_and_list(
     name: &str,
     cfg: &ServerConfig,
+    bridge: elicit::Bridge,
 ) -> Result<(Client, Vec<rmcp::model::Tool>), String> {
     let client = if cfg.is_remote() {
         #[cfg(not(feature = "mcp-http"))]
@@ -451,7 +464,7 @@ async fn connect_and_list(
         ));
         #[cfg(feature = "mcp-http")]
         {
-            connect_remote(cfg).await?
+            connect_remote(cfg, bridge).await?
         }
     } else {
         let Some((prog, args)) = cfg.command.split_first() else {
@@ -472,7 +485,7 @@ async fn connect_and_list(
             .spawn()
             .map(|(t, _)| t)
             .map_err(|e| format!("start {prog:?}: {e}"))?;
-        ().serve(transport).await.map_err(|e| e.to_string())?
+        bridge.serve(transport).await.map_err(|e| e.to_string())?
     };
     let defs = client
         .list_all_tools()
@@ -506,7 +519,7 @@ fn apply_tools_filter(
 }
 
 #[cfg(feature = "mcp-http")]
-async fn connect_remote(cfg: &ServerConfig) -> Result<Client, String> {
+async fn connect_remote(cfg: &ServerConfig, bridge: elicit::Bridge) -> Result<Client, String> {
     let url = cfg.url.clone().unwrap_or_default();
     let mut hm = http::HeaderMap::new();
     for (k, v) in expand_env_headers(&cfg.headers) {
@@ -524,14 +537,15 @@ async fn connect_remote(cfg: &ServerConfig) -> Result<Client, String> {
         tc.custom_headers.insert(k.clone(), v.clone());
     }
     let transport = StreamableHttpClientTransport::with_client(reqwest::Client::new(), tc);
-    let http_err = match ().serve(transport).await {
+    let http_err = match bridge.clone().serve(transport).await {
         Ok(c) => return Ok(c),
         Err(e) => e.to_string(),
     };
     let sse = sse::SseClientTransport::connect(&url, hm)
         .await
         .map_err(|e| format!("streamable-http failed ({http_err}) and sse start failed: {e}"))?;
-    ().serve(sse)
+    bridge
+        .serve(sse)
         .await
         .map_err(|e| format!("streamable-http failed ({http_err}) and sse start failed: {e}"))
 }

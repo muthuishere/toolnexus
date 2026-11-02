@@ -363,6 +363,9 @@ pub enum ClientError {
     },
     #[error("{0}")]
     Unsupported(String),
+    /// A durable resume (`run_with_answer` / `ask_with_answer`) was refused.
+    #[error("{0}")]
+    Resume(String),
 }
 
 /// What a run starts from.
@@ -456,9 +459,60 @@ impl RawResponse {
     }
 }
 
+/// The §7D global turn gate: at most N LLM calls in flight across every
+/// client that shares it. It wraps ONLY the provider call (never a whole run),
+/// and the slot is released on any exit, including a cancelled caller.
+pub(crate) struct TurnGate {
+    sem: Arc<tokio::sync::Semaphore>,
+    counts: Mutex<(usize, usize)>,
+}
+
+pub(crate) struct TurnSlot<'a> {
+    gate: &'a TurnGate,
+    _permit: tokio::sync::OwnedSemaphorePermit,
+}
+
+impl Drop for TurnSlot<'_> {
+    fn drop(&mut self) {
+        let mut c = self.gate.counts.lock().unwrap_or_else(|e| e.into_inner());
+        c.0 -= 1;
+    }
+}
+
+impl TurnGate {
+    pub(crate) fn new(n: usize) -> Self {
+        TurnGate {
+            sem: Arc::new(tokio::sync::Semaphore::new(n.max(1))),
+            counts: Mutex::new((0, 0)),
+        }
+    }
+    async fn acquire(&self) -> TurnSlot<'_> {
+        let permit = self
+            .sem
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("turn gate semaphore is never closed");
+        let mut c = self.counts.lock().unwrap_or_else(|e| e.into_inner());
+        c.0 += 1;
+        if c.0 > c.1 {
+            c.1 = c.0;
+        }
+        TurnSlot {
+            gate: self,
+            _permit: permit,
+        }
+    }
+    /// The high-water mark of in-flight calls.
+    pub(crate) fn max_observed(&self) -> usize {
+        self.counts.lock().unwrap_or_else(|e| e.into_inner()).1
+    }
+}
+
 struct Inner {
     opts: ClientOptions,
     transport: Transport,
+    gate: Option<Arc<TurnGate>>,
     store: Arc<dyn ConversationStore>,
     registry: metrics::Registry,
     plans: Mutex<HashMap<usize, Arc<tiers::Plan>>>,
@@ -701,6 +755,28 @@ impl LineReader {
 
 impl Client {
     pub(crate) fn with_transport(opts: ClientOptions, transport: Transport) -> Client {
+        Self::with_transport_gate(opts, transport, None)
+    }
+
+    /// A client whose provider calls pass through a shared [`TurnGate`]; with
+    /// `in_process` the model is a host function (as `create_in_process_client`).
+    pub(crate) fn gated(
+        opts: ClientOptions,
+        in_process: Option<GenerateFn>,
+        gate: Arc<TurnGate>,
+    ) -> Client {
+        let transport = match in_process {
+            Some(g) => inprocess::transport_of(g),
+            None => Transport::Http(opts.http_client.clone().unwrap_or_default()),
+        };
+        Self::with_transport_gate(opts, transport, Some(gate))
+    }
+
+    fn with_transport_gate(
+        opts: ClientOptions,
+        transport: Transport,
+        gate: Option<Arc<TurnGate>>,
+    ) -> Client {
         let store = opts
             .store
             .clone()
@@ -709,6 +785,7 @@ impl Client {
             inner: Arc::new(Inner {
                 opts,
                 transport,
+                gate,
                 store,
                 registry: metrics::Registry::default(),
                 plans: Mutex::new(HashMap::new()),
@@ -944,6 +1021,10 @@ impl Client {
         cancel: &CancellationToken,
         side: Option<&Tx>,
     ) -> Result<RawResponse, String> {
+        let _slot = match &self.inner.gate {
+            Some(g) => Some(g.acquire().await),
+            None => None,
+        };
         match &self.inner.transport {
             Transport::InProcess(ip) => ip.respond(raw, cancel, side).await,
             Transport::Http(http) => {
@@ -1792,7 +1873,10 @@ impl Client {
             st.messages
                 .push(json!({"role": "system", "content": system}));
         }
-        st.messages.push(user_message(prompt));
+        // A resume continues from the transcript, with no new user turn.
+        if !matches!(prompt, Prompt::Text(t) if t == crate::relay::RESUME_NO_PROMPT) {
+            st.messages.push(user_message(prompt));
+        }
         st.started = true;
         let req_tools = self.request_tools(tk);
         let mut tools = match style {
@@ -1840,7 +1924,9 @@ impl Client {
             let futs = calls.iter().map(|c| async move {
                 let (args, mut result) = self.run_tool(tk, c, turn, cancel).await?;
                 let mut halted = None;
-                if let Some(req) = pending_of(&result) {
+                if let Some(mut req) = pending_of(&result) {
+                    // the tool cannot know its own call id; the loop does
+                    crate::relay::stamp_relay_call_id(&mut req, &c.id);
                     send(
                         tx,
                         StreamEvent {
@@ -1900,8 +1986,17 @@ impl Client {
             }
             let mut blocks = Vec::new();
             let mut halt: Option<Request> = None;
-            for (c, o) in calls.iter().zip(outcomes) {
+            let mut done = Vec::with_capacity(outcomes.len());
+            let mut halts = Vec::with_capacity(outcomes.len());
+            for o in outcomes {
                 let (args, r, h) = o?;
+                done.push((args, r));
+                halts.push(h);
+            }
+            // Fold every relay suspension of this turn into the first (§10,
+            // ADR-0010 F2-a); the first-in-order halt rule below is untouched.
+            crate::relay::merge_relay_calls(&mut halts);
+            for ((c, (args, r)), h) in calls.iter().zip(done).zip(halts) {
                 st.tool_calls.push(record(c, &args, &r));
                 match style {
                     Style::OpenAI => st.messages.push(entry(c, &r)),
@@ -2104,6 +2199,68 @@ impl Client {
             }
         }
         self.drive(&prompt, tk, history, cancel, None).await.0
+    }
+
+    /// Resume a run that halted with status `pending` (§10 durable path,
+    /// ADR-0010): `history` is the transcript the host persisted, `pending` the
+    /// Request it received, `answer` the results it executed itself. Every tool
+    /// call of the halted turn gets a tool result (the placeholder is
+    /// replaced), and the loop continues with no new user turn. The answer must
+    /// echo the request id.
+    pub async fn run_with_answer(
+        &self,
+        cancel: CancellationToken,
+        tk: &Toolkit,
+        history: Vec<Value>,
+        pending: &Request,
+        answer: &Answer,
+    ) -> Result<RunResult, ClientError> {
+        if answer.id != pending.id {
+            return Err(ClientError::Resume(format!(
+                "toolnexus: cannot resume — answer id {:?} does not echo the pending request id {:?}",
+                answer.id, pending.id
+            )));
+        }
+        if history.is_empty() {
+            return Err(ClientError::Resume(
+                "toolnexus: cannot resume — no transcript supplied".into(),
+            ));
+        }
+        let repaired = crate::relay::repair_halted_turn(&history, pending, answer)
+            .map_err(ClientError::Resume)?;
+        self.run_ctx(cancel, crate::relay::RESUME_NO_PROMPT, tk, repaired)
+            .await
+    }
+
+    /// [`Client::run_with_answer`] against a stored conversation: load `id`,
+    /// resume it, save the updated transcript back.
+    pub async fn ask_with_answer(
+        &self,
+        cancel: CancellationToken,
+        tk: &Toolkit,
+        id: &str,
+        pending: &Request,
+        answer: &Answer,
+    ) -> Result<RunResult, ClientError> {
+        if id.is_empty() {
+            return Err(ClientError::Resume(
+                "toolnexus: AskWithAnswer needs a conversation id".into(),
+            ));
+        }
+        let history = self
+            .inner
+            .store
+            .get(id)
+            .map_err(ClientError::Store)?
+            .unwrap_or_default();
+        let res = self
+            .run_with_answer(cancel, tk, history, pending, answer)
+            .await?;
+        self.inner
+            .store
+            .save(id, &res.messages)
+            .map_err(ClientError::Store)?;
+        Ok(res)
     }
 
     /// A run remembered under `id` in the conversation store (empty id ⇒ `run`).

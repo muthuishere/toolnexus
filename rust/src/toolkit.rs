@@ -46,6 +46,12 @@ pub struct ToolkitOptions {
     pub extra_tools: Vec<Tool>,
     /// `None` ⇒ the config's top-level `builtins` key, else all on.
     pub builtins: Option<BuiltinsConfig>,
+    /// Host resolver for out-of-band input (§10). When set, connected MCP
+    /// servers may elicit input mid-`tools/call` and it is bridged onto this
+    /// `wait_for` (form → `kind:"input"`, URL → `kind:"authorization"`) —
+    /// typically the same function given to the client. `None` ⇒ MCP
+    /// elicitation is not advertised.
+    pub wait_for: Option<crate::client::WaitForFn>,
 }
 
 /// Construction failure (bad MCP config file, or no shell for an enabled `bash`).
@@ -55,6 +61,9 @@ pub enum ToolkitError {
     Mcp(#[from] mcp::McpError),
     #[error("{0}")]
     Builtins(String),
+    /// A relay tool shares a name with a builtin (ADR-0010 D5).
+    #[error("{0}")]
+    Relay(String),
 }
 
 #[derive(Default)]
@@ -110,7 +119,16 @@ pub async fn create_toolkit(opts: ToolkitOptions) -> Result<Toolkit, ToolkitErro
         Some(McpConfigInput::Parsed(c)) => Some(c.clone()),
     };
     let mcp = match mcp_cfg {
-        Some(c) => Some(Arc::new(mcp::load_mcp(&c).await)),
+        Some(c) => Some(Arc::new(
+            mcp::load_mcp_with(
+                &c,
+                mcp::McpLoadOptions {
+                    wait_for: opts.wait_for.clone(),
+                    ..Default::default()
+                },
+            )
+            .await,
+        )),
         None => None,
     };
 
@@ -164,6 +182,9 @@ pub async fn create_toolkit(opts: ToolkitOptions) -> Result<Toolkit, ToolkitErro
             .filter(|b| !extra.contains(b.name.as_str())),
     );
     all.extend(opts.extra_tools.iter().cloned());
+    // A relay tool must never share a name with a builtin — checked
+    // unconditionally, even with builtins off (ADR-0010 D5).
+    crate::relay::check_relay_collisions(&all).map_err(ToolkitError::Relay)?;
 
     let mut reg = Registry::default();
     for t in all {
