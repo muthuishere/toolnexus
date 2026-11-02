@@ -779,7 +779,7 @@ type McpLoadOptions struct {
 	// failed or found disabled, so a host can register a fast server's tools
 	// (Toolkit.Register) while a slow server is still connecting. Calls are
 	// serialized (never concurrent with each other) but come from load
-	// goroutines; keep them short. golang only for now; other ports pending.
+	// goroutines; keep them short.
 	OnServer func(McpServerResult)
 }
 

@@ -66,14 +66,14 @@ type BuiltinsConfig struct {
 
 	// Background, when set, lets `bash` take run_in_background:true and adds
 	// the bash_output and kill_shell tools. The host owns it: call CloseAll on
-	// shutdown. nil ⇒ none of this exists (golang only for now).
+	// shutdown. nil ⇒ none of this exists.
 	Background *BackgroundShells `json:"-"`
 
 	// WebSearch, when set, adds a `websearch` tool backed by this provider.
-	// nil ⇒ no websearch tool (golang only for now).
+	// nil ⇒ no websearch tool.
 	WebSearch WebSearchFunc `json:"-"`
 
-	// NotebookEdit adds the `notebook_edit` tool for .ipynb cells (golang only for now).
+	// NotebookEdit adds the `notebook_edit` tool for .ipynb cells.
 	NotebookEdit bool `json:"notebookEdit"`
 }
 
@@ -768,7 +768,7 @@ func readTool(env *builtinEnv) Tool {
 			}
 			out := strings.Join(lines[start:end], "\n")
 			// A window that stops before the end of the file says so in metadata,
-			// with the offset to continue from (golang only for now). The text
+			// with the offset to continue from. The text
 			// stays byte-identical: windowed output is a pinned cross-port
 			// contract, and the caller asked for exactly this window. A trailing
 			// newline does not count as a line.
@@ -1034,8 +1034,8 @@ func grepTool(env *builtinEnv) Tool {
 			}
 			meta := map[string]any{"count": len(hits)}
 			if total > len(hits) {
-				// Say the list was cut, and by how much, in metadata (golang only
-				// for now). The text stays the pinned cross-port output.
+				// Say the list was cut, and by how much, in metadata.
+				// The text stays the pinned cross-port output.
 				meta["truncated"] = true
 				meta["total"] = total
 			}

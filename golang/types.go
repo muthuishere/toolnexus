@@ -56,7 +56,7 @@ type ToolContext struct {
 	Answer *Answer
 	// CallID is the model's id for this tool call (the loop runs a message's
 	// calls concurrently, so it tells sibling calls apart). Empty when the tool
-	// is executed outside the client loop. golang only for now.
+	// is executed outside the client loop.
 	CallID string
 }
 
@@ -149,7 +149,7 @@ type Tool struct {
 	// can treat read-only tools differently (e.g. allow them in a plan mode).
 	// nil = unknown; treat as mutating. Builtins always carry hints; MCP tools carry
 	// them when the server sends annotations. Hints are advisory: a server can
-	// mislabel its tools. golang only for now; other ports pending.
+	// mislabel its tools.
 	Hints *ToolHints `json:"-"`
 }
 

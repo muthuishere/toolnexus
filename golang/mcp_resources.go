@@ -2,7 +2,7 @@ package toolnexus
 
 // MCP resource tools (change add-go-host-asks, ask #7.3): list_mcp_resources
 // and read_mcp_resource over the servers an McpSource connected. Opt-in: a host
-// registers McpSource.ResourceTools(). golang only for now; other ports pending.
+// registers McpSource.ResourceTools().
 
 import (
 	"context"
