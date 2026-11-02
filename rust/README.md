@@ -52,6 +52,7 @@ All under `rust/examples/`, run with `cargo run --example <name>`:
 | `pending` | the builtin `question` suspending, with and without `wait_for` (§10) | nothing |
 | `acp` | an ACP coding agent as the client's model, streaming its own tool calls | an agent command, or the bundled fake |
 | `agents` | the §7D runtime: a coordinator fans out to sub-agents via `task`, then a child parks durably and is resumed | nothing |
+| `prompt_cache` | prompt cache + tool tiers against a local mock Anthropic: a stable tools array, `call_tool` unwrapped for hooks, cache-read usage. Mirrors `golang/examples/promptcache` | nothing |
 
 ## Toolkit (§4)
 

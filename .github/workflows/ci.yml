@@ -105,6 +105,12 @@ jobs:
       - run: cargo test
       - name: stdio-only build (no HTTP/TLS stack)
         run: cargo test --no-default-features
+      - name: run the examples (hermetic; agent skips without a key)
+        run: |
+          for e in basic agent native_http streaming pending acp agents prompt_cache; do
+            echo "== $e"; cargo run -q --example "$e"
+          done
+          cargo run -q --example skills_dump -- ../examples/skills >/dev/null
 
   skills-parity:
     name: Skills byte-parity (Go reference vs Rust)
