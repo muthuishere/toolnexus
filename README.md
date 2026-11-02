@@ -25,7 +25,7 @@ to the same `full` tier as the other six and published to Clojars like the rest.
 > **Right-sized.** Not a framework — no builders, advisors, runnables, or config to wade through.
 > Not a toy that falls over the moment you need streaming or a retry. Exactly what a real agent
 > needs — MCP, skills, native + HTTP + built-in tools, remote A2A agents, in-process sub-agents,
-> the loop, hooks, streaming, retries, memory — and nothing it doesn't.
+> the loop, hooks, streaming, retries, memory, and media generation (images, video and speech from a JSON style, as typed calls and as agent tools). Nothing it doesn't.
 
 ```sh
 npm i toolnexus                                   # JS / TypeScript
