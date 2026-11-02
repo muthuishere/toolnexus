@@ -9,7 +9,7 @@ SPEC §0 obligation, with the gaps listed at the end of this page.
 ```toml
 [dependencies]
 toolnexus = "0.22.0"
-# toolnexus = { version = "0.22.0", default-features = false }   # MCP over stdio only (no MCP HTTP/TLS transport)
+# toolnexus = { version = "0.22.0", default-features = false }   # MCP over stdio only, no `serve` (A2A / MCP server)
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -55,8 +55,8 @@ All under `rust/examples/`, run with `cargo run --example <name>`:
 ## Toolkit (§4)
 
 `create_toolkit(ToolkitOptions { mcp_config, skills_dir, skills, skill_provider, skills_filter,
-skill_sample_limit, extra_tools, builtins, disable_tools, disable_skills })` assembles
-MCP → skill → builtin → extra tools, first name wins, and an extra tool shadows a builtin of the
+skill_sample_limit, extra_tools, builtins, agents, disable_tools, disable_skills })` assembles
+MCP → skill → builtin → A2A agents → extra tools, first name wins, and an extra tool shadows a builtin of the
 same name. `tools()`, `get`, `execute`, `skills_prompt`, `mcp_status`, `to_openai` /
 `to_anthropic` / `to_gemini`, `register` (safe mid-turn) and `close`.
 
@@ -94,6 +94,48 @@ it, `run` returns `status: "pending"` with the request, and a stream emits a `pe
 `toolnexus::http::http_tool(HttpToolOptions { name, url, method, headers, query, body,
 input_schema, .. })`: `{placeholder}` URL segments, `${ENV}` headers that are never logged, and
 `HTTP <status>: <body>` errors.
+
+## A2A agents (§7A)
+
+`ToolkitOptions.agents` (or a top-level `agents` block in the MCP config, or
+`tk.add_agent(card_url)` at runtime) turns every skill on a remote Agent Card into a tool named
+`<card name>_<skill id>` with `source: ToolSource::A2a`. A call sends one non-blocking
+`SendMessage`, polls `GetTask` every `poll_every_ms` until the Task is terminal or the budget
+(`timeout_ms`, or `ToolContext.timeout_ms`) runs out, and returns the artifact text; `metadata`
+carries `agent`, `taskId`, `state`, `polls`, `ms`. `${ENV}` headers are expanded at call time and
+never logged. Cancelling the call's token stops it, even mid-request (`A2A task <id> canceled`).
+
+```rust
+use toolnexus::a2a::Agent;
+let tk = create_toolkit(ToolkitOptions {
+    agents: vec![Agent::new("https://reviewer.example/.well-known/agent-card.json")],
+    ..Default::default()
+}).await?;
+```
+
+## Serve: A2A agent and MCP server (§7B, §7C; `serve` feature, on by default)
+
+```rust
+use toolnexus::mcp_serve::McpServeConfig;
+use toolnexus::serve::{A2aConfig, ServeOptions};
+
+let handle = tk.serve("127.0.0.1:0", ServeOptions {
+    client: Some(client),                                         // fulfils A2A Tasks
+    a2a: Some(A2aConfig { name: "video-desk".into(), ..Default::default() }),
+    mcp: Some(McpServeConfig::default()),                         // POST /mcp
+    ..Default::default()
+}).await?;
+println!("{}", handle.url);   // dropping the handle (or handle.stop()) stops the server
+```
+
+With `a2a`, `GET /.well-known/agent-card.json` publishes a card built from the toolkit's skills
+(never raw tools) and a JSON-RPC `POST` answers `SendMessage` / `GetTask`. Tasks run in the
+background through `client.run`, or `client.ask` keyed by the message's `contextId`. A suspended
+run is `input-required` with the prompt. `A2aConfig.store` is `"memory"` (default),
+`"file:<dir>"` or a custom `TaskStore`. With `mcp`, a stateless streamable-HTTP MCP server (rmcp)
+at `/mcp` exposes every toolkit tool, filtered by `McpServeConfig.tools`; §1B parts follow the text
+block as native MCP content. Neither profile ⇒ every request is a 404. Inline options win over the
+config's top-level `a2a` / `mcpServer` blocks. `on_task` / `on_call` observe each Task and call.
 
 ## ACP client
 
@@ -186,8 +228,7 @@ HTTP / MCP / SSE servers, no network and no real model. CI runs `cargo fmt --che
 
 ## Not done yet (tier `core`)
 
-A2A agents (outbound and `serve`), `translate` (§11), the classifier and judge (§8B), the
-sub-agent runtime and personas (§7D/§7E), compaction (§7F), the MCP server profile (§7C), MCP
-elicitation (the toolkit `wait_for` bridge), the relay / resume path, and a Gemini client style
+`translate` (§11), the classifier and judge (§8B), the sub-agent runtime and personas
+(§7D/§7E), compaction (§7F), MCP elicitation (the toolkit `wait_for` bridge), the relay / resume path, and a Gemini client style
 (Gemini is a schema adapter, as in Go). The Windows code paths compile but have not been run.
 Tracked in `openspec/changes/add-rust-port`.

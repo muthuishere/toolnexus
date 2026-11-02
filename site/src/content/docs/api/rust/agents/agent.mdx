@@ -8,19 +8,83 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7A</a>
+<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7A</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/rust/src/a2a.rs">rust/src/a2a.rs</a>
 </p>
 
-<Aside type="caution" title="Not available in Rust">
-Outbound A2A agents are not ported to Rust. Tracked in `openspec/changes/add-rust-port`.
+```rust
+pub struct Agent {
+    pub card: String,                       // URL of /.well-known/agent-card.json
+    pub headers: BTreeMap<String, String>,  // ${ENV} values expand at call time, never logged
+    pub timeout_ms: u64,                    // overall poll budget, 0 ⇒ 300000
+    pub poll_every_ms: u64,                 // GetTask interval, 0 ⇒ 1000
+}
+impl Agent { pub fn new(card: impl Into<String>) -> Self }
+// ToolkitOptions { agents: Vec<Agent>, .. } · Toolkit::add_agent(impl Into<Agent>)
+```
+
+`Agent` points at a remote A2A agent's card. Hand it to `ToolkitOptions.agents` (or
+`Toolkit::add_agent` at runtime) and every skill on the card becomes a tool named
+`<card name>_<skill id>` with `source: ToolSource::A2a`. Calling it sends one non-blocking
+`SendMessage`, polls `GetTask` until the Task is `completed` / `failed` / `canceled`, and returns
+the artifact text.
+
+## When to use it
+
+When another team (or another toolnexus port) runs its agent behind A2A and you want your model to
+delegate to it exactly like a local tool: same schema (`{task: string}`), same hooks, same
+cancellation (`ToolContext.cancel` stops polling, even mid-request: `A2A task <id> canceled`).
+
+## Why this and not the alternative
+
+An A2A peer owns its own loop, model and tools; wrapping it with `http_tool` would make you
+re-implement the Task protocol. For a local coding CLI use the ACP client instead; for a peer that
+only exposes MCP use `mcp_config`.
+
+<Aside type="tip" title="A failing agent never breaks the toolkit">
+If the card cannot be fetched at `create_toolkit` time, the agent is logged and skipped; the rest of the toolkit loads. Use `agent_tools` directly when you need the error.
 </Aside>
 
-Point at a remote agent's card and use it exactly like a local tool.
+## Examples
 
-## What to use instead
+### 1. Declare an agent on the toolkit
 
-Drive a local agent over ACP (`toolnexus::acp`) or wrap the remote endpoint with `http_tool`.
+```rust
+use toolnexus::a2a::Agent;
+use toolnexus::{ToolkitOptions, create_toolkit};
+let tk = create_toolkit(ToolkitOptions {
+    agents: vec![Agent::new("https://reviewer.example/.well-known/agent-card.json")],
+    ..Default::default()
+}).await?;
+// tk.get("reviewer_review") is now a tool with source ToolSource::A2a
+```
+
+### 2. Headers from the environment, a tighter budget
+
+```rust
+use std::collections::BTreeMap;
+use toolnexus::a2a::Agent;
+let agent = Agent {
+    card: "https://reviewer.example/.well-known/agent-card.json".into(),
+    headers: BTreeMap::from([("Authorization".into(), "Bearer ${REVIEWER_TOKEN}".into())]),
+    timeout_ms: 60_000,
+    poll_every_ms: 250,
+};
+```
+
+### 3. Add one at runtime and call it
+
+```rust
+use serde_json::json;
+use toolnexus::ToolContext;
+tk.add_agent("https://reviewer.example/.well-known/agent-card.json").await?;
+let r = tk.execute("reviewer_review", json!({"task": "review src/lib.rs"}), ToolContext::default()).await;
+let meta = r.metadata.unwrap();   // agent, taskId, state, polls, ms
+println!("{} ({})", r.output, meta["state"]);
+```
 
 ## See also
 
+- [`agent_tools`](/api/rust/agents/agent-tools/) — expand a card into one tool per skill.
+- [`parse_agents_config`](/api/rust/agents/parse-config/) — agents from a config `agents` block.
+- [`Toolkit::serve`](/api/rust/serve/a2a/) — expose the toolkit as an A2A agent and/or an MCP server.
 - [`create_toolkit`](/api/rust/toolkit/create/) — Collapse MCP servers, skills, built-ins, A2A agents and your own functions into one tool list.

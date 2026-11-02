@@ -671,7 +671,7 @@
 				"csharp": "A2A.Agent",
 				"elixir": "Toolnexus.A2a.agent",
 				"clojure": "toolnexus.a2a/remote-agent",
-				"rust": null
+				"rust": "a2a.Agent"
 			},
 			"sources": [
 				"python/examples/a2a_agents.py"
@@ -693,7 +693,7 @@
 				"csharp": "A2A.AgentTools",
 				"elixir": "Toolnexus.A2a.agent_tools",
 				"clojure": "toolnexus.a2a/agent-tools",
-				"rust": null
+				"rust": "agent_tools"
 			}
 		},
 		{
@@ -711,7 +711,7 @@
 				"csharp": "A2A.ParseAgentsConfig",
 				"elixir": "Toolnexus.A2a.parse_agents_config",
 				"clojure": "toolnexus.a2a/parse-agents-config",
-				"rust": null
+				"rust": "parse_agents_config"
 			}
 		},
 		{
@@ -729,7 +729,7 @@
 				"csharp": "A2AServer.StartAsync",
 				"elixir": "Toolnexus.Serve.start",
 				"clojure": "toolnexus.serve/serve",
-				"rust": null
+				"rust": "Toolkit.serve"
 			},
 			"parityNote": "Go names this Toolkit.Serve (a method), not a free StartAgent function — StartAgent is the unrelated §7E persona-heartbeat starter."
 		},
@@ -748,7 +748,7 @@
 				"csharp": "A2AServer.BuildAgentCard",
 				"elixir": "Toolnexus.Serve.build_agent_card",
 				"clojure": "toolnexus.serve/agent-card",
-				"rust": null
+				"rust": "build_agent_card"
 			}
 		},
 		{
@@ -766,7 +766,7 @@
 				"csharp": "FileTaskStore",
 				"elixir": "Toolnexus.Serve task_store",
 				"clojure": "toolnexus.serve/file-store",
-				"rust": null
+				"rust": "FileTaskStore"
 			}
 		},
 		{
@@ -784,7 +784,7 @@
 				"csharp": "McpServe.BuildMcpServer",
 				"elixir": "Toolnexus.McpServe.exposed_tools",
 				"clojure": "toolnexus.serve/exposed-tools",
-				"rust": null
+				"rust": "exposed_mcp_tools"
 			}
 		},
 		{

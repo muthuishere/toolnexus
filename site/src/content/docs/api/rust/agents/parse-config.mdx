@@ -8,19 +8,71 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7A</a>
+<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7A</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/rust/src/a2a.rs">rust/src/a2a.rs</a>
 </p>
 
-<Aside type="caution" title="Not available in Rust">
-The `agents` config block is not parsed by the Rust toolkit. Tracked in `openspec/changes/add-rust-port`.
-</Aside>
+```rust
+pub fn parse_agents_config(block: &AgentsConfig) -> Vec<Agent>
+pub fn parse_agents_value(v: &Value) -> Vec<Agent>
+pub type AgentsConfig = BTreeMap<String, AgentConfig>;  // {card, headers, timeout, pollEvery, enabled, disabled}
+```
 
-Declare remote peers in config the way MCP servers are declared, with precedence rules.
+Turn an `agents` config block into `Agent`s, with the same precedence as MCP servers:
+`disabled: true` wins, then `enabled: false`; an entry without a `card` is skipped. The key is only
+an identifier: the tool prefix comes from the card's `name`.
 
-## What to use instead
+## When to use it
 
-Declare remote endpoints as `http_tool`s in code.
+When the peers live in config next to `mcpServers`. `create_toolkit` already reads a top-level
+`agents` block from `mcp_config` (file or JSON), so you only call this to inspect the block yourself.
+
+## Why this and not the alternative
+
+Declaring agents in config keeps URLs and `${ENV}` header references out of code, and the
+`enabled` / `disabled` switches mean the same thing they do for MCP servers.
+
+## Examples
+
+### 1. The block create_toolkit reads
+
+```rust
+use serde_json::json;
+use toolnexus::{McpConfigInput, ToolkitOptions, create_toolkit};
+let tk = create_toolkit(ToolkitOptions {
+    mcp_config: Some(McpConfigInput::Json(json!({
+        "agents": {"rev": {"card": "https://reviewer.example/.well-known/agent-card.json", "pollEvery": 500}}
+    }))),
+    ..Default::default()
+}).await?;
+```
+
+### 2. Precedence
+
+```rust
+use serde_json::json;
+use toolnexus::a2a::parse_agents_value;
+let agents = parse_agents_value(&json!({
+    "a": {"card": "http://x/1"},
+    "b": {"card": "http://x/2", "disabled": true},
+    "c": {"card": "http://x/3", "enabled": false},
+    "d": {"card": "http://x/4", "enabled": true, "disabled": true},
+}));
+assert_eq!(agents.len(), 1);   // only "a"
+```
+
+### 3. Typed entries
+
+```rust
+use std::collections::BTreeMap;
+use toolnexus::a2a::{AgentConfig, parse_agents_config};
+let agents = parse_agents_config(&BTreeMap::from([(
+    "rev".to_string(),
+    AgentConfig { card: "http://x/1".into(), timeout: 60_000, ..Default::default() },
+)]));
+```
 
 ## See also
 
+- [`Agent`](/api/rust/agents/agent/) — the outbound descriptor: card URL, headers, budget.
+- [`agent_tools`](/api/rust/agents/agent-tools/) — expand a card into one tool per skill.
 - [`create_toolkit`](/api/rust/toolkit/create/) — Collapse MCP servers, skills, built-ins, A2A agents and your own functions into one tool list.

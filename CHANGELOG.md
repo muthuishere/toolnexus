@@ -32,17 +32,30 @@ core types that were already there:
 - **ACP host hooks** (Go's 0.22.0 set): `on_update`, a reject answer from `on_permission`, a
   cancellable `generate`, `generate_stream`, and `acp_generate` / `acp_generate_stream` to use
   an ACP agent as the client's model.
+- **A2A agents, both directions, and the MCP server profile** (SPEC §7A–§7C, ported from Go
+  with its tests mirrored). Outbound: `ToolkitOptions.agents`, a top-level `agents` config
+  block, or `Toolkit::add_agent` turn each skill on a remote Agent Card into a `source: "a2a"`
+  tool that sends `SendMessage` and polls `GetTask`; a cancel, even mid-request, ends it as
+  `A2A task <id> canceled`, and an unreachable agent is skipped instead of failing the toolkit.
+  Inbound: `Toolkit::serve(addr, ServeOptions { client, a2a, on_task, mcp, on_call })` publishes
+  an Agent Card built from the toolkit's skills (same bytes and key order as Go) and answers
+  JSON-RPC over the client loop, with `contextId` remembered through `client.ask`, a suspended
+  run reported as `input-required`, and memory / `file:<dir>` / custom `TaskStore`s. With `mcp`
+  (or a `mcpServer` block) the same server is a stateless streamable-HTTP MCP server at
+  `POST /mcp` exposing every tool, §1B parts included. The server side is the new `serve` cargo
+  feature (hyper + rmcp's server, on by default); `--no-default-features` builds without it.
+  Rust only: a served Task with no `client` configured fails with a message saying so (Go's
+  fulfilment would crash and leave the Task `working`).
 - Runnable examples (`cargo run --example basic|agent|native_http|streaming|pending|acp`).
 - Release: a `crates` leg in `release.yml`, gated by `ENABLE_CRATES` and using the
   `CARGO_REGISTRY_TOKEN` secret in `prod` (a crate's first publish cannot use Trusted Publishing;
   switch once it exists). It skips a version that is already on crates.io. `preflight` and the
   readiness script now check `rust/Cargo.toml`.
 - Conformance: rust is held to tier `core`. All 22 client options are present. Toolkit
-  `agents` and `waitFor` are permitted absences, and the whole classifier group is recorded
+  `waitFor` is a permitted absence, and the whole classifier group is recorded
   under a new `unported` key. Both are printed as debt on every run.
 
-**Not done in Rust** (`openspec/changes/add-rust-port`): A2A (outbound and `serve`), the MCP
-server profile, `translate`, the classifier / judge / batteries, the agents runtime, personas and
+**Not done in Rust** (`openspec/changes/add-rust-port`): `translate`, the classifier / judge / batteries, the agents runtime, personas and
 compaction, MCP elicitation, the relay / resume path, and a Gemini client style (Gemini is a
 schema adapter only, as in Go). The Windows code paths compile but have not been run. A few io
 and network error strings come from Rust's libraries and differ from Go's wording; the

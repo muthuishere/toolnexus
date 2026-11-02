@@ -8,19 +8,56 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7B</a>
+<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7B</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/rust/src/serve.rs">rust/src/serve.rs</a>
 </p>
 
-<Aside type="caution" title="Not available in Rust">
-Agent Card generation is part of A2A serve, which Rust does not have. Tracked in `openspec/changes/add-rust-port`.
-</Aside>
+```rust
+pub fn build_agent_card(cfg: Option<&A2aConfig>, skills: &[SkillInfo], url: &str) -> ServedAgentCard
+```
 
-Construct the Agent Card that advertises your name, skills and endpoint.
+Build the card `serve` publishes: `name` (default `toolnexus-agent`), `description` (default `""`),
+`version` (default `0.1.0`), `protocolVersion: "0.3.0"`, `capabilities: {streaming: false,
+pushNotifications: false}`, text input/output modes, one `{id, name, description}` per skill
+(filtered by `cfg.skills`), the JSON-RPC `url`, and `provider` only when set. Serialized with the
+same key order as the Go and JS ports.
 
-## What to use instead
+## When to use it
 
-None yet.
+When you publish the card somewhere other than `serve` (a registry, a static file) or want to test
+what peers will see.
+
+## Why this and not the alternative
+
+`serve` already builds and serves it at `/.well-known/agent-card.json`. Never advertise raw tools on
+a card: peers delegate tasks to skills.
+
+## Examples
+
+### 1. Default card
+
+```rust
+use toolnexus::serve::build_agent_card;
+let skills: Vec<_> = tk.skill_source().map(|s| s.skills.values().cloned().collect()).unwrap_or_default();
+let card = build_agent_card(None, &skills, "http://127.0.0.1:8080/");
+println!("{}", serde_json::to_string(&card)?);
+```
+
+### 2. Named, versioned, filtered
+
+```rust
+use toolnexus::serve::{A2aConfig, build_agent_card};
+let cfg = A2aConfig { name: "video-desk".into(), version: "2.1.0".into(), skills: Some(vec!["transcribe".into()]), ..Default::default() };
+let card = build_agent_card(Some(&cfg), &skills, "https://desk.example/");
+```
+
+### 3. Fetch the served one
+
+```rust
+let body = reqwest::get(format!("{}/.well-known/agent-card.json", h.url)).await?.text().await?;
+```
 
 ## See also
 
-- [`create_toolkit`](/api/rust/toolkit/create/) — Collapse MCP servers, skills, built-ins, A2A agents and your own functions into one tool list.
+- [`Toolkit::serve`](/api/rust/serve/a2a/) — expose the toolkit as an A2A agent and/or an MCP server.
+- [`TaskStore`](/api/rust/serve/task-store/) — where served Tasks live.
+- [`Agent`](/api/rust/agents/agent/) — the outbound descriptor: card URL, headers, budget.

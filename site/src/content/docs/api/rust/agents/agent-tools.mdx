@@ -8,19 +8,56 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7A</a>
+<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7A</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/rust/src/a2a.rs">rust/src/a2a.rs</a>
 </p>
 
-<Aside type="caution" title="Not available in Rust">
-Outbound A2A agents are not ported to Rust. Tracked in `openspec/changes/add-rust-port`.
-</Aside>
+```rust
+pub async fn agent_tools(agent: &Agent) -> Result<Vec<Tool>, String>
+```
 
-Expand a remote agent card into one tool per advertised skill.
+Fetch one agent's card and return one tool per advertised skill, named
+`sanitize(card.name) + "_" + sanitize(skill.id)` (the skill's `name` when it has no `id`). The
+card's `url` is the JSON-RPC endpoint; without one, the card's origin is used.
 
-## What to use instead
+## When to use it
 
-Use `http_tool` against the agent's endpoint, or the ACP client for local agents.
+When you want the tools without a toolkit, want to see the card-fetch error instead of having it
+logged, or want to filter / rename the tools before you register them.
+
+## Why this and not the alternative
+
+`ToolkitOptions.agents` calls this for you and isolates failures, which is what most programs want.
+Reach for `agent_tools` only when you need the error or the list.
+
+## Examples
+
+### 1. Resolve a card
+
+```rust
+use toolnexus::a2a::{Agent, agent_tools};
+let tools = agent_tools(&Agent::new("http://127.0.0.1:8080/.well-known/agent-card.json")).await?;
+for t in &tools { println!("{} — {}", t.name, t.description); }
+```
+
+### 2. Register only some skills
+
+```rust
+let tools = agent_tools(&agent).await?;
+tk.register(tools.into_iter().filter(|t| t.name.ends_with("_review")));
+```
+
+### 3. Call a skill directly
+
+```rust
+use serde_json::json;
+use toolnexus::ToolContext;
+let tool = &agent_tools(&agent).await?[0];
+let r = tool.call(json!({"task": "plan the migration"}), ToolContext { timeout_ms: 30_000, ..Default::default() }).await;
+if r.is_error { eprintln!("{}", r.output); }   // "A2A task t1 failed: <status message>"
+```
 
 ## See also
 
+- [`Agent`](/api/rust/agents/agent/) — the outbound descriptor: card URL, headers, budget.
+- [`parse_agents_config`](/api/rust/agents/parse-config/) — agents from a config `agents` block.
 - [`create_toolkit`](/api/rust/toolkit/create/) — Collapse MCP servers, skills, built-ins, A2A agents and your own functions into one tool list.

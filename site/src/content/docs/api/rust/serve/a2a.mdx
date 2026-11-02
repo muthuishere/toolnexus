@@ -8,19 +8,96 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7B</a>
+<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7B</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/rust/src/serve.rs">rust/src/serve.rs</a>
 </p>
 
-<Aside type="caution" title="Not available in Rust">
-`Toolkit::serve` (inbound A2A) is not ported to Rust. Tracked in `openspec/changes/add-rust-port`.
+```rust
+impl Toolkit {
+    pub async fn serve(&self, addr: &str, opts: ServeOptions) -> Result<ServeHandle, ServeError>
+}
+pub struct ServeOptions {
+    pub client: Option<Client>,        // fulfils Tasks through its run loop
+    pub a2a: Option<A2aConfig>,        // A2A profile; None ⇒ the config's `a2a` block, else no A2A routes
+    pub on_task: Option<OnTask>,       // fires on every terminal Task state
+    pub mcp: Option<McpServeConfig>,   // MCP profile at POST /mcp; None ⇒ the `mcpServer` block
+    pub on_call: Option<OnCall>,       // fires per inbound MCP tools/call
+}
+// feature "serve" (on by default)
+```
+
+`serve` stands up an HTTP server (hyper) that exposes this toolkit's **skills** (never raw tools)
+as an A2A agent: `GET /.well-known/agent-card.json` publishes the card, and a JSON-RPC `POST`
+answers `SendMessage` (submit a Task, fulfil it in the background with `client.run`) and `GetTask`
+(poll). A message's `contextId` keys the conversation through `client.ask`, so a peer's turns are
+remembered. A suspended run (§10) surfaces as `input-required` with the prompt, never `completed`.
+
+## When to use it
+
+When your toolkit should be callable by other agents (any A2A peer, including another toolnexus
+port's outbound client), not just by your own loop. Bind `127.0.0.1:0` for an ephemeral port; the
+handle's `url` reports it.
+
+## Why this and not the alternative
+
+Wrapping `client.run` in your own axum handler gives you an endpoint, not an A2A agent: no card, no
+Task lifecycle, no store. `serve` speaks the same wire subset as every other port.
+
+<Aside type="tip" title="Only want MCP clients?">
+`a2a` and `mcp` are independent. Set only `mcp` to expose tools instead of skills. Set neither and every request is a 404. Dropping the `ServeHandle` stops the server, so keep it alive.
 </Aside>
 
-Publish an Agent Card and answer JSON-RPC over the client loop — your toolkit becomes someone else's remote agent.
+## Examples
 
-## What to use instead
+### 1. Publish the card
 
-Serve the client loop behind your own HTTP framework (axum, actix) calling `client.run`.
+```rust
+use toolnexus::client::{ClientOptions, create_client};
+use toolnexus::serve::{A2aConfig, ServeOptions};
+let client = create_client(ClientOptions { base_url: "https://openrouter.ai/api/v1".into(), model: "openai/gpt-4o-mini".into(), ..Default::default() });
+let h = tk.serve("127.0.0.1:0", ServeOptions {
+    client: Some(client),
+    a2a: Some(A2aConfig { name: "greeter-desk".into(), ..Default::default() }),
+    ..Default::default()
+}).await?;
+println!("{}/.well-known/agent-card.json", h.url);
+```
+
+### 2. A round trip through this port's own outbound client
+
+```rust
+use serde_json::json;
+use toolnexus::ToolContext;
+use toolnexus::a2a::{Agent, agent_tools};
+let tools = agent_tools(&Agent { card: format!("{}/.well-known/agent-card.json", h.url), poll_every_ms: 5, ..Default::default() }).await?;
+let hello = tools.iter().find(|t| t.name == "greeter-desk_hello-world").unwrap();
+let r = hello.call(json!({"task": "say hi"}), ToolContext::default()).await;
+```
+
+### 3. Skill filter, provider and on_task
+
+```rust
+use std::sync::Arc;
+use toolnexus::serve::{A2aConfig, A2aProvider, ServeOptions};
+let h = tk.serve("0.0.0.0:8080", ServeOptions {
+    client: Some(client),
+    a2a: Some(A2aConfig {
+        name: "video-desk".into(),
+        skills: Some(vec!["hello-world".into()]),
+        provider: Some(A2aProvider { organization: "acme".into(), url: "https://acme.example".into() }),
+        ..Default::default()
+    }),
+    on_task: Some(Arc::new(|ev| println!("{} → {}", ev.id, ev.state))),
+    ..Default::default()
+}).await?;
+```
+
+JSON-RPC errors: unparseable body `-32700 Parse error`, unknown method `-32601 Method not found: <m>`,
+unknown task `-32001 Task not found: <id>`. A run with no `client` configured fails its Task with a
+message saying so (Rust only: Go would crash the fulfilment goroutine and leave the Task `working`).
 
 ## See also
 
-- [`create_toolkit`](/api/rust/toolkit/create/) — Collapse MCP servers, skills, built-ins, A2A agents and your own functions into one tool list.
+- [`build_agent_card`](/api/rust/serve/agent-card/) — the card a served toolkit publishes.
+- [`TaskStore`](/api/rust/serve/task-store/) — where served Tasks live.
+- [`exposed_mcp_tools`](/api/rust/serve/mcp/) — the inbound MCP profile at `POST /mcp`.
+- [`Agent`](/api/rust/agents/agent/) — the outbound descriptor: card URL, headers, budget.

@@ -8,19 +8,65 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7B</a>
+<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7B</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/rust/src/serve.rs">rust/src/serve.rs</a>
 </p>
 
-<Aside type="caution" title="Not available in Rust">
-The A2A task store is part of serve, which Rust does not have. Tracked in `openspec/changes/add-rust-port`.
-</Aside>
+```rust
+pub trait TaskStore: Send + Sync {
+    fn get(&self, id: &str) -> Result<Option<A2aTask>, String>;   // Ok(None) ⇒ unknown id
+    fn save(&self, task: A2aTask) -> Result<(), String>;
+}
+pub struct InMemoryTaskStore;  pub struct FileTaskStore;  // FileTaskStore::new(dir)
+pub enum TaskStoreSpec { Selector(String), Custom(Arc<dyn TaskStore>) }  // A2aConfig.store
+pub fn resolve_store(spec: &TaskStoreSpec) -> Result<Arc<dyn TaskStore>, String>
+```
 
-Persist inbound A2A tasks so a suspended request survives a restart.
+Where served Tasks live. `A2aConfig.store` selects it: `""` / `"memory"` (default, process
+lifetime), `"file:<dir>"` (one JSON file per Task, atomic temp-file + rename writes), or your own
+`TaskStore`. Any other selector fails `serve`. Every state change (submitted, working, terminal) is
+a `save`; every `GetTask` is a `get`.
 
-## What to use instead
+## When to use it
 
-Persist conversations with a `ConversationStore` instead.
+When Tasks must survive a restart, or be visible to more than one process (a database, NATS).
+
+## Why this and not the alternative
+
+The in-memory default is right for tests and single-process agents. A store write that fails never
+crashes the server: the next poll just sees the last saved state.
+
+## Examples
+
+### 1. File store from config
+
+```rust
+use serde_json::json;
+// mcp.json: { "a2a": { "name": "desk", "store": "file:/var/lib/desk/tasks" } }
+let h = tk.serve("127.0.0.1:0", ServeOptions { client: Some(client), ..Default::default() }).await?;
+```
+
+### 2. File store inline
+
+```rust
+use toolnexus::serve::{A2aConfig, TaskStoreSpec};
+let a2a = A2aConfig { store: TaskStoreSpec::Selector("file:./tasks".into()), ..Default::default() };
+```
+
+### 3. Your own store
+
+```rust
+use std::sync::Arc;
+use toolnexus::a2a::A2aTask;
+use toolnexus::serve::{A2aConfig, InMemoryTaskStore, TaskStore, TaskStoreSpec};
+struct Audited(InMemoryTaskStore);
+impl TaskStore for Audited {
+    fn get(&self, id: &str) -> Result<Option<A2aTask>, String> { self.0.get(id) }
+    fn save(&self, t: A2aTask) -> Result<(), String> { println!("{} {}", t.id, t.status.state); self.0.save(t) }
+}
+let a2a = A2aConfig { store: TaskStoreSpec::Custom(Arc::new(Audited(InMemoryTaskStore::new()))), ..Default::default() };
+```
 
 ## See also
 
-- [`create_toolkit`](/api/rust/toolkit/create/) — Collapse MCP servers, skills, built-ins, A2A agents and your own functions into one tool list.
+- [`Toolkit::serve`](/api/rust/serve/a2a/) — expose the toolkit as an A2A agent and/or an MCP server.
+- [`build_agent_card`](/api/rust/serve/agent-card/) — the card a served toolkit publishes.

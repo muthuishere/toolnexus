@@ -8,19 +8,76 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7C</a>
+<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7C</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/rust/src/mcp_serve.rs">rust/src/mcp_serve.rs</a>
 </p>
 
-<Aside type="caution" title="Not available in Rust">
-The inbound MCP server profile (§7C) is not ported to Rust. Tracked in `openspec/changes/add-rust-port`.
+```rust
+pub struct McpServeConfig { pub name: String, pub version: String, pub tools: Option<Vec<String>> }
+pub fn exposed_mcp_tools(tools: Vec<Tool>, cfg: Option<&McpServeConfig>) -> Vec<Tool>
+pub struct McpToolServer;  // rmcp ServerHandler over a tool list: McpToolServer::new(tools, cfg, on_call)
+// ServeOptions { mcp: Some(McpServeConfig), on_call, .. } mounts it at POST /mcp
+```
+
+The inbound MCP profile: `serve` mounts a stateless streamable-HTTP MCP server (rmcp) at `/mcp`
+exposing the toolkit's **unified tools** (every source: MCP, skill, builtin, native, HTTP, A2A).
+`tools/list` gives each tool's name verbatim, description and input schema as-is; `tools/call`
+dispatches straight to the tool, `isError` propagates, and §1B parts follow the text block as
+native MCP content (image, audio, embedded blob resource, or a resource link for URL-only parts).
+`serverInfo` defaults to `toolnexus` / `0.1.0`. Unknown names in `tools` are ignored.
+
+## When to use it
+
+When the caller is an MCP host (Claude Desktop, an IDE, another agent's MCP client) that wants your
+tools, not a delegated Task. The calling host is the LLM, so no `client` is needed.
+
+## Why this and not the alternative
+
+A2A delegates a whole task to your loop; MCP lends your tools to someone else's loop. Use
+`exposed_mcp_tools` to choose what to lend: an MCP host gets every tool it is shown, builtins
+included.
+
+<Aside type="tip" title="Use McpToolServer on another transport">
+`McpToolServer` is a plain rmcp `ServerHandler`, so it can also be served over stdio with rmcp's own transports.
 </Aside>
 
-The inbound MCP profile: any MCP client can call your tools.
+## Examples
 
-## What to use instead
+### 1. Expose everything
 
-Expose tools from another port, or with rmcp's server side directly.
+```rust
+use toolnexus::mcp_serve::McpServeConfig;
+use toolnexus::serve::ServeOptions;
+let h = tk.serve("127.0.0.1:0", ServeOptions { mcp: Some(McpServeConfig::default()), ..Default::default() }).await?;
+println!("MCP at {}/mcp", h.url);
+```
+
+### 2. Name it, narrow it, watch calls
+
+```rust
+use std::sync::Arc;
+use toolnexus::mcp_serve::McpServeConfig;
+let h = tk.serve("127.0.0.1:0", ServeOptions {
+    mcp: Some(McpServeConfig { name: "gateway".into(), version: "2.0.0".into(), tools: Some(vec!["echo".into(), "read".into()]) }),
+    on_call: Some(Arc::new(|ev| println!("{} {}ms error={}", ev.name, ev.ms, ev.is_error))),
+    ..Default::default()
+}).await?;
+```
+
+### 3. Consume it with toolnexus's own MCP client
+
+```rust
+use serde_json::json;
+use toolnexus::{McpConfigInput, ToolkitOptions, create_toolkit};
+let consumer = create_toolkit(ToolkitOptions {
+    mcp_config: Some(McpConfigInput::Json(json!({"mcpServers": {"gw": {"type": "remote", "url": format!("{}/mcp", h.url)}}}))),
+    ..Default::default()
+}).await?;
+// consumer.get("gw_echo") calls the served toolkit's echo
+```
+
+A top-level `mcpServer` (singular) block in the toolkit's config enables the profile without an inline option.
 
 ## See also
 
+- [`Toolkit::serve`](/api/rust/serve/a2a/) — expose the toolkit as an A2A agent and/or an MCP server.
 - [`create_toolkit`](/api/rust/toolkit/create/) — Collapse MCP servers, skills, built-ins, A2A agents and your own functions into one tool list.
