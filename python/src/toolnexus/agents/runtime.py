@@ -1154,4 +1154,7 @@ class AgentRuntime:
             },
             source="native",
             execute=execute,
+            # Each subagent is isolated and the runtime's own gate schedules the children,
+            # so a fan-out of task calls runs concurrently (SPEC §8 "Tool scheduling").
+            concurrency_safe=lambda _args: True,
         )

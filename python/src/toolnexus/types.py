@@ -160,6 +160,9 @@ class Tool:
     # What the tool may do (§4C). None = unknown; treat as mutating. Builtins always
     # carry hints; MCP tools carry them when the server sends annotations.
     hints: Optional[ToolHints] = None
+    # Decides per call whether this tool may run alongside other safe calls of the same
+    # model response (SPEC §8 "Tool scheduling"). None ⇒ safe only when hints.read_only.
+    concurrency_safe: Optional[Callable[[dict[str, Any]], bool]] = field(default=None, repr=False)
 
 
 _SANITIZE_RE = re.compile(r"[^a-zA-Z0-9_-]")
