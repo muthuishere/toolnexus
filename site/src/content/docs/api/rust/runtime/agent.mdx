@@ -8,19 +8,46 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7D</a>
+<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7D</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/rust/src/agents/agent.rs">rust/src/agents/agent.rs</a>
 </p>
 
-<Aside type="caution" title="Not available in Rust">
-The §7D sub-agent runtime is not ported to Rust. Tracked in `openspec/changes/add-rust-port`.
-</Aside>
+```rust
+pub fn new(name: impl Into<String>, spec: Spec) -> Agent     // toolnexus::agents
+pub struct Spec { pub does: String, pub tools: Vec<Tool>, pub soul: String, pub soul_file: String,
+                  pub team: Vec<Agent>, pub budget: Option<Budget>, pub model: String,
+                  pub wait_for: Option<WaitForFn>, pub hooks: Option<Hooks>,
+                  pub on_metric: Option<OnMetricFn>, pub guardrails: Vec<Guardrail>,
+                  pub completion: Option<Completion>, /* on_spawn, on_close */ }
 
-Define a sub-agent with its own toolkit, prompt and budget, callable as a tool by its parent.
+impl Agent {
+    pub fn registry(&self) -> HashMap<String, Def>                 // transitive team closure
+    pub async fn run(&self, opts: Options, prompt: &str) -> (TaskResult, Runtime)
+    pub fn as_tool(&self, opts: Options) -> Tool
+    pub fn as_tool_with(&self, per: AsToolOptionsFn) -> Tool        // Options per calling ToolContext
+}
+```
 
-## What to use instead
+One new noun. Declaring agents in each other's `team` IS the sub-agent wiring (a `task` tool
+appears only when a team is declared). `run` is the one-shot; when the run parks durably
+(`status: "pending"`) the returned runtime is kept alive so you can `resume`. An Agent IS a Tool:
+`as_tool` drops it into a classic toolkit's `extra_tools`, returning only the final text plus
+`{agent, turns, totalTokens}` metadata; the calling turn's cancellation cancels the child.
+`as_tool_with` builds the child's Options from the calling `ToolContext`, so the child runs under
+the parent turn's `hooks` gate, `wait_for` bridge and `on_metric`.
 
-Wrap a second `Client` + `Toolkit` in a `define_tool` to delegate a task.
+## Example
+
+```rust
+use toolnexus::agents::{self, Options, Spec};
+let explore = agents::new("explore", Spec { does: "read-only research".into(), tools: vec![lookup], ..Default::default() });
+let coder = agents::new("coder", Spec { does: "implements changes".into(), soul_file: "AGENTS.md".into(),
+                                         team: vec![explore.clone()], ..Default::default() });
+let (r, _rt) = coder.run(Options { in_process: Some(model), ..Default::default() }, "fix the failing test").await;
+
+// or inside the classic API:
+let tk = toolnexus::create_toolkit(toolnexus::ToolkitOptions { extra_tools: vec![explore.as_tool(opts)], ..Default::default() }).await?;
+```
 
 ## See also
 
-- [`create_toolkit`](/api/rust/toolkit/create/) — Collapse MCP servers, skills, built-ins, A2A agents and your own functions into one tool list.
+- [Loop](/api/rust/runtime/loop/) · [task tool](/api/rust/runtime/task-tool/) · [runtime](/api/rust/runtime/runtime/)

@@ -51,11 +51,12 @@ All under `rust/examples/`, run with `cargo run --example <name>`:
 | `streaming` | `client.stream` with tool calls, offline (in-process model) | nothing |
 | `pending` | the builtin `question` suspending, with and without `wait_for` (§10) | nothing |
 | `acp` | an ACP coding agent as the client's model, streaming its own tool calls | an agent command, or the bundled fake |
+| `agents` | the §7D runtime: a coordinator fans out to sub-agents via `task`, then a child parks durably and is resumed | nothing |
 
 ## Toolkit (§4)
 
 `create_toolkit(ToolkitOptions { mcp_config, skills_dir, skills, skill_provider, skills_filter,
-skill_sample_limit, extra_tools, builtins, disable_tools, disable_skills })` assembles
+skill_sample_limit, extra_tools, builtins, disable_tools, disable_skills, wait_for })` assembles
 MCP → skill → builtin → extra tools, first name wins, and an extra tool shadows a builtin of the
 same name. `tools()`, `get`, `execute`, `skills_prompt`, `mcp_status`, `to_openai` /
 `to_anthropic` / `to_gemini`, `register` (safe mid-turn) and `close`.
@@ -88,6 +89,33 @@ model you run yourself. One message's tool calls run concurrently, each with its
 A tool returns `pending(Request { kind, prompt, .. })` (or `auth_required(url, prompt)`). With
 `wait_for`, the loop asks the host, then re-runs the tool once with `ToolContext.answer`. Without
 it, `run` returns `status: "pending"` with the request, and a stream emits a `pending` event.
+
+### Relay tools and durable resume
+
+`toolnexus::relay::relay_tool(name, description, schema)` declares a tool the HOST executes: the
+call surfaces as a `kind: "tool_call"` Request (every relay call of the turn rides one Request, in
+call order, with the provider call id). With `wait_for` the host's `data.output` becomes the tool
+result inline; without it the run halts `pending` and `client.run_with_answer(cancel, tk,
+history, &pending, &answer)` (or `ask_with_answer` by conversation id) resumes it, replacing the
+halt's placeholders so every call has one result. `answer_output`, `answer_declined` and
+`relay_answer` build the Answer. A relay tool may not share a builtin's name.
+
+## Agents (§7D–§7F)
+
+`toolnexus::agents`: `agents::new(name, Spec { does, tools, soul, soul_file, team, budget, model,
+wait_for, hooks, on_metric, guardrails, completion, .. })`, `agent.run(opts, prompt)`,
+`agent.as_tool(opts)` / `as_tool_with(per_call)`, and `agent.loop_(client_opts, toolkit)` with
+the completion gate (`all_todos_done`) and first-deny-wins guardrails. `Runtime::new(Options {
+http_client + llm | in_process, registry, inbox_cap, max_concurrent_turns, shutdown, store,
+clock, hooks, on_metric, wait_for })` gives the six verbs (`spawn`, `post`, `wake`, `wait`,
+`interrupt`, `close`) plus `run_turn`, `resume`, `list`, `inspect`, `trace`: bounded inboxes,
+per-parent concurrency with FIFO slot transfer, a global turn gate around only the provider call,
+hierarchical budgets with a named `limit` on every stop, nearest-interpreter escalation, and
+durable pending with `data.path` and task reattachment on resume. Personas: `from_dir`,
+`compose_soul`, `memory_tool`, `start_agent` (heartbeat on the runtime `Clock`). Compaction:
+`compactor(CompactorOptions { max_tokens, keep_tail, summarize, count_tokens, flush_to_memory,
+on_compact })` as a `before_llm` hook. Tests mirror `golang/agents` (trace strings and the
+unset-run golden are byte-identical).
 
 ## HTTP tools (§7)
 
@@ -171,7 +199,10 @@ timeout is an idle timeout: progress for that call resets it. Cancelling `ToolCo
 ends a call at once. A remote server that does not speak streamable HTTP is retried over legacy
 SSE. Non-text content becomes `ToolResult.parts`, tool annotations become `ToolHints`,
 `resource_tools()` lists and reads resources, and `load_mcp_with(cfg, McpLoadOptions {
-on_server })` reports each server as soon as it is ready.
+on_server, wait_for })` reports each server as soon as it is ready. With a `wait_for` (or
+`ToolkitOptions.wait_for`) the client advertises elicitation and bridges a server's
+`elicitation/create` onto §10: form → `kind:"input"` (schema in `data.schema`), URL →
+`kind:"authorization"`; `ok` → accept, `reason:"declined"` → decline, else cancel.
 
 ## Tools and adapters
 
@@ -186,8 +217,7 @@ HTTP / MCP / SSE servers, no network and no real model. CI runs `cargo fmt --che
 
 ## Not done yet (tier `core`)
 
-A2A agents (outbound and `serve`), `translate` (§11), the classifier and judge (§8B), the
-sub-agent runtime and personas (§7D/§7E), compaction (§7F), the MCP server profile (§7C), MCP
-elicitation (the toolkit `wait_for` bridge), the relay / resume path, and a Gemini client style
+A2A agents (outbound and `serve`, so also the toolkit `agents` option), `translate` (§11), the
+classifier and judge (§8B), the MCP server profile (§7C), and a Gemini client style
 (Gemini is a schema adapter, as in Go). The Windows code paths compile but have not been run.
 Tracked in `openspec/changes/add-rust-port`.

@@ -8,19 +8,28 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7E</a>
+<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7E</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/rust/src/agents/home.rs">rust/src/agents/home.rs</a>
 </p>
 
-<Aside type="caution" title="Not available in Rust">
-The file-backed `memory` tool (§7E) is not ported to Rust. Tracked in `openspec/changes/add-rust-port`.
-</Aside>
+```rust
+pub fn memory_tool(dir: impl AsRef<Path>) -> Tool   // toolnexus::agents
+// input: { action: "add" | "replace" | "remove", target?: "self" | "user", text: string, with?: string }
+```
 
-The opt-in built-in that lets a persona write durable notes to its own home.
+One tool, three actions, over `MEMORY.md` (`target: "self"`, default) or `USER.md`
+(`target: "user"`). Every write goes to disk and loads at the START of the next session — it never
+changes the live prompt, so a long-lived persona stays cache-stable. A replace/remove of a
+substring that is not there is a loud `isError` and the file is unchanged. Not one of the default
+builtins: it exists for a home-wired persona.
 
-## What to use instead
+## Example
 
-Use a `ConversationStore`, or a `define_tool` writing to a file.
+```rust
+let tool = toolnexus::agents::memory_tool("./ava");
+let r = tool.call(serde_json::json!({"action": "add", "text": "Likes hiking"}), Default::default()).await;
+// r.output == "ok (add → MEMORY.md); loads next session"
+```
 
 ## See also
 
-- [`create_toolkit`](/api/rust/toolkit/create/) — Collapse MCP servers, skills, built-ins, A2A agents and your own functions into one tool list.
+- [from_dir](/api/rust/persona/from-dir/) · [compactor](/api/rust/compaction/compactor/)

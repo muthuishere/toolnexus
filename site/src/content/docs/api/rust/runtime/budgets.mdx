@@ -8,19 +8,38 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7D</a>
+<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7D</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/rust/src/agents/runtime.rs">rust/src/agents/runtime.rs</a>
 </p>
 
-<Aside type="caution" title="Not available in Rust">
-§7D budgets are not ported to Rust. Tracked in `openspec/changes/add-rust-port`.
-</Aside>
+```rust
+pub struct Budget {
+    pub max_turns: usize,       // default 6 per run
+    pub max_tokens: i64,        // subtree pool
+    pub max_tool_calls: i64,    // subtree pool
+    pub max_wall: Duration,     // SPEC maxWallMs, on the runtime Clock
+    pub max_children: usize,
+    pub max_concurrent: usize,  // default 8; excess wakes queue FIFO
+    pub max_depth: usize,       // default 3
+}
+```
 
-Cap tool calls and wall-clock per agent and per team, enforced while the run is in flight.
+A budget is carved at spawn — effective = min(own, parent remaining) — and then enforced by a LIVE
+walk of the ancestor chain before every turn and every spawn, so sibling spend counts. Usage rolls
+up to every ancestor (that roll-up is the ledger). Every limit stop is a loud
+`status: "incomplete"` with `TaskResult.limit` naming the field (`maxTokens`, `maxToolCalls`,
+`maxWallMs`, `maxTurns`, `completion`), never a crash and never a silent done.
 
-## What to use instead
+## Example
 
-Bound a run with `max_turns` and `timeout_ms` on `ClientOptions`.
+```rust
+use toolnexus::agents::Budget;
+let c = rt.spawn(&rt.root(), "coordinator", Some(Budget { max_tokens: 100, max_children: 2, ..Default::default() }))?;
+let kid = rt.spawn(&c, "explore", Some(Budget { max_tokens: 500, ..Default::default() }))?;
+assert_eq!(rt.pool_tokens(&kid), 100);            // carved down to the parent's pool
+let r = rt.run_turn(&kid, "go").await;
+if r.status == "incomplete" { eprintln!("stopped by {}", r.limit); }
+```
 
 ## See also
 
-- [`create_toolkit`](/api/rust/toolkit/create/) — Collapse MCP servers, skills, built-ins, A2A agents and your own functions into one tool list.
+- [runtime](/api/rust/runtime/runtime/) · [vocabulary](/api/rust/runtime/vocabulary/)

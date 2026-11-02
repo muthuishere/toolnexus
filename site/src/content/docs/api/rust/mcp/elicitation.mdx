@@ -8,21 +8,38 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §2</a>
+<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §2</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/rust/src/mcp/elicit.rs">rust/src/mcp/elicit.rs</a>
 </p>
 
-<Aside type="caution" title="Not available in Rust">
-The MCP elicitation bridge (server-initiated input mapped onto §10) is not ported to Rust; a server's elicitation request is not answered. Tracked in `openspec/changes/add-rust-port`.
-</Aside>
+```rust
+pub fn elicitation_to_request(params: &Value) -> Request      // toolnexus::mcp
+pub fn answer_to_elicit_result(answer: &Answer) -> Value
+// enable it: ToolkitOptions { wait_for: Some(..), .. }  (or McpLoadOptions { wait_for, .. })
+```
 
-Map an MCP server's elicitation request onto the §10 suspension contract, and map the answer back.
+When the toolkit is built with a `wait_for`, every MCP client advertises the `elicitation`
+capability and answers `elicitation/create` through it — inline, without re-executing the tool.
+Form mode becomes `kind: "input"` with the requested schema in `data.schema`; URL mode becomes
+`kind: "authorization"` with `url`. The Answer maps back: `ok` → `accept` (content = `answer.data`,
+or `{}`), `reason: "declined"` → `decline`, anything else → `cancel`. Without a `wait_for` the
+capability is not advertised, so a compliant server never elicits.
 
-## What to use instead
+## Example
 
-Use MCP servers that do not elicit, or implement the question as a tool returning `pending(..)`.
+```rust
+use std::sync::Arc;
+use toolnexus::{Answer, McpConfigInput, ToolkitOptions, create_toolkit};
+let ask: toolnexus::client::WaitForFn = Arc::new(|req| Box::pin(async move {
+    // show req.prompt (and req.data["schema"] / req.url) to the user
+    Ok(Answer { id: req.id, ok: true, data: None, ..Default::default() })
+}));
+let tk = create_toolkit(ToolkitOptions {
+    mcp_config: Some(McpConfigInput::Path("mcp.json".into())),
+    wait_for: Some(ask.clone()),   // typically the same function given to the client
+    ..Default::default()
+}).await?;
+```
 
 ## See also
 
-- [`load_mcp`](/api/rust/mcp/load/) — Read an mcp.json, connect every local stdio and remote streamable-HTTP server, expose each server tool as a Tool.
-- [`load_mcp_with`](/api/rust/mcp/load-with-context/) — The ctx-aware load: bound connection time and cancel a slow or hung server without leaking a child process.
-- [`parse_mcp_config`](/api/rust/mcp/parse-config/) — Parse and validate config without connecting — the fast fail for a malformed or misspelled server block.
+- [`wait_for`](/api/rust/suspension/wait-for/)

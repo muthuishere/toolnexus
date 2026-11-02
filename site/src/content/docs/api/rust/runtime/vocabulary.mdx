@@ -8,19 +8,31 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7D</a>
+<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7D</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/rust/src/agents/mod.rs">rust/src/agents/mod.rs</a>
 </p>
 
-<Aside type="caution" title="Not available in Rust">
-The §7D status vocabulary is not ported to Rust; the client's own `RunResult.status` is `done` | `pending` | `incomplete`. Tracked in `openspec/changes/add-rust-port`.
-</Aside>
+```rust
+// toolnexus::agents — the §7D TaskResult.status set (seven values)
+TASK_STATUS_DONE, TASK_STATUS_PENDING, TASK_STATUS_INCOMPLETE, TASK_STATUS_INTERRUPTED,
+TASK_STATUS_CLOSED, TASK_STATUS_TIMEOUT, TASK_STATUS_ERROR
+// TaskResult.limit — the closed stop vocabulary
+LIMIT_MAX_TURNS, LIMIT_MAX_TOKENS, LIMIT_MAX_TOOL_CALLS, LIMIT_MAX_WALL_MS, LIMIT_MAX_CHILDREN,
+LIMIT_MAX_CONCURRENT, LIMIT_MAX_DEPTH, LIMIT_COMPLETION, LIMIT_TIMEOUT
+```
 
-The canonical, byte-identical-across-ports string constants a host branches on: task statuses, run statuses, and the nine stop-limit reasons a task can end on, plus the helper that canonicalizes a limit name.
+The strings a host branches on, identical in all ports. The §7D agent set is not the §8 client's
+(`RunResult.status` is `done | pending | incomplete`): `"timeout"` belongs only to `wait(handle,
+timeout)` — a wait deadline while the child keeps running. Every limit stop (`incomplete`,
+`timeout`) names its limit; every other status leaves `limit` empty.
 
-## What to use instead
+## Example
 
-Match on `RunResult.status` and `limit`.
+```rust
+use toolnexus::agents::{LIMIT_MAX_TOKENS, TASK_STATUS_INCOMPLETE};
+let r = rt.run_turn(&h, "again").await;
+if r.status == TASK_STATUS_INCOMPLETE && r.limit == LIMIT_MAX_TOKENS { /* top up the budget */ }
+```
 
 ## See also
 
-- [`create_toolkit`](/api/rust/toolkit/create/) — Collapse MCP servers, skills, built-ins, A2A agents and your own functions into one tool list.
+- [Budgets](/api/rust/runtime/budgets/) · [Handle](/api/rust/runtime/handle/)

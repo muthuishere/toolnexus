@@ -8,19 +8,27 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7E</a>
+<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7E</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/rust/src/agents/home.rs">rust/src/agents/home.rs</a>
 </p>
 
-<Aside type="caution" title="Not available in Rust">
-Personas (§7E) are not ported to Rust. Tracked in `openspec/changes/add-rust-port`.
-</Aside>
+```rust
+pub fn compose_soul(dir: impl AsRef<Path>) -> (String, Vec<String>)   // toolnexus::agents
+pub const BOOTSTRAP_ORDER: [&str; 7] =
+    ["AGENTS.md", "SOUL.md", "IDENTITY.md", "USER.md", "TOOLS.md", "HEARTBEAT.md", "MEMORY.md"];
+```
 
-Build a persona's system prompt from its home directory: identity, memory, skills.
+Reads the bootstrap files present under `dir`, in canonical order, each capped at 2 MB (an
+over-cap file is truncated with a notice; the file on disk is untouched), and joins them as
+`## <file>` sections. Returns the soul and the files found. Composed once, at session start: the
+soul is a frozen snapshot for the run.
 
-## What to use instead
+## Example
 
-Read your persona files yourself and pass them as `system_prompt`.
+```rust
+let (soul, found) = toolnexus::agents::compose_soul("./ava");
+// found == ["SOUL.md", "USER.md", "HEARTBEAT.md", "MEMORY.md"]
+```
 
 ## See also
 
-- [`create_toolkit`](/api/rust/toolkit/create/) — Collapse MCP servers, skills, built-ins, A2A agents and your own functions into one tool list.
+- [from_dir](/api/rust/persona/from-dir/) · [memory tool](/api/rust/persona/memory-tool/)

@@ -23,7 +23,7 @@
 - [x] 3.4 tests on examples/mcp.json (parse) + examples/mcp-progress-server.mjs (4 idle-timeout assertions, isolation, allowlist)
 - [x] 3.5 legacy SSE fallback for remote servers — rmcp has no SSE client, so an in-house one (`mcp/sse.rs`, `mcp-http` feature), tested against an in-process legacy server
 - [x] 3.6 §1B non-text content → `ToolResult.parts` on every branch; annotation hints; `resource_tools()`; `load_mcp_with(on_server)`
-- [ ] 3.7 MCP elicitation bridge (server → §10 `waitFor`) — not ported; toolkit `waitFor` is tier debt
+- [x] 3.7 MCP elicitation bridge (server → §10 `waitFor`) — `ToolkitOptions.wait_for` / `McpLoadOptions.wait_for`, rmcp client handler advertises elicitation only with a `wait_for`; pure mappings mirror Go's tests, live tests on `rust/tests/fixtures/mcp-elicit-server.mjs`
 
 ## Phase 4 — core types + native + adapters (§0 1, 7–8)
 - [x] 4.1 Tool / ToolResult / ToolContext(CancellationToken); define_tool
@@ -44,6 +44,7 @@
 - [ ] A2A outbound + `serve` (§7A/§7B), MCP server profile (§7C)
 - [ ] translate (§11)
 - [ ] classifier + judge + batteries (§8B)
-- [ ] agents runtime, personas, compaction (§7D–§7F); toolkit `agents` option
-- [ ] relay / resume path; MCP elicitation (3.7)
+- [x] agents runtime, personas, compaction (§7D–§7F) — `toolnexus::agents`, incl. 0.22.0 `on_compact`/`CompactInfo`, `as_tool_with`, runtime `wait_for`; golang/agents tests mirrored (92). The toolkit `agents` option is A2A (remote agents) in Go and stays with the A2A item above
+- [x] relay / resume path (relay tools, `run_with_answer` / `ask_with_answer`, collision guard); MCP elicitation (3.7)
+- [ ] the remaining golang relay tests not mirrored: streaming relay, parked-wait_for-across-turns, run-deadline-breaks-parking
 - [ ] run the Windows code paths on a Windows host

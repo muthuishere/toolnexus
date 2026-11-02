@@ -8,22 +8,36 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7D</a>
+<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7D</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/rust/src/agents/runtime.rs">rust/src/agents/runtime.rs</a>
 </p>
 
-<Aside type="caution" title="Not available in Rust">
-Agent-runtime resume is not ported to Rust; a halted run is continued by calling `ask` again on the same conversation id. Tracked in `openspec/changes/add-rust-port`.
+```rust
+impl Runtime { pub async fn resume(&self, answer: Answer) -> Result<TaskResult, String> }
+```
+
+A sub-agent that suspends with no interpreter on its chain (no `Def.wait_for`, no
+`Options.wait_for`) parks durably: the run returns `status: "pending"` with the Request, whose
+`data.path` names the suspended handle. `resume` delivers the Answer to the DEEPEST suspended
+handle, which re-runs its turn from its pre-turn checkpoint (turns and usage grow, never reset),
+then cascades upward; each parent's re-invoked `task` call reattaches to the existing child. It
+returns the settled result of the topmost handle it re-ran.
+
+<Aside type="caution" title="Idempotency">
+A durable resume REPLAYS the suspended turn: every tool that ran in it runs again. Any tool
+reachable in a turn that can suspend must be idempotent.
 </Aside>
 
-Route an Answer to the deepest suspended sub-agent handle and resume it in place.
+## Example
 
-## What to use instead
-
-Answer out of band, then `client.ask(prompt, tk, id)`.
+```rust
+let (r, rt) = boss.run(opts, "do the secret thing").await;
+if r.status == "pending" {
+    let req = r.pending.unwrap();
+    let done = rt.resume(toolnexus::Answer { id: req.id, ok: true, ..Default::default() }).await?;
+    // done.status == "done"
+}
+```
 
 ## See also
 
-- [`pending`](/api/rust/suspension/pending/) — Return a Pending from a tool to park the run until someone answers.
-- [`auth_required`](/api/rust/suspension/auth-required/) — The auth-shaped suspension: hand back a URL, resume once the user has granted access.
-- [`WaitForFn`](/api/rust/suspension/wait-for/) — The single hook where the host resolves a suspension — in-process prompt or durable queue, same contract.
-- [`pending_of`](/api/rust/suspension/pending-of/) — Detect that a RunResult is parked rather than finished, and get the Request that parked it.
+- [runtime](/api/rust/runtime/runtime/) · [task tool](/api/rust/runtime/task-tool/)

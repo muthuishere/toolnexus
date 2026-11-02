@@ -8,19 +8,65 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7D</a>
+<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7D</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/rust/src/agents/runtime.rs">rust/src/agents/runtime.rs</a>
 </p>
 
-<Aside type="caution" title="Not available in Rust">
-The §7D runtime is not ported to Rust. Tracked in `openspec/changes/add-rust-port`.
-</Aside>
+```rust
+pub fn Runtime::new(opts: Options) -> Runtime   // toolnexus::agents
 
-The six host verbs that drive sub-agents, plus the read-only list and inspect views.
+pub fn spawn(&self, parent: &Handle, def: &str, budget: Option<Budget>) -> Result<Handle, String>
+pub fn post(&self, h: &Handle, item: InboxItem) -> PostResult
+pub fn wake(&self, h: &Handle, prompt: &str) -> PostResult
+pub async fn wait(&self, h: &Handle, timeout: Option<Duration>) -> TaskResult
+pub fn interrupt(&self, h: &Handle)
+pub async fn close(&self, h: &Handle, opts: Option<CloseOptions>)
 
-## What to use instead
+pub fn list(&self) -> Vec<HandleView>
+pub fn inspect(&self, h: &Handle) -> HandleView
+pub fn trace(&self) -> Vec<String>
+pub async fn run_turn(&self, h: &Handle, prompt: &str) -> TaskResult
+pub async fn resume(&self, answer: Answer) -> Result<TaskResult, String>
+```
 
-Run several `Client::run` calls with tokio tasks.
+`Runtime::new` builds the substrate `Agent::run` rides on: a handle table rooted at `root()`, the
+three backpressure gates (bounded inbox, per-parent concurrency with FIFO slot transfer, a global
+turn gate around ONLY the provider call), hierarchical budgets, and one runtime-wide
+`ConversationStore` (conversation id = handle id). `Options` takes the model as `http_client` +
+`llm` (a real provider) or `in_process` (a host function) — never both. `wake` runs the turn as a
+tokio task; call it inside a runtime.
+
+## When to use it
+
+When you need more than one handle alive: fan work out to several children, keep a long-lived
+agent between calls, post unsolicited events into its inbox, or drive interrupt/close yourself.
+For one agent to completion, `agents::new(..).run(opts, prompt)` already does spawn + wake + wait +
+close.
+
+## Example
+
+```rust
+use std::sync::Arc;
+use toolnexus::agents::{Def, InboxItem, Options, Runtime};
+use toolnexus::client::InProcessResponse;
+
+let mut registry = std::collections::HashMap::new();
+registry.insert("peer".to_string(), Def { name: "peer".into(), does: "team member".into(), ..Default::default() });
+let rt = Runtime::new(Options {
+    in_process: Some(Arc::new(|_req| Box::pin(async {
+        Ok(InProcessResponse { content: "ok".into(), ..Default::default() })
+    }))),
+    registry,
+    ..Default::default()
+});
+let h = rt.spawn(&rt.root(), "peer", None)?;
+rt.post(&h, InboxItem::new("external", "external", "webhook payload")); // drained at the next wake
+rt.wake(&h, "process your inbox");
+let r = rt.wait(&h, None).await;          // r.status == "done"
+rt.close(&rt.root(), None).await;          // stop-all, leaf-first
+```
+
+Runnable: `cargo run --example agents`.
 
 ## See also
 
-- [`create_toolkit`](/api/rust/toolkit/create/) — Collapse MCP servers, skills, built-ins, A2A agents and your own functions into one tool list.
+- [`Agent`](/api/rust/runtime/agent/) · [`Handle`](/api/rust/runtime/handle/) · [Budgets](/api/rust/runtime/budgets/) · [`resume`](/api/rust/suspension/resume/)
