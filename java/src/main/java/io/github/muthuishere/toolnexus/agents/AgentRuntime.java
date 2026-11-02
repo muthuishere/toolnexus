@@ -764,6 +764,9 @@ public final class AgentRuntime {
         AgentRuntime self = this;
         return new Tool() {
             @Override public String name() { return "task"; }
+            // Each subagent is isolated and the runtime's own gate schedules the children,
+            // so a fan-out of task calls runs concurrently (SPEC §8 "Tool scheduling").
+            @Override public boolean concurrencySafe(Map<String, Object> args) { return true; }
             @Override public String description() {
                 return "Delegate a subtask to an isolated subagent. Available agents — " + namesJoined;
             }

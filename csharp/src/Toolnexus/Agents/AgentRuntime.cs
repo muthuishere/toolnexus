@@ -739,7 +739,7 @@ public sealed class AgentRuntime
             },
             ["required"] = new List<object?> { "agent", "prompt" },
         };
-        return NativeTool.OfAsync("task", description, schema, async (args, _) =>
+        var taskTool = NativeTool.OfAsync("task", description, schema, async (args, _) =>
         {
             var agentName = args.TryGetValue("agent", out var av) ? av?.ToString() ?? "" : "";
             var prompt = args.TryGetValue("prompt", out var pv) ? pv?.ToString() ?? "" : "";
@@ -796,5 +796,9 @@ public sealed class AgentRuntime
                 r.IsError,
                 new Dictionary<string, object?> { ["agent"] = agentName, ["turns"] = r.Turns, ["totalTokens"] = r.TotalTokens });
         });
+        // Each subagent is isolated and the runtime's own gate schedules the children,
+        // so a fan-out of task calls runs concurrently (SPEC §8 "Tool scheduling").
+        taskTool.ConcurrencySafe = _ => true;
+        return taskTool;
     }
 }

@@ -30,6 +30,17 @@ public interface Tool {
     }
 
     /**
+     * Whether a call with {@code args} may run alongside other safe calls of the same model
+     * response (SPEC §8 "Tool scheduling"). Default: safe only when {@link #hints()} says
+     * read-only; a tool without hints is unsafe. Override (or use {@link #withConcurrencySafe})
+     * to decide per input.
+     */
+    default boolean concurrencySafe(Map<String, Object> args) {
+        ToolHints h = hints();
+        return h != null && h.readOnly();
+    }
+
+    /**
      * A view of {@code tool} that reports {@code hints}; everything else delegates. Use it to tag
      * a native/custom tool for a permission gate.
      */
@@ -41,6 +52,22 @@ public interface Tool {
             @Override public String source() { return tool.source(); }
             @Override public ToolResult execute(Map<String, Object> args, ToolContext ctx) { return tool.execute(args, ctx); }
             @Override public ToolHints hints() { return hints; }
+        };
+    }
+
+    /**
+     * A view of {@code tool} whose concurrency safety is decided by {@code safe}, per call;
+     * everything else (hints included) delegates.
+     */
+    static Tool withConcurrencySafe(Tool tool, java.util.function.Predicate<Map<String, Object>> safe) {
+        return new Tool() {
+            @Override public String name() { return tool.name(); }
+            @Override public String description() { return tool.description(); }
+            @Override public Map<String, Object> inputSchema() { return tool.inputSchema(); }
+            @Override public String source() { return tool.source(); }
+            @Override public ToolResult execute(Map<String, Object> args, ToolContext ctx) { return tool.execute(args, ctx); }
+            @Override public ToolHints hints() { return tool.hints(); }
+            @Override public boolean concurrencySafe(Map<String, Object> args) { return safe.test(args); }
         };
     }
 
