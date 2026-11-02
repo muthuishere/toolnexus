@@ -35,6 +35,7 @@ use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdin, Command};
 use tokio::sync::{Mutex, mpsc, oneshot};
+use tokio_util::sync::CancellationToken;
 
 /// The marker [`AcpClient::generate`] appends, naming the latest user turn as
 /// superseding everything earlier in the (stateful) session — same text as Go.
@@ -62,6 +63,9 @@ pub enum AcpError {
     Protocol(String),
     #[error("toolnexus: acp: io: {0}")]
     Io(#[from] std::io::Error),
+    /// The turn was cancelled by the host (`session/cancel` was sent).
+    #[error("toolnexus: acp: turn cancelled")]
+    Cancelled,
 }
 
 /// One permission option the agent offers (`allow_once`, `allow_always`,
@@ -92,8 +96,38 @@ impl PermissionRequest {
 /// The host's answer to a permission request.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PermissionOutcome {
+    /// Answer with this option id. An empty id behaves like [`Self::Reject`].
     Selected(String),
     Cancelled,
+    /// No decision (the Go hook's error / empty answer): the first `reject*`
+    /// option, else `cancelled`.
+    Reject,
+}
+
+/// Host observer of EVERY `session/update`: receives the raw `params` object
+/// (`{sessionId, update}`), during a turn or not. Called on the read loop, so
+/// it must not block.
+pub type UpdateHandler = Arc<dyn Fn(&Value) + Send + Sync>;
+
+/// One event of a streamed turn ([`AcpClient::generate_stream`]). Tool events
+/// carry `via: "acp"`: the AGENT ran these tools, a host loop must not.
+#[derive(Debug, Clone, PartialEq)]
+pub enum AcpStreamEvent {
+    /// A reply text delta (`agent_message_chunk` only).
+    Text { delta: String },
+    ToolCall {
+        id: String,
+        name: String,
+        args: Value,
+        via: &'static str,
+    },
+    ToolResult {
+        id: String,
+        name: String,
+        output: String,
+        is_error: bool,
+        via: &'static str,
+    },
 }
 
 /// Async host permission handler.
@@ -161,6 +195,8 @@ pub struct AcpOptions {
     pub permission_timeout: Duration,
     /// Host permission handler; `None` ⇒ the first `allow*` option.
     pub on_permission: Option<PermissionHandler>,
+    /// Observer of every `session/update`; `None` ⇒ nothing is called.
+    pub on_update: Option<UpdateHandler>,
     /// Wait between SIGTERM and SIGKILL of the agent's process group on close; default 2s.
     pub kill_grace: Duration,
 }
@@ -178,6 +214,7 @@ impl AcpOptions {
             request_timeout: Duration::from_secs(30),
             permission_timeout: Duration::from_secs(30),
             on_permission: None,
+            on_update: None,
             kill_grace: Duration::from_secs(2),
         }
     }
@@ -201,6 +238,14 @@ impl AcpOptions {
         self.mode = Some(mode.into());
         self
     }
+    pub fn on_update<F>(mut self, f: F) -> Self
+    where
+        F: Fn(&Value) + Send + Sync + 'static,
+    {
+        self.on_update = Some(Arc::new(f));
+        self
+    }
+
     pub fn on_permission(mut self, h: PermissionHandler) -> Self {
         self.on_permission = Some(h);
         self
@@ -231,6 +276,7 @@ pub struct AcpClient {
     session_id: String,
     turn: Mutex<()>,
     kill_grace: Duration,
+    request_timeout: Duration,
     agent_info: Value,
     pid: Option<u32>,
 }
@@ -283,6 +329,7 @@ impl AcpClient {
             shared.clone(),
             BufReader::new(stdout),
             opts.on_permission.clone(),
+            opts.on_update.clone(),
             opts.permission_timeout,
         ));
 
@@ -292,6 +339,7 @@ impl AcpClient {
             session_id: String::new(),
             turn: Mutex::new(()),
             kill_grace: opts.kill_grace,
+            request_timeout: opts.request_timeout,
             agent_info: Value::Null,
             pid,
         };
@@ -465,6 +513,106 @@ impl AcpClient {
         Ok(self.prompt_text(&render_prompt(messages)).await?.text)
     }
 
+    /// [`generate`](Self::generate) bound to `cancel`: when the token fires
+    /// mid-turn, `session/cancel` is sent and the turn's end awaited (bounded
+    /// by `request_timeout`) so the next turn never lands on a busy session;
+    /// the call then returns [`AcpError::Cancelled`].
+    pub async fn generate_cancellable(
+        &self,
+        messages: &[(String, String)],
+        cancel: &CancellationToken,
+    ) -> Result<String, AcpError> {
+        self.generate_stream(messages, cancel, |_| {}).await
+    }
+
+    /// [`generate_cancellable`](Self::generate_cancellable) that also reports
+    /// the turn as it happens: message chunks as [`AcpStreamEvent::Text`], the
+    /// agent's own tool calls as `ToolCall` / `ToolResult` (on a
+    /// `tool_call_update` with status `completed` or `failed`), all `via: "acp"`.
+    /// Thoughts and plans are not emitted (observe them with `on_update`).
+    pub async fn generate_stream<F>(
+        &self,
+        messages: &[(String, String)],
+        cancel: &CancellationToken,
+        mut emit: F,
+    ) -> Result<String, AcpError>
+    where
+        F: FnMut(AcpStreamEvent),
+    {
+        let mut turn = self.prompt(&render_prompt(messages)).await?;
+        let mut names: HashMap<String, String> = HashMap::new();
+        let mut cancelled = false;
+        loop {
+            let u = tokio::select! {
+                u = turn.next() => u,
+                _ = cancel.cancelled(), if !cancelled => {
+                    cancelled = true;
+                    let _ = self.cancel().await;
+                    continue;
+                }
+            };
+            let Some(u) = u else { break };
+            if cancelled {
+                continue;
+            }
+            let field = |k: &str| {
+                u.update
+                    .get(k)
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_owned()
+            };
+            let (id, title) = (field("toolCallId"), field("title"));
+            match u.kind.as_str() {
+                "agent_message_chunk" => {
+                    if let Some(t) = u.text().filter(|t| !t.is_empty()) {
+                        emit(AcpStreamEvent::Text {
+                            delta: t.to_owned(),
+                        });
+                    }
+                }
+                "tool_call" => {
+                    let name = if title.is_empty() {
+                        field("kind")
+                    } else {
+                        title
+                    };
+                    names.insert(id.clone(), name.clone());
+                    emit(AcpStreamEvent::ToolCall {
+                        id,
+                        name,
+                        args: u.update.get("rawInput").cloned().unwrap_or(Value::Null),
+                        via: "acp",
+                    });
+                }
+                "tool_call_update" => {
+                    let status = field("status");
+                    if status != "completed" && status != "failed" {
+                        continue;
+                    }
+                    let name = if title.is_empty() {
+                        names.get(&id).cloned().unwrap_or_default()
+                    } else {
+                        title
+                    };
+                    emit(AcpStreamEvent::ToolResult {
+                        id,
+                        name,
+                        output: tool_content_text(u.update.get("content").unwrap_or(&Value::Null)),
+                        is_error: status == "failed",
+                        via: "acp",
+                    });
+                }
+                _ => {}
+            }
+        }
+        if cancelled {
+            let _ = tokio::time::timeout(self.request_timeout, turn.finish()).await;
+            return Err(AcpError::Cancelled);
+        }
+        Ok(turn.finish().await?.text)
+    }
+
     /// Ask the agent to stop the running turn (`session/cancel`). The turn then
     /// finishes with stop reason `cancelled`.
     pub async fn cancel(&self) -> Result<(), AcpError> {
@@ -602,6 +750,7 @@ async fn read_loop(
     shared: Arc<Shared>,
     stdout: BufReader<tokio::process::ChildStdout>,
     on_permission: Option<PermissionHandler>,
+    on_update: Option<UpdateHandler>,
     permission_timeout: Duration,
 ) {
     let mut lines = stdout.lines();
@@ -633,6 +782,9 @@ async fn read_loop(
                 }
             }
             (Some("session/update"), _) => {
+                if let Some(h) = &on_update {
+                    h(msg.get("params").unwrap_or(&Value::Null));
+                }
                 let update = msg
                     .pointer("/params/update")
                     .cloned()
@@ -650,6 +802,7 @@ async fn read_loop(
                 // Answered off the read loop, so a slow host callback never
                 // stalls the updates and replies behind it.
                 let req = parse_permission(&msg);
+                let options = req.options.clone();
                 let shared = shared.clone();
                 let handler = on_permission.clone();
                 tokio::spawn(async move {
@@ -670,10 +823,15 @@ async fn read_loop(
                         },
                     };
                     let outcome = match outcome {
+                        PermissionOutcome::Selected(o) if o.is_empty() => first_reject(&options),
+                        PermissionOutcome::Reject => first_reject(&options),
+                        o => o,
+                    };
+                    let outcome = match outcome {
                         PermissionOutcome::Selected(o) => {
                             json!({"outcome": "selected", "optionId": o})
                         }
-                        PermissionOutcome::Cancelled => json!({"outcome": "cancelled"}),
+                        _ => json!({"outcome": "cancelled"}),
                     };
                     let _ = write_line(
                         &shared,
@@ -703,6 +861,37 @@ async fn read_loop(
     let waiting: Vec<_> = shared.pending.lock().unwrap().drain().collect();
     for (_, tx) in waiting {
         let _ = tx.send(Err(AcpError::AgentExited { code }));
+    }
+}
+
+fn first_reject(options: &[PermissionOption]) -> PermissionOutcome {
+    options
+        .iter()
+        .find(|o| o.kind.starts_with("reject"))
+        .map(|o| PermissionOutcome::Selected(o.option_id.clone()))
+        .unwrap_or(PermissionOutcome::Cancelled)
+}
+
+/// The text of a tool call's `content` (ACP tool content
+/// `[{type:"content", content:{type:"text", text}}]`, or bare text blocks), joined by newlines.
+fn tool_content_text(v: &Value) -> String {
+    match v {
+        Value::Array(items) => items
+            .iter()
+            .map(tool_content_text)
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n"),
+        Value::Object(m) => {
+            if let Some(t) = m.get("text").and_then(Value::as_str) {
+                t.to_owned()
+            } else if let Some(c) = m.get("content") {
+                tool_content_text(c)
+            } else {
+                String::new()
+            }
+        }
+        _ => String::new(),
     }
 }
 

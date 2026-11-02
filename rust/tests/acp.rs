@@ -6,8 +6,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use toolnexus::acp::{
-    AcpClient, AcpError, AcpOptions, PermissionOutcome, SUPERSEDES_MARKER, permission_handler,
-    render_prompt,
+    AcpClient, AcpError, AcpOptions, AcpStreamEvent, PermissionOutcome, SUPERSEDES_MARKER,
+    permission_handler, render_prompt,
 };
 
 fn fake() -> PathBuf {
@@ -250,4 +250,144 @@ async fn close_kills_the_agent_process_group() {
         c.prompt_text("x").await.unwrap_err(),
         AcpError::AgentExited { .. }
     ));
+}
+
+// ---------------------------------------------------------------------------
+// 0.22.0 host hooks (mirrors golang/acp_hooks_test.go)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn on_permission_no_decision_falls_back_to_first_reject() {
+    // Go: OnPermission error ⇒ first reject-kind option
+    let o = opts("permission")
+        .on_permission(permission_handler(|_| async { PermissionOutcome::Reject }));
+    let c = AcpClient::load(o).await.unwrap();
+    assert_eq!(c.prompt_text("go").await.unwrap().text, "chose:no");
+    c.close().await;
+}
+
+#[tokio::test]
+async fn on_permission_empty_answer_falls_back_to_first_reject() {
+    let o = opts("permission").on_permission(permission_handler(|_| async {
+        PermissionOutcome::Selected(String::new())
+    }));
+    let c = AcpClient::load(o).await.unwrap();
+    assert_eq!(c.prompt_text("go").await.unwrap().text, "chose:no");
+    c.close().await;
+}
+
+#[tokio::test]
+async fn on_permission_empty_without_reject_option_cancels() {
+    let o = opts("permission_noreject")
+        .on_permission(permission_handler(|_| async { PermissionOutcome::Reject }));
+    let c = AcpClient::load(o).await.unwrap();
+    assert_eq!(c.prompt_text("go").await.unwrap().text, "chose:cancelled");
+    c.close().await;
+}
+
+#[tokio::test]
+async fn on_update_sees_every_update_with_raw_params() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let s2 = seen.clone();
+    let o = opts("basic").on_update(move |p| s2.lock().unwrap().push(p.clone()));
+    let c = AcpClient::load(o).await.unwrap();
+    let r = c.prompt_text("hi").await.unwrap();
+    assert_eq!(r.text, "Hello, world", "the hook does not change the reply");
+    let seen = seen.lock().unwrap().clone();
+    let kinds: Vec<&str> = seen
+        .iter()
+        .map(|p| p["update"]["sessionUpdate"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            "agent_thought_chunk",
+            "tool_call",
+            "tool_call_update",
+            "plan",
+            "agent_message_chunk",
+            "agent_message_chunk"
+        ]
+    );
+    assert!(seen.iter().all(|p| p["sessionId"] == "sess-1"));
+    c.close().await;
+}
+
+#[tokio::test]
+async fn generate_cancellable_sends_session_cancel_and_returns_cancelled() {
+    let c = AcpClient::load(opts("cancel")).await.unwrap();
+    let token = tokio_util::sync::CancellationToken::new();
+    let t2 = token.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        t2.cancel();
+    });
+    let start = Instant::now();
+    let err = c
+        .generate_cancellable(&[("user".into(), "work".into())], &token)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, AcpError::Cancelled), "{err:?}");
+    // the fake ends the turn only on session/cancel, so returning proves it was sent
+    assert!(start.elapsed() < Duration::from_secs(5));
+    c.close().await;
+}
+
+#[tokio::test]
+async fn generate_cancellable_without_cancel_is_generate() {
+    let c = AcpClient::load(opts("echo")).await.unwrap();
+    let token = tokio_util::sync::CancellationToken::new();
+    let msgs = [("user".to_owned(), "ping".to_owned())];
+    let a = c.generate_cancellable(&msgs, &token).await.unwrap();
+    let b = c.generate(&msgs).await.unwrap();
+    assert_eq!(a, b);
+    c.close().await;
+}
+
+#[tokio::test]
+async fn generate_stream_emits_text_and_agent_tool_events_via_acp() {
+    let c = AcpClient::load(opts("toolstream")).await.unwrap();
+    let token = tokio_util::sync::CancellationToken::new();
+    let mut events = Vec::new();
+    let text = c
+        .generate_stream(&[("user".into(), "go".into())], &token, |e| events.push(e))
+        .await
+        .unwrap();
+    assert_eq!(text, "done");
+    assert_eq!(
+        events,
+        vec![
+            AcpStreamEvent::ToolCall {
+                id: "t1".into(),
+                name: "Read file".into(),
+                args: serde_json::json!({"path": "a.txt"}),
+                via: "acp"
+            },
+            AcpStreamEvent::ToolResult {
+                id: "t1".into(),
+                name: "Read file".into(),
+                output: "file body".into(),
+                is_error: false,
+                via: "acp"
+            },
+            AcpStreamEvent::ToolCall {
+                id: "t2".into(),
+                name: "execute".into(),
+                args: serde_json::Value::Null,
+                via: "acp"
+            },
+            AcpStreamEvent::ToolResult {
+                id: "t2".into(),
+                name: "execute".into(),
+                output: "boom".into(),
+                is_error: true,
+                via: "acp"
+            },
+            AcpStreamEvent::Text {
+                delta: "done".into()
+            },
+        ],
+        "thoughts and in-progress updates are not emitted"
+    );
+    c.close().await;
 }

@@ -96,15 +96,47 @@ fn main() {
                             serde_json::json!({"jsonrpc":"2.0","id":id,"result":{"stopReason":"end_turn"}}),
                         );
                     }
-                    "permission" => {
+                    "toolstream" => {
+                        chunk(session, "agent_thought_chunk", "hmm");
+                        update(
+                            session,
+                            serde_json::json!({"sessionUpdate":"tool_call","toolCallId":"t1","title":"Read file","kind":"read","status":"pending","rawInput":{"path":"a.txt"}}),
+                        );
+                        update(
+                            session,
+                            serde_json::json!({"sessionUpdate":"tool_call_update","toolCallId":"t1","status":"in_progress"}),
+                        );
+                        update(
+                            session,
+                            serde_json::json!({"sessionUpdate":"tool_call_update","toolCallId":"t1","status":"completed","content":[{"type":"content","content":{"type":"text","text":"file body"}}]}),
+                        );
+                        update(
+                            session,
+                            serde_json::json!({"sessionUpdate":"tool_call","toolCallId":"t2","kind":"execute","status":"pending"}),
+                        );
+                        update(
+                            session,
+                            serde_json::json!({"sessionUpdate":"tool_call_update","toolCallId":"t2","status":"failed","content":[{"type":"content","content":{"type":"text","text":"boom"}}]}),
+                        );
+                        chunk(session, "agent_message_chunk", "done");
+                        send(
+                            serde_json::json!({"jsonrpc":"2.0","id":id,"result":{"stopReason":"end_turn"}}),
+                        );
+                    }
+                    "permission" | "permission_noreject" => {
                         let pid = next_out_id;
                         next_out_id += 1;
+                        let options = if scenario == "permission" {
+                            serde_json::json!([{"optionId":"no","name":"Reject","kind":"reject_once"},
+                                       {"optionId":"yes","name":"Allow","kind":"allow_once"},
+                                       {"optionId":"always","name":"Always allow","kind":"allow_always"}])
+                        } else {
+                            serde_json::json!([{"optionId":"yes","name":"Allow","kind":"allow_once"}])
+                        };
                         send(
                             serde_json::json!({"jsonrpc":"2.0","id":pid,"method":"session/request_permission","params":{
                             "sessionId":session,"toolCall":{"toolCallId":"t9","title":"rm -rf build","kind":"execute"},
-                            "options":[{"optionId":"no","name":"Reject","kind":"reject_once"},
-                                       {"optionId":"yes","name":"Allow","kind":"allow_once"},
-                                       {"optionId":"always","name":"Always allow","kind":"allow_always"}]}}),
+                            "options":options}}),
                         );
                         // wait for the client's answer
                         let mut chose = String::from("none");
