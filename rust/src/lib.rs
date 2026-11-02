@@ -7,10 +7,12 @@
 
 pub mod acp;
 pub mod adapters;
+pub mod agents;
 pub mod builtins;
 pub mod client;
 pub mod http;
 pub mod mcp;
+pub mod relay;
 pub mod skills;
 pub mod store;
 pub mod tool;
