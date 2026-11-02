@@ -45,7 +45,7 @@ failure" — a host branches with `(= :provider (:toolnexus/error (ex-data e)))`
 namespace.
 
 <Aside type="note" title="A real, minor drift: no named cap constant">
-Five of the seven ports (js, python, golang, java, csharp) give the 200-character message cap a
+Five of the eight ports (js, python, golang, java, csharp) give the 200-character message cap a
 named constant — `ERROR_BODY_CAP`, `MAX_ERROR_BODY`, `providerBodyCap`, `ErrorBodyCap`. Clojure (like
 elixir) inlines the literal `200` directly in `cap-message` (`clojure/src/toolnexus/client.cljc:591`)
 rather than naming it. The *value* is identical everywhere — this is a naming/maintainability gap,

@@ -1,6 +1,6 @@
 ---
 name: release
-description: Cut and verify a toolnexus release across all seven registries, with the guardrails that a green CI run does not give you. Use whenever the user says publish, release, ship it, cut a release, bump the version, or asks whether a release actually landed. Also use to re-publish a single failed registry leg.
+description: Cut and verify a toolnexus release across all eight registries, with the guardrails that a green CI run does not give you. Use whenever the user says publish, release, ship it, cut a release, bump the version, or asks whether a release actually landed. Also use to re-publish a single failed registry leg.
 license: MIT
 compatibility: Requires gh (authenticated), node, git. Read-only checks run anywhere; publishing needs owner authorization.
 metadata:
@@ -11,7 +11,7 @@ metadata:
 # Releasing toolnexus
 
 Publishing is **outward-facing and irreversible**: a version number can never be reused on npm,
-PyPI, NuGet, Maven Central, Hex or Clojars. This skill exists because the obvious signals lie in
+PyPI, NuGet, Maven Central, Hex, Clojars or crates.io. This skill exists because the obvious signals lie in
 both directions — a green workflow can ship nothing, and a red workflow can be a complete success.
 
 ## The two rules that override intuition
@@ -45,10 +45,10 @@ Read the **job list**, not the conclusion.
 ```
 
 It replicates `release.yml`'s `preflight` locally **and adds the check preflight does not have** —
-that the versioned install coordinates in the docs match the release. It checks: six manifests in
+that the versioned install coordinates in the docs match the release. It checks: seven manifests in
 lockstep (golang has none — it releases as a tag), docs install coordinates, a dated `## <version>`
 changelog section with a fresh `## Unreleased` above it, clean tree on `main` in sync with origin,
-the tag being free, all seven `ENABLE_*` gates, and **licensing**.
+the tag being free, all eight `ENABLE_*` gates (including `ENABLE_CRATES`), and **licensing**.
 
 The licensing check covers what actually drifts: a LICENSE file in every port, `THIRD-PARTY-NOTICES.md`
 present, the elixir Hex package still shipping LICENSE in its `files:` list, and **every declared
@@ -69,11 +69,11 @@ be undone.
 
 ### 3. Bump and roll, as one commit on its own branch
 
-All six manifests to the same version, and `## Unreleased` → `## X.Y.Z — YYYY-MM-DD` with a fresh
+All seven manifests (js, python, csharp, java, elixir, `clojure/build.clj`, `rust/Cargo.toml`) to the same version, and `## Unreleased` → `## X.Y.Z — YYYY-MM-DD` with a fresh
 empty `## Unreleased` above it. **Update the docs install coordinates in the same commit** —
 `README.md`, `java/README.md`, `clojure/README.md`, `elixir/README.md`,
-`clojure/examples/*/deps.edn`, `site/src/content/docs/install.mdx`, `quickstart.mdx`,
-`api/clojure.mdx`.
+`clojure/examples/*/deps.edn`, `rust/README.md`, `site/src/content/docs/install.mdx`,
+`quickstart.mdx`, `api/clojure.mdx`.
 
 Leave historical statements alone: "on Clojars since v0.13.0", "Relay ships in golang/ as of
 0.12.0", and `docs/performance-benchmarks.md`'s "Versions measured". Rewriting those falsifies the
@@ -97,10 +97,10 @@ cd golang && OPENROUTER_API_KEY=… go test -tags live -run TestLive -v ./...
 The tag keeps these out of normal CI: `go test ./...` never sees them, and the tests skip cleanly
 when the key is absent.
 
-### 4. Open the PR and wait for all nine CI jobs
+### 4. Open the PR and wait for every CI job
 
-"Docs examples (seven ports)" legitimately takes **13–18 minutes**. It is not hung. Do not merge on
-eight of nine.
+"Docs examples (eight ports)" legitimately takes **13–18 minutes**. It is not hung. Do not merge on
+all-but-one.
 
 ### 5. Merge, then cut the Release
 
@@ -122,8 +122,13 @@ curl -s https://api.nuget.org/v3-flatcontainer/toolnexus/index.json | python3 -c
 curl -s https://repo1.maven.org/maven2/io/github/muthuishere/toolnexus/ | grep -oE '0\.[0-9]+\.[0-9]+' | sort -uV | tail -1
 curl -s https://clojars.org/api/artifacts/net.clojars.muthuishere/toolnexus | python3 -c 'import sys,json;print(json.load(sys.stdin)["latest_version"])'
 curl -s https://hex.pm/api/packages/toolnexus | python3 -c 'import sys,json;print(json.load(sys.stdin)["releases"][0]["version"])'
+curl -s https://crates.io/api/v1/crates/toolnexus | python3 -c 'import sys,json;print(json.load(sys.stdin)["crate"]["max_version"])'
 git ls-remote --tags origin | grep golang/v<version>
 ```
+
+crates.io needs a `User-Agent`-friendly client; if the API refuses a bare curl, add
+`-A toolnexus-release-check`. Verify a consumer build too: `cargo new t && cd t && cargo add
+toolnexus@<version> tokio -F tokio/full && cargo build`.
 
 **Indexing lag is normal and is not failure**: NuGet ~5 min, Maven Central ~15–20 min. Poll before
 concluding anything. Clojars is `net.clojars.muthuishere`, **not** `io.github.muthuishere`.

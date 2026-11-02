@@ -380,7 +380,7 @@ asyncio.run(main())
 | `status` | `int` | The HTTP status the provider answered with. |
 | `body` | `str` | The FULL provider body, account identifiers redacted to `«redacted»`, never capped. Empty for `401`/`403`. |
 | `text` | `str` | Deprecated alias of `body` — identical value, kept for back-compat. |
-| `retry_after` | `str \| None` | The raw `Retry-After` header, verbatim. `None` only when the response sent no such header — an un-honourable value like an HTTP-date still arrives intact. Identical in all seven ports. |
+| `retry_after` | `str \| None` | The raw `Retry-After` header, verbatim. `None` only when the response sent no such header — an un-honourable value like an HTTP-date still arrives intact. Identical in all eight ports. |
 
 `str(error)` is `"LLM {status}: {shown}"` where `shown` is `body` capped at 200 characters
 (`MAX_ERROR_BODY`) with a trailing `…` — the presentational form. Reach into `.body` (or the

@@ -1,6 +1,6 @@
 ---
 title: Suspension & the human loop
-description: Sometimes an agent hits a wall only a human can clear — approve a risky action, log in, answer a question. Suspension lets any tool pause the loop and resume once the answer arrives, whether that's in seconds or in days. The same primitive in all seven ports.
+description: Sometimes an agent hits a wall only a human can clear — approve a risky action, log in, answer a question. Suspension lets any tool pause the loop and resume once the answer arrives, whether that's in seconds or in days. The same primitive in all eight ports.
 ---
 
 import { Aside, Tabs, TabItem, LinkButton } from '@astrojs/starlight/components';
@@ -10,7 +10,7 @@ Your agent is halfway through a task and hits a wall only a person can clear: **
 loop do — crash? Block a thread for six hours? Guess?
 
 toolnexus gives you a fourth answer: **suspend**. Any tool can pause the loop, surface a `Request`,
-and resume once it's answered — the same way in all seven ports.
+and resume once it's answered — the same way in all eight ports.
 
 ## The one decision: can the human answer *now*, or *later*?
 
@@ -163,6 +163,26 @@ result = Client.run(client, "Refund order #4021 if policy allows.", tk)
 ;; (:status result) => "done" — the refund tool ran only after you typed y
 ```
 </TabItem>
+<TabItem label="Rust">
+```rust
+let c = create_client(ClientOptions {
+    base_url: base_url.clone(),
+    style: Style::OpenAI,
+    model: model.clone(),
+    wait_for: Some(Arc::new(|req: Request| {
+        Box::pin(async move {
+            print!("{} [y/N] ", req.prompt); // read the operator's decision off the terminal
+            let mut line = String::new();
+            let _ = std::io::stdin().read_line(&mut line);
+            Ok(Answer { id: req.id, ok: line.trim() == "y", ..Default::default() })
+        })
+    })),
+    ..Default::default()
+});
+let res = c.run("Refund order #4021 if policy allows.", &tk).await?;
+// res.status == "done" — the refund tool ran only after you typed y
+```
+</TabItem>
 </Tabs>
 
 The tool that gated the action simply returned `pending({ kind: "question", prompt: "Approve refund?" })`.
@@ -202,7 +222,7 @@ const client = createClient({
 
 <Aside type="note">
 `authRequired(url, prompt)` is a one-liner over the same primitive — it returns
-`pending({ kind: "authorization", url, prompt })`. The **same shape works in all seven ports**;
+`pending({ kind: "authorization", url, prompt })`. The **same shape works in all eight ports**;
 only the surface syntax differs. Nothing here is special-cased for auth.
 </Aside>
 
@@ -313,9 +333,20 @@ end                                              # the caller returns; nothing i
 ;; the handler returns; nothing is blocked
 ```
 </TabItem>
+<TabItem label="Rust">
+```rust
+let res = c.ask(prompt, &tk, conversation_id).await?; // no wait_for; ask records the id
+if res.status == "pending" {
+    let req = res.pending.expect("pending carries the Request"); // Request { id, kind, prompt, url, data, .. }
+    db_save(conversation_id, &req);  // persist — plain serde-serializable data
+    slack_post(channel, &req.prompt); // ask the human, out of band
+    return Ok(());                    // request returns; nothing is blocked
+}
+```
+</TabItem>
 </Tabs>
 
-**Phase 2, posture A — a `waitFor` that *waits* (works in all seven ports):**
+**Phase 2, posture A — a `waitFor` that *waits* (works in all eight ports):**
 
 The run never ended. Its `waitFor` parks on a promise / future / channel / process mailbox, and your
 chat webhook resolves it whenever the reply lands. Because this is the inline path, the **whole
@@ -486,6 +517,43 @@ done = Toolnexus.Client.run(client, prompt, tk)
 ;; (:status done) => "done" — the tool re-ran with ctx :answer
 ```
 </TabItem>
+<TabItem label="Rust">
+```rust
+use std::collections::HashMap;
+use std::sync::{LazyLock, Mutex};
+use tokio::sync::oneshot;
+
+// request id -> the parked run's reply channel
+static PARKED: LazyLock<Mutex<HashMap<String, oneshot::Sender<Answer>>>> = LazyLock::new(Default::default);
+
+let c = create_client(ClientOptions {
+    base_url: base_url.clone(),
+    style: Style::OpenAI,
+    model: model.clone(),
+    wait_for: Some(Arc::new(|req: Request| {
+        Box::pin(async move {
+            let (tx, rx) = oneshot::channel();
+            PARKED.lock().unwrap().insert(req.id.clone(), tx);
+            slack_post(CHANNEL, &req.prompt); // ask, out of band
+            rx.await.map_err(|e| e.to_string()) // park the run on the reply
+        })
+    })),
+    ..Default::default()
+});
+
+// your Slack webhook, minutes or hours later:
+fn on_slack_reply(request_id: &str, reply: &str) {
+    if let Some(tx) = PARKED.lock().unwrap().remove(request_id) {
+        let mut data = Map::new();
+        data.insert("answers".into(), json!([reply]));
+        let _ = tx.send(Answer { id: request_id.into(), ok: true, data: Some(data), ..Default::default() });
+    }
+}
+
+let done = c.run(prompt, &tk).await?;
+// done.status == "done" — the tool re-ran with ctx.answer.data
+```
+</TabItem>
 </Tabs>
 
 <Aside type="note" title="What posture A costs you">
@@ -570,7 +638,7 @@ to servers only when a `waitFor` is present.
   handler can push the link the instant the agent asks.
 
 <Aside type="note">
-This layer shipped byte-identical across JavaScript, Python, Go, Java, C#, Elixir and Clojure. The A2A fulfilment
+This layer shipped byte-identical across JavaScript, Python, Go, Java, C#, Elixir, Clojure and Rust. The A2A fulfilment
 path maps a suspended run to the A2A `input-required` state, so a *served* toolnexus agent can ask
 its caller a question too.
 </Aside>

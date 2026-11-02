@@ -3,8 +3,16 @@
 The Rust port of [toolnexus](../README.md), async on tokio: MCP servers, agent skills, native
 and HTTP tools, the built-in coding tools and remote ACP agents behind one `Tool` interface,
 schema adapters for OpenAI / Anthropic / Gemini, and a unified client with the tool-calling
-loop. It is held to conformance tier **`core`** (`conformance/options_manifest.json`): every
-SPEC §0 obligation, with the gaps listed at the end of this page.
+loop. The same library, byte-identical, also in **JavaScript, Python, Go, Java, C#, Elixir and
+Clojure**. It is held to conformance tier **`full`** (`conformance/options_manifest.json`), like
+the other seven ports; the remaining gaps are listed at the end of this page.
+
+Docs: [docs site](https://muthuishere.github.io/toolnexus/) ·
+[Rust API reference](https://muthuishere.github.io/toolnexus/api/rust/) (every runnable example
+there is compiled and run in CI).
+
+The crate is published to crates.io from the next release. Until then, depend on it by git:
+`toolnexus = { git = "https://github.com/muthuishere/toolnexus" }`.
 
 ```toml
 [dependencies]
@@ -269,8 +277,10 @@ exactly one provider call, an OpenAI-shaped result out, no tool executed and no 
 HTTP / MCP / SSE servers, no network and no real model. CI runs `cargo fmt --check`,
 `cargo clippy --all-targets -- -D warnings`, `cargo test` and `cargo test --no-default-features`.
 
-## Not done yet (tier `full`)
+## Not done yet
 
 A Gemini client style
 (Gemini is a schema adapter, as in Go). The Windows code paths compile but have not been run.
 Tracked in `openspec/changes/add-rust-port`.
+
+Contract across all eight ports: [`SPEC.md`](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).

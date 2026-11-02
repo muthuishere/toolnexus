@@ -12,7 +12,7 @@ unified as one tool set, driving any LLM.
 > loop, hooks, streaming, retries, memory — and nothing it doesn't.
 
 The JS/TypeScript port of [toolnexus](https://github.com/muthuishere/toolnexus) — the same
-library, byte-identical, also in **Python, Go, Java, C#, Elixir and Clojure**. Built on
+library, byte-identical, also in **Python, Go, Java, C#, Elixir, Clojure and Rust**. Built on
 `@modelcontextprotocol/sdk` (the MCP SDK opencode uses).
 
 ## Install
@@ -148,4 +148,4 @@ Everything else — the full surface, with runnable examples — lives on the do
 | **API reference** | [JavaScript](https://muthuishere.github.io/toolnexus/api/javascript/) |
 | **Cookbook** | [Zero to agent](https://muthuishere.github.io/toolnexus/cookbook/zero-to-agent/) · [MCP servers](https://muthuishere.github.io/toolnexus/cookbook/mcp-servers/) · [Agent skills](https://muthuishere.github.io/toolnexus/cookbook/agent-skills/) · [Judge](https://muthuishere.github.io/toolnexus/cookbook/judge/) |
 
-Contract across all seven ports: [`SPEC.md`](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
+Contract across all eight ports: [`SPEC.md`](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).

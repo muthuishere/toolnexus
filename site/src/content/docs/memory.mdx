@@ -1,6 +1,6 @@
 ---
 title: Memory & conversations
-description: The client loop remembers a thread for you. ask(prompt, id) loads a conversation's transcript, runs, and saves it back — with a pluggable store you can point at a file, database, or Redis. The same shape across all seven languages.
+description: The client loop remembers a thread for you. ask(prompt, id) loads a conversation's transcript, runs, and saves it back — with a pluggable store you can point at a file, database, or Redis. The same shape across all eight languages.
 ---
 
 import { Aside, Tabs, TabItem, LinkButton } from '@astrojs/starlight/components';
@@ -89,6 +89,20 @@ Toolnexus.Client.run(agent, "What is 21 + 21?",            tk)              # ru
 (client/run agent "Book me a flight to Berlin." {:toolkit tk :conversation-id "user-42"})
 (client/run agent "Actually, make it Munich."   {:toolkit tk :conversation-id "user-42"}) ; remembered
 (client/run agent "What is 21 + 21?"            {:toolkit tk})   ; no :conversation-id → one-shot
+```
+</TabItem>
+<TabItem label="Rust">
+```rust
+let agent = create_client(ClientOptions {
+    base_url: base_url.clone(),
+    style: Style::OpenAI,
+    model: model.clone(),
+    ..Default::default()
+});
+
+agent.ask("Book me a flight to Berlin.", &tk, "user-42").await?;
+agent.ask("Actually, make it Munich.", &tk, "user-42").await?; // same thread — remembered
+agent.ask("What is 21 + 21?", &tk, "").await?;                 // empty id → one-shot
 ```
 </TabItem>
 </Tabs>
@@ -202,6 +216,25 @@ agent = Toolnexus.Client.create(base_url: base, style: "openai", model: model,
 
 (def agent (client/create-client {:base-url base-url :style "openai" :model model
                                   :store    (redis-store)}))
+```
+</TabItem>
+<TabItem label="Rust">
+```rust
+use toolnexus::store::ConversationStore;
+
+struct RedisStore { /* client */ }
+impl ConversationStore for RedisStore {
+    fn get(&self, id: &str) -> Result<Option<Vec<Value>>, String> { /* load + serde_json::from_str */ todo!() }
+    fn save(&self, id: &str, messages: &[Value]) -> Result<(), String> { /* serde_json::to_string + store */ todo!() }
+}
+
+let agent = create_client(ClientOptions {
+    base_url: base_url.clone(),
+    style: Style::OpenAI,
+    model: model.clone(),
+    store: Some(Arc::new(RedisStore {})),
+    ..Default::default()
+});
 ```
 </TabItem>
 </Tabs>

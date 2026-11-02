@@ -74,6 +74,15 @@ await using var tk = await Toolkit.CreateAsync(new Toolkit.Options { Builtins = 
 (def tk (tn/build {:builtins false}))
 ```
 </TabItem>
+<TabItem label="Rust">
+```rust
+let tk = create_toolkit(ToolkitOptions {
+    builtins: Some(BuiltinsConfig::off()),
+    ..Default::default()
+})
+.await?;
+```
+</TabItem>
 </Tabs>
 
 **Or drop individual tools on the all-on baseline** — here, disable `bash` while keeping the rest:
@@ -121,6 +130,18 @@ await using var tk = await Toolkit.CreateAsync(new Toolkit.Options
 <TabItem label="Clojure">
 ```clojure
 (def tk (tn/build {:builtins {:tools {:bash false}}}))
+```
+</TabItem>
+<TabItem label="Rust">
+```rust
+let tk = create_toolkit(ToolkitOptions {
+    builtins: Some(BuiltinsConfig {
+        tools: [("bash".to_string(), false)].into(),
+        ..Default::default()
+    }),
+    ..Default::default()
+})
+.await?;
 ```
 </TabItem>
 </Tabs>

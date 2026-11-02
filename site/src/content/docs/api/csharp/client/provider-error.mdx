@@ -44,7 +44,7 @@ alerting rule keyed on status, a support tool that needs the provider's real err
 
 ## Why this and not the alternative
 
-<Aside type="note" title="RetryAfter is the RAW header — identical in all seven ports">
+<Aside type="note" title="RetryAfter is the RAW header — identical in all eight ports">
 `RetryAfter` is the `Retry-After` header value **exactly as the provider sent it**, or `null` when
 the response sent no such header. It is deliberately not pre-parsed into a number: `Retry-After`
 may legitimately be an HTTP-date, or fractional, signed, out-of-range or unparseable, and a numeric
@@ -312,15 +312,15 @@ sealed class Stub : IDisposable
 |---|---|---|
 | `Status` | `int` | The HTTP status the provider returned. |
 | `Body` | `string` | The response body, redacted but **uncapped** (ADR 0027 A5). Empty on 401/403, where the body may reflect the credential that was sent. |
-| `RetryAfter` | `string?` | The raw `Retry-After` header, verbatim, or `null` when the response sent none. Not pre-parsed — see the note above. Identical in all seven ports. |
+| `RetryAfter` | `string?` | The raw `Retry-After` header, verbatim, or `null` when the response sent none. Not pre-parsed — see the note above. Identical in all eight ports. |
 | `Message` (inherited) | `string` | The redacted **and capped** rendering — the one that reaches logs by default. |
 
 ## Redaction policy (ADR 0027)
 
 | Member | What it is |
 |---|---|
-| `RedactedBodyKeys` | `user_id`, `account_id`, `org_id`, `organization` — replaced with `RedactionToken`, never dropped, so the body's shape survives. Identical across all seven ports. |
-| `RedactionToken` | `"«redacted»"` — byte-identical across all seven ports. |
+| `RedactedBodyKeys` | `user_id`, `account_id`, `org_id`, `organization` — replaced with `RedactionToken`, never dropped, so the body's shape survives. Identical across all eight ports. |
+| `RedactionToken` | `"«redacted»"` — byte-identical across all eight ports. |
 | `ErrorBodyCap` | `200` — applied to `Message` only, never to `Body`. A cap is not redaction: the leaking body that motivated ADR 0027 was 96 bytes and would have sailed through a 200-char cap untouched had redaction not run first. |
 
 ## See also

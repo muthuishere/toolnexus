@@ -1,0 +1,67 @@
+---
+title: API Reference — Rust
+description: The toolnexus Rust crate — toolkit, client, skills, MCP, adapters, native/HTTP/built-in tools, agents, A2A/MCP serving, judge and suspension — async on tokio, with each symbol's equivalents in the other ports.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Crate **`toolnexus`** (Rust edition 2024, async on tokio). See the
+[combined API Reference](/toolnexus/api/) for every symbol shown in eight-language synced tabs.
+Every runnable example in this section is compiled and executed in CI against the `rust/` port.
+
+<Aside type="note">
+The Rust port is held to conformance tier **full** (`conformance/options_manifest.json`), like the
+other seven. It is published to crates.io from the next release; until then depend on it by git
+(`toolnexus = { git = "https://github.com/muthuishere/toolnexus" }`). Not done: a Gemini client
+style (Gemini is a schema adapter, as in Go), and the Windows code paths compile but have not
+been run. Cargo features: `mcp-http` (MCP over streamable HTTP) and `serve` (A2A / MCP server),
+both on by default.
+</Aside>
+
+## Toolkit
+
+- `create_toolkit(ToolkitOptions) -> Result<Toolkit, ToolkitError>` (async).
+- `ToolkitOptions` fields: `mcp_config` (`McpConfigInput::Path | Json | Parsed`), `skills_dir`,
+  `skills`, `skill_provider`, `skills_filter`, `skill_sample_limit`, `extra_tools`, `builtins`,
+  `agents`, `disable_tools`, `disable_skills`, `wait_for`.
+- `tk.tools()` · `get` · `execute` · `skills_prompt` · `mcp_status` · `register` · `add_agent` ·
+  `serve` · `close`.
+
+## Skills · MCP · Adapters
+
+- `skills::load_skills(&dirs)` · `load_skills_with(LoadSkillsOptions)` · `list_skills(&opts)` ·
+  `SkillDef { name, description, content, resources, base }`.
+- `mcp::parse_mcp_config_file(path)` · `load_mcp(&cfg)` · `load_mcp_with(&cfg, McpLoadOptions)` ·
+  `resource_tools()`.
+- `tk.to_openai()` · `tk.to_anthropic()` · `tk.to_gemini()`.
+
+## Client
+
+- `client::create_client(ClientOptions) -> Client` → `run`, `ask` (memory by id), `stream` /
+  `stream_with_id` (an `mpsc::UnboundedReceiver<StreamEvent>`), `run_with_answer` /
+  `ask_with_answer` (durable resume), `list_models`, `translate`.
+- `create_in_process_client(InProcessOptions)` for a model you run yourself; `acp_generate` /
+  `acp_generate_stream` drive a local ACP coding agent as the model.
+
+## Tools you build — native, HTTP, built-ins
+
+- `define_tool(name, description, schema, f)` · `define_typed_tool::<T>(…)` (serde args).
+- `http::http_tool(HttpToolOptions { name, description, method, url, headers, query, body,
+  input_schema, timeout_ms, result_mode })`.
+- `BuiltinsConfig` → the ten built-ins plus opt-in `background`, `web_search`, `notebook_edit`;
+  `BuiltinsConfig::off()` disables them.
+
+## Agents
+
+- `agents::new(name, Spec { does, tools, soul, soul_file, team, budget, model, wait_for, hooks,
+  guardrails, completion, .. })` → `run(Options, prompt) -> (TaskResult, Runtime)`, `as_tool`,
+  `loop_(ClientOptions, Toolkit)`.
+- `from_dir` · `compose_soul` · `memory_tool` · `start_agent` · `compactor(CompactorOptions)`.
+
+## Serve · Judge · Suspension
+
+- `tk.serve(addr, ServeOptions { client, a2a: Some(A2aConfig), mcp: Some(McpServeConfig), .. })`.
+- `create_classifier(ClassifierOptions)` · `judge::{ask, gate, Policy, Tape}` ·
+  `judge::batteries::{ToolGuard, ModelRouter, …}`.
+- `pending(Request)` · `auth_required(url, prompt)` · `pending_of(&result)` · `relay::relay_tool` ·
+  `Request { id, kind, prompt, url, data, expires_at }` · `Answer { id, ok, data, reason }`.

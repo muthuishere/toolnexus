@@ -1,6 +1,6 @@
 ---
 title: Build an openclaw-style personal assistant
-description: A complete build — a long-lived assistant whose identity is a git-able folder, whose memory it edits itself, which wakes on its own clock and reaches you on your channels. fromDir + memory + heartbeat + compaction, in all seven languages.
+description: A complete build — a long-lived assistant whose identity is a git-able folder, whose memory it edits itself, which wakes on its own clock and reaches you on your channels. fromDir + memory + heartbeat + compaction, in all eight languages.
 ---
 
 import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
@@ -217,6 +217,28 @@ IO.puts("#{r.status} #{r.text}")
 (println (:status r) (:text r))
 ```
 </TabItem>
+<TabItem label="Rust">
+```rust
+use toolnexus::agents::{self, FromDirOptions, LlmOptions, Options};
+
+let ava = agents::from_dir("./personas/ava", FromDirOptions::default());
+let (r, _rt) = ava
+    .run(
+        Options {
+            llm: Some(LlmOptions {
+                base_url: "https://openrouter.ai/api/v1".into(),
+                style: Style::OpenAI,
+                model: "openai/gpt-4o-mini".into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        "What's on my plate today?",
+    )
+    .await;
+println!("{} {}", r.status, r.text);
+```
+</TabItem>
 </Tabs>
 
 Options worth knowing on `fromDir`: `name` (defaults to the directory basename), `does` (the
@@ -371,6 +393,26 @@ Home.stop(started)
 ((:stop started))
 ```
 </TabItem>
+<TabItem label="Rust">
+```rust
+use toolnexus::agents::{self, LlmOptions, Options, StartOptions};
+
+let llm = LlmOptions {
+    base_url: "https://openrouter.ai/api/v1".into(),
+    style: Style::OpenAI,
+    model: "openai/gpt-4o-mini".into(),
+    ..Default::default()
+};
+
+let started = agents::start_agent(&ava, StartOptions {
+    options: Options { llm: Some(llm), ..Default::default() },
+    every_ms: 5 * 60_000,                                         // check in every 5 minutes
+    on_beat: Some(Arc::new(|text: &str| send_to_telegram(text))), // ONLY non-silent beats arrive here
+})?;
+// ... on shutdown:
+started.stop().await;
+```
+</TabItem>
 </Tabs>
 
 <Aside type="caution" title="Pick the interval against your HEARTBEAT.md, not against your nerves">
@@ -501,6 +543,24 @@ end
     (let [r (rt/wait runtime handle)]
       (when-not (:isError r) (send-to-channel channel from (:text r))))
     nil))                       ; busy: the inbox keeps it, the next wake drains it
+```
+</TabItem>
+<TabItem label="Rust">
+```rust
+use toolnexus::agents::InboxItem;
+
+let (rt, handle) = (started.runtime(), started.handle());
+
+async fn on_inbound_message(rt: &Runtime, handle: &Handle, from: &str, channel: &str, text: &str) {
+    rt.post(handle, InboxItem::new(from, channel, text));
+    if !rt.wake(handle, "You have a new message — read it and respond.").ok {
+        return; // busy: the inbox keeps it for the next wake
+    }
+    let r = rt.wait(handle, None).await;
+    if !r.is_error {
+        send_to_channel(channel, from, &r.text);
+    }
+}
 ```
 </TabItem>
 </Tabs>
@@ -764,6 +824,50 @@ end
 (defn on-inbound-message [from text]
   (let [r (client/run ava text {:toolkit tk :conversation-id (str "ava:" from)})]
     (send-to-telegram from (:text r))))
+```
+</TabItem>
+<TabItem label="Rust">
+```rust
+use toolnexus::agents::{CompactorOptions, compactor, compose_soul, memory_tool};
+
+let dir = "./personas/ava";
+
+// 1. Identity — frozen snapshot of the bootstrap files.
+let (soul, _files) = compose_soul(dir);
+
+// 2. Tools — built-ins + MCP + her memory.
+let tk = create_toolkit(ToolkitOptions {
+    mcp_config: Some(McpConfigInput::Path("./mcp.json".into())),
+    ..Default::default()
+})
+.await?;
+tk.register([memory_tool(dir)]);
+
+// 3. The loop — compaction with a memory flush on the before_llm seam.
+let ava = create_client(ClientOptions {
+    base_url: "https://openrouter.ai/api/v1".into(),
+    style: Style::OpenAI,
+    model: "openai/gpt-4o-mini".into(),
+    system_prompt: soul,
+    hooks: Hooks {
+        before_llm: Some(compactor(CompactorOptions {
+            max_tokens: 120_000,
+            keep_tail: 40_000,
+            flush_to_memory: true, // persist durable facts BEFORE summarizing
+            summarize: Some(Arc::new(|older| Box::pin(summarise_with_cheap_model(older)))),
+            ..Default::default()
+        })),
+        ..Default::default()
+    },
+    ..Default::default()
+});
+
+// 4. Inbound — one stable id = one continuous assistant.
+async fn on_inbound_message(ava: &Client, tk: &Toolkit, from: &str, text: &str) {
+    if let Ok(r) = ava.ask(text, tk, &format!("ava:{from}")).await {
+        send_to_telegram_to(from, &r.text);
+    }
+}
 ```
 </TabItem>
 </Tabs>

@@ -261,6 +261,29 @@ verifier =
    :budget {:max-turns 10 :max-tokens 40000}})
 ```
 </TabItem>
+<TabItem label="Rust">
+```rust
+use toolnexus::agents::{self, Budget, Spec};
+
+let inspect = create_toolkit(ToolkitOptions {
+    builtins: Some(BuiltinsConfig {
+        tools: ["write", "edit", "apply_patch"].map(|t| (t.to_string(), false)).into(),
+        ..Default::default()
+    }),
+    ..Default::default()
+})
+.await?;
+
+let verifier = agents::new("verifier", Spec {
+    does: "Adversarially verifies an artifact against a task. Replies PASS or FAIL + critique. Read/test-only.".into(),
+    soul_file: "./verifier/SOUL.md".into(),
+    tools: inspect.tools(),             // read, grep, glob, bash(tests) — no write/edit/patch
+    model: "openai/gpt-4o-mini".into(), // cheap: verifying is not a frontier-model task
+    budget: Some(Budget { max_turns: 10, max_tokens: 40_000, ..Default::default() }),
+    ..Default::default()
+});
+```
+</TabItem>
 </Tabs>
 
 <Aside type="caution" title="`bash` is a real shell — scope it honestly">
@@ -514,6 +537,45 @@ end
         (if (re-find pass-line verdict)
           {:text artifact :verified true}
           (recur (inc attempt) verdict artifact))))))   ; carry the critique forward
+```
+</TabItem>
+<TabItem label="Rust">
+```rust
+const MAX_RETRIES: usize = 2; // total attempts = MAX_RETRIES + 1
+
+fn passes(verdict: &str) -> bool {
+    verdict.trim_start().to_uppercase().starts_with("PASS")
+}
+
+async fn verified_run(worker: &Agent, verifier: &Agent, llm: &LlmOptions, task: &str) -> (String, bool, String) {
+    let opts = || Options { llm: Some(llm.clone()), ..Default::default() };
+    let (mut text, mut critique) = (String::new(), String::new());
+    for _attempt in 0..=MAX_RETRIES {
+        let prompt = if critique.is_empty() {
+            task.to_string()
+        } else {
+            format!("{task}\n\nA reviewer REJECTED your last attempt. Fix EXACTLY this and return the corrected artifact:\n{critique}")
+        };
+        let (work, _) = worker.run(opts(), &prompt).await;
+        text = work.text;
+
+        // The verifier sees the ARTIFACT — never the worker's reasoning.
+        let (verdict, _) = verifier
+            .run(opts(), &format!("Verify this artifact against the task.\n\nTASK:\n{task}\n\nARTIFACT:\n{text}"))
+            .await;
+        if passes(&verdict.text) {
+            return (text, true, String::new());
+        }
+        critique = verdict.text; // carry the critique forward
+    }
+
+    // Retries exhausted — best effort, loudly flagged.
+    (
+        format!("⚠️ UNVERIFIED — failed {} checks.\n\n{text}\n\nUnresolved critique:\n{critique}", MAX_RETRIES + 1),
+        false,
+        critique,
+    )
+}
 ```
 </TabItem>
 </Tabs>
@@ -835,6 +897,50 @@ end
   (slack-post "#eng" (:text result)))       ; loudly unverified — a human decides
 ```
 </TabItem>
+<TabItem label="Rust">
+```rust
+use toolnexus::agents::{self, Budget, LlmOptions, Spec};
+
+let llm = LlmOptions { base_url: "https://openrouter.ai/api/v1".into(), style: Style::OpenAI, ..Default::default() };
+
+let full = create_toolkit(ToolkitOptions::default()).await?;
+let inspect = create_toolkit(ToolkitOptions {
+    builtins: Some(BuiltinsConfig {
+        tools: ["write", "edit", "apply_patch"].map(|t| (t.to_string(), false)).into(),
+        ..Default::default()
+    }),
+    ..Default::default()
+})
+.await?;
+
+let worker = agents::new("worker", Spec {
+    does: "Implements a change in this repository and returns the diff.".into(),
+    soul_file: "./AGENTS.md".into(),
+    tools: full.tools(),
+    model: "anthropic/claude-sonnet-4".into(),
+    budget: Some(Budget { max_turns: 40, max_tokens: 300_000, ..Default::default() }),
+    ..Default::default()
+});
+
+let verifier = agents::new("verifier", Spec {
+    does: "Adversarially verifies a diff. Compiles + runs the tests. PASS or FAIL + critique.".into(),
+    soul_file: "./verifier/SOUL.md".into(),
+    tools: inspect.tools(),
+    model: "openai/gpt-4o-mini".into(),
+    budget: Some(Budget { max_turns: 10, max_tokens: 40_000, ..Default::default() }),
+    ..Default::default()
+});
+
+let (text, verified, _) =
+    verified_run(&worker, &verifier, &llm, "Fix the child-process leak on MCP stdio reconnect. Add a test.").await;
+
+if verified {
+    git_commit(&text); // passed the gate
+} else {
+    slack_post("#eng", &text); // loudly unverified — a human decides
+}
+```
+</TabItem>
 </Tabs>
 
 ## What you bring — and what this is not
@@ -842,7 +948,7 @@ end
 **The library gives you the hard parts:** isolated sub-agents (the verifier structurally cannot see
 the worker's reasoning), tool scoping (it structurally cannot mutate the artifact), hierarchical
 budgets (it cannot outspend its ceiling), and usage roll-up (you can measure the gate's true cost) —
-identical in seven languages. The gate itself is yours, and so are its limits:
+identical in eight languages. The gate itself is yours, and so are its limits:
 
 | Not shipped | What you do instead |
 |---|---|

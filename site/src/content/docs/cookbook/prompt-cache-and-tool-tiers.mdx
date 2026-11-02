@@ -1,6 +1,6 @@
 ---
 title: Prompt cache & tool tiers
-description: Keep the prompt prefix stable so the provider caches it, send only the tools that matter up front, and let the model load the rest with tool_search — in all seven languages.
+description: Keep the prompt prefix stable so the provider caches it, send only the tools that matter up front, and let the model load the rest with tool_search — in all eight languages.
 ---
 
 import { Tabs, TabItem, Aside } from '@astrojs/starlight/components';
@@ -132,6 +132,28 @@ IO.inspect({Toolnexus.Client.tool_tier_plan(client, tk), res.usage[:cache_read_t
 (client/reset-tool-tiers! llm tk)
 (let [res (client/run llm "fix the test" {:toolkit tk})]
   (prn (client/tool-tier-plan llm tk) (get-in res [:usage :cache-read-tokens])))
+```
+</TabItem>
+<TabItem label="Rust">
+```rust
+use toolnexus::client::{PromptCacheOptions, ToolTierOptions};
+
+let agent = create_client(ClientOptions {
+    base_url: "https://api.anthropic.com".into(),
+    style: Style::Anthropic,
+    model: "claude-sonnet-4-5".into(),
+    prompt_cache: Some(PromptCacheOptions { long_ttl: true, ..Default::default() }),
+    tool_tiers: Some(ToolTierOptions {
+        core: vec!["read".into(), "grep".into(), "edit".into()],
+        deferred: vec!["deploy".into()],
+        context_window: 200_000,
+        ..Default::default()
+    }),
+    ..Default::default()
+});
+agent.reset_tool_tiers(&tk);
+let res = agent.run("fix the test", &tk).await;
+println!("{:?} {:?}", agent.tool_tier_plan(&tk), res.map(|r| r.usage.cache_read_tokens));
 ```
 </TabItem>
 </Tabs>

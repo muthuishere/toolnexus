@@ -1,6 +1,6 @@
 ---
 title: Sub-agents & teams
-description: Give your agent a team — delegate subtasks to scoped, isolated sub-agents with one task call, and get back one clean result with tokens rolled up. In all seven languages.
+description: Give your agent a team — delegate subtasks to scoped, isolated sub-agents with one task call, and get back one clean result with tokens rolled up. In all eight languages.
 ---
 
 import { Tabs, TabItem, Aside } from '@astrojs/starlight/components';
@@ -196,6 +196,40 @@ IO.puts("#{r.status} #{r.text} #{r.total_tokens}")
 
 (def r (rt/run-agent runtime "coder" "fix the failing test"))
 (println (:status r) (:text r) (:total-tokens r))
+```
+</TabItem>
+<TabItem label="Rust">
+```rust
+use toolnexus::agents::{self, Budget, LlmOptions, Options, Spec};
+
+let explore = agents::new("explore", Spec {
+    does: "read-only research".into(),
+    tools: vec![lookup],
+    ..Default::default()
+});
+let coder = agents::new("coder", Spec {
+    does: "implements changes".into(),
+    soul_file: "./AGENTS.md".into(),
+    team: vec![explore],
+    budget: Some(Budget { max_tokens: 10_000, ..Default::default() }),
+    ..Default::default()
+});
+
+let (r, _rt) = coder
+    .run(
+        Options {
+            llm: Some(LlmOptions {
+                base_url: "https://openrouter.ai/api/v1".into(),
+                style: Style::OpenAI,
+                model: "openai/gpt-4o-mini".into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        "fix the failing test",
+    )
+    .await;
+println!("{} {} {}", r.status, r.text, r.total_tokens);
 ```
 </TabItem>
 </Tabs>

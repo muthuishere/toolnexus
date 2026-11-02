@@ -1,6 +1,6 @@
 ---
 title: A customer-support agent
-description: Answer customer questions from your real systems (orders, CRM) over MCP, keep policy in agent skills, gate refunds behind a human, serve the whole thing to your web app as an A2A endpoint, and cap what a chatty customer can spend — in all seven languages.
+description: Answer customer questions from your real systems (orders, CRM) over MCP, keep policy in agent skills, gate refunds behind a human, serve the whole thing to your web app as an A2A endpoint, and cap what a chatty customer can spend — in all eight languages.
 ---
 
 import { Aside, Tabs, TabItem, LinkButton } from '@astrojs/starlight/components';
@@ -373,6 +373,49 @@ issue_refund =
               (billing-refund orderId amount)))}))
 ```
 </TabItem>
+<TabItem label="Rust">
+```rust
+const THRESHOLD: f64 = 50.0;
+
+// A suspending tool needs the ToolContext (for ctx.answer), so build the Tool
+// directly rather than through the define_tool sugar.
+let issue_refund = Tool {
+    name: "issue_refund".into(),
+    description: "Refund an order. Amounts at or above the approval threshold require a human.".into(),
+    source: ToolSource::Native,
+    hints: None,
+    input_schema: json!({
+        "type": "object",
+        "properties": {
+            "orderId": {"type": "string"},
+            "amount": {"type": "number"},
+            "reason": {"type": "string"}
+        },
+        "required": ["orderId", "amount", "reason"]
+    }),
+    execute: Arc::new(|args: Value, tctx: ToolContext| {
+        Box::pin(async move {
+            let order_id = args["orderId"].as_str().unwrap_or("").to_string();
+            let amount = args["amount"].as_f64().unwrap_or(0.0);
+            let reason = args["reason"].as_str().unwrap_or("");
+
+            if amount >= THRESHOLD && tctx.answer.is_none() {
+                let mut data = Map::new();
+                data.insert("orderId".into(), json!(order_id));
+                data.insert("amount".into(), json!(amount));
+                return pending(Request {
+                    kind: "approval".into(),
+                    prompt: format!("Approve {amount:.2} USD refund on order {order_id}? Reason: {reason}"),
+                    data: Some(data),
+                    ..Default::default()
+                });
+            }
+            billing_refund(&order_id, amount).await
+        })
+    }),
+};
+```
+</TabItem>
 </Tabs>
 
 Three properties of this gate matter in production:
@@ -499,6 +542,24 @@ result = Toolnexus.Client.run(client, ticket_text, tk)
 ;; (:status result) => "done" — the refund ran only after an approver said yes
 ```
 </TabItem>
+<TabItem label="Rust">
+```rust
+let c = create_client(ClientOptions {
+    base_url: base_url.clone(),
+    style: Style::OpenAI,
+    model: model.clone(),
+    max_turns: 8,
+    wait_for: Some(Arc::new(|req: Request| {
+        Box::pin(async move {
+            let d = approvals_ask_on_shift(&req.prompt, req.data.as_ref()).await?;
+            Ok(Answer { id: req.id, ok: d.approved, ..Default::default() })
+        })
+    })),
+    ..Default::default()
+});
+let res = c.run(ticket_text, &tk).await?;
+```
+</TabItem>
 </Tabs>
 
 `ok: false` is not an error either — the loop feeds `"declined: <prompt>"` back to the model, which
@@ -591,6 +652,16 @@ end
   (reply 200 (:text res)))
 ```
 </TabItem>
+<TabItem label="Rust">
+```rust
+let res = c.ask(ticket_text, &tk, ticket_id).await?;
+if res.status == "pending" {
+    approval_queue_insert(ticket_id, res.pending.as_ref()); // Option<Request> — serde-serializable
+    return Ok(reply(200, "Escalated to a supervisor for approval."));
+}
+Ok(reply(200, &res.text))
+```
+</TabItem>
 </Tabs>
 
 **Phase 2 — the supervisor clicks Approve; resume the same conversation.** Same `id`, a client
@@ -665,10 +736,26 @@ done = Toolnexus.Client.ask(resume, ticket_text, tk, ticket_id)
 (def done (client/run resume ticket-text {:toolkit tk :conversation-id ticket-id}))
 ```
 </TabItem>
+<TabItem label="Rust">
+```rust
+let approved = decision.approved;
+let resume = create_client(ClientOptions {
+    base_url: base_url.clone(),
+    style: Style::OpenAI,
+    model: model.clone(),
+    max_turns: 8,
+    wait_for: Some(Arc::new(move |req: Request| {
+        Box::pin(async move { Ok(Answer { id: req.id, ok: approved, ..Default::default() }) })
+    })),
+    ..Default::default()
+});
+let done = resume.ask(ticket_text, &tk, ticket_id).await?;
+```
+</TabItem>
 </Tabs>
 
 <Aside type="note" title="Why this survives a restart">
-`Request` and `Answer` are **fixed-key, plain serializable data** across all seven ports —
+`Request` and `Answer` are **fixed-key, plain serializable data** across all eight ports —
 not objects holding a live connection. That is the entire reason the durable posture works: the
 pending approval can sit in Postgres over a deploy, be rendered by a React queue written by another
 team, and be resolved by a different process in a different language.
@@ -762,6 +849,24 @@ handle =
                          :store "file:./tasks"}          ; survives a restart
                    :on-task (fn [t] (metrics-record t))}))
 (println (:url handle))   ; stop with ((:stop! handle))
+```
+</TabItem>
+<TabItem label="Rust">
+```rust
+use toolnexus::serve::{A2aConfig, ServeOptions, TaskStoreSpec};
+
+let handle = tk
+    .serve("127.0.0.1:8080", ServeOptions {
+        client: Some(c),
+        a2a: Some(A2aConfig {
+            name: "support-agent".into(),
+            skills: Some(vec!["refund-policy".into(), "shipping-claims".into()]),
+            store: TaskStoreSpec::Selector("file:./tasks".into()),
+            ..Default::default()
+        }),
+        ..Default::default()
+    })
+    .await?;
 ```
 </TabItem>
 </Tabs>

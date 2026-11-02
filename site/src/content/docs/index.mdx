@@ -1,9 +1,9 @@
 ---
 title: toolnexus
-description: Your LLM, with MCP tools and agent skills built in — in 3 lines, in 7 languages. Vendor-neutral, byte-identical across JavaScript, Python, Go, Java, C#, Elixir and Clojure.
+description: Your LLM, with MCP tools and agent skills built in — in 3 lines, in 8 languages. Vendor-neutral, byte-identical across JavaScript, Python, Go, Java, C#, Elixir, Clojure and Rust.
 template: splash
 hero:
-  tagline: Give any LLM tool-calling, an MCP host, agent skills, and remote agents — in a few lines, in seven languages.
+  tagline: Give any LLM tool-calling, an MCP host, agent skills, and remote agents — in a few lines, in eight languages.
   actions:
     - text: Quickstart
       link: /toolnexus/quickstart/
@@ -170,6 +170,34 @@ IO.puts(res.text)
 (println (:text (client/run agent "Use my tools to answer this." {:toolkit tk})))
 ```
 </TabItem>
+<TabItem label="Rust">
+```rust
+use toolnexus::client::{ClientOptions, Style, create_client};
+use toolnexus::{McpConfigInput, ToolkitOptions, create_toolkit};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let tk = create_toolkit(ToolkitOptions {
+        mcp_config: Some(McpConfigInput::Path("./mcp.json".into())), // every MCP server's tools
+        skills_dir: vec!["./skills".into()],                         // every SKILL.md, loaded on demand
+        ..Default::default()
+    })
+    .await?;
+
+    let agent = create_client(ClientOptions {
+        base_url: "https://openrouter.ai/api/v1".into(),
+        style: Style::OpenAI,
+        model: "openai/gpt-4o-mini".into(),
+        ..Default::default()
+    });
+
+    let res = agent.run("Use my tools to answer this.", &tk).await?;
+    println!("{}", res.text);
+    tk.close().await;
+    Ok(())
+}
+```
+</TabItem>
 </Tabs>
 
 ## One interface for every tool
@@ -197,11 +225,11 @@ IO.puts(res.text)
 	</Card>
 	<Card title="Human in the loop" icon="comment">
 		The suspension layer: an agent can pause, ask *you* a question, and resume — plus an
-		MCP elicitation bridge. Nobody else ships this across seven ports.
+		MCP elicitation bridge. Nobody else ships this across eight ports.
 	</Card>
 </CardGrid>
 
-## Byte-identical across seven languages
+## Byte-identical across eight languages
 
 The whole point is **parity**: the same `examples/` fixtures produce the same behavior in every
 language — all seven published to their registries. [Clojure](/toolnexus/api/clojure/) is one

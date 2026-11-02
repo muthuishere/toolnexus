@@ -1,6 +1,6 @@
 ---
 title: Quickstart
-description: Zero to a working agent in three steps — install, point at your tools, run. Same shape in JavaScript, Python, Go, Java, C#, Elixir and Clojure.
+description: Zero to a working agent in three steps — install, point at your tools, run. Same shape in JavaScript, Python, Go, Java, C#, Elixir, Clojure and Rust.
 ---
 
 import { Tabs, TabItem, Steps, Aside } from '@astrojs/starlight/components';
@@ -64,6 +64,14 @@ Three steps to a working agent. Pick your language once — the tabs stay in syn
    ```clojure
    ;; deps.edn — one artifact; koine (the portability seam) comes with it
    {:deps {net.clojars.muthuishere/toolnexus {:mvn/version "0.22.0"}}}
+   ```
+   </TabItem>
+   <TabItem label="Rust">
+   ```toml
+   # Cargo.toml — on crates.io from the next release (until then: git = "https://github.com/muthuishere/toolnexus")
+   [dependencies]
+   toolnexus = "0.22.0"
+   tokio = { version = "1", features = ["full"] }
    ```
    </TabItem>
    </Tabs>
@@ -149,6 +157,17 @@ Three steps to a working agent. Pick your language once — the tabs stay in syn
                  :model "openai/gpt-4o-mini"}))
    ```
    </TabItem>
+   <TabItem label="Rust">
+   ```rust
+   let tk = create_toolkit(ToolkitOptions::default()).await?;
+   let agent = create_client(ClientOptions {
+       base_url: "https://openrouter.ai/api/v1".into(),
+       style: Style::OpenAI,
+       model: "openai/gpt-4o-mini".into(),
+       ..Default::default()
+   });
+   ```
+   </TabItem>
    </Tabs>
 
 3. **Run.** Tools are called for you and the loop runs to a final answer.
@@ -193,6 +212,13 @@ Three steps to a working agent. Pick your language once — the tabs stay in syn
    ```clojure
    (def res (client/run agent "List the files here, then count them." {:toolkit tk}))
    (println (:text res))
+   ```
+   </TabItem>
+   <TabItem label="Rust">
+   ```rust
+   let res = agent.run("List the Rust files here and count them.", &tk).await?;
+   println!("{}", res.text);
+   tk.close().await;
    ```
    </TabItem>
    </Tabs>
@@ -249,6 +275,16 @@ await using var tk = await Toolkit.CreateAsync(new Toolkit.Options
 <TabItem label="Clojure">
 ```clojure
 (def tk (tn/build {:mcp "./mcp.json" :skills "./skills"}))
+```
+</TabItem>
+<TabItem label="Rust">
+```rust
+let tk = create_toolkit(ToolkitOptions {
+    mcp_config: Some(McpConfigInput::Path("./mcp.json".into())),
+    skills_dir: vec!["./skills".into()],
+    ..Default::default()
+})
+.await?;
 ```
 </TabItem>
 </Tabs>

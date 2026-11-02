@@ -1,6 +1,6 @@
 ---
 title: Fail fast, or retry
-description: Own the retry-vs-fail decision for every LLM-call failure with one onError callback — in all seven languages.
+description: Own the retry-vs-fail decision for every LLM-call failure with one onError callback — in all eight languages.
 ---
 
 import { Tabs, TabItem, Aside } from '@astrojs/starlight/components';
@@ -104,6 +104,24 @@ client = Toolnexus.Client.create(
                   (= 402 (:status info)) :fail
                   (:retryable? info)     :retry
                   :else                  :fail))}))
+```
+</TabItem>
+<TabItem label="Rust">
+```rust
+use toolnexus::client::{ErrorInfo, ErrorTier};
+
+let agent = create_client(ClientOptions {
+    base_url: base_url.clone(),
+    style: Style::OpenAI,
+    model: model.clone(),
+    api_key: api_key.clone(),
+    on_error: Some(Arc::new(|i: &ErrorInfo| match i {
+        i if i.status == 402 => ErrorTier::Fail,
+        i if i.retryable => ErrorTier::Retry,
+        _ => ErrorTier::Fail,
+    })),
+    ..Default::default()
+});
 ```
 </TabItem>
 </Tabs>

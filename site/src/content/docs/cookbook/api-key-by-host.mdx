@@ -1,6 +1,6 @@
 ---
 title: API key by host
-description: Which key the client sends to which host — and what a local server or a proxy must now set (breaking in 0.22.0) — in all seven languages.
+description: Which key the client sends to which host — and what a local server or a proxy must now set (breaking in 0.22.0) — in all eight languages.
 ---
 
 import { Tabs, TabItem, Aside } from '@astrojs/starlight/components';
@@ -89,6 +89,24 @@ proxy = Toolnexus.Client.create(base_url: "https://llm.internal/v1", style: "ope
 ```clojure
 (def local (client/create-client {:base-url "http://localhost:11434/v1" :style "openai" :model "llama3" :api-key "unused"}))
 (def proxy (client/create-client {:base-url "https://llm.internal/v1" :style "openai" :model "m" :api-key-env "INTERNAL_LLM_KEY"}))
+```
+</TabItem>
+<TabItem label="Rust">
+```rust
+let local = create_client(ClientOptions {
+    base_url: "http://localhost:11434/v1".into(),
+    style: Style::OpenAI,
+    model: "llama3".into(),
+    api_key: "unused".into(),
+    ..Default::default()
+});
+let proxy = create_client(ClientOptions {
+    base_url: "https://llm.internal/v1".into(),
+    style: Style::OpenAI,
+    model: "m".into(),
+    api_key_env: "INTERNAL_LLM_KEY".into(),
+    ..Default::default()
+});
 ```
 </TabItem>
 </Tabs>

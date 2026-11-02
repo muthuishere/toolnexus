@@ -194,6 +194,22 @@ reviewer =
    :budget {:max-tokens 4000 :max-turns 3}})   ; a review that runs long is a broken review
 ```
 </TabItem>
+<TabItem label="Rust">
+```rust
+use toolnexus::agents::{self, Budget, Spec, memory_tool};
+
+let dir = "./personas/ava";
+
+let reviewer = agents::new("reviewer", Spec {
+    does: "reads a finished run and records durable lessons".into(),
+    soul_file: "./personas/reviewer/SOUL.md".into(),
+    tools: vec![memory_tool(dir)],      // the ONLY tool it can touch
+    model: "openai/gpt-4o-mini".into(), // cheap: it reads a digest
+    budget: Some(Budget { max_tokens: 4_000, max_turns: 3, ..Default::default() }),
+    ..Default::default()
+});
+```
+</TabItem>
 </Tabs>
 
 <Aside type="tip" title="Budget the reviewer tightly — it is a tax on every run">
@@ -331,6 +347,26 @@ end
                (str "OUTCOME (" (:turns r) " turns, "
                     (get-in r [:usage :total-tokens]) " tokens): " (:text r))
                (str "TOOL CALLS:\n" (if (seq calls) calls "(none)"))])))
+```
+</TabItem>
+<TabItem label="Rust">
+```rust
+use std::fmt::Write as _;
+
+fn digest(r: &RunResult, prompt: &str) -> String {
+    let mut b = String::new();
+    let _ = write!(b, "TASK: {prompt}\n\n");
+    let _ = write!(b, "OUTCOME ({} turns, {} tokens): {}\n\nTOOL CALLS:\n", r.turns, r.usage.total_tokens, r.text);
+    if r.tool_calls.is_empty() {
+        b.push_str("(none)");
+    }
+    for c in &r.tool_calls {
+        let status = if c.is_error { "ERROR: " } else { "" };
+        let out: String = c.output.chars().take(200).collect();
+        let _ = writeln!(b, "- {}({}) → {status}{out}", c.name, c.args);
+    }
+    b
+}
 ```
 </TabItem>
 </Tabs>
@@ -483,6 +519,33 @@ end
     (:text r)))
 ```
 </TabItem>
+<TabItem label="Rust">
+```rust
+use toolnexus::agents::{LlmOptions, Options};
+
+let llm = LlmOptions {
+    base_url: "https://openrouter.ai/api/v1".into(),
+    style: Style::OpenAI,
+    model: "openai/gpt-4o-mini".into(),
+    ..Default::default()
+};
+
+async fn handle(ava: &Client, tk: &Toolkit, reviewer: Agent, llm: LlmOptions, prompt: &str) -> Result<String, ClientError> {
+    let r = ava.ask(prompt, tk, "ava").await?;
+
+    let d = digest(&r, prompt);
+    tokio::spawn(async move {
+        // fire-and-forget: a failed review must never fail the run
+        let (out, _rt) = reviewer.run(Options { llm: Some(llm), ..Default::default() }, &d).await;
+        if out.is_error {
+            eprintln!("review failed: {}", out.text);
+        }
+    });
+
+    Ok(r.text)
+}
+```
+</TabItem>
 </Tabs>
 
 The reviewer's `memory add` lands in `MEMORY.md` on disk immediately. It becomes part of Ava's
@@ -590,6 +653,19 @@ nightly = Home.start_agent(ava, rt_opts,
                     {:every-ms (* 24 60 60000)                    ; once a day
                      ;; quiet nights surface nothing — HEARTBEAT_OK never reaches :on-beat
                      :on-beat  (fn [summary] (println "memory consolidated:" summary))}))
+```
+</TabItem>
+<TabItem label="Rust">
+```rust
+use toolnexus::agents::{self, FromDirOptions, Options, StartOptions};
+
+let ava = agents::from_dir("./personas/ava", FromDirOptions::default()); // memory tool wired automatically
+
+let nightly = agents::start_agent(&ava, StartOptions {
+    options: Options { llm: Some(llm), ..Default::default() },
+    every_ms: 24 * 60 * 60_000, // once a day
+    on_beat: Some(Arc::new(|s: &str| eprintln!("memory consolidated: {s}"))),
+})?;
 ```
 </TabItem>
 </Tabs>

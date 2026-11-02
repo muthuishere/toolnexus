@@ -58,7 +58,7 @@ from an MCP server.
 - **Returning one from a tool.** A screenshot tool sets `:output` to a description and the image
   goes in `:parts` via [`toolnexus.tool/with-parts`](/api/clojure/types/tool-result/).
 - **Reading one back** — `part-bytes` for size, `summarize-part` for the one-line, payload-free
-  rendering §1B pins byte-identically across all seven ports.
+  rendering §1B pins byte-identically across all eight ports.
 
 ## Why this and not the alternative
 
@@ -118,7 +118,7 @@ boundary, so nothing above a tool has to catch.
 (assert (nil? (:url img)))                      ; exactly one of :data / :url
 (assert (not (str/includes? (pr-str img) "fixture.png")))   ; the PATH is gone
 
-;; §1B pins this string byte-identically in all seven ports; <bytes> is DECODED
+;; §1B pins this string byte-identically in all eight ports; <bytes> is DECODED
 (assert (= "image (image/png, 82 bytes)" (content/summarize-part img)))
 (assert (= 82 (content/part-bytes img)))
 ;; a log line or a §9 event renders a part WITHOUT its payload

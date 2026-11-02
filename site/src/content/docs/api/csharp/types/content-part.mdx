@@ -237,7 +237,7 @@ if (image.ByteLength != 82) throw new Exception($"bytes: {image.ByteLength}");
 if (image.EstimatedTokens != 85) throw new Exception($"tokens: {image.EstimatedTokens}");
 if (ContentPart.FromText("four characters!").EstimatedTokens != 4) throw new Exception("text tokens");
 
-// The three user-visible strings are byte-identical in all seven ports.
+// The three user-visible strings are byte-identical in all eight ports.
 if (image.DescribeInText() != "image (image/png, 82 bytes)") throw new Exception(image.DescribeInText());
 if (image.UnsupportedPlaceholderText() != "[unsupported image part (image/png, 82 bytes)]")
     throw new Exception(image.UnsupportedPlaceholderText());

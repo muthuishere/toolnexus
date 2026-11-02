@@ -71,7 +71,7 @@ import assert from "node:assert"
 import fs from "node:fs"
 import { attach, text, partBytes, type ContentPart } from "toolnexus"
 
-// The committed golden — the source of truth for these bytes in all seven ports.
+// The committed golden — the source of truth for these bytes in all eight ports.
 const golden = fs.readFileSync("examples/media/fixture.png.base64", "utf8").trim()
 
 type ImagePart = Extract<ContentPart, { type: "image" }>

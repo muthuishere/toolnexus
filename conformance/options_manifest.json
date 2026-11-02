@@ -274,7 +274,7 @@
     ]
   },
   "classifierOptions": {
-    "_doc": "ClassifierOptions (SPEC.md §8B). Registered here so the same parity gate that covers the client covers the judgment seam: a field that ships in six ports and not the seventh fails loudly instead of silently. All seven ports have landed, so a missing options file here is a failure like any other — there is no grace flag, and there must not be one again: a gate with a hole in it reports the hole as a pass.",
+    "_doc": "ClassifierOptions (SPEC.md §8B). Registered here so the same parity gate that covers the client covers the judgment seam: a field that ships in six ports and not the seventh fails loudly instead of silently. All eight ports have landed, so a missing options file here is a failure like any other — there is no grace flag, and there must not be one again: a gate with a hole in it reports the hole as a pass.",
     "files": {
       "js": "js/src/classifier.ts",
       "python": "python/src/toolnexus/classifier.py",

@@ -8,7 +8,7 @@ tools, and remote **A2A agents** — behind one uniform `Tool`, emits the schema
 Anthropic / Gemini** formats, and ships a unified client with a built-in tool-calling loop.
 
 The Elixir port of [toolnexus](https://github.com/muthuishere/toolnexus) — the same library,
-byte-identical, also in **JavaScript, Python, Go, Java, C# and Clojure**. The MCP client is
+byte-identical, also in **JavaScript, Python, Go, Java, C#, Clojure and Rust**. The MCP client is
 implemented in-house on OTP (supervised connections, no third-party MCP SDK), which is also why
 this port ships the **full** elicitation bridge (form *and* URL mode).
 
@@ -132,4 +132,4 @@ Everything else — the full surface, with runnable examples — lives on the do
 | **API reference** | **[Elixir](https://muthuishere.github.io/toolnexus/api/elixir/)** |
 | **Cookbook** | [Zero to agent](https://muthuishere.github.io/toolnexus/cookbook/zero-to-agent/) · [MCP servers](https://muthuishere.github.io/toolnexus/cookbook/mcp-servers/) · [Agent skills](https://muthuishere.github.io/toolnexus/cookbook/agent-skills/) · [Judge](https://muthuishere.github.io/toolnexus/cookbook/judge/) |
 
-Contract across all seven ports: [`SPEC.md`](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
+Contract across all eight ports: [`SPEC.md`](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).

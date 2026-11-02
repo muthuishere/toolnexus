@@ -1,13 +1,16 @@
 # Publishing toolnexus
 
-All seven ports publish from **one** GitHub Actions workflow — `.github/workflows/release.yml`.
+All eight ports publish from **one** GitHub Actions workflow — `.github/workflows/release.yml`.
 You cut a GitHub Release and the workflow publishes every enabled port at the release's version.
 No tokens are stored for npm / PyPI / NuGet (OIDC Trusted Publishing); Go is a tag push; Maven
-Central, Hex and Clojars use stored secrets, because none of those three offers OIDC.
+Central, Hex and Clojars use stored secrets, because none of those three offers OIDC. crates.io
+uses a stored token (`CARGO_REGISTRY_TOKEN`) because a crate's first publish cannot use Trusted
+Publishing; switch it to Trusted Publishing once the crate exists.
 
 Package names (all live): npm **`toolnexus`**, PyPI **`toolnexus`**, NuGet **`Toolnexus`**,
 Maven **`io.github.muthuishere:toolnexus`**, Go module **`github.com/muthuishere/toolnexus/golang`**,
-Hex **`toolnexus`**, Clojars **`net.clojars.muthuishere/toolnexus`**.
+Hex **`toolnexus`**, Clojars **`net.clojars.muthuishere/toolnexus`**, crates.io **`toolnexus`** (from
+the next release — not yet published).
 
 ## Release in one step
 
@@ -23,7 +26,7 @@ Hex **`toolnexus`**, Clojars **`net.clojars.muthuishere/toolnexus`**.
    That triggers `release.yml` (`on: release.published`). Each port publishes **iff** its repo
    variable is `true` (Settings → Secrets and variables → Actions → Variables):
    `ENABLE_NPM`, `ENABLE_PYPI`, `ENABLE_GO`, `ENABLE_NUGET`, `ENABLE_JAVA`, `ENABLE_ELIXIR`,
-   `ENABLE_CLOJARS`.
+   `ENABLE_CLOJARS`, `ENABLE_CRATES`.
 4. Watch it: `gh run watch <run-id> --exit-status`.
 
 Dry run / manual: `release.yml` also has a `workflow_dispatch` with a `version` input. (Note: npm and
@@ -40,8 +43,9 @@ PyPI reject re-publishing an existing version, so only dispatch a version you ha
 | **Maven Central** | Gradle `publishAndReleaseToMavenCentral` | `prod` environment secrets: `CENTRAL_USERNAME`, `CENTRAL_PASSWORD` (Sonatype Central Portal token), `GPG_PRIVATE_KEY`, `GPG_PASSPHRASE`. No OIDC available for Central. |
 | **Hex** | `mix hex.publish --yes` | `prod` environment secret: `HEX_API_KEY`. No OIDC on Hex. |
 | **Clojars** | `clojure -T:build deploy` (tools.build + deps-deploy) | `prod` environment secrets: `CLOJARS_USERNAME`, `CLOJARS_PASSWORD` (a Clojars **deploy token**, not the account password). No OIDC on Clojars. |
+| **crates.io** | `cargo publish --locked` (skips if the version exists) | `prod` environment secret: `CARGO_REGISTRY_TOKEN` (scopes publish-new + publish-update). Gated by `ENABLE_CRATES`. |
 
-**Version parity is enforced.** The `preflight` job reads all six manifests and fails the run unless
+**Version parity is enforced.** The `preflight` job reads all seven manifests (including `rust/Cargo.toml`) and fails the run unless
 each equals the release tag — so partial version bumps never publish a mismatched set.
 
 ### Clojure / Clojars — the one thing that is not like the others
@@ -79,6 +83,7 @@ go get github.com/muthuishere/toolnexus/golang    # Go
 # Java (Maven): io.github.muthuishere:toolnexus:<version>
 # Elixir (mix.exs): {:toolnexus, "~> <version>"}
 # Clojure (deps.edn): net.clojars.muthuishere/toolnexus {:mvn/version "<version>"}
+cargo add toolnexus@<version>                      # Rust
 ```
 
 ## Secrets discipline

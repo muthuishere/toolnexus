@@ -350,7 +350,7 @@ async fn openai_parallel_tool_calls_with_call_ids() {
         "returns its call id",
         None,
         |_, ctx: toolnexus::ToolContext| async move {
-            tokio::time::sleep(Duration::from_millis(30)).await;
+            tokio::time::sleep(Duration::from_millis(200)).await;
             Ok::<_, String>(ctx.call_id.unwrap_or_default())
         },
     );
@@ -361,7 +361,7 @@ async fn openai_parallel_tool_calls_with_call_ids() {
     assert_eq!(res.tool_call_count, 2);
     assert_eq!(res.turns, 2);
     assert!(
-        t0.elapsed() < Duration::from_millis(55),
+        t0.elapsed() < Duration::from_millis(390),
         "calls run concurrently"
     );
 }
