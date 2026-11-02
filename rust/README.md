@@ -1,14 +1,99 @@
-# toolnexus (Rust) — in progress
+# toolnexus (Rust)
 
-The Rust port of [toolnexus](../README.md), async on tokio. It is being built in phases
-(`openspec/changes/add-rust-port`). Done: the **ACP client**, **skills**, the **MCP
-client** and the **core `Tool` types** with native tools and schema adapters. Next: the
-toolkit, builtins and the client loop. It is not published yet.
+The Rust port of [toolnexus](../README.md), async on tokio: MCP servers, agent skills, native
+and HTTP tools, the built-in coding tools and remote ACP agents behind one `Tool` interface,
+schema adapters for OpenAI / Anthropic / Gemini, and a unified client with the tool-calling
+loop. It is held to conformance tier **`core`** (`conformance/options_manifest.json`): every
+SPEC §0 obligation, with the gaps listed at the end of this page.
 
 ```toml
-toolnexus = { path = "../toolnexus/rust" }                                   # everything
-toolnexus = { path = "../toolnexus/rust", default-features = false }         # no HTTP/TLS: stdio MCP only
+[dependencies]
+toolnexus = "0.22.0"
+# toolnexus = { version = "0.22.0", default-features = false }   # MCP over stdio only (no MCP HTTP/TLS transport)
+tokio = { version = "1", features = ["full"] }
 ```
+
+## Zero to agent
+
+```rust
+use toolnexus::client::{ClientOptions, Style, create_client};
+use toolnexus::{McpConfigInput, ToolkitOptions, create_toolkit};
+
+let tk = create_toolkit(ToolkitOptions {
+    mcp_config: Some(McpConfigInput::Path("mcp.json".into())),
+    skills_dir: vec!["skills".into()],
+    ..Default::default()
+}).await?;
+let client = create_client(ClientOptions {
+    base_url: "https://openrouter.ai/api/v1".into(),   // key: OPENROUTER_API_KEY (by host)
+    style: Style::OpenAI,
+    model: "openai/gpt-4o-mini".into(),
+    ..Default::default()
+});
+let result = client.run("Say hello using the hello-world skill", &tk).await?;
+println!("{}", result.text);
+tk.close().await;
+```
+
+The environment key is used only for the host it belongs to (`api.openai.com` →
+`OPENAI_API_KEY`, `api.anthropic.com` → `ANTHROPIC_API_KEY`, `openrouter.ai` →
+`OPENROUTER_API_KEY`). Any other `base_url` needs `api_key` or `api_key_env`.
+
+## Examples
+
+All under `rust/examples/`, run with `cargo run --example <name>`:
+
+| example | what | needs |
+|---|---|---|
+| `basic` | toolkit over the shared `examples/` fixtures: MCP status, tools, skill catalog, OpenAI schema, a `skill` call. Same output as `golang/examples/basic` (JSON key order aside) | `npx` for the MCP server |
+| `agent` | a real model running skills + builtins + a native tool | `OPENROUTER_API_KEY` |
+| `native_http` | `define_tool` and `http_tool` through the toolkit | network only if you pass a URL |
+| `streaming` | `client.stream` with tool calls, offline (in-process model) | nothing |
+| `pending` | the builtin `question` suspending, with and without `wait_for` (§10) | nothing |
+| `acp` | an ACP coding agent as the client's model, streaming its own tool calls | an agent command, or the bundled fake |
+
+## Toolkit (§4)
+
+`create_toolkit(ToolkitOptions { mcp_config, skills_dir, skills, skill_provider, skills_filter,
+skill_sample_limit, extra_tools, builtins, disable_tools, disable_skills })` assembles
+MCP → skill → builtin → extra tools, first name wins, and an extra tool shadows a builtin of the
+same name. `tools()`, `get`, `execute`, `skills_prompt`, `mcp_status`, `to_openai` /
+`to_anthropic` / `to_gemini`, `register` (safe mid-turn) and `close`.
+
+## Built-in tools (§4A)
+
+On by default: `bash, read, write, edit, grep, glob, webfetch, question, apply_patch,
+todowrite`, with the same names, schemas and outputs as the other ports. `BuiltinsConfig`
+carries the toggles (`enabled` / `disabled`, per-tool `tools`), the host boundary (`shell`,
+`base_dir`, `confine_to_base_dir`, `kill_grace_ms`) and the opt-in extras: `background`
+(`bash` `run_in_background` + `bash_output` / `kill_shell`), `web_search` (your provider) and
+`notebook_edit`. `bash` kills its whole process group on timeout or cancel (TERM, grace, KILL).
+Every builtin carries `ToolHints`. `grep` takes `context` / `before` / `after`; `read` and
+`grep` report `truncated` in metadata.
+
+## Client (§8)
+
+`ClientOptions` has every option the other ports have: `base_url`, `style` (`OpenAI` |
+`Anthropic`), `model`, `api_key`, `api_key_env`, `headers`, `system_prompt`, `max_turns`,
+`hooks` (`before_llm`, `after_llm`, `before_tool`, `after_tool`), `retries`, `retry_base_ms`,
+`retryable_statuses` (Retry-After is honoured), `timeout_ms`, `store`, `on_metric`, `wait_for` /
+`wait_for_ctx`, `request_params`, `body_transform`, `http_client`, `on_error`, `prompt_cache`,
+`tool_tiers`. `run`, `ask` (conversation memory by id), `stream` (an
+`mpsc::UnboundedReceiver<StreamEvent>`), `list_models`, and `create_in_process_client` for a
+model you run yourself. One message's tool calls run concurrently, each with its
+`ToolContext.call_id`. `Usage` reports `cache_read_tokens` / `cache_write_tokens`.
+
+## Suspension (§10)
+
+A tool returns `pending(Request { kind, prompt, .. })` (or `auth_required(url, prompt)`). With
+`wait_for`, the loop asks the host, then re-runs the tool once with `ToolContext.answer`. Without
+it, `run` returns `status: "pending"` with the request, and a stream emits a `pending` event.
+
+## HTTP tools (§7)
+
+`toolnexus::http::http_tool(HttpToolOptions { name, url, method, headers, query, body,
+input_schema, .. })`: `{placeholder}` URL segments, `${ENV}` headers that are never logged, and
+`HTTP <status>: <body>` errors.
 
 ## ACP client
 
@@ -83,8 +168,10 @@ It is built on the official `rmcp` SDK. It supports stdio servers (own process g
 Object) and streamable HTTP (`mcp-http` feature, on by default; `${ENV}` headers, never
 logged). A failing server is isolated, and the per-server `tools` allowlist works. Each call's
 timeout is an idle timeout: progress for that call resets it. Cancelling `ToolContext.cancel`
-ends a call at once. Gaps compared with Go: no legacy-SSE fallback for remote servers, and no
-images or other non-text content parts.
+ends a call at once. A remote server that does not speak streamable HTTP is retried over legacy
+SSE. Non-text content becomes `ToolResult.parts`, tool annotations become `ToolHints`,
+`resource_tools()` lists and reads resources, and `load_mcp_with(cfg, McpLoadOptions {
+on_server })` reports each server as soon as it is ready.
 
 ## Tools and adapters
 
@@ -93,5 +180,14 @@ images or other non-text content parts.
 
 ## Tests
 
-`cargo test` is hermetic. It runs against a scripted fake agent (`examples/fake_acp_agent.rs`);
-there is no network and no real agent CLI.
+`cargo test` is hermetic: a scripted fake ACP agent (`examples/fake_acp_agent.rs`), local fake
+HTTP / MCP / SSE servers, no network and no real model. CI runs `cargo fmt --check`,
+`cargo clippy --all-targets -- -D warnings`, `cargo test` and `cargo test --no-default-features`.
+
+## Not done yet (tier `core`)
+
+A2A agents (outbound and `serve`), `translate` (§11), the classifier and judge (§8B), the
+sub-agent runtime and personas (§7D/§7E), compaction (§7F), the MCP server profile (§7C), MCP
+elicitation (the toolkit `wait_for` bridge), the relay / resume path, and a Gemini client style
+(Gemini is a schema adapter, as in Go). The Windows code paths compile but have not been run.
+Tracked in `openspec/changes/add-rust-port`.
