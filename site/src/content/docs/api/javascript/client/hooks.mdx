@@ -201,6 +201,62 @@ server.close()
 console.log("ok:", res.toolCalls[0].output)
 ```
 
+{/* 0.22 */}
+## Tool hints and permission gates (0.22)
+
+`beforeTool` events carry `hints?: { readOnly, destructive, openWorld }` — set on every builtin
+(`read`/`grep`/`glob`/`question`/`todowrite` read-only; `webfetch` read-only + open-world;
+`write`/`edit`/`apply_patch` destructive; `bash` destructive + open-world), read from MCP tool
+annotations, absent (unknown: treat as mutating) otherwise. Hints are advisory and never sent to
+the model. A permission gate is just `beforeTool`: return nothing to allow, `{ result }` with
+`isError` to deny (the model sees it, the run continues), or `{ result: pending(request) }` to
+ask through `waitFor`. Under [tool tiers](/api/javascript/client/tool-tiers/) `call_tool` is
+unwrapped first, so the gate sees the real tool. There is no separate permit option.
+
+```ts test
+import assert from "node:assert"
+import http from "node:http"
+import { createClient, createToolkit } from "toolnexus"
+
+// A local OpenAI-style stub: replies[i] is the i-th assistant message.
+async function stub(replies: any[]) {
+  let n = 0
+  const server = http.createServer((req, res) => {
+    req.resume()
+    req.on("end", () => {
+      const msg = replies[Math.min(++n, replies.length) - 1]
+      res.writeHead(200, { "content-type": "application/json" })
+      res.end(JSON.stringify({ choices: [{ message: { content: null, ...msg }, finish_reason: msg.tool_calls ? "tool_calls" : "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } }))
+    })
+  })
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", r))
+  return { url: `http://127.0.0.1:${(server.address() as any).port}`, close: () => server.close() }
+}
+const call = (id: string, name: string, args: object) => ({ tool_calls: [{ id, type: "function", function: { name, arguments: JSON.stringify(args) } }] })
+
+const llm = await stub([call("c1", "bash", { command: "rm -rf /tmp/x" }), { content: "refused" }])
+const tk = await createToolkit({}) // builtins carry hints
+const asked: string[] = []
+const client = createClient({
+  baseUrl: llm.url, style: "openai", model: "stub", apiKey: "YOUR_KEY_HERE",
+  hooks: {
+    beforeTool: (ev) => {
+      if (ev.hints?.readOnly) return                       // read-only: allow
+      asked.push(`${ev.name} destructive=${ev.hints?.destructive}`)
+      return { result: { output: "denied by policy", isError: true } }
+    },
+  },
+})
+const res = await client.run("clean up", { toolkit: tk })
+assert.deepEqual(asked, ["bash destructive=true"])
+assert.equal(res.toolCalls[0].output, "denied by policy")
+assert.equal(tk.get("read")!.hints?.readOnly, true)
+await tk.close()
+llm.close()
+console.log("ok:", asked[0])
+```
+{/* /0.22 */}
+
 ## Fields
 
 | Hook | When | Return to observe | Return to change behavior |

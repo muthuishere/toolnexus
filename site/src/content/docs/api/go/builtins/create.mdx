@@ -195,6 +195,69 @@ func main() {
 
 `[]Tool` — always length 10, always the same order, each with `Source: SourceBuiltin`.
 
+## Opt-in builtins, grep context and truncation metadata
+
+`CreateBuiltinToolsWith(BuiltinsConfig{…})` (or `Options.Builtins: BuiltinsConfig{…}`) adds tools
+that are **off** unless configured; the default ten are unchanged:
+
+| Field | Adds |
+|---|---|
+| `Background *BackgroundShells` | `run_in_background` on `bash`, plus `bash_output` and `kill_shell` — see [`BackgroundShells`](/api/go/builtins/background-shells/) |
+| `WebSearch WebSearchFunc` | `websearch` over a provider the host supplies (`func(ctx, query, limit) ([]WebSearchResult, error)`; the library ships none) |
+| `NotebookEdit bool` | `notebook_edit` — replace / insert / delete a `.ipynb` cell by id or index (replacing a code cell clears its outputs) |
+
+`grep` also takes `context`, `before` and `after`: match lines print as `path:N:text`, context lines
+as `path-N-text`, with `--` between groups that do not touch. Absent ⇒ output unchanged. And `read`
+and `grep` now say in **metadata** when output was cut — `read`: `truncated`, `totalLines`,
+`nextOffset`; `grep`: `truncated`, `total` — while the text stays the pinned cross-port bytes.
+
+```go test
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"os"
+	"path/filepath"
+	"strings"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	dir, _ := os.MkdirTemp("", "grep")
+	defer os.RemoveAll(dir)
+	f := filepath.Join(dir, "a.txt")
+	_ = os.WriteFile(f, []byte("one\ntwo\nNEEDLE\nfour\nfive\n"), 0o644)
+
+	search := func(ctx context.Context, q string, limit int) ([]toolnexus.WebSearchResult, error) {
+		return []toolnexus.WebSearchResult{{Title: "Go", URL: "https://go.dev", Snippet: "The Go language"}}, nil
+	}
+	tools := map[string]toolnexus.Tool{}
+	for _, t := range toolnexus.CreateBuiltinToolsWith(toolnexus.BuiltinsConfig{WebSearch: search, NotebookEdit: true}) {
+		tools[t.Name] = t
+	}
+	if _, ok := tools["notebook_edit"]; !ok {
+		log.Fatal("notebook_edit should be added")
+	}
+
+	g, err := tools["grep"].Execute(map[string]any{"pattern": "NEEDLE", "path": dir, "context": 1}, nil)
+	if err != nil || !strings.Contains(g.Output, ":3:NEEDLE") || !strings.Contains(g.Output, "-2-two") || !strings.Contains(g.Output, "-4-four") {
+		log.Fatalf("grep with context: %v %q", err, g.Output)
+	}
+	r, _ := tools["read"].Execute(map[string]any{"path": f, "limit": 2}, nil)
+	if r.Metadata["truncated"] != true {
+		log.Fatalf("read window should report truncation: %v", r.Metadata)
+	}
+	ws, _ := tools["websearch"].Execute(map[string]any{"query": "go"}, nil)
+	if !strings.Contains(ws.Output, "https://go.dev") {
+		log.Fatalf("websearch: %q", ws.Output)
+	}
+	fmt.Println("ok: grep context, read truncated, nextOffset =", r.Metadata["nextOffset"])
+}
+```
+
 ## See also
 
 - [`SelectBuiltins`](/api/go/builtins/select/) — pick which built-in file/shell/web tools are in play, by name or by source toggle.

@@ -228,6 +228,26 @@ IO.puts("ok: denial fed back as a tool error — model replied: #{result.text}")
 | in | `Toolnexus.Request.t()` | The suspension the tool raised (`id`, `kind`, `prompt`, `url?`, `data?`). |
 | out | `Toolnexus.Answer.t()` | `%{id, ok, data?, reason?}`. `ok: true` re-invokes the tool with `ctx.answer` set; `ok: false` resolves to a `"declined/expired: <prompt>"` error result. |
 
+## `wait_for_ctx` — the turn's context
+
+`Client.create(wait_for_ctx: fn %Toolnexus.Context{} = ctx, request -> answer end)` is
+`:wait_for` plus the turn's context, and wins over `:wait_for` when both are set. `ctx.signal` is
+the pid of the process running the turn and `ctx.call_id` is the suspended call's id. A resolver
+that waits in another process (a UI, a chat bridge) monitors `ctx.signal`, so a pending question
+ends when the turn is cancelled (its process stopped) instead of hanging:
+
+```elixir
+wait_for_ctx: fn ctx, request ->
+  ref = Process.monitor(ctx.signal)
+  send(ui, {:ask, self(), request})
+
+  receive do
+    {:answer, answer} -> answer
+    {:DOWN, ^ref, _, _, _} -> exit(:turn_gone)
+  end
+end
+```
+
 ## See also
 
 - [`Toolnexus.ToolResult`](/api/elixir/types/tool-result/) — how a tool raises a suspension (`metadata.pending`).

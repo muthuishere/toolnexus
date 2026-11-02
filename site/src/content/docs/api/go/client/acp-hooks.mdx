@@ -1,0 +1,418 @@
+---
+title: "ACPOptions.OnPermission"
+description: "Opt-in hooks on an ACP model source: choose the permission option, watch every session/update, cancel a turn, and stream through an in-process client. — Go."
+sidebar:
+  label: "ACPOptions.OnPermission"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Go</strong> · package <code>github.com/muthuishere/toolnexus/golang</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/golang/acp.go">golang/acp.go</a>
+</p>
+
+```go
+type ACPOptions struct {
+	Command string
+	Args    []string
+	// ...
+	OnPermission func(ctx context.Context, params json.RawMessage) (optionID string, err error)
+	OnUpdate     func(json.RawMessage)
+}
+
+func (c *ACPClient) Generate(req InProcessRequest) (InProcessResponse, error)
+func (c *ACPClient) GenerateCtx(ctx context.Context, req InProcessRequest) (InProcessResponse, error)
+func (c *ACPClient) GenerateStream(ctx context.Context, req InProcessRequest, emit func(StreamEvent)) (InProcessResponse, error)
+
+// InProcessOptions.GenerateStream — pass ACPClient.GenerateStream to make Client.Stream work.
+```
+
+Four opt-in hooks on an ACP model source (`LoadACP`). With none set, behaviour is byte-identical
+to before: a permission request gets the first allow-kind option and only `agent_message_chunk`
+text forms the reply.
+
+- **`OnPermission`** — called for every `session/request_permission` with its raw params
+  (`sessionId`, `toolCall`, `options`); toolnexus answers with the returned `optionId`. An error or
+  an empty id answers the first reject-kind option, else `cancelled`. It runs off the read loop, so
+  it may block on a human — but `PermissionTimeout` still bounds the whole turn.
+- **`OnUpdate`** — the raw params of **every** `session/update` (message and thought chunks, tool
+  calls and their updates, plans), before filtering. It runs on the read loop: it must not block.
+- **`GenerateCtx`** — cancelling its context sends the `session/cancel` notification, waits for the
+  turn's reply and returns the cancellation error. The process and session stay warm.
+- **`GenerateStream`** — passed as `InProcessOptions.GenerateStream`, `Client.Stream` streams
+  instead of refusing: message chunks become text deltas, and the agent's own tool calls arrive as
+  `tool_call` / `tool_result` events with `Via: "acp"`. The loop **never executes** them.
+
+<Aside type="caution" title="Go only today">
+The other six ports ship an ACP client without these hooks (tracked in
+`openspec/changes/add-go-host-asks`, task 2.6d). A slow human approval in `OnPermission` can still
+hit `PermissionTimeout` (default 30s); raise it for interactive approval.
+</Aside>
+
+## When to use it
+
+Building a UI over a coding agent (devin, opencode, …) driven through ACP: a plan mode that rejects
+every write, a human approval prompt, a live transcript of the agent's thoughts and tool calls, or a
+stop button that cancels the turn without killing the warm session.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Want your own gates on every tool? Use an HTTP model instead">
+With ACP the agent runs its own tools; the loop only sees them as `Via: "acp"` events and cannot
+gate them with `BeforeTool`. `OnPermission` is the only gate, and only for what the agent asks
+about. If every tool call must pass your hooks, drive an HTTP model with
+[`CreateClient`](/api/go/client/create/) and give it your toolkit.
+</Aside>
+
+## Examples
+
+Each example runs a tiny fake ACP agent — the snippet re-runs its own binary with
+`FAKE_ACP_AGENT=1` — so no real agent is spawned and nothing touches the network.
+
+### 1. The smallest useful call — a plan mode with `OnPermission`
+
+```go test
+package main
+
+import (
+	"bufio"
+	"context"
+	"encoding/json"
+	"fmt"
+	"log"
+	"os"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+// fakeAgent is a tiny ACP agent: this same binary, re-run with FAKE_ACP_AGENT=1.
+// Each turn it narrates (thought + tool_call), asks one permission, then reports
+// the tool's result and replies with the option the host picked.
+func fakeAgent() {
+	in := bufio.NewScanner(os.Stdin)
+	in.Buffer(make([]byte, 0, 1<<20), 1<<24)
+	send := func(v map[string]any) { b, _ := json.Marshal(v); os.Stdout.Write(append(b, '\n')) }
+	update := func(u map[string]any) {
+		send(map[string]any{"jsonrpc": "2.0", "method": "session/update", "params": map[string]any{"sessionId": "s1", "update": u}})
+	}
+	for in.Scan() {
+		var m struct {
+			ID     json.RawMessage `json:"id"`
+			Method string          `json:"method"`
+		}
+		if json.Unmarshal(in.Bytes(), &m) != nil {
+			continue
+		}
+		switch m.Method {
+		case "initialize":
+			send(map[string]any{"jsonrpc": "2.0", "id": m.ID, "result": map[string]any{"protocolVersion": 1}})
+		case "session/new":
+			send(map[string]any{"jsonrpc": "2.0", "id": m.ID, "result": map[string]any{"sessionId": "s1"}})
+		case "session/prompt":
+			update(map[string]any{"sessionUpdate": "agent_thought_chunk", "content": map[string]any{"type": "text", "text": "thinking"}})
+			update(map[string]any{"sessionUpdate": "tool_call", "toolCallId": "t1", "title": "ls", "rawInput": map[string]any{"path": "."}})
+			send(map[string]any{"jsonrpc": "2.0", "id": "p1", "method": "session/request_permission", "params": map[string]any{
+				"sessionId": "s1", "toolCall": map[string]any{"toolCallId": "t1", "title": "ls"},
+				"options": []any{
+					map[string]any{"optionId": "allow", "kind": "allow_once", "name": "Allow"},
+					map[string]any{"optionId": "reject", "kind": "reject_once", "name": "Reject"},
+				},
+			}})
+			in.Scan() // the host's answer
+			var ans struct {
+				Result struct {
+					Outcome struct {
+						OptionID string `json:"optionId"`
+					} `json:"outcome"`
+				} `json:"result"`
+			}
+			_ = json.Unmarshal(in.Bytes(), &ans)
+			update(map[string]any{"sessionUpdate": "tool_call_update", "toolCallId": "t1", "status": "completed",
+				"content": []any{map[string]any{"type": "content", "content": map[string]any{"type": "text", "text": "a.txt"}}}})
+			update(map[string]any{"sessionUpdate": "agent_message_chunk", "content": map[string]any{"type": "text", "text": "picked " + ans.Result.Outcome.OptionID}})
+			send(map[string]any{"jsonrpc": "2.0", "id": m.ID, "result": map[string]any{"stopReason": "end_turn"}})
+		}
+	}
+}
+
+func agentOptions() toolnexus.ACPOptions {
+	self, err := os.Executable()
+	if err != nil {
+		log.Fatal(err)
+	}
+	return toolnexus.ACPOptions{Command: self, Env: []string{"FAKE_ACP_AGENT=1"}}
+}
+
+func main() {
+	if os.Getenv("FAKE_ACP_AGENT") == "1" {
+		fakeAgent()
+		return
+	}
+	opts := agentOptions()
+	var asked string
+	opts.OnPermission = func(_ context.Context, params json.RawMessage) (string, error) {
+		var p struct {
+			ToolCall struct {
+				Title string `json:"title"`
+			} `json:"toolCall"`
+		}
+		_ = json.Unmarshal(params, &p)
+		asked = p.ToolCall.Title
+		return "reject", nil // a plan mode: never let the agent act
+	}
+	c, err := toolnexus.LoadACP(context.Background(), opts)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer c.Close()
+
+	resp, err := c.Generate(toolnexus.InProcessRequest{Messages: []any{map[string]any{"role": "user", "content": "list files"}}})
+	if err != nil {
+		log.Fatal(err)
+	}
+	if asked != "ls" || resp.Content != "picked reject" {
+		log.Fatalf("asked=%q content=%q", asked, resp.Content)
+	}
+	fmt.Println("ok:", resp.Content)
+}
+```
+
+### 2. The realistic case — a live transcript with `OnUpdate`
+
+```go test
+package main
+
+import (
+	"bufio"
+	"context"
+	"encoding/json"
+	"fmt"
+	"log"
+	"os"
+	"strings"
+	"sync"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+// fakeAgent is a tiny ACP agent: this same binary, re-run with FAKE_ACP_AGENT=1.
+// Each turn it narrates (thought + tool_call), asks one permission, then reports
+// the tool's result and replies with the option the host picked.
+func fakeAgent() {
+	in := bufio.NewScanner(os.Stdin)
+	in.Buffer(make([]byte, 0, 1<<20), 1<<24)
+	send := func(v map[string]any) { b, _ := json.Marshal(v); os.Stdout.Write(append(b, '\n')) }
+	update := func(u map[string]any) {
+		send(map[string]any{"jsonrpc": "2.0", "method": "session/update", "params": map[string]any{"sessionId": "s1", "update": u}})
+	}
+	for in.Scan() {
+		var m struct {
+			ID     json.RawMessage `json:"id"`
+			Method string          `json:"method"`
+		}
+		if json.Unmarshal(in.Bytes(), &m) != nil {
+			continue
+		}
+		switch m.Method {
+		case "initialize":
+			send(map[string]any{"jsonrpc": "2.0", "id": m.ID, "result": map[string]any{"protocolVersion": 1}})
+		case "session/new":
+			send(map[string]any{"jsonrpc": "2.0", "id": m.ID, "result": map[string]any{"sessionId": "s1"}})
+		case "session/prompt":
+			update(map[string]any{"sessionUpdate": "agent_thought_chunk", "content": map[string]any{"type": "text", "text": "thinking"}})
+			update(map[string]any{"sessionUpdate": "tool_call", "toolCallId": "t1", "title": "ls", "rawInput": map[string]any{"path": "."}})
+			send(map[string]any{"jsonrpc": "2.0", "id": "p1", "method": "session/request_permission", "params": map[string]any{
+				"sessionId": "s1", "toolCall": map[string]any{"toolCallId": "t1", "title": "ls"},
+				"options": []any{
+					map[string]any{"optionId": "allow", "kind": "allow_once", "name": "Allow"},
+					map[string]any{"optionId": "reject", "kind": "reject_once", "name": "Reject"},
+				},
+			}})
+			in.Scan() // the host's answer
+			var ans struct {
+				Result struct {
+					Outcome struct {
+						OptionID string `json:"optionId"`
+					} `json:"outcome"`
+				} `json:"result"`
+			}
+			_ = json.Unmarshal(in.Bytes(), &ans)
+			update(map[string]any{"sessionUpdate": "tool_call_update", "toolCallId": "t1", "status": "completed",
+				"content": []any{map[string]any{"type": "content", "content": map[string]any{"type": "text", "text": "a.txt"}}}})
+			update(map[string]any{"sessionUpdate": "agent_message_chunk", "content": map[string]any{"type": "text", "text": "picked " + ans.Result.Outcome.OptionID}})
+			send(map[string]any{"jsonrpc": "2.0", "id": m.ID, "result": map[string]any{"stopReason": "end_turn"}})
+		}
+	}
+}
+
+func agentOptions() toolnexus.ACPOptions {
+	self, err := os.Executable()
+	if err != nil {
+		log.Fatal(err)
+	}
+	return toolnexus.ACPOptions{Command: self, Env: []string{"FAKE_ACP_AGENT=1"}}
+}
+
+func main() {
+	if os.Getenv("FAKE_ACP_AGENT") == "1" {
+		fakeAgent()
+		return
+	}
+	opts := agentOptions()
+	var mu sync.Mutex
+	var kinds []string
+	opts.OnUpdate = func(raw json.RawMessage) { // runs on the read loop: never block here
+		var u struct {
+			Update struct {
+				SessionUpdate string `json:"sessionUpdate"`
+			} `json:"update"`
+		}
+		_ = json.Unmarshal(raw, &u)
+		mu.Lock()
+		kinds = append(kinds, u.Update.SessionUpdate)
+		mu.Unlock()
+	}
+	c, err := toolnexus.LoadACP(context.Background(), opts)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer c.Close()
+
+	// GenerateCtx is Generate with a context: cancelling it sends session/cancel.
+	resp, err := c.GenerateCtx(context.Background(), toolnexus.InProcessRequest{Messages: []any{map[string]any{"role": "user", "content": "list files"}}})
+	if err != nil {
+		log.Fatal(err)
+	}
+	mu.Lock()
+	got := strings.Join(kinds, ",")
+	mu.Unlock()
+	if got != "agent_thought_chunk,tool_call,tool_call_update,agent_message_chunk" {
+		log.Fatalf("updates seen: %s", got)
+	}
+	// Without OnPermission the first allow option is picked, as before.
+	if resp.Content != "picked allow" {
+		log.Fatalf("content = %q (thoughts must never reach it)", resp.Content)
+	}
+	fmt.Println("ok:", got)
+}
+```
+
+### 3. The full surface — `Client.Stream` over ACP with `GenerateStream`
+
+```go test
+package main
+
+import (
+	"bufio"
+	"context"
+	"encoding/json"
+	"fmt"
+	"log"
+	"os"
+	"strings"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+// fakeAgent is a tiny ACP agent: this same binary, re-run with FAKE_ACP_AGENT=1.
+// Each turn it narrates (thought + tool_call), asks one permission, then reports
+// the tool's result and replies with the option the host picked.
+func fakeAgent() {
+	in := bufio.NewScanner(os.Stdin)
+	in.Buffer(make([]byte, 0, 1<<20), 1<<24)
+	send := func(v map[string]any) { b, _ := json.Marshal(v); os.Stdout.Write(append(b, '\n')) }
+	update := func(u map[string]any) {
+		send(map[string]any{"jsonrpc": "2.0", "method": "session/update", "params": map[string]any{"sessionId": "s1", "update": u}})
+	}
+	for in.Scan() {
+		var m struct {
+			ID     json.RawMessage `json:"id"`
+			Method string          `json:"method"`
+		}
+		if json.Unmarshal(in.Bytes(), &m) != nil {
+			continue
+		}
+		switch m.Method {
+		case "initialize":
+			send(map[string]any{"jsonrpc": "2.0", "id": m.ID, "result": map[string]any{"protocolVersion": 1}})
+		case "session/new":
+			send(map[string]any{"jsonrpc": "2.0", "id": m.ID, "result": map[string]any{"sessionId": "s1"}})
+		case "session/prompt":
+			update(map[string]any{"sessionUpdate": "agent_thought_chunk", "content": map[string]any{"type": "text", "text": "thinking"}})
+			update(map[string]any{"sessionUpdate": "tool_call", "toolCallId": "t1", "title": "ls", "rawInput": map[string]any{"path": "."}})
+			send(map[string]any{"jsonrpc": "2.0", "id": "p1", "method": "session/request_permission", "params": map[string]any{
+				"sessionId": "s1", "toolCall": map[string]any{"toolCallId": "t1", "title": "ls"},
+				"options": []any{
+					map[string]any{"optionId": "allow", "kind": "allow_once", "name": "Allow"},
+					map[string]any{"optionId": "reject", "kind": "reject_once", "name": "Reject"},
+				},
+			}})
+			in.Scan() // the host's answer
+			var ans struct {
+				Result struct {
+					Outcome struct {
+						OptionID string `json:"optionId"`
+					} `json:"outcome"`
+				} `json:"result"`
+			}
+			_ = json.Unmarshal(in.Bytes(), &ans)
+			update(map[string]any{"sessionUpdate": "tool_call_update", "toolCallId": "t1", "status": "completed",
+				"content": []any{map[string]any{"type": "content", "content": map[string]any{"type": "text", "text": "a.txt"}}}})
+			update(map[string]any{"sessionUpdate": "agent_message_chunk", "content": map[string]any{"type": "text", "text": "picked " + ans.Result.Outcome.OptionID}})
+			send(map[string]any{"jsonrpc": "2.0", "id": m.ID, "result": map[string]any{"stopReason": "end_turn"}})
+		}
+	}
+}
+
+func agentOptions() toolnexus.ACPOptions {
+	self, err := os.Executable()
+	if err != nil {
+		log.Fatal(err)
+	}
+	return toolnexus.ACPOptions{Command: self, Env: []string{"FAKE_ACP_AGENT=1"}}
+}
+
+func main() {
+	if os.Getenv("FAKE_ACP_AGENT") == "1" {
+		fakeAgent()
+		return
+	}
+	acp, err := toolnexus.LoadACP(context.Background(), agentOptions())
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer acp.Close()
+
+	client := toolnexus.CreateInProcessClient(toolnexus.InProcessOptions{
+		Model:          "fake-acp",
+		GenerateStream: acp.GenerateStream, // makes Client.Stream work
+	})
+	ch, err := client.Stream(context.Background(), "list files", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	var text strings.Builder
+	var tools []string
+	for ev := range ch {
+		switch ev.Type {
+		case "text":
+			text.WriteString(ev.Delta)
+		case "tool_call", "tool_result":
+			// The agent ran this itself: Via "acp", never executed by the loop.
+			tools = append(tools, ev.Type+":"+ev.Name+":"+ev.Via)
+		case "error":
+			log.Fatal(ev.Err)
+		}
+	}
+	if text.String() != "picked allow" || strings.Join(tools, ",") != "tool_call:ls:acp,tool_result:ls:acp" {
+		log.Fatalf("text=%q tools=%v", text.String(), tools)
+	}
+	fmt.Println("ok:", text.String(), tools)
+}
+```
+
+## See also
+
+- [`CreateClient`](/api/go/client/create/) — The unified client: system prompt, skills injection, parallel and chained tool calls, retries, memory.
+- [`Client.Stream`](/api/go/client/stream/) — The streaming loop: text deltas, tool-call events, and suspension events as they happen.
+- [`Hooks`](/api/go/client/hooks/) — Intercept before/after model calls and tool calls: audit, redact, veto, or rewrite.

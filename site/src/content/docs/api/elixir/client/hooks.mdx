@@ -267,8 +267,30 @@ the loop tries to call it — it never silently falls through to "hook absent" b
 |---|---|---|---|
 | `:before_llm` | `%{messages, tools, model, turn}` | `%{messages: ..., tools: ...}` | Replaces the working transcript/tool list for the rest of the run. |
 | `:after_llm` | `%{response, model, turn}` | (ignored) | Observe the raw provider payload — logging, cost, tracing. |
-| `:before_tool` | `%{name, args, id, turn}` | `%{result: %ToolResult{}}` or `%{args: map()}` | Short-circuits the tool (deny/cache/dry-run), or rewrites its arguments. |
+| `:before_tool` | `%{name, args, id, turn, hints}` | `%{result: %ToolResult{}}` or `%{args: map()}` | Short-circuits the tool (deny/cache/dry-run), or rewrites its arguments. |
 | `:after_tool` | `%{name, args, result, id, turn}` | `%{result: %ToolResult{}}` | Transforms the result (redact, annotate) before it joins the transcript. |
+
+## Permission gates and tool hints
+
+`before_tool` events carry the tool's `hints` — `%Toolnexus.ToolHints{read_only, destructive,
+open_world}`, or `nil` when unknown (treat as mutating). Every builtin sets them (`read`, `grep`,
+`glob`, `question`, `todowrite` read-only; `webfetch` read-only and open-world; `write`, `edit`,
+`apply_patch` destructive; `bash` destructive and open-world), MCP tools map their annotations,
+and your own `%Tool{hints: ...}` is passed through. Hints are advisory and never sent to the model.
+
+A permission gate is a `before_tool` hook, there is no separate option: return `nil` to allow,
+`%{result: %ToolResult{is_error: true, ...}}` to deny (the model sees the error and the run
+continues), or a pending result to ask (resolved by `:wait_for` / `:wait_for_ctx`). Under
+`:tool_tiers`, a `call_tool` call is unwrapped first, so the gate sees the real tool.
+
+```elixir
+hooks: %{
+  before_tool: fn ev ->
+    unless ev.hints && ev.hints.read_only,
+      do: %{result: %Toolnexus.ToolResult{output: "denied: plan mode allows read-only tools only", is_error: true}}
+  end
+}
+```
 
 ## See also
 

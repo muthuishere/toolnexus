@@ -530,6 +530,15 @@ public sealed partial class LlmClient
         return (ra, rr);
     }
 
+    /// <summary>The RunResult record for a tool call: a ToolTiers <c>call_tool</c> call records the REAL
+    /// tool name and its inner arguments (after any BeforeTool rewrite), as hooks and stream events see
+    /// it; the transcript keeps the wrapper. tool_search stays tool_search.</summary>
+    private ToolCall ToolCallRecord(string name, IDictionary<string, object?> args, ToolResult result)
+    {
+        var (real, inner, _) = UnwrapCall(name, args);
+        return new ToolCall(real, inner, result.Output, result.IsError, result.Metadata);
+    }
+
     private async Task<(IDictionary<string, object?> Args, ToolResult Result)> RunToolDirectAsync(
         Toolkit? toolkit, string name, IDictionary<string, object?> args, string? id, int turn,
         CancellationToken cancellationToken)
@@ -1336,7 +1345,7 @@ public sealed partial class LlmClient
                         runs[i] = (runs[i].Args, r.Result);
                         halted = r.Halted;
                     }
-                    toolCalls.Add(new ToolCall(names[i], runs[i].Args, runs[i].Result.Output, runs[i].Result.IsError, runs[i].Result.Metadata));
+                    toolCalls.Add(ToolCallRecord(names[i], runs[i].Args, runs[i].Result));
                     messages.Add(new Dictionary<string, object?>
                     {
                         ["role"] = "tool",
@@ -1449,7 +1458,7 @@ public sealed partial class LlmClient
                         runs[i] = (runs[i].Args, r.Result);
                         halted = r.Halted;
                     }
-                    toolCalls.Add(new ToolCall(names[i], runs[i].Args, runs[i].Result.Output, runs[i].Result.IsError, runs[i].Result.Metadata));
+                    toolCalls.Add(ToolCallRecord(names[i], runs[i].Args, runs[i].Result));
                     // §8A: native — the parts are blocks inside tool_result.content, keyed to the
                     // tool_use_id. No relocation: it would discard that association and break
                     // cache breakpoints.
@@ -1653,7 +1662,7 @@ public sealed partial class LlmClient
                         halted = r.Halted;
                     }
                     var rr = runs[i];
-                    toolCalls.Add(new ToolCall(slot[1], rr.Args, rr.Result.Output, rr.Result.IsError, rr.Result.Metadata));
+                    toolCalls.Add(ToolCallRecord(slot[1], rr.Args, rr.Result));
                     messages.Add(new Dictionary<string, object?> { ["role"] = "tool", ["tool_call_id"] = slot[0], ["content"] = ToolMessageContent(rr.Result) });
                     relocations.Add((slot[1], slot[0], ContentEmit.NonText(rr.Result.Parts)));
                     if (halted != null)
@@ -1855,7 +1864,7 @@ public sealed partial class LlmClient
                         halted = rp.Halted;
                     }
                     var r = runs[i];
-                    toolCalls.Add(new ToolCall(name, r.Args, r.Result.Output, r.Result.IsError, r.Result.Metadata));
+                    toolCalls.Add(ToolCallRecord(name, r.Args, r.Result));
                     results.Add(new Dictionary<string, object?>
                     {
                         ["type"] = "tool_result",

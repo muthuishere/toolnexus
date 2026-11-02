@@ -201,6 +201,30 @@ the reminder asks it to save.
 | `CountTokens` | `CountTokensFn?` | Token estimator. Default: `ceil(len(JSON) / 4)` summed per message — an estimator, not a tokenizer. |
 | `FlushToMemory` | `bool` | Inject a pre-compact system reminder to persist durable facts via the §7E `memory` tool. Default `false`. |
 
+## `OnCompact` — tell the UI
+
+```csharp
+public Action<CompactInfo>? OnCompact { get; init; }
+
+public sealed record CompactInfo(int TokensBefore, int TokensAfter, int MessagesBefore, int MessagesAfter,
+    int Summarized, string Summary, IReadOnlyList<object?> Folded);
+```
+
+Called after each compaction, never on a no-op, so a host can show "context compacted". `Folded`
+is the summarized messages verbatim, for a host that persists them (the loop saves only the
+compacted transcript). It gets no cancellation token (the C# `BeforeLLM` hook carries none). Since
+0.22.0 the compactor also keeps a turn's sole user prompt when the rest is tool traffic, and does
+nothing when the result would not be smaller.
+
+```csharp
+var compactor = Compaction.Compactor(new Compaction.Options
+{
+    MaxTokens = 8000,
+    Summarize = older => Summarize(older),
+    OnCompact = info => Console.WriteLine($"context compacted: {info.TokensBefore} → {info.TokensAfter} tokens"),
+});
+```
+
 ## See also
 
 - [`Home.MemoryTool`](/api/csharp/persona/memory-tool/) — What `FlushToMemory`'s reminder points the model at.

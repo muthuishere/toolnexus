@@ -1,0 +1,175 @@
+---
+title: "promptCache"
+description: "Mark the stable prompt prefix for the provider (Anthropic cache breakpoints, OpenAI prompt_cache_key) and read cacheRead/cacheWrite tokens from usage. — JavaScript."
+sidebar:
+  label: "promptCache"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>JavaScript</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/js/src/promptcache.ts">js/src/promptcache.ts</a>
+</p>
+```ts
+interface PromptCacheOptions {
+  key?: string      // openai prompt_cache_key; one per session
+  longTTL?: boolean // anthropic ttl: "1h"
+}
+createClient({ promptCache?: PromptCacheOptions, … })
+
+interface Usage { promptTokens; completionTokens; totalTokens; cacheReadTokens?; cacheWriteTokens? }
+```
+
+Marks the stable prefix of every request for the provider's prompt cache. Off unless set; with it
+absent the request body is byte-identical to before.
+
+- **anthropic** — `cache_control: { type: "ephemeral" }` (plus `ttl: "1h"` with `longTTL`) on the
+  last tool, on the system prompt (a string becomes one text block) and on the last content block
+  of the latest message.
+- **openai** — `prompt_cache_key = key`; the prefix is cached automatically by the provider.
+- **gemini** — nothing yet (explicit `cachedContent` is deferred, `openspec/changes/add-prompt-cache`).
+
+Applied before `requestParams` and `bodyTransform`; the transcript itself is never mutated.
+`RunResult.usage` and the stream's `usage` event report `cacheReadTokens` (anthropic
+`cache_read_input_tokens`, openai `prompt_tokens_details.cached_tokens`) and `cacheWriteTokens`
+(anthropic `cache_creation_input_tokens`), present once a provider reports any.
+
+<Aside type="caution" title="Context size under anthropic">
+Anthropic's input count excludes cached tokens: the real context is
+`promptTokens + cacheReadTokens + cacheWriteTokens`. Under openai `promptTokens` already includes
+`cacheReadTokens`. A UI showing context use from `promptTokens` alone under-reports a cached
+anthropic session.
+</Aside>
+
+## When to use it
+
+Any multi-turn session with a large stable prefix — a long system prompt, a skills catalog, many
+tool schemas. Cache hits start on the second request and cut cost and latency of every turn after.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Keep the prefix stable, or the cache never hits">
+`promptCache` only marks the prefix. A tool registered mid-session changes the tools array and
+breaks it. Pair it with [`toolTiers`](/api/javascript/client/tool-tiers/), which keeps the tools
+array fixed and loads extra schemas through `tool_search` instead.
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call — openai cache key
+
+```ts test
+import assert from "node:assert"
+import http from "node:http"
+import { createClient, createToolkit, defineTool } from "toolnexus"
+
+// A local OpenAI-style stub: replies[i] is the i-th assistant message. Records every body.
+function stub(replies: any[], usage = (n: number) => ({ prompt_tokens: 10, completion_tokens: 2, total_tokens: 12 })) {
+  const bodies: any[] = []
+  const server = http.createServer((req, res) => {
+    let raw = ""
+    req.on("data", (c) => (raw += c))
+    req.on("end", () => {
+      bodies.push(JSON.parse(raw))
+      const n = bodies.length
+      const msg = replies[Math.min(n, replies.length) - 1]
+      res.writeHead(200, { "content-type": "application/json" })
+      res.end(JSON.stringify({ choices: [{ message: { content: null, ...msg }, finish_reason: msg.tool_calls ? "tool_calls" : "stop" }], usage: usage(n) }))
+    })
+  })
+  return new Promise<{ url: string; bodies: any[]; close: () => void }>((r) =>
+    server.listen(0, "127.0.0.1", () => r({ url: `http://127.0.0.1:${(server.address() as any).port}`, bodies, close: () => server.close() })))
+}
+
+const llm = await stub([{ content: "hi" }])
+const client = createClient({ baseUrl: llm.url, style: "openai", model: "stub", apiKey: "YOUR_KEY_HERE", promptCache: { key: "session-1" } })
+await client.run("hi", { toolkit: await createToolkit({ builtins: false }) })
+assert.equal(llm.bodies[0].prompt_cache_key, "session-1")
+llm.close()
+console.log("ok:", llm.bodies[0].prompt_cache_key)
+```
+
+### 2. The realistic case — anthropic breakpoints and the 1-hour lifetime
+
+```ts test
+import assert from "node:assert"
+import http from "node:http"
+import { createClient, createToolkit, defineTool } from "toolnexus"
+
+let body: any
+const server = http.createServer((req, res) => {
+  let raw = ""
+  req.on("data", (c) => (raw += c))
+  req.on("end", () => {
+    body = JSON.parse(raw)
+    res.writeHead(200, { "content-type": "application/json" })
+    res.end(JSON.stringify({ content: [{ type: "text", text: "hi" }], stop_reason: "end_turn",
+      usage: { input_tokens: 5, output_tokens: 1, cache_read_input_tokens: 900, cache_creation_input_tokens: 40 } }))
+  })
+})
+await new Promise<void>((r) => server.listen(0, "127.0.0.1", r))
+const tk = await createToolkit({ builtins: false, extraTools: [defineTool({ name: "echo", description: "Echo", run: () => "x" })] })
+const client = createClient({
+  baseUrl: `http://127.0.0.1:${(server.address() as any).port}`, style: "anthropic", model: "stub",
+  apiKey: "YOUR_KEY_HERE", systemPrompt: "You are terse.", promptCache: { longTTL: true },
+})
+const res = await client.run("hi", { toolkit: tk })
+const mark = { type: "ephemeral", ttl: "1h" }
+assert.deepEqual(body.tools.at(-1).cache_control, mark)
+assert.deepEqual(body.system.at(-1).cache_control, mark)
+assert.deepEqual(body.messages.at(-1).content.at(-1).cache_control, mark)
+assert.equal(res.usage.cacheReadTokens, 900)
+assert.equal(res.usage.cacheWriteTokens, 40)
+// anthropic: the real context is promptTokens + cacheReadTokens + cacheWriteTokens
+assert.equal(res.usage.promptTokens + res.usage.cacheReadTokens! + res.usage.cacheWriteTokens!, 945)
+await tk.close()
+server.close()
+console.log("ok: 3 breakpoints, cache read", res.usage.cacheReadTokens)
+```
+
+### 3. The full surface — watch cache hits across turns of one session
+
+```ts test
+import assert from "node:assert"
+import http from "node:http"
+import { createClient, createToolkit, defineTool } from "toolnexus"
+
+// A local OpenAI-style stub: replies[i] is the i-th assistant message. Records every body.
+function stub(replies: any[], usage = (n: number) => ({ prompt_tokens: 10, completion_tokens: 2, total_tokens: 12 })) {
+  const bodies: any[] = []
+  const server = http.createServer((req, res) => {
+    let raw = ""
+    req.on("data", (c) => (raw += c))
+    req.on("end", () => {
+      bodies.push(JSON.parse(raw))
+      const n = bodies.length
+      const msg = replies[Math.min(n, replies.length) - 1]
+      res.writeHead(200, { "content-type": "application/json" })
+      res.end(JSON.stringify({ choices: [{ message: { content: null, ...msg }, finish_reason: msg.tool_calls ? "tool_calls" : "stop" }], usage: usage(n) }))
+    })
+  })
+  return new Promise<{ url: string; bodies: any[]; close: () => void }>((r) =>
+    server.listen(0, "127.0.0.1", () => r({ url: `http://127.0.0.1:${(server.address() as any).port}`, bodies, close: () => server.close() })))
+}
+
+// The stub reports 90 cached prompt tokens from the second request on, as a provider would.
+const llm = await stub([{ content: "one" }, { content: "two" }],
+  (n) => ({ prompt_tokens: 100, completion_tokens: 1, total_tokens: 101, prompt_tokens_details: { cached_tokens: n > 1 ? 90 : 0 } }))
+const tk = await createToolkit({ builtins: false })
+const client = createClient({ baseUrl: llm.url, style: "openai", model: "stub", apiKey: "YOUR_KEY_HERE", promptCache: { key: "s" } })
+const first = await client.ask("hi", { toolkit: tk, id: "s" })
+const second = await client.ask("again", { toolkit: tk, id: "s" })
+assert.equal(first.usage.cacheReadTokens ?? 0, 0)
+assert.equal(second.usage.cacheReadTokens, 90)   // a drop here means the prefix changed
+assert.ok(llm.bodies.every((b) => b.prompt_cache_key === "s"))
+await tk.close()
+llm.close()
+console.log("ok: cache read", first.usage.cacheReadTokens ?? 0, "->", second.usage.cacheReadTokens)
+```
+
+## See also
+
+- [`createClient`](/api/javascript/client/create/) — The unified client: system prompt, skills injection, parallel and chained tool calls, retries, memory.
+- [`Client.run`](/api/javascript/client/run/) — Send a prompt, let the loop call tools until the model stops, get a RunResult.
+- [`Client.stream`](/api/javascript/client/stream/) — The streaming loop: text deltas, tool-call events, and suspension events as they happen.
+- [`Hooks`](/api/javascript/client/hooks/) — Intercept before/after model calls and tool calls: audit, redact, veto, or rewrite.

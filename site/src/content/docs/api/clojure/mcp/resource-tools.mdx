@@ -1,0 +1,75 @@
+---
+title: "toolnexus.mcp/resource-tools"
+description: "Opt-in list_mcp_resources / read_mcp_resource tools over every connected MCP server. Read-only. — Clojure."
+sidebar:
+  label: "toolnexus.mcp/resource-tools"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Clojure (JVM) + cljgo</strong> · package <code>net.clojars.muthuishere/toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §2</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/clojure/src/toolnexus/mcp.cljc">clojure/src/toolnexus/mcp.cljc</a>
+</p>
+
+```clojure
+(mcp/resource-tools source) ; source: a from-config result, or a seq of connections
+;; => [list_mcp_resources read_mcp_resource]   both read-only (:hints {:read-only true …})
+
+;; list_mcp_resources {:server "docs"}            ; :server optional, default all
+;; read_mcp_resource  {:server "docs" :uri "…"}
+```
+
+MCP servers expose **resources** (files, records, documents) beside their tools. `resource-tools`
+returns two tools bound to the *connected* servers of a source: `list_mcp_resources` (uri, name,
+description, mimeType, optionally for one server) and `read_mcp_resource`. They are opt-in: add them
+to the toolkit only when the model should browse resources. A source with no connected server still
+returns both; they report that no server is connected. They stop working once the source is
+disconnected.
+
+## When to use it
+
+- **Docs or knowledge servers** that publish content as resources rather than tools.
+- **When the model should discover context itself** instead of the host pre-loading it.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Read the resource yourself when the host already knows which one">
+If the host knows the URI the model needs, read it and put it in the prompt — one less round trip.
+Give the model the tools when it has to choose.
+</Aside>
+
+## Examples
+
+### 1. Two read-only tools, even with nothing connected
+
+```clojure test
+(require '[toolnexus.mcp :as mcp]
+         '[toolnexus.tool :as tool])
+
+(println)
+
+(def rts (mcp/resource-tools []))
+(assert (= ["list_mcp_resources" "read_mcp_resource"] (mapv :name rts)))
+(assert (every? #(true? (get-in % [:hints :read-only])) rts))
+
+(def r (tool/execute (tool/toolkit rts) "list_mcp_resources" {}))
+(println (:output r))
+(println "OK")
+```
+
+### 2. Added beside the server's tools
+
+```clojure
+(def src (mcp/from-config (slurp "mcp.json")))
+(def tk  (tool/toolkit (concat (:tools src) (mcp/resource-tools src))))
+```
+
+### 3. Reading one resource directly
+
+```clojure
+(tool/execute tk "read_mcp_resource" {:server "docs" :uri "file:///guide.md"})
+```
+
+## See also
+
+- [`mcp/from-config`](/api/clojure/mcp/load/) — the source these tools bind to.

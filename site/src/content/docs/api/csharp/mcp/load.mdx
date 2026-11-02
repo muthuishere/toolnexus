@@ -132,6 +132,33 @@ others. A per-server `timeout` config value bounds that one server; see
 `CancellationToken`.
 </Aside>
 
+## Per-server readiness — `McpLoadOptions.OnServer`
+
+```csharp
+public static Task<McpSource> LoadAsync(object input, McpLoadOptions options, CancellationToken ct = default);
+
+public sealed class McpLoadOptions
+{
+    public Func<Request, Task<Answer>>? WaitFor { get; set; }
+    public Action<McpServerResult>? OnServer { get; set; }
+}
+
+public sealed record McpServerResult(string Name, string Status, IReadOnlyList<ITool> Tools, Exception? Error);
+// Status: "connected" | "failed" | "disabled"
+```
+
+`OnServer` fires once per server the moment it connects, fails or is found disabled, so a host can
+offer one server's tools without waiting for a slow one. Calls are serialized. The load still
+returns after every server finishes. MCP tool annotations become [`ITool.Hints`](/api/csharp/client/hooks/),
+and [`McpSource.ResourceTools`](/api/csharp/mcp/resource-tools/) adds tools for MCP resources.
+
+```csharp
+await using var src = await McpSource.LoadAsync("mcp.json", new McpLoadOptions
+{
+    OnServer = r => Console.WriteLine($"{r.Name}: {r.Status} ({r.Tools.Count} tools){(r.Error is null ? "" : " " + r.Error.Message)}"),
+});
+```
+
 ## Parameters
 
 | Parameter | Type | What it is |

@@ -291,6 +291,25 @@ public class Example {
 | `RunResult.pending` | `Request` | The unresolved suspension, non-null iff `status == "pending"`. |
 | `Context.answer()` | `Answer` | Set on the retry after `waitFor` resolves; a tool reads `answer.data()` for `kind:"input"`, ignores it for `kind:"authorization"`. |
 
+## `waitForCtx` — end the ask with the turn
+
+```java
+public Options waitForCtx(BiFunction<Request, CancelToken, Answer> v)
+```
+
+Like `waitFor`, but it also receives the run's `CancelToken`, so a resolver that blocks on a human
+can stop when the turn is cancelled. A cancel also interrupts the thread running it. When both are
+set, `waitForCtx` is used.
+
+```java
+LlmClient client = LlmClient.create(new LlmClient.Options()
+        .baseUrl(base).model("m").apiKey("YOUR_KEY_HERE")
+        .waitForCtx((request, cancel) -> approvals.await(request, cancel))); // your UI bridge
+```
+
+The same resolver answers a permission gate: return `ToolOverride.withResult(ToolResult.pending(request))` from `beforeTool` (see
+[Hooks](/api/java/client/hooks/)) and `waitFor` / `waitForCtx` resolves it.
+
 ## See also
 
 - [`ToolResult.pending`](/api/java/suspension/pending/) — Return a Pending from a tool to park the run until someone answers.

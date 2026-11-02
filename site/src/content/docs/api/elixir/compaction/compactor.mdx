@@ -186,6 +186,11 @@ IO.puts("ok: compactor ran inside a real Client.run — #{length(sent)} messages
 | `:keep_tail` | `pos_integer()` | `div(max_tokens, 2)` | Minimum tokens of recent tail to keep. |
 | `:count_tokens` | `([map] -> non_neg_integer())` | `estimate_tokens/1` | Token estimator (`ceil(byte_size(json)/4)` summed), overridable for exactness. |
 | `:flush_to_memory` | `boolean()` | `false` | Inject a system reminder to persist facts via the memory tool before summarizing. |
+| `:on_compact` | `(info -> any)` | `nil` | Called after each compaction, never on a no-op, with `%{tokens_before, tokens_after, messages_before, messages_after, summarized, summary, folded}`. `folded` is the summarized messages verbatim — the loop saves only the compacted transcript, so this is the host's one chance to keep them. |
+
+Since 0.22.0 the compactor never summarizes away the sole user prompt of a turn (one prompt
+followed only by tool traffic compacts to `[system?, prompt, summary]`), and it does nothing when
+the result would not be smaller than the input.
 
 ## See also
 

@@ -278,6 +278,29 @@ Toolnexus;` and `using Toolnexus.Agents;` into scope and the bare name is ambigu
 | `WaitFor` | `Func<Request, Task<Answer>>?` | This agent's §10 interpreter authority. |
 | `Hooks` / `OnMetric` | — | Per-agent §8 seams — replace the runtime-wide ones for this agent only. |
 
+## `AsToolWith` — a child under the parent's gates
+
+```csharp
+public ITool AsToolWith(Func<ToolContext?, RuntimeOptions> perCall);
+// RuntimeOptions.WaitFor: answers a child's suspension when no agent on its chain has its own
+```
+
+`AsTool(opts)` is `AsToolWith(_ => opts)`. Both stop the child when the calling turn is cancelled
+(the tool returns a cancelled error result). `AsToolWith` builds the runtime options per call from
+the calling tool's context, so the child gets the parent turn's `Hooks` (the same `BeforeTool`
+permission gate, which also sees the child's tool calls) and `WaitFor` (the same question bridge).
+A `Spec.Hooks` on the agent replaces `Hooks`, so leave it unset when the gate must hold. There is
+no token-by-token stream of the child's text.
+
+```csharp
+var tool = researcher.AsToolWith(ctx => new RuntimeOptions
+{
+    BaseUrl = baseUrl, Style = "openai", Model = model, ApiKey = "YOUR_KEY_HERE",
+    Hooks = parentHooks,          // the same permission gate as the parent turn
+    WaitFor = parentWaitFor,      // the child's questions reach the same UI
+});
+```
+
 ## See also
 
 - [`AgentRuntime`](/api/csharp/runtime/runtime/) — The six host verbs that drive sub-agents, plus the read-only list and inspect views.

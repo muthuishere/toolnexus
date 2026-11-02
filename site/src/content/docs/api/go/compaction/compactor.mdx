@@ -258,6 +258,51 @@ func main() {
 }
 ```
 
+## `OnCompact` — tell the user the context was compacted
+
+`CompactorOptions.OnCompact(ctx, CompactInfo)` is called after each compaction (never on a no-op)
+with `TokensBefore`/`TokensAfter`, `MessagesBefore`/`MessagesAfter`, `Summarized`, the `Summary`
+text, and `Folded` — the summarized messages verbatim, because the loop saves only the compacted
+transcript. Since 0.22.0 the compactor also never summarizes away the sole user prompt of a turn
+(one prompt then only tool traffic ⇒ `[system?, prompt, summary, …]`), and it does nothing when the
+result would not be smaller.
+
+```go test
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"strings"
+
+	tn "github.com/muthuishere/toolnexus/golang"
+	"github.com/muthuishere/toolnexus/golang/agents"
+)
+
+func main() {
+	msgs := []any{map[string]any{"role": "system", "content": "sys"}}
+	for i := 0; i < 20; i++ {
+		msgs = append(msgs,
+			map[string]any{"role": "user", "content": fmt.Sprintf("question %d %s", i, strings.Repeat("pad ", 20))},
+			map[string]any{"role": "assistant", "content": fmt.Sprintf("answer %d %s", i, strings.Repeat("pad ", 20))})
+	}
+	var info agents.CompactInfo
+	hook := agents.Compactor(agents.CompactorOptions{
+		MaxTokens: 400, KeepTail: 200,
+		Summarize: func(older []any) (string, error) { return "the user asked many questions", nil },
+		OnCompact: func(_ context.Context, ci agents.CompactInfo) { info = ci },
+	})
+	if _, err := hook(context.Background(), tn.BeforeLLMEvent{Messages: msgs}); err != nil {
+		log.Fatal(err)
+	}
+	if info.TokensAfter >= info.TokensBefore || len(info.Folded) != info.Summarized || info.Summarized == 0 {
+		log.Fatalf("unexpected compact info: %+v", info)
+	}
+	fmt.Printf("ok: context compacted %d -> %d tokens, %d messages folded\n", info.TokensBefore, info.TokensAfter, info.Summarized)
+}
+```
+
 ## CompactorOptions fields
 
 | Field | Type | Default | What it does |

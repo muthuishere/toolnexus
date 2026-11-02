@@ -117,6 +117,30 @@ Console.WriteLine($"ok: {schema.Count} built-ins as OpenAI schema, first={fnName
 | `apply_patch` | Apply a Begin/End Patch grammar patch; atomic. |
 | `todowrite` | Replace the session todo list; returns the rendered list. |
 
+## Opt-in builtins and 0.22 additions
+
+Absent unless the builtins config turns them on; the default ten are unchanged.
+
+| Config key | Adds |
+|---|---|
+| `background` (a [`BackgroundShells`](/api/csharp/builtins/background-shells/)) | `run_in_background` on `bash`, plus `bash_output` and `kill_shell` |
+| `webSearch` (a `WebSearchFn`: `(query, limit, ct) => Task<IReadOnlyList<WebSearchResult>>`) | `websearch` over the host's provider (the library ships none) |
+| `notebookEdit` (`true`) | `notebook_edit`: replace / insert / delete an `.ipynb` cell by id or index |
+
+```csharp
+WebSearchFn search = async (query, limit, ct) => await mySearch.QueryAsync(query, limit, ct);
+var tools = BuiltinTools.Create(new Dictionary<string, object?>
+{
+    ["webSearch"] = search,
+    ["notebookEdit"] = true,
+});
+```
+
+Also new: `grep` takes `context`, `before` and `after` (match lines `path:N:text`, context lines
+`path-N-text`, `--` between groups). `read` and `grep` report a cut in metadata, the text stays the
+same: a `read` window that stops early sets `truncated`, `totalLines`, `nextOffset`; a `grep` cut by
+`limit` sets `truncated`, `total`. Every builtin carries [tool hints](/api/csharp/client/hooks/).
+
 ## See also
 
 - [`BuiltinTools.Select`](/api/csharp/builtins/select/) — Pick which built-in file/shell/web tools are in play, by name or by source toggle.

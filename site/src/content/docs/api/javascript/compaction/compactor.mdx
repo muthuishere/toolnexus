@@ -163,6 +163,41 @@ await tk.close()
 console.log("ok: compacted to", sentMessages.length, "messages before the LLM call")
 ```
 
+{/* 0.22 */}
+## Hearing about a compaction — `onCompact` (0.22)
+
+`compactor({ …, onCompact })` calls `onCompact(info)` after each compaction (never on a no-op),
+awaited before the next model call. `info` is `{ tokensBefore, tokensAfter, messagesBefore,
+messagesAfter, summarized, summary, folded }`; `folded` is the summarized messages verbatim,
+because the loop saves only the compacted transcript. Since 0.22 the compactor also keeps a turn's
+sole user prompt (one prompt then only tool traffic ⇒ `[system?, prompt, summary, …]`) and does
+nothing when the result would not be smaller.
+
+```ts test
+import assert from "node:assert"
+import { agents } from "toolnexus"
+
+const infos: agents.CompactInfo[] = []
+const hook = agents.compactor({
+  maxTokens: 40, keepTail: 10,
+  summarize: async () => "they talked",
+  onCompact: (info) => { infos.push(info) },
+})
+const long = "word ".repeat(40)
+const messages = [
+  { role: "user", content: long }, { role: "assistant", content: long },
+  { role: "user", content: long }, { role: "assistant", content: "ok" }, { role: "user", content: "last" },
+] as any
+const out = await hook({ messages, tools: [] } as any)
+assert.ok(out, "compacted")
+assert.equal(infos.length, 1)
+assert.ok(infos[0].tokensAfter < infos[0].tokensBefore)
+assert.equal(infos[0].folded.length, infos[0].summarized)
+assert.equal(infos[0].summary, "they talked")
+console.log("ok:", infos[0].tokensBefore, "->", infos[0].tokensAfter, "tokens")
+```
+{/* /0.22 */}
+
 ## Options
 
 | Option | Type | What it does |

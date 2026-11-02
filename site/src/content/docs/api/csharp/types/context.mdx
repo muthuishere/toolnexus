@@ -175,6 +175,17 @@ world changed out-of-band — the session is simply valid now — so you re-run 
 ignore `Data`.
 </Aside>
 
+## `CallId`
+
+`ToolContext.CallId` is the model's id for this tool call when the client loop runs the tool, and
+`null` outside the loop. One message's tool calls run concurrently, so this is how a tool tells
+sibling calls apart (for example, which subagent call is the parent of a UI row).
+
+```csharp
+var tool = NativeTool.Of("track", "Tracked work", null,
+    (IDictionary<string, object?> a, ToolContext? ctx) => $"call {ctx?.CallId ?? "(outside the loop)"}");
+```
+
 ## Members
 
 | Member | Type | What it is |

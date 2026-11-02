@@ -1,0 +1,133 @@
+---
+title: "BackgroundShells"
+description: "Opt-in background shells: bash gains run_in_background, bash_output reads new output, kill_shell stops the process group. The host owns the registry and closes it. — Java."
+sidebar:
+  label: "BackgroundShells"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Java</strong> · package <code>io.github.muthuishere:toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §4A</a>
+</p>
+
+```java
+public final class BackgroundShells implements AutoCloseable {
+    public BackgroundShells()
+    public List<Info> list()
+    public void kill(String id)
+    public void closeAll()          // also close()
+    public record Info(String id, String command, Instant started,
+                       boolean running, int exitCode, boolean killed) {}
+}
+
+// pass it as the `background` key of the builtins config
+Map.of("background", shells, "killGraceMs", 2000)
+```
+
+A host-owned registry of commands started by `bash` with `run_in_background: true`. With it set:
+
+- `bash` gains `run_in_background` and returns at once with a background id (also in
+  `metadata.backgroundId`).
+- `bash_output {id}` returns the output produced since the last read plus
+  `[status: running|killed|exited with code N]`. N is `-1` when the shell was killed by a signal not
+  sent by `kill_shell` (on the JVM a command that itself exits 129..159 also reads as -1).
+- `kill_shell {id}` stops the whole process group: SIGTERM, `killGraceMs`, SIGKILL.
+
+Without it, the default ten builtins are unchanged. A background command is NOT tied to the turn
+that started it: call `closeAll()` (or use try-with-resources) when the host shuts down. POSIX only.
+
+## When to use it
+
+A coding agent that starts a dev server, a watcher or a long test run and keeps working while it
+runs, checking its output later.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Plain bash for anything that finishes">
+A command that ends within the tool timeout belongs in plain `bash`: one call, one result. Use
+background shells only for processes that must outlive the call, because you now own their lifetime.
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call — the tools appear
+
+```java test
+import io.github.muthuishere.toolnexus.*;
+import java.util.List;
+import java.util.Map;
+
+public class Example {
+    public static void main(String[] args) {
+        try (BackgroundShells bg = new BackgroundShells()) {
+            List<String> names = BuiltinTools.create(Map.of("background", bg)).stream().map(Tool::name).toList();
+            if (!names.contains("bash_output") || !names.contains("kill_shell")) throw new AssertionError(names);
+            List<String> plain = BuiltinTools.create(Map.of()).stream().map(Tool::name).toList();
+            if (plain.contains("bash_output")) throw new AssertionError("must be opt-in");
+            System.out.println("ok: " + names.size() + " builtins with background shells");
+        }
+    }
+}
+```
+
+### 2. The realistic case — start, poll, finish
+
+```java test
+import io.github.muthuishere.toolnexus.*;
+import java.util.List;
+import java.util.Map;
+
+public class Example {
+    static Tool find(List<Tool> ts, String n) { return ts.stream().filter(t -> t.name().equals(n)).findFirst().orElseThrow(); }
+
+    public static void main(String[] args) throws Exception {
+        try (BackgroundShells bg = new BackgroundShells()) {
+            List<Tool> tools = BuiltinTools.create(Map.of("background", bg));
+            ToolResult started = find(tools, "bash").execute(
+                    Map.of("command", "echo building; sleep 0.2; echo built", "run_in_background", true), null);
+            String id = (String) started.metadata().get("backgroundId");
+            String out = "";
+            for (int i = 0; i < 100 && !out.contains("exited"); i++) {
+                Thread.sleep(50);
+                out += find(tools, "bash_output").execute(Map.of("id", id), null).output();
+            }
+            if (!out.contains("built") || !out.contains("[status: exited with code 0]")) throw new AssertionError(out);
+            System.out.println("ok: " + id + " exited 0");
+        }
+    }
+}
+```
+
+### 3. The full surface — `kill_shell`, `list` and `closeAll`
+
+```java test
+import io.github.muthuishere.toolnexus.*;
+import java.util.List;
+import java.util.Map;
+
+public class Example {
+    static Tool find(List<Tool> ts, String n) { return ts.stream().filter(t -> t.name().equals(n)).findFirst().orElseThrow(); }
+
+    public static void main(String[] args) throws Exception {
+        BackgroundShells bg = new BackgroundShells();
+        try {
+            List<Tool> tools = BuiltinTools.create(Map.of("background", bg, "killGraceMs", 100));
+            String id = (String) find(tools, "bash").execute(
+                    Map.of("command", "sleep 30", "run_in_background", true), null).metadata().get("backgroundId");
+            if (!bg.list().get(0).running()) throw new AssertionError("should be running");
+            find(tools, "kill_shell").execute(Map.of("id", id), null);
+            String status = find(tools, "bash_output").execute(Map.of("id", id), null).output();
+            if (!status.contains("killed")) throw new AssertionError(status);
+            System.out.println("ok: " + status.trim());
+        } finally {
+            bg.closeAll(); // the host owns the lifetime of every background command
+        }
+    }
+}
+```
+
+## See also
+
+- [`BuiltinTools.select`](/api/java/builtins/select/) — Pick which built-in file/shell/web tools are in play, by name or by source toggle.
+- [`BuiltinTools.create`](/api/java/builtins/create/) — Construct every built-in tool directly, outside a toolkit.

@@ -1,0 +1,288 @@
+---
+title: "Options.ToolTiers"
+description: "Send only core tool schemas; the model loads the rest with tool_search and calls them by name or through call_tool. The plan is frozen until resetToolTiers. — C#."
+sidebar:
+  label: "Options.ToolTiers"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>C#</strong> · package <code>Toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/csharp/src/Toolnexus/LlmClientHost.cs">LlmClientHost.cs</a>
+</p>
+
+```csharp
+public sealed class LlmClient.Options
+{
+    public ToolTierOptions? ToolTiers { get; set; }   // null ⇒ every tool is sent, as before
+}
+
+public sealed class ToolTierOptions
+{
+    public IReadOnlyList<string>? Core { get; set; }      // always sent with full schema
+    public IReadOnlyList<string>? Deferred { get; set; }  // named only; the rest are "listed"
+    public int BudgetTokens { get; set; }                 // 0 ⇒ 5% of ContextWindow; both 0 ⇒ no budget
+    public int ContextWindow { get; set; }
+    public Func<string, int>? UsageCount { get; set; }    // host usage stat, read when the plan is built
+    public Func<object?, int>? CountTokens { get; set; }  // default ceil(bytes/4)
+}
+
+public enum ToolTier { Core, Listed, Deferred }
+
+public IReadOnlyDictionary<string, ToolTier>? LlmClient.ToolTierPlan(Toolkit toolkit);
+public void LlmClient.ResetToolTiers(Toolkit toolkit);
+```
+
+With `ToolTiers` set, the tools array is the **core** tools (sorted by name), then two meta tools:
+
+- **`tool_search {query, limit?}`** — its description lists every other tool: *listed* tools as
+  `- name — first line` (cut to 120 bytes of valid UTF-8), *deferred* tools by name only.
+  `select:a,b` loads exact names; anything else is keyword-scored (default 5 results). The schemas
+  come back as JSON in the **tool result**, so the tools array never changes.
+- **`call_tool {name, arguments}`** — calls a loaded tool. The loop unwraps it *before* hooks, so
+  `BeforeTool`, hints and permission gates see the real tool, and stream events name the real tool
+  with `Via = "call_tool"`. The model may also call a loaded tool by its own name.
+
+The plan is built on a toolkit's first request and then **frozen**; a tool registered later is
+deferred and found by search. Over budget, the least-used core tools move to listed, then the
+least-used listed tools to deferred. `ResetToolTiers` drops the plan so the next request rebuilds it.
+
+## When to use it
+
+A toolkit with dozens of tools (several MCP servers, the builtins, your own): sending every schema
+on every request costs tokens and, with [`PromptCache`](/api/csharp/client/prompt-cache/), a tool
+added mid-session would change the tools array and break the cached prefix. Tiers keep the up-front
+schemas small and the prefix stable.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="ToolTiers, not DisableTools">
+`DisableTools` removes a tool from the model entirely. Tiers keep every tool reachable, just not
+pre-loaded. Use `DisableTools` for tools the model must never call, tiers for tools it rarely needs.
+</Aside>
+
+## Examples
+
+### 1. Only core schemas, plus the two meta tools
+
+```csharp test
+using System.Net;
+using System.Text;
+using Toolnexus;
+
+string sent = "";
+using var stub = new Stub((ctx, body) =>
+{
+    sent = body;
+    Stub.Json(ctx, 200, """
+    {"id":"c1","choices":[{"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":1,"total_tokens":4}}
+    """);
+});
+
+var tools = new List<ITool>
+{
+    NativeTool.Of("read_note", "Read a note", null, (IDictionary<string, object?> a) => "note"),
+    NativeTool.Of("weather", "Weather for a city", null, (IDictionary<string, object?> a) => "sunny"),
+    NativeTool.Of("translate", "Translate text", null, (IDictionary<string, object?> a) => "hola"),
+};
+var client = LlmClient.Create(new LlmClient.Options
+{
+    BaseUrl = stub.BaseUrl, Style = "openai", Model = "m", ApiKey = "YOUR_KEY_HERE",
+    ToolTiers = new ToolTierOptions { Core = new[] { "read_note" } },
+});
+
+await using var tk = await Toolkit.CreateAsync(new Toolkit.Options { ExtraTools = tools });
+await client.RunAsync("hi", tk);
+
+var json = System.Text.Json.JsonDocument.Parse(sent).RootElement;
+var names = json.GetProperty("tools").EnumerateArray()
+    .Select(t => t.GetProperty("function").GetProperty("name").GetString()).ToList();
+if (string.Join(",", names) != "read_note,tool_search,call_tool") throw new Exception(string.Join(",", names));
+Console.WriteLine($"ok: tools sent = {string.Join(",", names)}");
+
+sealed class Stub : IDisposable
+{
+    readonly HttpListener _listener = new();
+    readonly CancellationTokenSource _cts = new();
+    public int Port { get; }
+    public string BaseUrl => $"http://127.0.0.1:{Port}";
+
+    public Stub(Action<HttpListenerContext, string> handler)
+    {
+        var probe = new System.Net.Sockets.TcpListener(IPAddress.Loopback, 0);
+        probe.Start();
+        Port = ((IPEndPoint)probe.LocalEndpoint).Port;
+        probe.Stop();
+        _listener.Prefixes.Add($"http://127.0.0.1:{Port}/");
+        _listener.Start();
+        _ = Task.Run(async () =>
+        {
+            while (!_cts.IsCancellationRequested)
+            {
+                HttpListenerContext ctx;
+                try { ctx = await _listener.GetContextAsync(); }
+                catch { break; }
+                var body = new StreamReader(ctx.Request.InputStream).ReadToEnd();
+                try { handler(ctx, body); } catch { }
+            }
+        });
+    }
+
+    public static void Json(HttpListenerContext ctx, int status, string body)
+    {
+        var bytes = Encoding.UTF8.GetBytes(body);
+        ctx.Response.StatusCode = status;
+        ctx.Response.ContentType = "application/json";
+        ctx.Response.ContentLength64 = bytes.Length;
+        ctx.Response.OutputStream.Write(bytes, 0, bytes.Length);
+        ctx.Response.OutputStream.Close();
+    }
+
+    public void Dispose()
+    {
+        _cts.Cancel();
+        try { _listener.Stop(); } catch { }
+        try { _listener.Close(); } catch { }
+    }
+}
+```
+
+### 2. The model searches, then calls through `call_tool`
+
+```csharp test
+using System.Net;
+using System.Text;
+using Toolnexus;
+
+var turn = 0;
+var requests = new List<string>();
+using var stub = new Stub((ctx, body) =>
+{
+    requests.Add(body);
+    turn++;
+    var reply = turn switch
+    {
+        1 => """
+        {"id":"c1","choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"s1","type":"function","function":{"name":"tool_search","arguments":"{\"query\":\"select:weather\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":5,"completion_tokens":1,"total_tokens":6}}
+        """,
+        2 => """
+        {"id":"c2","choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"w1","type":"function","function":{"name":"call_tool","arguments":"{\"name\":\"weather\",\"arguments\":{\"city\":\"Paris\"}}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":5,"completion_tokens":1,"total_tokens":6}}
+        """,
+        _ => """
+        {"id":"c3","choices":[{"message":{"role":"assistant","content":"sunny"},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":1,"total_tokens":6}}
+        """,
+    };
+    Stub.Json(ctx, 200, reply);
+});
+
+var ran = "";
+var weather = NativeTool.Of("weather", "Weather for a city", null,
+    (IDictionary<string, object?> a) => { ran = $"{a["city"]}"; return "sunny"; });
+var seenByHook = new List<string>();
+var client = LlmClient.Create(new LlmClient.Options
+{
+    BaseUrl = stub.BaseUrl, Style = "openai", Model = "m", ApiKey = "YOUR_KEY_HERE",
+    ToolTiers = new ToolTierOptions { Core = Array.Empty<string>() },
+    Hooks = new LlmClient.Hooks { BeforeTool = ev => { seenByHook.Add(ev.Name); return null; } },
+});
+
+await using var tk = await Toolkit.CreateAsync(new Toolkit.Options { ExtraTools = new List<ITool> { weather } });
+var result = await client.RunAsync("weather in Paris?", tk);
+
+if (ran != "Paris") throw new Exception("weather never ran");
+if (!seenByHook.Contains("weather")) throw new Exception(string.Join(",", seenByHook)); // the real name, not call_tool
+// The tools array is the same on every request: the loaded schema arrived as a tool result.
+var arrays = requests.Select(r => System.Text.Json.JsonDocument.Parse(r).RootElement.GetProperty("tools").GetRawText()).Distinct().Count();
+if (arrays != 1) throw new Exception("tools array changed mid-session");
+Console.WriteLine($"ok: {result.Text}; hook saw [{string.Join(",", seenByHook)}]; tools array stable across {requests.Count} requests");
+
+sealed class Stub : IDisposable
+{
+    readonly HttpListener _listener = new();
+    readonly CancellationTokenSource _cts = new();
+    public int Port { get; }
+    public string BaseUrl => $"http://127.0.0.1:{Port}";
+
+    public Stub(Action<HttpListenerContext, string> handler)
+    {
+        var probe = new System.Net.Sockets.TcpListener(IPAddress.Loopback, 0);
+        probe.Start();
+        Port = ((IPEndPoint)probe.LocalEndpoint).Port;
+        probe.Stop();
+        _listener.Prefixes.Add($"http://127.0.0.1:{Port}/");
+        _listener.Start();
+        _ = Task.Run(async () =>
+        {
+            while (!_cts.IsCancellationRequested)
+            {
+                HttpListenerContext ctx;
+                try { ctx = await _listener.GetContextAsync(); }
+                catch { break; }
+                var body = new StreamReader(ctx.Request.InputStream).ReadToEnd();
+                try { handler(ctx, body); } catch { }
+            }
+        });
+    }
+
+    public static void Json(HttpListenerContext ctx, int status, string body)
+    {
+        var bytes = Encoding.UTF8.GetBytes(body);
+        ctx.Response.StatusCode = status;
+        ctx.Response.ContentType = "application/json";
+        ctx.Response.ContentLength64 = bytes.Length;
+        ctx.Response.OutputStream.Write(bytes, 0, bytes.Length);
+        ctx.Response.OutputStream.Close();
+    }
+
+    public void Dispose()
+    {
+        _cts.Cancel();
+        try { _listener.Stop(); } catch { }
+        try { _listener.Close(); } catch { }
+    }
+}
+```
+
+### 3. Inspect, budget and reset the plan
+
+```csharp test
+using Toolnexus;
+
+var tools = Enumerable.Range(0, 6)
+    .Select(i => (ITool)NativeTool.Of($"tool_{i}", $"Tool number {i}", null, (IDictionary<string, object?> a) => "ok"))
+    .ToList();
+var usage = new Dictionary<string, int> { ["tool_0"] = 50, ["tool_1"] = 10 };
+
+var client = LlmClient.Create(new LlmClient.Options
+{
+    BaseUrl = "http://127.0.0.1:1", Style = "openai", Model = "m", ApiKey = "YOUR_KEY_HERE",
+    ToolTiers = new ToolTierOptions
+    {
+        Core = tools.Take(5).Select(t => t.Name).ToList(),   // ask for five as core...
+        Deferred = new[] { "tool_5" },
+        BudgetTokens = 450,                                  // ...but cap the up-front schemas
+        CountTokens = _ => 100,                              // every definition "costs" 100 here, for a stable demo
+        UsageCount = n => usage.GetValueOrDefault(n),
+    },
+});
+
+await using var tk = await Toolkit.CreateAsync(new Toolkit.Options { ExtraTools = tools, Builtins = false });
+var plan = client.ToolTierPlan(tk)!;   // built now, frozen until reset
+foreach (var (name, tier) in plan.OrderBy(p => p.Key)) Console.WriteLine($"  {name}: {tier}");
+// 2 meta tools + 2 core = 400 <= 450: the three least-used core tools moved down to listed.
+if (plan["tool_0"] != ToolTier.Core || plan["tool_1"] != ToolTier.Core || plan["tool_2"] != ToolTier.Listed)
+    throw new Exception("the most-used tools should stay core");
+if (plan["tool_5"] != ToolTier.Deferred) throw new Exception("tool_5 was asked to be deferred");
+
+usage["tool_4"] = 99;
+client.ResetToolTiers(tk);              // e.g. at a new session start, after updating usage stats
+var replanned = client.ToolTierPlan(tk)!;
+Console.WriteLine($"ok: {plan.Count(p => p.Value == ToolTier.Core)} core before reset, tool_4 now {replanned["tool_4"]}");
+```
+
+## See also
+
+- [`LlmClient.Create`](/api/csharp/client/create/) — The unified client: system prompt, skills injection, parallel and chained tool calls, retries, memory.
+- [`LlmClient.RunAsync`](/api/csharp/client/run/) — Send a prompt, let the loop call tools until the model stops, get a RunResult.
+- [`LlmClient.StreamAsync`](/api/csharp/client/stream/) — The streaming loop: text deltas, tool-call events, and suspension events as they happen.
+- [`LlmClient.Hooks`](/api/csharp/client/hooks/) — Intercept before/after model calls and tool calls: audit, redact, veto, or rewrite.

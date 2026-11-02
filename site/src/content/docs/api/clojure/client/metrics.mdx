@@ -120,7 +120,7 @@ The cheapest way to learn the shapes is to collect them.
 ```clojure
 (def seen (atom []))
 
-(client/run (client/create-client {:base-url base-url :model "gpt-4.1"
+(client/run (client/create-client {:base-url base-url :model "gpt-4.1" :api-key-env "LLM_API_KEY"
                                    :on-metric #(swap! seen conj %)})
             "Say hello and read README.md"
             {:toolkit toolkit})
@@ -146,6 +146,15 @@ payloads. The RunResult, which never crosses a wire, stays kebab-case.
 | `"run"` | `:model` `:turns` `:tool_calls` `:total_tokens` `:ms` `:error` | Exactly once per `run`, on every exit path. |
 
 Token fields come straight from the provider payload and may be `nil` if it sent none.
+
+## Cache tokens in usage (0.22.0)
+
+Usage gains `:cache-read-tokens` and `:cache-write-tokens` (anthropic
+`cache_read_input_tokens` / `cache_creation_input_tokens`; openai
+`prompt_tokens_details.cached_tokens`), present only when the provider reports them. Under
+anthropic the real context size is `:prompt-tokens + :cache-read-tokens + :cache-write-tokens`;
+under openai `:prompt-tokens` already includes the cached part. See
+[prompt cache](/api/clojure/client/prompt-cache/).
 
 ## See also
 

@@ -1,0 +1,199 @@
+---
+title: "list_models"
+description: "List a provider's models (id, display name, context length when reported), sorted by id, under the same key rules as the client. — Python."
+sidebar:
+  label: "list_models"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Python</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/python/src/toolnexus/client.py">python/src/toolnexus/client.py</a>
+</p>
+
+```python
+@dataclass
+class ModelInfo:
+    id: str
+    name: str = ""            # display name, when the provider gives one
+    context_length: int = 0   # tokens, when reported (OpenRouter does) — 0 = unknown
+
+async def list_models(
+    *, base_url: str, style: ClientStyle = "openai",
+    api_key: str | None = None, api_key_env: str | None = None,
+    timeout_ms: int = 30_000,
+) -> list[ModelInfo]          # sorted by id
+```
+
+- **openai** style: `GET {base_url}/models`; OpenRouter's `context_length` is read when present.
+- **anthropic** style: `GET {base_url}/v1/models`, following `has_more` / `last_id` pages.
+
+The key follows the [API-key-by-host rule](/api/python/client/api-key/): `api_key`, else
+`api_key_env`, else only the host's own env var over https. One GET per page, no retries.
+
+## When to use it
+
+- A model picker in a host UI, or a `/model` command that switches the client's model.
+- Sizing a context budget (for compaction or [`tool_tiers`](/api/python/client/tool-tiers/))
+  from `context_length` when the provider reports it.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="list_models over a hand-rolled GET">
+A raw `GET /models` works, but you would re-implement the key rule (and risk sending a key to
+the wrong host), anthropic paging and the response shapes. Hard-code model ids instead when the
+set is fixed and you do not need discovery.
+</Aside>
+
+## Examples
+
+<Aside type="note" title="Hermetic on purpose">
+Each example serves `/models` from a local `http.server` stub.
+</Aside>
+
+### 1. The smallest useful call — ids, sorted
+
+```python test
+import asyncio
+import json
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+from toolnexus import list_models
+
+
+def serve(payload_for):
+    class H(BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_GET(self):  # noqa: N802
+            body = json.dumps(payload_for(self.path, self.headers)).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv
+
+
+async def main():
+    srv = serve(lambda path, h: {"data": [{"id": "zeta"}, {"id": "alpha"}]})
+    try:
+        models = await list_models(base_url=f"http://127.0.0.1:{srv.server_address[1]}/v1",
+                                   api_key="YOUR_KEY_HERE")
+    finally:
+        srv.shutdown()
+    assert [m.id for m in models] == ["alpha", "zeta"]
+    print("ok:", [m.id for m in models])
+
+
+asyncio.run(main())
+```
+
+### 2. The realistic case — OpenRouter-shaped context lengths
+
+```python test
+import asyncio
+import json
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+from toolnexus import list_models
+
+
+def serve(payload):
+    class H(BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_GET(self):  # noqa: N802
+            body = json.dumps(payload).encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv
+
+
+async def main():
+    srv = serve({"data": [{"id": "big/model", "name": "Big", "context_length": 200000},
+                          {"id": "small/model", "name": "Small"}]})
+    try:
+        models = await list_models(base_url=f"http://127.0.0.1:{srv.server_address[1]}/api/v1",
+                                   api_key="YOUR_KEY_HERE")
+    finally:
+        srv.shutdown()
+    big = models[0]
+    assert (big.name, big.context_length) == ("Big", 200000)
+    assert models[1].context_length == 0  # unknown
+    print(f"ok: {big.id} has {big.context_length} tokens")
+
+
+asyncio.run(main())
+```
+
+### 3. The full surface — anthropic paging, and the key rule
+
+```python test
+import asyncio
+import json
+import os
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+from toolnexus import list_models
+
+PAGES = {
+    "": {"data": [{"id": "claude-b", "display_name": "B"}], "has_more": True, "last_id": "claude-b"},
+    "claude-b": {"data": [{"id": "claude-a", "display_name": "A"}], "has_more": False},
+}
+keys = []
+
+
+class H(BaseHTTPRequestHandler):
+    def log_message(self, *a):
+        pass
+
+    def do_GET(self):  # noqa: N802
+        keys.append(self.headers.get("x-api-key"))
+        after = self.path.split("after_id=", 1)[1] if "after_id=" in self.path else ""
+        body = json.dumps(PAGES[after]).encode()
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+async def main():
+    os.environ["MY_GATEWAY_KEY"] = "YOUR_KEY_HERE"
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{srv.server_address[1]}"
+    try:
+        models = await list_models(base_url=base, style="anthropic", api_key_env="MY_GATEWAY_KEY")
+        try:
+            await list_models(base_url=base, style="anthropic")  # no key for this host
+            raise AssertionError("expected No API key")
+        except RuntimeError as e:
+            assert "No API key" in str(e)
+    finally:
+        srv.shutdown()
+    assert [(m.id, m.name) for m in models] == [("claude-a", "A"), ("claude-b", "B")]
+    assert keys == ["YOUR_KEY_HERE", "YOUR_KEY_HERE"]
+    print("ok: 2 pages, key from api_key_env")
+
+
+asyncio.run(main())
+```
+
+## See also
+
+- [`api_key_env`](/api/python/client/api-key/) — Which key is sent to which host.
+- [`create_client`](/api/python/client/create/) — The unified client: system prompt, skills injection, parallel and chained tool calls, retries, memory.

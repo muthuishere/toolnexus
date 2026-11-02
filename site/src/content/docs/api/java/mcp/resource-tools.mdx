@@ -1,0 +1,110 @@
+---
+title: "McpSource.resourceTools"
+description: "Opt-in list_mcp_resources / read_mcp_resource tools over every connected MCP server. Read-only. — Java."
+sidebar:
+  label: "McpSource.resourceTools"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Java</strong> · package <code>io.github.muthuishere:toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §2</a>
+</p>
+
+```java
+// McpSource
+public List<Tool> resourceTools()   // [list_mcp_resources, read_mcp_resource]
+
+// also reachable from a toolkit built with an MCP config
+public McpSource Toolkit.mcpSource()
+```
+
+Two opt-in, read-only tools bound to the source's connected servers:
+
+- `list_mcp_resources {server?}` — one line per resource: `server uri — name (mimeType): description`.
+- `read_mcp_resource {server, uri}` — the resource's text. An unknown server or uri is an error
+  result, not a throw.
+
+Both carry `ToolHints.READ_ONLY` and stop working when the source is closed. Nothing registers them
+for you: add them to a toolkit with `tk.register(...)`.
+
+## When to use it
+
+Your MCP servers expose resources (docs, schemas, files, records) as well as tools, and the model
+should be able to browse and read them on its own during a run.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Read resources yourself when the host already knows which">
+If the host knows the exact resource the model needs, read it once and put it in the prompt; that
+saves two tool round trips. Register `resourceTools()` when the model has to discover what exists.
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call — list, then read
+
+```java test
+import io.github.muthuishere.toolnexus.*;
+import java.util.List;
+import java.util.Map;
+
+public class Example {
+    public static void main(String[] args) {
+        String cfg = "{\"mcpServers\":{\"progress\":{\"command\":[\"node\",\"examples/mcp-progress-server.mjs\"]}}}";
+        try (McpSource src = McpSource.load(cfg)) {
+            List<Tool> tools = src.resourceTools();
+            ToolResult list = tools.get(0).execute(Map.of(), null);
+            if (!list.output().contains("fixture://hello")) throw new AssertionError(list.output());
+            ToolResult read = tools.get(1).execute(Map.of("server", "progress", "uri", "fixture://hello"), null);
+            if (!"hello resource".equals(read.output())) throw new AssertionError(read.output());
+            System.out.println("ok: " + list.output());
+        }
+    }
+}
+```
+
+### 2. The realistic case — register them on a toolkit
+
+```java test
+import io.github.muthuishere.toolnexus.*;
+
+public class Example {
+    public static void main(String[] args) {
+        String cfg = "{\"mcpServers\":{\"progress\":{\"command\":[\"node\",\"examples/mcp-progress-server.mjs\"]}}}";
+        try (Toolkit tk = Toolkit.create(new Toolkit.Options().builtins(false).mcpConfig(cfg))) {
+            tk.register(tk.mcpSource().resourceTools().toArray(new Tool[0]));
+            Tool read = tk.get("read_mcp_resource");
+            if (read == null || !read.hints().readOnly()) throw new AssertionError("not registered read-only");
+            System.out.println("ok: " + tk.tools().stream().map(Tool::name).filter(n -> n.contains("resource")).toList());
+        }
+    }
+}
+```
+
+### 3. The full surface — errors are results
+
+```java test
+import io.github.muthuishere.toolnexus.*;
+import java.util.Map;
+
+public class Example {
+    public static void main(String[] args) {
+        String cfg = "{\"mcpServers\":{\"progress\":{\"command\":[\"node\",\"examples/mcp-progress-server.mjs\"]}}}";
+        try (McpSource src = McpSource.load(cfg)) {
+            Tool read = src.resourceTools().get(1);
+            ToolResult missing = read.execute(Map.of("server", "progress", "uri", "fixture://nope"), null);
+            ToolResult unknown = read.execute(Map.of("server", "nope", "uri", "x"), null);
+            if (!missing.isError() || !unknown.isError()) throw new AssertionError("expected error results");
+            System.out.println("ok: " + unknown.output());
+        }
+    }
+}
+```
+
+## See also
+
+- [`McpSource.load`](/api/java/mcp/load/) — Read an mcp.json, connect every local stdio and remote streamable-HTTP server, expose each server tool as a Tool.
+- [`McpSource.loadWith`](/api/java/mcp/load-with-context/) — The ctx-aware load: bound connection time and cancel a slow or hung server without leaking a child process.
+- [`McpSource.listMcpTools`](/api/java/mcp/list-tools/) — List what each configured server would expose, plus per-server status, without wiring it into a toolkit.
+- [`McpSource.parseConfig`](/api/java/mcp/parse-config/) — Parse and validate config without connecting — the fast fail for a malformed or misspelled server block.

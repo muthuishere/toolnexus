@@ -140,6 +140,50 @@ public class PromptCacheTests
         }
     }
 
+    /// <summary>Mirrors golang TestPromptCacheMarksLastToolInRequestJSON: the request body actually sent
+    /// carries cache_control on the LAST tools entry and on no other tool.</summary>
+    [Fact]
+    public async Task MarksLastToolInRequestJson()
+    {
+        var bodies = new List<string>();
+        var wire = new FnWire(body =>
+        {
+            lock (bodies) bodies.Add(Json.Stringify(body));
+            return JsonSerializer.Serialize(new { content = new[] { new { type = "text", text = "ok" } }, stop_reason = "end_turn", usage = new { input_tokens = 1, output_tokens = 1 } });
+        });
+        var c = HostEngineAsksTests.Client(wire, "anthropic", o => o.PromptCache = new PromptCacheOptions());
+        var tk = await Toolkit.CreateAsync(new Toolkit.Options
+        {
+            ExtraTools = new List<ITool>
+            {
+                NativeTool.Of("aaa_extra", "A.", null, _ => "a"),
+                NativeTool.Of("zzz_extra", "Z.", null, _ => "z"),
+            },
+        });
+        await c.RunAsync("hi", tk);
+        Assert.Single(bodies);
+        using var doc = JsonDocument.Parse(bodies[0]);
+        var tools = doc.RootElement.GetProperty("tools").EnumerateArray().ToList();
+        Assert.True(tools.Count > 2, $"want builtins + 2 extra tools, got {tools.Count}");
+        for (var i = 0; i < tools.Count; i++)
+        {
+            var has = tools[i].TryGetProperty("cache_control", out var cc);
+            if (i == tools.Count - 1)
+            {
+                Assert.True(has, "last tool has no cache_control");
+                Assert.Equal("ephemeral", cc.GetProperty("type").GetString());
+            }
+            else Assert.False(has, $"tool {i} ({tools[i].GetProperty("name")}) carries cache_control");
+        }
+    }
+
+    [Fact]
+    public async Task DefaultToolkitOptionsDoNotCrash()
+    {
+        var tk = await Toolkit.CreateAsync(new Toolkit.Options());
+        Assert.NotEmpty(tk.Tools());
+    }
+
     [Fact]
     public void OpenAiKeyAndUsage()
     {
@@ -331,6 +375,9 @@ public class ToolTierTests
         Assert.Contains("\"name\": \"deploy\"", res.ToolCalls[0].Output);
         Assert.Equal("deploy(prod),lint(direct)", string.Join(",", ran));
         Assert.Equal("deploy:true,lint:?", string.Join(",", gated));
+        Assert.Equal("tool_search(),deploy(prod),lint(direct)",
+            string.Join(",", res.ToolCalls.Select(tc => $"{tc.Name}({tc.Args.Get("x")})")));
+        Assert.Equal("select:deploy", res.ToolCalls[0].Args.Get("query"));
         Assert.All(arrays, a => Assert.Equal(arrays[0], a));
     }
 
@@ -353,12 +400,13 @@ public class ToolTierTests
         });
         var c = HostEngineAsksTests.Client(wire, "openai", o => o.ToolTiers = new ToolTierOptions { Core = new[] { "alpha_read" } });
         var got = new List<string>();
-        await c.StreamAsync("go", tk, ev =>
+        var res = await c.StreamAsync("go", tk, ev =>
         {
             if (ev.Type is LlmClient.StreamKind.ToolCall or LlmClient.StreamKind.ToolResult)
                 got.Add($"{ev.Type}:{ev.Name}:{ev.Via}:{ev.Args?.Get("x")}");
         });
         Assert.Equal("ToolCall:deploy:call_tool:prod,ToolResult:deploy:call_tool:", string.Join(",", got));
+        Assert.Equal("deploy(prod)", string.Join(",", res.ToolCalls.Select(tc => $"{tc.Name}({tc.Args.Get("x")})")));
         Assert.Equal("deploy(prod)", string.Join(",", ran));
     }
 }

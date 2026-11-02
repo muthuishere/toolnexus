@@ -195,6 +195,23 @@
 			"parityNote": "Elixir's elicitation_to_request lives on Toolnexus.Mcp.Protocol, not Toolnexus.Mcp — there is no delegate on the top-level Mcp module."
 		},
 		{
+			"id": "mcp/resource-tools",
+			"group": "mcp",
+			"member": "resource-tools",
+			"title": "resourceTools — list and read MCP resources",
+			"spec": "§2",
+			"summary": "Opt-in list_mcp_resources / read_mcp_resource tools over every connected MCP server. Read-only.",
+			"symbols": {
+				"javascript": "McpSource.resourceTools",
+				"python": "resource_tools",
+				"golang": "McpSource.ResourceTools",
+				"java": "McpSource.resourceTools",
+				"csharp": "McpSource.ResourceTools",
+				"elixir": "Toolnexus.Mcp.resource_tools",
+				"clojure": "toolnexus.mcp/resource-tools"
+			}
+		},
+		{
 			"id": "skills/load",
 			"group": "skills",
 			"member": "load",
@@ -358,6 +375,23 @@
 				"clojure": "toolnexus.builtin/builtin-tools"
 			},
 			"parityNote": "Elixir has no Builtin.create/1 — the zero-arg 'build the full set' constructor is Toolnexus.Builtin.tools/0."
+		},
+		{
+			"id": "builtins/background-shells",
+			"group": "builtins",
+			"member": "background-shells",
+			"title": "BackgroundShells — bash_output and kill_shell",
+			"spec": "§4A",
+			"summary": "Opt-in background shells: bash gains run_in_background, bash_output reads new output, kill_shell stops the process group. The host owns the registry and closes it.",
+			"symbols": {
+				"javascript": "BackgroundShells",
+				"python": "BackgroundShells",
+				"golang": "BackgroundShells",
+				"java": "BackgroundShells",
+				"csharp": "BackgroundShells",
+				"elixir": "Toolnexus.Builtin.BackgroundShells",
+				"clojure": "toolnexus.builtin/background-shells"
+			}
 		},
 		{
 			"id": "adapters/openai",
@@ -1092,6 +1126,92 @@
 				"elixir": "Toolnexus.ProviderError",
 				"clojure": "toolnexus.client/provider-error"
 			}
+		},
+		{
+			"id": "client/api-key",
+			"group": "client",
+			"member": "api-key",
+			"title": "API key by host — apiKey / apiKeyEnv",
+			"spec": "§8",
+			"summary": "Which key the client sends where: apiKey, else apiKeyEnv, else only the env var of the baseUrl host (https). A local or custom host needs one of the two.",
+			"symbols": {
+				"javascript": "apiKeyEnv",
+				"python": "api_key_env",
+				"golang": "ClientOptions.APIKeyEnv",
+				"java": "Options.apiKeyEnv",
+				"csharp": "Options.ApiKeyEnv",
+				"elixir": "api_key_env",
+				"clojure": "api-key-env"
+			}
+		},
+		{
+			"id": "client/prompt-cache",
+			"group": "client",
+			"member": "prompt-cache",
+			"title": "promptCache — cache the stable prefix",
+			"spec": "§8",
+			"summary": "Mark the stable prompt prefix for the provider (Anthropic cache breakpoints, OpenAI prompt_cache_key) and read cacheRead/cacheWrite tokens from usage.",
+			"symbols": {
+				"javascript": "promptCache",
+				"python": "prompt_cache",
+				"golang": "ClientOptions.PromptCache",
+				"java": "Options.promptCache",
+				"csharp": "Options.PromptCache",
+				"elixir": "prompt_cache",
+				"clojure": "prompt-cache"
+			}
+		},
+		{
+			"id": "client/tool-tiers",
+			"group": "client",
+			"member": "tool-tiers",
+			"title": "toolTiers — tool_search and call_tool",
+			"spec": "§8",
+			"summary": "Send only core tool schemas; the model loads the rest with tool_search and calls them by name or through call_tool. The plan is frozen until resetToolTiers.",
+			"symbols": {
+				"javascript": "toolTiers",
+				"python": "tool_tiers",
+				"golang": "ClientOptions.ToolTiers",
+				"java": "Options.toolTiers",
+				"csharp": "Options.ToolTiers",
+				"elixir": "tool_tiers",
+				"clojure": "tool-tiers"
+			}
+		},
+		{
+			"id": "client/list-models",
+			"group": "client",
+			"member": "list-models",
+			"title": "listModels — what the provider serves",
+			"spec": "§8",
+			"summary": "List a provider's models (id, display name, context length when reported), sorted by id, under the same key rules as the client.",
+			"symbols": {
+				"javascript": "listModels",
+				"python": "list_models",
+				"golang": "ListModels",
+				"java": "LlmClient.listModels",
+				"csharp": "LlmClient.ListModelsAsync",
+				"elixir": "Toolnexus.Client.list_models",
+				"clojure": "toolnexus.client/list-models"
+			}
+		},
+		{
+			"id": "client/acp-hooks",
+			"group": "client",
+			"member": "acp-hooks",
+			"title": "ACP host hooks — permission, updates, cancel, stream",
+			"spec": "§8",
+			"summary": "Opt-in hooks on an ACP model source: choose the permission option, watch every session/update, cancel a turn, and stream through an in-process client.",
+			"symbols": {
+				"javascript": null,
+				"python": null,
+				"golang": "ACPOptions.OnPermission",
+				"java": null,
+				"csharp": null,
+				"elixir": null,
+				"clojure": null
+			},
+			"parityNote": "Go-only today (golang/acp.go). The other six ports ship an ACP client without these hooks; tracked in openspec/changes/add-go-host-asks task 2.6d."
 		},
 		{
 			"id": "suspension/answer-output",

@@ -252,6 +252,69 @@ func main() {
 | configured | `false` | Feeds back error `"declined/expired: <prompt>"`. The loop continues; the model decides. |
 | not configured | — | The run halts: `RunResult.Status == "pending"`, `RunResult.Pending` set. Resume later via [`Client.Resume`](/api/go/suspension/resume/). |
 
+## `WaitForCtx` — end a pending question with its turn
+
+```go
+WaitForCtx func(ctx context.Context, req Request) (Answer, error) // ClientOptions
+```
+
+`WaitForCtx` is `WaitFor` that also receives the turn's context, so a question waiting on a human
+ends when the turn is cancelled (a stop button, a timeout). When both are set, `WaitForCtx` wins;
+the §10 contract is otherwise the same. Ask permission through it from a `BeforeTool` gate that
+returns `Pending` (see [Hooks](/api/go/client/hooks/)).
+
+```go test
+package main
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log"
+	"net/http"
+	"net/http/httptest"
+	"time"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"c1","type":"function","function":{"name":"ask","arguments":"{}"}}]}}]}`))
+	}))
+	defer srv.Close()
+
+	ask := toolnexus.Tool{
+		Name: "ask", Description: "asks the user", InputSchema: toolnexus.JSONSchema{"type": "object", "properties": map[string]any{}},
+		Source: toolnexus.SourceCustom,
+		Execute: func(_ map[string]any, _ *toolnexus.ToolContext) (toolnexus.ToolResult, error) {
+			return toolnexus.Pending(toolnexus.Request{Kind: "input", Prompt: "deploy?"}), nil
+		},
+	}
+	tk, err := toolnexus.CreateToolkit(context.Background(), toolnexus.Options{ExtraTools: []toolnexus.Tool{ask}})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer tk.Close()
+
+	client := toolnexus.CreateClient(toolnexus.ClientOptions{
+		BaseURL: srv.URL, Style: toolnexus.StyleOpenAI, Model: "m", APIKey: "YOUR_KEY_HERE",
+		WaitForCtx: func(ctx context.Context, req toolnexus.Request) (toolnexus.Answer, error) {
+			<-ctx.Done() // the human never answers; the turn's cancel ends the wait
+			return toolnexus.Answer{}, ctx.Err()
+		},
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	_, err = client.Run(ctx, "deploy it", tk)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		log.Fatalf("expected the pending ask to end with the turn, got %v", err)
+	}
+	fmt.Println("ok: pending question ended with the turn:", err)
+}
+```
+
 ## See also
 
 - [`Pending`](/api/go/suspension/pending/) — Return a Pending from a tool to park the run until someone answers.

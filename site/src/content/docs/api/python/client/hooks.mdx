@@ -378,8 +378,65 @@ asyncio.run(main())
 |---|---|---|
 | `before_llm` | `messages`, `tools`, `model`, `turn` | `{"messages"?, "tools"?}` replaces them for this call. |
 | `after_llm` | `response`, `model`, `turn` | Observation only — return value is ignored. |
-| `before_tool` | `name`, `args`, `id`, `turn` | `{"result": ToolResult}` short-circuits (real tool never runs); `{"args": {...}}` rewrites the arguments. |
+| `before_tool` | `name`, `args`, `id`, `turn`, `hints` | `{"result": ToolResult}` short-circuits (real tool never runs); `{"args": {...}}` rewrites the arguments. |
 | `after_tool` | `name`, `args`, `result`, `id`, `turn` | `{"result": ToolResult}` replaces the result before it enters the transcript. |
+
+## Tool hints and permission gates
+
+Every `before_tool` event also carries `hints` — a `ToolHints(read_only, destructive,
+open_world)` or `None` (unknown: treat as mutating). Builtins set them (`read`/`grep`/`glob` are
+read-only, `bash`/`write`/`edit` destructive), MCP tools map their annotations, and you can set
+`Tool(hints=...)` on your own tools. Hints are advisory and never sent to the model. Under
+[`tool_tiers`](/api/python/client/tool-tiers/), a `call_tool` call is unwrapped first, so the
+gate sees the real tool. A permission gate is just `before_tool`: return nothing to allow, an
+error `{"result": ...}` to deny (the model sees it, the run continues), or a `pending(...)`
+request to ask the user through `wait_for` / `wait_for_ctx`.
+
+```python test
+import asyncio
+
+from toolnexus import ToolResult, create_client, create_toolkit
+
+
+class Script:
+    """Asks for one tool call, then answers."""
+
+    def __init__(self, tool, args="{}"):
+        self.tool, self.args, self.n = tool, args, 0
+
+    def post(self, url, headers, payload, timeout):
+        self.n += 1
+        if self.n == 1:
+            return {"choices": [{"message": {"role": "assistant", "content": None, "tool_calls": [
+                {"id": "call_1", "type": "function",
+                 "function": {"name": self.tool, "arguments": self.args}}]}}]}
+        return {"choices": [{"message": {"role": "assistant", "content": "done"}}]}
+
+
+async def main():
+    tk = await create_toolkit()  # builtins carry hints
+    events = []
+
+    async def gate(ev):
+        h = ev["hints"]
+        events.append((ev["name"], h.read_only if h else None))
+        if h is None or not h.read_only:
+            return {"result": ToolResult(output="denied: ask the user first", is_error=True)}
+        return None
+
+    client = create_client(
+        base_url="http://localhost:8080/v1", style="openai", model="m", api_key="YOUR_KEY_HERE",
+        hooks={"before_tool": gate},
+        http_transport=Script("bash", '{"command": "rm -rf build"}'),
+    )
+    res = await client.run("clean up", tk)
+    assert events == [("bash", False)]
+    assert res.tool_calls[0]["is_error"] and res.tool_calls[0]["output"].startswith("denied")
+    print("ok: destructive bash denied by the hint-based gate")
+
+
+asyncio.run(main())
+```
 
 ## See also
 

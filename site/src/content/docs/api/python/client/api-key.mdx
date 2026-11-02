@@ -1,0 +1,176 @@
+---
+title: "api_key_env"
+description: "Which key the client sends where: apiKey, else apiKeyEnv, else only the env var of the baseUrl host (https). A local or custom host needs one of the two. — Python."
+sidebar:
+  label: "api_key_env"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Python</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/python/src/toolnexus/client.py">python/src/toolnexus/client.py</a>
+</p>
+
+```python
+create_client(
+    *, base_url: str, style: ClientStyle, model: str,
+    api_key: str | None = None,       # the key itself — used as-is, always wins
+    api_key_env: str | None = None,   # the NAME of an env var to read the key from
+    ...,
+) -> Client
+
+# list_models(base_url=..., api_key=..., api_key_env=...) follows the same rule.
+```
+
+Which key the client sends, and to whom, in this order:
+
+1. `api_key` set ⇒ exactly that key.
+2. else `api_key_env` set ⇒ the value of the env var with that **name**.
+3. else ONLY the env var that belongs to the `base_url` host, and only over https:
+   `api.openai.com` → `OPENAI_API_KEY`, `api.anthropic.com` → `ANTHROPIC_API_KEY`,
+   `openrouter.ai` (and subdomains) → `OPENROUTER_API_KEY`.
+4. anything else — a local server, a proxy, plain `http://` — raises
+   `RuntimeError("No API key: set api_key or api_key_env …")` on the first request.
+
+There is no cross-provider fallback: an OpenRouter key is never sent to api.openai.com, and no
+provider key is ever sent to a host you happen to point `base_url` at. The key's value never
+appears in an error or a log line.
+
+<Aside type="caution" title="Breaking in 0.22.0">
+Before 0.22.0, a client with no `api_key` sent the first of `OPENROUTER_API_KEY` /
+`OPENAI_API_KEY` / `ANTHROPIC_API_KEY` that was set to whatever `base_url` was configured. A host
+on a local or custom `base_url` that relied on that must now pass `api_key` or `api_key_env`.
+</Aside>
+
+## When to use it
+
+- You point the client at a local model server (llama.cpp, Ollama, vLLM) or a corporate proxy:
+  pass `api_key` (any placeholder the server accepts) or `api_key_env="MY_PROXY_KEY"`.
+- Your key lives in an env var whose name is not the provider default (for example per-tenant
+  keys): `api_key_env` names it, so the value never passes through your code.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="api_key_env over reading os.environ yourself">
+`api_key=os.environ["X"]` works, but puts the secret into a Python value your code holds and can
+log. `api_key_env="X"` passes only the name; the client reads it at request time. For the three
+known hosts you need neither — the matching env var is read automatically.
+</Aside>
+
+## Examples
+
+<Aside type="note" title="Hermetic on purpose">
+Each example injects an `http_transport` that records the request instead of sending it — no
+network, and the keys are obvious fakes.
+</Aside>
+
+### 1. The smallest useful call — a local server with an explicit key
+
+```python test
+import asyncio
+
+from toolnexus import create_client, create_toolkit
+
+
+class Recorder:
+    def __init__(self):
+        self.headers = []
+
+    def post(self, url, headers, payload, timeout):
+        self.headers.append(headers)
+        return {"choices": [{"message": {"role": "assistant", "content": "ok"}}]}
+
+
+async def main():
+    tk = await create_toolkit(builtins=False)
+    rec = Recorder()
+    client = create_client(
+        base_url="http://localhost:8080/v1", style="openai", model="local-model",
+        api_key="YOUR_KEY_HERE", http_transport=rec,
+    )
+    res = await client.run("hi", tk)
+    assert res.text == "ok"
+    assert rec.headers[0]["Authorization"] == "Bearer YOUR_KEY_HERE"
+    print("ok: explicit key sent to the local server")
+
+
+asyncio.run(main())
+```
+
+### 2. The realistic case — a proxy key read from a named env var
+
+```python test
+import asyncio
+import os
+
+from toolnexus import create_client, create_toolkit
+
+
+class Recorder:
+    def __init__(self):
+        self.headers = []
+
+    def post(self, url, headers, payload, timeout):
+        self.headers.append(headers)
+        return {"choices": [{"message": {"role": "assistant", "content": "ok"}}]}
+
+
+async def main():
+    os.environ["MY_PROXY_KEY"] = "YOUR_KEY_HERE"  # set by your deployment, not your code
+    tk = await create_toolkit(builtins=False)
+    rec = Recorder()
+    client = create_client(
+        base_url="https://llm-proxy.internal.example/v1", style="openai", model="gpt-4o-mini",
+        api_key_env="MY_PROXY_KEY", http_transport=rec,
+    )
+    await client.run("hi", tk)
+    assert rec.headers[0]["Authorization"] == "Bearer YOUR_KEY_HERE"
+    print("ok: api_key_env read at request time")
+
+
+asyncio.run(main())
+```
+
+### 3. The full surface — a provider key is never sent to a host it does not belong to
+
+```python test
+import asyncio
+import os
+
+from toolnexus import create_client, create_toolkit
+
+
+class Recorder:
+    def __init__(self):
+        self.calls = 0
+
+    def post(self, url, headers, payload, timeout):
+        self.calls += 1
+        return {"choices": [{"message": {"role": "assistant", "content": "ok"}}]}
+
+
+async def main():
+    os.environ["OPENAI_API_KEY"] = "YOUR_KEY_HERE"
+    tk = await create_toolkit(builtins=False)
+    rec = Recorder()
+    client = create_client(
+        base_url="http://localhost:8080/v1", style="openai", model="local-model",
+        http_transport=rec, retries=0,
+    )
+    try:
+        await client.run("hi", tk)
+        raise AssertionError("expected No API key")
+    except RuntimeError as e:
+        assert "No API key" in str(e) and "YOUR_KEY_HERE" not in str(e)
+    assert rec.calls == 0  # nothing was sent
+    print("ok: OPENAI_API_KEY was not sent to localhost")
+
+
+asyncio.run(main())
+```
+
+## See also
+
+- [`create_client`](/api/python/client/create/) — The unified client: system prompt, skills injection, parallel and chained tool calls, retries, memory.
+- [`list_models`](/api/python/client/list-models/) — List a provider's models under the same key rules.
+- [`Client.run`](/api/python/client/run/) — Send a prompt, let the loop call tools until the model stops, get a RunResult.

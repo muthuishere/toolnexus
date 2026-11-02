@@ -35,6 +35,52 @@ IO.puts(result.text)
 - `skills/` is a folder of `**/SKILL.md` files, loaded on demand through one `skill` tool.
 - Remote MCP `headers` values expand `${ENV_VAR}` at call time and are never logged.
 
+## API key by host (BREAKING in 0.22.0)
+
+With no `api_key`, the client reads only `api_key_env` (the **name** of an env var) or the env
+var that belongs to the `base_url` host, over https: `api.openai.com` → `OPENAI_API_KEY`,
+`api.anthropic.com` → `ANTHROPIC_API_KEY`, `openrouter.ai` → `OPENROUTER_API_KEY`. There is no
+cross-provider fallback any more, so **a local or custom `base_url` must set `api_key` or
+`api_key_env`**, or the run raises before any request:
+
+```elixir
+Toolnexus.Client.create(base_url: "http://localhost:11434/v1", model: "llama3", api_key: "unused")
+Toolnexus.Client.create(base_url: "https://gateway.example/v1", model: "m", api_key_env: "GATEWAY_KEY")
+```
+
+## Prompt cache and tool tiers
+
+```elixir
+client =
+  Toolnexus.Client.create(
+    base_url: "https://api.anthropic.com", style: "anthropic", model: "claude-sonnet-4-5",
+    prompt_cache: %{long_ttl: false},                    # cache breakpoints (anthropic) / prompt_cache_key (openai)
+    tool_tiers: %{core: ["read", "grep"], deferred: []}  # other tools load via tool_search / call_tool
+  )
+
+result = Toolnexus.Client.run(client, "fix the failing test", toolkit)
+result.usage[:cache_read_tokens]           # present when the provider reports cache hits
+Toolnexus.Client.tool_tier_plan(client, toolkit)   # %{"read" => :core, "bash" => :listed, ...}
+Toolnexus.Client.reset_tool_tiers(client, toolkit) # rebuild the frozen plan at a session start
+```
+
+The tools array never changes mid-session, so the cached prefix holds even when tools are added
+later. Runnable: `mix run examples/prompt_cache_tiers.exs` (hermetic, no key needed).
+
+## Host additions (0.22.0)
+
+- `Toolnexus.Mcp.load(cfg, on_server: fn %{name, status, tools, error} -> ... end)` — use each
+  MCP server as soon as it is ready; `Toolnexus.Mcp.resource_tools/1` lists and reads MCP resources.
+- `wait_for_ctx: fn ctx, request -> answer end` — `ctx.signal` is the turn's pid, so a pending
+  question ends with the turn.
+- Tool `hints` (`%Toolnexus.ToolHints{read_only, destructive, open_world}`) on builtins, MCP
+  annotations and every `before_tool` event — a permission gate is a `before_tool` hook.
+- Opt-in builtins: `background: Toolnexus.Builtin.BackgroundShells.new()` (`bash_output`,
+  `kill_shell`), `web_search: fn query, limit -> ... end`, `notebook_edit: true`; `grep`
+  `context` / `before` / `after`; truncation in `read` / `grep` metadata.
+- Compactor `on_compact` (counts, summary, `folded` messages); `Toolnexus.Agents.as_tool_with/2`
+  and runtime `:wait_for`; `ctx.call_id` on every tool call; `Toolnexus.Client.list_models/1`.
+
 ## Simple judgments
 
 `Toolnexus.Judge` is a thin layer over any `Toolnexus.Classifier` (SPEC §8B); the wire is unchanged.

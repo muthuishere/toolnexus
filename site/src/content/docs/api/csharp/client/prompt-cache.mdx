@@ -1,0 +1,314 @@
+---
+title: "Options.PromptCache"
+description: "Mark the stable prompt prefix for the provider (Anthropic cache breakpoints, OpenAI prompt_cache_key) and read cacheRead/cacheWrite tokens from usage. — C#."
+sidebar:
+  label: "Options.PromptCache"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>C#</strong> · package <code>Toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/csharp/src/Toolnexus/LlmClientHost.cs">LlmClientHost.cs</a>
+</p>
+
+```csharp
+public sealed class LlmClient.Options
+{
+    public PromptCacheOptions? PromptCache { get; set; }   // null ⇒ request body byte-identical
+}
+
+public sealed class PromptCacheOptions
+{
+    public string? Key { get; set; }    // openai prompt_cache_key (one per session)
+    public bool LongTtl { get; set; }   // anthropic ttl:"1h"
+}
+
+public sealed class LlmClient.Usage
+{
+    public long PromptTokens, CompletionTokens, TotalTokens;
+    public long CacheReadTokens;   // served from the cache
+    public long CacheWriteTokens;  // written to the cache (anthropic)
+}
+```
+
+Marks the stable prefix of every request for the provider's prompt cache:
+
+- **anthropic** — `cache_control: {type:"ephemeral"}` (plus `ttl:"1h"` with `LongTtl`) on the last
+  tool, on the system prompt (a string becomes one text block) and on the last content block of the
+  latest message.
+- **openai** — `prompt_cache_key = Key` when `Key` is set (OpenAI caches long prefixes on its own).
+- **gemini** — nothing yet (explicit `cachedContent` is not built).
+
+It is applied before `RequestParams` and `BodyTransform`, so both can override it. The transcript
+itself is never mutated. Usage reports `CacheReadTokens` / `CacheWriteTokens` either way.
+
+<Aside type="caution" title="Context size under anthropic">
+Anthropic's `input_tokens` excludes cached tokens, so the real context sent is
+`PromptTokens + CacheReadTokens + CacheWriteTokens`. Under openai `PromptTokens` already includes
+`CacheReadTokens`; do not add it again.
+</Aside>
+
+## When to use it
+
+Long sessions with a big, stable system prompt and tool list: a coding agent, a support agent with
+a skills catalog. The second and later requests read the prefix from the cache, which is cheaper
+and faster. Pair it with [`ToolTiers`](/api/csharp/client/tool-tiers/) so registering a tool
+mid-session does not change the tools array and break the cached prefix.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="PromptCache, not a hand-written BodyTransform">
+You could add `cache_control` yourself in `BodyTransform`, but you would have to find the last
+tool, convert a string system prompt to a block and copy the latest message without mutating the
+transcript, per provider. Use `BodyTransform` only for a provider shape `PromptCache` does not cover.
+</Aside>
+
+## Examples
+
+### 1. OpenAI: a session key, and cache hits in usage
+
+```csharp test
+using System.Net;
+using System.Text;
+using Toolnexus;
+
+string sent = "";
+using var stub = new Stub((ctx, body) =>
+{
+    sent = body;
+    Stub.Json(ctx, 200, """
+    {"id":"c1","choices":[{"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1200,"completion_tokens":1,"total_tokens":1201,"prompt_tokens_details":{"cached_tokens":1024}}}
+    """);
+});
+
+var client = LlmClient.Create(new LlmClient.Options
+{
+    BaseUrl = stub.BaseUrl, Style = "openai", Model = "gpt-4o-mini", ApiKey = "YOUR_KEY_HERE",
+    PromptCache = new PromptCacheOptions { Key = "session-42" },
+});
+
+await using var tk = await Toolkit.CreateAsync(new Toolkit.Options());
+var result = await client.RunAsync("hi", tk);
+
+if (!sent.Contains("\"prompt_cache_key\":\"session-42\"")) throw new Exception(sent);
+if (result.Usage.CacheReadTokens != 1024) throw new Exception($"{result.Usage.CacheReadTokens}");
+Console.WriteLine($"ok: prompt_cache_key sent, {result.Usage.CacheReadTokens} cached of {result.Usage.PromptTokens}");
+
+sealed class Stub : IDisposable
+{
+    readonly HttpListener _listener = new();
+    readonly CancellationTokenSource _cts = new();
+    public int Port { get; }
+    public string BaseUrl => $"http://127.0.0.1:{Port}";
+
+    public Stub(Action<HttpListenerContext, string> handler)
+    {
+        var probe = new System.Net.Sockets.TcpListener(IPAddress.Loopback, 0);
+        probe.Start();
+        Port = ((IPEndPoint)probe.LocalEndpoint).Port;
+        probe.Stop();
+        _listener.Prefixes.Add($"http://127.0.0.1:{Port}/");
+        _listener.Start();
+        _ = Task.Run(async () =>
+        {
+            while (!_cts.IsCancellationRequested)
+            {
+                HttpListenerContext ctx;
+                try { ctx = await _listener.GetContextAsync(); }
+                catch { break; }
+                var body = new StreamReader(ctx.Request.InputStream).ReadToEnd();
+                try { handler(ctx, body); } catch { }
+            }
+        });
+    }
+
+    public static void Json(HttpListenerContext ctx, int status, string body)
+    {
+        var bytes = Encoding.UTF8.GetBytes(body);
+        ctx.Response.StatusCode = status;
+        ctx.Response.ContentType = "application/json";
+        ctx.Response.ContentLength64 = bytes.Length;
+        ctx.Response.OutputStream.Write(bytes, 0, bytes.Length);
+        ctx.Response.OutputStream.Close();
+    }
+
+    public void Dispose()
+    {
+        _cts.Cancel();
+        try { _listener.Stop(); } catch { }
+        try { _listener.Close(); } catch { }
+    }
+}
+```
+
+### 2. Anthropic: breakpoints on tools, system prompt and latest message
+
+```csharp test
+using System.Net;
+using System.Text;
+using Toolnexus;
+
+string sent = "";
+using var stub = new Stub((ctx, body) =>
+{
+    sent = body;
+    Stub.Json(ctx, 200, """
+    {"id":"m1","type":"message","role":"assistant","content":[{"type":"text","text":"hi"}],"stop_reason":"end_turn","usage":{"input_tokens":12,"output_tokens":1,"cache_read_input_tokens":900,"cache_creation_input_tokens":40}}
+    """);
+});
+
+var echo = NativeTool.Of("echo", "Echo text", null, (IDictionary<string, object?> a) => "x");
+var client = LlmClient.Create(new LlmClient.Options
+{
+    BaseUrl = stub.BaseUrl, Style = "anthropic", Model = "claude-sonnet", ApiKey = "YOUR_KEY_HERE",
+    SystemPrompt = "You are a careful assistant.",
+    PromptCache = new PromptCacheOptions(),
+});
+
+await using var tk = await Toolkit.CreateAsync(new Toolkit.Options { ExtraTools = new List<ITool> { echo } });
+var result = await client.RunAsync("hi", tk);
+
+var marks = sent.Split("\"cache_control\"").Length - 1;
+if (marks != 3) throw new Exception($"expected 3 breakpoints, got {marks}: {sent}");
+var u = result.Usage;
+var context = u.PromptTokens + u.CacheReadTokens + u.CacheWriteTokens;
+Console.WriteLine($"ok: {marks} cache breakpoints; context = {context} tokens ({u.CacheReadTokens} read, {u.CacheWriteTokens} written)");
+
+sealed class Stub : IDisposable
+{
+    readonly HttpListener _listener = new();
+    readonly CancellationTokenSource _cts = new();
+    public int Port { get; }
+    public string BaseUrl => $"http://127.0.0.1:{Port}";
+
+    public Stub(Action<HttpListenerContext, string> handler)
+    {
+        var probe = new System.Net.Sockets.TcpListener(IPAddress.Loopback, 0);
+        probe.Start();
+        Port = ((IPEndPoint)probe.LocalEndpoint).Port;
+        probe.Stop();
+        _listener.Prefixes.Add($"http://127.0.0.1:{Port}/");
+        _listener.Start();
+        _ = Task.Run(async () =>
+        {
+            while (!_cts.IsCancellationRequested)
+            {
+                HttpListenerContext ctx;
+                try { ctx = await _listener.GetContextAsync(); }
+                catch { break; }
+                var body = new StreamReader(ctx.Request.InputStream).ReadToEnd();
+                try { handler(ctx, body); } catch { }
+            }
+        });
+    }
+
+    public static void Json(HttpListenerContext ctx, int status, string body)
+    {
+        var bytes = Encoding.UTF8.GetBytes(body);
+        ctx.Response.StatusCode = status;
+        ctx.Response.ContentType = "application/json";
+        ctx.Response.ContentLength64 = bytes.Length;
+        ctx.Response.OutputStream.Write(bytes, 0, bytes.Length);
+        ctx.Response.OutputStream.Close();
+    }
+
+    public void Dispose()
+    {
+        _cts.Cancel();
+        try { _listener.Stop(); } catch { }
+        try { _listener.Close(); } catch { }
+    }
+}
+```
+
+### 3. The one-hour lifetime
+
+```csharp test
+using System.Net;
+using System.Text;
+using Toolnexus;
+
+string sent = "";
+using var stub = new Stub((ctx, body) =>
+{
+    sent = body;
+    Stub.Json(ctx, 200, """
+    {"id":"m1","type":"message","role":"assistant","content":[{"type":"text","text":"hi"}],"stop_reason":"end_turn","usage":{"input_tokens":12,"output_tokens":1}}
+    """);
+});
+
+var client = LlmClient.Create(new LlmClient.Options
+{
+    BaseUrl = stub.BaseUrl, Style = "anthropic", Model = "claude-sonnet", ApiKey = "YOUR_KEY_HERE",
+    SystemPrompt = "Long, stable instructions.",
+    PromptCache = new PromptCacheOptions { LongTtl = true },
+});
+
+await using var tk = await Toolkit.CreateAsync(new Toolkit.Options());
+await client.RunAsync("hi", tk);
+
+if (!sent.Contains("\"ttl\":\"1h\"")) throw new Exception(sent);
+Console.WriteLine("ok: cache_control carries ttl 1h");
+
+sealed class Stub : IDisposable
+{
+    readonly HttpListener _listener = new();
+    readonly CancellationTokenSource _cts = new();
+    public int Port { get; }
+    public string BaseUrl => $"http://127.0.0.1:{Port}";
+
+    public Stub(Action<HttpListenerContext, string> handler)
+    {
+        var probe = new System.Net.Sockets.TcpListener(IPAddress.Loopback, 0);
+        probe.Start();
+        Port = ((IPEndPoint)probe.LocalEndpoint).Port;
+        probe.Stop();
+        _listener.Prefixes.Add($"http://127.0.0.1:{Port}/");
+        _listener.Start();
+        _ = Task.Run(async () =>
+        {
+            while (!_cts.IsCancellationRequested)
+            {
+                HttpListenerContext ctx;
+                try { ctx = await _listener.GetContextAsync(); }
+                catch { break; }
+                var body = new StreamReader(ctx.Request.InputStream).ReadToEnd();
+                try { handler(ctx, body); } catch { }
+            }
+        });
+    }
+
+    public static void Json(HttpListenerContext ctx, int status, string body)
+    {
+        var bytes = Encoding.UTF8.GetBytes(body);
+        ctx.Response.StatusCode = status;
+        ctx.Response.ContentType = "application/json";
+        ctx.Response.ContentLength64 = bytes.Length;
+        ctx.Response.OutputStream.Write(bytes, 0, bytes.Length);
+        ctx.Response.OutputStream.Close();
+    }
+
+    public void Dispose()
+    {
+        _cts.Cancel();
+        try { _listener.Stop(); } catch { }
+        try { _listener.Close(); } catch { }
+    }
+}
+```
+
+## Fields
+
+| Field | Type | What it is |
+|---|---|---|
+| `PromptCacheOptions.Key` | `string?` | openai `prompt_cache_key`; ignored by anthropic. |
+| `PromptCacheOptions.LongTtl` | `bool` | anthropic one-hour cache lifetime. |
+| `Usage.CacheReadTokens` | `long` | Prompt tokens served from the cache. |
+| `Usage.CacheWriteTokens` | `long` | Prompt tokens written to the cache (anthropic). |
+
+## See also
+
+- [`LlmClient.Create`](/api/csharp/client/create/) — The unified client: system prompt, skills injection, parallel and chained tool calls, retries, memory.
+- [`LlmClient.RunAsync`](/api/csharp/client/run/) — Send a prompt, let the loop call tools until the model stops, get a RunResult.
+- [`LlmClient.StreamAsync`](/api/csharp/client/stream/) — The streaming loop: text deltas, tool-call events, and suspension events as they happen.
+- [`LlmClient.Hooks`](/api/csharp/client/hooks/) — Intercept before/after model calls and tool calls: audit, redact, veto, or rewrite.

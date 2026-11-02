@@ -157,6 +157,48 @@ way you would any other shell invocation you don't fully control. It is one of t
 `selectBuiltins`/`createToolkit`'s `tools` map exists to turn off per-agent.
 </Aside>
 
+{/* 0.22 */}
+## New in 0.22 — grep context, truncation metadata, opt-in tools
+
+- **`grep` context.** `grep` takes `context`, `before`, `after`: match lines are `path:N:text`,
+  context lines `path-N-text`, `--` between groups that do not touch. Absent ⇒ output unchanged.
+- **Truncation in metadata.** A `read` window that stops before the end sets `metadata.truncated`,
+  `totalLines`, `nextOffset`; a `grep` cut by `limit` sets `truncated`, `total`. The text is unchanged.
+- **Opt-in builtins**, off unless configured (the default ten are unchanged):
+  `background: new BackgroundShells()` ([background shells](/api/javascript/builtins/background-shells/)),
+  `webSearch: (query, limit, { signal }) => results` (adds `websearch`; the library ships no
+  provider) and `notebookEdit: true` (adds `notebook_edit` for `.ipynb` cells).
+- Every builtin carries [`hints`](/api/javascript/client/hooks/).
+
+```ts test
+import assert from "node:assert"
+import fs from "node:fs"
+import os from "node:os"
+import path from "node:path"
+import { createBuiltinTools } from "toolnexus"
+
+const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tn-grep-"))
+fs.writeFileSync(path.join(dir, "a.txt"), "one\ntwo\nTARGET\nfour\nfive\n")
+const tools = createBuiltinTools({
+  baseDir: dir,
+  webSearch: async (query, limit) => [{ title: "Docs", url: "https://example.invalid/docs", snippet: `about ${query}` }].slice(0, limit),
+  notebookEdit: true,
+})
+const pick = (n: string) => tools.find((t) => t.name === n)!
+const g = await pick("grep").execute({ pattern: "TARGET", path: dir, context: 1 })
+assert.match(g.output, /a\.txt-2-two/)
+assert.match(g.output, /a\.txt:3:TARGET/)
+assert.match(g.output, /a\.txt-4-four/)
+const r = await pick("read").execute({ path: "a.txt", limit: 2 })
+assert.equal(r.metadata?.truncated, true)
+const w = await pick("websearch").execute({ query: "toolnexus", limit: 1 })
+assert.equal(w.output, "1. Docs\n   https://example.invalid/docs\n   about toolnexus")
+assert.ok(pick("notebook_edit"))
+fs.rmSync(dir, { recursive: true, force: true })
+console.log("ok: grep context, read truncated, websearch, notebook_edit")
+```
+{/* /0.22 */}
+
 ## What you get back
 
 Fixed order, each `source: "builtin"`:

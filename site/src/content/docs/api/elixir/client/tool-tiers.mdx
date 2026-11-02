@@ -1,0 +1,153 @@
+---
+title: "tool_tiers"
+description: "Send only core tool schemas; the model loads the rest with tool_search and calls them by name or through call_tool. The plan is frozen until resetToolTiers. — Elixir."
+sidebar:
+  label: "tool_tiers"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Elixir</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a>
+</p>
+
+```elixir
+Toolnexus.Client.create(
+  ...,
+  tool_tiers: %{
+    core: [String.t()],             # always sent with the full schema
+    deferred: [String.t()],         # listed by name only; every other tool is "listed"
+    budget_tokens: pos_integer(),   # optional cap on the up-front schema tokens
+    context_window: pos_integer(),  # default budget = 5% of this
+    usage_count: (String.t() -> integer()),
+    count_tokens: (term() -> integer())
+  }
+)
+
+@spec tool_tier_plan(Client.t(), toolkit) :: %{String.t() => :core | :listed | :deferred} | nil
+@spec reset_tool_tiers(Client.t(), toolkit) :: :ok
+```
+
+Send only the **core** tool schemas. Every other tool is named inside the description of a
+`tool_search` tool — *listed* tools as `- name — first line` (cut to 120 bytes), *deferred*
+tools by name only. The model calls `tool_search %{query}` (`"select:a,b"` for exact names, else
+keywords) and gets the full definitions back **as a tool result**, so the tools array — and the
+cached prefix — never changes mid-session. A loaded tool is then called by name, or through
+`call_tool %{name, arguments}`, which the loop unwraps **before** hooks: `before_tool` and its
+`hints` see the real tool. Stream `tool_call` / `tool_result` events name the real tool and carry
+`via: "call_tool"`. `tool_search` itself is engine-internal and never reaches `before_tool`.
+
+The plan is built on a toolkit's first request and then **frozen**, keyed by the toolkit's id
+(which survives `Toolkit.register`). A tool registered later is absent from the description but
+still found by search. `Toolnexus.Client.reset_tool_tiers/2` drops the plan so the next request
+rebuilds it — call it at a session start. With a budget, the least-used core tool moves down to
+listed (ties: larger schema, then name), then the least-used listed tool to deferred.
+
+## When to use it
+
+- **Many tools, few used per session** — dozens of MCP tools cost thousands of prompt tokens
+  on every turn; tiers send a handful plus two small meta tools.
+- **Tools arrive mid-session** (an MCP server connects late, a plugin loads) — without tiers
+  the tools array changes and the [prompt cache](/api/elixir/client/prompt-cache/) misses.
+- **A UI that shows what the model can see** — `tool_tier_plan/2` returns the frozen plan.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Not disable_tools">
+`disable_tools` removes a tool outright: the model cannot reach it at all. Tiers keep every tool
+reachable and only defer its schema. Use `disable_tools` for what must never run, tiers for what
+is merely rarely needed.
+</Aside>
+
+## Examples
+
+### 1. Inspect the plan
+
+```elixir test
+alias Toolnexus.{Client, Toolkit}
+
+mk = fn name, desc -> Toolnexus.define_tool(name: name, description: desc, execute: fn _ -> name end) end
+tk = Toolkit.register(Toolnexus.create_toolkit!(builtins: false),
+       [mk.("read_file", "Read a file."), mk.("lint", "Lint the code."), mk.("deploy", "Deploy the service.")])
+
+c = Client.create(base_url: "https://api.example/v1", model: "m", api_key: "YOUR_KEY_HERE",
+                  tool_tiers: %{core: ["read_file"], deferred: ["deploy"]})
+
+plan = Client.tool_tier_plan(c, tk)
+true = plan == %{"read_file" => :core, "lint" => :listed, "deploy" => :deferred}
+IO.puts("ok: #{inspect(plan)}")
+```
+
+### 2. The loop: tool_search, then call_tool, with the gate seeing the real tool
+
+```elixir test
+alias Toolnexus.{Client, Toolkit}
+me = self()
+
+deploy = Toolnexus.define_tool(name: "deploy", description: "Deploy the service.",
+           execute: fn args -> send(me, {:ran, args["env"]}); "deployed" end)
+read = Toolnexus.define_tool(name: "read_file", description: "Read a file.", execute: fn _ -> "x" end)
+tk = Toolkit.register(Toolnexus.create_toolkit!(builtins: false), [read, deploy])
+
+{:ok, step} = Agent.start_link(fn -> 0 end)
+
+msg = fn calls ->
+  %{"choices" => [%{"message" => %{"role" => "assistant", "content" => nil,
+      "tool_calls" => for({id, n, a} <- calls, do: %{"id" => id, "type" => "function",
+        "function" => %{"name" => n, "arguments" => Jason.encode!(a)}})}}],
+    "usage" => %{"prompt_tokens" => 1, "completion_tokens" => 1, "total_tokens" => 2}}
+end
+
+t = fn req ->
+  send(me, {:tools, Enum.map(req.body["tools"], & &1["function"]["name"])})
+  body =
+    case Agent.get_and_update(step, &{&1 + 1, &1 + 1}) do
+      1 -> msg.([{"s1", "tool_search", %{"query" => "select:deploy"}}])
+      2 -> msg.([{"c1", "call_tool", %{"name" => "deploy", "arguments" => %{"env" => "prod"}}}])
+      _ -> %{"choices" => [%{"message" => %{"role" => "assistant", "content" => "shipped"}}],
+             "usage" => %{"prompt_tokens" => 1, "completion_tokens" => 1, "total_tokens" => 2}}
+    end
+  {:ok, %{status: 200, headers: %{}, body: body}}
+end
+
+c = Client.create(base_url: "https://api.example/v1", model: "m", api_key: "YOUR_KEY_HERE",
+      transport: t, tool_tiers: %{core: ["read_file"]},
+      hooks: %{before_tool: fn ev -> send(me, {:gate, ev.name}); nil end})
+
+r = Client.run(c, "ship it", tk)
+true = r.text == "shipped"
+receive do: ({:ran, "prod"} -> :ok)
+receive do: ({:gate, "deploy"} -> :ok)
+
+arrays = for _ <- 1..3, do: (receive do {:tools, a} -> a end)
+[["read_file", "tool_search", "call_tool"]] = Enum.uniq(arrays)
+IO.puts("ok: tools array stable across #{length(arrays)} requests")
+```
+
+### 3. Frozen across register, rebuilt by reset_tool_tiers
+
+```elixir test
+alias Toolnexus.{Client, Toolkit}
+
+mk = fn name -> Toolnexus.define_tool(name: name, description: "Tool #{name}.", execute: fn _ -> name end) end
+tk = Toolkit.register(Toolnexus.create_toolkit!(builtins: false), [mk.("a"), mk.("b")])
+
+c = Client.create(base_url: "https://api.example/v1", model: "m", api_key: "YOUR_KEY_HERE",
+                  tool_tiers: %{core: ["a"]})
+
+plan = Client.tool_tier_plan(c, tk)
+tk2 = Toolkit.register(tk, mk.("late"))
+
+# Same toolkit id ⇒ the frozen plan; "late" is not in it (found by search instead).
+true = Client.tool_tier_plan(c, tk2) == plan
+:ok = Client.reset_tool_tiers(c, tk2)
+true = Client.tool_tier_plan(c, tk2)["late"] == :listed
+IO.puts("ok: late tool listed after reset")
+```
+
+## See also
+
+- [`Toolnexus.Client.create`](/api/elixir/client/create/) — The unified client: system prompt, skills injection, parallel and chained tool calls, retries, memory.
+- [`Toolnexus.Client.run`](/api/elixir/client/run/) — Send a prompt, let the loop call tools until the model stops, get a RunResult.
+- [`Toolnexus.Client.stream`](/api/elixir/client/stream/) — The streaming loop: text deltas, tool-call events, and suspension events as they happen.
+- [`Toolnexus.Client.create`](/api/elixir/client/hooks/) — Intercept before/after model calls and tool calls: audit, redact, veto, or rewrite.

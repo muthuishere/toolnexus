@@ -245,6 +245,72 @@ world changed out-of-band — the session is simply valid now — so you re-run 
 ignore `Data`.
 </Aside>
 
+## `CallID` — tell sibling calls apart
+
+A tool run by the client loop gets `ToolContext.CallID` = the model's id for that call (empty outside
+the loop). The loop runs one message's tool calls concurrently, so this is how a tool — or a host
+tracking which subagent call is the parent of which UI row — tells sibling calls apart.
+
+```go test
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"net/http"
+	"net/http/httptest"
+	"sort"
+	"sync"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	var mu sync.Mutex
+	var ids []string
+	probe := toolnexus.Tool{
+		Name: "probe", Description: "records its call id", InputSchema: toolnexus.JSONSchema{"type": "object", "properties": map[string]any{}},
+		Source: toolnexus.SourceCustom,
+		Execute: func(_ map[string]any, tctx *toolnexus.ToolContext) (toolnexus.ToolResult, error) {
+			mu.Lock()
+			ids = append(ids, tctx.CallID)
+			mu.Unlock()
+			return toolnexus.ToolResult{Output: "ok"}, nil
+		},
+	}
+	tk, err := toolnexus.CreateToolkit(context.Background(), toolnexus.Options{ExtraTools: []toolnexus.Tool{probe}})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer tk.Close()
+
+	turn := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		turn++
+		w.Header().Set("Content-Type", "application/json")
+		if turn == 1 {
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[
+				{"id":"call_a","type":"function","function":{"name":"probe","arguments":"{}"}},
+				{"id":"call_b","type":"function","function":{"name":"probe","arguments":"{}"}}]}}]}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"done"}}]}`))
+	}))
+	defer srv.Close()
+
+	client := toolnexus.CreateClient(toolnexus.ClientOptions{BaseURL: srv.URL, Style: toolnexus.StyleOpenAI, Model: "m", APIKey: "YOUR_KEY_HERE"})
+	if _, err := client.Run(context.Background(), "probe twice", tk); err != nil {
+		log.Fatal(err)
+	}
+	sort.Strings(ids)
+	if len(ids) != 2 || ids[0] != "call_a" || ids[1] != "call_b" {
+		log.Fatalf("unexpected call ids: %v", ids)
+	}
+	fmt.Println("ok:", ids)
+}
+```
+
 ## Fields
 
 | Field | Type | What it is |

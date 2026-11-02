@@ -522,6 +522,21 @@ test("prompt cache: simulated replay, hits from the 2nd request and never drop",
   for (const b of sim.bodies) assert.ok(JSON.stringify(b.tools) === t0 && JSON.stringify(b.system) === s0, "prefix changed")
 })
 
+test("createToolkit() with no argument builds the default toolkit", async () => {
+  const tk = await createToolkit()
+  assert.ok(tk.tools().some((t) => t.name === "bash"))
+  await tk.close()
+})
+
+test("prompt cache: the last tool in the anthropic request carries the breakpoint, and only it", async () => {
+  const sim = await runCacheSession({})
+  const tools = JSON.parse(JSON.stringify(sim.bodies[0])).tools
+  assert.ok(tools.length >= 2)
+  for (const t of tools.slice(0, -1)) assert.equal("cache_control" in t, false)
+  assert.equal(tools.at(-1).name, "tool_search")
+  assert.deepEqual(tools.at(-1).cache_control, { type: "ephemeral" })
+})
+
 test("prompt cache: off is byte-identical (no cache_control, string system)", async () => {
   const sim = await runCacheSession(undefined)
   for (const b of sim.bodies) {
@@ -617,6 +632,8 @@ test("tool tiers: tool_search loads, call_tool is unwrapped before hooks, tools 
   assert.equal(r.status, "done")
   assert.ok(r.toolCalls[0].output.includes('"name": "deploy"'), r.toolCalls[0].output)
   assert.deepEqual(ran, ["deploy(prod)", "lint(direct)"])
+  // RunResult.toolCalls names the real tool with its inner args, like hooks and stream events.
+  assert.deepEqual(r.toolCalls.map((t) => `${t.name}(${(t.args as any).x})`), ["tool_search(undefined)", "deploy(prod)", "lint(direct)"])
   assert.deepEqual(gated, ["deploy:true", "lint:?"])
   for (const a of arrays) assert.equal(a, arrays[0])
 })

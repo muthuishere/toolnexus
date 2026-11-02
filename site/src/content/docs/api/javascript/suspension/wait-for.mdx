@@ -14,7 +14,7 @@ import { Aside } from '@astrojs/starlight/components';
 ```ts
 interface ClientOptions {
   // ...
-  waitFor?: (request: Request) => Promise<Answer>
+  waitFor?: (request: Request, ctx: { signal: AbortSignal }) => Promise<Answer>
 }
 ```
 
@@ -165,6 +165,58 @@ assert.equal(res.toolCalls[0].output, "unresolved: still need approval")
 await tk.close()
 console.log("ok:", res.toolCalls[0].output)
 ```
+
+{/* 0.22 */}
+## The turn's signal (0.22)
+
+`waitFor` receives the turn's abort signal as a second argument:
+`waitFor(request, { signal })`. A resolver waiting on a human (a Slack reply, a browser login)
+should listen to it, so a pending question ends when the turn is cancelled instead of outliving
+it. JS has no separate `waitForCtx` (Go `WaitForCtx`, python `wait_for_ctx`): the signal rides
+on the one callback.
+
+```ts test
+import assert from "node:assert"
+import http from "node:http"
+import { createClient, createToolkit, defineTool, pending } from "toolnexus"
+
+// A local OpenAI-style stub: replies[i] is the i-th assistant message.
+async function stub(replies: any[]) {
+  let n = 0
+  const server = http.createServer((req, res) => {
+    req.resume()
+    req.on("end", () => {
+      const msg = replies[Math.min(++n, replies.length) - 1]
+      res.writeHead(200, { "content-type": "application/json" })
+      res.end(JSON.stringify({ choices: [{ message: { content: null, ...msg }, finish_reason: msg.tool_calls ? "tool_calls" : "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } }))
+    })
+  })
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", r))
+  return { url: `http://127.0.0.1:${(server.address() as any).port}`, close: () => server.close() }
+}
+const call = (id: string, name: string, args: object) => ({ tool_calls: [{ id, type: "function", function: { name, arguments: JSON.stringify(args) } }] })
+
+const llm = await stub([call("c1", "ask_human", {}), { content: "never" }])
+const tk = await createToolkit({ builtins: false, extraTools: [
+  defineTool({ name: "ask_human", description: "Ask", run: () => pending({ kind: "input", prompt: "Which env?" }) }),
+] })
+const ac = new AbortController()
+let sawAbort = false
+const client = createClient({
+  baseUrl: llm.url, style: "openai", model: "stub", apiKey: "YOUR_KEY_HERE",
+  // Never answers on its own: only the turn's signal ends the wait.
+  waitFor: (request, { signal }) => new Promise((_, reject) => {
+    signal.addEventListener("abort", () => { sawAbort = true; reject(new Error("turn cancelled")) })
+    setTimeout(() => ac.abort(), 50)
+  }),
+})
+await assert.rejects(client.run("deploy", { toolkit: tk, signal: ac.signal }))
+assert.equal(sawAbort, true)
+await tk.close()
+llm.close()
+console.log("ok: pending ask ended with the turn")
+```
+{/* /0.22 */}
 
 ## Options
 

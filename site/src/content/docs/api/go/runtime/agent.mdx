@@ -266,6 +266,28 @@ func main() {
 }
 ```
 
+## `AsToolWith` — a subagent under the parent's gates
+
+```go
+func (a *Agent) AsTool(opts Options) tn.Tool
+func (a *Agent) AsToolWith(per func(*tn.ToolContext) Options) tn.Tool
+```
+
+`AsTool` stops the child run when the calling turn is cancelled (the tool returns a cancelled error
+result). `AsToolWith` builds the runtime `Options` per call from the calling tool's context, so the
+child runs under the **same** gates as the parent turn: `Options.Hooks` (the same `BeforeTool`
+permission gate — it also sees the child's tool calls and results, and `AfterLLM` its replies, enough
+for a nested UI row), `Options.WaitFor` (answers a child's suspension when no agent on its chain has
+its own `WaitFor`) and `OnMetric`. A `Def.Hooks` on the agent replaces `Options.Hooks`, so leave it
+unset when the gate must hold. There is no token-by-token stream of the child's text.
+
+```go
+gate := &tn.Hooks{BeforeTool: parentGate}
+tool := child.AsToolWith(func(tctx *tn.ToolContext) agents.Options {
+	return agents.Options{Hooks: gate, WaitFor: askTheUser} // tctx.CallID names the parent row
+})
+```
+
 ## Spec fields
 
 | Field | Type | What it does |

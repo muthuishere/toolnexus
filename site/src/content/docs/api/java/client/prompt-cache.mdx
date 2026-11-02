@@ -1,0 +1,192 @@
+---
+title: "Options.promptCache"
+description: "Mark the stable prompt prefix for the provider (Anthropic cache breakpoints, OpenAI prompt_cache_key) and read cacheRead/cacheWrite tokens from usage. — Java."
+sidebar:
+  label: "Options.promptCache"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Java</strong> · package <code>io.github.muthuishere:toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a>
+</p>
+
+```java
+// LlmClient.Options
+public Options promptCache(PromptCache v)   // null (default) = request body byte-identical
+
+public final class PromptCache {
+    public String key;        // openai prompt_cache_key (one per session); ignored by anthropic
+    public boolean longTTL;   // anthropic ttl:"1h" instead of the default 5 minutes
+    public PromptCache key(String v)
+    public PromptCache longTTL(boolean v)
+}
+
+// LlmClient.Usage — summed across the run
+public long cacheReadTokens;   // anthropic cache_read_input_tokens / openai cached_tokens
+public long cacheWriteTokens;  // anthropic cache_creation_input_tokens (openai reports none)
+```
+
+Marks the stable prefix of every request so the provider can cache it:
+
+- **anthropic** — `cache_control: {type:"ephemeral"}` (plus `ttl:"1h"` with `longTTL`) on the last
+  tool, on the system prompt (a string becomes one text block) and on the last content block of the
+  latest message.
+- **openai** — `prompt_cache_key = key` when set; OpenAI caches the prefix on its own.
+- **gemini** — nothing yet (explicit `cachedContent` is not built).
+
+It is applied before `requestParams` and `bodyTransform`, so both can still override it, and the
+transcript itself is never mutated.
+
+<Aside type="note" title="Counting context under anthropic">
+Anthropic's input count excludes cached tokens, so the real context size is
+`promptTokens + cacheReadTokens + cacheWriteTokens`. Under openai `promptTokens` already includes
+`cacheReadTokens`; do not add it twice.
+</Aside>
+
+## When to use it
+
+Any multi-turn session against Anthropic or OpenAI with a long system prompt, a skills catalog or
+many tool schemas. The prefix is re-sent on every model call of every turn; caching it cuts input
+cost and latency once the second request arrives. Watch `usage.cacheReadTokens` to see that it
+works and to notice when hits drop.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Not bodyTransform">
+You can add `cache_control` yourself in `bodyTransform`, but you then have to find the last tool, the
+system block and the latest message on every request, in both dialects. `promptCache` does that,
+and copies rather than mutates the transcript. Keep `bodyTransform` for provider fields toolnexus
+does not know. If your tool set changes mid-session, add [`toolTiers`](/api/java/client/tool-tiers/)
+too, or every change breaks the cached prefix.
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call — anthropic cache breakpoints
+
+```java test
+import com.sun.net.httpserver.HttpServer;
+import io.github.muthuishere.toolnexus.*;
+import java.io.OutputStream;
+import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
+import java.util.concurrent.atomic.AtomicReference;
+
+public class Example {
+    public static void main(String[] args) throws Exception {
+        AtomicReference<String> sent = new AtomicReference<>();
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/", ex -> {
+            sent.set(new String(ex.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+            byte[] b = ("{\"content\":[{\"type\":\"text\",\"text\":\"ok\"}],\"stop_reason\":\"end_turn\","
+                    + "\"usage\":{\"input_tokens\":3,\"output_tokens\":1}}").getBytes(StandardCharsets.UTF_8);
+            ex.getResponseHeaders().add("Content-Type", "application/json");
+            ex.sendResponseHeaders(200, b.length);
+            try (OutputStream os = ex.getResponseBody()) { os.write(b); }
+        });
+        server.start();
+        try (Toolkit tk = Toolkit.create(new Toolkit.Options().builtins(false))) {
+            LlmClient client = LlmClient.create(new LlmClient.Options()
+                    .baseUrl("http://127.0.0.1:" + server.getAddress().getPort())
+                    .style("anthropic").model("m").apiKey("YOUR_KEY_HERE")
+                    .systemPrompt("You are terse.")
+                    .promptCache(new PromptCache()));
+            client.run("hi", tk);
+            String body = sent.get();
+            if (!body.contains("\"cache_control\":{\"type\":\"ephemeral\"}")) throw new AssertionError(body);
+            System.out.println("ok: cache breakpoints sent");
+        } finally {
+            server.stop(0);
+        }
+    }
+}
+```
+
+### 2. The realistic case — reading cache hits from usage
+
+```java test
+import com.sun.net.httpserver.HttpServer;
+import io.github.muthuishere.toolnexus.*;
+import java.io.OutputStream;
+import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
+
+public class Example {
+    public static void main(String[] args) throws Exception {
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/", ex -> {
+            ex.getRequestBody().readAllBytes();
+            byte[] b = ("{\"content\":[{\"type\":\"text\",\"text\":\"ok\"}],\"stop_reason\":\"end_turn\","
+                    + "\"usage\":{\"input_tokens\":5,\"output_tokens\":2,"
+                    + "\"cache_read_input_tokens\":1200,\"cache_creation_input_tokens\":40}}")
+                    .getBytes(StandardCharsets.UTF_8);
+            ex.getResponseHeaders().add("Content-Type", "application/json");
+            ex.sendResponseHeaders(200, b.length);
+            try (OutputStream os = ex.getResponseBody()) { os.write(b); }
+        });
+        server.start();
+        try (Toolkit tk = Toolkit.create(new Toolkit.Options().builtins(false))) {
+            LlmClient client = LlmClient.create(new LlmClient.Options()
+                    .baseUrl("http://127.0.0.1:" + server.getAddress().getPort())
+                    .style("anthropic").model("m").apiKey("YOUR_KEY_HERE")
+                    .promptCache(new PromptCache().longTTL(true)));
+            LlmClient.Usage u = client.run("hi", tk).usage;
+            long context = u.promptTokens + u.cacheReadTokens + u.cacheWriteTokens; // anthropic
+            if (u.cacheReadTokens != 1200 || u.cacheWriteTokens != 40) throw new AssertionError(u.cacheReadTokens);
+            if (context != 1245) throw new AssertionError(context);
+            System.out.println("ok: context " + context + " tokens, " + u.cacheReadTokens + " from cache");
+        } finally {
+            server.stop(0);
+        }
+    }
+}
+```
+
+### 3. The full surface — openai `prompt_cache_key`
+
+```java test
+import com.sun.net.httpserver.HttpServer;
+import io.github.muthuishere.toolnexus.*;
+import java.io.OutputStream;
+import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
+import java.util.concurrent.atomic.AtomicReference;
+
+public class Example {
+    public static void main(String[] args) throws Exception {
+        AtomicReference<String> sent = new AtomicReference<>();
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/", ex -> {
+            sent.set(new String(ex.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+            byte[] b = ("{\"choices\":[{\"message\":{\"content\":\"ok\"}}],\"usage\":{\"prompt_tokens\":900,"
+                    + "\"completion_tokens\":1,\"total_tokens\":901,\"prompt_tokens_details\":{\"cached_tokens\":768}}}")
+                    .getBytes(StandardCharsets.UTF_8);
+            ex.getResponseHeaders().add("Content-Type", "application/json");
+            ex.sendResponseHeaders(200, b.length);
+            try (OutputStream os = ex.getResponseBody()) { os.write(b); }
+        });
+        server.start();
+        try (Toolkit tk = Toolkit.create(new Toolkit.Options().builtins(false))) {
+            LlmClient client = LlmClient.create(new LlmClient.Options()
+                    .baseUrl("http://127.0.0.1:" + server.getAddress().getPort())
+                    .style("openai").model("m").apiKey("YOUR_KEY_HERE")
+                    .promptCache(new PromptCache().key("session-42")));
+            LlmClient.Usage u = client.run("hi", tk).usage;
+            if (!sent.get().contains("\"prompt_cache_key\":\"session-42\"")) throw new AssertionError(sent.get());
+            // openai: promptTokens already includes the cached part
+            if (u.promptTokens != 900 || u.cacheReadTokens != 768) throw new AssertionError(u.cacheReadTokens);
+            System.out.println("ok: " + u.cacheReadTokens + "/" + u.promptTokens + " prompt tokens cached");
+        } finally {
+            server.stop(0);
+        }
+    }
+}
+```
+
+## See also
+
+- [`LlmClient.create`](/api/java/client/create/) — The unified client: system prompt, skills injection, parallel and chained tool calls, retries, memory.
+- [`LlmClient.run`](/api/java/client/run/) — Send a prompt, let the loop call tools until the model stops, get a RunResult.
+- [`LlmClient.stream`](/api/java/client/stream/) — The streaming loop: text deltas, tool-call events, and suspension events as they happen.
+- [`LlmClient.Hooks`](/api/java/client/hooks/) — Intercept before/after model calls and tool calls: audit, redact, veto, or rewrite.

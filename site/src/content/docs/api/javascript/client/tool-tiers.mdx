@@ -1,0 +1,204 @@
+---
+title: "toolTiers"
+description: "Send only core tool schemas; the model loads the rest with tool_search and calls them by name or through call_tool. The plan is frozen until resetToolTiers. — JavaScript."
+sidebar:
+  label: "toolTiers"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>JavaScript</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/js/src/tooltiers.ts">js/src/tooltiers.ts</a>
+</p>
+```ts
+interface ToolTierOptions {
+  core?: string[]                         // always sent with full schemas
+  deferred?: string[]                     // named only; every other tool is "listed"
+  budgetTokens?: number                   // cap on up-front tool tokens
+  contextWindow?: number                  // budget default: 5% of this
+  usageCount?: (name: string) => number   // higher = more used
+  countTokens?: (v: unknown) => number    // default ceil(bytes / 4)
+}
+createClient({ toolTiers?: ToolTierOptions, … })
+client.toolTierPlan(toolkit): Record<string, "core" | "listed" | "deferred"> | undefined
+client.resetToolTiers(toolkit): void
+```
+
+Sends only the **core** tool schemas, then `tool_search` and `call_tool`. Every other tool is
+**listed** (`- name — first line`, cut to 120 UTF-8 bytes, inside `tool_search`'s description) or
+**deferred** (name only). The model calls `tool_search { query, limit? }` — `"select:a,b"` for
+exact names, else keyword scoring — and gets the full definitions back **as a tool result**, so the
+tools array, and the cached prefix, never change mid-session. A loaded tool is called by name or
+as `call_tool { name, arguments }`; the loop unwraps `call_tool` **before** hooks, so
+`beforeTool`, hints and permission gates see the real tool. Streamed `tool_call` / `tool_result`
+events carry the real name with `via: "call_tool"`.
+
+The plan is built on a toolkit's first request and then frozen. `resetToolTiers(tk)` rebuilds it
+(call at session start). A tool registered later is deferred and found by search. With a budget,
+the least-used core tool moves to listed while over it, then the least-used listed tool to deferred.
+
+## When to use it
+
+A toolkit with dozens of tools (several MCP servers, a big builtin set) where sending every schema
+on every request costs tokens and breaks [prompt caching](/api/javascript/client/prompt-cache/)
+whenever a tool appears.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Few tools? Skip it">
+With a handful of tools the extra `tool_search` round trip costs more than it saves. To hide tools
+outright, use [`disableTools`](/api/javascript/client/create/) instead — tiers keep every tool
+reachable.
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call — core only, the rest listed
+
+```ts test
+import assert from "node:assert"
+import http from "node:http"
+import { createClient, createToolkit, defineTool } from "toolnexus"
+
+// A local OpenAI-style stub: replies[i] is the i-th assistant message. Records every body.
+function stub(replies: any[], usage = (n: number) => ({ prompt_tokens: 10, completion_tokens: 2, total_tokens: 12 })) {
+  const bodies: any[] = []
+  const server = http.createServer((req, res) => {
+    let raw = ""
+    req.on("data", (c) => (raw += c))
+    req.on("end", () => {
+      bodies.push(JSON.parse(raw))
+      const n = bodies.length
+      const msg = replies[Math.min(n, replies.length) - 1]
+      res.writeHead(200, { "content-type": "application/json" })
+      res.end(JSON.stringify({ choices: [{ message: { content: null, ...msg }, finish_reason: msg.tool_calls ? "tool_calls" : "stop" }], usage: usage(n) }))
+    })
+  })
+  return new Promise<{ url: string; bodies: any[]; close: () => void }>((r) =>
+    server.listen(0, "127.0.0.1", () => r({ url: `http://127.0.0.1:${(server.address() as any).port}`, bodies, close: () => server.close() })))
+}
+
+const llm = await stub([{ content: "hi" }])
+const tk = await createToolkit({ builtins: false, extraTools: [
+  defineTool({ name: "echo", description: "Echo the text back.", run: () => "" }),
+  defineTool({ name: "weather", description: "Weather for a city.", run: () => "" }),
+] })
+const client = createClient({ baseUrl: llm.url, style: "openai", model: "stub", apiKey: "YOUR_KEY_HERE", toolTiers: { core: ["echo"] } })
+await client.run("hi", { toolkit: tk })
+const tools = llm.bodies[0].tools
+assert.deepEqual(tools.map((t: any) => t.function.name), ["echo", "tool_search", "call_tool"])
+assert.match(tools[1].function.description, /- weather — Weather for a city\./)
+assert.deepEqual(client.toolTierPlan(tk), { echo: "core", weather: "listed" })
+await tk.close()
+llm.close()
+console.log("ok:", tools.map((t: any) => t.function.name).join(","))
+```
+
+### 2. The realistic case — load with tool_search, call through call_tool, gate the real tool
+
+```ts test
+import assert from "node:assert"
+import http from "node:http"
+import { createClient, createToolkit, defineTool } from "toolnexus"
+
+// A local OpenAI-style stub: replies[i] is the i-th assistant message. Records every body.
+function stub(replies: any[], usage = (n: number) => ({ prompt_tokens: 10, completion_tokens: 2, total_tokens: 12 })) {
+  const bodies: any[] = []
+  const server = http.createServer((req, res) => {
+    let raw = ""
+    req.on("data", (c) => (raw += c))
+    req.on("end", () => {
+      bodies.push(JSON.parse(raw))
+      const n = bodies.length
+      const msg = replies[Math.min(n, replies.length) - 1]
+      res.writeHead(200, { "content-type": "application/json" })
+      res.end(JSON.stringify({ choices: [{ message: { content: null, ...msg }, finish_reason: msg.tool_calls ? "tool_calls" : "stop" }], usage: usage(n) }))
+    })
+  })
+  return new Promise<{ url: string; bodies: any[]; close: () => void }>((r) =>
+    server.listen(0, "127.0.0.1", () => r({ url: `http://127.0.0.1:${(server.address() as any).port}`, bodies, close: () => server.close() })))
+}
+
+const llm = await stub([
+  { tool_calls: [{ id: "c1", type: "function", function: { name: "tool_search", arguments: "{\"query\":\"select:weather\"}" } }] },
+  { tool_calls: [{ id: "c2", type: "function", function: { name: "call_tool", arguments: "{\"name\":\"weather\",\"arguments\":{\"city\":\"Paris\"}}" } }] },
+  { content: "Sunny." },
+])
+const tk = await createToolkit({ builtins: false, extraTools: [
+  defineTool({ name: "echo", description: "Echo", run: () => "" }),
+  defineTool({ name: "weather", description: "Weather for a city.", run: ({ city }) => `sunny in ${city}` }),
+] })
+const gated: string[] = []
+const client = createClient({
+  baseUrl: llm.url, style: "openai", model: "stub", apiKey: "YOUR_KEY_HERE",
+  toolTiers: { core: ["echo"] },
+  hooks: { beforeTool: (ev) => { gated.push(ev.name) } },
+})
+const res = await client.run("weather?", { toolkit: tk })
+assert.equal(res.text, "Sunny.")
+// tool_search returned the schema as a message; the tools array never changed
+for (const b of llm.bodies) assert.deepEqual(b.tools, llm.bodies[0].tools)
+assert.match(llm.bodies[1].messages.at(-1).content, /"name": "weather"/)
+assert.deepEqual(gated, ["weather"])   // tool_search is engine-internal; call_tool unwrapped
+await tk.close()
+llm.close()
+console.log("ok: gate saw", gated.join(","))
+```
+
+### 3. The full surface — deferred tools, budget, reset
+
+```ts test
+import assert from "node:assert"
+import http from "node:http"
+import { createClient, createToolkit, defineTool } from "toolnexus"
+
+// A local OpenAI-style stub: replies[i] is the i-th assistant message. Records every body.
+function stub(replies: any[], usage = (n: number) => ({ prompt_tokens: 10, completion_tokens: 2, total_tokens: 12 })) {
+  const bodies: any[] = []
+  const server = http.createServer((req, res) => {
+    let raw = ""
+    req.on("data", (c) => (raw += c))
+    req.on("end", () => {
+      bodies.push(JSON.parse(raw))
+      const n = bodies.length
+      const msg = replies[Math.min(n, replies.length) - 1]
+      res.writeHead(200, { "content-type": "application/json" })
+      res.end(JSON.stringify({ choices: [{ message: { content: null, ...msg }, finish_reason: msg.tool_calls ? "tool_calls" : "stop" }], usage: usage(n) }))
+    })
+  })
+  return new Promise<{ url: string; bodies: any[]; close: () => void }>((r) =>
+    server.listen(0, "127.0.0.1", () => r({ url: `http://127.0.0.1:${(server.address() as any).port}`, bodies, close: () => server.close() })))
+}
+
+const llm = await stub([
+  { tool_calls: [{ id: "c1", type: "function", function: { name: "call_tool", arguments: "{\"name\":\"weather\",\"arguments\":{\"city\":\"Oslo\"}}" } }] },
+  { content: "ok" },
+])
+const big = { type: "object", properties: Object.fromEntries(Array.from({ length: 40 }, (_, i) => [`f${i}`, { type: "string", description: "x".repeat(40) }])) }
+const tk = await createToolkit({ builtins: false, extraTools: [
+  defineTool({ name: "echo", description: "Echo", run: () => "" }),
+  defineTool({ name: "huge", description: "Many fields", inputSchema: big as any, run: () => "" }),
+  defineTool({ name: "weather", description: "Weather", run: ({ city }) => `cold in ${city}` }),
+] })
+const client = createClient({
+  baseUrl: llm.url, style: "openai", model: "stub", apiKey: "YOUR_KEY_HERE",
+  toolTiers: { core: ["echo", "huge"], deferred: ["weather"], budgetTokens: 400, usageCount: (n) => (n === "echo" ? 10 : 0) },
+})
+const res = await client.run("weather?", { toolkit: tk })
+const plan = client.toolTierPlan(tk)!
+assert.equal(plan.echo, "core")
+assert.equal(plan.huge, "listed")      // over budget and least used: moved down a tier
+assert.equal(plan.weather, "deferred")
+assert.equal(res.text, "ok")           // a deferred tool is still callable via call_tool
+client.resetToolTiers(tk)              // next request rebuilds the plan
+await tk.close()
+llm.close()
+console.log("ok:", JSON.stringify(plan))
+```
+
+## See also
+
+- [`createClient`](/api/javascript/client/create/) — The unified client: system prompt, skills injection, parallel and chained tool calls, retries, memory.
+- [`Client.run`](/api/javascript/client/run/) — Send a prompt, let the loop call tools until the model stops, get a RunResult.
+- [`Client.stream`](/api/javascript/client/stream/) — The streaming loop: text deltas, tool-call events, and suspension events as they happen.
+- [`Hooks`](/api/javascript/client/hooks/) — Intercept before/after model calls and tool calls: audit, redact, veto, or rewrite.

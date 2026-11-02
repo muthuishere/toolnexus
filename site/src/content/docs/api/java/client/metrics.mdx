@@ -251,6 +251,13 @@ public class Example {
 | `Options.onMetric(v)` | — | Receives every event as the loop runs. `null` ⇒ no sink (zero cost). |
 | `client.metrics()` | `String` | Prometheus text exposition, cumulative, byte-identical across ports. Valid (HELP/TYPE only) even before any activity. |
 
+## Cache tokens in usage
+
+`RunResult.usage` also reports `cacheReadTokens` and `cacheWriteTokens` (0 when the provider reports
+none). Under anthropic the real context size is `promptTokens + cacheReadTokens + cacheWriteTokens`;
+under openai `promptTokens` already includes the cached part. See
+[`promptCache`](/api/java/client/prompt-cache/).
+
 ## See also
 
 - [`LlmClient.create`](/api/java/client/create/) — The unified client: system prompt, skills injection, parallel and chained tool calls, retries, memory.

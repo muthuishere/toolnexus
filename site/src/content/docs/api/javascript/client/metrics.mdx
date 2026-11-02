@@ -184,6 +184,16 @@ badServer.close()
 console.log("ok:", toolEvents.length, !!runEvent?.error)
 ```
 
+{/* 0.22 */}
+## Cache tokens (0.22)
+
+`MetricEvent` is unchanged. Prompt-cache counts live on `RunResult.usage` and the stream's
+`usage` event as `cacheReadTokens` / `cacheWriteTokens` — see
+[`promptCache`](/api/javascript/client/prompt-cache/). Under anthropic the real context is
+`promptTokens + cacheReadTokens + cacheWriteTokens`; under openai `promptTokens` already
+includes `cacheReadTokens`.
+{/* /0.22 */}
+
 ## Fields
 
 | `event` | Fields | Fires |

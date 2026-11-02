@@ -1,0 +1,159 @@
+---
+title: Prompt cache & tool tiers
+description: Keep the prompt prefix stable so the provider caches it, send only the tools that matter up front, and let the model load the rest with tool_search — in all seven languages.
+---
+
+import { Tabs, TabItem, Aside } from '@astrojs/starlight/components';
+
+<Aside type="tip" title="Why you need this">
+A coding agent with forty tools resends every schema on every request — often several thousand
+tokens before the conversation even starts — and any change to that array (a tool registered
+mid-session) throws away the provider's prompt cache. `promptCache` tells the provider where
+the stable prefix ends; `toolTiers` keeps that prefix small and frozen. Both are off unless set,
+and with them off the request bytes are unchanged.
+</Aside>
+
+## 1. Prompt cache
+
+`promptCache` marks the stable prefix:
+
+- **Anthropic:** `cache_control: {type: "ephemeral"}` after the tools, on the system prompt and
+  on the latest message; `longTTL` adds `ttl: "1h"`.
+- **OpenAI:** sends `prompt_cache_key` = `key` (use one key per session).
+- **Gemini:** nothing yet (explicit `cachedContent` is not built; implicit prefix caching still
+  benefits from the stable prefix).
+
+Usage then reports `cacheReadTokens` and `cacheWriteTokens`, so a drop in hits is visible.
+
+<Aside type="caution" title="Context size under Anthropic">
+Anthropic's input count excludes cached tokens: the real context size is
+`promptTokens + cacheReadTokens + cacheWriteTokens`. Under OpenAI, `promptTokens` already
+includes the cached ones.
+</Aside>
+
+## 2. Tool tiers
+
+`toolTiers` sends the **core** tools with full schemas, plus two meta tools:
+
+- `tool_search {query, limit?}` — its description lists every other tool (name and one line, or
+  name only for **deferred** ones). `select:a,b` loads exact names; anything else is a keyword
+  search. The loaded schemas come back as a tool **result**, so the tools array never changes.
+- `call_tool {name, arguments}` — calls a loaded tool. The loop unwraps it before hooks, so
+  `beforeTool` permission gates and hints see the **real** tool, and streamed events carry the
+  real name with `via: "call_tool"`. The run result's tool calls record the real tool and its
+  inner arguments too; only the transcript keeps the `call_tool` wrapper.
+
+An optional budget (`budgetTokens`, default 5% of `contextWindow`) moves the least-used core
+tools down a tier when the plan is built. The plan is then frozen for that toolkit until
+`resetToolTiers` (call it at session start); `toolTierPlan` shows it.
+
+## Both together
+
+<Tabs syncKey="lang">
+<TabItem label="JavaScript">
+```js
+const agent = createClient({
+  baseUrl: "https://api.anthropic.com", style: "anthropic", model: "claude-sonnet-4-5",
+  promptCache: { longTTL: true },
+  toolTiers: { core: ["read", "grep", "edit"], deferred: ["deploy"], contextWindow: 200_000 },
+})
+agent.resetToolTiers(tk)                      // session start
+const res = await agent.run("fix the test", { toolkit: tk })
+console.log(agent.toolTierPlan(tk), res.usage?.cacheReadTokens)
+```
+</TabItem>
+<TabItem label="Python">
+```python
+agent = create_client(
+    base_url="https://api.anthropic.com", style="anthropic", model="claude-sonnet-4-5",
+    prompt_cache=PromptCacheOptions(long_ttl=True),
+    tool_tiers=ToolTierOptions(core=["read", "grep", "edit"], deferred=["deploy"], context_window=200_000),
+)
+agent.reset_tool_tiers(tk)
+res = await agent.run("fix the test", tk)
+print(agent.tool_tier_plan(tk), res.usage.get("cache_read_tokens"))
+```
+</TabItem>
+<TabItem label="Go">
+```go
+agent := toolnexus.CreateClient(toolnexus.ClientOptions{
+	BaseURL: "https://api.anthropic.com", Style: toolnexus.StyleAnthropic, Model: "claude-sonnet-4-5",
+	PromptCache: &toolnexus.PromptCacheOptions{LongTTL: true},
+	ToolTiers: &toolnexus.ToolTierOptions{
+		Core: []string{"read", "grep", "edit"}, Deferred: []string{"deploy"}, ContextWindow: 200_000,
+	},
+})
+agent.ResetToolTiers(tk)
+res, err := agent.Run(ctx, "fix the test", tk)
+fmt.Println(agent.ToolTierPlan(tk), res.Usage.CacheReadTokens, err)
+```
+</TabItem>
+<TabItem label="Java">
+```java
+LlmClient agent = LlmClient.create(new LlmClient.Options()
+        .baseUrl("https://api.anthropic.com").style("anthropic").model("claude-sonnet-4-5")
+        .promptCache(new PromptCache().longTTL(true))
+        .toolTiers(new ToolTiers().core("read", "grep", "edit").deferred("deploy").contextWindow(200_000)));
+agent.resetToolTiers(tk);
+var res = agent.run("fix the test", tk);
+System.out.println(agent.toolTierPlan(tk) + " " + res.usage.cacheReadTokens);
+```
+</TabItem>
+<TabItem label="C#">
+```csharp
+var agent = LlmClient.Create(new LlmClient.Options {
+    BaseUrl = "https://api.anthropic.com", Style = "anthropic", Model = "claude-sonnet-4-5",
+    PromptCache = new PromptCacheOptions { LongTtl = true },
+    ToolTiers = new ToolTierOptions { Core = ["read", "grep", "edit"], Deferred = ["deploy"], ContextWindow = 200_000 },
+});
+agent.ResetToolTiers(tk);
+var res = await agent.RunAsync("fix the test", tk);
+Console.WriteLine($"{res.Usage.CacheReadTokens}");
+```
+</TabItem>
+<TabItem label="Elixir">
+```elixir
+client = Toolnexus.Client.create(
+  base_url: "https://api.anthropic.com", style: "anthropic", model: "claude-sonnet-4-5",
+  prompt_cache: %{long_ttl: true},
+  tool_tiers: %{core: ["read", "grep", "edit"], deferred: ["deploy"], context_window: 200_000}
+)
+Toolnexus.Client.reset_tool_tiers(client, tk)
+res = Toolnexus.Client.run(client, "fix the test", tk)
+IO.inspect({Toolnexus.Client.tool_tier_plan(client, tk), res.usage[:cache_read_tokens]})
+```
+</TabItem>
+<TabItem label="Clojure">
+```clojure
+(def llm (client/create-client
+          {:base-url "https://api.anthropic.com" :style "anthropic" :model "claude-sonnet-4-5"
+           :prompt-cache {:long-ttl true}
+           :tool-tiers {:core ["read" "grep" "edit"] :deferred ["deploy"] :context-window 200000}}))
+(client/reset-tool-tiers! llm tk)
+(let [res (client/run llm "fix the test" {:toolkit tk})]
+  (prn (client/tool-tier-plan llm tk) (get-in res [:usage :cache-read-tokens])))
+```
+</TabItem>
+</Tabs>
+
+Each port has a hermetic, runnable example against a mock provider that simulates the cache:
+`js/examples/prompt_cache.ts`, `python/examples/prompt_cache_tool_tiers.py`,
+`golang/examples/promptcache`, `java/.../examples/PromptCacheTiers.java`,
+`csharp/examples/Toolnexus.Examples/Cache.cs` (`dotnet run -- cache`),
+`elixir/examples/prompt_cache_tiers.exs`, and the Clojure example under `clojure/examples/`.
+
+API pages with every field: prompt cache
+([JS](/api/javascript/client/prompt-cache/) · [Python](/api/python/client/prompt-cache/) ·
+[Go](/api/go/client/prompt-cache/) · [Java](/api/java/client/prompt-cache/) ·
+[C#](/api/csharp/client/prompt-cache/) · [Elixir](/api/elixir/client/prompt-cache/) ·
+[Clojure](/api/clojure/client/prompt-cache/)) and tool tiers
+([JS](/api/javascript/client/tool-tiers/) · [Python](/api/python/client/tool-tiers/) ·
+[Go](/api/go/client/tool-tiers/) · [Java](/api/java/client/tool-tiers/) ·
+[C#](/api/csharp/client/tool-tiers/) · [Elixir](/api/elixir/client/tool-tiers/) ·
+[Clojure](/api/clojure/client/tool-tiers/)).
+
+## What is not done
+
+- Gemini explicit `cachedContent` (`openspec/changes/add-prompt-cache`, task 2.3).
+- A tool registered mid-session without tool tiers still changes the tools array, which breaks
+  the cached prefix. With tiers it is deferred and found by `tool_search`.

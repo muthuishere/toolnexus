@@ -1,0 +1,128 @@
+---
+title: "api-key-env"
+description: "Which key the client sends where: apiKey, else apiKeyEnv, else only the env var of the baseUrl host (https). A local or custom host needs one of the two. — Clojure."
+sidebar:
+  label: "api-key-env"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Clojure (JVM) + cljgo</strong> · package <code>net.clojars.muthuishere/toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/clojure/src/toolnexus/client.cljc">clojure/src/toolnexus/client.cljc</a>
+</p>
+
+```clojure
+;; how create-client / list-models pick the key, in order:
+;;   1. :api-key       "…"              used as-is
+;;   2. :api-key-env   "MY_LLM_KEY"     the NAME of an env var, read at call time
+;;   3. the env var of the :base-url host, https only:
+;;        https://api.openai.com      -> OPENAI_API_KEY
+;;        https://api.anthropic.com   -> ANTHROPIC_API_KEY
+;;        https://openrouter.ai (+ subdomains) -> OPENROUTER_API_KEY
+;;   anything else (a local server, a proxy, plain http) -> throws ex-info
+;;   {:toolnexus/error :config} at the first request
+```
+
+The key is never sent to a host it does not belong to. Before 0.22.0 a client with no `:api-key`
+took the first of `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` / `OPENROUTER_API_KEY` that was set and sent
+it to whatever `:base-url` was configured, so an OpenRouter key could reach api.openai.com, or any
+key a local or third-party server. Now the environment is consulted only for the env var that matches
+the host.
+
+<Aside type="caution" title="BREAKING in 0.22.0">
+A client on a local or custom `:base-url` that relied on the old fallback now throws
+`no API key: set :api-key or :api-key-env …`. Set one of the two.
+</Aside>
+
+The value is resolved at call time, only ever reaches a request header, and never appears in a log,
+a result or an error message.
+
+## When to use it
+
+- **A local model server or a company proxy** — any host that is not OpenAI, Anthropic or
+  OpenRouter needs `:api-key` or `:api-key-env`.
+- **Several keys in one environment** — `:api-key-env` names exactly the one this client may use.
+- **Never for the three known hosts** — leave both unset and the host's own env var is read.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Prefer :api-key-env over :api-key">
+`:api-key` takes the **value**, which then lives in your config map. `:api-key-env` takes only the
+**name** of the variable, so the secret stays in the process environment. Use `:api-key` when the key
+comes from a vault at runtime, or for a placeholder against a local server that ignores it.
+</Aside>
+
+## Examples
+
+### 1. A custom host without a key fails before anything is sent
+
+```clojure test
+(require '[toolnexus.client :as client]
+         '[toolnexus.tool :as tool])
+
+(println)
+
+(def sent (atom 0))
+
+(def llm (client/create-client
+           {:base-url "http://localhost:11434/v1" :model "llama3"
+            :http-client (fn [_ _ _] (swap! sent inc) {:status 500 :headers {} :body ""})}))
+
+(def err (try (client/run llm "hi" {:toolkit (tool/toolkit [])}) nil
+              (catch Exception e e)))
+
+(assert (some? err))
+(assert (= :config (:toolnexus/error (ex-data err))))
+(assert (re-find #":api-key-env" (ex-message err)))
+(assert (zero? @sent) "nothing reached the server")
+(println "OK")
+```
+
+### 2. `:api-key-env` names the variable — and an unset one says which
+
+```clojure test
+(require '[toolnexus.client :as client]
+         '[toolnexus.tool :as tool])
+
+(println)
+
+(def llm (client/create-client
+           {:base-url    "https://gateway.internal/v1" :model "gpt-4.1"
+            :api-key-env "TN_DOCS_SURELY_UNSET_KEY"
+            :http-client (fn [_ _ _] {:status 500 :headers {} :body ""})}))
+
+(def err (try (client/run llm "hi" {:toolkit (tool/toolkit [])}) nil
+              (catch Exception e e)))
+
+(assert (re-find #"TN_DOCS_SURELY_UNSET_KEY" (ex-message err)) "the error names the variable, never a value")
+(println "OK")
+```
+
+### 3. An explicit key reaches the header, and only the header
+
+```clojure test
+(require '[toolnexus.client :as client]
+         '[toolnexus.tool :as tool]
+         '[koine.json :as json])
+
+(println)
+
+(def auth (atom nil))
+
+(def llm (client/create-client
+           {:base-url "http://localhost:8080/v1" :model "local" :api-key "YOUR_KEY_HERE"
+            :http-client (fn [_url headers _body]
+                           (reset! auth (get headers "authorization"))
+                           {:status 200 :headers {}
+                            :body (json/write-str {:choices [{:message {:role "assistant" :content "hi"}}]})})}))
+
+(def r (client/run llm "hello" {:toolkit (tool/toolkit [])}))
+(assert (= "hi" (:text r)))
+(assert (= "Bearer YOUR_KEY_HERE" @auth))
+(println "OK")
+```
+
+## See also
+
+- [`toolnexus.client/create-client`](/api/clojure/client/create/) — every client option.
+- [`toolnexus.client/list-models`](/api/clojure/client/list-models/) — follows the same key rules.

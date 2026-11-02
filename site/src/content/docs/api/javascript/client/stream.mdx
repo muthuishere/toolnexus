@@ -202,6 +202,17 @@ server.close()
 console.log("ok:", seen.join(","))
 ```
 
+{/* 0.22 */}
+## New in 0.22
+
+- `usage` events carry `cacheReadTokens` / `cacheWriteTokens` when the provider reports them
+  ([prompt cache](/api/javascript/client/prompt-cache/)).
+- Under [tool tiers](/api/javascript/client/tool-tiers/), a `call_tool` call streams as
+  `tool_call` / `tool_result` with the **real** tool name and inner args, plus `via: "call_tool"`.
+- `tool_result` events carry the result's `metadata` (e.g. `edit` diffs, `read` truncation).
+- `waitFor` gets the turn's `signal` while a stream is suspended, as in `run`.
+{/* /0.22 */}
+
 ## Options
 
 | Field | Type | What it does |

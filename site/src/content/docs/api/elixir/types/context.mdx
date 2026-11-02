@@ -187,11 +187,11 @@ ignore `data`.
 | `session_id` | `String.t() \| nil` | The conversation this call belongs to. |
 | `message_id` | `String.t() \| nil` | The message that triggered it. |
 | `agent` | `String.t() \| nil` | Which agent is calling — useful with sub-agents. |
-| `call_id` | `String.t() \| nil` | This specific tool call. |
+| `call_id` | `String.t() \| nil` | The model's id for this tool call, set by the client loop. One message's calls run concurrently, so this is how a tool tells its siblings apart. Also passed to `:wait_for_ctx`. |
 | `extra` | `map() \| nil` | Host-supplied state. |
 | `answer` | `Answer.t() \| nil` | Present **only** on a post-`wait_for` re-execution. |
 | `timeout` | `non_neg_integer() \| nil` | This call's budget in ms. `nil` means unset. |
-| `signal` | `reference() \| pid() \| nil` | Cancellation. |
+| `signal` | `reference() \| pid() \| nil` | Cancellation. In `:wait_for_ctx` it is the pid running the turn — monitor it to end a pending ask with the turn. |
 
 ## See also
 

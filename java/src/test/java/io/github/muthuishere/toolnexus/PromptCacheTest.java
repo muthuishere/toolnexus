@@ -132,6 +132,37 @@ class PromptCacheTest {
         return sim;
     }
 
+    /** End to end: the HTTP body sent with style anthropic marks ONLY the last tool (builtins + two extras). */
+    @Test
+    @SuppressWarnings("unchecked")
+    void marksLastToolInRequestJson() throws IOException {
+        List<Map<String, Object>> bodies = new ArrayList<>();
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/", ex -> {
+            synchronized (bodies) { bodies.add(Json.toMap(new String(ex.getRequestBody().readAllBytes(), StandardCharsets.UTF_8))); }
+            HostEngineAsksTest.writeJson(ex, Json.stringify(Map.of("content", List.of(Map.of("type", "text", "text", "ok")),
+                    "stop_reason", "end_turn", "usage", Map.of("input_tokens", 1, "output_tokens", 1))));
+        });
+        server.start();
+        Tool a = NativeTool.of("extra_a", "A.", null, (Map<String, Object> x) -> "a");
+        Tool b = NativeTool.of("extra_b", "B.", null, (Map<String, Object> x) -> "b");
+        try (Toolkit tk = Toolkit.create(new Toolkit.Options().extraTools(a, b))) {
+            LlmClient c = LlmClient.create(new LlmClient.Options()
+                    .baseUrl("http://127.0.0.1:" + server.getAddress().getPort()).style("anthropic").model("m").apiKey("k")
+                    .promptCache(new PromptCache()));
+            c.run("hi", tk);
+        } finally {
+            server.stop(0);
+        }
+        List<Object> tools = (List<Object>) bodies.get(0).get("tools");
+        assertTrue(tools.size() > 2, "builtins missing: " + tools.size());
+        for (int i = 0; i < tools.size(); i++) {
+            Object cc = ((Map<String, Object>) tools.get(i)).get("cache_control");
+            if (i == tools.size() - 1) assertEquals(Map.of("type", "ephemeral"), cc);
+            else assertEquals(null, cc, "tool " + i + " marked");
+        }
+    }
+
     @Test
     void replayNoRegression() throws IOException {
         CacheSim sim = runSession(new PromptCache().key("session-1"));

@@ -1,0 +1,205 @@
+---
+title: "BackgroundShells"
+description: "Opt-in background shells: bash gains run_in_background, bash_output reads new output, kill_shell stops the process group. The host owns the registry and closes it. — Go."
+sidebar:
+  label: "BackgroundShells"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Go</strong> · package <code>github.com/muthuishere/toolnexus/golang</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §4A</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/golang/builtin_extras.go">golang/builtin_extras.go</a>
+</p>
+
+```go
+func NewBackgroundShells() *BackgroundShells
+func (b *BackgroundShells) List() []BackgroundShellInfo
+func (b *BackgroundShells) Kill(id string) error
+func (b *BackgroundShells) CloseAll()
+
+type BackgroundShellInfo struct {
+	ID, Command string
+	Started     time.Time
+	Running     bool
+	ExitCode    int // valid when !Running; -1 if killed by a signal
+	Killed      bool
+}
+
+// BuiltinsConfig.Background *BackgroundShells — nil ⇒ none of this exists.
+```
+
+Pass a registry as `BuiltinsConfig.Background` and the builtins change in three ways:
+
+- `bash` gains `run_in_background: true`: it returns at once with
+  `Started background shell <id>. …` (`Metadata["backgroundId"]`). No timeout applies.
+- `bash_output {id}` returns the output produced **since the last read**, then
+  `[status: running|killed|exited with code N]`. N is `-1` when the shell was killed by a signal it
+  did not get from `kill_shell`.
+- `kill_shell {id}` stops the whole process group (SIGTERM, `KillGraceMs`, then SIGKILL).
+
+A background command is **not** tied to the turn that started it. The host owns the registry: call
+`CloseAll` on shutdown, or the commands outlive the process that started them.
+
+<Aside type="note" title="The other opt-in builtins">
+`BuiltinsConfig.WebSearch` (a `WebSearchFunc` the host supplies — the library ships none) adds
+`websearch`, and `BuiltinsConfig.NotebookEdit: true` adds `notebook_edit` for `.ipynb` cells. See
+[`CreateBuiltinTools`](/api/go/builtins/create/).
+</Aside>
+
+## When to use it
+
+A coding agent that starts a dev server, a watcher or a long test run and keeps working while it
+runs — then checks the output, or stops it.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Short commands? Plain bash is enough">
+A foreground `bash` call waits for the command (with a timeout) and returns everything in one result.
+Use background shells only for commands that must outlive one tool call; each one is a process the
+host must remember to stop.
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call — start, wait, read
+
+```go test
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"strings"
+	"time"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	bg := toolnexus.NewBackgroundShells()
+	defer bg.CloseAll()
+
+	tk, err := toolnexus.CreateToolkit(context.Background(), toolnexus.Options{
+		Builtins: toolnexus.BuiltinsConfig{Background: bg},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer tk.Close()
+	ctx := context.Background()
+
+	started, err := tk.Execute(ctx, "bash", map[string]any{"command": "echo hello", "run_in_background": true})
+	if err != nil {
+		log.Fatal(err)
+	}
+	id := started.Metadata["backgroundId"].(string)
+
+	for i := 0; i < 50 && bg.List()[0].Running; i++ {
+		time.Sleep(20 * time.Millisecond)
+	}
+	out, err := tk.Execute(ctx, "bash_output", map[string]any{"id": id})
+	if err != nil || !strings.Contains(out.Output, "hello") || !strings.Contains(out.Output, "[status: exited with code 0]") {
+		log.Fatalf("%v %q", err, out.Output)
+	}
+	fmt.Printf("ok: %s -> %q\n", id, out.Output)
+}
+```
+
+### 2. The realistic case — a long-running command, stopped with `kill_shell`
+
+```go test
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"strings"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	bg := toolnexus.NewBackgroundShells()
+	defer bg.CloseAll()
+
+	tk, err := toolnexus.CreateToolkit(context.Background(), toolnexus.Options{
+		Builtins: toolnexus.BuiltinsConfig{Background: bg, KillGraceMs: 100},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer tk.Close()
+	ctx := context.Background()
+
+	started, _ := tk.Execute(ctx, "bash", map[string]any{"command": "sleep 30", "run_in_background": true})
+	id := started.Metadata["backgroundId"].(string)
+
+	running, _ := tk.Execute(ctx, "bash_output", map[string]any{"id": id})
+	if !strings.Contains(running.Output, "[status: running]") {
+		log.Fatalf("expected running, got %q", running.Output)
+	}
+	killed, _ := tk.Execute(ctx, "kill_shell", map[string]any{"id": id})
+	if killed.Output != "Killed background shell "+id {
+		log.Fatalf("unexpected kill output %q", killed.Output)
+	}
+	fmt.Println("ok:", killed.Output)
+}
+```
+
+### 3. The full surface — the host's view with `List`, `Kill` and `CloseAll`
+
+```go test
+package main
+
+import (
+	"fmt"
+	"log"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	bg := toolnexus.NewBackgroundShells()
+	tools := toolnexus.CreateBuiltinToolsWith(toolnexus.BuiltinsConfig{Background: bg, KillGraceMs: 100})
+
+	names := map[string]bool{}
+	var bash toolnexus.Tool
+	for _, t := range tools {
+		names[t.Name] = true
+		if t.Name == "bash" {
+			bash = t
+		}
+	}
+	if !names["bash_output"] || !names["kill_shell"] {
+		log.Fatal("bash_output and kill_shell should be added")
+	}
+
+	for _, cmd := range []string{"sleep 30", "sleep 31"} {
+		if _, err := bash.Execute(map[string]any{"command": cmd, "run_in_background": true}, nil); err != nil {
+			log.Fatal(err)
+		}
+	}
+	list := bg.List()
+	if len(list) != 2 || !list[0].Running {
+		log.Fatalf("expected two running shells: %+v", list)
+	}
+	if err := bg.Kill(list[0].ID); err != nil { // the host's own stop button
+		log.Fatal(err)
+	}
+	bg.CloseAll() // on shutdown: stops everything still running
+	for _, s := range bg.List() {
+		if s.Running {
+			log.Fatalf("%s still running after CloseAll", s.ID)
+		}
+	}
+	fmt.Println("ok:", len(list), "shells started, all stopped")
+}
+```
+
+## See also
+
+- [`CreateBuiltinTools`](/api/go/builtins/create/) — the ten default builtins and the other opt-ins.
+- [`SelectBuiltins`](/api/go/builtins/select/) — choose which builtins a toolkit gets.
+- [`Hooks`](/api/go/client/hooks/) — `bash` is hinted destructive and open-world; gate it in `BeforeTool`.

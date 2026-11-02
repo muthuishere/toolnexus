@@ -918,7 +918,9 @@ Change `add-go-host-asks`. Shipped first in Go for go-agent-cli, now in all seve
   level, and `<` `>` `&` U+2028 U+2029 escaped as `\u003c` `\u003e` `\u0026` `\u2028` `\u2029`) — a message, never a change to the tools array. It is engine-internal and
   read-only (no `beforeTool`). Loaded tools are called by name, or as `call_tool {name,
   arguments}`, which the loop unwraps BEFORE hooks, so gates and hints see the real tool. Stream
-  `tool_call`/`tool_result` events carry the real name and inner args, with `via: "call_tool"`.
+  `tool_call`/`tool_result` events carry the real name and inner args, with `via: "call_tool"`,
+  and the run result's `toolCalls` entry records the real name and inner args (after any
+  `beforeTool` rewrite). Only the transcript keeps the `call_tool` wrapper.
 - **Gemini** explicit `cachedContent`: not built (the Go client reaches Gemini only
   through its OpenAI-compatible endpoint; creating a cache needs the native API). Gemini's
   implicit prefix caching benefits from the stable prefix above.

@@ -140,6 +140,25 @@ what a §10 resume re-executes with — so a hook that scopes a tenant cannot be
 | `:before-tool` | `{:name :args :id :turn}` | `{:result …}` short-circuits the call · `{:args …}` rewrites it |
 | `:after-tool` | `{:name :args :result :id :turn}` | `{:result …}` replaces what the model sees. Skipped for a suspension |
 
+## Tool hints and permission gates (0.22.0)
+
+Every builtin carries `:hints {:read-only :destructive :open-world}`, MCP tools map their
+`readOnlyHint` / `destructiveHint` / `openWorldHint` annotations onto it, and a `:before-tool` event
+carries the called tool's `:hints`. A permission gate is just `:before-tool`: return nothing to
+allow, `{:result (tool/failure "denied")}` to deny (the model sees it, the run continues), or a
+`pending` result to ask the user (resolved by `:wait-for` / `:wait-for-ctx`). Hints are advisory and
+never sent to the model; a tool with no `:hints` is unknown, so treat it as mutating.
+
+```clojure
+{:hooks {:before-tool (fn [{:keys [name hints]}]
+                        (when-not (:read-only hints)
+                          {:result (tool/failure (str name ": needs approval"))}))}}
+```
+
+Under [tool tiers](/api/clojure/client/tool-tiers/) a `call_tool` call is unwrapped **before** the
+hook, so the gate sees the real tool name and its hints; `tool_search` is engine-internal and never
+reaches the hook.
+
 ## See also
 
 - [`toolnexus.client/create-client`](/api/clojure/client/create/) — the rest of the option map, including `:body-transform` and `:request-params`

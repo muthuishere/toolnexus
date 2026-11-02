@@ -166,6 +166,62 @@ func main() {
 }
 ```
 
+## Per-server readiness — `LoadMcpWithOptions` and `OnServer`
+
+```go
+func LoadMcpWithOptions(ctx context.Context, input any, opts McpLoadOptions) (*McpSource, error)
+
+type McpLoadOptions struct {
+	WaitFor  func(Request) (Answer, error) // elicitation bridge, as in LoadMcpWithContext
+	OnServer func(McpServerResult)         // once per server: connected, failed or disabled
+}
+type McpServerResult struct {
+	Name   string
+	Status McpStatus
+	Tools  []Tool // nil unless connected
+	Error  error
+}
+```
+
+`OnServer` fires the moment each server finishes, without waiting for slower ones, so a host can
+`Toolkit.Register` a fast server's tools while a slow one is still connecting (`Register` is safe
+while a turn runs; a tool added mid-turn is offered from the next model call). Calls are
+serialized. The load still returns only after every server finishes; cancelling `ctx` aborts it and
+closes every client, including ones whose tools were already handed out.
+
+```go test
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"sort"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	config := map[string]any{
+		"off":    map[string]any{"command": []any{"node", "server.mjs"}, "enabled": false},
+		"broken": map[string]any{"command": []any{"/no/such/binary-for-docs"}},
+	}
+	var seen []string
+	src, err := toolnexus.LoadMcpWithOptions(context.Background(), config, toolnexus.McpLoadOptions{
+		OnServer: func(r toolnexus.McpServerResult) { seen = append(seen, r.Name+"="+string(r.Status)) },
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer src.Close()
+	sort.Strings(seen)
+	if len(seen) != 2 || seen[0] != "broken=failed" || seen[1] != "off=disabled" {
+		log.Fatalf("unexpected readiness: %v", seen)
+	}
+	fmt.Println("ok:", seen)
+}
+```
+
 ## Parameters
 
 | Parameter | Type | What it does |

@@ -1,0 +1,44 @@
+---
+title: "ACP host hooks — permission, updates, cancel, stream"
+description: "Opt-in hooks on an ACP model source: choose the permission option, watch every session/update, cancel a turn, and stream through an in-process client. — Python."
+sidebar:
+  label: "client / acp-hooks"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Python</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a>
+</p>
+
+<Aside type="caution" title="Not available in Python">
+Go-only today (golang/acp.go). The other six ports ship an ACP client without these hooks; tracked in openspec/changes/add-go-host-asks task 2.6d.
+</Aside>
+
+Opt-in hooks on an ACP model source: choose the permission option, watch every session/update, cancel a turn, and stream through an in-process client.
+
+## What to use instead
+
+Python ships the ACP model source itself — `load_acp(ACPOptions(command=..., args=[...]))`
+returns a warm `ACPClient` whose `generate` you hand to
+`create_in_process_client(model=..., generate=acp.generate)` — but not the four host hooks.
+Today, in Python:
+
+- **Permissions** are answered by the client with the first option whose `kind` starts with
+  `allow`; there is no `on_permission` callback. To gate what the agent may do, start it in a
+  restricted mode (`ACPOptions(mode=...)`, sent as `session/set_mode`) or a sandboxed `cwd`.
+  `permission_timeout` (default 5 s) bounds a turn.
+- **Updates**: only `agent_message_chunk` text forms the reply; thoughts, tool calls and plans
+  are not surfaced (no `on_update`).
+- **Cancel** and **streaming** are not available: `generate` is synchronous and a client built
+  on it runs non-streaming only. Use `client.run` and show the final text.
+
+The Go port has all four ([Go reference](/api/go/client/acp-hooks/)); the other ports are
+tracked in `openspec/changes/add-go-host-asks` task 2.6d.
+
+## See also
+
+- [`create_client`](/api/python/client/create/) — The unified client: system prompt, skills injection, parallel and chained tool calls, retries, memory.
+- [`Client.run`](/api/python/client/run/) — Send a prompt, let the loop call tools until the model stops, get a RunResult.
+- [`Client.stream`](/api/python/client/stream/) — The streaming loop: text deltas, tool-call events, and suspension events as they happen.
+- [`Hooks`](/api/python/client/hooks/) — Intercept before/after model calls and tool calls: audit, redact, veto, or rewrite.

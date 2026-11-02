@@ -105,8 +105,7 @@ type ClientOptions struct {
 	WaitFor func(Request) (Answer, error)
 	// WaitForCtx is WaitFor that also receives the turn's context, so a pending
 	// ask can stop when the turn is cancelled (return ctx.Err()). When both are
-	// set, WaitForCtx wins. Same §10 contract otherwise. golang only for now;
-	// other ports pending.
+	// set, WaitForCtx wins. Same §10 contract otherwise.
 	WaitForCtx func(context.Context, Request) (Answer, error)
 	// RequestParams (§8 Gap 1) are extra top-level keys shallow-merged into EVERY
 	// LLM request body after the client builds its own — a RequestParams key WINS
@@ -121,11 +120,11 @@ type ClientOptions struct {
 	BodyTransform func(body map[string]any) map[string]any
 	// PromptCache, when set, asks the provider to cache the stable request
 	// prefix (see PromptCacheOptions). Nil ⇒ body byte-identical. Applied before
-	// RequestParams and BodyTransform, so both can still override it. golang only for now.
+	// RequestParams and BodyTransform, so both can still override it.
 	PromptCache *PromptCacheOptions
 	// ToolTiers, when set, sends only core tool schemas up front plus a
 	// tool_search tool that loads the rest on demand (see ToolTierOptions).
-	// Nil ⇒ every tool is sent, as before. golang only for now.
+	// Nil ⇒ every tool is sent, as before.
 	ToolTiers *ToolTierOptions
 	// HTTPClient (§8 Gap 2) overrides the HTTP client for LLM requests (retries
 	// included). Nil ⇒ http.DefaultClient. Scope is the LLM path only; MCP transports
@@ -313,7 +312,7 @@ type BeforeToolEvent struct {
 	ID   string
 	Turn int
 	// Hints are the called tool's Tool.Hints (nil = unknown or no such tool),
-	// for permission gates. golang only for now.
+	// for permission gates.
 	Hints *ToolHints
 }
 
@@ -367,7 +366,7 @@ type Usage struct {
 	// context actually sent is PromptTokens + CacheReadTokens + CacheWriteTokens
 	// — use that sum for context-window size, or a cached session looks almost
 	// empty. Under openai, PromptTokens already INCLUDES the cached part (do not
-	// add CacheReadTokens again). golang only for now.
+	// add CacheReadTokens again).
 	CacheReadTokens  int `json:"cacheReadTokens,omitempty"`
 	CacheWriteTokens int `json:"cacheWriteTokens,omitempty"`
 }
@@ -648,8 +647,7 @@ func (c *Client) timedOutRun(model string, messages []any, toolCalls []ToolCall,
 
 // resolveKey picks the API key. An explicit APIKey is used as-is. Otherwise
 // the key comes ONLY from the env var that belongs to the BaseURL's host, so a
-// key is never sent to another provider's host (security, go-agent-cli ask #8;
-// golang only for now). Any other host needs an explicit APIKey. The value is
+// key is never sent to another provider's host (security, go-agent-cli ask #8). Any other host needs an explicit APIKey. The value is
 // never logged.
 func (c *Client) resolveKey() (string, error) {
 	if c.opts.APIKey != "" {
@@ -1236,13 +1234,7 @@ func (c *Client) runOpenAI(ctx context.Context, prompt any, tk *Toolkit, history
 					mu.Unlock()
 					return
 				}
-				records[i] = ToolCall{
-					Name:     tc.Function.Name,
-					Args:     args,
-					Output:   result.Output,
-					IsError:  result.IsError,
-					Metadata: result.Metadata,
-				}
+				records[i] = c.toolCallRecord(tc.Function.Name, args, result)
 				results[i] = withToolParts(map[string]any{
 					"role":         "tool",
 					"tool_call_id": tc.ID,
@@ -1539,13 +1531,7 @@ func (c *Client) runAnthropic(ctx context.Context, prompt any, tk *Toolkit, hist
 					mu.Unlock()
 					return
 				}
-				records[i] = ToolCall{
-					Name:     u.Name,
-					Args:     args,
-					Output:   result.Output,
-					IsError:  result.IsError,
-					Metadata: result.Metadata,
-				}
+				records[i] = c.toolCallRecord(u.Name, args, result)
 				results[i] = withToolParts(map[string]any{
 					"type":        "tool_result",
 					"tool_use_id": u.ID,
@@ -1926,7 +1912,7 @@ func (c *Client) streamOpenAI(ctx context.Context, prompt any, tk *Toolkit, hist
 					mu.Unlock()
 					return
 				}
-				records[i] = ToolCall{Name: cc.name, Args: args, Output: result.Output, IsError: result.IsError, Metadata: result.Metadata}
+				records[i] = c.toolCallRecord(cc.name, args, result)
 				results[i] = withToolParts(map[string]any{"role": "tool", "tool_call_id": cc.id, "content": result.Output}, cc.name, result.Parts)
 				events[i] = c.resultEvent(cc.id, cc.name, safeJSONArgs(cc.args), result)
 			}(i, cc)
@@ -2215,7 +2201,7 @@ func (c *Client) streamAnthropic(ctx context.Context, prompt any, tk *Toolkit, h
 					mu.Unlock()
 					return
 				}
-				records[i] = ToolCall{Name: u.name, Args: args, Output: result.Output, IsError: result.IsError, Metadata: result.Metadata}
+				records[i] = c.toolCallRecord(u.name, args, result)
 				results[i] = withToolParts(map[string]any{"type": "tool_result", "tool_use_id": u.id, "content": result.Output, "is_error": result.IsError}, u.name, result.Parts)
 				events[i] = c.resultEvent(u.id, u.name, u.input, result)
 			}(i, u)
@@ -2407,6 +2393,14 @@ func (conv *Conversation) Send(ctx context.Context, prompt string) (RunResult, e
 // Reset clears the conversation memory.
 func (conv *Conversation) Reset() {
 	conv.Messages = nil
+}
+
+// toolCallRecord builds the RunResult.ToolCalls entry. A ToolTiers call_tool
+// call is recorded as the REAL tool with its inner arguments, the same name
+// hooks and stream events see (the transcript keeps the wrapper).
+func (c *Client) toolCallRecord(name string, args map[string]any, result ToolResult) ToolCall {
+	real, inner, _ := c.unwrapCall(name, args)
+	return ToolCall{Name: real, Args: inner, Output: result.Output, IsError: result.IsError, Metadata: result.Metadata}
 }
 
 // callEvent / resultEvent build the stream's tool events, naming the real tool

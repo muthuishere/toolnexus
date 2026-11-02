@@ -112,6 +112,9 @@ async def test_tool_tier_loop_call_tool_unwraps():
     assert res.status == "done"
     assert '"name": "deploy"' in res.tool_calls[0]["output"]
     assert ran == ["deploy(prod)", "lint(direct)"]
+    # RunResult.tool_calls names the real tool with its inner args, like hooks and stream events
+    assert [f"{t['name']}({t['args'].get('x')})" for t in res.tool_calls] == [
+        "tool_search(None)", "deploy(prod)", "lint(direct)"]
     assert gated == ["deploy:true", "lint:?"]  # tool_search is engine-internal; call_tool unwrapped
     assert all(a == script.arrays[0] for a in script.arrays)
     assert json.loads(script.arrays[0])[-2]["name"] == "tool_search"

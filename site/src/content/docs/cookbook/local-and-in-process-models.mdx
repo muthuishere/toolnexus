@@ -15,7 +15,9 @@ unchanged, because none of it knows whether a socket was involved.
 </Aside>
 
 A local OpenAI-compatible server — `llama-server`, Ollama, vLLM, LM Studio — is
-just a `baseUrl`, so it needs no recipe. This page is about the case that does:
+just a `baseUrl` plus a key setting: since 0.22.0 a local or custom host gets no key from the
+environment, so pass `apiKey` (any placeholder the server accepts) or `apiKeyEnv` (the name of
+the env var to read) — see [API key by host](/cookbook/api-key-by-host/). This page is about the case that does:
 **the model runs inside your process and there is no server at all.**
 
 ## One constructor. No wire to configure.

@@ -115,6 +115,21 @@ true = Enum.map(Builtin.tools(), & &1.name) == Enum.map(full, & &1.name)
 IO.puts("ok: tools/0 always #{length(full)}, load/1 narrowed to #{length(narrowed)}")
 ```
 
+## Search context, truncation, and the opt-in tools
+
+- `grep` takes `context`, `before` and `after` line counts: match lines print as `path:N:text`,
+  context lines as `path-N-text`, with `--` between groups that do not touch. Absent ⇒ the output
+  is unchanged.
+- A `read` window that stops before the end of the file sets `metadata.truncated`,
+  `totalLines` and `nextOffset`; a `grep` cut by its `limit` sets `truncated` and `total`. The
+  text output stays the pinned cross-port bytes.
+- `edit`, `write` and `apply_patch` results carry `metadata.files` and a unified `metadata.diff`.
+- Every builtin carries `hints` (see [hooks](/api/elixir/client/hooks/)).
+- `tools/0` stays the default ten. The opt-in tools come from `Toolnexus.Builtin.tools/1`
+  config: `background:` ([background shells](/api/elixir/builtins/background-shells/)),
+  `web_search: fn query, limit -> ... end` (`websearch`) and `notebook_edit: true`
+  (`notebook_edit`, replace / insert / delete an `.ipynb` cell by id or index).
+
 ## See also
 
 - [`Toolnexus.Builtin.load`](/api/elixir/builtins/select/) — the config-driven on/off and per-tool toggle

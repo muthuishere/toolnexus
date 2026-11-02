@@ -236,6 +236,18 @@ is a valid, minimal client.
 A non-2xx provider response surfaces as a typed [`ProviderError`](/api/go/client/provider-error/),
 regardless of which of the options above is set.
 
+## Which API key is sent where
+
+`APIKey` set ⇒ only it. Else `APIKeyEnv` (an env var **name**) if set. Else only the env var that
+belongs to the `BaseURL` host, over https: `api.openai.com` → `OPENAI_API_KEY`, `api.anthropic.com` →
+`ANTHROPIC_API_KEY`, `openrouter.ai` → `OPENROUTER_API_KEY`. Any other host — a local server, a proxy
+— without `APIKey`/`APIKeyEnv` fails with `no API key`. **Breaking in 0.22.0:** there is no longer a
+fallback across those env vars. See [`ClientOptions.APIKeyEnv`](/api/go/client/api-key/).
+
+Other options added in 0.22.0: [`PromptCache`](/api/go/client/prompt-cache/),
+[`ToolTiers`](/api/go/client/tool-tiers/), `WaitForCtx` ([WaitFor](/api/go/suspension/wait-for/)),
+and [`ListModels`](/api/go/client/list-models/) for model pickers.
+
 ## See also
 
 - [`Client.Run`](/api/go/client/run/) — Send a prompt, let the loop call tools until the model stops, get a RunResult.

@@ -14,12 +14,13 @@ return which switch
     "multimodal" => await Multimodal.Run(),
     "judge" => await Judge.Run(),
     "acp" => await Acp.Run(args.Skip(1).ToArray()),
+    "cache" => await Cache.Run(),
     _ => Unknown(which),
 };
 
 static int Unknown(string which)
 {
     Console.Error.WriteLine($"Unknown example: {which}");
-    Console.Error.WriteLine("Usage: dotnet run -- [basic|agent|hooks|streaming|memory|advanced|openrouter|multimodal|judge|acp]");
+    Console.Error.WriteLine("Usage: dotnet run -- [basic|agent|hooks|streaming|memory|advanced|openrouter|multimodal|judge|acp|cache]");
     return 1;
 }

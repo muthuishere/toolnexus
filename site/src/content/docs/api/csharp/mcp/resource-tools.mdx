@@ -1,0 +1,96 @@
+---
+title: "McpSource.ResourceTools"
+description: "Opt-in list_mcp_resources / read_mcp_resource tools over every connected MCP server. Read-only. — C#."
+sidebar:
+  label: "McpSource.ResourceTools"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>C#</strong> · package <code>Toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §2</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/csharp/src/Toolnexus/McpResources.cs">McpResources.cs</a>
+</p>
+
+```csharp
+public List<ITool> McpSource.ResourceTools();
+// [0] list_mcp_resources { server? }       → "server uri — name (mimeType): description" per line
+// [1] read_mcp_resource  { server, uri }   → the resource's text
+```
+
+Two read-only tools (`Hints.ReadOnly = true`) bound to the source's connected servers. Opt-in: they
+are not added to a toolkit on their own; register them with `ExtraTools`. They stop working once
+the `McpSource` is disposed. A source with no connected server still returns both; they report
+that no server is connected. An unknown server or uri is an error result, not an exception.
+
+## When to use it
+
+An MCP server exposes data as *resources* (files, records, docs) rather than tools, and you want
+the model to browse and read them itself.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="ResourceTools, not a NativeTool per resource">
+Wrapping each resource in your own tool freezes the list at build time. These two tools ask the
+servers live, so new resources appear without a rebuild. Read a resource yourself, outside the
+model, when the host already knows which one it needs.
+</Aside>
+
+## Examples
+
+### 1. The two tools, even with no server
+
+```csharp test
+using Toolnexus;
+
+await using var src = await McpSource.LoadAsync("""{"mcp":{}}""");
+var tools = src.ResourceTools();
+
+if (string.Join(",", tools.Select(t => t.Name)) != "list_mcp_resources,read_mcp_resource") throw new Exception("names");
+if (!tools.All(t => t.Hints!.ReadOnly)) throw new Exception("expected read-only hints");
+Console.WriteLine($"ok: {string.Join(", ", tools.Select(t => t.Name))} (read-only)");
+```
+
+### 2. List and read a server's resource
+
+```csharp test
+using Toolnexus;
+
+// TOOLNEXUS_REPO is set by the docs test runner; in your own code use your server's path.
+var repo = Environment.GetEnvironmentVariable("TOOLNEXUS_REPO") ?? ".";
+var server = Path.Combine(repo, "examples", "mcp-progress-server.mjs");
+var cfg = "{\"mcp\":{\"progress\":{\"command\":\"node\",\"args\":[" + System.Text.Json.JsonSerializer.Serialize(server) + "]}}}";
+
+await using var src = await McpSource.LoadAsync(cfg);
+var (list, read) = (src.ResourceTools()[0], src.ResourceTools()[1]);
+
+var listed = await list.ExecuteAsync(new Dictionary<string, object?>());
+var text = await read.ExecuteAsync(new Dictionary<string, object?> { ["server"] = "progress", ["uri"] = "fixture://hello" });
+var missing = await read.ExecuteAsync(new Dictionary<string, object?> { ["server"] = "progress", ["uri"] = "fixture://nope" });
+
+if (text.Output != "hello resource" || !missing.IsError) throw new Exception(text.Output);
+Console.WriteLine($"ok: {listed.Output} → \"{text.Output}\"");
+```
+
+### 3. Hand them to the model through a toolkit
+
+```csharp test
+using Toolnexus;
+
+var repo = Environment.GetEnvironmentVariable("TOOLNEXUS_REPO") ?? ".";
+var server = Path.Combine(repo, "examples", "mcp-progress-server.mjs");
+var cfg = "{\"mcp\":{\"progress\":{\"command\":\"node\",\"args\":[" + System.Text.Json.JsonSerializer.Serialize(server) + "]}}}";
+
+await using var src = await McpSource.LoadAsync(cfg);
+await using var tk = await Toolkit.CreateAsync(new Toolkit.Options { ExtraTools = src.ResourceTools() });
+
+var r = await tk.ExecuteAsync("read_mcp_resource", new Dictionary<string, object?> { ["server"] = "progress", ["uri"] = "fixture://hello" });
+if (r.Output != "hello resource") throw new Exception(r.Output);
+Console.WriteLine($"ok: the toolkit offers {string.Join(", ", tk.Tools().Select(t => t.Name))}");
+```
+
+## See also
+
+- [`McpSource.LoadAsync`](/api/csharp/mcp/load/) — Read an mcp.json, connect every local stdio and remote streamable-HTTP server, expose each server tool as a Tool.
+- [`McpSource.LoadAsync`](/api/csharp/mcp/load-with-context/) — The ctx-aware load: bound connection time and cancel a slow or hung server without leaking a child process.
+- [`McpSource.ListMcpToolsAsync`](/api/csharp/mcp/list-tools/) — List what each configured server would expose, plus per-server status, without wiring it into a toolkit.
+- [`McpSource.ParseConfig`](/api/csharp/mcp/parse-config/) — Parse and validate config without connecting — the fast fail for a malformed or misspelled server block.

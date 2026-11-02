@@ -287,6 +287,82 @@ func main() {
 | `AfterToolEvent` | `AfterTool` | `Name`, `Args`, `Result`, `ID`, `Turn`. |
 | `ToolOverride` | returned from `BeforeTool` / `AfterTool` | In `BeforeTool`: `Result` short-circuits (the real tool never runs), else `Args` rewrites the call. In `AfterTool`: `Result` replaces the result. |
 
+## Tool hints and permission gates
+
+`BeforeToolEvent.Hints` is the called tool's `*ToolHints{ReadOnly, Destructive, OpenWorld}` — `nil`
+when unknown (treat as mutating). Every builtin sets them (`read`, `grep`, `glob`, `question`,
+`todowrite` read-only; `webfetch` read-only and open-world; `write`, `edit`, `apply_patch`
+destructive; `bash` destructive and open-world), and MCP tools map their
+`readOnlyHint`/`destructiveHint`/`openWorldHint` annotations. Hints are advisory and never sent to
+the model.
+
+A permission gate is just `BeforeTool` — there is no separate permit option: **allow** = return
+`nil, nil`; **deny** = return an error `Result` (the model sees it, the run continues); **ask** =
+return `Result: Pending(request)`, which `WaitFor` / `WaitForCtx` resolves. Under
+[`ToolTiers`](/api/go/client/tool-tiers/) the hook sees the real tool behind `call_tool`.
+
+```go test
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	dir, _ := os.MkdirTemp("", "gate")
+	defer os.RemoveAll(dir)
+	target := filepath.Join(dir, "x.txt")
+
+	tk, err := toolnexus.CreateToolkit(context.Background(), toolnexus.Options{Builtins: true})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer tk.Close()
+
+	turn := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		turn++
+		w.Header().Set("Content-Type", "application/json")
+		if turn == 1 {
+			_, _ = fmt.Fprintf(w, `{"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"c1","type":"function","function":{"name":"write","arguments":"{\"path\":\"%s\",\"content\":\"hi\"}"}}]}}]}`, target)
+			return
+		}
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"ok"}}]}`))
+	}))
+	defer srv.Close()
+
+	var seen *toolnexus.ToolHints
+	client := toolnexus.CreateClient(toolnexus.ClientOptions{
+		BaseURL: srv.URL, Style: toolnexus.StyleOpenAI, Model: "m", APIKey: "YOUR_KEY_HERE",
+		Hooks: &toolnexus.Hooks{BeforeTool: func(_ context.Context, ev toolnexus.BeforeToolEvent) (*toolnexus.ToolOverride, error) {
+			seen = ev.Hints
+			if ev.Hints != nil && ev.Hints.ReadOnly {
+				return nil, nil // read-only: let it run
+			}
+			return &toolnexus.ToolOverride{Result: &toolnexus.ToolResult{Output: "denied: read-only mode", IsError: true}}, nil
+		}},
+	})
+	if _, err := client.Run(context.Background(), "write a file", tk); err != nil {
+		log.Fatal(err)
+	}
+	if seen == nil || !seen.Destructive {
+		log.Fatalf("write should be hinted destructive: %+v", seen)
+	}
+	if _, err := os.Stat(target); err == nil {
+		log.Fatal("the gate should have stopped the write")
+	}
+	fmt.Println("ok: write denied, hints =", *seen)
+}
+```
+
 ## See also
 
 - [`CreateClient`](/api/go/client/create/) — The unified client: system prompt, skills injection, parallel and chained tool calls, retries, memory.

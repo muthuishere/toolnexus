@@ -256,4 +256,9 @@ defmodule Toolnexus.ToolkitTest do
     assert is_binary(tk.prompt)
     assert %Tool{name: "skill"} = List.first(tk.tools)
   end
+
+  test "create_toolkit with no argument builds the default toolkit (js createToolkit() regression)" do
+    assert {:ok, %Toolnexus.Toolkit{tools: [_ | _]} = tk} = Toolnexus.create_toolkit()
+    assert Enum.map(Toolnexus.create_toolkit!().tools, & &1.name) == Enum.map(tk.tools, & &1.name)
+  end
 end

@@ -1,0 +1,217 @@
+---
+title: "ClientOptions.PromptCache"
+description: "Mark the stable prompt prefix for the provider (Anthropic cache breakpoints, OpenAI prompt_cache_key) and read cacheRead/cacheWrite tokens from usage. — Go."
+sidebar:
+  label: "ClientOptions.PromptCache"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Go</strong> · package <code>github.com/muthuishere/toolnexus/golang</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/golang/prompt_cache.go">golang/prompt_cache.go</a>
+</p>
+
+```go
+type PromptCacheOptions struct {
+	Key     string // openai prompt_cache_key (one per session); ignored by anthropic
+	LongTTL bool   // anthropic ttl "1h" instead of the default short lifetime
+}
+
+// ClientOptions.PromptCache *PromptCacheOptions — nil ⇒ off, request bytes unchanged.
+
+type Usage struct {
+	PromptTokens, CompletionTokens, TotalTokens int
+	CacheReadTokens  int // served from the provider's cache
+	CacheWriteTokens int // written to it (anthropic only)
+}
+```
+
+`PromptCache` marks the stable request prefix for the provider's cache:
+
+- **Anthropic** — `cache_control: {type: "ephemeral"}` (plus `ttl: "1h"` with `LongTTL`) on the
+  last tool, on the system prompt (a string becomes one text block) and on the last content block
+  of the latest message.
+- **OpenAI** — `prompt_cache_key = Key`; the prefix itself is cached automatically.
+- **Gemini** — nothing yet (explicit `cachedContent` is not built).
+
+It is applied before `RequestParams` and `BodyTransform`, and the saved transcript is never
+mutated. Usage reports `CacheReadTokens` / `CacheWriteTokens` either way, so a drop in cache hits is
+visible.
+
+<Aside type="caution" title="Context size under Anthropic">
+Anthropic's `input_tokens` excludes cached tokens, so under `StyleAnthropic` the real context size
+is `PromptTokens + CacheReadTokens + CacheWriteTokens`. Under OpenAI `PromptTokens` already
+includes the cached part — do not add it twice.
+</Aside>
+
+## When to use it
+
+Any multi-turn session with a large stable prefix — a long system prompt, a skills catalog, many
+tool schemas — where you pay for the same input tokens on every request. Turn it on once per client
+and give each session its own `Key` under OpenAI.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Pair it with ToolTiers when tools change mid-session">
+The cache only hits while the prefix is byte-identical. Registering a tool mid-session changes the
+tools array and so breaks the cache. If your host adds tools as it goes, also set
+[`ToolTiers`](/api/go/client/tool-tiers/): loaded tools arrive as tool results and the tools array
+never changes.
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call — Anthropic breakpoints and cache usage
+
+```go test
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log"
+	"net/http"
+	"net/http/httptest"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	var body map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(b, &body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"content":[{"type":"text","text":"hi"}],"stop_reason":"end_turn",
+			"usage":{"input_tokens":12,"output_tokens":3,"cache_read_input_tokens":900,"cache_creation_input_tokens":40}}`))
+	}))
+	defer srv.Close()
+
+	client := toolnexus.CreateClient(toolnexus.ClientOptions{
+		BaseURL: srv.URL, Style: toolnexus.StyleAnthropic, Model: "claude", APIKey: "YOUR_KEY_HERE",
+		SystemPrompt: "You are a careful assistant.",
+		PromptCache:  &toolnexus.PromptCacheOptions{},
+	})
+	res, err := client.Run(context.Background(), "hello", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	sys, _ := body["system"].([]any)
+	if len(sys) != 1 || sys[0].(map[string]any)["cache_control"] == nil {
+		log.Fatalf("system prompt not marked: %v", body["system"])
+	}
+	u := res.Usage
+	if u.CacheReadTokens != 900 || u.CacheWriteTokens != 40 {
+		log.Fatalf("cache usage not reported: %+v", u)
+	}
+	fmt.Println("ok: context =", u.PromptTokens+u.CacheReadTokens+u.CacheWriteTokens, "tokens")
+}
+```
+
+### 2. The realistic case — OpenAI `prompt_cache_key` per session
+
+```go test
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log"
+	"net/http"
+	"net/http/httptest"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	var body map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(b, &body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"hi"}}],
+			"usage":{"prompt_tokens":1000,"completion_tokens":2,"total_tokens":1002,"prompt_tokens_details":{"cached_tokens":896}}}`))
+	}))
+	defer srv.Close()
+
+	client := toolnexus.CreateClient(toolnexus.ClientOptions{
+		BaseURL: srv.URL, Style: toolnexus.StyleOpenAI, Model: "m", APIKey: "YOUR_KEY_HERE",
+		PromptCache: &toolnexus.PromptCacheOptions{Key: "session-42"},
+	})
+	res, err := client.Run(context.Background(), "hello", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if body["prompt_cache_key"] != "session-42" {
+		log.Fatalf("prompt_cache_key missing: %v", body["prompt_cache_key"])
+	}
+	// Under OpenAI PromptTokens already includes the cached part.
+	fmt.Printf("ok: %d of %d prompt tokens cached\n", res.Usage.CacheReadTokens, res.Usage.PromptTokens)
+}
+```
+
+### 3. The full surface — 1-hour lifetime on a turn with tools
+
+```go test
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log"
+	"net/http"
+	"net/http/httptest"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	echo := toolnexus.NativeTool("echo", "echo text",
+		toolnexus.JSONSchema{"type": "object", "properties": map[string]any{"text": map[string]any{"type": "string"}}},
+		func(_ context.Context, a map[string]any) (string, error) { return fmt.Sprint(a["text"]), nil })
+	tk, err := toolnexus.CreateToolkit(context.Background(), toolnexus.Options{ExtraTools: []toolnexus.Tool{echo}})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer tk.Close()
+
+	var body map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(b, &body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"content":[{"type":"text","text":"done"}],"stop_reason":"end_turn","usage":{"input_tokens":5,"output_tokens":1}}`))
+	}))
+	defer srv.Close()
+
+	client := toolnexus.CreateClient(toolnexus.ClientOptions{
+		BaseURL: srv.URL, Style: toolnexus.StyleAnthropic, Model: "claude", APIKey: "YOUR_KEY_HERE",
+		PromptCache: &toolnexus.PromptCacheOptions{LongTTL: true},
+	})
+	if _, err := client.Run(context.Background(), "hello", tk); err != nil {
+		log.Fatal(err)
+	}
+
+	msgs := body["messages"].([]any)
+	content := msgs[len(msgs)-1].(map[string]any)["content"].([]any)
+	mark, _ := content[len(content)-1].(map[string]any)["cache_control"].(map[string]any)
+	if mark["ttl"] != "1h" {
+		log.Fatalf("latest message not marked with ttl 1h: %v", mark)
+	}
+	fmt.Println("ok: latest message marked, ttl 1h")
+}
+```
+
+## See also
+
+- [`ToolTiers`](/api/go/client/tool-tiers/) — keep the tools array, and so the cached prefix, stable.
+- [`OnMetric`](/api/go/client/metrics/) — per-call token counts, including cache reads and writes.
+- [`CreateClient`](/api/go/client/create/) — The unified client: system prompt, skills injection, parallel and chained tool calls, retries, memory.
+- [`Client.Run`](/api/go/client/run/) — Send a prompt, let the loop call tools until the model stops, get a RunResult.

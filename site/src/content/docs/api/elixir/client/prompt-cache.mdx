@@ -1,0 +1,155 @@
+---
+title: "prompt_cache"
+description: "Mark the stable prompt prefix for the provider (Anthropic cache breakpoints, OpenAI prompt_cache_key) and read cacheRead/cacheWrite tokens from usage. — Elixir."
+sidebar:
+  label: "prompt_cache"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Elixir</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a>
+</p>
+
+```elixir
+Toolnexus.Client.create(
+  ...,
+  prompt_cache: %{key: String.t() | nil, long_ttl: boolean()} | nil
+)
+
+# usage gains, only when the provider reports a non-zero count:
+%{prompt_tokens: _, completion_tokens: _, total_tokens: _,
+  cache_read_tokens: non_neg_integer(), cache_write_tokens: non_neg_integer()}
+```
+
+Marks the stable request prefix for the provider's prompt cache
+(`elixir/lib/toolnexus/prompt_cache.ex`). Under **anthropic** style the request gets
+`cache_control: %{"type" => "ephemeral"}` (plus `"ttl" => "1h"` with `long_ttl: true`) on the
+last tool, on the system prompt (a string becomes one text block) and on the last content block
+of the latest message. Under **openai** style it sets `prompt_cache_key` to `:key`. Gemini: nothing
+yet (explicit `cachedContent` is deferred). It is applied before `:request_params` and
+`:body_transform`, so both can still override it; the transcript itself is never changed.
+Absent ⇒ the request body is byte-identical to before.
+
+Usage reports `cache_read_tokens` (anthropic `cache_read_input_tokens`, openai
+`prompt_tokens_details.cached_tokens`) and `cache_write_tokens` (anthropic
+`cache_creation_input_tokens`). The keys are **absent** when the provider reports no cache, so
+uncached usage maps are unchanged.
+
+<Aside type="note" title="Context size under anthropic">
+Anthropic's `input_tokens` excludes cached tokens, so the real context size is
+`prompt_tokens + cache_read_tokens + cache_write_tokens`. Under openai, `prompt_tokens` already
+includes `cache_read_tokens`. A UI that shows context use from `prompt_tokens` alone
+under-reports a cached anthropic session.
+</Aside>
+
+## When to use it
+
+- **Long sessions with a big, fixed prefix** — many tools, a long system prompt, a skills
+  catalog: every turn re-sends the same bytes, and the cache bills them at a fraction.
+- **You want to see whether the cache works** — `cache_read_tokens` per run makes a drop in
+  hits visible.
+- **Pair it with [`tool_tiers`](/api/elixir/client/tool-tiers/)** when tools are added
+  mid-session: a changed tools array breaks the cached prefix, tool tiers keep it fixed.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Not :request_params">
+You could inject `cache_control` yourself through `:body_transform`, but you would have to find
+the last tool, convert a string system prompt into a block and re-mark the latest message on
+every turn. `:prompt_cache` does exactly that and nothing else. Keep `:body_transform` for the
+provider fields toolnexus does not model.
+</Aside>
+
+## Examples
+
+### 1. OpenAI: a cache key, and the cached-token count
+
+```elixir test
+alias Toolnexus.Client
+me = self()
+
+t = fn req ->
+  send(me, {:key, req.body["prompt_cache_key"]})
+
+  {:ok,
+   %{status: 200, headers: %{},
+     body: %{"choices" => [%{"message" => %{"role" => "assistant", "content" => "hi"}}],
+             "usage" => %{"prompt_tokens" => 100, "completion_tokens" => 5,
+                          "prompt_tokens_details" => %{"cached_tokens" => 80}}}}}
+end
+
+c = Client.create(base_url: "https://api.example/v1", model: "m", api_key: "YOUR_KEY_HERE",
+                  transport: t, prompt_cache: %{key: "session-1"})
+
+r = Client.run(c, "x", [])
+receive do: ({:key, "session-1"} -> :ok)
+true = r.usage.cache_read_tokens == 80 and r.usage.prompt_tokens == 100
+false = Map.has_key?(r.usage, :cache_write_tokens)
+IO.puts("ok: openai cached #{r.usage.cache_read_tokens} of #{r.usage.prompt_tokens}")
+```
+
+### 2. Anthropic: three breakpoints and the 1-hour lifetime
+
+```elixir test
+alias Toolnexus.Client
+me = self()
+
+t = fn req ->
+  send(me, {:body, req.body})
+
+  {:ok,
+   %{status: 200, headers: %{},
+     body: %{"content" => [%{"type" => "text", "text" => "ok"}], "stop_reason" => "end_turn",
+             "usage" => %{"input_tokens" => 10, "output_tokens" => 2,
+                          "cache_read_input_tokens" => 900, "cache_creation_input_tokens" => 50}}}}
+end
+
+tool = Toolnexus.define_tool(name: "lookup", description: "Look a thing up.", execute: fn _ -> "x" end)
+
+c = Client.create(base_url: "https://api.example", style: "anthropic", model: "m",
+                  api_key: "YOUR_KEY_HERE", system_prompt: "You are terse.", transport: t,
+                  prompt_cache: %{long_ttl: true})
+
+r = Client.run(c, "hi", [tool])
+body = receive do: ({:body, b} -> b)
+mark = %{"type" => "ephemeral", "ttl" => "1h"}
+true = List.last(body["tools"])["cache_control"] == mark
+[%{"type" => "text", "text" => _, "cache_control" => ^mark}] = body["system"]
+true = List.last(List.last(body["messages"])["content"])["cache_control"] == mark
+
+# Real context size under anthropic: input + cache read + cache write.
+true = r.usage.prompt_tokens + r.usage.cache_read_tokens + r.usage.cache_write_tokens == 960
+IO.puts("ok: 3 breakpoints, context #{960} tokens")
+```
+
+### 3. Off is byte-identical
+
+```elixir test
+alias Toolnexus.Client
+me = self()
+
+t = fn req ->
+  send(me, {:body, req.body})
+  {:ok, %{status: 200, headers: %{},
+          body: %{"content" => [%{"type" => "text", "text" => "ok"}], "stop_reason" => "end_turn",
+                  "usage" => %{"input_tokens" => 3, "output_tokens" => 1}}}}
+end
+
+c = Client.create(base_url: "https://api.example", style: "anthropic", model: "m",
+                  api_key: "YOUR_KEY_HERE", system_prompt: "S", transport: t)
+
+r = Client.run(c, "hi", [])
+body = receive do: ({:body, b} -> b)
+true = is_binary(body["system"])
+false = Jason.encode!(body) =~ "cache_control"
+false = Map.has_key?(r.usage, :cache_read_tokens)
+IO.puts("ok: no prompt_cache, no cache_control")
+```
+
+## See also
+
+- [`Toolnexus.Client.create`](/api/elixir/client/create/) — The unified client: system prompt, skills injection, parallel and chained tool calls, retries, memory.
+- [`Toolnexus.Client.run`](/api/elixir/client/run/) — Send a prompt, let the loop call tools until the model stops, get a RunResult.
+- [`Toolnexus.Client.stream`](/api/elixir/client/stream/) — The streaming loop: text deltas, tool-call events, and suspension events as they happen.
+- [`Toolnexus.Client.create`](/api/elixir/client/hooks/) — Intercept before/after model calls and tool calls: audit, redact, veto, or rewrite.

@@ -196,6 +196,26 @@ await tk.close()
 console.log("ok:", res.text)
 ```
 
+{/* 0.22 */}
+## Agents as tools under the parent's gates — `asToolWith` (0.22)
+
+`agent.asTool(opts)` now stops the child run when the calling turn is cancelled (the tool
+returns a `cancelled:` error result). `agent.asToolWith(ctx => opts)` builds the run options per
+call from the calling tool's context, so the child runs under the parent's `hooks` (the same
+`beforeTool` permission gate also sees the child's tool calls), `waitFor` (the same question
+bridge) and `onMetric`. A `hooks` on the agent's own spec replaces `opts.hooks`, so leave it unset
+when the gate must hold. `AgentRuntime` options also take `waitFor`: it answers a child's
+suspension when no agent on its chain has its own. There is no token-by-token stream of the
+child's text.
+
+```ts display
+const gate = { beforeTool: (ev) => (ev.hints?.readOnly ? undefined : { result: { output: "denied", isError: true } }) }
+const reviewer = new agents.Agent({ name: "reviewer", does: "Review a diff", model, toolkit })
+const tk = await createToolkit({ extraTools: [reviewer.asToolWith((ctx) => ({ hooks: gate, waitFor }))] })
+createClient({ …, hooks: gate, waitFor })   // parent and child share one gate and one bridge
+```
+{/* /0.22 */}
+
 ## Options
 
 | Field | Type | What it does |

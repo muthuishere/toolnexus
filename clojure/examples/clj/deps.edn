@@ -1,6 +1,6 @@
-;; The five examples on Clojure (JVM).
+;; The eight examples on Clojure (JVM).
 ;;
-;;   ./run.sh                       all five
+;;   ./run.sh                       all eight
 ;;   clojure -M -m examples.skills  one of them
 ;;
 ;; `src` is a SYMLINK to ../src — the same source the cljgo/ project compiles.
