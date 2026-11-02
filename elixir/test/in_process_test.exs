@@ -11,9 +11,11 @@ defmodule Toolnexus.InProcessTest do
     Toolnexus.Native.define_tool(%{
       name: "add",
       description: "Add two numbers.",
-      input_schema: %{"type" => "object",
-                      "properties" => %{"a" => %{"type" => "number"}, "b" => %{"type" => "number"}},
-                      "required" => ["a", "b"]},
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{"a" => %{"type" => "number"}, "b" => %{"type" => "number"}},
+        "required" => ["a", "b"]
+      },
       execute: fn args -> to_string(trunc(args["a"] + args["b"])) end
     })
   end
@@ -30,7 +32,12 @@ defmodule Toolnexus.InProcessTest do
 
   test "no wire configuration is required" do
     # No :base_url. No :api_key. No :style. That is the whole point.
-    client = Client.create_in_process(model: "my-local", generate: fn _req -> %{content: "hello from in-process"} end)
+    client =
+      Client.create_in_process(
+        model: "my-local",
+        generate: fn _req -> %{content: "hello from in-process"} end
+      )
+
     r = Client.run(client, "hi", bare_toolkit())
     assert r.text == "hello from in-process"
     assert r.status == "done"
@@ -43,7 +50,10 @@ defmodule Toolnexus.InProcessTest do
       Client.create_in_process(
         model: "my-local",
         system_prompt: "You are terse.",
-        generate: fn req -> Agent.update(seen, fn _ -> req end); %{content: "ok"} end
+        generate: fn req ->
+          Agent.update(seen, fn _ -> req end)
+          %{content: "ok"}
+        end
       )
 
     Client.run(client, "What is 2 + 3?", add_toolkit())
@@ -138,6 +148,7 @@ defmodule Toolnexus.InProcessTest do
       )
 
     started = System.monotonic_time(:millisecond)
+
     assert_raise RuntimeError, ~r/my model blew up/, fn ->
       Client.run(client, "hi", bare_toolkit())
     end

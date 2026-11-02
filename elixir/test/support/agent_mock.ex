@@ -11,13 +11,20 @@ defmodule Toolnexus.TestAgentMock do
   def usage_per_call, do: @usage
 
   def openai_response(message, usage \\ @usage),
-    do: %{"choices" => [%{"message" => Map.merge(%{"role" => "assistant"}, message)}], "usage" => usage}
+    do: %{
+      "choices" => [%{"message" => Map.merge(%{"role" => "assistant"}, message)}],
+      "usage" => usage
+    }
 
   def tool_call(name, args, id) do
     %{
       "content" => nil,
       "tool_calls" => [
-        %{"id" => id, "type" => "function", "function" => %{"name" => name, "arguments" => Jason.encode!(args)}}
+        %{
+          "id" => id,
+          "type" => "function",
+          "function" => %{"name" => name, "arguments" => Jason.encode!(args)}
+        }
       ]
     }
   end
@@ -43,17 +50,26 @@ defmodule Toolnexus.TestAgentMock do
               %{
                 "id" => "c1",
                 "type" => "function",
-                "function" => %{"name" => "task", "arguments" => Jason.encode!(%{"agent" => "explore", "prompt" => "find A"})}
+                "function" => %{
+                  "name" => "task",
+                  "arguments" => Jason.encode!(%{"agent" => "explore", "prompt" => "find A"})
+                }
               },
               %{
                 "id" => "c2",
                 "type" => "function",
-                "function" => %{"name" => "task", "arguments" => Jason.encode!(%{"agent" => "explore", "prompt" => "find B"})}
+                "function" => %{
+                  "name" => "task",
+                  "arguments" => Jason.encode!(%{"agent" => "explore", "prompt" => "find B"})
+                }
               }
             ]
           })
         else
-          openai_response(%{"content" => "synthesis: " <> Enum.map_join(tool_msgs, " + ", &to_string(&1["content"]))})
+          openai_response(%{
+            "content" =>
+              "synthesis: " <> Enum.map_join(tool_msgs, " + ", &to_string(&1["content"]))
+          })
         end
 
       "m-explore" ->
@@ -63,8 +79,12 @@ defmodule Toolnexus.TestAgentMock do
 
       "m-approver-parent" ->
         if tool_msgs == [],
-          do: openai_response(tool_call("task", %{"agent" => "asker", "prompt" => "get the secret"}, "p1")),
-          else: openai_response(%{"content" => "parent-final: #{List.last(tool_msgs)["content"]}"})
+          do:
+            openai_response(
+              tool_call("task", %{"agent" => "asker", "prompt" => "get the secret"}, "p1")
+            ),
+          else:
+            openai_response(%{"content" => "parent-final: #{List.last(tool_msgs)["content"]}"})
 
       "m-asker" ->
         if Enum.any?(tool_msgs, &String.contains?(to_string(&1["content"]), "secret-token")),
@@ -103,10 +123,15 @@ defmodule Toolnexus.TestAgentMock do
     case body["model"] do
       "m-coder" ->
         if tool_msgs == [] do
-          openai_response(tool_call("task", %{"agent" => "explore", "prompt" => "find the bug"}, "t1"))
+          openai_response(
+            tool_call("task", %{"agent" => "explore", "prompt" => "find the bug"}, "t1")
+          )
         else
           soul = if String.contains?(sys, "You are the CODER"), do: "loaded", else: "missing"
-          openai_response(%{"content" => "fixed using: #{hd(tool_msgs)["content"]} [soul:#{soul}]"})
+
+          openai_response(%{
+            "content" => "fixed using: #{hd(tool_msgs)["content"]} [soul:#{soul}]"
+          })
         end
 
       "m-explore" ->
@@ -146,7 +171,15 @@ defmodule Toolnexus.TestAgentMock do
   end
 
   # ---- agent-home scripts (H1–H7) — mirrors examples/persona-agent/fixture.json ----
-  @home_order ["AGENTS.md", "SOUL.md", "IDENTITY.md", "USER.md", "TOOLS.md", "HEARTBEAT.md", "MEMORY.md"]
+  @home_order [
+    "AGENTS.md",
+    "SOUL.md",
+    "IDENTITY.md",
+    "USER.md",
+    "TOOLS.md",
+    "HEARTBEAT.md",
+    "MEMORY.md"
+  ]
   @heartbeat_ok_text "HEARTBEAT_OK"
 
   def home(body) do
@@ -167,18 +200,31 @@ defmodule Toolnexus.TestAgentMock do
         if tool_msgs == [],
           do:
             openai_response(
-              tool_call("memory", %{"action" => "add", "target" => "user", "text" => "Prefers dark roast"}, "w1")
+              tool_call(
+                "memory",
+                %{"action" => "add", "target" => "user", "text" => "Prefers dark roast"},
+                "w1"
+              )
             ),
           else: openai_response(%{"content" => "saved: #{hd(tool_msgs)["content"]}"})
 
       "m-recall" ->
         openai_response(%{
-          "content" => if(String.contains?(sys, "Prefers dark roast"), do: "I recall: dark roast", else: "no memory")
+          "content" =>
+            if(String.contains?(sys, "Prefers dark roast"),
+              do: "I recall: dark roast",
+              else: "no memory"
+            )
         })
 
       "m-heartbeat" ->
-        speak = String.contains?(sys, "remind about the 3pm sync") and String.contains?(last, "Heartbeat")
-        openai_response(%{"content" => if(speak, do: "Reminder: 3pm sync 🔔", else: @heartbeat_ok_text)})
+        speak =
+          String.contains?(sys, "remind about the 3pm sync") and
+            String.contains?(last, "Heartbeat")
+
+        openai_response(%{
+          "content" => if(speak, do: "Reminder: 3pm sync 🔔", else: @heartbeat_ok_text)
+        })
 
       _ ->
         openai_response(%{"content" => "ok"})

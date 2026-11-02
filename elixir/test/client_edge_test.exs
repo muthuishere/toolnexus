@@ -25,14 +25,28 @@ defmodule Toolnexus.ClientEdgeTest do
       handler =
         Agent.get_and_update(agent, fn st ->
           case st.handlers do
-            [h | rest] -> {h, %{st | handlers: rest, captured: st.captured ++ [%{body: body, headers: Map.new(conn.req_headers)}]}}
-            [] -> {nil, %{st | captured: st.captured ++ [%{body: body, headers: Map.new(conn.req_headers)}]}}
+            [h | rest] ->
+              {h,
+               %{
+                 st
+                 | handlers: rest,
+                   captured: st.captured ++ [%{body: body, headers: Map.new(conn.req_headers)}]
+               }}
+
+            [] ->
+              {nil,
+               %{
+                 st
+                 | captured: st.captured ++ [%{body: body, headers: Map.new(conn.req_headers)}]
+               }}
           end
         end)
 
       case handler && handler.(body) do
         {:json, status, resp} ->
-          conn |> put_resp_content_type("application/json") |> send_resp(status, Jason.encode!(resp))
+          conn
+          |> put_resp_content_type("application/json")
+          |> send_resp(status, Jason.encode!(resp))
 
         {:sse, text} ->
           conn |> put_resp_content_type("text/event-stream") |> send_resp(200, text)
@@ -47,7 +61,9 @@ defmodule Toolnexus.ClientEdgeTest do
           |> send_resp(429, "throttled")
 
         nil ->
-          conn |> put_resp_content_type("application/json") |> send_resp(500, ~s({"error":"no handler"}))
+          conn
+          |> put_resp_content_type("application/json")
+          |> send_resp(500, ~s({"error":"no handler"}))
       end
     end
   end
@@ -57,7 +73,10 @@ defmodule Toolnexus.ClientEdgeTest do
     port = free_port()
 
     start_supervised!(
-      Supervisor.child_spec({Bandit, plug: {Stub, agent}, scheme: :http, port: port, ip: {127, 0, 0, 1}}, id: make_ref())
+      Supervisor.child_spec(
+        {Bandit, plug: {Stub, agent}, scheme: :http, port: port, ip: {127, 0, 0, 1}},
+        id: make_ref()
+      )
     )
 
     {"http://127.0.0.1:#{port}", agent}
@@ -74,10 +93,21 @@ defmodule Toolnexus.ClientEdgeTest do
 
   defp usage, do: %{"prompt_tokens" => 1, "completion_tokens" => 1, "total_tokens" => 2}
 
-  defp openai_text(text), do: {:json, 200, %{"choices" => [%{"message" => %{"role" => "assistant", "content" => text}}], "usage" => usage()}}
+  defp openai_text(text),
+    do:
+      {:json, 200,
+       %{
+         "choices" => [%{"message" => %{"role" => "assistant", "content" => text}}],
+         "usage" => usage()
+       }}
 
   defp anthropic_text(text),
-    do: {:json, 200, %{"content" => [%{"type" => "text", "text" => text}], "usage" => %{"input_tokens" => 1, "output_tokens" => 1}}}
+    do:
+      {:json, 200,
+       %{
+         "content" => [%{"type" => "text", "text" => text}],
+         "usage" => %{"input_tokens" => 1, "output_tokens" => 1}
+       }}
 
   defp anthropic_tool_use(id, name, input) do
     {:json, 200,
@@ -126,36 +156,79 @@ defmodule Toolnexus.ClientEdgeTest do
   defp anthropic_tool_sse do
     ": comment\n" <>
       sse([
-        %{"type" => "message_start", "message" => %{"usage" => %{"input_tokens" => 2, "output_tokens" => 0}}},
+        %{
+          "type" => "message_start",
+          "message" => %{"usage" => %{"input_tokens" => 2, "output_tokens" => 0}}
+        },
         %{"type" => "content_block_start", "index" => 0, "content_block" => %{"type" => "text"}},
-        %{"type" => "content_block_delta", "index" => 0, "delta" => %{"type" => "text_delta", "text" => "calling"}},
-        %{"type" => "content_block_start", "index" => 1, "content_block" => %{"type" => "tool_use", "id" => "c1", "name" => "echo"}},
-        %{"type" => "content_block_delta", "index" => 1, "delta" => %{"type" => "input_json_delta", "partial_json" => ~s({"text":)}},
-        %{"type" => "content_block_delta", "index" => 1, "delta" => %{"type" => "input_json_delta", "partial_json" => ~s("hi"})}},
+        %{
+          "type" => "content_block_delta",
+          "index" => 0,
+          "delta" => %{"type" => "text_delta", "text" => "calling"}
+        },
+        %{
+          "type" => "content_block_start",
+          "index" => 1,
+          "content_block" => %{"type" => "tool_use", "id" => "c1", "name" => "echo"}
+        },
+        %{
+          "type" => "content_block_delta",
+          "index" => 1,
+          "delta" => %{"type" => "input_json_delta", "partial_json" => ~s({"text":)}
+        },
+        %{
+          "type" => "content_block_delta",
+          "index" => 1,
+          "delta" => %{"type" => "input_json_delta", "partial_json" => ~s("hi"})}
+        },
         %{"type" => "content_block_delta", "index" => 1, "delta" => %{"type" => "unknown_delta"}},
         %{"type" => "totally_unknown"},
-        %{"type" => "message_delta", "delta" => %{"stop_reason" => "tool_use"}, "usage" => %{"output_tokens" => 3}}
+        %{
+          "type" => "message_delta",
+          "delta" => %{"stop_reason" => "tool_use"},
+          "usage" => %{"output_tokens" => 3}
+        }
       ]) <> "data: not-json\n\n"
   end
 
   defp anthropic_text_sse(text, stop \\ "end_turn") do
     sse([
-      %{"type" => "message_start", "message" => %{"usage" => %{"input_tokens" => 1, "output_tokens" => 0}}},
+      %{
+        "type" => "message_start",
+        "message" => %{"usage" => %{"input_tokens" => 1, "output_tokens" => 0}}
+      },
       %{"type" => "content_block_start", "index" => 0, "content_block" => %{"type" => "text"}},
-      %{"type" => "content_block_delta", "index" => 0, "delta" => %{"type" => "text_delta", "text" => text}},
-      %{"type" => "message_delta", "delta" => %{"stop_reason" => stop}, "usage" => %{"output_tokens" => 1}}
+      %{
+        "type" => "content_block_delta",
+        "index" => 0,
+        "delta" => %{"type" => "text_delta", "text" => text}
+      },
+      %{
+        "type" => "message_delta",
+        "delta" => %{"stop_reason" => stop},
+        "usage" => %{"output_tokens" => 1}
+      }
     ])
   end
 
   # --- anthropic streaming -----------------------------------------------------------
 
   test "anthropic streaming: tool_use round (json deltas) then final text" do
-    {url, _} = start_stub([fn _ -> {:sse, anthropic_tool_sse()} end, fn _ -> {:sse, anthropic_text_sse("done!")} end])
+    {url, _} =
+      start_stub([
+        fn _ -> {:sse, anthropic_tool_sse()} end,
+        fn _ -> {:sse, anthropic_text_sse("done!")} end
+      ])
+
     c = client(url, style: "anthropic")
 
     events = Client.stream(c, "go", [echo_tool()]) |> Enum.to_list()
 
-    assert Enum.any?(events, &match?(%{type: "tool_call", name: "echo", args: %{"text" => "hi"}}, &1))
+    assert Enum.any?(
+             events,
+             &match?(%{type: "tool_call", name: "echo", args: %{"text" => "hi"}}, &1)
+           )
+
     assert Enum.any?(events, &match?(%{type: "tool_result", output: "echoed: hi"}, &1))
     assert %{type: "done", result: result} = List.last(events)
     assert result.text == "done!"
@@ -166,12 +239,22 @@ defmodule Toolnexus.ClientEdgeTest do
     {url, _} = start_stub([fn _ -> {:sse, anthropic_tool_sse()} end])
     c = client(url, style: "anthropic")
 
-    events = Client.stream(c, "go", [tool("echo", fn _, _ ->
-      %ToolResult{output: "p", is_error: true, metadata: %{pending: %Request{id: "r9", kind: "input", prompt: "p"}}}
-    end)]) |> Enum.to_list()
+    events =
+      Client.stream(c, "go", [
+        tool("echo", fn _, _ ->
+          %ToolResult{
+            output: "p",
+            is_error: true,
+            metadata: %{pending: %Request{id: "r9", kind: "input", prompt: "p"}}
+          }
+        end)
+      ])
+      |> Enum.to_list()
 
     assert Enum.any?(events, &match?(%{type: "pending", request: %Request{id: "r9"}}, &1))
-    assert %{type: "done", result: %{status: "pending", pending: %Request{id: "r9"}}} = List.last(events)
+
+    assert %{type: "done", result: %{status: "pending", pending: %Request{id: "r9"}}} =
+             List.last(events)
   end
 
   test "anthropic streaming with :id loads and saves history; max_turns caps immediately" do
@@ -179,6 +262,7 @@ defmodule Toolnexus.ClientEdgeTest do
     c = client(url, style: "anthropic")
 
     store = Client.conversation_store(c)
+
     Toolnexus.Client.InMemoryConversationStore.save(store, "conv", [
       %{"role" => "user", "content" => "before"},
       %{"role" => "assistant", "content" => [%{"type" => "text", "text" => "earlier"}]}
@@ -214,7 +298,10 @@ defmodule Toolnexus.ClientEdgeTest do
 
     c = client(url2)
     store = Client.conversation_store(c)
-    Toolnexus.Client.InMemoryConversationStore.save(store, "cv", [%{"role" => "user", "content" => "old"}])
+
+    Toolnexus.Client.InMemoryConversationStore.save(store, "cv", [
+      %{"role" => "user", "content" => "old"}
+    ])
 
     events = Client.stream(c, "new", [], id: "cv") |> Enum.to_list()
     assert %{type: "done", result: %{text: "ok"}} = List.last(events)
@@ -238,7 +325,9 @@ defmodule Toolnexus.ClientEdgeTest do
   # --- anthropic non-streaming edges ---------------------------------------------------
 
   test "anthropic: ask with id threads history; max_turns 0 short-circuits" do
-    {url, agent} = start_stub([fn _ -> anthropic_text("one") end, fn _ -> anthropic_text("two") end])
+    {url, agent} =
+      start_stub([fn _ -> anthropic_text("one") end, fn _ -> anthropic_text("two") end])
+
     c = client(url, style: "anthropic")
 
     assert Client.ask(c, "first", [], id: "conv").text == "one"
@@ -275,7 +364,11 @@ defmodule Toolnexus.ClientEdgeTest do
   end
 
   test "anthropic: resolve_pending re-executes with the answer and after_tool transforms it" do
-    {url, _} = start_stub([fn _ -> anthropic_tool_use("c1", "suspend", %{}) end, fn _ -> anthropic_text("finished") end])
+    {url, _} =
+      start_stub([
+        fn _ -> anthropic_tool_use("c1", "suspend", %{}) end,
+        fn _ -> anthropic_text("finished") end
+      ])
 
     c =
       client(url,
@@ -283,7 +376,9 @@ defmodule Toolnexus.ClientEdgeTest do
         wait_for: fn %Request{id: id} -> %Answer{id: id, ok: true, data: %{"v" => 1}} end,
         hooks: %{
           after_tool: fn %{result: r} ->
-            if r.output == "resumed", do: %{result: %ToolResult{output: "resumed+hooked"}}, else: :keep
+            if r.output == "resumed",
+              do: %{result: %ToolResult{output: "resumed+hooked"}},
+              else: :keep
           end
         }
       )
@@ -299,7 +394,10 @@ defmodule Toolnexus.ClientEdgeTest do
     {url, _} = start_stub([])
 
     c = client(url, timeout_ms: 0)
-    assert_raise Toolnexus.TimeoutError, ~r/run timeout after 0ms/, fn -> Client.run(c, "x", []) end
+
+    assert_raise Toolnexus.TimeoutError, ~r/run timeout after 0ms/, fn ->
+      Client.run(c, "x", [])
+    end
 
     {url2, _} = start_stub([openai_text("fast") |> then(fn resp -> fn _ -> resp end end)])
     c2 = client(url2, timeout_ms: 5_000)
@@ -324,7 +422,9 @@ defmodule Toolnexus.ClientEdgeTest do
     assert System.monotonic_time(:millisecond) - t0 >= 900
 
     # unparseable Retry-After falls back to the exponential backoff
-    {url3, _} = start_stub([fn _ -> {:retry_after, "soon"} end, fn _ -> openai_text("backed-off") end])
+    {url3, _} =
+      start_stub([fn _ -> {:retry_after, "soon"} end, fn _ -> openai_text("backed-off") end])
+
     assert Client.run(client(url3, retries: 1, retry_base_ms: 1), "x", []).text == "backed-off"
   end
 
@@ -337,7 +437,10 @@ defmodule Toolnexus.ClientEdgeTest do
   test "non-2xx with a text body raises with the raw body text" do
     {url, _} = start_stub([fn _ -> {:text, 400, "bad request body"} end])
     c = client(url)
-    assert_raise Toolnexus.ProviderError, ~r/LLM 400: bad request body/, fn -> Client.run(c, "x", []) end
+
+    assert_raise Toolnexus.ProviderError, ~r/LLM 400: bad request body/, fn ->
+      Client.run(c, "x", [])
+    end
   end
 
   test "streaming non-2xx raises the LLM error" do
@@ -364,7 +467,11 @@ defmodule Toolnexus.ClientEdgeTest do
 
     Enum.each(Map.keys(saved), &System.delete_env/1)
 
-    {url, agent} = start_stub([fn _ -> openai_text("via-openai-env") end, fn _ -> anthropic_text("via-anthropic-env") end])
+    {url, agent} =
+      start_stub([
+        fn _ -> openai_text("via-openai-env") end,
+        fn _ -> anthropic_text("via-anthropic-env") end
+      ])
 
     assert_raise ArgumentError, ~r/No API key/, fn ->
       Client.run(Client.create(base_url: url, style: "openai", model: "m"), "x", [])
@@ -391,7 +498,16 @@ defmodule Toolnexus.ClientEdgeTest do
 
     System.delete_env("OPENAI_API_KEY")
     System.put_env("ANTHROPIC_API_KEY", "env-ant")
-    c = Client.create(base_url: url, style: "anthropic", model: "m", retries: 0, api_key_env: "ANTHROPIC_API_KEY")
+
+    c =
+      Client.create(
+        base_url: url,
+        style: "anthropic",
+        model: "m",
+        retries: 0,
+        api_key_env: "ANTHROPIC_API_KEY"
+      )
+
     assert Client.run(c, "x", []).text == "via-anthropic-env"
 
     [openai_req, anthropic_req] = captured(agent)
@@ -416,7 +532,11 @@ defmodule Toolnexus.ClientEdgeTest do
                    "role" => "assistant",
                    "content" => nil,
                    "tool_calls" => [
-                     %{"id" => "c1", "type" => "function", "function" => %{"name" => "echo", "arguments" => ~s({"text":"orig"})}}
+                     %{
+                       "id" => "c1",
+                       "type" => "function",
+                       "function" => %{"name" => "echo", "arguments" => ~s({"text":"orig"})}
+                     }
                    ]
                  }
                }
@@ -455,9 +575,21 @@ defmodule Toolnexus.ClientEdgeTest do
                    "role" => "assistant",
                    "content" => nil,
                    "tool_calls" => [
-                     %{"id" => "c1", "type" => "function", "function" => %{"name" => "ghost", "arguments" => "{}"}},
-                     %{"id" => "c2", "type" => "function", "function" => %{"name" => "raiser", "arguments" => "{}"}},
-                     %{"id" => "c3", "type" => "function", "function" => %{"name" => "barestr", "arguments" => "{}"}}
+                     %{
+                       "id" => "c1",
+                       "type" => "function",
+                       "function" => %{"name" => "ghost", "arguments" => "{}"}
+                     },
+                     %{
+                       "id" => "c2",
+                       "type" => "function",
+                       "function" => %{"name" => "raiser", "arguments" => "{}"}
+                     },
+                     %{
+                       "id" => "c3",
+                       "type" => "function",
+                       "function" => %{"name" => "barestr", "arguments" => "{}"}
+                     }
                    ]
                  }
                }
@@ -473,10 +605,25 @@ defmodule Toolnexus.ClientEdgeTest do
 
     result = Client.run(client(url), "x", [raiser, barestr])
     assert [ghost, raised, bare] = result.tool_calls
-    assert ghost == %{name: "ghost", args: %{}, output: "Tool not found: ghost", is_error: true, metadata: nil}
+
+    assert ghost == %{
+             name: "ghost",
+             args: %{},
+             output: "Tool not found: ghost",
+             is_error: true,
+             metadata: nil
+           }
+
     assert raised.output == "tool blew up"
     assert raised.is_error
-    assert bare == %{name: "barestr", args: %{}, output: "just a string", is_error: false, metadata: nil}
+
+    assert bare == %{
+             name: "barestr",
+             args: %{},
+             output: "just a string",
+             is_error: false,
+             metadata: nil
+           }
   end
 
   test "toolkit protocol fallbacks: nil toolkit and a prompt function" do

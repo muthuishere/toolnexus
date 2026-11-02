@@ -11,7 +11,15 @@ defmodule Toolnexus.Agents.UxTest do
   alias Toolnexus.TestAgentMock, as: Mock
   import Toolnexus.TestAgentHelpers, only: [lookup: 0]
 
-  @bootstrap_order ["AGENTS.md", "SOUL.md", "IDENTITY.md", "USER.md", "TOOLS.md", "HEARTBEAT.md", "MEMORY.md"]
+  @bootstrap_order [
+    "AGENTS.md",
+    "SOUL.md",
+    "IDENTITY.md",
+    "USER.md",
+    "TOOLS.md",
+    "HEARTBEAT.md",
+    "MEMORY.md"
+  ]
 
   defp ux_opts, do: %{transport: Mock.transport(&Mock.ux/1)}
 
@@ -28,7 +36,12 @@ defmodule Toolnexus.Agents.UxTest do
     soul_path = Path.join(System.tmp_dir!(), "AGENTS-shipped.md")
     File.write!(soul_path, "You are the CODER. Fix things surgically.")
 
-    explore = Agents.agent("explore", %{does: "read-only research", uses: %{tools: [lookup()]}, model: "m-explore"})
+    explore =
+      Agents.agent("explore", %{
+        does: "read-only research",
+        uses: %{tools: [lookup()]},
+        model: "m-explore"
+      })
 
     coder =
       Agents.agent("coder", %{
@@ -42,14 +55,28 @@ defmodule Toolnexus.Agents.UxTest do
     r = Agents.run(coder, ux_opts(), "fix the failing test")
 
     # coding agent completes via its team
-    assert r.status == "done" and r.text =~ "bug at line 42", "coding agent completes via its team: #{r.text}"
+    assert r.status == "done" and r.text =~ "bug at line 42",
+           "coding agent completes via its team: #{r.text}"
+
     # soul FILE reached the system prompt
     assert r.text =~ "[soul:loaded]", "soul FILE reached the system prompt: #{r.text}"
   end
 
   test "S11 team scoping: task targets = the team, nothing else" do
-    _stranger = Agents.agent("stranger", %{does: "should be unreachable", model: "m-explore", uses: %{tools: [lookup()]}})
-    explore = Agents.agent("explore", %{does: "read-only research", uses: %{tools: [lookup()]}, model: "m-explore"})
+    _stranger =
+      Agents.agent("stranger", %{
+        does: "should be unreachable",
+        model: "m-explore",
+        uses: %{tools: [lookup()]}
+      })
+
+    explore =
+      Agents.agent("explore", %{
+        does: "read-only research",
+        uses: %{tools: [lookup()]},
+        model: "m-explore"
+      })
+
     coder = Agents.agent("coder", %{does: "implements", team: [explore], model: "m-coder"})
 
     reg = Agents.registry(coder)
@@ -68,9 +95,19 @@ defmodule Toolnexus.Agents.UxTest do
     File.write!(Path.join(dir, "SOUL.md"), "You are Mia. Warm, brief.")
     File.write!(Path.join(dir, "USER.md"), "The user is Muthu.")
     File.write!(Path.join(dir, "MEMORY.md"), "- Likes green tea.")
-    File.write!(Path.join(dir, "HEARTBEAT.md"), "On heartbeat: if it is watering day, remind to water the plants.")
 
-    mia = Agents.agent("mia", %{does: "persona agent from #{dir}", soul: soul_from_dir(dir), model: "m-mia"})
+    File.write!(
+      Path.join(dir, "HEARTBEAT.md"),
+      "On heartbeat: if it is watering day, remind to water the plants."
+    )
+
+    mia =
+      Agents.agent("mia", %{
+        does: "persona agent from #{dir}",
+        soul: soul_from_dir(dir),
+        model: "m-mia"
+      })
+
     direct = Agents.run(mia, ux_opts(), "hello")
 
     # bootstrap files discovered + injected as ## sections (fixed order)
@@ -81,7 +118,9 @@ defmodule Toolnexus.Agents.UxTest do
     # filter HEARTBEAT_OK results host-side
     rt = Runtime.new(Map.put(ux_opts(), :registry, Agents.registry(mia)))
     {:ok, h} = Runtime.spawn_agent(rt, Runtime.root(rt), "mia")
-    hb_prompt = "Heartbeat. Read your HEARTBEAT.md section and follow it. If nothing needs attention, reply HEARTBEAT_OK."
+
+    hb_prompt =
+      "Heartbeat. Read your HEARTBEAT.md section and follow it. If nothing needs attention, reply HEARTBEAT_OK."
 
     reports =
       for beat <- 1..3 do
@@ -107,7 +146,13 @@ defmodule Toolnexus.Agents.UxTest do
   end
 
   test "S13 bridge: an Agent IS a Tool in the classic toolkit/client API" do
-    explore = Agents.agent("explore", %{does: "read-only research", uses: %{tools: [lookup()]}, model: "m-explore"})
+    explore =
+      Agents.agent("explore", %{
+        does: "read-only research",
+        uses: %{tools: [lookup()]},
+        model: "m-explore"
+      })
+
     toolkit = [Agents.as_tool(explore, ux_opts())]
 
     client =
@@ -126,6 +171,7 @@ defmodule Toolnexus.Agents.UxTest do
            "old API called the agent like any tool: #{r.text}"
 
     # agent metadata surfaced through the tool result
-    assert hd(r.tool_calls).metadata.agent == "explore", "agent metadata surfaced through the tool result"
+    assert hd(r.tool_calls).metadata.agent == "explore",
+           "agent metadata surfaced through the tool result"
   end
 end

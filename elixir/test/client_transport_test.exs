@@ -17,7 +17,13 @@ defmodule Toolnexus.ClientTransportTest do
   defp client(transport, opts \\ []) do
     Client.create(
       Keyword.merge(
-        [base_url: "http://transport.invalid", style: "openai", model: "m", api_key: "k", transport: transport],
+        [
+          base_url: "http://transport.invalid",
+          style: "openai",
+          model: "m",
+          api_key: "k",
+          transport: transport
+        ],
         opts
       )
     )
@@ -79,7 +85,10 @@ defmodule Toolnexus.ClientTransportTest do
 
   test "non-retryable status via transport surfaces as LLM error" do
     transport = fn _req -> {:ok, %{status: 401, headers: %{}, body: %{"error" => "bad key"}}} end
-    assert_raise Toolnexus.ProviderError, ~r/LLM 401/, fn -> Client.run(client(transport), "go", []) end
+
+    assert_raise Toolnexus.ProviderError, ~r/LLM 401/, fn ->
+      Client.run(client(transport), "go", [])
+    end
   end
 
   test "streaming rides the transport too (SSE body as binary)" do
@@ -101,6 +110,7 @@ defmodule Toolnexus.ClientTransportTest do
     events = Client.stream(client(transport), "hi", []) |> Enum.to_list()
     assert %{type: "done", result: %{text: "hello"}} = List.last(events)
   end
+
   # Retry-After is parsed identically in all seven ports: the delay-seconds form
   # only (RFC 9110 §10.2.3) — ASCII digits in 0..2_147_483_647. This port's parser
   # is private, so the rule is asserted where it is observable: how long the client
@@ -113,7 +123,13 @@ defmodule Toolnexus.ClientTransportTest do
       n = Agent.get_and_update(calls, &{&1, &1 + 1})
 
       if n == 0,
-        do: {:ok, %{status: 429, headers: %{"retry-after" => [retry_after]}, body: %{"error" => "slow down"}}},
+        do:
+          {:ok,
+           %{
+             status: 429,
+             headers: %{"retry-after" => [retry_after]},
+             body: %{"error" => "slow down"}
+           }},
         else: {:ok, %{status: 200, headers: %{}, body: openai_text("ok")}}
     end
 
@@ -180,5 +196,4 @@ defmodule Toolnexus.ClientTransportTest do
     # 1 initial + 2 retries
     assert Agent.get(calls, & &1) == 3
   end
-
 end

@@ -565,9 +565,9 @@ defmodule Toolnexus.Skill do
 
     case Map.get(by_name, name) do
       nil ->
+        # A22: also user-visible. Code point, by the same construction as the
+        # §0.10 prompt sort — see `skills_prompt/1`.
         available =
-          # A22: also user-visible. Code point, by the same construction as the
-          # §0.10 prompt sort — see `skills_prompt/1`.
           case by_name |> Map.keys() |> Enum.sort() do
             [] -> "none"
             names -> Enum.join(names, ", ")

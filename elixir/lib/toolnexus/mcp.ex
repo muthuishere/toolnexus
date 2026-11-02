@@ -154,7 +154,12 @@ defmodule Toolnexus.Mcp do
       end)
 
     outcomes =
-      case collect(Map.new(entries, fn {name, t} -> {t.ref, {name, t}} end), %{}, deadline_at, on_server) do
+      case collect(
+             Map.new(entries, fn {name, t} -> {t.ref, {name, t}} end),
+             %{},
+             deadline_at,
+             on_server
+           ) do
         {:ok, outcomes} ->
           outcomes
 
@@ -233,8 +238,12 @@ defmodule Toolnexus.Mcp do
 
     conn = fn server ->
       case conns do
-        %{^server => pid} -> {:ok, pid}
-        _ -> {:error, ~s(no connected MCP server "#{server}" (connected: #{Enum.join(names, ", ")}\))}
+        %{^server => pid} ->
+          {:ok, pid}
+
+        _ ->
+          {:error,
+           ~s(no connected MCP server "#{server}" (connected: #{Enum.join(names, ", ")}\))}
       end
     end
 
@@ -244,7 +253,9 @@ defmodule Toolnexus.Mcp do
         "List the resources MCP servers offer (uri, name, description, mimeType). Optionally for one server.",
       input_schema: %{
         "type" => "object",
-        "properties" => %{"server" => %{"type" => "string", "description" => "Only this server (default: all)"}},
+        "properties" => %{
+          "server" => %{"type" => "string", "description" => "Only this server (default: all)"}
+        },
         "additionalProperties" => false
       },
       source: "mcp",
@@ -292,17 +303,27 @@ defmodule Toolnexus.Mcp do
           text =
             (res["contents"] || [])
             |> Enum.flat_map(fn
-              %{"text" => t} when is_binary(t) -> [t]
-              %{"blob" => b} = c when is_binary(b) -> ["[binary #{c["mimeType"]}, #{byte_size(b)} base64 chars]"]
-              _ -> []
+              %{"text" => t} when is_binary(t) ->
+                [t]
+
+              %{"blob" => b} = c when is_binary(b) ->
+                ["[binary #{c["mimeType"]}, #{byte_size(b)} base64 chars]"]
+
+              _ ->
+                []
             end)
             |> Enum.join("\n")
 
           %ToolResult{output: text, metadata: %{server: server, uri: uri}}
         else
-          {:error, msg} when is_binary(msg) -> %ToolResult{output: "read_mcp_resource: " <> msg, is_error: true}
-          {:uri, false} -> %ToolResult{output: "read_mcp_resource: uri is required", is_error: true}
-          {:error, reason} -> %ToolResult{output: "read_mcp_resource: " <> error_text(reason), is_error: true}
+          {:error, msg} when is_binary(msg) ->
+            %ToolResult{output: "read_mcp_resource: " <> msg, is_error: true}
+
+          {:uri, false} ->
+            %ToolResult{output: "read_mcp_resource: uri is required", is_error: true}
+
+          {:error, reason} ->
+            %ToolResult{output: "read_mcp_resource: " <> error_text(reason), is_error: true}
         end
       end
     }
@@ -339,8 +360,14 @@ defmodule Toolnexus.Mcp do
       end)
 
     case Enum.reverse(lines) do
-      [] -> %ToolResult{output: "No resources.", metadata: %{count: 0}}
-      lines -> %ToolResult{output: Enum.join(lines, "\n"), metadata: %{count: length(items), resources: Enum.reverse(items)}}
+      [] ->
+        %ToolResult{output: "No resources.", metadata: %{count: 0}}
+
+      lines ->
+        %ToolResult{
+          output: Enum.join(lines, "\n"),
+          metadata: %{count: length(items), resources: Enum.reverse(items)}
+        }
     end
   end
 
@@ -557,8 +584,8 @@ defmodule Toolnexus.Mcp do
   # destructive.
   @doc false
   def mcp_hints(%{} = a)
-       when is_map_key(a, "readOnlyHint") or is_map_key(a, "destructiveHint") or
-              is_map_key(a, "openWorldHint") do
+      when is_map_key(a, "readOnlyHint") or is_map_key(a, "destructiveHint") or
+             is_map_key(a, "openWorldHint") do
     read_only = a["readOnlyHint"] == true
 
     %Toolnexus.ToolHints{

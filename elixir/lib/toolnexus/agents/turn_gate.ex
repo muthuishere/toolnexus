@@ -53,7 +53,13 @@ defmodule Toolnexus.Agents.TurnGate do
   defp grant(st, pid) do
     mon = Process.monitor(pid)
     concurrent = st.concurrent + 1
-    %{st | holders: Map.put(st.holders, pid, mon), concurrent: concurrent, max: max(st.max, concurrent)}
+
+    %{
+      st
+      | holders: Map.put(st.holders, pid, mon),
+        concurrent: concurrent,
+        max: max(st.max, concurrent)
+    }
   end
 
   defp do_release(st, pid, how) do

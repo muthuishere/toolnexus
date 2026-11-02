@@ -40,7 +40,13 @@ defmodule Toolnexus.ContentPartTest do
     end
 
     test "both data and url, or neither, is a typed error" do
-      both = %ContentPart{type: "image", mime_type: "image/png", data: "x", url: "https://x/y.png"}
+      both = %ContentPart{
+        type: "image",
+        mime_type: "image/png",
+        data: "x",
+        url: "https://x/y.png"
+      }
+
       assert {:error, %Error{message: msg}} = ContentPart.validate(both)
       assert msg =~ "both"
 
@@ -98,7 +104,8 @@ defmodule Toolnexus.ContentPartTest do
       assert msg =~ "iodata"
       assert_raise Error, fn -> ContentPart.image!([:nope], mime_type: "image/png") end
 
-      assert {:error, %Error{}} = ContentPart.image([head, tail], mime_type: "image/png", max_part_bytes: 10)
+      assert {:error, %Error{}} =
+               ContentPart.image([head, tail], mime_type: "image/png", max_part_bytes: 10)
     end
 
     test "a File.Stream is consumed eagerly and takes its mime type from its own path" do
@@ -120,20 +127,26 @@ defmodule Toolnexus.ContentPartTest do
       File.write!(tmp, "hello")
       assert {:error, %Error{message: msg}} = ContentPart.file(File.stream!(tmp))
       assert msg =~ ".xyz"
-      assert ContentPart.file!(File.stream!(tmp), mime_type: "text/plain").data == Base.encode64("hello")
+
+      assert ContentPart.file!(File.stream!(tmp), mime_type: "text/plain").data ==
+               Base.encode64("hello")
+
       File.rm(tmp)
 
       assert {:error, %Error{message: msg}} = ContentPart.image(File.stream!("/nope/missing.png"))
       assert msg =~ "stream"
       assert_raise Error, fn -> ContentPart.image!(File.stream!("/nope/missing.png")) end
 
-      assert {:error, %Error{}} = ContentPart.image(File.stream!(@fixture, 16), max_part_bytes: 10)
+      assert {:error, %Error{}} =
+               ContentPart.image(File.stream!(@fixture, 16), max_part_bytes: 10)
     end
 
     test "any enumerable of binary chunks is consumed at construction" do
       chunks = @fixture |> File.read!() |> then(&for <<c::binary-size(1) <- &1>>, do: c)
 
-      assert ContentPart.image!(chunks |> Stream.map(& &1), mime_type: "image/png").data == golden()
+      assert ContentPart.image!(chunks |> Stream.map(& &1), mime_type: "image/png").data ==
+               golden()
+
       assert {:ok, part} = ContentPart.image(Stream.map(chunks, & &1), mime_type: "image/png")
       assert part.data == golden()
 
@@ -141,7 +154,9 @@ defmodule Toolnexus.ContentPartTest do
       assert {:error, %Error{message: msg}} = ContentPart.image(Stream.map(chunks, & &1))
       assert msg =~ ":mime_type"
 
-      assert {:error, %Error{message: msg}} = ContentPart.image(Stream.map(1..3, fn _ -> :nope end), mime_type: "image/png")
+      assert {:error, %Error{message: msg}} =
+               ContentPart.image(Stream.map(1..3, fn _ -> :nope end), mime_type: "image/png")
+
       assert msg =~ "binary chunks"
       assert_raise Error, fn -> ContentPart.image!(%{a: 1}, mime_type: "image/png") end
     end
@@ -176,8 +191,12 @@ defmodule Toolnexus.ContentPartTest do
       assert {:error, %Error{message: msg}} = ContentPart.image(@fixture, max_part_bytes: 81)
       assert msg =~ "82" and msg =~ "81"
       assert {:ok, _} = ContentPart.image(@fixture, max_part_bytes: 82)
-      assert {:error, %Error{}} = ContentPart.image({:bytes, bin}, mime_type: "image/png", max_part_bytes: 10)
-      assert {:error, %Error{}} = ContentPart.image("data:image/png;base64," <> golden(), max_part_bytes: 10)
+
+      assert {:error, %Error{}} =
+               ContentPart.image({:bytes, bin}, mime_type: "image/png", max_part_bytes: 10)
+
+      assert {:error, %Error{}} =
+               ContentPart.image("data:image/png;base64," <> golden(), max_part_bytes: 10)
     end
 
     test "a file part from a path picks up its basename, and the media table is fixed" do
@@ -190,7 +209,13 @@ defmodule Toolnexus.ContentPartTest do
   describe "safety and accounting (§9)" do
     test "describe/1 is {type, mimeType, bytes} and never carries data" do
       part = ContentPart.image!(@fixture)
-      assert ContentPart.describe(part) == %{"type" => "image", "mimeType" => "image/png", "bytes" => 82}
+
+      assert ContentPart.describe(part) == %{
+               "type" => "image",
+               "mimeType" => "image/png",
+               "bytes" => 82
+             }
+
       refute ContentPart.describe(part) |> Map.values() |> Enum.member?(part.data)
     end
 
@@ -213,7 +238,12 @@ defmodule Toolnexus.ContentPartTest do
       assert ContentPart.estimated_tokens(ContentPart.image!(@fixture)) == 85
       assert ContentPart.estimated_tokens(ContentPart.text("abcd")) == 1
       assert ContentPart.byte_size_of(%ContentPart{type: "image", url: "https://x/y.png"}) == 0
-      assert ContentPart.byte_size_of(%ContentPart{type: "image", mime_type: "image/png", data: "abcd"}) == 3
+
+      assert ContentPart.byte_size_of(%ContentPart{
+               type: "image",
+               mime_type: "image/png",
+               data: "abcd"
+             }) == 3
     end
   end
 
@@ -222,7 +252,8 @@ defmodule Toolnexus.ContentPartTest do
       %{
         img_data: ContentPart.image!(@fixture),
         img_url: ContentPart.image!("https://x/y.png", mime_type: "image/png"),
-        file_data: ContentPart.file!({:bytes, "%PDF-"}, mime_type: "application/pdf", name: "r.pdf"),
+        file_data:
+          ContentPart.file!({:bytes, "%PDF-"}, mime_type: "application/pdf", name: "r.pdf"),
         file_url: ContentPart.file!("https://x/y.pdf", mime_type: "application/pdf"),
         audio_data: ContentPart.audio!({:bytes, "ID3"}, mime_type: "audio/mpeg"),
         audio_url: ContentPart.audio!("https://x/y.mp3", mime_type: "audio/mpeg")
@@ -231,8 +262,14 @@ defmodule Toolnexus.ContentPartTest do
 
     test "openai: inline image is an image_url carrying a data: URL", ctx do
       assert {:ok, blk} = ContentPart.to_block(ctx.img_data, "openai")
-      assert blk == %{"type" => "image_url", "image_url" => %{"url" => "data:image/png;base64," <> golden()}}
-      assert {:ok, %{"image_url" => %{"url" => "https://x/y.png"}}} = ContentPart.to_block(ctx.img_url, "openai")
+
+      assert blk == %{
+               "type" => "image_url",
+               "image_url" => %{"url" => "data:image/png;base64," <> golden()}
+             }
+
+      assert {:ok, %{"image_url" => %{"url" => "https://x/y.png"}}} =
+               ContentPart.to_block(ctx.img_url, "openai")
     end
 
     test "openai: file_data carries the data: prefix (a bare base64 string is a 400)", ctx do
@@ -245,7 +282,12 @@ defmodule Toolnexus.ContentPartTest do
 
     test "openai: audio is input_audio with a format; a URL form is refused", ctx do
       assert {:ok, blk} = ContentPart.to_block(ctx.audio_data, "openai")
-      assert blk == %{"type" => "input_audio", "input_audio" => %{"data" => Base.encode64("ID3"), "format" => "mp3"}}
+
+      assert blk == %{
+               "type" => "input_audio",
+               "input_audio" => %{"data" => Base.encode64("ID3"), "format" => "mp3"}
+             }
+
       assert {:unsupported, _} = ContentPart.to_block(ctx.audio_url, "openai")
       assert {:unsupported, _} = ContentPart.to_block(ctx.file_url, "openai")
 
@@ -257,9 +299,14 @@ defmodule Toolnexus.ContentPartTest do
 
     test "anthropic: image and document sources, base64 and url", ctx do
       assert {:ok, blk} = ContentPart.to_block(ctx.img_data, "anthropic")
-      assert blk == %{"type" => "image", "source" => %{"type" => "base64", "media_type" => "image/png", "data" => golden()}}
 
-      assert {:ok, %{"type" => "image", "source" => %{"type" => "url", "url" => "https://x/y.png"}}} =
+      assert blk == %{
+               "type" => "image",
+               "source" => %{"type" => "base64", "media_type" => "image/png", "data" => golden()}
+             }
+
+      assert {:ok,
+              %{"type" => "image", "source" => %{"type" => "url", "url" => "https://x/y.png"}}} =
                ContentPart.to_block(ctx.img_url, "anthropic")
 
       assert {:ok, %{"type" => "document", "source" => %{"type" => "base64"}}} =
@@ -276,11 +323,14 @@ defmodule Toolnexus.ContentPartTest do
 
     test "text maps to a text block on both styles, and an unknown type is unsupported" do
       for style <- ["openai", "anthropic"] do
-        assert {:ok, %{"type" => "text", "text" => "hi"}} = ContentPart.to_block(ContentPart.text("hi"), style)
+        assert {:ok, %{"type" => "text", "text" => "hi"}} =
+                 ContentPart.to_block(ContentPart.text("hi"), style)
       end
 
       assert {:ok, %{"text" => ""}} = ContentPart.to_block(%ContentPart{type: "text"}, "openai")
-      assert {:unsupported, _} = ContentPart.to_block(%ContentPart{type: "video", url: "https://x"}, "openai")
+
+      assert {:unsupported, _} =
+               ContentPart.to_block(%ContentPart{type: "video", url: "https://x"}, "openai")
     end
 
     test "the positive allowlist rejects a block no style declares" do
@@ -298,7 +348,9 @@ defmodule Toolnexus.ContentPartTest do
     end
 
     test "provenance: an attached unsupported part errors, a derived one degrades", ctx do
-      assert_raise Error, ~r/anthropic/, fn -> ContentPart.encode([ctx.audio_data], "anthropic") end
+      assert_raise Error, ~r/anthropic/, fn ->
+        ContentPart.encode([ctx.audio_data], "anthropic")
+      end
 
       assert [%{"type" => "text", "text" => text}] =
                ContentPart.encode([ctx.audio_data], "anthropic", provenance: :derived)
@@ -309,15 +361,24 @@ defmodule Toolnexus.ContentPartTest do
 
     test "on_unsupported_part overrides the provenance rule in both directions", ctx do
       assert_raise Error, fn ->
-        ContentPart.encode([ctx.audio_data], "anthropic", provenance: :derived, on_unsupported: "error")
+        ContentPart.encode([ctx.audio_data], "anthropic",
+          provenance: :derived,
+          on_unsupported: "error"
+        )
       end
 
       assert [%{"type" => "text"}] =
-               ContentPart.encode([ctx.audio_data], "anthropic", provenance: :attached, on_unsupported: "text")
+               ContentPart.encode([ctx.audio_data], "anthropic",
+                 provenance: :attached,
+                 on_unsupported: "text"
+               )
 
       # an unrecognised override falls back to the provenance rule
       assert_raise Error, fn ->
-        ContentPart.encode([ctx.audio_data], "anthropic", provenance: :attached, on_unsupported: "shrug")
+        ContentPart.encode([ctx.audio_data], "anthropic",
+          provenance: :attached,
+          on_unsupported: "shrug"
+        )
       end
     end
 

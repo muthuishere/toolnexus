@@ -19,19 +19,23 @@ defmodule Toolnexus.HarnessLoopTest do
     {:ok, agent} = Agent.start_link(fn -> %{i: 0, models: []} end)
 
     transport = fn req ->
-      state = Agent.get_and_update(agent, fn s ->
-        {s, %{s | i: s.i + 1, models: s.models ++ [req.body["model"]]}}
-      end)
+      state =
+        Agent.get_and_update(agent, fn s ->
+          {s, %{s | i: s.i + 1, models: s.models ++ [req.body["model"]]}}
+        end)
 
       message = Enum.at(messages, min(state.i, length(messages) - 1))
       finish = if Map.has_key?(message, "tool_calls"), do: "tool_calls", else: "stop"
 
       {:ok,
-       %{status: 200, headers: %{"content-type" => "application/json"},
+       %{
+         status: 200,
+         headers: %{"content-type" => "application/json"},
          body: %{
            "choices" => [%{"index" => 0, "message" => message, "finish_reason" => finish}],
            "usage" => %{"prompt_tokens" => 1, "completion_tokens" => 1, "total_tokens" => 2}
-         }}}
+         }
+       }}
     end
 
     {transport, fn -> Agent.get(agent, & &1.models) end}
@@ -40,26 +44,50 @@ defmodule Toolnexus.HarnessLoopTest do
   defp say(content), do: %{"role" => "assistant", "content" => content}
 
   defp call_todo(todos) do
-    %{"role" => "assistant",
-      "tool_calls" => [%{"id" => "t1", "type" => "function",
-        "function" => %{"name" => "todowrite", "arguments" => Jason.encode!(%{"todos" => todos})}}]}
+    %{
+      "role" => "assistant",
+      "tool_calls" => [
+        %{
+          "id" => "t1",
+          "type" => "function",
+          "function" => %{
+            "name" => "todowrite",
+            "arguments" => Jason.encode!(%{"todos" => todos})
+          }
+        }
+      ]
+    }
   end
 
   defp todo(id, text, done), do: %{"id" => id, "text" => text, "completed" => done}
 
   defp base_opts(transport) do
-    %{base_url: "http://scripted.invalid", style: "openai", model: "test-model",
-      api_key: "unused", transport: transport}
+    %{
+      base_url: "http://scripted.invalid",
+      style: "openai",
+      model: "test-model",
+      api_key: "unused",
+      transport: transport
+    }
   end
 
   defp todo_toolkit do
     {:ok, tk} =
       Toolnexus.create_toolkit(
-        builtins: %{"tools" => %{
-          "todowrite" => true, "bash" => false, "read" => false, "write" => false,
-          "edit" => false, "glob" => false, "grep" => false, "webfetch" => false,
-          "apply_patch" => false, "question" => false
-        }}
+        builtins: %{
+          "tools" => %{
+            "todowrite" => true,
+            "bash" => false,
+            "read" => false,
+            "write" => false,
+            "edit" => false,
+            "glob" => false,
+            "grep" => false,
+            "webfetch" => false,
+            "apply_patch" => false,
+            "question" => false
+          }
+        }
       )
 
     tk
@@ -99,8 +127,11 @@ defmodule Toolnexus.HarnessLoopTest do
         say("all done")
       ])
 
-    a = Agents.agent("gated", does: "plans",
-          completion: %{verify: &Loop.all_todos_done/1, max_attempts: 3})
+    a =
+      Agents.agent("gated",
+        does: "plans",
+        completion: %{verify: &Loop.all_todos_done/1, max_attempts: 3}
+      )
 
     {out, _} = Loop.run(Agents.loop(a, base_opts(transport), todo_toolkit()), "do the thing")
     assert out.status == "done"
@@ -110,8 +141,11 @@ defmodule Toolnexus.HarnessLoopTest do
   test "an unverifiable run stops LOUDLY, bounded by max_attempts" do
     {transport, _} = scripted([say("done!")])
 
-    a = Agents.agent("never", does: "never verifies",
-          completion: %{verify: fn _ -> %{ok: false, reason: "always red"} end, max_attempts: 2})
+    a =
+      Agents.agent("never",
+        does: "never verifies",
+        completion: %{verify: fn _ -> %{ok: false, reason: "always red"} end, max_attempts: 2}
+      )
 
     {out, _} = Loop.run(Agents.loop(a, base_opts(transport), bare_toolkit()), "go")
     assert out.status == "incomplete", "never a silent done"
@@ -123,8 +157,11 @@ defmodule Toolnexus.HarnessLoopTest do
   test "max_attempts is required, not defaulted" do
     {transport, _} = scripted([say("hi")])
 
-    a = Agents.agent("bad", does: "x",
-          completion: %{verify: fn _ -> %{ok: true, reason: ""} end, max_attempts: 0})
+    a =
+      Agents.agent("bad",
+        does: "x",
+        completion: %{verify: fn _ -> %{ok: true, reason: ""} end, max_attempts: 0}
+      )
 
     assert_raise ArgumentError, ~r/max_attempts/, fn ->
       Loop.run(Agents.loop(a, base_opts(transport), bare_toolkit()), "go")
@@ -134,8 +171,11 @@ defmodule Toolnexus.HarnessLoopTest do
   test "no plan declared means the built-in verifier passes" do
     {transport, _} = scripted([say("answered without a plan")])
 
-    a = Agents.agent("noplan", does: "x",
-          completion: %{verify: &Loop.all_todos_done/1, max_attempts: 2})
+    a =
+      Agents.agent("noplan",
+        does: "x",
+        completion: %{verify: &Loop.all_todos_done/1, max_attempts: 2}
+      )
 
     {out, _} = Loop.run(Agents.loop(a, base_opts(transport), todo_toolkit()), "go")
     assert out.status == "done", "the gate must not punish an agent for not using the builtin"
@@ -148,8 +188,11 @@ defmodule Toolnexus.HarnessLoopTest do
     {transport, _} =
       scripted([call_todo([todo("1", "ship it", false)]), say("I am finished, honest")])
 
-    a = Agents.agent("escaper", does: "x",
-          completion: %{verify: &Loop.all_todos_done/1, max_attempts: 2})
+    a =
+      Agents.agent("escaper",
+        does: "x",
+        completion: %{verify: &Loop.all_todos_done/1, max_attempts: 2}
+      )
 
     {out, _} = Loop.run(Agents.loop(a, base_opts(transport), todo_toolkit()), "go")
     assert out.status == "incomplete", "the earlier open plan must still be visible"
@@ -163,7 +206,10 @@ defmodule Toolnexus.HarnessLoopTest do
       Loop.guarded_hooks(
         [
           fn ev -> if ev[:name] == "danger", do: "policy: no", else: "allow" end,
-          fn _ -> Agent.update(seen, &(&1 + 1)); "allow" end
+          fn _ ->
+            Agent.update(seen, &(&1 + 1))
+            "allow"
+          end
         ],
         nil
       )
@@ -183,7 +229,12 @@ defmodule Toolnexus.HarnessLoopTest do
     hooks =
       Loop.guarded_hooks(
         [fn ev -> if ev[:name] == "danger", do: "nope", else: "allow" end],
-        %{before_tool: fn _ -> Agent.update(prior, &(&1 + 1)); nil end}
+        %{
+          before_tool: fn _ ->
+            Agent.update(prior, &(&1 + 1))
+            nil
+          end
+        }
       )
 
     hooks[:before_tool].(%{name: "danger", args: %{}, turn: 1})

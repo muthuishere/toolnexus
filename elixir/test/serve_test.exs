@@ -83,7 +83,11 @@ defmodule Toolnexus.ServeTest do
                "role" => "assistant",
                "content" => nil,
                "tool_calls" => [
-                 %{"id" => "c1", "type" => "function", "function" => %{"name" => name, "arguments" => args_json}}
+                 %{
+                   "id" => "c1",
+                   "type" => "function",
+                   "function" => %{"name" => name, "arguments" => args_json}
+                 }
                ]
              }
            }
@@ -124,14 +128,27 @@ defmodule Toolnexus.ServeTest do
         %ToolResult{
           output: "Authorize me",
           is_error: true,
-          metadata: %{pending: %Request{id: "r1", kind: "authorization", prompt: "Authorize me", url: "https://auth"}}
+          metadata: %{
+            pending: %Request{
+              id: "r1",
+              kind: "authorization",
+              prompt: "Authorize me",
+              url: "https://auth"
+            }
+          }
         }
       end
     }
   end
 
   defp client(base_url) do
-    Client.create(base_url: base_url, style: "openai", model: "test-model", api_key: "k", retries: 0)
+    Client.create(
+      base_url: base_url,
+      style: "openai",
+      model: "test-model",
+      api_key: "k",
+      retries: 0
+    )
   end
 
   defp serve!(tk, opts) do
@@ -204,7 +221,9 @@ defmodule Toolnexus.ServeTest do
              "capabilities" => %{"streaming" => false, "pushNotifications" => false},
              "defaultInputModes" => ["text"],
              "defaultOutputModes" => ["text"],
-             "skills" => [%{"id" => "greeter", "name" => "greeter", "description" => "Says hello nicely"}],
+             "skills" => [
+               %{"id" => "greeter", "name" => "greeter", "description" => "Says hello nicely"}
+             ],
              "provider" => %{"organization" => "deemwar", "url" => "https://deemwar.com"},
              "url" => handle.url <> "/"
            }
@@ -257,7 +276,9 @@ defmodule Toolnexus.ServeTest do
     assert List.last(first["messages"])["content"] == "please echo hi"
 
     # onTask fired with telemetry on the terminal state
-    assert [%{id: ^id, state: "completed", result: %Client.RunResult{} = rr}] = Agent.get(events, & &1)
+    assert [%{id: ^id, state: "completed", result: %Client.RunResult{} = rr}] =
+             Agent.get(events, & &1)
+
     assert rr.tool_call_count == 1
   end
 
@@ -298,13 +319,16 @@ defmodule Toolnexus.ServeTest do
     final = await_task(handle.url, task["id"])
 
     assert final["status"]["state"] == "input-required"
+
     assert final["status"]["message"] == %{
              "role" => "agent",
              "parts" => [%{"kind" => "text", "text" => "Authorize me"}]
            }
 
     refute Map.has_key?(final, "artifacts")
-    assert [%{state: "input-required", result: %Client.RunResult{status: "pending"}}] = Agent.get(events, & &1)
+
+    assert [%{state: "input-required", result: %Client.RunResult{status: "pending"}}] =
+             Agent.get(events, & &1)
   end
 
   test "a fulfilment error becomes a failed Task (server stays alive)" do
@@ -323,7 +347,10 @@ defmodule Toolnexus.ServeTest do
     final = await_task(handle.url, task["id"])
 
     assert final["status"]["state"] == "failed"
-    assert %{"role" => "agent", "parts" => [%{"kind" => "text", "text" => detail}]} = final["status"]["message"]
+
+    assert %{"role" => "agent", "parts" => [%{"kind" => "text", "text" => detail}]} =
+             final["status"]["message"]
+
     assert detail != ""
     assert [%{state: "failed", result: nil}] = Agent.get(events, & &1)
 
@@ -356,10 +383,15 @@ defmodule Toolnexus.ServeTest do
     tk = echo_toolkit()
     handle = Toolkit.serve(tk, "127.0.0.1:0")
 
-    assert Req.get!(url: handle.url <> "/.well-known/agent-card.json", retry: false, decode_body: false).status ==
+    assert Req.get!(
+             url: handle.url <> "/.well-known/agent-card.json",
+             retry: false,
+             decode_body: false
+           ).status ==
              404
 
-    assert Req.post!(url: handle.url <> "/", json: %{}, retry: false, decode_body: false).status == 404
+    assert Req.post!(url: handle.url <> "/", json: %{}, retry: false, decode_body: false).status ==
+             404
 
     assert Serve.stop(handle) == :ok
     assert Serve.close(handle) == :ok

@@ -65,7 +65,8 @@ defmodule Toolnexus.Serve do
       %__MODULE__{dir: dir}
     end
 
-    defp file(%__MODULE__{dir: dir}, id), do: Path.join(dir, Toolnexus.Tool.sanitize(id) <> ".json")
+    defp file(%__MODULE__{dir: dir}, id),
+      do: Path.join(dir, Toolnexus.Tool.sanitize(id) <> ".json")
 
     @impl true
     def get(store, id) do
@@ -100,7 +101,8 @@ defmodule Toolnexus.Serve do
   def resolve_store("file:" <> dir), do: FileTaskStore.new(dir)
 
   def resolve_store(store) when is_binary(store),
-    do: raise(ArgumentError, ~s{Unknown A2A store: "#{store}" (expected "memory" or "file:<dir>")})
+    do:
+      raise(ArgumentError, ~s{Unknown A2A store: "#{store}" (expected "memory" or "file:<dir>")})
 
   def resolve_store(store) when is_struct(store), do: store
 
@@ -420,7 +422,10 @@ defmodule Toolnexus.Serve do
             "id" => id,
             "status" => %{
               "state" => "failed",
-              "message" => %{"role" => "agent", "parts" => [%{"kind" => "text", "text" => detail}]}
+              "message" => %{
+                "role" => "agent",
+                "parts" => [%{"kind" => "text", "text" => detail}]
+              }
             }
           }
 

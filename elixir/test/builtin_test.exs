@@ -6,142 +6,145 @@ defmodule Toolnexus.BuiltinTest do
   # Golden input schemas, extracted byte-for-byte from js/src/builtin.ts; grep gained
   # context/before/after with SPEC §4C (golang reference, change add-go-host-asks).
   @golden_schemas Jason.decode!("""
-  {
-    "bash": {
-      "type": "object",
-      "properties": {
-        "command": {"type": "string", "description": "The shell command to run"},
-        "workdir": {"type": "string", "description": "Working directory (default: process cwd)"},
-        "timeout": {"type": "number", "description": "Timeout in milliseconds (default 60000)"},
-        "description": {"type": "string", "description": "Human-readable description of the command"}
-      },
-      "required": ["command"],
-      "additionalProperties": false
-    },
-    "read": {
-      "type": "object",
-      "properties": {
-        "path": {"type": "string", "description": "Path to the file to read"},
-        "offset": {"type": "number", "description": "1-based line to start from"},
-        "limit": {"type": "number", "description": "Maximum number of lines to read"}
-      },
-      "required": ["path"],
-      "additionalProperties": false
-    },
-    "write": {
-      "type": "object",
-      "properties": {
-        "path": {"type": "string", "description": "Path to write to"},
-        "content": {"type": "string", "description": "Content to write"}
-      },
-      "required": ["path", "content"],
-      "additionalProperties": false
-    },
-    "edit": {
-      "type": "object",
-      "properties": {
-        "path": {"type": "string", "description": "Path to the file to edit"},
-        "oldString": {"type": "string", "description": "Exact string to replace"},
-        "newString": {"type": "string", "description": "Replacement string"},
-        "replaceAll": {"type": "boolean", "description": "Replace all occurrences"}
-      },
-      "required": ["path", "oldString", "newString"],
-      "additionalProperties": false
-    },
-    "grep": {
-      "type": "object",
-      "properties": {
-        "pattern": {"type": "string", "description": "Regular expression to search for"},
-        "path": {"type": "string", "description": "Directory to search (default: process cwd)"},
-        "include": {"type": "string", "description": "Glob filter for file names"},
-        "limit": {"type": "number", "description": "Maximum number of matches (default 100)"},
-        "context": {"type": "number", "description": "Lines of context before and after each match"},
-        "before": {"type": "number", "description": "Lines of context before each match (overrides context)"},
-        "after": {"type": "number", "description": "Lines of context after each match (overrides context)"}
-      },
-      "required": ["pattern"],
-      "additionalProperties": false
-    },
-    "glob": {
-      "type": "object",
-      "properties": {
-        "pattern": {"type": "string", "description": "Glob pattern to match"},
-        "path": {"type": "string", "description": "Directory to search (default: process cwd)"},
-        "limit": {"type": "number", "description": "Maximum number of results (default 100)"}
-      },
-      "required": ["pattern"],
-      "additionalProperties": false
-    },
-    "webfetch": {
-      "type": "object",
-      "properties": {
-        "url": {"type": "string", "description": "URL to fetch"},
-        "format": {"type": "string", "enum": ["text", "markdown", "html"], "description": "Response format (default markdown)"},
-        "timeout": {"type": "number", "description": "Timeout in seconds (default 30)"}
-      },
-      "required": ["url"],
-      "additionalProperties": false
-    },
-    "question": {
-      "type": "object",
-      "properties": {
-        "questions": {
-          "type": "array",
-          "description": "Questions to ask",
-          "items": {
-            "type": "object",
-            "properties": {
-              "question": {"type": "string"},
-              "header": {"type": "string"},
-              "options": {"type": "array", "items": {"type": "string"}},
-              "multiple": {"type": "boolean"}
-            },
-            "required": ["question"]
-          }
-        }
-      },
-      "required": ["questions"],
-      "additionalProperties": false
-    },
-    "apply_patch": {
-      "type": "object",
-      "properties": {
-        "patchText": {"type": "string", "description": "The patch text in Begin/End Patch format"}
-      },
-      "required": ["patchText"],
-      "additionalProperties": false
-    },
-    "todowrite": {
-      "type": "object",
-      "properties": {
-        "todos": {
-          "type": "array",
-          "description": "The full todo list to store",
-          "items": {
-            "type": "object",
-            "properties": {
-              "id": {"type": "string"},
-              "text": {"type": "string"},
-              "completed": {"type": "boolean"}
-            },
-            "required": ["id", "text", "completed"]
-          }
-        }
-      },
-      "required": ["todos"],
-      "additionalProperties": false
-    }
-  }
-  """)
+                  {
+                    "bash": {
+                      "type": "object",
+                      "properties": {
+                        "command": {"type": "string", "description": "The shell command to run"},
+                        "workdir": {"type": "string", "description": "Working directory (default: process cwd)"},
+                        "timeout": {"type": "number", "description": "Timeout in milliseconds (default 60000)"},
+                        "description": {"type": "string", "description": "Human-readable description of the command"}
+                      },
+                      "required": ["command"],
+                      "additionalProperties": false
+                    },
+                    "read": {
+                      "type": "object",
+                      "properties": {
+                        "path": {"type": "string", "description": "Path to the file to read"},
+                        "offset": {"type": "number", "description": "1-based line to start from"},
+                        "limit": {"type": "number", "description": "Maximum number of lines to read"}
+                      },
+                      "required": ["path"],
+                      "additionalProperties": false
+                    },
+                    "write": {
+                      "type": "object",
+                      "properties": {
+                        "path": {"type": "string", "description": "Path to write to"},
+                        "content": {"type": "string", "description": "Content to write"}
+                      },
+                      "required": ["path", "content"],
+                      "additionalProperties": false
+                    },
+                    "edit": {
+                      "type": "object",
+                      "properties": {
+                        "path": {"type": "string", "description": "Path to the file to edit"},
+                        "oldString": {"type": "string", "description": "Exact string to replace"},
+                        "newString": {"type": "string", "description": "Replacement string"},
+                        "replaceAll": {"type": "boolean", "description": "Replace all occurrences"}
+                      },
+                      "required": ["path", "oldString", "newString"],
+                      "additionalProperties": false
+                    },
+                    "grep": {
+                      "type": "object",
+                      "properties": {
+                        "pattern": {"type": "string", "description": "Regular expression to search for"},
+                        "path": {"type": "string", "description": "Directory to search (default: process cwd)"},
+                        "include": {"type": "string", "description": "Glob filter for file names"},
+                        "limit": {"type": "number", "description": "Maximum number of matches (default 100)"},
+                        "context": {"type": "number", "description": "Lines of context before and after each match"},
+                        "before": {"type": "number", "description": "Lines of context before each match (overrides context)"},
+                        "after": {"type": "number", "description": "Lines of context after each match (overrides context)"}
+                      },
+                      "required": ["pattern"],
+                      "additionalProperties": false
+                    },
+                    "glob": {
+                      "type": "object",
+                      "properties": {
+                        "pattern": {"type": "string", "description": "Glob pattern to match"},
+                        "path": {"type": "string", "description": "Directory to search (default: process cwd)"},
+                        "limit": {"type": "number", "description": "Maximum number of results (default 100)"}
+                      },
+                      "required": ["pattern"],
+                      "additionalProperties": false
+                    },
+                    "webfetch": {
+                      "type": "object",
+                      "properties": {
+                        "url": {"type": "string", "description": "URL to fetch"},
+                        "format": {"type": "string", "enum": ["text", "markdown", "html"], "description": "Response format (default markdown)"},
+                        "timeout": {"type": "number", "description": "Timeout in seconds (default 30)"}
+                      },
+                      "required": ["url"],
+                      "additionalProperties": false
+                    },
+                    "question": {
+                      "type": "object",
+                      "properties": {
+                        "questions": {
+                          "type": "array",
+                          "description": "Questions to ask",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "question": {"type": "string"},
+                              "header": {"type": "string"},
+                              "options": {"type": "array", "items": {"type": "string"}},
+                              "multiple": {"type": "boolean"}
+                            },
+                            "required": ["question"]
+                          }
+                        }
+                      },
+                      "required": ["questions"],
+                      "additionalProperties": false
+                    },
+                    "apply_patch": {
+                      "type": "object",
+                      "properties": {
+                        "patchText": {"type": "string", "description": "The patch text in Begin/End Patch format"}
+                      },
+                      "required": ["patchText"],
+                      "additionalProperties": false
+                    },
+                    "todowrite": {
+                      "type": "object",
+                      "properties": {
+                        "todos": {
+                          "type": "array",
+                          "description": "The full todo list to store",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "id": {"type": "string"},
+                              "text": {"type": "string"},
+                              "completed": {"type": "boolean"}
+                            },
+                            "required": ["id", "text", "completed"]
+                          }
+                        }
+                      },
+                      "required": ["todos"],
+                      "additionalProperties": false
+                    }
+                  }
+                  """)
 
   @golden_descriptions %{
-    "bash" => "Run a shell command and return its combined stdout+stderr. Non-zero exit is an error.",
+    "bash" =>
+      "Run a shell command and return its combined stdout+stderr. Non-zero exit is an error.",
     "read" => "Read a UTF-8 text file. With offset/limit, return only that line window.",
     "write" => "Write content to a file (create/overwrite), creating parent directories.",
     "edit" =>
       "Exact-string replace in a file. Default replaces a single unique occurrence; replaceAll replaces all.",
-    "grep" => "Search file contents by regex under a directory. Output is file:line:text matches.",
-    "glob" => "List files matching a glob under a directory. Output is newline-joined relative paths.",
+    "grep" =>
+      "Search file contents by regex under a directory. Output is file:line:text matches.",
+    "glob" =>
+      "List files matching a glob under a directory. Output is newline-joined relative paths.",
     "webfetch" => "HTTP GET a URL and return its body as text, markdown, or html.",
     "question" =>
       "Ask the host one or more questions. Suspends via a kind:\"question\" Request (§10); the host's waitFor resolves it and the answer is returned to the model.",
@@ -193,11 +196,15 @@ defmodule Toolnexus.BuiltinTest do
     end
 
     test "per-tool map drops tools mapped to false from the all-on baseline" do
-      names = Builtin.load(%{"tools" => %{"bash" => false, "write" => false}}) |> Enum.map(& &1.name)
+      names =
+        Builtin.load(%{"tools" => %{"bash" => false, "write" => false}}) |> Enum.map(& &1.name)
+
       assert names == @order -- ["bash", "write"]
 
       # true / absent stay on; unknown names are ignored
-      names2 = Builtin.load(%{"tools" => %{"bash" => true, "nosuch" => false}}) |> Enum.map(& &1.name)
+      names2 =
+        Builtin.load(%{"tools" => %{"bash" => true, "nosuch" => false}}) |> Enum.map(& &1.name)
+
       assert names2 == @order
     end
 
@@ -246,7 +253,11 @@ defmodule Toolnexus.BuiltinTest do
     test "reads a whole file verbatim", %{tmp_dir: tmp} do
       p = Path.join(tmp, "f.txt")
       File.write!(p, "l1\nl2\nl3\nl4\n")
-      assert run("read", %{"path" => p}) == %ToolResult{output: "l1\nl2\nl3\nl4\n", is_error: false}
+
+      assert run("read", %{"path" => p}) == %ToolResult{
+               output: "l1\nl2\nl3\nl4\n",
+               is_error: false
+             }
     end
 
     @tag :tmp_dir
@@ -305,7 +316,9 @@ defmodule Toolnexus.BuiltinTest do
                  is_error: true
                }
 
-      result = run("edit", %{"path" => p, "oldString" => "x", "newString" => "w", "replaceAll" => true})
+      result =
+        run("edit", %{"path" => p, "oldString" => "x", "newString" => "w", "replaceAll" => true})
+
       assert result.output == "Edited #{p} (2 replacements)"
       assert Map.drop(result.metadata, [:files, :diff]) == %{replacements: 2}
       assert File.read!(p) == "w y w"
@@ -431,7 +444,10 @@ a.txt:2:m"
     end
 
     test "missing url is an error" do
-      assert run("webfetch", %{}) == %ToolResult{output: "webfetch: url is required", is_error: true}
+      assert run("webfetch", %{}) == %ToolResult{
+               output: "webfetch: url is required",
+               is_error: true
+             }
     end
   end
 
@@ -446,7 +462,10 @@ a.txt:2:m"
 
       assert result.is_error
       assert ToolResult.pending?(result)
-      assert %Request{kind: "question", prompt: prompt, data: data, id: "pnd-" <> _} = result.metadata.pending
+
+      assert %Request{kind: "question", prompt: prompt, data: data, id: "pnd-" <> _} =
+               result.metadata.pending
+
       assert prompt == "Pick one (options: a, b, c)\nWhy?"
       assert result.output == prompt
       assert data == %{"questions" => questions}
@@ -490,6 +509,7 @@ a.txt:2:m"
 
       assert Enum.map(result.metadata.files, &{&1.status, &1.additions, &1.deletions}) ==
                [{"added", 2, 0}, {"modified", 1, 1}, {"deleted", 0, 1}]
+
       assert File.read!(new) == "hello\nworld"
       assert File.read!(upd) == "keep\nnew line\nend\n"
       refute File.exists?(del)
@@ -513,7 +533,12 @@ a.txt:2:m"
       """
 
       result = run("apply_patch", %{"patchText" => patch})
-      assert result == %ToolResult{output: "apply_patch: hunk does not match file contents", is_error: true}
+
+      assert result == %ToolResult{
+               output: "apply_patch: hunk does not match file contents",
+               is_error: true
+             }
+
       refute File.exists?(new)
       assert File.read!(upd) == "content\n"
     end
@@ -525,7 +550,12 @@ a.txt:2:m"
 
       patch = "*** Begin Patch\n*** Add File: #{p}\n+y\n*** End Patch"
       result = run("apply_patch", %{"patchText" => patch})
-      assert result == %ToolResult{output: "apply_patch: file already exists: #{p}", is_error: true}
+
+      assert result == %ToolResult{
+               output: "apply_patch: file already exists: #{p}",
+               is_error: true
+             }
+
       assert File.read!(p) == "x"
     end
 

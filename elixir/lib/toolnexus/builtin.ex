@@ -118,7 +118,6 @@ defmodule Toolnexus.Builtin do
     |> Enum.map(&%{&1 | hints: Map.fetch!(@hints, &1.name)})
   end
 
-
   # ---------------------------------------------------------------------------
   # the host boundary: interpreter, base directory, confinement (SPEC §4A, ADR 0034)
   # ---------------------------------------------------------------------------
@@ -139,7 +138,7 @@ defmodule Toolnexus.Builtin do
     if windows?() do
       comspec = System.get_env("COMSPEC")
 
-      (if comspec, do: [[comspec, "/d", "/s", "/c"]], else: []) ++
+      if(comspec, do: [[comspec, "/d", "/s", "/c"]], else: []) ++
         [
           ["cmd.exe", "/d", "/s", "/c"],
           ["pwsh", "-NoProfile", "-Command"],
@@ -176,7 +175,9 @@ defmodule Toolnexus.Builtin do
   def env(cfg) do
     map = if is_map(cfg), do: cfg, else: %{}
     base_dir = cfg_get(map, :base_dir) || cfg_get(map, :baseDir) || ""
-    confine = cfg_get(map, :confine_to_base_dir) == true or cfg_get(map, :confineToBaseDir) == true
+
+    confine =
+      cfg_get(map, :confine_to_base_dir) == true or cfg_get(map, :confineToBaseDir) == true
 
     {shell, shell_error} =
       case cfg_get(map, :shell) do
@@ -368,10 +369,11 @@ defmodule Toolnexus.Builtin do
   defp build_glob_regex([], re), do: re
 
   defp build_glob_regex(["*", "*" | rest], re) do
-    rest = case rest do
-      ["/" | r] -> r
-      r -> r
-    end
+    rest =
+      case rest do
+        ["/" | r] -> r
+        r -> r
+      end
 
     build_glob_regex(rest, re <> ".*")
   end
@@ -390,7 +392,10 @@ defmodule Toolnexus.Builtin do
   # Match a relative path against a glob; slash-less globs test the basename.
   defp match_glob?(rel, glob) do
     re = glob_to_regex(glob)
-    if String.contains?(glob, "/"), do: Regex.match?(re, rel), else: Regex.match?(re, Path.basename(rel))
+
+    if String.contains?(glob, "/"),
+      do: Regex.match?(re, rel),
+      else: Regex.match?(re, Path.basename(rel))
   end
 
   # Recursively list files under root (skips node_modules/.git), returned in ONE
@@ -432,9 +437,18 @@ defmodule Toolnexus.Builtin do
   defp bash_tool(env) do
     props = %{
       "command" => %{"type" => "string", "description" => "The shell command to run"},
-      "workdir" => %{"type" => "string", "description" => "Working directory (default: process cwd)"},
-      "timeout" => %{"type" => "number", "description" => "Timeout in milliseconds (default 60000)"},
-      "description" => %{"type" => "string", "description" => "Human-readable description of the command"}
+      "workdir" => %{
+        "type" => "string",
+        "description" => "Working directory (default: process cwd)"
+      },
+      "timeout" => %{
+        "type" => "number",
+        "description" => "Timeout in milliseconds (default 60000)"
+      },
+      "description" => %{
+        "type" => "string",
+        "description" => "Human-readable description of the command"
+      }
     }
 
     props =
@@ -468,7 +482,9 @@ defmodule Toolnexus.Builtin do
 
           true ->
             workdir_result =
-              if args["workdir"], do: resolve_path(env, str(args["workdir"])), else: {:ok, env_dir(env)}
+              if args["workdir"],
+                do: resolve_path(env, str(args["workdir"])),
+                else: {:ok, env_dir(env)}
 
             case workdir_result do
               {:error, message} ->
@@ -476,7 +492,13 @@ defmodule Toolnexus.Builtin do
 
               {:ok, workdir} ->
                 if is_pid(env.background) and args["run_in_background"] == true do
-                  id = Toolnexus.Builtin.BackgroundShells.start_job(env.background, env, command, workdir)
+                  id =
+                    Toolnexus.Builtin.BackgroundShells.start_job(
+                      env.background,
+                      env,
+                      command,
+                      workdir
+                    )
 
                   ok(
                     "Started background shell #{id}. Read its output with bash_output, stop it with kill_shell.",
@@ -566,11 +588,19 @@ defmodule Toolnexus.Builtin do
       # the way out; nobody is left to receive a result.
       {:DOWN, ^caller_ref, :process, _pid, _reason} ->
         kill.()
-        err("bash: command cancelled\n#{out}", Map.merge(meta, %{timedOut: false, killedTree: true}))
+
+        err(
+          "bash: command cancelled\n#{out}",
+          Map.merge(meta, %{timedOut: false, killedTree: true})
+        )
 
       {:EXIT, _from, _reason} ->
         kill.()
-        err("bash: command cancelled\n#{out}", Map.merge(meta, %{timedOut: false, killedTree: true}))
+
+        err(
+          "bash: command cancelled\n#{out}",
+          Map.merge(meta, %{timedOut: false, killedTree: true})
+        )
     after
       remaining ->
         killed = kill.()
@@ -629,7 +659,11 @@ defmodule Toolnexus.Builtin do
         background_loop(%{j | out: j.out <> d})
 
       {^port, {:exit_status, code}} ->
-        background_loop(%{j | status: if(j.status == :killed, do: :killed, else: :exited), code: signal_code(code)})
+        background_loop(%{
+          j
+          | status: if(j.status == :killed, do: :killed, else: :exited),
+            code: signal_code(code)
+        })
 
       {:read, from, ref} ->
         fresh = binary_part(j.out, j.read, byte_size(j.out) - j.read)
@@ -730,7 +764,9 @@ defmodule Toolnexus.Builtin do
       # able to take the PARENT down, which reparents the grandchild. Both steps
       # therefore force there; the grace window is a POSIX effect.
       Enum.each(pids, fn pid ->
-        System.cmd("taskkill", ["/T", "/F", "/PID", Integer.to_string(pid)], stderr_to_stdout: true)
+        System.cmd("taskkill", ["/T", "/F", "/PID", Integer.to_string(pid)],
+          stderr_to_stdout: true
+        )
       end)
     else
       Enum.each(pids, fn pid ->
@@ -811,7 +847,14 @@ defmodule Toolnexus.Builtin do
                     %ToolResult{
                       output: "#{p} (#{mime}, #{byte_size(content)} bytes)",
                       is_error: false,
-                      parts: [%ContentPart{type: type, mime_type: mime, data: Base.encode64(content), name: Path.basename(p)}]
+                      parts: [
+                        %ContentPart{
+                          type: type,
+                          mime_type: mime,
+                          data: Base.encode64(content),
+                          name: Path.basename(p)
+                        }
+                      ]
                     }
 
                   not String.valid?(content) ->
@@ -822,7 +865,10 @@ defmodule Toolnexus.Builtin do
 
                   true ->
                     lines = String.split(content, "\n")
-                    offset = if is_number(args["offset"]), do: max(1, trunc(args["offset"])), else: 1
+
+                    offset =
+                      if is_number(args["offset"]), do: max(1, trunc(args["offset"])), else: 1
+
                     start = offset - 1
 
                     limit =
@@ -916,12 +962,14 @@ defmodule Toolnexus.Builtin do
 
           true ->
             new_string = str(args["newString"])
-            full = case resolve_path(env, p) do
-              {:ok, resolved} -> resolved
-              {:error, _} -> nil
-            end
 
-            case (if full, do: File.read(full), else: {:error, elem(resolve_path(env, p), 1)}) do
+            full =
+              case resolve_path(env, p) do
+                {:ok, resolved} -> resolved
+                {:error, _} -> nil
+              end
+
+            case if full, do: File.read(full), else: {:error, elem(resolve_path(env, p), 1)} do
               {:error, reason} when is_binary(reason) ->
                 err("edit: #{reason}")
 
@@ -937,13 +985,16 @@ defmodule Toolnexus.Builtin do
                     err("edit: oldString not found in #{p}")
 
                   count > 1 and not replace_all ->
-                    err("edit: oldString is not unique in #{p} (#{count} occurrences); use replaceAll")
+                    err(
+                      "edit: oldString is not unique in #{p} (#{count} occurrences); use replaceAll"
+                    )
 
                   true ->
                     next = String.replace(content, old_string, new_string, global: replace_all)
                     File.write!(full, next)
                     n = if replace_all, do: count, else: 1
                     plural = if n == 1, do: "", else: "s"
+
                     ok(
                       "Edited #{p} (#{n} replacement#{plural})",
                       Map.merge(%{replacements: n}, edit_metadata(env, [{full, content, next}]))
@@ -963,15 +1014,27 @@ defmodule Toolnexus.Builtin do
         "type" => "object",
         "properties" => %{
           "pattern" => %{"type" => "string", "description" => "Regular expression to search for"},
-          "path" => %{"type" => "string", "description" => "Directory to search (default: process cwd)"},
+          "path" => %{
+            "type" => "string",
+            "description" => "Directory to search (default: process cwd)"
+          },
           "include" => %{"type" => "string", "description" => "Glob filter for file names"},
-          "limit" => %{"type" => "number", "description" => "Maximum number of matches (default 100)"},
-          "context" => %{"type" => "number", "description" => "Lines of context before and after each match"},
+          "limit" => %{
+            "type" => "number",
+            "description" => "Maximum number of matches (default 100)"
+          },
+          "context" => %{
+            "type" => "number",
+            "description" => "Lines of context before and after each match"
+          },
           "before" => %{
             "type" => "number",
             "description" => "Lines of context before each match (overrides context)"
           },
-          "after" => %{"type" => "number", "description" => "Lines of context after each match (overrides context)"}
+          "after" => %{
+            "type" => "number",
+            "description" => "Lines of context after each match (overrides context)"
+          }
         },
         "required" => ["pattern"],
         "additionalProperties" => false
@@ -988,7 +1051,9 @@ defmodule Toolnexus.Builtin do
 
             {:ok, re} ->
               root =
-                case (if args["path"], do: resolve_path(env, str(args["path"])), else: {:ok, env_dir(env)}) do
+                case if args["path"],
+                       do: resolve_path(env, str(args["path"])),
+                       else: {:ok, env_dir(env)} do
                   {:ok, r} -> r
                   {:error, _} -> nil
                 end
@@ -1045,7 +1110,12 @@ defmodule Toolnexus.Builtin do
                   else: grep_context(hits, before, after_)
 
               meta = %{count: length(hits)}
-              meta = if total > length(hits), do: Map.merge(meta, %{truncated: true, total: total}), else: meta
+
+              meta =
+                if total > length(hits),
+                  do: Map.merge(meta, %{truncated: true, total: total}),
+                  else: meta
+
               ok(Enum.join(out, "\n"), meta)
           end
         end
@@ -1095,8 +1165,14 @@ defmodule Toolnexus.Builtin do
         "type" => "object",
         "properties" => %{
           "pattern" => %{"type" => "string", "description" => "Glob pattern to match"},
-          "path" => %{"type" => "string", "description" => "Directory to search (default: process cwd)"},
-          "limit" => %{"type" => "number", "description" => "Maximum number of results (default 100)"}
+          "path" => %{
+            "type" => "string",
+            "description" => "Directory to search (default: process cwd)"
+          },
+          "limit" => %{
+            "type" => "number",
+            "description" => "Maximum number of results (default 100)"
+          }
         },
         "required" => ["pattern"],
         "additionalProperties" => false
@@ -1108,10 +1184,13 @@ defmodule Toolnexus.Builtin do
           err("glob: pattern is required")
         else
           root =
-            case (if args["path"], do: resolve_path(env, str(args["path"])), else: {:ok, env_dir(env)}) do
+            case if args["path"],
+                   do: resolve_path(env, str(args["path"])),
+                   else: {:ok, env_dir(env)} do
               {:ok, r} -> r
               {:error, _} -> nil
             end
+
           limit = args["limit"] |> num(100) |> trunc()
 
           found =
@@ -1426,7 +1505,9 @@ defmodule Toolnexus.Builtin do
                 "Add" ->
                   content =
                     body
-                    |> Enum.map(fn l -> if String.starts_with?(l, "+"), do: strip_first(l), else: l end)
+                    |> Enum.map(fn l ->
+                      if String.starts_with?(l, "+"), do: strip_first(l), else: l
+                    end)
                     |> Enum.join("\n")
 
                   {:add, p, content}
@@ -1510,7 +1591,10 @@ defmodule Toolnexus.Builtin do
       %{
         "type" => "object",
         "properties" => %{
-          "patchText" => %{"type" => "string", "description" => "The patch text in Begin/End Patch format"}
+          "patchText" => %{
+            "type" => "string",
+            "description" => "The patch text in Begin/End Patch format"
+          }
         },
         "required" => ["patchText"],
         "additionalProperties" => false
@@ -1665,14 +1749,19 @@ defmodule Toolnexus.Builtin do
         "type" => "object",
         "properties" => %{
           "query" => %{"type" => "string", "description" => "The search query"},
-          "limit" => %{"type" => "number", "description" => "Maximum number of results (default 5)"}
+          "limit" => %{
+            "type" => "number",
+            "description" => "Maximum number of results (default 5)"
+          }
         },
         "required" => ["query"],
         "additionalProperties" => false
       },
       fn args, _ctx ->
         q = str(args["query"])
-        limit = if is_number(args["limit"]) and args["limit"] >= 1, do: trunc(args["limit"]), else: 5
+
+        limit =
+          if is_number(args["limit"]) and args["limit"] >= 1, do: trunc(args["limit"]), else: 5
 
         if String.trim(q) == "" do
           err("websearch: query is required")
@@ -1688,7 +1777,8 @@ defmodule Toolnexus.Builtin do
                   results
                   |> Enum.with_index(1)
                   |> Enum.map_join("\n\n", fn {r, i} ->
-                    "#{i}. #{r.title}\n   #{r.url}" <> if(r.snippet != "", do: "\n   #{r.snippet}", else: "")
+                    "#{i}. #{r.title}\n   #{r.url}" <>
+                      if(r.snippet != "", do: "\n   #{r.snippet}", else: "")
                   end)
 
                 ok(text, %{count: length(results), results: results})
@@ -1716,8 +1806,14 @@ defmodule Toolnexus.Builtin do
         "properties" => %{
           "path" => %{"type" => "string", "description" => "Path to the .ipynb file"},
           "cell_id" => %{"type" => "string", "description" => "The cell's id (or use cell_index)"},
-          "cell_index" => %{"type" => "number", "description" => "0-based cell position (used when cell_id is absent)"},
-          "new_source" => %{"type" => "string", "description" => "The new cell source (replace/insert)"},
+          "cell_index" => %{
+            "type" => "number",
+            "description" => "0-based cell position (used when cell_id is absent)"
+          },
+          "new_source" => %{
+            "type" => "string",
+            "description" => "The new cell source (replace/insert)"
+          },
           "cell_type" => %{
             "type" => "string",
             "enum" => ["code", "markdown"],
@@ -1726,7 +1822,8 @@ defmodule Toolnexus.Builtin do
           "edit_mode" => %{
             "type" => "string",
             "enum" => ["replace", "insert", "delete"],
-            "description" => "Default replace. insert adds the new cell AFTER the given cell, or first when none is given"
+            "description" =>
+              "Default replace. insert adds the new cell AFTER the given cell, or first when none is given"
           }
         },
         "required" => ["path"],
@@ -1816,7 +1913,9 @@ defmodule Toolnexus.Builtin do
     cell = %{"cell_type" => cell_type, "metadata" => %{}, "source" => notebook_source(src)}
 
     cell =
-      if cell_type == "code", do: Map.merge(cell, %{"outputs" => [], "execution_count" => nil}), else: cell
+      if cell_type == "code",
+        do: Map.merge(cell, %{"outputs" => [], "execution_count" => nil}),
+        else: cell
 
     at = idx + 1
     {:ok, List.insert_at(cells, at, cell), "Inserted #{cell_type} cell at #{at} in #{p}"}
@@ -1893,7 +1992,8 @@ defmodule Toolnexus.Builtin.BackgroundShells do
   end
 
   @doc false
-  def start_job(reg, env, command, workdir), do: GenServer.call(reg, {:start, env, command, workdir})
+  def start_job(reg, env, command, workdir),
+    do: GenServer.call(reg, {:start, env, command, workdir})
 
   @doc false
   def read(reg, id) do

@@ -205,7 +205,10 @@ defmodule Toolnexus.ToolkitTest do
     tk = Toolnexus.create_toolkit!(extra_tools: [tool("mine")], builtins: false)
 
     assert %ToolResult{output: "out:mine", is_error: false} = Toolkit.execute(tk, "mine", nil)
-    assert %ToolResult{output: "Unknown tool: nope", is_error: true} = Toolkit.execute(tk, "nope", %{})
+
+    assert %ToolResult{output: "Unknown tool: nope", is_error: true} =
+             Toolkit.execute(tk, "nope", %{})
+
     assert Toolkit.get(tk, "nope") == nil
   end
 

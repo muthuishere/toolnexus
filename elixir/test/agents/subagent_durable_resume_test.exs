@@ -19,14 +19,18 @@ defmodule Toolnexus.Agents.DurableResumeTest do
     # root run returned status=pending
     assert r1.status == "pending", "root run returned status=pending: #{r1.status}"
     # Request carries the handle PATH in data.path (§10 addendum — the ONE portable slot)
-    assert "approverParent.1" in (r1.pending.data["path"] || []), "Request carries the handle PATH to the leaf"
+    assert "approverParent.1" in (r1.pending.data["path"] || []),
+           "Request carries the handle PATH to the leaf"
+
     # both levels parked (suspended), zero tokens burning
-    assert Enum.all?(Runtime.list(rt), &(&1.state == :suspended)), "both levels parked (suspended)"
+    assert Enum.all?(Runtime.list(rt), &(&1.state == :suspended)),
+           "both levels parked (suspended)"
 
     # the store holds the PRE-TURN checkpoint: a suspended turn commits nothing —
     # resume replays the whole turn; idempotency comes from task-key reattachment,
     # never from a halted placeholder visible in history
     store = Runtime.conversation_store(rt)
+
     assert InMemoryConversationStore.get(store, "root/approverParent.1") == nil,
            "suspended parent turn did not advance the stored transcript"
 
@@ -50,7 +54,9 @@ defmodule Toolnexus.Agents.DurableResumeTest do
     # parent cascade REATTACHED to the finished child (no re-execution)
     assert joined =~ "task replay → REATTACH", "parent cascade REATTACHED to the finished child"
     # parent reached done after cascade
-    assert Runtime.snapshot(p).state == :idle, "parent reached done after cascade: #{Runtime.snapshot(p).state}"
+    assert Runtime.snapshot(p).state == :idle,
+           "parent reached done after cascade: #{Runtime.snapshot(p).state}"
+
     # child did not restart from scratch (usage grew, not reset)
     assert Enum.find(Runtime.list(rt), &String.contains?(&1.id, "asker")).tokens > before,
            "child did not restart from scratch (usage grew, not reset)"
@@ -63,10 +69,23 @@ defmodule Toolnexus.Agents.DurableResumeTest do
     # then idle→running (the replay wake). NOTE: the shared fixture predates the
     # pin and omits the suspended→idle hop — SPEC.md is authoritative here.
     assert transitions(tr, "root/approverParent.1") ==
-             ["idle→running", "running→suspended", "suspended→idle", "idle→running", "running→idle"]
+             [
+               "idle→running",
+               "running→suspended",
+               "suspended→idle",
+               "idle→running",
+               "running→idle"
+             ]
 
     assert transitions(tr, "root/approverParent.1/asker.1") ==
-             ["idle→running", "running→suspended", "suspended→idle", "idle→running", "running→idle", "idle→closed"]
+             [
+               "idle→running",
+               "running→suspended",
+               "suspended→idle",
+               "idle→running",
+               "running→idle",
+               "idle→closed"
+             ]
 
     # after resume, the COMPLETED turns are committed — transcripts survive
     assert is_list(InMemoryConversationStore.get(store, "root/approverParent.1")),
