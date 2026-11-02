@@ -17,8 +17,9 @@ LLM call; when the model asks for a tool, you call `toolkit.execute(name, args)`
 This contract is identical across the eight implementations — `js/`, `python/`, `golang/`,
 `java/`, `csharp/`, `elixir/`, `clojure/` and `rust/`. Each builds on the most popular MCP SDK
 for that language — except Elixir, which (lacking a mature SDK) owns its MCP
-client in-house. Rust is held to tier `core` (§0 only; see `conformance/options_manifest.json`),
-so a section below that says "all seven ports" does not yet include it:
+client in-house. Rust is held to tier `full`, the same bar as the other seven (see
+`conformance/options_manifest.json`); a section below that says "all seven ports" predates the
+Rust port and now covers it too:
 
 | Lang   | MCP SDK                                  |
 |--------|------------------------------------------|
