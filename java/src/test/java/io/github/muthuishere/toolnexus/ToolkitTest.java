@@ -47,6 +47,14 @@ class ToolkitTest {
         }
     }
 
+    /** Default options (and a null Options, the Java "no argument") must not crash. */
+    @Test
+    void defaultOptionsDoNotCrash() {
+        try (Toolkit a = Toolkit.create(new Toolkit.Options()); Toolkit b = Toolkit.create(null)) {
+            assertEquals(a.tools().size(), b.tools().size());
+        }
+    }
+
     @Test
     void noMcpMeansEmptyStatus() {
         try (Toolkit tk = build()) {
