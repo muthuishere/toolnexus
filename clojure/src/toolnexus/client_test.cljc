@@ -1655,3 +1655,75 @@
               (is (= [{:path "n.txt" :status "added" :additions 1 :deletions 0}]
                      (get-in tr [:metadata :files])))))))
       (finally (fs/delete-tree! d)))))
+
+;; ---------------------------------------------------------------------------
+;; §8 Tool scheduling (add-tool-concurrency), ported from
+;; golang/tool_concurrency_test.go. The run loop with both styles.
+;; ---------------------------------------------------------------------------
+
+(defn- sched-tracker [] (atom {:inflight 0 :peak 0 :log []}))
+
+(defn- sched-tool [tr nm read-only?]
+  (cond-> (tool/tool {:name nm :description nm
+                      :execute (fn [_args]
+                                 (swap! tr (fn [s] (let [n (inc (:inflight s))]
+                                                     (assoc s :inflight n :peak (max n (:peak s))
+                                                            :log (conj (:log s) (str "start " nm))))))
+                                 (ktime/sleep! 60)
+                                 (swap! tr (fn [s] (assoc s :inflight (dec (:inflight s))
+                                                          :log (conj (:log s) (str "end " nm)))))
+                                 (tool/success (str "out " nm)))})
+    read-only? (assoc :hints {:read-only true})))
+
+(defn- sched-run [style names tr opts]
+  (let [tk (tool/toolkit (mapv #(sched-tool tr % (str/starts-with? % "r")) names))]
+    (with-llm style [{:calls (mapv (fn [n] {:id (str "c-" n) :name n}) names)} {:text "done"}]
+      (fn [{:keys [base]}]
+        (names-of (client/run (client-for style base opts) "go" {:toolkit tk}))))))
+
+(def ^:private six ["r1" "r2" "r3" "r4" "r5" "r6"])
+
+(deftest tool-scheduling-per-style
+  (doseq [style ["openai" "anthropic"]]
+    (testing (str style ": two unsafe calls serialize in emitted order")
+      (let [tr (sched-tracker) got (sched-run style ["w1" "w2"] tr {})]
+        (is (= 1 (:peak @tr)))
+        (is (= ["start w1" "end w1" "start w2" "end w2"] (:log @tr)))
+        (is (= ["w1" "w2"] got))))
+    (testing (str style ": read-only calls overlap")
+      (let [tr (sched-tracker) got (sched-run style six tr {})]
+        (is (= 6 (:peak @tr)))
+        (is (= six got))))
+    (testing (str style ": the cap is honoured")
+      (let [tr (sched-tracker)]
+        (sched-run style six tr {:max-tool-concurrency 2})
+        (is (= 2 (:peak @tr)))))
+    (testing (str style ": mixed runs keep order")
+      (let [names ["r1" "r2" "w" "r3" "r4"]
+            tr (sched-tracker) got (sched-run style names tr {})
+            log (:log @tr) pos #(first-index log %)]
+        (doseq [r ["r1" "r2"]] (is (< (pos (str "end " r)) (pos "start w")) (pr-str log)))
+        (doseq [r ["r3" "r4"]] (is (> (pos (str "start " r)) (pos "end w")) (pr-str log)))
+        (is (= 2 (:peak @tr)))
+        (is (= names got))))))
+
+(deftest tool-scheduling-cap-resolution
+  (is (= 3 (client/resolve-max-tool-concurrency nil (constantly "3"))))
+  (is (= 4 (client/resolve-max-tool-concurrency 4 (constantly "3"))))
+  (doseq [bad ["0" "-2" "abc" "" nil]]
+    (is (= 10 (client/resolve-max-tool-concurrency nil (constantly bad))) (pr-str bad))))
+
+(deftest tool-scheduling-safety-rule
+  (let [bs (builtin/builtin-tools-for nil)]
+    (doseq [[nm safe] {"read" true "grep" true "glob" true "webfetch" true
+                       "bash" false "write" false "edit" false "apply_patch" false}]
+      (let [t (some #(when (= nm (:name %)) %) bs)]
+        (is (some? t) nm)
+        (is (= safe (tool/concurrency-safe? t {})) nm))))
+  (let [plain (tool/tool {:name "x" :execute (fn [_] (tool/success ""))})
+        own   (tool/tool {:name "y" :execute (fn [_] (tool/success ""))
+                          :hints {:read-only true}
+                          :concurrency-safe (fn [a] (true? (:dry a)))})]
+    (is (false? (tool/concurrency-safe? plain {})))
+    (is (false? (tool/concurrency-safe? own {})))
+    (is (true? (tool/concurrency-safe? own {:dry true})))))
