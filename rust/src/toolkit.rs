@@ -260,6 +260,12 @@ impl Toolkit {
         to_gemini(&self.tools())
     }
 
+    /// Identity of the shared registry: equal for clones of one toolkit (keys
+    /// per-toolkit client state such as a frozen tool-tier plan).
+    pub fn identity(&self) -> usize {
+        Arc::as_ptr(&self.reg) as *const () as usize
+    }
+
     /// Disconnect MCP servers. Idempotent.
     pub async fn close(&self) {
         if let Some(m) = &self.mcp {
