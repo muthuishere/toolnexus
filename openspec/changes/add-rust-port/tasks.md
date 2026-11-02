@@ -38,7 +38,7 @@
 - [x] 5.6 SPEC.md / CLAUDE.md language lists → eight; rust/README.md; CHANGELOG
 - [x] 5.7 ACP host hooks (0.22.0): on_update, reject fallback, cancellable generate, generate_stream; ACP as an in-process client model
 - [x] 5.8 runnable examples (basic, agent, native_http, streaming, pending, acp)
-- [ ] 5.9 docs-site pages (install tab, api/rust, cookbook tabs)
+- [x] 5.9 docs-site pages (install tab, api/rust 63 pages incl. n/a gap pages, 8 cookbook tabs); site build not run locally (no node_modules)
 
 ## Later (→ `full` tier)
 - [ ] A2A outbound + `serve` (§7A/§7B), MCP server profile (§7C)
