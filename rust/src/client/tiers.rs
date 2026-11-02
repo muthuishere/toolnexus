@@ -100,6 +100,7 @@ pub(crate) fn first_line(s: &str) -> String {
 
 fn noop_tool(name: &str, description: String, schema: Value, hints: Option<ToolHints>) -> Tool {
     Tool {
+        concurrency_safe: None,
         name: name.into(),
         description,
         input_schema: schema,

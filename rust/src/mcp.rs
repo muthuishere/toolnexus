@@ -613,6 +613,7 @@ fn convert_tool(
     let original = def.name.to_string();
     let server = server.to_owned();
     Tool {
+        concurrency_safe: None,
         name: format!("{}_{}", sanitize(&server), sanitize(&original)),
         description: def.description.as_deref().unwrap_or("").to_owned(),
         input_schema: build_input_schema(&def),

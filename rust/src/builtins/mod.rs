@@ -596,6 +596,7 @@ where
     let run = Arc::new(run);
     let tool_name = name.to_owned();
     Tool {
+        concurrency_safe: None,
         name: name.into(),
         description: description.into(),
         input_schema: schema,

@@ -27,6 +27,30 @@ fn rt() -> Runtime {
     rt_with(CancellationToken::new())
 }
 
+// SPEC §7D "Background runs": spawn + wake return at once with the id; a background
+// wait delivers the completion to the host's callback. No new API; pins the recipe.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn background_run_recipe() {
+    let rt = rt();
+    let h = rt.spawn(&rt.root(), "coordinator", None).unwrap();
+    let id = h.id.clone();
+    assert!(!id.is_empty(), "the handle id is available at once");
+    rt.wake(&h, "answer using two lookups");
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let (rt2, h2, id2) = (rt.clone(), h.clone(), id.clone());
+    tokio::spawn(async move {
+        let r = rt2.wait(&h2, None).await;
+        let _ = tx.send((id2, r)); // on_done(id, r)
+    });
+    let (got_id, r) = tokio::time::timeout(Duration::from_secs(5), rx)
+        .await
+        .expect("completion within 5s")
+        .unwrap();
+    assert_eq!(got_id, id);
+    assert_eq!(r.status, "done", "{}", r.text);
+    assert!(r.text.contains("found:"), "{}", r.text);
+}
+
 // S1/S2 — fan-out, isolation, deterministic ids, concurrency, roll-up, auto-close.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn task_fanout_isolation_and_rollup() {
