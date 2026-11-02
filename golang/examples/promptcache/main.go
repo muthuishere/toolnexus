@@ -37,7 +37,9 @@ func main() {
 		toolnexus.NativeTool("clock", "Current time", noArgs,
 			func(context.Context, map[string]any) (string, error) { return "12:00", nil }),
 		toolnexus.NativeTool("weather", "Current weather for a city", city,
-			func(_ context.Context, a map[string]any) (string, error) { return fmt.Sprint("sunny in ", a["city"]), nil }),
+			func(_ context.Context, a map[string]any) (string, error) {
+				return fmt.Sprint("sunny in ", a["city"]), nil
+			}),
 		toolnexus.NativeTool("stocks", "Latest stock quote", noArgs,
 			func(context.Context, map[string]any) (string, error) { return "ACME 42", nil }),
 	}})

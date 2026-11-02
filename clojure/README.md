@@ -71,7 +71,7 @@ Runnable: `clojure -M -m examples.prompt-cache` (from `examples/clj`).
 
 ## Verified on both hosts, in five execution modes
 
-581 tests / 3470 assertions, 0 failures, identical in every mode — and the gate fails on any
+652 tests / 3963 assertions, 0 failures, identical in every mode — and the gate fails on any
 divergence between them:
 
 | runtime | how |
