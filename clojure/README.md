@@ -32,6 +32,43 @@ net.clojars.muthuishere/koine     {:mvn/version "0.11.0"}   ; its only dependenc
 (println (:text (client/run agent "What tools do you have? Use one." {:toolkit toolkit})))
 ```
 
+## API key by host (BREAKING in 0.22.0)
+
+A client with no `:api-key` reads only the env var of its `:base-url` host, over https:
+`api.openai.com` → `OPENAI_API_KEY`, `api.anthropic.com` → `ANTHROPIC_API_KEY`, `openrouter.ai` →
+`OPENROUTER_API_KEY`. Any other host — a local model server, a proxy, plain http — throws unless you
+set `:api-key` (the value) or `:api-key-env` (the **name** of the env var). Before 0.22.0 the client
+fell back across all three variables and could send a key to a host it did not belong to.
+
+```clojure
+(client/create-client {:base-url "http://localhost:11434/v1" :model "llama3"
+                        :api-key-env "LOCAL_LLM_KEY"})
+```
+
+## Prompt cache and tool tiers
+
+```clojure
+(def llm (client/create-client
+           {:base-url "https://api.anthropic.com" :style "anthropic" :model "claude-sonnet-4-5"
+            :prompt-cache {:long-ttl true}                 ; cache breakpoints on tools, system, last message
+            :tool-tiers   {:core ["read" "grep"]}}))         ; others load through tool_search / call_tool
+
+(client/tool-tier-plan llm toolkit)      ;=> {"read" "core" "bash" "listed" …}
+(client/reset-tool-tiers! llm toolkit)   ; at a new session start
+;; usage now carries :cache-read-tokens / :cache-write-tokens
+```
+
+Runnable: `clojure -M -m examples.prompt-cache` (from `examples/clj`).
+
+## Host additions (0.22.0)
+
+`mcp/from-config` `:on-server` (each server as soon as it is ready), `:wait-for-ctx` plus a
+`:cancel` token on `run`/`ask`, compactor `:on-compact`, `:hints` on tools and `:before-tool` events
+(permission gates), opt-in `:background` / `:web-search` / `:notebook-edit` builtins,
+`mcp/resource-tools`, grep `context`/`before`/`after` and truncation metadata,
+`agents.runtime/as-tool-with` and runtime `:wait-for`, `:call-id` on the tool context,
+`client/list-models`. Each has a page in the [API reference](https://muthuishere.github.io/toolnexus/api/clojure/).
+
 ## Verified on both hosts, in five execution modes
 
 581 tests / 3470 assertions, 0 failures, identical in every mode — and the gate fails on any
