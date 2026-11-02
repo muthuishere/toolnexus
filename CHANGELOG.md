@@ -8,6 +8,19 @@ GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
 
 ## Unreleased
 
+**Docs and examples for 0.22.0, in all seven ports.** The 0.22.0 features had code but no
+reference pages, so a reader could only learn them from this changelog. Now each port's API
+reference has pages for API key by host, `promptCache`, `toolTiers`, `listModels`, MCP
+`resourceTools` and `BackgroundShells`, each with runnable examples that CI compiles and
+executes. The existing pages cover `waitForCtx`, `onServer`, tool hints, `onCompact`,
+`asToolWith`, `callId` and the new builtins. There are four new cookbook recipes (API key by
+host, prompt cache and tool tiers, host hooks, ACP hooks for Go), README sections in every
+port, and a hermetic prompt-cache and tool-tiers example per port. js, python and java examples
+now also run in CI through each port's test suite, and the clojure one runs on both hosts.
+Not done: the ACP hooks page for the six ports other than Go only says what to use instead,
+because those ports do not have the hooks yet (`openspec/changes/add-go-host-asks`). CI compiles the C#
+and Go examples but does not run them, and the Elixir example is run only by hand.
+
 ## 0.22.0 — 2026-11-02
 
 **ACP host hooks: decide permissions, watch every update, cancel a turn, and stream (golang first;

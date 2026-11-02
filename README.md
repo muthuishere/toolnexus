@@ -71,8 +71,40 @@ const agent = createClient({ baseUrl: "https://openrouter.ai/api/v1", style: "op
 const { text } = await agent.run("Refund order 4021 using the policy.", { toolkit: tk })
 ```
 
+The key above comes from `OPENROUTER_API_KEY`, because the host is `openrouter.ai`. **Since
+0.22.0 a key is only ever sent to the host it belongs to**: with no `apiKey`, the client reads
+only the env var matching the `baseUrl` host (`openrouter.ai` → `OPENROUTER_API_KEY`,
+`api.openai.com` → `OPENAI_API_KEY`, `api.anthropic.com` → `ANTHROPIC_API_KEY`, https only).
+A local server or a proxy needs `apiKey` or `apiKeyEnv` (the *name* of the env var to read):
+
+```ts
+createClient({ baseUrl: "http://localhost:11434/v1", style: "openai", model: "llama3", apiKey: "unused" })
+createClient({ baseUrl: "https://llm.internal/v1", style: "openai", model: "m", apiKeyEnv: "INTERNAL_LLM_KEY" })
+```
+
 The same three steps, in the same shape, in every port — see your language's
 [API reference](https://muthuishere.github.io/toolnexus/) below.
+
+## New in 0.22
+
+- **Prompt caching and tool tiers.** `promptCache` marks the stable prefix for the provider
+  (Anthropic cache breakpoints, OpenAI `prompt_cache_key`) and usage reports
+  `cacheReadTokens` / `cacheWriteTokens`. `toolTiers` sends only your core tool schemas and
+  lets the model load the rest through `tool_search` / `call_tool`, so the tools array — and
+  the cached prefix — never changes mid-session.
+  [Recipe](https://muthuishere.github.io/toolnexus/cookbook/prompt-cache-and-tool-tiers/).
+- **API key by host** (breaking for local/custom hosts, above).
+  [Recipe](https://muthuishere.github.io/toolnexus/cookbook/api-key-by-host/).
+- **Host hooks**: a cancellable `waitFor`, per-server MCP readiness (`onServer`), MCP resource
+  tools, tool hints (`readOnly` / `destructive` / `openWorld`) on `beforeTool` for permission
+  gates, opt-in builtins (background shells, `websearch`, `notebook_edit`), grep context,
+  compaction notices, `asToolWith` for subagents under the parent's gates, `callId` on the tool
+  context, and `listModels`.
+  [Recipe](https://muthuishere.github.io/toolnexus/cookbook/host-hooks/).
+- **Go only, for now:** ACP host hooks (`OnPermission`, `OnUpdate`, `GenerateCtx`,
+  `GenerateStream`). [Recipe](https://muthuishere.github.io/toolnexus/cookbook/acp-hooks/).
+
+Per-port spellings are in [`CHANGELOG.md`](CHANGELOG.md) and each port's API reference.
 
 ## The seven ports
 
@@ -96,7 +128,7 @@ Each port's own README covers install and a quick start; everything beyond that 
 | **Tool sources** | [MCP](https://muthuishere.github.io/toolnexus/mcp/) · [Skills](https://muthuishere.github.io/toolnexus/skills/) · [Native](https://muthuishere.github.io/toolnexus/native/) · [HTTP](https://muthuishere.github.io/toolnexus/http/) · [Built-ins](https://muthuishere.github.io/toolnexus/builtins/) · [A2A](https://muthuishere.github.io/toolnexus/a2a/) |
 | **The loop** | [Streaming](https://muthuishere.github.io/toolnexus/streaming/) · [Memory](https://muthuishere.github.io/toolnexus/memory/) · [Suspension](https://muthuishere.github.io/toolnexus/suspension/) · [Resilience](https://muthuishere.github.io/toolnexus/resilience/) · [Observability](https://muthuishere.github.io/toolnexus/observability/) |
 | **Agents** | [Sub-agents & teams](https://muthuishere.github.io/toolnexus/subagents/) · [Personas](https://muthuishere.github.io/toolnexus/persona-agents/) · [Typed decisions (`Classifier`)](https://muthuishere.github.io/toolnexus/judge/) |
-| **Cookbook** | [Zero to agent](https://muthuishere.github.io/toolnexus/cookbook/zero-to-agent/) · [MCP servers](https://muthuishere.github.io/toolnexus/cookbook/mcp-servers/) · [Agent skills](https://muthuishere.github.io/toolnexus/cookbook/agent-skills/) · [Judge](https://muthuishere.github.io/toolnexus/cookbook/judge/) |
+| **Cookbook** | [Zero to agent](https://muthuishere.github.io/toolnexus/cookbook/zero-to-agent/) · [MCP servers](https://muthuishere.github.io/toolnexus/cookbook/mcp-servers/) · [Agent skills](https://muthuishere.github.io/toolnexus/cookbook/agent-skills/) · [Prompt cache & tool tiers](https://muthuishere.github.io/toolnexus/cookbook/prompt-cache-and-tool-tiers/) · [API key by host](https://muthuishere.github.io/toolnexus/cookbook/api-key-by-host/) · [Host hooks](https://muthuishere.github.io/toolnexus/cookbook/host-hooks/) · [Judge](https://muthuishere.github.io/toolnexus/cookbook/judge/) |
 | **Numbers** | [Performance](https://muthuishere.github.io/toolnexus/performance/) · [Comparison](https://muthuishere.github.io/toolnexus/comparison/) · [Judge, live](https://muthuishere.github.io/toolnexus/harness/judge-live/) |
 
 ## The contract
