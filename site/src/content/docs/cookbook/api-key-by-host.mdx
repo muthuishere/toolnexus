@@ -1,0 +1,103 @@
+---
+title: API key by host
+description: Which key the client sends to which host — and what a local server or a proxy must now set (breaking in 0.22.0) — in all seven languages.
+---
+
+import { Tabs, TabItem, Aside } from '@astrojs/starlight/components';
+
+<Aside type="tip" title="Why you need this">
+Before 0.22.0, a client with no `apiKey` took the first of `OPENROUTER_API_KEY`,
+`OPENAI_API_KEY`, `ANTHROPIC_API_KEY` that was set and sent it to whatever `baseUrl` you
+configured. With several keys in your environment, an OpenRouter key could go to
+api.openai.com, or any key to a local or third-party server. Now a key only ever goes to the
+host it belongs to.
+</Aside>
+
+<Aside type="caution" title="Breaking in 0.22.0">
+A client on a **local or custom `baseUrl`** (Ollama, llama-server, vLLM, LM Studio, a company
+proxy) that relied on the old fallback now fails to build. Set `apiKey` or `apiKeyEnv`.
+</Aside>
+
+## The rule, in order
+
+1. `apiKey` is set: send it, and nothing else.
+2. Else `apiKeyEnv` is set: read **that** env var (the variable's *name*, never its value, goes
+   in your code).
+3. Else read only the env var of the `baseUrl` host, over **https**:
+
+   | host | env var |
+   |---|---|
+   | `api.openai.com` | `OPENAI_API_KEY` |
+   | `api.anthropic.com` | `ANTHROPIC_API_KEY` |
+   | `openrouter.ai` (and subdomains) | `OPENROUTER_API_KEY` |
+
+4. Any other host, or plain `http`, without `apiKey` / `apiKeyEnv`: an error. There is no
+   cross-provider fallback.
+
+`listModels` follows the same rule.
+
+## A local server and a proxy
+
+<Tabs syncKey="lang">
+<TabItem label="JavaScript">
+```js
+// local server that ignores the key: any placeholder
+const local = createClient({ baseUrl: "http://localhost:11434/v1", style: "openai", model: "llama3", apiKey: "unused" })
+// proxy: name the env var to read
+const proxy = createClient({ baseUrl: "https://llm.internal/v1", style: "openai", model: "m", apiKeyEnv: "INTERNAL_LLM_KEY" })
+```
+</TabItem>
+<TabItem label="Python">
+```python
+local = create_client(base_url="http://localhost:11434/v1", style="openai", model="llama3", api_key="unused")
+proxy = create_client(base_url="https://llm.internal/v1", style="openai", model="m", api_key_env="INTERNAL_LLM_KEY")
+```
+</TabItem>
+<TabItem label="Go">
+```go
+local := toolnexus.CreateClient(toolnexus.ClientOptions{
+	BaseURL: "http://localhost:11434/v1", Style: toolnexus.StyleOpenAI, Model: "llama3", APIKey: "unused",
+})
+proxy := toolnexus.CreateClient(toolnexus.ClientOptions{
+	BaseURL: "https://llm.internal/v1", Style: toolnexus.StyleOpenAI, Model: "m", APIKeyEnv: "INTERNAL_LLM_KEY",
+})
+```
+</TabItem>
+<TabItem label="Java">
+```java
+LlmClient local = LlmClient.create(new LlmClient.Options()
+        .baseUrl("http://localhost:11434/v1").style("openai").model("llama3").apiKey("unused"));
+LlmClient proxy = LlmClient.create(new LlmClient.Options()
+        .baseUrl("https://llm.internal/v1").style("openai").model("m").apiKeyEnv("INTERNAL_LLM_KEY"));
+```
+</TabItem>
+<TabItem label="C#">
+```csharp
+var local = LlmClient.Create(new LlmClient.Options {
+    BaseUrl = "http://localhost:11434/v1", Style = "openai", Model = "llama3", ApiKey = "unused" });
+var proxy = LlmClient.Create(new LlmClient.Options {
+    BaseUrl = "https://llm.internal/v1", Style = "openai", Model = "m", ApiKeyEnv = "INTERNAL_LLM_KEY" });
+```
+</TabItem>
+<TabItem label="Elixir">
+```elixir
+local = Toolnexus.Client.create(base_url: "http://localhost:11434/v1", style: "openai", model: "llama3", api_key: "unused")
+proxy = Toolnexus.Client.create(base_url: "https://llm.internal/v1", style: "openai", model: "m", api_key_env: "INTERNAL_LLM_KEY")
+```
+</TabItem>
+<TabItem label="Clojure">
+```clojure
+(def local (client/create-client {:base-url "http://localhost:11434/v1" :style "openai" :model "llama3" :api-key "unused"}))
+(def proxy (client/create-client {:base-url "https://llm.internal/v1" :style "openai" :model "m" :api-key-env "INTERNAL_LLM_KEY"}))
+```
+</TabItem>
+</Tabs>
+
+A hosted provider needs neither: `baseUrl: "https://openrouter.ai/api/v1"` with
+`OPENROUTER_API_KEY` in the environment works as before.
+
+The full rule, with runnable examples, is on each port's API page, e.g.
+[JavaScript](/api/javascript/client/api-key/), [Python](/api/python/client/api-key/),
+[Go](/api/go/client/api-key/), [Java](/api/java/client/api-key/),
+[C#](/api/csharp/client/api-key/), [Elixir](/api/elixir/client/api-key/),
+[Clojure](/api/clojure/client/api-key/).
