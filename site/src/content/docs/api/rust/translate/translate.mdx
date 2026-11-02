@@ -11,16 +11,70 @@ import { Aside } from '@astrojs/starlight/components';
 <strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §11</a>
 </p>
 
-<Aside type="caution" title="Not available in Rust">
-`translate` (§11) is not ported to Rust. Tracked in `openspec/changes/add-rust-port`.
-</Aside>
+```rust
+impl Client {
+    pub async fn translate(&self, req: TranslateRequest) -> Result<TranslateResult, ClientError>;
+    pub async fn translate_ctx(&self, cancel: CancellationToken, req: TranslateRequest)
+        -> Result<TranslateResult, ClientError>;
+}
+```
 
 Declare a toolkit to a provider and translate one request/response without executing anything or keeping state.
 
-## What to use instead
+## When to use it
 
-Use `to_openai` / `to_anthropic` for the schema and call the provider yourself, or use the client loop.
+When the CALLER owns the conversation and runs tools itself — an OpenAI-compatible proxy, or a
+host that wants the model's tool calls handed back. OpenAI-shaped `messages` and `tools` go in,
+exactly ONE provider call happens, and an OpenAI-shaped `TranslateResult` (`text`, `tool_calls`
+with `arguments` as a JSON string, `finish_reason`, `usage`, `model`, `raw`) comes back.
+
+## Why this and not the alternative
+
+The agent loop (`run`) executes tools and remembers turns; `translate` does neither, so a
+stateless proxy can scale horizontally. Against an Anthropic-style client it does the real
+translation (system hoisting, `tool_calls` → `tool_use`, consecutive `tool` results merged into
+one user turn, non-text parts → provider blocks). Retries, `request_params` / `body_transform`,
+the `llm` metric and `before_llm` / `after_llm` (once, turn 0) are shared with the loop.
+
+## Examples
+
+### 1. One turn, tool calls handed back
+
+```rust
+use serde_json::json;
+use toolnexus::client::{ClientOptions, TranslateRequest, create_client};
+let client = create_client(ClientOptions {
+    base_url: "https://openrouter.ai/api/v1".into(),
+    model: "openai/gpt-4o-mini".into(),
+    ..Default::default()
+});
+let res = client.translate(TranslateRequest {
+    messages: vec![json!({"role": "user", "content": "weather in Paris?"})],
+    tools: vec![json!({"type": "function", "function": {
+        "name": "get_weather", "parameters": {"type": "object"}}})],
+    ..Default::default()
+}).await?;
+for tc in &res.tool_calls {
+    println!("{} {}", tc.name, tc.arguments); // you run it, then send the result back
+}
+```
+
+### 2. Declare a whole toolkit without executing it
+
+```rust
+let res = client.translate(TranslateRequest {
+    messages,
+    toolkit: Some(tk.clone()), // MCP tools, skills, builtins — declared, never run
+    ..Default::default()
+}).await?;
+let envelope = res.tool_calls_json(); // ready for an assistant message
+```
+
+<Aside type="tip" title="When not to use it">
+If toolnexus should own the conversation and execute tools, use the client loop (`run` / `ask`).
+</Aside>
 
 ## See also
 
-- [`create_toolkit`](/api/rust/toolkit/create/) — Collapse MCP servers, skills, built-ins, A2A agents and your own functions into one tool list.
+- [`create_client`](/api/rust/client/create/) — the tool-calling loop.
+- [Inbound translation](/api/rust/translate/inbound/) — what the Anthropic path converts.

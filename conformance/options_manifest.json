@@ -282,7 +282,8 @@
       "java": "java/src/main/java/io/github/muthuishere/toolnexus/Classifier.java",
       "csharp": "csharp/src/Toolnexus/Classifier.cs",
       "elixir": "elixir/lib/toolnexus/classifier.ex",
-      "clojure": "clojure/src/toolnexus/classifier.cljc"
+      "clojure": "clojure/src/toolnexus/classifier.cljc",
+      "rust": "rust/src/classifier.rs"
     },
     "options": [
       {
@@ -410,11 +411,7 @@
         ],
         "tier": "core"
       }
-    ],
-    "unported": {
-      "_doc": "A port named here has NO implementation of this group yet. It is not a pass: every run prints it as debt, a port listed here that also appears in `files` is an error, and only a port at tier 'core' may be listed.",
-      "rust": "classifier (SPEC §8B) not ported — openspec/changes/add-rust-port, 'Later'"
-    }
+    ]
   },
   "portTiers": {
     "_doc": "The tier a port is HELD TO, declared here and nowhere else. A port declaring its own tier is a self-graded exam: the claim must live in the shared contract, where changing it is a visible diff reviewed by the other ports. 'full' = every option. 'core' = the SPEC §0 conformance contract only; full-tier options are permitted absences, counted and printed on every run so the debt can never go quiet.",

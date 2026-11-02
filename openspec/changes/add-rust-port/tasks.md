@@ -42,8 +42,8 @@
 
 ## Later (→ `full` tier)
 - [ ] A2A outbound + `serve` (§7A/§7B), MCP server profile (§7C)
-- [ ] translate (§11)
-- [ ] classifier + judge + batteries (§8B)
+- [x] translate (§11) — `Client::translate`, mirrors golang/translate_test.go
+- [x] classifier + judge + batteries (§8B) incl. ModelRouter — shared examples/judge fixtures; classifier group in the options manifest, `unported` entry removed
 - [ ] agents runtime, personas, compaction (§7D–§7F); toolkit `agents` option
 - [ ] relay / resume path; MCP elicitation (3.7)
 - [ ] run the Windows code paths on a Windows host

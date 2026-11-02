@@ -178,6 +178,17 @@ on_server })` reports each server as soon as it is ready.
 `define_tool` / `define_typed_tool` (native tools: `Ok` ⇒ output, `Err` ⇒ `isError`), and
 `to_openai` / `to_anthropic` / `to_gemini`.
 
+## Translate, classifier and judge
+
+`Client::translate` (§11) is the one-turn translator: OpenAI-shaped messages and tools in,
+exactly one provider call, an OpenAI-shaped result out, no tool executed and no state kept.
+`create_classifier` (§8B) is the judgment seam (styles `SystemOne` / `Llm` / `Custom` /
+`Static`; noul, choice and score questions; byte-identical canonical requests), with
+`toolnexus::judge` for `ask` / `gate` / `Policy` / `Tape` and `toolnexus::judge::batteries` for
+`ToolGuard`, `ToolRelevance`, `SkillRelevance`, `ToolResultFilter`, `IsComplete`, `AgentRouter`,
+`ContentGuard` and the opt-in `ModelRouter` (hooks via `as_hook`). All run against the shared
+`examples/judge/` fixtures.
+
 ## Tests
 
 `cargo test` is hermetic: a scripted fake ACP agent (`examples/fake_acp_agent.rs`), local fake
@@ -186,7 +197,7 @@ HTTP / MCP / SSE servers, no network and no real model. CI runs `cargo fmt --che
 
 ## Not done yet (tier `core`)
 
-A2A agents (outbound and `serve`), `translate` (§11), the classifier and judge (§8B), the
+A2A agents (outbound and `serve`), the
 sub-agent runtime and personas (§7D/§7E), compaction (§7F), the MCP server profile (§7C), MCP
 elicitation (the toolkit `wait_for` bridge), the relay / resume path, and a Gemini client style
 (Gemini is a schema adapter, as in Go). The Windows code paths compile but have not been run.

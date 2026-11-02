@@ -32,17 +32,26 @@ core types that were already there:
 - **ACP host hooks** (Go's 0.22.0 set): `on_update`, a reject answer from `on_permission`, a
   cancellable `generate`, `generate_stream`, and `acp_generate` / `acp_generate_stream` to use
   an ACP agent as the client's model.
+- **`translate` (§11)**: `Client::translate` / `translate_ctx`, one provider call with no loop,
+  including the OpenAI → Anthropic inbound conversion and non-text parts. On `timeout_ms` it
+  returns a `Transport("translate timeout after Nms")` error where Go returns its context error.
+- **The classifier (§8B)**: `create_classifier` with the `systemone`, `llm`, `custom` and `static`
+  styles, the OpenRouter backend preset, client-side limits, the degenerate-criteria warning
+  (`MetricEvent` gains `question` / `warning`), `near_uniform`, `evaluate_batch`, and the
+  byte-identical canonical request. All seven shared `examples/judge/` fixtures pass, hashes included.
+- **Judge adapters and batteries**: `ask` / `gate` / `Policy` / `Tape`, and all eight batteries
+  including the opt-in `ModelRouter`, with their hooks, against the shared battery fixtures.
 - Runnable examples (`cargo run --example basic|agent|native_http|streaming|pending|acp`).
 - Release: a `crates` leg in `release.yml`, gated by `ENABLE_CRATES` and using the
   `CARGO_REGISTRY_TOKEN` secret in `prod` (a crate's first publish cannot use Trusted Publishing;
   switch once it exists). It skips a version that is already on crates.io. `preflight` and the
   readiness script now check `rust/Cargo.toml`.
-- Conformance: rust is held to tier `core`. All 22 client options are present. Toolkit
-  `agents` and `waitFor` are permitted absences, and the whole classifier group is recorded
-  under a new `unported` key. Both are printed as debt on every run.
+- Conformance: rust is held to tier `core`. All 22 client options are present. All 17 classifier
+  options are present. Toolkit `agents` and `waitFor` are permitted absences, printed as debt on
+  every run.
 
 **Not done in Rust** (`openspec/changes/add-rust-port`): A2A (outbound and `serve`), the MCP
-server profile, `translate`, the classifier / judge / batteries, the agents runtime, personas and
+server profile, the agents runtime, personas and
 compaction, MCP elicitation, the relay / resume path, and a Gemini client style (Gemini is a
 schema adapter only, as in Go). The Windows code paths compile but have not been run. A few io
 and network error strings come from Rust's libraries and differ from Go's wording; the
