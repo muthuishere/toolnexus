@@ -14,10 +14,11 @@ The output is a single **Toolkit** of uniform `Tool`s plus adapters that emit th
 tool schema in OpenAI / Anthropic / Gemini formats. You wire the schema into your
 LLM call; when the model asks for a tool, you call `toolkit.execute(name, args)`.
 
-This contract is identical across the `js/`, `python/`, `golang/`, `java/`,
-`csharp/`, and `elixir/` implementations. Each builds on the most popular MCP SDK
+This contract is identical across the eight implementations — `js/`, `python/`, `golang/`,
+`java/`, `csharp/`, `elixir/`, `clojure/` and `rust/`. Each builds on the most popular MCP SDK
 for that language — except Elixir, which (lacking a mature SDK) owns its MCP
-client in-house:
+client in-house. Rust is held to tier `core` (§0 only; see `conformance/options_manifest.json`),
+so a section below that says "all seven ports" does not yet include it:
 
 | Lang   | MCP SDK                                  |
 |--------|------------------------------------------|
@@ -27,6 +28,7 @@ client in-house:
 | Java   | `io.modelcontextprotocol.sdk:mcp` (official)   |
 | C#     | `ModelContextProtocol` (official)        |
 | Elixir | in-house client (`Toolnexus.Mcp.*` — JSON-RPC 2.0, stdio + streamable-HTTP) |
+| Rust   | `rmcp` (official Rust SDK) |
 
 > **Who reads this:** nobody, normally. End users read the per-language READMEs.
 > This file exists only so a future porter keeps JS/Python/Go byte-identical.
