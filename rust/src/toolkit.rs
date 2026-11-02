@@ -66,7 +66,10 @@ struct Registry {
 impl Registry {
     fn add(&mut self, t: Tool) {
         if self.by_name.contains_key(&t.name) {
-            eprintln!("[toolnexus] duplicate tool name {:?} — keeping first", t.name);
+            eprintln!(
+                "[toolnexus] duplicate tool name {:?} — keeping first",
+                t.name
+            );
             return;
         }
         self.order.push(t.name.clone());
@@ -111,29 +114,30 @@ pub async fn create_toolkit(opts: ToolkitOptions) -> Result<Toolkit, ToolkitErro
         None => None,
     };
 
-    let skill =
-        if !opts.skills_dir.is_empty() || !opts.skills.is_empty() || opts.skill_provider.is_some()
-        {
-            let mut defs = opts.skills.clone();
-            if let Some(p) = &opts.skill_provider {
-                match p().await {
-                    Ok(more) => defs.extend(more),
-                    Err(e) => eprintln!("[toolnexus] skill provider failed: {e}"),
-                }
+    let skill = if !opts.skills_dir.is_empty()
+        || !opts.skills.is_empty()
+        || opts.skill_provider.is_some()
+    {
+        let mut defs = opts.skills.clone();
+        if let Some(p) = &opts.skill_provider {
+            match p().await {
+                Ok(more) => defs.extend(more),
+                Err(e) => eprintln!("[toolnexus] skill provider failed: {e}"),
             }
-            let mut filter = opts.skills_filter.clone();
-            for n in &opts.disable_skills {
-                filter.entry(n.clone()).or_insert(false);
-            }
-            Some(Arc::new(load_skills_with(LoadSkillsOptions {
-                dirs: opts.skills_dir.clone(),
-                skills: defs,
-                filter,
-                sample_limit: opts.skill_sample_limit,
-            })))
-        } else {
-            None
-        };
+        }
+        let mut filter = opts.skills_filter.clone();
+        for n in &opts.disable_skills {
+            filter.entry(n.clone()).or_insert(false);
+        }
+        Some(Arc::new(load_skills_with(LoadSkillsOptions {
+            dirs: opts.skills_dir.clone(),
+            skills: defs,
+            filter,
+            sample_limit: opts.skill_sample_limit,
+        })))
+    } else {
+        None
+    };
 
     let builtins_cfg = match (
         &opts.builtins,

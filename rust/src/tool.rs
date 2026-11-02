@@ -101,7 +101,11 @@ pub struct Request {
     pub url: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data: Option<Map<String, Value>>,
-    #[serde(rename = "expiresAt", default, skip_serializing_if = "String::is_empty")]
+    #[serde(
+        rename = "expiresAt",
+        default,
+        skip_serializing_if = "String::is_empty"
+    )]
     pub expires_at: String,
 }
 
