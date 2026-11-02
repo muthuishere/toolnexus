@@ -40,7 +40,8 @@ includes the cached ones.
   search. The loaded schemas come back as a tool **result**, so the tools array never changes.
 - `call_tool {name, arguments}` — calls a loaded tool. The loop unwraps it before hooks, so
   `beforeTool` permission gates and hints see the **real** tool, and streamed events carry the
-  real name with `via: "call_tool"`.
+  real name with `via: "call_tool"`. The run result's tool calls record the real tool and its
+  inner arguments too; only the transcript keeps the `call_tool` wrapper.
 
 An optional budget (`budgetTokens`, default 5% of `contextWindow`) moves the least-used core
 tools down a tier when the plan is built. The plan is then frozen for that toolkit until

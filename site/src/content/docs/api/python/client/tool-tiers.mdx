@@ -35,7 +35,8 @@ With `tool_tiers`, the tools array is the **core** tools sorted by name, then tw
   no `before_tool` hook runs for it.
 - **`call_tool {name, arguments}`** — calls a loaded tool. The loop unwraps it *before* hooks, so
   `before_tool`, hints and permission gates see the real tool; streamed events name the real
-  tool with `via: "call_tool"`. A loaded tool may also be called directly by name.
+  tool with `via: "call_tool"`; `RunResult.tool_calls` records the real tool and its inner
+  arguments (only the transcript keeps the wrapper). A loaded tool may also be called directly by name.
 
 The plan is built on a toolkit's first request and then frozen; a tool registered later is
 deferred and found by search. Call `reset_tool_tiers(tk)` at a session boundary to rebuild it.

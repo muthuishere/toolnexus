@@ -995,6 +995,13 @@ export class Client {
     return this.opts.toolTiers ? unwrapCallTool(name, args) : undefined
   }
 
+  /** The RunResult.toolCalls entry: a `call_tool` call is recorded as the real tool with its
+   *  inner arguments, the name hooks and stream events see (the transcript keeps the wrapper). */
+  private toolCallRecord(name: string, args: Record<string, unknown>, result: ToolResult): ToolCallRecord {
+    const inner = this.unwrapCall(name, args)
+    return { name: inner ? inner.name : name, args: inner ? inner.args : args, output: result.output, isError: result.isError, metadata: result.metadata }
+  }
+
   /** The stream's tool_call event, naming the real tool for a `call_tool` call. */
   private callEvent(id: string, name: string, args: Record<string, unknown>): StreamEvent {
     const inner = this.unwrapCall(name, args)
@@ -1168,7 +1175,7 @@ export class Client {
         // and the later suspensions' placeholder results never enter the transcript (they re-suspend
         // on resume). Mirrors the streaming path.
         for (const s of settled) {
-          toolCalls.push({ name: s.call.function.name, args: s.args, output: s.result.output, isError: s.result.isError, metadata: s.result.metadata })
+          toolCalls.push(this.toolCallRecord(s.call.function.name, s.args, s.result))
           messages.push(toolMessage(s.call.id, s.call.function.name, s.result))
           if (s.halted) return this.pendingRun(runStart, lastModel, s.halted, messages, toolCalls, turns, usage)
         }
@@ -1288,7 +1295,7 @@ export class Client {
         const content: any[] = []
         let halted: Request | undefined
         for (const s of settled) {
-          toolCalls.push({ name: s.use.name, args: s.args, output: s.result.output, isError: s.result.isError, metadata: s.result.metadata })
+          toolCalls.push(this.toolCallRecord(s.use.name, s.args, s.result))
           content.push(toolResultBlock(s.use.id, s.result))
           if (s.halted) { halted = s.halted; break }
         }
@@ -1392,13 +1399,13 @@ export class Client {
             const r = await this.resolvePending(toolkit, c.name, args, req, c.id, turn, signal)
             result = r.result
             if (r.halted) {
-              toolCalls.push({ name: c.name, args, output: result.output, isError: result.isError, metadata: result.metadata })
+              toolCalls.push(this.toolCallRecord(c.name, args, result))
               messages.push(toolMessage(c.id, c.name, result))
               yield { type: "done", result: this.pendingRun(runStart, lastModel, r.halted, messages, toolCalls, turns, usage) }
               return
             }
           }
-          toolCalls.push({ name: c.name, args, output: result.output, isError: result.isError, metadata: result.metadata })
+          toolCalls.push(this.toolCallRecord(c.name, args, result))
           messages.push(toolMessage(c.id, c.name, result))
           yield this.resultEvent(c.id, c.name, safeJson(c.args), result)
         }
@@ -1495,14 +1502,14 @@ export class Client {
             const r = await this.resolvePending(toolkit, u.name, args, req, u.id, turn, signal)
             result = r.result
             if (r.halted) {
-              toolCalls.push({ name: u.name, args, output: result.output, isError: result.isError, metadata: result.metadata })
+              toolCalls.push(this.toolCallRecord(u.name, args, result))
               results.push(toolResultBlock(u.id, result))
               messages.push({ role: "user", content: results })
               yield { type: "done", result: this.pendingRun(runStart, lastModel, r.halted, messages, toolCalls, turns, usage) }
               return
             }
           }
-          toolCalls.push({ name: u.name, args, output: result.output, isError: result.isError, metadata: result.metadata })
+          toolCalls.push(this.toolCallRecord(u.name, args, result))
           results.push(toolResultBlock(u.id, result))
           yield this.resultEvent(u.id, u.name, u.input, result)
         }

@@ -21,6 +21,28 @@ Not done: the ACP hooks page for the six ports other than Go only says what to u
 because those ports do not have the hooks yet (`openspec/changes/add-go-host-asks`). CI compiles the C#
 and Go examples but does not run them, and the Elixir example is run only by hand.
 
+### Fixed
+
+- **Go prompt cache now caches the tools array (golang only).** In 0.22.0, `PromptCache` with
+  anthropic marked the system prompt and the latest message but never the last tool, because the
+  adapter emits typed structs and the marker only touched maps. The cache breakpoint promised by
+  SPEC §4C was missing, so the tools prefix was never cached. The last tool now carries
+  `cache_control: {type: "ephemeral"}` (plus `ttl: "1h"` with `LongTTL`). Every other port
+  already did this; each now has a test that checks the request body actually sent.
+- **`createToolkit()` with no argument works in js.** It threw a TypeError; it now builds
+  the default toolkit, as python and elixir already did. In java, `Toolkit.create(null)` now
+  means default options instead of throwing a NullPointerException. Go, C# and clojure take a required
+  options value, so they had nothing to fix.
+- **The run result names the real tool behind `call_tool`, in all seven ports.** With tool tiers,
+  a call the model made through `call_tool {name, arguments}` was recorded in the run result's
+  `toolCalls` as `call_tool` with the wrapper arguments. Hooks and stream events already showed
+  the real tool, so the three views disagreed. The run result now records the real tool and its
+  inner arguments, after any `beforeTool` rewrite. The transcript still keeps the wrapper, and
+  `tool_search` is still recorded as `tool_search`. If you matched on `"call_tool"` in
+  `toolCalls`, match on the real tool name instead (SPEC §4C).
+- Removed stale "golang only for now" comments from Go source for features every port has, and
+  corrected the example count in `clojure/examples/clj/deps.edn`.
+
 ## 0.22.0 — 2026-11-02
 
 **ACP host hooks: decide permissions, watch every update, cancel a turn, and stream (golang first;

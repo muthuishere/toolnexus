@@ -120,6 +120,13 @@ class ToolTiersTest {
             assertEquals("done", res.status, res.text);
             assertTrue(res.toolCalls.get(0).output.contains("\"name\": \"deploy\""), res.toolCalls.get(0).output);
             assertEquals(List.of("deploy(prod)", "lint(direct)"), ran);
+            StringBuilder rec = new StringBuilder();
+            for (LlmClient.ToolCall tc : res.toolCalls) {
+                if (rec.length() > 0) rec.append(',');
+                rec.append(tc.name).append('(').append(tc.args == null ? null : tc.args.get("x")).append(')');
+            }
+            assertEquals("tool_search(null),deploy(prod),lint(direct)", rec.toString(),
+                    "RunResult records the real tool + inner args for call_tool");
             assertEquals(List.of("deploy:true", "lint:?"), gated,
                     "tool_search is engine-internal; call_tool must be unwrapped");
             for (String a : toolArrays) assertEquals(toolArrays.get(0), a, "tools array changed");
@@ -150,11 +157,12 @@ class ToolTiersTest {
         });
         server.start();
         List<String> got = new ArrayList<>();
+        LlmClient.RunResult sres;
         try {
             LlmClient c = LlmClient.create(new LlmClient.Options()
                     .baseUrl("http://127.0.0.1:" + server.getAddress().getPort()).style("openai").model("m").apiKey("k")
                     .toolTiers(new ToolTiers().core("alpha_read")));
-            c.stream("go", tk, ev -> {
+            sres = c.stream("go", tk, ev -> {
                 if (ev.type() == LlmClient.StreamEvent.Kind.TOOL_CALL || ev.type() == LlmClient.StreamEvent.Kind.TOOL_RESULT) {
                     got.add(ev.type() + ":" + ev.name() + ":" + ev.via() + ":" + (ev.args() == null ? null : ev.args().get("x")));
                 }
@@ -164,6 +172,8 @@ class ToolTiersTest {
         }
         assertEquals(List.of("TOOL_CALL:deploy:call_tool:prod", "TOOL_RESULT:deploy:call_tool:null"), got);
         assertEquals(List.of("deploy(prod)"), ran);
+        assertEquals("deploy", sres.toolCalls.get(0).name, "stream RunResult records the real tool");
+        assertEquals("prod", sres.toolCalls.get(0).args.get("x"));
     }
 
     @Test

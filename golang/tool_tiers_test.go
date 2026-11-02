@@ -148,6 +148,14 @@ func TestToolTierLoopCallToolUnwraps(t *testing.T) {
 	if strings.Join(ran, ",") != "deploy(prod),lint(direct)" {
 		t.Fatalf("ran = %v", ran)
 	}
+	// RunResult.ToolCalls names the real tool with its inner args, like hooks and stream events.
+	var recorded []string
+	for _, tc := range res.ToolCalls {
+		recorded = append(recorded, fmt.Sprintf("%s(%v)", tc.Name, tc.Args["x"]))
+	}
+	if strings.Join(recorded, ",") != "tool_search(<nil>),deploy(prod),lint(direct)" {
+		t.Fatalf("ToolCalls = %v", recorded)
+	}
 	if strings.Join(gated, ",") != "deploy:true,lint:?" {
 		t.Fatalf("BeforeTool saw %v (tool_search is engine-internal; call_tool must be unwrapped)", gated)
 	}

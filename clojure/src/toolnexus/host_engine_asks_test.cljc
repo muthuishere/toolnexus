@@ -676,6 +676,30 @@
     (is (= [{:type "text" :text "s" :cache_control {:type "ephemeral" :ttl "1h"}}] (:system out)))
     (is (= {:type "ephemeral"} (get-in (client/apply-prompt-cache body "anthropic" {}) [:tools 0 :cache_control])))))
 
+(deftest prompt-cache-marks-last-tool-in-request-json
+  ;; end-to-end: the body actually SENT carries cache_control on the last tool only
+  (let [bodies (atom [])]
+    (with-server
+      (fn [body _]
+        (swap! bodies conj body)
+        (json-response {:content [{:type "text" :text "ok"}] :stop_reason "end_turn"
+                        :usage {:input_tokens 1 :output_tokens 1}}))
+      (fn [base]
+        (let [tk (core/build {:tools [(native/native-tool {:name "extra_one" :description "One." :run (fn [_] "1")})
+                                      (native/native-tool {:name "extra_two" :description "Two." :run (fn [_] "2")})]})
+              c  (client/create-client {:base-url base :style "anthropic" :model "m" :api-key "k"
+                                        :prompt-cache {}})]
+          (client/run c "hi" {:toolkit tk})
+          (let [tools  (:tools (first @bodies))
+                marked (keep-indexed (fn [i t] (when (contains? t :cache_control) i)) tools)]
+            (is (> (count tools) 2) "builtins plus the two extra tools")
+            (is (= [(dec (count tools))] marked) "exactly the last tool is marked")
+            (is (= {:type "ephemeral"} (:cache_control (last tools))))))))))
+
+(deftest build-with-no-options
+  (is (map? (:tools (core/build nil))) "nil options build a default toolkit")
+  (is (map? (:tools (core/build {})))))
+
 ;; ---------------------------------------------------------------------------
 ;; tool tiers (add-prompt-cache phase 2)
 ;; ---------------------------------------------------------------------------
@@ -772,7 +796,13 @@
           (is (= ["deploy(prod)" "lint(direct)"] @ran))
           (is (= ["deploy:true" "lint:?"] @gated)
               "tool_search is engine-internal; call_tool is unwrapped before the hook")
-          (is (= "call_tool" (:name (second (:tool-calls r)))) "the transcript keeps the wrapper")
+          (is (= ["tool_search()" "deploy(prod)" "lint(direct)"]
+                 (mapv #(str (:name %) "(" (get-in % [:args :x]) ")") (:tool-calls r)))
+              "RunResult records the REAL tool and its inner args; tool_search stays itself")
+          (is (some (fn [m] (and (sequential? (:content m))
+                                 (some #(and (= "tool_use" (:type %)) (= "call_tool" (:name %))) (:content m))))
+                    (:messages r))
+              "the transcript keeps the wrapper")
           (is (apply = @arrays) "the tools array is the same bytes on every request"))))))
 
 (deftest tool-tier-events-name-the-real-tool

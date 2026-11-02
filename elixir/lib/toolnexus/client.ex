@@ -1919,13 +1919,20 @@ defmodule Toolnexus.Client do
         max_part_bytes: client.max_part_bytes
       )
 
-  defp tool_call_record(s) do
+  defp tool_call_record(client, s), do: call_record(client, s.name, s.args, s.result)
+
+  # A RunResult tool_calls entry. Under :tool_tiers a `call_tool` call records the REAL tool
+  # and its inner args (after any before_tool rewrite), as hooks and stream events see it;
+  # the transcript keeps the wrapper. tool_search stays tool_search.
+  defp call_record(client, name, args, result) do
+    {name, args, _} = unwrap_call(client, name, args)
+
     %{
-      name: s.name,
-      args: s.args,
-      output: s.result.output,
-      is_error: s.result.is_error,
-      metadata: s.result.metadata
+      name: name,
+      args: args,
+      output: result.output,
+      is_error: result.is_error,
+      metadata: result.metadata
     }
   end
 
@@ -2020,7 +2027,7 @@ defmodule Toolnexus.Client do
 
       # Record in tool-call order; on the FIRST durable halt, surface it and stop (G3) —
       # later suspensions' placeholder results never enter the transcript.
-      case fold_openai_results(st, settled) do
+      case fold_openai_results(client, st, settled) do
         {:halted, st, request} ->
           pending_run(
             rc(client, st),
@@ -2038,11 +2045,11 @@ defmodule Toolnexus.Client do
     end
   end
 
-  defp fold_openai_results(st, settled) do
+  defp fold_openai_results(client, st, settled) do
     Enum.reduce_while(settled, {:ok, st}, fn s, {:ok, st} ->
       st = %{
         st
-        | tool_calls: st.tool_calls ++ [tool_call_record(s)],
+        | tool_calls: st.tool_calls ++ [tool_call_record(client, s)],
           messages: st.messages ++ [tool_message(s.id, s.name, s.result)]
       }
 
@@ -2132,7 +2139,7 @@ defmodule Toolnexus.Client do
             blocks ++
               [tool_result_block(s.id, s.result)]
 
-          records = records ++ [tool_call_record(s)]
+          records = records ++ [tool_call_record(client, s)]
 
           if s.halted,
             do: {:halt, {blocks, records, s.halted}},
@@ -2356,16 +2363,7 @@ defmodule Toolnexus.Client do
           st = %{
             st
             | tool_calls:
-                st.tool_calls ++
-                  [
-                    %{
-                      name: c.name,
-                      args: args,
-                      output: result.output,
-                      is_error: result.is_error,
-                      metadata: result.metadata
-                    }
-                  ],
+                st.tool_calls ++ [call_record(client, c.name, args, result)],
               messages: st.messages ++ [tool_message(c.id, c.name, result)]
           }
 
@@ -2622,16 +2620,7 @@ defmodule Toolnexus.Client do
           st = %{
             st
             | tool_calls:
-                st.tool_calls ++
-                  [
-                    %{
-                      name: u["name"],
-                      args: args,
-                      output: result.output,
-                      is_error: result.is_error,
-                      metadata: result.metadata
-                    }
-                  ]
+                st.tool_calls ++ [call_record(client, u["name"], args, result)]
           }
 
           results = results ++ [tool_result_block(u["id"], result)]

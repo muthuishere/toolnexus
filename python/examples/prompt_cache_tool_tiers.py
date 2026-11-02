@@ -88,7 +88,7 @@ async def main() -> None:
     second = await client.ask("anything else?", tk, id="session-1")
     print("turn 2:", second.text, "| usage:", second.usage)
 
-    assert [c["name"] for c in first.tool_calls] == ["tool_search", "call_tool"]
+    assert [c["name"] for c in first.tool_calls] == ["tool_search", "deploy"]  # call_tool is recorded as the real tool
     assert first.tool_calls[-1]["output"] == "deployed to staging"
     assert second.usage.get("cache_read_tokens") == 2048
     assert len(set(provider.tool_arrays)) == 1, "the tools array must never change"

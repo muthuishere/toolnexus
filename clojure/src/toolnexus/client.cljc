@@ -1812,10 +1812,14 @@
                                          ;; the result's metadata.
                                          (some? (:metadata (:result s)))
                                          (assoc :metadata (:metadata (:result s))))))
-                      records (mapv (fn [s] {:name (:name s) :args (:args s)
+                      ;; SPEC §4C: the RunResult records a call_tool call as the
+                      ;; REAL tool with its inner (post-:before-tool) arguments —
+                      ;; what hooks and events see. The transcript keeps the wrapper.
+                      records (mapv (fn [s] (let [[nm a] (unwrap-call client (:name s) (:args s))]
+                                             {:name nm :args a
                                              :output (:output (:result s))
                                              :isError (boolean (:isError (:result s)))
-                                             :metadata (:metadata (:result s))})
+                                             :metadata (:metadata (:result s))}))
                                     settled)
                       halted  (first (keep :halt settled))
                       msgs    (into messages (tool-result-messages client settled))]
