@@ -200,7 +200,8 @@ pub struct StartedAgent {
     rt: Runtime,
     handle: Handle,
     stop: CancellationToken,
-    tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
+    /// The clock loop and every in-flight beat turn; `stop` awaits them all.
+    tasks: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
     beats: Arc<Mutex<Vec<String>>>,
     beat: Arc<Notify>,
 }
@@ -221,13 +222,21 @@ impl StartedAgent {
     pub async fn next_beat(&self) {
         self.beat.notified().await;
     }
-    /// End the heartbeat and close the runtime (stop-all at the root).
+    /// End the heartbeat and close the runtime (stop-all at the root). Like
+    /// Go's `Stop`, it first waits for a beat turn that is still in flight.
     pub async fn stop(&self) {
         self.stop.cancel();
-        let tasks: Vec<_> =
-            std::mem::take(&mut *self.tasks.lock().unwrap_or_else(|e| e.into_inner()));
-        for t in tasks {
-            let _ = t.await;
+        // Drain until empty: the clock loop may register one last beat
+        // before it observes the cancel.
+        loop {
+            let tasks: Vec<_> =
+                std::mem::take(&mut *self.tasks.lock().unwrap_or_else(|e| e.into_inner()));
+            if tasks.is_empty() {
+                break;
+            }
+            for t in tasks {
+                let _ = t.await;
+            }
         }
         self.rt.close(&self.rt.root(), None).await;
     }
@@ -248,13 +257,15 @@ pub fn start_agent(a: &Agent, opts: StartOptions) -> Result<StartedAgent, String
     let prompt = format!(
         "Heartbeat. Read your HEARTBEAT.md section and follow it. If nothing needs attention, reply {HEARTBEAT_OK}."
     );
+    let tasks: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>> = Arc::default();
     let task = {
-        let (rt, h, stop, beats, beat) = (
+        let (rt, h, stop, beats, beat, tasks) = (
             rt.clone(),
             h.clone(),
             stop.clone(),
             beats.clone(),
             beat.clone(),
+            tasks.clone(),
         );
         let on_beat = opts.on_beat.clone();
         tokio::spawn(async move {
@@ -275,7 +286,7 @@ pub fn start_agent(a: &Agent, opts: StartOptions) -> Result<StartedAgent, String
                         beat.clone(),
                         on_beat.clone(),
                     );
-                    tokio::spawn(async move {
+                    let turn = tokio::spawn(async move {
                         let r = rt.wait(&h, None).await;
                         if !r.is_error && !r.text.contains(HEARTBEAT_OK) {
                             beats
@@ -288,6 +299,7 @@ pub fn start_agent(a: &Agent, opts: StartOptions) -> Result<StartedAgent, String
                         }
                         beat.notify_one();
                     });
+                    tasks.lock().unwrap_or_else(|e| e.into_inner()).push(turn);
                 } else {
                     beat.notify_one();
                 }
@@ -298,7 +310,10 @@ pub fn start_agent(a: &Agent, opts: StartOptions) -> Result<StartedAgent, String
         rt,
         handle: h,
         stop,
-        tasks: Mutex::new(vec![task]),
+        tasks: {
+            tasks.lock().unwrap_or_else(|e| e.into_inner()).push(task);
+            tasks
+        },
         beats,
         beat,
     })

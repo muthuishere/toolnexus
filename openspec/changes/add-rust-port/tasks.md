@@ -47,5 +47,5 @@
 - [x] classifier + judge + batteries (§8B) incl. ModelRouter — shared examples/judge fixtures; classifier group in the options manifest, `unported` entry removed
 - [x] agents runtime, personas, compaction (§7D–§7F) — `toolnexus::agents`, incl. 0.22.0 `on_compact`/`CompactInfo`, `as_tool_with`, runtime `wait_for`; golang/agents tests mirrored (92). The toolkit `agents` option is A2A (remote agents), done with the A2A item above
 - [x] relay / resume path (relay tools, `run_with_answer` / `ask_with_answer`, collision guard); MCP elicitation (3.7)
-- [ ] the remaining golang relay tests not mirrored: streaming relay, parked-wait_for-across-turns, run-deadline-breaks-parking
+- [x] the remaining golang relay tests: streaming relay, parked wait_for across turns, run deadline breaks parking (Rust drops the parked wait_for at the deadline; Go lets it finish — both fail the run). `start_agent` stop now waits for an in-flight beat, as Go does
 - [ ] run the Windows code paths on a Windows host

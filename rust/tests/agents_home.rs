@@ -681,3 +681,71 @@ fn estimate_tokens_is_ceil_json_len_over_4() {
     // {"content":"<&>","role":"user"} = 31 bytes, no HTML escaping → ceil(31/4) = 8
     assert_eq!(estimate_tokens(&m), 8);
 }
+
+/// `stop` waits for a beat turn that is still in flight, as Go's `Stop` does
+/// (`wg.Wait` covers the beat goroutine), so a beat is never lost or left
+/// running against a closed runtime.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn home_stop_waits_for_an_in_flight_beat() {
+    let dir = write_bootstrap(&[
+        ("SOUL.md", "You are Ava."),
+        ("HEARTBEAT.md", "If it is time, remind about the 3pm sync."),
+    ]);
+    let clk = FakeClock::new();
+    // The beat's tail (on_beat) is slow, so a stop that only waits for the
+    // runtime would return before the beat is delivered.
+    let delivered = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let d2 = delivered.clone();
+    let gate = tokio_util::sync::CancellationToken::new();
+    let ava = from_dir(
+        &dir,
+        FromDirOptions {
+            model: "m-heartbeat".into(),
+            ..Default::default()
+        },
+    );
+    let sa = Arc::new(
+        start_agent(
+            &ava,
+            StartOptions {
+                options: Options {
+                    clock: Some(clk.clone()),
+                    in_process: Some(home_mock(Some(gate.clone()), Arc::default())),
+                    ..Default::default()
+                },
+                every_ms: 60_000,
+                on_beat: Some(Arc::new(move |_: &str| {
+                    std::thread::sleep(std::time::Duration::from_millis(300));
+                    d2.store(true, std::sync::atomic::Ordering::SeqCst);
+                })),
+            },
+        )
+        .unwrap(),
+    );
+    clk.wait_armed().await;
+    clk.fire();
+    let (rt, h) = (sa.runtime(), sa.handle());
+    assert!(await_state(&rt, &h, State::Running).await);
+    let s2 = sa.clone();
+    let stopping = tokio::spawn(async move { s2.stop().await });
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    assert!(
+        !stopping.is_finished(),
+        "stop returned while a beat was in flight"
+    );
+    gate.cancel();
+    tokio::time::timeout(std::time::Duration::from_secs(5), stopping)
+        .await
+        .expect("stop never returned after the beat finished")
+        .unwrap();
+    assert!(
+        delivered.load(std::sync::atomic::Ordering::SeqCst),
+        "stop returned before the in-flight beat was delivered: {:?}",
+        sa.beats()
+    );
+    let beats = sa.beats();
+    assert!(
+        !beats.is_empty() && beats[0].contains("3pm sync"),
+        "{beats:?}"
+    );
+}

@@ -778,3 +778,187 @@ async fn relay_answer_with_a_non_string_output_is_a_loud_error_result() {
     let tc = &res.tool_calls[0];
     assert!(tc.is_error && tc.output.contains("non-string"), "{tc:?}");
 }
+
+// ---- the relay tests the Go suite pins on streaming, parking and deadlines ----
+
+#[tokio::test]
+async fn relay_on_streaming_loop() {
+    let srv = serve(|r: common::Req| async move {
+        if r.has_role("tool") {
+            return Resp::sse(common::sse_lines(&[
+                json!({"choices": [{"delta": {"content": "streamed"}}]}),
+            ]));
+        }
+        Resp::sse(common::sse_lines(&[
+            json!({"choices": [{"delta": {"tool_calls": [
+            {"index": 0, "id": "c1", "function": {"name": "lookup", "arguments": "{}"}}]}}]}),
+        ]))
+    })
+    .await;
+    let c = client(
+        &srv.url,
+        Style::OpenAI,
+        answer_with(|req| Answer {
+            id: req.id.clone(),
+            ok: true,
+            data: data(&[(RELAY_OUTPUT_KEY, json!("stream-out"))]),
+            ..Default::default()
+        }),
+    );
+    let mut rx = c.stream("go", &tk(vec![rt("lookup")]).await).unwrap();
+    let (mut saw_pending, mut res) = (false, None);
+    while let Some(ev) = rx.recv().await {
+        match ev.kind.as_str() {
+            "pending" => {
+                saw_pending = true;
+                let req = ev
+                    .request
+                    .as_ref()
+                    .expect("pending event carries the request");
+                assert!(is_relay_request(req), "pending kind = {:?}", req.kind);
+                let calls = relay_calls_of(req);
+                assert_eq!(calls.len(), 1, "streaming relay call not stamped");
+                assert_eq!(calls[0].id, "c1");
+            }
+            "done" => res = ev.result,
+            "error" => panic!("stream error: {:?}", ev.error),
+            _ => {}
+        }
+    }
+    assert!(saw_pending, "no pending event emitted for the relay call");
+    let res = res.expect("done event");
+    assert_eq!(res.status, "done");
+    assert_eq!(res.tool_calls.len(), 1);
+    assert_eq!(res.tool_calls[0].output, "stream-out");
+    assert_eq!(res.text, "streamed");
+}
+
+/// Each parallel relay call gets its OWN wait_for callback, and the host may
+/// park every one of them until the "next HTTP turn" answers them all.
+#[tokio::test]
+async fn parked_wait_for_across_turns() {
+    let (url, _) = llm(Style::OpenAI, abc(), "all parked calls answered").await;
+    type Parked = (Request, tokio::sync::oneshot::Sender<Answer>);
+    let (arr_tx, mut arrivals) = tokio::sync::mpsc::unbounded_channel::<Parked>();
+    // No timeout_ms: parking is unbounded here, the deadline test covers the other case.
+    let wait_for: WaitForFn = Arc::new(move |req: Request| {
+        let arr_tx = arr_tx.clone();
+        Box::pin(async move {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            arr_tx.send((req, tx)).unwrap();
+            Ok(rx.await.unwrap())
+        })
+    });
+    let c = client(&url, Style::OpenAI, Some(wait_for));
+    let toolkit = tk(vec![rt("alpha"), rt("beta"), rt("gamma")]).await;
+    let run = tokio::spawn(async move { c.run("go", &toolkit).await });
+
+    let mut collected = Vec::new();
+    while collected.len() < 3 {
+        match tokio::time::timeout(std::time::Duration::from_secs(5), arrivals.recv()).await {
+            Ok(Some(p)) => collected.push(p),
+            _ => panic!(
+                "only {} of 3 relay calls surfaced a wait_for callback",
+                collected.len()
+            ),
+        }
+    }
+    let mut names = Vec::new();
+    for (req, _) in &collected {
+        let calls = relay_calls_of(req);
+        assert_eq!(
+            calls.len(),
+            1,
+            "a callback carried {} calls, want its own 1",
+            calls.len()
+        );
+        names.push(calls[0].name.clone());
+    }
+    names.sort();
+    assert_eq!(names, ["alpha", "beta", "gamma"]);
+    for (req, reply) in collected {
+        let name = relay_calls_of(&req)[0].name.clone();
+        reply
+            .send(Answer {
+                id: req.id.clone(),
+                ok: true,
+                data: data(&[(RELAY_OUTPUT_KEY, json!(format!("out-{name}")))]),
+                ..Default::default()
+            })
+            .unwrap();
+    }
+    let res = tokio::time::timeout(std::time::Duration::from_secs(5), run)
+        .await
+        .expect("the run never resumed after the parked answers were delivered")
+        .unwrap()
+        .unwrap();
+    assert_eq!(res.status, "done");
+    assert_eq!(res.text, "all parked calls answered");
+    assert_eq!(res.tool_calls.len(), 3);
+    let (calls, results, _) = counts(&res.messages);
+    assert_eq!(
+        calls, results,
+        "parked resume left an unbalanced transcript"
+    );
+}
+
+/// A run deadline shorter than a park fails the run. Rust differs from Go
+/// here, on purpose and measured: `timeout_ms` wraps the whole run future, so
+/// the parked `wait_for` is dropped AT the deadline (Go's blocking WaitFor runs
+/// to completion and the run dies at the next context-aware step). Either way
+/// a park outliving `timeout_ms` never silently succeeds, so a parking host
+/// must leave `timeout_ms` unset.
+#[tokio::test]
+async fn run_deadline_breaks_parking() {
+    let (url, _) = llm(Style::OpenAI, vec![vec![("c1", "alpha", "{}")]], "x").await;
+    let park = std::time::Duration::from_millis(400);
+    let finished = Arc::new(AtomicUsize::new(0));
+    let f2 = finished.clone();
+    let wait_for: WaitForFn = Arc::new(move |req: Request| {
+        let f2 = f2.clone();
+        Box::pin(async move {
+            tokio::time::sleep(park).await;
+            f2.fetch_add(1, Ordering::SeqCst);
+            Ok(Answer {
+                id: req.id.clone(),
+                ok: true,
+                data: data(&[(RELAY_OUTPUT_KEY, json!("late"))]),
+                ..Default::default()
+            })
+        })
+    });
+    let c = create_client(ClientOptions {
+        base_url: url,
+        model: "stub".into(),
+        api_key: "k".into(),
+        retries: -1,
+        timeout_ms: 100,
+        wait_for: Some(wait_for),
+        ..Default::default()
+    });
+    let start = std::time::Instant::now();
+    let err = c
+        .run("go", &tk(vec![rt("alpha")]).await)
+        .await
+        .expect_err("a park outliving timeout_ms must not silently succeed");
+    let elapsed = start.elapsed();
+    assert!(
+        matches!(
+            err,
+            toolnexus::client::ClientError::RunTimeout {
+                timeout_ms: 100,
+                ..
+            }
+        ),
+        "{err:?}"
+    );
+    assert!(
+        elapsed < park,
+        "the run took {elapsed:?}: the deadline no longer interrupts a parked wait_for"
+    );
+    assert_eq!(
+        finished.load(Ordering::SeqCst),
+        0,
+        "the park was dropped, not completed"
+    );
+}
