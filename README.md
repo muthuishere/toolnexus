@@ -32,10 +32,10 @@ npm i toolnexus                                   # JS / TypeScript
 pip install toolnexus                             # Python
 go get github.com/muthuishere/toolnexus/golang    # Go
 dotnet add package Toolnexus                       # C#
-{:toolnexus, "~> 0.22"}                             # Elixir (mix.exs deps)
-# Java (Maven): io.github.muthuishere:toolnexus:0.22.0
-# Clojure (deps.edn): net.clojars.muthuishere/toolnexus {:mvn/version "0.22.0"} — JVM and cljgo
-cargo add toolnexus                                # Rust — on crates.io from the next release
+{:toolnexus, "~> 0.23"}                             # Elixir (mix.exs deps)
+# Java (Maven): io.github.muthuishere:toolnexus:0.23.0
+# Clojure (deps.edn): net.clojars.muthuishere/toolnexus {:mvn/version "0.23.0"} — JVM and cljgo
+cargo add toolnexus                                # Rust (crates.io)
 ```
 
 The insight (borrowed from [opencode](https://github.com/anomalyco/opencode)): MCP server
@@ -118,7 +118,7 @@ Per-port spellings are in [`CHANGELOG.md`](CHANGELOG.md) and each port's API ref
 | C# / .NET | [`Toolnexus`](https://www.nuget.org/packages/Toolnexus) (NuGet) | [api/csharp](https://muthuishere.github.io/toolnexus/api/csharp/) |
 | Elixir | [`toolnexus`](https://hex.pm/packages/toolnexus) (Hex) | [api/elixir](https://muthuishere.github.io/toolnexus/api/elixir/) |
 | Clojure | [`net.clojars.muthuishere/toolnexus`](https://clojars.org/net.clojars.muthuishere/toolnexus) | [api/clojure](https://muthuishere.github.io/toolnexus/api/clojure/) |
-| Rust | `toolnexus` (crates.io, from the next release) · [`rust/`](rust/README.md) | [api/rust](https://muthuishere.github.io/toolnexus/api/rust/) |
+| Rust | `toolnexus` (crates.io) · [`rust/`](rust/README.md) | [api/rust](https://muthuishere.github.io/toolnexus/api/rust/) |
 
 Each port's own README covers install and a quick start; everything beyond that is on the docs site.
 

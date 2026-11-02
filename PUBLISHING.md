@@ -9,8 +9,7 @@ Publishing; switch it to Trusted Publishing once the crate exists.
 
 Package names (all live): npm **`toolnexus`**, PyPI **`toolnexus`**, NuGet **`Toolnexus`**,
 Maven **`io.github.muthuishere:toolnexus`**, Go module **`github.com/muthuishere/toolnexus/golang`**,
-Hex **`toolnexus`**, Clojars **`net.clojars.muthuishere/toolnexus`**, crates.io **`toolnexus`** (from
-the next release — not yet published).
+Hex **`toolnexus`**, Clojars **`net.clojars.muthuishere/toolnexus`**, crates.io **`toolnexus`**.
 
 ## Release in one step
 

@@ -8,6 +8,8 @@ GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
 
 ## Unreleased
 
+## 0.23.0 — 2026-11-02
+
 **Docs: Rust is on every page, and the docs now say eight languages.** Every tabbed guide,
 cookbook recipe, scenario and the combined API page now has a Rust tab next to the other seven
 (76 tab groups across 31 pages), and all 76 were compile-checked against `rust/`. There is a new

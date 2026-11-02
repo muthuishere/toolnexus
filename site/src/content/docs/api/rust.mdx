@@ -11,8 +11,8 @@ Every runnable example in this section is compiled and executed in CI against th
 
 <Aside type="note">
 The Rust port is held to conformance tier **full** (`conformance/options_manifest.json`), like the
-other seven. It is published to crates.io from the next release; until then depend on it by git
-(`toolnexus = { git = "https://github.com/muthuishere/toolnexus" }`). Not done: a Gemini client
+other seven. It is published to crates.io as `toolnexus`.
+Not done: a Gemini client
 style (Gemini is a schema adapter, as in Go), and the Windows code paths compile but have not
 been run. Cargo features: `mcp-http` (MCP over streamable HTTP) and `serve` (A2A / MCP server),
 both on by default.
