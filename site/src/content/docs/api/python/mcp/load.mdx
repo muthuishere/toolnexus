@@ -157,6 +157,55 @@ async def main():
 asyncio.run(main())
 ```
 
+## `on_server` — use each server as soon as it is ready
+
+```python
+load_mcp(input, *, wait_for=None, on_server: Callable[[McpServerResult], Any] | None = None)
+
+@dataclass
+class McpServerResult:
+    name: str
+    status: McpStatus           # connected / failed / disabled
+    tools: list[Tool]           # empty unless connected
+    error: BaseException | None
+```
+
+`on_server` fires once per server the moment it connects, fails or is found disabled — one slow
+server no longer holds up the others' tools. With `on_server` the servers load concurrently;
+without it, loading is unchanged. `load_mcp` still returns only after every server finishes.
+
+```python test
+import asyncio
+import shutil
+
+from toolnexus import load_mcp
+
+
+async def main():
+    seen = []
+    src = await load_mcp(
+        {"mcp": {
+            "progress": {"command": [shutil.which("node"), "examples/mcp-progress-server.mjs"], "timeout": 5000},
+            "off": {"command": ["does-not-run"], "enabled": False},
+        }},
+        on_server=lambda r: seen.append((r.name, str(r.status), len(r.tools))),
+    )
+    try:
+        names = sorted(n for n, _, _ in seen)
+        assert names == ["off", "progress"], seen
+        progress = next(s for s in seen if s[0] == "progress")
+        assert progress[2] >= 1, seen
+        print("ok:", sorted(seen))
+    finally:
+        try:
+            await src.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+asyncio.run(main())
+```
+
 ## Options
 
 | Parameter | Type | What it does |

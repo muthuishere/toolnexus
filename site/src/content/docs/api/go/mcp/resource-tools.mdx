@@ -1,0 +1,192 @@
+---
+title: "McpSource.ResourceTools"
+description: "Opt-in list_mcp_resources / read_mcp_resource tools over every connected MCP server. Read-only. — Go."
+sidebar:
+  label: "McpSource.ResourceTools"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Go</strong> · package <code>github.com/muthuishere/toolnexus/golang</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §2</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/golang/mcp_resources.go">golang/mcp_resources.go</a>
+</p>
+
+```go
+func (m *McpSource) ResourceTools() []Tool // [list_mcp_resources, read_mcp_resource]
+```
+
+Two tools bound to the servers an `McpSource` connected. Both are `SourceMCP`, carry
+`Hints{ReadOnly: true}`, and stop working once the source is closed. Nothing is added unless the
+host registers them.
+
+- `list_mcp_resources {server?}` — one line per resource, `server uri — name (mimeType): description`;
+  `Metadata["resources"]` holds the same as structured items. No resources ⇒ `No resources.`
+- `read_mcp_resource {server, uri}` — text contents as text; binary contents are described
+  (`[binary <mime>, N base64 chars]`), never inlined. An unknown server or a server error comes back
+  as an error result the model can read.
+
+## When to use it
+
+Your MCP servers publish **resources** (files, schemas, docs) as well as tools, and you want the model
+to browse and read them on its own. MCP tools are loaded automatically; resources are not, because
+they can be large and many servers do not offer them.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Know which resource you need? Read it in the host">
+If the host already knows the resource (a fixed schema, a project README), read it once and put it
+in the system prompt or an attachment — that costs no tool round trip and keeps the prompt stable for
+[caching](/api/go/client/prompt-cache/). Register the resource tools when the model has to discover
+what is there.
+</Aside>
+
+## Examples
+
+Each example serves a real MCP server from `httptest` (mcp-go, streamable HTTP) — no network.
+
+### 1. The smallest useful call — list and read
+
+```go test
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"net/http/httptest"
+	"strings"
+
+	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/mark3labs/mcp-go/server"
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	s := server.NewMCPServer("docs", "1.0", server.WithToolCapabilities(false), server.WithResourceCapabilities(false, false))
+	s.AddResource(mcp.NewResource("file:///notes.txt", "notes", mcp.WithMIMEType("text/plain")),
+		func(_ context.Context, req mcp.ReadResourceRequest) ([]mcp.ResourceContents, error) {
+			return []mcp.ResourceContents{mcp.TextResourceContents{URI: req.Params.URI, MIMEType: "text/plain", Text: "ship on friday"}}, nil
+		})
+	ts := httptest.NewServer(server.NewStreamableHTTPServer(s, server.WithStateLess(true)))
+	defer ts.Close()
+
+	src, err := toolnexus.LoadMcp(map[string]any{"docs": map[string]any{"url": ts.URL + "/mcp"}})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer src.Close()
+
+	tools := src.ResourceTools()
+	list, read := tools[0], tools[1]
+	out, err := list.Execute(map[string]any{}, nil)
+	if err != nil || !strings.Contains(out.Output, "docs file:///notes.txt — notes (text/plain)") {
+		log.Fatalf("list: %v %q", err, out.Output)
+	}
+	got, err := read.Execute(map[string]any{"server": "docs", "uri": "file:///notes.txt"}, nil)
+	if err != nil || got.Output != "ship on friday" {
+		log.Fatalf("read: %v %q", err, got.Output)
+	}
+	fmt.Println("ok:", list.Name, read.Name, "->", got.Output)
+}
+```
+
+### 2. The realistic case — hand them to the model through the toolkit
+
+```go test
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"net/http/httptest"
+
+	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/mark3labs/mcp-go/server"
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	s := server.NewMCPServer("docs", "1.0", server.WithToolCapabilities(false), server.WithResourceCapabilities(false, false))
+	s.AddResource(mcp.NewResource("file:///readme.md", "readme"),
+		func(_ context.Context, req mcp.ReadResourceRequest) ([]mcp.ResourceContents, error) {
+			return []mcp.ResourceContents{mcp.TextResourceContents{URI: req.Params.URI, Text: "# Hello"}}, nil
+		})
+	ts := httptest.NewServer(server.NewStreamableHTTPServer(s, server.WithStateLess(true)))
+	defer ts.Close()
+
+	src, err := toolnexus.LoadMcp(map[string]any{"docs": map[string]any{"url": ts.URL + "/mcp"}})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer src.Close()
+
+	tk, err := toolnexus.CreateToolkit(context.Background(), toolnexus.Options{ExtraTools: src.ResourceTools()})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer tk.Close()
+
+	res, err := tk.Execute(context.Background(), "read_mcp_resource", map[string]any{"server": "docs", "uri": "file:///readme.md"})
+	if err != nil || res.Output != "# Hello" {
+		log.Fatalf("%v %q", err, res.Output)
+	}
+	fmt.Println("ok: toolkit read", res.Output)
+}
+```
+
+### 3. The full surface — read-only hints, metadata, and errors as results
+
+```go test
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"net/http/httptest"
+	"strings"
+
+	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/mark3labs/mcp-go/server"
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	s := server.NewMCPServer("docs", "1.0", server.WithToolCapabilities(false), server.WithResourceCapabilities(false, false))
+	s.AddResource(mcp.NewResource("file:///a.txt", "a", mcp.WithResourceDescription("first")),
+		func(_ context.Context, req mcp.ReadResourceRequest) ([]mcp.ResourceContents, error) {
+			return []mcp.ResourceContents{mcp.TextResourceContents{URI: req.Params.URI, Text: "A"}}, nil
+		})
+	ts := httptest.NewServer(server.NewStreamableHTTPServer(s, server.WithStateLess(true)))
+	defer ts.Close()
+
+	src, err := toolnexus.LoadMcp(map[string]any{"docs": map[string]any{"url": ts.URL + "/mcp"}})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer src.Close()
+	tools := src.ResourceTools()
+
+	for _, t := range tools {
+		if t.Hints == nil || !t.Hints.ReadOnly {
+			log.Fatalf("%s should be read-only", t.Name)
+		}
+	}
+	list, _ := tools[0].Execute(map[string]any{"server": "docs"}, nil)
+	if list.Metadata["count"] != 1 {
+		log.Fatalf("metadata: %v", list.Metadata)
+	}
+	bad, _ := tools[1].Execute(map[string]any{"server": "nope", "uri": "file:///a.txt"}, nil)
+	if !bad.IsError || !strings.Contains(bad.Output, `no connected MCP server "nope"`) {
+		log.Fatalf("expected an error result, got %+v", bad)
+	}
+	fmt.Println("ok: read-only, count =", list.Metadata["count"], "| unknown server ->", bad.IsError)
+}
+```
+
+## See also
+
+- [`LoadMcp`](/api/go/mcp/load/) — connect the servers whose resources these tools read.
+- [`ListMcpTools`](/api/go/mcp/list-tools/) — the MCP tools themselves, loaded automatically.
+- [`Hooks`](/api/go/client/hooks/) — `BeforeTool` sees `Hints.ReadOnly` and can let these run without asking.

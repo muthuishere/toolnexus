@@ -1,0 +1,238 @@
+---
+title: "tool_tiers"
+description: "Send only core tool schemas; the model loads the rest with tool_search and calls them by name or through call_tool. The plan is frozen until resetToolTiers. — Python."
+sidebar:
+  label: "tool_tiers"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Python</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/python/src/toolnexus/tool_tiers.py">python/src/toolnexus/tool_tiers.py</a>
+</p>
+
+```python
+@dataclass
+class ToolTierOptions:
+    core: list[str] = []          # always sent with their full schema
+    deferred: list[str] = []      # named only in tool_search's description
+    budget_tokens: int = 0        # cap on up-front tool tokens; 0 ⇒ 5% of context_window
+    context_window: int = 0
+    usage_count: Callable[[str], int] | None = None   # host usage stat; least-used demote first
+    count_tokens: Callable[[Any], int] | None = None  # default ceil(utf-8 bytes / 4)
+
+create_client(..., tool_tiers: ToolTierOptions | None = None)
+client.tool_tier_plan(toolkit) -> dict[str, ToolTier] | None   # "core" | "listed" | "deferred"
+client.reset_tool_tiers(toolkit) -> None                       # rebuild the frozen plan
+```
+
+With `tool_tiers`, the tools array is the **core** tools sorted by name, then two meta tools:
+
+- **`tool_search {query, limit?}`** — its description lists every other tool: *listed* tools as
+  `- name — first line` (cut to 120 UTF-8 bytes), *deferred* tools by name only. `select:a,b`
+  loads exact names; anything else is keyword-scored (default 5 results). The full schemas come
+  back as JSON **in the tool result**, so the tools array never changes. It is engine-internal:
+  no `before_tool` hook runs for it.
+- **`call_tool {name, arguments}`** — calls a loaded tool. The loop unwraps it *before* hooks, so
+  `before_tool`, hints and permission gates see the real tool; streamed events name the real
+  tool with `via: "call_tool"`. A loaded tool may also be called directly by name.
+
+The plan is built on a toolkit's first request and then frozen; a tool registered later is
+deferred and found by search. Call `reset_tool_tiers(tk)` at a session boundary to rebuild it.
+
+## When to use it
+
+- Dozens of MCP and builtin tools whose schemas would eat the context window every turn.
+- Prompt caching with tools that arrive mid-session: registering a tool changes the tools array
+  and breaks the cached prefix; under tiers the array stays fixed.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="tool_tiers over disable_tools or a smaller toolkit">
+`disable_tools` removes tools outright — the model can never reach them. Tiers keep every tool
+reachable at the cost of one `tool_search` round trip, and keep the cached prefix stable. If a
+session truly needs only five tools, a smaller toolkit is simpler.
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call — inspect the plan and the request tools
+
+```python test
+import asyncio
+
+from toolnexus import ToolTierOptions, create_client, create_toolkit, define_tool
+
+
+@define_tool
+def read_file(path: str) -> str:
+    """Read a file."""
+    return path
+
+
+@define_tool
+def deploy(env: str) -> str:
+    """Deploy the service to production."""
+    return env
+
+
+@define_tool
+def lint(path: str) -> str:
+    """Lint the code."""
+    return path
+
+
+class Recorder:
+    def __init__(self):
+        self.bodies = []
+
+    def post(self, url, headers, payload, timeout):
+        self.bodies.append(payload)
+        return {"choices": [{"message": {"role": "assistant", "content": "ok"}}]}
+
+
+async def main():
+    tk = await create_toolkit(builtins=False, extra_tools=[read_file, deploy, lint])
+    rec = Recorder()
+    client = create_client(
+        base_url="http://localhost:8080/v1", style="openai", model="m", api_key="YOUR_KEY_HERE",
+        tool_tiers=ToolTierOptions(core=["read_file"], deferred=["deploy"]), http_transport=rec,
+    )
+    await client.run("hi", tk)
+    names = [t["function"]["name"] for t in rec.bodies[0]["tools"]]
+    assert names == ["read_file", "tool_search", "call_tool"], names
+    plan = client.tool_tier_plan(tk)
+    assert plan == {"read_file": "core", "lint": "listed", "deploy": "deferred"}, plan
+    print("ok:", names)
+
+
+asyncio.run(main())
+```
+
+### 2. The realistic case — the model searches, then calls through call_tool
+
+```python test
+import asyncio
+import json
+
+from toolnexus import ToolTierOptions, create_client, create_toolkit, define_tool
+
+ran = []
+
+
+@define_tool
+def deploy(env: str) -> str:
+    """Deploy the service."""
+    ran.append(env)
+    return f"deployed {env}"
+
+
+@define_tool
+def status() -> str:
+    """Service status."""
+    return "green"
+
+
+class Script:
+    def __init__(self):
+        self.step = 0
+        self.tool_arrays = []
+
+    def post(self, url, headers, payload, timeout):
+        self.tool_arrays.append(json.dumps(payload["tools"], sort_keys=True))
+        self.step += 1
+        calls = {
+            1: [("s1", "tool_search", {"query": "select:deploy"})],
+            2: [("c1", "call_tool", {"name": "deploy", "arguments": {"env": "prod"}})],
+        }.get(self.step)
+        if calls is None:
+            return {"choices": [{"message": {"role": "assistant", "content": "shipped"}}]}
+        return {"choices": [{"message": {"role": "assistant", "content": None, "tool_calls": [
+            {"id": i, "type": "function", "function": {"name": n, "arguments": json.dumps(a)}}
+            for i, n, a in calls]}}]}
+
+
+async def main():
+    tk = await create_toolkit(builtins=False, extra_tools=[deploy, status])
+    seen = []
+
+    async def before_tool(ev):
+        seen.append(ev["name"])
+        return None
+
+    script = Script()
+    client = create_client(
+        base_url="http://localhost:8080/v1", style="openai", model="m", api_key="YOUR_KEY_HERE",
+        tool_tiers=ToolTierOptions(core=["status"]), hooks={"before_tool": before_tool},
+        http_transport=script,
+    )
+    res = await client.run("ship it", tk)
+    assert res.text == "shipped" and ran == ["prod"]
+    assert seen == ["deploy"]  # tool_search has no hook; call_tool was unwrapped
+    assert len(set(script.tool_arrays)) == 1  # the tools array never changed
+    print("ok: loaded deploy via tool_search, ran it via call_tool")
+
+
+asyncio.run(main())
+```
+
+### 3. The full surface — a budget, a late tool and reset_tool_tiers
+
+```python test
+import asyncio
+
+from toolnexus import ToolTierOptions, create_client, create_toolkit, define_tool
+
+
+@define_tool
+def often(q: str) -> str:
+    """Used all the time."""
+    return q
+
+
+@define_tool
+def rarely(q: str) -> str:
+    """Hardly ever used."""
+    return q
+
+
+@define_tool
+def late(q: str) -> str:
+    """Registered after the plan froze."""
+    return q
+
+
+class Ok:
+    def post(self, url, headers, payload, timeout):
+        return {"choices": [{"message": {"role": "assistant", "content": "ok"}}]}
+
+
+async def main():
+    tk = await create_toolkit(builtins=False, extra_tools=[often, rarely])
+    uses = {"often": 50, "rarely": 1, "late": 0}
+    client = create_client(
+        base_url="http://localhost:8080/v1", style="openai", model="m", api_key="YOUR_KEY_HERE",
+        tool_tiers=ToolTierOptions(core=["often", "rarely"], budget_tokens=1,
+                                   usage_count=lambda n: uses.get(n, 0)),
+        http_transport=Ok(),
+    )
+    await client.run("hi", tk)
+    plan = client.tool_tier_plan(tk)
+    assert all(t == "deferred" for t in plan.values()), plan  # a 1-token budget demotes everything
+
+    tk.register(late)
+    assert "late" not in client.tool_tier_plan(tk)  # frozen: found only by search
+    client.reset_tool_tiers(tk)
+    await client.run("hi", tk)
+    assert "late" in client.tool_tier_plan(tk)
+    print("ok: plan rebuilt after reset_tool_tiers")
+
+
+asyncio.run(main())
+```
+
+## See also
+
+- [`prompt_cache`](/api/python/client/prompt-cache/) — Cache the stable prefix that tool tiers keep stable.
+- [`Hooks`](/api/python/client/hooks/) — `before_tool` sees the real tool behind `call_tool`.
+- [`create_client`](/api/python/client/create/) — The unified client: system prompt, skills injection, parallel and chained tool calls, retries, memory.

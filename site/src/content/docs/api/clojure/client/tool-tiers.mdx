@@ -1,0 +1,157 @@
+---
+title: "tool-tiers"
+description: "Send only core tool schemas; the model loads the rest with tool_search and calls them by name or through call_tool. The plan is frozen until resetToolTiers. — Clojure."
+sidebar:
+  label: "tool-tiers"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Clojure (JVM) + cljgo</strong> · package <code>net.clojars.muthuishere/toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/clojure/src/toolnexus/client.cljc">clojure/src/toolnexus/client.cljc</a>
+</p>
+
+```clojure
+(create-client {… :tool-tiers {:core           ["read" "grep"]  ; schemas always sent
+                               :deferred       ["deploy"]       ; name only in tool_search's description
+                               :budget-tokens  2000             ; optional; else 5% of :context-window
+                               :context-window 200000
+                               :usage-count    (fn [name] n)    ; optional, for the budget
+                               :count-tokens   (fn [v] n)}})   ; optional
+
+(client/tool-tier-plan    client toolkit) ; => {"read" "core" "lint" "listed" "deploy" "deferred"}
+(client/reset-tool-tiers! client toolkit) ; rebuild at the next request (call at session start)
+(client/reset-tool-tiers! client)         ; forget every plan
+```
+
+With `:tool-tiers` the tools array of every request is the core tools sorted by name, then two meta
+tools: `tool_search` and `call_tool`. Every other tool is *listed* (`- name — first line` in
+`tool_search`'s description) or *deferred* (name only). The model loads schemas with
+`tool_search {:query "select:a,b"}` (exact names) or a keyword query (name match 3, description
+match 1, default 5 results); the definitions come back as a **tool result**, so the tools array —
+and the cached prefix — never change mid-session. A loaded tool is called by name, or as
+`call_tool {:name :arguments}`, which the loop unwraps **before** `:before-tool`, so permission
+gates and hints see the real tool. `:on-event` `tool_call` / `tool_result` events name the real tool
+and carry `:via "call_tool"`.
+
+The plan is built on a toolkit's first request and then frozen per toolkit identity (which
+`tool/add-tools` keeps). A tool added later is deferred, absent from the description, and still
+found by search. Over the budget, the least-used core tool moves to listed (ties: larger schema,
+then name), then the least-used listed tool to deferred. `tool_search` is engine-internal and
+read-only; it never goes through `:before-tool`.
+
+## When to use it
+
+- **Dozens of tools** — MCP servers plus builtins quickly cost thousands of tokens per request.
+- **With [`:prompt-cache`](/api/clojure/client/prompt-cache/)** — a tools array that never changes
+  is a prefix that stays cached.
+- **When tools arrive mid-session** — a new MCP server's tools are found by search instead of
+  changing the array.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="A smaller toolkit is simpler when you know the tools up front">
+If a session only ever needs five tools, build a toolkit of those five — no meta tools, no extra
+round trip to load a schema. Tool tiers pay off when the full set is large or unknown.
+</Aside>
+
+## Examples
+
+### 1. Only core schemas are sent
+
+```clojure test
+(require '[toolnexus.client :as client]
+         '[toolnexus.tool :as tool]
+         '[toolnexus.native :as native])
+
+(println)
+
+(defn t [n d] (native/native-tool {:name n :description d :run (fn [_] (str n " ran"))}))
+(def tk (tool/toolkit [(t "read_notes" "Read the notes.") (t "lint" "Lint the code.")
+                             (t "deploy" "Deploy the service.")]))
+
+(def llm (client/create-client {:base-url "https://api.openai.com/v1" :model "gpt-4.1" :api-key "YOUR_KEY_HERE"
+                                 :tool-tiers {:core ["read_notes"] :deferred ["deploy"]}}))
+
+(assert (= {"read_notes" "core" "lint" "listed" "deploy" "deferred"} (client/tool-tier-plan llm tk)))
+(println "OK")
+```
+
+### 2. The model searches, then calls through `call_tool`
+
+```clojure test
+(require '[toolnexus.client :as client]
+         '[toolnexus.tool :as tool]
+         '[toolnexus.native :as native]
+         '[koine.json :as json])
+
+(println)
+
+(defn body-of [b] (if (string? b) (json/read-str b) b))
+
+(defn mock-llm
+  "An :http-client that records every request body and answers from `replies` in order."
+  [seen replies]
+  (let [q (atom replies)]
+    (fn [_url _headers body]
+      (swap! seen conj (body-of body))
+      (let [r (first @q)]
+        (swap! q #(if (next %) (vec (rest %)) %))
+        {:status 200 :headers {} :body (json/write-str r)}))))
+
+(defn call [id nm args] {:choices [{:message {:role "assistant" :content nil
+                                              :tool_calls [{:id id :type "function"
+                                                            :function {:name nm :arguments (json/write-str args)}}]}}]})
+
+(def seen (atom []))
+(def gated (atom []))
+(def tk (tool/toolkit [(native/native-tool {:name "read_notes" :description "Read." :run (fn [_] "n")})
+                             (native/native-tool {:name "deploy" :description "Deploy." :run (fn [a] (str "deployed " (:env a)))})]))
+
+(def llm (client/create-client
+           {:base-url "https://api.openai.com/v1" :model "gpt-4.1" :api-key "YOUR_KEY_HERE"
+            :tool-tiers {:core ["read_notes"]}
+            :hooks {:before-tool (fn [ev] (swap! gated conj (:name ev)) nil)}
+            :http-client (mock-llm seen [(call "s1" "tool_search" {:query "select:deploy"})
+                                         (call "c1" "call_tool" {:name "deploy" :arguments {:env "prod"}})
+                                         {:choices [{:message {:role "assistant" :content "done"}}]}])}))
+
+(def r (client/run llm "deploy to prod" {:toolkit tk}))
+
+(assert (= "done" (:text r)))
+(assert (= ["read_notes" "tool_search" "call_tool"]
+           (mapv #(get-in % [:function :name]) (:tools (first @seen)))))
+(assert (apply = (map #(json/write-str (:tools %)) @seen)) "the tools array never changed")
+(assert (= ["deploy"] @gated) "the gate saw the real tool, never tool_search")
+(assert (some #(= "deployed prod" (:output %)) (:tool-calls r)))
+(println "OK")
+```
+
+### 3. A late tool is found by search; reset rebuilds the plan
+
+```clojure test
+(require '[toolnexus.client :as client]
+         '[toolnexus.tool :as tool]
+         '[toolnexus.native :as native])
+
+(println)
+
+(defn t [n] (native/native-tool {:name n :description (str n " things") :run (fn [_] n)}))
+(def tk (tool/toolkit [(t "read_notes") (t "lint")]))
+(def llm (client/create-client {:base-url "https://api.openai.com/v1" :model "gpt-4.1" :api-key "YOUR_KEY_HERE"
+                                 :tool-tiers {:core ["read_notes"]}}))
+
+(assert (= {"read_notes" "core" "lint" "listed"} (client/tool-tier-plan llm tk)))
+
+(def tk2 (tool/add-tools tk [(t "late")]))
+(assert (= {"read_notes" "core" "lint" "listed"} (client/tool-tier-plan llm tk2)) "the plan is frozen")
+
+(client/reset-tool-tiers! llm tk2)
+(assert (= "listed" (get (client/tool-tier-plan llm tk2) "late")) "rebuilt at the next session start")
+(println "OK")
+```
+
+## See also
+
+- [`prompt-cache`](/api/clojure/client/prompt-cache/) — why a stable tools array matters.
+- [`hooks`](/api/clojure/client/hooks/) — `:before-tool` sees the unwrapped call.

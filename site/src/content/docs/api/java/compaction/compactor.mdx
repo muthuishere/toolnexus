@@ -208,6 +208,26 @@ public class Example {
 | `countTokens` | `Function<List<Object>, Integer>` | Token estimator; default `Compaction::estimateTokens` (`ceil(chars/4)` per message, summed). |
 | `flushToMemory` | `boolean` | When set, injects a pre-compact reminder to persist durable facts via the §7E memory tool. Off by default. |
 
+## `onCompact` — tell the UI
+
+```java
+public Options onCompact(Consumer<Compaction.CompactInfo> v)
+public record CompactInfo(int tokensBefore, int tokensAfter, int messagesBefore, int messagesAfter,
+                          int summarized, String summary, List<Object> folded) {}
+```
+
+Called after each compaction, never on a no-op, with the counts before and after, the summary and
+`folded` (the summarized messages verbatim, since the loop saves only the compacted transcript).
+Since 0.22.0 the compactor also keeps the sole user prompt of a turn that is one prompt followed by
+tool traffic, and does nothing when the result would not be smaller.
+
+```java
+Compaction.compactor(new Compaction.Options()
+        .maxTokens(8000)
+        .summarize(msgs -> summarizer.apply(msgs))
+        .onCompact(info -> ui.notice("context compacted: " + info.tokensBefore() + " -> " + info.tokensAfter())));
+```
+
 ## See also
 
 - [`LlmClient.Hooks`](/api/java/client/hooks/) — The lifecycle middleware `compactor` plugs into via `beforeLLM`.

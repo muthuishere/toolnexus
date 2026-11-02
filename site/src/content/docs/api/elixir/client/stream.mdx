@@ -230,9 +230,9 @@ IO.puts("ok: stream/4 with :id persisted #{length(history)} messages, continued 
 | Event | Fields | When |
 |---|---|---|
 | `%{type: "text", delta}` | `delta :: String.t()` | Each assistant text token as it arrives. |
-| `%{type: "tool_call", id, name, args}` | `args :: map()` | Right before a tool call executes. |
-| `%{type: "tool_result", id, name, output, is_error}` | | Right after it ran — skipped for a suspending call (see `pending` below). |
-| `%{type: "usage", usage}` | `%{prompt_tokens, completion_tokens, total_tokens}` | Once per completed turn with no further tool calls, before `done`. |
+| `%{type: "tool_call", id, name, args, via?}` | `args :: map()` | Right before a tool call executes. Under `:tool_tiers` a `call_tool` call names the real tool and inner args, with `via: "call_tool"`. |
+| `%{type: "tool_result", id, name, output, is_error, metadata, via?}` | |  Right after it ran — skipped for a suspending call (see `pending` below). |
+| `%{type: "usage", usage}` | `%{prompt_tokens, completion_tokens, total_tokens}` plus `cache_read_tokens` / `cache_write_tokens` when the provider reports them | Once per completed turn with no further tool calls, before `done`. |
 | `%{type: "pending", request}` | `request :: Toolnexus.Request.t()` | §10 — a tool suspended; fires before `wait_for` runs. |
 | `%{type: "done", result}` | `result :: Toolnexus.Client.RunResult.t()` | Terminal — same shape `run/4` returns. |
 

@@ -160,6 +160,24 @@ differ between Clojure and JavaScript for the same transcript. SPEC §7F pins th
 byte count. If you need an exact budget, pass `:count-tokens`.
 </Aside>
 
+## `:on-compact` — hear about each compaction (0.22.0)
+
+`:on-compact` is called after each compaction, never on a no-op, with
+`{:tokens-before :tokens-after :messages-before :messages-after :summarized :summary :folded}`.
+`:folded` is the summarized messages verbatim — the loop saves only the compacted transcript, so
+this is the host's one chance to persist them.
+
+```clojure
+(compaction/compactor {:max-tokens 8000
+                       :summarize  summarize-fn
+                       :on-compact (fn [{:keys [tokens-before tokens-after]}]
+                                     (println "context compacted" tokens-before "->" tokens-after))})
+```
+
+Also fixed in 0.22.0: the sole user prompt of a turn followed only by tool traffic is kept (the
+result is `[system?, prompt, summary]`), and a compaction that would not make the transcript
+smaller is skipped.
+
 ## See also
 
 - [`toolnexus.client/create-client`](/toolnexus/api/clojure/client/create/) — the `:hooks` seam

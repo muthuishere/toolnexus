@@ -18,7 +18,8 @@ public static LlmClient create(Options opts)
 public Options baseUrl(String v)          // provider endpoint
 public Options style(String v)            // "openai" | "anthropic" — wire format
 public Options model(String v)
-public Options apiKey(String v)           // falls back to env if null
+public Options apiKey(String v)           // the key itself
+public Options apiKeyEnv(String v)        // the NAME of the env var to read it from
 public Options headers(Map<String, String> v)
 public Options systemPrompt(String v)
 public Options maxTurns(int v)            // default 10
@@ -42,6 +43,11 @@ public Options httpClient(HttpClient v)
 
 // §10 suspension + §1B/§8A content parts
 public Options waitFor(Function<Request, Answer> v)
+public Options waitForCtx(BiFunction<Request, CancelToken, Answer> v) // wins over waitFor
+
+// prompt caching + tool tiers (0.22)
+public Options promptCache(PromptCache v)
+public Options toolTiers(ToolTiers v)
 public Options maxPartBytes(long v)
 public Options onUnsupportedPart(String v)
 ```
@@ -199,6 +205,14 @@ public class Example {
     }
 }
 ```
+
+## API key by host
+
+With no `apiKey`, the client reads `apiKeyEnv` if set, else ONLY the env var of the `baseUrl` host
+over https (`api.openai.com` → `OPENAI_API_KEY`, `api.anthropic.com` → `ANTHROPIC_API_KEY`,
+`openrouter.ai` → `OPENROUTER_API_KEY`). A local or custom `baseUrl` needs `apiKey` or `apiKeyEnv`
+(**breaking in 0.22.0**: the old cross-provider env fallback is gone). See
+[API key by host](/api/java/client/api-key/).
 
 ## See also
 

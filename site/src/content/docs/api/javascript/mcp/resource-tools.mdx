@@ -1,0 +1,103 @@
+---
+title: "McpSource.resourceTools"
+description: "Opt-in list_mcp_resources / read_mcp_resource tools over every connected MCP server. Read-only. — JavaScript."
+sidebar:
+  label: "McpSource.resourceTools"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>JavaScript</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §2</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/js/src/mcp.ts">js/src/mcp.ts</a>
+</p>
+```ts
+interface McpSource {
+  resourceTools(): Tool[]   // [list_mcp_resources, read_mcp_resource]
+  …
+}
+// list_mcp_resources { server?: string }
+// read_mcp_resource  { server: string, uri: string }
+```
+
+Two opt-in tools bound to a loaded source's connected servers: `list_mcp_resources` lists every
+resource (`<server> <uri> — <name> (<mimeType>): <description>`, one per line, servers sorted), and
+`read_mcp_resource` returns one resource's text. Both carry read-only [hints](/api/javascript/client/hooks/).
+They are not added to a toolkit automatically — register them. They stop working once the
+source is closed. An unknown server or URI is an error result, never a throw.
+
+## When to use it
+
+An MCP server that publishes data as resources (docs, schemas, files) rather than tools, and you
+want the model to browse and read them itself.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Know the resource already? Read it yourself">
+If the host knows which resource it needs, read it once and put it in the system prompt — no
+model round trip, and it sits in the cached prefix.
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call — list and read
+
+```ts test
+import assert from "node:assert"
+import { loadMcp } from "toolnexus"
+
+// examples/mcp-progress-server.mjs is a dependency-free stdio MCP server with one resource.
+const src = await loadMcp({ progress: { command: ["node", "examples/mcp-progress-server.mjs"], timeout: 5000 } })
+try {
+  const [list, read] = src.resourceTools()
+  assert.equal((await list.execute({})).output, "progress fixture://hello — hello (text/plain): A fixed text resource.")
+  const r = await read.execute({ server: "progress", uri: "fixture://hello" })
+  assert.deepEqual([r.isError, r.output], [false, "hello resource"])
+  console.log("ok:", r.output)
+} finally {
+  await src.close()
+}
+```
+
+### 2. The realistic case — offer them to the model next to the server's tools
+
+```ts test
+import assert from "node:assert"
+import { createToolkit, loadMcp } from "toolnexus"
+
+const src = await loadMcp({ progress: { command: ["node", "examples/mcp-progress-server.mjs"], timeout: 5000 } })
+const tk = await createToolkit({ builtins: false, extraTools: [...src.tools, ...src.resourceTools()] })
+try {
+  const names = tk.tools().map((t) => t.name).sort()
+  assert.deepEqual(names, ["list_mcp_resources", "progress_slow", "read_mcp_resource"])
+  assert.ok(tk.get("read_mcp_resource")!.hints?.readOnly)
+  console.log("ok:", names.join(","))
+} finally {
+  await tk.close()
+  await src.close()
+}
+```
+
+### 3. The full surface — errors are results, not throws
+
+```ts test
+import assert from "node:assert"
+import { loadMcp } from "toolnexus"
+
+const src = await loadMcp({ progress: { command: ["node", "examples/mcp-progress-server.mjs"], timeout: 5000 } })
+try {
+  const [list, read] = src.resourceTools()
+  assert.equal((await list.execute({ server: "nope" })).isError, true)
+  assert.equal((await read.execute({ server: "progress", uri: "fixture://nope" })).isError, true)
+  assert.equal((await list.execute({ server: "progress" })).isError, false)
+  console.log("ok: bad server and bad uri are error results")
+} finally {
+  await src.close()
+}
+```
+
+## See also
+
+- [`loadMcp`](/api/javascript/mcp/load/) — Read an mcp.json, connect every local stdio and remote streamable-HTTP server, expose each server tool as a Tool.
+- [`loadMcp`](/api/javascript/mcp/load-with-context/) — The ctx-aware load: bound connection time and cancel a slow or hung server without leaking a child process.
+- [`listMcpTools`](/api/javascript/mcp/list-tools/) — List what each configured server would expose, plus per-server status, without wiring it into a toolkit.
+- [`parseMcpConfig`](/api/javascript/mcp/parse-config/) — Parse and validate config without connecting — the fast fail for a malformed or misspelled server block.

@@ -142,6 +142,7 @@ IO.puts("ok: malformed config raised before connecting")
 | Option | Default | What it does |
 |---|---|---|
 | `:wait_for` | `nil` | `(Request.t() -> Answer.t())`. When set, the client advertises the MCP `elicitation` capability and bridges an inbound `elicitation/create` onto it (§10). See [`Toolnexus.Mcp.Protocol.elicitation_to_request`](/api/elixir/mcp/elicitation/). |
+| `:on_server` | `nil` | `(%{name, status, tools, error} -> any)`, called once per server the moment it is `"connected"`, `"failed"` or `"disabled"`, so a host can register a fast server's `tools` without waiting for a slow one. With it set, servers connect concurrently; the call still returns only after every server finishes, and the returned source is unchanged. |
 | `:deadline` (alias `:timeout`) | `:infinity` | Overall load deadline in ms. See [the ctx-aware form](/api/elixir/mcp/load-with-context/). |
 
 ## What you get back
@@ -152,6 +153,11 @@ IO.puts("ok: malformed config raised before connecting")
 | `status` | `%{name => status}` | `"connected"`, `"failed"`, or `"disabled"` per configured server. |
 | `sup` | `pid()` | The `DynamicSupervisor` holding all connections — pass to `close/1`. |
 | `connections` | `%{name => pid()}` | The connection process per connected server. |
+
+For MCP **resources** (not tools), register
+[`Toolnexus.Mcp.resource_tools/1`](/api/elixir/mcp/resource-tools/) on the returned source. MCP
+tool annotations (`readOnlyHint`, `destructiveHint`, `openWorldHint`) become each tool's
+`%Toolnexus.ToolHints{}` with MCP's defaults; no annotations ⇒ `hints: nil`.
 
 ## See also
 

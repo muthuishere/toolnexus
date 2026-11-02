@@ -295,6 +295,28 @@ async, not a blocking call: don't wrap a synchronous prompt in `.Result`/`.Wait(
 you risk deadlocking the client's own async call chain.
 </Aside>
 
+## `WaitForCtx` — end the ask with the turn
+
+```csharp
+public Func<Request, CancellationToken, Task<Answer>>? WaitForCtx { get; set; }
+```
+
+The same §10 contract as `WaitFor`, plus the turn's `CancellationToken`, so a question pending on
+a human ends when the turn is cancelled (throw `OperationCanceledException` or let the token
+cancel your await). When both are set, `WaitForCtx` wins.
+
+```csharp
+var client = LlmClient.Create(new LlmClient.Options
+{
+    BaseUrl = "http://127.0.0.1:8080/v1", Style = "openai", Model = "m", ApiKey = "YOUR_KEY_HERE",
+    WaitForCtx = async (request, ct) =>
+    {
+        var reply = await ui.AskAsync(request.Prompt, ct);   // cancelled with the turn
+        return new Answer { Id = request.Id, Ok = true, Data = reply };
+    },
+});
+```
+
 ## Fields
 
 | Field | Type | What it is |

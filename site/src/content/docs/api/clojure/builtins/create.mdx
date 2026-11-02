@@ -165,6 +165,29 @@ are not guaranteed to match the other six. Both are reported upstream. Everythin
 contract.
 </Aside>
 
+## New in 0.22.0
+
+- **grep context.** `grep` takes `context`, `before` and `after` line counts: matches print as
+  `path:N:text`, context lines as `path-N-text`, and `--` separates groups that do not touch.
+  Absent, the output is unchanged.
+- **Truncation metadata.** A `read` window that stops before the end sets `:truncated`,
+  `:totalLines` and `:nextOffset` in the result metadata; a `grep` cut by `limit` sets `:truncated`
+  and `:total`. The text itself is the same bytes as before.
+- **Hints.** Every builtin carries `:hints` (`read`, `grep`, `glob`, `question`, `todowrite`
+  read-only; `webfetch` read-only and open-world; `write`, `edit`, `apply_patch` destructive; `bash`
+  destructive and open-world) for a [permission gate](/api/clojure/client/hooks/).
+- **Opt-in builtins**, absent unless configured:
+  `:background (builtin/background-shells)` adds `run_in_background`, `bash_output`, `kill_shell`
+  ([page](/api/clojure/builtins/background-shells/)); `:web-search (fn [query limit] [{:title :url :snippet}])`
+  adds `websearch` over a provider you supply (the library ships none); `:notebook-edit true` adds
+  `notebook_edit` for `.ipynb` cells (replace / insert / delete by id or index).
+
+```clojure
+(builtin/builtin-tools-for
+  {:web-search    (fn [query limit] (my-search query limit))
+   :notebook-edit true})
+```
+
 ## See also
 
 - [`toolnexus.builtin/enabled-builtins`](/api/clojure/builtins/select/) — Pick which built-in file/shell/web tools are in play, by name or by source toggle.

@@ -1,0 +1,192 @@
+---
+title: "Options.toolTiers"
+description: "Send only core tool schemas; the model loads the rest with tool_search and calls them by name or through call_tool. The plan is frozen until resetToolTiers. — Java."
+sidebar:
+  label: "Options.toolTiers"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Java</strong> · package <code>io.github.muthuishere:toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a>
+</p>
+
+```java
+// LlmClient.Options
+public Options toolTiers(ToolTiers v)          // null (default) = every tool sent, as before
+
+public final class ToolTiers {
+    public ToolTiers core(String... names)      // always sent with full schema
+    public ToolTiers deferred(String... names)  // named only (no description) in tool_search
+    public ToolTiers budgetTokens(int v)        // schema budget; 0 = 5% of contextWindow
+    public ToolTiers contextWindow(int v)
+    public ToolTiers usageCount(ToIntFunction<String> v)   // demote the least-used first
+    public ToolTiers countTokens(Function<Object, Integer> v)
+    public enum Tier { CORE, LISTED, DEFERRED }
+}
+
+// LlmClient
+public Map<String, ToolTiers.Tier> toolTierPlan(Toolkit tk)  // frozen plan, for a UI or log
+public void resetToolTiers(Toolkit tk)                       // rebuild on the next request
+```
+
+Sends only the **core** tools with their full schemas. Every other tool is **listed** (`- name — first
+line`) or **deferred** (name only) inside the description of a `tool_search` tool. The tools array is
+the core tools sorted by name, then `tool_search` and `call_tool`.
+
+- `tool_search {query, limit?}` — `select:a,b` for exact names, else keyword scoring (default 5
+  results). It returns the full definitions as JSON in a **tool result**, so the tools array, and the
+  cached prefix, never change mid-session. It is engine-internal: `beforeTool` does not see it.
+- A loaded tool is called by name, or as `call_tool {name, arguments}`. The loop unwraps `call_tool`
+  **before** hooks, so a permission gate and its hints see the real tool. Stream `TOOL_CALL` /
+  `TOOL_RESULT` events carry the real name with `via() == "call_tool"`.
+- The plan is built on a toolkit's first request and then frozen; a tool registered later is
+  deferred and found by search. With a budget, while core schemas exceed it the least-used core tool
+  moves to listed, then the least-used listed tool to deferred.
+
+## When to use it
+
+A toolkit with dozens of tools (several MCP servers, the builtins, your own) where most are rarely
+needed, or one where tools are registered mid-session. Sending every schema every call costs tokens,
+and with [`promptCache`](/api/java/client/prompt-cache/) a changed tools array throws away the cache.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Not a smaller toolkit">
+If a tool is never needed, leave it out of the toolkit (or use the toolkit's disable options) —
+that is simpler. Tiers are for tools that ARE sometimes needed: the model can still find them, at the
+cost of one extra `tool_search` round trip. Call `resetToolTiers` at a session start, not mid-session:
+a rebuilt plan changes the tools array.
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call — inspect the frozen plan
+
+```java test
+import io.github.muthuishere.toolnexus.*;
+import java.util.Map;
+
+public class Example {
+    public static void main(String[] args) {
+        Map<String, Object> schema = Map.of("type", "object", "properties", Map.of());
+        try (Toolkit tk = Toolkit.create(new Toolkit.Options().builtins(false).extraTools(
+                NativeTool.of("read_doc", "Read a doc.", schema, (Map<String, Object> a) -> "doc"),
+                NativeTool.of("lint", "Lint the code.", schema, (Map<String, Object> a) -> "clean"),
+                NativeTool.of("deploy", "Deploy to production.", schema, (Map<String, Object> a) -> "shipped")))) {
+            LlmClient client = LlmClient.create(new LlmClient.Options()
+                    .baseUrl("http://127.0.0.1:9").model("m").apiKey("YOUR_KEY_HERE")
+                    .toolTiers(new ToolTiers().core("read_doc").deferred("deploy")));
+            Map<String, ToolTiers.Tier> plan = client.toolTierPlan(tk);
+            if (plan.get("read_doc") != ToolTiers.Tier.CORE) throw new AssertionError(plan);
+            if (plan.get("lint") != ToolTiers.Tier.LISTED) throw new AssertionError(plan);
+            if (plan.get("deploy") != ToolTiers.Tier.DEFERRED) throw new AssertionError(plan);
+            System.out.println("ok: " + plan);
+        }
+    }
+}
+```
+
+### 2. The realistic case — the model loads a tool, then calls it through `call_tool`
+
+The mock model calls `tool_search`, then `call_tool`. The `beforeTool` gate sees `deploy`, not
+`call_tool`, and the tools array is the same bytes on every request.
+
+```java test
+import com.sun.net.httpserver.HttpServer;
+import io.github.muthuishere.toolnexus.*;
+import java.io.OutputStream;
+import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.atomic.AtomicInteger;
+
+public class Example {
+    public static void main(String[] args) throws Exception {
+        List<String> toolArrays = new CopyOnWriteArrayList<>();
+        AtomicInteger step = new AtomicInteger();
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/", ex -> {
+            String req = new String(ex.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+            toolArrays.add(req.substring(req.indexOf("\"tools\"")));
+            String content = switch (step.incrementAndGet()) {
+                case 1 -> "[{\"type\":\"tool_use\",\"id\":\"s1\",\"name\":\"tool_search\",\"input\":{\"query\":\"select:deploy\"}}]";
+                case 2 -> "[{\"type\":\"tool_use\",\"id\":\"c1\",\"name\":\"call_tool\",\"input\":{\"name\":\"deploy\",\"arguments\":{}}}]";
+                default -> "[{\"type\":\"text\",\"text\":\"done\"}]";
+            };
+            byte[] b = ("{\"content\":" + content + ",\"stop_reason\":\"tool_use\","
+                    + "\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}").getBytes(StandardCharsets.UTF_8);
+            ex.getResponseHeaders().add("Content-Type", "application/json");
+            ex.sendResponseHeaders(200, b.length);
+            try (OutputStream os = ex.getResponseBody()) { os.write(b); }
+        });
+        server.start();
+        Map<String, Object> schema = Map.of("type", "object", "properties", Map.of());
+        List<String> gated = new CopyOnWriteArrayList<>();
+        try (Toolkit tk = Toolkit.create(new Toolkit.Options().builtins(false).extraTools(
+                NativeTool.of("read_doc", "Read a doc.", schema, (Map<String, Object> a) -> "doc"),
+                Tool.withHints(NativeTool.of("deploy", "Deploy to production.", schema,
+                        (Map<String, Object> a) -> "shipped"), ToolHints.DESTRUCTIVE)))) {
+            LlmClient client = LlmClient.create(new LlmClient.Options()
+                    .baseUrl("http://127.0.0.1:" + server.getAddress().getPort())
+                    .style("anthropic").model("m").apiKey("YOUR_KEY_HERE")
+                    .promptCache(new PromptCache())
+                    .toolTiers(new ToolTiers().core("read_doc").deferred("deploy"))
+                    .hooks(new LlmClient.Hooks().beforeTool(ev -> {
+                        gated.add(ev.name() + " destructive=" + (ev.hints() != null && ev.hints().destructive()));
+                        return null;
+                    })));
+            LlmClient.RunResult res = client.run("ship it", tk);
+            if (!"done".equals(res.text)) throw new AssertionError(res.text);
+            if (!gated.equals(List.of("deploy destructive=true"))) throw new AssertionError(gated);
+            for (String a : toolArrays) if (!a.equals(toolArrays.get(0))) throw new AssertionError("tools changed");
+            System.out.println("ok: " + gated + ", tools array stable over " + toolArrays.size() + " requests");
+        } finally {
+            server.stop(0);
+        }
+    }
+}
+```
+
+### 3. The full surface — a budget, usage counts and `resetToolTiers`
+
+With a tiny budget nothing fits, so even core tools are demoted. After usage changes, `resetToolTiers`
+at the next session start rebuilds the plan.
+
+```java test
+import io.github.muthuishere.toolnexus.*;
+import java.util.HashMap;
+import java.util.Map;
+
+public class Example {
+    public static void main(String[] args) {
+        Map<String, Object> schema = Map.of("type", "object", "properties", Map.of());
+        Map<String, Integer> uses = new HashMap<>(Map.of("a_tool", 9, "b_tool", 1));
+        try (Toolkit tk = Toolkit.create(new Toolkit.Options().builtins(false).extraTools(
+                NativeTool.of("a_tool", "A.", schema, (Map<String, Object> a) -> "a"),
+                NativeTool.of("b_tool", "B.", schema, (Map<String, Object> a) -> "b")))) {
+            LlmClient client = LlmClient.create(new LlmClient.Options()
+                    .baseUrl("http://127.0.0.1:9").model("m").apiKey("YOUR_KEY_HERE")
+                    .toolTiers(new ToolTiers().core("a_tool", "b_tool")
+                            .usageCount(n -> uses.getOrDefault(n, 0))
+                            .budgetTokens(1)));
+            Map<String, ToolTiers.Tier> first = client.toolTierPlan(tk);
+            if (first.get("a_tool") == ToolTiers.Tier.CORE) throw new AssertionError(first);
+
+            client.resetToolTiers(tk);   // e.g. at a new session, after updating usage stats
+            Map<String, ToolTiers.Tier> second = client.toolTierPlan(tk);
+            if (!first.equals(second)) throw new AssertionError(second); // same inputs, same plan
+            System.out.println("ok: under budget 1 -> " + second);
+        }
+    }
+}
+```
+
+## See also
+
+- [`LlmClient.create`](/api/java/client/create/) — The unified client: system prompt, skills injection, parallel and chained tool calls, retries, memory.
+- [`LlmClient.run`](/api/java/client/run/) — Send a prompt, let the loop call tools until the model stops, get a RunResult.
+- [`LlmClient.stream`](/api/java/client/stream/) — The streaming loop: text deltas, tool-call events, and suspension events as they happen.
+- [`LlmClient.Hooks`](/api/java/client/hooks/) — Intercept before/after model calls and tool calls: audit, redact, veto, or rewrite.

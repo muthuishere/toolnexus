@@ -242,6 +242,13 @@ public class Example {
 | `StreamEvent.request()` | `Request` | Set on `PENDING` — a §10 suspension, emitted BEFORE `waitFor` runs. |
 | `StreamEvent.result()` | `RunResult` | Set on `DONE` — the same terminal value `stream` returns. |
 
+## `via` and tool-result metadata
+
+`StreamEvent.via()` is `"call_tool"` on a `TOOL_CALL` / `TOOL_RESULT` for a tool the model reached
+through [tool tiers](/api/java/client/tool-tiers/)' `call_tool`; the event names the real tool and its
+inner arguments. It is `null` otherwise. A `TOOL_RESULT` event also carries the result's `metadata`
+(for example an edit's `files` and `diff`).
+
 ## See also
 
 - [`LlmClient.create`](/api/java/client/create/) — The unified client: system prompt, skills injection, parallel and chained tool calls, retries, memory.

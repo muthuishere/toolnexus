@@ -1,0 +1,78 @@
+---
+title: "toolnexus.client/list-models"
+description: "List a provider's models (id, display name, context length when reported), sorted by id, under the same key rules as the client. — Clojure."
+sidebar:
+  label: "toolnexus.client/list-models"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Clojure (JVM) + cljgo</strong> · package <code>net.clojars.muthuishere/toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/clojure/src/toolnexus/client.cljc">clojure/src/toolnexus/client.cljc</a>
+</p>
+
+```clojure
+(list-models opts) ; opts: the same map create-client takes (:base-url :style :api-key :api-key-env :headers)
+
+;; => [{:id "anthropic/claude-sonnet-4.5" :name "Claude Sonnet 4.5" :context-length 200000} …]
+;;    sorted by :id; :name and :context-length only when the provider reports them
+```
+
+One GET, no retries. openai style: `GET {base}/models` (OpenRouter's `context_length` is read when
+present). anthropic style: `GET {base}/v1/models` (or `{base}/models` when the base already ends in
+`/v1`), following `has_more` / `last_id` across pages. The key follows the client's
+[rules](/api/clojure/client/api-key/) exactly. A non-2xx throws `ex-info` with
+`{:toolnexus/error :provider :status n}`.
+
+`list-models` uses koine's HTTP client directly, not `:http-client` (which only posts).
+
+## When to use it
+
+- **A model picker** — list what the configured provider serves and let the user switch.
+- **Sizing a context budget** — `:context-length` feeds `:tool-tiers` `:context-window` or a compactor.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Hard-code the model when it never changes">
+A service pinned to one model gains nothing from a network call at startup. Use `list-models` when
+a human or a router chooses the model at runtime.
+</Aside>
+
+## Examples
+
+### 1. A local server without a key is refused before any request
+
+```clojure test
+(require '[toolnexus.client :as client])
+
+(println)
+
+(def err (try (client/list-models {:base-url "http://localhost:11434/v1"}) nil
+              (catch Exception e e)))
+(assert (= :config (:toolnexus/error (ex-data err))))
+(println "OK")
+```
+
+### 2. OpenRouter, with context lengths
+
+```clojure
+(require '[toolnexus.client :as client])
+
+;; key from OPENROUTER_API_KEY — the host's own env var
+(doseq [m (client/list-models {:base-url "https://openrouter.ai/api/v1"})]
+  (println (:id m) (or (:context-length m) "?")))
+```
+
+### 3. Anthropic, paginated, with an explicit key variable
+
+```clojure
+(def models (client/list-models {:base-url "https://api.anthropic.com" :style "anthropic"
+                                  :api-key-env "TEAM_ANTHROPIC_KEY"}))
+(def llm (client/create-client {:base-url "https://api.anthropic.com" :style "anthropic"
+                                 :api-key-env "TEAM_ANTHROPIC_KEY"
+                                 :model (:id (first models))}))
+```
+
+## See also
+
+- [`api-key`](/api/clojure/client/api-key/) — the key rules `list-models` shares with the client.

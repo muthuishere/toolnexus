@@ -1,0 +1,139 @@
+---
+title: "resource_tools"
+description: "Opt-in list_mcp_resources / read_mcp_resource tools over every connected MCP server. Read-only. — Python."
+sidebar:
+  label: "resource_tools"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Python</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §2</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/python/src/toolnexus/mcp_source.py">python/src/toolnexus/mcp_source.py</a>
+</p>
+
+```python
+McpSource.resource_tools(self) -> list[Tool]   # [list_mcp_resources, read_mcp_resource]
+
+# list_mcp_resources {server?}      one line per resource: "<server> <uri> — <name> (<mime>): <description>"
+# read_mcp_resource  {server, uri}  the resource's text contents
+```
+
+MCP servers can expose **resources** (files, records, fixed documents) besides tools. A plain
+`load_mcp` exposes only tools; `resource_tools()` returns two extra tools over the source's
+connected servers that let the model list and read them. Both carry
+`ToolHints(read_only=True)`. They are opt-in — register them yourself — and stop working when the
+source is closed.
+
+## When to use it
+
+- A server publishes its knowledge as resources (docs, schemas, config) and you want the model
+  to browse them without writing a custom tool per server.
+- A coding or support agent that should read MCP-provided context but never call a mutating tool.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="resource_tools over reading resources yourself">
+If the host already knows which resource it needs, read it once and put it in the prompt —
+cheaper than a tool round trip. Use `resource_tools()` when the *model* should decide which
+resource is relevant.
+</Aside>
+
+## Examples
+
+<Aside type="note" title="Needs node">
+These examples spawn the repo's dependency-free stdio fixture `examples/mcp-progress-server.mjs`,
+which offers one resource, `fixture://hello`.
+</Aside>
+
+### 1. The smallest useful call — list what the servers offer
+
+```python test
+import asyncio
+import shutil
+
+from toolnexus import load_mcp
+
+
+async def main():
+    src = await load_mcp({"mcp": {"progress": {
+        "command": [shutil.which("node"), "examples/mcp-progress-server.mjs"], "timeout": 5000}}})
+    try:
+        list_tool, _ = src.resource_tools()
+        r = await list_tool.execute({})
+        assert r.output == "progress fixture://hello — hello (text/plain): A fixed text resource.", r.output
+        print("ok:", r.output)
+    finally:
+        try:
+            await src.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+asyncio.run(main())
+```
+
+### 2. The realistic case — give the model the tools, read-only
+
+```python test
+import asyncio
+import shutil
+
+from toolnexus import create_toolkit, load_mcp
+
+
+async def main():
+    src = await load_mcp({"mcp": {"progress": {
+        "command": [shutil.which("node"), "examples/mcp-progress-server.mjs"], "timeout": 5000}}})
+    try:
+        tk = await create_toolkit(builtins=False, extra_tools=src.resource_tools())
+        names = sorted(t.name for t in tk.tools())
+        assert names == ["list_mcp_resources", "read_mcp_resource"], names
+        assert all(t.hints.read_only for t in tk.tools())
+        r = await tk.execute("read_mcp_resource", {"server": "progress", "uri": "fixture://hello"})
+        assert not r.is_error and r.output == "hello resource"
+        print("ok:", r.output)
+    finally:
+        try:
+            await src.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+asyncio.run(main())
+```
+
+### 3. The full surface — errors are tool results, not exceptions
+
+```python test
+import asyncio
+import shutil
+
+from toolnexus import load_mcp
+
+
+async def main():
+    src = await load_mcp({"mcp": {"progress": {
+        "command": [shutil.which("node"), "examples/mcp-progress-server.mjs"], "timeout": 5000}}})
+    try:
+        _, read = src.resource_tools()
+        bad_uri = await read.execute({"server": "progress", "uri": "fixture://nope"})
+        bad_server = await read.execute({"server": "nope", "uri": "x"})
+        assert bad_uri.is_error and bad_server.is_error
+        assert "connected: progress" in bad_server.output, bad_server.output
+        print("ok: both failures came back as error results")
+    finally:
+        try:
+            await src.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+asyncio.run(main())
+```
+
+## See also
+
+- [`load_mcp`](/api/python/mcp/load/) — Read an mcp.json, connect every local stdio and remote streamable-HTTP server, expose each server tool as a Tool.
+- [`load_mcp_with_context`](/api/python/mcp/load-with-context/) — The ctx-aware load: bound connection time and cancel a slow or hung server without leaking a child process.
+- [`list_mcp_tools`](/api/python/mcp/list-tools/) — List what each configured server would expose, plus per-server status, without wiring it into a toolkit.
+- [`parse_mcp_config`](/api/python/mcp/parse-config/) — Parse and validate config without connecting — the fast fail for a malformed or misspelled server block.

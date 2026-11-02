@@ -18,14 +18,17 @@ import { Aside } from '@astrojs/starlight/components';
 ;;   :base-url        required   "https://api.anthropic.com"
 ;;   :model           required   "claude-sonnet-4-5"
 ;;   :style           "openai" (default) | "anthropic"
-;;   :api-key         optional; falls back to the environment
+;;   :api-key         optional; else :api-key-env, else ONLY the env var of the :base-url host
+;;   :api-key-env     the NAME of the env var holding the key (never the value)
 ;;   :headers         extra request headers
 ;;   :system-prompt   prepended to the toolkit's skills prompt
 ;;   :max-turns       default 10
 ;;   :request-params  shallow-merged into the request body, wins on collision
 ;;   :body-transform  (fn [body] body) — runs last, its return value is sent
 ;;   :http-client     (fn [url headers body] response) — supply the transport
-;;   … plus the :hooks / :retries / :on-metric / :store / :wait-for slices, each on its own page
+;;   :prompt-cache    {:key :long-ttl} — mark the stable prefix for the provider cache
+;;   :tool-tiers      {:core :deferred :budget-tokens …} — tool_search / call_tool
+;;   … plus the :hooks / :retries / :on-metric / :store / :wait-for / :wait-for-ctx slices, each on its own page
 
 ;; the returned client is a plain map with the defaults filled in:
 ;;   {:base-url "…" :model "…" :style "openai" :max-turns 10
@@ -47,8 +50,12 @@ implemented and both are exercised by the suite against a recording fake server,
 is a measurement rather than a claim.
 
 The API key is resolved at call time and only ever reaches a request header — never a log line,
-never a return value. With `:api-key` unset the client reads `ANTHROPIC_API_KEY` for the anthropic
-style, `OPENAI_API_KEY` for the openai style, then `OPENROUTER_API_KEY` as a shared fallback.
+never a return value. With `:api-key` unset the key comes from the env var `:api-key-env` names,
+else **only** from the env var that belongs to the `:base-url` host, over https:
+`api.openai.com` → `OPENAI_API_KEY`, `api.anthropic.com` → `ANTHROPIC_API_KEY`, `openrouter.ai` →
+`OPENROUTER_API_KEY`. Any other host, or plain http, throws without `:api-key` / `:api-key-env`
+(**breaking in 0.22.0** — there is no cross-provider fallback any more). See
+[API key by host](/api/clojure/client/api-key/).
 
 ## When to use it
 
@@ -58,7 +65,8 @@ style, `OPENAI_API_KEY` for the openai style, then `OPENROUTER_API_KEY` as a sha
   emission, parallel tool execution, results fed back in the provider's own shape, bounded by
   `:max-turns`.
 - **When you need to reach a gateway** — OpenRouter, a company proxy, a local model server. Set
-  `:base-url` and the style its wire format matches; nothing else changes.
+  `:base-url` and the style its wire format matches, plus `:api-key` or `:api-key-env` for any host
+  that is not OpenAI, Anthropic or OpenRouter.
 
 ## Why this and not the alternative
 
@@ -157,7 +165,11 @@ routed through it.
 | `:base-url` | — | **Required.** Trailing slashes are trimmed. |
 | `:model` | — | **Required.** Sent as `model` and echoed on the RunResult. |
 | `:style` | `"openai"` | `"openai"` or `"anthropic"`. Anything else normalizes to `"openai"`. |
-| `:api-key` | env | Falls back to `ANTHROPIC_API_KEY` / `OPENAI_API_KEY`, then `OPENROUTER_API_KEY`. |
+| `:api-key` | env | Else `:api-key-env`, else only the host's own env var (https `api.openai.com` / `api.anthropic.com` / `openrouter.ai`). Any other host throws. |
+| `:api-key-env` | `nil` | The **name** of the env var to read the key from. See [API key by host](/api/clojure/client/api-key/). |
+| `:prompt-cache` | `nil` | `{:key :long-ttl}` — see [prompt cache](/api/clojure/client/prompt-cache/). Absent ⇒ body byte-identical. |
+| `:tool-tiers` | `nil` | `{:core :deferred …}` — see [tool tiers](/api/clojure/client/tool-tiers/). Absent ⇒ every tool is sent. |
+| `:wait-for-ctx` | `nil` | `(fn [ctx request] answer)` — `:wait-for` with the turn's context; wins when both are set. |
 | `:headers` | `nil` | Merged over the auth headers the style built. |
 | `:system-prompt` | `nil` | Joined to the toolkit's skills prompt with a blank line. Empty parts are dropped. |
 | `:max-turns` | `10` | Hard cap on LLM round trips. |

@@ -1,0 +1,96 @@
+---
+title: "Toolnexus.Mcp.resource_tools"
+description: "Opt-in list_mcp_resources / read_mcp_resource tools over every connected MCP server. Read-only. — Elixir."
+sidebar:
+  label: "Toolnexus.Mcp.resource_tools"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Elixir</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §2</a>
+</p>
+
+```elixir
+@spec resource_tools(Toolnexus.Mcp.Source.t() | nil) :: [Toolnexus.Tool.t()]
+def resource_tools(source)
+# => [list_mcp_resources, read_mcp_resource]
+```
+
+Two tools bound to the source's connected servers: `list_mcp_resources %{server?}` prints one
+line per resource (`server uri — name (mimeType): description`) and `read_mcp_resource
+%{server, uri}` returns its text. Both carry `%Toolnexus.ToolHints{read_only: true}`. They are
+**opt-in** — `Mcp.load/2` does not add them; register them yourself — and they stop working
+when the source is closed (a closed server reports an error line, not a crash). `nil`, or a
+source with no connected server, still returns both tools; listing then says `No resources.`
+
+## When to use it
+
+- **MCP servers that expose data as resources** (files, schemas, docs) rather than tools.
+- **A read-only agent mode** — both tools are read-only, so a plan-mode `before_tool` gate lets
+  them through.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Not a custom tool per resource">
+You could wrap each resource in its own `define_tool`, but the set of resources changes with the
+server. Two generic tools let the model discover and read whatever is there now.
+</Aside>
+
+## Examples
+
+### 1. With no source
+
+```elixir test
+alias Toolnexus.{Context, Mcp, ToolHints}
+
+[list, read] = Mcp.resource_tools(nil)
+true = list.name == "list_mcp_resources" and read.name == "read_mcp_resource"
+true = list.hints == %ToolHints{read_only: true}
+%{output: "No resources.", metadata: %{count: 0}} = list.execute.(%{}, %Context{})
+IO.puts("ok: #{list.name}, #{read.name}")
+```
+
+### 2. Register them on a toolkit
+
+```elixir test
+alias Toolnexus.{Mcp, Toolkit}
+
+source = Mcp.load(%{})
+tk = Toolkit.register(Toolnexus.create_toolkit!(builtins: false), Mcp.resource_tools(source))
+r = Toolkit.execute(tk, "list_mcp_resources", %{})
+true = r.output == "No resources."
+Mcp.close(source)
+IO.puts("ok: resource tools on the toolkit")
+```
+
+### 3. Against a real stdio server
+
+The shared fixture `examples/mcp-progress-server.mjs` serves one resource, `fixture://hello`.
+Skipped when `node` is not installed.
+
+```elixir test
+alias Toolnexus.{Context, Mcp}
+
+repo = System.get_env("TOOLNEXUS_REPO") || File.cwd!()
+fixture = Path.join(repo, "examples/mcp-progress-server.mjs")
+
+if System.find_executable("node") && File.exists?(fixture) do
+  src = Mcp.load(%{"progress" => %{"command" => ["node", fixture], "timeout" => 5000}})
+  [list, read] = Mcp.resource_tools(src)
+  "progress fixture://hello — hello (text/plain): A fixed text resource." = list.execute.(%{}, %Context{}).output
+  %{output: "hello resource", is_error: false} =
+    read.execute.(%{"server" => "progress", "uri" => "fixture://hello"}, %Context{})
+  Mcp.close(src)
+  IO.puts("ok: read fixture://hello")
+else
+  IO.puts("ok: skipped (no node)")
+end
+```
+
+## See also
+
+- [`Toolnexus.Mcp.load`](/api/elixir/mcp/load/) — Read an mcp.json, connect every local stdio and remote streamable-HTTP server, expose each server tool as a Tool.
+- [`Toolnexus.Mcp.load`](/api/elixir/mcp/load-with-context/) — The ctx-aware load: bound connection time and cancel a slow or hung server without leaking a child process.
+- [`Toolnexus.Mcp.list_tools`](/api/elixir/mcp/list-tools/) — List what each configured server would expose, plus per-server status, without wiring it into a toolkit.
+- [`Toolnexus.Mcp.parse_config`](/api/elixir/mcp/parse-config/) — Parse and validate config without connecting — the fast fail for a malformed or misspelled server block.

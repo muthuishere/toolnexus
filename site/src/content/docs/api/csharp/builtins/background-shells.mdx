@@ -1,0 +1,128 @@
+---
+title: "BackgroundShells"
+description: "Opt-in background shells: bash gains run_in_background, bash_output reads new output, kill_shell stops the process group. The host owns the registry and closes it. — C#."
+sidebar:
+  label: "BackgroundShells"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>C#</strong> · package <code>Toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §4A</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/csharp/src/Toolnexus/BuiltinExtras.cs">BuiltinExtras.cs</a>
+</p>
+
+```csharp
+public sealed class BackgroundShells
+{
+    public List<BackgroundShellInfo> List();
+    public Task KillAsync(string id);
+    public Task CloseAllAsync();
+    public void CloseAll();
+}
+
+public sealed record BackgroundShellInfo(string Id, string Command, DateTimeOffset Started,
+    bool Running, int ExitCode, bool Killed);
+
+// Turned on through the builtins config:
+new Dictionary<string, object?> { ["background"] = new BackgroundShells() }
+```
+
+Opt-in. With a `BackgroundShells` under the builtins config key `background`:
+
+- `bash` gains `run_in_background: true`, which returns at once with `Metadata["backgroundId"]`.
+- **`bash_output {id}`** returns the output produced since the last read, then
+  `[status: running|killed|exited with code N]` (`Metadata["status"]`, `Metadata["exitCode"]`).
+  N is `-1` for a shell killed by a signal it did not get from `kill_shell`.
+- **`kill_shell {id}`** stops the whole process group: SIGTERM, `killGraceMs` (default 2000), SIGKILL.
+
+A background command is not tied to the turn that started it, so the host owns the registry and
+calls `CloseAll` on shutdown. POSIX only. The other opt-in builtins, `webSearch` and
+`notebookEdit`, are on [`BuiltinTools.Create`](/api/csharp/builtins/create/).
+
+## When to use it
+
+A coding agent that starts a dev server, a watcher or a long build and keeps working while it runs,
+checking the output later.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Background shells, not a long bash timeout">
+A plain `bash` call blocks the turn until the command ends or times out, and a server never ends.
+Use plain `bash` for anything that finishes; background shells for anything that should outlive the call.
+</Aside>
+
+## Examples
+
+### 1. Off by default, two more tools when on
+
+```csharp test
+using Toolnexus;
+
+var plainNames = BuiltinTools.Create().Select(t => t.Name).ToList();
+if (plainNames.Contains("bash_output")) throw new Exception("background tools must be opt-in");
+
+var bg = new BackgroundShells();
+var names = BuiltinTools.Create(new Dictionary<string, object?> { ["background"] = bg }).Select(t => t.Name).ToList();
+if (!names.Contains("bash_output") || !names.Contains("kill_shell")) throw new Exception(string.Join(",", names));
+bg.CloseAll();
+Console.WriteLine($"ok: {plainNames.Count} default builtins, {names.Count} with background shells");
+```
+
+### 2. Start a command, read its output as it arrives
+
+```csharp test
+using Toolnexus;
+
+var bg = new BackgroundShells();
+try
+{
+    var tools = BuiltinTools.Create(new Dictionary<string, object?> { ["background"] = bg });
+    var bash = tools.Single(t => t.Name == "bash");
+    var output = tools.Single(t => t.Name == "bash_output");
+
+    var started = await bash.ExecuteAsync(new Dictionary<string, object?> { ["command"] = "echo one; sleep 0.2; echo two", ["run_in_background"] = true });
+    var id = (string)started.Metadata!["backgroundId"]!;
+
+    var seen = "";
+    var deadline = DateTime.UtcNow.AddSeconds(5);
+    while (true)
+    {
+        var o = await output.ExecuteAsync(new Dictionary<string, object?> { ["id"] = id });
+        seen += o.Output.Split("\n[status:")[0];
+        if ((string)o.Metadata!["status"]! == "exited") break;
+        if (DateTime.UtcNow > deadline) throw new Exception("never exited");
+        await Task.Delay(50);
+    }
+    if (!seen.Contains("one") || !seen.Contains("two")) throw new Exception(seen);
+    Console.WriteLine($"ok: {id} produced {seen.Replace("\n", " ").Trim()}");
+}
+finally { bg.CloseAll(); }
+```
+
+### 3. Kill a stubborn job, and close everything on shutdown
+
+```csharp test
+using Toolnexus;
+
+var bg = new BackgroundShells();
+var tools = BuiltinTools.Create(new Dictionary<string, object?> { ["background"] = bg, ["killGraceMs"] = 100L });
+var bash = tools.Single(t => t.Name == "bash");
+var kill = tools.Single(t => t.Name == "kill_shell");
+
+// Ignores SIGTERM and has a child: kill_shell still stops the whole group after killGraceMs.
+var r = await bash.ExecuteAsync(new Dictionary<string, object?> { ["command"] = "trap '' TERM; sleep 30 & wait", ["run_in_background"] = true });
+var id = (string)r.Metadata!["backgroundId"]!;
+await Task.Delay(100);
+var k = await kill.ExecuteAsync(new Dictionary<string, object?> { ["id"] = id });
+if (k.Metadata!["killed"] is not true) throw new Exception(k.Output);
+
+await bash.ExecuteAsync(new Dictionary<string, object?> { ["command"] = "sleep 30", ["run_in_background"] = true });
+await bg.CloseAllAsync();   // what a host calls on shutdown
+if (bg.List().Any(j => j.Running)) throw new Exception("still running after CloseAll");
+Console.WriteLine($"ok: {bg.List().Count} jobs, none running");
+```
+
+## See also
+
+- [`BuiltinTools.Select`](/api/csharp/builtins/select/) — Pick which built-in file/shell/web tools are in play, by name or by source toggle.
+- [`BuiltinTools.Create`](/api/csharp/builtins/create/) — Construct every built-in tool directly, outside a toolkit.

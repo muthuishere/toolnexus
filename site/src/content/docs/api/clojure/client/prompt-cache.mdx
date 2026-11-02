@@ -1,0 +1,170 @@
+---
+title: "prompt-cache"
+description: "Mark the stable prompt prefix for the provider (Anthropic cache breakpoints, OpenAI prompt_cache_key) and read cacheRead/cacheWrite tokens from usage. — Clojure."
+sidebar:
+  label: "prompt-cache"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Clojure (JVM) + cljgo</strong> · package <code>net.clojars.muthuishere/toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/clojure/src/toolnexus/client.cljc">clojure/src/toolnexus/client.cljc</a>
+</p>
+
+```clojure
+(create-client {… :prompt-cache {:key "session-1"   ; openai: sent as prompt_cache_key
+                                 :long-ttl true}})  ; anthropic: ttl "1h" on each breakpoint
+
+;; usage on every RunResult then carries, when the provider reports them:
+;;   :cache-read-tokens  :cache-write-tokens
+```
+
+`:prompt-cache` marks the stable prefix of every request for the provider's cache. Under the
+anthropic style the client puts `cache_control {:type "ephemeral"}` (plus `:ttl "1h"` with
+`:long-ttl`) on the last tool, on the system prompt (a string becomes one text block) and on the last
+content block of the latest message. Under the openai style it sends `prompt_cache_key` = `:key`
+(OpenAI caches the prefix by itself). Gemini gets nothing yet. The marks go on before
+`:request-params` and `:body-transform`, so both can still override them, and the transcript itself
+is never changed. Absent, the body is byte-identical to 0.21.
+
+Usage gains `:cache-read-tokens` and `:cache-write-tokens`. Under anthropic the real context size is
+`:prompt-tokens + :cache-read-tokens + :cache-write-tokens` (Anthropic's input count excludes cached
+tokens); under openai `:prompt-tokens` already includes the cached part.
+
+## When to use it
+
+- **Long system prompts or big skills catalogs** — the stable prefix is paid for once, then read.
+- **Many tools** — the tools array is part of the prefix; combine with
+  [tool tiers](/api/clojure/client/tool-tiers/) so registering a tool mid-session does not break it.
+- **To watch cache hits** — a drop in `:cache-read-tokens` shows a prefix that changed.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Hand-placing cache_control in :body-transform">
+You can add `cache_control` yourself in `:body-transform`, but you then own the breakpoint
+placement on every request. `:prompt-cache` places the three breakpoints the same way in every
+port. Use `:body-transform` only for a placement it does not cover.
+</Aside>
+
+## Examples
+
+### 1. Anthropic: breakpoints on tools, system and the latest message
+
+```clojure test
+(require '[toolnexus.client :as client]
+         '[toolnexus.core :as core]
+         '[toolnexus.native :as native]
+         '[koine.json :as json])
+
+(println)
+
+(defn body-of [b] (if (string? b) (json/read-str b) b))
+
+(defn mock-llm
+  "An :http-client that records every request body and answers from `replies` in order."
+  [seen replies]
+  (let [q (atom replies)]
+    (fn [_url _headers body]
+      (swap! seen conj (body-of body))
+      (let [r (first @q)]
+        (swap! q #(if (next %) (vec (rest %)) %))
+        {:status 200 :headers {} :body (json/write-str r)}))))
+
+(def seen (atom []))
+
+(def llm (client/create-client
+           {:base-url "https://api.anthropic.com" :style "anthropic" :model "claude-sonnet-4-5"
+            :api-key "YOUR_KEY_HERE"
+            :system-prompt "You are a release engineer."
+            :prompt-cache {:long-ttl true}
+            :http-client (mock-llm seen [{:content [{:type "text" :text "ok"}] :stop_reason "end_turn"
+                                         :usage {:input_tokens 10 :output_tokens 2
+                                                 :cache_read_input_tokens 900 :cache_creation_input_tokens 0}}])}))
+
+(def tk (core/build {:tools [(native/native-tool {:name "notes" :description "Read notes." :run (fn [_] "n")})]}))
+(def r (client/run llm "ship it" {:toolkit tk}))
+
+(def body (first @seen))
+(assert (= {:type "ephemeral" :ttl "1h"} (:cache_control (last (:tools body)))))
+(assert (= {:type "ephemeral" :ttl "1h"} (:cache_control (first (:system body)))))
+(assert (= {:type "ephemeral" :ttl "1h"} (:cache_control (last (:content (last (:messages body)))))))
+(assert (= 900 (get-in r [:usage :cache-read-tokens])))
+(println "OK")
+```
+
+### 2. OpenAI: a cache key, and the cached count read back
+
+```clojure test
+(require '[toolnexus.client :as client]
+         '[toolnexus.tool :as tool]
+         '[koine.json :as json])
+
+(println)
+
+(defn body-of [b] (if (string? b) (json/read-str b) b))
+
+(defn mock-llm
+  "An :http-client that records every request body and answers from `replies` in order."
+  [seen replies]
+  (let [q (atom replies)]
+    (fn [_url _headers body]
+      (swap! seen conj (body-of body))
+      (let [r (first @q)]
+        (swap! q #(if (next %) (vec (rest %)) %))
+        {:status 200 :headers {} :body (json/write-str r)}))))
+
+(def seen (atom []))
+
+(def llm (client/create-client
+           {:base-url "https://api.openai.com/v1" :model "gpt-4.1" :api-key "YOUR_KEY_HERE"
+            :prompt-cache {:key "session-42"}
+            :http-client (mock-llm seen [{:choices [{:message {:role "assistant" :content "hi"}}]
+                                         :usage {:prompt_tokens 1200 :completion_tokens 3 :total_tokens 1203
+                                                 :prompt_tokens_details {:cached_tokens 1024}}}])}))
+
+(def r (client/run llm "hello" {:toolkit (tool/toolkit [])}))
+(assert (= "session-42" (:prompt_cache_key (first @seen))))
+(assert (= 1024 (get-in r [:usage :cache-read-tokens])))
+(assert (= 1200 (get-in r [:usage :prompt-tokens])) "openai prompt tokens already include the cached part")
+(println "OK")
+```
+
+### 3. Off is byte-identical
+
+```clojure test
+(require '[toolnexus.client :as client]
+         '[toolnexus.tool :as tool]
+         '[koine.json :as json])
+
+(println)
+
+(defn body-of [b] (if (string? b) (json/read-str b) b))
+
+(defn mock-llm
+  "An :http-client that records every request body and answers from `replies` in order."
+  [seen replies]
+  (let [q (atom replies)]
+    (fn [_url _headers body]
+      (swap! seen conj (body-of body))
+      (let [r (first @q)]
+        (swap! q #(if (next %) (vec (rest %)) %))
+        {:status 200 :headers {} :body (json/write-str r)}))))
+
+(def seen (atom []))
+(def reply [{:content [{:type "text" :text "ok"}] :stop_reason "end_turn" :usage {:input_tokens 1 :output_tokens 1}}])
+
+(def llm (client/create-client {:base-url "https://api.anthropic.com" :style "anthropic" :model "m"
+                                 :api-key "YOUR_KEY_HERE" :system-prompt "s"
+                                 :http-client (mock-llm seen reply)}))
+(def r (client/run llm "hi" {:toolkit (tool/toolkit [])}))
+
+(assert (string? (:system (first @seen))) "no :prompt-cache ⇒ system stays a string")
+(assert (not (re-find #"cache_control" (json/write-str (first @seen)))))
+(assert (nil? (get-in r [:usage :cache-read-tokens])) "uncached usage has no cache keys")
+(println "OK")
+```
+
+## See also
+
+- [`tool-tiers`](/api/clojure/client/tool-tiers/) — keep the tools array, and so the cached prefix, stable.
+- [`metrics`](/api/clojure/client/metrics/) — usage on every model call.

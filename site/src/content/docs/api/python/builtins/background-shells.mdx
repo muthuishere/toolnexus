@@ -1,0 +1,138 @@
+---
+title: "BackgroundShells"
+description: "Opt-in background shells: bash gains run_in_background, bash_output reads new output, kill_shell stops the process group. The host owns the registry and closes it. — Python."
+sidebar:
+  label: "BackgroundShells"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Python</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §4A</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/python/src/toolnexus/builtin_extras.py">python/src/toolnexus/builtin_extras.py</a>
+</p>
+
+```python
+class BackgroundShells:
+    def list(self) -> list[BackgroundShellInfo]   # oldest first
+    def kill(self, job_id: str) -> None           # KeyError on an unknown id
+    def close_all(self) -> None                   # stop everything still running
+
+create_toolkit(builtins={"background": BackgroundShells(), "kill_grace_ms": 2000})
+
+# bash        {command, run_in_background: true} -> metadata["backgroundId"]
+# bash_output {id}  output since the last read + "[status: running|killed|exited with code N]"
+# kill_shell  {id}  SIGTERM the process group, wait kill_grace_ms, then SIGKILL
+```
+
+Passing a `BackgroundShells` as `builtins["background"]` turns on three things: `bash` gains a
+`run_in_background` flag, and two tools appear, `bash_output` and `kill_shell`. Without it none of
+this exists and the default builtins are unchanged. A background command is **not** tied to the
+turn that started it, so the host owns the registry and must call `close_all()` on shutdown.
+A shell killed by a signal it did not get from `kill_shell` reports `exited with code -1`.
+
+<Aside type="note" title="The other opt-in builtins">
+The same `builtins` dict also turns on `websearch` (`"web_search": fn(query, limit)`, a provider
+you supply — none ships) and `notebook_edit` (`"notebook_edit": True`). See
+[`create_builtin_tools`](/api/python/builtins/create/).
+</Aside>
+
+## When to use it
+
+- A coding agent that must start a dev server or a watch build and keep working while it runs.
+- Long test suites whose output the model polls instead of blocking a turn.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Background shells over a long bash timeout">
+A plain `bash` call blocks the turn until it ends or times out. Use background shells only for
+commands that outlive a turn; for anything that finishes, plain `bash` is simpler and leaves
+nothing to clean up.
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call — start, poll, read
+
+```python test
+import asyncio
+
+from toolnexus import BackgroundShells, create_toolkit
+
+
+async def main():
+    bg = BackgroundShells()
+    tk = await create_toolkit(builtins={"background": bg})
+    try:
+        r = await tk.execute("bash", {"command": "echo built", "run_in_background": True})
+        bid = r.metadata["backgroundId"]
+        while True:
+            out = await tk.execute("bash_output", {"id": bid})
+            if out.metadata["status"] != "running":
+                break
+            await asyncio.sleep(0.05)
+        assert out.output.startswith("built"), out.output
+        assert out.output.endswith("[status: exited with code 0]"), out.output
+        print("ok:", bid, out.metadata["status"])
+    finally:
+        bg.close_all()
+
+
+asyncio.run(main())
+```
+
+### 2. The realistic case — stop a long-running server with kill_shell
+
+```python test
+import asyncio
+
+from toolnexus import BackgroundShells, create_toolkit
+
+
+async def main():
+    bg = BackgroundShells()
+    tk = await create_toolkit(builtins={"background": bg, "kill_grace_ms": 100})
+    try:
+        r = await tk.execute("bash", {"command": "sleep 30", "run_in_background": True})
+        bid = r.metadata["backgroundId"]
+        k = await tk.execute("kill_shell", {"id": bid})
+        assert not k.is_error and k.metadata["killed"] is True
+        out = await tk.execute("bash_output", {"id": bid})
+        assert out.metadata["status"] == "killed"
+        print("ok: killed", bid)
+    finally:
+        bg.close_all()
+
+
+asyncio.run(main())
+```
+
+### 3. The full surface — the host's view, and shutdown
+
+```python test
+import asyncio
+
+from toolnexus import BackgroundShells, create_toolkit
+
+
+async def main():
+    bg = BackgroundShells()
+    tk = await create_toolkit(builtins={"background": bg, "kill_grace_ms": 100})
+    assert "run_in_background" in tk.get("bash").input_schema["properties"]
+    for cmd in ("sleep 30", "sleep 30"):
+        await tk.execute("bash", {"command": cmd, "run_in_background": True})
+    running = [i for i in bg.list() if i.running]
+    assert len(running) == 2
+    bg.close_all()  # on host shutdown: stops every process group
+    assert not any(i.running for i in bg.list())
+    plain = await create_toolkit()
+    assert plain.get("bash_output") is None  # off unless configured
+    print("ok: closed", len(running), "background shells")
+
+
+asyncio.run(main())
+```
+
+## See also
+
+- [`select_builtins`](/api/python/builtins/select/) — Pick which built-in file/shell/web tools are in play, by name or by source toggle.
+- [`create_builtin_tools`](/api/python/builtins/create/) — Construct every built-in tool directly, outside a toolkit.

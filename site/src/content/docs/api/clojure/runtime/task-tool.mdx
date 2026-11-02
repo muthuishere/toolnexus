@@ -292,6 +292,26 @@ token spend is already rolled into `boss`'s own totals by the time `wait` return
 (println "OK")
 ```
 
+## `as-tool-with` — a child agent under the parent's gates (0.22.0)
+
+`agents.runtime/as-tool` now closes the child run when the calling turn is cancelled (the ctx's
+`:cancel` token) and returns a `cancelled: …` error result. `as-tool-with` builds the runtime
+options **per call** from the calling tool's context, so the child gets the same `:hooks`
+(permission gate — it sees the child's tool calls) and `:wait-for` (question bridge) as the parent
+turn. Runtime `:wait-for` answers a child's suspension when no agent on its chain has its own. A
+def's own `:hooks` replaces the runtime's, so leave it unset when the gate must hold.
+
+```clojure
+(rt/as-tool-with writer-def
+  (fn [tool-ctx]
+    {:llm      llm-opts
+     :hooks    {:before-tool permission-gate}
+     :wait-for ask-the-user}))
+```
+
+The child's text is not streamed token by token; the tool returns its final text plus
+`{:agent :turns :total-tokens}`.
+
 ## See also
 
 - [`AgentDef`](/api/clojure/runtime/agent/) — `:team` is the only switch that turns `task-tool` on
