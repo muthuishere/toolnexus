@@ -1,8 +1,8 @@
 # Changelog
 
 All ports are versioned and released together; entries here apply to every port unless a port
-is named. All seven ports are at tier `full` (js / python / golang / java / csharp / elixir /
-clojure) — see `conformance/options_manifest.json`, which is where a
+is named. Seven ports are at tier `full` (js / python / golang / java / csharp / elixir /
+clojure) and rust is at tier `core` — see `conformance/options_manifest.json`, which is where a
 port's tier is declared, never by the port about itself. Releases are cut as
 GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
 
