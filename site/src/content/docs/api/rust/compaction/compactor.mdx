@@ -8,19 +8,46 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7F</a>
+<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7F</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/rust/src/agents/compaction.rs">rust/src/agents/compaction.rs</a>
 </p>
 
-<Aside type="caution" title="Not available in Rust">
-Context compaction (§7F) is not ported to Rust. Tracked in `openspec/changes/add-rust-port`.
-</Aside>
+```rust
+pub fn compactor(opts: CompactorOptions) -> BeforeLlmHook        // toolnexus::agents
+pub struct CompactorOptions {
+    pub max_tokens: usize, pub keep_tail: usize,                 // keep_tail 0 ⇒ max_tokens / 2
+    pub summarize: Option<SummarizeFn>,                          // required; MAY call an LLM
+    pub count_tokens: Option<CountTokensFn>,                     // default estimate_tokens
+    pub flush_to_memory: bool,
+    pub on_compact: Option<OnCompactFn>,                         // called after each compaction
+}
+pub struct CompactInfo { pub tokens_before: usize, pub tokens_after: usize, pub messages_before: usize,
+                         pub messages_after: usize, pub summarized: usize, pub summary: String,
+                         pub folded: Vec<Value> }
+pub fn estimate_tokens(messages: &[Value]) -> usize              // Σ ceil(len(JSON) / 4)
+```
 
-Summarise older turns when the transcript grows, so a long-lived agent stays inside its context window.
+A `before_llm` hook — no loop change. At or under `max_tokens` it is a no-op (byte-identical to no
+compactor). Over it, the older head becomes one `[Summary of earlier conversation]` system message;
+the retained tail always starts at a user turn that carries no tool result (no tool result is ever
+orphaned, in either dialect); the leading system prompt stays verbatim; a sole user prompt is kept;
+a compaction that would not shrink the transcript is skipped. `on_compact` receives the counts and
+the folded messages verbatim, so a host can persist what was summarized away.
 
-## What to use instead
+## Example
 
-Trim `Conversation.messages` yourself, or rely on `max_turns`.
+```rust
+use std::sync::Arc;
+use toolnexus::agents::{CompactorOptions, compactor};
+let hook = compactor(CompactorOptions {
+    max_tokens: 8000, keep_tail: 3000,
+    summarize: Some(Arc::new(|older| Box::pin(async move { Ok(format!("{} earlier messages", older.len())) }))),
+    on_compact: Some(Arc::new(|info| eprintln!("compacted {} → {}", info.tokens_before, info.tokens_after))),
+    ..Default::default()
+});
+let hooks = toolnexus::client::Hooks { before_llm: Some(hook), ..Default::default() };
+// ClientOptions { hooks, .. } — or Def.hooks / Options.hooks for an agent
+```
 
 ## See also
 
-- [`create_toolkit`](/api/rust/toolkit/create/) — Collapse MCP servers, skills, built-ins, A2A agents and your own functions into one tool list.
+- [Agent](/api/rust/runtime/agent/) · [memory tool](/api/rust/persona/memory-tool/)

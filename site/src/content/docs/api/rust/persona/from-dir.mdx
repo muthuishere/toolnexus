@@ -8,19 +8,35 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7E</a>
+<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7E</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/rust/src/agents/home.rs">rust/src/agents/home.rs</a>
 </p>
 
-<Aside type="caution" title="Not available in Rust">
-Personas (§7E) are not ported to Rust. Tracked in `openspec/changes/add-rust-port`.
-</Aside>
+```rust
+pub fn from_dir(dir: impl AsRef<Path>, opts: FromDirOptions) -> Agent   // toolnexus::agents
+pub struct FromDirOptions { pub does: String, pub name: String, pub model: String,
+                            pub tools: Vec<Tool>, pub memory: Option<bool> }
+pub fn start_agent(a: &Agent, opts: StartOptions) -> Result<StartedAgent, String>
+pub struct StartOptions { pub options: Options, pub every_ms: u64, pub on_beat: Option<OnBeatFn> }
+```
 
-Point at an agent home directory and get a configured agent back.
+The directory IS the agent: `from_dir` composes the soul from the bootstrap files and wires the
+`memory` tool over the same directory (`memory: Some(false)` omits it). The name defaults to the
+directory's base name, the model to `"inherit"`. `start_agent` gives the persona a heartbeat: each
+interval it posts a tick to the agent's own inbox (ticks coalesce) and, when idle, wakes it with
+"read HEARTBEAT.md and act, else reply HEARTBEAT_OK"; a `HEARTBEAT_OK` reply stays silent. All
+timing goes through the runtime `Clock`. Inbound channels are the host's job (`post` / `wake`).
 
-## What to use instead
+## Example
 
-Build `ToolkitOptions` + `ClientOptions.system_prompt` from the directory yourself.
+```rust
+use toolnexus::agents::{FromDirOptions, Options, StartOptions, from_dir, start_agent};
+let ava = from_dir("./ava", FromDirOptions::default());
+let (r, _) = ava.run(Options { in_process: Some(model.clone()), ..Default::default() }, "who are you?").await;
+let hb = start_agent(&ava, StartOptions { options: Options { in_process: Some(model), ..Default::default() },
+                                          every_ms: 60_000, ..Default::default() })?;
+// … hb.beats() collects substantive beats; hb.stop().await tears it down
+```
 
 ## See also
 
-- [`create_toolkit`](/api/rust/toolkit/create/) — Collapse MCP servers, skills, built-ins, A2A agents and your own functions into one tool list.
+- [compose_soul](/api/rust/persona/compose-soul/) · [memory tool](/api/rust/persona/memory-tool/)

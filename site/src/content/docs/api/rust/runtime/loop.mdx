@@ -8,19 +8,43 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7D</a>
+<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7D</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/rust/src/agents/agent_loop.rs">rust/src/agents/agent_loop.rs</a>
 </p>
 
-<Aside type="caution" title="Not available in Rust">
-`Loop` (§7D) is not ported to Rust. Tracked in `openspec/changes/add-rust-port`.
-</Aside>
+```rust
+impl Agent { pub fn loop_(&self, opts: ClientOptions, tk: Toolkit) -> Loop }
+impl Loop {
+    pub async fn run(&mut self, cancel: CancellationToken, prompt: &str, opts: RunOpts)
+        -> Result<Outcome, ClientError>
+    pub fn unsupported(&self) -> Vec<String>
+    pub fn status(&self) -> &str
+    pub fn turns(&self) -> usize
+}
+pub fn loop_unsupported(sp: &Spec) -> Vec<String>       // "tools" | "team" | "waitFor" | "onMetric"
+pub fn all_todos_done(r: &RunResult) -> (bool, String)  // built-in Completion verifier
+pub struct Completion { pub verify: Option<VerifyFn>, pub max_attempts: usize }
+pub type Guardrail = Arc<dyn Fn(&BeforeToolEvent) -> String + Send + Sync>;
+```
 
-Agent.Loop(...).Run drives the agent under a Guardrail policy that vets every tool call and a Completion check that decides when the task is done — the gated door beside the plain Agent.Run, with unsupported spec fields (tools, team, waitFor, onMetric) named explicitly rather than silently dropped.
+The other door: drive an agent over a client and toolkit YOU built. The Spec is honoured — the soul
+is the default system prompt (a caller `system_prompt` wins), guardrails compile to one
+first-deny-wins `before_tool`, the Spec model and `budget.max_turns` are defaults, and
+`RunOpts.model` overrides the model for one call. `Completion` re-runs with the failure reason
+until `verify` passes or `max_attempts` is spent, then stops as `incomplete` with
+`limit: "completion"`. A suspension is never re-judged by the gate. Spec fields the Loop cannot
+carry are reported by `unsupported()`, not dropped silently.
 
-## What to use instead
+## Example
 
-Call `Client::run` / `ask` in your own loop.
+```rust
+use toolnexus::agents::{self, Completion, RunOpts, Spec};
+let a = agents::new("worker", Spec { does: "works".into(),
+    completion: Some(Completion::new(agents::all_todos_done, 3)), ..Default::default() });
+let mut l = a.loop_(client_opts, toolkit);
+let out = l.run(Default::default(), "do it", RunOpts::default()).await?;
+// out.status: "done" | "incomplete" (out.stopped_by names why) | "pending"
+```
 
 ## See also
 
-- [`create_toolkit`](/api/rust/toolkit/create/) — Collapse MCP servers, skills, built-ins, A2A agents and your own functions into one tool list.
+- [Agent](/api/rust/runtime/agent/) · [vocabulary](/api/rust/runtime/vocabulary/)

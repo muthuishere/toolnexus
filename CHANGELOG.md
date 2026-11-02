@@ -55,7 +55,20 @@ core types that were already there:
   byte-identical canonical request. All seven shared `examples/judge/` fixtures pass, hashes included.
 - **Judge adapters and batteries**: `ask` / `gate` / `Policy` / `Tape`, and all eight batteries
   including the opt-in `ModelRouter`, with their hooks, against the shared battery fixtures.
-- Runnable examples (`cargo run --example basic|agent|native_http|streaming|pending|acp`).
+- **Agents (§7D–§7F)**: `toolnexus::agents` — the runtime with the six verbs, the three gates,
+  hierarchical budgets with a named `limit` on every stop, nearest-interpreter escalation and the
+  runtime-level `wait_for`, durable pending + `resume` with task reattachment; `Agent` / `Spec`
+  with team wiring, `run`, `as_tool` / `as_tool_with` (the child runs under the calling turn's
+  cancellation, hooks gate and ask bridge); the `Loop` door with the completion gate and
+  guardrails; personas (`from_dir`, `compose_soul`, `memory_tool`, `start_agent`); and
+  `compactor` with 0.22.0's `on_compact` / `CompactInfo`. Ported from golang/agents with its tests
+  (92, hermetic); the trace strings and the recorded unset-run golden are byte-identical to Go.
+- **Relay tools and durable resume**: `relay_tool`, `run_with_answer` / `ask_with_answer`,
+  `answer_output` / `answer_declined` / `relay_answer`, and the relay-vs-builtin collision guard.
+- **MCP elicitation**: `ToolkitOptions.wait_for` (and `McpLoadOptions.wait_for`) bridges a
+  server's `elicitation/create` onto §10, form → `input`, URL → `authorization`. Without it the
+  capability is not advertised.
+- Runnable examples (`cargo run --example basic|agent|native_http|streaming|pending|acp|agents`).
 - Release: a `crates` leg in `release.yml`, gated by `ENABLE_CRATES` and using the
   `CARGO_REGISTRY_TOKEN` secret in `prod` (a crate's first publish cannot use Trusted Publishing;
   switch once it exists). It skips a version that is already on crates.io. `preflight` and the
@@ -64,8 +77,7 @@ core types that were already there:
   options are present. Toolkit `agents` and `waitFor` are permitted absences, printed as debt on
   every run.
 
-**Not done in Rust** (`openspec/changes/add-rust-port`): the agents runtime, personas and
-compaction, MCP elicitation, the relay / resume path, and a Gemini client style (Gemini is a
+**Not done in Rust** (`openspec/changes/add-rust-port`): a Gemini client style (Gemini is a
 schema adapter only, as in Go). The Windows code paths compile but have not been run. A few io
 and network error strings come from Rust's libraries and differ from Go's wording; the
 conformance outputs (skill tool, prompt, tool names and schemas) are byte-identical.

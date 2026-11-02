@@ -8,22 +8,24 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §10</a>
+<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §10</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/rust/src/relay.rs">rust/src/relay.rs</a>
 </p>
 
-<Aside type="caution" title="Not available in Rust">
-The `AnswerOutput` helper is not exported in Rust; the builtin `question` renders the answer as JSON internally. Tracked in `openspec/changes/add-rust-port`.
-</Aside>
+```rust
+pub fn answer_output(id: impl Into<String>, output: impl Into<String>) -> Answer   // toolnexus::relay
+```
 
-Wraps a human's typed string reply into the Answer a suspended run resumes with — the success counterpart to answerDeclined.
+The Answer for a single outstanding call: `{ id, ok: true, data: { "output": <output> } }` — the
+one key the engine reads for a relay result and for a durable resume. For several relayed calls,
+or to mark the host's tool as failed, use `relay_answer(id, &[RelayResult { .. }])`.
 
-## What to use instead
+## Example
 
-Format `Answer.data` with `serde_json::to_string`.
+```rust
+use toolnexus::relay::answer_output;
+let res = client.run_with_answer(Default::default(), &tk, halted.messages, &req, &answer_output(&req.id, "us-east-1")).await?;
+```
 
 ## See also
 
-- [`pending`](/api/rust/suspension/pending/) — Return a Pending from a tool to park the run until someone answers.
-- [`auth_required`](/api/rust/suspension/auth-required/) — The auth-shaped suspension: hand back a URL, resume once the user has granted access.
-- [`WaitForFn`](/api/rust/suspension/wait-for/) — The single hook where the host resolves a suspension — in-process prompt or durable queue, same contract.
-- [`pending_of`](/api/rust/suspension/pending-of/) — Detect that a RunResult is parked rather than finished, and get the Request that parked it.
+- [answer_declined](/api/rust/suspension/answer-declined/) · [relay](/api/rust/suspension/relay/)

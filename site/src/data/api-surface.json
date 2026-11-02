@@ -201,7 +201,7 @@
 				"csharp": "McpSource.ElicitationToRequest",
 				"elixir": "Toolnexus.Mcp.Protocol.elicitation_to_request",
 				"clojure": "toolnexus.mcp/elicitation->request",
-				"rust": null
+				"rust": "elicitation_to_request"
 			},
 			"parityNote": "Elixir's elicitation_to_request lives on Toolnexus.Mcp.Protocol, not Toolnexus.Mcp — there is no delegate on the top-level Mcp module."
 		},
@@ -802,7 +802,7 @@
 				"csharp": "Agent",
 				"elixir": "Toolnexus.Agents",
 				"clojure": "AgentDef",
-				"rust": null
+				"rust": "agents.new"
 			},
 			"sources": [
 				"js/examples/agent.ts",
@@ -827,7 +827,7 @@
 				"csharp": "AgentRuntime",
 				"elixir": "Toolnexus.Agents.Runtime",
 				"clojure": "create-runtime",
-				"rust": null
+				"rust": "Runtime.new"
 			},
 			"sources": [
 				"examples/subagent-lifecycle",
@@ -850,7 +850,7 @@
 				"csharp": "Handle",
 				"elixir": "Toolnexus.Agents.Handle",
 				"clojure": "Handle",
-				"rust": null
+				"rust": "agents.Handle"
 			},
 			"parityNote": null
 		},
@@ -869,7 +869,7 @@
 				"csharp": "Budget",
 				"elixir": "Toolnexus.Agents budget",
 				"clojure": "Budget",
-				"rust": null
+				"rust": "agents.Budget"
 			},
 			"sources": [
 				"examples/subagent-budgets"
@@ -910,7 +910,7 @@
 				"csharp": "Home.ComposeSoul",
 				"elixir": "Toolnexus.Agents.Home.compose_soul",
 				"clojure": "toolnexus.agents.home/compose-soul",
-				"rust": null
+				"rust": "compose_soul"
 			},
 			"sources": [
 				"examples/persona-agent",
@@ -934,7 +934,7 @@
 				"csharp": "Home.FromDir",
 				"elixir": "Toolnexus.Agents.Home.from_dir",
 				"clojure": null,
-				"rust": null
+				"rust": "from_dir"
 			},
 			"parityNote": "from-dir composes a persona into an AgentDef, so it needs the §7D runtime this port does not ship yet. compose-soul and memory-tool — the two halves it would combine — ARE shipped: compose the soul yourself and pass it as :system-prompt."
 		},
@@ -953,7 +953,7 @@
 				"csharp": "Home.MemoryTool",
 				"elixir": "Toolnexus.Agents.Home.memory_tool",
 				"clojure": "toolnexus.agents.home/memory-tool",
-				"rust": null
+				"rust": "memory_tool"
 			}
 		},
 		{
@@ -971,7 +971,7 @@
 				"csharp": "Compaction.Compactor",
 				"elixir": "Toolnexus.Agents.Compaction.compactor",
 				"clojure": "toolnexus.agents.compaction/compactor",
-				"rust": null
+				"rust": "compactor"
 			},
 			"sources": [
 				"examples/compaction"
@@ -1071,7 +1071,7 @@
 				"csharp": "AgentRuntime.ResumeAsync",
 				"elixir": "Toolnexus.Agents.Runtime.resume",
 				"clojure": null,
-				"rust": null
+				"rust": "Runtime.resume"
 			},
 			"sources": [
 				"examples/subagent-durable-resume"
@@ -1093,7 +1093,7 @@
 				"csharp": null,
 				"elixir": null,
 				"clojure": null,
-				"rust": null
+				"rust": "relay_tool"
 			},
 			"parityNote": "Go-only today (golang/relay.go). SPEC §10 addendum landed as a Go preview; the other five ports do not ship a relay tool yet. Clojure does not ship a relay tool either."
 		},
@@ -1167,7 +1167,7 @@
 				"csharp": "Answer.Output",
 				"elixir": "Toolnexus.Answer.answer_output/2",
 				"clojure": "answer-output",
-				"rust": null
+				"rust": "answer_output"
 			}
 		},
 		{
@@ -1185,7 +1185,7 @@
 				"csharp": "Answer.Declined",
 				"elixir": "Toolnexus.Answer.answer_declined/2",
 				"clojure": "answer-declined",
-				"rust": null
+				"rust": "answer_declined"
 			}
 		},
 		{
@@ -1203,7 +1203,7 @@
 				"csharp": "AgentStatus.All / RunStatus.All / StopLimit.All / StopLimit.FromPool",
 				"elixir": "Toolnexus.Status.task/0 / run/0 / limits/0 / canonical_limit/1",
 				"clojure": "agents.runtime/statuses / agents.runtime/limits",
-				"rust": null
+				"rust": "TASK_STATUS_DONE"
 			}
 		},
 		{
@@ -1221,7 +1221,7 @@
 				"csharp": "Loop",
 				"elixir": "Toolnexus.Agents.Loop",
 				"clojure": "toolnexus.agents.loop",
-				"rust": null
+				"rust": "Loop"
 			}
 		},
 		{

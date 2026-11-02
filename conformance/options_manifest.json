@@ -422,6 +422,6 @@
     "csharp": "full",
     "elixir": "full",
     "clojure": "full",
-    "rust": "core"
+    "rust": "full"
   }
 }

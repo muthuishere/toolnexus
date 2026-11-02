@@ -9,6 +9,7 @@
 pub mod a2a;
 pub mod acp;
 pub mod adapters;
+pub mod agents;
 pub mod builtins;
 pub mod classifier;
 pub mod client;
@@ -19,6 +20,7 @@ pub mod mcp;
 pub mod mcp_serve;
 #[cfg(feature = "serve")]
 pub mod serve;
+pub mod relay;
 pub mod skills;
 pub mod store;
 pub mod tool;

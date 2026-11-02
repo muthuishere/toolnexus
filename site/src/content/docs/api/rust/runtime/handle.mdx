@@ -8,19 +8,38 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7D</a>
+<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7D</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/rust/src/agents/runtime.rs">rust/src/agents/runtime.rs</a>
 </p>
 
-<Aside type="caution" title="Not available in Rust">
-The §7D handle state machine is not ported to Rust. Tracked in `openspec/changes/add-rust-port`.
-</Aside>
+```rust
+pub struct Handle { pub id: String, /* … */ }      // cheap Clone; a capability
+pub enum State { Idle, Running, Suspended, Closed }
+pub struct TaskResult {
+    pub text: String, pub is_error: bool, pub status: String,
+    pub pending: Option<Request>, pub turns: usize,
+    pub total_tokens: i64, pub own_tokens: i64, pub limit: String,
+}
+pub struct HandleView { pub id: String, pub state: State, pub tokens: i64,
+                        pub turns: usize, pub inbox: usize, pub pending_kind: String }
+```
 
-The state machine for one spawned agent: pending, running, suspended, done.
+A handle is one live agent with a deterministic, parent-scoped id (`root/coordinator.1/explore.2`).
+Its state machine is pinned: idle → running → idle | suspended | closed; suspended → running only
+through the Answer to its pending Request. `turns` and `total_tokens` are cumulative on every
+status; `own_tokens` excludes children. What crosses a handle boundary is always a `TaskResult`,
+never an exception.
 
-## What to use instead
+## Example
 
-Use a tokio `JoinHandle` around `Client::run`.
+```rust
+let h = rt.spawn(&rt.root(), "slow", None)?;
+rt.wake(&h, "work");
+let r = rt.wait(&h, Some(std::time::Duration::from_millis(30))).await;
+// r.status == "timeout", r.limit == "timeout" — the child keeps running
+rt.interrupt(&h);                         // aborts the turn, not the agent; inbox restored
+assert_eq!(rt.state_of(&h), toolnexus::agents::State::Idle);
+```
 
 ## See also
 
-- [`create_toolkit`](/api/rust/toolkit/create/) — Collapse MCP servers, skills, built-ins, A2A agents and your own functions into one tool list.
+- [runtime](/api/rust/runtime/runtime/) · [vocabulary](/api/rust/runtime/vocabulary/)

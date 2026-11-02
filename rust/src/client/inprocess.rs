@@ -261,6 +261,14 @@ impl InProcess {
     }
 }
 
+/// The in-process transport for a bare `generate` (the §7D runtime's model).
+pub(crate) fn transport_of(generate: GenerateFn) -> Transport {
+    Transport::InProcess(Arc::new(InProcess {
+        generate: Some(generate),
+        generate_stream: None,
+    }))
+}
+
 const IN_PROCESS_BASE_URL: &str = "http://in-process.invalid/v1";
 
 /// A client whose "provider" is a host function (`generate` and/or

@@ -21,6 +21,8 @@ pub enum ToolSource {
     Agent,
     /// A remote A2A agent's skill (§7A), wire name `a2a`.
     A2a,
+    /// Declaration-only: the call is surfaced to the host (§10 relay).
+    Relay,
 }
 
 /// What a tool returns. Wire keys match every other port.
@@ -178,7 +180,7 @@ pub fn pending_of(result: &ToolResult) -> Option<Request> {
     Some(req)
 }
 
-fn to_base36(mut n: u64) -> String {
+pub(crate) fn to_base36(mut n: u64) -> String {
     if n == 0 {
         return "0".into();
     }

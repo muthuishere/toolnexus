@@ -127,6 +127,7 @@ async fn on_server_reports_each_server_once() {
                     .unwrap()
                     .push((r.name, r.status, r.tools.len(), r.error.is_some()));
             })),
+            ..Default::default()
         },
     )
     .await;

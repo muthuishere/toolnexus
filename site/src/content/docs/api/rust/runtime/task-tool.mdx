@@ -8,19 +8,35 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7D</a>
+<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7D</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/rust/src/agents/runtime.rs">rust/src/agents/runtime.rs</a>
 </p>
 
-<Aside type="caution" title="Not available in Rust">
-The `task` tool belongs to the §7D runtime, not ported to Rust. Tracked in `openspec/changes/add-rust-port`.
-</Aside>
+```rust
+// Not constructed by hand: a Def with a non-empty `team` gets it on every turn.
+// name: "task", input: { "agent": string, "prompt": string }
+// description: "Delegate a subtask to an isolated subagent. Available agents — <name>: <does>; …"
+```
 
-The opt-in tool that lets the model itself spawn a teammate. Default OFF.
+The model-facing delegation surface. Only an agent that declares a `team` gets a `task` tool
+(recursion is opt-in), and its targets are exactly that team — anything else is an error result
+listing the team. Each call fuses spawn → wake → wait → close into a context-isolated child and
+returns only the child's final text with `{agent, turns, totalTokens}` metadata. A suspending child
+presents exactly as a suspending tool (the §10 Request, with `data.path` naming the leaf). On a
+durable resume, a re-invoked task with the same (agent, prompt) REATTACHES to the existing child
+instead of spawning a duplicate.
 
-## What to use instead
+## Example
 
-A `define_tool` that calls another client's `run`.
+```rust
+use toolnexus::agents::{self, Spec};
+let explore = agents::new("explore", Spec { does: "read-only research".into(), ..Default::default() });
+let coordinator = agents::new("coordinator", Spec {
+    does: "splits and delegates".into(),
+    team: vec![explore],   // ⇒ the coordinator's model sees a `task` tool
+    ..Default::default()
+});
+```
 
 ## See also
 
-- [`create_toolkit`](/api/rust/toolkit/create/) — Collapse MCP servers, skills, built-ins, A2A agents and your own functions into one tool list.
+- [Agent](/api/rust/runtime/agent/) · [resume](/api/rust/suspension/resume/)
