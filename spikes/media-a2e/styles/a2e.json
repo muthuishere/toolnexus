@@ -1,0 +1,38 @@
+{
+  "baseUrl": "https://api.a2e.ai/api",
+  "headers": { "Authorization": "Bearer ${A2E_API_KEY}" },
+  "verbs": {
+    "image": {
+      "mode": "async", "kind": "image",
+      "start": { "method": "POST", "path": "/v1/userText2Image/start" },
+      "defaults": { "name": "toolnexus", "model_type": "a2e" },
+      "args": { "prompt": "prompt", "width": "width", "height": "height", "seed": "seed" },
+      "idPath": "data.0._id",
+      "poll": { "path": "/v1/userText2Image/{id}", "statusPath": "data.current_status",
+                "done": ["completed"], "failed": ["failed", "blocked", "canceled"],
+                "errorPath": "data.failed_message", "intervalMs": 3000, "timeoutMs": 300000 },
+      "resultPath": "data.image_urls"
+    },
+    "video": {
+      "mode": "async", "kind": "video",
+      "start": { "method": "POST", "path": "/v1/userImage2Video/start" },
+      "defaults": { "name": "toolnexus", "generation_mode": "image-to-video", "negative_prompt": "blurry, distorted, low quality" },
+      "args": { "image": "image_url", "prompt": "prompt", "seconds": "video_time" },
+      "idPath": "data._id",
+      "poll": { "path": "/v1/userImage2Video/{id}", "statusPath": "data.current_status",
+                "done": ["completed"], "failed": ["failed", "blocked", "canceled"],
+                "errorPath": "data.failed_message", "intervalMs": 5000, "timeoutMs": 900000 },
+      "resultPath": "data.result_url"
+    },
+    "speech": {
+      "mode": "async", "kind": "audio",
+      "start": { "method": "POST", "path": "/v1/seedAudio/start" },
+      "args": { "text": "text_prompt", "voice": "references.0.speaker" },
+      "idPath": "data._id",
+      "poll": { "path": "/v1/seedAudio/{id}", "statusPath": "data.current_status",
+                "done": ["completed"], "failed": ["failed"],
+                "errorPath": "data.failed_message", "intervalMs": 3000, "timeoutMs": 300000 },
+      "resultPath": "data.result_url"
+    }
+  }
+}

@@ -114,6 +114,13 @@ A new language port is "correct" iff these hold. Run it against the shared
     into ONE user turn when consecutive, `system` hoisted. `finishReason`: any tool call ⇒
     `"tool_calls"`, else length/content_filter/stop. `beforeLLM`/`afterLLM` fire once; tool hooks
     never fire. This is the INBOUND half of the adapters, which are outbound-only.
+14. **Media generation** (§7G): `createMedia(styles)` — one engine, two faces. Typed verbs
+    (`image|video|speech|transcribe|cloneVoice|talking`) return `{files,text?,jobId?,status}`;
+    `media.tools()` exposes `generate_image|generate_video|generate_speech|transcribe_audio|clone_voice|talking_video`
+    (source `"media"`). Styles are JSON (sync or async start→poll→result, dot-paths, `${ENV}` headers);
+    no vendor in the library. Error strings, schemas and tool results are byte-fixed by
+    `conformance/media/`. `RunResult.files` collects every non-text part a run's tools produced
+    (`from`, `callId`), and `toolCalls[].parts` carries them per call.
 
 That's it. The sections below just expand each point with wire-format detail.
 
@@ -1556,6 +1563,109 @@ Absent a `compactor`, a run is byte-identical to today (compaction is entirely o
 
 ---
 
+## 7G. Media generation (source: "media")
+
+Image, video, speech, transcription, voice cloning and talking-head generation, behind one engine
+with **two faces**: typed verbs a host calls, and tools an LLM calls. Providers are **styles** —
+JSON data, never code. ADR 0036; spike `spikes/media-a2e/`. Realtime/live conversation is out of
+scope. Conformance: `conformance/media/` (`verbs.json`, `cases.json`, `schemas.json`) — every port
+replays it against an in-process fake server and must match it exactly.
+
+### Style (JSON)
+
+```
+Style = {
+  baseUrl:        string                    // trailing "/" trimmed before joining with a path
+  headers?:       { [name]: string }        // "${VAR}" expands from the process env at call time
+                                            // (unset ⇒ ""); values are never logged
+  errorEnvelope?: { codePath, okValues: [json], messagePath? }
+  verbs:          { [verb]: Verb }          // verb ∈ image|video|speech|transcribe|cloneVoice|talking
+}
+Verb = {
+  mode:       "sync" | "async"
+  kind:       "image" | "video" | "audio" | "text"
+  start:      { method?: string = "POST", path: string }
+  defaults?:  object                        // deep-copied, then args are written over it
+  args:       { [normalisedArg]: dotPath }  // which normalised args this style accepts, and where they go
+  idPath?:    dotPath                       // async only
+  poll?:      { method?: "GET", path /* contains {id} */, statusPath, done: [string], failed: [string],
+                errorPath?, intervalMs?: 5000, timeoutMs?: 600000 }   // async only
+  resultPath: dotPath
+}
+```
+
+`loadMediaStyle(path)` reads one style file. `createMedia(styles, opts?)` takes one style or a list;
+a verb resolves to the **first** style in the list that declares it. Options: `onProgress({verb,
+jobId, status})` and the port's HTTP-client injection (the same seam as the LLM client). Vendor
+presets live in `examples/media-styles/` and are loaded by path — the library names no vendor.
+
+**dotPath.** Segments split on `.`; a segment of only digits indexes an array. *Read*: missing ⇒
+absent. *Write*: creates objects, and arrays when the next segment is numeric (padding with null).
+
+### Verbs (function face)
+
+Fixed verbs with normalised arguments (`verbs.json` is the byte source: order, names, types,
+descriptions, required). Idiomatic per port — `media.image({prompt})`, `media.Image(ctx,
+ImageInput{…})`, `media.image(prompt=…)` — plus a generic `generate(verb, args)`. Every verb
+returns `MediaResult = { files: [File], text?: string, jobId?: string, status: string }`;
+`File = { type, mimeType, url }`. A function-face call may also take `providerOptions` (object),
+whose top-level keys overwrite the request body last; the tool face never exposes it.
+
+### Engine (normative order)
+
+1. No style declares `verb` ⇒ error `media: no style supports "<verb>"`.
+2. Any arg key not in `verb.args` ⇒ error `<verb>: argument "<key>" not supported by this style`.
+   No request is made.
+3. body = deep copy of `defaults`; each present arg is written at its dotPath; `providerOptions` last.
+4. Start request: `start.method` to `baseUrl + start.path`, JSON body, `Content-Type:
+   application/json`, style headers.
+5. Every response: non-2xx ⇒ error `HTTP <status>: <raw body text>`. Unparseable JSON ⇒
+   `<verb>: response is not JSON`. If `errorEnvelope` is set and the value at `codePath` is present
+   and not JSON-equal to one of `okValues` ⇒ `API error <code>: <message>` (`message` = string at
+   `messagePath`, else empty; a number `code` renders as an integer when integral).
+6. `sync` ⇒ the start response is the final response; `status = "completed"`.
+7. `async` ⇒ jobId = value at `idPath` (string as-is, integral number as integer text); absent ⇒
+   `<verb>: no job id at <idPath>`. Loop: wait `intervalMs`, request `poll.method` to
+   `baseUrl + poll.path` with `{id}` replaced, read the status string at `statusPath` (absent ⇒ ""),
+   call `onProgress`. In `done` ⇒ final response, `status` = it. In `failed` ⇒ error
+   `job <id> <status>: <msg>` where `msg` = string at `errorPath`, or `job <id> <status>` when
+   absent/null/empty. **Any other status keeps polling** (providers emit undocumented ones, e.g.
+   a2e `sent`). After a non-terminal poll, if time since the first wait began ≥ `timeoutMs` ⇒
+   `job <id> timed out after <timeoutMs>ms`. Cancellation (port-native: ctx, AbortSignal,
+   CancellationToken, …) stops the loop with the port's cancellation error.
+8. Result: value at `resultPath`. `kind:"text"` ⇒ a string (or number, rendered) becomes
+   `MediaResult.text`, `files = []`. Media kinds ⇒ a string or an array of strings (flattened,
+   empty strings dropped) becomes one `File` each. Nothing found ⇒ `<verb>: no result at <resultPath>`.
+9. File mapping: `type` = `image`→`image`, `audio`→`audio`, `video`→`file`. `mimeType` from the URL's
+   path extension (query and fragment stripped, case-insensitive): png→image/png, jpg|jpeg→image/jpeg,
+   webp→image/webp, gif→image/gif, mp4→video/mp4, webm→video/webm, mov→video/quicktime,
+   mp3→audio/mpeg, wav→audio/wav, ogg→audio/ogg, m4a→audio/mp4, flac→audio/flac; else the kind
+   default image/png, video/mp4, audio/mpeg.
+
+### Tools (tool face)
+
+`media.tools()` returns one `Tool` (source `"media"`) per verb the media supports, in `verbs.json`
+order, named per `verbs.json` (`generate_image`, `generate_video`, `generate_speech`,
+`transcribe_audio`, `clone_voice`, `talking_video`). `inputSchema = {type:"object", properties,
+required}` where properties are the verb's canonical args **the resolved style maps**, in canonical
+order, and `required` = canonical-required ∩ mapped (always present, possibly `[]`). Array args are
+`{type:"array", items:{type:<items>}, description}`. Expected bytes: `conformance/media/schemas.json`.
+`createToolkit({ media })` registers them; `toolkit.register(...media.tools())` is equivalent.
+
+Execute ⇒ engine; never throws. Success:
+`ToolResult{ isError:false, output, parts, metadata:{source:"media", verb, jobId? (async only), status} }`
+— media kinds: `output = "<word> ready: " + urls.join("\n")` (`word` = image|video|audio),
+`parts = files` as ContentParts `{type, mimeType, url}`; text kind: `output = text`, no `parts` key.
+Any engine error ⇒ `ToolResult{ isError:true, output:<the error message> }`.
+
+### Not in v1
+
+Download of expiring result URLs, local-file upload flows, ComfyUI graph injection, webhooks,
+price quotes, §10 suspension for long jobs, streaming `file` events. Tracked in
+`openspec/changes/add-media-generation`.
+
+---
+
 ## 8. Unified LLM client (the host loop)
 
 The payoff: give it a plain base URL + a "style", and it runs the whole tool-calling
@@ -1586,7 +1696,11 @@ dispatch); what is normative is the position and the byte-identical string path.
 RunResult {
   text:          string        // final assistant answer
   messages:      [...]          // full transcript
-  toolCalls:     [{ name, args, output, isError, metadata }]   // every call + its result
+  toolCalls:     [{ name, args, output, isError, metadata, parts? }]   // every call + its result;
+                                                                      // parts present iff the ToolResult had parts
+  files:         [{ type, mimeType, url?, data?, from, callId }]      // every non-text part produced
+                 // by tool calls this run, in call order; from = tool name, callId = the model's tool-call id.
+                 // Always present ([] when none). The final `text` never gets markup for them (§7G).
   toolCallCount: number         // = toolCalls.length
   turns:         number         // LLM round trips
   usage:         { promptTokens, completionTokens, totalTokens }  // summed across turns
