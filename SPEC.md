@@ -225,7 +225,7 @@ across providers, so the contract optimises for the one property the compactor a
 every port agrees, and a part is never free.
 Logs and §9 events render a part as `{type, mimeType, bytes}`; `data` is **never** logged.
 
-**Three user-visible strings are byte-identical across all seven ports.** They reach a model's
+**Three user-visible strings are byte-identical across all eight ports.** They reach a model's
 context or a user's terminal, so a port inventing its own wording is exactly the drift §0 exists
 to prevent. `<bytes>` is the **decoded** byte count, rendered as a plain integer.
 
@@ -550,7 +550,7 @@ skill dir, **sort by the path RELATIVE to the skill directory in plain Unicode C
 > `/`-separated relative rule below: §3 pins the block's shape, and because every entry shares the
 > skill-directory prefix, ordering by relative path and by the emitted absolute path are the SAME
 > order — there is no sort-key/emitted-string mismatch here. Whether it *should* emit relative
-> paths is an open seven-port question, not a port-local fix: changing one port alone would break
+> paths is an open eight-port question, not a port-local fix: changing one port alone would break
 > §3 byte-identity.
 
 ### System-prompt helper
@@ -816,9 +816,9 @@ test, or example fixture. The global toggle is the supported off-switch for lock
 
 ---
 
-## 4C. Host runtime additions (all seven ports)
+## 4C. Host runtime additions (all eight ports)
 
-Change `add-go-host-asks`. Shipped first in Go for go-agent-cli, now in all seven ports
+Change `add-go-host-asks`. Shipped first in Go for go-agent-cli, now in all eight ports
 (the ACP host hooks of 1.5h are Go only; task 2.6d). Absent options are byte-identical to today.
 
 - **Concurrent `register`.** `Toolkit.register` is safe while a turn reads the
@@ -888,7 +888,7 @@ Change `add-go-host-asks`. Shipped first in Go for go-agent-cli, now in all seve
   continues); ask = return `pending(request)` (path B, §10), which `waitFor` /
   `waitForCtx` resolves. Rules and modes stay in the host.
 
-### Prompt caching (change `add-prompt-cache`, all seven ports)
+### Prompt caching (change `add-prompt-cache`, all eight ports)
 
 - `Usage` gains `cacheReadTokens` and `cacheWriteTokens` (anthropic
   `cache_read_input_tokens` / `cache_creation_input_tokens`; openai
@@ -1212,7 +1212,7 @@ maxTurns · maxTokens · maxToolCalls · maxWallMs · maxChildren · maxConcurre
 completion · timeout
 ```
 
-Identical strings in all seven ports, like the `loopUnsupported` vocabulary. **A port MAPS its
+Identical strings in all eight ports, like the `loopUnsupported` vocabulary. **A port MAPS its
 internal pool or dimension name onto these at the boundary** — an internal spelling (`tokens`,
 `wallMs`, `maxWall`) is an implementation detail and MUST NOT leak into the field. The field exists
 so a host can *branch*; a value that differs per port defeats the field entirely, which is the
@@ -1238,12 +1238,12 @@ is written at its construction site as a **named constant, never a string litera
 cannot silently desync the two. Where a language allows it, close the hole **by construction** — a
 mapper whose return type cannot express an internal pool name is a stronger guarantee than a test.
 
-**Both vocabularies are PUBLIC API in all seven ports.** A host must branch on `limit` and on
+**Both vocabularies are PUBLIC API in all eight ports.** A host must branch on `limit` and on
 `status` without hard-coding strings, which is the entire reason the field exists; every value in
 each closed set is reachable as a named public constant. The holder's *name* stays port-local (as
 above). Two things that are deliberately NOT public: the **invariant predicate** — it exists so the
 ports' own tests can assert the rule, and a rule a test can hold does not become permanent API in
-seven languages — and the **internal pool-name mapper**, whose export would leak exactly the
+eight languages — and the **internal pool-name mapper**, whose export would leak exactly the
 internal spellings the mapping obligation exists to keep out of the field.
 
 Public visibility is verified **from outside the module boundary** — by reflection, an
@@ -1313,7 +1313,7 @@ and are the **host's responsibility**. The rule to design against:
 Replaying the suspended leaf's stored transcript instead of rewinding it — which would remove the
 re-run for everything except the suspended tool — is **deferred to its own change**
 (`openspec/changes/fix-consumer-issues-86-93`, D3). It is a §0 conformance change, not a bugfix,
-because the placeholder's shape would become a byte-identical obligation in all seven ports.
+because the placeholder's shape would become a byte-identical obligation in all eight ports.
 Today's behaviour is the rewind described above, in every port.
 
 Three pins the first implementations forced: (1) **rewind-to-checkpoint** — on a durable
@@ -1324,7 +1324,7 @@ inline resume traces `suspended→running` (the Run never ended); durable resume
 `suspended→idle` (Answer accepted, checkpoint restored) then `idle→running` (the replay
 wake); the Answer remains the only exit from `suspended` in both; (3) **result status
 vocabulary is closed**: `"done" | "pending" | "incomplete" | "interrupted" | "closed" |
-"timeout" | "error"` — identical strings in all seven ports.
+"timeout" | "error"` — identical strings in all eight ports.
 
 **This seven-value set is NOT the client's.** §8's `RunResult.status` is a *different*, three-value
 closed set (`"done" | "pending" | "incomplete"`) that does **not** contain `"timeout"`, `"closed"`,
@@ -1437,12 +1437,12 @@ driver over a client and a toolkit the **caller** already built — so anything 
 
 Two rules make the ignored half detectable rather than silent:
 
-1. **Caller-wins precedence, one sentence for all seven ports:** where both the spec and the
+1. **Caller-wins precedence, one sentence for all eight ports:** where both the spec and the
    caller's client options set the system prompt, **the caller's value wins**; the soul is the
    default, not an override.
 2. **`loopUnsupported(spec)`** (idiomatic per port) returns the names of the spec fields this
    agent's Loop will discard. The returned strings are a **CLOSED canonical vocabulary, identical in
-   all seven ports** — `"tools"`, `"team"`, `"waitFor"`, `"onMetric"` — not each language's own
+   all eight ports** — `"tools"`, `"team"`, `"waitFor"`, `"onMetric"` — not each language's own
    spelling of the field, exactly as the `limit` strings are. It is additive and non-fatal: constructing a Loop with such a spec is not an error
    (that would be a breaking change), but a host can print or assert on the list. A guardrail that
    silently does not run is the failure this exists to prevent (issue #87).
@@ -1636,7 +1636,7 @@ observe; the noted ones may mutate or short-circuit.
   run) and in `translate`: the error (a thrown exception, a rejected promise, Go's returned
   `error`, an Elixir `{:error, _}`/raise) propagates to the caller as that entry point's failure,
   and **no provider request is sent** for that turn. It is never swallowed, logged-and-ignored, or
-  retried. On a §7D agent the same failure has exactly two shapes, identical in all seven ports:
+  retried. On a §7D agent the same failure has exactly two shapes, identical in all eight ports:
   the agent's **level-1 loop run throws/raises** the hook's error, and a **runtime handle turn**
   (`runTurn`, `wake` + `wait`, the one-shot agent run) resolves the §7D *one boundary rule*
   result — `isError: true`, `status: "error"`, text = the hook's message. Neither sends a request
@@ -1771,7 +1771,7 @@ and unchanged** — internally each port still parses the header per the `delay-
 above (whole seconds, `0` = retry now, everything else falls back to backoff); that behaviour is
 unaffected by what the field carries.
 
-On top of that, one policy, identical in all seven ports and identical to the one §8B's
+On top of that, one policy, identical in all eight ports and identical to the one §8B's
 classifier already applies:
 
 - **Account identifiers are redacted before the body is interpolated into any message**:
@@ -2188,7 +2188,7 @@ wrong-but-answerable question still reads as answerable. `calibrated` carries th
 Every `Decision` reports `calibrated`. **An absent or `null` `calibrated` on the wire decodes as
 `true`**, in every port: the systemone wire reports calibration by being itself, and a backend that
 is not calibrated says so explicitly. Only the literal `false` yields `false`. This is stated
-because seven ports already agree on it and agreement that is never written down is luck rather
+because eight ports already agree on it and agreement that is never written down is luck rather
 than contract — a port that later defaults it to `false` would flip every threshold a host has
 tuned, on a field the host never set. The `systemone` style reports **true**. The `llm` style
 reports **false** unless it derived its probabilities from provider token probabilities. Measured
@@ -2775,10 +2775,10 @@ is no relay loop mode and no second suspension mechanism.
 > `js`, `python`, `java`, `csharp`, `elixir` and `clojure` ship **no answer-carrying entry point**
 > at all. Everything in this subsection describes one port.
 
-**What IS at parity, in all seven ports, is the inline `waitFor` path** (Loop rule 1 above): the
+**What IS at parity, in all eight ports, is the inline `waitFor` path** (Loop rule 1 above): the
 whole `Answer` reaches the re-executed tool as `Context.answer`, unfiltered, so the tool reads
 whatever keys the host put in `answer.data` and no key is reserved. A host that wants
-human-in-the-loop behaviour portable across the seven ports uses `waitFor`. The durable halt
+human-in-the-loop behaviour portable across the eight ports uses `waitFor`. The durable halt
 (`status:"pending"`) is also at parity — what is golang-only is the *resume*.
 
 The durable path above (`waitFor` absent → `status:"pending"`) needs a way back in. `golang`

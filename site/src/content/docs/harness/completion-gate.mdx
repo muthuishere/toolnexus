@@ -124,12 +124,32 @@ end
     (println (:stopped-by out))))
 ```
 </TabItem>
+<TabItem label="Rust">
+```rust
+use toolnexus::agents::{self, Completion, RunOpts, Spec, all_todos_done};
+
+let shipper = agents::new("shipper", Spec {
+    does: "ships the release".into(),
+    completion: Some(Completion { verify: Some(Arc::new(all_todos_done)), max_attempts: 3 }),
+    ..Default::default()
+});
+
+let out = shipper
+    .loop_(client_options, tk)
+    .run(CancellationToken::new(), "Cut 0.15.0.", RunOpts::default())
+    .await?;
+
+if out.status == "incomplete" && out.result.limit == "completion" {
+    eprintln!("{}", out.stopped_by); // completion.verify failed 3x: 1 item(s) still open: proofread
+}
+```
+</TabItem>
 </Tabs>
 
 ## Six rules it obeys
 
 Every one of these was found by **prototyping**, not by design, and every one is tested in all
-seven ports. They are the difference between a gate and a suggestion:
+eight ports. They are the difference between a gate and a suggestion:
 
 1. **It judges accumulated work, not one attempt.** Otherwise an agent escapes by simply not
    re-declaring its plan on the retry: the fresh run carries no `todowrite`, the verifier sees "no
@@ -239,6 +259,22 @@ ops =
               (fn [ev] (if (= "bash" (:name ev)) "shell is off in this agent" "allow"))]}
 ```
 </TabItem>
+<TabItem label="Rust">
+```rust
+use toolnexus::agents::{self, Spec};
+
+let ops = agents::new("ops", Spec {
+    does: "operates the fleet".into(),
+    guardrails: vec![Arc::new(|ev: &BeforeToolEvent| {
+        if ev.name == "deploy" && ev.args["env"] == "prod" {
+            return "prod needs human approval".into();
+        }
+        "allow".into()
+    })],
+    ..Default::default()
+});
+```
+</TabItem>
 </Tabs>
 
 A denied call never executes; the model receives the denial as the tool result and can react to it.
@@ -246,7 +282,7 @@ A denied call never executes; the model receives the denial as the tool result a
 ## Absent ⇒ byte-identical
 
 No `completion` and no `guardrails` is the pre-existing path, unchanged. Nothing was added to the
-status vocabulary either — `SPEC.md` pins the statuses across all seven ports, so the gate reuses
+status vocabulary either — `SPEC.md` pins the statuses across all eight ports, so the gate reuses
 `incomplete` and distinguishes itself through `limit`.
 
 Next: [proved against live models](/toolnexus/harness/live/) — the same mechanisms, run against

@@ -1,6 +1,6 @@
 ---
 title: Harness & loop
-description: The harness is everything an agent MAY do, fixed per problem. The loop is one live execution of it. Two names for two things toolnexus already had — in all seven languages.
+description: The harness is everything an agent MAY do, fixed per problem. The loop is one live execution of it. Two names for two things toolnexus already had — in all eight languages.
 ---
 
 import { Tabs, TabItem, Aside } from '@astrojs/starlight/components';
@@ -217,6 +217,36 @@ out.stopped_by  # nil when done; ALWAYS set otherwise
   (tnloop/run lp "Now tighten it." {:model "openai/gpt-4o"}))
 ```
 </TabItem>
+<TabItem label="Rust">
+```rust
+use toolnexus::agents::{self, RunOpts, Spec};
+
+let writer = agents::new("writer", Spec {
+    does: "drafts release notes".into(),
+    soul: "You write terse, factual release notes.".into(),
+    ..Default::default()
+});
+
+let tk = create_toolkit(ToolkitOptions { builtins: Some(BuiltinsConfig::off()), ..Default::default() }).await?;
+let mut lp = writer.loop_(
+    ClientOptions {
+        base_url: "https://openrouter.ai/api/v1".into(),
+        style: Style::OpenAI,
+        model: "openai/gpt-4o-mini".into(), // key: OPENROUTER_API_KEY, read by host
+        ..Default::default()
+    },
+    tk,
+);
+
+let out = lp.run(CancellationToken::new(), "Draft notes for 0.15.0.", RunOpts::default()).await?;
+println!("{}", out.status); // "done"
+println!("{}", out.turns);
+println!("{}", out.stopped_by); // "" when done; ALWAYS set otherwise
+
+// A different model for one call only.
+lp.run(CancellationToken::new(), "Now tighten it.", RunOpts { model: "openai/gpt-4o".into() }).await?;
+```
+</TabItem>
 </Tabs>
 
 ## What a run reports
@@ -234,7 +264,7 @@ Every run returns an **Outcome**. The field that matters most is the one that is
 
 <Aside type="caution" title="A loop never stops silently">
 If `status` is not `done`, `stoppedBy` says why — in words. `result.limit` says which limit, as a
-value you can branch on. Those values are a **closed vocabulary, identical in all seven ports** —
+value you can branch on. Those values are a **closed vocabulary, identical in all eight ports** —
 `maxTurns` · `maxTokens` · `maxToolCalls` · `maxWallMs` · `maxChildren` · `maxConcurrent` ·
 `maxDepth` · `completion` · `timeout` — each naming the budget field that stopped the run, spelled
 as the `Budget` spells it, and each reachable as a **named public constant** so you never hard-code
@@ -278,7 +308,7 @@ half a loop drops is worth knowing before you put a policy in one:
 <Aside type="caution" title="Ask the loop what it is about to drop">
 `loopUnsupported(spec)` returns the canonical names — `"tools"`, `"team"`, `"waitFor"`,
 `"onMetric"` — of the fields this harness declares that a loop will discard. Same strings in all
-seven ports. Constructing the loop is still legal (making it an error would break every existing
+eight ports. Constructing the loop is still legal (making it an error would break every existing
 caller), so print or assert on that list in your own startup path. The reason this exists: a
 guardrail that silently does not run is worse than no guardrail API — you write the policy, see it
 in code review, and ship with none.

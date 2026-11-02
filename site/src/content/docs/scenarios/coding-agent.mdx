@@ -1,6 +1,6 @@
 ---
 title: Build a Claude-Code-style coding agent
-description: A complete build — an AGENTS.md soul, the built-in shell/file pack, a read-only explore sub-agent, hierarchical budgets, compaction, and a human approval gate on dangerous bash — assembled in all seven languages.
+description: A complete build — an AGENTS.md soul, the built-in shell/file pack, a read-only explore sub-agent, hierarchical budgets, compaction, and a human approval gate on dangerous bash — assembled in all eight languages.
 ---
 
 import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
@@ -263,6 +263,32 @@ explore =
    :budget {:max-turns 20 :max-tokens 60000}})
 ```
 </TabItem>
+<TabItem label="Rust">
+```rust
+use toolnexus::agents::{self, Budget, Spec};
+
+let read_only = create_toolkit(ToolkitOptions {
+    builtins: Some(BuiltinsConfig {
+        tools: ["bash", "write", "edit", "apply_patch"].map(|t| (t.to_string(), false)).into(),
+        ..Default::default()
+    }),
+    ..Default::default()
+})
+.await?;
+
+let explore = agents::new("explore", Spec {
+    does: "Answers a specific question about this codebase. Give it ONE question, not a task. \
+           Read-only: it cannot edit files or run commands."
+        .into(),
+    tools: read_only.tools(),
+    soul: "Answer the question and nothing else. Cite file:line for every claim. \
+           If the answer is not in the code, say so — never guess."
+        .into(),
+    budget: Some(Budget { max_turns: 20, max_tokens: 60_000, ..Default::default() }),
+    ..Default::default()
+});
+```
+</TabItem>
 </Tabs>
 
 <Aside type="tip" title="`does` is not documentation — it is the router">
@@ -291,7 +317,7 @@ turn and *every* spawn — so a sibling's spend counts against you.
 
 When a limit stops a run, the result is **`status: "incomplete"`** — never a silent `"done"`,
 never a crash. Partial work and the transcript are preserved, so you can inspect what it got
-through before the ceiling. The status vocabulary is closed and byte-identical in all seven ports:
+through before the ceiling. The status vocabulary is closed and byte-identical in all eight ports:
 
 ```
 "done" | "pending" | "incomplete" | "interrupted" | "closed" | "timeout" | "error"
@@ -328,7 +354,7 @@ Because compaction rides the **client** loop's hook and the agent runtime owns i
 wire it on the client when you run a coding session through `client.ask(...)` directly. The full
 assembly below shows the agent path; see
 [persona agents → compaction](/toolnexus/persona-agents/#staying-under-the-context-window--compaction)
-for the client-loop wiring in all seven languages.
+for the client-loop wiring in all eight languages.
 
 ## 6. The brake — human approval on dangerous `bash`
 
@@ -610,6 +636,49 @@ end)
 (def coder-tools
   (mapv (fn [t] (if (= "bash" (:name t)) (gated-bash t) t))
         (tool/all-tools full)))
+```
+</TabItem>
+<TabItem label="Rust">
+```rust
+const DANGEROUS: [&str; 6] = ["rm -rf", "git push", "--force", "drop table", "terraform apply", "kubectl delete"];
+
+// Same name + schema as the built-in — the model cannot tell it apart.
+fn gated_bash(mut raw: Tool) -> Tool {
+    let inner = raw.execute.clone();
+    raw.execute = Arc::new(move |args: Value, ctx: ToolContext| {
+        let inner = inner.clone();
+        Box::pin(async move {
+            let command = args["command"].as_str().unwrap_or("").to_string();
+            let lower = command.to_lowercase();
+            if !DANGEROUS.iter().any(|d| lower.contains(d)) {
+                return inner(args, ctx).await; // safe: straight through
+            }
+            let Some(answer) = &ctx.answer else {
+                let mut data = Map::new();
+                data.insert("command".into(), json!(command));
+                data.insert("workdir".into(), args["workdir"].clone());
+                return pending(Request {
+                    kind: "question".into(),
+                    prompt: format!("Approve destructive command?\n\n  {command}"),
+                    data: Some(data),
+                    ..Default::default()
+                });
+            };
+            if !answer.ok {
+                return ToolResult::error(format!("Operator declined: {command}"));
+            }
+            inner(args, ctx).await // approved: run it
+        })
+    });
+    raw
+}
+
+let full = create_toolkit(ToolkitOptions::default()).await?;
+let coder_tools: Vec<Tool> = full
+    .tools()
+    .into_iter()
+    .map(|t| if t.name == "bash" { gated_bash(t) } else { t })
+    .collect();
 ```
 </TabItem>
 </Tabs>
@@ -939,13 +1008,75 @@ if r.status == "incomplete", do: IO.warn("stopped by a budget: #{r.text}")
 (when (= "incomplete" (:status r)) (println "stopped by a budget:" (:text r)))
 ```
 </TabItem>
+<TabItem label="Rust">
+```rust
+use toolnexus::agents::{self, Budget, LlmOptions, Options, Spec};
+
+let llm = LlmOptions {
+    base_url: "https://openrouter.ai/api/v1".into(),
+    style: Style::OpenAI,
+    model: "anthropic/claude-sonnet-4".into(),
+    ..Default::default()
+};
+
+// --- tools -----------------------------------------------------------------
+let read_only = create_toolkit(ToolkitOptions {
+    builtins: Some(BuiltinsConfig {
+        tools: ["bash", "write", "edit", "apply_patch"].map(|t| (t.to_string(), false)).into(),
+        ..Default::default()
+    }),
+    ..Default::default()
+})
+.await?;
+let full = create_toolkit(ToolkitOptions::default()).await?;
+let coder_tools: Vec<Tool> = full
+    .tools()
+    .into_iter()
+    .map(|t| if t.name == "bash" { gated_bash(t) } else { t })
+    .collect();
+
+// --- the team --------------------------------------------------------------
+let explore = agents::new("explore", Spec {
+    does: "Answers ONE specific question about this codebase. Read-only: cannot edit or run commands.".into(),
+    tools: read_only.tools(),
+    soul: "Answer the question and nothing else. Cite file:line. Never guess.".into(),
+    budget: Some(Budget { max_turns: 20, max_tokens: 60_000, ..Default::default() }),
+    ..Default::default()
+});
+
+let coder = agents::new("coder", Spec {
+    does: "Implements a change in this repository".into(),
+    soul_file: "./AGENTS.md".into(),
+    tools: coder_tools,
+    team: vec![explore],
+    budget: Some(Budget { max_turns: 60, max_tokens: 400_000, max_children: 8, max_depth: 2, ..Default::default() }),
+    wait_for: Some(Arc::new(|req: Request| {
+        Box::pin(async move { Ok(Answer { ok: confirm_on_terminal(&req.prompt), id: req.id, ..Default::default() }) })
+    })),
+    ..Default::default()
+});
+
+// --- run -------------------------------------------------------------------
+let (r, _rt) = coder
+    .run(
+        Options { llm: Some(llm), ..Default::default() },
+        "The MCP stdio client leaks a child process on reconnect. Find it and fix it.",
+    )
+    .await;
+
+println!("{} {}", r.status, r.total_tokens); // whole-tree tokens: coder + every explore call
+if r.status == "incomplete" {
+    eprintln!("stopped by a budget: {}", r.text);
+}
+```
+</TabItem>
 </Tabs>
 
 ## What this is — and what it is not
 
 **It is the engine.** The loop, the tool pack, delegation with real context isolation,
 hierarchical budgets, durable suspension, compaction, and a scoped security model — the parts
-that are genuinely hard to build correctly and that behave identically in seven languages.
+that are genuinely hard to build correctly and that behave identically in eight languages.
 
 **It is not the product around the engine.** You bring:
 

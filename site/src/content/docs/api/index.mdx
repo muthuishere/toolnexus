@@ -1,11 +1,11 @@
 ---
 title: API Reference
-description: The public surface of every port — toolkit options, client options, skill loading and inventory, MCP load, and adapters — with the exact symbol in all seven languages side by side.
+description: The public surface of every port — toolkit options, client options, skill loading and inventory, MCP load, and adapters — with the exact symbol in all eight languages side by side.
 ---
 
 import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
 
-The same API, seven languages. Every entry below shows its **exact per-language equivalent** in
+The same API, eight languages. Every entry below shows its **exact per-language equivalent** in
 synced tabs — pick your language once and it sticks across the page. Each port's full reference
 has its own dedicated nav; open one in a new tab:
 <a href="/toolnexus/api/javascript/" target="_blank" rel="noopener">JavaScript</a> ·
@@ -14,7 +14,8 @@ has its own dedicated nav; open one in a new tab:
 <a href="/toolnexus/api/java/" target="_blank" rel="noopener">Java</a> ·
 <a href="/toolnexus/api/csharp/" target="_blank" rel="noopener">C#</a> ·
 <a href="/toolnexus/api/elixir/" target="_blank" rel="noopener">Elixir</a> ·
-<a href="/toolnexus/api/clojure/" target="_blank" rel="noopener">Clojure</a>.
+<a href="/toolnexus/api/clojure/" target="_blank" rel="noopener">Clojure</a> ·
+<a href="/toolnexus/api/rust/" target="_blank" rel="noopener">Rust</a>.
 
 <Aside type="tip">These are the public entry points. Behavior is identical across ports by
 contract — see <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC.md</a>.</Aside>
@@ -129,6 +130,23 @@ await using var tk = await Toolkit.CreateAsync(new Toolkit.Options
 ;; Not in this port: :skill-provider, :skills-filter, :agents (parity debt).
 ```
 </TabItem>
+<TabItem label="Rust">
+```rust
+use toolnexus::skills::SkillDef;
+
+let tk = create_toolkit(ToolkitOptions {
+    mcp_config: Some(McpConfigInput::Path("./mcp.json".into())),
+    skills_dir: vec!["./skills".into()],
+    skills: vec![SkillDef { /* … */ ..Default::default() }],
+    skill_provider: Some(Arc::new(|| Box::pin(async { Ok(Vec::<SkillDef>::new()) }))),
+    skills_filter: [("deploy".to_string(), true)].into(),
+    skill_sample_limit: 0,
+    builtins: None, // None ⇒ on; Some(BuiltinsConfig::off()) ⇒ off
+    ..Default::default()
+})
+.await?;
+```
+</TabItem>
 </Tabs>
 
 Two more options prune the assembled toolkit after the sources above have run: `disableTools` drops
@@ -211,6 +229,17 @@ new SkillSource.SkillDef(Name, Description, Content,
  :files       []}      ; sibling files sampled for the skill
 ```
 </TabItem>
+<TabItem label="Rust">
+```rust
+pub struct SkillDef {
+    pub name: String,
+    pub description: String,
+    pub content: String,
+    pub resources: Vec<String>,
+    pub base: String,
+}
+```
+</TabItem>
 </Tabs>
 
 ### List & validate — `ListSkills`
@@ -268,6 +297,14 @@ inv = Toolnexus.Skill.list("./skills")
 ;; malformed-frontmatter · duplicate-name · unreadable
 ```
 </TabItem>
+<TabItem label="Rust">
+```rust
+use toolnexus::skills::{LoadSkillsOptions, list_skills};
+
+let inv = list_skills(&LoadSkillsOptions { dirs: vec!["./skills".into()], ..Default::default() });
+// inv.skills: Vec<SkillInfo>   inv.skipped: Vec<SkillSkip>
+```
+</TabItem>
 </Tabs>
 
 ## Load MCP servers
@@ -314,6 +351,13 @@ var mcp = await McpSource.LoadAsync("./mcp.json");
 (mcp/tools m)
 ```
 </TabItem>
+<TabItem label="Rust">
+```rust
+use toolnexus::mcp::{load_mcp, parse_mcp_config_file};
+
+let mcp = load_mcp(&parse_mcp_config_file("./mcp.json")?).await;
+```
+</TabItem>
 </Tabs>
 
 ## Adapters — emit provider schema
@@ -356,6 +400,11 @@ tools = Toolnexus.Adapters.to_openai(tk.tools)   # to_anthropic · to_gemini
 <TabItem label="Clojure">
 ```clojure
 (tn/to-openai tk)   ; tn/to-anthropic · tn/to-gemini
+```
+</TabItem>
+<TabItem label="Rust">
+```rust
+let tools = tk.to_openai(); // tk.to_anthropic() · tk.to_gemini()
 ```
 </TabItem>
 </Tabs>
@@ -424,6 +473,18 @@ res = Toolnexus.Client.run(client, "…", tk)
                               :base-url "…" :api-key "…"}))
 (def res (client/run c "…" {:toolkit tk}))
 ;; {:text :messages :tool-calls :turns :usage :status}
+```
+</TabItem>
+<TabItem label="Rust">
+```rust
+let client = create_client(ClientOptions {
+    style: Style::OpenAI,
+    model: "gpt-5".into(),
+    base_url: "…".into(),
+    api_key: "…".into(),
+    ..Default::default()
+});
+let res = client.ask("…", &tk, "").await?;
 ```
 </TabItem>
 </Tabs>
@@ -520,6 +581,14 @@ add = Toolnexus.Native.define_tool(
 ;; a ctx-aware tool: {:ctx? true :run (fn [args ctx] …)}
 ```
 </TabItem>
+<TabItem label="Rust">
+```rust
+let add = define_tool("add", "Add two numbers", None, |a: Value, _ctx| async move {
+    Ok::<_, String>(format!("{}", a["x"].as_f64().unwrap_or(0.0) + a["y"].as_f64().unwrap_or(0.0)))
+});
+// or define_typed_tool::<T> — the args deserialize into your serde struct
+```
+</TabItem>
 </Tabs>
 
 ## HTTP / REST tools
@@ -590,6 +659,19 @@ weather = Toolnexus.Http.tool(
 ;; :timeout-ms (default 30000)
 ```
 </TabItem>
+<TabItem label="Rust">
+```rust
+use toolnexus::http::{HttpToolOptions, http_tool};
+
+let weather = http_tool(HttpToolOptions {
+    name: "weather".into(),
+    description: "Current weather".into(),
+    method: "GET".into(),
+    url: "https://api.example.com/weather/{city}".into(),
+    ..Default::default()
+}); // timeout_ms (0 ⇒ 30000)
+```
+</TabItem>
 </Tabs>
 
 ## Built-in tools
@@ -647,6 +729,18 @@ await using var tk = await Toolkit.CreateAsync(new Toolkit.Options {
 <TabItem label="Clojure">
 ```clojure
 (tn/build {:builtins {:tools {"bash" false}}})   ; all built-ins except bash
+```
+</TabItem>
+<TabItem label="Rust">
+```rust
+let tk = create_toolkit(ToolkitOptions {
+    builtins: Some(BuiltinsConfig {
+        tools: [("bash".to_string(), false)].into(),
+        ..Default::default()
+    }),
+    ..Default::default()
+})
+.await?;
 ```
 </TabItem>
 </Tabs>
@@ -827,6 +921,24 @@ handle = Toolnexus.Toolkit.serve(tk, "127.0.0.1:0",
 ;; (:url handle) speaks A2A ; ((:stop! handle))
 ```
 </TabItem>
+<TabItem label="Rust">
+```rust
+use toolnexus::serve::{A2aConfig, ServeOptions, TaskStoreSpec};
+
+let handle = tk
+    .serve("127.0.0.1:0", ServeOptions {
+        client: Some(client),
+        a2a: Some(A2aConfig {
+            name: "my-agent".into(),
+            store: TaskStoreSpec::Selector("memory".into()),
+            ..Default::default()
+        }),
+        ..Default::default()
+    })
+    .await?;
+// handle.url ; handle.stop()
+```
+</TabItem>
 </Tabs>
 
 ### Remote agents — consume a peer
@@ -887,6 +999,18 @@ Toolnexus.Toolkit.add_agent(tk, "https://other.example.com/.well-known/agent-car
 (def peer (a2a/remote-agent {:card "https://peer.example.com/.well-known/agent-card.json"}))
 ;; each of the peer's skills is a Tool in (:tools peer) — hand them to build:
 (tn/build {:tools (:tools peer)})
+```
+</TabItem>
+<TabItem label="Rust">
+```rust
+use toolnexus::a2a::Agent;
+
+let tk = create_toolkit(ToolkitOptions {
+    agents: vec![Agent::new("https://peer.example.com/.well-known/agent-card.json")],
+    ..Default::default()
+})
+.await?;
+tk.add_agent(Agent::new("https://other.example.com/.well-known/agent-card.json")).await?;
 ```
 </TabItem>
 </Tabs>
@@ -959,6 +1083,22 @@ await using var tk = await Toolkit.CreateAsync(new Toolkit.Options()
           :wait-for (fn [req] (client/make-answer (:id req) true {:answer "…"}))}))
 ;; inside a tool: (client/suspend (client/make-request "input" "…"))
 ;;                or (client/auth-required url) ; (client/pending-of result) -> Request|nil
+```
+</TabItem>
+<TabItem label="Rust">
+```rust
+let tk = create_toolkit(ToolkitOptions {
+    wait_for: Some(Arc::new(|req: Request| {
+        Box::pin(async move {
+            let mut data = Map::new();
+            data.insert("answer".into(), json!("…"));
+            Ok(Answer { id: req.id, ok: true, data: Some(data), ..Default::default() })
+        })
+    })),
+    ..Default::default()
+})
+.await?;
+// inside a tool: return pending(Request { kind: "input".into(), prompt: "…".into(), ..Default::default() })
 ```
 </TabItem>
 </Tabs>

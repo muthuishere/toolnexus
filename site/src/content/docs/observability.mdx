@@ -1,6 +1,6 @@
 ---
 title: Observability — metrics & Prometheus
-description: One internal instrumentation, two opt-in outputs — a semantic on_metric event feed you can forward anywhere, and a zero-dependency client.metrics() that renders Prometheus text. No cost when unused, byte-identical across seven languages (the Clojure port ships the event feed only).
+description: One internal instrumentation, two opt-in outputs — a semantic on_metric event feed you can forward anywhere, and a zero-dependency client.metrics() that renders Prometheus text. No cost when unused, byte-identical across eight languages (the Clojure port ships the event feed only).
 ---
 
 import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
@@ -90,6 +90,21 @@ client = Toolnexus.Client.create(base_url: base, style: "openai", model: model,
                   (when (= "run" (:event m))
                     (println (str "run: " (:turns m) " turns, "
                                   (:total_tokens m) " tokens, " (:ms m) "ms"))))}))
+```
+</TabItem>
+<TabItem label="Rust">
+```rust
+let c = create_client(ClientOptions {
+    base_url: base_url.clone(),
+    style: Style::OpenAI,
+    model: model.clone(),
+    on_metric: Some(Arc::new(|ev: &MetricEvent| {
+        if ev.event == "run" {
+            eprintln!("run: {} turns, {} tokens, {}ms", ev.turns, ev.total_tokens, ev.ms);
+        }
+    })),
+    ..Default::default()
+});
 ```
 </TabItem>
 </Tabs>

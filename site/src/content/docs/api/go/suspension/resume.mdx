@@ -377,7 +377,7 @@ shorthand `"output"` (a **string**, with optional `"isError"`) — `toolnexus.Re
 `toolnexus.RelayOutputKey`. Build them with `toolnexus.AnswerOutput(id, output)` or
 `toolnexus.RelayAnswer(id, results)` rather than by hand — and use
 `toolnexus.AnswerDeclined(id, reason)` for the human who said no, which is a resolution
-(`Ok: false` + `Reason`), not an error. All three ship in all seven ports. Any other shape — `{"answers": […]}`,
+(`Ok: false` + `Reason`), not an error. All three ship in all eight ports. Any other shape — `{"answers": […]}`,
 `{"value": "staging"}` — is **not** a recognised payload: `Ok: true` with no determinable result
 for an outstanding call returns an **error to you**, never a fabricated tool result handed to the
 model alongside `Status: "done"` (issue #89). A non-string `output` is an error too, not a silent

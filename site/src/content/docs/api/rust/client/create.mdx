@@ -23,7 +23,7 @@ To run the tool-calling loop against an OpenAI- or Anthropic-style endpoint: sys
 
 ## Why this and not the alternative
 
-Use the client rather than your own loop: it implements §8 and §10 the same way as the other seven ports, including Retry-After, the API-key-by-host rule and suspension.
+Use the client rather than your own loop: it implements §8 and §10 the same way as the other eight ports, including Retry-After, the API-key-by-host rule and suspension.
 
 <Aside type="tip" title="When not to use it">
 For a model you run in-process (or an ACP agent), use `create_in_process_client`.

@@ -1,6 +1,6 @@
 ---
-title: ACP host hooks (Go)
-description: Drive a local coding agent over ACP and stay in charge of it — decide its permission requests, watch every update, cancel a turn, and stream it through the ordinary client. Go only today.
+title: ACP host hooks (Go, Rust)
+description: Drive a local coding agent over ACP and stay in charge of it — decide its permission requests, watch every update, cancel a turn, and stream it through the ordinary client. Go and Rust today.
 ---
 
 import { Aside } from '@astrojs/starlight/components';
@@ -13,10 +13,10 @@ mid-turn. A real host — a plan mode, an approval prompt, a UI that shows the a
 needs all three back. Since 0.22.0 the Go port gives them back, each one opt-in.
 </Aside>
 
-<Aside type="caution" title="Go only">
-The JavaScript, Python, Java, C#, Elixir and Clojure ports ship an ACP client without these
-hooks; it answers the first allow option and returns only the final text. Tracked in
-`openspec/changes/add-go-host-asks` (task 2.6d).
+<Aside type="caution" title="Go and Rust only">
+The Rust port has all four hooks (see [In Rust](#in-rust) below). The JavaScript, Python, Java,
+C#, Elixir and Clojure ports ship an ACP client without them; it answers the first allow option
+and returns only the final text. Tracked in `openspec/changes/add-go-host-asks` (task 2.6d).
 </Aside>
 
 ## The four hooks
@@ -94,11 +94,58 @@ for ev := range events {
 Without streaming, pass `Generate` and call `acp.GenerateCtx` yourself when you need a
 cancellable turn.
 
+## In Rust
+
+The same four hooks, in the Rust port's shape: `AcpOptions::on_permission` takes an async
+handler built with `permission_handler`, `on_update` sees the raw params of every
+`session/update`, `agent.cancel()` (or a cancelled token passed to `generate_cancellable`)
+sends `session/cancel`, and `acp_generate_stream` makes `Client::stream` work.
+
+```rust
+use std::sync::Arc;
+use toolnexus::acp::{AcpClient, AcpOptions, PermissionOutcome, permission_handler};
+use toolnexus::client::{InProcessOptions, acp_generate, acp_generate_stream, create_in_process_client};
+
+let opts = AcpOptions::new("my-coding-agent")
+    .args(["acp"])
+    .on_permission(permission_handler(|req| async move {
+        // show req.tool_call and req.options to a human; answer one option id
+        match req.first_allow() {
+            Some(o) if ask_user(&req).await => PermissionOutcome::Selected(o.option_id.clone()),
+            _ => PermissionOutcome::Cancelled,
+        }
+    }))
+    .on_update(|params| ui_push(params)); // never block here
+let agent = Arc::new(AcpClient::load(opts).await?);
+
+let client = create_in_process_client(InProcessOptions {
+    model: "acp".into(),
+    generate: Some(acp_generate(agent.clone())),
+    generate_stream: Some(acp_generate_stream(agent.clone())), // Stream works
+    ..Default::default()
+});
+let mut events = client.stream("fix the failing test", &tk)?;
+while let Some(ev) = events.recv().await {
+    match ev.kind.as_str() {
+        "text" => print!("{}", ev.delta),
+        // ev.via == "acp": the agent already ran this tool; the loop never executes it
+        "tool_call" | "tool_result" => println!("\n[agent] {} {}", ev.kind, ev.name),
+        _ => {}
+    }
+}
+agent.close().await;
+```
+
+One difference from Go: Rust's `permission_timeout` (30 s default) bounds each
+`on_permission` call, not the whole turn. A handler slower than that is answered `cancelled`
+and the turn fails with `AcpError::PermissionTimeout`.
+
 ## What is not done
 
-- Only Go has the hooks; the other six ports are pending (`openspec/changes/add-go-host-asks`).
-- `PermissionTimeout` still bounds the whole turn, so a slow human approval can time it out.
-  Raise it when `OnPermission` waits on a person.
+- Only Go and Rust have the hooks; the other six ports are pending
+  (`openspec/changes/add-go-host-asks`).
+- In Go, `PermissionTimeout` still bounds the whole turn, so a slow human approval can time it
+  out. Raise it when `OnPermission` waits on a person.
 
 See the [Go API reference](/api/go/client/acp-hooks/) for the full field list, and
 [Local & in-process models](/cookbook/local-and-in-process-models/) for `CreateInProcessClient`.

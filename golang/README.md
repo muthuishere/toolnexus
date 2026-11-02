@@ -11,7 +11,7 @@ unified as one tool set, driving any LLM.
 > retry. Idiomatic Go: struct options, exported functions, `context.Context`, `defer tk.Close()`.
 
 The Go port of [toolnexus](https://github.com/muthuishere/toolnexus) — the same library,
-byte-identical, also in **JavaScript, Python, Java, C#, Elixir and Clojure**. Built on
+byte-identical, also in **JavaScript, Python, Java, C#, Elixir, Clojure and Rust**. Built on
 [`mark3labs/mcp-go`](https://github.com/mark3labs/mcp-go). Requires Go 1.23+.
 
 ## Install
@@ -158,4 +158,4 @@ Everything else — the full surface, with runnable examples — lives on the do
 | **API reference** | [Go](https://muthuishere.github.io/toolnexus/api/go/) |
 | **Cookbook** | [Zero to agent](https://muthuishere.github.io/toolnexus/cookbook/zero-to-agent/) · [MCP servers](https://muthuishere.github.io/toolnexus/cookbook/mcp-servers/) · [Agent skills](https://muthuishere.github.io/toolnexus/cookbook/agent-skills/) · [Judge](https://muthuishere.github.io/toolnexus/cookbook/judge/) |
 
-Contract across all seven ports: [`SPEC.md`](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
+Contract across all eight ports: [`SPEC.md`](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).

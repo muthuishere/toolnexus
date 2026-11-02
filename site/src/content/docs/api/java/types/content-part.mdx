@@ -88,7 +88,7 @@ The error design is deliberate too, and it is the reason there are two spellings
 
 The base64 is asserted against the **committed golden** at `examples/media/fixture.png.base64`,
 read from disk — never a hardcoded string and never a re-encoding, because the fixture's bytes are
-the source of truth in all seven ports.
+the source of truth in all eight ports.
 
 ```java test
 import io.github.muthuishere.toolnexus.ContentPart;
@@ -242,7 +242,7 @@ public class Example {
 |---|---|---|
 | `type()` | `String` | `"text"`, `"image"`, `"file"` or `"audio"`. |
 | `text()` | `String` | The text, on a `text` part only. |
-| `mimeType()` | `String` | Required on every non-text part. Spelled `mimeType` on the wire in all seven ports. |
+| `mimeType()` | `String` | Required on every non-text part. Spelled `mimeType` on the wire in all eight ports. |
 | `data()` | `String` | Standard base64 (padded, no line breaks — not the URL-safe alphabet). |
 | `url()` | `String` | An `https:` URL. Exactly one of `data` / `url` is set. |
 | `name()` | `String` | A `file` part's display name. |

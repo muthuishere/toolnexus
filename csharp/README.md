@@ -13,7 +13,7 @@ call `RunAsync()`, and the tool-calling loop runs to an answer. Every source is 
 > loop, hooks, streaming, retries, conversation memory — and nothing it doesn't.
 
 The C#/.NET port of [toolnexus](https://github.com/muthuishere/toolnexus) — the same library,
-byte-identical, also in **JavaScript, Python, Go, Java, Elixir and Clojure**. Built on the
+byte-identical, also in **JavaScript, Python, Go, Java, Elixir, Clojure and Rust**. Built on the
 official `ModelContextProtocol` SDK. Targets .NET 10.
 
 ## Install
@@ -147,4 +147,4 @@ Everything else — the full surface, with runnable examples — lives on the do
 | **API reference** | [C#](https://muthuishere.github.io/toolnexus/api/csharp/) |
 | **Cookbook** | [Zero to agent](https://muthuishere.github.io/toolnexus/cookbook/zero-to-agent/) · [MCP servers](https://muthuishere.github.io/toolnexus/cookbook/mcp-servers/) · [Agent skills](https://muthuishere.github.io/toolnexus/cookbook/agent-skills/) · [Judge](https://muthuishere.github.io/toolnexus/cookbook/judge/) |
 
-Contract across all seven ports: [`SPEC.md`](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
+Contract across all eight ports: [`SPEC.md`](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).

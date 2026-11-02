@@ -10,7 +10,7 @@ A host that puts an agent in front of a person — an IDE panel, a per-folder ag
 chat UI — needs more than a loop: ask before anything destructive runs, stop a pending
 question when the user cancels, show tools as each MCP server comes up, say "context
 compacted", and keep a subagent's `bash` behind the same gate as the parent's. 0.22.0 adds all
-of it in all seven ports. Every addition is opt-in; unset, behaviour is unchanged.
+of it in all eight ports. Every addition is opt-in; unset, behaviour is unchanged.
 </Aside>
 
 ## A permission gate from tool hints
@@ -71,7 +71,7 @@ Also: `grep` takes `context` / `before` / `after`, and `read` / `grep` report a 
 ## By design, per port
 
 - **Register mid-turn:** a tool added to a running toolkit is offered from the next model call
-  (js, python, go, java, csharp). Elixir and Clojure toolkits are immutable values, so a running
+  (js, python, go, java, csharp, rust). Elixir and Clojure toolkits are immutable values, so a running
   turn keeps the toolkit it started with.
 - **Cancellation** is the turn context in Go, an abort signal in JS, a `CancelToken` / thread
   interrupt in Java, the turn's pid (`ctx.signal`) in Elixir, and a cooperative `:cancel` token

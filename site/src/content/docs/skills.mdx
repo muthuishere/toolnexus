@@ -1,6 +1,6 @@
 ---
 title: Agent skills
-description: What an agent skill is, how toolnexus loads a skills/ folder with progressive disclosure, and what toolnexus adds on top — across seven languages.
+description: What an agent skill is, how toolnexus loads a skills/ folder with progressive disclosure, and what toolnexus adds on top — across eight languages.
 ---
 
 import { Aside, Tabs, TabItem, LinkButton } from '@astrojs/starlight/components';
@@ -60,6 +60,15 @@ await using var tk = await Toolkit.CreateAsync(new Toolkit.Options { SkillsDir =
 (def tk (tn/build {:skills "./skills"}))
 ```
 </TabItem>
+<TabItem label="Rust">
+```rust
+let tk = create_toolkit(ToolkitOptions {
+    skills_dir: vec!["./skills".into()],
+    ..Default::default()
+})
+.await?;
+```
+</TabItem>
 </Tabs>
 
 ## The `SKILL.md` format
@@ -99,7 +108,7 @@ toolnexus prints in the `skill` tool's output — so the model always knows wher
 ## What toolnexus adds on top
 
 The skill *format* is simple by design. toolnexus makes it a first-class tool source — the same
-way in seven languages:
+way in eight languages:
 
 - **One `skill` tool, every skill.** No matter how many skills the folder holds, the model sees
   one tool and a menu of names + descriptions. That is progressive disclosure, done for you.
@@ -110,6 +119,6 @@ way in seven languages:
 - **Same registry as everything else.** The `skill` tool sits beside MCP tools, your functions,
   HTTP tools, built-ins, and A2A agents.
 - **Byte-identical parity.** The same `skills/` folder behaves the same in JavaScript, Python, Go,
-  Java, C#, Elixir and Clojure.
+  Java, C#, Elixir, Clojure and Rust.
 
 <LinkButton href="https://www.anthropic.com/news/skills" variant="secondary" icon="external">Learn about Agent Skills</LinkButton>

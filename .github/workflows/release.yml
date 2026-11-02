@@ -71,7 +71,7 @@ jobs:
     # call and one more way for a release to fail for no reason.
     #
     # This gates ONLY the live proof. Every registry still publishes, because
-    # all seven ports move in lockstep or the version numbers drift apart —
+    # all eight ports move in lockstep or the version numbers drift apart —
     # which is the failure `preflight` exists to catch.
     #
     # Anything outside the doc paths counts as code, so the default is to RUN

@@ -1,6 +1,6 @@
 ---
 title: Streaming & hooks
-description: Stream the loop's events live — text deltas, tool calls, results, usage, done — and wrap every tool call with beforeTool/afterTool hooks to rewrite args, deny a call, or redact output. The same shapes across all seven languages.
+description: Stream the loop's events live — text deltas, tool calls, results, usage, done — and wrap every tool call with beforeTool/afterTool hooks to rewrite args, deny a call, or redact output. The same shapes across all eight languages.
 ---
 
 import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
@@ -106,6 +106,18 @@ end
                                                   (get-in ev [:request :prompt]))
                            "done"        (println (str "\n(" (:turns (:result ev)) " turns)"))
                            nil))})
+```
+</TabItem>
+<TabItem label="Rust">
+```rust
+let mut rx = client.stream_with_id("Summarize the repo.", &tk, "user-42")?;
+while let Some(ev) = rx.recv().await {
+    match ev.kind.as_str() {
+        "text" => print!("{}", ev.delta),
+        "tool_call" => println!("\n→ {}", ev.name),
+        _ => {}
+    }
+}
 ```
 </TabItem>
 </Tabs>
@@ -226,6 +238,30 @@ client =
                               {:result {:output "denied by policy" :isError true}}))
              :after-tool  (fn [{:keys [result]}]
                             {:result (update result :output redact)})}}))
+```
+</TabItem>
+<TabItem label="Rust">
+```rust
+let c = create_client(ClientOptions {
+    base_url: base_url.clone(),
+    style: Style::OpenAI,
+    model: model.clone(),
+    hooks: Hooks {
+        before_tool: Some(Arc::new(|ev: BeforeToolEvent| {
+            Box::pin(async move {
+                if ev.name == "bash" && ev.args["command"].as_str().unwrap_or("").contains("rm -rf") {
+                    return Ok(Some(ToolOverride {
+                        result: Some(ToolResult::error("denied by policy")),
+                        ..Default::default()
+                    })); // tool never runs
+                }
+                Ok(None)
+            })
+        })),
+        ..Default::default()
+    },
+    ..Default::default()
+});
 ```
 </TabItem>
 </Tabs>

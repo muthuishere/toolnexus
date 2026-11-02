@@ -1,7 +1,7 @@
 # toolnexus
 
-**We wrote one agent SDK and ported it, by hand, to seven languages — JS, Python, Go, Java,
-C#, Elixir, Clojure — until the same conformance suite passes byte-identical output in every
+**We wrote one agent SDK and ported it, by hand, to eight languages — JS, Python, Go, Java,
+C#, Elixir, Clojure, Rust — until the same conformance suite passes byte-identical output in every
 one of them.**
 
 [![CI](https://github.com/muthuishere/toolnexus/actions/workflows/ci.yml/badge.svg)](https://github.com/muthuishere/toolnexus/actions/workflows/ci.yml)
@@ -14,7 +14,7 @@ one of them.**
 [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Discord](https://img.shields.io/badge/AgentNexus-join%20the%20community-5865F2?logo=discord&logoColor=white)](https://discord.gg/V9C2kvHC8D)
 
-### Your LLM, with MCP tools and agent skills built in — in 3 lines, in 7 languages.
+### Your LLM, with MCP tools and agent skills built in — in 3 lines, in 8 languages.
 
 Point toolnexus at an `mcp.json` and a `skills/` folder and you get a **working agent**: the
 tool-calling loop, skills injection, six unified tool sources, and conversation memory — all
@@ -35,6 +35,7 @@ dotnet add package Toolnexus                       # C#
 {:toolnexus, "~> 0.22"}                             # Elixir (mix.exs deps)
 # Java (Maven): io.github.muthuishere:toolnexus:0.22.0
 # Clojure (deps.edn): net.clojars.muthuishere/toolnexus {:mvn/version "0.22.0"} — JVM and cljgo
+cargo add toolnexus                                # Rust — on crates.io from the next release
 ```
 
 The insight (borrowed from [opencode](https://github.com/anomalyco/opencode)): MCP server
@@ -101,12 +102,12 @@ The same three steps, in the same shape, in every port — see your language's
   compaction notices, `asToolWith` for subagents under the parent's gates, `callId` on the tool
   context, and `listModels`.
   [Recipe](https://muthuishere.github.io/toolnexus/cookbook/host-hooks/).
-- **Go only, for now:** ACP host hooks (`OnPermission`, `OnUpdate`, `GenerateCtx`,
+- **Go and Rust only, for now:** ACP host hooks (`OnPermission`, `OnUpdate`, `GenerateCtx`,
   `GenerateStream`). [Recipe](https://muthuishere.github.io/toolnexus/cookbook/acp-hooks/).
 
 Per-port spellings are in [`CHANGELOG.md`](CHANGELOG.md) and each port's API reference.
 
-## The seven ports
+## The eight ports
 
 | language | package | API reference |
 |---|---|---|
@@ -117,6 +118,7 @@ Per-port spellings are in [`CHANGELOG.md`](CHANGELOG.md) and each port's API ref
 | C# / .NET | [`Toolnexus`](https://www.nuget.org/packages/Toolnexus) (NuGet) | [api/csharp](https://muthuishere.github.io/toolnexus/api/csharp/) |
 | Elixir | [`toolnexus`](https://hex.pm/packages/toolnexus) (Hex) | [api/elixir](https://muthuishere.github.io/toolnexus/api/elixir/) |
 | Clojure | [`net.clojars.muthuishere/toolnexus`](https://clojars.org/net.clojars.muthuishere/toolnexus) | [api/clojure](https://muthuishere.github.io/toolnexus/api/clojure/) |
+| Rust | `toolnexus` (crates.io, from the next release) · [`rust/`](rust/README.md) | [api/rust](https://muthuishere.github.io/toolnexus/api/rust/) |
 
 Each port's own README covers install and a quick start; everything beyond that is on the docs site.
 
@@ -134,7 +136,7 @@ Each port's own README covers install and a quick start; everything beyond that 
 ## The contract
 
 [`SPEC.md`](SPEC.md) is the cross-language contract — §0 is the one-page conformance suite every
-port must satisfy. A behaviour change lands in all seven ports or it is not done; the shared
+port must satisfy. A behaviour change lands in all eight ports or it is not done; the shared
 fixtures in [`examples/`](examples/) are what "identical" is measured against.
 
 Changes go through [OpenSpec](openspec/) before code. See [`CLAUDE.md`](CLAUDE.md) for the

@@ -1,6 +1,6 @@
 ---
 title: Attachments & multimodal
-description: Hand the loop an image, a PDF or an audio clip — and let a tool hand one back — in all seven languages.
+description: Hand the loop an image, a PDF or an audio clip — and let a tool hand one back — in all eight languages.
 ---
 
 import { Tabs, TabItem, Aside } from '@astrojs/starlight/components';
@@ -81,6 +81,19 @@ alias Toolnexus.ContentPart
 (client/run c [(content/text-part "What is broken in this screenshot?")
                (content/attach "./shot.png")]
             {:toolkit tk})
+```
+</TabItem>
+<TabItem label="Rust">
+```rust
+let res = client
+    .run(
+        vec![
+            ContentPart::text("What is broken in this screenshot?"),
+            ContentPart::from_path("./shot.png")?, // read now; a read error surfaces here
+        ],
+        &tk,
+    )
+    .await?;
 ```
 </TabItem>
 </Tabs>
@@ -165,6 +178,14 @@ ContentPart.file!("./invoice.pdf")
 (content/attach "https://example.com/chart.png")     ; kept as a :url
 (content/from-bytes ba "image/png")                  ; byte[] (JVM) / []byte (Go) / any byte seq
 (content/image-file "./shot.png")                    ; from-file pinned to an image part
+```
+</TabItem>
+<TabItem label="Rust">
+```rust
+ContentPart::from_path("./shot.png")?;                              // a path
+ContentPart::from_reader(std::fs::File::open("./shot.png")?, "image/png")?; // any std::io::Read
+ContentPart::from_bytes(&raw, "image/png")?;                       // bytes, e.g. include_bytes!
+ContentPart::from_url("https://example.com/chart.png", "image/png")?;
 ```
 </TabItem>
 </Tabs>
@@ -254,6 +275,19 @@ return new ToolResult("screenshot, 1280x720 png",
 ```clojure
 {:output "screenshot, 1280x720 png"
  :parts  [(content/attach "./shot.png")]}
+```
+</TabItem>
+<TabItem label="Rust">
+```rust
+let shot = match ContentPart::from_path("./shot.png") {
+    Ok(p) => p,
+    Err(e) => return ToolResult::error(e.to_string()), // a read error is the tool's error
+};
+return ToolResult {
+    output: "screenshot, 1280x720 png".into(),
+    parts: vec![shot],
+    ..Default::default()
+};
 ```
 </TabItem>
 </Tabs>

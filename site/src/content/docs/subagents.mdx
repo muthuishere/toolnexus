@@ -1,6 +1,6 @@
 ---
 title: Sub-agents & teams
-description: Delegate work to in-process sub-agents — agent() + team + the task tool, with context isolation, usage roll-up, hierarchical budgets, and durable suspension — in all seven languages.
+description: Delegate work to in-process sub-agents — agent() + team + the task tool, with context isolation, usage roll-up, hierarchical budgets, and durable suspension — in all eight languages.
 ---
 
 import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
@@ -200,6 +200,40 @@ IO.puts("#{r.status} #{r.text} #{r.total_tokens}")
 (println (:status r) (:text r) (:total-tokens r))  ; "done", final text, tree-wide tokens
 ```
 </TabItem>
+<TabItem label="Rust">
+```rust
+use toolnexus::agents::{self, Budget, LlmOptions, Options, Spec};
+
+let explore = agents::new("explore", Spec {
+    does: "read-only research".into(),
+    tools: vec![lookup],
+    ..Default::default()
+});
+let coder = agents::new("coder", Spec {
+    does: "implements changes".into(),
+    soul_file: "./AGENTS.md".into(),
+    team: vec![explore],
+    budget: Some(Budget { max_tokens: 10_000, ..Default::default() }),
+    ..Default::default()
+});
+
+let (r, _rt) = coder
+    .run(
+        Options {
+            llm: Some(LlmOptions {
+                base_url: "https://openrouter.ai/api/v1".into(),
+                style: Style::OpenAI,
+                model: "openai/gpt-4o-mini".into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        "fix the failing test",
+    )
+    .await;
+println!("{} {} {}", r.status, r.text, r.total_tokens);
+```
+</TabItem>
 </Tabs>
 
 The registry an agent runs against is the **transitive closure of its team graph** — agents you
@@ -250,6 +284,15 @@ tools = [Agents.as_tool(explore, rt_opts)]
 ```clojure
 ;; agent-tool turns a registry entry into an ordinary Tool
 (def tk (tn/build {:tools [(rt/agent-tool runtime "explore")]}))
+```
+</TabItem>
+<TabItem label="Rust">
+```rust
+let tk = create_toolkit(ToolkitOptions {
+    extra_tools: vec![explore.as_tool(toolnexus::agents::Options { llm: Some(llm), ..Default::default() })],
+    ..Default::default()
+})
+.await?;
 ```
 </TabItem>
 </Tabs>
@@ -326,7 +369,7 @@ and spawn — a sibling's spend counts.
 
 Any limit stop is **loud**: the result is `status: "incomplete"` with the limit named — never a
 silent `"done"`, never a crash. Partial work and the transcript are preserved. The full result
-status vocabulary is closed and byte-identical in all seven ports:
+status vocabulary is closed and byte-identical in all eight ports:
 
 ```
 "done" | "pending" | "incomplete" | "interrupted" | "closed" | "timeout" | "error"
@@ -353,7 +396,7 @@ which replaces the runtime-wide value for that agent alone.
 | `hooks` | every agent's turns | that agent's turns only |
 | `onMetric` | every agent's turns | that agent's turns only |
 
-Four rules hold in all seven ports:
+Four rules hold in all eight ports:
 
 1. **Agent beats runtime, replace never merge.** Two transcript rewrites have no defined
    order, so an agent that sets `hooks` runs only its own. The two fields resolve
@@ -368,7 +411,7 @@ Four rules hold in all seven ports:
 
 The headline use is **context compaction on a long-lived agent** — a compactor *is* a
 `beforeLLM` hook. See [Persona agents → compaction](/toolnexus/persona-agents/#wire-it-on-an-agent-run-per-agent)
-for the per-agent snippets in all seven languages.
+for the per-agent snippets in all eight languages.
 
 <Aside type="note" title="Compaction and suspension interact — correctly">
 A turn that compacts and *then* suspends is rewound with the rest of the turn: the stored

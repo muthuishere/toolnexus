@@ -104,7 +104,7 @@ true = image.url == nil
 wire = ContentPart.to_map(image)
 true = Enum.sort(Map.keys(wire)) == ["data", "mimeType", "type"]
 
-# The data-free rendering — this exact string is byte-identical in all seven ports.
+# The data-free rendering — this exact string is byte-identical in all eight ports.
 true = ContentPart.summary(image) == "image (image/png, 82 bytes)"
 
 IO.puts("ok: #{ContentPart.summary(image)}")

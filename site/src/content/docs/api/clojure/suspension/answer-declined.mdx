@@ -22,7 +22,7 @@ import { Aside } from '@astrojs/starlight/components';
 Wraps a human's refusal into the `Answer` a suspended run resumes with, carrying a reason string
 that defaults to `"declined"`. It is the decline counterpart to
 [`answer-output`](/api/clojure/suspension/answer-output/), and both are canonical, shipped in all
-seven ports (addendum A9): before these constructors existed, a host hand-built the `Answer` map
+eight ports (addendum A9): before these constructors existed, a host hand-built the `Answer` map
 and a mistyped `:ok`/`:reason` key was a silent wrong-outcome bug rather than a construction error.
 
 `:reason` is carried **only** on a decline (R1) — `answer-output` never sets it, because the loop's

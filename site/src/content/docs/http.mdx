@@ -1,6 +1,6 @@
 ---
 title: HTTP / REST tools
-description: Expose any REST endpoint as a tool without writing a client — URL placeholders filled from args, ${ENV} header auth expanded at call time and never logged, JSON/form/raw bodies, and querystring params. The same declaration across all seven languages.
+description: Expose any REST endpoint as a tool without writing a client — URL placeholders filled from args, ${ENV} header auth expanded at call time and never logged, JSON/form/raw bodies, and querystring params. The same declaration across all eight languages.
 ---
 
 import { Aside, Tabs, TabItem, LinkButton } from '@astrojs/starlight/components';
@@ -141,6 +141,27 @@ tk = Toolnexus.Toolkit.register(tk, [get_post])
                     :required ["id"]}}))
 
 (def tk (tn/build {:tools [get-post]}))
+```
+</TabItem>
+<TabItem label="Rust">
+```rust
+use toolnexus::http::{HttpToolOptions, http_tool};
+
+let get_post = http_tool(HttpToolOptions {
+    name: "get_post".into(),
+    description: "Fetch a blog post by id".into(),
+    method: "GET".into(),
+    url: "https://api.example.com/posts/{id}".into(),
+    headers: [("Authorization".to_string(), "Bearer ${API_TOKEN}".to_string())].into(),
+    input_schema: Some(json!({
+        "type": "object",
+        "properties": {"id": {"type": "number"}},
+        "required": ["id"]
+    })),
+    ..Default::default()
+});
+
+tk.register([get_post]);
 ```
 </TabItem>
 </Tabs>

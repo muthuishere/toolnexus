@@ -1,6 +1,6 @@
 ---
 title: A2A — call remote agents, or be one
-description: Point the toolkit at a remote agent-to-agent (A2A) agent and each of its skills becomes a tool; the same toolkit can serve itself as an A2A agent others call. A minimal, verified subset of A2A — outbound and inbound — in all seven languages.
+description: Point the toolkit at a remote agent-to-agent (A2A) agent and each of its skills becomes a tool; the same toolkit can serve itself as an A2A agent others call. A minimal, verified subset of A2A — outbound and inbound — in all eight languages.
 ---
 
 import { Aside, Tabs, TabItem, LinkButton } from '@astrojs/starlight/components';
@@ -86,6 +86,19 @@ Toolnexus.Toolkit.add_agent(tk, "https://other.example.com/.well-known/agent-car
 (def tk2
   (tool/add-tools tk (a2a/agent-tools
                        {:card "https://other.example.com/.well-known/agent-card.json"})))
+```
+</TabItem>
+<TabItem label="Rust">
+```rust
+use toolnexus::a2a::Agent;
+
+let tk = create_toolkit(ToolkitOptions {
+    agents: vec![Agent::new("https://peer.example.com/.well-known/agent-card.json")],
+    ..Default::default()
+})
+.await?;
+
+tk.add_agent(Agent::new("https://other.example.com/.well-known/agent-card.json")).await?; // or at runtime
 ```
 </TabItem>
 </Tabs>
@@ -209,6 +222,29 @@ handle = Toolnexus.Toolkit.serve(tk, "127.0.0.1:0",
 ;; (:url handle) now speaks A2A; stop with (serve/stop! handle)
 ```
 </TabItem>
+<TabItem label="Rust">
+```rust
+use toolnexus::serve::{A2aConfig, ServeOptions, TaskStoreSpec};
+
+let llm = create_client(ClientOptions {
+    base_url: base_url.clone(),
+    style: Style::OpenAI,
+    model: model.clone(),
+    ..Default::default()
+});
+let handle = tk
+    .serve("127.0.0.1:0", ServeOptions {
+        client: Some(llm),
+        a2a: Some(A2aConfig {
+            name: "my-agent".into(),
+            store: TaskStoreSpec::Selector("memory".into()),
+            ..Default::default()
+        }),
+        ..Default::default()
+    })
+    .await?;
+```
+</TabItem>
 </Tabs>
 
 ## Tasks persist through a pluggable store
@@ -224,7 +260,7 @@ it to the A2A `input-required` state (the question in the task's status message)
 resumes it by answering. The human-in-the-loop primitive reaches across the agent boundary.
 </Aside>
 
-Both directions exist in all seven ports. The same `serve(...)` can co-mount an
+Both directions exist in all eight ports. The same `serve(...)` can co-mount an
 [MCP server](/toolnexus/mcp/) endpoint, so what you assemble is consumable as an agent *and* as an
 MCP server at once.
 

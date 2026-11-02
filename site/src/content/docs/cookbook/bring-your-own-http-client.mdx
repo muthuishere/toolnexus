@@ -173,6 +173,24 @@ client = Toolnexus.Client.create(
     :headers {"X-Egress-Token" (env/get-env "EGRESS_TOKEN")}}))
 ```
 </TabItem>
+<TabItem label="Rust">
+```rust
+// Hand in your own reqwest::Client (same major version as toolnexus's) for full
+// control: an explicit proxy, TLS roots, timeouts.
+let proxied = reqwest::Client::builder()
+    .proxy(reqwest::Proxy::all("http://proxy.internal:3128")?)
+    .build()?;
+
+let agent = create_client(ClientOptions {
+    base_url: "https://openrouter.ai/api/v1".into(),
+    style: Style::OpenAI,
+    model: "openai/gpt-4o-mini".into(), // key: OPENROUTER_API_KEY, read by host
+    http_client: Some(proxied),         // ← toolnexus uses this client
+    headers: [("X-Egress-Token".to_string(), std::env::var("EGRESS_TOKEN").unwrap_or_default())].into(),
+    ..Default::default()
+});
+```
+</TabItem>
 </Tabs>
 
 The injection seam per port:

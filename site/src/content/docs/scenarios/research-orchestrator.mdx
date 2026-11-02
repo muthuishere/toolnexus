@@ -601,6 +601,82 @@ Finish with a recommendation, the evidence for it, and what would change your mi
   (println (:id h) (:state h) (:tokens h)))
 ```
 </TabItem>
+<TabItem label="Rust">
+```rust
+use toolnexus::agents::{self, Agent, Budget, LlmOptions, Options, Spec};
+
+let llm = LlmOptions {
+    base_url: "https://openrouter.ai/api/v1".into(),
+    style: Style::OpenAI,
+    model: "anthropic/claude-sonnet-4".into(),
+    ..Default::default()
+};
+
+let research = create_toolkit(ToolkitOptions {
+    builtins: Some(BuiltinsConfig {
+        tools: ["bash", "write", "edit", "apply_patch"].map(|t| (t.to_string(), false)).into(),
+        ..Default::default()
+    }),
+    ..Default::default()
+})
+.await?;
+let tools = research.tools();
+
+let worker = |name: &str, does: &str, soul: &str| -> Agent {
+    agents::new(name, Spec {
+        does: does.into(),
+        soul: soul.into(),
+        tools: tools.clone(),
+        budget: Some(Budget { max_turns: 15, max_tokens: 80_000, ..Default::default() }),
+        ..Default::default()
+    })
+};
+
+let team = vec![
+    worker("cost-analyst",
+        "Estimates one-time and recurring cost of a stated migration. Needs current volumes to be useful.",
+        "Produce a cost range with the assumptions named. Say 'unknown' rather than inventing a number."),
+    worker("competitor-scout",
+        "Finds what comparable companies did about a named decision, and what happened after.",
+        "Three concrete examples with sources. No generic industry commentary."),
+    worker("code-auditor",
+        "Answers what OUR codebase depends on for a named vendor. Read-only; cites file:line.",
+        "Search the repo. Cite file:line for every dependency you report. Never guess."),
+    worker("risk-officer",
+        "Argues the strongest case AGAINST a proposed change. Adversarial by design.",
+        "Your job is to find what breaks. Be specific and concrete, never rhetorical."),
+];
+
+let coordinator = agents::new("coordinator", Spec {
+    does: "Answers a strategic question by delegating research and synthesizing the results".into(),
+    soul: "Split the question into INDEPENDENT parts, one per worker, and dispatch them ALL in a
+SINGLE turn so they run in parallel. Give each worker a self-contained prompt — they
+cannot see this conversation.
+
+If a worker errors or returns nothing: retry ONCE with a narrower prompt, then route to
+the closest other worker. If nothing covers it, state the gap under \"Not covered\".
+Never present a gap as a finding.
+
+Finish with a recommendation, the evidence for it, and what would change your mind."
+        .into(),
+    team,
+    budget: Some(Budget { max_turns: 25, max_tokens: 600_000, max_concurrent: 4, max_children: 8, max_depth: 2, ..Default::default() }),
+    ..Default::default()
+});
+
+let (r, rt) = coordinator
+    .run(
+        Options { llm: Some(llm), max_concurrent_turns: 3, ..Default::default() }, // 4 workers, 3 requests in flight
+        "Should we migrate billing off Stripe? We do ~40k charges/month across US and EU.",
+    )
+    .await;
+
+println!("{} {}", r.status, r.total_tokens); // whole-tree ledger
+for h in rt.list() {
+    println!("{} {} {}", h.id, h.state, h.tokens); // per-handle breakdown
+}
+```
+</TabItem>
 </Tabs>
 
 <Aside type="tip" title="Map is the same primitive, one worker">

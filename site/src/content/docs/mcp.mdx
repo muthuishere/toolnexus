@@ -1,6 +1,6 @@
 ---
 title: MCP servers
-description: What the Model Context Protocol is, how toolnexus connects to MCP servers from a single mcp.json, and what toolnexus adds on top — across seven languages.
+description: What the Model Context Protocol is, how toolnexus connects to MCP servers from a single mcp.json, and what toolnexus adds on top — across eight languages.
 ---
 
 import { Aside, Tabs, TabItem, LinkButton } from '@astrojs/starlight/components';
@@ -69,6 +69,15 @@ await using var tk = await Toolkit.CreateAsync(new Toolkit.Options { McpConfig =
 (def tk (tn/build {:mcp "./mcp.json"}))
 ```
 </TabItem>
+<TabItem label="Rust">
+```rust
+let tk = create_toolkit(ToolkitOptions {
+    mcp_config: Some(McpConfigInput::Path("./mcp.json".into())),
+    ..Default::default()
+})
+.await?;
+```
+</TabItem>
 </Tabs>
 
 Each server tool is namespaced as `<server>_<tool>` (sanitised), so a tool named `echo` on a
@@ -115,7 +124,7 @@ variable name and let it expand at the edge.
 ## What toolnexus adds on top
 
 MCP defines the protocol. toolnexus is what makes it *usable inside an agent loop* — and it does
-so identically in seven languages:
+so identically in eight languages:
 
 - **One registry, every source.** MCP tools sit beside your functions, agent skills, HTTP tools,
   built-ins, and A2A agents — all one `Tool` interface, all callable in the same loop.
@@ -127,7 +136,7 @@ so identically in seven languages:
   — so a server can pause your agent to ask the user a question, and your single `waitFor` host
   answers it. Advertised to servers only when you provide a `waitFor`.
 - **Byte-identical parity.** The same `mcp.json` yields the same tools and behavior in
-  JavaScript, Python, Go, Java, C#, Elixir and Clojure.
+  JavaScript, Python, Go, Java, C#, Elixir, Clojure and Rust.
 
 ## Inbound: serve your toolkit *as* an MCP server
 

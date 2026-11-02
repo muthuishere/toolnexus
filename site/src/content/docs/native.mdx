@@ -1,6 +1,6 @@
 ---
 title: Native tools — your own functions
-description: Turn any plain function into a first-class Tool with defineTool, sitting in the same registry as MCP servers, agent skills, HTTP endpoints and A2A agents. Schema is explicit or inferred, and the same shape works across all seven languages.
+description: Turn any plain function into a first-class Tool with defineTool, sitting in the same registry as MCP servers, agent skills, HTTP endpoints and A2A agents. Schema is explicit or inferred, and the same shape works across all eight languages.
 ---
 
 import { Aside, Tabs, TabItem, LinkButton } from '@astrojs/starlight/components';
@@ -125,6 +125,25 @@ tk = Toolnexus.Toolkit.register(tk, [add])   # now in the toolkit, beside every 
 
 ;; tools go in through :tools, alongside every other source
 (def tk (tn/build {:tools [add]}))
+```
+</TabItem>
+<TabItem label="Rust">
+```rust
+#[derive(serde::Deserialize)]
+struct AddArgs {
+    a: f64,
+    b: f64,
+}
+
+// define_typed_tool deserializes the args into the struct; the schema is yours.
+let add = define_typed_tool(
+    "add",
+    "Add two numbers",
+    json!({"type": "object", "properties": {"a": {"type": "number"}, "b": {"type": "number"}}, "required": ["a", "b"]}),
+    |x: AddArgs, _ctx| async move { Ok::<_, String>(format!("{}", x.a + x.b)) },
+);
+
+tk.register([add]);
 ```
 </TabItem>
 </Tabs>

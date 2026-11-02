@@ -80,7 +80,7 @@ stops calling tools.
 ## Why this and not the alternative
 
 <Aside type="tip" title="C# has no standalone harness() factory function">
-Five of the seven ports (js, python, golang, elixir, clojure) ship a `harness(spec)`/`Harness(spec)`
+Five of the eight ports (js, python, golang, elixir, clojure) ship a `harness(spec)`/`Harness(spec)`
 identity function that returns its argument unchanged — a name for something that already exists,
 so a spec built through it and one written inline are indistinguishable. **C# and Java skip it.**
 `AgentSpec` is a plain class built through object initializers (or a fluent builder), and that
@@ -317,7 +317,7 @@ sealed class Scripted : HttpMessageHandler
 | `LoopRunOptions.Model` | Per-call model override. `"inherit"` and absence are treated identically — both mean "no opinion, use the spec's/client's default." |
 | `Outcome` | `Text`, `Status` (reuses `AgentStatus`/`RunStatus` — no new strings minted), `StoppedBy` (human-readable, null when nothing stopped it early), `Attempts`, `Turns`, `Result` (the underlying `RunResult`). |
 | `Loop.Status` | Observed only: `"idle"` → `"running"` → `"idle"`/`"error"`/the run's own non-done status. Never set by the caller. |
-| `Loop.Unsupported` | The spec fields this Loop cannot honour, from the closed vocabulary `"tools"` \| `"team"` \| `"waitFor"` \| `"onMetric"` — identical strings in all seven ports. Empty ⇒ the whole spec is honoured. |
+| `Loop.Unsupported` | The spec fields this Loop cannot honour, from the closed vocabulary `"tools"` \| `"team"` \| `"waitFor"` \| `"onMetric"` — identical strings in all eight ports. Empty ⇒ the whole spec is honoured. |
 | `LoopSupport.GuardedHooks` | Compiles `AgentSpec.Guardrails` into one `BeforeTool` hook, first-deny-wins, composed ahead of any hook already set. |
 | `LoopSupport.AllTodosDone` | The built-in completion verifier: reads the shipped `todowrite` tool's plan metadata, requires every item checked. No plan declared ⇒ nothing to verify ⇒ passes — an agent that never uses `todowrite` is never punished by this gate. |
 

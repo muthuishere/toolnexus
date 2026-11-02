@@ -24,7 +24,7 @@ distribution. `Tool` is the contract for an **action**; `Classifier` is the cont
 ## Start here: ask & gate
 
 <Aside type="note" title="Unreleased — lands in the next release">
-`State`, `ask`, `gate`, `Policy`, `Tape` and `evaluateBatch` are implemented in all seven ports and
+`State`, `ask`, `gate`, `Policy`, `Tape` and `evaluateBatch` are implemented in all eight ports and
 land in the next release (OpenSpec change `add-judge-adapters`, ADR 0035) and pass the 16 shared cases
 in `examples/judge/`. They are not in a published package yet. The numbers below are real.
 </Aside>
@@ -167,6 +167,28 @@ Toolnexus.Judge.Answer.value(a["does_this_help"])
 ;=> {:action … :escalated … :request …}
 ```
 </TabItem>
+<TabItem label="Rust">
+```rust
+use toolnexus::judge::{self, Policy, Rule};
+
+let st = judge::state("You are Donkey Kong. You want to win the game.", json!({"message_received": msg}));
+let qs = [
+    judge::noul("is_appropriate", "Does `message_received` contain insults, profanity or harmful topics?"),
+    judge::noul("does_this_help", "Does `message_received` help Donkey Kong win the game?"),
+];
+let a = judge::ask(&c, &st, &qs, None).await?; // a["is_appropriate"].band: yes | no | uncertain
+println!("{}", a["does_this_help"].value());
+
+let out = Policy {
+    rules: vec![Rule { question: "is_appropriate".into(), at_least: Some(0.7), action: "fail".into(), ..Default::default() }],
+    default: String::new(),
+    skip_uncertain: true,
+    ..Default::default()
+}
+.gate(&c, &st, &qs)
+.await?; // out.action, out.escalated, out.request
+```
+</TabItem>
 </Tabs>
 
 - **Bands** default to 0.30 / 0.70 and are exclusive: exactly 0.70 is `uncertain`. A choice or
@@ -206,7 +228,7 @@ readings, not averages. A full pipeline built on this is the
 ## Batteries: judgments already wired into the loop
 
 <Aside type="note" title="Unreleased — lands in the next release">
-Eight batteries ship in all seven ports (OpenSpec change `add-judge-batteries`, ADR 0035). Each
+Eight batteries ship in all eight ports (OpenSpec change `add-judge-batteries`, ADR 0035). Each
 takes any `Classifier`, has a standalone method returning a typed verdict, and where the loop has a
 seam an `asHook(next)` that wraps your own hook instead of replacing it. Every port runs the shared
 cases in `examples/judge/batteries/` against a recorded `static` classifier. No threshold here has
@@ -329,6 +351,22 @@ hooks = %{before_tool: ToolGuard.as_hook(guard), before_llm: ModelRouter.as_hook
 
 (def hooks {:before-tool (b/as-hook guard nil)
             :before-llm  (b/as-hook router nil)})
+```
+</TabItem>
+<TabItem label="Rust">
+```rust
+use toolnexus::judge::batteries::{ModelOption, ModelRouter, OnError, RouterOptions, ToolGuard, ToolGuardOptions};
+
+let guard = ToolGuard::new(c.clone(), ToolGuardOptions { on_error: Some(OnError::Closed), ..Default::default() })?;
+let router = ModelRouter::new(
+    c.clone(),
+    vec![
+        ModelOption { id: "small-fast".into(), description: "Short factual answers, lookups and simple rewrites; cheapest.".into() },
+        ModelOption { id: "large-reasoning".into(), description: "Multi-step reasoning and code changes across files; most expensive.".into() },
+    ],
+    RouterOptions::default(),
+);
+let hooks = Hooks { before_tool: Some(guard.as_hook(None)), before_llm: Some(router.as_hook(None)), ..Default::default() };
 ```
 </TabItem>
 </Tabs>
@@ -628,6 +666,51 @@ questions = %{
       dept (jev/choice d "department")
       urg  (jev/score  d "urgency")]
   ...)
+```
+</TabItem>
+<TabItem label="Rust">
+```rust
+use toolnexus::classifier::{ChoiceQuestion, NoulQuestion, ScoreQuestion};
+use toolnexus::{ClassifierOptions, Question, Questions, create_classifier};
+
+let questions: Questions = [
+    ("wants_money_back".to_string(), Question::Noul(NoulQuestion {
+        instructions: "Is the customer asking for money to be returned?".into(),
+        ..Default::default()
+    })),
+    ("department".to_string(), Question::Choice(ChoiceQuestion {
+        instructions: "Which desk should own this ticket?".into(),
+        criteria: [
+            ("billing", "own it here when the problem is money that moved: a duplicate charge, a wrong invoice, a refund owed"),
+            ("shipping", "own it here when the problem is a physical parcel: a late delivery, a package damaged in transit"),
+            ("technical", "own it here when the problem is the product itself: a login that fails, a feature that errors"),
+        ]
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .into(),
+    })),
+    ("urgency".to_string(), Question::Score(ScoreQuestion {
+        instructions: "How fast does this ticket need a human?".into(),
+        criteria: vec![
+            "the customer is working normally and is waiting on an answer".into(),
+            "the customer is inconvenienced and will chase if nobody replies today".into(),
+            "the customer is blocked from working right now and every hour costs them".into(),
+        ],
+    })),
+]
+.into();
+
+let judge = create_classifier(ClassifierOptions {
+    base_url: "https://api.typesafe.ai/v1".into(), // TypeSafe's own API — also the library default
+    model: "jev-latest".into(),
+    api_key_env: "TYPESAFE_API_KEY".into(), // the NAME of an env var, never the value
+    ..Default::default()
+})?;
+
+let d = judge.evaluate(json!(ticket), &questions).await?;
+
+let want = d.noul("wants_money_back")?;
+let dept = d.choice("department")?;
+let urg = d.score("urgency")?;
 ```
 </TabItem>
 </Tabs>

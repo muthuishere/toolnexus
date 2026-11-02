@@ -27,7 +27,7 @@ answers you read back — is identical across all four.
 The live backend is **non-deterministic**. The same bytes, twelve times, move by σ ≈ 0.015 — so
 `static` is the only backend a test may assert a number against.
 
-That is why every test in this repo, in all seven ports, runs on `static`: **no network, no
+That is why every test in this repo, in all eight ports, runs on `static`: **no network, no
 credential, no cost**, and a numeric assertion that means something. A live call, if it is run at
 all, asserts shape only. It is also why the
 [runnable examples](/toolnexus/cookbook/judge/) work for you with nothing configured — they replay
@@ -154,5 +154,5 @@ shared across seven test suites:
 - absent and empty are **different**: an absent `criteria` is absent, not `null` and not `{}`.
 
 **`state` is transmitted verbatim as you supplied it, and is explicitly outside that claim** —
-numbers do not canonicalise identically across seven languages, so the library does not pretend
+numbers do not canonicalise identically across eight languages, so the library does not pretend
 they do.

@@ -8,6 +8,18 @@ GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
 
 ## Unreleased
 
+**Docs: Rust is on every page, and the docs now say eight languages.** Every tabbed guide,
+cookbook recipe, scenario and the combined API page now has a Rust tab next to the other seven
+(76 tab groups across 31 pages), and all 76 were compile-checked against `rust/`. There is a new
+Rust API overview page (`/api/rust/`), which the sidebar already linked to. The READMEs,
+`PUBLISHING.md`, `SPEC.md`, the CI job names and the release runbook now count eight ports and
+cover crates.io (`ENABLE_CRATES`, `CARGO_REGISTRY_TOKEN`). The ACP host-hooks recipe now covers
+Rust too: like Go, Rust has `on_permission`, `on_update`, cancel and `acp_generate_stream`. The
+other six ports still lack the hooks (`add-go-host-asks` 2.6d). Not done: Rust has **no
+benchmark row** on the performance page. That page says so instead of guessing a number.
+Install snippets mark crates.io as "from the next release", because the crate is not
+published yet.
+
 **Rust port (`rust/`, crate `toolnexus` on crates.io) is complete: tier `full`, ready to publish.**
 A Rust host can now build a toolkit and run the whole tool-calling loop natively on tokio, with
 no Node/Python/Go sidecar. New since 0.22.0, on top of the ACP client, skills, MCP client and
