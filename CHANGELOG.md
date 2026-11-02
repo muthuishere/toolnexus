@@ -8,6 +8,46 @@ GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
 
 ## Unreleased
 
+**Rust port (`rust/`, crate `toolnexus` on crates.io) reaches tier `core` and is ready to publish.**
+A Rust host can now build a toolkit and run the whole tool-calling loop natively on tokio, with
+no Node/Python/Go sidecar. New since 0.22.0, on top of the ACP client, skills, MCP client and
+core types that were already there:
+- **Toolkit** (`create_toolkit`): MCP → skill → builtin → extra tools, first name wins, an extra
+  tool shadows a builtin, `disable_tools` / `disable_skills`, `register` safe mid-turn.
+- **The ten builtins** with the same names, schemas and outputs as the other ports, the host
+  boundary (`shell`, `base_dir`, `confine_to_base_dir`, `kill_grace_ms`; a timeout or cancel
+  kills the whole process group), hints on every builtin, `grep` context lines and truncation
+  metadata, edit diffs, and the opt-in extras (background shells, `websearch` over a provider
+  you supply, `notebook_edit`).
+- **HTTP tools** (`http_tool`).
+- **The unified client**: OpenAI and Anthropic styles, concurrent tool calls with
+  `ToolContext.call_id`, hooks, streaming, retries with Retry-After and `on_error`,
+  conversation stores (memory and file), metrics, `request_params` / `body_transform`, prompt
+  cache, tool tiers, `list_models`, in-process models, Usage cache tokens, and the API-key-by-host
+  rule from 0.22.0 (a custom `base_url` needs `api_key` or `api_key_env`).
+- **§10 suspension**: `wait_for` / `wait_for_ctx`, or a durable `status: "pending"` result.
+- **MCP**: non-text content now becomes `ToolResult.parts` (images were dropped before),
+  annotation hints, `resource_tools()`, `load_mcp_with(on_server)`, and a legacy-SSE fallback
+  for remote servers (rmcp has no SSE client, so this one is in-house).
+- **ACP host hooks** (Go's 0.22.0 set): `on_update`, a reject answer from `on_permission`, a
+  cancellable `generate`, `generate_stream`, and `acp_generate` / `acp_generate_stream` to use
+  an ACP agent as the client's model.
+- Runnable examples (`cargo run --example basic|agent|native_http|streaming|pending|acp`).
+- Release: a `crates` leg in `release.yml`, gated by `ENABLE_CRATES` and using the
+  `CARGO_REGISTRY_TOKEN` secret in `prod` (a crate's first publish cannot use Trusted Publishing;
+  switch once it exists). It skips a version that is already on crates.io. `preflight` and the
+  readiness script now check `rust/Cargo.toml`.
+- Conformance: rust is held to tier `core`. All 22 client options are present. Toolkit
+  `agents` and `waitFor` are permitted absences, and the whole classifier group is recorded
+  under a new `unported` key. Both are printed as debt on every run.
+
+**Not done in Rust** (`openspec/changes/add-rust-port`): A2A (outbound and `serve`), the MCP
+server profile, `translate`, the classifier / judge / batteries, the agents runtime, personas and
+compaction, MCP elicitation, the relay / resume path, and a Gemini client style (Gemini is a
+schema adapter only, as in Go). The Windows code paths compile but have not been run. A few io
+and network error strings come from Rust's libraries and differ from Go's wording; the
+conformance outputs (skill tool, prompt, tool names and schemas) are byte-identical.
+
 ## 0.22.0 — 2026-11-02
 
 **ACP host hooks: decide permissions, watch every update, cancel a turn, and stream (golang first;
