@@ -6,6 +6,7 @@
 //! Mirrors `golang/client.go`. Gemini is a schema adapter only (§0 item 7), as in
 //! every other port: there is no Gemini wire style in the loop.
 
+mod acp_bridge;
 mod cache;
 mod emit;
 mod inprocess;
@@ -24,6 +25,7 @@ use serde_json::{Map, Value, json};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+pub use acp_bridge::{acp_generate, acp_generate_stream, acp_messages};
 pub use cache::PromptCacheOptions;
 pub use emit::{UNSUPPORTED_PART_AS_ERROR, UNSUPPORTED_PART_AS_TEXT, validate_part};
 pub use inprocess::{

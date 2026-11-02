@@ -391,3 +391,40 @@ async fn generate_stream_emits_text_and_agent_tool_events_via_acp() {
     );
     c.close().await;
 }
+
+#[tokio::test]
+async fn client_streams_an_acp_agent_through_the_in_process_seam() {
+    use toolnexus::client::{
+        InProcessOptions, acp_generate, acp_generate_stream, create_in_process_client,
+    };
+    let c = Arc::new(AcpClient::load(opts("toolstream")).await.unwrap());
+    let client = create_in_process_client(InProcessOptions {
+        generate: Some(acp_generate(c.clone())),
+        generate_stream: Some(acp_generate_stream(c.clone())),
+        ..Default::default()
+    });
+    let tk = toolnexus::create_toolkit(toolnexus::ToolkitOptions {
+        builtins: Some(toolnexus::BuiltinsConfig::off()),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    let mut rx = client.stream("go", &tk).unwrap();
+    let (mut text, mut calls, mut results) = (String::new(), Vec::new(), 0);
+    while let Some(ev) = rx.recv().await {
+        match ev.kind.as_str() {
+            "text" => text.push_str(&ev.delta),
+            "tool_call" => {
+                assert_eq!(ev.via, "acp");
+                calls.push(ev.name.clone());
+            }
+            "tool_result" => results += 1,
+            "error" => panic!("{:?}", ev.error),
+            _ => {}
+        }
+    }
+    assert_eq!(text, "done");
+    assert_eq!(calls, vec!["Read file", "execute"]);
+    assert_eq!(results, 2);
+    c.close().await;
+}
