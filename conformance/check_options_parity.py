@@ -65,6 +65,18 @@ def check_group(name: str, group: dict, tiers: dict) -> tuple[list[str], list[st
     failures: list[str] = []
     debt: list[str] = []
     files = group["files"]
+    # A port with no implementation of this group at all is DEBT, never a pass,
+    # and only a core-tier port may claim it. Listing it here as well as in
+    # `files` is a contradiction, so it fails.
+    for port, why in group.get("unported", {}).items():
+        if port.startswith("_"):
+            continue
+        if port in files:
+            failures.append(f"[{name}] {port}: listed in both 'files' and 'unported'")
+        elif tiers.get(port, "full") != "core":
+            failures.append(f"[{name}] {port}: 'unported' is only permitted at tier core")
+        else:
+            debt.append(f"[{name}] {port}: WHOLE GROUP UNPORTED ({why})")
     token_sets: dict[str, set[str]] = {}
     for port, rel in files.items():
         p = ROOT / rel

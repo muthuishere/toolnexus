@@ -1,0 +1,137 @@
+---
+title: "Build the Answer that resumes a run after a human declines to respond"
+description: "Wraps a human's refusal into the Answer a suspended run resumes with, carrying a reason string that defaults to \"declined\". — Rust."
+sidebar:
+  label: "suspension / answer-declined"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §10</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/rust/src/relay.rs">rust/src/relay.rs</a>
+</p>
+
+```rust
+pub fn answer_declined(id: impl Into<String>, reason: &str) -> Answer   // toolnexus::relay
+```
+
+The Answer for a refused request: `ok: false` and a reason (`""` ⇒ `"declined"`). A declined relay
+is an error tool result, not an aborted run — the model sees the refusal and recovers. Through the
+MCP elicitation bridge, `reason: "declined"` maps to `decline` (anything else to `cancel`).
+
+## When to use it
+
+Reach for `answer_declined` any time the party who would resolve a suspension says no: a human
+rejects an approval, a policy check refuses a relayed call, a request expires. Return it from
+`wait_for`, or pass it to `Client::run_with_answer` on the durable path.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="The tool succeeded, just with a real answer? Use answer_output">
+`answer_declined` is specifically for a **refusal** — nobody produced a result. When the human (or
+host) actually produced an output, use [`answer_output`](/api/rust/suspension/answer-output/)
+instead: `ok: true` plus the output string. Building `Answer { ok: false, .. }` by hand means
+handling the empty-reason case yourself, which is the one behavior `answer_declined` fixes in one
+place (`""` ⇒ `"declined"`).
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call — build the Answer and inspect its shape
+
+```rust test
+use toolnexus::relay::answer_declined;
+
+fn main() {
+    let ans = answer_declined("req-1", "not authorized");
+    assert_eq!(ans.id, "req-1");
+    assert!(!ans.ok);
+    assert_eq!(ans.reason, "not authorized");
+
+    // An empty reason defaults to "declined".
+    let def = answer_declined("req-2", "");
+    assert_eq!(def.reason, "declined");
+    println!("ok: {} / {}", ans.reason, def.reason);
+}
+```
+
+### 2. The realistic case — decline a relayed tool call and let the run finish anyway
+
+```rust test
+use std::sync::Arc;
+
+use serde_json::json;
+use tokio_util::sync::CancellationToken;
+use toolnexus::client::{
+    GenerateFn, InProcessOptions, InProcessRequest, InProcessResponse, InProcessToolCall,
+    create_in_process_client,
+};
+use toolnexus::relay::{answer_declined, relay_tool};
+use toolnexus::{BuiltinsConfig, ToolkitOptions, create_toolkit};
+
+fn model() -> GenerateFn {
+    Arc::new(|req: InProcessRequest| {
+        Box::pin(async move {
+            Ok(if req.messages.iter().any(|m| m["role"] == "tool") {
+                InProcessResponse { content: "understood, no refund issued".into(), ..Default::default() }
+            } else {
+                InProcessResponse {
+                    tool_calls: vec![InProcessToolCall { id: "c1".into(), name: "refund".into(), arguments: json!({}) }],
+                    ..Default::default()
+                }
+            })
+        })
+    })
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let tk = create_toolkit(ToolkitOptions {
+        builtins: Some(BuiltinsConfig::off()),
+        extra_tools: vec![relay_tool("refund", "issue a refund", None)],
+        ..Default::default()
+    })
+    .await?;
+    let client = create_in_process_client(InProcessOptions { generate: Some(model()), ..Default::default() });
+
+    let halted = client.run("refund the customer", &tk).await?;
+    assert_eq!(halted.status, "pending", "expected a durable halt");
+    let req = halted.pending.clone().unwrap();
+
+    // The approver said no — the run still completes, it just knows it was refused.
+    let resumed = client
+        .run_with_answer(
+            CancellationToken::new(),
+            &tk,
+            halted.messages,
+            &req,
+            &answer_declined(&req.id, "amount exceeds refund policy"),
+        )
+        .await?;
+    assert_eq!(resumed.status, "done");
+    assert!(resumed.text.contains("no refund"), "got {:?}", resumed.text);
+    println!("ok: {}", resumed.text);
+    Ok(())
+}
+```
+
+### 3. The full surface — comparing a decline against a successful answer for the same call
+
+```rust test
+use toolnexus::relay::{answer_declined, answer_output};
+
+fn main() {
+    let declined = answer_declined("req-1", "");
+    let output = answer_output("req-1", "approved");
+
+    assert!(!declined.ok, "a decline must carry ok: false");
+    assert!(output.ok, "a real output must carry ok: true");
+    assert!(declined.data.is_none(), "a decline carries no payload");
+    assert!(output.reason.is_empty(), "a success carries no reason");
+    println!("ok: declined.ok = {} output.ok = {}", declined.ok, output.ok);
+}
+```
+
+## See also
+
+- [answer_output](/api/rust/suspension/answer-output/)

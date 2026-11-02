@@ -1,0 +1,36 @@
+---
+title: "collectTools — gather decorated functions"
+description: "Sweep a module or class and collect every function marked as a tool. — Rust."
+sidebar:
+  label: "native / collect"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §6</a>
+</p>
+
+<Aside type="caution" title="Not available in Rust">
+Rust has no collector: JS (`collectTools`), Java and C# (`Tools.fromObject` / `Tools.FromObject`) sweep an object for marked methods, but Rust has no runtime reflection or method annotations to sweep (Python, Go, Elixir and Clojure have no collector either).
+</Aside>
+
+Sweep a module or class and collect every function marked as a tool.
+
+## What to use instead
+
+Build a `Vec<Tool>` with `define_tool` / `define_typed_tool` and pass it as `ToolkitOptions.extra_tools` (or `Toolkit::register` it later). A function that returns the vector is the Rust spelling of a collector:
+
+```rust
+fn math_tools() -> Vec<Tool> {
+    vec![
+        define_tool("add", "Add a and b", None, |a, _c| async move { Ok::<_, String>((a["a"].as_f64().unwrap_or(0.0) + a["b"].as_f64().unwrap_or(0.0)).to_string()) }),
+        define_tool("neg", "Negate n", None, |a, _c| async move { Ok::<_, String>((-a["n"].as_f64().unwrap_or(0.0)).to_string()) }),
+    ]
+}
+```
+
+## See also
+
+- [`define_tool`](/api/rust/native/define-tool/) — Wrap a plain function with a name, description and schema — the shortest path from code you have to a tool the LLM can call.
+- [`define_typed_tool`](/api/rust/native/reflect/) — Derive the schema from the function signature or annotation instead of writing it by hand.

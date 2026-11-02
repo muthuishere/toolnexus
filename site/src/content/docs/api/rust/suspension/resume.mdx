@@ -1,0 +1,460 @@
+---
+title: "AgentRuntime.resume — resume a suspended sub-agent"
+description: "Route an Answer to the deepest suspended sub-agent handle and resume it in place. — Rust."
+sidebar:
+  label: "suspension / resume"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7D</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/rust/src/agents/runtime.rs">rust/src/agents/runtime.rs</a>
+</p>
+
+```rust
+impl Runtime { pub async fn resume(&self, answer: Answer) -> Result<TaskResult, String> }
+```
+
+A sub-agent that suspends with no interpreter on its chain (no `Def.wait_for`, no
+`Options.wait_for`) parks durably: the run returns `status: "pending"` with the Request, whose
+`data.path` names the suspended handle. `resume` delivers the Answer to the DEEPEST suspended
+handle, which re-runs its turn from its pre-turn checkpoint (turns and usage grow, never reset),
+then cascades upward; each parent's re-invoked `task` call reattaches to the existing child. It
+returns the settled result of the topmost handle it re-ran.
+
+## When to use it
+
+Use `Runtime::resume` when a sub-agent run comes back `status: "pending"` and you hold the
+Answer out of band — from a UI, a queue, a database row. It is the only way a handle in
+`State::Suspended` gets back to running. For a plain `Client` run (no agent runtime) the
+durable path is `Client::run_with_answer` / `ask_with_answer` instead (section below).
+
+## Why this and not the alternative
+
+Give the chain a `wait_for` (on the `Def` or on `Options`) when someone can answer inline;
+the suspension never goes durable and you never call `resume`. Leave it unset when the answer
+may take minutes or days: the handle parks, and `resume` replays its turn when the answer arrives.
+
+<Aside type="caution" title="Idempotency">
+A durable resume REPLAYS the suspended turn: every tool that ran in it runs again. Any tool
+reachable in a turn that can suspend must be idempotent.
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call — `Suspended`, `pending_kind`, and durable `resume`
+
+No `wait_for` anywhere in the chain ⇒ the suspension goes durable: the handle parks in
+`State::Suspended` and `Runtime::resume` is the ONLY way back to running.
+
+```rust test
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use serde_json::json;
+use toolnexus::agents::{Def, Options, Runtime, State};
+use toolnexus::client::{GenerateFn, InProcessRequest, InProcessResponse, InProcessToolCall};
+use toolnexus::{Answer, Request, Tool, ToolResult, ToolSource, empty_schema, pending};
+
+// check_secret needs human approval the first time; once ctx.answer is ok, it succeeds.
+fn check_secret() -> Tool {
+    Tool {
+        name: "check_secret".into(),
+        description: "needs approval".into(),
+        input_schema: empty_schema(),
+        source: ToolSource::Custom,
+        hints: None,
+        execute: Arc::new(|_args, ctx| {
+            Box::pin(async move {
+                if ctx.answer.as_ref().is_some_and(|a| a.ok) {
+                    return ToolResult::ok("secret-token");
+                }
+                pending(Request { kind: "approval".into(), prompt: "approve secret access?".into(), ..Default::default() })
+            })
+        }),
+    }
+}
+
+fn model() -> GenerateFn {
+    Arc::new(|req: InProcessRequest| {
+        Box::pin(async move {
+            Ok(if req.messages.iter().any(|m| m["role"] == "tool") {
+                InProcessResponse { content: "approved and done".into(), ..Default::default() }
+            } else {
+                InProcessResponse {
+                    tool_calls: vec![InProcessToolCall { id: "c1".into(), name: "check_secret".into(), arguments: json!({}) }],
+                    ..Default::default()
+                }
+            })
+        })
+    })
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // No wait_for on this def, and none higher in the chain: the suspension goes durable.
+    let registry = HashMap::from([(
+        "asker".to_string(),
+        Def { name: "asker".into(), does: "needs approvals".into(), model: "m-asker".into(), tools: vec![check_secret()], ..Default::default() },
+    )]);
+    let rt = Runtime::new(Options { in_process: Some(model()), registry, ..Default::default() });
+
+    let h = rt.spawn(&rt.root(), "asker", None)?;
+    rt.wake(&h, "get the secret");
+    let r = rt.wait(&h, None).await;
+    assert_eq!(r.status, "pending");
+    assert_eq!(rt.state_of(&h), State::Suspended);
+    let v = rt.inspect(&h);
+    assert_eq!(v.pending_kind, "approval");
+
+    // The out-of-band Answer resumes the DEEPEST suspended handle.
+    let id = r.pending.unwrap().id;
+    let done = rt.resume(Answer { id, ok: true, ..Default::default() }).await?;
+    assert_eq!(done.status, "done");
+    assert_eq!(rt.state_of(&h), State::Idle);
+    println!("ok: suspended ({}) -> resumed -> {}", v.pending_kind, rt.state_of(&h).as_str());
+    Ok(())
+}
+```
+
+### 2. A declined answer — the run finishes, it just doesn't do the thing
+
+`resume`'s loop rule branches only on `Answer.ok` — a decline is data, not a returned error.
+
+```rust test
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use serde_json::json;
+use toolnexus::agents::{Def, Options, Runtime, State};
+use toolnexus::client::{GenerateFn, InProcessRequest, InProcessResponse, InProcessToolCall};
+use toolnexus::{Answer, Request, Tool, ToolResult, ToolSource, empty_schema, pending};
+
+fn check_secret() -> Tool {
+    Tool {
+        name: "check_secret".into(),
+        description: "needs approval".into(),
+        input_schema: empty_schema(),
+        source: ToolSource::Custom,
+        hints: None,
+        execute: Arc::new(|_args, ctx| {
+            Box::pin(async move {
+                if let Some(a) = &ctx.answer {
+                    return ToolResult::ok(format!("outcome ok={}", a.ok));
+                }
+                pending(Request { kind: "approval".into(), prompt: "approve secret access?".into(), ..Default::default() })
+            })
+        }),
+    }
+}
+
+fn model() -> GenerateFn {
+    Arc::new(|req: InProcessRequest| {
+        Box::pin(async move {
+            Ok(if req.messages.iter().any(|m| m["role"] == "tool") {
+                InProcessResponse { content: "understood — access was declined".into(), ..Default::default() }
+            } else {
+                InProcessResponse {
+                    tool_calls: vec![InProcessToolCall { id: "c1".into(), name: "check_secret".into(), arguments: json!({}) }],
+                    ..Default::default()
+                }
+            })
+        })
+    })
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let registry = HashMap::from([(
+        "asker".to_string(),
+        Def { name: "asker".into(), does: "needs approvals".into(), model: "m-asker".into(), tools: vec![check_secret()], ..Default::default() },
+    )]);
+    let rt = Runtime::new(Options { in_process: Some(model()), registry, ..Default::default() });
+
+    let h = rt.spawn(&rt.root(), "asker", None)?;
+    rt.wake(&h, "get the secret");
+    let r = rt.wait(&h, None).await;
+    assert_eq!(r.status, "pending");
+
+    let id = r.pending.unwrap().id;
+    let fin = rt.resume(Answer { id, ok: false, reason: "declined".into(), ..Default::default() }).await?;
+
+    // The RUN still completes — it just knows the request was declined.
+    assert_eq!(fin.status, "done");
+    assert!(fin.text.contains("declined"), "got {:?}", fin.text);
+    assert_eq!(rt.state_of(&h), State::Idle);
+    println!("ok: {}", fin.text);
+    Ok(())
+}
+```
+
+### 3. Inspecting the parked handle before resuming — `list` / `inspect`
+
+A host that stores the answer separately from the runtime (a queue, a database row) still needs a
+live handle to resume — `list()` / `inspect()` give a read-only `HandleView` of what is
+parked, including the pending request's kind, without walking the tree by hand.
+
+```rust test
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use serde_json::json;
+use toolnexus::agents::{Def, Options, Runtime, State};
+use toolnexus::client::{GenerateFn, InProcessRequest, InProcessResponse, InProcessToolCall};
+use toolnexus::{Answer, Request, Tool, ToolResult, ToolSource, empty_schema, pending};
+
+fn check_secret() -> Tool {
+    Tool {
+        name: "check_secret".into(),
+        description: "needs approval".into(),
+        input_schema: empty_schema(),
+        source: ToolSource::Custom,
+        hints: None,
+        execute: Arc::new(|_args, ctx| {
+            Box::pin(async move {
+                if ctx.answer.as_ref().is_some_and(|a| a.ok) {
+                    return ToolResult::ok("secret-token");
+                }
+                pending(Request { kind: "approval".into(), prompt: "approve secret access?".into(), ..Default::default() })
+            })
+        }),
+    }
+}
+
+fn model() -> GenerateFn {
+    Arc::new(|req: InProcessRequest| {
+        Box::pin(async move {
+            Ok(if req.messages.iter().any(|m| m["role"] == "tool") {
+                InProcessResponse { content: "approved and done".into(), ..Default::default() }
+            } else {
+                InProcessResponse {
+                    tool_calls: vec![InProcessToolCall { id: "c1".into(), name: "check_secret".into(), arguments: json!({}) }],
+                    ..Default::default()
+                }
+            })
+        })
+    })
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let registry = HashMap::from([(
+        "asker".to_string(),
+        Def { name: "asker".into(), does: "needs approvals".into(), model: "m-asker".into(), tools: vec![check_secret()], ..Default::default() },
+    )]);
+    let rt = Runtime::new(Options { in_process: Some(model()), registry, ..Default::default() });
+
+    let h = rt.spawn(&rt.root(), "asker", None)?;
+    rt.wake(&h, "get the secret");
+    let parked = rt.wait(&h, None).await;
+
+    // The read-only views: inspect() for one handle, list() for the whole tree.
+    let view = rt.inspect(&h);
+    assert_eq!(view.state, State::Suspended);
+    assert_eq!(view.pending_kind, "approval");
+    assert!(rt.list().iter().any(|v| v.id == h.id && v.state == State::Suspended));
+
+    let id = parked.pending.unwrap().id;
+    let settled = rt.resume(Answer { id, ok: true, ..Default::default() }).await?;
+    assert_eq!(settled.status, "done");
+    println!("ok: {} -> {}", view.state.as_str(), settled.status);
+    Ok(())
+}
+```
+
+## The plain-client durable resume — `run_with_answer` / `ask_with_answer`
+
+```rust
+impl Client {
+    pub async fn run_with_answer(&self, cancel: CancellationToken, tk: &Toolkit, history: Vec<Value>,
+                                 pending: &Request, answer: &Answer) -> Result<RunResult, ClientError>
+    pub async fn ask_with_answer(&self, cancel: CancellationToken, tk: &Toolkit, id: &str,
+                                 pending: &Request, answer: &Answer) -> Result<RunResult, ClientError>
+}
+```
+
+Separately from `Runtime::resume`, a plain `Client` run that halted `pending` resumes from the
+transcript you persisted: `run_with_answer` takes that transcript, `ask_with_answer` loads and
+saves it through the client's conversation store. The halted turn's placeholders are replaced so
+every call has exactly one result, no new user turn is appended, and the answer must echo the
+request id. An `ok: true` answer must carry `data["output"]` (a string) or `data["results"]`;
+build it with `answer_output` / `relay_answer` rather than by hand.
+
+### 1. The smallest useful call — halt, then resume with `run_with_answer`
+
+```rust test
+use std::sync::Arc;
+
+use serde_json::json;
+use tokio_util::sync::CancellationToken;
+use toolnexus::client::{
+    GenerateFn, InProcessOptions, InProcessRequest, InProcessResponse, InProcessToolCall,
+    create_in_process_client,
+};
+use toolnexus::relay::{answer_output, relay_tool};
+use toolnexus::{BuiltinsConfig, ToolkitOptions, create_toolkit};
+
+fn model() -> GenerateFn {
+    Arc::new(|req: InProcessRequest| {
+        Box::pin(async move {
+            let tool = req.messages.iter().rev().find(|m| m["role"] == "tool");
+            Ok(match tool.and_then(|m| m["content"].as_str()) {
+                Some(out) => InProcessResponse { content: format!("weather: {out}"), ..Default::default() },
+                None => InProcessResponse {
+                    tool_calls: vec![InProcessToolCall { id: "c1".into(), name: "lookup".into(), arguments: json!({}) }],
+                    ..Default::default()
+                },
+            })
+        })
+    })
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let tk = create_toolkit(ToolkitOptions {
+        builtins: Some(BuiltinsConfig::off()),
+        extra_tools: vec![relay_tool("lookup", "look something up", None)],
+        ..Default::default()
+    })
+    .await?;
+    let client = create_in_process_client(InProcessOptions { generate: Some(model()), ..Default::default() });
+
+    let halted = client.run("weather?", &tk).await?;
+    assert_eq!(halted.status, "pending", "expected a durable halt");
+    let req = halted.pending.clone().unwrap();
+
+    let resumed = client
+        .run_with_answer(CancellationToken::new(), &tk, halted.messages, &req, &answer_output(&req.id, "sunny"))
+        .await?;
+    assert_eq!(resumed.status, "done");
+    assert_eq!(resumed.text, "weather: sunny");
+    println!("ok: resumed to {}", resumed.status);
+    Ok(())
+}
+```
+
+### 2. The realistic case — resume on a fresh client from persisted JSON, and a mismatched answer errors loudly
+
+```rust test
+use std::sync::Arc;
+
+use serde_json::{Value, json};
+use tokio_util::sync::CancellationToken;
+use toolnexus::client::{
+    GenerateFn, InProcessOptions, InProcessRequest, InProcessResponse, InProcessToolCall,
+    create_in_process_client,
+};
+use toolnexus::relay::{answer_output, relay_tool};
+use toolnexus::{BuiltinsConfig, Request, ToolkitOptions, create_toolkit};
+
+fn model() -> GenerateFn {
+    Arc::new(|req: InProcessRequest| {
+        Box::pin(async move {
+            let tool = req.messages.iter().rev().find(|m| m["role"] == "tool");
+            Ok(match tool.and_then(|m| m["content"].as_str()) {
+                Some(out) => InProcessResponse { content: format!("got {out}"), ..Default::default() },
+                None => InProcessResponse {
+                    tool_calls: vec![InProcessToolCall { id: "c1".into(), name: "lookup".into(), arguments: json!({}) }],
+                    ..Default::default()
+                },
+            })
+        })
+    })
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let tk = create_toolkit(ToolkitOptions {
+        builtins: Some(BuiltinsConfig::off()),
+        extra_tools: vec![relay_tool("lookup", "look something up", None)],
+        ..Default::default()
+    })
+    .await?;
+
+    // Process 1: run until the halt, then persist the transcript + pending request as JSON.
+    let first = create_in_process_client(InProcessOptions { generate: Some(model()), ..Default::default() });
+    let halted = first.run("look it up", &tk).await?;
+    let saved = serde_json::to_string(&json!({"messages": halted.messages, "pending": halted.pending}))?;
+
+    // Process 2: a brand-new client restores both and resumes.
+    let restored: Value = serde_json::from_str(&saved)?;
+    let messages: Vec<Value> = serde_json::from_value(restored["messages"].clone())?;
+    let req: Request = serde_json::from_value(restored["pending"].clone())?;
+    let second = create_in_process_client(InProcessOptions { generate: Some(model()), ..Default::default() });
+
+    let err = second
+        .run_with_answer(CancellationToken::new(), &tk, messages.clone(), &req, &answer_output("not-the-right-id", "x"))
+        .await
+        .expect_err("a mismatched answer id must be rejected");
+    assert!(err.to_string().contains("does not echo"), "got {err}");
+
+    let resumed = second
+        .run_with_answer(CancellationToken::new(), &tk, messages, &req, &answer_output(&req.id, "cross-process"))
+        .await?;
+    assert_eq!(resumed.text, "got cross-process");
+    println!("ok: resumed on a fresh client after a rejected mismatched answer");
+    Ok(())
+}
+```
+
+### 3. The full surface — `ask_with_answer` round-trips through the conversation store
+
+`ask_with_answer` is `run_with_answer` plus store load/save: no explicit transcript handling on
+your side.
+
+```rust test
+use std::sync::Arc;
+
+use serde_json::json;
+use tokio_util::sync::CancellationToken;
+use toolnexus::client::{
+    GenerateFn, InProcessOptions, InProcessRequest, InProcessResponse, InProcessToolCall,
+    create_in_process_client,
+};
+use toolnexus::relay::{answer_output, relay_tool};
+use toolnexus::{BuiltinsConfig, ToolkitOptions, create_toolkit};
+
+fn model() -> GenerateFn {
+    Arc::new(|req: InProcessRequest| {
+        Box::pin(async move {
+            let tool = req.messages.iter().rev().find(|m| m["role"] == "tool");
+            Ok(match tool.and_then(|m| m["content"].as_str()) {
+                Some(out) => InProcessResponse { content: format!("got {out}"), ..Default::default() },
+                None => InProcessResponse {
+                    tool_calls: vec![InProcessToolCall { id: "c1".into(), name: "lookup".into(), arguments: json!({}) }],
+                    ..Default::default()
+                },
+            })
+        })
+    })
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let tk = create_toolkit(ToolkitOptions {
+        builtins: Some(BuiltinsConfig::off()),
+        extra_tools: vec![relay_tool("lookup", "look something up", None)],
+        ..Default::default()
+    })
+    .await?;
+    let client = create_in_process_client(InProcessOptions { generate: Some(model()), ..Default::default() });
+
+    let halted = client.ask("look it up", &tk, "conv-1").await?;
+    assert_eq!(halted.status, "pending");
+    let req = halted.pending.clone().unwrap();
+
+    let resumed = client
+        .ask_with_answer(CancellationToken::new(), &tk, "conv-1", &req, &answer_output(&req.id, "stored answer"))
+        .await?;
+    assert_eq!(resumed.text, "got stored answer");
+
+    let saved = client.conversation_store().get("conv-1")?.unwrap_or_default();
+    assert_eq!(saved.len(), resumed.messages.len(), "the store holds the resumed transcript");
+    println!("ok: ask_with_answer resumed and saved conv-1, {} messages", saved.len());
+    Ok(())
+}
+```
+
+## See also
+
+- [runtime](/api/rust/runtime/runtime/) · [task tool](/api/rust/runtime/task-tool/)

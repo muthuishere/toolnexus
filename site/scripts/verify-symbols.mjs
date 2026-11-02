@@ -30,6 +30,7 @@ const PORTS = {
 	// Clojure keeps its tests beside the source (clojure/src/toolnexus/*_test.cljc), so a symbol
 	// that exists only in a test must NOT count as a shipped public symbol.
 	clojure: { dir: "clojure/src", ext: ["cljc"], exclude: ["*_test.cljc"] },
+	rust: { dir: "rust/src", ext: ["rs"] },
 }
 
 /** The identifier to look for: last dotted segment, minus prose decoration. */

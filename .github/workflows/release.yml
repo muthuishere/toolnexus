@@ -6,13 +6,14 @@ name: Release
 # stays off until you flip it on — partial onboarding still produces a green run.
 #
 #   ENABLE_NPM  ENABLE_PYPI  ENABLE_GO  ENABLE_NUGET  ENABLE_JAVA  ENABLE_ELIXIR
-#   ENABLE_CLOJARS                                                  (=true to publish)
+#   ENABLE_CLOJARS  ENABLE_CRATES                                   (=true to publish)
 #
 # npm / PyPI / NuGet use OIDC Trusted Publishing (no stored secrets); Go is a tag
 # push; Java (Maven Central) uses the prod-environment secrets CENTRAL_USERNAME /
 # CENTRAL_PASSWORD / GPG_PRIVATE_KEY / GPG_PASSPHRASE (no OIDC available there);
 # Hex uses HEX_API_KEY and Clojars uses CLOJARS_USERNAME / CLOJARS_PASSWORD —
-# neither registry offers OIDC.
+# neither registry offers OIDC. crates.io uses CARGO_REGISTRY_TOKEN (see the
+# crates job: a crate's FIRST publish cannot use Trusted Publishing).
 
 on:
   release:
@@ -50,7 +51,8 @@ jobs:
           JAVA=$(grep -E "^version" java/build.gradle | head -1 | sed -E "s/.*'([^']+)'.*/\1/")
           EX=$(grep -E '@version "' elixir/mix.exs | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
           CLJ=$(grep -E '^\(def version ' clojure/build.clj | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
-          echo "js=$JS python=$PY csharp=$CS java=$JAVA elixir=$EX clojure=$CLJ"
+          RS=$(grep -E '^version' rust/Cargo.toml | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+          echo "js=$JS python=$PY csharp=$CS java=$JAVA elixir=$EX clojure=$CLJ rust=$RS"
           fail=0
           [ "$JS" = "$VERSION" ] || { echo "::error::js/package.json is $JS, expected $VERSION"; fail=1; }
           [ "$PY" = "$VERSION" ] || { echo "::error::python/pyproject.toml is $PY, expected $VERSION"; fail=1; }
@@ -58,6 +60,7 @@ jobs:
           [ "$JAVA" = "$VERSION" ] || { echo "::error::java/build.gradle is $JAVA, expected $VERSION"; fail=1; }
           [ "$EX" = "$VERSION" ] || { echo "::error::elixir/mix.exs is $EX, expected $VERSION"; fail=1; }
           [ "$CLJ" = "$VERSION" ] || { echo "::error::clojure/build.clj is $CLJ, expected $VERSION"; fail=1; }
+          [ "$RS" = "$VERSION" ] || { echo "::error::rust/Cargo.toml is $RS, expected $VERSION"; fail=1; }
           exit $fail
 
   scope:
@@ -99,7 +102,7 @@ jobs:
           # manifest's own diff and promotes it back to CODE if it changed for any
           # reason other than the version string.
           DOCS='^(site/|docs/|openspec/|README\.md$|CHANGELOG\.md$|PUBLISHING\.md$|CLAUDE\.md$|SPEC\.md$|.*/README\.md$|.*/GUIDE\.md$)'
-          MANIFESTS='^(js/package\.json|python/pyproject\.toml|csharp/src/Toolnexus/Toolnexus\.csproj|java/build\.gradle|elixir/mix\.exs|clojure/build\.clj|clojure/examples/.*/deps\.edn)$'
+          MANIFESTS='^(js/package\.json|python/pyproject\.toml|csharp/src/Toolnexus/Toolnexus\.csproj|java/build\.gradle|elixir/mix\.exs|clojure/build\.clj|rust/Cargo\.toml|rust/Cargo\.lock|clojure/examples/.*/deps\.edn)$'
 
           CHANGED=$(git diff --name-only "$PREV".."$TAG" | grep -vE "$DOCS" | grep -vE "$MANIFESTS" || true)
 
@@ -362,3 +365,45 @@ jobs:
           # CLOJARS_PASSWORD must be a Clojars DEPLOY TOKEN, not the password.
           CLOJARS_USERNAME: ${{ secrets.CLOJARS_USERNAME }}
           CLOJARS_PASSWORD: ${{ secrets.CLOJARS_PASSWORD }}
+
+  crates:
+    needs: [preflight, scope, live-scenarios]
+    # `always()` because a SKIPPED live proof (documentation-only release) must not
+    # skip the publish with it. preflight must still have passed, and the live proof
+    # must be success-or-skipped — never failed.
+    if: |
+      always() &&
+      needs.preflight.result == 'success' &&
+      (needs.live-scenarios.result == 'success' || needs.live-scenarios.result == 'skipped') &&
+      vars.ENABLE_CRATES == 'true'
+    runs-on: ubuntu-latest
+    environment: prod          # CARGO_REGISTRY_TOKEN lives in this environment's secrets
+    permissions: { contents: read }
+    defaults: { run: { working-directory: rust } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      # Idempotent: a version can never be re-published on crates.io, so a re-run
+      # after a partial release must skip, not fail.
+      - id: exists
+        run: |
+          VERSION="${{ needs.preflight.outputs.version }}"
+          CODE=$(curl -s -o /dev/null -w '%{http_code}' \
+            -H 'User-Agent: toolnexus-release (github.com/muthuishere/toolnexus)' \
+            "https://crates.io/api/v1/crates/toolnexus/$VERSION")
+          if [ "$CODE" = "200" ]; then
+            echo "toolnexus $VERSION is already on crates.io — skipping"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+      - if: steps.exists.outputs.skip != 'true'
+        run: cargo publish --locked
+        env:
+          # Use-only: consumed by cargo publish, never echoed or logged.
+          # A token, because the FIRST publish of a new crate cannot use crates.io
+          # Trusted Publishing. Once toolnexus exists on crates.io, configure a
+          # trusted publisher for this repo + workflow + the `prod` environment,
+          # switch to rust-lang/crates-io-auth-action (id-token: write) and delete
+          # this secret.
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

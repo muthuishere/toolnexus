@@ -1,0 +1,141 @@
+---
+title: "toOpenAI — emit OpenAI tool schema"
+description: "Render the toolkit as OpenAI function-calling schema. — Rust."
+sidebar:
+  label: "to_openai"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §4</a>
+</p>
+
+```rust
+pub fn to_openai(tools: &[Tool]) -> Vec<Value>
+impl Toolkit { pub fn to_openai(&self) -> Vec<Value> }
+```
+
+Render the toolkit as OpenAI function-calling schema.
+
+## When to use it
+
+When you call the provider yourself and need the tool schema in its shape: `\{type:"function", function:\{name, description, parameters\}\}`. Schema only — the input schema is passed through verbatim.
+
+## Why this and not the alternative
+
+Use the adapter rather than hand-writing the JSON: names and schemas then always match what `Toolkit::execute` routes.
+
+<Aside type="tip" title="When not to use it">
+If you use the toolnexus client, you never call this; the loop does.
+</Aside>
+
+## Examples
+
+### 1. One tool to OpenAI schema
+
+```rust test
+use serde_json::json;
+use toolnexus::{define_tool, to_openai};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let weather = define_tool(
+        "get_weather",
+        "Current weather for a city",
+        Some(json!({"type":"object","properties":{"city":{"type":"string"}},"required":["city"]})),
+        |args, _ctx| async move {
+            let city = args["city"].as_str().ok_or("city is required")?;
+            Ok::<_, String>(format!("{city}: 21C, clear"))
+        },
+    );
+    let schema = to_openai(&[weather]);
+    assert_eq!(schema.len(), 1);
+    assert_eq!(schema[0]["type"], "function");
+    assert_eq!(schema[0]["function"]["name"], "get_weather");
+    // The input schema is passed through verbatim as `parameters`.
+    assert_eq!(schema[0]["function"]["parameters"]["required"][0], "city");
+    println!("{}", serde_json::to_string_pretty(&schema)?);
+    println!("ok: {}", schema[0]["function"]["name"]);
+    Ok(())
+}
+```
+
+### 2. Feeding it straight into a request body
+
+```rust test
+use serde_json::{Value, json};
+use toolnexus::{BuiltinsConfig, Tool, ToolkitOptions, create_toolkit, define_tool};
+
+fn mk(name: &'static str, desc: &str) -> Tool {
+    define_tool(name, desc, None, move |_a, _c| async move { Ok::<_, String>(name.to_string()) })
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let tk = create_toolkit(ToolkitOptions {
+        extra_tools: vec![mk("search", "Search the docs"), mk("ping", "Health check")],
+        builtins: Some(BuiltinsConfig::off()),
+        ..Default::default()
+    })
+    .await?;
+    let body = json!({
+        "model": "gpt-4o-mini",
+        "messages": [{"role": "user", "content": "search for adapters"}],
+        "tools": tk.to_openai(),
+    });
+    // Plain serde_json values — serialize and send with any HTTP client.
+    let wire: Value = serde_json::from_str(&serde_json::to_string(&body)?)?;
+    let names: Vec<&str> = wire["tools"].as_array().unwrap().iter()
+        .map(|t| t["function"]["name"].as_str().unwrap()).collect();
+    assert_eq!(names, ["search", "ping"], "order is preserved");
+    println!("ok: {names:?}");
+    Ok(())
+}
+```
+
+### 3. Round-tripping a call back to the tool
+
+Schema out, tool call in. The `name` the model returns is the same `name` you look up, and `arguments` arrives as a JSON **string**.
+
+```rust test
+use serde_json::{Value, json};
+use toolnexus::{BuiltinsConfig, ToolContext, ToolkitOptions, create_toolkit, define_tool};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let weather = define_tool(
+        "get_weather",
+        "Current weather for a city",
+        Some(json!({"type":"object","properties":{"city":{"type":"string"}},"required":["city"]})),
+        |args, _ctx| async move {
+            let city = args["city"].as_str().ok_or("city is required")?;
+            Ok::<_, String>(format!("{city}: 21C, clear"))
+        },
+    );
+    let tk = create_toolkit(ToolkitOptions {
+        extra_tools: vec![weather],
+        builtins: Some(BuiltinsConfig::off()),
+        ..Default::default()
+    })
+    .await?;
+    assert_eq!(tk.to_openai()[0]["function"]["name"], "get_weather");
+
+    // What an OpenAI-shaped response carries in choices[0].message.tool_calls.
+    let call = json!({"id": "call_1", "type": "function",
+        "function": {"name": "get_weather", "arguments": "{\"city\":\"Chennai\"}"}});
+    let name = call["function"]["name"].as_str().unwrap();
+    let args: Value = serde_json::from_str(call["function"]["arguments"].as_str().unwrap())?;
+    let r = tk.execute(name, args, ToolContext::default()).await;
+    assert_eq!(r.output, "Chennai: 21C, clear");
+
+    // The reply message you append for the next turn.
+    let reply = json!({"role": "tool", "tool_call_id": call["id"], "content": r.output});
+    println!("ok: {}", reply["content"]);
+    Ok(())
+}
+```
+
+## See also
+
+- [`to_anthropic`](/api/rust/adapters/anthropic/) — Render the toolkit as Anthropic tool-use schema.
+- [`to_gemini`](/api/rust/adapters/gemini/) — Render the toolkit as Gemini function-declaration schema.

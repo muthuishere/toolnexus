@@ -1,6 +1,6 @@
 ---
 title: MCP servers
-description: Point the toolkit at an mcp.json and every server's tools appear, uniform and vendor-neutral — in all seven languages.
+description: Point the toolkit at an mcp.json and every server's tools appear, uniform and vendor-neutral — in all eight languages.
 ---
 
 import { Tabs, TabItem, Aside } from '@astrojs/starlight/components';
@@ -67,6 +67,34 @@ await using var tk = await Toolkit.CreateAsync(new Toolkit.Options()
 
 (def tk (tn/build {:mcp "./mcp.json"}))    ; path, raw JSON string, or a parsed map
 (tn/tool-names tk)                          ; sorted; (:statuses tk) shows any failed server
+```
+</TabItem>
+<TabItem label="Rust">
+```rust test
+use serde_json::json;
+use toolnexus::{McpConfigInput, ToolkitOptions, create_toolkit};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // usually McpConfigInput::Path("mcp.json".into()); inline here so the recipe runs offline
+    let tk = create_toolkit(ToolkitOptions {
+        mcp_config: Some(McpConfigInput::Json(json!({"mcpServers": {
+            "everything": {"type": "local", "command": ["npx", "-y", "@modelcontextprotocol/server-everything"], "enabled": false},
+            "broken": {"type": "local", "command": ["no-such-mcp-binary"]}
+        }}))),
+        ..Default::default()
+    }).await?;
+    for (server, status) in tk.mcp_status() {
+        println!("{server}: {}", status.as_str()); // connected | disabled | failed
+    }
+    // a server that fails never takes the toolkit down; its tools are just absent
+    assert_eq!(tk.mcp_status()["everything"].as_str(), "disabled");
+    assert_eq!(tk.mcp_status()["broken"].as_str(), "failed");
+    // tools are named sanitize(server)_sanitize(tool), e.g. everything_echo
+    tk.close().await;
+    println!("ok: mcp status reported");
+    Ok(())
+}
 ```
 </TabItem>
 </Tabs>

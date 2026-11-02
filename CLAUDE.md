@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **toolnexus** — a small, **vendor-neutral** library that gives *any* LLM the dynamic
 capabilities [opencode](https://github.com/anomalyco/opencode) has, ported **byte-identically
-across seven languages** (`js/`, `python/`, `golang/`, `java/`, `csharp/`, `elixir/`, `clojure/`):
+across eight languages** (`js/`, `python/`, `golang/`, `java/`, `csharp/`, `elixir/`, `clojure/`, `rust/`):
 
 1. **Dynamic MCP servers** — read an `mcp.json`, connect to every server (local stdio +
    remote streamable-HTTP), expose each server tool as a uniform `Tool`.
@@ -38,20 +38,21 @@ below.
 | `java/` | Java port — `io.github.muthuishere:toolnexus`, Java 21. MCP SDK: official `io.modelcontextprotocol.sdk:mcp`. |
 | `csharp/` | C# port — `Toolnexus` (NuGet), .NET. MCP SDK: `ModelContextProtocol`. |
 | `elixir/` | Elixir port — `toolnexus` (Hex), Elixir ≥ 1.16/OTP 26. MCP client: **in-house** (`Toolnexus.Mcp.*` — no mature Elixir SDK exists); coverage gate ≥ 95%. |
+| `rust/` | Rust port — `toolnexus` (crates.io), edition 2024, tokio. MCP SDK: official `rmcp`. Held to tier **core** (`conformance/options_manifest.json`); its gaps are listed in `CHANGELOG.md` and `openspec/changes/add-rust-port`. |
 | `examples/` | **Shared cross-language fixtures** — `mcp.json` + `skills/hello-world/`. Every port runs against these; outputs must match. |
 | `openspec/` | **Spec-driven change workflow (OpenSpec).** `changes/` = active proposals (`proposal.md` + spec deltas + `tasks.md`), `specs/` = canonical capability specs, `changes/archive/` = shipped changes. Run the `openspec` CLI from the repo root. |
-| `.github/workflows/ci.yml` | Runs all seven suites (JS/Python/Go/Java/C#/Elixir/Clojure), hermetically (no network, no live LLM). |
+| `.github/workflows/ci.yml` | Runs all eight suites (JS/Python/Go/Java/C#/Elixir/Clojure/Rust), hermetically (no network, no live LLM). |
 
-## The prime directive: spec-driven, seven-language parity
+## The prime directive: spec-driven, eight-language parity
 
-`SPEC.md` is the contract; the seven ports are implementations of it. Two rules govern every change:
+`SPEC.md` is the contract; the eight ports are implementations of it. Two rules govern every change:
 
 1. **Behavior is defined in the spec before it is written in code.** `SPEC.md §0` is the
    conformance contract — if a change alters observable behavior (tool naming, config parsing,
    the `skill` tool's byte-exact output, adapter mapping, the client loop), it changes `SPEC.md`
    *first*, then the code. Any change of real substance goes through an **OpenSpec change** first
    (below) — the proposal's spec deltas are where intended behavior is pinned before code.
-2. **A behavior change lands in all seven ports, or it is not done.** Do not ship a capability
+2. **A behavior change lands in all eight ports, or it is not done.** Do not ship a capability
    in `js/` and leave `python/`/`golang/`/`java/`/`csharp/` behind without explicitly saying so
    and tracking it in an in-progress spec. The ports are meant to be substitutable; silent drift
    is the one bug this repo exists to prevent.
@@ -121,6 +122,7 @@ Each port is self-contained and hermetic — `cd` into its directory first. CI r
 | `java/` | `./gradlew build --no-daemon` | `./gradlew test --no-daemon` |
 | `csharp/` | `dotnet build` | `dotnet test` |
 | `elixir/` | `mix deps.get && mix compile` | `mix test` · coverage gate: `mix coveralls` (min 95%) |
+| `rust/` | `cargo build` | `cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test && cargo test --no-default-features` |
 
 ## Releasing — the runbook, so nothing is missed
 
@@ -130,7 +132,7 @@ A partial bump is the failure this process exists to prevent.
 ### The one-time setup an owner controls
 
 - Each registry publishes **only** if its repo variable is `true`: `ENABLE_NPM`, `ENABLE_PYPI`,
-  `ENABLE_GO`, `ENABLE_NUGET`, `ENABLE_JAVA`, `ENABLE_ELIXIR`, `ENABLE_CLOJARS`. A leg that is
+  `ENABLE_GO`, `ENABLE_NUGET`, `ENABLE_JAVA`, `ENABLE_ELIXIR`, `ENABLE_CLOJARS`, `ENABLE_CRATES`. A leg that is
   off is skipped silently — **check the variables before concluding a release "worked"**.
 - Secrets live in the **`prod` GitHub environment**, never in the repo, never in code.
 
@@ -141,6 +143,7 @@ A partial bump is the failure this process exists to prevent.
 | Maven Central | Gradle `publishAndReleaseToMavenCentral` | `CENTRAL_USERNAME`, `CENTRAL_PASSWORD`, `GPG_PRIVATE_KEY`, `GPG_PASSPHRASE` |
 | Hex | `mix hex.publish --yes` | `HEX_API_KEY` |
 | Clojars | `clojure -T:build deploy` | `CLOJARS_USERNAME`, `CLOJARS_PASSWORD` — a Clojars **deploy token**, not the account password |
+| crates.io | `cargo publish --locked` (skips if the version exists) | `CARGO_REGISTRY_TOKEN` — a token only because a crate's first publish cannot use Trusted Publishing; switch to it once the crate exists |
 
 Maven Central, Hex and Clojars use stored secrets only because none of the three offers OIDC.
 Never bake a registry token into code, config, a test or CI; they are use-only env vars read at
@@ -148,8 +151,8 @@ the point of use.
 
 ### Cutting a release
 
-1. **Bump every manifest to the same version** — js, python, csharp, java, elixir, and
-   `clojure/build.clj`. Go has no manifest; it releases as a tag. The `preflight` job **fails the
+1. **Bump every manifest to the same version** — js, python, csharp, java, elixir,
+   `clojure/build.clj` and `rust/Cargo.toml`. Go has no manifest; it releases as a tag. The `preflight` job **fails the
    run** if any manifest disagrees with the tag, which is the guard against a partial bump.
 2. **Move the changelog**: `## Unreleased` becomes `## X.Y.Z — YYYY-MM-DD`, with a fresh empty
    `## Unreleased` above it.

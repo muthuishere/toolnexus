@@ -1,0 +1,290 @@
+---
+title: "httpTool — a REST endpoint as a tool"
+description: "Turn an HTTP endpoint into a tool: URL, method, headers with ${ENV} expansion, and a schema. — Rust."
+sidebar:
+  label: "http_tool"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7</a>
+</p>
+
+```rust
+pub fn http_tool(opts: HttpToolOptions) -> Tool
+pub struct HttpToolOptions {
+    pub name: String, pub description: String, pub method: String, pub url: String,
+    pub headers: BTreeMap<String, String>, pub query: Vec<String>, pub body: String,
+    pub input_schema: Option<Value>, pub timeout_ms: u64, pub result_mode: String,
+}
+```
+
+Turn an HTTP endpoint into a tool: URL, method, headers with $\{ENV\} expansion, and a schema.
+
+## When to use it
+
+To expose a REST endpoint as a tool with no code: `\{placeholder\}` URL segments come from the arguments, the rest become query params (GET) or a JSON/form/raw body, and `$\{ENV\}` header values are expanded at call time and never logged.
+
+## Why this and not the alternative
+
+Use this over a native tool wrapping an HTTP client when the call is a straight request/response; you get the §7 error shape (`HTTP <status>: <body>`) for free.
+
+<Aside type="tip" title="When not to use it">
+When the call needs logic around it (pagination, auth refresh), write a `define_tool` instead.
+</Aside>
+
+## Examples
+
+Each example runs against a loopback stub (`serve`, defined at the bottom of the program) so it
+needs no network; point `url` at your real endpoint instead.
+
+### 1. A GET with a path placeholder
+
+```rust test
+use serde_json::json;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
+use toolnexus::http::{HttpToolOptions, http_tool};
+use toolnexus::{ToolContext, ToolSource};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Echo the request line back: we want to see the URL the tool built.
+    let base = serve(|head, _body| (200, head.lines().next().unwrap_or("").to_string())).await?;
+    let repo = http_tool(HttpToolOptions {
+        name: "repo_info".into(),
+        description: "Fetch a repository's metadata".into(),
+        url: format!("{base}/repos/{{owner}}/{{repo}}"),
+        input_schema: Some(json!({"type":"object","properties":{
+            "owner":{"type":"string"},"repo":{"type":"string"},"ref":{"type":"string"}},"required":["owner","repo"]})),
+        ..Default::default()
+    });
+    assert_eq!(repo.source, ToolSource::Http);
+    // Placeholders are filled (path-escaped) and removed; on GET the rest is the query string.
+    let r = repo
+        .call(json!({"owner": "muthu ishere", "repo": "toolnexus", "ref": "main"}), ToolContext::default())
+        .await;
+    assert!(!r.is_error, "{}", r.output);
+    assert_eq!(r.output, "GET /repos/muthu%20ishere/toolnexus?ref=main HTTP/1.1");
+    assert_eq!(r.metadata.as_ref().unwrap()["status"], 200);
+    println!("ok: {}", r.output);
+    Ok(())
+}
+
+/// A tiny loopback HTTP server: `handle(request_head, body)` returns (status, body).
+async fn serve(handle: fn(&str, &str) -> (u16, String)) -> std::io::Result<String> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let base = format!("http://{}", listener.local_addr()?);
+    tokio::spawn(async move {
+        while let Ok((mut sock, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let mut buf = Vec::new();
+                let mut chunk = [0u8; 4096];
+                loop {
+                    let n = sock.read(&mut chunk).await.unwrap_or(0);
+                    if n == 0 { return; }
+                    buf.extend_from_slice(&chunk[..n]);
+                    let text = String::from_utf8_lossy(&buf).to_string();
+                    let Some(end) = text.find("\r\n\r\n") else { continue };
+                    let len = text[..end].lines()
+                        .find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse::<usize>().unwrap_or(0)))
+                        .unwrap_or(0);
+                    if buf.len() < end + 4 + len { continue; }
+                    let (status, out) = handle(&text[..end], &text[end + 4..]);
+                    let resp = format!("HTTP/1.1 {status} X\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{out}", out.len());
+                    let _ = sock.write_all(resp.as_bytes()).await;
+                    return;
+                }
+            });
+        }
+    });
+    Ok(base)
+}
+```
+
+### 2. A POST with a JSON body and an env-backed header
+
+`${ENV}` in a header value is expanded at call time from the process environment and never logged.
+
+```rust test
+use serde_json::{Value, json};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
+use toolnexus::http::{HttpToolOptions, http_tool};
+use toolnexus::ToolContext;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Echo the body back, and whether the Authorization header carried the expanded token.
+    let base = serve(|head, body| {
+        let authed = head.to_ascii_lowercase().contains("authorization: bearer test-key");
+        (if authed { 201 } else { 401 }, body.to_string())
+    })
+    .await?;
+    // SAFETY: set before any other thread reads the environment. In real code the
+    // variable comes from your deployment, never from source.
+    unsafe { std::env::set_var("EXAMPLE_TOKEN", "test-key") };
+    let create = http_tool(HttpToolOptions {
+        name: "create_issue".into(),
+        description: "Open an issue".into(),
+        method: "POST".into(),
+        url: format!("{base}/issues"),
+        headers: [("Authorization".to_string(), "Bearer ${EXAMPLE_TOKEN}".to_string())].into(),
+        input_schema: Some(json!({"type":"object","properties":{
+            "title":{"type":"string"},"labels":{"type":"array","items":{"type":"string"}}},"required":["title"]})),
+        ..Default::default()
+    });
+    let r = create
+        .call(json!({"title": "Docs drift", "labels": ["docs"]}), ToolContext::default())
+        .await;
+    assert!(!r.is_error, "{}", r.output);
+    // Every non-placeholder arg became the JSON body.
+    let sent: Value = serde_json::from_str(&r.output)?;
+    assert_eq!(sent, json!({"title": "Docs drift", "labels": ["docs"]}));
+    assert_eq!(r.metadata.as_ref().unwrap()["status"], 201, "the header was expanded");
+    println!("ok: sent {}", r.output);
+    Ok(())
+}
+
+/// A tiny loopback HTTP server: `handle(request_head, body)` returns (status, body).
+async fn serve(handle: fn(&str, &str) -> (u16, String)) -> std::io::Result<String> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let base = format!("http://{}", listener.local_addr()?);
+    tokio::spawn(async move {
+        while let Ok((mut sock, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let mut buf = Vec::new();
+                let mut chunk = [0u8; 4096];
+                loop {
+                    let n = sock.read(&mut chunk).await.unwrap_or(0);
+                    if n == 0 { return; }
+                    buf.extend_from_slice(&chunk[..n]);
+                    let text = String::from_utf8_lossy(&buf).to_string();
+                    let Some(end) = text.find("\r\n\r\n") else { continue };
+                    let len = text[..end].lines()
+                        .find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse::<usize>().unwrap_or(0)))
+                        .unwrap_or(0);
+                    if buf.len() < end + 4 + len { continue; }
+                    let (status, out) = handle(&text[..end], &text[end + 4..]);
+                    let resp = format!("HTTP/1.1 {status} X\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{out}", out.len());
+                    let _ = sock.write_all(resp.as_bytes()).await;
+                    return;
+                }
+            });
+        }
+    });
+    Ok(base)
+}
+```
+
+### 3. The full surface — query routing, form bodies, result modes and failures
+
+```rust test
+use std::time::Duration;
+
+use serde_json::json;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
+use toolnexus::http::{HttpToolOptions, http_tool};
+use toolnexus::ToolContext;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let base = serve(|head, body| {
+        let path = head.split(' ').nth(1).unwrap_or("");
+        if path.starts_with("/search") {
+            (200, format!(r#"{{"path":"{path}","body":{}}}"#, json!(body)))
+        } else if path == "/form" {
+            (200, body.to_string())
+        } else if path == "/missing" {
+            (404, "no such thing".into())
+        } else {
+            // /slow
+            std::thread::sleep(Duration::from_millis(300));
+            (200, "eventually".into())
+        }
+    })
+    .await?;
+
+    // `query` names ride in the querystring even on a POST; the rest is the JSON body.
+    let search = http_tool(HttpToolOptions {
+        name: "search".into(),
+        method: "POST".into(),
+        url: format!("{base}/search"),
+        query: vec!["q".into(), "page".into()],
+        result_mode: "json".into(),
+        ..Default::default()
+    });
+    let r = search.call(json!({"q": "adapters", "page": 2, "filter": "docs"}), ToolContext::default()).await;
+    // result_mode "json" re-encodes the body the way every port does (Go-style: `&` -> `\u0026`).
+    assert!(r.output.contains(r"/search?page=2\u0026q=adapters"), "{}", r.output);
+    let echoed: serde_json::Value = serde_json::from_str(&r.output)?;
+    assert_eq!(echoed["path"], "/search?page=2&q=adapters");
+    assert_eq!(echoed["body"], r#"{"filter":"docs"}"#, "the leftover arg is the body");
+
+    // body: "form" urlencodes the leftover args instead of sending JSON.
+    let form = http_tool(HttpToolOptions {
+        name: "submit".into(), method: "POST".into(), url: format!("{base}/form"), body: "form".into(),
+        ..Default::default()
+    });
+    let f = form.call(json!({"name": "muthu"}), ToolContext::default()).await;
+    assert_eq!(f.output, "name=muthu");
+
+    // A non-2xx is an error RESULT the model can read; the failure shape wins over result_mode.
+    let missing = http_tool(HttpToolOptions {
+        name: "missing".into(), url: format!("{base}/missing"), result_mode: "status+text".into(),
+        ..Default::default()
+    });
+    let m = missing.call(json!({}), ToolContext::default()).await;
+    assert!(m.is_error && m.output == "HTTP 404: no such thing");
+    assert_eq!(m.metadata.as_ref().unwrap()["status"], 404);
+
+    // timeout_ms is milliseconds; a ToolContext.timeout_ms overrides it.
+    let slow = http_tool(HttpToolOptions {
+        name: "slow".into(), url: format!("{base}/slow"), timeout_ms: 50,
+        ..Default::default()
+    });
+    let s1 = slow.call(json!({}), ToolContext::default()).await;
+    assert!(s1.is_error && s1.output.contains("deadline exceeded"), "{}", s1.output);
+    let s2 = slow.call(json!({}), ToolContext { timeout_ms: 5000, ..Default::default() }).await;
+    assert!(!s2.is_error && s2.output == "eventually");
+
+    println!("ok: {} | {} | override: {}", f.output, m.output, s2.output);
+    Ok(())
+}
+
+/// A tiny loopback HTTP server: `handle(request_head, body)` returns (status, body).
+async fn serve(handle: fn(&str, &str) -> (u16, String)) -> std::io::Result<String> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let base = format!("http://{}", listener.local_addr()?);
+    tokio::spawn(async move {
+        while let Ok((mut sock, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let mut buf = Vec::new();
+                let mut chunk = [0u8; 4096];
+                loop {
+                    let n = sock.read(&mut chunk).await.unwrap_or(0);
+                    if n == 0 { return; }
+                    buf.extend_from_slice(&chunk[..n]);
+                    let text = String::from_utf8_lossy(&buf).to_string();
+                    let Some(end) = text.find("\r\n\r\n") else { continue };
+                    let len = text[..end].lines()
+                        .find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse::<usize>().unwrap_or(0)))
+                        .unwrap_or(0);
+                    if buf.len() < end + 4 + len { continue; }
+                    let (status, out) = handle(&text[..end], &text[end + 4..]);
+                    let resp = format!("HTTP/1.1 {status} X\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{out}", out.len());
+                    let _ = sock.write_all(resp.as_bytes()).await;
+                    return;
+                }
+            });
+        }
+    });
+    Ok(base)
+}
+```
+
+## See also
+
+- [`create_toolkit`](/api/rust/toolkit/create/) — Collapse MCP servers, skills, built-ins, A2A agents and your own functions into one tool list.

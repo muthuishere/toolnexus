@@ -1,0 +1,125 @@
+---
+title: "Inbound translation — transcripts across providers"
+description: "Convert an OpenAI-shaped transcript into Anthropic shape, including the tool-result merging a flattening translator gets wrong. — Rust."
+sidebar:
+  label: "translate / inbound"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §11</a>
+</p>
+
+<Aside type="caution" title="Not available in Rust">
+There is no public inbound converter in Rust: as in Go, it is crate-private. Inbound translation
+runs only inside [`Client::translate`](/api/rust/translate/translate/) on a `Style::Anthropic`
+client.
+</Aside>
+
+Convert an OpenAI-shaped transcript into Anthropic shape, including the tool-result merging a flattening translator gets wrong.
+
+## What it does
+
+On `Style::Anthropic`, `translate` converts the OpenAI transcript before its one call:
+
+- `system` / `developer` messages are hoisted into `system` (joined with a blank line); a
+  request `system` override wins.
+- An assistant turn's `tool_calls` become `tool_use` blocks (`id`, `name`, parsed `input`).
+- `tool`-role results become `tool_result` blocks keyed by `tool_call_id`, and consecutive
+  results merge into ONE user turn.
+- A content-parts array keeps its non-text parts (`image_url`, `input_audio`, `file`, §1B parts)
+  as provider blocks; a part Anthropic cannot carry becomes a named text placeholder.
+- OpenAI `tools` become `{name, description, input_schema}`; `tool_choice` `required` → `any`,
+  `none` → `none`, a named function → `{type: "tool", name}`.
+
+The reply's `stop_reason` maps back to an OpenAI `finish_reason`; any tool call wins as `tool_calls`.
+
+## What to use instead
+
+Call [`Client::translate`](/api/rust/translate/translate/) on a client built with
+`style: Style::Anthropic`. It converts the OpenAI transcript as described above, makes its one
+provider call, and maps the reply back to OpenAI shape. This example shows the merge a flattening
+translator gets wrong: two consecutive `tool` results land in ONE user turn.
+
+```rust test
+use std::sync::{Arc, Mutex};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use serde_json::{Value, json};
+use toolnexus::client::{ClientOptions, Style, TranslateRequest, create_client};
+
+/// A one-shot loopback provider: answers each request with `reply`, keeps the last body.
+async fn stub(reply: &'static str) -> (String, Arc<Mutex<String>>) {
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", l.local_addr().unwrap());
+    let seen = Arc::new(Mutex::new(String::new()));
+    let keep = seen.clone();
+    tokio::spawn(async move {
+        while let Ok((mut s, _)) = l.accept().await {
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 8192];
+            loop {
+                let n = s.read(&mut chunk).await.unwrap_or(0);
+                if n == 0 { break; }
+                buf.extend_from_slice(&chunk[..n]);
+                let text = String::from_utf8_lossy(&buf).to_string();
+                if let Some(i) = text.find("\r\n\r\n") {
+                    let len = text[..i].lines()
+                        .find_map(|h| h.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse().unwrap_or(0)))
+                        .unwrap_or(0usize);
+                    if buf.len() >= i + 4 + len {
+                        *keep.lock().unwrap() = String::from_utf8_lossy(&buf[i + 4..i + 4 + len]).into();
+                        break;
+                    }
+                }
+            }
+            let resp = format!("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{reply}", reply.len());
+            let _ = s.write_all(resp.as_bytes()).await;
+        }
+    });
+    (url, seen)
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let (url, body) = stub(r#"{"content":[{"type":"text","text":"both done"}],"stop_reason":"end_turn","usage":{"input_tokens":9,"output_tokens":2}}"#).await;
+    let client = create_client(ClientOptions {
+        base_url: url, style: Style::Anthropic, model: "claude-x".into(), api_key: "test-key".into(),
+        ..Default::default()
+    });
+
+    let res = client
+        .translate(TranslateRequest {
+            messages: vec![
+                json!({"role": "user", "content": "check a and b"}),
+                json!({"role": "assistant", "content": null, "tool_calls": [
+                    {"id": "a1", "type": "function", "function": {"name": "check", "arguments": "{\"x\":\"a\"}"}},
+                    {"id": "b1", "type": "function", "function": {"name": "check", "arguments": "{\"x\":\"b\"}"}}
+                ]}),
+                json!({"role": "tool", "tool_call_id": "a1", "content": "a ok"}),
+                json!({"role": "tool", "tool_call_id": "b1", "content": "b ok"}),
+            ],
+            ..Default::default()
+        })
+        .await?;
+    assert_eq!(res.text, "both done");
+
+    let sent: Value = serde_json::from_str(&body.lock().unwrap())?;
+    let msgs = sent["messages"].as_array().unwrap();
+    assert_eq!(msgs.len(), 3, "user, assistant(tool_use x2), ONE user(tool_result x2): {msgs:?}");
+    let last = &msgs[2];
+    assert_eq!(last["role"], "user");
+    let ids: Vec<&str> = last["content"].as_array().unwrap().iter()
+        .filter(|b| b["type"] == "tool_result")
+        .map(|b| b["tool_use_id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, ["a1", "b1"]);
+
+    println!("ok: 2 tool results merged into one user turn: {ids:?}");
+    Ok(())
+}
+```
+
+## See also
+
+- [`translate`](/api/rust/translate/translate/) — one turn, no loop.

@@ -1,0 +1,226 @@
+---
+title: "TaskStore — durable inbound tasks"
+description: "Persist inbound A2A tasks so a suspended request survives a restart. — Rust."
+sidebar:
+  label: "serve / task-store"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7B</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/rust/src/serve.rs">rust/src/serve.rs</a>
+</p>
+
+```rust
+pub trait TaskStore: Send + Sync {
+    fn get(&self, id: &str) -> Result<Option<A2aTask>, String>;   // Ok(None) ⇒ unknown id
+    fn save(&self, task: A2aTask) -> Result<(), String>;
+}
+pub struct InMemoryTaskStore;  pub struct FileTaskStore;  // FileTaskStore::new(dir)
+pub enum TaskStoreSpec { Selector(String), Custom(Arc<dyn TaskStore>) }  // A2aConfig.store
+pub fn resolve_store(spec: &TaskStoreSpec) -> Result<Arc<dyn TaskStore>, String>
+```
+
+Where served Tasks live. `A2aConfig.store` selects it: `""` / `"memory"` (default, process
+lifetime), `"file:<dir>"` (one JSON file per Task, atomic temp-file + rename writes), or your own
+`TaskStore`. Any other selector fails `serve`. Every state change (submitted, working, terminal) is
+a `save`; every `GetTask` is a `get`.
+
+## When to use it
+
+When Tasks must survive a restart, or be visible to more than one process (a database, NATS).
+
+## Why this and not the alternative
+
+The in-memory default is right for tests and single-process agents. A store write that fails never
+crashes the server: the next poll just sees the last saved state.
+
+## Examples
+
+### 1. Save a Task, read it back
+
+```rust test
+use toolnexus::a2a::{A2aTask, A2aTaskStatus};
+use toolnexus::serve::{FileTaskStore, TaskStore};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = std::env::temp_dir().join(format!("toolnexus-docs-taskstore-1-{}", std::process::id()));
+    let store = FileTaskStore::new(&dir);
+
+    let task = A2aTask { id: "t1".into(), status: A2aTaskStatus { state: "completed".into(), ..Default::default() }, ..Default::default() };
+    store.save(task)?;
+
+    let got = store.get("t1")?.expect("the saved task");
+    assert_eq!(got.status.state, "completed");
+    assert!(dir.join("t1.json").exists(), "one JSON file per task id");
+    std::fs::remove_dir_all(&dir)?;
+    println!("ok: task {} state {}", got.id, got.status.state);
+    Ok(())
+}
+```
+
+### 2. An unknown id is `Ok(None)`, never an error
+
+```rust test
+use toolnexus::a2a::{A2aTask, A2aTaskStatus};
+use toolnexus::serve::{FileTaskStore, TaskStore};
+
+fn task(state: &str) -> A2aTask {
+    A2aTask { id: "t1".into(), status: A2aTaskStatus { state: state.into(), ..Default::default() }, ..Default::default() }
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = std::env::temp_dir().join(format!("toolnexus-docs-taskstore-2-{}", std::process::id()));
+    let store = FileTaskStore::new(&dir);
+
+    let got = store.get("does-not-exist")?; // a get on a missing id does not error
+    assert!(got.is_none(), "expected None for a missing id");
+
+    // Saving again under the same id overwrites (temp file + atomic rename — a concurrent
+    // get during the write sees the old or the new file, never neither).
+    store.save(task("working"))?;
+    store.save(task("completed"))?;
+    let fin = store.get("t1")?.unwrap();
+    assert_eq!(fin.status.state, "completed", "the latest save wins");
+    std::fs::remove_dir_all(&dir)?;
+    println!("ok: unknown id -> {got:?}; overwrite settles at {}", fin.status.state);
+    Ok(())
+}
+```
+
+### 3. The full surface — wired into `Toolkit::serve`, then read straight off disk
+
+A Task submitted through a REAL local A2A round trip lands on disk; a second, brand-new
+`FileTaskStore` pointed at the same directory (simulating a process restart) can read it directly.
+
+```rust test
+use std::sync::Arc;
+use std::time::Duration;
+
+use serde_json::{Value, json};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
+use toolnexus::client::{GenerateFn, InProcessOptions, InProcessResponse, create_in_process_client};
+use toolnexus::serve::{A2aConfig, FileTaskStore, ServeOptions, TaskStore, TaskStoreSpec};
+use toolnexus::{BuiltinsConfig, ToolkitOptions, create_toolkit};
+
+// A tiny HTTP/1.1 client over loopback (std + tokio only): send `body` as JSON, parse the JSON reply.
+async fn http(method: &str, url: &str, body: Option<&Value>) -> Result<Value, Box<dyn std::error::Error>> {
+    let rest = url.strip_prefix("http://").ok_or("http only")?;
+    let (host, path) = rest.split_at(rest.find('/').unwrap_or(rest.len()));
+    let path = if path.is_empty() { "/" } else { path };
+    let payload = body.map(Value::to_string).unwrap_or_default();
+    let mut conn = TcpStream::connect(host).await?;
+    let req = format!(
+        "{method} {path} HTTP/1.1\r\nHost: {host}\r\nContent-Type: application/json\r\nAccept: application/json, text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+        payload.len()
+    );
+    conn.write_all(req.as_bytes()).await?;
+    let mut raw = Vec::new();
+    conn.read_to_end(&mut raw).await?;
+    let text = String::from_utf8(raw)?;
+    let (head, mut rest) = text.split_once("\r\n\r\n").ok_or("no body")?;
+    let mut out = String::new();
+    if head.to_ascii_lowercase().contains("transfer-encoding: chunked") {
+        while let Some((size, tail)) = rest.split_once("\r\n") {
+            let n = usize::from_str_radix(size.trim(), 16)?;
+            if n == 0 { break; }
+            out.push_str(&tail[..n]);
+            rest = &tail[n + 2..];
+        }
+    } else {
+        out.push_str(rest);
+    }
+    Ok(serde_json::from_str(&out)?)
+}
+
+fn reply(text: &'static str) -> GenerateFn {
+    Arc::new(move |_req| Box::pin(async move { Ok(InProcessResponse { content: text.into(), ..Default::default() }) }))
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = std::env::temp_dir().join(format!("toolnexus-docs-taskstore-3-{}", std::process::id()));
+    let tk = create_toolkit(ToolkitOptions { builtins: Some(BuiltinsConfig::off()), ..Default::default() }).await?;
+    let client = create_in_process_client(InProcessOptions { generate: Some(reply("done")), ..Default::default() });
+
+    let handle = tk
+        .serve("127.0.0.1:0", ServeOptions {
+            client: Some(client),
+            a2a: Some(A2aConfig {
+                name: "durable-desk".into(),
+                store: TaskStoreSpec::Selector(format!("file:{}", dir.display())),
+                ..Default::default()
+            }),
+            ..Default::default()
+        })
+        .await?;
+
+    // Drive a task through the wire protocol directly.
+    let sent = http("POST", &handle.url, Some(&json!({
+        "jsonrpc": "2.0", "id": 1, "method": "SendMessage",
+        "params": {"message": {"role": "user", "parts": [{"kind": "text", "text": "go"}]}}
+    })))
+    .await?;
+    let task_id = sent["result"]["id"].as_str().ok_or("no task id")?.to_string();
+
+    // Poll GetTask to completion (bounded).
+    let mut state = String::new();
+    for _ in 0..200 {
+        let got = http("POST", &handle.url, Some(&json!({"jsonrpc": "2.0", "id": 2, "method": "GetTask", "params": {"id": task_id}}))).await?;
+        state = got["result"]["status"]["state"].as_str().unwrap_or("").to_string();
+        if state == "completed" { break; }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert_eq!(state, "completed");
+    handle.stop();
+
+    // Read the SAME id from a FRESH FileTaskStore on the same directory — as if the process restarted.
+    let reopened = FileTaskStore::new(&dir);
+    let persisted = reopened.get(&task_id)?.expect("the task survived on disk");
+    assert_eq!(persisted.status.state, "completed");
+    std::fs::remove_dir_all(&dir)?;
+    println!("ok: task {task_id} read back after a simulated restart, state = {}", persisted.status.state);
+    Ok(())
+}
+```
+
+### 4. Your own store
+
+Any `TaskStore` is a first-class `A2aConfig.store` value via `TaskStoreSpec::Custom`;
+`resolve_store` hands it back as-is and rejects an unknown selector.
+
+```rust test
+use std::sync::{Arc, Mutex};
+
+use toolnexus::a2a::{A2aTask, A2aTaskStatus};
+use toolnexus::serve::{InMemoryTaskStore, TaskStore, TaskStoreSpec, resolve_store};
+
+// Wraps the in-memory store and records every state it is asked to save.
+struct Audited { inner: InMemoryTaskStore, log: Mutex<Vec<String>> }
+impl TaskStore for Audited {
+    fn get(&self, id: &str) -> Result<Option<A2aTask>, String> { self.inner.get(id) }
+    fn save(&self, t: A2aTask) -> Result<(), String> {
+        self.log.lock().unwrap().push(format!("{} {}", t.id, t.status.state));
+        self.inner.save(t)
+    }
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let audited = Arc::new(Audited { inner: InMemoryTaskStore::new(), log: Mutex::new(Vec::new()) });
+    let store = resolve_store(&TaskStoreSpec::Custom(audited.clone()))?;
+    store.save(A2aTask { id: "t1".into(), status: A2aTaskStatus { state: "working".into(), ..Default::default() }, ..Default::default() })?;
+    assert_eq!(store.get("t1")?.unwrap().status.state, "working");
+    assert_eq!(*audited.log.lock().unwrap(), ["t1 working"]);
+
+    let bad = resolve_store(&TaskStoreSpec::Selector("redis://x".into()));
+    assert!(bad.is_err(), "an unknown selector is an error, never a silent fallback");
+    println!("ok: custom store saw {:?}", audited.log.lock().unwrap());
+    Ok(())
+}
+```
+
+## See also
+
+- [`Toolkit::serve`](/api/rust/serve/a2a/) — expose the toolkit as an A2A agent and/or an MCP server.
+- [`build_agent_card`](/api/rust/serve/agent-card/) — the card a served toolkit publishes.

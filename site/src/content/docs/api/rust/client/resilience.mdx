@@ -1,0 +1,375 @@
+---
+title: "Retries, timeout, cancellation"
+description: "Classify an LLM error into retry / fail, bound a run with a deadline, and cancel cleanly. — Rust."
+sidebar:
+  label: "ErrorInfo"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a>
+</p>
+
+```rust
+pub struct ErrorInfo {
+    pub error: String,   // "LLM <status>" on a non-ok response, the transport error otherwise
+    pub status: u16,     // HTTP status (0 on a transport error)
+    pub attempt: u32,    // zero-based attempt index
+    pub retryable: bool, // the default classification: 429/500/502/503/504/529 or transport
+}
+pub enum ErrorTier { Retry, Fail }
+pub type OnErrorFn = Arc<dyn Fn(&ErrorInfo) -> ErrorTier + Send + Sync>;
+
+// ClientOptions { retries: i32, retry_base_ms: u64, retryable_statuses: Vec<u16>,
+//                 timeout_ms: u64, on_error: Option<OnErrorFn>, .. }
+// Client::run_ctx(cancel: CancellationToken, prompt, &tk, history)
+```
+
+Three independent resilience knobs on `ClientOptions`: retry classification (`on_error`, given an
+`ErrorInfo` per failed attempt, returns `ErrorTier::Retry` or `ErrorTier::Fail`), a whole-run
+deadline (`timeout_ms`, failing with `ClientError::RunTimeout`), and cancellation through a
+`CancellationToken` passed to `run_ctx` (failing with `ClientError::Cancelled`). Both the deadline
+and the token abort the in-flight HTTP request rather than let it run to completion unheeded.
+
+## When to use it
+
+The defaults (retry `429`, `500`, `502`, `503`, `504`, `529` and transport errors up to `retries`,
+exponential backoff honoring `Retry-After`, no deadline) are right for most callers. The default set
+is an exhaustive enumeration, not "429 plus any 5xx": a `501` or a Cloudflare `520` is terminal
+unless you say otherwise. Reach for `retryable_statuses` when your provider emits a transient status
+outside that set (it is **added** to the defaults, never a replacement); reach for `on_error` when a
+provider's failure modes don't fit the default classifier; reach for `timeout_ms` to bound
+worst-case latency; reach for `run_ctx` with a `CancellationToken` when the caller gave up.
+
+## Why this and not the alternative
+
+Use `on_error` over wrapping `run` in your own retry loop: the loop's retries keep the transcript,
+honour `Retry-After`, and never retry a cancellation or a deadline.
+
+<Aside type="tip" title="A tool suspension is a different mechanism — not an error tier">
+There is no `Suspend` tier. §10 suspension (a tool halting awaiting human input) is a deliberate
+pause, never routed through `on_error`. `on_error` governs only failed LLM HTTP attempts.
+</Aside>
+
+## Examples
+
+Each example points `create_client` at a loopback stub (a few lines of `tokio::net::TcpListener`)
+that returns 429/503 or stalls — no real network call, no real API key.
+
+### 1. The smallest useful call — default retry on a transient 503
+
+```rust test
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
+use toolnexus::client::{ClientOptions, Style, create_client};
+use toolnexus::{ToolkitOptions, create_toolkit};
+
+/// A loopback HTTP stub: `reply(n, raw_request)` answers the n-th request (1-based)
+/// with `(status, extra header lines, body)`.
+async fn stub<F>(reply: F) -> String
+where
+    F: Fn(usize, &str) -> (u16, String, String) + Send + Sync + 'static,
+{
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let reply = Arc::new(reply);
+    tokio::spawn(async move {
+        let mut n = 0;
+        while let Ok((mut sock, _)) = listener.accept().await {
+            n += 1;
+            let (reply, i) = (reply.clone(), n);
+            tokio::spawn(async move {
+                let (mut buf, mut chunk) = (Vec::new(), [0u8; 4096]);
+                loop {
+                    let k = sock.read(&mut chunk).await.unwrap_or(0);
+                    if k == 0 {
+                        break;
+                    }
+                    buf.extend_from_slice(&chunk[..k]);
+                    let s = String::from_utf8_lossy(&buf).to_string();
+                    if let Some(h) = s.find("\r\n\r\n") {
+                        let len = s[..h]
+                            .lines()
+                            .find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse().unwrap_or(0)))
+                            .unwrap_or(0);
+                        if buf.len() >= h + 4 + len {
+                            break;
+                        }
+                    }
+                }
+                let (status, extra, body) = reply(i, &String::from_utf8_lossy(&buf));
+                let head = format!(
+                    "HTTP/1.1 {status} STUB\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n{extra}\r\n",
+                    body.len()
+                );
+                let _ = sock.write_all(format!("{head}{body}").as_bytes()).await;
+            });
+        }
+    });
+    url
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let seen = calls.clone();
+    let url = stub(move |_, _| {
+        if seen.fetch_add(1, Ordering::SeqCst) < 2 {
+            return (503, String::new(), r#"{"error":"try later"}"#.into());
+        }
+        (200, String::new(), r#"{"choices":[{"message":{"role":"assistant","content":"hello"}}]}"#.into())
+    })
+    .await;
+
+    let tk = create_toolkit(ToolkitOptions::default()).await?;
+    let client = create_client(ClientOptions {
+        base_url: url, style: Style::OpenAI, model: "m".into(), api_key: "test-key".into(),
+        retry_base_ms: 1,
+        ..Default::default()
+    });
+    let res = client.run("hi", &tk).await?;
+    assert_eq!(res.text, "hello");
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
+    println!("ok: succeeded after {} attempts", calls.load(Ordering::SeqCst));
+    Ok(())
+}
+```
+
+### 2. The realistic case — a custom `on_error` classifier
+
+Return `ErrorTier::Fail` to stop retrying a status the default set would otherwise retry, or
+`ErrorTier::Retry` to retry something it treats as terminal.
+
+```rust test
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
+use toolnexus::client::{ClientOptions, ErrorInfo, ErrorTier, Style, create_client};
+use toolnexus::{ToolkitOptions, create_toolkit};
+
+/// A loopback HTTP stub: `reply(n, raw_request)` answers the n-th request (1-based)
+/// with `(status, extra header lines, body)`.
+async fn stub<F>(reply: F) -> String
+where
+    F: Fn(usize, &str) -> (u16, String, String) + Send + Sync + 'static,
+{
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let reply = Arc::new(reply);
+    tokio::spawn(async move {
+        let mut n = 0;
+        while let Ok((mut sock, _)) = listener.accept().await {
+            n += 1;
+            let (reply, i) = (reply.clone(), n);
+            tokio::spawn(async move {
+                let (mut buf, mut chunk) = (Vec::new(), [0u8; 4096]);
+                loop {
+                    let k = sock.read(&mut chunk).await.unwrap_or(0);
+                    if k == 0 {
+                        break;
+                    }
+                    buf.extend_from_slice(&chunk[..k]);
+                    let s = String::from_utf8_lossy(&buf).to_string();
+                    if let Some(h) = s.find("\r\n\r\n") {
+                        let len = s[..h]
+                            .lines()
+                            .find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse().unwrap_or(0)))
+                            .unwrap_or(0);
+                        if buf.len() >= h + 4 + len {
+                            break;
+                        }
+                    }
+                }
+                let (status, extra, body) = reply(i, &String::from_utf8_lossy(&buf));
+                let head = format!(
+                    "HTTP/1.1 {status} STUB\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n{extra}\r\n",
+                    body.len()
+                );
+                let _ = sock.write_all(format!("{head}{body}").as_bytes()).await;
+            });
+        }
+    });
+    url
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let counter = calls.clone();
+    let url = stub(move |_, _| {
+        counter.fetch_add(1, Ordering::SeqCst);
+        (429, String::new(), r#"{"error":"slow down"}"#.into())
+    })
+    .await;
+
+    let tk = create_toolkit(ToolkitOptions::default()).await?;
+    let seen: Arc<Mutex<Option<ErrorInfo>>> = Arc::default();
+    let record = seen.clone();
+    let client = create_client(ClientOptions {
+        base_url: url, style: Style::OpenAI, model: "m".into(), api_key: "test-key".into(),
+        retry_base_ms: 1,
+        on_error: Some(Arc::new(move |info: &ErrorInfo| {
+            *record.lock().unwrap() = Some(info.clone());
+            ErrorTier::Fail // fail fast on 429 instead of retrying
+        })),
+        ..Default::default()
+    });
+    assert!(client.run("hi", &tk).await.is_err(), "ErrorTier::Fail must surface the error");
+    assert_eq!(calls.load(Ordering::SeqCst), 1, "Fail => no retry");
+    let info = seen.lock().unwrap().clone().expect("on_error was called");
+    assert!(info.status == 429 && info.retryable && info.attempt == 0);
+    println!("ok: failed fast on attempt {} status {}", info.attempt, info.status);
+    Ok(())
+}
+```
+
+### 3. The full surface — timeout, cancellation, and retry exhaustion together
+
+`timeout_ms` aborts an in-flight request that takes too long; a cancelled token does the same for
+"the caller gave up", and neither is retried. `retries` is a hard budget.
+
+```rust test
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
+
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
+use tokio_util::sync::CancellationToken;
+use toolnexus::client::{ClientError, ClientOptions, Style, create_client};
+use toolnexus::{ToolkitOptions, create_toolkit};
+
+/// A loopback HTTP stub: `reply(n, raw_request)` answers the n-th request (1-based)
+/// with `(status, extra header lines, body)`.
+async fn stub<F>(reply: F) -> String
+where
+    F: Fn(usize, &str) -> (u16, String, String) + Send + Sync + 'static,
+{
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let reply = Arc::new(reply);
+    tokio::spawn(async move {
+        let mut n = 0;
+        while let Ok((mut sock, _)) = listener.accept().await {
+            n += 1;
+            let (reply, i) = (reply.clone(), n);
+            tokio::spawn(async move {
+                let (mut buf, mut chunk) = (Vec::new(), [0u8; 4096]);
+                loop {
+                    let k = sock.read(&mut chunk).await.unwrap_or(0);
+                    if k == 0 {
+                        break;
+                    }
+                    buf.extend_from_slice(&chunk[..k]);
+                    let s = String::from_utf8_lossy(&buf).to_string();
+                    if let Some(h) = s.find("\r\n\r\n") {
+                        let len = s[..h]
+                            .lines()
+                            .find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse().unwrap_or(0)))
+                            .unwrap_or(0);
+                        if buf.len() >= h + 4 + len {
+                            break;
+                        }
+                    }
+                }
+                let (status, extra, body) = reply(i, &String::from_utf8_lossy(&buf));
+                let head = format!(
+                    "HTTP/1.1 {status} STUB\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n{extra}\r\n",
+                    body.len()
+                );
+                let _ = sock.write_all(format!("{head}{body}").as_bytes()).await;
+            });
+        }
+    });
+    url
+}
+
+/// A server that accepts and never answers; counts connections.
+async fn hang(calls: Arc<AtomicUsize>) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        while let Ok((sock, _)) = listener.accept().await {
+            calls.fetch_add(1, Ordering::SeqCst);
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                drop(sock);
+            });
+        }
+    });
+    url
+}
+
+fn opts(url: String) -> ClientOptions {
+    ClientOptions {
+        base_url: url, style: Style::OpenAI, model: "m".into(), api_key: "test-key".into(),
+        retry_base_ms: 1,
+        ..Default::default()
+    }
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let tk = create_toolkit(ToolkitOptions::default()).await?;
+
+    // 1. timeout_ms aborts a run that would otherwise hang.
+    let slow = hang(Arc::default()).await;
+    let client = create_client(ClientOptions { timeout_ms: 80, ..opts(slow) });
+    let start = Instant::now();
+    let err = client.run("hi", &tk).await.unwrap_err();
+    assert!(matches!(err, ClientError::RunTimeout { .. }), "got {err}");
+    assert!(start.elapsed() < Duration::from_secs(1));
+
+    // 2. Cancellation aborts in-flight and is never retried.
+    let calls = Arc::new(AtomicUsize::new(0));
+    let client = create_client(opts(hang(calls.clone()).await));
+    let token = CancellationToken::new();
+    let trigger = token.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        trigger.cancel();
+    });
+    let err = client.run_ctx(token, "hi", &tk, Vec::new()).await.unwrap_err();
+    assert!(matches!(err, ClientError::Cancelled), "got {err}");
+    assert_eq!(calls.load(Ordering::SeqCst), 1, "cancellation must not retry");
+
+    // 3. retries is a hard budget: exhausting it surfaces the failure.
+    let fails = Arc::new(AtomicUsize::new(0));
+    let counter = fails.clone();
+    let failing = stub(move |_, _| {
+        counter.fetch_add(1, Ordering::SeqCst);
+        (502, String::new(), String::new())
+    })
+    .await;
+    let client = create_client(ClientOptions { retries: 1, ..opts(failing) });
+    assert!(client.run("hi", &tk).await.is_err());
+    assert_eq!(fails.load(Ordering::SeqCst), 2, "1 try + retries: 1");
+
+    println!("ok: timeout, cancellation, and retry exhaustion all abort cleanly");
+    Ok(())
+}
+```
+
+## ClientOptions resilience fields
+
+| Field | Type | Default | What it does |
+|---|---|---|---|
+| `retries` | `i32` | `0` ⇒ 2 retries | Retries on transient LLM errors; `-1` ⇒ no retries. Bounded even with a custom `on_error`. |
+| `retry_base_ms` | `u64` | `0` ⇒ 500 | Base backoff in ms; exponential + jitter, honoring `Retry-After` when present. |
+| `timeout_ms` | `u64` | `0` (no deadline) | When `> 0`, the whole run is aborted with `ClientError::RunTimeout` (carrying the partial result). |
+| `retryable_statuses` | `Vec<u16>` | empty | Extra statuses classified retryable, **added** to 429/500/502/503/504/529. `on_error` still has the final say. |
+| `on_error` | `Option<OnErrorFn>` | the default classifier | Classify each failed attempt; `None` ⇒ retryable ⇒ `Retry`, else `Fail`. |
+| `http_client` | `Option<reqwest::Client>` | a default client | The client used for LLM requests (retries included). |
+
+## See also
+
+- [`create_client`](/api/rust/client/create/) — The unified client: system prompt, skills injection, parallel and chained tool calls, retries, memory.
+- [`Client.run`](/api/rust/client/run/) — Send a prompt, let the loop call tools until the model stops, get a RunResult.
+- [`ProviderError`](/api/rust/client/provider-error/) — what a non-2xx answer becomes once retries are exhausted.
+- [`Hooks`](/api/rust/client/hooks/) — Intercept before/after model calls and tool calls: audit, redact, veto, or rewrite.

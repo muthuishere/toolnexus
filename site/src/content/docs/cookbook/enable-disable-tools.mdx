@@ -1,6 +1,6 @@
 ---
 title: Enable / disable tools
-description: Scope exactly which tools and skills an agent sees — per-server MCP allowlists, built-in toggles, and drop-lists — in all seven languages.
+description: Scope exactly which tools and skills an agent sees — per-server MCP allowlists, built-in toggles, and drop-lists — in all eight languages.
 ---
 
 import { Tabs, TabItem, Aside } from '@astrojs/starlight/components';
@@ -19,7 +19,7 @@ Four controls, smallest blast radius first:
 
 In `mcp.json`, a per-server `tools` map is an **allowlist** when it has any `true` entry (only those
 load), a **drop-list** when it has only `false` entries, and "all tools" when absent/empty. Keys are
-the server's original tool names. This is config, identical across all seven ports:
+the server's original tool names. This is config, identical across all eight ports:
 
 ```json
 {
@@ -122,6 +122,33 @@ await using var tk = await Toolkit.CreateAsync(new Toolkit.Options {
            :skills-filter {"refunds" true}        ; #3: skill allowlist
            :disable-tools ["peer_write"]})        ; #4: drop tools by name
 ;; :disable-skills exists too — sugar over the filter for the drop-by-name case.
+```
+</TabItem>
+<TabItem label="Rust">
+```rust test
+use std::collections::BTreeMap;
+use toolnexus::{BuiltinsConfig, ToolkitOptions, create_toolkit};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let tk = create_toolkit(ToolkitOptions {
+        builtins: Some(BuiltinsConfig {
+            tools: BTreeMap::from([("bash".to_string(), false)]), // drop one builtin
+            ..Default::default()
+        }),
+        disable_tools: vec!["webfetch".into()], // drop any tool by name
+        ..Default::default()
+    }).await?;
+    let names: Vec<String> = tk.tools().into_iter().map(|t| t.name).collect();
+    assert!(!names.contains(&"bash".into()) && !names.contains(&"webfetch".into()));
+    assert!(names.contains(&"read".into()));
+
+    // BuiltinsConfig::off() turns the whole builtin source off
+    let none = create_toolkit(ToolkitOptions { builtins: Some(BuiltinsConfig::off()), ..Default::default() }).await?;
+    assert!(none.tools().is_empty());
+    println!("ok: {}", names.join(" "));
+    Ok(())
+}
 ```
 </TabItem>
 </Tabs>

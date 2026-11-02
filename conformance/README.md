@@ -12,6 +12,10 @@ This guards the class of silent drift where an option ships in five ports but no
 e.g. `disableTools`/`disableSkills` sat in five ports while the JS reference lacked them,
 undetected until found by hand. **Add an option => add a row to the manifest for all six ports.**
 
+A `core`-tier port that has no implementation of a whole group (Rust has no classifier yet) is listed
+under that group's `unported` key with the reason. It is printed as debt on every run, never as a
+pass, and is refused for a `full`-tier port or a port that also lists a file for the group.
+
 ```sh
 python3 conformance/check_options_parity.py   # exit 0 = parity holds
 ```

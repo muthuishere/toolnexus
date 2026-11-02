@@ -1,0 +1,170 @@
+---
+title: "createToolkit — the aggregator"
+description: "Collapse MCP servers, skills, built-ins, A2A agents and your own functions into one tool list. — Rust."
+sidebar:
+  label: "create_toolkit"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §4</a>
+</p>
+
+```rust
+pub async fn create_toolkit(opts: ToolkitOptions) -> Result<Toolkit, ToolkitError>
+```
+
+Collapse MCP servers, skills, built-ins, A2A agents and your own functions into one tool list.
+
+## When to use it
+
+Once per process or per agent: aggregate MCP servers, skills, the builtins and your own tools into one ordered set (MCP → skill → builtin → extra, first name wins) that every adapter and the client read.
+
+## Why this and not the alternative
+
+Use the toolkit rather than passing tool vectors around: it owns MCP connections (`close`), routes `execute` by name, builds `skills_prompt()` and is safe to `register` into mid-turn.
+
+<Aside type="tip" title="When not to use it">
+If you only need the schema of a handful of hand-built tools, `to_openai(&tools)` on a `Vec<Tool>` is enough.
+</Aside>
+
+## Examples
+
+### 1. Skills only — the smallest useful toolkit
+
+```rust test
+use std::path::PathBuf;
+
+use serde_json::json;
+use toolnexus::{BuiltinsConfig, ToolContext, ToolkitOptions, create_toolkit};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // TOOLNEXUS_REPO is set by the docs test runner; in your own code just use a path.
+    let root = PathBuf::from(std::env::var("TOOLNEXUS_REPO")?).join("examples");
+    let tk = create_toolkit(ToolkitOptions {
+        skills_dir: vec![root.join("skills")],
+        builtins: Some(BuiltinsConfig::off()),
+        ..Default::default()
+    })
+    .await?;
+
+    let res = tk
+        .execute("skill", json!({"name": "hello-world"}), ToolContext::default())
+        .await;
+    assert!(!res.is_error, "{}", res.output);
+    assert!(tk.skills_prompt().contains("hello-world"));
+    println!("{}", res.output.lines().next().unwrap_or(""));
+    println!("ok: {} tool(s)", tk.tools().len());
+    tk.close().await;
+    Ok(())
+}
+```
+
+### 2. MCP servers and skills together
+
+The same flow as `rust/examples/basic.rs`, against the shared `examples/` fixtures. To stay hermetic
+it points the config at the repo's dependency-free stdio fixture server instead of the `npx`
+server in `examples/mcp.json`. MCP tools arrive namespaced as `server_tool`, so two servers exposing
+`search` don't collide.
+
+```rust test
+use std::path::PathBuf;
+
+use serde_json::json;
+use toolnexus::{BuiltinsConfig, McpConfigInput, ToolSource, ToolkitOptions, create_toolkit};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let root = PathBuf::from(std::env::var("TOOLNEXUS_REPO")?).join("examples");
+    let server = root.join("mcp-progress-server.mjs");
+    let tk = create_toolkit(ToolkitOptions {
+        mcp_config: Some(McpConfigInput::Json(json!({"mcpServers": {
+            "fixture": {"type": "local", "command": ["node", server], "timeout": 30000}
+        }}))),
+        skills_dir: vec![root.join("skills")],
+        builtins: Some(BuiltinsConfig::off()),
+        ..Default::default()
+    })
+    .await?;
+
+    // Per-server connection status.
+    let status = tk.mcp_status();
+    assert_eq!(status["fixture"].as_str(), "connected");
+
+    // One flat list; `source` says where each tool came from.
+    for t in tk.tools() {
+        println!("{} ({:?})", t.name, t.source);
+    }
+    let mcp = tk.get("fixture_slow").expect("namespaced server_tool");
+    assert_eq!(mcp.source, ToolSource::Mcp);
+    assert!(tk.get("skill").is_some());
+
+    // Provider schema, straight off the toolkit.
+    assert!(tk.to_openai().iter().any(|t| t["function"]["name"] == "fixture_slow"));
+    tk.close().await;
+    println!("ok: fixture={}", status["fixture"].as_str());
+    Ok(())
+}
+```
+
+### 3. The full surface
+
+```rust test
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use serde_json::json;
+use toolnexus::skills::SkillDef;
+use toolnexus::{Answer, BuiltinsConfig, Request, ToolContext, ToolkitOptions, create_toolkit, define_tool};
+
+fn skill(name: &str, description: &str) -> SkillDef {
+    SkillDef { name: name.into(), description: description.into(), content: format!("# {name}\nSteps…"), ..Default::default() }
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let weather = define_tool("weather", "Weather for a city", None, |_a, _c| async { Ok::<_, String>("21C".to_string()) });
+    let delete_repo = define_tool("delete_repo", "Delete a repository", None, |_a, _c| async { Ok::<_, String>("gone".to_string()) });
+
+    let tk = create_toolkit(ToolkitOptions {
+        // Skills as data — no filesystem involved (§3, S1) — plus a host provider.
+        skills: vec![skill("deploy", "Ship a release"), skill("dangerous-migration", "Rewrite the DB")],
+        skill_provider: Some(Arc::new(|| Box::pin(async { Ok(vec![skill("triage", "Sort the inbox")]) }))),
+        // Narrow what this agent may see (§3, S2): only `false` entries = a drop-list
+        // (any `true` would make it an allowlist).
+        skills_filter: HashMap::from([("triage".to_string(), false)]),
+        // Sugar over the same drop-list; an explicit skills_filter entry for a name wins.
+        disable_skills: vec!["dangerous-migration".into()],
+        // Drop tools by FINAL exposed name, after aggregation.
+        disable_tools: vec!["delete_repo".into()],
+        builtins: Some(BuiltinsConfig::off()), // no file/shell tools for this agent
+        extra_tools: vec![weather, delete_repo],
+        // An MCP server may elicit input from the human mid-call (§10).
+        wait_for: Some(Arc::new(|req: Request| Box::pin(async move { Ok(Answer { id: req.id, ok: true, ..Default::default() }) }))),
+        ..Default::default()
+    })
+    .await?;
+
+    let names: Vec<String> = tk.tools().iter().map(|t| t.name.clone()).collect();
+    assert_eq!(names, ["skill", "weather"]);
+    let prompt = tk.skills_prompt();
+    assert!(prompt.contains("deploy"));
+    assert!(!prompt.contains("dangerous-migration") && !prompt.contains("triage"));
+    let r = tk.execute("delete_repo", json!({}), ToolContext::default()).await;
+    assert_eq!(r.output, "Unknown tool: delete_repo");
+    tk.close().await;
+    println!("ok: {names:?}");
+    Ok(())
+}
+```
+
+<Aside type="caution">
+A `skill_provider` failure is **isolated** — it is logged and the other skill sources still load.
+Don't rely on a provider error to fail construction.
+</Aside>
+
+## See also
+
+- [`create_client`](/api/rust/client/create/) — The unified client: system prompt, skills injection, parallel and chained tool calls, retries, memory.

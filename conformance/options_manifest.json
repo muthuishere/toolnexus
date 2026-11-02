@@ -8,7 +8,8 @@
       "java": "java/src/main/java/io/github/muthuishere/toolnexus/LlmClient.java",
       "csharp": "csharp/src/Toolnexus/LlmClient.cs",
       "elixir": "elixir/lib/toolnexus/client.ex",
-      "clojure": "clojure/src/toolnexus/client.cljc"
+      "clojure": "clojure/src/toolnexus/client.cljc",
+      "rust": "rust/src/client.rs"
     },
     "options": [
       {
@@ -179,7 +180,8 @@
       "java": "java/src/main/java/io/github/muthuishere/toolnexus/Toolkit.java",
       "csharp": "csharp/src/Toolnexus/Toolkit.cs",
       "elixir": "elixir/lib/toolnexus/toolkit.ex",
-      "clojure": "clojure/src/toolnexus/core.cljc"
+      "clojure": "clojure/src/toolnexus/core.cljc",
+      "rust": "rust/src/toolkit.rs"
     },
     "options": [
       {
@@ -280,7 +282,8 @@
       "java": "java/src/main/java/io/github/muthuishere/toolnexus/Classifier.java",
       "csharp": "csharp/src/Toolnexus/Classifier.cs",
       "elixir": "elixir/lib/toolnexus/classifier.ex",
-      "clojure": "clojure/src/toolnexus/classifier.cljc"
+      "clojure": "clojure/src/toolnexus/classifier.cljc",
+      "rust": "rust/src/classifier.rs"
     },
     "options": [
       {
@@ -418,6 +421,7 @@
     "java": "full",
     "csharp": "full",
     "elixir": "full",
-    "clojure": "full"
+    "clojure": "full",
+    "rust": "full"
   }
 }

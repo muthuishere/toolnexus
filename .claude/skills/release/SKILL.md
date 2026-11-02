@@ -146,6 +146,7 @@ run to go red — check that the leg you cared about says `success`, then verify
 | Hex | `HEX_API_KEY`, `prod` env, gated by `ENABLE_ELIXIR` (not `ENABLE_HEX`); needs `api:write` | rejects |
 | Clojars | `CLOJARS_USERNAME`/`CLOJARS_PASSWORD` (a deploy token) | `403 non-snapshots` |
 | Go | none — tag push `golang/vX.Y.Z` | idempotent, skips |
+| crates.io | `CARGO_REGISTRY_TOKEN`, `prod` env, gated by `ENABLE_CRATES` (first publish cannot use Trusted Publishing; switch later) | rejects; the leg checks the crates.io API first and skips |
 
 ## Report honestly
 

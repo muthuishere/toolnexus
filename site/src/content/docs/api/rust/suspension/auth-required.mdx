@@ -1,0 +1,168 @@
+---
+title: "authRequired — suspend for authorization"
+description: "The auth-shaped suspension: hand back a URL, resume once the user has granted access. — Rust."
+sidebar:
+  label: "auth_required"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §10</a>
+</p>
+
+```rust
+pub fn auth_required(url: &str, prompt: &str) -> ToolResult
+```
+
+The auth-shaped suspension: hand back a URL, resume once the user has granted access.
+
+## When to use it
+
+When a tool needs the user to authorize at a URL: an `authorization` suspension whose output is the prompt plus the URL. An empty prompt uses the shared default text.
+
+## Why this and not the alternative
+
+Use this rather than `pending` by hand so the kind and default prompt match every other port.
+
+<Aside type="tip" title="When not to use it">
+For a yes/no or a typed value, use `pending` with `approval` / `input`.
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call — build the suspension and read it back
+
+```rust test
+use toolnexus::{auth_required, pending_of};
+
+fn main() {
+    let res = auth_required("https://example.com/login", "");
+    let req = pending_of(&res).expect("a suspension");
+    assert_eq!(req.kind, "authorization");
+    assert_eq!(req.url, "https://example.com/login");
+    assert_eq!(req.prompt, "Authorization required to continue", "the default prompt");
+    println!("ok: {} {}", req.kind, req.url);
+}
+```
+
+### 2. The realistic case — a custom prompt, and the human-readable fallback text
+
+```rust test
+use toolnexus::{auth_required, pending_of};
+
+fn main() {
+    let res = auth_required(
+        "https://accounts.example.com/oauth/authorize?client=crm",
+        "Connect your CRM account to continue",
+    );
+    let req = pending_of(&res).unwrap();
+    assert_eq!(req.prompt, "Connect your CRM account to continue");
+    // The plain output a host without §10 support would show: prompt, newline, URL.
+    assert_eq!(
+        res.output,
+        "Connect your CRM account to continue\nhttps://accounts.example.com/oauth/authorize?client=crm"
+    );
+    assert!(res.is_error, "a parked call is not a success");
+    println!("ok: {}", res.output.replace('\n', " | "));
+}
+```
+
+### 3. The full surface — wired into a live `Client::run`, resolved by `wait_for`
+
+The tool discovers it has no valid session and suspends with `auth_required`; `wait_for`
+"performs" the OAuth dance (stubbed here) and answers `ok: true`; the loop retries the same tool
+once with `ctx.answer` set — and because this is `kind: "authorization"`, the tool ignores
+`answer.data` and just proceeds now that the world has changed.
+
+```rust test
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use serde_json::json;
+use toolnexus::client::{
+    GenerateFn, InProcessOptions, InProcessRequest, InProcessResponse, InProcessToolCall,
+    WaitForFn, create_in_process_client,
+};
+use toolnexus::{
+    Answer, BuiltinsConfig, Tool, ToolResult, ToolSource, ToolkitOptions, auth_required,
+    create_toolkit, empty_schema,
+};
+
+fn model() -> GenerateFn {
+    Arc::new(|req: InProcessRequest| {
+        Box::pin(async move {
+            Ok(if req.messages.iter().any(|m| m["role"] == "tool") {
+                InProcessResponse { content: "3 open deals".into(), ..Default::default() }
+            } else {
+                InProcessResponse {
+                    tool_calls: vec![InProcessToolCall { id: "c1".into(), name: "fetch_crm_deals".into(), arguments: json!({}) }],
+                    ..Default::default()
+                }
+            })
+        })
+    })
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let logged_in = Arc::new(AtomicBool::new(false)); // simulates session state the tool checks
+    let session = logged_in.clone();
+    let fetch_deals = Tool {
+        name: "fetch_crm_deals".into(),
+        description: "fetches open deals from the CRM".into(),
+        input_schema: empty_schema(),
+        source: ToolSource::Custom,
+        hints: None,
+        execute: Arc::new(move |_args, ctx| {
+            let session = session.clone();
+            Box::pin(async move {
+                if !session.load(Ordering::SeqCst) {
+                    if ctx.answer.is_none() {
+                        return auth_required("https://crm.example.com/oauth/authorize", "");
+                    }
+                    // The world changed out-of-band — the session is now valid; ignore answer.data.
+                    session.store(true, Ordering::SeqCst);
+                }
+                ToolResult::ok("3 open deals")
+            })
+        }),
+    };
+    let tk = create_toolkit(ToolkitOptions {
+        builtins: Some(BuiltinsConfig::off()),
+        extra_tools: vec![fetch_deals],
+        ..Default::default()
+    })
+    .await?;
+
+    let saw_auth = Arc::new(AtomicBool::new(false));
+    let saw = saw_auth.clone();
+    let wait_for: WaitForFn = Arc::new(move |req| {
+        let saw = saw.clone();
+        Box::pin(async move {
+            assert_eq!(req.kind, "authorization", "unexpected request kind");
+            saw.store(true, Ordering::SeqCst); // a real host opens req.url and waits for the callback
+            Ok(Answer { id: req.id, ok: true, ..Default::default() })
+        })
+    });
+    let client = create_in_process_client(InProcessOptions {
+        generate: Some(model()),
+        wait_for: Some(wait_for),
+        ..Default::default()
+    });
+
+    let res = client.run("how many open deals?", &tk).await?;
+    assert!(saw_auth.load(Ordering::SeqCst), "expected wait_for to see the authorization request");
+    assert_eq!(res.status, "done");
+    assert_eq!(res.text, "3 open deals");
+    assert!(logged_in.load(Ordering::SeqCst));
+    println!("ok: {}", res.text);
+    Ok(())
+}
+```
+
+## See also
+
+- [`pending`](/api/rust/suspension/pending/) — Return a Pending from a tool to park the run until someone answers.
+- [`WaitForFn`](/api/rust/suspension/wait-for/) — The single hook where the host resolves a suspension — in-process prompt or durable queue, same contract.
+- [`pending_of`](/api/rust/suspension/pending-of/) — Detect that a RunResult is parked rather than finished, and get the Request that parked it.

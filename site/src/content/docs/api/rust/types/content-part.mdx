@@ -1,0 +1,152 @@
+---
+title: "ContentPart — images, PDFs and audio"
+description: "The non-text half of a message: text | image | file | audio, carrying base64 bytes or a URL plus a mimeType — never a path. — Rust."
+sidebar:
+  label: "ContentPart"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §1B</a>
+</p>
+
+```rust
+pub struct ContentPart {
+    pub kind: String,      // wire "type": text | image | file | audio
+    pub text: String,
+    pub mime_type: String, // wire "mimeType"
+    pub data: String,      // standard base64
+    pub url: String,
+    pub name: String,
+}
+```
+
+The non-text half of a message: text | image | file | audio, carrying base64 bytes or a URL plus a mimeType — never a path.
+
+Build parts with the §1B edge constructors — [`ContentPart::text`, `from_path`, `from_bytes`,
+`from_reader`, `from_url`](/api/rust/types/attach/) — which read and base64-encode at construction,
+or with a struct literal when you already hold base64.
+
+## When to use it
+
+When a tool returns non-text content — an image the `read` builtin loaded, a screenshot, an MCP image result — put it in `ToolResult.parts`; the client relocates it into the provider's shape (§8A).
+
+## Why this and not the alternative
+
+Use parts rather than base64 inside `output`: text output is token-counted and unreadable to a vision model, while a part reaches the model as an image block.
+
+<Aside type="tip" title="When not to use it">
+Never put a filesystem path in a part (§0 1b): carry `data` or `url`, exactly one.
+</Aside>
+
+## Examples
+
+### 1. A text part and an image part
+
+```rust test
+use std::path::PathBuf;
+
+use toolnexus::ContentPart;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // TOOLNEXUS_REPO is set by the docs test runner; in your own code just use a path.
+    let media = PathBuf::from(std::env::var("TOOLNEXUS_REPO")?).join("examples/media");
+    let parts = vec![
+        ContentPart::text("What is in this picture?"),
+        ContentPart::from_path(media.join("fixture.png"))?,
+    ];
+    assert_eq!(parts[0].kind, "text");
+    assert_eq!(parts[1].kind, "image");
+    assert_eq!(parts[1].mime_type, "image/png");
+    // The bytes are read and base64-encoded now: no path is kept in the part.
+    let expected = std::fs::read_to_string(media.join("fixture.png.base64"))?;
+    assert_eq!(parts[1].data, expected.trim());
+    assert!(parts[1].url.is_empty());
+
+    // The wire keys every port shares: type / mimeType / data.
+    let wire = serde_json::to_value(&parts[1])?;
+    assert_eq!(wire["type"], "image");
+    assert_eq!(wire["mimeType"], "image/png");
+    println!("ok: {} parts, image {} b64 chars", parts.len(), parts[1].data.len());
+    Ok(())
+}
+```
+
+### 2. The sources Rust programs actually hold
+
+```rust test
+use std::io::Cursor;
+use std::path::PathBuf;
+
+use toolnexus::ContentPart;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let media = PathBuf::from(std::env::var("TOOLNEXUS_REPO")?).join("examples/media");
+    let raw = std::fs::read(media.join("fixture.png"))?;
+
+    let from_path = ContentPart::from_path(media.join("fixture.png"))?;
+    let from_bytes = ContentPart::from_bytes(&raw, "image/png")?;
+    let from_reader = ContentPart::from_reader(Cursor::new(raw.clone()), "image/png")?;
+    let data_url = format!("data:image/png;base64,{}", from_bytes.data);
+    let from_data_url = ContentPart::from_url(&data_url, "")?;
+
+    // Four spellings of the same bytes produce the identical part.
+    for p in [&from_bytes, &from_reader, &from_data_url] {
+        assert_eq!(p, &from_path);
+    }
+
+    // A remote URL is kept as a URL (and needs an explicit mime type).
+    let remote = ContentPart::from_url("https://example.com/a.pdf", "application/pdf")?;
+    assert_eq!((remote.kind.as_str(), remote.url.as_str()), ("file", "https://example.com/a.pdf"));
+    assert!(remote.data.is_empty());
+
+    // mime decides the type: audio/* -> audio, anything else non-image -> file.
+    assert_eq!(ContentPart::from_bytes(b"ID3", "audio/mpeg")?.kind, "audio");
+    assert_eq!(ContentPart::from_bytes(b"%PDF", "application/pdf")?.kind, "file");
+    println!("ok: path == bytes == reader == data-url; remote kept as {}", remote.kind);
+    Ok(())
+}
+```
+
+### 3. Every way a part can be refused
+
+Construction errors are a `PartError` whose `kind` is one of `extension | read | mime | dataurl`;
+`validate_part` checks a hand-built part (exactly one of `data`/`url`, a mime type, an optional size
+cap) — the same check the client runs before a multimodal prompt leaves the process.
+
+```rust test
+use toolnexus::ContentPart;
+use toolnexus::client::validate_part;
+
+fn main() {
+    let kind = |r: Result<ContentPart, toolnexus::PartError>| r.unwrap_err().kind;
+    assert_eq!(kind(ContentPart::from_path("notes.docx")), "extension");
+    assert_eq!(kind(ContentPart::from_path("/no/such/dir/missing.png")), "read");
+    assert_eq!(kind(ContentPart::from_bytes(b"x", "")), "mime");
+    assert_eq!(kind(ContentPart::from_url("https://example.com/x", "")), "mime");
+    assert_eq!(kind(ContentPart::from_url("data:image/png,raw", "")), "dataurl");
+    assert_eq!(kind(ContentPart::from_url("data:image/png;base64,***", "")), "dataurl");
+
+    let err = ContentPart::from_path("notes.docx").unwrap_err();
+    assert!(err.to_string().starts_with("toolnexus: unknown media extension"));
+
+    // Hand-built parts: neither / both of data and url, no mime, over the cap.
+    let empty = ContentPart { kind: "image".into(), mime_type: "image/png".into(), ..Default::default() };
+    assert!(validate_part(&empty, 0).unwrap_err().contains("neither data nor url"));
+    let both = ContentPart { data: "eA==".into(), url: "https://x/y.png".into(), ..empty.clone() };
+    assert!(validate_part(&both, 0).unwrap_err().contains("both data and url"));
+    let no_mime = ContentPart { kind: "image".into(), data: "eA==".into(), ..Default::default() };
+    assert!(validate_part(&no_mime, 0).unwrap_err().contains("needs a mimeType"));
+    let big = ContentPart::from_bytes(vec![0u8; 2048], "image/png").unwrap();
+    assert!(validate_part(&big, 1024).unwrap_err().contains("over the 1024 byte limit"));
+    assert!(validate_part(&big, 0).is_ok());
+    println!("ok: every refusal named: {err}");
+}
+```
+
+## See also
+
+- [`Tool`](/api/rust/types/tool/) — The uniform shape every tool source collapses to: name, description, JSON-Schema parameters, execute.
+- [`ToolResult`](/api/rust/types/tool-result/) — The result envelope: output text, optional error flag, optional non-text parts, and optional metadata that can carry a suspension.
+- [`ToolContext`](/api/rust/types/context/) — Optional per-call context handed to execute: cancellation, identity, and host-supplied state.

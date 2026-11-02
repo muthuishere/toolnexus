@@ -1,0 +1,344 @@
+---
+title: "waitFor — the one host slot"
+description: "The single hook where the host resolves a suspension — in-process prompt or durable queue, same contract. — Rust."
+sidebar:
+  label: "WaitForFn"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §10</a>
+</p>
+
+```rust
+pub type WaitForFn = Arc<dyn Fn(Request) -> BoxFuture<Result<Answer, String>> + Send + Sync>;
+pub type WaitForCtxFn = Arc<dyn Fn(CancellationToken, Request) -> BoxFuture<Result<Answer, String>> + Send + Sync>;
+// ClientOptions { wait_for, wait_for_ctx, .. }
+```
+
+The single hook where the host resolves a suspension — in-process prompt or durable queue, same contract.
+
+## When to use it
+
+The host slot that resolves a suspension inline: show the request to a person, return an `Answer`. `wait_for_ctx` also gets the turn's cancellation, so a pending question ends with its turn; it wins when both are set.
+
+## Why this and not the alternative
+
+Set `wait_for` when someone is present to answer now; leave it unset to let `run` return `status: "pending"` and resume later.
+
+<Aside type="tip" title="When not to use it">
+An `Answer \{ ok: false \}` is fed back as an error result, not retried.
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call — `wait_for` resolves a suspension inline
+
+```rust test
+use std::sync::Arc;
+
+use serde_json::json;
+use toolnexus::client::{
+    GenerateFn, InProcessOptions, InProcessRequest, InProcessResponse, InProcessToolCall,
+    WaitForFn, create_in_process_client,
+};
+use toolnexus::{
+    Answer, BuiltinsConfig, Request, Tool, ToolResult, ToolSource, ToolkitOptions, create_toolkit,
+    empty_schema, pending,
+};
+
+// A scripted model: call `ask` first, answer once a tool result is in the transcript.
+fn model() -> GenerateFn {
+    Arc::new(|req: InProcessRequest| {
+        Box::pin(async move {
+            Ok(if req.messages.iter().any(|m| m["role"] == "tool") {
+                InProcessResponse { content: "got it".into(), ..Default::default() }
+            } else {
+                InProcessResponse {
+                    tool_calls: vec![InProcessToolCall { id: "c1".into(), name: "ask".into(), arguments: json!({}) }],
+                    ..Default::default()
+                }
+            })
+        })
+    })
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let ask = Tool {
+        name: "ask".into(),
+        description: "asks something".into(),
+        input_schema: empty_schema(),
+        source: ToolSource::Custom,
+        hints: None,
+        execute: Arc::new(|_args, ctx| {
+            Box::pin(async move {
+                if ctx.answer.is_some() {
+                    return ToolResult::ok("resolved");
+                }
+                pending(Request { kind: "input".into(), prompt: "confirm?".into(), ..Default::default() })
+            })
+        }),
+    };
+    let tk = create_toolkit(ToolkitOptions {
+        builtins: Some(BuiltinsConfig::off()),
+        extra_tools: vec![ask],
+        ..Default::default()
+    })
+    .await?;
+
+    let wait_for: WaitForFn = Arc::new(|req| {
+        Box::pin(async move { Ok(Answer { id: req.id, ok: true, ..Default::default() }) })
+    });
+    let client = create_in_process_client(InProcessOptions {
+        generate: Some(model()),
+        wait_for: Some(wait_for),
+        ..Default::default()
+    });
+
+    let res = client.run("please ask", &tk).await?;
+    assert_eq!(res.status, "done");
+    assert_eq!(res.text, "got it");
+    assert_eq!(res.tool_calls[0].output, "resolved");
+    println!("ok: {}", res.text);
+    Ok(())
+}
+```
+
+### 2. The realistic case — no `wait_for` set: the run halts durably instead
+
+Omitting `wait_for` entirely is the other, equally valid posture: the run does not hang or
+error — it comes back with `status: "pending"` and the `Request` for you to resolve out of
+band.
+
+```rust test
+use std::sync::Arc;
+
+use serde_json::json;
+use toolnexus::client::{
+    GenerateFn, InProcessOptions, InProcessRequest, InProcessResponse, InProcessToolCall,
+    create_in_process_client,
+};
+use toolnexus::{
+    BuiltinsConfig, Request, Tool, ToolSource, ToolkitOptions, create_toolkit, empty_schema, pending,
+};
+
+fn model() -> GenerateFn {
+    Arc::new(|_req: InProcessRequest| {
+        Box::pin(async move {
+            Ok(InProcessResponse {
+                tool_calls: vec![InProcessToolCall { id: "c1".into(), name: "ask".into(), arguments: json!({}) }],
+                ..Default::default()
+            })
+        })
+    })
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let ask = Tool {
+        name: "ask".into(),
+        description: "asks something".into(),
+        input_schema: empty_schema(),
+        source: ToolSource::Custom,
+        hints: None,
+        execute: Arc::new(|_args, _ctx| {
+            Box::pin(async move {
+                pending(Request { kind: "input".into(), prompt: "confirm?".into(), ..Default::default() })
+            })
+        }),
+    };
+    let tk = create_toolkit(ToolkitOptions {
+        builtins: Some(BuiltinsConfig::off()),
+        extra_tools: vec![ask],
+        ..Default::default()
+    })
+    .await?;
+
+    // No wait_for configured.
+    let client = create_in_process_client(InProcessOptions { generate: Some(model()), ..Default::default() });
+
+    let res = client.run("please ask", &tk).await?;
+    assert_eq!(res.status, "pending", "expected a durable pending halt");
+    let p = res.pending.expect("the parked Request");
+    assert_eq!(p.prompt, "confirm?");
+    println!("ok: halted durably with {} - {}", p.kind, p.prompt);
+    Ok(())
+}
+```
+
+### 3. The full surface — declined vs granted, and the loop rule on retry
+
+`Answer { ok: false, .. }` feeds back a `"declined/expired: <prompt>"` error result and the model
+decides what to do next — the run does not abort.
+
+```rust test
+use std::sync::Arc;
+
+use serde_json::json;
+use toolnexus::client::{
+    GenerateFn, InProcessOptions, InProcessRequest, InProcessResponse, InProcessToolCall,
+    WaitForFn, create_in_process_client,
+};
+use toolnexus::{
+    Answer, BuiltinsConfig, Request, Tool, ToolResult, ToolSource, ToolkitOptions, create_toolkit,
+    empty_schema, pending,
+};
+
+fn model() -> GenerateFn {
+    Arc::new(|req: InProcessRequest| {
+        Box::pin(async move {
+            Ok(if req.messages.iter().any(|m| m["role"] == "tool") {
+                InProcessResponse { content: "understood, not deleting".into(), ..Default::default() }
+            } else {
+                InProcessResponse {
+                    tool_calls: vec![InProcessToolCall { id: "c1".into(), name: "delete_record".into(), arguments: json!({}) }],
+                    ..Default::default()
+                }
+            })
+        })
+    })
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let del = Tool {
+        name: "delete_record".into(),
+        description: "deletes a record".into(),
+        input_schema: empty_schema(),
+        source: ToolSource::Custom,
+        hints: None,
+        execute: Arc::new(|_args, ctx| {
+            Box::pin(async move {
+                if ctx.answer.is_some() {
+                    return ToolResult::ok("deleted");
+                }
+                pending(Request { kind: "approval".into(), prompt: "delete this record?".into(), ..Default::default() })
+            })
+        }),
+    };
+    let tk = create_toolkit(ToolkitOptions {
+        builtins: Some(BuiltinsConfig::off()),
+        extra_tools: vec![del],
+        ..Default::default()
+    })
+    .await?;
+
+    let wait_for: WaitForFn = Arc::new(|req| {
+        Box::pin(async move {
+            Ok(Answer { id: req.id, ok: false, reason: "declined".into(), ..Default::default() })
+        })
+    });
+    let client = create_in_process_client(InProcessOptions {
+        generate: Some(model()),
+        wait_for: Some(wait_for),
+        ..Default::default()
+    });
+
+    let res = client.run("delete the record", &tk).await?;
+    assert_eq!(res.status, "done", "a decline continues the loop, not aborts it");
+    assert!(res.tool_calls[0].output.contains("declined"), "got {:?}", res.tool_calls[0].output);
+    assert!(res.tool_calls[0].is_error, "a declined resolution is an error tool_result");
+    println!("ok: {}", res.text);
+    Ok(())
+}
+```
+
+## The loop rule
+
+| `wait_for` | `Answer.ok` | What happens |
+|---|---|---|
+| configured | `true` | Retries the same tool once with `ctx.answer` set. Still-suspended retry ⇒ error `"unresolved: <prompt>"`, never loops forever. |
+| configured | `false` | Feeds back error `"declined/expired: <prompt>"`. The loop continues; the model decides. |
+| not configured | — | The run halts: `RunResult.status == "pending"`, `RunResult.pending` set. Resume later via [`Client::run_with_answer`](/api/rust/suspension/relay/). |
+
+## `wait_for_ctx` — end a pending question with its turn
+
+```rust
+pub type WaitForCtxFn = Arc<dyn Fn(CancellationToken, Request) -> BoxFuture<Result<Answer, String>> + Send + Sync>;
+// ClientOptions { wait_for_ctx, .. } / InProcessOptions { wait_for_ctx, .. }
+```
+
+`wait_for_ctx` is `wait_for` that also receives the turn's cancellation token, so a question
+waiting on a human ends when the turn is cancelled (a stop button, a timeout). When both are set,
+`wait_for_ctx` wins; the §10 contract is otherwise the same.
+
+```rust test
+use std::sync::Arc;
+use std::time::Duration;
+
+use serde_json::json;
+use tokio_util::sync::CancellationToken;
+use toolnexus::client::{
+    GenerateFn, InProcessOptions, InProcessRequest, InProcessResponse, InProcessToolCall,
+    WaitForCtxFn, create_in_process_client,
+};
+use toolnexus::{
+    BuiltinsConfig, Request, Tool, ToolSource, ToolkitOptions, create_toolkit, empty_schema, pending,
+};
+
+fn model() -> GenerateFn {
+    Arc::new(|_req: InProcessRequest| {
+        Box::pin(async move {
+            Ok(InProcessResponse {
+                tool_calls: vec![InProcessToolCall { id: "c1".into(), name: "ask".into(), arguments: json!({}) }],
+                ..Default::default()
+            })
+        })
+    })
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let ask = Tool {
+        name: "ask".into(),
+        description: "asks the user".into(),
+        input_schema: empty_schema(),
+        source: ToolSource::Custom,
+        hints: None,
+        execute: Arc::new(|_args, _ctx| {
+            Box::pin(async move {
+                pending(Request { kind: "input".into(), prompt: "deploy?".into(), ..Default::default() })
+            })
+        }),
+    };
+    let tk = create_toolkit(ToolkitOptions {
+        builtins: Some(BuiltinsConfig::off()),
+        extra_tools: vec![ask],
+        ..Default::default()
+    })
+    .await?;
+
+    let wait_for_ctx: WaitForCtxFn = Arc::new(|cancel, _req| {
+        Box::pin(async move {
+            cancel.cancelled().await; // the human never answers; the turn's cancel ends the wait
+            Err("turn cancelled".to_string())
+        })
+    });
+    let client = create_in_process_client(InProcessOptions {
+        generate: Some(model()),
+        wait_for_ctx: Some(wait_for_ctx),
+        ..Default::default()
+    });
+
+    let cancel = CancellationToken::new();
+    let timer = cancel.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        timer.cancel();
+    });
+    let err = client
+        .run_ctx(cancel, "deploy it", &tk, Vec::new())
+        .await
+        .expect_err("the pending ask must end with the turn");
+    println!("ok: pending question ended with the turn: {err}");
+    Ok(())
+}
+```
+
+## See also
+
+- [`pending`](/api/rust/suspension/pending/) — Return a Pending from a tool to park the run until someone answers.
+- [`auth_required`](/api/rust/suspension/auth-required/) — The auth-shaped suspension: hand back a URL, resume once the user has granted access.
+- [`pending_of`](/api/rust/suspension/pending-of/) — Detect that a RunResult is parked rather than finished, and get the Request that parked it.

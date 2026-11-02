@@ -1,0 +1,146 @@
+---
+title: "buildAgentCard — describe yourself to peers"
+description: "Construct the Agent Card that advertises your name, skills and endpoint. — Rust."
+sidebar:
+  label: "serve / agent-card"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7B</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/rust/src/serve.rs">rust/src/serve.rs</a>
+</p>
+
+```rust
+pub fn build_agent_card(cfg: Option<&A2aConfig>, skills: &[SkillInfo], url: &str) -> ServedAgentCard
+```
+
+Build the card `serve` publishes: `name` (default `toolnexus-agent`), `description` (default `""`),
+`version` (default `0.1.0`), `protocolVersion: "0.3.0"`, `capabilities: {streaming: false,
+pushNotifications: false}`, text input/output modes, one `{id, name, description}` per skill
+(filtered by `cfg.skills`), the JSON-RPC `url`, and `provider` only when set. Serialized with the
+same key order as the Go and JS ports.
+
+## When to use it
+
+When you publish the card somewhere other than `serve` (a registry, a static file) or want to test
+what peers will see.
+
+## Why this and not the alternative
+
+`serve` already builds and serves it at `/.well-known/agent-card.json`. Never advertise raw tools on
+a card: peers delegate tasks to skills.
+
+## Examples
+
+### 1. Defaults — no config, no skills
+
+```rust test
+use serde_json::json;
+use toolnexus::serve::build_agent_card;
+
+fn main() {
+    let card = build_agent_card(None, &[], "http://localhost:8080/");
+    let got = serde_json::to_value(&card).unwrap();
+
+    assert_eq!(got["name"], "toolnexus-agent");
+    assert_eq!(got["version"], "0.1.0");
+    assert_eq!(got["protocolVersion"], "0.3.0");
+    assert_eq!(got["capabilities"], json!({"streaming": false, "pushNotifications": false}));
+    assert_eq!(got["skills"], json!([]), "an empty skills array, not null");
+    println!("ok: defaults — {} {}", got["name"], got["version"]);
+}
+```
+
+### 2. Named agent, filtered to a subset of skills
+
+```rust test
+use serde_json::json;
+use toolnexus::serve::{A2aConfig, build_agent_card};
+use toolnexus::skills::SkillInfo;
+
+fn skill(name: &str, description: &str) -> SkillInfo {
+    SkillInfo {
+        name: name.into(),
+        description: description.into(),
+        location: String::new(),
+        content: String::new(),
+        origin: "logical".into(),
+        resources: Vec::new(),
+        base: String::new(),
+    }
+}
+
+fn main() {
+    let skills = vec![skill("search", "Search the docs"), skill("admin", "Dangerous — internal only")];
+    let cfg = A2aConfig {
+        name: "video-desk".into(),
+        description: "Transcribes and summarizes video".into(),
+        skills: Some(vec!["search".into()]), // never advertise "admin"
+        ..Default::default()
+    };
+
+    let got = serde_json::to_value(build_agent_card(Some(&cfg), &skills, "http://localhost:8080/")).unwrap();
+    assert_eq!(got["name"], "video-desk");
+    let card_skills = got["skills"].as_array().unwrap();
+    assert_eq!(card_skills.len(), 1, "exactly the filtered skill");
+    assert_eq!(card_skills[0], json!({"id": "search", "name": "search", "description": "Search the docs"}));
+    println!("ok: {} advertises {} of {} skills", got["name"], card_skills.len(), skills.len());
+}
+```
+
+### 3. The full surface — provider, version override, and the URL param
+
+```rust test
+use toolnexus::serve::{A2aConfig, A2aProvider, build_agent_card};
+use toolnexus::skills::SkillInfo;
+
+fn main() {
+    let skills = vec![SkillInfo {
+        name: "hello-world".into(),
+        description: "says hello".into(),
+        location: String::new(),
+        content: String::new(),
+        origin: "logical".into(),
+        resources: Vec::new(),
+        base: String::new(),
+    }];
+    let cfg = A2aConfig {
+        name: "greeter".into(),
+        version: "2.3.1".into(),
+        provider: Some(A2aProvider { organization: "acme corp".into(), url: "https://acme.example".into() }),
+        ..Default::default()
+    };
+
+    let got = serde_json::to_value(build_agent_card(Some(&cfg), &skills, "http://localhost:9090/")).unwrap();
+    assert_eq!(got["version"], "2.3.1", "the version override");
+    assert_eq!(got["url"], "http://localhost:9090/", "url is exactly the caller-supplied endpoint");
+    assert_eq!(got["provider"]["organization"], "acme corp");
+    assert_eq!(got["provider"]["url"], "https://acme.example");
+
+    // Omitting provider omits it from the JSON — not a null field.
+    let bare_cfg = A2aConfig { name: "bare".into(), ..Default::default() };
+    let bare = serde_json::to_value(build_agent_card(Some(&bare_cfg), &[], "http://x/")).unwrap();
+    assert!(bare.get("provider").is_none(), "provider omitted when not configured");
+    println!("ok: {} {} by {}", got["name"], got["version"], got["provider"]["organization"]);
+}
+```
+
+## Parameters and defaults
+
+| Field | Default | Notes |
+|---|---|---|
+| `name` | `"toolnexus-agent"` | `A2aConfig.name`; empty ⇒ default. |
+| `description` | `""` | `A2aConfig.description`. |
+| `version` | `"0.1.0"` | `A2aConfig.version`; empty ⇒ default. |
+| `protocolVersion` | `"0.3.0"` | Fixed. |
+| `capabilities` | `{streaming: false, pushNotifications: false}` | Fixed. |
+| `skills` | every skill | `A2aConfig.skills = Some(..)` ⇒ exactly those (even empty); `None` ⇒ all. Each is `{id, name, description}`. |
+| `url` | — | The `url` argument verbatim; `serve` passes its base URL plus `/`. |
+| `provider` | omitted | Present only when `A2aConfig.provider` is set. |
+
+## See also
+
+- [`Toolkit::serve`](/api/rust/serve/a2a/) — expose the toolkit as an A2A agent and/or an MCP server.
+- [`TaskStore`](/api/rust/serve/task-store/) — where served Tasks live.
+- [`Agent`](/api/rust/agents/agent/) — the outbound descriptor: card URL, headers, budget.

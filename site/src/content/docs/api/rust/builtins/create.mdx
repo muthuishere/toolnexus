@@ -1,0 +1,180 @@
+---
+title: "createBuiltinTools — the full built-in set"
+description: "Construct every built-in tool directly, outside a toolkit. — Rust."
+sidebar:
+  label: "create_builtin_tools"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §4A</a>
+</p>
+
+```rust
+pub fn create_builtin_tools(cfg: &BuiltinsConfig) -> Vec<Tool>
+```
+
+Construct every built-in tool directly, outside a toolkit.
+
+## When to use it
+
+When you want every builtin regardless of the toggles — for example to list their schemas in a UI — with the host boundary from `cfg` applied.
+
+## Why this and not the alternative
+
+Prefer `select_builtins` for a running agent: this one ignores `enabled` / `tools` and skips the shell check.
+
+<Aside type="tip" title="When not to use it">
+Do not use it to build an agent's toolset; the toggles exist for locked-down hosts.
+</Aside>
+
+## Examples
+
+### 1. The full set, in the fixed order
+
+```rust test
+use toolnexus::builtins::create_builtin_tools;
+use toolnexus::{BuiltinsConfig, ToolSource};
+
+fn main() {
+    let tools = create_builtin_tools(&BuiltinsConfig::default());
+    let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+    assert_eq!(
+        names,
+        ["bash", "read", "write", "edit", "grep", "glob", "webfetch", "question", "apply_patch", "todowrite"]
+    );
+    assert!(tools.iter().all(|t| t.source == ToolSource::Builtin && t.hints.is_some()));
+
+    println!("ok: {} built-ins in fixed order", tools.len());
+}
+```
+
+### 2. Calling one directly, no toolkit involved
+
+```rust test
+use serde_json::json;
+use toolnexus::builtins::create_builtin_tools;
+use toolnexus::{BuiltinsConfig, ToolContext};
+
+#[tokio::main]
+async fn main() {
+    let tools = create_builtin_tools(&BuiltinsConfig::default());
+    let find = |n: &str| tools.iter().find(|t| t.name == n).unwrap();
+    let (write, read) = (find("write"), find("read"));
+
+    let path = std::env::temp_dir().join(format!("toolnexus-docs-create-{}.txt", std::process::id()));
+    let path = path.to_string_lossy().into_owned();
+
+    let w = write.call(json!({"path": path, "content": "hello"}), ToolContext::default()).await;
+    assert!(!w.is_error, "{}", w.output);
+    let r = read.call(json!({"path": path}), ToolContext::default()).await;
+    std::fs::remove_file(&path).ok();
+    assert!(!r.is_error, "{}", r.output);
+    assert_eq!(r.output, "hello");
+
+    println!("ok: {}", r.output);
+}
+```
+
+`read` is not text-only. When the path's extension is in the fixed media table — `png` `jpg`
+`jpeg` `gif` `webp` `pdf` `mp3` `wav` — it returns `output` as a one-line description
+(`shot.png (image/png, 82 bytes)`) and one `ContentPart` in `ToolResult.parts` carrying the base64
+bytes. Any other extension is read as UTF-8 text.
+
+### 3. Hand-assembling a custom set on top of the full list
+
+`create_builtin_tools` always returns the whole set — filtering to a custom subset is your own
+iterator logic, which is exactly what [`select_builtins`](/api/rust/builtins/select/) does for you
+from a `BuiltinsConfig`.
+
+```rust test
+use toolnexus::builtins::create_builtin_tools;
+use toolnexus::{BuiltinsConfig, ToolkitOptions, create_toolkit};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let only = ["read", "grep", "glob"];
+    let read_only: Vec<_> = create_builtin_tools(&BuiltinsConfig::default())
+        .into_iter()
+        .filter(|t| only.contains(&t.name.as_str()))
+        .collect();
+    assert_eq!(read_only.len(), 3);
+
+    // BuiltinsConfig::off() turns the default ten OFF; only the hand-picked three go in
+    // via extra_tools — create_builtin_tools never wires itself into a toolkit.
+    let tk = create_toolkit(ToolkitOptions {
+        extra_tools: read_only,
+        builtins: Some(BuiltinsConfig::off()),
+        ..Default::default()
+    })
+    .await?;
+    assert_eq!(tk.tools().len(), 3);
+
+    tk.close().await;
+    println!("ok: 3 hand-picked read-only tools");
+    Ok(())
+}
+```
+
+## Return value
+
+`Vec<Tool>` — the default ten in the fixed order, each with `source: ToolSource::Builtin` and
+`hints` set, followed by whichever opt-ins `cfg` turns on.
+
+## Opt-in builtins, grep context and truncation metadata
+
+These `BuiltinsConfig` fields add tools that are **off** unless configured; the default ten are
+unchanged:
+
+| Field | Adds |
+|---|---|
+| `background: Option<Arc<BackgroundShells>>` | `run_in_background` on `bash`, plus `bash_output` and `kill_shell` — see [`BackgroundShells`](/api/rust/builtins/background-shells/) |
+| `web_search: Option<WebSearchFn>` | `websearch` over a provider the host supplies (`(query, limit, cancel) -> WebSearchFuture`; the library ships none) |
+| `notebook_edit: bool` | `notebook_edit` — replace / insert / delete a `.ipynb` cell |
+
+`grep` also takes `context`, `before` and `after`: match lines print as `path:N:text`, context lines
+as `path-N-text`. And `read` and `grep` say in **metadata** when output was cut — `read`:
+`truncated`, `totalLines`, `nextOffset`; `grep`: `truncated`, `total`.
+
+```rust test
+use std::sync::Arc;
+use serde_json::json;
+use toolnexus::builtins::{WebSearchFn, WebSearchResult, create_builtin_tools};
+use toolnexus::{BuiltinsConfig, ToolContext};
+
+#[tokio::main]
+async fn main() {
+    let dir = std::env::temp_dir().join(format!("toolnexus-docs-grep-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let f = dir.join("a.txt");
+    std::fs::write(&f, "one\ntwo\nNEEDLE\nfour\nfive\n").unwrap();
+
+    let search: WebSearchFn = Arc::new(|_q, _limit, _cancel| {
+        Box::pin(async {
+            Ok(vec![WebSearchResult { title: "Rust".into(), url: "https://rust-lang.org".into(), snippet: "The Rust language".into() }])
+        })
+    });
+    let tools = create_builtin_tools(&BuiltinsConfig { web_search: Some(search), notebook_edit: true, ..Default::default() });
+    let find = |n: &str| tools.iter().find(|t| t.name == n).expect(n);
+    find("notebook_edit");
+
+    let g = find("grep").call(json!({"pattern": "NEEDLE", "path": dir.to_string_lossy(), "context": 1}), ToolContext::default()).await;
+    assert!(g.output.contains(":3:NEEDLE") && g.output.contains("-2-two") && g.output.contains("-4-four"), "{}", g.output);
+
+    let r = find("read").call(json!({"path": f.to_string_lossy(), "limit": 2}), ToolContext::default()).await;
+    let meta = r.metadata.clone().unwrap_or_default();
+    assert_eq!(meta["truncated"], true, "{meta:?}");
+
+    let ws = find("websearch").call(json!({"query": "rust"}), ToolContext::default()).await;
+    assert!(ws.output.contains("https://rust-lang.org"), "{}", ws.output);
+
+    std::fs::remove_dir_all(&dir).ok();
+    println!("ok: grep context, read truncated, nextOffset = {}", meta["nextOffset"]);
+}
+```
+
+## See also
+
+- [`select_builtins`](/api/rust/builtins/select/) — Pick which built-in file/shell/web tools are in play, by name or by source toggle.
+- [`BackgroundShells`](/api/rust/builtins/background-shells/) — opt-in background shells: `run_in_background`, `bash_output`, `kill_shell`.

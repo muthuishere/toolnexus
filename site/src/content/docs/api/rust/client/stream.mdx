@@ -1,0 +1,316 @@
+---
+title: "stream — token and event streaming"
+description: "The streaming loop: text deltas, tool-call events, and suspension events as they happen. — Rust."
+sidebar:
+  label: "Client.stream"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a>
+</p>
+
+```rust
+pub fn stream(&self, prompt: impl Into<Prompt>, tk: &Toolkit)
+    -> Result<mpsc::UnboundedReceiver<StreamEvent>, ClientError>
+```
+
+The streaming loop: text deltas, tool-call events, and suspension events as they happen.
+
+## When to use it
+
+For a UI: text deltas, `tool_call` / `tool_result` events (with `via` for `call_tool` or ACP), a `pending` event on suspension, then `done` with the final `RunResult`, or `error`.
+
+## Why this and not the alternative
+
+Use `stream` instead of `run` when a person is watching; the loop is the same.
+
+<Aside type="tip" title="When not to use it">
+For a batch job, `run` is simpler — you only need the result.
+</Aside>
+
+## Examples
+
+Each example is a complete program that serves canned Server-Sent Events from a tiny loopback server on `127.0.0.1` written inline (`stub`) — no network, no real API key. `StreamEvent.kind` is one of `"text"`, `"tool_call"`, `"tool_result"`, `"usage"`, `"pending"`, `"done"`, `"error"`; only the fields relevant to that kind are populated.
+
+### 1. The smallest useful call — text deltas only
+
+No tool calls: the SSE stream is a run of `content` deltas terminated by `[DONE]`.
+
+```rust test
+use toolnexus::client::{ClientOptions, Style, create_client};
+use toolnexus::{BuiltinsConfig, ToolkitOptions, create_toolkit};
+
+/// A tiny loopback stand-in for the provider: `reply(head, body)` is the response body.
+async fn stub(reply: impl Fn(&str, serde_json::Value) -> String + Send + Sync + 'static) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", l.local_addr().unwrap());
+    let reply = std::sync::Arc::new(reply);
+    tokio::spawn(async move {
+        while let Ok((mut s, _)) = l.accept().await {
+            let reply = reply.clone();
+            tokio::spawn(async move {
+                let (mut buf, mut tmp) = (Vec::new(), [0u8; 8192]);
+                let (head, body) = loop {
+                    let n = s.read(&mut tmp).await.unwrap_or(0);
+                    if n == 0 { return; }
+                    buf.extend_from_slice(&tmp[..n]);
+                    let Some(i) = buf.windows(4).position(|w| w == b"\r\n\r\n") else { continue };
+                    let head0 = String::from_utf8_lossy(&buf[..i]).to_lowercase();
+                    let len: usize = head0.lines().find_map(|l| l.strip_prefix("content-length:"))
+                        .and_then(|v| v.trim().parse().ok()).unwrap_or(0);
+                    while buf.len() < i + 4 + len {
+                        let n = s.read(&mut tmp).await.unwrap_or(0);
+                        if n == 0 { break; }
+                        buf.extend_from_slice(&tmp[..n]);
+                    }
+                    break (head0, buf[i + 4..].to_vec());
+                };
+                let out = reply(&head, serde_json::from_slice(&body).unwrap_or_default());
+                let ct = if out.starts_with("data:") { "text/event-stream" } else { "application/json" };
+                let resp = format!("HTTP/1.1 200 OK\r\ncontent-type: {ct}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{out}", out.len());
+                let _ = s.write_all(resp.as_bytes()).await;
+            });
+        }
+    });
+    url
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let url = stub(|_, _| {
+        [
+            r#"data: {"choices":[{"delta":{"content":"Bon"}}]}"#,
+            r#"data: {"choices":[{"delta":{"content":"jour"}}]}"#,
+            r#"data: {"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}}"#,
+            "data: [DONE]",
+        ].map(|l| format!("{l}\n\n")).concat()
+    }).await;
+
+    let tk = create_toolkit(ToolkitOptions { builtins: Some(BuiltinsConfig::off()), ..Default::default() }).await?;
+    let client = create_client(ClientOptions {
+        base_url: url, style: Style::OpenAI, model: "gpt-4o-mini".into(), api_key: "test-key".into(),
+        ..Default::default()
+    });
+
+    let mut rx = client.stream("say hi in French", &tk)?;
+    let mut text = String::new();
+    while let Some(ev) = rx.recv().await {
+        match ev.kind.as_str() {
+            "text" => text.push_str(&ev.delta),
+            "error" => panic!("stream error: {:?}", ev.error),
+            _ => {}
+        }
+    }
+    assert_eq!(text, "Bonjour");
+    println!("ok: {text}");
+    Ok(())
+}
+```
+
+### 2. The realistic case — a streamed tool call, then a streamed answer
+
+OpenAI-style streaming assembles a tool call's `name`/`arguments` across multiple deltas (keyed by `index`) before
+the loop can execute it. Turn 2 then streams the final text.
+
+```rust test
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+use toolnexus::client::{ClientOptions, Style, create_client};
+use toolnexus::{BuiltinsConfig, ToolkitOptions, create_toolkit, define_tool};
+
+/// A tiny loopback stand-in for the provider: `reply(head, body)` is the response body.
+async fn stub(reply: impl Fn(&str, serde_json::Value) -> String + Send + Sync + 'static) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", l.local_addr().unwrap());
+    let reply = std::sync::Arc::new(reply);
+    tokio::spawn(async move {
+        while let Ok((mut s, _)) = l.accept().await {
+            let reply = reply.clone();
+            tokio::spawn(async move {
+                let (mut buf, mut tmp) = (Vec::new(), [0u8; 8192]);
+                let (head, body) = loop {
+                    let n = s.read(&mut tmp).await.unwrap_or(0);
+                    if n == 0 { return; }
+                    buf.extend_from_slice(&tmp[..n]);
+                    let Some(i) = buf.windows(4).position(|w| w == b"\r\n\r\n") else { continue };
+                    let head0 = String::from_utf8_lossy(&buf[..i]).to_lowercase();
+                    let len: usize = head0.lines().find_map(|l| l.strip_prefix("content-length:"))
+                        .and_then(|v| v.trim().parse().ok()).unwrap_or(0);
+                    while buf.len() < i + 4 + len {
+                        let n = s.read(&mut tmp).await.unwrap_or(0);
+                        if n == 0 { break; }
+                        buf.extend_from_slice(&tmp[..n]);
+                    }
+                    break (head0, buf[i + 4..].to_vec());
+                };
+                let out = reply(&head, serde_json::from_slice(&body).unwrap_or_default());
+                let ct = if out.starts_with("data:") { "text/event-stream" } else { "application/json" };
+                let resp = format!("HTTP/1.1 200 OK\r\ncontent-type: {ct}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{out}", out.len());
+                let _ = s.write_all(resp.as_bytes()).await;
+            });
+        }
+    });
+    url
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let echo = define_tool("echo", "echo n", None, |a, _| async move { Ok::<_, String>(a["n"].to_string()) });
+    let tk = create_toolkit(ToolkitOptions {
+        extra_tools: vec![echo], builtins: Some(BuiltinsConfig::off()), ..Default::default()
+    }).await?;
+
+    let turn = AtomicUsize::new(0);
+    let url = stub(move |_, _| {
+        let lines: &[&str] = if turn.fetch_add(1, Ordering::SeqCst) == 0 {
+            // The tool call's arguments arrive split across two chunks; the client assembles them.
+            &[
+                r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c0","function":{"name":"echo","arguments":"{\"n\":"}}]}}]}"#,
+                r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"7}"}}]}}]}"#,
+                "data: [DONE]",
+            ]
+        } else {
+            &[r#"data: {"choices":[{"delta":{"content":"seven"}}]}"#, "data: [DONE]"]
+        };
+        lines.iter().map(|l| format!("{l}\n\n")).collect()
+    }).await;
+
+    let client = create_client(ClientOptions {
+        base_url: url, style: Style::OpenAI, model: "gpt-4o-mini".into(), api_key: "test-key".into(),
+        ..Default::default()
+    });
+
+    let mut rx = client.stream("echo 7", &tk)?;
+    let (mut text, mut saw_call, mut saw_result) = (String::new(), false, false);
+    while let Some(ev) = rx.recv().await {
+        match ev.kind.as_str() {
+            "text" => text.push_str(&ev.delta),
+            "tool_call" => {
+                saw_call = true;
+                assert_eq!((ev.name.as_str(), ev.args["n"].as_i64()), ("echo", Some(7)));
+            }
+            "tool_result" => {
+                saw_result = true;
+                assert_eq!(ev.output, "7");
+            }
+            "error" => panic!("stream error: {:?}", ev.error),
+            _ => {}
+        }
+    }
+    assert!(saw_call && saw_result);
+    assert_eq!(text, "seven");
+    println!("ok: {text}");
+    Ok(())
+}
+```
+
+### 3. The full surface — every event type, Anthropic style
+
+Same interface, a different wire format: Anthropic streams `content_block_start` / `content_block_delta` /
+`message_delta` events. `stream` normalizes both providers to the same `StreamEvent`, so downstream code never
+branches on `Style`.
+
+```rust test
+use toolnexus::client::{ClientOptions, Style, create_client};
+use toolnexus::{BuiltinsConfig, ToolkitOptions, create_toolkit};
+
+/// A tiny loopback stand-in for the provider: `reply(head, body)` is the response body.
+async fn stub(reply: impl Fn(&str, serde_json::Value) -> String + Send + Sync + 'static) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", l.local_addr().unwrap());
+    let reply = std::sync::Arc::new(reply);
+    tokio::spawn(async move {
+        while let Ok((mut s, _)) = l.accept().await {
+            let reply = reply.clone();
+            tokio::spawn(async move {
+                let (mut buf, mut tmp) = (Vec::new(), [0u8; 8192]);
+                let (head, body) = loop {
+                    let n = s.read(&mut tmp).await.unwrap_or(0);
+                    if n == 0 { return; }
+                    buf.extend_from_slice(&tmp[..n]);
+                    let Some(i) = buf.windows(4).position(|w| w == b"\r\n\r\n") else { continue };
+                    let head0 = String::from_utf8_lossy(&buf[..i]).to_lowercase();
+                    let len: usize = head0.lines().find_map(|l| l.strip_prefix("content-length:"))
+                        .and_then(|v| v.trim().parse().ok()).unwrap_or(0);
+                    while buf.len() < i + 4 + len {
+                        let n = s.read(&mut tmp).await.unwrap_or(0);
+                        if n == 0 { break; }
+                        buf.extend_from_slice(&tmp[..n]);
+                    }
+                    break (head0, buf[i + 4..].to_vec());
+                };
+                let out = reply(&head, serde_json::from_slice(&body).unwrap_or_default());
+                let ct = if out.starts_with("data:") { "text/event-stream" } else { "application/json" };
+                let resp = format!("HTTP/1.1 200 OK\r\ncontent-type: {ct}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{out}", out.len());
+                let _ = s.write_all(resp.as_bytes()).await;
+            });
+        }
+    });
+    url
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let url = stub(|_, _| {
+        [
+            r#"data: {"type":"message_start","message":{"usage":{"input_tokens":0,"output_tokens":0}}}"#,
+            r#"data: {"type":"content_block_start","index":0,"content_block":{"type":"text"}}"#,
+            r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Namaste"}}"#,
+            r#"data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":6,"output_tokens":3}}"#,
+        ].map(|l| format!("{l}\n\n")).concat()
+    }).await;
+
+    let tk = create_toolkit(ToolkitOptions { builtins: Some(BuiltinsConfig::off()), ..Default::default() }).await?;
+    let client = create_client(ClientOptions {
+        base_url: url, style: Style::Anthropic, model: "claude-3-5-haiku-20241022".into(),
+        api_key: "test-key".into(), ..Default::default()
+    });
+
+    let mut rx = client.stream("say hi in Hindi", &tk)?;
+    let (mut text, mut usage_seen, mut done) = (String::new(), false, None);
+    while let Some(ev) = rx.recv().await {
+        match ev.kind.as_str() {
+            "text" => text.push_str(&ev.delta),
+            "usage" => usage_seen = true,
+            "done" => done = ev.result,
+            "error" => panic!("stream error: {:?}", ev.error),
+            _ => {}
+        }
+    }
+    let done = done.expect("a done event");
+    assert!(usage_seen);
+    assert_eq!((text.as_str(), done.text.as_str(), done.usage.total_tokens), ("Namaste", "Namaste", 9));
+    println!("ok: {} usage: {}", done.text, done.usage.total_tokens);
+    Ok(())
+}
+```
+
+## StreamEvent fields
+
+| Field | Populated on | What it holds |
+|---|---|---|
+| `kind` | always | `"text"` \| `"tool_call"` \| `"tool_result"` \| `"usage"` \| `"pending"` \| `"done"` \| `"error"`. |
+| `delta` | `"text"` | The incremental assistant text. |
+| `name`, `id` | `"tool_call"`, `"tool_result"` | Tool name and provider call id. |
+| `args` | `"tool_call"` | Parsed tool arguments, assembled from any split chunks. |
+| `output`, `is_error`, `metadata` | `"tool_result"` | The executed tool's result. |
+| `usage` | `"usage"` | Aggregated token usage so far. |
+| `result` | `"done"` | The final `RunResult` — same shape `Client::run` returns. |
+| `request` | `"pending"` | A §10 suspension, emitted before `wait_for` runs so a UI can push the link live. |
+| `error` | `"error"` | The terminal `ClientError`; the channel closes right after. |
+| `via` | tool events | Empty normally; `"call_tool"` under tool tiers, `"acp"` for an ACP agent's own tool calls. |
+
+`stream_with_id(prompt, tk, id)` streams a run remembered in the conversation store; `stream_ctx` adds a
+`CancellationToken`; `ask_stream` collects the result while handing each text delta to a callback.
+
+## See also
+
+- [`create_client`](/api/rust/client/create/) — The unified client: system prompt, skills injection, parallel and chained tool calls, retries, memory.
+- [`Client.run`](/api/rust/client/run/) — Send a prompt, let the loop call tools until the model stops, get a RunResult.
+- [`Hooks`](/api/rust/client/hooks/) — Intercept before/after model calls and tool calls: audit, redact, veto, or rewrite.
+- [`Conversation`](/api/rust/client/conversation/) — Keep a transcript across turns so the model remembers what it already did.

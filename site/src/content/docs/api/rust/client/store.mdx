@@ -1,0 +1,167 @@
+---
+title: "ConversationStore — durable transcripts"
+description: "Swap in-memory history for your own store so a conversation survives a process restart. — Rust."
+sidebar:
+  label: "InMemoryConversationStore"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a>
+</p>
+
+```rust
+pub struct InMemoryConversationStore { .. }   // InMemoryConversationStore::new()
+pub struct FileConversationStore { .. }       // FileConversationStore::new(root)?
+pub trait ConversationStore: Send + Sync {
+    fn get(&self, id: &str) -> Result<Option<Vec<Value>>, String>;
+    fn save(&self, id: &str, messages: &[Value]) -> Result<(), String>;
+    fn list(&self) -> ..; fn delete(&self, id: &str) -> ..;
+}
+```
+
+Swap in-memory history for your own store so a conversation survives a process restart.
+
+## When to use it
+
+Behind `ask(prompt, tk, id)`: where transcripts are kept by id. In-memory is the default; the file store writes each conversation atomically so it survives a restart.
+
+## Why this and not the alternative
+
+Use a store over a `Conversation` when several requests (or processes) continue the same id.
+
+<Aside type="tip" title="When not to use it">
+Implement `ConversationStore` yourself for a database; do not reach into the file store's layout.
+</Aside>
+
+## Examples
+
+Example 1 uses the store on its own; examples 2 and 3 drive it through an in-process model ([`create_in_process_client`](/api/rust/client/create/)) that answers with the number of messages it received, so a growing count proves history round-tripped through the store. No network, no API key.
+
+### 1. The smallest useful call — `get`/`save` roundtrip
+
+`InMemoryConversationStore` works standalone too — it's just the trait.
+
+```rust test
+use serde_json::json;
+use toolnexus::store::{ConversationStore, InMemoryConversationStore};
+
+fn main() -> Result<(), String> {
+    let store = InMemoryConversationStore::new();
+
+    // Nothing stored yet => Ok(None).
+    assert_eq!(store.get("u1")?, None);
+
+    store.save("u1", &[json!({"role": "user", "content": "hi"})])?;
+    let got = store.get("u1")?.expect("stored");
+    assert_eq!(got.len(), 1);
+    println!("ok: roundtripped {} message(s)", got.len());
+    Ok(())
+}
+```
+
+### 2. The realistic case — `Client::ask` remembers by id through the default store
+
+```rust test
+use std::sync::Arc;
+
+use toolnexus::client::{GenerateFn, InProcessOptions, InProcessResponse, create_in_process_client};
+use toolnexus::{BuiltinsConfig, ToolkitOptions, create_toolkit};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // The model answers with the number of messages it was sent.
+    let model: GenerateFn = Arc::new(|req| {
+        let n = req.messages.len();
+        Box::pin(async move { Ok(InProcessResponse { content: n.to_string(), ..Default::default() }) })
+    });
+    let client = create_in_process_client(InProcessOptions { model: "m".into(), generate: Some(model), ..Default::default() });
+    // No skills / system prompt, so the count is exactly the turns.
+    let tk = create_toolkit(ToolkitOptions { builtins: Some(BuiltinsConfig::off()), ..Default::default() }).await?;
+
+    let first = client.ask("first", &tk, "c1").await?;
+    assert_eq!(first.text, "1");
+    let second = client.ask("second", &tk, "c1").await?;
+    // user(first) + assistant(1) + user(second) = 3 messages remembered via the store.
+    assert_eq!(second.text, "3");
+    println!("ok: {} -> {}", first.text, second.text);
+    Ok(())
+}
+```
+
+### 3. The full surface — a custom store, plugged in via `store`
+
+Implement the two required trait methods yourself for a file/db-backed store; `Client::conversation_store()`
+returns whatever instance is in effect (the one you supplied, or the default) so callers never need a shadow copy.
+
+```rust test
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+
+use serde_json::Value;
+use toolnexus::client::{GenerateFn, InProcessOptions, InProcessResponse, create_in_process_client};
+use toolnexus::store::ConversationStore;
+use toolnexus::{BuiltinsConfig, ToolkitOptions, create_toolkit};
+
+/// Stands in for a durable store (file / db / Redis): the same two required methods.
+#[derive(Default)]
+struct FileLikeStore {
+    calls: Mutex<Vec<String>>,
+    backing: Mutex<HashMap<String, Vec<Value>>>,
+}
+
+impl ConversationStore for FileLikeStore {
+    fn get(&self, id: &str) -> Result<Option<Vec<Value>>, String> {
+        self.calls.lock().unwrap().push(format!("get:{id}"));
+        Ok(self.backing.lock().unwrap().get(id).cloned())
+    }
+    fn save(&self, id: &str, messages: &[Value]) -> Result<(), String> {
+        self.calls.lock().unwrap().push(format!("save:{id}"));
+        self.backing.lock().unwrap().insert(id.into(), messages.to_vec());
+        Ok(())
+    }
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let model: GenerateFn = Arc::new(|_req| Box::pin(async {
+        Ok(InProcessResponse { content: "ack".into(), ..Default::default() })
+    }));
+    let store = Arc::new(FileLikeStore::default());
+    let client = create_in_process_client(InProcessOptions {
+        model: "m".into(), generate: Some(model), store: Some(store.clone()), ..Default::default()
+    });
+    let tk = create_toolkit(ToolkitOptions { builtins: Some(BuiltinsConfig::off()), ..Default::default() }).await?;
+
+    // The instance you get back is the exact one you supplied.
+    let in_effect = client.conversation_store();
+    assert!(std::ptr::addr_eq(Arc::as_ptr(&in_effect), Arc::as_ptr(&store)));
+
+    client.ask("hi", &tk, "u1").await?;
+    let calls = store.calls.lock().unwrap().clone();
+    assert_eq!(calls, ["get:u1", "save:u1"]);
+    assert!(store.backing.lock().unwrap().contains_key("u1"));
+    println!("ok: custom store calls = {calls:?}");
+    Ok(())
+}
+```
+
+## ConversationStore surface
+
+| Member | What it does |
+|---|---|
+| `get(&self, id) -> Result<Option<Vec<Value>>, String>` | The stored transcript for `id`, or `Ok(None)` when none exists. |
+| `save(&self, id, messages: &[Value]) -> Result<(), String>` | Persists the (updated) transcript for `id`. |
+| `list` / `delete` | Provided methods (default: empty list / no-op); the built-in stores implement them. |
+| `InMemoryConversationStore::new()` | The default provider — process memory, safe for concurrent use, copies on get/save. |
+| `FileConversationStore::new(root)` | Durable: one JSON file per conversation, written atomically. |
+| `ClientOptions.store: Option<Arc<dyn ConversationStore>>` | Supply your own implementation; `None` ⇒ the in-memory default. |
+| `Client::conversation_store() -> Arc<dyn ConversationStore>` | Whichever instance is in effect — the supplied one, or the default. |
+
+## See also
+
+- [`create_client`](/api/rust/client/create/) — The unified client: system prompt, skills injection, parallel and chained tool calls, retries, memory.
+- [`Client.run`](/api/rust/client/run/) — Send a prompt, let the loop call tools until the model stops, get a RunResult.
+- [`Client.stream`](/api/rust/client/stream/) — The streaming loop: text deltas, tool-call events, and suspension events as they happen.
+- [`Hooks`](/api/rust/client/hooks/) — Intercept before/after model calls and tool calls: audit, redact, veto, or rewrite.

@@ -1,0 +1,173 @@
+---
+title: "Build a ContentPart — attach a file, image, or bytes to a prompt"
+description: "The authoring side of multimodal content: constructors that turn a path, bytes, a blob, a data URL, or a remote URL into the ContentPart a prompt or tool result carries — the write half of the read-only ContentPart shape. — Rust."
+sidebar:
+  label: "types / attach"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §1B</a>
+</p>
+
+```rust
+impl ContentPart {
+    pub fn text(s: impl Into<String>) -> Self;
+    // Edge constructors — every one reads and base64-encodes NOW, so a path or an
+    // unread stream never enters a ContentPart. A failure is a PartError, returned.
+    pub fn from_path(path: impl AsRef<Path>) -> Result<Self, PartError>;   // mime from the fixed extension table
+    pub fn from_bytes(raw: impl AsRef<[u8]>, mime_type: &str) -> Result<Self, PartError>;
+    pub fn from_reader(r: impl std::io::Read, mime_type: &str) -> Result<Self, PartError>; // drained now; not closed
+    pub fn from_url(url: &str, mime_type: &str) -> Result<Self, PartError>; // data: URL -> {mime_type, data}; else kept as url
+}
+
+pub struct PartError {
+    pub kind: &'static str, // extension | read | mime | dataurl
+    pub msg: String,
+}
+
+// ClientOptions.on_unsupported_part: String // "" (provenance rule) | "error" | "text"
+```
+
+`ContentPart::text` and four edge constructors turn a string, a path, raw bytes, any
+`std::io::Read`, or a URL into the one wire shape every part collapses to —
+[`ContentPart`](/api/rust/types/content-part/): `{kind, text, mime_type, data, url, name}` (wire
+keys `type`/`mimeType`). They are the **write** half; `ContentPart` itself is the shape a prompt, a
+tool result, or an MCP response actually carries.
+
+Every constructor reads and base64-encodes **at construction time** — never lazily, never on a
+retained handle — so a `ContentPart` can always be serialized, persisted, or replayed without
+re-touching whatever it was built from. Unlike Go, which defers a construction error onto the part,
+Rust returns it: each constructor is a `Result<ContentPart, PartError>`, so `?` handles it at the
+call site.
+
+## When to use it
+
+Reach for `from_path` for the common case — a file already on disk (png/jpg/jpeg/gif/webp/pdf/mp3/wav;
+any other extension is a `PartError` naming it, never a guess). Reach for `from_bytes` when you already
+hold the bytes (a generated screenshot, a downloaded payload) and don't want a temp file. Reach for
+`from_reader` for a stream — a `File`, a `Cursor`, an `include_bytes!` slice — without writing the read
+loop yourself (the reader is drained now and left to you to close). Reach for `from_url` for a remote
+image/file/audio URL, or a `data:` URL you want normalized into `{mime_type, data}` at construction
+rather than carried as a string.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Building a ContentPart by hand instead?">
+Nothing stops you from writing `ContentPart { kind: "image".into(), mime_type: "image/png".into(),
+data: b64, ..Default::default() }` — every field is public. The constructors exist so you never
+hand-derive the mime type from an extension, hand-base64-encode bytes, or hand-parse a `data:` URL
+differently at each call site; `from_path` also fills `name` for a `file` part, which a literal easily
+forgets. Use `from_url` over your own `starts_with("data:")` check because it is the one place a
+`data:` URL's two representations — inline vs. remote — are guaranteed to decode to identical bytes.
+</Aside>
+
+<Aside type="caution" title="on_unsupported_part — the provenance rule for a part the wire style can't carry">
+Not every `Style` can represent every part type (Anthropic has no audio block, for one). The default
+(`ClientOptions.on_unsupported_part == ""`) applies a **provenance rule**: a part **you attached** (a
+`Prompt::Parts` run) fails loudly as `ClientError::Part` before any HTTP call. A part **derived from a
+tool or MCP result** instead degrades to a text placeholder (`"[unsupported audio part (audio/mpeg, N
+bytes)]"`, never the bytes), because a remote server returning something your style can't render must
+not fail the whole run. Set it to `"error"` to make both kinds fail, or `"text"` to make both degrade —
+see [`emit.rs`](https://github.com/muthuishere/toolnexus/blob/main/rust/src/client/emit.rs).
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call — attach a file from disk
+
+```rust test
+use toolnexus::ContentPart;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // ".pdf" resolves to a `file` part, the one type from_path names from the path
+    // (`name` is not set for image/audio).
+    let path = std::env::temp_dir().join(format!("note-{}.pdf", std::process::id()));
+    std::fs::write(&path, b"%PDF-1.4 fake pdf bytes")?;
+
+    let p = ContentPart::from_path(&path)?;
+    std::fs::remove_file(&path)?;
+    assert_eq!(p.kind, "file");
+    assert_eq!(p.mime_type, "application/pdf");
+    assert_eq!(p.name, path.file_name().unwrap().to_string_lossy());
+    // Already read and encoded: deleting the file changed nothing.
+    assert_eq!(ContentPart::from_bytes(b"%PDF-1.4 fake pdf bytes", "application/pdf")?.data, p.data);
+    println!("ok: {} ({}) {} b64 chars", p.name, p.mime_type, p.data.len());
+    Ok(())
+}
+```
+
+### 2. The realistic case — `from_bytes` for generated data, `from_url` for a `data:` URL, one prompt
+
+```rust test
+use toolnexus::ContentPart;
+use toolnexus::client::Prompt;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // A PNG signature, generated in memory — no filesystem round trip needed.
+    let png: &[u8] = &[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+    let screenshot = ContentPart::from_bytes(png, "image/png")?;
+
+    // Same bytes, arriving as a data: URL — from_url normalizes it to the identical part.
+    let data_url = format!("data:image/png;base64,{}", screenshot.data);
+    let from_url = ContentPart::from_url(&data_url, "")?;
+    assert_eq!(screenshot, from_url, "a data: URL decodes to the same bytes as from_bytes");
+
+    let prompt: Prompt = vec![ContentPart::text("what's in this screenshot?"), screenshot].into();
+    let Prompt::Parts(parts) = &prompt else { panic!("a multimodal prompt") };
+    assert_eq!(parts.len(), 2);
+    println!("ok: {} parts, same image two ways", parts.len());
+    Ok(())
+}
+```
+
+### 3. The full surface — `from_reader` for an embedded asset, and the unsupported-part provenance rule
+
+```rust test
+use std::io::Cursor;
+
+use toolnexus::client::{ClientError, ClientOptions, Style, create_client};
+use toolnexus::{BuiltinsConfig, ContentPart, ToolkitOptions, create_toolkit};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Stands in for an asset compiled into the binary with include_bytes!.
+    static REPORT: &[u8] = b"%PDF-1.4";
+    let report = ContentPart::from_reader(Cursor::new(REPORT), "application/pdf")?;
+    assert_eq!((report.kind.as_str(), report.mime_type.as_str()), ("file", "application/pdf"));
+
+    // A missing extension is refused, by name, with a typed kind.
+    let err = ContentPart::from_path("README").unwrap_err();
+    assert_eq!(err.kind, "extension");
+
+    // An ATTACHED part the style cannot represent (Anthropic has no audio block)
+    // fails before any HTTP call: port 9 on loopback is never contacted.
+    let tk = create_toolkit(ToolkitOptions { builtins: Some(BuiltinsConfig::off()), ..Default::default() }).await?;
+    let client = create_client(ClientOptions {
+        base_url: "http://127.0.0.1:9".into(),
+        style: Style::Anthropic,
+        model: "m".into(),
+        api_key: "test-key".into(),
+        retries: -1,
+        ..Default::default()
+    });
+    let audio = ContentPart::from_bytes(b"fakeaudio", "audio/mpeg")?;
+    let res = client.run(vec![ContentPart::text("listen"), audio], &tk).await;
+    match res {
+        Err(ClientError::Part(msg)) => {
+            assert!(msg.contains("\"audio\""), "names the part type: {msg}");
+            println!("ok: {} bytes embedded; attached audio refused: {msg}", REPORT.len());
+        }
+        other => panic!("expected ClientError::Part, got {other:?}"),
+    }
+    Ok(())
+}
+```
+
+## See also
+
+- [`Tool`](/api/rust/types/tool/) — The uniform shape every tool source collapses to: name, description, JSON-Schema parameters, execute.
+- [`ToolResult`](/api/rust/types/tool-result/) — The result envelope: output text, optional error flag, optional non-text parts, and optional metadata that can carry a suspension.
+- [`ContentPart`](/api/rust/types/content-part/) — The non-text half of a message: text | image | file | audio, carrying base64 bytes or a URL plus a mimeType — never a path.
+- [`ToolContext`](/api/rust/types/context/) — Optional per-call context handed to execute: cancellation, identity, and host-supplied state.

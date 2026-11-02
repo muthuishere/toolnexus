@@ -1,6 +1,6 @@
 ---
 title: Native tools — your own functions
-description: Wrap a plain function as a tool that joins the toolkit, in all seven languages.
+description: Wrap a plain function as a tool that joins the toolkit, in all eight languages.
 ---
 
 import { Tabs, TabItem, Aside } from '@astrojs/starlight/components';
@@ -105,6 +105,38 @@ tk = Toolnexus.Toolkit.register(tk, [add])
      :run (fn [{:keys [a b]}] (str (+ a b)))}))
 ;; hand your tools to the toolkit builder:
 (def tk (tn/build {:tools [add]}))
+```
+</TabItem>
+<TabItem label="Rust">
+```rust test
+use serde::Deserialize;
+use serde_json::json;
+use toolnexus::{BuiltinsConfig, ToolContext, ToolkitOptions, create_toolkit, define_typed_tool};
+
+#[derive(Deserialize)]
+struct Weather { city: String }
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let weather = define_typed_tool(
+        "get_weather",
+        "Current weather for a city",
+        json!({"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]}),
+        |w: Weather, _ctx| async move { Ok::<_, String>(format!("Sunny in {}", w.city)) },
+    );
+    let tk = create_toolkit(ToolkitOptions {
+        extra_tools: vec![weather],
+        builtins: Some(BuiltinsConfig::off()),
+        ..Default::default()
+    }).await?;
+
+    let ok = tk.execute("get_weather", json!({"city": "Chennai"}), ToolContext::default()).await;
+    assert_eq!(ok.output, "Sunny in Chennai");
+    let bad = tk.execute("get_weather", json!({}), ToolContext::default()).await; // bad args => isError
+    assert!(bad.is_error);
+    println!("ok: {}", ok.output);
+    Ok(())
+}
 ```
 </TabItem>
 </Tabs>

@@ -1,0 +1,261 @@
+---
+title: "compactor — keep a long run under budget"
+description: "Summarise older turns when the transcript grows, so a long-lived agent stays inside its context window. — Rust."
+sidebar:
+  label: "compaction / compactor"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7F</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/rust/src/agents/compaction.rs">rust/src/agents/compaction.rs</a>
+</p>
+
+```rust
+pub fn compactor(opts: CompactorOptions) -> BeforeLlmHook        // toolnexus::agents
+pub struct CompactorOptions {
+    pub max_tokens: usize, pub keep_tail: usize,                 // keep_tail 0 ⇒ max_tokens / 2
+    pub summarize: Option<SummarizeFn>,                          // required; MAY call an LLM
+    pub count_tokens: Option<CountTokensFn>,                     // default estimate_tokens
+    pub flush_to_memory: bool,
+    pub on_compact: Option<OnCompactFn>,                         // called after each compaction
+}
+pub struct CompactInfo { pub tokens_before: usize, pub tokens_after: usize, pub messages_before: usize,
+                         pub messages_after: usize, pub summarized: usize, pub summary: String,
+                         pub folded: Vec<Value> }
+pub fn estimate_tokens(messages: &[Value]) -> usize              // Σ ceil(len(JSON) / 4)
+```
+
+A `before_llm` hook — no loop change. At or under `max_tokens` it is a no-op (byte-identical to no
+compactor). Over it, the older head becomes one `[Summary of earlier conversation]` system message;
+the retained tail always starts at a user turn that carries no tool result (no tool result is ever
+orphaned, in either dialect); the leading system prompt stays verbatim; a sole user prompt is kept;
+a compaction that would not shrink the transcript is skipped. `on_compact` receives the counts and
+the folded messages verbatim, so a host can persist what was summarized away.
+
+## When to use it
+
+Reach for `compactor` on any agent that runs long enough to threaten the model's context window — a
+persona with a heartbeat, a coordinator delegating many rounds, anything backed by a
+[`ConversationStore`](/api/rust/client/store/). Wire the returned hook into
+`ClientOptions.hooks.before_llm` on a bare client, or into an [`agents::Spec`](/api/rust/runtime/agent/)'s
+`hooks` for a §7D agent run — per agent, so two agents in one runtime can carry different budgets.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Trimming history yourself with a raw before_llm hook?">
+You can always write your own `Hooks.before_llm` that truncates or rewrites `ev.messages`.
+`compactor` exists because getting the boundary right is easy to get subtly wrong: split at the
+wrong point and you orphan a `tool` result from its `tool_calls`, which every provider rejects.
+`compactor` enforces the user-turn boundary and the leading-system-preserved rule for you, and is a
+no-op at rest — reach for a hand-written hook only when you need a transform `compactor` does not
+model (e.g. compacting by wall-clock age instead of token count).
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call — under budget is a byte-identical no-op
+
+```rust test
+use std::sync::Arc;
+use serde_json::json;
+use toolnexus::agents::{CompactorOptions, compactor};
+use toolnexus::client::BeforeLlmEvent;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let hook = compactor(CompactorOptions {
+        max_tokens: 100_000, // far above this tiny transcript
+        summarize: Some(Arc::new(|_older| Box::pin(async { Ok("summary".to_string()) }))),
+        ..Default::default()
+    });
+    let messages = vec![
+        json!({"role": "system", "content": "You are Ava."}),
+        json!({"role": "user", "content": "hi"}),
+        json!({"role": "assistant", "content": "hello"}),
+    ];
+    let ov = hook(BeforeLlmEvent { messages, tools: vec![], model: "m".into(), turn: 0 }).await?;
+    assert!(ov.is_none(), "expected no override under budget");
+    println!("ok: under budget, no compaction ran");
+    Ok(())
+}
+```
+
+### 2. The realistic case — compacts above budget, preserving system + tool pairing
+
+A synthetic transcript with many user/assistant/tool rounds, well over a small `max_tokens`. The
+result keeps the leading system message, a summary, and a tail that starts cleanly at a `user`
+turn — no orphaned `tool` message.
+
+```rust test
+use std::sync::Arc;
+use serde_json::{Value, json};
+use toolnexus::agents::{CompactorOptions, compactor, estimate_tokens};
+use toolnexus::client::BeforeLlmEvent;
+
+fn round(i: usize) -> Vec<Value> {
+    let id = format!("c{i}");
+    vec![
+        json!({"role": "user", "content": format!("question {i} with some padding text here")}),
+        json!({"role": "assistant", "content": null, "tool_calls": [
+            {"id": id, "type": "function", "function": {"name": "lookup", "arguments": "{}"}}]}),
+        json!({"role": "tool", "tool_call_id": id, "content": format!("result {i} with more padding data")}),
+        json!({"role": "assistant", "content": format!("answer {i}")}),
+    ]
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut msgs = vec![json!({"role": "system", "content": "You are Ava. SOUL."})];
+    for i in 0..30 {
+        msgs.extend(round(i));
+    }
+    let before = estimate_tokens(&msgs);
+
+    let hook = compactor(CompactorOptions {
+        max_tokens: 2000,
+        keep_tail: 800,
+        summarize: Some(Arc::new(|older| Box::pin(async move { Ok(format!("summarized {} messages", older.len())) }))),
+        ..Default::default()
+    });
+    let ov = hook(BeforeLlmEvent { messages: msgs, tools: vec![], model: "m".into(), turn: 0 })
+        .await?
+        .expect("compaction should fire above budget");
+    let out = ov.messages.expect("compacted messages");
+
+    let after = estimate_tokens(&out);
+    assert!(after < before, "before={before} after={after}");
+    assert_eq!(out[0], json!({"role": "system", "content": "You are Ava. SOUL."}));
+    assert_eq!(out[1]["role"], "system");
+    assert!(out[1]["content"].as_str().unwrap().starts_with("[Summary of earlier conversation]"));
+    assert_eq!(out[2]["role"], "user", "the tail must start at a user turn");
+    println!("ok: compacted {before} -> {after} estimated tokens, tail starts at a user turn");
+    Ok(())
+}
+```
+
+### 3. The full surface — wired into a live `Client` run, plus `flush_to_memory`
+
+The hook goes into `hooks.before_llm`, so an ordinary `run_with_history` compacts transparently
+before the request ever reaches the (in-process, stubbed) model. `flush_to_memory` adds one more
+system reminder telling the model to persist durable facts via the `memory` tool before the head
+is summarized.
+
+```rust test
+use std::sync::{Arc, Mutex};
+use serde_json::{Value, json};
+use toolnexus::agents::{CompactorOptions, compactor};
+use toolnexus::client::{Hooks, InProcessOptions, InProcessResponse, create_in_process_client};
+use toolnexus::{BuiltinsConfig, ToolkitOptions, create_toolkit};
+
+fn round(i: usize) -> Vec<Value> {
+    let id = format!("c{i}");
+    vec![
+        json!({"role": "user", "content": format!("question {i} with some padding text here")}),
+        json!({"role": "assistant", "content": null, "tool_calls": [
+            {"id": id, "type": "function", "function": {"name": "lookup", "arguments": "{}"}}]}),
+        json!({"role": "tool", "tool_call_id": id, "content": format!("result {i} with more padding data")}),
+        json!({"role": "assistant", "content": format!("answer {i}")}),
+    ]
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut history = vec![json!({"role": "system", "content": "You are Ava."})];
+    for i in 0..25 {
+        history.extend(round(i));
+    }
+
+    let hook = compactor(CompactorOptions {
+        max_tokens: 1500,
+        keep_tail: 600,
+        flush_to_memory: true,
+        summarize: Some(Arc::new(|older| Box::pin(async move { Ok(format!("summarized {} messages", older.len())) }))),
+        ..Default::default()
+    });
+
+    let sent: Arc<Mutex<Vec<Value>>> = Arc::default();
+    let seen = sent.clone();
+    let client = create_in_process_client(InProcessOptions {
+        model: "m".into(),
+        hooks: Hooks { before_llm: Some(hook), ..Default::default() },
+        generate: Some(Arc::new(move |req| {
+            *seen.lock().unwrap() = req.messages.clone();
+            Box::pin(async { Ok(InProcessResponse { content: "noted".into(), ..Default::default() }) })
+        })),
+        ..Default::default()
+    });
+    let tk = create_toolkit(ToolkitOptions {
+        builtins: Some(BuiltinsConfig { enabled: Some(false), ..Default::default() }),
+        ..Default::default()
+    })
+    .await?;
+
+    let res = client.run_with_history("one more question", &tk, history).await?;
+    assert_eq!((res.status.as_str(), res.text.as_str()), ("done", "noted"));
+
+    let raw = serde_json::to_string(&*sent.lock().unwrap())?;
+    assert!(raw.contains("summarized"), "the model should see a summarized transcript");
+    assert!(raw.contains("save it with the memory tool now"), "expected the flush reminder");
+    println!("ok: {} - the model received a compacted, flush-reminded transcript", res.text);
+    Ok(())
+}
+```
+
+## `on_compact` — tell the user the context was compacted
+
+`CompactorOptions.on_compact(&CompactInfo)` is called after each compaction (never on a no-op) with
+`tokens_before` / `tokens_after`, `messages_before` / `messages_after`, `summarized`, the `summary`
+text, and `folded` — the summarized messages verbatim, because the loop saves only the compacted
+transcript. The compactor also never summarizes away the sole user prompt of a turn (one prompt
+then only tool traffic ⇒ `[system?, prompt, summary, …]`), and it does nothing when the result would
+not be smaller.
+
+```rust test
+use std::sync::{Arc, Mutex};
+use serde_json::json;
+use toolnexus::agents::{CompactInfo, CompactorOptions, compactor};
+use toolnexus::client::BeforeLlmEvent;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut msgs = vec![json!({"role": "system", "content": "sys"})];
+    let pad = "pad ".repeat(20);
+    for i in 0..20 {
+        msgs.push(json!({"role": "user", "content": format!("question {i} {pad}")}));
+        msgs.push(json!({"role": "assistant", "content": format!("answer {i} {pad}")}));
+    }
+    let info: Arc<Mutex<CompactInfo>> = Arc::default();
+    let sink = info.clone();
+    let hook = compactor(CompactorOptions {
+        max_tokens: 400,
+        keep_tail: 200,
+        summarize: Some(Arc::new(|_older| Box::pin(async { Ok("the user asked many questions".to_string()) }))),
+        on_compact: Some(Arc::new(move |ci| *sink.lock().unwrap() = ci.clone())),
+        ..Default::default()
+    });
+    hook(BeforeLlmEvent { messages: msgs, tools: vec![], model: "m".into(), turn: 0 }).await?;
+
+    let i = info.lock().unwrap().clone();
+    assert!(i.tokens_after < i.tokens_before && i.summarized > 0 && i.folded.len() == i.summarized, "{i:?}");
+    println!("ok: context compacted {} -> {} tokens, {} messages folded", i.tokens_before, i.tokens_after, i.summarized);
+    Ok(())
+}
+```
+
+## CompactorOptions fields
+
+| Field | Type | Default | What it does |
+|---|---|---|---|
+| `max_tokens` | `usize` | — (required for compaction to ever fire) | Compact only when the estimate exceeds this; at or below ⇒ no-op, byte-identical to no compactor. |
+| `keep_tail` | `usize` | `0` ⇒ `max_tokens / 2` | Keep at least this many estimated tokens of the most recent tail. |
+| `summarize` | `Option<SummarizeFn>` | — (required; the hook errors without it once over budget) | Produces the summary. MAY call an LLM — the library never calls a model on the host's behalf. |
+| `count_tokens` | `Option<CountTokensFn>` | `estimate_tokens` | The token estimator (`ceil(len(JSON)/4)` per message, summed). An estimator, not a tokenizer. |
+| `flush_to_memory` | `bool` | `false` | Injects a pre-compact system reminder to persist durable facts via the §7E `memory` tool. |
+| `on_compact` | `Option<OnCompactFn>` | `None` | Called with a `CompactInfo` after each compaction. |
+
+## See also
+
+- [`Client::run`](/api/rust/client/run/) — the loop that applies `hooks.before_llm` on every turn.
+- [Agent](/api/rust/runtime/agent/) — wire a compactor per agent via `Spec.hooks`.
+- [compose_soul](/api/rust/persona/compose-soul/) · [memory tool](/api/rust/persona/memory-tool/)

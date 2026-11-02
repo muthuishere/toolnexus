@@ -1,0 +1,136 @@
+---
+title: "toAnthropic — emit Anthropic tool schema"
+description: "Render the toolkit as Anthropic tool-use schema. — Rust."
+sidebar:
+  label: "to_anthropic"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §4</a>
+</p>
+
+```rust
+pub fn to_anthropic(tools: &[Tool]) -> Vec<Value>
+impl Toolkit { pub fn to_anthropic(&self) -> Vec<Value> }
+```
+
+Render the toolkit as Anthropic tool-use schema.
+
+## When to use it
+
+When you call the provider yourself and need the tool schema in its shape: `\{name, description, input_schema\}`. Schema only — the input schema is passed through verbatim.
+
+## Why this and not the alternative
+
+Use the adapter rather than hand-writing the JSON: names and schemas then always match what `Toolkit::execute` routes.
+
+<Aside type="tip" title="When not to use it">
+If you use the toolnexus client, you never call this; the loop does.
+</Aside>
+
+## Examples
+
+### 1. One tool to Anthropic schema
+
+```rust test
+use serde_json::json;
+use toolnexus::{define_tool, to_anthropic};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let weather = define_tool(
+        "get_weather",
+        "Current weather for a city",
+        Some(json!({"type":"object","properties":{"city":{"type":"string"}},"required":["city"]})),
+        |args, _ctx| async move {
+            let city = args["city"].as_str().ok_or("city is required")?;
+            Ok::<_, String>(format!("{city}: 21C, clear"))
+        },
+    );
+    let schema = to_anthropic(&[weather]);
+    assert_eq!(schema[0]["name"], "get_weather");
+    // No `type: function` wrapper, and the key is `input_schema`, not `parameters`.
+    assert!(schema[0].get("type").is_none());
+    assert_eq!(schema[0]["input_schema"]["properties"]["city"]["type"], "string");
+    println!("{}", serde_json::to_string_pretty(&schema)?);
+    println!("ok: {}", schema[0]["name"]);
+    Ok(())
+}
+```
+
+### 2. Feeding it straight into a Messages request body
+
+```rust test
+use serde_json::json;
+use toolnexus::{BuiltinsConfig, ToolkitOptions, create_toolkit, define_tool};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let now = define_tool("now", "Current time", None, |_a, _c| async { Ok::<_, String>("12:00".to_string()) });
+    let tk = create_toolkit(ToolkitOptions {
+        extra_tools: vec![now],
+        builtins: Some(BuiltinsConfig::off()),
+        ..Default::default()
+    })
+    .await?;
+    let body = json!({
+        "model": "claude-model-id",
+        "max_tokens": 1024,
+        "system": tk.skills_prompt(),
+        "messages": [{"role": "user", "content": "what time is it?"}],
+        "tools": tk.to_anthropic(),
+    });
+    assert_eq!(body["tools"][0]["name"], "now");
+    // A tool with no schema gets the empty-object schema, not null.
+    assert_eq!(body["tools"][0]["input_schema"]["type"], "object");
+    println!("ok: {} tool(s) in the body", body["tools"].as_array().unwrap().len());
+    Ok(())
+}
+```
+
+### 3. Round-tripping a `tool_use` block back to the tool
+
+Anthropic returns `input` as a JSON **object** (not a string), and expects the result back as a `tool_result` block inside a `user` message.
+
+```rust test
+use serde_json::json;
+use toolnexus::{BuiltinsConfig, ToolContext, ToolkitOptions, create_toolkit, define_tool};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let weather = define_tool(
+        "get_weather",
+        "Current weather for a city",
+        Some(json!({"type":"object","properties":{"city":{"type":"string"}},"required":["city"]})),
+        |args, _ctx| async move {
+            let city = args["city"].as_str().ok_or("city is required")?;
+            Ok::<_, String>(format!("{city}: 21C, clear"))
+        },
+    );
+    let tk = create_toolkit(ToolkitOptions {
+        extra_tools: vec![weather],
+        builtins: Some(BuiltinsConfig::off()),
+        ..Default::default()
+    })
+    .await?;
+
+    // One content block of a Messages response with stop_reason "tool_use".
+    let block = json!({"type": "tool_use", "id": "toolu_1", "name": "get_weather", "input": {"city": "Chennai"}});
+    let r = tk
+        .execute(block["name"].as_str().unwrap(), block["input"].clone(), ToolContext::default())
+        .await;
+    let reply = json!({"role": "user", "content": [{
+        "type": "tool_result", "tool_use_id": block["id"], "content": r.output, "is_error": r.is_error,
+    }]});
+    assert_eq!(reply["content"][0]["content"], "Chennai: 21C, clear");
+    assert_eq!(reply["content"][0]["is_error"], false);
+    println!("ok: {}", reply["content"][0]["content"]);
+    Ok(())
+}
+```
+
+## See also
+
+- [`to_openai`](/api/rust/adapters/openai/) — Render the toolkit as OpenAI function-calling schema.
+- [`to_gemini`](/api/rust/adapters/gemini/) — Render the toolkit as Gemini function-declaration schema.

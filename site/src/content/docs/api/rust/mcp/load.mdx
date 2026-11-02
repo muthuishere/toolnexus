@@ -1,0 +1,120 @@
+---
+title: "loadMcp — connect to MCP servers"
+description: "Read an mcp.json, connect every local stdio and remote streamable-HTTP server, expose each server tool as a Tool. — Rust."
+sidebar:
+  label: "load_mcp"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §2</a>
+</p>
+
+```rust
+pub async fn load_mcp(config: &McpConfig) -> McpSource
+```
+
+Read an mcp.json, connect every local stdio and remote streamable-HTTP server, expose each server tool as a Tool.
+
+## When to use it
+
+When you want MCP tools without a toolkit, or want to load servers yourself and hand the tools to `extra_tools`. It connects every enabled server concurrently and never fails as a whole.
+
+## Why this and not the alternative
+
+Prefer `create_toolkit` with `mcp_config` in most programs: it calls this for you and closes the connections with the toolkit.
+
+<Aside type="tip" title="When not to use it">
+If you need each server's tools as soon as it is ready, use `load_mcp_with` and its `on_server` callback.
+</Aside>
+
+## Examples
+
+The shared `examples/mcp.json` fixture has one **enabled** local server (`everything`, spawned via
+`npx`, which needs the network) and one **disabled** remote server (`example-remote`). To stay
+hermetic, these examples swap `everything` for the repo's dependency-free stdio fixture
+`examples/mcp-progress-server.mjs` (plain `node`, no SDK, no network) and assert what `load_mcp`
+guarantees: the disabled server is skipped, a failed connection is isolated rather than fatal, and a
+malformed config errors before any connection is attempted.
+
+### 1. Load the shared fixture and read per-server status
+
+```rust test
+use std::path::Path;
+use toolnexus::mcp::{McpStatus, load_mcp, parse_mcp_config_file};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // TOOLNEXUS_REPO is set by the docs test runner; in your own code just use a path.
+    let repo = std::env::var("TOOLNEXUS_REPO")?;
+    let mut cfg = parse_mcp_config_file(Path::new(&repo).join("examples/mcp.json"))?;
+
+    // Hermetic stand-in for the npx server: the same name, a local node fixture.
+    let server = Path::new(&repo).join("examples/mcp-progress-server.mjs");
+    cfg.get_mut("everything").unwrap().command =
+        vec!["node".into(), server.to_string_lossy().into_owned()];
+
+    let src = load_mcp(&cfg).await;
+
+    // The disabled remote server never gets a connection attempt.
+    assert_eq!(src.status["example-remote"], McpStatus::Disabled);
+    // The enabled server connected and its tools are namespaced `server_tool`.
+    assert_eq!(src.status["everything"], McpStatus::Connected, "{:?}", src.errors);
+    assert!(src.tools.iter().any(|t| t.name == "everything_slow"));
+
+    src.close().await;
+    println!("ok: example-remote=disabled, everything=connected");
+    Ok(())
+}
+```
+
+### 2. A bad server is isolated, not fatal
+
+One server that can never start (`command` points at a binary that does not exist). `load_mcp`
+still returns a source — the failure is reported per server in `status` and `errors`.
+
+```rust test
+use toolnexus::mcp::{McpStatus, load_mcp, parse_mcp_config_str};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let cfg = parse_mcp_config_str(
+        r#"{"mcpServers":{"broken":{"type":"local","command":["toolnexus-docs-does-not-exist"]}}}"#,
+    )?;
+
+    let src = load_mcp(&cfg).await; // never fails as a whole
+
+    assert_eq!(src.status["broken"], McpStatus::Failed);
+    assert!(src.errors.contains_key("broken"), "a failed server says why");
+    // A failed server contributes zero tools — the load degrades, it does not abort.
+    assert!(src.tools.is_empty());
+
+    src.close().await;
+    println!("ok: broken server isolated as {}", src.status["broken"].as_str());
+    Ok(())
+}
+```
+
+### 3. Malformed config fails fast, before any connection
+
+`load_mcp` takes an already-parsed `McpConfig`, so a syntax error surfaces from the parse step —
+it never reaches the network or spawns a process.
+
+```rust test
+use toolnexus::mcp::{parse_mcp_config, parse_mcp_config_str};
+
+fn main() {
+    let err = parse_mcp_config_str("{not valid json").unwrap_err();
+
+    // Well-formed JSON of the wrong shape is also rejected up front.
+    assert!(parse_mcp_config(&serde_json::json!(42)).is_err());
+
+    println!("ok: malformed config rejected before connecting: {err}");
+}
+```
+
+## See also
+
+- [`load_mcp_with`](/api/rust/mcp/load-with-context/) — The ctx-aware load: bound connection time and cancel a slow or hung server without leaking a child process.
+- [`parse_mcp_config`](/api/rust/mcp/parse-config/) — Parse and validate config without connecting — the fast fail for a malformed or misspelled server block.

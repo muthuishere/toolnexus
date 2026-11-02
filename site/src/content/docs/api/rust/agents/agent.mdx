@@ -1,0 +1,378 @@
+---
+title: "agent — call a remote A2A peer"
+description: "Point at a remote agent's card and use it exactly like a local tool. — Rust."
+sidebar:
+  label: "agents / agent"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7A</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/rust/src/a2a.rs">rust/src/a2a.rs</a>
+</p>
+
+```rust
+pub struct Agent {
+    pub card: String,                       // URL of /.well-known/agent-card.json
+    pub headers: BTreeMap<String, String>,  // ${ENV} values expand at call time, never logged
+    pub timeout_ms: u64,                    // overall poll budget, 0 ⇒ 300000
+    pub poll_every_ms: u64,                 // GetTask interval, 0 ⇒ 1000
+}
+impl Agent { pub fn new(card: impl Into<String>) -> Self }
+// ToolkitOptions { agents: Vec<Agent>, .. } · Toolkit::add_agent(impl Into<Agent>)
+```
+
+`Agent` points at a remote A2A agent's card. Hand it to `ToolkitOptions.agents` (or
+`Toolkit::add_agent` at runtime) and every skill on the card becomes a tool named
+`<card name>_<skill id>` with `source: ToolSource::A2a`. Calling it sends one non-blocking
+`SendMessage`, polls `GetTask` until the Task is `completed` / `failed` / `canceled`, and returns
+the artifact text.
+
+## When to use it
+
+When another team (or another toolnexus port) runs its agent behind A2A and you want your model to
+delegate to it exactly like a local tool: same schema (`{task: string}`), same hooks, same
+cancellation (`ToolContext.cancel` stops polling, even mid-request: `A2A task <id> canceled`).
+
+## Why this and not the alternative
+
+An A2A peer owns its own loop, model and tools; wrapping it with `http_tool` would make you
+re-implement the Task protocol. For a local coding CLI use the ACP client instead; for a peer that
+only exposes MCP use `mcp_config`.
+
+<Aside type="tip" title="A failing agent never breaks the toolkit">
+If the card cannot be fetched at `create_toolkit` time, the agent is logged and skipped; the rest of the toolkit loads. Use `agent_tools` directly when you need the error.
+</Aside>
+
+## Examples
+
+All three examples stand up a tiny fake A2A peer on `127.0.0.1` (a few lines of
+`tokio::net::TcpListener`, speaking the JSON-RPC subset `a2a.rs` expects) — no external network, no
+real agent.
+
+### 1. The smallest useful call — one peer, one tool call
+
+```rust test
+use std::sync::{Arc, Mutex};
+
+use serde_json::{Value, json};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
+use toolnexus::a2a::Agent;
+use toolnexus::{BuiltinsConfig, ToolContext, ToolkitOptions, create_toolkit};
+
+/// A minimal fake A2A peer on 127.0.0.1: the card at any GET, `SendMessage` →
+/// a submitted task, `GetTask` → `last`. Records the last Authorization header.
+async fn start_peer(name: &str, skills: Value, last: Value) -> (String, Arc<Mutex<String>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let card = json!({"name": name, "url": format!("{base}/"), "skills": skills});
+    let auth = Arc::new(Mutex::new(String::new()));
+    let seen = auth.clone();
+    tokio::spawn(async move {
+        while let Ok((mut sock, _)) = listener.accept().await {
+            let (card, last, seen) = (card.clone(), last.clone(), seen.clone());
+            tokio::spawn(async move {
+                let (mut buf, mut chunk) = (Vec::new(), [0u8; 4096]);
+                let mut head_end = None;
+                loop {
+                    if let Some(end) = head_end {
+                        let head = String::from_utf8_lossy(&buf[..end]).to_lowercase();
+                        let len = head.lines().find_map(|l| l.strip_prefix("content-length:"))
+                            .and_then(|v| v.trim().parse::<usize>().ok()).unwrap_or(0);
+                        if buf.len() >= end + len { break; }
+                    }
+                    let n = sock.read(&mut chunk).await.unwrap_or(0);
+                    if n == 0 { return; }
+                    buf.extend_from_slice(&chunk[..n]);
+                    head_end = head_end.or(buf.windows(4).position(|w| w == b"\r\n\r\n").map(|i| i + 4));
+                }
+                let end = head_end.unwrap();
+                let head = String::from_utf8_lossy(&buf[..end]).to_string();
+                if let Some(a) = head.lines().find_map(|l| {
+                    let (k, v) = l.split_once(':')?;
+                    k.eq_ignore_ascii_case("authorization").then(|| v.trim().to_string())
+                }) {
+                    *seen.lock().unwrap() = a;
+                }
+                let reply = if head.starts_with("GET") {
+                    card
+                } else {
+                    let rpc: Value = serde_json::from_slice(&buf[end..]).unwrap_or(Value::Null);
+                    let result = if rpc["method"] == "SendMessage" {
+                        json!({"id": "t1", "status": {"state": "submitted"}})
+                    } else {
+                        last
+                    };
+                    json!({"jsonrpc": "2.0", "id": rpc["id"], "result": result})
+                };
+                let body = reply.to_string();
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+            });
+        }
+    });
+    (base, auth)
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let completed = json!({"id": "t1", "status": {"state": "completed"},
+        "artifacts": [{"parts": [{"kind": "text", "text": "hello!"}]}]});
+    let (base, _) = start_peer("greeter",
+        json!([{"id": "greet", "name": "Greet", "description": "Say hello"}]), completed).await;
+
+    let tk = create_toolkit(ToolkitOptions {
+        builtins: Some(BuiltinsConfig::off()),
+        agents: vec![Agent {
+            poll_every_ms: 5,
+            ..Agent::new(format!("{base}/.well-known/agent-card.json"))
+        }],
+        ..Default::default()
+    })
+    .await?;
+
+    // The peer's "greet" skill is now an ordinary tool: greeter_greet.
+    assert!(tk.get("greeter_greet").is_some(), "expected greeter_greet in the toolkit");
+    let res = tk.execute("greeter_greet", json!({"task": "say hi"}), ToolContext::default()).await;
+    assert!(!res.is_error, "unexpected: {}", res.output);
+    tk.close().await;
+
+    println!("ok: {}", res.output);
+    Ok(())
+}
+```
+
+### 2. The realistic case — auth headers with `${ENV}` expansion
+
+`headers` values containing `${ENV_VAR}` expand from the process environment at call time and are
+never logged — the same rule `http_tool` uses for outbound headers.
+
+```rust test
+use std::sync::{Arc, Mutex};
+
+use serde_json::{Value, json};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
+use std::collections::BTreeMap;
+
+use toolnexus::a2a::Agent;
+use toolnexus::{BuiltinsConfig, ToolContext, ToolkitOptions, create_toolkit};
+
+/// A minimal fake A2A peer on 127.0.0.1: the card at any GET, `SendMessage` →
+/// a submitted task, `GetTask` → `last`. Records the last Authorization header.
+async fn start_peer(name: &str, skills: Value, last: Value) -> (String, Arc<Mutex<String>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let card = json!({"name": name, "url": format!("{base}/"), "skills": skills});
+    let auth = Arc::new(Mutex::new(String::new()));
+    let seen = auth.clone();
+    tokio::spawn(async move {
+        while let Ok((mut sock, _)) = listener.accept().await {
+            let (card, last, seen) = (card.clone(), last.clone(), seen.clone());
+            tokio::spawn(async move {
+                let (mut buf, mut chunk) = (Vec::new(), [0u8; 4096]);
+                let mut head_end = None;
+                loop {
+                    if let Some(end) = head_end {
+                        let head = String::from_utf8_lossy(&buf[..end]).to_lowercase();
+                        let len = head.lines().find_map(|l| l.strip_prefix("content-length:"))
+                            .and_then(|v| v.trim().parse::<usize>().ok()).unwrap_or(0);
+                        if buf.len() >= end + len { break; }
+                    }
+                    let n = sock.read(&mut chunk).await.unwrap_or(0);
+                    if n == 0 { return; }
+                    buf.extend_from_slice(&chunk[..n]);
+                    head_end = head_end.or(buf.windows(4).position(|w| w == b"\r\n\r\n").map(|i| i + 4));
+                }
+                let end = head_end.unwrap();
+                let head = String::from_utf8_lossy(&buf[..end]).to_string();
+                if let Some(a) = head.lines().find_map(|l| {
+                    let (k, v) = l.split_once(':')?;
+                    k.eq_ignore_ascii_case("authorization").then(|| v.trim().to_string())
+                }) {
+                    *seen.lock().unwrap() = a;
+                }
+                let reply = if head.starts_with("GET") {
+                    card
+                } else {
+                    let rpc: Value = serde_json::from_slice(&buf[end..]).unwrap_or(Value::Null);
+                    let result = if rpc["method"] == "SendMessage" {
+                        json!({"id": "t1", "status": {"state": "submitted"}})
+                    } else {
+                        last
+                    };
+                    json!({"jsonrpc": "2.0", "id": rpc["id"], "result": result})
+                };
+                let body = reply.to_string();
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+            });
+        }
+    });
+    (base, auth)
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let completed = json!({"id": "t1", "status": {"state": "completed"},
+        "artifacts": [{"parts": [{"kind": "text", "text": "secret-value"}]}]});
+    let (base, seen_auth) = start_peer("vault",
+        json!([{"id": "read", "name": "Read", "description": "Read a secret"}]), completed).await;
+
+    // The real key lives only in the environment — never in code.
+    // SAFETY: set before any other thread reads the environment.
+    unsafe { std::env::set_var("VAULT_TOKEN", "sk-demo-123") };
+
+    let tk = create_toolkit(ToolkitOptions {
+        builtins: Some(BuiltinsConfig::off()),
+        agents: vec![Agent {
+            card: format!("{base}/.well-known/agent-card.json"),
+            headers: BTreeMap::from([("Authorization".into(), "Bearer ${VAULT_TOKEN}".into())]),
+            poll_every_ms: 5,
+            ..Default::default()
+        }],
+        ..Default::default()
+    })
+    .await?;
+
+    let res = tk.execute("vault_read", json!({"task": "read it"}), ToolContext::default()).await;
+    assert!(!res.is_error && res.output == "secret-value", "unexpected: {}", res.output);
+    let seen = seen_auth.lock().unwrap().clone();
+    assert_eq!(seen, "Bearer sk-demo-123", "the header expands from the env");
+    tk.close().await;
+
+    println!("ok: peer saw {seen}");
+    Ok(())
+}
+```
+
+### 3. The full surface — a failed task, and the metadata every call carries
+
+```rust test
+use std::sync::{Arc, Mutex};
+
+use serde_json::{Value, json};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
+use toolnexus::a2a::Agent;
+use toolnexus::{BuiltinsConfig, ToolContext, ToolkitOptions, create_toolkit};
+
+/// A minimal fake A2A peer on 127.0.0.1: the card at any GET, `SendMessage` →
+/// a submitted task, `GetTask` → `last`. Records the last Authorization header.
+async fn start_peer(name: &str, skills: Value, last: Value) -> (String, Arc<Mutex<String>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let card = json!({"name": name, "url": format!("{base}/"), "skills": skills});
+    let auth = Arc::new(Mutex::new(String::new()));
+    let seen = auth.clone();
+    tokio::spawn(async move {
+        while let Ok((mut sock, _)) = listener.accept().await {
+            let (card, last, seen) = (card.clone(), last.clone(), seen.clone());
+            tokio::spawn(async move {
+                let (mut buf, mut chunk) = (Vec::new(), [0u8; 4096]);
+                let mut head_end = None;
+                loop {
+                    if let Some(end) = head_end {
+                        let head = String::from_utf8_lossy(&buf[..end]).to_lowercase();
+                        let len = head.lines().find_map(|l| l.strip_prefix("content-length:"))
+                            .and_then(|v| v.trim().parse::<usize>().ok()).unwrap_or(0);
+                        if buf.len() >= end + len { break; }
+                    }
+                    let n = sock.read(&mut chunk).await.unwrap_or(0);
+                    if n == 0 { return; }
+                    buf.extend_from_slice(&chunk[..n]);
+                    head_end = head_end.or(buf.windows(4).position(|w| w == b"\r\n\r\n").map(|i| i + 4));
+                }
+                let end = head_end.unwrap();
+                let head = String::from_utf8_lossy(&buf[..end]).to_string();
+                if let Some(a) = head.lines().find_map(|l| {
+                    let (k, v) = l.split_once(':')?;
+                    k.eq_ignore_ascii_case("authorization").then(|| v.trim().to_string())
+                }) {
+                    *seen.lock().unwrap() = a;
+                }
+                let reply = if head.starts_with("GET") {
+                    card
+                } else {
+                    let rpc: Value = serde_json::from_slice(&buf[end..]).unwrap_or(Value::Null);
+                    let result = if rpc["method"] == "SendMessage" {
+                        json!({"id": "t1", "status": {"state": "submitted"}})
+                    } else {
+                        last
+                    };
+                    json!({"jsonrpc": "2.0", "id": rpc["id"], "result": result})
+                };
+                let body = reply.to_string();
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+            });
+        }
+    });
+    (base, auth)
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let failed = json!({"id": "t1", "status": {"state": "failed",
+        "message": {"role": "agent", "parts": [{"kind": "text", "text": "disk full"}]}}});
+    let (base, _) = start_peer("flaky",
+        json!([{"id": "risky", "name": "Risky", "description": "Sometimes fails"}]), failed).await;
+
+    let tk = create_toolkit(ToolkitOptions {
+        builtins: Some(BuiltinsConfig::off()),
+        agents: vec![Agent {
+            card: format!("{base}/.well-known/agent-card.json"),
+            timeout_ms: 5_000,
+            poll_every_ms: 5,
+            ..Default::default()
+        }],
+        ..Default::default()
+    })
+    .await?;
+
+    let res = tk.execute("flaky_risky", json!({"task": "try it"}), ToolContext::default()).await;
+    assert!(res.is_error, "expected the failed task to surface as an error result");
+    assert_eq!(res.output, "A2A task t1 failed: disk full");
+    // Every call — success or failure — carries {agent, taskId, state, polls, ms}.
+    let meta = res.metadata.clone().expect("metadata");
+    assert_eq!(meta["agent"], "flaky");
+    assert_eq!(meta["state"], "failed");
+    assert!(meta["taskId"].is_string(), "expected a taskId in metadata");
+    tk.close().await;
+
+    println!("ok: {} metadata.state = {}", res.output, meta["state"]);
+    Ok(())
+}
+```
+
+## Fields
+
+| Field | Type | What it does |
+|---|---|---|
+| `card` | `String` | URL of the peer's `/.well-known/agent-card.json`. |
+| `headers` | `BTreeMap<String, String>` | Static request headers; `${ENV_VAR}` values expand at call time, never logged. |
+| `timeout_ms` | `u64` | Overall poll budget in ms; `0` ⇒ `300000`. |
+| `poll_every_ms` | `u64` | Interval between `GetTask` polls in ms; `0` ⇒ `1000`. |
+
+## The runtime form
+
+`tk.add_agent(agent).await` adds a peer to an already-built toolkit, resolving and registering its
+tools immediately (it takes `impl Into<Agent>`, so a bare card URL `&str` works). Unlike
+`ToolkitOptions.agents`, it returns the card-fetch error instead of logging it.
+
+## See also
+
+- [`agent_tools`](/api/rust/agents/agent-tools/) — expand a card into one tool per skill.
+- [`parse_agents_config`](/api/rust/agents/parse-config/) — agents from a config `agents` block.
+- [`Toolkit::serve`](/api/rust/serve/a2a/) — expose the toolkit as an A2A agent and/or an MCP server.
+- [`create_toolkit`](/api/rust/toolkit/create/) — Collapse MCP servers, skills, built-ins, A2A agents and your own functions into one tool list.

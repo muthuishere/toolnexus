@@ -1,6 +1,6 @@
 ---
 title: HTTP / REST tools
-description: Turn a REST endpoint into a tool with placeholder URLs and ${ENV} headers, in all seven languages.
+description: Turn a REST endpoint into a tool with placeholder URLs and ${ENV} headers, in all eight languages.
 ---
 
 import { Tabs, TabItem, Aside } from '@astrojs/starlight/components';
@@ -112,6 +112,51 @@ tk = Toolnexus.Toolkit.register(tk, [get_post])
      :input-schema {:type "object"
                     :properties {:id {:type "number"}} :required ["id"]}}))
 (def tk (tn/build {:tools [get-post]}))
+```
+</TabItem>
+<TabItem label="Rust">
+```rust test
+use serde_json::json;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use toolnexus::http::{HttpToolOptions, http_tool};
+use toolnexus::{BuiltinsConfig, ToolContext, ToolkitOptions, create_toolkit};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // A loopback stand-in for api.github.com: echoes the request line and auth header.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let base = format!("http://{}", listener.local_addr()?);
+    tokio::spawn(async move {
+        let (mut s, _) = listener.accept().await.unwrap();
+        let mut buf = vec![0; 4096];
+        let n = s.read(&mut buf).await.unwrap();
+        let req = String::from_utf8_lossy(&buf[..n]).to_string();
+        let auth = req.lines().find(|l| l.to_lowercase().starts_with("authorization:")).unwrap_or("").to_string();
+        let body = json!({"line": req.lines().next().unwrap_or(""), "auth": auth}).to_string();
+        let resp = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+        s.write_all(resp.as_bytes()).await.unwrap();
+    });
+    if std::env::var("GITHUB_TOKEN").is_err() {
+        unsafe { std::env::set_var("GITHUB_TOKEN", "test-key") } // demo only; normally set by your shell
+    }
+
+    let repo = http_tool(HttpToolOptions {
+        name: "repo_info".into(),
+        description: "Fetch a GitHub repository".into(),
+        url: format!("{base}/repos/{{owner}}/{{repo}}"), // real: https://api.github.com/repos/{owner}/{repo}
+        headers: [("Authorization".to_string(), "Bearer ${GITHUB_TOKEN}".to_string())].into(),
+        input_schema: Some(json!({"type": "object", "properties": {
+            "owner": {"type": "string"}, "repo": {"type": "string"}}, "required": ["owner", "repo"]})),
+        ..Default::default()
+    });
+    // ${GITHUB_TOKEN} is read from the environment at call time and never logged
+    let tk = create_toolkit(ToolkitOptions { extra_tools: vec![repo], builtins: Some(BuiltinsConfig::off()), ..Default::default() }).await?;
+    let r = tk.execute("repo_info", json!({"owner": "muthuishere", "repo": "toolnexus"}), ToolContext::default()).await;
+    assert!(!r.is_error, "{}", r.output);
+    assert!(r.output.contains("/repos/muthuishere/toolnexus") && r.output.contains("Bearer "), "{}", r.output);
+    println!("ok: {}", r.output);
+    Ok(())
+}
 ```
 </TabItem>
 </Tabs>

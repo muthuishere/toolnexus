@@ -1,0 +1,288 @@
+---
+title: "Relay tools — declaration-only"
+description: "Declare a tool the host executes, not the library: the call rides out on the suspension. — Rust."
+sidebar:
+  label: "suspension / relay"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §10</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/rust/src/relay.rs">rust/src/relay.rs</a>
+</p>
+
+```rust
+pub fn relay_tool(name: impl Into<String>, description: impl Into<String>, schema: Option<Value>) -> Tool
+pub const RELAY_KIND: &str = "tool_call";
+pub fn is_relay_request(req: &Request) -> bool
+pub fn relay_calls_of(req: &Request) -> Vec<RelayCall>          // { id, name, input, arguments }
+pub fn relay_answer(request_id: impl Into<String>, results: &[RelayResult]) -> Answer
+
+impl Client {
+    pub async fn run_with_answer(&self, cancel: CancellationToken, tk: &Toolkit, history: Vec<Value>,
+                                 pending: &Request, answer: &Answer) -> Result<RunResult, ClientError>
+    pub async fn ask_with_answer(&self, cancel: CancellationToken, tk: &Toolkit, id: &str,
+                                 pending: &Request, answer: &Answer) -> Result<RunResult, ClientError>
+}
+```
+
+A relay tool carries a schema and no behaviour: when the model calls it, the run suspends with a
+`kind: "tool_call"` Request carrying the call (`data.calls`, with the provider's call id stamped in),
+and the HOST executes it. Every relay call of one assistant turn rides the one surfaced Request, in
+tool-call order. With a `wait_for`, the host's `data.output` (and `data.isError`) becomes the tool
+result inline. Without one the run halts `pending`; `run_with_answer` resumes it from the persisted
+transcript, replacing the halt's placeholders so every call has exactly one result, and appends no
+new user turn. The answer must echo the request id. A relay tool may not share a name with a
+builtin, even with builtins off (`ToolkitError::Relay`).
+
+## When to use it
+
+Reach for `relay_tool` when toolnexus owns the conversation loop but the **execution** of a
+specific tool belongs to the caller — a coding-agent client that runs shell commands itself, a
+browser extension that clicks buttons in a real tab, anything where "the tool" is inherently
+outside the process running toolnexus. Declare it, let the model call it, and resolve it inline
+with `wait_for` or durably with `run_with_answer` / `ask_with_answer`.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Translator posture, not agent-loop posture? Use translate">
+A relay tool still runs the full agent loop — turns, retries, conversation memory — with one
+tool's execution deferred to the caller. Single-turn `translate` (§11) is a different posture:
+no loop, no state, exactly one provider call, and the caller owns everything. Use it when the
+caller already has its own agent loop; use `relay_tool` when toolnexus's loop should keep driving
+turns but one particular tool has to execute somewhere else.
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call — the relay call reaches the host, nothing runs locally
+
+```rust test
+use std::sync::{Arc, Mutex};
+
+use serde_json::json;
+use toolnexus::client::{
+    GenerateFn, InProcessOptions, InProcessRequest, InProcessResponse, InProcessToolCall,
+    WaitForFn, create_in_process_client,
+};
+use toolnexus::relay::{answer_output, is_relay_request, relay_calls_of, relay_tool};
+use toolnexus::{BuiltinsConfig, Request, ToolkitOptions, create_toolkit};
+
+fn model() -> GenerateFn {
+    Arc::new(|req: InProcessRequest| {
+        Box::pin(async move {
+            Ok(if req.messages.iter().any(|m| m["role"] == "tool") {
+                InProcessResponse { content: "it is sunny".into(), ..Default::default() }
+            } else {
+                InProcessResponse {
+                    tool_calls: vec![InProcessToolCall { id: "c1".into(), name: "lookup".into(), arguments: json!({"q": "weather"}) }],
+                    ..Default::default()
+                }
+            })
+        })
+    })
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let lookup = relay_tool(
+        "lookup",
+        "look something up",
+        Some(json!({"type": "object", "properties": {"q": {"type": "string"}}})),
+    );
+    let tk = create_toolkit(ToolkitOptions {
+        builtins: Some(BuiltinsConfig::off()),
+        extra_tools: vec![lookup],
+        ..Default::default()
+    })
+    .await?;
+
+    let got: Arc<Mutex<Option<Request>>> = Arc::new(Mutex::new(None));
+    let sink = got.clone();
+    let wait_for: WaitForFn = Arc::new(move |req| {
+        let sink = sink.clone();
+        Box::pin(async move {
+            *sink.lock().unwrap() = Some(req.clone());
+            Ok(answer_output(req.id, "sunny, 31C")) // the HOST ran the lookup
+        })
+    });
+    let client = create_in_process_client(InProcessOptions {
+        generate: Some(model()),
+        wait_for: Some(wait_for),
+        ..Default::default()
+    });
+
+    let res = client.run("weather?", &tk).await?;
+    assert_eq!(res.status, "done");
+    assert_eq!(res.text, "it is sunny");
+    let got = got.lock().unwrap().clone().expect("wait_for saw the relay request");
+    assert!(is_relay_request(&got), "expected a relay request, got kind={:?}", got.kind);
+    let calls = relay_calls_of(&got);
+    assert_eq!(calls.len(), 1);
+    assert_eq!((calls[0].id.as_str(), calls[0].name.as_str()), ("c1", "lookup"));
+    assert_eq!(calls[0].input["q"], "weather");
+    assert_eq!(res.tool_calls[0].output, "sunny, 31C", "the host's output became the tool result");
+    assert!(!res.tool_calls[0].is_error);
+    println!("ok: {} - relay call was {}({})", res.text, calls[0].name, calls[0].arguments);
+    Ok(())
+}
+```
+
+### 2. The realistic case — three relay calls in one turn ride a single suspension
+
+`data.calls` carries ALL of a turn's relay calls, in tool-call order — the first-in-order halt
+rule is unchanged; only the surfaced request's payload grows. The host answers all of them at once
+with `relay_answer`, one `RelayResult` per call id.
+
+<Aside type="note" title="Merging is a property of the durable halt">
+The merge into ONE request happens when no `wait_for` is configured: the run collects every
+suspension of the turn and folds them into the first one before halting. A configured `wait_for`
+is called once per relay call as each is hit.
+</Aside>
+
+```rust test
+use std::sync::Arc;
+
+use serde_json::json;
+use tokio_util::sync::CancellationToken;
+use toolnexus::client::{
+    GenerateFn, InProcessOptions, InProcessRequest, InProcessResponse, InProcessToolCall,
+    create_in_process_client,
+};
+use toolnexus::relay::{RelayResult, relay_answer, relay_calls_of, relay_tool};
+use toolnexus::{BuiltinsConfig, ToolkitOptions, create_toolkit};
+
+fn model() -> GenerateFn {
+    Arc::new(|req: InProcessRequest| {
+        Box::pin(async move {
+            let outs: Vec<String> = req.messages.iter().filter(|m| m["role"] == "tool")
+                .map(|m| m["content"].as_str().unwrap_or("").to_string()).collect();
+            if !outs.is_empty() {
+                return Ok(InProcessResponse { content: outs.join(","), ..Default::default() });
+            }
+            let call = |id: &str, name: &str| InProcessToolCall { id: id.into(), name: name.into(), arguments: json!({}) };
+            Ok(InProcessResponse {
+                tool_calls: vec![call("c1", "alpha"), call("c2", "beta"), call("c3", "gamma")],
+                ..Default::default()
+            })
+        })
+    })
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let relay = |name: &str| relay_tool(name, "relayed to the caller", None);
+    let tk = create_toolkit(ToolkitOptions {
+        builtins: Some(BuiltinsConfig::off()),
+        extra_tools: vec![relay("alpha"), relay("beta"), relay("gamma")],
+        ..Default::default()
+    })
+    .await?;
+    let client = create_in_process_client(InProcessOptions { generate: Some(model()), ..Default::default() });
+
+    let halted = client.run("do all three", &tk).await?;
+    assert_eq!(halted.status, "pending", "expected a durable halt");
+    let req = halted.pending.clone().unwrap();
+    let calls = relay_calls_of(&req);
+    let names: Vec<&str> = calls.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(names, ["alpha", "beta", "gamma"], "all 3 on ONE request, tool-call order preserved");
+
+    // The host executes each call and answers them together, keyed by call id.
+    let results: Vec<RelayResult> = calls
+        .iter()
+        .map(|c| RelayResult { id: c.id.clone(), output: format!("{}-done", c.name), is_error: false })
+        .collect();
+    let done = client
+        .run_with_answer(CancellationToken::new(), &tk, halted.messages, &req, &relay_answer(&req.id, &results))
+        .await?;
+    assert_eq!(done.text, "alpha-done,beta-done,gamma-done");
+    println!("ok: {} relay calls rode one suspension, in order: {}", calls.len(), names.join(" "));
+    Ok(())
+}
+```
+
+### 3. The full surface — a real tool runs alongside a relay tool, and a declined relay does not abort the run
+
+Relay composes with ordinary executing tools (only the relay one suspends), and a declined relay
+call becomes an error tool result — the loop continues, exactly like any other declined
+suspension.
+
+```rust test
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use serde_json::{Value, json};
+use toolnexus::client::{
+    GenerateFn, InProcessOptions, InProcessRequest, InProcessResponse, InProcessToolCall,
+    WaitForFn, create_in_process_client,
+};
+use toolnexus::relay::{answer_declined, relay_tool};
+use toolnexus::{BuiltinsConfig, ToolkitOptions, create_toolkit, define_tool};
+
+// Turn 1 calls the real tool, turn 2 the relayed one, turn 3 answers.
+fn model() -> GenerateFn {
+    Arc::new(|req: InProcessRequest| {
+        Box::pin(async move {
+            let call = |id: &str, name: &str| InProcessResponse {
+                tool_calls: vec![InProcessToolCall { id: id.into(), name: name.into(), arguments: json!({}) }],
+                ..Default::default()
+            };
+            Ok(match req.messages.iter().filter(|m| m["role"] == "tool").count() {
+                0 => call("c1", "real_tool"),
+                1 => call("c2", "relayed_tool"),
+                _ => InProcessResponse { content: "handled the decline".into(), ..Default::default() },
+            })
+        })
+    })
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let real_ran = Arc::new(AtomicBool::new(false));
+    let flag = real_ran.clone();
+    let real = define_tool("real_tool", "runs locally", None, move |_: Value, _| {
+        let flag = flag.clone();
+        async move {
+            flag.store(true, Ordering::SeqCst);
+            Ok::<_, String>("real-output".to_string())
+        }
+    });
+    let tk = create_toolkit(ToolkitOptions {
+        builtins: Some(BuiltinsConfig::off()),
+        extra_tools: vec![real, relay_tool("relayed_tool", "runs at the host", None)],
+        ..Default::default()
+    })
+    .await?;
+
+    // The caller declines the relayed call — the run must not abort.
+    let wait_for: WaitForFn = Arc::new(|req| Box::pin(async move { Ok(answer_declined(req.id, "")) }));
+    let client = create_in_process_client(InProcessOptions {
+        generate: Some(model()),
+        wait_for: Some(wait_for),
+        ..Default::default()
+    });
+
+    let res = client.run("do both", &tk).await?;
+    assert!(real_ran.load(Ordering::SeqCst), "expected the ordinary tool to actually run");
+    assert_eq!(res.status, "done", "a declined relay must not abort the run");
+    assert!(res.tool_calls[1].is_error, "the declined relay is an error tool result");
+    println!("ok: real tool ran locally, relay decline was handled without aborting: {}", res.text);
+    Ok(())
+}
+```
+
+## Wire shape and rules
+
+| Aspect | Detail |
+|---|---|
+| `Request.kind` | `"tool_call"` (`RELAY_KIND`) — a use of the suspension primitive, not a second mechanism. |
+| `Request.data["calls"]` | `[{id, name, input, arguments}]` — read with `relay_calls_of`; `id` is stamped by the loop (a tool cannot know its own call id). |
+| Multiple calls, one turn | All of one assistant turn's relay calls ride the **single** surfaced request, in tool-call order. |
+| Resolution | `Answer.data["results"]` — `[{id, output, isError}]`, one per call (`relay_answer`). A single-call relay may use the shorthand `data["output"]` / `data["isError"]` (`answer_output`). |
+| Declined (`ok: false`) | Feeds back an error tool result for that call; the run continues — a relayed *failure* is never an aborted run. |
+| Collision guard | Toolkit construction **fails** (`ToolkitError::Relay`) if a relay tool's name collides with a builtin's — even with builtins disabled. |
+| Absent | No relay tool declared ⇒ not one observable difference from a plain toolkit. |
+
+## See also
+
+- [answer_output](/api/rust/suspension/answer-output/) · [`wait_for`](/api/rust/suspension/wait-for/)

@@ -1,0 +1,238 @@
+---
+title: "buildMcpServer — expose your toolkit over MCP"
+description: "The inbound MCP profile: any MCP client can call your tools. — Rust."
+sidebar:
+  label: "serve / mcp"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7C</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/rust/src/mcp_serve.rs">rust/src/mcp_serve.rs</a>
+</p>
+
+```rust
+pub struct McpServeConfig { pub name: String, pub version: String, pub tools: Option<Vec<String>> }
+pub fn exposed_mcp_tools(tools: Vec<Tool>, cfg: Option<&McpServeConfig>) -> Vec<Tool>
+pub struct McpToolServer;  // rmcp ServerHandler over a tool list: McpToolServer::new(tools, cfg, on_call)
+// ServeOptions { mcp: Some(McpServeConfig), on_call, .. } mounts it at POST /mcp
+```
+
+The inbound MCP profile: `serve` mounts a stateless streamable-HTTP MCP server (rmcp) at `/mcp`
+exposing the toolkit's **unified tools** (every source: MCP, skill, builtin, native, HTTP, A2A).
+`tools/list` gives each tool's name verbatim, description and input schema as-is; `tools/call`
+dispatches straight to the tool, `isError` propagates, and §1B parts follow the text block as
+native MCP content (image, audio, embedded blob resource, or a resource link for URL-only parts).
+`serverInfo` defaults to `toolnexus` / `0.1.0`. Unknown names in `tools` are ignored.
+
+## When to use it
+
+When the caller is an MCP host (Claude Desktop, an IDE, another agent's MCP client) that wants your
+tools, not a delegated Task. The calling host is the LLM, so no `client` is needed.
+
+## Why this and not the alternative
+
+A2A delegates a whole task to your loop; MCP lends your tools to someone else's loop. Use
+`exposed_mcp_tools` to choose what to lend: an MCP host gets every tool it is shown, builtins
+included.
+
+<Aside type="tip" title="Use McpToolServer on another transport">
+`McpToolServer` is a plain rmcp `ServerHandler`, so it can also be served over stdio with rmcp's own transports.
+</Aside>
+
+## Examples
+
+### 1. The filter itself — omit, narrow, unknown names ignored
+
+```rust test
+use serde_json::Value;
+use toolnexus::mcp_serve::{McpServeConfig, exposed_mcp_tools};
+use toolnexus::{Tool, define_tool};
+
+fn mk(name: &'static str) -> Tool {
+    define_tool(name, format!("does {name}"), None, move |_: Value, _| async move { Ok::<_, String>(name.to_string()) })
+}
+
+fn main() {
+    let tools = vec![mk("echo"), mk("boom")];
+
+    let all = exposed_mcp_tools(tools.clone(), None);
+    assert_eq!(all.len(), 2, "no config exposes everything");
+
+    let only_echo = McpServeConfig { tools: Some(vec!["echo".into()]), ..Default::default() };
+    let narrowed = exposed_mcp_tools(tools.clone(), Some(&only_echo));
+    assert_eq!(narrowed.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(), ["echo"]);
+
+    // An unknown name in the filter is ignored, never an error.
+    let with_unknown = McpServeConfig { tools: Some(vec!["echo".into(), "nope".into()]), ..Default::default() };
+    assert_eq!(exposed_mcp_tools(tools, Some(&with_unknown)).len(), 1);
+    println!("ok: {} -> {} tools after filtering", all.len(), narrowed.len());
+}
+```
+
+### 2. The realistic case — a real MCP client, over real streamable-HTTP
+
+A served toolkit, and two independent MCP clients connecting to it over `POST /mcp` on a local
+ephemeral port: a raw JSON-RPC `initialize` (to read `serverInfo`), and toolnexus's own MCP
+client (rmcp) consuming it as a remote server — no external network.
+
+```rust test
+use serde_json::{Value, json};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
+use toolnexus::mcp_serve::McpServeConfig;
+use toolnexus::serve::ServeOptions;
+use toolnexus::{BuiltinsConfig, McpConfigInput, ToolContext, ToolkitOptions, create_toolkit, define_tool};
+
+// A tiny HTTP/1.1 client over loopback (std + tokio only): send `body` as JSON, parse the JSON reply.
+async fn http(method: &str, url: &str, body: Option<&Value>) -> Result<Value, Box<dyn std::error::Error>> {
+    let rest = url.strip_prefix("http://").ok_or("http only")?;
+    let (host, path) = rest.split_at(rest.find('/').unwrap_or(rest.len()));
+    let path = if path.is_empty() { "/" } else { path };
+    let payload = body.map(Value::to_string).unwrap_or_default();
+    let mut conn = TcpStream::connect(host).await?;
+    let req = format!(
+        "{method} {path} HTTP/1.1\r\nHost: {host}\r\nContent-Type: application/json\r\nAccept: application/json, text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+        payload.len()
+    );
+    conn.write_all(req.as_bytes()).await?;
+    let mut raw = Vec::new();
+    conn.read_to_end(&mut raw).await?;
+    let text = String::from_utf8(raw)?;
+    let (head, mut rest) = text.split_once("\r\n\r\n").ok_or("no body")?;
+    let mut out = String::new();
+    if head.to_ascii_lowercase().contains("transfer-encoding: chunked") {
+        while let Some((size, tail)) = rest.split_once("\r\n") {
+            let n = usize::from_str_radix(size.trim(), 16)?;
+            if n == 0 { break; }
+            out.push_str(&tail[..n]);
+            rest = &tail[n + 2..];
+        }
+    } else {
+        out.push_str(rest);
+    }
+    Ok(serde_json::from_str(&out)?)
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let echo = define_tool(
+        "echo",
+        "echo back the text",
+        Some(json!({"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]})),
+        |args: Value, _| async move { Ok::<_, String>(args["text"].as_str().unwrap_or("").to_string()) },
+    );
+    let tk = create_toolkit(ToolkitOptions {
+        builtins: Some(BuiltinsConfig::off()),
+        extra_tools: vec![echo],
+        ..Default::default()
+    })
+    .await?;
+    let handle = tk
+        .serve("127.0.0.1:0", ServeOptions {
+            mcp: Some(McpServeConfig { name: "gateway".into(), ..Default::default() }),
+            ..Default::default()
+        })
+        .await?;
+    let endpoint = format!("{}/mcp", handle.url);
+
+    // A raw MCP initialize: serverInfo carries the configured name.
+    let init = http("POST", &endpoint, Some(&json!({
+        "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": {"protocolVersion": "2025-03-26", "capabilities": {}, "clientInfo": {"name": "docs", "version": "0"}}
+    })))
+    .await?;
+    assert_eq!(init["result"]["serverInfo"]["name"], "gateway");
+
+    // toolnexus's own MCP client, pointed at the served endpoint as a remote server.
+    let consumer = create_toolkit(ToolkitOptions {
+        builtins: Some(BuiltinsConfig::off()),
+        mcp_config: Some(McpConfigInput::Json(json!({"mcpServers": {"gw": {"type": "remote", "url": endpoint}}}))),
+        ..Default::default()
+    })
+    .await?;
+    let res = consumer.execute("gw_echo", json!({"text": "over mcp"}), ToolContext::default()).await;
+    assert!(!res.is_error, "got {:?}", res.output);
+    assert_eq!(res.output, "over mcp");
+    consumer.close().await;
+    println!("ok: {}", res.output);
+    Ok(())
+}
+```
+
+### 3. The full surface — `tools/list` narrowed, and a tool error becomes `isError`, never a crash
+
+```rust test
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+use serde_json::{Value, json};
+use toolnexus::mcp_serve::McpServeConfig;
+use toolnexus::serve::ServeOptions;
+use toolnexus::{BuiltinsConfig, McpConfigInput, ToolContext, ToolkitOptions, create_toolkit, define_tool};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let safe = define_tool("safe", "always works", None, |_: Value, _| async { Ok::<_, String>("ok".to_string()) });
+    let boom = define_tool("boom", "always explodes", None, |_: Value, _| async { Err::<String, _>("kaboom") });
+    let hidden = define_tool("hidden", "not exposed", None, |_: Value, _| async { Ok::<_, String>("x".to_string()) });
+    let tk = create_toolkit(ToolkitOptions {
+        builtins: Some(BuiltinsConfig::off()),
+        extra_tools: vec![safe, boom, hidden],
+        ..Default::default()
+    })
+    .await?;
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let counter = calls.clone();
+    let handle = tk
+        .serve("127.0.0.1:0", ServeOptions {
+            mcp: Some(McpServeConfig {
+                name: "narrow-gw".into(),
+                tools: Some(vec!["safe".into(), "boom".into()]),
+                ..Default::default()
+            }),
+            on_call: Some(Arc::new(move |_ev| { counter.fetch_add(1, Ordering::SeqCst); })),
+            ..Default::default()
+        })
+        .await?;
+
+    let consumer = create_toolkit(ToolkitOptions {
+        builtins: Some(BuiltinsConfig::off()),
+        mcp_config: Some(McpConfigInput::Json(json!({"mcpServers": {"gw": {"type": "remote", "url": format!("{}/mcp", handle.url)}}}))),
+        ..Default::default()
+    })
+    .await?;
+    let mut listed: Vec<String> = consumer.tools().into_iter().map(|t| t.name).collect();
+    listed.sort();
+    assert_eq!(listed, ["gw_boom", "gw_safe"], "tools/list is exactly the filtered subset");
+
+    // A tool ERROR is an isError result over MCP — not a protocol/transport error.
+    let res = consumer.execute("gw_boom", json!({}), ToolContext::default()).await;
+    assert!(res.is_error, "expected isError=true for a tool that returned an error");
+    assert!(res.output.contains("kaboom"), "got {:?}", res.output);
+    assert_eq!(calls.load(Ordering::SeqCst), 1, "on_call fires once per tools/call");
+    consumer.close().await;
+    println!("ok: {} tools listed; boom isError = {}", listed.len(), res.is_error);
+    Ok(())
+}
+```
+
+## McpServeConfig fields
+
+| Field | Type | Default |
+|---|---|---|
+| `name` | `String` | `""` ⇒ `"toolnexus"` |
+| `version` | `String` | `""` ⇒ `"0.1.0"` |
+| `tools` | `Option<Vec<String>>` | `None` ⇒ every toolkit tool; `Some` ⇒ exactly that subset, unknown names ignored |
+
+`tools/call` maps `ToolResult.output` to a text content block (§1B parts follow it) and
+`is_error` propagates verbatim — a failing tool is `isError: true` with its text, never a server
+crash. `OnCallEvent { name, source, ms, is_error }` fires per call.
+
+A top-level `mcpServer` (singular) block in the toolkit's config enables the profile without an inline option.
+
+## See also
+
+- [`Toolkit::serve`](/api/rust/serve/a2a/) — expose the toolkit as an A2A agent and/or an MCP server.
+- [`create_toolkit`](/api/rust/toolkit/create/) — Collapse MCP servers, skills, built-ins, A2A agents and your own functions into one tool list.

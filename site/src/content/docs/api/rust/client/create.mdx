@@ -1,0 +1,361 @@
+---
+title: "createClient — the tool-calling loop"
+description: "The unified client: system prompt, skills injection, parallel and chained tool calls, retries, memory. — Rust."
+sidebar:
+  label: "create_client"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a>
+</p>
+
+```rust
+pub fn create_client(opts: ClientOptions) -> Client
+```
+
+The unified client: system prompt, skills injection, parallel and chained tool calls, retries, memory.
+
+## When to use it
+
+To run the tool-calling loop against an OpenAI- or Anthropic-style endpoint: system prompt + skills catalog, concurrent tool calls, hooks, retries, memory, streaming.
+
+## Why this and not the alternative
+
+Use the client rather than your own loop: it implements §8 and §10 the same way as the other seven ports, including Retry-After, the API-key-by-host rule and suspension.
+
+<Aside type="tip" title="When not to use it">
+For a model you run in-process (or an ACP agent), use `create_in_process_client`.
+</Aside>
+
+## Examples
+
+Each example is a complete program. Because `create_client` speaks HTTP, the provider is a tiny loopback server on `127.0.0.1` written inline (`stub`): no network, no real API key.
+
+### 1. The smallest useful call — one prompt, one turn
+
+```rust test
+use serde_json::json;
+use toolnexus::client::{ClientOptions, Style, create_client};
+use toolnexus::{BuiltinsConfig, ToolkitOptions, create_toolkit};
+
+/// A tiny loopback stand-in for the provider: `reply(head, body)` is the response body.
+async fn stub(reply: impl Fn(&str, serde_json::Value) -> String + Send + Sync + 'static) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", l.local_addr().unwrap());
+    let reply = std::sync::Arc::new(reply);
+    tokio::spawn(async move {
+        while let Ok((mut s, _)) = l.accept().await {
+            let reply = reply.clone();
+            tokio::spawn(async move {
+                let (mut buf, mut tmp) = (Vec::new(), [0u8; 8192]);
+                let (head, body) = loop {
+                    let n = s.read(&mut tmp).await.unwrap_or(0);
+                    if n == 0 { return; }
+                    buf.extend_from_slice(&tmp[..n]);
+                    let Some(i) = buf.windows(4).position(|w| w == b"\r\n\r\n") else { continue };
+                    let head0 = String::from_utf8_lossy(&buf[..i]).to_lowercase();
+                    let len: usize = head0.lines().find_map(|l| l.strip_prefix("content-length:"))
+                        .and_then(|v| v.trim().parse().ok()).unwrap_or(0);
+                    while buf.len() < i + 4 + len {
+                        let n = s.read(&mut tmp).await.unwrap_or(0);
+                        if n == 0 { break; }
+                        buf.extend_from_slice(&tmp[..n]);
+                    }
+                    break (head0, buf[i + 4..].to_vec());
+                };
+                let out = reply(&head, serde_json::from_slice(&body).unwrap_or_default());
+                let ct = if out.starts_with("data:") { "text/event-stream" } else { "application/json" };
+                let resp = format!("HTTP/1.1 200 OK\r\ncontent-type: {ct}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{out}", out.len());
+                let _ = s.write_all(resp.as_bytes()).await;
+            });
+        }
+    });
+    url
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let url = stub(|_, _| {
+        json!({"choices":[{"message":{"role":"assistant","content":"hi"}}],
+               "usage":{"prompt_tokens":4,"completion_tokens":1,"total_tokens":5}}).to_string()
+    }).await;
+
+    let tk = create_toolkit(ToolkitOptions { builtins: Some(BuiltinsConfig::off()), ..Default::default() }).await?;
+    let client = create_client(ClientOptions {
+        base_url: url,
+        style: Style::OpenAI,
+        model: "gpt-x".into(),
+        api_key: "test-key".into(),
+        ..Default::default()
+    });
+
+    let res = client.run("hi", &tk).await?;
+    assert_eq!(res.text, "hi");
+    assert_eq!(res.usage.total_tokens, 5);
+    println!("ok: {}", res.text);
+    Ok(())
+}
+```
+
+### 2. The realistic case — skills + a native tool, driven by the loop
+
+Run against the shared `examples/skills` fixture every port is tested on. `create_toolkit` aggregates the tool
+sources; `create_client` is what actually calls them, with the system prompt followed by the skills catalog.
+
+```rust test
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+use serde_json::json;
+use toolnexus::client::{ClientOptions, Style, create_client};
+use toolnexus::{BuiltinsConfig, ToolkitOptions, create_toolkit, define_tool};
+
+/// A tiny loopback stand-in for the provider: `reply(head, body)` is the response body.
+async fn stub(reply: impl Fn(&str, serde_json::Value) -> String + Send + Sync + 'static) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", l.local_addr().unwrap());
+    let reply = std::sync::Arc::new(reply);
+    tokio::spawn(async move {
+        while let Ok((mut s, _)) = l.accept().await {
+            let reply = reply.clone();
+            tokio::spawn(async move {
+                let (mut buf, mut tmp) = (Vec::new(), [0u8; 8192]);
+                let (head, body) = loop {
+                    let n = s.read(&mut tmp).await.unwrap_or(0);
+                    if n == 0 { return; }
+                    buf.extend_from_slice(&tmp[..n]);
+                    let Some(i) = buf.windows(4).position(|w| w == b"\r\n\r\n") else { continue };
+                    let head0 = String::from_utf8_lossy(&buf[..i]).to_lowercase();
+                    let len: usize = head0.lines().find_map(|l| l.strip_prefix("content-length:"))
+                        .and_then(|v| v.trim().parse().ok()).unwrap_or(0);
+                    while buf.len() < i + 4 + len {
+                        let n = s.read(&mut tmp).await.unwrap_or(0);
+                        if n == 0 { break; }
+                        buf.extend_from_slice(&tmp[..n]);
+                    }
+                    break (head0, buf[i + 4..].to_vec());
+                };
+                let out = reply(&head, serde_json::from_slice(&body).unwrap_or_default());
+                let ct = if out.starts_with("data:") { "text/event-stream" } else { "application/json" };
+                let resp = format!("HTTP/1.1 200 OK\r\ncontent-type: {ct}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{out}", out.len());
+                let _ = s.write_all(resp.as_bytes()).await;
+            });
+        }
+    });
+    url
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Turn 1: the model calls add(2, 3). Turn 2: it answers with the tool's result.
+    let turn = AtomicUsize::new(0);
+    let url = stub(move |_, body| {
+        if turn.fetch_add(1, Ordering::SeqCst) == 0 {
+            // The system prompt carries the caller's prompt plus the skills catalog.
+            let sys = body["messages"][0]["content"].as_str().unwrap_or("").to_string();
+            assert!(sys.starts_with("You are a precise agent.") && sys.contains("hello-world"));
+            return json!({"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[
+                {"id":"c1","type":"function","function":{"name":"add","arguments":"{\"a\":2,\"b\":3}"}}]}}]}).to_string();
+        }
+        json!({"choices":[{"message":{"role":"assistant","content":"The sum is 5."}}]}).to_string()
+    }).await;
+
+    // The shared fixtures every port is tested on (the runner exports TOOLNEXUS_REPO).
+    let root = PathBuf::from(std::env::var("TOOLNEXUS_REPO")?).join("examples");
+    let tk = create_toolkit(ToolkitOptions {
+        skills_dir: vec![root.join("skills")],
+        builtins: Some(BuiltinsConfig::off()),
+        ..Default::default()
+    }).await?;
+    tk.register([define_tool("add", "Add two numbers and return the sum.", None, |a, _| async move {
+        Ok::<_, String>((a["a"].as_f64().unwrap_or(0.0) + a["b"].as_f64().unwrap_or(0.0)).to_string())
+    })]);
+
+    let agent = create_client(ClientOptions {
+        base_url: url,
+        style: Style::OpenAI,
+        model: "gpt-x".into(),
+        api_key: "test-key".into(),
+        system_prompt: "You are a precise agent. Prefer issuing independent tool calls together in one step.".into(),
+        ..Default::default()
+    });
+
+    let res = agent.run("Add 2 and 3, then tell me the sum.", &tk).await?;
+    assert_eq!((res.text.as_str(), res.turns, res.tool_call_count), ("The sum is 5.", 2, 1));
+    assert_eq!(res.tool_calls[0].output, "5");
+    tk.close().await;
+    println!("ok: {} ({} turns, {} tool call)", res.text, res.turns, res.tool_call_count);
+    Ok(())
+}
+```
+
+### 3. The full surface — every option at once
+
+Not all of these combine meaningfully in one real client, but this sets every field `ClientOptions` exposes,
+grouped by what it controls, and checks the request-shaping ones on the wire.
+
+```rust test
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use serde_json::{Map, json};
+use toolnexus::client::{ClientOptions, ErrorTier, Hooks, Style, create_client};
+use toolnexus::store::InMemoryConversationStore;
+use toolnexus::{Answer, BuiltinsConfig, ToolkitOptions, create_toolkit};
+
+/// A tiny loopback stand-in for the provider: `reply(head, body)` is the response body.
+async fn stub(reply: impl Fn(&str, serde_json::Value) -> String + Send + Sync + 'static) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", l.local_addr().unwrap());
+    let reply = std::sync::Arc::new(reply);
+    tokio::spawn(async move {
+        while let Ok((mut s, _)) = l.accept().await {
+            let reply = reply.clone();
+            tokio::spawn(async move {
+                let (mut buf, mut tmp) = (Vec::new(), [0u8; 8192]);
+                let (head, body) = loop {
+                    let n = s.read(&mut tmp).await.unwrap_or(0);
+                    if n == 0 { return; }
+                    buf.extend_from_slice(&tmp[..n]);
+                    let Some(i) = buf.windows(4).position(|w| w == b"\r\n\r\n") else { continue };
+                    let head0 = String::from_utf8_lossy(&buf[..i]).to_lowercase();
+                    let len: usize = head0.lines().find_map(|l| l.strip_prefix("content-length:"))
+                        .and_then(|v| v.trim().parse().ok()).unwrap_or(0);
+                    while buf.len() < i + 4 + len {
+                        let n = s.read(&mut tmp).await.unwrap_or(0);
+                        if n == 0 { break; }
+                        buf.extend_from_slice(&tmp[..n]);
+                    }
+                    break (head0, buf[i + 4..].to_vec());
+                };
+                let out = reply(&head, serde_json::from_slice(&body).unwrap_or_default());
+                let ct = if out.starts_with("data:") { "text/event-stream" } else { "application/json" };
+                let resp = format!("HTTP/1.1 200 OK\r\ncontent-type: {ct}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{out}", out.len());
+                let _ = s.write_all(resp.as_bytes()).await;
+            });
+        }
+    });
+    url
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let url = stub(|head, body| {
+        // What actually went over the wire, shaped by the options below.
+        assert!(head.contains("x-org: acme"));
+        assert_eq!(body["max_tokens"], 4096);
+        assert_eq!(body["stream_options"]["include_usage"], true);
+        json!({"choices":[{"message":{"role":"assistant","content":"shaped"}}]}).to_string()
+    }).await;
+
+    let mut params = Map::new();
+    params.insert("max_tokens".into(), json!(4096));
+
+    let client = create_client(ClientOptions {
+        // Required: where and how to call the model.
+        base_url: url,
+        style: Style::OpenAI, // or Style::Anthropic
+        model: "gpt-x".into(),
+        api_key: "test-key".into(), // "" => api_key_env, else the env var for the base_url host
+        api_key_env: String::new(),
+        headers: HashMap::from([("X-Org".to_string(), "acme".to_string())]),
+
+        // Prompting + loop shape.
+        system_prompt: "You are a precise agent.".into(),
+        max_turns: 10, // 0 => 10
+
+        // Resilience: see resilience.mdx and provider-error.mdx.
+        retries: 2,                         // 0 => 2
+        retry_base_ms: 500,                 // 0 => 500
+        retryable_statuses: vec![520, 521], // ADDED to the default set
+        timeout_ms: 30_000,                 // whole-run deadline; 0 => none
+        on_error: Some(Arc::new(|_info| ErrorTier::Retry)),
+        http_client: None,                  // Some(reqwest::Client) to bring your own
+
+        // Memory across turns: see conversation.mdx and store.mdx.
+        store: Some(Arc::new(InMemoryConversationStore::new())),
+
+        // Observability: see metrics.mdx.
+        on_metric: Some(Arc::new(|ev| { let _ = &ev.event; })),
+
+        // Interception: see hooks.mdx.
+        hooks: Hooks {
+            before_tool: Some(Arc::new(|_ev| Box::pin(async { Ok(None) }))),
+            ..Default::default()
+        },
+
+        // §10 suspension resolver: resumes a tool that returned metadata.pending.
+        wait_for: Some(Arc::new(|req| Box::pin(async move {
+            Ok(Answer { id: req.id, ..Default::default() })
+        }))),
+        wait_for_ctx: None,
+
+        // Request shaping: merge extra body keys, or rewrite the body just before it is sent.
+        request_params: params,
+        body_transform: Some(Arc::new(|mut body| {
+            body["stream_options"] = json!({"include_usage": true});
+            Some(body)
+        })),
+
+        // Multimodal content parts (§1B/§8A).
+        max_part_bytes: 0,                  // 0 => the default cap
+        on_unsupported_part: String::new(), // "" default | "error" | "text"
+
+        // Opt-in extras: see prompt-cache.mdx and tool-tiers.mdx.
+        prompt_cache: None,
+        tool_tiers: None,
+    });
+
+    let tk = create_toolkit(ToolkitOptions { builtins: Some(BuiltinsConfig::off()), ..Default::default() }).await?;
+    let res = client.run("hi", &tk).await?;
+    assert_eq!(res.text, "shaped");
+    println!("ok: {}", res.text);
+    Ok(())
+}
+```
+
+## Options
+
+Every field has a default (`ClientOptions` is `Default`), so `..Default::default()` fills what you leave out.
+
+| Field | Type | What it does |
+|---|---|---|
+| `base_url` | `String` | The provider endpoint to call. |
+| `style` | `Style` | `Style::OpenAI` (default) \| `Style::Anthropic` — selects the wire format. |
+| `model` | `String` | The model id sent with every request. |
+| `api_key`, `api_key_env` | `String` | The key, or the name of an env var holding it (see below). Never printed. |
+| `headers` | `HashMap<String, String>` | Extra request headers. |
+| `system_prompt` | `String` | Prepended to the toolkit's `skills_prompt()`. |
+| `max_turns` | `usize` | Caps the tool-calling loop. `0` ⇒ 10. |
+| `retries`, `retry_base_ms`, `retryable_statuses` | resilience | Transient-failure retry budget and backoff. See [`ErrorInfo`](/api/rust/client/resilience/). |
+| `timeout_ms` | `u64` | Whole-run deadline in ms. `0` ⇒ no deadline. |
+| `on_error` | `Option<OnErrorFn>` | Classify a failed LLM attempt as `ErrorTier::Retry` or `Fail`. |
+| `http_client` | `Option<reqwest::Client>` | Overrides the client used for LLM requests. |
+| `store` | `Option<Arc<dyn ConversationStore>>` | Conversation provider for `ask(prompt, tk, id)`. `None` ⇒ in-memory. See [`ConversationStore`](/api/rust/client/store/). |
+| `on_metric` | `Option<OnMetricFn>` | Observability sink, one event per LLM/tool/run. See [`MetricEvent`](/api/rust/client/metrics/). |
+| `hooks` | `Hooks` | Lifecycle callbacks before/after model and tool calls. See [`Hooks`](/api/rust/client/hooks/). |
+| `wait_for`, `wait_for_ctx` | `Option<WaitForFn>` / `Option<WaitForCtxFn>` | §10 suspension resolver; resumes a tool whose result carries `metadata.pending`. |
+| `request_params` | `Map<String, Value>` | Extra top-level keys shallow-merged into every request body; wins on collision. |
+| `body_transform` | `Option<BodyTransformFn>` | Rewrites the assembled body just before it is sent (`None` return keeps it). |
+| `prompt_cache`, `tool_tiers` | `Option<…>` | Opt-in prompt caching and tool tiers. |
+| `max_part_bytes` | `usize` | Caps a content part's decoded byte length. `0` ⇒ the default cap. |
+| `on_unsupported_part` | `String` | `""` default \| `"error"` \| `"text"`. |
+
+## Which API key is sent where
+
+`api_key` set ⇒ only it. Else `api_key_env` (an env var **name**) if set. Else only the env var that belongs to
+the `base_url` host, over https: `api.openai.com` → `OPENAI_API_KEY`, `api.anthropic.com` → `ANTHROPIC_API_KEY`,
+`openrouter.ai` → `OPENROUTER_API_KEY` (`key_env_for_base_url`). Any other host — a local server, a proxy —
+without `api_key`/`api_key_env` fails with `ClientError::NoApiKey`.
+
+## See also
+
+- [`Client.run`](/api/rust/client/run/) — Send a prompt, let the loop call tools until the model stops, get a RunResult.
+- [`Client.stream`](/api/rust/client/stream/) — The streaming loop: text deltas, tool-call events, and suspension events as they happen.
+- [`Hooks`](/api/rust/client/hooks/) — Intercept before/after model calls and tool calls: audit, redact, veto, or rewrite.
+- [`Conversation`](/api/rust/client/conversation/) — Keep a transcript across turns so the model remembers what it already did.

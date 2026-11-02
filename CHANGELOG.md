@@ -1,13 +1,102 @@
 # Changelog
 
 All ports are versioned and released together; entries here apply to every port unless a port
-is named. All seven ports are at tier `full` (js / python / golang / java / csharp / elixir /
-clojure) — see `conformance/options_manifest.json`, which is where a
+is named. All eight ports are at tier `full` (js / python / golang / java / csharp / elixir /
+clojure / rust) — see `conformance/options_manifest.json`, which is where a
 port's tier is declared, never by the port about itself. Releases are cut as
 GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
 
 ## Unreleased
 
+**Rust port (`rust/`, crate `toolnexus` on crates.io) is complete: tier `full`, ready to publish.**
+A Rust host can now build a toolkit and run the whole tool-calling loop natively on tokio, with
+no Node/Python/Go sidecar. New since 0.22.0, on top of the ACP client, skills, MCP client and
+core types that were already there:
+- **Toolkit** (`create_toolkit`): MCP → skill → builtin → extra tools, first name wins, an extra
+  tool shadows a builtin, `disable_tools` / `disable_skills`, `register` safe mid-turn.
+- **The ten builtins** with the same names, schemas and outputs as the other ports, the host
+  boundary (`shell`, `base_dir`, `confine_to_base_dir`, `kill_grace_ms`; a timeout or cancel
+  kills the whole process group), hints on every builtin, `grep` context lines and truncation
+  metadata, edit diffs, and the opt-in extras (background shells, `websearch` over a provider
+  you supply, `notebook_edit`).
+- **HTTP tools** (`http_tool`).
+- **The unified client**: OpenAI and Anthropic styles, concurrent tool calls with
+  `ToolContext.call_id`, hooks, streaming, retries with Retry-After and `on_error`,
+  conversation stores (memory and file), metrics, `request_params` / `body_transform`, prompt
+  cache, tool tiers, `list_models`, in-process models, Usage cache tokens, and the API-key-by-host
+  rule from 0.22.0 (a custom `base_url` needs `api_key` or `api_key_env`).
+- **§10 suspension**: `wait_for` / `wait_for_ctx`, or a durable `status: "pending"` result.
+- **MCP**: non-text content now becomes `ToolResult.parts` (images were dropped before),
+  annotation hints, `resource_tools()`, `load_mcp_with(on_server)`, and a legacy-SSE fallback
+  for remote servers (rmcp has no SSE client, so this one is in-house).
+- **ACP host hooks** (Go's 0.22.0 set): `on_update`, a reject answer from `on_permission`, a
+  cancellable `generate`, `generate_stream`, and `acp_generate` / `acp_generate_stream` to use
+  an ACP agent as the client's model.
+- **A2A agents, both directions, and the MCP server profile** (SPEC §7A–§7C, ported from Go
+  with its tests mirrored). Outbound: `ToolkitOptions.agents`, a top-level `agents` config
+  block, or `Toolkit::add_agent` turn each skill on a remote Agent Card into a `source: "a2a"`
+  tool that sends `SendMessage` and polls `GetTask`; a cancel, even mid-request, ends it as
+  `A2A task <id> canceled`, and an unreachable agent is skipped instead of failing the toolkit.
+  Inbound: `Toolkit::serve(addr, ServeOptions { client, a2a, on_task, mcp, on_call })` publishes
+  an Agent Card built from the toolkit's skills (same bytes and key order as Go) and answers
+  JSON-RPC over the client loop, with `contextId` remembered through `client.ask`, a suspended
+  run reported as `input-required`, and memory / `file:<dir>` / custom `TaskStore`s. With `mcp`
+  (or a `mcpServer` block) the same server is a stateless streamable-HTTP MCP server at
+  `POST /mcp` exposing every tool, §1B parts included. The server side is the new `serve` cargo
+  feature (hyper + rmcp's server, on by default); `--no-default-features` builds without it.
+  Rust only: a served Task with no `client` configured fails with a message saying so (Go's
+  fulfilment would crash and leave the Task `working`).
+- **`translate` (§11)**: `Client::translate` / `translate_ctx`, one provider call with no loop,
+  including the OpenAI → Anthropic inbound conversion and non-text parts. On `timeout_ms` it
+  returns a `Transport("translate timeout after Nms")` error where Go returns its context error.
+- **The classifier (§8B)**: `create_classifier` with the `systemone`, `llm`, `custom` and `static`
+  styles, the OpenRouter backend preset, client-side limits, the degenerate-criteria warning
+  (`MetricEvent` gains `question` / `warning`), `near_uniform`, `evaluate_batch`, and the
+  byte-identical canonical request. All seven shared `examples/judge/` fixtures pass, hashes included.
+- **Judge adapters and batteries**: `ask` / `gate` / `Policy` / `Tape`, and all eight batteries
+  including the opt-in `ModelRouter`, with their hooks, against the shared battery fixtures.
+- **Agents (§7D–§7F)**: `toolnexus::agents` — the runtime with the six verbs, the three gates,
+  hierarchical budgets with a named `limit` on every stop, nearest-interpreter escalation and the
+  runtime-level `wait_for`, durable pending + `resume` with task reattachment; `Agent` / `Spec`
+  with team wiring, `run`, `as_tool` / `as_tool_with` (the child runs under the calling turn's
+  cancellation, hooks gate and ask bridge); the `Loop` door with the completion gate and
+  guardrails; personas (`from_dir`, `compose_soul`, `memory_tool`, `start_agent`); and
+  `compactor` with 0.22.0's `on_compact` / `CompactInfo`. Ported from golang/agents with its tests
+  (92, hermetic); the trace strings and the recorded unset-run golden are byte-identical to Go.
+- **Relay tools and durable resume**: `relay_tool`, `run_with_answer` / `ask_with_answer`,
+  `answer_output` / `answer_declined` / `relay_answer`, and the relay-vs-builtin collision guard.
+- **Relay tests from Go** now mirrored too: streaming relay, `wait_for` parked across turns, and a
+  run deadline breaking the parking. Rust differs from Go there, on purpose: `timeout_ms` wraps
+  the whole run, so a parked `wait_for` is dropped at the deadline (Go lets it finish and fails at
+  the next step). Either way a park outliving `timeout_ms` fails the run. `start_agent`'s `stop`
+  now waits for a beat that is still running, as Go's does.
+- **§1B edge constructors**: `ContentPart::text`, `from_path`, `from_bytes`, `from_reader`,
+  `from_url` (a `data:` URL decodes to the same part as its bytes), with a typed `PartError`.
+- **The post-0.22 fixes apply to Rust as well**: `RunResult.tool_calls` names the real tool
+  behind `call_tool` with its inner args (SPEC §4C), and the Anthropic last-tool `cache_control`
+  breakpoint is checked against the request body that is actually sent.
+- **MCP elicitation**: `ToolkitOptions.wait_for` (and `McpLoadOptions.wait_for`) bridges a
+  server's `elicitation/create` onto §10, form → `input`, URL → `authorization`. Without it the
+  capability is not advertised.
+- Runnable examples (`cargo run --example basic|agent|native_http|streaming|pending|acp|agents|prompt_cache`), all run in CI.
+- Release: a `crates` leg in `release.yml`, gated by `ENABLE_CRATES` and using the
+  `CARGO_REGISTRY_TOKEN` secret in `prod` (a crate's first publish cannot use Trusted Publishing;
+  switch once it exists). It skips a version that is already on crates.io. `preflight` and the
+  readiness script now check `rust/Cargo.toml`.
+- Conformance: rust is held to tier `full`. All 22 client, 12 toolkit and 17 classifier options
+  are present, with no permitted absences and no `unported` entries left.
+- Docs: every Rust example on the API reference and cookbook pages is now a complete program that
+  CI compiles and runs (218 of them, through a new Rust runner in `site/tests/run-all.sh`), and Rust
+  has the 0.22.0 pages (API key by host, prompt cache, tool tiers, list_models, ACP hooks,
+  `resource_tools`, background shells) plus shipped pages for translate, the classifier and attach.
+
+**Not done in Rust** (`openspec/changes/add-rust-port`): a Gemini client style (Gemini is a
+schema adapter only, as in Go). The Windows code paths compile but have not been run. A few io
+and network error strings come from Rust's libraries and differ from Go's wording; the
+conformance outputs (skill tool, prompt, tool names and schemas) are byte-identical. Found while
+writing the docs, and true of Go as well: on the durable resume path an `answer_declined(id,
+reason)` loses its reason (the slot reads "no result supplied on resume"); the inline `wait_for`
+path reports it correctly. Not fixed here, since it is a cross-port change.
 **Docs and examples for 0.22.0, in all seven ports.** The 0.22.0 features had code but no
 reference pages, so a reader could only learn them from this changelog. Now each port's API
 reference has pages for API key by host, `promptCache`, `toolTiers`, `listModels`, MCP

@@ -1,0 +1,243 @@
+---
+title: "serve — expose your toolkit as an A2A agent"
+description: "Publish an Agent Card and answer JSON-RPC over the client loop — your toolkit becomes someone else's remote agent. — Rust."
+sidebar:
+  label: "serve / a2a"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7B</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/rust/src/serve.rs">rust/src/serve.rs</a>
+</p>
+
+```rust
+impl Toolkit {
+    pub async fn serve(&self, addr: &str, opts: ServeOptions) -> Result<ServeHandle, ServeError>
+}
+pub struct ServeOptions {
+    pub client: Option<Client>,        // fulfils Tasks through its run loop
+    pub a2a: Option<A2aConfig>,        // A2A profile; None ⇒ the config's `a2a` block, else no A2A routes
+    pub on_task: Option<OnTask>,       // fires on every terminal Task state
+    pub mcp: Option<McpServeConfig>,   // MCP profile at POST /mcp; None ⇒ the `mcpServer` block
+    pub on_call: Option<OnCall>,       // fires per inbound MCP tools/call
+}
+// feature "serve" (on by default)
+```
+
+`serve` stands up an HTTP server (hyper) that exposes this toolkit's **skills** (never raw tools)
+as an A2A agent: `GET /.well-known/agent-card.json` publishes the card, and a JSON-RPC `POST`
+answers `SendMessage` (submit a Task, fulfil it in the background with `client.run`) and `GetTask`
+(poll). A message's `contextId` keys the conversation through `client.ask`, so a peer's turns are
+remembered. A suspended run (§10) surfaces as `input-required` with the prompt, never `completed`.
+
+## When to use it
+
+When your toolkit should be callable by other agents (any A2A peer, including another toolnexus
+port's outbound client), not just by your own loop. Bind `127.0.0.1:0` for an ephemeral port; the
+handle's `url` reports it.
+
+## Why this and not the alternative
+
+Wrapping `client.run` in your own axum handler gives you an endpoint, not an A2A agent: no card, no
+Task lifecycle, no store. `serve` speaks the same wire subset as every other port.
+
+<Aside type="tip" title="Only want MCP clients?">
+`a2a` and `mcp` are independent. Set only `mcp` to expose tools instead of skills. Set neither and every request is a 404. Dropping the `ServeHandle` stops the server, so keep it alive.
+</Aside>
+
+## Examples
+
+The fulfilling `client` in these examples is the in-process model seam
+(`create_in_process_client`), so they run with no key and no network beyond `127.0.0.1`. In
+production it is an ordinary `create_client(ClientOptions { .. })`.
+
+### 1. The smallest useful call — publish the card
+
+```rust test
+use std::collections::BTreeMap;
+use std::sync::Arc;
+use std::time::Duration;
+
+use toolnexus::a2a::fetch_card;
+use toolnexus::client::{GenerateFn, InProcessOptions, InProcessResponse, create_in_process_client};
+use toolnexus::serve::{A2aConfig, CARD_PATH, ServeOptions};
+use toolnexus::{BuiltinsConfig, ToolkitOptions, create_toolkit};
+
+fn reply(text: &'static str) -> GenerateFn {
+    Arc::new(move |_req| Box::pin(async move { Ok(InProcessResponse { content: text.into(), ..Default::default() }) }))
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let tk = create_toolkit(ToolkitOptions { builtins: Some(BuiltinsConfig::off()), ..Default::default() }).await?;
+    let client = create_in_process_client(InProcessOptions { generate: Some(reply("hi there")), ..Default::default() });
+
+    let handle = tk
+        .serve("127.0.0.1:0", ServeOptions {
+            client: Some(client),
+            a2a: Some(A2aConfig { name: "greeter-desk".into(), ..Default::default() }),
+            ..Default::default()
+        })
+        .await?;
+
+    let card = fetch_card(&format!("{}{CARD_PATH}", handle.url), &BTreeMap::new(), Duration::from_secs(5)).await?;
+    assert_eq!(card.name, "greeter-desk");
+    assert_eq!(card.protocol_version, "0.3.0");
+    handle.stop();
+    println!("ok: card published for {}", card.name);
+    Ok(())
+}
+```
+
+### 2. The realistic case — two toolkits, a real A2A round trip
+
+Toolkit A is served; toolkit B is a completely separate `Toolkit` that resolves toolkit A's card
+and calls it through this port's own outbound A2A client (`ToolkitOptions.agents`) — the same
+shape a real external A2A peer would use.
+
+```rust test
+use std::sync::Arc;
+
+use serde_json::json;
+use toolnexus::a2a::Agent;
+use toolnexus::client::{GenerateFn, InProcessOptions, InProcessResponse, create_in_process_client};
+use toolnexus::serve::{A2aConfig, CARD_PATH, ServeOptions};
+use toolnexus::{BuiltinsConfig, ToolContext, ToolkitOptions, create_toolkit};
+
+fn reply(text: &'static str) -> GenerateFn {
+    Arc::new(move |_req| Box::pin(async move { Ok(InProcessResponse { content: text.into(), ..Default::default() }) }))
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let skills_dir = std::env::temp_dir().join(format!("toolnexus-docs-serve-a2a-2-{}", std::process::id()));
+    std::fs::create_dir_all(skills_dir.join("answer"))?;
+    std::fs::write(
+        skills_dir.join("answer/SKILL.md"),
+        "---\nname: answer\ndescription: answers a question\n---\n\nAnswer it.\n",
+    )?;
+
+    // Toolkit A: served over A2A with one skill.
+    let served = create_toolkit(ToolkitOptions {
+        builtins: Some(BuiltinsConfig::off()),
+        skills_dir: vec![skills_dir.clone()],
+        ..Default::default()
+    })
+    .await?;
+    let client = create_in_process_client(InProcessOptions { generate: Some(reply("42")), ..Default::default() });
+    let handle = served
+        .serve("127.0.0.1:0", ServeOptions {
+            client: Some(client),
+            a2a: Some(A2aConfig { name: "answer-desk".into(), ..Default::default() }),
+            ..Default::default()
+        })
+        .await?;
+
+    // Toolkit B: a fresh, unrelated toolkit that points AT toolkit A over HTTP.
+    let caller = create_toolkit(ToolkitOptions {
+        builtins: Some(BuiltinsConfig::off()),
+        agents: vec![Agent { card: format!("{}{CARD_PATH}", handle.url), poll_every_ms: 5, ..Default::default() }],
+        ..Default::default()
+    })
+    .await?;
+
+    let res = caller.execute("answer-desk_answer", json!({"task": "what is 6*7?"}), ToolContext::default()).await;
+    assert!(!res.is_error, "got {:?}", res.output);
+    assert_eq!(res.output, "42");
+    std::fs::remove_dir_all(&skills_dir)?;
+    println!("ok: {} (via a real local A2A round trip)", res.output);
+    Ok(())
+}
+```
+
+### 3. The full surface — a served skill, `on_task`, and a real skill answer
+
+```rust test
+use std::sync::{Arc, Mutex};
+
+use serde_json::json;
+use toolnexus::a2a::{Agent, agent_tools};
+use toolnexus::client::{GenerateFn, InProcessOptions, InProcessResponse, create_in_process_client};
+use toolnexus::serve::{A2aConfig, A2aProvider, CARD_PATH, ServeOptions};
+use toolnexus::{BuiltinsConfig, ToolContext, ToolkitOptions, create_toolkit};
+
+fn reply(text: &'static str) -> GenerateFn {
+    Arc::new(move |_req| Box::pin(async move { Ok(InProcessResponse { content: text.into(), ..Default::default() }) }))
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let skills_dir = std::env::temp_dir().join(format!("toolnexus-docs-serve-a2a-3-{}", std::process::id()));
+    std::fs::create_dir_all(skills_dir.join("hello-world"))?;
+    std::fs::write(
+        skills_dir.join("hello-world/SKILL.md"),
+        "---\nname: hello-world\ndescription: says hello\n---\n\nSay hello.\n",
+    )?;
+    let tk = create_toolkit(ToolkitOptions {
+        builtins: Some(BuiltinsConfig::off()),
+        skills_dir: vec![skills_dir.clone()],
+        ..Default::default()
+    })
+    .await?;
+    let client = create_in_process_client(InProcessOptions { generate: Some(reply("TRANSCRIBED")), ..Default::default() });
+
+    let states: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = states.clone();
+    let handle = tk
+        .serve("127.0.0.1:0", ServeOptions {
+            client: Some(client),
+            a2a: Some(A2aConfig {
+                name: "video-desk".into(),
+                skills: Some(vec!["hello-world".into()]),
+                provider: Some(A2aProvider { organization: "acme".into(), url: "https://acme.example".into() }),
+                ..Default::default()
+            }),
+            on_task: Some(Arc::new(move |ev| sink.lock().unwrap().push(ev.state))),
+            ..Default::default()
+        })
+        .await?;
+
+    let tools = agent_tools(&Agent { card: format!("{}{CARD_PATH}", handle.url), poll_every_ms: 5, ..Default::default() }).await?;
+    let hello = tools
+        .iter()
+        .find(|t| t.name == "video-desk_hello-world")
+        .expect("the served skill resolves as video-desk_hello-world");
+
+    let res = hello.call(json!({"task": "do it"}), ToolContext::default()).await;
+    assert!(!res.is_error, "got {:?}", res.output);
+    assert_eq!(res.output, "TRANSCRIBED");
+
+    // on_task fires on the terminal state; give the background fulfilment a moment to report.
+    for _ in 0..100 {
+        if !states.lock().unwrap().is_empty() { break; }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    let state = states.lock().unwrap().first().cloned().unwrap_or_default();
+    assert_eq!(state, "completed");
+    std::fs::remove_dir_all(&skills_dir)?;
+    println!("ok: {} on_task state = {state}", res.output);
+    Ok(())
+}
+```
+
+## ServeOptions fields
+
+| Field | Type | What it does |
+|---|---|---|
+| `client` | `Option<Client>` | Fulfils each Task by running the prompt through this client's loop (`ask` when the message has a `contextId`). |
+| `a2a` | `Option<A2aConfig>` | `name`, `description`, `version`, `provider`, `skills` filter, `store`. `None` ⇒ the toolkit's `a2a` config block, else no A2A routes. |
+| `on_task` | `Option<OnTask>` | Fires with `OnTaskEvent { id, skill, task, result, state }` on every terminal Task state. |
+| `mcp` | `Option<McpServeConfig>` | The MCP profile at `POST /mcp` — see [`exposed_mcp_tools`](/api/rust/serve/mcp/). |
+| `on_call` | `Option<OnCall>` | Fires per inbound MCP `tools/call`. |
+
+JSON-RPC errors: unparseable body `-32700 Parse error`, unknown method `-32601 Method not found: <m>`,
+unknown task `-32001 Task not found: <id>`. A run with no `client` configured fails its Task with a
+message saying so (Rust only: Go would crash the fulfilment goroutine and leave the Task `working`).
+
+## See also
+
+- [`build_agent_card`](/api/rust/serve/agent-card/) — the card a served toolkit publishes.
+- [`TaskStore`](/api/rust/serve/task-store/) — where served Tasks live.
+- [`exposed_mcp_tools`](/api/rust/serve/mcp/) — the inbound MCP profile at `POST /mcp`.
+- [`Agent`](/api/rust/agents/agent/) — the outbound descriptor: card URL, headers, budget.

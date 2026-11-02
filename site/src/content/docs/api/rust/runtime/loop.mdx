@@ -1,0 +1,271 @@
+---
+title: "The other door on an agent — run it under a harness with guardrails, a soul, and a budget"
+description: "Agent.Loop(...).Run drives the agent under a Guardrail policy that vets every tool call and a Completion check that decides when the task is done — the gated door beside the plain Agent.Run, with unsupported spec fields (tools, team, waitFor, onMetric) named explicitly rather than silently dropped. — Rust."
+sidebar:
+  label: "runtime / loop"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7D</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/rust/src/agents/agent_loop.rs">rust/src/agents/agent_loop.rs</a>
+</p>
+
+```rust
+impl Agent { pub fn loop_(&self, opts: ClientOptions, tk: Toolkit) -> Loop }
+impl Loop {
+    pub async fn run(&mut self, cancel: CancellationToken, prompt: &str, opts: RunOpts)
+        -> Result<Outcome, ClientError>
+    pub fn unsupported(&self) -> Vec<String>
+    pub fn status(&self) -> &str
+    pub fn turns(&self) -> usize
+}
+pub fn loop_unsupported(sp: &Spec) -> Vec<String>       // "tools" | "team" | "waitFor" | "onMetric"
+pub fn all_todos_done(r: &RunResult) -> (bool, String)  // built-in Completion verifier
+pub struct Completion { pub verify: Option<VerifyFn>, pub max_attempts: usize }
+pub type Guardrail = Arc<dyn Fn(&BeforeToolEvent) -> String + Send + Sync>;
+```
+
+The other door: drive an agent over a client and toolkit YOU built. The Spec is honoured — the soul
+is the default system prompt (a caller `system_prompt` wins), guardrails compile to one
+first-deny-wins `before_tool`, the Spec model and `budget.max_turns` are defaults, and
+`RunOpts.model` overrides the model for one call. `Completion` re-runs with the failure reason
+until `verify` passes or `max_attempts` is spent, then stops as `incomplete` with
+`limit: "completion"`. A suspension is never re-judged by the gate. Spec fields the Loop cannot
+carry are reported by `unsupported()`, not dropped silently.
+
+## When to use it
+
+Reach for `agent.loop_(opts, tk)` when you already have a `ClientOptions` / `Toolkit` pair built by
+hand — not through the [`Runtime`](/api/rust/runtime/runtime/) registry — and want that same
+`Agent`'s `guardrails` and `completion` gate enforced over it, without standing up `spawn` / `wake` /
+`wait`. It is the natural fit for a single top-level agent with no delegation: one conversation, one
+completion gate, driven turn by turn. (`loop` is a Rust keyword, hence the trailing underscore.)
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Need delegation, suspension, or a per-agent metric sink? Use the Runtime instead">
+`Loop` is deliberately a driver over a toolkit and client options **the caller built**, so four
+`Spec` fields have nowhere to attach: no tool view to scope (`tools`), no task tool to delegate
+through (`team`), no handle to suspend on (`wait_for`), and no per-agent sink the caller did not
+already wire in (`on_metric`). `loop_unsupported(&spec)` reports exactly these four by their
+canonical names (`tools`, `team`, `waitFor`, `onMetric`) rather than silently dropping them — call
+it as a pre-flight, and if it returns anything, drive that agent through
+[`Runtime`](/api/rust/runtime/runtime/) (`Agent::run` or `spawn`/`wake`/`wait`) instead.
+</Aside>
+
+<Aside type="note" title="Rust idiom: (bool, String), not a named Verdict type">
+`VerifyFn` returns the plain tuple `(bool, String)` — `(ok, reason)`. `Completion` itself IS a
+named struct, because it also carries `max_attempts`; `Completion::new(verify, max_attempts)` builds
+one from a closure.
+</Aside>
+
+## Examples
+
+All three point `ClientOptions.base_url` at a loopback stub on `127.0.0.1` — no real network
+call, no real API key. (`Loop` takes `ClientOptions`, so it always drives the HTTP wire.)
+
+### 1. The smallest useful call — no Completion, one attempt, done
+
+```rust test
+use serde_json::{Value, json};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
+use tokio_util::sync::CancellationToken;
+use toolnexus::agents::{self, RunOpts, Spec};
+use toolnexus::client::{ClientOptions, Style};
+use toolnexus::{BuiltinsConfig, ToolkitOptions, create_toolkit};
+
+/// A loopback OpenAI-shaped stub: the n-th request gets replies[n] (the last repeats).
+async fn stub(replies: Vec<Value>) -> String {
+    let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", l.local_addr().unwrap());
+    tokio::spawn(async move {
+        for i in 0usize.. {
+            let Ok((mut s, _)) = l.accept().await else { return };
+            let (mut buf, mut chunk) = (Vec::new(), [0u8; 4096]);
+            loop {
+                let n = s.read(&mut chunk).await.unwrap_or(0);
+                if n == 0 { break; }
+                buf.extend_from_slice(&chunk[..n]);
+                let t = String::from_utf8_lossy(&buf).to_string();
+                if let Some(h) = t.find("\r\n\r\n") {
+                    let len = t[..h].lines().find_map(|l| l.to_ascii_lowercase()
+                        .strip_prefix("content-length:").map(|v| v.trim().parse::<usize>().unwrap_or(0)))
+                        .unwrap_or(0);
+                    if buf.len() >= h + 4 + len { break; }
+                }
+            }
+            let msg = replies[i.min(replies.len() - 1)].clone();
+            let b = json!({"choices": [{"message": msg}],
+                "usage": {"prompt_tokens": 5, "completion_tokens": 5, "total_tokens": 10}}).to_string();
+            let resp = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{b}", b.len());
+            let _ = s.write_all(resp.as_bytes()).await;
+        }
+    });
+    url
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let url = stub(vec![json!({"role": "assistant", "content": "hi there"})]).await;
+    let tk = create_toolkit(ToolkitOptions {
+        builtins: Some(BuiltinsConfig { enabled: Some(false), ..Default::default() }),
+        ..Default::default()
+    })
+    .await?;
+
+    let a = agents::new("plain", Spec { does: "answers".into(), soul: "be brief".into(), ..Default::default() });
+    let opts = ClientOptions { base_url: url, style: Style::OpenAI, model: "m".into(), api_key: "test-key".into(), ..Default::default() };
+    let mut l = a.loop_(opts, tk);
+
+    let out = l.run(CancellationToken::new(), "hello", RunOpts::default()).await?;
+    // Absent completion ⇒ byte-identical to no gate at all: one attempt, no stopped_by.
+    assert_eq!((out.status.as_str(), out.attempts, out.stopped_by.as_str()), ("done", 1, ""));
+    assert_eq!(l.status(), "idle");
+    println!("ok: {} {}", out.status, out.text);
+    Ok(())
+}
+```
+
+### 2. The realistic case — a Completion gate blocks an early claim of "done", then passes
+
+```rust test
+use serde_json::{Value, json};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
+use tokio_util::sync::CancellationToken;
+use toolnexus::agents::{self, Completion, RunOpts, Spec};
+use toolnexus::client::{ClientOptions, Style};
+use toolnexus::{BuiltinsConfig, ToolkitOptions, create_toolkit};
+
+/// A loopback OpenAI-shaped stub: the n-th request gets replies[n] (the last repeats).
+async fn stub(replies: Vec<Value>) -> String {
+    let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", l.local_addr().unwrap());
+    tokio::spawn(async move {
+        for i in 0usize.. {
+            let Ok((mut s, _)) = l.accept().await else { return };
+            let (mut buf, mut chunk) = (Vec::new(), [0u8; 4096]);
+            loop {
+                let n = s.read(&mut chunk).await.unwrap_or(0);
+                if n == 0 { break; }
+                buf.extend_from_slice(&chunk[..n]);
+                let t = String::from_utf8_lossy(&buf).to_string();
+                if let Some(h) = t.find("\r\n\r\n") {
+                    let len = t[..h].lines().find_map(|l| l.to_ascii_lowercase()
+                        .strip_prefix("content-length:").map(|v| v.trim().parse::<usize>().unwrap_or(0)))
+                        .unwrap_or(0);
+                    if buf.len() >= h + 4 + len { break; }
+                }
+            }
+            let msg = replies[i.min(replies.len() - 1)].clone();
+            let b = json!({"choices": [{"message": msg}],
+                "usage": {"prompt_tokens": 5, "completion_tokens": 5, "total_tokens": 10}}).to_string();
+            let resp = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{b}", b.len());
+            let _ = s.write_all(resp.as_bytes()).await;
+        }
+    });
+    url
+}
+
+fn call_todo(todos: Value) -> Value {
+    let args = json!({"todos": todos}).to_string();
+    json!({"role": "assistant", "content": null, "tool_calls": [
+        {"id": "t1", "type": "function", "function": {"name": "todowrite", "arguments": args}}]})
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let todo = |id: &str, text: &str, done: bool| json!({"id": id, "text": text, "completed": done});
+    // attempt 1: claims done with an open item ⇒ gate rejects; attempt 2: all checked ⇒ passes.
+    let url = stub(vec![
+        call_todo(json!([todo("1", "draft", true), todo("2", "proofread", false)])),
+        json!({"role": "assistant", "content": "claiming done"}),
+        call_todo(json!([todo("1", "draft", true), todo("2", "proofread", true)])),
+        json!({"role": "assistant", "content": "really done"}),
+    ])
+    .await;
+
+    // Only the todowrite builtin: every other builtin switched off by name.
+    let mut tools = std::collections::BTreeMap::new();
+    for n in ["bash", "read", "write", "edit", "glob", "grep", "webfetch", "apply_patch", "question"] {
+        tools.insert(n.to_string(), false);
+    }
+    let tk = create_toolkit(ToolkitOptions {
+        builtins: Some(BuiltinsConfig { tools, ..Default::default() }),
+        ..Default::default()
+    })
+    .await?;
+
+    let a = agents::new("worker", Spec {
+        does: "works".into(),
+        completion: Some(Completion::new(agents::all_todos_done, 3)),
+        ..Default::default()
+    });
+    let opts = ClientOptions { base_url: url, style: Style::OpenAI, model: "m".into(), api_key: "test-key".into(), ..Default::default() };
+    let out = a.loop_(opts, tk).run(CancellationToken::new(), "do it", RunOpts::default()).await?;
+
+    assert_eq!(out.status, "done", "stopped_by={}", out.stopped_by);
+    assert_eq!(out.attempts, 2, "the gate should force a second attempt");
+    println!("ok: done after {} attempt(s)", out.attempts);
+    Ok(())
+}
+```
+
+### 3. The full surface — `loop_unsupported` names the four fields this door cannot honour
+
+```rust test
+use std::sync::Arc;
+use toolnexus::agents::{self, Spec};
+use toolnexus::client::{ClientOptions, Style};
+use toolnexus::{Answer, BuiltinsConfig, ToolkitOptions, create_toolkit, define_tool};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let child = agents::new("helper", Spec { does: "helps".into(), ..Default::default() });
+
+    // A Spec that declares tools, team, wait_for and on_metric — each needs the Runtime
+    // registry to be honoured; Loop cannot carry them.
+    let sp = Spec {
+        does: "coordinates".into(),
+        tools: vec![define_tool("extra", "d", None, |_, _| async { Ok::<_, String>("x".into()) })],
+        team: vec![child],
+        wait_for: Some(Arc::new(|_req| Box::pin(async { Ok(Answer::default()) }))),
+        on_metric: Some(Arc::new(|_ev| {})),
+        ..Default::default()
+    };
+
+    let missing = agents::loop_unsupported(&sp);
+    assert_eq!(missing, ["tools", "team", "waitFor", "onMetric"]); // stable order
+
+    // A live Loop's own unsupported() reports the same thing.
+    let tk = create_toolkit(ToolkitOptions {
+        builtins: Some(BuiltinsConfig { enabled: Some(false), ..Default::default() }),
+        ..Default::default()
+    })
+    .await?;
+    let opts = ClientOptions { base_url: "http://127.0.0.1:9".into(), style: Style::OpenAI, model: "m".into(), api_key: "test-key".into(), ..Default::default() };
+    let l = agents::new("coordinator", sp).loop_(opts, tk);
+    assert_eq!(l.unsupported().len(), 4);
+    println!("ok: unsupported through this door: {missing:?}");
+    Ok(())
+}
+```
+
+## Signature
+
+| Symbol | What it is |
+|---|---|
+| `Agent::loop_(opts, tk)` | Opens a live `Loop` for this agent over caller-built `ClientOptions` / `Toolkit`. |
+| `Loop::run(cancel, prompt, RunOpts)` | Runs one request through the gate; `RunOpts.model` overrides the agent's model for this call only. |
+| `Loop::status()` / `turns()` / `unsupported()` | Observed, never set by the caller. |
+| `Guardrail` | Policy check — `""` or `"allow"` permits, anything else denies with that reason. Composed first-deny-wins, ahead of any `Hooks.before_tool`. |
+| `Completion { verify, max_attempts }` | The gate: `verify` reports `(ok, reason)`; `max_attempts` bounds the retries a failing gate can force. |
+| `all_todos_done` | The shipped structural verifier — reads the `todowrite` builtin's last call; no plan declared ⇒ passes. |
+| `loop_unsupported(&spec)` | The four Spec fields (`tools`, `team`, `waitFor`, `onMetric`) this door cannot carry, in stable order. |
+
+## See also
+
+- [Agent](/api/rust/runtime/agent/) · [Runtime](/api/rust/runtime/runtime/) · [vocabulary](/api/rust/runtime/vocabulary/)
+- [Harness (narrative)](/harness/) — how `harness` / `Loop` / `Completion` fit together across ports.

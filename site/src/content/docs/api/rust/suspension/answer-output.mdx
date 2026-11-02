@@ -1,0 +1,164 @@
+---
+title: "Build the Answer a human's plain-text reply resumes a suspended run with"
+description: "Wraps a human's typed string reply into the Answer a suspended run resumes with — the success counterpart to answerDeclined. — Rust."
+sidebar:
+  label: "suspension / answer-output"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §10</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/rust/src/relay.rs">rust/src/relay.rs</a>
+</p>
+
+```rust
+pub fn answer_output(id: impl Into<String>, output: impl Into<String>) -> Answer   // toolnexus::relay
+```
+
+The Answer for a single outstanding call: `{ id, ok: true, data: { "output": <output> } }` — the
+one key the engine reads for a relay result and for a durable resume. For several relayed calls,
+or to mark the host's tool as failed, use `relay_answer(id, &[RelayResult { .. }])`.
+
+## When to use it
+
+Reach for `answer_output` whenever you are the host resolving a suspended relayed tool call
+(kind `"tool_call"`) with one result — inline from `wait_for`, or durably through
+`Client::run_with_answer` / `ask_with_answer`. It is the success half of the pair; use
+[`answer_declined`](/api/rust/suspension/answer-declined/) when nobody produced a result.
+
+## Why this and not the alternative
+
+`answer_output` covers the common case: exactly one relayed call parked the turn. When a single
+turn relays several calls, use `relay_answer(id, &[RelayResult { .. }])`, which is keyed by each
+call's own id rather than the single implicit slot `answer_output` fills. Building the `Answer` by
+hand risks the wrong key — and an `ok: true` answer the engine cannot read is an error, never a
+silently fabricated result (example 3).
+
+## Examples
+
+### 1. The smallest useful call — build the Answer and inspect its shape
+
+```rust test
+use serde_json::json;
+use toolnexus::relay::{RELAY_OUTPUT_KEY, answer_output};
+
+fn main() {
+    let ans = answer_output("req-1", "staging");
+    assert_eq!(ans.id, "req-1");
+    assert!(ans.ok);
+    assert!(ans.reason.is_empty());
+    let out = &ans.data.as_ref().expect("data")[RELAY_OUTPUT_KEY];
+    assert_eq!(out, &json!("staging"), "output rides under {RELAY_OUTPUT_KEY:?}");
+    println!("ok: {} {}", ans.id, out);
+}
+```
+
+### 2. The realistic case — halt on a relayed tool call, then resume with the host's real output
+
+```rust test
+use std::sync::Arc;
+
+use serde_json::json;
+use tokio_util::sync::CancellationToken;
+use toolnexus::client::{
+    GenerateFn, InProcessOptions, InProcessRequest, InProcessResponse, InProcessToolCall,
+    create_in_process_client,
+};
+use toolnexus::relay::{answer_output, relay_tool};
+use toolnexus::{BuiltinsConfig, ToolkitOptions, create_toolkit};
+
+fn model() -> GenerateFn {
+    Arc::new(|req: InProcessRequest| {
+        Box::pin(async move {
+            let tool = req.messages.iter().rev().find(|m| m["role"] == "tool");
+            Ok(match tool.and_then(|m| m["content"].as_str()) {
+                Some(out) => InProcessResponse { content: format!("it is {out}"), ..Default::default() },
+                None => InProcessResponse {
+                    tool_calls: vec![InProcessToolCall { id: "c1".into(), name: "weather".into(), arguments: json!({"city": "Chennai"}) }],
+                    ..Default::default()
+                },
+            })
+        })
+    })
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let tk = create_toolkit(ToolkitOptions {
+        builtins: Some(BuiltinsConfig::off()),
+        extra_tools: vec![relay_tool("weather", "look up the weather", None)],
+        ..Default::default()
+    })
+    .await?;
+    let client = create_in_process_client(InProcessOptions { generate: Some(model()), ..Default::default() });
+
+    let halted = client.run("what's the weather?", &tk).await?;
+    assert_eq!(halted.status, "pending", "expected a durable halt");
+    let req = halted.pending.clone().unwrap();
+
+    // The host ran the real weather lookup itself; hand its output back.
+    let resumed = client
+        .run_with_answer(CancellationToken::new(), &tk, halted.messages, &req, &answer_output(&req.id, "sunny, 24C"))
+        .await?;
+    assert_eq!(resumed.status, "done");
+    assert_eq!(resumed.text, "it is sunny, 24C");
+    println!("ok: {}", resumed.text);
+    Ok(())
+}
+```
+
+### 3. The full surface — a malformed hand-built Answer errors instead of fabricating a result
+
+```rust test
+use std::sync::Arc;
+
+use serde_json::{Map, json};
+use tokio_util::sync::CancellationToken;
+use toolnexus::client::{
+    GenerateFn, InProcessOptions, InProcessRequest, InProcessResponse, InProcessToolCall,
+    create_in_process_client,
+};
+use toolnexus::relay::relay_tool;
+use toolnexus::{Answer, BuiltinsConfig, ToolkitOptions, create_toolkit};
+
+fn model() -> GenerateFn {
+    Arc::new(|_req: InProcessRequest| {
+        Box::pin(async move {
+            Ok(InProcessResponse {
+                tool_calls: vec![InProcessToolCall { id: "c1".into(), name: "weather".into(), arguments: json!({}) }],
+                ..Default::default()
+            })
+        })
+    })
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let tk = create_toolkit(ToolkitOptions {
+        builtins: Some(BuiltinsConfig::off()),
+        extra_tools: vec![relay_tool("weather", "look up the weather", None)],
+        ..Default::default()
+    })
+    .await?;
+    let client = create_in_process_client(InProcessOptions { generate: Some(model()), ..Default::default() });
+
+    let halted = client.run("what's the weather?", &tk).await?;
+    let req = halted.pending.clone().unwrap();
+
+    // Hand-built, wrong key ("value" instead of "output") — NOT what answer_output builds.
+    let mut data = Map::new();
+    data.insert("value".into(), json!("sunny"));
+    let bad = Answer { id: req.id.clone(), ok: true, data: Some(data), ..Default::default() };
+    let err = client
+        .run_with_answer(CancellationToken::new(), &tk, halted.messages, &req, &bad)
+        .await
+        .expect_err("a malformed ok:true answer must error to the host, never resume silently");
+    assert!(err.to_string().contains("cannot resume"), "got {err}");
+    println!("ok: rejected malformed answer: {}", &err.to_string()[..60]);
+    Ok(())
+}
+```
+
+## See also
+
+- [answer_declined](/api/rust/suspension/answer-declined/) · [relay](/api/rust/suspension/relay/)

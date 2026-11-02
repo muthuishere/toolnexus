@@ -1,0 +1,159 @@
+---
+title: "The closed status and stop-limit vocabularies every task/run result uses"
+description: "The canonical, byte-identical-across-ports string constants a host branches on: task statuses, run statuses, and the nine stop-limit reasons a task can end on, plus the helper that canonicalizes a limit name. — Rust."
+sidebar:
+  label: "runtime / vocabulary"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7D</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/rust/src/agents/mod.rs">rust/src/agents/mod.rs</a>
+</p>
+
+```rust
+// toolnexus::agents — the §7D TaskResult.status set (seven values)
+TASK_STATUS_DONE, TASK_STATUS_PENDING, TASK_STATUS_INCOMPLETE, TASK_STATUS_INTERRUPTED,
+TASK_STATUS_CLOSED, TASK_STATUS_TIMEOUT, TASK_STATUS_ERROR
+// TaskResult.limit — the closed stop vocabulary
+LIMIT_MAX_TURNS, LIMIT_MAX_TOKENS, LIMIT_MAX_TOOL_CALLS, LIMIT_MAX_WALL_MS, LIMIT_MAX_CHILDREN,
+LIMIT_MAX_CONCURRENT, LIMIT_MAX_DEPTH, LIMIT_COMPLETION, LIMIT_TIMEOUT
+```
+
+The strings a host branches on, identical in all ports. The §7D agent set is not the §8 client's
+(`RunResult.status` is `done | pending | incomplete`): `"timeout"` belongs only to `wait(handle,
+timeout)` — a wait deadline while the child keeps running. Every limit stop (`incomplete`,
+`timeout`) names its limit; every other status leaves `limit` empty.
+
+## When to use it
+
+Use the constants — never a bare string literal — whenever you branch on `TaskResult.status` or
+`TaskResult.limit`. A literal `"timeout"` compiles against either vocabulary and silently reads the
+wrong one if you branch on the wrong result type; the named constant makes which vocabulary you
+meant visible at the call site, and a rename anywhere in the closed set becomes a compile error
+instead of a silent drift.
+
+```rust
+if r.status == agents::TASK_STATUS_INCOMPLETE && r.limit == agents::LIMIT_MAX_TOOL_CALLS {
+    // this child ran out of tool-call budget
+}
+```
+
+<Aside type="note" title="Rust ships constants for the §7D set only">
+Unlike Go (`RunStatus*` / `RunLimit*`), the Rust port has no named constants for the §8 client's
+`RunResult.status` (`"done" | "pending" | "incomplete"`) and `RunResult.limit` (`"maxTurns"`,
+`"timeout"`, …): compare those against the SPEC literals. The `toolnexus::agents` constants below
+are the §7D task vocabulary.
+</Aside>
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Don't read a TaskResult with §8 client strings, or vice versa">
+It is tempting to treat the client's `"timeout"` limit and `TASK_STATUS_TIMEOUT` as interchangeable
+because they are the same string — they are not the same **vocabulary**. A §8 run deadline is always
+reported as `incomplete` with `limit: "timeout"`, never as a `timeout` status. If you drive
+[`Runtime`](/api/rust/runtime/runtime/) (`spawn`/`wake`/`wait`/`resume`), read `TaskResult.status` /
+`.limit` against the `agents::*` constants. If you drive the bare [`Client::run`](/api/rust/client/run/),
+read `RunResult.status` / `.limit` against the §8 literals.
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call — branch on the §8 client vocabulary
+
+```rust test
+use std::sync::Arc;
+use serde_json::json;
+use toolnexus::client::{InProcessOptions, InProcessResponse, InProcessToolCall, create_in_process_client};
+use toolnexus::{BuiltinsConfig, ToolkitOptions, create_toolkit, define_tool};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let noop = define_tool("noop", "does nothing", None, |_, _| async { Ok::<_, String>("ok".into()) });
+    let tk = create_toolkit(ToolkitOptions {
+        builtins: Some(BuiltinsConfig { enabled: Some(false), ..Default::default() }),
+        extra_tools: vec![noop],
+        ..Default::default()
+    })
+    .await?;
+
+    // An in-process model that ALWAYS calls a tool, so max_turns is exhausted before "done".
+    let client = create_in_process_client(InProcessOptions {
+        model: "stub".into(),
+        max_turns: 2,
+        generate: Some(Arc::new(|_req| Box::pin(async {
+            Ok(InProcessResponse {
+                tool_calls: vec![InProcessToolCall { name: "noop".into(), arguments: json!({}), ..Default::default() }],
+                ..Default::default()
+            })
+        }))),
+        ..Default::default()
+    });
+    let r = client.run("go", &tk).await?;
+
+    assert_eq!((r.status.as_str(), r.limit.as_str()), ("incomplete", "maxTurns"));
+    println!("ok: {} {}", r.status, r.limit);
+    Ok(())
+}
+```
+
+### 2. The realistic case — branch on the §7D task/agent vocabulary
+
+```rust test
+use toolnexus::agents::{
+    LIMIT_MAX_TOOL_CALLS, TASK_STATUS_INCOMPLETE, TASK_STATUS_TIMEOUT, TaskResult,
+};
+
+fn main() {
+    // A task that ran out of its own tool-call budget reports at the AGENT level.
+    let tr = TaskResult {
+        status: TASK_STATUS_INCOMPLETE.into(),
+        limit: LIMIT_MAX_TOOL_CALLS.into(),
+        text: "stopped: tool-call budget".into(),
+        ..Default::default()
+    };
+
+    match tr.status.as_str() {
+        TASK_STATUS_INCOMPLETE => {}
+        TASK_STATUS_TIMEOUT => panic!("this branch would be a WAIT deadline, not this scenario"),
+        other => panic!("unexpected status {other:?}"),
+    }
+    assert_eq!(tr.limit, LIMIT_MAX_TOOL_CALLS);
+    println!("ok: incomplete, limit = {}", tr.limit);
+}
+```
+
+### 3. The full surface — the two "timeout" strings side by side, and why they never collide
+
+```rust test
+use toolnexus::agents::*;
+
+fn main() {
+    // Same literal string, two closed vocabularies, two different meanings.
+    assert_eq!(TASK_STATUS_TIMEOUT, "timeout");
+    assert_eq!(LIMIT_TIMEOUT, "timeout");
+
+    // The §7D status set: seven values, all distinct.
+    let statuses = [TASK_STATUS_DONE, TASK_STATUS_PENDING, TASK_STATUS_INCOMPLETE,
+        TASK_STATUS_INTERRUPTED, TASK_STATUS_CLOSED, TASK_STATUS_TIMEOUT, TASK_STATUS_ERROR];
+    let mut uniq = statuses.to_vec();
+    uniq.sort();
+    uniq.dedup();
+    assert_eq!(uniq.len(), 7);
+
+    // The closed limit vocabulary, spelled as SPEC spells the Budget fields.
+    let limits = [LIMIT_MAX_TURNS, LIMIT_MAX_TOKENS, LIMIT_MAX_TOOL_CALLS, LIMIT_MAX_WALL_MS,
+        LIMIT_MAX_CHILDREN, LIMIT_MAX_CONCURRENT, LIMIT_MAX_DEPTH, LIMIT_COMPLETION, LIMIT_TIMEOUT];
+    assert_eq!(limits.len(), 9);
+
+    // The §8 client set has NO timeout status: a run deadline is incomplete + limit "timeout".
+    let run_statuses = ["done", "pending", "incomplete"];
+    assert!(!run_statuses.contains(&"timeout"));
+
+    println!("ok: agent-level timeout and client-level run-deadline are two different things");
+}
+```
+
+## See also
+
+- [Budgets](/api/rust/runtime/budgets/) · [Handle](/api/rust/runtime/handle/) · [Runtime](/api/rust/runtime/runtime/)

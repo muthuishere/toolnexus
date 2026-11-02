@@ -1,0 +1,268 @@
+---
+title: "ClientOptions.api_key_env"
+description: "Which key the client sends where: apiKey, else apiKeyEnv, else only the env var of the baseUrl host (https). A local or custom host needs one of the two. — Rust."
+sidebar:
+  label: "ClientOptions.api_key_env"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a>
+</p>
+
+```rust
+pub struct ClientOptions {
+    /// Sent as-is. Wins over everything else.
+    pub api_key: String,
+    /// The NAME of the env var to read the key from (never the value).
+    pub api_key_env: String,
+    // ...
+}
+
+impl Client {
+    /// The key this client would send, by the rules below (no request is made).
+    pub fn resolve_key(&self) -> Result<String, ClientError>;
+}
+pub fn key_env_for_base_url(base_url: &str) -> &'static str;
+```
+
+The client decides which key goes to which host, in this order:
+
+1. `api_key` set ⇒ only it.
+2. Else `api_key_env` set ⇒ the env var it names.
+3. Else **only** the env var that belongs to the `base_url` host, over https:
+   `api.openai.com` → `OPENAI_API_KEY`, `api.anthropic.com` → `ANTHROPIC_API_KEY`,
+   `openrouter.ai` (and subdomains) → `OPENROUTER_API_KEY`.
+4. Any other host, or plain http, with neither set ⇒ the run fails with
+   `ClientError::NoApiKey("no API key: set APIKey or APIKeyEnv …")`. Nothing is sent.
+
+<Aside type="caution" title="Breaking in 0.22.0">
+Before 0.22.0 the client took the first provider env var that was set and sent it to whatever
+`base_url` was configured. A host on a local or custom `base_url` that relied on that fallback must
+now set `api_key` or `api_key_env`.
+</Aside>
+
+## When to use it
+
+Set `api_key_env` whenever the `base_url` is not one of the three known hosts — a local llama.cpp
+or vLLM server, a corporate gateway, a proxy — and the key lives in the environment. Set `api_key`
+when the host already has the value in hand (a secret manager, a test). For the three known hosts
+you can set neither: the matching env var is read automatically.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="api_key_env over api_key when the key is in the environment">
+`api_key: std::env::var("MY_KEY")?` works, but it copies the secret into your options struct.
+`api_key_env: "MY_KEY".into()` keeps only the name in your code; the value is read at request time
+and never logged. Use `api_key` only when the value does not come from the environment.
+</Aside>
+
+## Examples
+
+Each example uses a loopback stub or no request at all — no network, fake keys only.
+
+### 1. The smallest useful call — a local server with `api_key_env`
+
+```rust test
+use std::sync::{Arc, Mutex};
+
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
+use toolnexus::client::{ClientOptions, Style, create_client};
+use toolnexus::{ToolkitOptions, create_toolkit};
+
+/// A loopback HTTP stub: `reply(n, raw_request)` answers the n-th request (1-based)
+/// with `(status, extra header lines, body)`.
+async fn stub<F>(reply: F) -> String
+where
+    F: Fn(usize, &str) -> (u16, String, String) + Send + Sync + 'static,
+{
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let reply = Arc::new(reply);
+    tokio::spawn(async move {
+        let mut n = 0;
+        while let Ok((mut sock, _)) = listener.accept().await {
+            n += 1;
+            let (reply, i) = (reply.clone(), n);
+            tokio::spawn(async move {
+                let (mut buf, mut chunk) = (Vec::new(), [0u8; 4096]);
+                loop {
+                    let k = sock.read(&mut chunk).await.unwrap_or(0);
+                    if k == 0 {
+                        break;
+                    }
+                    buf.extend_from_slice(&chunk[..k]);
+                    let s = String::from_utf8_lossy(&buf).to_string();
+                    if let Some(h) = s.find("\r\n\r\n") {
+                        let len = s[..h]
+                            .lines()
+                            .find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse().unwrap_or(0)))
+                            .unwrap_or(0);
+                        if buf.len() >= h + 4 + len {
+                            break;
+                        }
+                    }
+                }
+                let (status, extra, body) = reply(i, &String::from_utf8_lossy(&buf));
+                let head = format!(
+                    "HTTP/1.1 {status} STUB\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n{extra}\r\n",
+                    body.len()
+                );
+                let _ = sock.write_all(format!("{head}{body}").as_bytes()).await;
+            });
+        }
+    });
+    url
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // SAFETY: set before any other code reads the environment.
+    unsafe { std::env::set_var("MY_LOCAL_LLM_KEY", "YOUR_KEY_HERE") };
+
+    let auth = Arc::new(Mutex::new(String::new()));
+    let seen = auth.clone();
+    let url = stub(move |_, raw| {
+        let line = raw.lines().find(|l| l.to_ascii_lowercase().starts_with("authorization:"));
+        *seen.lock().unwrap() = line.map(|l| l[14..].trim().to_owned()).unwrap_or_default();
+        (200, String::new(), r#"{"choices":[{"message":{"role":"assistant","content":"hi"}}]}"#.into())
+    })
+    .await;
+
+    let tk = create_toolkit(ToolkitOptions::default()).await?;
+    let client = create_client(ClientOptions {
+        base_url: url, style: Style::OpenAI, model: "local".into(),
+        api_key_env: "MY_LOCAL_LLM_KEY".into(), // the NAME, not the value
+        ..Default::default()
+    });
+    let res = client.run("hello", &tk).await?;
+    assert_eq!(*auth.lock().unwrap(), "Bearer YOUR_KEY_HERE");
+    println!("ok: {}", res.text);
+    Ok(())
+}
+```
+
+### 2. The realistic case — a local host with no key fails before sending
+
+A provider key in the environment is never sent to a host it does not belong to.
+
+```rust test
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
+use toolnexus::client::{ClientError, ClientOptions, Style, create_client};
+use toolnexus::{ToolkitOptions, create_toolkit};
+
+/// A loopback HTTP stub: `reply(n, raw_request)` answers the n-th request (1-based)
+/// with `(status, extra header lines, body)`.
+async fn stub<F>(reply: F) -> String
+where
+    F: Fn(usize, &str) -> (u16, String, String) + Send + Sync + 'static,
+{
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let reply = Arc::new(reply);
+    tokio::spawn(async move {
+        let mut n = 0;
+        while let Ok((mut sock, _)) = listener.accept().await {
+            n += 1;
+            let (reply, i) = (reply.clone(), n);
+            tokio::spawn(async move {
+                let (mut buf, mut chunk) = (Vec::new(), [0u8; 4096]);
+                loop {
+                    let k = sock.read(&mut chunk).await.unwrap_or(0);
+                    if k == 0 {
+                        break;
+                    }
+                    buf.extend_from_slice(&chunk[..k]);
+                    let s = String::from_utf8_lossy(&buf).to_string();
+                    if let Some(h) = s.find("\r\n\r\n") {
+                        let len = s[..h]
+                            .lines()
+                            .find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse().unwrap_or(0)))
+                            .unwrap_or(0);
+                        if buf.len() >= h + 4 + len {
+                            break;
+                        }
+                    }
+                }
+                let (status, extra, body) = reply(i, &String::from_utf8_lossy(&buf));
+                let head = format!(
+                    "HTTP/1.1 {status} STUB\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n{extra}\r\n",
+                    body.len()
+                );
+                let _ = sock.write_all(format!("{head}{body}").as_bytes()).await;
+            });
+        }
+    });
+    url
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // SAFETY: set before any other code reads the environment.
+    unsafe { std::env::set_var("OPENAI_API_KEY", "YOUR_KEY_HERE") };
+
+    let hits = Arc::new(AtomicUsize::new(0));
+    let counter = hits.clone();
+    let url = stub(move |_, _| {
+        counter.fetch_add(1, Ordering::SeqCst);
+        (200, String::new(), r#"{"choices":[{"message":{"role":"assistant","content":"hi"}}]}"#.into())
+    })
+    .await;
+
+    let tk = create_toolkit(ToolkitOptions::default()).await?;
+    let client = create_client(ClientOptions {
+        base_url: url, style: Style::OpenAI, model: "local".into(),
+        ..Default::default()
+    });
+    let err = client.run("hello", &tk).await.unwrap_err();
+    assert!(matches!(err, ClientError::NoApiKey(_)) && err.to_string().contains("no API key"), "{err}");
+    assert_eq!(hits.load(Ordering::SeqCst), 0, "OPENAI_API_KEY must never reach a local server");
+    println!("ok: refused, {} requests sent", hits.load(Ordering::SeqCst));
+    Ok(())
+}
+```
+
+### 3. The full surface — the host picks its own env var
+
+With several provider keys set, `https://api.openai.com` gets `OPENAI_API_KEY` and nothing else.
+`resolve_key` answers the question without sending a request.
+
+```rust test
+use toolnexus::client::{ClientOptions, Style, create_client, key_env_for_base_url};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // SAFETY: single-threaded, before anything reads the environment.
+    unsafe {
+        std::env::set_var("OPENROUTER_API_KEY", "YOUR_OPENROUTER_KEY_HERE");
+        std::env::set_var("OPENAI_API_KEY", "YOUR_OPENAI_KEY_HERE");
+    }
+    let client = |base: &str| {
+        create_client(ClientOptions {
+            base_url: base.into(), style: Style::OpenAI, model: "m".into(),
+            ..Default::default()
+        })
+    };
+
+    assert_eq!(client("https://api.openai.com/v1").resolve_key()?, "YOUR_OPENAI_KEY_HERE");
+    assert_eq!(client("https://openrouter.ai/api/v1").resolve_key()?, "YOUR_OPENROUTER_KEY_HERE");
+    assert_eq!(key_env_for_base_url("https://api.anthropic.com"), "ANTHROPIC_API_KEY");
+    // Plain http, even to a known host name, gets no provider key.
+    assert!(client("http://api.openai.com/v1").resolve_key().is_err());
+
+    println!("ok: api.openai.com got OPENAI_API_KEY only");
+    Ok(())
+}
+```
+
+## See also
+
+- [`create_client`](/api/rust/client/create/) — The unified client: system prompt, skills injection, parallel and chained tool calls, retries, memory.
+- [`list_models`](/api/rust/client/list-models/) — the same key rules apply when listing a provider's models.
+- [`Client.run`](/api/rust/client/run/) — Send a prompt, let the loop call tools until the model stops, get a RunResult.
+- [`Hooks`](/api/rust/client/hooks/) — Intercept before/after model calls and tool calls: audit, redact, veto, or rewrite.

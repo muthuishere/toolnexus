@@ -1,0 +1,183 @@
+---
+title: "pending — suspend and ask a human"
+description: "Return a Pending from a tool to park the run until someone answers. — Rust."
+sidebar:
+  label: "pending"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §10</a>
+</p>
+
+```rust
+pub fn pending(req: Request) -> ToolResult
+pub struct Request { pub id: String, pub kind: String, pub prompt: String, pub url: String,
+                     pub data: Option<Map<String, Value>>, pub expires_at: String }
+```
+
+Return a Pending from a tool to park the run until someone answers.
+
+## When to use it
+
+From a tool that needs a human (or another system) before it can finish: return `pending(..)`; the loop calls `wait_for` and re-runs you with `ctx.answer`, or halts with `status: "pending"`.
+
+## Why this and not the alternative
+
+Suspend instead of blocking inside the tool: the host decides how to ask (UI, chat, email) and the run can resume later.
+
+<Aside type="tip" title="When not to use it">
+For a link the user must open (OAuth), `auth_required(url, prompt)` is the shorthand.
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call — a tool that suspends on first call
+
+```rust test
+use toolnexus::{Request, pending, pending_of};
+
+fn main() {
+    let res = pending(Request { kind: "input".into(), prompt: "Which environment?".into(), ..Default::default() });
+    assert!(res.is_error, "a parked call is not a success");
+
+    let req = pending_of(&res).expect("a suspension");
+    assert_eq!(req.kind, "input");
+    assert_eq!(req.prompt, "Which environment?");
+    assert!(!req.id.is_empty(), "expected a generated correlation id");
+    println!("ok: {} {}", req.kind, !req.id.is_empty());
+}
+```
+
+### 2. The realistic case — a tool that suspends until it has a decision
+
+`kind` is an open vocabulary — `"approval"` here is just data the host's `wait_for` interprets
+however it likes; the mechanism doesn't care what the string is.
+
+```rust test
+use serde_json::{Map, json};
+use toolnexus::{Request, ToolResult, pending, pending_of};
+
+fn approve_refund(amount: f64) -> ToolResult {
+    if amount > 100.0 {
+        let mut data = Map::new();
+        data.insert("amount".into(), json!(amount));
+        return pending(Request {
+            kind: "approval".into(),
+            prompt: format!("Approve a ${amount:.2} refund?"),
+            data: Some(data),
+            ..Default::default()
+        });
+    }
+    ToolResult::ok("refund processed automatically")
+}
+
+fn main() {
+    let small = approve_refund(20.0);
+    assert!(!small.is_error, "small refunds should not suspend");
+
+    let big = approve_refund(500.0);
+    let req = pending_of(&big).expect("an approval suspension");
+    assert_eq!(req.kind, "approval");
+    assert_eq!(req.data.as_ref().unwrap()["amount"], json!(500.0), "the amount rides data");
+    println!("ok: {} | {}", small.output, req.prompt);
+}
+```
+
+### 3. The full surface — wired into a live `Client::run`, resolved by `wait_for`
+
+```rust test
+use std::sync::Arc;
+
+use serde_json::json;
+use toolnexus::client::{
+    GenerateFn, InProcessOptions, InProcessRequest, InProcessResponse, InProcessToolCall,
+    WaitForFn, create_in_process_client,
+};
+use toolnexus::{
+    Answer, BuiltinsConfig, Request, Tool, ToolResult, ToolSource, ToolkitOptions, create_toolkit,
+    empty_schema, pending,
+};
+
+// A scripted model: call `pick_env`, then echo the tool result back as the reply.
+fn model() -> GenerateFn {
+    Arc::new(|req: InProcessRequest| {
+        Box::pin(async move {
+            let tool = req.messages.iter().rev().find(|m| m["role"] == "tool");
+            Ok(match tool.and_then(|m| m["content"].as_str()) {
+                Some(out) => InProcessResponse { content: format!("deploying to {out}"), ..Default::default() },
+                None => InProcessResponse {
+                    tool_calls: vec![InProcessToolCall { id: "c1".into(), name: "pick_env".into(), arguments: json!({}) }],
+                    ..Default::default()
+                },
+            })
+        })
+    })
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let pick_env = Tool {
+        name: "pick_env".into(),
+        description: "asks which environment".into(),
+        input_schema: empty_schema(),
+        source: ToolSource::Custom,
+        hints: None,
+        execute: Arc::new(|_args, ctx| {
+            Box::pin(async move {
+                if let Some(env) = ctx.answer.as_ref().and_then(|a| a.data.as_ref()).and_then(|d| d["env"].as_str()) {
+                    return ToolResult::ok(env);
+                }
+                pending(Request { kind: "input".into(), prompt: "Which environment?".into(), ..Default::default() })
+            })
+        }),
+    };
+    let tk = create_toolkit(ToolkitOptions {
+        builtins: Some(BuiltinsConfig::off()),
+        extra_tools: vec![pick_env],
+        ..Default::default()
+    })
+    .await?;
+
+    let wait_for: WaitForFn = Arc::new(|req| {
+        Box::pin(async move {
+            assert_eq!(req.kind, "input", "unexpected request kind");
+            let mut data = serde_json::Map::new();
+            data.insert("env".into(), json!("staging"));
+            Ok(Answer { id: req.id, ok: true, data: Some(data), ..Default::default() })
+        })
+    });
+    let client = create_in_process_client(InProcessOptions {
+        generate: Some(model()),
+        wait_for: Some(wait_for),
+        ..Default::default()
+    });
+
+    let res = client.run("deploy", &tk).await?;
+    assert_eq!(res.status, "done");
+    assert_eq!(res.text, "deploying to staging");
+    println!("ok: {}", res.text);
+    Ok(())
+}
+```
+
+## Request fields
+
+| Field | Type | What it is |
+|---|---|---|
+| `id` | `String` | Unique per suspension; the correlation key. Auto-generated by `pending` when empty (`pnd-<ms36>-<seq>`). |
+| `kind` | `String` | `"authorization"` \| `"approval"` \| `"input"` \| … — open vocabulary. |
+| `prompt` | `String` | What is being asked, in human words. |
+| `url` | `String` (skipped when empty) | Present when the action happens at a link. |
+| `data` | `Option<Map<String, Value>>` | Kind-specific extra (choices, schema, …). |
+| `expires_at` | `String` (wire key `expiresAt`, skipped when empty) | RFC3339; the request is stale after this. |
+
+`Request`/`Answer` wire keys are fixed across all ports (they serialize over the wire and cross
+agent boundaries).
+
+## See also
+
+- [`auth_required`](/api/rust/suspension/auth-required/) — The auth-shaped suspension: hand back a URL, resume once the user has granted access.
+- [`WaitForFn`](/api/rust/suspension/wait-for/) — The single hook where the host resolves a suspension — in-process prompt or durable queue, same contract.
+- [`pending_of`](/api/rust/suspension/pending-of/) — Detect that a RunResult is parked rather than finished, and get the Request that parked it.

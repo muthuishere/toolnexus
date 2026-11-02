@@ -1,0 +1,194 @@
+---
+title: "fromDir — load a persona from disk"
+description: "Point at an agent home directory and get a configured agent back. — Rust."
+sidebar:
+  label: "persona / from-dir"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7E</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/rust/src/agents/home.rs">rust/src/agents/home.rs</a>
+</p>
+
+```rust
+pub fn from_dir(dir: impl AsRef<Path>, opts: FromDirOptions) -> Agent   // toolnexus::agents
+#[derive(Clone, Default)]
+pub struct FromDirOptions {
+    pub does: String,        // routing description (default "persona agent from <dir>")
+    pub name: String,        // agent name (default the directory's base name)
+    pub model: String,       // model id (default "inherit")
+    pub tools: Vec<Tool>,    // extra tools beyond the memory builtin
+    pub memory: Option<bool>,// None ⇒ enabled; Some(false) omits the memory tool
+}
+pub fn start_agent(a: &Agent, opts: StartOptions) -> Result<StartedAgent, String>
+```
+
+`from_dir` is the one-call persona constructor: the directory *is* the agent. It calls
+[`compose_soul`](/api/rust/persona/compose-soul/) to build the soul from `dir`'s bootstrap files,
+wires [`memory_tool(dir)`](/api/rust/persona/memory-tool/) into the tool list (unless
+`opts.memory` is `Some(false)`), and hands both to [`agents::new`](/api/rust/runtime/agent/).
+The returned `Agent` runs like any other — `run` for a one-shot, `as_tool` to drop it into a
+classic toolkit, or `start_agent` for a heartbeat loop (each interval posts a tick to the
+agent's own inbox and, when idle, wakes it; a `HEARTBEAT_OK` reply stays silent).
+
+## When to use it
+
+Reach for `from_dir` whenever a persona's identity lives in files on disk — the openclaw
+convention of `AGENTS.md` / `SOUL.md` / `IDENTITY.md` / `USER.md` / `TOOLS.md` /
+`HEARTBEAT.md` / `MEMORY.md`. It's the standard way to boot a long-lived, home-directory-backed
+agent: point it at a folder, get back something runnable, with durable memory already wired.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Building the Spec fields yourself instead?">
+Use [`agents::new`](/api/rust/runtime/agent/) directly when your persona's soul comes from
+somewhere other than a directory (a database row, a generated string, a template) or when you
+need `Spec` fields `from_dir` doesn't expose (`team`, `budget`, `wait_for`, hooks). `from_dir` is
+a convenience over `new` for the specific, common case: soul + memory tool, both rooted at one
+directory. Call [`compose_soul`](/api/rust/persona/compose-soul/) and
+[`memory_tool`](/api/rust/persona/memory-tool/) yourself and pass them to `new` when you want
+that control back.
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call — a persona from a bare directory
+
+No bootstrap files at all still works: the soul is empty, the name defaults to the directory's
+base name, and the memory tool is wired anyway. The model is an in-process stand-in.
+
+```rust test
+use std::sync::Arc;
+
+use toolnexus::agents::{FromDirOptions, Options, from_dir};
+use toolnexus::client::{GenerateFn, InProcessRequest, InProcessResponse};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = std::env::temp_dir().join(format!("kip-fd1-{}", std::process::id()));
+    std::fs::create_dir_all(&dir)?;
+
+    let kip = from_dir(&dir, FromDirOptions { model: "m-kip".into(), ..Default::default() });
+    assert_eq!(kip.name, dir.file_name().unwrap().to_string_lossy());
+
+    let model: GenerateFn = Arc::new(|_req: InProcessRequest| {
+        Box::pin(async { Ok(InProcessResponse { content: "hi".into(), ..Default::default() }) })
+    });
+    let (r, _rt) = kip.run(Options { in_process: Some(model), ..Default::default() }, "hello").await;
+    assert_eq!((r.status.as_str(), r.text.as_str()), ("done", "hi"));
+
+    std::fs::remove_dir_all(&dir)?;
+    println!("ok: {} answered {}", kip.name, r.text);
+    Ok(())
+}
+```
+
+### 2. The realistic case — bootstrap files shape the soul, and the model answers with it
+
+`SOUL.md` on disk becomes part of the request the stub model receives — proving the composed
+soul actually reaches the provider as the system prompt.
+
+```rust test
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use toolnexus::agents::{FromDirOptions, Options, from_dir};
+use toolnexus::client::{GenerateFn, InProcessRequest, InProcessResponse};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = std::env::temp_dir().join(format!("archivist-fd2-{}", std::process::id()));
+    std::fs::create_dir_all(&dir)?;
+    std::fs::write(dir.join("SOUL.md"), "You are Archivist, terse and precise.")?;
+
+    let archivist = from_dir(
+        &dir,
+        FromDirOptions { name: "archivist".into(), does: "keeps records".into(), model: "m-archivist".into(), ..Default::default() },
+    );
+
+    let saw_soul = Arc::new(AtomicBool::new(false));
+    let seen = saw_soul.clone();
+    let model: GenerateFn = Arc::new(move |req: InProcessRequest| {
+        if req.body.to_string().contains("Archivist, terse and precise") {
+            seen.store(true, Ordering::SeqCst);
+        }
+        Box::pin(async { Ok(InProcessResponse { content: "logged".into(), ..Default::default() }) })
+    });
+    let (r, _rt) = archivist
+        .run(Options { in_process: Some(model), ..Default::default() }, "file this record")
+        .await;
+    assert_eq!((r.status.as_str(), r.text.as_str()), ("done", "logged"));
+    assert!(saw_soul.load(Ordering::SeqCst), "the composed SOUL.md text must reach the model");
+
+    std::fs::remove_dir_all(&dir)?;
+    println!("ok: {} ran with its composed soul", archivist.name);
+    Ok(())
+}
+```
+
+### 3. The full surface — extra tools, and turning the memory builtin off
+
+`memory: Some(false)` yields a read-only persona: no `memory` tool at all, even though a home
+directory is wired. Extra tools in `tools` are declared either way.
+
+```rust test
+use std::sync::Arc;
+
+use serde_json::json;
+use toolnexus::agents::{FromDirOptions, Options, from_dir};
+use toolnexus::client::{GenerateFn, InProcessRequest, InProcessResponse};
+use toolnexus::define_tool;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = std::env::temp_dir().join(format!("readonly-fd3-{}", std::process::id()));
+    std::fs::create_dir_all(&dir)?;
+
+    let clock = define_tool("clock", "Current time", Some(json!({"type": "object"})), |_args, _ctx| async {
+        Ok::<_, String>("12:00".to_string())
+    });
+    let readonly = from_dir(
+        &dir,
+        FromDirOptions { name: "readonly".into(), model: "m-readonly".into(), tools: vec![clock], memory: Some(false), ..Default::default() },
+    );
+    // Memory enabled (the default) DOES get the memory tool.
+    let with_memory = from_dir(&dir, FromDirOptions { name: "withmemory".into(), model: "m-with".into(), ..Default::default() });
+
+    // The stub model reports which tools the request declared.
+    let model: GenerateFn = Arc::new(|req: InProcessRequest| {
+        let mut names: Vec<String> = req
+            .tools
+            .iter()
+            .filter_map(|t| t["function"]["name"].as_str().map(String::from))
+            .collect();
+        names.sort();
+        Box::pin(async move { Ok(InProcessResponse { content: names.join(","), ..Default::default() }) })
+    });
+
+    let (r1, _) = readonly.run(Options { in_process: Some(model.clone()), ..Default::default() }, "go").await;
+    assert_eq!(r1.text, "clock", "readonly persona must declare no memory tool");
+    let (r2, _) = with_memory.run(Options { in_process: Some(model), ..Default::default() }, "go").await;
+    assert_eq!(r2.text, "memory", "default persona must declare the memory tool");
+
+    std::fs::remove_dir_all(&dir)?;
+    println!("ok: memory: Some(false) omits the tool; the default wires it");
+    Ok(())
+}
+```
+
+## FromDirOptions fields
+
+| Field | Type | Default | What it does |
+|---|---|---|---|
+| `does` | `String` | `"persona agent from <dir>"` | The routing description the delegating model (or a parent's `task` tool) sees. |
+| `name` | `String` | the directory's base name | The agent's name. |
+| `model` | `String` | `"inherit"` | The model id passed to `agents::Spec.model`. |
+| `tools` | `Vec<Tool>` | none | Extra tools beyond the memory builtin. |
+| `memory` | `Option<bool>` | `None` (enabled) | `Some(false)` omits `memory_tool(dir)` — a read-only persona. |
+
+## See also
+
+- [`compose_soul`](/api/rust/persona/compose-soul/) — Build a persona's system prompt from its home directory: identity, memory, skills.
+- [`memory_tool`](/api/rust/persona/memory-tool/) — The opt-in built-in that lets a persona write durable notes to its own home.
+- [`agents::new`](/api/rust/runtime/agent/) — The lower-level constructor `from_dir` wraps.

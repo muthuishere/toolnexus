@@ -1,0 +1,218 @@
+---
+title: "Budgets — hierarchical, live-enforced"
+description: "Cap tool calls and wall-clock per agent and per team, enforced while the run is in flight. — Rust."
+sidebar:
+  label: "runtime / budgets"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7D</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/rust/src/agents/runtime.rs">rust/src/agents/runtime.rs</a>
+</p>
+
+```rust
+pub struct Budget {
+    pub max_turns: usize,       // default 6 per run
+    pub max_tokens: i64,        // subtree pool
+    pub max_tool_calls: i64,    // subtree pool
+    pub max_wall: Duration,     // SPEC maxWallMs, on the runtime Clock
+    pub max_children: usize,
+    pub max_concurrent: usize,  // default 8; excess wakes queue FIFO
+    pub max_depth: usize,       // default 3
+}
+```
+
+A `Budget` caps one handle's whole subtree. Pooled fields (`max_tokens`, `max_tool_calls`) are
+**carved** at spawn — `effective = min(own, parent's remaining)` — then enforced with a **live**
+walk up the ancestor chain before every turn and every spawn, because carving alone misses spend a
+sibling racked up afterward. Usage rolls up to every ancestor (that roll-up is the ledger). Money
+is deliberately excluded: usage is vendor-neutral (tokens, tool calls, turns, wall time). Zero
+fields mean "unset" (the default applies).
+
+## When to use it
+
+Set a `Budget` on any `Spec`/`Def` or pass one to `spawn` whenever a sub-agent's work is
+open-ended and you want a hard, structural ceiling — not a prompt asking it to be frugal. Every
+limit stop is **loud**: `status: "incomplete"` with `TaskResult.limit` naming the field
+(`maxTurns`, `maxTokens`, `maxToolCalls`, `maxWallMs`, `completion`), never a silent `"done"`,
+never a panic — partial work and the transcript are preserved either way. Spawn-time caps
+(`max_children`, `max_depth`) refuse the `spawn` itself with an `Err` naming the limit.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Want the model to see its own limit and self-regulate?">
+`Budget` is enforced by the RUNTIME — the model never sees it and can't negotiate around it. If you
+want the model aware of a soft limit (so it can wrap up gracefully), say so in the agent's `soul`;
+`Budget` is the backstop for when it doesn't.
+</Aside>
+
+## Examples
+
+### 1. `max_turns` — a model that never stops calling tools
+
+```rust test
+use std::collections::HashMap;
+use std::sync::Arc;
+use serde_json::json;
+use toolnexus::agents::{Budget, Def, LIMIT_MAX_TURNS, Options, Runtime};
+use toolnexus::client::{BoxFuture, InProcessRequest, InProcessResponse, InProcessToolCall, InProcessUsage};
+use toolnexus::define_tool;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let lookup = define_tool("lookup", "looks something up", None, |_args, _ctx| async { Ok::<_, String>("data".to_string()) });
+    // This model ALWAYS wants another tool call — it never produces a final answer.
+    let model = Arc::new(|_req: InProcessRequest| -> BoxFuture<Result<InProcessResponse, String>> {
+        Box::pin(async {
+            Ok(InProcessResponse {
+                tool_calls: vec![InProcessToolCall { id: "c".into(), name: "lookup".into(), arguments: json!({}) }],
+                usage: Some(InProcessUsage { prompt_tokens: 2, completion_tokens: 2, total_tokens: 4 }),
+                ..Default::default()
+            })
+        })
+    });
+    let registry = HashMap::from([(
+        "looper".to_string(),
+        Def {
+            name: "looper".into(), does: "never finishes".into(), model: "m-loop".into(),
+            tools: vec![lookup],
+            budget: Some(Budget { max_turns: 3, ..Default::default() }),
+            ..Default::default()
+        },
+    )]);
+    let rt = Runtime::new(Options { in_process: Some(model), registry, ..Default::default() });
+
+    let h = rt.spawn(&rt.root(), "looper", None)?;
+    rt.wake(&h, "loop forever");
+    let r = rt.wait(&h, None).await;
+    assert_eq!(r.status, "incomplete", "max_turns must be a LOUD incomplete: {r:?}");
+    assert_eq!(r.limit, LIMIT_MAX_TURNS);
+
+    println!("ok: stopped {} ({}) after {} turns (max_turns=3)", r.status, r.limit, r.turns);
+    Ok(())
+}
+```
+
+### 2. `max_tokens` — carved at spawn, then drained by the live roll-up
+
+```rust test
+use std::collections::HashMap;
+use std::sync::Arc;
+use toolnexus::agents::{Budget, Def, Options, Runtime};
+use toolnexus::client::{BoxFuture, InProcessRequest, InProcessResponse, InProcessUsage};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let model = Arc::new(|_req: InProcessRequest| -> BoxFuture<Result<InProcessResponse, String>> {
+        Box::pin(async {
+            Ok(InProcessResponse {
+                content: "ok".into(),
+                usage: Some(InProcessUsage { prompt_tokens: 20, completion_tokens: 20, total_tokens: 40 }),
+                ..Default::default()
+            })
+        })
+    });
+    let registry = HashMap::from([(
+        "explore".to_string(),
+        Def { name: "explore".into(), does: "research".into(), model: "m-explore".into(), ..Default::default() },
+    )]);
+    let rt = Runtime::new(Options { in_process: Some(model), registry, ..Default::default() });
+
+    // Parent asks for 100; child asks for 500 — effective = min(100, 500) = 100.
+    let parent = rt.spawn(&rt.root(), "explore", Some(Budget { max_tokens: 100, ..Default::default() }))?;
+    let child = rt.spawn(&parent, "explore", Some(Budget { max_tokens: 500, ..Default::default() }))?;
+    assert_eq!(rt.pool_tokens(&child), 100, "carve");
+
+    rt.wake(&child, "go");
+    rt.wait(&child, None).await; // spends 40 tokens
+    assert_eq!(rt.pool_tokens(&parent), 60, "the roll-up drains the PARENT pool too");
+
+    println!("ok: child pool carved to 100; parent pool now {}", rt.pool_tokens(&parent));
+    Ok(())
+}
+```
+
+### 3. The full surface — `max_tool_calls`, `max_children`, `max_depth` all refuse loudly, naming the limit
+
+```rust test
+use std::collections::HashMap;
+use std::sync::Arc;
+use serde_json::json;
+use toolnexus::agents::{Budget, Def, LIMIT_MAX_TOOL_CALLS, Options, Runtime};
+use toolnexus::client::{BoxFuture, InProcessRequest, InProcessResponse, InProcessToolCall};
+use toolnexus::define_tool;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let lookup = define_tool("lookup", "looks something up", None, |_args, _ctx| async { Ok::<_, String>("data".to_string()) });
+    // Calls lookup until it has seen a tool result in this turn, then answers.
+    let model = Arc::new(|req: InProcessRequest| -> BoxFuture<Result<InProcessResponse, String>> {
+        let saw_tool_result = req.messages.iter().any(|m| m["role"] == "tool");
+        Box::pin(async move {
+            Ok(if !saw_tool_result {
+                InProcessResponse {
+                    tool_calls: vec![InProcessToolCall { id: "c".into(), name: "lookup".into(), arguments: json!({}) }],
+                    ..Default::default()
+                }
+            } else {
+                InProcessResponse { content: "done".into(), ..Default::default() }
+            })
+        })
+    });
+    let registry = HashMap::from([
+        ("explore".to_string(), Def { name: "explore".into(), does: "research".into(), model: "m-explore".into(), tools: vec![lookup], ..Default::default() }),
+        ("peer".to_string(), Def { name: "peer".into(), does: "a worker".into(), model: "m-peer".into(), ..Default::default() }),
+    ]);
+    let rt = Runtime::new(Options { in_process: Some(model), registry, ..Default::default() });
+
+    // max_tool_calls: the pool is spent by the FIRST run; the second refuses.
+    let h = rt.spawn(&rt.root(), "explore", Some(Budget { max_tool_calls: 1, ..Default::default() }))?;
+    let r1 = rt.run_turn(&h, "go").await;
+    assert_eq!(r1.status, "done", "first run (one lookup) should pass: {r1:?}");
+    let r2 = rt.run_turn(&h, "go again").await;
+    assert_eq!(r2.status, "incomplete", "{r2:?}");
+    assert_eq!(r2.limit, LIMIT_MAX_TOOL_CALLS);
+
+    // max_children: the third spawn under a 2-child cap is refused, naming the limit.
+    let capped = rt.spawn(&rt.root(), "peer", Some(Budget { max_children: 2, ..Default::default() }))?;
+    rt.spawn(&capped, "peer", None)?;
+    rt.spawn(&capped, "peer", None)?;
+    let err = rt.spawn(&capped, "peer", None).expect_err("third child must be refused");
+    assert!(err.contains("maxChildren"), "{err}");
+
+    // max_depth: three spawns deep is fine; a fourth is refused, naming the limit.
+    let mut deep = rt.root();
+    for _ in 0..3 {
+        deep = rt.spawn(&deep, "peer", None)?;
+    }
+    let err = rt.spawn(&deep, "peer", None).expect_err("fourth level must be refused");
+    assert!(err.contains("maxDepth"), "{err}");
+
+    println!("ok: maxToolCalls, maxChildren, and maxDepth all refused loudly, naming the limit");
+    Ok(())
+}
+```
+
+## Fields and defaults
+
+| Field | Type | Default | Checked |
+|---|---|---|---|
+| `max_turns` | `usize` | 6 | Per turn, inside the client loop. |
+| `max_tokens` | `i64` | unlimited | Carved at spawn; live ancestor walk before every turn/spawn. |
+| `max_tool_calls` | `i64` | unlimited | Same carve + live walk as `max_tokens`. |
+| `max_wall` | `Duration` | unlimited | Live ancestor walk, measured against the runtime `Clock` (SPEC `maxWallMs`). |
+| `max_children` | `usize` | unlimited | At `spawn`. |
+| `max_concurrent` | `usize` | 8 | At `wake` (the concurrency gate; excess wakes queue FIFO). |
+| `max_depth` | `usize` | 3 | At `spawn`. |
+
+Any turn-level limit stop ⇒ `TaskResult { status: "incomplete", limit: <field>, .. }` — never
+silent, never a panic. Pooled resources apply to the WHOLE subtree, not just the handle they were
+set on.
+
+## See also
+
+- [`agents::new`](/api/rust/runtime/agent/) — Define a sub-agent with its own toolkit, prompt and budget, callable as a tool by its parent.
+- [`Runtime::new`](/api/rust/runtime/runtime/) — The six host verbs that drive sub-agents, plus the read-only list and inspect views.
+- [`Handle`](/api/rust/runtime/handle/) — The state machine for one spawned agent: pending, running, suspended, done.
+- [vocabulary](/api/rust/runtime/vocabulary/) — every `status` and `limit` string.

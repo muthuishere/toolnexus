@@ -87,7 +87,7 @@ jobs:
       - run: go test -race ./...
 
   rust:
-    name: Rust (cargo test, in progress — openspec add-rust-port)
+    name: Rust (cargo)
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -99,9 +99,18 @@ jobs:
           components: rustfmt, clippy
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo clippy --all-targets --no-default-features -- -D warnings
+      - name: clippy, serve without the MCP HTTP client
+        run: cargo clippy --all-targets --no-default-features --features serve -- -D warnings
       - run: cargo test
       - name: stdio-only build (no HTTP/TLS stack)
         run: cargo test --no-default-features
+      - name: run the examples (hermetic; agent skips without a key)
+        run: |
+          for e in basic agent native_http streaming pending acp agents prompt_cache; do
+            echo "== $e"; cargo run -q --example "$e"
+          done
+          cargo run -q --example skills_dump -- ../examples/skills >/dev/null
 
   skills-parity:
     name: Skills byte-parity (Go reference vs Rust)
@@ -197,6 +206,7 @@ jobs:
           go-version: "1.23"
       - run: go install github.com/muthuishere/cljgo/cmd/cljgo@v0.9.0
       - run: echo "$HOME/go/bin" >> "$GITHUB_PATH"
+      - uses: dtolnay/rust-toolchain@stable
       - uses: actions/cache@v4
         with:
           path: ~/.m2/repository
@@ -242,7 +252,7 @@ jobs:
           TN_EXAMPLES: ${{ github.workspace }}/examples
 
   docs-examples:
-    name: Docs examples (seven ports)
+    name: Docs examples (eight ports)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

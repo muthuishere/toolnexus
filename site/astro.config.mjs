@@ -149,7 +149,7 @@ export default defineConfig({
 								{
 									label: 'Reference',
 									items: [
-										{ label: 'Install — all seven languages', slug: 'install' },
+										{ label: 'Install — all eight languages', slug: 'install' },
 										{ label: 'Ecosystem & references', slug: 'references' },
 									],
 								},

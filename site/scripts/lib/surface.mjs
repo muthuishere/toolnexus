@@ -25,6 +25,8 @@ export const LANGS = {
 	// One .cljc tree that runs on Clojure (JVM) and on cljgo. Tier `full` in the shared
 	// conformance manifest, same bar as the other six. On Clojars since v0.13.0.
 	clojure: { slug: "clojure", label: "Clojure", pkg: "net.clojars.muthuishere/toolnexus", registry: "Clojars", src: "clojure/src/toolnexus", fence: "clojure" },
+	// Tier `full` in the shared conformance manifest, same bar as the other seven.
+	rust: { slug: "rust", label: "Rust", pkg: "toolnexus", registry: "crates.io", src: "rust/src", fence: "rust" },
 }
 
 export const GITHUB = "https://github.com/muthuishere/toolnexus"

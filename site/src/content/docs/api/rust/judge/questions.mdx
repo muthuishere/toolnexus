@@ -1,0 +1,237 @@
+---
+title: "Questions — noul, choice and score"
+description: "The three question types, the criteria each one needs, and the limits enforced client-side before the request. — Rust."
+sidebar:
+  label: "judge / questions"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8B</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/rust/src/classifier.rs">rust/src/classifier.rs</a>
+</p>
+
+```rust
+pub enum Question { Noul(NoulQuestion), Choice(ChoiceQuestion), Score(ScoreQuestion) }
+pub type Questions = BTreeMap<String, Question>;
+
+pub struct NoulCriteria   { pub when_true: String, pub when_false: String }
+pub struct NoulQuestion   { pub instructions: String, pub criteria: Option<NoulCriteria> }
+pub struct ChoiceQuestion { pub instructions: String, pub criteria: BTreeMap<String, String> } // 1..255
+pub struct ScoreQuestion  { pub instructions: String, pub criteria: Vec<String> }             // 2..10, ORDERED
+
+pub fn choice_over<K: Into<String>, V: Into<String>>(instructions: &str,
+    items: impl IntoIterator<Item = (K, V)>) -> ChoiceQuestion;
+pub fn canonical_request(model: &str, questions: &Questions) -> String;
+```
+
+The three question types, the criteria each one needs, and the limits enforced client-side before
+the request. `Question` is a closed enum, so a `match` over it is exhaustive; each struct converts
+with `.into()`.
+
+Questions are **independent**. One answer is never context for another; a backend that cannot
+guarantee that reports `calibrated: false`.
+
+## When to use it
+
+| Type | You get back | Reach for it when |
+|---|---|---|
+| `NoulQuestion` | one number in `0..1` — **no confidence; the number is the answer** | is this true, is this from an untrusted source |
+| `ChoiceQuestion` | one of **your** named options, a probability for every option, a confidence | routing to a skill, a tool, an agent |
+| `ScoreQuestion` | a number against an ordered rubric of 2–10 levels (`1.21` is a real answer) | risk, urgency, severity |
+
+Declare them up front and pass them all in one `evaluate` call: many questions, one round trip.
+`toolnexus::judge::{noul, noul_with, choice, score, questions}` are named builders over the same
+types (a repeated name is an error).
+
+## Why this and not the alternative
+
+<Aside type="tip" title="When NOT to use a choice">
+If the options are genuinely ordered — low/medium/high — use a `ScoreQuestion`. A
+`ChoiceQuestion` throws the ordering away, so you lose the between-levels answer. Conversely, do
+**not** use a score for unordered alternatives: the rubric's order is its numbering.
+</Aside>
+
+## `criteria`, per type
+
+- **noul** — optional. `None` omits `criteria` entirely; `Some(NoulCriteria::default())` sends
+  both labels as empty strings. Absent and empty are different values on the wire.
+- **choice** — required, `id → what picking that option would MEAN`. Not the id again.
+- **score** — required, an ordered `Vec`. Index 0 is level 0. Nothing sorts it.
+
+<Aside type="caution" title="The option descriptions are the whole ball game">
+For a `choice`, `criteria[id]` is the **only** thing that differentiates one option from another
+to the model. Passing the id itself, an empty string, or one repeated value is schema-valid and
+**ranks at chance**. The library detects this and emits one `classifier.warning` metric naming the
+key; it never repairs it. See [The encoding obligation](/toolnexus/judge/encoding/).
+</Aside>
+
+## The client-side limits
+
+| Rule | Constant | Error |
+|---|---|---|
+| a `choice` needs 1..255 options | `MAX_CHOICE_OPTIONS = 255` | `classifier: question "<key>": a choice needs 1..255 options, got N` |
+| a `score` needs 2..10 ordered levels | `MIN_SCORE_LEVELS = 2`, `MAX_SCORE_LEVELS = 10` | `classifier: question "<key>": a score needs 2..10 ordered levels, got N` |
+
+Both are enforced **before the request**, and **no request is sent**. Keys are walked in sorted
+order (`BTreeMap`), so the same malformed set always names the same key first. An empty
+`Questions` map is an error too.
+
+## Examples
+
+### 1. The smallest useful call — all three types in one round trip
+
+```rust test
+use serde_json::json;
+use toolnexus::classifier::{
+    ChoiceQuestion, ClassifierOptions, ClassifierStyle, NoulCriteria, NoulQuestion, Questions,
+    RecordedDecision, ScoreQuestion, create_classifier,
+};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let state = json!("my card was charged twice for the annual plan and the second charge was not refunded");
+
+    let mut questions = Questions::new();
+    questions.insert("wants_money_back".into(), NoulQuestion {
+        instructions: "Is the customer asking for money to be returned?".into(),
+        criteria: Some(NoulCriteria {
+            when_true: "the customer wants a payment reversed or credited back".into(),
+            when_false: "the customer wants something other than money returned".into(),
+        }),
+    }.into());
+    questions.insert("department".into(), ChoiceQuestion {
+        instructions: "Which desk should own this ticket?".into(),
+        criteria: [
+            ("billing".into(), "own it here when the problem is money that moved: a duplicate charge, a refund owed".into()),
+            ("technical".into(), "own it here when the problem is the product itself: a login that fails, a feature that errors".into()),
+        ].into(),
+    }.into());
+    questions.insert("urgency".into(), ScoreQuestion {
+        instructions: "How fast does this ticket need a human?".into(),
+        criteria: vec![
+            "the customer is working normally and is waiting on an answer".into(),
+            "the customer is inconvenienced and will chase if nobody replies today".into(),
+            "the customer is blocked from working right now".into(),
+        ],
+    }.into());
+
+    let recorded = br#"{"model":"typesafe/jev-1.13","calibrated":true,
+        "answers":{
+            "wants_money_back":{"type":"noul","noul":0.99},
+            "department":{"type":"choice","choice":"billing",
+                "probabilities":{"billing":0.97,"technical":0.03},"confidence":0.94},
+            "urgency":{"type":"score","score":0.49,
+                "legend":{"0":"working normally","1":"inconvenienced","2":"blocked"},
+                "probabilities":{"0":0.52,"1":0.48,"2":0},"confidence":0.27}},
+        "usage":{"input_tokens":516,"output_tokens":72}}"#;
+
+    let judge = create_classifier(ClassifierOptions {
+        style: ClassifierStyle::Static,
+        model: "typesafe/jev-1.13".into(),
+        decisions: vec![RecordedDecision {
+            state: state.clone(),
+            questions: questions.clone(),
+            response: recorded.to_vec(),
+        }],
+        ..Default::default()
+    })?;
+
+    let d = judge.evaluate(state, &questions).await?;
+    let dept = d.choice("department")?;
+    let urg = d.score("urgency")?;
+    assert_eq!(dept.choice, "billing");
+    assert!(urg.score > 0.0 && urg.score < 1.0);
+
+    println!("ok: desk={} urgency={} (a score may fall BETWEEN levels)", dept.choice, urg.score);
+    Ok(())
+}
+```
+
+### 2. The realistic case — the limits fail before the request
+
+```rust test
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use serde_json::{Value, json};
+use toolnexus::classifier::{
+    ChoiceQuestion, ClassifierOptions, ClassifierStyle, Decision, EvalContext, Questions,
+    ScoreQuestion, create_classifier,
+};
+use toolnexus::client::BoxFuture;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // A custom backend that records whether it was ever reached.
+    let reached = Arc::new(AtomicBool::new(false));
+    let r = reached.clone();
+    let judge = create_classifier(ClassifierOptions {
+        style: ClassifierStyle::Custom,
+        evaluate: Some(Arc::new(move |_ctx: EvalContext, _state: Value, _qs: Questions| -> BoxFuture<Result<Decision, String>> {
+            r.store(true, Ordering::SeqCst);
+            Box::pin(async { Ok(Decision::default()) })
+        })),
+        ..Default::default()
+    })?;
+
+    let levels: Vec<String> = (0..11).map(|i| format!("level {i}")).collect(); // 11 > MAX_SCORE_LEVELS
+    let mut qs = Questions::new();
+    qs.insert("urgency".into(), ScoreQuestion { instructions: "how urgent?".into(), criteria: levels }.into());
+
+    let e = judge.evaluate(json!("anything"), &qs).await.expect_err("expected a client-side limit error");
+    // The error names the offending question KEY and the limit.
+    assert!(e.to_string().contains(r#""urgency""#) && e.to_string().contains("2..10"), "unhelpful error: {e}");
+    assert!(!reached.load(Ordering::SeqCst), "no request may be sent once a limit fails");
+
+    // A choice is capped at 255 options, checked the same way.
+    let too_many = (0..256).map(|i| (format!("opt{i:03}"), "pick this when it is the right one".to_string()));
+    let mut qs = Questions::new();
+    qs.insert("route".into(), ChoiceQuestion { instructions: "which?".into(), criteria: too_many.collect() }.into());
+    let e = judge.evaluate(json!("anything"), &qs).await.expect_err("expected the 255-option cap");
+    assert!(e.to_string().contains("1..255"), "got {e}");
+
+    println!("ok: both limits refused before any request");
+    Ok(())
+}
+```
+
+### 3. The full surface — `choice_over`, and `criteria` absent vs empty
+
+`choice_over` builds a `ChoiceQuestion` from any `(name, description)` pairs — a tool roster, a
+skill list, an A2A agent card's skills. It copies the pairs, so later mutation of the caller's
+collection cannot reach the question.
+
+```rust test
+use toolnexus::classifier::{NoulCriteria, NoulQuestion, Questions, canonical_request, choice_over};
+
+fn main() {
+    let q = choice_over("Which tool answers this turn?", [
+        ("search_docs", "use this when the answer is written down somewhere in the product docs"),
+        ("run_query", "use this when the answer has to be computed from the live database"),
+    ]);
+
+    // A noul's criteria: None omits the field, Some(default) sends both labels
+    // empty. Absent and empty are DIFFERENT values, and both survive the wire.
+    let absent = NoulQuestion { instructions: "is this urgent?".into(), criteria: None };
+    let empty = NoulQuestion { instructions: "is this urgent?".into(), criteria: Some(NoulCriteria::default()) };
+
+    let with_absent = canonical_request("jev-latest", &Questions::from([("u".to_string(), absent.into())]));
+    let with_empty = canonical_request("jev-latest", &Questions::from([("u".to_string(), empty.into())]));
+    assert_ne!(with_absent, with_empty, "absent criteria must not collapse into empty criteria");
+    assert!(with_empty.contains(r#""criteria":{"false":"","true":""}"#));
+
+    // The canonical request covers `model` + `questions` only: keys sorted
+    // recursively, arrays never reordered. `state` is outside the claim.
+    let canon = canonical_request("jev-latest", &Questions::from([("tool".to_string(), q.into())]));
+    assert!(canon.starts_with(r#"{"model":"jev-latest","questions":{"tool":"#));
+
+    println!("ok: {} …", &canon[..40]);
+}
+```
+
+## See also
+
+- [`create_classifier`](/api/rust/judge/classifier/) — the judgment seam these questions are asked through.
+- [Decision](/api/rust/judge/decision/) — typed accessors that fail loudly rather than hand back a zero.
+- [The encoding obligation](/toolnexus/judge/encoding/) · [Typed decisions](/toolnexus/judge/) · [Backends](/toolnexus/judge/backends/) · [Cookbook](/toolnexus/cookbook/judge/)
