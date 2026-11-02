@@ -60,7 +60,7 @@ for f in $DOCS; do
     echo "$hit" | grep -q '"<version>"' && continue    # PUBLISHING.md templates
     echo "$hit" | grep -q "\"$V\"" || stale="$stale\n  $f: $hit"
   done < <(grep -n 'muthuishere/toolnexus" \?{:mvn/version\|muthuishere/toolnexus {:mvn/version' "$f" 2>/dev/null)
-  # e) crates:   toolnexus = "0.22.0"  (Cargo.toml dependency line)
+  # e) crates:   toolnexus = "0.23.0"  (Cargo.toml dependency line)
   while IFS= read -r hit; do
     echo "$hit" | grep -q '"<version>"' && continue
     echo "$hit" | grep -qE "\"(\\^)?($V|$MINOR)\"" || stale="$stale\n  $f: $hit"

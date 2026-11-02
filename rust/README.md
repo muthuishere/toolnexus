@@ -11,13 +11,10 @@ Docs: [docs site](https://muthuishere.github.io/toolnexus/) ·
 [Rust API reference](https://muthuishere.github.io/toolnexus/api/rust/) (every runnable example
 there is compiled and run in CI).
 
-The crate is published to crates.io from the next release. Until then, depend on it by git:
-`toolnexus = { git = "https://github.com/muthuishere/toolnexus" }`.
-
 ```toml
 [dependencies]
-toolnexus = "0.22.0"
-# toolnexus = { version = "0.22.0", default-features = false }   # MCP over stdio only, no `serve` (A2A / MCP server)
+toolnexus = "0.23.0"
+# toolnexus = { version = "0.23.0", default-features = false }   # MCP over stdio only, no `serve` (A2A / MCP server)
 tokio = { version = "1", features = ["full"] }
 ```
 

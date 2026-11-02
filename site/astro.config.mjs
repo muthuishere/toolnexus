@@ -36,7 +36,7 @@ export default defineConfig({
 				starlightLlmsTxt({
 					projectName: 'toolnexus',
 					description:
-						'A small, vendor-neutral library that gives any LLM dynamic tool-calling: an MCP host, agent skills, native + HTTP + built-in tools, remote A2A agents, a human-in-the-loop suspension layer, and a unified client loop — byte-identical across JavaScript, Python, Go, Java, C#, Elixir, Clojure and Rust — seven published to their registries, Rust (crates.io) from the next release.',
+						'A small, vendor-neutral library that gives any LLM dynamic tool-calling: an MCP host, agent skills, native + HTTP + built-in tools, remote A2A agents, a human-in-the-loop suspension layer, and a unified client loop — byte-identical across JavaScript, Python, Go, Java, C#, Elixir, Clojure and Rust — all eight published to their registries.',
 					details:
 						'toolnexus unifies every tool source (MCP servers, agent skills, your own functions via defineTool, HTTP/REST endpoints, built-in shell/file tools, and remote A2A agents) behind one Tool interface, emits schema in OpenAI/Anthropic/Gemini formats, and ships a client with a built-in tool-calling loop (skills injection, parallel + chained calls, hooks, streaming, retries, conversation memory, observability). The same examples/ fixtures produce identical behavior in all eight ports, each held to the full tier by a shared conformance gate. The Rust port is async on tokio. The Clojure port runs one .cljc source tree on both the JVM and cljgo, published to Clojars.',
 				}),
