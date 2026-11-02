@@ -14,7 +14,7 @@ categories = ["api-bindings", "asynchronous"]
 default = ["mcp-http"]
 # MCP over streamable HTTP (pulls in reqwest + rustls). Off ⇒ stdio servers only;
 # a remote server is then reported failed with a message naming this feature.
-mcp-http = ["rmcp/transport-streamable-http-client-reqwest", "dep:reqwest", "dep:http"]
+mcp-http = ["rmcp/transport-streamable-http-client-reqwest", "dep:http"]
 
 [dependencies]
 tokio = { version = "1", features = ["process", "io-util", "sync", "time", "rt", "macros"] }
@@ -24,7 +24,10 @@ thiserror = "2"
 yaml-rust2 = "0.13"
 tokio-util = "0.7"
 rmcp = { version = "3.8", default-features = false, features = ["client", "transport-child-process"] }
-reqwest = { version = "0.13", default-features = false, features = ["rustls"], optional = true }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "stream", "json"] }
+regex = "1"
+base64 = "0.22"
+futures-util = "0.3"
 http = { version = "1", optional = true }
 process-wrap = { version = "10", features = ["tokio1"] }
 

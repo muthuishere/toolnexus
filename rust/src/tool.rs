@@ -27,6 +27,9 @@ pub struct ToolResult {
     pub output: String,
     #[serde(rename = "isError")]
     pub is_error: bool,
+    /// Non-text content (§1B). Empty ⇒ omitted on the wire.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parts: Vec<ContentPart>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata: Option<Map<String, Value>>,
 }
@@ -42,7 +45,7 @@ impl ToolResult {
         Self {
             output: output.into(),
             is_error: true,
-            metadata: None,
+            ..Default::default()
         }
     }
     pub fn with_metadata(mut self, metadata: Map<String, Value>) -> Self {
@@ -51,11 +54,136 @@ impl ToolResult {
     }
 }
 
-/// Per-call context: cancellation, and the model's call id when run by a loop.
+/// Per-call context: cancellation, the model's call id when run by a loop,
+/// a per-call timeout override (ms, 0 = none) and the §10 answer on re-execution.
 #[derive(Debug, Clone, Default)]
 pub struct ToolContext {
     pub cancel: CancellationToken,
     pub call_id: Option<String>,
+    pub timeout_ms: u64,
+    pub answer: Option<Answer>,
+}
+
+/// §1B content part: `text | image | file | audio`. Wire keys match Go.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ContentPart {
+    #[serde(rename = "type")]
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub text: String,
+    #[serde(rename = "mimeType", default, skip_serializing_if = "String::is_empty")]
+    pub mime_type: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub data: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub url: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub name: String,
+}
+
+/// Advisory tool behaviour hints (0.22.0). Never sent to the model.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolHints {
+    #[serde(rename = "readOnly")]
+    pub read_only: bool,
+    pub destructive: bool,
+    #[serde(rename = "openWorld")]
+    pub open_world: bool,
+}
+
+/// §10 suspension request. Keys byte-identical across ports.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Request {
+    pub id: String,
+    pub kind: String,
+    pub prompt: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data: Option<Map<String, Value>>,
+    #[serde(rename = "expiresAt", default, skip_serializing_if = "String::is_empty")]
+    pub expires_at: String,
+}
+
+/// §10 answer to a [`Request`].
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Answer {
+    pub id: String,
+    pub ok: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data: Option<Map<String, Value>>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub reason: String,
+}
+
+static PENDING_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Build a suspension result (§10): `isError`, output = prompt (+ "\n" + url),
+/// `metadata.pending` = the request. An empty id gets `pnd-<ms36>-<seq>`.
+pub fn pending(mut req: Request) -> ToolResult {
+    if req.id.is_empty() {
+        let ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let seq = PENDING_SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        req.id = format!("pnd-{}-{}", to_base36(ms), seq);
+    }
+    let mut out = req.prompt.clone();
+    if !req.url.is_empty() {
+        out.push('\n');
+        out.push_str(&req.url);
+    }
+    let mut meta = Map::new();
+    meta.insert(
+        "pending".into(),
+        serde_json::to_value(&req).unwrap_or(Value::Null),
+    );
+    ToolResult {
+        output: out,
+        is_error: true,
+        parts: Vec::new(),
+        metadata: Some(meta),
+    }
+}
+
+/// `authorization` suspension at `url` (default prompt as in Go).
+pub fn auth_required(url: &str, prompt: &str) -> ToolResult {
+    let prompt = if prompt.is_empty() {
+        "Authorization required to continue"
+    } else {
+        prompt
+    };
+    pending(Request {
+        kind: "authorization".into(),
+        prompt: prompt.into(),
+        url: url.into(),
+        ..Default::default()
+    })
+}
+
+/// The request a result suspends on, if any.
+pub fn pending_of(result: &ToolResult) -> Option<Request> {
+    let v = result.metadata.as_ref()?.get("pending")?;
+    let req: Request = serde_json::from_value(v.clone()).ok()?;
+    if req.id.is_empty() && req.kind.is_empty() {
+        return None;
+    }
+    Some(req)
+}
+
+fn to_base36(mut n: u64) -> String {
+    if n == 0 {
+        return "0".into();
+    }
+    let digits = b"0123456789abcdefghijklmnopqrstuvwxyz";
+    let mut out = Vec::new();
+    while n > 0 {
+        out.push(digits[(n % 36) as usize]);
+        n /= 36;
+    }
+    out.reverse();
+    String::from_utf8(out).unwrap_or_default()
 }
 
 /// The boxed future a tool's execute returns.
@@ -73,6 +201,8 @@ pub struct Tool {
     pub input_schema: Value,
     pub source: ToolSource,
     pub execute: ExecuteFn,
+    /// Advisory hints (read-only / destructive / open-world); `None` = unknown.
+    pub hints: Option<ToolHints>,
 }
 
 impl std::fmt::Debug for Tool {
@@ -134,6 +264,7 @@ where
         description: description.into(),
         input_schema: schema.unwrap_or_else(empty_schema),
         source: ToolSource::Native,
+        hints: None,
         execute: Arc::new(move |args, ctx| {
             let f = f.clone();
             Box::pin(async move {

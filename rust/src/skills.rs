@@ -534,6 +534,7 @@ pub fn load_skills_with(opts: LoadSkillsOptions) -> SkillSource {
             "additionalProperties": false
         }),
         source: ToolSource::Skill,
+        hints: None,
         execute: Arc::new(move |args, _ctx| {
             let skills = shared.clone();
             Box::pin(async move { skill_output(&skills, &args, limit) })

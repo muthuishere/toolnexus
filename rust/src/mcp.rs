@@ -481,6 +481,7 @@ fn convert_tool(
         description: def.description.as_deref().unwrap_or("").to_owned(),
         input_schema: build_input_schema(&def),
         source: ToolSource::Mcp,
+        hints: None,
         execute: Arc::new(move |args, ctx| {
             let (peer, original, server) = (peer.clone(), original.clone(), server.clone());
             Box::pin(async move {
