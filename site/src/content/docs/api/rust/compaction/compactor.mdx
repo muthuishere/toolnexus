@@ -8,20 +8,19 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Rust</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7F</a>
+<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7F</a>
 </p>
 
 <Aside type="caution" title="Not available in Rust">
-The Rust port does not ship this entry point.
+Context compaction (§7F) is not ported to Rust. Tracked in `openspec/changes/add-rust-port`.
 </Aside>
 
 Summarise older turns when the transcript grows, so a long-lived agent stays inside its context window.
 
 ## What to use instead
 
-{/* TODO:why */}
-_TODO: the closest thing this port does offer, and how to get the same outcome._
+Trim `Conversation.messages` yourself, or rely on `max_turns`.
 
 ## See also
 
-- _TODO: related entry points_
+- [`create_toolkit`](/api/rust/toolkit/create/) — Collapse MCP servers, skills, built-ins, A2A agents and your own functions into one tool list.

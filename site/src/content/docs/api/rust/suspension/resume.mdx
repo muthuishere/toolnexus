@@ -8,19 +8,18 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Rust</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7D</a>
+<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7D</a>
 </p>
 
 <Aside type="caution" title="Not available in Rust">
-Go additionally ships a separate, golang-only SPEC §10 preview (Client.RunWithAnswer/Client.AskWithAnswer) for durable, cross-process resume of a bare-client run — not part of the §0 conformance contract. Documented on Go's own page and cross-linked from suspension/relay. Clojure has no sub-agent runtime to resume into. A suspension is resolved in-process by the :wait-for slot on toolnexus.client/create-client; durable, cross-process resume is recorded parity debt.
+Agent-runtime resume is not ported to Rust; a halted run is continued by calling `ask` again on the same conversation id. Tracked in `openspec/changes/add-rust-port`.
 </Aside>
 
 Route an Answer to the deepest suspended sub-agent handle and resume it in place.
 
 ## What to use instead
 
-{/* TODO:why */}
-_TODO: the closest thing this port does offer, and how to get the same outcome._
+Answer out of band, then `client.ask(prompt, tk, id)`.
 
 ## See also
 

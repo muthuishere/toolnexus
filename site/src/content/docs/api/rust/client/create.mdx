@@ -1,5 +1,5 @@
 ---
-title: "create_client"
+title: "createClient — the tool-calling loop"
 description: "The unified client: system prompt, skills injection, parallel and chained tool calls, retries, memory. — Rust."
 sidebar:
   label: "create_client"
@@ -8,48 +8,67 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Rust</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a>
+<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a>
 </p>
 
 ```rust
-{/* TODO:signature */}
+pub fn create_client(opts: ClientOptions) -> Client
 ```
 
 The unified client: system prompt, skills injection, parallel and chained tool calls, retries, memory.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+To run the tool-calling loop against an OpenAI- or Anthropic-style endpoint: system prompt + skills catalog, concurrent tool calls, hooks, retries, memory, streaming.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+Use the client rather than your own loop: it implements §8 and §10 the same way as the other seven ports, including Retry-After, the API-key-by-host rule and suspension.
+
+<Aside type="tip" title="When not to use it">
+For a model you run in-process (or an ACP agent), use `create_in_process_client`.
 </Aside>
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. OpenRouter, key from the environment
 
-{/* TODO:example1 */}
 ```rust
-// TODO
+use toolnexus::client::{ClientOptions, Style, create_client};
+let client = create_client(ClientOptions {
+    base_url: "https://openrouter.ai/api/v1".into(),
+    style: Style::OpenAI,
+    model: "openai/gpt-4o-mini".into(),
+    ..Default::default()
+});
 ```
 
-### 2. TODO — the realistic case
+### 2. Anthropic with a system prompt
 
-{/* TODO:example2 */}
 ```rust
-// TODO
+use toolnexus::client::{ClientOptions, Style, create_client};
+let client = create_client(ClientOptions {
+    base_url: "https://api.anthropic.com/v1".into(),
+    style: Style::Anthropic,
+    model: "claude-sonnet-4-5".into(),
+    system_prompt: "Be terse.".into(),
+    max_turns: 20,
+    ..Default::default()
+});
 ```
 
-### 3. TODO — the full surface
+### 3. A local server needs an explicit key source
 
-{/* TODO:example3 */}
 ```rust
-// TODO
+use toolnexus::client::{ClientOptions, Style, create_client};
+let client = create_client(ClientOptions {
+    base_url: "http://localhost:11434/v1".into(),
+    model: "llama3".into(),
+    api_key_env: "LOCAL_LLM_KEY".into(),
+    retries: 4,
+    timeout_ms: 120_000,
+    ..Default::default()
+});
 ```
 
 ## See also

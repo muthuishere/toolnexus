@@ -1,5 +1,5 @@
 ---
-title: "http_tool"
+title: "httpTool — a REST endpoint as a tool"
 description: "Turn an HTTP endpoint into a tool: URL, method, headers with ${ENV} expansion, and a schema. — Rust."
 sidebar:
   label: "http_tool"
@@ -8,50 +8,69 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Rust</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7</a>
+<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7</a>
 </p>
 
 ```rust
-{/* TODO:signature */}
+pub fn http_tool(opts: HttpToolOptions) -> Tool
+pub struct HttpToolOptions {
+    pub name: String, pub description: String, pub method: String, pub url: String,
+    pub headers: BTreeMap<String, String>, pub query: Vec<String>, pub body: String,
+    pub input_schema: Option<Value>, pub timeout: u64, pub result_mode: String,
+}
 ```
 
 Turn an HTTP endpoint into a tool: URL, method, headers with $\{ENV\} expansion, and a schema.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+To expose a REST endpoint as a tool with no code: `\{placeholder\}` URL segments come from the arguments, the rest become query params (GET) or a JSON/form/raw body, and `$\{ENV\}` header values are expanded at call time and never logged.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+Use this over a native tool wrapping reqwest when the call is a straight request/response; you get the §7 error shape (`HTTP <status>: <body>`) for free.
+
+<Aside type="tip" title="When not to use it">
+When the call needs logic around it (pagination, auth refresh), write a `define_tool` instead.
 </Aside>
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. GET with placeholders
 
-{/* TODO:example1 */}
 ```rust
-// TODO
+use toolnexus::http::{HttpToolOptions, http_tool};
+let t = http_tool(HttpToolOptions {
+    name: "repo".into(), description: "GitHub repo".into(),
+    url: "https://api.github.com/repos/{owner}/{repo}".into(),
+    headers: [("User-Agent".to_string(), "me".to_string())].into(),
+    ..Default::default()
+});
 ```
 
-### 2. TODO — the realistic case
+### 2. POST JSON with a secret header
 
-{/* TODO:example2 */}
 ```rust
-// TODO
+use toolnexus::http::{HttpToolOptions, http_tool};
+let t = http_tool(HttpToolOptions {
+    name: "create_issue".into(), description: "Open an issue".into(), method: "POST".into(),
+    url: "https://api.example.com/issues".into(),
+    headers: [("Authorization".to_string(), "Bearer ${EXAMPLE_TOKEN}".to_string())].into(),
+    ..Default::default()
+});
 ```
 
-### 3. TODO — the full surface
+### 3. Status-prefixed results
 
-{/* TODO:example3 */}
 ```rust
-// TODO
+use toolnexus::http::{HttpToolOptions, http_tool};
+let t = http_tool(HttpToolOptions {
+    name: "health".into(), description: "Health".into(),
+    url: "https://example.com/health".into(), result_mode: "status+text".into(), timeout: 5000,
+    ..Default::default()
+});
 ```
 
 ## See also
 
-- _TODO: related entry points_
+- [`create_toolkit`](/api/rust/toolkit/create/) — Collapse MCP servers, skills, built-ins, A2A agents and your own functions into one tool list.

@@ -1,5 +1,5 @@
 ---
-title: "load_skills_with"
+title: "loadSkillsWith — data skills, providers, filters"
 description: "Supply skills as data or from a lazy provider, and narrow them per agent with an allowlist. — Rust."
 sidebar:
   label: "load_skills_with"
@@ -8,48 +8,62 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Rust</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §3</a>
+<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §3</a>
 </p>
 
 ```rust
-{/* TODO:signature */}
+pub fn load_skills_with(opts: LoadSkillsOptions) -> SkillSource
+pub struct LoadSkillsOptions {
+    pub dirs: Vec<PathBuf>,
+    pub skills: Vec<SkillDef>,
+    pub filter: HashMap<String, bool>,
+    pub sample_limit: i64,
+}
 ```
 
 Supply skills as data or from a lazy provider, and narrow them per agent with an allowlist.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+When skills come from somewhere other than disk (a database, a bundle), or you need an allowlist or a different `<skill_files>` sample cap.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+Use this rather than writing temp files: `SkillDef` skills behave exactly like on-disk ones, including the byte-exact tool output.
+
+<Aside type="tip" title="When not to use it">
+For plain directories, `load_skills` is shorter.
 </Aside>
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. Skills as data
 
-{/* TODO:example1 */}
 ```rust
-// TODO
+use toolnexus::skills::{LoadSkillsOptions, SkillDef, load_skills_with};
+let src = load_skills_with(LoadSkillsOptions {
+    skills: vec![SkillDef { name: "greet".into(), description: "Say hi".into(), content: "Say hi.".into(), ..Default::default() }],
+    ..Default::default()
+});
 ```
 
-### 2. TODO — the realistic case
+### 2. An allowlist
 
-{/* TODO:example2 */}
 ```rust
-// TODO
+use std::collections::HashMap;
+use toolnexus::skills::{LoadSkillsOptions, load_skills_with};
+let src = load_skills_with(LoadSkillsOptions {
+    dirs: vec!["skills".into()],
+    filter: HashMap::from([("deploy".to_string(), false)]),
+    ..Default::default()
+});
 ```
 
-### 3. TODO — the full surface
+### 3. A larger sample cap
 
-{/* TODO:example3 */}
 ```rust
-// TODO
+use toolnexus::skills::{LoadSkillsOptions, load_skills_with};
+let src = load_skills_with(LoadSkillsOptions { dirs: vec!["skills".into()], sample_limit: 25, ..Default::default() });
 ```
 
 ## See also

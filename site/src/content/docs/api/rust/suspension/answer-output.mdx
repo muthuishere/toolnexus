@@ -8,19 +8,18 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Rust</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §10</a>
+<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §10</a>
 </p>
 
 <Aside type="caution" title="Not available in Rust">
-The Rust port does not ship this entry point.
+The `AnswerOutput` helper is not exported in Rust; the builtin `question` renders the answer as JSON internally. Tracked in `openspec/changes/add-rust-port`.
 </Aside>
 
 Wraps a human's typed string reply into the Answer a suspended run resumes with — the success counterpart to answerDeclined.
 
 ## What to use instead
 
-{/* TODO:why */}
-_TODO: the closest thing this port does offer, and how to get the same outcome._
+Format `Answer.data` with `serde_json::to_string`.
 
 ## See also
 

@@ -1,5 +1,5 @@
 ---
-title: "create_toolkit"
+title: "createToolkit — the aggregator"
 description: "Collapse MCP servers, skills, built-ins, A2A agents and your own functions into one tool list. — Rust."
 sidebar:
   label: "create_toolkit"
@@ -8,50 +8,68 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Rust</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §4</a>
+<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §4</a>
 </p>
 
 ```rust
-{/* TODO:signature */}
+pub async fn create_toolkit(opts: ToolkitOptions) -> Result<Toolkit, ToolkitError>
 ```
 
 Collapse MCP servers, skills, built-ins, A2A agents and your own functions into one tool list.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+Once per process or per agent: aggregate MCP servers, skills, the builtins and your own tools into one ordered set (MCP → skill → builtin → extra, first name wins) that every adapter and the client read.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+Use the toolkit rather than passing tool vectors around: it owns MCP connections (`close`), routes `execute` by name, builds `skills_prompt()` and is safe to `register` into mid-turn.
+
+<Aside type="tip" title="When not to use it">
+If you only need the schema of a handful of hand-built tools, `to_openai(&tools)` on a `Vec<Tool>` is enough.
 </Aside>
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. Skills only
 
-{/* TODO:example1 */}
 ```rust
-// TODO
+use toolnexus::{BuiltinsConfig, ToolkitOptions, create_toolkit};
+let tk = create_toolkit(ToolkitOptions {
+    skills_dir: vec!["skills".into()],
+    builtins: Some(BuiltinsConfig::off()),
+    ..Default::default()
+}).await?;
+println!("{}", tk.skills_prompt());
 ```
 
-### 2. TODO — the realistic case
+### 2. MCP + builtins + a native tool
 
-{/* TODO:example2 */}
 ```rust
-// TODO
+use toolnexus::{McpConfigInput, ToolkitOptions, create_toolkit, define_tool};
+let mine = define_tool("now", "Current time", None, |_a, _c| async { Ok::<_, String>("12:00".to_string()) });
+let tk = create_toolkit(ToolkitOptions {
+    mcp_config: Some(McpConfigInput::Path("mcp.json".into())),
+    extra_tools: vec![mine],
+    ..Default::default()
+}).await?;
+println!("{:?}", tk.mcp_status());
+tk.close().await;
 ```
 
-### 3. TODO — the full surface
+### 3. Disable tools and skills
 
-{/* TODO:example3 */}
 ```rust
-// TODO
+use toolnexus::{ToolkitOptions, create_toolkit};
+let tk = create_toolkit(ToolkitOptions {
+    skills_dir: vec!["skills".into()],
+    disable_tools: vec!["bash".into(), "write".into()],
+    disable_skills: vec!["deploy".into()],
+    ..Default::default()
+}).await?;
+assert!(tk.get("bash").is_none());
 ```
 
 ## See also
 
-- _TODO: related entry points_
+- [`create_client`](/api/rust/client/create/) — The unified client: system prompt, skills injection, parallel and chained tool calls, retries, memory.

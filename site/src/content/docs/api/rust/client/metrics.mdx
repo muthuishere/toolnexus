@@ -1,5 +1,5 @@
 ---
-title: "MetricEvent"
+title: "onMetric — observability"
 description: "Emit one metric event per model call and per tool call: tokens, latency, outcome. — Rust."
 sidebar:
   label: "MetricEvent"
@@ -8,48 +8,68 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Rust</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a>
+<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a>
 </p>
 
 ```rust
-{/* TODO:signature */}
+pub struct MetricEvent {
+    pub event: String, pub model: String, pub status: String, pub ms: i64,
+    pub prompt_tokens: i64, pub completion_tokens: i64, pub tool: String, pub source: String,
+    pub is_error: bool, pub pending: bool, pub turns: i64, pub tool_calls: i64,
+    pub total_tokens: i64, pub error: String, ..
+}
 ```
 
 Emit one metric event per model call and per tool call: tokens, latency, outcome.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+For observability: `on_metric` receives one event per LLM call, per tool call and per run, with latency, tokens and status.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+Use `on_metric` rather than parsing logs; the event set and field names match the other ports.
+
+<Aside type="tip" title="When not to use it">
+For per-call control (veto, rewrite), use hooks; metrics are read-only.
 </Aside>
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. Print every event
 
-{/* TODO:example1 */}
 ```rust
-// TODO
+use std::sync::Arc;
+use toolnexus::client::{ClientOptions, create_client};
+let client = create_client(ClientOptions {
+    on_metric: Some(Arc::new(|m| println!("{} {} {}ms", m.event, m.status, m.ms))),
+    ..Default::default()
+});
 ```
 
-### 2. TODO — the realistic case
+### 2. Count tool errors
 
-{/* TODO:example2 */}
 ```rust
-// TODO
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use toolnexus::client::{ClientOptions, create_client};
+let errors = Arc::new(AtomicU64::new(0));
+let e = errors.clone();
+let client = create_client(ClientOptions {
+    on_metric: Some(Arc::new(move |m| if m.is_error { e.fetch_add(1, Ordering::Relaxed); })),
+    ..Default::default()
+});
 ```
 
-### 3. TODO — the full surface
+### 3. Sum tokens per run
 
-{/* TODO:example3 */}
 ```rust
-// TODO
+use std::sync::Arc;
+use toolnexus::client::{ClientOptions, create_client};
+let client = create_client(ClientOptions {
+    on_metric: Some(Arc::new(|m| if m.event == "run" { println!("run used {} tokens", m.total_tokens) })),
+    ..Default::default()
+});
 ```
 
 ## See also

@@ -1,5 +1,5 @@
 ---
-title: "auth_required"
+title: "authRequired — suspend for authorization"
 description: "The auth-shaped suspension: hand back a URL, resume once the user has granted access. — Rust."
 sidebar:
   label: "auth_required"
@@ -8,48 +8,53 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Rust</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §10</a>
+<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §10</a>
 </p>
 
 ```rust
-{/* TODO:signature */}
+pub fn auth_required(url: &str, prompt: &str) -> ToolResult
 ```
 
 The auth-shaped suspension: hand back a URL, resume once the user has granted access.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+When a tool needs the user to authorize at a URL: an `authorization` suspension whose output is the prompt plus the URL. An empty prompt uses the shared default text.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+Use this rather than `pending` by hand so the kind and default prompt match every other port.
+
+<Aside type="tip" title="When not to use it">
+For a yes/no or a typed value, use `pending` with `approval` / `input`.
 </Aside>
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. Default prompt
 
-{/* TODO:example1 */}
 ```rust
-// TODO
+use toolnexus::auth_required;
+let r = auth_required("https://example.com/oauth", "");
+assert_eq!(r.output, "Authorization required to continue\nhttps://example.com/oauth");
 ```
 
-### 2. TODO — the realistic case
+### 2. Custom prompt
 
-{/* TODO:example2 */}
 ```rust
-// TODO
+use toolnexus::auth_required;
+let r = auth_required("https://github.com/login/device", "Sign in to GitHub");
 ```
 
-### 3. TODO — the full surface
+### 3. Inside a tool
 
-{/* TODO:example3 */}
 ```rust
-// TODO
+use toolnexus::{Tool, ToolResult, ToolSource, auth_required, empty_schema};
+use std::sync::Arc;
+let t = Tool { name: "gh".into(), description: "".into(), input_schema: empty_schema(), source: ToolSource::Custom, hints: None,
+    execute: Arc::new(|_a, ctx| Box::pin(async move {
+        if ctx.answer.is_some() { ToolResult::ok("authorized") } else { auth_required("https://example.com/auth", "") }
+    })) };
 ```
 
 ## See also

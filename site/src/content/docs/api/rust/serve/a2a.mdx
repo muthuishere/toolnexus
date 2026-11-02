@@ -8,20 +8,19 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Rust</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7B</a>
+<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7B</a>
 </p>
 
 <Aside type="caution" title="Not available in Rust">
-Go names this Toolkit.Serve (a method), not a free StartAgent function — StartAgent is the unrelated §7E persona-heartbeat starter.
+`Toolkit::serve` (inbound A2A) is not ported to Rust. Tracked in `openspec/changes/add-rust-port`.
 </Aside>
 
 Publish an Agent Card and answer JSON-RPC over the client loop — your toolkit becomes someone else's remote agent.
 
 ## What to use instead
 
-{/* TODO:why */}
-_TODO: the closest thing this port does offer, and how to get the same outcome._
+Serve the client loop behind your own HTTP framework (axum, actix) calling `client.run`.
 
 ## See also
 
-- _TODO: related entry points_
+- [`create_toolkit`](/api/rust/toolkit/create/) — Collapse MCP servers, skills, built-ins, A2A agents and your own functions into one tool list.

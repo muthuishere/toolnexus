@@ -8,19 +8,18 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Rust</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §10</a>
+<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §10</a>
 </p>
 
 <Aside type="caution" title="Not available in Rust">
-The Rust port does not ship this entry point.
+The `AnswerDeclined` helper is not exported in Rust; a declined answer is fed back as an error result by the loop. Tracked in `openspec/changes/add-rust-port`.
 </Aside>
 
 Wraps a human's refusal into the Answer a suspended run resumes with, carrying a reason string that defaults to "declined".
 
 ## What to use instead
 
-{/* TODO:why */}
-_TODO: the closest thing this port does offer, and how to get the same outcome._
+Return `ToolResult::error(..)` when `ctx.answer` is not `ok`.
 
 ## See also
 

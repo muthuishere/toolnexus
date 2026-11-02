@@ -1,5 +1,5 @@
 ---
-title: "define_tool"
+title: "defineTool — your own function as a tool"
 description: "Wrap a plain function with a name, description and schema — the shortest path from code you have to a tool the LLM can call. — Rust."
 sidebar:
   label: "define_tool"
@@ -8,48 +8,55 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Rust</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §6</a>
+<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §6</a>
 </p>
 
 ```rust
-{/* TODO:signature */}
+pub fn define_tool<F, Fut, E>(name, description, schema: Option<Value>, f: F) -> Tool
+where F: Fn(Value, ToolContext) -> Fut, Fut: Future<Output = Result<String, E>>, E: Display
 ```
 
 Wrap a plain function with a name, description and schema — the shortest path from code you have to a tool the LLM can call.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+To turn your own async function into a tool (`source: "native"`): `Ok(text)` becomes the output, `Err(e)` becomes an `isError` result the model can read.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+Use this over a hand-built `Tool`: it fills the source, the default empty-object schema and the error mapping.
+
+<Aside type="tip" title="When not to use it">
+If you want the arguments decoded into a struct, use `define_typed_tool`.
 </Aside>
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. No arguments
 
-{/* TODO:example1 */}
 ```rust
-// TODO
+use toolnexus::define_tool;
+let t = define_tool("now", "Current time", None, |_a, _c| async { Ok::<_, String>("12:00".to_string()) });
 ```
 
-### 2. TODO — the realistic case
+### 2. With a schema
 
-{/* TODO:example2 */}
 ```rust
-// TODO
+use serde_json::json;
+use toolnexus::define_tool;
+let t = define_tool("greet", "Greet someone",
+    Some(json!({"type":"object","properties":{"name":{"type":"string"}},"required":["name"]})),
+    |a, _c| async move { a["name"].as_str().map(|n| format!("Hello, {n}!")).ok_or("name is required") });
 ```
 
-### 3. TODO — the full surface
+### 3. Errors are results
 
-{/* TODO:example3 */}
 ```rust
-// TODO
+use serde_json::json;
+use toolnexus::{ToolContext, define_tool};
+let t = define_tool("fail", "", None, |_a, _c| async { Err::<String, _>("boom") });
+let r = t.call(json!({}), ToolContext::default()).await;
+assert!(r.is_error && r.output == "boom");
 ```
 
 ## See also

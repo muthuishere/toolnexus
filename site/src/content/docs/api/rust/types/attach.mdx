@@ -8,19 +8,18 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Rust</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §1B</a>
+<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §1B</a>
 </p>
 
 <Aside type="caution" title="Not available in Rust">
-The Rust port does not ship this entry point.
+The attach helpers (§1B edge constructors such as `File`) are not exported in Rust yet; the `read` builtin builds parts internally. Tracked in `openspec/changes/add-rust-port`.
 </Aside>
 
 The authoring side of multimodal content: constructors that turn a path, bytes, a blob, a data URL, or a remote URL into the ContentPart a prompt or tool result carries — the write half of the read-only ContentPart shape.
 
 ## What to use instead
 
-{/* TODO:why */}
-_TODO: the closest thing this port does offer, and how to get the same outcome._
+Build a `ContentPart` yourself with base64 `data` and a `mime_type`.
 
 ## See also
 

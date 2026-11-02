@@ -1,5 +1,5 @@
 ---
-title: "pending_of"
+title: "pendingOf — read a suspension off a result"
 description: "Detect that a RunResult is parked rather than finished, and get the Request that parked it. — Rust."
 sidebar:
   label: "pending_of"
@@ -8,48 +8,60 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Rust</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §10</a>
+<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §10</a>
 </p>
 
 ```rust
-{/* TODO:signature */}
+pub fn pending_of(result: &ToolResult) -> Option<Request>
 ```
 
 Detect that a RunResult is parked rather than finished, and get the Request that parked it.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+To tell whether a result is a suspension (and read its request) — in a hook, a test, or a loop of your own.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+Use this rather than reading `metadata["pending"]` yourself; it decodes the typed `Request`.
+
+<Aside type="tip" title="When not to use it">
+With the client, `RunResult.pending` already carries the request.
 </Aside>
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. Check a result
 
-{/* TODO:example1 */}
 ```rust
-// TODO
+use toolnexus::{ToolResult, auth_required, pending_of};
+assert!(pending_of(&ToolResult::ok("x")).is_none());
+assert_eq!(pending_of(&auth_required("https://x", "")).unwrap().kind, "authorization");
 ```
 
-### 2. TODO — the realistic case
+### 2. In an after_tool hook
 
-{/* TODO:example2 */}
 ```rust
-// TODO
+use std::sync::Arc;
+use toolnexus::client::Hooks;
+use toolnexus::pending_of;
+let hooks = Hooks {
+    after_tool: Some(Arc::new(|ev| Box::pin(async move {
+        if let Some(r) = pending_of(&ev.result) { println!("{} suspended: {}", ev.name, r.prompt); }
+        Ok(None)
+    }))),
+    ..Default::default()
+};
 ```
 
-### 3. TODO — the full surface
+### 3. Your own loop
 
-{/* TODO:example3 */}
 ```rust
-// TODO
+use serde_json::json;
+use toolnexus::{BuiltinsConfig, ToolContext, ToolkitOptions, create_toolkit, pending_of};
+let tk = create_toolkit(ToolkitOptions::default()).await?;
+let r = tk.execute("question", json!({"questions":[{"question":"Name?"}]}), ToolContext::default()).await;
+if let Some(req) = pending_of(&r) { println!("ask: {}", req.prompt); }
 ```
 
 ## See also

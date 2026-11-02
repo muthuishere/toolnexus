@@ -8,20 +8,19 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Rust</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §11</a>
+<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §11</a>
 </p>
 
 <Aside type="caution" title="Not available in Rust">
-Go keeps openAIMessagesToAnthropic unexported (golang/translate.go:283) — inbound translation is reachable only through Translate.
+Inbound translation (§11) is not ported to Rust. Tracked in `openspec/changes/add-rust-port`.
 </Aside>
 
 Convert an OpenAI-shaped transcript into Anthropic shape, including the tool-result merging a flattening translator gets wrong.
 
 ## What to use instead
 
-{/* TODO:why */}
-_TODO: the closest thing this port does offer, and how to get the same outcome._
+None yet; see `translate/translate`.
 
 ## See also
 
-- _TODO: related entry points_
+- [`create_toolkit`](/api/rust/toolkit/create/) — Collapse MCP servers, skills, built-ins, A2A agents and your own functions into one tool list.

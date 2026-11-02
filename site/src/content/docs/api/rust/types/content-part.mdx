@@ -1,5 +1,5 @@
 ---
-title: "ContentPart"
+title: "ContentPart — images, PDFs and audio"
 description: "The non-text half of a message: text | image | file | audio, carrying base64 bytes or a URL plus a mimeType — never a path. — Rust."
 sidebar:
   label: "ContentPart"
@@ -8,48 +8,59 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Rust</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §1B</a>
+<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §1B</a>
 </p>
 
 ```rust
-{/* TODO:signature */}
+pub struct ContentPart {
+    pub kind: String,      // wire "type": text | image | file | audio
+    pub text: String,
+    pub mime_type: String, // wire "mimeType"
+    pub data: String,      // standard base64
+    pub url: String,
+    pub name: String,
+}
 ```
 
 The non-text half of a message: text | image | file | audio, carrying base64 bytes or a URL plus a mimeType — never a path.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+When a tool returns non-text content — an image the `read` builtin loaded, a screenshot, an MCP image result — put it in `ToolResult.parts`; the client relocates it into the provider's shape (§8A).
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+Use parts rather than base64 inside `output`: text output is token-counted and unreadable to a vision model, while a part reaches the model as an image block.
+
+<Aside type="tip" title="When not to use it">
+Never put a filesystem path in a part (§0 1b): carry `data` or `url`, exactly one.
 </Aside>
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. An image part
 
-{/* TODO:example1 */}
 ```rust
-// TODO
+use toolnexus::{ContentPart, ToolResult};
+let png_b64 = String::from("iVBORw0KGgo="); // your bytes, base64
+let mut r = ToolResult::ok("screenshot.png (image/png)");
+r.parts.push(ContentPart { kind: "image".into(), mime_type: "image/png".into(), data: png_b64, ..Default::default() });
 ```
 
-### 2. TODO — the realistic case
+### 2. A file by URL
 
-{/* TODO:example2 */}
 ```rust
-// TODO
+use toolnexus::ContentPart;
+let p = ContentPart { kind: "file".into(), mime_type: "application/pdf".into(), url: "https://example.com/a.pdf".into(), ..Default::default() };
 ```
 
-### 3. TODO — the full surface
+### 3. Check a part before sending
 
-{/* TODO:example3 */}
 ```rust
-// TODO
+use toolnexus::ContentPart;
+use toolnexus::client::validate_part;
+let p = ContentPart { kind: "image".into(), mime_type: "image/png".into(), ..Default::default() };
+assert!(validate_part(&p, 0).is_err()); // neither data nor url
 ```
 
 ## See also

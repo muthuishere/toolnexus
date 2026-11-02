@@ -1,5 +1,5 @@
 ---
-title: "select_builtins"
+title: "selectBuiltins — choose the shipped tools"
 description: "Pick which built-in file/shell/web tools are in play, by name or by source toggle. — Rust."
 sidebar:
   label: "select_builtins"
@@ -8,48 +8,56 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Rust</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §4A</a>
+<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §4A</a>
 </p>
 
 ```rust
-{/* TODO:signature */}
+pub fn select_builtins(cfg: &BuiltinsConfig) -> Result<Vec<Tool>, String>
 ```
 
 Pick which built-in file/shell/web tools are in play, by name or by source toggle.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+To get exactly the builtins a `BuiltinsConfig` enables (global toggle, then the per-tool map) — what `create_toolkit` uses. It fails when `bash` is enabled and no shell resolves.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+Use this rather than filtering `create_builtin_tools` yourself: it applies the whole-source-off short-circuit and the shell check exactly as §4 says.
+
+<Aside type="tip" title="When not to use it">
+Inside a toolkit, set `ToolkitOptions.builtins` instead.
 </Aside>
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. Everything on
 
-{/* TODO:example1 */}
 ```rust
-// TODO
+use toolnexus::{BuiltinsConfig, select_builtins};
+let tools = select_builtins(&BuiltinsConfig::default())?;
+assert_eq!(tools.len(), 10);
 ```
 
-### 2. TODO — the realistic case
+### 2. Drop bash and write
 
-{/* TODO:example2 */}
 ```rust
-// TODO
+use std::collections::BTreeMap;
+use toolnexus::{BuiltinsConfig, select_builtins};
+let tools = select_builtins(&BuiltinsConfig {
+    tools: BTreeMap::from([("bash".to_string(), false), ("write".to_string(), false)]),
+    ..Default::default()
+})?;
 ```
 
-### 3. TODO — the full surface
+### 3. Confined to a workspace
 
-{/* TODO:example3 */}
 ```rust
-// TODO
+use toolnexus::{BuiltinsConfig, select_builtins};
+let tools = select_builtins(&BuiltinsConfig {
+    base_dir: "/work/project".into(), confine_to_base_dir: true, kill_grace_ms: 200,
+    ..Default::default()
+})?;
 ```
 
 ## See also

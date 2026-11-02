@@ -1,5 +1,5 @@
 ---
-title: "InMemoryConversationStore"
+title: "ConversationStore — durable transcripts"
 description: "Swap in-memory history for your own store so a conversation survives a process restart. — Rust."
 sidebar:
   label: "InMemoryConversationStore"
@@ -8,48 +8,71 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Rust</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a>
+<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a>
 </p>
 
 ```rust
-{/* TODO:signature */}
+pub struct InMemoryConversationStore { .. }   // InMemoryConversationStore::new()
+pub struct FileConversationStore { .. }       // FileConversationStore::new(root)?
+pub trait ConversationStore: Send + Sync {
+    fn get(&self, id: &str) -> Result<Option<Vec<Value>>, String>;
+    fn save(&self, id: &str, messages: &[Value]) -> Result<(), String>;
+    fn list(&self) -> ..; fn delete(&self, id: &str) -> ..;
+}
 ```
 
 Swap in-memory history for your own store so a conversation survives a process restart.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+Behind `ask(prompt, tk, id)`: where transcripts are kept by id. In-memory is the default; the file store writes each conversation atomically so it survives a restart.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+Use a store over a `Conversation` when several requests (or processes) continue the same id.
+
+<Aside type="tip" title="When not to use it">
+Implement `ConversationStore` yourself for a database; do not reach into the file store's layout.
 </Aside>
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. The default
 
-{/* TODO:example1 */}
 ```rust
-// TODO
+use toolnexus::client::{ClientOptions, Style, create_client};
+use toolnexus::{ToolkitOptions, create_toolkit};
+let tk = create_toolkit(ToolkitOptions::default()).await?;
+let client = create_client(ClientOptions {
+    base_url: "https://openrouter.ai/api/v1".into(),
+    style: Style::OpenAI,
+    model: "openai/gpt-4o-mini".into(),
+    ..Default::default()
+});
+client.ask("I like tea", &tk, "u1").await?;
+let r = client.ask("What do I like?", &tk, "u1").await?;
 ```
 
-### 2. TODO — the realistic case
+### 2. Persist to disk
 
-{/* TODO:example2 */}
 ```rust
-// TODO
+use std::sync::Arc;
+use toolnexus::client::{ClientOptions, create_client};
+use toolnexus::store::FileConversationStore;
+let store = Arc::new(FileConversationStore::new("/var/lib/myapp/conversations")?);
+let client = create_client(ClientOptions { store: Some(store), ..Default::default() });
 ```
 
-### 3. TODO — the full surface
+### 3. Your own store
 
-{/* TODO:example3 */}
 ```rust
-// TODO
+use serde_json::Value;
+use toolnexus::store::ConversationStore;
+struct Db;
+impl ConversationStore for Db {
+    fn get(&self, _id: &str) -> Result<Option<Vec<Value>>, String> { Ok(None) }
+    fn save(&self, _id: &str, _m: &[Value]) -> Result<(), String> { Ok(()) }
+}
 ```
 
 ## See also

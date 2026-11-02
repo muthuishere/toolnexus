@@ -1,5 +1,5 @@
 ---
-title: "create_builtin_tools"
+title: "createBuiltinTools — the full built-in set"
 description: "Construct every built-in tool directly, outside a toolkit. — Rust."
 sidebar:
   label: "create_builtin_tools"
@@ -8,48 +8,55 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Rust</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §4A</a>
+<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §4A</a>
 </p>
 
 ```rust
-{/* TODO:signature */}
+pub fn create_builtin_tools(cfg: &BuiltinsConfig) -> Vec<Tool>
 ```
 
 Construct every built-in tool directly, outside a toolkit.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+When you want every builtin regardless of the toggles — for example to list their schemas in a UI — with the host boundary from `cfg` applied.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+Prefer `select_builtins` for a running agent: this one ignores `enabled` / `tools` and skips the shell check.
+
+<Aside type="tip" title="When not to use it">
+Do not use it to build an agent's toolset; the toggles exist for locked-down hosts.
 </Aside>
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. List names
 
-{/* TODO:example1 */}
 ```rust
-// TODO
+use toolnexus::BuiltinsConfig;
+use toolnexus::builtins::create_builtin_tools;
+for t in create_builtin_tools(&BuiltinsConfig::default()) { println!("{}", t.name); }
 ```
 
-### 2. TODO — the realistic case
+### 2. Show hints
 
-{/* TODO:example2 */}
 ```rust
-// TODO
+use toolnexus::BuiltinsConfig;
+use toolnexus::builtins::create_builtin_tools;
+for t in create_builtin_tools(&BuiltinsConfig::default()) { println!("{} {:?}", t.name, t.hints); }
 ```
 
-### 3. TODO — the full surface
+### 3. Opt-in background shells
 
-{/* TODO:example3 */}
 ```rust
-// TODO
+use std::sync::Arc;
+use toolnexus::BuiltinsConfig;
+use toolnexus::builtins::{BackgroundShells, create_builtin_tools};
+let bg = Arc::new(BackgroundShells::default());
+let tools = create_builtin_tools(&BuiltinsConfig { background: Some(bg.clone()), ..Default::default() });
+// ... on shutdown:
+bg.close_all().await;
 ```
 
 ## See also

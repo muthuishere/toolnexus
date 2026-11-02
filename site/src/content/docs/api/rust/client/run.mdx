@@ -1,5 +1,5 @@
 ---
-title: "Client.run"
+title: "run — one turn of the loop"
 description: "Send a prompt, let the loop call tools until the model stops, get a RunResult. — Rust."
 sidebar:
   label: "Client.run"
@@ -8,48 +8,75 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Rust</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a>
+<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a>
 </p>
 
 ```rust
-{/* TODO:signature */}
+pub async fn run(&self, prompt: impl Into<Prompt>, tk: &Toolkit) -> Result<RunResult, ClientError>
 ```
 
 Send a prompt, let the loop call tools until the model stops, get a RunResult.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+For one task: send the prompt, let the loop call tools until the model stops (or `max_turns`), and get `RunResult \{ text, tool_calls, turns, usage, status, pending \}`.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+Use `run` for a one-shot; use `ask(prompt, tk, id)` or `conversation(tk)` when the next prompt must remember this one.
+
+<Aside type="tip" title="When not to use it">
+When you need tokens as they arrive, use `stream`.
 </Aside>
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. One task
 
-{/* TODO:example1 */}
 ```rust
-// TODO
+use toolnexus::client::{ClientOptions, Style, create_client};
+use toolnexus::{ToolkitOptions, create_toolkit};
+let tk = create_toolkit(ToolkitOptions::default()).await?;
+let client = create_client(ClientOptions {
+    base_url: "https://openrouter.ai/api/v1".into(),
+    style: Style::OpenAI,
+    model: "openai/gpt-4o-mini".into(),
+    ..Default::default()
+});
+let r = client.run("List the files here", &tk).await?;
+println!("{} ({} turns)", r.text, r.turns);
 ```
 
-### 2. TODO — the realistic case
+### 2. Inspect tool calls
 
-{/* TODO:example2 */}
 ```rust
-// TODO
+use toolnexus::client::{ClientOptions, Style, create_client};
+use toolnexus::{ToolkitOptions, create_toolkit};
+let tk = create_toolkit(ToolkitOptions::default()).await?;
+let client = create_client(ClientOptions {
+    base_url: "https://openrouter.ai/api/v1".into(),
+    style: Style::OpenAI,
+    model: "openai/gpt-4o-mini".into(),
+    ..Default::default()
+});
+let r = client.run("Read README.md", &tk).await?;
+for c in &r.tool_calls { println!("{} -> error={}", c.name, c.is_error); }
 ```
 
-### 3. TODO — the full surface
+### 3. Handle a suspension
 
-{/* TODO:example3 */}
 ```rust
-// TODO
+use toolnexus::client::{ClientOptions, Style, create_client};
+use toolnexus::{ToolkitOptions, create_toolkit};
+let tk = create_toolkit(ToolkitOptions::default()).await?;
+let client = create_client(ClientOptions {
+    base_url: "https://openrouter.ai/api/v1".into(),
+    style: Style::OpenAI,
+    model: "openai/gpt-4o-mini".into(),
+    ..Default::default()
+});
+let r = client.run("Ask me which environment, then deploy", &tk).await?;
+if r.status == "pending" { println!("waiting on: {}", r.pending.unwrap().prompt); }
 ```
 
 ## See also

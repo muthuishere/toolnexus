@@ -1,5 +1,5 @@
 ---
-title: "ToolContext"
+title: "ToolContext — what execute receives"
 description: "Optional per-call context handed to execute: cancellation, identity, and host-supplied state. — Rust."
 sidebar:
   label: "ToolContext"
@@ -8,48 +8,73 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Rust</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §1</a>
+<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §1</a>
 </p>
 
 ```rust
-{/* TODO:signature */}
+pub struct ToolContext {
+    pub cancel: CancellationToken,
+    pub call_id: Option<String>,
+    pub timeout_ms: u64,
+    pub answer: Option<Answer>,
+}
 ```
 
 Optional per-call context handed to execute: cancellation, identity, and host-supplied state.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+Inside a tool's execute: honour `cancel` when the turn is cancelled, tell sibling calls apart with `call_id` (the loop runs one message's calls concurrently), and read `answer` when the loop re-runs you after a §10 suspension.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+Read cancellation from the context rather than a global flag: the loop creates one token per turn, so cancelling one turn never stops another.
+
+<Aside type="tip" title="When not to use it">
+Outside a loop, pass `ToolContext::default()` — every field is optional.
 </Aside>
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. Honour cancellation
 
-{/* TODO:example1 */}
 ```rust
-// TODO
+use toolnexus::define_tool;
+let slow = define_tool("slow", "Waits", None, |_a, ctx| async move {
+    tokio::select! {
+        _ = ctx.cancel.cancelled() => Err("cancelled".to_string()),
+        _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => Ok("done".to_string()),
+    }
+});
 ```
 
-### 2. TODO — the realistic case
+### 2. Use the call id
 
-{/* TODO:example2 */}
 ```rust
-// TODO
+use toolnexus::define_tool;
+let t = define_tool("who", "", None, |_a, ctx| async move {
+    Ok::<_, String>(ctx.call_id.unwrap_or_else(|| "direct".into()))
+});
 ```
 
-### 3. TODO — the full surface
+### 3. Read a §10 answer
 
-{/* TODO:example3 */}
 ```rust
-// TODO
+use std::sync::Arc;
+use toolnexus::{Request, Tool, ToolResult, ToolSource, empty_schema, pending};
+// A suspension must be the tool's whole ToolResult (it carries metadata.pending),
+// so build the Tool directly rather than through define_tool, whose Ok(String) has no metadata.
+let ask = Tool {
+    name: "confirm".into(), description: "Ask first".into(), input_schema: empty_schema(),
+    source: ToolSource::Custom, hints: None,
+    execute: Arc::new(|_a, ctx| Box::pin(async move {
+        match ctx.answer {
+            Some(a) if a.ok => ToolResult::ok("confirmed"),
+            Some(_) => ToolResult::error("declined"),
+            None => pending(Request { kind: "approval".into(), prompt: "Proceed?".into(), ..Default::default() }),
+        }
+    })),
+};
 ```
 
 ## See also

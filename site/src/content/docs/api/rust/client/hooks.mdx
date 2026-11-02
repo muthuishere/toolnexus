@@ -1,5 +1,5 @@
 ---
-title: "Hooks"
+title: "Hooks — lifecycle middleware"
 description: "Intercept before/after model calls and tool calls: audit, redact, veto, or rewrite. — Rust."
 sidebar:
   label: "Hooks"
@@ -8,48 +8,76 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Rust</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a>
+<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a>
 </p>
 
 ```rust
-{/* TODO:signature */}
+pub struct Hooks {
+    pub before_llm: Option<BeforeLlmHook>,
+    pub after_llm: Option<AfterLlmHook>,
+    pub before_tool: Option<BeforeToolHook>,
+    pub after_tool: Option<AfterToolHook>,
+}
 ```
 
 Intercept before/after model calls and tool calls: audit, redact, veto, or rewrite.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+To audit, redact, veto or rewrite: `before_tool` sees the name, args, call id and `hints` and can replace the args or short-circuit with a result (or a `pending` for approval); `before_llm` can swap messages, tools or the model.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+Gate permissions in `before_tool` using `hints` rather than wrapping each tool: one hook covers MCP, builtins and your own tools alike.
+
+<Aside type="tip" title="When not to use it">
+Hooks are async and run on the loop's path; keep them fast, and return `Ok(None)` to change nothing.
 </Aside>
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. Log every tool call
 
-{/* TODO:example1 */}
 ```rust
-// TODO
+use std::sync::Arc;
+use toolnexus::client::{ClientOptions, Hooks, create_client};
+let client = create_client(ClientOptions {
+    hooks: Hooks {
+        before_tool: Some(Arc::new(|ev| Box::pin(async move { println!("{} {}", ev.name, ev.args); Ok(None) }))),
+        ..Default::default()
+    },
+    ..Default::default()
+});
 ```
 
-### 2. TODO — the realistic case
+### 2. Deny anything that is not read-only
 
-{/* TODO:example2 */}
 ```rust
-// TODO
+use std::sync::Arc;
+use toolnexus::ToolResult;
+use toolnexus::client::{Hooks, ToolOverride};
+let hooks = Hooks {
+    before_tool: Some(Arc::new(|ev| Box::pin(async move {
+        if ev.hints.map(|h| h.read_only).unwrap_or(false) { return Ok(None); }
+        Ok(Some(ToolOverride { result: Some(ToolResult::error(format!("{} needs approval", ev.name))), ..Default::default() }))
+    }))),
+    ..Default::default()
+};
 ```
 
-### 3. TODO — the full surface
+### 3. Redact tool output before the model sees it
 
-{/* TODO:example3 */}
 ```rust
-// TODO
+use std::sync::Arc;
+use toolnexus::client::{Hooks, ToolOverride};
+let hooks = Hooks {
+    after_tool: Some(Arc::new(|ev| Box::pin(async move {
+        let mut r = ev.result.clone();
+        r.output = r.output.replace("SECRET", "[redacted]");
+        Ok(Some(ToolOverride { result: Some(r), ..Default::default() }))
+    }))),
+    ..Default::default()
+};
 ```
 
 ## See also

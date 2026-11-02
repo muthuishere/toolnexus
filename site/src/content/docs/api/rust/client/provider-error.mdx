@@ -1,5 +1,5 @@
 ---
-title: "ProviderError"
+title: "The typed error a failed LLM call raises — the host loop, made catchable"
 description: "A non-2xx response from the model endpoint raises a typed provider error carrying the status code, a redacted+capped body, and the retry-after signal — never a bare unstructured exception. — Rust."
 sidebar:
   label: "ProviderError"
@@ -8,48 +8,82 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Rust</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a>
+<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a>
 </p>
 
 ```rust
-{/* TODO:signature */}
+pub struct ProviderError { pub status: u16, pub body: String, pub retry_after: String }
+// returned as ClientError::Provider(ProviderError)
 ```
 
 A non-2xx response from the model endpoint raises a typed provider error carrying the status code, a redacted+capped body, and the retry-after signal — never a bare unstructured exception.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+When a run fails on the provider's side: match `ClientError::Provider` to get the HTTP status, the (redacted) body and any `Retry-After`.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+Match the typed error instead of parsing the message string; the body is already redacted of account identifiers.
+
+<Aside type="tip" title="When not to use it">
+Transport failures are `ClientError::Transport`, not this.
 </Aside>
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. Branch on the status
 
-{/* TODO:example1 */}
 ```rust
-// TODO
+use toolnexus::client::{ClientOptions, Style, create_client};
+use toolnexus::client::ClientError;
+use toolnexus::{ToolkitOptions, create_toolkit};
+let tk = create_toolkit(ToolkitOptions::default()).await?;
+let client = create_client(ClientOptions {
+    base_url: "https://openrouter.ai/api/v1".into(),
+    style: Style::OpenAI,
+    model: "openai/gpt-4o-mini".into(),
+    ..Default::default()
+});
+match client.run("hi", &tk).await {
+    Err(ClientError::Provider(p)) if p.status == 402 => println!("top up credits"),
+    Err(e) => println!("failed: {e}"),
+    Ok(r) => println!("{}", r.text),
+}
 ```
 
-### 2. TODO — the realistic case
+### 2. Respect Retry-After yourself
 
-{/* TODO:example2 */}
 ```rust
-// TODO
+use toolnexus::client::{ClientOptions, Style, create_client};
+use toolnexus::client::ClientError;
+use toolnexus::{ToolkitOptions, create_toolkit};
+let tk = create_toolkit(ToolkitOptions::default()).await?;
+let client = create_client(ClientOptions {
+    base_url: "https://openrouter.ai/api/v1".into(),
+    style: Style::OpenAI,
+    model: "openai/gpt-4o-mini".into(),
+    ..Default::default()
+});
+if let Err(ClientError::Provider(p)) = client.run("hi", &tk).await {
+    println!("retry after {}s", p.retry_after);
+}
 ```
 
-### 3. TODO — the full surface
+### 3. Log the body
 
-{/* TODO:example3 */}
 ```rust
-// TODO
+use toolnexus::client::{ClientOptions, Style, create_client};
+use toolnexus::client::ClientError;
+use toolnexus::{ToolkitOptions, create_toolkit};
+let tk = create_toolkit(ToolkitOptions::default()).await?;
+let client = create_client(ClientOptions {
+    base_url: "https://openrouter.ai/api/v1".into(),
+    style: Style::OpenAI,
+    model: "openai/gpt-4o-mini".into(),
+    ..Default::default()
+});
+if let Err(ClientError::Provider(p)) = client.run("hi", &tk).await { eprintln!("{}: {}", p.status, p.body); }
 ```
 
 ## See also

@@ -8,19 +8,18 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Rust</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §6</a>
+<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §6</a>
 </p>
 
 <Aside type="caution" title="Not available in Rust">
-JS/Java/C# expose an explicit collector; Python, Go and Elixir have no equivalent public symbol. Clojure has no collector either.
+No port exposes a collect-from-annotations helper under this name, and Rust has no annotations to collect from. Tracked in `openspec/changes/add-rust-port`.
 </Aside>
 
 Sweep a module or class and collect every function marked as a tool.
 
 ## What to use instead
 
-{/* TODO:why */}
-_TODO: the closest thing this port does offer, and how to get the same outcome._
+Build a `Vec<Tool>` with `define_tool` / `define_typed_tool` and pass it as `extra_tools`.
 
 ## See also
 

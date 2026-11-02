@@ -1,5 +1,5 @@
 ---
-title: "list_skills"
+title: "listSkills — inventory and skip reasons"
 description: "Enumerate discovered skills and, crucially, the ones that were skipped and why. — Rust."
 sidebar:
   label: "list_skills"
@@ -8,48 +8,52 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Rust</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §3</a>
+<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §3</a>
 </p>
 
 ```rust
-{/* TODO:signature */}
+pub fn list_skills(opts: &LoadSkillsOptions) -> SkillInventory
+pub struct SkillInventory { pub skills: Vec<SkillInfo>, pub skipped: Vec<SkillSkip> }
 ```
 
 Enumerate discovered skills and, crucially, the ones that were skipped and why.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+To show what was found and why something was skipped (missing name, malformed frontmatter, duplicate, unreadable) — for a settings screen or a lint step — without building a tool.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+Use this rather than `load_skills_with(..).skipped` when you do not want the tool or the filter applied: it is the unfiltered inventory.
+
+<Aside type="tip" title="When not to use it">
+To actually expose skills to a model, load them; this only lists.
 </Aside>
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. List names
 
-{/* TODO:example1 */}
 ```rust
-// TODO
+use toolnexus::skills::{LoadSkillsOptions, list_skills};
+let inv = list_skills(&LoadSkillsOptions { dirs: vec!["skills".into()], ..Default::default() });
+for s in &inv.skills { println!("{}: {}", s.name, s.description); }
 ```
 
-### 2. TODO — the realistic case
+### 2. Report skips
 
-{/* TODO:example2 */}
 ```rust
-// TODO
+use toolnexus::skills::{LoadSkillsOptions, list_skills};
+let inv = list_skills(&LoadSkillsOptions { dirs: vec!["skills".into()], ..Default::default() });
+for s in &inv.skipped { println!("{} {} {}", s.location, s.reason.as_str(), s.detail); }
 ```
 
-### 3. TODO — the full surface
+### 3. Fail a CI lint on any skip
 
-{/* TODO:example3 */}
 ```rust
-// TODO
+use toolnexus::skills::{LoadSkillsOptions, list_skills};
+let inv = list_skills(&LoadSkillsOptions { dirs: vec!["skills".into()], ..Default::default() });
+assert!(inv.skipped.is_empty(), "{:?}", inv.skipped);
 ```
 
 ## See also

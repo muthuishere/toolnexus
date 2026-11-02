@@ -1,5 +1,5 @@
 ---
-title: "pending"
+title: "pending — suspend and ask a human"
 description: "Return a Pending from a tool to park the run until someone answers. — Rust."
 sidebar:
   label: "pending"
@@ -8,48 +8,74 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Rust</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §10</a>
+<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §10</a>
 </p>
 
 ```rust
-{/* TODO:signature */}
+pub fn pending(req: Request) -> ToolResult
+pub struct Request { pub id: String, pub kind: String, pub prompt: String, pub url: String,
+                     pub data: Option<Map<String, Value>>, pub expires_at: String }
 ```
 
 Return a Pending from a tool to park the run until someone answers.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+From a tool that needs a human (or another system) before it can finish: return `pending(..)`; the loop calls `wait_for` and re-runs you with `ctx.answer`, or halts with `status: "pending"`.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+Suspend instead of blocking inside the tool: the host decides how to ask (UI, chat, email) and the run can resume later.
+
+<Aside type="tip" title="When not to use it">
+For a link the user must open (OAuth), `auth_required(url, prompt)` is the shorthand.
 </Aside>
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. Ask for approval
 
-{/* TODO:example1 */}
 ```rust
-// TODO
+use std::sync::Arc;
+use toolnexus::{Request, Tool, ToolResult, ToolSource, empty_schema, pending};
+// A suspension must be the tool's whole ToolResult (it carries metadata.pending),
+// so build the Tool directly rather than through define_tool, whose Ok(String) has no metadata.
+let deploy = Tool {
+    name: "deploy".into(), description: "Deploy".into(), input_schema: empty_schema(),
+    source: ToolSource::Custom, hints: None,
+    execute: Arc::new(|_a, ctx| Box::pin(async move {
+        match ctx.answer {
+            Some(a) if a.ok => ToolResult::ok("deployed"),
+            Some(_) => ToolResult::error("declined"),
+            None => pending(Request { kind: "approval".into(), prompt: "Deploy to prod?".into(), ..Default::default() }),
+        }
+    })),
+};
 ```
 
-### 2. TODO — the realistic case
+### 2. Return the pending result itself
 
-{/* TODO:example2 */}
 ```rust
-// TODO
+use std::sync::Arc;
+use toolnexus::{Request, Tool, ToolSource, empty_schema, pending};
+let t = Tool {
+    name: "ask".into(), description: "Ask the user".into(), input_schema: empty_schema(),
+    source: ToolSource::Custom, hints: None,
+    execute: Arc::new(|_a, ctx| Box::pin(async move {
+        match ctx.answer { Some(a) => toolnexus::ToolResult::ok(format!("{:?}", a.data)),
+            None => pending(Request { kind: "input".into(), prompt: "Your email?".into(), ..Default::default() }) }
+    })),
+};
 ```
 
-### 3. TODO — the full surface
+### 3. With extra data
 
-{/* TODO:example3 */}
 ```rust
-// TODO
+use serde_json::{Map, json};
+use toolnexus::{Request, pending};
+let mut data = Map::new();
+data.insert("options".into(), json!(["a", "b"]));
+let r = pending(Request { kind: "choice".into(), prompt: "Pick one".into(), data: Some(data), ..Default::default() });
 ```
 
 ## See also

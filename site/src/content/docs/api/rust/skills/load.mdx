@@ -1,5 +1,5 @@
 ---
-title: "load_skills"
+title: "loadSkills — discover SKILL.md files"
 description: "Glob a skills directory and expose one skill tool with progressive disclosure. — Rust."
 sidebar:
   label: "load_skills"
@@ -8,48 +8,54 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 <p class="api-crumb">
-<strong>Rust</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §3</a>
+<strong>Rust</strong> · crate <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §3</a>
 </p>
 
 ```rust
-{/* TODO:signature */}
+pub fn load_skills<P: AsRef<Path>>(dirs: &[P]) -> SkillSource
 ```
 
 Glob a skills directory and expose one skill tool with progressive disclosure.
 
 ## When to use it
 
-{/* TODO:when */}
-_TODO: the situation this entry point is for._
+For the common case: glob `**/SKILL.md` under one or more roots and get the `skill` tool plus `prompt()`, byte-identical to every other port.
 
 ## Why this and not the alternative
 
-{/* TODO:why */}
-<Aside type="tip" title="TODO: when NOT to use it">
-_TODO: name the alternative and when to prefer it._
+Use this shorthand when you have only directories; reach for `load_skills_with` for data skills, an allowlist or a sample cap.
+
+<Aside type="tip" title="When not to use it">
+Inside an agent, prefer `ToolkitOptions.skills_dir` so the toolkit adds the catalog and tool for you.
 </Aside>
 
 ## Examples
 
-### 1. TODO — the smallest useful call
+### 1. One root
 
-{/* TODO:example1 */}
 ```rust
-// TODO
+use toolnexus::skills::load_skills;
+let src = load_skills(&["skills"]);
+println!("{}", src.prompt());
 ```
 
-### 2. TODO — the realistic case
+### 2. Several roots, first name wins
 
-{/* TODO:example2 */}
 ```rust
-// TODO
+use toolnexus::skills::load_skills;
+let src = load_skills(&["project/skills", "/home/me/.skills"]);
+println!("{:?}", src.skills.keys().collect::<Vec<_>>());
 ```
 
-### 3. TODO — the full surface
+### 3. Run the skill tool
 
-{/* TODO:example3 */}
 ```rust
-// TODO
+use serde_json::json;
+use toolnexus::ToolContext;
+use toolnexus::skills::load_skills;
+let src = load_skills(&["skills"]);
+let r = src.tool.call(json!({"name": "hello-world"}), ToolContext::default()).await;
+println!("{}", r.output);
 ```
 
 ## See also
