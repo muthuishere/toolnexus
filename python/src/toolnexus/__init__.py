@@ -164,6 +164,7 @@ from .builtin_extras import BackgroundShellInfo, BackgroundShells, WebSearchResu
 from .client import ModelInfo, list_models
 from .prompt_cache import PromptCacheOptions
 from .tool_tiers import TIER_CORE, TIER_DEFERRED, TIER_LISTED, ToolTier, ToolTierOptions
+from .tool_concurrency import DEFAULT_MAX_TOOL_CONCURRENCY, is_concurrency_safe, resolve_max_tool_concurrency
 from .mcp_serve import (
     MCPServeConfig,
     OnCall,
@@ -224,6 +225,9 @@ __all__ = [
     "list_models",
     "PromptCacheOptions",
     "ToolTierOptions",
+    "DEFAULT_MAX_TOOL_CONCURRENCY",
+    "is_concurrency_safe",
+    "resolve_max_tool_concurrency",
     "ToolTier",
     "TIER_CORE",
     "TIER_LISTED",

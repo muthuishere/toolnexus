@@ -57,7 +57,11 @@ defmodule Toolnexus.A2aTest do
       })
     end
 
-    defp handle(conn, agent, st, %{"method" => "GetTask", "id" => id, "params" => %{"id" => task_id}}) do
+    defp handle(conn, agent, st, %{
+           "method" => "GetTask",
+           "id" => id,
+           "params" => %{"id" => task_id}
+         }) do
       polls = Agent.get_and_update(agent, fn s -> {s.polls + 1, %{s | polls: s.polls + 1}} end)
 
       task =
@@ -92,7 +96,10 @@ defmodule Toolnexus.A2aTest do
               "id" => task_id,
               "status" => %{
                 "state" => "failed",
-                "message" => %{"role" => "agent", "parts" => [%{"kind" => "text", "text" => "boom"}]}
+                "message" => %{
+                  "role" => "agent",
+                  "parts" => [%{"kind" => "text", "text" => "boom"}]
+                }
               }
             }
 
@@ -230,7 +237,9 @@ defmodule Toolnexus.A2aTest do
 
   test "completed: SendMessage then GetTask polls; artifact text joined with newlines" do
     {url, agent} = start_stub(mode: :completed)
-    [add, _] = A2a.agent_tools(A2a.agent(card: url <> "/.well-known/agent-card.json", poll_every: 20))
+
+    [add, _] =
+      A2a.agent_tools(A2a.agent(card: url <> "/.well-known/agent-card.json", poll_every: 20))
 
     result = add.execute.(%{"task" => "add 1 and 2"}, %Context{})
     refute result.is_error
@@ -247,7 +256,10 @@ defmodule Toolnexus.A2aTest do
     assert send_msg["jsonrpc"] == "2.0"
     assert get_in(send_msg, ["params", "configuration", "blocking"]) == false
     assert get_in(send_msg, ["params", "message", "role"]) == "user"
-    assert [%{"kind" => "text", "text" => "add 1 and 2"}] = get_in(send_msg, ["params", "message", "parts"])
+
+    assert [%{"kind" => "text", "text" => "add 1 and 2"}] =
+             get_in(send_msg, ["params", "message", "parts"])
+
     assert is_binary(get_in(send_msg, ["params", "message", "messageId"]))
 
     get_task = Enum.find(rpcs(agent), &(&1["method"] == "GetTask"))
@@ -256,7 +268,9 @@ defmodule Toolnexus.A2aTest do
 
   test "completed with no artifact text falls back to the last agent history message" do
     {url, _} = start_stub(mode: :history_fallback)
-    [tool | _] = A2a.agent_tools(A2a.agent(card: url <> "/.well-known/agent-card.json", poll_every: 10))
+
+    [tool | _] =
+      A2a.agent_tools(A2a.agent(card: url <> "/.well-known/agent-card.json", poll_every: 10))
 
     result = tool.execute.(%{"task" => "x"}, %Context{})
     refute result.is_error
@@ -265,7 +279,9 @@ defmodule Toolnexus.A2aTest do
 
   test "failed: error result carries the state and status message detail" do
     {url, _} = start_stub(mode: :failed)
-    [tool | _] = A2a.agent_tools(A2a.agent(card: url <> "/.well-known/agent-card.json", poll_every: 10))
+
+    [tool | _] =
+      A2a.agent_tools(A2a.agent(card: url <> "/.well-known/agent-card.json", poll_every: 10))
 
     result = tool.execute.(%{"task" => "x"}, %Context{})
     assert result.is_error
@@ -275,7 +291,9 @@ defmodule Toolnexus.A2aTest do
 
   test "canceled: error result without detail" do
     {url, _} = start_stub(mode: :canceled)
-    [tool | _] = A2a.agent_tools(A2a.agent(card: url <> "/.well-known/agent-card.json", poll_every: 10))
+
+    [tool | _] =
+      A2a.agent_tools(A2a.agent(card: url <> "/.well-known/agent-card.json", poll_every: 10))
 
     result = tool.execute.(%{"task" => "x"}, %Context{})
     assert result.is_error
@@ -320,8 +338,13 @@ defmodule Toolnexus.A2aTest do
   end
 
   test "an HTTP-level failure on the endpoint becomes an error ToolResult" do
-    {url, _} = start_stub(card: %{"name" => "Dead", "url" => "http://127.0.0.1:1/", "skills" => [%{"id" => "s"}]})
-    [tool] = A2a.agent_tools(A2a.agent(card: url <> "/.well-known/agent-card.json", timeout: 1_000))
+    {url, _} =
+      start_stub(
+        card: %{"name" => "Dead", "url" => "http://127.0.0.1:1/", "skills" => [%{"id" => "s"}]}
+      )
+
+    [tool] =
+      A2a.agent_tools(A2a.agent(card: url <> "/.well-known/agent-card.json", timeout: 1_000))
 
     result = tool.execute.(%{"task" => "x"}, %Context{})
     assert result.is_error

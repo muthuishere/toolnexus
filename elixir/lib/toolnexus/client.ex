@@ -303,6 +303,7 @@ defmodule Toolnexus.Client do
             headers: %{},
             system_prompt: nil,
             max_turns: 10,
+            max_tool_concurrency: nil,
             hooks: %{},
             retries: 2,
             retry_base_ms: 500,
@@ -339,6 +340,9 @@ defmodule Toolnexus.Client do
     belong to (SPEC §4C). Never logged.
   - `:system_prompt` — prepended to the toolkit's skills prompt (joined with `"\\n\\n"`)
   - `:max_turns` (default 10)
+  - `:max_tool_concurrency` — cap on concurrency-safe tool calls of one response running at
+    once (SPEC §8 "Tool scheduling"). Absent ⇒ env `TOOLNEXUS_MAX_TOOL_CONCURRENCY` when a
+    positive integer, else 10. Unsafe calls (anything not read-only) always run alone.
   - `:on_error` — `(%{error?, status?, attempt, retryable} -> :retry | :fail)` classifies each
     failed LLM attempt (§8 Resilience). Absent ⇒ default (`retryable ⇒ :retry, else :fail`),
     byte-identical to today. A `:retry` is bounded by `:retries`. No `:suspend` tier.
@@ -491,7 +495,9 @@ defmodule Toolnexus.Client do
 
       models =
         if client.style == "anthropic" do
-          endpoint = if String.ends_with?(base, "/v1"), do: base <> "/models", else: base <> "/v1/models"
+          endpoint =
+            if String.ends_with?(base, "/v1"), do: base <> "/models", else: base <> "/v1/models"
+
           list_anthropic_models(client, endpoint, key, nil, 0, [])
         else
           body = get_json!(client, base <> "/models", %{"authorization" => "Bearer " <> key})
@@ -508,12 +514,22 @@ defmodule Toolnexus.Client do
   end
 
   defp list_anthropic_models(client, endpoint, key, after_id, page, acc) do
-    url = endpoint <> "?limit=1000" <> if(after_id, do: "&after_id=" <> URI.encode_www_form(after_id), else: "")
+    url =
+      endpoint <>
+        "?limit=1000" <> if(after_id, do: "&after_id=" <> URI.encode_www_form(after_id), else: "")
+
     body = get_json!(client, url, %{"x-api-key" => key, "anthropic-version" => "2023-06-01"})
-    acc = acc ++ Enum.map(body["data"] || [], &%{id: &1["id"], name: &1["display_name"], context_length: nil})
+
+    acc =
+      acc ++
+        Enum.map(
+          body["data"] || [],
+          &%{id: &1["id"], name: &1["display_name"], context_length: nil}
+        )
 
     case body do
-      %{"has_more" => true, "last_id" => last} when is_binary(last) and last != "" and page < 99 ->
+      %{"has_more" => true, "last_id" => last}
+      when is_binary(last) and last != "" and page < 99 ->
         list_anthropic_models(client, endpoint, key, last, page + 1, acc)
 
       _ ->
@@ -525,7 +541,9 @@ defmodule Toolnexus.Client do
     resp =
       case client.transport do
         f when is_function(f, 1) ->
-          {:ok, r} = f.(%{method: :get, url: url, headers: headers, body: nil, receive_timeout: nil})
+          {:ok, r} =
+            f.(%{method: :get, url: url, headers: headers, body: nil, receive_timeout: nil})
+
           r
 
         _ ->
@@ -1712,13 +1730,40 @@ defmodule Toolnexus.Client do
   # (string keys) must be accepted exactly like an atom-keyed one (ADR 0026 / D4).
   defp as_answer(a), do: Answer.coerce(a)
 
-  # Execute all tool calls of a turn concurrently; results come back in original call order.
+  # One call's safety; looks through call_tool to the tool it names. Unknown ⇒ unsafe.
+  defp call_safe?(client, toolkit, name, args) do
+    if client.tool_tiers != nil and name == "tool_search" do
+      true
+    else
+      {real, inner, _} = unwrap_call(client, name, if(is_map(args), do: args, else: %{}))
+      tool = if toolkit, do: find_tool(toolkit, real)
+      Toolnexus.ToolScheduling.concurrency_safe?(tool, if(is_map(inner), do: inner, else: %{}))
+    end
+  end
+
+  # Run one response's calls under the tool schedule (SPEC §8 "Tool scheduling").
+  defp schedule_calls(client, toolkit, items, key, fun) do
+    Toolnexus.ToolScheduling.schedule(
+      items,
+      fn item ->
+        {name, args} = key.(item)
+        call_safe?(client, toolkit, name, args)
+      end,
+      Toolnexus.ToolScheduling.resolve_max_tool_concurrency(client.max_tool_concurrency),
+      fun
+    )
+  end
+
+  # Execute the tool calls of a turn under the tool schedule; results come back in call order.
   defp exec_calls(client, toolkit, calls, turn) do
     guard = TurnGuard.current()
     owner = self()
 
-    calls
-    |> Task.async_stream(
+    schedule_calls(
+      client,
+      toolkit,
+      calls,
+      fn {_id, name, args} -> {name, args} end,
       fn {call_id, name, args} ->
         {args, result} = run_tool(client, toolkit, name, args, call_id, turn)
         report_tool(client, guard, call_id, name, result)
@@ -1730,12 +1775,8 @@ defmodule Toolnexus.Client do
           end
 
         %{id: call_id, name: name, args: args, result: result, halted: halted}
-      end,
-      ordered: true,
-      timeout: :infinity,
-      max_concurrency: max(length(calls), 1)
+      end
     )
-    |> Enum.map(fn {:ok, s} -> s end)
   end
 
   # ---- §1B content parts: canonical transcript in, provider blocks out ----
@@ -2332,18 +2373,11 @@ defmodule Toolnexus.Client do
       end)
 
       settled =
-        calls
-        |> Task.async_stream(
-          fn c ->
-            r = run_tool(client, toolkit, c.name, safe_json(c.args), c.id, turn)
-            report_tool(client, guard, c.id, c.name, elem(r, 1))
-            r
-          end,
-          ordered: true,
-          timeout: :infinity,
-          max_concurrency: max(length(calls), 1)
-        )
-        |> Enum.map(fn {:ok, r} -> r end)
+        schedule_calls(client, toolkit, calls, fn c -> {c.name, safe_json(c.args)} end, fn c ->
+          r = run_tool(client, toolkit, c.name, safe_json(c.args), c.id, turn)
+          report_tool(client, guard, c.id, c.name, elem(r, 1))
+          r
+        end)
 
       outcome =
         calls
@@ -2362,8 +2396,7 @@ defmodule Toolnexus.Client do
 
           st = %{
             st
-            | tool_calls:
-                st.tool_calls ++ [call_record(client, c.name, args, result)],
+            | tool_calls: st.tool_calls ++ [call_record(client, c.name, args, result)],
               messages: st.messages ++ [tool_message(c.id, c.name, result)]
           }
 
@@ -2590,18 +2623,11 @@ defmodule Toolnexus.Client do
       guard = TurnGuard.current()
 
       settled =
-        uses
-        |> Task.async_stream(
-          fn u ->
-            r = run_tool(client, toolkit, u["name"], u["input"] || %{}, u["id"], turn)
-            report_tool(client, guard, u["id"], u["name"], elem(r, 1))
-            r
-          end,
-          ordered: true,
-          timeout: :infinity,
-          max_concurrency: max(length(uses), 1)
-        )
-        |> Enum.map(fn {:ok, r} -> r end)
+        schedule_calls(client, toolkit, uses, fn u -> {u["name"], u["input"] || %{}} end, fn u ->
+          r = run_tool(client, toolkit, u["name"], u["input"] || %{}, u["id"], turn)
+          report_tool(client, guard, u["id"], u["name"], elem(r, 1))
+          r
+        end)
 
       outcome =
         uses
@@ -2619,8 +2645,7 @@ defmodule Toolnexus.Client do
 
           st = %{
             st
-            | tool_calls:
-                st.tool_calls ++ [call_record(client, u["name"], args, result)]
+            | tool_calls: st.tool_calls ++ [call_record(client, u["name"], args, result)]
           }
 
           results = results ++ [tool_result_block(u["id"], result)]

@@ -26,6 +26,13 @@ public interface ITool
     /// Never serialized into any adapter or wire output. Default: <c>null</c>.
     /// </summary>
     ToolHints? Hints => null;
+
+    /// <summary>
+    /// (SPEC §8 "Tool scheduling") Whether a call with <paramref name="args"/> may run alongside
+    /// other safe calls of the same model response. Default: safe only when <see cref="Hints"/>
+    /// says read-only; a tool without hints is unsafe.
+    /// </summary>
+    bool IsConcurrencySafe(IDictionary<string, object?> args) => Hints?.ReadOnly == true;
 }
 
 /// <summary>

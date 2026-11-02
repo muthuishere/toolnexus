@@ -354,6 +354,14 @@ async fn openai_parallel_tool_calls_with_call_ids() {
             Ok::<_, String>(ctx.call_id.unwrap_or_default())
         },
     );
+    // read-only: only concurrency-safe calls overlap (SPEC §8 "Tool scheduling")
+    let who = Tool {
+        hints: Some(toolnexus::ToolHints {
+            read_only: true,
+            ..Default::default()
+        }),
+        ..who
+    };
     let tk = tk_with(vec![who]).await;
     let t0 = Instant::now();
     let res = create_client(opts(&srv.url)).run("go", &tk).await.unwrap();

@@ -1,0 +1,133 @@
+---
+title: Tool scheduling
+description: Read-only tool calls run together, writes run alone and in order, under a cap — and how to run a subagent in the background — in all eight languages.
+---
+
+import { Tabs, TabItem, Aside } from '@astrojs/starlight/components';
+
+<Aside type="tip" title="Why you need this">
+A model often asks for several tools in one response. Before this change every call ran at
+once, with no limit, so two `write` or `edit` calls on the same file could race, and a response
+with forty reads opened forty at once. Now reads overlap, writes take turns in the order the
+model asked for them, and a cap bounds how many run together.
+</Aside>
+
+<Aside type="caution" title="Behaviour change">
+A tool **without hints** now counts as unsafe and runs alone. Your own tools that used to run
+in parallel run one at a time until you mark them read-only (hints) or give them a predicate.
+</Aside>
+
+## The rule
+
+Each call of a response is **safe** or **unsafe**:
+
+1. The tool's own predicate (`concurrencySafe(args)`, idiomatic name per language) decides, per call.
+2. Without one, a tool is safe only when its hints say **read-only**. No hints ⇒ unsafe.
+3. Built-ins: `read`, `grep`, `glob`, `webfetch`, `websearch`, `question`, `todowrite`,
+   `bash_output` are safe; `bash`, `write`, `edit`, `apply_patch`, `notebook_edit`, `kill_shell`
+   are unsafe. MCP tools follow the server's `readOnlyHint`.
+4. With tool tiers, `tool_search` is safe and `call_tool` takes the safety of the tool it calls.
+5. Relay tools and the subagent `task` tool always run concurrently.
+
+The calls then run in the order the model emitted them: a run of safe calls overlaps, at most
+**`maxToolConcurrency`** at once; an unsafe call waits for everything before it, runs alone, and
+nothing after it starts until it ends. Results always come back in the emitted order.
+
+| per-call order | what runs together |
+|---|---|
+| `read, read, write, read, read` | the two reads, then the write alone, then the last two reads |
+
+## Setting the cap
+
+Default **10**. The environment variable `TOOLNEXUS_MAX_TOOL_CONCURRENCY` overrides the
+default; an explicit option overrides both. Zero, negative or non-numeric values fall back.
+
+<Tabs syncKey="lang">
+<TabItem label="JavaScript">
+```js
+const client = createClient({ baseUrl: "https://openrouter.ai/api/v1", style: "openai", model: "openai/gpt-4o-mini", maxToolConcurrency: 4 })
+```
+</TabItem>
+<TabItem label="Python">
+```python
+client = create_client(base_url="https://openrouter.ai/api/v1", style="openai", model="openai/gpt-4o-mini", max_tool_concurrency=4)
+```
+</TabItem>
+<TabItem label="Go">
+```go
+client := toolnexus.CreateClient(toolnexus.ClientOptions{
+	BaseURL: "https://openrouter.ai/api/v1", Style: toolnexus.StyleOpenAI, Model: "openai/gpt-4o-mini",
+	MaxToolConcurrency: 4,
+})
+```
+</TabItem>
+<TabItem label="Java">
+```java
+LlmClient client = LlmClient.create(new LlmClient.Options()
+        .baseUrl("https://openrouter.ai/api/v1").style("openai").model("openai/gpt-4o-mini")
+        .maxToolConcurrency(4));
+```
+</TabItem>
+<TabItem label="C#">
+```csharp
+var client = LlmClient.Create(new LlmClient.Options {
+    BaseUrl = "https://openrouter.ai/api/v1", Style = "openai", Model = "openai/gpt-4o-mini",
+    MaxToolConcurrency = 4 });
+```
+</TabItem>
+<TabItem label="Elixir">
+```elixir
+client = Toolnexus.Client.create(base_url: "https://openrouter.ai/api/v1", style: "openai", model: "openai/gpt-4o-mini", max_tool_concurrency: 4)
+```
+</TabItem>
+<TabItem label="Clojure">
+```clojure
+(def client (client/create-client {:base-url "https://openrouter.ai/api/v1" :style "openai" :model "openai/gpt-4o-mini" :max-tool-concurrency 4}))
+```
+</TabItem>
+<TabItem label="Rust">
+```rust
+let client = create_client(ClientOptions {
+    base_url: "https://openrouter.ai/api/v1".into(),
+    style: Style::OpenAI,
+    model: "openai/gpt-4o-mini".into(),
+    max_tool_concurrency: 4,
+    ..Default::default()
+});
+```
+</TabItem>
+</Tabs>
+
+## Making your own tool parallel
+
+Mark it read-only with hints (`hints: { readOnly: true }`, `ToolHints(read_only=True)`,
+`Tool.withHints(t, ToolHints.READ_ONLY)`, `t.Hints = new ToolHints(ReadOnly: true)`,
+`%ToolHints{read_only: true}`, `{:hints {:read-only true}}`, `ToolHints { read_only: true, .. }`),
+or give it a per-call predicate when safety depends on the arguments:
+
+| language | predicate |
+|---|---|
+| JavaScript | `{ ...tool, concurrencySafe: (args) => args.dryRun === true }` |
+| Python | `Tool(..., concurrency_safe=lambda args: args.get("dryRun") is True)` |
+| Go | `tool.ConcurrencySafe = func(args map[string]any) bool { return args["dryRun"] == true }` |
+| Java | `Tool.withConcurrencySafe(tool, args -> Boolean.TRUE.equals(args.get("dryRun")))` |
+| C# | `tool.ConcurrencySafe = args => args.TryGetValue("dryRun", out var v) && v is true;` |
+| Elixir | `define_tool(..., concurrency_safe: fn args -> args["dryRun"] == true end)` |
+| Clojure | `(tool/tool {... :concurrency-safe (fn [args] (true? (:dryRun args)))})` |
+| Rust | `tool.with_concurrency_safe(\|args\| args["dryRun"] == true)` |
+
+## A subagent in the background
+
+There is no extra API for this: the agent runtime's verbs already do it. `spawn` gives you the
+id at once, `wake` starts the turn and returns immediately, and a `wait` in a background
+task/thread/goroutine delivers the result to your callback. To tell the parent turn, `post` the
+result to the parent and `wake` it.
+
+```text
+h = runtime.spawn(parent, "researcher")      // h.id → hand back at once
+runtime.wake(h, prompt)                      // returns at once
+background { r = runtime.wait(h); onDone(h.id, r) }
+```
+
+Each port pins this recipe with a test (Go `agents/background_test.go`, and the matching test
+in every other port).

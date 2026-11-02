@@ -130,6 +130,9 @@ export interface Tool {
   /** What the tool may do (§4C). Builtins always carry hints; MCP tools carry them when the
    * server sends annotations. Advisory: a server can mislabel its tools. */
   hints?: ToolHints
+  /** Decides per call whether this tool may run alongside other safe calls of the same model
+   * response (SPEC §8 "Tool scheduling"). Absent ⇒ safe only when `hints.readOnly`. */
+  concurrencySafe?: (args: Record<string, unknown>) => boolean
 }
 
 export type McpStatus = "connected" | "disabled" | "failed"

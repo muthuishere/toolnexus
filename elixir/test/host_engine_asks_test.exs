@@ -8,7 +8,19 @@ defmodule Toolnexus.HostEngineAsksTest do
   """
   use ExUnit.Case, async: false
 
-  alias Toolnexus.{Answer, Builtin, Client, Context, Mcp, Request, Tool, ToolHints, ToolResult, Toolkit}
+  alias Toolnexus.{
+    Answer,
+    Builtin,
+    Client,
+    Context,
+    Mcp,
+    Request,
+    Tool,
+    ToolHints,
+    ToolResult,
+    Toolkit
+  }
+
   alias Toolnexus.Builtin.BackgroundShells
 
   @repo_root Path.expand("../..", __DIR__)
@@ -33,7 +45,11 @@ defmodule Toolnexus.HostEngineAsksTest do
             "content" => nil,
             "tool_calls" =>
               Enum.map(calls, fn {id, name, args} ->
-                %{"id" => id, "type" => "function", "function" => %{"name" => name, "arguments" => Jason.encode!(args)}}
+                %{
+                  "id" => id,
+                  "type" => "function",
+                  "function" => %{"name" => name, "arguments" => Jason.encode!(args)}
+                }
               end)
           }
         }
@@ -49,7 +65,13 @@ defmodule Toolnexus.HostEngineAsksTest do
     }
 
   defp tool_results?(body),
-    do: Enum.any?(body["messages"], &(&1["role"] == "tool" or (is_list(&1["content"]) and Enum.any?(&1["content"], fn b -> is_map(b) and b["type"] == "tool_result" end))))
+    do:
+      Enum.any?(
+        body["messages"],
+        &(&1["role"] == "tool" or
+            (is_list(&1["content"]) and
+               Enum.any?(&1["content"], fn b -> is_map(b) and b["type"] == "tool_result" end)))
+      )
 
   # An auth-gated tool: suspends until a §10 answer arrives.
   defp balance_tool do
@@ -70,7 +92,9 @@ defmodule Toolnexus.HostEngineAsksTest do
 
   defp balance_llm do
     transport(fn body ->
-      if tool_results?(body), do: openai_text("done"), else: openai_calls([{"c1", "get_balance", %{}}])
+      if tool_results?(body),
+        do: openai_text("done"),
+        else: openai_calls([{"c1", "get_balance", %{}}])
     end)
   end
 
@@ -185,32 +209,51 @@ defmodule Toolnexus.HostEngineAsksTest do
         body =
           cond do
             req.headers["x-api-key"] && not String.contains?(req.url, "after_id") ->
-              %{"data" => [%{"id" => "claude-b", "display_name" => "B"}], "has_more" => true, "last_id" => "claude-b"}
+              %{
+                "data" => [%{"id" => "claude-b", "display_name" => "B"}],
+                "has_more" => true,
+                "last_id" => "claude-b"
+              }
 
             req.headers["x-api-key"] ->
               %{"data" => [%{"id" => "claude-a", "display_name" => "A"}], "has_more" => false}
 
             true ->
-              %{"data" => [%{"id" => "z/model", "name" => "Z", "context_length" => 200_000}, %{"id" => "a/model"}]}
+              %{
+                "data" => [
+                  %{"id" => "z/model", "name" => "Z", "context_length" => 200_000},
+                  %{"id" => "a/model"}
+                ]
+              }
           end
 
         {:ok, %{status: 200, headers: %{}, body: body}}
       end
 
-      assert {:ok, [a, z]} = Client.list_models(base_url: "https://h/api/v1", api_key: "fake", transport: t)
+      assert {:ok, [a, z]} =
+               Client.list_models(base_url: "https://h/api/v1", api_key: "fake", transport: t)
+
       assert a == %{id: "a/model", name: nil, context_length: nil}
       assert z.context_length == 200_000
       assert_received {:url, "https://h/api/v1/models"}
 
       assert {:ok, [ca, cb]} =
-               Client.list_models(base_url: "https://h/v1", style: "anthropic", api_key: "fake", transport: t)
+               Client.list_models(
+                 base_url: "https://h/v1",
+                 style: "anthropic",
+                 api_key: "fake",
+                 transport: t
+               )
 
       assert ca.id == "claude-a" and cb.name == "B"
       assert_received {:url, "https://h/v1/models?limit=1000"}
       assert_received {:url, "https://h/v1/models?limit=1000&after_id=claude-b"}
 
       err = fn _ -> {:ok, %{status: 401, headers: %{}, body: ~s({"error":"bad"})}} end
-      assert {:error, msg} = Client.list_models(base_url: "https://h", api_key: "fake", transport: err)
+
+      assert {:error, msg} =
+               Client.list_models(base_url: "https://h", api_key: "fake", transport: err)
+
       assert msg =~ "list models: HTTP 401"
 
       assert {:error, _} = Client.list_models(base_url: "https://h", transport: t)
@@ -220,7 +263,11 @@ defmodule Toolnexus.HostEngineAsksTest do
       plug = fn conn -> Req.Test.json(conn, %{"data" => [%{"id" => "m1"}]}) end
 
       assert {:ok, [%{id: "m1"}]} =
-               Client.list_models(base_url: "https://h/v1", api_key: "fake", http_options: [plug: plug])
+               Client.list_models(
+                 base_url: "https://h/v1",
+                 api_key: "fake",
+                 http_options: [plug: plug]
+               )
     end
   end
 
@@ -293,12 +340,20 @@ defmodule Toolnexus.HostEngineAsksTest do
     test "MCP annotations map with MCP's defaults" do
       assert Mcp.mcp_hints(nil) == nil
       assert Mcp.mcp_hints(%{"title" => "x"}) == nil
-      assert Mcp.mcp_hints(%{"readOnlyHint" => true}) == %ToolHints{read_only: true, destructive: false, open_world: true}
+
+      assert Mcp.mcp_hints(%{"readOnlyHint" => true}) == %ToolHints{
+               read_only: true,
+               destructive: false,
+               open_world: true
+             }
 
       assert Mcp.mcp_hints(%{"destructiveHint" => false, "openWorldHint" => false}) ==
                %ToolHints{read_only: false, destructive: false, open_world: false}
 
-      assert Mcp.mcp_hints(%{"readOnlyHint" => false}) == %ToolHints{destructive: true, open_world: true}
+      assert Mcp.mcp_hints(%{"readOnlyHint" => false}) == %ToolHints{
+               destructive: true,
+               open_world: true
+             }
     end
 
     test "a plan-mode gate on before_tool denies a mutating tool; the run finishes" do
@@ -316,7 +371,12 @@ defmodule Toolnexus.HostEngineAsksTest do
               send(me, {:hints, ev.hints})
 
               unless ev.hints && ev.hints.read_only,
-                do: %{result: %ToolResult{output: "denied: plan mode allows read-only tools only", is_error: true}}
+                do: %{
+                  result: %ToolResult{
+                    output: "denied: plan mode allows read-only tools only",
+                    is_error: true
+                  }
+                }
             end
           }
         )
@@ -324,7 +384,9 @@ defmodule Toolnexus.HostEngineAsksTest do
       r = Client.run(c, "balance?", [tool])
       assert r.status == "done"
       assert_received {:hints, %ToolHints{destructive: true}}
-      assert [%{is_error: true, output: "denied: plan mode allows read-only tools only"}] = r.tool_calls
+
+      assert [%{is_error: true, output: "denied: plan mode allows read-only tools only"}] =
+               r.tool_calls
     end
   end
 
@@ -344,7 +406,9 @@ defmodule Toolnexus.HostEngineAsksTest do
       }
     end
 
-    defp sse(events), do: Enum.map_join(events, "\n\n", &("data: " <> Jason.encode!(&1))) <> "\n\ndata: [DONE]\n\n"
+    defp sse(events),
+      do:
+        Enum.map_join(events, "\n\n", &("data: " <> Jason.encode!(&1))) <> "\n\ndata: [DONE]\n\n"
 
     test "parallel calls each see their own id: run + stream, openai + anthropic" do
       me = self()
@@ -368,8 +432,16 @@ defmodule Toolnexus.HostEngineAsksTest do
                 %{
                   "delta" => %{
                     "tool_calls" => [
-                      %{"index" => 0, "id" => "c1", "function" => %{"name" => "fast", "arguments" => "{}"}},
-                      %{"index" => 1, "id" => "c2", "function" => %{"name" => "slow", "arguments" => "{}"}}
+                      %{
+                        "index" => 0,
+                        "id" => "c1",
+                        "function" => %{"name" => "fast", "arguments" => "{}"}
+                      },
+                      %{
+                        "index" => 1,
+                        "id" => "c2",
+                        "function" => %{"name" => "slow", "arguments" => "{}"}
+                      }
                     ]
                   }
                 }
@@ -383,11 +455,31 @@ defmodule Toolnexus.HostEngineAsksTest do
         transport(fn _ ->
           sse([
             %{"type" => "message_start", "message" => %{"usage" => %{"input_tokens" => 1}}},
-            %{"type" => "content_block_start", "index" => 0, "content_block" => %{"type" => "tool_use", "id" => "c1", "name" => "fast"}},
-            %{"type" => "content_block_delta", "index" => 0, "delta" => %{"type" => "input_json_delta", "partial_json" => "{}"}},
-            %{"type" => "content_block_start", "index" => 1, "content_block" => %{"type" => "tool_use", "id" => "c2", "name" => "slow"}},
-            %{"type" => "content_block_delta", "index" => 1, "delta" => %{"type" => "input_json_delta", "partial_json" => "{}"}},
-            %{"type" => "message_delta", "delta" => %{"stop_reason" => "tool_use"}, "usage" => %{"output_tokens" => 1}}
+            %{
+              "type" => "content_block_start",
+              "index" => 0,
+              "content_block" => %{"type" => "tool_use", "id" => "c1", "name" => "fast"}
+            },
+            %{
+              "type" => "content_block_delta",
+              "index" => 0,
+              "delta" => %{"type" => "input_json_delta", "partial_json" => "{}"}
+            },
+            %{
+              "type" => "content_block_start",
+              "index" => 1,
+              "content_block" => %{"type" => "tool_use", "id" => "c2", "name" => "slow"}
+            },
+            %{
+              "type" => "content_block_delta",
+              "index" => 1,
+              "delta" => %{"type" => "input_json_delta", "partial_json" => "{}"}
+            },
+            %{
+              "type" => "message_delta",
+              "delta" => %{"stop_reason" => "tool_use"},
+              "usage" => %{"output_tokens" => 1}
+            }
           ])
         end)
 
@@ -397,9 +489,19 @@ defmodule Toolnexus.HostEngineAsksTest do
             {"openai", openai_sse, :stream},
             {"anthropic", anthropic_sse, :stream}
           ] do
-        c = Client.create(base_url: "https://x", style: style, model: "m", api_key: "k", max_turns: 1, transport: t)
+        c =
+          Client.create(
+            base_url: "https://x",
+            style: style,
+            model: "m",
+            api_key: "k",
+            max_turns: 1,
+            transport: t
+          )
 
-        if mode == :run, do: Client.run(c, "go", tools), else: Client.stream(c, "go", tools) |> Enum.to_list()
+        if mode == :run,
+          do: Client.run(c, "go", tools),
+          else: Client.stream(c, "go", tools) |> Enum.to_list()
 
         assert_received {:call_id, "fast", "c1"}, "#{style} #{mode}"
         assert_received {:call_id, "slow", "c2"}, "#{style} #{mode}"
@@ -419,14 +521,19 @@ defmodule Toolnexus.HostEngineAsksTest do
 
         cfg = %{
           "fast" => %{"command" => ["node", @fixture], "timeout" => 5000},
-          "slow" => %{"command" => ["sh", "-c", "sleep 1; exec node #{@fixture}"], "timeout" => 5000},
+          "slow" => %{
+            "command" => ["sh", "-c", "sleep 1; exec node #{@fixture}"],
+            "timeout" => 5000
+          },
           "bad" => %{"command" => ["/nonexistent/toolnexus-no-such-binary"], "timeout" => 2000},
           "off" => %{"command" => ["node", @fixture], "enabled" => false}
         }
 
         src =
           Mcp.load(cfg,
-            on_server: fn r -> send(me, {:server, r.name, r, System.monotonic_time(:millisecond) - t0}) end
+            on_server: fn r ->
+              send(me, {:server, r.name, r, System.monotonic_time(:millisecond) - t0})
+            end
           )
 
         results =
@@ -440,21 +547,40 @@ defmodule Toolnexus.HostEngineAsksTest do
         assert fast.status == "connected"
         assert [%Tool{name: "fast_slow"}] = fast.tools
         assert slow.status == "connected"
-        assert elem(results["bad"], 0).status == "failed" and is_binary(elem(results["bad"], 0).error)
-        assert elem(results["off"], 0) == %{name: "off", status: "disabled", tools: [], error: nil}
+
+        assert elem(results["bad"], 0).status == "failed" and
+                 is_binary(elem(results["bad"], 0).error)
+
+        assert elem(results["off"], 0) == %{
+                 name: "off",
+                 status: "disabled",
+                 tools: [],
+                 error: nil
+               }
+
         assert fast_at < slow_at and slow_at - fast_at >= 500
 
         tk = Toolkit.register(Toolnexus.create_toolkit!(builtins: false), fast.tools)
         out = Toolkit.execute(tk, "fast_slow", %{"totalMs" => 0, "intervalMs" => 0})
         refute out.is_error
-        assert src.status == %{"fast" => "connected", "slow" => "connected", "bad" => "failed", "off" => "disabled"}
+
+        assert src.status == %{
+                 "fast" => "connected",
+                 "slow" => "connected",
+                 "bad" => "failed",
+                 "off" => "disabled"
+               }
+
         Mcp.close(src)
       end
     end
 
     test "a load deadline still aborts (on_server path)" do
       cfg = %{"slow" => %{"command" => ["sh", "-c", "sleep 5"], "timeout" => 10_000}}
-      assert_raise RuntimeError, ~r/deadline/, fn -> Mcp.load(cfg, deadline: 200, on_server: fn _ -> :ok end) end
+
+      assert_raise RuntimeError, ~r/deadline/, fn ->
+        Mcp.load(cfg, deadline: 200, on_server: fn _ -> :ok end)
+      end
     end
 
     test "resource tools list and read the fixture's resource" do
@@ -475,7 +601,10 @@ defmodule Toolnexus.HostEngineAsksTest do
                  read.execute.(%{"server" => "progress", "uri" => "fixture://hello"}, %Context{})
 
         assert read.execute.(%{"server" => "progress", "uri" => "fixture://nope"}, %Context{}).is_error
-        assert read.execute.(%{"server" => "progress", "uri" => ""}, %Context{}).output =~ "uri is required"
+
+        assert read.execute.(%{"server" => "progress", "uri" => ""}, %Context{}).output =~
+                 "uri is required"
+
         assert read.execute.(%{"server" => "nope", "uri" => "x"}, %Context{}).is_error
         Mcp.close(src)
 
@@ -486,7 +615,9 @@ defmodule Toolnexus.HostEngineAsksTest do
 
     test "no source ⇒ no resources" do
       [list, _] = Mcp.resource_tools(nil)
-      assert %ToolResult{output: "No resources.", metadata: %{count: 0}} = list.execute.(%{}, %Context{})
+
+      assert %ToolResult{output: "No resources.", metadata: %{count: 0}} =
+               list.execute.(%{}, %Context{})
     end
   end
 
@@ -507,13 +638,19 @@ defmodule Toolnexus.HostEngineAsksTest do
       cfg = %{background: bg, kill_grace_ms: 100}
       bash = extra(cfg, "bash")
       out = extra(cfg, "bash_output")
-      r = bash.execute.(%{"command" => "kill -TERM $$; sleep 5", "run_in_background" => true}, nil)
+
+      r =
+        bash.execute.(%{"command" => "kill -TERM $$; sleep 5", "run_in_background" => true}, nil)
+
       id = r.metadata.backgroundId
 
       o =
         Enum.reduce_while(1..100, nil, fn _, _ ->
           o = out.execute.(%{"id" => id}, nil)
-          if o.metadata.status == "exited", do: {:halt, o}, else: (Process.sleep(50) && {:cont, nil})
+
+          if o.metadata.status == "exited",
+            do: {:halt, o},
+            else: Process.sleep(50) && {:cont, nil}
         end)
 
       assert o.metadata.exitCode == -1
@@ -532,7 +669,12 @@ defmodule Toolnexus.HostEngineAsksTest do
       assert Map.has_key?(bash.input_schema["properties"], "run_in_background")
       assert out.hints.read_only and kill.hints.destructive
 
-      r = bash.execute.(%{"command" => "echo one; sleep 0.2; echo two", "run_in_background" => true}, nil)
+      r =
+        bash.execute.(
+          %{"command" => "echo one; sleep 0.2; echo two", "run_in_background" => true},
+          nil
+        )
+
       refute r.is_error
       id = r.metadata.backgroundId
 
@@ -553,7 +695,12 @@ defmodule Toolnexus.HostEngineAsksTest do
 
       assert length(String.split(all, "one")) == 2 and length(String.split(all, "two")) == 2
 
-      r = bash.execute.(%{"command" => "trap '' TERM; sleep 30 & wait", "run_in_background" => true}, nil)
+      r =
+        bash.execute.(
+          %{"command" => "trap '' TERM; sleep 30 & wait", "run_in_background" => true},
+          nil
+        )
+
       id2 = r.metadata.backgroundId
       Process.sleep(150)
       t0 = System.monotonic_time(:millisecond)
@@ -584,7 +731,12 @@ defmodule Toolnexus.HostEngineAsksTest do
       cfg = %{
         web_search: fn q, n ->
           send(me, {:q, q, n})
-          {:ok, [%{title: "A", url: "https://a.example", snippet: "sa"}, %{"title" => "B", "url" => "https://b.example"}]}
+
+          {:ok,
+           [
+             %{title: "A", url: "https://a.example", snippet: "sa"},
+             %{"title" => "B", "url" => "https://b.example"}
+           ]}
         end
       }
 
@@ -593,11 +745,26 @@ defmodule Toolnexus.HostEngineAsksTest do
       r = ws.execute.(%{"query" => "go", "limit" => 1}, nil)
       assert_received {:q, "go", 1}
       assert r.output == "1. A\n   https://a.example\n   sa"
-      assert ws.execute.(%{"query" => "go"}, nil).output == "1. A\n   https://a.example\n   sa\n\n2. B\n   https://b.example"
+
+      assert ws.execute.(%{"query" => "go"}, nil).output ==
+               "1. A\n   https://a.example\n   sa\n\n2. B\n   https://b.example"
+
       assert ws.execute.(%{"query" => " "}, nil).output == "websearch: query is required"
-      assert extra(%{web_search: fn _, _ -> {:ok, []} end}, "websearch").execute.(%{"query" => "x"}, nil).output == "No results."
-      assert extra(%{web_search: fn _, _ -> {:error, "down"} end}, "websearch").execute.(%{"query" => "x"}, nil).output == "websearch: down"
-      assert extra(%{web_search: fn _, _ -> {:error, :x} end}, "websearch").execute.(%{"query" => "x"}, nil).output == "websearch: :x"
+
+      assert extra(%{web_search: fn _, _ -> {:ok, []} end}, "websearch").execute.(
+               %{"query" => "x"},
+               nil
+             ).output == "No results."
+
+      assert extra(%{web_search: fn _, _ -> {:error, "down"} end}, "websearch").execute.(
+               %{"query" => "x"},
+               nil
+             ).output == "websearch: down"
+
+      assert extra(%{web_search: fn _, _ -> {:error, :x} end}, "websearch").execute.(
+               %{"query" => "x"},
+               nil
+             ).output == "websearch: :x"
     end
 
     @tag :tmp_dir
@@ -610,12 +777,27 @@ defmodule Toolnexus.HostEngineAsksTest do
       ne = extra(%{notebook_edit: true, base_dir: dir}, "notebook_edit")
       load = fn -> (p |> File.read!() |> Jason.decode!())["cells"] end
 
-      r = ne.execute.(%{"path" => "n.ipynb", "cell_id" => "a", "new_source" => "x = 2\ny = 3"}, nil)
+      r =
+        ne.execute.(%{"path" => "n.ipynb", "cell_id" => "a", "new_source" => "x = 2\ny = 3"}, nil)
+
       refute r.is_error
       [c0 | _] = load.()
-      assert c0["outputs"] == [] and c0["execution_count"] == nil and c0["source"] == ["x = 2\n", "y = 3"]
 
-      r = ne.execute.(%{"path" => "n.ipynb", "cell_index" => 0, "edit_mode" => "insert", "cell_type" => "markdown", "new_source" => "hi"}, nil)
+      assert c0["outputs"] == [] and c0["execution_count"] == nil and
+               c0["source"] == ["x = 2\n", "y = 3"]
+
+      r =
+        ne.execute.(
+          %{
+            "path" => "n.ipynb",
+            "cell_index" => 0,
+            "edit_mode" => "insert",
+            "cell_type" => "markdown",
+            "new_source" => "hi"
+          },
+          nil
+        )
+
       refute r.is_error
       cells = load.()
       assert length(cells) == 3 and Enum.at(cells, 1)["cell_type"] == "markdown"
@@ -626,22 +808,39 @@ defmodule Toolnexus.HostEngineAsksTest do
 
       assert ne.execute.(%{"path" => "n.ipynb", "cell_id" => "zz"}, nil).is_error
       assert ne.execute.(%{"path" => "n.ipynb", "cell_index" => 9}, nil).output =~ "out of range"
-      assert ne.execute.(%{"path" => "n.ipynb"}, nil).output =~ "cell_id or cell_index is required"
-      assert ne.execute.(%{"path" => "n.ipynb", "cell_index" => 0, "edit_mode" => "zap"}, nil).output =~ "unknown edit_mode"
-      assert ne.execute.(%{"path" => "", "cell_index" => 0}, nil).output == "notebook_edit: path is required"
+
+      assert ne.execute.(%{"path" => "n.ipynb"}, nil).output =~
+               "cell_id or cell_index is required"
+
+      assert ne.execute.(%{"path" => "n.ipynb", "cell_index" => 0, "edit_mode" => "zap"}, nil).output =~
+               "unknown edit_mode"
+
+      assert ne.execute.(%{"path" => "", "cell_index" => 0}, nil).output ==
+               "notebook_edit: path is required"
+
       assert ne.execute.(%{"path" => "missing.ipynb", "cell_index" => 0}, nil).is_error
 
       # insert first with no cell given; replace a markdown cell into code
       r = ne.execute.(%{"path" => "n.ipynb", "edit_mode" => "insert", "new_source" => ""}, nil)
       assert r.output =~ "Inserted code cell at 0"
       assert hd(load.())["source"] == []
-      ne.execute.(%{"path" => "n.ipynb", "cell_index" => 0, "cell_type" => "markdown", "new_source" => "m"}, nil)
+
+      ne.execute.(
+        %{"path" => "n.ipynb", "cell_index" => 0, "cell_type" => "markdown", "new_source" => "m"},
+        nil
+      )
+
       refute Map.has_key?(hd(load.()), "outputs")
 
       File.write!(Path.join(dir, "bad.ipynb"), "[1]")
-      assert ne.execute.(%{"path" => "bad.ipynb", "cell_index" => 0}, nil).output =~ "is not a notebook"
+
+      assert ne.execute.(%{"path" => "bad.ipynb", "cell_index" => 0}, nil).output =~
+               "is not a notebook"
+
       File.write!(Path.join(dir, "bad2.ipynb"), "{")
-      assert ne.execute.(%{"path" => "bad2.ipynb", "cell_index" => 0}, nil).output =~ "is not a notebook:"
+
+      assert ne.execute.(%{"path" => "bad2.ipynb", "cell_index" => 0}, nil).output =~
+               "is not a notebook:"
     end
 
     @tag :tmp_dir
@@ -664,6 +863,7 @@ defmodule Toolnexus.HostEngineAsksTest do
 
       # a second file starts a new group
       File.write!(Path.join(dir, "g.txt"), "HIT3\n")
+
       assert grep.execute.(%{"pattern" => "HIT[13]", "context" => 1}, nil).output ==
                "f.txt-2-b\nf.txt:3:HIT1\nf.txt-4-c\n--\ng.txt:1:HIT3"
 
@@ -714,7 +914,15 @@ defmodule Toolnexus.HostEngineAsksTest do
           tool_tiers: %{core: ["zeta_read", "alpha_read"], deferred: ["deploy"]}
         )
 
-      tools = Toolnexus.ToolTiers.request_tools(Toolnexus.ToolTiers.build_plan(%{core: ["zeta_read", "alpha_read"], deferred: ["deploy"]}, tk.tools), tk.tools)
+      tools =
+        Toolnexus.ToolTiers.request_tools(
+          Toolnexus.ToolTiers.build_plan(
+            %{core: ["zeta_read", "alpha_read"], deferred: ["deploy"]},
+            tk.tools
+          ),
+          tk.tools
+        )
+
       assert Enum.map(tools, & &1.name) == ~w(alpha_read zeta_read tool_search call_tool)
       desc = Enum.at(tools, 2).description
       assert desc =~ "- lint — Lint the code."
@@ -723,9 +931,21 @@ defmodule Toolnexus.HostEngineAsksTest do
       refute desc =~ "second line hidden"
 
       plan = Client.tool_tier_plan(c, tk)
-      assert plan == %{"deploy" => :deferred, "lint" => :listed, "alpha_read" => :core, "zeta_read" => :core}
 
-      late = Toolnexus.define_tool(name: "late", description: "A late tool.", execute: fn _ -> "late ok" end)
+      assert plan == %{
+               "deploy" => :deferred,
+               "lint" => :listed,
+               "alpha_read" => :core,
+               "zeta_read" => :core
+             }
+
+      late =
+        Toolnexus.define_tool(
+          name: "late",
+          description: "A late tool.",
+          execute: fn _ -> "late ok" end
+        )
+
       tk2 = Toolkit.register(tk, late)
       assert Client.tool_tier_plan(c, tk2) == plan
 
@@ -742,12 +962,13 @@ defmodule Toolnexus.HostEngineAsksTest do
     end
 
     test "tool_search output escapes <, > and & exactly like Go" do
-      amp = Toolnexus.define_tool(
-        name: "amp",
-        description: "Use <a & b> here",
-        input_schema: %{"type" => "object", "properties" => %{"x" => %{"type" => "string"}}},
-        execute: fn _ -> "" end
-      )
+      amp =
+        Toolnexus.define_tool(
+          name: "amp",
+          description: "Use <a & b> here",
+          input_schema: %{"type" => "object", "properties" => %{"x" => %{"type" => "string"}}},
+          execute: fn _ -> "" end
+        )
 
       r = Toolnexus.ToolTiers.search([amp], %{"query" => "select:amp"})
 
@@ -764,7 +985,10 @@ defmodule Toolnexus.HostEngineAsksTest do
       s = &Toolnexus.ToolTiers.search(tools, &1)
       assert s.(%{"query" => "select:deploy, lint"}).metadata.tools == ["deploy", "lint"]
       assert s.(%{"query" => "select:deploy,nope"}).metadata.tools == ["deploy"]
-      assert %ToolResult{is_error: true, output: "tool_search: no such tool: nope"} = s.(%{"query" => "select:nope"})
+
+      assert %ToolResult{is_error: true, output: "tool_search: no such tool: nope"} =
+               s.(%{"query" => "select:nope"})
+
       assert s.(%{"query" => "read"}).metadata.tools == ["alpha_read", "zeta_read"]
       assert s.(%{"query" => "read", "limit" => 1}).metadata.tools == ["alpha_read"]
       assert s.(%{"query" => "zzz"}).output == "No matching tools."
@@ -784,25 +1008,38 @@ defmodule Toolnexus.HostEngineAsksTest do
       base = Toolnexus.ToolTiers.build_plan(%{core: ["alpha_read", "zeta_read"]}, tools)
 
       fixed =
-        count.(Toolnexus.ToolTiers.tool_def(base.search)) + count.(Toolnexus.ToolTiers.tool_def(base.call))
+        count.(Toolnexus.ToolTiers.tool_def(base.search)) +
+          count.(Toolnexus.ToolTiers.tool_def(base.call))
 
       one = count.(Toolnexus.ToolTiers.tool_def(by["alpha_read"]))
 
       p =
         Toolnexus.ToolTiers.build_plan(
-          %{core: ["alpha_read", "zeta_read"], budget_tokens: fixed + one + 15, usage_count: &uses[&1]},
+          %{
+            core: ["alpha_read", "zeta_read"],
+            budget_tokens: fixed + one + 15,
+            usage_count: &uses[&1]
+          },
           tools
         )
 
       assert p.tier["alpha_read"] == :core and p.tier["zeta_read"] == :listed
 
-      p = Toolnexus.ToolTiers.build_plan(%{core: ["alpha_read"], budget_tokens: 1, usage_count: &uses[&1]}, tools)
+      p =
+        Toolnexus.ToolTiers.build_plan(
+          %{core: ["alpha_read"], budget_tokens: 1, usage_count: &uses[&1]},
+          tools
+        )
+
       assert Enum.all?(p.tier, fn {_n, t} -> t == :deferred end)
 
       # default budget: 5% of the context window
       p = Toolnexus.ToolTiers.build_plan(%{core: ["alpha_read"], context_window: 20}, tools)
       assert p.tier["alpha_read"] == :deferred
-      p = Toolnexus.ToolTiers.build_plan(%{core: ["alpha_read"], context_window: 10_000_000}, tools)
+
+      p =
+        Toolnexus.ToolTiers.build_plan(%{core: ["alpha_read"], context_window: 10_000_000}, tools)
+
       assert p.tier["alpha_read"] == :core
     end
 
@@ -817,10 +1054,38 @@ defmodule Toolnexus.HostEngineAsksTest do
           n = Agent.get_and_update(step, &{&1 + 1, &1 + 1})
 
           case n do
-            1 -> anthropic([%{"type" => "tool_use", "id" => "s1", "name" => "tool_search", "input" => %{"query" => "select:deploy"}}])
-            2 -> anthropic([%{"type" => "tool_use", "id" => "c1", "name" => "call_tool", "input" => %{"name" => "deploy", "arguments" => %{"x" => "prod"}}}])
-            3 -> anthropic([%{"type" => "tool_use", "id" => "d1", "name" => "lint", "input" => %{"x" => "direct"}}])
-            _ -> anthropic([%{"type" => "text", "text" => "done"}])
+            1 ->
+              anthropic([
+                %{
+                  "type" => "tool_use",
+                  "id" => "s1",
+                  "name" => "tool_search",
+                  "input" => %{"query" => "select:deploy"}
+                }
+              ])
+
+            2 ->
+              anthropic([
+                %{
+                  "type" => "tool_use",
+                  "id" => "c1",
+                  "name" => "call_tool",
+                  "input" => %{"name" => "deploy", "arguments" => %{"x" => "prod"}}
+                }
+              ])
+
+            3 ->
+              anthropic([
+                %{
+                  "type" => "tool_use",
+                  "id" => "d1",
+                  "name" => "lint",
+                  "input" => %{"x" => "direct"}
+                }
+              ])
+
+            _ ->
+              anthropic([%{"type" => "text", "text" => "done"}])
           end
         end)
 
@@ -843,20 +1108,30 @@ defmodule Toolnexus.HostEngineAsksTest do
       r = Client.run(c, "ship it", tk)
       assert r.status == "done"
       assert hd(r.tool_calls).output =~ ~s("name": "deploy")
+
       # RunResult records the REAL tool + inner args for call_tool (TestToolTierLoopCallToolUnwraps)
       assert Enum.map_join(r.tool_calls, ",", &"#{&1.name}(#{inspect(&1.args["x"])})") ==
                ~s|tool_search(nil),deploy("prod"),lint("direct")|
+
       # the transcript keeps the wrapper
       assert Enum.any?(r.messages, fn m ->
-               is_list(m["content"]) and Enum.any?(m["content"], &(is_map(&1) and &1["name"] == "call_tool"))
+               is_list(m["content"]) and
+                 Enum.any?(m["content"], &(is_map(&1) and &1["name"] == "call_tool"))
              end)
+
       assert_received {:ran, "deploy(prod)"}
       assert_received {:ran, "lint(direct)"}
       assert_received {:gated, "deploy:true"}
       assert_received {:gated, "lint:?"}
       refute_received {:gated, "tool_search" <> _}
 
-      arrays = for _ <- 1..4, do: (receive do {:tools, a} -> a end)
+      arrays =
+        for _ <- 1..4,
+            do:
+              (receive do
+                 {:tools, a} -> a
+               end)
+
       assert length(Enum.uniq(arrays)) == 1
       assert hd(arrays) =~ "tool_search" and not (hd(arrays) =~ "Deploy the service")
     end
@@ -866,7 +1141,8 @@ defmodule Toolnexus.HostEngineAsksTest do
         transport(fn body ->
           if tool_results?(body),
             do: openai_text("done"),
-            else: openai_calls([{"c1", "call_tool", %{"name" => "get_balance", "arguments" => %{}}}])
+            else:
+              openai_calls([{"c1", "call_tool", %{"name" => "get_balance", "arguments" => %{}}}])
         end)
 
       c =
@@ -896,26 +1172,50 @@ defmodule Toolnexus.HostEngineAsksTest do
             sse([
               %{
                 "choices" => [
-                  %{"delta" => %{"tool_calls" => [%{"index" => 0, "id" => "c1", "type" => "function", "function" => %{"name" => "call_tool", "arguments" => args}}]}}
+                  %{
+                    "delta" => %{
+                      "tool_calls" => [
+                        %{
+                          "index" => 0,
+                          "id" => "c1",
+                          "type" => "function",
+                          "function" => %{"name" => "call_tool", "arguments" => args}
+                        }
+                      ]
+                    }
+                  }
                 ]
               },
               %{"choices" => [%{"delta" => %{}, "finish_reason" => "tool_calls"}]}
             ])
           else
-            sse([%{"choices" => [%{"delta" => %{"content" => "done"}, "finish_reason" => "stop"}]}])
+            sse([
+              %{"choices" => [%{"delta" => %{"content" => "done"}, "finish_reason" => "stop"}]}
+            ])
           end
         end)
 
-      c = Client.create(base_url: "https://x", model: "m", api_key: "k", transport: openai_t, tool_tiers: %{core: ["alpha_read"]})
+      c =
+        Client.create(
+          base_url: "https://x",
+          model: "m",
+          api_key: "k",
+          transport: openai_t,
+          tool_tiers: %{core: ["alpha_read"]}
+        )
+
       events = Client.stream(c, "go", tier_kit(me)) |> Enum.to_list()
 
       got =
-        for %{type: ty} = e <- events, ty in ["tool_call", "tool_result"],
+        for %{type: ty} = e <- events,
+            ty in ["tool_call", "tool_result"],
             do: "#{ty}:#{e.name}:#{e[:via]}:#{e[:args]["x"]}"
 
       assert got == ["tool_call:deploy:call_tool:prod", "tool_result:deploy:call_tool:"]
+
       assert [%{result: %{tool_calls: [%{name: "deploy", args: %{"x" => "prod"}}]}}] =
                Enum.filter(events, &(&1.type == "done"))
+
       assert_received {:ran, "deploy(prod)"}
 
       {:ok, step2} = Agent.start_link(fn -> 0 end)
@@ -924,23 +1224,53 @@ defmodule Toolnexus.HostEngineAsksTest do
         transport(fn _ ->
           if Agent.get_and_update(step2, &{&1 + 1, &1 + 1}) == 1 do
             sse([
-              %{"type" => "content_block_start", "index" => 0, "content_block" => %{"type" => "tool_use", "id" => "c1", "name" => "call_tool"}},
-              %{"type" => "content_block_delta", "index" => 0, "delta" => %{"type" => "input_json_delta", "partial_json" => args}},
+              %{
+                "type" => "content_block_start",
+                "index" => 0,
+                "content_block" => %{"type" => "tool_use", "id" => "c1", "name" => "call_tool"}
+              },
+              %{
+                "type" => "content_block_delta",
+                "index" => 0,
+                "delta" => %{"type" => "input_json_delta", "partial_json" => args}
+              },
               %{"type" => "message_delta", "delta" => %{"stop_reason" => "tool_use"}}
             ])
           else
             sse([
-              %{"type" => "content_block_start", "index" => 0, "content_block" => %{"type" => "text"}},
-              %{"type" => "content_block_delta", "index" => 0, "delta" => %{"type" => "text_delta", "text" => "done"}},
+              %{
+                "type" => "content_block_start",
+                "index" => 0,
+                "content_block" => %{"type" => "text"}
+              },
+              %{
+                "type" => "content_block_delta",
+                "index" => 0,
+                "delta" => %{"type" => "text_delta", "text" => "done"}
+              },
               %{"type" => "message_delta", "delta" => %{"stop_reason" => "end_turn"}}
             ])
           end
         end)
 
-      c = Client.create(base_url: "https://x", style: "anthropic", model: "m", api_key: "k", transport: anthropic_t, tool_tiers: %{core: []})
+      c =
+        Client.create(
+          base_url: "https://x",
+          style: "anthropic",
+          model: "m",
+          api_key: "k",
+          transport: anthropic_t,
+          tool_tiers: %{core: []}
+        )
+
       events = Client.stream(c, "go", tier_kit(me)) |> Enum.to_list()
-      assert [%{name: "deploy", via: "call_tool", args: %{"x" => "prod"}}] = Enum.filter(events, &(&1.type == "tool_call"))
-      assert [%{name: "deploy", via: "call_tool"}] = Enum.filter(events, &(&1.type == "tool_result"))
+
+      assert [%{name: "deploy", via: "call_tool", args: %{"x" => "prod"}}] =
+               Enum.filter(events, &(&1.type == "tool_call"))
+
+      assert [%{name: "deploy", via: "call_tool"}] =
+               Enum.filter(events, &(&1.type == "tool_result"))
+
       assert [%{result: %{tool_calls: [%{name: "deploy", args: %{"x" => "prod"}}]}}] =
                Enum.filter(events, &(&1.type == "done"))
     end
@@ -949,7 +1279,9 @@ defmodule Toolnexus.HostEngineAsksTest do
   # ---- prompt cache ---------------------------------------------------------------------
 
   # Strip cache_control so a segment's identity is its content.
-  defp strip_cc(%{} = m), do: m |> Map.delete("cache_control") |> Map.new(fn {k, v} -> {k, strip_cc(v)} end)
+  defp strip_cc(%{} = m),
+    do: m |> Map.delete("cache_control") |> Map.new(fn {k, v} -> {k, strip_cc(v)} end)
+
   defp strip_cc(l) when is_list(l), do: Enum.map(l, &strip_cc/1)
   defp strip_cc(v), do: v
 
@@ -965,7 +1297,10 @@ defmodule Toolnexus.HostEngineAsksTest do
     size = fn i -> div(byte_size(Enum.join(prefix.(i))), 4) end
 
     Agent.get_and_update(sim, fn st ->
-      read = Enum.find_value(length(keys)..1//-1, 0, fn i -> if MapSet.member?(st.written, prefix.(i)), do: size.(i) end)
+      read =
+        Enum.find_value(length(keys)..1//-1, 0, fn i ->
+          if MapSet.member?(st.written, prefix.(i)), do: size.(i)
+        end)
 
       {written, write} =
         keys
@@ -976,7 +1311,8 @@ defmodule Toolnexus.HostEngineAsksTest do
             else: {w, wr}
         end)
 
-      {{read, write}, %{st | written: written, reads: st.reads ++ [read], bodies: st.bodies ++ [body]}}
+      {{read, write},
+       %{st | written: written, reads: st.reads ++ [read], bodies: st.bodies ++ [body]}}
     end)
   end
 
@@ -991,21 +1327,36 @@ defmodule Toolnexus.HostEngineAsksTest do
         usage = %{"cache_read_input_tokens" => read, "cache_creation_input_tokens" => write}
 
         if tool_results?(%{"messages" => [List.last(body["messages"])]}) do
-          Map.put(anthropic([%{"type" => "text", "text" => "ok"}], usage), "stop_reason", "end_turn")
+          Map.put(
+            anthropic([%{"type" => "text", "text" => "ok"}], usage),
+            "stop_reason",
+            "end_turn"
+          )
         else
           n = Agent.get_and_update(turn, &{&1 + 1, &1 + 1})
           name = if n == 2, do: "load_schema", else: "read_notes"
-          anthropic([%{"type" => "tool_use", "id" => "t#{n}", "name" => name, "input" => %{}}], usage)
+
+          anthropic(
+            [%{"type" => "tool_use", "id" => "t#{n}", "name" => name, "input" => %{}}],
+            usage
+          )
         end
       end)
 
-    notes = Toolnexus.define_tool(name: "read_notes", description: "Read the notes.", execute: fn _ -> "notes" end)
+    notes =
+      Toolnexus.define_tool(
+        name: "read_notes",
+        description: "Read the notes.",
+        execute: fn _ -> "notes" end
+      )
 
     loader =
       Toolnexus.define_tool(
         name: "load_schema",
         description: "Load a deferred tool's schema.",
-        execute: fn _ -> ~s({"name":"deploy","description":"Deploy.","inputSchema":{"type":"object"}}) end
+        execute: fn _ ->
+          ~s({"name":"deploy","description":"Deploy.","inputSchema":{"type":"object"}})
+        end
       )
 
     tk = Toolnexus.create_toolkit!(extra_tools: [notes, loader])
@@ -1024,7 +1375,11 @@ defmodule Toolnexus.HostEngineAsksTest do
     usage =
       Enum.reduce(~w(first second third fourth), %{read: 0, write: 0}, fn p, acc ->
         r = Client.ask(c, p, tk, "session-1")
-        %{read: acc.read + Map.get(r.usage, :cache_read_tokens, 0), write: acc.write + Map.get(r.usage, :cache_write_tokens, 0)}
+
+        %{
+          read: acc.read + Map.get(r.usage, :cache_read_tokens, 0),
+          write: acc.write + Map.get(r.usage, :cache_write_tokens, 0)
+        }
       end)
 
     {Agent.get(sim, & &1), usage}
@@ -1061,16 +1416,38 @@ defmodule Toolnexus.HostEngineAsksTest do
       t = fn req ->
         # round-trip through JSON: assert on what goes over the wire, not on internal shapes
         send(me, {:wire, Jason.decode!(Jason.encode!(req.body))})
-        {:ok, %{status: 200, headers: %{}, body: anthropic([%{"type" => "text", "text" => "ok"}])}}
+
+        {:ok,
+         %{status: 200, headers: %{}, body: anthropic([%{"type" => "text", "text" => "ok"}])}}
       end
 
       extra = [
-        Toolnexus.define_tool(name: "zz_one", description: "one", input_schema: %{"type" => "object"}, execute: fn _ -> "1" end),
-        Toolnexus.define_tool(name: "zz_two", description: "two", input_schema: %{"type" => "object"}, execute: fn _ -> "2" end)
+        Toolnexus.define_tool(
+          name: "zz_one",
+          description: "one",
+          input_schema: %{"type" => "object"},
+          execute: fn _ -> "1" end
+        ),
+        Toolnexus.define_tool(
+          name: "zz_two",
+          description: "two",
+          input_schema: %{"type" => "object"},
+          execute: fn _ -> "2" end
+        )
       ]
 
       tk = Toolnexus.create_toolkit!(extra_tools: extra)
-      c = Client.create(base_url: "https://x", style: "anthropic", model: "m", api_key: "k", transport: t, prompt_cache: %{})
+
+      c =
+        Client.create(
+          base_url: "https://x",
+          style: "anthropic",
+          model: "m",
+          api_key: "k",
+          transport: t,
+          prompt_cache: %{}
+        )
+
       Client.run(c, "hi", tk)
       assert_received {:wire, body}
       tools = body["tools"]
@@ -1080,8 +1457,19 @@ defmodule Toolnexus.HostEngineAsksTest do
     end
 
     test "usage keys are absent when the provider reports no cache" do
-      c = Client.create(base_url: "https://x", model: "m", api_key: "k", transport: transport(fn _ -> openai_text("hi") end))
-      assert Client.run(c, "x", []).usage == %{prompt_tokens: 1, completion_tokens: 1, total_tokens: 2}
+      c =
+        Client.create(
+          base_url: "https://x",
+          model: "m",
+          api_key: "k",
+          transport: transport(fn _ -> openai_text("hi") end)
+        )
+
+      assert Client.run(c, "x", []).usage == %{
+               prompt_tokens: 1,
+               completion_tokens: 1,
+               total_tokens: 2
+             }
     end
 
     test "openai: prompt_cache_key and cached_tokens" do
@@ -1093,11 +1481,23 @@ defmodule Toolnexus.HostEngineAsksTest do
 
           %{
             "choices" => [%{"message" => %{"role" => "assistant", "content" => "hi"}}],
-            "usage" => %{"prompt_tokens" => 100, "completion_tokens" => 5, "prompt_tokens_details" => %{"cached_tokens" => 80}}
+            "usage" => %{
+              "prompt_tokens" => 100,
+              "completion_tokens" => 5,
+              "prompt_tokens_details" => %{"cached_tokens" => 80}
+            }
           }
         end)
 
-      c = Client.create(base_url: "https://x", model: "m", api_key: "k", transport: t, prompt_cache: %{key: "s1"})
+      c =
+        Client.create(
+          base_url: "https://x",
+          model: "m",
+          api_key: "k",
+          transport: t,
+          prompt_cache: %{key: "s1"}
+        )
+
       r = Client.run(c, "x", [])
       assert_received {:key, "s1"}
       assert r.usage.cache_read_tokens == 80 and r.usage.prompt_tokens == 100
@@ -1117,24 +1517,49 @@ defmodule Toolnexus.HostEngineAsksTest do
       out = Toolnexus.PromptCache.apply(body, "anthropic", long_ttl: true)
       assert length(String.split(Jason.encode!(out), ~s("ttl":"1h"))) == 4
       assert hd(out["tools"]) == %{"name" => "a"}
-      assert out["system"] == [%{"type" => "text", "text" => "s", "cache_control" => %{"type" => "ephemeral", "ttl" => "1h"}}]
+
+      assert out["system"] == [
+               %{
+                 "type" => "text",
+                 "text" => "s",
+                 "cache_control" => %{"type" => "ephemeral", "ttl" => "1h"}
+               }
+             ]
 
       blocks = %{
         "system" => [%{"type" => "text", "text" => "s"}],
-        "messages" => [%{"role" => "user", "content" => [%{"type" => "text", "text" => "a"}, %{"type" => "text", "text" => "b"}]}],
+        "messages" => [
+          %{
+            "role" => "user",
+            "content" => [%{"type" => "text", "text" => "a"}, %{"type" => "text", "text" => "b"}]
+          }
+        ],
         "tools" => []
       }
 
       out = Toolnexus.PromptCache.apply(blocks, "anthropic", %{})
-      assert List.last(hd(out["messages"])["content"])["cache_control"] == %{"type" => "ephemeral"}
+
+      assert List.last(hd(out["messages"])["content"])["cache_control"] == %{
+               "type" => "ephemeral"
+             }
+
       refute Map.has_key?(hd(hd(out["messages"])["content"]), "cache_control")
       assert hd(out["system"])["cache_control"] == %{"type" => "ephemeral"}
       assert out["tools"] == []
-      assert Toolnexus.PromptCache.apply(%{"system" => "", "messages" => [%{"role" => "user"}]}, "anthropic", %{}) ==
+
+      assert Toolnexus.PromptCache.apply(
+               %{"system" => "", "messages" => [%{"role" => "user"}]},
+               "anthropic",
+               %{}
+             ) ==
                %{"system" => "", "messages" => [%{"role" => "user"}]}
 
       me = self()
-      t = transport(fn b -> send(me, {:sys, b["system"]}) && anthropic([%{"type" => "text", "text" => "ok"}]) end)
+
+      t =
+        transport(fn b ->
+          send(me, {:sys, b["system"]}) && anthropic([%{"type" => "text", "text" => "ok"}])
+        end)
 
       c =
         Client.create(

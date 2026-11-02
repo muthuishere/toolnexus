@@ -65,6 +65,7 @@ public static class InProcess
         public Func<Request, Response>? Generate { get; set; }
         public string? SystemPrompt { get; set; }
         public int? MaxTurns { get; set; }
+        public int? MaxToolConcurrency { get; set; }
         public LlmClient.Hooks? Hooks { get; set; }
         public long? TimeoutMs { get; set; }
         public IConversationStore? Store { get; set; }
@@ -111,6 +112,7 @@ public static class InProcess
         };
         // Only when set: a 0 here is not "no timeout", it is "already expired".
         if (opts.MaxTurns is > 0) o.MaxTurns = opts.MaxTurns.Value;
+        if (opts.MaxToolConcurrency is > 0) o.MaxToolConcurrency = opts.MaxToolConcurrency.Value;
         if (opts.TimeoutMs is > 0) o.TimeoutMs = opts.TimeoutMs.Value;
         return LlmClient.Create(o);
     }

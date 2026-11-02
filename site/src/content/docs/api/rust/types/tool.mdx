@@ -50,6 +50,7 @@ use toolnexus::{Tool, ToolContext, ToolResult, ToolSource, empty_schema};
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Every field is public; `execute` returns a boxed future of a ToolResult.
     let ping = Tool {
+        concurrency_safe: None,
         name: "ping".into(),
         description: "Reply pong".into(),
         input_schema: empty_schema(),
@@ -118,6 +119,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let tools: Vec<Tool> = endpoints
         .iter()
         .map(|&(key, path)| Tool {
+            concurrency_safe: None,
             // Names must match [a-zA-Z0-9_-]; sanitize does exactly that.
             name: sanitize(key),
             description: format!("Call {path}"),

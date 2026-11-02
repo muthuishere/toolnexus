@@ -150,6 +150,7 @@ use toolnexus::{Answer, Request, Tool, ToolResult, ToolSource, pending};
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // check_secret needs approval the first time; once ctx.answer is satisfied, it succeeds.
     let check_secret = Tool {
+        concurrency_safe: None,
         name: "check_secret".into(),
         description: "needs approval".into(),
         input_schema: json!({"type": "object", "properties": {}}),

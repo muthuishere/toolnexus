@@ -93,7 +93,14 @@ defmodule Toolnexus.Agents.AsToolCtxTest do
 
               unless ev.hints && ev.hints.read_only do
                 req = %Request{id: "a1", kind: "approval", prompt: "allow #{ev.name}?"}
-                %{result: %ToolResult{output: req.prompt, is_error: true, metadata: %{pending: req}}}
+
+                %{
+                  result: %ToolResult{
+                    output: req.prompt,
+                    is_error: true,
+                    metadata: %{pending: req}
+                  }
+                }
               end
             end
           },

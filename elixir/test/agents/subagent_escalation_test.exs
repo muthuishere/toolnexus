@@ -13,7 +13,8 @@ defmodule Toolnexus.Agents.EscalationTest do
     rt =
       Runtime.new(%{
         transport: Mock.transport(&Mock.demo/1),
-        registry: registry(%{"approverParent" => %{wait_for: fn req -> %{id: req.id, ok: true} end}})
+        registry:
+          registry(%{"approverParent" => %{wait_for: fn req -> %{id: req.id, ok: true} end}})
       })
 
     {:ok, p} = Runtime.spawn_agent(rt, Runtime.root(rt), "approverParent")
@@ -23,11 +24,13 @@ defmodule Toolnexus.Agents.EscalationTest do
     # run completed (no durable pending)
     assert r.status == "done", "run completed (no durable pending): #{r.status}"
     # child's approval flowed through parent authority
-    assert r.text =~ "asker-done: secret-token", "child's approval flowed through parent authority: #{r.text}"
+    assert r.text =~ "asker-done: secret-token",
+           "child's approval flowed through parent authority: #{r.text}"
 
     tr = Runtime.trace(rt)
     # trace shows suspended→running round-trip
-    assert Enum.any?(tr, &(&1 =~ "running→suspended")) and Enum.any?(tr, &(&1 =~ "suspended→running")),
+    assert Enum.any?(tr, &(&1 =~ "running→suspended")) and
+             Enum.any?(tr, &(&1 =~ "suspended→running")),
            "trace shows suspended→running round-trip"
 
     # escalation chose an ANCESTOR (not self)
@@ -38,7 +41,13 @@ defmodule Toolnexus.Agents.EscalationTest do
     assert transitions(tr, "root/approverParent.1") == ["idle→running", "running→idle"]
 
     assert transitions(tr, "root/approverParent.1/asker.1") ==
-             ["idle→running", "running→suspended", "suspended→running", "running→idle", "idle→closed"]
+             [
+               "idle→running",
+               "running→suspended",
+               "suspended→running",
+               "running→idle",
+               "idle→closed"
+             ]
 
     Runtime.shutdown(rt)
   end

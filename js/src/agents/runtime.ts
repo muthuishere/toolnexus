@@ -1012,7 +1012,7 @@ export class AgentRuntime {
     const team = [...(parent.def.team ?? [])].sort()
     const advertised = team.map((n) => (this.registry[n] ? `${n}: ${this.registry[n].does}` : n)).join("; ")
     const rt = this
-    return defineTool({
+    const tool = defineTool({
       name: "task",
       description: `Delegate a subtask to an isolated subagent (it runs on a fresh transcript and returns only its final answer). Available agents — ${advertised}`,
       inputSchema: {
@@ -1068,5 +1068,8 @@ export class AgentRuntime {
         }
       },
     })
+    // Each subagent is isolated and the runtime's own gate schedules the children,
+    // so a fan-out of task calls runs concurrently (SPEC §8 "Tool scheduling").
+    return { ...tool, concurrencySafe: () => true }
   }
 }

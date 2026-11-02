@@ -10,13 +10,17 @@ defmodule Toolnexus.HttpTest do
     fn conn ->
       {:ok, req_body, conn} = read_body(conn)
 
-      send(test_pid, {:request, %{
-        method: conn.method,
-        path: conn.request_path,
-        query: conn.query_string,
-        headers: conn.req_headers,
-        body: req_body
-      }})
+      send(
+        test_pid,
+        {:request,
+         %{
+           method: conn.method,
+           path: conn.request_path,
+           query: conn.query_string,
+           headers: conn.req_headers,
+           body: req_body
+         }}
+      )
 
       send_resp(conn, status, body)
     end
@@ -59,7 +63,10 @@ defmodule Toolnexus.HttpTest do
     assert_received {:request, req}
     assert req.method == "POST"
     assert Jason.decode!(req.body) == %{"name" => "x", "count" => 2}
-    assert {"content-type", "application/json"} in Enum.map(req.headers, fn {k, v} -> {String.downcase(k), v} end)
+
+    assert {"content-type", "application/json"} in Enum.map(req.headers, fn {k, v} ->
+             {String.downcase(k), v}
+           end)
   end
 
   test "POST with query list: named args go to the querystring, the rest to the body" do
@@ -93,7 +100,11 @@ defmodule Toolnexus.HttpTest do
     tool.execute.(%{"user" => "a b", "pass" => "c"}, nil)
     assert_received {:request, req}
     assert URI.decode_query(req.body) == %{"user" => "a b", "pass" => "c"}
-    assert {"content-type", "application/x-www-form-urlencoded"} in Enum.map(req.headers, fn {k, v} -> {String.downcase(k), v} end)
+
+    assert {"content-type", "application/x-www-form-urlencoded"} in Enum.map(req.headers, fn {k,
+                                                                                              v} ->
+             {String.downcase(k), v}
+           end)
   end
 
   test "raw body mode sends the body arg verbatim" do
@@ -170,7 +181,12 @@ defmodule Toolnexus.HttpTest do
       )
 
     result = tool.execute.(%{}, nil)
-    assert result == %ToolResult{output: "HTTP 404: not found", is_error: true, metadata: %{status: 404}}
+
+    assert result == %ToolResult{
+             output: "HTTP 404: not found",
+             is_error: true,
+             metadata: %{status: 404}
+           }
   end
 
   test "result_mode status+text prefixes the status line" do

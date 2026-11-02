@@ -165,6 +165,10 @@ pub struct ClientOptions {
     pub system_prompt: String,
     /// 0 ⇒ 10.
     pub max_turns: usize,
+    /// Cap on concurrency-safe tool calls of one response running at once (SPEC §8
+    /// "Tool scheduling"). 0 ⇒ env `TOOLNEXUS_MAX_TOOL_CONCURRENCY` when a positive
+    /// integer, else 10. Unsafe calls (anything not read-only) always run alone.
+    pub max_tool_concurrency: usize,
     pub hooks: Hooks,
     /// 0 ⇒ 2 retries (3 attempts); -1 ⇒ no retries; n ⇒ n.
     pub retries: i32,
@@ -976,6 +980,17 @@ impl Client {
     /// Run `tool_search` against a toolkit (what the loop does for the model).
     pub fn tool_search(&self, tk: &Toolkit, args: &Value) -> ToolResult {
         tiers::tool_search(tk, args)
+    }
+
+    /// One call's safety; looks through `call_tool` to the tool it names. Unknown ⇒ unsafe.
+    fn call_safe(&self, tk: &Toolkit, call: &Call) -> bool {
+        if self.opts().tool_tiers.is_some() && call.name == "tool_search" {
+            return true;
+        }
+        let (name, args, _) = self.unwrap_call(&call.name, &call.args);
+        tk.get(&name)
+            .map(|t| crate::tool::is_concurrency_safe(&t, &args))
+            .unwrap_or(false)
     }
 
     fn unwrap_call(&self, name: &str, args: &Value) -> (String, Value, bool) {
@@ -1947,7 +1962,10 @@ impl Client {
                 }
                 Ok::<_, ClientError>((args, result, halted))
             });
-            let outcomes = futures_util::future::join_all(futs).await;
+            let safe: Vec<bool> = calls.iter().map(|c| self.call_safe(tk, c)).collect();
+            let cap = crate::tool::resolve_max_tool_concurrency(self.opts().max_tool_concurrency);
+            let futs: Vec<_> = futs.collect();
+            let outcomes = crate::tool::schedule_calls(futs, &safe, cap).await;
             let entry = |c: &Call, r: &ToolResult| match style {
                 Style::OpenAI => emit::with_tool_parts(
                     json!({"role": "tool", "tool_call_id": c.id, "content": r.output}),

@@ -270,7 +270,12 @@ defmodule Toolnexus.Acp do
   end
 
   defp send_req(stdio, id, method, params) do
-    Stdio.send_msg(stdio, %{"jsonrpc" => "2.0", "id" => id, "method" => method, "params" => params})
+    Stdio.send_msg(stdio, %{
+      "jsonrpc" => "2.0",
+      "id" => id,
+      "method" => method,
+      "params" => params
+    })
   end
 
   # -- turn serialisation -----------------------------------------------------

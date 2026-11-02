@@ -27,6 +27,7 @@ fn stub_llm_handler(r: Req) -> Resp {
 
 async fn balance_toolkit(authed: Arc<AtomicBool>) -> toolnexus::Toolkit {
     let balance = Tool {
+        concurrency_safe: None,
         name: "get_balance".into(),
         description: "Return the account balance. Requires login first.".into(),
         input_schema: json!({"type": "object", "properties": {}, "additionalProperties": false}),

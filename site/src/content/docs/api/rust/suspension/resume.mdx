@@ -59,6 +59,7 @@ use toolnexus::{Answer, Request, Tool, ToolResult, ToolSource, empty_schema, pen
 // check_secret needs human approval the first time; once ctx.answer is ok, it succeeds.
 fn check_secret() -> Tool {
     Tool {
+        concurrency_safe: None,
         name: "check_secret".into(),
         description: "needs approval".into(),
         input_schema: empty_schema(),
@@ -132,6 +133,7 @@ use toolnexus::{Answer, Request, Tool, ToolResult, ToolSource, empty_schema, pen
 
 fn check_secret() -> Tool {
     Tool {
+        concurrency_safe: None,
         name: "check_secret".into(),
         description: "needs approval".into(),
         input_schema: empty_schema(),
@@ -205,6 +207,7 @@ use toolnexus::{Answer, Request, Tool, ToolResult, ToolSource, empty_schema, pen
 
 fn check_secret() -> Tool {
     Tool {
+        concurrency_safe: None,
         name: "check_secret".into(),
         description: "needs approval".into(),
         input_schema: empty_schema(),

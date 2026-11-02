@@ -37,7 +37,11 @@ defmodule Toolnexus.ToolTiers do
   def build_plan(opts, tools) do
     opts = Map.new(opts)
     count = opts[:count_tokens] || (&default_count_tokens/1)
-    usage = fn n -> if is_function(opts[:usage_count], 1), do: opts[:usage_count].(n) || 0, else: 0 end
+
+    usage = fn n ->
+      if is_function(opts[:usage_count], 1), do: opts[:usage_count].(n) || 0, else: 0
+    end
+
     by_name = Map.new(tools, &{&1.name, &1})
 
     tier =
@@ -50,8 +54,13 @@ defmodule Toolnexus.ToolTiers do
 
     budget =
       case opts[:budget_tokens] do
-        b when is_integer(b) and b > 0 -> b
-        _ -> if is_integer(opts[:context_window]) and opts[:context_window] > 0, do: div(opts[:context_window], 20), else: 0
+        b when is_integer(b) and b > 0 ->
+          b
+
+        _ ->
+          if is_integer(opts[:context_window]) and opts[:context_window] > 0,
+            do: div(opts[:context_window], 20),
+            else: 0
       end
 
     if budget > 0 do
@@ -82,7 +91,10 @@ defmodule Toolnexus.ToolTiers do
   defp mark(tier, nil, _t), do: tier
 
   defp mark(tier, names, t),
-    do: Enum.reduce(names, tier, fn n, acc -> if Map.has_key?(acc, n), do: Map.put(acc, n, t), else: acc end)
+    do:
+      Enum.reduce(names, tier, fn n, acc ->
+        if Map.has_key?(acc, n), do: Map.put(acc, n, t), else: acc
+      end)
 
   defp default_count_tokens(v), do: div(byte_size(Jason.encode!(v)) + 3, 4)
 
@@ -148,7 +160,10 @@ defmodule Toolnexus.ToolTiers do
           "type" => "object",
           "properties" => %{
             "query" => %{"type" => "string", "description" => "Keywords, or select:name1,name2"},
-            "limit" => %{"type" => "number", "description" => "Maximum results for a keyword query (default 5)"}
+            "limit" => %{
+              "type" => "number",
+              "description" => "Maximum results for a keyword query (default 5)"
+            }
           },
           "required" => ["query"],
           "additionalProperties" => false
@@ -174,7 +189,10 @@ defmodule Toolnexus.ToolTiers do
 
   # The client loop intercepts both meta tools; run outside it they say so.
   defp engine_only(_args, _ctx),
-    do: %ToolResult{output: "tool_search/call_tool run only inside the client loop", is_error: true}
+    do: %ToolResult{
+      output: "tool_search/call_tool run only inside the client loop",
+      is_error: true
+    }
 
   @doc false
   # The tools array for a request: core tools (sorted, present in the toolkit) then

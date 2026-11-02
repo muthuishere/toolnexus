@@ -89,14 +89,21 @@ defmodule Toolnexus.TranslateTest do
     {base, agent} =
       start_stub(%{
         "content" => [
-          %{"type" => "tool_use", "id" => "toolu_1", "name" => "get_weather", "input" => %{"city" => "Chennai"}}
+          %{
+            "type" => "tool_use",
+            "id" => "toolu_1",
+            "name" => "get_weather",
+            "input" => %{"city" => "Chennai"}
+          }
         ],
         "stop_reason" => "tool_use",
         "usage" => %{"input_tokens" => 10, "output_tokens" => 5}
       })
 
     res =
-      Client.translate(client(base, "anthropic"), [user("weather in Chennai?")], tools: openai_tools())
+      Client.translate(client(base, "anthropic"), [user("weather in Chennai?")],
+        tools: openai_tools()
+      )
 
     assert res.finish_reason == "tool_calls"
     assert [tc] = res.tool_calls
@@ -161,7 +168,10 @@ defmodule Toolnexus.TranslateTest do
 
   test "three consecutive tool results merge into ONE user turn" do
     {base, agent} =
-      start_stub(%{"content" => [%{"type" => "text", "text" => "done"}], "stop_reason" => "end_turn"})
+      start_stub(%{
+        "content" => [%{"type" => "text", "text" => "done"}],
+        "stop_reason" => "end_turn"
+      })
 
     call = fn id -> %{"id" => id, "function" => %{"name" => "f", "arguments" => "{}"}} end
     result = fn id, content -> %{"role" => "tool", "tool_call_id" => id, "content" => content} end
@@ -250,7 +260,12 @@ defmodule Toolnexus.TranslateTest do
     {base, agent} =
       start_stub(%{
         "content" => [
-          %{"type" => "tool_use", "id" => "tu_9", "name" => "my_native_tool", "input" => %{"x" => 1}}
+          %{
+            "type" => "tool_use",
+            "id" => "tu_9",
+            "name" => "my_native_tool",
+            "input" => %{"x" => 1}
+          }
         ],
         "stop_reason" => "tool_use"
       })
@@ -282,7 +297,10 @@ defmodule Toolnexus.TranslateTest do
 
   test "a toolkit and an OpenAI tools array compose" do
     {base, agent} =
-      start_stub(%{"content" => [%{"type" => "text", "text" => "ok"}], "stop_reason" => "end_turn"})
+      start_stub(%{
+        "content" => [%{"type" => "text", "text" => "ok"}],
+        "stop_reason" => "end_turn"
+      })
 
     tool = %Toolnexus.Tool{
       name: "server_side_tool",
@@ -308,12 +326,16 @@ defmodule Toolnexus.TranslateTest do
       {"auto", nil},
       {"required", ~s("type":"any")},
       {"none", ~s("type":"none")},
-      {%{"type" => "function", "function" => %{"name" => "get_weather"}}, ~s("name":"get_weather")}
+      {%{"type" => "function", "function" => %{"name" => "get_weather"}},
+       ~s("name":"get_weather")}
     ]
 
     for {choice, want} <- cases do
       {base, agent} =
-        start_stub(%{"content" => [%{"type" => "text", "text" => "ok"}], "stop_reason" => "end_turn"})
+        start_stub(%{
+          "content" => [%{"type" => "text", "text" => "ok"}],
+          "stop_reason" => "end_turn"
+        })
 
       Client.translate(client(base, "anthropic"), [user("go")],
         tools: openai_tools(),
@@ -348,7 +370,10 @@ defmodule Toolnexus.TranslateTest do
 
   test "arguments are accepted as an object as well as a string" do
     {base, agent} =
-      start_stub(%{"content" => [%{"type" => "text", "text" => "ok"}], "stop_reason" => "end_turn"})
+      start_stub(%{
+        "content" => [%{"type" => "text", "text" => "ok"}],
+        "stop_reason" => "end_turn"
+      })
 
     Client.translate(client(base, "anthropic"), [
       user("go"),
@@ -371,7 +396,10 @@ defmodule Toolnexus.TranslateTest do
 
   test "content given as parts is flattened to text" do
     {base, agent} =
-      start_stub(%{"content" => [%{"type" => "text", "text" => "ok"}], "stop_reason" => "end_turn"})
+      start_stub(%{
+        "content" => [%{"type" => "text", "text" => "ok"}],
+        "stop_reason" => "end_turn"
+      })
 
     Client.translate(client(base, "anthropic"), [
       %{
@@ -389,7 +417,9 @@ defmodule Toolnexus.TranslateTest do
   test "LLM hooks fire exactly once and no tool hook fires" do
     {base, _agent} =
       start_stub(%{
-        "content" => [%{"type" => "tool_use", "id" => "t1", "name" => "get_weather", "input" => %{}}],
+        "content" => [
+          %{"type" => "tool_use", "id" => "t1", "name" => "get_weather", "input" => %{}}
+        ],
         "stop_reason" => "tool_use"
       })
 
@@ -458,6 +488,7 @@ defmodule Toolnexus.TranslateTest do
     assert res.usage.total_tokens == 7
     assert sent_json(agent) =~ ~s("parameters"), "OpenAI tools were altered on an OpenAI upstream"
   end
+
   # ---- pure translation functions: the fallback and edge clauses ----
 
   describe "pure functions" do
@@ -515,7 +546,11 @@ defmodule Toolnexus.TranslateTest do
       native = %{"name" => "n", "input_schema" => %{"type" => "object"}}
       assert Translate.openai_tools_to_anthropic([native]) == [native]
       # a non-map `parameters` falls back to an empty object schema
-      [decl] = Translate.openai_tools_to_anthropic([%{"function" => %{"name" => "f", "parameters" => "bad"}}])
+      [decl] =
+        Translate.openai_tools_to_anthropic([
+          %{"function" => %{"name" => "f", "parameters" => "bad"}}
+        ])
+
       assert decl["input_schema"] == %{"type" => "object", "properties" => %{}}
       refute Map.has_key?(decl, "description")
     end
@@ -560,7 +595,10 @@ defmodule Toolnexus.TranslateTest do
 
     test "openai_messages_to_anthropic keeps a user content-block array as-is" do
       blocks = [%{"type" => "image", "source" => %{}}]
-      {msgs, ""} = Translate.openai_messages_to_anthropic([%{"role" => "user", "content" => blocks}])
+
+      {msgs, ""} =
+        Translate.openai_messages_to_anthropic([%{"role" => "user", "content" => blocks}])
+
       assert msgs == [%{"role" => "user", "content" => blocks}]
     end
 
@@ -571,23 +609,35 @@ defmodule Toolnexus.TranslateTest do
         ])
 
       assert msgs == [
-               %{"role" => "user", "content" => [%{"type" => "tool_result", "content" => "ra", "tool_use_id" => "a"}]}
+               %{
+                 "role" => "user",
+                 "content" => [
+                   %{"type" => "tool_result", "content" => "ra", "tool_use_id" => "a"}
+                 ]
+               }
              ]
     end
 
     test "openai_messages_to_anthropic omits tool_use_id when the caller sent none" do
-      {msgs, ""} = Translate.openai_messages_to_anthropic([%{"role" => "tool", "content" => "orphan"}])
+      {msgs, ""} =
+        Translate.openai_messages_to_anthropic([%{"role" => "tool", "content" => "orphan"}])
+
       [%{"content" => [block]}] = msgs
       refute Map.has_key?(block, "tool_use_id")
     end
 
     test "tool_calls_json renders an envelope-ready array" do
-      res = %Translate.Result{tool_calls: [%Translate.ToolCall{id: "i", name: "n", arguments: "{}"}]}
+      res = %Translate.Result{
+        tool_calls: [%Translate.ToolCall{id: "i", name: "n", arguments: "{}"}]
+      }
 
       assert Translate.tool_calls_json(res) == [
-               %{"id" => "i", "type" => "function", "function" => %{"name" => "n", "arguments" => "{}"}}
+               %{
+                 "id" => "i",
+                 "type" => "function",
+                 "function" => %{"name" => "n", "arguments" => "{}"}
+               }
              ]
     end
   end
-
 end

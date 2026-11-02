@@ -98,7 +98,9 @@ defmodule Toolnexus.Agents.Runtime do
     # Toolnexus.Client.in_process_transport/1 export create_in_process/1 uses —
     # so it rides the identical gated-transport wrapping below with zero new code
     # path. Mutual exclusion with :transport/:llm is already enforced in new/1.
-    transport = opts[:transport] || (opts[:in_process] && Toolnexus.Client.in_process_transport(opts[:in_process]))
+    transport =
+      opts[:transport] ||
+        (opts[:in_process] && Toolnexus.Client.in_process_transport(opts[:in_process]))
 
     ctx = %{
       runtime: self(),
@@ -125,7 +127,12 @@ defmodule Toolnexus.Agents.Runtime do
     }
 
     {:ok, root} =
-      Handle.start(ctx, "root", %{name: "root", description: "runtime root", system_prompt: "", model: "none"}, nil)
+      Handle.start(
+        ctx,
+        "root",
+        %{name: "root", description: "runtime root", system_prompt: "", model: "none"},
+        nil
+      )
 
     {:ok, %{ctx: Map.put(ctx, :root, root), root: root}}
   end
@@ -250,7 +257,16 @@ defmodule Toolnexus.Agents.Runtime do
     acc =
       if snap.id == "root",
         do: acc,
-        else: acc ++ [%{id: snap.id, state: snap.state, tokens: snap.usage_total, inbox: length(snap.inbox)}]
+        else:
+          acc ++
+            [
+              %{
+                id: snap.id,
+                state: snap.state,
+                tokens: snap.usage_total,
+                inbox: length(snap.inbox)
+              }
+            ]
 
     Enum.reduce(snap.children, acc, fn c, acc -> walk(c.pid, acc) end)
   end
@@ -279,7 +295,11 @@ defmodule Toolnexus.Agents.Runtime do
     snap = Handle.snapshot(leaf)
     ok = Toolnexus.Answer.ok?(answer)
 
-    Trace.add(ctx.trace, "#{snap.id}: resume with Answer(ok=#{ok}) at checkpoint (turns so far: #{snap.turns_total})")
+    Trace.add(
+      ctx.trace,
+      "#{snap.id}: resume with Answer(ok=#{ok}) at checkpoint (turns so far: #{snap.turns_total})"
+    )
+
     GenServer.call(leaf, :cancel_pending)
     result = Handle.run_now(leaf, nil, fn _req -> answer end, :resume)
 
@@ -340,6 +360,9 @@ defmodule Toolnexus.Agents.Runtime do
     names = Enum.map_join(entries, "; ", fn {k, d} -> "#{k}: #{d[:description]}" end)
 
     Toolnexus.define_tool(%{
+      # Each subagent is isolated and the runtime's own gate schedules the children,
+      # so a fan-out of task calls runs concurrently (SPEC §8 "Tool scheduling").
+      concurrency_safe: fn _args -> true end,
       name: "task",
       description: "Delegate a subtask to an isolated subagent. Available agents — " <> names,
       input_schema: %{
@@ -353,7 +376,8 @@ defmodule Toolnexus.Agents.Runtime do
 
         if agent_name not in targets do
           %ToolResult{
-            output: "agent \"#{agent_name}\" not in this agent's team (#{Enum.join(Enum.sort(targets), ", ")})",
+            output:
+              "agent \"#{agent_name}\" not in this agent's team (#{Enum.join(Enum.sort(targets), ", ")})",
             is_error: true
           }
         else
@@ -380,7 +404,10 @@ defmodule Toolnexus.Agents.Runtime do
     {child, r} =
       case existing do
         {pid, es} ->
-          Trace.add(ctx.trace, "#{parent_id}: task replay → REATTACH to #{es.id} (state #{es.state})")
+          Trace.add(
+            ctx.trace,
+            "#{parent_id}: task replay → REATTACH to #{es.id} (state #{es.state})"
+          )
 
           r =
             if es.last_result != nil and es.state in [:idle, :suspended, :closed],

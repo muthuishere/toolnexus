@@ -709,6 +709,7 @@ async fn relay_suspension_is_not_a_tool_error_and_may_repeat() {
 #[tokio::test]
 async fn relay_and_auth_suspension_in_the_same_turn() {
     let auth = Tool {
+        concurrency_safe: None,
         name: "needs_login".into(),
         description: "auth".into(),
         input_schema: json!({"type": "object", "properties": {}}),

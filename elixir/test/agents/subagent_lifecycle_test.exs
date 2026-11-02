@@ -35,7 +35,9 @@ defmodule Toolnexus.Agents.LifecycleTest do
     third = Runtime.post(rt, peer, %{from: "a", channel: "peer", text: "3"})
 
     # inbox gate: third post REJECTED loudly to sender
-    assert third.ok == false and third.is_error =~ "inbox full", "inbox gate: third post REJECTED loudly"
+    assert third.ok == false and third.is_error =~ "inbox full",
+           "inbox gate: third post REJECTED loudly"
+
     Runtime.shutdown(rt)
 
     rt2 =
@@ -89,9 +91,13 @@ defmodule Toolnexus.Agents.LifecycleTest do
     r = Task.await(w, 5_000)
 
     # turn aborted → isError result, status=interrupted
-    assert r.is_error and r.status == "interrupted", "turn aborted → isError, status=interrupted: #{r.status}"
+    assert r.is_error and r.status == "interrupted",
+           "turn aborted → isError, status=interrupted: #{r.status}"
+
     # agent is IDLE (alive), not closed
-    assert Runtime.snapshot(s).state == :idle, "agent is IDLE (alive), not closed: #{Runtime.snapshot(s).state}"
+    assert Runtime.snapshot(s).state == :idle,
+           "agent is IDLE (alive), not closed: #{Runtime.snapshot(s).state}"
+
     # inbox survived the interrupt (transactional drain restored the item)
     assert length(Runtime.snapshot(s).inbox) == 1, "inbox survived the interrupt"
 

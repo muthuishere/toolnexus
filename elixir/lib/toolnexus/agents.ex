@@ -165,7 +165,8 @@ defmodule Toolnexus.Agents do
   and `:on_metric`. A `:hooks` on the agent itself replaces the runtime's for that
   agent, so leave it unset when the gate must hold.
   """
-  @spec as_tool_with(AgentDef.t(), (Toolnexus.Context.t() -> keyword() | map())) :: Toolnexus.Tool.t()
+  @spec as_tool_with(AgentDef.t(), (Toolnexus.Context.t() -> keyword() | map())) ::
+          Toolnexus.Tool.t()
   def as_tool_with(%AgentDef{} = a, per_call) when is_function(per_call, 1) do
     Toolnexus.define_tool(%{
       name: a.name,
@@ -182,7 +183,13 @@ defmodule Toolnexus.Agents do
         r =
           cond do
             aborted?(ctx.signal) ->
-              %{text: "context canceled", is_error: true, status: "cancelled", turns: 0, total_tokens: 0}
+              %{
+                text: "context canceled",
+                is_error: true,
+                status: "cancelled",
+                turns: 0,
+                total_tokens: 0
+              }
 
             ctx.answer ->
               run_with_answer(a, rt_opts, prompt, ctx.answer)

@@ -125,6 +125,22 @@ class AgentRuntimeTest {
     }
 
     // S1+S2 — examples/subagent-fanout: fan-out, isolation, parallelism, usage roll-up ----------
+    /** SPEC §7D "Background runs": spawn + wake return at once with the id; the completion
+     * arrives on the host's callback. No new API; this pins the recipe. */
+    @Test
+    void backgroundRunRecipe() throws Exception {
+        AgentRuntime rt = new AgentRuntime(opts());
+        Handle h = rt.spawn(rt.root, "coordinator").handle();
+        check("the handle id is available at once", h != null && h.id != null && !h.id.isEmpty(), String.valueOf(h));
+        var done = new java.util.concurrent.CompletableFuture<String[]>();
+        rt.futureResult(h).thenAccept(r -> done.complete(new String[] {h.id, r.status(), r.text()})); // onDone(id, r)
+        rt.wake(h, "answer using two lookups");
+        String[] got = done.get(5, java.util.concurrent.TimeUnit.SECONDS);
+        check("completion carries the id", h.id.equals(got[0]), got[0]);
+        check("completion is done", "done".equals(got[1]), got[1] + " " + got[2]);
+        check("completion carries the answer", got[2].contains("found:"), got[2]);
+    }
+
     @Test
     @SuppressWarnings("unchecked")
     void s1s2_taskFanOut_contextIsolation_parallel_usageRollup() {

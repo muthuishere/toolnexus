@@ -110,6 +110,7 @@ public final class InProcess {
         public Function<Request, Response> generate;
         public String systemPrompt;
         public int maxTurns;
+        public int maxToolConcurrency;
         public LlmClient.Hooks hooks;
         public long timeoutMs;
         public LlmClient.ConversationStore store;
@@ -126,6 +127,7 @@ public final class InProcess {
         public Options generate(Function<Request, Response> v) { this.generate = v; return this; }
         public Options systemPrompt(String v) { this.systemPrompt = v; return this; }
         public Options maxTurns(int v) { this.maxTurns = v; return this; }
+        public Options maxToolConcurrency(int v) { this.maxToolConcurrency = v; return this; }
         public Options hooks(LlmClient.Hooks v) { this.hooks = v; return this; }
         public Options timeoutMs(long v) { this.timeoutMs = v; return this; }
         public Options store(LlmClient.ConversationStore v) { this.store = v; return this; }
@@ -158,6 +160,7 @@ public final class InProcess {
         o.httpClient = new GenerateBackedHttpClient(opts.generate);
         o.systemPrompt = opts.systemPrompt;
         if (opts.maxTurns > 0) o.maxTurns = opts.maxTurns;
+        if (opts.maxToolConcurrency > 0) o.maxToolConcurrency = opts.maxToolConcurrency;
         o.hooks = opts.hooks;
         // Only when positive: 0 is not "no timeout" here, it is "already expired".
         if (opts.timeoutMs > 0) o.timeoutMs = opts.timeoutMs;

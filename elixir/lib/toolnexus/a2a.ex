@@ -233,7 +233,12 @@ defmodule Toolnexus.A2a do
   # LOCAL verdict, not the remote Task's state (matches the js reference).
   defp cancel_result(state) do
     state = %{state | state: "canceled"}
-    %ToolResult{output: "A2A task #{state.task_id} canceled", is_error: true, metadata: meta(state)}
+
+    %ToolResult{
+      output: "A2A task #{state.task_id} canceled",
+      is_error: true,
+      metadata: meta(state)
+    }
   end
 
   # §7A ctx abort. `signal` is a zero-arity predicate (aborted when it returns

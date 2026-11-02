@@ -10,6 +10,7 @@ import { toOpenAI, toAnthropic } from "./adapters.js"
 import { applyPromptCache, type PromptCacheOptions } from "./promptcache.js"
 import { buildToolPlan, toolSearch, unwrapCallTool, type ToolPlan, type ToolTier, type ToolTierOptions } from "./tooltiers.js"
 import { isRetryableStatus, retryAfterMs } from "./retry.js"
+import { isConcurrencySafe, resolveMaxToolConcurrency, scheduleCalls } from "./toolconcurrency.js"
 import type { ContentPart, PromptInput, UnsupportedPartMode } from "./content.js"
 import { toOpenAIWire, toAnthropicWire, checkPromptParts, type WireOptions } from "./wire.js"
 import type { TranslateRequest, TranslateResult, TranslatedToolCall } from "./translate.js"
@@ -41,6 +42,10 @@ export interface ClientOptions {
   headers?: Record<string, string>
   systemPrompt?: string
   maxTurns?: number
+  /** Cap on concurrency-safe tool calls of one response running at once (SPEC §8 "Tool
+   * scheduling"). Absent ⇒ env `TOOLNEXUS_MAX_TOOL_CONCURRENCY` when a positive integer, else 10.
+   * Unsafe calls (anything not read-only) always run alone. */
+  maxToolConcurrency?: number
   hooks?: Hooks
   /** Retries on transient LLM errors (`429`/`500`/`502`/`503`/`504`/`529` + network). Default 2.
    * Widen the status set with `retryableStatuses`. */
@@ -990,6 +995,27 @@ export class Client {
     return { args: a, result }
   }
 
+  /** Runs one response's calls under the tool schedule (SPEC §8 "Tool scheduling"). */
+  private schedule<T, R>(
+    toolkit: Toolkit | undefined,
+    items: T[],
+    key: (item: T) => [string, Record<string, unknown>],
+    fn: (item: T) => Promise<R>,
+  ): Promise<R[]> {
+    return scheduleCalls(items, (item) => {
+      const [name, args] = key(item)
+      return this.callSafe(toolkit, name, args)
+    }, resolveMaxToolConcurrency(this.opts.maxToolConcurrency), fn)
+  }
+
+  /** One call's safety; looks through `call_tool` to the tool it names. Unknown ⇒ unsafe. */
+  private callSafe(toolkit: Toolkit | undefined, name: string, args: Record<string, unknown>): boolean {
+    if (this.opts.toolTiers && name === "tool_search") return true
+    const inner = this.unwrapCall(name, args ?? {})
+    const tool = toolkit?.get(inner ? inner.name : name)
+    return tool ? isConcurrencySafe(tool, inner ? inner.args : (args ?? {})) : false
+  }
+
   /** ToolTiers `call_tool {name, arguments}` -> the real call; undefined when tiers are off. */
   private unwrapCall(name: string, args: Record<string, unknown>): { name: string; args: Record<string, unknown> } | undefined {
     return this.opts.toolTiers ? unwrapCallTool(name, args) : undefined
@@ -1157,8 +1183,8 @@ export class Client {
         if (calls.length === 0) return this.endRun(runStart, lastModel, msg.content ?? "", messages, toolCalls, turns, usage)
         // execute all tool calls in this turn concurrently (true parallel tool calling)
         done.clear()
-        const settled = await untilAborted(signal, Promise.all(
-          calls.map(async (call: any) => {
+        const settled = await untilAborted(signal, this.schedule(toolkit,
+          calls, (call: any) => [call.function.name, safeJson(call.function.arguments)], async (call: any) => {
             let { args, result } = await this.runTool(toolkit, call.function.name, safeJson(call.function.arguments), call.id, turn, signal)
             let halted: Request | undefined
             const req = pendingOf(result)
@@ -1169,7 +1195,7 @@ export class Client {
             }
             if (!halted && call.id) done.set(call.id, result)
             return { call, args, result, halted }
-          }),
+          },
         ))
         // Record in tool-call order; on the FIRST durable halt, surface it and stop — deterministic,
         // and the later suspensions' placeholder results never enter the transcript (they re-suspend
@@ -1275,8 +1301,8 @@ export class Client {
         }
         // execute all tool_use blocks in this turn concurrently (true parallel tool calling)
         done.clear()
-        const settled = await untilAborted(signal, Promise.all(
-          uses.map(async (use: any) => {
+        const settled = await untilAborted(signal, this.schedule(toolkit,
+          uses, (use: any) => [use.name, use.input ?? {}], async (use: any) => {
             let { args, result } = await this.runTool(toolkit, use.name, use.input ?? {}, use.id, turn, signal)
             let halted: Request | undefined
             const req = pendingOf(result)
@@ -1287,7 +1313,7 @@ export class Client {
             }
             if (!halted && use.id) done.set(use.id, result)
             return { use, args, result, halted }
-          }),
+          },
         ))
         // Record in tool-call order; on the FIRST durable halt, include that tool_result block, stop
         // building the content, and surface it — deterministic (G3), later suspensions re-suspend on
@@ -1385,11 +1411,11 @@ export class Client {
         messages.push({ role: "assistant", content: content || null, tool_calls: calls.map((c) => ({ id: c.id, type: "function", function: { name: c.name, arguments: c.args } })) })
         for (const c of calls) yield this.callEvent(c.id, c.name, safeJson(c.args))
         done.clear()
-        const settled = await untilAborted(signal, Promise.all(calls.map(async (c) => {
+        const settled = await untilAborted(signal, this.schedule(toolkit, calls, (c) => [c.name, safeJson(c.args)], async (c) => {
           const r = await this.runTool(toolkit, c.name, safeJson(c.args), c.id, turn, signal)
-          if (!pendingOf(r.result) && c.id) done.set(c.id, r.result)
+                    if (!pendingOf(r.result) && c.id) done.set(c.id, r.result)
           return r
-        })))
+        }))
         for (let i = 0; i < calls.length; i++) {
           const c = calls[i]
           let { args, result } = settled[i]
@@ -1487,11 +1513,11 @@ export class Client {
         }
         for (const u of uses as any[]) yield this.callEvent(u.id, u.name, u.input)
         done.clear()
-        const settled = await untilAborted(signal, Promise.all((uses as any[]).map(async (u) => {
+        const settled = await untilAborted(signal, this.schedule(toolkit, uses as any[], (u: any) => [u.name, u.input ?? {}], async (u: any) => {
           const r = await this.runTool(toolkit, u.name, u.input ?? {}, u.id, turn, signal)
           if (!pendingOf(r.result) && u.id) done.set(u.id, r.result)
           return r
-        })))
+        }))
         const results: any[] = []
         for (let i = 0; i < uses.length; i++) {
           const u = uses[i] as any

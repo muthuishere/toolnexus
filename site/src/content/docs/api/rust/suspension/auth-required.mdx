@@ -109,6 +109,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let logged_in = Arc::new(AtomicBool::new(false)); // simulates session state the tool checks
     let session = logged_in.clone();
     let fetch_deals = Tool {
+        concurrency_safe: None,
         name: "fetch_crm_deals".into(),
         description: "fetches open deals from the CRM".into(),
         input_schema: empty_schema(),

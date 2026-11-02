@@ -33,8 +33,10 @@ defmodule Toolnexus.Agents.Loop do
     * `:max_attempts` — REQUIRED; an unbounded verify loop is a denial-of-service
       on the caller's own bill
   """
-  @type completion :: %{required(:verify) => (Client.RunResult.t() -> verdict()),
-                        required(:max_attempts) => pos_integer()}
+  @type completion :: %{
+          required(:verify) => (Client.RunResult.t() -> verdict()),
+          required(:max_attempts) => pos_integer()
+        }
 
   @typedoc "What a run reports. `status` reuses the SHIPPED vocabulary."
   @type outcome :: %{
@@ -71,7 +73,9 @@ defmodule Toolnexus.Agents.Loop do
   def run(%__MODULE__{} = loop, prompt, opts \\ []) do
     spec = loop.agent.spec
     completion = spec[:completion]
-    client = Client.create(client_options(loop, spec, effective_model(opts[:model], spec[:model])))
+
+    client =
+      Client.create(client_options(loop, spec, effective_model(opts[:model], spec[:model])))
 
     state = %{loop: %{loop | status: "running"}, attempts: 0, client: client}
 
@@ -221,9 +225,14 @@ defmodule Toolnexus.Agents.Loop do
         end)
 
       cond do
-        denial != nil -> %{result: %Toolnexus.ToolResult{output: "denied: #{denial}", is_error: true}}
-        prior != nil -> prior.(ev)
-        true -> nil
+        denial != nil ->
+          %{result: %Toolnexus.ToolResult{output: "denied: #{denial}", is_error: true}}
+
+        prior != nil ->
+          prior.(ev)
+
+        true ->
+          nil
       end
     end
 
@@ -285,8 +294,12 @@ defmodule Toolnexus.Agents.Loop do
   keeps `pending` and `incomplete` distinct — the caller can always tell whether it
   owes an Answer or a fix.
   """
-  @spec run_gated((String.t(), term() -> {Client.RunResult.t(), term()}), String.t(),
-                  completion() | nil, term()) :: {Client.RunResult.t(), term()}
+  @spec run_gated(
+          (String.t(), term() -> {Client.RunResult.t(), term()}),
+          String.t(),
+          completion() | nil,
+          term()
+        ) :: {Client.RunResult.t(), term()}
   def run_gated(ask, prompt, nil, state), do: ask.(prompt, state)
 
   def run_gated(ask, prompt, completion, state) do
@@ -321,7 +334,8 @@ defmodule Toolnexus.Agents.Loop do
   end
 
   defp gate_loop(ask, prompt, completion, state, attempt, accumulated, reason, _last) do
-    text = if attempt == 1, do: prompt, else: "Your work did not verify: #{reason}. Fix it and finish."
+    text =
+      if attempt == 1, do: prompt, else: "Your work did not verify: #{reason}. Fix it and finish."
 
     {r, state} = ask.(text, state)
 
@@ -337,7 +351,10 @@ defmodule Toolnexus.Agents.Loop do
         # verification failure and they never see why it was looping.
         r =
           if reason != "" and r.status != "pending",
-            do: %{r | text: "#{r.text} [while verifying: attempt #{attempt} last failed: #{reason}]"},
+            do: %{
+              r
+              | text: "#{r.text} [while verifying: attempt #{attempt} last failed: #{reason}]"
+            },
             else: r
 
         {r, state}

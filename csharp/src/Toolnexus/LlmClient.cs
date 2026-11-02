@@ -214,6 +214,10 @@ public sealed partial class LlmClient
         public IDictionary<string, string>? Headers { get; set; }
         public string? SystemPrompt { get; set; }
         public int? MaxTurns { get; set; }             // default 10
+        /// <summary>(SPEC §8 "Tool scheduling") Cap on concurrency-safe tool calls of one response
+        /// running at once. <c>null</c> ⇒ env <c>TOOLNEXUS_MAX_TOOL_CONCURRENCY</c> when a positive
+        /// integer, else 10. Unsafe calls (anything not read-only) always run alone.</summary>
+        public int? MaxToolConcurrency { get; set; }
         public Hooks? Hooks { get; set; }
         public int? Retries { get; set; }              // default 2
 
@@ -348,6 +352,7 @@ public sealed partial class LlmClient
         public Options WithHeaders(IDictionary<string, string> v) { Headers = v; return this; }
         public Options WithSystemPrompt(string v) { SystemPrompt = v; return this; }
         public Options WithMaxTurns(int v) { MaxTurns = v; return this; }
+        public Options WithMaxToolConcurrency(int v) { MaxToolConcurrency = v; return this; }
         public Options WithHooks(Hooks v) { Hooks = v; return this; }
         public Options WithRetries(int v) { Retries = v; return this; }
         public Options WithRetryableStatuses(IReadOnlyCollection<int> v) { RetryableStatuses = v; return this; }
@@ -529,6 +534,17 @@ public sealed partial class LlmClient
         if (wrapped) ra = new Dictionary<string, object?> { ["name"] = real, ["arguments"] = ra };
         return (ra, rr);
     }
+
+    /// <summary>One call's safety; looks through <c>call_tool</c> to the tool it names. Unknown ⇒ unsafe.</summary>
+    private bool CallSafe(Toolkit? toolkit, string name, IDictionary<string, object?> args)
+    {
+        if (_opts.ToolTiers != null && name == "tool_search") return true;
+        var (real, inner, _) = UnwrapCall(name, args);
+        var tool = toolkit?.Get(real);
+        return ToolScheduler.IsConcurrencySafe(tool, inner);
+    }
+
+    private ToolScheduler NewToolScheduler() => new(ToolScheduler.ResolveMaxToolConcurrency(_opts.MaxToolConcurrency));
 
     /// <summary>The RunResult record for a tool call: a ToolTiers <c>call_tool</c> call records the REAL
     /// tool name and its inner arguments (after any BeforeTool rewrite), as hooks and stream events see
@@ -1317,6 +1333,7 @@ public sealed partial class LlmClient
                 var callIds = new string?[n];
                 var runs = new (IDictionary<string, object?> Args, ToolResult Result)[n];
                 var tasks = new Task[n];
+                var sched = NewToolScheduler();
                 for (var i = 0; i < n; i++)
                 {
                     var idx = i;
@@ -1325,7 +1342,7 @@ public sealed partial class LlmClient
                     names[idx] = fn.Get("name")?.ToString() ?? "";
                     callIds[idx] = call.Get("id")?.ToString();
                     var args = Json.ParseObjectLoose(fn.Get("arguments")?.ToString() ?? "{}");
-                    tasks[idx] = Task.Run(async () => { runs[idx] = await RunToolAsync(toolkit, names[idx], args, callIds[idx], turn, external).ConfigureAwait(false); if (!external.IsCancellationRequested && callIds[idx] is { } k) finished[k] = runs[idx].Result; });
+                    tasks[idx] = await sched.RunAsync(CallSafe(toolkit, names[idx], args), () => Task.Run(async () => { runs[idx] = await RunToolAsync(toolkit, names[idx], args, callIds[idx], turn, external).ConfigureAwait(false); if (!external.IsCancellationRequested && callIds[idx] is { } k) finished[k] = runs[idx].Result; }), external).ConfigureAwait(false);
                 }
                 await Task.WhenAll(tasks).WaitAsync(external).ConfigureAwait(false);
                 external.ThrowIfCancellationRequested(); // a cancelled turn records no tool results; the save marks them interrupted
@@ -1432,6 +1449,7 @@ public sealed partial class LlmClient
                 var useIds = new string?[n];
                 var runs = new (IDictionary<string, object?> Args, ToolResult Result)[n];
                 var tasks = new Task[n];
+                var sched = NewToolScheduler();
                 for (var i = 0; i < n; i++)
                 {
                     var idx = i;
@@ -1439,7 +1457,7 @@ public sealed partial class LlmClient
                     var input = use.Get("input") as IDictionary<string, object?> ?? new Dictionary<string, object?>();
                     names[idx] = use.Get("name")?.ToString() ?? "";
                     useIds[idx] = use.Get("id")?.ToString();
-                    tasks[idx] = Task.Run(async () => { runs[idx] = await RunToolAsync(toolkit, names[idx], input, useIds[idx], turn, external).ConfigureAwait(false); if (!external.IsCancellationRequested && useIds[idx] is { } k) finished[k] = runs[idx].Result; });
+                    tasks[idx] = await sched.RunAsync(CallSafe(toolkit, names[idx], input), () => Task.Run(async () => { runs[idx] = await RunToolAsync(toolkit, names[idx], input, useIds[idx], turn, external).ConfigureAwait(false); if (!external.IsCancellationRequested && useIds[idx] is { } k) finished[k] = runs[idx].Result; }), external).ConfigureAwait(false);
                 }
                 await Task.WhenAll(tasks).WaitAsync(external).ConfigureAwait(false);
                 external.ThrowIfCancellationRequested(); // a cancelled turn records no tool results; the save marks them interrupted
@@ -1636,12 +1654,13 @@ public sealed partial class LlmClient
                 var n = order.Count;
                 var runs = new (IDictionary<string, object?> Args, ToolResult Result)[n];
                 var tasks = new Task[n];
+                var sched = NewToolScheduler();
                 for (var i = 0; i < n; i++)
                 {
                     var idx = i;
                     var slot = acc[order[i]];
                     var args = Json.ParseObjectLoose(slot[2]);
-                    tasks[idx] = Task.Run(async () => { runs[idx] = await RunToolAsync(toolkit, slot[1], args, slot[0], turn, external).ConfigureAwait(false); if (!external.IsCancellationRequested && slot[0] is { Length: > 0 } k) finished[k] = runs[idx].Result; });
+                    tasks[idx] = await sched.RunAsync(CallSafe(toolkit, slot[1], args), () => Task.Run(async () => { runs[idx] = await RunToolAsync(toolkit, slot[1], args, slot[0], turn, external).ConfigureAwait(false); if (!external.IsCancellationRequested && slot[0] is { Length: > 0 } k) finished[k] = runs[idx].Result; }), external).ConfigureAwait(false);
                 }
                 await Task.WhenAll(tasks).WaitAsync(external).ConfigureAwait(false);
                 external.ThrowIfCancellationRequested(); // a cancelled turn records no tool results; the save marks them interrupted
@@ -1834,6 +1853,7 @@ public sealed partial class LlmClient
                     onEvent(CallEvent(u["id"]?.ToString(), u["name"]?.ToString() ?? "", (IDictionary<string, object?>)u["input"]!));
                 var runs = new (IDictionary<string, object?> Args, ToolResult Result)[n];
                 var tasks = new Task[n];
+                var sched = NewToolScheduler();
                 for (var i = 0; i < n; i++)
                 {
                     var idx = i;
@@ -1841,7 +1861,7 @@ public sealed partial class LlmClient
                     var input = u.Get("input") as IDictionary<string, object?> ?? new Dictionary<string, object?>();
                     var name = u.Get("name")?.ToString() ?? "";
                     var id = u.Get("id")?.ToString();
-                    tasks[idx] = Task.Run(async () => { runs[idx] = await RunToolAsync(toolkit, name, input, id, turn, external).ConfigureAwait(false); if (!external.IsCancellationRequested && id is { } k) finished[k] = runs[idx].Result; });
+                    tasks[idx] = await sched.RunAsync(CallSafe(toolkit, name, input), () => Task.Run(async () => { runs[idx] = await RunToolAsync(toolkit, name, input, id, turn, external).ConfigureAwait(false); if (!external.IsCancellationRequested && id is { } k) finished[k] = runs[idx].Result; }), external).ConfigureAwait(false);
                 }
                 await Task.WhenAll(tasks).WaitAsync(external).ConfigureAwait(false);
                 external.ThrowIfCancellationRequested(); // a cancelled turn records no tool results; the save marks them interrupted

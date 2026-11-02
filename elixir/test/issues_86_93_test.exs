@@ -368,7 +368,11 @@ defmodule Toolnexus.Issues8693Test do
       vc = VClock.new()
 
       rt =
-        Runtime.new(%{transport: transport, registry: Agents.registry(a), clock: VClock.clock(vc)})
+        Runtime.new(%{
+          transport: transport,
+          registry: Agents.registry(a),
+          clock: VClock.clock(vc)
+        })
 
       {:ok, h} = Runtime.spawn_agent(rt, Runtime.root(rt), "slowpoke")
 
@@ -381,6 +385,7 @@ defmodule Toolnexus.Issues8693Test do
       out = Task.await(w, 1_000)
 
       assert out.status == Status.timeout()
+
       assert out.limit == Status.Limit.timeout(),
              "status says timeout but limit is #{inspect(out.limit)}"
 
@@ -980,7 +985,12 @@ defmodule Toolnexus.Issues8693Test do
       # A locale-aware compare puts "á"/"é" next to "a"; a UTF-16 code-unit compare
       # puts the astral emoji BEFORE U+E000-U+FFFF. Code point gives exactly this.
       for n <- ["é-skill", "Z-skill", "a-skill", "á-skill", "\u{1F600}-skill"] do
-        write_skill!(dir, "#{Base.url_encode64(n, padding: false)}/SKILL.md", "name: #{n}\ndescription: d", "b")
+        write_skill!(
+          dir,
+          "#{Base.url_encode64(n, padding: false)}/SKILL.md",
+          "name: #{n}\ndescription: d",
+          "b"
+        )
       end
 
       src = Skill.load(dirs: [dir])
@@ -1265,7 +1275,12 @@ defmodule Toolnexus.Issues8693Test do
 
     test "the `skill` tool's not-found list is ordered the same way", %{tmp_dir: dir} do
       for n <- ["é-skill", "Z-skill", "a-skill"] do
-        write_skill!(dir, "#{Base.url_encode64(n, padding: false)}/SKILL.md", "name: #{n}\ndescription: d", "b")
+        write_skill!(
+          dir,
+          "#{Base.url_encode64(n, padding: false)}/SKILL.md",
+          "name: #{n}\ndescription: d",
+          "b"
+        )
       end
 
       src = Skill.load(dirs: [dir])

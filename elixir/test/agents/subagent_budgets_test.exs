@@ -11,7 +11,10 @@ defmodule Toolnexus.Agents.BudgetsTest do
 
   test "S7 budgets: hierarchical carve · exhaustion = incomplete (never crash) · maxTurns loud" do
     rt = new_rt()
-    {:ok, c} = Runtime.spawn_agent(rt, Runtime.root(rt), "coordinator", %{max_tokens: 100, max_children: 2})
+
+    {:ok, c} =
+      Runtime.spawn_agent(rt, Runtime.root(rt), "coordinator", %{max_tokens: 100, max_children: 2})
+
     {:ok, kid} = Runtime.spawn_agent(rt, c, "explore", %{max_tokens: 500})
 
     # carve: child asked 500, parent pool 100 → effective 100
@@ -22,7 +25,8 @@ defmodule Toolnexus.Agents.BudgetsTest do
     kid3 = Runtime.spawn_agent(rt, c, "explore")
 
     # maxChildren enforced at spawn
-    assert match?({:error, _}, kid3) and elem(kid3, 1) =~ "maxChildren", "maxChildren enforced at spawn"
+    assert match?({:error, _}, kid3) and elem(kid3, 1) =~ "maxChildren",
+           "maxChildren enforced at spawn"
 
     Runtime.wake(rt, kid, "go")
     # burns 80 tokens (2 turns×40) from both kid and parent pools

@@ -32,7 +32,11 @@ defmodule Toolnexus.NativeTest do
     assert tool.execute.(%{}, nil) == %ToolResult{output: "kaboom", is_error: true}
 
     tool2 =
-      Native.define_tool(name: "arg", description: "d", execute: fn _ -> raise ArgumentError, "bad arg" end)
+      Native.define_tool(
+        name: "arg",
+        description: "d",
+        execute: fn _ -> raise ArgumentError, "bad arg" end
+      )
 
     assert tool2.execute.(%{}, nil) == %ToolResult{output: "bad arg", is_error: true}
   end
@@ -57,13 +61,24 @@ defmodule Toolnexus.NativeTest do
 
   test "explicit input_schema and source are honored" do
     schema = %{"type" => "object", "properties" => %{"x" => %{"type" => "number"}}}
-    tool = Native.define_tool(name: "t", description: "d", input_schema: schema, source: "custom", execute: fn _ -> "x" end)
+
+    tool =
+      Native.define_tool(
+        name: "t",
+        description: "d",
+        input_schema: schema,
+        source: "custom",
+        execute: fn _ -> "x" end
+      )
+
     assert tool.input_schema == schema
     assert tool.source == "custom"
   end
 
   test "nil args are normalized to an empty map" do
-    tool = Native.define_tool(name: "t", description: "d", execute: fn args -> Jason.encode!(args) end)
+    tool =
+      Native.define_tool(name: "t", description: "d", execute: fn args -> Jason.encode!(args) end)
+
     assert tool.execute.(nil, nil).output == "{}"
   end
 

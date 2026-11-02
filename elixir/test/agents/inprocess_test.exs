@@ -12,7 +12,12 @@ defmodule Toolnexus.Agents.InProcessTest do
   alias Toolnexus.Agents.Runtime
 
   @registry %{
-    "worker" => %{name: "worker", description: "a scripted worker", system_prompt: "", model: "m-worker"}
+    "worker" => %{
+      name: "worker",
+      description: "a scripted worker",
+      system_prompt: "",
+      model: "m-worker"
+    }
   }
 
   # ---- scripted model, shared by BOTH the top-level client and the sub-agent
@@ -32,7 +37,15 @@ defmodule Toolnexus.Agents.InProcessTest do
       Agent.get_and_update(pid, fn st ->
         n = st.in_flight + 1
         overlaps = if n > 1, do: st.overlaps + 1, else: st.overlaps
-        st = %{st | in_flight: n, calls: st.calls + 1, max_seen: max(st.max_seen, n), overlaps: overlaps}
+
+        st = %{
+          st
+          | in_flight: n,
+            calls: st.calls + 1,
+            max_seen: max(st.max_seen, n),
+            overlaps: overlaps
+        }
+
         {n, st}
       end)
 
@@ -86,7 +99,11 @@ defmodule Toolnexus.Agents.InProcessTest do
     generate = fn req -> model_generate(m, req) end
 
     assert_raise ArgumentError, ~r/mutually exclusive/, fn ->
-      Runtime.new(%{llm: %{base_url: "http://example.invalid"}, in_process: generate, registry: @registry})
+      Runtime.new(%{
+        llm: %{base_url: "http://example.invalid"},
+        in_process: generate,
+        registry: @registry
+      })
     end
   end
 

@@ -27,18 +27,27 @@ defmodule Toolnexus.ClientTest do
               [] -> {nil, []}
             end
 
-          {h, %{st | handlers: rest, captured: st.captured ++ [%{path: conn.request_path, body: body}]}}
+          {h,
+           %{
+             st
+             | handlers: rest,
+               captured: st.captured ++ [%{path: conn.request_path, body: body}]
+           }}
         end)
 
       case handler && handler.(body) do
         {:json, status, resp} ->
-          conn |> put_resp_content_type("application/json") |> send_resp(status, Jason.encode!(resp))
+          conn
+          |> put_resp_content_type("application/json")
+          |> send_resp(status, Jason.encode!(resp))
 
         {:sse, text} ->
           conn |> put_resp_content_type("text/event-stream") |> send_resp(200, text)
 
         nil ->
-          conn |> put_resp_content_type("application/json") |> send_resp(500, ~s({"error":"no handler"}))
+          conn
+          |> put_resp_content_type("application/json")
+          |> send_resp(500, ~s({"error":"no handler"}))
       end
     end
   end
@@ -48,7 +57,8 @@ defmodule Toolnexus.ClientTest do
     port = free_port()
 
     start_supervised!(
-      Supervisor.child_spec({Bandit, plug: {Stub, agent}, scheme: :http, port: port, ip: {127, 0, 0, 1}},
+      Supervisor.child_spec(
+        {Bandit, plug: {Stub, agent}, scheme: :http, port: port, ip: {127, 0, 0, 1}},
         id: make_ref()
       )
     )
@@ -80,12 +90,18 @@ defmodule Toolnexus.ClientTest do
   defp openai_calls(calls) do
     tool_calls =
       Enum.map(calls, fn {id, name, args_json} ->
-        %{"id" => id, "type" => "function", "function" => %{"name" => name, "arguments" => args_json}}
+        %{
+          "id" => id,
+          "type" => "function",
+          "function" => %{"name" => name, "arguments" => args_json}
+        }
       end)
 
     {:json, 200,
      %{
-       "choices" => [%{"message" => %{"role" => "assistant", "content" => nil, "tool_calls" => tool_calls}}],
+       "choices" => [
+         %{"message" => %{"role" => "assistant", "content" => nil, "tool_calls" => tool_calls}}
+       ],
        "usage" => openai_usage()
      }}
   end
@@ -99,7 +115,11 @@ defmodule Toolnexus.ClientTest do
   end
 
   defp anthropic_tool_use(uses) do
-    content = Enum.map(uses, fn {id, name, input} -> %{"type" => "tool_use", "id" => id, "name" => name, "input" => input} end)
+    content =
+      Enum.map(uses, fn {id, name, input} ->
+        %{"type" => "tool_use", "id" => id, "name" => name, "input" => input}
+      end)
+
     {:json, 200, %{"content" => content, "usage" => %{"input_tokens" => 3, "output_tokens" => 2}}}
   end
 
@@ -125,12 +145,16 @@ defmodule Toolnexus.ClientTest do
     %ToolResult{
       output: prompt,
       is_error: true,
-      metadata: %{pending: %Request{id: id, kind: "authorization", prompt: prompt, url: "https://x/auth"}}
+      metadata: %{
+        pending: %Request{id: id, kind: "authorization", prompt: prompt, url: "https://x/auth"}
+      }
     }
   end
 
   defp make_client(base, extra \\ []) do
-    Client.create([base_url: base, style: "openai", model: "gpt-x", api_key: "k", retry_base_ms: 1] ++ extra)
+    Client.create(
+      [base_url: base, style: "openai", model: "gpt-x", api_key: "k", retry_base_ms: 1] ++ extra
+    )
   end
 
   # ---- single turn ----
@@ -151,7 +175,11 @@ defmodule Toolnexus.ClientTest do
 
     [%{path: "/chat/completions", body: body}] = captured(agent)
     assert body["model"] == "gpt-x"
-    assert [%{"role" => "system", "content" => "be brief"}, %{"role" => "user", "content" => "hi"}] = body["messages"]
+
+    assert [
+             %{"role" => "system", "content" => "be brief"},
+             %{"role" => "user", "content" => "hi"}
+           ] = body["messages"]
   end
 
   test "anthropic: single turn text, /v1/messages path, max_tokens default 4096" do
@@ -189,6 +217,7 @@ defmodule Toolnexus.ClientTest do
     assert result.usage.total_tokens == 18
 
     [_first, %{body: second}] = captured(agent)
+
     assert Enum.any?(second["messages"], fn m ->
              m["role"] == "tool" and m["tool_call_id"] == "c1" and m["content"] == "5"
            end)
@@ -211,7 +240,14 @@ defmodule Toolnexus.ClientTest do
     last = List.last(second["messages"])
     assert last["role"] == "user"
 
-    assert [%{"type" => "tool_result", "tool_use_id" => "t1", "content" => "5", "is_error" => false}] =
+    assert [
+             %{
+               "type" => "tool_result",
+               "tool_use_id" => "t1",
+               "content" => "5",
+               "is_error" => false
+             }
+           ] =
              last["content"]
   end
 
@@ -244,8 +280,22 @@ defmodule Toolnexus.ClientTest do
       Agent.update(inflight, fn st -> %{st | current: st.current - 1} end)
     end
 
-    slow = tool("slow", fn _, _ -> body.(); ToolResult.ok("slow-out") end)
-    fast = tool("fast", fn _, _ -> body.(); ToolResult.ok("fast-out") end)
+    # Read-only: only concurrency-safe calls overlap (SPEC §8 "Tool scheduling").
+    slow = %{
+      tool("slow", fn _, _ ->
+        body.()
+        ToolResult.ok("slow-out")
+      end)
+      | hints: %Toolnexus.ToolHints{read_only: true}
+    }
+
+    fast = %{
+      tool("fast", fn _, _ ->
+        body.()
+        ToolResult.ok("fast-out")
+      end)
+      | hints: %Toolnexus.ToolHints{read_only: true}
+    }
 
     {base, agent} =
       start_stub([
@@ -262,7 +312,8 @@ defmodule Toolnexus.ClientTest do
            "both tools must be in flight SIMULTANEOUSLY (parallel tool calls, §8); " <>
              "a peak of 1 means they ran one after the other"
 
-    assert [%{name: "slow", output: "slow-out"}, %{name: "fast", output: "fast-out"}] = result.tool_calls
+    assert [%{name: "slow", output: "slow-out"}, %{name: "fast", output: "fast-out"}] =
+             result.tool_calls
 
     [_first, %{body: second}] = captured(agent)
     tool_msgs = Enum.filter(second["messages"], &(&1["role"] == "tool"))
@@ -300,7 +351,8 @@ defmodule Toolnexus.ClientTest do
     [%{body: body}] = captured(agent)
     assert body["tool_choice"] == "auto"
 
-    assert [%{"type" => "function", "function" => %{"name" => "add", "parameters" => _}}] = body["tools"]
+    assert [%{"type" => "function", "function" => %{"name" => "add", "parameters" => _}}] =
+             body["tools"]
   end
 
   # ---- gap 1: request_params merge (caller wins) + body_transform runs LAST ----
@@ -335,7 +387,10 @@ defmodule Toolnexus.ClientTest do
   # ---- max_turns cap ----
 
   test "max_turns caps the loop" do
-    handler = fn _ -> openai_calls([{"c#{System.unique_integer([:positive])}", "add", ~s({"a":1,"b":1})}]) end
+    handler = fn _ ->
+      openai_calls([{"c#{System.unique_integer([:positive])}", "add", ~s({"a":1,"b":1})}])
+    end
+
     {base, agent} = start_stub([handler, handler, handler])
 
     client = make_client(base, max_turns: 2)
@@ -498,7 +553,11 @@ defmodule Toolnexus.ClientTest do
     assert length(captured(agent)) == 2
 
     {base2, agent2} = start_stub([fn _ -> {:json, 400, %{"e" => 1}} end])
-    assert_raise Toolnexus.ProviderError, ~r/^LLM 400:/, fn -> Client.run(make_client(base2, retries: 3), "hi", []) end
+
+    assert_raise Toolnexus.ProviderError, ~r/^LLM 400:/, fn ->
+      Client.run(make_client(base2, retries: 3), "hi", [])
+    end
+
     assert length(captured(agent2)) == 1
   end
 
@@ -545,7 +604,10 @@ defmodule Toolnexus.ClientTest do
 
   test "conversation_store/1 returns the exact instance passed in (gap 4)" do
     store = InMemoryConversationStore.new()
-    client = Client.create(base_url: "http://x", style: "openai", model: "m", api_key: "k", store: store)
+
+    client =
+      Client.create(base_url: "http://x", style: "openai", model: "m", api_key: "k", store: store)
+
     assert Client.conversation_store(client) == store
   end
 
@@ -657,7 +719,13 @@ defmodule Toolnexus.ClientTest do
     # the shape a three-state policy gate ships on: a guardrail returns a string and
     # has only allow/deny, so "ask a human" has to live here.
     {:ok, ran} = Agent.start_link(fn -> false end)
-    guarded = tool("deploy", fn _, _ -> Agent.update(ran, fn _ -> true end); "DEPLOYED" end)
+
+    guarded =
+      tool("deploy", fn _, _ ->
+        Agent.update(ran, fn _ -> true end)
+        "DEPLOYED"
+      end)
+
     {base, _agent} = start_stub([fn _ -> openai_calls([{"c1", "deploy", "{}"}]) end])
 
     client =
@@ -679,10 +747,16 @@ defmodule Toolnexus.ClientTest do
 
   test "G3: two concurrent suspensions, no wait_for => halts on FIRST in call order" do
     # first call is SLOWER — order must come from call order, not completion order
-    p1 = tool("p1", fn _, _ -> Process.sleep(60); pending_result("req-1", "first prompt") end)
+    p1 =
+      tool("p1", fn _, _ ->
+        Process.sleep(60)
+        pending_result("req-1", "first prompt")
+      end)
+
     p2 = tool("p2", fn _, _ -> pending_result("req-2", "second prompt") end)
 
-    {base, _agent} = start_stub([fn _ -> openai_calls([{"c1", "p1", "{}"}, {"c2", "p2", "{}"}]) end])
+    {base, _agent} =
+      start_stub([fn _ -> openai_calls([{"c1", "p1", "{}"}, {"c2", "p2", "{}"}]) end])
 
     client = make_client(base)
     result = Client.run(client, "go", [p1, p2])
@@ -773,7 +847,14 @@ defmodule Toolnexus.ClientTest do
     events = client |> Client.stream("add", [add_tool()]) |> Enum.to_list()
 
     assert Enum.any?(events, &match?(%{type: "tool_call", id: "c1", name: "add"}, &1))
-    assert Enum.any?(events, &match?(%{type: "tool_result", id: "c1", name: "add", output: "5", is_error: false}, &1))
+
+    assert Enum.any?(
+             events,
+             &match?(
+               %{type: "tool_result", id: "c1", name: "add", output: "5", is_error: false},
+               &1
+             )
+           )
 
     %{type: "done", result: result} = List.last(events)
     assert result.text == "sum=5"
@@ -872,7 +953,9 @@ defmodule Toolnexus.ClientTest do
     }
 
     client = make_client(base, hooks: hooks)
-    result = Client.run(client, "go", [add_tool(), tool("blocked", fn _, _ -> ToolResult.ok("nope") end)])
+
+    result =
+      Client.run(client, "go", [add_tool(), tool("blocked", fn _, _ -> ToolResult.ok("nope") end)])
 
     assert [
              %{name: "add", output: "[2]"},
@@ -946,12 +1029,35 @@ defmodule Toolnexus.ClientTest do
     before = Client.metrics(client)
 
     for line <- String.split(before, "\n", trim: true) do
-      assert String.starts_with?(line, "#"), "before activity: unexpected sample line #{inspect(line)}"
+      assert String.starts_with?(line, "#"),
+             "before activity: unexpected sample line #{inspect(line)}"
     end
 
-    MetricsRegistry.record(client.registry, %{event: "llm", model: "gpt-x", status: "ok", ms: 120, prompt_tokens: 3, completion_tokens: 2})
-    MetricsRegistry.record(client.registry, %{event: "tool", tool: "add", source: "native", is_error: false, ms: 40})
-    MetricsRegistry.record(client.registry, %{event: "run", model: "gpt-x", turns: 2, tool_calls: 1, total_tokens: 16, ms: 200})
+    MetricsRegistry.record(client.registry, %{
+      event: "llm",
+      model: "gpt-x",
+      status: "ok",
+      ms: 120,
+      prompt_tokens: 3,
+      completion_tokens: 2
+    })
+
+    MetricsRegistry.record(client.registry, %{
+      event: "tool",
+      tool: "add",
+      source: "native",
+      is_error: false,
+      ms: 40
+    })
+
+    MetricsRegistry.record(client.registry, %{
+      event: "run",
+      model: "gpt-x",
+      turns: 2,
+      tool_calls: 1,
+      total_tokens: 16,
+      ms: 200
+    })
 
     assert Client.metrics(client) == @metrics_reference
   end
@@ -968,7 +1074,10 @@ defmodule Toolnexus.ClientTest do
     text = Client.metrics(client)
 
     assert text =~ ~s(toolnexus_llm_requests_total{model="gpt-x",status="ok"} 2)
-    assert text =~ ~s(toolnexus_tool_calls_total{tool="add",source="native",is_error="false",pending="false"} 1)
+
+    assert text =~
+             ~s(toolnexus_tool_calls_total{tool="add",source="native",is_error="false",pending="false"} 1)
+
     assert String.ends_with?(text, "\n")
   end
 
