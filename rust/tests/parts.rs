@@ -155,3 +155,77 @@ async fn multimodal_prompt_and_part_validation() {
         Err(ClientError::Part(_))
     ));
 }
+
+// ---- §1B edge constructors (mirrors golang/content_test.go's constructor cases) ----
+
+#[test]
+fn edge_constructors_normalise_at_construction() {
+    use toolnexus::ContentPart;
+    let dir = std::env::temp_dir().join(format!("tn-parts-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let png = dir.join("shot.PNG");
+    std::fs::write(&png, [0x89, b'P', b'N', b'G']).unwrap();
+    let p = ContentPart::from_path(&png).unwrap();
+    assert_eq!(
+        (p.kind.as_str(), p.mime_type.as_str(), p.data.as_str()),
+        ("image", "image/png", "iVBORw==")
+    );
+    assert!(p.name.is_empty() && p.url.is_empty());
+
+    let pdf = dir.join("report.pdf");
+    std::fs::write(&pdf, b"%PDF").unwrap();
+    let p = ContentPart::from_path(&pdf).unwrap();
+    assert_eq!((p.kind.as_str(), p.name.as_str()), ("file", "report.pdf"));
+
+    let e = ContentPart::from_path(dir.join("notes.txt")).unwrap_err();
+    assert_eq!(e.kind, "extension");
+    assert_eq!(
+        e.to_string(),
+        "toolnexus: unknown media extension \"txt\" — pass explicit bytes with a mimeType instead"
+    );
+    assert_eq!(
+        ContentPart::from_path(dir.join("README")).unwrap_err().kind,
+        "extension"
+    );
+    assert_eq!(
+        ContentPart::from_path(dir.join("gone.png"))
+            .unwrap_err()
+            .kind,
+        "read"
+    );
+
+    let p = ContentPart::from_bytes(b"hi", "audio/wav").unwrap();
+    assert_eq!((p.kind.as_str(), p.data.as_str()), ("audio", "aGk="));
+    assert_eq!(ContentPart::from_bytes(b"hi", "").unwrap_err().kind, "mime");
+    let p = ContentPart::from_reader(&b"hi"[..], "application/pdf").unwrap();
+    assert_eq!((p.kind.as_str(), p.data.as_str()), ("file", "aGk="));
+
+    // a data: URL and the same bytes never diverge
+    let p = ContentPart::from_url("data:image/png;base64,aGk=", "").unwrap();
+    assert_eq!(p, ContentPart::from_bytes(b"hi", "image/png").unwrap());
+    let p = ContentPart::from_url("https://x.test/a.jpg", "image/jpeg").unwrap();
+    assert_eq!(
+        (p.kind.as_str(), p.url.as_str(), p.data.as_str()),
+        ("image", "https://x.test/a.jpg", "")
+    );
+    assert_eq!(
+        ContentPart::from_url("https://x.test/a", "")
+            .unwrap_err()
+            .kind,
+        "mime"
+    );
+    assert_eq!(
+        ContentPart::from_url("data:image/png,abc", "")
+            .unwrap_err()
+            .kind,
+        "dataurl"
+    );
+    assert_eq!(
+        ContentPart::from_url("data:;base64,aGk=", "")
+            .unwrap_err()
+            .kind,
+        "dataurl"
+    );
+    assert_eq!(ContentPart::text("x").kind, "text");
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -33,7 +33,7 @@ pub use classifier::{
     create_classifier,
 };
 pub use tool::{
-    Answer, ContentPart, Request, Tool, ToolContext, ToolHints, ToolResult, ToolSource,
+    Answer, ContentPart, PartError, Request, Tool, ToolContext, ToolHints, ToolResult, ToolSource,
     auth_required, define_tool, define_typed_tool, empty_schema, pending, pending_of, sanitize,
 };
 pub use toolkit::{McpConfigInput, Toolkit, ToolkitError, ToolkitOptions, create_toolkit};

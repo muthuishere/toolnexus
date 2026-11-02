@@ -85,6 +85,161 @@ pub struct ContentPart {
     pub name: String,
 }
 
+/// A §1B edge-constructor failure: an unknown extension, an unreadable
+/// source, a missing mime type or a malformed `data:` URL. `kind` is one of
+/// `extension | read | mime | dataurl`; the message wording matches Go.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("toolnexus: {msg}")]
+pub struct PartError {
+    pub kind: &'static str,
+    pub msg: String,
+}
+
+fn part_err(kind: &'static str, msg: String) -> PartError {
+    PartError { kind, msg }
+}
+
+/// image/* ⇒ image, audio/* ⇒ audio, everything else ⇒ file.
+fn part_type_for_mime(mime: &str) -> &'static str {
+    if mime.starts_with("image/") {
+        "image"
+    } else if mime.starts_with("audio/") {
+        "audio"
+    } else {
+        "file"
+    }
+}
+
+fn encode_part(raw: &[u8], mime: &str, kind: &str) -> ContentPart {
+    use base64::Engine as _;
+    ContentPart {
+        kind: kind.into(),
+        mime_type: mime.into(),
+        data: base64::engine::general_purpose::STANDARD.encode(raw),
+        ..Default::default()
+    }
+}
+
+fn unknown_extension(name: &str) -> PartError {
+    let ext = std::path::Path::new(name)
+        .extension()
+        .map(|e| e.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    if ext.is_empty() {
+        part_err(
+            "extension",
+            format!("{name} has no extension — pass explicit bytes with a mimeType instead"),
+        )
+    } else {
+        part_err(
+            "extension",
+            format!(
+                "unknown media extension {ext:?} — pass explicit bytes with a mimeType instead"
+            ),
+        )
+    }
+}
+
+/// The §1B edge constructors. They normalise at construction, so a path or a
+/// stream never enters a part: the bytes are read and base64-encoded now.
+impl ContentPart {
+    /// A text part.
+    pub fn text(s: impl Into<String>) -> Self {
+        Self {
+            kind: "text".into(),
+            text: s.into(),
+            ..Default::default()
+        }
+    }
+
+    /// A part from a filesystem path. The mime type comes from the fixed
+    /// extension table (png/jpg/jpeg/gif/webp/pdf/mp3/wav); an unknown one is
+    /// an error naming it. A `file` part keeps the base name.
+    pub fn from_path(path: impl AsRef<std::path::Path>) -> Result<Self, PartError> {
+        let path = path.as_ref();
+        let shown = path.display().to_string();
+        let (mime, kind) =
+            crate::builtins::lookup_media(&shown).ok_or_else(|| unknown_extension(&shown))?;
+        let raw = std::fs::read(path)
+            .map_err(|e| part_err("read", format!("cannot read {shown}: {e}")))?;
+        let mut p = encode_part(&raw, mime, kind);
+        if kind == "file" {
+            p.name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+        }
+        Ok(p)
+    }
+
+    /// A part from bytes with an explicit mime type.
+    pub fn from_bytes(raw: impl AsRef<[u8]>, mime_type: &str) -> Result<Self, PartError> {
+        if mime_type.is_empty() {
+            return Err(part_err("mime", "Bytes needs an explicit mimeType".into()));
+        }
+        Ok(encode_part(
+            raw.as_ref(),
+            mime_type,
+            part_type_for_mime(mime_type),
+        ))
+    }
+
+    /// A part from any reader with an explicit mime type, drained now. The
+    /// reader is not closed; it belongs to the caller.
+    pub fn from_reader(mut r: impl std::io::Read, mime_type: &str) -> Result<Self, PartError> {
+        if mime_type.is_empty() {
+            return Err(part_err("mime", "Reader needs an explicit mimeType".into()));
+        }
+        let mut raw = Vec::new();
+        r.read_to_end(&mut raw)
+            .map_err(|e| part_err("read", format!("cannot read the reader: {e}")))?;
+        Ok(encode_part(&raw, mime_type, part_type_for_mime(mime_type)))
+    }
+
+    /// A part from a URL. A `data:<mime>;base64,<b64>` URL is decoded into
+    /// `{mime_type, data}` (two spellings of the same bytes never diverge);
+    /// any other URL is kept as `url` and needs an explicit mime type.
+    pub fn from_url(url: &str, mime_type: &str) -> Result<Self, PartError> {
+        use base64::Engine as _;
+        if let Some(rest) = url.strip_prefix("data:") {
+            let (meta, payload) = rest
+                .split_once(',')
+                .ok_or_else(|| part_err("dataurl", "malformed data: URL — no comma".into()))?;
+            if !meta.contains(";base64") {
+                return Err(part_err(
+                    "dataurl",
+                    "only base64 data: URLs are supported".into(),
+                ));
+            }
+            let mime = meta.trim_end_matches(";base64");
+            if mime.is_empty() {
+                return Err(part_err("dataurl", "data: URL carries no mime type".into()));
+            }
+            let raw = base64::engine::general_purpose::STANDARD
+                .decode(payload)
+                .map_err(|e| {
+                    part_err(
+                        "dataurl",
+                        format!("data: URL payload is not standard base64: {e}"),
+                    )
+                })?;
+            return Ok(encode_part(&raw, mime, part_type_for_mime(mime)));
+        }
+        if mime_type.is_empty() {
+            return Err(part_err(
+                "mime",
+                "a url part needs an explicit mimeType".into(),
+            ));
+        }
+        Ok(Self {
+            kind: part_type_for_mime(mime_type).into(),
+            mime_type: mime_type.into(),
+            url: url.into(),
+            ..Default::default()
+        })
+    }
+}
+
 /// Advisory tool behaviour hints (0.22.0). Never sent to the model.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolHints {

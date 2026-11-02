@@ -9,6 +9,7 @@ mod bash;
 mod diff;
 mod extras;
 mod files;
+pub(crate) use files::lookup_media;
 mod net;
 
 use std::collections::BTreeMap;
