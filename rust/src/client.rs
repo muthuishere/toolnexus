@@ -1960,12 +1960,18 @@ impl Client {
                     &r.parts,
                 ),
             };
-            let record = |c: &Call, args: &Value, r: &ToolResult| ToolCall {
-                name: c.name.clone(),
-                args: args.clone(),
-                output: r.output.clone(),
-                is_error: r.is_error,
-                metadata: r.metadata.clone(),
+            // A tool-tiers `call_tool` call is recorded as the REAL tool with
+            // its inner args, as hooks and stream events see it (§4C); the
+            // transcript keeps the wrapper.
+            let record = |c: &Call, args: &Value, r: &ToolResult| {
+                let (name, args, _) = self.unwrap_call(&c.name, args);
+                ToolCall {
+                    name,
+                    args,
+                    output: r.output.clone(),
+                    is_error: r.is_error,
+                    metadata: r.metadata.clone(),
+                }
             };
             if let Some(err) = outcomes.iter().find_map(|o| o.as_ref().err()).cloned() {
                 // keep the finished pairs; the rest are sealed as interrupted

@@ -18,9 +18,9 @@ pub mod judge;
 pub mod mcp;
 #[cfg(feature = "serve")]
 pub mod mcp_serve;
+pub mod relay;
 #[cfg(feature = "serve")]
 pub mod serve;
-pub mod relay;
 pub mod skills;
 pub mod store;
 pub mod tool;

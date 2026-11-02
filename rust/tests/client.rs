@@ -1075,7 +1075,7 @@ async fn prompt_cache_marks_anthropic_prefix_without_mutating_transcript() {
         }
     })
     .await;
-    let tk = tk_with(vec![add_tool()]).await;
+    let tk = tk_with(vec![add_tool(), named("zz_last", "Last.")]).await;
     let res = create_client(ClientOptions {
         style: Style::Anthropic,
         system_prompt: "SYS".into(),
@@ -1090,7 +1090,11 @@ async fn prompt_cache_marks_anthropic_prefix_without_mutating_transcript() {
     .unwrap();
     let b = seen.lock().unwrap().clone();
     let mark = json!({"type": "ephemeral", "ttl": "1h"});
-    assert_eq!(b["tools"][0]["cache_control"], mark);
+    // the breakpoint sits on the LAST tool of the body actually sent, only there
+    let tools = b["tools"].as_array().unwrap();
+    assert_eq!(tools.len(), 2);
+    assert_eq!(tools[1]["cache_control"], mark);
+    assert!(tools[0].get("cache_control").is_none());
     assert_eq!(
         b["system"],
         json!([{"type": "text", "text": "SYS", "cache_control": mark}])
@@ -1297,10 +1301,15 @@ async fn tool_tier_loop_call_tool_unwraps() {
         arrays.windows(2).all(|w| w[0] == w[1]),
         "tools array is stable"
     );
-    assert_eq!(
-        res.tool_calls[1].args,
-        json!({"name": "deploy", "arguments": {"env": "prod"}})
-    );
+    // RunResult.tool_calls names the real tool with its inner args, like
+    // hooks and stream events (SPEC §4C); the transcript keeps the wrapper.
+    let recorded: Vec<(&str, &Value)> = res
+        .tool_calls
+        .iter()
+        .map(|c| (c.name.as_str(), &c.args))
+        .collect();
+    assert_eq!(recorded[0].0, "tool_search");
+    assert_eq!(recorded[1], ("deploy", &json!({"env": "prod"})));
 }
 
 #[tokio::test]
