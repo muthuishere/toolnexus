@@ -205,6 +205,27 @@ ignore `data()`.
 | `cancellationToken()` | `AtomicBoolean` | The raw token, to hand to work you spawn. |
 | `answer()` | `Answer` | Present **only** on a post-`waitFor` retry. |
 
+## `callId()`
+
+`ctx.callId()` is the model's id for this tool call when the client loop runs the tool (`""`
+outside the loop). The loop runs one message's calls concurrently, so this is how a tool, or a host
+tracking nested subagent rows, tells sibling calls apart.
+
+```java test
+import io.github.muthuishere.toolnexus.*;
+import java.util.concurrent.atomic.AtomicBoolean;
+
+public class Example {
+    public static void main(String[] args) {
+        ToolContext ctx = new ToolContext(null, new AtomicBoolean(false), null, "call_7");
+        if (!"call_7".equals(ctx.callId())) throw new AssertionError(ctx.callId());
+        ToolContext outside = new ToolContext(null, new AtomicBoolean(false), null, null);
+        if (!outside.callId().isEmpty()) throw new AssertionError("expected empty");
+        System.out.println("ok: " + ctx.callId());
+    }
+}
+```
+
 ## See also
 
 - [`Tool`](/api/java/types/tool/) — what receives this

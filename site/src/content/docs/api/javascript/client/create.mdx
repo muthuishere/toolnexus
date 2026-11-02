@@ -143,6 +143,21 @@ const client = createClient({
 })
 ```
 
+{/* 0.22 */}
+## API key by host (BREAKING in 0.22)
+
+`apiKey` set ⇒ only it. Else `apiKeyEnv` (the NAME of an env var). Else ONLY the env var of the
+`baseUrl` host over https (`api.openai.com` → `OPENAI_API_KEY`, `api.anthropic.com` →
+`ANTHROPIC_API_KEY`, `openrouter.ai` → `OPENROUTER_API_KEY`). Any other host — a local server, a
+proxy, plain http — needs `apiKey` or `apiKeyEnv`, or the request throws. Before 0.22 the first
+set provider key was sent to any `baseUrl`. Full rule and examples:
+[API key by host](/api/javascript/client/api-key/).
+
+Also new on `ClientOptions`: [`promptCache`](/api/javascript/client/prompt-cache/),
+[`toolTiers`](/api/javascript/client/tool-tiers/) (with `toolTierPlan` / `resetToolTiers`), and
+`waitFor(request, { signal })`. Model discovery: [`listModels`](/api/javascript/client/list-models/).
+{/* /0.22 */}
+
 ## Options
 
 | Option | Type | What it does |
@@ -150,7 +165,8 @@ const client = createClient({
 | `baseUrl` | `string` | Provider endpoint. **Required.** |
 | `style` | `ClientStyle` | Wire format — OpenAI-shaped or Anthropic-shaped. **Required.** |
 | `model` | `string` | Model id. **Required.** |
-| `apiKey` | `string` | Read from the environment; never hard-code it. |
+| `apiKey` | `string` | Used as-is. Never hard-code a real key; prefer `apiKeyEnv`. |
+| `apiKeyEnv` | `string` | NAME of the env var to read at call time. Without either, only the `baseUrl` host's own provider env var is used (https only) — see [API key by host](/api/javascript/client/api-key/). |
 | `headers` | `Record<string, string>` | Extra request headers. |
 | `systemPrompt` | `string` | Prepended; the skill catalog is injected alongside it. |
 | `maxTurns` | `number` | Cap on loop iterations. |

@@ -47,6 +47,46 @@ Toolkit tk = Toolkit.create(new Toolkit.Options()
         .skillsDir(List.of("skills")));
 ```
 
+## API key by host (breaking in 0.22.0)
+
+With no `apiKey`, the client reads `apiKeyEnv` (the NAME of an env var) if set, else ONLY the env
+var of the `baseUrl` host over https: `api.openai.com` → `OPENAI_API_KEY`, `api.anthropic.com` →
+`ANTHROPIC_API_KEY`, `openrouter.ai` → `OPENROUTER_API_KEY`. A local or custom `baseUrl` (llama.cpp,
+Ollama, a proxy) must set one of the two; the old cross-provider env fallback is gone.
+
+```java
+LlmClient local = LlmClient.create(new LlmClient.Options()
+        .baseUrl("http://localhost:8080/v1").model("local-model")
+        .apiKeyEnv("LOCAL_LLM_KEY"));   // or .apiKey("YOUR_KEY_HERE")
+```
+
+## Prompt cache and tool tiers
+
+```java
+LlmClient agent = LlmClient.create(new LlmClient.Options()
+        .baseUrl("https://api.anthropic.com").style("anthropic").model("claude-sonnet-4-5")
+        .promptCache(new PromptCache())                               // cache breakpoints; openai: .key("session-1")
+        .toolTiers(new ToolTiers().core("read", "grep", "edit")));    // the rest via tool_search / call_tool
+var res = agent.run("Fix the failing test.", tk);
+long context = res.usage.promptTokens + res.usage.cacheReadTokens + res.usage.cacheWriteTokens; // anthropic
+agent.toolTierPlan(tk);    // name -> CORE | LISTED | DEFERRED, frozen per toolkit
+agent.resetToolTiers(tk);  // rebuild at the next session start
+```
+
+Runnable, hermetic: `./gradlew runPromptCache`.
+
+## Host additions (0.22.0)
+
+`Toolkit.register` is safe mid-turn; `McpSource.load(cfg, new McpSource.LoadOptions().onServer(...))`
+reports each server as it is ready; `Options.waitForCtx((request, cancelToken) -> answer)` ends a
+pending ask with its turn; `Compaction.Options.onCompact` reports each compaction; tools carry
+`ToolHints` (`Tool.withHints`, `BeforeToolEvent.hints()`) for permission gates in `beforeTool`;
+opt-in builtins via the builtins config keys `background` (a `BackgroundShells`), `webSearch` (a
+`WebSearch`) and `notebookEdit`; `McpSource.resourceTools()`; `grep` `context`/`before`/`after` and
+truncation metadata; `Agent.asToolWith(ctx -> runtimeOptions)` with `RuntimeOptions.waitFor`;
+`ToolContext.callId()`; `LlmClient.listModels(options)`. The ACP host hooks (permission callback,
+update stream, cancel, streaming) are Go-only for now.
+
 ## Simple judgments
 
 A thin layer over `Classifier` (SPEC.md §8B); the wire is unchanged.

@@ -1,0 +1,104 @@
+---
+title: ACP host hooks (Go)
+description: Drive a local coding agent over ACP and stay in charge of it — decide its permission requests, watch every update, cancel a turn, and stream it through the ordinary client. Go only today.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<Aside type="tip" title="Why you need this">
+An ACP source (`LoadACP`) turns a coding CLI that speaks the Agent Client Protocol into a model
+behind the ordinary `Client`. Without hooks it is a black box: it approves the first "allow"
+option on every permission request, shows you only the final text, and cannot be stopped
+mid-turn. A real host — a plan mode, an approval prompt, a UI that shows the agent thinking —
+needs all three back. Since 0.22.0 the Go port gives them back, each one opt-in.
+</Aside>
+
+<Aside type="caution" title="Go only">
+The JavaScript, Python, Java, C#, Elixir and Clojure ports ship an ACP client without these
+hooks; it answers the first allow option and returns only the final text. Tracked in
+`openspec/changes/add-go-host-asks` (task 2.6d).
+</Aside>
+
+## The four hooks
+
+| hook | what it does | unset |
+|---|---|---|
+| `ACPOptions.OnPermission(ctx, params) (optionID, error)` | you pick the option for every `session/request_permission`; an error or empty id picks the first reject option, else cancels | first allow option, as before |
+| `ACPOptions.OnUpdate(params)` | the raw params of **every** `session/update` (message and thought chunks, tool calls, plans), before filtering. Runs on the read loop — must not block | only message text is used |
+| `ACPClient.GenerateCtx(ctx, req)` | cancelling `ctx` sends `session/cancel`; the process and session stay warm | `Generate` cannot be cancelled |
+| `ACPClient.GenerateStream`, passed as `InProcessOptions.GenerateStream` | makes `Client.Stream` work: message chunks become text deltas, the agent's own tool calls arrive as `tool_call` / `tool_result` events with `Via: "acp"` | a client built on ACP refuses to stream |
+
+With no hook set, behaviour is byte-identical to 0.21.
+
+## Ask a human before the agent writes
+
+```go
+acp, err := toolnexus.LoadACP(ctx, toolnexus.ACPOptions{
+	Command: "my-coding-agent", Args: []string{"acp"},
+	PermissionTimeout: 5 * time.Minute, // bounds the whole turn, so leave room for a human
+	OnPermission: func(ctx context.Context, params json.RawMessage) (string, error) {
+		var req struct {
+			ToolCall struct{ Title string `json:"title"` } `json:"toolCall"`
+			Options  []struct {
+				OptionID string `json:"optionId"`
+				Kind     string `json:"kind"` // allow_once, allow_always, reject_once, ...
+			} `json:"options"`
+		}
+		if err := json.Unmarshal(params, &req); err != nil {
+			return "", err // -> first reject option
+		}
+		if !askUser(ctx, "Allow: "+req.ToolCall.Title+"?") {
+			return "", nil // empty -> first reject option
+		}
+		for _, o := range req.Options {
+			if o.Kind == "allow_once" {
+				return o.OptionID, nil
+			}
+		}
+		return "", nil
+	},
+	OnUpdate: func(params json.RawMessage) { ui.Push(params) }, // never block here
+})
+if err != nil {
+	return err
+}
+defer acp.Close()
+```
+
+## Stream and cancel a turn through the ordinary client
+
+```go
+client := toolnexus.CreateInProcessClient(toolnexus.InProcessOptions{
+	Model:          "acp",
+	GenerateStream: acp.GenerateStream, // Stream works; Run uses it too
+})
+
+ctx, cancel := context.WithCancel(ctx)
+defer cancel() // cancelling mid-turn sends session/cancel; the session stays warm
+
+events, err := client.Stream(ctx, "fix the failing test", tk)
+if err != nil {
+	return err
+}
+for ev := range events {
+	switch ev.Type {
+	case "text":
+		fmt.Print(ev.Delta)
+	case "tool_call", "tool_result":
+		// ev.Via == "acp": the agent already ran this tool; the loop never executes it
+		fmt.Println("\n[agent]", ev.Type, ev.Name)
+	}
+}
+```
+
+Without streaming, pass `Generate` and call `acp.GenerateCtx` yourself when you need a
+cancellable turn.
+
+## What is not done
+
+- Only Go has the hooks; the other six ports are pending (`openspec/changes/add-go-host-asks`).
+- `PermissionTimeout` still bounds the whole turn, so a slow human approval can time it out.
+  Raise it when `OnPermission` waits on a person.
+
+See the [Go API reference](/api/go/client/acp-hooks/) for the full field list, and
+[Local & in-process models](/cookbook/local-and-in-process-models/) for `CreateInProcessClient`.

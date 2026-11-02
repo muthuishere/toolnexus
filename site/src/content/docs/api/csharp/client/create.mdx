@@ -21,7 +21,8 @@ public sealed class LlmClient
         public string BaseUrl { get; set; } = "";
         public string Style { get; set; } = "openai";  // "openai" | "anthropic"
         public string Model { get; set; } = "";
-        public string? ApiKey { get; set; }             // from env if null
+        public string? ApiKey { get; set; }             // see "API key by host" below
+        public string? ApiKeyEnv { get; set; }          // NAME of the env var to read
         public IDictionary<string, string>? Headers { get; set; }
         public string? SystemPrompt { get; set; }
         public int? MaxTurns { get; set; }              // default 10
@@ -42,6 +43,11 @@ public sealed class LlmClient
 
         // Suspension (§10) — see LlmClient.WaitFor
         public Func<Request, Task<Answer>>? WaitFor { get; set; }
+        public Func<Request, CancellationToken, Task<Answer>>? WaitForCtx { get; set; }
+
+        // Prompt cache + tool tiers (0.22)
+        public PromptCacheOptions? PromptCache { get; set; }
+        public ToolTierOptions? ToolTiers { get; set; }
 
         // Request shaping (§8 Gap 1/2)
         public IReadOnlyDictionary<string, object?>? RequestParams { get; set; }
@@ -61,6 +67,17 @@ The unified client: system prompt, skills injection, parallel and chained tool c
 that can run a [`Toolkit`](/api/csharp/toolkit/create/) to completion — everything else on
 `Options` is either required wiring (the four fields above) or an opt-in override of a documented
 default, with its own page for the deep dive.
+
+<Aside type="caution" title="API key by host (BREAKING in 0.22.0)">
+With no `ApiKey`, the client reads `ApiKeyEnv` if set, else ONLY the env var of the `BaseUrl`
+host over https (`api.openai.com` → `OPENAI_API_KEY`, `api.anthropic.com` → `ANTHROPIC_API_KEY`,
+`openrouter.ai` → `OPENROUTER_API_KEY`). A local or custom `BaseUrl` now needs `ApiKey` or
+`ApiKeyEnv`; there is no cross-provider fallback. See [API key by host](/api/csharp/client/api-key/).
+</Aside>
+
+Also new in 0.22.0: [`PromptCache`](/api/csharp/client/prompt-cache/),
+[`ToolTiers`](/api/csharp/client/tool-tiers/), [`WaitForCtx`](/api/csharp/suspension/wait-for/) and
+[`LlmClient.ListModelsAsync`](/api/csharp/client/list-models/).
 
 ## When to use it
 

@@ -192,6 +192,21 @@ reports `peer-exited (status N)` when it knows and `peer-eof (stdout closed, exi
 when it does not — rather than confidently claiming the peer is still alive. The status says *that*
 it died; `mcp/stderr` says *why*.
 
+## `:on-server` — use each server as soon as it is ready (0.22.0)
+
+`mcp/from-config` takes `:on-server` in its second argument: `(fn [{:keys [name status tools error]}])`,
+called once per server the moment it is connected, failed or found disabled. With it set the servers
+connect concurrently, so one slow server no longer holds up the rest; the returned source is still
+built in name order and is the same value as without it.
+
+```clojure
+(mcp/from-config cfg
+  {:on-server (fn [{:keys [name status tools error]}]
+                (println name status (count tools) (or error "")))})
+```
+
+For MCP *resources* (as opposed to tools), see [`resource-tools`](/api/clojure/mcp/resource-tools/).
+
 ## See also
 
 - [`toolnexus.mcp/parse-config`](/api/clojure/mcp/parse-config/) — validate the config offline first

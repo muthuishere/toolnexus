@@ -1,0 +1,41 @@
+---
+title: "ACP host hooks — permission, updates, cancel, stream"
+description: "Opt-in hooks on an ACP model source: choose the permission option, watch every session/update, cancel a turn, and stream through an in-process client. — JavaScript."
+sidebar:
+  label: "client / acp-hooks"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>JavaScript</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a>
+</p>
+
+<Aside type="caution" title="Not available in JavaScript">
+Go-only today (golang/acp.go). The other six ports ship an ACP client without these hooks; tracked in openspec/changes/add-go-host-asks task 2.6d.
+</Aside>
+
+Opt-in hooks on an ACP model source: choose the permission option, watch every session/update, cancel a turn, and stream through an in-process client.
+
+## What to use instead
+
+The JS ACP client (`loadACP` → `ACPClient`, `js/src/acp.ts`) ships without these hooks. Today it:
+
+- answers every `session/request_permission` with the **first allow-kind option** as soon as it
+  arrives (`permissionTimeoutMs` only bounds a broken agent);
+- returns only `agent_message_chunk` text as the reply — thoughts, tool calls and plans are not
+  surfaced;
+- has no per-turn cancel and does not stream through `createInProcessClient`.
+
+To gate an ACP agent's actions today, set the agent's own mode with `ACPOptions.mode` (for
+example a read-only or plan mode the agent supports) and keep side-effecting work in toolnexus
+tools, where [`beforeTool`](/api/javascript/client/hooks/) gates them. The Go port has the hooks
+(`ACPOptions.OnPermission`, `OnUpdate`, `ACPClient.GenerateCtx`, `GenerateStream`) — see
+[the Go page](/api/go/client/acp-hooks/). Tracked in `openspec/changes/add-go-host-asks` task 2.6d.
+
+## See also
+
+- [`createClient`](/api/javascript/client/create/) — The unified client: system prompt, skills injection, parallel and chained tool calls, retries, memory.
+- [`Client.run`](/api/javascript/client/run/) — Send a prompt, let the loop call tools until the model stops, get a RunResult.
+- [`Client.stream`](/api/javascript/client/stream/) — The streaming loop: text deltas, tool-call events, and suspension events as they happen.
+- [`Hooks`](/api/javascript/client/hooks/) — Intercept before/after model calls and tool calls: audit, redact, veto, or rewrite.

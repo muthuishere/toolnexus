@@ -8,7 +8,7 @@ package toolnexus
 // cached prefix survives). A loaded tool is called directly by name, or through
 // `call_tool` {name, arguments} on providers that refuse calls to tools absent
 // from the array; the loop unwraps call_tool, so hooks, hints and permission
-// gates always see the real tool. golang only for now; other ports pending.
+// gates always see the real tool.
 
 import (
 	"encoding/json"

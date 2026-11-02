@@ -199,6 +199,54 @@ world changed out-of-band — the session is simply valid now — so you re-run 
 ignore `data`.
 </Aside>
 
+## `call_id` — tell sibling calls apart
+
+A tool run by the client loop gets `ctx.call_id` = the model's id for that call (`None` outside
+the loop). One message's tool calls run concurrently, so this is how a tool — or a host tracking
+which subagent call is which — tells them apart.
+
+```python test
+import asyncio
+
+from toolnexus import ToolResult, create_client, create_toolkit, define_tool
+
+
+class Script:
+    """Asks for one tool call, then answers."""
+
+    def __init__(self, tool, args="{}"):
+        self.tool, self.args, self.n = tool, args, 0
+
+    def post(self, url, headers, payload, timeout):
+        self.n += 1
+        if self.n == 1:
+            return {"choices": [{"message": {"role": "assistant", "content": None, "tool_calls": [
+                {"id": "call_1", "type": "function",
+                 "function": {"name": self.tool, "arguments": self.args}}]}}]}
+        return {"choices": [{"message": {"role": "assistant", "content": "done"}}]}
+
+
+ids = []
+
+
+async def whoami(args=None, ctx=None):
+    ids.append(ctx.call_id)
+    return ToolResult(output="ok", is_error=False)
+
+
+async def main():
+    tk = await create_toolkit(builtins=False)
+    tk.register(define_tool(whoami, name="whoami", description="Report the call id."))
+    client = create_client(base_url="http://localhost:8080/v1", style="openai", model="m",
+                           api_key="YOUR_KEY_HERE", http_transport=Script("whoami"))
+    await client.run("go", tk)
+    assert ids == ["call_1"], ids
+    print("ok: call_id", ids[0])
+
+
+asyncio.run(main())
+```
+
 ## Fields
 
 | Field | Type | What it is |
@@ -206,6 +254,7 @@ ignore `data`.
 | `signal` | `Any \| None` | Cancellation token — advisory. Guard with `ctx is not None`. |
 | `timeout` | `float \| None` | This call's budget, in **seconds**. |
 | `answer` | `Answer \| None` | Present **only** on a post-`wait_for` retry — the resolution of a prior suspension. |
+| `call_id` | `str \| None` | The model's id for this tool call; `None` outside the client loop. |
 
 ## See also
 

@@ -329,6 +329,26 @@ suspension is not a completed result yet. It fires once the suspension is resolv
 after `WaitFor` re-executes the tool.
 </Aside>
 
+## Tool hints and permission gates
+
+`BeforeToolEvent` carries `Hints` (`ToolHints(ReadOnly, Destructive, OpenWorld)`, null = unknown;
+treat unknown as mutating). Every builtin sets them (`read`, `grep`, `glob`, `question`,
+`todowrite` are read-only; `write`, `edit`, `apply_patch` destructive; `bash` destructive and
+open-world), and MCP tools map them from their annotations. Hints are advisory and never sent to
+the model. A permission gate is a `BeforeTool` hook: return `null` to allow, a `WithResult(ToolResult.Error(...))`
+to deny, or a [`pending`](/api/csharp/suspension/pending/) result to ask, which `WaitFor` /
+`WaitForCtx` answers. For a [`ToolTiers`](/api/csharp/client/tool-tiers/) `call_tool` call, the
+event names the real tool, with its own args and hints.
+
+```csharp
+Hooks = new LlmClient.Hooks
+{
+    BeforeTool = ev => ev.Hints?.ReadOnly == true
+        ? null                                                        // allow reads
+        : LlmClient.ToolOverride.WithResult(ToolResult.Error($"{ev.Name} needs approval")),
+},
+```
+
 ## Fields
 
 | Field | Type | What it is |

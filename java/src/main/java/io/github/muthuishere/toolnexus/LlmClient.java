@@ -759,6 +759,14 @@ public final class LlmClient {
         return new ToolRun(wrapper, run.result());
     }
 
+    /** The RunResult entry for one executed call: a tool-tiers {@code call_tool} call is recorded
+     * as the REAL tool with its inner (post-beforeTool) arguments, as hooks and stream events see
+     * it; the transcript keeps the wrapper. */
+    private ToolCall toolCallRecord(String name, ToolRun run) {
+        Unwrapped u = unwrapCall(name, run.args());
+        return new ToolCall(u.name(), u.args(), run.result().output(), run.result().isError(), run.result().metadata());
+    }
+
     /** {@code call_tool {name, arguments}} mapped to the real call ({@code wrapped=false} when tiers
      * are off or the name is not {@code call_tool}). */
     private record Unwrapped(String name, Map<String, Object> args, boolean wrapped) {}
@@ -2229,8 +2237,7 @@ public final class LlmClient {
                             executor).thenAccept(outcome -> {
                         ToolRun run = outcome.run();
                         haltedAt[idx] = outcome.halted();
-                        recorded[idx] = new ToolCall(fnName, run.args(),
-                                run.result().output(), run.result().isError(), run.result().metadata());
+                        recorded[idx] = toolCallRecord(fnName, run);
                         results[idx] = run.result();
                         if (!deadline.cancelled()) inflight.put(String.valueOf(callId), run.result());
                         Map<String, Object> toolMsg = new LinkedHashMap<>();
@@ -2370,8 +2377,7 @@ public final class LlmClient {
                             executor).thenAccept(outcome -> {
                         ToolRun run = outcome.run();
                         haltedAt[idx] = outcome.halted();
-                        recorded[idx] = new ToolCall(useName, run.args(),
-                                run.result().output(), run.result().isError(), run.result().metadata());
+                        recorded[idx] = toolCallRecord(useName, run);
                         results[idx] = run.result();
                         if (!deadline.cancelled()) inflight.put(String.valueOf(useId), run.result());
                         Map<String, Object> tr = new LinkedHashMap<>();
@@ -2593,7 +2599,7 @@ public final class LlmClient {
                         if (res.halted() != null) halted = res.halted();
                         r = new ToolRun(r.args(), res.result());
                     }
-                    toolCalls.add(new ToolCall(slot[1], r.args(), r.result().output(), r.result().isError(), r.result().metadata()));
+                    toolCalls.add(toolCallRecord(slot[1], r));
                     Map<String, Object> toolMsg = new LinkedHashMap<>();
                     toolMsg.put("role", "tool");
                     toolMsg.put("tool_call_id", slot[0]);
@@ -2817,7 +2823,7 @@ public final class LlmClient {
                         if (res.halted() != null) halted = res.halted();
                         r = new ToolRun(r.args(), res.result());
                     }
-                    toolCalls.add(new ToolCall(name, r.args(), r.result().output(), r.result().isError(), r.result().metadata()));
+                    toolCalls.add(toolCallRecord(name, r));
                     Map<String, Object> tr = new LinkedHashMap<>();
                     tr.put("type", "tool_result");
                     tr.put("tool_use_id", id);

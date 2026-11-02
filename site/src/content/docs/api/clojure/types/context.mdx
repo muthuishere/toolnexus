@@ -76,6 +76,14 @@ There is no cancellation handle and no identity carried in the context by the po
 either, put it in the map yourself at the call site: the context is opaque to `execute`, which only
 decides whether to pass it.
 
+## `:call-id` (0.22.0)
+
+A tool run by the client loop gets `:call-id` on its context — the model's id for that call (empty
+outside the loop). One message's calls run concurrently, so this is how a tool tells sibling calls
+apart. It reaches a tool only through the two-argument arity with `:context? true` (every
+`native-tool` sets it); a one-argument tool is called exactly as before. The context also carries
+the run's `:cancel` token.
+
 ## See also
 
 - [`toolnexus.tool/tool`](/api/clojure/types/tool/) — the Tool whose `:execute` may take the context

@@ -120,6 +120,7 @@ public final class Toolkit implements AutoCloseable {
     }
 
     public static Toolkit create(Options opts) {
+        if (opts == null) opts = new Options(); // null = defaults, like a no-arg call in the other ports
         // §2 Gap 3: thread the caller's cancellation signal into the MCP connect/init/list.
         McpSource mcp = opts.mcpConfig != null
                 ? McpSource.load(opts.mcpConfig, opts.waitFor, opts.cancelSignal) : null;

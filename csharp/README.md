@@ -87,6 +87,53 @@ Batteries (§8B): `ToolGuardClassifier`, `ToolRelevanceClassifier`, `SkillReleva
 `CheckAsync(...)` standalone or `AsHook(next)` as a client hook. A `BeforeLLM` override may carry
 `Model` for that turn only (the opt-in `ModelRouterClassifier` sets it).
 
+## API key by host (BREAKING in 0.22.0)
+
+With no `ApiKey`, the client reads `ApiKeyEnv` (the NAME of an env var) if set, else ONLY the env
+var of the `BaseUrl` host, over https: `api.openai.com` → `OPENAI_API_KEY`, `api.anthropic.com` →
+`ANTHROPIC_API_KEY`, `openrouter.ai` → `OPENROUTER_API_KEY`. A key is never sent to another host.
+A local server or proxy now needs one of the two:
+
+```csharp
+var local = LlmClient.Create(new LlmClient.Options
+{
+    BaseUrl = "http://localhost:11434/v1", Style = "openai", Model = "llama3.2",
+    ApiKey = "YOUR_KEY_HERE",            // or: ApiKeyEnv = "MY_PROXY_KEY"
+});
+```
+
+[API key by host](https://muthuishere.github.io/toolnexus/api/csharp/client/api-key/) ·
+[`ListModelsAsync`](https://muthuishere.github.io/toolnexus/api/csharp/client/list-models/) uses the same rule.
+
+## Prompt cache and tool tiers
+
+```csharp
+var agent = LlmClient.Create(new LlmClient.Options
+{
+    BaseUrl = "https://api.anthropic.com", Style = "anthropic", Model = "claude-sonnet-4-5",
+    PromptCache = new PromptCacheOptions { Key = "session-42" },             // cache_control / prompt_cache_key
+    ToolTiers = new ToolTierOptions { Core = new[] { "read", "edit", "bash" } }, // the rest via tool_search / call_tool
+});
+// res.Usage.CacheReadTokens / CacheWriteTokens; agent.ToolTierPlan(tk); agent.ResetToolTiers(tk) at a new session
+```
+
+Only the core schemas are sent; the model loads the rest with `tool_search` and calls them by name
+or through `call_tool` (hooks still see the real tool), so the tools array and the cached prefix
+never change mid-session. Runnable: `dotnet run --project examples/Toolnexus.Examples -- cache`.
+[Prompt cache](https://muthuishere.github.io/toolnexus/api/csharp/client/prompt-cache/) ·
+[Tool tiers](https://muthuishere.github.io/toolnexus/api/csharp/client/tool-tiers/)
+
+## Host additions (0.22.0)
+
+- `Options.WaitForCtx((request, ct) => …)` — a pending question ends with the turn.
+- `McpSource.LoadAsync(cfg, new McpLoadOptions { OnServer = r => … })` — each MCP server reported as it is ready.
+- `McpSource.ResourceTools()` — opt-in `list_mcp_resources` / `read_mcp_resource`.
+- `BeforeToolEvent.Hints` (`ReadOnly` / `Destructive` / `OpenWorld`) on every builtin and MCP tool, for permission gates.
+- Opt-in builtins: `["background"] = new BackgroundShells()` (`bash_output`, `kill_shell`; call `CloseAll` on shutdown), `["webSearch"]` (your provider), `["notebookEdit"] = true`.
+- `grep` `context` / `before` / `after`; `read` / `grep` report truncation in metadata.
+- `Compaction.Options.OnCompact`, `Agent.AsToolWith(ctx => runtimeOptions)` with `RuntimeOptions.WaitFor`, `ToolContext.CallId`, `LlmClient.ListModelsAsync`.
+- Not in C# yet: the ACP host hooks (Go only; `openspec/changes/add-go-host-asks`).
+
 ## Documentation
 
 Everything else — the full surface, with runnable examples — lives on the docs site:

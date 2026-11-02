@@ -40,7 +40,7 @@ accidentally drop 429 and lose `Retry-After` handling with it. The case it exist
 Cloudflare-fronted origin:
 
 ```clojure
-(create-client {:base-url base-url
+(create-client {:base-url base-url :api-key-env "LLM_API_KEY"
                 :model model
                 :retries 3
                 :retryable-statuses [520 521 522 523 524 525 526 527]})
@@ -122,6 +122,7 @@ immediately — no budget is spent on an error that will not change.
 (def llm
   (client/create-client
     {:base-url "https://gateway.internal/v1"
+     :api-key-env "GATEWAY_API_KEY" ; a custom host needs :api-key or :api-key-env
      :model    "gpt-4.1"
      :retries  4
      :on-error (fn [{:keys [status attempt error retryable?]}]

@@ -1,0 +1,111 @@
+---
+title: "listModels"
+description: "List a provider's models (id, display name, context length when reported), sorted by id, under the same key rules as the client. — JavaScript."
+sidebar:
+  label: "listModels"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>JavaScript</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/js/src/models.ts">js/src/models.ts</a>
+</p>
+```ts
+interface ModelInfo { id: string; name?: string; contextLength?: number }
+listModels(
+  opts: Pick<ClientOptions, "baseUrl" | "style" | "apiKey" | "apiKeyEnv" | "headers" | "fetch">,
+  ctx?: { signal?: AbortSignal },
+): Promise<ModelInfo[]>
+```
+
+Lists the models a provider serves, sorted by id. openai style: `GET {base}/models` (OpenRouter's
+`context_length` becomes `contextLength`); anthropic: `GET {base}/v1/models`, following
+`has_more` / `last_id`. One GET per page, no retries, and the same
+[key rules](/api/javascript/client/api-key/) as the client. A non-2xx throws
+`list models: HTTP <status>: …`.
+
+## When to use it
+
+A model picker in a host UI, or checking at startup that the configured model exists before the
+first turn fails on it.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Hard-code the model when it never changes">
+A fixed deployment knows its model; calling `listModels` on every start adds a round trip and a
+failure mode for nothing.
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call
+
+```ts test
+import assert from "node:assert"
+import http from "node:http"
+import { listModels } from "toolnexus"
+
+const server = http.createServer((req, res) => {
+  assert.equal(req.url, "/v1/models")
+  res.writeHead(200, { "content-type": "application/json" })
+  res.end(JSON.stringify({ data: [{ id: "b-model" }, { id: "a-model" }] }))
+})
+await new Promise<void>((r) => server.listen(0, "127.0.0.1", r))
+const models = await listModels({ baseUrl: `http://127.0.0.1:${(server.address() as any).port}/v1`, style: "openai", apiKey: "YOUR_KEY_HERE" })
+assert.deepEqual(models.map((m) => m.id), ["a-model", "b-model"])
+server.close()
+console.log("ok:", models.map((m) => m.id).join(","))
+```
+
+### 2. The realistic case — OpenRouter-shaped context lengths for a picker
+
+```ts test
+import assert from "node:assert"
+import http from "node:http"
+import { listModels } from "toolnexus"
+
+const server = http.createServer((req, res) => {
+  res.writeHead(200, { "content-type": "application/json" })
+  res.end(JSON.stringify({ data: [
+    { id: "openai/gpt-4o-mini", name: "GPT-4o mini", context_length: 128000 },
+    { id: "local/tiny" },
+  ] }))
+})
+await new Promise<void>((r) => server.listen(0, "127.0.0.1", r))
+const models = await listModels({ baseUrl: `http://127.0.0.1:${(server.address() as any).port}`, style: "openai", apiKey: "YOUR_KEY_HERE" })
+assert.deepEqual(models[1], { id: "openai/gpt-4o-mini", name: "GPT-4o mini", contextLength: 128000 })
+assert.deepEqual(models[0], { id: "local/tiny" })
+server.close()
+console.log("ok:", models.map((m) => `${m.id}:${m.contextLength ?? "?"}`).join(" "))
+```
+
+### 3. The full surface — anthropic paging, and the key rule
+
+```ts test
+import assert from "node:assert"
+import http from "node:http"
+import { listModels } from "toolnexus"
+
+const server = http.createServer((req, res) => {
+  const after = new URL(req.url!, "http://x").searchParams.get("after_id")
+  res.writeHead(200, { "content-type": "application/json" })
+  res.end(JSON.stringify(after
+    ? { data: [{ id: "claude-b", display_name: "B" }], has_more: false }
+    : { data: [{ id: "claude-a", display_name: "A" }], has_more: true, last_id: "claude-a" }))
+})
+await new Promise<void>((r) => server.listen(0, "127.0.0.1", r))
+const base = `http://127.0.0.1:${(server.address() as any).port}`
+const models = await listModels({ baseUrl: base, style: "anthropic", apiKey: "YOUR_KEY_HERE" })
+assert.deepEqual(models, [{ id: "claude-a", name: "A" }, { id: "claude-b", name: "B" }])
+// A local host with no apiKey/apiKeyEnv is refused, exactly like the client.
+await assert.rejects(listModels({ baseUrl: base, style: "anthropic" }), /apiKeyEnv/)
+server.close()
+console.log("ok:", models.length, "models over 2 pages")
+```
+
+## See also
+
+- [`createClient`](/api/javascript/client/create/) — The unified client: system prompt, skills injection, parallel and chained tool calls, retries, memory.
+- [`Client.run`](/api/javascript/client/run/) — Send a prompt, let the loop call tools until the model stops, get a RunResult.
+- [`Client.stream`](/api/javascript/client/stream/) — The streaming loop: text deltas, tool-call events, and suspension events as they happen.
+- [`Hooks`](/api/javascript/client/hooks/) — Intercept before/after model calls and tool calls: audit, redact, veto, or rewrite.

@@ -1,0 +1,87 @@
+---
+title: "toolnexus.builtin/background-shells"
+description: "Opt-in background shells: bash gains run_in_background, bash_output reads new output, kill_shell stops the process group. The host owns the registry and closes it. — Clojure."
+sidebar:
+  label: "toolnexus.builtin/background-shells"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Clojure (JVM) + cljgo</strong> · package <code>net.clojars.muthuishere/toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §4A</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/clojure/src/toolnexus/builtin.cljc">clojure/src/toolnexus/builtin.cljc</a>
+</p>
+
+```clojure
+(def bg (builtin/background-shells))          ; an empty registry; the HOST owns it
+(builtin/builtin-tools-for {:background bg})  ; bash gains run_in_background; adds bash_output, kill_shell
+
+(builtin/bg-list bg)       ; => [{:id :command :started :running :exit-code :killed} …]
+(builtin/bg-kill! bg "bg1")
+(builtin/bg-close-all! bg) ; on shutdown — background jobs are not tied to a turn
+```
+
+With `:background`, `bash {:command … :run_in_background true}` starts the command and returns at
+once with a background id (in metadata `:backgroundId`). `bash_output {:id}` returns the output
+produced since the last read plus `[status: running|killed|exited with code N]`. `kill_shell {:id}`
+stops the whole process group: SIGTERM, `:kill-grace-ms` (default 2000), SIGKILL. A shell killed by a
+signal it did not get from `kill_shell` reports `exited with code -1` (and, as the runtime cannot tell
+the difference, so does a command that itself exits 129..159). POSIX only.
+
+## When to use it
+
+- **Dev servers and watchers** — start, read output later, stop.
+- **Long builds** — the model keeps working while the job runs.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Plain bash when the command finishes">
+Foreground `bash` waits, bounds the run with a timeout, and is killed with the turn. Use background
+shells only for commands that must outlive the call, and remember the host must `bg-close-all!`.
+</Aside>
+
+## Examples
+
+### 1. Start, read, finish
+
+```clojure test
+(require '[toolnexus.builtin :as builtin]
+         '[toolnexus.tool :as tool]
+         '[koine.time :as ktime])
+
+(println)
+
+(def bg (builtin/background-shells))
+(def tk (tool/toolkit (builtin/builtin-tools-for {:background bg})))
+
+(def started (tool/execute tk "bash" {:command "echo hello-bg" :run_in_background true}))
+(def id (get-in started [:metadata :backgroundId]))
+(assert (string? id))
+
+(def out (loop [n 0]
+           (let [o (:output (tool/execute tk "bash_output" {:id id}))]
+             (if (or (re-find #"exited" o) (> n 200)) o (do (ktime/sleep! 20) (recur (inc n)))))))
+(println out)
+(assert (re-find #"exited with code 0" out))
+(builtin/bg-close-all! bg)
+(println "OK")
+```
+
+### 2. Stop a long job
+
+```clojure
+(def s (tool/execute tk "bash" {:command "sleep 600" :run_in_background true}))
+(tool/execute tk "kill_shell" {:id (get-in s [:metadata :backgroundId])})
+```
+
+### 3. Owned by the host, closed on shutdown
+
+```clojure
+(def bg (builtin/background-shells))
+(def llm-toolkit (tool/toolkit (builtin/builtin-tools-for {:background bg :kill-grace-ms 500})))
+;; … run turns …
+(builtin/bg-close-all! bg)
+```
+
+## See also
+
+- [`builtins`](/api/clojure/builtins/create/) — the other opt-in builtins (`:web-search`, `:notebook-edit`).

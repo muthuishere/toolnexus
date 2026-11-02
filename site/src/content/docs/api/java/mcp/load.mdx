@@ -161,6 +161,41 @@ public class Example {
 | `src.status()` | `Map<String,String>` | Per server: `connected` \| `disabled` \| `failed`. |
 | `src.close()` | `void` | Gracefully disconnects every connected client. `AutoCloseable`. |
 
+## Per-server readiness — `LoadOptions.onServer`
+
+```java
+public static McpSource load(Object input, McpSource.LoadOptions opts)
+
+public static final class LoadOptions {
+    public LoadOptions onServer(Consumer<ServerResult> v)
+}
+public record ServerResult(String name, String status, List<Tool> tools, Throwable error) {}
+```
+
+`onServer` fires once per server the moment it connects, fails or is found disabled, so one slow
+server no longer holds up the tools of the rest. Calls are serialized. `load` still returns only
+after every server finishes.
+
+```java test
+import io.github.muthuishere.toolnexus.*;
+import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
+
+public class Example {
+    public static void main(String[] args) {
+        String cfg = "{\"mcpServers\":{\"off\":{\"command\":[\"node\",\"x.mjs\"],\"enabled\":false}}}";
+        List<String> seen = new CopyOnWriteArrayList<>();
+        try (McpSource src = McpSource.load(cfg, new McpSource.LoadOptions()
+                .onServer(r -> seen.add(r.name() + ":" + r.status())))) {
+            if (!seen.equals(List.of("off:disabled"))) throw new AssertionError(seen);
+            System.out.println("ok: " + seen);
+        }
+    }
+}
+```
+
+MCP resources are exposed as opt-in tools: see [`resourceTools`](/api/java/mcp/resource-tools/).
+
 ## See also
 
 - [`McpSource.loadWith`](/api/java/mcp/load-with-context/) — the ctx-aware load: bound connection time and cancel a slow or hung server without leaking a child process.

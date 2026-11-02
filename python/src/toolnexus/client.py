@@ -1421,6 +1421,19 @@ class Client:
         out = [t for t in (toolkit.get(n) for n in p.core) if t is not None]
         return out + [p.search, p.call]
 
+    def _tool_call_record(self, name: str, args: dict[str, Any], result: ToolResult) -> dict[str, Any]:
+        """The ``RunResult.tool_calls`` entry. A ``call_tool`` call is recorded as the real
+        tool with its inner arguments, the name hooks and stream events see (the
+        transcript keeps the wrapper)."""
+        real, inner, _ = self._unwrap_call(name, args)
+        return {
+            "name": real,
+            "args": inner,
+            "output": result.output,
+            "is_error": result.is_error,
+            "metadata": result.metadata,
+        }
+
     def _unwrap_call(self, name: str, args: dict[str, Any]) -> tuple[str, dict[str, Any], bool]:
         """Map ``call_tool {name, arguments}`` to the real call; ``wrapped`` False when
         tiers are off or ``name`` is not call_tool."""
@@ -2148,15 +2161,7 @@ class Client:
                     req = pending_of(result)
                     if req is not None:
                         result, halted = await self._resolve_pending(toolkit, name, args, req, call_id, turn, cancel)
-                    tool_calls.append(
-                        {
-                            "name": name,
-                            "args": args,
-                            "output": result.output,
-                            "is_error": result.is_error,
-                            "metadata": result.metadata,
-                        }
-                    )
+                    tool_calls.append(self._tool_call_record(name, args, result))
                     messages.append(_tool_message(call_id, name, result))
                     if halted is not None:
                         return self._pending_run(run_start, halted, messages, tool_calls, turns, usage, model=last_model)
@@ -2268,15 +2273,7 @@ class Client:
                     req = pending_of(result)
                     if req is not None:
                         result, halted = await self._resolve_pending(toolkit, use["name"], args, req, use.get("id"), turn, cancel)
-                    tool_calls.append(
-                        {
-                            "name": use["name"],
-                            "args": args,
-                            "output": result.output,
-                            "is_error": result.is_error,
-                            "metadata": result.metadata,
-                        }
-                    )
+                    tool_calls.append(self._tool_call_record(use["name"], args, result))
                     results.append(_tool_result_block(use["id"], result))
                     if halted is not None:
                         break
@@ -2436,27 +2433,11 @@ class Client:
                         yield {"type": "pending", "request": req}  # surface BEFORE wait_for so a channel can push the link
                         result, halted = await self._resolve_pending(toolkit, c["name"], args, req, c["id"], turn, cancel)
                         if halted is not None:
-                            tool_calls.append(
-                                {
-                                    "name": c["name"],
-                                    "args": args,
-                                    "output": result.output,
-                                    "is_error": result.is_error,
-                                    "metadata": result.metadata,
-                                }
-                            )
+                            tool_calls.append(self._tool_call_record(c["name"], args, result))
                             messages.append(_tool_message(c["id"], c["name"], result))
                             yield {"type": "done", "result": self._pending_run(run_start, halted, messages, tool_calls, turns, usage, model=last_model)}
                             return
-                    tool_calls.append(
-                        {
-                            "name": c["name"],
-                            "args": args,
-                            "output": result.output,
-                            "is_error": result.is_error,
-                            "metadata": result.metadata,
-                        }
-                    )
+                    tool_calls.append(self._tool_call_record(c["name"], args, result))
                     messages.append(_tool_message(c["id"], c["name"], result))
                     yield self._result_event(c["id"], c["name"], _safe_json(c["args"]), result)
 
@@ -2611,15 +2592,7 @@ class Client:
                     if req is not None:
                         yield {"type": "pending", "request": req}  # surface BEFORE wait_for
                         result, halted = await self._resolve_pending(toolkit, u["name"], args, req, u["id"], turn, cancel)
-                    tool_calls.append(
-                        {
-                            "name": u["name"],
-                            "args": args,
-                            "output": result.output,
-                            "is_error": result.is_error,
-                            "metadata": result.metadata,
-                        }
-                    )
+                    tool_calls.append(self._tool_call_record(u["name"], args, result))
                     results.append(_tool_result_block(u["id"], result))
                     yield self._result_event(u["id"], u["name"], u["input"], result)
                     if halted is not None:

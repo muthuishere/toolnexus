@@ -1,0 +1,187 @@
+---
+title: "prompt_cache"
+description: "Mark the stable prompt prefix for the provider (Anthropic cache breakpoints, OpenAI prompt_cache_key) and read cacheRead/cacheWrite tokens from usage. — Python."
+sidebar:
+  label: "prompt_cache"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Python</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/python/src/toolnexus/prompt_cache.py">python/src/toolnexus/prompt_cache.py</a>
+</p>
+
+```python
+@dataclass
+class PromptCacheOptions:
+    key: str = ""          # openai prompt_cache_key (one per session); ignored by anthropic
+    long_ttl: bool = False # anthropic ttl "1h" instead of the default short lifetime
+
+create_client(..., prompt_cache: PromptCacheOptions | None = None)
+
+# RunResult.usage gains, when the provider reports them:
+#   "cache_read_tokens"   anthropic cache_read_input_tokens / openai prompt_tokens_details.cached_tokens
+#   "cache_write_tokens"  anthropic cache_creation_input_tokens
+```
+
+With `prompt_cache` set, every request marks its stable prefix for the provider's cache:
+
+- **anthropic** — `cache_control: {"type": "ephemeral"}` (plus `"ttl": "1h"` with `long_ttl`) on
+  the last tool, on the system prompt (a string becomes one text block) and on the last content
+  block of the latest message.
+- **openai** — `prompt_cache_key = key` (when set); the prefix itself is cached automatically.
+- **gemini** — nothing yet (explicit `cachedContent` is deferred).
+
+The marks are applied before `request_params` and `body_transform`, and the stored transcript is
+never mutated. Without `prompt_cache` the request is byte-identical to before.
+
+<Aside type="caution" title="Context size under anthropic">
+Anthropic's input count excludes cached tokens, so the real context size is
+`prompt_tokens + cache_read_tokens + cache_write_tokens`. Under openai `prompt_tokens` already
+includes the cached part.
+</Aside>
+
+## When to use it
+
+- Long sessions with a large stable prefix — many tool schemas, a big skills catalog in the
+  system prompt — where every turn would otherwise re-bill the whole prefix.
+- You want to watch the cache: a drop in `cache_read_tokens` between turns means something
+  changed the prefix (a tool registered mid-session, an edited system prompt).
+
+## Why this and not the alternative
+
+<Aside type="tip" title="prompt_cache over a hand-written body_transform">
+You could inject `cache_control` yourself in `body_transform`, but you would have to find the
+last tool, convert the system string and copy the latest message without touching the
+transcript — per dialect. `prompt_cache` does exactly that. If tools change mid-session, pair
+it with [`tool_tiers`](/api/python/client/tool-tiers/), which keeps the tools array fixed.
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call — anthropic breakpoints on tools, system and the last message
+
+```python test
+import asyncio
+
+from toolnexus import PromptCacheOptions, create_client, create_toolkit, define_tool
+
+
+class Recorder:
+    def __init__(self):
+        self.bodies = []
+
+    def post(self, url, headers, payload, timeout):
+        self.bodies.append(payload)
+        return {"content": [{"type": "text", "text": "ok"}], "stop_reason": "end_turn",
+                "usage": {"input_tokens": 5, "output_tokens": 1}}
+
+
+@define_tool
+def lookup(city: str) -> str:
+    """Look up a city."""
+    return city
+
+
+async def main():
+    tk = await create_toolkit(builtins=False, extra_tools=[lookup])
+    rec = Recorder()
+    client = create_client(
+        base_url="http://localhost:8080", style="anthropic", model="claude-test",
+        api_key="YOUR_KEY_HERE", system_prompt="You are terse.",
+        prompt_cache=PromptCacheOptions(), http_transport=rec,
+    )
+    await client.run("hi", tk)
+    body = rec.bodies[0]
+    mark = {"type": "ephemeral"}
+    assert body["tools"][-1]["cache_control"] == mark
+    assert body["system"] == [{"type": "text", "text": "You are terse.", "cache_control": mark}]
+    assert body["messages"][-1]["content"][-1]["cache_control"] == mark
+    print("ok: 3 cache breakpoints")
+
+
+asyncio.run(main())
+```
+
+### 2. The realistic case — read cache hits from usage across turns
+
+```python test
+import asyncio
+
+from toolnexus import InMemoryConversationStore, PromptCacheOptions, create_client, create_toolkit
+
+
+class CachingProvider:
+    """Reports a cache write on the first request and a read on every later one."""
+
+    def __init__(self):
+        self.n = 0
+
+    def post(self, url, headers, payload, timeout):
+        self.n += 1
+        usage = {"input_tokens": 3, "output_tokens": 1}
+        usage["cache_creation_input_tokens" if self.n == 1 else "cache_read_input_tokens"] = 1200
+        return {"content": [{"type": "text", "text": f"turn {self.n}"}], "stop_reason": "end_turn",
+                "usage": usage}
+
+
+async def main():
+    tk = await create_toolkit(builtins=False)
+    client = create_client(
+        base_url="http://localhost:8080", style="anthropic", model="claude-test",
+        api_key="YOUR_KEY_HERE", prompt_cache=PromptCacheOptions(long_ttl=True),
+        store=InMemoryConversationStore(), http_transport=CachingProvider(),
+    )
+    first = await client.ask("hello", tk, id="s1")
+    second = await client.ask("again", tk, id="s1")
+    assert first.usage.get("cache_write_tokens") == 1200
+    assert second.usage.get("cache_read_tokens") == 1200
+    u = second.usage
+    context = u["prompt_tokens"] + u.get("cache_read_tokens", 0) + u.get("cache_write_tokens", 0)
+    print(f"ok: second turn read {u['cache_read_tokens']} cached tokens, context {context}")
+
+
+asyncio.run(main())
+```
+
+### 3. The full surface — openai gets prompt_cache_key, cached tokens come back as reads
+
+```python test
+import asyncio
+
+from toolnexus import PromptCacheOptions, create_client, create_toolkit
+
+
+class Recorder:
+    def __init__(self):
+        self.bodies = []
+
+    def post(self, url, headers, payload, timeout):
+        self.bodies.append(payload)
+        return {"choices": [{"message": {"role": "assistant", "content": "ok"}}],
+                "usage": {"prompt_tokens": 900, "completion_tokens": 2, "total_tokens": 902,
+                          "prompt_tokens_details": {"cached_tokens": 768}}}
+
+
+async def main():
+    tk = await create_toolkit(builtins=False)
+    rec = Recorder()
+    client = create_client(
+        base_url="http://localhost:8080/v1", style="openai", model="gpt-test",
+        api_key="YOUR_KEY_HERE", prompt_cache=PromptCacheOptions(key="session-42"),
+        http_transport=rec,
+    )
+    res = await client.run("hi", tk)
+    assert rec.bodies[0]["prompt_cache_key"] == "session-42"
+    assert res.usage["cache_read_tokens"] == 768  # already inside prompt_tokens under openai
+    print("ok: prompt_cache_key sent, 768 cached")
+
+
+asyncio.run(main())
+```
+
+## See also
+
+- [`tool_tiers`](/api/python/client/tool-tiers/) — Keep the tools array (and so the cached prefix) fixed while the model loads tools on demand.
+- [`create_client`](/api/python/client/create/) — The unified client: system prompt, skills injection, parallel and chained tool calls, retries, memory.
+- [`MetricEvent`](/api/python/client/metrics/) — Per-call token counts, latency and outcome.

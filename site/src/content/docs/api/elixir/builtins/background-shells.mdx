@@ -1,0 +1,108 @@
+---
+title: "Toolnexus.Builtin.BackgroundShells"
+description: "Opt-in background shells: bash gains run_in_background, bash_output reads new output, kill_shell stops the process group. The host owns the registry and closes it. — Elixir."
+sidebar:
+  label: "Toolnexus.Builtin.BackgroundShells"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Elixir</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §4A</a>
+</p>
+
+```elixir
+bg = Toolnexus.Builtin.BackgroundShells.new()
+Toolnexus.Builtin.tools(%{background: bg, kill_grace_ms: 2000})
+# bash gains "run_in_background"; adds bash_output %{id} and kill_shell %{id}
+
+Toolnexus.Builtin.BackgroundShells.list(bg)       # [%{id, running, killed, exit_code, ...}]
+Toolnexus.Builtin.BackgroundShells.kill(bg, id)   # :ok | {:error, reason}
+Toolnexus.Builtin.BackgroundShells.close_all(bg)  # :ok — call on shutdown
+```
+
+Opt-in background shells (`elixir/lib/toolnexus/builtin.ex`). With `background:` set, `bash`
+accepts `run_in_background: true` and returns at once with a background id in
+`metadata.backgroundId` (no timeout applies). `bash_output %{id}` returns the output produced
+since the last read plus `[status: running|killed|exited with code N]`; `kill_shell %{id}` stops
+the whole process group (SIGTERM, `kill_grace_ms`, SIGKILL). The host owns the registry and calls
+`close_all/1` on shutdown. A shell killed by a signal it did not get from `kill_shell` reports
+`exited with code -1`; because the BEAM cannot tell a signal from an exit status, a command that
+itself exits 129..159 also reads as -1. POSIX only.
+
+The same builtins config turns on the other opt-in tools: `web_search: fn query, limit -> {:ok,
+[%{title, url, snippet}]} | {:error, reason} end` adds `websearch` (the library ships no
+provider), and `notebook_edit: true` adds `notebook_edit` for `.ipynb` cells.
+
+## When to use it
+
+- **Dev servers, watchers, long builds** — start them, keep working, read their output later.
+- **A coding agent** that must not block a turn on `mix test --cover` taking minutes.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Not bash with a long timeout">
+A foreground `bash` blocks the turn and dies at its timeout. A background shell returns
+immediately and keeps running until it exits, the model kills it, or the host closes the
+registry. Use foreground `bash` for anything that finishes in seconds.
+</Aside>
+
+## Examples
+
+### 1. Off by default
+
+```elixir test
+names = Enum.map(Toolnexus.Builtin.tools(%{}), & &1.name)
+false = Enum.any?(~w(bash_output kill_shell websearch notebook_edit), &(&1 in names))
+IO.puts("ok: no background tools unless configured")
+```
+
+### 2. Start, read, finish
+
+```elixir test
+alias Toolnexus.Builtin.BackgroundShells
+
+bg = BackgroundShells.new()
+tools = Map.new(Toolnexus.Builtin.tools(%{background: bg, kill_grace_ms: 100}), &{&1.name, &1})
+
+r = tools["bash"].execute.(%{"command" => "echo one; sleep 0.2; echo two", "run_in_background" => true}, nil)
+id = r.metadata.backgroundId
+
+out =
+  Enum.reduce_while(1..100, "", fn _, acc ->
+    o = tools["bash_output"].execute.(%{"id" => id}, nil)
+    acc = acc <> o.output
+    if o.metadata.status == "exited", do: {:halt, acc}, else: (Process.sleep(50) && {:cont, acc})
+  end)
+
+true = out =~ "one" and out =~ "two" and out =~ "[status: exited with code 0]"
+:ok = BackgroundShells.close_all(bg)
+IO.puts("ok: #{id} exited 0")
+```
+
+### 3. Kill a stubborn job, then websearch over a host provider
+
+```elixir test
+alias Toolnexus.Builtin.BackgroundShells
+
+bg = BackgroundShells.new()
+cfg = %{background: bg, kill_grace_ms: 100,
+        web_search: fn q, _n -> {:ok, [%{title: "Result for #{q}", url: "https://a.example", snippet: "s"}]} end}
+tools = Map.new(Toolnexus.Builtin.tools(cfg), &{&1.name, &1})
+
+r = tools["bash"].execute.(%{"command" => "trap '' TERM; sleep 30 & wait", "run_in_background" => true}, nil)
+id = r.metadata.backgroundId
+Process.sleep(150)
+k = tools["kill_shell"].execute.(%{"id" => id}, nil)
+true = k.metadata.killed
+"killed" = tools["bash_output"].execute.(%{"id" => id}, nil).metadata.status
+:ok = BackgroundShells.close_all(bg)
+
+"1. Result for elixir\n   https://a.example\n   s" = tools["websearch"].execute.(%{"query" => "elixir"}, nil).output
+IO.puts("ok: killed #{id}; websearch answered")
+```
+
+## See also
+
+- [`Toolnexus.Builtin.load`](/api/elixir/builtins/select/) — Pick which built-in file/shell/web tools are in play, by name or by source toggle.
+- [`Toolnexus.Builtin.tools`](/api/elixir/builtins/create/) — Construct every built-in tool directly, outside a toolkit.

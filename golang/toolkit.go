@@ -243,7 +243,7 @@ func CreateToolkit(ctx context.Context, opts Options) (*Toolkit, error) {
 // with a warning). Returns the toolkit for chaining.
 //
 // Register is safe to call concurrently with a running turn and with other
-// Register calls (golang only for now; other ports pending).
+// Register calls.
 func (tk *Toolkit) Register(tools ...Tool) *Toolkit {
 	tk.mu.Lock()
 	defer tk.mu.Unlock()

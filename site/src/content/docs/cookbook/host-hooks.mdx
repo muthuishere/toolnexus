@@ -1,0 +1,87 @@
+---
+title: Host hooks & opt-in builtins
+description: The 0.22.0 host additions — permission gates from tool hints, a cancellable waitFor, per-server MCP readiness, MCP resource tools, background shells, websearch, notebook_edit, compaction notices, subagents under the parent's gates, callId and listModels — with each port's spelling.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<Aside type="tip" title="Why you need this">
+A host that puts an agent in front of a person — an IDE panel, a per-folder agent server, a
+chat UI — needs more than a loop: ask before anything destructive runs, stop a pending
+question when the user cancels, show tools as each MCP server comes up, say "context
+compacted", and keep a subagent's `bash` behind the same gate as the parent's. 0.22.0 adds all
+of it in all seven ports. Every addition is opt-in; unset, behaviour is unchanged.
+</Aside>
+
+## A permission gate from tool hints
+
+Every tool now carries `hints = { readOnly, destructive, openWorld }` — set on every builtin,
+read from MCP tool annotations, `nil`/absent when unknown (treat as mutating). They arrive on
+the `beforeTool` event. There is no separate permit option; the gate *is* `beforeTool`:
+
+- **allow** — return nothing;
+- **deny** — return an error result (the model sees it, the run continues);
+- **ask** — return `pending(request)`, which `waitFor` / `waitForCtx` resolves.
+
+```js
+const agent = createClient({
+  baseUrl, style: "openai", model, apiKey,
+  hooks: {
+    beforeTool: (e) => {
+      if (e.hints?.readOnly) return                       // let reads run
+      return { result: pending({ kind: "input", prompt: `Run ${e.name}?` }) }  // ask
+    },
+  },
+  waitFor: async (request, { signal }) => ui.ask(request, signal),  // ends with the turn
+})
+```
+
+A call through `call_tool` (see [tool tiers](/cookbook/prompt-cache-and-tool-tiers/)) is
+unwrapped before the hook, so the gate sees the real tool. Hints are advisory and never sent to
+the model.
+
+## Opt-in builtins
+
+Off unless configured; the default ten builtins are unchanged.
+
+| builtin | what it adds |
+|---|---|
+| `background` (a host-owned `BackgroundShells`) | `bash` gains `run_in_background`; `bash_output(id)` returns new output plus `[status: …]`; `kill_shell(id)` stops the process group. Call `closeAll` on shutdown |
+| `webSearch` (a provider you supply; none ships) | `websearch` with numbered title / URL / snippet results |
+| `notebookEdit` | `notebook_edit`: replace, insert or delete an `.ipynb` cell |
+| `McpSource.resourceTools()` | `list_mcp_resources` / `read_mcp_resource`, read-only |
+
+Also: `grep` takes `context` / `before` / `after`, and `read` / `grep` report a cut in metadata
+(`truncated`, `nextOffset` / `total`) while the text stays the same bytes.
+
+## Each port's spelling
+
+| | JavaScript | Python | Go | Java | C# | Elixir | Clojure |
+|---|---|---|---|---|---|---|---|
+| cancellable ask | `waitFor(req, { signal })` | `wait_for_ctx` | `WaitForCtx` | `waitForCtx` | `WaitForCtx` | `wait_for_ctx` | `:wait-for-ctx` |
+| MCP readiness | `loadMcp(cfg, { onServer })` | `load_mcp(cfg, on_server=)` | `LoadMcpWithOptions` + `OnServer` | `LoadOptions().onServer` | `OnServer` | `Mcp.load(cfg, on_server:)` | `:on-server` |
+| MCP resources | `resourceTools()` | `resource_tools()` | `ResourceTools()` | `resourceTools()` | `ResourceTools()` | `Mcp.resource_tools/1` | `mcp/resource-tools` |
+| hints on the event | `e.hints` | `hints` | `Hints` | `BeforeToolEvent.hints()` | `Hints` | `hints` | `:hints` |
+| background shells | `background: new BackgroundShells()` | `BackgroundShells` | `BackgroundShells` | `background` | `BackgroundShells` | `Builtin.BackgroundShells` | `builtin/background-shells` |
+| compaction notice | `compactor({ onCompact })` | `on_compact` | `OnCompact` | `onCompact` | `OnCompact` | `on_compact` | `:on-compact` |
+| subagent under gates | `asToolWith` + runtime `waitFor` | `as_tool_with` | `AsToolWith` | `asToolWith` | `AsToolWith` | `Agents.as_tool_with/2` | `as-tool-with` |
+| tool-call id | `ctx.callId` | `call_id` | `ToolContext.CallID` | `callId()` | `CallId` | `call_id` | `:call-id` |
+| list models | `listModels(opts)` | `list_models` | `ListModels` | `LlmClient.listModels` | `LlmClient.ListModelsAsync` | `Client.list_models/1` | `client/list-models` |
+
+## By design, per port
+
+- **Register mid-turn:** a tool added to a running toolkit is offered from the next model call
+  (js, python, go, java, csharp). Elixir and Clojure toolkits are immutable values, so a running
+  turn keeps the toolkit it started with.
+- **Cancellation** is the turn context in Go, an abort signal in JS, a `CancelToken` / thread
+  interrupt in Java, the turn's pid (`ctx.signal`) in Elixir, and a cooperative `:cancel` token
+  in Clojure (checked between model calls and tool batches).
+- **Background shells** are POSIX only in Clojure.
+- **ACP host hooks** are Go only for now — see [ACP host hooks](/cookbook/acp-hooks/).
+
+Full field tables and runnable examples are on each port's API pages:
+[hooks](/api/javascript/client/hooks/), [waitFor](/api/javascript/suspension/wait-for/),
+[MCP load](/api/javascript/mcp/load/), [MCP resources](/api/javascript/mcp/resource-tools/),
+[background shells](/api/javascript/builtins/background-shells/),
+[builtins](/api/javascript/builtins/create/), [list models](/api/javascript/client/list-models/)
+(switch language from any page).

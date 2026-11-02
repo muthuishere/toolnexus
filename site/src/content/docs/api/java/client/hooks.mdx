@@ -261,6 +261,41 @@ public class Example {
 | `beforeTool` | `Function<BeforeToolEvent, ToolOverride>` | Fires before a tool runs. `ToolOverride.withResult(...)` short-circuits (the real tool never runs); `.withArgs(...)` rewrites the call's arguments; `null` ⇒ unchanged. |
 | `afterTool` | `Function<AfterToolEvent, ToolOverride>` | Fires after a tool ran (skipped for a §10 suspension). `ToolOverride.withResult(...)` replaces the result; `null` ⇒ unchanged. |
 
+## Tool hints and permission gates
+
+```java
+public record BeforeToolEvent(String name, Map<String, Object> args, String id, int turn, ToolHints hints) {}
+public record ToolHints(boolean readOnly, boolean destructive, boolean openWorld) {}
+Tool.withHints(tool, ToolHints.READ_ONLY)   // tool.hints() reads them; null = unknown
+```
+
+Every builtin carries hints (`read`, `grep`, `glob`, `question`, `todowrite` are read-only;
+`webfetch` read-only and open-world; `write`, `edit`, `apply_patch` destructive; `bash` destructive
+and open-world), MCP tools map their annotations, and `beforeTool` receives them. A permission gate
+is a `beforeTool` hook: return `null` to allow, an error result to deny (the model sees it), or
+`ToolOverride.withResult(ToolResult.pending(request))` to ask, which `waitFor` / `waitForCtx` resolves. Hints are advisory and never
+sent to the model. Under [tool tiers](/api/java/client/tool-tiers/) a `call_tool` call is unwrapped
+first, so the gate sees the real tool.
+
+```java test
+import io.github.muthuishere.toolnexus.*;
+import java.util.List;
+
+public class Example {
+    public static void main(String[] args) {
+        List<Tool> tools = BuiltinTools.create();
+        Tool read = tools.stream().filter(t -> t.name().equals("read")).findFirst().orElseThrow();
+        Tool bash = tools.stream().filter(t -> t.name().equals("bash")).findFirst().orElseThrow();
+        if (!read.hints().readOnly() || !bash.hints().destructive()) throw new AssertionError();
+        // the gate a host would install: let read-only tools through, ask for the rest
+        LlmClient.Hooks gate = new LlmClient.Hooks().beforeTool(ev ->
+                ev.hints() != null && ev.hints().readOnly() ? null
+                        : LlmClient.ToolOverride.withResult(ToolResult.error("denied: " + ev.name() + " needs approval")));
+        System.out.println("ok: read=" + read.hints() + " bash=" + bash.hints());
+    }
+}
+```
+
 ## See also
 
 - [`LlmClient.create`](/api/java/client/create/) — The unified client: system prompt, skills injection, parallel and chained tool calls, retries, memory.

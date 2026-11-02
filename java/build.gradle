@@ -142,6 +142,13 @@ tasks.register('runJudge', JavaExec) {
     }
 }
 
+tasks.register('runPromptCache', JavaExec) {
+    group = 'application'
+    description = 'Run the PromptCacheTiers example (promptCache + toolTiers against a local mock server; no API key, no network).'
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = 'io.github.muthuishere.toolnexus.examples.PromptCacheTiers'
+}
+
 tasks.register('runAcp', JavaExec) {
     group = 'application'
     description = 'Run the Acp example (ACP agent CLI — devin/opencode — as the model behind the unified client). NOT run in CI: needs the agent CLI installed + authenticated.'

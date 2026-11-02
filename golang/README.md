@@ -57,7 +57,8 @@ func main() {
 		BaseURL: "https://openrouter.ai/api/v1",
 		Style:   "openai", // or "anthropic"
 		Model:   "openai/gpt-4o-mini",
-		// APIKey defaults to $OPENROUTER_API_KEY / $OPENAI_API_KEY / $ANTHROPIC_API_KEY
+		// no APIKey: openrouter.ai reads $OPENROUTER_API_KEY (its own host's var only).
+		// A local or custom BaseURL needs APIKey or APIKeyEnv — see below.
 	})
 
 	// 3. run — skills injected into the system prompt, tools called for you, looped to an answer
@@ -92,6 +93,57 @@ o, err := tn.Policy{Rules: rules, Default: "continue"}.Gate(ctx, c, state, qs)
 `Choice` / `Score` build the other question kinds; `Tape` records live decisions by call name
 (`WithCallName`) and replays them offline; `StaticClassifier(Recorded(...))` is a one-line test
 double; `EvaluateBatch` asks the same questions of many states.
+
+## API key by host (breaking in 0.22.0)
+
+A key is only sent to the host it belongs to. `APIKey` set ⇒ only it; else `APIKeyEnv` (the **name**
+of an env var); else only the env var of the `BaseURL` host, over https — `api.openai.com` →
+`OPENAI_API_KEY`, `api.anthropic.com` → `ANTHROPIC_API_KEY`, `openrouter.ai` → `OPENROUTER_API_KEY`.
+Any other host (a local llama.cpp/vLLM server, a proxy, plain http) without `APIKey`/`APIKeyEnv`
+fails with `no API key`. Before 0.22.0 the first of those three env vars was sent to any `BaseURL`;
+a host that relied on that must now set one:
+
+```go
+client := toolnexus.CreateClient(toolnexus.ClientOptions{
+	BaseURL: "http://localhost:8080/v1", Style: "openai", Model: "local",
+	APIKeyEnv: "LOCAL_LLM_KEY", // the NAME of the env var, never the value
+})
+```
+
+## Prompt cache and tool tiers
+
+```go
+client := toolnexus.CreateClient(toolnexus.ClientOptions{
+	BaseURL: "https://api.anthropic.com", Style: "anthropic", Model: "claude-sonnet-4-5",
+	PromptCache: &toolnexus.PromptCacheOptions{Key: "session-42"}, // anthropic breakpoints / openai prompt_cache_key
+	ToolTiers:   &toolnexus.ToolTierOptions{Core: []string{"read", "grep", "bash"}},
+})
+res, _ := client.Run(ctx, "fix the failing test", tk)
+_ = res.Usage.CacheReadTokens // + CacheWriteTokens; under anthropic context = Prompt+CacheRead+CacheWrite
+client.ToolTierPlan(tk)       // name -> core | listed | deferred, frozen until client.ResetToolTiers(tk)
+```
+
+`ToolTiers` sends only the core schemas plus `tool_search` (the model loads the rest; schemas arrive
+as a tool result, so the tools array and the cached prefix never change) and `call_tool` (unwrapped
+before hooks, so gates see the real tool). Runnable: `go run ./examples/promptcache`.
+
+## Host hooks (0.22.0)
+
+- `LoadMcpWithOptions(ctx, cfg, McpLoadOptions{OnServer: ...})` — each MCP server as soon as it is
+  ready; `Toolkit.Register` is safe mid-turn.
+- `ClientOptions.WaitForCtx(ctx, req)` — a pending question ends with its turn.
+- `Tool.Hints{ReadOnly, Destructive, OpenWorld}` on every builtin and MCP tool, passed to
+  `BeforeTool` — allow / deny / ask (`Pending`) gates.
+- Opt-in builtins: `BuiltinsConfig{Background: NewBackgroundShells(), WebSearch: fn, NotebookEdit: true}`
+  (`bash_output`, `kill_shell`, `websearch`, `notebook_edit`); `McpSource.ResourceTools()`.
+- `grep` `context`/`before`/`after`; `read`/`grep` report truncation in metadata.
+- `agents.CompactorOptions.OnCompact`, `Agent.AsToolWith` + runtime `Options.WaitFor`,
+  `ToolContext.CallID`, `ListModels(ctx, opts)`.
+- ACP (Go only): `ACPOptions.OnPermission`, `ACPOptions.OnUpdate`, `ACPClient.GenerateCtx`
+  (cancel sends `session/cancel`), and `ACPClient.GenerateStream` as
+  `InProcessOptions.GenerateStream` to make `Client.Stream` work over an ACP agent.
+
+Each has a runnable page in the [Go API reference](https://muthuishere.github.io/toolnexus/api/go/).
 
 ## Documentation
 

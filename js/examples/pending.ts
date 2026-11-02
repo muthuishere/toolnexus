@@ -60,7 +60,7 @@ try {
   // ── A) waitFor provided → resolve + retry, transparently ───────────────────────
   const seen: string[] = []
   const clientA = createClient({
-    baseUrl: "http://stub", style: "openai", model: "stub",
+    baseUrl: "http://stub", style: "openai", model: "stub", apiKey: "YOUR_KEY_HERE", // a custom host needs an explicit key (0.22)
     // waitFor is the ONLY behavior the host supplies. Here we simulate the human completing
     // login. In real life: open a browser, OR text the link to #stockloop, OR forward over A2A.
     waitFor: async (request): Promise<Answer> => {
@@ -80,7 +80,7 @@ try {
   assert.ok(seen[0].includes("example.com/login"))
 
   // ── B) NO waitFor → durable: run() halts with the request to resume later ───────
-  const clientB = createClient({ baseUrl: "http://stub", style: "openai", model: "stub" })
+  const clientB = createClient({ baseUrl: "http://stub", style: "openai", model: "stub", apiKey: "YOUR_KEY_HERE" })
   const b = await clientB.run("what is my balance?", { toolkit: await balanceToolkit() })
   console.log("\nB) durable path (no waitFor)")
   console.log("   status                 :", b.status)

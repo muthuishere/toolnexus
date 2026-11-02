@@ -169,6 +169,41 @@ isolates a single hung server without aborting the rest — see
 [`loadMcp` (ctx-aware)](/api/javascript/mcp/load-with-context/) for the difference in detail.
 </Aside>
 
+{/* 0.22 */}
+## Per-server readiness — `onServer` (0.22)
+
+`loadMcp(cfg, { onServer })` calls `onServer({ name, status, tools, error? })` once per server
+the moment it is connected, failed or found disabled, so a host can register a fast server's
+tools while a slow one is still connecting. Calls are serialized (an async callback is awaited
+before the next); the load still resolves only after every server and callback finished. A local
+`command` may be a string with `args`, as Claude Code writes it. The returned source also has
+[`resourceTools()`](/api/javascript/mcp/resource-tools/), and MCP tool annotations become
+[`hints`](/api/javascript/client/hooks/).
+
+```ts test
+import assert from "node:assert"
+import { createToolkit, loadMcp, type McpServerResult } from "toolnexus"
+
+const tk = await createToolkit({ builtins: false })
+const seen: McpServerResult[] = []
+const src = await loadMcp({
+  progress: { command: "node", args: ["examples/mcp-progress-server.mjs"], timeout: 5000 },
+  broken: { command: ["node", "/no/such/script.mjs"], timeout: 5000 },
+}, {
+  onServer: (r) => { seen.push(r); if (r.status === "connected") for (const t of r.tools) tk.register(t) },
+})
+try {
+  assert.deepEqual(seen.map((r) => [r.name, r.status]).sort(), [["broken", "failed"], ["progress", "connected"]])
+  assert.ok(seen.find((r) => r.name === "broken")!.error instanceof Error)
+  assert.ok(tk.get("progress_slow"))
+  console.log("ok:", seen.map((r) => `${r.name}=${r.status}`).join(" "))
+} finally {
+  await src.close()
+  await tk.close()
+}
+```
+{/* /0.22 */}
+
 ## Options
 
 | Field | Type | What it does |

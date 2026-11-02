@@ -181,6 +181,52 @@ world changed out-of-band — the session is simply valid now — so you re-run 
 ignore `data`.
 </Aside>
 
+{/* 0.22 */}
+## `callId` (0.22)
+
+A tool run by the client loop gets `ctx.callId`, the model's id for that tool call (absent outside
+the loop). The loop runs one message's tool calls concurrently, so this is how a tool — or a
+host tracking which subagent call is which — tells sibling calls apart. The loop also passes the
+turn's abort `signal` to every tool it runs.
+
+```ts test
+import assert from "node:assert"
+import http from "node:http"
+import { createClient, createToolkit, defineTool } from "toolnexus"
+
+// A local OpenAI-style stub: replies[i] is the i-th assistant message.
+async function stub(replies: any[]) {
+  let n = 0
+  const server = http.createServer((req, res) => {
+    req.resume()
+    req.on("end", () => {
+      const msg = replies[Math.min(++n, replies.length) - 1]
+      res.writeHead(200, { "content-type": "application/json" })
+      res.end(JSON.stringify({ choices: [{ message: { content: null, ...msg }, finish_reason: msg.tool_calls ? "tool_calls" : "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } }))
+    })
+  })
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", r))
+  return { url: `http://127.0.0.1:${(server.address() as any).port}`, close: () => server.close() }
+}
+const call = (id: string, name: string, args: object) => ({ tool_calls: [{ id, type: "function", function: { name, arguments: JSON.stringify(args) } }] })
+
+const llm = await stub([{ tool_calls: [
+  { id: "call_a", type: "function", function: { name: "who", arguments: "{}" } },
+  { id: "call_b", type: "function", function: { name: "who", arguments: "{}" } },
+] }, { content: "done" }])
+const ids: string[] = []
+const tk = await createToolkit({ builtins: false, extraTools: [
+  defineTool({ name: "who", description: "Report the call id", run: (_a, ctx) => { ids.push(ctx!.callId!); return ctx!.callId! } }),
+] })
+const client = createClient({ baseUrl: llm.url, style: "openai", model: "stub", apiKey: "YOUR_KEY_HERE" })
+await client.run("go", { toolkit: tk })
+assert.deepEqual(ids.sort(), ["call_a", "call_b"])
+await tk.close()
+llm.close()
+console.log("ok:", ids.join(","))
+```
+{/* /0.22 */}
+
 ## Fields
 
 | Field | Type | What it is |

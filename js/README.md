@@ -28,11 +28,11 @@ Built-in tools are on by default, so an empty toolkit can already act:
 ```ts
 import { createToolkit, createClient } from "toolnexus"
 
-const tk = await createToolkit()                        // 10 built-in tools, on by default
+const tk = await createToolkit({})                      // 10 built-in tools, on by default
 const agent = createClient({
   baseUrl: "https://openrouter.ai/api/v1",              // any OpenAI- or Anthropic-style endpoint
   style: "openai",                                      // or "anthropic"
-  model: "openai/gpt-4o-mini",
+  model: "openai/gpt-4o-mini",                          // key: OPENROUTER_API_KEY (matches the host)
 })
 
 const { text } = await agent.run("What files are in this folder?", { toolkit: tk })
@@ -48,6 +48,52 @@ const tk = await createToolkit({ mcp: "mcp.json", skills: ["skills"] })
 - `mcp.json` is the standard Claude-desktop-style config (`mcpServers` / `servers` / `mcp` keys all accepted).
 - `skills/` is a folder of `**/SKILL.md` files, loaded on demand through one `skill` tool.
 - Remote MCP `headers` values expand `${ENV_VAR}` at call time and are never logged.
+
+## API key by host (BREAKING in 0.22)
+
+A key is only ever sent to the host it belongs to. `apiKey` wins; else `apiKeyEnv` (the NAME of
+an env var); else only the env var of the `baseUrl` host, over https — `api.openai.com` →
+`OPENAI_API_KEY`, `api.anthropic.com` → `ANTHROPIC_API_KEY`, `openrouter.ai` →
+`OPENROUTER_API_KEY`. **A local server, a proxy or any other host needs `apiKey` or `apiKeyEnv`**
+(before 0.22 the first provider key in the environment was sent to any `baseUrl`):
+
+```ts
+createClient({ baseUrl: "http://localhost:11434/v1", style: "openai", model: "llama3", apiKey: "YOUR_KEY_HERE" })
+createClient({ baseUrl: "https://my-proxy.example/v1", style: "openai", model: "m", apiKeyEnv: "MY_PROXY_KEY" })
+```
+
+## Prompt cache and tool tiers
+
+```ts
+const agent = createClient({
+  baseUrl, style, model,
+  promptCache: { key: "session-42" },   // anthropic cache breakpoints / openai prompt_cache_key
+  toolTiers: { core: ["read", "grep"] }, // the rest load on demand via tool_search / call_tool
+})
+const res = await agent.run(prompt, { toolkit: tk })
+res.usage.cacheReadTokens               // cache hits; anthropic context = prompt + cacheRead + cacheWrite
+agent.toolTierPlan(tk)                  // { read: "core", bash: "listed", … }, frozen per toolkit
+agent.resetToolTiers(tk)                // rebuild at session start
+```
+
+`toolTiers` keeps the tools array identical on every request, so the cached prefix survives a
+large or growing toolkit. `call_tool` is unwrapped before hooks, so permission gates see the real
+tool. Runnable: `npm run example:prompt-cache` ([`examples/prompt_cache.ts`](examples/prompt_cache.ts)).
+
+## Host additions (0.22)
+
+- `loadMcp(cfg, { onServer })` — each MCP server reported the moment it connects or fails;
+  `mcpSource.resourceTools()` adds `list_mcp_resources` / `read_mcp_resource`.
+- `waitFor(request, { signal })` — a pending question ends with its turn.
+- Tool `hints` (`readOnly` / `destructive` / `openWorld`) on every builtin and MCP tool, passed to
+  `hooks.beforeTool` — allow, deny with an error result, or ask via `pending`.
+- Opt-in builtins: `builtins: { background: new BackgroundShells(), webSearch, notebookEdit: true }`
+  (`bash_output` / `kill_shell`, `websearch`, `notebook_edit`); `grep` takes `context` / `before` /
+  `after`; `read` / `grep` report truncation in metadata.
+- `agents.compactor({ onCompact })`, `agent.asToolWith(ctx => ({ hooks, waitFor }))`, runtime
+  `waitFor`, `ctx.callId` on tools, `listModels(opts)`.
+
+ACP host hooks (permission choice, update stream, cancel, streaming) are Go-only for now.
 
 ## Simple judgments
 

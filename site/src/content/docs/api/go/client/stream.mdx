@@ -288,6 +288,15 @@ func main() {
 | `Request` | `"pending"` | A §10 suspension, emitted before `WaitFor` runs so a UI can push the link live. |
 | `Err` | `"error"` | The terminal error; the channel closes right after. |
 
+## `Via` — where a tool event came from
+
+`StreamEvent.Via` is empty for an ordinary tool call. Under [`ToolTiers`](/api/go/client/tool-tiers/)
+a `call_tool` call is reported as the **real** tool (its name and inner arguments) with
+`Via: "call_tool"`. Over an ACP agent streamed through `InProcessOptions.GenerateStream`, the agent's
+own tool calls arrive as `tool_call` / `tool_result` with `Via: "acp"` — the loop never runs them (see
+[ACP host hooks](/api/go/client/acp-hooks/)). `tool_result` events also carry the result's
+`Metadata` (for example the `files` / `diff` of an edit).
+
 ## See also
 
 - [`CreateClient`](/api/go/client/create/) — The unified client: system prompt, skills injection, parallel and chained tool calls, retries, memory.

@@ -357,6 +357,65 @@ async def main():
 asyncio.run(main())
 ```
 
+## `wait_for_ctx` — the pending ask ends with the turn
+
+```python
+create_client(..., wait_for_ctx: Callable[[asyncio.Event, Request], Answer | Awaitable[Answer]])
+```
+
+`wait_for_ctx(cancel, request)` is `wait_for` plus the turn's cancel token (an `asyncio.Event`,
+set when the turn is cancelled), so a resolver waiting on a human can stop waiting when the user
+abandons the turn. When both are set, `wait_for_ctx` wins.
+
+```python test
+import asyncio
+
+from toolnexus import Answer, ToolResult, create_client, create_toolkit, define_tool, pending
+
+
+class Script:
+    """Asks for one tool call, then answers."""
+
+    def __init__(self, tool, args="{}"):
+        self.tool, self.args, self.n = tool, args, 0
+
+    def post(self, url, headers, payload, timeout):
+        self.n += 1
+        if self.n == 1:
+            return {"choices": [{"message": {"role": "assistant", "content": None, "tool_calls": [
+                {"id": "call_1", "type": "function",
+                 "function": {"name": self.tool, "arguments": self.args}}]}}]}
+        return {"choices": [{"message": {"role": "assistant", "content": "done"}}]}
+
+
+async def refund(args=None, ctx=None):
+    if ctx is not None and ctx.answer is not None and ctx.answer.ok:
+        return ToolResult(output="refund issued", is_error=False)
+    return pending(kind="approval", prompt="OK to refund $40?")
+
+
+async def main():
+    tk = await create_toolkit(builtins=False)
+    tk.register(define_tool(refund, name="refund", description="Issue a refund."))
+    seen = []
+
+    async def wait_for_ctx(cancel, request):
+        seen.append((type(cancel).__name__, request.kind))
+        return Answer(id=request.id, ok=True)
+
+    client = create_client(
+        base_url="http://localhost:8080/v1", style="openai", model="m", api_key="YOUR_KEY_HERE",
+        wait_for_ctx=wait_for_ctx, http_transport=Script("refund"),
+    )
+    res = await client.run("refund it", tk)
+    assert res.tool_calls[0]["output"] == "refund issued"
+    assert seen == [("Event", "approval")], seen
+    print("ok: wait_for_ctx answered with the turn's cancel token")
+
+
+asyncio.run(main())
+```
+
 ## The one behavioral pin
 
 | `wait_for` | Behavior |

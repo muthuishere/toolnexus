@@ -227,6 +227,41 @@ async def main():
 asyncio.run(main())
 ```
 
+## `on_compact` — tell the host a compaction happened
+
+`compactor(..., on_compact=fn)` calls `fn(info: CompactInfo)` (sync or async) after each
+compaction, never on a no-op. `CompactInfo` has `tokens_before`, `tokens_after`,
+`messages_before`, `messages_after`, `summarized`, `summary`, and `folded` — the summarized
+messages verbatim, because the loop saves only the compacted transcript. Since 0.22.0 the
+compactor also never summarizes away the sole user prompt of a turn, and does nothing when the
+result would not be smaller.
+
+```python test
+import asyncio
+
+from toolnexus.agents import compactor
+
+
+async def main():
+    seen = []
+    hook = compactor(max_tokens=40, keep_tail=10, summarize=lambda older: "earlier chat",
+                     on_compact=seen.append)
+    msgs = [{"role": "user", "content": "first question " * 10},
+            {"role": "assistant", "content": "a long answer " * 20},
+            {"role": "user", "content": "follow-up " * 10},
+            {"role": "assistant", "content": "ok"},
+            {"role": "user", "content": "latest"}]
+    out = await hook({"messages": msgs})
+    assert out is not None and len(seen) == 1
+    info = seen[0]
+    assert info.tokens_after < info.tokens_before and info.summary == "earlier chat"
+    assert len(info.folded) == info.summarized
+    print(f"ok: {info.tokens_before} -> {info.tokens_after} tokens, {info.summarized} folded")
+
+
+asyncio.run(main())
+```
+
 ## `compactor(**opts)` fields
 
 | Option | Type | Meaning |
@@ -236,6 +271,7 @@ asyncio.run(main())
 | `keep_tail` | `int \| None` | Keep at least this many tokens of the most recent tail. Default `max_tokens // 2`. |
 | `count_tokens` | `(messages) -> int \| None` | Token estimator. Default [`estimate_tokens`](https://github.com/muthuishere/toolnexus/blob/main/python/src/toolnexus/agents/compaction.py) (`ceil(chars/4)`, an estimate, not a real tokenizer). |
 | `flush_to_memory` | `bool` | Inject a pre-compact system reminder to persist durable facts via the §7E `memory` tool. Default off. |
+| `on_compact` | `Callable[[CompactInfo], Any] \| None` | Called (sync or async) after each compaction, never on a no-op. See above. |
 
 ## See also
 

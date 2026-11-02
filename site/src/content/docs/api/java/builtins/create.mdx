@@ -137,6 +137,48 @@ public class Example {
 | Paths | — | Resolve relative to the process working directory unless absolute. |
 | `read` on media | — | A `png/jpg/jpeg/gif/webp/pdf/mp3/wav` file returns a content part; undecodable bytes return an `isError` result. |
 
+## Opt-in builtins, grep context and truncation metadata
+
+The default ten are unchanged. These keys of the builtins config add more:
+
+| key | adds |
+|---|---|
+| `background` (a [`BackgroundShells`](/api/java/builtins/background-shells/)) | `run_in_background` on `bash`, plus `bash_output` and `kill_shell` |
+| `webSearch` (a `WebSearch`) | `websearch` — numbered title / URL / snippet; the library ships no provider |
+| `notebookEdit: true` | `notebook_edit` — replace / insert / delete an `.ipynb` cell by id or index |
+
+`grep` takes `context`, `before` and `after`: match lines `path:N:text`, context lines
+`path-N-text`, `--` between groups. A `read` window that stops early sets `truncated`,
+`totalLines`, `nextOffset` in `metadata`; a `grep` cut by `limit` sets `truncated` and `total`. The
+text output is unchanged. `edit`, `write` and `apply_patch` results carry `metadata.files` and a
+unified `metadata.diff`.
+
+```java test
+import io.github.muthuishere.toolnexus.*;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.List;
+import java.util.Map;
+
+public class Example {
+    public static void main(String[] args) throws Exception {
+        Path dir = Files.createTempDirectory("tn-grep");
+        Files.writeString(dir.resolve("f.txt"), "a\nHIT1\nb\nc\nHIT2\n");
+        WebSearch search = (query, limit) -> List.of(new WebSearch.Result("Docs", "https://example.com", "toolnexus"));
+        List<Tool> tools = BuiltinTools.create(Map.of("baseDir", dir.toString(), "webSearch", search, "notebookEdit", true));
+        List<String> names = tools.stream().map(Tool::name).toList();
+        if (!names.contains("websearch") || !names.contains("notebook_edit")) throw new AssertionError(names);
+
+        Tool grep = tools.stream().filter(t -> t.name().equals("grep")).findFirst().orElseThrow();
+        ToolResult r = grep.execute(Map.of("pattern", "HIT1", "context", 1), null);
+        if (!r.output().equals("f.txt-1-a\nf.txt:2:HIT1\nf.txt-3-b")) throw new AssertionError(r.output());
+        ToolResult cut = grep.execute(Map.of("pattern", "HIT", "limit", 1), null);
+        if (!Boolean.TRUE.equals(cut.metadata().get("truncated"))) throw new AssertionError(cut.metadata());
+        System.out.println("ok: total=" + cut.metadata().get("total"));
+    }
+}
+```
+
 ## See also
 
 - [`BuiltinTools.select`](/api/java/builtins/select/) — the config-aware filter built on top of `create()`.

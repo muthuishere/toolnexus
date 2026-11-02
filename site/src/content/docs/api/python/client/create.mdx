@@ -35,6 +35,10 @@ def create_client(
     on_error: ErrorClassifier | None = None,
     on_unsupported_part: Literal["error", "text"] | None = None,
     max_part_bytes: int | None = None,
+    api_key_env: str | None = None,
+    wait_for_ctx: Callable[[asyncio.Event, Request], Any] | None = None,
+    prompt_cache: PromptCacheOptions | None = None,
+    tool_tiers: ToolTierOptions | None = None,
 ) -> Client
 ```
 
@@ -81,13 +85,16 @@ its own page — this page is the map, not the manual:
 
 | Option | What it's for | Depth |
 |---|---|---|
-| `base_url`, `style`, `model`, `api_key`, `headers` | Where the model lives, which wire shape it speaks, which model, how to authenticate. | — |
+| `base_url`, `style`, `model`, `api_key`, `api_key_env`, `headers` | Where the model lives, which wire shape it speaks, which model, how to authenticate. Without `api_key`/`api_key_env` only the env var of the `base_url` host is read (https `api.openai.com`, `api.anthropic.com`, `openrouter.ai`); a local or custom host needs one of the two (breaking in 0.22.0). | [`api_key_env`](/api/python/client/api-key/) |
 | `system_prompt` | Prepended once; toolkit skill/tool catalogs are injected alongside it. | — |
 | `max_turns` | Hard cap on tool-call round-trips in one `run`/`stream` before the loop stops. | — |
 | `hooks` | Intercept before/after every model call and every tool call — audit, redact, veto, rewrite. | [`Hooks`](/api/python/client/hooks/) |
 | `retries`, `retry_base_ms`, `retryable_statuses`, `on_error`, `timeout_ms` | Retry/backoff policy for transient provider failures, and a deadline for the whole run. | [`ErrorClassifier`](/api/python/client/resilience/) |
 | `store` | Persist conversation history somewhere other than in-process memory. | [`InMemoryConversationStore`](/api/python/client/store/) |
 | `on_metric` | A sink called once per `llm`/`tool`/`run` event; also feeds `client.metrics()`. | [`MetricEvent`](/api/python/client/metrics/) |
+| `prompt_cache` | Mark the stable prefix for the provider's prompt cache; usage reports `cache_read_tokens` / `cache_write_tokens`. | [`prompt_cache`](/api/python/client/prompt-cache/) |
+| `tool_tiers` | Send only core tool schemas; the rest load on demand via `tool_search` / `call_tool`. | [`tool_tiers`](/api/python/client/tool-tiers/) |
+| `wait_for_ctx` | `wait_for` that also gets the turn's cancel token, so a pending ask ends with the turn; wins over `wait_for`. | [`WaitFor`](/api/python/suspension/wait-for/) |
 | `wait_for` | Resolve a §10 suspension (a tool that needs a human answer) synchronously or by resuming later. | [`WaitFor`](/api/python/suspension/wait-for/) |
 | `request_params` | Extra top-level fields merged into every outbound request body (e.g. `temperature`). | — |
 | `body_transform` | Last-mile hook to rewrite (or veto) the outbound request body before it's sent. | — |

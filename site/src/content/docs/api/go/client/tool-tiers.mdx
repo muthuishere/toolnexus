@@ -1,0 +1,261 @@
+---
+title: "ClientOptions.ToolTiers"
+description: "Send only core tool schemas; the model loads the rest with tool_search and calls them by name or through call_tool. The plan is frozen until resetToolTiers. — Go."
+sidebar:
+  label: "ClientOptions.ToolTiers"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Go</strong> · package <code>github.com/muthuishere/toolnexus/golang</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/golang/tool_tiers.go">golang/tool_tiers.go</a>
+</p>
+
+```go
+type ToolTierOptions struct {
+	Core          []string                // always sent with full schemas
+	Deferred      []string                // named only; every other tool is "listed"
+	BudgetTokens  int                     // cap on what is sent up front; 0 ⇒ 5% of ContextWindow
+	ContextWindow int
+	UsageCount    func(name string) int   // host usage stat, read when the plan is built
+	CountTokens   func(v any) int         // default ceil(bytes/4)
+}
+
+// ClientOptions.ToolTiers *ToolTierOptions — nil ⇒ off, every schema sent as before.
+
+func (c *Client) ToolTierPlan(tk *Toolkit) map[string]ToolTier // TierCore | TierListed | TierDeferred
+func (c *Client) ResetToolTiers(tk *Toolkit)
+```
+
+With `ToolTiers` set, the tools array is the **core** tools sorted by name, then `tool_search` and
+`call_tool`. Every other tool is **listed** (`- name — first line` inside `tool_search`'s
+description, cut to at most 120 bytes) or **deferred** (name only there).
+
+- `tool_search {query, limit?}` — `select:a,b` for exact names, else keyword scoring (default 5
+  results). It returns the full definitions as JSON **in the tool result**, so the tools array —
+  and the cached prefix — never changes mid-session. It is engine-internal and read-only (no
+  `BeforeTool`).
+- A loaded tool is called by name, or as `call_tool {name, arguments}`. The loop unwraps
+  `call_tool` **before** hooks, so `BeforeTool`, hints and permission gates see the real tool;
+  stream `tool_call` / `tool_result` events carry the real name with `Via: "call_tool"`.
+- The plan is built on a toolkit's first request and then **frozen**. `ResetToolTiers(tk)` rebuilds
+  it — call it at session start. A tool registered later is deferred and found by search.
+- Budget: while core schemas plus the two meta tools exceed it, the least-used core tool moves to
+  listed (ties: larger schema, then name), then the least-used listed tool to deferred.
+
+## When to use it
+
+A host with many tools — dozens of MCP tools, a full builtin pack, plugins — where sending every
+schema on every request costs tokens and dilutes the model's choice, or where tools are added
+mid-session and would otherwise break the [prompt cache](/api/go/client/prompt-cache/).
+
+## Why this and not the alternative
+
+<Aside type="tip" title="A handful of tools? Use DisableTools or nothing at all">
+Tiers add a search round trip whenever the model needs a tool outside the core set. With a small,
+fixed tool set, sending every schema is simpler and costs one request less. To drop tools you never
+want offered, filter them with `DisableTools` instead.
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call — only core schemas go out
+
+```go test
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func tool(name, desc string) toolnexus.Tool {
+	return toolnexus.NativeTool(name, desc, toolnexus.JSONSchema{"type": "object", "properties": map[string]any{}},
+		func(context.Context, map[string]any) (string, error) { return name + " ran", nil })
+}
+
+func main() {
+	tk, err := toolnexus.CreateToolkit(context.Background(), toolnexus.Options{ExtraTools: []toolnexus.Tool{
+		tool("read_file", "Read a file"), tool("weather", "Current weather for a city"), tool("stocks", "Stock quote"),
+	}})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer tk.Close()
+
+	var sent []string
+	var searchDesc string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Tools []struct {
+				Function struct{ Name, Description string } `json:"function"`
+			} `json:"tools"`
+		}
+		b, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(b, &body)
+		for _, t := range body.Tools {
+			sent = append(sent, t.Function.Name)
+			if t.Function.Name == "tool_search" {
+				searchDesc = t.Function.Description
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"hi"}}]}`))
+	}))
+	defer srv.Close()
+
+	client := toolnexus.CreateClient(toolnexus.ClientOptions{
+		BaseURL: srv.URL, Style: toolnexus.StyleOpenAI, Model: "m", APIKey: "YOUR_KEY_HERE",
+		ToolTiers: &toolnexus.ToolTierOptions{Core: []string{"read_file"}, Deferred: []string{"stocks"}},
+	})
+	if _, err := client.Run(context.Background(), "hello", tk); err != nil {
+		log.Fatal(err)
+	}
+	if strings.Join(sent, ",") != "read_file,tool_search,call_tool" {
+		log.Fatalf("unexpected tools array: %v", sent)
+	}
+	if !strings.Contains(searchDesc, "weather") || !strings.Contains(searchDesc, "stocks") {
+		log.Fatalf("tool_search description does not name the other tools: %q", searchDesc)
+	}
+	plan := client.ToolTierPlan(tk)
+	fmt.Println("ok:", sent, "weather =", plan["weather"], "stocks =", plan["stocks"])
+}
+```
+
+### 2. The realistic case — search, then `call_tool`, under a permission hook
+
+The hook sees `weather`, never `call_tool`.
+
+```go test
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"net/http"
+	"net/http/httptest"
+	"sync"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	weather := toolnexus.NativeTool("weather", "Current weather for a city",
+		toolnexus.JSONSchema{"type": "object", "properties": map[string]any{"city": map[string]any{"type": "string"}}},
+		func(_ context.Context, a map[string]any) (string, error) { return fmt.Sprint("sunny in ", a["city"]), nil })
+	tk, err := toolnexus.CreateToolkit(context.Background(), toolnexus.Options{ExtraTools: []toolnexus.Tool{weather}})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer tk.Close()
+
+	replies := []string{
+		`{"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"c1","type":"function","function":{"name":"tool_search","arguments":"{\"query\":\"select:weather\"}"}}]}}]}`,
+		`{"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"c2","type":"function","function":{"name":"call_tool","arguments":"{\"name\":\"weather\",\"arguments\":{\"city\":\"Paris\"}}"}}]}}]}`,
+		`{"choices":[{"message":{"role":"assistant","content":"It is sunny in Paris."}}]}`,
+	}
+	var mu sync.Mutex
+	turn := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		reply := replies[turn]
+		turn++
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(reply))
+	}))
+	defer srv.Close()
+
+	var gated []string
+	client := toolnexus.CreateClient(toolnexus.ClientOptions{
+		BaseURL: srv.URL, Style: toolnexus.StyleOpenAI, Model: "m", APIKey: "YOUR_KEY_HERE",
+		ToolTiers: &toolnexus.ToolTierOptions{},
+		Hooks: &toolnexus.Hooks{BeforeTool: func(_ context.Context, ev toolnexus.BeforeToolEvent) (*toolnexus.ToolOverride, error) {
+			gated = append(gated, ev.Name)
+			return nil, nil
+		}},
+	})
+	res, err := client.Run(context.Background(), "weather in Paris?", tk)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if len(gated) != 1 || gated[0] != "weather" {
+		log.Fatalf("BeforeTool should see only the real tool, saw %v", gated)
+	}
+	fmt.Println("ok:", res.Text)
+}
+```
+
+### 3. The full surface — a token budget, usage stats, and `ResetToolTiers`
+
+The plan is frozen once built; changing the usage stat only takes effect after `ResetToolTiers`.
+
+```go test
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"strings"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	var tools []toolnexus.Tool
+	for _, n := range []string{"alpha", "beta", "gamma"} {
+		n := n
+		tools = append(tools, toolnexus.NativeTool(n, "Tool "+n+" "+strings.Repeat("x", 200),
+			toolnexus.JSONSchema{"type": "object", "properties": map[string]any{}},
+			func(context.Context, map[string]any) (string, error) { return n, nil }))
+	}
+	tk, err := toolnexus.CreateToolkit(context.Background(), toolnexus.Options{ExtraTools: tools})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer tk.Close()
+
+	usage := map[string]int{"alpha": 10, "beta": 1, "gamma": 5}
+	client := toolnexus.CreateClient(toolnexus.ClientOptions{
+		BaseURL: "http://127.0.0.1:1", Style: toolnexus.StyleOpenAI, Model: "m", APIKey: "YOUR_KEY_HERE",
+		ToolTiers: &toolnexus.ToolTierOptions{
+			Core:         []string{"alpha", "beta", "gamma"},
+			BudgetTokens: 300, // the two meta tools plus exactly one core schema
+			CountTokens:  func(any) int { return 100 }, // every definition "costs" 100
+			UsageCount:   func(name string) int { return usage[name] },
+		},
+	})
+
+	first := client.ToolTierPlan(tk)
+	if first["alpha"] != toolnexus.TierCore || first["beta"] == toolnexus.TierCore {
+		log.Fatalf("budget should keep the most-used tool core: %v", first)
+	}
+
+	usage["beta"] = 100 // new stats are ignored while the plan is frozen
+	if client.ToolTierPlan(tk)["beta"] != first["beta"] {
+		log.Fatal("plan changed without ResetToolTiers")
+	}
+	client.ResetToolTiers(tk) // e.g. at a new session start
+	if client.ToolTierPlan(tk)["beta"] != toolnexus.TierCore {
+		log.Fatalf("after reset beta should be core: %v", client.ToolTierPlan(tk))
+	}
+	fmt.Println("ok: before", first, "after", client.ToolTierPlan(tk))
+}
+```
+
+## See also
+
+- [`PromptCache`](/api/go/client/prompt-cache/) — tiers keep the tools array stable, so the cache keeps hitting.
+- [`Hooks`](/api/go/client/hooks/) — `BeforeTool` sees the real tool behind `call_tool`.
+- [`Client.Stream`](/api/go/client/stream/) — `tool_call` events carry `Via: "call_tool"`.
+- [`CreateClient`](/api/go/client/create/) — The unified client: system prompt, skills injection, parallel and chained tool calls, retries, memory.

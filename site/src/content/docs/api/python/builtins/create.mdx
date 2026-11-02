@@ -173,6 +173,51 @@ asyncio.run(main())
 | `apply_patch` | Apply an opencode Begin/End Patch (Add/Update/Delete); atomic — one bad hunk aborts with no writes. |
 | `todowrite` | Replace the session todo list; returns the rendered `[x]`/`[ ]` list. |
 
+## Opt-in builtins, grep context and truncation metadata
+
+Absent unless configured; the default ten are unchanged:
+
+| Config key | Adds |
+|---|---|
+| `"background": BackgroundShells()` | `run_in_background` on `bash`, plus `bash_output` and `kill_shell` — see [`BackgroundShells`](/api/python/builtins/background-shells/). |
+| `"web_search": fn(query, limit)` | `websearch` over your provider (returns `WebSearchResult`s or dicts; numbered title/URL/snippet). None ships. |
+| `"notebook_edit": True` | `notebook_edit` — replace / insert / delete a `.ipynb` cell by `cell_id` or `cell_index`; replacing a code cell clears its outputs. |
+
+`grep` takes `context`, `before` and `after` line counts (match lines `path:N:text`, context lines
+`path-N-text`, `--` between groups). When output is cut, `read` sets `metadata` `truncated`,
+`totalLines`, `nextOffset`, and `grep` sets `truncated`, `total`; the text itself is unchanged.
+
+```python test
+import asyncio
+import pathlib
+import tempfile
+
+from toolnexus import WebSearchResult
+from toolnexus.builtin import create_builtin_tools
+
+
+async def main():
+    d = tempfile.mkdtemp()
+    pathlib.Path(d, "f.txt").write_text("a\nb\nHIT1\nc\nd\ne\nf\nHIT2\ng\n")
+
+    def search(query, limit):
+        return [WebSearchResult(title="Docs", url="https://example.com", snippet="hi")]
+
+    tools = {t.name: t for t in create_builtin_tools({"base_dir": d, "web_search": search,
+                                                    "notebook_edit": True})}
+    assert "websearch" in tools and "notebook_edit" in tools
+    r = await tools["grep"].execute({"pattern": "HIT", "context": 1})
+    assert r.output == "f.txt-2-b\nf.txt:3:HIT1\nf.txt-4-c\n--\nf.txt-7-f\nf.txt:8:HIT2\nf.txt-9-g"
+    r = await tools["read"].execute({"path": "f.txt", "limit": 2})
+    assert r.metadata == {"truncated": True, "totalLines": 9, "nextOffset": 3}
+    r = await tools["websearch"].execute({"query": "toolnexus", "limit": 1})
+    assert r.output == "1. Docs\n   https://example.com\n   hi"
+    print("ok: grep context, read truncation, websearch")
+
+
+asyncio.run(main())
+```
+
 ## See also
 
 - [`select_builtins`](/api/python/builtins/select/) — Pick which built-ins are in play, by name or by a whole-source toggle.

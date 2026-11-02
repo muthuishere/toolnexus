@@ -13,9 +13,11 @@ not a runtime, so it drops into whatever control flow you already have.
 </Aside>
 
 The three-liner: a toolkit with the ten built-in tools, a client pointed at any
-OpenAI- or Anthropic-style endpoint, and one `run`. API keys are read from the
-environment (`OPENROUTER_API_KEY`, then `OPENAI_API_KEY` / `ANTHROPIC_API_KEY`)
-and never printed.
+OpenAI- or Anthropic-style endpoint, and one `run`. With no `apiKey`, the key is read
+only from the env var that belongs to the `baseUrl` host (`openrouter.ai` →
+`OPENROUTER_API_KEY`, `api.openai.com` → `OPENAI_API_KEY`, `api.anthropic.com` →
+`ANTHROPIC_API_KEY`, https only) and never printed. Any other host needs `apiKey` or
+`apiKeyEnv` — see [API key by host](/cookbook/api-key-by-host/).
 
 <Tabs syncKey="lang">
 <TabItem label="JavaScript">

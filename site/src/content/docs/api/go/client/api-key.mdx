@@ -1,0 +1,203 @@
+---
+title: "ClientOptions.APIKeyEnv"
+description: "Which key the client sends where: apiKey, else apiKeyEnv, else only the env var of the baseUrl host (https). A local or custom host needs one of the two. — Go."
+sidebar:
+  label: "ClientOptions.APIKeyEnv"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Go</strong> · package <code>github.com/muthuishere/toolnexus/golang</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/golang/client.go">golang/client.go</a>
+</p>
+
+```go
+type ClientOptions struct {
+	// APIKey is sent as-is. Wins over everything else.
+	APIKey string
+	// APIKeyEnv is the NAME of the env var to read the key from (never the value).
+	APIKeyEnv string
+	// ...
+}
+```
+
+The client decides which key goes to which host, in this order:
+
+1. `APIKey` set ⇒ only it.
+2. Else `APIKeyEnv` set ⇒ the env var it names.
+3. Else **only** the env var that belongs to the `BaseURL` host, over https:
+   `api.openai.com` → `OPENAI_API_KEY`, `api.anthropic.com` → `ANTHROPIC_API_KEY`,
+   `openrouter.ai` (and subdomains) → `OPENROUTER_API_KEY`.
+4. Any other host, or plain http, with neither set ⇒ the run fails with
+   `no API key: set APIKey or APIKeyEnv …`. Nothing is sent.
+
+<Aside type="caution" title="Breaking in 0.22.0">
+Before 0.22.0 the client took the first of `OPENROUTER_API_KEY`, `OPENAI_API_KEY`,
+`ANTHROPIC_API_KEY` that was set and sent it to whatever `BaseURL` was configured — so an
+OpenRouter key could reach api.openai.com, or any key a local server or proxy. A host on a local
+or custom `BaseURL` that relied on that fallback must now set `APIKey` or `APIKeyEnv`.
+</Aside>
+
+## When to use it
+
+Set `APIKeyEnv` whenever the `BaseURL` is not one of the three known hosts — a local llama.cpp or
+vLLM server, a corporate gateway, a proxy — and the key lives in the environment. Set `APIKey` when
+the host already has the value in hand (a secret manager, a test). For the three known hosts you
+can set neither: the matching env var is read automatically.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="APIKeyEnv over APIKey when the key is in the environment">
+`APIKey: os.Getenv("MY_KEY")` works, but it copies the secret into your options struct, where a
+`%+v` log line can print it. `APIKeyEnv: "MY_KEY"` keeps only the name in your code; the value is
+read at request time and never logged. Use `APIKey` only when the value does not come from the
+environment.
+</Aside>
+
+## Examples
+
+Each example uses a local `httptest.Server` or a capturing transport — no network, fake keys only.
+
+### 1. The smallest useful call — a local server with `APIKeyEnv`
+
+```go test
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"net/http"
+	"net/http/httptest"
+	"os"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	os.Setenv("MY_LOCAL_LLM_KEY", "YOUR_KEY_HERE")
+
+	var auth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		auth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"hi"}}]}`))
+	}))
+	defer srv.Close()
+
+	client := toolnexus.CreateClient(toolnexus.ClientOptions{
+		BaseURL: srv.URL, Style: toolnexus.StyleOpenAI, Model: "local",
+		APIKeyEnv: "MY_LOCAL_LLM_KEY", // the NAME, not the value
+	})
+	res, err := client.Run(context.Background(), "hello", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if auth != "Bearer YOUR_KEY_HERE" {
+		log.Fatalf("unexpected Authorization header %q", auth)
+	}
+	fmt.Println("ok:", res.Text)
+}
+```
+
+### 2. The realistic case — a local host with no key fails before sending
+
+A provider key in the environment is never sent to a host it does not belong to.
+
+```go test
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"strings"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	os.Setenv("OPENAI_API_KEY", "YOUR_KEY_HERE")
+
+	hits := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"hi"}}]}`))
+	}))
+	defer srv.Close()
+
+	client := toolnexus.CreateClient(toolnexus.ClientOptions{
+		BaseURL: srv.URL, Style: toolnexus.StyleOpenAI, Model: "local",
+	})
+	_, err := client.Run(context.Background(), "hello", nil)
+	if err == nil || !strings.Contains(err.Error(), "no API key") {
+		log.Fatalf("expected a no-API-key error, got %v", err)
+	}
+	if hits != 0 {
+		log.Fatal("the local server was called — OPENAI_API_KEY must never reach it")
+	}
+	fmt.Println("ok: refused,", hits, "requests sent")
+}
+```
+
+### 3. The full surface — the host picks its own env var
+
+With several provider keys set, `https://api.openai.com` gets `OPENAI_API_KEY` and nothing else.
+A capturing `HTTPClient` stands in for the network.
+
+```go test
+package main
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"log"
+	"net/http"
+	"os"
+	"strings"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+type capture struct{ auth, host string }
+
+func (c *capture) RoundTrip(r *http.Request) (*http.Response, error) {
+	c.auth, c.host = r.Header.Get("Authorization"), r.URL.Host
+	return &http.Response{
+		StatusCode: 200,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       io.NopCloser(strings.NewReader(`{"choices":[{"message":{"role":"assistant","content":"hi"}}]}`)),
+		Request:    r,
+	}, nil
+}
+
+func main() {
+	os.Setenv("OPENROUTER_API_KEY", "YOUR_OPENROUTER_KEY_HERE")
+	os.Setenv("OPENAI_API_KEY", "YOUR_OPENAI_KEY_HERE")
+
+	cap := &capture{}
+	client := toolnexus.CreateClient(toolnexus.ClientOptions{
+		BaseURL: "https://api.openai.com/v1", Style: toolnexus.StyleOpenAI, Model: "gpt-4o-mini",
+		HTTPClient: &http.Client{Transport: cap},
+	})
+	if _, err := client.Run(context.Background(), "hello", nil); err != nil {
+		log.Fatal(err)
+	}
+	if cap.host != "api.openai.com" || cap.auth != "Bearer YOUR_OPENAI_KEY_HERE" {
+		log.Fatalf("wrong key for host %s: %q", cap.host, cap.auth)
+	}
+	fmt.Println("ok:", cap.host, "got OPENAI_API_KEY only")
+}
+```
+
+## See also
+
+- [`CreateClient`](/api/go/client/create/) — The unified client: system prompt, skills injection, parallel and chained tool calls, retries, memory.
+- [`ListModels`](/api/go/client/list-models/) — the same key rules apply when listing a provider's models.
+- [`Client.Run`](/api/go/client/run/) — Send a prompt, let the loop call tools until the model stops, get a RunResult.
+- [`Hooks`](/api/go/client/hooks/) — Intercept before/after model calls and tool calls: audit, redact, veto, or rewrite.

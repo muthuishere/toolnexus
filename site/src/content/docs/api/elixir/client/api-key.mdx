@@ -1,0 +1,142 @@
+---
+title: "api_key_env"
+description: "Which key the client sends where: apiKey, else apiKeyEnv, else only the env var of the baseUrl host (https). A local or custom host needs one of the two. — Elixir."
+sidebar:
+  label: "api_key_env"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Elixir</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a>
+</p>
+
+```elixir
+Toolnexus.Client.create(
+  base_url: String.t(),
+  api_key: String.t() | nil,      # used as-is when set
+  api_key_env: String.t() | nil,  # the NAME of an env var, read at call time
+  ...
+)
+```
+
+Which key the client sends, and to whom. In order: `:api_key` when set; else the env var
+named by `:api_key_env`; else **only** the env var that belongs to the `:base_url` host,
+over https — `api.openai.com` → `OPENAI_API_KEY`, `api.anthropic.com` → `ANTHROPIC_API_KEY`,
+`openrouter.ai` (and its subdomains) → `OPENROUTER_API_KEY`. Any other host, or plain http,
+with neither option set raises `ArgumentError` ("No API key: …") before any request is made.
+The same rule applies to [`Toolnexus.Client.list_models/1`](/api/elixir/client/list-models/),
+which returns `{:error, message}` instead of raising.
+
+<Aside type="caution" title="BREAKING in 0.22.0">
+Before 0.22.0 a client with no `:api_key` took the first of `OPENROUTER_API_KEY`,
+`OPENAI_API_KEY`, `ANTHROPIC_API_KEY` that was set and sent it to whatever `:base_url` was
+configured — so an OpenRouter key could reach api.openai.com, and any key could reach a local
+or third-party server. A host on a local server (Ollama, llama.cpp, vLLM) or a proxy must now
+set `:api_key` or `:api_key_env`.
+</Aside>
+
+## When to use it
+
+- **A local or self-hosted endpoint** — `http://localhost:11434/v1` has no "own" env var, so
+  pass `api_key: "unused"` (many local servers ignore it) or the key it really wants.
+- **A proxy or gateway** that fronts a provider — name the env var that holds the gateway key
+  with `api_key_env: "GATEWAY_KEY"`; the value is read at call time and never logged.
+- **Several provider keys in one environment** — leave both unset on the official hosts; each
+  host gets only its own key.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Prefer api_key_env over api_key for real secrets">
+`:api_key` takes the **value**, so it ends up in whatever built the options (config files,
+supervisor specs, crash dumps of the client struct). `:api_key_env` takes only the **name**;
+the value stays in the process environment and is read at the moment of the request.
+Use `:api_key` for tests and placeholders.
+</Aside>
+
+## Examples
+
+### 1. A local server needs an explicit key
+
+```elixir test
+alias Toolnexus.Client
+
+# A custom host with no key raises before any request is made.
+no_key = Client.create(base_url: "http://127.0.0.1:1/v1", model: "m")
+
+raised =
+  try do
+    Client.run(no_key, "hi", [])
+    false
+  rescue
+    e in ArgumentError -> e.message =~ "No API key"
+  end
+
+true = raised
+
+t = fn _req ->
+  {:ok,
+   %{status: 200, headers: %{},
+     body: %{"choices" => [%{"message" => %{"role" => "assistant", "content" => "local ok"}}],
+             "usage" => %{"prompt_tokens" => 1, "completion_tokens" => 1, "total_tokens" => 2}}}}
+end
+
+local = Client.create(base_url: "http://127.0.0.1:11434/v1", model: "m", api_key: "YOUR_KEY_HERE", transport: t)
+true = Client.run(local, "hi", []).text == "local ok"
+IO.puts("ok: explicit key required for a local host")
+```
+
+### 2. Name the env var with `:api_key_env`
+
+```elixir test
+alias Toolnexus.Client
+
+System.put_env("MY_GATEWAY_KEY", "YOUR_KEY_HERE")
+me = self()
+
+t = fn req ->
+  send(me, {:auth, req.headers["authorization"]})
+  {:ok, %{status: 200, headers: %{}, body: %{"data" => []}}}
+end
+
+{:ok, []} =
+  Client.list_models(base_url: "https://gateway.example/v1", api_key_env: "MY_GATEWAY_KEY", transport: t)
+
+receive do
+  {:auth, "Bearer YOUR_KEY_HERE"} -> IO.puts("ok: the gateway got the key named by api_key_env")
+end
+```
+
+### 3. Each official host gets only its own env var
+
+```elixir test
+alias Toolnexus.Client
+
+System.put_env("OPENAI_API_KEY", "fake-openai")
+System.put_env("OPENROUTER_API_KEY", "fake-openrouter")
+me = self()
+
+t = fn req ->
+  send(me, {:auth, req.headers["authorization"]})
+  {:ok, %{status: 200, headers: %{}, body: %{"data" => []}}}
+end
+
+{:ok, []} = Client.list_models(base_url: "https://api.openai.com/v1", transport: t)
+receive do: ({:auth, "Bearer fake-openai"} -> :ok)
+
+{:ok, []} = Client.list_models(base_url: "https://openrouter.ai/api/v1", transport: t)
+receive do: ({:auth, "Bearer fake-openrouter"} -> :ok)
+
+# No fallback: another host never sees either key, and plain http never qualifies.
+{:error, msg} = Client.list_models(base_url: "https://example.com/v1", transport: t)
+true = msg =~ "No API key" and not (msg =~ "fake-")
+{:error, _} = Client.list_models(base_url: "http://api.openai.com/v1", transport: t)
+IO.puts("ok: keys go only to their own host")
+```
+
+## See also
+
+- [`Toolnexus.Client.create`](/api/elixir/client/create/) — The unified client: system prompt, skills injection, parallel and chained tool calls, retries, memory.
+- [`Toolnexus.Client.run`](/api/elixir/client/run/) — Send a prompt, let the loop call tools until the model stops, get a RunResult.
+- [`Toolnexus.Client.stream`](/api/elixir/client/stream/) — The streaming loop: text deltas, tool-call events, and suspension events as they happen.
+- [`Toolnexus.Client.create`](/api/elixir/client/hooks/) — Intercept before/after model calls and tool calls: audit, redact, veto, or rewrite.

@@ -55,7 +55,8 @@ tk.Register(
 ```go
 client := toolnexus.CreateClient(toolnexus.ClientOptions{
     BaseURL: "https://openrouter.ai/api/v1", Style: "openai", Model: "openai/gpt-4o-mini",
-    // APIKey defaults to OPENROUTER_API_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY
+    // no APIKey: openrouter.ai reads OPENROUTER_API_KEY. A local or custom BaseURL
+    // needs APIKey or APIKeyEnv (0.22.0: keys are only sent to their own host).
 })
 out, _ := client.Run(ctx, "Refund order 1234.", tk)
 fmt.Println(out.Text)
@@ -79,6 +80,21 @@ is `Stream` with memory (load before, save on the `done` event). Empty `id` ⇒ 
 `"llm"`/`"tool"`/`"run"` events, and mount `client.Metrics()` (Prometheus text, zero-dep) at
 `GET /metrics`. Series: `toolnexus_llm_requests_total`, `toolnexus_llm_tokens_total`,
 `toolnexus_tool_calls_total`, + the `*_duration_seconds` histograms. OTLP is a future companion.
+
+**Local model or proxy?** Set `APIKeyEnv: "MY_KEY"` (the env var's name) or `APIKey`. Since 0.22.0
+a provider key is only sent to its own host (`api.openai.com`, `api.anthropic.com`, `openrouter.ai`,
+https), so a custom `BaseURL` with neither fails with `no API key`.
+
+**Cheaper long sessions** — `PromptCache: &toolnexus.PromptCacheOptions{Key: sessionID}` marks the
+stable prefix for the provider's cache (`res.Usage.CacheReadTokens` / `CacheWriteTokens` show the
+hits), and `ToolTiers: &toolnexus.ToolTierOptions{Core: []string{...}}` sends only core schemas plus a
+`tool_search` / `call_tool` pair so adding tools never breaks the cache. Call
+`client.ResetToolTiers(tk)` at a new session. See `examples/promptcache`.
+
+**Gates and UI** — `Hooks.BeforeTool` gets `ev.Hints` (read-only / destructive / open-world) for
+permission prompts; `WaitForCtx` answers them and ends with the turn;
+`LoadMcpWithOptions(..., McpLoadOptions{OnServer: ...})` lets you `tk.Register` each MCP server's
+tools as it connects; `agents.CompactorOptions.OnCompact` tells you when context was compacted.
 
 **B) Bring your own LLM client** — take just the schema + executor:
 ```go
@@ -131,6 +147,15 @@ turns are remembered through the client's `ConversationStore` (no `contextId` �
 The `Store` above is the separate, pluggable *TaskStore* for served-task persistence.
 
 See [README.md](README.md#a2a-agents-agent-to-agent) for the full option set.
+
+## 7. A coding agent as the model (ACP)
+
+`LoadACP(ctx, ACPOptions{Command: "devin", Args: []string{"acp"}})` drives an ACP agent; pass its
+`Generate` to `CreateInProcessClient`. Opt-in hooks (Go only for now): `OnPermission` picks the
+option for each permission request (a plan mode, or a human prompt), `OnUpdate` sees every
+`session/update`, `GenerateCtx` cancels a turn with `session/cancel` and keeps the session warm, and
+`InProcessOptions{GenerateStream: acp.GenerateStream}` makes `client.Stream` work — the agent's own
+tool calls arrive with `Via: "acp"` and are never run by the loop. See `examples/acp`.
 
 ## Notes
 

@@ -147,7 +147,7 @@ does not enforce it.
     ;; unknown kinds decline rather than guess
     (client/make-answer (:id request) false nil (str "unsupported kind: " (:kind request)))))
 
-(def llm (client/create-client {:base-url base-url :model "gpt-4.1" :wait-for router}))
+(def llm (client/create-client {:base-url base-url :model "gpt-4.1" :api-key-env "LLM_API_KEY" :wait-for router}))
 
 (let [r (client/run llm "Ship it" {:toolkit toolkit})]
   ;; with :wait-for set, a run never ends in "pending" — it resolves or reports
@@ -175,6 +175,33 @@ Three outputs tell you which path a call took: your tool's own result (resolved)
 | set | `ok`, but the retry suspends again | `"unresolved: <prompt>"`, `isError` true. |
 | set | not ok | `"declined/expired: <prompt>"`, `isError` true. |
 | unset | — | The run ends: `:status "pending"`, `:pending` is the `Request`. |
+
+## `:wait-for-ctx` — a pending ask that ends with its turn (0.22.0)
+
+`:wait-for` cannot tell that the turn it is blocking was cancelled. `:wait-for-ctx` is the same
+slot with the turn's context first: `(fn [ctx request] answer)`, where `ctx` is
+`{:cancel :cancelled? :call-id :turn}`. It wins over `:wait-for` when both are set. Pass a
+`:cancel` token to `run` / `ask` (an atom that is cancelled once it holds a truthy value, or a
+0-arg fn); throw from the resolver when `(:cancelled? ctx)` says so and the ask ends with the turn.
+
+```clojure
+(def cancel (atom nil))
+
+(def llm (client/create-client
+           {:base-url "https://api.openai.com/v1" :model "gpt-4.1"
+            :wait-for-ctx (fn [ctx request]
+                            (loop []
+                              (cond
+                                ((:cancelled? ctx)) (throw (ex-info "turn cancelled" {}))
+                                (realized? answer-promise) @answer-promise
+                                :else (do (ktime/sleep! 50) (recur)))))}))
+
+(future (client/run llm "Deploy" {:toolkit toolkit :cancel cancel}))
+(reset! cancel "user pressed stop")   ; the pending ask ends, the run returns the cancellation
+```
+
+Cancellation is cooperative: it is checked before each model call and after each batch of tool
+calls, so an HTTP call already in flight is not aborted.
 
 ## See also
 

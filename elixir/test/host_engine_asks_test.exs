@@ -843,7 +843,13 @@ defmodule Toolnexus.HostEngineAsksTest do
       r = Client.run(c, "ship it", tk)
       assert r.status == "done"
       assert hd(r.tool_calls).output =~ ~s("name": "deploy")
-      assert Enum.at(r.tool_calls, 1).name == "call_tool"
+      # RunResult records the REAL tool + inner args for call_tool (TestToolTierLoopCallToolUnwraps)
+      assert Enum.map_join(r.tool_calls, ",", &"#{&1.name}(#{inspect(&1.args["x"])})") ==
+               ~s|tool_search(nil),deploy("prod"),lint("direct")|
+      # the transcript keeps the wrapper
+      assert Enum.any?(r.messages, fn m ->
+               is_list(m["content"]) and Enum.any?(m["content"], &(is_map(&1) and &1["name"] == "call_tool"))
+             end)
       assert_received {:ran, "deploy(prod)"}
       assert_received {:ran, "lint(direct)"}
       assert_received {:gated, "deploy:true"}
@@ -875,7 +881,8 @@ defmodule Toolnexus.HostEngineAsksTest do
 
       r = Client.run(c, "balance?", [balance_tool()])
       assert hd(r.tool_calls).output == "balance: 42"
-      assert hd(r.tool_calls).args == %{"name" => "get_balance", "arguments" => %{}}
+      assert hd(r.tool_calls).name == "get_balance"
+      assert hd(r.tool_calls).args == %{}
     end
 
     test "stream events name the real tool with via: call_tool (openai + anthropic)" do
@@ -907,6 +914,8 @@ defmodule Toolnexus.HostEngineAsksTest do
             do: "#{ty}:#{e.name}:#{e[:via]}:#{e[:args]["x"]}"
 
       assert got == ["tool_call:deploy:call_tool:prod", "tool_result:deploy:call_tool:"]
+      assert [%{result: %{tool_calls: [%{name: "deploy", args: %{"x" => "prod"}}]}}] =
+               Enum.filter(events, &(&1.type == "done"))
       assert_received {:ran, "deploy(prod)"}
 
       {:ok, step2} = Agent.start_link(fn -> 0 end)
@@ -932,6 +941,8 @@ defmodule Toolnexus.HostEngineAsksTest do
       events = Client.stream(c, "go", tier_kit(me)) |> Enum.to_list()
       assert [%{name: "deploy", via: "call_tool", args: %{"x" => "prod"}}] = Enum.filter(events, &(&1.type == "tool_call"))
       assert [%{name: "deploy", via: "call_tool"}] = Enum.filter(events, &(&1.type == "tool_result"))
+      assert [%{result: %{tool_calls: [%{name: "deploy", args: %{"x" => "prod"}}]}}] =
+               Enum.filter(events, &(&1.type == "done"))
     end
   end
 
@@ -1042,6 +1053,30 @@ defmodule Toolnexus.HostEngineAsksTest do
       assert Enum.all?(sim.bodies, &(not cc?(&1) and is_binary(&1["system"])))
       # the sim reports reads on its own; the usage keys appear only when reported
       assert usage.read >= 0
+    end
+
+    test "anthropic: the request JSON marks ONLY the last tool (TestPromptCacheMarksLastToolInRequestJSON)" do
+      me = self()
+
+      t = fn req ->
+        # round-trip through JSON: assert on what goes over the wire, not on internal shapes
+        send(me, {:wire, Jason.decode!(Jason.encode!(req.body))})
+        {:ok, %{status: 200, headers: %{}, body: anthropic([%{"type" => "text", "text" => "ok"}])}}
+      end
+
+      extra = [
+        Toolnexus.define_tool(name: "zz_one", description: "one", input_schema: %{"type" => "object"}, execute: fn _ -> "1" end),
+        Toolnexus.define_tool(name: "zz_two", description: "two", input_schema: %{"type" => "object"}, execute: fn _ -> "2" end)
+      ]
+
+      tk = Toolnexus.create_toolkit!(extra_tools: extra)
+      c = Client.create(base_url: "https://x", style: "anthropic", model: "m", api_key: "k", transport: t, prompt_cache: %{})
+      Client.run(c, "hi", tk)
+      assert_received {:wire, body}
+      tools = body["tools"]
+      assert length(tools) > 2
+      assert List.last(tools)["cache_control"] == %{"type" => "ephemeral"}
+      assert Enum.count(tools, &Map.has_key?(&1, "cache_control")) == 1
     end
 
     test "usage keys are absent when the provider reports no cache" do

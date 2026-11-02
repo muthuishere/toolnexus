@@ -1,0 +1,199 @@
+---
+title: "LlmClient.ListModelsAsync"
+description: "List a provider's models (id, display name, context length when reported), sorted by id, under the same key rules as the client. — C#."
+sidebar:
+  label: "LlmClient.ListModelsAsync"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>C#</strong> · package <code>Toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/csharp/src/Toolnexus/LlmClientHost.cs">LlmClientHost.cs</a>
+</p>
+
+```csharp
+public static Task<List<ModelInfo>> LlmClient.ListModelsAsync(
+    LlmClient.Options opts, CancellationToken cancellationToken = default);
+
+public sealed record ModelInfo(string Id, string? Name = null, int ContextLength = 0);  // 0 = unknown
+```
+
+Lists the models a provider serves, sorted by id. openai style: `GET {BaseUrl}/models` (OpenRouter's
+`context_length` is read when present). anthropic style: `GET {BaseUrl}/v1/models`, following
+`has_more` / `last_id`. One GET per page, no retries. It uses the same key rules as the client
+([`ApiKey` / `ApiKeyEnv`](/api/csharp/client/api-key/)) and the same `HttpClient` / `HttpHandler`
+seam. A non-2xx throws `ProviderException`.
+
+## When to use it
+
+A model picker in a host UI, or a startup check that the configured `Model` exists. OpenRouter's
+`ContextLength` also gives you the window to feed `ToolTierOptions.ContextWindow`.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="ListModelsAsync, not a hand-rolled GET">
+A raw GET would need its own key resolution, and that is exactly where a key can leak to the wrong
+host. `ListModelsAsync` reuses the client's host-checked key and HTTP seam.
+</Aside>
+
+## Examples
+
+### 1. An OpenAI-compatible server, sorted by id
+
+```csharp test
+using System.Net;
+using System.Text;
+using Toolnexus;
+
+using var stub = new Stub((ctx, body) => Stub.Json(ctx, 200, """
+    {"data":[{"id":"z-large","name":"Z Large","context_length":131072},{"id":"a-small"}]}
+    """));
+
+var models = await LlmClient.ListModelsAsync(new LlmClient.Options
+{
+    BaseUrl = stub.BaseUrl, Style = "openai", ApiKey = "YOUR_KEY_HERE",
+});
+
+if (models[0].Id != "a-small" || models[1].ContextLength != 131072) throw new Exception(string.Join(",", models));
+Console.WriteLine($"ok: {string.Join(", ", models.Select(m => $"{m.Id} ({m.ContextLength})"))}");
+
+sealed class Stub : IDisposable
+{
+    readonly HttpListener _listener = new();
+    readonly CancellationTokenSource _cts = new();
+    public int Port { get; }
+    public string BaseUrl => $"http://127.0.0.1:{Port}";
+
+    public Stub(Action<HttpListenerContext, string> handler)
+    {
+        var probe = new System.Net.Sockets.TcpListener(IPAddress.Loopback, 0);
+        probe.Start();
+        Port = ((IPEndPoint)probe.LocalEndpoint).Port;
+        probe.Stop();
+        _listener.Prefixes.Add($"http://127.0.0.1:{Port}/");
+        _listener.Start();
+        _ = Task.Run(async () =>
+        {
+            while (!_cts.IsCancellationRequested)
+            {
+                HttpListenerContext ctx;
+                try { ctx = await _listener.GetContextAsync(); }
+                catch { break; }
+                var body = new StreamReader(ctx.Request.InputStream).ReadToEnd();
+                try { handler(ctx, body); } catch { }
+            }
+        });
+    }
+
+    public static void Json(HttpListenerContext ctx, int status, string body)
+    {
+        var bytes = Encoding.UTF8.GetBytes(body);
+        ctx.Response.StatusCode = status;
+        ctx.Response.ContentType = "application/json";
+        ctx.Response.ContentLength64 = bytes.Length;
+        ctx.Response.OutputStream.Write(bytes, 0, bytes.Length);
+        ctx.Response.OutputStream.Close();
+    }
+
+    public void Dispose()
+    {
+        _cts.Cancel();
+        try { _listener.Stop(); } catch { }
+        try { _listener.Close(); } catch { }
+    }
+}
+```
+
+### 2. Anthropic, following pages
+
+```csharp test
+using System.Net;
+using System.Text;
+using Toolnexus;
+
+using var stub = new Stub((ctx, body) =>
+{
+    var after = ctx.Request.QueryString["after_id"];
+    Stub.Json(ctx, 200, after == null
+        ? """{"data":[{"id":"claude-b","display_name":"Claude B"}],"has_more":true,"last_id":"claude-b"}"""
+        : """{"data":[{"id":"claude-a","display_name":"Claude A"}],"has_more":false,"last_id":"claude-a"}""");
+});
+
+var models = await LlmClient.ListModelsAsync(new LlmClient.Options
+{
+    BaseUrl = stub.BaseUrl, Style = "anthropic", ApiKey = "YOUR_KEY_HERE",
+});
+
+if (models.Count != 2 || models[0].Name != "Claude A") throw new Exception(string.Join(",", models));
+Console.WriteLine($"ok: {models.Count} models over two pages, first = {models[0].Id}");
+
+sealed class Stub : IDisposable
+{
+    readonly HttpListener _listener = new();
+    readonly CancellationTokenSource _cts = new();
+    public int Port { get; }
+    public string BaseUrl => $"http://127.0.0.1:{Port}";
+
+    public Stub(Action<HttpListenerContext, string> handler)
+    {
+        var probe = new System.Net.Sockets.TcpListener(IPAddress.Loopback, 0);
+        probe.Start();
+        Port = ((IPEndPoint)probe.LocalEndpoint).Port;
+        probe.Stop();
+        _listener.Prefixes.Add($"http://127.0.0.1:{Port}/");
+        _listener.Start();
+        _ = Task.Run(async () =>
+        {
+            while (!_cts.IsCancellationRequested)
+            {
+                HttpListenerContext ctx;
+                try { ctx = await _listener.GetContextAsync(); }
+                catch { break; }
+                var body = new StreamReader(ctx.Request.InputStream).ReadToEnd();
+                try { handler(ctx, body); } catch { }
+            }
+        });
+    }
+
+    public static void Json(HttpListenerContext ctx, int status, string body)
+    {
+        var bytes = Encoding.UTF8.GetBytes(body);
+        ctx.Response.StatusCode = status;
+        ctx.Response.ContentType = "application/json";
+        ctx.Response.ContentLength64 = bytes.Length;
+        ctx.Response.OutputStream.Write(bytes, 0, bytes.Length);
+        ctx.Response.OutputStream.Close();
+    }
+
+    public void Dispose()
+    {
+        _cts.Cancel();
+        try { _listener.Stop(); } catch { }
+        try { _listener.Close(); } catch { }
+    }
+}
+```
+
+### 3. Same key rules as the client
+
+```csharp test
+using Toolnexus;
+
+try
+{
+    // A local host with no ApiKey / ApiKeyEnv: refused before any request is made.
+    await LlmClient.ListModelsAsync(new LlmClient.Options { BaseUrl = "http://127.0.0.1:1", Style = "openai" });
+    throw new Exception("expected a missing-key error");
+}
+catch (InvalidOperationException e) when (e.Message.StartsWith("No API key"))
+{
+    Console.WriteLine("ok: no key, no request");
+}
+```
+
+## See also
+
+- [`LlmClient.Create`](/api/csharp/client/create/) — The unified client: system prompt, skills injection, parallel and chained tool calls, retries, memory.
+- [`LlmClient.RunAsync`](/api/csharp/client/run/) — Send a prompt, let the loop call tools until the model stops, get a RunResult.
+- [`LlmClient.StreamAsync`](/api/csharp/client/stream/) — The streaming loop: text deltas, tool-call events, and suspension events as they happen.
+- [`LlmClient.Hooks`](/api/csharp/client/hooks/) — Intercept before/after model calls and tool calls: audit, redact, veto, or rewrite.

@@ -1,0 +1,98 @@
+---
+title: "Toolnexus.Client.list_models"
+description: "List a provider's models (id, display name, context length when reported), sorted by id, under the same key rules as the client. — Elixir."
+sidebar:
+  label: "Toolnexus.Client.list_models"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Elixir</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a>
+</p>
+
+```elixir
+@spec list_models(keyword() | map()) ::
+        {:ok, [%{id: String.t(), name: String.t() | nil, context_length: integer() | nil}]}
+        | {:error, String.t()}
+def list_models(opts)   # the same options as Client.create/1
+```
+
+One GET, no retries. openai style: `GET {base_url}/models` (OpenRouter's `context_length` is
+read when present). anthropic style: `GET {base_url}/v1/models`, following `has_more` /
+`last_id` pages. Results are sorted by id; `name` and `context_length` are `nil` when the
+provider does not report them. The key follows the [API-key-by-host](/api/elixir/client/api-key/)
+rule; a missing key, an HTTP error or a bad body is `{:error, message}`, never a raise.
+
+## When to use it
+
+- **A model switcher** in a host UI — list what the configured endpoint really serves.
+- **Sizing a context budget** — OpenRouter reports `context_length`, which feeds
+  `tool_tiers`' `context_window` or a compactor threshold.
+- **A startup health check** — a cheap authenticated call that fails fast on a bad key.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Not a hand-rolled Req.get">
+A direct `Req.get` would have to repeat the key-by-host rule, the anthropic pagination and the
+response normalisation. `list_models/1` reuses the client's options, `:transport` and
+`:http_options`, so a test stub for the client also covers it.
+</Aside>
+
+## Examples
+
+### 1. The smallest call
+
+```elixir test
+t = fn _req ->
+  {:ok, %{status: 200, headers: %{}, body: %{"data" => [%{"id" => "gpt-b"}, %{"id" => "gpt-a"}]}}}
+end
+
+{:ok, models} = Toolnexus.Client.list_models(base_url: "https://api.example/v1", api_key: "YOUR_KEY_HERE", transport: t)
+["gpt-a", "gpt-b"] = Enum.map(models, & &1.id)
+IO.puts("ok: #{length(models)} models")
+```
+
+### 2. OpenRouter's context length
+
+```elixir test
+t = fn _req ->
+  {:ok, %{status: 200, headers: %{},
+          body: %{"data" => [%{"id" => "z/model", "name" => "Z", "context_length" => 200_000}]}}}
+end
+
+{:ok, [m]} = Toolnexus.Client.list_models(base_url: "https://router.example/api/v1", api_key: "YOUR_KEY_HERE", transport: t)
+true = m == %{id: "z/model", name: "Z", context_length: 200_000}
+IO.puts("ok: #{m.id} has #{m.context_length} tokens")
+```
+
+### 3. Anthropic pagination and errors
+
+```elixir test
+me = self()
+
+t = fn req ->
+  send(me, {:url, req.url})
+  body =
+    if String.contains?(req.url, "after_id"),
+      do: %{"data" => [%{"id" => "claude-a", "display_name" => "A"}], "has_more" => false},
+      else: %{"data" => [%{"id" => "claude-b", "display_name" => "B"}], "has_more" => true, "last_id" => "claude-b"}
+  {:ok, %{status: 200, headers: %{}, body: body}}
+end
+
+{:ok, [a, b]} = Toolnexus.Client.list_models(base_url: "https://api.example/v1", style: "anthropic",
+                                              api_key: "YOUR_KEY_HERE", transport: t)
+true = a.id == "claude-a" and b.name == "B"
+
+denied = fn _ -> {:ok, %{status: 401, headers: %{}, body: ~s({"error":"bad"})}} end
+{:error, msg} = Toolnexus.Client.list_models(base_url: "https://api.example", api_key: "YOUR_KEY_HERE", transport: denied)
+true = msg =~ "HTTP 401"
+IO.puts("ok: two pages, then #{msg}")
+```
+
+## See also
+
+- [`Toolnexus.Client.create`](/api/elixir/client/create/) — The unified client: system prompt, skills injection, parallel and chained tool calls, retries, memory.
+- [`Toolnexus.Client.run`](/api/elixir/client/run/) — Send a prompt, let the loop call tools until the model stops, get a RunResult.
+- [`Toolnexus.Client.stream`](/api/elixir/client/stream/) — The streaming loop: text deltas, tool-call events, and suspension events as they happen.
+- [`Toolnexus.Client.create`](/api/elixir/client/hooks/) — Intercept before/after model calls and tool calls: audit, redact, veto, or rewrite.

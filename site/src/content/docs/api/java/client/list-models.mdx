@@ -1,0 +1,150 @@
+---
+title: "LlmClient.listModels"
+description: "List a provider's models (id, display name, context length when reported), sorted by id, under the same key rules as the client. — Java."
+sidebar:
+  label: "LlmClient.listModels"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Java</strong> · package <code>io.github.muthuishere:toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §8</a>
+</p>
+
+```java
+public static List<LlmClient.ModelInfo> listModels(LlmClient.Options opts)
+
+public record ModelInfo(String id, String name, int contextLength) {}
+// name: provider display name ("" when none); contextLength: tokens, 0 = unknown
+```
+
+Lists the models a provider serves, sorted by id. openai style: `GET {baseUrl}/models` (OpenRouter's
+`context_length` is read when present). anthropic style: `GET {baseUrl}/v1/models`, following
+`has_more` / `last_id`. One GET per page, no retries, `opts.httpClient` honoured, and the same key
+rules as the client ([API key by host](/api/java/client/api-key/)). A non-2xx throws
+`list models: HTTP <status>: …`.
+
+## When to use it
+
+A model picker or a `/model` command in a host: list what the configured provider offers, show the
+display name and context window, then build the client with the chosen `model`.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Not a hard-coded list">
+A hard-coded model list goes stale the day a provider ships a model. `listModels` asks the provider
+with the options you already have. Hard-code only when you deliberately restrict users to a vetted
+set, and then you do not need this call.
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call
+
+```java test
+import com.sun.net.httpserver.HttpServer;
+import io.github.muthuishere.toolnexus.*;
+import java.io.OutputStream;
+import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
+import java.util.List;
+
+public class Example {
+    public static void main(String[] args) throws Exception {
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/models", ex -> {
+            byte[] b = "{\"data\":[{\"id\":\"zeta\"},{\"id\":\"alpha\"}]}".getBytes(StandardCharsets.UTF_8);
+            ex.sendResponseHeaders(200, b.length);
+            try (OutputStream os = ex.getResponseBody()) { os.write(b); }
+        });
+        server.start();
+        try {
+            List<LlmClient.ModelInfo> models = LlmClient.listModels(new LlmClient.Options()
+                    .baseUrl("http://127.0.0.1:" + server.getAddress().getPort())
+                    .apiKey("YOUR_KEY_HERE"));
+            if (!models.get(0).id().equals("alpha")) throw new AssertionError(models);
+            System.out.println("ok: " + models.stream().map(LlmClient.ModelInfo::id).toList());
+        } finally {
+            server.stop(0);
+        }
+    }
+}
+```
+
+### 2. The realistic case — OpenRouter-shaped names and context lengths
+
+```java test
+import com.sun.net.httpserver.HttpServer;
+import io.github.muthuishere.toolnexus.*;
+import java.io.OutputStream;
+import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
+
+public class Example {
+    public static void main(String[] args) throws Exception {
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/api/v1/models", ex -> {
+            byte[] b = "{\"data\":[{\"id\":\"vendor/big\",\"name\":\"Big Model\",\"context_length\":200000}]}"
+                    .getBytes(StandardCharsets.UTF_8);
+            ex.sendResponseHeaders(200, b.length);
+            try (OutputStream os = ex.getResponseBody()) { os.write(b); }
+        });
+        server.start();
+        try {
+            for (LlmClient.ModelInfo m : LlmClient.listModels(new LlmClient.Options()
+                    .baseUrl("http://127.0.0.1:" + server.getAddress().getPort() + "/api/v1")
+                    .apiKey("YOUR_KEY_HERE"))) {
+                if (m.contextLength() != 200000) throw new AssertionError(m);
+                System.out.println("ok: " + m.name() + " (" + m.id() + "), " + m.contextLength() + " tokens");
+            }
+        } finally {
+            server.stop(0);
+        }
+    }
+}
+```
+
+### 3. The full surface — anthropic paging
+
+```java test
+import com.sun.net.httpserver.HttpServer;
+import io.github.muthuishere.toolnexus.*;
+import java.io.OutputStream;
+import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
+import java.util.List;
+
+public class Example {
+    public static void main(String[] args) throws Exception {
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/v1/models", ex -> {
+            boolean second = String.valueOf(ex.getRequestURI().getQuery()).contains("after_id=m-b");
+            String json = second
+                    ? "{\"data\":[{\"id\":\"m-c\",\"display_name\":\"C\"}],\"has_more\":false}"
+                    : "{\"data\":[{\"id\":\"m-b\",\"display_name\":\"B\"},{\"id\":\"m-a\",\"display_name\":\"A\"}],"
+                      + "\"has_more\":true,\"last_id\":\"m-b\"}";
+            byte[] b = json.getBytes(StandardCharsets.UTF_8);
+            ex.sendResponseHeaders(200, b.length);
+            try (OutputStream os = ex.getResponseBody()) { os.write(b); }
+        });
+        server.start();
+        try {
+            List<LlmClient.ModelInfo> models = LlmClient.listModels(new LlmClient.Options()
+                    .baseUrl("http://127.0.0.1:" + server.getAddress().getPort())
+                    .style("anthropic").apiKey("YOUR_KEY_HERE"));
+            List<String> ids = models.stream().map(LlmClient.ModelInfo::id).toList();
+            if (!ids.equals(List.of("m-a", "m-b", "m-c"))) throw new AssertionError(ids);
+            System.out.println("ok: two pages -> " + ids);
+        } finally {
+            server.stop(0);
+        }
+    }
+}
+```
+
+## See also
+
+- [`LlmClient.create`](/api/java/client/create/) — The unified client: system prompt, skills injection, parallel and chained tool calls, retries, memory.
+- [`LlmClient.run`](/api/java/client/run/) — Send a prompt, let the loop call tools until the model stops, get a RunResult.
+- [`LlmClient.stream`](/api/java/client/stream/) — The streaming loop: text deltas, tool-call events, and suspension events as they happen.
+- [`LlmClient.Hooks`](/api/java/client/hooks/) — Intercept before/after model calls and tool calls: audit, redact, veto, or rewrite.

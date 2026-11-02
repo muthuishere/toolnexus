@@ -264,6 +264,30 @@ async def main():
 asyncio.run(main())
 ```
 
+## `as_tool_with` — run the child under the parent's gates
+
+```python
+Agent.as_tool(**runtime_opts) -> Tool
+Agent.as_tool_with(per_call: Callable[[ToolContext], dict]) -> Tool
+```
+
+`as_tool()` stops the child run when the calling turn is cancelled (the tool returns a
+`cancelled: ...` error result). `as_tool_with(lambda ctx: {...})` builds the runtime options
+per call from the calling tool's context, so a child can run under the **same** `before_tool`
+permission gate (`hooks`) and the same ask bridge (runtime `wait_for`, which answers a child's
+suspension when no agent on its chain has its own) as the parent turn. An agent's own `hooks`
+replaces the passed ones, so leave it unset when the gate must hold. The child's tool calls
+reach those hooks; there is no token-by-token stream of the child's text.
+
+```python
+sub = agent("researcher", does="Research a question.", uses=tk)
+gated = sub.as_tool_with(lambda ctx: {
+    "hooks": {"before_tool": permission_gate},   # the parent's gate
+    "wait_for": ask_the_user,                      # the parent's question bridge
+})
+parent_tk.register(gated)
+```
+
 ## `agent(name, **spec)` fields
 
 | Field | Type | What it does |

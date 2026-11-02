@@ -79,7 +79,7 @@ export class Toolkit {
     }
   }
 
-  static async create(opts: ToolkitOptions): Promise<Toolkit> {
+  static async create(opts: ToolkitOptions = {}): Promise<Toolkit> {
     const mcp = opts.mcpConfig !== undefined ? await loadMcp(opts.mcpConfig, { waitFor: opts.waitFor, signal: opts.signal }) : undefined
     // Skills come from directories, in-memory data, and/or a lazy provider (§3,
     // S1). The provider is resolved here (create() is async) and merged with the
@@ -250,6 +250,6 @@ export class Toolkit {
   }
 }
 
-export function createToolkit(opts: ToolkitOptions): Promise<Toolkit> {
+export function createToolkit(opts: ToolkitOptions = {}): Promise<Toolkit> {
   return Toolkit.create(opts)
 }
