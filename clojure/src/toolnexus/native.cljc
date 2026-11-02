@@ -44,7 +44,7 @@
   honest version of what the other ports get for free. It costs a keyword and
   never guesses wrong."
   ([m]
-   (let [{:keys [name description input-schema run ctx? hints]} m
+   (let [{:keys [name description input-schema run ctx? hints concurrency-safe]} m
          f (if ctx? run (fn [args _ctx] (run args)))]
      (tool/tool
        {:name         name
@@ -52,6 +52,7 @@
         :input-schema input-schema
         :source       "native"
         :hints        hints
+        :concurrency-safe concurrency-safe
         ;; :execute below has both arities, so it can always take the loop's
         ;; ToolContext (§4C call id) — `ctx?` still decides whether `run` sees it.
         :context?     true

@@ -116,8 +116,9 @@
 (def tools
   [(mk "upper" (fn [args] (tool/success (str/upper-case (str (:text args))))))
    (mk "boom"  (fn [_args] (throw (ex-info "kaboom" {}))))
-   (mk "slow"  (fn [_args] (ktime/sleep! 250) (tool/success "slow")))
-   (mk "quick" (fn [_args] (tool/success "quick")))
+   ;; read-only: only concurrency-safe calls overlap (SPEC §8 Tool scheduling)
+   (assoc (mk "slow"  (fn [_args] (ktime/sleep! 250) (tool/success "slow"))) :hints {:read-only true})
+   (assoc (mk "quick" (fn [_args] (tool/success "quick"))) :hints {:read-only true})
 
    ;; kind:"authorization" — the retry IGNORES answer.data; the world changed
    ;; out of band and the session is simply valid now.

@@ -421,6 +421,10 @@
     :headers        extra request headers
     :system-prompt  prepended to the toolkit's skills prompt
     :max-turns      default 10
+    :max-tool-concurrency  cap on concurrency-safe tool calls of one response
+                    running at once (SPEC §8, Tool scheduling). Absent ⇒ env
+                    TOOLNEXUS_MAX_TOOL_CONCURRENCY when a positive integer, else
+                    10. Unsafe calls (anything not read-only) always run alone.
     :retries        transient-failure budget (default 2); retries on
                     `429`/`500`/`502`/`503`/`504`/`529` + network. Widen the
                     status set with `:retryable-statuses`.
@@ -1458,6 +1462,30 @@
                        result)]
           (assoc call :args (rewrap args) :result result))))))
 
+(def default-max-tool-concurrency
+  "The cap when neither :max-tool-concurrency nor TOOLNEXUS_MAX_TOOL_CONCURRENCY sets one."
+  10)
+
+(defn resolve-max-tool-concurrency
+  "option > env TOOLNEXUS_MAX_TOOL_CONCURRENCY > 10. Non-positive or non-numeric
+  values fall back. `get-env` is the lookup (default: the process env)."
+  ([option] (resolve-max-tool-concurrency option env/get-env))
+  ([option get-env]
+   (if (and (integer? option) (pos? option))
+     option
+     (let [raw (some-> (get-env "TOOLNEXUS_MAX_TOOL_CONCURRENCY") str/trim)
+           n   (when (and raw (re-matches #"\+?\d{1,9}" raw))
+                 (parse-long (str/replace raw "+" "")))]
+       (if (and n (pos? n)) n default-max-tool-concurrency)))))
+
+(defn- call-safe?
+  "One call's safety; looks through call_tool to the tool it names. Unknown ⇒ unsafe."
+  [client toolkit c]
+  (if (and (:tool-tiers client) (= "tool_search" (:name c)))
+    true
+    (let [[nm args _] (unwrap-call client (:name c) (or (:args c) {}))]
+      (tool/concurrency-safe? (get (:tools toolkit) nm) (if (map? args) args {})))))
+
 (defn- execute-calls
   "§8 — the tool calls of one turn, in parallel, with the results in CALL ORDER
   regardless of completion order. Order is not cosmetic: a scrambled transcript
@@ -1481,8 +1509,12 @@
   ports, where an unguarded hook rejects the run."
   ([client toolkit calls turn] (execute-calls client toolkit calls turn nil))
   ([client toolkit calls turn on-settled]
-  (->> calls
-       (mapv (fn [c]
+  ;; §8 "Tool scheduling": calls start in emitted order. A safe call starts once
+  ;; fewer than `cap` are in flight (else it waits for the oldest in flight); an
+  ;; unsafe call waits for every earlier call, runs alone, and finishes before
+  ;; the next starts. Results are still read in call order below.
+  (->> (let [cap   (resolve-max-tool-concurrency (:max-tool-concurrency client))
+             start (fn [c]
                (let [p (promise)
                      t0 (ktime/now-ms)]
                  ;; EVERY exit from the body delivers, including a throw. Only
@@ -1496,7 +1528,21 @@
                   (fn []
                     (deliver p (try {:value (execute-tool client toolkit c turn)}
                                     (catch Throwable e {:thrown e})))))
-                 [p t0])))
+                 [p t0]))]
+         (loop [cs calls, started [], inflight []]
+           (if-let [c (first cs)]
+             (if (call-safe? client toolkit c)
+               (let [inflight (vec (remove #(realized? (first %)) inflight))
+                     inflight (if (>= (count inflight) cap)
+                                (do (deref (first (first inflight))) (subvec inflight 1))
+                                inflight)
+                     pair     (start c)]
+                 (recur (rest cs) (conj started pair) (conj inflight pair)))
+               (do (doseq [pr inflight] (deref (first pr)))
+                   (let [pair (start c)]
+                     (deref (first pair))
+                     (recur (rest cs) (conj started pair) []))))
+             started)))
        (mapv (fn [pair]
                ;; Rethrow on the CALLING thread rather than converting to an
                ;; isError result: js/src/client.ts wraps neither hook, so a hook
