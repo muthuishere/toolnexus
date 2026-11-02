@@ -26,7 +26,8 @@ CS=$(grep -oE '<Version>[^<]+</Version>' csharp/src/Toolnexus/Toolnexus.csproj |
 JAVA=$(grep -E "^version" java/build.gradle | head -1 | sed -E "s/.*'([^']+)'.*/\1/")
 EX=$(grep -E '@version "' elixir/mix.exs | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
 CLJ=$(grep -E '^\(def version ' clojure/build.clj | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
-for pair in "js:$JS" "python:$PY" "csharp:$CS" "java:$JAVA" "elixir:$EX" "clojure:$CLJ"; do
+RS=$(grep -E '^version' rust/Cargo.toml | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+for pair in "js:$JS" "python:$PY" "csharp:$CS" "java:$JAVA" "elixir:$EX" "clojure:$CLJ" "rust:$RS"; do
   n="${pair%%:*}"; v="${pair#*:}"
   [ "$v" = "$V" ] && ok "$n = $v" || bad "$n = ${v:-<unreadable>}, expected $V"
 done
@@ -59,6 +60,11 @@ for f in $DOCS; do
     echo "$hit" | grep -q '"<version>"' && continue    # PUBLISHING.md templates
     echo "$hit" | grep -q "\"$V\"" || stale="$stale\n  $f: $hit"
   done < <(grep -n 'muthuishere/toolnexus" \?{:mvn/version\|muthuishere/toolnexus {:mvn/version' "$f" 2>/dev/null)
+  # e) crates:   toolnexus = "0.22.0"  (Cargo.toml dependency line)
+  while IFS= read -r hit; do
+    echo "$hit" | grep -q '"<version>"' && continue
+    echo "$hit" | grep -qE "\"(\\^)?($V|$MINOR)\"" || stale="$stale\n  $f: $hit"
+  done < <(grep -nE '^\s*toolnexus = "[0-9^]' "$f" 2>/dev/null)
   # d) maven xml: <version>..</version> in a file that installs the java artifact
   if grep -q 'artifactId>toolnexus<' "$f" 2>/dev/null; then
     while IFS= read -r hit; do
@@ -100,7 +106,7 @@ git ls-remote --tags origin 2>/dev/null | grep -q "refs/tags/v$V$" \
 echo
 echo "== 5. Publish gates (a leg that is off is skipped SILENTLY) =="
 if command -v gh >/dev/null 2>&1; then
-  for v in ENABLE_NPM ENABLE_PYPI ENABLE_GO ENABLE_NUGET ENABLE_JAVA ENABLE_ELIXIR ENABLE_CLOJARS; do
+  for v in ENABLE_NPM ENABLE_PYPI ENABLE_GO ENABLE_NUGET ENABLE_JAVA ENABLE_ELIXIR ENABLE_CLOJARS ENABLE_CRATES; do
     val=$(gh variable list 2>/dev/null | awk -v k="$v" '$1==k{print $2}')
     [ "$val" = "true" ] && ok "$v=true" || note "  ! $v=${val:-unset} — this registry will NOT publish"
   done
