@@ -156,3 +156,13 @@ def test_prompt_cache_does_not_mutate_transcript():
     apply_prompt_cache(body, "anthropic", PromptCacheOptions(long_ttl=True))
     assert isinstance(msg["content"], str) and "cache_control" not in tool
     assert json.dumps(body, separators=(",", ":")).count('"ttl":"1h"') == 3
+
+
+async def test_prompt_cache_marks_last_tool_in_request_json():
+    """The last tool in the anthropic request carries the breakpoint, and only it."""
+    sim = await _session(PromptCacheOptions())
+    tools = json.loads(json.dumps(sim.bodies[0]))["tools"]
+    assert len(tools) >= 2
+    assert all("cache_control" not in t for t in tools[:-1])
+    assert tools[-1]["name"] == "tool_search"
+    assert tools[-1]["cache_control"] == {"type": "ephemeral"}

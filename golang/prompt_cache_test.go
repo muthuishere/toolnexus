@@ -12,6 +12,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -238,5 +239,44 @@ func TestPromptCacheDoesNotMutateTranscript(t *testing.T) {
 	b, _ := json.Marshal(body)
 	if strings.Count(string(b), `"ttl":"1h"`) != 3 {
 		t.Fatalf("want 3 breakpoints with 1h ttl: %s", b)
+	}
+}
+
+// The last tool carries the anthropic breakpoint in the request bytes. ToAnthropic
+// returns structs, which withCacheControl skipped silently in 0.22.0.
+func TestPromptCacheMarksLastToolInRequestJSON(t *testing.T) {
+	var raw []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ = io.ReadAll(r.Body)
+		w.Header().Set("content-type", "application/json")
+		_, _ = w.Write([]byte(`{"content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`))
+	}))
+	defer srv.Close()
+	a := NativeTool("a", "A.", nil, func(context.Context, map[string]any) (string, error) { return "", nil })
+	b := NativeTool("b", "B.", nil, func(context.Context, map[string]any) (string, error) { return "", nil })
+	tk, err := CreateToolkit(context.Background(), Options{ExtraTools: []Tool{a, b}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := CreateClient(ClientOptions{BaseURL: srv.URL, Style: StyleAnthropic, Model: "m", APIKey: "k", PromptCache: &PromptCacheOptions{}})
+	if _, err := c.Ask(context.Background(), "hi", tk, ""); err != nil {
+		t.Fatal(err)
+	}
+	var body struct {
+		Tools []map[string]any `json:"tools"`
+	}
+	if err := json.Unmarshal(raw, &body); err != nil || len(body.Tools) < 2 {
+		t.Fatalf("tools = %s (%v)", raw, err)
+	}
+	last := len(body.Tools) - 1
+	for i, tool := range body.Tools[:last] {
+		if _, ok := tool["cache_control"]; ok {
+			t.Fatalf("only the last tool is a breakpoint, tool %d has one: %v", i, tool)
+		}
+	}
+	got, _ := json.Marshal(body.Tools[last])
+	want := `{"cache_control":{"type":"ephemeral"},"description":"B.","input_schema":{"additionalProperties":false,"properties":{},"type":"object"},"name":"b"}`
+	if string(got) != want {
+		t.Fatalf("last tool =\n %s\nwant\n %s", got, want)
 	}
 }

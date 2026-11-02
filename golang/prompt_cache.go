@@ -1,8 +1,9 @@
 package toolnexus
 
+import "encoding/json"
+
 // Prompt caching (change add-prompt-cache, phase 1). The engine keeps the
-// request prefix stable and marks it for the provider's cache. golang only for
-// now; other ports pending.
+// request prefix stable and marks it for the provider's cache.
 
 // PromptCacheOptions configures ClientOptions.PromptCache.
 type PromptCacheOptions struct {
@@ -72,7 +73,15 @@ func applyPromptCache(body map[string]any, style ClientStyle, o *PromptCacheOpti
 func withCacheControl(v any, mark map[string]any) any {
 	m, ok := v.(map[string]any)
 	if !ok {
-		return v
+		// Adapter output (ToAnthropic) is typed structs, not maps: round-trip
+		// it through JSON so the breakpoint can be added. The provider only sees
+		// the wire bytes, so this is the same tool plus the mark.
+		b, err := json.Marshal(v)
+		if err != nil || json.Unmarshal(b, &m) != nil || m == nil {
+			return v
+		}
+		m["cache_control"] = mark
+		return m
 	}
 	c := copyMap(m)
 	c["cache_control"] = mark
