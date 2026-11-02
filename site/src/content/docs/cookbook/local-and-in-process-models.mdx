@@ -219,6 +219,19 @@ r = Toolnexus.Client.run(client, "What is 2 + 3?", tk)
 (def r (client/run c "What is 2 + 3?" {:toolkit tk}))
 ```
 </TabItem>
+<TabItem label="Rust">
+```rust
+use std::sync::Arc;
+use toolnexus::client::{GenerateFn, InProcessOptions, InProcessResponse, create_in_process_client};
+
+let generate: GenerateFn = Arc::new(|req| Box::pin(async move {
+    // run your own model on req.messages / req.tools
+    Ok(InProcessResponse { content: format!("{} messages seen", req.messages.len()), ..Default::default() })
+}));
+let client = create_in_process_client(InProcessOptions { generate: Some(generate), ..Default::default() });
+// an ACP coding agent works the same way: acp_generate(agent) / acp_generate_stream(agent)
+```
+</TabItem>
 </Tabs>
 
 <Aside type="note" title="All seven were executed, not written from memory">

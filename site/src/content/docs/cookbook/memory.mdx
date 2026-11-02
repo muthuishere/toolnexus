@@ -72,6 +72,13 @@ IO.puts(r.text)   # recalls "Muthu"
 (println (:text r))   ; recalls "Muthu"
 ```
 </TabItem>
+<TabItem label="Rust">
+```rust
+let first = client.ask("My name is Ada.", &tk, "user-42").await?;
+let again = client.ask("What is my name?", &tk, "user-42").await?;   // same id ⇒ same transcript
+// ClientOptions { store: Some(Arc::new(FileConversationStore::new("./convos")?)), .. } persists it
+```
+</TabItem>
 </Tabs>
 
 The transcript store is pluggable (in-memory by default; bring your own to persist

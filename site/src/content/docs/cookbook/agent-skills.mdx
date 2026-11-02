@@ -104,6 +104,17 @@ IO.puts(res.output)
 (println (:output res))
 ```
 </TabItem>
+<TabItem label="Rust">
+```rust
+use toolnexus::{ToolkitOptions, create_toolkit};
+
+let tk = create_toolkit(ToolkitOptions {
+    skills_dir: vec!["./skills".into()],
+    ..Default::default()
+}).await?;
+let catalog = tk.skills_prompt();   // the client appends this to the system prompt for you
+```
+</TabItem>
 </Tabs>
 
 A skill is a folder with a `SKILL.md` — the open standard, verbatim:

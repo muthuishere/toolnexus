@@ -114,6 +114,23 @@ tk = Toolnexus.Toolkit.register(tk, [get_post])
 (def tk (tn/build {:tools [get-post]}))
 ```
 </TabItem>
+<TabItem label="Rust">
+```rust
+use serde_json::json;
+use toolnexus::http::{HttpToolOptions, http_tool};
+
+let repo = http_tool(HttpToolOptions {
+    name: "repo_info".into(),
+    description: "Fetch a GitHub repository".into(),
+    url: "https://api.github.com/repos/{owner}/{repo}".into(),
+    headers: [("Authorization".to_string(), "Bearer ${GITHUB_TOKEN}".to_string())].into(),
+    input_schema: Some(json!({"type": "object", "properties": {
+        "owner": {"type": "string"}, "repo": {"type": "string"}}, "required": ["owner", "repo"]})),
+    ..Default::default()
+});
+// ${GITHUB_TOKEN} is read from the environment at call time and never logged
+```
+</TabItem>
 </Tabs>
 
 An authenticated endpoint uses `${ENV}` in a header — e.g. a POST with

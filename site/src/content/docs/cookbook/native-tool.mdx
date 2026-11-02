@@ -107,6 +107,24 @@ tk = Toolnexus.Toolkit.register(tk, [add])
 (def tk (tn/build {:tools [add]}))
 ```
 </TabItem>
+<TabItem label="Rust">
+```rust
+use serde::Deserialize;
+use serde_json::json;
+use toolnexus::define_typed_tool;
+
+#[derive(Deserialize)]
+struct Weather { city: String }
+
+let weather = define_typed_tool(
+    "get_weather",
+    "Current weather for a city",
+    json!({"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]}),
+    |w: Weather, _ctx| async move { Ok::<_, String>(format!("Sunny in {}", w.city)) },
+);
+// pass it as ToolkitOptions { extra_tools: vec![weather], .. }; Err(..) becomes isError
+```
+</TabItem>
 </Tabs>
 
 Java and C# also support annotation-driven tools (`@ToolMethod` / `[ToolMethod]` on a

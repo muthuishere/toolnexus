@@ -124,6 +124,22 @@ await using var tk = await Toolkit.CreateAsync(new Toolkit.Options {
 ;; :disable-skills exists too — sugar over the filter for the drop-by-name case.
 ```
 </TabItem>
+<TabItem label="Rust">
+```rust
+use std::collections::BTreeMap;
+use toolnexus::{BuiltinsConfig, ToolkitOptions, create_toolkit};
+
+let tk = create_toolkit(ToolkitOptions {
+    builtins: Some(BuiltinsConfig {
+        tools: BTreeMap::from([("bash".to_string(), false)]),   // drop one builtin
+        ..Default::default()
+    }),
+    disable_tools: vec!["webfetch".into()],                      // drop any tool by name
+    ..Default::default()
+}).await?;
+// BuiltinsConfig::off() turns the whole builtin source off
+```
+</TabItem>
 </Tabs>
 
 ## 4. Allowlist skills per agent

@@ -101,6 +101,22 @@ IO.puts(res.text)
 (println (:text res))
 ```
 </TabItem>
+<TabItem label="Rust">
+```rust
+use toolnexus::client::{ClientOptions, Style, create_client};
+use toolnexus::{ToolkitOptions, create_toolkit};
+
+let tk = create_toolkit(ToolkitOptions::default()).await?;   // 10 built-ins, on by default
+let agent = create_client(ClientOptions {
+    base_url: "https://openrouter.ai/api/v1".into(),
+    style: Style::OpenAI,
+    model: "openai/gpt-4o-mini".into(),                        // key from OPENROUTER_API_KEY
+    ..Default::default()
+});
+let res = agent.run("List the files here, then read the largest one.", &tk).await?;
+println!("{}", res.text);
+```
+</TabItem>
 </Tabs>
 
 Next: [MCP servers](/toolnexus/cookbook/mcp-servers/).

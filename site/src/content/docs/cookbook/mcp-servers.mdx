@@ -69,6 +69,21 @@ await using var tk = await Toolkit.CreateAsync(new Toolkit.Options()
 (tn/tool-names tk)                          ; sorted; (:statuses tk) shows any failed server
 ```
 </TabItem>
+<TabItem label="Rust">
+```rust
+use toolnexus::{McpConfigInput, ToolkitOptions, create_toolkit};
+
+let tk = create_toolkit(ToolkitOptions {
+    mcp_config: Some(McpConfigInput::Path("mcp.json".into())),
+    ..Default::default()
+}).await?;
+for (server, status) in tk.mcp_status() {
+    println!("{server}: {}", status.as_str());            // connected | disabled | failed
+}
+// tools are named sanitize(server)_sanitize(tool), e.g. everything_echo
+tk.close().await;
+```
+</TabItem>
 </Tabs>
 
 An `mcp.json` — both server kinds shown:
