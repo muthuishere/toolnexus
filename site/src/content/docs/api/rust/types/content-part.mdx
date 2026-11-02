@@ -1,0 +1,59 @@
+---
+title: "ContentPart"
+description: "The non-text half of a message: text | image | file | audio, carrying base64 bytes or a URL plus a mimeType — never a path. — Rust."
+sidebar:
+  label: "ContentPart"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Rust</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §1B</a>
+</p>
+
+```rust
+{/* TODO:signature */}
+```
+
+The non-text half of a message: text | image | file | audio, carrying base64 bytes or a URL plus a mimeType — never a path.
+
+## When to use it
+
+{/* TODO:when */}
+_TODO: the situation this entry point is for._
+
+## Why this and not the alternative
+
+{/* TODO:why */}
+<Aside type="tip" title="TODO: when NOT to use it">
+_TODO: name the alternative and when to prefer it._
+</Aside>
+
+## Examples
+
+### 1. TODO — the smallest useful call
+
+{/* TODO:example1 */}
+```rust
+// TODO
+```
+
+### 2. TODO — the realistic case
+
+{/* TODO:example2 */}
+```rust
+// TODO
+```
+
+### 3. TODO — the full surface
+
+{/* TODO:example3 */}
+```rust
+// TODO
+```
+
+## See also
+
+- [`Tool`](/api/rust/types/tool/) — The uniform shape every tool source collapses to: name, description, JSON-Schema parameters, execute.
+- [`ToolResult`](/api/rust/types/tool-result/) — The result envelope: output text, optional error flag, optional non-text parts, and optional metadata that can carry a suspension.
+- [`ToolContext`](/api/rust/types/context/) — Optional per-call context handed to execute: cancellation, identity, and host-supplied state.

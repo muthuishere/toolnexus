@@ -34,6 +34,7 @@ const EXT = {
 	elixir: "exs",
 	// The Clojure port has no snippet runner yet, so no Clojure block is tagged `test`.
 	clojure: "cljc",
+	rust: "rs",
 }
 
 const outRoot = path.join(repoRoot, "site/tests/snippets")

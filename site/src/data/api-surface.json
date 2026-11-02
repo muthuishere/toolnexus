@@ -7,7 +7,8 @@
 		"java",
 		"csharp",
 		"elixir",
-		"clojure"
+		"clojure",
+		"rust"
 	],
 	"entries": [
 		{
@@ -24,7 +25,8 @@
 				"java": "Tool",
 				"csharp": "ITool",
 				"elixir": "Toolnexus.Tool",
-				"clojure": "toolnexus.tool/tool"
+				"clojure": "toolnexus.tool/tool",
+				"rust": "Tool"
 			}
 		},
 		{
@@ -41,7 +43,8 @@
 				"java": "ToolResult",
 				"csharp": "ToolResult",
 				"elixir": "Toolnexus.ToolResult",
-				"clojure": "toolnexus.tool/success"
+				"clojure": "toolnexus.tool/success",
+				"rust": "ToolResult"
 			}
 		},
 		{
@@ -58,7 +61,8 @@
 				"java": "ContentPart",
 				"csharp": "ContentPart",
 				"elixir": "Toolnexus.ContentPart",
-				"clojure": "toolnexus.content/attach"
+				"clojure": "toolnexus.content/attach",
+				"rust": "ContentPart"
 			}
 		},
 		{
@@ -75,7 +79,8 @@
 				"java": "ToolContext",
 				"csharp": "ToolContext",
 				"elixir": "Toolnexus.Context",
-				"clojure": null
+				"clojure": null,
+				"rust": "ToolContext"
 			},
 			"parityNote": "Clojure has no ToolContext type. The context is a plain map passed as the third argument to toolnexus.tool/execute; a native tool opts into receiving it with :ctx? true."
 		},
@@ -93,7 +98,8 @@
 				"java": "Toolkit.create",
 				"csharp": "Toolkit.CreateAsync",
 				"elixir": "Toolnexus.create_toolkit",
-				"clojure": "toolnexus.core/build"
+				"clojure": "toolnexus.core/build",
+				"rust": "create_toolkit"
 			},
 			"sources": [
 				"js/examples/basic.ts",
@@ -116,7 +122,8 @@
 				"java": "McpSource.load",
 				"csharp": "McpSource.LoadAsync",
 				"elixir": "Toolnexus.Mcp.load",
-				"clojure": "toolnexus.mcp/from-config"
+				"clojure": "toolnexus.mcp/from-config",
+				"rust": "load_mcp"
 			},
 			"sources": [
 				"examples/mcp.json"
@@ -136,7 +143,8 @@
 				"java": "McpSource.loadWith",
 				"csharp": "McpSource.LoadAsync",
 				"elixir": "Toolnexus.Mcp.load",
-				"clojure": null
+				"clojure": null,
+				"rust": "load_mcp_with"
 			},
 			"parityNote": "Clojure has no ctx-aware load. toolnexus.mcp/from-config bounds each server with its own :timeout (toolnexus.mcp/default-timeout-ms); there is no cancellation handle."
 		},
@@ -154,7 +162,8 @@
 				"java": "McpSource.listMcpTools",
 				"csharp": "McpSource.ListMcpToolsAsync",
 				"elixir": "Toolnexus.Mcp.list_tools",
-				"clojure": null
+				"clojure": null,
+				"rust": null
 			},
 			"parityNote": "Clojure ships no list-without-connecting inventory. toolnexus.mcp/parse-config validates config offline, and toolnexus.mcp/from-config returns :statuses alongside :tools once connected."
 		},
@@ -172,7 +181,8 @@
 				"java": "McpSource.parseConfig",
 				"csharp": "McpSource.ParseConfig",
 				"elixir": "Toolnexus.Mcp.parse_config",
-				"clojure": "toolnexus.mcp/parse-config"
+				"clojure": "toolnexus.mcp/parse-config",
+				"rust": "parse_mcp_config"
 			},
 			"parityNote": "Every port exposes the parser; only the spelling differs. C# and Java hang it off the type as McpSource.ParseConfig / McpSource.parseConfig rather than a free parseMcpConfig."
 		},
@@ -190,7 +200,8 @@
 				"java": "McpSource.elicitationToRequest",
 				"csharp": "McpSource.ElicitationToRequest",
 				"elixir": "Toolnexus.Mcp.Protocol.elicitation_to_request",
-				"clojure": "toolnexus.mcp/elicitation->request"
+				"clojure": "toolnexus.mcp/elicitation->request",
+				"rust": null
 			},
 			"parityNote": "Elixir's elicitation_to_request lives on Toolnexus.Mcp.Protocol, not Toolnexus.Mcp — there is no delegate on the top-level Mcp module."
 		},
@@ -208,7 +219,8 @@
 				"java": "SkillSource.load",
 				"csharp": "SkillSource.Load",
 				"elixir": "Toolnexus.Skill.load",
-				"clojure": "toolnexus.skill/load-skills"
+				"clojure": "toolnexus.skill/load-skills",
+				"rust": "load_skills"
 			},
 			"sources": [
 				"examples/skills"
@@ -228,7 +240,8 @@
 				"java": "SkillSource.loadWith",
 				"csharp": "SkillSource.LoadWith",
 				"elixir": "Toolnexus.Skill.load",
-				"clojure": "toolnexus.skill/load-skills"
+				"clojure": "toolnexus.skill/load-skills",
+				"rust": "load_skills_with"
 			}
 		},
 		{
@@ -245,7 +258,8 @@
 				"java": "SkillSource.listSkills",
 				"csharp": "SkillSource.ListSkills",
 				"elixir": "Toolnexus.Skill.list",
-				"clojure": "toolnexus.skill/list-skills"
+				"clojure": "toolnexus.skill/list-skills",
+				"rust": "list_skills"
 			}
 		},
 		{
@@ -262,7 +276,8 @@
 				"java": "NativeTool.of",
 				"csharp": "NativeTool.Of",
 				"elixir": "Toolnexus.Native.define_tool",
-				"clojure": "toolnexus.native/native-tool"
+				"clojure": "toolnexus.native/native-tool",
+				"rust": "define_tool"
 			},
 			"sources": [
 				"js/examples/advanced.ts",
@@ -284,7 +299,8 @@
 				"java": "@Tool annotation",
 				"csharp": "ToolMethodAttribute",
 				"elixir": null,
-				"clojure": null
+				"clojure": null,
+				"rust": "define_typed_tool"
 			},
 			"parityNote": "Elixir has no reflection-based tool builder; use Toolnexus.Native.define_tool/1 with an explicit input_schema. Clojure has no reflection-based builder either — Clojure and cljgo share no portable fn-arity introspection, which is also why a context-taking tool declares :ctx? true. Use toolnexus.native/native-tool with an explicit :input-schema."
 		},
@@ -302,7 +318,8 @@
 				"java": "Tools.fromObject",
 				"csharp": "Tools.FromObject",
 				"elixir": null,
-				"clojure": null
+				"clojure": null,
+				"rust": null
 			},
 			"parityNote": "JS/Java/C# expose an explicit collector; Python, Go and Elixir have no equivalent public symbol. Clojure has no collector either."
 		},
@@ -320,7 +337,8 @@
 				"java": "HttpTool.of",
 				"csharp": "HttpTool.Of",
 				"elixir": "Toolnexus.Http.tool",
-				"clojure": "toolnexus.http/http-tool"
+				"clojure": "toolnexus.http/http-tool",
+				"rust": "http_tool"
 			}
 		},
 		{
@@ -337,7 +355,8 @@
 				"java": "BuiltinTools.select",
 				"csharp": "BuiltinTools.Select",
 				"elixir": "Toolnexus.Builtin.load",
-				"clojure": "toolnexus.builtin/enabled-builtins"
+				"clojure": "toolnexus.builtin/enabled-builtins",
+				"rust": "select_builtins"
 			},
 			"parityNote": "Elixir selects built-ins via Toolnexus.Builtin.load/1 (a config map), not a named select function."
 		},
@@ -355,7 +374,8 @@
 				"java": "BuiltinTools.create",
 				"csharp": "BuiltinTools.Create",
 				"elixir": "Toolnexus.Builtin.tools",
-				"clojure": "toolnexus.builtin/builtin-tools"
+				"clojure": "toolnexus.builtin/builtin-tools",
+				"rust": "create_builtin_tools"
 			},
 			"parityNote": "Elixir has no Builtin.create/1 — the zero-arg 'build the full set' constructor is Toolnexus.Builtin.tools/0."
 		},
@@ -373,7 +393,8 @@
 				"java": "Adapters.toOpenAI",
 				"csharp": "Adapters.ToOpenAI",
 				"elixir": "Toolnexus.Adapters.to_openai",
-				"clojure": "toolnexus.adapter/to-openai"
+				"clojure": "toolnexus.adapter/to-openai",
+				"rust": "to_openai"
 			}
 		},
 		{
@@ -390,7 +411,8 @@
 				"java": "Adapters.toAnthropic",
 				"csharp": "Adapters.ToAnthropic",
 				"elixir": "Toolnexus.Adapters.to_anthropic",
-				"clojure": "toolnexus.adapter/to-anthropic"
+				"clojure": "toolnexus.adapter/to-anthropic",
+				"rust": "to_anthropic"
 			}
 		},
 		{
@@ -407,7 +429,8 @@
 				"java": "Adapters.toGemini",
 				"csharp": "Adapters.ToGemini",
 				"elixir": "Toolnexus.Adapters.to_gemini",
-				"clojure": "toolnexus.adapter/to-gemini"
+				"clojure": "toolnexus.adapter/to-gemini",
+				"rust": "to_gemini"
 			}
 		},
 		{
@@ -424,7 +447,8 @@
 				"java": "LlmClient.create",
 				"csharp": "LlmClient.Create",
 				"elixir": "Toolnexus.Client.create",
-				"clojure": "toolnexus.client/create-client"
+				"clojure": "toolnexus.client/create-client",
+				"rust": "create_client"
 			},
 			"sources": [
 				"js/examples/basic.ts",
@@ -446,7 +470,8 @@
 				"java": "LlmClient.run",
 				"csharp": "LlmClient.RunAsync",
 				"elixir": "Toolnexus.Client.run",
-				"clojure": "toolnexus.client/run"
+				"clojure": "toolnexus.client/run",
+				"rust": "Client.run"
 			}
 		},
 		{
@@ -463,7 +488,8 @@
 				"java": "LlmClient.stream",
 				"csharp": "LlmClient.StreamAsync",
 				"elixir": "Toolnexus.Client.stream",
-				"clojure": null
+				"clojure": null,
+				"rust": "Client.stream"
 			},
 			"sources": [
 				"js/examples/streaming.ts",
@@ -486,7 +512,8 @@
 				"java": "LlmClient.Hooks",
 				"csharp": "LlmClient.Hooks",
 				"elixir": "Toolnexus.Client.create",
-				"clojure": "toolnexus.client/create-client"
+				"clojure": "toolnexus.client/create-client",
+				"rust": "Hooks"
 			},
 			"sources": [
 				"js/examples/hooks.ts",
@@ -510,7 +537,8 @@
 				"java": "LlmClient.Conversation",
 				"csharp": "LlmClient.Conversation",
 				"elixir": "Toolnexus.Client conversation",
-				"clojure": "toolnexus.client/run"
+				"clojure": "toolnexus.client/run",
+				"rust": "Conversation"
 			},
 			"sources": [
 				"js/examples/memory.ts",
@@ -532,7 +560,8 @@
 				"java": "LlmClient.ConversationStore",
 				"csharp": "LlmClient.IConversationStore",
 				"elixir": "Toolnexus.Client.InMemoryConversationStore",
-				"clojure": "toolnexus.client/in-memory-store"
+				"clojure": "toolnexus.client/in-memory-store",
+				"rust": "InMemoryConversationStore"
 			}
 		},
 		{
@@ -549,7 +578,8 @@
 				"java": "LlmClient.MetricEvent",
 				"csharp": "MetricEvent",
 				"elixir": "Toolnexus.Client.MetricsRegistry",
-				"clojure": "toolnexus.client/create-client"
+				"clojure": "toolnexus.client/create-client",
+				"rust": "MetricEvent"
 			},
 			"parityNote": "C# has no wrapping Metrics class — MetricEvent is a top-level record in namespace Toolnexus."
 		},
@@ -567,7 +597,8 @@
 				"java": "LlmClient.ErrorInfo",
 				"csharp": "LlmClient.ErrorInfo",
 				"elixir": "Toolnexus.Client.create",
-				"clojure": "toolnexus.client/create-client"
+				"clojure": "toolnexus.client/create-client",
+				"rust": "ErrorInfo"
 			},
 			"parityNote": "Elixir configures retries/timeout as options on Toolnexus.Client.create/1 rather than a distinct error-classifier type."
 		},
@@ -585,7 +616,8 @@
 				"java": "Classifier.create",
 				"csharp": "Classifier.Create",
 				"elixir": "Toolnexus.Classifier.create",
-				"clojure": "toolnexus.classifier/create-classifier"
+				"clojure": "toolnexus.classifier/create-classifier",
+				"rust": null
 			}
 		},
 		{
@@ -602,7 +634,8 @@
 				"java": "Classifier.NoulQuestion",
 				"csharp": "NoulQuestion",
 				"elixir": "Toolnexus.Classifier.Noul",
-				"clojure": "toolnexus.classifier/noul-question"
+				"clojure": "toolnexus.classifier/noul-question",
+				"rust": null
 			}
 		},
 		{
@@ -619,7 +652,8 @@
 				"java": "Classifier.Decision",
 				"csharp": "Decision",
 				"elixir": "Toolnexus.Classifier.Decision",
-				"clojure": "toolnexus.classifier/parse-decision"
+				"clojure": "toolnexus.classifier/parse-decision",
+				"rust": null
 			}
 		},
 		{
@@ -636,7 +670,8 @@
 				"java": "A2A.agent",
 				"csharp": "A2A.Agent",
 				"elixir": "Toolnexus.A2a.agent",
-				"clojure": "toolnexus.a2a/remote-agent"
+				"clojure": "toolnexus.a2a/remote-agent",
+				"rust": null
 			},
 			"sources": [
 				"python/examples/a2a_agents.py"
@@ -657,7 +692,8 @@
 				"java": "A2A.agentTools",
 				"csharp": "A2A.AgentTools",
 				"elixir": "Toolnexus.A2a.agent_tools",
-				"clojure": "toolnexus.a2a/agent-tools"
+				"clojure": "toolnexus.a2a/agent-tools",
+				"rust": null
 			}
 		},
 		{
@@ -674,7 +710,8 @@
 				"java": "A2A.parseAgentsConfig",
 				"csharp": "A2A.ParseAgentsConfig",
 				"elixir": "Toolnexus.A2a.parse_agents_config",
-				"clojure": "toolnexus.a2a/parse-agents-config"
+				"clojure": "toolnexus.a2a/parse-agents-config",
+				"rust": null
 			}
 		},
 		{
@@ -691,7 +728,8 @@
 				"java": "A2AServer.start",
 				"csharp": "A2AServer.StartAsync",
 				"elixir": "Toolnexus.Serve.start",
-				"clojure": "toolnexus.serve/serve"
+				"clojure": "toolnexus.serve/serve",
+				"rust": null
 			},
 			"parityNote": "Go names this Toolkit.Serve (a method), not a free StartAgent function — StartAgent is the unrelated §7E persona-heartbeat starter."
 		},
@@ -709,7 +747,8 @@
 				"java": "A2AServer.buildAgentCard",
 				"csharp": "A2AServer.BuildAgentCard",
 				"elixir": "Toolnexus.Serve.build_agent_card",
-				"clojure": "toolnexus.serve/agent-card"
+				"clojure": "toolnexus.serve/agent-card",
+				"rust": null
 			}
 		},
 		{
@@ -726,7 +765,8 @@
 				"java": "A2AServer.FileTaskStore",
 				"csharp": "FileTaskStore",
 				"elixir": "Toolnexus.Serve task_store",
-				"clojure": "toolnexus.serve/file-store"
+				"clojure": "toolnexus.serve/file-store",
+				"rust": null
 			}
 		},
 		{
@@ -743,7 +783,8 @@
 				"java": "McpServe.build",
 				"csharp": "McpServe.BuildMcpServer",
 				"elixir": "Toolnexus.McpServe.exposed_tools",
-				"clojure": "toolnexus.serve/exposed-tools"
+				"clojure": "toolnexus.serve/exposed-tools",
+				"rust": null
 			}
 		},
 		{
@@ -760,7 +801,8 @@
 				"java": "agents.Agent",
 				"csharp": "Agent",
 				"elixir": "Toolnexus.Agents",
-				"clojure": "AgentDef"
+				"clojure": "AgentDef",
+				"rust": null
 			},
 			"sources": [
 				"js/examples/agent.ts",
@@ -784,7 +826,8 @@
 				"java": "agents.Runtime",
 				"csharp": "AgentRuntime",
 				"elixir": "Toolnexus.Agents.Runtime",
-				"clojure": "create-runtime"
+				"clojure": "create-runtime",
+				"rust": null
 			},
 			"sources": [
 				"examples/subagent-lifecycle",
@@ -806,7 +849,8 @@
 				"java": "agents.Handle",
 				"csharp": "Handle",
 				"elixir": "Toolnexus.Agents.Handle",
-				"clojure": "Handle"
+				"clojure": "Handle",
+				"rust": null
 			},
 			"parityNote": null
 		},
@@ -824,7 +868,8 @@
 				"java": "agents.Budget",
 				"csharp": "Budget",
 				"elixir": "Toolnexus.Agents budget",
-				"clojure": "Budget"
+				"clojure": "Budget",
+				"rust": null
 			},
 			"sources": [
 				"examples/subagent-budgets"
@@ -845,7 +890,8 @@
 				"java": null,
 				"csharp": null,
 				"elixir": null,
-				"clojure": "task-tool"
+				"clojure": "task-tool",
+				"rust": null
 			},
 			"parityNote": "Only JS exposes a constructible task tool symbol; elsewhere it is the `task` builtin, toggled on the runtime."
 		},
@@ -863,7 +909,8 @@
 				"java": "Home.composeSoul",
 				"csharp": "Home.ComposeSoul",
 				"elixir": "Toolnexus.Agents.Home.compose_soul",
-				"clojure": "toolnexus.agents.home/compose-soul"
+				"clojure": "toolnexus.agents.home/compose-soul",
+				"rust": null
 			},
 			"sources": [
 				"examples/persona-agent",
@@ -886,7 +933,8 @@
 				"java": "A2A.agentFromDir",
 				"csharp": "Home.FromDir",
 				"elixir": "Toolnexus.Agents.Home.from_dir",
-				"clojure": null
+				"clojure": null,
+				"rust": null
 			},
 			"parityNote": "from-dir composes a persona into an AgentDef, so it needs the §7D runtime this port does not ship yet. compose-soul and memory-tool — the two halves it would combine — ARE shipped: compose the soul yourself and pass it as :system-prompt."
 		},
@@ -904,7 +952,8 @@
 				"java": "Home.memoryTool",
 				"csharp": "Home.MemoryTool",
 				"elixir": "Toolnexus.Agents.Home.memory_tool",
-				"clojure": "toolnexus.agents.home/memory-tool"
+				"clojure": "toolnexus.agents.home/memory-tool",
+				"rust": null
 			}
 		},
 		{
@@ -921,7 +970,8 @@
 				"java": "Compaction.compactor",
 				"csharp": "Compaction.Compactor",
 				"elixir": "Toolnexus.Agents.Compaction.compactor",
-				"clojure": "toolnexus.agents.compaction/compactor"
+				"clojure": "toolnexus.agents.compaction/compactor",
+				"rust": null
 			},
 			"sources": [
 				"examples/compaction"
@@ -941,7 +991,8 @@
 				"java": "Request.pending",
 				"csharp": "Suspension.Pending",
 				"elixir": null,
-				"clojure": "toolnexus.client/suspend"
+				"clojure": "toolnexus.client/suspend",
+				"rust": "pending"
 			},
 			"sources": [
 				"js/examples/pending.ts"
@@ -962,7 +1013,8 @@
 				"java": "Request.authRequired",
 				"csharp": "Suspension.AuthRequired",
 				"elixir": null,
-				"clojure": "toolnexus.client/auth-required"
+				"clojure": "toolnexus.client/auth-required",
+				"rust": "auth_required"
 			},
 			"parityNote": "Elixir ships no auth_required/pending producer helpers — build %ToolResult{metadata: %{pending: %Request{}}} by hand. Only the reader, ToolResult.pending?/1, exists."
 		},
@@ -980,7 +1032,8 @@
 				"java": "LlmClient.waitFor",
 				"csharp": "LlmClient.WaitFor",
 				"elixir": "Toolnexus.Client.create",
-				"clojure": "toolnexus.client/create-client"
+				"clojure": "toolnexus.client/create-client",
+				"rust": "WaitForFn"
 			},
 			"parityNote": "Elixir passes :wait_for as an option to Toolnexus.Client.create/1 rather than exposing a WaitFor type."
 		},
@@ -998,7 +1051,8 @@
 				"java": "Request.pendingOf",
 				"csharp": "Suspension.PendingOf",
 				"elixir": null,
-				"clojure": "toolnexus.client/pending-of"
+				"clojure": "toolnexus.client/pending-of",
+				"rust": "pending_of"
 			},
 			"parityNote": "Elixir has no pending_of/1; match on result.metadata or use ToolResult.pending?/1."
 		},
@@ -1016,7 +1070,8 @@
 				"java": "AgentRuntime.resume",
 				"csharp": "AgentRuntime.ResumeAsync",
 				"elixir": "Toolnexus.Agents.Runtime.resume",
-				"clojure": null
+				"clojure": null,
+				"rust": null
 			},
 			"sources": [
 				"examples/subagent-durable-resume"
@@ -1037,7 +1092,8 @@
 				"java": null,
 				"csharp": null,
 				"elixir": null,
-				"clojure": null
+				"clojure": null,
+				"rust": null
 			},
 			"parityNote": "Go-only today (golang/relay.go). SPEC §10 addendum landed as a Go preview; the other five ports do not ship a relay tool yet. Clojure does not ship a relay tool either."
 		},
@@ -1055,7 +1111,8 @@
 				"java": "Translate.translate",
 				"csharp": "Translate.Run",
 				"elixir": "Toolnexus.Translate.translate",
-				"clojure": "toolnexus.translate/translate"
+				"clojure": "toolnexus.translate/translate",
+				"rust": null
 			}
 		},
 		{
@@ -1072,7 +1129,8 @@
 				"java": "Translate.openAIMessagesToAnthropic",
 				"csharp": "Translate.OpenAIMessagesToAnthropic",
 				"elixir": "Toolnexus.Translate.openai_messages_to_anthropic",
-				"clojure": "toolnexus.translate/openai-messages-to-anthropic"
+				"clojure": "toolnexus.translate/openai-messages-to-anthropic",
+				"rust": null
 			},
 			"parityNote": "Go keeps openAIMessagesToAnthropic unexported (golang/translate.go:283) — inbound translation is reachable only through Translate."
 		},
@@ -1090,7 +1148,8 @@
 				"java": "LlmClient.ProviderException",
 				"csharp": "ProviderException",
 				"elixir": "Toolnexus.ProviderError",
-				"clojure": "toolnexus.client/provider-error"
+				"clojure": "toolnexus.client/provider-error",
+				"rust": "ProviderError"
 			}
 		},
 		{
@@ -1107,7 +1166,8 @@
 				"java": "Answer.output",
 				"csharp": "Answer.Output",
 				"elixir": "Toolnexus.Answer.answer_output/2",
-				"clojure": "answer-output"
+				"clojure": "answer-output",
+				"rust": null
 			}
 		},
 		{
@@ -1124,7 +1184,8 @@
 				"java": "Answer.declined",
 				"csharp": "Answer.Declined",
 				"elixir": "Toolnexus.Answer.answer_declined/2",
-				"clojure": "answer-declined"
+				"clojure": "answer-declined",
+				"rust": null
 			}
 		},
 		{
@@ -1141,7 +1202,8 @@
 				"java": "TaskResult.STATUSES / TaskResult.LIMITS / TaskResult.canonicalLimit",
 				"csharp": "AgentStatus.All / RunStatus.All / StopLimit.All / StopLimit.FromPool",
 				"elixir": "Toolnexus.Status.task/0 / run/0 / limits/0 / canonical_limit/1",
-				"clojure": "agents.runtime/statuses / agents.runtime/limits"
+				"clojure": "agents.runtime/statuses / agents.runtime/limits",
+				"rust": null
 			}
 		},
 		{
@@ -1158,7 +1220,8 @@
 				"java": "Loop",
 				"csharp": "Loop",
 				"elixir": "Toolnexus.Agents.Loop",
-				"clojure": "toolnexus.agents.loop"
+				"clojure": "toolnexus.agents.loop",
+				"rust": null
 			}
 		},
 		{
@@ -1175,7 +1238,8 @@
 				"java": "ofFile",
 				"csharp": "FromFile",
 				"elixir": "from_path",
-				"clojure": "attach"
+				"clojure": "attach",
+				"rust": null
 			}
 		}
 	]

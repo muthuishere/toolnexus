@@ -1,0 +1,30 @@
+---
+title: "Build the Answer a human's plain-text reply resumes a suspended run with"
+description: "Wraps a human's typed string reply into the Answer a suspended run resumes with — the success counterpart to answerDeclined. — Rust."
+sidebar:
+  label: "suspension / answer-output"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Rust</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §10</a>
+</p>
+
+<Aside type="caution" title="Not available in Rust">
+The Rust port does not ship this entry point.
+</Aside>
+
+Wraps a human's typed string reply into the Answer a suspended run resumes with — the success counterpart to answerDeclined.
+
+## What to use instead
+
+{/* TODO:why */}
+_TODO: the closest thing this port does offer, and how to get the same outcome._
+
+## See also
+
+- [`pending`](/api/rust/suspension/pending/) — Return a Pending from a tool to park the run until someone answers.
+- [`auth_required`](/api/rust/suspension/auth-required/) — The auth-shaped suspension: hand back a URL, resume once the user has granted access.
+- [`WaitForFn`](/api/rust/suspension/wait-for/) — The single hook where the host resolves a suspension — in-process prompt or durable queue, same contract.
+- [`pending_of`](/api/rust/suspension/pending-of/) — Detect that a RunResult is parked rather than finished, and get the Request that parked it.

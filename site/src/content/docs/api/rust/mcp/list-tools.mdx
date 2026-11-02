@@ -1,0 +1,29 @@
+---
+title: "listMcpTools — inventory without connecting"
+description: "List what each configured server would expose, plus per-server status, without wiring it into a toolkit. — Rust."
+sidebar:
+  label: "mcp / list-tools"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Rust</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §2</a>
+</p>
+
+<Aside type="caution" title="Not available in Rust">
+Clojure ships no list-without-connecting inventory. toolnexus.mcp/parse-config validates config offline, and toolnexus.mcp/from-config returns :statuses alongside :tools once connected.
+</Aside>
+
+List what each configured server would expose, plus per-server status, without wiring it into a toolkit.
+
+## What to use instead
+
+{/* TODO:why */}
+_TODO: the closest thing this port does offer, and how to get the same outcome._
+
+## See also
+
+- [`load_mcp`](/api/rust/mcp/load/) — Read an mcp.json, connect every local stdio and remote streamable-HTTP server, expose each server tool as a Tool.
+- [`load_mcp_with`](/api/rust/mcp/load-with-context/) — The ctx-aware load: bound connection time and cancel a slow or hung server without leaking a child process.
+- [`parse_mcp_config`](/api/rust/mcp/parse-config/) — Parse and validate config without connecting — the fast fail for a malformed or misspelled server block.

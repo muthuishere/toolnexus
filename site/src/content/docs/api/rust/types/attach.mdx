@@ -1,0 +1,30 @@
+---
+title: "Build a ContentPart — attach a file, image, or bytes to a prompt"
+description: "The authoring side of multimodal content: constructors that turn a path, bytes, a blob, a data URL, or a remote URL into the ContentPart a prompt or tool result carries — the write half of the read-only ContentPart shape. — Rust."
+sidebar:
+  label: "types / attach"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Rust</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §1B</a>
+</p>
+
+<Aside type="caution" title="Not available in Rust">
+The Rust port does not ship this entry point.
+</Aside>
+
+The authoring side of multimodal content: constructors that turn a path, bytes, a blob, a data URL, or a remote URL into the ContentPart a prompt or tool result carries — the write half of the read-only ContentPart shape.
+
+## What to use instead
+
+{/* TODO:why */}
+_TODO: the closest thing this port does offer, and how to get the same outcome._
+
+## See also
+
+- [`Tool`](/api/rust/types/tool/) — The uniform shape every tool source collapses to: name, description, JSON-Schema parameters, execute.
+- [`ToolResult`](/api/rust/types/tool-result/) — The result envelope: output text, optional error flag, optional non-text parts, and optional metadata that can carry a suspension.
+- [`ContentPart`](/api/rust/types/content-part/) — The non-text half of a message: text | image | file | audio, carrying base64 bytes or a URL plus a mimeType — never a path.
+- [`ToolContext`](/api/rust/types/context/) — Optional per-call context handed to execute: cancellation, identity, and host-supplied state.

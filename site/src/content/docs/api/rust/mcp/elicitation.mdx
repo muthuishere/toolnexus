@@ -1,0 +1,29 @@
+---
+title: "Elicitation bridge — server asks the user"
+description: "Map an MCP server's elicitation request onto the §10 suspension contract, and map the answer back. — Rust."
+sidebar:
+  label: "mcp / elicitation"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Rust</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §2</a>
+</p>
+
+<Aside type="caution" title="Not available in Rust">
+Elixir's elicitation_to_request lives on Toolnexus.Mcp.Protocol, not Toolnexus.Mcp — there is no delegate on the top-level Mcp module.
+</Aside>
+
+Map an MCP server's elicitation request onto the §10 suspension contract, and map the answer back.
+
+## What to use instead
+
+{/* TODO:why */}
+_TODO: the closest thing this port does offer, and how to get the same outcome._
+
+## See also
+
+- [`load_mcp`](/api/rust/mcp/load/) — Read an mcp.json, connect every local stdio and remote streamable-HTTP server, expose each server tool as a Tool.
+- [`load_mcp_with`](/api/rust/mcp/load-with-context/) — The ctx-aware load: bound connection time and cancel a slow or hung server without leaking a child process.
+- [`parse_mcp_config`](/api/rust/mcp/parse-config/) — Parse and validate config without connecting — the fast fail for a malformed or misspelled server block.
