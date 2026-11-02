@@ -52,6 +52,11 @@ type ClientOptions struct {
 	SystemPrompt string
 	// MaxTurns caps the tool-calling loop; 0 ⇒ 10.
 	MaxTurns int
+	// MaxToolConcurrency caps how many concurrency-safe tool calls of one model
+	// response run at once (SPEC §8 "Tool scheduling"). 0 ⇒ the env var
+	// TOOLNEXUS_MAX_TOOL_CONCURRENCY when it is a positive integer, else 10.
+	// Unsafe calls (writes, shell, anything not marked read-only) always run alone.
+	MaxToolConcurrency int
 	// Hooks are optional lifecycle callbacks around the loop. A nil Hooks (or any
 	// nil field) is skipped. Any hook returning an error aborts the run.
 	Hooks *Hooks
@@ -1200,20 +1205,11 @@ func (c *Client) runOpenAI(ctx context.Context, prompt any, tk *Toolkit, history
 		results := make([]any, len(msg.ToolCalls))
 		records := make([]ToolCall, len(msg.ToolCalls))
 		haltedAt := make([]*Request, len(msg.ToolCalls))
-		var wg sync.WaitGroup
+		sched := c.newToolSched()
 		var mu sync.Mutex
 		var hookErr error
 		for i, tc := range msg.ToolCalls {
-			wg.Add(1)
-			go func(i int, tc struct {
-				ID       string `json:"id"`
-				Type     string `json:"type"`
-				Function struct {
-					Name      string `json:"name"`
-					Arguments string `json:"arguments"`
-				} `json:"function"`
-			}) {
-				defer wg.Done()
+			sched.Go(c.callSafe(tk, tc.Function.Name, safeJSONArgs(tc.Function.Arguments)), func() {
 				args, result, err := c.runTool(ctx, tk, tc.Function.Name, safeJSONArgs(tc.Function.Arguments), tc.ID, turn)
 				if err == nil {
 					if req := PendingOf(result); req != nil {
@@ -1240,9 +1236,9 @@ func (c *Client) runOpenAI(ctx context.Context, prompt any, tk *Toolkit, history
 					"tool_call_id": tc.ID,
 					"content":      result.Output,
 				}, tc.Function.Name, result.Parts)
-			}(i, tc)
+			})
 		}
-		wg.Wait()
+		sched.Wait()
 		if hookErr != nil {
 			for i := range msg.ToolCalls { // keep the finished pairs; the rest are sealed as interrupted
 				if results[i] != nil {
@@ -1496,17 +1492,11 @@ func (c *Client) runAnthropic(ctx context.Context, prompt any, tk *Toolkit, hist
 		results := make([]any, len(uses))
 		records := make([]ToolCall, len(uses))
 		haltedAt := make([]*Request, len(uses))
-		var wg sync.WaitGroup
+		sched := c.newToolSched()
 		var mu sync.Mutex
 		var hookErr error
 		for i, u := range uses {
-			wg.Add(1)
-			go func(i int, u struct {
-				ID    string
-				Name  string
-				Input map[string]any
-			}) {
-				defer wg.Done()
+			sched.Go(c.callSafe(tk, u.Name, u.Input), func() {
 				in := u.Input
 				if in == nil {
 					in = map[string]any{}
@@ -1538,9 +1528,9 @@ func (c *Client) runAnthropic(ctx context.Context, prompt any, tk *Toolkit, hist
 					"content":     result.Output,
 					"is_error":    result.IsError,
 				}, u.Name, result.Parts)
-			}(i, u)
+			})
 		}
-		wg.Wait()
+		sched.Wait()
 		if hookErr != nil {
 			messages = appendFinishedBlocks(messages, results)
 			return RunResult{}, hookErr
@@ -1884,13 +1874,11 @@ func (c *Client) streamOpenAI(ctx context.Context, prompt any, tk *Toolkit, hist
 		records := make([]ToolCall, len(calls))
 		events := make([]StreamEvent, len(calls))
 		haltedAt := make([]*Request, len(calls))
-		var wg sync.WaitGroup
+		sched := c.newToolSched()
 		var hookErr error
 		var mu sync.Mutex
 		for i, cc := range calls {
-			wg.Add(1)
-			go func(i int, cc *streamCall) {
-				defer wg.Done()
+			sched.Go(c.callSafe(tk, cc.name, safeJSONArgs(cc.args)), func() {
 				args, result, err := c.runTool(ctx, tk, cc.name, safeJSONArgs(cc.args), cc.id, turn)
 				if err == nil {
 					if req := PendingOf(result); req != nil {
@@ -1915,9 +1903,9 @@ func (c *Client) streamOpenAI(ctx context.Context, prompt any, tk *Toolkit, hist
 				records[i] = c.toolCallRecord(cc.name, args, result)
 				results[i] = withToolParts(map[string]any{"role": "tool", "tool_call_id": cc.id, "content": result.Output}, cc.name, result.Parts)
 				events[i] = c.resultEvent(cc.id, cc.name, safeJSONArgs(cc.args), result)
-			}(i, cc)
+			})
 		}
-		wg.Wait()
+		sched.Wait()
 		if hookErr != nil {
 			for i := range calls { // keep the finished pairs; the rest are sealed as interrupted
 				if results[i] != nil {
@@ -2169,13 +2157,11 @@ func (c *Client) streamAnthropic(ctx context.Context, prompt any, tk *Toolkit, h
 		records := make([]ToolCall, len(uses))
 		events := make([]StreamEvent, len(uses))
 		haltedAt := make([]*Request, len(uses))
-		var wg sync.WaitGroup
+		sched := c.newToolSched()
 		var hookErr error
 		var mu sync.Mutex
 		for i, u := range uses {
-			wg.Add(1)
-			go func(i int, u useBlock) {
-				defer wg.Done()
+			sched.Go(c.callSafe(tk, u.name, u.input), func() {
 				in := u.input
 				if in == nil {
 					in = map[string]any{}
@@ -2204,9 +2190,9 @@ func (c *Client) streamAnthropic(ctx context.Context, prompt any, tk *Toolkit, h
 				records[i] = c.toolCallRecord(u.name, args, result)
 				results[i] = withToolParts(map[string]any{"type": "tool_result", "tool_use_id": u.id, "content": result.Output, "is_error": result.IsError}, u.name, result.Parts)
 				events[i] = c.resultEvent(u.id, u.name, u.input, result)
-			}(i, u)
+			})
 		}
-		wg.Wait()
+		sched.Wait()
 		if hookErr != nil {
 			messages = appendFinishedBlocks(messages, results)
 			return hookErr
