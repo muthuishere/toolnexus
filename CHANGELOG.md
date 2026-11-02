@@ -1,14 +1,14 @@
 # Changelog
 
 All ports are versioned and released together; entries here apply to every port unless a port
-is named. Seven ports are at tier `full` (js / python / golang / java / csharp / elixir /
-clojure) and rust is at tier `core` — see `conformance/options_manifest.json`, which is where a
+is named. All eight ports are at tier `full` (js / python / golang / java / csharp / elixir /
+clojure / rust) — see `conformance/options_manifest.json`, which is where a
 port's tier is declared, never by the port about itself. Releases are cut as
 GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
 
 ## Unreleased
 
-**Rust port (`rust/`, crate `toolnexus` on crates.io) reaches tier `core` and is ready to publish.**
+**Rust port (`rust/`, crate `toolnexus` on crates.io) is complete: tier `full`, ready to publish.**
 A Rust host can now build a toolkit and run the whole tool-calling loop natively on tokio, with
 no Node/Python/Go sidecar. New since 0.22.0, on top of the ACP client, skills, MCP client and
 core types that were already there:
@@ -65,22 +65,38 @@ core types that were already there:
   (92, hermetic); the trace strings and the recorded unset-run golden are byte-identical to Go.
 - **Relay tools and durable resume**: `relay_tool`, `run_with_answer` / `ask_with_answer`,
   `answer_output` / `answer_declined` / `relay_answer`, and the relay-vs-builtin collision guard.
+- **Relay tests from Go** now mirrored too: streaming relay, `wait_for` parked across turns, and a
+  run deadline breaking the parking. Rust differs from Go there, on purpose: `timeout_ms` wraps
+  the whole run, so a parked `wait_for` is dropped at the deadline (Go lets it finish and fails at
+  the next step). Either way a park outliving `timeout_ms` fails the run. `start_agent`'s `stop`
+  now waits for a beat that is still running, as Go's does.
+- **§1B edge constructors**: `ContentPart::text`, `from_path`, `from_bytes`, `from_reader`,
+  `from_url` (a `data:` URL decodes to the same part as its bytes), with a typed `PartError`.
+- **The post-0.22 fixes apply to Rust as well**: `RunResult.tool_calls` names the real tool
+  behind `call_tool` with its inner args (SPEC §4C), and the Anthropic last-tool `cache_control`
+  breakpoint is checked against the request body that is actually sent.
 - **MCP elicitation**: `ToolkitOptions.wait_for` (and `McpLoadOptions.wait_for`) bridges a
   server's `elicitation/create` onto §10, form → `input`, URL → `authorization`. Without it the
   capability is not advertised.
-- Runnable examples (`cargo run --example basic|agent|native_http|streaming|pending|acp|agents`).
+- Runnable examples (`cargo run --example basic|agent|native_http|streaming|pending|acp|agents|prompt_cache`), all run in CI.
 - Release: a `crates` leg in `release.yml`, gated by `ENABLE_CRATES` and using the
   `CARGO_REGISTRY_TOKEN` secret in `prod` (a crate's first publish cannot use Trusted Publishing;
   switch once it exists). It skips a version that is already on crates.io. `preflight` and the
   readiness script now check `rust/Cargo.toml`.
-- Conformance: rust is held to tier `core`. All 22 client options are present. All 17 classifier
-  options are present. Toolkit `agents` and `waitFor` are permitted absences, printed as debt on
-  every run.
+- Conformance: rust is held to tier `full`. All 22 client, 12 toolkit and 17 classifier options
+  are present, with no permitted absences and no `unported` entries left.
+- Docs: every Rust example on the API reference and cookbook pages is now a complete program that
+  CI compiles and runs (218 of them, through a new Rust runner in `site/tests/run-all.sh`), and Rust
+  has the 0.22.0 pages (API key by host, prompt cache, tool tiers, list_models, ACP hooks,
+  `resource_tools`, background shells) plus shipped pages for translate, the classifier and attach.
 
 **Not done in Rust** (`openspec/changes/add-rust-port`): a Gemini client style (Gemini is a
 schema adapter only, as in Go). The Windows code paths compile but have not been run. A few io
 and network error strings come from Rust's libraries and differ from Go's wording; the
-conformance outputs (skill tool, prompt, tool names and schemas) are byte-identical.
+conformance outputs (skill tool, prompt, tool names and schemas) are byte-identical. Found while
+writing the docs, and true of Go as well: on the durable resume path an `answer_declined(id,
+reason)` loses its reason (the slot reads "no result supplied on resume"); the inline `wait_for`
+path reports it correctly. Not fixed here, since it is a cross-port change.
 **Docs and examples for 0.22.0, in all seven ports.** The 0.22.0 features had code but no
 reference pages, so a reader could only learn them from this changelog. Now each port's API
 reference has pages for API key by host, `promptCache`, `toolTiers`, `listModels`, MCP
