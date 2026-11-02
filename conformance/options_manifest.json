@@ -8,7 +8,8 @@
       "java": "java/src/main/java/io/github/muthuishere/toolnexus/LlmClient.java",
       "csharp": "csharp/src/Toolnexus/LlmClient.cs",
       "elixir": "elixir/lib/toolnexus/client.ex",
-      "clojure": "clojure/src/toolnexus/client.cljc"
+      "clojure": "clojure/src/toolnexus/client.cljc",
+      "rust": "rust/src/client.rs"
     },
     "options": [
       {
@@ -179,7 +180,8 @@
       "java": "java/src/main/java/io/github/muthuishere/toolnexus/Toolkit.java",
       "csharp": "csharp/src/Toolnexus/Toolkit.cs",
       "elixir": "elixir/lib/toolnexus/toolkit.ex",
-      "clojure": "clojure/src/toolnexus/core.cljc"
+      "clojure": "clojure/src/toolnexus/core.cljc",
+      "rust": "rust/src/toolkit.rs"
     },
     "options": [
       {
@@ -408,7 +410,11 @@
         ],
         "tier": "core"
       }
-    ]
+    ],
+    "unported": {
+      "_doc": "A port named here has NO implementation of this group yet. It is not a pass: every run prints it as debt, a port listed here that also appears in `files` is an error, and only a port at tier 'core' may be listed.",
+      "rust": "classifier (SPEC §8B) not ported — openspec/changes/add-rust-port, 'Later'"
+    }
   },
   "portTiers": {
     "_doc": "The tier a port is HELD TO, declared here and nowhere else. A port declaring its own tier is a self-graded exam: the claim must live in the shared contract, where changing it is a visible diff reviewed by the other ports. 'full' = every option. 'core' = the SPEC §0 conformance contract only; full-tier options are permitted absences, counted and printed on every run so the debt can never go quiet.",
@@ -418,6 +424,7 @@
     "java": "full",
     "csharp": "full",
     "elixir": "full",
-    "clojure": "full"
+    "clojure": "full",
+    "rust": "core"
   }
 }
