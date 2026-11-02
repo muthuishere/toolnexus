@@ -18,6 +18,12 @@
 //
 // Each extracted snippet must be a COMPLETE runnable program. Output lands in
 // site/tests/snippets/<lang>/, which the runners compile and execute.
+//
+// Cookbook recipes are scanned too: a `test`-tagged block on a cookbook page is
+// extracted as `cookbook_<page>_<n>` for the language its fence names.
+//
+//   --out <dir>       write to <dir>/<lang>/ instead (parallel runs, scratch checks)
+//   --pages <prefix>  only pages whose slug starts with <prefix> (e.g. api/rust/client)
 
 import fs from "node:fs"
 import path from "node:path"
@@ -37,7 +43,10 @@ const EXT = {
 	rust: "rs",
 }
 
-const outRoot = path.join(repoRoot, "site/tests/snippets")
+const argOf = (flag) => (process.argv.includes(flag) ? process.argv[process.argv.indexOf(flag) + 1] : null)
+const outRoot = argOf("--out") ? path.resolve(argOf("--out")) : path.join(repoRoot, "site/tests/snippets")
+const pagePrefix = argOf("--pages")
+const FENCE_LANG = Object.fromEntries(Object.entries(LANGS).map(([lang, l]) => [l.fence, lang]))
 
 /** Pull ```<fence> <meta>\n…``` blocks out of MDX. */
 function fencedBlocks(src) {
@@ -69,6 +78,7 @@ for (const lang of manifest.langs) {
 	for (const entry of manifest.entries) {
 		const slug = slugFor(lang, entry)
 		const file = path.join(docsRoot, `${slug}.mdx`)
+		if (pagePrefix && !slug.startsWith(pagePrefix)) continue
 		if (!fs.existsSync(file)) continue
 		const blocks = fencedBlocks(fs.readFileSync(file, "utf8")).filter((b) => /\btest\b/.test(b.meta))
 		blocks.forEach((b, i) => {
@@ -80,6 +90,29 @@ for (const lang of manifest.langs) {
 			manifestOut.push({ lang, entry: entry.id, name, file: path.relative(repoRoot, dest), page: slug })
 			counts[lang]++
 		})
+	}
+}
+
+// Cookbook recipes: one page, many languages — the fence picks the language.
+const cookbookDir = path.join(docsRoot, "cookbook")
+if (fs.existsSync(cookbookDir)) {
+	for (const f of fs.readdirSync(cookbookDir).sort()) {
+		if (!f.endsWith(".mdx")) continue
+		const slug = `cookbook/${f.replace(/\.mdx$/, "")}`
+		if (pagePrefix && !slug.startsWith(pagePrefix)) continue
+		const seen = {}
+		for (const b of fencedBlocks(fs.readFileSync(path.join(cookbookDir, f), "utf8"))) {
+			const lang = FENCE_LANG[b.fence]
+			if (!lang || !/\btest\b/.test(b.meta) || (only && lang !== only)) continue
+			seen[lang] = (seen[lang] || 0) + 1
+			const name = `cookbook_${f.replace(/\.mdx$/, "")}_${seen[lang]}`.replace(/-/g, "_")
+			const dir = path.join(outRoot, lang)
+			fs.mkdirSync(dir, { recursive: true })
+			const dest = path.join(dir, `${name}.${EXT[lang]}`)
+			fs.writeFileSync(dest, b.code)
+			manifestOut.push({ lang, entry: slug, name, file: path.relative(repoRoot, dest), page: slug })
+			counts[lang] = (counts[lang] || 0) + 1
+		}
 	}
 }
 
