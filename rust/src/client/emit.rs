@@ -73,7 +73,7 @@ fn style_name(s: Style) -> &'static str {
     }
 }
 
-fn encode_part(style: Style, p: &ContentPart) -> Result<Value, String> {
+pub(crate) fn encode_part(style: Style, p: &ContentPart) -> Result<Value, String> {
     let unsupported = || {
         let mime = if p.mime_type.is_empty() {
             "(no mime type)"
@@ -131,7 +131,7 @@ fn encode_part(style: Style, p: &ContentPart) -> Result<Value, String> {
     Ok(block)
 }
 
-fn placeholder(p: &ContentPart) -> Value {
+pub(crate) fn placeholder(p: &ContentPart) -> Value {
     json!({"type": "text", "text": format!("[unsupported {} part ({}, {} bytes)]", p.kind, p.mime_type, part_bytes(p))})
 }
 
