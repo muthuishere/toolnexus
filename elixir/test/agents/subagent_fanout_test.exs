@@ -17,7 +17,8 @@ defmodule Toolnexus.Agents.FanoutTest do
     # parent reaches done
     assert r.status == "done", "parent reaches done: #{r.text}"
     # parent got BOTH child answers
-    assert String.contains?(r.text, "found:data(x)") and length(String.split(r.text, "found:")) == 3,
+    assert String.contains?(r.text, "found:data(x)") and
+             length(String.split(r.text, "found:")) == 3,
            "parent got BOTH child answers: #{r.text}"
 
     # parent ran 2 turns only (children's turns not in parent)
@@ -46,8 +47,18 @@ defmodule Toolnexus.Agents.FanoutTest do
 
     # fixture `expect.transitions` — per-handle transition traces (§0 method)
     assert transitions(tr, "root/coordinator.1") == ["idle→running", "running→idle"]
-    assert transitions(tr, "root/coordinator.1/explore.1") == ["idle→running", "running→idle", "idle→closed"]
-    assert transitions(tr, "root/coordinator.1/explore.2") == ["idle→running", "running→idle", "idle→closed"]
+
+    assert transitions(tr, "root/coordinator.1/explore.1") == [
+             "idle→running",
+             "running→idle",
+             "idle→closed"
+           ]
+
+    assert transitions(tr, "root/coordinator.1/explore.2") == [
+             "idle→running",
+             "running→idle",
+             "idle→closed"
+           ]
 
     Runtime.shutdown(rt)
   end

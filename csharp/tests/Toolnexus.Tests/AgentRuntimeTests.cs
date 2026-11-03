@@ -12,7 +12,7 @@ public class AgentRuntimeTests
 {
     // ---------- registry (mirrors the fixtures' "registry" blocks) ----------
 
-    private static Dictionary<string, AgentDef> Registry(Action<Dictionary<string, AgentDef>>? mutate = null)
+    internal static Dictionary<string, AgentDef> Registry(Action<Dictionary<string, AgentDef>>? mutate = null)
     {
         var reg = new Dictionary<string, AgentDef>
         {

@@ -64,6 +64,9 @@ func RelayTool(name, description string, schema JSONSchema) Tool {
 		Description: description,
 		InputSchema: schema,
 		Source:      SourceRelay,
+		// The host runs a relay call, and every relay call of a turn surfaces at
+		// once (one Request), so they are never serialised here.
+		ConcurrencySafe: func(map[string]any) bool { return true },
 		Execute: func(args map[string]any, tctx *ToolContext) (ToolResult, error) {
 			// Post-resume retry: the host executed the call; hand its output back.
 			if tctx != nil && tctx.Answer != nil {

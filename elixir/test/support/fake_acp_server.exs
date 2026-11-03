@@ -125,11 +125,31 @@ defmodule FakeAcpServer do
   end
 
   defp dispatch("noisy", id, text, _state) do
-    emit_notification(%{"sessionUpdate" => "agent_thought_chunk", "content" => %{"type" => "text", "text" => "Let me think... "}})
-    emit_notification(%{"sessionUpdate" => "tool_call", "toolCallId" => "t1", "title" => "reading files", "status" => "in_progress"})
+    emit_notification(%{
+      "sessionUpdate" => "agent_thought_chunk",
+      "content" => %{"type" => "text", "text" => "Let me think... "}
+    })
+
+    emit_notification(%{
+      "sessionUpdate" => "tool_call",
+      "toolCallId" => "t1",
+      "title" => "reading files",
+      "status" => "in_progress"
+    })
+
     emit_chunk(~s({"answer":))
-    emit_notification(%{"sessionUpdate" => "tool_call_update", "toolCallId" => "t1", "status" => "completed"})
-    emit_notification(%{"sessionUpdate" => "agent_thought_chunk", "content" => %{"type" => "text", "text" => "double-checking... "}})
+
+    emit_notification(%{
+      "sessionUpdate" => "tool_call_update",
+      "toolCallId" => "t1",
+      "status" => "completed"
+    })
+
+    emit_notification(%{
+      "sessionUpdate" => "agent_thought_chunk",
+      "content" => %{"type" => "text", "text" => "double-checking... "}
+    })
+
     emit_chunk(~s("#{text}"}))
     reply(id, %{"stopReason" => "end_turn"})
   end
@@ -142,7 +162,11 @@ defmodule FakeAcpServer do
 
   defp dispatch(_echo, id, text, state) do
     params_json = Jason.encode!(state.new_params)
-    emit_chunk("echo:#{text} new_count=#{state.new_count} seq=#{state.prompt_n} params=#{params_json}")
+
+    emit_chunk(
+      "echo:#{text} new_count=#{state.new_count} seq=#{state.prompt_n} params=#{params_json}"
+    )
+
     reply(id, %{"stopReason" => "end_turn"})
   end
 
@@ -163,11 +187,18 @@ defmodule FakeAcpServer do
   end
 
   defp emit_chunk(text) do
-    emit_notification(%{"sessionUpdate" => "agent_message_chunk", "content" => %{"type" => "text", "text" => text}})
+    emit_notification(%{
+      "sessionUpdate" => "agent_message_chunk",
+      "content" => %{"type" => "text", "text" => text}
+    })
   end
 
   defp emit_notification(update) do
-    send_msg(%{"jsonrpc" => "2.0", "method" => "session/update", "params" => %{"sessionId" => "sess-1", "update" => update}})
+    send_msg(%{
+      "jsonrpc" => "2.0",
+      "method" => "session/update",
+      "params" => %{"sessionId" => "sess-1", "update" => update}
+    })
   end
 
   defp reply(id, result), do: send_msg(%{"jsonrpc" => "2.0", "id" => id, "result" => result})

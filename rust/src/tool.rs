@@ -368,6 +368,34 @@ pub struct Tool {
     pub execute: ExecuteFn,
     /// Advisory hints (read-only / destructive / open-world); `None` = unknown.
     pub hints: Option<ToolHints>,
+    /// Decides per call whether this tool may run alongside other safe calls of the
+    /// same model response (SPEC §8 "Tool scheduling"). `None` ⇒ safe only when
+    /// `hints.read_only`. See [`is_concurrency_safe`].
+    pub concurrency_safe: Option<ConcurrencySafeFn>,
+}
+
+/// A per-call concurrency-safety predicate (SPEC §8 "Tool scheduling").
+pub type ConcurrencySafeFn = Arc<dyn Fn(&Value) -> bool + Send + Sync>;
+
+/// Whether a call to `tool` with `args` may run alongside other safe calls of the same
+/// response: the tool's own predicate wins; otherwise only a `read_only` tool is safe.
+/// A tool without hints is unsafe.
+pub fn is_concurrency_safe(tool: &Tool, args: &Value) -> bool {
+    match &tool.concurrency_safe {
+        Some(f) => f(args),
+        None => tool.hints.map(|h| h.read_only).unwrap_or(false),
+    }
+}
+
+impl Tool {
+    /// This tool with a per-call concurrency-safety predicate.
+    pub fn with_concurrency_safe(
+        mut self,
+        f: impl Fn(&Value) -> bool + Send + Sync + 'static,
+    ) -> Self {
+        self.concurrency_safe = Some(Arc::new(f));
+        self
+    }
 }
 
 impl std::fmt::Debug for Tool {
@@ -425,6 +453,7 @@ where
 {
     let f = Arc::new(f);
     Tool {
+        concurrency_safe: None,
         name: name.into(),
         description: description.into(),
         input_schema: schema.unwrap_or_else(empty_schema),
@@ -465,4 +494,64 @@ where
             f(input, ctx).await.map_err(|e| e.to_string())
         }
     })
+}
+
+/// The cap when neither the option nor `TOOLNEXUS_MAX_TOOL_CONCURRENCY` sets one.
+pub const DEFAULT_MAX_TOOL_CONCURRENCY: usize = 10;
+
+/// option > env `TOOLNEXUS_MAX_TOOL_CONCURRENCY` > 10 (SPEC §8 "Tool scheduling").
+/// Zero, negative or non-numeric values fall back.
+pub fn resolve_max_tool_concurrency(option: usize) -> usize {
+    resolve_max_tool_concurrency_with(option, |k| std::env::var(k).ok())
+}
+
+/// As [`resolve_max_tool_concurrency`] with an injectable env lookup.
+pub fn resolve_max_tool_concurrency_with(
+    option: usize,
+    env: impl Fn(&str) -> Option<String>,
+) -> usize {
+    if option > 0 {
+        return option;
+    }
+    env("TOOLNEXUS_MAX_TOOL_CONCURRENCY")
+        .map(|raw| raw.trim().trim_start_matches('+').to_string())
+        .filter(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()))
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(DEFAULT_MAX_TOOL_CONCURRENCY)
+}
+
+/// Runs one response's call futures in emitted order: consecutive safe calls overlap
+/// (at most `cap` at once); an unsafe call runs alone, after every earlier call and
+/// before any later one. Outputs keep emitted order.
+pub(crate) async fn schedule_calls<F, T>(futs: Vec<F>, safe: &[bool], cap: usize) -> Vec<T>
+where
+    F: Future<Output = T>,
+{
+    let sem = tokio::sync::Semaphore::new(cap.max(1));
+    let mut out = Vec::with_capacity(safe.len());
+    let mut run: Vec<F> = Vec::new();
+    for (i, f) in futs.into_iter().enumerate() {
+        if safe.get(i).copied().unwrap_or(false) {
+            run.push(f);
+            continue;
+        }
+        if !run.is_empty() {
+            out.extend(bounded(std::mem::take(&mut run), &sem).await);
+        }
+        out.push(f.await);
+    }
+    if !run.is_empty() {
+        out.extend(bounded(run, &sem).await);
+    }
+    out
+}
+
+/// All of `run` concurrently, at most `sem`'s permits at once, outputs in order.
+async fn bounded<F: Future<Output = T>, T>(run: Vec<F>, sem: &tokio::sync::Semaphore) -> Vec<T> {
+    futures_util::future::join_all(run.into_iter().map(|f| async move {
+        let _permit = sem.acquire().await;
+        f.await
+    }))
+    .await
 }

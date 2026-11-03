@@ -120,6 +120,7 @@ use toolnexus::{
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let confirm = Tool {
+        concurrency_safe: None,
         name: "confirm".into(),
         description: "Ask first".into(),
         input_schema: empty_schema(),

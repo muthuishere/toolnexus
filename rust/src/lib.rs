@@ -39,7 +39,9 @@ pub use media::{
     load_media_style,
 };
 pub use tool::{
-    Answer, ContentPart, PartError, Request, Tool, ToolContext, ToolHints, ToolResult, ToolSource,
-    auth_required, define_tool, define_typed_tool, empty_schema, pending, pending_of, sanitize,
+    Answer, ConcurrencySafeFn, ContentPart, DEFAULT_MAX_TOOL_CONCURRENCY, PartError, Request, Tool,
+    ToolContext, ToolHints, ToolResult, ToolSource, auth_required, define_tool, define_typed_tool,
+    empty_schema, is_concurrency_safe, pending, pending_of, resolve_max_tool_concurrency,
+    resolve_max_tool_concurrency_with, sanitize,
 };
 pub use toolkit::{McpConfigInput, Toolkit, ToolkitError, ToolkitOptions, create_toolkit};

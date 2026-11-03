@@ -72,6 +72,7 @@ pub fn compose_soul(dir: impl AsRef<Path>) -> (String, Vec<String>) {
 pub fn memory_tool(dir: impl AsRef<Path>) -> Tool {
     let dir = dir.as_ref().to_path_buf();
     Tool {
+        concurrency_safe: None,
         name: "memory".into(),
         description: "Persist durable memory. action=add appends an entry; replace swaps an existing substring; remove deletes one. target=self (MEMORY.md, default) or user (USER.md). Writes persist to disk and load at the START of your next session — they do NOT change your current context.".into(),
         input_schema: json!({

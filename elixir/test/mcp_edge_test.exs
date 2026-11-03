@@ -67,11 +67,14 @@ defmodule Toolnexus.McpEdgeTest do
 
       case Jason.decode(body) do
         {:ok, %{"method" => "initialize", "id" => id}} ->
-          json(conn, rpc(id, %{
-            "protocolVersion" => "2025-06-18",
-            "capabilities" => %{"tools" => %{}},
-            "serverInfo" => %{"name" => "quirk", "version" => "0"}
-          }))
+          json(
+            conn,
+            rpc(id, %{
+              "protocolVersion" => "2025-06-18",
+              "capabilities" => %{"tools" => %{}},
+              "serverInfo" => %{"name" => "quirk", "version" => "0"}
+            })
+          )
 
         {:ok, %{"method" => "notifications/" <> _}} ->
           send_resp(conn, 202, "")
@@ -101,7 +104,11 @@ defmodule Toolnexus.McpEdgeTest do
     end
 
     defp handle_list(conn, _mode, id, _msg),
-      do: json(conn, rpc(id, %{"tools" => Enum.map(~w(ok bad_err bad_ok img hang boom500), &tool/1)}))
+      do:
+        json(
+          conn,
+          rpc(id, %{"tools" => Enum.map(~w(ok bad_err bad_ok img hang boom500), &tool/1)})
+        )
 
     defp handle_call_rpc(conn, :extras, id, msg) do
       case get_in(msg, ["params", "name"]) do
@@ -142,11 +149,16 @@ defmodule Toolnexus.McpEdgeTest do
       end
     end
 
-    defp tool(name), do: %{"name" => name, "description" => "", "inputSchema" => %{"type" => "object"}}
+    defp tool(name),
+      do: %{"name" => name, "description" => "", "inputSchema" => %{"type" => "object"}}
+
     defp rpc(id, result), do: %{"jsonrpc" => "2.0", "id" => id, "result" => result}
 
     defp json(conn, payload),
-      do: conn |> put_resp_content_type("application/json") |> send_resp(200, Jason.encode!(payload))
+      do:
+        conn
+        |> put_resp_content_type("application/json")
+        |> send_resp(200, Jason.encode!(payload))
   end
 
   # ---------------------------------------------------------------------------
@@ -204,7 +216,11 @@ defmodule Toolnexus.McpEdgeTest do
       sse_push(agent, %{
         "jsonrpc" => "2.0",
         "id" => id,
-        "result" => %{"protocolVersion" => "2025-06-18", "capabilities" => %{}, "serverInfo" => %{"name" => "legacy", "version" => "0"}}
+        "result" => %{
+          "protocolVersion" => "2025-06-18",
+          "capabilities" => %{},
+          "serverInfo" => %{"name" => "legacy", "version" => "0"}
+        }
       })
     end
 
@@ -214,7 +230,11 @@ defmodule Toolnexus.McpEdgeTest do
       sse_push(agent, %{
         "jsonrpc" => "2.0",
         "id" => id,
-        "result" => %{"tools" => [%{"name" => "lecho", "description" => "", "inputSchema" => %{"type" => "object"}}]}
+        "result" => %{
+          "tools" => [
+            %{"name" => "lecho", "description" => "", "inputSchema" => %{"type" => "object"}}
+          ]
+        }
       })
     end
 
@@ -270,7 +290,11 @@ defmodule Toolnexus.McpEdgeTest do
     base = start_plug(QuirkStub, :extras)
 
     source =
-      Mcp.load(%{"mcpServers" => %{"q" => %{"type" => "remote", "url" => base <> "/mcp", "timeout" => 2_000}}})
+      Mcp.load(%{
+        "mcpServers" => %{
+          "q" => %{"type" => "remote", "url" => base <> "/mcp", "timeout" => 2_000}
+        }
+      })
 
     on_exit(fn -> Mcp.close(source) end)
     assert source.status == %{"q" => "connected"}
@@ -332,7 +356,9 @@ defmodule Toolnexus.McpEdgeTest do
   test "a JSON-array RPC body is unpacked (batch-shaped response)" do
     base = start_plug(QuirkStub, :list_array)
 
-    source = Mcp.load(%{"mcpServers" => %{"arr" => %{"url" => base <> "/mcp", "timeout" => 2_000}}})
+    source =
+      Mcp.load(%{"mcpServers" => %{"arr" => %{"url" => base <> "/mcp", "timeout" => 2_000}}})
+
     on_exit(fn -> Mcp.close(source) end)
 
     assert source.status == %{"arr" => "connected"}
@@ -343,9 +369,19 @@ defmodule Toolnexus.McpEdgeTest do
     port = free_port()
 
     {:ok, server} =
-      Bandit.start_link(plug: {QuirkStub, :extras}, scheme: :http, port: port, ip: {127, 0, 0, 1}, startup_log: false)
+      Bandit.start_link(
+        plug: {QuirkStub, :extras},
+        scheme: :http,
+        port: port,
+        ip: {127, 0, 0, 1},
+        startup_log: false
+      )
 
-    source = Mcp.load(%{"mcpServers" => %{"q" => %{"url" => "http://127.0.0.1:#{port}/mcp", "timeout" => 2_000}}})
+    source =
+      Mcp.load(%{
+        "mcpServers" => %{"q" => %{"url" => "http://127.0.0.1:#{port}/mcp", "timeout" => 2_000}}
+      })
+
     assert source.status == %{"q" => "connected"}
 
     # stop the HTTP server, then close — the session DELETE fails and is swallowed
@@ -408,7 +444,13 @@ defmodule Toolnexus.McpEdgeTest do
 
   test "an unparseable remote URL is a failed server, never a crash" do
     capture_log(fn ->
-      source = Mcp.load(%{"mcpServers" => %{"bad" => %{"type" => "remote", "url" => "htp:\\bad url", "timeout" => 500}}})
+      source =
+        Mcp.load(%{
+          "mcpServers" => %{
+            "bad" => %{"type" => "remote", "url" => "htp:\\bad url", "timeout" => 500}
+          }
+        })
+
       send(self(), {:status, source.status})
     end)
 
@@ -439,12 +481,21 @@ defmodule Toolnexus.McpEdgeTest do
     on_exit(fn -> Mcp.close(source) end)
     assert source.status == %{"fixture" => "connected"}
 
-    result = find_tool(source, "fixture_getenv").execute.(%{"name" => "TOOLNEXUS_STDIO_EDGE"}, %Context{})
+    result =
+      find_tool(source, "fixture_getenv").execute.(
+        %{"name" => "TOOLNEXUS_STDIO_EDGE"},
+        %Context{}
+      )
+
     assert result.output == "edge-value"
   end
 
   test "stdio child killed externally: pending calls fail and later calls report closed" do
-    source = Mcp.load(%{"mcpServers" => %{"fixture" => %{"command" => fixture_cmd(), "timeout" => 20_000}}})
+    source =
+      Mcp.load(%{
+        "mcpServers" => %{"fixture" => %{"command" => fixture_cmd(), "timeout" => 20_000}}
+      })
+
     on_exit(fn -> Mcp.close(source) end)
 
     conn = source.connections["fixture"]
@@ -462,7 +513,11 @@ defmodule Toolnexus.McpEdgeTest do
   end
 
   test "calls after close map to rpc errors; os_pid on a dead connection is :error" do
-    source = Mcp.load(%{"mcpServers" => %{"fixture" => %{"command" => fixture_cmd(), "timeout" => 20_000}}})
+    source =
+      Mcp.load(%{
+        "mcpServers" => %{"fixture" => %{"command" => fixture_cmd(), "timeout" => 20_000}}
+      })
+
     conn = source.connections["fixture"]
     echo = find_tool(source, "fixture_echo")
 
@@ -484,10 +539,15 @@ defmodule Toolnexus.McpEdgeTest do
   end
 
   test "a stdio server that rejects initialize is a failed server" do
-    script = ~S(read init; printf '{"jsonrpc":"2.0","id":1,"error":{"code":-1,"message":"init refused"}}\n'; sleep 5)
+    script =
+      ~S(read init; printf '{"jsonrpc":"2.0","id":1,"error":{"code":-1,"message":"init refused"}}\n'; sleep 5)
 
     capture_log(fn ->
-      source = Mcp.load(%{"mcpServers" => %{"grump" => %{"command" => ["bash", "-c", script], "timeout" => 5_000}}})
+      source =
+        Mcp.load(%{
+          "mcpServers" => %{"grump" => %{"command" => ["bash", "-c", script], "timeout" => 5_000}}
+        })
+
       send(self(), {:status, source.status})
       Mcp.close(source)
     end)
@@ -507,7 +567,11 @@ defmodule Toolnexus.McpEdgeTest do
       sleep 60
       """
 
-    source = Mcp.load(%{"mcpServers" => %{"h" => %{"command" => ["bash", "-c", script], "timeout" => 400}}})
+    source =
+      Mcp.load(%{
+        "mcpServers" => %{"h" => %{"command" => ["bash", "-c", script], "timeout" => 400}}
+      })
+
     on_exit(fn -> Mcp.close(source) end)
     assert source.status == %{"h" => "connected"}
 
@@ -519,7 +583,11 @@ defmodule Toolnexus.McpEdgeTest do
   # --- elicitation edge paths ------------------------------------------------------------
 
   test "elicitation without a wait_for declines; a raising wait_for sends an error reply" do
-    source = Mcp.load(%{"mcpServers" => %{"fixture" => %{"command" => fixture_cmd(), "timeout" => 20_000}}})
+    source =
+      Mcp.load(%{
+        "mcpServers" => %{"fixture" => %{"command" => fixture_cmd(), "timeout" => 20_000}}
+      })
+
     on_exit(fn -> Mcp.close(source) end)
 
     # no wait_for at load → host declines
@@ -560,6 +628,10 @@ defmodule Toolnexus.McpEdgeTest do
 
     on_exit(fn -> Mcp.close(source) end)
     result = find_tool(source, "fixture_elicit").execute.(%{}, %Context{})
-    assert Jason.decode!(result.output) == %{"action" => "accept", "content" => %{"value" => "42"}}
+
+    assert Jason.decode!(result.output) == %{
+             "action" => "accept",
+             "content" => %{"value" => "42"}
+           }
   end
 end

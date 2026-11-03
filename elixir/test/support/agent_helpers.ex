@@ -104,7 +104,13 @@ defmodule Toolnexus.TestAgentHelpers do
         tools: [check_secret()]
       },
       "peer" => %{name: "peer", description: "team member", system_prompt: "", model: "m-peer"},
-      "looper" => %{name: "looper", description: "never finishes", system_prompt: "", model: "m-loop", tools: [lookup()]},
+      "looper" => %{
+        name: "looper",
+        description: "never finishes",
+        system_prompt: "",
+        model: "m-loop",
+        tools: [lookup()]
+      },
       "slow" => %{name: "slow", description: "slow worker", system_prompt: "", model: "m-slow"}
     }
 

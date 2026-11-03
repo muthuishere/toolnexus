@@ -228,6 +228,7 @@ defmodule Toolnexus.BeforeLlmContractTest do
       a = Agents.agent("m", does: "x", hooks: %{before_llm: hook})
 
       r = Agents.run(a, [transport: transport], "go")
+
       # fixture examples/agent-hooks H7: the handle boundary resolves an error result, never raises
       assert r.is_error and r.status == "error" and r.text =~ "hook boom"
       assert bodies(agent) == []

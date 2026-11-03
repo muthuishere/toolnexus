@@ -1582,6 +1582,9 @@
   (let [team (vec (sort (:team def-map)))]
     (native/native-tool
      {:name         "task"
+      ;; Each subagent is isolated and the runtime's own gate schedules the
+      ;; children, so a fan-out of task calls runs concurrently (SPEC §8).
+      :concurrency-safe (constantly true)
       :description  (task-description rt def-map)
       :input-schema task-input-schema
       :ctx?         true

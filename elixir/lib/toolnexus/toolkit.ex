@@ -97,7 +97,10 @@ defmodule Toolnexus.Toolkit do
           A2a.agent_tools(ag)
         rescue
           e ->
-            Logger.warning(~s([toolnexus] A2A agent "#{ag[:card]}" failed: #{Exception.message(e)}))
+            Logger.warning(
+              ~s([toolnexus] A2A agent "#{ag[:card]}" failed: #{Exception.message(e)})
+            )
+
             []
         end
       end)

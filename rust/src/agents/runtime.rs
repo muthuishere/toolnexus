@@ -1311,6 +1311,9 @@ impl Runtime {
         let rt = self.clone();
         let team = team.to_vec();
         Tool {
+            // Each subagent is isolated and the runtime's own gate schedules the
+            // children, so a fan-out of task calls runs concurrently (SPEC §8).
+            concurrency_safe: Some(std::sync::Arc::new(|_| true)),
             name: "task".into(),
             description: format!(
                 "Delegate a subtask to an isolated subagent. Available agents — {}",

@@ -1388,6 +1388,8 @@ func (rt *Runtime) taskTool(parent *Handle, team []string) tn.Tool {
 			"required": []any{"agent", "prompt"},
 		},
 		Source: tn.SourceCustom,
+		// Each subagent runs isolated, so a fan-out of task calls runs concurrently.
+		ConcurrencySafe: func(map[string]any) bool { return true },
 		Execute: func(args map[string]any, _ *tn.ToolContext) (tn.ToolResult, error) {
 			agentName, _ := args["agent"].(string)
 			prompt, _ := args["prompt"].(string)

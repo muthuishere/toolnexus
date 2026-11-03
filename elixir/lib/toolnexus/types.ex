@@ -154,9 +154,13 @@ defmodule Toolnexus.Tool do
   permission gate in `hooks.before_tool` (the event carries them as `:hints`).
   `nil` = unknown; treat as mutating. Builtins always carry hints; MCP tools carry
   them when the server sends annotations. Advisory, and never sent to the model.
+
+  `concurrency_safe` (`fn args -> boolean end`, optional) decides per call whether the
+  tool may run alongside other safe calls of one model response (SPEC §8 "Tool
+  scheduling"); `nil` ⇒ safe only when `hints.read_only`.
   """
   @enforce_keys [:name, :description, :input_schema, :source, :execute]
-  defstruct [:name, :description, :input_schema, :source, :execute, :hints]
+  defstruct [:name, :description, :input_schema, :source, :execute, :hints, :concurrency_safe]
 
   @type t :: %__MODULE__{
           name: String.t(),
@@ -164,7 +168,8 @@ defmodule Toolnexus.Tool do
           input_schema: map(),
           source: String.t(),
           execute: (map(), Toolnexus.Context.t() -> Toolnexus.ToolResult.t()),
-          hints: Toolnexus.ToolHints.t() | nil
+          hints: Toolnexus.ToolHints.t() | nil,
+          concurrency_safe: (map() -> boolean()) | nil
         }
 
   @doc "sanitize(x): replace every character outside [a-zA-Z0-9_-] with `_` (SPEC §0.2)."

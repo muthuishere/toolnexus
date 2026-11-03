@@ -22,6 +22,8 @@ defmodule Toolnexus.Native do
     * `:input_schema` — JSON schema map (default: empty object schema)
     * `:source` — tool source (default `"native"`)
     * `:execute` (required) — `fn args -> ... end` or `fn args, ctx -> ... end`
+    * `:hints` — `Toolnexus.ToolHints` (SPEC §4C)
+    * `:concurrency_safe` — `fn args -> boolean end` (SPEC §8 "Tool scheduling")
   """
   @spec define_tool(keyword() | map()) :: Tool.t()
   def define_tool(opts) do
@@ -33,6 +35,8 @@ defmodule Toolnexus.Native do
       description: Map.fetch!(opts, :description),
       input_schema: Map.get(opts, :input_schema) || @empty_schema,
       source: Map.get(opts, :source) || "native",
+      hints: Map.get(opts, :hints),
+      concurrency_safe: Map.get(opts, :concurrency_safe),
       execute: fn args, ctx ->
         try do
           case call_run(run, args || %{}, ctx) do

@@ -499,7 +499,12 @@ defmodule Toolnexus.ClassifierTest do
   # atom roster and its string equivalent are the SAME request. (Clojure's `str` kept
   # the sigil until it was fixed; this test is why the two ports now agree.)
   test "choice_over/2 sends an atom key as its plain name" do
-    q = Classifier.choice_over("Which desk?", %{billing: "money moved", shipping: "a parcel is late"})
+    q =
+      Classifier.choice_over("Which desk?", %{
+        billing: "money moved",
+        shipping: "a parcel is late"
+      })
+
     assert q.criteria == %{"billing" => "money moved", "shipping" => "a parcel is late"}
 
     assert Classifier.canonical_request("m", %{"r" => q}) ==

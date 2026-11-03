@@ -151,6 +151,10 @@ type Tool struct {
 	// them when the server sends annotations. Hints are advisory: a server can
 	// mislabel its tools.
 	Hints *ToolHints `json:"-"`
+	// ConcurrencySafe, when set, decides per call whether this tool may run
+	// alongside other safe calls of the same model response. nil ⇒ safe only
+	// when Hints.ReadOnly. See IsConcurrencySafe.
+	ConcurrencySafe func(args map[string]any) bool `json:"-"`
 }
 
 // ToolHints are advisory behavior hints (named after MCP tool annotations).

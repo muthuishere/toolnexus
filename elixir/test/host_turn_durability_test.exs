@@ -31,8 +31,16 @@ defmodule Toolnexus.HostTurnDurabilityTest do
             "role" => "assistant",
             "content" => nil,
             "tool_calls" => [
-              %{"id" => "c1", "type" => "function", "function" => %{"name" => "fast", "arguments" => "{}"}},
-              %{"id" => "c2", "type" => "function", "function" => %{"name" => "slow", "arguments" => "{}"}}
+              %{
+                "id" => "c1",
+                "type" => "function",
+                "function" => %{"name" => "fast", "arguments" => "{}"}
+              },
+              %{
+                "id" => "c2",
+                "type" => "function",
+                "function" => %{"name" => "slow", "arguments" => "{}"}
+              }
             ]
           }
         }
@@ -109,15 +117,24 @@ defmodule Toolnexus.HostTurnDurabilityTest do
     assert Enum.any?(msgs, &(&1["role"] == "user" and &1["content"] == "go"))
     assert [%{"tool_calls" => [_, _]}] = Enum.filter(msgs, &(&1["role"] == "assistant"))
     tools = Enum.filter(msgs, &(&1["role"] == "tool"))
+
     assert Enum.map(tools, &{&1["tool_call_id"], &1["content"]}) ==
-             [{"c1", "first-done"}, {"c2", "interrupted: the turn ended before this tool returned. Whether its side effects happened is unknown. Do not re-run it automatically; check first."}]
+             [
+               {"c1", "first-done"},
+               {"c2",
+                "interrupted: the turn ended before this tool returned. Whether its side effects happened is unknown. Do not re-run it automatically; check first."}
+             ]
   end
 
   defp assert_interrupted("anthropic", msgs) do
     assert [%{"role" => "user", "content" => "go"}, %{"role" => "assistant"}, last] = msgs
     assert %{"role" => "user", "content" => [b1, b2]} = last
     assert {b1["tool_use_id"], b1["content"], b1["is_error"]} == {"c1", "first-done", false}
-    assert {b2["tool_use_id"], b2["content"], b2["is_error"]} == {"c2", "interrupted: the turn ended before this tool returned. Whether its side effects happened is unknown. Do not re-run it automatically; check first.", true}
+
+    assert {b2["tool_use_id"], b2["content"], b2["is_error"]} ==
+             {"c2",
+              "interrupted: the turn ended before this tool returned. Whether its side effects happened is unknown. Do not re-run it automatically; check first.",
+              true}
   end
 
   # ---- interrupted turns are saved ----------------------------------------------
@@ -128,7 +145,14 @@ defmodule Toolnexus.HostTurnDurabilityTest do
     test "#{style}: ask cancelled mid second tool saves prompt, pair, and interrupted result" do
       me = self()
       store = InMemoryConversationStore.new()
-      c = client(@style, fn _ -> {:ok, %{status: 200, headers: %{}, body: two_calls(@style, false)}} end, store)
+
+      c =
+        client(
+          @style,
+          fn _ -> {:ok, %{status: 200, headers: %{}, body: two_calls(@style, false)}} end,
+          store
+        )
+
       tk = toolkit(me)
 
       {pid, mon} = spawn_monitor(fn -> Client.ask(c, "go", tk, id: "t") end)
@@ -144,7 +168,13 @@ defmodule Toolnexus.HostTurnDurabilityTest do
     test "#{style}: stream halted mid second tool saves the same transcript" do
       me = self()
       store = InMemoryConversationStore.new()
-      c = client(@style, fn _ -> {:ok, %{status: 200, headers: %{}, body: two_calls(@style, true)}} end, store)
+
+      c =
+        client(
+          @style,
+          fn _ -> {:ok, %{status: 200, headers: %{}, body: two_calls(@style, true)}} end,
+          store
+        )
 
       c
       |> Client.stream("go", toolkit(me), id: "t")
@@ -162,7 +192,11 @@ defmodule Toolnexus.HostTurnDurabilityTest do
     end
 
     test "#{style}: provider error on the first call saves prior + prompt; error still raised" do
-      prior = [%{"role" => "user", "content" => "earlier"}, %{"role" => "assistant", "content" => "ok"}]
+      prior = [
+        %{"role" => "user", "content" => "earlier"},
+        %{"role" => "assistant", "content" => "ok"}
+      ]
+
       bad = fn _ -> {:ok, %{status: 401, headers: %{}, body: %{"error" => "bad key"}}} end
 
       for mode <- [:ask, :stream] do
@@ -185,7 +219,16 @@ defmodule Toolnexus.HostTurnDurabilityTest do
 
   test "a successful stateful turn saves once and the guard stands down" do
     store = InMemoryConversationStore.new()
-    ok = fn _ -> {:ok, %{status: 200, headers: %{}, body: %{"choices" => [%{"message" => %{"role" => "assistant", "content" => "hi"}}]}}} end
+
+    ok = fn _ ->
+      {:ok,
+       %{
+         status: 200,
+         headers: %{},
+         body: %{"choices" => [%{"message" => %{"role" => "assistant", "content" => "hi"}}]}
+       }}
+    end
+
     r = Client.ask(client("openai", ok, store), "go", [], id: "s")
     assert r.text == "hi"
     assert List.last(InMemoryConversationStore.get(store, "s"))["content"] == "hi"
@@ -193,9 +236,17 @@ defmodule Toolnexus.HostTurnDurabilityTest do
   end
 
   test "repair leaves complete transcripts alone" do
-    msgs = [%{"role" => "user", "content" => "x"}, %{"role" => "assistant", "content" => [%{"type" => "text", "text" => "y"}]}]
+    msgs = [
+      %{"role" => "user", "content" => "x"},
+      %{"role" => "assistant", "content" => [%{"type" => "text", "text" => "y"}]}
+    ]
+
     assert TurnGuard.repair(msgs, "anthropic", %{}) == msgs
-    assert TurnGuard.repair([%{"role" => "user", "content" => "x"}], "anthropic", %{}) == [%{"role" => "user", "content" => "x"}]
+
+    assert TurnGuard.repair([%{"role" => "user", "content" => "x"}], "anthropic", %{}) == [
+             %{"role" => "user", "content" => "x"}
+           ]
+
     assert TurnGuard.repair(msgs, "openai", %{}) == msgs
   end
 
@@ -249,7 +300,11 @@ defmodule Toolnexus.HostTurnDurabilityTest do
     else
       times = for _ <- 1..10, do: cancel_once(%{"killGraceMs" => 100}, dir)
       sorted = Enum.sort(times)
-      IO.puts("\nkillGraceMs=100 cancel->gone ms: min=#{hd(sorted)} median=#{Enum.at(sorted, 5)} max=#{List.last(sorted)} all=#{inspect(times)}")
+
+      IO.puts(
+        "\nkillGraceMs=100 cancel->gone ms: min=#{hd(sorted)} median=#{Enum.at(sorted, 5)} max=#{List.last(sorted)} all=#{inspect(times)}"
+      )
+
       assert List.last(sorted) < 1_000
 
       # absent / 0 keeps the 2000 ms default
@@ -266,7 +321,13 @@ defmodule Toolnexus.HostTurnDurabilityTest do
   @tag :tmp_dir
   test "edit of one line reports modified 1/1 with the -/+ lines", %{tmp_dir: dir} do
     File.write!(Path.join(dir, "f.txt"), "a\nold\nc\n")
-    r = tool(%{base_dir: dir}, "edit").execute.(%{"path" => "f.txt", "oldString" => "old", "newString" => "new"}, nil)
+
+    r =
+      tool(%{base_dir: dir}, "edit").execute.(
+        %{"path" => "f.txt", "oldString" => "old", "newString" => "new"},
+        nil
+      )
+
     refute r.is_error
     assert r.output == "Edited f.txt (1 replacement)"
     assert r.metadata.replacements == 1
@@ -284,7 +345,10 @@ defmodule Toolnexus.HostTurnDurabilityTest do
     assert r.metadata.diff =~ "--- /dev/null\n+++ b/sub/n.txt\n@@ -0,0 +1,3 @@\n+1\n+2\n+3\n"
 
     r = w.execute.(%{"path" => "sub/n.txt", "content" => "1\n2\n3\n"}, nil)
-    assert r.metadata.files == [%{path: "sub/n.txt", status: "modified", additions: 0, deletions: 0}]
+
+    assert r.metadata.files == [
+             %{path: "sub/n.txt", status: "modified", additions: 0, deletions: 0}
+           ]
   end
 
   @tag :tmp_dir
@@ -338,13 +402,21 @@ defmodule Toolnexus.HostTurnDurabilityTest do
     transport = fn _ ->
       body =
         if Agent.get_and_update(n, &{&1, &1 + 1}) == 0,
-          do: sse([~s({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"x","function":{"name":"m","arguments":"{}"}}]}}]}), "[DONE]"]),
+          do:
+            sse([
+              ~s({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"x","function":{"name":"m","arguments":"{}"}}]}}]}),
+              "[DONE]"
+            ]),
           else: sse([~s({"choices":[{"delta":{"content":"done"}}]}), "[DONE]"])
 
       {:ok, %{status: 200, headers: %{}, body: body}}
     end
 
-    events = client("openai", transport, InMemoryConversationStore.new()) |> Client.stream("go", tk) |> Enum.to_list()
+    events =
+      client("openai", transport, InMemoryConversationStore.new())
+      |> Client.stream("go", tk)
+      |> Enum.to_list()
+
     assert %{metadata: %{k: 1}} = Enum.find(events, &(&1.type == "tool_result"))
   end
 end

@@ -2,7 +2,9 @@
 
 ## Purpose
 TBD - created by archiving change add-subagents. Update Purpose after archive.
+
 ## Requirements
+
 ### Requirement: Handle state machine pins transitions, never scheduling
 A live agent SHALL be represented by a Handle with state `idle | running | suspended |
 closed` and an inbox held as agent state (not a runtime/language mailbox). Transitions
@@ -320,3 +322,9 @@ attribute metric events to the agent that produced them.
 - **THEN** the client is constructed with no hooks and the turn is byte-identical to a run with
   the capability absent
 
+### Requirement: Background runs by composition
+The runtime SHALL support running a subagent in the background with the existing verbs: `spawn` SHALL return a handle whose id is available at once, `wake` SHALL return without waiting for the turn, and `wait` SHALL deliver the next settle with its full `TaskResult`, so a host can call its own completion callback from a background `wait`.
+
+#### Scenario: Background completion
+- **WHEN** a host spawns and wakes an agent, then waits on it from a background task
+- **THEN** wake returns at once with the id known, and the background wait receives the done result

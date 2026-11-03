@@ -169,6 +169,13 @@
           "tooltiers"
         ],
         "tier": "full"
+      },
+      {
+        "name": "maxToolConcurrency",
+        "aliases": [
+          "maxtoolconcurrency"
+        ],
+        "tier": "full"
       }
     ]
   },

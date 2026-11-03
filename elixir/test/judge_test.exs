@@ -10,20 +10,32 @@ defmodule Toolnexus.JudgeTest do
   defp load(n), do: @dir |> Path.join(n) |> File.read!() |> Jason.decode!()
 
   defp build(%{"kind" => "noul", "name" => n, "instructions" => i}), do: noul(n, i)
-  defp build(%{"kind" => "choice", "name" => n, "instructions" => i, "options" => o}), do: choice(n, i, o)
-  defp build(%{"kind" => "score", "name" => n, "instructions" => i, "levels" => l}), do: score(n, i, l)
+
+  defp build(%{"kind" => "choice", "name" => n, "instructions" => i, "options" => o}),
+    do: choice(n, i, o)
+
+  defp build(%{"kind" => "score", "name" => n, "instructions" => i, "levels" => l}),
+    do: score(n, i, l)
 
   defp qmap(wire) do
     Map.new(wire, fn
-      {k, %{"type" => "noul"} = q} -> {k, %C.Noul{instructions: q["instructions"], criteria: q["criteria"]}}
-      {k, %{"type" => "choice"} = q} -> {k, %C.Choice{instructions: q["instructions"], criteria: q["criteria"]}}
-      {k, %{"type" => "score"} = q} -> {k, %C.Score{instructions: q["instructions"], criteria: q["criteria"]}}
+      {k, %{"type" => "noul"} = q} ->
+        {k, %C.Noul{instructions: q["instructions"], criteria: q["criteria"]}}
+
+      {k, %{"type" => "choice"} = q} ->
+        {k, %C.Choice{instructions: q["instructions"], criteria: q["criteria"]}}
+
+      {k, %{"type" => "score"} = q} ->
+        {k, %C.Score{instructions: q["instructions"], criteria: q["criteria"]}}
     end)
   end
 
   # ------------------------------------------------------------ state cases
 
-  for %{"name" => name} = kase <- Jason.decode!(File.read!(Path.expand("../../examples/judge/adapters/state-cases.json", __DIR__)))["cases"] do
+  for %{"name" => name} = kase <-
+        Jason.decode!(
+          File.read!(Path.expand("../../examples/judge/adapters/state-cases.json", __DIR__))
+        )["cases"] do
     @kase kase
     test "state case #{name}" do
       k = @kase
@@ -51,7 +63,9 @@ defmodule Toolnexus.JudgeTest do
 
   test "duplicate name: no request is sent" do
     {:ok, c} = C.create(style: "custom", evaluate: fn _, _ -> flunk("request sent") end)
-    assert {:error, "duplicate question name \"x\""} = ask(c, %{}, [noul(:x, "a"), noul("x", "b")])
+
+    assert {:error, "duplicate question name \"x\""} =
+             ask(c, %{}, [noul(:x, "a"), noul("x", "b")])
   end
 
   test "State(role, data) and non-object wrapping" do
@@ -85,12 +99,17 @@ defmodule Toolnexus.JudgeTest do
   end
 
   test "question_to_wire is public" do
-    assert C.question_to_wire(%C.Noul{instructions: "i"}) == %{"type" => "noul", "instructions" => "i"}
+    assert C.question_to_wire(%C.Noul{instructions: "i"}) == %{
+             "type" => "noul",
+             "instructions" => "i"
+           }
   end
 
   # ------------------------------------------------------------ gate cases
 
-  @gate Jason.decode!(File.read!(Path.expand("../../examples/judge/adapters/gate-cases.json", __DIR__)))
+  @gate Jason.decode!(
+          File.read!(Path.expand("../../examples/judge/adapters/gate-cases.json", __DIR__))
+        )
 
   for %{"name" => name} = kase <- @gate["cases"] do
     @kase kase
@@ -105,8 +124,16 @@ defmodule Toolnexus.JudgeTest do
 
       rules =
         case k["policy"] do
-          nil -> rules
-          p -> %Policy{rules: rules, default: p["default"], bands: k["bands"], skip_uncertain: p["skipUncertain"]}
+          nil ->
+            rules
+
+          p ->
+            %Policy{
+              rules: rules,
+              default: p["default"],
+              bands: k["bands"],
+              skip_uncertain: p["skipUncertain"]
+            }
         end
 
       assert {:ok, %Outcome{} = o} = gate(c, st, qs, rules, opts)
@@ -154,8 +181,16 @@ defmodule Toolnexus.JudgeTest do
   end
 
   test "context/2 is context/3 with no extra fields; extra keys are stringified" do
-    assert Judge.context("support chat", "hi") == %{"context" => "support chat", "message" => "hi"}
-    assert Judge.context("c", "m", %{tier: "gold"}) == %{"context" => "c", "message" => "m", "tier" => "gold"}
+    assert Judge.context("support chat", "hi") == %{
+             "context" => "support chat",
+             "message" => "hi"
+           }
+
+    assert Judge.context("c", "m", %{tier: "gold"}) == %{
+             "context" => "c",
+             "message" => "m",
+             "tier" => "gold"
+           }
   end
 
   test "missing answer reason names it" do
@@ -165,7 +200,8 @@ defmodule Toolnexus.JudgeTest do
 
   # ------------------------------------------------------------ bands / answers
 
-  defp noul_ans(p, b \\ nil), do: answers(%C.Decision{answers: %{"q" => %C.NoulAnswer{noul: p}}}, b)["q"]
+  defp noul_ans(p, b \\ nil),
+    do: answers(%C.Decision{answers: %{"q" => %C.NoulAnswer{noul: p}}}, b)["q"]
 
   test "bands: exclusive cut-points, custom override, value/choice" do
     assert noul_ans(0.30).band == :uncertain
@@ -183,7 +219,13 @@ defmodule Toolnexus.JudgeTest do
     assert Answer.choice(a) == "a"
     assert Answer.value(a) == 0.8
     assert answers(%C.Decision{answers: %{"c" => %{ch | near_uniform: false}}})["c"].sure
-    assert Answer.value(answers(%C.Decision{answers: %{"s" => %C.ScoreAnswer{score: 1.5, confidence: 0.9}}})["s"]) == 1.5
+
+    assert Answer.value(
+             answers(%C.Decision{answers: %{"s" => %C.ScoreAnswer{score: 1.5, confidence: 0.9}}})[
+               "s"
+             ]
+           ) == 1.5
+
     assert Judge.default_bands() == %{low: 0.30, high: 0.70}
   end
 
@@ -196,9 +238,15 @@ defmodule Toolnexus.JudgeTest do
 
   test "Policy: no rule fired escalates; default fires; skip_uncertain" do
     a = %{"u" => noul_ans(0.5), "y" => noul_ans(0.9)}
-    rules = [%{question: "u", at_least: 0.5, action: "first"}, %{question: "y", at_least: 0.8, action: "second"}]
 
-    o = decide(%{"y" => noul_ans(0.9)}, %Policy{rules: [%{question: "y", below: 0.1, action: "x"}]})
+    rules = [
+      %{question: "u", at_least: 0.5, action: "first"},
+      %{question: "y", at_least: 0.8, action: "second"}
+    ]
+
+    o =
+      decide(%{"y" => noul_ans(0.9)}, %Policy{rules: [%{question: "y", below: 0.1, action: "x"}]})
+
     assert o.escalated and o.request.data["reason"] == "no rule fired"
 
     assert %Outcome{action: "go", escalated: false} =
@@ -207,15 +255,23 @@ defmodule Toolnexus.JudgeTest do
     assert %Outcome{escalated: true} = decide(a, %Policy{rules: rules})
     assert %Outcome{action: "second"} = decide(a, %Policy{rules: rules, skip_uncertain: true})
 
-    {:ok, c} = Judge.static(%{"s" => 1}, [noul(:y, "y?")], %{"answers" => %{"y" => %{"type" => "noul", "noul" => 0.9}}})
-    assert {:ok, %Outcome{action: "ok"}} = gate(c, %{s: 1}, [noul(:y, "y?")], %Policy{default: "ok"})
+    {:ok, c} =
+      Judge.static(%{"s" => 1}, [noul(:y, "y?")], %{
+        "answers" => %{"y" => %{"type" => "noul", "noul" => 0.9}}
+      })
+
+    assert {:ok, %Outcome{action: "ok"}} =
+             gate(c, %{s: 1}, [noul(:y, "y?")], %Policy{default: "ok"})
   end
 
   # ------------------------------------------------------------ Tape
 
   test "Tape records and replays by call name; a miss names the key" do
     qs = [noul(:y, "y?")]
-    {:ok, live} = Judge.static(%{"s" => 1}, qs, %{"answers" => %{"y" => %{"type" => "noul", "noul" => 0.9}}})
+
+    {:ok, live} =
+      Judge.static(%{"s" => 1}, qs, %{"answers" => %{"y" => %{"type" => "noul", "noul" => 0.9}}})
+
     tape = Tape.new()
     {:ok, rec} = Tape.record(tape, :plan, live)
     {:ok, a1} = ask(rec, %{s: 1}, qs)
@@ -236,7 +292,11 @@ defmodule Toolnexus.JudgeTest do
         evaluate: fn %{"i" => i}, _ ->
           if i == 1, do: Process.sleep(20)
           if i == 98, do: Process.sleep(30)
-          if i in [98, 99], do: {:error, "boom"}, else: C.decode_decision(%{"answers" => %{"q" => %{"type" => "noul", "noul" => i / 10}}})
+
+          if i in [98, 99],
+            do: {:error, "boom"},
+            else:
+              C.decode_decision(%{"answers" => %{"q" => %{"type" => "noul", "noul" => i / 10}}})
         end
       )
 
@@ -245,19 +305,32 @@ defmodule Toolnexus.JudgeTest do
 
   test "evaluate_batch returns decisions in state order" do
     qs = %{"q" => %C.Noul{instructions: "q?"}}
-    {:ok, ds} = C.evaluate_batch(batch_classifier(), [%{"i" => 1}, %{"i" => 2}, %{"i" => 3}], qs, concurrency: 3)
+
+    {:ok, ds} =
+      C.evaluate_batch(batch_classifier(), [%{"i" => 1}, %{"i" => 2}, %{"i" => 3}], qs,
+        concurrency: 3
+      )
+
     assert Enum.map(ds, & &1.answers["q"].noul) == [0.1, 0.2, 0.3]
   end
 
   test "evaluate_batch fails closed naming the index" do
     qs = %{"q" => %C.Noul{instructions: "q?"}}
-    assert {:error, msg} = C.evaluate_batch(batch_classifier(), [%{"i" => 1}, %{"i" => 99}, %{"i" => 3}], qs)
+
+    assert {:error, msg} =
+             C.evaluate_batch(batch_classifier(), [%{"i" => 1}, %{"i" => 99}, %{"i" => 3}], qs)
+
     assert msg =~ "state 1"
   end
 
   test "evaluate_batch names the lowest failing index whatever the completion order" do
     qs = %{"q" => %C.Noul{instructions: "q?"}}
-    assert {:error, msg} = C.evaluate_batch(batch_classifier(), [%{"i" => 98}, %{"i" => 2}, %{"i" => 99}], qs, concurrency: 3)
+
+    assert {:error, msg} =
+             C.evaluate_batch(batch_classifier(), [%{"i" => 98}, %{"i" => 2}, %{"i" => 99}], qs,
+               concurrency: 3
+             )
+
     assert msg =~ "state 0"
     refute msg =~ "state 2"
   end

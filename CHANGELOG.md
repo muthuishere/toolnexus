@@ -41,6 +41,37 @@ URLs (a2e's last 3–30 days — save them yourself for now), cancelling the job
 injection, webhooks, price quotes, pausing a long job through `waitFor`, and streaming `file`
 events. Realtime/live voice conversation is deliberately out of scope.
 
+### Tool scheduling: reads run together, writes run alone (all eight ports)
+
+The tool calls of one model response no longer all run at once. Before, every call started
+immediately with no limit, so two `write` / `edit` calls on one file could race and a response
+with forty reads opened forty at once. Now each call is **safe** or **unsafe**: a tool's own
+`concurrencySafe(args)` predicate decides, otherwise only a tool whose hints say `readOnly` is
+safe. Calls run in emitted order: a run of safe calls overlaps, an unsafe call runs alone after
+everything before it and before anything after it. Results and the transcript keep emitted
+order, as before. New client option **`maxToolConcurrency`** (default 10; env
+`TOOLNEXUS_MAX_TOOL_CONCURRENCY` overrides the default, the option overrides both) caps how many
+safe calls run at once. It applies to run and stream, both styles, resume paths and agent runs,
+and to the in-process client. Relay tools and the subagent `task` tool always run concurrently.
+SPEC §8 "Tool scheduling"; change `openspec/changes/add-tool-concurrency`; recipe page
+`cookbook/tool-scheduling`.
+
+- **Behaviour change:** a tool **without hints** (most `defineTool` / HTTP tools, MCP tools
+  whose server sends no `readOnlyHint`) is now unsafe and runs alone. Mark it read-only or give
+  it a predicate to keep it parallel.
+- **rust only, source break:** `Tool` gained a `concurrency_safe` field, so a `Tool { .. }`
+  struct literal must add `concurrency_safe: None` (or use `..` from another tool).
+  `define_tool` callers are unaffected.
+- **Not done:** the cap is per response, not per tool; `todowrite` keeps its `readOnly` hint, so
+  two `todowrite` calls in one response may still overlap (last writer wins, as before).
+
+### Background subagents: a documented recipe (all eight ports)
+
+Running a subagent in the background — an id back at once, a callback when it finishes — needs
+no new API: `spawn` returns the id, `wake` returns before the turn ends, and a `wait` in a
+background task delivers the result. SPEC §7D "Background runs" documents it and each port now
+pins it with a test.
+
 ## 0.23.0 — 2026-11-02
 
 **Docs: Rust is on every page, and the docs now say eight languages.** Every tabbed guide,

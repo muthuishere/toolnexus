@@ -48,7 +48,7 @@ defmodule Toolnexus.Agents.RuntimeInfraTest do
     delta =
       Enum.reduce_while(1..20, nil, fn _, _ ->
         d = length(Process.list()) - before_count
-        if d <= 2, do: {:halt, d}, else: (Process.sleep(50) && {:cont, d})
+        if d <= 2, do: {:halt, d}, else: Process.sleep(50) && {:cont, d}
       end)
 
     assert delta <= 2, "no leaked store/metrics processes from turns (delta #{delta})"
@@ -66,7 +66,14 @@ defmodule Toolnexus.Agents.RuntimeInfraTest do
     Runtime.shutdown(rt)
     Process.sleep(20)
 
-    for {name, pid} <- [sup: ctx.sup, gate: ctx.gate, trace: ctx.trace, metrics: ctx.metrics, store: store_pid, handle: peer] do
+    for {name, pid} <- [
+          sup: ctx.sup,
+          gate: ctx.gate,
+          trace: ctx.trace,
+          metrics: ctx.metrics,
+          store: store_pid,
+          handle: peer
+        ] do
       refute Process.alive?(pid), "#{name} still alive after shutdown"
     end
   end
@@ -92,7 +99,9 @@ defmodule Toolnexus.Agents.RuntimeInfraTest do
 
     TestVirtualClock.advance(vc, 1_000)
     r = Task.await(w, 1_000)
-    assert r.is_error and r.text =~ "wait timeout after 1000ms", "virtual-clock timeout fired: #{r.text}"
+
+    assert r.is_error and r.text =~ "wait timeout after 1000ms",
+           "virtual-clock timeout fired: #{r.text}"
 
     Runtime.close(rt, force: true)
     Runtime.shutdown(rt)
@@ -104,7 +113,9 @@ defmodule Toolnexus.Agents.RuntimeInfraTest do
 
     # a handle-scoped caller that did not spawn `a` is refused
     refused = Handle.wait(a, nil, as: "root/somebody-else.1")
-    assert refused.is_error and refused.text =~ "wait is spawner-only", "sibling wait refused: #{refused.text}"
+
+    assert refused.is_error and refused.text =~ "wait is spawner-only",
+           "sibling wait refused: #{refused.text}"
 
     # the spawner's id is accepted; the host (default) is accepted
     Runtime.wake(rt, a, "1. go")
@@ -123,6 +134,7 @@ defmodule Toolnexus.Agents.RuntimeInfraTest do
     # a wait AFTER completion answers immediately with the last result
     t0 = System.monotonic_time(:millisecond)
     r = Runtime.wait(rt, peer, 5_000)
+
     assert r.status == "done" and System.monotonic_time(:millisecond) - t0 < 100,
            "wait after completion answered immediately"
 
@@ -133,6 +145,7 @@ defmodule Toolnexus.Agents.RuntimeInfraTest do
 
     # a NEW wait on the already-suspended handle answers immediately with its pending
     r2 = Runtime.wait(rt, p, 5_000)
+
     assert r2.status == "pending" and r2.pending.kind == "approval",
            "wait on a suspended handle answered immediately with its pending"
 
@@ -214,7 +227,10 @@ defmodule Toolnexus.Agents.RuntimeInfraTest do
     {:ok, e} = Runtime.spawn_agent(rt, Runtime.root(rt), "explore", %{max_tool_calls: 1})
     assert Runtime.run_turn(rt, e, "go").status == "done"
     r = Runtime.run_turn(rt, e, "go again")
-    assert r.status == "incomplete" and r.text =~ "maxToolCalls", "maxToolCalls stop is loud: #{r.text}"
+
+    assert r.status == "incomplete" and r.text =~ "maxToolCalls",
+           "maxToolCalls stop is loud: #{r.text}"
+
     Runtime.shutdown(rt)
 
     vc = TestVirtualClock.new()
@@ -230,7 +246,10 @@ defmodule Toolnexus.Agents.RuntimeInfraTest do
     assert Runtime.run_turn(rt2, p, "1. go").status == "done"
     TestVirtualClock.advance(vc, 1_000)
     r2 = Runtime.run_turn(rt2, p, "1. late")
-    assert r2.status == "incomplete" and r2.text =~ "maxWallMs", "maxWallMs stop is loud: #{r2.text}"
+
+    assert r2.status == "incomplete" and r2.text =~ "maxWallMs",
+           "maxWallMs stop is loud: #{r2.text}"
+
     Runtime.shutdown(rt2)
   end
 
@@ -246,6 +265,7 @@ defmodule Toolnexus.Agents.RuntimeInfraTest do
 
     # the refusal SETTLED the handle — wait answers immediately, never hangs
     r = Runtime.wait(rt, e, 1_000)
+
     assert r.status == "incomplete" and r.limit == "maxTokens",
            "refused wake settled with incomplete: #{inspect(r)}"
 
@@ -263,11 +283,18 @@ defmodule Toolnexus.Agents.RuntimeInfraTest do
   end
 
   test "as_tool §10 bridge: a durably suspending agent surfaces pending; retry with ctx.answer resumes" do
-    asker = Agents.agent("asker", %{does: "needs approvals", uses: %{tools: [check_secret()]}, model: "m-asker"})
+    asker =
+      Agents.agent("asker", %{
+        does: "needs approvals",
+        uses: %{tools: [check_secret()]},
+        model: "m-asker"
+      })
+
     tool = Agents.as_tool(asker, %{transport: Mock.transport(&Mock.demo/1)})
 
     # without an answer: the agent suspends durably → §10 pending tool result
     r1 = tool.execute.(%{"prompt" => "get the secret"}, %Toolnexus.Context{})
+
     assert r1.is_error and match?(%Toolnexus.Request{kind: "approval"}, r1.metadata.pending),
            "agent suspension rides metadata.pending"
 

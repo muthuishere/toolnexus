@@ -1291,6 +1291,22 @@ port adds a turns roll-up** — that would be new behaviour, not a parity fix, a
 **There is no `ownTurns`.** With no roll-up, `turns` already IS the own-figure; a second spelling
 of the same number would only invite a roll-up to justify it.
 
+### Background runs (a recipe, not a new verb)
+
+A host that wants a subagent to run in the background — an id back at once, a callback when it
+finishes, so it can tell the parent turn — composes the six verbs; there is no seventh:
+
+```
+h = runtime.spawn(parent, "researcher")      // h.id is the id to hand back
+runtime.wake(h, prompt)                      // returns at once; the turn runs
+in the background: r = runtime.wait(h); onDone(h.id, r)   // goroutine / task / Task / spawn
+```
+
+`wake` never blocks on the turn, and `wait` delivers exactly the next settle (`done`, `pending`,
+`error`, …) with the full `TaskResult`. A host that needs the parent model to learn of it posts
+the result to the parent with `post` (the inbox rail) and wakes it. Pinned by a test in every
+port (`examples/` has no fixture: the recipe adds no observable behaviour).
+
 ### Suspension escalation & durable resume
 
 A suspending child agent presents to its parent EXACTLY as a suspending tool — §10
@@ -1751,6 +1767,41 @@ Loop (identical for both styles, only wire-format differs):
 
 This makes "bring any OpenAI- or Anthropic-style endpoint + point at mcp.json/skills =
 working agent" a few lines in any of the three languages.
+
+### Tool scheduling (change `add-tool-concurrency`)
+
+The tool calls of one model response do not all run at once. Each call is **concurrency-safe**
+or **unsafe**, decided per call (name + parsed arguments):
+
+1. A tool MAY carry its own predicate `concurrencySafe(args) -> bool` (idiomatic name per port);
+   when present it decides.
+2. Otherwise a tool is safe **only** when its `ToolHints` say `readOnly`. A tool with no hints is
+   **unsafe** (conservative: an unlabelled native, HTTP or MCP tool may write).
+3. With tool tiers on, `tool_search` is safe and `call_tool` takes the safety of the tool it
+   names (with its `arguments`). An unknown tool is unsafe.
+4. Built-ins follow their hints: `read`, `grep`, `glob`, `webfetch`, `websearch`, `question`,
+   `todowrite`, `bash_output` are safe; `bash`, `write`, `edit`, `apply_patch`,
+   `notebook_edit`, `kill_shell` are unsafe.
+5. Two library tools set the predicate to always-safe: **relay tools** (the host executes them,
+   and every relay call of a turn surfaces in one Request, §10) and the §7D **`task`** tool (each
+   subagent is isolated, and the runtime's own per-parent concurrency gate schedules the children).
+
+The calls, in the order the model emitted them, are split into consecutive runs. A run of safe
+calls executes concurrently, at most **`maxToolConcurrency`** at once. An unsafe call waits for
+every earlier call to finish, runs **alone**, and no later call starts until it finishes. Results,
+`RunResult.toolCalls`, and the transcript keep the **emitted order**, exactly as before; the
+schedule changes timing only. Suspension is unchanged: when several calls suspend, the first in
+emitted order wins (§10).
+
+`maxToolConcurrency` is a client option (also on the in-process client). Resolution: a positive
+option value wins; else the environment variable **`TOOLNEXUS_MAX_TOOL_CONCURRENCY`** when it
+parses as a positive integer; else **10**. Zero, negative or non-numeric values fall back. The
+schedule applies in every loop that runs tools: `run` and `stream`, both styles, the resume paths
+(`runWithAnswer` / `askWithAnswer`), and §7D agent runs (they run through this loop).
+
+Before this change every call of a response ran concurrently with no cap, so two `write` calls on
+one file could race. A host that relied on unlabelled tools running in parallel marks them
+`readOnly` or gives them a predicate.
 
 ### Hooks (lifecycle middleware)
 

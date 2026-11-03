@@ -811,3 +811,21 @@ test("§8 addendum: a maxTurns stop with no final text is status incomplete on t
   assert.equal(done.status, "done")
   assert.equal(done.limit, undefined)
 })
+
+// SPEC §7D "Background runs": spawn + wake return at once with the id; a background wait
+// delivers the completion to the host's callback. No new API; this pins the recipe.
+test("background run recipe: id at once, completion via a background wait", async () => {
+  const fx = fixture("subagent-fanout")
+  const runtime = rt()
+  const h = runtime.spawn(runtime.root, "coordinator")
+  assert.ok(!isVerbError(h))
+  assert.ok(runtime.wake(h, fx.run.prompt).ok)
+  assert.ok(h.id, "the handle id is available at once")
+  const completed = new Promise<{ id: string; status: string; text: string }>((resolve) => {
+    void runtime.wait(h).then((r) => resolve({ id: h.id, status: r.status, text: r.text })) // onDone(id, r)
+  })
+  const got = await completed
+  assert.equal(got.id, h.id)
+  assert.equal(got.status, "done")
+  assert.match(got.text, /found:/)
+})

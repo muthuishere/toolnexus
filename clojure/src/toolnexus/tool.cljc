@@ -22,12 +22,15 @@
                for a host permission gate; passed on `:before-tool` events as
                `:hints`. nil = unknown (treat as mutating). Never serialized into
                any adapter output.
+    :concurrency-safe  (fn [args] bool) — decides per call whether this tool may
+               run alongside other safe calls of one model response (SPEC §8
+               Tool scheduling). Absent ⇒ safe only when `:hints :read-only`.
     :context?  true when `execute` has the (args ctx) arity and wants the loop's
                ToolContext on EVERY call — `{:call-id :cancel}` (plus `:answer`
                on a §10 re-run). Absent, the loop calls (execute args) exactly as
                before: there is no portable way to ask a fn its arity, and a
                single-arity tool handed a ctx would fail."
-  [{:keys [name description input-schema source execute hints context?]}]
+  [{:keys [name description input-schema source execute hints context? concurrency-safe]}]
   {:pre [(some? name) (fn? execute)]}
   (cond-> {:name        (str name)
            :description (or description "")
@@ -35,7 +38,19 @@
            :source      (or source "custom")
            :execute     execute}
     hints    (assoc :hints hints)
-    context? (assoc :context? true)))
+    context? (assoc :context? true)
+    concurrency-safe (assoc :concurrency-safe concurrency-safe)))
+
+(defn concurrency-safe?
+  "SPEC §8 \"Tool scheduling\" — may a call to tool `t` with `args` run alongside
+  other safe calls of the same model response? The tool's own `:concurrency-safe`
+  predicate wins; otherwise only a tool whose hints say `:read-only`. A tool
+  without hints (or nil) is unsafe."
+  [t args]
+  (cond
+    (nil? t) false
+    (:concurrency-safe t) (true? ((:concurrency-safe t) args))
+    :else (true? (get-in t [:hints :read-only]))))
 
 (defn success
   "A successful ToolResult (SPEC §0.1).

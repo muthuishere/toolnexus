@@ -13,7 +13,11 @@ defmodule Toolnexus.MultimodalTest do
 
   @fixture Path.expand("../../examples/media/fixture.png", __DIR__)
 
-  defp golden, do: Path.expand("../../examples/media/fixture.png.base64", __DIR__) |> File.read!() |> String.trim()
+  defp golden,
+    do:
+      Path.expand("../../examples/media/fixture.png.base64", __DIR__)
+      |> File.read!()
+      |> String.trim()
 
   defp image_part, do: ContentPart.image!(@fixture)
 
@@ -32,7 +36,11 @@ defmodule Toolnexus.MultimodalTest do
             "content" => nil,
             "tool_calls" =>
               Enum.map(calls, fn {id, name} ->
-                %{"id" => id, "type" => "function", "function" => %{"name" => name, "arguments" => "{}"}}
+                %{
+                  "id" => id,
+                  "type" => "function",
+                  "function" => %{"name" => name, "arguments" => "{}"}
+                }
               end)
           },
           "finish_reason" => "tool_calls"
@@ -42,11 +50,15 @@ defmodule Toolnexus.MultimodalTest do
     }
   end
 
-  defp anthropic_text(text), do: %{"content" => [%{"type" => "text", "text" => text}], "usage" => %{}}
+  defp anthropic_text(text),
+    do: %{"content" => [%{"type" => "text", "text" => text}], "usage" => %{}}
 
   defp anthropic_uses(uses) do
     %{
-      "content" => Enum.map(uses, fn {id, name} -> %{"type" => "tool_use", "id" => id, "name" => name, "input" => %{}} end),
+      "content" =>
+        Enum.map(uses, fn {id, name} ->
+          %{"type" => "tool_use", "id" => id, "name" => name, "input" => %{}}
+        end),
       "stop_reason" => "tool_use",
       "usage" => %{}
     }
@@ -58,7 +70,9 @@ defmodule Toolnexus.MultimodalTest do
 
     transport = fn req ->
       body =
-        Agent.get_and_update(agent, fn {[b | rest], seen} -> {b, {rest ++ [b], seen ++ [req.body]}} end)
+        Agent.get_and_update(agent, fn {[b | rest], seen} ->
+          {b, {rest ++ [b], seen ++ [req.body]}}
+        end)
 
       {:ok, %{status: 200, headers: %{}, body: body}}
     end
@@ -69,7 +83,13 @@ defmodule Toolnexus.MultimodalTest do
   defp client(style, transport, opts \\ []) do
     Client.create(
       Keyword.merge(
-        [base_url: "http://parts.invalid", style: style, model: "m", api_key: "k", transport: transport],
+        [
+          base_url: "http://parts.invalid",
+          style: style,
+          model: "m",
+          api_key: "k",
+          transport: transport
+        ],
         opts
       )
     )
@@ -108,16 +128,28 @@ defmodule Toolnexus.MultimodalTest do
 
     test "anthropic: [text, image] becomes native blocks in order" do
       {t, sent} = scripted([anthropic_text("ok")])
-      assert Client.run(client("anthropic", t), [ContentPart.text("look"), image_part()], []).text == "ok"
+
+      assert Client.run(client("anthropic", t), [ContentPart.text("look"), image_part()], []).text ==
+               "ok"
 
       assert [%{"messages" => [%{"role" => "user", "content" => blocks}]}] = sent.()
       assert Enum.map(blocks, & &1["type"]) == ["text", "image"]
-      assert Enum.at(blocks, 1)["source"] == %{"type" => "base64", "media_type" => "image/png", "data" => golden()}
+
+      assert Enum.at(blocks, 1)["source"] == %{
+               "type" => "base64",
+               "media_type" => "image/png",
+               "data" => golden()
+             }
     end
 
     test "an attached part the style cannot represent errors before any HTTP call" do
       {:ok, calls} = Agent.start_link(fn -> 0 end)
-      t = fn _req -> Agent.update(calls, &(&1 + 1)) && {:ok, %{status: 200, headers: %{}, body: anthropic_text("x")}} end
+
+      t = fn _req ->
+        Agent.update(calls, &(&1 + 1)) &&
+          {:ok, %{status: 200, headers: %{}, body: anthropic_text("x")}}
+      end
+
       audio = ContentPart.audio!({:bytes, "ID3"}, mime_type: "audio/mpeg")
 
       assert_raise Error, ~r/anthropic/, fn -> Client.run(client("anthropic", t), [audio], []) end
@@ -129,7 +161,8 @@ defmodule Toolnexus.MultimodalTest do
       audio = ContentPart.audio!({:bytes, "ID3"}, mime_type: "audio/mpeg")
 
       capture_log(fn ->
-        assert Client.run(client("anthropic", t, on_unsupported_part: "text"), [audio], []).text == "ok"
+        assert Client.run(client("anthropic", t, on_unsupported_part: "text"), [audio], []).text ==
+                 "ok"
       end)
 
       assert [%{"messages" => [%{"content" => [%{"type" => "text", "text" => text}]}]}] = sent.()
@@ -148,17 +181,30 @@ defmodule Toolnexus.MultimodalTest do
       [_first, second] = sent.()
       [_user, _assistant, results] = second["messages"]
       assert results["role"] == "user"
-      [%{"type" => "tool_result", "tool_use_id" => "u1", "content" => content}] = results["content"]
-      assert [%{"type" => "text", "text" => "screenshot, 8x8 png"}, %{"type" => "image"} = img] = content
+
+      [%{"type" => "tool_result", "tool_use_id" => "u1", "content" => content}] =
+        results["content"]
+
+      assert [%{"type" => "text", "text" => "screenshot, 8x8 png"}, %{"type" => "image"} = img] =
+               content
+
       assert img["source"]["data"] == golden()
 
       # native emission means no relocation happened
-      refute Enum.any?(second["messages"], fn m -> m["role"] == "user" and is_list(m["content"]) and
-                 Enum.any?(m["content"], &(&1["type"] == "text" and String.starts_with?(&1["text"] || "", "Output of tool"))) end)
+      refute Enum.any?(second["messages"], fn m ->
+               m["role"] == "user" and is_list(m["content"]) and
+                 Enum.any?(
+                   m["content"],
+                   &(&1["type"] == "text" and
+                       String.starts_with?(&1["text"] || "", "Output of tool"))
+                 )
+             end)
     end
 
     test "openai relocates every non-text part into ONE synthetic user message, in call order" do
-      {t, sent} = scripted([openai_calls([{"c1", "shot_a"}, {"c2", "shot_b"}]), openai_text("two images")])
+      {t, sent} =
+        scripted([openai_calls([{"c1", "shot_a"}, {"c2", "shot_b"}]), openai_text("two images")])
+
       r = Client.run(client("openai", t), "look", [image_tool("shot_a"), image_tool("shot_b")])
       assert r.text == "two images"
 
@@ -169,17 +215,28 @@ defmodule Toolnexus.MultimodalTest do
       tools = Enum.filter(msgs, &(&1["role"] == "tool"))
       assert length(tools) == 2
       assert Enum.all?(tools, &(&1["content"] == "screenshot, 8x8 png"))
-      assert Enum.all?(tools, &(not Map.has_key?(&1, "parts") and not Map.has_key?(&1, "tool_name")))
+
+      assert Enum.all?(
+               tools,
+               &(not Map.has_key?(&1, "parts") and not Map.has_key?(&1, "tool_name"))
+             )
 
       # exactly one synthetic user message follows the last tool message
       synthetic = List.last(msgs)
       assert synthetic["role"] == "user"
 
-      assert Enum.map(synthetic["content"], & &1["type"]) == ["text", "image_url", "text", "image_url"]
+      assert Enum.map(synthetic["content"], & &1["type"]) == [
+               "text",
+               "image_url",
+               "text",
+               "image_url"
+             ]
 
       assert Enum.at(synthetic["content"], 0)["text"] == "Output of tool shot_a (c1):"
       assert Enum.at(synthetic["content"], 2)["text"] == "Output of tool shot_b (c2):"
-      assert Enum.at(synthetic["content"], 1)["image_url"]["url"] == "data:image/png;base64," <> golden()
+
+      assert Enum.at(synthetic["content"], 1)["image_url"]["url"] ==
+               "data:image/png;base64," <> golden()
 
       assert Enum.count(msgs, &(&1["role"] == "user")) == 2
     end
@@ -189,12 +246,16 @@ defmodule Toolnexus.MultimodalTest do
       c = client("openai", t)
       r = Client.ask(c, "look", [image_tool("shot")], id: "conv-1")
 
-      persisted = Client.conversation_store(c).__struct__.get(Client.conversation_store(c), "conv-1")
+      persisted =
+        Client.conversation_store(c).__struct__.get(Client.conversation_store(c), "conv-1")
 
       for messages <- [r.messages, persisted] do
         refute Enum.any?(messages, fn m ->
                  is_list(m["content"]) and
-                   Enum.any?(m["content"], &(is_map(&1) and String.starts_with?(&1["text"] || "", "Output of tool")))
+                   Enum.any?(
+                     m["content"],
+                     &(is_map(&1) and String.starts_with?(&1["text"] || "", "Output of tool"))
+                   )
                end)
       end
 
@@ -217,7 +278,12 @@ defmodule Toolnexus.MultimodalTest do
 
       [_first, second] = sent.()
       tool_msg = Enum.find(second["messages"], &(&1["role"] == "tool"))
-      assert tool_msg["content"] == [%{"type" => "text", "text" => "head"}, %{"type" => "text", "text" => "tail"}]
+
+      assert tool_msg["content"] == [
+               %{"type" => "text", "text" => "head"},
+               %{"type" => "text", "text" => "tail"}
+             ]
+
       assert List.last(second["messages"])["role"] == "tool"
     end
 
@@ -227,13 +293,20 @@ defmodule Toolnexus.MultimodalTest do
           name: "listen",
           description: "audio",
           execute: fn _ ->
-            %ToolResult{output: "a clip", parts: [ContentPart.audio!({:bytes, "ID3"}, mime_type: "audio/mpeg")]}
+            %ToolResult{
+              output: "a clip",
+              parts: [ContentPart.audio!({:bytes, "ID3"}, mime_type: "audio/mpeg")]
+            }
           end
         )
 
       {t, sent} = scripted([anthropic_uses([{"u1", "listen"}]), anthropic_text("heard it")])
 
-      log = capture_log(fn -> assert Client.run(client("anthropic", t), "go", [tool]).text == "heard it" end)
+      log =
+        capture_log(fn ->
+          assert Client.run(client("anthropic", t), "go", [tool]).text == "heard it"
+        end)
+
       assert log =~ "audio/mpeg"
       refute log =~ Base.encode64("ID3")
 
@@ -249,7 +322,10 @@ defmodule Toolnexus.MultimodalTest do
           name: "listen",
           description: "audio",
           execute: fn _ ->
-            %ToolResult{output: "a clip", parts: [ContentPart.audio!({:bytes, "ID3"}, mime_type: "audio/mpeg")]}
+            %ToolResult{
+              output: "a clip",
+              parts: [ContentPart.audio!({:bytes, "ID3"}, mime_type: "audio/mpeg")]
+            }
           end
         )
 
@@ -267,10 +343,16 @@ defmodule Toolnexus.MultimodalTest do
         Native.define_tool(
           name: "ask_it",
           description: "suspends",
-          execute: fn _ -> %ToolResult{output: "who?", parts: [image_part()], metadata: %{pending: req}} end
+          execute: fn _ ->
+            %ToolResult{output: "who?", parts: [image_part()], metadata: %{pending: req}}
+          end
         )
 
-      assert ToolResult.pending?(%ToolResult{output: "x", parts: [image_part()], metadata: %{pending: req}})
+      assert ToolResult.pending?(%ToolResult{
+               output: "x",
+               parts: [image_part()],
+               metadata: %{pending: req}
+             })
 
       {t, _sent} = scripted([openai_calls([{"c1", "ask_it"}]), openai_text("never")])
       r = Client.run(client("openai", t), "go", [tool])
@@ -298,7 +380,9 @@ defmodule Toolnexus.MultimodalTest do
       {:ok, agent} = Agent.start_link(fn -> {[calls_sse, sse_openai], []} end)
 
       t = fn req ->
-        body = Agent.get_and_update(agent, fn {[b | rest], seen} -> {b, {rest, seen ++ [req.body]}} end)
+        body =
+          Agent.get_and_update(agent, fn {[b | rest], seen} -> {b, {rest, seen ++ [req.body]}} end)
+
         {:ok, %{status: 200, headers: %{}, body: body}}
       end
 
@@ -338,7 +422,9 @@ defmodule Toolnexus.MultimodalTest do
       {:ok, agent} = Agent.start_link(fn -> {[use_sse, text_sse], []} end)
 
       t = fn req ->
-        body = Agent.get_and_update(agent, fn {[b | rest], seen} -> {b, {rest, seen ++ [req.body]}} end)
+        body =
+          Agent.get_and_update(agent, fn {[b | rest], seen} -> {b, {rest, seen ++ [req.body]}} end)
+
         {:ok, %{status: 200, headers: %{}, body: body}}
       end
 
@@ -355,25 +441,43 @@ defmodule Toolnexus.MultimodalTest do
 
   describe "§11 translate preserves non-text parts" do
     test "a text-only parts array still concatenates (regression pin)" do
-      messages = [%{"role" => "user", "content" => [%{"type" => "text", "text" => "a"}, %{"type" => "text", "text" => "b"}]}]
-      assert {[%{"role" => "user", "content" => "ab"}], ""} = Translate.openai_messages_to_anthropic(messages)
+      messages = [
+        %{
+          "role" => "user",
+          "content" => [%{"type" => "text", "text" => "a"}, %{"type" => "text", "text" => "b"}]
+        }
+      ]
+
+      assert {[%{"role" => "user", "content" => "ab"}], ""} =
+               Translate.openai_messages_to_anthropic(messages)
     end
 
     test "an image part survives translation, in the order given" do
       messages = [
-        %{"role" => "user", "content" => [%{"type" => "text", "text" => "what's this?"}, ContentPart.to_map(image_part())]}
+        %{
+          "role" => "user",
+          "content" => [
+            %{"type" => "text", "text" => "what's this?"},
+            ContentPart.to_map(image_part())
+          ]
+        }
       ]
 
-      assert {[%{"role" => "user", "content" => blocks}], ""} = Translate.openai_messages_to_anthropic(messages)
+      assert {[%{"role" => "user", "content" => blocks}], ""} =
+               Translate.openai_messages_to_anthropic(messages)
+
       assert Enum.map(blocks, & &1["type"]) == ["text", "image"]
       assert Enum.at(blocks, 1)["source"]["data"] == golden()
     end
 
     test "an empty array is still dropped, and unknown entries pass through" do
-      assert {[], ""} = Translate.openai_messages_to_anthropic([%{"role" => "user", "content" => []}])
+      assert {[], ""} =
+               Translate.openai_messages_to_anthropic([%{"role" => "user", "content" => []}])
 
       assert {[%{"content" => [%{"type" => "mystery"}]}], ""} =
-               Translate.openai_messages_to_anthropic([%{"role" => "user", "content" => [%{"type" => "mystery"}]}])
+               Translate.openai_messages_to_anthropic([
+                 %{"role" => "user", "content" => [%{"type" => "mystery"}]}
+               ])
     end
   end
 
@@ -387,7 +491,16 @@ defmodule Toolnexus.MultimodalTest do
       refute r.is_error
       assert r.output =~ "image/png"
       assert r.output =~ "82 bytes"
-      assert [%ContentPart{type: "image", mime_type: "image/png", data: data, name: "fixture.png"}] = r.parts
+
+      assert [
+               %ContentPart{
+                 type: "image",
+                 mime_type: "image/png",
+                 data: data,
+                 name: "fixture.png"
+               }
+             ] = r.parts
+
       assert data == golden()
     end
 
@@ -395,7 +508,9 @@ defmodule Toolnexus.MultimodalTest do
       tmp = Path.join(System.tmp_dir!(), "tn-read-#{System.unique_integer([:positive])}.md")
       File.write!(tmp, "one\ntwo\nthree")
 
-      assert read_tool().execute.(%{"path" => tmp}, %Context{}) == ToolResult.ok("one\ntwo\nthree")
+      assert read_tool().execute.(%{"path" => tmp}, %Context{}) ==
+               ToolResult.ok("one\ntwo\nthree")
+
       windowed = read_tool().execute.(%{"path" => tmp, "offset" => 2, "limit" => 1}, %Context{})
       assert windowed.output == "two"
       assert windowed.parts == nil
@@ -428,7 +543,9 @@ defmodule Toolnexus.MultimodalTest do
       # ~1 000 tokens for the part plus the tiny redacted envelope — not the 250 000 the
       # raw base64 would have cost, and not the ~3 the mimeType string would have.
       assert estimate > 900 and estimate < 1_100
-      assert Toolnexus.Agents.Compaction.estimate_tokens([%{"role" => "user", "content" => "hi"}]) < 20
+
+      assert Toolnexus.Agents.Compaction.estimate_tokens([%{"role" => "user", "content" => "hi"}]) <
+               20
     end
   end
 
@@ -458,15 +575,38 @@ defmodule Toolnexus.MultimodalTest do
         ]
       },
       "linked" => %{
-        "content" => [%{"type" => "resource_link", "uri" => "https://x/y.pdf", "mimeType" => "application/pdf", "name" => "y.pdf"}]
+        "content" => [
+          %{
+            "type" => "resource_link",
+            "uri" => "https://x/y.pdf",
+            "mimeType" => "application/pdf",
+            "name" => "y.pdf"
+          }
+        ]
       },
       "blobbed" => %{
-        "content" => [%{"type" => "resource", "resource" => %{"uri" => "file:///y.pdf", "mimeType" => "application/pdf", "blob" => "YmxvYg=="}}]
+        "content" => [
+          %{
+            "type" => "resource",
+            "resource" => %{
+              "uri" => "file:///y.pdf",
+              "mimeType" => "application/pdf",
+              "blob" => "YmxvYg=="
+            }
+          }
+        ]
       },
       "resourcetext" => %{
-        "content" => [%{"type" => "resource", "resource" => %{"uri" => "file:///a.txt", "text" => "inline text"}}]
+        "content" => [
+          %{
+            "type" => "resource",
+            "resource" => %{"uri" => "file:///a.txt", "text" => "inline text"}
+          }
+        ]
       },
-      "noisy" => %{"content" => [%{"type" => "audio", "data" => "c25k", "mimeType" => "audio/wav"}]}
+      "noisy" => %{
+        "content" => [%{"type" => "audio", "data" => "c25k", "mimeType" => "audio/wav"}]
+      }
     }
 
     def names, do: Map.keys(@results)
@@ -488,7 +628,13 @@ defmodule Toolnexus.MultimodalTest do
           send_resp(conn, 202, "")
 
         %{"method" => "tools/list", "id" => id} ->
-          json(conn, id, %{"tools" => Enum.map(names(), &%{"name" => &1, "description" => &1, "inputSchema" => %{"type" => "object"}})})
+          json(conn, id, %{
+            "tools" =>
+              Enum.map(
+                names(),
+                &%{"name" => &1, "description" => &1, "inputSchema" => %{"type" => "object"}}
+              )
+          })
 
         %{"method" => "tools/call", "id" => id, "params" => %{"name" => name}} ->
           json(conn, id, @results[name])
@@ -511,7 +657,11 @@ defmodule Toolnexus.MultimodalTest do
       start_supervised!({Bandit, plug: PartsStub, scheme: :http, port: port, ip: {127, 0, 0, 1}})
 
       source =
-        Mcp.load(%{"mcpServers" => %{"p" => %{"url" => "http://127.0.0.1:#{port}/mcp", "transport" => "http"}}})
+        Mcp.load(%{
+          "mcpServers" => %{
+            "p" => %{"url" => "http://127.0.0.1:#{port}/mcp", "transport" => "http"}
+          }
+        })
 
       on_exit(fn -> Mcp.close(source) end)
 
@@ -550,12 +700,23 @@ defmodule Toolnexus.MultimodalTest do
 
     test "a resource_link becomes a file part carrying its uri", %{call: call} do
       r = call.("linked")
-      assert [%ContentPart{type: "file", url: "https://x/y.pdf", mime_type: "application/pdf", name: "y.pdf"}] = r.parts
+
+      assert [
+               %ContentPart{
+                 type: "file",
+                 url: "https://x/y.pdf",
+                 mime_type: "application/pdf",
+                 name: "y.pdf"
+               }
+             ] = r.parts
+
       # an entry-only result names what came back rather than returning ""
       assert r.output == "file (application/pdf, 0 bytes)"
     end
 
-    test "an embedded blob becomes a file part; embedded text is appended to output", %{call: call} do
+    test "an embedded blob becomes a file part; embedded text is appended to output", %{
+      call: call
+    } do
       r = call.("blobbed")
       assert [%ContentPart{type: "file", data: "YmxvYg==", name: "file:///y.pdf"}] = r.parts
 
@@ -565,7 +726,8 @@ defmodule Toolnexus.MultimodalTest do
     end
 
     test "audio is mapped, not dropped", %{call: call} do
-      assert [%ContentPart{type: "audio", mime_type: "audio/wav", data: "c25k"}] = call.("noisy").parts
+      assert [%ContentPart{type: "audio", mime_type: "audio/wav", data: "c25k"}] =
+               call.("noisy").parts
     end
   end
 
@@ -643,15 +805,29 @@ defmodule Toolnexus.MultimodalTest do
 
       assert blob == %{
                "type" => "resource",
-               "resource" => %{"uri" => "r.pdf", "blob" => Base.encode64("%PDF-"), "mimeType" => "application/pdf"}
+               "resource" => %{
+                 "uri" => "r.pdf",
+                 "blob" => Base.encode64("%PDF-"),
+                 "mimeType" => "application/pdf"
+               }
              }
 
-      assert link == %{"type" => "resource_link", "uri" => "https://x/y.pdf", "mimeType" => "application/pdf", "name" => "y.pdf"}
+      assert link == %{
+               "type" => "resource_link",
+               "uri" => "https://x/y.pdf",
+               "mimeType" => "application/pdf",
+               "name" => "y.pdf"
+             }
     end
 
     test "a part-free tool still emits exactly one text block" do
-      tools = [Native.define_tool(name: "plain", description: "text", execute: fn _ -> "just text" end)]
-      assert call_served(tools, "plain")["content"] == [%{"type" => "text", "text" => "just text"}]
+      tools = [
+        Native.define_tool(name: "plain", description: "text", execute: fn _ -> "just text" end)
+      ]
+
+      assert call_served(tools, "plain")["content"] == [
+               %{"type" => "text", "text" => "just text"}
+             ]
     end
   end
 
@@ -679,7 +855,9 @@ defmodule Toolnexus.MultimodalTest do
           execute: fn _ ->
             %ToolResult{
               output: "screenshot",
-              parts: [ContentPart.image!({:bytes, String.duplicate("A", 400)}, mime_type: "image/png")]
+              parts: [
+                ContentPart.image!({:bytes, String.duplicate("A", 400)}, mime_type: "image/png")
+              ]
             }
           end
         )
@@ -688,7 +866,8 @@ defmodule Toolnexus.MultimodalTest do
 
       log =
         capture_log(fn ->
-          assert Client.run(client("anthropic", t, max_part_bytes: 4), "go", [tool]).text == "saw it"
+          assert Client.run(client("anthropic", t, max_part_bytes: 4), "go", [tool]).text ==
+                   "saw it"
         end)
 
       assert log =~ "max_part_bytes"

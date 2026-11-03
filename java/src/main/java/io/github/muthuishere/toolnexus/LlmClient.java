@@ -95,6 +95,10 @@ public final class LlmClient {
         public Map<String, String> headers;
         public String systemPrompt;
         public Integer maxTurns;       // default 10
+        /** Cap on concurrency-safe tool calls of one response running at once (SPEC §8 "Tool
+         * scheduling"). null ⇒ env {@code TOOLNEXUS_MAX_TOOL_CONCURRENCY} when a positive
+         * integer, else 10. Unsafe calls (anything not read-only) always run alone. */
+        public Integer maxToolConcurrency;
         public Hooks hooks;            // optional lifecycle middleware; null = no hooks
         /** Retries on transient LLM errors (429/500/502/503/504/529 + network). Default 2.
          * Widen the status set with {@link #retryableStatuses}. */
@@ -182,6 +186,7 @@ public final class LlmClient {
         public Options headers(Map<String, String> v) { this.headers = v; return this; }
         public Options systemPrompt(String v) { this.systemPrompt = v; return this; }
         public Options maxTurns(int v) { this.maxTurns = v; return this; }
+        public Options maxToolConcurrency(int v) { this.maxToolConcurrency = v; return this; }
         public Options hooks(Hooks v) { this.hooks = v; return this; }
         public Options retries(int v) { this.retries = v; return this; }
         public Options retryBaseMs(int v) { this.retryBaseMs = v; return this; }
@@ -771,6 +776,25 @@ public final class LlmClient {
     /** {@code call_tool {name, arguments}} mapped to the real call ({@code wrapped=false} when tiers
      * are off or the name is not {@code call_tool}). */
     private record Unwrapped(String name, Map<String, Object> args, boolean wrapped) {}
+
+    /** One call's safety; looks through {@code call_tool} to the tool it names. Unknown ⇒ unsafe. */
+    private boolean callSafe(Toolkit toolkit, String name, Map<String, Object> args) {
+        if (opts.toolTiers != null && "tool_search".equals(name)) return true;
+        Unwrapped u = unwrapCall(name, args == null ? new LinkedHashMap<>() : args);
+        Tool tool = toolkit == null ? null : toolkit.get(u.name());
+        return ToolScheduler.isConcurrencySafe(tool, u.args());
+    }
+
+    private ToolScheduler newToolScheduler(Deadline deadline, ExecutorService executor) {
+        return new ToolScheduler(ToolScheduler.resolveMaxToolConcurrency(opts.maxToolConcurrency),
+                f -> awaitTools(new CompletableFuture<?>[] {f}, deadline, executor),
+                () -> {
+                    if (deadline.cancelled()) {
+                        executor.shutdownNow();
+                        throw new CancelledException("run cancelled");
+                    }
+                });
+    }
 
     @SuppressWarnings("unchecked")
     private Unwrapped unwrapCall(String name, Map<String, Object> args) {
@@ -2247,6 +2271,7 @@ public final class LlmClient {
                 Object[] callIds = new Object[n];
                 Request[] haltedAt = new Request[n];
                 CompletableFuture<Void>[] futures = new CompletableFuture[n];
+                ToolScheduler sched = newToolScheduler(deadline, executor);
                 for (int i = 0; i < n; i++) {
                     final int idx = i;
                     Map<String, Object> call = (Map<String, Object>) calls.get(i);
@@ -2258,7 +2283,7 @@ public final class LlmClient {
                     callNames[idx] = fnName;
                     callIds[idx] = callId;
                     final int t = turn;
-                    futures[idx] = CompletableFuture.supplyAsync(
+                    futures[idx] = sched.supplyAsync(callSafe(toolkit, fnName, args),
                             () -> runToolResolved(toolkit, fnName,
                                     args, callId == null ? null : String.valueOf(callId), t, deadline),
                             executor).thenAccept(outcome -> {
@@ -2389,6 +2414,7 @@ public final class LlmClient {
                 ToolCall[] recorded = new ToolCall[n];
                 Request[] haltedAt = new Request[n];
                 CompletableFuture<Void>[] futures = new CompletableFuture[n];
+                ToolScheduler sched = newToolScheduler(deadline, executor);
                 for (int i = 0; i < n; i++) {
                     final int idx = i;
                     Map<String, Object> use = uses.get(i);
@@ -2398,7 +2424,7 @@ public final class LlmClient {
                     String useName = String.valueOf(use.get("name"));
                     Object useId = use.get("id");
                     final int t = turn;
-                    futures[idx] = CompletableFuture.supplyAsync(
+                    futures[idx] = sched.supplyAsync(callSafe(toolkit, useName, useInput),
                             () -> runToolResolved(toolkit, useName, useInput,
                                     useId == null ? null : String.valueOf(useId), t, deadline),
                             executor).thenAccept(outcome -> {
@@ -2602,12 +2628,13 @@ public final class LlmClient {
                 }
                 ToolRun[] runs = new ToolRun[n];
                 CompletableFuture<Void>[] futures = new CompletableFuture[n];
+                ToolScheduler sched = newToolScheduler(deadline, executor);
                 for (int i = 0; i < n; i++) {
                     final int idx = i;
                     String[] slot = acc.get(order.get(i));
                     Map<String, Object> args = Json.parseObjectLoose(slot[2]);
                     final int t = turn;
-                    futures[idx] = CompletableFuture.supplyAsync(
+                    futures[idx] = sched.supplyAsync(callSafe(toolkit, slot[1], args),
                             () -> runTool(toolkit, slot[1], args, slot[0], t), executor)
                             .thenAccept(r -> { runs[idx] = r; if (!deadline.cancelled()) inflight.put(slot[0], r.result()); });
                 }
@@ -2821,6 +2848,7 @@ public final class LlmClient {
                 }
                 ToolRun[] runs = new ToolRun[n];
                 CompletableFuture<Void>[] futures = new CompletableFuture[n];
+                ToolScheduler sched = newToolScheduler(deadline, executor);
                 for (int i = 0; i < n; i++) {
                     final int idx = i;
                     Map<String, Object> u = uses.get(i);
@@ -2830,7 +2858,7 @@ public final class LlmClient {
                     String name = String.valueOf(u.get("name"));
                     String id = String.valueOf(u.get("id"));
                     final int t = turn;
-                    futures[idx] = CompletableFuture.supplyAsync(
+                    futures[idx] = sched.supplyAsync(callSafe(toolkit, name, in),
                             () -> runTool(toolkit, name, in, id, t), executor)
                             .thenAccept(r -> { runs[idx] = r; if (!deadline.cancelled()) inflight.put(id, r.result()); });
                 }

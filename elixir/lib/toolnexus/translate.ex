@@ -76,7 +76,10 @@ defmodule Toolnexus.Translate do
   @spec finish_reason_for(boolean(), String.t() | nil) :: String.t()
   def finish_reason_for(true, _provider_stop), do: "tool_calls"
   def finish_reason_for(false, stop) when stop in ["max_tokens", "length"], do: "length"
-  def finish_reason_for(false, stop) when stop in ["refusal", "content_filter"], do: "content_filter"
+
+  def finish_reason_for(false, stop) when stop in ["refusal", "content_filter"],
+    do: "content_filter"
+
   def finish_reason_for(false, _), do: "stop"
 
   @doc """
@@ -239,8 +242,12 @@ defmodule Toolnexus.Translate do
     case Map.get(m, "content") do
       content when is_list(content) ->
         case content_blocks(content) do
-          [] -> {out, system_parts, pending}
-          blocks -> {[%{"role" => "user", "content" => user_content(blocks)} | out], system_parts, pending}
+          [] ->
+            {out, system_parts, pending}
+
+          blocks ->
+            {[%{"role" => "user", "content" => user_content(blocks)} | out], system_parts,
+             pending}
         end
 
       content ->

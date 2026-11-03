@@ -76,6 +76,8 @@ pub struct InProcessOptions {
     pub on_error: Option<OnErrorFn>,
     pub system_prompt: String,
     pub max_turns: usize,
+    /// See [`ClientOptions::max_tool_concurrency`](crate::client::ClientOptions).
+    pub max_tool_concurrency: usize,
     pub hooks: Hooks,
     pub timeout_ms: u64,
     pub store: Option<Arc<dyn ConversationStore>>,
@@ -292,6 +294,7 @@ pub fn create_in_process_client(opts: InProcessOptions) -> Client {
             model: opts.model,
             system_prompt: opts.system_prompt,
             max_turns: opts.max_turns,
+            max_tool_concurrency: opts.max_tool_concurrency,
             hooks: opts.hooks,
             timeout_ms: opts.timeout_ms,
             store: opts.store,

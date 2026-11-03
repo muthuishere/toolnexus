@@ -15,6 +15,7 @@ defmodule Toolnexus.Agents.EdgeTest do
     @moduledoc false
     @behaviour Toolnexus.Client.ConversationStore
     defstruct [:pid]
+
     def new do
       {:ok, pid} = Agent.start_link(fn -> %{} end)
       %__MODULE__{pid: pid}
@@ -23,7 +24,8 @@ defmodule Toolnexus.Agents.EdgeTest do
     @impl true
     def get(%__MODULE__{pid: pid}, id), do: Agent.get(pid, &Map.get(&1, id))
     @impl true
-    def save(%__MODULE__{pid: pid}, id, messages), do: Agent.update(pid, &Map.put(&1, id, messages))
+    def save(%__MODULE__{pid: pid}, id, messages),
+      do: Agent.update(pid, &Map.put(&1, id, messages))
   end
 
   test "verbs against closed handles: wait/run_now answer closed; spawn/post rejected; double close and stray kill_run are no-ops" do
@@ -118,7 +120,10 @@ defmodule Toolnexus.Agents.EdgeTest do
     r = Runtime.wait(rt, c)
 
     assert r.text =~ "found:data(x)", "first child completed: #{r.text}"
-    assert r.text =~ "[incomplete] budget exhausted", "second child settled incomplete loudly: #{r.text}"
+
+    assert r.text =~ "[incomplete] budget exhausted",
+           "second child settled incomplete loudly: #{r.text}"
+
     Runtime.shutdown(rt)
   end
 
@@ -139,13 +144,18 @@ defmodule Toolnexus.Agents.EdgeTest do
 
     # the child kept getting declined → never produced the token → loud incomplete
     # crossed the task boundary as a result; the parent still finished
-    assert r.status == "done" and r.text =~ "parent-final:", "declined path crossed as a result: #{r.text}"
+    assert r.status == "done" and r.text =~ "parent-final:",
+           "declined path crossed as a result: #{r.text}"
+
     Runtime.shutdown(rt)
   end
 
   test "host-injected ConversationStore: the runtime uses it and leaves it alive on shutdown" do
     store = KVStore.new()
-    rt = Runtime.new(%{transport: Mock.transport(&Mock.demo/1), registry: registry(), store: store})
+
+    rt =
+      Runtime.new(%{transport: Mock.transport(&Mock.demo/1), registry: registry(), store: store})
+
     {:ok, peer} = Runtime.spawn_agent(rt, Runtime.root(rt), "peer")
     assert Runtime.run_turn(rt, peer, "1. hi").status == "done"
 
@@ -165,8 +175,12 @@ defmodule Toolnexus.Agents.EdgeTest do
   end
 
   test "registry closure: duplicate team members collapse to one definition" do
-    explore = Agents.agent("explore", %{does: "research", model: "m-explore", uses: %{tools: [lookup()]}})
-    coder = Agents.agent("coder", %{does: "implements", team: [explore, explore], model: "m-coder"})
+    explore =
+      Agents.agent("explore", %{does: "research", model: "m-explore", uses: %{tools: [lookup()]}})
+
+    coder =
+      Agents.agent("coder", %{does: "implements", team: [explore, explore], model: "m-coder"})
+
     assert Agents.registry(coder) |> Map.keys() |> Enum.sort() == ["coder", "explore"]
   end
 end

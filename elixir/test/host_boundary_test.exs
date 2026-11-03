@@ -51,6 +51,7 @@ defmodule Toolnexus.HostBoundaryTest do
     result = run(nil, "bash", %{"command" => orphan_command(marker), "timeout" => 20_000})
 
     refute result.is_error, result.output
+
     assert File.exists?(marker),
            "the command cannot write the marker at all — the orphan test proves nothing"
   end
@@ -85,7 +86,9 @@ defmodule Toolnexus.HostBoundaryTest do
     elapsed = System.monotonic_time(:millisecond) - started
 
     assert result.is_error
-    assert elapsed < 1500, "a 300 ms timeout took #{elapsed} ms — the caller waited out the grace window"
+
+    assert elapsed < 1500,
+           "a 300 ms timeout took #{elapsed} ms — the caller waited out the grace window"
   end
 
   test "a job that IGNORES the polite signal is killed after the grace window" do
@@ -104,7 +107,9 @@ defmodule Toolnexus.HostBoundaryTest do
     assert result.is_error
     assert result.metadata[:timedOut] == true
     # It took the grace window, because TERM was ignored — but not much more.
-    assert elapsed >= 2000, "a TERM-ignoring job should have used the grace window, took #{elapsed} ms"
+    assert elapsed >= 2000,
+           "a TERM-ignoring job should have used the grace window, took #{elapsed} ms"
+
     assert elapsed < 4000, "the kill overran the grace window: #{elapsed} ms"
 
     Process.sleep(2000)
@@ -115,7 +120,9 @@ defmodule Toolnexus.HostBoundaryTest do
     assert {:error, message} = Builtin.shell(%{"shell" => ["definitely-not-a-real-shell-xyz"]})
     assert message =~ "does not resolve"
 
-    result = run(%{"shell" => ["definitely-not-a-real-shell-xyz"]}, "bash", %{"command" => "echo hi"})
+    result =
+      run(%{"shell" => ["definitely-not-a-real-shell-xyz"]}, "bash", %{"command" => "echo hi"})
+
     assert result.is_error
     assert result.output =~ "does not resolve"
   end
@@ -160,6 +167,7 @@ defmodule Toolnexus.HostBoundaryTest do
     result = run(cfg, "write", %{"path" => "sub/nested.txt", "content" => "landed"})
     refute result.is_error, result.output
     assert File.exists?(Path.join([base, "sub", "nested.txt"]))
+
     refute File.exists?(Path.join([File.cwd!(), "sub", "nested.txt"])),
            "relative write leaked into the process working directory"
 
@@ -180,6 +188,7 @@ defmodule Toolnexus.HostBoundaryTest do
 
     result = run(%{"base_dir" => base}, "apply_patch", %{"patchText" => patch})
     refute result.is_error, result.output
+
     assert File.exists?(Path.join([base, "pkg", "new.txt"])),
            "the path inside the patch text was not resolved"
   end
@@ -210,6 +219,7 @@ defmodule Toolnexus.HostBoundaryTest do
     end
 
     File.write!(Path.join(base, "ok.txt"), "fine")
+
     refute run(cfg, "read", %{"path" => "ok.txt"}).is_error,
            "a path inside base_dir must still be read"
   end
@@ -224,6 +234,7 @@ defmodule Toolnexus.HostBoundaryTest do
     File.ln_s!(outside, Path.join(base, "link"))
 
     cfg = %{"base_dir" => base, "confine_to_base_dir" => true}
+
     assert run(cfg, "read", %{"path" => "link/secret.txt"}).is_error,
            "a symlink out of base_dir must be refused"
   end

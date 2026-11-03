@@ -70,18 +70,19 @@ type InProcessOptions struct {
 	// OnError, when set, classifies a failed Generate exactly as it would a failed HTTP
 	// attempt. Unset ⇒ every failure is FINAL (see CreateInProcessClient) — set this to
 	// opt back into retries for a model that is genuinely flaky, e.g. a GPU that OOMs.
-	OnError       func(ErrorInfo) Tier
-	SystemPrompt  string
-	MaxTurns      int
-	Hooks         *Hooks
-	TimeoutMs     int
-	Store         ConversationStore
-	OnMetric      func(MetricEvent)
-	WaitFor       func(Request) (Answer, error)
-	WaitForCtx    func(context.Context, Request) (Answer, error)
-	RequestParams map[string]any
-	BodyTransform func(map[string]any) map[string]any
-	Headers       map[string]string
+	OnError            func(ErrorInfo) Tier
+	SystemPrompt       string
+	MaxTurns           int
+	MaxToolConcurrency int
+	Hooks              *Hooks
+	TimeoutMs          int
+	Store              ConversationStore
+	OnMetric           func(MetricEvent)
+	WaitFor            func(Request) (Answer, error)
+	WaitForCtx         func(context.Context, Request) (Answer, error)
+	RequestParams      map[string]any
+	BodyTransform      func(map[string]any) map[string]any
+	Headers            map[string]string
 }
 
 // inProcessBaseURL is a sentinel. It is never dialled — the round tripper below
@@ -311,19 +312,20 @@ func CreateInProcessClient(opts InProcessOptions) *Client {
 		BaseURL: inProcessBaseURL,
 		Style:   StyleOpenAI,
 		// An in-process model has no endpoint to authenticate to, so the host must never need a key — but the client resolves one from the environment and fails when it finds none. A sentinel keeps that resolution from ever running. Caught by CI, which has no OPENROUTER_API_KEY; every local run passed because a developer shell has one.
-		APIKey:        "in-process",
-		Model:         opts.Model,
-		HTTPClient:    &http.Client{Transport: &inProcessRoundTripper{generate: opts.Generate, generateStream: opts.GenerateStream}},
-		SystemPrompt:  opts.SystemPrompt,
-		MaxTurns:      opts.MaxTurns,
-		Hooks:         opts.Hooks,
-		TimeoutMs:     opts.TimeoutMs,
-		Store:         opts.Store,
-		OnMetric:      opts.OnMetric,
-		WaitFor:       opts.WaitFor,
-		WaitForCtx:    opts.WaitForCtx,
-		RequestParams: opts.RequestParams,
-		BodyTransform: opts.BodyTransform,
-		Headers:       opts.Headers,
+		APIKey:             "in-process",
+		Model:              opts.Model,
+		HTTPClient:         &http.Client{Transport: &inProcessRoundTripper{generate: opts.Generate, generateStream: opts.GenerateStream}},
+		SystemPrompt:       opts.SystemPrompt,
+		MaxTurns:           opts.MaxTurns,
+		MaxToolConcurrency: opts.MaxToolConcurrency,
+		Hooks:              opts.Hooks,
+		TimeoutMs:          opts.TimeoutMs,
+		Store:              opts.Store,
+		OnMetric:           opts.OnMetric,
+		WaitFor:            opts.WaitFor,
+		WaitForCtx:         opts.WaitForCtx,
+		RequestParams:      opts.RequestParams,
+		BodyTransform:      opts.BodyTransform,
+		Headers:            opts.Headers,
 	})
 }

@@ -33,7 +33,12 @@ defmodule Toolnexus.CoverageMiscTest do
 
   test "Request JSON: byte-identical keys, optional fields only when set, round-trip" do
     minimal = %Request{id: "r1", kind: "input", prompt: "p"}
-    assert Jason.decode!(Jason.encode!(minimal)) == %{"id" => "r1", "kind" => "input", "prompt" => "p"}
+
+    assert Jason.decode!(Jason.encode!(minimal)) == %{
+             "id" => "r1",
+             "kind" => "input",
+             "prompt" => "p"
+           }
 
     full = %Request{
       id: "r2",
@@ -59,18 +64,31 @@ defmodule Toolnexus.CoverageMiscTest do
   end
 
   test "Answer JSON: optional data/reason only when set, round-trip" do
-    assert Jason.decode!(Jason.encode!(%Answer{id: "a1", ok: true})) == %{"id" => "a1", "ok" => true}
+    assert Jason.decode!(Jason.encode!(%Answer{id: "a1", ok: true})) == %{
+             "id" => "a1",
+             "ok" => true
+           }
 
     full = %Answer{id: "a2", ok: false, data: %{"v" => 2}, reason: "declined"}
     encoded = Jason.decode!(Jason.encode!(full))
-    assert encoded == %{"id" => "a2", "ok" => false, "data" => %{"v" => 2}, "reason" => "declined"}
+
+    assert encoded == %{
+             "id" => "a2",
+             "ok" => false,
+             "data" => %{"v" => 2},
+             "reason" => "declined"
+           }
+
     assert Answer.from_map(encoded) == full
   end
 
   test "ToolResult.pending? is false for plain results and true only for a Request" do
     refute ToolResult.pending?(ToolResult.ok("x"))
     refute ToolResult.pending?(%ToolResult{output: "x", metadata: %{pending: "not-a-request"}})
-    assert ToolResult.pending?(%ToolResult{metadata: %{pending: %Request{id: "1", kind: "k", prompt: "p"}}})
+
+    assert ToolResult.pending?(%ToolResult{
+             metadata: %{pending: %Request{id: "1", kind: "k", prompt: "p"}}
+           })
   end
 
   # --- mcp/protocol.ex --------------------------------------------------------------
@@ -85,8 +103,12 @@ defmodule Toolnexus.CoverageMiscTest do
     assert Protocol.ping_response(3) == %{"jsonrpc" => "2.0", "id" => 3, "result" => %{}}
     assert Protocol.encode_line(%{"a" => 1}) == ~s({"a":1}\n)
 
-    assert Protocol.classify(%{"method" => "notifications/x"}) == {:notification, "notifications/x", %{}}
-    assert Protocol.classify(%{"id" => 1, "error" => %{"code" => 1}}) == {:response, 1, {:error, %{"code" => 1}}}
+    assert Protocol.classify(%{"method" => "notifications/x"}) ==
+             {:notification, "notifications/x", %{}}
+
+    assert Protocol.classify(%{"id" => 1, "error" => %{"code" => 1}}) ==
+             {:response, 1, {:error, %{"code" => 1}}}
+
     assert Protocol.classify(%{"id" => 1}) == :unknown
     assert Protocol.classify("junk") == :unknown
   end
@@ -108,13 +130,19 @@ defmodule Toolnexus.CoverageMiscTest do
     assert Protocol.answer_to_elicit_result(%Answer{id: "1", ok: false, reason: "declined"}) ==
              %{"action" => "decline"}
 
-    assert Protocol.answer_to_elicit_result(%Answer{id: "1", ok: false}) == %{"action" => "cancel"}
+    assert Protocol.answer_to_elicit_result(%Answer{id: "1", ok: false}) == %{
+             "action" => "cancel"
+           }
   end
 
   # --- SSE parser -----------------------------------------------------------------
 
   test "Sse: comments, unknown fields, no-space data, event names, trailing flush" do
-    events = Sse.parse_all(": a comment\nid: 5\nevent: custom\ndata:one\ndata: two\n\nevent: tail\ndata: end")
+    events =
+      Sse.parse_all(
+        ": a comment\nid: 5\nevent: custom\ndata:one\ndata: two\n\nevent: tail\ndata: end"
+      )
+
     assert events == [%{event: "custom", data: "one\ntwo"}, %{event: "tail", data: "end"}]
 
     # feed splits across chunk boundaries; blank line with no data dispatches nothing
@@ -145,14 +173,23 @@ defmodule Toolnexus.CoverageMiscTest do
 
   test "write/edit/grep/glob/apply_patch: required-arg guards" do
     assert run_builtin("write", %{"content" => "x"}).output == "write: path is required"
-    assert run_builtin("edit", %{"oldString" => "a", "newString" => "b"}).output == "edit: path is required"
+
+    assert run_builtin("edit", %{"oldString" => "a", "newString" => "b"}).output ==
+             "edit: path is required"
+
     assert run_builtin("grep", %{}).output == "grep: pattern is required"
     assert run_builtin("glob", %{}).output == "glob: pattern is required"
     assert run_builtin("apply_patch", %{}).output == "apply_patch: patchText is required"
   end
 
   test "edit: missing file reports the posix error" do
-    result = run_builtin("edit", %{"path" => "/nonexistent/f.txt", "oldString" => "a", "newString" => "b"})
+    result =
+      run_builtin("edit", %{
+        "path" => "/nonexistent/f.txt",
+        "oldString" => "a",
+        "newString" => "b"
+      })
+
     assert result.is_error
     assert result.output =~ "edit: /nonexistent/f.txt:"
   end
@@ -373,7 +410,12 @@ defmodule Toolnexus.CoverageMiscTest do
     resp =
       Req.post!(
         url: handle.url <> "/mcp",
-        json: %{"jsonrpc" => "2.0", "id" => 1, "method" => "tools/call", "params" => %{"name" => "bare"}},
+        json: %{
+          "jsonrpc" => "2.0",
+          "id" => 1,
+          "method" => "tools/call",
+          "params" => %{"name" => "bare"}
+        },
         retry: false
       )
 
@@ -430,7 +472,11 @@ defmodule Toolnexus.CoverageMiscTest do
 
     start_supervised!(
       Supervisor.child_spec(
-        {Bandit, plug: {GarbageAgent, fn -> base <> "/" end}, scheme: :http, port: port, ip: {127, 0, 0, 1}},
+        {Bandit,
+         plug: {GarbageAgent, fn -> base <> "/" end},
+         scheme: :http,
+         port: port,
+         ip: {127, 0, 0, 1}},
         id: make_ref()
       )
     )

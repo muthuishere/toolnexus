@@ -132,7 +132,9 @@ defmodule Toolnexus.AcpTest do
     # Even the FIRST turn carries the library-built marker (assembled from
     # every call, not left to the caller), so the fake agent already answers
     # fresh rather than falling back to its naive earliest-match behavior.
-    r1 = generate.(%{messages: [%{"role" => "user", "content" => "What is the capital of France?"}]})
+    r1 =
+      generate.(%{messages: [%{"role" => "user", "content" => "What is the capital of France?"}]})
+
     assert r1.content =~ "FRESH-ANSWER-TO:What is the capital of France?"
 
     r2 =

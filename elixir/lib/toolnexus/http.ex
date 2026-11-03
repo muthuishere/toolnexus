@@ -63,7 +63,9 @@ defmodule Toolnexus.Http do
     # 2. querystring args
     {pairs, rest} = split_query(rest, cfg.query_set, cfg.method)
     qs = URI.encode_query(pairs)
-    url = if qs == "", do: url, else: url <> if(String.contains?(url, "?"), do: "&", else: "?") <> qs
+
+    url =
+      if qs == "", do: url, else: url <> if(String.contains?(url, "?"), do: "&", else: "?") <> qs
 
     # 3. body
     headers = expand_headers(cfg.headers)
@@ -96,7 +98,11 @@ defmodule Toolnexus.Http do
 
           %ToolResult{output: output, is_error: false, metadata: %{status: status}}
         else
-          %ToolResult{output: "HTTP #{status}: #{text}", is_error: true, metadata: %{status: status}}
+          %ToolResult{
+            output: "HTTP #{status}: #{text}",
+            is_error: true,
+            metadata: %{status: status}
+          }
         end
 
       {:error, e} ->

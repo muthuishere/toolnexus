@@ -62,6 +62,7 @@ from .translate import (
 )
 from .prompt_cache import PromptCacheOptions, apply_prompt_cache
 from .tool_tiers import ToolPlan, ToolTier, ToolTierOptions, build_plan, tool_search
+from .tool_concurrency import is_concurrency_safe, resolve_max_tool_concurrency, schedule_calls
 from .types import Answer, Request, Tool, ToolContext, ToolResult, pending_of
 from .adapters import to_anthropic as _to_anthropic, to_openai as _to_openai
 
@@ -947,8 +948,13 @@ class Client:
         wait_for_ctx: Optional[Callable[[asyncio.Event, Request], Any]] = None,
         prompt_cache: Optional[PromptCacheOptions] = None,
         tool_tiers: Optional[ToolTierOptions] = None,
+        max_tool_concurrency: Optional[int] = None,
     ) -> None:
         self.base_url = base_url
+        # §8 tool scheduling: cap on concurrency-safe calls of one response running at once.
+        # None ⇒ env TOOLNEXUS_MAX_TOOL_CONCURRENCY when a positive integer, else 10. Unsafe
+        # calls (anything not read-only) always run alone.
+        self.max_tool_concurrency = max_tool_concurrency
         self.style = style
         self.model = model
         # The key: ``api_key``; else the env var NAMED by ``api_key_env``; else ONLY the
@@ -1466,6 +1472,23 @@ class Client:
             rec["parts"] = list(result.parts)
         rec.call_id = call_id
         return rec
+
+    def _call_safe(self, toolkit: Any, name: str, args: dict[str, Any]) -> bool:
+        """One call's safety; looks through ``call_tool`` to the tool it names. Unknown ⇒ unsafe."""
+        if self.tool_tiers is not None and name == "tool_search":
+            return True
+        real, inner, _ = self._unwrap_call(name, args if isinstance(args, dict) else {})
+        tool = toolkit.get(real) if toolkit is not None else None
+        return tool is not None and is_concurrency_safe(tool, inner if isinstance(inner, dict) else {})
+
+    async def _schedule(self, toolkit: Any, calls: list[tuple[str, dict[str, Any]]], fn: Any) -> list[Any]:
+        """Run one response's calls under the tool schedule; ``fn(i)`` runs call i."""
+        return await schedule_calls(
+            list(range(len(calls))),
+            lambda i: self._call_safe(toolkit, calls[i][0], calls[i][1]),
+            resolve_max_tool_concurrency(self.max_tool_concurrency),
+            fn,
+        )
 
     def _unwrap_call(self, name: str, args: dict[str, Any]) -> tuple[str, dict[str, Any], bool]:
         """Map ``call_tool {name, arguments}`` to the real call; ``wrapped`` False when
@@ -2180,11 +2203,10 @@ class Client:
                     args = _safe_json(fn.get("arguments"))
                     parsed.append((call["id"], fn["name"], args))
 
-                results = await asyncio.gather(
-                    *(
-                        self._run_tool(toolkit, name, args, call_id, turn, log, cancel)
-                        for (call_id, name, args) in parsed
-                    )
+                results = await self._schedule(
+                    toolkit,
+                    [(name, args) for (_cid, name, args) in parsed],
+                    lambda i: self._run_tool(toolkit, parsed[i][1], parsed[i][2], parsed[i][0], turn, log, cancel),
                 )
                 # Record in tool-call order; on the FIRST durable halt, surface it and stop —
                 # deterministic, and the later suspensions' placeholder results never enter the
@@ -2289,13 +2311,12 @@ class Client:
                 # Each result is mapped back to its originating block by index so
                 # tool_use_id ↔ output stays correct. We record the tool_calls entry
                 # AFTER execute so it carries output/is_error/metadata.
-                outputs = await asyncio.gather(
-                    *(
-                        self._run_tool(
-                            toolkit, use["name"], use.get("input") or {}, use.get("id"), turn, log, cancel
-                        )
-                        for use in uses
-                    )
+                outputs = await self._schedule(
+                    toolkit,
+                    [(use["name"], use.get("input") or {}) for use in uses],
+                    lambda i: self._run_tool(
+                        toolkit, uses[i]["name"], uses[i].get("input") or {}, uses[i].get("id"), turn, log, cancel
+                    ),
                 )
                 # Record in tool-call order; on the FIRST durable halt, include that tool_result
                 # block, stop building the content, and surface it — deterministic (G3), later
@@ -2457,8 +2478,12 @@ class Client:
                 )
                 for c in calls:
                     yield self._call_event(c["id"], c["name"], _safe_json(c["args"]))
-                settled = await asyncio.gather(
-                    *(self._run_tool(toolkit, c["name"], _safe_json(c["args"]), c["id"], turn, log, cancel) for c in calls)
+                settled = await self._schedule(
+                    toolkit,
+                    [(c["name"], _safe_json(c["args"])) for c in calls],
+                    lambda i: self._run_tool(
+                        toolkit, calls[i]["name"], _safe_json(calls[i]["args"]), calls[i]["id"], turn, log, cancel
+                    ),
                 )
                 for c, (args, result) in zip(calls, settled):
                     req = pending_of(result)
@@ -2615,8 +2640,10 @@ class Client:
 
                 for u in uses:
                     yield self._call_event(u["id"], u["name"], u["input"])
-                settled = await asyncio.gather(
-                    *(self._run_tool(toolkit, u["name"], u.get("input") or {}, u["id"], turn, log, cancel) for u in uses)
+                settled = await self._schedule(
+                    toolkit,
+                    [(u["name"], u.get("input") or {}) for u in uses],
+                    lambda i: self._run_tool(toolkit, uses[i]["name"], uses[i].get("input") or {}, uses[i]["id"], turn, log, cancel),
                 )
                 results: list[dict[str, Any]] = []
                 halted: Optional[Request] = None
@@ -2792,8 +2819,10 @@ def create_client(
     wait_for_ctx: Optional[Callable[[asyncio.Event, Request], Any]] = None,
     prompt_cache: Optional[PromptCacheOptions] = None,
     tool_tiers: Optional[ToolTierOptions] = None,
+    max_tool_concurrency: Optional[int] = None,
 ) -> Client:
     return Client(
+        max_tool_concurrency=max_tool_concurrency,
         api_key_env=api_key_env,
         wait_for_ctx=wait_for_ctx,
         prompt_cache=prompt_cache,

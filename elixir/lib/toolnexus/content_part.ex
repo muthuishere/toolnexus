@@ -104,7 +104,16 @@ defmodule Toolnexus.ContentPart do
 
     def inspect(p, _opts) do
       loc = if p.url, do: "url", else: "#{Toolnexus.ContentPart.byte_size_of(p)} bytes"
-      concat(["#Toolnexus.ContentPart<", p.type, " ", to_string(p.mime_type || "?"), " ", loc, ">"])
+
+      concat([
+        "#Toolnexus.ContentPart<",
+        p.type,
+        " ",
+        to_string(p.mime_type || "?"),
+        " ",
+        loc,
+        ">"
+      ])
     end
   end
 
@@ -206,13 +215,19 @@ defmodule Toolnexus.ContentPart do
 
   # iodata: a proper OR improper iolist. IO.iodata_to_binary/1 handles both; Enum cannot walk
   # an improper list at all, which is why lists take their own clause ahead of Enumerable.
-  defp build(type, source, opts) when is_list(source), do: from_bytes(type, iodata!(type, source), opts)
+  defp build(type, source, opts) when is_list(source),
+    do: from_bytes(type, iodata!(type, source), opts)
 
   defp build(type, source, opts) when is_binary(source) do
     cond do
-      String.starts_with?(source, "data:") -> from_data_url(type, source, opts)
-      String.starts_with?(source, "http://") or String.starts_with?(source, "https://") -> from_url(type, source, opts)
-      true -> from_path(type, source, opts)
+      String.starts_with?(source, "data:") ->
+        from_data_url(type, source, opts)
+
+      String.starts_with?(source, "http://") or String.starts_with?(source, "https://") ->
+        from_url(type, source, opts)
+
+      true ->
+        from_path(type, source, opts)
     end
   end
 
@@ -228,7 +243,9 @@ defmodule Toolnexus.ContentPart do
   end
 
   defp from_bytes(type, bin, opts) do
-    mime = opts[:mime_type] || fail("content part: #{type} from bytes needs an explicit :mime_type")
+    mime =
+      opts[:mime_type] || fail("content part: #{type} from bytes needs an explicit :mime_type")
+
     check_size!(byte_size(bin), opts)
     {:ok, %__MODULE__{type: type, mime_type: mime, data: Base.encode64(bin), name: opts[:name]}}
   end
@@ -261,18 +278,23 @@ defmodule Toolnexus.ContentPart do
         {:ok,
          %__MODULE__{
            type: type,
-           mime_type: opts[:mime_type] || blank_to_nil(mime) || fail("content part: data: URL has no mime type"),
+           mime_type:
+             opts[:mime_type] || blank_to_nil(mime) ||
+               fail("content part: data: URL has no mime type"),
            data: Base.encode64(bin),
            name: opts[:name]
          }}
 
       _ ->
-        fail("content part: only base64 data: URLs are supported, got #{String.slice(source, 0, 24)}…")
+        fail(
+          "content part: only base64 data: URLs are supported, got #{String.slice(source, 0, 24)}…"
+        )
     end
   end
 
   defp from_url(type, source, opts),
-    do: {:ok, %__MODULE__{type: type, mime_type: opts[:mime_type], url: source, name: opts[:name]}}
+    do:
+      {:ok, %__MODULE__{type: type, mime_type: opts[:mime_type], url: source, name: opts[:name]}}
 
   defp mime_for_path!(_type, path, opts) do
     case opts[:mime_type] do
@@ -281,8 +303,13 @@ defmodule Toolnexus.ContentPart do
 
       _ ->
         case media_for_path(path) do
-          {:ok, {mime, _}} -> mime
-          :error -> fail("content part: unknown file extension #{inspect(Path.extname(path))}; pass :mime_type")
+          {:ok, {mime, _}} ->
+            mime
+
+          :error ->
+            fail(
+              "content part: unknown file extension #{inspect(Path.extname(path))}; pass :mime_type"
+            )
         end
     end
   end
@@ -335,10 +362,17 @@ defmodule Toolnexus.ContentPart do
   def validate(%__MODULE__{type: type} = p) when type in @types do
     cond do
       p.data != nil and p.url != nil ->
-        {:error, %Error{message: "content part: #{type} carries both :data and :url; exactly one is allowed"}}
+        {:error,
+         %Error{
+           message: "content part: #{type} carries both :data and :url; exactly one is allowed"
+         }}
 
       p.data == nil and p.url == nil ->
-        {:error, %Error{message: "content part: #{type} carries neither :data nor :url; exactly one is required"}}
+        {:error,
+         %Error{
+           message:
+             "content part: #{type} carries neither :data nor :url; exactly one is required"
+         }}
 
       p.data != nil and p.mime_type in [nil, ""] ->
         {:error, %Error{message: "content part: #{type} with :data needs a :mime_type"}}
@@ -451,7 +485,8 @@ defmodule Toolnexus.ContentPart do
   @spec to_block(t() | map(), String.t()) :: {:ok, map()} | {:unsupported, String.t()}
   def to_block(part, style), do: part |> from_map() |> block(style)
 
-  defp block(%__MODULE__{type: "text", text: t}, _style), do: {:ok, %{"type" => "text", "text" => t || ""}}
+  defp block(%__MODULE__{type: "text", text: t}, _style),
+    do: {:ok, %{"type" => "text", "text" => t || ""}}
 
   defp block(%__MODULE__{type: "image", data: d, mime_type: m}, "openai") when is_binary(d),
     do: {:ok, %{"type" => "image_url", "image_url" => %{"url" => data_url(m, d)}}}
@@ -460,26 +495,38 @@ defmodule Toolnexus.ContentPart do
     do: {:ok, %{"type" => "image_url", "image_url" => %{"url" => u}}}
 
   defp block(%__MODULE__{type: "image", data: d, mime_type: m}, "anthropic") when is_binary(d),
-    do: {:ok, %{"type" => "image", "source" => %{"type" => "base64", "media_type" => m, "data" => d}}}
+    do:
+      {:ok,
+       %{"type" => "image", "source" => %{"type" => "base64", "media_type" => m, "data" => d}}}
 
   defp block(%__MODULE__{type: "image", url: u}, "anthropic") when is_binary(u),
     do: {:ok, %{"type" => "image", "source" => %{"type" => "url", "url" => u}}}
 
   # `file_data` REQUIRES the `data:<mime>;base64,` prefix — a bare base64 string is a 400.
-  defp block(%__MODULE__{type: "file", data: d, mime_type: m, name: n}, "openai") when is_binary(d),
-    do: {:ok, %{"type" => "file", "file" => %{"filename" => n || "file", "file_data" => data_url(m, d)}}}
+  defp block(%__MODULE__{type: "file", data: d, mime_type: m, name: n}, "openai")
+       when is_binary(d),
+       do:
+         {:ok,
+          %{
+            "type" => "file",
+            "file" => %{"filename" => n || "file", "file_data" => data_url(m, d)}
+          }}
 
   defp block(%__MODULE__{type: "file", url: u}, "openai") when is_binary(u),
     do: {:unsupported, "Chat Completions has no URL form for a file part"}
 
   defp block(%__MODULE__{type: "file", data: d, mime_type: m}, "anthropic") when is_binary(d),
-    do: {:ok, %{"type" => "document", "source" => %{"type" => "base64", "media_type" => m, "data" => d}}}
+    do:
+      {:ok,
+       %{"type" => "document", "source" => %{"type" => "base64", "media_type" => m, "data" => d}}}
 
   defp block(%__MODULE__{type: "file", url: u}, "anthropic") when is_binary(u),
     do: {:ok, %{"type" => "document", "source" => %{"type" => "url", "url" => u}}}
 
   defp block(%__MODULE__{type: "audio", data: d, mime_type: m}, "openai") when is_binary(d),
-    do: {:ok, %{"type" => "input_audio", "input_audio" => %{"data" => d, "format" => audio_format(m)}}}
+    do:
+      {:ok,
+       %{"type" => "input_audio", "input_audio" => %{"data" => d, "format" => audio_format(m)}}}
 
   defp block(%__MODULE__{type: "audio", url: u}, "openai") when is_binary(u),
     do: {:unsupported, "Chat Completions has no URL form for an audio part"}
@@ -490,7 +537,8 @@ defmodule Toolnexus.ContentPart do
   defp block(%__MODULE__{type: type}, style),
     do: {:unsupported, "no #{style} block shape for a #{type} part"}
 
-  defp data_url(mime, b64), do: "data:" <> to_string(mime || "application/octet-stream") <> ";base64," <> b64
+  defp data_url(mime, b64),
+    do: "data:" <> to_string(mime || "application/octet-stream") <> ";base64," <> b64
 
   defp audio_format(mime) do
     case mime do
@@ -574,7 +622,13 @@ defmodule Toolnexus.ContentPart do
         "toolnexus: #{p.type} content part (#{p.mime_type || "?"}) #{reason}; sending a text placeholder instead"
       )
 
-      [%{"type" => "text", "text" => "[unsupported #{p.type} part (#{p.mime_type || "unknown"}, #{byte_size_of(p)} bytes)]"}]
+      [
+        %{
+          "type" => "text",
+          "text" =>
+            "[unsupported #{p.type} part (#{p.mime_type || "unknown"}, #{byte_size_of(p)} bytes)]"
+        }
+      ]
     end
   end
 

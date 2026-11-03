@@ -150,8 +150,9 @@ defmodule Toolnexus.McpServe do
 
   defp mcp_block(%ContentPart{type: "text"}), do: []
 
-  defp mcp_block(%ContentPart{type: type, data: data} = p) when type in ["image", "audio"] and is_binary(data),
-    do: [%{"type" => type, "data" => data, "mimeType" => p.mime_type}]
+  defp mcp_block(%ContentPart{type: type, data: data} = p)
+       when type in ["image", "audio"] and is_binary(data),
+       do: [%{"type" => type, "data" => data, "mimeType" => p.mime_type}]
 
   defp mcp_block(%ContentPart{type: "file", data: data} = p) when is_binary(data) do
     resource =

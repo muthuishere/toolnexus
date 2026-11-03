@@ -38,7 +38,11 @@ defmodule Toolnexus.Agents.CompactionTest do
             "role" => "assistant",
             "content" => nil,
             "tool_calls" => [
-              %{"id" => "c#{i}", "type" => "function", "function" => %{"name" => "lookup", "arguments" => "{}"}}
+              %{
+                "id" => "c#{i}",
+                "type" => "function",
+                "function" => %{"name" => "lookup", "arguments" => "{}"}
+              }
             ]
           },
           %{"role" => "tool", "tool_call_id" => "c#{i}", "content" => "result #{i} #{data}"},
@@ -161,6 +165,7 @@ defmodule Toolnexus.Agents.CompactionTest do
 
   test "estimate_tokens sums ceil(byte_size(json)/4) per message" do
     m = %{"role" => "user", "content" => "hello"}
+
     # Jason.encode! is compact, no HTML escaping, no trailing newline — byte-length parity with JS.
     expected = ceil(byte_size(Jason.encode!(m)) / 4)
     assert Compaction.estimate_tokens([m]) == expected
@@ -186,7 +191,11 @@ defmodule Toolnexus.Agents.CompactionTest do
             "role" => "assistant",
             "content" => nil,
             "tool_calls" => [
-              %{"id" => "c#{n}", "type" => "function", "function" => %{"name" => "pad", "arguments" => "{}"}}
+              %{
+                "id" => "c#{n}",
+                "type" => "function",
+                "function" => %{"name" => "pad", "arguments" => "{}"}
+              }
             ]
           }
         end
@@ -215,7 +224,10 @@ defmodule Toolnexus.Agents.CompactionTest do
         max_turns: 20,
         transport: transport,
         system_prompt: "You are Ava. SOUL.",
-        hooks: %{before_llm: Compaction.compactor(max_tokens: 600, keep_tail: 250, summarize: &summarize/1)}
+        hooks: %{
+          before_llm:
+            Compaction.compactor(max_tokens: 600, keep_tail: 250, summarize: &summarize/1)
+        }
       )
 
     r = Client.run(client, "start", [pad])
@@ -224,6 +236,7 @@ defmodule Toolnexus.Agents.CompactionTest do
     assert String.contains?(r.text, "compacted=true"), r.text
     assert Compaction.estimate_tokens(r.messages) < 4000
   end
+
   # Dialect-blind tool-pair boundary (fix-compaction-tool-pair-dialect) ----------
   #
   # Under the anthropic dialect a tool result is a "user" message carrying
@@ -332,7 +345,13 @@ defmodule Toolnexus.Agents.CompactionTest do
           %{
             "role" => "assistant",
             "content" => nil,
-            "tool_calls" => [%{"id" => id, "type" => "function", "function" => %{"name" => "lookup", "arguments" => "{}"}}]
+            "tool_calls" => [
+              %{
+                "id" => id,
+                "type" => "function",
+                "function" => %{"name" => "lookup", "arguments" => "{}"}
+              }
+            ]
           },
           %{"role" => "tool", "tool_call_id" => id, "content" => data}
         ]
@@ -341,10 +360,21 @@ defmodule Toolnexus.Agents.CompactionTest do
     msgs = [%{"role" => "system", "content" => "SOUL"}, prompt] ++ work
 
     hook =
-      Compaction.compactor(max_tokens: 100, keep_tail: 20, summarize: &summarize/1, on_compact: &send(me, {:info, &1}))
+      Compaction.compactor(
+        max_tokens: 100,
+        keep_tail: 20,
+        summarize: &summarize/1,
+        on_compact: &send(me, {:info, &1})
+      )
 
     %{messages: out} = hook.(ev(msgs))
-    assert [%{"role" => "system"}, ^prompt, %{"role" => "system", "content" => "[Summary of earlier conversation]\n" <> _}] = out
+
+    assert [
+             %{"role" => "system"},
+             ^prompt,
+             %{"role" => "system", "content" => "[Summary of earlier conversation]\n" <> _}
+           ] = out
+
     assert_received {:info, %{folded: folded}}
     assert length(folded) == length(msgs) - 2
   end

@@ -90,7 +90,9 @@ defmodule Toolnexus.McpServeTest do
     handle = serve!(tk, mcp: %{tools: ["add", "does-not-exist"]})
 
     source =
-      Mcp.load(%{"mcpServers" => %{"gw" => %{"url" => handle.url <> "/mcp", "timeout" => 10_000}}})
+      Mcp.load(%{
+        "mcpServers" => %{"gw" => %{"url" => handle.url <> "/mcp", "timeout" => 10_000}}
+      })
 
     on_exit(fn -> Mcp.close(source) end)
     assert Enum.map(source.tools, & &1.name) == ["gw_add"]
@@ -100,7 +102,11 @@ defmodule Toolnexus.McpServeTest do
     tools = [add_tool(), fail_tool()]
     assert McpServe.exposed_tools(tools, nil) == tools
     assert McpServe.exposed_tools(tools, %{}) == tools
-    assert Enum.map(McpServe.exposed_tools(tools, %{tools: ["explode"]}), & &1.name) == ["explode"]
+
+    assert Enum.map(McpServe.exposed_tools(tools, %{tools: ["explode"]}), & &1.name) == [
+             "explode"
+           ]
+
     assert McpServe.exposed_tools(tools, %{"tools" => ["nope"]}) == []
   end
 
@@ -160,7 +166,10 @@ defmodule Toolnexus.McpServeTest do
     handle = serve!(tk, mcp: %{}, on_call: fn ev -> Agent.update(calls, &(&1 ++ [ev])) end)
 
     {200, body} =
-      post_mcp(handle.url, rpc(3, "tools/call", %{"name" => "add", "arguments" => %{"a" => 1, "b" => 2}}))
+      post_mcp(
+        handle.url,
+        rpc(3, "tools/call", %{"name" => "add", "arguments" => %{"a" => 1, "b" => 2}})
+      )
 
     assert body["result"] == %{
              "content" => [%{"type" => "text", "text" => "3"}],
@@ -171,7 +180,9 @@ defmodule Toolnexus.McpServeTest do
     assert body["result"]["isError"] == true
     assert [%{"type" => "text", "text" => "kaboom"}] = body["result"]["content"]
 
-    {200, body} = post_mcp(handle.url, rpc(5, "tools/call", %{"name" => "ghost", "arguments" => %{}}))
+    {200, body} =
+      post_mcp(handle.url, rpc(5, "tools/call", %{"name" => "ghost", "arguments" => %{}}))
+
     assert body["error"] == %{"code" => -32602, "message" => "Unknown tool: ghost"}
 
     # onCall fired per successful dispatch with source + is_error, never for unknown names
@@ -213,16 +224,24 @@ defmodule Toolnexus.McpServeTest do
     tk = toolkit()
     handle = serve!(tk, mcp: %{})
 
-    assert Req.get!(url: handle.url <> "/.well-known/agent-card.json", retry: false, decode_body: false).status ==
+    assert Req.get!(
+             url: handle.url <> "/.well-known/agent-card.json",
+             retry: false,
+             decode_body: false
+           ).status ==
              404
 
-    assert Req.post!(url: handle.url <> "/", json: %{}, retry: false, decode_body: false).status == 404
+    assert Req.post!(url: handle.url <> "/", json: %{}, retry: false, decode_body: false).status ==
+             404
   end
 
   test "a top-level mcpServer config block mounts the profile without an inline option" do
     tk =
       Toolnexus.create_toolkit!(
-        mcp_config: %{"mcpServers" => %{}, "mcpServer" => %{"name" => "cfg-gw", "version" => "1.1.1"}},
+        mcp_config: %{
+          "mcpServers" => %{},
+          "mcpServer" => %{"name" => "cfg-gw", "version" => "1.1.1"}
+        },
         extra_tools: [add_tool()],
         builtins: false
       )
@@ -282,10 +301,17 @@ defmodule Toolnexus.McpServeTest do
     tk = Toolnexus.create_toolkit!(extra_tools: [raw, raiser], builtins: false)
     handle = serve!(tk, mcp: %{})
 
-    {200, body} = post_mcp(handle.url, rpc(1, "tools/call", %{"name" => "raw", "arguments" => %{}}))
-    assert body["result"] == %{"content" => [%{"type" => "text", "text" => "fine"}], "isError" => false}
+    {200, body} =
+      post_mcp(handle.url, rpc(1, "tools/call", %{"name" => "raw", "arguments" => %{}}))
 
-    {200, body} = post_mcp(handle.url, rpc(2, "tools/call", %{"name" => "raiser", "arguments" => %{}}))
+    assert body["result"] == %{
+             "content" => [%{"type" => "text", "text" => "fine"}],
+             "isError" => false
+           }
+
+    {200, body} =
+      post_mcp(handle.url, rpc(2, "tools/call", %{"name" => "raiser", "arguments" => %{}}))
+
     assert body["result"]["isError"] == true
     assert [%{"text" => "unguarded"}] = body["result"]["content"]
   end

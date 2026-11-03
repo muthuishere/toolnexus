@@ -134,7 +134,8 @@ defmodule Toolnexus.Client.TurnGuard do
                 %{
                   "type" => "tool_result",
                   "tool_use_id" => id,
-                  "content" => "interrupted: the turn ended before this tool returned. Whether its side effects happened is unknown. Do not re-run it automatically; check first.",
+                  "content" =>
+                    "interrupted: the turn ended before this tool returned. Whether its side effects happened is unknown. Do not re-run it automatically; check first.",
                   "is_error" => true
                 }
             end)
@@ -160,7 +161,12 @@ defmodule Toolnexus.Client.TurnGuard do
     messages ++
       Enum.map(missing, fn id ->
         Map.get(done, id) ||
-          %{"role" => "tool", "tool_call_id" => id, "content" => "interrupted: the turn ended before this tool returned. Whether its side effects happened is unknown. Do not re-run it automatically; check first."}
+          %{
+            "role" => "tool",
+            "tool_call_id" => id,
+            "content" =>
+              "interrupted: the turn ended before this tool returned. Whether its side effects happened is unknown. Do not re-run it automatically; check first."
+          }
       end)
   end
 end

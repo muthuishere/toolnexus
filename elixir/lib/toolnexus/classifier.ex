@@ -625,8 +625,11 @@ defmodule Toolnexus.Classifier do
       timeout: :infinity
     )
     |> Enum.reduce_while({:ok, []}, fn
-      {:ok, {_i, {:ok, d}}}, {:ok, acc} -> {:cont, {:ok, [d | acc]}}
-      {:ok, {i, {:error, why}}}, _ -> {:halt, {:error, "classifier: evaluateBatch: state #{i}: #{why}"}}
+      {:ok, {_i, {:ok, d}}}, {:ok, acc} ->
+        {:cont, {:ok, [d | acc]}}
+
+      {:ok, {i, {:error, why}}}, _ ->
+        {:halt, {:error, "classifier: evaluateBatch: state #{i}: #{why}"}}
     end)
     |> case do
       {:ok, ds} -> {:ok, Enum.reverse(ds)}

@@ -330,6 +330,7 @@ pub fn custom_tool(
     f: impl Fn(Value, toolnexus::ToolContext) -> BoxFuture<ToolResult> + Send + Sync + 'static,
 ) -> Tool {
     Tool {
+        concurrency_safe: None,
         name: name.into(),
         description: desc.into(),
         input_schema: json!({"type": "object", "properties": {}}),

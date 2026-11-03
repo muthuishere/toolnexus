@@ -22,6 +22,7 @@
 ;; No java.*, no `future`, no reader conditionals.
 (ns toolnexus.agents.runtime-fixture-test
   (:require [toolnexus.shared-examples-test :as te]
+            [koine.process :as proc]
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
             [koine.fs :as fs]
@@ -232,6 +233,21 @@
 ;; ===========================================================================
 ;; subagent-fanout — S1/S2
 ;; ===========================================================================
+
+;; SPEC §7D Background runs: spawn + wake return at once with the id; a background
+;; wait delivers the completion to the host's callback. No new API; pins the recipe.
+(deftest background-run-recipe
+  (let [fx   (fixture "subagent-fanout")
+        r    (make-rt fx :ctl {:barrier 2 :in-flight (atom 0)})
+        h    (rt/spawn r rt/root (kstr (:entry (:run fx))))
+        done (promise)]
+    (is (string? h) "the handle id is available at once")
+    (rt/wake r h (str (:prompt (:run fx))))
+    (proc/run-async! (fn [] (deliver done [h (rt/wait r h)])))   ; on-done(id, r)
+    (let [[id res] (deref done 5000 nil)]
+      (is (= h id))
+      (is (= "done" (:status res)))
+      (is (str/includes? (str (:text res)) "found:")))))
 
 (deftest fixture-subagent-fanout
   (testing "parallel task fan-out: context isolation, usage roll-up, fused close"

@@ -19,6 +19,14 @@ public sealed class NativeTool : ITool
     /// <summary>(SPEC §4C) Advisory hints for a host permission gate; <c>null</c> = unknown. Settable.</summary>
     public ToolHints? Hints { get; set; }
 
+    /// <summary>(SPEC §8 "Tool scheduling") Decides per call whether this tool may run alongside
+    /// other safe calls of one response; <c>null</c> ⇒ safe only when <see cref="Hints"/> is read-only.</summary>
+    public Func<IDictionary<string, object?>, bool>? ConcurrencySafe { get; set; }
+
+    /// <inheritdoc/>
+    public bool IsConcurrencySafe(IDictionary<string, object?> args)
+        => ConcurrencySafe?.Invoke(args) ?? Hints?.ReadOnly == true;
+
     private NativeTool(string name, string description, IDictionary<string, object?>? inputSchema,
         Func<IDictionary<string, object?>, ToolContext?, Task<object?>> fn)
     {
