@@ -310,7 +310,7 @@ class Media:
         if v.get("mode") == "async":
             id_path = v.get("idPath", "")
             raw = _get(resp, id_path)
-            if not (isinstance(raw, str) or (
+            if not ((isinstance(raw, str) and raw != "") or (
                 isinstance(raw, (int, float)) and not isinstance(raw, bool)
                 and math.isfinite(raw) and raw == int(raw)
             )):
@@ -431,6 +431,9 @@ class Media:
                 description=spec["description"],
                 input_schema={"type": "object", "properties": props, "required": required},
                 source="media",
+                # Each call is an independent remote job: always concurrency-safe
+                # (§7G, §8 Tool scheduling).
+                concurrency_safe=lambda _args: True,
                 execute=self._executor(spec["verb"], found[1].get("kind", "")),
             ))
         return out

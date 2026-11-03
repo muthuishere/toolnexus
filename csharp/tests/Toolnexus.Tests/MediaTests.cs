@@ -348,4 +348,14 @@ public class MediaTests
         var f = Assert.Single(r.Files);
         Assert.Equal(new LlmClient.RunFile("audio", "audio/wav", "https://x/s.wav", null, "generate_speech", "s1"), f);
     }
+
+    /// <summary>Media tools are concurrency-safe (SPEC §7G, §8 Tool scheduling): each call is an independent remote job.</summary>
+    [Fact]
+    public void MediaTools_AreConcurrencySafe()
+    {
+        var media = Media.Create(MediaStyle.FromDictionary(Json.ToMap("{\"baseUrl\":\"http://unused\",\"verbs\":{\"image\":{\"mode\":\"sync\",\"kind\":\"image\",\"start\":{\"path\":\"/i\"},\"args\":{\"prompt\":\"p\"},\"resultPath\":\"u\"},\"video\":{\"mode\":\"sync\",\"kind\":\"video\",\"start\":{\"path\":\"/v\"},\"args\":{\"prompt\":\"p\"},\"resultPath\":\"u\"},\"speech\":{\"mode\":\"sync\",\"kind\":\"audio\",\"start\":{\"path\":\"/s\"},\"args\":{\"text\":\"t\"},\"resultPath\":\"u\"},\"transcribe\":{\"mode\":\"sync\",\"kind\":\"text\",\"start\":{\"path\":\"/r\"},\"args\":{\"audio\":\"a\"},\"resultPath\":\"u\"},\"cloneVoice\":{\"mode\":\"sync\",\"kind\":\"text\",\"start\":{\"path\":\"/c\"},\"args\":{\"name\":\"n\"},\"resultPath\":\"id\"},\"talking\":{\"mode\":\"sync\",\"kind\":\"video\",\"start\":{\"path\":\"/t\"},\"args\":{\"image\":\"i\"},\"resultPath\":\"u\"}}}")));
+        var tools = media.Tools();
+        Assert.Equal(6, tools.Count);
+        foreach (var t in tools) Assert.True(ToolScheduler.IsConcurrencySafe(t, new Dictionary<string, object?>()), t.Name);
+    }
 }

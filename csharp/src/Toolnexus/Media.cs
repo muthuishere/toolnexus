@@ -225,8 +225,8 @@ public sealed class Media
         if ((v.Get("mode") as string) == "async")
         {
             var idPath = v.Get("idPath") as string ?? "";
-            jobId = ScalarText(ReadPath(final, idPath), integralOnly: true)
-                ?? throw new MediaException($"{verb}: no job id at {idPath}");
+            jobId = ScalarText(ReadPath(final, idPath), integralOnly: true) is { Length: > 0 } jid ? jid
+                : throw new MediaException($"{verb}: no job id at {idPath}");
             (final, status) = await PollAsync(style, verb, v.Get("poll") as IDictionary<string, object?> ?? new Dictionary<string, object?>(),
                 jobId, cancellationToken).ConfigureAwait(false);
         }
@@ -384,6 +384,9 @@ public sealed class Media
         public string Description => _spec.Description;
         public IDictionary<string, object?> InputSchema { get; }
         public string Source => "media";
+
+        /// <summary>Each call is an independent remote job: always concurrency-safe (§7G, §8 Tool scheduling).</summary>
+        public bool IsConcurrencySafe(IDictionary<string, object?> args) => true;
 
         public async Task<ToolResult> ExecuteAsync(IDictionary<string, object?> args, ToolContext? ctx = null)
         {

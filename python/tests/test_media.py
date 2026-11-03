@@ -366,3 +366,13 @@ async def test_edge_rules_job_id_and_envelope_and_text():
     assert (await create_media(txt, http_transport=t({"t": 4.0})).generate("transcribe", {})).text == "4"
     with pytest.raises(MediaError, match="transcribe: no result at t"):
         await create_media(txt, http_transport=t({"t": None})).generate("transcribe", {})
+
+
+def test_media_tools_are_concurrency_safe():
+    """Media tools are concurrency-safe (SPEC §7G, §8 Tool scheduling): each call is an independent remote job."""
+    from toolnexus import is_concurrency_safe
+
+    tools = create_media(json.loads("{\"baseUrl\":\"http://unused\",\"verbs\":{\"image\":{\"mode\":\"sync\",\"kind\":\"image\",\"start\":{\"path\":\"/i\"},\"args\":{\"prompt\":\"p\"},\"resultPath\":\"u\"},\"video\":{\"mode\":\"sync\",\"kind\":\"video\",\"start\":{\"path\":\"/v\"},\"args\":{\"prompt\":\"p\"},\"resultPath\":\"u\"},\"speech\":{\"mode\":\"sync\",\"kind\":\"audio\",\"start\":{\"path\":\"/s\"},\"args\":{\"text\":\"t\"},\"resultPath\":\"u\"},\"transcribe\":{\"mode\":\"sync\",\"kind\":\"text\",\"start\":{\"path\":\"/r\"},\"args\":{\"audio\":\"a\"},\"resultPath\":\"u\"},\"cloneVoice\":{\"mode\":\"sync\",\"kind\":\"text\",\"start\":{\"path\":\"/c\"},\"args\":{\"name\":\"n\"},\"resultPath\":\"id\"},\"talking\":{\"mode\":\"sync\",\"kind\":\"video\",\"start\":{\"path\":\"/t\"},\"args\":{\"image\":\"i\"},\"resultPath\":\"u\"}}}")).tools()
+    assert len(tools) == 6
+    for t in tools:
+        assert is_concurrency_safe(t, {}), t.name

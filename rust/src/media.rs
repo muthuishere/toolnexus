@@ -682,7 +682,7 @@ impl Media {
 
         let (final_resp, status, job_id) = if vs.mode == "async" {
             let job_id = match get_path(&start, &vs.id_path) {
-                Some(Value::String(s)) => s.clone(),
+                Some(Value::String(s)) if !s.is_empty() => s.clone(),
                 Some(Value::Number(n)) if is_integral(n) => num_text(n),
                 _ => return err(format!("{verb}: no job id at {}", vs.id_path)),
             };
@@ -864,6 +864,9 @@ impl Media {
             input_schema: json!({"type": "object", "properties": props, "required": required}),
             source: ToolSource::Media,
             hints: None,
+            // Each call is an independent remote job: always concurrency-safe
+            // (§7G, §8 Tool scheduling).
+            concurrency_safe: Some(Arc::new(|_| true)),
             execute: Arc::new(move |args, ctx| {
                 let me = me.clone();
                 Box::pin(async move {

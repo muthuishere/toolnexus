@@ -366,3 +366,14 @@ async fn media_tool_wins_over_extra_tool_of_same_name() {
     assert_eq!(tools.len(), 1);
     assert_eq!(tools[0].source, ToolSource::Media);
 }
+
+// Media tools are concurrency-safe (SPEC §7G, §8 Tool scheduling): each call is an independent remote job.
+#[test]
+fn media_tools_are_concurrency_safe() {
+    let style: MediaStyle = serde_json::from_str("{\"baseUrl\":\"http://unused\",\"verbs\":{\"image\":{\"mode\":\"sync\",\"kind\":\"image\",\"start\":{\"path\":\"/i\"},\"args\":{\"prompt\":\"p\"},\"resultPath\":\"u\"},\"video\":{\"mode\":\"sync\",\"kind\":\"video\",\"start\":{\"path\":\"/v\"},\"args\":{\"prompt\":\"p\"},\"resultPath\":\"u\"},\"speech\":{\"mode\":\"sync\",\"kind\":\"audio\",\"start\":{\"path\":\"/s\"},\"args\":{\"text\":\"t\"},\"resultPath\":\"u\"},\"transcribe\":{\"mode\":\"sync\",\"kind\":\"text\",\"start\":{\"path\":\"/r\"},\"args\":{\"audio\":\"a\"},\"resultPath\":\"u\"},\"cloneVoice\":{\"mode\":\"sync\",\"kind\":\"text\",\"start\":{\"path\":\"/c\"},\"args\":{\"name\":\"n\"},\"resultPath\":\"id\"},\"talking\":{\"mode\":\"sync\",\"kind\":\"video\",\"start\":{\"path\":\"/t\"},\"args\":{\"image\":\"i\"},\"resultPath\":\"u\"}}}").unwrap();
+    let tools = create_media(style, MediaOptions::default()).tools();
+    assert_eq!(tools.len(), 6);
+    for t in &tools {
+        assert!(toolnexus::is_concurrency_safe(t, &json!({})), "{}", t.name);
+    }
+}

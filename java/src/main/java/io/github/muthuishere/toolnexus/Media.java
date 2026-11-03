@@ -312,6 +312,8 @@ public final class Media {
         @Override public String description() { return description; }
         @Override public Map<String, Object> inputSchema() { return schema; }
         @Override public String source() { return "media"; }
+        /** Each call is an independent remote job: always concurrency-safe (§7G, §8 Tool scheduling). */
+        @Override public boolean concurrencySafe(Map<String, Object> args) { return true; }
 
         @Override
         public ToolResult execute(Map<String, Object> args, ToolContext ctx) {
@@ -414,7 +416,7 @@ public final class Media {
         } else {
             String idPath = str(v.get("idPath"));
             Object id = readPath(resp, idPath);
-            if (id instanceof String sid) jobId = sid;
+            if (id instanceof String sid && !sid.isEmpty()) jobId = sid;
             else if (id instanceof Number n && isIntegral(n)) jobId = render(n);
             if (jobId == null) throw new MediaException(verb + ": no job id at " + idPath);
             Map<String, Object> poll = v.get("poll") instanceof Map ? (Map<String, Object>) v.get("poll") : Map.of();

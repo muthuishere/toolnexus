@@ -651,4 +651,11 @@ defmodule Toolnexus.MediaTest do
     assert r.text == "fin"
     assert Enum.map(r.files, & &1.call_id) == ["tu_1", "tu_1"]
   end
+
+  # Media tools are concurrency-safe (SPEC §7G, §8 Tool scheduling): each call is an independent remote job.
+  test "all six media tools are concurrency-safe" do
+    tools = Media.tools(Media.new(Jason.decode!(~S({"baseUrl":"http://unused","verbs":{"image":{"mode":"sync","kind":"image","start":{"path":"/i"},"args":{"prompt":"p"},"resultPath":"u"},"video":{"mode":"sync","kind":"video","start":{"path":"/v"},"args":{"prompt":"p"},"resultPath":"u"},"speech":{"mode":"sync","kind":"audio","start":{"path":"/s"},"args":{"text":"t"},"resultPath":"u"},"transcribe":{"mode":"sync","kind":"text","start":{"path":"/r"},"args":{"audio":"a"},"resultPath":"u"},"cloneVoice":{"mode":"sync","kind":"text","start":{"path":"/c"},"args":{"name":"n"},"resultPath":"id"},"talking":{"mode":"sync","kind":"video","start":{"path":"/t"},"args":{"image":"i"},"resultPath":"u"}}}))))
+    assert length(tools) == 6
+    for t <- tools, do: assert(Toolnexus.ToolScheduling.concurrency_safe?(t, %{}), t.name)
+  end
 end

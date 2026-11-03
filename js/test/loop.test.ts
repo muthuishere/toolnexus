@@ -231,3 +231,21 @@ test("guardrails: an async guardrail fails loudly instead of silently denying ev
   const ok = guardedHooks([(_ev: any) => undefined], undefined)
   assert.equal(await ok!.beforeTool!({ name: "safe", args: {}, turn: 1 } as any), undefined)
 })
+
+// Regression: RunResult.files accumulates across completion-gate retries exactly
+// like toolCalls — an image made in attempt 1 survives a retry that made none.
+test("the completion gate accumulates files across retries", async () => {
+  const { runGated } = await import("../dist/agents/loop.js")
+  const img = { type: "image", mimeType: "image/png", url: "https://x/1.png", from: "generate_image", callId: "c1" }
+  const attempts: any[] = [
+    { text: "a", status: "done", toolCalls: [{ name: "generate_image" }], files: [img] },
+    { text: "b", status: "done", toolCalls: [{ name: "noop" }], files: [] },
+  ]
+  let n = 0
+  const out = await runGated(async () => attempts[n++], "go", {
+    maxAttempts: 3,
+    verify: (r: any) => (r.toolCalls.length >= 2 ? { ok: true } : { ok: false, reason: "not yet" }),
+  })
+  assert.equal(out.toolCalls.length, 2)
+  assert.deepEqual(out.files, [img])
+})

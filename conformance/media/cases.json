@@ -215,6 +215,17 @@
       "error": "image: no job id at id",
       "tool": { "name": "generate_image", "isError": true, "output": "image: no job id at id" } },
 
+    { "name": "job_id_empty_string_is_not_an_id",
+      "style": { "baseUrl": "{server}", "verbs": { "image": {
+        "mode": "async", "kind": "image", "start": { "path": "/s" }, "args": { "prompt": "prompt" }, "idPath": "id",
+        "poll": { "path": "/p/{id}", "statusPath": "st", "done": ["completed"], "failed": ["failed"], "intervalMs": 1, "timeoutMs": 5000 },
+        "resultPath": "u" } } },
+      "verb": "image", "args": { "prompt": "x" },
+      "script": [ { "status": 200, "body": { "id": "" } } ],
+      "expectRequests": [ { "method": "POST", "path": "/s", "body": { "prompt": "x" } } ],
+      "error": "image: no job id at id",
+      "tool": { "name": "generate_image", "isError": true, "output": "image: no job id at id" } },
+
     { "name": "unknown_verb",
       "style": { "baseUrl": "{server}", "verbs": { "image": {
         "mode": "sync", "kind": "image", "start": { "path": "/s" }, "args": { "prompt": "prompt" }, "resultPath": "u" } } },

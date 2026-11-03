@@ -564,6 +564,8 @@ func (m *Media) Tools() []Tool {
 			Description: spec.desc,
 			InputSchema: JSONSchema{"type": "object", "properties": props, "required": required},
 			Source:      SourceMedia,
+			// Each call is an independent remote job: always concurrency-safe (§7G, §8 Tool scheduling).
+			ConcurrencySafe: func(map[string]any) bool { return true },
 			Execute: func(args map[string]any, tc *ToolContext) (ToolResult, error) {
 				ctx := context.Background()
 				if tc != nil && tc.Ctx != nil {

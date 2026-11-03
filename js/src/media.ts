@@ -416,7 +416,7 @@ export class Media {
       const poll = spec.poll!
       const idPath = spec.idPath ?? ""
       const rawId = readPath(startResp, idPath)
-      if (typeof rawId === "string") jobId = rawId
+      if (typeof rawId === "string" && rawId !== "") jobId = rawId
       else if (typeof rawId === "number" && Number.isInteger(rawId)) jobId = String(rawId)
       else throw new Error(`${verb}: no job id at ${idPath}`)
       const interval = poll.intervalMs ?? 5000
@@ -504,6 +504,8 @@ export class Media {
         description: v.description,
         inputSchema,
         source: "media",
+        // Each call is an independent remote job: always concurrency-safe (§7G, §8 Tool scheduling).
+        concurrencySafe: () => true,
         execute: async (args: Record<string, unknown>, ctx?: ToolContext): Promise<ToolResult> => {
           try {
             const r = await this.generate(v.verb, args ?? {}, { signal: ctx?.signal })

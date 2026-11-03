@@ -46,3 +46,14 @@ Every engine error SHALL use the exact message forms in SPEC §7G.
 #### Scenario: No media
 - **WHEN** a run calls no media-producing tool
 - **THEN** `RunResult.files` is `[]` and every other field is unchanged
+
+### Requirement: Media tools are concurrency-safe
+Every tool returned by `media.tools()` SHALL be concurrency-safe for every argument set under §8 *Tool scheduling* (it carries an always-true `concurrencySafe` predicate, idiomatic name per port), because each call is an independent remote job; the media calls of one model response SHALL therefore run concurrently up to `maxToolConcurrency` rather than serialised.
+
+#### Scenario: All six media tools are safe
+- **WHEN** a style maps all six verbs and `media.tools()` is built
+- **THEN** each of the six tools is concurrency-safe for empty arguments
+
+#### Scenario: Two media calls in one response
+- **WHEN** a model response calls `generate_image` twice
+- **THEN** both calls run in the same concurrent batch, and results keep the emitted order

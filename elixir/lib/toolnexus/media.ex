@@ -229,6 +229,9 @@ defmodule Toolnexus.Media do
         name: v.tool,
         description: v.description,
         source: "media",
+        # Each call is an independent remote job: always concurrency-safe
+        # (§7G, §8 Tool scheduling).
+        concurrency_safe: fn _args -> true end,
         input_schema: %{
           "type" => "object",
           "properties" => Map.new(args, &{&1.name, arg_schema(&1)}),
@@ -329,7 +332,7 @@ defmodule Toolnexus.Media do
     id_path = spec["idPath"]
 
     case read_path(resp, id_path) do
-      {:ok, id} when is_binary(id) or is_integer(id) or (is_float(id) and id == trunc(id)) ->
+      {:ok, id} when (is_binary(id) and id != "") or is_integer(id) or (is_float(id) and id == trunc(id)) ->
         id = render(id)
         interval = p["intervalMs"] || 5000
         timeout = p["timeoutMs"] || 600_000

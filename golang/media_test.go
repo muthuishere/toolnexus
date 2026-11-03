@@ -515,3 +515,20 @@ func TestRunResultFilesEmptyWithoutMedia(t *testing.T) {
 		t.Fatal("files not serialised as []")
 	}
 }
+
+// Media tools are concurrency-safe (SPEC §7G, §8 Tool scheduling): each call is an independent remote job.
+func TestMediaToolsAreConcurrencySafe(t *testing.T) {
+	var style MediaStyle
+	if err := json.Unmarshal([]byte("{\"baseUrl\":\"http://unused\",\"verbs\":{\"image\":{\"mode\":\"sync\",\"kind\":\"image\",\"start\":{\"path\":\"/i\"},\"args\":{\"prompt\":\"p\"},\"resultPath\":\"u\"},\"video\":{\"mode\":\"sync\",\"kind\":\"video\",\"start\":{\"path\":\"/v\"},\"args\":{\"prompt\":\"p\"},\"resultPath\":\"u\"},\"speech\":{\"mode\":\"sync\",\"kind\":\"audio\",\"start\":{\"path\":\"/s\"},\"args\":{\"text\":\"t\"},\"resultPath\":\"u\"},\"transcribe\":{\"mode\":\"sync\",\"kind\":\"text\",\"start\":{\"path\":\"/r\"},\"args\":{\"audio\":\"a\"},\"resultPath\":\"u\"},\"cloneVoice\":{\"mode\":\"sync\",\"kind\":\"text\",\"start\":{\"path\":\"/c\"},\"args\":{\"name\":\"n\"},\"resultPath\":\"id\"},\"talking\":{\"mode\":\"sync\",\"kind\":\"video\",\"start\":{\"path\":\"/t\"},\"args\":{\"image\":\"i\"},\"resultPath\":\"u\"}}}"), &style); err != nil {
+		t.Fatal(err)
+	}
+	tools := CreateMedia([]MediaStyle{style}, MediaOptions{}).Tools()
+	if len(tools) != 6 {
+		t.Fatalf("want all six media tools, got %d", len(tools))
+	}
+	for _, tl := range tools {
+		if !IsConcurrencySafe(tl, map[string]any{}) {
+			t.Fatalf("%s is not concurrency-safe", tl.Name)
+		}
+	}
+}

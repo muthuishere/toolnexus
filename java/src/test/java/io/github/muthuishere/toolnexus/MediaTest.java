@@ -506,4 +506,13 @@ class MediaTest {
             assertTrue(r.files.isEmpty());
         }
     }
+
+    /** Media tools are concurrency-safe (SPEC §7G, §8 Tool scheduling): each call is an independent remote job. */
+    @Test
+    void mediaToolsAreConcurrencySafe() throws IOException {
+        Map<String, Object> style = Json.MAPPER.readValue("{\"baseUrl\":\"http://unused\",\"verbs\":{\"image\":{\"mode\":\"sync\",\"kind\":\"image\",\"start\":{\"path\":\"/i\"},\"args\":{\"prompt\":\"p\"},\"resultPath\":\"u\"},\"video\":{\"mode\":\"sync\",\"kind\":\"video\",\"start\":{\"path\":\"/v\"},\"args\":{\"prompt\":\"p\"},\"resultPath\":\"u\"},\"speech\":{\"mode\":\"sync\",\"kind\":\"audio\",\"start\":{\"path\":\"/s\"},\"args\":{\"text\":\"t\"},\"resultPath\":\"u\"},\"transcribe\":{\"mode\":\"sync\",\"kind\":\"text\",\"start\":{\"path\":\"/r\"},\"args\":{\"audio\":\"a\"},\"resultPath\":\"u\"},\"cloneVoice\":{\"mode\":\"sync\",\"kind\":\"text\",\"start\":{\"path\":\"/c\"},\"args\":{\"name\":\"n\"},\"resultPath\":\"id\"},\"talking\":{\"mode\":\"sync\",\"kind\":\"video\",\"start\":{\"path\":\"/t\"},\"args\":{\"image\":\"i\"},\"resultPath\":\"u\"}}}", new TypeReference<Map<String, Object>>() {});
+        List<Tool> tools = Media.create(Media.Style.of(style)).tools();
+        assertEquals(6, tools.size());
+        for (Tool t : tools) assertTrue(ToolScheduler.isConcurrencySafe(t, Map.of()), t.name());
+    }
 }

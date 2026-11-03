@@ -161,3 +161,10 @@
                                 {:model "m" :generate (fn [_] {:content "hi"})})
                                "x" {:toolkit (toolnexus/build {:builtins false})})]
             (is (= [] (:files r2)))))))))
+
+;; Media tools are concurrency-safe (SPEC §7G, §8 Tool scheduling): each call is an independent remote job.
+(deftest media-tools-are-concurrency-safe
+  (let [ts (media/tools (media/create-media (json/read-str "{\"baseUrl\":\"http://unused\",\"verbs\":{\"image\":{\"mode\":\"sync\",\"kind\":\"image\",\"start\":{\"path\":\"/i\"},\"args\":{\"prompt\":\"p\"},\"resultPath\":\"u\"},\"video\":{\"mode\":\"sync\",\"kind\":\"video\",\"start\":{\"path\":\"/v\"},\"args\":{\"prompt\":\"p\"},\"resultPath\":\"u\"},\"speech\":{\"mode\":\"sync\",\"kind\":\"audio\",\"start\":{\"path\":\"/s\"},\"args\":{\"text\":\"t\"},\"resultPath\":\"u\"},\"transcribe\":{\"mode\":\"sync\",\"kind\":\"text\",\"start\":{\"path\":\"/r\"},\"args\":{\"audio\":\"a\"},\"resultPath\":\"u\"},\"cloneVoice\":{\"mode\":\"sync\",\"kind\":\"text\",\"start\":{\"path\":\"/c\"},\"args\":{\"name\":\"n\"},\"resultPath\":\"id\"},\"talking\":{\"mode\":\"sync\",\"kind\":\"video\",\"start\":{\"path\":\"/t\"},\"args\":{\"image\":\"i\"},\"resultPath\":\"u\"}}}")))]
+    (is (= 6 (count ts)))
+    (doseq [t ts]
+      (is (true? (tool/concurrency-safe? t {})) (:name t)))))

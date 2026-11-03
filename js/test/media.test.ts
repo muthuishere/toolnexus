@@ -249,3 +249,10 @@ test("media: several unsupported args ⇒ error names the first in sorted order;
   await assert.rejects(media.generate("image", { zeta: 1, alpha: 2 }), { message: 'image: argument "alpha" not supported by this style' })
   await assert.rejects(media.generate("image", { prompt: "x", seed: null, zeta: 1 }), { message: 'image: argument "zeta" not supported by this style' })
 })
+
+// Media tools are concurrency-safe (SPEC §7G, §8 Tool scheduling): each call is an independent remote job.
+test("media: all six media tools are concurrency-safe", () => {
+  const tools = createMedia(JSON.parse("{\"baseUrl\":\"http://unused\",\"verbs\":{\"image\":{\"mode\":\"sync\",\"kind\":\"image\",\"start\":{\"path\":\"/i\"},\"args\":{\"prompt\":\"p\"},\"resultPath\":\"u\"},\"video\":{\"mode\":\"sync\",\"kind\":\"video\",\"start\":{\"path\":\"/v\"},\"args\":{\"prompt\":\"p\"},\"resultPath\":\"u\"},\"speech\":{\"mode\":\"sync\",\"kind\":\"audio\",\"start\":{\"path\":\"/s\"},\"args\":{\"text\":\"t\"},\"resultPath\":\"u\"},\"transcribe\":{\"mode\":\"sync\",\"kind\":\"text\",\"start\":{\"path\":\"/r\"},\"args\":{\"audio\":\"a\"},\"resultPath\":\"u\"},\"cloneVoice\":{\"mode\":\"sync\",\"kind\":\"text\",\"start\":{\"path\":\"/c\"},\"args\":{\"name\":\"n\"},\"resultPath\":\"id\"},\"talking\":{\"mode\":\"sync\",\"kind\":\"video\",\"start\":{\"path\":\"/t\"},\"args\":{\"image\":\"i\"},\"resultPath\":\"u\"}}}")).tools()
+  assert.equal(tools.length, 6)
+  for (const t of tools) assert.equal(t.concurrencySafe?.({}), true, t.name)
+})

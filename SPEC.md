@@ -1697,6 +1697,11 @@ Execute ⇒ engine; never throws. Success:
 `parts = files` as ContentParts `{type, mimeType, url}`; text kind: `output = text`, no `parts` key.
 Any engine error ⇒ `ToolResult{ isError:true, output:<the error message> }`.
 
+**Scheduling.** Every media tool is **concurrency-safe** for every argument set: it carries the
+always-safe predicate (`concurrencySafe(args) -> true`, idiomatic name per port) of §8 *Tool
+scheduling*. Each call is an independent remote job, so the media calls of one model response run
+concurrently (up to `maxToolConcurrency`) instead of being serialised as unhinted tools are.
+
 ### Not in v1
 
 Download of expiring result URLs, provider-side job cancellation, local-file upload flows, ComfyUI graph injection, webhooks,

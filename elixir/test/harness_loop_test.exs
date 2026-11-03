@@ -301,4 +301,26 @@ defmodule Toolnexus.HarnessLoopTest do
     assert loop.turns > after_first, "turns accumulate across runs"
     assert loop.status == "idle"
   end
+
+  # Regression: `files` accumulates across completion-gate retries exactly like
+  # `tool_calls` — an image made in attempt 1 survives a retry that made none.
+  test "the completion gate accumulates files across retries" do
+    img = %{type: "image", mime_type: "image/png", url: "https://x/1.png", from: "generate_image", call_id: "c1"}
+    rr = Toolnexus.Client.RunResult
+
+    attempts = [
+      struct(rr, tool_calls: [%{name: "generate_image"}], files: [img]),
+      struct(rr, tool_calls: [%{name: "noop"}], files: [])
+    ]
+
+    ask = fn _p, [r | rest] -> {r, rest} end
+
+    verify = fn r ->
+      if length(r.tool_calls) >= 2, do: %{ok: true}, else: %{ok: false, reason: "not yet"}
+    end
+
+    {out, _} = Loop.run_gated(ask, "go", %{max_attempts: 3, verify: verify}, attempts)
+    assert length(out.tool_calls) == 2
+    assert out.files == [img]
+  end
 end

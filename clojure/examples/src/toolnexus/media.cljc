@@ -331,7 +331,7 @@
      (if (= "async" (get v "mode"))
        (let [id-path (get v "idPath")
              raw     (read-path resp id-path)
-             job-id  (cond (string? raw) raw
+             job-id  (cond (and (string? raw) (not= "" raw)) raw
                            (integral? raw) (render-number raw)
                            :else (fail! (str verb ": no job id at " id-path)))
              [final status] (poll! media style verb v job-id cancel)]
@@ -389,6 +389,9 @@
                  :description  (:description entry)
                  :input-schema (input-schema entry (set (keys (get v "args"))))
                  :source       "media"
+                 ;; Each call is an independent remote job: always concurrency-safe
+                 ;; (§7G, §8 Tool scheduling).
+                 :concurrency-safe (constantly true)
                  :context?     true
                  :execute
                  (fn exec

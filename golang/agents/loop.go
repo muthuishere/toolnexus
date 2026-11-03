@@ -275,6 +275,7 @@ func runGated(a ask, prompt string, comp *Completion) (tn.RunResult, error) {
 		return tn.RunResult{}, fmt.Errorf("toolnexus: Completion.Verify is required")
 	}
 	var acc []tn.ToolCall
+	accFiles := []tn.RunFile{}
 	var last tn.RunResult
 	var reason string
 	for n := 1; n <= maxAttempts; n++ {
@@ -290,6 +291,10 @@ func runGated(a ask, prompt string, comp *Completion) (tn.RunResult, error) {
 		// declining to re-declare its plan on a retry.
 		acc = append(acc, r.ToolCalls...)
 		r.ToolCalls = acc
+		// RunResult.Files is derived from ToolCalls, so it accumulates with them
+		// (§8): an image made in attempt 1 is still in Files after a retry.
+		accFiles = append(accFiles, r.Files...)
+		r.Files = accFiles
 		last = r
 		if r.Status != "" && r.Status != "done" {
 			// The run stopped for its own reason (suspension, budget). If the gate

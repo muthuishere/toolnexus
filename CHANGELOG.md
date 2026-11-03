@@ -19,6 +19,8 @@ hand-write a request and a polling loop, per endpoint, per language. Now one eng
 - **Tools for your agent** — the same verbs become `generate_image`, `generate_video`,
   `generate_speech`, `transcribe_audio`, `clone_voice` and `talking_video`; `createToolkit({ media })`
   registers them. Tool names never change when you switch provider, so prompts and skills keep working.
+  Media tools are concurrency-safe: two media calls in one response run side by side (up to
+  `maxToolConcurrency`) instead of waiting for each other like unlabelled tools.
 - **Long jobs just work** — async styles start the job and poll for you (default every 5 s, up to
   10 min), report progress, honour cancellation, and keep polling through statuses a provider
   never documented.
@@ -27,7 +29,8 @@ hand-write a request and a polling loop, per endpoint, per language. Now one eng
   video and speech. The library names no vendor.
 - **`RunResult.files`** — every image, video or audio a run's tools produced, in order, tagged with
   the tool name and call id; `toolCalls[].parts` carries them per call. The answer text never gets
-  markup — you decide how to render.
+  markup — you decide how to render. An agent with a completion gate keeps the files of every
+  attempt, exactly as it keeps their tool calls.
 
 Every port ships a runnable `media` example (an image through the typed call, speech through the
 `generate_speech` tool; without `A2E_API_KEY` it prints a hint and exits), and each language's API
