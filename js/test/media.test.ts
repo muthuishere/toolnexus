@@ -66,6 +66,12 @@ for (const c of CASES) {
     for (const [k, v] of Object.entries(c.env ?? {})) { saved[k] = process.env[k]; process.env[k] = v as string }
     try {
       const progress: string[] = []
+      if (c.styleError) {
+        // §7G Empty dotPath: rejected when the media is created, before any request.
+        assert.throws(() => createMedia(withServer(c.style, srv.url)), { message: c.error }, `${c.name}: style error`)
+        assertRequests(c, srv.requests)
+        return
+      }
       const media = createMedia(withServer(c.style, srv.url), { onProgress: (p) => progress.push(p.status) })
 
       // function face
@@ -255,4 +261,49 @@ test("media: all six media tools are concurrency-safe", () => {
   const tools = createMedia(JSON.parse("{\"baseUrl\":\"http://unused\",\"verbs\":{\"image\":{\"mode\":\"sync\",\"kind\":\"image\",\"start\":{\"path\":\"/i\"},\"args\":{\"prompt\":\"p\"},\"resultPath\":\"u\"},\"video\":{\"mode\":\"sync\",\"kind\":\"video\",\"start\":{\"path\":\"/v\"},\"args\":{\"prompt\":\"p\"},\"resultPath\":\"u\"},\"speech\":{\"mode\":\"sync\",\"kind\":\"audio\",\"start\":{\"path\":\"/s\"},\"args\":{\"text\":\"t\"},\"resultPath\":\"u\"},\"transcribe\":{\"mode\":\"sync\",\"kind\":\"text\",\"start\":{\"path\":\"/r\"},\"args\":{\"audio\":\"a\"},\"resultPath\":\"u\"},\"cloneVoice\":{\"mode\":\"sync\",\"kind\":\"text\",\"start\":{\"path\":\"/c\"},\"args\":{\"name\":\"n\"},\"resultPath\":\"id\"},\"talking\":{\"mode\":\"sync\",\"kind\":\"video\",\"start\":{\"path\":\"/t\"},\"args\":{\"image\":\"i\"},\"resultPath\":\"u\"}}}")).tools()
   assert.equal(tools.length, 6)
   for (const t of tools) assert.equal(t.concurrencySafe?.({}), true, t.name)
+})
+
+test("media: a cross-origin redirect never carries the style headers (§7G Redirects)", async () => {
+  const seen: http.IncomingHttpHeaders[] = []
+  const b = http.createServer((req, res) => { seen.push(req.headers); res.writeHead(200, { "content-type": "application/json" }); res.end(JSON.stringify({ u: "https://x/r.png" })) })
+  await new Promise<void>((r) => b.listen(0, "127.0.0.1", r))
+  const bUrl = `http://127.0.0.1:${(b.address() as any).port}`
+  const a = http.createServer((req, res) => { req.resume(); res.writeHead(307, { location: bUrl + "/landed" }); res.end() })
+  await new Promise<void>((r) => a.listen(0, "127.0.0.1", r))
+  const aUrl = `http://127.0.0.1:${(a.address() as any).port}`
+  try {
+    const media = createMedia({ baseUrl: aUrl, headers: { Authorization: "Bearer FAKE", "X-Style": "s" },
+      verbs: { image: { mode: "sync", kind: "image", start: { path: "/i" }, args: { prompt: "p" }, resultPath: "u" } } } as any)
+    const r = await media.image({ prompt: "x" })
+    assert.equal(r.files[0].url, "https://x/r.png")
+    assert.equal(seen.length, 1)
+    assert.equal(seen[0].authorization, undefined)
+    assert.equal(seen[0]["x-style"], undefined)
+  } finally {
+    await new Promise((r) => a.close(r)); await new Promise((r) => b.close(r))
+  }
+})
+
+test("media: a hung server is bounded by the job deadline (§7G Per-request timeout)", async () => {
+  const pending: http.ServerResponse[] = []
+  const srv = http.createServer((req, res) => {
+    req.resume()
+    if (req.method === "POST" && req.url === "/a") { res.writeHead(200, { "content-type": "application/json" }); res.end(JSON.stringify({ id: "h1" })); return }
+    pending.push(res) // never answers
+  })
+  await new Promise<void>((r) => srv.listen(0, "127.0.0.1", r))
+  const url = `http://127.0.0.1:${(srv.address() as any).port}`
+  try {
+    const sync = createMedia({ baseUrl: url, verbs: { image: { mode: "sync", kind: "image", start: { path: "/s" }, args: { prompt: "p" }, poll: { timeoutMs: 200 }, resultPath: "u" } } } as any)
+    const t0 = Date.now()
+    await assert.rejects(sync.image({ prompt: "x" }), { message: "image: timed out after 200ms" })
+    assert.ok(Date.now() - t0 < 3000)
+    const asyncM = createMedia({ baseUrl: url, verbs: { image: { mode: "async", kind: "image", start: { path: "/a" }, args: { prompt: "p" }, idPath: "id",
+      poll: { path: "/p/{id}", statusPath: "st", done: ["ok"], intervalMs: 1, timeoutMs: 200 }, resultPath: "u" } } } as any)
+    await assert.rejects(asyncM.image({ prompt: "x" }), { message: "job h1 timed out after 200ms" })
+  } finally {
+    for (const r of pending) r.destroy()
+    srv.closeAllConnections?.()
+    await new Promise((r) => srv.close(r))
+  }
 })

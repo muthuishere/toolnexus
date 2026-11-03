@@ -137,7 +137,7 @@ Tool {
   name:        string          // unique, sanitized to [a-zA-Z0-9_-]
   description: string
   inputSchema: JSONSchema      // a JSON-Schema object ({type:"object", properties, ...})
-  source:      "mcp" | "skill" | "native" | "http" | "custom"
+  source:      "mcp" | "skill" | "native" | "http" | "builtin" | "a2a" | "media" | "custom"
   execute(args: object, ctx?: Context) -> ToolResult
 }
 ```
@@ -1677,6 +1677,34 @@ whose top-level keys overwrite the request body last; the tool face never expose
   an object (or an array, when the next segment is numeric).
 - **Transport errors** (no HTTP status, e.g. connection refused) — `<verb>: <port's error message>`;
   not byte-fixed.
+- **Redirects** — style headers are **never sent to a different origin** (scheme + host + port)
+  than the origin of the request built from `baseUrl`. Same-origin redirects are followed normally;
+  on a cross-origin redirect the request is re-issued **without** the style headers (no
+  `Authorization`, no custom style header). A port whose HTTP client cannot do that cleanly may
+  instead not follow redirects at all and treat a 3xx as `HTTP <status>: <body>`.
+- **Per-request timeout** — every HTTP request (start and each poll) is bounded by the time
+  remaining until the job deadline: `timeoutMs` measured from the start request for async verbs;
+  sync verbs use the verb's `poll.timeoutMs` if given, else 600000. When the deadline expires the
+  error is `job <id> timed out after <timeoutMs>ms`, or `<verb>: timed out after <timeoutMs>ms` when
+  there is no job id yet (start request, sync verb). No extra create-time timeout option exists.
+- **Interval / timeout defaults** — `intervalMs` or `timeoutMs` absent, `<= 0` or not a number ⇒
+  the default (5000 / 600000).
+- **Poll status rendering** — the value at `statusPath` renders like the envelope code: string
+  as-is, integral number as integer text, other number in shortest round-trip form; absent/other ⇒
+  `""`. The rendered text is what `onProgress` reports, what appears in `job <id> <status>` errors,
+  and what is matched against `done` / `failed`.
+- **Empty dotPath** — `""` addresses the whole value for reads (`idPath`, `resultPath`,
+  `statusPath`, `errorPath`, `codePath`, `messagePath`). An `args` entry mapped to `""` is a style
+  error raised when the media is created/loaded: `style: empty path for argument "<key>"`.
+- **Job id in the poll path** — `{id}` is replaced by the id percent-encoded per RFC 3986: keep
+  `A-Z a-z 0-9 - . _ ~`, encode every other UTF-8 byte as `%XX` (uppercase hex).
+- **Echoed error bodies** — in `HTTP <status>: <body>` the body is capped at its first 1000 Unicode
+  code points; when truncated, `…` (U+2026) is appended.
+- **dotPath write through an array with a non-numeric segment** — the array is replaced by an
+  object (same rule as writing through a scalar); never a crash.
+- **dotPath write with a numeric segment through an existing object** — the object is kept and the
+  segment is written as an ordinary string key (`"0"`); only a missing (or scalar) container is
+  created as an array for a numeric next segment.
 - **Cancellation** — the function face raises the port's native cancellation error; the tool face
   returns `isError:true` with that error's message (not byte-fixed across ports) — except **Python**, where
   `asyncio.CancelledError` must propagate (swallowing it un-cancels the task).
@@ -1742,8 +1770,9 @@ RunResult {
   messages:      [...]          // full transcript
   toolCalls:     [{ name, args, output, isError, metadata, parts? }]   // every call + its result;
                                                                       // parts present iff the ToolResult had parts
-  files:         [{ type, mimeType, url?, data?, from, callId }]      // every non-text part produced
-                 // by tool calls this run, in call order; from = tool name, callId = the model's tool-call id.
+  files:         [{ type, mimeType, url?, data?, name?, from, callId }] // every non-text part produced
+                 // by tool calls this run (any source: media, MCP, built-in file reads…), in call order;
+                 // from = tool name, callId = the model's tool-call id; name present iff the part had one.
                  // Always present ([] when none). The final `text` never gets markup for them (§7G).
   toolCallCount: number         // = toolCalls.length
   turns:         number         // LLM round trips

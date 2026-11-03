@@ -164,7 +164,23 @@ public final class Media {
 
     private Media(List<Style> styles, Options opts) {
         this.styles = List.copyOf(styles);
+        for (Style s : this.styles) validate(s);
         this.opts = opts == null ? new Options() : opts;
+    }
+
+    /** Load-time style checks: an argument mapped to the empty path is an error (§7G). */
+    @SuppressWarnings("unchecked")
+    private static void validate(Style s) {
+        if (!(s.spec().get("verbs") instanceof Map<?, ?> vs)) return;
+        for (Object v : vs.values()) {
+            if (v instanceof Map<?, ?> vm && vm.get("args") instanceof Map<?, ?> am) {
+                for (Map.Entry<?, ?> e : am.entrySet()) {
+                    if ("".equals(e.getValue())) {
+                        throw new MediaException("style: empty path for argument \"" + e.getKey() + "\"");
+                    }
+                }
+            }
+        }
     }
 
     /** Read one style file (JSON). */
@@ -255,7 +271,8 @@ public final class Media {
                                 LlmClient.CancelToken cancel) {
         if (cancel != null) cancel.register(Thread.currentThread());
         try {
-            return run(verb, args == null ? Map.of() : args, providerOptions, cancel);
+            return run(verb, args == null ? Map.of() : args, providerOptions,
+                    cancel == null ? () -> false : cancel::isCancelled);
         } finally {
             if (cancel != null) {
                 cancel.unregister();
@@ -319,7 +336,10 @@ public final class Media {
         public ToolResult execute(Map<String, Object> args, ToolContext ctx) {
             MediaResult res;
             try {
-                res = media.generate(verb, args == null ? Map.of() : args, null, null);
+                res = media.run(verb, args == null ? Map.of() : args, null,
+                        ctx == null ? () -> false : ctx::isCancelled);
+            } catch (LlmClient.CancelledException e) {
+                throw e;
             } catch (RuntimeException e) {
                 return ToolResult.error(e.getMessage() == null ? String.valueOf(e) : e.getMessage());
             }
@@ -367,7 +387,7 @@ public final class Media {
 
     @SuppressWarnings("unchecked")
     private MediaResult run(String verb, Map<String, Object> args, Map<String, Object> providerOptions,
-                            LlmClient.CancelToken cancel) {
+                            java.util.function.BooleanSupplier cancel) {
         Resolved r = resolve(verb);
         if (r == null) throw new MediaException("media: no style supports \"" + verb + "\"");
         Map<String, Object> v = r.verb;
@@ -406,12 +426,18 @@ public final class Media {
 
         Map<String, Object> start = v.get("start") instanceof Map ? (Map<String, Object>) v.get("start") : Map.of();
         String method = start.get("method") == null ? "POST" : str(start.get("method"));
-        Object resp = request(verb, method, base + str(start.get("path")), Json.stringify(body), headers, envelope, cancel);
+        boolean async = "async".equals(str(v.get("mode")));
+        Map<String, Object> poll = v.get("poll") instanceof Map ? (Map<String, Object>) v.get("poll") : Map.of();
+        long timeout = positive(poll.get("timeoutMs"), 600000L);
+        long deadline = System.nanoTime() + timeout * 1_000_000L;
+        String startTimeout = verb + ": timed out after " + timeout + "ms";
+        Object resp = request(verb, method, base + str(start.get("path")), Json.stringify(body), headers, envelope,
+                cancel, deadline, startTimeout);
 
         String kind = str(v.get("kind"));
         String status;
         String jobId = null;
-        if (!"async".equals(str(v.get("mode")))) {
+        if (!async) {
             status = "completed";
         } else {
             String idPath = str(v.get("idPath"));
@@ -419,29 +445,25 @@ public final class Media {
             if (id instanceof String sid && !sid.isEmpty()) jobId = sid;
             else if (id instanceof Number n && isIntegral(n)) jobId = render(n);
             if (jobId == null) throw new MediaException(verb + ": no job id at " + idPath);
-            Map<String, Object> poll = v.get("poll") instanceof Map ? (Map<String, Object>) v.get("poll") : Map.of();
-            long interval = poll.get("intervalMs") instanceof Number n ? n.longValue() : 5000L;
-            long timeout = poll.get("timeoutMs") instanceof Number n ? n.longValue() : 600000L;
+            long interval = positive(poll.get("intervalMs"), 5000L);
+            String timedOut = "job " + jobId + " timed out after " + timeout + "ms";
             String pMethod = poll.get("method") == null ? "GET" : str(poll.get("method"));
-            String pUrl = base + str(poll.get("path")).replace("{id}", jobId);
+            String pUrl = base + str(poll.get("path")).replace("{id}", pctEncode(jobId));
             List<Object> done = poll.get("done") instanceof List ? (List<Object>) poll.get("done") : List.of();
             List<Object> failed = poll.get("failed") instanceof List ? (List<Object>) poll.get("failed") : List.of();
-            long began = System.nanoTime();
             while (true) {
-                sleep(interval, cancel);
-                resp = request(verb, pMethod, pUrl, null, headers, envelope, cancel);
+                sleep(interval, cancel, deadline, timedOut);
+                resp = request(verb, pMethod, pUrl, null, headers, envelope, cancel, deadline, timedOut);
                 Object st = readPath(resp, str(poll.get("statusPath")));
-                String s = st instanceof String ? (String) st : st == null ? "" : render(st);
+                String s = st == null ? "" : render(st);
                 if (opts.onProgress != null) opts.onProgress.accept(new Progress(verb, jobId, s));
-                if (done.contains(s)) { status = s; break; }
-                if (failed.contains(s)) {
+                if (matches(done, s)) { status = s; break; }
+                if (matches(failed, s)) {
                     Object msg = poll.get("errorPath") == null ? null : readPath(resp, str(poll.get("errorPath")));
                     String m = msg == null ? "" : (msg instanceof String ? (String) msg : render(msg));
                     throw new MediaException("job " + jobId + " " + s + (m.isEmpty() ? "" : ": " + m));
                 }
-                if ((System.nanoTime() - began) / 1_000_000L >= timeout) {
-                    throw new MediaException("job " + jobId + " timed out after " + timeout + "ms");
-                }
+                if (System.nanoTime() - deadline >= 0) throw new MediaException(timedOut);
             }
         }
 
@@ -472,33 +494,72 @@ public final class Media {
         }
     }
 
-    private Object request(String verb, String method, String url, String body, Map<String, String> headers,
-                           Map<String, Object> envelope, LlmClient.CancelToken cancel) {
-        checkCancel(cancel);
-        HttpRequest.Builder b = HttpRequest.newBuilder(URI.create(url));
-        for (Map.Entry<String, String> h : headers.entrySet()) b.header(h.getKey(), h.getValue());
-        if (body != null) {
-            b.header("Content-Type", "application/json");
-            b.method(method, HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8));
-        } else {
-            b.method(method, HttpRequest.BodyPublishers.noBody());
+    private static boolean matches(List<Object> list, String s) {
+        for (Object o : list) if (o != null && render(o).equals(s)) return true;
+        return false;
+    }
+
+    private static long positive(Object o, long dflt) {
+        return o instanceof Number n && n.doubleValue() > 0 ? n.longValue() : dflt;
+    }
+
+    /** RFC 3986 unreserved kept; everything else %XX (uppercase) of its UTF-8 bytes. */
+    static String pctEncode(String s) {
+        StringBuilder sb = new StringBuilder();
+        for (byte by : s.getBytes(StandardCharsets.UTF_8)) {
+            int c = by & 0xff;
+            if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')
+                    || c == '-' || c == '.' || c == '_' || c == '~') sb.append((char) c);
+            else sb.append('%').append(String.format("%02X", c));
         }
+        return sb.toString();
+    }
+
+    /** First 1000 code points of an echoed body; "…" appended when truncated. */
+    static String capBody(String text) {
+        if (text.codePointCount(0, text.length()) <= 1000) return text;
+        return text.substring(0, text.offsetByCodePoints(0, 1000)) + "\u2026";
+    }
+
+    private static String origin(URI u) {
+        String scheme = u.getScheme() == null ? "" : u.getScheme().toLowerCase(Locale.ROOT);
+        int port = u.getPort();
+        if (port < 0) port = "https".equals(scheme) ? 443 : "http".equals(scheme) ? 80 : -1;
+        return scheme + "://" + (u.getHost() == null ? "" : u.getHost().toLowerCase(Locale.ROOT)) + ":" + port;
+    }
+
+    private Object request(String verb, String method, String url, String body, Map<String, String> headers,
+                           Map<String, Object> envelope, java.util.function.BooleanSupplier cancel,
+                           long deadline, String timedOut) {
+        checkCancel(cancel);
         HttpClient http = opts.httpClient != null ? opts.httpClient : DEFAULT_HTTP;
+        URI target = URI.create(url);
+        String startOrigin = origin(target);
         HttpResponse<String> resp;
-        try {
-            resp = http.send(b.build(), HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new LlmClient.CancelledException("media cancelled");
-        } catch (IOException e) {
-            if (Thread.currentThread().isInterrupted() || (cancel != null && cancel.isCancelled())) {
-                throw new LlmClient.CancelledException("media cancelled");
+        for (int hops = 0; ; hops++) {
+            // Style headers are never sent to an origin other than the request's start origin (§7G).
+            boolean sameOrigin = origin(target).equals(startOrigin);
+            HttpRequest.Builder b = HttpRequest.newBuilder(target);
+            if (sameOrigin) for (Map.Entry<String, String> h : headers.entrySet()) b.header(h.getKey(), h.getValue());
+            if (body != null) {
+                b.header("Content-Type", "application/json");
+                b.method(method, HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8));
+            } else {
+                b.method(method, HttpRequest.BodyPublishers.noBody());
             }
-            throw new MediaException(verb + ": " + (e.getMessage() == null ? e.toString() : e.getMessage()));
+            resp = await(http, b.build(), cancel, deadline, timedOut, verb);
+            int sc = resp.statusCode();
+            String loc = resp.headers().firstValue("Location").orElse(null);
+            if (hops >= 10 || loc == null || !(sc == 301 || sc == 302 || sc == 303 || sc == 307 || sc == 308)) break;
+            target = target.resolve(loc);
+            if (sc == 303 || ((sc == 301 || sc == 302) && "POST".equalsIgnoreCase(method))) {
+                method = "GET";
+                body = null;
+            }
         }
         String text = resp.body() == null ? "" : resp.body();
         if (resp.statusCode() < 200 || resp.statusCode() >= 300) {
-            throw new MediaException("HTTP " + resp.statusCode() + ": " + text);
+            throw new MediaException("HTTP " + resp.statusCode() + ": " + capBody(text));
         }
         Object parsed;
         try {
@@ -521,18 +582,51 @@ public final class Media {
         return parsed;
     }
 
-    private static void sleep(long ms, LlmClient.CancelToken cancel) {
-        checkCancel(cancel);
+    /** Send bounded by the job deadline, polling the cancel flag so a ToolContext flag aborts too. */
+    private static HttpResponse<String> await(HttpClient http, HttpRequest req, java.util.function.BooleanSupplier cancel,
+                                              long deadline, String timedOut, String verb) {
+        java.util.concurrent.CompletableFuture<HttpResponse<String>> f =
+                http.sendAsync(req, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
         try {
-            Thread.sleep(Math.max(0, ms));
+            while (true) {
+                checkCancel(cancel);
+                long left = deadline - System.nanoTime();
+                if (left <= 0) throw new MediaException(timedOut);
+                try {
+                    return f.get(Math.min(left, 50_000_000L), java.util.concurrent.TimeUnit.NANOSECONDS);
+                } catch (java.util.concurrent.TimeoutException ignored) {
+                    // re-check cancel and deadline
+                }
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new LlmClient.CancelledException("media cancelled");
+        } catch (java.util.concurrent.ExecutionException e) {
+            Throwable c = e.getCause() == null ? e : e.getCause();
+            if (c instanceof java.net.http.HttpTimeoutException) throw new MediaException(timedOut);
+            throw new MediaException(verb + ": " + (c.getMessage() == null ? c.toString() : c.getMessage()));
+        } finally {
+            if (!f.isDone()) f.cancel(true);
+        }
+    }
+
+    private static void sleep(long ms, java.util.function.BooleanSupplier cancel, long deadline, String timedOut) {
+        long end = System.nanoTime() + Math.max(0, ms) * 1_000_000L;
+        try {
+            while (true) {
+                checkCancel(cancel);
+                long left = end - System.nanoTime();
+                if (left <= 0) return;
+                Thread.sleep(Math.min(left / 1_000_000L + 1, 50));
+            }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new LlmClient.CancelledException("media cancelled");
         }
     }
 
-    private static void checkCancel(LlmClient.CancelToken cancel) {
-        if ((cancel != null && cancel.isCancelled()) || Thread.currentThread().isInterrupted()) {
+    private static void checkCancel(java.util.function.BooleanSupplier cancel) {
+        if (cancel.getAsBoolean() || Thread.currentThread().isInterrupted()) {
             throw new LlmClient.CancelledException("media cancelled");
         }
     }
@@ -560,6 +654,7 @@ public final class Media {
 
     static Object readPath(Object root, String path) {
         if (path == null) return null;
+        if (path.isEmpty()) return root;
         Object cur = root;
         for (String seg : path.split("\\.", -1)) {
             if (cur instanceof Map<?, ?> m) {
@@ -588,15 +683,18 @@ public final class Media {
                 Map<String, Object> m = (Map<String, Object>) cur;
                 if (last) { m.put(seg, value); return; }
                 Object existing = m.get(seg);
-                if (!(existing instanceof Map) && !(existing instanceof List)) { m.put(seg, next); existing = next; }
+                if (!(existing instanceof Map) && !(existing instanceof List)
+                        || existing instanceof List && !isIndex(segs[i + 1])) { m.put(seg, next); existing = next; }
                 cur = existing;
             } else if (cur instanceof List) {
                 List<Object> l = (List<Object>) cur;
-                int idx = Integer.parseInt(seg);
+                int idx;
+                try { idx = Integer.parseInt(seg); } catch (NumberFormatException e) { return; }
                 while (l.size() <= idx) l.add(null);
                 if (last) { l.set(idx, value); return; }
                 Object existing = l.get(idx);
-                if (!(existing instanceof Map) && !(existing instanceof List)) { l.set(idx, next); existing = next; }
+                if (!(existing instanceof Map) && !(existing instanceof List)
+                        || existing instanceof List && !isIndex(segs[i + 1])) { l.set(idx, next); existing = next; }
                 cur = existing;
             } else {
                 return;

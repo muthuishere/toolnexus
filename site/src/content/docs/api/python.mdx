@@ -73,11 +73,13 @@ symbol shown in eight-language synced tabs.
 Guide: [Media generation](/toolnexus/media/) · recipe: [Generate images, video and speech](/toolnexus/cookbook/media/) · SPEC §7G.
 
 - `load_media_style(path: str) -> dict` — read one style JSON file.
-- `create_media(styles: dict | list[dict], *, on_progress=None, http_transport: MediaTransport | None = None, timeout: float = 120.0) -> Media`
+- `create_media(styles: dict | list[dict], *, on_progress=None, http_transport: MediaTransport | None = None) -> Media`
   — a verb resolves to the first style that declares it. `on_progress({"verb", "jobId", "status"})` fires
   after every poll and may be sync or async. `http_transport` replaces the default
   `UrllibMediaTransport`; a `MediaTransport` has a blocking
-  `request(method, url, headers, body, timeout) -> (status, body_text)` (run in a worker thread).
+  `request(method, url, headers, body, timeout) -> (status, body_text)` (run in a worker thread;
+  `timeout` is the time left until the job deadline, and it must not send the style headers across a
+  cross-origin redirect).
 - Verbs (all `async`, return `MediaResult`): `image(prompt, *, width, height, aspect_ratio, seed, provider_options)` ·
   `video(prompt, *, image, seconds, aspect_ratio, provider_options)` · `speech(text, *, voice, provider_options)` ·
   `transcribe(audio, *, provider_options)` · `clone_voice(name, samples, *, provider_options)` ·

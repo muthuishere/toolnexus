@@ -74,7 +74,7 @@ func newFakeMediaServer(script []mediaScriptEntry) *fakeMediaServer {
 			_ = json.Unmarshal(raw, &body)
 		}
 		f.mu.Lock()
-		f.reqs = append(f.reqs, mediaRecorded{Method: r.Method, Path: r.URL.Path, Body: body, Headers: r.Header.Clone()})
+		f.reqs = append(f.reqs, mediaRecorded{Method: r.Method, Path: r.URL.EscapedPath(), Body: body, Headers: r.Header.Clone()})
 		e := f.script[min(f.n, len(f.script)-1)]
 		f.n++
 		f.mu.Unlock()
@@ -530,5 +530,79 @@ func TestMediaToolsAreConcurrencySafe(t *testing.T) {
 		if !IsConcurrencySafe(tl, map[string]any{}) {
 			t.Fatalf("%s is not concurrency-safe", tl.Name)
 		}
+	}
+}
+
+// §7G Redirects: a cross-origin redirect never carries the style headers.
+func TestMediaCrossOriginRedirectDropsStyleHeaders(t *testing.T) {
+	var gotAuth, gotCustom = "unset", "unset"
+	b := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth, gotCustom = r.Header.Get("Authorization"), r.Header.Get("X-Style")
+		_, _ = io.WriteString(w, `{"u":"https://x/r.png"}`)
+	}))
+	defer b.Close()
+	a := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, b.URL+"/landed", http.StatusTemporaryRedirect)
+	}))
+	defer a.Close()
+	m := CreateMedia([]MediaStyle{{BaseURL: a.URL, Headers: map[string]string{"Authorization": "Bearer FAKE", "X-Style": "s"},
+		Verbs: map[string]MediaVerb{"image": {Mode: "sync", Kind: "image", Start: MediaStart{Path: "/i"},
+			Args: map[string]string{"prompt": "p"}, ResultPath: "u"}}}}, MediaOptions{})
+	if _, err := m.Image(context.Background(), ImageInput{Prompt: "x"}); err != nil {
+		t.Fatal(err)
+	}
+	if gotAuth != "" || gotCustom != "" {
+		t.Fatalf("server B saw Authorization=%q X-Style=%q", gotAuth, gotCustom)
+	}
+}
+
+// §7G Per-request timeout: a server that never answers is bounded by the deadline.
+func TestMediaHungServerBoundedByDeadline(t *testing.T) {
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+	}))
+	defer srv.Close()
+	defer close(release)
+	m := CreateMedia([]MediaStyle{{BaseURL: srv.URL, Verbs: map[string]MediaVerb{"image": {
+		Mode: "sync", Kind: "image", Start: MediaStart{Path: "/i"}, Args: map[string]string{"prompt": "p"},
+		Poll: &MediaPoll{TimeoutMs: 200}, ResultPath: "u"}}}}, MediaOptions{})
+	began := time.Now()
+	_, err := m.Image(context.Background(), ImageInput{Prompt: "x"})
+	if err == nil || err.Error() != "image: timed out after 200ms" {
+		t.Fatalf("err = %v", err)
+	}
+	if d := time.Since(began); d > 3*time.Second {
+		t.Fatalf("took %v", d)
+	}
+	// A hung poll is bounded too.
+	srv2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			_, _ = io.WriteString(w, `{"id":"h1"}`)
+			return
+		}
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+	}))
+	defer srv2.Close()
+	st := asyncTestStyle(srv2.URL, 1)
+	v := st.Verbs["image"]
+	v.Poll.TimeoutMs = 200
+	m2 := CreateMedia([]MediaStyle{st}, MediaOptions{})
+	if _, err := m2.Image(context.Background(), ImageInput{Prompt: "x"}); err == nil || err.Error() != "job h1 timed out after 200ms" {
+		t.Fatalf("poll err = %v", err)
+	}
+}
+
+func TestMediaDotSetThroughArrayWithWord(t *testing.T) {
+	body := map[string]any{"a": []any{}}
+	dotSet(body, "a.x.y", 1)
+	if got := mediaJSON(body); got != `{"a":{"x":{"y":1}}}` {
+		t.Fatalf("body = %s", got)
 	}
 }

@@ -76,7 +76,7 @@ class MediaTest {
             String body = new String(ex.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
             Map<String, String> h = new LinkedHashMap<>();
             ex.getRequestHeaders().forEach((k, v) -> h.put(k.toLowerCase(), v.isEmpty() ? "" : v.get(0)));
-            requests.add(new Recorded(ex.getRequestMethod(), ex.getRequestURI().getPath(), body, h));
+            requests.add(new Recorded(ex.getRequestMethod(), ex.getRequestURI().getRawPath(), body, h));
             int i = Math.min(next.getAndIncrement(), script.size() - 1);
             Map<String, Object> entry = script.get(i);
             int status = ((Number) entry.get("status")).intValue();
@@ -133,6 +133,13 @@ class MediaTest {
         try (FakeServer fs = new FakeServer()) {
             List<Map<String, Object>> script = (List<Map<String, Object>>) c.get("script");
             List<String> progress = Collections.synchronizedList(new ArrayList<>());
+            if (Boolean.TRUE.equals(c.get("styleError"))) {
+                Media.MediaException se = assertThrows(Media.MediaException.class,
+                        () -> Media.create(styleFor(c, fs.url())));
+                assertEquals(c.get("error"), se.getMessage());
+                assertTrue(fs.requests.isEmpty());
+                return;
+            }
             Media media = Media.create(styleFor(c, fs.url()), new Media.Options().onProgress(p -> {
                 assertEquals(c.get("verb"), p.verb());
                 progress.add(p.status());
@@ -362,6 +369,74 @@ class MediaTest {
             t.join(5000);
             assertFalse(t.isAlive());
             assertInstanceOf(LlmClient.CancelledException.class, thrown.get());
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Redirects (A) and per-request deadline (B)
+    // ------------------------------------------------------------------
+
+    @Test
+    void crossOriginRedirectDropsStyleHeaders() throws Exception {
+        HttpServer b = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        AtomicReference<Map<String, String>> seen = new AtomicReference<>();
+        b.createContext("/", ex -> {
+            Map<String, String> h = new LinkedHashMap<>();
+            ex.getRequestHeaders().forEach((k, v) -> h.put(k.toLowerCase(), v.get(0)));
+            seen.set(h);
+            byte[] out = "{\"u\":\"https://x/a.png\"}".getBytes(StandardCharsets.UTF_8);
+            ex.sendResponseHeaders(200, out.length);
+            try (OutputStream os = ex.getResponseBody()) { os.write(out); }
+        });
+        b.start();
+        HttpServer a = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        AtomicReference<String> aAuth = new AtomicReference<>();
+        a.createContext("/", ex -> {
+            aAuth.set(ex.getRequestHeaders().getFirst("Authorization"));
+            ex.getRequestBody().readAllBytes();
+            ex.getResponseHeaders().add("Location", "http://127.0.0.1:" + b.getAddress().getPort() + "/elsewhere");
+            ex.sendResponseHeaders(307, -1);
+            ex.close();
+        });
+        a.start();
+        try {
+            Media m = Media.create(Media.Style.parse("{\"baseUrl\":\"http://127.0.0.1:" + a.getAddress().getPort()
+                    + "\",\"headers\":{\"Authorization\":\"Bearer FAKE\",\"X-Style\":\"s\"},\"verbs\":{\"image\":{\"mode\":\"sync\","
+                    + "\"kind\":\"image\",\"start\":{\"path\":\"/gen\"},\"args\":{\"prompt\":\"prompt\"},\"resultPath\":\"u\"}}}"));
+            Media.MediaResult r = m.image(new Media.ImageInput("cat"));
+            assertEquals("https://x/a.png", r.files().get(0).url());
+            assertEquals("Bearer FAKE", aAuth.get(), "origin A gets the style headers");
+            assertNotNull(seen.get(), "B was reached");
+            assertFalse(seen.get().containsKey("authorization"));
+            assertFalse(seen.get().containsKey("x-style"));
+        } finally {
+            a.stop(0);
+            b.stop(0);
+        }
+    }
+
+    @Test
+    void hungServerBoundedByDeadline() throws Exception {
+        HttpServer hung = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        java.util.concurrent.CountDownLatch release = new java.util.concurrent.CountDownLatch(1);
+        hung.setExecutor(java.util.concurrent.Executors.newCachedThreadPool());
+        hung.createContext("/", ex -> {
+            try { release.await(); } catch (InterruptedException ignored) { }
+            ex.sendResponseHeaders(500, -1);
+            ex.close();
+        });
+        hung.start();
+        try {
+            Media m = Media.create(Media.Style.parse("{\"baseUrl\":\"http://127.0.0.1:" + hung.getAddress().getPort()
+                    + "\",\"verbs\":{\"image\":{\"mode\":\"sync\",\"kind\":\"image\",\"poll\":{\"timeoutMs\":300},"
+                    + "\"start\":{\"path\":\"/gen\"},\"args\":{\"prompt\":\"prompt\"},\"resultPath\":\"u\"}}}"));
+            long t0 = System.nanoTime();
+            Media.MediaException e = assertThrows(Media.MediaException.class, () -> m.image(new Media.ImageInput("cat")));
+            assertEquals("image: timed out after 300ms", e.getMessage());
+            assertTrue((System.nanoTime() - t0) / 1_000_000L < 3000);
+        } finally {
+            release.countDown();
+            hung.stop(0);
         }
     }
 

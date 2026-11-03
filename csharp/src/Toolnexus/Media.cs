@@ -31,7 +31,16 @@ public sealed class MediaStyle
 {
     internal Dictionary<string, object?> Raw { get; }
 
-    private MediaStyle(Dictionary<string, object?> raw) => Raw = raw;
+    private MediaStyle(Dictionary<string, object?> raw)
+    {
+        Raw = raw;
+        if (raw.Get("verbs") is IDictionary<string, object?> vs)
+            foreach (var (_, vv) in vs)
+                if (vv is IDictionary<string, object?> verb && verb.Get("args") is IDictionary<string, object?> am)
+                    foreach (var (k, path) in am)
+                        if (path is string ps && ps.Length == 0)
+                            throw new MediaException($"style: empty path for argument \"{k}\"");
+    }
 
     /// <summary>Read one style file (SPEC <c>loadMediaStyle(path)</c>).</summary>
     public static MediaStyle Load(string path) => Parse(File.ReadAllText(path));
@@ -120,7 +129,7 @@ public sealed record TalkingInput(string Image, string Audio)
 /// </summary>
 public sealed class Media
 {
-    private static readonly HttpClient DefaultHttp = new() { Timeout = Timeout.InfiniteTimeSpan };
+    private static readonly HttpClient DefaultHttp = new(new SocketsHttpHandler { AllowAutoRedirect = false }) { Timeout = Timeout.InfiniteTimeSpan };
 
     private readonly IReadOnlyList<MediaStyle> _styles;
     private readonly MediaOptions _opts;
@@ -215,20 +224,23 @@ public sealed class Media
         if (providerOptions != null)
             foreach (var (k, pv) in providerOptions) body[k] = Json.ParseLoose(Json.Stringify(pv));
 
-        // 4. start
+        // 4. start — every request is bounded by the job deadline (B)
+        var asyncMode = (v.Get("mode") as string) == "async";
+        var pollCfg = v.Get("poll") as IDictionary<string, object?> ?? new Dictionary<string, object?>();
+        var timeoutMs = Positive(ToLong(pollCfg.Get("timeoutMs")), 600000); // sync verbs too: poll.timeoutMs (SPEC §7G)
+        var deadline = new Deadline(Stopwatch.StartNew(), timeoutMs);
         var start = v.Get("start") as IDictionary<string, object?> ?? new Dictionary<string, object?>();
         var method = start.Get("method") as string ?? "POST";
-        var final = await SendAsync(style, verb, method, start.Get("path") as string ?? "", body, cancellationToken).ConfigureAwait(false);
+        var final = await SendAsync(style, verb, method, start.Get("path") as string ?? "", body, deadline, null, cancellationToken).ConfigureAwait(false);
 
         string status;
         string? jobId = null;
-        if ((v.Get("mode") as string) == "async")
+        if (asyncMode)
         {
             var idPath = v.Get("idPath") as string ?? "";
             jobId = ScalarText(ReadPath(final, idPath), integralOnly: true) is { Length: > 0 } jid ? jid
                 : throw new MediaException($"{verb}: no job id at {idPath}");
-            (final, status) = await PollAsync(style, verb, v.Get("poll") as IDictionary<string, object?> ?? new Dictionary<string, object?>(),
-                jobId, cancellationToken).ConfigureAwait(false);
+            (final, status) = await PollAsync(style, verb, pollCfg, jobId, deadline, cancellationToken).ConfigureAwait(false);
         }
         else
         {
@@ -252,21 +264,21 @@ public sealed class Media
     }
 
     private async Task<(object? Final, string Status)> PollAsync(MediaStyle style, string verb,
-        IDictionary<string, object?> poll, string jobId, CancellationToken ct)
+        IDictionary<string, object?> poll, string jobId, Deadline deadline, CancellationToken ct)
     {
-        var interval = ToLong(poll.Get("intervalMs")) ?? 5000;
-        var timeout = ToLong(poll.Get("timeoutMs")) ?? 600000;
+        var interval = Positive(ToLong(poll.Get("intervalMs")), 5000);
+        var timeout = deadline.TimeoutMs;
         var method = poll.Get("method") as string ?? "GET";
-        var path = (poll.Get("path") as string ?? "").Replace("{id}", jobId);
+        var path = (poll.Get("path") as string ?? "").Replace("{id}", PercentEncode(jobId));
         var statusPath = poll.Get("statusPath") as string ?? "";
         var done = StringSet(poll.Get("done"));
         var failed = StringSet(poll.Get("failed"));
         var errorPath = poll.Get("errorPath") as string;
-        var clock = Stopwatch.StartNew();
+        var clock = deadline.Clock;
         while (true)
         {
             await Task.Delay(TimeSpan.FromMilliseconds(interval), ct).ConfigureAwait(false);
-            var resp = await SendAsync(style, verb, method, path, null, ct).ConfigureAwait(false);
+            var resp = await SendAsync(style, verb, method, path, null, deadline, jobId, ct).ConfigureAwait(false);
             var status = ScalarText(ReadPath(resp, statusPath), false) ?? "";
             var ev = new MediaProgress(verb, jobId, status);
             _opts.OnProgress?.Invoke(ev);
@@ -282,13 +294,22 @@ public sealed class Media
         }
     }
 
-    private async Task<object?> SendAsync(MediaStyle style, string verb, string method, string path,
-        Dictionary<string, object?>? body, CancellationToken ct)
+    private sealed record Deadline(Stopwatch Clock, long TimeoutMs)
     {
-        using var req = new HttpRequestMessage(new HttpMethod(method.ToUpperInvariant()), style.BaseUrl + path);
+        public long RemainingMs => TimeoutMs - Clock.ElapsedMilliseconds;
+    }
+
+    private static long Positive(long? v, long dflt) => v is > 0 ? v.Value : dflt;
+
+    private static string TimedOut(string verb, string? jobId, long ms)
+        => jobId == null ? $"{verb}: timed out after {ms}ms" : $"job {jobId} timed out after {ms}ms";
+
+    private HttpRequestMessage BuildRequest(MediaStyle style, string method, Uri uri, Dictionary<string, object?>? body, bool withStyleHeaders)
+    {
+        var req = new HttpRequestMessage(new HttpMethod(method.ToUpperInvariant()), uri);
         if (body != null)
             req.Content = new StringContent(Json.Stringify(body), Encoding.UTF8, "application/json");
-        if (style.Raw.Get("headers") is IDictionary<string, object?> hs)
+        if (withStyleHeaders && style.Raw.Get("headers") is IDictionary<string, object?> hs)
         {
             var expanded = McpSource.ExpandEnvHeaders(hs.ToDictionary(kv => kv.Key, kv => kv.Value?.ToString() ?? ""))!;
             foreach (var (k, hv) in expanded)
@@ -297,20 +318,92 @@ public sealed class Media
                 req.Headers.TryAddWithoutValidation(k, hv);
             }
         }
-        HttpResponseMessage resp;
+        return req;
+    }
+
+    private static bool SameOrigin(Uri a, Uri b)
+        => string.Equals(a.Scheme, b.Scheme, StringComparison.OrdinalIgnoreCase)
+           && string.Equals(a.Host, b.Host, StringComparison.OrdinalIgnoreCase) && a.Port == b.Port;
+
+    /// <summary>§7G edge rule (G): echoed bodies are capped at 1000 code points, then "…".</summary>
+    internal static string CapBody(string text)
+    {
+        var n = 0;
+        for (var i = 0; i < text.Length; i++)
+        {
+            if (n == 1000) return text[..i] + "\u2026";
+            if (char.IsHighSurrogate(text[i]) && i + 1 < text.Length && char.IsLowSurrogate(text[i + 1])) i++;
+            n++;
+        }
+        return text;
+    }
+
+    /// <summary>§7G edge rule (F): RFC 3986 unreserved kept, everything else %XX of its UTF-8 bytes.</summary>
+    internal static string PercentEncode(string s)
+    {
+        var sb = new StringBuilder();
+        foreach (var b in Encoding.UTF8.GetBytes(s))
+        {
+            var c = (char)b;
+            if (c is >= 'A' and <= 'Z' or >= 'a' and <= 'z' or >= '0' and <= '9' or '-' or '.' or '_' or '~') sb.Append(c);
+            else sb.Append('%').Append(b.ToString("X2", CultureInfo.InvariantCulture));
+        }
+        return sb.ToString();
+    }
+
+    private async Task<object?> SendAsync(MediaStyle style, string verb, string method, string path,
+        Dictionary<string, object?>? body, Deadline deadline, string? jobId, CancellationToken ct)
+    {
+        var remaining = deadline.RemainingMs;
+        if (remaining <= 0) throw new MediaException(TimedOut(verb, jobId, deadline.TimeoutMs));
+        using var timer = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        timer.CancelAfter(TimeSpan.FromMilliseconds(remaining));
+        var origin = new Uri(style.BaseUrl + path);
+        var uri = origin;
+        var withHeaders = true;
+        HttpResponseMessage? resp = null;
         string text;
         try
         {
-            resp = await _http.SendAsync(req, ct).ConfigureAwait(false);
-            text = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+            for (var hops = 0; ; hops++)
+            {
+                using (var req = BuildRequest(style, method, uri, body, withHeaders))
+                    resp = await _http.SendAsync(req, timer.Token).ConfigureAwait(false);
+                var sc = (int)resp.StatusCode;
+                if (sc is 301 or 302 or 303 or 307 or 308 && resp.Headers.Location is { } loc && hops < 10)
+                {
+                    uri = loc.IsAbsoluteUri ? loc : new Uri(uri, loc);
+                    // (A) style headers never leave baseUrl's origin.
+                    withHeaders = withHeaders && SameOrigin(origin, uri);
+                    if (sc == 303 || (sc is 301 or 302 && method.ToUpperInvariant() == "POST")) { method = "GET"; body = null; }
+                    resp.Dispose();
+                    resp = null;
+                    continue;
+                }
+                break;
+            }
+            text = await resp.Content.ReadAsStringAsync(timer.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            resp?.Dispose();
+            if (deadline.RemainingMs <= 0 || timer.IsCancellationRequested)
+                throw new MediaException(TimedOut(verb, jobId, deadline.TimeoutMs));
+            throw new MediaException($"{verb}: request timed out"); // HttpClient.Timeout (K)
         }
         catch (HttpRequestException e)
         {
+            resp?.Dispose();
             throw new MediaException($"{verb}: {e.Message}"); // transport error: no HTTP status
+        }
+        catch
+        {
+            resp?.Dispose();
+            throw;
         }
         using var _ = resp;
         var code = (int)resp.StatusCode;
-        if (code is < 200 or > 299) throw new MediaException($"HTTP {code}: {text}");
+        if (code is < 200 or > 299) throw new MediaException($"HTTP {code}: {CapBody(text)}");
         object? parsed;
         try
         {
@@ -499,34 +592,25 @@ public sealed class Media
         return cur;
     }
 
-    /// <summary>§7G dotPath write: creates objects, and arrays when the next segment is numeric (null-padded).</summary>
+    /// <summary>§7G dotPath write: creates objects, and arrays when the next segment is numeric (null-padded).
+    /// A scalar in the way is replaced; so is an array met with a non-numeric segment (H).</summary>
     internal static void WritePath(Dictionary<string, object?> root, string path, object? value)
+        => root[path.Split('.')[0]] = WriteInto(root.Get(path.Split('.')[0]), path.Split('.'), 1, value);
+
+    private static object? WriteInto(object? cur, string[] segs, int n, object? value)
     {
-        var segs = path.Split('.');
-        object cur = root;
-        for (var n = 0; n < segs.Length; n++)
+        if (n == segs.Length) return value;
+        var seg = segs[n];
+        if (cur is not Dictionary<string, object?> && IsIndex(seg, out var i))
         {
-            var seg = segs[n];
-            var last = n == segs.Length - 1;
-            object? Fresh() => n + 1 < segs.Length && IsIndex(segs[n + 1], out _) ? new List<object?>() : new Dictionary<string, object?>();
-            if (cur is List<object?> list && IsIndex(seg, out var i))
-            {
-                while (list.Count <= i) list.Add(null);
-                if (last) { list[i] = value; return; }
-                if (list[i] is not (Dictionary<string, object?> or List<object?>)) list[i] = Fresh();
-                cur = list[i]!;
-            }
-            else
-            {
-                if (cur is not Dictionary<string, object?> d)
-                    return; // unreachable: containers are created to match the next segment
-                if (last) { d[seg] = value; return; }
-                if (!d.TryGetValue(seg, out var next) || next is not (Dictionary<string, object?> or List<object?>)
-                    || (next is List<object?> && !IsIndex(segs[n + 1], out _)))
-                    d[seg] = next = Fresh();
-                cur = next!;
-            }
+            var list = cur as List<object?> ?? new List<object?>();
+            while (list.Count <= i) list.Add(null);
+            list[i] = WriteInto(list[i], segs, n + 1, value);
+            return list;
         }
+        var d = cur as Dictionary<string, object?> ?? new Dictionary<string, object?>();
+        d[seg] = WriteInto(d.Get(seg), segs, n + 1, value);
+        return d;
     }
 }
 

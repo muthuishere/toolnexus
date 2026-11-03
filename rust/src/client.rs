@@ -228,6 +228,9 @@ pub struct RunFile {
     pub url: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub data: String,
+    /// The part's name, when it has one.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub name: String,
     /// The tool's name.
     pub from: String,
     /// The model's tool-call id.
@@ -245,6 +248,7 @@ pub fn run_files_of(call: &ToolCall, call_id: &str) -> Vec<RunFile> {
             mime_type: p.mime_type.clone(),
             url: p.url.clone(),
             data: p.data.clone(),
+            name: p.name.clone(),
             from: call.name.clone(),
             call_id: call_id.to_string(),
         })

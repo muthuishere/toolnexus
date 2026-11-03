@@ -6,6 +6,9 @@
   (:require [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
             [koine.fs :as fs]
+            [koine.host :as host]
+            [koine.http :as khttp]
+            [koine.time :as ktime]
             [koine.json :as json]
             [koine.server :as server]
             [toolnexus.client :as client]
@@ -42,19 +45,25 @@
       (f (str "http://127.0.0.1:" (server/port srv)) reqs)
       (finally (server/stop! srv)))))
 
-(defn- case-media [c base progress]
-  (media/create-media (update (:style c) :baseUrl #(str/replace % "{server}" base))
-                      {:env         (fn [k] (get (:env c) (keyword k)))
-                       :on-progress (fn [p] (swap! progress conj p))}))
+(defn- case-media
+  ([c base progress] (case-media c base progress (atom [])))
+  ([c base progress sent]
+   (media/create-media (update (:style c) :baseUrl #(str/replace % "{server}" base))
+                       {:env         (fn [k] (get (:env c) (keyword k)))
+                        :on-progress (fn [p] (swap! progress conj p))
+                        ;; koine.server decodes the path; record it as SENT
+                        :http-client (fn [req]
+                                       (swap! sent conj (subs (:url req) (count base)))
+                                       (khttp/request req))})))
 
 (defn- function-face [c]
   (with-fake-server (:script c)
     (fn [base reqs]
       (let [progress (atom [])
-            m        (case-media c base progress)
-            out      (try {:ok (media/generate m (:verb c) (:args c))}
+            sent     (atom [])
+            out      (try {:ok (media/generate (case-media c base progress sent) (:verb c) (:args c))}
                           (catch Throwable e {:error (ex-message e)}))]
-        {:out out :reqs @reqs :progress @progress}))))
+        {:out out :reqs (mapv (fn [r p] (assoc r :path p)) @reqs @sent) :progress @progress}))))
 
 (defn- tool-face [c]
   (with-fake-server (:script c)
@@ -66,7 +75,7 @@
 
 (deftest conformance-cases-replay
   (let [cases (:cases (fixture "cases.json"))]
-    (is (<= 19 (count cases)) "every fixture case is replayed")
+    (is (<= 29 (count cases)) "every fixture case is replayed")
     (doseq [c cases]
       (testing (:name c)
         (let [{:keys [out reqs progress]} (function-face c)]
@@ -86,7 +95,7 @@
           (if (contains? c :error)
             (is (= (:error c) (:error out)))
             (is (= (:result c) (:ok out))))
-          (when-let [expected (:tool c)]
+          (when-let [expected (when-not (:styleError c) (:tool c))]
             (is (= (dissoc expected :name) (tool-face c)))))))))
 
 (deftest tool-schemas-match-fixture
@@ -168,3 +177,51 @@
     (is (= 6 (count ts)))
     (doseq [t ts]
       (is (true? (tool/concurrency-safe? t {})) (:name t)))))
+
+;; SPEC §7G Redirects: style headers never reach a different origin. The JVM
+;; port follows redirects itself (java.net.http never does), so a cross-origin
+;; hop is re-issued without them. cljgo's Go client follows redirects on its own
+;; and koine exposes no switch, so the rule is asserted on the JVM only.
+(deftest cross-origin-redirect-drops-style-headers
+  (when (= :jvm host/id)
+    (let [seen-b (atom [])
+          seen-a (atom [])
+          b      (ts/serve (fn [req]
+                             (swap! seen-b conj (reduce (fn [m e] (assoc m (str/lower-case (str (key e))) (val e)))
+                                                        {} (:headers req)))
+                             {:status 200 :headers {"content-type" "application/json"}
+                              :body "{\"u\":\"https://x/a.png\"}"}))
+          b-url  (str "http://127.0.0.1:" (server/port b))
+          a      (ts/serve (fn [req]
+                             (swap! seen-a conj (:path req))
+                             (if (= "/s" (:path req))
+                               {:status 302 :headers {"location" "/same"} :body ""}
+                               {:status 307 :headers {"location" (str b-url "/other")} :body ""})))]
+      (try
+        (let [m (media/create-media {:baseUrl (str "http://127.0.0.1:" (server/port a))
+                                     :headers {:Authorization "Bearer k" :X-Key "secret"}
+                                     :verbs {:image {:mode "sync" :kind "image" :start {:path "/s"}
+                                                     :args {:prompt "p"} :resultPath "u"}}})
+              r (media/image m {:prompt "cat"})]
+          (is (= "https://x/a.png" (:url (first (:files r)))))
+          (is (= ["/s" "/same"] @seen-a) "same-origin redirect followed")
+          (is (= 1 (count @seen-b)))
+          (is (nil? (get (first @seen-b) "authorization")))
+          (is (nil? (get (first @seen-b) "x-key"))))
+        (finally (server/stop! a) (server/stop! b))))))
+
+;; SPEC §7G Per-request timeout: a hung server is bounded by the time remaining.
+(deftest hung-server-bounded-by-remaining-deadline
+  (let [srv (ts/serve (fn [_] (ktime/sleep! 3000)
+                        {:status 200 :headers {"content-type" "application/json"} :body "{}"}))]
+    (try
+      (let [base (str "http://127.0.0.1:" (server/port srv))
+            m    (media/create-media {:baseUrl base
+                                      :verbs {:image {:mode "sync" :kind "image" :start {:path "/s"}
+                                                      :args {:prompt "p"} :resultPath "u"
+                                                      :poll {:timeoutMs 300}}}})
+            t0   (ktime/mono-ms)
+            e    (try (media/image m {:prompt "x"}) nil (catch Throwable e e))]
+        (is (= "image: timed out after 300ms" (ex-message e)))
+        (is (< (- (ktime/mono-ms) t0) 2500)))
+      (finally (server/stop! srv)))))

@@ -2001,6 +2001,7 @@ defmodule Toolnexus.Client do
         %{type: type, mime_type: p.mime_type, from: rec.name, call_id: rec[:__call_id]}
         |> then(fn f -> if p.url, do: Map.put(f, :url, p.url), else: f end)
         |> then(fn f -> if p.data, do: Map.put(f, :data, p.data), else: f end)
+        |> then(fn f -> if Map.get(p, :name), do: Map.put(f, :name, p.name), else: f end)
       end
 
     {Enum.map(tool_calls, &Map.delete(&1, :__call_id)), files}

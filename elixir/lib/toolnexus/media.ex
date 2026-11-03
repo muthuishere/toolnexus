@@ -51,13 +51,14 @@ defmodule Toolnexus.Media do
   alias Toolnexus.{ContentPart, Context, Tool, ToolResult}
   alias Toolnexus.Media.Result
 
-  defstruct styles: [], on_progress: nil, transport: nil, http_options: []
+  defstruct styles: [], on_progress: nil, transport: nil, http_options: [], deadline: nil
 
   @type t :: %__MODULE__{
           styles: [map()],
           on_progress: (map() -> any()) | nil,
           transport: (map() -> {:ok, map()} | {:error, term()}) | nil,
-          http_options: keyword()
+          http_options: keyword(),
+          deadline: integer() | nil
         }
 
   # verbs.json — embedded verbatim (order, names, types, descriptions, required).
@@ -158,9 +159,13 @@ defmodule Toolnexus.Media do
   @spec load_style(Path.t()) :: {:ok, map()} | {:error, String.t()}
   def load_style(path) do
     with {:ok, text} <- File.read(path),
-         {:ok, %{} = style} <- Jason.decode(text) do
+         {:ok, %{} = style} <- Jason.decode(text),
+         :ok <- validate_style(style) do
       {:ok, style}
     else
+      {:error, msg} when is_binary(msg) ->
+        {:error, msg}
+
       {:error, %Jason.DecodeError{} = e} ->
         {:error, "media: #{path}: #{Exception.message(e)}"}
 
@@ -293,11 +298,23 @@ defmodule Toolnexus.Media do
       body = Map.merge(body, provider_options || %{})
       start = spec["start"] || %{}
 
-      with {:ok, resp} <- call(media, style, verb, start["method"] || "POST", start["path"], body) do
-        case spec["mode"] do
-          "async" -> poll(media, style, verb, spec, resp, signal)
-          _ -> result(verb, spec, resp, %Result{status: "completed"})
-        end
+      # §7G Per-request timeout: every request is bounded by the time left until the
+      # job deadline, which counts from the start request.
+      timeout = positive((spec["poll"] || %{})["timeoutMs"], 600_000)
+      media = %{media | deadline: System.monotonic_time(:millisecond) + timeout}
+
+      case call(media, style, verb, start["method"] || "POST", start["path"], body) do
+        :deadline ->
+          {:error, "#{verb}: timed out after #{timeout}ms"}
+
+        {:ok, resp} ->
+          case spec["mode"] do
+            "async" -> poll(media, style, verb, spec, resp, signal, timeout)
+            _ -> result(verb, spec, resp, %Result{status: "completed"})
+          end
+
+        err ->
+          err
       end
     end
   end
@@ -305,10 +322,27 @@ defmodule Toolnexus.Media do
   defp find(media, verb) do
     Enum.find_value(media.styles, {:error, ~s(media: no style supports "#{verb}")}, fn style ->
       case style["verbs"] do
-        %{^verb => spec} -> {:ok, spec, style}
-        _ -> nil
+        %{^verb => spec} ->
+          with :ok <- validate_style(style), do: {:ok, spec, style}
+
+        _ ->
+          nil
       end
     end)
+  end
+
+  # §7G Empty dotPath: an `args` entry mapped to "" is a style error (sorted ⇒ deterministic).
+  defp validate_style(style) do
+    empty =
+      for {_verb, spec} <- Enum.sort(style["verbs"] || %{}),
+          is_map(spec),
+          {k, ""} <- Enum.sort(spec["args"] || %{}),
+          do: k
+
+    case empty do
+      [] -> :ok
+      [k | _] -> {:error, ~s(style: empty path for argument "#{k}")}
+    end
   end
 
   defp resolve(media, verb) do
@@ -327,62 +361,74 @@ defmodule Toolnexus.Media do
     end
   end
 
-  defp poll(media, style, verb, spec, resp, signal) do
+  defp poll(media, style, verb, spec, resp, signal, timeout) do
     p = spec["poll"] || %{}
     id_path = spec["idPath"]
 
     case read_path(resp, id_path) do
-      {:ok, id} when (is_binary(id) and id != "") or is_integer(id) or (is_float(id) and id == trunc(id)) ->
+      {:ok, id}
+      when (is_binary(id) and id != "") or is_integer(id) or (is_float(id) and id == trunc(id)) ->
         id = render(id)
-        interval = p["intervalMs"] || 5000
-        timeout = p["timeoutMs"] || 600_000
-        path = String.replace(p["path"] || "", "{id}", id)
-        t0 = System.monotonic_time(:millisecond)
-        poll_loop(media, style, verb, spec, p, id, path, interval, timeout, t0, signal)
+        interval = positive(p["intervalMs"], 5000)
+        # §7G: the job id is percent-encoded (RFC 3986 unreserved kept) in the poll path.
+        path = String.replace(p["path"] || "", "{id}", URI.encode(id, &URI.char_unreserved?/1))
+        poll_loop(media, style, verb, spec, p, id, path, interval, timeout, signal)
 
       _ ->
         {:error, "#{verb}: no job id at #{id_path}"}
     end
   end
 
-  defp poll_loop(media, style, verb, spec, p, id, path, interval, timeout, t0, signal) do
+  defp poll_loop(media, style, verb, spec, p, id, path, interval, timeout, signal) do
     Process.sleep(interval)
+    timed_out = {:error, "job #{id} timed out after #{timeout}ms"}
 
     if cancelled?(signal) do
       raise Toolnexus.Media.Cancelled
     else
-      with {:ok, resp} <- call(media, style, verb, p["method"] || "GET", path, nil) do
-        status =
-          case read_path(resp, p["statusPath"]) do
-            {:ok, s} when is_binary(s) -> s
-            {:ok, s} when is_number(s) -> render(s)
-            _ -> ""
+      case call(media, style, verb, p["method"] || "GET", path, nil) do
+        :deadline ->
+          timed_out
+
+        {:ok, resp} ->
+          status =
+            case read_path(resp, p["statusPath"]) do
+              {:ok, s} when is_binary(s) -> s
+              {:ok, s} when is_number(s) -> render(s)
+              _ -> ""
+            end
+
+          if media.on_progress, do: media.on_progress.(%{verb: verb, job_id: id, status: status})
+
+          cond do
+            status in (p["done"] || []) ->
+              result(verb, spec, resp, %Result{status: status, job_id: id})
+
+            status in (p["failed"] || []) ->
+              msg =
+                case read_path(resp, p["errorPath"]) do
+                  {:ok, m} when is_binary(m) and m != "" -> ": " <> m
+                  _ -> ""
+                end
+
+              {:error, "job #{id} #{status}#{msg}"}
+
+            System.monotonic_time(:millisecond) >= media.deadline ->
+              timed_out
+
+            true ->
+              poll_loop(media, style, verb, spec, p, id, path, interval, timeout, signal)
           end
 
-        if media.on_progress, do: media.on_progress.(%{verb: verb, job_id: id, status: status})
-
-        cond do
-          status in (p["done"] || []) ->
-            result(verb, spec, resp, %Result{status: status, job_id: id})
-
-          status in (p["failed"] || []) ->
-            msg =
-              case read_path(resp, p["errorPath"]) do
-                {:ok, m} when is_binary(m) and m != "" -> ": " <> m
-                _ -> ""
-              end
-
-            {:error, "job #{id} #{status}#{msg}"}
-
-          System.monotonic_time(:millisecond) - t0 >= timeout ->
-            {:error, "job #{id} timed out after #{timeout}ms"}
-
-          true ->
-            poll_loop(media, style, verb, spec, p, id, path, interval, timeout, t0, signal)
-        end
+        err ->
+          err
       end
     end
   end
+
+  # §7G: an interval/timeout that is absent, not a number or <= 0 takes the default.
+  defp positive(v, _default) when is_number(v) and v > 0, do: v
+  defp positive(_v, default), do: default
 
   defp cancelled?(nil), do: false
   defp cancelled?(pid) when is_pid(pid), do: not Process.alive?(pid)
@@ -440,11 +486,14 @@ defmodule Toolnexus.Media do
 
     headers = if body, do: Map.put(headers, "Content-Type", "application/json"), else: headers
     method = method |> to_string() |> String.downcase() |> String.to_atom()
+    remaining = remaining_ms(media.deadline)
 
-    with {:ok, status, raw} <- prefix(verb, send_request(media, method, url, headers, body)) do
+    with :ok <- if(remaining == 0, do: :deadline, else: :ok),
+         {:ok, status, raw} <-
+           prefix(verb, send_request(media, method, url, headers, body, remaining)) do
       cond do
         status not in 200..299 ->
-          {:error, "HTTP #{status}: #{raw}"}
+          {:error, "HTTP #{status}: #{cap_body(raw)}"}
 
         true ->
           case decode(raw) do
@@ -455,25 +504,61 @@ defmodule Toolnexus.Media do
     end
   end
 
-  defp send_request(%{transport: t}, method, url, headers, body) when is_function(t, 1) do
-    case t.(%{method: method, url: url, headers: headers, body: body, receive_timeout: nil}) do
+  defp remaining_ms(nil), do: :infinity
+  defp remaining_ms(deadline), do: max(deadline - System.monotonic_time(:millisecond), 0)
+
+  defp send_request(%{transport: t} = media, method, url, headers, body, remaining)
+       when is_function(t, 1) do
+    req = %{method: method, url: url, headers: headers, body: body, receive_timeout: remaining}
+
+    case t.(req) do
       {:ok, %{status: status, body: b}} -> {:ok, status, b}
-      {:error, e} -> {:error, err_text(e)}
+      {:error, e} -> transport_error(media, e)
     end
   end
 
-  defp send_request(media, method, url, headers, body) do
+  defp send_request(media, method, url, headers, body, remaining) do
     opts =
       [method: method, url: url, headers: headers, retry: false, decode_body: false] ++
-        if(body, do: [body: Jason.encode!(body)], else: [])
+        if(body, do: [body: Jason.encode!(body)], else: []) ++
+        if(remaining == :infinity,
+          do: [],
+          else: [receive_timeout: remaining, connect_options: [timeout: remaining]]
+        )
 
-    case Req.request(Keyword.merge(opts, media.http_options)) do
+    # §7G Redirects: never followed, so style headers cannot reach another origin; a 3xx
+    # surfaces as `HTTP <status>: <body>`. Forced over the host's http_options.
+    opts = opts |> Keyword.merge(media.http_options) |> Keyword.put(:redirect, false)
+
+    case Req.request(opts) do
       {:ok, %Req.Response{status: status, body: b}} -> {:ok, status, b}
-      {:error, e} -> {:error, err_text(e)}
+      {:error, e} -> transport_error(media, e)
     end
   end
 
+  # A request cut short by the job deadline is `:deadline` (callers render the §7G
+  # timed-out message); anything else is a transport error.
+  defp transport_error(media, e) do
+    if timeout_error?(e) or past?(media.deadline), do: :deadline, else: {:error, err_text(e)}
+  end
+
+  defp timeout_error?(%{reason: :timeout}), do: true
+  defp timeout_error?(:timeout), do: true
+  defp timeout_error?(_), do: false
+
+  defp past?(nil), do: false
+  defp past?(deadline), do: System.monotonic_time(:millisecond) >= deadline
+
+  # §7G: echoed error bodies keep their first 1000 code points, then "…".
+  defp cap_body(raw) when is_binary(raw) do
+    cps = String.codepoints(raw)
+    if length(cps) <= 1000, do: raw, else: Enum.join(Enum.take(cps, 1000)) <> "…"
+  end
+
+  defp cap_body(raw), do: raw
+
   # Edge rule: a transport error (no HTTP status) ⇒ "<verb>: <message>".
+  defp prefix(_verb, :deadline), do: :deadline
   defp prefix(verb, {:error, msg}), do: {:error, "#{verb}: #{msg}"}
   defp prefix(_verb, ok), do: ok
 
@@ -524,6 +609,8 @@ defmodule Toolnexus.Media do
   @doc false
   # dotPath read: `{:ok, value}` or `:absent`.
   def read_path(_v, nil), do: :absent
+  # §7G: an empty dotPath is the whole value.
+  def read_path(v, ""), do: {:ok, v}
   def read_path(v, path), do: do_read(v, String.split(path, "."))
 
   defp do_read(v, []), do: {:ok, v}
@@ -549,13 +636,14 @@ defmodule Toolnexus.Media do
   defp do_read(_, _), do: :absent
 
   @doc false
-  # dotPath write: creates objects, and arrays when the next segment is numeric.
+  # dotPath write: creates objects, and arrays when the next segment is numeric
+  # (an existing object is kept; a numeric segment is then a string key).
   def put_path(container, path, value), do: do_put(container, String.split(path, "."), value)
 
   defp do_put(_c, [], value), do: value
 
   defp do_put(c, [seg | rest], value) do
-    if digits?(seg) do
+    if digits?(seg) and not is_map(c) do
       list = if is_list(c), do: c, else: []
       i = String.to_integer(seg)
 

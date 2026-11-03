@@ -14,6 +14,7 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"net/url"
 	"os"
 	"reflect"
 	"regexp"
@@ -21,6 +22,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // SourceMedia marks a tool produced by Media.Tools (§7G).
@@ -140,7 +142,33 @@ func LoadMediaStyle(path string) (MediaStyle, error) {
 	if err := json.Unmarshal(b, &s); err != nil {
 		return s, fmt.Errorf("media style %s: %w", path, err)
 	}
+	if err := validateMediaStyle(s); err != nil {
+		return s, err
+	}
 	return s, nil
+}
+
+// validateMediaStyle rejects an args entry mapped to "" (§7G Empty dotPath).
+// Verbs and keys are checked in sorted order so the error is deterministic.
+func validateMediaStyle(s MediaStyle) error {
+	verbs := make([]string, 0, len(s.Verbs))
+	for v := range s.Verbs {
+		verbs = append(verbs, v)
+	}
+	sort.Strings(verbs)
+	for _, v := range verbs {
+		keys := make([]string, 0, len(s.Verbs[v].Args))
+		for k := range s.Verbs[v].Args {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			if s.Verbs[v].Args[k] == "" {
+				return fmt.Errorf("style: empty path for argument %q", k)
+			}
+		}
+	}
+	return nil
 }
 
 // CreateMedia builds a media engine over one or more styles. A verb resolves to
@@ -266,12 +294,6 @@ func present(kv ...any) map[string]any {
 	return out
 }
 
-// Supports reports whether any style declares verb.
-func (m *Media) Supports(verb string) bool {
-	_, _, ok := m.resolve(verb)
-	return ok
-}
-
 func (m *Media) resolve(verb string) (MediaStyle, MediaVerb, bool) {
 	for _, s := range m.styles {
 		if v, ok := s.Verbs[verb]; ok {
@@ -292,6 +314,9 @@ func (m *Media) Generate(ctx context.Context, verb string, args map[string]any, 
 	style, v, ok := m.resolve(verb)
 	if !ok {
 		return MediaResult{}, fmt.Errorf("media: no style supports %q", verb)
+	}
+	if err := validateMediaStyle(style); err != nil {
+		return MediaResult{}, err
 	}
 	keys := make([]string, 0, len(args))
 	for k := range args {
@@ -325,7 +350,17 @@ func (m *Media) Generate(ctx context.Context, verb string, args map[string]any, 
 	if method == "" {
 		method = http.MethodPost
 	}
-	resp, err := m.do(ctx, style, verb, method, v.Start.Path, body)
+	// Every request is bounded by the time left until the job deadline (§7G
+	// Per-request timeout); the deadline counts from the start request.
+	timeout := 600000
+	if v.Poll != nil && v.Poll.TimeoutMs > 0 {
+		timeout = v.Poll.TimeoutMs
+	}
+	deadline := time.Now().Add(time.Duration(timeout) * time.Millisecond)
+	resp, err := m.do(ctx, deadline, style, verb, method, v.Start.Path, body)
+	if err == errMediaDeadline {
+		return MediaResult{}, fmt.Errorf("%s: timed out after %dms", verb, timeout)
+	}
 	if err != nil {
 		return MediaResult{}, err
 	}
@@ -336,7 +371,7 @@ func (m *Media) Generate(ctx context.Context, verb string, args map[string]any, 
 			return MediaResult{}, fmt.Errorf("%s: no job id at %s", verb, v.IDPath)
 		}
 		res.JobID = id
-		resp, res.Status, err = m.poll(ctx, style, verb, v, id)
+		resp, res.Status, err = m.poll(ctx, deadline, style, verb, v, id)
 		if err != nil {
 			return MediaResult{}, err
 		}
@@ -363,7 +398,7 @@ func (m *Media) Generate(ctx context.Context, verb string, args map[string]any, 
 	return res, nil
 }
 
-func (m *Media) poll(ctx context.Context, style MediaStyle, verb string, v MediaVerb, id string) (any, string, error) {
+func (m *Media) poll(ctx context.Context, deadline time.Time, style MediaStyle, verb string, v MediaVerb, id string) (any, string, error) {
 	p := v.Poll
 	if p == nil {
 		return nil, "", fmt.Errorf("%s: async verb has no poll", verb)
@@ -379,8 +414,8 @@ func (m *Media) poll(ctx context.Context, style MediaStyle, verb string, v Media
 	if method == "" {
 		method = http.MethodGet
 	}
-	path := strings.ReplaceAll(p.Path, "{id}", id)
-	began := time.Now()
+	path := strings.ReplaceAll(p.Path, "{id}", percentEncode(id))
+	timedOut := fmt.Errorf("job %s timed out after %dms", id, timeout)
 	timer := time.NewTimer(time.Duration(interval) * time.Millisecond)
 	defer timer.Stop()
 	for {
@@ -389,7 +424,10 @@ func (m *Media) poll(ctx context.Context, style MediaStyle, verb string, v Media
 			return nil, "", ctx.Err()
 		case <-timer.C:
 		}
-		resp, err := m.do(ctx, style, verb, method, path, nil)
+		resp, err := m.do(ctx, deadline, style, verb, method, path, nil)
+		if err == errMediaDeadline {
+			return nil, "", timedOut
+		}
 		if err != nil {
 			return nil, "", err
 		}
@@ -410,17 +448,32 @@ func (m *Media) poll(ctx context.Context, style MediaStyle, verb string, v Media
 			}
 			return nil, status, fmt.Errorf("job %s %s: %s", id, status, msg)
 		}
-		if time.Since(began) >= time.Duration(timeout)*time.Millisecond {
-			return nil, status, fmt.Errorf("job %s timed out after %dms", id, timeout)
+		if !time.Now().Before(deadline) {
+			return nil, status, timedOut
 		}
 		timer.Reset(time.Duration(interval) * time.Millisecond)
 	}
 }
 
+// errMediaDeadline marks a request cut short by the job deadline; callers turn
+// it into the §7G timed-out message.
+var errMediaDeadline = fmt.Errorf("media deadline")
+
 var mediaEnvRe = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
 
 // do sends one request and applies the §7G step-5 response checks.
-func (m *Media) do(ctx context.Context, style MediaStyle, verb, method, path string, body map[string]any) (any, error) {
+func (m *Media) do(parent context.Context, deadline time.Time, style MediaStyle, verb, method, path string, body map[string]any) (any, error) {
+	ctx, cancel := context.WithDeadline(parent, deadline)
+	defer cancel()
+	failed := func(err error) error {
+		if parent.Err() != nil {
+			return parent.Err() // cancellation stays the native error
+		}
+		if ctx.Err() != nil {
+			return errMediaDeadline
+		}
+		return fmt.Errorf("%s: %w", verb, err)
+	}
 	var rd io.Reader
 	if body != nil {
 		b, err := json.Marshal(body)
@@ -441,23 +494,17 @@ func (m *Media) do(ctx context.Context, style MediaStyle, verb, method, path str
 			return os.Getenv(mediaEnvRe.FindStringSubmatch(s)[1])
 		}))
 	}
-	r, err := m.http.Do(req)
+	r, err := m.redirectSafe(style).Do(req)
 	if err != nil {
-		if ctx.Err() != nil {
-			return nil, ctx.Err() // cancellation stays the native error
-		}
-		return nil, fmt.Errorf("%s: %w", verb, err)
+		return nil, failed(err)
 	}
 	defer r.Body.Close()
 	raw, err := io.ReadAll(r.Body)
 	if err != nil {
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
-		return nil, fmt.Errorf("%s: %w", verb, err)
+		return nil, failed(err)
 	}
 	if r.StatusCode < 200 || r.StatusCode > 299 {
-		return nil, fmt.Errorf("HTTP %d: %s", r.StatusCode, raw)
+		return nil, fmt.Errorf("HTTP %d: %s", r.StatusCode, capMediaBody(raw))
 	}
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.UseNumber()
@@ -486,6 +533,74 @@ func (m *Media) do(ctx context.Context, style MediaStyle, verb, method, path str
 		}
 	}
 	return out, nil
+}
+
+// redirectSafe returns a copy of the HTTP client that strips the style headers
+// from any redirect to a different origin than the original request's (§7G
+// Redirects). The host's own CheckRedirect policy still runs.
+func (m *Media) redirectSafe(style MediaStyle) *http.Client {
+	c := *m.http
+	inner := m.http.CheckRedirect
+	c.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if origin(req.URL) != origin(via[0].URL) {
+			for k := range style.Headers {
+				req.Header.Del(k)
+			}
+		}
+		if inner != nil {
+			return inner(req, via)
+		}
+		if len(via) >= 10 {
+			return fmt.Errorf("stopped after 10 redirects")
+		}
+		return nil
+	}
+	return &c
+}
+
+func origin(u *url.URL) string {
+	port := u.Port()
+	if port == "" {
+		switch strings.ToLower(u.Scheme) {
+		case "https":
+			port = "443"
+		case "http":
+			port = "80"
+		}
+	}
+	return strings.ToLower(u.Scheme) + "://" + strings.ToLower(u.Hostname()) + ":" + port
+}
+
+// capMediaBody keeps the first 1000 code points of an echoed error body, appending
+// "…" when it truncates (§7G Echoed error bodies).
+func capMediaBody(raw []byte) string {
+	s := string(raw)
+	if utf8.RuneCountInString(s) <= 1000 {
+		return s
+	}
+	n := 0
+	for i := range s {
+		if n == 1000 {
+			return s[:i] + "…"
+		}
+		n++
+	}
+	return s
+}
+
+// percentEncode encodes everything but RFC 3986 unreserved characters as %XX
+// (uppercase) of its UTF-8 bytes (§7G Job id in the poll path).
+func percentEncode(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '-' || c == '.' || c == '_' || c == '~' {
+			b.WriteByte(c)
+		} else {
+			fmt.Fprintf(&b, "%%%02X", c)
+		}
+	}
+	return b.String()
 }
 
 // ---- tool face ----
@@ -750,7 +865,7 @@ func dotSet(root map[string]any, path string, val any) {
 				return
 			}
 			child := c[k]
-			if !isContainer(child) {
+			if !fitsNext(child, keys[i+1]) {
 				child = next()
 			}
 			child = growFor(child, keys[i+1])
@@ -763,7 +878,7 @@ func dotSet(root map[string]any, path string, val any) {
 				return
 			}
 			child := c[j]
-			if !isContainer(child) {
+			if !fitsNext(child, keys[i+1]) {
 				child = next()
 			}
 			child = growFor(child, keys[i+1])
@@ -788,10 +903,14 @@ func growFor(child any, seg string) any {
 	return arr
 }
 
-func isContainer(v any) bool {
-	switch v.(type) {
-	case map[string]any, []any:
+// fitsNext reports whether child can take segment seg: an object takes any
+// segment, an array only a numeric one (else it is replaced, §7G).
+func fitsNext(child any, seg string) bool {
+	switch child.(type) {
+	case map[string]any:
 		return true
+	case []any:
+		return isDigits(seg)
 	}
 	return false
 }

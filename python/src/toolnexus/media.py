@@ -22,7 +22,7 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Optional, Protocol, Union
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 from .types import Tool, ToolContext, ToolResult
 
@@ -116,15 +116,37 @@ class MediaTransport(Protocol):
     ) -> tuple[int, str]: ...
 
 
+def _origin(url: str) -> tuple[str, str, Optional[int]]:
+    u = urlsplit(url)
+    scheme = u.scheme.lower()
+    return scheme, (u.hostname or "").lower(), u.port or {"http": 80, "https": 443}.get(scheme)
+
+
+class _SameOriginRedirect(urllib.request.HTTPRedirectHandler):
+    """§7G Redirects: a redirect to another origin is re-issued with NO headers, so the
+    style headers (API keys) never leave ``baseUrl``'s origin."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[override]
+        new = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new is not None and _origin(req.full_url) != _origin(newurl):
+            new.headers.clear()
+            new.unredirected_hdrs.clear()
+        return new
+
+
+_OPENER = urllib.request.build_opener(_SameOriginRedirect)
+
+
 class UrllibMediaTransport:
-    """Default media transport — stdlib ``urllib``."""
+    """Default media transport — stdlib ``urllib``. Cross-origin redirects drop every
+    request header (a custom transport must do the same with the style headers)."""
 
     def request(
         self, method: str, url: str, headers: dict[str, str], body: Optional[bytes], timeout: float
     ) -> tuple[int, str]:
         req = urllib.request.Request(url, data=body, method=method, headers=headers)
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
+            with _OPENER.open(req, timeout=timeout) as resp:
                 return resp.status, resp.read().decode("utf-8", errors="replace")
         except urllib.error.HTTPError as e:
             return e.code, e.read().decode("utf-8", errors="replace")
@@ -139,6 +161,8 @@ _MISSING = object()
 
 
 def _get(obj: Any, path: str) -> Any:
+    if path == "":
+        return obj  # §7G: an empty dotPath is the whole value
     cur = obj
     for seg in path.split("."):
         if seg.isdigit() and isinstance(cur, list):
@@ -166,16 +190,56 @@ def _set(obj: dict[str, Any], path: str, value: Any) -> None:
             if last:
                 cur[idx] = value
                 return
-            if not isinstance(cur[idx], (dict, list)):
+            if not _fits(cur[idx], nxt_is_index):
                 cur[idx] = [] if nxt_is_index else {}
             cur = cur[idx]
         else:
             if last:
                 cur[seg] = value
                 return
-            if not isinstance(cur.get(seg), (dict, list)):
+            if not _fits(cur.get(seg), nxt_is_index):
                 cur[seg] = [] if nxt_is_index else {}
             cur = cur[seg]
+
+
+def _fits(child: Any, nxt_is_index: bool) -> bool:
+    """An object takes any segment; an array only a numeric one (else it is replaced, §7G)."""
+    return isinstance(child, dict) or (isinstance(child, list) and nxt_is_index)
+
+
+def _positive(v: Any, default: float) -> float:
+    """§7G: an interval/timeout that is absent, not a number or <= 0 takes the default."""
+    if isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0:
+        return v
+    return default
+
+
+def _status_text(v: Any) -> str:
+    """Poll status (§7G): string as-is, a number rendered like the envelope code, else ""."""
+    if isinstance(v, str):
+        return v
+    if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v):
+        return _num_text(v)
+    return ""
+
+
+def _cap_body(text: str) -> str:
+    """Echoed error bodies keep their first 1000 code points, then "…" (§7G)."""
+    return text if len(text) <= 1000 else text[:1000] + "\u2026"
+
+
+def _validate_style(style: dict[str, Any]) -> None:
+    """§7G Empty dotPath: an args entry mapped to "" is a style error (sorted ⇒ deterministic)."""
+    verbs = style.get("verbs") or {}
+    for verb in sorted(verbs):
+        mapping = (verbs[verb] or {}).get("args") or {}
+        for k in sorted(mapping):
+            if mapping[k] == "":
+                raise MediaError(f'style: empty path for argument "{k}"')
+
+
+class _Deadline(Exception):
+    """A request cut short by the job deadline; callers raise the §7G timed-out message."""
 
 
 def _num_text(v: Any) -> str:
@@ -214,7 +278,9 @@ def _expand(value: str) -> str:
 def load_media_style(path: str) -> dict[str, Any]:
     """Read one style JSON file (SPEC §7G)."""
     with open(path, encoding="utf-8") as f:
-        return json.load(f)
+        style = json.load(f)
+    _validate_style(style)
+    return style
 
 
 # --------------------------------------------------------------------------- #
@@ -232,12 +298,12 @@ class Media:
         styles: list[dict[str, Any]],
         on_progress: Optional[OnProgress] = None,
         http_transport: Optional[MediaTransport] = None,
-        timeout: float = 120.0,
     ) -> None:
+        for s in styles:
+            _validate_style(s)
         self._styles = styles
         self._on_progress = on_progress
         self._transport: MediaTransport = http_transport if http_transport is not None else UrllibMediaTransport()
-        self._timeout = timeout
 
     def _resolve(self, verb: str) -> Optional[tuple[dict[str, Any], dict[str, Any]]]:
         for s in self._styles:
@@ -246,18 +312,32 @@ class Media:
                 return s, v
         return None
 
-    async def _do(self, style: dict[str, Any], verb: str, method: str, path: str, body: Any) -> Any:
+    async def _do(
+        self, style: dict[str, Any], verb: str, method: str, path: str, body: Any, deadline: float
+    ) -> Any:
         url = str(style.get("baseUrl", "")).rstrip("/") + path
         headers = {k: _expand(str(v)) for k, v in (style.get("headers") or {}).items()}
         data: Optional[bytes] = None
         if body is not None:
             data = json.dumps(body).encode("utf-8")
             headers["Content-Type"] = "application/json"
-        status, text = await asyncio.to_thread(
-            self._transport.request, method, url, headers, data, self._timeout
-        )
+        # §7G Per-request timeout: bounded by the time left until the job deadline.
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise _Deadline()
+        try:
+            status, text = await asyncio.wait_for(
+                asyncio.to_thread(self._transport.request, method, url, headers, data, remaining + 1.0),
+                remaining,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            if time.monotonic() >= deadline:
+                raise _Deadline() from None
+            raise
         if status < 200 or status >= 300:
-            raise MediaError(f"HTTP {status}: {text}")
+            raise MediaError(f"HTTP {status}: {_cap_body(text)}")
         try:
             parsed = json.loads(text)
         except (ValueError, TypeError):
@@ -303,7 +383,12 @@ class Media:
         for k, val in (provider_options or {}).items():
             body[k] = val
         start = v.get("start") or {}
-        resp = await self._do(style, verb, start.get("method") or "POST", start.get("path", ""), body)
+        timeout_ms = _positive((v.get("poll") or {}).get("timeoutMs"), 600000)
+        deadline = time.monotonic() + timeout_ms / 1000.0
+        try:
+            resp = await self._do(style, verb, start.get("method") or "POST", start.get("path", ""), body, deadline)
+        except _Deadline:
+            raise MediaError(f"{verb}: timed out after {_num_text(timeout_ms)}ms") from None
 
         job_id: Optional[str] = None
         status = "completed"
@@ -316,7 +401,7 @@ class Media:
             )):
                 raise MediaError(f"{verb}: no job id at {id_path}")
             job_id = _num_text(raw)
-            resp, status = await self._poll(style, verb, v, job_id)
+            resp, status = await self._poll(style, verb, v, job_id, deadline, timeout_ms)
 
         kind = v.get("kind")
         rp = v.get("resultPath", "")
@@ -344,19 +429,22 @@ class Media:
         files = [MediaFile(_KIND_PART_TYPE.get(kind, "file"), _mime_for(u, kind), u) for u in urls]
         return MediaResult(files=files, job_id=job_id, status=status)
 
-    async def _poll(self, style: dict[str, Any], verb: str, v: dict[str, Any], job_id: str) -> tuple[Any, str]:
+    async def _poll(
+        self, style: dict[str, Any], verb: str, v: dict[str, Any], job_id: str, deadline: float, timeout_ms: float
+    ) -> tuple[Any, str]:
         p = v.get("poll") or {}
-        interval = (p.get("intervalMs") if p.get("intervalMs") is not None else 5000) / 1000.0
-        timeout_ms = p.get("timeoutMs") if p.get("timeoutMs") is not None else 600000
-        path = p.get("path", "").replace("{id}", job_id)
+        interval = _positive(p.get("intervalMs"), 5000) / 1000.0
+        path = p.get("path", "").replace("{id}", quote(job_id, safe=""))
         done = p.get("done") or []
         failed = p.get("failed") or []
-        began = time.monotonic()
+        timed_out = MediaError(f"job {job_id} timed out after {_num_text(timeout_ms)}ms")
         while True:
             await asyncio.sleep(interval)
-            resp = await self._do(style, verb, p.get("method") or "GET", path, None)
-            st = _get(resp, p.get("statusPath", ""))
-            st_s = st if isinstance(st, str) else ""
+            try:
+                resp = await self._do(style, verb, p.get("method") or "GET", path, None, deadline)
+            except _Deadline:
+                raise timed_out from None
+            st_s = _status_text(_get(resp, p.get("statusPath", "")))
             await self._progress(verb, job_id, st_s)
             if st_s in done:
                 return resp, st_s
@@ -365,8 +453,8 @@ class Media:
                 if isinstance(msg, str) and msg:
                     raise MediaError(f"job {job_id} {st_s}: {msg}")
                 raise MediaError(f"job {job_id} {st_s}")
-            if (time.monotonic() - began) * 1000.0 >= timeout_ms:
-                raise MediaError(f"job {job_id} timed out after {_num_text(timeout_ms)}ms")
+            if time.monotonic() >= deadline:
+                raise timed_out
 
     # ------------------------------ typed verbs ------------------------------ #
     @staticmethod
@@ -475,10 +563,9 @@ def create_media(
     *,
     on_progress: Optional[OnProgress] = None,
     http_transport: Optional[MediaTransport] = None,
-    timeout: float = 120.0,
 ) -> Media:
     """Build the media engine from one style or a list (a verb resolves to the FIRST
     style declaring it). ``on_progress({"verb","jobId","status"})`` fires per poll;
     ``http_transport`` replaces the default urllib transport."""
     lst = [styles] if isinstance(styles, dict) else list(styles)
-    return Media(lst, on_progress=on_progress, http_transport=http_transport, timeout=timeout)
+    return Media(lst, on_progress=on_progress, http_transport=http_transport)

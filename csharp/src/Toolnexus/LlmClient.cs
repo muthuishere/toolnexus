@@ -650,7 +650,7 @@ public sealed partial class LlmClient
 
     /// <summary>(SPEC §8 / §7G) A non-text part a tool produced during a run, tagged with the tool name
     /// (<paramref name="From"/>) and the model's tool-call id (<paramref name="CallId"/>).</summary>
-    public sealed record RunFile(string Type, string MimeType, string? Url, string? Data, string From, string? CallId);
+    public sealed record RunFile(string Type, string MimeType, string? Url, string? Data, string From, string? CallId, string? Name = null);
 
     public sealed class Usage
     {
@@ -690,7 +690,7 @@ public sealed partial class LlmClient
         public IReadOnlyList<RunFile> Files => ToolCalls
             .SelectMany(c => (c.Parts ?? Array.Empty<ContentPart>())
                 .Where(p => p.Type != "text")
-                .Select(p => new RunFile(p.Type, p.MimeType ?? "", p.Url, p.Data, c.Name, c.CallId)))
+                .Select(p => new RunFile(p.Type, p.MimeType ?? "", p.Url, p.Data, c.Name, c.CallId, p.Name)))
             .ToList();
         public int Turns { get; }
         public Usage Usage { get; }

@@ -109,12 +109,24 @@ pub struct MediaPoll {
     #[serde(
         rename = "intervalMs",
         default,
+        deserialize_with = "lenient_ms",
         skip_serializing_if = "Option::is_none"
     )]
     pub interval_ms: Option<u64>,
     /// `None` ⇒ 600000.
-    #[serde(rename = "timeoutMs", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "timeoutMs",
+        default,
+        deserialize_with = "lenient_ms",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub timeout_ms: Option<u64>,
+}
+
+/// A positive whole number of ms; anything else (absent, `<= 0`, not a number) ⇒ `None` (default).
+fn lenient_ms<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<u64>, D::Error> {
+    let v = Value::deserialize(d)?;
+    Ok(v.as_f64().filter(|f| *f > 0.0).map(|f| f.ceil() as u64))
 }
 
 /// Read one style file (`loadMediaStyle`).
@@ -122,8 +134,20 @@ pub fn load_media_style(path: impl AsRef<Path>) -> Result<MediaStyle, MediaError
     let p = path.as_ref();
     let text = std::fs::read_to_string(p)
         .map_err(|e| MediaError::Message(format!("media: cannot read {}: {e}", p.display())))?;
-    serde_json::from_str(&text)
-        .map_err(|e| MediaError::Message(format!("media: bad style {}: {e}", p.display())))
+    let style: MediaStyle = serde_json::from_str(&text)
+        .map_err(|e| MediaError::Message(format!("media: bad style {}: {e}", p.display())))?;
+    check_style(&style)?;
+    Ok(style)
+}
+
+/// Load-time style checks (§7G): an argument may not map to the empty path.
+fn check_style(style: &MediaStyle) -> Result<(), MediaError> {
+    for vs in style.verbs.values() {
+        if let Some((k, _)) = vs.args.iter().find(|(_, p)| p.is_empty()) {
+            return err(format!("style: empty path for argument {k:?}"));
+        }
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -388,6 +412,9 @@ fn to_args<T: Serialize>(t: &T) -> Map<String, Value> {
 // ---------------------------------------------------------------------------
 
 fn get_path<'a>(v: &'a Value, path: &str) -> Option<&'a Value> {
+    if path.is_empty() {
+        return Some(v);
+    }
     let mut cur = v;
     for seg in path.split('.') {
         cur = if is_index(seg) {
@@ -415,7 +442,8 @@ fn set_path(root: &mut Value, path: &str, val: Value) {
                 Value::Object(Map::new())
             }
         };
-        if is_index(seg) {
+        // An existing object keeps a numeric segment as a string key (SPEC §7G).
+        if is_index(seg) && !cur.is_object() {
             let idx: usize = seg.parse().unwrap_or(0);
             if !cur.is_array() {
                 *cur = Value::Array(Vec::new());
@@ -568,7 +596,12 @@ impl Media {
             inner: Arc::new(Inner {
                 styles: styles.into(),
                 on_progress: opts.on_progress,
-                http: opts.http_client.unwrap_or_default(),
+                http: opts.http_client.unwrap_or_else(|| {
+                    reqwest::Client::builder()
+                        .redirect(reqwest::redirect::Policy::none())
+                        .build()
+                        .unwrap_or_default()
+                }),
             }),
         }
     }
@@ -581,37 +614,86 @@ impl Media {
     }
 
     pub async fn image(&self, input: ImageInput) -> Result<MediaResult, MediaError> {
-        self.typed("image", to_args(&input), input.provider_options)
+        self.image_with(input, &CancellationToken::new()).await
+    }
+    /// [`Media::image`] stopped early by `cancel`.
+    pub async fn image_with(
+        &self,
+        input: ImageInput,
+        cancel: &CancellationToken,
+    ) -> Result<MediaResult, MediaError> {
+        self.generate_with("image", to_args(&input), input.provider_options, cancel)
             .await
     }
     pub async fn video(&self, input: VideoInput) -> Result<MediaResult, MediaError> {
-        self.typed("video", to_args(&input), input.provider_options)
+        self.video_with(input, &CancellationToken::new()).await
+    }
+    /// [`Media::video`] stopped early by `cancel`.
+    pub async fn video_with(
+        &self,
+        input: VideoInput,
+        cancel: &CancellationToken,
+    ) -> Result<MediaResult, MediaError> {
+        self.generate_with("video", to_args(&input), input.provider_options, cancel)
             .await
     }
     pub async fn speech(&self, input: SpeechInput) -> Result<MediaResult, MediaError> {
-        self.typed("speech", to_args(&input), input.provider_options)
+        self.speech_with(input, &CancellationToken::new()).await
+    }
+    /// [`Media::speech`] stopped early by `cancel`.
+    pub async fn speech_with(
+        &self,
+        input: SpeechInput,
+        cancel: &CancellationToken,
+    ) -> Result<MediaResult, MediaError> {
+        self.generate_with("speech", to_args(&input), input.provider_options, cancel)
             .await
     }
     pub async fn transcribe(&self, input: TranscribeInput) -> Result<MediaResult, MediaError> {
-        self.typed("transcribe", to_args(&input), input.provider_options)
-            .await
+        self.transcribe_with(input, &CancellationToken::new()).await
+    }
+    /// [`Media::transcribe`] stopped early by `cancel`.
+    pub async fn transcribe_with(
+        &self,
+        input: TranscribeInput,
+        cancel: &CancellationToken,
+    ) -> Result<MediaResult, MediaError> {
+        self.generate_with(
+            "transcribe",
+            to_args(&input),
+            input.provider_options,
+            cancel,
+        )
+        .await
     }
     pub async fn clone_voice(&self, input: CloneVoiceInput) -> Result<MediaResult, MediaError> {
-        self.typed("cloneVoice", to_args(&input), input.provider_options)
+        self.clone_voice_with(input, &CancellationToken::new())
             .await
+    }
+    /// [`Media::clone_voice`] stopped early by `cancel`.
+    pub async fn clone_voice_with(
+        &self,
+        input: CloneVoiceInput,
+        cancel: &CancellationToken,
+    ) -> Result<MediaResult, MediaError> {
+        self.generate_with(
+            "cloneVoice",
+            to_args(&input),
+            input.provider_options,
+            cancel,
+        )
+        .await
     }
     pub async fn talking(&self, input: TalkingInput) -> Result<MediaResult, MediaError> {
-        self.typed("talking", to_args(&input), input.provider_options)
-            .await
+        self.talking_with(input, &CancellationToken::new()).await
     }
-
-    async fn typed(
+    /// [`Media::talking`] stopped early by `cancel`.
+    pub async fn talking_with(
         &self,
-        verb: &str,
-        args: Map<String, Value>,
-        po: Option<Map<String, Value>>,
+        input: TalkingInput,
+        cancel: &CancellationToken,
     ) -> Result<MediaResult, MediaError> {
-        self.generate_with(verb, args, po, &CancellationToken::new())
+        self.generate_with("talking", to_args(&input), input.provider_options, cancel)
             .await
     }
 
@@ -655,6 +737,7 @@ impl Media {
                 "{verb}: argument {k:?} not supported by this style"
             ));
         }
+        check_style(style)?;
         let mut body = vs
             .defaults
             .clone()
@@ -676,9 +759,20 @@ impl Media {
         } else {
             &vs.start.method
         };
-        let start = self
-            .request(style, verb, method, &vs.start.path, Some(&body))
-            .await?;
+        let timeout_ms = match vs.poll.as_ref().and_then(|p| p.timeout_ms) {
+            Some(n) if n > 0 => n,
+            _ => 600_000,
+        };
+        let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+        let start = match self
+            .request(style, verb, method, &vs.start.path, Some(&body), deadline)
+            .await
+        {
+            Err(MediaError::Message(m)) if m == TIMED_OUT => {
+                return err(format!("{verb}: timed out after {timeout_ms}ms"));
+            }
+            other => other?,
+        };
 
         let (final_resp, status, job_id) = if vs.mode == "async" {
             let job_id = match get_path(&start, &vs.id_path) {
@@ -687,20 +781,35 @@ impl Media {
                 _ => return err(format!("{verb}: no job id at {}", vs.id_path)),
             };
             let poll = vs.poll.clone().unwrap_or_default();
-            let interval = Duration::from_millis(poll.interval_ms.unwrap_or(5000));
-            let timeout_ms = poll.timeout_ms.unwrap_or(600_000);
+            let interval = Duration::from_millis(match poll.interval_ms {
+                Some(n) if n > 0 => n,
+                _ => 5000,
+            });
             let method = if poll.method.is_empty() {
                 "GET"
             } else {
                 &poll.method
             };
-            let path = poll.path.replace("{id}", &job_id);
-            let began = Instant::now();
+            let path = poll.path.replace("{id}", &pct_encode(&job_id));
+            let timed_out = || err(format!("job {job_id} timed out after {timeout_ms}ms"));
             loop {
-                tokio::time::sleep(interval).await;
-                let r = self.request(style, verb, method, &path, None).await?;
+                tokio::time::sleep(
+                    interval.min(deadline.saturating_duration_since(Instant::now())),
+                )
+                .await;
+                if Instant::now() >= deadline {
+                    return timed_out();
+                }
+                let r = match self
+                    .request(style, verb, method, &path, None, deadline)
+                    .await
+                {
+                    Err(MediaError::Message(m)) if m == TIMED_OUT => return timed_out(),
+                    other => other?,
+                };
                 let st = match get_path(&r, &poll.status_path) {
                     Some(Value::String(s)) => s.clone(),
+                    Some(Value::Number(n)) => num_text(n),
                     _ => String::new(),
                 };
                 if let Some(cb) = &self.inner.on_progress {
@@ -727,8 +836,8 @@ impl Media {
                         err(format!("job {job_id} {st}: {msg}"))
                     };
                 }
-                if began.elapsed() >= Duration::from_millis(timeout_ms) {
-                    return err(format!("job {job_id} timed out after {timeout_ms}ms"));
+                if Instant::now() >= deadline {
+                    return timed_out();
                 }
             }
         } else {
@@ -780,30 +889,18 @@ impl Media {
         method: &str,
         path: &str,
         body: Option<&Value>,
+        deadline: Instant,
     ) -> Result<Value, MediaError> {
-        let url = format!("{}{}", style.base_url.trim_end_matches('/'), path);
-        let m = reqwest::Method::from_bytes(method.to_ascii_uppercase().as_bytes())
-            .map_err(|e| MediaError::Message(format!("{verb}: bad method {method:?}: {e}")))?;
-        let mut req = self.inner.http.request(m, &url);
-        if let Some(b) = body {
-            req = req
-                .header("Content-Type", "application/json")
-                .body(b.to_string());
-        }
-        for (k, v) in expand_env_headers(&style.headers) {
-            req = req.header(k, v);
-        }
-        let resp = req
-            .send()
-            .await
-            .map_err(|e| MediaError::Message(format!("{verb}: {e}")))?;
-        let status = resp.status().as_u16();
-        let text = resp
-            .text()
-            .await
-            .map_err(|e| MediaError::Message(format!("{verb}: {e}")))?;
+        let fut = self.send(style, verb, method, path, body);
+        let (status, text) =
+            match tokio::time::timeout(deadline.saturating_duration_since(Instant::now()), fut)
+                .await
+            {
+                Ok(r) => r?,
+                Err(_) => return err(TIMED_OUT),
+            };
         if !(200..300).contains(&status) {
-            return err(format!("HTTP {status}: {text}"));
+            return err(format!("HTTP {status}: {}", cap_body(&text)));
         }
         let Ok(v) = serde_json::from_str::<Value>(&text) else {
             return err(format!("{verb}: response is not JSON"));
@@ -828,6 +925,60 @@ impl Media {
             return err(format!("API error {code_s}: {msg}"));
         }
         Ok(v)
+    }
+
+    /// Send one request; style headers go only to the style's origin (§7G):
+    /// a cross-origin redirect is re-issued without them.
+    async fn send(
+        &self,
+        style: &MediaStyle,
+        verb: &str,
+        method: &str,
+        path: &str,
+        body: Option<&Value>,
+    ) -> Result<(u16, String), MediaError> {
+        let fail = |e: reqwest::Error| MediaError::Message(format!("{verb}: {e}"));
+        let mut url =
+            reqwest::Url::parse(&format!("{}{}", style.base_url.trim_end_matches('/'), path))
+                .map_err(|e| MediaError::Message(format!("{verb}: {e}")))?;
+        let origin = url.origin();
+        let mut m = reqwest::Method::from_bytes(method.to_ascii_uppercase().as_bytes())
+            .map_err(|e| MediaError::Message(format!("{verb}: bad method {method:?}: {e}")))?;
+        let mut body = body.map(Value::to_string);
+        for _ in 0..=MAX_REDIRECTS {
+            let mut req = self.inner.http.request(m.clone(), url.clone());
+            if let Some(b) = &body {
+                req = req
+                    .header("Content-Type", "application/json")
+                    .body(b.clone());
+            }
+            if url.origin() == origin {
+                for (k, v) in expand_env_headers(&style.headers) {
+                    req = req.header(k, v);
+                }
+            }
+            let resp = req.send().await.map_err(fail)?;
+            let status = resp.status();
+            let location = resp
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .and_then(|l| l.to_str().ok())
+                .and_then(|l| url.join(l).ok());
+            match location {
+                Some(next) if status.is_redirection() => {
+                    if !matches!(status.as_u16(), 307 | 308) {
+                        m = reqwest::Method::GET;
+                        body = None;
+                    }
+                    url = next;
+                }
+                _ => {
+                    let text = resp.text().await.map_err(fail)?;
+                    return Ok((status.as_u16(), text));
+                }
+            }
+        }
+        err(format!("{verb}: too many redirects"))
     }
 
     /// One `source: "media"` tool per verb the styles support, in `verbs.json` order.
@@ -913,6 +1064,30 @@ fn tool_result(verb: &str, r: MediaResult) -> ToolResult {
         })
         .collect();
     out
+}
+
+const TIMED_OUT: &str = "\u{0}media-timeout";
+const MAX_REDIRECTS: usize = 10;
+
+/// RFC 3986 unreserved kept; every other UTF-8 byte as `%XX`.
+fn pct_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~') {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
+/// The first 1000 code points of an echoed body, `…` appended when cut.
+fn cap_body(t: &str) -> String {
+    match t.char_indices().nth(1000) {
+        Some((i, _)) => format!("{}…", &t[..i]),
+        None => t.to_string(),
+    }
 }
 
 /// JSON equality with numbers compared by value (0 == 0.0).

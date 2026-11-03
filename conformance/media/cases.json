@@ -1,5 +1,5 @@
 {
-  "_doc": "Media engine conformance (SPEC §7G). A port's harness starts a fake HTTP server, replaces \"{server}\" in style.baseUrl with its URL, sets case.env, then serves script[] in order: entry 0 answers the start request, entries 1.. answer polls; once exhausted the LAST entry repeats. Every request is recorded. The harness calls generate(verb,args) and the tool face, and asserts: requests (method, path, body for start, header values in expectHeaders), progress statuses, and either result (MediaResult minus nothing) or error (exact message string). tool = the expected ToolResult (output, isError, parts, metadata). Poll timings in these styles are tiny so the suite runs in milliseconds.",
+  "_doc": "Media engine conformance (SPEC §7G). A port's harness starts a fake HTTP server, replaces \"{server}\" in style.baseUrl with its URL, sets case.env, then serves script[] in order: entry 0 answers the start request, entries 1.. answer polls; once exhausted the LAST entry repeats. Every request is recorded; path is recorded exactly as sent (percent-encoding NOT decoded). The harness calls generate(verb,args) and the tool face, and asserts: requests (method, path, body for start, header values in expectHeaders), progress statuses, and either result (MediaResult minus nothing) or error (exact message string). tool = the expected ToolResult (output, isError, parts, metadata). styleError:true marks a style that is invalid at load (SPEC §7G Empty dotPath): a port whose constructor/loader can fail may raise the same error message there instead of from generate; either way no request is made and there is no tool case. Poll timings in these styles are tiny so the suite runs in milliseconds.",
   "cases": [
     { "name": "sync_image_urls_mime_from_extension",
       "style": { "baseUrl": "{server}/api/", "verbs": { "image": {
@@ -225,6 +225,117 @@
       "expectRequests": [ { "method": "POST", "path": "/s", "body": { "prompt": "x" } } ],
       "error": "image: no job id at id",
       "tool": { "name": "generate_image", "isError": true, "output": "image: no job id at id" } },
+
+    { "name": "zero_interval_and_timeout_use_defaults",
+      "style": { "baseUrl": "{server}", "verbs": { "image": {
+        "mode": "async", "kind": "image", "start": { "path": "/s" }, "args": { "prompt": "prompt" }, "idPath": "id",
+        "poll": { "path": "/p/{id}", "statusPath": "st", "done": ["completed"], "failed": ["failed"], "intervalMs": 1, "timeoutMs": 0 },
+        "resultPath": "u" } } },
+      "verb": "image", "args": { "prompt": "x" },
+      "script": [ { "status": 200, "body": { "id": "jz" } }, { "status": 200, "body": { "st": "processing" } }, { "status": 200, "body": { "st": "completed", "u": "https://x/z.png" } } ],
+      "expectProgress": ["processing", "completed"],
+      "result": { "files": [ { "type": "image", "mimeType": "image/png", "url": "https://x/z.png" } ], "jobId": "jz", "status": "completed" },
+      "tool": { "name": "generate_image", "isError": false, "output": "image ready: https://x/z.png",
+        "parts": [ { "type": "image", "mimeType": "image/png", "url": "https://x/z.png" } ],
+        "metadata": { "source": "media", "verb": "image", "jobId": "jz", "status": "completed" } } },
+
+    { "name": "numeric_poll_status_done",
+      "style": { "baseUrl": "{server}", "verbs": { "image": {
+        "mode": "async", "kind": "image", "start": { "path": "/s" }, "args": { "prompt": "prompt" }, "idPath": "id",
+        "poll": { "path": "/p/{id}", "statusPath": "st", "done": ["2"], "failed": ["3"], "intervalMs": 1, "timeoutMs": 5000 },
+        "resultPath": "u" } } },
+      "verb": "image", "args": { "prompt": "x" },
+      "script": [ { "status": 200, "body": { "id": "jn" } }, { "status": 200, "body": { "st": 1 } }, { "status": 200, "body": { "st": 2.0, "u": "https://x/n.png" } } ],
+      "expectProgress": ["1", "2"],
+      "result": { "files": [ { "type": "image", "mimeType": "image/png", "url": "https://x/n.png" } ], "jobId": "jn", "status": "2" },
+      "tool": { "name": "generate_image", "isError": false, "output": "image ready: https://x/n.png",
+        "parts": [ { "type": "image", "mimeType": "image/png", "url": "https://x/n.png" } ],
+        "metadata": { "source": "media", "verb": "image", "jobId": "jn", "status": "2" } } },
+
+    { "name": "numeric_poll_status_failed_fraction",
+      "style": { "baseUrl": "{server}", "verbs": { "image": {
+        "mode": "async", "kind": "image", "start": { "path": "/s" }, "args": { "prompt": "prompt" }, "idPath": "id",
+        "poll": { "path": "/p/{id}", "statusPath": "st", "done": ["2"], "failed": ["-1.5"], "intervalMs": 1, "timeoutMs": 5000 },
+        "resultPath": "u" } } },
+      "verb": "image", "args": { "prompt": "x" },
+      "script": [ { "status": 200, "body": { "id": "jf" } }, { "status": 200, "body": { "st": -1.5 } } ],
+      "expectProgress": ["-1.5"],
+      "error": "job jf -1.5",
+      "tool": { "name": "generate_image", "isError": true, "output": "job jf -1.5" } },
+
+    { "name": "empty_result_path_is_whole_body",
+      "style": { "baseUrl": "{server}", "verbs": { "image": {
+        "mode": "sync", "kind": "image", "start": { "path": "/s" }, "args": { "prompt": "prompt" }, "resultPath": "" } } },
+      "verb": "image", "args": { "prompt": "x" },
+      "script": [ { "status": 200, "body": ["https://x/w1.png", "https://x/w2.png"] } ],
+      "result": { "files": [ { "type": "image", "mimeType": "image/png", "url": "https://x/w1.png" }, { "type": "image", "mimeType": "image/png", "url": "https://x/w2.png" } ], "status": "completed" },
+      "tool": { "name": "generate_image", "isError": false, "output": "image ready: https://x/w1.png\nhttps://x/w2.png",
+        "parts": [ { "type": "image", "mimeType": "image/png", "url": "https://x/w1.png" }, { "type": "image", "mimeType": "image/png", "url": "https://x/w2.png" } ],
+        "metadata": { "source": "media", "verb": "image", "status": "completed" } } },
+
+    { "name": "empty_arg_path_is_a_style_error",
+      "styleError": true,
+      "style": { "baseUrl": "{server}", "verbs": { "image": {
+        "mode": "sync", "kind": "image", "start": { "path": "/s" }, "args": { "prompt": "prompt", "seed": "" }, "resultPath": "u" } } },
+      "verb": "image", "args": { "prompt": "x" },
+      "script": [ { "status": 200, "body": { "u": "https://x/a.png" } } ],
+      "expectRequests": [],
+      "error": "style: empty path for argument \"seed\"" },
+
+    { "name": "job_id_percent_encoded_in_poll_path",
+      "style": { "baseUrl": "{server}", "verbs": { "image": {
+        "mode": "async", "kind": "image", "start": { "path": "/s" }, "args": { "prompt": "prompt" }, "idPath": "id",
+        "poll": { "path": "/p/{id}", "statusPath": "st", "done": ["completed"], "failed": ["failed"], "intervalMs": 1, "timeoutMs": 5000 },
+        "resultPath": "u" } } },
+      "verb": "image", "args": { "prompt": "x" },
+      "script": [ { "status": 200, "body": { "id": "a b/é~-._?#" } }, { "status": 200, "body": { "st": "completed", "u": "https://x/e.png" } } ],
+      "expectRequests": [ { "method": "POST", "path": "/s", "body": { "prompt": "x" } }, { "method": "GET", "path": "/p/a%20b%2F%C3%A9~-._%3F%23" } ],
+      "result": { "files": [ { "type": "image", "mimeType": "image/png", "url": "https://x/e.png" } ], "jobId": "a b/é~-._?#", "status": "completed" },
+      "tool": { "name": "generate_image", "isError": false, "output": "image ready: https://x/e.png",
+        "parts": [ { "type": "image", "mimeType": "image/png", "url": "https://x/e.png" } ],
+        "metadata": { "source": "media", "verb": "image", "jobId": "a b/é~-._?#", "status": "completed" } } },
+
+    { "name": "error_body_capped_at_1000_code_points",
+      "style": { "baseUrl": "{server}", "verbs": { "image": {
+        "mode": "sync", "kind": "image", "start": { "path": "/s" }, "args": { "prompt": "prompt" }, "resultPath": "u" } } },
+      "verb": "image", "args": { "prompt": "x" },
+      "script": [ { "status": 500, "rawBody": "ééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé" } ],
+      "error": "HTTP 500: éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé…",
+      "tool": { "name": "generate_image", "isError": true, "output": "HTTP 500: éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé…" } },
+
+    { "name": "error_body_exactly_1000_not_truncated",
+      "style": { "baseUrl": "{server}", "verbs": { "image": {
+        "mode": "sync", "kind": "image", "start": { "path": "/s" }, "args": { "prompt": "prompt" }, "resultPath": "u" } } },
+      "verb": "image", "args": { "prompt": "x" },
+      "script": [ { "status": 503, "rawBody": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé" } ],
+      "error": "HTTP 503: éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé",
+      "tool": { "name": "generate_image", "isError": true, "output": "HTTP 503: éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé" } },
+
+    { "name": "dotset_through_array_with_word_segment",
+      "style": { "baseUrl": "{server}", "verbs": { "image": {
+        "mode": "sync", "kind": "image", "start": { "path": "/s" },
+        "defaults": { "a": [1, 2], "b": [] },
+        "args": { "prompt": "a.x", "seed": "b.k.0" }, "resultPath": "u" } } },
+      "verb": "image", "args": { "prompt": "cat", "seed": 3 },
+      "script": [ { "status": 200, "body": { "u": "https://x/d.png" } } ],
+      "expectRequests": [ { "method": "POST", "path": "/s", "body": { "a": { "x": "cat" }, "b": { "k": [3] } } } ],
+      "result": { "files": [ { "type": "image", "mimeType": "image/png", "url": "https://x/d.png" } ], "status": "completed" },
+      "tool": { "name": "generate_image", "isError": false, "output": "image ready: https://x/d.png",
+        "parts": [ { "type": "image", "mimeType": "image/png", "url": "https://x/d.png" } ],
+        "metadata": { "source": "media", "verb": "image", "status": "completed" } } },
+
+    { "name": "dotset_numeric_segment_through_object",
+      "style": { "baseUrl": "{server}", "verbs": { "image": {
+        "mode": "sync", "kind": "image", "start": { "path": "/s" },
+        "defaults": { "references": { "lang": "en" } },
+        "args": { "prompt": "prompt", "seed": "references.0.speaker" }, "resultPath": "u" } } },
+      "verb": "image", "args": { "prompt": "cat", "seed": "bob" },
+      "script": [ { "status": 200, "body": { "u": "https://x/d.png" } } ],
+      "expectRequests": [ { "method": "POST", "path": "/s", "body": { "prompt": "cat", "references": { "lang": "en", "0": { "speaker": "bob" } } } } ],
+      "result": { "files": [ { "type": "image", "mimeType": "image/png", "url": "https://x/d.png" } ], "status": "completed" },
+      "tool": { "name": "generate_image", "isError": false, "output": "image ready: https://x/d.png",
+        "parts": [ { "type": "image", "mimeType": "image/png", "url": "https://x/d.png" } ],
+        "metadata": { "source": "media", "verb": "image", "status": "completed" } } },
 
     { "name": "unknown_verb",
       "style": { "baseUrl": "{server}", "verbs": { "image": {

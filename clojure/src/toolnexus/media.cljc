@@ -21,6 +21,7 @@
             [koine.env :as env]
             [koine.fs :as fs]
             [koine.http :as khttp]
+            [koine.text :as text]
             [koine.json :as json]
             [koine.time :as ktime]
             [toolnexus.tool :as tool]))
@@ -98,15 +99,18 @@
 (defn- segments [path] (str/split (str path) #"\."))
 
 (defn read-path
-  "§7G dotPath read: missing ⇒ nil. A segment of only digits indexes an array."
+  "§7G dotPath read: missing ⇒ nil. A segment of only digits indexes an array.
+  The empty path \"\" is the whole value."
   [v path]
-  (reduce (fn [cur seg]
+  (if (= "" (str path))
+    v
+    (reduce (fn [cur seg]
             (cond
               (and (sequential? cur) (digits? seg))
               (let [i (parse-index seg)] (if (< i (count cur)) (nth cur i) (reduced nil)))
               (map? cur) (if (contains? cur seg) (get cur seg) (reduced nil))
               :else (reduced nil)))
-          v (segments path)))
+          v (segments path))))
 
 (defn- pad-to [v i] (if (< i (count v)) v (into v (repeat (inc (- i (count v))) nil))))
 
@@ -116,7 +120,7 @@
     (let [seg  (first segs)
           more (rest segs)
           fresh (fn [] (if (and (seq more) (digits? (first more))) [] {}))]
-      (if (digits? seg)
+      (if (and (digits? seg) (not (map? cur)))
         (let [i   (parse-index seg)
               v   (pad-to (if (sequential? cur) (vec cur) []) i)
               old (nth v i)]
@@ -127,7 +131,9 @@
 
 (defn write-path
   "§7G dotPath write: creates objects, and arrays when the next segment is
-  numeric (padding with nil)."
+  numeric (padding with nil). A scalar — or an array met by a non-numeric
+  segment — on the path is replaced; an object met by a numeric segment is
+  kept and the segment is written as a string key."
   [v path value]
   (write-segs v (segments path) value))
 
@@ -192,9 +198,15 @@
                   (default koine.env/get-env)."
   ([styles] (create-media styles {}))
   ([styles opts]
-   (let [ss (if (map? styles) [styles] (vec styles))]
+   (let [ss (mapv stringify-keys (if (map? styles) [styles] (vec styles)))]
+     (doseq [s ss
+             v (vals (get s "verbs"))
+             [k p] (sort-by first tool/compare-strings (get v "args"))]
+       (when (= "" (str p))
+         (throw (ex-info (str "style: empty path for argument \"" k "\"")
+                         {:toolnexus/error :media}))))
      {::media true
-      :styles (mapv stringify-keys ss)
+      :styles ss
       :on-progress (:on-progress opts)
       :http-client (:http-client opts)
       :env (:env opts)})))
@@ -235,20 +247,118 @@
     (throw (ex-info (str "cancelled" (when (string? r) (str ": " r)))
                     {:toolnexus/error :cancelled :reason r}))))
 
-(defn- send! [media style verb method path body]
+(def ^:private max-body-code-points 1000)
+
+(defn- cap-body
+  "The first 1000 code points of `s`, plus `…` when cut. Walks UTF-16 units on
+  the JVM (a surrogate pair is one code point) and runes on cljgo."
+  [s]
+  (let [n (count s)]
+    (loop [i 0 cps 0]
+      (cond
+        (>= i n) s
+        (= cps max-body-code-points) (str (subs s 0 i) "\u2026")
+        :else (let [c (int (nth s i))
+                    w (if (and (>= c 0xD800) (<= c 0xDBFF) (< (inc i) n)) 2 1)]
+                (recur (+ i w) (inc cps)))))))
+
+(defn- utf8-bytes [cp]
+  (cond
+    (< cp 0x80)    [cp]
+    (< cp 0x800)   [(bit-or 0xC0 (bit-shift-right cp 6)) (bit-or 0x80 (bit-and cp 0x3F))]
+    (< cp 0x10000) [(bit-or 0xE0 (bit-shift-right cp 12))
+                    (bit-or 0x80 (bit-and (bit-shift-right cp 6) 0x3F))
+                    (bit-or 0x80 (bit-and cp 0x3F))]
+    :else          [(bit-or 0xF0 (bit-shift-right cp 18))
+                    (bit-or 0x80 (bit-and (bit-shift-right cp 12) 0x3F))
+                    (bit-or 0x80 (bit-and (bit-shift-right cp 6) 0x3F))
+                    (bit-or 0x80 (bit-and cp 0x3F))]))
+
+(def ^:private hex "0123456789ABCDEF")
+
+(defn- unreserved? [b]
+  (or (and (>= b 65) (<= b 90)) (and (>= b 97) (<= b 122)) (and (>= b 48) (<= b 57))
+      (= b 45) (= b 46) (= b 95) (= b 126)))
+
+(defn percent-encode
+  "RFC 3986: keep A-Z a-z 0-9 - . _ ~, every other UTF-8 byte as %XX."
+  [s]
+  (apply str
+         (for [cp (text/code-points (str s))
+               b  (utf8-bytes (long cp))]
+           (if (unreserved? b)
+             (str (char b))
+             (str "%" (nth hex (bit-shift-right b 4)) (nth hex (bit-and b 15)))))))
+
+(defn- origin
+  "scheme://host:port (lower-cased, default port filled in) of an absolute URL."
+  [url]
+  (let [u   (str url)
+        sch (str/index-of u "://")]
+    (when sch
+      (let [scheme (str/lower-case (subs u 0 sch))
+            auth   (cut-at (subs u (+ sch 3)) #{\/ \? \#})
+            auth   (let [at (tool/last-index-of-char auth \@)] (if at (subs auth (inc at)) auth))
+            colon  (tool/last-index-of-char auth \:)
+            [h p]  (if (and colon (not (str/ends-with? auth "]")))
+                     [(subs auth 0 colon) (subs auth (inc colon))]
+                     [auth (if (= "https" scheme) "443" "80")])]
+        (str scheme "://" (str/lower-case h) ":" p)))))
+
+(defn- resolve-location [base loc]
+  (cond
+    (str/index-of loc "://") loc
+    (str/starts-with? loc "//") (str (subs base 0 (str/index-of base "//")) loc)
+    :else
+    (let [sch  (str/index-of base "://")
+          rest* (subs base (+ sch 3))
+          slash (first (keep-indexed (fn [i c] (when (contains? #{\/ \? \#} c) i)) rest*))
+          root  (if slash (subs base 0 (+ sch 3 slash)) base)]
+      (if (str/starts-with? loc "/")
+        (str root loc)
+        (let [path (if slash (cut-at (subs rest* slash) #{\? \#}) "/")
+              dir  (subs path 0 (inc (or (tool/last-index-of-char path \/) 0)))]
+          (str root dir loc))))))
+
+(def ^:private max-redirects 10)
+
+(defn- timed-out! [verb job-id timeout]
+  (fail! (if job-id
+           (str "job " job-id " timed out after " (render-number timeout) "ms")
+           (str verb ": timed out after " (render-number timeout) "ms"))))
+
+(defn- send!
+  "One logical request: follows redirects itself (style headers never leave the
+  baseUrl origin), bounded by `deadline` (a ktime/mono-ms instant)."
+  [media style verb method path body {:keys [deadline timeout job-id]}]
   (let [lookup  (or (:env media) env/get-env)
-        headers (reduce (fn [acc e] (assoc acc (key e) (expand-env (val e) lookup)))
+        sheads  (reduce (fn [acc e] (assoc acc (key e) (expand-env (val e) lookup)))
                         {} (get style "headers"))
-        headers (cond-> headers body (assoc "Content-Type" "application/json"))
-        req     (cond-> {:method (keyword (str/lower-case method))
-                         :url (str (trim-slash (get style "baseUrl")) path)
-                         :headers headers}
-                  body (assoc :body (json/write-str body)))
-        res     (if-let [f (:http-client media)] (f req) (khttp/request req))]
+        url0    (str (trim-slash (get style "baseUrl")) path)
+        home    (origin url0)
+        call    (or (:http-client media) khttp/request)
+        res     (loop [method (keyword (str/lower-case method)) url url0 body body hops 0]
+                  (let [remaining (- deadline (ktime/mono-ms))
+                        _   (when (<= remaining 0) (timed-out! verb job-id timeout))
+                        hs  (if (= home (origin url)) sheads {})
+                        hs  (cond-> hs body (assoc "Content-Type" "application/json"))
+                        req (cond-> {:method method :url url :headers hs :timeout-ms remaining}
+                              body (assoc :body (json/write-str body)))
+                        res (call req)
+                        st  (:status res)
+                        loc (khttp/header res "location")]
+                    (cond
+                      (= :timeout (:error res)) (timed-out! verb job-id timeout)
+                      (and st (contains? #{301 302 303 307 308} (long st)) (string? loc)
+                           (< hops max-redirects))
+                      (let [keep? (or (contains? #{307 308} (long st)) (= :get method) (= :head method))]
+                        (recur (if keep? method :get) (resolve-location url loc)
+                               (when keep? body) (inc hops)))
+                      :else res)))]
     (when (khttp/failed? res)
       (fail! (str verb ": HTTP transport failure: " (kname (:error res)))))
     (let [st (long (:status res)) raw (str (:body res))]
-      (when (or (< st 200) (> st 299)) (fail! (str "HTTP " st ": " raw)))
+      (when (or (< st 200) (> st 299)) (fail! (str "HTTP " st ": " (cap-body raw))))
       (let [parsed (try (json/read-str raw {:key-fn str}) (catch Throwable _ ::bad))]
         (when (= ::bad parsed) (fail! (str verb ": response is not JSON")))
         (when-let [env* (get style "errorEnvelope")]
@@ -262,18 +372,26 @@
                             ": " (if (string? m) m "")))))))
         parsed))))
 
-(defn- poll! [media style verb v job-id cancel]
+(defn- positive-or [x dflt] (if (and (number? x) (pos? x)) x dflt))
+
+(defn- render-status [s]
+  (cond (string? s) s
+        (number? s) (render-number s)
+        :else ""))
+
+(defn- poll! [media style verb v job-id cancel t0]
   (let [p        (get v "poll")
-        interval (or (get p "intervalMs") 5000)
-        timeout  (or (get p "timeoutMs") 600000)
-        path     (str/replace (str (get p "path")) "{id}" job-id)
-        t0       (ktime/mono-ms)]
+        interval (positive-or (get p "intervalMs") 5000)
+        timeout  (positive-or (get p "timeoutMs") 600000)
+        deadline (+ t0 timeout)
+        path     (str/replace (str (get p "path")) "{id}" (percent-encode job-id))
+        opts     {:deadline deadline :timeout timeout :job-id job-id}]
     (loop []
       (check-cancel! cancel)
       (ktime/sleep! interval)
       (check-cancel! cancel)
-      (let [resp   (send! media style verb (or (get p "method") "GET") path nil)
-            status (let [s (read-path resp (get p "statusPath"))] (if (string? s) s ""))]
+      (let [resp   (send! media style verb (or (get p "method") "GET") path nil opts)
+            status (render-status (read-path resp (get p "statusPath")))]
         (when-let [f (:on-progress media)] (f {:verb verb :jobId job-id :status status}))
         (cond
           (some #{status} (get p "done")) [resp status]
@@ -282,8 +400,7 @@
             (fail! (if (and (string? m) (seq m))
                      (str "job " job-id " " status ": " m)
                      (str "job " job-id " " status))))
-          (>= (ktime/elapsed-ms t0) timeout)
-          (fail! (str "job " job-id " timed out after " (render-number timeout) "ms"))
+          (>= (ktime/mono-ms) deadline) (timed-out! verb job-id timeout)
           :else (recur))))))
 
 (defn- extract [verb v resp]
@@ -327,14 +444,17 @@
                        body provider-options)
          start (get v "start")
          _     (check-cancel! cancel)
-         resp  (send! media style verb (or (get start "method") "POST") (get start "path") body)]
+         t0      (ktime/mono-ms)
+         timeout (positive-or (get-in v ["poll" "timeoutMs"]) 600000)
+         resp  (send! media style verb (or (get start "method") "POST") (get start "path") body
+                      {:deadline (+ t0 timeout) :timeout timeout})]
      (if (= "async" (get v "mode"))
        (let [id-path (get v "idPath")
              raw     (read-path resp id-path)
              job-id  (cond (and (string? raw) (not= "" raw)) raw
                            (integral? raw) (render-number raw)
                            :else (fail! (str verb ": no job id at " id-path)))
-             [final status] (poll! media style verb v job-id cancel)]
+             [final status] (poll! media style verb v job-id cancel t0)]
          (assoc (extract verb v final) :jobId job-id :status status))
        (assoc (extract verb v resp) :status "completed")))))
 

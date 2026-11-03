@@ -654,8 +654,156 @@ defmodule Toolnexus.MediaTest do
 
   # Media tools are concurrency-safe (SPEC §7G, §8 Tool scheduling): each call is an independent remote job.
   test "all six media tools are concurrency-safe" do
-    tools = Media.tools(Media.new(Jason.decode!(~S({"baseUrl":"http://unused","verbs":{"image":{"mode":"sync","kind":"image","start":{"path":"/i"},"args":{"prompt":"p"},"resultPath":"u"},"video":{"mode":"sync","kind":"video","start":{"path":"/v"},"args":{"prompt":"p"},"resultPath":"u"},"speech":{"mode":"sync","kind":"audio","start":{"path":"/s"},"args":{"text":"t"},"resultPath":"u"},"transcribe":{"mode":"sync","kind":"text","start":{"path":"/r"},"args":{"audio":"a"},"resultPath":"u"},"cloneVoice":{"mode":"sync","kind":"text","start":{"path":"/c"},"args":{"name":"n"},"resultPath":"id"},"talking":{"mode":"sync","kind":"video","start":{"path":"/t"},"args":{"image":"i"},"resultPath":"u"}}}))))
+    tools =
+      Media.tools(
+        Media.new(
+          Jason.decode!(
+            ~S({"baseUrl":"http://unused","verbs":{"image":{"mode":"sync","kind":"image","start":{"path":"/i"},"args":{"prompt":"p"},"resultPath":"u"},"video":{"mode":"sync","kind":"video","start":{"path":"/v"},"args":{"prompt":"p"},"resultPath":"u"},"speech":{"mode":"sync","kind":"audio","start":{"path":"/s"},"args":{"text":"t"},"resultPath":"u"},"transcribe":{"mode":"sync","kind":"text","start":{"path":"/r"},"args":{"audio":"a"},"resultPath":"u"},"cloneVoice":{"mode":"sync","kind":"text","start":{"path":"/c"},"args":{"name":"n"},"resultPath":"id"},"talking":{"mode":"sync","kind":"video","start":{"path":"/t"},"args":{"image":"i"},"resultPath":"u"}}})
+          )
+        )
+      )
+
     assert length(tools) == 6
     for t <- tools, do: assert(Toolnexus.ToolScheduling.concurrency_safe?(t, %{}), t.name)
+  end
+
+  defmodule PlugFn do
+    @moduledoc false
+    @behaviour Plug
+    def init(f), do: f
+    def call(conn, f), do: f.(conn)
+  end
+
+  defp serve_fn(f) do
+    {:ok, server} =
+      Bandit.start_link(
+        plug: {PlugFn, f},
+        scheme: :http,
+        port: 0,
+        ip: {127, 0, 0, 1},
+        startup_log: false
+      )
+
+    {:ok, {_ip, port}} = ThousandIsland.listener_info(server)
+    {server, "http://127.0.0.1:#{port}"}
+  end
+
+  defp sync_style(url, extra \\ %{}) do
+    %{
+      "baseUrl" => url,
+      "headers" => %{"Authorization" => "Bearer FAKE", "X-Style" => "s"},
+      "verbs" => %{
+        "image" =>
+          Map.merge(
+            %{
+              "mode" => "sync",
+              "kind" => "image",
+              "start" => %{"path" => "/i"},
+              "args" => %{"prompt" => "p"},
+              "resultPath" => "u"
+            },
+            extra
+          )
+      }
+    }
+  end
+
+  test "§7G Redirects: a cross-origin redirect never reaches the other origin with style headers" do
+    me = self()
+
+    {b, b_url} =
+      serve_fn(fn conn ->
+        send(me, {:b_saw, Map.new(conn.req_headers)})
+        Plug.Conn.send_resp(conn, 200, ~s({"u":"https://x/r.png"}))
+      end)
+
+    {a, a_url} =
+      serve_fn(fn conn ->
+        conn
+        |> Plug.Conn.put_resp_header("location", b_url <> "/landed")
+        |> Plug.Conn.send_resp(302, "moved")
+      end)
+
+    assert {:error, "HTTP 302: moved"} =
+             Media.image(Media.new(sync_style(a_url), http_options: [redirect: true]),
+               prompt: "x"
+             )
+
+    refute_received {:b_saw, _}
+    ThousandIsland.stop(a, 500)
+    ThousandIsland.stop(b, 500)
+  end
+
+  test "§7G Per-request timeout: a hung server is bounded by the job deadline" do
+    {srv, url} =
+      serve_fn(fn conn ->
+        if conn.request_path == "/a" do
+          Plug.Conn.send_resp(conn, 200, ~s({"id":"h1"}))
+        else
+          Process.sleep(3_000)
+          Plug.Conn.send_resp(conn, 200, "{}")
+        end
+      end)
+
+    t0 = System.monotonic_time(:millisecond)
+
+    assert {:error, "image: timed out after 200ms"} =
+             Media.image(Media.new(sync_style(url, %{"poll" => %{"timeoutMs" => 200}})),
+               prompt: "x"
+             )
+
+    assert System.monotonic_time(:millisecond) - t0 < 2_000
+
+    async =
+      sync_style(url, %{
+        "mode" => "async",
+        "start" => %{"path" => "/a"},
+        "idPath" => "id",
+        "poll" => %{
+          "path" => "/p/{id}",
+          "statusPath" => "st",
+          "done" => ["ok"],
+          "intervalMs" => 1,
+          "timeoutMs" => 200
+        }
+      })
+
+    assert {:error, "job h1 timed out after 200ms"} = Media.image(Media.new(async), prompt: "x")
+  end
+
+  test "§7G: an injected transport sees the remaining deadline and its timeout maps to the message" do
+    me = self()
+
+    transport = fn req ->
+      send(me, {:rt, req.receive_timeout})
+      {:error, %{reason: :timeout}}
+    end
+
+    style = sync_style("http://unused", %{"poll" => %{"timeoutMs" => 50}})
+
+    assert {:error, "image: timed out after 50ms"} =
+             Media.image(Media.new(style, transport: transport), prompt: "x")
+
+    assert_received {:rt, rt} when is_integer(rt) and rt <= 50
+
+    assert {:error, "image: \"boom\""} =
+             Media.image(Media.new(style, transport: fn _ -> {:error, "boom"} end), prompt: "x")
+  end
+
+  test "§7G: load_style rejects an args entry mapped to the empty path" do
+    path =
+      Path.join(System.tmp_dir!(), "tn-media-empty-#{System.unique_integer([:positive])}.json")
+
+    File.write!(
+      path,
+      Jason.encode!(sync_style("http://x") |> put_in(["verbs", "image", "args", "seed"], ""))
+    )
+
+    assert Media.load_style(path) == {:error, ~s(style: empty path for argument "seed")}
+    File.rm(path)
+  end
+
+  test "§7G: dotPath write through an array with a word segment replaces the array" do
+    assert Media.put_path(%{"a" => []}, "a.x.y", 1) == %{"a" => %{"x" => %{"y" => 1}}}
   end
 end

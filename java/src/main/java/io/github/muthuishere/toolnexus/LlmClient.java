@@ -937,7 +937,12 @@ public final class LlmClient {
     }
 
     /** §8 {@code RunResult.files} entry: one non-text part a tool call produced this run. */
-    public record RunFile(String type, String mimeType, String url, String data, String from, String callId) {}
+    public record RunFile(String type, String mimeType, String url, String data, String from, String callId,
+                          String name) {
+        public RunFile(String type, String mimeType, String url, String data, String from, String callId) {
+            this(type, mimeType, url, data, from, callId, null);
+        }
+    }
 
     /** Token usage, summed across every LLM round trip in the run. */
     public static final class Usage {
@@ -1020,7 +1025,7 @@ public final class LlmClient {
                 if (c.parts == null) continue;
                 for (ContentPart p : c.parts) {
                     if (ContentPart.TEXT.equals(p.type())) continue;
-                    fs.add(new RunFile(p.type(), p.mimeType(), p.url(), p.data(), c.name, c.callId));
+                    fs.add(new RunFile(p.type(), p.mimeType(), p.url(), p.data(), c.name, c.callId, p.name()));
                 }
             }
             this.files = List.copyOf(fs);

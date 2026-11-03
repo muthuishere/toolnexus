@@ -131,6 +131,13 @@ public class MediaTests
         {
             using var server = new FakeServer((List<object?>)c["script"]!);
             var progress = new List<string>();
+            if (c.Get("styleError") is true)
+            {
+                var se = Assert.Throws<MediaException>(() => Build(c, server, progress));
+                Assert.Equal((string)c["error"]!, se.Message);
+                Assert.Empty(server.Requests);
+                return;
+            }
             var media = Build(c, server, progress);
             var args = (Dictionary<string, object?>)c["args"]!;
             if (c.ContainsKey("error"))
@@ -357,5 +364,76 @@ public class MediaTests
         var tools = media.Tools();
         Assert.Equal(6, tools.Count);
         foreach (var t in tools) Assert.True(ToolScheduler.IsConcurrencySafe(t, new Dictionary<string, object?>()), t.Name);
+    }
+
+    // ---------------------------------------------------------------- round-2 edge rules
+
+    private static MediaStyle SyncStyle(string baseUrl, object? headers = null, long? timeoutMs = null)
+    {
+        var verb = new Dictionary<string, object?>
+        {
+            ["mode"] = "sync", ["kind"] = "image", ["start"] = new Dictionary<string, object?> { ["path"] = "/gen" },
+            ["args"] = new Dictionary<string, object?> { ["prompt"] = "prompt" }, ["resultPath"] = "url",
+        };
+        if (timeoutMs != null) verb["poll"] = new Dictionary<string, object?> { ["timeoutMs"] = timeoutMs };
+        var style = new Dictionary<string, object?> { ["baseUrl"] = baseUrl, ["verbs"] = new Dictionary<string, object?> { ["image"] = verb } };
+        if (headers != null) style["headers"] = headers;
+        return MediaStyle.FromDictionary(style);
+    }
+
+    [Fact]
+    public async Task CrossOriginRedirect_DropsStyleHeaders()
+    {
+        var seenB = new List<Dictionary<string, string>>();
+        using var b = new StubServer(ctx =>
+        {
+            var h = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var k in ctx.Request.Headers.AllKeys) if (k != null) h[k] = ctx.Request.Headers[k] ?? "";
+            lock (seenB) seenB.Add(h);
+            StubServer.Respond(ctx, 200, "{\"url\":\"https://x/a.png\"}");
+        });
+        var seenA = new List<string?>();
+        using var a = new StubServer(ctx =>
+        {
+            lock (seenA) seenA.Add(ctx.Request.Headers["Authorization"]);
+            ctx.Response.StatusCode = 307;
+            ctx.Response.Headers["Location"] = b.BaseUrl + "/elsewhere";
+            ctx.Response.Close();
+        });
+        var media = Media.Create(SyncStyle(a.BaseUrl, new Dictionary<string, object?>
+            { ["Authorization"] = "Bearer YOUR_KEY_HERE", ["X-Style"] = "s" }));
+        var r = await media.GenerateAsync("image", new Dictionary<string, object?> { ["prompt"] = "cat" });
+        Assert.Equal("https://x/a.png", r.Files[0].Url);
+        Assert.Equal("Bearer YOUR_KEY_HERE", Assert.Single(seenA));
+        var hb = Assert.Single(seenB);
+        Assert.False(hb.ContainsKey("Authorization"));
+        Assert.False(hb.ContainsKey("X-Style"));
+    }
+
+    [Fact]
+    public async Task HungServer_BoundedByRemainingDeadline()
+    {
+        using var release = new ManualResetEventSlim();
+        using var hung = new StubServer(ctx => { release.Wait(TimeSpan.FromSeconds(10)); try { StubServer.Respond(ctx, 200, "{}"); } catch { } });
+        var media = Media.Create(SyncStyle(hung.BaseUrl, timeoutMs: 300));
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        var ex = await Assert.ThrowsAsync<MediaException>(() => media.GenerateAsync("image", new Dictionary<string, object?> { ["prompt"] = "cat" }));
+        sw.Stop();
+        release.Set();
+        Assert.Equal("image: timed out after 300ms", ex.Message);
+        Assert.True(sw.ElapsedMilliseconds < 5000, $"took {sw.ElapsedMilliseconds}ms");
+    }
+
+    [Fact]
+    public void EdgeHelpers()
+    {
+        Assert.Equal("a%2Fb%20c%C3%A9-._~", Media.PercentEncode("a/b cé-._~"));
+        Assert.Equal(new string('x', 1000) + "\u2026", Media.CapBody(new string('x', 1001)));
+        Assert.Equal(new string('x', 1000), Media.CapBody(new string('x', 1000)));
+        var root = new Dictionary<string, object?> { ["a"] = new List<object?> { 1L } };
+        Media.WritePath(root, "a.b", 2L);
+        Assert.Equal("{\"a\":{\"b\":2}}", Json.Stringify(root));
+        var ex = Assert.Throws<MediaException>(() => MediaStyle.Parse("{\"verbs\":{\"image\":{\"args\":{\"prompt\":\"\"}}}}"));
+        Assert.Equal("style: empty path for argument \"prompt\"", ex.Message);
     }
 }

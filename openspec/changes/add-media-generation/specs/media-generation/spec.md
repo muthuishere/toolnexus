@@ -57,3 +57,28 @@ Every tool returned by `media.tools()` SHALL be concurrency-safe for every argum
 #### Scenario: Two media calls in one response
 - **WHEN** a model response calls `generate_image` twice
 - **THEN** both calls run in the same concurrent batch, and results keep the emitted order
+
+### Requirement: Media requests are bounded and safe
+The media engine SHALL never send style headers to an origin (scheme, host, port) other than the origin of the request built from `baseUrl`; on a cross-origin redirect it SHALL re-issue the request without style headers, or SHALL not follow redirects and report the 3xx as `HTTP <status>: <body>`. Every HTTP request (start and each poll) SHALL be bounded by the time remaining until the job deadline (`timeoutMs` from the start; sync verbs use `poll.timeoutMs` when given, else 600000), failing with `job <id> timed out after <ms>ms`, or `<verb>: timed out after <ms>ms` when no job id exists yet. No port SHALL offer a separate create-time timeout option.
+
+#### Scenario: Cross-origin redirect drops style headers
+- **WHEN** server A answers the start request with a redirect to server B on a different port and the style sets `Authorization`
+- **THEN** server B never receives `Authorization` or any other style header
+
+#### Scenario: A hung server is bounded by the deadline
+- **WHEN** a sync verb's server accepts the request and never answers, with a deadline of 200 ms
+- **THEN** the call fails with `<verb>: timed out after 200ms` shortly after 200 ms instead of hanging
+
+### Requirement: Style edge rules are pinned
+The engine SHALL treat `intervalMs`/`timeoutMs` that are absent or `<= 0` as 5000/600000; SHALL render a numeric poll status like the envelope code (integral ⇒ integer text, else shortest round-trip) for progress, errors and matching against `done`/`failed`; SHALL read an empty dotPath as the whole value; SHALL reject an `args` entry mapped to `""` with `style: empty path for argument "<key>"`; SHALL percent-encode the job id in the poll path per RFC 3986 unreserved characters; SHALL cap an echoed error body at 1000 code points followed by `…` when truncated; and SHALL replace an array with an object when a dotPath writes through it with a non-numeric segment.
+
+#### Scenario: Edge cases replay
+- **WHEN** the cases `zero_interval_and_timeout_use_defaults`, `numeric_poll_status_done`, `numeric_poll_status_failed_fraction`, `empty_result_path_is_whole_body`, `empty_arg_path_is_a_style_error`, `job_id_percent_encoded_in_poll_path`, `error_body_capped_at_1000_code_points`, `error_body_exactly_1000_not_truncated` and `dotset_through_array_with_word_segment` are replayed
+- **THEN** each produces exactly its expected requests, progress, result or error
+
+### Requirement: Run files carry part names
+Every entry of `RunResult.files` SHALL carry the part's `name` when the producing part had one, and SHALL collect non-text parts from every tool source (media, MCP, built-in file reads), not only media tools.
+
+#### Scenario: Named MCP resource
+- **WHEN** an MCP tool returns a `resource_link` with a name during a run
+- **THEN** that run's `files` holds a `file` entry with that `name`, `from` and `callId`

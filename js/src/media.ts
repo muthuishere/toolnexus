@@ -226,7 +226,19 @@ export const MEDIA_VERBS: MediaVerbSpec[] = [
 
 /** Read one style file (JSON). */
 export function loadMediaStyle(path: string): MediaStyle {
-  return JSON.parse(readFileSync(path, "utf8")) as MediaStyle
+  const style = JSON.parse(readFileSync(path, "utf8")) as MediaStyle
+  validateStyle(style)
+  return style
+}
+
+/** §7G Empty dotPath: an args entry mapped to "" is a style error (sorted, so deterministic). */
+function validateStyle(style: MediaStyle): void {
+  for (const verb of Object.keys(style.verbs ?? {}).sort()) {
+    const args = (style.verbs as Record<string, MediaVerbStyle>)[verb]?.args ?? {}
+    for (const key of Object.keys(args).sort()) {
+      if (args[key] === "") throw new Error(`style: empty path for argument "${key}"`)
+    }
+  }
 }
 
 // ---- dotPath ---------------------------------------------------------------------------------
@@ -234,6 +246,7 @@ export function loadMediaStyle(path: string): MediaStyle {
 const isIndex = (seg: string) => /^[0-9]+$/.test(seg)
 
 function readPath(obj: unknown, path: string): unknown {
+  if (path === "") return obj // §7G: empty dotPath is the whole value
   let cur: any = obj
   for (const seg of path.split(".")) {
     if (cur === null || cur === undefined || typeof cur !== "object") return undefined
@@ -260,7 +273,8 @@ function writePath(obj: Record<string, unknown>, path: string, value: unknown): 
       return
     }
     let next = cur[key]
-    if (next === null || next === undefined || typeof next !== "object") {
+    // A scalar — or an array followed by a non-numeric segment — is replaced (§7G).
+    if (next === null || next === undefined || typeof next !== "object" || (Array.isArray(next) && !isIndex(segs[i + 1]))) {
       next = isIndex(segs[i + 1]) ? [] : {}
       cur[key] = next
     }
@@ -313,6 +327,29 @@ function renderScalar(v: unknown): string {
   return JSON.stringify(v)
 }
 
+/** Poll status text (§7G): string as-is, numbers like the envelope code, anything else "". */
+function statusText(v: unknown): string {
+  if (typeof v === "string") return v
+  if (typeof v === "number" && Number.isFinite(v)) return String(v)
+  return ""
+}
+
+/** RFC 3986: keep unreserved A-Z a-z 0-9 - . _ ~, %XX (uppercase) every other UTF-8 byte. */
+function percentEncode(s: string): string {
+  return encodeURIComponent(s).replace(/[!'()*]/g, (c) => "%" + c.charCodeAt(0).toString(16).toUpperCase())
+}
+
+/** Echoed error bodies keep their first 1000 code points, then "…" (§7G). */
+function capBody(text: string): string {
+  const cps = Array.from(text)
+  return cps.length <= 1000 ? text : cps.slice(0, 1000).join("") + "\u2026"
+}
+
+/** §7G: an interval/timeout that is absent, not a number or <= 0 takes the default. */
+const positive = (v: unknown, dflt: number): number => (typeof v === "number" && v > 0 ? v : dflt)
+
+const originOf = (u: string): string => new URL(u).origin
+
 function abortError(signal: AbortSignal): unknown {
   return signal.reason ?? Object.assign(new Error("The operation was aborted"), { name: "AbortError" })
 }
@@ -346,6 +383,7 @@ export class Media {
   private readonly styles: MediaStyle[]
   constructor(styles: MediaStyle | MediaStyle[], private readonly opts: MediaOptions = {}) {
     this.styles = Array.isArray(styles) ? styles : [styles]
+    for (const s of this.styles) validateStyle(s)
   }
 
   private resolve(verb: string): { style: MediaStyle; spec: MediaVerbStyle } | undefined {
@@ -379,18 +417,50 @@ export class Media {
       return h
     }
     const doFetch = this.opts.fetch ?? fetch
+    // Every request is bounded by the time left until the job deadline (§7G Per-request timeout).
+    const timeout = positive(spec.poll?.timeoutMs, 600000)
+    const deadline = Date.now() + timeout
+    let jobId: string | undefined
+    const timedOut = () => new Error(jobId !== undefined ? `job ${jobId} timed out after ${timeout}ms` : `${verb}: timed out after ${timeout}ms`)
+    // Redirects are followed by hand so style headers never reach another origin (§7G Redirects).
+    const send = async (url: string, method: string, json: unknown, reqSignal: AbortSignal): Promise<Response> => {
+      const origin = originOf(url)
+      let body = json !== undefined ? JSON.stringify(json) : undefined
+      for (let hops = 0; ; hops++) {
+        const sameOrigin = originOf(url) === origin
+        const headers: Record<string, string> = { ...(body !== undefined ? { "Content-Type": "application/json" } : {}), ...(sameOrigin ? styleHeaders() : {}) }
+        const res = await doFetch(url, { method, headers, body, signal: reqSignal, redirect: "manual" })
+        const loc = res.headers?.get?.("location")
+        if (res.status < 300 || res.status > 399 || !loc || hops >= 20) return res
+        await res.body?.cancel().catch(() => {})
+        url = new URL(loc, url).toString()
+        if (res.status === 303 || ((res.status === 301 || res.status === 302) && method === "POST")) {
+          method = "GET"
+          body = undefined
+        }
+      }
+    }
     const call = async (method: string, path: string, json?: unknown): Promise<unknown> => {
       if (signal?.aborted) throw abortError(signal)
-      const headers: Record<string, string> = json !== undefined ? { "Content-Type": "application/json", ...styleHeaders() } : styleHeaders()
+      const remaining = deadline - Date.now()
+      if (remaining <= 0) throw timedOut()
+      const ctl = new AbortController()
+      const timer = setTimeout(() => ctl.abort(), remaining)
+      const forward = () => ctl.abort()
+      signal?.addEventListener("abort", forward, { once: true })
       let res: Response, text: string
       try {
-        res = await doFetch(base + path, { method, headers, body: json !== undefined ? JSON.stringify(json) : undefined, signal })
+        res = await send(base + path, method, json, ctl.signal)
         text = await res.text()
       } catch (e) {
         if (signal?.aborted) throw abortError(signal)
+        if (ctl.signal.aborted) throw timedOut()
         throw new Error(`${verb}: ${e instanceof Error ? e.message : String(e)}`)
+      } finally {
+        clearTimeout(timer)
+        signal?.removeEventListener("abort", forward)
       }
-      if (res.status < 200 || res.status > 299) throw new Error(`HTTP ${res.status}: ${text}`)
+      if (res.status < 200 || res.status > 299) throw new Error(`HTTP ${res.status}: ${capBody(text)}`)
       let data: unknown
       try {
         data = JSON.parse(text)
@@ -410,7 +480,6 @@ export class Media {
 
     let final: unknown
     let status = "completed"
-    let jobId: string | undefined
     const startResp = await call((spec.start.method ?? "POST").toUpperCase(), spec.start.path, body)
     if (spec.mode === "async") {
       const poll = spec.poll!
@@ -419,14 +488,12 @@ export class Media {
       if (typeof rawId === "string" && rawId !== "") jobId = rawId
       else if (typeof rawId === "number" && Number.isInteger(rawId)) jobId = String(rawId)
       else throw new Error(`${verb}: no job id at ${idPath}`)
-      const interval = poll.intervalMs ?? 5000
-      const timeout = poll.timeoutMs ?? 600000
-      const began = Date.now()
+      const interval = positive(poll.intervalMs, 5000)
+      const pollPath = poll.path.split("{id}").join(percentEncode(jobId))
       for (;;) {
         await sleep(interval, signal)
-        const resp = await call((poll.method ?? "GET").toUpperCase(), poll.path.split("{id}").join(jobId))
-        const st = readPath(resp, poll.statusPath)
-        const s = typeof st === "string" ? st : ""
+        const resp = await call((poll.method ?? "GET").toUpperCase(), pollPath)
+        const s = statusText(readPath(resp, poll.statusPath))
         this.opts.onProgress?.({ verb: verb as MediaVerb, jobId, status: s })
         if ((poll.done ?? []).includes(s)) {
           final = resp
@@ -437,7 +504,7 @@ export class Media {
           const m = poll.errorPath ? readPath(resp, poll.errorPath) : undefined
           throw new Error(typeof m === "string" && m !== "" ? `job ${jobId} ${s}: ${m}` : `job ${jobId} ${s}`)
         }
-        if (Date.now() - began >= timeout) throw new Error(`job ${jobId} timed out after ${timeout}ms`)
+        if (Date.now() >= deadline) throw timedOut()
       }
     } else {
       final = startResp

@@ -31,18 +31,32 @@ hand-write a request and a polling loop, per endpoint, per language. Now one eng
   the tool name and call id; `toolCalls[].parts` carries them per call. The answer text never gets
   markup — you decide how to render. An agent with a completion gate keeps the files of every
   attempt, exactly as it keeps their tool calls.
+  It is not media-only: image or file parts returned by MCP tools and by built-in file reads land
+  in `RunResult.files` too, and each entry keeps the part's `name` when it had one.
+- **Bounded, safe requests** — every request (start and each poll) is bounded by the time left
+  until the job's deadline (`timeoutMs`, counted from the start; sync verbs default to 10 min), so
+  a server that accepts and never answers can no longer hang a call. Style headers (your API key)
+  are never sent to a different origin than `baseUrl`'s, even across a redirect. Error bodies
+  echoed in `HTTP <status>: …` are capped at 1000 characters. Python has no separate `timeout`
+  option on `create_media`; the style's `timeoutMs` is the one knob.
 
 Every port ships a runnable `media` example (an image through the typed call, speech through the
 `generate_speech` tool; without `A2E_API_KEY` it prints a hint and exits), and each language's API
 reference page has a Media generation section.
 
-Contract: SPEC §7G, ADR 0036, `conformance/media/` (every port replays the same 19 cases and schema set).
+Contract: SPEC §7G, ADR 0036, `conformance/media/` (every port replays the same 29 cases and schema set).
 
 **Not done yet** (tracked in `openspec/changes/add-media-generation`): downloading expiring result
 URLs (a2e's last 3–30 days — save them yourself for now), cancelling the job at the provider
 (cancel stops polling; the provider's job keeps running), uploading local files, ComfyUI workflow
 injection, webhooks, price quotes, pausing a long job through `waitFor`, and streaming `file`
 events. Realtime/live voice conversation is deliberately out of scope.
+
+Known redirect gaps: on Clojure's cljgo host the Go HTTP client follows redirects itself and
+forwards custom style headers (not `Authorization`) to another origin, because koine has no
+no-redirect option yet; the JVM build is fixed. An HTTP client or transport you inject yourself
+(Java, C#, Rust, Python) may follow redirects before the engine sees them, so it must not
+forward headers cross-origin.
 
 ### Tool scheduling: reads run together, writes run alone (all eight ports)
 

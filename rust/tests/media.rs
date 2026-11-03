@@ -77,8 +77,11 @@ fn progress_media(style: MediaStyle) -> (Media, Arc<Mutex<Vec<String>>>) {
 async fn conformance_cases() {
     let cases = load("cases.json");
     let cases = cases["cases"].as_array().unwrap();
-    assert!(cases.len() >= 15);
+    let total = cases.len();
+    assert!(total >= 15);
+    let mut replayed = 0usize;
     for case in cases {
+        replayed += 1;
         let name = case["name"].as_str().unwrap();
         if let Some(env) = case.get("env").and_then(Value::as_object) {
             for (k, v) in env {
@@ -159,6 +162,7 @@ async fn conformance_cases() {
         want.as_object_mut().unwrap().remove("name");
         assert_eq!(serde_json::to_value(&r).unwrap(), want, "{name}: tool");
     }
+    assert_eq!(replayed, total, "every case replayed");
 }
 
 #[tokio::test]
@@ -376,4 +380,123 @@ fn media_tools_are_concurrency_safe() {
     for t in &tools {
         assert!(toolnexus::is_concurrency_safe(t, &json!({})), "{}", t.name);
     }
+}
+
+// §7G: style headers never reach a different origin than baseUrl's.
+#[tokio::test]
+async fn cross_origin_redirect_drops_style_headers() {
+    let (burl, blog) = script_server(vec![
+        json!({"status": 200, "body": {"u": "https://x/a.png"}}),
+    ])
+    .await;
+    let target = format!("{burl}/landed");
+    let a = serve(move |r: Req| {
+        let t = target.clone();
+        async move {
+            if r.path == "/same" {
+                Resp::status(307, "").header("Location", "/i")
+            } else if r.path == "/i" {
+                Resp::status(302, "").header("Location", &t)
+            } else {
+                Resp::status(500, "unexpected")
+            }
+        }
+    })
+    .await;
+    let style: MediaStyle = serde_json::from_value(json!({"baseUrl": a.url,
+        "headers": {"Authorization": "Bearer YOUR_KEY_HERE", "X-Style": "s"},
+        "verbs": {"image": {"mode": "sync", "kind": "image", "start": {"path": "/same"},
+        "args": {"prompt": "p"}, "resultPath": "u"}}}))
+    .unwrap();
+    let mut args = Map::new();
+    args.insert("prompt".into(), json!("x"));
+    let r = create_media(style, MediaOptions::default())
+        .generate("image", args)
+        .await
+        .unwrap();
+    assert_eq!(r.files[0].url, "https://x/a.png");
+    let reqs = blog.lock().unwrap().clone();
+    assert_eq!(reqs.len(), 1);
+    assert_eq!(reqs[0].path, "/landed");
+    assert!(!reqs[0].headers.contains_key("authorization"));
+    assert!(!reqs[0].headers.contains_key("x-style"));
+}
+
+// §7G: each request is bounded by the time left until the job deadline.
+#[tokio::test]
+async fn hung_server_bounded_by_deadline() {
+    let hang = serve(|_r: Req| async {
+        tokio::time::sleep(Duration::from_secs(30)).await;
+        Resp::status(200, "{}")
+    })
+    .await;
+    let style: MediaStyle =
+        serde_json::from_value(json!({"baseUrl": hang.url, "verbs": {"image": {
+        "mode": "async", "kind": "image", "start": {"path": "/s"}, "args": {"prompt": "p"},
+        "idPath": "id", "poll": {"path": "/p/{id}", "statusPath": "st", "done": ["ok"],
+        "intervalMs": 5, "timeoutMs": 200}, "resultPath": "u"}}}))
+        .unwrap();
+    let mut args = Map::new();
+    args.insert("prompt".into(), json!("x"));
+    let t0 = std::time::Instant::now();
+    let e = create_media(style, MediaOptions::default())
+        .generate("image", args.clone())
+        .await
+        .unwrap_err();
+    assert_eq!(e.to_string(), "image: timed out after 200ms");
+    assert!(t0.elapsed() < Duration::from_secs(5));
+
+    // a hung poll reports the job id
+    let n = Arc::new(Mutex::new(0usize));
+    let poll_hang = serve(move |_r: Req| {
+        let n = n.clone();
+        async move {
+            let first = {
+                let mut g = n.lock().unwrap();
+                *g += 1;
+                *g == 1
+            };
+            if !first {
+                tokio::time::sleep(Duration::from_secs(30)).await;
+            }
+            Resp::json(json!({"id": "a/b"}))
+        }
+    })
+    .await;
+    let style: MediaStyle =
+        serde_json::from_value(json!({"baseUrl": poll_hang.url, "verbs": {"image": {
+        "mode": "async", "kind": "image", "start": {"path": "/s"}, "args": {"prompt": "p"},
+        "idPath": "id", "poll": {"path": "/p/{id}", "statusPath": "st", "done": ["ok"],
+        "intervalMs": 5, "timeoutMs": 200}, "resultPath": "u"}}}))
+        .unwrap();
+    let t0 = std::time::Instant::now();
+    let e = create_media(style, MediaOptions::default())
+        .generate("image", args)
+        .await
+        .unwrap_err();
+    assert_eq!(e.to_string(), "job a/b timed out after 200ms");
+    assert!(t0.elapsed() < Duration::from_secs(5));
+}
+
+#[tokio::test]
+async fn typed_verb_with_cancel() {
+    let (url, _log) = script_server(vec![
+        json!({"status": 200, "body": {"id": "c1"}}),
+        json!({"status": 200, "body": {"st": "running"}}),
+    ])
+    .await;
+    let media = create_media(slow_style(&url), MediaOptions::default());
+    let tok = CancellationToken::new();
+    tok.cancel();
+    let e = media
+        .image_with(
+            toolnexus::ImageInput {
+                prompt: "x".into(),
+                ..Default::default()
+            },
+            &tok,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(e, MediaError::Cancelled);
 }

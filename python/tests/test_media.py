@@ -8,6 +8,7 @@ import io
 import json
 import os
 import threading
+import time
 
 import pytest
 
@@ -84,8 +85,9 @@ async def _run_function_face(case, monkeypatch):
     srv = FakeServer(case["script"])
     progress = []
     try:
-        media = create_media(_style(case, srv.url), on_progress=lambda p: progress.append(p))
         try:
+            # styleError cases (§7G Empty dotPath) are rejected by create_media itself.
+            media = create_media(_style(case, srv.url), on_progress=lambda p: progress.append(p))
             res = await media.generate(case["verb"], case["args"])
             outcome = ("result", res.to_dict())
         except MediaError as e:
@@ -144,7 +146,7 @@ async def test_media_conformance_tool_face(case, monkeypatch):
 
 
 def test_all_cases_present():
-    assert len(CASES) >= 19
+    assert len(CASES) >= 29
 
 
 def test_media_schemas():
@@ -376,3 +378,91 @@ def test_media_tools_are_concurrency_safe():
     assert len(tools) == 6
     for t in tools:
         assert is_concurrency_safe(t, {}), t.name
+
+
+# §7G Redirects: a cross-origin redirect never carries the style headers.
+async def test_cross_origin_redirect_drops_style_headers():
+    b = FakeServer([{"status": 200, "body": {"u": "https://x/r.png"}}])
+
+    class Redirect(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("Content-Length", 0) or 0))
+            self.send_response(302)
+            self.send_header("Location", b.url + "/landed")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+    a = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Redirect)
+    threading.Thread(target=a.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True).start()
+    try:
+        media = create_media({"baseUrl": f"http://127.0.0.1:{a.server_address[1]}",
+                              "headers": {"Authorization": "Bearer FAKE", "X-Style": "s"},
+                              "verbs": {"image": {"mode": "sync", "kind": "image", "start": {"path": "/i"},
+                                                  "args": {"prompt": "p"}, "resultPath": "u"}}})
+        r = await media.image("x")
+        assert r.files[0].url == "https://x/r.png"
+        assert len(b.requests) == 1
+        hdrs = {k.lower() for k in b.requests[0]["headers"]}
+        assert "authorization" not in hdrs and "x-style" not in hdrs
+    finally:
+        a.shutdown()
+        a.server_close()
+        b.close()
+
+
+# §7G Per-request timeout: a server that never answers is bounded by the job deadline.
+async def test_hung_server_bounded_by_deadline():
+    release = threading.Event()
+
+    class Hang(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def _reply(self, data):
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("Content-Length", 0) or 0))
+            if self.path == "/a":
+                return self._reply(b'{"id":"h1"}')
+            release.wait(10)
+
+        def do_GET(self):
+            release.wait(10)
+
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Hang)
+    srv.daemon_threads = True
+    threading.Thread(target=srv.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True).start()
+    url = f"http://127.0.0.1:{srv.server_address[1]}"
+    try:
+        sync = create_media({"baseUrl": url, "verbs": {"image": {
+            "mode": "sync", "kind": "image", "start": {"path": "/s"}, "args": {"prompt": "p"},
+            "poll": {"timeoutMs": 200}, "resultPath": "u"}}})
+        t0 = time.monotonic()
+        with pytest.raises(MediaError, match=r"^image: timed out after 200ms$"):
+            await sync.image("x")
+        assert time.monotonic() - t0 < 3
+        asy = create_media({"baseUrl": url, "verbs": {"image": {
+            "mode": "async", "kind": "image", "start": {"path": "/a"}, "args": {"prompt": "p"}, "idPath": "id",
+            "poll": {"path": "/p/{id}", "statusPath": "st", "done": ["ok"], "intervalMs": 1, "timeoutMs": 200},
+            "resultPath": "u"}}})
+        with pytest.raises(MediaError, match=r"^job h1 timed out after 200ms$"):
+            await asy.image("x")
+    finally:
+        release.set()
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_dotset_through_array_with_word_segment():
+    from toolnexus.media import _set
+
+    body = {"a": []}
+    _set(body, "a.x.y", 1)
+    assert body == {"a": {"x": {"y": 1}}}
