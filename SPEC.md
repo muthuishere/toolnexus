@@ -1634,8 +1634,9 @@ MediaClient = {
   transcribe?(args, ctx)  cloneVoice?(args, ctx)  talk?(args, ctx)      -> MediaResult
 }
 ctx         = { signal, deadline?, progress?, providerOptions? }
-MediaResult = { files: [MediaFile], text?: string, jobId?: string, status }
+MediaResult = { files: [MediaFile], text?: string, jobId?: string, status, usage?: MediaUsage }
 MediaFile   = { type, mimeType, url?, path?, data? }
+MediaUsage  = { inputTokens?: int, outputTokens?: int, costUsd?: number, raw?: {…} }   // §7G.12 D21
 status      ∈ "completed" | "failed" | "timeout" | "cancelled" | "unavailable"
 ```
 
@@ -1683,22 +1684,28 @@ failure.
 1. Empty client list ⇒ error at creation: `media: no clients`.
 2. Candidates = clients whose `supports(verb)` is true, in list order. None ⇒
    `media: no client supports "<verb>"`, status `failed`, no request.
-3. Try candidates in order. A candidate's result is returned as is — success **or any error that is
-   not `unavailable`** (bad prompt, HTTP 500, timeout, cancellation: no fall-through).
-4. An `unavailable` error moves on to the next candidate. **Fall-through drops** any arg the next
-   candidate does not accept (§7G.2 `args`) instead of failing on it.
-5. Every candidate `unavailable` ⇒ error status `unavailable`, message
-   `media: no client available for "<verb>": ` + each candidate's message, in order, joined by `"; "`.
+3. **Non-canonical key** (§7G.12 D7/D19): a key that is not a canonical arg of the verb
+   (`verbs.json`) ⇒ `<verb>: argument "<key>" not supported` (first in sorted code-point order),
+   status `failed`, before any client is tried. A null/nil/None value is absent everywhere.
+4. Try candidates in order. Before calling one, check the args against its `args(verb)` (§7G.2; a
+   client without `args` accepts every canonical arg and requires the canonical required ones),
+   before any request, spawn or key check:
+   - a key it does not accept ⇒ the candidate is **skipped** (never called) with reason
+     `<name>: argument "<key>" not supported` (first in sorted code-point order);
+   - else a required arg missing ⇒ **skipped** with reason `<name>: missing required argument
+     "<key>"` (first in canonical order).
+   A skip is treated exactly like an `unavailable` error. This holds for **every** candidate,
+   the first included (§7G.12 D19). Args are never dropped or rewritten for a candidate.
+5. A called candidate's result is returned as is — success **or any error that is not
+   `unavailable`** (bad prompt, HTTP 500, timeout, cancellation: no fall-through). An
+   `unavailable` error moves on to the next candidate.
+6. Every candidate skipped or `unavailable` ⇒ error status `unavailable`, message
+   `media: no client available for "<verb>": ` + each candidate's reason (skip reason or error
+   message), in candidate order, joined by `"; "`. This includes a single-client list.
 
-Arg checks: before calling the **first** candidate the router checks the args against its
-`args(verb)` (§7G.2; a client without `args` accepts every canonical arg and requires the canonical
-required ones), before any request or spawn, and before the client's own key check: an arg key it
-does not accept ⇒ `<verb>: argument "<key>" not supported by <client>` (first in sorted code-point order;
-**style clients keep the ADR 0036 text** `… not supported by this style`); then a required arg
-missing ⇒ `<verb>: argument "<key>" is required` (first in canonical order). A null/nil/None
-value is absent. Both are `failed` and are not fall-through. A fall-through candidate is re-checked for its
-required args and skipped as `unavailable` when one is missing (§7G.12 D16); a key that is not a
-canonical arg is rejected for every client, with or without `args` (D7).
+Example: `createMedia([grok, openai])` with `video({prompt, seconds: 5})` — Grok does not accept
+`seconds`, so it is skipped and OpenAI serves the call; with `foo: 1` the call fails at once with
+`video: argument "foo" not supported`.
 
 ### 7G.4 Shared client config
 
@@ -1742,11 +1749,15 @@ A provider returns media in one of five shapes. `gather.mode` decides what the h
   stripped) when present and not `application/octet-stream`, else as for a URL. `data:` URL: its
   own mime. Local path: extension table.
 - **Saved file name** `<client>-<verb>-<unixMillis>-<seq><ext>`, `seq` a per-process counter from 1;
-  `<ext>` from the mime type: image/png `.png`, image/jpeg `.jpg`, image/webp `.webp`, image/gif
-  `.gif`, video/mp4 `.mp4`, video/webm `.webm`, video/quicktime `.mov`, audio/mpeg `.mp3`,
-  audio/wav `.wav`, audio/ogg `.ogg`, audio/mp4 `.m4a`, audio/flac `.flac`, else `.bin`.
+  `<ext>` (§7G.12 D22): for a file that came from a URL, the URL path's own extension when it has
+  one (last segment, `.` + 1–5 ASCII letters/digits, lowercased); otherwise from the mime type:
+  image/png `.png`, image/jpeg `.jpg`, image/webp `.webp`, image/gif `.gif`, video/mp4 `.mp4`,
+  video/webm `.webm`, video/quicktime `.mov`, audio/mpeg `.mp3`, audio/wav · audio/x-wav ·
+  audio/wave `.wav`, audio/ogg `.ogg`, audio/mp4 `.m4a`, audio/flac `.flac`, audio/aac `.aac`,
+  text/plain `.txt`; `.bin` only for a mime type not in this table.
   `path` is absolute; `url` is `file://` + the absolute path, not percent-encoded.
-- **Download** is a `GET` with **no** client headers (no key leaves the provider origin), follows
+- **Download** is a `GET` with **no** client headers (no key leaves the provider origin) — only the
+  default `User-Agent` (§7G.12 D23) — follows
   §7G.8's redirect rules and the job deadline. Non-2xx ⇒ `<verb>: download failed: HTTP <status>`.
 - **maxBytes.** Any saved or inlined file larger than `maxBytes` ⇒
   `<verb>: file exceeds gather.maxBytes (<maxBytes> bytes)` (a download: `<verb>: download failed: file exceeds …`, §7G.12 D14); a download stops reading at
@@ -1766,7 +1777,8 @@ before `extraTools`; `toolkit.register(...media.tools())` is equivalent; enable/
 
 Execute ⇒ the §7G.3 call; never throws. Success:
 `ToolResult{ isError:false, output, parts, metadata:{source:"media", verb, client, jobId?, status} }`
-(`client` = the name of the client that served it; `jobId` only when the result has one).
+(`client` = the name of the client that served it; `jobId` only when the result has one;
+`usage` = the result's `MediaUsage` only when it has one, §7G.12 D21).
 
 - Media verbs: `output = "<word> ready: " + lines.join("\n")`, `word` = `image` | `video` |
   `audio` by the verb's kind (§7G.12 D2); a line is the file's `path`, else its `url`, else
@@ -1854,7 +1866,9 @@ absent. *Write*: creates objects, and arrays when the next segment is numeric (p
 ### 7G.8 Edge rules (pinned after the first port; apply to every API client)
 
 - **Headers** — client/style headers go on **every** request (start and polls); `Content-Type:
-  application/json` only on requests with a JSON body. Polls send no body.
+  application/json` only on requests with a JSON body. Polls send no body. Every media HTTP request
+  (start, poll, download, input fetch) also sends `User-Agent: toolnexus/<version> (<port>)` unless
+  the client/style headers set `User-Agent` (§7G.12 D23).
 - **Job id** — only a non-empty string or an integral number counts; anything else (incl. `""`) ⇒ `no job id`.
 - **Envelope code** rendering — string as-is, integral number as integer text, anything else JSON-encoded.
 - **Media result** — arrays flatten to any depth; non-string and empty-string entries are dropped.
@@ -2106,10 +2120,12 @@ wins**.
 - **D6 Style `args()`** = only the **canonical** args of the verb that the style maps (plus its
   `required`). A style may map a non-canonical name (it stays loadable), but that name is not an
   accepted arg and never appears in a tool schema. Case `style_noncanonical_mapped_arg_is_not_accepted`.
-- **D7 Unknown arg keys** — any key that is not a canonical arg the client accepts is rejected
-  `<verb>: argument "<key>" not supported by <name>` (`by this style` for styles), for **every**
-  client, including one without `args()` (it accepts the canonical args only). Cases
-  `client_without_args_rejects_non_canonical_key`, `builtin_client_rejects_non_canonical_arg`.
+- **D7 Non-canonical arg keys** (amended by D19) — a key that is not a canonical arg of the verb
+  is accepted by **no** client (a client without `args()` accepts the canonical args only), so it
+  fails the call at once: `<verb>: argument "<key>" not supported`, status `failed`, no client
+  called. A canonical key a client does not accept is D19's skip. Cases
+  `client_without_args_rejects_non_canonical_key`, `builtin_client_rejects_non_canonical_arg`,
+  `non_canonical_key_plain_error_even_with_fallbacks`.
 - **D8 Model visibility** — only `image` parts of a media tool result reach the model; no other
   part, **text parts included** (§7G.6).
 - **D9 No image parts** — when a media tool result emits no image part, every message style
@@ -2146,20 +2162,51 @@ wins**.
 - **D15 Grok failed tool, no message** — the error text is `rawOutput` as compact JSON (no
   whitespace) with object keys sorted by code point at every depth; array order kept. Case
   `grok_failed_raw_output_keys_sorted`.
-- **D16 Fall-through re-checks required args** — before a fall-through candidate is called its
-  required args (§7G.2) are checked; one missing ⇒ the candidate is skipped as if `unavailable`
-  (never called) with message `<name>: missing required argument "<key>"` (first in canonical
-  order), which joins the §7G.3 all-unavailable message. On the **first** candidate a missing
-  required arg stays the plain `failed` error of §7G.3. Cases
+- **D16** — *superseded by D19*: a missing required arg skips **every** candidate, the first
+  included; there is no first-client special case. Cases
   `fall_through_skips_candidate_missing_required_arg`,
-  `fall_through_missing_required_arg_joins_unavailable`.
+  `fall_through_missing_required_arg_joins_unavailable`, `client_declared_required_arg`.
 - **D17 CLI working dir** — the dir passed to the CLI (`--cwd`, spawn cwd) is the **realpath** of
   the temp dir (macOS `/var` ⇒ `/private/var`); `cli.json`'s `{cwd}` compares byte for byte with
   the fake's `pwd -P`.
 
+- **D19 Fall-through on unsupported args** (pinned 2026-11-04 from live example runs) — a
+  candidate that does not accept a canonical arg, or lacks a required one, is skipped like
+  `unavailable` (never called) with reason `<name>: argument "<key>" not supported` /
+  `<name>: missing required argument "<key>"`; every candidate, the first included (§7G.3). All
+  skipped/unavailable ⇒ `media: no client available for "<verb>": <reasons joined "; ">`, status
+  `unavailable`. A non-canonical key stays D7's plain `failed` error. Replaces the earlier "check
+  the args against the first client" rule, the `… not supported by <client>` / `by this style`
+  texts, the `is required` failed error, and fall-through arg dropping. Cases
+  `first_candidate_rejects_arg_falls_to_next`, `every_candidate_rejects_an_arg_joined`,
+  `skipped_and_unavailable_reasons_join_in_order`, `candidate_not_accepting_arg_is_skipped_after_unavailable`.
+- **D20 Local path on run files** — `MediaFile.path` (absolute) is set whenever gather has a local
+  file (download mode, any saved base64 / bytes / `data:` result, CLI copy-out, CLI url mode). The
+  matching `RunResult.files` entry carries the same `path` in all 8 ports. Parts and anything sent
+  to a model or over A2A never contain a path (§1B). Conformance: `runFilePath` (each file's
+  `_doc`).
+- **D21 Usage** — `MediaResult.usage` and the tool's `metadata.usage` are filled only from what the
+  provider returns, never estimated: OpenAI images `usage.input_tokens` / `usage.output_tokens` ⇒
+  `inputTokens` / `outputTokens`; OpenRouter `usage.prompt_tokens` / `usage.completion_tokens` /
+  `usage.cost` ⇒ `inputTokens` / `outputTokens` / `costUsd`; Grok CLI `costUsdTicks` (on the `end`
+  event) ⇒ `raw.costUsdTicks` only — its unit is undocumented, so it is **never converted**. Every
+  other client: no `usage`. A field the provider omits is absent; no fields ⇒ no `usage` key. There
+  is **no run-level sum** of media usage in v1 (`RunResult.usage` stays LLM tokens only). Cases
+  `openai_image_usage`, `openrouter_image_usage_cost`, `grok_usage_cost_ticks_raw`,
+  `usage_passes_through_to_tool_metadata`; `noUsage` elsewhere.
+- **D22 Saved-file extension** — URL path extension first, then the mime table of §7G.5, `.bin`
+  only for an unknown mime. Cases `download_ext_from_url_extension`,
+  `download_ext_wav_from_x_wav_mime`, `download_ext_aac_from_mime`, `download_ext_unknown_mime_is_bin`.
+- **D23 User-Agent** — every media HTTP request (start, poll, download, input fetch) sends
+  `User-Agent: toolnexus/<version> (<port>)`, `<version>` the package version and `<port>` one of
+  `js python golang java csharp elixir clojure rust`, unless the client/style headers set a
+  `User-Agent` (then that value, unchanged). CDNs reject requests without one (A2E CloudFront 403).
+  Conformance: `expectHeaderPatterns`. Cases `user_agent_on_start_poll_and_download`,
+  `style_user_agent_default_on_start_and_poll`, `style_user_agent_header_overrides`.
+
 ### 7G.13 Not in v1
 
-Provider-side job cancellation, webhooks, price quotes, §10 suspension for long jobs, streaming
+Provider-side job cancellation, webhooks, price quotes, a run-level sum of media `usage` (§7G.12 D21), §10 suspension for long jobs, streaming
 `file` events, ComfyUI, a generic ACP media client, Replicate (reachable through a custom client),
 Gemini/Grok-API/Seedance/Kling/Runway direct clients, OpenRouter video/audio, image editing.
 Tracked in `openspec/changes/add-media-clients`.
@@ -2198,9 +2245,11 @@ RunResult {
   messages:      [...]          // full transcript
   toolCalls:     [{ name, args, output, isError, metadata, parts? }]   // every call + its result;
                                                                       // parts present iff the ToolResult had parts
-  files:         [{ type, mimeType, url?, data?, name?, from, callId }] // every non-text part produced
+  files:         [{ type, mimeType, url?, data?, name?, path?, from, callId }] // every non-text part produced
                  // by tool calls this run (any source: media, MCP, built-in file reads…), in call order;
                  // from = tool name, callId = the model's tool-call id; name present iff the part had one.
+                 // path (absolute) iff the part came from a media file with a local path (§7G.12 D20);
+                 // it is carried port-internally, never inside a part or anything sent to a model.
                  // Always present ([] when none). The final `text` never gets markup for them (§7G).
   toolCallCount: number         // = toolCalls.length
   turns:         number         // LLM round trips

@@ -1,5 +1,5 @@
 {
-  "_doc": "Built-in API client conformance (SPEC §7G.9, §7G.5, §7G.11). A port's harness, per case: starts the fake HTTP server (script[] in order, last repeats; entries {status, body|rawBody|bodyBase64, headers?}), substitutes {server} everywhere (config, args, script bodies and headers, expectations), makes {dir} (passed as gather.dir) and {inputs} (writes inputFiles name->base64 there), sets env and removes unsetEnv, builds the named built-in client (client = a2e|elevenlabs|openai|openrouter|fal) from config, and calls createMedia(client) for verb/args through the function face and then the tool face (fresh script replay, fresh {dir}). Asserts: expectRequests in order (method, path exactly as sent incl. query; body = JSON deep-equal; multipart = parts in order, each {name,value} or {name,filename,contentType,bytesBase64}; headers = subset with exact values; absentHeaders = must not be sent) — when expectRequests is present the request count must match too; expectHeaders on EVERY request; expectProgress; result (files: url/data/type/mimeType exact; saved = file lives directly in {dir}, name matches ^<client>-<verb>-[0-9]+-[0-9]+<ext>$, path absolute, url == 'file://'+path, bytes == bytesBase64) or error (exact) / errorPrefix (startsWith) with status; tool: output exact or outputPattern (regex after substituting {dir} regex-escaped), parts, metadata, noParts = no parts key. liveVerified:false marks a request shape pinned from provider docs, not from a live call. A field absent from a case is not asserted. modelParts (SPEC §7G.6 model visibility): the parts of this tool result that message assembly (§8A) emits to the model — only image parts; video/audio parts stay in RunResult.files and toolCalls[].parts only. Assert with the port's assembly function on a transcript containing this tool result. {inputs} is substituted in expectations too. ctxTimeoutMs (D12): the function face is called with ctx.deadline = now + ctxTimeoutMs (the tool face is not run for such a case); errorPrefix then asserts the message start, maxElapsedMs bounds the call. D9 (SPEC §7G.12): when modelParts is [] the tool-result content the port sends to the model is the plain output string in every message style incl. Anthropic — never an empty content array, never a placeholder; assert it with the same assembly function.",
+  "_doc": "Built-in API client conformance (SPEC §7G.9, §7G.5, §7G.11). A port's harness, per case: starts the fake HTTP server (script[] in order, last repeats; entries {status, body|rawBody|bodyBase64, headers?}), substitutes {server} everywhere (config, args, script bodies and headers, expectations), makes {dir} (passed as gather.dir) and {inputs} (writes inputFiles name->base64 there), sets env and removes unsetEnv, builds the named built-in client (client = a2e|elevenlabs|openai|openrouter|fal) from config, and calls createMedia(client) for verb/args through the function face and then the tool face (fresh script replay, fresh {dir}). Asserts: expectRequests in order (method, path exactly as sent incl. query; body = JSON deep-equal; multipart = parts in order, each {name,value} or {name,filename,contentType,bytesBase64}; headers = subset with exact values; absentHeaders = must not be sent) — when expectRequests is present the request count must match too; expectHeaders on EVERY request; expectProgress; result (files: url/data/type/mimeType exact; saved = file lives directly in {dir}, name matches ^<client>-<verb>-[0-9]+-[0-9]+<ext>$, path absolute, url == 'file://'+path, bytes == bytesBase64) or error (exact) / errorPrefix (startsWith) with status; tool: output exact or outputPattern (regex after substituting {dir} regex-escaped), parts, metadata, noParts = no parts key. liveVerified:false marks a request shape pinned from provider docs, not from a live call. A field absent from a case is not asserted. modelParts (SPEC §7G.6 model visibility): the parts of this tool result that message assembly (§8A) emits to the model — only image parts; video/audio parts stay in RunResult.files and toolCalls[].parts only. Assert with the port's assembly function on a transcript containing this tool result. {inputs} is substituted in expectations too. ctxTimeoutMs (D12): the function face is called with ctx.deadline = now + ctxTimeoutMs (the tool face is not run for such a case); errorPrefix then asserts the message start, maxElapsedMs bounds the call. D9 (SPEC §7G.12): when modelParts is [] the tool-result content the port sends to the model is the plain output string in every message style incl. Anthropic — never an empty content array, never a placeholder; assert it with the same assembly function. D19: a built-in client that does not accept a canonical arg, or lacks a required one, is skipped ⇒ the joined 'media: no client available for …' error naming '<client>: argument \"<k>\" not supported' / '<client>: missing required argument \"<k>\"'; a non-canonical key is the plain '<verb>: argument \"<k>\" not supported'. D20 runFilePath: true ⇒ build RunResult.files from a toolCalls record of this tool result (the port's run-files function) and assert each entry's path equals the corresponding MediaFile.path (absolute, present); false ⇒ no entry has path; parts never hold a path. D21: result.usage exact when present; noUsage:true ⇒ neither the result nor tool metadata has a usage key. D23: expectHeaderPatterns = header name → regex the value must match on EVERY request (start, poll, download).",
   "cases": [
     {
       "name": "elevenlabs_speech_default_voice_bytes_download",
@@ -73,7 +73,9 @@
           "status": "completed"
         },
         "modelParts": []
-      }
+      },
+      "runFilePath": true,
+      "noUsage": true
     },
     {
       "name": "elevenlabs_speech_voice_by_name_case_insensitive",
@@ -398,11 +400,11 @@
         }
       ],
       "expectRequests": [],
-      "status": "failed",
-      "error": "music: argument \"lyrics\" not supported by elevenlabs",
+      "status": "unavailable",
+      "error": "media: no client available for \"music\": elevenlabs: argument \"lyrics\" not supported",
       "tool": {
         "isError": true,
-        "output": "music: argument \"lyrics\" not supported by elevenlabs"
+        "output": "media: no client available for \"music\": elevenlabs: argument \"lyrics\" not supported"
       }
     },
     {
@@ -725,7 +727,9 @@
             "data": "UE5HQllURVM="
           }
         ]
-      }
+      },
+      "runFilePath": true,
+      "noUsage": true
     },
     {
       "name": "openai_image_b64_url_mode_still_saves",
@@ -768,7 +772,8 @@
           }
         ],
         "status": "completed"
-      }
+      },
+      "runFilePath": true
     },
     {
       "name": "openai_image_inline",
@@ -963,11 +968,11 @@
         }
       ],
       "expectRequests": [],
-      "status": "failed",
-      "error": "image: argument \"aspectRatio\" not supported by openai",
+      "status": "unavailable",
+      "error": "media: no client available for \"image\": openai: argument \"aspectRatio\" not supported",
       "tool": {
         "isError": true,
-        "output": "image: argument \"aspectRatio\" not supported by openai"
+        "output": "media: no client available for \"image\": openai: argument \"aspectRatio\" not supported"
       }
     },
     {
@@ -992,11 +997,11 @@
         }
       ],
       "expectRequests": [],
-      "status": "failed",
-      "error": "image: argument \"prompt\" is required",
+      "status": "unavailable",
+      "error": "media: no client available for \"image\": openai: missing required argument \"prompt\"",
       "tool": {
         "isError": true,
-        "output": "image: argument \"prompt\" is required"
+        "output": "media: no client available for \"image\": openai: missing required argument \"prompt\""
       }
     },
     {
@@ -1906,7 +1911,9 @@
             "url": "https://fal.media/files/b"
           }
         ]
-      }
+      },
+      "runFilePath": false,
+      "noUsage": true
     },
     {
       "name": "fal_image_other_model_no_schnell_defaults",
@@ -2585,7 +2592,9 @@
             "data": "UE5HQllURVM="
           }
         ]
-      }
+      },
+      "runFilePath": true,
+      "noUsage": true
     },
     {
       "name": "a2e_builtin_talk_url_mode",
@@ -2714,11 +2723,11 @@
         }
       ],
       "expectRequests": [],
-      "status": "failed",
-      "error": "talk: argument \"text\" not supported by this style",
+      "status": "unavailable",
+      "error": "media: no client available for \"talk\": a2e: argument \"text\" not supported",
       "tool": {
         "isError": true,
-        "output": "talk: argument \"text\" not supported by this style"
+        "output": "media: no client available for \"talk\": a2e: argument \"text\" not supported"
       }
     },
     {
@@ -3158,10 +3167,10 @@
       ],
       "expectRequests": [],
       "status": "failed",
-      "error": "image: argument \"foo\" not supported by openai",
+      "error": "image: argument \"foo\" not supported",
       "tool": {
         "isError": true,
-        "output": "image: argument \"foo\" not supported by openai"
+        "output": "image: argument \"foo\" not supported"
       }
     },
     {
@@ -3731,6 +3740,625 @@
       "tool": {
         "isError": true,
         "output": "image: download failed: file exceeds gather.maxBytes (4 bytes)"
+      }
+    },
+    {
+      "name": "openai_image_usage",
+      "client": "openai",
+      "liveVerified": true,
+      "config": {
+        "key": "FAKE_KEY",
+        "url": "{server}/v1/",
+        "gather": {
+          "dir": "{dir}"
+        }
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "cat"
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {
+            "created": 1,
+            "data": [
+              {
+                "b64_json": "UE5HQllURVM="
+              }
+            ],
+            "output_format": "png",
+            "usage": {
+              "input_tokens": 9,
+              "output_tokens": 272,
+              "total_tokens": 281,
+              "input_tokens_details": {
+                "text_tokens": 9,
+                "image_tokens": 0
+              }
+            }
+          }
+        }
+      ],
+      "expectRequests": [
+        {
+          "method": "POST",
+          "path": "/v1/images/generations",
+          "headers": {
+            "Authorization": "Bearer FAKE_KEY",
+            "Content-Type": "application/json"
+          },
+          "body": {
+            "model": "gpt-image-1-mini",
+            "prompt": "cat",
+            "n": 1,
+            "size": "1024x1024",
+            "quality": "low"
+          }
+        }
+      ],
+      "result": {
+        "files": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "saved": {
+              "ext": ".png",
+              "bytesBase64": "UE5HQllURVM="
+            }
+          }
+        ],
+        "status": "completed",
+        "usage": {
+          "inputTokens": 9,
+          "outputTokens": 272
+        }
+      },
+      "tool": {
+        "name": "generate_image",
+        "isError": false,
+        "outputPattern": "^image ready: {dir}/openai-image-[0-9]+-[0-9]+\\.png$",
+        "parts": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "data": "UE5HQllURVM="
+          }
+        ],
+        "metadata": {
+          "source": "media",
+          "verb": "image",
+          "client": "openai",
+          "status": "completed",
+          "usage": {
+            "inputTokens": 9,
+            "outputTokens": 272
+          }
+        },
+        "modelParts": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "data": "UE5HQllURVM="
+          }
+        ]
+      },
+      "note": "D21: usage.input_tokens/output_tokens ⇒ inputTokens/outputTokens; no cost from OpenAI."
+    },
+    {
+      "name": "openrouter_image_usage_cost",
+      "client": "openrouter",
+      "liveVerified": true,
+      "config": {
+        "key": "FAKE_KEY",
+        "url": "{server}/api/v1",
+        "gather": {
+          "dir": "{dir}"
+        }
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "cat"
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {
+            "id": "gen-1",
+            "choices": [
+              {
+                "message": {
+                  "role": "assistant",
+                  "content": "Here you go",
+                  "images": [
+                    {
+                      "type": "image_url",
+                      "image_url": {
+                        "url": "data:image/png;base64,UE5HQllURVM="
+                      }
+                    }
+                  ]
+                }
+              }
+            ],
+            "usage": {
+              "prompt_tokens": 7,
+              "completion_tokens": 1290,
+              "total_tokens": 1297,
+              "cost": 0.0387
+            }
+          }
+        }
+      ],
+      "expectRequests": [
+        {
+          "method": "POST",
+          "path": "/api/v1/chat/completions",
+          "headers": {
+            "Authorization": "Bearer FAKE_KEY"
+          },
+          "body": {
+            "model": "google/gemini-2.5-flash-image",
+            "modalities": [
+              "image",
+              "text"
+            ],
+            "messages": [
+              {
+                "role": "user",
+                "content": "cat"
+              }
+            ]
+          }
+        }
+      ],
+      "result": {
+        "files": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "saved": {
+              "ext": ".png",
+              "bytesBase64": "UE5HQllURVM="
+            }
+          }
+        ],
+        "text": "Here you go",
+        "jobId": "gen-1",
+        "status": "completed",
+        "usage": {
+          "inputTokens": 7,
+          "outputTokens": 1290,
+          "costUsd": 0.0387
+        }
+      },
+      "tool": {
+        "name": "generate_image",
+        "isError": false,
+        "outputPattern": "^image ready: {dir}/openrouter-image-[0-9]+-[0-9]+\\.png$",
+        "parts": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "data": "UE5HQllURVM="
+          }
+        ],
+        "metadata": {
+          "source": "media",
+          "verb": "image",
+          "client": "openrouter",
+          "jobId": "gen-1",
+          "status": "completed",
+          "usage": {
+            "inputTokens": 7,
+            "outputTokens": 1290,
+            "costUsd": 0.0387
+          }
+        },
+        "modelParts": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "data": "UE5HQllURVM="
+          }
+        ]
+      },
+      "note": "D21: usage.prompt_tokens/completion_tokens/cost ⇒ inputTokens/outputTokens/costUsd (USD)."
+    },
+    {
+      "name": "download_ext_from_url_extension",
+      "client": "fal",
+      "config": {
+        "key": "FAKE_KEY",
+        "url": "{server}",
+        "gather": {
+          "dir": "{dir}"
+        },
+        "loop": {
+          "intervalMs": 1
+        }
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "cat"
+      },
+      "note": "D22: the URL path extension wins over the mime table (.jpeg, not .jpg); lowercased.",
+      "script": [
+        {
+          "status": 200,
+          "body": {
+            "request_id": "r5",
+            "status_url": "{server}/s",
+            "response_url": "{server}/r"
+          }
+        },
+        {
+          "status": 200,
+          "body": {
+            "status": "COMPLETED"
+          }
+        },
+        {
+          "status": 200,
+          "body": {
+            "images": [
+              {
+                "url": "{server}/files/photo.JPEG"
+              }
+            ]
+          }
+        },
+        {
+          "status": 200,
+          "bodyBase64": "SlBFR0JZVEVT",
+          "headers": {
+            "Content-Type": "image/jpeg"
+          }
+        }
+      ],
+      "result": {
+        "files": [
+          {
+            "type": "image",
+            "mimeType": "image/jpeg",
+            "saved": {
+              "ext": ".jpeg",
+              "bytesBase64": "SlBFR0JZVEVT"
+            }
+          }
+        ],
+        "jobId": "r5",
+        "status": "completed"
+      },
+      "runFilePath": true
+    },
+    {
+      "name": "download_ext_wav_from_x_wav_mime",
+      "client": "fal",
+      "config": {
+        "key": "FAKE_KEY",
+        "url": "{server}",
+        "gather": {
+          "dir": "{dir}"
+        },
+        "loop": {
+          "intervalMs": 1
+        }
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "cat"
+      },
+      "note": "D22: no URL extension; audio/x-wav maps to .wav (JS saved it as .bin).",
+      "script": [
+        {
+          "status": 200,
+          "body": {
+            "request_id": "r5",
+            "status_url": "{server}/s",
+            "response_url": "{server}/r"
+          }
+        },
+        {
+          "status": 200,
+          "body": {
+            "status": "COMPLETED"
+          }
+        },
+        {
+          "status": 200,
+          "body": {
+            "images": [
+              {
+                "url": "{server}/files/blob"
+              }
+            ]
+          }
+        },
+        {
+          "status": 200,
+          "bodyBase64": "V0FWQllURVM=",
+          "headers": {
+            "Content-Type": "audio/x-wav"
+          }
+        }
+      ],
+      "result": {
+        "files": [
+          {
+            "type": "image",
+            "mimeType": "audio/x-wav",
+            "saved": {
+              "ext": ".wav",
+              "bytesBase64": "V0FWQllURVM="
+            }
+          }
+        ],
+        "jobId": "r5",
+        "status": "completed"
+      },
+      "runFilePath": true
+    },
+    {
+      "name": "download_ext_aac_from_mime",
+      "client": "fal",
+      "config": {
+        "key": "FAKE_KEY",
+        "url": "{server}",
+        "gather": {
+          "dir": "{dir}"
+        },
+        "loop": {
+          "intervalMs": 1
+        }
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "cat"
+      },
+      "note": "D22: audio/aac ⇒ .aac.",
+      "script": [
+        {
+          "status": 200,
+          "body": {
+            "request_id": "r5",
+            "status_url": "{server}/s",
+            "response_url": "{server}/r"
+          }
+        },
+        {
+          "status": 200,
+          "body": {
+            "status": "COMPLETED"
+          }
+        },
+        {
+          "status": 200,
+          "body": {
+            "images": [
+              {
+                "url": "{server}/files/blob"
+              }
+            ]
+          }
+        },
+        {
+          "status": 200,
+          "bodyBase64": "QUFDQllURVM=",
+          "headers": {
+            "Content-Type": "audio/aac"
+          }
+        }
+      ],
+      "result": {
+        "files": [
+          {
+            "type": "image",
+            "mimeType": "audio/aac",
+            "saved": {
+              "ext": ".aac",
+              "bytesBase64": "QUFDQllURVM="
+            }
+          }
+        ],
+        "jobId": "r5",
+        "status": "completed"
+      },
+      "runFilePath": true
+    },
+    {
+      "name": "download_ext_unknown_mime_is_bin",
+      "client": "fal",
+      "config": {
+        "key": "FAKE_KEY",
+        "url": "{server}",
+        "gather": {
+          "dir": "{dir}"
+        },
+        "loop": {
+          "intervalMs": 1
+        }
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "cat"
+      },
+      "note": "D22: .bin only for a mime type not in the table and no URL extension.",
+      "script": [
+        {
+          "status": 200,
+          "body": {
+            "request_id": "r5",
+            "status_url": "{server}/s",
+            "response_url": "{server}/r"
+          }
+        },
+        {
+          "status": 200,
+          "body": {
+            "status": "COMPLETED"
+          }
+        },
+        {
+          "status": 200,
+          "body": {
+            "images": [
+              {
+                "url": "{server}/files/blob"
+              }
+            ]
+          }
+        },
+        {
+          "status": 200,
+          "bodyBase64": "QklOQllURVM=",
+          "headers": {
+            "Content-Type": "application/x-thing"
+          }
+        }
+      ],
+      "result": {
+        "files": [
+          {
+            "type": "image",
+            "mimeType": "application/x-thing",
+            "saved": {
+              "ext": ".bin",
+              "bytesBase64": "QklOQllURVM="
+            }
+          }
+        ],
+        "jobId": "r5",
+        "status": "completed"
+      },
+      "runFilePath": true
+    },
+    {
+      "name": "user_agent_on_start_poll_and_download",
+      "client": "a2e",
+      "liveVerified": true,
+      "config": {
+        "key": "FAKE_KEY",
+        "url": "{server}",
+        "gather": {
+          "dir": "{dir}"
+        },
+        "loop": {
+          "intervalMs": 1
+        }
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "cat",
+        "width": 512
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {
+            "code": 0,
+            "data": [
+              {
+                "_id": "a1"
+              }
+            ]
+          }
+        },
+        {
+          "status": 200,
+          "body": {
+            "code": 0,
+            "data": {
+              "current_status": "completed",
+              "image_urls": [
+                "{server}/files/a.png"
+              ]
+            }
+          }
+        },
+        {
+          "status": 200,
+          "bodyBase64": "UE5HQllURVM=",
+          "headers": {
+            "Content-Type": "image/png"
+          }
+        }
+      ],
+      "expectRequests": [
+        {
+          "method": "POST",
+          "path": "/v1/userText2Image/start",
+          "headers": {
+            "Authorization": "Bearer FAKE_KEY"
+          },
+          "body": {
+            "name": "toolnexus",
+            "model_type": "a2e",
+            "prompt": "cat",
+            "width": 512
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/v1/userText2Image/a1",
+          "headers": {
+            "Authorization": "Bearer FAKE_KEY"
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/files/a.png",
+          "absentHeaders": [
+            "Authorization"
+          ]
+        }
+      ],
+      "expectProgress": [
+        "completed"
+      ],
+      "result": {
+        "files": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "saved": {
+              "ext": ".png",
+              "bytesBase64": "UE5HQllURVM="
+            }
+          }
+        ],
+        "jobId": "a1",
+        "status": "completed"
+      },
+      "tool": {
+        "name": "generate_image",
+        "isError": false,
+        "outputPattern": "^image ready: {dir}/a2e-image-[0-9]+-[0-9]+\\.png$",
+        "parts": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "data": "UE5HQllURVM="
+          }
+        ],
+        "metadata": {
+          "source": "media",
+          "verb": "image",
+          "client": "a2e",
+          "jobId": "a1",
+          "status": "completed"
+        },
+        "modelParts": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "data": "UE5HQllURVM="
+          }
+        ]
+      },
+      "note": "D23: the default User-Agent goes on the start, the poll AND the header-less download (A2E CloudFront answered 403 without one).",
+      "expectHeaderPatterns": {
+        "User-Agent": "^toolnexus/[0-9]+\\.[0-9]+\\.[0-9]+[^ ]* \\((js|python|golang|java|csharp|elixir|clojure|rust)\\)$"
       }
     }
   ]

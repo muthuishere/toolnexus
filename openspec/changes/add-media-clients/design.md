@@ -15,11 +15,9 @@ taken while pinning it that the ADR left open, so port agents do not re-decide t
    works.
 3. **Routing wraps every all-unavailable outcome**, even for one client:
    `media: no client available for "<verb>": a: …; b: …`. One rule, no special case.
-4. **Arg checks belong to the router**, against the first candidate's `args(verb)`, before any
-   request or spawn. Fall-through *drops* args the next client does not accept: the request was
-   valid for the first choice, and failing on the fallback would defeat the fallback.
-   Style clients keep the ADR 0036 text `not supported by this style` (34 cases depend on it);
-   every other client says `not supported by <name>`.
+4. **Arg checks belong to the router**, per candidate, before any request or spawn. *Superseded
+   by D19 (2026-11-04)*: the first-client check, fall-through arg dropping and the `not supported
+   by <name>` / `by this style` texts are gone.
 5. **Tool schema = the first supporting client's args.** It is the client a call tries first;
    union schemas would invite args the primary rejects.
 6. **`models` map** added beside `model`: `model` is the primary verb's model (the one the spike
@@ -80,10 +78,46 @@ the calls (2026-11-03); each is now a §7G.12 rule with conformance cases. Why e
 - **D13 Missing-result texts** follow the style engine's `no result at <path>` / `no job id at <path>`.
 - **D14 maxBytes texts and enforcement** independent of an injected HTTP client (read ≤ maxBytes+1).
 - **D15 Grok raw JSON sorted** — the only portable byte form of a provider object.
-- **D16 Fall-through re-checks required args** — a fallback that cannot take the call is skipped as
-  unavailable rather than called with a half request; the first candidate still fails plainly.
+- **D16 Fall-through re-checks required args** — *superseded by D19*: the first candidate is no
+  longer special.
 - **D17 CLI cwd is a realpath** — macOS `/var` ⇒ `/private/var`; argv equals `pwd -P`.
 - **D18 tasks.md**: a port's 2.x is ticked only when its code **and** README section are done.
+
+## Decisions from the live example runs (round 3, 2026-11-04)
+
+- **D19 Skip, don't fail, on args a candidate cannot take.** Live: `createMedia([grok, openai])`
+  with `video({prompt, seconds})` failed because Grok (prompt only) was first, although OpenAI could
+  serve it. An arg the first client does not take is the same kind of fact as a missing key: this
+  client cannot serve this call. So every candidate, the first included, is skipped with a reason
+  and the joined `unavailable` error lists them all. Dropping args on fall-through is gone too — a
+  silently ignored `seconds` is a different video. A key that is not canonical for the verb can
+  never be served by anyone, so it stays an immediate plain `failed` error (D7).
+- **D20 `path` on run files.** Hosts want the saved file, not a base64 copy; Go and Rust dropped
+  it between `MediaFile` and `RunResult.files`. The path is carried port-internally; parts stay
+  path-free (§1B).
+- **D21 Usage only as reported.** OpenAI image tokens and OpenRouter's USD cost come back on the
+  response; Grok's ACP `costUsdTicks` has no documented unit, so it goes in `raw` unconverted. No
+  estimates, and no run-level sum yet (a named gap): `RunResult.usage` stays LLM tokens.
+- **D22 Extension: URL first, then mime, `.bin` last.** JS saved an A2E `audio/x-wav` as `.bin`.
+- **D23 Default User-Agent.** Rust's A2E download got a CloudFront 403 with no UA. One value for
+  every request: `toolnexus/<version> (<port>)`; a client/style `User-Agent` header wins.
+
+## Example contract (E1)
+
+Every port ships one runnable media example with identical behaviour:
+
+- **Client order:** `GrokMediaClient`, `CodexMediaClient`, `ElevenLabsMediaClient`, then
+  `OpenAIMediaClient`, `FalMediaClient`, `A2EMediaClient` as fallbacks — each added only when its
+  key (env var) or CLI (on `PATH`) is present.
+- **Steps:** (1) image, prompt `a red apple on a white table`; (2) speech through ElevenLabs, voice
+  from env `MEDIA_VOICE`, else the ElevenLabs default; (3) tool face: list `media.tools()` and call
+  `generate_image`; (4) video through Grok only when `MEDIA_VIDEO=1`; (5) any paid video/talk only
+  when `MEDIA_PAID=1`. Paid image clients use the smallest size and lowest quality.
+- **Output per result:** client, verb, file path or URL, mime type, size in bytes, and usage when
+  present.
+- **Exit code:** non-zero if any attempted step errors; `0` with a hint (which env vars/CLIs to
+  set) when no client is available at all.
+- **Clojure:** runnable from the documented location; `EXAMPLES.md` fixed to match.
 
 ## Options manifest
 

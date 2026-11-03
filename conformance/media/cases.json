@@ -1,5 +1,5 @@
 {
-  "_doc": "Media engine conformance (SPEC §7G). A port's harness starts a fake HTTP server, replaces \"{server}\" in style.baseUrl and in script[].headers values with its URL, sets case.env, then serves script[] in order (an entry's optional headers are sent as response headers): entry 0 answers the start request, entries 1.. answer polls; once exhausted the LAST entry repeats. Every request is recorded; path is recorded exactly as sent (percent-encoding NOT decoded). The harness calls generate(verb,args) and the tool face, and asserts: requests (method, path, body for start, header values in expectHeaders), progress statuses, and either result (MediaResult minus nothing) or error (exact message string). tool = the expected ToolResult (output, isError, parts, metadata). styleError:true marks a style that is invalid at load (SPEC §7G Empty dotPath): a port whose constructor/loader can fail may raise the same error message there instead of from generate; either way no request is made and there is no tool case. Poll timings in these styles are tiny so the suite runs in milliseconds. SINCE ADR 0037: the harness builds createMedia(styleMediaClient(style, case.config ?? {})) — style clients default to gather mode url, so URL results stay URLs; success tool metadata carries client (\"style\" unless style.name). status, when present, is the error's media status (failed|timeout|cancelled|unavailable). unsetEnv lists env vars removed for the case. modelParts (SPEC §7G.6 model visibility): the parts of this tool result that message assembly (§8A) emits to the model — only image parts; video/audio parts stay in RunResult.files and toolCalls[].parts only. Assert with the port's assembly function on a transcript containing this tool result. D9 (SPEC §7G.12): when modelParts is [] the tool-result content the port sends to the model is the plain output string in every message style incl. Anthropic — never an empty content array, never a placeholder; assert it with the same assembly function.",
+  "_doc": "Media engine conformance (SPEC §7G). A port's harness starts a fake HTTP server, replaces \"{server}\" in style.baseUrl and in script[].headers values with its URL, sets case.env, then serves script[] in order (an entry's optional headers are sent as response headers): entry 0 answers the start request, entries 1.. answer polls; once exhausted the LAST entry repeats. Every request is recorded; path is recorded exactly as sent (percent-encoding NOT decoded). The harness calls generate(verb,args) and the tool face, and asserts: requests (method, path, body for start, header values in expectHeaders), progress statuses, and either result (MediaResult minus nothing) or error (exact message string). tool = the expected ToolResult (output, isError, parts, metadata). styleError:true marks a style that is invalid at load (SPEC §7G Empty dotPath): a port whose constructor/loader can fail may raise the same error message there instead of from generate; either way no request is made and there is no tool case. Poll timings in these styles are tiny so the suite runs in milliseconds. SINCE ADR 0037: the harness builds createMedia(styleMediaClient(style, case.config ?? {})) — style clients default to gather mode url, so URL results stay URLs; success tool metadata carries client (\"style\" unless style.name). status, when present, is the error's media status (failed|timeout|cancelled|unavailable). unsetEnv lists env vars removed for the case. modelParts (SPEC §7G.6 model visibility): the parts of this tool result that message assembly (§8A) emits to the model — only image parts; video/audio parts stay in RunResult.files and toolCalls[].parts only. Assert with the port's assembly function on a transcript containing this tool result. D9 (SPEC §7G.12): when modelParts is [] the tool-result content the port sends to the model is the plain output string in every message style incl. Anthropic — never an empty content array, never a placeholder; assert it with the same assembly function. D19: arg checks skip the style client like unavailable (reason '<name>: argument \"<k>\" not supported' / '<name>: missing required argument \"<k>\"', <name> = style.name ?? \"style\"), so a single style yields the joined 'media: no client available for …' error; a non-canonical key is the plain '<verb>: argument \"<k>\" not supported'. D23: expectHeaderPatterns = header name → regex that the header value must match on EVERY request.",
   "cases": [
     {
       "name": "sync_image_urls_mime_from_extension",
@@ -745,12 +745,13 @@
         }
       ],
       "expectRequests": [],
-      "error": "image: argument \"seed\" not supported by this style",
+      "error": "media: no client available for \"image\": style: argument \"seed\" not supported",
       "tool": {
         "name": "generate_image",
         "isError": true,
-        "output": "image: argument \"seed\" not supported by this style"
-      }
+        "output": "media: no client available for \"image\": style: argument \"seed\" not supported"
+      },
+      "status": "unavailable"
     },
     {
       "name": "no_result",
@@ -2544,12 +2545,12 @@
         }
       ],
       "expectRequests": [],
-      "status": "failed",
-      "error": "talk: argument \"audio\" is required",
+      "status": "unavailable",
+      "error": "media: no client available for \"talk\": style: missing required argument \"audio\"",
       "tool": {
         "name": "talking_video",
         "isError": true,
-        "output": "talk: argument \"audio\" is required"
+        "output": "media: no client available for \"talk\": style: missing required argument \"audio\""
       }
     },
     {
@@ -3015,12 +3016,317 @@
       ],
       "expectRequests": [],
       "status": "failed",
-      "error": "image: argument \"negative_prompt\" not supported by this style",
+      "error": "image: argument \"negative_prompt\" not supported",
       "tool": {
         "name": "generate_image",
         "isError": true,
-        "output": "image: argument \"negative_prompt\" not supported by this style"
+        "output": "image: argument \"negative_prompt\" not supported"
       }
+    },
+    {
+      "name": "style_user_agent_default_on_start_and_poll",
+      "env": {
+        "MEDIA_TEST_KEY": "FAKE_KEY"
+      },
+      "style": {
+        "baseUrl": "{server}",
+        "headers": {
+          "Authorization": "Bearer ${MEDIA_TEST_KEY}",
+          "X-Missing": "a${MEDIA_UNSET_VAR}b"
+        },
+        "verbs": {
+          "speech": {
+            "mode": "async",
+            "kind": "audio",
+            "start": {
+              "method": "POST",
+              "path": "/v1/tts"
+            },
+            "args": {
+              "text": "text_prompt",
+              "voice": "references.0.speaker"
+            },
+            "idPath": "data.0._id",
+            "poll": {
+              "path": "/v1/tts/{id}",
+              "statusPath": "data.current_status",
+              "done": [
+                "completed"
+              ],
+              "failed": [
+                "failed"
+              ],
+              "intervalMs": 1,
+              "timeoutMs": 5000
+            },
+            "resultPath": "data.result_url"
+          }
+        }
+      },
+      "verb": "speech",
+      "args": {
+        "text": "hi",
+        "voice": "alloy"
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {
+            "data": [
+              {
+                "_id": "j1"
+              }
+            ]
+          }
+        },
+        {
+          "status": 200,
+          "body": {
+            "data": {
+              "current_status": "processing"
+            }
+          }
+        },
+        {
+          "status": 200,
+          "body": {
+            "data": {
+              "current_status": "sent"
+            }
+          }
+        },
+        {
+          "status": 200,
+          "body": {
+            "data": {
+              "current_status": "completed",
+              "result_url": "https://x/s.wav"
+            }
+          }
+        }
+      ],
+      "expectHeaders": {
+        "Authorization": "Bearer FAKE_KEY",
+        "X-Missing": "ab"
+      },
+      "expectRequests": [
+        {
+          "method": "POST",
+          "path": "/v1/tts",
+          "body": {
+            "text_prompt": "hi",
+            "references": [
+              {
+                "speaker": "alloy"
+              }
+            ]
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/v1/tts/j1"
+        },
+        {
+          "method": "GET",
+          "path": "/v1/tts/j1"
+        },
+        {
+          "method": "GET",
+          "path": "/v1/tts/j1"
+        }
+      ],
+      "expectProgress": [
+        "processing",
+        "sent",
+        "completed"
+      ],
+      "result": {
+        "files": [
+          {
+            "type": "audio",
+            "mimeType": "audio/wav",
+            "url": "https://x/s.wav"
+          }
+        ],
+        "jobId": "j1",
+        "status": "completed"
+      },
+      "tool": {
+        "name": "generate_speech",
+        "isError": false,
+        "output": "audio ready: https://x/s.wav",
+        "parts": [
+          {
+            "type": "audio",
+            "mimeType": "audio/wav",
+            "url": "https://x/s.wav"
+          }
+        ],
+        "metadata": {
+          "source": "media",
+          "verb": "speech",
+          "client": "style",
+          "jobId": "j1",
+          "status": "completed"
+        },
+        "modelParts": []
+      },
+      "note": "D23: no User-Agent in style headers ⇒ the default toolnexus UA on start and every poll.",
+      "expectHeaderPatterns": {
+        "User-Agent": "^toolnexus/[0-9]+\\.[0-9]+\\.[0-9]+[^ ]* \\((js|python|golang|java|csharp|elixir|clojure|rust)\\)$"
+      }
+    },
+    {
+      "name": "style_user_agent_header_overrides",
+      "env": {
+        "MEDIA_TEST_KEY": "FAKE_KEY"
+      },
+      "style": {
+        "baseUrl": "{server}",
+        "headers": {
+          "Authorization": "Bearer ${MEDIA_TEST_KEY}",
+          "X-Missing": "a${MEDIA_UNSET_VAR}b",
+          "User-Agent": "my-app/2.0"
+        },
+        "verbs": {
+          "speech": {
+            "mode": "async",
+            "kind": "audio",
+            "start": {
+              "method": "POST",
+              "path": "/v1/tts"
+            },
+            "args": {
+              "text": "text_prompt",
+              "voice": "references.0.speaker"
+            },
+            "idPath": "data.0._id",
+            "poll": {
+              "path": "/v1/tts/{id}",
+              "statusPath": "data.current_status",
+              "done": [
+                "completed"
+              ],
+              "failed": [
+                "failed"
+              ],
+              "intervalMs": 1,
+              "timeoutMs": 5000
+            },
+            "resultPath": "data.result_url"
+          }
+        }
+      },
+      "verb": "speech",
+      "args": {
+        "text": "hi",
+        "voice": "alloy"
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {
+            "data": [
+              {
+                "_id": "j1"
+              }
+            ]
+          }
+        },
+        {
+          "status": 200,
+          "body": {
+            "data": {
+              "current_status": "processing"
+            }
+          }
+        },
+        {
+          "status": 200,
+          "body": {
+            "data": {
+              "current_status": "sent"
+            }
+          }
+        },
+        {
+          "status": 200,
+          "body": {
+            "data": {
+              "current_status": "completed",
+              "result_url": "https://x/s.wav"
+            }
+          }
+        }
+      ],
+      "expectHeaders": {
+        "Authorization": "Bearer FAKE_KEY",
+        "X-Missing": "ab",
+        "User-Agent": "my-app/2.0"
+      },
+      "expectRequests": [
+        {
+          "method": "POST",
+          "path": "/v1/tts",
+          "body": {
+            "text_prompt": "hi",
+            "references": [
+              {
+                "speaker": "alloy"
+              }
+            ]
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/v1/tts/j1"
+        },
+        {
+          "method": "GET",
+          "path": "/v1/tts/j1"
+        },
+        {
+          "method": "GET",
+          "path": "/v1/tts/j1"
+        }
+      ],
+      "expectProgress": [
+        "processing",
+        "sent",
+        "completed"
+      ],
+      "result": {
+        "files": [
+          {
+            "type": "audio",
+            "mimeType": "audio/wav",
+            "url": "https://x/s.wav"
+          }
+        ],
+        "jobId": "j1",
+        "status": "completed"
+      },
+      "tool": {
+        "name": "generate_speech",
+        "isError": false,
+        "output": "audio ready: https://x/s.wav",
+        "parts": [
+          {
+            "type": "audio",
+            "mimeType": "audio/wav",
+            "url": "https://x/s.wav"
+          }
+        ],
+        "metadata": {
+          "source": "media",
+          "verb": "speech",
+          "client": "style",
+          "jobId": "j1",
+          "status": "completed"
+        },
+        "modelParts": []
+      },
+      "note": "D23: a User-Agent in style headers replaces the default, unchanged, on every request."
     }
   ]
 }

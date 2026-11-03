@@ -9,7 +9,7 @@ Every port replays all of these hermetically (no network, no real CLI, no keys) 
 | `cases.json` | style engine (JSON styles, `loadMediaStyle` path) | fake HTTP server, `createMedia(styleMediaClient(style, config))` |
 | `clients.json` | built-in API clients: a2e, elevenlabs, openai, openrouter, fal; gather; unavailable mapping | fake HTTP server, `createMedia(<Client>(config))` |
 | `cli.json` | CLI clients: grok, codex; wrong-kind guard, failed tool result, kill on timeout, spawn failure | `fake-cli/fake-cli.sh` via `/bin/sh` |
-| `routing.json` | `createMedia` routing, fall-through on `unavailable` only, tool schemas from the first supporting client | test-only custom clients |
+| `routing.json` | `createMedia` routing, fall-through on `unavailable` or a skipped candidate (D19), tool schemas from the first supporting client | test-only custom clients |
 
 Each file's `_doc` is the exact harness contract. Shared rules: `{server}` / `{dir}` / `{inputs}` /
 `{out}` / `{cwd}` placeholders; `script[]` served in order with the last entry repeating; a field

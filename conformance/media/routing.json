@@ -1,5 +1,5 @@
 {
-  "_doc": "createMedia routing and tools conformance (SPEC §7G.3, §7G.6). Each case builds test-only custom MediaClients from clients[]: name; supports(verb) = verb in verbs; args(verb) = verbs[verb].args (absent ⇒ the client declares no args(), so every canonical arg is accepted); calling a verb records {client, verb, args} and returns outcome.result, or fails with a media error {message: outcome.error, status: outcome.status} (status unavailable must use the port's typed unavailable error). Assert expectCalls exactly (order, args after nulls removed), then result / error+status, then the tool face (fresh clients). schemaCases: build createMedia(clients).tools() and assert names, order, descriptions, source and inputSchema exactly (Go: key order not asserted). emptyClients: createMedia([]) fails with exactly that message. modelParts (SPEC §7G.6 model visibility): the parts of this tool result that message assembly (§8A) emits to the model — only image parts; video/audio parts stay in RunResult.files and toolCalls[].parts only. Assert with the port's assembly function on a transcript containing this tool result. D9 (SPEC §7G.12): when modelParts is [] the tool-result content the port sends to the model is the plain output string in every message style incl. Anthropic — never an empty content array, never a placeholder; assert it with the same assembly function.",
+  "_doc": "createMedia routing and tools conformance (SPEC §7G.3, §7G.6). Each case builds test-only custom MediaClients from clients[]: name; supports(verb) = verb in verbs; args(verb) = verbs[verb].args (absent ⇒ the client declares no args(), so every canonical arg is accepted); calling a verb records {client, verb, args} and returns outcome.result, or fails with a media error {message: outcome.error, status: outcome.status} (status unavailable must use the port's typed unavailable error). Assert expectCalls exactly (order, args after nulls removed), then result / error+status, then the tool face (fresh clients). schemaCases: build createMedia(clients).tools() and assert names, order, descriptions, source and inputSchema exactly (Go: key order not asserted). emptyClients: createMedia([]) fails with exactly that message. modelParts (SPEC §7G.6 model visibility): the parts of this tool result that message assembly (§8A) emits to the model — only image parts; video/audio parts stay in RunResult.files and toolCalls[].parts only. Assert with the port's assembly function on a transcript containing this tool result. D9 (SPEC §7G.12): when modelParts is [] the tool-result content the port sends to the model is the plain output string in every message style incl. Anthropic — never an empty content array, never a placeholder; assert it with the same assembly function. D19 (SPEC §7G.3/§7G.12): a candidate whose args() does not accept a canonical arg, or that lacks a required one, is SKIPPED (never called) with reason '<name>: argument \"<k>\" not supported' / '<name>: missing required argument \"<k>\"'; every candidate skipped/unavailable ⇒ the joined unavailable error. A non-canonical key fails at once: '<verb>: argument \"<k>\" not supported'. D21: outcome.result may carry usage; it is returned as is and the tool metadata carries it as usage.",
   "cases": [
     {
       "name": "first_supporting_client_wins",
@@ -535,7 +535,7 @@
       "error": "media: no client supports \"video\""
     },
     {
-      "name": "fall_through_drops_args_the_next_client_does_not_accept",
+      "name": "candidate_not_accepting_arg_is_skipped_after_unavailable",
       "clients": [
         {
           "name": "a",
@@ -597,28 +597,18 @@
             "prompt": "cat",
             "seed": 3
           }
-        },
-        {
-          "client": "b",
-          "verb": "image",
-          "args": {
-            "prompt": "cat"
-          }
         }
       ],
-      "result": {
-        "files": [
-          {
-            "type": "image",
-            "mimeType": "image/png",
-            "url": "https://x/b.png"
-          }
-        ],
-        "status": "completed"
-      }
+      "note": "D19: args are never dropped; b does not accept seed ⇒ skipped; its reason joins.",
+      "tool": {
+        "isError": true,
+        "output": "media: no client available for \"image\": a: HTTP 402: {}; b: argument \"seed\" not supported"
+      },
+      "error": "media: no client available for \"image\": a: HTTP 402: {}; b: argument \"seed\" not supported",
+      "status": "unavailable"
     },
     {
-      "name": "first_client_rejects_an_arg_it_does_not_accept",
+      "name": "every_candidate_rejects_an_arg_joined",
       "clients": [
         {
           "name": "a",
@@ -682,12 +672,13 @@
         "aspectRatio": "1:1"
       },
       "expectCalls": [],
-      "status": "failed",
-      "error": "image: argument \"aspectRatio\" not supported by a",
+      "status": "unavailable",
+      "error": "media: no client available for \"image\": a: argument \"aspectRatio\" not supported; b: argument \"aspectRatio\" not supported",
       "tool": {
         "isError": true,
-        "output": "image: argument \"aspectRatio\" not supported by a"
-      }
+        "output": "media: no client available for \"image\": a: argument \"aspectRatio\" not supported; b: argument \"aspectRatio\" not supported"
+      },
+      "note": "D19: a accepts only prompt, b also seed; neither accepts aspectRatio (canonical, first in sorted order) ⇒ both skipped, never called."
     },
     {
       "name": "client_declared_required_arg",
@@ -727,12 +718,13 @@
         "image": "https://x/f.png"
       },
       "expectCalls": [],
-      "status": "failed",
-      "error": "talk: argument \"audio\" is required",
+      "status": "unavailable",
+      "error": "media: no client available for \"talk\": a: missing required argument \"audio\"",
       "tool": {
         "isError": true,
-        "output": "talk: argument \"audio\" is required"
-      }
+        "output": "media: no client available for \"talk\": a: missing required argument \"audio\""
+      },
+      "note": "D19 (supersedes the D16 first-client case): a missing required arg skips the only candidate."
     },
     {
       "name": "client_without_args_gets_every_arg",
@@ -846,7 +838,7 @@
     },
     {
       "name": "client_without_args_rejects_non_canonical_key",
-      "note": "D7: a client without args() accepts every canonical arg and nothing else.",
+      "note": "D7/D19: a non-canonical key is accepted by no client ⇒ plain failed error, no client called.",
       "clients": [
         {
           "name": "d",
@@ -875,15 +867,15 @@
       },
       "expectCalls": [],
       "status": "failed",
-      "error": "image: argument \"foo\" not supported by d",
+      "error": "image: argument \"foo\" not supported",
       "tool": {
         "isError": true,
-        "output": "image: argument \"foo\" not supported by d"
+        "output": "image: argument \"foo\" not supported"
       }
     },
     {
       "name": "fall_through_skips_candidate_missing_required_arg",
-      "note": "D16: b requires audio, which the call lacks ⇒ b is skipped as unavailable (never called); c serves it.",
+      "note": "D19 (was D16): b requires audio, which the call lacks ⇒ b is skipped as unavailable (never called); c serves it.",
       "clients": [
         {
           "name": "a",
@@ -1009,7 +1001,7 @@
     },
     {
       "name": "fall_through_missing_required_arg_joins_unavailable",
-      "note": "D16: the skipped candidate's message joins the all-unavailable error.",
+      "note": "D19 (was D16): the skipped candidate's message joins the all-unavailable error.",
       "clients": [
         {
           "name": "a",
@@ -1076,6 +1068,374 @@
       "tool": {
         "isError": true,
         "output": "media: no client available for \"talk\": a: HTTP 402: {}; b: missing required argument \"audio\""
+      }
+    },
+    {
+      "name": "first_candidate_rejects_arg_falls_to_next",
+      "note": "D19: a Grok-like first client does not accept seconds ⇒ skipped (never called); the next client serves the call with the args unchanged.",
+      "clients": [
+        {
+          "name": "grok",
+          "verbs": {
+            "video": {
+              "args": [
+                {
+                  "name": "prompt",
+                  "required": true
+                },
+                {
+                  "name": "image",
+                  "required": false
+                }
+              ],
+              "outcome": {
+                "result": {
+                  "files": [
+                    {
+                      "type": "file",
+                      "mimeType": "video/mp4",
+                      "url": "https://x/g.mp4"
+                    }
+                  ],
+                  "status": "completed"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "openai",
+          "verbs": {
+            "video": {
+              "args": [
+                {
+                  "name": "prompt",
+                  "required": true
+                },
+                {
+                  "name": "seconds",
+                  "required": false
+                }
+              ],
+              "outcome": {
+                "result": {
+                  "files": [
+                    {
+                      "type": "file",
+                      "mimeType": "video/mp4",
+                      "url": "https://x/o.mp4"
+                    }
+                  ],
+                  "jobId": "v1",
+                  "status": "completed"
+                }
+              }
+            }
+          }
+        }
+      ],
+      "verb": "video",
+      "args": {
+        "prompt": "a cat",
+        "seconds": 4
+      },
+      "expectCalls": [
+        {
+          "client": "openai",
+          "verb": "video",
+          "args": {
+            "prompt": "a cat",
+            "seconds": 4
+          }
+        }
+      ],
+      "result": {
+        "files": [
+          {
+            "type": "file",
+            "mimeType": "video/mp4",
+            "url": "https://x/o.mp4"
+          }
+        ],
+        "jobId": "v1",
+        "status": "completed"
+      },
+      "tool": {
+        "name": "generate_video",
+        "isError": false,
+        "output": "video ready: https://x/o.mp4",
+        "parts": [
+          {
+            "type": "file",
+            "mimeType": "video/mp4",
+            "url": "https://x/o.mp4"
+          }
+        ],
+        "metadata": {
+          "source": "media",
+          "verb": "video",
+          "client": "openai",
+          "jobId": "v1",
+          "status": "completed"
+        },
+        "modelParts": []
+      }
+    },
+    {
+      "name": "skipped_and_unavailable_reasons_join_in_order",
+      "note": "D19: skip reasons and unavailable messages join in candidate order.",
+      "clients": [
+        {
+          "name": "grok",
+          "verbs": {
+            "video": {
+              "args": [
+                {
+                  "name": "prompt",
+                  "required": true
+                }
+              ],
+              "outcome": {
+                "result": {
+                  "files": [
+                    {
+                      "type": "file",
+                      "mimeType": "video/mp4",
+                      "url": "https://x/g.mp4"
+                    }
+                  ],
+                  "status": "completed"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "fal",
+          "verbs": {
+            "video": {
+              "args": [
+                {
+                  "name": "prompt",
+                  "required": true
+                },
+                {
+                  "name": "seconds",
+                  "required": false
+                }
+              ],
+              "outcome": {
+                "error": "fal: HTTP 402: {}",
+                "status": "unavailable"
+              }
+            }
+          }
+        },
+        {
+          "name": "talky",
+          "verbs": {
+            "video": {
+              "args": [
+                {
+                  "name": "prompt",
+                  "required": true
+                },
+                {
+                  "name": "image",
+                  "required": true
+                },
+                {
+                  "name": "seconds",
+                  "required": false
+                }
+              ],
+              "outcome": {
+                "result": {
+                  "files": [
+                    {
+                      "type": "file",
+                      "mimeType": "video/mp4",
+                      "url": "https://x/t.mp4"
+                    }
+                  ],
+                  "status": "completed"
+                }
+              }
+            }
+          }
+        }
+      ],
+      "verb": "video",
+      "args": {
+        "prompt": "a cat",
+        "seconds": 4
+      },
+      "expectCalls": [
+        {
+          "client": "fal",
+          "verb": "video",
+          "args": {
+            "prompt": "a cat",
+            "seconds": 4
+          }
+        }
+      ],
+      "status": "unavailable",
+      "error": "media: no client available for \"video\": grok: argument \"seconds\" not supported; fal: HTTP 402: {}; talky: missing required argument \"image\"",
+      "tool": {
+        "isError": true,
+        "output": "media: no client available for \"video\": grok: argument \"seconds\" not supported; fal: HTTP 402: {}; talky: missing required argument \"image\""
+      }
+    },
+    {
+      "name": "non_canonical_key_plain_error_even_with_fallbacks",
+      "note": "D7/D19: a non-canonical key (not in verbs.json) fails at once, before any candidate; not a joined error.",
+      "clients": [
+        {
+          "name": "a",
+          "verbs": {
+            "image": {
+              "args": [
+                {
+                  "name": "prompt",
+                  "required": true
+                }
+              ],
+              "outcome": {
+                "result": {
+                  "files": [
+                    {
+                      "type": "image",
+                      "mimeType": "image/png",
+                      "url": "https://x/a.png"
+                    }
+                  ],
+                  "status": "completed"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "b",
+          "verbs": {
+            "image": {
+              "outcome": {
+                "result": {
+                  "files": [
+                    {
+                      "type": "image",
+                      "mimeType": "image/png",
+                      "url": "https://x/b.png"
+                    }
+                  ],
+                  "status": "completed"
+                }
+              }
+            }
+          }
+        }
+      ],
+      "verb": "image",
+      "args": {
+        "prompt": "cat",
+        "seed": 3,
+        "zoom": 2
+      },
+      "expectCalls": [],
+      "status": "failed",
+      "error": "image: argument \"zoom\" not supported",
+      "tool": {
+        "isError": true,
+        "output": "image: argument \"zoom\" not supported"
+      }
+    },
+    {
+      "name": "usage_passes_through_to_tool_metadata",
+      "note": "D21: MediaResult.usage is returned as is; the tool face copies it to metadata.usage.",
+      "clients": [
+        {
+          "name": "u",
+          "verbs": {
+            "image": {
+              "outcome": {
+                "result": {
+                  "files": [
+                    {
+                      "type": "image",
+                      "mimeType": "image/png",
+                      "url": "https://x/u.png"
+                    }
+                  ],
+                  "status": "completed",
+                  "usage": {
+                    "inputTokens": 12,
+                    "outputTokens": 3400,
+                    "costUsd": 0.02
+                  }
+                }
+              }
+            }
+          }
+        }
+      ],
+      "verb": "image",
+      "args": {
+        "prompt": "cat"
+      },
+      "expectCalls": [
+        {
+          "client": "u",
+          "verb": "image",
+          "args": {
+            "prompt": "cat"
+          }
+        }
+      ],
+      "result": {
+        "files": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "url": "https://x/u.png"
+          }
+        ],
+        "status": "completed",
+        "usage": {
+          "inputTokens": 12,
+          "outputTokens": 3400,
+          "costUsd": 0.02
+        }
+      },
+      "tool": {
+        "name": "generate_image",
+        "isError": false,
+        "output": "image ready: https://x/u.png",
+        "parts": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "url": "https://x/u.png"
+          }
+        ],
+        "metadata": {
+          "source": "media",
+          "verb": "image",
+          "client": "u",
+          "status": "completed",
+          "usage": {
+            "inputTokens": 12,
+            "outputTokens": 3400,
+            "costUsd": 0.02
+          }
+        },
+        "modelParts": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "url": "https://x/u.png"
+          }
+        ]
       }
     }
   ],

@@ -1,5 +1,5 @@
 {
-  "_doc": "CLI client conformance (SPEC §7G.10, §7G.11) over conformance/media/fake-cli/fake-cli.sh — see fake-cli/README.md for the exact harness steps. client = grok|codex. Placeholders: {out} the fake's out dir, {dir} gather.dir, {cwd} in expectArgv = must equal <out>/cwd.txt byte for byte (the fake writes `pwd -P`; D17: the client passes the realpath of its temp dir, so no symlink resolution on either side). command (when present) replaces the fake command entirely (spawn-failure case). env is set in the TEST process (the child inherits it; Codex's folder lookup reads it). expectExists / expectMissing: paths that must / must not exist after the run. expectNoSpawn: argv.txt must not exist. maxElapsedMs: the call must return within it (kill on timeout). Other fields as in clients.json. modelParts (SPEC §7G.6 model visibility): the parts of this tool result that message assembly (§8A) emits to the model — only image parts; video/audio parts stay in RunResult.files and toolCalls[].parts only. Assert with the port's assembly function on a transcript containing this tool result. ctxTimeoutMs (D12): function face only, ctx.deadline = now + ctxTimeoutMs; errorPrefix asserts the message start. D9 (SPEC §7G.12): when modelParts is [] the tool-result content the port sends to the model is the plain output string in every message style incl. Anthropic — never an empty content array, never a placeholder; assert it with the same assembly function.",
+  "_doc": "CLI client conformance (SPEC §7G.10, §7G.11) over conformance/media/fake-cli/fake-cli.sh — see fake-cli/README.md for the exact harness steps. client = grok|codex. Placeholders: {out} the fake's out dir, {dir} gather.dir, {cwd} in expectArgv = must equal <out>/cwd.txt byte for byte after removing its one trailing newline (the fake writes `pwd -P`; D17: the client passes the realpath of its temp dir, so no symlink resolution on either side). command (when present) replaces the fake command entirely (spawn-failure case). env is set in the TEST process (the child inherits it; Codex's folder lookup reads it). expectExists / expectMissing: paths that must / must not exist after the run. expectNoSpawn: argv.txt must not exist. maxElapsedMs: the call must return within it (kill on timeout). Other fields as in clients.json. modelParts (SPEC §7G.6 model visibility): the parts of this tool result that message assembly (§8A) emits to the model — only image parts; video/audio parts stay in RunResult.files and toolCalls[].parts only. Assert with the port's assembly function on a transcript containing this tool result. ctxTimeoutMs (D12): function face only, ctx.deadline = now + ctxTimeoutMs; errorPrefix asserts the message start. D9 (SPEC §7G.12): when modelParts is [] the tool-result content the port sends to the model is the plain output string in every message style incl. Anthropic — never an empty content array, never a placeholder; assert it with the same assembly function. D19: a CLI client that does not accept a canonical arg is skipped (never spawned) ⇒ the joined 'media: no client available for …' error. D20 runFilePath / D21 noUsage: as in clients.json. D21: Grok's end-event costUsdTicks ⇒ usage.raw.costUsdTicks, never converted; total_cost_usd is ignored.",
   "cases": [
     {
       "name": "grok_image_path_from_tool_result_download",
@@ -87,7 +87,8 @@
             "data": "SlBFR0JZVEVT"
           }
         ]
-      }
+      },
+      "runFilePath": true
     },
     {
       "name": "grok_image_url_mode_keeps_cli_path",
@@ -158,7 +159,9 @@
             "data": "UE5HQllURVM="
           }
         ]
-      }
+      },
+      "runFilePath": true,
+      "noUsage": true
     },
     {
       "name": "grok_keep_false_deletes_original",
@@ -496,11 +499,11 @@
         "{\"type\":\"end\",\"stopReason\":\"end_turn\",\"sessionId\":\"s1\",\"num_turns\":1,\"total_cost_usd\":0.01}"
       ],
       "expectNoSpawn": true,
-      "status": "failed",
-      "error": "image: argument \"width\" not supported by grok",
+      "status": "unavailable",
+      "error": "media: no client available for \"image\": grok: argument \"width\" not supported",
       "tool": {
         "isError": true,
-        "output": "image: argument \"width\" not supported by grok"
+        "output": "media: no client available for \"image\": grok: argument \"width\" not supported"
       }
     },
     {
@@ -580,7 +583,9 @@
             "data": "UE5HQllURVM="
           }
         ]
-      }
+      },
+      "runFilePath": true,
+      "noUsage": true
     },
     {
       "name": "codex_image_from_generated_images_folder",
@@ -818,6 +823,89 @@
       ],
       "status": "timeout",
       "errorPrefix": "grok: timed out after "
+    },
+    {
+      "name": "grok_usage_cost_ticks_raw",
+      "client": "grok",
+      "config": {
+        "gather": {
+          "mode": "url",
+          "dir": "{dir}"
+        },
+        "model": "grok-4.7-build"
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "cat"
+      },
+      "fixture": [
+        "{\"type\":\"tool_call\",\"toolCallId\":\"c0\",\"title\":\"image_gen\",\"kind\":\"image_gen\",\"status\":\"pending\",\"toolName\":\"image_gen\",\"rawInput\":{\"prompt\":\"a red apple\",\"aspect_ratio\":\"1:1\"},\"content\":[],\"locations\":[]}",
+        "#file sessions/s1/images/1.png PNGBYTES",
+        "{\"type\":\"tool_call_update\",\"toolCallId\":\"c0\",\"status\":\"completed\",\"rawOutput\":{\"type\":\"ImageGen\",\"path\":\"{out}/sessions/s1/images/1.png\",\"filename\":\"1.png\",\"session_folder\":\"images\"},\"locations\":[]}",
+        "{\"type\":\"end\",\"stopReason\":\"end_turn\",\"sessionId\":\"s1\",\"num_turns\":1,\"total_cost_usd\":0.01,\"costUsdTicks\":351342400}"
+      ],
+      "expectArgv": [
+        "-p",
+        "Generate exactly one image with your image generation tool: cat. Do not write code. Reply only with the file path.",
+        "--cwd",
+        "{cwd}",
+        "--output-format",
+        "streaming-json",
+        "--yolo",
+        "--no-auto-update",
+        "-m",
+        "grok-4.7-build"
+      ],
+      "result": {
+        "files": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "path": "{out}/sessions/s1/images/1.png",
+            "url": "file://{out}/sessions/s1/images/1.png"
+          }
+        ],
+        "jobId": "s1",
+        "status": "completed",
+        "usage": {
+          "raw": {
+            "costUsdTicks": 351342400
+          }
+        }
+      },
+      "tool": {
+        "name": "generate_image",
+        "isError": false,
+        "output": "image ready: {out}/sessions/s1/images/1.png",
+        "parts": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "data": "UE5HQllURVM="
+          }
+        ],
+        "metadata": {
+          "source": "media",
+          "verb": "image",
+          "client": "grok",
+          "jobId": "s1",
+          "status": "completed",
+          "usage": {
+            "raw": {
+              "costUsdTicks": 351342400
+            }
+          }
+        },
+        "modelParts": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "data": "UE5HQllURVM="
+          }
+        ]
+      },
+      "liveVerified": false,
+      "note": "D21: costUsdTicks (live ACP _meta.usage showed 351342400 for one image; unit undocumented) ⇒ usage.raw.costUsdTicks verbatim. Its location on the streaming-json end event is pinned here, not yet live-verified."
     }
   ]
 }

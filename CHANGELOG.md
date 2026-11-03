@@ -29,6 +29,22 @@ and your agent seven tools, and the provider is a small named client instead of 
   installed, or Grok's Zero Data Retention blocking video. A bad prompt or a server error is
   returned as is, not hidden behind a second provider's bill. Errors carry a typed status, so you
   can test for `unavailable` without reading the message.
+  A client that cannot take your arguments is skipped the same way: `createMedia([grok, openai])`
+  with `video({prompt, seconds: 5})` goes straight to OpenAI because Grok has no length setting,
+  instead of failing on the first client. Arguments are never silently dropped; if no client can
+  take them you get one `media: no client available for "video": grok: argument "seconds" not
+  supported; …` error listing every client's reason. A misspelled argument (not one of the verb's
+  canonical names) still fails at once.
+- **What a call cost, when the provider says** — results (and the tool's `metadata.usage`) carry
+  `usage` with `inputTokens` / `outputTokens` from OpenAI images, plus `costUsd` from OpenRouter.
+  Grok's `costUsdTicks` is passed through as `usage.raw.costUsdTicks` without conversion, because
+  its unit is undocumented. Other clients report nothing rather than an estimate. **Gap:** there
+  is no run-level total of media usage yet; `RunResult.usage` still counts LLM tokens only.
+- **Saved files keep their path and a real extension** — each `RunResult.files` entry for a saved
+  file carries its absolute `path` (never sent to the model); file names take the URL's own
+  extension, else one from the mime type (`audio/x-wav` is now `.wav`, not `.bin`). Every media
+  request sends `User-Agent: toolnexus/<version> (<port>)` unless you set one, since some CDNs
+  refuse requests without it.
 - **Files you can keep** — `gather.mode` decides what you get back: `download` (default for named
   clients) saves every result under `gather.dir`, so a2e's URLs that expire in 3–30 days are no
   longer your problem; `url` keeps provider URLs; `inline` returns the bytes. A `maxBytes` cap

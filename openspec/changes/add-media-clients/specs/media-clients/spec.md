@@ -12,7 +12,7 @@ The library SHALL define a `MediaClient` with a `name`, `supports(verb)`, an opt
 - **THEN** the host can detect `unavailable` through the port's type or sentinel, not by text
 
 ### Requirement: createMedia routes and falls through only on unavailable
-`createMedia(client | [client])` SHALL try the clients that support a verb in order, return the first outcome that is not `unavailable` (success or any other error), move on only on `unavailable`, drop args the next client does not accept, and when every candidate is unavailable fail with `media: no client available for "<verb>": ` followed by each message joined by `"; "`.
+`createMedia(client | [client])` SHALL try the clients that support a verb in order, return the first outcome that is not `unavailable` (success or any other error), move on only on `unavailable` or a skipped candidate (never dropping args), and when every candidate is unavailable or skipped fail with `media: no client available for "<verb>": ` followed by each message joined by `"; "`.
 
 #### Scenario: Fall-through on unavailable
 - **WHEN** case `falls_through_on_unavailable` is replayed
@@ -151,15 +151,19 @@ An HTTP 402 or quota-429 on a result download or an input fetch SHALL be status 
 - **THEN** the error is `transcribe: cannot read "<ref>": HTTP 402` with status `failed`
 
 ### Requirement: Only canonical args are accepted
-A client's accepted args SHALL be canonical args only: a style's non-canonical mapped names are not accepted args, and any non-canonical key SHALL be rejected `<verb>: argument "<key>" not supported by <name|this style>` for every client, including one without `args()`.
+A client's accepted args SHALL be canonical args only: a style's non-canonical mapped names are not accepted args. A key that is not a canonical arg of the verb SHALL fail the call before any client is tried with `<verb>: argument "<key>" not supported`, status `failed`.
 
 #### Scenario: Style maps a non-canonical name
 - **WHEN** case `style_noncanonical_mapped_arg_is_not_accepted` runs
-- **THEN** no request is made and the error names `negative_prompt`
+- **THEN** no request is made and the error is `image: argument "negative_prompt" not supported`
 
 #### Scenario: Client without args
 - **WHEN** case `client_without_args_rejects_non_canonical_key` runs
-- **THEN** the client is not called and the error is `image: argument "foo" not supported by d`
+- **THEN** the client is not called and the error is `image: argument "foo" not supported`
+
+#### Scenario: Non-canonical key with fallbacks
+- **WHEN** case `non_canonical_key_plain_error_even_with_fallbacks` runs
+- **THEN** no client is called and the error is `image: argument "zoom" not supported`, not a joined error
 
 ### Requirement: A media result without image parts sends plain text
 When a media tool result emits no image part, message assembly SHALL send its `output` string as the tool-result content in every message style, including Anthropic, with no empty array and no placeholder.
@@ -204,16 +208,88 @@ A Grok failed tool result without a message SHALL produce its error from `rawOut
 - **WHEN** case `grok_failed_raw_output_keys_sorted` runs
 - **THEN** the error is `grok: no video: {"alpha":{"a":"x","b":2},"zeta":[1,{"c":null,"d":true}]}`
 
-### Requirement: Fall-through re-checks required args
-Before a fall-through candidate is called its required args SHALL be checked; a missing one SHALL skip it as unavailable with `<name>: missing required argument "<key>"`, joined into the all-unavailable message. On the first candidate a missing required arg SHALL stay a plain `failed` error.
+### Requirement: A candidate that cannot take the args is skipped
+Before calling any candidate, the first included, the router SHALL check the args against its `args(verb)`. A canonical arg it does not accept SHALL skip it like `unavailable` with reason `<name>: argument "<key>" not supported` (first in sorted code-point order); otherwise a missing required arg SHALL skip it with `<name>: missing required argument "<key>"` (first in canonical order). Every candidate skipped or unavailable SHALL fail with status `unavailable` and `media: no client available for "<verb>": ` plus each reason in candidate order joined by `"; "`.
+
+#### Scenario: First candidate rejects an arg
+- **WHEN** case `first_candidate_rejects_arg_falls_to_next` runs (a Grok-like client without `seconds`, then a client with it)
+- **THEN** the first client is never called and the second serves the call with `seconds` unchanged
+
+#### Scenario: Every candidate rejects
+- **WHEN** case `every_candidate_rejects_an_arg_joined` runs
+- **THEN** no client is called and the error is `media: no client available for "image": a: argument "aspectRatio" not supported; b: argument "aspectRatio" not supported`
+
+#### Scenario: Skips and unavailable join in order
+- **WHEN** case `skipped_and_unavailable_reasons_join_in_order` runs
+- **THEN** only `fal` is called and the error joins `grok: argument "seconds" not supported`, `fal: HTTP 402: {}` and `talky: missing required argument "image"` in that order
+
+#### Scenario: Single client missing a required arg
+- **WHEN** case `client_declared_required_arg` runs
+- **THEN** the error is `media: no client available for "talk": a: missing required argument "audio"` with status `unavailable`
 
 #### Scenario: Skipped fallback
 - **WHEN** case `fall_through_skips_candidate_missing_required_arg` runs
 - **THEN** client b is never called and client c serves the call
 
-#### Scenario: All unavailable
+#### Scenario: Skipped fallback joins the error
 - **WHEN** case `fall_through_missing_required_arg_joins_unavailable` runs
 - **THEN** the error is `media: no client available for "talk": a: HTTP 402: {}; b: missing required argument "audio"`
+
+### Requirement: Run files carry the local path
+When gather has a local file for a `MediaFile` it SHALL set `path` (absolute), and the matching `RunResult.files` entry SHALL carry the same `path` in every port; parts and anything sent to a model SHALL never contain it.
+
+#### Scenario: Downloaded file
+- **WHEN** a `clients.json` or `cli.json` case marked `runFilePath: true` runs
+- **THEN** each `RunResult.files` entry built from its tool call has `path` equal to the saved file's absolute path
+
+#### Scenario: URL kept
+- **WHEN** case `fal_image_url_mode_env_key_size_seed` (`runFilePath: false`) runs
+- **THEN** no `RunResult.files` entry has a `path`
+
+### Requirement: Media usage is reported only as the provider gives it
+`MediaResult.usage` and the tool's `metadata.usage` SHALL be set only from provider fields: OpenAI images `usage.input_tokens`/`output_tokens` as `inputTokens`/`outputTokens`; OpenRouter `usage.prompt_tokens`/`completion_tokens`/`cost` as `inputTokens`/`outputTokens`/`costUsd`; Grok CLI `costUsdTicks` as `raw.costUsdTicks`, never converted. Other clients SHALL set no `usage`. There SHALL be no run-level sum in v1.
+
+#### Scenario: OpenAI image usage
+- **WHEN** case `openai_image_usage` runs
+- **THEN** the result and tool metadata carry `usage` `{inputTokens: 9, outputTokens: 272}`
+
+#### Scenario: OpenRouter cost
+- **WHEN** case `openrouter_image_usage_cost` runs
+- **THEN** `usage` is `{inputTokens: 7, outputTokens: 1290, costUsd: 0.0387}`
+
+#### Scenario: Grok ticks stay raw
+- **WHEN** case `grok_usage_cost_ticks_raw` runs
+- **THEN** `usage` is `{raw: {costUsdTicks: 351342400}}` and `total_cost_usd` is ignored
+
+#### Scenario: No usage
+- **WHEN** a case marked `noUsage: true` runs
+- **THEN** neither the result nor the tool metadata has a `usage` key
+
+### Requirement: Saved files get an extension from the URL or the mime type
+A saved file's extension SHALL be the source URL path's extension when it has one, else the §7G.5 mime table (including `audio/x-wav`, `audio/wave` ⇒ `.wav`, `audio/aac` ⇒ `.aac`, `text/plain` ⇒ `.txt`), and `.bin` only for an unknown mime type.
+
+#### Scenario: URL extension wins
+- **WHEN** case `download_ext_from_url_extension` runs
+- **THEN** the saved file ends in `.jpeg`
+
+#### Scenario: Wav variant
+- **WHEN** case `download_ext_wav_from_x_wav_mime` runs
+- **THEN** the saved file ends in `.wav`, not `.bin`
+
+#### Scenario: Unknown mime
+- **WHEN** case `download_ext_unknown_mime_is_bin` runs
+- **THEN** the saved file ends in `.bin`
+
+### Requirement: Media requests send a User-Agent
+Every media HTTP request (start, poll, download, input fetch) SHALL send `User-Agent: toolnexus/<version> (<port>)` unless the client or style headers set a `User-Agent`, which SHALL then be sent unchanged.
+
+#### Scenario: Default on every request
+- **WHEN** case `user_agent_on_start_poll_and_download` runs
+- **THEN** the start, poll and download requests all carry a `User-Agent` matching `toolnexus/<version> (<port>)`
+
+#### Scenario: Style override
+- **WHEN** case `style_user_agent_header_overrides` runs
+- **THEN** every request carries `User-Agent: my-app/2.0`
 
 ### Requirement: CLI working dir is a realpath
 A CLI client SHALL pass the realpath of its temp dir as the working dir and `--cwd`.
