@@ -1,4 +1,4 @@
-package main
+package mcp2026
 
 // Client-side OAuth for MCP 2026-07-28 (basic/authorization). Stdlib only.
 // Flow: 401/403 -> WWW-Authenticate -> PRM (RFC 9728) -> AS metadata (RFC 8414 / OIDC)

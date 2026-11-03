@@ -10,5 +10,5 @@ stress)
 fuzz)
   go test -race -run '^$' -fuzz FuzzServerHandler -fuzztime "${2:-30s}" .
   ;;
-*) exec go run . "$@" ;;
+*) exec go run ./cmd/spike "$@" ;;
 esac

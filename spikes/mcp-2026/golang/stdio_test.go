@@ -1,13 +1,10 @@
-package main
+package mcp2026
 
 // The test binary doubles as a tiny stdio MCP server (TEST ONLY — the product server is HTTP only):
 // MCP2026_STDIO_SERVER=1 makes TestMain serve newline-delimited JSON-RPC on stdin/stdout.
 
 import (
-	"bufio"
 	"bytes"
-	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -21,48 +18,12 @@ func TestMain(m *testing.M) {
 	switch os.Getenv("MCP2026_STDIO_SERVER") {
 	case "1":
 		fmt.Fprintln(os.Stderr, `stdio-test-server ready {"jsonrpc":"2.0","id":1,"result":{}}`) // log noise, must not be parsed
-		serveStdio(mustServer(), os.Stdin, os.Stdout)
+		ServeStdio(mustServer(), os.Stdin, os.Stdout)
 		os.Exit(0)
 	case "exit":
 		os.Exit(3)
 	}
 	os.Exit(m.Run())
-}
-
-func serveStdio(s *Server, in io.Reader, out io.Writer) {
-	sc := bufio.NewScanner(in)
-	sc.Buffer(make([]byte, 64<<10), 16<<20)
-	enc := json.NewEncoder(out) // one message per line
-	for sc.Scan() {
-		var req struct {
-			ID     json.RawMessage `json:"id"`
-			Method string          `json:"method"`
-			Params obj             `json:"params"`
-		}
-		if json.Unmarshal(sc.Bytes(), &req) != nil {
-			enc.Encode(obj{"jsonrpc": "2.0", "id": nil, "error": rpcError{Code: -32700, Message: "Parse error"}})
-			continue
-		}
-		if len(req.ID) == 0 {
-			continue
-		}
-		meta, _ := req.Params["_meta"].(map[string]any)
-		var res obj
-		var e *rpcError
-		if mv, _ := meta[MetaVersion].(string); mv != ProtocolVersion {
-			e = &rpcError{Code: CodeUnsupportedProtocol, Message: "Unsupported protocol version",
-				Data: obj{"supported": []string{ProtocolVersion}, "requested": mv}}
-		} else {
-			res, e = s.dispatch(context.Background(), req.Method, req.Params)
-		}
-		msg := obj{"jsonrpc": "2.0", "id": req.ID}
-		if e != nil {
-			msg["error"] = e
-		} else {
-			msg["result"] = res
-		}
-		enc.Encode(msg)
-	}
 }
 
 func stdioClient(t *testing.T, mode string, stderr io.Writer) *Client {

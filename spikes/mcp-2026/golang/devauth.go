@@ -1,4 +1,4 @@
-package main
+package mcp2026
 
 // DevAuthServer — DEV/TEST ONLY. NEVER USE IN PRODUCTION.
 // A one-line OAuth 2.1 authorization server that auto-approves every request as "dev-user"

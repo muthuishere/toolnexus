@@ -9,7 +9,13 @@ Stdlib only (`net/http`, `encoding/json`, `crypto/sha256`). No MCP SDK. Go 1.23+
 ./run.sh client http://127.0.0.1:7103/mcp  # run all client checks against ANY port's server
 ./run.sh selftest                        # own client vs own in-process server
 go vet ./... && go test -race ./...      # unit tests incl. OAuth (hermetic: localhost TLS only)
+go run ./examples/01-connect-http        # 10 runnable user-story examples (examples/), see docs/
 ```
+
+Layout: the library is package `mcp2026` (import `toolnexus/spikes/mcp2026`); the CLI is `cmd/spike`.
+`examples/NN-*` are one program per user story; `examples_test.go` runs 01-08 and checks their exact output
+(09 Keycloak / 10 GitHub are env-gated). `docs/` drafts the docs-site pages; `docs_test.go` fails if a code block
+there stops matching its example.
 
 Self-test output (all PASS): server/discover, unsupported version -> -32022,
 header mismatch -> -32020, tools/list, tools/call echo, tools/call greet (MRTR), skills/list,

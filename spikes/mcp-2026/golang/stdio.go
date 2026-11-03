@@ -1,4 +1,4 @@
-package main
+package mcp2026
 
 // stdio client transport (MCP 2026-07-28 basic/transports): spawn the server, one JSON-RPC
 // message per line on stdin/stdout. stderr is the server's log stream: passed through
@@ -6,6 +6,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -130,4 +131,42 @@ func (c *Client) Close() error {
 		s.cmd.Process.Kill()
 	}
 	return s.cmd.Wait()
+}
+
+// ServeStdio serves s as newline-delimited JSON-RPC over in/out (one message per line) until in
+// closes. No auth and no HTTP headers exist on stdio; only the _meta protocol version is checked.
+func ServeStdio(s *Server, in io.Reader, out io.Writer) {
+	sc := bufio.NewScanner(in)
+	sc.Buffer(make([]byte, 64<<10), 16<<20)
+	enc := json.NewEncoder(out) // one message per line
+	for sc.Scan() {
+		var req struct {
+			ID     json.RawMessage `json:"id"`
+			Method string          `json:"method"`
+			Params obj             `json:"params"`
+		}
+		if json.Unmarshal(sc.Bytes(), &req) != nil {
+			enc.Encode(obj{"jsonrpc": "2.0", "id": nil, "error": rpcError{Code: -32700, Message: "Parse error"}})
+			continue
+		}
+		if len(req.ID) == 0 {
+			continue
+		}
+		meta, _ := req.Params["_meta"].(map[string]any)
+		var res obj
+		var e *rpcError
+		if mv, _ := meta[MetaVersion].(string); mv != ProtocolVersion {
+			e = &rpcError{Code: CodeUnsupportedProtocol, Message: "Unsupported protocol version",
+				Data: obj{"supported": []string{ProtocolVersion}, "requested": mv}}
+		} else {
+			res, e = s.dispatch(context.Background(), req.Method, req.Params)
+		}
+		msg := obj{"jsonrpc": "2.0", "id": req.ID}
+		if e != nil {
+			msg["error"] = e
+		} else {
+			msg["result"] = res
+		}
+		enc.Encode(msg)
+	}
 }

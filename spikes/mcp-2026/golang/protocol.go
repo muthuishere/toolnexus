@@ -1,4 +1,4 @@
-package main
+package mcp2026
 
 // Shared wire constants for MCP 2026-07-28 (stateless Streamable HTTP).
 const (
@@ -24,3 +24,4 @@ type rpcError struct {
 func (e *rpcError) Error() string { return e.Message }
 
 type obj = map[string]any
+type Obj = obj // exported alias: a JSON object (map[string]any)

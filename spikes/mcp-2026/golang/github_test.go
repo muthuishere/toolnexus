@@ -1,4 +1,4 @@
-package main
+package mcp2026
 
 // Live interop against GitHub's hosted MCP server (speaks 2026-07-28).
 // Gated: GITHUB_MCP=1 GH_TOKEN=$(gh auth token) go test -run GitHub -v .

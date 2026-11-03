@@ -1,4 +1,4 @@
-package main
+package mcp2026
 
 // Lazy tool search: with Client.ToolSearch the LLM sees two small tools instead of all N:
 // search_tools(query) -> ranked {name, description, inputSchema, server}, and

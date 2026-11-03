@@ -1,4 +1,4 @@
-package main
+package mcp2026
 
 // Live tests against a real Keycloak (keycloak/docker-compose.yml). Skipped unless KEYCLOAK=1,
 // so `go test ./...` stays hermetic. Run: cd keycloak && docker compose up -d && cd .. &&

@@ -1,4 +1,4 @@
-package main
+package mcp2026
 
 // Side effects run exactly once across auth pauses, refresh-after-401 and step-up; a lost or failed
 // response is never retried (spec issue #3394).

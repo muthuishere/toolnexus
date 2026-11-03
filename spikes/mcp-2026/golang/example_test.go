@@ -1,4 +1,4 @@
-package main
+package mcp2026
 
 // The three user stories, each run against the in-process DevAuthServer.
 // Lines between "user code" markers are what a user writes; the rest is the demo harness

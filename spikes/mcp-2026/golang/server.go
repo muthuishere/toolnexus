@@ -1,4 +1,4 @@
-package main
+package mcp2026
 
 import (
 	"context"

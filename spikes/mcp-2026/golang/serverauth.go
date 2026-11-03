@@ -1,4 +1,4 @@
-package main
+package mcp2026
 
 // Server-side authorization: the MCP server as an OAuth 2.1 protected resource
 // (MCP 2026-07-28 basic/authorization). One struct, set Server.Auth, done.

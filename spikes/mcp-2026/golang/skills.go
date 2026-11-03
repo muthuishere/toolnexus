@@ -1,4 +1,4 @@
-package main
+package mcp2026
 
 // Skill URI safety (python-sdk #3685): a skill:// URI is percent-decoded ONCE, then rejected if it
 // still contains '%' (double encoding), a backslash, NUL, an absolute/empty path, or a "."/".."
