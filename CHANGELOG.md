@@ -8,6 +8,8 @@ GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
 
 ## Unreleased
 
+## 0.24.0 — 2026-11-04
+
 **Media generation: images, video, speech, transcription, voice cloning and talking-head video,
 from a JSON style instead of provider code.** Until now toolnexus could carry an image or audio
 part but not make one; every provider (a2e, Replicate, fal, OpenAI images/TTS, ComfyUI…) made you
@@ -58,7 +60,7 @@ events. Realtime/live voice conversation is deliberately out of scope.
 Known redirect gaps: on Clojure's cljgo host the Go HTTP client follows redirects itself, because
 koine has no no-redirect option yet: custom style headers reach another origin (and so does
 `Authorization` when only the port differs), and a redirect loop stops after 10 requests instead
-of 11 (same `too many redirects` error). The JVM build follows the §7G rules. An HTTP client or transport you inject yourself
+of 11 (same `too many redirects` error); tracked in #130. The JVM build follows the §7G rules. An HTTP client or transport you inject yourself
 (Java, C#, Rust, Python, and JS's `opts.fetch`, which may ignore `redirect: "manual"`) may follow
 redirects before the engine sees them, so it must not forward headers cross-origin.
 
@@ -84,7 +86,9 @@ SPEC §8 "Tool scheduling"; change `openspec/changes/add-tool-concurrency`; reci
   struct literal must add `concurrency_safe: None` (or use `..` from another tool).
   `define_tool` callers are unaffected.
 - **Not done:** the cap is per response, not per tool; `todowrite` keeps its `readOnly` hint, so
-  two `todowrite` calls in one response may still overlap (last writer wins, as before).
+  two `todowrite` calls in one response may still overlap (last writer wins, as before). On Clojure, when
+  the cap is full a new safe call waits for the oldest running call rather than the first to finish
+  (#128). Only Go's tests are mutation-checked so far (#129).
 
 ### Background subagents: a documented recipe (all eight ports)
 

@@ -32,9 +32,9 @@ npm i toolnexus                                   # JS / TypeScript
 pip install toolnexus                             # Python
 go get github.com/muthuishere/toolnexus/golang    # Go
 dotnet add package Toolnexus                       # C#
-{:toolnexus, "~> 0.23"}                             # Elixir (mix.exs deps)
-# Java (Maven): io.github.muthuishere:toolnexus:0.23.0
-# Clojure (deps.edn): net.clojars.muthuishere/toolnexus {:mvn/version "0.23.0"} — JVM and cljgo
+{:toolnexus, "~> 0.24"}                             # Elixir (mix.exs deps)
+# Java (Maven): io.github.muthuishere:toolnexus:0.24.0
+# Clojure (deps.edn): net.clojars.muthuishere/toolnexus {:mvn/version "0.24.0"} — JVM and cljgo
 cargo add toolnexus                                # Rust (crates.io)
 ```
 
