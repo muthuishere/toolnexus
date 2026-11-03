@@ -1,5 +1,5 @@
 {
-  "_doc": "CLI client conformance (SPEC §7G.10, §7G.11) over conformance/media/fake-cli/fake-cli.sh — see fake-cli/README.md for the exact harness steps. client = grok|codex. Placeholders: {out} the fake's out dir, {dir} gather.dir, {cwd} in expectArgv = must equal <out>/cwd.txt. command (when present) replaces the fake command entirely (spawn-failure case). env is set in the TEST process (the child inherits it; Codex's folder lookup reads it). expectExists / expectMissing: paths that must / must not exist after the run. expectNoSpawn: argv.txt must not exist. maxElapsedMs: the call must return within it (kill on timeout). Other fields as in clients.json.",
+  "_doc": "CLI client conformance (SPEC §7G.10, §7G.11) over conformance/media/fake-cli/fake-cli.sh — see fake-cli/README.md for the exact harness steps. client = grok|codex. Placeholders: {out} the fake's out dir, {dir} gather.dir, {cwd} in expectArgv = must equal <out>/cwd.txt. command (when present) replaces the fake command entirely (spawn-failure case). env is set in the TEST process (the child inherits it; Codex's folder lookup reads it). expectExists / expectMissing: paths that must / must not exist after the run. expectNoSpawn: argv.txt must not exist. maxElapsedMs: the call must return within it (kill on timeout). Other fields as in clients.json. modelParts (SPEC §7G.6 model visibility): the parts of this tool result that message assembly (§8A) emits to the model — only image parts; video/audio parts stay in RunResult.files and toolCalls[].parts only. Assert with the port's assembly function on a transcript containing this tool result.",
   "cases": [
     {
       "name": "grok_image_path_from_tool_result_download",
@@ -79,7 +79,14 @@
           "client": "grok",
           "jobId": "s1",
           "status": "completed"
-        }
+        },
+        "modelParts": [
+          {
+            "type": "image",
+            "mimeType": "image/jpeg",
+            "data": "SlBFR0JZVEVT"
+          }
+        ]
       }
     },
     {
@@ -143,7 +150,14 @@
           "client": "grok",
           "jobId": "s1",
           "status": "completed"
-        }
+        },
+        "modelParts": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "data": "UE5HQllURVM="
+          }
+        ]
       }
     },
     {
@@ -558,7 +572,14 @@
           "client": "codex",
           "jobId": "t1",
           "status": "completed"
-        }
+        },
+        "modelParts": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "data": "UE5HQllURVM="
+          }
+        ]
       }
     },
     {

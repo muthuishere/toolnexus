@@ -1,7 +1,7 @@
 ## 1. Contract (this commit)
 - [x] 1.1 ADR 0037 accepted; spike `spikes/media-clients/` (Go) live-verified per SPIKE.md
 - [x] 1.2 SPEC §0 item 14 and §7G.1–§7G.12 rewritten
-- [x] 1.3 `conformance/media/`: `verbs.json` (7 verbs), `schemas.json` (talk), `cases.json` (42),
+- [x] 1.3 `conformance/media/`: `verbs.json` (7 verbs), `schemas.json` (talk), `cases.json` (44),
       `clients.json` (47), `cli.json` (18), `routing.json` (12 + schema + empty), `fake-cli/`
 - [x] 1.4 `examples/media-styles/a2e.json`: `name`, `talk` (unverified)
 - [x] 1.5 CHANGELOG `## Unreleased` entry (gaps and unverified verbs named)

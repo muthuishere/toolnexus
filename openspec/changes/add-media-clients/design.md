@@ -8,7 +8,7 @@ taken while pinning it that the ADR left open, so port agents do not re-decide t
 
 1. **Errors carry a status; `unavailable` is typed.** Not string-matched. Every port exposes a way
    to test for it (§7G.2 lists each). Function-face errors keep the ADR 0036 texts.
-2. **`unavailable` is a closed list** (§7G.2): 402; 429 whose body says `quota`/`credit`; built-in
+2. **`unavailable` is a closed list** (§7G.2): 402; 429 whose body says `quota`/`credit`/`billing`/`balance`; built-in
    client without a key (no request); CLI that cannot be started; Grok `zero data retention` /
    `usage limit`; Codex `usage limit` / `quota`. A missing key and a missing CLI are `unavailable`
    so that `createMedia([grok, fal])` on a machine without grok, or without `FAL_API_KEY`, just
@@ -30,10 +30,12 @@ taken while pinning it that the ADR left open, so port agents do not re-decide t
    `dir` defaults to `<os temp>/toolnexus-media`, `maxBytes` to 100 MiB.
 8. **`gather.keep`** (the ADR named it without semantics) = keep the CLI's original file after
    copying it out; default `true`, `false` deletes it. Only local-path results are affected.
-9. **Tool parts for local files are `data` parts.** §1B forbids paths in parts; `file://` would
-   be a path in disguise. So downloaded/inline/CLI files reach the model as base64 (as `read`
-   does today), and an `http(s)` URL is kept as `url` only in `url` mode. A host that does not
-   want bytes in its transcript uses `gather.mode: "url"`. *Open question 1.*
+9. **Tool parts for local files are `data` parts; only images reach the model** (coordinator,
+   2026-11-03). §1B forbids paths in parts, so downloaded/inline/CLI files are base64 parts. Only
+   `image` parts of a media tool result are emitted to the model (§8A); video and audio parts go
+   only to `toolCalls[].parts` / `RunResult.files`, and the model sees the `<kind> ready: …` line
+   (URL in url mode, saved path in download mode). A base64 video in context is huge and most
+   models cannot read it. Pinned per case as `modelParts`.
 10. **Downloads and input fetches send no client headers** — a provider key never leaves its
     origin, even when the file host is the same origin. Fal's `status_url`/`response_url` follow
     the §7G.8 origin rule (headers only on the base URL's origin).
@@ -87,11 +89,8 @@ The toolkit option `media` is already registered and unchanged.
 
 ## Open questions for the owner (do not block the ports)
 
-1. Data parts for downloaded video can be large and are relocated to the model (§8A). Should media
-   tool parts for local files be dropped from the LLM-facing message and kept only in
-   `RunResult.files`? Contract today: sent, like `read`.
-2. `unavailable` keyword list for 429 (`quota`, `credit`) is what the spike saw; providers may say
-   `billing` or `balance`. Widening is a contract change (cases).
+1. (closed) Video/audio parts are kept out of the model context; images go in.
+2. (closed) 429 keywords are `quota`, `credit`, `billing`, `balance`.
 3. ElevenLabs `lyrics` (needs a composition plan) and OpenAI/fal video, ElevenLabs
    music/transcribe/cloneVoice, OpenAI speech/transcribe, A2E talk are pinned from docs, not live.
    One cheap live call each before release.

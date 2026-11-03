@@ -25,7 +25,7 @@ and your agent seven tools, and the provider is a small named client instead of 
   saved. Every client takes the same `{model, models, key, url, command, loop, gather}`; the key
   defaults to the provider's usual env var (`OPENAI_API_KEY`, `FAL_API_KEY`, …).
 - **Fallback that only falls back when it should** — `createMedia([grok, fal])` tries Grok and moves
-  to fal only when Grok is *unavailable*: out of credits (402), out of quota, no key, CLI not
+  to fal only when Grok is *unavailable*: out of credits (402), out of quota or billing balance (429), no key, CLI not
   installed, or Grok's Zero Data Retention blocking video. A bad prompt or a server error is
   returned as is, not hidden behind a second provider's bill. Errors carry a typed status, so you
   can test for `unavailable` without reading the message.
@@ -44,7 +44,9 @@ and your agent seven tools, and the provider is a small named client instead of 
   the tool name and call id; `toolCalls[].parts` carries them per call. The answer text never gets
   markup. It is not media-only: image or file parts returned by MCP tools and built-in file reads
   land there too, and each entry keeps the part's `name` when it had one. A media tool's parts
-  carry downloaded or inline files as bytes, never as a local path.
+  carry downloaded or inline files as bytes, never as a local path, and only images are shown to
+  the model: a generated video or audio clip goes to `RunResult.files`, while the model sees just
+  the `video ready: …` line, so a clip never floods its context.
 - **Bounded, safe requests** — every request (start, each poll, each download) is bounded by the
   time left until the job's deadline, provider headers never reach a different origin, and
   redirects follow one rule set in every port: 301/302/303/307/308 with a `Location`, at most 10

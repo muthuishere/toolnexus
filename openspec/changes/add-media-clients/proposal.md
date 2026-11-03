@@ -30,7 +30,7 @@ PR #123's API is unreleased, so it is reshaped here before any release.
   - the JSON style engine becomes `styleMediaClient(style, config?)`; `loadMediaStyle` stays public.
   - tool metadata gains `client`; downloaded/inline files become `data` parts (§1B: a part never
     holds a path).
-- `conformance/media/`: `verbs.json` (7 verbs), `schemas.json` (talk), `cases.json` (34 → 42),
+- `conformance/media/`: `verbs.json` (7 verbs), `schemas.json` (talk), `cases.json` (34 → 44),
   new `clients.json` (47), `cli.json` (18) with the portable `fake-cli/fake-cli.sh`, and
   `routing.json` (12 cases + 1 schema case + empty-list check).
 - `examples/media-styles/a2e.json`: `name`, the `talk` verb (unverified), embedded by every port.

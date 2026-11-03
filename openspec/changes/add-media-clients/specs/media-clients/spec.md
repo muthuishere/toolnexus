@@ -27,7 +27,7 @@ The library SHALL define a `MediaClient` with a `name`, `supports(verb)`, an opt
 - **THEN** the error is `media: no client available for "image": a: no API key (set A_KEY); b: HTTP 402: {}` with status `unavailable`
 
 ### Requirement: Account preconditions are unavailable
-HTTP 402, HTTP 429 whose body contains `quota` or `credit`, a built-in API client without a key, a CLI that cannot be started, Grok `zero data retention` or `usage limit`, and Codex `usage limit` or `quota` SHALL yield status `unavailable`; nothing else SHALL.
+HTTP 402, HTTP 429 whose body contains `quota`, `credit`, `billing` or `balance`, a built-in API client without a key, a CLI that cannot be started, Grok `zero data retention` or `usage limit`, and Codex `usage limit` or `quota` SHALL yield status `unavailable`; nothing else SHALL.
 
 #### Scenario: Quota versus rate limit
 - **WHEN** cases `openai_429_quota_is_unavailable` and `openai_429_rate_limit_is_failed` are replayed
@@ -84,3 +84,14 @@ A media tool result SHALL emit a file with `data` as a `data` part, a file with 
 #### Scenario: Downloaded file reaches the tool as data
 - **WHEN** case `openai_image_b64_download` runs through the tool face
 - **THEN** the output names the saved path and the single part carries the image as base64 `data`
+
+### Requirement: Only image media reaches the model
+Message assembly SHALL emit only `image` parts of a `source:"media"` tool result to the model (per §8A); video and audio parts SHALL NOT be emitted (no placeholder) and SHALL appear only in `toolCalls[].parts` and `RunResult.files`, the model seeing just the text output.
+
+#### Scenario: Video stays out of the model context
+- **WHEN** case `openai_video_poll_then_content` runs through the tool face and the result is assembled into the next LLM request
+- **THEN** the request carries the `video ready: …` output and no video part, while `RunResult.files` holds the video (`modelParts` is `[]`)
+
+#### Scenario: Image still reaches the model
+- **WHEN** case `openai_image_b64_download` is assembled into the next LLM request
+- **THEN** the image part is emitted per §8A (`modelParts` equals `parts`)

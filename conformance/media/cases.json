@@ -1,5 +1,5 @@
 {
-  "_doc": "Media engine conformance (SPEC §7G). A port's harness starts a fake HTTP server, replaces \"{server}\" in style.baseUrl and in script[].headers values with its URL, sets case.env, then serves script[] in order (an entry's optional headers are sent as response headers): entry 0 answers the start request, entries 1.. answer polls; once exhausted the LAST entry repeats. Every request is recorded; path is recorded exactly as sent (percent-encoding NOT decoded). The harness calls generate(verb,args) and the tool face, and asserts: requests (method, path, body for start, header values in expectHeaders), progress statuses, and either result (MediaResult minus nothing) or error (exact message string). tool = the expected ToolResult (output, isError, parts, metadata). styleError:true marks a style that is invalid at load (SPEC §7G Empty dotPath): a port whose constructor/loader can fail may raise the same error message there instead of from generate; either way no request is made and there is no tool case. Poll timings in these styles are tiny so the suite runs in milliseconds. SINCE ADR 0037: the harness builds createMedia(styleMediaClient(style, case.config ?? {})) — style clients default to gather mode url, so URL results stay URLs; success tool metadata carries client (\"style\" unless style.name). status, when present, is the error's media status (failed|timeout|cancelled|unavailable). unsetEnv lists env vars removed for the case.",
+  "_doc": "Media engine conformance (SPEC §7G). A port's harness starts a fake HTTP server, replaces \"{server}\" in style.baseUrl and in script[].headers values with its URL, sets case.env, then serves script[] in order (an entry's optional headers are sent as response headers): entry 0 answers the start request, entries 1.. answer polls; once exhausted the LAST entry repeats. Every request is recorded; path is recorded exactly as sent (percent-encoding NOT decoded). The harness calls generate(verb,args) and the tool face, and asserts: requests (method, path, body for start, header values in expectHeaders), progress statuses, and either result (MediaResult minus nothing) or error (exact message string). tool = the expected ToolResult (output, isError, parts, metadata). styleError:true marks a style that is invalid at load (SPEC §7G Empty dotPath): a port whose constructor/loader can fail may raise the same error message there instead of from generate; either way no request is made and there is no tool case. Poll timings in these styles are tiny so the suite runs in milliseconds. SINCE ADR 0037: the harness builds createMedia(styleMediaClient(style, case.config ?? {})) — style clients default to gather mode url, so URL results stay URLs; success tool metadata carries client (\"style\" unless style.name). status, when present, is the error's media status (failed|timeout|cancelled|unavailable). unsetEnv lists env vars removed for the case. modelParts (SPEC §7G.6 model visibility): the parts of this tool result that message assembly (§8A) emits to the model — only image parts; video/audio parts stay in RunResult.files and toolCalls[].parts only. Assert with the port's assembly function on a transcript containing this tool result.",
   "cases": [
     {
       "name": "sync_image_urls_mime_from_extension",
@@ -106,7 +106,24 @@
           "verb": "image",
           "client": "style",
           "status": "completed"
-        }
+        },
+        "modelParts": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "url": "https://x/a.PNG?sig=1"
+          },
+          {
+            "type": "image",
+            "mimeType": "image/jpeg",
+            "url": "https://x/b.jpg"
+          },
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "url": "https://x/c"
+          }
+        ]
       }
     },
     {
@@ -254,7 +271,8 @@
           "client": "style",
           "jobId": "j1",
           "status": "completed"
-        }
+        },
+        "modelParts": []
       }
     },
     {
@@ -358,7 +376,8 @@
           "client": "style",
           "jobId": "42",
           "status": "done"
-        }
+        },
+        "modelParts": []
       }
     },
     {
@@ -684,7 +703,14 @@
           "verb": "image",
           "client": "style",
           "status": "completed"
-        }
+        },
+        "modelParts": [
+          {
+            "type": "image",
+            "mimeType": "image/webp",
+            "url": "https://x/ok.webp"
+          }
+        ]
       }
     },
     {
@@ -1071,7 +1097,19 @@
           "verb": "image",
           "client": "style",
           "status": "completed"
-        }
+        },
+        "modelParts": [
+          {
+            "type": "image",
+            "mimeType": "image/gif",
+            "url": "https://x/1.gif"
+          },
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "url": "https://x/2.png"
+          }
+        ]
       }
     },
     {
@@ -1329,7 +1367,14 @@
           "client": "style",
           "jobId": "jz",
           "status": "completed"
-        }
+        },
+        "modelParts": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "url": "https://x/z.png"
+          }
+        ]
       }
     },
     {
@@ -1420,7 +1465,14 @@
           "client": "style",
           "jobId": "jn",
           "status": "2"
-        }
+        },
+        "modelParts": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "url": "https://x/n.png"
+          }
+        ]
       }
     },
     {
@@ -1549,7 +1601,19 @@
           "verb": "image",
           "client": "style",
           "status": "completed"
-        }
+        },
+        "modelParts": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "url": "https://x/w1.png"
+          },
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "url": "https://x/w2.png"
+          }
+        ]
       }
     },
     {
@@ -1678,7 +1742,14 @@
           "client": "style",
           "jobId": "a b/é~-._?#!'()*",
           "status": "completed"
-        }
+        },
+        "modelParts": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "url": "https://x/e.png"
+          }
+        ]
       }
     },
     {
@@ -1832,7 +1903,14 @@
           "verb": "image",
           "client": "style",
           "status": "completed"
-        }
+        },
+        "modelParts": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "url": "https://x/d.png"
+          }
+        ]
       }
     },
     {
@@ -1913,7 +1991,14 @@
           "verb": "image",
           "client": "style",
           "status": "completed"
-        }
+        },
+        "modelParts": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "url": "https://x/d.png"
+          }
+        ]
       }
     },
     {
@@ -1998,7 +2083,14 @@
           "client": "style",
           "jobId": "jn",
           "status": "completed"
-        }
+        },
+        "modelParts": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "url": "https://x/neg.png"
+          }
+        ]
       }
     },
     {
@@ -2087,7 +2179,14 @@
           "verb": "image",
           "client": "style",
           "status": "completed"
-        }
+        },
+        "modelParts": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "url": "https://x/r.png"
+          }
+        ]
       }
     },
     {
@@ -2170,7 +2269,14 @@
           "verb": "image",
           "client": "style",
           "status": "completed"
-        }
+        },
+        "modelParts": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "url": "https://x/k.png"
+          }
+        ]
       }
     },
     {
@@ -2517,7 +2623,8 @@
           "verb": "talk",
           "client": "style",
           "status": "completed"
-        }
+        },
+        "modelParts": []
       }
     },
     {
@@ -2621,7 +2728,8 @@
           "verb": "music",
           "client": "style",
           "status": "completed"
-        }
+        },
+        "modelParts": []
       }
     },
     {
@@ -2676,6 +2784,78 @@
           }
         ],
         "status": "completed"
+      }
+    },
+    {
+      "name": "http_429_billing_is_unavailable",
+      "style": {
+        "baseUrl": "{server}",
+        "verbs": {
+          "image": {
+            "mode": "sync",
+            "kind": "image",
+            "start": {
+              "path": "/s"
+            },
+            "args": {
+              "prompt": "prompt"
+            },
+            "resultPath": "u"
+          }
+        }
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "x"
+      },
+      "script": [
+        {
+          "status": 429,
+          "rawBody": "Check your BILLING details"
+        }
+      ],
+      "status": "unavailable",
+      "error": "media: no client available for \"image\": style: HTTP 429: Check your BILLING details",
+      "tool": {
+        "name": "generate_image",
+        "isError": true,
+        "output": "media: no client available for \"image\": style: HTTP 429: Check your BILLING details"
+      }
+    },
+    {
+      "name": "http_429_balance_is_unavailable",
+      "style": {
+        "baseUrl": "{server}",
+        "verbs": {
+          "image": {
+            "mode": "sync",
+            "kind": "image",
+            "start": {
+              "path": "/s"
+            },
+            "args": {
+              "prompt": "prompt"
+            },
+            "resultPath": "u"
+          }
+        }
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "x"
+      },
+      "script": [
+        {
+          "status": 429,
+          "rawBody": "Check your BALANCE details"
+        }
+      ],
+      "status": "unavailable",
+      "error": "media: no client available for \"image\": style: HTTP 429: Check your BALANCE details",
+      "tool": {
+        "name": "generate_image",
+        "isError": true,
+        "output": "media: no client available for \"image\": style: HTTP 429: Check your BALANCE details"
       }
     }
   ]

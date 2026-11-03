@@ -1,5 +1,5 @@
 {
-  "_doc": "Built-in API client conformance (SPEC §7G.9, §7G.5, §7G.11). A port's harness, per case: starts the fake HTTP server (script[] in order, last repeats; entries {status, body|rawBody|bodyBase64, headers?}), substitutes {server} everywhere (config, args, script bodies and headers, expectations), makes {dir} (passed as gather.dir) and {inputs} (writes inputFiles name->base64 there), sets env and removes unsetEnv, builds the named built-in client (client = a2e|elevenlabs|openai|openrouter|fal) from config, and calls createMedia(client) for verb/args through the function face and then the tool face (fresh script replay, fresh {dir}). Asserts: expectRequests in order (method, path exactly as sent incl. query; body = JSON deep-equal; multipart = parts in order, each {name,value} or {name,filename,contentType,bytesBase64}; headers = subset with exact values; absentHeaders = must not be sent) — when expectRequests is present the request count must match too; expectHeaders on EVERY request; expectProgress; result (files: url/data/type/mimeType exact; saved = file lives directly in {dir}, name matches ^<client>-<verb>-[0-9]+-[0-9]+<ext>$, path absolute, url == 'file://'+path, bytes == bytesBase64) or error (exact) / errorPrefix (startsWith) with status; tool: output exact or outputPattern (regex after substituting {dir} regex-escaped), parts, metadata, noParts = no parts key. liveVerified:false marks a request shape pinned from provider docs, not from a live call. A field absent from a case is not asserted.",
+  "_doc": "Built-in API client conformance (SPEC §7G.9, §7G.5, §7G.11). A port's harness, per case: starts the fake HTTP server (script[] in order, last repeats; entries {status, body|rawBody|bodyBase64, headers?}), substitutes {server} everywhere (config, args, script bodies and headers, expectations), makes {dir} (passed as gather.dir) and {inputs} (writes inputFiles name->base64 there), sets env and removes unsetEnv, builds the named built-in client (client = a2e|elevenlabs|openai|openrouter|fal) from config, and calls createMedia(client) for verb/args through the function face and then the tool face (fresh script replay, fresh {dir}). Asserts: expectRequests in order (method, path exactly as sent incl. query; body = JSON deep-equal; multipart = parts in order, each {name,value} or {name,filename,contentType,bytesBase64}; headers = subset with exact values; absentHeaders = must not be sent) — when expectRequests is present the request count must match too; expectHeaders on EVERY request; expectProgress; result (files: url/data/type/mimeType exact; saved = file lives directly in {dir}, name matches ^<client>-<verb>-[0-9]+-[0-9]+<ext>$, path absolute, url == 'file://'+path, bytes == bytesBase64) or error (exact) / errorPrefix (startsWith) with status; tool: output exact or outputPattern (regex after substituting {dir} regex-escaped), parts, metadata, noParts = no parts key. liveVerified:false marks a request shape pinned from provider docs, not from a live call. A field absent from a case is not asserted. modelParts (SPEC §7G.6 model visibility): the parts of this tool result that message assembly (§8A) emits to the model — only image parts; video/audio parts stay in RunResult.files and toolCalls[].parts only. Assert with the port's assembly function on a transcript containing this tool result.",
   "cases": [
     {
       "name": "elevenlabs_speech_default_voice_bytes_download",
@@ -71,7 +71,8 @@
           "client": "elevenlabs",
           "jobId": "req-1",
           "status": "completed"
-        }
+        },
+        "modelParts": []
       }
     },
     {
@@ -217,7 +218,8 @@
           "verb": "speech",
           "client": "elevenlabs",
           "status": "completed"
-        }
+        },
+        "modelParts": []
       }
     },
     {
@@ -324,7 +326,8 @@
           "verb": "music",
           "client": "elevenlabs",
           "status": "completed"
-        }
+        },
+        "modelParts": []
       }
     },
     {
@@ -714,7 +717,14 @@
           "verb": "image",
           "client": "openai",
           "status": "completed"
-        }
+        },
+        "modelParts": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "data": "UE5HQllURVM="
+          }
+        ]
       }
     },
     {
@@ -814,7 +824,14 @@
           "verb": "image",
           "client": "openai",
           "status": "completed"
-        }
+        },
+        "modelParts": [
+          {
+            "type": "image",
+            "mimeType": "image/jpeg",
+            "data": "SlBFR0JZVEVT"
+          }
+        ]
       }
     },
     {
@@ -884,7 +901,14 @@
           "verb": "image",
           "client": "openai",
           "status": "completed"
-        }
+        },
+        "modelParts": [
+          {
+            "type": "image",
+            "mimeType": "image/webp",
+            "url": "https://cdn.example/x.webp?sig=2"
+          }
+        ]
       }
     },
     {
@@ -1372,7 +1396,8 @@
           "client": "openai",
           "jobId": "vid_1",
           "status": "completed"
-        }
+        },
+        "modelParts": []
       }
     },
     {
@@ -1526,7 +1551,14 @@
           "client": "openrouter",
           "jobId": "gen-1",
           "status": "completed"
-        }
+        },
+        "modelParts": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "data": "UE5HQllURVM="
+          }
+        ]
       }
     },
     {
@@ -1736,7 +1768,14 @@
           "client": "fal",
           "jobId": "req-1",
           "status": "completed"
-        }
+        },
+        "modelParts": [
+          {
+            "type": "image",
+            "mimeType": "image/jpeg",
+            "data": "SlBFR0JZVEVT"
+          }
+        ]
       }
     },
     {
@@ -1854,7 +1893,19 @@
           "client": "fal",
           "jobId": "req-1",
           "status": "completed"
-        }
+        },
+        "modelParts": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "url": "https://fal.media/files/a.png"
+          },
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "url": "https://fal.media/files/b"
+          }
+        ]
       }
     },
     {
@@ -2113,7 +2164,8 @@
           "client": "fal",
           "jobId": "v1",
           "status": "completed"
-        }
+        },
+        "modelParts": []
       }
     },
     {
@@ -2525,7 +2577,14 @@
           "client": "a2e",
           "jobId": "a1",
           "status": "completed"
-        }
+        },
+        "modelParts": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "data": "UE5HQllURVM="
+          }
+        ]
       }
     },
     {
@@ -2629,7 +2688,8 @@
           "client": "a2e",
           "jobId": "t1",
           "status": "completed"
-        }
+        },
+        "modelParts": []
       }
     },
     {

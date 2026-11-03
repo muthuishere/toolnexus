@@ -1663,7 +1663,7 @@ precondition, not a bad request. Exactly these cases, nothing else:
 
 | where | condition |
 |---|---|
-| any API client (style or built-in) | HTTP **402**; HTTP **429** whose body contains `quota` or `credit` (ASCII case-insensitive) |
+| any API client (style or built-in) | HTTP **402**; HTTP **429** whose body contains `quota`, `credit`, `billing` or `balance` (ASCII case-insensitive) |
 | any built-in API client | no key: config `key` absent and the default env var unset or empty — **no request is made** |
 | any CLI client | the command cannot be started (not found, not executable) |
 | Grok CLI | a failed tool result containing `zero data retention` or `usage limit` |
@@ -1768,9 +1768,14 @@ Execute ⇒ the §7G.3 call; never throws. Success:
 
 - Media verbs: `output = "<word> ready: " + lines.join("\n")`, `word` = `image` | `video` |
   `audio` by the files' kind; a line is the file's `path`, else its `url`, else
-  `inline <mimeType> <n> bytes`. `parts` = one §1B part per file: `data` when the file has `data`;
-  else `url` when the url is `http(s)`; else (local file) the file's bytes read now as `data`.
-  A part never holds a path (§1B).
+  `inline <mimeType> <n> bytes` (url mode ⇒ the URL; download ⇒ the saved file's path).
+  `parts` = one §1B part per file: `data` when the file has `data`; else `url` when the url is
+  `http(s)`; else (local file) the file's bytes read now as `data`. A part never holds a path (§1B).
+- **Model visibility.** Only **image** parts of a media tool result reach the model, emitted per
+  §8A as today. Video (`file`) and `audio` parts of a `source:"media"` tool result are **never
+  emitted** to the model (no placeholder, no warning): they go only into `toolCalls[].parts` and
+  `RunResult.files`, and the model sees just `output`. Rationale: a base64 video in context is huge
+  and most models cannot read it. Conformance: each success `tool` expectation's `modelParts`.
 - Text verbs (`transcribe`, `cloneVoice`): `output = text`, no `parts` key.
 - Any error ⇒ `ToolResult{ isError:true, output:<the error message> }`.
 
@@ -1821,7 +1826,7 @@ absent. *Write*: creates objects, and arrays when the next segment is numeric (p
    (function face only, never the tool face) top-level keys overwrite the body last.
 3. Start request: `start.method` to `baseUrl + start.path`, JSON body, `Content-Type:
    application/json`, style headers.
-4. Every response: HTTP 402, or 429 with `quota`/`credit` ⇒ `unavailable` (§7G.2,
+4. Every response: HTTP 402, or 429 with `quota`/`credit`/`billing`/`balance` ⇒ `unavailable` (§7G.2,
    `<name>: HTTP <status>: <body>`). Other non-2xx ⇒ error `HTTP <status>: <raw body text>`.
    Unparseable JSON ⇒ `<verb>: response is not JSON`. If `errorEnvelope` is set and the value at
    `codePath` is present and not JSON-equal to one of `okValues` ⇒ `API error <code>: <message>`
