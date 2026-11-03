@@ -74,3 +74,31 @@ eight-language synced tabs.
   `Pending` / `AuthRequired` / `PendingOf` (go) · `waitFor` / `ToolResult.pending` /
   `authRequired` / `pendingOf` (java) · `WithWaitFor` / `ToolResult.Pending` / `AuthRequired` /
   `PendingOf` (c#) · `wait_for` / `ToolResult.pending?` (elixir).
+
+## Media generation
+
+Guide: [Media generation](/toolnexus/media/) · recipe: [Generate images, video and speech](/toolnexus/cookbook/media/) · SPEC §7G.
+
+- `loadMediaStyle(path: string): MediaStyle` — read one style JSON file.
+- `createMedia(styles: MediaStyle | MediaStyle[], opts?: MediaOptions): Media` — a verb resolves to
+  the first style that declares it.
+- `MediaOptions { onProgress?: (p: MediaProgress) => void, fetch?: typeof fetch }` —
+  `MediaProgress { verb, jobId, status }` fires after every poll; `fetch` is the injected transport
+  (default: global `fetch`).
+- Verbs, each `(input: XArgs & MediaCallOptions): Promise<MediaResult>`:
+  `image(ImageArgs { prompt, width?, height?, aspectRatio?, seed? })` ·
+  `video(VideoArgs { prompt, image?, seconds?, aspectRatio? })` · `speech(SpeechArgs { text, voice? })` ·
+  `transcribe(TranscribeArgs { audio })` · `cloneVoice(CloneVoiceArgs { name, samples })` ·
+  `talking(TalkingArgs { image, audio })`.
+- `MediaCallOptions { providerOptions?, signal?: AbortSignal }` — `providerOptions` top-level keys
+  overwrite the request body last.
+- `generate(verb: MediaVerb | string, args, callOpts?: MediaCallOptions): Promise<MediaResult>` — the raw call.
+- `MediaResult { files: MediaFile[], text?, jobId?, status }` · `MediaFile { type: "image" | "audio" | "file", mimeType, url }`.
+- `media.tools(): Tool[]` — `generate_image` … `talking_video` (source `"media"`), one per supported verb;
+  or pass `createToolkit({ media })`.
+- `RunResult.files: RunFile[]` — `{ type, mimeType, url?, data?, name?, from, callId }`, in call order;
+  the same parts are on `toolCalls[].parts`.
+- Errors: the function face **throws** `Error` with the exact §7G message; a media tool never throws
+  (`isError: true`, message as output). An aborted `signal` rejects with `signal.reason` (or an `AbortError`). `MEDIA_VERBS` exports the canonical verb table.
+- Equivalents: `create_media` (py) · `CreateMedia` (go) · `Media.create` (java) · `Media.Create` (c#) ·
+  `Toolnexus.Media.new` (elixir) · `toolnexus.media/create-media` (clojure) · `create_media` (rust).

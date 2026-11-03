@@ -143,3 +143,27 @@ cross-process form of delegation this port does ship.
 - Equivalents: `waitFor` / `pending` / `authRequired` / `pendingOf` (js) · `wait_for` / `pending`
   (py) · `WaitFor` / `Pending` / `AuthRequired` / `PendingOf` (go) · `waitFor` / `ToolResult.pending`
   (java) · `WithWaitFor` / `ToolResult.Pending` (c#) · `wait_for` / `ToolResult.pending?` (elixir).
+
+## Media generation — `toolnexus.media`
+
+Guide: [Media generation](/toolnexus/media/) · recipe: [Generate images, video and speech](/toolnexus/cookbook/media/) · SPEC §7G.
+
+- `(load-style path)` — one style JSON file, string-keyed.
+- `(create-media styles)` / `(create-media styles opts)` — one style or a seq (string- or keyword-keyed);
+  a verb resolves to the first style that declares it. opts: `:on-progress` (`(fn [{:verb :jobId :status}])`,
+  after every poll) · `:http-client` (`(fn [{:method :url :headers :body}]) -> {:status :body}`; default
+  `koine.http/request` — unlike the LLM client's seam it carries a method, because polls are GETs) ·
+  `:env` (`(fn [name])` for `${VAR}` header expansion).
+- Verbs, each `(verb m args)` / `(verb m args opts)`: `image` (`:prompt :width :height :aspectRatio :seed`) ·
+  `video` (`:prompt :image :seconds :aspectRatio`) · `speech` (`:text :voice`) · `transcribe` (`:audio`) ·
+  `clone-voice` (`:name :samples`) · `talking` (`:image :audio`).
+- `(generate m verb args)` / `(generate m verb args {:provider-options .. :cancel ..})` — the raw call;
+  `verb` is the canonical name (`"cloneVoice"`), `:cancel` an atom or 0-arg fn (truthy ⇒ cancelled).
+- Returns MediaResult `{:files [{:type :mimeType :url}] :text? :jobId? :status}`.
+- `(tools m)` — source `"media"` tools; or `(toolnexus.core/build {:media m ..})`. `(media? x)`.
+- `:files` on the run result — `{:type :mimeType :url :from :callId}`, in call order; the same parts are on
+  each `:tool-calls` entry's `:parts`.
+- Errors: the function face **throws** `ex-info` whose message is the exact §7G string; a media tool never
+  throws (`:isError true`).
+- Equivalents: `createMedia` (js) · `create_media` (py) · `CreateMedia` (go) · `Media.create` (java) ·
+  `Media.Create` (c#) · `Toolnexus.Media.new` (elixir) · `create_media` (rust).

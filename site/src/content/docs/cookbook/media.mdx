@@ -310,4 +310,37 @@ wins, as for every other source.
 - **WhatsApp / Telegram.** Send each URL as a media message, using `mimeType` to pick image, video or voice note.
 - **CLI.** Print `from`, `mimeType` and the URL, or download it to disk (do this soon, because a2e URLs expire).
 
+## Run the example
+
+Every port ships one runnable media example: an image through the typed verb, then
+`generate_speech` called straight off `tools()`. Without `A2E_API_KEY` it prints a one-line hint
+and exits 0, so it never touches the network in CI.
+
+<Tabs syncKey="lang">
+<TabItem label="JavaScript">
+`cd js && npm run build && A2E_API_KEY=... npm run example:media` ([`js/examples/media.ts`](https://github.com/muthuishere/toolnexus/blob/main/js/examples/media.ts))
+</TabItem>
+<TabItem label="Python">
+`cd python && A2E_API_KEY=... python examples/media.py` ([`python/examples/media.py`](https://github.com/muthuishere/toolnexus/blob/main/python/examples/media.py))
+</TabItem>
+<TabItem label="Go">
+`cd golang && A2E_API_KEY=... go run ./examples/media` ([`golang/examples/media/main.go`](https://github.com/muthuishere/toolnexus/blob/main/golang/examples/media/main.go))
+</TabItem>
+<TabItem label="Java">
+`cd java && A2E_API_KEY=... ./gradlew runMedia` ([`MediaExample.java`](https://github.com/muthuishere/toolnexus/blob/main/java/src/main/java/io/github/muthuishere/toolnexus/examples/MediaExample.java))
+</TabItem>
+<TabItem label="C#">
+`cd csharp && A2E_API_KEY=... dotnet run --project examples/Toolnexus.Examples -- media` ([`MediaExample.cs`](https://github.com/muthuishere/toolnexus/blob/main/csharp/examples/Toolnexus.Examples/MediaExample.cs))
+</TabItem>
+<TabItem label="Elixir">
+`cd elixir && A2E_API_KEY=... mix run examples/media.exs` ([`elixir/examples/media.exs`](https://github.com/muthuishere/toolnexus/blob/main/elixir/examples/media.exs))
+</TabItem>
+<TabItem label="Clojure">
+`cd clojure/examples/clj && A2E_API_KEY=... clojure -M -m examples.media`, or on cljgo `cljgo run src/run_media.cljc` ([`examples/media.cljc`](https://github.com/muthuishere/toolnexus/blob/main/clojure/examples/src/examples/media.cljc))
+</TabItem>
+<TabItem label="Rust">
+`cd rust && A2E_API_KEY=... cargo run --example media` ([`rust/examples/media.rs`](https://github.com/muthuishere/toolnexus/blob/main/rust/examples/media.rs))
+</TabItem>
+</Tabs>
+
 Next: [write your own style](/toolnexus/media/#write-your-own-style) for another provider.

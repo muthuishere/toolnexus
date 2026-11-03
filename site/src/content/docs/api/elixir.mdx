@@ -88,3 +88,31 @@ ships the **full** elicitation bridge (form *and* URL mode).
   `%ToolResult{is_error: true, metadata: %{pending: %Request{}}}`.
 - Equivalents: `waitFor` / `pending` (js) · `wait_for` / `pending` (py) · `WaitFor` / `Pending`
   (go) · `waitFor` / `ToolResult.pending` (java) · `WithWaitFor` / `ToolResult.Pending` (c#).
+
+## Media generation
+
+Guide: [Media generation](/toolnexus/media/) · recipe: [Generate images, video and speech](/toolnexus/cookbook/media/) · SPEC §7G.
+
+- `Toolnexus.Media.load_style(path) :: {:ok, map()} | {:error, String.t()}`
+- `Toolnexus.Media.new(styles, opts \\ [])` — one style map or a list; a verb resolves to the first style
+  that declares it. Options: `:on_progress` (`fn %{verb, jobId, status} -> any`, after every poll) ·
+  `:transport` (the same injectable seam as `Toolnexus.Client`: `fn request -> {:ok, %{status, headers, body}} | {:error, e}`) ·
+  `:http_options` (extra `Req` options, e.g. `plug:` in tests).
+- Verbs, each `(media, args, opts \\ [])` with `args` a map or keyword list:
+  `image` (`prompt`, `width`, `height`, `aspectRatio`, `seed`) · `video` (`prompt`, `image`, `seconds`,
+  `aspectRatio`) · `speech` (`text`, `voice`) · `transcribe` (`audio`) · `clone_voice` (`name`, `samples`) ·
+  `talking` (`image`, `audio`). Snake-case atom keys work (`:aspect_ratio`); `:provider_options` in `args`
+  overwrites the body last.
+- `Toolnexus.Media.generate(media, verb, args, opts \\ []) :: {:ok, Result.t()} | {:error, String.t()}` —
+  the raw call; `verb` is a string or atom (`"cloneVoice"`, `:clone_voice`). `opts[:signal]` is cooperative
+  cancellation (a pid or zero-arity predicate).
+- `%Toolnexus.Media.Result{files: [ContentPart.t()], text, job_id, status}` — files carry `type`,
+  `mime_type`, `url`.
+- `Toolnexus.Media.tools(media) :: [Tool.t()]` (source `"media"`), or `create_toolkit(media: media)`.
+- `RunResult.files` — maps `%{type, mime_type, url, from, call_id}`, in call order; the same parts are on
+  each `tool_calls` entry's `parts`.
+- Errors: the function face returns `{:error, message}` (exact §7G string) rather than raising; a signalled
+  cancel raises `Toolnexus.Media.Cancelled`. Process-idiom cancellation also works: run in a `Task` and
+  `Task.shutdown/1` it. A media tool never raises (`is_error: true`).
+- Equivalents: `createMedia` (js) · `create_media` (py) · `CreateMedia` (go) · `Media.create` (java) ·
+  `Media.Create` (c#) · `toolnexus.media/create-media` (clojure) · `create_media` (rust).

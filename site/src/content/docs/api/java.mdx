@@ -69,3 +69,29 @@ for every symbol shown in eight-language synced tabs.
 - Equivalents: `waitFor` / `pending` / `authRequired` / `pendingOf` (js) · `wait_for` / `pending`
   (py) · `WaitFor` / `Pending` (go) · `WithWaitFor` / `ToolResult.Pending` (c#) · `wait_for` /
   `ToolResult.pending?` (elixir).
+
+## Media generation
+
+Guide: [Media generation](/toolnexus/media/) · recipe: [Generate images, video and speech](/toolnexus/cookbook/media/) · SPEC §7G.
+
+- `Media.loadStyle(String path): Media.Style` · `Media.Style.parse(json)` · `Media.Style.of(map)`.
+- `Media.create(Style... styles)` · `Media.create(Style style, Options opts)` ·
+  `Media.create(List<Style> styles, Options opts)` — a verb resolves to the first style that declares it.
+- `new Media.Options().onProgress(Consumer<Progress>).httpClient(HttpClient)` —
+  `Progress(verb, jobId, status)` after every poll; `httpClient` is the injected `java.net.http.HttpClient`.
+- Verbs (blocking), each `MediaResult x(XInput in)` and `MediaResult x(XInput in, LlmClient.CancelToken cancel)`:
+  `image(ImageInput(prompt, width, height, aspectRatio, seed, providerOptions))` ·
+  `video(VideoInput(prompt, image, seconds, aspectRatio, providerOptions))` ·
+  `speech(SpeechInput(text, voice, providerOptions))` · `transcribe(TranscribeInput(audio, providerOptions))` ·
+  `cloneVoice(CloneVoiceInput(name, samples, providerOptions))` · `talking(TalkingInput(image, audio, providerOptions))`.
+  Each record has a short constructor with only the required args; `null` fields are not sent.
+- `generate(String verb, Map<String,Object> args)` ·
+  `generate(verb, args, Map<String,Object> providerOptions, LlmClient.CancelToken cancel)` — the raw call.
+- `Media.MediaResult(List<File> files, String text, String jobId, String status)` · `Media.File(type, mimeType, url)`.
+- `media.tools(): List<Tool>` (source `"media"`), or `Toolkit.Options.media(media)`.
+- `RunResult.files: List<LlmClient.RunFile>` — `RunFile(type, mimeType, url, data, from, callId)`, in call
+  order; the same parts are on `toolCalls.get(i).parts`.
+- Errors: the function face throws `Media.MediaException` (unchecked; message is the exact §7G string); a
+  media tool never throws (`isError`).
+- Equivalents: `createMedia` (js) · `create_media` (py) · `CreateMedia` (go) · `Media.Create` (c#) ·
+  `Toolnexus.Media.new` (elixir) · `toolnexus.media/create-media` (clojure) · `create_media` (rust).

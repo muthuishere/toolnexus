@@ -21,6 +21,7 @@
     "example": "node --experimental-strip-types examples/basic.ts",
     "example:judge": "node --experimental-strip-types examples/judge.ts",
     "example:multimodal": "node --experimental-strip-types examples/multimodal.ts",
+    "example:media": "node --experimental-strip-types examples/media.ts",
     "example:prompt-cache": "node --experimental-strip-types examples/prompt_cache.ts"
   },
   "keywords": [

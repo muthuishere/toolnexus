@@ -72,3 +72,32 @@ shown in eight-language synced tabs.
 - Equivalents: `waitFor` / `pending` / `authRequired` / `pendingOf` (js) · `wait_for` / `pending`
   (py) · `WaitFor` / `Pending` (go) · `waitFor` / `ToolResult.pending` (java) · `wait_for` /
   `ToolResult.pending?` (elixir).
+
+## Media generation
+
+Guide: [Media generation](/toolnexus/media/) · recipe: [Generate images, video and speech](/toolnexus/cookbook/media/) · SPEC §7G.
+
+- `MediaStyle.Load(string path)` · `MediaStyle.Parse(string json)` · `MediaStyle.FromDictionary(dict)`.
+- `Media.Create(MediaStyle style, MediaOptions? options = null)` ·
+  `Media.Create(IEnumerable<MediaStyle> styles, MediaOptions? options = null)` — a verb resolves to the
+  first style that declares it.
+- `MediaOptions { OnProgress: Action<MediaProgress>?, Progress: IProgress<MediaProgress>?, HttpClient: HttpClient?, HttpHandler: HttpMessageHandler? }`
+  — `MediaProgress(Verb, JobId, Status)` after every poll.
+- Verbs, each `Task<MediaResult> XAsync(XInput input, CancellationToken cancellationToken = default)`:
+  `ImageAsync(new ImageInput(prompt) { Width, Height, AspectRatio, Seed, ProviderOptions })` ·
+  `VideoAsync(new VideoInput(prompt) { Image, Seconds, AspectRatio, ProviderOptions })` ·
+  `SpeechAsync(new SpeechInput(text) { Voice, ProviderOptions })` ·
+  `TranscribeAsync(new TranscribeInput(audio) { ProviderOptions })` ·
+  `CloneVoiceAsync(new CloneVoiceInput(name, samples) { ProviderOptions })` ·
+  `TalkingAsync(new TalkingInput(image, audio) { ProviderOptions })`. `null` properties are not sent.
+- `GenerateAsync(string verb, IDictionary<string, object?>? args, IDictionary<string, object?>? providerOptions = null, CancellationToken cancellationToken = default)`
+  — the raw call.
+- `MediaResult(IReadOnlyList<MediaFile> Files, string Status, string? Text = null, string? JobId = null)` ·
+  `MediaFile(Type, MimeType, Url)` (`.ToPart()` → `ContentPart`).
+- `media.Tools(): IReadOnlyList<ITool>` (source `"media"`), or `Toolkit.Options.Media` / `.WithMedia(media)`.
+- `RunResult.Files: IReadOnlyList<RunFile>` — `RunFile(Type, MimeType, Url, Data, From, CallId)`, in call
+  order; the same parts are on `ToolCalls[i].Parts`.
+- Errors: the function face throws `MediaException` (message is the exact §7G string); cancellation throws
+  `OperationCanceledException`. A media tool never throws (`IsError`).
+- Equivalents: `createMedia` (js) · `create_media` (py) · `CreateMedia` (go) · `Media.create` (java) ·
+  `Toolnexus.Media.new` (elixir) · `toolnexus.media/create-media` (clojure) · `create_media` (rust).

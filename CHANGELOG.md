@@ -29,6 +29,10 @@ hand-write a request and a polling loop, per endpoint, per language. Now one eng
   the tool name and call id; `toolCalls[].parts` carries them per call. The answer text never gets
   markup — you decide how to render.
 
+Every port ships a runnable `media` example (an image through the typed call, speech through the
+`generate_speech` tool; without `A2E_API_KEY` it prints a hint and exits), and each language's API
+reference page has a Media generation section.
+
 Contract: SPEC §7G, ADR 0036, `conformance/media/` (every port replays the same 19 cases and schema set).
 
 **Not done yet** (tracked in `openspec/changes/add-media-generation`): downloading expiring result

@@ -67,3 +67,30 @@ symbol shown in eight-language synced tabs.
 - Equivalents: `waitFor` / `pending` / `authRequired` / `pendingOf` (js) · `WaitFor` / `Pending`
   (go) · `waitFor` / `ToolResult.pending` (java) · `WithWaitFor` / `ToolResult.Pending` (c#) ·
   `wait_for` / `ToolResult.pending?` (elixir).
+
+## Media generation
+
+Guide: [Media generation](/toolnexus/media/) · recipe: [Generate images, video and speech](/toolnexus/cookbook/media/) · SPEC §7G.
+
+- `load_media_style(path: str) -> dict` — read one style JSON file.
+- `create_media(styles: dict | list[dict], *, on_progress=None, http_transport: MediaTransport | None = None, timeout: float = 120.0) -> Media`
+  — a verb resolves to the first style that declares it. `on_progress({"verb", "jobId", "status"})` fires
+  after every poll and may be sync or async. `http_transport` replaces the default
+  `UrllibMediaTransport`; a `MediaTransport` has a blocking
+  `request(method, url, headers, body, timeout) -> (status, body_text)` (run in a worker thread).
+- Verbs (all `async`, return `MediaResult`): `image(prompt, *, width, height, aspect_ratio, seed, provider_options)` ·
+  `video(prompt, *, image, seconds, aspect_ratio, provider_options)` · `speech(text, *, voice, provider_options)` ·
+  `transcribe(audio, *, provider_options)` · `clone_voice(name, samples, *, provider_options)` ·
+  `talking(image, audio, *, provider_options)`. `None` arguments are not sent.
+- `await media.generate(verb, args=None, provider_options=None)` — the raw call; `verb` is the canonical
+  name (`"cloneVoice"`, not `"clone_voice"`).
+- `MediaResult(files: list[MediaFile], text, job_id, status)` · `MediaFile(type, mime_type, url)`;
+  `.to_dict()` gives the canonical camelCase shape.
+- `media.tools() -> list[Tool]` (source `"media"`), or `create_toolkit(media=media)`.
+- `RunResult.files` — list of dicts `{type, mimeType, url, from, callId}`, in call order; the same parts are
+  on `tool_calls[i]["parts"]`.
+- Errors: the function face raises `MediaError` (`str(e)` is the exact §7G message); a media tool never
+  raises (`is_error=True`). Cancellation is asyncio's: `asyncio.CancelledError` **always propagates**,
+  from the function face and the tool face alike — it is never turned into a `MediaError` or a tool error.
+- Equivalents: `createMedia` (js) · `CreateMedia` (go) · `Media.create` (java) · `Media.Create` (c#) ·
+  `Toolnexus.Media.new` (elixir) · `toolnexus.media/create-media` (clojure) · `create_media` (rust).
