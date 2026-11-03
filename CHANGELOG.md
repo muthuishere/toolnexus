@@ -8,6 +8,60 @@ GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
 
 ## Unreleased
 
+**Media generation: images, video, speech, transcription, voice cloning and talking-head video,
+from a JSON style instead of provider code.** Until now toolnexus could carry an image or audio
+part but not make one; every provider (a2e, Replicate, fal, OpenAI images/TTS, ComfyUI…) made you
+hand-write a request and a polling loop, per endpoint, per language. Now one engine does it:
+
+- **Typed verbs for your code** — `createMedia(style)` gives `image`, `video`, `speech`,
+  `transcribe`, `cloneVoice` and `talking`, with normalised arguments (`prompt`, `seconds`,
+  `voice`, …) and a result of `{files, text?, jobId?, status}`.
+- **Tools for your agent** — the same verbs become `generate_image`, `generate_video`,
+  `generate_speech`, `transcribe_audio`, `clone_voice` and `talking_video`; `createToolkit({ media })`
+  registers them. Tool names never change when you switch provider, so prompts and skills keep working.
+  Media tools are concurrency-safe: two media calls in one response run side by side (up to
+  `maxToolConcurrency`) instead of waiting for each other like unlabelled tools.
+- **Long jobs just work** — async styles start the job and poll for you (default every 5 s, up to
+  10 min), report progress, honour cancellation, and keep polling through statuses a provider
+  never documented.
+- **Providers are data** — a style is a JSON file (endpoints, dot-paths, `${ENV}` headers, an
+  optional error envelope). `examples/media-styles/a2e.json` ships first, live-verified for image,
+  video and speech. The library names no vendor.
+- **`RunResult.files`** — every image, video or audio a run's tools produced, in order, tagged with
+  the tool name and call id; `toolCalls[].parts` carries them per call. The answer text never gets
+  markup — you decide how to render. An agent with a completion gate keeps the files of every
+  attempt, exactly as it keeps their tool calls.
+  It is not media-only: image or file parts returned by MCP tools and by built-in file reads land
+  in `RunResult.files` too, and each entry keeps the part's `name` when it had one.
+- **Bounded, safe requests** — every request (start and each poll) is bounded by the time left
+  until the job's deadline (`timeoutMs`, counted from the start; sync verbs default to 10 min), so
+  a server that accepts and never answers can no longer hang a call. Style headers (your API key)
+  are never sent to a different origin than `baseUrl`'s, even across a redirect. Redirects follow
+  one rule set in every port: 301/302/303/307/308 with a `Location`, at most 10 hops (then
+  `<verb>: too many redirects`), 301/302/303 after a POST become a body-less GET, 307/308 keep the
+  method and body (Elixir now follows same-origin redirects too instead of refusing them). Error bodies
+  echoed in `HTTP <status>: …` are capped at 1000 characters. Python has no separate `timeout`
+  option on `create_media`; the style's `timeoutMs` is the one knob.
+
+Every port ships a runnable `media` example (an image through the typed call, speech through the
+`generate_speech` tool; without `A2E_API_KEY` it prints a hint and exits), and each language's API
+reference page has a Media generation section.
+
+Contract: SPEC §7G, ADR 0036, `conformance/media/` (every port replays the same 34 cases and schema set).
+
+**Not done yet** (tracked in `openspec/changes/add-media-generation`): downloading expiring result
+URLs (a2e's last 3–30 days — save them yourself for now), cancelling the job at the provider
+(cancel stops polling; the provider's job keeps running), uploading local files, ComfyUI workflow
+injection, webhooks, price quotes, pausing a long job through `waitFor`, and streaming `file`
+events. Realtime/live voice conversation is deliberately out of scope.
+
+Known redirect gaps: on Clojure's cljgo host the Go HTTP client follows redirects itself, because
+koine has no no-redirect option yet: custom style headers reach another origin (and so does
+`Authorization` when only the port differs), and a redirect loop stops after 10 requests instead
+of 11 (same `too many redirects` error). The JVM build follows the §7G rules. An HTTP client or transport you inject yourself
+(Java, C#, Rust, Python, and JS's `opts.fetch`, which may ignore `redirect: "manual"`) may follow
+redirects before the engine sees them, so it must not forward headers cross-origin.
+
 ### Tool scheduling: reads run together, writes run alone (all eight ports)
 
 The tool calls of one model response no longer all run at once. Before, every call started

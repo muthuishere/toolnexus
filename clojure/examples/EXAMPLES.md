@@ -41,6 +41,7 @@ nothing — a trap worth knowing about before you write your own.
 | 6 | `examples.multimodal` | **Sending an image, and a tool returning one** (§1B / §8A). The only example that talks to a real model — and the only one whose claim cannot be checked by reading the model's answer, so it is checked by prompt-token delta instead. |
 | 7 | `examples.judge` | **A typed judgment, not an action** (§8B): pre-declared questions answered with no free text. Picks its backend from the environment — `TYPESAFE_API_KEY`, else `OPENROUTER_API_KEY`, else the offline `static` replay — so it runs uncredentialed and still prints the same shape. |
 | 8 | `examples.prompt-cache` | **Prompt cache + tool tiers** (0.22.0): Anthropic cache breakpoints on the stable prefix, only core tool schemas sent, `tool_search` loading a deferred tool and `call_tool` unwrapped before the permission hook — the tools array never changes. |
+| 9 | `examples.media` | **Media generation** (§7G): the shared `a2e.json` style as a typed verb (`media/image`) and as tools (`media/tools`, `generate_speech` invoked directly). Opt-in by environment: with no `A2E_API_KEY` it prints a hint and `OK` and makes no network call. |
 
 Examples 4 and 5 exercise the two subsystems this port has that are newest; 1–3
 are the ones to read first if you have never used the library.

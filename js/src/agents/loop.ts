@@ -141,6 +141,7 @@ export async function runGated(
   }
 
   let accumulated: RunResult["toolCalls"] = []
+  let accFiles: RunResult["files"] = []
   let last: RunResult | undefined
   let reason = ""
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -149,7 +150,9 @@ export async function runGated(
     // The gate judges the ACCUMULATED work, so an agent cannot escape it by
     // declining to re-declare its plan on a retry.
     accumulated = [...accumulated, ...r.toolCalls]
-    const judged: RunResult = { ...r, toolCalls: accumulated }
+    // RunResult.files is derived from toolCalls, so it accumulates with them (§8).
+    accFiles = [...accFiles, ...(r.files ?? [])]
+    const judged: RunResult = { ...r, toolCalls: accumulated, files: accFiles }
     last = judged
 
     if (r.status && r.status !== "done") {

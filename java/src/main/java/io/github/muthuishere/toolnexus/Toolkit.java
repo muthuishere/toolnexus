@@ -65,6 +65,8 @@ public final class Toolkit implements AutoCloseable {
          * Null ⇒ today's behavior. See {@link McpSource.CancelSignal}.
          */
         public McpSource.CancelSignal cancelSignal;
+        /** §7G: a media engine whose {@link Media#tools()} are registered (source {@code "media"}). */
+        public Media media;
 
         public Options mcpConfig(Object v) { this.mcpConfig = v; return this; }
         public Options skillsDir(String... v) { this.skillsDir = List.of(v); return this; }
@@ -85,6 +87,7 @@ public final class Toolkit implements AutoCloseable {
         public Options disableSkills(List<String> v) { this.disableSkills = v; return this; }
         public Options disableSkills(String... v) { this.disableSkills = List.of(v); return this; }
         public Options cancelSignal(McpSource.CancelSignal v) { this.cancelSignal = v; return this; }
+        public Options media(Media v) { this.media = v; return this; }
     }
 
     private Toolkit(McpSource mcp, SkillSource skill, List<Tool> builtins, List<Tool> agents, List<Tool> extraTools,
@@ -218,6 +221,9 @@ public final class Toolkit implements AutoCloseable {
                 mcpServerConfig = McpServe.MCPServeConfig.fromMap(mcpBlock);
             }
         }
+
+        // §7G: media tools register after A2A agent tools and BEFORE extraTools (first name wins).
+        if (opts.media != null) agentTools.addAll(opts.media.tools());
 
         return new Toolkit(mcp, skill, builtins, agentTools, extras, a2aConfig, mcpServerConfig, opts.disableTools);
     }

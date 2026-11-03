@@ -313,7 +313,7 @@ defmodule Toolnexus.Agents.Loop do
       raise ArgumentError, "toolnexus: completion.verify is required"
     end
 
-    gate_loop(ask, prompt, completion, state, 1, [], "", nil)
+    gate_loop(ask, prompt, completion, state, 1, {[], []}, "", nil)
   end
 
   defp gate_loop(ask, prompt, completion, state, attempt, accumulated, reason, last)
@@ -341,8 +341,11 @@ defmodule Toolnexus.Agents.Loop do
 
     # The gate judges the ACCUMULATED work, so an agent cannot escape it by
     # declining to re-declare its plan on a retry.
-    accumulated = accumulated ++ r.tool_calls
-    r = %{r | tool_calls: accumulated, tool_call_count: length(accumulated)}
+    # `files` is derived from `tool_calls`, so it accumulates with them (§8).
+    {acc_calls, acc_files} = accumulated
+    accumulated = {acc_calls ++ r.tool_calls, acc_files ++ (r.files || [])}
+    {calls, files} = accumulated
+    r = %{r | tool_calls: calls, tool_call_count: length(calls), files: files}
 
     cond do
       r.status != nil and r.status != "done" ->

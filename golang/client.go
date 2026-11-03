@@ -356,6 +356,37 @@ type ToolCall struct {
 	Output   string         `json:"output"`
 	IsError  bool           `json:"isError"`
 	Metadata map[string]any `json:"metadata,omitempty"`
+	// Parts is the tool result's non-text output (§1B, §7G) — present iff the
+	// ToolResult had parts.
+	Parts []ContentPart `json:"parts,omitempty"`
+	// callID is the model's tool-call id; it feeds RunResult.Files[].CallID.
+	callID string
+}
+
+// RunFile is one non-text part a tool produced during a run (§8 RunResult.files):
+// the part's fields plus From (the tool name) and CallID (the model's tool-call id).
+type RunFile struct {
+	Type     string `json:"type"`
+	MimeType string `json:"mimeType,omitempty"`
+	URL      string `json:"url,omitempty"`
+	Data     string `json:"data,omitempty"`
+	Name     string `json:"name,omitempty"`
+	From     string `json:"from"`
+	CallID   string `json:"callId"`
+}
+
+// runFiles collects every non-text part of toolCalls, in call order. Never nil.
+func runFiles(toolCalls []ToolCall) []RunFile {
+	files := []RunFile{}
+	for _, tc := range toolCalls {
+		for _, p := range tc.Parts {
+			if p.Type == "text" {
+				continue
+			}
+			files = append(files, RunFile{Type: p.Type, MimeType: p.MimeType, URL: p.URL, Data: p.Data, Name: p.Name, From: tc.Name, CallID: tc.callID})
+		}
+	}
+	return files
 }
 
 // Usage is token usage, summed across every LLM round trip in the run.
@@ -381,6 +412,10 @@ type RunResult struct {
 	Text      string     `json:"text"`
 	Messages  []any      `json:"messages"`
 	ToolCalls []ToolCall `json:"toolCalls"`
+	// Files is every non-text part (image/audio/file) the run's tool calls
+	// produced, in call order (§8, §7G). Always non-nil ([] when none). The final
+	// Text never carries markup for them.
+	Files []RunFile `json:"files"`
 	// ToolCallCount is the total number of tool calls (= len(ToolCalls)).
 	ToolCallCount int `json:"toolCallCount"`
 	// Turns is the number of LLM round trips.
@@ -1230,7 +1265,7 @@ func (c *Client) runOpenAI(ctx context.Context, prompt any, tk *Toolkit, history
 					mu.Unlock()
 					return
 				}
-				records[i] = c.toolCallRecord(tc.Function.Name, args, result)
+				records[i] = c.toolCallRecord(tc.ID, tc.Function.Name, args, result)
 				results[i] = withToolParts(map[string]any{
 					"role":         "tool",
 					"tool_call_id": tc.ID,
@@ -1271,6 +1306,7 @@ func (c *Client) result(model, text string, messages []any, toolCalls []ToolCall
 		Text:          text,
 		Messages:      messages,
 		ToolCalls:     toolCalls,
+		Files:         runFiles(toolCalls),
 		ToolCallCount: len(toolCalls),
 		Turns:         turns,
 		Usage:         usage,
@@ -1288,6 +1324,7 @@ func (c *Client) pendingRun(model string, runStart time.Time, request Request, m
 		Text:          request.Prompt,
 		Messages:      messages,
 		ToolCalls:     toolCalls,
+		Files:         runFiles(toolCalls),
 		ToolCallCount: len(toolCalls),
 		Turns:         turns,
 		Usage:         usage,
@@ -1521,7 +1558,7 @@ func (c *Client) runAnthropic(ctx context.Context, prompt any, tk *Toolkit, hist
 					mu.Unlock()
 					return
 				}
-				records[i] = c.toolCallRecord(u.Name, args, result)
+				records[i] = c.toolCallRecord(u.ID, u.Name, args, result)
 				results[i] = withToolParts(map[string]any{
 					"type":        "tool_result",
 					"tool_use_id": u.ID,
@@ -1900,7 +1937,7 @@ func (c *Client) streamOpenAI(ctx context.Context, prompt any, tk *Toolkit, hist
 					mu.Unlock()
 					return
 				}
-				records[i] = c.toolCallRecord(cc.name, args, result)
+				records[i] = c.toolCallRecord(cc.id, cc.name, args, result)
 				results[i] = withToolParts(map[string]any{"role": "tool", "tool_call_id": cc.id, "content": result.Output}, cc.name, result.Parts)
 				events[i] = c.resultEvent(cc.id, cc.name, safeJSONArgs(cc.args), result)
 			})
@@ -2187,7 +2224,7 @@ func (c *Client) streamAnthropic(ctx context.Context, prompt any, tk *Toolkit, h
 					mu.Unlock()
 					return
 				}
-				records[i] = c.toolCallRecord(u.name, args, result)
+				records[i] = c.toolCallRecord(u.id, u.name, args, result)
 				results[i] = withToolParts(map[string]any{"type": "tool_result", "tool_use_id": u.id, "content": result.Output, "is_error": result.IsError}, u.name, result.Parts)
 				events[i] = c.resultEvent(u.id, u.name, u.input, result)
 			})
@@ -2384,9 +2421,9 @@ func (conv *Conversation) Reset() {
 // toolCallRecord builds the RunResult.ToolCalls entry. A ToolTiers call_tool
 // call is recorded as the REAL tool with its inner arguments, the same name
 // hooks and stream events see (the transcript keeps the wrapper).
-func (c *Client) toolCallRecord(name string, args map[string]any, result ToolResult) ToolCall {
+func (c *Client) toolCallRecord(callID, name string, args map[string]any, result ToolResult) ToolCall {
 	real, inner, _ := c.unwrapCall(name, args)
-	return ToolCall{Name: real, Args: inner, Output: result.Output, IsError: result.IsError, Metadata: result.Metadata}
+	return ToolCall{Name: real, Args: inner, Output: result.Output, IsError: result.IsError, Metadata: result.Metadata, Parts: result.Parts, callID: callID}
 }
 
 // callEvent / resultEvent build the stream's tool events, naming the real tool

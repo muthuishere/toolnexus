@@ -127,6 +127,26 @@ new LlmClient.Hooks().beforeTool(guard.asHook(null)).beforeLLM(router.asHook(nul
 
 A `beforeLLM` hook may return `LLMOverride.withModel(id)`: that turn only is sent to `id`.
 
+## Media generation
+
+Generate images, video and speech (plus transcription, voice cloning and talking-head video)
+from a **JSON style** instead of provider code. Async jobs are started and polled for you. The same
+verbs become agent tools (`generate_image`, `generate_video`, `generate_speech`, …), and whatever
+they produce lands in `RunResult.files`. `examples/media-styles/a2e.json` ships first and reads
+`A2E_API_KEY` at call time. Its result URLs expire in 3–30 days, so save what you keep. SPEC §7G;
+guide: <https://muthuishere.github.io/toolnexus/media/>.
+
+```java
+Media media = Media.create(Media.loadStyle("examples/media-styles/a2e.json"),
+        new Media.Options().onProgress(p -> System.out.println(p.verb() + " " + p.status())));
+var img = media.image(new Media.ImageInput("a red fox in fresh snow", 1024, 768, null, null, null));
+var vid = media.video(new Media.VideoInput("the fox blinks", img.files().get(0).url(), 5, null, null));
+
+Toolkit tk = Toolkit.create(new Toolkit.Options().media(media));   // generate_image, …
+var res = agent.run("Draw a fox, then animate it.", tk);
+for (var f : res.files) System.out.println(f.from() + " " + f.mimeType() + " " + f.url());
+```
+
 ## Documentation
 
 Everything else — the full surface, with runnable examples — lives on the docs site:

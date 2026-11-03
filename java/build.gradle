@@ -142,6 +142,16 @@ tasks.register('runJudge', JavaExec) {
     }
 }
 
+tasks.register('runMedia', JavaExec) {
+    group = 'application'
+    description = 'Run the Media example (§7G image verb + generate_speech tool via the a2e.ai preset; without A2E_API_KEY it prints a hint and exits 0).'
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = 'io.github.muthuishere.toolnexus.examples.MediaExample'
+    if (System.getenv('A2E_API_KEY')) {
+        environment 'A2E_API_KEY', System.getenv('A2E_API_KEY')
+    }
+}
+
 tasks.register('runPromptCache', JavaExec) {
     group = 'application'
     description = 'Run the PromptCacheTiers example (promptCache + toolTiers against a local mock server; no API key, no network).'

@@ -297,6 +297,7 @@ where
         ));
     };
     let mut acc = Vec::new();
+    let mut acc_files = Vec::new();
     let mut last = RunResult::default();
     let mut reason = String::new();
     for n in 1..=comp.max_attempts {
@@ -308,6 +309,8 @@ where
         let mut r = ask(p).await?;
         acc.extend(r.tool_calls.iter().cloned());
         r.tool_calls = acc.clone();
+        acc_files.extend(r.files.iter().cloned());
+        r.files = acc_files.clone();
         last = r.clone();
         if !r.status.is_empty() && r.status != "done" {
             if !reason.is_empty() && r.status != "pending" {

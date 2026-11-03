@@ -15,7 +15,7 @@
 ;;   cljgo run src/run_acp_demo.cljc
 (defn build [b]
   (dep b "net.clojars.muthuishere/koine" {:mvn/version "0.11.0"})
-  (doseq [n ["demo" "native_and_http" "skills" "persona_memory" "compaction" "multimodal" "judge" "prompt_cache" "acp_demo"]]
+  (doseq [n ["demo" "native_and_http" "skills" "persona_memory" "compaction" "multimodal" "judge" "prompt_cache" "media" "acp_demo"]]
     (install b (exe b {:name (str "ex-" n)
                        :main (if (= n "demo")
                                "src/toolnexus/demo.cljc"

@@ -549,10 +549,10 @@ public sealed partial class LlmClient
     /// <summary>The RunResult record for a tool call: a ToolTiers <c>call_tool</c> call records the REAL
     /// tool name and its inner arguments (after any BeforeTool rewrite), as hooks and stream events see
     /// it; the transcript keeps the wrapper. tool_search stays tool_search.</summary>
-    private ToolCall ToolCallRecord(string name, IDictionary<string, object?> args, ToolResult result)
+    private ToolCall ToolCallRecord(string name, IDictionary<string, object?> args, ToolResult result, string? callId)
     {
         var (real, inner, _) = UnwrapCall(name, args);
-        return new ToolCall(real, inner, result.Output, result.IsError, result.Metadata);
+        return new ToolCall(real, inner, result.Output, result.IsError, result.Metadata, result.Parts, callId);
     }
 
     private async Task<(IDictionary<string, object?> Args, ToolResult Result)> RunToolDirectAsync(
@@ -643,7 +643,14 @@ public sealed partial class LlmClient
 
     // ---------------------------------------------------------------- results
 
-    public sealed record ToolCall(string Name, IDictionary<string, object?> Args, string Output, bool IsError, IDictionary<string, object?>? Metadata);
+    /// <summary>One tool call of a run. <paramref name="Parts"/> is the ToolResult's parts (null iff it had
+    /// none); <paramref name="CallId"/> is the model's tool-call id (SPEC §8).</summary>
+    public sealed record ToolCall(string Name, IDictionary<string, object?> Args, string Output, bool IsError,
+        IDictionary<string, object?>? Metadata, IReadOnlyList<ContentPart>? Parts = null, string? CallId = null);
+
+    /// <summary>(SPEC §8 / §7G) A non-text part a tool produced during a run, tagged with the tool name
+    /// (<paramref name="From"/>) and the model's tool-call id (<paramref name="CallId"/>).</summary>
+    public sealed record RunFile(string Type, string MimeType, string? Url, string? Data, string From, string? CallId, string? Name = null);
 
     public sealed class Usage
     {
@@ -677,6 +684,14 @@ public sealed partial class LlmClient
         public List<object?> Messages { get; }
         public List<ToolCall> ToolCalls { get; }
         public int ToolCallCount => ToolCalls.Count;
+
+        /// <summary>(SPEC §8) Every non-text part the run's tool calls produced, in call order — never
+        /// null (<c>[]</c> when none). Derived from <see cref="ToolCalls"/>, so every run path fills it.</summary>
+        public IReadOnlyList<RunFile> Files => ToolCalls
+            .SelectMany(c => (c.Parts ?? Array.Empty<ContentPart>())
+                .Where(p => p.Type != "text")
+                .Select(p => new RunFile(p.Type, p.MimeType ?? "", p.Url, p.Data, c.Name, c.CallId, p.Name)))
+            .ToList();
         public int Turns { get; }
         public Usage Usage { get; }
         public string Model { get; }
@@ -1362,7 +1377,7 @@ public sealed partial class LlmClient
                         runs[i] = (runs[i].Args, r.Result);
                         halted = r.Halted;
                     }
-                    toolCalls.Add(ToolCallRecord(names[i], runs[i].Args, runs[i].Result));
+                    toolCalls.Add(ToolCallRecord(names[i], runs[i].Args, runs[i].Result, callIds[i]));
                     messages.Add(new Dictionary<string, object?>
                     {
                         ["role"] = "tool",
@@ -1476,7 +1491,7 @@ public sealed partial class LlmClient
                         runs[i] = (runs[i].Args, r.Result);
                         halted = r.Halted;
                     }
-                    toolCalls.Add(ToolCallRecord(names[i], runs[i].Args, runs[i].Result));
+                    toolCalls.Add(ToolCallRecord(names[i], runs[i].Args, runs[i].Result, useIds[i]));
                     // §8A: native — the parts are blocks inside tool_result.content, keyed to the
                     // tool_use_id. No relocation: it would discard that association and break
                     // cache breakpoints.
@@ -1681,7 +1696,7 @@ public sealed partial class LlmClient
                         halted = r.Halted;
                     }
                     var rr = runs[i];
-                    toolCalls.Add(ToolCallRecord(slot[1], rr.Args, rr.Result));
+                    toolCalls.Add(ToolCallRecord(slot[1], rr.Args, rr.Result, slot[0]));
                     messages.Add(new Dictionary<string, object?> { ["role"] = "tool", ["tool_call_id"] = slot[0], ["content"] = ToolMessageContent(rr.Result) });
                     relocations.Add((slot[1], slot[0], ContentEmit.NonText(rr.Result.Parts)));
                     if (halted != null)
@@ -1884,7 +1899,7 @@ public sealed partial class LlmClient
                         halted = rp.Halted;
                     }
                     var r = runs[i];
-                    toolCalls.Add(ToolCallRecord(name, r.Args, r.Result));
+                    toolCalls.Add(ToolCallRecord(name, r.Args, r.Result, id));
                     results.Add(new Dictionary<string, object?>
                     {
                         ["type"] = "tool_result",

@@ -248,3 +248,26 @@ async def test_async_guardrail_fails_loudly_instead_of_denying_everything():
     # A sync guardrail returning None still permits — unchanged.
     ok = guarded_hooks([lambda _ev: None], None)
     assert await ok["before_tool"]({"name": "safe", "args": {}, "turn": 1}) is None
+
+
+async def test_completion_gate_accumulates_files_across_retries():
+    """Regression: RunResult.files accumulates across gate retries like tool_calls."""
+    from types import SimpleNamespace
+
+    from toolnexus.agents.loop import run_gated
+
+    img = {"type": "image", "mimeType": "image/png", "url": "https://x/1.png", "from": "generate_image", "callId": "c1"}
+    attempts = [
+        SimpleNamespace(text="a", status="done", tool_calls=[{"name": "generate_image"}], files=[img]),
+        SimpleNamespace(text="b", status="done", tool_calls=[{"name": "noop"}], files=[]),
+    ]
+    it = iter(attempts)
+
+    async def ask(_prompt):
+        return next(it)
+
+    out = await run_gated(
+        ask, "go", Completion(verify=lambda r: Verdict(ok=len(r.tool_calls) >= 2, reason="not yet"), max_attempts=3)
+    )
+    assert len(out.tool_calls) == 2
+    assert out.files == [img]

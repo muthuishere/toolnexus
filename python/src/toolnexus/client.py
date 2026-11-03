@@ -204,6 +204,31 @@ class RunResult:
     limit: Optional[str] = None
     # The unresolved suspension — present iff status == "pending" (§10).
     pending: Optional[Request] = None
+    # §8/§7G: every non-text part the run's tool calls produced, in call order, each
+    # ``{type, mimeType, url?, data?, from, callId}`` (``from`` = tool name, ``callId`` =
+    # the model's tool-call id). Always a list ([] when none).
+    files: list[dict[str, Any]] = field(default_factory=list)
+
+
+class _CallRecord(dict):
+    """A ``RunResult.tool_calls`` entry. A plain dict on the wire; carries the model's
+    tool-call id as an attribute so ``RunResult.files`` can be derived without adding a
+    key to the entry."""
+
+    call_id: Any = None
+
+
+def _run_files(tool_calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for rec in tool_calls:
+        for p in rec.get("parts") or []:
+            if not isinstance(p, dict) or p.get("type") == "text":
+                continue
+            f = dict(p)
+            f["from"] = rec.get("name")
+            f["callId"] = getattr(rec, "call_id", None)
+            out.append(f)
+    return out
 
 
 def _add_usage(acc: dict[str, int], raw: Any, style: ClientStyle) -> None:
@@ -1274,6 +1299,7 @@ class Client:
             model=model or self.model,
             status="incomplete" if at_limit and not text else "done",
             limit="maxTurns" if at_limit and not text else None,
+            files=_run_files(tool_calls),
         )
 
     # ----------------------------------------------------------------------- #
@@ -1312,6 +1338,7 @@ class Client:
             model=model or self.model,
             status="pending",
             pending=request,
+            files=_run_files(tool_calls),
         )
 
     async def _resolve_pending(
@@ -1427,18 +1454,24 @@ class Client:
         out = [t for t in (toolkit.get(n) for n in p.core) if t is not None]
         return out + [p.search, p.call]
 
-    def _tool_call_record(self, name: str, args: dict[str, Any], result: ToolResult) -> dict[str, Any]:
+    def _tool_call_record(
+        self, name: str, args: dict[str, Any], result: ToolResult, call_id: Any = None
+    ) -> dict[str, Any]:
         """The ``RunResult.tool_calls`` entry. A ``call_tool`` call is recorded as the real
         tool with its inner arguments, the name hooks and stream events see (the
         transcript keeps the wrapper)."""
         real, inner, _ = self._unwrap_call(name, args)
-        return {
-            "name": real,
-            "args": inner,
-            "output": result.output,
-            "is_error": result.is_error,
-            "metadata": result.metadata,
-        }
+        rec = _CallRecord(
+            name=real,
+            args=inner,
+            output=result.output,
+            is_error=result.is_error,
+            metadata=result.metadata,
+        )
+        if result.parts:
+            rec["parts"] = list(result.parts)
+        rec.call_id = call_id
+        return rec
 
     def _call_safe(self, toolkit: Any, name: str, args: dict[str, Any]) -> bool:
         """One call's safety; looks through ``call_tool`` to the tool it names. Unknown ⇒ unsafe."""
@@ -2183,7 +2216,7 @@ class Client:
                     req = pending_of(result)
                     if req is not None:
                         result, halted = await self._resolve_pending(toolkit, name, args, req, call_id, turn, cancel)
-                    tool_calls.append(self._tool_call_record(name, args, result))
+                    tool_calls.append(self._tool_call_record(name, args, result, call_id))
                     messages.append(_tool_message(call_id, name, result))
                     if halted is not None:
                         return self._pending_run(run_start, halted, messages, tool_calls, turns, usage, model=last_model)
@@ -2294,7 +2327,7 @@ class Client:
                     req = pending_of(result)
                     if req is not None:
                         result, halted = await self._resolve_pending(toolkit, use["name"], args, req, use.get("id"), turn, cancel)
-                    tool_calls.append(self._tool_call_record(use["name"], args, result))
+                    tool_calls.append(self._tool_call_record(use["name"], args, result, use.get("id")))
                     results.append(_tool_result_block(use["id"], result))
                     if halted is not None:
                         break
@@ -2458,11 +2491,11 @@ class Client:
                         yield {"type": "pending", "request": req}  # surface BEFORE wait_for so a channel can push the link
                         result, halted = await self._resolve_pending(toolkit, c["name"], args, req, c["id"], turn, cancel)
                         if halted is not None:
-                            tool_calls.append(self._tool_call_record(c["name"], args, result))
+                            tool_calls.append(self._tool_call_record(c["name"], args, result, c["id"]))
                             messages.append(_tool_message(c["id"], c["name"], result))
                             yield {"type": "done", "result": self._pending_run(run_start, halted, messages, tool_calls, turns, usage, model=last_model)}
                             return
-                    tool_calls.append(self._tool_call_record(c["name"], args, result))
+                    tool_calls.append(self._tool_call_record(c["name"], args, result, c["id"]))
                     messages.append(_tool_message(c["id"], c["name"], result))
                     yield self._result_event(c["id"], c["name"], _safe_json(c["args"]), result)
 
@@ -2619,7 +2652,7 @@ class Client:
                     if req is not None:
                         yield {"type": "pending", "request": req}  # surface BEFORE wait_for
                         result, halted = await self._resolve_pending(toolkit, u["name"], args, req, u["id"], turn, cancel)
-                    tool_calls.append(self._tool_call_record(u["name"], args, result))
+                    tool_calls.append(self._tool_call_record(u["name"], args, result, u["id"]))
                     results.append(_tool_result_block(u["id"], result))
                     yield self._result_event(u["id"], u["name"], u["input"], result)
                     if halted is not None:

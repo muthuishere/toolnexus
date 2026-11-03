@@ -72,6 +72,7 @@ defmodule Toolnexus.Client.RunResult do
   defstruct text: "",
             messages: [],
             tool_calls: [],
+            files: [],
             tool_call_count: 0,
             turns: 0,
             usage: %{prompt_tokens: 0, completion_tokens: 0, total_tokens: 0},
@@ -84,6 +85,7 @@ defmodule Toolnexus.Client.RunResult do
           text: String.t(),
           messages: [map()],
           tool_calls: [map()],
+          files: [map()],
           tool_call_count: non_neg_integer(),
           turns: non_neg_integer(),
           usage: %{
@@ -1224,10 +1226,13 @@ defmodule Toolnexus.Client do
       ms: now_ms() - run_start
     })
 
+    {tool_calls, files} = finish_calls(tool_calls)
+
     %RunResult{
       text: text,
       messages: messages,
       tool_calls: tool_calls,
+      files: files,
       tool_call_count: length(tool_calls),
       turns: turns,
       usage: usage,
@@ -1248,10 +1253,13 @@ defmodule Toolnexus.Client do
       ms: now_ms() - run_start
     })
 
+    {tool_calls, files} = finish_calls(tool_calls)
+
     %RunResult{
       text: request.prompt,
       messages: messages,
       tool_calls: tool_calls,
+      files: files,
       tool_call_count: length(tool_calls),
       turns: turns,
       usage: usage,
@@ -1960,21 +1968,43 @@ defmodule Toolnexus.Client do
         max_part_bytes: client.max_part_bytes
       )
 
-  defp tool_call_record(client, s), do: call_record(client, s.name, s.args, s.result)
+  defp tool_call_record(client, s), do: call_record(client, s.name, s.args, s.result, s.id)
 
   # A RunResult tool_calls entry. Under :tool_tiers a `call_tool` call records the REAL tool
   # and its inner args (after any before_tool rewrite), as hooks and stream events see it;
   # the transcript keeps the wrapper. tool_search stays tool_search.
-  defp call_record(client, name, args, result) do
+  defp call_record(client, name, args, result, call_id) do
     {name, args, _} = unwrap_call(client, name, args)
 
-    %{
+    rec = %{
       name: name,
       args: args,
       output: result.output,
       is_error: result.is_error,
       metadata: result.metadata
     }
+
+    # §8: `parts` present iff the ToolResult had parts. `:__call_id` is internal — it
+    # feeds RunResult.files (callId) and is stripped before the record is returned.
+    case result.parts do
+      [_ | _] = parts -> rec |> Map.put(:parts, parts) |> Map.put(:__call_id, call_id)
+      _ -> rec
+    end
+  end
+
+  # §8 RunResult: strip the internal call id and collect every non-text part, in call order.
+  defp finish_calls(tool_calls) do
+    files =
+      for %{parts: parts} = rec <- tool_calls,
+          %{type: type} = p <- parts,
+          type != "text" do
+        %{type: type, mime_type: p.mime_type, from: rec.name, call_id: rec[:__call_id]}
+        |> then(fn f -> if p.url, do: Map.put(f, :url, p.url), else: f end)
+        |> then(fn f -> if p.data, do: Map.put(f, :data, p.data), else: f end)
+        |> then(fn f -> if Map.get(p, :name), do: Map.put(f, :name, p.name), else: f end)
+      end
+
+    {Enum.map(tool_calls, &Map.delete(&1, :__call_id)), files}
   end
 
   # ---- non-streaming: openai ----
@@ -2396,7 +2426,7 @@ defmodule Toolnexus.Client do
 
           st = %{
             st
-            | tool_calls: st.tool_calls ++ [call_record(client, c.name, args, result)],
+            | tool_calls: st.tool_calls ++ [call_record(client, c.name, args, result, c.id)],
               messages: st.messages ++ [tool_message(c.id, c.name, result)]
           }
 
@@ -2645,7 +2675,7 @@ defmodule Toolnexus.Client do
 
           st = %{
             st
-            | tool_calls: st.tool_calls ++ [call_record(client, u["name"], args, result)]
+            | tool_calls: st.tool_calls ++ [call_record(client, u["name"], args, result, u["id"])]
           }
 
           results = results ++ [tool_result_block(u["id"], result)]

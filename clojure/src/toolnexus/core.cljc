@@ -9,6 +9,7 @@
             [toolnexus.mcp :as mcp]
             [toolnexus.skill :as skill]
             [toolnexus.a2a :as a2a]
+            [toolnexus.media :as media]
             [toolnexus.builtin :as builtin]
             [toolnexus.adapter :as adapter]))
 
@@ -78,6 +79,8 @@
     :disable-skills      — names to drop from the catalog; sugar over the filter
     :builtins            — the §0.11 toggle: false | {:disabled ..} | {:enabled ..} | {:tools {..}}
     :agents              — remote A2A agents; each advertised skill becomes a tool (§7A)
+    :media               — a `toolnexus.media/create-media` value; its §7G tools
+                           (source \"media\") are registered beside :tools
     :tools               — extra Tools of your own (native, http, a2a, anything)
     :disable-tools       — final exposed names to drop, across EVERY source (§4A)
     :wait-for            — the ONE §10 host resolver. Passed to the MCP source so a
@@ -91,7 +94,7 @@
   a status, never an exception. A toolkit with one dead MCP server is still a
   working toolkit — that is the whole point of the status map."
   [{:keys [mcp skills skill-defs skill-provider builtins tools agents
-           disable-tools wait-for] :as opts}]
+           disable-tools wait-for] media-src :media :as opts}]
   (let [skill?   (or (some? skills) (some? skill-defs) (some? skill-provider))
         loaded   (when skill? (skill/load-skills (skill-source-opts opts)))
         skill-ts (when loaded [(skill/skill-tool loaded)])
@@ -112,6 +115,7 @@
         ;; shipped behaviour for a collision (a host extra named exactly like a
         ;; remote agent's `Card_Bot_echo`) that essentially cannot occur.
         (tool/add-tools agent-ts)
+        (tool/add-tools (if media-src (media/tools media-src) []))
         (tool/add-tools (or tools []))
         (tool/add-tools (:tools mcp-res []))        ; last: §0.11 MCP precedence
         (update :tools (fn [m] (apply dissoc m (map str (or disable-tools [])))))

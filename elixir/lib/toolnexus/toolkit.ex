@@ -53,6 +53,7 @@ defmodule Toolnexus.Toolkit do
     * `:disable_skills` — drop skills by name from the `skill` catalog (sugar
       over a drop-list in `:skills_filter`)
     * `:extra_tools` — your own custom tools, always added to the toolkit
+    * `:media` — a `Toolnexus.Media` engine; registers its tools (§7G), after A2A agents and before `:extra_tools` (first name wins)
     * `:builtins` — built-in tools toggle (§4A). Default ON. When absent, a
       top-level `builtins` key on a parsed config map is consulted
     * `:agents` — remote A2A agents (§7A); a top-level `agents` config block
@@ -114,7 +115,8 @@ defmodule Toolnexus.Toolkit do
 
     all =
       ((mcp && mcp.tools) || []) ++
-        if(skill, do: [skill.tool], else: []) ++ active_builtins ++ agent_tools ++ extra_tools
+        if(skill, do: [skill.tool], else: []) ++
+        active_builtins ++ agent_tools ++ media_tools(opts[:media]) ++ extra_tools
 
     # disable_tools drops tools by their final exposed name across every source.
     disabled = MapSet.new(opts[:disable_tools] || [])
@@ -173,6 +175,10 @@ defmodule Toolnexus.Toolkit do
       )
     end
   end
+
+  # §7G: `media:` registers the media tools — equivalent to `register(tk, Media.tools(m))`.
+  defp media_tools(nil), do: []
+  defp media_tools(%Toolnexus.Media{} = m), do: Toolnexus.Media.tools(m)
 
   @doc "All tools (mcp tools + skill tool + builtins + agents + extras), in insertion order."
   @spec tools(t()) :: [Tool.t()]

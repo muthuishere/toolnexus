@@ -84,12 +84,20 @@ public sealed class Toolkit : IAsyncDisposable
         /// </summary>
         public Func<Request, Task<Answer>>? WaitFor { get; set; }
 
+        /// <summary>
+        /// §7G media generation: registers <c>Media.Tools()</c> (source <c>"media"</c>) — equivalent to
+        /// <c>toolkit.Register(media.Tools())</c>. They follow A2A agent tools and precede
+        /// <see cref="ExtraTools"/> (first name wins), so a host tool of the same name loses.
+        /// </summary>
+        public Media? Media { get; set; }
+
         public Options WithMcpConfig(object? v) { McpConfig = v; return this; }
         public Options WithSkillsDir(params string[] v) { SkillsDir = v.ToList(); return this; }
         public Options WithExtraTools(params ITool[] v) { ExtraTools = v.ToList(); return this; }
         public Options WithAnnotatedObjects(params object[] v) { AnnotatedObjects = v.ToList(); return this; }
         public Options WithBuiltins(object? v) { Builtins = v; return this; }
         public Options WithAgents(params Agent[] v) { Agents = v.ToList(); return this; }
+        public Options WithMedia(Media v) { Media = v; return this; }
         public Options WithWaitFor(Func<Request, Task<Answer>> v) { WaitFor = v; return this; }
     }
 
@@ -195,6 +203,8 @@ public sealed class Toolkit : IAsyncDisposable
             }
         })).ConfigureAwait(false);
         var agentTools = agentToolLists.SelectMany(x => x).ToList();
+        // §7G: media tools follow A2A agent tools and precede ExtraTools (first name wins).
+        if (opts.Media != null) agentTools.AddRange(opts.Media.Tools());
 
         // A2A inbound profile: a top-level `a2a` block on a parsed config object (mirrors
         // builtins/agents). ServeAsync prefers its inline `a2a` over this.

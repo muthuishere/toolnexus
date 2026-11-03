@@ -222,6 +222,7 @@ async def run_gated(ask: Callable[[str], Any], prompt: str, completion: Optional
         raise ValueError("toolnexus: Completion.verify is required")
 
     accumulated: list[Any] = []
+    acc_files: list[Any] = []
     last: Any = None
     reason = ""
     for attempt in range(1, max_attempts + 1):
@@ -232,6 +233,12 @@ async def run_gated(ask: Callable[[str], Any], prompt: str, completion: Optional
         accumulated.extend(_tool_calls(result))
         try:
             result.tool_calls = list(accumulated)
+        except (AttributeError, TypeError):  # pragma: no cover - defensive
+            pass
+        # RunResult.files is derived from tool_calls, so it accumulates with them (§8).
+        acc_files.extend(_field(result, "files") or [])
+        try:
+            result.files = list(acc_files)
         except (AttributeError, TypeError):  # pragma: no cover - defensive
             pass
         last = result

@@ -71,3 +71,30 @@ Module **`github.com/muthuishere/toolnexus/golang`** (Go 1.23). See the
 - Equivalents: `waitFor` / `pending` / `authRequired` / `pendingOf` (js) · `wait_for` / `pending`
   (py) · `waitFor` / `ToolResult.pending` (java) · `WithWaitFor` / `ToolResult.Pending` (c#) ·
   `wait_for` / `ToolResult.pending?` (elixir).
+
+## Media generation
+
+Guide: [Media generation](/toolnexus/media/) · recipe: [Generate images, video and speech](/toolnexus/cookbook/media/) · SPEC §7G.
+
+- `LoadMediaStyle(path string) (MediaStyle, error)`
+- `CreateMedia(styles []MediaStyle, opts MediaOptions) *Media` — a verb resolves to the first style that
+  declares it.
+- `MediaOptions{ OnProgress func(MediaProgress), HTTPClient *http.Client }` — `MediaProgress{ Verb, JobID,
+  Status }` after every poll; `HTTPClient` nil ⇒ `http.DefaultClient`.
+- Verbs, each `(ctx context.Context, in XInput) (MediaResult, error)`:
+  `Image(ImageInput{ Prompt, Width, Height, AspectRatio, Seed, ProviderOptions })` ·
+  `Video(VideoInput{ Prompt, Image, Seconds, AspectRatio, ProviderOptions })` ·
+  `Speech(SpeechInput{ Text, Voice, ProviderOptions })` · `Transcribe(TranscribeInput{ Audio, ProviderOptions })` ·
+  `CloneVoice(CloneVoiceInput{ Name, Samples, ProviderOptions })` · `Talking(TalkingInput{ Image, Audio, ProviderOptions })`.
+- **Zero value = unset**: a `0` or `""` field is not sent. To send a literal zero (e.g. `seed: 0`), use
+  `Generate` with an explicit args map.
+- `(m *Media) Generate(ctx, verb string, args map[string]any, providerOptions map[string]any) (MediaResult, error)` —
+  the raw call. `(m *Media) Supports(verb string) bool`.
+- `MediaResult{ Files []MediaFile, Text, JobID, Status }` · `MediaFile{ Type, MimeType, URL }`.
+- `(m *Media) Tools() []Tool` (source `"media"`), or `Options.Media`.
+- `RunResult.Files []RunFile` — `{ Type, MimeType, URL, Data, Name, From, CallID }`, in call order; the same
+  parts are on `RunResult.ToolCalls[i].Parts`.
+- Errors: the function face returns an `error` whose `Error()` is the exact §7G message; cancelling `ctx`
+  returns the context error. A media tool never errors (`IsError: true`).
+- Equivalents: `createMedia` (js) · `create_media` (py) · `Media.create` (java) · `Media.Create` (c#) ·
+  `Toolnexus.Media.new` (elixir) · `toolnexus.media/create-media` (clojure) · `create_media` (rust).

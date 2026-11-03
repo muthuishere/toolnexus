@@ -114,6 +114,13 @@ A new language port is "correct" iff these hold. Run it against the shared
     into ONE user turn when consecutive, `system` hoisted. `finishReason`: any tool call ⇒
     `"tool_calls"`, else length/content_filter/stop. `beforeLLM`/`afterLLM` fire once; tool hooks
     never fire. This is the INBOUND half of the adapters, which are outbound-only.
+14. **Media generation** (§7G): `createMedia(styles)` — one engine, two faces. Typed verbs
+    (`image|video|speech|transcribe|cloneVoice|talking`) return `{files,text?,jobId?,status}`;
+    `media.tools()` exposes `generate_image|generate_video|generate_speech|transcribe_audio|clone_voice|talking_video`
+    (source `"media"`). Styles are JSON (sync or async start→poll→result, dot-paths, `${ENV}` headers);
+    no vendor in the library. Error strings, schemas and tool results are byte-fixed by
+    `conformance/media/`. `RunResult.files` collects every non-text part a run's tools produced
+    (`from`, `callId`), and `toolCalls[].parts` carries them per call.
 
 That's it. The sections below just expand each point with wire-format detail.
 
@@ -130,7 +137,7 @@ Tool {
   name:        string          // unique, sanitized to [a-zA-Z0-9_-]
   description: string
   inputSchema: JSONSchema      // a JSON-Schema object ({type:"object", properties, ...})
-  source:      "mcp" | "skill" | "native" | "http" | "custom"
+  source:      "mcp" | "skill" | "native" | "http" | "builtin" | "a2a" | "media" | "custom"
   execute(args: object, ctx?: Context) -> ToolResult
 }
 ```
@@ -1572,6 +1579,174 @@ Absent a `compactor`, a run is byte-identical to today (compaction is entirely o
 
 ---
 
+## 7G. Media generation (source: "media")
+
+Image, video, speech, transcription, voice cloning and talking-head generation, behind one engine
+with **two faces**: typed verbs a host calls, and tools an LLM calls. Providers are **styles** —
+JSON data, never code. ADR 0036; spike `spikes/media-a2e/`. Realtime/live conversation is out of
+scope. Conformance: `conformance/media/` (`verbs.json`, `cases.json`, `schemas.json`) — every port
+replays it against an in-process fake server and must match it exactly.
+
+### Style (JSON)
+
+```
+Style = {
+  baseUrl:        string                    // trailing "/" trimmed before joining with a path
+  headers?:       { [name]: string }        // "${VAR}" expands from the process env at call time
+                                            // (unset ⇒ ""); values are never logged
+  errorEnvelope?: { codePath, okValues: [json], messagePath? }
+  verbs:          { [verb]: Verb }          // verb ∈ image|video|speech|transcribe|cloneVoice|talking
+}
+Verb = {
+  mode:       "sync" | "async"
+  kind:       "image" | "video" | "audio" | "text"
+  start:      { method?: string = "POST", path: string }
+  defaults?:  object                        // deep-copied, then args are written over it
+  args:       { [normalisedArg]: dotPath }  // which normalised args this style accepts, and where they go
+  idPath?:    dotPath                       // async only
+  poll?:      { method?: "GET", path /* contains {id} */, statusPath, done: [string], failed: [string],
+                errorPath?, intervalMs?: 5000, timeoutMs?: 600000 }   // async only
+  resultPath: dotPath
+}
+```
+
+`loadMediaStyle(path)` reads one style file. `createMedia(styles, opts?)` takes one style or a list;
+a verb resolves to the **first** style in the list that declares it. Options: `onProgress({verb,
+jobId, status})` and the port's HTTP-client injection (the same seam as the LLM client). Vendor
+presets live in `examples/media-styles/` and are loaded by path — the library names no vendor.
+
+**dotPath.** Segments split on `.`; a segment of only digits indexes an array. *Read*: missing ⇒
+absent. *Write*: creates objects, and arrays when the next segment is numeric (padding with null).
+
+### Verbs (function face)
+
+Fixed verbs with normalised arguments (`verbs.json` is the byte source: order, names, types,
+descriptions, required). Idiomatic per port — `media.image({prompt})`, `media.Image(ctx,
+ImageInput{…})`, `media.image(prompt=…)` — plus a generic `generate(verb, args)`. Every verb
+returns `MediaResult = { files: [File], text?: string, jobId?: string, status: string }`;
+`File = { type, mimeType, url }`. A function-face call may also take `providerOptions` (object),
+whose top-level keys overwrite the request body last; the tool face never exposes it.
+
+### Engine (normative order)
+
+1. No style declares `verb` ⇒ error `media: no style supports "<verb>"`.
+2. Any arg key not in `verb.args` ⇒ error `<verb>: argument "<key>" not supported by this style`.
+   No request is made.
+3. body = deep copy of `defaults`; each present arg is written at its dotPath; `providerOptions` last.
+4. Start request: `start.method` to `baseUrl + start.path`, JSON body, `Content-Type:
+   application/json`, style headers.
+5. Every response: non-2xx ⇒ error `HTTP <status>: <raw body text>`. Unparseable JSON ⇒
+   `<verb>: response is not JSON`. If `errorEnvelope` is set and the value at `codePath` is present
+   and not JSON-equal to one of `okValues` ⇒ `API error <code>: <message>` (`message` = string at
+   `messagePath`, else empty; a number `code` renders as an integer when integral).
+6. `sync` ⇒ the start response is the final response; `status = "completed"`.
+7. `async` ⇒ jobId = value at `idPath` (string as-is, integral number as integer text); absent ⇒
+   `<verb>: no job id at <idPath>`. Loop: wait `intervalMs`, request `poll.method` to
+   `baseUrl + poll.path` with `{id}` replaced, read the status string at `statusPath` (absent ⇒ ""),
+   call `onProgress`. In `done` ⇒ final response, `status` = it. In `failed` ⇒ error
+   `job <id> <status>: <msg>` where `msg` = string at `errorPath`, or `job <id> <status>` when
+   absent/null/empty. **Any other status keeps polling** (providers emit undocumented ones, e.g.
+   a2e `sent`). After a non-terminal poll, if time since the first wait began ≥ `timeoutMs` ⇒
+   `job <id> timed out after <timeoutMs>ms`. Cancellation (port-native: ctx, AbortSignal,
+   CancellationToken, …) stops the loop with the port's cancellation error.
+8. Result: value at `resultPath`. `kind:"text"` ⇒ a string (or number, rendered) becomes
+   `MediaResult.text`, `files = []`. Media kinds ⇒ a string or an array of strings (flattened,
+   empty strings dropped) becomes one `File` each. Nothing found ⇒ `<verb>: no result at <resultPath>`.
+9. File mapping: `type` = `image`→`image`, `audio`→`audio`, `video`→`file`. `mimeType` from the URL's
+   path extension (query and fragment stripped, case-insensitive): png→image/png, jpg|jpeg→image/jpeg,
+   webp→image/webp, gif→image/gif, mp4→video/mp4, webm→video/webm, mov→video/quicktime,
+   mp3→audio/mpeg, wav→audio/wav, ogg→audio/ogg, m4a→audio/mp4, flac→audio/flac; else the kind
+   default image/png, video/mp4, audio/mpeg.
+
+### Edge rules (pinned after the first port)
+
+- **Headers** — style headers go on **every** request (start and polls); `Content-Type:
+  application/json` only on requests with a body. Polls send no body.
+- **Job id** — only a non-empty string or an integral number counts; anything else (incl. `""`) ⇒ `no job id`.
+- **Envelope code** rendering — string as-is, integral number as integer text, anything else JSON-encoded.
+- **Media result** — arrays flatten to any depth; non-string and empty-string entries are dropped.
+- **Text result** — a string (including `""`, e.g. silence) or a number is a result; absent/null/other ⇒ `no result`.
+- **Args** — an arg whose value is null/nil/None is treated as absent. With several unsupported args,
+  the error names the first in sorted (code-point) order.
+- **Absent `done`/`failed`** lists are empty (the job polls until timeout).
+- **Registration order** — `createToolkit({ media })` registers media tools after A2A agent tools
+  and **before** `extraTools`; first name wins as everywhere else.
+- **Number rendering** — a non-integral number (text result, envelope code) uses the shortest
+  round-trip decimal form (`1.5`).
+- **dotPath write through a scalar** — an existing non-container value on the path is replaced by
+  an object (or an array, when the next segment is numeric).
+- **Transport errors** (no HTTP status, e.g. connection refused) — `<verb>: <port's error message>`;
+  not byte-fixed.
+- **Redirects** — every port follows redirects itself, with one rule set:
+  - Followed statuses: 301, 302, 303, 307, 308 **with** a `Location` header (resolved against the
+    current URL). Any other 3xx, or one of these without `Location`, is a non-2xx response ⇒
+    `HTTP <status>: <body>`.
+  - Method: 301/302/303 after a request whose method is not GET/HEAD ⇒ the next request is **GET
+    with no body** (and no `Content-Type`). 307/308 re-issue the **same method and body**.
+  - Hop limit: at most **10** redirects are followed (11 requests). A redirect response after that ⇒
+    error `<verb>: too many redirects`.
+  - Headers: style headers are **never sent to a different origin** (scheme + host + port) than the
+    origin of the request built from `baseUrl`. A same-origin redirect keeps them; a cross-origin
+    redirect is re-issued **without** them (no `Authorization`, no custom style header).
+  - Every hop is bounded by the same job deadline (Per-request timeout below).
+  - Gap: a host-injected HTTP client that follows redirects on its own (e.g. a custom JS `fetch`
+    that ignores `redirect: "manual"`, or the cljgo host's Go client) is outside these guarantees.
+- **Per-request timeout** — every HTTP request (start and each poll) is bounded by the time
+  remaining until the job deadline: `timeoutMs` measured from the start request for async verbs;
+  sync verbs use the verb's `poll.timeoutMs` if given, else 600000. When the deadline expires the
+  error is `job <id> timed out after <timeoutMs>ms`, or `<verb>: timed out after <timeoutMs>ms` when
+  there is no job id yet (start request, sync verb). No extra create-time timeout option exists.
+- **Interval / timeout defaults** — `intervalMs` or `timeoutMs` absent, `<= 0` or not a number ⇒
+  the default (5000 / 600000).
+- **Poll status rendering** — the value at `statusPath` renders like the envelope code: string
+  as-is, integral number as integer text, other number in shortest round-trip form; absent/other ⇒
+  `""`. The rendered text is what `onProgress` reports, what appears in `job <id> <status>` errors,
+  and what is matched against `done` / `failed`.
+- **Empty dotPath** — `""` addresses the whole value for reads (`idPath`, `resultPath`,
+  `statusPath`, `errorPath`, `codePath`, `messagePath`). An `args` entry mapped to `""` is a style
+  error raised when the media is created/loaded: `style: empty path for argument "<key>"`.
+- **Job id in the poll path** — `{id}` is replaced by the id percent-encoded per RFC 3986: keep
+  `A-Z a-z 0-9 - . _ ~`, encode every other UTF-8 byte as `%XX` (uppercase hex).
+- **Echoed error bodies** — in `HTTP <status>: <body>` the body is capped at its first 1000 Unicode
+  code points; when truncated, `…` (U+2026) is appended.
+- **dotPath write through an array with a non-numeric segment** — the array is replaced by an
+  object (same rule as writing through a scalar); never a crash.
+- **dotPath write with a numeric segment through an existing object** — the object is kept and the
+  segment is written as an ordinary string key (`"0"`); only a missing (or scalar) container is
+  created as an array for a numeric next segment.
+- **Cancellation** — the function face raises the port's native cancellation error; the tool face
+  returns `isError:true` with that error's message (not byte-fixed across ports) — except **Python**, where
+  `asyncio.CancelledError` must propagate (swallowing it un-cancels the task).
+
+### Tools (tool face)
+
+`media.tools()` returns one `Tool` (source `"media"`) per verb the media supports, in `verbs.json`
+order, named per `verbs.json` (`generate_image`, `generate_video`, `generate_speech`,
+`transcribe_audio`, `clone_voice`, `talking_video`). `inputSchema = {type:"object", properties,
+required}` where properties are the verb's canonical args **the resolved style maps**, in canonical
+order where the port's schema type preserves key order (Go's map does not; contents must still match), and `required` = canonical-required ∩ mapped (always present, possibly `[]`). Array args are
+`{type:"array", items:{type:<items>}, description}`. Expected bytes: `conformance/media/schemas.json`.
+`createToolkit({ media })` registers them; `toolkit.register(...media.tools())` is equivalent.
+
+Execute ⇒ engine; never throws. Success:
+`ToolResult{ isError:false, output, parts, metadata:{source:"media", verb, jobId? (async only), status} }`
+— media kinds: `output = "<word> ready: " + urls.join("\n")` (`word` = image|video|audio),
+`parts = files` as ContentParts `{type, mimeType, url}`; text kind: `output = text`, no `parts` key.
+Any engine error ⇒ `ToolResult{ isError:true, output:<the error message> }`.
+
+**Scheduling.** Every media tool is **concurrency-safe** for every argument set: it carries the
+always-safe predicate (`concurrencySafe(args) -> true`, idiomatic name per port) of §8 *Tool
+scheduling*. Each call is an independent remote job, so the media calls of one model response run
+concurrently (up to `maxToolConcurrency`) instead of being serialised as unhinted tools are.
+
+### Not in v1
+
+Download of expiring result URLs, provider-side job cancellation, local-file upload flows, ComfyUI graph injection, webhooks,
+price quotes, §10 suspension for long jobs, streaming `file` events. Tracked in
+`openspec/changes/add-media-generation`.
+
+---
+
 ## 8. Unified LLM client (the host loop)
 
 The payoff: give it a plain base URL + a "style", and it runs the whole tool-calling
@@ -1602,7 +1777,12 @@ dispatch); what is normative is the position and the byte-identical string path.
 RunResult {
   text:          string        // final assistant answer
   messages:      [...]          // full transcript
-  toolCalls:     [{ name, args, output, isError, metadata }]   // every call + its result
+  toolCalls:     [{ name, args, output, isError, metadata, parts? }]   // every call + its result;
+                                                                      // parts present iff the ToolResult had parts
+  files:         [{ type, mimeType, url?, data?, name?, from, callId }] // every non-text part produced
+                 // by tool calls this run (any source: media, MCP, built-in file reads…), in call order;
+                 // from = tool name, callId = the model's tool-call id; name present iff the part had one.
+                 // Always present ([] when none). The final `text` never gets markup for them (§7G).
   toolCallCount: number         // = toolCalls.length
   turns:         number         // LLM round trips
   usage:         { promptTokens, completionTokens, totalTokens }  // summed across turns

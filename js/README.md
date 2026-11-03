@@ -135,6 +135,29 @@ const out = await gate(c, state, questions, [
   filter, content and model batteries into `hooks`. A `beforeLLM` hook may return `{ model }` to
   send another model for that turn only.
 
+## Media generation
+
+Generate images, video and speech (plus transcription, voice cloning and talking-head video)
+from a **JSON style** instead of provider code. Async jobs are started and polled for you. The same
+verbs become agent tools (`generate_image`, `generate_video`, `generate_speech`, …), and whatever
+they produce lands in `RunResult.files`. `examples/media-styles/a2e.json` ships first and reads
+`A2E_API_KEY` at call time. Its result URLs expire in 3–30 days, so save what you keep. SPEC §7G;
+guide: <https://muthuishere.github.io/toolnexus/media/>.
+
+```ts
+import { loadMediaStyle, createMedia, createToolkit } from "toolnexus"
+
+const media = createMedia(loadMediaStyle("examples/media-styles/a2e.json"), {
+  onProgress: ({ verb, status }) => console.log(verb, status),
+})
+const img = await media.image({ prompt: "a red fox in fresh snow", width: 1024, height: 768 })
+const vid = await media.video({ prompt: "the fox blinks", image: img.files[0].url, seconds: 5 })
+
+const tk = await createToolkit({ media })            // the agent gets generate_image, …
+const res = await agent.run("Draw a fox, then animate it.", { toolkit: tk })
+for (const f of res.files) console.log(f.from, f.mimeType, f.url)
+```
+
 ## Documentation
 
 Everything else — the full surface, with runnable examples — lives on the docs site:

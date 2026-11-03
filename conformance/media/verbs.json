@@ -1,0 +1,33 @@
+{
+  "_doc": "Canonical media verbs (SPEC §7G). Ports embed this table verbatim: verb order, tool names, descriptions, normalised args, types and required flags are byte-contract. A tool's schema lists only the args its style maps, in this order; required = this list's required ∩ mapped.",
+  "verbs": [
+    { "verb": "image", "tool": "generate_image", "description": "Generate an image from a text prompt.",
+      "args": [
+        { "name": "prompt", "type": "string", "description": "What to draw.", "required": true },
+        { "name": "width", "type": "integer", "description": "Width in pixels." },
+        { "name": "height", "type": "integer", "description": "Height in pixels." },
+        { "name": "aspectRatio", "type": "string", "description": "Aspect ratio, e.g. 16:9." },
+        { "name": "seed", "type": "integer", "description": "Seed for reproducible output." } ] },
+    { "verb": "video", "tool": "generate_video", "description": "Generate a short video from a prompt, optionally starting from an image URL. Can take minutes.",
+      "args": [
+        { "name": "prompt", "type": "string", "description": "What should happen in the video.", "required": true },
+        { "name": "image", "type": "string", "description": "URL of the starting image." },
+        { "name": "seconds", "type": "integer", "description": "Video length in seconds." },
+        { "name": "aspectRatio", "type": "string", "description": "Aspect ratio, e.g. 9:16." } ] },
+    { "verb": "speech", "tool": "generate_speech", "description": "Speak text aloud and return the audio.",
+      "args": [
+        { "name": "text", "type": "string", "description": "The text to speak.", "required": true },
+        { "name": "voice", "type": "string", "description": "Voice or speaker id." } ] },
+    { "verb": "transcribe", "tool": "transcribe_audio", "description": "Transcribe speech in an audio URL to text.",
+      "args": [
+        { "name": "audio", "type": "string", "description": "URL of the audio.", "required": true } ] },
+    { "verb": "cloneVoice", "tool": "clone_voice", "description": "Create a cloned voice from audio sample URLs and return its voice id.",
+      "args": [
+        { "name": "name", "type": "string", "description": "Name for the new voice.", "required": true },
+        { "name": "samples", "type": "array", "items": "string", "description": "URLs of audio samples of the voice.", "required": true } ] },
+    { "verb": "talking", "tool": "talking_video", "description": "Make the person in an image speak the given audio (lip-synced video).",
+      "args": [
+        { "name": "image", "type": "string", "description": "URL of the face image.", "required": true },
+        { "name": "audio", "type": "string", "description": "URL of the speech audio.", "required": true } ] }
+  ]
+}

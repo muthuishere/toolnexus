@@ -1,0 +1,175 @@
+---
+title: Media generation
+description: Images, video, speech, transcription, voice cloning and talking-head video from a JSON style. Typed verbs for your code, tools for your agent, and polling handled for you.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<Aside type="tip" title="Why you need this">
+Media providers all work the same way under different JSON: you start a job, poll until it
+finishes, and dig a URL out of the response. Without help you write that loop once per
+endpoint, once per language, and again every time you switch vendor. toolnexus turns the
+provider into a **style**, a JSON file of endpoints and dot-paths. One engine runs every style.
+Your code calls `image(...)`, and your agent calls `generate_image`. Switching provider means
+loading a different file.
+</Aside>
+
+Contract: SPEC §7G · ADR 0036 · `conformance/media/`. Every port replays the same 19 cases and
+schema set, so error strings, tool schemas and results are byte-identical across all eight.
+For runnable code in every language, see the cookbook recipe
+[Generate images, video and speech](/toolnexus/cookbook/media/).
+
+## One engine, two faces
+
+```
+createMedia(style)  ──┬── function face:  image · video · speech · transcribe · cloneVoice · talking · generate(verb, args)
+                      └── tool face:      generate_image · generate_video · generate_speech
+                                          transcribe_audio · clone_voice · talking_video
+```
+
+| verb | tool | arguments (required in **bold**) | result |
+|---|---|---|---|
+| `image` | `generate_image` | **prompt**, width, height, aspectRatio, seed | image file(s) |
+| `video` | `generate_video` | **prompt**, image (start-frame URL), seconds, aspectRatio | video file |
+| `speech` | `generate_speech` | **text**, voice | audio file |
+| `transcribe` | `transcribe_audio` | **audio** (URL) | `text` |
+| `cloneVoice` | `clone_voice` | **name**, **samples** (URLs) | `text` (the voice id) |
+| `talking` | `talking_video` | **image**, **audio** (URLs) | video file |
+
+- **Function face.** Each port uses its own idiom: `media.image({prompt})` in JS,
+  `await media.image(prompt=…)` in Python, `media.Image(ctx, ImageInput{…})` in Go,
+  `media.ImageAsync(new ImageInput(…))` in C#, `Media.image(m, %{prompt: …})` in Elixir. Each
+  verb returns `MediaResult = { files: [{type, mimeType, url}], text?, jobId?, status }`. The
+  function face also takes `providerOptions`, whose top-level keys are written over the request
+  body last. It also takes the port's native cancellation (AbortSignal, `context.Context`,
+  `CancellationToken`, …).
+- **Tool face.** `media.tools()` returns one tool (source `"media"`) for each verb the styles
+  support. Its schema lists **only the arguments the style maps**, so the model is never offered
+  a knob the provider ignores. `createToolkit({ media })` registers them. A tool never throws:
+  on success it returns `"image ready: <url>"` with the files as `parts`, and any failure becomes
+  `isError: true` with the engine's error message.
+
+You can pass a **list** of styles. Each verb resolves to the first style that declares it, so
+you can, for example, take images from one vendor and speech from another.
+
+## Sync vs async
+
+A style marks each verb `sync` or `async`:
+
+- **sync.** The start response already holds the result. `status` is `"completed"`.
+- **async.** The engine reads a job id at `idPath`, then polls `poll.path` every `intervalMs`
+  (default 5 s) until the status at `statusPath` is in `done` (success) or `failed` (an error:
+  `job <id> <status>: <message>`). After `timeoutMs` (default 10 min) it gives up with
+  `job <id> timed out after <n>ms`. **Any other status keeps polling.** Providers send statuses
+  their docs never mention (a2e sends `sent`). `onProgress({verb, jobId, status})` fires after
+  every poll.
+
+Measured live against a2e: an image takes about 30 s, speech about 30 s, and a 5-second image-to-video
+about 4 minutes. Pass `onProgress` if a person is waiting.
+
+## `RunResult.files`: what the agent made
+
+When an agent calls a media tool, the files appear in `RunResult.files`. They are listed in call
+order, and each is `{type, mimeType, url, from, callId}`, where `from` is the tool name. The
+same parts are on `toolCalls[].parts` for each call. The final answer text **never** gets
+markup for them, so the host decides how to show them:
+
+- **Web.** `image/*` goes in `<img>`, `video/*` in `<video controls>`, `audio/*` in `<audio controls>`.
+- **WhatsApp / Telegram / Slack.** Send each URL as a media message, using `mimeType` to choose image, video or voice note.
+- **CLI.** Print the URL or download it. Download soon, because many provider URLs expire.
+
+`mimeType` comes from the URL's file extension (`.jpg` gives `image/jpeg`, `.wav` gives `audio/wav`). When the
+extension is unknown it falls back to the kind's default: `image/png`, `video/mp4` or `audio/mpeg`.
+
+## Write your own style
+
+A style is plain JSON. The library contains no vendor names. Presets live in
+`examples/media-styles/` and you load them by path. This is the shape of the shipped a2e `image` verb:
+
+```json
+{
+  "baseUrl": "https://api.a2e.ai/api",
+  "headers": { "Authorization": "Bearer ${A2E_API_KEY}" },
+  "verbs": {
+    "image": {
+      "mode": "async",
+      "kind": "image",
+      "start": { "method": "POST", "path": "/v1/userText2Image/start" },
+      "defaults": { "name": "toolnexus", "model_type": "a2e" },
+      "args": { "prompt": "prompt", "width": "width", "height": "height", "seed": "seed" },
+      "idPath": "data.0._id",
+      "poll": {
+        "path": "/v1/userText2Image/{id}",
+        "statusPath": "data.current_status",
+        "done": ["completed"],
+        "failed": ["failed", "blocked", "canceled"],
+        "errorPath": "data.failed_message",
+        "intervalMs": 3000,
+        "timeoutMs": 300000
+      },
+      "resultPath": "data.image_urls"
+    }
+  }
+}
+```
+
+### Field reference
+
+| field | meaning |
+|---|---|
+| `baseUrl` | Joined with each `path`. A trailing `/` is trimmed. |
+| `headers` | Sent on **every** request, start and polls. `${VAR}` expands from the environment at call time (an unset variable becomes `""`). Values are never logged. |
+| `errorEnvelope` | `{codePath, okValues, messagePath?}` for providers that answer HTTP 200 with an error code. If the code at `codePath` is present and not in `okValues`, the call fails with `API error <code>: <message>`. |
+| `verbs.<verb>.mode` | `"sync"` or `"async"`. |
+| `verbs.<verb>.kind` | `"image"`, `"video"`, `"audio"` or `"text"`. This sets the file `type` (`video` maps to `file`) and the default mime type. |
+| `start` | `{method?: "POST", path}`. The body is JSON. |
+| `defaults` | Copied into the body first, then the args are written over it. Use it for parameters the provider requires but the verbs don't model. |
+| `args` | Maps each normalised arg to a body **dotPath**. An arg not listed here is rejected before any request is made, and it is left out of the tool schema. |
+| `idPath` | async only. The job id: a non-empty string or an integer. |
+| `poll` | async only. `{method?: "GET", path` (contains `{id}`), `statusPath, done, failed, errorPath?, intervalMs?: 5000, timeoutMs?: 600000}`. Polls send no body. If `done` or `failed` is absent it counts as empty. |
+| `resultPath` | Where the result is. For media kinds it is a string or an array of strings (flattened to any depth, with empty entries dropped), one file each. For `text` it is a string or number. |
+
+A **dotPath** splits on `.`, and an all-digit segment indexes an array. `references.0.speaker`
+writes `{"references":[{"speaker":…}]}`, creating objects and arrays as it goes. Reading a
+missing path counts as absent.
+
+<Aside type="caution" title="Live-smoke every verb">
+Provider docs are often wrong. During the a2e spike, the OpenAPI spec marked `negative_prompt` as
+optional, but the live API rejected video requests without it. The fix was one `defaults` line in
+the style, with no code change, but only a live call found it. Run each verb of a new style
+for real once before you ship it.
+</Aside>
+
+## Error strings
+
+Every port produces these messages, byte for byte:
+
+| when | message |
+|---|---|
+| no style declares the verb | `media: no style supports "<verb>"` |
+| an arg the style doesn't map | `<verb>: argument "<key>" not supported by this style` (no request is made) |
+| non-2xx response | `HTTP <status>: <raw body>` |
+| body is not JSON | `<verb>: response is not JSON` |
+| error envelope tripped | `API error <code>: <message>` |
+| no job id | `<verb>: no job id at <idPath>` |
+| job failed | `job <id> <status>: <message>` (or `job <id> <status>` when there is no message) |
+| timeout | `job <id> timed out after <timeoutMs>ms` |
+| nothing at `resultPath` | `<verb>: no result at <resultPath>` |
+
+Transport failures (such as a refused connection) read `<verb>: <the port's own message>`. Cancellation
+raises the port's native cancellation error. In Python, `asyncio.CancelledError` always propagates.
+
+## Not yet
+
+These are tracked in `openspec/changes/add-media-generation`:
+
+- **Downloading result URLs.** a2e's URLs expire in **3–30 days** (images in about 3, audio in about 30).
+  Save them yourself if you need them later.
+- Uploading local files. Today inputs such as `image`, `audio` and `samples` are URLs.
+- ComfyUI workflow-graph injection.
+- Webhooks instead of polling.
+- Price quotes before a call.
+- Pausing a long job through `waitFor` (§10 suspension).
+- Streaming `file` events.
+
+Realtime or live voice conversation is out of scope by design.

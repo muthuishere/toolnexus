@@ -98,6 +98,7 @@ class Toolkit:
         disable_tools: Optional[list[str]] = None,
         disable_skills: Optional[list[str]] = None,
         cancel: Optional[Any] = None,
+        media: Optional[Any] = None,
     ) -> "Toolkit":
         # ``wait_for`` (§10): when set, connected MCP servers may elicit input from the
         # human mid-``tools/call``, bridged onto this resolver (form→kind:"input",
@@ -190,7 +191,9 @@ class Toolkit:
             skill,
             builtin_tools,
             agent_tools_flat,
-            extra_tools or [],
+            # §7G: ``media`` (a :class:`~toolnexus.media.Media`) registers its tools —
+            # equivalent to ``toolkit.register(*media.tools())``.
+            (list(media.tools()) if media is not None else []) + list(extra_tools or []),
             a2a_config,
             mcp_server_config,
             disable_tools=disable_tools,
@@ -344,6 +347,7 @@ async def create_toolkit(
     disable_tools: Optional[list[str]] = None,
     disable_skills: Optional[list[str]] = None,
     cancel: Optional[Any] = None,
+    media: Optional[Any] = None,
 ) -> Toolkit:
     """Async factory. The returned Toolkit is also an async context manager.
 
@@ -371,4 +375,5 @@ async def create_toolkit(
         disable_tools=disable_tools,
         disable_skills=disable_skills,
         cancel=cancel,
+        media=media,
     )

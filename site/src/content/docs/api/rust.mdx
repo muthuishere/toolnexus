@@ -65,3 +65,31 @@ both on by default.
   `judge::batteries::{ToolGuard, ModelRouter, …}`.
 - `pending(Request)` · `auth_required(url, prompt)` · `pending_of(&result)` · `relay::relay_tool` ·
   `Request { id, kind, prompt, url, data, expires_at }` · `Answer { id, ok, data, reason }`.
+
+## Media generation
+
+Guide: [Media generation](/toolnexus/media/) · recipe: [Generate images, video and speech](/toolnexus/cookbook/media/) · SPEC §7G.
+
+- `load_media_style(path: impl AsRef<Path>) -> Result<MediaStyle, MediaError>`
+- `create_media(styles: impl Into<Vec<MediaStyle>>, opts: MediaOptions) -> Media` (also `Media::new`) — a verb
+  resolves to the first style that declares it.
+- `MediaOptions { on_progress: Option<OnProgressFn>, http_client: Option<reqwest::Client> }` —
+  `OnProgressFn = Arc<dyn Fn(&MediaProgress) + Send + Sync>`, `MediaProgress { verb, job_id, status }`.
+- Verbs, each `async fn x(&self, input: XInput) -> Result<MediaResult, MediaError>`:
+  `image(ImageInput { prompt, width, height, aspect_ratio, seed, provider_options })` ·
+  `video(VideoInput { prompt, image, seconds, aspect_ratio, provider_options })` ·
+  `speech(SpeechInput { text, voice, provider_options })` · `transcribe(TranscribeInput { audio, provider_options })` ·
+  `clone_voice(CloneVoiceInput { name, samples, provider_options })` ·
+  `talking(TalkingInput { image, audio, provider_options })`. Optional fields are `Option<_>`; inputs derive
+  `Default`.
+- `generate(&self, verb: &str, args: Map<String, Value>)` · `generate_with(&self, verb, args, provider_options: Option<Map<String, Value>>, cancel: &CancellationToken)`
+  — the raw call. Only `generate_with` takes a cancellation token.
+- `MediaResult { files: Vec<MediaFile>, text: Option<String>, job_id: Option<String>, status }` ·
+  `MediaFile { kind, mime_type, url }` (`kind` serialises as `type`).
+- `media.tools() -> Vec<Tool>` (source `"media"`), or `ToolkitOptions.media`.
+- `RunResult.files: Vec<RunFile>` — `{ kind, mime_type, url, data, from, call_id }`, in call order; the same
+  parts are on `tool_calls[i].parts`.
+- Errors: `MediaError::Message(String)` displays the exact §7G string; `MediaError::Cancelled` when the token
+  fires. A media tool never errors (`ToolResult::error`, `is_error: true`).
+- Equivalents: `createMedia` (js) · `create_media` (py) · `CreateMedia` (go) · `Media.create` (java) ·
+  `Media.Create` (c#) · `Toolnexus.Media.new` (elixir) · `toolnexus.media/create-media` (clojure).
