@@ -61,6 +61,13 @@ jobs:
           [ "$EX" = "$VERSION" ] || { echo "::error::elixir/mix.exs is $EX, expected $VERSION"; fail=1; }
           [ "$CLJ" = "$VERSION" ] || { echo "::error::clojure/build.clj is $CLJ, expected $VERSION"; fail=1; }
           [ "$RS" = "$VERSION" ] || { echo "::error::rust/Cargo.toml is $RS, expected $VERSION"; fail=1; }
+          # The media User-Agent (SPEC §7G.12 D23) carries the version as a source literal in
+          # two ports; a stale literal would mislabel every media request after a release.
+          GOUA=$(grep -E '^const mediaVersionFallback = "' golang/media_engine.go | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+          CLJUA=$(grep -A2 -E '^\(def version$' clojure/src/toolnexus/media.cljc | grep -oE '"[0-9][^"]*"' | head -1 | tr -d '"')
+          echo "media-ua golang=$GOUA clojure=$CLJUA"
+          [ "$GOUA" = "$VERSION" ] || { echo "::error::golang/media_engine.go mediaVersionFallback is $GOUA, expected $VERSION"; fail=1; }
+          [ "$CLJUA" = "$VERSION" ] || { echo "::error::clojure/src/toolnexus/media.cljc version is $CLJUA, expected $VERSION"; fail=1; }
           exit $fail
 
   scope:

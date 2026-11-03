@@ -2052,7 +2052,8 @@ see below). Command default `grok`. Argv: `-p <prompt> --cwd <cwd> --output-form
 Parse by `type`: `text` ⇒ text `data`; `tool_call` ⇒ status `tool <toolName>`;
 `tool_call_update` with a non-empty string `status` ⇒ status `tool <status>`; when `completed`,
 `rawOutput.path` (non-empty string) is a path; when `failed`, error = `rawOutput.message`, else the
-compact JSON of `rawOutput` with keys sorted (§7G.12 D15); `end` ⇒ session `sessionId`, status `end <stopReason>`; `error` ⇒ error
+compact JSON of `rawOutput` with keys sorted (§7G.12 D15); `end` ⇒ session `sessionId`, status `end <stopReason>`, and `usage` from its
+`usage.input_tokens` / `usage.output_tokens` / `total_cost_usd` / `total_cost_usd_ticks` (§7G.12 D21); `error` ⇒ error
 `message`. Unavailable matcher (ASCII case-insensitive): `zero data retention` ⇒ the fixed message
 `grok: <verb> blocked by Zero Data Retention — run /privacy and opt in, or configure ZDR video storage (docs/media#grok-video-zdr)`;
 `usage limit` ⇒ `grok: <error capped 400>`. The client **never edits the user's Grok settings**.
@@ -2090,6 +2091,9 @@ or `quota` ⇒ `codex: <error capped 400>`.
   `["/bin/sh", "<abs>/fake-cli.sh", "<fixture.jsonl>", "<out>"]`, so the fake needs no env. It
   records its argv to `<out>/argv.txt` (one per line), its working dir to `<out>/cwd.txt` and
   `$GROK_CONFIG` to `<out>/env-GROK_CONFIG.txt`, then replays the fixture (see `fake-cli/README.md`).
+  Grok fixture lines use the live headless `streaming-json` shapes; the `end` line is
+  `{"type":"end","stopReason":…,"sessionId":…,"usage":{"input_tokens":N,"output_tokens":N},"num_turns":N,"total_cost_usd":X,"total_cost_usd_ticks":N}`
+  (case `grok_usage_from_end_event`, live-verified).
 - **File results** are asserted as `saved: {bytesBase64, ext}` — the file is under `{dir}`, named
   `^<client>-<verb>-[0-9]+-[0-9]+<ext>$`, `url == "file://" + path`, and holds exactly those bytes.
 
@@ -2184,15 +2188,18 @@ wins**.
   file (download mode, any saved base64 / bytes / `data:` result, CLI copy-out, CLI url mode). The
   matching `RunResult.files` entry carries the same `path` in all 8 ports. Parts and anything sent
   to a model or over A2A never contain a path (§1B). Conformance: `runFilePath` (each file's
-  `_doc`).
+  `_doc`), asserted within the tool face; in `url` mode a CLI file's `path` is the CLI's own
+  absolute file, not under `{dir}`.
 - **D21 Usage** — `MediaResult.usage` and the tool's `metadata.usage` are filled only from what the
   provider returns, never estimated: OpenAI images `usage.input_tokens` / `usage.output_tokens` ⇒
   `inputTokens` / `outputTokens`; OpenRouter `usage.prompt_tokens` / `usage.completion_tokens` /
-  `usage.cost` ⇒ `inputTokens` / `outputTokens` / `costUsd`; Grok CLI `costUsdTicks` (on the `end`
-  event) ⇒ `raw.costUsdTicks` only — its unit is undocumented, so it is **never converted**. Every
+  `usage.cost` ⇒ `inputTokens` / `outputTokens` / `costUsd`; Grok CLI headless `end` event
+  `usage.input_tokens` / `usage.output_tokens` / `total_cost_usd` ⇒ `inputTokens` / `outputTokens` /
+  `costUsd`, and `total_cost_usd_ticks` (1 tick = 1e-10 USD) ⇒ `raw.total_cost_usd_ticks` verbatim,
+  **never converted** (live-verified: stdout carries no `costUsdTicks`). Every
   other client: no `usage`. A field the provider omits is absent; no fields ⇒ no `usage` key. There
   is **no run-level sum** of media usage in v1 (`RunResult.usage` stays LLM tokens only). Cases
-  `openai_image_usage`, `openrouter_image_usage_cost`, `grok_usage_cost_ticks_raw`,
+  `openai_image_usage`, `openrouter_image_usage_cost`, `grok_usage_from_end_event`,
   `usage_passes_through_to_tool_metadata`; `noUsage` elsewhere.
 - **D22 Saved-file extension** — URL path extension first, then the mime table of §7G.5, `.bin`
   only for an unknown mime. Cases `download_ext_from_url_extension`,
@@ -2200,7 +2207,10 @@ wins**.
 - **D23 User-Agent** — every media HTTP request (start, poll, download, input fetch) sends
   `User-Agent: toolnexus/<version> (<port>)`, `<version>` the package version and `<port>` one of
   `js python golang java csharp elixir clojure rust`, unless the client/style headers set a
-  `User-Agent` (then that value, unchanged). CDNs reject requests without one (A2E CloudFront 403).
+  `User-Agent` (then that value, unchanged). A **download** sends that client/style `User-Agent`
+  only when the download URL is on the client's base-URL origin (scheme + host + port, as §7G.8);
+  a download on any other origin sends the default toolnexus UA, matching §7G.5's no-client-headers
+  rule. CDNs reject requests without one (A2E CloudFront 403).
   Conformance: `expectHeaderPatterns`. Cases `user_agent_on_start_poll_and_download`,
   `style_user_agent_default_on_start_and_poll`, `style_user_agent_header_overrides`.
 

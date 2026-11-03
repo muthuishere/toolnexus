@@ -209,11 +209,18 @@ A Grok failed tool result without a message SHALL produce its error from `rawOut
 - **THEN** the error is `grok: no video: {"alpha":{"a":"x","b":2},"zeta":[1,{"c":null,"d":true}]}`
 
 ### Requirement: A candidate that cannot take the args is skipped
-Before calling any candidate, the first included, the router SHALL check the args against its `args(verb)`. A canonical arg it does not accept SHALL skip it like `unavailable` with reason `<name>: argument "<key>" not supported` (first in sorted code-point order); otherwise a missing required arg SHALL skip it with `<name>: missing required argument "<key>"` (first in canonical order). Every candidate skipped or unavailable SHALL fail with status `unavailable` and `media: no client available for "<verb>": ` plus each reason in candidate order joined by `"; "`.
+Before calling each candidate the router SHALL check the args against its `args(verb)`: an unaccepted canonical arg skips it like `unavailable` with `<name>: argument "<key>" not supported` (first in code-point order); else a missing required arg skips it with `<name>: missing required argument "<key>"` (first in canonical order).
 
 #### Scenario: First candidate rejects an arg
 - **WHEN** case `first_candidate_rejects_arg_falls_to_next` runs (a Grok-like client without `seconds`, then a client with it)
 - **THEN** the first client is never called and the second serves the call with `seconds` unchanged
+
+#### Scenario: Skip is like unavailable
+- **WHEN** case `candidate_not_accepting_arg_is_skipped_after_unavailable` runs
+- **THEN** `b` is never called and its reason `b: argument "seed" not supported` joins after `a: HTTP 402: {}`
+
+### Requirement: Exhausted candidates fail with every reason joined
+When every candidate is skipped or unavailable the router SHALL fail with status `unavailable` and `media: no client available for "<verb>": ` plus each reason in candidate order joined by `"; "`.
 
 #### Scenario: Every candidate rejects
 - **WHEN** case `every_candidate_rejects_an_arg_joined` runs
@@ -247,7 +254,7 @@ When gather has a local file for a `MediaFile` it SHALL set `path` (absolute), a
 - **THEN** no `RunResult.files` entry has a `path`
 
 ### Requirement: Media usage is reported only as the provider gives it
-`MediaResult.usage` and the tool's `metadata.usage` SHALL be set only from provider fields: OpenAI images `usage.input_tokens`/`output_tokens` as `inputTokens`/`outputTokens`; OpenRouter `usage.prompt_tokens`/`completion_tokens`/`cost` as `inputTokens`/`outputTokens`/`costUsd`; Grok CLI `costUsdTicks` as `raw.costUsdTicks`, never converted. Other clients SHALL set no `usage`. There SHALL be no run-level sum in v1.
+`MediaResult.usage` and the tool's `metadata.usage` SHALL be set only from provider fields: OpenAI images `usage.input_tokens`/`output_tokens` as `inputTokens`/`outputTokens`; OpenRouter `usage.prompt_tokens`/`completion_tokens`/`cost` as `inputTokens`/`outputTokens`/`costUsd`; Grok CLI from its `end` event (`total_cost_usd_ticks` kept unconverted in `raw`). Other clients SHALL set no `usage`. There SHALL be no run-level sum in v1.
 
 #### Scenario: OpenAI image usage
 - **WHEN** case `openai_image_usage` runs
@@ -257,9 +264,9 @@ When gather has a local file for a `MediaFile` it SHALL set `path` (absolute), a
 - **WHEN** case `openrouter_image_usage_cost` runs
 - **THEN** `usage` is `{inputTokens: 7, outputTokens: 1290, costUsd: 0.0387}`
 
-#### Scenario: Grok ticks stay raw
-- **WHEN** case `grok_usage_cost_ticks_raw` runs
-- **THEN** `usage` is `{raw: {costUsdTicks: 351342400}}` and `total_cost_usd` is ignored
+#### Scenario: Grok usage from the end event
+- **WHEN** case `grok_usage_from_end_event` runs with the live end line `{"type":"end",…,"usage":{"input_tokens":11021,"output_tokens":187},"num_turns":1,"total_cost_usd":0.01585216,"total_cost_usd_ticks":158521600}`
+- **THEN** `usage` is `{inputTokens: 11021, outputTokens: 187, costUsd: 0.01585216, raw: {total_cost_usd_ticks: 158521600}}`
 
 #### Scenario: No usage
 - **WHEN** a case marked `noUsage: true` runs
@@ -281,7 +288,7 @@ A saved file's extension SHALL be the source URL path's extension when it has on
 - **THEN** the saved file ends in `.bin`
 
 ### Requirement: Media requests send a User-Agent
-Every media HTTP request (start, poll, download, input fetch) SHALL send `User-Agent: toolnexus/<version> (<port>)` unless the client or style headers set a `User-Agent`, which SHALL then be sent unchanged.
+Every media HTTP request (start, poll, download, input fetch) SHALL send `User-Agent: toolnexus/<version> (<port>)` unless the client or style headers set a `User-Agent`, which SHALL then be sent unchanged — except that a download SHALL carry the client/style `User-Agent` only when its URL is on the client's base-URL origin, and the default toolnexus UA on any other origin.
 
 #### Scenario: Default on every request
 - **WHEN** case `user_agent_on_start_poll_and_download` runs
@@ -290,6 +297,10 @@ Every media HTTP request (start, poll, download, input fetch) SHALL send `User-A
 #### Scenario: Style override
 - **WHEN** case `style_user_agent_header_overrides` runs
 - **THEN** every request carries `User-Agent: my-app/2.0`
+
+#### Scenario: Cross-origin download gets the default UA
+- **WHEN** a client with a `User-Agent` header downloads a result URL on an origin other than its base URL
+- **THEN** the download carries the default `toolnexus/<version> (<port>)` User-Agent and no client headers
 
 ### Requirement: CLI working dir is a realpath
 A CLI client SHALL pass the realpath of its temp dir as the working dir and `--cwd`.

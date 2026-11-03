@@ -37,8 +37,8 @@ and your agent seven tools, and the provider is a small named client instead of 
   canonical names) still fails at once.
 - **What a call cost, when the provider says** — results (and the tool's `metadata.usage`) carry
   `usage` with `inputTokens` / `outputTokens` from OpenAI images, plus `costUsd` from OpenRouter.
-  Grok's `costUsdTicks` is passed through as `usage.raw.costUsdTicks` without conversion, because
-  its unit is undocumented. Other clients report nothing rather than an estimate. **Gap:** there
+  Grok CLI reports tokens and `costUsd` from its headless `end` event (live-verified), with
+  `total_cost_usd_ticks` passed through unconverted as `usage.raw.total_cost_usd_ticks`. Other clients report nothing rather than an estimate. **Gap:** there
   is no run-level total of media usage yet; `RunResult.usage` still counts LLM tokens only.
 - **Saved files keep their path and a real extension** — each `RunResult.files` entry for a saved
   file carries its absolute `path` (never sent to the model); file names take the URL's own

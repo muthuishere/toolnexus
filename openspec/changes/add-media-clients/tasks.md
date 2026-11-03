@@ -62,3 +62,8 @@ on any failed step, exit 0 with a hint when no client is available.
       fal video, ElevenLabs music/transcribe/cloneVoice, A2E talk — update `liveVerified` and the
       CHANGELOG list
 - [ ] 4.4 Archive after `add-media-generation` (its MODIFIED requirements build on it)
+- [ ] 4.5 Release runbook: the media User-Agent version literal — golang `mediaVersionFallback`
+      (`golang/media_engine.go`) and clojure `version` (`clojure/src/toolnexus/media.cljc`, plus its
+      `examples/src` mirror) — is bumped with every release alongside the manifests
+- [x] 4.6 `release.yml` preflight fails the run when either literal differs from the tag (same
+      check as the manifests; it goes green once the port code carrying the literals is committed)
