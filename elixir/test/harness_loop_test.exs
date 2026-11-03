@@ -305,7 +305,14 @@ defmodule Toolnexus.HarnessLoopTest do
   # Regression: `files` accumulates across completion-gate retries exactly like
   # `tool_calls` — an image made in attempt 1 survives a retry that made none.
   test "the completion gate accumulates files across retries" do
-    img = %{type: "image", mime_type: "image/png", url: "https://x/1.png", from: "generate_image", call_id: "c1"}
+    img = %{
+      type: "image",
+      mime_type: "image/png",
+      url: "https://x/1.png",
+      from: "generate_image",
+      call_id: "c1"
+    }
+
     rr = Toolnexus.Client.RunResult
 
     attempts = [

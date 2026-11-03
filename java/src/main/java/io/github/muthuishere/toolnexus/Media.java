@@ -550,9 +550,13 @@ public final class Media {
             resp = await(http, b.build(), cancel, deadline, timedOut, verb);
             int sc = resp.statusCode();
             String loc = resp.headers().firstValue("Location").orElse(null);
-            if (hops >= 10 || loc == null || !(sc == 301 || sc == 302 || sc == 303 || sc == 307 || sc == 308)) break;
+            if (loc == null || !(sc == 301 || sc == 302 || sc == 303 || sc == 307 || sc == 308)) break;
+            // At most 10 redirects followed (11 requests); the next one is an error (§7G).
+            if (hops >= 10) throw new MediaException(verb + ": too many redirects");
             target = target.resolve(loc);
-            if (sc == 303 || ((sc == 301 || sc == 302) && "POST".equalsIgnoreCase(method))) {
+            // 301/302/303 after any non-GET/HEAD request => GET, no body; 307/308 keep method + body.
+            if ((sc == 301 || sc == 302 || sc == 303)
+                    && !"GET".equalsIgnoreCase(method) && !"HEAD".equalsIgnoreCase(method)) {
                 method = "GET";
                 body = null;
             }

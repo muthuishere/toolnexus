@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -474,28 +475,19 @@ func (m *Media) do(parent context.Context, deadline time.Time, style MediaStyle,
 		}
 		return fmt.Errorf("%s: %w", verb, err)
 	}
-	var rd io.Reader
+	var payload []byte
 	if body != nil {
 		b, err := json.Marshal(body)
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", verb, err)
 		}
-		rd = bytes.NewReader(b)
+		payload = b
 	}
-	req, err := http.NewRequestWithContext(ctx, method, strings.TrimRight(style.BaseURL, "/")+path, rd)
+	r, err := m.send(ctx, style, verb, method, strings.TrimRight(style.BaseURL, "/")+path, payload)
 	if err != nil {
-		return nil, err
-	}
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	for k, val := range style.Headers {
-		req.Header.Set(k, mediaEnvRe.ReplaceAllStringFunc(val, func(s string) string {
-			return os.Getenv(mediaEnvRe.FindStringSubmatch(s)[1])
-		}))
-	}
-	r, err := m.redirectSafe(style).Do(req)
-	if err != nil {
+		if errors.Is(err, errTooManyRedirects) {
+			return nil, fmt.Errorf("%s: too many redirects", verb)
+		}
 		return nil, failed(err)
 	}
 	defer r.Body.Close()
@@ -535,27 +527,84 @@ func (m *Media) do(parent context.Context, deadline time.Time, style MediaStyle,
 	return out, nil
 }
 
-// redirectSafe returns a copy of the HTTP client that strips the style headers
-// from any redirect to a different origin than the original request's (§7G
-// Redirects). The host's own CheckRedirect policy still runs.
-func (m *Media) redirectSafe(style MediaStyle) *http.Client {
+var errTooManyRedirects = errors.New("too many redirects")
+
+// send issues the request and follows redirects itself with the §7G Redirects
+// rule set: 301/302/303/307/308 with a Location are followed (at most 10);
+// 301/302/303 after a non-GET/HEAD become a bodiless GET; style headers are
+// only sent to the origin of the baseUrl request. A host-supplied
+// CheckRedirect still runs before each hop.
+func (m *Media) send(ctx context.Context, style MediaStyle, verb, method, target string, payload []byte) (*http.Response, error) {
 	c := *m.http
 	inner := m.http.CheckRedirect
-	c.CheckRedirect = func(req *http.Request, via []*http.Request) error {
-		if origin(req.URL) != origin(via[0].URL) {
-			for k := range style.Headers {
-				req.Header.Del(k)
+	c.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	var first *url.URL
+	var via []*http.Request
+	var prev *http.Response // the redirect response being followed
+	for {
+		var rd io.Reader
+		if payload != nil {
+			rd = bytes.NewReader(payload)
+		}
+		req, err := http.NewRequestWithContext(ctx, method, target, rd)
+		if err != nil {
+			return nil, err
+		}
+		if first == nil {
+			first = req.URL
+		}
+		if payload != nil {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		if origin(req.URL) == origin(first) {
+			for k, val := range style.Headers {
+				req.Header.Set(k, mediaEnvRe.ReplaceAllStringFunc(val, func(s string) string {
+					return os.Getenv(mediaEnvRe.FindStringSubmatch(s)[1])
+				}))
 			}
 		}
-		if inner != nil {
-			return inner(req, via)
+		if len(via) > 0 && inner != nil {
+			if err := inner(req, via); err != nil {
+				if err == http.ErrUseLastResponse {
+					return prev, nil
+				}
+				prev.Body.Close()
+				return nil, err
+			}
+		}
+		if prev != nil {
+			io.Copy(io.Discard, io.LimitReader(prev.Body, 1<<16))
+			prev.Body.Close()
+		}
+		r, err := c.Do(req)
+		if err != nil {
+			return nil, err
+		}
+		loc := r.Header.Get("Location")
+		switch r.StatusCode {
+		case 301, 302, 303, 307, 308:
+		default:
+			return r, nil
+		}
+		if loc == "" {
+			return r, nil
 		}
 		if len(via) >= 10 {
-			return fmt.Errorf("stopped after 10 redirects")
+			r.Body.Close()
+			return nil, errTooManyRedirects
 		}
-		return nil
+		next, err := req.URL.Parse(loc)
+		if err != nil {
+			r.Body.Close()
+			return nil, err
+		}
+		if r.StatusCode <= 303 && method != http.MethodGet && method != http.MethodHead {
+			method, payload = http.MethodGet, nil
+		}
+		prev = r
+		via = append(via, req)
+		target = next.String()
 	}
-	return &c
 }
 
 func origin(u *url.URL) string {
@@ -781,9 +830,14 @@ func scalarText(v any) (string, bool) {
 
 // jobIDText: only a non-empty string or an integral number is a job id.
 func jobIDText(v any) (string, bool) {
-	if n, isNum := v.(json.Number); isNum {
+	switch n := v.(type) {
+	case json.Number:
 		f, err := strconv.ParseFloat(string(n), 64)
 		if err != nil || f != math.Trunc(f) {
+			return "", false
+		}
+	case float64:
+		if n != math.Trunc(n) {
 			return "", false
 		}
 	}

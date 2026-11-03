@@ -339,6 +339,10 @@ function percentEncode(s: string): string {
   return encodeURIComponent(s).replace(/[!'()*]/g, (c) => "%" + c.charCodeAt(0).toString(16).toUpperCase())
 }
 
+/** §7G Redirects: the followed statuses; anything else (or no Location) is an HTTP error. */
+const REDIRECTS = new Set([301, 302, 303, 307, 308])
+class TooManyRedirects extends Error {}
+
 /** Echoed error bodies keep their first 1000 code points, then "…" (§7G). */
 function capBody(text: string): string {
   const cps = Array.from(text)
@@ -431,10 +435,11 @@ export class Media {
         const headers: Record<string, string> = { ...(body !== undefined ? { "Content-Type": "application/json" } : {}), ...(sameOrigin ? styleHeaders() : {}) }
         const res = await doFetch(url, { method, headers, body, signal: reqSignal, redirect: "manual" })
         const loc = res.headers?.get?.("location")
-        if (res.status < 300 || res.status > 399 || !loc || hops >= 20) return res
+        if (!REDIRECTS.has(res.status) || !loc) return res
         await res.body?.cancel().catch(() => {})
+        if (hops >= 10) throw new TooManyRedirects()
         url = new URL(loc, url).toString()
-        if (res.status === 303 || ((res.status === 301 || res.status === 302) && method === "POST")) {
+        if (res.status <= 303 && method !== "GET" && method !== "HEAD") {
           method = "GET"
           body = undefined
         }
@@ -455,6 +460,7 @@ export class Media {
       } catch (e) {
         if (signal?.aborted) throw abortError(signal)
         if (ctl.signal.aborted) throw timedOut()
+        if (e instanceof TooManyRedirects) throw new Error(`${verb}: too many redirects`)
         throw new Error(`${verb}: ${e instanceof Error ? e.message : String(e)}`)
       } finally {
         clearTimeout(timer)

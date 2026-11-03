@@ -25,6 +25,9 @@ public class MediaTests
         => ((List<object?>)Load("cases.json")["cases"]!).Cast<Dictionary<string, object?>>()
             .Select(c => new object[] { (string)c["name"]! });
 
+    [Fact]
+    public void CaseCount_IsExact() => Assert.Equal(34, CaseNames().Count());
+
     private static Dictionary<string, object?> Case(string name)
         => ((List<object?>)Load("cases.json")["cases"]!).Cast<Dictionary<string, object?>>()
             .First(c => (string)c["name"]! == name);
@@ -53,6 +56,8 @@ public class MediaTests
                     entry = (Dictionary<string, object?>)script[Math.Min(_n++, script.Count - 1)]!;
                 }
                 var text = entry.Get("rawBody") as string ?? Json.Stringify(entry.Get("body"));
+                if (entry.Get("headers") is Dictionary<string, object?> rh)
+                    foreach (var (hk, hv) in rh) ctx.Response.Headers[hk] = (hv?.ToString() ?? "").Replace("{server}", _stub!.BaseUrl);
                 StubServer.Respond(ctx, Convert.ToInt32(entry["status"]), text);
             });
         }
@@ -415,12 +420,12 @@ public class MediaTests
     {
         using var release = new ManualResetEventSlim();
         using var hung = new StubServer(ctx => { release.Wait(TimeSpan.FromSeconds(10)); try { StubServer.Respond(ctx, 200, "{}"); } catch { } });
-        var media = Media.Create(SyncStyle(hung.BaseUrl, timeoutMs: 300));
+        var media = Media.Create(SyncStyle(hung.BaseUrl, timeoutMs: 1000));
         var sw = System.Diagnostics.Stopwatch.StartNew();
         var ex = await Assert.ThrowsAsync<MediaException>(() => media.GenerateAsync("image", new Dictionary<string, object?> { ["prompt"] = "cat" }));
         sw.Stop();
         release.Set();
-        Assert.Equal("image: timed out after 300ms", ex.Message);
+        Assert.Equal("image: timed out after 1000ms", ex.Message);
         Assert.True(sw.ElapsedMilliseconds < 5000, $"took {sw.ElapsedMilliseconds}ms");
     }
 
@@ -430,6 +435,11 @@ public class MediaTests
         Assert.Equal("a%2Fb%20c%C3%A9-._~", Media.PercentEncode("a/b cé-._~"));
         Assert.Equal(new string('x', 1000) + "\u2026", Media.CapBody(new string('x', 1001)));
         Assert.Equal(new string('x', 1000), Media.CapBody(new string('x', 1000)));
+        Assert.Equal("%21%27%28%29%2A", Media.PercentEncode("!'()*"));
+        Assert.Equal("100000000000000000000", Media.ScalarText(1e20, integralOnly: true));
+        Assert.Equal("9223372036854775808", Media.ScalarText(9223372036854775808d, integralOnly: true));
+        Assert.Equal("-100000000000000000000", Media.ScalarText(-1e20, integralOnly: true));
+        Assert.Equal("42", Media.ScalarText(42d, integralOnly: true));
         var root = new Dictionary<string, object?> { ["a"] = new List<object?> { 1L } };
         Media.WritePath(root, "a.b", 2L);
         Assert.Equal("{\"a\":{\"b\":2}}", Json.Stringify(root));

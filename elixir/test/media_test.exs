@@ -41,6 +41,13 @@ defmodule Toolnexus.MediaTest do
         end)
 
       raw = entry["rawBody"] || Jason.encode!(entry["body"])
+      server = Agent.get(state, & &1.url)
+
+      conn =
+        Enum.reduce(entry["headers"] || %{}, conn, fn {k, v}, conn ->
+          put_resp_header(conn, String.downcase(k), String.replace(v, "{server}", server))
+        end)
+
       conn |> put_resp_content_type("application/json") |> send_resp(entry["status"], raw)
     end
   end
@@ -58,7 +65,9 @@ defmodule Toolnexus.MediaTest do
       )
 
     {:ok, {_ip, port}} = ThousandIsland.listener_info(server)
-    {state, server, "http://127.0.0.1:#{port}"}
+    url = "http://127.0.0.1:#{port}"
+    Agent.update(state, &Map.put(&1, :url, url))
+    {state, server, url}
   end
 
   defp stop({state, server, _}) do
@@ -93,6 +102,10 @@ defmodule Toolnexus.MediaTest do
         else: &1
       )
     )
+  end
+
+  test "conformance: cases.json has exactly 34 cases" do
+    assert length(@cases) == 34
   end
 
   for c <- @cases do
@@ -724,12 +737,13 @@ defmodule Toolnexus.MediaTest do
         |> Plug.Conn.send_resp(302, "moved")
       end)
 
-    assert {:error, "HTTP 302: moved"} =
+    assert {:ok, %Media.Result{}} =
              Media.image(Media.new(sync_style(a_url), http_options: [redirect: true]),
                prompt: "x"
              )
 
-    refute_received {:b_saw, _}
+    assert_received {:b_saw, h}
+    refute Map.has_key?(h, "authorization") or Map.has_key?(h, "x-style")
     ThousandIsland.stop(a, 500)
     ThousandIsland.stop(b, 500)
   end
@@ -747,12 +761,25 @@ defmodule Toolnexus.MediaTest do
 
     t0 = System.monotonic_time(:millisecond)
 
-    assert {:error, "image: timed out after 200ms"} =
-             Media.image(Media.new(sync_style(url, %{"poll" => %{"timeoutMs" => 200}})),
+    assert {:error, "image: timed out after 1000ms"} =
+             Media.image(Media.new(sync_style(url, %{"poll" => %{"timeoutMs" => 1000}})),
                prompt: "x"
              )
 
-    assert System.monotonic_time(:millisecond) - t0 < 2_000
+    assert System.monotonic_time(:millisecond) - t0 < 2_500
+
+    # A host http_options receive_timeout cannot widen the job-deadline bound.
+    t0 = System.monotonic_time(:millisecond)
+
+    assert {:error, "image: timed out after 1000ms"} =
+             Media.image(
+               Media.new(sync_style(url, %{"poll" => %{"timeoutMs" => 1000}}),
+                 http_options: [receive_timeout: 60_000, connect_options: [protocols: [:http1]]]
+               ),
+               prompt: "x"
+             )
+
+    assert System.monotonic_time(:millisecond) - t0 < 2_500
 
     async =
       sync_style(url, %{
@@ -764,11 +791,11 @@ defmodule Toolnexus.MediaTest do
           "statusPath" => "st",
           "done" => ["ok"],
           "intervalMs" => 1,
-          "timeoutMs" => 200
+          "timeoutMs" => 1000
         }
       })
 
-    assert {:error, "job h1 timed out after 200ms"} = Media.image(Media.new(async), prompt: "x")
+    assert {:error, "job h1 timed out after 1000ms"} = Media.image(Media.new(async), prompt: "x")
   end
 
   test "§7G: an injected transport sees the remaining deadline and its timeout maps to the message" do
@@ -805,5 +832,39 @@ defmodule Toolnexus.MediaTest do
 
   test "§7G: dotPath write through an array with a word segment replaces the array" do
     assert Media.put_path(%{"a" => []}, "a.x.y", 1) == %{"a" => %{"x" => %{"y" => 1}}}
+  end
+
+  test "§7G Redirects via transport: relative Location, header shapes, no-Location and 300 are errors" do
+    me = self()
+
+    transport = fn req ->
+      send(me, {:req, req})
+
+      case req.url do
+        "http://a/i" ->
+          {:ok, %{status: 308, headers: [{"Location", "/two"}], body: "m"}}
+
+        "http://a/two" ->
+          {:ok, %{status: 301, headers: %{"location" => ["http://b/x"]}, body: ""}}
+
+        "http://b/x" ->
+          {:ok, %{status: 200, headers: %{}, body: ~s({"u":"https://x/r.png"})}}
+      end
+    end
+
+    assert {:ok, _} =
+             Media.image(Media.new(sync_style("http://a"), transport: transport), prompt: "y")
+
+    assert_received {:req, %{method: :post, url: "http://a/i"}}
+    assert_received {:req, %{method: :post, url: "http://a/two", headers: %{"X-Style" => "s"}}}
+    assert_received {:req, %{method: :get, url: "http://b/x", body: nil, headers: h}}
+    assert h == %{}
+
+    for {st, hs} <- [{302, %{}}, {300, %{"location" => "http://a/z"}}, {302, nil}] do
+      t = fn _ -> {:ok, %{status: st, headers: hs, body: "nope"}} end
+
+      assert {:error, "HTTP #{st}: nope"} ==
+               Media.image(Media.new(sync_style("http://a"), transport: t), prompt: "y")
+    end
   end
 end

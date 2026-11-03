@@ -26,9 +26,10 @@ type mediaRecorded struct {
 }
 
 type mediaScriptEntry struct {
-	Status  int             `json:"status"`
-	Body    json.RawMessage `json:"body"`
-	RawBody *string         `json:"rawBody"`
+	Status  int               `json:"status"`
+	Body    json.RawMessage   `json:"body"`
+	RawBody *string           `json:"rawBody"`
+	Headers map[string]string `json:"headers"`
 }
 
 type mediaCase struct {
@@ -78,6 +79,9 @@ func newFakeMediaServer(script []mediaScriptEntry) *fakeMediaServer {
 		e := f.script[min(f.n, len(f.script)-1)]
 		f.n++
 		f.mu.Unlock()
+		for k, v := range e.Headers {
+			w.Header().Set(k, strings.ReplaceAll(v, "{server}", f.URL))
+		}
 		w.WriteHeader(e.Status)
 		if e.RawBody != nil {
 			_, _ = io.WriteString(w, *e.RawBody)
@@ -132,8 +136,8 @@ func loadMediaCases(t *testing.T) []mediaCase {
 	for i := range doc.Cases {
 		doc.Cases[i].raw = rawDoc.Cases[i]
 	}
-	if len(doc.Cases) == 0 {
-		t.Fatal("no cases")
+	if len(doc.Cases) != 34 {
+		t.Fatalf("%d cases, want exactly 34", len(doc.Cases))
 	}
 	return doc.Cases
 }
@@ -569,10 +573,10 @@ func TestMediaHungServerBoundedByDeadline(t *testing.T) {
 	defer close(release)
 	m := CreateMedia([]MediaStyle{{BaseURL: srv.URL, Verbs: map[string]MediaVerb{"image": {
 		Mode: "sync", Kind: "image", Start: MediaStart{Path: "/i"}, Args: map[string]string{"prompt": "p"},
-		Poll: &MediaPoll{TimeoutMs: 200}, ResultPath: "u"}}}}, MediaOptions{})
+		Poll: &MediaPoll{TimeoutMs: 1000}, ResultPath: "u"}}}}, MediaOptions{})
 	began := time.Now()
 	_, err := m.Image(context.Background(), ImageInput{Prompt: "x"})
-	if err == nil || err.Error() != "image: timed out after 200ms" {
+	if err == nil || err.Error() != "image: timed out after 1000ms" {
 		t.Fatalf("err = %v", err)
 	}
 	if d := time.Since(began); d > 3*time.Second {
@@ -592,9 +596,9 @@ func TestMediaHungServerBoundedByDeadline(t *testing.T) {
 	defer srv2.Close()
 	st := asyncTestStyle(srv2.URL, 1)
 	v := st.Verbs["image"]
-	v.Poll.TimeoutMs = 200
+	v.Poll.TimeoutMs = 1000
 	m2 := CreateMedia([]MediaStyle{st}, MediaOptions{})
-	if _, err := m2.Image(context.Background(), ImageInput{Prompt: "x"}); err == nil || err.Error() != "job h1 timed out after 200ms" {
+	if _, err := m2.Image(context.Background(), ImageInput{Prompt: "x"}); err == nil || err.Error() != "job h1 timed out after 1000ms" {
 		t.Fatalf("poll err = %v", err)
 	}
 }
@@ -604,5 +608,37 @@ func TestMediaDotSetThroughArrayWithWord(t *testing.T) {
 	dotSet(body, "a.x.y", 1)
 	if got := mediaJSON(body); got != `{"a":{"x":{"y":1}}}` {
 		t.Fatalf("body = %s", got)
+	}
+}
+
+func TestMediaJobIDTextRejectsFractionalFloat(t *testing.T) {
+	if _, ok := jobIDText(1.5); ok {
+		t.Fatal("1.5 accepted as job id")
+	}
+	if id, ok := jobIDText(float64(42)); !ok || id != "42" {
+		t.Fatalf("42 => %q %v", id, ok)
+	}
+	if _, ok := jobIDText(json.Number("2.5")); ok {
+		t.Fatal("json 2.5 accepted")
+	}
+}
+
+func TestMediaHostCheckRedirectStillRuns(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/i" {
+			w.Header().Set("Location", "/r")
+			w.WriteHeader(302)
+			_, _ = io.WriteString(w, `{"u":"https://x/a.png"}`)
+			return
+		}
+		t.Errorf("redirect followed despite host policy")
+	}))
+	defer srv.Close()
+	hc := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	m := CreateMedia([]MediaStyle{{BaseURL: srv.URL, Verbs: map[string]MediaVerb{"image": {
+		Mode: "sync", Kind: "image", Start: MediaStart{Path: "/i"}, Args: map[string]string{"prompt": "p"}, ResultPath: "u"}}}},
+		MediaOptions{HTTPClient: hc})
+	if _, err := m.Image(context.Background(), ImageInput{Prompt: "x"}); err == nil || err.Error() != "HTTP 302: {\"u\":\"https://x/a.png\"}" {
+		t.Fatalf("err = %v", err)
 	}
 }

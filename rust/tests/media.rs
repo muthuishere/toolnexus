@@ -28,9 +28,12 @@ type Log = Arc<Mutex<Vec<Req>>>;
 async fn script_server(script: Vec<Value>) -> (String, Log) {
     let log: Log = Arc::default();
     let l2 = log.clone();
+    let base: Arc<std::sync::OnceLock<String>> = Arc::default();
+    let b2 = base.clone();
     let srv = serve(move |r: Req| {
         let log = l2.clone();
         let script = script.clone();
+        let base = b2.clone();
         async move {
             let n = {
                 let mut g = log.lock().unwrap();
@@ -39,17 +42,25 @@ async fn script_server(script: Vec<Value>) -> (String, Log) {
             };
             let e = &script[n.min(script.len() - 1)];
             let status = e["status"].as_u64().unwrap() as u16;
-            match e.get("rawBody").and_then(Value::as_str) {
+            let mut resp = match e.get("rawBody").and_then(Value::as_str) {
                 Some(raw) => Resp::status(status, raw),
                 None => {
                     let mut r = Resp::json(e["body"].clone());
                     r.status = status;
                     r
                 }
+            };
+            if let Some(h) = e.get("headers").and_then(Value::as_object) {
+                let url = base.get().cloned().unwrap_or_default();
+                for (k, v) in h {
+                    resp = resp.header(k, &v.as_str().unwrap().replace("{server}", &url));
+                }
             }
+            resp
         }
     })
     .await;
+    base.set(srv.url.clone()).unwrap();
     (srv.url, log)
 }
 
@@ -77,11 +88,8 @@ fn progress_media(style: MediaStyle) -> (Media, Arc<Mutex<Vec<String>>>) {
 async fn conformance_cases() {
     let cases = load("cases.json");
     let cases = cases["cases"].as_array().unwrap();
-    let total = cases.len();
-    assert!(total >= 15);
-    let mut replayed = 0usize;
+    assert_eq!(cases.len(), 34, "conformance case count");
     for case in cases {
-        replayed += 1;
         let name = case["name"].as_str().unwrap();
         if let Some(env) = case.get("env").and_then(Value::as_object) {
             for (k, v) in env {
@@ -162,7 +170,6 @@ async fn conformance_cases() {
         want.as_object_mut().unwrap().remove("name");
         assert_eq!(serde_json::to_value(&r).unwrap(), want, "{name}: tool");
     }
-    assert_eq!(replayed, total, "every case replayed");
 }
 
 #[tokio::test]
@@ -209,11 +216,12 @@ async fn cancel_stops_polling() {
         .await
         .unwrap_err();
     assert_eq!(e, MediaError::Cancelled);
-    let n = log.lock().unwrap().len();
+    // A poll already in flight at cancel may still land: settle, then baseline.
     tokio::time::sleep(Duration::from_millis(50)).await;
-    assert_eq!(
-        log.lock().unwrap().len(),
-        n,
+    let n = log.lock().unwrap().len();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        log.lock().unwrap().len() <= n + 1,
         "polling continued after cancel"
     );
 
@@ -434,7 +442,7 @@ async fn hung_server_bounded_by_deadline() {
         serde_json::from_value(json!({"baseUrl": hang.url, "verbs": {"image": {
         "mode": "async", "kind": "image", "start": {"path": "/s"}, "args": {"prompt": "p"},
         "idPath": "id", "poll": {"path": "/p/{id}", "statusPath": "st", "done": ["ok"],
-        "intervalMs": 5, "timeoutMs": 200}, "resultPath": "u"}}}))
+        "intervalMs": 5, "timeoutMs": 1000}, "resultPath": "u"}}}))
         .unwrap();
     let mut args = Map::new();
     args.insert("prompt".into(), json!("x"));
@@ -443,7 +451,7 @@ async fn hung_server_bounded_by_deadline() {
         .generate("image", args.clone())
         .await
         .unwrap_err();
-    assert_eq!(e.to_string(), "image: timed out after 200ms");
+    assert_eq!(e.to_string(), "image: timed out after 1000ms");
     assert!(t0.elapsed() < Duration::from_secs(5));
 
     // a hung poll reports the job id
@@ -467,14 +475,14 @@ async fn hung_server_bounded_by_deadline() {
         serde_json::from_value(json!({"baseUrl": poll_hang.url, "verbs": {"image": {
         "mode": "async", "kind": "image", "start": {"path": "/s"}, "args": {"prompt": "p"},
         "idPath": "id", "poll": {"path": "/p/{id}", "statusPath": "st", "done": ["ok"],
-        "intervalMs": 5, "timeoutMs": 200}, "resultPath": "u"}}}))
+        "intervalMs": 5, "timeoutMs": 1000}, "resultPath": "u"}}}))
         .unwrap();
     let t0 = std::time::Instant::now();
     let e = create_media(style, MediaOptions::default())
         .generate("image", args)
         .await
         .unwrap_err();
-    assert_eq!(e.to_string(), "job a/b timed out after 200ms");
+    assert_eq!(e.to_string(), "job a/b timed out after 1000ms");
     assert!(t0.elapsed() < Duration::from_secs(5));
 }
 

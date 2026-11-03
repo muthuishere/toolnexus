@@ -349,12 +349,17 @@
                         loc (khttp/header res "location")]
                     (cond
                       (= :timeout (:error res)) (timed-out! verb job-id timeout)
-                      (and st (contains? #{301 302 303 307 308} (long st)) (string? loc)
-                           (< hops max-redirects))
-                      (let [keep? (or (contains? #{307 308} (long st)) (= :get method) (= :head method))]
+                      (and st (contains? #{301 302 303 307 308} (long st)) (string? loc))
+                      (let [_     (when (>= hops max-redirects) (fail! (str verb ": too many redirects")))
+                            keep? (or (contains? #{307 308} (long st)) (= :get method) (= :head method))]
                         (recur (if keep? method :get) (resolve-location url loc)
                                (when keep? body) (inc hops)))
                       :else res)))]
+    ;; cljgo: Go's net/http follows redirects itself (koine has no switch) and
+    ;; stops after 10 with this text — the same §7G limit, reported in §7G words.
+    (when (and (khttp/failed? res)
+               (str/includes? (str (:error-message res)) "stopped after 10 redirects"))
+      (fail! (str verb ": too many redirects")))
     (when (khttp/failed? res)
       (fail! (str verb ": HTTP transport failure: " (kname (:error res)))))
     (let [st (long (:status res)) raw (str (:body res))]

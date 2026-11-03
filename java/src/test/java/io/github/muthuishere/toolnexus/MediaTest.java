@@ -82,6 +82,11 @@ class MediaTest {
             int status = ((Number) entry.get("status")).intValue();
             String text = entry.containsKey("rawBody") ? (String) entry.get("rawBody") : Json.stringify(entry.get("body"));
             byte[] bytes = text.getBytes(StandardCharsets.UTF_8);
+            if (entry.get("headers") instanceof Map<?, ?> rh) {
+                String server = "http://127.0.0.1:" + ex.getLocalAddress().getPort();
+                for (Map.Entry<?, ?> e : rh.entrySet())
+                    ex.getResponseHeaders().add((String) e.getKey(), ((String) e.getValue()).replace("{server}", server));
+            }
             ex.sendResponseHeaders(status, bytes.length);
             try (OutputStream os = ex.getResponseBody()) { os.write(bytes); }
         }
@@ -119,7 +124,7 @@ class MediaTest {
     @SuppressWarnings("unchecked")
     List<DynamicTest> conformanceCases() throws IOException {
         List<Map<String, Object>> cases = (List<Map<String, Object>>) readJson("cases.json").get("cases");
-        assertFalse(cases.isEmpty());
+        assertEquals(34, cases.size(), "exact conformance case count");
         List<DynamicTest> tests = new ArrayList<>();
         for (Map<String, Object> c : cases) tests.add(DynamicTest.dynamicTest((String) c.get("name"), () -> runCase(c)));
         return tests;
@@ -428,11 +433,11 @@ class MediaTest {
         hung.start();
         try {
             Media m = Media.create(Media.Style.parse("{\"baseUrl\":\"http://127.0.0.1:" + hung.getAddress().getPort()
-                    + "\",\"verbs\":{\"image\":{\"mode\":\"sync\",\"kind\":\"image\",\"poll\":{\"timeoutMs\":300},"
+                    + "\",\"verbs\":{\"image\":{\"mode\":\"sync\",\"kind\":\"image\",\"poll\":{\"timeoutMs\":1000},"
                     + "\"start\":{\"path\":\"/gen\"},\"args\":{\"prompt\":\"prompt\"},\"resultPath\":\"u\"}}}"));
             long t0 = System.nanoTime();
             Media.MediaException e = assertThrows(Media.MediaException.class, () -> m.image(new Media.ImageInput("cat")));
-            assertEquals("image: timed out after 300ms", e.getMessage());
+            assertEquals("image: timed out after 1000ms", e.getMessage());
             assertTrue((System.nanoTime() - t0) / 1_000_000L < 3000);
         } finally {
             release.countDown();

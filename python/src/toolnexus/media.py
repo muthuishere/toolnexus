@@ -22,7 +22,7 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Optional, Protocol, Union
-from urllib.parse import quote, urlsplit
+from urllib.parse import quote, urljoin, urlsplit
 
 from .types import Tool, ToolContext, ToolResult
 
@@ -109,11 +109,15 @@ class MediaResult:
 
 class MediaTransport(Protocol):
     """HTTP seam for the media engine. ``request`` is blocking (run in a worker thread)
-    and returns ``(status, body_text)`` for every status — the engine owns error mapping."""
+    and returns ``(status, body_text)`` or ``(status, body_text, headers)`` for every
+    status — the engine owns error mapping and redirects. A transport must NOT follow
+    redirects itself; it reports the 3xx (with its ``Location`` header in ``headers``) and
+    the engine follows it under the §7G Redirects rules. A 2-tuple carries no headers, so
+    a 3xx from such a transport is a non-2xx error."""
 
     def request(
         self, method: str, url: str, headers: dict[str, str], body: Optional[bytes], timeout: float
-    ) -> tuple[int, str]: ...
+    ) -> Union[tuple[int, str], tuple[int, str, dict[str, str]]]: ...
 
 
 def _origin(url: str) -> tuple[str, str, Optional[int]]:
@@ -122,34 +126,39 @@ def _origin(url: str) -> tuple[str, str, Optional[int]]:
     return scheme, (u.hostname or "").lower(), u.port or {"http": 80, "https": 443}.get(scheme)
 
 
-class _SameOriginRedirect(urllib.request.HTTPRedirectHandler):
-    """§7G Redirects: a redirect to another origin is re-issued with NO headers, so the
-    style headers (API keys) never leave ``baseUrl``'s origin."""
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Hand every 3xx back to the engine, which follows redirects itself (§7G Redirects)."""
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[override]
-        new = super().redirect_request(req, fp, code, msg, headers, newurl)
-        if new is not None and _origin(req.full_url) != _origin(newurl):
-            new.headers.clear()
-            new.unredirected_hdrs.clear()
-        return new
+        return None
 
 
-_OPENER = urllib.request.build_opener(_SameOriginRedirect)
+_OPENER = urllib.request.build_opener(_NoRedirect)
 
 
 class UrllibMediaTransport:
-    """Default media transport — stdlib ``urllib``. Cross-origin redirects drop every
-    request header (a custom transport must do the same with the style headers)."""
+    """Default media transport — stdlib ``urllib`` with automatic redirects disabled."""
 
     def request(
         self, method: str, url: str, headers: dict[str, str], body: Optional[bytes], timeout: float
-    ) -> tuple[int, str]:
+    ) -> tuple[int, str, dict[str, str]]:
         req = urllib.request.Request(url, data=body, method=method, headers=headers)
         try:
             with _OPENER.open(req, timeout=timeout) as resp:
-                return resp.status, resp.read().decode("utf-8", errors="replace")
+                return resp.status, resp.read().decode("utf-8", errors="replace"), dict(resp.headers.items())
         except urllib.error.HTTPError as e:
-            return e.code, e.read().decode("utf-8", errors="replace")
+            return e.code, e.read().decode("utf-8", errors="replace"), dict(e.headers.items()) if e.headers else {}
+
+
+_REDIRECTS = (301, 302, 303, 307, 308)
+_MAX_REDIRECTS = 10
+
+
+def _location(headers: dict[str, str]) -> Optional[str]:
+    for k, v in headers.items():
+        if k.lower() == "location" and v:
+            return v
+    return None
 
 
 OnProgress = Callable[[dict[str, Any]], Union[None, Awaitable[None]]]
@@ -316,26 +325,42 @@ class Media:
         self, style: dict[str, Any], verb: str, method: str, path: str, body: Any, deadline: float
     ) -> Any:
         url = str(style.get("baseUrl", "")).rstrip("/") + path
-        headers = {k: _expand(str(v)) for k, v in (style.get("headers") or {}).items()}
+        style_headers = {k: _expand(str(v)) for k, v in (style.get("headers") or {}).items()}
+        base_origin = _origin(url)
         data: Optional[bytes] = None
         if body is not None:
             data = json.dumps(body).encode("utf-8")
-            headers["Content-Type"] = "application/json"
-        # §7G Per-request timeout: bounded by the time left until the job deadline.
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            raise _Deadline()
-        try:
-            status, text = await asyncio.wait_for(
-                asyncio.to_thread(self._transport.request, method, url, headers, data, remaining + 1.0),
-                remaining,
-            )
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            if time.monotonic() >= deadline:
-                raise _Deadline() from None
-            raise
+        redirects = 0
+        while True:
+            # §7G Redirects: style headers only ever go to baseUrl's origin.
+            headers = dict(style_headers) if _origin(url) == base_origin else {}
+            if data is not None:
+                headers["Content-Type"] = "application/json"
+            # §7G Per-request timeout: every hop bounded by the time left until the job deadline.
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise _Deadline()
+            try:
+                out = await asyncio.wait_for(
+                    asyncio.to_thread(self._transport.request, method, url, headers, data, remaining + 1.0),
+                    remaining,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                if time.monotonic() >= deadline:
+                    raise _Deadline() from None
+                raise
+            status, text = out[0], out[1]
+            loc = _location(out[2] or {}) if len(out) > 2 else None
+            if status not in _REDIRECTS or loc is None:
+                break
+            if redirects >= _MAX_REDIRECTS:
+                raise MediaError(f"{verb}: too many redirects")
+            redirects += 1
+            url = urljoin(url, loc)
+            if status in (301, 302, 303) and method.upper() not in ("GET", "HEAD"):
+                method, data = "GET", None
         if status < 200 or status >= 300:
             raise MediaError(f"HTTP {status}: {_cap_body(text)}")
         try:

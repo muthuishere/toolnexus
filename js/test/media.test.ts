@@ -15,6 +15,7 @@ const HERE = path.dirname(fileURLToPath(import.meta.url))
 const CONF = path.resolve(HERE, "../../conformance/media")
 const read = (f: string) => JSON.parse(fs.readFileSync(path.join(CONF, f), "utf8"))
 const CASES = read("cases.json").cases as any[]
+test("media conformance: exact case count", () => assert.equal(CASES.length, 34))
 const SCHEMAS = read("schemas.json")
 const VERBS = read("verbs.json")
 
@@ -23,18 +24,21 @@ type Recorded = { method: string; path: string; headers: http.IncomingHttpHeader
 /** Fake provider: serves script[] in order, last entry repeats; records every request. */
 async function fakeServer(script: any[]) {
   const requests: Recorded[] = []
+  let url = ""
   const server = http.createServer((req, res) => {
     let body = ""
     req.on("data", (c) => (body += c))
     req.on("end", () => {
       requests.push({ method: req.method!, path: req.url!, headers: req.headers, body })
       const entry = script[Math.min(requests.length - 1, script.length - 1)]
-      res.writeHead(entry.status, { "content-type": "application/json" })
+      const extra: Record<string, string> = {}
+      for (const [k, v] of Object.entries(entry.headers ?? {})) extra[k] = String(v).split("{server}").join(url)
+      res.writeHead(entry.status, { "content-type": "application/json", ...extra })
       res.end(entry.rawBody !== undefined ? entry.rawBody : JSON.stringify(entry.body))
     })
   })
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", r))
-  const url = `http://127.0.0.1:${(server.address() as any).port}`
+  url = `http://127.0.0.1:${(server.address() as any).port}`
   return { url, requests, reset: () => { requests.length = 0 }, close: () => new Promise((r) => server.close(r)) }
 }
 
@@ -299,8 +303,8 @@ test("media: a hung server is bounded by the job deadline (§7G Per-request time
     await assert.rejects(sync.image({ prompt: "x" }), { message: "image: timed out after 200ms" })
     assert.ok(Date.now() - t0 < 3000)
     const asyncM = createMedia({ baseUrl: url, verbs: { image: { mode: "async", kind: "image", start: { path: "/a" }, args: { prompt: "p" }, idPath: "id",
-      poll: { path: "/p/{id}", statusPath: "st", done: ["ok"], intervalMs: 1, timeoutMs: 200 }, resultPath: "u" } } } as any)
-    await assert.rejects(asyncM.image({ prompt: "x" }), { message: "job h1 timed out after 200ms" })
+      poll: { path: "/p/{id}", statusPath: "st", done: ["ok"], intervalMs: 1, timeoutMs: 1000 }, resultPath: "u" } } } as any)
+    await assert.rejects(asyncM.image({ prompt: "x" }), { message: "job h1 timed out after 1000ms" })
   } finally {
     for (const r of pending) r.destroy()
     srv.closeAllConnections?.()

@@ -370,12 +370,13 @@ public sealed class Media
                 using (var req = BuildRequest(style, method, uri, body, withHeaders))
                     resp = await _http.SendAsync(req, timer.Token).ConfigureAwait(false);
                 var sc = (int)resp.StatusCode;
-                if (sc is 301 or 302 or 303 or 307 or 308 && resp.Headers.Location is { } loc && hops < 10)
+                if (sc is 301 or 302 or 303 or 307 or 308 && resp.Headers.Location is { } loc)
                 {
+                    if (hops >= 10) throw new MediaException($"{verb}: too many redirects");
                     uri = loc.IsAbsoluteUri ? loc : new Uri(uri, loc);
                     // (A) style headers never leave baseUrl's origin.
                     withHeaders = withHeaders && SameOrigin(origin, uri);
-                    if (sc == 303 || (sc is 301 or 302 && method.ToUpperInvariant() == "POST")) { method = "GET"; body = null; }
+                    if (sc is 301 or 302 or 303 && method.ToUpperInvariant() is not ("GET" or "HEAD")) { method = "GET"; body = null; }
                     resp.Dispose();
                     resp = null;
                     continue;
@@ -542,18 +543,19 @@ public sealed class Media
     {
         long l => l,
         int i => i,
-        double d => (long)d,
+        double d when d >= long.MinValue && d < 9223372036854775808d => (long)d,
+        double d when !double.IsNaN(d) => d > 0 ? long.MaxValue : long.MinValue,
         _ => null,
     };
 
     /// <summary>String as-is; an integral number as integer text; a non-integral number (unless
     /// <paramref name="integralOnly"/>) in invariant round-trip form; anything else null.</summary>
-    private static string? ScalarText(object? v, bool integralOnly) => v switch
+    internal static string? ScalarText(object? v, bool integralOnly) => v switch
     {
         string s => s,
         long l => l.ToString(CultureInfo.InvariantCulture),
         int i => i.ToString(CultureInfo.InvariantCulture),
-        double d when d == Math.Floor(d) && !double.IsInfinity(d) => ((long)d).ToString(CultureInfo.InvariantCulture),
+        double d when d == Math.Floor(d) && !double.IsInfinity(d) => new System.Numerics.BigInteger(d).ToString(CultureInfo.InvariantCulture),
         double d when !integralOnly => d.ToString("R", CultureInfo.InvariantCulture),
         _ => null,
     };

@@ -476,6 +476,9 @@ defmodule Toolnexus.Media do
 
   # ---- HTTP ----
 
+  @redirects [301, 302, 303, 307, 308]
+  @max_redirects 10
+
   defp call(media, style, verb, method, path, body) do
     url = String.trim_trailing(style["baseUrl"] || "", "/") <> (path || "")
 
@@ -484,13 +487,9 @@ defmodule Toolnexus.Media do
         {k, Regex.replace(@env_var, v, fn _, var -> System.get_env(var) || "" end)}
       end)
 
-    headers = if body, do: Map.put(headers, "Content-Type", "application/json"), else: headers
     method = method |> to_string() |> String.downcase() |> String.to_atom()
-    remaining = remaining_ms(media.deadline)
 
-    with :ok <- if(remaining == 0, do: :deadline, else: :ok),
-         {:ok, status, raw} <-
-           prefix(verb, send_request(media, method, url, headers, body, remaining)) do
+    with {:ok, status, raw} <- hop(media, verb, method, url, headers, body, origin(url), 0) do
       cond do
         status not in 200..299 ->
           {:error, "HTTP #{status}: #{cap_body(raw)}"}
@@ -504,6 +503,57 @@ defmodule Toolnexus.Media do
     end
   end
 
+  # §7G Redirects: followed here (never by the HTTP client), one hop per request, each
+  # bounded by the job deadline. Style headers only ever go to the base URL's origin.
+  defp hop(media, verb, method, url, style_headers, body, base_origin, hops) do
+    headers = if origin(url) == base_origin, do: style_headers, else: %{}
+    headers = if body, do: Map.put(headers, "Content-Type", "application/json"), else: headers
+    remaining = remaining_ms(media.deadline)
+
+    with :ok <- if(remaining == 0, do: :deadline, else: :ok),
+         {:ok, status, resp_headers, raw} <-
+           prefix(verb, send_request(media, method, url, headers, body, remaining)) do
+      loc = if status in @redirects, do: location(resp_headers)
+
+      cond do
+        loc == nil ->
+          {:ok, status, raw}
+
+        hops >= @max_redirects ->
+          {:error, "#{verb}: too many redirects"}
+
+        true ->
+          next = url |> URI.merge(loc) |> URI.to_string()
+
+          {method, body} =
+            if status in [301, 302, 303] and method not in [:get, :head],
+              do: {:get, nil},
+              else: {method, body}
+
+          hop(media, verb, method, next, style_headers, body, base_origin, hops + 1)
+      end
+    end
+  end
+
+  defp origin(url) do
+    u = URI.parse(url)
+    {u.scheme && String.downcase(u.scheme), u.host && String.downcase(u.host), u.port}
+  end
+
+  defp location(headers) when is_map(headers) or is_list(headers) do
+    Enum.find_value(headers, fn {k, v} ->
+      if String.downcase(to_string(k)) == "location" do
+        case v do
+          [first | _] -> first
+          v when is_binary(v) and v != "" -> v
+          _ -> nil
+        end
+      end
+    end)
+  end
+
+  defp location(_), do: nil
+
   defp remaining_ms(nil), do: :infinity
   defp remaining_ms(deadline), do: max(deadline - System.monotonic_time(:millisecond), 0)
 
@@ -512,7 +562,7 @@ defmodule Toolnexus.Media do
     req = %{method: method, url: url, headers: headers, body: body, receive_timeout: remaining}
 
     case t.(req) do
-      {:ok, %{status: status, body: b}} -> {:ok, status, b}
+      {:ok, %{status: status, body: b} = resp} -> {:ok, status, Map.get(resp, :headers), b}
       {:error, e} -> transport_error(media, e)
     end
   end
@@ -520,18 +570,22 @@ defmodule Toolnexus.Media do
   defp send_request(media, method, url, headers, body, remaining) do
     opts =
       [method: method, url: url, headers: headers, retry: false, decode_body: false] ++
-        if(body, do: [body: Jason.encode!(body)], else: []) ++
-        if(remaining == :infinity,
-          do: [],
-          else: [receive_timeout: remaining, connect_options: [timeout: remaining]]
-        )
+        if(body, do: [body: Jason.encode!(body)], else: [])
 
-    # §7G Redirects: never followed, so style headers cannot reach another origin; a 3xx
-    # surfaces as `HTTP <status>: <body>`. Forced over the host's http_options.
-    opts = opts |> Keyword.merge(media.http_options) |> Keyword.put(:redirect, false)
+    # Host http_options first; the job-deadline bound and `redirect: false` (§7G — we
+    # follow redirects ourselves) are applied after, so a host option cannot override them.
+    opts = Keyword.merge(opts, media.http_options) |> Keyword.put(:redirect, false)
+
+    opts =
+      if remaining == :infinity do
+        opts
+      else
+        connect = Keyword.put(opts[:connect_options] || [], :timeout, remaining)
+        opts |> Keyword.put(:receive_timeout, remaining) |> Keyword.put(:connect_options, connect)
+      end
 
     case Req.request(opts) do
-      {:ok, %Req.Response{status: status, body: b}} -> {:ok, status, b}
+      {:ok, %Req.Response{status: status, headers: h, body: b}} -> {:ok, status, h, b}
       {:error, e} -> transport_error(media, e)
     end
   end

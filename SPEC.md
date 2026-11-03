@@ -1677,11 +1677,20 @@ whose top-level keys overwrite the request body last; the tool face never expose
   an object (or an array, when the next segment is numeric).
 - **Transport errors** (no HTTP status, e.g. connection refused) — `<verb>: <port's error message>`;
   not byte-fixed.
-- **Redirects** — style headers are **never sent to a different origin** (scheme + host + port)
-  than the origin of the request built from `baseUrl`. Same-origin redirects are followed normally;
-  on a cross-origin redirect the request is re-issued **without** the style headers (no
-  `Authorization`, no custom style header). A port whose HTTP client cannot do that cleanly may
-  instead not follow redirects at all and treat a 3xx as `HTTP <status>: <body>`.
+- **Redirects** — every port follows redirects itself, with one rule set:
+  - Followed statuses: 301, 302, 303, 307, 308 **with** a `Location` header (resolved against the
+    current URL). Any other 3xx, or one of these without `Location`, is a non-2xx response ⇒
+    `HTTP <status>: <body>`.
+  - Method: 301/302/303 after a request whose method is not GET/HEAD ⇒ the next request is **GET
+    with no body** (and no `Content-Type`). 307/308 re-issue the **same method and body**.
+  - Hop limit: at most **10** redirects are followed (11 requests). A redirect response after that ⇒
+    error `<verb>: too many redirects`.
+  - Headers: style headers are **never sent to a different origin** (scheme + host + port) than the
+    origin of the request built from `baseUrl`. A same-origin redirect keeps them; a cross-origin
+    redirect is re-issued **without** them (no `Authorization`, no custom style header).
+  - Every hop is bounded by the same job deadline (Per-request timeout below).
+  - Gap: a host-injected HTTP client that follows redirects on its own (e.g. a custom JS `fetch`
+    that ignores `redirect: "manual"`, or the cljgo host's Go client) is outside these guarantees.
 - **Per-request timeout** — every HTTP request (start and each poll) is bounded by the time
   remaining until the job deadline: `timeoutMs` measured from the start request for async verbs;
   sync verbs use the verb's `poll.timeoutMs` if given, else 600000. When the deadline expires the

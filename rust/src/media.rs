@@ -964,9 +964,13 @@ impl Media {
                 .get(reqwest::header::LOCATION)
                 .and_then(|l| l.to_str().ok())
                 .and_then(|l| url.join(l).ok());
+            let code = status.as_u16();
             match location {
-                Some(next) if status.is_redirection() => {
-                    if !matches!(status.as_u16(), 307 | 308) {
+                Some(next) if matches!(code, 301 | 302 | 303 | 307 | 308) => {
+                    if matches!(code, 301..=303)
+                        && m != reqwest::Method::GET
+                        && m != reqwest::Method::HEAD
+                    {
                         m = reqwest::Method::GET;
                         body = None;
                     }

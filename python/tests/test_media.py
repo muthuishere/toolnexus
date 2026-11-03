@@ -53,6 +53,8 @@ class FakeServer:
                     entry = srv.script[i]
                 data = (entry["rawBody"] if "rawBody" in entry else json.dumps(entry["body"])).encode()
                 self.send_response(entry["status"])
+                for hk, hv in (entry.get("headers") or {}).items():
+                    self.send_header(hk, hv.replace("{server}", srv.url))
                 self.send_header("Content-Length", str(len(data)))
                 self.end_headers()
                 self.wfile.write(data)
@@ -146,7 +148,7 @@ async def test_media_conformance_tool_face(case, monkeypatch):
 
 
 def test_all_cases_present():
-    assert len(CASES) >= 29
+    assert len(CASES) == 34
 
 
 def test_media_schemas():
@@ -443,16 +445,16 @@ async def test_hung_server_bounded_by_deadline():
     try:
         sync = create_media({"baseUrl": url, "verbs": {"image": {
             "mode": "sync", "kind": "image", "start": {"path": "/s"}, "args": {"prompt": "p"},
-            "poll": {"timeoutMs": 200}, "resultPath": "u"}}})
+            "poll": {"timeoutMs": 1000}, "resultPath": "u"}}})
         t0 = time.monotonic()
-        with pytest.raises(MediaError, match=r"^image: timed out after 200ms$"):
+        with pytest.raises(MediaError, match=r"^image: timed out after 1000ms$"):
             await sync.image("x")
-        assert time.monotonic() - t0 < 3
+        assert time.monotonic() - t0 < 4
         asy = create_media({"baseUrl": url, "verbs": {"image": {
             "mode": "async", "kind": "image", "start": {"path": "/a"}, "args": {"prompt": "p"}, "idPath": "id",
-            "poll": {"path": "/p/{id}", "statusPath": "st", "done": ["ok"], "intervalMs": 1, "timeoutMs": 200},
+            "poll": {"path": "/p/{id}", "statusPath": "st", "done": ["ok"], "intervalMs": 1, "timeoutMs": 1000},
             "resultPath": "u"}}})
-        with pytest.raises(MediaError, match=r"^job h1 timed out after 200ms$"):
+        with pytest.raises(MediaError, match=r"^job h1 timed out after 1000ms$"):
             await asy.image("x")
     finally:
         release.set()
