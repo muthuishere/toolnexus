@@ -1,0 +1,678 @@
+{
+  "_doc": "CLI client conformance (SPEC §7G.10, §7G.11) over conformance/media/fake-cli/fake-cli.sh — see fake-cli/README.md for the exact harness steps. client = grok|codex. Placeholders: {out} the fake's out dir, {dir} gather.dir, {cwd} in expectArgv = must equal <out>/cwd.txt. command (when present) replaces the fake command entirely (spawn-failure case). env is set in the TEST process (the child inherits it; Codex's folder lookup reads it). expectExists / expectMissing: paths that must / must not exist after the run. expectNoSpawn: argv.txt must not exist. maxElapsedMs: the call must return within it (kill on timeout). Other fields as in clients.json.",
+  "cases": [
+    {
+      "name": "grok_image_path_from_tool_result_download",
+      "client": "grok",
+      "liveVerified": true,
+      "config": {
+        "gather": {
+          "dir": "{dir}"
+        }
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "a red apple"
+      },
+      "fixture": [
+        "grok starting (not JSON, ignored)",
+        "{\"type\":\"available_commands\",\"tools\":[\"image_gen\",\"image_to_video\"],\"commands\":[\"compact\"]}",
+        "{\"type\":\"thought\",\"data\":\"Generating.\"}",
+        "{\"type\":\"text\",\"data\":\"Generating\"}",
+        "{\"type\":\"tool_call\",\"toolCallId\":\"c0\",\"title\":\"image_gen\",\"kind\":\"image_gen\",\"status\":\"pending\",\"toolName\":\"image_gen\",\"rawInput\":{\"prompt\":\"a red apple\",\"aspect_ratio\":\"1:1\"},\"content\":[],\"locations\":[]}",
+        "{\"type\":\"tool_call_update\",\"toolCallId\":\"c0\",\"status\":null,\"content\":[],\"rawOutput\":null,\"locations\":[]}",
+        "#file sessions/s1/images/1.jpg JPEGBYTES",
+        "{\"type\":\"tool_call_update\",\"toolCallId\":\"c0\",\"status\":\"completed\",\"rawOutput\":{\"type\":\"ImageGen\",\"path\":\"{out}/sessions/s1/images/1.jpg\",\"filename\":\"1.jpg\",\"session_folder\":\"images\"},\"locations\":[]}",
+        "{\"type\":\"text\",\"data\":\" {out}/sessions/s1/images/1.jpg\"}",
+        "{\"type\":\"end\",\"stopReason\":\"end_turn\",\"sessionId\":\"s1\",\"num_turns\":1,\"total_cost_usd\":0.01}"
+      ],
+      "expectArgv": [
+        "-p",
+        "Generate exactly one image with your image generation tool: a red apple. Do not write code. Reply only with the file path.",
+        "--cwd",
+        "{cwd}",
+        "--output-format",
+        "streaming-json",
+        "--yolo",
+        "--no-auto-update"
+      ],
+      "expectEnv": {
+        "GROK_CONFIG": "{\"features\":{\"image_gen\":true,\"video_gen\":true}}"
+      },
+      "expectProgress": [
+        "tool image_gen",
+        "tool completed",
+        "end end_turn"
+      ],
+      "expectExists": [
+        "{out}/sessions/s1/images/1.jpg"
+      ],
+      "result": {
+        "files": [
+          {
+            "type": "image",
+            "mimeType": "image/jpeg",
+            "saved": {
+              "ext": ".jpg",
+              "bytesBase64": "SlBFR0JZVEVT"
+            }
+          }
+        ],
+        "text": "Generating {out}/sessions/s1/images/1.jpg",
+        "jobId": "s1",
+        "status": "completed"
+      },
+      "tool": {
+        "name": "generate_image",
+        "isError": false,
+        "outputPattern": "^image ready: {dir}/grok-image-[0-9]+-[0-9]+\\.jpg$",
+        "parts": [
+          {
+            "type": "image",
+            "mimeType": "image/jpeg",
+            "data": "SlBFR0JZVEVT"
+          }
+        ],
+        "metadata": {
+          "source": "media",
+          "verb": "image",
+          "client": "grok",
+          "jobId": "s1",
+          "status": "completed"
+        }
+      }
+    },
+    {
+      "name": "grok_image_url_mode_keeps_cli_path",
+      "client": "grok",
+      "config": {
+        "gather": {
+          "mode": "url",
+          "dir": "{dir}"
+        },
+        "model": "grok-4.7-build"
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "cat"
+      },
+      "fixture": [
+        "{\"type\":\"tool_call\",\"toolCallId\":\"c0\",\"title\":\"image_gen\",\"kind\":\"image_gen\",\"status\":\"pending\",\"toolName\":\"image_gen\",\"rawInput\":{\"prompt\":\"a red apple\",\"aspect_ratio\":\"1:1\"},\"content\":[],\"locations\":[]}",
+        "#file sessions/s1/images/1.png PNGBYTES",
+        "{\"type\":\"tool_call_update\",\"toolCallId\":\"c0\",\"status\":\"completed\",\"rawOutput\":{\"type\":\"ImageGen\",\"path\":\"{out}/sessions/s1/images/1.png\",\"filename\":\"1.png\",\"session_folder\":\"images\"},\"locations\":[]}",
+        "{\"type\":\"end\",\"stopReason\":\"end_turn\",\"sessionId\":\"s1\",\"num_turns\":1,\"total_cost_usd\":0.01}"
+      ],
+      "expectArgv": [
+        "-p",
+        "Generate exactly one image with your image generation tool: cat. Do not write code. Reply only with the file path.",
+        "--cwd",
+        "{cwd}",
+        "--output-format",
+        "streaming-json",
+        "--yolo",
+        "--no-auto-update",
+        "-m",
+        "grok-4.7-build"
+      ],
+      "result": {
+        "files": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "path": "{out}/sessions/s1/images/1.png",
+            "url": "file://{out}/sessions/s1/images/1.png"
+          }
+        ],
+        "jobId": "s1",
+        "status": "completed"
+      },
+      "tool": {
+        "name": "generate_image",
+        "isError": false,
+        "output": "image ready: {out}/sessions/s1/images/1.png",
+        "parts": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "data": "UE5HQllURVM="
+          }
+        ],
+        "metadata": {
+          "source": "media",
+          "verb": "image",
+          "client": "grok",
+          "jobId": "s1",
+          "status": "completed"
+        }
+      }
+    },
+    {
+      "name": "grok_keep_false_deletes_original",
+      "client": "grok",
+      "config": {
+        "gather": {
+          "dir": "{dir}",
+          "keep": false
+        }
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "cat"
+      },
+      "fixture": [
+        "#file sessions/s1/images/1.png PNGBYTES",
+        "{\"type\":\"tool_call_update\",\"toolCallId\":\"c0\",\"status\":\"completed\",\"rawOutput\":{\"type\":\"ImageGen\",\"path\":\"{out}/sessions/s1/images/1.png\",\"filename\":\"1.png\",\"session_folder\":\"images\"},\"locations\":[]}",
+        "{\"type\":\"end\",\"stopReason\":\"end_turn\",\"sessionId\":\"s1\",\"num_turns\":1,\"total_cost_usd\":0.01}"
+      ],
+      "expectMissing": [
+        "{out}/sessions/s1/images/1.png"
+      ],
+      "result": {
+        "files": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "saved": {
+              "ext": ".png",
+              "bytesBase64": "UE5HQllURVM="
+            }
+          }
+        ],
+        "jobId": "s1",
+        "status": "completed"
+      }
+    },
+    {
+      "name": "grok_video_keeps_only_video_kind",
+      "client": "grok",
+      "liveVerified": true,
+      "config": {
+        "gather": {
+          "dir": "{dir}"
+        }
+      },
+      "verb": "video",
+      "args": {
+        "prompt": "an apple rotates"
+      },
+      "fixture": [
+        "{\"type\":\"tool_call\",\"toolCallId\":\"c0\",\"title\":\"image_gen\",\"kind\":\"image_gen\",\"status\":\"pending\",\"toolName\":\"image_gen\",\"rawInput\":{\"prompt\":\"a red apple\",\"aspect_ratio\":\"1:1\"},\"content\":[],\"locations\":[]}",
+        "#file sessions/s1/images/1.jpg JPEGBYTES",
+        "{\"type\":\"tool_call_update\",\"toolCallId\":\"c0\",\"status\":\"completed\",\"rawOutput\":{\"type\":\"ImageGen\",\"path\":\"{out}/sessions/s1/images/1.jpg\",\"filename\":\"1.jpg\",\"session_folder\":\"images\"},\"locations\":[]}",
+        "{\"type\":\"tool_call\",\"toolCallId\":\"c1\",\"title\":\"image_to_video\",\"kind\":\"image_to_video\",\"status\":\"pending\",\"toolName\":\"image_to_video\",\"rawInput\":{\"prompt\":\"it rotates\",\"duration\":6},\"content\":[],\"locations\":[]}",
+        "#file sessions/s1/videos/1.mp4 MP4BYTES",
+        "{\"type\":\"tool_call_update\",\"toolCallId\":\"c1\",\"status\":\"completed\",\"rawOutput\":{\"type\":\"ImageToVideo\",\"path\":\"{out}/sessions/s1/videos/1.mp4\",\"filename\":\"1.mp4\",\"session_folder\":\"videos\"},\"locations\":[]}",
+        "{\"type\":\"end\",\"stopReason\":\"end_turn\",\"sessionId\":\"s1\",\"num_turns\":1,\"total_cost_usd\":0.01}"
+      ],
+      "expectArgv": [
+        "-p",
+        "Generate exactly one short video with your video generation tool, shortest duration available: an apple rotates. Do not write code. Reply only with the file path.",
+        "--cwd",
+        "{cwd}",
+        "--output-format",
+        "streaming-json",
+        "--yolo",
+        "--no-auto-update"
+      ],
+      "expectProgress": [
+        "tool image_gen",
+        "tool completed",
+        "tool image_to_video",
+        "tool completed",
+        "end end_turn"
+      ],
+      "result": {
+        "files": [
+          {
+            "type": "file",
+            "mimeType": "video/mp4",
+            "saved": {
+              "ext": ".mp4",
+              "bytesBase64": "TVA0QllURVM="
+            }
+          }
+        ],
+        "jobId": "s1",
+        "status": "completed"
+      }
+    },
+    {
+      "name": "grok_video_zdr_wrong_kind_is_unavailable",
+      "client": "grok",
+      "liveVerified": true,
+      "config": {
+        "gather": {
+          "dir": "{dir}"
+        }
+      },
+      "verb": "video",
+      "args": {
+        "prompt": "an apple rotates"
+      },
+      "fixture": [
+        "{\"type\":\"tool_call\",\"toolCallId\":\"c0\",\"title\":\"image_gen\",\"kind\":\"image_gen\",\"status\":\"pending\",\"toolName\":\"image_gen\",\"rawInput\":{\"prompt\":\"a red apple\",\"aspect_ratio\":\"1:1\"},\"content\":[],\"locations\":[]}",
+        "#file sessions/s1/images/1.jpg JPEGBYTES",
+        "{\"type\":\"tool_call_update\",\"toolCallId\":\"c0\",\"status\":\"completed\",\"rawOutput\":{\"type\":\"ImageGen\",\"path\":\"{out}/sessions/s1/images/1.jpg\",\"filename\":\"1.jpg\",\"session_folder\":\"images\"},\"locations\":[]}",
+        "{\"type\":\"tool_call\",\"toolCallId\":\"c1\",\"title\":\"image_to_video\",\"kind\":\"image_to_video\",\"status\":\"pending\",\"toolName\":\"image_to_video\",\"rawInput\":{\"prompt\":\"it rotates\",\"duration\":6},\"content\":[],\"locations\":[]}",
+        "{\"type\":\"tool_call_update\",\"toolCallId\":\"c1\",\"status\":\"failed\",\"rawOutput\":{\"error\":\"tool_execution_failed\",\"message\":\"Video generation tools are unavailable under zero data retention (ZDR). To enable, either turn off /privacy mode to disable ZDR or supply a user-hosted storage bucket (see https://docs.x.ai/build/settings/zdr-video-storage).\"},\"locations\":[]}",
+        "{\"type\":\"text\",\"data\":\"Video generation failed: the tool is unavailable under zero data retention.\"}",
+        "{\"type\":\"end\",\"stopReason\":\"end_turn\",\"sessionId\":\"s1\",\"num_turns\":1,\"total_cost_usd\":0.01}"
+      ],
+      "status": "unavailable",
+      "error": "media: no client available for \"video\": grok: video blocked by Zero Data Retention — run /privacy and opt in, or configure ZDR video storage (docs/media#grok-video-zdr)",
+      "tool": {
+        "isError": true,
+        "output": "media: no client available for \"video\": grok: video blocked by Zero Data Retention — run /privacy and opt in, or configure ZDR video storage (docs/media#grok-video-zdr)"
+      }
+    },
+    {
+      "name": "grok_video_other_tool_failure_is_failed",
+      "client": "grok",
+      "config": {
+        "gather": {
+          "dir": "{dir}"
+        }
+      },
+      "verb": "video",
+      "args": {
+        "prompt": "x"
+      },
+      "fixture": [
+        "{\"type\":\"tool_call\",\"toolCallId\":\"c1\",\"title\":\"image_to_video\",\"kind\":\"image_to_video\",\"status\":\"pending\",\"toolName\":\"image_to_video\",\"rawInput\":{\"prompt\":\"it rotates\",\"duration\":6},\"content\":[],\"locations\":[]}",
+        "{\"type\":\"tool_call_update\",\"toolCallId\":\"c1\",\"status\":\"failed\",\"rawOutput\":{\"error\":\"tool_execution_failed\",\"message\":\"content policy\"},\"locations\":[]}",
+        "{\"type\":\"end\",\"stopReason\":\"end_turn\",\"sessionId\":\"s1\",\"num_turns\":1,\"total_cost_usd\":0.01}"
+      ],
+      "status": "failed",
+      "error": "grok: no video: content policy",
+      "tool": {
+        "isError": true,
+        "output": "grok: no video: content policy"
+      }
+    },
+    {
+      "name": "grok_failed_tool_without_message_uses_raw_output_json",
+      "client": "grok",
+      "config": {
+        "gather": {
+          "dir": "{dir}"
+        }
+      },
+      "verb": "video",
+      "args": {
+        "prompt": "x"
+      },
+      "fixture": [
+        "{\"type\":\"tool_call\",\"toolCallId\":\"c1\",\"title\":\"image_to_video\",\"kind\":\"image_to_video\",\"status\":\"pending\",\"toolName\":\"image_to_video\",\"rawInput\":{\"prompt\":\"it rotates\",\"duration\":6},\"content\":[],\"locations\":[]}",
+        "{\"type\":\"tool_call_update\",\"toolCallId\":\"c1\",\"status\":\"failed\",\"rawOutput\":{\"error\":\"boom\"},\"locations\":[]}",
+        "{\"type\":\"end\",\"stopReason\":\"end_turn\",\"sessionId\":\"s1\",\"num_turns\":1,\"total_cost_usd\":0.01}"
+      ],
+      "status": "failed",
+      "error": "grok: no video: {\"error\":\"boom\"}",
+      "tool": {
+        "isError": true,
+        "output": "grok: no video: {\"error\":\"boom\"}"
+      }
+    },
+    {
+      "name": "grok_usage_limit_error_line_is_unavailable",
+      "client": "grok",
+      "config": {
+        "gather": {
+          "dir": "{dir}"
+        }
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "x"
+      },
+      "fixture": [
+        "{\"type\":\"error\",\"message\":\"You have reached your usage limit for today\"}",
+        "#exit 1"
+      ],
+      "status": "unavailable",
+      "error": "media: no client available for \"image\": grok: You have reached your usage limit for today",
+      "tool": {
+        "isError": true,
+        "output": "media: no client available for \"image\": grok: You have reached your usage limit for today"
+      }
+    },
+    {
+      "name": "grok_no_file_no_error",
+      "client": "grok",
+      "config": {
+        "gather": {
+          "dir": "{dir}"
+        }
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "x"
+      },
+      "fixture": [
+        "{\"type\":\"text\",\"data\":\"I could not.\"}",
+        "{\"type\":\"end\",\"stopReason\":\"end_turn\",\"sessionId\":\"s1\",\"num_turns\":1,\"total_cost_usd\":0.01}"
+      ],
+      "status": "failed",
+      "error": "grok: no image file in the run (exit code 0): I could not.",
+      "tool": {
+        "isError": true,
+        "output": "grok: no image file in the run (exit code 0): I could not."
+      }
+    },
+    {
+      "name": "grok_nonzero_exit_with_file_is_completed",
+      "client": "grok",
+      "config": {
+        "gather": {
+          "dir": "{dir}"
+        }
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "x"
+      },
+      "fixture": [
+        "#file sessions/s1/images/2.webp WEBP",
+        "{\"type\":\"tool_call_update\",\"toolCallId\":\"c0\",\"status\":\"completed\",\"rawOutput\":{\"type\":\"ImageGen\",\"path\":\"{out}/sessions/s1/images/2.webp\",\"filename\":\"2.webp\",\"session_folder\":\"images\"},\"locations\":[]}",
+        "{\"type\":\"end\",\"stopReason\":\"end_turn\",\"sessionId\":\"s1\",\"num_turns\":1,\"total_cost_usd\":0.01}",
+        "#exit 2"
+      ],
+      "result": {
+        "files": [
+          {
+            "type": "image",
+            "mimeType": "image/webp",
+            "saved": {
+              "ext": ".webp",
+              "bytesBase64": "V0VCUA=="
+            }
+          }
+        ],
+        "jobId": "s1",
+        "status": "completed"
+      }
+    },
+    {
+      "name": "grok_text_names_missing_file_exit_3",
+      "client": "grok",
+      "config": {
+        "gather": {
+          "dir": "{dir}"
+        }
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "x"
+      },
+      "fixture": [
+        "{\"type\":\"text\",\"data\":\"saved to /nonexistent/toolnexus/x.png\"}",
+        "#exit 3"
+      ],
+      "status": "failed",
+      "error": "grok: no image file in the run (exit code 3): saved to /nonexistent/toolnexus/x.png",
+      "tool": {
+        "isError": true,
+        "output": "grok: no image file in the run (exit code 3): saved to /nonexistent/toolnexus/x.png"
+      }
+    },
+    {
+      "name": "grok_timeout_kills_process",
+      "client": "grok",
+      "config": {
+        "gather": {
+          "dir": "{dir}"
+        },
+        "loop": {
+          "timeoutMs": 300
+        }
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "x"
+      },
+      "fixture": [
+        "{\"type\":\"text\",\"data\":\"thinking\"}",
+        "#hang"
+      ],
+      "maxElapsedMs": 5000,
+      "status": "timeout",
+      "error": "grok: timed out after 300ms",
+      "tool": {
+        "isError": true,
+        "output": "grok: timed out after 300ms"
+      }
+    },
+    {
+      "name": "grok_spawn_failure_is_unavailable",
+      "client": "grok",
+      "command": [
+        "/nonexistent/toolnexus-fake-grok"
+      ],
+      "config": {
+        "gather": {
+          "dir": "{dir}"
+        }
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "x"
+      },
+      "fixture": [],
+      "status": "unavailable",
+      "error": "media: no client available for \"image\": grok: cannot start \"/nonexistent/toolnexus-fake-grok\"",
+      "tool": {
+        "isError": true,
+        "output": "media: no client available for \"image\": grok: cannot start \"/nonexistent/toolnexus-fake-grok\""
+      }
+    },
+    {
+      "name": "grok_unsupported_arg_no_spawn",
+      "client": "grok",
+      "config": {
+        "gather": {
+          "dir": "{dir}"
+        }
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "x",
+        "width": 64
+      },
+      "fixture": [
+        "{\"type\":\"end\",\"stopReason\":\"end_turn\",\"sessionId\":\"s1\",\"num_turns\":1,\"total_cost_usd\":0.01}"
+      ],
+      "expectNoSpawn": true,
+      "status": "failed",
+      "error": "image: argument \"width\" not supported by grok",
+      "tool": {
+        "isError": true,
+        "output": "image: argument \"width\" not supported by grok"
+      }
+    },
+    {
+      "name": "codex_image_path_in_text",
+      "client": "codex",
+      "liveVerified": true,
+      "config": {
+        "gather": {
+          "dir": "{dir}"
+        }
+      },
+      "env": {
+        "CODEX_HOME": "{out}/codexhome"
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "a red apple"
+      },
+      "fixture": [
+        "{\"type\":\"thread.started\",\"thread_id\":\"t1\"}",
+        "{\"type\":\"turn.started\"}",
+        "#file gen/t1/exec-1.png PNGBYTES",
+        "{\"type\":\"item.completed\",\"item\":{\"id\":\"item_0\",\"type\":\"agent_message\",\"text\":\"{out}/gen/t1/exec-1.png\"}}",
+        "{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":80850,\"output_tokens\":134}}"
+      ],
+      "expectArgv": [
+        "exec",
+        "--json",
+        "--skip-git-repo-check",
+        "-s",
+        "workspace-write",
+        "Generate exactly one image with your built-in image generation tool: a red apple. Do not write code or use scripts. Reply only with the absolute path where the image was saved."
+      ],
+      "expectProgress": [
+        "thread.started",
+        "turn.started",
+        "item.completed",
+        "turn.completed"
+      ],
+      "result": {
+        "files": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "saved": {
+              "ext": ".png",
+              "bytesBase64": "UE5HQllURVM="
+            }
+          }
+        ],
+        "text": "{out}/gen/t1/exec-1.png",
+        "jobId": "t1",
+        "status": "completed"
+      },
+      "tool": {
+        "name": "generate_image",
+        "isError": false,
+        "outputPattern": "^image ready: {dir}/codex-image-[0-9]+-[0-9]+\\.png$",
+        "parts": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "data": "UE5HQllURVM="
+          }
+        ],
+        "metadata": {
+          "source": "media",
+          "verb": "image",
+          "client": "codex",
+          "jobId": "t1",
+          "status": "completed"
+        }
+      }
+    },
+    {
+      "name": "codex_image_from_generated_images_folder",
+      "client": "codex",
+      "liveVerified": true,
+      "note": "Live capture: Codex answered without the path; the file is found in $CODEX_HOME/generated_images/<thread>.",
+      "config": {
+        "gather": {
+          "dir": "{dir}"
+        },
+        "model": "gpt-5.4"
+      },
+      "env": {
+        "CODEX_HOME": "{out}/codexhome"
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "cat"
+      },
+      "fixture": [
+        "{\"type\":\"thread.started\",\"thread_id\":\"t2\"}",
+        "#file codexhome/generated_images/t2/exec-b.png PNGBYTES",
+        "#file codexhome/generated_images/t2/exec-a.png PNGA",
+        "{\"type\":\"item.completed\",\"item\":{\"id\":\"item_0\",\"type\":\"agent_message\",\"text\":\"I couldn't retrieve the saved image's absolute path.\"}}",
+        "{\"type\":\"turn.completed\",\"usage\":{}}"
+      ],
+      "expectArgv": [
+        "exec",
+        "--json",
+        "--skip-git-repo-check",
+        "-s",
+        "workspace-write",
+        "-m",
+        "gpt-5.4",
+        "Generate exactly one image with your built-in image generation tool: cat. Do not write code or use scripts. Reply only with the absolute path where the image was saved."
+      ],
+      "result": {
+        "files": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "saved": {
+              "ext": ".png",
+              "bytesBase64": "UE5HQQ=="
+            }
+          },
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "saved": {
+              "ext": ".png",
+              "bytesBase64": "UE5HQllURVM="
+            }
+          }
+        ],
+        "text": "I couldn't retrieve the saved image's absolute path.",
+        "jobId": "t2",
+        "status": "completed"
+      }
+    },
+    {
+      "name": "codex_usage_limit_is_unavailable",
+      "client": "codex",
+      "config": {
+        "gather": {
+          "dir": "{dir}"
+        }
+      },
+      "env": {
+        "CODEX_HOME": "{out}/codexhome"
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "x"
+      },
+      "fixture": [
+        "{\"type\":\"thread.started\",\"thread_id\":\"t3\"}",
+        "{\"type\":\"turn.failed\",\"error\":{\"message\":\"You've hit your usage limit. Try again later.\"}}",
+        "#exit 1"
+      ],
+      "status": "unavailable",
+      "error": "media: no client available for \"image\": codex: You've hit your usage limit. Try again later.",
+      "tool": {
+        "isError": true,
+        "output": "media: no client available for \"image\": codex: You've hit your usage limit. Try again later."
+      }
+    },
+    {
+      "name": "codex_error_line_is_failed",
+      "client": "codex",
+      "config": {
+        "gather": {
+          "dir": "{dir}"
+        }
+      },
+      "env": {
+        "CODEX_HOME": "{out}/codexhome"
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "x"
+      },
+      "fixture": [
+        "{\"type\":\"thread.started\",\"thread_id\":\"t4\"}",
+        "{\"type\":\"error\",\"message\":\"stream disconnected\"}",
+        "#exit 1"
+      ],
+      "status": "failed",
+      "error": "codex: no image: stream disconnected",
+      "tool": {
+        "isError": true,
+        "output": "codex: no image: stream disconnected"
+      }
+    }
+  ]
+}

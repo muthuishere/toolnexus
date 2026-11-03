@@ -1,31 +1,159 @@
 {
-  "_doc": "Expected tool schemas (Tool.inputSchema, the canonical JSON before any OpenAI/Anthropic/Gemini adapter) for the style below. Ports assert deep equality AND tool order. The style maps only some args: unmapped args are absent; a required arg the style does not map is not required.",
-  "style": { "baseUrl": "http://unused", "verbs": {
-    "talking": { "mode": "async", "kind": "video", "start": { "path": "/t" }, "args": { "image": "i", "audio": "a" }, "idPath": "id",
-                 "poll": { "path": "/t/{id}", "statusPath": "s", "done": ["ok"], "failed": ["x"] }, "resultPath": "u" },
-    "image": { "mode": "sync", "kind": "image", "start": { "path": "/i" }, "args": { "seed": "seed", "prompt": "p", "width": "w" }, "resultPath": "u" },
-    "speech": { "mode": "sync", "kind": "audio", "start": { "path": "/s" }, "args": { "voice": "v" }, "resultPath": "u" },
-    "cloneVoice": { "mode": "sync", "kind": "text", "start": { "path": "/c" }, "args": { "name": "n", "samples": "s" }, "resultPath": "id" } } },
+  "_doc": "Expected tool schemas (Tool.inputSchema, the canonical JSON before any OpenAI/Anthropic/Gemini adapter) for the style below. Ports assert deep equality AND tool order. The style maps only some args: unmapped args are absent; a required arg the style does not map is not required. The talk verb declares required:[\"audio\"] (SPEC §7G.7), so audio stays required although canonical talk requires only image.",
+  "style": {
+    "baseUrl": "http://unused",
+    "verbs": {
+      "image": {
+        "mode": "sync",
+        "kind": "image",
+        "start": {
+          "path": "/i"
+        },
+        "args": {
+          "seed": "seed",
+          "prompt": "p",
+          "width": "w"
+        },
+        "resultPath": "u"
+      },
+      "speech": {
+        "mode": "sync",
+        "kind": "audio",
+        "start": {
+          "path": "/s"
+        },
+        "args": {
+          "voice": "v"
+        },
+        "resultPath": "u"
+      },
+      "cloneVoice": {
+        "mode": "sync",
+        "kind": "text",
+        "start": {
+          "path": "/c"
+        },
+        "args": {
+          "name": "n",
+          "samples": "s"
+        },
+        "resultPath": "id"
+      },
+      "talk": {
+        "mode": "async",
+        "kind": "video",
+        "start": {
+          "path": "/t"
+        },
+        "args": {
+          "image": "i",
+          "audio": "a"
+        },
+        "idPath": "id",
+        "poll": {
+          "path": "/t/{id}",
+          "statusPath": "s",
+          "done": [
+            "ok"
+          ],
+          "failed": [
+            "x"
+          ]
+        },
+        "resultPath": "u",
+        "required": [
+          "audio"
+        ]
+      }
+    }
+  },
   "tools": [
-    { "name": "generate_image", "description": "Generate an image from a text prompt.", "source": "media",
-      "inputSchema": { "type": "object", "properties": {
-        "prompt": { "type": "string", "description": "What to draw." },
-        "width": { "type": "integer", "description": "Width in pixels." },
-        "seed": { "type": "integer", "description": "Seed for reproducible output." } },
-        "required": ["prompt"] } },
-    { "name": "generate_speech", "description": "Speak text aloud and return the audio.", "source": "media",
-      "inputSchema": { "type": "object", "properties": {
-        "voice": { "type": "string", "description": "Voice or speaker id." } },
-        "required": [] } },
-    { "name": "clone_voice", "description": "Create a cloned voice from audio sample URLs and return its voice id.", "source": "media",
-      "inputSchema": { "type": "object", "properties": {
-        "name": { "type": "string", "description": "Name for the new voice." },
-        "samples": { "type": "array", "items": { "type": "string" }, "description": "URLs of audio samples of the voice." } },
-        "required": ["name", "samples"] } },
-    { "name": "talking_video", "description": "Make the person in an image speak the given audio (lip-synced video).", "source": "media",
-      "inputSchema": { "type": "object", "properties": {
-        "image": { "type": "string", "description": "URL of the face image." },
-        "audio": { "type": "string", "description": "URL of the speech audio." } },
-        "required": ["image", "audio"] } }
+    {
+      "name": "generate_image",
+      "description": "Generate an image from a text prompt.",
+      "source": "media",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "prompt": {
+            "type": "string",
+            "description": "What to draw."
+          },
+          "width": {
+            "type": "integer",
+            "description": "Width in pixels."
+          },
+          "seed": {
+            "type": "integer",
+            "description": "Seed for reproducible output."
+          }
+        },
+        "required": [
+          "prompt"
+        ]
+      }
+    },
+    {
+      "name": "generate_speech",
+      "description": "Speak text aloud and return the audio.",
+      "source": "media",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "voice": {
+            "type": "string",
+            "description": "Voice name or id, including a cloned voice."
+          }
+        },
+        "required": []
+      }
+    },
+    {
+      "name": "clone_voice",
+      "description": "Create a cloned voice from audio samples and return its voice id.",
+      "source": "media",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Name for the new voice."
+          },
+          "samples": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "URLs or local paths of audio samples of the voice."
+          }
+        },
+        "required": [
+          "name",
+          "samples"
+        ]
+      }
+    },
+    {
+      "name": "talking_video",
+      "description": "Make the person in an image speak, from speech audio or from text (lip-synced video).",
+      "source": "media",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "image": {
+            "type": "string",
+            "description": "URL or local path of the face image."
+          },
+          "audio": {
+            "type": "string",
+            "description": "URL or local path of the speech audio."
+          }
+        },
+        "required": [
+          "image",
+          "audio"
+        ]
+      }
+    }
   ]
 }

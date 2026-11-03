@@ -1,0 +1,994 @@
+{
+  "_doc": "createMedia routing and tools conformance (SPEC §7G.3, §7G.6). Each case builds test-only custom MediaClients from clients[]: name; supports(verb) = verb in verbs; args(verb) = verbs[verb].args (absent ⇒ the client declares no args(), so every canonical arg is accepted); calling a verb records {client, verb, args} and returns outcome.result, or fails with a media error {message: outcome.error, status: outcome.status} (status unavailable must use the port's typed unavailable error). Assert expectCalls exactly (order, args after nulls removed), then result / error+status, then the tool face (fresh clients). schemaCases: build createMedia(clients).tools() and assert names, order, descriptions, source and inputSchema exactly (Go: key order not asserted). emptyClients: createMedia([]) fails with exactly that message.",
+  "cases": [
+    {
+      "name": "first_supporting_client_wins",
+      "clients": [
+        {
+          "name": "a",
+          "verbs": {
+            "image": {
+              "args": [
+                {
+                  "name": "prompt",
+                  "required": true
+                }
+              ],
+              "outcome": {
+                "result": {
+                  "files": [
+                    {
+                      "type": "image",
+                      "mimeType": "image/png",
+                      "url": "https://x/a.png"
+                    }
+                  ],
+                  "status": "completed"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "b",
+          "verbs": {
+            "image": {
+              "args": [
+                {
+                  "name": "prompt",
+                  "required": true
+                }
+              ],
+              "outcome": {
+                "result": {
+                  "files": [
+                    {
+                      "type": "image",
+                      "mimeType": "image/png",
+                      "url": "https://x/b.png"
+                    }
+                  ],
+                  "status": "completed"
+                }
+              }
+            }
+          }
+        }
+      ],
+      "verb": "image",
+      "args": {
+        "prompt": "cat"
+      },
+      "expectCalls": [
+        {
+          "client": "a",
+          "verb": "image",
+          "args": {
+            "prompt": "cat"
+          }
+        }
+      ],
+      "result": {
+        "files": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "url": "https://x/a.png"
+          }
+        ],
+        "status": "completed"
+      },
+      "tool": {
+        "name": "generate_image",
+        "isError": false,
+        "output": "image ready: https://x/a.png",
+        "parts": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "url": "https://x/a.png"
+          }
+        ],
+        "metadata": {
+          "source": "media",
+          "verb": "image",
+          "client": "a",
+          "status": "completed"
+        }
+      }
+    },
+    {
+      "name": "skips_clients_that_do_not_support_the_verb",
+      "clients": [
+        {
+          "name": "a",
+          "verbs": {
+            "speech": {
+              "outcome": {
+                "result": {
+                  "files": [
+                    {
+                      "type": "image",
+                      "mimeType": "image/png",
+                      "url": "https://x/a.png"
+                    }
+                  ],
+                  "status": "completed"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "b",
+          "verbs": {
+            "image": {
+              "args": [
+                {
+                  "name": "prompt",
+                  "required": true
+                }
+              ],
+              "outcome": {
+                "result": {
+                  "files": [
+                    {
+                      "type": "image",
+                      "mimeType": "image/png",
+                      "url": "https://x/b.png"
+                    }
+                  ],
+                  "status": "completed"
+                }
+              }
+            }
+          }
+        }
+      ],
+      "verb": "image",
+      "args": {
+        "prompt": "cat"
+      },
+      "expectCalls": [
+        {
+          "client": "b",
+          "verb": "image",
+          "args": {
+            "prompt": "cat"
+          }
+        }
+      ],
+      "result": {
+        "files": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "url": "https://x/b.png"
+          }
+        ],
+        "status": "completed"
+      }
+    },
+    {
+      "name": "falls_through_on_unavailable",
+      "clients": [
+        {
+          "name": "a",
+          "verbs": {
+            "image": {
+              "args": [
+                {
+                  "name": "prompt",
+                  "required": true
+                }
+              ],
+              "outcome": {
+                "error": "a: HTTP 402: {}",
+                "status": "unavailable"
+              }
+            }
+          }
+        },
+        {
+          "name": "b",
+          "verbs": {
+            "image": {
+              "args": [
+                {
+                  "name": "prompt",
+                  "required": true
+                }
+              ],
+              "outcome": {
+                "result": {
+                  "files": [
+                    {
+                      "type": "image",
+                      "mimeType": "image/png",
+                      "url": "https://x/b.png"
+                    }
+                  ],
+                  "status": "completed",
+                  "jobId": "j9"
+                }
+              }
+            }
+          }
+        }
+      ],
+      "verb": "image",
+      "args": {
+        "prompt": "cat"
+      },
+      "expectCalls": [
+        {
+          "client": "a",
+          "verb": "image",
+          "args": {
+            "prompt": "cat"
+          }
+        },
+        {
+          "client": "b",
+          "verb": "image",
+          "args": {
+            "prompt": "cat"
+          }
+        }
+      ],
+      "result": {
+        "files": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "url": "https://x/b.png"
+          }
+        ],
+        "status": "completed",
+        "jobId": "j9"
+      },
+      "tool": {
+        "name": "generate_image",
+        "isError": false,
+        "output": "image ready: https://x/b.png",
+        "parts": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "url": "https://x/b.png"
+          }
+        ],
+        "metadata": {
+          "source": "media",
+          "verb": "image",
+          "client": "b",
+          "jobId": "j9",
+          "status": "completed"
+        }
+      }
+    },
+    {
+      "name": "no_fall_through_on_failed",
+      "clients": [
+        {
+          "name": "a",
+          "verbs": {
+            "image": {
+              "args": [
+                {
+                  "name": "prompt",
+                  "required": true
+                }
+              ],
+              "outcome": {
+                "error": "bad prompt",
+                "status": "failed"
+              }
+            }
+          }
+        },
+        {
+          "name": "b",
+          "verbs": {
+            "image": {
+              "args": [
+                {
+                  "name": "prompt",
+                  "required": true
+                }
+              ],
+              "outcome": {
+                "result": {
+                  "files": [
+                    {
+                      "type": "image",
+                      "mimeType": "image/png",
+                      "url": "https://x/b.png"
+                    }
+                  ],
+                  "status": "completed"
+                }
+              }
+            }
+          }
+        }
+      ],
+      "verb": "image",
+      "args": {
+        "prompt": "cat"
+      },
+      "expectCalls": [
+        {
+          "client": "a",
+          "verb": "image",
+          "args": {
+            "prompt": "cat"
+          }
+        }
+      ],
+      "status": "failed",
+      "error": "bad prompt",
+      "tool": {
+        "isError": true,
+        "output": "bad prompt"
+      }
+    },
+    {
+      "name": "no_fall_through_on_timeout",
+      "clients": [
+        {
+          "name": "a",
+          "verbs": {
+            "image": {
+              "args": [
+                {
+                  "name": "prompt",
+                  "required": true
+                }
+              ],
+              "outcome": {
+                "error": "job j1 timed out after 5ms",
+                "status": "timeout"
+              }
+            }
+          }
+        },
+        {
+          "name": "b",
+          "verbs": {
+            "image": {
+              "args": [
+                {
+                  "name": "prompt",
+                  "required": true
+                }
+              ],
+              "outcome": {
+                "result": {
+                  "files": [
+                    {
+                      "type": "image",
+                      "mimeType": "image/png",
+                      "url": "https://x/b.png"
+                    }
+                  ],
+                  "status": "completed"
+                }
+              }
+            }
+          }
+        }
+      ],
+      "verb": "image",
+      "args": {
+        "prompt": "cat"
+      },
+      "expectCalls": [
+        {
+          "client": "a",
+          "verb": "image",
+          "args": {
+            "prompt": "cat"
+          }
+        }
+      ],
+      "status": "timeout",
+      "error": "job j1 timed out after 5ms",
+      "tool": {
+        "isError": true,
+        "output": "job j1 timed out after 5ms"
+      }
+    },
+    {
+      "name": "all_unavailable_joined_in_order",
+      "clients": [
+        {
+          "name": "a",
+          "verbs": {
+            "image": {
+              "args": [
+                {
+                  "name": "prompt",
+                  "required": true
+                }
+              ],
+              "outcome": {
+                "error": "a: no API key (set A_KEY)",
+                "status": "unavailable"
+              }
+            }
+          }
+        },
+        {
+          "name": "x",
+          "verbs": {
+            "speech": {
+              "outcome": {
+                "result": {
+                  "files": [
+                    {
+                      "type": "image",
+                      "mimeType": "image/png",
+                      "url": "https://x/x.png"
+                    }
+                  ],
+                  "status": "completed"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "b",
+          "verbs": {
+            "image": {
+              "args": [
+                {
+                  "name": "prompt",
+                  "required": true
+                }
+              ],
+              "outcome": {
+                "error": "b: HTTP 402: {}",
+                "status": "unavailable"
+              }
+            }
+          }
+        }
+      ],
+      "verb": "image",
+      "args": {
+        "prompt": "cat"
+      },
+      "expectCalls": [
+        {
+          "client": "a",
+          "verb": "image",
+          "args": {
+            "prompt": "cat"
+          }
+        },
+        {
+          "client": "b",
+          "verb": "image",
+          "args": {
+            "prompt": "cat"
+          }
+        }
+      ],
+      "status": "unavailable",
+      "error": "media: no client available for \"image\": a: no API key (set A_KEY); b: HTTP 402: {}",
+      "tool": {
+        "isError": true,
+        "output": "media: no client available for \"image\": a: no API key (set A_KEY); b: HTTP 402: {}"
+      }
+    },
+    {
+      "name": "no_client_supports_the_verb",
+      "clients": [
+        {
+          "name": "a",
+          "verbs": {
+            "image": {
+              "args": [
+                {
+                  "name": "prompt",
+                  "required": true
+                }
+              ],
+              "outcome": {
+                "result": {
+                  "files": [
+                    {
+                      "type": "image",
+                      "mimeType": "image/png",
+                      "url": "https://x/a.png"
+                    }
+                  ],
+                  "status": "completed"
+                }
+              }
+            }
+          }
+        }
+      ],
+      "verb": "video",
+      "args": {
+        "prompt": "x"
+      },
+      "expectCalls": [],
+      "status": "failed",
+      "error": "media: no client supports \"video\""
+    },
+    {
+      "name": "fall_through_drops_args_the_next_client_does_not_accept",
+      "clients": [
+        {
+          "name": "a",
+          "verbs": {
+            "image": {
+              "args": [
+                {
+                  "name": "prompt",
+                  "required": true
+                },
+                {
+                  "name": "seed",
+                  "required": false
+                }
+              ],
+              "outcome": {
+                "error": "a: HTTP 402: {}",
+                "status": "unavailable"
+              }
+            }
+          }
+        },
+        {
+          "name": "b",
+          "verbs": {
+            "image": {
+              "args": [
+                {
+                  "name": "prompt",
+                  "required": true
+                }
+              ],
+              "outcome": {
+                "result": {
+                  "files": [
+                    {
+                      "type": "image",
+                      "mimeType": "image/png",
+                      "url": "https://x/b.png"
+                    }
+                  ],
+                  "status": "completed"
+                }
+              }
+            }
+          }
+        }
+      ],
+      "verb": "image",
+      "args": {
+        "prompt": "cat",
+        "seed": 3
+      },
+      "expectCalls": [
+        {
+          "client": "a",
+          "verb": "image",
+          "args": {
+            "prompt": "cat",
+            "seed": 3
+          }
+        },
+        {
+          "client": "b",
+          "verb": "image",
+          "args": {
+            "prompt": "cat"
+          }
+        }
+      ],
+      "result": {
+        "files": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "url": "https://x/b.png"
+          }
+        ],
+        "status": "completed"
+      }
+    },
+    {
+      "name": "first_client_rejects_an_arg_it_does_not_accept",
+      "clients": [
+        {
+          "name": "a",
+          "verbs": {
+            "image": {
+              "args": [
+                {
+                  "name": "prompt",
+                  "required": true
+                }
+              ],
+              "outcome": {
+                "result": {
+                  "files": [
+                    {
+                      "type": "image",
+                      "mimeType": "image/png",
+                      "url": "https://x/a.png"
+                    }
+                  ],
+                  "status": "completed"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "b",
+          "verbs": {
+            "image": {
+              "args": [
+                {
+                  "name": "prompt",
+                  "required": true
+                },
+                {
+                  "name": "seed",
+                  "required": false
+                }
+              ],
+              "outcome": {
+                "result": {
+                  "files": [
+                    {
+                      "type": "image",
+                      "mimeType": "image/png",
+                      "url": "https://x/b.png"
+                    }
+                  ],
+                  "status": "completed"
+                }
+              }
+            }
+          }
+        }
+      ],
+      "verb": "image",
+      "args": {
+        "prompt": "cat",
+        "seed": 3,
+        "aspectRatio": "1:1"
+      },
+      "expectCalls": [],
+      "status": "failed",
+      "error": "image: argument \"aspectRatio\" not supported by a",
+      "tool": {
+        "isError": true,
+        "output": "image: argument \"aspectRatio\" not supported by a"
+      }
+    },
+    {
+      "name": "client_declared_required_arg",
+      "clients": [
+        {
+          "name": "a",
+          "verbs": {
+            "talk": {
+              "args": [
+                {
+                  "name": "image",
+                  "required": true
+                },
+                {
+                  "name": "audio",
+                  "required": true
+                }
+              ],
+              "outcome": {
+                "result": {
+                  "files": [
+                    {
+                      "type": "image",
+                      "mimeType": "image/png",
+                      "url": "https://x/a.png"
+                    }
+                  ],
+                  "status": "completed"
+                }
+              }
+            }
+          }
+        }
+      ],
+      "verb": "talk",
+      "args": {
+        "image": "https://x/f.png"
+      },
+      "expectCalls": [],
+      "status": "failed",
+      "error": "talk: argument \"audio\" is required",
+      "tool": {
+        "isError": true,
+        "output": "talk: argument \"audio\" is required"
+      }
+    },
+    {
+      "name": "client_without_args_gets_every_arg",
+      "clients": [
+        {
+          "name": "d",
+          "verbs": {
+            "music": {
+              "outcome": {
+                "result": {
+                  "files": [
+                    {
+                      "type": "audio",
+                      "mimeType": "audio/mpeg",
+                      "url": "https://x/m.mp3"
+                    }
+                  ],
+                  "status": "completed"
+                }
+              }
+            }
+          }
+        }
+      ],
+      "verb": "music",
+      "args": {
+        "prompt": "lofi",
+        "lyrics": "la",
+        "instrumental": false
+      },
+      "expectCalls": [
+        {
+          "client": "d",
+          "verb": "music",
+          "args": {
+            "prompt": "lofi",
+            "lyrics": "la",
+            "instrumental": false
+          }
+        }
+      ],
+      "result": {
+        "files": [
+          {
+            "type": "audio",
+            "mimeType": "audio/mpeg",
+            "url": "https://x/m.mp3"
+          }
+        ],
+        "status": "completed"
+      },
+      "tool": {
+        "name": "generate_music",
+        "isError": false,
+        "output": "audio ready: https://x/m.mp3",
+        "parts": [
+          {
+            "type": "audio",
+            "mimeType": "audio/mpeg",
+            "url": "https://x/m.mp3"
+          }
+        ],
+        "metadata": {
+          "source": "media",
+          "verb": "music",
+          "client": "d",
+          "status": "completed"
+        }
+      }
+    },
+    {
+      "name": "text_result_has_no_parts",
+      "clients": [
+        {
+          "name": "t",
+          "verbs": {
+            "transcribe": {
+              "outcome": {
+                "result": {
+                  "files": [],
+                  "text": "hello",
+                  "status": "completed"
+                }
+              }
+            }
+          }
+        }
+      ],
+      "verb": "transcribe",
+      "args": {
+        "audio": "https://x/a.mp3"
+      },
+      "result": {
+        "files": [],
+        "text": "hello",
+        "status": "completed"
+      },
+      "tool": {
+        "name": "transcribe_audio",
+        "isError": false,
+        "output": "hello",
+        "noParts": true,
+        "metadata": {
+          "source": "media",
+          "verb": "transcribe",
+          "client": "t",
+          "status": "completed"
+        }
+      }
+    }
+  ],
+  "schemaCases": [
+    {
+      "name": "tools_follow_the_first_supporting_client",
+      "clients": [
+        {
+          "name": "a",
+          "verbs": {
+            "image": {
+              "args": [
+                {
+                  "name": "prompt",
+                  "required": true
+                },
+                {
+                  "name": "width",
+                  "required": false
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "b",
+          "verbs": {
+            "image": {
+              "args": [
+                {
+                  "name": "seed",
+                  "required": false
+                },
+                {
+                  "name": "prompt",
+                  "required": true
+                }
+              ]
+            },
+            "speech": {
+              "args": [
+                {
+                  "name": "voice",
+                  "required": false
+                },
+                {
+                  "name": "text",
+                  "required": true
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "c",
+          "verbs": {
+            "talk": {
+              "args": [
+                {
+                  "name": "image",
+                  "required": true
+                },
+                {
+                  "name": "audio",
+                  "required": true
+                }
+              ]
+            },
+            "transcribe": {}
+          }
+        }
+      ],
+      "tools": [
+        {
+          "name": "generate_image",
+          "description": "Generate an image from a text prompt.",
+          "source": "media",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "prompt": {
+                "type": "string",
+                "description": "What to draw."
+              },
+              "width": {
+                "type": "integer",
+                "description": "Width in pixels."
+              }
+            },
+            "required": [
+              "prompt"
+            ]
+          }
+        },
+        {
+          "name": "generate_speech",
+          "description": "Speak text aloud and return the audio.",
+          "source": "media",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "text": {
+                "type": "string",
+                "description": "The text to speak."
+              },
+              "voice": {
+                "type": "string",
+                "description": "Voice name or id, including a cloned voice."
+              }
+            },
+            "required": [
+              "text"
+            ]
+          }
+        },
+        {
+          "name": "transcribe_audio",
+          "description": "Transcribe speech in an audio file to text.",
+          "source": "media",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "audio": {
+                "type": "string",
+                "description": "URL or local path of the audio."
+              },
+              "language": {
+                "type": "string",
+                "description": "Language of the speech as an ISO 639-1 code, e.g. en."
+              }
+            },
+            "required": [
+              "audio"
+            ]
+          }
+        },
+        {
+          "name": "talking_video",
+          "description": "Make the person in an image speak, from speech audio or from text (lip-synced video).",
+          "source": "media",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "image": {
+                "type": "string",
+                "description": "URL or local path of the face image."
+              },
+              "audio": {
+                "type": "string",
+                "description": "URL or local path of the speech audio."
+              }
+            },
+            "required": [
+              "image",
+              "audio"
+            ]
+          }
+        }
+      ]
+    }
+  ],
+  "emptyClients": {
+    "error": "media: no clients"
+  }
+}

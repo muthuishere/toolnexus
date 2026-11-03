@@ -1,403 +1,2682 @@
 {
-  "_doc": "Media engine conformance (SPEC §7G). A port's harness starts a fake HTTP server, replaces \"{server}\" in style.baseUrl and in script[].headers values with its URL, sets case.env, then serves script[] in order (an entry's optional headers are sent as response headers): entry 0 answers the start request, entries 1.. answer polls; once exhausted the LAST entry repeats. Every request is recorded; path is recorded exactly as sent (percent-encoding NOT decoded). The harness calls generate(verb,args) and the tool face, and asserts: requests (method, path, body for start, header values in expectHeaders), progress statuses, and either result (MediaResult minus nothing) or error (exact message string). tool = the expected ToolResult (output, isError, parts, metadata). styleError:true marks a style that is invalid at load (SPEC §7G Empty dotPath): a port whose constructor/loader can fail may raise the same error message there instead of from generate; either way no request is made and there is no tool case. Poll timings in these styles are tiny so the suite runs in milliseconds.",
+  "_doc": "Media engine conformance (SPEC §7G). A port's harness starts a fake HTTP server, replaces \"{server}\" in style.baseUrl and in script[].headers values with its URL, sets case.env, then serves script[] in order (an entry's optional headers are sent as response headers): entry 0 answers the start request, entries 1.. answer polls; once exhausted the LAST entry repeats. Every request is recorded; path is recorded exactly as sent (percent-encoding NOT decoded). The harness calls generate(verb,args) and the tool face, and asserts: requests (method, path, body for start, header values in expectHeaders), progress statuses, and either result (MediaResult minus nothing) or error (exact message string). tool = the expected ToolResult (output, isError, parts, metadata). styleError:true marks a style that is invalid at load (SPEC §7G Empty dotPath): a port whose constructor/loader can fail may raise the same error message there instead of from generate; either way no request is made and there is no tool case. Poll timings in these styles are tiny so the suite runs in milliseconds. SINCE ADR 0037: the harness builds createMedia(styleMediaClient(style, case.config ?? {})) — style clients default to gather mode url, so URL results stay URLs; success tool metadata carries client (\"style\" unless style.name). status, when present, is the error's media status (failed|timeout|cancelled|unavailable). unsetEnv lists env vars removed for the case.",
   "cases": [
-    { "name": "sync_image_urls_mime_from_extension",
-      "style": { "baseUrl": "{server}/api/", "verbs": { "image": {
-        "mode": "sync", "kind": "image", "start": { "path": "/gen" },
-        "defaults": { "model": "m1", "size": { "q": "hd" } },
-        "args": { "prompt": "prompt", "width": "size.w" },
-        "resultPath": "data.urls" } } },
-      "verb": "image", "args": { "prompt": "cat", "width": 512 },
-      "script": [ { "status": 200, "body": { "data": { "urls": ["https://x/a.PNG?sig=1", "https://x/b.jpg", "https://x/c"] } } } ],
-      "expectRequests": [ { "method": "POST", "path": "/api/gen", "body": { "model": "m1", "size": { "q": "hd", "w": 512 }, "prompt": "cat" } } ],
+    {
+      "name": "sync_image_urls_mime_from_extension",
+      "style": {
+        "baseUrl": "{server}/api/",
+        "verbs": {
+          "image": {
+            "mode": "sync",
+            "kind": "image",
+            "start": {
+              "path": "/gen"
+            },
+            "defaults": {
+              "model": "m1",
+              "size": {
+                "q": "hd"
+              }
+            },
+            "args": {
+              "prompt": "prompt",
+              "width": "size.w"
+            },
+            "resultPath": "data.urls"
+          }
+        }
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "cat",
+        "width": 512
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {
+            "data": {
+              "urls": [
+                "https://x/a.PNG?sig=1",
+                "https://x/b.jpg",
+                "https://x/c"
+              ]
+            }
+          }
+        }
+      ],
+      "expectRequests": [
+        {
+          "method": "POST",
+          "path": "/api/gen",
+          "body": {
+            "model": "m1",
+            "size": {
+              "q": "hd",
+              "w": 512
+            },
+            "prompt": "cat"
+          }
+        }
+      ],
       "expectProgress": [],
-      "result": { "files": [
-        { "type": "image", "mimeType": "image/png", "url": "https://x/a.PNG?sig=1" },
-        { "type": "image", "mimeType": "image/jpeg", "url": "https://x/b.jpg" },
-        { "type": "image", "mimeType": "image/png", "url": "https://x/c" } ], "status": "completed" },
-      "tool": { "name": "generate_image", "isError": false,
+      "result": {
+        "files": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "url": "https://x/a.PNG?sig=1"
+          },
+          {
+            "type": "image",
+            "mimeType": "image/jpeg",
+            "url": "https://x/b.jpg"
+          },
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "url": "https://x/c"
+          }
+        ],
+        "status": "completed"
+      },
+      "tool": {
+        "name": "generate_image",
+        "isError": false,
         "output": "image ready: https://x/a.PNG?sig=1\nhttps://x/b.jpg\nhttps://x/c",
         "parts": [
-          { "type": "image", "mimeType": "image/png", "url": "https://x/a.PNG?sig=1" },
-          { "type": "image", "mimeType": "image/jpeg", "url": "https://x/b.jpg" },
-          { "type": "image", "mimeType": "image/png", "url": "https://x/c" } ],
-        "metadata": { "source": "media", "verb": "image", "status": "completed" } } },
-
-    { "name": "async_speech_array_id_nested_arg_unknown_status",
-      "env": { "MEDIA_TEST_KEY": "FAKE_KEY" },
-      "style": { "baseUrl": "{server}", "headers": { "Authorization": "Bearer ${MEDIA_TEST_KEY}", "X-Missing": "a${MEDIA_UNSET_VAR}b" },
-        "verbs": { "speech": {
-        "mode": "async", "kind": "audio", "start": { "method": "POST", "path": "/v1/tts" },
-        "args": { "text": "text_prompt", "voice": "references.0.speaker" },
-        "idPath": "data.0._id",
-        "poll": { "path": "/v1/tts/{id}", "statusPath": "data.current_status", "done": ["completed"], "failed": ["failed"],
-                  "intervalMs": 1, "timeoutMs": 5000 },
-        "resultPath": "data.result_url" } } },
-      "verb": "speech", "args": { "text": "hi", "voice": "alloy" },
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "url": "https://x/a.PNG?sig=1"
+          },
+          {
+            "type": "image",
+            "mimeType": "image/jpeg",
+            "url": "https://x/b.jpg"
+          },
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "url": "https://x/c"
+          }
+        ],
+        "metadata": {
+          "source": "media",
+          "verb": "image",
+          "client": "style",
+          "status": "completed"
+        }
+      }
+    },
+    {
+      "name": "async_speech_array_id_nested_arg_unknown_status",
+      "env": {
+        "MEDIA_TEST_KEY": "FAKE_KEY"
+      },
+      "style": {
+        "baseUrl": "{server}",
+        "headers": {
+          "Authorization": "Bearer ${MEDIA_TEST_KEY}",
+          "X-Missing": "a${MEDIA_UNSET_VAR}b"
+        },
+        "verbs": {
+          "speech": {
+            "mode": "async",
+            "kind": "audio",
+            "start": {
+              "method": "POST",
+              "path": "/v1/tts"
+            },
+            "args": {
+              "text": "text_prompt",
+              "voice": "references.0.speaker"
+            },
+            "idPath": "data.0._id",
+            "poll": {
+              "path": "/v1/tts/{id}",
+              "statusPath": "data.current_status",
+              "done": [
+                "completed"
+              ],
+              "failed": [
+                "failed"
+              ],
+              "intervalMs": 1,
+              "timeoutMs": 5000
+            },
+            "resultPath": "data.result_url"
+          }
+        }
+      },
+      "verb": "speech",
+      "args": {
+        "text": "hi",
+        "voice": "alloy"
+      },
       "script": [
-        { "status": 200, "body": { "data": [ { "_id": "j1" } ] } },
-        { "status": 200, "body": { "data": { "current_status": "processing" } } },
-        { "status": 200, "body": { "data": { "current_status": "sent" } } },
-        { "status": 200, "body": { "data": { "current_status": "completed", "result_url": "https://x/s.wav" } } } ],
-      "expectHeaders": { "Authorization": "Bearer FAKE_KEY", "X-Missing": "ab" },
+        {
+          "status": 200,
+          "body": {
+            "data": [
+              {
+                "_id": "j1"
+              }
+            ]
+          }
+        },
+        {
+          "status": 200,
+          "body": {
+            "data": {
+              "current_status": "processing"
+            }
+          }
+        },
+        {
+          "status": 200,
+          "body": {
+            "data": {
+              "current_status": "sent"
+            }
+          }
+        },
+        {
+          "status": 200,
+          "body": {
+            "data": {
+              "current_status": "completed",
+              "result_url": "https://x/s.wav"
+            }
+          }
+        }
+      ],
+      "expectHeaders": {
+        "Authorization": "Bearer FAKE_KEY",
+        "X-Missing": "ab"
+      },
       "expectRequests": [
-        { "method": "POST", "path": "/v1/tts", "body": { "text_prompt": "hi", "references": [ { "speaker": "alloy" } ] } },
-        { "method": "GET", "path": "/v1/tts/j1" }, { "method": "GET", "path": "/v1/tts/j1" }, { "method": "GET", "path": "/v1/tts/j1" } ],
-      "expectProgress": ["processing", "sent", "completed"],
-      "result": { "files": [ { "type": "audio", "mimeType": "audio/wav", "url": "https://x/s.wav" } ], "jobId": "j1", "status": "completed" },
-      "tool": { "name": "generate_speech", "isError": false, "output": "audio ready: https://x/s.wav",
-        "parts": [ { "type": "audio", "mimeType": "audio/wav", "url": "https://x/s.wav" } ],
-        "metadata": { "source": "media", "verb": "speech", "jobId": "j1", "status": "completed" } } },
-
-    { "name": "async_video_numeric_id_default_mime",
-      "style": { "baseUrl": "{server}", "verbs": { "video": {
-        "mode": "async", "kind": "video", "start": { "path": "/v" },
-        "args": { "prompt": "p", "image": "image_url", "seconds": "dur" },
-        "idPath": "id",
-        "poll": { "path": "/v/{id}", "statusPath": "state", "done": ["ok", "done"], "failed": ["err"], "intervalMs": 1, "timeoutMs": 5000 },
-        "resultPath": "out" } } },
-      "verb": "video", "args": { "prompt": "wave", "image": "https://x/i.jpg", "seconds": 5 },
-      "script": [ { "status": 200, "body": { "id": 42 } }, { "status": 200, "body": { "state": "done", "out": "https://x/clip" } } ],
-      "expectRequests": [ { "method": "POST", "path": "/v", "body": { "p": "wave", "image_url": "https://x/i.jpg", "dur": 5 } }, { "method": "GET", "path": "/v/42" } ],
-      "expectProgress": ["done"],
-      "result": { "files": [ { "type": "file", "mimeType": "video/mp4", "url": "https://x/clip" } ], "jobId": "42", "status": "done" },
-      "tool": { "name": "generate_video", "isError": false, "output": "video ready: https://x/clip",
-        "parts": [ { "type": "file", "mimeType": "video/mp4", "url": "https://x/clip" } ],
-        "metadata": { "source": "media", "verb": "video", "jobId": "42", "status": "done" } } },
-
-    { "name": "async_failed_with_message",
-      "style": { "baseUrl": "{server}", "verbs": { "image": {
-        "mode": "async", "kind": "image", "start": { "path": "/s" }, "args": { "prompt": "prompt" }, "idPath": "id",
-        "poll": { "path": "/p/{id}", "statusPath": "st", "done": ["completed"], "failed": ["failed", "blocked"], "errorPath": "why", "intervalMs": 1, "timeoutMs": 5000 },
-        "resultPath": "u" } } },
-      "verb": "image", "args": { "prompt": "x" },
-      "script": [ { "status": 200, "body": { "id": "j2" } }, { "status": 200, "body": { "st": "blocked", "why": "nsfw" } } ],
-      "expectProgress": ["blocked"],
+        {
+          "method": "POST",
+          "path": "/v1/tts",
+          "body": {
+            "text_prompt": "hi",
+            "references": [
+              {
+                "speaker": "alloy"
+              }
+            ]
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/v1/tts/j1"
+        },
+        {
+          "method": "GET",
+          "path": "/v1/tts/j1"
+        },
+        {
+          "method": "GET",
+          "path": "/v1/tts/j1"
+        }
+      ],
+      "expectProgress": [
+        "processing",
+        "sent",
+        "completed"
+      ],
+      "result": {
+        "files": [
+          {
+            "type": "audio",
+            "mimeType": "audio/wav",
+            "url": "https://x/s.wav"
+          }
+        ],
+        "jobId": "j1",
+        "status": "completed"
+      },
+      "tool": {
+        "name": "generate_speech",
+        "isError": false,
+        "output": "audio ready: https://x/s.wav",
+        "parts": [
+          {
+            "type": "audio",
+            "mimeType": "audio/wav",
+            "url": "https://x/s.wav"
+          }
+        ],
+        "metadata": {
+          "source": "media",
+          "verb": "speech",
+          "client": "style",
+          "jobId": "j1",
+          "status": "completed"
+        }
+      }
+    },
+    {
+      "name": "async_video_numeric_id_default_mime",
+      "style": {
+        "baseUrl": "{server}",
+        "verbs": {
+          "video": {
+            "mode": "async",
+            "kind": "video",
+            "start": {
+              "path": "/v"
+            },
+            "args": {
+              "prompt": "p",
+              "image": "image_url",
+              "seconds": "dur"
+            },
+            "idPath": "id",
+            "poll": {
+              "path": "/v/{id}",
+              "statusPath": "state",
+              "done": [
+                "ok",
+                "done"
+              ],
+              "failed": [
+                "err"
+              ],
+              "intervalMs": 1,
+              "timeoutMs": 5000
+            },
+            "resultPath": "out"
+          }
+        }
+      },
+      "verb": "video",
+      "args": {
+        "prompt": "wave",
+        "image": "https://x/i.jpg",
+        "seconds": 5
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {
+            "id": 42
+          }
+        },
+        {
+          "status": 200,
+          "body": {
+            "state": "done",
+            "out": "https://x/clip"
+          }
+        }
+      ],
+      "expectRequests": [
+        {
+          "method": "POST",
+          "path": "/v",
+          "body": {
+            "p": "wave",
+            "image_url": "https://x/i.jpg",
+            "dur": 5
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/v/42"
+        }
+      ],
+      "expectProgress": [
+        "done"
+      ],
+      "result": {
+        "files": [
+          {
+            "type": "file",
+            "mimeType": "video/mp4",
+            "url": "https://x/clip"
+          }
+        ],
+        "jobId": "42",
+        "status": "done"
+      },
+      "tool": {
+        "name": "generate_video",
+        "isError": false,
+        "output": "video ready: https://x/clip",
+        "parts": [
+          {
+            "type": "file",
+            "mimeType": "video/mp4",
+            "url": "https://x/clip"
+          }
+        ],
+        "metadata": {
+          "source": "media",
+          "verb": "video",
+          "client": "style",
+          "jobId": "42",
+          "status": "done"
+        }
+      }
+    },
+    {
+      "name": "async_failed_with_message",
+      "style": {
+        "baseUrl": "{server}",
+        "verbs": {
+          "image": {
+            "mode": "async",
+            "kind": "image",
+            "start": {
+              "path": "/s"
+            },
+            "args": {
+              "prompt": "prompt"
+            },
+            "idPath": "id",
+            "poll": {
+              "path": "/p/{id}",
+              "statusPath": "st",
+              "done": [
+                "completed"
+              ],
+              "failed": [
+                "failed",
+                "blocked"
+              ],
+              "errorPath": "why",
+              "intervalMs": 1,
+              "timeoutMs": 5000
+            },
+            "resultPath": "u"
+          }
+        }
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "x"
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {
+            "id": "j2"
+          }
+        },
+        {
+          "status": 200,
+          "body": {
+            "st": "blocked",
+            "why": "nsfw"
+          }
+        }
+      ],
+      "expectProgress": [
+        "blocked"
+      ],
       "error": "job j2 blocked: nsfw",
-      "tool": { "name": "generate_image", "isError": true, "output": "job j2 blocked: nsfw" } },
-
-    { "name": "async_failed_without_message",
-      "style": { "baseUrl": "{server}", "verbs": { "image": {
-        "mode": "async", "kind": "image", "start": { "path": "/s" }, "args": { "prompt": "prompt" }, "idPath": "id",
-        "poll": { "path": "/p/{id}", "statusPath": "st", "done": ["completed"], "failed": ["failed"], "errorPath": "why", "intervalMs": 1, "timeoutMs": 5000 },
-        "resultPath": "u" } } },
-      "verb": "image", "args": { "prompt": "x" },
-      "script": [ { "status": 200, "body": { "id": "j3" } }, { "status": 200, "body": { "st": "failed", "why": null } } ],
-      "expectProgress": ["failed"],
+      "tool": {
+        "name": "generate_image",
+        "isError": true,
+        "output": "job j2 blocked: nsfw"
+      }
+    },
+    {
+      "name": "async_failed_without_message",
+      "style": {
+        "baseUrl": "{server}",
+        "verbs": {
+          "image": {
+            "mode": "async",
+            "kind": "image",
+            "start": {
+              "path": "/s"
+            },
+            "args": {
+              "prompt": "prompt"
+            },
+            "idPath": "id",
+            "poll": {
+              "path": "/p/{id}",
+              "statusPath": "st",
+              "done": [
+                "completed"
+              ],
+              "failed": [
+                "failed"
+              ],
+              "errorPath": "why",
+              "intervalMs": 1,
+              "timeoutMs": 5000
+            },
+            "resultPath": "u"
+          }
+        }
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "x"
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {
+            "id": "j3"
+          }
+        },
+        {
+          "status": 200,
+          "body": {
+            "st": "failed",
+            "why": null
+          }
+        }
+      ],
+      "expectProgress": [
+        "failed"
+      ],
       "error": "job j3 failed",
-      "tool": { "name": "generate_image", "isError": true, "output": "job j3 failed" } },
-
-    { "name": "async_timeout",
-      "style": { "baseUrl": "{server}", "verbs": { "image": {
-        "mode": "async", "kind": "image", "start": { "path": "/s" }, "args": { "prompt": "prompt" }, "idPath": "id",
-        "poll": { "path": "/p/{id}", "statusPath": "st", "done": ["completed"], "failed": ["failed"], "intervalMs": 2, "timeoutMs": 500 },
-        "resultPath": "u" } } },
-      "verb": "image", "args": { "prompt": "x" },
-      "script": [ { "status": 200, "body": { "id": "j4" } }, { "status": 200, "body": { "st": "processing" } } ],
+      "tool": {
+        "name": "generate_image",
+        "isError": true,
+        "output": "job j3 failed"
+      }
+    },
+    {
+      "name": "async_timeout",
+      "style": {
+        "baseUrl": "{server}",
+        "verbs": {
+          "image": {
+            "mode": "async",
+            "kind": "image",
+            "start": {
+              "path": "/s"
+            },
+            "args": {
+              "prompt": "prompt"
+            },
+            "idPath": "id",
+            "poll": {
+              "path": "/p/{id}",
+              "statusPath": "st",
+              "done": [
+                "completed"
+              ],
+              "failed": [
+                "failed"
+              ],
+              "intervalMs": 2,
+              "timeoutMs": 500
+            },
+            "resultPath": "u"
+          }
+        }
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "x"
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {
+            "id": "j4"
+          }
+        },
+        {
+          "status": 200,
+          "body": {
+            "st": "processing"
+          }
+        }
+      ],
       "error": "job j4 timed out after 500ms",
-      "tool": { "name": "generate_image", "isError": true, "output": "job j4 timed out after 500ms" } },
-
-    { "name": "http_error_on_start",
-      "style": { "baseUrl": "{server}", "verbs": { "image": {
-        "mode": "sync", "kind": "image", "start": { "path": "/s" }, "args": { "prompt": "prompt" }, "resultPath": "u" } } },
-      "verb": "image", "args": { "prompt": "x" },
-      "script": [ { "status": 402, "rawBody": "{\"error\":\"no credits\"}" } ],
-      "error": "HTTP 402: {\"error\":\"no credits\"}",
-      "tool": { "name": "generate_image", "isError": true, "output": "HTTP 402: {\"error\":\"no credits\"}" } },
-
-    { "name": "error_envelope_on_200",
-      "style": { "baseUrl": "{server}", "errorEnvelope": { "codePath": "code", "okValues": [0], "messagePath": "message" },
-        "verbs": { "image": { "mode": "sync", "kind": "image", "start": { "path": "/s" }, "args": { "prompt": "prompt" }, "resultPath": "u" } } },
-      "verb": "image", "args": { "prompt": "x" },
-      "script": [ { "status": 200, "body": { "code": 400, "message": "bad prompt" } } ],
+      "tool": {
+        "name": "generate_image",
+        "isError": true,
+        "output": "job j4 timed out after 500ms"
+      }
+    },
+    {
+      "name": "http_error_on_start",
+      "style": {
+        "baseUrl": "{server}",
+        "verbs": {
+          "image": {
+            "mode": "sync",
+            "kind": "image",
+            "start": {
+              "path": "/s"
+            },
+            "args": {
+              "prompt": "prompt"
+            },
+            "resultPath": "u"
+          }
+        }
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "x"
+      },
+      "script": [
+        {
+          "status": 500,
+          "rawBody": "{\"error\":\"no credits\"}"
+        }
+      ],
+      "error": "HTTP 500: {\"error\":\"no credits\"}",
+      "tool": {
+        "name": "generate_image",
+        "isError": true,
+        "output": "HTTP 500: {\"error\":\"no credits\"}"
+      }
+    },
+    {
+      "name": "error_envelope_on_200",
+      "style": {
+        "baseUrl": "{server}",
+        "errorEnvelope": {
+          "codePath": "code",
+          "okValues": [
+            0
+          ],
+          "messagePath": "message"
+        },
+        "verbs": {
+          "image": {
+            "mode": "sync",
+            "kind": "image",
+            "start": {
+              "path": "/s"
+            },
+            "args": {
+              "prompt": "prompt"
+            },
+            "resultPath": "u"
+          }
+        }
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "x"
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {
+            "code": 400,
+            "message": "bad prompt"
+          }
+        }
+      ],
       "error": "API error 400: bad prompt",
-      "tool": { "name": "generate_image", "isError": true, "output": "API error 400: bad prompt" } },
-
-    { "name": "error_envelope_ok_passes",
-      "style": { "baseUrl": "{server}", "errorEnvelope": { "codePath": "code", "okValues": [0], "messagePath": "message" },
-        "verbs": { "image": { "mode": "sync", "kind": "image", "start": { "path": "/s" }, "args": { "prompt": "prompt" }, "resultPath": "u" } } },
-      "verb": "image", "args": { "prompt": "x" },
-      "script": [ { "status": 200, "body": { "code": 0, "u": "https://x/ok.webp" } } ],
-      "result": { "files": [ { "type": "image", "mimeType": "image/webp", "url": "https://x/ok.webp" } ], "status": "completed" },
-      "tool": { "name": "generate_image", "isError": false, "output": "image ready: https://x/ok.webp",
-        "parts": [ { "type": "image", "mimeType": "image/webp", "url": "https://x/ok.webp" } ],
-        "metadata": { "source": "media", "verb": "image", "status": "completed" } } },
-
-    { "name": "unsupported_arg_no_request",
-      "style": { "baseUrl": "{server}", "verbs": { "image": {
-        "mode": "sync", "kind": "image", "start": { "path": "/s" }, "args": { "prompt": "prompt" }, "resultPath": "u" } } },
-      "verb": "image", "args": { "prompt": "x", "seed": 7 },
-      "script": [ { "status": 200, "body": { "u": "https://x/a.png" } } ],
+      "tool": {
+        "name": "generate_image",
+        "isError": true,
+        "output": "API error 400: bad prompt"
+      }
+    },
+    {
+      "name": "error_envelope_ok_passes",
+      "style": {
+        "baseUrl": "{server}",
+        "errorEnvelope": {
+          "codePath": "code",
+          "okValues": [
+            0
+          ],
+          "messagePath": "message"
+        },
+        "verbs": {
+          "image": {
+            "mode": "sync",
+            "kind": "image",
+            "start": {
+              "path": "/s"
+            },
+            "args": {
+              "prompt": "prompt"
+            },
+            "resultPath": "u"
+          }
+        }
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "x"
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {
+            "code": 0,
+            "u": "https://x/ok.webp"
+          }
+        }
+      ],
+      "result": {
+        "files": [
+          {
+            "type": "image",
+            "mimeType": "image/webp",
+            "url": "https://x/ok.webp"
+          }
+        ],
+        "status": "completed"
+      },
+      "tool": {
+        "name": "generate_image",
+        "isError": false,
+        "output": "image ready: https://x/ok.webp",
+        "parts": [
+          {
+            "type": "image",
+            "mimeType": "image/webp",
+            "url": "https://x/ok.webp"
+          }
+        ],
+        "metadata": {
+          "source": "media",
+          "verb": "image",
+          "client": "style",
+          "status": "completed"
+        }
+      }
+    },
+    {
+      "name": "unsupported_arg_no_request",
+      "style": {
+        "baseUrl": "{server}",
+        "verbs": {
+          "image": {
+            "mode": "sync",
+            "kind": "image",
+            "start": {
+              "path": "/s"
+            },
+            "args": {
+              "prompt": "prompt"
+            },
+            "resultPath": "u"
+          }
+        }
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "x",
+        "seed": 7
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {
+            "u": "https://x/a.png"
+          }
+        }
+      ],
       "expectRequests": [],
       "error": "image: argument \"seed\" not supported by this style",
-      "tool": { "name": "generate_image", "isError": true, "output": "image: argument \"seed\" not supported by this style" } },
-
-    { "name": "no_result",
-      "style": { "baseUrl": "{server}", "verbs": { "image": {
-        "mode": "sync", "kind": "image", "start": { "path": "/s" }, "args": { "prompt": "prompt" }, "resultPath": "data.urls" } } },
-      "verb": "image", "args": { "prompt": "x" },
-      "script": [ { "status": 200, "body": { "data": { "urls": [] } } } ],
+      "tool": {
+        "name": "generate_image",
+        "isError": true,
+        "output": "image: argument \"seed\" not supported by this style"
+      }
+    },
+    {
+      "name": "no_result",
+      "style": {
+        "baseUrl": "{server}",
+        "verbs": {
+          "image": {
+            "mode": "sync",
+            "kind": "image",
+            "start": {
+              "path": "/s"
+            },
+            "args": {
+              "prompt": "prompt"
+            },
+            "resultPath": "data.urls"
+          }
+        }
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "x"
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {
+            "data": {
+              "urls": []
+            }
+          }
+        }
+      ],
       "error": "image: no result at data.urls",
-      "tool": { "name": "generate_image", "isError": true, "output": "image: no result at data.urls" } },
-
-    { "name": "no_job_id",
-      "style": { "baseUrl": "{server}", "verbs": { "image": {
-        "mode": "async", "kind": "image", "start": { "path": "/s" }, "args": { "prompt": "prompt" }, "idPath": "data._id",
-        "poll": { "path": "/p/{id}", "statusPath": "st", "done": ["completed"], "failed": ["failed"], "intervalMs": 1, "timeoutMs": 5000 },
-        "resultPath": "u" } } },
-      "verb": "image", "args": { "prompt": "x" },
-      "script": [ { "status": 200, "body": { "data": {} } } ],
+      "tool": {
+        "name": "generate_image",
+        "isError": true,
+        "output": "image: no result at data.urls"
+      }
+    },
+    {
+      "name": "no_job_id",
+      "style": {
+        "baseUrl": "{server}",
+        "verbs": {
+          "image": {
+            "mode": "async",
+            "kind": "image",
+            "start": {
+              "path": "/s"
+            },
+            "args": {
+              "prompt": "prompt"
+            },
+            "idPath": "data._id",
+            "poll": {
+              "path": "/p/{id}",
+              "statusPath": "st",
+              "done": [
+                "completed"
+              ],
+              "failed": [
+                "failed"
+              ],
+              "intervalMs": 1,
+              "timeoutMs": 5000
+            },
+            "resultPath": "u"
+          }
+        }
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "x"
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {
+            "data": {}
+          }
+        }
+      ],
       "error": "image: no job id at data._id",
-      "tool": { "name": "generate_image", "isError": true, "output": "image: no job id at data._id" } },
-
-    { "name": "non_json_response",
-      "style": { "baseUrl": "{server}", "verbs": { "image": {
-        "mode": "sync", "kind": "image", "start": { "path": "/s" }, "args": { "prompt": "prompt" }, "resultPath": "u" } } },
-      "verb": "image", "args": { "prompt": "x" },
-      "script": [ { "status": 200, "rawBody": "<html>oops</html>" } ],
+      "tool": {
+        "name": "generate_image",
+        "isError": true,
+        "output": "image: no job id at data._id"
+      }
+    },
+    {
+      "name": "non_json_response",
+      "style": {
+        "baseUrl": "{server}",
+        "verbs": {
+          "image": {
+            "mode": "sync",
+            "kind": "image",
+            "start": {
+              "path": "/s"
+            },
+            "args": {
+              "prompt": "prompt"
+            },
+            "resultPath": "u"
+          }
+        }
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "x"
+      },
+      "script": [
+        {
+          "status": 200,
+          "rawBody": "<html>oops</html>"
+        }
+      ],
       "error": "image: response is not JSON",
-      "tool": { "name": "generate_image", "isError": true, "output": "image: response is not JSON" } },
-
-    { "name": "text_kind_transcribe",
-      "style": { "baseUrl": "{server}", "verbs": { "transcribe": {
-        "mode": "sync", "kind": "text", "start": { "path": "/stt" }, "args": { "audio": "file_url" }, "resultPath": "text" } } },
-      "verb": "transcribe", "args": { "audio": "https://x/a.mp3" },
-      "script": [ { "status": 200, "body": { "text": "hello world" } } ],
-      "expectRequests": [ { "method": "POST", "path": "/stt", "body": { "file_url": "https://x/a.mp3" } } ],
-      "result": { "files": [], "text": "hello world", "status": "completed" },
-      "tool": { "name": "transcribe_audio", "isError": false, "output": "hello world",
-        "metadata": { "source": "media", "verb": "transcribe", "status": "completed" } } },
-
-    { "name": "error_envelope_string_code_headers_on_polls",
-      "env": { "MEDIA_TEST_KEY": "FAKE_KEY" },
-      "style": { "baseUrl": "{server}", "headers": { "Authorization": "Bearer ${MEDIA_TEST_KEY}" },
-        "errorEnvelope": { "codePath": "code", "okValues": ["OK"], "messagePath": "msg" },
-        "verbs": { "image": {
-        "mode": "async", "kind": "image", "start": { "path": "/s" }, "args": { "prompt": "prompt" }, "idPath": "id",
-        "poll": { "path": "/p/{id}", "statusPath": "st", "done": ["completed"], "failed": ["failed"], "intervalMs": 1, "timeoutMs": 5000 },
-        "resultPath": "u" } } },
-      "verb": "image", "args": { "prompt": "x" },
-      "script": [ { "status": 200, "body": { "code": "OK", "id": "j5" } }, { "status": 200, "body": { "code": "E_QUOTA", "msg": "out of credits" } } ],
-      "expectHeaders": { "Authorization": "Bearer FAKE_KEY" },
-      "expectRequests": [ { "method": "POST", "path": "/s", "body": { "prompt": "x" } }, { "method": "GET", "path": "/p/j5" } ],
+      "tool": {
+        "name": "generate_image",
+        "isError": true,
+        "output": "image: response is not JSON"
+      }
+    },
+    {
+      "name": "text_kind_transcribe",
+      "style": {
+        "baseUrl": "{server}",
+        "verbs": {
+          "transcribe": {
+            "mode": "sync",
+            "kind": "text",
+            "start": {
+              "path": "/stt"
+            },
+            "args": {
+              "audio": "file_url"
+            },
+            "resultPath": "text"
+          }
+        }
+      },
+      "verb": "transcribe",
+      "args": {
+        "audio": "https://x/a.mp3"
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {
+            "text": "hello world"
+          }
+        }
+      ],
+      "expectRequests": [
+        {
+          "method": "POST",
+          "path": "/stt",
+          "body": {
+            "file_url": "https://x/a.mp3"
+          }
+        }
+      ],
+      "result": {
+        "files": [],
+        "text": "hello world",
+        "status": "completed"
+      },
+      "tool": {
+        "name": "transcribe_audio",
+        "isError": false,
+        "output": "hello world",
+        "metadata": {
+          "source": "media",
+          "verb": "transcribe",
+          "client": "style",
+          "status": "completed"
+        }
+      }
+    },
+    {
+      "name": "error_envelope_string_code_headers_on_polls",
+      "env": {
+        "MEDIA_TEST_KEY": "FAKE_KEY"
+      },
+      "style": {
+        "baseUrl": "{server}",
+        "headers": {
+          "Authorization": "Bearer ${MEDIA_TEST_KEY}"
+        },
+        "errorEnvelope": {
+          "codePath": "code",
+          "okValues": [
+            "OK"
+          ],
+          "messagePath": "msg"
+        },
+        "verbs": {
+          "image": {
+            "mode": "async",
+            "kind": "image",
+            "start": {
+              "path": "/s"
+            },
+            "args": {
+              "prompt": "prompt"
+            },
+            "idPath": "id",
+            "poll": {
+              "path": "/p/{id}",
+              "statusPath": "st",
+              "done": [
+                "completed"
+              ],
+              "failed": [
+                "failed"
+              ],
+              "intervalMs": 1,
+              "timeoutMs": 5000
+            },
+            "resultPath": "u"
+          }
+        }
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "x"
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {
+            "code": "OK",
+            "id": "j5"
+          }
+        },
+        {
+          "status": 200,
+          "body": {
+            "code": "E_QUOTA",
+            "msg": "out of credits"
+          }
+        }
+      ],
+      "expectHeaders": {
+        "Authorization": "Bearer FAKE_KEY"
+      },
+      "expectRequests": [
+        {
+          "method": "POST",
+          "path": "/s",
+          "body": {
+            "prompt": "x"
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/p/j5"
+        }
+      ],
       "error": "API error E_QUOTA: out of credits",
-      "tool": { "name": "generate_image", "isError": true, "output": "API error E_QUOTA: out of credits" } },
-
-    { "name": "nested_result_arrays_flatten_drop_empty",
-      "style": { "baseUrl": "{server}", "verbs": { "image": {
-        "mode": "sync", "kind": "image", "start": { "path": "/s" }, "args": { "prompt": "prompt" }, "resultPath": "u" } } },
-      "verb": "image", "args": { "prompt": "x" },
-      "script": [ { "status": 200, "body": { "u": [ ["https://x/1.gif", ""], [ ["https://x/2.png"] ], 7, null ] } } ],
-      "result": { "files": [
-        { "type": "image", "mimeType": "image/gif", "url": "https://x/1.gif" },
-        { "type": "image", "mimeType": "image/png", "url": "https://x/2.png" } ], "status": "completed" },
-      "tool": { "name": "generate_image", "isError": false, "output": "image ready: https://x/1.gif\nhttps://x/2.png",
-        "parts": [ { "type": "image", "mimeType": "image/gif", "url": "https://x/1.gif" }, { "type": "image", "mimeType": "image/png", "url": "https://x/2.png" } ],
-        "metadata": { "source": "media", "verb": "image", "status": "completed" } } },
-
-    { "name": "text_kind_empty_string_is_a_result",
-      "style": { "baseUrl": "{server}", "verbs": { "transcribe": {
-        "mode": "sync", "kind": "text", "start": { "path": "/stt" }, "args": { "audio": "a" }, "resultPath": "text" } } },
-      "verb": "transcribe", "args": { "audio": "https://x/silence.wav" },
-      "script": [ { "status": 200, "body": { "text": "" } } ],
-      "result": { "files": [], "text": "", "status": "completed" },
-      "tool": { "name": "transcribe_audio", "isError": false, "output": "",
-        "metadata": { "source": "media", "verb": "transcribe", "status": "completed" } } },
-
-    { "name": "job_id_object_is_not_an_id",
-      "style": { "baseUrl": "{server}", "verbs": { "image": {
-        "mode": "async", "kind": "image", "start": { "path": "/s" }, "args": { "prompt": "prompt" }, "idPath": "id",
-        "poll": { "path": "/p/{id}", "statusPath": "st", "done": ["completed"], "failed": ["failed"], "intervalMs": 1, "timeoutMs": 5000 },
-        "resultPath": "u" } } },
-      "verb": "image", "args": { "prompt": "x" },
-      "script": [ { "status": 200, "body": { "id": { "v": 1 } } } ],
-      "expectRequests": [ { "method": "POST", "path": "/s", "body": { "prompt": "x" } } ],
+      "tool": {
+        "name": "generate_image",
+        "isError": true,
+        "output": "API error E_QUOTA: out of credits"
+      }
+    },
+    {
+      "name": "nested_result_arrays_flatten_drop_empty",
+      "style": {
+        "baseUrl": "{server}",
+        "verbs": {
+          "image": {
+            "mode": "sync",
+            "kind": "image",
+            "start": {
+              "path": "/s"
+            },
+            "args": {
+              "prompt": "prompt"
+            },
+            "resultPath": "u"
+          }
+        }
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "x"
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {
+            "u": [
+              [
+                "https://x/1.gif",
+                ""
+              ],
+              [
+                [
+                  "https://x/2.png"
+                ]
+              ],
+              7,
+              null
+            ]
+          }
+        }
+      ],
+      "result": {
+        "files": [
+          {
+            "type": "image",
+            "mimeType": "image/gif",
+            "url": "https://x/1.gif"
+          },
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "url": "https://x/2.png"
+          }
+        ],
+        "status": "completed"
+      },
+      "tool": {
+        "name": "generate_image",
+        "isError": false,
+        "output": "image ready: https://x/1.gif\nhttps://x/2.png",
+        "parts": [
+          {
+            "type": "image",
+            "mimeType": "image/gif",
+            "url": "https://x/1.gif"
+          },
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "url": "https://x/2.png"
+          }
+        ],
+        "metadata": {
+          "source": "media",
+          "verb": "image",
+          "client": "style",
+          "status": "completed"
+        }
+      }
+    },
+    {
+      "name": "text_kind_empty_string_is_a_result",
+      "style": {
+        "baseUrl": "{server}",
+        "verbs": {
+          "transcribe": {
+            "mode": "sync",
+            "kind": "text",
+            "start": {
+              "path": "/stt"
+            },
+            "args": {
+              "audio": "a"
+            },
+            "resultPath": "text"
+          }
+        }
+      },
+      "verb": "transcribe",
+      "args": {
+        "audio": "https://x/silence.wav"
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {
+            "text": ""
+          }
+        }
+      ],
+      "result": {
+        "files": [],
+        "text": "",
+        "status": "completed"
+      },
+      "tool": {
+        "name": "transcribe_audio",
+        "isError": false,
+        "output": "",
+        "metadata": {
+          "source": "media",
+          "verb": "transcribe",
+          "client": "style",
+          "status": "completed"
+        }
+      }
+    },
+    {
+      "name": "job_id_object_is_not_an_id",
+      "style": {
+        "baseUrl": "{server}",
+        "verbs": {
+          "image": {
+            "mode": "async",
+            "kind": "image",
+            "start": {
+              "path": "/s"
+            },
+            "args": {
+              "prompt": "prompt"
+            },
+            "idPath": "id",
+            "poll": {
+              "path": "/p/{id}",
+              "statusPath": "st",
+              "done": [
+                "completed"
+              ],
+              "failed": [
+                "failed"
+              ],
+              "intervalMs": 1,
+              "timeoutMs": 5000
+            },
+            "resultPath": "u"
+          }
+        }
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "x"
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {
+            "id": {
+              "v": 1
+            }
+          }
+        }
+      ],
+      "expectRequests": [
+        {
+          "method": "POST",
+          "path": "/s",
+          "body": {
+            "prompt": "x"
+          }
+        }
+      ],
       "error": "image: no job id at id",
-      "tool": { "name": "generate_image", "isError": true, "output": "image: no job id at id" } },
-
-    { "name": "job_id_empty_string_is_not_an_id",
-      "style": { "baseUrl": "{server}", "verbs": { "image": {
-        "mode": "async", "kind": "image", "start": { "path": "/s" }, "args": { "prompt": "prompt" }, "idPath": "id",
-        "poll": { "path": "/p/{id}", "statusPath": "st", "done": ["completed"], "failed": ["failed"], "intervalMs": 1, "timeoutMs": 5000 },
-        "resultPath": "u" } } },
-      "verb": "image", "args": { "prompt": "x" },
-      "script": [ { "status": 200, "body": { "id": "" } } ],
-      "expectRequests": [ { "method": "POST", "path": "/s", "body": { "prompt": "x" } } ],
+      "tool": {
+        "name": "generate_image",
+        "isError": true,
+        "output": "image: no job id at id"
+      }
+    },
+    {
+      "name": "job_id_empty_string_is_not_an_id",
+      "style": {
+        "baseUrl": "{server}",
+        "verbs": {
+          "image": {
+            "mode": "async",
+            "kind": "image",
+            "start": {
+              "path": "/s"
+            },
+            "args": {
+              "prompt": "prompt"
+            },
+            "idPath": "id",
+            "poll": {
+              "path": "/p/{id}",
+              "statusPath": "st",
+              "done": [
+                "completed"
+              ],
+              "failed": [
+                "failed"
+              ],
+              "intervalMs": 1,
+              "timeoutMs": 5000
+            },
+            "resultPath": "u"
+          }
+        }
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "x"
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {
+            "id": ""
+          }
+        }
+      ],
+      "expectRequests": [
+        {
+          "method": "POST",
+          "path": "/s",
+          "body": {
+            "prompt": "x"
+          }
+        }
+      ],
       "error": "image: no job id at id",
-      "tool": { "name": "generate_image", "isError": true, "output": "image: no job id at id" } },
-
-    { "name": "zero_interval_and_timeout_use_defaults",
-      "style": { "baseUrl": "{server}", "verbs": { "image": {
-        "mode": "async", "kind": "image", "start": { "path": "/s" }, "args": { "prompt": "prompt" }, "idPath": "id",
-        "poll": { "path": "/p/{id}", "statusPath": "st", "done": ["completed"], "failed": ["failed"], "intervalMs": 1, "timeoutMs": 0 },
-        "resultPath": "u" } } },
-      "verb": "image", "args": { "prompt": "x" },
-      "script": [ { "status": 200, "body": { "id": "jz" } }, { "status": 200, "body": { "st": "processing" } }, { "status": 200, "body": { "st": "completed", "u": "https://x/z.png" } } ],
-      "expectProgress": ["processing", "completed"],
-      "result": { "files": [ { "type": "image", "mimeType": "image/png", "url": "https://x/z.png" } ], "jobId": "jz", "status": "completed" },
-      "tool": { "name": "generate_image", "isError": false, "output": "image ready: https://x/z.png",
-        "parts": [ { "type": "image", "mimeType": "image/png", "url": "https://x/z.png" } ],
-        "metadata": { "source": "media", "verb": "image", "jobId": "jz", "status": "completed" } } },
-
-    { "name": "numeric_poll_status_done",
-      "style": { "baseUrl": "{server}", "verbs": { "image": {
-        "mode": "async", "kind": "image", "start": { "path": "/s" }, "args": { "prompt": "prompt" }, "idPath": "id",
-        "poll": { "path": "/p/{id}", "statusPath": "st", "done": ["2"], "failed": ["3"], "intervalMs": 1, "timeoutMs": 5000 },
-        "resultPath": "u" } } },
-      "verb": "image", "args": { "prompt": "x" },
-      "script": [ { "status": 200, "body": { "id": "jn" } }, { "status": 200, "body": { "st": 1 } }, { "status": 200, "body": { "st": 2.0, "u": "https://x/n.png" } } ],
-      "expectProgress": ["1", "2"],
-      "result": { "files": [ { "type": "image", "mimeType": "image/png", "url": "https://x/n.png" } ], "jobId": "jn", "status": "2" },
-      "tool": { "name": "generate_image", "isError": false, "output": "image ready: https://x/n.png",
-        "parts": [ { "type": "image", "mimeType": "image/png", "url": "https://x/n.png" } ],
-        "metadata": { "source": "media", "verb": "image", "jobId": "jn", "status": "2" } } },
-
-    { "name": "numeric_poll_status_failed_fraction",
-      "style": { "baseUrl": "{server}", "verbs": { "image": {
-        "mode": "async", "kind": "image", "start": { "path": "/s" }, "args": { "prompt": "prompt" }, "idPath": "id",
-        "poll": { "path": "/p/{id}", "statusPath": "st", "done": ["2"], "failed": ["-1.5"], "intervalMs": 1, "timeoutMs": 5000 },
-        "resultPath": "u" } } },
-      "verb": "image", "args": { "prompt": "x" },
-      "script": [ { "status": 200, "body": { "id": "jf" } }, { "status": 200, "body": { "st": -1.5 } } ],
-      "expectProgress": ["-1.5"],
+      "tool": {
+        "name": "generate_image",
+        "isError": true,
+        "output": "image: no job id at id"
+      }
+    },
+    {
+      "name": "zero_interval_and_timeout_use_defaults",
+      "style": {
+        "baseUrl": "{server}",
+        "verbs": {
+          "image": {
+            "mode": "async",
+            "kind": "image",
+            "start": {
+              "path": "/s"
+            },
+            "args": {
+              "prompt": "prompt"
+            },
+            "idPath": "id",
+            "poll": {
+              "path": "/p/{id}",
+              "statusPath": "st",
+              "done": [
+                "completed"
+              ],
+              "failed": [
+                "failed"
+              ],
+              "intervalMs": 1,
+              "timeoutMs": 0
+            },
+            "resultPath": "u"
+          }
+        }
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "x"
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {
+            "id": "jz"
+          }
+        },
+        {
+          "status": 200,
+          "body": {
+            "st": "processing"
+          }
+        },
+        {
+          "status": 200,
+          "body": {
+            "st": "completed",
+            "u": "https://x/z.png"
+          }
+        }
+      ],
+      "expectProgress": [
+        "processing",
+        "completed"
+      ],
+      "result": {
+        "files": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "url": "https://x/z.png"
+          }
+        ],
+        "jobId": "jz",
+        "status": "completed"
+      },
+      "tool": {
+        "name": "generate_image",
+        "isError": false,
+        "output": "image ready: https://x/z.png",
+        "parts": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "url": "https://x/z.png"
+          }
+        ],
+        "metadata": {
+          "source": "media",
+          "verb": "image",
+          "client": "style",
+          "jobId": "jz",
+          "status": "completed"
+        }
+      }
+    },
+    {
+      "name": "numeric_poll_status_done",
+      "style": {
+        "baseUrl": "{server}",
+        "verbs": {
+          "image": {
+            "mode": "async",
+            "kind": "image",
+            "start": {
+              "path": "/s"
+            },
+            "args": {
+              "prompt": "prompt"
+            },
+            "idPath": "id",
+            "poll": {
+              "path": "/p/{id}",
+              "statusPath": "st",
+              "done": [
+                "2"
+              ],
+              "failed": [
+                "3"
+              ],
+              "intervalMs": 1,
+              "timeoutMs": 5000
+            },
+            "resultPath": "u"
+          }
+        }
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "x"
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {
+            "id": "jn"
+          }
+        },
+        {
+          "status": 200,
+          "body": {
+            "st": 1
+          }
+        },
+        {
+          "status": 200,
+          "body": {
+            "st": 2.0,
+            "u": "https://x/n.png"
+          }
+        }
+      ],
+      "expectProgress": [
+        "1",
+        "2"
+      ],
+      "result": {
+        "files": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "url": "https://x/n.png"
+          }
+        ],
+        "jobId": "jn",
+        "status": "2"
+      },
+      "tool": {
+        "name": "generate_image",
+        "isError": false,
+        "output": "image ready: https://x/n.png",
+        "parts": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "url": "https://x/n.png"
+          }
+        ],
+        "metadata": {
+          "source": "media",
+          "verb": "image",
+          "client": "style",
+          "jobId": "jn",
+          "status": "2"
+        }
+      }
+    },
+    {
+      "name": "numeric_poll_status_failed_fraction",
+      "style": {
+        "baseUrl": "{server}",
+        "verbs": {
+          "image": {
+            "mode": "async",
+            "kind": "image",
+            "start": {
+              "path": "/s"
+            },
+            "args": {
+              "prompt": "prompt"
+            },
+            "idPath": "id",
+            "poll": {
+              "path": "/p/{id}",
+              "statusPath": "st",
+              "done": [
+                "2"
+              ],
+              "failed": [
+                "-1.5"
+              ],
+              "intervalMs": 1,
+              "timeoutMs": 5000
+            },
+            "resultPath": "u"
+          }
+        }
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "x"
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {
+            "id": "jf"
+          }
+        },
+        {
+          "status": 200,
+          "body": {
+            "st": -1.5
+          }
+        }
+      ],
+      "expectProgress": [
+        "-1.5"
+      ],
       "error": "job jf -1.5",
-      "tool": { "name": "generate_image", "isError": true, "output": "job jf -1.5" } },
-
-    { "name": "empty_result_path_is_whole_body",
-      "style": { "baseUrl": "{server}", "verbs": { "image": {
-        "mode": "sync", "kind": "image", "start": { "path": "/s" }, "args": { "prompt": "prompt" }, "resultPath": "" } } },
-      "verb": "image", "args": { "prompt": "x" },
-      "script": [ { "status": 200, "body": ["https://x/w1.png", "https://x/w2.png"] } ],
-      "result": { "files": [ { "type": "image", "mimeType": "image/png", "url": "https://x/w1.png" }, { "type": "image", "mimeType": "image/png", "url": "https://x/w2.png" } ], "status": "completed" },
-      "tool": { "name": "generate_image", "isError": false, "output": "image ready: https://x/w1.png\nhttps://x/w2.png",
-        "parts": [ { "type": "image", "mimeType": "image/png", "url": "https://x/w1.png" }, { "type": "image", "mimeType": "image/png", "url": "https://x/w2.png" } ],
-        "metadata": { "source": "media", "verb": "image", "status": "completed" } } },
-
-    { "name": "empty_arg_path_is_a_style_error",
+      "tool": {
+        "name": "generate_image",
+        "isError": true,
+        "output": "job jf -1.5"
+      }
+    },
+    {
+      "name": "empty_result_path_is_whole_body",
+      "style": {
+        "baseUrl": "{server}",
+        "verbs": {
+          "image": {
+            "mode": "sync",
+            "kind": "image",
+            "start": {
+              "path": "/s"
+            },
+            "args": {
+              "prompt": "prompt"
+            },
+            "resultPath": ""
+          }
+        }
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "x"
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": [
+            "https://x/w1.png",
+            "https://x/w2.png"
+          ]
+        }
+      ],
+      "result": {
+        "files": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "url": "https://x/w1.png"
+          },
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "url": "https://x/w2.png"
+          }
+        ],
+        "status": "completed"
+      },
+      "tool": {
+        "name": "generate_image",
+        "isError": false,
+        "output": "image ready: https://x/w1.png\nhttps://x/w2.png",
+        "parts": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "url": "https://x/w1.png"
+          },
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "url": "https://x/w2.png"
+          }
+        ],
+        "metadata": {
+          "source": "media",
+          "verb": "image",
+          "client": "style",
+          "status": "completed"
+        }
+      }
+    },
+    {
+      "name": "empty_arg_path_is_a_style_error",
       "styleError": true,
-      "style": { "baseUrl": "{server}", "verbs": { "image": {
-        "mode": "sync", "kind": "image", "start": { "path": "/s" }, "args": { "prompt": "prompt", "seed": "" }, "resultPath": "u" } } },
-      "verb": "image", "args": { "prompt": "x" },
-      "script": [ { "status": 200, "body": { "u": "https://x/a.png" } } ],
+      "style": {
+        "baseUrl": "{server}",
+        "verbs": {
+          "image": {
+            "mode": "sync",
+            "kind": "image",
+            "start": {
+              "path": "/s"
+            },
+            "args": {
+              "prompt": "prompt",
+              "seed": ""
+            },
+            "resultPath": "u"
+          }
+        }
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "x"
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {
+            "u": "https://x/a.png"
+          }
+        }
+      ],
       "expectRequests": [],
-      "error": "style: empty path for argument \"seed\"" },
-
-    { "name": "job_id_percent_encoded_in_poll_path",
-      "style": { "baseUrl": "{server}", "verbs": { "image": {
-        "mode": "async", "kind": "image", "start": { "path": "/s" }, "args": { "prompt": "prompt" }, "idPath": "id",
-        "poll": { "path": "/p/{id}", "statusPath": "st", "done": ["completed"], "failed": ["failed"], "intervalMs": 1, "timeoutMs": 5000 },
-        "resultPath": "u" } } },
-      "verb": "image", "args": { "prompt": "x" },
-      "script": [ { "status": 200, "body": { "id": "a b/é~-._?#!'()*" } }, { "status": 200, "body": { "st": "completed", "u": "https://x/e.png" } } ],
-      "expectRequests": [ { "method": "POST", "path": "/s", "body": { "prompt": "x" } }, { "method": "GET", "path": "/p/a%20b%2F%C3%A9~-._%3F%23%21%27%28%29%2A" } ],
-      "result": { "files": [ { "type": "image", "mimeType": "image/png", "url": "https://x/e.png" } ], "jobId": "a b/é~-._?#!'()*", "status": "completed" },
-      "tool": { "name": "generate_image", "isError": false, "output": "image ready: https://x/e.png",
-        "parts": [ { "type": "image", "mimeType": "image/png", "url": "https://x/e.png" } ],
-        "metadata": { "source": "media", "verb": "image", "jobId": "a b/é~-._?#!'()*", "status": "completed" } } },
-
-    { "name": "error_body_capped_at_1000_code_points",
-      "style": { "baseUrl": "{server}", "verbs": { "image": {
-        "mode": "sync", "kind": "image", "start": { "path": "/s" }, "args": { "prompt": "prompt" }, "resultPath": "u" } } },
-      "verb": "image", "args": { "prompt": "x" },
-      "script": [ { "status": 500, "rawBody": "ééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé😀😀" } ],
+      "error": "style: empty path for argument \"seed\""
+    },
+    {
+      "name": "job_id_percent_encoded_in_poll_path",
+      "style": {
+        "baseUrl": "{server}",
+        "verbs": {
+          "image": {
+            "mode": "async",
+            "kind": "image",
+            "start": {
+              "path": "/s"
+            },
+            "args": {
+              "prompt": "prompt"
+            },
+            "idPath": "id",
+            "poll": {
+              "path": "/p/{id}",
+              "statusPath": "st",
+              "done": [
+                "completed"
+              ],
+              "failed": [
+                "failed"
+              ],
+              "intervalMs": 1,
+              "timeoutMs": 5000
+            },
+            "resultPath": "u"
+          }
+        }
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "x"
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {
+            "id": "a b/é~-._?#!'()*"
+          }
+        },
+        {
+          "status": 200,
+          "body": {
+            "st": "completed",
+            "u": "https://x/e.png"
+          }
+        }
+      ],
+      "expectRequests": [
+        {
+          "method": "POST",
+          "path": "/s",
+          "body": {
+            "prompt": "x"
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/p/a%20b%2F%C3%A9~-._%3F%23%21%27%28%29%2A"
+        }
+      ],
+      "result": {
+        "files": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "url": "https://x/e.png"
+          }
+        ],
+        "jobId": "a b/é~-._?#!'()*",
+        "status": "completed"
+      },
+      "tool": {
+        "name": "generate_image",
+        "isError": false,
+        "output": "image ready: https://x/e.png",
+        "parts": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "url": "https://x/e.png"
+          }
+        ],
+        "metadata": {
+          "source": "media",
+          "verb": "image",
+          "client": "style",
+          "jobId": "a b/é~-._?#!'()*",
+          "status": "completed"
+        }
+      }
+    },
+    {
+      "name": "error_body_capped_at_1000_code_points",
+      "style": {
+        "baseUrl": "{server}",
+        "verbs": {
+          "image": {
+            "mode": "sync",
+            "kind": "image",
+            "start": {
+              "path": "/s"
+            },
+            "args": {
+              "prompt": "prompt"
+            },
+            "resultPath": "u"
+          }
+        }
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "x"
+      },
+      "script": [
+        {
+          "status": 500,
+          "rawBody": "ééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé😀😀"
+        }
+      ],
       "error": "HTTP 500: ééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé😀…",
-      "tool": { "name": "generate_image", "isError": true, "output": "HTTP 500: ééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé😀…" } },
-
-    { "name": "error_body_exactly_1000_not_truncated",
-      "style": { "baseUrl": "{server}", "verbs": { "image": {
-        "mode": "sync", "kind": "image", "start": { "path": "/s" }, "args": { "prompt": "prompt" }, "resultPath": "u" } } },
-      "verb": "image", "args": { "prompt": "x" },
-      "script": [ { "status": 503, "rawBody": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé😀😀" } ],
+      "tool": {
+        "name": "generate_image",
+        "isError": true,
+        "output": "HTTP 500: ééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé😀…"
+      }
+    },
+    {
+      "name": "error_body_exactly_1000_not_truncated",
+      "style": {
+        "baseUrl": "{server}",
+        "verbs": {
+          "image": {
+            "mode": "sync",
+            "kind": "image",
+            "start": {
+              "path": "/s"
+            },
+            "args": {
+              "prompt": "prompt"
+            },
+            "resultPath": "u"
+          }
+        }
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "x"
+      },
+      "script": [
+        {
+          "status": 503,
+          "rawBody": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé😀😀"
+        }
+      ],
       "error": "HTTP 503: éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé😀😀",
-      "tool": { "name": "generate_image", "isError": true, "output": "HTTP 503: éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé😀😀" } },
-
-    { "name": "dotset_through_array_with_word_segment",
-      "style": { "baseUrl": "{server}", "verbs": { "image": {
-        "mode": "sync", "kind": "image", "start": { "path": "/s" },
-        "defaults": { "a": [1, 2], "b": [] },
-        "args": { "prompt": "a.x", "seed": "b.k.0" }, "resultPath": "u" } } },
-      "verb": "image", "args": { "prompt": "cat", "seed": 3 },
-      "script": [ { "status": 200, "body": { "u": "https://x/d.png" } } ],
-      "expectRequests": [ { "method": "POST", "path": "/s", "body": { "a": { "x": "cat" }, "b": { "k": [3] } } } ],
-      "result": { "files": [ { "type": "image", "mimeType": "image/png", "url": "https://x/d.png" } ], "status": "completed" },
-      "tool": { "name": "generate_image", "isError": false, "output": "image ready: https://x/d.png",
-        "parts": [ { "type": "image", "mimeType": "image/png", "url": "https://x/d.png" } ],
-        "metadata": { "source": "media", "verb": "image", "status": "completed" } } },
-
-    { "name": "dotset_numeric_segment_through_object",
-      "style": { "baseUrl": "{server}", "verbs": { "image": {
-        "mode": "sync", "kind": "image", "start": { "path": "/s" },
-        "defaults": { "references": { "lang": "en" } },
-        "args": { "prompt": "prompt", "seed": "references.0.speaker" }, "resultPath": "u" } } },
-      "verb": "image", "args": { "prompt": "cat", "seed": "bob" },
-      "script": [ { "status": 200, "body": { "u": "https://x/d.png" } } ],
-      "expectRequests": [ { "method": "POST", "path": "/s", "body": { "prompt": "cat", "references": { "lang": "en", "0": { "speaker": "bob" } } } } ],
-      "result": { "files": [ { "type": "image", "mimeType": "image/png", "url": "https://x/d.png" } ], "status": "completed" },
-      "tool": { "name": "generate_image", "isError": false, "output": "image ready: https://x/d.png",
-        "parts": [ { "type": "image", "mimeType": "image/png", "url": "https://x/d.png" } ],
-        "metadata": { "source": "media", "verb": "image", "status": "completed" } } },
-
-    { "name": "negative_interval_and_timeout_use_defaults",
+      "tool": {
+        "name": "generate_image",
+        "isError": true,
+        "output": "HTTP 503: éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé😀😀"
+      }
+    },
+    {
+      "name": "dotset_through_array_with_word_segment",
+      "style": {
+        "baseUrl": "{server}",
+        "verbs": {
+          "image": {
+            "mode": "sync",
+            "kind": "image",
+            "start": {
+              "path": "/s"
+            },
+            "defaults": {
+              "a": [
+                1,
+                2
+              ],
+              "b": []
+            },
+            "args": {
+              "prompt": "a.x",
+              "seed": "b.k.0"
+            },
+            "resultPath": "u"
+          }
+        }
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "cat",
+        "seed": 3
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {
+            "u": "https://x/d.png"
+          }
+        }
+      ],
+      "expectRequests": [
+        {
+          "method": "POST",
+          "path": "/s",
+          "body": {
+            "a": {
+              "x": "cat"
+            },
+            "b": {
+              "k": [
+                3
+              ]
+            }
+          }
+        }
+      ],
+      "result": {
+        "files": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "url": "https://x/d.png"
+          }
+        ],
+        "status": "completed"
+      },
+      "tool": {
+        "name": "generate_image",
+        "isError": false,
+        "output": "image ready: https://x/d.png",
+        "parts": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "url": "https://x/d.png"
+          }
+        ],
+        "metadata": {
+          "source": "media",
+          "verb": "image",
+          "client": "style",
+          "status": "completed"
+        }
+      }
+    },
+    {
+      "name": "dotset_numeric_segment_through_object",
+      "style": {
+        "baseUrl": "{server}",
+        "verbs": {
+          "image": {
+            "mode": "sync",
+            "kind": "image",
+            "start": {
+              "path": "/s"
+            },
+            "defaults": {
+              "references": {
+                "lang": "en"
+              }
+            },
+            "args": {
+              "prompt": "prompt",
+              "seed": "references.0.speaker"
+            },
+            "resultPath": "u"
+          }
+        }
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "cat",
+        "seed": "bob"
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {
+            "u": "https://x/d.png"
+          }
+        }
+      ],
+      "expectRequests": [
+        {
+          "method": "POST",
+          "path": "/s",
+          "body": {
+            "prompt": "cat",
+            "references": {
+              "lang": "en",
+              "0": {
+                "speaker": "bob"
+              }
+            }
+          }
+        }
+      ],
+      "result": {
+        "files": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "url": "https://x/d.png"
+          }
+        ],
+        "status": "completed"
+      },
+      "tool": {
+        "name": "generate_image",
+        "isError": false,
+        "output": "image ready: https://x/d.png",
+        "parts": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "url": "https://x/d.png"
+          }
+        ],
+        "metadata": {
+          "source": "media",
+          "verb": "image",
+          "client": "style",
+          "status": "completed"
+        }
+      }
+    },
+    {
+      "name": "negative_interval_and_timeout_use_defaults",
       "note": "intervalMs < 0 and timeoutMs < 0 both fall back to the defaults (5000 / 600000): one default wait, no immediate timeout.",
-      "style": { "baseUrl": "{server}", "verbs": { "image": {
-        "mode": "async", "kind": "image", "start": { "path": "/s" }, "args": { "prompt": "prompt" },
-        "idPath": "id",
-        "poll": { "path": "/p/{id}", "statusPath": "st", "done": ["completed"], "failed": ["failed"], "intervalMs": -1, "timeoutMs": -5 },
-        "resultPath": "u" } } },
-      "verb": "image", "args": { "prompt": "x" },
-      "script": [ { "status": 200, "body": { "id": "jn" } }, { "status": 200, "body": { "st": "completed", "u": "https://x/neg.png" } } ],
-      "expectProgress": ["completed"],
-      "result": { "files": [ { "type": "image", "mimeType": "image/png", "url": "https://x/neg.png" } ], "jobId": "jn", "status": "completed" },
-      "tool": { "name": "generate_image", "isError": false, "output": "image ready: https://x/neg.png",
-        "parts": [ { "type": "image", "mimeType": "image/png", "url": "https://x/neg.png" } ],
-        "metadata": { "source": "media", "verb": "image", "jobId": "jn", "status": "completed" } } },
-
-    { "name": "redirect_303_same_origin_post_becomes_get",
+      "style": {
+        "baseUrl": "{server}",
+        "verbs": {
+          "image": {
+            "mode": "async",
+            "kind": "image",
+            "start": {
+              "path": "/s"
+            },
+            "args": {
+              "prompt": "prompt"
+            },
+            "idPath": "id",
+            "poll": {
+              "path": "/p/{id}",
+              "statusPath": "st",
+              "done": [
+                "completed"
+              ],
+              "failed": [
+                "failed"
+              ],
+              "intervalMs": -1,
+              "timeoutMs": -5
+            },
+            "resultPath": "u"
+          }
+        }
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "x"
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {
+            "id": "jn"
+          }
+        },
+        {
+          "status": 200,
+          "body": {
+            "st": "completed",
+            "u": "https://x/neg.png"
+          }
+        }
+      ],
+      "expectProgress": [
+        "completed"
+      ],
+      "result": {
+        "files": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "url": "https://x/neg.png"
+          }
+        ],
+        "jobId": "jn",
+        "status": "completed"
+      },
+      "tool": {
+        "name": "generate_image",
+        "isError": false,
+        "output": "image ready: https://x/neg.png",
+        "parts": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "url": "https://x/neg.png"
+          }
+        ],
+        "metadata": {
+          "source": "media",
+          "verb": "image",
+          "client": "style",
+          "jobId": "jn",
+          "status": "completed"
+        }
+      }
+    },
+    {
+      "name": "redirect_303_same_origin_post_becomes_get",
       "note": "§7G Redirects: a same-origin redirect is followed and keeps the style headers; 301/302/303 after a non-GET/HEAD request is re-issued as GET with no body.",
-      "env": { "MEDIA_TEST_KEY": "FAKE_KEY" },
-      "style": { "baseUrl": "{server}", "headers": { "Authorization": "Bearer ${MEDIA_TEST_KEY}" }, "verbs": { "image": {
-        "mode": "sync", "kind": "image", "start": { "path": "/s" }, "args": { "prompt": "prompt" }, "resultPath": "u" } } },
-      "verb": "image", "args": { "prompt": "x" },
-      "script": [ { "status": 303, "headers": { "Location": "{server}/r" }, "rawBody": "" }, { "status": 200, "body": { "u": "https://x/r.png" } } ],
-      "expectRequests": [ { "method": "POST", "path": "/s", "body": { "prompt": "x" } }, { "method": "GET", "path": "/r" } ],
-      "expectHeaders": { "Authorization": "Bearer FAKE_KEY" },
-      "result": { "files": [ { "type": "image", "mimeType": "image/png", "url": "https://x/r.png" } ], "status": "completed" },
-      "tool": { "name": "generate_image", "isError": false, "output": "image ready: https://x/r.png",
-        "parts": [ { "type": "image", "mimeType": "image/png", "url": "https://x/r.png" } ],
-        "metadata": { "source": "media", "verb": "image", "status": "completed" } } },
-
-    { "name": "redirect_307_keeps_method_and_body",
+      "env": {
+        "MEDIA_TEST_KEY": "FAKE_KEY"
+      },
+      "style": {
+        "baseUrl": "{server}",
+        "headers": {
+          "Authorization": "Bearer ${MEDIA_TEST_KEY}"
+        },
+        "verbs": {
+          "image": {
+            "mode": "sync",
+            "kind": "image",
+            "start": {
+              "path": "/s"
+            },
+            "args": {
+              "prompt": "prompt"
+            },
+            "resultPath": "u"
+          }
+        }
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "x"
+      },
+      "script": [
+        {
+          "status": 303,
+          "headers": {
+            "Location": "{server}/r"
+          },
+          "rawBody": ""
+        },
+        {
+          "status": 200,
+          "body": {
+            "u": "https://x/r.png"
+          }
+        }
+      ],
+      "expectRequests": [
+        {
+          "method": "POST",
+          "path": "/s",
+          "body": {
+            "prompt": "x"
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/r"
+        }
+      ],
+      "expectHeaders": {
+        "Authorization": "Bearer FAKE_KEY"
+      },
+      "result": {
+        "files": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "url": "https://x/r.png"
+          }
+        ],
+        "status": "completed"
+      },
+      "tool": {
+        "name": "generate_image",
+        "isError": false,
+        "output": "image ready: https://x/r.png",
+        "parts": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "url": "https://x/r.png"
+          }
+        ],
+        "metadata": {
+          "source": "media",
+          "verb": "image",
+          "client": "style",
+          "status": "completed"
+        }
+      }
+    },
+    {
+      "name": "redirect_307_keeps_method_and_body",
       "note": "§7G Redirects: 307/308 re-issue the same method with the same body.",
-      "style": { "baseUrl": "{server}", "verbs": { "image": {
-        "mode": "sync", "kind": "image", "start": { "path": "/s" }, "args": { "prompt": "prompt" }, "resultPath": "u" } } },
-      "verb": "image", "args": { "prompt": "x" },
-      "script": [ { "status": 307, "headers": { "Location": "{server}/r" }, "rawBody": "" }, { "status": 200, "body": { "u": "https://x/k.png" } } ],
-      "expectRequests": [ { "method": "POST", "path": "/s", "body": { "prompt": "x" } }, { "method": "POST", "path": "/r", "body": { "prompt": "x" } } ],
-      "result": { "files": [ { "type": "image", "mimeType": "image/png", "url": "https://x/k.png" } ], "status": "completed" },
-      "tool": { "name": "generate_image", "isError": false, "output": "image ready: https://x/k.png",
-        "parts": [ { "type": "image", "mimeType": "image/png", "url": "https://x/k.png" } ],
-        "metadata": { "source": "media", "verb": "image", "status": "completed" } } },
-
-    { "name": "redirect_loop_too_many",
+      "style": {
+        "baseUrl": "{server}",
+        "verbs": {
+          "image": {
+            "mode": "sync",
+            "kind": "image",
+            "start": {
+              "path": "/s"
+            },
+            "args": {
+              "prompt": "prompt"
+            },
+            "resultPath": "u"
+          }
+        }
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "x"
+      },
+      "script": [
+        {
+          "status": 307,
+          "headers": {
+            "Location": "{server}/r"
+          },
+          "rawBody": ""
+        },
+        {
+          "status": 200,
+          "body": {
+            "u": "https://x/k.png"
+          }
+        }
+      ],
+      "expectRequests": [
+        {
+          "method": "POST",
+          "path": "/s",
+          "body": {
+            "prompt": "x"
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/r",
+          "body": {
+            "prompt": "x"
+          }
+        }
+      ],
+      "result": {
+        "files": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "url": "https://x/k.png"
+          }
+        ],
+        "status": "completed"
+      },
+      "tool": {
+        "name": "generate_image",
+        "isError": false,
+        "output": "image ready: https://x/k.png",
+        "parts": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "url": "https://x/k.png"
+          }
+        ],
+        "metadata": {
+          "source": "media",
+          "verb": "image",
+          "client": "style",
+          "status": "completed"
+        }
+      }
+    },
+    {
+      "name": "redirect_loop_too_many",
       "note": "§7G Redirects: at most 10 redirects are followed (11 requests); the next redirect is the error <verb>: too many redirects.",
-      "style": { "baseUrl": "{server}", "verbs": { "image": {
-        "mode": "sync", "kind": "image", "start": { "path": "/s" }, "args": { "prompt": "prompt" }, "resultPath": "u" } } },
-      "verb": "image", "args": { "prompt": "x" },
-      "script": [ { "status": 302, "headers": { "Location": "{server}/loop" }, "rawBody": "" } ],
-      "expectRequests": [ { "method": "POST", "path": "/s", "body": { "prompt": "x" } },
-        { "method": "GET", "path": "/loop" }, { "method": "GET", "path": "/loop" }, { "method": "GET", "path": "/loop" },
-        { "method": "GET", "path": "/loop" }, { "method": "GET", "path": "/loop" }, { "method": "GET", "path": "/loop" },
-        { "method": "GET", "path": "/loop" }, { "method": "GET", "path": "/loop" }, { "method": "GET", "path": "/loop" },
-        { "method": "GET", "path": "/loop" } ],
+      "style": {
+        "baseUrl": "{server}",
+        "verbs": {
+          "image": {
+            "mode": "sync",
+            "kind": "image",
+            "start": {
+              "path": "/s"
+            },
+            "args": {
+              "prompt": "prompt"
+            },
+            "resultPath": "u"
+          }
+        }
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "x"
+      },
+      "script": [
+        {
+          "status": 302,
+          "headers": {
+            "Location": "{server}/loop"
+          },
+          "rawBody": ""
+        }
+      ],
+      "expectRequests": [
+        {
+          "method": "POST",
+          "path": "/s",
+          "body": {
+            "prompt": "x"
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/loop"
+        },
+        {
+          "method": "GET",
+          "path": "/loop"
+        },
+        {
+          "method": "GET",
+          "path": "/loop"
+        },
+        {
+          "method": "GET",
+          "path": "/loop"
+        },
+        {
+          "method": "GET",
+          "path": "/loop"
+        },
+        {
+          "method": "GET",
+          "path": "/loop"
+        },
+        {
+          "method": "GET",
+          "path": "/loop"
+        },
+        {
+          "method": "GET",
+          "path": "/loop"
+        },
+        {
+          "method": "GET",
+          "path": "/loop"
+        },
+        {
+          "method": "GET",
+          "path": "/loop"
+        }
+      ],
       "error": "image: too many redirects",
-      "tool": { "name": "generate_image", "isError": true, "output": "image: too many redirects" } },
-
-    { "name": "unknown_verb",
-      "style": { "baseUrl": "{server}", "verbs": { "image": {
-        "mode": "sync", "kind": "image", "start": { "path": "/s" }, "args": { "prompt": "prompt" }, "resultPath": "u" } } },
-      "verb": "video", "args": { "prompt": "x" },
-      "script": [ { "status": 200, "body": {} } ],
+      "tool": {
+        "name": "generate_image",
+        "isError": true,
+        "output": "image: too many redirects"
+      }
+    },
+    {
+      "name": "unknown_verb",
+      "style": {
+        "baseUrl": "{server}",
+        "verbs": {
+          "image": {
+            "mode": "sync",
+            "kind": "image",
+            "start": {
+              "path": "/s"
+            },
+            "args": {
+              "prompt": "prompt"
+            },
+            "resultPath": "u"
+          }
+        }
+      },
+      "verb": "video",
+      "args": {
+        "prompt": "x"
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {}
+        }
+      ],
       "expectRequests": [],
-      "error": "media: no style supports \"video\"" }
+      "error": "media: no client supports \"video\""
+    },
+    {
+      "name": "http_402_is_unavailable",
+      "note": "SPEC §7G.2: 402 is an account precondition. A single client that is unavailable still gets the createMedia wrap (§7G.3 step 5).",
+      "style": {
+        "baseUrl": "{server}",
+        "verbs": {
+          "image": {
+            "mode": "sync",
+            "kind": "image",
+            "start": {
+              "path": "/s"
+            },
+            "args": {
+              "prompt": "prompt"
+            },
+            "resultPath": "u"
+          }
+        }
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "x"
+      },
+      "script": [
+        {
+          "status": 402,
+          "rawBody": "{\"error\":\"no credits\"}"
+        }
+      ],
+      "status": "unavailable",
+      "error": "media: no client available for \"image\": style: HTTP 402: {\"error\":\"no credits\"}",
+      "tool": {
+        "name": "generate_image",
+        "isError": true,
+        "output": "media: no client available for \"image\": style: HTTP 402: {\"error\":\"no credits\"}"
+      }
+    },
+    {
+      "name": "http_429_quota_is_unavailable_named_style",
+      "style": {
+        "baseUrl": "{server}",
+        "verbs": {
+          "image": {
+            "mode": "sync",
+            "kind": "image",
+            "start": {
+              "path": "/s"
+            },
+            "args": {
+              "prompt": "prompt"
+            },
+            "resultPath": "u"
+          }
+        },
+        "name": "acme"
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "x"
+      },
+      "script": [
+        {
+          "status": 429,
+          "rawBody": "You exceeded your current QUOTA"
+        }
+      ],
+      "status": "unavailable",
+      "error": "media: no client available for \"image\": acme: HTTP 429: You exceeded your current QUOTA",
+      "tool": {
+        "name": "generate_image",
+        "isError": true,
+        "output": "media: no client available for \"image\": acme: HTTP 429: You exceeded your current QUOTA"
+      }
+    },
+    {
+      "name": "http_429_plain_is_failed",
+      "style": {
+        "baseUrl": "{server}",
+        "verbs": {
+          "image": {
+            "mode": "sync",
+            "kind": "image",
+            "start": {
+              "path": "/s"
+            },
+            "args": {
+              "prompt": "prompt"
+            },
+            "resultPath": "u"
+          }
+        }
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "x"
+      },
+      "script": [
+        {
+          "status": 429,
+          "rawBody": "slow down"
+        }
+      ],
+      "status": "failed",
+      "error": "HTTP 429: slow down",
+      "tool": {
+        "name": "generate_image",
+        "isError": true,
+        "output": "HTTP 429: slow down"
+      }
+    },
+    {
+      "name": "style_required_arg_missing_no_request",
+      "note": "SPEC §7G.7 Verb.required.",
+      "style": {
+        "baseUrl": "{server}",
+        "verbs": {
+          "talk": {
+            "mode": "sync",
+            "kind": "video",
+            "start": {
+              "path": "/t"
+            },
+            "args": {
+              "image": "i",
+              "audio": "a"
+            },
+            "required": [
+              "audio"
+            ],
+            "resultPath": "u"
+          }
+        }
+      },
+      "verb": "talk",
+      "args": {
+        "image": "https://x/face.png"
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {
+            "u": "https://x/v.mp4"
+          }
+        }
+      ],
+      "expectRequests": [],
+      "status": "failed",
+      "error": "talk: argument \"audio\" is required",
+      "tool": {
+        "name": "talking_video",
+        "isError": true,
+        "output": "talk: argument \"audio\" is required"
+      }
+    },
+    {
+      "name": "style_talk_verb",
+      "style": {
+        "baseUrl": "{server}",
+        "verbs": {
+          "talk": {
+            "mode": "sync",
+            "kind": "video",
+            "start": {
+              "path": "/t"
+            },
+            "args": {
+              "image": "i",
+              "audio": "a"
+            },
+            "required": [
+              "audio"
+            ],
+            "resultPath": "u"
+          }
+        }
+      },
+      "verb": "talk",
+      "args": {
+        "image": "https://x/face.png",
+        "audio": "https://x/a.mp3"
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {
+            "u": "https://x/v.mp4"
+          }
+        }
+      ],
+      "expectRequests": [
+        {
+          "method": "POST",
+          "path": "/t",
+          "body": {
+            "i": "https://x/face.png",
+            "a": "https://x/a.mp3"
+          }
+        }
+      ],
+      "result": {
+        "files": [
+          {
+            "type": "file",
+            "mimeType": "video/mp4",
+            "url": "https://x/v.mp4"
+          }
+        ],
+        "status": "completed"
+      },
+      "tool": {
+        "name": "talking_video",
+        "isError": false,
+        "output": "video ready: https://x/v.mp4",
+        "parts": [
+          {
+            "type": "file",
+            "mimeType": "video/mp4",
+            "url": "https://x/v.mp4"
+          }
+        ],
+        "metadata": {
+          "source": "media",
+          "verb": "talk",
+          "client": "style",
+          "status": "completed"
+        }
+      }
+    },
+    {
+      "name": "style_old_talking_verb_is_a_style_error",
+      "styleError": true,
+      "note": "SPEC §7G.7: talking was renamed talk; a style declaring it fails at load.",
+      "style": {
+        "baseUrl": "{server}",
+        "verbs": {
+          "talking": {
+            "mode": "sync",
+            "kind": "video",
+            "start": {
+              "path": "/t"
+            },
+            "args": {
+              "image": "i"
+            },
+            "resultPath": "u"
+          }
+        }
+      },
+      "verb": "talk",
+      "args": {
+        "image": "x"
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {}
+        }
+      ],
+      "expectRequests": [],
+      "error": "style: unknown verb \"talking\""
+    },
+    {
+      "name": "style_music_boolean_arg",
+      "style": {
+        "baseUrl": "{server}",
+        "verbs": {
+          "music": {
+            "mode": "sync",
+            "kind": "audio",
+            "start": {
+              "path": "/m"
+            },
+            "args": {
+              "prompt": "p",
+              "instrumental": "inst"
+            },
+            "resultPath": "u"
+          }
+        }
+      },
+      "verb": "music",
+      "args": {
+        "prompt": "lofi",
+        "instrumental": true
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {
+            "u": "https://x/m.mp3"
+          }
+        }
+      ],
+      "expectRequests": [
+        {
+          "method": "POST",
+          "path": "/m",
+          "body": {
+            "p": "lofi",
+            "inst": true
+          }
+        }
+      ],
+      "result": {
+        "files": [
+          {
+            "type": "audio",
+            "mimeType": "audio/mpeg",
+            "url": "https://x/m.mp3"
+          }
+        ],
+        "status": "completed"
+      },
+      "tool": {
+        "name": "generate_music",
+        "isError": false,
+        "output": "audio ready: https://x/m.mp3",
+        "parts": [
+          {
+            "type": "audio",
+            "mimeType": "audio/mpeg",
+            "url": "https://x/m.mp3"
+          }
+        ],
+        "metadata": {
+          "source": "media",
+          "verb": "music",
+          "client": "style",
+          "status": "completed"
+        }
+      }
+    },
+    {
+      "name": "style_config_key_fills_env_placeholders",
+      "note": "SPEC §7G.7: styleMediaClient(style, {key}) - key is what every ${...} in the headers expands to.",
+      "unsetEnv": [
+        "MEDIA_TEST_KEY"
+      ],
+      "config": {
+        "key": "CONFIG_KEY"
+      },
+      "style": {
+        "baseUrl": "{server}",
+        "headers": {
+          "Authorization": "Bearer ${MEDIA_TEST_KEY}"
+        },
+        "verbs": {
+          "image": {
+            "mode": "sync",
+            "kind": "image",
+            "start": {
+              "path": "/s"
+            },
+            "args": {
+              "prompt": "prompt"
+            },
+            "resultPath": "u"
+          }
+        }
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "x"
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {
+            "u": "https://x/k.png"
+          }
+        }
+      ],
+      "expectHeaders": {
+        "Authorization": "Bearer CONFIG_KEY"
+      },
+      "result": {
+        "files": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "url": "https://x/k.png"
+          }
+        ],
+        "status": "completed"
+      }
+    }
   ]
 }

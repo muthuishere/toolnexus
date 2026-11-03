@@ -1,5 +1,5 @@
 {
-  "_doc": "Canonical media verbs (SPEC §7G). Ports embed this table verbatim: verb order, tool names, descriptions, normalised args, types and required flags are byte-contract. A tool's schema lists only the args its style maps, in this order; required = this list's required ∩ mapped.",
+  "_doc": "Canonical media verbs (SPEC §7G.1). Ports embed this table verbatim: verb order, tool names, descriptions, normalised args, types and required flags are byte-contract. A tool's schema lists only the args its first supporting client accepts, in this order; required = that client's required args (for a style: this list's required ∩ mapped, plus the style verb's own required).",
   "verbs": [
     { "verb": "image", "tool": "generate_image", "description": "Generate an image from a text prompt.",
       "args": [
@@ -8,26 +8,35 @@
         { "name": "height", "type": "integer", "description": "Height in pixels." },
         { "name": "aspectRatio", "type": "string", "description": "Aspect ratio, e.g. 16:9." },
         { "name": "seed", "type": "integer", "description": "Seed for reproducible output." } ] },
-    { "verb": "video", "tool": "generate_video", "description": "Generate a short video from a prompt, optionally starting from an image URL. Can take minutes.",
+    { "verb": "video", "tool": "generate_video", "description": "Generate a short video from a prompt, optionally starting from an image. Can take minutes.",
       "args": [
         { "name": "prompt", "type": "string", "description": "What should happen in the video.", "required": true },
-        { "name": "image", "type": "string", "description": "URL of the starting image." },
+        { "name": "image", "type": "string", "description": "URL or local path of the starting image." },
         { "name": "seconds", "type": "integer", "description": "Video length in seconds." },
         { "name": "aspectRatio", "type": "string", "description": "Aspect ratio, e.g. 9:16." } ] },
     { "verb": "speech", "tool": "generate_speech", "description": "Speak text aloud and return the audio.",
       "args": [
         { "name": "text", "type": "string", "description": "The text to speak.", "required": true },
-        { "name": "voice", "type": "string", "description": "Voice or speaker id." } ] },
-    { "verb": "transcribe", "tool": "transcribe_audio", "description": "Transcribe speech in an audio URL to text.",
+        { "name": "voice", "type": "string", "description": "Voice name or id, including a cloned voice." } ] },
+    { "verb": "music", "tool": "generate_music", "description": "Generate music from a text prompt and return the audio.",
       "args": [
-        { "name": "audio", "type": "string", "description": "URL of the audio.", "required": true } ] },
-    { "verb": "cloneVoice", "tool": "clone_voice", "description": "Create a cloned voice from audio sample URLs and return its voice id.",
+        { "name": "prompt", "type": "string", "description": "Style, mood and instruments of the music.", "required": true },
+        { "name": "seconds", "type": "integer", "description": "Length in seconds." },
+        { "name": "instrumental", "type": "boolean", "description": "True for no vocals." },
+        { "name": "lyrics", "type": "string", "description": "Lyrics to sing." } ] },
+    { "verb": "transcribe", "tool": "transcribe_audio", "description": "Transcribe speech in an audio file to text.",
+      "args": [
+        { "name": "audio", "type": "string", "description": "URL or local path of the audio.", "required": true },
+        { "name": "language", "type": "string", "description": "Language of the speech as an ISO 639-1 code, e.g. en." } ] },
+    { "verb": "cloneVoice", "tool": "clone_voice", "description": "Create a cloned voice from audio samples and return its voice id.",
       "args": [
         { "name": "name", "type": "string", "description": "Name for the new voice.", "required": true },
-        { "name": "samples", "type": "array", "items": "string", "description": "URLs of audio samples of the voice.", "required": true } ] },
-    { "verb": "talking", "tool": "talking_video", "description": "Make the person in an image speak the given audio (lip-synced video).",
+        { "name": "samples", "type": "array", "items": "string", "description": "URLs or local paths of audio samples of the voice.", "required": true } ] },
+    { "verb": "talk", "tool": "talking_video", "description": "Make the person in an image speak, from speech audio or from text (lip-synced video).",
       "args": [
-        { "name": "image", "type": "string", "description": "URL of the face image.", "required": true },
-        { "name": "audio", "type": "string", "description": "URL of the speech audio.", "required": true } ] }
+        { "name": "image", "type": "string", "description": "URL or local path of the face image.", "required": true },
+        { "name": "audio", "type": "string", "description": "URL or local path of the speech audio." },
+        { "name": "text", "type": "string", "description": "Text to speak when no audio is given." },
+        { "name": "voice", "type": "string", "description": "Voice for the text." } ] }
   ]
 }

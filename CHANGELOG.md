@@ -8,59 +8,87 @@ GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
 
 ## Unreleased
 
-**Media generation: images, video, speech, transcription, voice cloning and talking-head video,
-from a JSON style instead of provider code.** Until now toolnexus could carry an image or audio
-part but not make one; every provider (a2e, Replicate, fal, OpenAI images/TTS, ComfyUI…) made you
-hand-write a request and a polling loop, per endpoint, per language. Now one engine does it:
+**Media generation: images, video, speech, music, transcription, voice cloning and talking-head
+video — from named clients you configure in one line, or from your own.** Until now toolnexus could
+carry an image or audio part but not make one. Now `createMedia(client)` gives your code seven verbs
+and your agent seven tools, and the provider is a small named client instead of request code:
 
-- **Typed verbs for your code** — `createMedia(style)` gives `image`, `video`, `speech`,
-  `transcribe`, `cloneVoice` and `talking`, with normalised arguments (`prompt`, `seconds`,
-  `voice`, …) and a result of `{files, text?, jobId?, status}`.
-- **Tools for your agent** — the same verbs become `generate_image`, `generate_video`,
-  `generate_speech`, `transcribe_audio`, `clone_voice` and `talking_video`; `createToolkit({ media })`
-  registers them. Tool names never change when you switch provider, so prompts and skills keep working.
-  Media tools are concurrency-safe: two media calls in one response run side by side (up to
-  `maxToolConcurrency`) instead of waiting for each other like unlabelled tools.
-- **Long jobs just work** — async styles start the job and poll for you (default every 5 s, up to
-  10 min), report progress, honour cancellation, and keep polling through statuses a provider
-  never documented.
-- **Providers are data** — a style is a JSON file (endpoints, dot-paths, `${ENV}` headers, an
-  optional error envelope). `examples/media-styles/a2e.json` ships first, live-verified for image,
-  video and speech. The library names no vendor.
+- **Seven verbs, seven tools** — `image`, `video`, `speech`, `music`, `transcribe`, `cloneVoice`,
+  `talk` for your code (result `{files, text?, jobId?, status}`); `generate_image`,
+  `generate_video`, `generate_speech`, `generate_music`, `transcribe_audio`, `clone_voice`,
+  `talking_video` for your agent via `createToolkit({ media })`. Tool names never change when you
+  switch provider, so prompts and skills keep working. Media tools are concurrency-safe.
+- **Built-in clients, one config shape** — `A2EMediaClient`, `ElevenLabsMediaClient`,
+  `OpenAIMediaClient` (its `url` reaches any OpenAI-compatible server), `OpenRouterMediaClient`,
+  `FalMediaClient` (any hosted model by id through fal's queue), and two local subscription CLIs,
+  `GrokMediaClient` and `CodexMediaClient`, which run the CLI once headless and pick up the file it
+  saved. Every client takes the same `{model, models, key, url, command, loop, gather}`; the key
+  defaults to the provider's usual env var (`OPENAI_API_KEY`, `FAL_API_KEY`, …).
+- **Fallback that only falls back when it should** — `createMedia([grok, fal])` tries Grok and moves
+  to fal only when Grok is *unavailable*: out of credits (402), out of quota, no key, CLI not
+  installed, or Grok's Zero Data Retention blocking video. A bad prompt or a server error is
+  returned as is, not hidden behind a second provider's bill. Errors carry a typed status, so you
+  can test for `unavailable` without reading the message.
+- **Files you can keep** — `gather.mode` decides what you get back: `download` (default for named
+  clients) saves every result under `gather.dir`, so a2e's URLs that expire in 3–30 days are no
+  longer your problem; `url` keeps provider URLs; `inline` returns the bytes. A `maxBytes` cap
+  (100 MiB) bounds every download, and downloads never carry your API key.
+- **Your own provider** — implement `MediaClient` (`supports` plus the verbs you have), or keep
+  writing JSON styles: `loadMediaStyle` + `styleMediaClient` is the advanced path, and the a2e
+  client is itself such a style.
+- **Grok video and privacy** — Grok's video tools refuse to run under Zero Data Retention. The Grok
+  client never changes your settings; it reports `grok: video blocked by Zero Data Retention — run
+  /privacy and opt in, …` and `createMedia` moves to your next video client. The media docs page
+  has the steps.
 - **`RunResult.files`** — every image, video or audio a run's tools produced, in order, tagged with
   the tool name and call id; `toolCalls[].parts` carries them per call. The answer text never gets
-  markup — you decide how to render. An agent with a completion gate keeps the files of every
-  attempt, exactly as it keeps their tool calls.
-  It is not media-only: image or file parts returned by MCP tools and by built-in file reads land
-  in `RunResult.files` too, and each entry keeps the part's `name` when it had one.
-- **Bounded, safe requests** — every request (start and each poll) is bounded by the time left
-  until the job's deadline (`timeoutMs`, counted from the start; sync verbs default to 10 min), so
-  a server that accepts and never answers can no longer hang a call. Style headers (your API key)
-  are never sent to a different origin than `baseUrl`'s, even across a redirect. Redirects follow
-  one rule set in every port: 301/302/303/307/308 with a `Location`, at most 10 hops (then
-  `<verb>: too many redirects`), 301/302/303 after a POST become a body-less GET, 307/308 keep the
-  method and body (Elixir now follows same-origin redirects too instead of refusing them). Error bodies
-  echoed in `HTTP <status>: …` are capped at 1000 characters. Python has no separate `timeout`
-  option on `create_media`; the style's `timeoutMs` is the one knob.
+  markup. It is not media-only: image or file parts returned by MCP tools and built-in file reads
+  land there too, and each entry keeps the part's `name` when it had one. A media tool's parts
+  carry downloaded or inline files as bytes, never as a local path.
+- **Bounded, safe requests** — every request (start, each poll, each download) is bounded by the
+  time left until the job's deadline, provider headers never reach a different origin, and
+  redirects follow one rule set in every port: 301/302/303/307/308 with a `Location`, at most 10
+  hops (then `<verb>: too many redirects`), 301/302/303 after a POST become a body-less GET,
+  307/308 keep the method and body. Error bodies echoed in `HTTP <status>: …` are capped at 1000
+  characters.
 
-Every port ships a runnable `media` example (an image through the typed call, speech through the
-`generate_speech` tool; without `A2E_API_KEY` it prints a hint and exits), and each language's API
-reference page has a Media generation section.
+Contract: SPEC §7G, ADRs 0036 and 0037, `conformance/media/` — every port replays the same style
+engine cases, built-in client cases, CLI cases (against a fake CLI script) and routing cases,
+hermetically.
 
-Contract: SPEC §7G, ADR 0036, `conformance/media/` (every port replays the same 34 cases and schema set).
+**Live-verified** (one real call each): a2e image, video and speech; ElevenLabs speech (including a
+cloned voice by name); OpenAI image; OpenRouter image; fal image; Codex image; Grok image and video
+(video after opting in under `/privacy`).
 
-**Not done yet** (tracked in `openspec/changes/add-media-generation`): downloading expiring result
-URLs (a2e's last 3–30 days — save them yourself for now), cancelling the job at the provider
-(cancel stops polling; the provider's job keeps running), uploading local files, ComfyUI workflow
-injection, webhooks, price quotes, pausing a long job through `waitFor`, and streaming `file`
-events. Realtime/live voice conversation is deliberately out of scope.
+**Implemented from the provider's docs, not yet verified live**: OpenAI speech, transcription and
+video (Sora); fal video; ElevenLabs music, transcription and voice cloning; a2e talking video.
+They are pinned by the conformance cases; a live check of each is tracked in
+`openspec/changes/add-media-clients`.
+
+**Not done yet** (tracked in `openspec/changes/add-media-clients`): cancelling the job at the
+provider (cancel stops polling or kills the CLI; a remote job keeps running), webhooks, price
+quotes, pausing a long job through `waitFor`, streaming `file` events, ComfyUI, a generic ACP
+media client, music lyrics on ElevenLabs, OpenRouter video/audio, image editing, and direct
+clients for Replicate, Gemini, the Grok API, Seedance, Kling and Runway (reachable today through a
+custom client or a style). A file kept with `gather.mode: "url"` from Grok lives in Grok's own
+session folder, whose lifetime Grok decides. Realtime/live voice conversation is deliberately out
+of scope.
+
+Breaking against the unreleased #123 API (never published): `createMedia` takes clients, not styles
+(`createMedia(styleMediaClient(loadMediaStyle(path)))` is the old behaviour); the verb `talking` is
+now `talk`; a style declaring `talking` fails to load; HTTP 402 from a style is now `unavailable`.
 
 Known redirect gaps: on Clojure's cljgo host the Go HTTP client follows redirects itself, because
-koine has no no-redirect option yet: custom style headers reach another origin (and so does
+koine has no no-redirect option yet: custom headers reach another origin (and so does
 `Authorization` when only the port differs), and a redirect loop stops after 10 requests instead
-of 11 (same `too many redirects` error). The JVM build follows the §7G rules. An HTTP client or transport you inject yourself
-(Java, C#, Rust, Python, and JS's `opts.fetch`, which may ignore `redirect: "manual"`) may follow
-redirects before the engine sees them, so it must not forward headers cross-origin.
+of 11 (same `too many redirects` error). The JVM build follows the §7G rules. An HTTP client or
+transport you inject yourself (Java, C#, Rust, Python, and JS's `opts.fetch`, which may ignore
+`redirect: "manual"`) may follow redirects before the engine sees them, so it must not forward
+headers cross-origin.
+
+**Status of the ports:** the contract (SPEC, conformance, OpenSpec change) lands first; the eight
+port implementations follow on this branch before release and are tracked per port in
+`openspec/changes/add-media-clients/tasks.md`.
 
 ### Tool scheduling: reads run together, writes run alone (all eight ports)
 
