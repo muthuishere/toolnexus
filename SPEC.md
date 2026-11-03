@@ -51,6 +51,16 @@ A new language port is "correct" iff these hold. Run it against the shared
 3. **MCP config**: accept top-level `mcpServers` | `servers` | `mcp`. `url`⇒remote, `command`⇒local.
    `disabled`/`enabled:false` ⇒ skip. Default timeout 30000ms. A failed server is isolated (status `failed`), never fatal.
    Remote `headers` values expand `${ENV_VAR}` from the environment (never logged).
+   **Protocol (§2, target of `upgrade-mcp-2026-07-28`):** `server/discover` first; on `2026-07-28` every
+   request carries `_meta` `io.modelcontextprotocol/{protocolVersion,clientCapabilities,clientInfo}` and, over
+   HTTP, `MCP-Protocol-Version`/`Mcp-Method`/`Mcp-Name`; missing `resultType` ⇒ `complete`; MRTR
+   `input_required` ⇒ §10 (form⇒`input`, url⇒`authorization`), retried with `inputResponses`+`requestState`;
+   a `tools/call` is **never** re-sent except after 401 / 403 `insufficient_scope`. Discover failing ⇒ the
+   frozen pre-2026 path (§2.F). OAuth (§2A): PRM → AS metadata → pre-registered `clientId` → CIMD (**no DCR**),
+   PKCE S256 + `resource`, `state`+`iss` checked, tokens never logged; `auto` or §10 `authorization` pause.
+   Opt-in `toolSearch` ⇒ only `search_tools` + `call_tool`. **MCP server** (§7C): 2026-07-28 only, HTTP only,
+   header mismatch `-32020` checked before unsupported version `-32022`, serverInfo in result `_meta`, skills
+   extension, optional `auth` (§2A.2). Fixtures: `examples/mcp-2026/`.
 4. **MCP execute**: `isError`⇒error w/ joined text; `structuredContent`⇒`JSON.stringify`; else joined text parts.
    **`content[]` non-text entries become `ToolResult.parts` on EVERY branch** — image⇒`image`,
    audio⇒`audio`, `resource_link`⇒`file{url}`, `resource` blob⇒`file{data}`, `resource` text⇒
@@ -273,7 +283,133 @@ Answer  { id, ok, data? }
 
 ## 2. MCP source
 
-### Config file format
+> **Status: contract pinned, ports pending.** This section is the target contract of OpenSpec change
+> `upgrade-mcp-2026-07-28`. The reference implementation is the Go spike `spikes/mcp-2026/golang`; all
+> eight language spikes under `spikes/mcp-2026/` pass the 8×8 interop matrix (`spikes/mcp-2026/interop.sh`).
+> Until a port ships it, that port's shipped behaviour is the frozen pre-2026 path (§2.F below).
+> Shared conformance fixtures: `examples/mcp-2026/`.
+
+toolnexus **owns its MCP layer** (no MCP SDK) and speaks protocol **`2026-07-28`** first, over **stdio**
+(local) and **Streamable HTTP** (remote), through one client API. The config file format, type inference,
+tool naming (`sanitize(server)_sanitize(tool)`), the per-server load bound, the `tools/call` result mapping
+(text / `structuredContent` / `isError` / non-text `parts`), failure isolation, status and the host-facing
+extensions are **unchanged** — they are specified in §2.F and apply to both paths. New optional per-server
+config keys (absent ⇒ byte-identical behaviour): `auth` (§2A), `description` (tool search, below),
+`toolSearch` (below).
+
+### 2.1 Wire constants (byte-exact)
+
+| constant | value |
+|---|---|
+| protocol version | `2026-07-28` |
+| `_meta` key: version | `io.modelcontextprotocol/protocolVersion` |
+| `_meta` key: client capabilities | `io.modelcontextprotocol/clientCapabilities` |
+| `_meta` key: client info | `io.modelcontextprotocol/clientInfo` |
+| `_meta` key: server info | `io.modelcontextprotocol/serverInfo` |
+| skills extension id | `io.modelcontextprotocol/skills` |
+| method not found / invalid params | `-32601` / `-32602` |
+| header mismatch | `-32020` |
+| unsupported protocol version | `-32022` (`data: {supported: [..], requested}`) |
+
+### 2.2 Discover first
+
+- The client sends **`server/discover`** before any other request. If the result's `supportedVersions`
+  contains `2026-07-28`, the server is used on the 2026 path. **No `initialize`** is ever sent on it, and
+  there is no session (`Mcp-Session-Id`), no resumable SSE and no server→client request.
+- `serverInfo` is read from the result, else from result `_meta["io.modelcontextprotocol/serverInfo"]`
+  (as GitHub's hosted server sends it).
+- `server/discover` failing with `-32601` (method not found) or an unsupported-version error (`-32022`,
+  or an HTTP 400/404 equivalent from an old server) ⇒ **frozen fallback** (§2.F). Any other failure is a
+  load failure (status `failed`, isolated, never fatal).
+
+### 2.3 Every request
+
+- `params._meta` carries `io.modelcontextprotocol/protocolVersion: "2026-07-28"`,
+  `io.modelcontextprotocol/clientCapabilities` (`{"elicitation":{"form":{}}}`) and
+  `io.modelcontextprotocol/clientInfo` (`{name, version}`).
+- Over HTTP the headers `MCP-Protocol-Version: 2026-07-28`, `Mcp-Method: <method>` and, for `tools/call`
+  and `prompts/get` (the `name` param) and `resources/read` (the `uri` param), `Mcp-Name: <value>`. A value
+  that has leading/trailing whitespace, contains a character outside printable ASCII (0x20–0x7E), or itself
+  looks like the sentinel is sent as
+  `=?base64?<std-base64>?=`. Remote `headers` (with `${ENV}` expansion, never logged) are added as before.
+- Responses are accepted as `application/json` or `text/event-stream` (the final SSE `data:` carrying a
+  result or error is used). stdio is one JSON-RPC message per line; responses are demultiplexed by `id`
+  (concurrent calls allowed); stderr is passed through and **never parsed**; a dead child fails every
+  pending call instead of hanging. stdio carries no headers, so only `-32022` can apply there.
+
+### 2.4 Results: `resultType`, cache hints
+
+- `resultType` missing ⇒ `"complete"`. `"input_required"` ⇒ MRTR (§2.5). Any other value is an error.
+- `tools/list` (and other list/read results) may carry `ttlMs` and `cacheScope`; the client MAY cache
+  for `ttlMs` (tool search does, below). Absent hints ⇒ no caching.
+- The `tools/call` result is mapped onto `ToolResult` exactly as §2.F *Behaviour* specifies.
+
+### 2.5 MRTR (`input_required`) → §10
+
+A `tools/call` result `{resultType:"input_required", inputRequests:{<key>: {method, params}}, requestState?}`
+is surfaced through §10 `waitFor`, one `Request` per input request:
+
+- `elicitation/create` with `mode:"form"` ⇒ `Request{kind:"input", prompt: params.message,
+  data:{schema: params.requestedSchema}}`; `mode:"url"` ⇒ `Request{kind:"authorization", url}`.
+- `Answer` → input response: `ok` ⇒ `{action:"accept", content: answer.data}`; `!ok` ⇒ `decline` when
+  `answer.reason=="declined"`, else `cancel` (same mapping as the §2.F elicitation bridge).
+- The client re-sends the **same** `tools/call` with `params.inputResponses = {<key>: <response>}` and
+  `params.requestState` echoed verbatim from the server. Further `input_required` rounds repeat; a paused
+  round resumes that round, earlier rounds are never re-asked.
+- Without a `waitFor`, the loop returns `{status:"pending"}` per §10 (no hang).
+
+### 2.6 No hidden re-execution
+
+The client **never** re-sends a `tools/call` after a lost connection, timeout, 5xx or unreadable response —
+the caller gets an error (the server may have executed it; spec issue #3394). It re-sends only after a
+pre-dispatch rejection: HTTP **401**, or **403 with `error="insufficient_scope"`**, carrying
+`WWW-Authenticate` (§2A), at most 3 auth retries per request. The MRTR re-send (§2.5) is a new round, not a
+retry.
+
+### 2.7 Skills extension (SEP-2640) — client
+
+When `server/discover` lists `capabilities.extensions["io.modelcontextprotocol/skills"]`:
+
+- `skills/list` ⇒ `{skills:[{uri, frontmatter}], ttlMs, cacheScope}`; URIs are `skill://<name>/SKILL.md`.
+- `skills/get {uri}` ⇒ `{skill:{uri, frontmatter, resources:[{uri, digest:"sha256:<hex>", size}]}}`;
+  unknown ⇒ `-32602`.
+- `resources/read {uri}` ⇒ `{contents:[{uri, mimeType, text}]}` (`text/markdown` for `.md`, else
+  `text/plain`).
+- Remote skills join the **same** `skill` tool inventory as local skills (§3); a remote skill's loaded body
+  is byte-identical to the local copy of the same files.
+- **URI containment** (client and server): percent-decode once, then reject any leftover `%`, `\`, NUL,
+  `:`, and any empty / `.` / `..` segment; a download also rejects a resource outside the skill and a
+  sha256 mismatch, before writing anything. Server answer for a bad URI: `-32602`.
+
+### 2.8 Tool search (lazy exposure) — client
+
+Opt-in per server: `"toolSearch": true` (+ optional `"description": "<what this server is for>"`). Absent
+⇒ unchanged. With it the toolkit exposes **two** tools for that server instead of every server tool:
+
+- `search_tools` — description `"Search the tools of <about> by keywords. Returns name, description and
+  inputSchema of the best matches; run one with call_tool."`, schema
+  `{type:"object", properties:{query:{type:"string"}, limit:{type:"integer"}}, required:["query"]}`.
+  Ranking is BM25 over the tool name (weight ×2, split on `_` and camelCase) and description; each hit is
+  `{name, description, inputSchema, server}` where `server` is the configured `description`.
+- `call_tool` — description `"Run a tool found with search_tools."`, args `{name, arguments}`; the result
+  is identical to a direct call (MRTR still routes through §10).
+- Direct server-tool names are hidden in this mode. Search is client-side (the spec has no search method):
+  `tools/list` is fetched once and cached for its `ttlMs`.
+
+### 2.9 Not supported
+
+roots, sampling, logging (deprecated by the spec); Dynamic Client Registration (§2A); Tasks extension
+(follow-up change); `x-mcp-header` mirroring; SSE progress notifications on the 2026 path; `nextCursor`
+pagination on the 2026 path; prompts/resource-template/subscription helpers.
+
+### 2.F Frozen fallback — pre-2026 behaviour (verbatim, frozen)
+
+Used **only** when `server/discover` fails as in §2.2 (servers on 2025-11-25 and older). **Frozen:** no
+feature introduced by `upgrade-mcp-2026-07-28` lands here, except OAuth (§2A). The text below is the
+pre-change §2, kept verbatim (headings demoted one level); its config format, naming, result mapping and
+host-facing extensions also govern the 2026 path. It is deleted when the spec's removal window passes.
+
+#### Config file format
 
 Superset of the Claude-desktop / opencode format. The top-level key may be
 `mcpServers` (Claude style), `servers`, or `mcp` — all accepted.
@@ -317,7 +453,7 @@ sibling config sections, not MCP servers. (Without this, a config file that carr
 toggle, an `agents` block, an `a2a` card block, or an `mcpServer` profile would produce a bogus MCP
 server.)
 
-### Behaviour (mirrors opencode `mcp/index.ts` + `mcp/catalog.ts`)
+#### Behaviour (mirrors opencode `mcp/index.ts` + `mcp/catalog.ts`)
 
 - **local** → connect over **stdio** (spawn `command[0]` with `command[1:]`, merged
   env = process env + `environment`, in `cwd`).
@@ -369,12 +505,12 @@ server.)
     yields **no** `parts` key at all, so it stays byte-identical.
 - `close()` disconnects every client (and kills stdio child trees).
 
-### Status (queryable)
+#### Status (queryable)
 
 `connected | disabled | failed`  (v1 drops opencode's `needs_auth` /
 `needs_client_registration` since OAuth is deferred.)
 
-### Elicitation bridge (server→client input, mapped onto §10)
+#### Elicitation bridge (server→client input, mapped onto §10)
 
 An MCP server may **elicit** input from the user *during* a `tools/call` it is servicing —
 `elicitation/create`, a reverse-request on the same session (the mirror of sampling/roots). toolnexus
@@ -394,7 +530,7 @@ bridges it onto the one §10 `waitFor` rather than inventing a second input path
   uses URL mode → `kind:"authorization"`, entered out-of-band. v1 ships form mode across all ports; URL
   mode where the port's MCP SDK supports it.
 
-### Host-facing extensions (ctx-aware load, per-server allowlist, list-only inventory)
+#### Host-facing extensions (ctx-aware load, per-server allowlist, list-only inventory)
 
 Additive; grounded in `docs/adr/0001-rag-go-consumer-needs.md`. A caller passing none of these gets
 byte-identical behavior.
@@ -415,6 +551,84 @@ byte-identical behavior.
 - **Toolkit sugar.** `DisableTools []string` drops tools by their final exposed name across every
   source; `DisableSkills []string` drops skills by name from the `skill` catalog. Both compose with the
   map filters above.
+
+---
+
+## 2A. MCP authorization (OAuth 2.1, MCP 2026-07-28 `basic/authorization`)
+
+> **Status: contract pinned, ports pending** (change `upgrade-mcp-2026-07-28`; reference
+> `spikes/mcp-2026/golang` `auth.go`, `serverauth.go`, `devauth.go`; verified live against Keycloak 26.8.1 and
+> GitHub's hosted MCP server). Applies to the 2026 path and to the frozen fallback (§2.F). stdio has no auth.
+
+### 2A.1 Client
+
+Per-server config `auth` (all optional; absent ⇒ a 401 still triggers the flow with CIMD if the AS supports
+it): `{ clientId?, clientSecret?, tokenAuthMethod?: "client_secret_basic"|"client_secret_post",
+clientIds?: {<issuer>: <id>}, clientMetadataUrl?, redirectUri?, mode?: "auto"|"pause",
+omitRefreshResource?: bool, allowHttp?: bool }`, plus a host-supplied **token store** (default in-memory).
+
+1. **Trigger.** HTTP 401 (or 403 `insufficient_scope`) with `WWW-Authenticate: Bearer ...`. After a restart
+   the first request goes token-less to learn the issuer before a stored token is sent.
+2. **Protected Resource Metadata** (RFC 9728): the challenge's `resource_metadata` URL, else
+   `/.well-known/oauth-protected-resource<path>`, else `/.well-known/oauth-protected-resource`. PRM `resource`
+   MUST equal the server URI. `authorization_servers[0]` is used; none ⇒ error `PRM lists no
+   authorization_servers`. AS must be https (`allowHttp` escape hatch, dev/test only).
+3. **AS metadata**: `/.well-known/oauth-authorization-server<path>` (RFC 8414) → `/.well-known/openid-configuration<path>`
+   → `<path>/.well-known/openid-configuration` (no path: the first two at root). Metadata `issuer` MUST equal the
+   issuer. `code_challenge_methods_supported` lacking `S256` ⇒ refuse (`authorization server does not advertise
+   PKCE S256; refusing`).
+4. **Client identity, in order:** a pre-registered `clientId` bound to that issuer (`clientIds[issuer]`, or
+   `clientId`), optional `clientSecret` via `tokenAuthMethod`; then a **Client ID Metadata Document** URL as
+   `client_id` when the AS advertises `client_id_metadata_document_supported`. **No Dynamic Client
+   Registration, ever.** Neither ⇒ error naming the issuer: `no client identity for <issuer>: <why> and no
+   client id is configured — register an app with <issuer> and set OAuth.ClientID (dynamic client registration
+   is not supported)` (the setter name is per-port: `clientId` in config).
+5. **Authorization code + PKCE S256**, `resource=<server URI>` on the authorize and token requests, `scope` =
+   the challenge `scope`, else PRM `scopes_supported`. Random `state`.
+6. **Callback validation** (before acting on `error`): when the AS advertises
+   `authorization_response_iss_parameter_supported`, `iss` MUST be present and equal the issuer (`authorization
+   response iss mismatch (possible mix-up attack)` / `authorization response missing iss`); `state` MUST match
+   (`authorization response state mismatch`); `error=<e>` ⇒ `authorization denied: <e>`. On failure nothing is
+   stored.
+7. **Token request** sends `Accept: application/json` and accepts a JSON **or** `application/x-www-form-urlencoded`
+   reply (GitHub). Errors are `token endpoint: HTTP <status> <error>` — **never the body**.
+8. **Refresh** on expiry (10 s skew) and on 401 `invalid_token` with a refresh token; `resource` is sent unless
+   `omitRefreshResource` (Entra). **Single-flight:** concurrent callers share one refresh request.
+9. **Step-up** on 403 `insufficient_scope`: re-authorize with the union of the challenge `scope` and the
+   previously granted scopes.
+10. **Two modes.** `auto` (default for CLI/desktop): open the system browser, receive the callback on
+    `http://127.0.0.1:<random>/callback` (5 min timeout). `pause`: no browser — return a §10
+    `Request{id:"auth-<random>", kind:"authorization", prompt:"Authorize access to <resource>", url, expiresAt}`
+    (10 min expiry) through `waitFor`, or as `{status:"pending"}` without one. The `Answer` carries the callback
+    URL the AS redirected to (the reference API is `Resume(id, callbackURL)`); resuming completes the flow and sends the
+    **paused request** — same MRTR round, same `inputResponses`/`requestState` — for the first time. The tool
+    runs exactly once. Unknown id ⇒ `unknown pending authorization "<id>"`; expired ⇒ `pending authorization
+    expired`. Hosts that already answer `authorization` requests (URL elicitation) get OAuth for free.
+11. **Token handling.** Credentials are keyed by issuer and sent only once the server's AS issuer is confirmed.
+    Tokens, codes, verifiers and secrets are **never logged** and never appear in error text.
+
+### 2A.2 Server (`serve` MCP profile)
+
+`mcp.auth = { issuer, audience?, scopes?: {"*": [...], <tool>: [...]}, verify? }`. Absent ⇒ unprotected
+(unchanged).
+
+- **PRM** at `/.well-known/oauth-protected-resource` and `/.well-known/oauth-protected-resource/mcp`:
+  `{resource: <audience>, authorization_servers: [issuer], scopes_supported: scopes["*"],
+  bearer_methods_supported: ["header"]}`.
+- **401** for a missing token, `WWW-Authenticate: Bearer resource_metadata="<scheme>://<host>/.well-known/oauth-protected-resource/mcp", scope="<scopes[*]>"`;
+  an invalid/expired/wrong-audience token adds `, error="invalid_token"`. Body `{"error":"unauthorized"}`. The
+  token and the failure reason are never echoed.
+- **403** when the token lacks a needed scope (needed = `scopes["*"]`, plus `scopes[<tool>]` for `tools/call`):
+  same header with the **full** needed set and `, error="insufficient_scope"`. Scopes match exactly (no
+  hierarchy).
+- **Default verifier**: RS256 JWT, keys from the issuer's discovered `jwks_uri` (by `kid`), checks signature,
+  `iss`, `aud` = `audience` (default: the server's `/mcp` URL), `exp`. `verify(ctx, token) -> Principal` replaces
+  it (opaque tokens / introspection).
+- **Principal** `{subject, scopes, claims}` is visible to the tool through its `Context` during execution.
+- Header validation (`-32020`/`-32022`, §7C) runs **before** auth.
+- **Dev authorization server** (every port, one call, in-process, **not for production**): auto-approves as
+  `dev-user`, issues RS256 JWTs, serves AS metadata + JWKS, supports PKCE, CIMD, refresh, and an Entra-style
+  "reject `resource` on refresh" switch for tests.
 
 ---
 
@@ -1102,6 +1316,39 @@ an object ⇒ used as-is. All Task reads/writes go through the store.
 ---
 
 ## 7C. MCP server — inbound (`serve` MCP profile)
+
+> **Target contract (change `upgrade-mcp-2026-07-28`, ports pending):** the server speaks **`2026-07-28`
+> only** over Streamable HTTP. Until a port ships it, that port serves the pre-change profile in §7C.F.
+> **BREAKING when shipped:** old-era MCP clients (`initialize`) can no longer call `serve /mcp`.
+
+Expose a toolkit as an MCP server (the gateway role is unchanged — every source's unified tools, dispatched
+straight to `Tool.execute`, no client loop). **HTTP only** (`POST /mcp`, stateless, no per-client session
+state); **no stdio transport**. `MCPServeConfig = { name?, version?, tools?, auth? }` (`auth` per §2A.2).
+
+- **Header validation, in this order** (any failure ⇒ HTTP 400 + JSON-RPC error; checked before auth):
+  1. `MCP-Protocol-Version` header missing ⇒ `-32020` `Header mismatch: MCP-Protocol-Version header missing`.
+  2. `Mcp-Method` ≠ body `method` ⇒ `-32020`.
+  3. For `tools/call` / `prompts/get` (`name`) and `resources/read` (`uri`): `Mcp-Name` (base64 sentinel
+     `=?base64?...?=` decoded) ≠ body value ⇒ `-32020`.
+  4. Header version ≠ `_meta["io.modelcontextprotocol/protocolVersion"]` ⇒ `-32020` (mismatch wins over
+     support, design decision 8).
+  5. Version ≠ `2026-07-28` ⇒ `-32022` `Unsupported protocol version`, `data: {supported:["2026-07-28"], requested}`.
+  Unknown method ⇒ HTTP 404 + `-32601`; parse error ⇒ `-32700`; notifications ⇒ 202.
+- **Every result** carries `resultType` (`"complete"` unless MRTR) and `_meta["io.modelcontextprotocol/serverInfo"]
+  = {name, version}` (defaults `toolnexus` / `0.1.0`).
+- **`server/discover`** ⇒ `{resultType, supportedVersions:["2026-07-28"], capabilities:{tools:{}, resources:{},
+  extensions:{"io.modelcontextprotocol/skills":{}}}, _meta, ttlMs:3600000, cacheScope:"public"}`.
+- **`tools/list`** ⇒ tools in deterministic order (by name, code point), `name` verbatim, `ttlMs:60000`,
+  `cacheScope:"public"`; `mcp.tools` filtering as in §7C.F.
+- **`tools/call`** ⇒ `Tool.execute`; `ToolResult` → `CallToolResult` mapping and throw ⇒ `isError:true` as in §7C.F.
+  Unknown tool ⇒ `-32602` `Unknown tool: <name>`. A tool suspension (§10 `Pending` of kind `input`) is returned as
+  `resultType:"input_required"` with `inputRequests` (form `elicitation/create`) and an opaque `requestState`;
+  the retried call carries `inputResponses`.
+- **Skills extension** (§2.7): `skills/list`, `skills/get`, `resources/read` for `skill://` URIs publish the
+  toolkit's skills; URI containment rejects with `-32602`.
+- **Auth**: §2A.2.
+
+### 7C.F Pre-change profile (frozen, until each port ships the above)
 
 Expose a toolkit **as an MCP server** so any MCP client (Claude Desktop, an IDE, another agent) can
 call its tools — the inbound mirror of §7B. Where A2A advertises **skills** and fulfils a Task through

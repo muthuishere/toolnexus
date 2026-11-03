@@ -1,10 +1,10 @@
 ## 1. Contract
 
-- [ ] 1.1 Rewrite SPEC.md §2 (MCP source, 2026-07-28 + frozen fallback) and §7C (MCP server), add §2A (authorization)
+- [x] 1.1 Rewrite SPEC.md §2 (MCP source, 2026-07-28 + frozen fallback) and §7C (MCP server), add §2A (authorization)
 - [ ] 1.2 Resolve design open questions (resource-on-refresh default, tools/list caching, stdio concurrency)
-- [ ] 1.3 Shared conformance fixtures in `examples/` (fixture server tools, MRTR greet, skills, auth cases)
+- [x] 1.3 Shared conformance fixtures in `examples/` (fixture server tools, MRTR greet, skills, auth cases)
 - [ ] 1.4 Cross-port interop runner: every port's client against every port's server
-- [ ] 1.5 `openspec validate upgrade-mcp-2026-07-28`
+- [x] 1.5 `openspec validate upgrade-mcp-2026-07-28`
 
 ## 2. Reference (golang)
 

@@ -8,6 +8,25 @@ GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
 
 ## Unreleased
 
+### In progress — MCP 2026-07-28 (not yet in any shipped port)
+
+toolnexus is moving its MCP layer to the 2026-07-28 protocol, which hosted servers (GitHub's MCP server among
+them) already speak and which most of them pair with OAuth. Today no shipped port speaks it and none can log
+in to an OAuth-protected server; you still pass a bearer token through `headers`. Nothing you install changes
+with this entry.
+
+What exists: the contract is pinned in `SPEC.md` (§2 rewritten, new §2A authorization, §7C server), with
+shared conformance fixtures in `examples/mcp-2026/`. Spikes in all eight languages under `spikes/mcp-2026/`
+pass an 8×8 client×server interop matrix; the Go spike was also run live against Keycloak 26.8.1 and GitHub's
+hosted server. Planned behaviour: `server/discover` first with today's client frozen as the fallback for older
+servers; OAuth with no config when the server's authorization server supports Client ID Metadata Documents, or
+one `clientId` when it does not (no Dynamic Client Registration), in browser or §10 pause/resume mode; skills
+over MCP; opt-in lazy `toolSearch`; and `serve` protected with one `auth` line.
+
+Not done: no port code, no fallback wiring, no release. When it ships, `serve /mcp` becomes **BREAKING** —
+old-era MCP clients will not be able to call it — and golang drops `mark3labs/mcp-go`. Out of scope: Tasks,
+roots/sampling/logging, DCR, MCP server over stdio. Tracked in `openspec/changes/upgrade-mcp-2026-07-28`.
+
 ## 0.24.0 — 2026-11-04
 
 **Media generation: images, video, speech, transcription, voice cloning and talking-head video,
