@@ -23,7 +23,7 @@ the same output in every language.
 
 ```toml
 [dependencies]
-toolnexus = "0.23"
+toolnexus = "0.24"
 tokio = { version = "1", features = ["full"] }
 serde_json = "1"
 ```
@@ -119,7 +119,7 @@ for f in &res.files { println!("{} {} {}", f.from, f.mime_type, f.url); }
 | `mcp-http` | on | MCP over streamable HTTP. Without it you get stdio MCP servers only. |
 | `serve` | on | `Toolkit::serve`: the A2A agent and the MCP server. |
 
-For a lean build, use `toolnexus = { version = "0.23", default-features = false }`.
+For a lean build, use `toolnexus = { version = "0.24", default-features = false }`.
 
 ## More examples
 

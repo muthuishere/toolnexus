@@ -16,7 +16,7 @@ this port ships the **full** elicitation bridge (form *and* URL mode).
 
 ```elixir
 def deps do
-  [{:toolnexus, "~> 0.23"}]
+  [{:toolnexus, "~> 0.24"}]
 end
 ```
 
