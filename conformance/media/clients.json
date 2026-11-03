@@ -1,5 +1,5 @@
 {
-  "_doc": "Built-in API client conformance (SPEC §7G.9, §7G.5, §7G.11). A port's harness, per case: starts the fake HTTP server (script[] in order, last repeats; entries {status, body|rawBody|bodyBase64, headers?}), substitutes {server} everywhere (config, args, script bodies and headers, expectations), makes {dir} (passed as gather.dir) and {inputs} (writes inputFiles name->base64 there), sets env and removes unsetEnv, builds the named built-in client (client = a2e|elevenlabs|openai|openrouter|fal) from config, and calls createMedia(client) for verb/args through the function face and then the tool face (fresh script replay, fresh {dir}). Asserts: expectRequests in order (method, path exactly as sent incl. query; body = JSON deep-equal; multipart = parts in order, each {name,value} or {name,filename,contentType,bytesBase64}; headers = subset with exact values; absentHeaders = must not be sent) — when expectRequests is present the request count must match too; expectHeaders on EVERY request; expectProgress; result (files: url/data/type/mimeType exact; saved = file lives directly in {dir}, name matches ^<client>-<verb>-[0-9]+-[0-9]+<ext>$, path absolute, url == 'file://'+path, bytes == bytesBase64) or error (exact) / errorPrefix (startsWith) with status; tool: output exact or outputPattern (regex after substituting {dir} regex-escaped), parts, metadata, noParts = no parts key. liveVerified:false marks a request shape pinned from provider docs, not from a live call. A field absent from a case is not asserted. modelParts (SPEC §7G.6 model visibility): the parts of this tool result that message assembly (§8A) emits to the model — only image parts; video/audio parts stay in RunResult.files and toolCalls[].parts only. Assert with the port's assembly function on a transcript containing this tool result.",
+  "_doc": "Built-in API client conformance (SPEC §7G.9, §7G.5, §7G.11). A port's harness, per case: starts the fake HTTP server (script[] in order, last repeats; entries {status, body|rawBody|bodyBase64, headers?}), substitutes {server} everywhere (config, args, script bodies and headers, expectations), makes {dir} (passed as gather.dir) and {inputs} (writes inputFiles name->base64 there), sets env and removes unsetEnv, builds the named built-in client (client = a2e|elevenlabs|openai|openrouter|fal) from config, and calls createMedia(client) for verb/args through the function face and then the tool face (fresh script replay, fresh {dir}). Asserts: expectRequests in order (method, path exactly as sent incl. query; body = JSON deep-equal; multipart = parts in order, each {name,value} or {name,filename,contentType,bytesBase64}; headers = subset with exact values; absentHeaders = must not be sent) — when expectRequests is present the request count must match too; expectHeaders on EVERY request; expectProgress; result (files: url/data/type/mimeType exact; saved = file lives directly in {dir}, name matches ^<client>-<verb>-[0-9]+-[0-9]+<ext>$, path absolute, url == 'file://'+path, bytes == bytesBase64) or error (exact) / errorPrefix (startsWith) with status; tool: output exact or outputPattern (regex after substituting {dir} regex-escaped), parts, metadata, noParts = no parts key. liveVerified:false marks a request shape pinned from provider docs, not from a live call. A field absent from a case is not asserted. modelParts (SPEC §7G.6 model visibility): the parts of this tool result that message assembly (§8A) emits to the model — only image parts; video/audio parts stay in RunResult.files and toolCalls[].parts only. Assert with the port's assembly function on a transcript containing this tool result. {inputs} is substituted in expectations too. ctxTimeoutMs (D12): the function face is called with ctx.deadline = now + ctxTimeoutMs (the tool face is not run for such a case); errorPrefix then asserts the message start, maxElapsedMs bounds the call. D9 (SPEC §7G.12): when modelParts is [] the tool-result content the port sends to the model is the plain output string in every message style incl. Anthropic — never an empty content array, never a placeholder; assert it with the same assembly function.",
   "cases": [
     {
       "name": "elevenlabs_speech_default_voice_bytes_download",
@@ -2776,6 +2776,961 @@
       "tool": {
         "isError": true,
         "output": "API error 1001: insufficient balance"
+      }
+    },
+    {
+      "name": "fal_completed_ignores_error_field",
+      "note": "D1: status COMPLETED is done even when error is set.",
+      "client": "fal",
+      "config": {
+        "key": "FAKE_KEY",
+        "url": "{server}",
+        "gather": {
+          "dir": "{dir}",
+          "mode": "url"
+        },
+        "loop": {
+          "intervalMs": 1
+        }
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "cat"
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {
+            "request_id": "req-c",
+            "status_url": "{server}/s",
+            "response_url": "{server}/r"
+          }
+        },
+        {
+          "status": 200,
+          "body": {
+            "status": "COMPLETED",
+            "error": "ignored warning"
+          }
+        },
+        {
+          "status": 200,
+          "body": {
+            "images": [
+              {
+                "url": "https://x/out.png"
+              }
+            ]
+          }
+        }
+      ],
+      "expectProgress": [
+        "COMPLETED"
+      ],
+      "result": {
+        "files": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "url": "https://x/out.png"
+          }
+        ],
+        "jobId": "req-c",
+        "status": "completed"
+      }
+    },
+    {
+      "name": "fal_error_field_while_in_progress_is_failed",
+      "note": "D1: not COMPLETED and a non-empty error ⇒ failed.",
+      "client": "fal",
+      "config": {
+        "key": "FAKE_KEY",
+        "url": "{server}",
+        "gather": {
+          "dir": "{dir}",
+          "mode": "url"
+        },
+        "loop": {
+          "intervalMs": 1
+        }
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "cat"
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {
+            "request_id": "req-e",
+            "status_url": "{server}/s",
+            "response_url": "{server}/r"
+          }
+        },
+        {
+          "status": 200,
+          "body": {
+            "status": "IN_PROGRESS",
+            "error": "worker crashed"
+          }
+        }
+      ],
+      "status": "failed",
+      "error": "job req-e failed: worker crashed",
+      "tool": {
+        "isError": true,
+        "output": "job req-e failed: worker crashed"
+      }
+    },
+    {
+      "name": "openrouter_no_image_text_capped_200",
+      "note": "D4: cap counts code points, … only when truncated.",
+      "client": "openrouter",
+      "config": {
+        "key": "FAKE_KEY",
+        "url": "{server}/api/v1",
+        "gather": {
+          "dir": "{dir}"
+        }
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "cat"
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {
+            "id": "gen-3",
+            "choices": [
+              {
+                "message": {
+                  "content": "ééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé"
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "status": "failed",
+      "error": "image: no image in response: éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé…",
+      "tool": {
+        "isError": true,
+        "output": "image: no image in response: éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé…"
+      }
+    },
+    {
+      "name": "openrouter_no_image_text_exactly_200_not_capped",
+      "note": "D4",
+      "client": "openrouter",
+      "config": {
+        "key": "FAKE_KEY",
+        "url": "{server}/api/v1",
+        "gather": {
+          "dir": "{dir}"
+        }
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "cat"
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {
+            "id": "gen-4",
+            "choices": [
+              {
+                "message": {
+                  "content": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé"
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "status": "failed",
+      "error": "image: no image in response: éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé",
+      "tool": {
+        "isError": true,
+        "output": "image: no image in response: éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé"
+      }
+    },
+    {
+      "name": "download_402_is_failed_not_unavailable",
+      "note": "D5: account-precondition codes only count on the provider's API, not on a result download.",
+      "client": "fal",
+      "config": {
+        "key": "FAKE_KEY",
+        "url": "{server}",
+        "gather": {
+          "dir": "{dir}"
+        },
+        "loop": {
+          "intervalMs": 1
+        }
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "cat"
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {
+            "request_id": "r5",
+            "status_url": "{server}/s",
+            "response_url": "{server}/r"
+          }
+        },
+        {
+          "status": 200,
+          "body": {
+            "status": "COMPLETED"
+          }
+        },
+        {
+          "status": 200,
+          "body": {
+            "images": [
+              {
+                "url": "{server}/files/a.png"
+              }
+            ]
+          }
+        },
+        {
+          "status": 402,
+          "rawBody": "{\"error\":\"no credits\"}"
+        }
+      ],
+      "status": "failed",
+      "error": "image: download failed: HTTP 402",
+      "tool": {
+        "isError": true,
+        "output": "image: download failed: HTTP 402"
+      }
+    },
+    {
+      "name": "download_429_quota_is_failed_not_unavailable",
+      "note": "D5",
+      "client": "fal",
+      "config": {
+        "key": "FAKE_KEY",
+        "url": "{server}",
+        "gather": {
+          "dir": "{dir}"
+        },
+        "loop": {
+          "intervalMs": 1
+        }
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "cat"
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {
+            "request_id": "r6",
+            "status_url": "{server}/s",
+            "response_url": "{server}/r"
+          }
+        },
+        {
+          "status": 200,
+          "body": {
+            "status": "COMPLETED"
+          }
+        },
+        {
+          "status": 200,
+          "body": {
+            "images": [
+              {
+                "url": "{server}/files/a.png"
+              }
+            ]
+          }
+        },
+        {
+          "status": 429,
+          "rawBody": "quota exceeded"
+        }
+      ],
+      "status": "failed",
+      "error": "image: download failed: HTTP 429",
+      "tool": {
+        "isError": true,
+        "output": "image: download failed: HTTP 429"
+      }
+    },
+    {
+      "name": "input_fetch_402_is_failed_not_unavailable",
+      "note": "D5",
+      "client": "elevenlabs",
+      "config": {
+        "key": "FAKE_KEY",
+        "url": "{server}",
+        "gather": {
+          "dir": "{dir}"
+        }
+      },
+      "verb": "transcribe",
+      "args": {
+        "audio": "{server}/in/clip.wav"
+      },
+      "script": [
+        {
+          "status": 402,
+          "rawBody": "payment required"
+        }
+      ],
+      "expectRequests": [
+        {
+          "method": "GET",
+          "path": "/in/clip.wav"
+        }
+      ],
+      "status": "failed",
+      "error": "transcribe: cannot read \"{server}/in/clip.wav\": HTTP 402",
+      "tool": {
+        "isError": true,
+        "output": "transcribe: cannot read \"{server}/in/clip.wav\": HTTP 402"
+      }
+    },
+    {
+      "name": "input_fetch_429_billing_is_failed_not_unavailable",
+      "note": "D5",
+      "client": "openai",
+      "config": {
+        "key": "FAKE_KEY",
+        "url": "{server}/v1",
+        "gather": {
+          "dir": "{dir}"
+        }
+      },
+      "verb": "transcribe",
+      "args": {
+        "audio": "{server}/in/memo.m4a"
+      },
+      "script": [
+        {
+          "status": 429,
+          "rawBody": "billing hard limit"
+        }
+      ],
+      "expectRequests": [
+        {
+          "method": "GET",
+          "path": "/in/memo.m4a"
+        }
+      ],
+      "status": "failed",
+      "error": "transcribe: cannot read \"{server}/in/memo.m4a\": HTTP 429",
+      "tool": {
+        "isError": true,
+        "output": "transcribe: cannot read \"{server}/in/memo.m4a\": HTTP 429"
+      }
+    },
+    {
+      "name": "builtin_client_rejects_non_canonical_arg",
+      "note": "D7",
+      "client": "openai",
+      "config": {
+        "key": "FAKE_KEY",
+        "url": "{server}/v1",
+        "gather": {
+          "dir": "{dir}"
+        }
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "cat",
+        "foo": 1
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {}
+        }
+      ],
+      "expectRequests": [],
+      "status": "failed",
+      "error": "image: argument \"foo\" not supported by openai",
+      "tool": {
+        "isError": true,
+        "output": "image: argument \"foo\" not supported by openai"
+      }
+    },
+    {
+      "name": "fal_missing_status_and_response_url_builds_them",
+      "note": "D10: <url>/<model>/requests/<id>/status and <url>/<model>/requests/<id>; same origin, so the key is sent.",
+      "client": "fal",
+      "config": {
+        "key": "FAKE_KEY",
+        "url": "{server}",
+        "gather": {
+          "dir": "{dir}",
+          "mode": "url"
+        },
+        "loop": {
+          "intervalMs": 1
+        }
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "cat"
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {
+            "request_id": "req-f"
+          }
+        },
+        {
+          "status": 200,
+          "body": {
+            "status": "COMPLETED"
+          }
+        },
+        {
+          "status": 200,
+          "body": {
+            "images": [
+              {
+                "url": "https://x/out.png"
+              }
+            ]
+          }
+        }
+      ],
+      "expectRequests": [
+        {
+          "method": "POST",
+          "path": "/fal-ai/flux/schnell"
+        },
+        {
+          "method": "GET",
+          "path": "/fal-ai/flux/schnell/requests/req-f/status",
+          "headers": {
+            "Authorization": "Key FAKE_KEY"
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/fal-ai/flux/schnell/requests/req-f",
+          "headers": {
+            "Authorization": "Key FAKE_KEY"
+          }
+        }
+      ],
+      "result": {
+        "files": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "url": "https://x/out.png"
+          }
+        ],
+        "jobId": "req-f",
+        "status": "completed"
+      }
+    },
+    {
+      "name": "elevenlabs_transcribe_models_override",
+      "note": "D11",
+      "client": "elevenlabs",
+      "liveVerified": false,
+      "config": {
+        "key": "FAKE_KEY",
+        "url": "{server}",
+        "gather": {
+          "dir": "{dir}"
+        },
+        "models": {
+          "transcribe": "scribe_v2"
+        }
+      },
+      "inputFiles": {
+        "clip.mp3": "QVVESU8="
+      },
+      "verb": "transcribe",
+      "args": {
+        "audio": "{inputs}/clip.mp3"
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {
+            "text": "hi"
+          }
+        }
+      ],
+      "expectRequests": [
+        {
+          "method": "POST",
+          "path": "/v1/speech-to-text",
+          "multipart": [
+            {
+              "name": "model_id",
+              "value": "scribe_v2"
+            },
+            {
+              "name": "file",
+              "filename": "clip.mp3",
+              "contentType": "audio/mpeg",
+              "bytesBase64": "QVVESU8="
+            }
+          ]
+        }
+      ],
+      "result": {
+        "files": [],
+        "text": "hi",
+        "status": "completed"
+      }
+    },
+    {
+      "name": "elevenlabs_speech_models_beats_model",
+      "note": "D11: models.<verb> wins over model.",
+      "client": "elevenlabs",
+      "liveVerified": false,
+      "config": {
+        "key": "FAKE_KEY",
+        "url": "{server}",
+        "gather": {
+          "dir": "{dir}"
+        },
+        "model": "eleven_turbo_v2_5",
+        "models": {
+          "speech": "eleven_multilingual_v2"
+        }
+      },
+      "verb": "speech",
+      "args": {
+        "text": "hi"
+      },
+      "script": [
+        {
+          "status": 200,
+          "bodyBase64": "TVAzQllURVM="
+        }
+      ],
+      "expectRequests": [
+        {
+          "method": "POST",
+          "path": "/v1/text-to-speech/JBFqnCBsd6RMkjVDRZzb?output_format=mp3_22050_32",
+          "body": {
+            "text": "hi",
+            "model_id": "eleven_multilingual_v2"
+          }
+        }
+      ],
+      "result": {
+        "files": [
+          {
+            "type": "audio",
+            "mimeType": "audio/mpeg",
+            "saved": {
+              "ext": ".mp3",
+              "bytesBase64": "TVAzQllURVM="
+            }
+          }
+        ],
+        "status": "completed"
+      }
+    },
+    {
+      "name": "openai_transcribe_models_override",
+      "note": "D11",
+      "client": "openai",
+      "liveVerified": false,
+      "config": {
+        "key": "FAKE_KEY",
+        "url": "{server}/v1",
+        "gather": {
+          "dir": "{dir}"
+        },
+        "models": {
+          "transcribe": "whisper-1"
+        }
+      },
+      "inputFiles": {
+        "memo.m4a": "TTRB"
+      },
+      "verb": "transcribe",
+      "args": {
+        "audio": "{inputs}/memo.m4a"
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {
+            "text": "ok"
+          }
+        }
+      ],
+      "expectRequests": [
+        {
+          "method": "POST",
+          "path": "/v1/audio/transcriptions",
+          "multipart": [
+            {
+              "name": "model",
+              "value": "whisper-1"
+            },
+            {
+              "name": "file",
+              "filename": "memo.m4a",
+              "contentType": "audio/mp4",
+              "bytesBase64": "TTRB"
+            }
+          ]
+        }
+      ],
+      "result": {
+        "files": [],
+        "text": "ok",
+        "status": "completed"
+      }
+    },
+    {
+      "name": "caller_deadline_is_timeout_not_cancelled",
+      "note": "D12: a ctx deadline that expires is status timeout with the job form; only an explicit cancel is cancelled.",
+      "client": "fal",
+      "config": {
+        "key": "FAKE_KEY",
+        "url": "{server}",
+        "gather": {
+          "dir": "{dir}",
+          "mode": "url"
+        },
+        "loop": {
+          "intervalMs": 1,
+          "timeoutMs": 60000
+        }
+      },
+      "ctxTimeoutMs": 300,
+      "maxElapsedMs": 5000,
+      "verb": "image",
+      "args": {
+        "prompt": "cat"
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {
+            "request_id": "req-t",
+            "status_url": "{server}/s",
+            "response_url": "{server}/r"
+          }
+        },
+        {
+          "status": 200,
+          "body": {
+            "status": "IN_PROGRESS"
+          }
+        }
+      ],
+      "status": "timeout",
+      "errorPrefix": "job req-t timed out after "
+    },
+    {
+      "name": "elevenlabs_transcribe_no_text",
+      "note": "D13",
+      "client": "elevenlabs",
+      "config": {
+        "key": "FAKE_KEY",
+        "url": "{server}",
+        "gather": {
+          "dir": "{dir}"
+        }
+      },
+      "inputFiles": {
+        "clip.mp3": "QVVESU8="
+      },
+      "verb": "transcribe",
+      "args": {
+        "audio": "{inputs}/clip.mp3"
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {
+            "language_code": "en"
+          }
+        }
+      ],
+      "status": "failed",
+      "error": "transcribe: no result at text",
+      "tool": {
+        "isError": true,
+        "output": "transcribe: no result at text"
+      }
+    },
+    {
+      "name": "elevenlabs_clone_voice_no_voice_id",
+      "note": "D13",
+      "client": "elevenlabs",
+      "config": {
+        "key": "FAKE_KEY",
+        "url": "{server}",
+        "gather": {
+          "dir": "{dir}"
+        }
+      },
+      "inputFiles": {
+        "a.mp3": "U0FNUExFQQ=="
+      },
+      "verb": "cloneVoice",
+      "args": {
+        "name": "Me",
+        "samples": [
+          "{inputs}/a.mp3"
+        ]
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {
+            "requires_verification": false
+          }
+        }
+      ],
+      "status": "failed",
+      "error": "cloneVoice: no result at voice_id",
+      "tool": {
+        "isError": true,
+        "output": "cloneVoice: no result at voice_id"
+      }
+    },
+    {
+      "name": "openai_transcribe_no_text",
+      "note": "D13",
+      "client": "openai",
+      "config": {
+        "key": "FAKE_KEY",
+        "url": "{server}/v1",
+        "gather": {
+          "dir": "{dir}"
+        }
+      },
+      "inputFiles": {
+        "memo.m4a": "TTRB"
+      },
+      "verb": "transcribe",
+      "args": {
+        "audio": "{inputs}/memo.m4a"
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {}
+        }
+      ],
+      "status": "failed",
+      "error": "transcribe: no result at text",
+      "tool": {
+        "isError": true,
+        "output": "transcribe: no result at text"
+      }
+    },
+    {
+      "name": "openai_video_no_job_id",
+      "note": "D13",
+      "client": "openai",
+      "config": {
+        "key": "FAKE_KEY",
+        "url": "{server}/v1",
+        "gather": {
+          "dir": "{dir}"
+        }
+      },
+      "verb": "video",
+      "args": {
+        "prompt": "waves"
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {
+            "status": "queued"
+          }
+        }
+      ],
+      "status": "failed",
+      "error": "video: no job id at id",
+      "tool": {
+        "isError": true,
+        "output": "video: no job id at id"
+      }
+    },
+    {
+      "name": "fal_no_request_id",
+      "note": "D13",
+      "client": "fal",
+      "config": {
+        "key": "FAKE_KEY",
+        "url": "{server}",
+        "gather": {
+          "dir": "{dir}"
+        },
+        "loop": {
+          "intervalMs": 1
+        }
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "cat"
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {
+            "status_url": "{server}/s"
+          }
+        }
+      ],
+      "status": "failed",
+      "error": "image: no job id at request_id",
+      "tool": {
+        "isError": true,
+        "output": "image: no job id at request_id"
+      }
+    },
+    {
+      "name": "input_file_exceeds_max_bytes_no_request",
+      "note": "D14",
+      "client": "elevenlabs",
+      "config": {
+        "key": "FAKE_KEY",
+        "url": "{server}",
+        "gather": {
+          "dir": "{dir}",
+          "maxBytes": 4
+        }
+      },
+      "inputFiles": {
+        "clip.mp3": "QVVESU8="
+      },
+      "verb": "transcribe",
+      "args": {
+        "audio": "{inputs}/clip.mp3"
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {
+            "text": "x"
+          }
+        }
+      ],
+      "expectRequests": [],
+      "status": "failed",
+      "error": "transcribe: cannot read \"{inputs}/clip.mp3\": file exceeds gather.maxBytes (4 bytes)",
+      "tool": {
+        "isError": true,
+        "output": "transcribe: cannot read \"{inputs}/clip.mp3\": file exceeds gather.maxBytes (4 bytes)"
+      }
+    },
+    {
+      "name": "input_url_exceeds_max_bytes",
+      "note": "D14",
+      "client": "elevenlabs",
+      "config": {
+        "key": "FAKE_KEY",
+        "url": "{server}",
+        "gather": {
+          "dir": "{dir}",
+          "maxBytes": 4
+        }
+      },
+      "verb": "transcribe",
+      "args": {
+        "audio": "{server}/in/big.wav"
+      },
+      "script": [
+        {
+          "status": 200,
+          "bodyBase64": "V0FWQllURVM=",
+          "headers": {
+            "Content-Type": "audio/wav"
+          }
+        }
+      ],
+      "expectRequests": [
+        {
+          "method": "GET",
+          "path": "/in/big.wav"
+        }
+      ],
+      "status": "failed",
+      "error": "transcribe: cannot read \"{server}/in/big.wav\": file exceeds gather.maxBytes (4 bytes)",
+      "tool": {
+        "isError": true,
+        "output": "transcribe: cannot read \"{server}/in/big.wav\": file exceeds gather.maxBytes (4 bytes)"
+      }
+    },
+    {
+      "name": "download_exceeds_max_bytes",
+      "note": "D14",
+      "client": "fal",
+      "config": {
+        "key": "FAKE_KEY",
+        "url": "{server}",
+        "gather": {
+          "dir": "{dir}",
+          "maxBytes": 4
+        },
+        "loop": {
+          "intervalMs": 1
+        }
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "cat"
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {
+            "request_id": "r7",
+            "status_url": "{server}/s",
+            "response_url": "{server}/r"
+          }
+        },
+        {
+          "status": 200,
+          "body": {
+            "status": "COMPLETED"
+          }
+        },
+        {
+          "status": 200,
+          "body": {
+            "images": [
+              {
+                "url": "{server}/files/a.png"
+              }
+            ]
+          }
+        },
+        {
+          "status": 200,
+          "bodyBase64": "UE5HQllURVM=",
+          "headers": {
+            "Content-Type": "image/png"
+          }
+        }
+      ],
+      "status": "failed",
+      "error": "image: download failed: file exceeds gather.maxBytes (4 bytes)",
+      "tool": {
+        "isError": true,
+        "output": "image: download failed: file exceeds gather.maxBytes (4 bytes)"
       }
     }
   ]

@@ -12,7 +12,7 @@ OpenAI image, OpenRouter image, fal image, Codex image and Grok image/video live
 PR #123's API is unreleased, so it is reshaped here before any release.
 
 ## What changes
-- SPEC §0 item 14 and **§7G rewritten** (§7G.1–§7G.12):
+- SPEC §0 item 14 and **§7G rewritten** (§7G.1–§7G.13, incl. §7G.12 edge rules D1–D17):
   - seven verbs `image|video|speech|music|transcribe|cloneVoice|talk` — `music` is new, `talk`
     replaces `talking` (tool name `talking_video` unchanged), tool `generate_music` is new;
     canonical args gain `language` (transcribe), `text`/`voice` (talk), music's

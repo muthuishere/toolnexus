@@ -1,5 +1,5 @@
 {
-  "_doc": "CLI client conformance (SPEC §7G.10, §7G.11) over conformance/media/fake-cli/fake-cli.sh — see fake-cli/README.md for the exact harness steps. client = grok|codex. Placeholders: {out} the fake's out dir, {dir} gather.dir, {cwd} in expectArgv = must equal <out>/cwd.txt. command (when present) replaces the fake command entirely (spawn-failure case). env is set in the TEST process (the child inherits it; Codex's folder lookup reads it). expectExists / expectMissing: paths that must / must not exist after the run. expectNoSpawn: argv.txt must not exist. maxElapsedMs: the call must return within it (kill on timeout). Other fields as in clients.json. modelParts (SPEC §7G.6 model visibility): the parts of this tool result that message assembly (§8A) emits to the model — only image parts; video/audio parts stay in RunResult.files and toolCalls[].parts only. Assert with the port's assembly function on a transcript containing this tool result.",
+  "_doc": "CLI client conformance (SPEC §7G.10, §7G.11) over conformance/media/fake-cli/fake-cli.sh — see fake-cli/README.md for the exact harness steps. client = grok|codex. Placeholders: {out} the fake's out dir, {dir} gather.dir, {cwd} in expectArgv = must equal <out>/cwd.txt byte for byte (the fake writes `pwd -P`; D17: the client passes the realpath of its temp dir, so no symlink resolution on either side). command (when present) replaces the fake command entirely (spawn-failure case). env is set in the TEST process (the child inherits it; Codex's folder lookup reads it). expectExists / expectMissing: paths that must / must not exist after the run. expectNoSpawn: argv.txt must not exist. maxElapsedMs: the call must return within it (kill on timeout). Other fields as in clients.json. modelParts (SPEC §7G.6 model visibility): the parts of this tool result that message assembly (§8A) emits to the model — only image parts; video/audio parts stay in RunResult.files and toolCalls[].parts only. Assert with the port's assembly function on a transcript containing this tool result. ctxTimeoutMs (D12): function face only, ctx.deadline = now + ctxTimeoutMs; errorPrefix asserts the message start. D9 (SPEC §7G.12): when modelParts is [] the tool-result content the port sends to the model is the plain output string in every message style incl. Anthropic — never an empty content array, never a placeholder; assert it with the same assembly function.",
   "cases": [
     {
       "name": "grok_image_path_from_tool_result_download",
@@ -694,6 +694,130 @@
         "isError": true,
         "output": "codex: no image: stream disconnected"
       }
+    },
+    {
+      "name": "grok_failed_raw_output_keys_sorted",
+      "note": "D15: rawOutput without message ⇒ compact JSON, object keys sorted by code point at every depth (array order kept).",
+      "client": "grok",
+      "config": {
+        "gather": {
+          "dir": "{dir}"
+        }
+      },
+      "verb": "video",
+      "args": {
+        "prompt": "x"
+      },
+      "fixture": [
+        "{\"type\":\"tool_call\",\"toolCallId\":\"c1\",\"title\":\"image_to_video\",\"kind\":\"image_to_video\",\"status\":\"pending\",\"toolName\":\"image_to_video\",\"rawInput\":{\"prompt\":\"x\"},\"content\":[],\"locations\":[]}",
+        "{\"type\":\"tool_call_update\",\"toolCallId\":\"c1\",\"status\":\"failed\",\"rawOutput\":{\"zeta\":[1,{\"d\":true,\"c\":null}],\"alpha\":{\"b\":2,\"a\":\"x\"}},\"locations\":[]}",
+        "{\"type\":\"end\",\"stopReason\":\"end_turn\",\"sessionId\":\"s1\",\"num_turns\":1,\"total_cost_usd\":0.01}"
+      ],
+      "status": "failed",
+      "error": "grok: no video: {\"alpha\":{\"a\":\"x\",\"b\":2},\"zeta\":[1,{\"c\":null,\"d\":true}]}",
+      "tool": {
+        "isError": true,
+        "output": "grok: no video: {\"alpha\":{\"a\":\"x\",\"b\":2},\"zeta\":[1,{\"c\":null,\"d\":true}]}"
+      }
+    },
+    {
+      "name": "grok_text_capped_300",
+      "note": "D4: 300 code points + … only when truncated.",
+      "client": "grok",
+      "config": {
+        "gather": {
+          "dir": "{dir}"
+        }
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "x"
+      },
+      "fixture": [
+        "{\"type\": \"text\", \"data\": \"ééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé\"}",
+        "{\"type\":\"end\",\"stopReason\":\"end_turn\",\"sessionId\":\"s1\",\"num_turns\":1,\"total_cost_usd\":0.01}"
+      ],
+      "status": "failed",
+      "error": "grok: no image file in the run (exit code 0): éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé…",
+      "tool": {
+        "isError": true,
+        "output": "grok: no image file in the run (exit code 0): éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé…"
+      }
+    },
+    {
+      "name": "grok_tool_error_capped_400",
+      "note": "D4: 400 code points + … only when truncated.",
+      "client": "grok",
+      "config": {
+        "gather": {
+          "dir": "{dir}"
+        }
+      },
+      "verb": "video",
+      "args": {
+        "prompt": "x"
+      },
+      "fixture": [
+        "{\"type\":\"tool_call\",\"toolCallId\":\"c1\",\"title\":\"image_to_video\",\"kind\":\"image_to_video\",\"status\":\"pending\",\"toolName\":\"image_to_video\",\"rawInput\":{\"prompt\":\"x\"},\"content\":[],\"locations\":[]}",
+        "{\"type\": \"tool_call_update\", \"toolCallId\": \"c1\", \"status\": \"failed\", \"rawOutput\": {\"message\": \"ééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé\"}, \"locations\": []}",
+        "{\"type\":\"end\",\"stopReason\":\"end_turn\",\"sessionId\":\"s1\",\"num_turns\":1,\"total_cost_usd\":0.01}"
+      ],
+      "status": "failed",
+      "error": "grok: no video: éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé…",
+      "tool": {
+        "isError": true,
+        "output": "grok: no video: éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé…"
+      }
+    },
+    {
+      "name": "codex_error_exactly_400_not_capped",
+      "note": "D4",
+      "client": "codex",
+      "config": {
+        "gather": {
+          "dir": "{dir}"
+        }
+      },
+      "env": {
+        "CODEX_HOME": "{out}/codexhome"
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "x"
+      },
+      "fixture": [
+        "{\"type\":\"thread.started\",\"thread_id\":\"t9\"}",
+        "{\"type\": \"error\", \"message\": \"éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé\"}",
+        "#exit 1"
+      ],
+      "status": "failed",
+      "error": "codex: no image: éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé",
+      "tool": {
+        "isError": true,
+        "output": "codex: no image: éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé"
+      }
+    },
+    {
+      "name": "grok_caller_deadline_is_timeout",
+      "note": "D12: a ctx deadline kills the CLI and is status timeout, not cancelled.",
+      "client": "grok",
+      "config": {
+        "gather": {
+          "dir": "{dir}"
+        }
+      },
+      "ctxTimeoutMs": 300,
+      "maxElapsedMs": 5000,
+      "verb": "image",
+      "args": {
+        "prompt": "x"
+      },
+      "fixture": [
+        "{\"type\":\"text\",\"data\":\"thinking\"}",
+        "#hang"
+      ],
+      "status": "timeout",
+      "errorPrefix": "grok: timed out after "
     }
   ]
 }

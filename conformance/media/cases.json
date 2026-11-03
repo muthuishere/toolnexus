@@ -1,5 +1,5 @@
 {
-  "_doc": "Media engine conformance (SPEC §7G). A port's harness starts a fake HTTP server, replaces \"{server}\" in style.baseUrl and in script[].headers values with its URL, sets case.env, then serves script[] in order (an entry's optional headers are sent as response headers): entry 0 answers the start request, entries 1.. answer polls; once exhausted the LAST entry repeats. Every request is recorded; path is recorded exactly as sent (percent-encoding NOT decoded). The harness calls generate(verb,args) and the tool face, and asserts: requests (method, path, body for start, header values in expectHeaders), progress statuses, and either result (MediaResult minus nothing) or error (exact message string). tool = the expected ToolResult (output, isError, parts, metadata). styleError:true marks a style that is invalid at load (SPEC §7G Empty dotPath): a port whose constructor/loader can fail may raise the same error message there instead of from generate; either way no request is made and there is no tool case. Poll timings in these styles are tiny so the suite runs in milliseconds. SINCE ADR 0037: the harness builds createMedia(styleMediaClient(style, case.config ?? {})) — style clients default to gather mode url, so URL results stay URLs; success tool metadata carries client (\"style\" unless style.name). status, when present, is the error's media status (failed|timeout|cancelled|unavailable). unsetEnv lists env vars removed for the case. modelParts (SPEC §7G.6 model visibility): the parts of this tool result that message assembly (§8A) emits to the model — only image parts; video/audio parts stay in RunResult.files and toolCalls[].parts only. Assert with the port's assembly function on a transcript containing this tool result.",
+  "_doc": "Media engine conformance (SPEC §7G). A port's harness starts a fake HTTP server, replaces \"{server}\" in style.baseUrl and in script[].headers values with its URL, sets case.env, then serves script[] in order (an entry's optional headers are sent as response headers): entry 0 answers the start request, entries 1.. answer polls; once exhausted the LAST entry repeats. Every request is recorded; path is recorded exactly as sent (percent-encoding NOT decoded). The harness calls generate(verb,args) and the tool face, and asserts: requests (method, path, body for start, header values in expectHeaders), progress statuses, and either result (MediaResult minus nothing) or error (exact message string). tool = the expected ToolResult (output, isError, parts, metadata). styleError:true marks a style that is invalid at load (SPEC §7G Empty dotPath): a port whose constructor/loader can fail may raise the same error message there instead of from generate; either way no request is made and there is no tool case. Poll timings in these styles are tiny so the suite runs in milliseconds. SINCE ADR 0037: the harness builds createMedia(styleMediaClient(style, case.config ?? {})) — style clients default to gather mode url, so URL results stay URLs; success tool metadata carries client (\"style\" unless style.name). status, when present, is the error's media status (failed|timeout|cancelled|unavailable). unsetEnv lists env vars removed for the case. modelParts (SPEC §7G.6 model visibility): the parts of this tool result that message assembly (§8A) emits to the model — only image parts; video/audio parts stay in RunResult.files and toolCalls[].parts only. Assert with the port's assembly function on a transcript containing this tool result. D9 (SPEC §7G.12): when modelParts is [] the tool-result content the port sends to the model is the plain output string in every message style incl. Anthropic — never an empty content array, never a placeholder; assert it with the same assembly function.",
   "cases": [
     {
       "name": "sync_image_urls_mime_from_extension",
@@ -2856,6 +2856,170 @@
         "name": "generate_image",
         "isError": true,
         "output": "media: no client available for \"image\": style: HTTP 429: Check your BALANCE details"
+      }
+    },
+    {
+      "name": "kind_word_and_type_from_verb_not_file",
+      "note": "D2/D3: the ready word and MediaFile.type come from the verb's kind; mimeType still comes from the file (here a .png URL under the video verb).",
+      "style": {
+        "baseUrl": "{server}",
+        "verbs": {
+          "video": {
+            "mode": "sync",
+            "kind": "video",
+            "start": {
+              "path": "/v"
+            },
+            "args": {
+              "prompt": "prompt"
+            },
+            "resultPath": "u"
+          }
+        }
+      },
+      "verb": "video",
+      "args": {
+        "prompt": "x"
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {
+            "u": "https://x/poster.png"
+          }
+        }
+      ],
+      "result": {
+        "files": [
+          {
+            "type": "file",
+            "mimeType": "image/png",
+            "url": "https://x/poster.png"
+          }
+        ],
+        "status": "completed"
+      },
+      "tool": {
+        "name": "generate_video",
+        "isError": false,
+        "output": "video ready: https://x/poster.png",
+        "parts": [
+          {
+            "type": "file",
+            "mimeType": "image/png",
+            "url": "https://x/poster.png"
+          }
+        ],
+        "metadata": {
+          "source": "media",
+          "verb": "video",
+          "client": "style",
+          "status": "completed"
+        },
+        "modelParts": []
+      }
+    },
+    {
+      "name": "speech_kind_audio_from_verb_not_file",
+      "note": "D2/D3: speech is audio by verb, even for an .mp4 URL.",
+      "style": {
+        "baseUrl": "{server}",
+        "verbs": {
+          "speech": {
+            "mode": "sync",
+            "kind": "audio",
+            "start": {
+              "path": "/tts"
+            },
+            "args": {
+              "text": "text"
+            },
+            "resultPath": "u"
+          }
+        }
+      },
+      "verb": "speech",
+      "args": {
+        "text": "hi"
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {
+            "u": "https://x/a.mp4"
+          }
+        }
+      ],
+      "result": {
+        "files": [
+          {
+            "type": "audio",
+            "mimeType": "video/mp4",
+            "url": "https://x/a.mp4"
+          }
+        ],
+        "status": "completed"
+      },
+      "tool": {
+        "name": "generate_speech",
+        "isError": false,
+        "output": "audio ready: https://x/a.mp4",
+        "parts": [
+          {
+            "type": "audio",
+            "mimeType": "video/mp4",
+            "url": "https://x/a.mp4"
+          }
+        ],
+        "metadata": {
+          "source": "media",
+          "verb": "speech",
+          "client": "style",
+          "status": "completed"
+        },
+        "modelParts": []
+      }
+    },
+    {
+      "name": "style_noncanonical_mapped_arg_is_not_accepted",
+      "note": "D6/D7: a style may map a non-canonical name, but it is never an accepted arg (args() lists canonical names only; the tool schema has no such property).",
+      "style": {
+        "baseUrl": "{server}",
+        "verbs": {
+          "image": {
+            "mode": "sync",
+            "kind": "image",
+            "start": {
+              "path": "/s"
+            },
+            "args": {
+              "prompt": "prompt",
+              "negative_prompt": "neg"
+            },
+            "resultPath": "u"
+          }
+        }
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "x",
+        "negative_prompt": "blur"
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {
+            "u": "https://x/a.png"
+          }
+        }
+      ],
+      "expectRequests": [],
+      "status": "failed",
+      "error": "image: argument \"negative_prompt\" not supported by this style",
+      "tool": {
+        "name": "generate_image",
+        "isError": true,
+        "output": "image: argument \"negative_prompt\" not supported by this style"
       }
     }
   ]

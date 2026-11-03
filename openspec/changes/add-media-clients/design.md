@@ -56,6 +56,35 @@ taken while pinning it that the ADR left open, so port agents do not re-decide t
 15. **Codex folder reads `CODEX_HOME`** (default `~/.codex`) — Codex honours it, and it makes the
     folder finder testable hermetically.
 
+## Decisions pinned after the first ports (SPEC §7G.12)
+
+Seven ports implemented §7G.1–§7G.11 and disagreed where the text was silent. The owner delegated
+the calls (2026-11-03); each is now a §7G.12 rule with conformance cases. Why each went this way:
+
+- **D1 fal: `COMPLETED` before `error`.** A finished job with a stray warning is still finished;
+  the result fetch is the truth. Error is only fatal while the job is not done.
+- **D2/D3 kind from the verb.** The caller asked for a video; the word and `MediaFile.type` follow
+  the request, not whatever extension a provider returned. `mimeType` stays honest (from the file).
+- **D4 `…` only when truncated, counted in code points** — one rule for every cap (200/300/400/1000).
+- **D5 Downloads/input fetches are never `unavailable`.** 402/quota from a CDN or a user's file host
+  says nothing about the provider account; falling through to another client would re-bill.
+- **D6/D7 Canonical args only.** A style may map a provider-only name, but the router, `args()` and
+  schemas speak the seven verbs' canonical args; any other key is rejected for every client — a
+  client without `args()` gets every canonical arg, not every key.
+- **D8/D9 Only image parts reach the model; no image ⇒ plain text content.** No empty arrays or
+  placeholders, so Anthropic and every other style see the same `output` text.
+- **D10 fal URL fallback** `<url>/<model>/requests/<id>[/status]` when the submit omits them.
+- **D11 `models.<verb>` everywhere.** The table in §7G.4 already says it wins; the ports that ignored
+  it for ElevenLabs transcribe / OpenAI speech+transcribe were the bug.
+- **D12 Deadline ⇒ `timeout`, cancel ⇒ `cancelled`.** A caller's deadline is a timeout whoever set it.
+- **D13 Missing-result texts** follow the style engine's `no result at <path>` / `no job id at <path>`.
+- **D14 maxBytes texts and enforcement** independent of an injected HTTP client (read ≤ maxBytes+1).
+- **D15 Grok raw JSON sorted** — the only portable byte form of a provider object.
+- **D16 Fall-through re-checks required args** — a fallback that cannot take the call is skipped as
+  unavailable rather than called with a half request; the first candidate still fails plainly.
+- **D17 CLI cwd is a realpath** — macOS `/var` ⇒ `/private/var`; argv equals `pwd -P`.
+- **D18 tasks.md**: a port's 2.x is ticked only when its code **and** README section are done.
+
 ## Options manifest
 
 `conformance/check_options_parity.py` fails on any group whose options file lacks an option, and

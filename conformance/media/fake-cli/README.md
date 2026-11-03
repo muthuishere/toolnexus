@@ -12,7 +12,8 @@ A port's test, per case:
 4. runs `createMedia(client)` for `case.verb` / `case.args` (function face and tool face — the tool
    face on a fresh `<out>` so the argv check holds for both);
 5. asserts `<out>/argv.txt` equals `case.expectArgv` (`{cwd}` = the line must equal the content of
-   `<out>/cwd.txt`, compared after resolving symlinks), `<out>/env-GROK_CONFIG.txt` equals
+   `<out>/cwd.txt` byte for byte: the fake writes `pwd -P`, and the client passes the realpath of
+   its temp dir, SPEC §7G.12 D17), `<out>/env-GROK_CONFIG.txt` equals
    `case.expectEnv.GROK_CONFIG` when given, then the result or error as in the other files.
 
 Fixture directives: `#file <relpath> <text>` creates `<out>/<relpath>`; `#exit <n>` exits;

@@ -1,5 +1,5 @@
 {
-  "_doc": "createMedia routing and tools conformance (SPEC §7G.3, §7G.6). Each case builds test-only custom MediaClients from clients[]: name; supports(verb) = verb in verbs; args(verb) = verbs[verb].args (absent ⇒ the client declares no args(), so every canonical arg is accepted); calling a verb records {client, verb, args} and returns outcome.result, or fails with a media error {message: outcome.error, status: outcome.status} (status unavailable must use the port's typed unavailable error). Assert expectCalls exactly (order, args after nulls removed), then result / error+status, then the tool face (fresh clients). schemaCases: build createMedia(clients).tools() and assert names, order, descriptions, source and inputSchema exactly (Go: key order not asserted). emptyClients: createMedia([]) fails with exactly that message. modelParts (SPEC §7G.6 model visibility): the parts of this tool result that message assembly (§8A) emits to the model — only image parts; video/audio parts stay in RunResult.files and toolCalls[].parts only. Assert with the port's assembly function on a transcript containing this tool result.",
+  "_doc": "createMedia routing and tools conformance (SPEC §7G.3, §7G.6). Each case builds test-only custom MediaClients from clients[]: name; supports(verb) = verb in verbs; args(verb) = verbs[verb].args (absent ⇒ the client declares no args(), so every canonical arg is accepted); calling a verb records {client, verb, args} and returns outcome.result, or fails with a media error {message: outcome.error, status: outcome.status} (status unavailable must use the port's typed unavailable error). Assert expectCalls exactly (order, args after nulls removed), then result / error+status, then the tool face (fresh clients). schemaCases: build createMedia(clients).tools() and assert names, order, descriptions, source and inputSchema exactly (Go: key order not asserted). emptyClients: createMedia([]) fails with exactly that message. modelParts (SPEC §7G.6 model visibility): the parts of this tool result that message assembly (§8A) emits to the model — only image parts; video/audio parts stay in RunResult.files and toolCalls[].parts only. Assert with the port's assembly function on a transcript containing this tool result. D9 (SPEC §7G.12): when modelParts is [] the tool-result content the port sends to the model is the plain output string in every message style incl. Anthropic — never an empty content array, never a placeholder; assert it with the same assembly function.",
   "cases": [
     {
       "name": "first_supporting_client_wins",
@@ -842,6 +842,240 @@
           "client": "t",
           "status": "completed"
         }
+      }
+    },
+    {
+      "name": "client_without_args_rejects_non_canonical_key",
+      "note": "D7: a client without args() accepts every canonical arg and nothing else.",
+      "clients": [
+        {
+          "name": "d",
+          "verbs": {
+            "image": {
+              "outcome": {
+                "result": {
+                  "files": [
+                    {
+                      "type": "image",
+                      "mimeType": "image/png",
+                      "url": "https://x/d.png"
+                    }
+                  ],
+                  "status": "completed"
+                }
+              }
+            }
+          }
+        }
+      ],
+      "verb": "image",
+      "args": {
+        "prompt": "cat",
+        "foo": "bar"
+      },
+      "expectCalls": [],
+      "status": "failed",
+      "error": "image: argument \"foo\" not supported by d",
+      "tool": {
+        "isError": true,
+        "output": "image: argument \"foo\" not supported by d"
+      }
+    },
+    {
+      "name": "fall_through_skips_candidate_missing_required_arg",
+      "note": "D16: b requires audio, which the call lacks ⇒ b is skipped as unavailable (never called); c serves it.",
+      "clients": [
+        {
+          "name": "a",
+          "verbs": {
+            "talk": {
+              "args": [
+                {
+                  "name": "image",
+                  "required": true
+                }
+              ],
+              "outcome": {
+                "error": "a: HTTP 402: {}",
+                "status": "unavailable"
+              }
+            }
+          }
+        },
+        {
+          "name": "b",
+          "verbs": {
+            "talk": {
+              "args": [
+                {
+                  "name": "image",
+                  "required": true
+                },
+                {
+                  "name": "audio",
+                  "required": true
+                }
+              ],
+              "outcome": {
+                "result": {
+                  "files": [
+                    {
+                      "type": "image",
+                      "mimeType": "image/png",
+                      "url": "https://x/b.png"
+                    }
+                  ],
+                  "status": "completed"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "c",
+          "verbs": {
+            "talk": {
+              "args": [
+                {
+                  "name": "image",
+                  "required": true
+                }
+              ],
+              "outcome": {
+                "result": {
+                  "files": [
+                    {
+                      "type": "file",
+                      "mimeType": "video/mp4",
+                      "url": "https://x/c.mp4"
+                    }
+                  ],
+                  "status": "completed"
+                }
+              }
+            }
+          }
+        }
+      ],
+      "verb": "talk",
+      "args": {
+        "image": "https://x/f.png"
+      },
+      "expectCalls": [
+        {
+          "client": "a",
+          "verb": "talk",
+          "args": {
+            "image": "https://x/f.png"
+          }
+        },
+        {
+          "client": "c",
+          "verb": "talk",
+          "args": {
+            "image": "https://x/f.png"
+          }
+        }
+      ],
+      "result": {
+        "files": [
+          {
+            "type": "file",
+            "mimeType": "video/mp4",
+            "url": "https://x/c.mp4"
+          }
+        ],
+        "status": "completed"
+      },
+      "tool": {
+        "name": "talking_video",
+        "isError": false,
+        "output": "video ready: https://x/c.mp4",
+        "parts": [
+          {
+            "type": "file",
+            "mimeType": "video/mp4",
+            "url": "https://x/c.mp4"
+          }
+        ],
+        "metadata": {
+          "source": "media",
+          "verb": "talk",
+          "client": "c",
+          "status": "completed"
+        },
+        "modelParts": []
+      }
+    },
+    {
+      "name": "fall_through_missing_required_arg_joins_unavailable",
+      "note": "D16: the skipped candidate's message joins the all-unavailable error.",
+      "clients": [
+        {
+          "name": "a",
+          "verbs": {
+            "talk": {
+              "args": [
+                {
+                  "name": "image",
+                  "required": true
+                }
+              ],
+              "outcome": {
+                "error": "a: HTTP 402: {}",
+                "status": "unavailable"
+              }
+            }
+          }
+        },
+        {
+          "name": "b",
+          "verbs": {
+            "talk": {
+              "args": [
+                {
+                  "name": "image",
+                  "required": true
+                },
+                {
+                  "name": "audio",
+                  "required": true
+                }
+              ],
+              "outcome": {
+                "result": {
+                  "files": [
+                    {
+                      "type": "image",
+                      "mimeType": "image/png",
+                      "url": "https://x/b.png"
+                    }
+                  ],
+                  "status": "completed"
+                }
+              }
+            }
+          }
+        }
+      ],
+      "verb": "talk",
+      "args": {
+        "image": "https://x/f.png"
+      },
+      "expectCalls": [
+        {
+          "client": "a",
+          "verb": "talk",
+          "args": {
+            "image": "https://x/f.png"
+          }
+        }
+      ],
+      "status": "unavailable",
+      "error": "media: no client available for \"talk\": a: HTTP 402: {}; b: missing required argument \"audio\"",
+      "tool": {
+        "isError": true,
+        "output": "media: no client available for \"talk\": a: HTTP 402: {}; b: missing required argument \"audio\""
       }
     }
   ],

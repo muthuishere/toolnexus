@@ -1618,7 +1618,7 @@ are strings: an `http(s)://` URL, a `file://` URL, or a local path. A client tha
 on (a style, a2e) passes the string as is. A client that must upload bytes resolves it: `http(s)`
 ⇒ `GET` with **no** client headers, bounded by the job deadline, capped by `gather.maxBytes`;
 `file://` or a path ⇒ read the file. Failure ⇒ `<verb>: cannot read "<value>"` (a port may append
-`: <reason>`; only the prefix is byte-fixed). The upload filename is the last path segment (URL
+`: <reason>`; only the prefix is byte-fixed — except the HTTP and maxBytes reasons, pinned by §7G.12 D5/D14). The upload filename is the last path segment (URL
 query stripped), or `"input"` when empty; its part `Content-Type` comes from the extension table
 (§7G.6), else `application/octet-stream`.
 
@@ -1654,7 +1654,7 @@ status      ∈ "completed" | "failed" | "timeout" | "cancelled" | "unavailable"
   a `MediaUnavailableError` subclass of the media error, Rust `MediaError::Unavailable`, Elixir
   `{:error, %Toolnexus.Media.Error{status: :unavailable}}`, Clojure `ex-info` with
   `{:status :unavailable}`. Cancellation keeps §7G.8's native-cancellation rule.
-- `MediaFile.type`: image ⇒ `image`, audio ⇒ `audio`, video ⇒ `file` (the §1B part types).
+- `MediaFile.type`, by the **verb's** kind (§7G.12 D3): image ⇒ `image`, audio ⇒ `audio`, video ⇒ `file` (the §1B part types).
   `url` is an `http(s)` URL or a `file://` URL; `path` is an absolute local path; `data` is
   standard padded base64 (§1B). Which fields are set is decided by gather (§7G.5).
 
@@ -1696,7 +1696,9 @@ required ones), before any request or spawn, and before the client's own key che
 does not accept ⇒ `<verb>: argument "<key>" not supported by <client>` (first in sorted code-point order;
 **style clients keep the ADR 0036 text** `… not supported by this style`); then a required arg
 missing ⇒ `<verb>: argument "<key>" is required` (first in canonical order). A null/nil/None
-value is absent. Both are `failed` and are not fall-through.
+value is absent. Both are `failed` and are not fall-through. A fall-through candidate is re-checked for its
+required args and skipped as `unavailable` when one is missing (§7G.12 D16); a key that is not a
+canonical arg is rejected for every client, with or without `args` (D7).
 
 ### 7G.4 Shared client config
 
@@ -1746,8 +1748,8 @@ A provider returns media in one of five shapes. `gather.mode` decides what the h
   `path` is absolute; `url` is `file://` + the absolute path, not percent-encoded.
 - **Download** is a `GET` with **no** client headers (no key leaves the provider origin), follows
   §7G.8's redirect rules and the job deadline. Non-2xx ⇒ `<verb>: download failed: HTTP <status>`.
-- **maxBytes.** Any saved, inlined or downloaded file larger than `maxBytes` ⇒
-  `<verb>: file exceeds gather.maxBytes (<maxBytes> bytes)`; a download stops reading at
+- **maxBytes.** Any saved or inlined file larger than `maxBytes` ⇒
+  `<verb>: file exceeds gather.maxBytes (<maxBytes> bytes)` (a download: `<verb>: download failed: file exceeds …`, §7G.12 D14); a download stops reading at
   `maxBytes + 1`. `url` mode on a URL never reads it, so never checks.
 - **Inline `data`** is standard padded base64 of the bytes; `url` and `path` are absent.
 
@@ -1767,7 +1769,7 @@ Execute ⇒ the §7G.3 call; never throws. Success:
 (`client` = the name of the client that served it; `jobId` only when the result has one).
 
 - Media verbs: `output = "<word> ready: " + lines.join("\n")`, `word` = `image` | `video` |
-  `audio` by the files' kind; a line is the file's `path`, else its `url`, else
+  `audio` by the verb's kind (§7G.12 D2); a line is the file's `path`, else its `url`, else
   `inline <mimeType> <n> bytes` (url mode ⇒ the URL; download ⇒ the saved file's path).
   `parts` = one §1B part per file: `data` when the file has `data`; else `url` when the url is
   `http(s)`; else (local file) the file's bytes read now as `data`. A part never holds a path (§1B).
@@ -1977,7 +1979,7 @@ text is non-empty. Video/audio are not built in (no spike).
 
 **fal** — the queue API for any hosted model id:
 - Submit `POST <url>/<model>` JSON input ⇒ `{request_id, status_url, response_url}`; jobId =
-  `request_id`. Poll `GET <status_url>`: `status == "COMPLETED"` done; a non-empty `error` ⇒
+  `request_id` (absent URLs are built per §7G.12 D10). Poll `GET <status_url>`: `status == "COMPLETED"` done; a non-empty `error` ⇒
   `job <request_id> failed: <error>`; anything else (`IN_QUEUE`, `IN_PROGRESS`, …) keeps polling
   and is reported. Then `GET <response_url>` ⇒ result URLs, in this order: `images[].url`,
   `image.url`, `video.url`, `audio.url`, `audio_file.url`. None ⇒ `<verb>: no result in response`.
@@ -2036,7 +2038,7 @@ see below). Command default `grok`. Argv: `-p <prompt> --cwd <cwd> --output-form
 Parse by `type`: `text` ⇒ text `data`; `tool_call` ⇒ status `tool <toolName>`;
 `tool_call_update` with a non-empty string `status` ⇒ status `tool <status>`; when `completed`,
 `rawOutput.path` (non-empty string) is a path; when `failed`, error = `rawOutput.message`, else the
-JSON of `rawOutput`; `end` ⇒ session `sessionId`, status `end <stopReason>`; `error` ⇒ error
+compact JSON of `rawOutput` with keys sorted (§7G.12 D15); `end` ⇒ session `sessionId`, status `end <stopReason>`; `error` ⇒ error
 `message`. Unavailable matcher (ASCII case-insensitive): `zero data retention` ⇒ the fixed message
 `grok: <verb> blocked by Zero Data Retention — run /privacy and opt in, or configure ZDR video storage (docs/media#grok-video-zdr)`;
 `usage limit` ⇒ `grok: <error capped 400>`. The client **never edits the user's Grok settings**.
@@ -2077,7 +2079,85 @@ or `quota` ⇒ `codex: <error capped 400>`.
 - **File results** are asserted as `saved: {bytesBase64, ext}` — the file is under `{dir}`, named
   `^<client>-<verb>-[0-9]+-[0-9]+<ext>$`, `url == "file://" + path`, and holds exactly those bytes.
 
-### 7G.12 Not in v1
+### 7G.12 Edge rules (pinned after the first ports)
+
+Pinned 2026-11-03 after seven ports implemented §7G.1–§7G.11 and disagreed where the text was
+silent. Each rule names its case(s); where a rule and an earlier paragraph differ, **this rule
+wins**.
+
+- **D1 fal poll order** — `status == "COMPLETED"` ⇒ done (an `error` field is ignored); else a
+  non-empty `error` ⇒ `job <request_id> failed: <error>`; else keep polling. Cases
+  `fal_completed_ignores_error_field`, `fal_error_field_while_in_progress_is_failed`.
+- **D2 Ready word** — the tool output's `<word> ready:` comes from the **verb's** kind (image ⇒
+  `image`; video, talk ⇒ `video`; speech, music ⇒ `audio`), never from the files' types or mimes.
+- **D3 `MediaFile.type`** comes from the verb's kind (image ⇒ `image`, video/talk ⇒ `file`,
+  speech/music ⇒ `audio`); `mimeType` still comes from the file (§7G.5). Cases
+  `kind_word_and_type_from_verb_not_file`, `speech_kind_audio_from_verb_not_file`.
+- **D4 Every text cap** (OpenRouter text 200, CLI text 300, CLI/tool error 400, echoed bodies 1000)
+  counts Unicode code points and appends `…` (U+2026) **only when it truncated**. Cases
+  `openrouter_no_image_text_capped_200`, `openrouter_no_image_text_exactly_200_not_capped`,
+  `grok_text_capped_300`, `grok_tool_error_capped_400`, `codex_error_exactly_400_not_capped`.
+- **D5 Downloads and input fetches are never `unavailable`.** The 402 / quota-429 rule of §7G.2
+  applies only to the provider's API requests. A result download keeps
+  `<verb>: download failed: HTTP <status>`; an input fetch is `<verb>: cannot read "<ref>": HTTP
+  <status>` (status `failed`). Cases `download_402_is_failed_not_unavailable`,
+  `download_429_quota_is_failed_not_unavailable`, `input_fetch_402_is_failed_not_unavailable`,
+  `input_fetch_429_billing_is_failed_not_unavailable`.
+- **D6 Style `args()`** = only the **canonical** args of the verb that the style maps (plus its
+  `required`). A style may map a non-canonical name (it stays loadable), but that name is not an
+  accepted arg and never appears in a tool schema. Case `style_noncanonical_mapped_arg_is_not_accepted`.
+- **D7 Unknown arg keys** — any key that is not a canonical arg the client accepts is rejected
+  `<verb>: argument "<key>" not supported by <name>` (`by this style` for styles), for **every**
+  client, including one without `args()` (it accepts the canonical args only). Cases
+  `client_without_args_rejects_non_canonical_key`, `builtin_client_rejects_non_canonical_arg`.
+- **D8 Model visibility** — only `image` parts of a media tool result reach the model; no other
+  part, **text parts included** (§7G.6).
+- **D9 No image parts** — when a media tool result emits no image part, every message style
+  (Anthropic included) sends the plain `output` string as the tool-result content: no empty content
+  array, no placeholder. Asserted where `modelParts` is `[]` (each file's `_doc`).
+- **D10 fal URLs** — when the submit response lacks `status_url` / `response_url`, use
+  `<url>/<model>/requests/<id>/status` and `<url>/<model>/requests/<id>` (id percent-encoded,
+  §7G.8). Case `fal_missing_status_and_response_url_builds_them`.
+- **D11 `models.<verb>`** overrides `model` and the default for that verb on **every** built-in
+  client (ElevenLabs speech/transcribe, OpenAI speech/transcribe/video, fal video, …); defaults
+  are unchanged. Cases `elevenlabs_transcribe_models_override`, `elevenlabs_speech_models_beats_model`,
+  `openai_transcribe_models_override`.
+- **D12 Deadline vs cancel** — the effective deadline (earlier of `ctx.deadline` and
+  `loop.timeoutMs`) expiring is status `timeout`: `job <id> timed out after <ms>ms`, or
+  `<verb>: timed out after <ms>ms` with no job id (CLI: `<client>: timed out after <ms>ms`);
+  `<ms>` is byte-fixed only when it comes from `loop.timeoutMs`. Only an explicit cancel
+  (`ctx.signal`) is `cancelled`. Cases `caller_deadline_is_timeout_not_cancelled`,
+  `grok_caller_deadline_is_timeout`.
+- **D13 Missing-result texts** — every API client says `<verb>: no result at <path>` and
+  `<verb>: no job id at <path>`, `<path>` being the provider field: `transcribe: no result at text`,
+  `cloneVoice: no result at voice_id`, `image: no result at data` (OpenAI), `video: no job id at id`
+  (OpenAI), `<verb>: no job id at request_id` (fal). fal's `<verb>: no result in response` and
+  OpenRouter's `no image in response` stay. Cases `elevenlabs_transcribe_no_text`,
+  `elevenlabs_clone_voice_no_voice_id`, `openai_transcribe_no_text`, `openai_video_no_job_id`,
+  `fal_no_request_id`.
+- **D14 maxBytes texts** — an input over `gather.maxBytes` ⇒ `<verb>: cannot read "<ref>": file
+  exceeds gather.maxBytes (<n> bytes)` (a local file is checked before any request); a download
+  over it ⇒ `<verb>: download failed: file exceeds gather.maxBytes (<n> bytes)`; a saved/inlined
+  provider body keeps `<verb>: file exceeds gather.maxBytes (<n> bytes)`. Enforced **regardless of
+  an injected HTTP client**: read at most `maxBytes + 1` bytes and stop (use `Content-Length` to
+  stop early when present); an oversize body is never accepted. Cases
+  `input_file_exceeds_max_bytes_no_request`, `input_url_exceeds_max_bytes`,
+  `download_exceeds_max_bytes`, `gather_max_bytes_exceeded`.
+- **D15 Grok failed tool, no message** — the error text is `rawOutput` as compact JSON (no
+  whitespace) with object keys sorted by code point at every depth; array order kept. Case
+  `grok_failed_raw_output_keys_sorted`.
+- **D16 Fall-through re-checks required args** — before a fall-through candidate is called its
+  required args (§7G.2) are checked; one missing ⇒ the candidate is skipped as if `unavailable`
+  (never called) with message `<name>: missing required argument "<key>"` (first in canonical
+  order), which joins the §7G.3 all-unavailable message. On the **first** candidate a missing
+  required arg stays the plain `failed` error of §7G.3. Cases
+  `fall_through_skips_candidate_missing_required_arg`,
+  `fall_through_missing_required_arg_joins_unavailable`.
+- **D17 CLI working dir** — the dir passed to the CLI (`--cwd`, spawn cwd) is the **realpath** of
+  the temp dir (macOS `/var` ⇒ `/private/var`); `cli.json`'s `{cwd}` compares byte for byte with
+  the fake's `pwd -P`.
+
+### 7G.13 Not in v1
 
 Provider-side job cancellation, webhooks, price quotes, §10 suspension for long jobs, streaming
 `file` events, ComfyUI, a generic ACP media client, Replicate (reachable through a custom client),
