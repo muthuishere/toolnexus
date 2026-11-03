@@ -5,10 +5,15 @@ package main
 // Read-only: discover, tools/list, and the get_me tool. The token is use-only, never logged.
 
 import (
+	"context"
+	"crypto/sha256"
 	"fmt"
+	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"testing"
+	"time"
 )
 
 const githubMCP = "https://api.githubcopilot.com/mcp/"
@@ -82,3 +87,77 @@ func TestGitHubOAuthLive(t *testing.T) {
 }
 
 func anyList(v any) []any { s, _ := v.([]any); return s }
+
+// Pause/resume (the web-app mode) then a forced refresh, against GitHub. Same gate as above.
+func TestGitHubPauseResumeAndRefreshLive(t *testing.T) {
+	if os.Getenv("GITHUB_OAUTH") != "1" {
+		t.Skip("set GITHUB_OAUTH=1")
+	}
+	// the "host web app": a loopback endpoint that just captures the callback URL
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cb := make(chan string, 1)
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cb <- "http://" + ln.Addr().String() + r.URL.String()
+		fmt.Fprint(w, "ok")
+	})}
+	go srv.Serve(ln)
+	defer srv.Close()
+
+	store := &MemoryTokenStore{}
+	c := NewClient(githubMCP)
+	c.Auth = &OAuth{
+		ClientID:     os.Getenv("GITHUB_MCP_CLIENT_ID"),
+		ClientSecret: os.Getenv("GITHUB_MCP_CLIENT_SECRET"),
+		Store:        store,
+		Authorizer:   PauseAuthorizer{Redirect: "http://" + ln.Addr().String() + "/callback"},
+	}
+	_, err = c.CallTool("get_me", obj{}, nil)
+	p := PendingOf(err)
+	if p == nil {
+		t.Fatalf("expected a pending authorization, got %v", err)
+	}
+	t.Logf("paused: kind=%s prompt=%q", p.Kind, p.Prompt)
+	if err := exec.Command("chrome-agent", "goto", p.URL).Run(); err != nil { // the user clicks the link
+		t.Fatal(err)
+	}
+	var cbURL string
+	select {
+	case cbURL = <-cb:
+	case <-time.After(120 * time.Second):
+		t.Fatal("no callback (approve the GitHub consent page in the chrome-agent browser)")
+	}
+	r, err := c.Auth.Resume(context.Background(), p.ID, cbURL)
+	if err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	t.Logf("resumed: get_me resultType=%v content-items=%d", r["resultType"], len(anyList(r["content"])))
+
+	// forced refresh: expire the stored token, call again, expect a new access token
+	store.mu.Lock()
+	var tok *Token
+	for _, v := range store.m {
+		tok = v
+	}
+	store.mu.Unlock()
+	if tok == nil || tok.RefreshToken == "" {
+		t.Fatalf("no refresh token stored (GitHub OAuth App needs expiring user tokens enabled)")
+	}
+	before := sha256.Sum256([]byte(tok.AccessToken))
+	tok.Expiry = time.Now().Add(-time.Minute)
+	if _, err := c.Call("tools/list", obj{}); err != nil {
+		t.Fatalf("tools/list after expiry: %v", err)
+	}
+	store.mu.Lock()
+	var after [32]byte
+	for _, v := range store.m {
+		after = sha256.Sum256([]byte(v.AccessToken))
+	}
+	store.mu.Unlock()
+	if before == after {
+		t.Fatal("access token not refreshed")
+	}
+	t.Log("refresh: new access token issued and used")
+}
