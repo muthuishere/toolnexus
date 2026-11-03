@@ -231,6 +231,10 @@ pub struct RunFile {
     /// The part's name, when it has one.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub name: String,
+    /// The absolute local path, when the part came from a saved media file
+    /// (§7G.12 D20).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub path: String,
     /// The tool's name.
     pub from: String,
     /// The model's tool-call id.
@@ -249,6 +253,7 @@ pub fn run_files_of(call: &ToolCall, call_id: &str) -> Vec<RunFile> {
             url: p.url.clone(),
             data: p.data.clone(),
             name: p.name.clone(),
+            path: p.path.clone(),
             from: call.name.clone(),
             call_id: call_id.to_string(),
         })
@@ -2016,12 +2021,14 @@ impl Client {
                 Style::OpenAI => emit::with_tool_parts(
                     json!({"role": "tool", "tool_call_id": c.id, "content": r.output}),
                     &c.name,
-                    &r.parts,
+                    // §7G.6: only image parts of a media result reach the model
+                    &crate::media::model_parts(r),
                 ),
                 Style::Anthropic => emit::with_tool_parts(
                     json!({"type": "tool_result", "tool_use_id": c.id, "content": r.output, "is_error": r.is_error}),
                     &c.name,
-                    &r.parts,
+                    // §7G.6: only image parts of a media result reach the model
+                    &crate::media::model_parts(r),
                 ),
             };
             // A tool-tiers `call_tool` call is recorded as the REAL tool with

@@ -147,28 +147,77 @@ Each has a runnable page in the [Go API reference](https://muthuishere.github.io
 
 ## Media generation
 
-Generate images, video and speech (plus transcription, voice cloning and talking-head video)
-from a **JSON style** instead of provider code. Async jobs are started and polled for you. The same
-verbs become agent tools (`generate_image`, `generate_video`, `generate_speech`, …), and whatever
-they produce lands in `RunResult.files`. `examples/media-styles/a2e.json` ships first and reads
-`A2E_API_KEY` at call time. Its result URLs expire in 3–30 days, so save what you keep. SPEC §7G;
-guide: <https://muthuishere.github.io/toolnexus/media/>.
+Generate images, video, speech and music (plus transcription, voice cloning and talking-head
+video) through **named media clients**: API clients `NewA2EMediaClient`, `NewElevenLabsMediaClient`,
+`NewOpenAIMediaClient`, `NewOpenRouterMediaClient`, `NewFalMediaClient`, and CLI clients
+`NewGrokMediaClient`, `NewCodexMediaClient`. `CreateMedia` takes them in priority order: each verb
+goes to the first client that supports it, and moves on to the next **only** when that client is
+unavailable (no key, no credits, CLI missing). Keys are read from the client's env var
+(`FAL_API_KEY`, `OPENAI_API_KEY`, …) at call time and never logged. SPEC §7G; guide:
+<https://muthuishere.github.io/toolnexus/media/>.
 
 ```go
-style, _ := toolnexus.LoadMediaStyle("examples/media-styles/a2e.json")
-media := toolnexus.CreateMedia([]toolnexus.MediaStyle{style}, toolnexus.MediaOptions{
-    OnProgress: func(p toolnexus.MediaProgress) { fmt.Println(p.Verb, p.Status) },
-})
-img, err := media.Image(ctx, toolnexus.ImageInput{Prompt: "a red fox in fresh snow", Width: 1024, Height: 768})
-vid, err := media.Video(ctx, toolnexus.VideoInput{Prompt: "the fox blinks", Image: img.Files[0].URL, Seconds: 5})
-
-tk, _ := toolnexus.CreateToolkit(ctx, toolnexus.Options{Media: media}) // generate_image, …
-res, _ := agent.Run(ctx, "Draw a fox, then animate it.", tk)
-for _, f := range res.Files { fmt.Println(f.From, f.MimeType, f.URL) }
+cfg := toolnexus.MediaConfig{Gather: toolnexus.MediaGather{Mode: "download", Dir: "out"}}
+media, err := toolnexus.CreateMedia(
+	toolnexus.NewFalMediaClient(cfg),        // image, video (FAL_API_KEY)
+	toolnexus.NewGrokMediaClient(cfg),       // fallback when fal is unavailable (grok CLI; prompt only)
+	toolnexus.NewElevenLabsMediaClient(cfg), // speech, music, transcribe, cloneVoice
+	toolnexus.NewA2EMediaClient(cfg),        // talk
+)
+if err != nil {
+	log.Fatal(err)
+}
+img, err := media.Image(ctx, toolnexus.ImageInput{Prompt: "a red fox in fresh snow"})
+if errors.Is(err, toolnexus.ErrMediaUnavailable) {
+	log.Fatal("every image client is unavailable: ", err)
+}
+vid, _ := media.Video(ctx, toolnexus.VideoInput{Prompt: "the fox blinks", Image: img.Files[0].Path, Seconds: 5})
+voice, _ := media.Speech(ctx, toolnexus.SpeechInput{Text: "Hello from the fox."})
+talk, _ := media.Talk(ctx, toolnexus.TalkInput{Image: img.Files[0].Path, Audio: voice.Files[0].Path})
+fmt.Println(vid.Files[0].Path, talk.Files[0].Path)
 ```
 
-In the typed inputs a zero value means "not set" (`Seed: 0` is never sent). To send a real
-zero, use `media.Generate(ctx, "image", map[string]any{"prompt": "…", "seed": 0}, nil)`.
+The typed verbs are `Image`, `Video`, `Speech`, `Music`, `Transcribe` (→ `MediaResult.Text`),
+`CloneVoice` (voice id in `Text`) and `Talk`. A zero field means "not set"; to send a real zero use
+`media.Generate(ctx, "image", map[string]any{"prompt": "…", "seed": 0}, toolnexus.MediaCall{})`.
+
+**Config** — every built-in client takes one `MediaConfig{Model, Models, Key, URL, Command, Loop,
+Gather, HTTPClient}`. `Gather.Mode` is `"url"` (keep provider URLs), `"download"` (default; save under
+`Dir`, default `<os temp>/toolnexus-media`, capped by `MaxBytes`) or `"inline"` (base64 `Data`).
+`Loop{IntervalMs, TimeoutMs, OnProgress}` bounds async jobs.
+
+**As agent tools** — pass the router to the toolkit and each supported verb becomes a tool
+(`generate_image`, `generate_video`, `generate_speech`, …). Whatever they produce lands in
+`RunResult.Files`; only image parts are shown to the model.
+
+```go
+tk, _ := toolnexus.CreateToolkit(ctx, toolnexus.Options{Media: media})
+res, _ := agent.Run(ctx, "Draw a fox, then animate it.", tk)
+for _, f := range res.Files { fmt.Println(f.From, f.Type, f.MimeType, f.URL) }
+```
+
+**Your own provider** — embed `toolnexus.UnsupportedMedia`, implement `Name`, `Supports` and the
+verbs you serve; return `toolnexus.MediaUnavailable("…")` to let the router fall through.
+
+```go
+type stock struct{ toolnexus.UnsupportedMedia }
+
+func (stock) Name() string              { return "stock" }
+func (stock) Supports(verb string) bool { return verb == "image" }
+func (stock) Image(ctx context.Context, args map[string]any, call toolnexus.MediaCall) (toolnexus.MediaResult, error) {
+	return toolnexus.MediaResult{Status: "completed", Files: []toolnexus.MediaFile{
+		{Type: "image", MimeType: "image/png", URL: "https://example.com/fox.png"}}}, nil
+}
+```
+
+Advanced: `LoadMediaStyle` + `NewStyleMediaClient` drive any HTTP provider from a JSON style.
+Run the example: `go run ./examples/media`. It uses, in order and only when present, the `grok`
+and `codex` CLIs, `ELEVENLABS_API_KEY`, then `OPENAI_API_KEY` / `FAL_API_KEY` / `A2E_API_KEY`:
+an image, ElevenLabs speech (`MEDIA_VOICE` or the default voice), and the `generate_image` tool;
+Grok video only with `MEDIA_VIDEO=1`, paid video/talk only with `MEDIA_PAID=1`. It prints client,
+verb, file, mime, size and provider-reported `usage`, exits 1 if a step fails, and exits 0 with a
+hint when no client is available. A client that cannot take a call's args is skipped like an
+unavailable one; saved files carry their `Path` into `RunResult.Files`.
 
 ## Documentation
 

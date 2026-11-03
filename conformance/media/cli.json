@@ -24,7 +24,7 @@
         "#file sessions/s1/images/1.jpg JPEGBYTES",
         "{\"type\":\"tool_call_update\",\"toolCallId\":\"c0\",\"status\":\"completed\",\"rawOutput\":{\"type\":\"ImageGen\",\"path\":\"{out}/sessions/s1/images/1.jpg\",\"filename\":\"1.jpg\",\"session_folder\":\"images\"},\"locations\":[]}",
         "{\"type\":\"text\",\"data\":\" {out}/sessions/s1/images/1.jpg\"}",
-        "{\"type\":\"end\",\"stopReason\":\"end_turn\",\"sessionId\":\"s1\",\"num_turns\":1,\"total_cost_usd\":0.01}"
+        "{\"type\":\"end\",\"stopReason\":\"end_turn\",\"sessionId\":\"s1\",\"num_turns\":1}"
       ],
       "expectArgv": [
         "-p",
@@ -108,7 +108,7 @@
         "{\"type\":\"tool_call\",\"toolCallId\":\"c0\",\"title\":\"image_gen\",\"kind\":\"image_gen\",\"status\":\"pending\",\"toolName\":\"image_gen\",\"rawInput\":{\"prompt\":\"a red apple\",\"aspect_ratio\":\"1:1\"},\"content\":[],\"locations\":[]}",
         "#file sessions/s1/images/1.png PNGBYTES",
         "{\"type\":\"tool_call_update\",\"toolCallId\":\"c0\",\"status\":\"completed\",\"rawOutput\":{\"type\":\"ImageGen\",\"path\":\"{out}/sessions/s1/images/1.png\",\"filename\":\"1.png\",\"session_folder\":\"images\"},\"locations\":[]}",
-        "{\"type\":\"end\",\"stopReason\":\"end_turn\",\"sessionId\":\"s1\",\"num_turns\":1,\"total_cost_usd\":0.01}"
+        "{\"type\":\"end\",\"stopReason\":\"end_turn\",\"sessionId\":\"s1\",\"num_turns\":1}"
       ],
       "expectArgv": [
         "-p",
@@ -179,7 +179,7 @@
       "fixture": [
         "#file sessions/s1/images/1.png PNGBYTES",
         "{\"type\":\"tool_call_update\",\"toolCallId\":\"c0\",\"status\":\"completed\",\"rawOutput\":{\"type\":\"ImageGen\",\"path\":\"{out}/sessions/s1/images/1.png\",\"filename\":\"1.png\",\"session_folder\":\"images\"},\"locations\":[]}",
-        "{\"type\":\"end\",\"stopReason\":\"end_turn\",\"sessionId\":\"s1\",\"num_turns\":1,\"total_cost_usd\":0.01}"
+        "{\"type\":\"end\",\"stopReason\":\"end_turn\",\"sessionId\":\"s1\",\"num_turns\":1}"
       ],
       "expectMissing": [
         "{out}/sessions/s1/images/1.png"
@@ -219,7 +219,7 @@
         "{\"type\":\"tool_call\",\"toolCallId\":\"c1\",\"title\":\"image_to_video\",\"kind\":\"image_to_video\",\"status\":\"pending\",\"toolName\":\"image_to_video\",\"rawInput\":{\"prompt\":\"it rotates\",\"duration\":6},\"content\":[],\"locations\":[]}",
         "#file sessions/s1/videos/1.mp4 MP4BYTES",
         "{\"type\":\"tool_call_update\",\"toolCallId\":\"c1\",\"status\":\"completed\",\"rawOutput\":{\"type\":\"ImageToVideo\",\"path\":\"{out}/sessions/s1/videos/1.mp4\",\"filename\":\"1.mp4\",\"session_folder\":\"videos\"},\"locations\":[]}",
-        "{\"type\":\"end\",\"stopReason\":\"end_turn\",\"sessionId\":\"s1\",\"num_turns\":1,\"total_cost_usd\":0.01}"
+        "{\"type\":\"end\",\"stopReason\":\"end_turn\",\"sessionId\":\"s1\",\"num_turns\":1}"
       ],
       "expectArgv": [
         "-p",
@@ -273,7 +273,7 @@
         "{\"type\":\"tool_call\",\"toolCallId\":\"c1\",\"title\":\"image_to_video\",\"kind\":\"image_to_video\",\"status\":\"pending\",\"toolName\":\"image_to_video\",\"rawInput\":{\"prompt\":\"it rotates\",\"duration\":6},\"content\":[],\"locations\":[]}",
         "{\"type\":\"tool_call_update\",\"toolCallId\":\"c1\",\"status\":\"failed\",\"rawOutput\":{\"error\":\"tool_execution_failed\",\"message\":\"Video generation tools are unavailable under zero data retention (ZDR). To enable, either turn off /privacy mode to disable ZDR or supply a user-hosted storage bucket (see https://docs.x.ai/build/settings/zdr-video-storage).\"},\"locations\":[]}",
         "{\"type\":\"text\",\"data\":\"Video generation failed: the tool is unavailable under zero data retention.\"}",
-        "{\"type\":\"end\",\"stopReason\":\"end_turn\",\"sessionId\":\"s1\",\"num_turns\":1,\"total_cost_usd\":0.01}"
+        "{\"type\":\"end\",\"stopReason\":\"end_turn\",\"sessionId\":\"s1\",\"num_turns\":1}"
       ],
       "status": "unavailable",
       "error": "media: no client available for \"video\": grok: video blocked by Zero Data Retention — run /privacy and opt in, or configure ZDR video storage (docs/media#grok-video-zdr)",
@@ -297,7 +297,7 @@
       "fixture": [
         "{\"type\":\"tool_call\",\"toolCallId\":\"c1\",\"title\":\"image_to_video\",\"kind\":\"image_to_video\",\"status\":\"pending\",\"toolName\":\"image_to_video\",\"rawInput\":{\"prompt\":\"it rotates\",\"duration\":6},\"content\":[],\"locations\":[]}",
         "{\"type\":\"tool_call_update\",\"toolCallId\":\"c1\",\"status\":\"failed\",\"rawOutput\":{\"error\":\"tool_execution_failed\",\"message\":\"content policy\"},\"locations\":[]}",
-        "{\"type\":\"end\",\"stopReason\":\"end_turn\",\"sessionId\":\"s1\",\"num_turns\":1,\"total_cost_usd\":0.01}"
+        "{\"type\":\"end\",\"stopReason\":\"end_turn\",\"sessionId\":\"s1\",\"num_turns\":1}"
       ],
       "status": "failed",
       "error": "grok: no video: content policy",
@@ -321,7 +321,7 @@
       "fixture": [
         "{\"type\":\"tool_call\",\"toolCallId\":\"c1\",\"title\":\"image_to_video\",\"kind\":\"image_to_video\",\"status\":\"pending\",\"toolName\":\"image_to_video\",\"rawInput\":{\"prompt\":\"it rotates\",\"duration\":6},\"content\":[],\"locations\":[]}",
         "{\"type\":\"tool_call_update\",\"toolCallId\":\"c1\",\"status\":\"failed\",\"rawOutput\":{\"error\":\"boom\"},\"locations\":[]}",
-        "{\"type\":\"end\",\"stopReason\":\"end_turn\",\"sessionId\":\"s1\",\"num_turns\":1,\"total_cost_usd\":0.01}"
+        "{\"type\":\"end\",\"stopReason\":\"end_turn\",\"sessionId\":\"s1\",\"num_turns\":1}"
       ],
       "status": "failed",
       "error": "grok: no video: {\"error\":\"boom\"}",
@@ -367,7 +367,7 @@
       },
       "fixture": [
         "{\"type\":\"text\",\"data\":\"I could not.\"}",
-        "{\"type\":\"end\",\"stopReason\":\"end_turn\",\"sessionId\":\"s1\",\"num_turns\":1,\"total_cost_usd\":0.01}"
+        "{\"type\":\"end\",\"stopReason\":\"end_turn\",\"sessionId\":\"s1\",\"num_turns\":1}"
       ],
       "status": "failed",
       "error": "grok: no image file in the run (exit code 0): I could not.",
@@ -391,7 +391,7 @@
       "fixture": [
         "#file sessions/s1/images/2.webp WEBP",
         "{\"type\":\"tool_call_update\",\"toolCallId\":\"c0\",\"status\":\"completed\",\"rawOutput\":{\"type\":\"ImageGen\",\"path\":\"{out}/sessions/s1/images/2.webp\",\"filename\":\"2.webp\",\"session_folder\":\"images\"},\"locations\":[]}",
-        "{\"type\":\"end\",\"stopReason\":\"end_turn\",\"sessionId\":\"s1\",\"num_turns\":1,\"total_cost_usd\":0.01}",
+        "{\"type\":\"end\",\"stopReason\":\"end_turn\",\"sessionId\":\"s1\",\"num_turns\":1}",
         "#exit 2"
       ],
       "result": {
@@ -496,7 +496,7 @@
         "width": 64
       },
       "fixture": [
-        "{\"type\":\"end\",\"stopReason\":\"end_turn\",\"sessionId\":\"s1\",\"num_turns\":1,\"total_cost_usd\":0.01}"
+        "{\"type\":\"end\",\"stopReason\":\"end_turn\",\"sessionId\":\"s1\",\"num_turns\":1}"
       ],
       "expectNoSpawn": true,
       "status": "unavailable",
@@ -716,7 +716,7 @@
       "fixture": [
         "{\"type\":\"tool_call\",\"toolCallId\":\"c1\",\"title\":\"image_to_video\",\"kind\":\"image_to_video\",\"status\":\"pending\",\"toolName\":\"image_to_video\",\"rawInput\":{\"prompt\":\"x\"},\"content\":[],\"locations\":[]}",
         "{\"type\":\"tool_call_update\",\"toolCallId\":\"c1\",\"status\":\"failed\",\"rawOutput\":{\"zeta\":[1,{\"d\":true,\"c\":null}],\"alpha\":{\"b\":2,\"a\":\"x\"}},\"locations\":[]}",
-        "{\"type\":\"end\",\"stopReason\":\"end_turn\",\"sessionId\":\"s1\",\"num_turns\":1,\"total_cost_usd\":0.01}"
+        "{\"type\":\"end\",\"stopReason\":\"end_turn\",\"sessionId\":\"s1\",\"num_turns\":1}"
       ],
       "status": "failed",
       "error": "grok: no video: {\"alpha\":{\"a\":\"x\",\"b\":2},\"zeta\":[1,{\"c\":null,\"d\":true}]}",
@@ -740,7 +740,7 @@
       },
       "fixture": [
         "{\"type\": \"text\", \"data\": \"ééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé\"}",
-        "{\"type\":\"end\",\"stopReason\":\"end_turn\",\"sessionId\":\"s1\",\"num_turns\":1,\"total_cost_usd\":0.01}"
+        "{\"type\":\"end\",\"stopReason\":\"end_turn\",\"sessionId\":\"s1\",\"num_turns\":1}"
       ],
       "status": "failed",
       "error": "grok: no image file in the run (exit code 0): éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé…",
@@ -765,7 +765,7 @@
       "fixture": [
         "{\"type\":\"tool_call\",\"toolCallId\":\"c1\",\"title\":\"image_to_video\",\"kind\":\"image_to_video\",\"status\":\"pending\",\"toolName\":\"image_to_video\",\"rawInput\":{\"prompt\":\"x\"},\"content\":[],\"locations\":[]}",
         "{\"type\": \"tool_call_update\", \"toolCallId\": \"c1\", \"status\": \"failed\", \"rawOutput\": {\"message\": \"ééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé\"}, \"locations\": []}",
-        "{\"type\":\"end\",\"stopReason\":\"end_turn\",\"sessionId\":\"s1\",\"num_turns\":1,\"total_cost_usd\":0.01}"
+        "{\"type\":\"end\",\"stopReason\":\"end_turn\",\"sessionId\":\"s1\",\"num_turns\":1}"
       ],
       "status": "failed",
       "error": "grok: no video: éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé…",

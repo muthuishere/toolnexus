@@ -1,90 +1,163 @@
-// Media generation (SPEC §7G) — image, video, speech, transcription, voice
-// cloning and talking-head generation behind one engine with two faces: typed
-// verbs a host calls (Media.Image, Media.Video, ...) and tools an LLM calls
-// (Media.Tools). Providers are styles — JSON data, never code; the library
-// names no vendor. ADR 0036; conformance fixtures in conformance/media/.
+// Media generation (SPEC §7G) — image, video, speech, music, transcription,
+// voice cloning and talking-head video behind one interface with two faces:
+// typed verbs a host calls (Media.Image, Media.Video, ...) and tools an LLM
+// calls (Media.Tools). Providers are media clients: built-in API clients
+// (A2E, ElevenLabs, OpenAI, OpenRouter, fal), CLI clients (Grok, Codex), style
+// clients over the JSON style engine, or any type implementing MediaClient.
+// ADRs 0036 + 0037; conformance fixtures in conformance/media/.
 
 package toolnexus
 
 import (
-	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"math"
 	"net/http"
-	"net/url"
 	"os"
-	"reflect"
-	"regexp"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
-	"unicode/utf8"
 )
 
 // SourceMedia marks a tool produced by Media.Tools (§7G).
 const SourceMedia ToolSource = "media"
 
-// MediaStyle describes one provider as data (§7G Style).
-type MediaStyle struct {
-	// BaseURL is joined with each request path; a trailing "/" is trimmed.
-	BaseURL string `json:"baseUrl"`
-	// Headers are sent on every request. "${VAR}" expands from the process
-	// environment at call time (unset ⇒ ""); values are never logged.
-	Headers map[string]string `json:"headers,omitempty"`
-	// ErrorEnvelope detects errors reported inside a 2xx JSON body.
-	ErrorEnvelope *MediaErrorEnvelope `json:"errorEnvelope,omitempty"`
-	// Verbs maps a verb (image|video|speech|transcribe|cloneVoice|talking) to its wiring.
-	Verbs map[string]MediaVerb `json:"verbs"`
+// ---- the interface (§7G.2) ----
+
+// MediaClient is one media provider. Every verb is optional: Supports is the
+// truth, and a verb the client does not support is never called. Embed
+// UnsupportedMedia to implement only the verbs a client serves.
+//
+// args holds canonical arg names (§7G.1) with nil values already removed.
+// A failed verb returns a *MediaError (or any error, treated as failed);
+// return a *MediaError with Status "unavailable" (see MediaUnavailable) to let
+// CreateMedia fall through to the next client.
+type MediaClient interface {
+	Name() string
+	Supports(verb string) bool
+	Image(ctx context.Context, args map[string]any, call MediaCall) (MediaResult, error)
+	Video(ctx context.Context, args map[string]any, call MediaCall) (MediaResult, error)
+	Speech(ctx context.Context, args map[string]any, call MediaCall) (MediaResult, error)
+	Music(ctx context.Context, args map[string]any, call MediaCall) (MediaResult, error)
+	Transcribe(ctx context.Context, args map[string]any, call MediaCall) (MediaResult, error)
+	CloneVoice(ctx context.Context, args map[string]any, call MediaCall) (MediaResult, error)
+	Talk(ctx context.Context, args map[string]any, call MediaCall) (MediaResult, error)
 }
 
-// MediaErrorEnvelope: a present value at CodePath that is not JSON-equal to one
-// of OkValues is an error `API error <code>: <message at MessagePath>`.
-type MediaErrorEnvelope struct {
-	CodePath    string `json:"codePath"`
-	OkValues    []any  `json:"okValues"`
-	MessagePath string `json:"messagePath,omitempty"`
+// MediaArgsProvider is the optional args(verb) of §7G.2: the canonical args a
+// client accepts for a verb. A client without it — or returning nil — accepts
+// every canonical arg of the verb, with the canonical required flags.
+type MediaArgsProvider interface {
+	Args(verb string) []MediaArg
 }
 
-// MediaVerb wires one verb to a provider endpoint.
-type MediaVerb struct {
-	Mode       string            `json:"mode"` // "sync" | "async"
-	Kind       string            `json:"kind"` // "image" | "video" | "audio" | "text"
-	Start      MediaStart        `json:"start"`
-	Defaults   map[string]any    `json:"defaults,omitempty"`
-	Args       map[string]string `json:"args"` // normalised arg → provider dotPath
-	IDPath     string            `json:"idPath,omitempty"`
-	Poll       *MediaPoll        `json:"poll,omitempty"`
-	ResultPath string            `json:"resultPath"`
+// MediaArg is one accepted canonical arg.
+type MediaArg struct {
+	Name     string
+	Required bool
 }
 
-// MediaStart is the start request (Method defaults to POST).
-type MediaStart struct {
-	Method string `json:"method,omitempty"`
-	Path   string `json:"path"`
+// UnsupportedMedia is the embeddable base for a custom MediaClient: every verb
+// fails. Override the verbs the client serves and implement Name and Supports.
+type UnsupportedMedia struct{}
+
+func unsupportedVerb(verb string) (MediaResult, error) {
+	return MediaResult{}, mediaErr("failed", fmt.Sprintf("media: no client supports %q", verb))
 }
 
-// MediaPoll is the async status loop. Path contains "{id}".
-type MediaPoll struct {
-	Method     string   `json:"method,omitempty"` // default GET
-	Path       string   `json:"path"`
-	StatusPath string   `json:"statusPath"`
-	Done       []string `json:"done"`
-	Failed     []string `json:"failed"`
-	ErrorPath  string   `json:"errorPath,omitempty"`
-	IntervalMs int      `json:"intervalMs,omitempty"` // default 5000
-	TimeoutMs  int      `json:"timeoutMs,omitempty"`  // default 600000
+func (UnsupportedMedia) Image(context.Context, map[string]any, MediaCall) (MediaResult, error) {
+	return unsupportedVerb("image")
+}
+func (UnsupportedMedia) Video(context.Context, map[string]any, MediaCall) (MediaResult, error) {
+	return unsupportedVerb("video")
+}
+func (UnsupportedMedia) Speech(context.Context, map[string]any, MediaCall) (MediaResult, error) {
+	return unsupportedVerb("speech")
+}
+func (UnsupportedMedia) Music(context.Context, map[string]any, MediaCall) (MediaResult, error) {
+	return unsupportedVerb("music")
+}
+func (UnsupportedMedia) Transcribe(context.Context, map[string]any, MediaCall) (MediaResult, error) {
+	return unsupportedVerb("transcribe")
+}
+func (UnsupportedMedia) CloneVoice(context.Context, map[string]any, MediaCall) (MediaResult, error) {
+	return unsupportedVerb("cloneVoice")
+}
+func (UnsupportedMedia) Talk(context.Context, map[string]any, MediaCall) (MediaResult, error) {
+	return unsupportedVerb("talk")
+}
+
+// MediaCall is the per-call context of §7G.2 beside the context.Context (which
+// is the cancellation signal). The zero value is "nothing set".
+type MediaCall struct {
+	// Deadline is absolute; the job deadline is the earlier of it and
+	// loop.timeoutMs from the start. Zero ⇒ none.
+	Deadline time.Time
+	// Progress is called for every progress status; when nil the client's
+	// Loop.OnProgress is called instead (never both).
+	Progress func(MediaProgress)
+	// ProviderOptions' top-level keys overwrite the request body last (function
+	// face only — never set from the tool face).
+	ProviderOptions map[string]any
+}
+
+// MediaProgress is one progress report.
+type MediaProgress struct {
+	Verb      string
+	Client    string
+	JobID     string
+	Status    string
+	ElapsedMs int64
 }
 
 // MediaFile is one produced file. Type is "image", "audio" or "file" (video).
+// Which of URL / Path / Data is set is decided by gather (§7G.5): Data is
+// standard padded base64.
 type MediaFile struct {
 	Type     string `json:"type"`
 	MimeType string `json:"mimeType"`
-	URL      string `json:"url"`
+	URL      string `json:"url,omitempty"`
+	Path     string `json:"path,omitempty"`
+	Data     string `json:"data,omitempty"`
+}
+
+// MediaUsage is provider-reported usage (§7G.12 D21). Absent fields were not reported.
+// Raw carries values whose unit is undocumented (Grok costUsdTicks), unconverted.
+type MediaUsage struct {
+	InputTokens  *int           `json:"inputTokens,omitempty"`
+	OutputTokens *int           `json:"outputTokens,omitempty"`
+	CostUsd      *float64       `json:"costUsd,omitempty"`
+	Raw          map[string]any `json:"raw,omitempty"`
+}
+
+// mediaUsageOf returns nil when u has no fields.
+func mediaUsageOf(u MediaUsage) *MediaUsage {
+	if u.InputTokens == nil && u.OutputTokens == nil && u.CostUsd == nil && len(u.Raw) == 0 {
+		return nil
+	}
+	return &u
+}
+
+func usageInt(v any) *int {
+	if f := usageFloat(v); f != nil {
+		n := int(*f)
+		return &n
+	}
+	return nil
+}
+
+func usageFloat(v any) *float64 {
+	switch x := v.(type) {
+	case float64:
+		return &x
+	case json.Number:
+		if f, err := x.Float64(); err == nil {
+			return &f
+		}
+	}
+	return nil
 }
 
 // MediaResult is what every verb returns.
@@ -93,6 +166,8 @@ type MediaResult struct {
 	Text   string      `json:"text,omitempty"`
 	JobID  string      `json:"jobId,omitempty"`
 	Status string      `json:"status"`
+	// Usage is what the provider reported (§7G.12 D21), never estimated; nil when none.
+	Usage *MediaUsage `json:"usage,omitempty"`
 	// hasText marks a text-kind result, so an empty Text ("" — e.g. silence)
 	// still serialises as "text":"".
 	hasText bool
@@ -101,6 +176,9 @@ type MediaResult struct {
 // MarshalJSON emits "text" for every text-kind result, even when it is "".
 func (r MediaResult) MarshalJSON() ([]byte, error) {
 	type plain MediaResult
+	if r.Files == nil {
+		r.Files = []MediaFile{}
+	}
 	if !r.hasText || r.Text != "" {
 		return json.Marshal(plain(r))
 	}
@@ -110,549 +188,122 @@ func (r MediaResult) MarshalJSON() ([]byte, error) {
 	}{plain(r), r.Text})
 }
 
-// MediaProgress is reported after every poll of an async job.
-type MediaProgress struct {
-	Verb   string
-	JobID  string
-	Status string
+// ErrMediaUnavailable is matched by errors.Is for every media error whose
+// status is "unavailable" (§7G.2): the call was valid but this client cannot
+// serve it now (no credits, quota, no key, CLI missing, ZDR).
+var ErrMediaUnavailable = errors.New("media: unavailable")
+
+// MediaError is the typed media error. Status is failed | timeout | cancelled |
+// unavailable. A cancelled error unwraps to the context's error.
+type MediaError struct {
+	Message string
+	Status  string
+	JobID   string
+	Err     error
 }
 
-// MediaOptions configures CreateMedia.
-type MediaOptions struct {
-	// OnProgress is called after each poll of an async job.
-	OnProgress func(MediaProgress)
-	// HTTPClient overrides the HTTP client (the same seam as ClientOptions.HTTPClient).
+func (e *MediaError) Error() string { return e.Message }
+func (e *MediaError) Unwrap() error { return e.Err }
+
+// Is makes errors.Is(err, ErrMediaUnavailable) true for status "unavailable".
+func (e *MediaError) Is(target error) bool {
+	return target == ErrMediaUnavailable && e.Status == "unavailable"
+}
+
+// MediaUnavailable builds an "unavailable" media error, for custom clients.
+func MediaUnavailable(message string) error { return mediaErr("unavailable", message) }
+
+func mediaErr(status, msg string) *MediaError { return &MediaError{Message: msg, Status: status} }
+
+func mediaFailed(format string, a ...any) *MediaError {
+	return mediaErr("failed", fmt.Sprintf(format, a...))
+}
+
+// mediaCancelled keeps the native cancellation error reachable (§7G.8).
+func mediaCancelled(err error) *MediaError {
+	return &MediaError{Message: err.Error(), Status: "cancelled", Err: err}
+}
+
+// ---- shared config (§7G.4) ----
+
+// MediaConfig is the one config shape of every built-in client. Fields a client
+// does not use are ignored.
+type MediaConfig struct {
+	// Model is the model of the client's primary verb (CLI: passed as -m).
+	Model string
+	// Models overrides the model per verb; wins over Model and the default.
+	Models map[string]string
+	// Key is the API key; empty ⇒ the client's env var, read at call time.
+	// Never logged, never in an error message.
+	Key string
+	// URL overrides the base URL (trailing "/" trimmed) — any compatible server.
+	URL string
+	// Command is the CLI argv prefix; empty ⇒ the CLI's name.
+	Command []string
+	// Loop bounds jobs and reports progress.
+	Loop MediaLoop
+	// Gather decides how results become files (§7G.5).
+	Gather MediaGather
+	// HTTPClient is the same injection seam as ClientOptions.HTTPClient.
 	// Nil ⇒ http.DefaultClient.
 	HTTPClient *http.Client
 }
 
-// Media is the engine. Build it with CreateMedia.
-type Media struct {
-	styles []MediaStyle
-	opts   MediaOptions
-	http   *http.Client
+// MediaLoop: values <= 0 mean the default.
+type MediaLoop struct {
+	// IntervalMs is the poll interval (default per client).
+	IntervalMs int
+	// TimeoutMs is the job deadline from the start (default 600000).
+	TimeoutMs int
+	// OnProgress is called when MediaCall.Progress is nil.
+	OnProgress func(MediaProgress)
 }
 
-// LoadMediaStyle reads one style JSON file.
-func LoadMediaStyle(path string) (MediaStyle, error) {
-	var s MediaStyle
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return s, err
-	}
-	if err := json.Unmarshal(b, &s); err != nil {
-		return s, fmt.Errorf("media style %s: %w", path, err)
-	}
-	if err := validateMediaStyle(s); err != nil {
-		return s, err
-	}
-	return s, nil
+// MediaGather: Mode url | download | inline (default download; style clients
+// url). Dir default <os temp>/toolnexus-media; MaxBytes default 100 MiB;
+// Keep (CLI only) default true — false deletes the CLI's original after a copy.
+type MediaGather struct {
+	Mode     string
+	Dir      string
+	MaxBytes int64
+	Keep     *bool
 }
 
-// validateMediaStyle rejects an args entry mapped to "" (§7G Empty dotPath).
-// Verbs and keys are checked in sorted order so the error is deterministic.
-func validateMediaStyle(s MediaStyle) error {
-	verbs := make([]string, 0, len(s.Verbs))
-	for v := range s.Verbs {
-		verbs = append(verbs, v)
+const mediaDefaultTimeoutMs = 600000
+
+func (c MediaConfig) timeoutMs() int {
+	if c.Loop.TimeoutMs > 0 {
+		return c.Loop.TimeoutMs
 	}
-	sort.Strings(verbs)
-	for _, v := range verbs {
-		keys := make([]string, 0, len(s.Verbs[v].Args))
-		for k := range s.Verbs[v].Args {
-			keys = append(keys, k)
-		}
-		sort.Strings(keys)
-		for _, k := range keys {
-			if s.Verbs[v].Args[k] == "" {
-				return fmt.Errorf("style: empty path for argument %q", k)
-			}
-		}
-	}
-	return nil
+	return mediaDefaultTimeoutMs
 }
 
-// CreateMedia builds a media engine over one or more styles. A verb resolves to
-// the FIRST style in the list that declares it.
-func CreateMedia(styles []MediaStyle, opts MediaOptions) *Media {
-	h := opts.HTTPClient
-	if h == nil {
-		h = http.DefaultClient
+func (c MediaConfig) intervalMs(def int) int {
+	if c.Loop.IntervalMs > 0 {
+		return c.Loop.IntervalMs
 	}
-	return &Media{styles: append([]MediaStyle(nil), styles...), opts: opts, http: h}
+	return def
 }
 
-// ---- function face: typed verbs ----
-//
-// Zero-valued fields are treated as absent (not sent). To send a literal zero,
-// use Generate with an explicit args map. ProviderOptions' top-level keys
-// overwrite the request body last.
-
-// ImageInput is the input of Media.Image.
-type ImageInput struct {
-	Prompt          string
-	Width           int
-	Height          int
-	AspectRatio     string
-	Seed            int
-	ProviderOptions map[string]any
+// modelFor: models[verb], else Model when verb is the primary verb, else def.
+func (c MediaConfig) modelFor(verb, primary, def string) string {
+	if m := c.Models[verb]; m != "" {
+		return m
+	}
+	if verb == primary && c.Model != "" {
+		return c.Model
+	}
+	return def
 }
 
-// VideoInput is the input of Media.Video.
-type VideoInput struct {
-	Prompt          string
-	Image           string // URL of the starting image
-	Seconds         int
-	AspectRatio     string
-	ProviderOptions map[string]any
+func (c MediaConfig) httpClient() *http.Client {
+	if c.HTTPClient != nil {
+		return c.HTTPClient
+	}
+	return http.DefaultClient
 }
 
-// SpeechInput is the input of Media.Speech.
-type SpeechInput struct {
-	Text            string
-	Voice           string
-	ProviderOptions map[string]any
-}
-
-// TranscribeInput is the input of Media.Transcribe.
-type TranscribeInput struct {
-	Audio           string // URL of the audio
-	ProviderOptions map[string]any
-}
-
-// CloneVoiceInput is the input of Media.CloneVoice.
-type CloneVoiceInput struct {
-	Name            string
-	Samples         []string // URLs of audio samples
-	ProviderOptions map[string]any
-}
-
-// TalkingInput is the input of Media.Talking.
-type TalkingInput struct {
-	Image           string // URL of the face image
-	Audio           string // URL of the speech audio
-	ProviderOptions map[string]any
-}
-
-// Image generates an image from a text prompt.
-func (m *Media) Image(ctx context.Context, in ImageInput) (MediaResult, error) {
-	return m.Generate(ctx, "image", present(
-		"prompt", in.Prompt, "width", in.Width, "height", in.Height,
-		"aspectRatio", in.AspectRatio, "seed", in.Seed), in.ProviderOptions)
-}
-
-// Video generates a short video, optionally from a starting image URL.
-func (m *Media) Video(ctx context.Context, in VideoInput) (MediaResult, error) {
-	return m.Generate(ctx, "video", present(
-		"prompt", in.Prompt, "image", in.Image, "seconds", in.Seconds,
-		"aspectRatio", in.AspectRatio), in.ProviderOptions)
-}
-
-// Speech speaks text aloud.
-func (m *Media) Speech(ctx context.Context, in SpeechInput) (MediaResult, error) {
-	return m.Generate(ctx, "speech", present("text", in.Text, "voice", in.Voice), in.ProviderOptions)
-}
-
-// Transcribe turns speech in an audio URL into MediaResult.Text.
-func (m *Media) Transcribe(ctx context.Context, in TranscribeInput) (MediaResult, error) {
-	return m.Generate(ctx, "transcribe", present("audio", in.Audio), in.ProviderOptions)
-}
-
-// CloneVoice creates a cloned voice; its id is returned as MediaResult.Text
-// (for a text-kind style).
-func (m *Media) CloneVoice(ctx context.Context, in CloneVoiceInput) (MediaResult, error) {
-	args := present("name", in.Name)
-	if in.Samples != nil {
-		s := make([]any, len(in.Samples))
-		for i, v := range in.Samples {
-			s[i] = v
-		}
-		args["samples"] = s
-	}
-	return m.Generate(ctx, "cloneVoice", args, in.ProviderOptions)
-}
-
-// Talking makes the person in an image speak the given audio.
-func (m *Media) Talking(ctx context.Context, in TalkingInput) (MediaResult, error) {
-	return m.Generate(ctx, "talking", present("image", in.Image, "audio", in.Audio), in.ProviderOptions)
-}
-
-// present builds an args map from key/value pairs, dropping zero values.
-func present(kv ...any) map[string]any {
-	out := map[string]any{}
-	for i := 0; i+1 < len(kv); i += 2 {
-		switch v := kv[i+1].(type) {
-		case string:
-			if v != "" {
-				out[kv[i].(string)] = v
-			}
-		case int:
-			if v != 0 {
-				out[kv[i].(string)] = v
-			}
-		}
-	}
-	return out
-}
-
-func (m *Media) resolve(verb string) (MediaStyle, MediaVerb, bool) {
-	for _, s := range m.styles {
-		if v, ok := s.Verbs[verb]; ok {
-			return s, v, true
-		}
-	}
-	return MediaStyle{}, MediaVerb{}, false
-}
-
-// ---- engine (§7G normative order) ----
-
-// Generate runs verb with normalised args (the generic function face).
-// providerOptions may be nil; its top-level keys overwrite the body last.
-func (m *Media) Generate(ctx context.Context, verb string, args map[string]any, providerOptions map[string]any) (MediaResult, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	style, v, ok := m.resolve(verb)
-	if !ok {
-		return MediaResult{}, fmt.Errorf("media: no style supports %q", verb)
-	}
-	if err := validateMediaStyle(style); err != nil {
-		return MediaResult{}, err
-	}
-	keys := make([]string, 0, len(args))
-	for k := range args {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	for _, k := range keys {
-		if args[k] == nil {
-			continue // a null arg is absent
-		}
-		if _, ok := v.Args[k]; !ok {
-			return MediaResult{}, fmt.Errorf("%s: argument %q not supported by this style", verb, k)
-		}
-	}
-
-	body := map[string]any{}
-	if v.Defaults != nil {
-		body = deepCopyJSON(v.Defaults).(map[string]any)
-	}
-	for _, k := range keys {
-		if args[k] == nil {
-			continue
-		}
-		dotSet(body, v.Args[k], args[k])
-	}
-	for k, val := range providerOptions {
-		body[k] = val
-	}
-
-	method := v.Start.Method
-	if method == "" {
-		method = http.MethodPost
-	}
-	// Every request is bounded by the time left until the job deadline (§7G
-	// Per-request timeout); the deadline counts from the start request.
-	timeout := 600000
-	if v.Poll != nil && v.Poll.TimeoutMs > 0 {
-		timeout = v.Poll.TimeoutMs
-	}
-	deadline := time.Now().Add(time.Duration(timeout) * time.Millisecond)
-	resp, err := m.do(ctx, deadline, style, verb, method, v.Start.Path, body)
-	if err == errMediaDeadline {
-		return MediaResult{}, fmt.Errorf("%s: timed out after %dms", verb, timeout)
-	}
-	if err != nil {
-		return MediaResult{}, err
-	}
-	res := MediaResult{Files: []MediaFile{}, Status: "completed"}
-	if v.Mode == "async" {
-		id, ok := jobIDText(dotGet(resp, v.IDPath))
-		if !ok {
-			return MediaResult{}, fmt.Errorf("%s: no job id at %s", verb, v.IDPath)
-		}
-		res.JobID = id
-		resp, res.Status, err = m.poll(ctx, deadline, style, verb, v, id)
-		if err != nil {
-			return MediaResult{}, err
-		}
-	}
-
-	found := dotGet(resp, v.ResultPath)
-	if v.Kind == "text" {
-		t, ok := scalarText(found)
-		if s, isStr := found.(string); isStr {
-			t, ok = s, true
-		}
-		if !ok {
-			return MediaResult{}, fmt.Errorf("%s: no result at %s", verb, v.ResultPath)
-		}
-		res.Text, res.hasText = t, true
-		return res, nil
-	}
-	for _, u := range flattenURLs(found) {
-		res.Files = append(res.Files, MediaFile{Type: mediaPartType(v.Kind), MimeType: mediaMime(v.Kind, u), URL: u})
-	}
-	if len(res.Files) == 0 {
-		return MediaResult{}, fmt.Errorf("%s: no result at %s", verb, v.ResultPath)
-	}
-	return res, nil
-}
-
-func (m *Media) poll(ctx context.Context, deadline time.Time, style MediaStyle, verb string, v MediaVerb, id string) (any, string, error) {
-	p := v.Poll
-	if p == nil {
-		return nil, "", fmt.Errorf("%s: async verb has no poll", verb)
-	}
-	interval, timeout := p.IntervalMs, p.TimeoutMs
-	if interval <= 0 {
-		interval = 5000
-	}
-	if timeout <= 0 {
-		timeout = 600000
-	}
-	method := p.Method
-	if method == "" {
-		method = http.MethodGet
-	}
-	path := strings.ReplaceAll(p.Path, "{id}", percentEncode(id))
-	timedOut := fmt.Errorf("job %s timed out after %dms", id, timeout)
-	timer := time.NewTimer(time.Duration(interval) * time.Millisecond)
-	defer timer.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return nil, "", ctx.Err()
-		case <-timer.C:
-		}
-		resp, err := m.do(ctx, deadline, style, verb, method, path, nil)
-		if err == errMediaDeadline {
-			return nil, "", timedOut
-		}
-		if err != nil {
-			return nil, "", err
-		}
-		status, _ := scalarText(dotGet(resp, p.StatusPath))
-		if m.opts.OnProgress != nil {
-			m.opts.OnProgress(MediaProgress{Verb: verb, JobID: id, Status: status})
-		}
-		if mediaHas(p.Done, status) {
-			return resp, status, nil
-		}
-		if mediaHas(p.Failed, status) {
-			msg := ""
-			if p.ErrorPath != "" {
-				msg, _ = scalarText(dotGet(resp, p.ErrorPath))
-			}
-			if msg == "" {
-				return nil, status, fmt.Errorf("job %s %s", id, status)
-			}
-			return nil, status, fmt.Errorf("job %s %s: %s", id, status, msg)
-		}
-		if !time.Now().Before(deadline) {
-			return nil, status, timedOut
-		}
-		timer.Reset(time.Duration(interval) * time.Millisecond)
-	}
-}
-
-// errMediaDeadline marks a request cut short by the job deadline; callers turn
-// it into the §7G timed-out message.
-var errMediaDeadline = fmt.Errorf("media deadline")
-
-var mediaEnvRe = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
-
-// do sends one request and applies the §7G step-5 response checks.
-func (m *Media) do(parent context.Context, deadline time.Time, style MediaStyle, verb, method, path string, body map[string]any) (any, error) {
-	ctx, cancel := context.WithDeadline(parent, deadline)
-	defer cancel()
-	failed := func(err error) error {
-		if parent.Err() != nil {
-			return parent.Err() // cancellation stays the native error
-		}
-		if ctx.Err() != nil {
-			return errMediaDeadline
-		}
-		return fmt.Errorf("%s: %w", verb, err)
-	}
-	var payload []byte
-	if body != nil {
-		b, err := json.Marshal(body)
-		if err != nil {
-			return nil, fmt.Errorf("%s: %w", verb, err)
-		}
-		payload = b
-	}
-	r, err := m.send(ctx, style, verb, method, strings.TrimRight(style.BaseURL, "/")+path, payload)
-	if err != nil {
-		if errors.Is(err, errTooManyRedirects) {
-			return nil, fmt.Errorf("%s: too many redirects", verb)
-		}
-		return nil, failed(err)
-	}
-	defer r.Body.Close()
-	raw, err := io.ReadAll(r.Body)
-	if err != nil {
-		return nil, failed(err)
-	}
-	if r.StatusCode < 200 || r.StatusCode > 299 {
-		return nil, fmt.Errorf("HTTP %d: %s", r.StatusCode, capMediaBody(raw))
-	}
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	dec.UseNumber()
-	var out any
-	if err := dec.Decode(&out); err != nil || dec.More() {
-		return nil, fmt.Errorf("%s: response is not JSON", verb)
-	}
-	if env := style.ErrorEnvelope; env != nil {
-		code := dotGet(out, env.CodePath)
-		if code != nil && !jsonEqualAny(code, env.OkValues) {
-			msg := ""
-			if env.MessagePath != "" {
-				if s, ok := dotGet(out, env.MessagePath).(string); ok {
-					msg = s
-				}
-			}
-			ct, ok := scalarText(code)
-			if str, isStr := code.(string); isStr {
-				ct, ok = str, true
-			}
-			if !ok {
-				b, _ := json.Marshal(code)
-				ct = string(b)
-			}
-			return nil, fmt.Errorf("API error %s: %s", ct, msg)
-		}
-	}
-	return out, nil
-}
-
-var errTooManyRedirects = errors.New("too many redirects")
-
-// send issues the request and follows redirects itself with the §7G Redirects
-// rule set: 301/302/303/307/308 with a Location are followed (at most 10);
-// 301/302/303 after a non-GET/HEAD become a bodiless GET; style headers are
-// only sent to the origin of the baseUrl request. A host-supplied
-// CheckRedirect still runs before each hop.
-func (m *Media) send(ctx context.Context, style MediaStyle, verb, method, target string, payload []byte) (*http.Response, error) {
-	c := *m.http
-	inner := m.http.CheckRedirect
-	c.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	var first *url.URL
-	var via []*http.Request
-	var prev *http.Response // the redirect response being followed
-	for {
-		var rd io.Reader
-		if payload != nil {
-			rd = bytes.NewReader(payload)
-		}
-		req, err := http.NewRequestWithContext(ctx, method, target, rd)
-		if err != nil {
-			return nil, err
-		}
-		if first == nil {
-			first = req.URL
-		}
-		if payload != nil {
-			req.Header.Set("Content-Type", "application/json")
-		}
-		if origin(req.URL) == origin(first) {
-			for k, val := range style.Headers {
-				req.Header.Set(k, mediaEnvRe.ReplaceAllStringFunc(val, func(s string) string {
-					return os.Getenv(mediaEnvRe.FindStringSubmatch(s)[1])
-				}))
-			}
-		}
-		if len(via) > 0 && inner != nil {
-			if err := inner(req, via); err != nil {
-				if err == http.ErrUseLastResponse {
-					return prev, nil
-				}
-				prev.Body.Close()
-				return nil, err
-			}
-		}
-		if prev != nil {
-			io.Copy(io.Discard, io.LimitReader(prev.Body, 1<<16))
-			prev.Body.Close()
-		}
-		r, err := c.Do(req)
-		if err != nil {
-			return nil, err
-		}
-		loc := r.Header.Get("Location")
-		switch r.StatusCode {
-		case 301, 302, 303, 307, 308:
-		default:
-			return r, nil
-		}
-		if loc == "" {
-			return r, nil
-		}
-		if len(via) >= 10 {
-			r.Body.Close()
-			return nil, errTooManyRedirects
-		}
-		next, err := req.URL.Parse(loc)
-		if err != nil {
-			r.Body.Close()
-			return nil, err
-		}
-		if r.StatusCode <= 303 && method != http.MethodGet && method != http.MethodHead {
-			method, payload = http.MethodGet, nil
-		}
-		prev = r
-		via = append(via, req)
-		target = next.String()
-	}
-}
-
-func origin(u *url.URL) string {
-	port := u.Port()
-	if port == "" {
-		switch strings.ToLower(u.Scheme) {
-		case "https":
-			port = "443"
-		case "http":
-			port = "80"
-		}
-	}
-	return strings.ToLower(u.Scheme) + "://" + strings.ToLower(u.Hostname()) + ":" + port
-}
-
-// capMediaBody keeps the first 1000 code points of an echoed error body, appending
-// "…" when it truncates (§7G Echoed error bodies).
-func capMediaBody(raw []byte) string {
-	s := string(raw)
-	if utf8.RuneCountInString(s) <= 1000 {
-		return s
-	}
-	n := 0
-	for i := range s {
-		if n == 1000 {
-			return s[:i] + "…"
-		}
-		n++
-	}
-	return s
-}
-
-// percentEncode encodes everything but RFC 3986 unreserved characters as %XX
-// (uppercase) of its UTF-8 bytes (§7G Job id in the poll path).
-func percentEncode(s string) string {
-	var b strings.Builder
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		if c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '-' || c == '.' || c == '_' || c == '~' {
-			b.WriteByte(c)
-		} else {
-			fmt.Fprintf(&b, "%%%02X", c)
-		}
-	}
-	return b.String()
-}
-
-// ---- tool face ----
+// ---- verbs table (§7G.1) ----
 
 type mediaArgSpec struct {
 	name, typ, items, desc string
@@ -673,43 +324,404 @@ var mediaVerbs = []mediaVerbSpec{
 		{"aspectRatio", "string", "", "Aspect ratio, e.g. 16:9.", false},
 		{"seed", "integer", "", "Seed for reproducible output.", false},
 	}},
-	{"video", "generate_video", "Generate a short video from a prompt, optionally starting from an image URL. Can take minutes.", []mediaArgSpec{
+	{"video", "generate_video", "Generate a short video from a prompt, optionally starting from an image. Can take minutes.", []mediaArgSpec{
 		{"prompt", "string", "", "What should happen in the video.", true},
-		{"image", "string", "", "URL of the starting image.", false},
+		{"image", "string", "", "URL or local path of the starting image.", false},
 		{"seconds", "integer", "", "Video length in seconds.", false},
 		{"aspectRatio", "string", "", "Aspect ratio, e.g. 9:16.", false},
 	}},
 	{"speech", "generate_speech", "Speak text aloud and return the audio.", []mediaArgSpec{
 		{"text", "string", "", "The text to speak.", true},
-		{"voice", "string", "", "Voice or speaker id.", false},
+		{"voice", "string", "", "Voice name or id, including a cloned voice.", false},
 	}},
-	{"transcribe", "transcribe_audio", "Transcribe speech in an audio URL to text.", []mediaArgSpec{
-		{"audio", "string", "", "URL of the audio.", true},
+	{"music", "generate_music", "Generate music from a text prompt and return the audio.", []mediaArgSpec{
+		{"prompt", "string", "", "Style, mood and instruments of the music.", true},
+		{"seconds", "integer", "", "Length in seconds.", false},
+		{"instrumental", "boolean", "", "True for no vocals.", false},
+		{"lyrics", "string", "", "Lyrics to sing.", false},
 	}},
-	{"cloneVoice", "clone_voice", "Create a cloned voice from audio sample URLs and return its voice id.", []mediaArgSpec{
+	{"transcribe", "transcribe_audio", "Transcribe speech in an audio file to text.", []mediaArgSpec{
+		{"audio", "string", "", "URL or local path of the audio.", true},
+		{"language", "string", "", "Language of the speech as an ISO 639-1 code, e.g. en.", false},
+	}},
+	{"cloneVoice", "clone_voice", "Create a cloned voice from audio samples and return its voice id.", []mediaArgSpec{
 		{"name", "string", "", "Name for the new voice.", true},
-		{"samples", "array", "string", "URLs of audio samples of the voice.", true},
+		{"samples", "array", "string", "URLs or local paths of audio samples of the voice.", true},
 	}},
-	{"talking", "talking_video", "Make the person in an image speak the given audio (lip-synced video).", []mediaArgSpec{
-		{"image", "string", "", "URL of the face image.", true},
-		{"audio", "string", "", "URL of the speech audio.", true},
+	{"talk", "talking_video", "Make the person in an image speak, from speech audio or from text (lip-synced video).", []mediaArgSpec{
+		{"image", "string", "", "URL or local path of the face image.", true},
+		{"audio", "string", "", "URL or local path of the speech audio.", false},
+		{"text", "string", "", "Text to speak when no audio is given.", false},
+		{"voice", "string", "", "Voice for the text.", false},
 	}},
 }
 
-// Tools returns one Tool (source "media") per supported verb, in canonical
-// verb order. Each schema lists only the args the resolving style maps.
-// Execute never returns an error: an engine failure is ToolResult{IsError:true}.
+func mediaVerbSpecOf(verb string) (mediaVerbSpec, bool) {
+	for _, s := range mediaVerbs {
+		if s.verb == verb {
+			return s, true
+		}
+	}
+	return mediaVerbSpec{}, false
+}
+
+// mediaArgsOf builds a MediaArg list for a built-in client: names in canonical
+// order, required ones marked.
+func mediaArgsOf(required []string, optional ...string) []MediaArg {
+	out := []MediaArg{}
+	for _, n := range required {
+		out = append(out, MediaArg{Name: n, Required: true})
+	}
+	for _, n := range optional {
+		out = append(out, MediaArg{Name: n})
+	}
+	return out
+}
+
+// clientArgs is a client's accepted args for verb (§7G.2 args, absent ⇒ canonical).
+func clientArgs(c MediaClient, verb string) []MediaArg {
+	if p, ok := c.(MediaArgsProvider); ok {
+		if a := p.Args(verb); a != nil {
+			return a
+		}
+	}
+	spec, _ := mediaVerbSpecOf(verb)
+	out := make([]MediaArg, len(spec.args))
+	for i, a := range spec.args {
+		out[i] = MediaArg{Name: a.name, Required: a.required}
+	}
+	return out
+}
+
+// ---- createMedia (§7G.3) ----
+
+// Media routes each verb to its clients. Build it with CreateMedia.
+type Media struct {
+	clients []MediaClient
+}
+
+// CreateMedia builds a router over one or more clients, in priority order.
+// Each call goes to the first client that supports the verb, and falls through
+// to the next only when a client is unavailable.
+func CreateMedia(clients ...MediaClient) (*Media, error) {
+	if len(clients) == 0 {
+		return nil, errors.New("media: no clients")
+	}
+	return &Media{clients: append([]MediaClient(nil), clients...)}, nil
+}
+
+// MustCreateMedia is CreateMedia that panics on an empty client list.
+func MustCreateMedia(clients ...MediaClient) *Media {
+	m, err := CreateMedia(clients...)
+	if err != nil {
+		panic(err)
+	}
+	return m
+}
+
+func (m *Media) candidates(verb string) []MediaClient {
+	var out []MediaClient
+	for _, c := range m.clients {
+		if c.Supports(verb) {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// Supports reports whether any client supports verb.
+func (m *Media) Supports(verb string) bool { return len(m.candidates(verb)) > 0 }
+
+// Generate runs verb with canonical args through the routing of §7G.3 (the
+// generic function face).
+func (m *Media) Generate(ctx context.Context, verb string, args map[string]any, call MediaCall) (MediaResult, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	res, _, err := m.route(ctx, verb, args, call)
+	return res, err
+}
+
+// route returns the result and the name of the client that served it.
+func (m *Media) route(ctx context.Context, verb string, args map[string]any, call MediaCall) (MediaResult, string, error) {
+	cands := m.candidates(verb)
+	if len(cands) == 0 {
+		return MediaResult{}, "", mediaFailed("media: no client supports %q", verb)
+	}
+	clean := map[string]any{}
+	for k, v := range args {
+		if v != nil {
+			clean[k] = v
+		}
+	}
+	keys := make([]string, 0, len(clean))
+	for k := range clean {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	// D7/D19: a key that is not canonical for the verb fails at once.
+	spec, _ := mediaVerbSpecOf(verb)
+	for _, k := range keys {
+		canonical := false
+		for _, a := range spec.args {
+			if a.name == k {
+				canonical = true
+				break
+			}
+		}
+		if !canonical {
+			return MediaResult{}, "", mediaFailed("%s: argument %q not supported", verb, k)
+		}
+	}
+	var msgs []string
+	for _, c := range cands {
+		// D19: a candidate that cannot take the args is skipped like unavailable.
+		acc := clientArgs(c, verb)
+		if bad := firstUnaccepted(acc, keys); bad != "" {
+			msgs = append(msgs, fmt.Sprintf("%s: argument %q not supported", c.Name(), bad))
+			continue
+		}
+		if miss := missingRequired(acc, verb, clean); miss != "" {
+			msgs = append(msgs, fmt.Sprintf("%s: missing required argument %q", c.Name(), miss))
+			continue
+		}
+		a := clean
+		res, err := callMediaVerb(ctx, c, verb, a, call)
+		if err == nil {
+			return res, c.Name(), nil
+		}
+		if !errors.Is(err, ErrMediaUnavailable) {
+			return MediaResult{}, c.Name(), err
+		}
+		msgs = append(msgs, err.Error())
+	}
+	return MediaResult{}, "", mediaErr("unavailable",
+		fmt.Sprintf("media: no client available for %q: %s", verb, strings.Join(msgs, "; ")))
+}
+
+// missingRequired returns the first required arg of acc (in canonical order,
+// then declaration order) absent from args, or "".
+func missingRequired(acc []MediaArg, verb string, args map[string]any) string {
+	req := map[string]bool{}
+	for _, a := range acc {
+		if a.Required {
+			if _, ok := args[a.Name]; !ok {
+				req[a.Name] = true
+			}
+		}
+	}
+	if len(req) == 0 {
+		return ""
+	}
+	spec, _ := mediaVerbSpecOf(verb)
+	for _, a := range spec.args {
+		if req[a.name] {
+			return a.name
+		}
+	}
+	for _, a := range acc {
+		if req[a.Name] {
+			return a.Name
+		}
+	}
+	return ""
+}
+
+func firstUnaccepted(acc []MediaArg, keys []string) string {
+	for _, k := range keys {
+		if !mediaArgIn(acc, k) {
+			return k
+		}
+	}
+	return ""
+}
+
+func mediaArgIn(args []MediaArg, name string) bool {
+	for _, a := range args {
+		if a.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+func callMediaVerb(ctx context.Context, c MediaClient, verb string, args map[string]any, call MediaCall) (MediaResult, error) {
+	switch verb {
+	case "image":
+		return c.Image(ctx, args, call)
+	case "video":
+		return c.Video(ctx, args, call)
+	case "speech":
+		return c.Speech(ctx, args, call)
+	case "music":
+		return c.Music(ctx, args, call)
+	case "transcribe":
+		return c.Transcribe(ctx, args, call)
+	case "cloneVoice":
+		return c.CloneVoice(ctx, args, call)
+	case "talk":
+		return c.Talk(ctx, args, call)
+	}
+	return unsupportedVerb(verb)
+}
+
+// ---- function face: typed verbs ----
+//
+// Zero-valued fields are absent (not sent). To send a literal zero, use
+// Generate with an explicit args map. The embedded MediaCall carries the
+// deadline, progress callback and ProviderOptions.
+
+// ImageInput is the input of Media.Image.
+type ImageInput struct {
+	Prompt      string
+	Width       int
+	Height      int
+	AspectRatio string
+	Seed        int
+	MediaCall
+}
+
+// VideoInput is the input of Media.Video.
+type VideoInput struct {
+	Prompt      string
+	Image       string // URL or local path of the starting image
+	Seconds     int
+	AspectRatio string
+	MediaCall
+}
+
+// SpeechInput is the input of Media.Speech.
+type SpeechInput struct {
+	Text  string
+	Voice string // name or id, including a cloned voice
+	MediaCall
+}
+
+// MusicInput is the input of Media.Music.
+type MusicInput struct {
+	Prompt       string
+	Seconds      int
+	Instrumental *bool // nil ⇒ absent
+	Lyrics       string
+	MediaCall
+}
+
+// TranscribeInput is the input of Media.Transcribe.
+type TranscribeInput struct {
+	Audio    string // URL or local path of the audio
+	Language string
+	MediaCall
+}
+
+// CloneVoiceInput is the input of Media.CloneVoice.
+type CloneVoiceInput struct {
+	Name    string
+	Samples []string // URLs or local paths of audio samples
+	MediaCall
+}
+
+// TalkInput is the input of Media.Talk.
+type TalkInput struct {
+	Image string // URL or local path of the face image
+	Audio string // URL or local path of the speech audio
+	Text  string // text to speak when no audio is given
+	Voice string
+	MediaCall
+}
+
+// Image generates an image from a text prompt.
+func (m *Media) Image(ctx context.Context, in ImageInput) (MediaResult, error) {
+	return m.Generate(ctx, "image", present(
+		"prompt", in.Prompt, "width", in.Width, "height", in.Height,
+		"aspectRatio", in.AspectRatio, "seed", in.Seed), in.MediaCall)
+}
+
+// Video generates a short video, optionally from a starting image.
+func (m *Media) Video(ctx context.Context, in VideoInput) (MediaResult, error) {
+	return m.Generate(ctx, "video", present(
+		"prompt", in.Prompt, "image", in.Image, "seconds", in.Seconds,
+		"aspectRatio", in.AspectRatio), in.MediaCall)
+}
+
+// Speech speaks text aloud.
+func (m *Media) Speech(ctx context.Context, in SpeechInput) (MediaResult, error) {
+	return m.Generate(ctx, "speech", present("text", in.Text, "voice", in.Voice), in.MediaCall)
+}
+
+// Music generates music from a prompt.
+func (m *Media) Music(ctx context.Context, in MusicInput) (MediaResult, error) {
+	args := present("prompt", in.Prompt, "seconds", in.Seconds, "lyrics", in.Lyrics)
+	if in.Instrumental != nil {
+		args["instrumental"] = *in.Instrumental
+	}
+	return m.Generate(ctx, "music", args, in.MediaCall)
+}
+
+// Transcribe turns speech into MediaResult.Text.
+func (m *Media) Transcribe(ctx context.Context, in TranscribeInput) (MediaResult, error) {
+	return m.Generate(ctx, "transcribe", present("audio", in.Audio, "language", in.Language), in.MediaCall)
+}
+
+// CloneVoice creates a cloned voice; its id is MediaResult.Text.
+func (m *Media) CloneVoice(ctx context.Context, in CloneVoiceInput) (MediaResult, error) {
+	args := present("name", in.Name)
+	if in.Samples != nil {
+		s := make([]any, len(in.Samples))
+		for i, v := range in.Samples {
+			s[i] = v
+		}
+		args["samples"] = s
+	}
+	return m.Generate(ctx, "cloneVoice", args, in.MediaCall)
+}
+
+// Talk makes the person in an image speak (lip-synced video).
+func (m *Media) Talk(ctx context.Context, in TalkInput) (MediaResult, error) {
+	return m.Generate(ctx, "talk", present("image", in.Image, "audio", in.Audio,
+		"text", in.Text, "voice", in.Voice), in.MediaCall)
+}
+
+// present builds an args map from key/value pairs, dropping zero values.
+func present(kv ...any) map[string]any {
+	out := map[string]any{}
+	for i := 0; i+1 < len(kv); i += 2 {
+		switch v := kv[i+1].(type) {
+		case string:
+			if v != "" {
+				out[kv[i].(string)] = v
+			}
+		case int:
+			if v != 0 {
+				out[kv[i].(string)] = v
+			}
+		}
+	}
+	return out
+}
+
+// ---- tool face (§7G.6) ----
+
+// Tools returns one Tool (source "media") per verb any client supports, in
+// canonical verb order. A tool's schema is the first supporting client's args.
+// Execute never returns an error: a failure is ToolResult{IsError:true}.
 func (m *Media) Tools() []Tool {
 	out := []Tool{}
 	for _, spec := range mediaVerbs {
-		_, v, ok := m.resolve(spec.verb)
-		if !ok {
+		cands := m.candidates(spec.verb)
+		if len(cands) == 0 {
 			continue
 		}
+		accepted := clientArgs(cands[0], spec.verb)
 		props := map[string]any{}
 		required := []string{}
 		for _, a := range spec.args {
-			if _, mapped := v.Args[a.name]; !mapped {
+			var acc *MediaArg
+			for i := range accepted {
+				if accepted[i].Name == a.name {
+					acc = &accepted[i]
+				}
+			}
+			if acc == nil {
 				continue
 			}
 			p := map[string]any{"type": a.typ, "description": a.desc}
@@ -717,315 +729,106 @@ func (m *Media) Tools() []Tool {
 				p["items"] = map[string]any{"type": a.items}
 			}
 			props[a.name] = p
-			if a.required {
+			if acc.Required {
 				required = append(required, a.name)
 			}
 		}
 		verb := spec.verb
-		kind := v.Kind
 		out = append(out, Tool{
 			Name:        spec.tool,
 			Description: spec.desc,
 			InputSchema: JSONSchema{"type": "object", "properties": props, "required": required},
 			Source:      SourceMedia,
-			// Each call is an independent remote job: always concurrency-safe (§7G, §8 Tool scheduling).
+			// Each call is an independent job: always concurrency-safe (§7G.6).
 			ConcurrencySafe: func(map[string]any) bool { return true },
 			Execute: func(args map[string]any, tc *ToolContext) (ToolResult, error) {
 				ctx := context.Background()
 				if tc != nil && tc.Ctx != nil {
 					ctx = tc.Ctx
 				}
-				return m.toolResult(ctx, verb, kind, args), nil
+				return m.toolResult(ctx, verb, args), nil
 			},
 		})
 	}
 	return out
 }
 
-func (m *Media) toolResult(ctx context.Context, verb, kind string, args map[string]any) ToolResult {
-	r, err := m.Generate(ctx, verb, args, nil)
+func (m *Media) toolResult(ctx context.Context, verb string, args map[string]any) ToolResult {
+	r, client, err := m.route(ctx, verb, args, MediaCall{})
 	if err != nil {
 		return ToolResult{IsError: true, Output: err.Error()}
 	}
-	meta := map[string]any{"source": "media", "verb": verb, "status": r.Status}
+	meta := map[string]any{"source": "media", "verb": verb, "client": client, "status": r.Status}
 	if r.JobID != "" {
 		meta["jobId"] = r.JobID
 	}
-	if kind == "text" {
+	if r.Usage != nil {
+		meta["usage"] = r.Usage
+	}
+	if verb == "transcribe" || verb == "cloneVoice" || (len(r.Files) == 0 && r.hasText) {
 		return ToolResult{Output: r.Text, Metadata: meta}
 	}
-	urls := make([]string, len(r.Files))
+	lines := make([]string, len(r.Files))
 	parts := make([]ContentPart, len(r.Files))
 	for i, f := range r.Files {
-		urls[i] = f.URL
-		parts[i] = ContentPart{Type: f.Type, MimeType: f.MimeType, URL: f.URL}
-	}
-	word := kind
-	if kind != "image" && kind != "video" {
-		word = "audio"
-	}
-	return ToolResult{Output: word + " ready: " + strings.Join(urls, "\n"), Parts: parts, Metadata: meta}
-}
-
-// ---- helpers ----
-
-func mediaPartType(kind string) string {
-	switch kind {
-	case "image", "audio":
-		return kind
-	}
-	return "file"
-}
-
-var mediaMimes = map[string]string{
-	"png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg", "webp": "image/webp", "gif": "image/gif",
-	"mp4": "video/mp4", "webm": "video/webm", "mov": "video/quicktime",
-	"mp3": "audio/mpeg", "wav": "audio/wav", "ogg": "audio/ogg", "m4a": "audio/mp4", "flac": "audio/flac",
-}
-
-func mediaMime(kind, u string) string {
-	if i := strings.IndexAny(u, "?#"); i >= 0 {
-		u = u[:i]
-	}
-	if i := strings.Index(u, "://"); i >= 0 { // only the path's extension counts
-		rest := u[i+3:]
-		if j := strings.Index(rest, "/"); j >= 0 {
-			u = rest[j:]
-		} else {
-			u = ""
+		switch {
+		case f.Path != "":
+			lines[i] = f.Path
+		case f.URL != "":
+			lines[i] = f.URL
+		default:
+			n := 0
+			if b, err := base64.StdEncoding.DecodeString(f.Data); err == nil {
+				n = len(b)
+			}
+			lines[i] = fmt.Sprintf("inline %s %d bytes", f.MimeType, n)
 		}
-	}
-	last := u[strings.LastIndex(u, "/")+1:]
-	if dot := strings.LastIndex(last, "."); dot >= 0 {
-		if mt, ok := mediaMimes[strings.ToLower(last[dot+1:])]; ok {
-			return mt
+		p := ContentPart{Type: f.Type, MimeType: f.MimeType, path: f.Path}
+		switch {
+		case f.Data != "":
+			p.Data = f.Data
+		case strings.HasPrefix(f.URL, "http://") || strings.HasPrefix(f.URL, "https://"):
+			p.URL = f.URL
+		default: // a local file: its bytes, read now (a part never holds a path, §1B)
+			path := f.Path
+			if path == "" {
+				path = strings.TrimPrefix(f.URL, "file://")
+			}
+			b, err := os.ReadFile(path)
+			if err != nil {
+				return ToolResult{IsError: true, Output: fmt.Sprintf("%s: cannot read %q: %v", verb, path, err)}
+			}
+			p.Data = base64.StdEncoding.EncodeToString(b)
 		}
+		parts[i] = p
+	}
+	word := "audio"
+	kind := ""
+	if len(r.Files) > 0 {
+		kind = r.Files[0].Type
 	}
 	switch kind {
 	case "image":
-		return "image/png"
-	case "audio":
-		return "audio/mpeg"
+		word = "image"
+	case "file":
+		word = "video"
 	}
-	return "video/mp4"
+	return ToolResult{Output: word + " ready: " + strings.Join(lines, "\n"), Parts: parts, Metadata: meta}
 }
 
-// scalarText renders a string as-is and a number (integral ⇒ integer text).
-// Anything else (absent, null, objects, bools) ⇒ ok=false. Empty string ⇒ ok=false.
-func scalarText(v any) (string, bool) {
-	switch x := v.(type) {
-	case string:
-		return x, x != ""
-	case json.Number:
-		return numberText(string(x)), true
-	case float64:
-		return numberText(strconv.FormatFloat(x, 'f', -1, 64)), true
-	case int:
-		return strconv.Itoa(x), true
-	case int64:
-		return strconv.FormatInt(x, 10), true
+// toolPartsForModel is the §7G.6 model-visibility rule applied at message
+// assembly (§8A): of a media tool result's parts, only image parts reach the
+// model; video and audio stay in toolCalls[].parts and RunResult.files only.
+// Every other tool's parts pass through unchanged.
+func toolPartsForModel(r ToolResult) []ContentPart {
+	if r.Metadata == nil || r.Metadata["source"] != "media" {
+		return r.Parts
 	}
-	return "", false
-}
-
-// jobIDText: only a non-empty string or an integral number is a job id.
-func jobIDText(v any) (string, bool) {
-	switch n := v.(type) {
-	case json.Number:
-		f, err := strconv.ParseFloat(string(n), 64)
-		if err != nil || f != math.Trunc(f) {
-			return "", false
-		}
-	case float64:
-		if n != math.Trunc(n) {
-			return "", false
+	var out []ContentPart
+	for _, p := range r.Parts {
+		if p.Type == "image" {
+			out = append(out, p)
 		}
 	}
-	return scalarText(v)
-}
-
-func numberText(s string) string {
-	if _, err := strconv.ParseInt(s, 10, 64); err == nil {
-		return s
-	}
-	f, err := strconv.ParseFloat(s, 64)
-	if err != nil {
-		return s
-	}
-	if f == math.Trunc(f) && math.Abs(f) < 1e18 {
-		return strconv.FormatInt(int64(f), 10)
-	}
-	return strconv.FormatFloat(f, 'g', -1, 64)
-}
-
-func flattenURLs(v any) []string {
-	switch x := v.(type) {
-	case string:
-		if x != "" {
-			return []string{x}
-		}
-	case []any:
-		var out []string
-		for _, e := range x {
-			out = append(out, flattenURLs(e)...)
-		}
-		return out
-	}
-	return nil
-}
-
-// dotGet reads a dotPath; a missing segment ⇒ nil. An empty path is the root.
-func dotGet(v any, path string) any {
-	if path == "" {
-		return v
-	}
-	for _, k := range strings.Split(path, ".") {
-		switch x := v.(type) {
-		case map[string]any:
-			v = x[k]
-		case []any:
-			if !isDigits(k) {
-				return nil
-			}
-			i, err := strconv.Atoi(k)
-			if err != nil || i >= len(x) {
-				return nil
-			}
-			v = x[i]
-		default:
-			return nil
-		}
-	}
-	return v
-}
-
-// dotSet writes val at a dotPath, creating objects — or arrays when the next
-// segment is all digits (padding with null).
-func dotSet(root map[string]any, path string, val any) {
-	keys := strings.Split(path, ".")
-	var cur any = root
-	for i, k := range keys {
-		last := i == len(keys)-1
-		var next func() any
-		if !last && isDigits(keys[i+1]) {
-			next = func() any { return []any{} }
-		} else {
-			next = func() any { return map[string]any{} }
-		}
-		switch c := cur.(type) {
-		case map[string]any:
-			if last {
-				c[k] = val
-				return
-			}
-			child := c[k]
-			if !fitsNext(child, keys[i+1]) {
-				child = next()
-			}
-			child = growFor(child, keys[i+1])
-			c[k] = child
-			cur = child
-		case []any:
-			j, _ := strconv.Atoi(k)
-			if last {
-				c[j] = val
-				return
-			}
-			child := c[j]
-			if !fitsNext(child, keys[i+1]) {
-				child = next()
-			}
-			child = growFor(child, keys[i+1])
-			c[j] = child
-			cur = child
-		default:
-			return
-		}
-	}
-}
-
-// growFor pads a slice so index seg exists; maps pass through.
-func growFor(child any, seg string) any {
-	arr, ok := child.([]any)
-	if !ok || !isDigits(seg) {
-		return child
-	}
-	j, _ := strconv.Atoi(seg)
-	for len(arr) <= j {
-		arr = append(arr, nil)
-	}
-	return arr
-}
-
-// fitsNext reports whether child can take segment seg: an object takes any
-// segment, an array only a numeric one (else it is replaced, §7G).
-func fitsNext(child any, seg string) bool {
-	switch child.(type) {
-	case map[string]any:
-		return true
-	case []any:
-		return isDigits(seg)
-	}
-	return false
-}
-
-func isDigits(s string) bool {
-	if s == "" {
-		return false
-	}
-	for _, r := range s {
-		if r < '0' || r > '9' {
-			return false
-		}
-	}
-	return true
-}
-
-func deepCopyJSON(v any) any {
-	switch x := v.(type) {
-	case map[string]any:
-		out := make(map[string]any, len(x))
-		for k, e := range x {
-			out[k] = deepCopyJSON(e)
-		}
-		return out
-	case []any:
-		out := make([]any, len(x))
-		for i, e := range x {
-			out[i] = deepCopyJSON(e)
-		}
-		return out
-	}
-	return v
-}
-
-// jsonEqualAny reports whether v is JSON-equal to any of vals (numbers compare
-// by value, so 0 == 0.0).
-func jsonEqualAny(v any, vals []any) bool {
-	nv := normJSON(v)
-	for _, o := range vals {
-		if reflect.DeepEqual(nv, normJSON(o)) {
-			return true
-		}
-	}
-	return false
-}
-
-func normJSON(v any) any {
-	b, err := json.Marshal(v)
-	if err != nil {
-		return v
-	}
-	var out any
-	_ = json.Unmarshal(b, &out)
 	return out
-}
-
-func mediaHas(xs []string, s string) bool {
-	for _, x := range xs {
-		if x == s {
-			return true
-		}
-	}
-	return false
 }

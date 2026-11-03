@@ -1,183 +1,93 @@
-//! SPEC §7G conformance: replays `../conformance/media/cases.json` and
-//! `schemas.json` (read in place, never copied) against an in-process server.
+//! SPEC §7G conformance: replays `../conformance/media/cases.json` (style
+//! engine), `schemas.json` and `routing.json` (read in place, never copied)
+//! against an in-process server, plus the embedded-copy and loop checks.
 
 mod common;
+mod media_support;
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use common::{Req, Resp, oa_calls, oa_text, serve};
+use media_support::*;
 use serde_json::{Map, Value, json};
 use tokio_util::sync::CancellationToken;
 use toolnexus::client::{ClientOptions, Style, create_client};
 use toolnexus::{
-    BuiltinsConfig, Media, MediaError, MediaOptions, MediaStyle, ToolContext, ToolSource,
-    ToolkitOptions, create_media, create_toolkit,
+    BuiltinsConfig, IntoMediaClient, MediaArg, MediaArgs, MediaClient, MediaClientConfig, MediaCtx,
+    MediaError, MediaFuture, MediaResult, MediaStyle, ToolContext, ToolSource, ToolkitOptions,
+    create_media, create_toolkit, style_media_client,
 };
 
-fn load(name: &str) -> Value {
-    let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../conformance/media")
-        .join(name);
-    serde_json::from_str(&std::fs::read_to_string(p).unwrap()).unwrap()
-}
-
-type Log = Arc<Mutex<Vec<Req>>>;
-
-/// A fresh server answering `script` in order (last entry repeats).
-async fn script_server(script: Vec<Value>) -> (String, Log) {
-    let log: Log = Arc::default();
-    let l2 = log.clone();
-    let base: Arc<std::sync::OnceLock<String>> = Arc::default();
-    let b2 = base.clone();
-    let srv = serve(move |r: Req| {
-        let log = l2.clone();
-        let script = script.clone();
-        let base = b2.clone();
-        async move {
-            let n = {
-                let mut g = log.lock().unwrap();
-                g.push(r);
-                g.len() - 1
-            };
-            let e = &script[n.min(script.len() - 1)];
-            let status = e["status"].as_u64().unwrap() as u16;
-            let mut resp = match e.get("rawBody").and_then(Value::as_str) {
-                Some(raw) => Resp::status(status, raw),
-                None => {
-                    let mut r = Resp::json(e["body"].clone());
-                    r.status = status;
-                    r
-                }
-            };
-            if let Some(h) = e.get("headers").and_then(Value::as_object) {
-                let url = base.get().cloned().unwrap_or_default();
-                for (k, v) in h {
-                    resp = resp.header(k, &v.as_str().unwrap().replace("{server}", &url));
-                }
-            }
-            resp
-        }
-    })
-    .await;
-    base.set(srv.url.clone()).unwrap();
-    (srv.url, log)
-}
-
-fn style_for(case: &Value, url: &str) -> MediaStyle {
-    let mut s = case["style"].clone();
-    let b = s["baseUrl"].as_str().unwrap().replace("{server}", url);
-    s["baseUrl"] = json!(b);
-    serde_json::from_value(s).unwrap()
-}
-
-fn progress_media(style: MediaStyle) -> (Media, Arc<Mutex<Vec<String>>>) {
-    let prog: Arc<Mutex<Vec<String>>> = Arc::default();
-    let p2 = prog.clone();
-    let m = create_media(
-        style,
-        MediaOptions {
-            on_progress: Some(Arc::new(move |p| p2.lock().unwrap().push(p.status.clone()))),
-            ..Default::default()
-        },
-    );
-    (m, prog)
+fn style_of(case: &Value, url: &str) -> MediaStyle {
+    serde_json::from_value(subst(&case["style"], &[("{server}", url)])).unwrap()
 }
 
 #[tokio::test]
 async fn conformance_cases() {
     let cases = load("cases.json");
     let cases = cases["cases"].as_array().unwrap();
-    assert_eq!(cases.len(), 34, "conformance case count");
+    assert_eq!(cases.len(), 49, "cases.json case count");
+    let mut tool_faces = 0;
     for case in cases {
         let name = case["name"].as_str().unwrap();
-        if let Some(env) = case.get("env").and_then(Value::as_object) {
-            for (k, v) in env {
-                // SAFETY: the only test in this binary touching the env.
-                unsafe { std::env::set_var(k, v.as_str().unwrap()) };
-            }
-        }
+        set_env(case, &[]);
         let script: Vec<Value> = case["script"].as_array().unwrap().clone();
         let verb = case["verb"].as_str().unwrap();
         let args: Map<String, Value> = case["args"].as_object().unwrap().clone();
 
         // function face
+        let dir = temp_dir("cases");
         let (url, log) = script_server(script.clone()).await;
-        let (media, prog) = progress_media(style_for(case, &url));
+        let (cfg, prog) = config(case.get("config"));
+        let client = match style_media_client(style_of(case, &url), cfg) {
+            Ok(c) => c,
+            Err(e) => {
+                assert_eq!(case.get("styleError"), Some(&json!(true)), "{name}: {e}");
+                assert_eq!(e.to_string(), case["error"].as_str().unwrap(), "{name}");
+                assert!(log.lock().unwrap().is_empty());
+                clear_env(case);
+                continue;
+            }
+        };
+        assert!(case.get("styleError").is_none(), "{name}: style loaded");
+        let media = create_media([client]).unwrap();
         let got = media.generate(verb, args.clone()).await;
-        match (case.get("result"), case.get("error")) {
-            (Some(want), _) => {
-                let got = got.unwrap_or_else(|e| panic!("{name}: {e}"));
-                assert_eq!(serde_json::to_value(&got).unwrap(), *want, "{name}");
-            }
-            (None, Some(want)) => {
-                let e = got.expect_err(name);
-                assert_eq!(e.to_string(), want.as_str().unwrap(), "{name}");
-            }
-            _ => panic!("{name}: no result/error"),
-        }
-        let reqs = log.lock().unwrap().clone();
-        if let Some(want) = case.get("expectRequests").and_then(Value::as_array) {
-            assert_eq!(reqs.len(), want.len(), "{name}: request count");
-            for (r, w) in reqs.iter().zip(want) {
-                assert_eq!(r.method, w["method"].as_str().unwrap(), "{name}");
-                assert_eq!(r.path, w["path"].as_str().unwrap(), "{name}");
-                if let Some(b) = w.get("body") {
-                    assert_eq!(r.body, *b, "{name}: body");
-                    assert_eq!(
-                        r.headers.get("content-type").map(String::as_str),
-                        Some("application/json"),
-                        "{name}"
-                    );
-                } else {
-                    assert!(r.raw.is_empty(), "{name}: poll has a body");
-                    assert!(!r.headers.contains_key("content-type"), "{name}");
-                }
-            }
-        }
-        if let Some(h) = case.get("expectHeaders").and_then(Value::as_object) {
-            assert!(!reqs.is_empty());
-            for r in &reqs {
-                for (k, v) in h {
-                    assert_eq!(
-                        r.headers.get(&k.to_ascii_lowercase()).map(String::as_str),
-                        Some(v.as_str().unwrap()),
-                        "{name}: header {k} on {}",
-                        r.path
-                    );
-                }
-            }
-        }
-        if let Some(want) = case.get("expectProgress").and_then(Value::as_array) {
-            let want: Vec<String> = want.iter().map(|v| v.as_str().unwrap().into()).collect();
-            assert_eq!(*prog.lock().unwrap(), want, "{name}: progress");
-        }
+        check_outcome(name, case, &got, "style", verb, &dir);
+        check_requests(name, case, &log.lock().unwrap());
+        check_header_patterns(name, case, &log.lock().unwrap());
+        check_progress(name, case, &prog);
 
         // tool face (fresh server, script restarts)
-        let Some(want) = case.get("tool") else {
-            continue;
-        };
-        let (url, _log) = script_server(script).await;
-        let media = create_media(style_for(case, &url), MediaOptions::default());
-        let tools = media.tools();
-        let tool = tools
-            .iter()
-            .find(|t| t.name == want["name"].as_str().unwrap())
-            .unwrap_or_else(|| panic!("{name}: no tool"));
-        assert_eq!(tool.source, ToolSource::Media);
-        let r = tool.call(Value::Object(args), ToolContext::default()).await;
-        let mut want = want.clone();
-        want.as_object_mut().unwrap().remove("name");
-        assert_eq!(serde_json::to_value(&r).unwrap(), want, "{name}: tool");
+        if let Some(want) = case.get("tool") {
+            tool_faces += 1;
+            let (url, _log) = script_server(script).await;
+            let (cfg, _) = config(case.get("config"));
+            let media =
+                create_media([style_media_client(style_of(case, &url), cfg).unwrap()]).unwrap();
+            let tools = media.tools();
+            let tname = tool_name(want, verb);
+            let tool = tools
+                .iter()
+                .find(|t| t.name == tname)
+                .unwrap_or_else(|| panic!("{name}: no tool {tname}"));
+            assert_eq!(tool.source, ToolSource::Media);
+            let r = tool.call(Value::Object(args), ToolContext::default()).await;
+            check_tool(name, want, &r, &dir);
+        }
+        clear_env(case);
     }
+    assert_eq!(tool_faces, 45, "cases.json tool-face count");
 }
 
 #[tokio::test]
 async fn conformance_schemas() {
     let f = load("schemas.json");
     let style: MediaStyle = serde_json::from_value(f["style"].clone()).unwrap();
-    let tools = create_media(style, MediaOptions::default()).tools();
+    let client = style_media_client(style, MediaClientConfig::default()).unwrap();
+    let tools = create_media([client]).unwrap().tools();
     let want = f["tools"].as_array().unwrap();
+    assert_eq!(want.len(), 4);
     assert_eq!(tools.len(), want.len());
     for (t, w) in tools.iter().zip(want) {
         assert_eq!(t.name, w["name"].as_str().unwrap());
@@ -187,12 +97,196 @@ async fn conformance_schemas() {
     }
 }
 
-fn slow_style(url: &str) -> MediaStyle {
-    serde_json::from_value(json!({"baseUrl": url, "verbs": {"image": {
+// ---------------------------------------------------------------------------
+// routing.json — test-only custom clients
+// ---------------------------------------------------------------------------
+
+type Calls = Arc<Mutex<Vec<Value>>>;
+
+struct TestClient {
+    name: String,
+    verbs: Map<String, Value>,
+    calls: Calls,
+}
+
+impl TestClient {
+    fn from(v: &Value, calls: &Calls) -> Self {
+        TestClient {
+            name: v["name"].as_str().unwrap().into(),
+            verbs: v["verbs"].as_object().unwrap().clone(),
+            calls: calls.clone(),
+        }
+    }
+    async fn run(
+        &self,
+        verb: &str,
+        args: MediaArgs,
+        _ctx: &MediaCtx,
+    ) -> Result<MediaResult, MediaError> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(json!({"client": self.name, "verb": verb, "args": args}));
+        let out = &self.verbs[verb]["outcome"];
+        if let Some(r) = out.get("result") {
+            return Ok(serde_json::from_value(r.clone()).unwrap());
+        }
+        let msg = out["error"].as_str().unwrap().to_string();
+        Err(match out["status"].as_str().unwrap() {
+            "unavailable" => MediaError::unavailable(msg),
+            "timeout" => MediaError::Timeout {
+                message: msg,
+                job_id: None,
+            },
+            _ => MediaError::failed(msg),
+        })
+    }
+}
+
+macro_rules! test_verb {
+    ($f:ident, $verb:literal) => {
+        fn $f<'a>(&'a self, args: MediaArgs, ctx: &'a MediaCtx) -> MediaFuture<'a> {
+            Box::pin(self.run($verb, args, ctx))
+        }
+    };
+}
+
+impl MediaClient for TestClient {
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn supports(&self, verb: &str) -> bool {
+        self.verbs.contains_key(verb)
+    }
+    fn args(&self, verb: &str) -> Option<Vec<MediaArg>> {
+        let a = self.verbs.get(verb)?.get("args")?.as_array()?;
+        Some(
+            a.iter()
+                .map(|x| {
+                    MediaArg::new(
+                        x["name"].as_str().unwrap(),
+                        x["required"].as_bool().unwrap_or(false),
+                    )
+                })
+                .collect(),
+        )
+    }
+    test_verb!(image, "image");
+    test_verb!(video, "video");
+    test_verb!(speech, "speech");
+    test_verb!(music, "music");
+    test_verb!(transcribe, "transcribe");
+    test_verb!(clone_voice, "cloneVoice");
+    test_verb!(talk, "talk");
+}
+
+fn test_clients(v: &Value, calls: &Calls) -> Vec<Arc<dyn MediaClient>> {
+    v.as_array()
+        .unwrap()
+        .iter()
+        .map(|c| TestClient::from(c, calls).into_media_client())
+        .collect()
+}
+
+#[tokio::test]
+async fn conformance_routing() {
+    let f = load("routing.json");
+    let cases = f["cases"].as_array().unwrap();
+    assert_eq!(cases.len(), 19, "routing.json case count");
+    let dir = temp_dir("routing");
+    for case in cases {
+        let name = case["name"].as_str().unwrap();
+        let verb = case["verb"].as_str().unwrap();
+        let args = case["args"].as_object().unwrap().clone();
+        let calls: Calls = Arc::default();
+        let media = create_media(test_clients(&case["clients"], &calls)).unwrap();
+        let got = media.generate(verb, args.clone()).await;
+        if let Some(want) = case.get("expectCalls") {
+            assert_eq!(
+                Value::Array(calls.lock().unwrap().clone()),
+                *want,
+                "{name}: calls"
+            );
+        }
+        check_outcome(name, case, &got, "", verb, &dir);
+
+        if let Some(want) = case.get("tool") {
+            let calls: Calls = Arc::default();
+            let media = create_media(test_clients(&case["clients"], &calls)).unwrap();
+            let tname = tool_name(want, verb);
+            let tool = media
+                .tools()
+                .into_iter()
+                .find(|t| t.name == tname)
+                .unwrap_or_else(|| panic!("{name}: no tool"));
+            let r = tool.call(Value::Object(args), ToolContext::default()).await;
+            check_tool(name, want, &r, &dir);
+        }
+    }
+
+    let sc = f["schemaCases"].as_array().unwrap();
+    assert_eq!(sc.len(), 1);
+    for case in sc {
+        let calls: Calls = Arc::default();
+        let tools = create_media(test_clients(&case["clients"], &calls))
+            .unwrap()
+            .tools();
+        let want = case["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), want.len());
+        for (t, w) in tools.iter().zip(want) {
+            assert_eq!(t.name, w["name"].as_str().unwrap());
+            assert_eq!(t.description, w["description"].as_str().unwrap());
+            assert_eq!(serde_json::to_value(t.source).unwrap(), w["source"]);
+            assert_eq!(t.input_schema, w["inputSchema"], "{}", t.name);
+        }
+    }
+
+    let none: Vec<Arc<dyn MediaClient>> = Vec::new();
+    let e = create_media(none).unwrap_err();
+    assert_eq!(e.to_string(), f["emptyClients"]["error"].as_str().unwrap());
+}
+
+// ---------------------------------------------------------------------------
+// embedded copies
+// ---------------------------------------------------------------------------
+
+#[test]
+fn embedded_verbs_json_is_verbatim() {
+    let shared = std::fs::read_to_string(conformance("verbs.json")).unwrap();
+    assert_eq!(toolnexus::media::verbs_json(), shared);
+}
+
+#[test]
+fn embedded_a2e_json_is_verbatim() {
+    let p =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../examples/media-styles/a2e.json");
+    let shared = std::fs::read_to_string(p).unwrap();
+    assert_eq!(toolnexus::media::a2e_style_json(), shared);
+}
+
+// ---------------------------------------------------------------------------
+// loop, cancellation, tools
+// ---------------------------------------------------------------------------
+
+fn style_client(v: Value) -> toolnexus::StyleMediaClient {
+    style_media_client(
+        serde_json::from_value(v).unwrap(),
+        MediaClientConfig::default(),
+    )
+    .unwrap()
+}
+
+fn slow_style(url: &str) -> toolnexus::StyleMediaClient {
+    style_client(json!({"baseUrl": url, "verbs": {"image": {
         "mode": "async", "kind": "image", "start": {"path": "/s"}, "args": {"prompt": "p"},
         "idPath": "id", "poll": {"path": "/p/{id}", "statusPath": "st", "done": ["ok"],
         "failed": [], "intervalMs": 5, "timeoutMs": 60000}, "resultPath": "u"}}}))
-    .unwrap()
+}
+
+fn prompt(p: &str) -> MediaArgs {
+    let mut a = Map::new();
+    a.insert("prompt".into(), json!(p));
+    a
 }
 
 #[tokio::test]
@@ -202,21 +296,19 @@ async fn cancel_stops_polling() {
         json!({"status": 200, "body": {"st": "running"}}),
     ])
     .await;
-    let media = create_media(slow_style(&url), MediaOptions::default());
+    let media = create_media([slow_style(&url)]).unwrap();
     let tok = CancellationToken::new();
     let t2 = tok.clone();
     tokio::spawn(async move {
         tokio::time::sleep(Duration::from_millis(60)).await;
         t2.cancel();
     });
-    let mut args = Map::new();
-    args.insert("prompt".into(), json!("x"));
     let e = media
-        .generate_with("image", args.clone(), None, &tok)
+        .generate_with("image", prompt("x"), None, &tok)
         .await
         .unwrap_err();
     assert_eq!(e, MediaError::Cancelled);
-    // A poll already in flight at cancel may still land: settle, then baseline.
+    assert_eq!(e.status(), "cancelled");
     tokio::time::sleep(Duration::from_millis(50)).await;
     let n = log.lock().unwrap().len();
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -228,7 +320,7 @@ async fn cancel_stops_polling() {
     // tool face: isError with the cancellation message
     let ctx = ToolContext::default();
     ctx.cancel.cancel();
-    let r = media.tools()[0].call(Value::Object(args), ctx).await;
+    let r = media.tools()[0].call(Value::Object(prompt("x")), ctx).await;
     assert!(r.is_error);
     assert_eq!(r.output, MediaError::Cancelled.to_string());
 }
@@ -239,11 +331,10 @@ async fn typed_verb_and_provider_options() {
         json!({"status": 200, "body": {"u": "https://x/a.gif"}}),
     ])
     .await;
-    let style: MediaStyle = serde_json::from_value(json!({"baseUrl": url, "verbs": {"image": {
+    let media = create_media([style_client(json!({"baseUrl": url, "verbs": {"image": {
         "mode": "sync", "kind": "image", "start": {"path": "/i"},
-        "args": {"prompt": "p", "seed": "opts.seed"}, "resultPath": "u"}}}))
+        "args": {"prompt": "p", "seed": "opts.seed"}, "resultPath": "u"}}}))])
     .unwrap();
-    let media = Media::new(style, MediaOptions::default());
     let mut po = Map::new();
     po.insert("opts".into(), json!("overwritten"));
     let r = media
@@ -263,17 +354,85 @@ async fn typed_verb_and_provider_options() {
 }
 
 #[tokio::test]
-async fn run_result_files_and_parts() {
-    // the media provider
-    let (murl, _) = script_server(vec![
-        json!({"status": 200, "body": {"u": "https://x/a.png"}}),
+async fn typed_talk_and_music_verbs() {
+    let (url, log) = script_server(vec![
+        json!({"status": 200, "body": {"u": "https://x/v.mp4"}}),
     ])
     .await;
-    let style: MediaStyle = serde_json::from_value(json!({"baseUrl": murl, "verbs": {"image": {
-        "mode": "sync", "kind": "image", "start": {"path": "/i"},
-        "args": {"prompt": "p"}, "resultPath": "u"}}}))
+    let media = create_media([style_client(json!({"baseUrl": url, "verbs": {
+        "talk": {"mode": "sync", "kind": "video", "start": {"path": "/t"},
+                 "args": {"image": "i", "text": "t"}, "resultPath": "u"},
+        "music": {"mode": "sync", "kind": "audio", "start": {"path": "/m"},
+                  "args": {"prompt": "p", "instrumental": "inst"}, "resultPath": "u"}}}))])
     .unwrap();
-    let media = create_media(style, MediaOptions::default());
+    let r = media
+        .talk(toolnexus::TalkInput {
+            image: "https://x/f.png".into(),
+            text: Some("hi".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(r.files[0].kind, "file");
+    media
+        .music(toolnexus::MusicInput {
+            prompt: "lofi".into(),
+            instrumental: Some(true),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let reqs = log.lock().unwrap();
+    assert_eq!(reqs[0].body, json!({"i": "https://x/f.png", "t": "hi"}));
+    assert_eq!(reqs[1].body, json!({"p": "lofi", "inst": true}));
+}
+
+/// A custom client returning one image and one audio file inline.
+struct TwoFiles;
+
+impl TwoFiles {
+    async fn run(
+        &self,
+        _verb: &str,
+        _args: MediaArgs,
+        _ctx: &MediaCtx,
+    ) -> Result<MediaResult, MediaError> {
+        Ok(MediaResult {
+            files: vec![
+                toolnexus::MediaFile {
+                    kind: "image".into(),
+                    mime_type: "image/png".into(),
+                    data: "SU1BR0VCWVRFUw==".into(),
+                    ..Default::default()
+                },
+                toolnexus::MediaFile {
+                    kind: "audio".into(),
+                    mime_type: "audio/mpeg".into(),
+                    data: "QVVESU9CWVRFUw==".into(),
+                    ..Default::default()
+                },
+            ],
+            status: "completed".into(),
+            ..Default::default()
+        })
+    }
+}
+
+impl MediaClient for TwoFiles {
+    fn name(&self) -> &str {
+        "two"
+    }
+    fn supports(&self, verb: &str) -> bool {
+        verb == "image"
+    }
+    fn image<'a>(&'a self, args: MediaArgs, ctx: &'a MediaCtx) -> MediaFuture<'a> {
+        Box::pin(self.run("image", args, ctx))
+    }
+}
+
+#[tokio::test]
+async fn run_result_files_and_parts_and_model_visibility() {
+    let media = create_media([TwoFiles]).unwrap();
     let tk = create_toolkit(ToolkitOptions {
         builtins: Some(BuiltinsConfig::off()),
         media: Some(media),
@@ -290,13 +449,17 @@ async fn run_result_files_and_parts() {
     );
 
     // scripted LLM: one tool call, then a final answer
-    let turn = Arc::new(Mutex::new(0usize));
-    let llm = serve(move |_r: Req| {
-        let turn = turn.clone();
+    let seen: Arc<Mutex<Vec<String>>> = Arc::default();
+    let s2 = seen.clone();
+    let llm = serve(move |r: Req| {
+        let seen = s2.clone();
         async move {
-            let mut t = turn.lock().unwrap();
-            *t += 1;
-            if *t == 1 {
+            let n = {
+                let mut g = seen.lock().unwrap();
+                g.push(r.raw.clone());
+                g.len()
+            };
+            if n == 1 {
                 Resp::json(oa_calls(&[(
                     "call_7",
                     "generate_image",
@@ -318,15 +481,95 @@ async fn run_result_files_and_parts() {
     let r = client.run("draw", &tk).await.unwrap();
     assert_eq!(r.text, "here it is");
     let v = serde_json::to_value(&r).unwrap();
+    // RunResult.files and toolCalls[].parts keep every file …
     assert_eq!(
         v["files"],
-        json!([{"type": "image", "mimeType": "image/png", "url": "https://x/a.png",
-                "from": "generate_image", "callId": "call_7"}])
+        json!([
+            {"type": "image", "mimeType": "image/png", "data": "SU1BR0VCWVRFUw==",
+             "from": "generate_image", "callId": "call_7"},
+            {"type": "audio", "mimeType": "audio/mpeg", "data": "QVVESU9CWVRFUw==",
+             "from": "generate_image", "callId": "call_7"}
+        ])
     );
-    assert_eq!(
-        v["toolCalls"][0]["parts"],
-        json!([{"type": "image", "mimeType": "image/png", "url": "https://x/a.png"}])
+    assert_eq!(v["toolCalls"][0]["parts"].as_array().unwrap().len(), 2);
+    assert_eq!(v["toolCalls"][0]["metadata"]["client"], "two");
+    // … but only the image reaches the model (§7G.6)
+    let second = seen.lock().unwrap()[1].clone();
+    assert!(second.contains("SU1BR0VCWVRFUw=="), "image part not sent");
+    assert!(
+        !second.contains("QVVESU9CWVRFUw=="),
+        "audio part leaked to the model"
     );
+}
+
+/// D9 (§7G.12): a media tool result with no image part (modelParts `[]`)
+/// sends the plain `output` string as the tool-result content in every
+/// message style — never an empty content array, never a placeholder.
+#[tokio::test]
+async fn media_result_without_image_parts_sends_plain_output_every_style() {
+    let calls: Calls = Arc::default();
+    let client_def = json!([{"name": "c", "verbs": {"talk": {"outcome": {"result": {
+        "files": [{"type": "file", "mimeType": "video/mp4", "url": "https://x/c.mp4"}],
+        "status": "completed"}}}}}]);
+    for style in [Style::OpenAI, Style::Anthropic] {
+        let media = create_media(test_clients(&client_def, &calls)).unwrap();
+        let tk = create_toolkit(ToolkitOptions {
+            builtins: Some(BuiltinsConfig::off()),
+            media: Some(media),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        let wire: Arc<Mutex<Vec<Value>>> = Arc::default();
+        let w2 = wire.clone();
+        let llm = serve(move |r: Req| {
+            let w = w2.clone();
+            async move {
+                let anthropic = r.path.contains("messages");
+                if r.messages().len() > 1 {
+                    *w.lock().unwrap() = r.messages();
+                    if anthropic {
+                        return Resp::json(json!({"content": [{"type": "text", "text": "ok"}]}));
+                    }
+                    return Resp::json(oa_text("ok"));
+                }
+                let args = json!({"image": "https://x/f.png"});
+                if anthropic {
+                    return Resp::json(json!({"content": [{"type": "tool_use", "id": "t1",
+                        "name": "talking_video", "input": args}]}));
+                }
+                Resp::json(oa_calls(&[("t1", "talking_video", &args.to_string())]))
+            }
+        })
+        .await;
+        let r = create_client(ClientOptions {
+            base_url: llm.url,
+            style,
+            model: "m".into(),
+            api_key: "YOUR_KEY_HERE".into(),
+            ..Default::default()
+        })
+        .run("animate", &tk)
+        .await
+        .unwrap();
+        assert_eq!(r.text, "ok", "{style:?}");
+        let w = wire.lock().unwrap().clone();
+        let output = "video ready: https://x/c.mp4";
+        match style {
+            Style::OpenAI => {
+                assert_eq!(
+                    w[2],
+                    json!({"role": "tool", "tool_call_id": "t1", "content": output})
+                );
+                assert_eq!(w.len(), 3, "no relocated user message: {w:?}");
+            }
+            Style::Anthropic => {
+                let tr = &w[2]["content"][0];
+                assert_eq!(tr["type"], "tool_result");
+                assert_eq!(tr["content"], json!(output), "{tr}");
+            }
+        }
+    }
 }
 
 #[tokio::test]
@@ -345,30 +588,14 @@ async fn run_without_media_has_empty_files() {
     assert_eq!(v["files"], json!([]));
 }
 
-#[test]
-fn embedded_verb_table_matches_verbs_json() {
-    let mut want = load("verbs.json");
-    want.as_object_mut().unwrap().remove("_doc");
-    // arrays compare in order, so verb and arg order are asserted too
-    assert_eq!(toolnexus::media::canonical_verbs(), want);
-}
-
 #[tokio::test]
 async fn media_tool_wins_over_extra_tool_of_same_name() {
-    let (murl, _) = script_server(vec![
-        json!({"status": 200, "body": {"u": "https://x/a.png"}}),
-    ])
-    .await;
-    let style: MediaStyle = serde_json::from_value(json!({"baseUrl": murl, "verbs": {"image": {
-        "mode": "sync", "kind": "image", "start": {"path": "/i"},
-        "args": {"prompt": "p"}, "resultPath": "u"}}}))
-    .unwrap();
     let extra = toolnexus::define_tool("generate_image", "impostor", None, |_a, _c| async {
         Ok::<_, String>("extra".to_string())
     });
     let tk = create_toolkit(ToolkitOptions {
         builtins: Some(BuiltinsConfig::off()),
-        media: Some(create_media(style, MediaOptions::default())),
+        media: Some(create_media([TwoFiles]).unwrap()),
         extra_tools: vec![extra],
         ..Default::default()
     })
@@ -379,18 +606,36 @@ async fn media_tool_wins_over_extra_tool_of_same_name() {
     assert_eq!(tools[0].source, ToolSource::Media);
 }
 
-// Media tools are concurrency-safe (SPEC §7G, §8 Tool scheduling): each call is an independent remote job.
+// Media tools are concurrency-safe (SPEC §7G.6, §8 Tool scheduling).
 #[test]
 fn media_tools_are_concurrency_safe() {
-    let style: MediaStyle = serde_json::from_str("{\"baseUrl\":\"http://unused\",\"verbs\":{\"image\":{\"mode\":\"sync\",\"kind\":\"image\",\"start\":{\"path\":\"/i\"},\"args\":{\"prompt\":\"p\"},\"resultPath\":\"u\"},\"video\":{\"mode\":\"sync\",\"kind\":\"video\",\"start\":{\"path\":\"/v\"},\"args\":{\"prompt\":\"p\"},\"resultPath\":\"u\"},\"speech\":{\"mode\":\"sync\",\"kind\":\"audio\",\"start\":{\"path\":\"/s\"},\"args\":{\"text\":\"t\"},\"resultPath\":\"u\"},\"transcribe\":{\"mode\":\"sync\",\"kind\":\"text\",\"start\":{\"path\":\"/r\"},\"args\":{\"audio\":\"a\"},\"resultPath\":\"u\"},\"cloneVoice\":{\"mode\":\"sync\",\"kind\":\"text\",\"start\":{\"path\":\"/c\"},\"args\":{\"name\":\"n\"},\"resultPath\":\"id\"},\"talking\":{\"mode\":\"sync\",\"kind\":\"video\",\"start\":{\"path\":\"/t\"},\"args\":{\"image\":\"i\"},\"resultPath\":\"u\"}}}").unwrap();
-    let tools = create_media(style, MediaOptions::default()).tools();
-    assert_eq!(tools.len(), 6);
+    let mut verbs = Map::new();
+    for (v, k) in [
+        ("image", "image"),
+        ("video", "video"),
+        ("speech", "audio"),
+        ("music", "audio"),
+        ("transcribe", "text"),
+        ("cloneVoice", "text"),
+        ("talk", "video"),
+    ] {
+        verbs.insert(
+            v.into(),
+            json!({"mode": "sync", "kind": k, "start": {"path": "/x"}, "args": {}, "resultPath": "u"}),
+        );
+    }
+    let tools = create_media([style_client(
+        json!({"baseUrl": "http://unused", "verbs": verbs}),
+    )])
+    .unwrap()
+    .tools();
+    assert_eq!(tools.len(), 7);
     for t in &tools {
         assert!(toolnexus::is_concurrency_safe(t, &json!({})), "{}", t.name);
     }
 }
 
-// §7G: style headers never reach a different origin than baseUrl's.
+// §7G.8: style headers never reach a different origin than baseUrl's.
 #[tokio::test]
 async fn cross_origin_redirect_drops_style_headers() {
     let (burl, blog) = script_server(vec![
@@ -411,15 +656,13 @@ async fn cross_origin_redirect_drops_style_headers() {
         }
     })
     .await;
-    let style: MediaStyle = serde_json::from_value(json!({"baseUrl": a.url,
+    let client = style_client(json!({"baseUrl": a.url,
         "headers": {"Authorization": "Bearer YOUR_KEY_HERE", "X-Style": "s"},
         "verbs": {"image": {"mode": "sync", "kind": "image", "start": {"path": "/same"},
-        "args": {"prompt": "p"}, "resultPath": "u"}}}))
-    .unwrap();
-    let mut args = Map::new();
-    args.insert("prompt".into(), json!("x"));
-    let r = create_media(style, MediaOptions::default())
-        .generate("image", args)
+        "args": {"prompt": "p"}, "resultPath": "u"}}}));
+    let r = create_media([client])
+        .unwrap()
+        .generate("image", prompt("x"))
         .await
         .unwrap();
     assert_eq!(r.files[0].url, "https://x/a.png");
@@ -430,7 +673,7 @@ async fn cross_origin_redirect_drops_style_headers() {
     assert!(!reqs[0].headers.contains_key("x-style"));
 }
 
-// §7G: each request is bounded by the time left until the job deadline.
+// §7G.8: each request is bounded by the time left until the job deadline.
 #[tokio::test]
 async fn hung_server_bounded_by_deadline() {
     let hang = serve(|_r: Req| async {
@@ -438,20 +681,20 @@ async fn hung_server_bounded_by_deadline() {
         Resp::status(200, "{}")
     })
     .await;
-    let style: MediaStyle =
-        serde_json::from_value(json!({"baseUrl": hang.url, "verbs": {"image": {
+    let mk = |url: &str| {
+        style_client(json!({"baseUrl": url, "verbs": {"image": {
         "mode": "async", "kind": "image", "start": {"path": "/s"}, "args": {"prompt": "p"},
         "idPath": "id", "poll": {"path": "/p/{id}", "statusPath": "st", "done": ["ok"],
         "intervalMs": 5, "timeoutMs": 1000}, "resultPath": "u"}}}))
-        .unwrap();
-    let mut args = Map::new();
-    args.insert("prompt".into(), json!("x"));
+    };
     let t0 = std::time::Instant::now();
-    let e = create_media(style, MediaOptions::default())
-        .generate("image", args.clone())
+    let e = create_media([mk(&hang.url)])
+        .unwrap()
+        .generate("image", prompt("x"))
         .await
         .unwrap_err();
     assert_eq!(e.to_string(), "image: timed out after 1000ms");
+    assert_eq!(e.status(), "timeout");
     assert!(t0.elapsed() < Duration::from_secs(5));
 
     // a hung poll reports the job id
@@ -471,18 +714,14 @@ async fn hung_server_bounded_by_deadline() {
         }
     })
     .await;
-    let style: MediaStyle =
-        serde_json::from_value(json!({"baseUrl": poll_hang.url, "verbs": {"image": {
-        "mode": "async", "kind": "image", "start": {"path": "/s"}, "args": {"prompt": "p"},
-        "idPath": "id", "poll": {"path": "/p/{id}", "statusPath": "st", "done": ["ok"],
-        "intervalMs": 5, "timeoutMs": 1000}, "resultPath": "u"}}}))
-        .unwrap();
     let t0 = std::time::Instant::now();
-    let e = create_media(style, MediaOptions::default())
-        .generate("image", args)
+    let e = create_media([mk(&poll_hang.url)])
+        .unwrap()
+        .generate("image", prompt("x"))
         .await
         .unwrap_err();
     assert_eq!(e.to_string(), "job a/b timed out after 1000ms");
+    assert_eq!(e.job_id(), Some("a/b"));
     assert!(t0.elapsed() < Duration::from_secs(5));
 }
 
@@ -493,7 +732,7 @@ async fn typed_verb_with_cancel() {
         json!({"status": 200, "body": {"st": "running"}}),
     ])
     .await;
-    let media = create_media(slow_style(&url), MediaOptions::default());
+    let media = create_media([slow_style(&url)]).unwrap();
     let tok = CancellationToken::new();
     tok.cancel();
     let e = media
@@ -507,4 +746,26 @@ async fn typed_verb_with_cancel() {
         .await
         .unwrap_err();
     assert_eq!(e, MediaError::Cancelled);
+}
+
+#[test]
+fn load_media_style_rejects_old_talking_verb() {
+    let d = temp_dir("style");
+    let p = d.join("s.json");
+    std::fs::write(
+        &p,
+        r#"{"baseUrl":"http://x","verbs":{"talking":{"mode":"sync","kind":"video","start":{"path":"/t"},"args":{},"resultPath":"u"}}}"#,
+    )
+    .unwrap();
+    let e = toolnexus::load_media_style(&p).unwrap_err();
+    assert_eq!(e.to_string(), "style: unknown verb \"talking\"");
+}
+
+#[test]
+fn a2e_preset_loads_through_load_media_style() {
+    let p =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../examples/media-styles/a2e.json");
+    let s = toolnexus::load_media_style(p).unwrap();
+    assert_eq!(s.name.as_deref(), Some("a2e"));
+    assert!(s.verbs.contains_key("talk"));
 }

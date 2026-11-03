@@ -137,25 +137,65 @@ A `:before-llm` hook may return `:model`: a non-empty value is sent for that tur
 
 ## Media generation
 
-Generate images, video and speech (plus transcription, voice cloning and talking-head video)
-from a **JSON style** instead of provider code. Async jobs are started and polled for you. The same
-verbs become agent tools (`generate_image`, `generate_video`, `generate_speech`, …), and whatever
-they produce lands in `RunResult.files`. `examples/media-styles/a2e.json` ships first and reads
-`A2E_API_KEY` at call time. Its result URLs expire in 3–30 days, so save what you keep. SPEC §7G;
+Image, video, speech, music, transcription, voice cloning and talking-head video behind one
+interface. Pick **named media clients** — API: `a2e-media-client`, `elevenlabs-media-client`,
+`openai-media-client`, `openrouter-media-client`, `fal-media-client`; local CLI on your own
+subscription: `grok-media-client`, `codex-media-client` — and `create-media` sends each verb to
+the first client that supports it, falling through to the next **only** when a client is
+`:unavailable` (no key, no credits, quota, CLI missing). Each API client reads its key
+(`OPENAI_API_KEY`, `FAL_API_KEY`, …) at call time and never logs it. SPEC §7G;
 guide: <https://muthuishere.github.io/toolnexus/media/>.
 
 ```clojure
 (require '[toolnexus.media :as media] '[toolnexus.core :as tn] '[toolnexus.client :as client])
 
-(def m (media/create-media (media/load-style "examples/media-styles/a2e.json")
-                           {:on-progress (fn [{:keys [verb status]}] (println verb status))}))
-(def img (media/image m {:prompt "a red fox in fresh snow" :width 1024 :height 768}))
-(def vid (media/video m {:prompt "the fox blinks" :image (-> img :files first :url) :seconds 5}))
+(def m (media/create-media [(media/fal-media-client) (media/grok-media-client)
+                            (media/elevenlabs-media-client) (media/a2e-media-client)]))
+(defn loc [r] (let [f (first (:files r))] (or (:path f) (:url f))))
 
-(def tk (tn/build {:media m}))                         ; generate_image, …
-(def res (client/run agent "Draw a fox, then animate it." {:toolkit tk}))
+(try
+  (let [img   (loc (media/image m {:prompt "a red fox in fresh snow"}))
+        _     (media/video m {:prompt "the fox blinks" :image img})
+        voice (loc (media/speech m {:text "Hello from the fox."}))]
+    (println (loc (media/talk m {:image img :audio voice}))))
+  (catch clojure.lang.ExceptionInfo e
+    (if (media/unavailable? e)
+      (println "no client could serve it:" (ex-message e))
+      (println (:status (ex-data e)) (ex-message e)))))
+
+(def tk (tn/build {:media m}))                          ; generate_image, generate_video, …
+(def res (client/run llm "Draw a fox, then animate it." {:toolkit tk}))
 (doseq [f (:files res)] (println (:from f) (:mimeType f) (:url f)))
 ```
+
+- **Verbs** — `image`, `video`, `speech`, `music`, `transcribe`, `clone-voice`, `talk`, each
+  `(verb m args)` / `(verb m args ctx)` → `{:files [..] :text? :jobId? :status}`; or
+  `(media/generate m verb args)`. CLI clients take `:prompt` only.
+- **Tools** — `(tn/build {:media m})` (or `(media/tools m)`) registers one tool per verb some
+  client supports. Every file a tool makes lands in the run result's `:files`; only **image** parts
+  are sent back to the model.
+- **Config** — every built-in takes the same map: `:model`, `:models` (per verb), `:key`, `:url`,
+  `:command` (CLI), `:loop {:interval-ms :timeout-ms :on-progress}`,
+  `:gather {:mode "url"|"download"|"inline" :dir :max-bytes :keep}` (built-ins default to
+  `"download"` into the temp dir), `:http-client`.
+- **Your own client** — a map: `:name`, `:supports (fn [verb])`, optional `:args`, and one
+  `(fn [args ctx])` per verb you serve (`:image`, `:video`, … `:clone-voice`, `:talk`); throw
+  `(media/media-error msg :unavailable)` to fall through.
+- **Errors** — the verbs throw `ex-info` with `(:status (ex-data e))` one of `:failed :timeout
+  :cancelled :unavailable` (`media/unavailable?` tests it); a media tool never throws.
+- **Advanced** — a JSON style as a client: `(media/load-style path)` + `(media/style-media-client style)`.
+- **Known gap** — koine carries HTTP bodies as UTF-8 text, so binary that travels as a raw HTTP
+  body is not byte-exact on Clojure yet: ElevenLabs speech/music, OpenAI speech and video, any
+  `"download"`/`"inline"` fetch of an `http(s)` result, and uploaded inputs (`:image`/`:audio`/
+  `:samples` files). Base64 and `data:` URL results, `"url"` mode and CLI files are byte-exact.
+  Pending a bytes mode in koine.
+
+Run it: `cd examples/clj && clojure -M -m examples.media`. It adds each client only when its CLI is
+on `PATH` (`grok`, `codex`) or its key is set (`ELEVENLABS_API_KEY`, then the paid fallbacks
+`OPENAI_API_KEY`, `FAL_API_KEY`, `A2E_API_KEY`), makes an image, ElevenLabs speech (`MEDIA_VOICE`
+picks the voice) and a `generate_image` tool call, and prints client, verb, path or URL, mime type,
+size and usage per file. Grok video only with `MEDIA_VIDEO=1`; paid video/talk only with
+`MEDIA_PAID=1`. Exits non-zero when a step fails; with no client at all it prints a hint and exits 0.
 
 ## Documentation
 

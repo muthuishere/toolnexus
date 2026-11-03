@@ -36,6 +36,20 @@ dependencies {
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
 }
 
+// §7G.12 D23: the package version, read at runtime for the media User-Agent.
+def generateVersionResource = tasks.register('generateVersionResource') {
+    def outDir = layout.buildDirectory.dir('generated/version-resource')
+    def v = version.toString()
+    inputs.property('version', v)
+    outputs.dir(outDir)
+    doLast {
+        def f = outDir.get().file('io/github/muthuishere/toolnexus/version.txt').asFile
+        f.parentFile.mkdirs()
+        f.text = v
+    }
+}
+sourceSets.main.resources.srcDir(generateVersionResource)
+
 // Enable -parameters so @Tool reflection can read real parameter names.
 tasks.withType(JavaCompile).configureEach {
     options.compilerArgs << '-parameters'
@@ -144,12 +158,10 @@ tasks.register('runJudge', JavaExec) {
 
 tasks.register('runMedia', JavaExec) {
     group = 'application'
-    description = 'Run the Media example (§7G image verb + generate_speech tool via the a2e.ai preset; without A2E_API_KEY it prints a hint and exits 0).'
+    description = 'Run the Media example (§7G, E1): grok/codex CLIs and ElevenLabs/OpenAI/fal/A2E keys when present; with none it prints a hint and exits 0.'
     classpath = sourceSets.main.runtimeClasspath
     mainClass = 'io.github.muthuishere.toolnexus.examples.MediaExample'
-    if (System.getenv('A2E_API_KEY')) {
-        environment 'A2E_API_KEY', System.getenv('A2E_API_KEY')
-    }
+    // the process environment (keys, PATH, MEDIA_VOICE, MEDIA_VIDEO, MEDIA_PAID) is inherited
 }
 
 tasks.register('runPromptCache', JavaExec) {

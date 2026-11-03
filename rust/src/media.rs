@@ -1,295 +1,240 @@
-//! Media generation (SPEC §7G, ADR 0036; `source: "media"`): one engine, two
-//! faces. Typed verbs a host calls ([`Media::image`], [`Media::video`], …) and
-//! tools an LLM calls ([`Media::tools`]). Providers are **styles** — JSON data,
-//! never code. Conformance: `conformance/media/`.
+//! Media generation (SPEC §7G, ADRs 0036 + 0037; `source: "media"`): one
+//! interface, two faces. Typed verbs a host calls ([`Media::image`],
+//! [`Media::video`], …) and tools an LLM calls ([`Media::tools`]).
 //!
-//! Cancellation: drop the future, or pass a [`CancellationToken`] to
-//! [`Media::generate_with`] (the tool face uses `ToolContext.cancel`).
+//! Providers are **media clients** — anything implementing [`MediaClient`]:
+//!
+//! - built-in API clients: [`A2EMediaClient`], [`ElevenLabsMediaClient`],
+//!   [`OpenAIMediaClient`], [`OpenRouterMediaClient`], [`FalMediaClient`];
+//! - CLI clients over a local subscription CLI: [`GrokMediaClient`],
+//!   [`CodexMediaClient`] (both built on [`CliMediaClient`]);
+//! - style clients over a JSON style ([`load_media_style`] + [`style_media_client`]);
+//! - your own type implementing [`MediaClient`].
+//!
+//! [`create_media`] routes each verb to the first client that supports it and
+//! falls through to the next one **only** when a client is
+//! [`MediaError::Unavailable`] (no key, no credits, quota, CLI missing, …).
+//!
+//! Cancellation: every verb takes a [`CancellationToken`] (`*_with`, or
+//! [`MediaCtx::cancel`]); the tool face uses `ToolContext.cancel`. A CLI run is
+//! killed (its whole process group on Unix) when cancelled or past its deadline.
+//! Conformance: `conformance/media/`.
 
 use std::collections::BTreeMap;
-use std::path::Path;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::future::Future;
+use std::path::PathBuf;
+use std::pin::Pin;
+use std::sync::{Arc, OnceLock};
+use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use tokio_util::sync::CancellationToken;
 
-use crate::mcp::expand_env_headers;
 use crate::tool::{ContentPart, Tool, ToolResult, ToolSource};
 
-// ---------------------------------------------------------------------------
-// style (data)
-// ---------------------------------------------------------------------------
-
-/// A provider style (§7G). Loaded from JSON; the library names no vendor.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct MediaStyle {
-    #[serde(rename = "baseUrl")]
-    pub base_url: String,
-    /// Values may contain `${VAR}` (expanded at call time, unset ⇒ ""; never logged).
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub headers: BTreeMap<String, String>,
-    #[serde(
-        rename = "errorEnvelope",
-        default,
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub error_envelope: Option<ErrorEnvelope>,
-    /// verb ∈ image | video | speech | transcribe | cloneVoice | talking.
-    pub verbs: BTreeMap<String, MediaVerb>,
-}
-
-/// HTTP-200 error signalling: `codePath` not in `okValues` ⇒ error.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct ErrorEnvelope {
-    #[serde(rename = "codePath")]
-    pub code_path: String,
-    #[serde(rename = "okValues", default)]
-    pub ok_values: Vec<Value>,
-    #[serde(
-        rename = "messagePath",
-        default,
-        skip_serializing_if = "String::is_empty"
-    )]
-    pub message_path: String,
-}
-
-/// One verb of a style.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct MediaVerb {
-    /// `sync` | `async`.
-    pub mode: String,
-    /// `image` | `video` | `audio` | `text`.
-    pub kind: String,
-    pub start: MediaStart,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub defaults: Option<Value>,
-    /// normalised arg → dotPath in the request body.
-    #[serde(default)]
-    pub args: BTreeMap<String, String>,
-    #[serde(rename = "idPath", default, skip_serializing_if = "String::is_empty")]
-    pub id_path: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub poll: Option<MediaPoll>,
-    #[serde(rename = "resultPath")]
-    pub result_path: String,
-}
-
-/// The start request.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct MediaStart {
-    /// Empty ⇒ `POST`.
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub method: String,
-    pub path: String,
-}
-
-/// Async polling.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct MediaPoll {
-    /// Empty ⇒ `GET`.
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub method: String,
-    /// Contains `{id}`.
-    pub path: String,
-    #[serde(rename = "statusPath")]
-    pub status_path: String,
-    #[serde(default)]
-    pub done: Vec<String>,
-    #[serde(default)]
-    pub failed: Vec<String>,
-    #[serde(
-        rename = "errorPath",
-        default,
-        skip_serializing_if = "String::is_empty"
-    )]
-    pub error_path: String,
-    /// `None` ⇒ 5000.
-    #[serde(
-        rename = "intervalMs",
-        default,
-        deserialize_with = "lenient_ms",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub interval_ms: Option<u64>,
-    /// `None` ⇒ 600000.
-    #[serde(
-        rename = "timeoutMs",
-        default,
-        deserialize_with = "lenient_ms",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub timeout_ms: Option<u64>,
-}
-
-/// A positive whole number of ms; anything else (absent, `<= 0`, not a number) ⇒ `None` (default).
-fn lenient_ms<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<u64>, D::Error> {
-    let v = Value::deserialize(d)?;
-    Ok(v.as_f64().filter(|f| *f > 0.0).map(|f| f.ceil() as u64))
-}
-
-/// Read one style file (`loadMediaStyle`).
-pub fn load_media_style(path: impl AsRef<Path>) -> Result<MediaStyle, MediaError> {
-    let p = path.as_ref();
-    let text = std::fs::read_to_string(p)
-        .map_err(|e| MediaError::Message(format!("media: cannot read {}: {e}", p.display())))?;
-    let style: MediaStyle = serde_json::from_str(&text)
-        .map_err(|e| MediaError::Message(format!("media: bad style {}: {e}", p.display())))?;
-    check_style(&style)?;
-    Ok(style)
-}
-
-/// Load-time style checks (§7G): an argument may not map to the empty path.
-fn check_style(style: &MediaStyle) -> Result<(), MediaError> {
-    for vs in style.verbs.values() {
-        if let Some((k, _)) = vs.args.iter().find(|(_, p)| p.is_empty()) {
-            return err(format!("style: empty path for argument {k:?}"));
+/// Implements the seven verb methods of [`MediaClient`] by calling
+/// `self.run(verb, args, ctx)`, each stopped early by `ctx.cancel`.
+macro_rules! verbs_via_run {
+    () => {
+        fn image<'a>(
+            &'a self,
+            args: $crate::media::MediaArgs,
+            ctx: &'a $crate::media::MediaCtx,
+        ) -> $crate::media::MediaFuture<'a> {
+            Box::pin($crate::media::cancellable(
+                ctx,
+                self.run("image", args, ctx),
+            ))
         }
-    }
-    Ok(())
+        fn video<'a>(
+            &'a self,
+            args: $crate::media::MediaArgs,
+            ctx: &'a $crate::media::MediaCtx,
+        ) -> $crate::media::MediaFuture<'a> {
+            Box::pin($crate::media::cancellable(
+                ctx,
+                self.run("video", args, ctx),
+            ))
+        }
+        fn speech<'a>(
+            &'a self,
+            args: $crate::media::MediaArgs,
+            ctx: &'a $crate::media::MediaCtx,
+        ) -> $crate::media::MediaFuture<'a> {
+            Box::pin($crate::media::cancellable(
+                ctx,
+                self.run("speech", args, ctx),
+            ))
+        }
+        fn music<'a>(
+            &'a self,
+            args: $crate::media::MediaArgs,
+            ctx: &'a $crate::media::MediaCtx,
+        ) -> $crate::media::MediaFuture<'a> {
+            Box::pin($crate::media::cancellable(
+                ctx,
+                self.run("music", args, ctx),
+            ))
+        }
+        fn transcribe<'a>(
+            &'a self,
+            args: $crate::media::MediaArgs,
+            ctx: &'a $crate::media::MediaCtx,
+        ) -> $crate::media::MediaFuture<'a> {
+            Box::pin($crate::media::cancellable(
+                ctx,
+                self.run("transcribe", args, ctx),
+            ))
+        }
+        fn clone_voice<'a>(
+            &'a self,
+            args: $crate::media::MediaArgs,
+            ctx: &'a $crate::media::MediaCtx,
+        ) -> $crate::media::MediaFuture<'a> {
+            Box::pin($crate::media::cancellable(
+                ctx,
+                self.run("cloneVoice", args, ctx),
+            ))
+        }
+        fn talk<'a>(
+            &'a self,
+            args: $crate::media::MediaArgs,
+            ctx: &'a $crate::media::MediaCtx,
+        ) -> $crate::media::MediaFuture<'a> {
+            Box::pin($crate::media::cancellable(ctx, self.run("talk", args, ctx)))
+        }
+    };
 }
+
+mod api;
+mod cli;
+mod http;
+mod style;
+
+pub use api::{
+    A2EMediaClient, ElevenLabsMediaClient, FalMediaClient, OpenAIMediaClient, OpenRouterMediaClient,
+};
+pub use cli::{CliEvent, CliMediaClient, CliProfile, CodexMediaClient, GrokMediaClient};
+pub use style::{
+    ErrorEnvelope, MediaPoll, MediaStart, MediaStyle, MediaVerb, StyleMediaClient,
+    load_media_style, style_media_client,
+};
 
 // ---------------------------------------------------------------------------
 // canonical verbs (conformance/media/verbs.json, embedded verbatim)
 // ---------------------------------------------------------------------------
 
-struct ArgSpec {
-    name: &'static str,
-    ty: &'static str,
-    items: Option<&'static str>,
-    description: &'static str,
-    required: bool,
+const VERBS_JSON: &str = include_str!("media/verbs.json");
+const A2E_JSON: &str = include_str!("media/a2e.json");
+
+/// The embedded `verbs.json` (byte copy of `conformance/media/verbs.json`).
+#[doc(hidden)]
+pub fn verbs_json() -> &'static str {
+    VERBS_JSON
 }
 
-struct VerbSpec {
-    verb: &'static str,
-    tool: &'static str,
-    description: &'static str,
-    args: &'static [ArgSpec],
+/// The embedded a2e preset (byte copy of `examples/media-styles/a2e.json`).
+#[doc(hidden)]
+pub fn a2e_style_json() -> &'static str {
+    A2E_JSON
 }
 
-const fn a(
-    name: &'static str,
-    ty: &'static str,
-    description: &'static str,
-    required: bool,
-) -> ArgSpec {
-    ArgSpec {
-        name,
-        ty,
-        items: None,
-        description,
-        required,
+/// The seven verbs, in `verbs.json` order.
+pub const MEDIA_VERBS: [&str; 7] = [
+    "image",
+    "video",
+    "speech",
+    "music",
+    "transcribe",
+    "cloneVoice",
+    "talk",
+];
+
+#[derive(Deserialize)]
+pub(crate) struct VerbSpec {
+    pub(crate) verb: String,
+    pub(crate) tool: String,
+    pub(crate) description: String,
+    pub(crate) args: Vec<ArgSpec>,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct ArgSpec {
+    pub(crate) name: String,
+    #[serde(rename = "type")]
+    pub(crate) ty: String,
+    #[serde(default)]
+    pub(crate) items: Option<String>,
+    pub(crate) description: String,
+    #[serde(default)]
+    pub(crate) required: bool,
+}
+
+#[derive(Deserialize)]
+struct VerbsFile {
+    verbs: Vec<VerbSpec>,
+}
+
+pub(crate) fn verb_specs() -> &'static [VerbSpec] {
+    static V: OnceLock<Vec<VerbSpec>> = OnceLock::new();
+    V.get_or_init(|| {
+        serde_json::from_str::<VerbsFile>(VERBS_JSON)
+            .expect("embedded verbs.json")
+            .verbs
+    })
+}
+
+pub(crate) fn verb_spec(verb: &str) -> Option<&'static VerbSpec> {
+    verb_specs().iter().find(|v| v.verb == verb)
+}
+
+/// Every canonical arg of `verb`, with its canonical `required`.
+pub(crate) fn canonical_args(verb: &str) -> Vec<MediaArg> {
+    verb_spec(verb)
+        .map(|s| {
+            s.args
+                .iter()
+                .map(|a| MediaArg::new(&a.name, a.required))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The result kind of a media verb: `image` | `video` | `audio` | `text`.
+pub(crate) fn verb_kind(verb: &str) -> &'static str {
+    match verb {
+        "image" => "image",
+        "video" | "talk" => "video",
+        "speech" | "music" => "audio",
+        _ => "text",
     }
 }
 
-const VERBS: &[VerbSpec] = &[
-    VerbSpec {
-        verb: "image",
-        tool: "generate_image",
-        description: "Generate an image from a text prompt.",
-        args: &[
-            a("prompt", "string", "What to draw.", true),
-            a("width", "integer", "Width in pixels.", false),
-            a("height", "integer", "Height in pixels.", false),
-            a("aspectRatio", "string", "Aspect ratio, e.g. 16:9.", false),
-            a("seed", "integer", "Seed for reproducible output.", false),
-        ],
-    },
-    VerbSpec {
-        verb: "video",
-        tool: "generate_video",
-        description: "Generate a short video from a prompt, optionally starting from an image URL. Can take minutes.",
-        args: &[
-            a("prompt", "string", "What should happen in the video.", true),
-            a("image", "string", "URL of the starting image.", false),
-            a("seconds", "integer", "Video length in seconds.", false),
-            a("aspectRatio", "string", "Aspect ratio, e.g. 9:16.", false),
-        ],
-    },
-    VerbSpec {
-        verb: "speech",
-        tool: "generate_speech",
-        description: "Speak text aloud and return the audio.",
-        args: &[
-            a("text", "string", "The text to speak.", true),
-            a("voice", "string", "Voice or speaker id.", false),
-        ],
-    },
-    VerbSpec {
-        verb: "transcribe",
-        tool: "transcribe_audio",
-        description: "Transcribe speech in an audio URL to text.",
-        args: &[a("audio", "string", "URL of the audio.", true)],
-    },
-    VerbSpec {
-        verb: "cloneVoice",
-        tool: "clone_voice",
-        description: "Create a cloned voice from audio sample URLs and return its voice id.",
-        args: &[
-            a("name", "string", "Name for the new voice.", true),
-            ArgSpec {
-                name: "samples",
-                ty: "array",
-                items: Some("string"),
-                description: "URLs of audio samples of the voice.",
-                required: true,
-            },
-        ],
-    },
-    VerbSpec {
-        verb: "talking",
-        tool: "talking_video",
-        description: "Make the person in an image speak the given audio (lip-synced video).",
-        args: &[
-            a("image", "string", "URL of the face image.", true),
-            a("audio", "string", "URL of the speech audio.", true),
-        ],
-    },
-];
-
-/// The embedded canonical verb table in `verbs.json` shape (`{"verbs": [...]}`).
-#[doc(hidden)]
-pub fn canonical_verbs() -> Value {
-    let verbs: Vec<Value> = VERBS
-        .iter()
-        .map(|v| {
-            let args: Vec<Value> = v
-                .args
-                .iter()
-                .map(|a| {
-                    let mut m = Map::new();
-                    m.insert("name".into(), a.name.into());
-                    m.insert("type".into(), a.ty.into());
-                    if let Some(i) = a.items {
-                        m.insert("items".into(), i.into());
-                    }
-                    m.insert("description".into(), a.description.into());
-                    if a.required {
-                        m.insert("required".into(), true.into());
-                    }
-                    Value::Object(m)
-                })
-                .collect();
-            json!({"verb": v.verb, "tool": v.tool, "description": v.description, "args": args})
-        })
-        .collect();
-    json!({ "verbs": verbs })
-}
-
 // ---------------------------------------------------------------------------
-// results, options, errors
+// results, progress, context, errors
 // ---------------------------------------------------------------------------
 
-/// One produced file: `type` image | audio | file.
+/// Verb arguments (canonical names, §7G.1).
+pub type MediaArgs = Map<String, Value>;
+
+/// One produced file: `type` image | audio | file (video). Which of
+/// `url` / `path` / `data` are set is decided by gather (§7G.5).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct MediaFile {
     #[serde(rename = "type")]
     pub kind: String,
     #[serde(rename = "mimeType")]
     pub mime_type: String,
+    /// An `http(s)://` URL or a `file://` URL.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub url: String,
+    /// An absolute local path.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub path: String,
+    /// Standard padded base64 of the bytes.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub data: String,
 }
 
 /// What every verb returns.
@@ -301,39 +246,370 @@ pub struct MediaResult {
     #[serde(rename = "jobId", default, skip_serializing_if = "Option::is_none")]
     pub job_id: Option<String>,
     pub status: String,
+    /// What the provider reported (§7G.12 D21); never estimated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<MediaUsage>,
 }
 
-/// One poll observation passed to `on_progress`.
+/// Provider-reported usage of one media call (§7G.12 D21). A field the
+/// provider omits stays `None`; Grok's `total_cost_usd_ticks` stays unconverted in `raw`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct MediaUsage {
+    #[serde(
+        rename = "inputTokens",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub input_tokens: Option<i64>,
+    #[serde(
+        rename = "outputTokens",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub output_tokens: Option<i64>,
+    #[serde(rename = "costUsd", default, skip_serializing_if = "Option::is_none")]
+    pub cost_usd: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw: Option<Map<String, Value>>,
+}
+
+impl MediaUsage {
+    /// `Some` only when at least one field is set.
+    pub(crate) fn nonempty(self) -> Option<Self> {
+        (self != MediaUsage::default()).then_some(self)
+    }
+}
+
+/// One progress observation (a poll status, a CLI event).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MediaProgress {
     pub verb: String,
-    pub job_id: String,
+    pub client: String,
+    pub job_id: Option<String>,
     pub status: String,
+    pub elapsed_ms: u64,
 }
 
 /// Progress callback.
 pub type OnProgressFn = Arc<dyn Fn(&MediaProgress) + Send + Sync>;
 
-/// `createMedia` options.
+/// Per-call context (§7G.2 `ctx`).
 #[derive(Clone, Default)]
-pub struct MediaOptions {
-    pub on_progress: Option<OnProgressFn>,
-    /// The same injection seam as `ClientOptions.http_client`; `None` ⇒ a default client.
-    pub http_client: Option<reqwest::Client>,
+pub struct MediaCtx {
+    /// Native cancellation.
+    pub cancel: CancellationToken,
+    /// Absolute deadline; the job deadline is the earlier of it and `loop.timeoutMs`.
+    pub deadline: Option<Instant>,
+    /// Called for every progress status; when `None`, the client's `loop.on_progress` is.
+    pub progress: Option<OnProgressFn>,
+    /// Top-level keys overwrite the JSON body last (function face only).
+    pub provider_options: Option<MediaArgs>,
 }
 
-/// An engine failure. `Message` displays the exact §7G error string.
+/// A media failure (§7G.2). `Display` is the exact §7G message.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum MediaError {
-    #[error("{0}")]
-    Message(String),
+    #[error("{message}")]
+    Failed {
+        message: String,
+        job_id: Option<String>,
+    },
+    #[error("{message}")]
+    Timeout {
+        message: String,
+        job_id: Option<String>,
+    },
+    /// The call was valid but this client cannot serve it now (no key, no
+    /// credits, quota, CLI missing, ZDR, …). The only error `createMedia`
+    /// falls through on.
+    #[error("{message}")]
+    Unavailable { message: String },
     /// Stopped by the cancellation token.
     #[error("media: cancelled")]
     Cancelled,
 }
 
-fn err<T>(m: impl Into<String>) -> Result<T, MediaError> {
-    Err(MediaError::Message(m.into()))
+impl MediaError {
+    /// `failed` | `timeout` | `cancelled` | `unavailable`.
+    pub fn status(&self) -> &'static str {
+        match self {
+            MediaError::Failed { .. } => "failed",
+            MediaError::Timeout { .. } => "timeout",
+            MediaError::Unavailable { .. } => "unavailable",
+            MediaError::Cancelled => "cancelled",
+        }
+    }
+    pub fn is_unavailable(&self) -> bool {
+        matches!(self, MediaError::Unavailable { .. })
+    }
+    pub fn job_id(&self) -> Option<&str> {
+        match self {
+            MediaError::Failed { job_id, .. } | MediaError::Timeout { job_id, .. } => {
+                job_id.as_deref()
+            }
+            _ => None,
+        }
+    }
+    /// A `failed` error.
+    pub fn failed(message: impl Into<String>) -> Self {
+        MediaError::Failed {
+            message: message.into(),
+            job_id: None,
+        }
+    }
+    /// An `unavailable` error.
+    pub fn unavailable(message: impl Into<String>) -> Self {
+        MediaError::Unavailable {
+            message: message.into(),
+        }
+    }
+    pub(crate) fn timeout(message: impl Into<String>, job_id: Option<String>) -> Self {
+        MediaError::Timeout {
+            message: message.into(),
+            job_id,
+        }
+    }
+    pub(crate) fn with_job(self, id: &Option<String>) -> Self {
+        match self {
+            MediaError::Failed { message, job_id } => MediaError::Failed {
+                message,
+                job_id: job_id.or_else(|| id.clone()),
+            },
+            other => other,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// shared client config (§7G.4)
+// ---------------------------------------------------------------------------
+
+/// `gather.mode` (§7G.5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GatherMode {
+    /// Keep provider URLs as given (bytes / base64 / data URLs are still saved).
+    Url,
+    /// Save every file under `gather.dir`.
+    Download,
+    /// Return the bytes as base64 `data`.
+    Inline,
+}
+
+/// `gather` config.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct MediaGather {
+    /// `None` ⇒ the client's default (`Download`; style clients `Url`).
+    pub mode: Option<GatherMode>,
+    /// `None` ⇒ `<os temp dir>/toolnexus-media`, created when missing.
+    pub dir: Option<PathBuf>,
+    /// `None` ⇒ 104857600 (100 MiB).
+    pub max_bytes: Option<u64>,
+    /// CLI clients: `Some(false)` deletes the CLI's original after a copy.
+    pub keep: Option<bool>,
+}
+
+/// `loop` config. Values absent or `<= 0` ⇒ the default.
+#[derive(Clone, Default)]
+pub struct MediaLoop {
+    pub interval_ms: Option<i64>,
+    pub timeout_ms: Option<i64>,
+    /// Progress callback when `ctx.progress` is absent.
+    pub on_progress: Option<OnProgressFn>,
+}
+
+/// One config shape for every built-in client (§7G.4). Fields a client does
+/// not use are ignored.
+#[derive(Clone, Default)]
+pub struct MediaClientConfig {
+    /// The model of the client's primary verb (CLI: `-m <model>`).
+    pub model: Option<String>,
+    /// Per-verb model override; wins over `model` and the default.
+    pub models: BTreeMap<String, String>,
+    /// API key; `None` ⇒ the client's env var, read at call time. Never logged.
+    pub key: Option<String>,
+    /// Base URL override (trailing `/` trimmed).
+    pub url: Option<String>,
+    /// CLI argv prefix; empty ⇒ the CLI's name.
+    pub command: Vec<String>,
+    pub r#loop: MediaLoop,
+    pub gather: MediaGather,
+    /// The same HTTP-client injection seam as the LLM client.
+    pub http_client: Option<reqwest::Client>,
+}
+
+pub(crate) fn positive(v: Option<i64>) -> Option<u64> {
+    v.filter(|n| *n > 0).map(|n| n as u64)
+}
+
+pub(crate) fn report(
+    ctx: &MediaCtx,
+    cfg: &MediaClientConfig,
+    verb: &str,
+    client: &str,
+    job_id: Option<&str>,
+    status: &str,
+    start: Instant,
+) {
+    let cb = ctx.progress.as_ref().or(cfg.r#loop.on_progress.as_ref());
+    if let Some(cb) = cb {
+        cb(&MediaProgress {
+            verb: verb.to_string(),
+            client: client.to_string(),
+            job_id: job_id.map(str::to_string),
+            status: status.to_string(),
+            elapsed_ms: start.elapsed().as_millis() as u64,
+        });
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MediaClient
+// ---------------------------------------------------------------------------
+
+/// The boxed future every verb returns.
+pub type MediaFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<MediaResult, MediaError>> + Send + 'a>>;
+
+/// One accepted canonical argument of a verb.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MediaArg {
+    pub name: String,
+    pub required: bool,
+}
+
+impl MediaArg {
+    pub fn new(name: impl Into<String>, required: bool) -> Self {
+        MediaArg {
+            name: name.into(),
+            required,
+        }
+    }
+}
+
+fn unsupported<'a>(name: &str, verb: &str) -> MediaFuture<'a> {
+    let m = format!("{name}: {verb} is not supported");
+    Box::pin(async move { Err(MediaError::failed(m)) })
+}
+
+/// A media provider (§7G.2). Every verb is optional: implement what you
+/// support and say so in [`MediaClient::supports`].
+pub trait MediaClient: Send + Sync {
+    /// The client's name in messages and tool metadata.
+    fn name(&self) -> &str;
+    /// Whether this client serves `verb`.
+    fn supports(&self, verb: &str) -> bool;
+    /// The canonical args this client accepts for `verb`; `None` ⇒ every
+    /// canonical arg, with the canonical `required` flags.
+    fn args(&self, _verb: &str) -> Option<Vec<MediaArg>> {
+        None
+    }
+    fn image<'a>(&'a self, _args: MediaArgs, _ctx: &'a MediaCtx) -> MediaFuture<'a> {
+        unsupported(self.name(), "image")
+    }
+    fn video<'a>(&'a self, _args: MediaArgs, _ctx: &'a MediaCtx) -> MediaFuture<'a> {
+        unsupported(self.name(), "video")
+    }
+    fn speech<'a>(&'a self, _args: MediaArgs, _ctx: &'a MediaCtx) -> MediaFuture<'a> {
+        unsupported(self.name(), "speech")
+    }
+    fn music<'a>(&'a self, _args: MediaArgs, _ctx: &'a MediaCtx) -> MediaFuture<'a> {
+        unsupported(self.name(), "music")
+    }
+    fn transcribe<'a>(&'a self, _args: MediaArgs, _ctx: &'a MediaCtx) -> MediaFuture<'a> {
+        unsupported(self.name(), "transcribe")
+    }
+    fn clone_voice<'a>(&'a self, _args: MediaArgs, _ctx: &'a MediaCtx) -> MediaFuture<'a> {
+        unsupported(self.name(), "cloneVoice")
+    }
+    fn talk<'a>(&'a self, _args: MediaArgs, _ctx: &'a MediaCtx) -> MediaFuture<'a> {
+        unsupported(self.name(), "talk")
+    }
+}
+
+/// Call `verb` on `c` (the generic dispatch).
+pub fn call_media_verb<'a>(
+    c: &'a dyn MediaClient,
+    verb: &str,
+    args: MediaArgs,
+    ctx: &'a MediaCtx,
+) -> MediaFuture<'a> {
+    match verb {
+        "image" => c.image(args, ctx),
+        "video" => c.video(args, ctx),
+        "speech" => c.speech(args, ctx),
+        "music" => c.music(args, ctx),
+        "transcribe" => c.transcribe(args, ctx),
+        "cloneVoice" => c.clone_voice(args, ctx),
+        "talk" => c.talk(args, ctx),
+        other => unsupported(c.name(), other),
+    }
+}
+
+pub(crate) async fn cancellable<F>(ctx: &MediaCtx, fut: F) -> Result<MediaResult, MediaError>
+where
+    F: Future<Output = Result<MediaResult, MediaError>>,
+{
+    tokio::select! {
+        biased;
+        _ = ctx.cancel.cancelled() => Err(MediaError::Cancelled),
+        r = fut => r,
+    }
+}
+
+/// Anything [`create_media`] accepts as a client: a concrete client or an
+/// `Arc<dyn MediaClient>`.
+pub trait IntoMediaClient {
+    fn into_media_client(self) -> Arc<dyn MediaClient>;
+}
+
+impl<C: MediaClient + 'static> IntoMediaClient for C {
+    fn into_media_client(self) -> Arc<dyn MediaClient> {
+        Arc::new(self)
+    }
+}
+
+impl IntoMediaClient for Arc<dyn MediaClient> {
+    fn into_media_client(self) -> Arc<dyn MediaClient> {
+        self
+    }
+}
+
+fn accepted_args(c: &dyn MediaClient, verb: &str) -> Vec<MediaArg> {
+    let canon = canonical_args(verb);
+    match c.args(verb) {
+        // D7: only canonical names are ever accepted
+        Some(a) => a
+            .into_iter()
+            .filter(|x| canon.iter().any(|k| k.name == x.name))
+            .collect(),
+        None => canon,
+    }
+}
+
+/// §7G.3 per-candidate arg check (D19): the skip reason when `c` cannot take
+/// `args` — first unsupported key (sorted), then first missing required
+/// (canonical order).
+fn skip_reason(c: &dyn MediaClient, verb: &str, args: &MediaArgs) -> Option<String> {
+    let accepted = accepted_args(c, verb);
+    let mut keys: Vec<&String> = args.keys().collect();
+    keys.sort();
+    if let Some(k) = keys
+        .into_iter()
+        .find(|k| !accepted.iter().any(|a| &a.name == *k))
+    {
+        return Some(format!("{}: argument \"{k}\" not supported", c.name()));
+    }
+    let required = |n: &str| accepted.iter().any(|a| a.name == n && a.required);
+    let mut order: Vec<String> = canonical_args(verb).into_iter().map(|a| a.name).collect();
+    for a in &accepted {
+        if !order.contains(&a.name) {
+            order.push(a.name.clone());
+        }
+    }
+    order
+        .iter()
+        .find(|n| required(n) && !args.contains_key(n.as_str()))
+        .map(|k| format!("{}: missing required argument \"{k}\"", c.name()))
 }
 
 // ---------------------------------------------------------------------------
@@ -371,6 +647,7 @@ input!(
     /// `video` arguments.
     VideoInput {
         prompt: String,
+        /// URL or local path of the starting image.
         #[serde(skip_serializing_if = "Option::is_none")]
         image: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -383,24 +660,51 @@ input!(
     /// `speech` arguments.
     SpeechInput {
         text: String,
+        /// Voice name or id, including a cloned voice.
         #[serde(skip_serializing_if = "Option::is_none")]
         voice: Option<String>,
     }
 );
 input!(
+    /// `music` arguments.
+    MusicInput {
+        prompt: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        seconds: Option<i64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        instrumental: Option<bool>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        lyrics: Option<String>,
+    }
+);
+input!(
     /// `transcribe` arguments.
-    TranscribeInput { audio: String }
+    TranscribeInput {
+        /// URL or local path of the audio.
+        audio: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        language: Option<String>,
+    }
 );
 input!(
     /// `cloneVoice` arguments.
     CloneVoiceInput { name: String, samples: Vec<String> }
 );
 input!(
-    /// `talking` arguments.
-    TalkingInput { image: String, audio: String }
+    /// `talk` arguments.
+    TalkInput {
+        /// URL or local path of the face image.
+        image: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        audio: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        text: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        voice: Option<String>,
+    }
 );
 
-fn to_args<T: Serialize>(t: &T) -> Map<String, Value> {
+fn to_args<T: Serialize>(t: &T) -> MediaArgs {
     match serde_json::to_value(t) {
         Ok(Value::Object(m)) => m,
         _ => Map::new(),
@@ -408,619 +712,195 @@ fn to_args<T: Serialize>(t: &T) -> Map<String, Value> {
 }
 
 // ---------------------------------------------------------------------------
-// dotPath
+// createMedia — routing (§7G.3)
 // ---------------------------------------------------------------------------
 
-fn get_path<'a>(v: &'a Value, path: &str) -> Option<&'a Value> {
-    if path.is_empty() {
-        return Some(v);
-    }
-    let mut cur = v;
-    for seg in path.split('.') {
-        cur = if is_index(seg) {
-            cur.as_array()?.get(seg.parse::<usize>().ok()?)?
-        } else {
-            cur.as_object()?.get(seg)?
-        };
-    }
-    Some(cur)
-}
-
-fn is_index(seg: &str) -> bool {
-    !seg.is_empty() && seg.bytes().all(|b| b.is_ascii_digit())
-}
-
-fn set_path(root: &mut Value, path: &str, val: Value) {
-    let segs: Vec<&str> = path.split('.').collect();
-    let mut cur = root;
-    for (i, seg) in segs.iter().enumerate() {
-        let last = i + 1 == segs.len();
-        let fresh = || {
-            if !last && is_index(segs[i + 1]) {
-                Value::Array(Vec::new())
-            } else {
-                Value::Object(Map::new())
-            }
-        };
-        // An existing object keeps a numeric segment as a string key (SPEC §7G).
-        if is_index(seg) && !cur.is_object() {
-            let idx: usize = seg.parse().unwrap_or(0);
-            if !cur.is_array() {
-                *cur = Value::Array(Vec::new());
-            }
-            let arr = cur.as_array_mut().expect("array");
-            while arr.len() <= idx {
-                arr.push(Value::Null);
-            }
-            if last {
-                arr[idx] = val;
-                return;
-            }
-            if !(arr[idx].is_object() || arr[idx].is_array()) {
-                arr[idx] = fresh();
-            }
-            cur = &mut arr[idx];
-        } else {
-            if !cur.is_object() {
-                *cur = Value::Object(Map::new());
-            }
-            let obj = cur.as_object_mut().expect("object");
-            if last {
-                obj.insert((*seg).to_string(), val);
-                return;
-            }
-            let slot = obj.entry((*seg).to_string()).or_insert_with(fresh);
-            if !(slot.is_object() || slot.is_array()) {
-                *slot = fresh();
-            }
-            cur = slot;
-        }
-    }
-}
-
-fn is_integral(n: &serde_json::Number) -> bool {
-    n.is_i64()
-        || n.is_u64()
-        || n.as_f64()
-            .is_some_and(|f| f.fract() == 0.0 && f.abs() < 1e18)
-}
-
-/// A number as integer text when integral, else as JSON renders it.
-fn num_text(n: &serde_json::Number) -> String {
-    if let Some(i) = n.as_i64() {
-        return i.to_string();
-    }
-    if let Some(u) = n.as_u64() {
-        return u.to_string();
-    }
-    match n.as_f64() {
-        Some(f) if f.fract() == 0.0 && f.abs() < 1e18 => (f as i64).to_string(),
-        _ => n.to_string(),
-    }
-}
-
-// ---------------------------------------------------------------------------
-// file mapping
-// ---------------------------------------------------------------------------
-
-fn mime_for(url: &str, kind: &str) -> String {
-    let no_frag = url.split('#').next().unwrap_or("");
-    let no_q = no_frag.split('?').next().unwrap_or("");
-    let path = match no_q.find("://") {
-        Some(i) => {
-            let rest = &no_q[i + 3..];
-            rest.find('/').map(|j| &rest[j..]).unwrap_or("")
-        }
-        None => no_q,
-    };
-    let last = path.rsplit('/').next().unwrap_or("");
-    let ext = last
-        .rsplit_once('.')
-        .map(|(_, e)| e.to_ascii_lowercase())
-        .unwrap_or_default();
-    let m = match ext.as_str() {
-        "png" => "image/png",
-        "jpg" | "jpeg" => "image/jpeg",
-        "webp" => "image/webp",
-        "gif" => "image/gif",
-        "mp4" => "video/mp4",
-        "webm" => "video/webm",
-        "mov" => "video/quicktime",
-        "mp3" => "audio/mpeg",
-        "wav" => "audio/wav",
-        "ogg" => "audio/ogg",
-        "m4a" => "audio/mp4",
-        "flac" => "audio/flac",
-        _ => match kind {
-            "video" => "video/mp4",
-            "audio" => "audio/mpeg",
-            _ => "image/png",
-        },
-    };
-    m.to_string()
-}
-
-fn part_type(kind: &str) -> &'static str {
-    match kind {
-        "image" => "image",
-        "audio" => "audio",
-        _ => "file",
-    }
-}
-
-fn collect_urls(v: &Value, out: &mut Vec<String>) {
-    match v {
-        Value::String(s) if !s.is_empty() => out.push(s.clone()),
-        Value::Array(a) => a.iter().for_each(|x| collect_urls(x, out)),
-        _ => {}
-    }
-}
-
-// ---------------------------------------------------------------------------
-// engine
-// ---------------------------------------------------------------------------
-
-struct Inner {
-    styles: Vec<MediaStyle>,
-    on_progress: Option<OnProgressFn>,
-    http: reqwest::Client,
-}
-
-/// The media engine (`createMedia`). Cheap to clone.
+/// The routed media surface (`createMedia`). Cheap to clone.
 #[derive(Clone)]
 pub struct Media {
-    inner: Arc<Inner>,
+    clients: Arc<Vec<Arc<dyn MediaClient>>>,
 }
 
 impl std::fmt::Debug for Media {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Media").finish_non_exhaustive()
+        let names: Vec<&str> = self.clients.iter().map(|c| c.name()).collect();
+        f.debug_struct("Media").field("clients", &names).finish()
     }
 }
 
-/// `createMedia(styles, opts)`: a verb resolves to the first style that declares it.
-pub fn create_media(styles: impl Into<Vec<MediaStyle>>, opts: MediaOptions) -> Media {
-    Media::new(styles, opts)
+/// `createMedia(client | [client])`: each verb goes to the first client that
+/// supports it; an [`MediaError::Unavailable`] moves on to the next.
+/// An empty list fails with `media: no clients`.
+pub fn create_media<I>(clients: I) -> Result<Media, MediaError>
+where
+    I: IntoIterator,
+    I::Item: IntoMediaClient,
+{
+    let clients: Vec<Arc<dyn MediaClient>> = clients
+        .into_iter()
+        .map(IntoMediaClient::into_media_client)
+        .collect();
+    if clients.is_empty() {
+        return Err(MediaError::failed("media: no clients"));
+    }
+    Ok(Media {
+        clients: Arc::new(clients),
+    })
 }
 
-impl From<MediaStyle> for Vec<MediaStyle> {
-    fn from(s: MediaStyle) -> Self {
-        vec![s]
-    }
+macro_rules! typed_verb {
+    ($verb:literal, $f:ident, $fw:ident, $in:ty) => {
+        #[doc = concat!("The `", $verb, "` verb.")]
+        pub async fn $f(&self, input: $in) -> Result<MediaResult, MediaError> {
+            self.$fw(input, &CancellationToken::new()).await
+        }
+        #[doc = concat!("The `", $verb, "` verb, stopped early by `cancel`.")]
+        pub async fn $fw(
+            &self,
+            input: $in,
+            cancel: &CancellationToken,
+        ) -> Result<MediaResult, MediaError> {
+            let ctx = MediaCtx {
+                cancel: cancel.clone(),
+                provider_options: input.provider_options.clone(),
+                ..Default::default()
+            };
+            self.generate_ctx($verb, to_args(&input), ctx).await
+        }
+    };
 }
 
 impl Media {
-    /// One style or a list of styles.
-    pub fn new(styles: impl Into<Vec<MediaStyle>>, opts: MediaOptions) -> Self {
-        Media {
-            inner: Arc::new(Inner {
-                styles: styles.into(),
-                on_progress: opts.on_progress,
-                http: opts.http_client.unwrap_or_else(|| {
-                    reqwest::Client::builder()
-                        .redirect(reqwest::redirect::Policy::none())
-                        .build()
-                        .unwrap_or_default()
-                }),
-            }),
-        }
+    /// Whether any client supports `verb`.
+    pub fn supports(&self, verb: &str) -> bool {
+        self.clients.iter().any(|c| c.supports(verb))
     }
 
-    fn resolve(&self, verb: &str) -> Option<(&MediaStyle, &MediaVerb)> {
-        self.inner
-            .styles
-            .iter()
-            .find_map(|s| s.verbs.get(verb).map(|v| (s, v)))
-    }
-
-    pub async fn image(&self, input: ImageInput) -> Result<MediaResult, MediaError> {
-        self.image_with(input, &CancellationToken::new()).await
-    }
-    /// [`Media::image`] stopped early by `cancel`.
-    pub async fn image_with(
-        &self,
-        input: ImageInput,
-        cancel: &CancellationToken,
-    ) -> Result<MediaResult, MediaError> {
-        self.generate_with("image", to_args(&input), input.provider_options, cancel)
-            .await
-    }
-    pub async fn video(&self, input: VideoInput) -> Result<MediaResult, MediaError> {
-        self.video_with(input, &CancellationToken::new()).await
-    }
-    /// [`Media::video`] stopped early by `cancel`.
-    pub async fn video_with(
-        &self,
-        input: VideoInput,
-        cancel: &CancellationToken,
-    ) -> Result<MediaResult, MediaError> {
-        self.generate_with("video", to_args(&input), input.provider_options, cancel)
-            .await
-    }
-    pub async fn speech(&self, input: SpeechInput) -> Result<MediaResult, MediaError> {
-        self.speech_with(input, &CancellationToken::new()).await
-    }
-    /// [`Media::speech`] stopped early by `cancel`.
-    pub async fn speech_with(
-        &self,
-        input: SpeechInput,
-        cancel: &CancellationToken,
-    ) -> Result<MediaResult, MediaError> {
-        self.generate_with("speech", to_args(&input), input.provider_options, cancel)
-            .await
-    }
-    pub async fn transcribe(&self, input: TranscribeInput) -> Result<MediaResult, MediaError> {
-        self.transcribe_with(input, &CancellationToken::new()).await
-    }
-    /// [`Media::transcribe`] stopped early by `cancel`.
-    pub async fn transcribe_with(
-        &self,
-        input: TranscribeInput,
-        cancel: &CancellationToken,
-    ) -> Result<MediaResult, MediaError> {
-        self.generate_with(
-            "transcribe",
-            to_args(&input),
-            input.provider_options,
-            cancel,
-        )
-        .await
-    }
-    pub async fn clone_voice(&self, input: CloneVoiceInput) -> Result<MediaResult, MediaError> {
-        self.clone_voice_with(input, &CancellationToken::new())
-            .await
-    }
-    /// [`Media::clone_voice`] stopped early by `cancel`.
-    pub async fn clone_voice_with(
-        &self,
-        input: CloneVoiceInput,
-        cancel: &CancellationToken,
-    ) -> Result<MediaResult, MediaError> {
-        self.generate_with(
-            "cloneVoice",
-            to_args(&input),
-            input.provider_options,
-            cancel,
-        )
-        .await
-    }
-    pub async fn talking(&self, input: TalkingInput) -> Result<MediaResult, MediaError> {
-        self.talking_with(input, &CancellationToken::new()).await
-    }
-    /// [`Media::talking`] stopped early by `cancel`.
-    pub async fn talking_with(
-        &self,
-        input: TalkingInput,
-        cancel: &CancellationToken,
-    ) -> Result<MediaResult, MediaError> {
-        self.generate_with("talking", to_args(&input), input.provider_options, cancel)
-            .await
-    }
+    typed_verb!("image", image, image_with, ImageInput);
+    typed_verb!("video", video, video_with, VideoInput);
+    typed_verb!("speech", speech, speech_with, SpeechInput);
+    typed_verb!("music", music, music_with, MusicInput);
+    typed_verb!("transcribe", transcribe, transcribe_with, TranscribeInput);
+    typed_verb!("cloneVoice", clone_voice, clone_voice_with, CloneVoiceInput);
+    typed_verb!("talk", talk, talk_with, TalkInput);
 
     /// The generic verb call: `generate(verb, args)`.
-    pub async fn generate(
-        &self,
-        verb: &str,
-        args: Map<String, Value>,
-    ) -> Result<MediaResult, MediaError> {
-        self.generate_with(verb, args, None, &CancellationToken::new())
-            .await
+    pub async fn generate(&self, verb: &str, args: MediaArgs) -> Result<MediaResult, MediaError> {
+        self.generate_ctx(verb, args, MediaCtx::default()).await
     }
 
     /// [`Media::generate`] with `providerOptions` and a cancellation token.
     pub async fn generate_with(
         &self,
         verb: &str,
-        args: Map<String, Value>,
-        provider_options: Option<Map<String, Value>>,
+        args: MediaArgs,
+        provider_options: Option<MediaArgs>,
         cancel: &CancellationToken,
     ) -> Result<MediaResult, MediaError> {
-        tokio::select! {
-            biased;
-            _ = cancel.cancelled() => Err(MediaError::Cancelled),
-            r = self.run(verb, args, provider_options) => r,
-        }
+        let ctx = MediaCtx {
+            cancel: cancel.clone(),
+            provider_options,
+            ..Default::default()
+        };
+        self.generate_ctx(verb, args, ctx).await
     }
 
-    async fn run(
+    /// [`Media::generate`] with a full [`MediaCtx`].
+    pub async fn generate_ctx(
         &self,
         verb: &str,
-        args: Map<String, Value>,
-        provider_options: Option<Map<String, Value>>,
+        args: MediaArgs,
+        ctx: MediaCtx,
     ) -> Result<MediaResult, MediaError> {
-        let args: Map<String, Value> = args.into_iter().filter(|(_, v)| !v.is_null()).collect();
-        let Some((style, vs)) = self.resolve(verb) else {
-            return err(format!("media: no style supports {verb:?}"));
-        };
-        if let Some(k) = args.keys().find(|k| !vs.args.contains_key(*k)) {
-            return err(format!(
-                "{verb}: argument {k:?} not supported by this style"
-            ));
-        }
-        check_style(style)?;
-        let mut body = vs
-            .defaults
-            .clone()
-            .unwrap_or_else(|| Value::Object(Map::new()));
-        for (k, v) in &args {
-            set_path(&mut body, &vs.args[k], v.clone());
-        }
-        if let Some(po) = provider_options {
-            if !body.is_object() {
-                body = Value::Object(Map::new());
-            }
-            let obj = body.as_object_mut().expect("object");
-            for (k, v) in po {
-                obj.insert(k, v);
-            }
-        }
-        let method = if vs.start.method.is_empty() {
-            "POST"
-        } else {
-            &vs.start.method
-        };
-        let timeout_ms = match vs.poll.as_ref().and_then(|p| p.timeout_ms) {
-            Some(n) if n > 0 => n,
-            _ => 600_000,
-        };
-        let deadline = Instant::now() + Duration::from_millis(timeout_ms);
-        let start = match self
-            .request(style, verb, method, &vs.start.path, Some(&body), deadline)
-            .await
-        {
-            Err(MediaError::Message(m)) if m == TIMED_OUT => {
-                return err(format!("{verb}: timed out after {timeout_ms}ms"));
-            }
-            other => other?,
-        };
+        self.route(verb, args, &ctx).await.map(|(r, _)| r)
+    }
 
-        let (final_resp, status, job_id) = if vs.mode == "async" {
-            let job_id = match get_path(&start, &vs.id_path) {
-                Some(Value::String(s)) if !s.is_empty() => s.clone(),
-                Some(Value::Number(n)) if is_integral(n) => num_text(n),
-                _ => return err(format!("{verb}: no job id at {}", vs.id_path)),
-            };
-            let poll = vs.poll.clone().unwrap_or_default();
-            let interval = Duration::from_millis(match poll.interval_ms {
-                Some(n) if n > 0 => n,
-                _ => 5000,
-            });
-            let method = if poll.method.is_empty() {
-                "GET"
-            } else {
-                &poll.method
-            };
-            let path = poll.path.replace("{id}", &pct_encode(&job_id));
-            let timed_out = || err(format!("job {job_id} timed out after {timeout_ms}ms"));
-            loop {
-                tokio::time::sleep(
-                    interval.min(deadline.saturating_duration_since(Instant::now())),
-                )
-                .await;
-                if Instant::now() >= deadline {
-                    return timed_out();
-                }
-                let r = match self
-                    .request(style, verb, method, &path, None, deadline)
-                    .await
-                {
-                    Err(MediaError::Message(m)) if m == TIMED_OUT => return timed_out(),
-                    other => other?,
-                };
-                let st = match get_path(&r, &poll.status_path) {
-                    Some(Value::String(s)) => s.clone(),
-                    Some(Value::Number(n)) => num_text(n),
-                    _ => String::new(),
-                };
-                if let Some(cb) = &self.inner.on_progress {
-                    cb(&MediaProgress {
-                        verb: verb.to_string(),
-                        job_id: job_id.clone(),
-                        status: st.clone(),
-                    });
-                }
-                if poll.done.contains(&st) {
-                    break (r, st, Some(job_id));
-                }
-                if poll.failed.contains(&st) {
-                    let msg = match get_path(&r, &poll.error_path) {
-                        _ if poll.error_path.is_empty() => String::new(),
-                        Some(Value::String(s)) => s.clone(),
-                        Some(Value::Number(n)) => num_text(n),
-                        Some(Value::Null) | None => String::new(),
-                        Some(other) => other.to_string(),
-                    };
-                    return if msg.is_empty() {
-                        err(format!("job {job_id} {st}"))
-                    } else {
-                        err(format!("job {job_id} {st}: {msg}"))
-                    };
-                }
-                if Instant::now() >= deadline {
-                    return timed_out();
-                }
-            }
-        } else {
-            (start, "completed".to_string(), None)
-        };
-
-        let found = get_path(&final_resp, &vs.result_path);
-        let no_result = || err(format!("{verb}: no result at {}", vs.result_path));
-        if vs.kind == "text" {
-            let text = match found {
-                Some(Value::String(s)) => s.clone(),
-                Some(Value::Number(n)) => num_text(n),
-                _ => return no_result(),
-            };
-            return Ok(MediaResult {
-                files: Vec::new(),
-                text: Some(text),
-                job_id,
-                status,
-            });
+    /// The §7G.3 routing; returns the result and the serving client's name.
+    async fn route(
+        &self,
+        verb: &str,
+        args: MediaArgs,
+        ctx: &MediaCtx,
+    ) -> Result<(MediaResult, String), MediaError> {
+        let args: MediaArgs = args.into_iter().filter(|(_, v)| !v.is_null()).collect();
+        let cands: Vec<&Arc<dyn MediaClient>> =
+            self.clients.iter().filter(|c| c.supports(verb)).collect();
+        if cands.is_empty() {
+            return Err(MediaError::failed(format!(
+                "media: no client supports \"{verb}\""
+            )));
         }
-        let mut urls = Vec::new();
-        if let Some(v) = found {
-            collect_urls(v, &mut urls);
-        }
-        if urls.is_empty() {
-            return no_result();
-        }
-        let files = urls
+        // D7/D19: a non-canonical key can be served by no client
+        let canon = canonical_args(verb);
+        let mut keys: Vec<&String> = args.keys().collect();
+        keys.sort();
+        if let Some(k) = keys
             .into_iter()
-            .map(|u| MediaFile {
-                kind: part_type(&vs.kind).into(),
-                mime_type: mime_for(&u, &vs.kind),
-                url: u,
-            })
-            .collect();
-        Ok(MediaResult {
-            files,
-            text: None,
-            job_id,
-            status,
-        })
-    }
-
-    async fn request(
-        &self,
-        style: &MediaStyle,
-        verb: &str,
-        method: &str,
-        path: &str,
-        body: Option<&Value>,
-        deadline: Instant,
-    ) -> Result<Value, MediaError> {
-        let fut = self.send(style, verb, method, path, body);
-        let (status, text) =
-            match tokio::time::timeout(deadline.saturating_duration_since(Instant::now()), fut)
-                .await
-            {
-                Ok(r) => r?,
-                Err(_) => return err(TIMED_OUT),
-            };
-        if !(200..300).contains(&status) {
-            return err(format!("HTTP {status}: {}", cap_body(&text)));
-        }
-        let Ok(v) = serde_json::from_str::<Value>(&text) else {
-            return err(format!("{verb}: response is not JSON"));
-        };
-        if let Some(env) = &style.error_envelope
-            && let Some(code) = get_path(&v, &env.code_path)
-            && !env.ok_values.iter().any(|ok| json_eq(ok, code))
+            .find(|k| !canon.iter().any(|a| &a.name == *k))
         {
-            let code_s = match code {
-                Value::Number(n) => num_text(n),
-                Value::String(s) => s.clone(),
-                other => other.to_string(),
-            };
-            let msg = if env.message_path.is_empty() {
-                String::new()
-            } else {
-                match get_path(&v, &env.message_path) {
-                    Some(Value::String(s)) => s.clone(),
-                    _ => String::new(),
-                }
-            };
-            return err(format!("API error {code_s}: {msg}"));
+            return Err(MediaError::failed(format!(
+                "{verb}: argument \"{k}\" not supported"
+            )));
         }
-        Ok(v)
-    }
-
-    /// Send one request; style headers go only to the style's origin (§7G):
-    /// a cross-origin redirect is re-issued without them.
-    async fn send(
-        &self,
-        style: &MediaStyle,
-        verb: &str,
-        method: &str,
-        path: &str,
-        body: Option<&Value>,
-    ) -> Result<(u16, String), MediaError> {
-        let fail = |e: reqwest::Error| MediaError::Message(format!("{verb}: {e}"));
-        let mut url =
-            reqwest::Url::parse(&format!("{}{}", style.base_url.trim_end_matches('/'), path))
-                .map_err(|e| MediaError::Message(format!("{verb}: {e}")))?;
-        let origin = url.origin();
-        let mut m = reqwest::Method::from_bytes(method.to_ascii_uppercase().as_bytes())
-            .map_err(|e| MediaError::Message(format!("{verb}: bad method {method:?}: {e}")))?;
-        let mut body = body.map(Value::to_string);
-        for _ in 0..=MAX_REDIRECTS {
-            let mut req = self.inner.http.request(m.clone(), url.clone());
-            if let Some(b) = &body {
-                req = req
-                    .header("Content-Type", "application/json")
-                    .body(b.clone());
+        let mut msgs = Vec::new();
+        for c in cands {
+            if let Some(why) = skip_reason(c.as_ref(), verb, &args) {
+                msgs.push(why);
+                continue;
             }
-            if url.origin() == origin {
-                for (k, v) in expand_env_headers(&style.headers) {
-                    req = req.header(k, v);
-                }
-            }
-            let resp = req.send().await.map_err(fail)?;
-            let status = resp.status();
-            let location = resp
-                .headers()
-                .get(reqwest::header::LOCATION)
-                .and_then(|l| l.to_str().ok())
-                .and_then(|l| url.join(l).ok());
-            let code = status.as_u16();
-            match location {
-                Some(next) if matches!(code, 301 | 302 | 303 | 307 | 308) => {
-                    if matches!(code, 301..=303)
-                        && m != reqwest::Method::GET
-                        && m != reqwest::Method::HEAD
-                    {
-                        m = reqwest::Method::GET;
-                        body = None;
-                    }
-                    url = next;
-                }
-                _ => {
-                    let text = resp.text().await.map_err(fail)?;
-                    return Ok((status.as_u16(), text));
-                }
+            let a = args.clone();
+            let r = cancellable(ctx, call_media_verb(c.as_ref(), verb, a, ctx)).await;
+            match r {
+                Ok(res) => return Ok((res, c.name().to_string())),
+                Err(MediaError::Unavailable { message }) => msgs.push(message),
+                Err(e) => return Err(e),
             }
         }
-        err(format!("{verb}: too many redirects"))
+        Err(MediaError::unavailable(format!(
+            "media: no client available for \"{verb}\": {}",
+            msgs.join("; ")
+        )))
     }
 
-    /// One `source: "media"` tool per verb the styles support, in `verbs.json` order.
+    /// One `source: "media"` tool per verb any client supports, in
+    /// `verbs.json` order; schema from the first supporting client (§7G.6).
     pub fn tools(&self) -> Vec<Tool> {
-        VERBS
+        verb_specs()
             .iter()
             .filter_map(|spec| {
-                let (_, vs) = self.resolve(spec.verb)?;
-                Some(self.tool_for(spec, vs))
+                let first = self.clients.iter().find(|c| c.supports(&spec.verb))?;
+                Some(self.tool_for(spec, &accepted_args(first.as_ref(), &spec.verb)))
             })
             .collect()
     }
 
-    fn tool_for(&self, spec: &'static VerbSpec, vs: &MediaVerb) -> Tool {
+    fn tool_for(&self, spec: &'static VerbSpec, accepted: &[MediaArg]) -> Tool {
         let mut props = Map::new();
         let mut required = Vec::new();
-        for arg in spec.args.iter().filter(|a| vs.args.contains_key(a.name)) {
-            let p = match arg.items {
+        for arg in spec.args.iter() {
+            let Some(acc) = accepted.iter().find(|a| a.name == arg.name) else {
+                continue;
+            };
+            let p = match &arg.items {
                 Some(items) => {
                     json!({"type": arg.ty, "items": {"type": items}, "description": arg.description})
                 }
                 None => json!({"type": arg.ty, "description": arg.description}),
             };
-            props.insert(arg.name.into(), p);
-            if arg.required {
-                required.push(Value::String(arg.name.into()));
+            props.insert(arg.name.clone(), p);
+            if acc.required {
+                required.push(Value::String(arg.name.clone()));
             }
         }
         let me = self.clone();
-        let verb = spec.verb;
+        let verb: &'static str = &spec.verb;
         Tool {
-            name: spec.tool.into(),
-            description: spec.description.into(),
+            name: spec.tool.clone(),
+            description: spec.description.clone(),
             input_schema: json!({"type": "object", "properties": props, "required": required}),
             source: ToolSource::Media,
             hints: None,
-            // Each call is an independent remote job: always concurrency-safe
-            // (§7G, §8 Tool scheduling).
+            // Each call is an independent job: always concurrency-safe (§7G.6).
             concurrency_safe: Some(Arc::new(|_| true)),
             execute: Arc::new(move |args, ctx| {
                 let me = me.clone();
@@ -1029,8 +909,12 @@ impl Media {
                         Value::Object(m) => m,
                         _ => Map::new(),
                     };
-                    match me.generate_with(verb, args, None, &ctx.cancel).await {
-                        Ok(r) => tool_result(verb, r),
+                    let mctx = MediaCtx {
+                        cancel: ctx.cancel.clone(),
+                        ..Default::default()
+                    };
+                    match me.route(verb, args, &mctx).await {
+                        Ok((r, client)) => tool_result(verb, &client, r),
                         Err(e) => ToolResult::error(e.to_string()),
                     }
                 })
@@ -1039,73 +923,96 @@ impl Media {
     }
 }
 
-fn tool_result(verb: &str, r: MediaResult) -> ToolResult {
+/// The tool face of a [`MediaResult`] (for the conformance harness).
+#[doc(hidden)]
+pub fn media_tool_result(verb: &str, client: &str, r: MediaResult) -> ToolResult {
+    tool_result(verb, client, r)
+}
+
+fn tool_result(verb: &str, client: &str, r: MediaResult) -> ToolResult {
     let mut meta = Map::new();
     meta.insert("source".into(), "media".into());
     meta.insert("verb".into(), verb.into());
+    meta.insert("client".into(), client.into());
     if let Some(id) = &r.job_id {
         meta.insert("jobId".into(), id.clone().into());
     }
     meta.insert("status".into(), r.status.clone().into());
-    if let Some(text) = r.text {
-        return ToolResult::ok(text).with_metadata(meta);
+    if let Some(u) = &r.usage {
+        meta.insert(
+            "usage".into(),
+            serde_json::to_value(u).unwrap_or(Value::Null),
+        );
+    }
+    if verb_kind(verb) == "text" {
+        return ToolResult::ok(r.text.unwrap_or_default()).with_metadata(meta);
     }
     let word = match r.files.first().map(|f| f.kind.as_str()) {
         Some("image") => "image",
         Some("audio") => "audio",
         _ => "video",
     };
-    let urls: Vec<&str> = r.files.iter().map(|f| f.url.as_str()).collect();
-    let mut out = ToolResult::ok(format!("{word} ready: {}", urls.join("\n"))).with_metadata(meta);
-    out.parts = r
+    let lines: Vec<String> = r
         .files
         .iter()
-        .map(|f| ContentPart {
-            kind: f.kind.clone(),
-            mime_type: f.mime_type.clone(),
-            url: f.url.clone(),
-            ..Default::default()
+        .map(|f| {
+            if !f.path.is_empty() {
+                f.path.clone()
+            } else if !f.url.is_empty() {
+                f.url.clone()
+            } else {
+                let n = http::b64_decode(&f.data).map(|b| b.len()).unwrap_or(0);
+                format!("inline {} {n} bytes", f.mime_type)
+            }
         })
         .collect();
+    let mut out = ToolResult::ok(format!("{word} ready: {}", lines.join("\n"))).with_metadata(meta);
+    out.parts = r.files.iter().filter_map(file_part).collect();
     out
 }
 
-const TIMED_OUT: &str = "\u{0}media-timeout";
-const MAX_REDIRECTS: usize = 10;
-
-/// RFC 3986 unreserved kept; every other UTF-8 byte as `%XX`.
-fn pct_encode(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for b in s.bytes() {
-        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~') {
-            out.push(b as char);
+/// A §1B part for a file: `data` when it has data, `url` for an http(s) URL,
+/// else the local file's bytes read now. A part never holds a path.
+fn file_part(f: &MediaFile) -> Option<ContentPart> {
+    let mut p = ContentPart {
+        kind: f.kind.clone(),
+        mime_type: f.mime_type.clone(),
+        ..Default::default()
+    };
+    // D20: the local path rides along port-internally (never serialized)
+    p.path = f.path.clone();
+    if !f.data.is_empty() {
+        p.data = f.data.clone();
+    } else if f.url.starts_with("http://") || f.url.starts_with("https://") {
+        p.url = f.url.clone();
+    } else {
+        let path = if f.path.is_empty() {
+            f.url.strip_prefix("file://")?.to_string()
         } else {
-            out.push_str(&format!("%{b:02X}"));
-        }
+            f.path.clone()
+        };
+        p.data = http::b64_encode(&std::fs::read(path).ok()?);
     }
-    out
+    Some(p)
 }
 
-/// The first 1000 code points of an echoed body, `…` appended when cut.
-fn cap_body(t: &str) -> String {
-    match t.char_indices().nth(1000) {
-        Some((i, _)) => format!("{}…", &t[..i]),
-        None => t.to_string(),
+/// The parts of a tool result that message assembly (§8A) emits to the model:
+/// for a `source: "media"` result only `image` parts (§7G.6 model
+/// visibility); every other result keeps all its parts.
+#[doc(hidden)]
+pub fn model_parts(r: &ToolResult) -> Vec<ContentPart> {
+    let media = r
+        .metadata
+        .as_ref()
+        .and_then(|m| m.get("source"))
+        .and_then(Value::as_str)
+        == Some("media");
+    if !media {
+        return r.parts.clone();
     }
-}
-
-/// JSON equality with numbers compared by value (0 == 0.0).
-fn json_eq(a: &Value, b: &Value) -> bool {
-    match (a, b) {
-        (Value::Number(x), Value::Number(y)) => x.as_f64() == y.as_f64(),
-        (Value::Array(x), Value::Array(y)) => {
-            x.len() == y.len() && x.iter().zip(y).all(|(p, q)| json_eq(p, q))
-        }
-        (Value::Object(x), Value::Object(y)) => {
-            x.len() == y.len()
-                && x.iter()
-                    .all(|(k, v)| y.get(k).is_some_and(|w| json_eq(v, w)))
-        }
-        _ => a == b,
-    }
+    r.parts
+        .iter()
+        .filter(|p| p.kind == "image")
+        .cloned()
+        .collect()
 }

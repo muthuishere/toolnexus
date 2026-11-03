@@ -195,14 +195,19 @@ defmodule Toolnexus.ToolResult do
   `parts` carries non-text output (SPEC §1B) — an image, a PDF, an audio clip. `output`
   stays required and remains what the transcript, compaction, token estimation and any
   text-only provider see; a result setting no `parts` is byte-identical to pre-0.17.
+
+  `paths` is port-internal (SPEC §7G.12 D20): when set, a list aligned with `parts` giving
+  each part's absolute local file path (or `nil`). It feeds `RunResult.files[].path` only and
+  is never sent to a model, over A2A, or inside a part.
   """
-  defstruct output: "", is_error: false, parts: nil, metadata: nil
+  defstruct output: "", is_error: false, parts: nil, metadata: nil, paths: nil
 
   @type t :: %__MODULE__{
           output: String.t(),
           is_error: boolean(),
           parts: [Toolnexus.ContentPart.t()] | nil,
-          metadata: map() | nil
+          metadata: map() | nil,
+          paths: [String.t() | nil] | nil
         }
 
   @doc "Convenience: an error result with the given text."

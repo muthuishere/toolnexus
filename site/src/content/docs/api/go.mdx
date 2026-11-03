@@ -76,25 +76,46 @@ Module **`github.com/muthuishere/toolnexus/golang`** (Go 1.23). See the
 
 Guide: [Media generation](/toolnexus/media/) · recipe: [Generate images, video and speech](/toolnexus/cookbook/media/) · SPEC §7G.
 
-- `LoadMediaStyle(path string) (MediaStyle, error)`
-- `CreateMedia(styles []MediaStyle, opts MediaOptions) *Media` — a verb resolves to the first style that
-  declares it.
-- `MediaOptions{ OnProgress func(MediaProgress), HTTPClient *http.Client }` — `MediaProgress{ Verb, JobID,
-  Status }` after every poll; `HTTPClient` nil ⇒ `http.DefaultClient`.
-- Verbs, each `(ctx context.Context, in XInput) (MediaResult, error)`:
-  `Image(ImageInput{ Prompt, Width, Height, AspectRatio, Seed, ProviderOptions })` ·
-  `Video(VideoInput{ Prompt, Image, Seconds, AspectRatio, ProviderOptions })` ·
-  `Speech(SpeechInput{ Text, Voice, ProviderOptions })` · `Transcribe(TranscribeInput{ Audio, ProviderOptions })` ·
-  `CloneVoice(CloneVoiceInput{ Name, Samples, ProviderOptions })` · `Talking(TalkingInput{ Image, Audio, ProviderOptions })`.
-- **Zero value = unset**: a `0` or `""` field is not sent. To send a literal zero (e.g. `seed: 0`), use
-  `Generate` with an explicit args map.
-- `(m *Media) Generate(ctx, verb string, args map[string]any, providerOptions map[string]any) (MediaResult, error)` —
-  the raw call. `(m *Media) Supports(verb string) bool`.
-- `MediaResult{ Files []MediaFile, Text, JobID, Status }` · `MediaFile{ Type, MimeType, URL }`.
-- `(m *Media) Tools() []Tool` (source `"media"`), or `Options.Media`.
-- `RunResult.Files []RunFile` — `{ Type, MimeType, URL, Data, Name, From, CallID }`, in call order; the same
-  parts are on `RunResult.ToolCalls[i].Parts`.
-- Errors: the function face returns an `error` whose `Error()` is the exact §7G message; cancelling `ctx`
-  returns the context error. A media tool never errors (`IsError: true`).
+- `CreateMedia(clients ...MediaClient) (*Media, error)` · `MustCreateMedia(...)` (panics on an empty list) — a verb
+  goes to the first client whose `Supports(verb)` is true; it falls through to the next **only** on an
+  `unavailable` error. Empty list ⇒ `media: no clients`.
+- `MediaClient` interface: `Name() string` · `Supports(verb string) bool` · `Image` / `Video` / `Speech` / `Music` /
+  `Transcribe` / `CloneVoice` / `Talk`, each `(ctx, args map[string]any, call MediaCall) (MediaResult, error)`.
+  Embed `UnsupportedMedia` to implement only the verbs you serve. Optional `MediaArgsProvider{ Args(verb) []MediaArg }`
+  (`MediaArg{ Name, Required }`) narrows the accepted args; absent ⇒ every canonical arg.
+- Built-in API clients, each `NewXMediaClient(cfg MediaConfig)`: `NewA2EMediaClient` (`A2E_API_KEY`) ·
+  `NewElevenLabsMediaClient` (`ELEVENLABS_API_KEY`) · `NewOpenAIMediaClient` (`OPENAI_API_KEY`) ·
+  `NewOpenRouterMediaClient` (`OPENROUTER_API_KEY`) · `NewFalMediaClient` (`FAL_API_KEY`).
+  CLI clients: `NewGrokMediaClient` · `NewCodexMediaClient` (both `*CliMediaClient`; fill a `CliMediaClient{ ClientName,
+  Verbs, Config, DefaultCommand, Env, Templates, Argv, Parse, Folder, Unavailable }` for another CLI).
+- `MediaConfig{ Model, Models map[string]string, Key, URL, Command []string, Loop MediaLoop, Gather MediaGather,
+  HTTPClient *http.Client }` — `Key` empty ⇒ the client's env var at call time (never logged); `HTTPClient` nil ⇒
+  `http.DefaultClient`.
+- `MediaLoop{ IntervalMs, TimeoutMs, OnProgress func(MediaProgress) }` (≤ 0 ⇒ default; timeout 600000) ·
+  `MediaProgress{ Verb, Client, JobID, Status, ElapsedMs }`.
+- `MediaGather{ Mode, Dir, MaxBytes, Keep *bool }` — `Mode` `"url"` | `"download"` (default) | `"inline"`; `Dir`
+  default `<os temp>/toolnexus-media`; `MaxBytes` default 100 MiB; `Keep` (CLI only) default true.
+- Typed verbs on `*Media`, each `(ctx context.Context, in XInput) (MediaResult, error)`:
+  `Image(ImageInput{ Prompt, Width, Height, AspectRatio, Seed })` · `Video(VideoInput{ Prompt, Image, Seconds,
+  AspectRatio })` · `Speech(SpeechInput{ Text, Voice })` · `Music(MusicInput{ Prompt, Seconds, Instrumental *bool,
+  Lyrics })` · `Transcribe(TranscribeInput{ Audio, Language })` · `CloneVoice(CloneVoiceInput{ Name, Samples })` ·
+  `Talk(TalkInput{ Image, Audio, Text, Voice })`. Every input embeds `MediaCall`. Image/audio inputs take a URL or
+  a local path.
+- **Zero value = unset**: a `0` or `""` field is not sent. To send a literal zero, use `Generate`.
+- `(m *Media) Generate(ctx, verb string, args map[string]any, call MediaCall) (MediaResult, error)` — the raw call ·
+  `(m *Media) Supports(verb string) bool`.
+- `MediaCall{ Deadline time.Time, Progress func(MediaProgress), ProviderOptions map[string]any }` —
+  `ProviderOptions` overwrite the request body last (function face only).
+- `MediaResult{ Files []MediaFile, Text, JobID, Status }` · `MediaFile{ Type, MimeType, URL, Path, Data }` — which
+  of `URL` / `Path` / `Data` is set follows `Gather.Mode`.
+- `(m *Media) Tools() []Tool` (source `"media"`, `generate_image`, `generate_video`, …), or `Options{ Media: m }` on
+  `CreateToolkit`. A media tool never errors (`IsError: true`); only image parts reach the model.
+- `RunResult.Files []RunFile` — `{ Type, MimeType, URL, Data, Name, From, CallID }`, in call order; the same parts
+  are on `RunResult.ToolCalls[i].Parts`.
+- Errors: `*MediaError{ Message, Status, JobID, Err }`, `Status` failed | timeout | cancelled | unavailable;
+  `errors.Is(err, ErrMediaUnavailable)` matches unavailable; `MediaUnavailable(msg)` builds one for a custom client.
+  Cancelling `ctx` returns a cancelled error that unwraps to the context error.
+- Advanced: `LoadMediaStyle(path) (MediaStyle, error)` + `NewStyleMediaClient(style, cfg) (*StyleMediaClient, error)`
+  — a client from a JSON style.
 - Equivalents: `createMedia` (js) · `create_media` (py) · `Media.create` (java) · `Media.Create` (c#) ·
-  `Toolnexus.Media.new` (elixir) · `toolnexus.media/create-media` (clojure) · `create_media` (rust).
+  `Toolnexus.Media.create` (elixir) · `toolnexus.media/create-media` (clojure) · `create_media` (rust).

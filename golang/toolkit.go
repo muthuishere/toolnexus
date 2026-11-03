@@ -52,8 +52,8 @@ type Options struct {
 	// onto this WaitFor (form→kind:"input", URL→kind:"authorization"). Typically the
 	// same function passed to the client. Omit ⇒ MCP elicitation is not advertised.
 	WaitFor func(Request) (Answer, error)
-	// Media registers the media engine's tools (§7G, source "media") — one per
-	// verb its styles support. Equivalent to tk.Register(media.Tools()...).
+	// Media registers the media router's tools (§7G, source "media") — one per
+	// verb its clients support. Equivalent to tk.Register(media.Tools()...).
 	Media *Media
 }
 

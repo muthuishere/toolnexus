@@ -85,6 +85,11 @@ pub struct ContentPart {
     pub url: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub name: String,
+    /// The local file a media part came from (§7G.12 D20). Port-internal:
+    /// never serialized, never sent to a model or over A2A.
+    #[doc(hidden)]
+    #[serde(skip)]
+    pub path: String,
 }
 
 /// A §1B edge-constructor failure: an unknown extension, an unreadable

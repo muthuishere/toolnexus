@@ -47,6 +47,9 @@ type ContentPart struct {
 	// surfaces the first bad part. Unexported, so it never serialises and never
 	// crosses a process boundary.
 	err error
+	// path is the local file a media part came from (§7G.12 D20). Unexported:
+	// it reaches RunResult.Files only, never a model, a wire or JSON.
+	path string
 }
 
 // PartError is the typed construction/validation error for a content part (§1B).

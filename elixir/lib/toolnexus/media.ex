@@ -1,203 +1,356 @@
-defmodule Toolnexus.Media.Result do
+defmodule Toolnexus.Media.MediaFile do
   @moduledoc """
-  The outcome of one media verb (SPEC §7G `MediaResult`).
+  One generated file (SPEC §7G.2 `MediaFile`).
 
-  `files` is always a list of `Toolnexus.ContentPart` (`type`, `mime_type`, `url`);
-  `text` is set only for `kind: "text"` verbs; `job_id` only for async verbs.
+  `type` is the §1B part type (`"image"`, `"audio"`, or `"file"` for video). `url` is an
+  `http(s)` or `file://` URL, `path` an absolute local path, `data` standard padded base64.
+  Which fields are set is decided by `gather` (§7G.5).
   """
-  defstruct files: [], text: nil, job_id: nil, status: "completed"
+  defstruct [:type, :mime_type, :url, :path, :data]
 
   @type t :: %__MODULE__{
-          files: [Toolnexus.ContentPart.t()],
-          text: String.t() | nil,
-          job_id: String.t() | nil,
-          status: String.t()
+          type: String.t(),
+          mime_type: String.t(),
+          url: String.t() | nil,
+          path: String.t() | nil,
+          data: String.t() | nil
         }
 end
 
+defmodule Toolnexus.Media.Result do
+  @moduledoc """
+  The outcome of one media verb (SPEC §7G.2 `MediaResult`).
+
+  `files` is a list of `Toolnexus.Media.MediaFile`; `text` is set for the text verbs
+  (`transcribe`, `cloneVoice`) and when a client returns text beside its files; `job_id`
+  when the provider gave one. `usage` (§7G.12 D21) is a map with string keys
+  `"inputTokens"`, `"outputTokens"`, `"costUsd"`, `"raw"` — only what the provider returned,
+  never estimated; `nil` when it returned none.
+  """
+  defstruct files: [], text: nil, job_id: nil, status: "completed", usage: nil
+
+  @type t :: %__MODULE__{
+          files: [Toolnexus.Media.MediaFile.t()],
+          text: String.t() | nil,
+          job_id: String.t() | nil,
+          status: String.t(),
+          usage: map() | nil
+        }
+end
+
+defmodule Toolnexus.Media.Error do
+  @moduledoc """
+  The typed media error (SPEC §7G.2): `message`, `status` (`:failed | :timeout |
+  :cancelled | :unavailable`) and `job_id` when known.
+
+  Test for `unavailable` without string matching:
+
+      {:error, %Toolnexus.Media.Error{status: :unavailable}}
+  """
+  defexception message: "", status: :failed, job_id: nil
+
+  @type t :: %__MODULE__{message: String.t(), status: atom(), job_id: String.t() | nil}
+
+  @doc false
+  def failed(msg), do: %__MODULE__{message: msg, status: :failed}
+  @doc false
+  def unavailable(msg), do: %__MODULE__{message: msg, status: :unavailable}
+end
+
 defmodule Toolnexus.Media.Cancelled do
-  @moduledoc "Raised by the function face when a media call's `:signal` reports cancellation (§7G)."
+  @moduledoc """
+  Raised by the function face when a media call's `:signal` reports cancellation (§7G.8).
+  Elixir's native cancellation is `Task.shutdown/1`; the cooperative `:signal` is the
+  in-call equivalent. The tool face turns it into an `is_error` result.
+  """
   defexception message: "media: cancelled"
+end
+
+defmodule Toolnexus.Media.Client do
+  @moduledoc """
+  The `MediaClient` behaviour (SPEC §7G.2). Every verb callback is optional;
+  `supports?/2` is the truth.
+
+  A client value is either a struct whose module implements this behaviour, or the module
+  itself (then the module atom is passed as `client`). Each verb receives the canonical
+  string-keyed args and a ctx map `%{signal, deadline, progress, provider_options}` and
+  returns `{:ok, %Toolnexus.Media.Result{}}` or `{:error, %Toolnexus.Media.Error{}}`.
+
+      defmodule MyClient do
+        @behaviour Toolnexus.Media.Client
+        defstruct []
+        def name(_), do: "mine"
+        def supports?(_, verb), do: verb == "image"
+        def image(_, %{"prompt" => p}, _ctx), do: {:ok, %Toolnexus.Media.Result{...}}
+      end
+
+      {:ok, media} = Toolnexus.Media.create([%MyClient{}, Toolnexus.Media.fal()])
+  """
+  alias Toolnexus.Media.{Error, Result}
+
+  @type client :: struct() | module()
+  @type arg_spec :: %{name: String.t(), required: boolean()}
+  @type ctx :: %{
+          optional(:signal) => pid() | (-> boolean()) | nil,
+          optional(:deadline) => integer() | nil,
+          optional(:progress) => (map() -> any()) | nil,
+          optional(:provider_options) => map() | nil
+        }
+  @type outcome :: {:ok, Result.t()} | {:error, Error.t()}
+
+  @callback name(client) :: String.t()
+  @callback supports?(client, verb :: String.t()) :: boolean()
+  @callback args(client, verb :: String.t()) :: [arg_spec] | nil
+  @callback image(client, map(), ctx) :: outcome
+  @callback video(client, map(), ctx) :: outcome
+  @callback speech(client, map(), ctx) :: outcome
+  @callback music(client, map(), ctx) :: outcome
+  @callback transcribe(client, map(), ctx) :: outcome
+  @callback clone_voice(client, map(), ctx) :: outcome
+  @callback talk(client, map(), ctx) :: outcome
+
+  @optional_callbacks args: 2,
+                      image: 3,
+                      video: 3,
+                      speech: 3,
+                      music: 3,
+                      transcribe: 3,
+                      clone_voice: 3,
+                      talk: 3
+end
+
+defmodule Toolnexus.Media.Config do
+  @moduledoc """
+  The one config shape every built-in client takes (SPEC §7G.4). Pass a keyword list or
+  map; atom keys are snake_case, string keys may be the JSON spelling (`intervalMs`).
+
+    * `:model` — the model of the client's primary verb (CLI: `-m <model>`)
+    * `:models` — `%{verb => model}` per-verb override; wins over `:model` and the default
+    * `:key` — the API key; default: the client's env var, read **at call time**
+    * `:url` — base URL override (trailing `/` trimmed) — any compatible server
+    * `:command` — CLI argv prefix (string = one executable, never shell-split)
+    * `:loop` — `%{interval_ms, timeout_ms, on_progress}`
+    * `:gather` — `%{mode: "url" | "download" | "inline", dir, max_bytes, keep}`
+    * `:http_client` — the HTTP seam: `fn %{method, url, headers, body, receive_timeout} ->
+      {:ok, %{status, headers, body}} | {:error, e}` (`body` is the encoded binary or
+      `nil`); `:http_options` — extra `Req` options instead (e.g. `plug:`)
+
+  A key is never logged and never appears in an error message.
+  """
+  defstruct model: nil,
+            models: %{},
+            key: nil,
+            url: nil,
+            command: nil,
+            loop: %{interval_ms: nil, timeout_ms: nil, on_progress: nil},
+            gather: %{mode: nil, dir: nil, max_bytes: nil, keep: true},
+            http_client: nil,
+            http_options: []
+
+  @type t :: %__MODULE__{}
+
+  @doc "Normalise a keyword list / map (atom or JSON string keys) into a config."
+  @spec new(keyword() | map() | t() | nil) :: t()
+  def new(%__MODULE__{} = c), do: c
+  def new(nil), do: %__MODULE__{}
+
+  def new(opts) do
+    o = Map.new(opts)
+    loop = Map.new(get(o, :loop, "loop") || %{})
+    gather = Map.new(get(o, :gather, "gather") || %{})
+
+    %__MODULE__{
+      model: get(o, :model, "model"),
+      models: Map.new(get(o, :models, "models") || %{}, fn {k, v} -> {verb_key(k), v} end),
+      key: get(o, :key, "key"),
+      url: get(o, :url, "url"),
+      command: get(o, :command, "command"),
+      loop: %{
+        interval_ms: get(loop, :interval_ms, "intervalMs"),
+        timeout_ms: get(loop, :timeout_ms, "timeoutMs"),
+        on_progress: get(loop, :on_progress, "onProgress")
+      },
+      gather: %{
+        mode: to_mode(get(gather, :mode, "mode")),
+        dir: get(gather, :dir, "dir"),
+        max_bytes: get(gather, :max_bytes, "maxBytes"),
+        keep: get(gather, :keep, "keep") != false
+      },
+      http_client: get(o, :http_client, "httpClient"),
+      http_options: get(o, :http_options, "httpOptions") || []
+    }
+  end
+
+  defp get(m, atom, string) do
+    case Map.fetch(m, atom) do
+      {:ok, v} -> v
+      :error -> Map.get(m, string)
+    end
+  end
+
+  defp to_mode(nil), do: nil
+  defp to_mode(m), do: to_string(m)
+
+  defp verb_key(:clone_voice), do: "cloneVoice"
+  defp verb_key(k), do: to_string(k)
+
+  @doc false
+  # §7G.4: absent, <= 0 or not a number ⇒ the default.
+  def positive(v, _default) when is_number(v) and v > 0, do: v
+  def positive(_v, default), do: default
+
+  @doc false
+  def model_for(%__MODULE__{} = c, verb, primary?, default) do
+    Map.get(c.models, verb) || if(primary?, do: c.model) || default
+  end
 end
 
 defmodule Toolnexus.Media do
   @moduledoc """
-  Media generation (SPEC §7G, source `"media"`): image, video, speech, transcription,
-  voice cloning and talking-head video behind one engine with two faces — the typed
-  verbs below (function face) and `tools/1` (tool face, for an LLM).
+  Media generation (SPEC §7G, source `"media"`): image, video, speech, music,
+  transcription, voice cloning and talking-head video behind one interface with two
+  faces — the typed verbs below (function face) and `tools/1` (tool face, for an LLM).
 
-  Providers are **styles**: JSON data loaded with `load_style/1` (or passed as a
-  string-keyed map). The library names no vendor; presets live in
-  `examples/media-styles/`.
+  Providers are **media clients** (`Toolnexus.Media.Client`): built-in API clients
+  (`a2e/1`, `elevenlabs/1`, `openai/1`, `openrouter/1`, `fal/1`), local CLI clients
+  (`grok/1`, `codex/1`), style clients over the JSON style engine (`load_style/1` +
+  `style_client/2`), or your own module. `create/1` routes each verb to the first client
+  that supports it and falls through **only** on status `:unavailable`.
 
-      {:ok, style} = Toolnexus.Media.load_style("examples/media-styles/some.json")
-      media = Toolnexus.Media.new(style, on_progress: &IO.inspect/1)
+      {:ok, media} = Toolnexus.Media.create([Toolnexus.Media.grok(), Toolnexus.Media.fal()])
       {:ok, %Toolnexus.Media.Result{files: files}} = Toolnexus.Media.image(media, prompt: "a cat")
 
       Toolnexus.create_toolkit!(media: media)   # registers generate_image, ...
 
-  **Arguments** are a map or keyword list of the normalised args (`verbs.json`). Atom
-  keys may be snake_case (`:aspect_ratio` ⇒ `"aspectRatio"`). `:provider_options`
-  (or `"providerOptions"`) is a map whose top-level keys overwrite the request body
-  last; the tool face never exposes it.
+  **Arguments** are a map or keyword list of the canonical args (`verbs.json`). Atom keys
+  may be snake_case (`:aspect_ratio` ⇒ `"aspectRatio"`). `:provider_options` (or
+  `"providerOptions"`) is a map whose top-level keys overwrite the request body last;
+  the tool face never exposes it.
 
-  **Cancellation** is the process idiom: run the call in a `Task` and
-  `Task.shutdown/1` it (or `Task.await/2` with a timeout). The tool face also honours
-  the context's cooperative `signal` between polls, and the function face accepts a
-  `:signal` (pid or zero-arity predicate) the same way: the function face raises
-  `Toolnexus.Media.Cancelled`, the tool face returns `is_error` with its message.
+  **Options** (third argument): `:signal` (pid or zero-arity predicate — cooperative
+  cancellation), `:deadline` (absolute, `System.monotonic_time(:millisecond)`),
+  `:progress` (`fn %{verb, client, job_id, status, elapsed_ms} -> ... end`),
+  `:provider_options`.
+
+  **Errors** are `{:error, %Toolnexus.Media.Error{message, status, job_id}}`.
+  Cancellation raises `Toolnexus.Media.Cancelled` (the tool face returns `is_error`).
   """
 
   alias Toolnexus.{ContentPart, Context, Tool, ToolResult}
-  alias Toolnexus.Media.Result
+  alias Toolnexus.Media.{Error, MediaFile, Result}
 
-  defstruct styles: [], on_progress: nil, transport: nil, http_options: [], deadline: nil
+  defstruct clients: []
 
-  @type t :: %__MODULE__{
-          styles: [map()],
-          on_progress: (map() -> any()) | nil,
-          transport: (map() -> {:ok, map()} | {:error, term()}) | nil,
-          http_options: keyword(),
-          deadline: integer() | nil
-        }
+  @type t :: %__MODULE__{clients: [Toolnexus.Media.Client.client()]}
 
-  # verbs.json — embedded verbatim (order, names, types, descriptions, required).
-  @verbs [
-    %{
-      verb: "image",
-      tool: "generate_image",
-      description: "Generate an image from a text prompt.",
-      args: [
-        %{name: "prompt", type: "string", description: "What to draw.", required: true},
-        %{name: "width", type: "integer", description: "Width in pixels."},
-        %{name: "height", type: "integer", description: "Height in pixels."},
-        %{name: "aspectRatio", type: "string", description: "Aspect ratio, e.g. 16:9."},
-        %{name: "seed", type: "integer", description: "Seed for reproducible output."}
-      ]
-    },
-    %{
-      verb: "video",
-      tool: "generate_video",
-      description:
-        "Generate a short video from a prompt, optionally starting from an image URL. Can take minutes.",
-      args: [
-        %{
-          name: "prompt",
-          type: "string",
-          description: "What should happen in the video.",
-          required: true
-        },
-        %{name: "image", type: "string", description: "URL of the starting image."},
-        %{name: "seconds", type: "integer", description: "Video length in seconds."},
-        %{name: "aspectRatio", type: "string", description: "Aspect ratio, e.g. 9:16."}
-      ]
-    },
-    %{
-      verb: "speech",
-      tool: "generate_speech",
-      description: "Speak text aloud and return the audio.",
-      args: [
-        %{name: "text", type: "string", description: "The text to speak.", required: true},
-        %{name: "voice", type: "string", description: "Voice or speaker id."}
-      ]
-    },
-    %{
-      verb: "transcribe",
-      tool: "transcribe_audio",
-      description: "Transcribe speech in an audio URL to text.",
-      args: [%{name: "audio", type: "string", description: "URL of the audio.", required: true}]
-    },
-    %{
-      verb: "cloneVoice",
-      tool: "clone_voice",
-      description: "Create a cloned voice from audio sample URLs and return its voice id.",
-      args: [
-        %{name: "name", type: "string", description: "Name for the new voice.", required: true},
-        %{
-          name: "samples",
-          type: "array",
-          items: "string",
-          description: "URLs of audio samples of the voice.",
-          required: true
-        }
-      ]
-    },
-    %{
-      verb: "talking",
-      tool: "talking_video",
-      description: "Make the person in an image speak the given audio (lip-synced video).",
-      args: [
-        %{name: "image", type: "string", description: "URL of the face image.", required: true},
-        %{name: "audio", type: "string", description: "URL of the speech audio.", required: true}
-      ]
-    }
-  ]
+  @verbs_path Path.expand("../../priv/media/verbs.json", __DIR__)
+  @a2e_path Path.expand("../../priv/media/a2e.json", __DIR__)
+  @external_resource @verbs_path
+  @external_resource @a2e_path
 
-  @mime %{
-    "png" => "image/png",
-    "jpg" => "image/jpeg",
-    "jpeg" => "image/jpeg",
-    "webp" => "image/webp",
-    "gif" => "image/gif",
-    "mp4" => "video/mp4",
-    "webm" => "video/webm",
-    "mov" => "video/quicktime",
-    "mp3" => "audio/mpeg",
-    "wav" => "audio/wav",
-    "ogg" => "audio/ogg",
-    "m4a" => "audio/mp4",
-    "flac" => "audio/flac"
+  @verbs_json File.read!(@verbs_path)
+  @a2e_json File.read!(@a2e_path)
+
+  # verbs.json — embedded verbatim (priv/media/verbs.json, asserted against the conformance copy).
+  @verbs @verbs_json
+         |> Jason.decode!()
+         |> Map.fetch!("verbs")
+         |> Enum.map(fn v ->
+           %{
+             verb: v["verb"],
+             tool: v["tool"],
+             description: v["description"],
+             args:
+               Enum.map(v["args"], fn a ->
+                 %{name: a["name"], type: a["type"], description: a["description"]}
+                 |> then(&if(a["required"], do: Map.put(&1, :required, true), else: &1))
+                 |> then(&if(a["items"], do: Map.put(&1, :items, a["items"]), else: &1))
+               end)
+           }
+         end)
+
+  @verb_names Enum.map(@verbs, & &1.verb)
+  @text_verbs ["transcribe", "cloneVoice"]
+  @fun %{
+    "image" => :image,
+    "video" => :video,
+    "speech" => :speech,
+    "music" => :music,
+    "transcribe" => :transcribe,
+    "cloneVoice" => :clone_voice,
+    "talk" => :talk
   }
-
-  @env_var ~r/\$\{([A-Za-z0-9_]+)\}/
 
   @doc "The canonical verb table (`conformance/media/verbs.json`)."
   @spec verbs() :: [map()]
   def verbs, do: @verbs
 
-  @doc "Read one style JSON file. Returns `{:ok, style}` (string-keyed map) or `{:error, msg}`."
-  @spec load_style(Path.t()) :: {:ok, map()} | {:error, String.t()}
-  def load_style(path) do
-    with {:ok, text} <- File.read(path),
-         {:ok, %{} = style} <- Jason.decode(text),
-         :ok <- validate_style(style) do
-      {:ok, style}
-    else
-      {:error, msg} when is_binary(msg) ->
-        {:error, msg}
+  @doc false
+  def verbs_json, do: @verbs_json
+  @doc false
+  def a2e_json, do: @a2e_json
 
-      {:error, %Jason.DecodeError{} = e} ->
-        {:error, "media: #{path}: #{Exception.message(e)}"}
-
-      {:error, reason} when is_atom(reason) ->
-        {:error, "media: #{path}: #{:file.format_error(reason)}"}
-
-      {:ok, _} ->
-        {:error, "media: #{path}: style must be a JSON object"}
+  @doc false
+  def canonical_args(verb) do
+    case Enum.find(@verbs, &(&1.verb == verb)) do
+      nil -> []
+      v -> Enum.map(v.args, &%{name: &1.name, required: Map.get(&1, :required, false)})
     end
   end
 
+  # ---- construction ----
+
   @doc """
-  Build a media engine from one style or a list (a verb resolves to the FIRST style
-  that declares it).
-
-  Options: `:on_progress` — `fn %{verb, job_id, status} -> ... end` per poll;
-  `:transport` — the same injectable seam as `Toolnexus.Client` (`fn request ->
-  {:ok, %{status, headers, body}} | {:error, e}`, `request = %{method, url, headers,
-  body, receive_timeout}` with `body` the un-marshalled JSON map, `nil` on polls);
-  `:http_options` — extra `Req` options (e.g. `plug:` in tests).
+  `createMedia(client | [client])` (§7G.3). `{:ok, media}`, or `{:error, %Error{}}` with
+  `media: no clients` for an empty list.
   """
-  @spec new(map() | [map()], keyword() | map()) :: t()
-  def new(styles, opts \\ []) do
-    opts = Map.new(opts)
-
-    %__MODULE__{
-      styles: if(is_list(styles), do: styles, else: [styles]),
-      on_progress: opts[:on_progress],
-      transport: opts[:transport],
-      http_options: opts[:http_options] || []
-    }
+  @spec create(Toolnexus.Media.Client.client() | [Toolnexus.Media.Client.client()]) ::
+          {:ok, t()} | {:error, Error.t()}
+  def create(clients) do
+    case List.wrap(clients) do
+      [] -> {:error, Error.failed("media: no clients")}
+      list -> {:ok, %__MODULE__{clients: list}}
+    end
   end
+
+  @doc "`create/1`, raising `Toolnexus.Media.Error` on an empty list."
+  @spec create!(Toolnexus.Media.Client.client() | [Toolnexus.Media.Client.client()]) :: t()
+  def create!(clients) do
+    case create(clients) do
+      {:ok, m} -> m
+      {:error, e} -> raise e
+    end
+  end
+
+  @doc "Read one style JSON file. `{:ok, style}` (string-keyed map) or `{:error, %Error{}}`."
+  defdelegate load_style(path), to: Toolnexus.Media.StyleClient
+
+  @doc """
+  A style client over a parsed style (§7G.7), named `style["name"] || "style"`. Uses `url`,
+  `loop`, `gather` (default mode `url`), `key` (what every `${…}` header expands to) and
+  `http_client` from `config`. `{:error, %Error{}}` for an invalid style.
+  """
+  defdelegate style_client(style, config \\ []), to: Toolnexus.Media.StyleClient, as: :new
+
+  @doc "`style_client/2`, raising on an invalid style."
+  defdelegate style_client!(style, config \\ []), to: Toolnexus.Media.StyleClient, as: :new!
+
+  @doc "Built-in a2e.ai client (`A2E_API_KEY`): image, video, speech, talk."
+  defdelegate a2e(config \\ []), to: Toolnexus.Media.A2E, as: :new
+  @doc "Built-in ElevenLabs client (`ELEVENLABS_API_KEY`): speech, music, transcribe, cloneVoice."
+  defdelegate elevenlabs(config \\ []), to: Toolnexus.Media.ElevenLabs, as: :new
+  @doc "Built-in OpenAI client (`OPENAI_API_KEY`): image, video, speech, transcribe."
+  defdelegate openai(config \\ []), to: Toolnexus.Media.OpenAI, as: :new
+  @doc "Built-in OpenRouter client (`OPENROUTER_API_KEY`): image."
+  defdelegate openrouter(config \\ []), to: Toolnexus.Media.OpenRouter, as: :new
+  @doc "Built-in fal client (`FAL_API_KEY`): image, video."
+  defdelegate fal(config \\ []), to: Toolnexus.Media.Fal, as: :new
+  @doc "Grok CLI client (subscription login): image, video."
+  defdelegate grok(config \\ []), to: Toolnexus.Media.Grok, as: :new
+  @doc "Codex CLI client (ChatGPT plan): image."
+  defdelegate codex(config \\ []), to: Toolnexus.Media.Codex, as: :new
+
+  # ---- function face ----
 
   @doc "Generate an image (`prompt`, `width`, `height`, `aspectRatio`, `seed`)."
   def image(media, args, opts \\ []), do: generate(media, "image", args, opts)
@@ -205,42 +358,176 @@ defmodule Toolnexus.Media do
   def video(media, args, opts \\ []), do: generate(media, "video", args, opts)
   @doc "Text to speech (`text`, `voice`)."
   def speech(media, args, opts \\ []), do: generate(media, "speech", args, opts)
-  @doc "Speech to text (`audio`); the result's `text` is set."
+  @doc "Generate music (`prompt`, `seconds`, `instrumental`, `lyrics`)."
+  def music(media, args, opts \\ []), do: generate(media, "music", args, opts)
+  @doc "Speech to text (`audio`, `language`); the result's `text` is set."
   def transcribe(media, args, opts \\ []), do: generate(media, "transcribe", args, opts)
-  @doc "Clone a voice (`name`, `samples`)."
+  @doc "Clone a voice (`name`, `samples`); the result's `text` is the new voice id."
   def clone_voice(media, args, opts \\ []), do: generate(media, "cloneVoice", args, opts)
-  @doc "Talking-head video (`image`, `audio`)."
-  def talking(media, args, opts \\ []), do: generate(media, "talking", args, opts)
+  @doc "Talking-head video (`image`, `audio`, `text`, `voice`)."
+  def talk(media, args, opts \\ []), do: generate(media, "talk", args, opts)
 
-  @doc """
-  Run any verb (`"image"`, `:clone_voice`, ...) with normalised args.
-  Options: `:signal` — cooperative cancellation (pid or zero-arity predicate).
-  """
-  @spec generate(t(), String.t() | atom(), map() | keyword(), keyword()) ::
-          {:ok, Result.t()} | {:error, String.t()}
-  def generate(%__MODULE__{} = media, verb, args, opts \\ []) do
-    {provider_options, args} = split_args(args)
-    run(media, verb_name(verb), args, provider_options, opts[:signal])
+  @doc "Whether any client supports `verb`."
+  @spec supports?(t(), String.t() | atom()) :: boolean()
+  def supports?(%__MODULE__{clients: clients}, verb) do
+    verb = verb_name(verb)
+    Enum.any?(clients, &client_supports?(&1, verb))
   end
 
-  @doc "One `Tool` (source `\"media\"`) per verb the styles support, in `verbs.json` order."
+  @doc "Run any verb (`\"image\"`, `:clone_voice`, ...) with canonical args (§7G.3)."
+  @spec generate(t(), String.t() | atom(), map() | keyword(), keyword()) ::
+          {:ok, Result.t()} | {:error, Error.t()}
+  def generate(%__MODULE__{} = media, verb, args, opts \\ []) do
+    {provider_options, args} = split_args(args)
+    po = opts[:provider_options] || provider_options
+
+    ctx = %{
+      signal: opts[:signal],
+      deadline: opts[:deadline],
+      progress: opts[:progress],
+      provider_options: po && Map.new(po, fn {k, v} -> {to_string(k), v} end)
+    }
+
+    case route(media, verb_name(verb), args, ctx) do
+      {:ok, r, _client} -> {:ok, r}
+      err -> err
+    end
+  end
+
+  # ---- routing (§7G.3) ----
+
+  @doc false
+  def route(%__MODULE__{clients: clients}, verb, args, ctx) do
+    args = Map.reject(args, fn {_k, v} -> is_nil(v) end)
+    canonical = MapSet.new(canonical_args(verb), & &1.name)
+
+    with [_ | _] = candidates <- Enum.filter(clients, &client_supports?(&1, verb)),
+         nil <- first_unaccepted(args, canonical) do
+      try_candidates(candidates, verb, args, ctx, [])
+    else
+      [] -> {:error, Error.failed(~s(media: no client supports "#{verb}"))}
+      # §7G.3 step 3 / D7: a non-canonical key fails the call before any client is tried.
+      key -> {:error, Error.failed(~s(#{verb}: argument "#{key}" not supported))}
+    end
+  end
+
+  defp try_candidates([], verb, _args, _ctx, reasons) do
+    joined = reasons |> Enum.reverse() |> Enum.join("; ")
+    {:error, Error.unavailable(~s(media: no client available for "#{verb}": ) <> joined)}
+  end
+
+  # D19: every candidate, the first included, is skipped (never called) like `unavailable`
+  # when it does not accept an arg or lacks a required one. Args are never rewritten.
+  defp try_candidates([c | rest], verb, args, ctx, reasons) do
+    case skip_reason(c, verb, args) do
+      nil ->
+        case call_client(c, verb, args, ctx) do
+          {:ok, %Result{} = r} ->
+            {:ok, r, client_name(c)}
+
+          {:error, %Error{status: :unavailable, message: m}} ->
+            try_candidates(rest, verb, args, ctx, [m | reasons])
+
+          {:error, %Error{}} = err ->
+            err
+        end
+
+      reason ->
+        try_candidates(rest, verb, args, ctx, [reason | reasons])
+    end
+  end
+
+  defp skip_reason(client, verb, args) do
+    accepted = MapSet.new(client_args(client, verb), & &1.name)
+
+    cond do
+      key = first_unaccepted(args, accepted) ->
+        ~s(#{client_name(client)}: argument "#{key}" not supported)
+
+      key = missing_required(client, verb, args) ->
+        ~s(#{client_name(client)}: missing required argument "#{key}")
+
+      true ->
+        nil
+    end
+  end
+
+  # The first key (sorted by code point) not in `accepted`, or nil.
+  defp first_unaccepted(args, accepted),
+    do: args |> Map.keys() |> Enum.sort() |> Enum.find(&(not MapSet.member?(accepted, &1)))
+
+  defp call_client(c, verb, args, ctx) do
+    mod = module(c)
+    fun = Map.fetch!(@fun, verb)
+
+    if function_exported?(mod, fun, 3) do
+      case apply(mod, fun, [c, args, ctx]) do
+        {:ok, %Result{}} = ok -> ok
+        {:error, %Error{}} = err -> err
+        {:error, msg} when is_binary(msg) -> {:error, Error.failed(msg)}
+        other -> {:error, Error.failed("#{verb}: invalid client result #{inspect(other)}")}
+      end
+    else
+      {:error, Error.failed("#{verb}: not implemented by #{client_name(c)}")}
+    end
+  end
+
+  # The first required arg (canonical order) the client declares that `args` lacks.
+  defp missing_required(client, verb, args) do
+    order = Enum.map(canonical_args(verb), & &1.name)
+
+    for(a <- client_args(client, verb), a.required, not Map.has_key?(args, a.name), do: a.name)
+    |> Enum.sort_by(&(Enum.find_index(order, fn n -> n == &1 end) || 999))
+    |> List.first()
+  end
+
+  defp module(c) when is_atom(c), do: c
+  defp module(%{__struct__: mod}), do: mod
+
+  defp client_name(c), do: module(c).name(c)
+  defp client_supports?(c, verb), do: module(c).supports?(c, verb) == true
+
+  @doc false
+  def client_args(c, verb) do
+    mod = module(c)
+
+    # A client without `args/2`, or one returning `nil` for a verb, accepts every
+    # canonical arg of the verb with the canonical required flags (§7G.2).
+    case function_exported?(mod, :args, 2) && mod.args(c, verb) do
+      list when is_list(list) ->
+        Enum.map(list, fn a ->
+          %{
+            name: to_string(a[:name] || a["name"]),
+            required: (a[:required] || a["required"]) == true
+          }
+        end)
+
+      _ ->
+        canonical_args(verb)
+    end
+  end
+
+  # ---- tool face (§7G.6) ----
+
+  @doc "One `Tool` (source `\"media\"`) per verb any client supports, in `verbs.json` order."
   @spec tools(t()) :: [Tool.t()]
-  def tools(%__MODULE__{} = media) do
-    for v <- @verbs, spec = resolve(media, v.verb), spec != nil do
-      mapped = spec["args"] || %{}
-      args = Enum.filter(v.args, &Map.has_key?(mapped, &1.name))
+  def tools(%__MODULE__{clients: clients} = media) do
+    for v <- @verbs, first = Enum.find(clients, &client_supports?(&1, v.verb)), first != nil do
+      spec = client_args(first, v.verb)
+      accepted = MapSet.new(spec, & &1.name)
+      required = MapSet.new(for a <- spec, a.required, do: a.name)
+      args = Enum.filter(v.args, &MapSet.member?(accepted, &1.name))
 
       %Tool{
         name: v.tool,
         description: v.description,
         source: "media",
-        # Each call is an independent remote job: always concurrency-safe
-        # (§7G, §8 Tool scheduling).
+        # Each call is an independent job: always concurrency-safe (§7G.6, §8).
         concurrency_safe: fn _args -> true end,
         input_schema: %{
           "type" => "object",
           "properties" => Map.new(args, &{&1.name, arg_schema(&1)}),
-          "required" => for(a <- args, a[:required], do: a.name)
+          "required" => for(a <- v.args, MapSet.member?(required, a.name), do: a.name)
         },
         execute: fn tool_args, ctx -> execute(media, v.verb, tool_args, ctx) end
       }
@@ -254,473 +541,75 @@ defmodule Toolnexus.Media do
 
   defp execute(media, verb, args, ctx) do
     signal = if is_struct(ctx, Context), do: ctx.signal
+    tctx = %{signal: signal, deadline: nil, progress: nil, provider_options: nil}
 
     outcome =
       try do
-        run(media, verb, stringify(args || %{}), nil, signal)
+        route(media, verb, stringify(args || %{}), tctx)
       rescue
-        e in Toolnexus.Media.Cancelled -> {:error, Exception.message(e)}
+        e in Toolnexus.Media.Cancelled -> {:error, Error.failed(Exception.message(e))}
       end
 
     case outcome do
-      {:ok, %Result{} = r} ->
-        meta = %{source: "media", verb: verb, status: r.status}
+      {:ok, %Result{} = r, client} ->
+        meta = %{source: "media", verb: verb, client: client, status: r.status}
         meta = if r.job_id, do: Map.put(meta, :jobId, r.job_id), else: meta
-        kind = resolve(media, verb)["kind"]
+        meta = if r.usage, do: Map.put(meta, :usage, r.usage), else: meta
 
-        if kind == "text" do
-          %ToolResult{output: r.text, metadata: meta}
+        if verb in @text_verbs do
+          %ToolResult{output: r.text || "", metadata: meta}
         else
-          word = %{"image" => "image", "video" => "video", "audio" => "audio"}[kind]
-          urls = Enum.map_join(r.files, "\n", & &1.url)
-          %ToolResult{output: "#{word} ready: " <> urls, parts: r.files, metadata: meta}
+          lines = Enum.map_join(r.files, "\n", &line/1)
+
+          %ToolResult{
+            output: "#{word(verb, r.files)} ready: " <> lines,
+            parts: Enum.map(r.files, &part/1),
+            paths: Enum.map(r.files, & &1.path),
+            metadata: meta
+          }
         end
 
-      {:error, msg} ->
+      {:error, %Error{message: msg}} ->
         ToolResult.error(msg)
     end
   end
 
-  # ---- engine ----
+  defp word(_verb, [%MediaFile{type: "image"} | _]), do: "image"
+  defp word(_verb, [%MediaFile{type: "audio"} | _]), do: "audio"
+  defp word(_verb, [%MediaFile{} | _]), do: "video"
+  defp word(verb, []) when verb in ["speech", "music"], do: "audio"
+  defp word("image", []), do: "image"
+  defp word(_verb, []), do: "video"
 
-  defp run(media, verb, args, provider_options, signal) do
-    # Edge rule: a nil-valued arg is absent.
-    args = Map.reject(args, fn {_k, v} -> is_nil(v) end)
+  defp line(%MediaFile{path: p}) when is_binary(p), do: p
+  defp line(%MediaFile{url: u}) when is_binary(u), do: u
 
-    with {:ok, spec, style} <- find(media, verb),
-         :ok <- check_args(verb, spec, args) do
-      # Immutable data: `defaults` is never mutated, so no explicit deep copy is needed.
-      body =
-        Enum.reduce(args, spec["defaults"] || %{}, fn {k, v}, acc ->
-          put_path(acc, spec["args"][k], v)
-        end)
+  defp line(%MediaFile{data: d, mime_type: m}),
+    do: "inline #{m} #{byte_size(Base.decode64!(d))} bytes"
 
-      body = Map.merge(body, provider_options || %{})
-      start = spec["start"] || %{}
+  # §7G.6: data ⇒ data part; http(s) url ⇒ url part; a local file ⇒ its bytes read now.
+  defp part(%MediaFile{data: d} = f) when is_binary(d),
+    do: %ContentPart{type: f.type, mime_type: f.mime_type, data: d}
 
-      # §7G Per-request timeout: every request is bounded by the time left until the
-      # job deadline, which counts from the start request.
-      timeout = positive((spec["poll"] || %{})["timeoutMs"], 600_000)
-      media = %{media | deadline: System.monotonic_time(:millisecond) + timeout}
+  defp part(%MediaFile{url: "http" <> _ = u} = f),
+    do: %ContentPart{type: f.type, mime_type: f.mime_type, url: u}
 
-      case call(media, style, verb, start["method"] || "POST", start["path"], body) do
-        :deadline ->
-          {:error, "#{verb}: timed out after #{timeout}ms"}
-
-        {:ok, resp} ->
-          case spec["mode"] do
-            "async" -> poll(media, style, verb, spec, resp, signal, timeout)
-            _ -> result(verb, spec, resp, %Result{status: "completed"})
-          end
-
-        err ->
-          err
-      end
-    end
+  defp part(%MediaFile{} = f) do
+    path = f.path || String.replace_prefix(f.url || "", "file://", "")
+    %ContentPart{type: f.type, mime_type: f.mime_type, data: Base.encode64(File.read!(path))}
   end
 
-  defp find(media, verb) do
-    Enum.find_value(media.styles, {:error, ~s(media: no style supports "#{verb}")}, fn style ->
-      case style["verbs"] do
-        %{^verb => spec} ->
-          with :ok <- validate_style(style), do: {:ok, spec, style}
-
-        _ ->
-          nil
-      end
-    end)
-  end
-
-  # §7G Empty dotPath: an `args` entry mapped to "" is a style error (sorted ⇒ deterministic).
-  defp validate_style(style) do
-    empty =
-      for {_verb, spec} <- Enum.sort(style["verbs"] || %{}),
-          is_map(spec),
-          {k, ""} <- Enum.sort(spec["args"] || %{}),
-          do: k
-
-    case empty do
-      [] -> :ok
-      [k | _] -> {:error, ~s(style: empty path for argument "#{k}")}
-    end
-  end
-
-  defp resolve(media, verb) do
-    case find(media, verb) do
-      {:ok, spec, _} -> spec
-      _ -> nil
-    end
-  end
-
-  defp check_args(verb, spec, args) do
-    mapped = spec["args"] || %{}
-
-    case Enum.find(Map.keys(args) |> Enum.sort(), &(not Map.has_key?(mapped, &1))) do
-      nil -> :ok
-      key -> {:error, ~s(#{verb}: argument "#{key}" not supported by this style)}
-    end
-  end
-
-  defp poll(media, style, verb, spec, resp, signal, timeout) do
-    p = spec["poll"] || %{}
-    id_path = spec["idPath"]
-
-    case read_path(resp, id_path) do
-      {:ok, id}
-      when (is_binary(id) and id != "") or is_integer(id) or (is_float(id) and id == trunc(id)) ->
-        id = render(id)
-        interval = positive(p["intervalMs"], 5000)
-        # §7G: the job id is percent-encoded (RFC 3986 unreserved kept) in the poll path.
-        path = String.replace(p["path"] || "", "{id}", URI.encode(id, &URI.char_unreserved?/1))
-        poll_loop(media, style, verb, spec, p, id, path, interval, timeout, signal)
-
-      _ ->
-        {:error, "#{verb}: no job id at #{id_path}"}
-    end
-  end
-
-  defp poll_loop(media, style, verb, spec, p, id, path, interval, timeout, signal) do
-    Process.sleep(interval)
-    timed_out = {:error, "job #{id} timed out after #{timeout}ms"}
-
-    if cancelled?(signal) do
-      raise Toolnexus.Media.Cancelled
-    else
-      case call(media, style, verb, p["method"] || "GET", path, nil) do
-        :deadline ->
-          timed_out
-
-        {:ok, resp} ->
-          status =
-            case read_path(resp, p["statusPath"]) do
-              {:ok, s} when is_binary(s) -> s
-              {:ok, s} when is_number(s) -> render(s)
-              _ -> ""
-            end
-
-          if media.on_progress, do: media.on_progress.(%{verb: verb, job_id: id, status: status})
-
-          cond do
-            status in (p["done"] || []) ->
-              result(verb, spec, resp, %Result{status: status, job_id: id})
-
-            status in (p["failed"] || []) ->
-              msg =
-                case read_path(resp, p["errorPath"]) do
-                  {:ok, m} when is_binary(m) and m != "" -> ": " <> m
-                  _ -> ""
-                end
-
-              {:error, "job #{id} #{status}#{msg}"}
-
-            System.monotonic_time(:millisecond) >= media.deadline ->
-              timed_out
-
-            true ->
-              poll_loop(media, style, verb, spec, p, id, path, interval, timeout, signal)
-          end
-
-        err ->
-          err
-      end
-    end
-  end
-
-  # §7G: an interval/timeout that is absent, not a number or <= 0 takes the default.
-  defp positive(v, _default) when is_number(v) and v > 0, do: v
-  defp positive(_v, default), do: default
-
-  defp cancelled?(nil), do: false
-  defp cancelled?(pid) when is_pid(pid), do: not Process.alive?(pid)
-  defp cancelled?(f) when is_function(f, 0), do: f.() == true
-  defp cancelled?(_), do: false
-
-  defp result(verb, spec, resp, %Result{} = r) do
-    path = spec["resultPath"]
-    found = read_path(resp, path)
-
-    case spec["kind"] do
-      "text" ->
-        case found do
-          {:ok, t} when is_binary(t) or is_number(t) -> {:ok, %{r | text: render(t), files: []}}
-          _ -> {:error, "#{verb}: no result at #{path}"}
-        end
-
-      kind ->
-        urls =
-          case found do
-            {:ok, u} when is_binary(u) -> [u]
-            {:ok, l} when is_list(l) -> l |> List.flatten() |> Enum.filter(&is_binary/1)
-            _ -> []
-          end
-          |> Enum.reject(&(&1 == ""))
-
-        if urls == [],
-          do: {:error, "#{verb}: no result at #{path}"},
-          else: {:ok, %{r | files: Enum.map(urls, &file(kind, &1))}}
-    end
-  end
-
-  defp file(kind, url) do
-    type = if kind == "video", do: "file", else: kind
-
-    ext =
-      (URI.parse(url).path || "")
-      |> Path.extname()
-      |> String.trim_leading(".")
-      |> String.downcase()
-
-    default = %{"image" => "image/png", "video" => "video/mp4", "audio" => "audio/mpeg"}[kind]
-    %ContentPart{type: type, mime_type: Map.get(@mime, ext, default), url: url}
-  end
-
-  # ---- HTTP ----
-
-  @redirects [301, 302, 303, 307, 308]
-  @max_redirects 10
-
-  defp call(media, style, verb, method, path, body) do
-    url = String.trim_trailing(style["baseUrl"] || "", "/") <> (path || "")
-
-    headers =
-      Map.new(style["headers"] || %{}, fn {k, v} ->
-        {k, Regex.replace(@env_var, v, fn _, var -> System.get_env(var) || "" end)}
-      end)
-
-    method = method |> to_string() |> String.downcase() |> String.to_atom()
-
-    with {:ok, status, raw} <- hop(media, verb, method, url, headers, body, origin(url), 0) do
-      cond do
-        status not in 200..299 ->
-          {:error, "HTTP #{status}: #{cap_body(raw)}"}
-
-        true ->
-          case decode(raw) do
-            {:ok, json} -> envelope(style["errorEnvelope"], json)
-            :error -> {:error, "#{verb}: response is not JSON"}
-          end
-      end
-    end
-  end
-
-  # §7G Redirects: followed here (never by the HTTP client), one hop per request, each
-  # bounded by the job deadline. Style headers only ever go to the base URL's origin.
-  defp hop(media, verb, method, url, style_headers, body, base_origin, hops) do
-    headers = if origin(url) == base_origin, do: style_headers, else: %{}
-    headers = if body, do: Map.put(headers, "Content-Type", "application/json"), else: headers
-    remaining = remaining_ms(media.deadline)
-
-    with :ok <- if(remaining == 0, do: :deadline, else: :ok),
-         {:ok, status, resp_headers, raw} <-
-           prefix(verb, send_request(media, method, url, headers, body, remaining)) do
-      loc = if status in @redirects, do: location(resp_headers)
-
-      cond do
-        loc == nil ->
-          {:ok, status, raw}
-
-        hops >= @max_redirects ->
-          {:error, "#{verb}: too many redirects"}
-
-        true ->
-          next = url |> URI.merge(loc) |> URI.to_string()
-
-          {method, body} =
-            if status in [301, 302, 303] and method not in [:get, :head],
-              do: {:get, nil},
-              else: {method, body}
-
-          hop(media, verb, method, next, style_headers, body, base_origin, hops + 1)
-      end
-    end
-  end
-
-  defp origin(url) do
-    u = URI.parse(url)
-    {u.scheme && String.downcase(u.scheme), u.host && String.downcase(u.host), u.port}
-  end
-
-  defp location(headers) when is_map(headers) or is_list(headers) do
-    Enum.find_value(headers, fn {k, v} ->
-      if String.downcase(to_string(k)) == "location" do
-        case v do
-          [first | _] -> first
-          v when is_binary(v) and v != "" -> v
-          _ -> nil
-        end
-      end
-    end)
-  end
-
-  defp location(_), do: nil
-
-  defp remaining_ms(nil), do: :infinity
-  defp remaining_ms(deadline), do: max(deadline - System.monotonic_time(:millisecond), 0)
-
-  defp send_request(%{transport: t} = media, method, url, headers, body, remaining)
-       when is_function(t, 1) do
-    req = %{method: method, url: url, headers: headers, body: body, receive_timeout: remaining}
-
-    case t.(req) do
-      {:ok, %{status: status, body: b} = resp} -> {:ok, status, Map.get(resp, :headers), b}
-      {:error, e} -> transport_error(media, e)
-    end
-  end
-
-  defp send_request(media, method, url, headers, body, remaining) do
-    opts =
-      [method: method, url: url, headers: headers, retry: false, decode_body: false] ++
-        if(body, do: [body: Jason.encode!(body)], else: [])
-
-    # Host http_options first; the job-deadline bound and `redirect: false` (§7G — we
-    # follow redirects ourselves) are applied after, so a host option cannot override them.
-    opts = Keyword.merge(opts, media.http_options) |> Keyword.put(:redirect, false)
-
-    opts =
-      if remaining == :infinity do
-        opts
-      else
-        connect = Keyword.put(opts[:connect_options] || [], :timeout, remaining)
-        opts |> Keyword.put(:receive_timeout, remaining) |> Keyword.put(:connect_options, connect)
-      end
-
-    case Req.request(opts) do
-      {:ok, %Req.Response{status: status, headers: h, body: b}} -> {:ok, status, h, b}
-      {:error, e} -> transport_error(media, e)
-    end
-  end
-
-  # A request cut short by the job deadline is `:deadline` (callers render the §7G
-  # timed-out message); anything else is a transport error.
-  defp transport_error(media, e) do
-    if timeout_error?(e) or past?(media.deadline), do: :deadline, else: {:error, err_text(e)}
-  end
-
-  defp timeout_error?(%{reason: :timeout}), do: true
-  defp timeout_error?(:timeout), do: true
-  defp timeout_error?(_), do: false
-
-  defp past?(nil), do: false
-  defp past?(deadline), do: System.monotonic_time(:millisecond) >= deadline
-
-  # §7G: echoed error bodies keep their first 1000 code points, then "…".
-  defp cap_body(raw) when is_binary(raw) do
-    cps = String.codepoints(raw)
-    if length(cps) <= 1000, do: raw, else: Enum.join(Enum.take(cps, 1000)) <> "…"
-  end
-
-  defp cap_body(raw), do: raw
-
-  # Edge rule: a transport error (no HTTP status) ⇒ "<verb>: <message>".
-  defp prefix(_verb, :deadline), do: :deadline
-  defp prefix(verb, {:error, msg}), do: {:error, "#{verb}: #{msg}"}
-  defp prefix(_verb, ok), do: ok
-
-  defp err_text(e) when is_exception(e), do: Exception.message(e)
-  defp err_text(e), do: inspect(e)
-
-  # A transport may hand back an already-decoded body; raw text is decoded here.
-  defp decode(raw) when is_binary(raw) do
-    case Jason.decode(raw) do
-      {:ok, j} -> {:ok, j}
-      _ -> :error
-    end
-  end
-
-  defp decode(raw) when is_map(raw) or is_list(raw), do: {:ok, raw}
-  defp decode(_), do: :error
-
-  defp envelope(nil, json), do: {:ok, json}
-
-  defp envelope(env, json) do
-    case read_path(json, env["codePath"]) do
-      {:ok, code} ->
-        if Enum.any?(env["okValues"] || [], &(&1 == code)) do
-          {:ok, json}
-        else
-          msg =
-            case read_path(json, env["messagePath"]) do
-              {:ok, m} when is_binary(m) -> m
-              _ -> ""
-            end
-
-          {:error, "API error #{render(code)}: #{msg}"}
-        end
-
-      :absent ->
-        {:ok, json}
-    end
-  end
-
-  # ---- values ----
-
-  defp render(s) when is_binary(s), do: s
-  defp render(n) when is_integer(n), do: Integer.to_string(n)
-  defp render(f) when is_float(f) and f == trunc(f), do: Integer.to_string(trunc(f))
-  defp render(f) when is_float(f), do: to_string(f)
-  defp render(other), do: Jason.encode!(other)
-
-  @doc false
-  # dotPath read: `{:ok, value}` or `:absent`.
-  def read_path(_v, nil), do: :absent
-  # §7G: an empty dotPath is the whole value.
-  def read_path(v, ""), do: {:ok, v}
-  def read_path(v, path), do: do_read(v, String.split(path, "."))
-
-  defp do_read(v, []), do: {:ok, v}
-
-  defp do_read(m, [seg | rest]) when is_map(m) do
-    case Map.fetch(m, seg) do
-      {:ok, v} -> do_read(v, rest)
-      :error -> :absent
-    end
-  end
-
-  defp do_read(l, [seg | rest]) when is_list(l) do
-    if digits?(seg) do
-      case Enum.fetch(l, String.to_integer(seg)) do
-        {:ok, v} -> do_read(v, rest)
-        :error -> :absent
-      end
-    else
-      :absent
-    end
-  end
-
-  defp do_read(_, _), do: :absent
-
-  @doc false
-  # dotPath write: creates objects, and arrays when the next segment is numeric
-  # (an existing object is kept; a numeric segment is then a string key).
-  def put_path(container, path, value), do: do_put(container, String.split(path, "."), value)
-
-  defp do_put(_c, [], value), do: value
-
-  defp do_put(c, [seg | rest], value) do
-    if digits?(seg) and not is_map(c) do
-      list = if is_list(c), do: c, else: []
-      i = String.to_integer(seg)
-
-      list =
-        if length(list) <= i, do: list ++ List.duplicate(nil, i + 1 - length(list)), else: list
-
-      List.replace_at(list, i, do_put(Enum.at(list, i), rest, value))
-    else
-      map = if is_map(c), do: c, else: %{}
-      Map.put(map, seg, do_put(Map.get(map, seg), rest, value))
-    end
-  end
-
-  defp digits?(seg), do: seg != "" and String.match?(seg, ~r/^\d+$/)
+  # ---- args ----
 
   defp split_args(args) do
     args = stringify(args)
     {po, args} = Map.pop(args, "providerOptions")
     {po2, args} = Map.pop(args, "provider_options")
-    {Map.new(po || po2 || %{}, fn {k, v} -> {to_string(k), v} end), args}
+    {po || po2, args}
   end
 
-  defp stringify(args) do
+  @doc false
+  def stringify(args) do
     Map.new(args, fn
       {k, v} when is_atom(k) -> {k |> Atom.to_string() |> camelize(), v}
       {k, v} -> {to_string(k), v}
@@ -736,4 +625,7 @@ defmodule Toolnexus.Media do
 
   defp verb_name(v) when is_atom(v), do: v |> Atom.to_string() |> camelize()
   defp verb_name(v), do: v
+
+  @doc false
+  def verb_names, do: @verb_names
 end

@@ -29,8 +29,8 @@ rules D1–D17 and their cases. Tick a port only when its code AND its README se
 
 Round 3 (D19–D23), per port — router skip + joined error (D19), `RunFile.path` (D20), `usage`
 (D21), extension table (D22), default User-Agent (D23):
-- [ ] 2.9 golang  - [ ] 2.10 js  - [ ] 2.11 python  - [ ] 2.12 java
-- [ ] 2.13 csharp  - [ ] 2.14 elixir  - [ ] 2.15 clojure  - [ ] 2.16 rust
+- [x] 2.9 golang  - [x] 2.10 js  - [x] 2.11 python  - [x] 2.12 java
+- [x] 2.13 csharp  - [x] 2.14 elixir  - [x] 2.15 clojure  - [x] 2.16 rust
 
 ## 5. Examples (E1 — design.md "Example contract"), one per port
 Each: client order Grok, Codex, ElevenLabs, then OpenAI, fal, A2E (only those with key/CLI);
@@ -38,15 +38,15 @@ image `a red apple on a white table`; ElevenLabs speech (`MEDIA_VOICE` or defaul
 `generate_image`; Grok video only with `MEDIA_VIDEO=1`; paid video/talk only with `MEDIA_PAID=1`;
 smallest/lowest-quality paid images; print client, verb, path/url, mime, size, usage; non-zero exit
 on any failed step, exit 0 with a hint when no client is available.
-- [ ] 5.1 golang
-- [ ] 5.2 js
-- [ ] 5.3 python
-- [ ] 5.4 java
-- [ ] 5.5 csharp
-- [ ] 5.6 elixir (also E3: drop the `:preferred_cli_env` deprecation in mix.exs)
-- [ ] 5.7 clojure (runnable from the documented location; fix `examples/EXAMPLES.md`; E2: check
-      ElevenLabs voice-name resolution — output ~2x the other ports for the same sentence)
-- [ ] 5.8 rust (must exit non-zero on failure — it exited 0)
+- [x] 5.1 golang
+- [x] 5.2 js
+- [x] 5.3 python
+- [x] 5.4 java
+- [x] 5.5 csharp
+- [x] 5.6 elixir (also E3: drop the `:preferred_cli_env` deprecation in mix.exs)
+- [x] 5.7 clojure (runnable from the documented location; fix `examples/EXAMPLES.md`; E2: check
+      ElevenLabs voice-name resolution — output ~2x the other ports for the same sentence; E2 result: voice resolution is correct, the 2x is the koine UTF-8 text-body gap — U+FFFD per invalid byte — pending a koine bytes mode)
+- [x] 5.8 rust (must exit non-zero on failure — it exited 0)
 
 ## 3. Docs
 - [x] 3.1 Docs site media guide: clients, config, gather, routing, custom client — 8 language tabs

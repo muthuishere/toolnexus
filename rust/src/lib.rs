@@ -34,9 +34,13 @@ pub use classifier::{
     create_classifier,
 };
 pub use media::{
-    CloneVoiceInput, ImageInput, Media, MediaError, MediaFile, MediaOptions, MediaProgress,
-    MediaResult, MediaStyle, SpeechInput, TalkingInput, TranscribeInput, VideoInput, create_media,
-    load_media_style,
+    A2EMediaClient, CliEvent, CliMediaClient, CliProfile, CloneVoiceInput, CodexMediaClient,
+    ElevenLabsMediaClient, FalMediaClient, GatherMode, GrokMediaClient, ImageInput,
+    IntoMediaClient, Media, MediaArg, MediaArgs, MediaClient, MediaClientConfig, MediaCtx,
+    MediaError, MediaFile, MediaFuture, MediaGather, MediaLoop, MediaProgress, MediaResult,
+    MediaStyle, MediaUsage, MusicInput, OpenAIMediaClient, OpenRouterMediaClient, SpeechInput,
+    StyleMediaClient, TalkInput, TranscribeInput, VideoInput, create_media, load_media_style,
+    style_media_client,
 };
 pub use tool::{
     Answer, ConcurrencySafeFn, ContentPart, DEFAULT_MAX_TOOL_CONCURRENCY, PartError, Request, Tool,

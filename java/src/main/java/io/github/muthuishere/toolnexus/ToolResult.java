@@ -24,6 +24,12 @@ public final class ToolResult {
     private final boolean isError;
     private final Map<String, Object> metadata;
     private final List<ContentPart> parts;
+    /**
+     * §7G.12 D20: the local path behind each part (same index; null entries for parts with none).
+     * Port-internal — never inside a part or anything sent to a model; it only reaches
+     * {@code RunResult.files[].path}.
+     */
+    private final List<String> partPaths;
 
     public ToolResult(String output, boolean isError, Map<String, Object> metadata) {
         this(output, isError, metadata, null);
@@ -31,10 +37,22 @@ public final class ToolResult {
 
     /** §1B: a result that also carries non-text content parts. */
     public ToolResult(String output, boolean isError, Map<String, Object> metadata, List<ContentPart> parts) {
+        this(output, isError, metadata, parts, null);
+    }
+
+    ToolResult(String output, boolean isError, Map<String, Object> metadata, List<ContentPart> parts,
+               List<String> partPaths) {
         this.output = output == null ? "" : output;
         this.isError = isError;
         this.metadata = metadata;
         this.parts = parts == null || parts.isEmpty() ? null : List.copyOf(parts);
+        this.partPaths = this.parts == null || partPaths == null || partPaths.size() != this.parts.size()
+                ? null : java.util.Collections.unmodifiableList(new java.util.ArrayList<>(partPaths));
+    }
+
+    /** D20: the local path behind each part, or null. Package-private. */
+    List<String> partPaths() {
+        return partPaths;
     }
 
     public String output() {

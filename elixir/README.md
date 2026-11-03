@@ -121,25 +121,56 @@ ride `Task.async_stream`. Same contract as the other six ports, native OTP under
 
 ## Media generation
 
-Generate images, video and speech (plus transcription, voice cloning and talking-head video)
-from a **JSON style** instead of provider code. Async jobs are started and polled for you. The same
-verbs become agent tools (`generate_image`, `generate_video`, `generate_speech`, …), and whatever
-they produce lands in `RunResult.files`. `examples/media-styles/a2e.json` ships first and reads
-`A2E_API_KEY` at call time. Its result URLs expire in 3–30 days, so save what you keep. SPEC §7G;
+Image, video, speech, music, transcription, voice cloning and talking-head video behind one
+interface. Pick **named media clients** — API: `Media.a2e/1`, `elevenlabs/1`, `openai/1`,
+`openrouter/1`, `fal/1`; local CLI on your own subscription: `grok/1`, `codex/1` — and
+`Media.create/1` sends each verb to the first client that supports it, falling through to the next
+**only** when a client is `:unavailable` (no key, no credits, quota, CLI missing). Each API client
+reads its key (`OPENAI_API_KEY`, `FAL_API_KEY`, …) at call time and never logs it. SPEC §7G;
 guide: <https://muthuishere.github.io/toolnexus/media/>.
 
 ```elixir
 alias Toolnexus.Media
 
-{:ok, style} = Media.load_style("examples/media-styles/a2e.json")
-media = Media.new(style, on_progress: &IO.inspect/1)
-{:ok, img} = Media.image(media, %{prompt: "a red fox in fresh snow", width: 1024, height: 768})
-{:ok, vid} = Media.video(media, %{prompt: "the fox blinks", image: hd(img.files).url, seconds: 5})
+media = Media.create!([Media.fal(), Media.grok(), Media.elevenlabs(), Media.a2e()])
 
-{:ok, tk} = Toolnexus.create_toolkit(media: media)    # generate_image, …
+with {:ok, %{files: [img | _]}} <- Media.image(media, prompt: "a red fox in fresh snow"),
+     {:ok, _vid} <- Media.video(media, prompt: "the fox blinks", image: img.path || img.url),
+     {:ok, %{files: [voice | _]}} <- Media.speech(media, text: "Hello from the fox."),
+     {:ok, talk} <- Media.talk(media, image: img.path || img.url, audio: voice.path || voice.url) do
+  IO.inspect(talk.files)
+else
+  {:error, %Media.Error{status: :unavailable, message: m}} -> IO.puts("no client could serve it: " <> m)
+  {:error, %Media.Error{status: status, message: m}} -> IO.puts("#{status}: #{m}")
+end
+
+{:ok, tk} = Toolnexus.create_toolkit(media: media)    # generate_image, generate_video, …
 res = Toolnexus.Client.run(client, "Draw a fox, then animate it.", tk)
 for f <- res.files, do: IO.puts("#{f.from} #{f.mime_type} #{f[:url]}")
 ```
+
+- **Verbs** — `image`, `video`, `speech`, `music`, `transcribe`, `clone_voice`, `talk`, each
+  `(media, args, opts \\ [])` → `{:ok, %Media.Result{files, text, job_id, status, usage}}`; or
+  `Media.generate(media, verb, args)`. CLI clients take `prompt` only.
+- **Tools** — `create_toolkit(media: media)` (or `Media.tools(media)`) registers one tool per verb
+  some client supports. Every file a tool makes lands in `RunResult.files`; only **image** parts are
+  sent back to the model.
+- **Config** — every built-in takes the same keyword list: `model`, `models` (per verb), `key`,
+  `url`, `command` (CLI), `loop: [interval_ms:, timeout_ms:, on_progress:]`,
+  `gather: [mode: "url" | "download" | "inline", dir:, max_bytes:, keep:]` (built-ins default to
+  `"download"` into the temp dir), `http_client`.
+- **Your own client** — a module implementing `Toolnexus.Media.Client`: `name/1`, `supports?/2`,
+  plus only the verb callbacks you serve; return `{:error, %Media.Error{status: :unavailable, message: msg}}` to fall
+  through.
+- **Errors** — `{:error, %Toolnexus.Media.Error{status: :failed | :timeout | :cancelled |
+  :unavailable}}`; a media tool never raises (`is_error: true`).
+- **Advanced** — a JSON style as a client: `Media.load_style(path)` + `Media.style_client(style)`.
+
+Run it: `mix run examples/media.exs` — uses the `grok` / `codex` CLIs when on `PATH`, ElevenLabs with
+`ELEVENLABS_API_KEY` (voice from `MEDIA_VOICE`), and paid OpenAI / fal / A2E only as fallbacks when their
+keys are set; `MEDIA_VIDEO=1` adds Grok video, `MEDIA_PAID=1` paid video/talk. It prints client, verb,
+path or URL, mime, size and usage per file, exits 1 if a step fails, and exits 0 with a hint when no
+client is available.
 
 ## Documentation
 

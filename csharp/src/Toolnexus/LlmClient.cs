@@ -650,7 +650,20 @@ public sealed partial class LlmClient
 
     /// <summary>(SPEC §8 / §7G) A non-text part a tool produced during a run, tagged with the tool name
     /// (<paramref name="From"/>) and the model's tool-call id (<paramref name="CallId"/>).</summary>
-    public sealed record RunFile(string Type, string MimeType, string? Url, string? Data, string From, string? CallId, string? Name = null);
+    public sealed record RunFile(string Type, string MimeType, string? Url, string? Data, string From, string? CallId, string? Name = null)
+    {
+        /// <summary>§7G.12 D20: the absolute local path when the part came from a media file saved
+        /// locally; null otherwise. Never inside a part or anything sent to a model.</summary>
+        public string? Path { get; init; }
+    }
+
+    /// <summary>The run-files function (§8 <c>RunResult.files</c>): every non-text part of
+    /// <paramref name="toolCalls"/>, in call order.</summary>
+    public static IReadOnlyList<RunFile> RunFilesOf(IEnumerable<ToolCall> toolCalls) => toolCalls
+        .SelectMany(c => (c.Parts ?? Array.Empty<ContentPart>())
+            .Where(p => p.Type != "text")
+            .Select(p => new RunFile(p.Type, p.MimeType ?? "", p.Url, p.Data, c.Name, c.CallId, p.Name) { Path = p.LocalPath }))
+        .ToList();
 
     public sealed class Usage
     {
@@ -687,11 +700,7 @@ public sealed partial class LlmClient
 
         /// <summary>(SPEC §8) Every non-text part the run's tool calls produced, in call order — never
         /// null (<c>[]</c> when none). Derived from <see cref="ToolCalls"/>, so every run path fills it.</summary>
-        public IReadOnlyList<RunFile> Files => ToolCalls
-            .SelectMany(c => (c.Parts ?? Array.Empty<ContentPart>())
-                .Where(p => p.Type != "text")
-                .Select(p => new RunFile(p.Type, p.MimeType ?? "", p.Url, p.Data, c.Name, c.CallId, p.Name)))
-            .ToList();
+        public IReadOnlyList<RunFile> Files => RunFilesOf(ToolCalls);
         public int Turns { get; }
         public Usage Usage { get; }
         public string Model { get; }
@@ -1211,7 +1220,7 @@ public sealed partial class LlmClient
     /// <c>tool_use_id</c> — no relocation, so the association and cache breakpoints survive.</summary>
     private object? AnthropicToolResultContent(ToolResult result)
     {
-        var parts = result.Parts;
+        var parts = Media.ModelParts(result); // §7G.6: only image parts of a media result reach the model
         if (parts == null || parts.Count == 0) return result.Output;
         var blocks = new List<object?> { new Dictionary<string, object?> { ["type"] = "text", ["text"] = result.Output } };
         blocks.AddRange(EncodeParts(parts, ContentEmit.Provenance.Derived));
@@ -1384,7 +1393,7 @@ public sealed partial class LlmClient
                         ["tool_call_id"] = callIds[i],
                         ["content"] = ToolMessageContent(runs[i].Result),
                     });
-                    relocations.Add((names[i], callIds[i], ContentEmit.NonText(runs[i].Result.Parts)));
+                    relocations.Add((names[i], callIds[i], ContentEmit.NonText(Media.ModelParts(runs[i].Result))));
                     if (halted != null)
                     {
                         RecordRelocation(relocated, relocations, messages.Count);
@@ -1698,7 +1707,7 @@ public sealed partial class LlmClient
                     var rr = runs[i];
                     toolCalls.Add(ToolCallRecord(slot[1], rr.Args, rr.Result, slot[0]));
                     messages.Add(new Dictionary<string, object?> { ["role"] = "tool", ["tool_call_id"] = slot[0], ["content"] = ToolMessageContent(rr.Result) });
-                    relocations.Add((slot[1], slot[0], ContentEmit.NonText(rr.Result.Parts)));
+                    relocations.Add((slot[1], slot[0], ContentEmit.NonText(Media.ModelParts(rr.Result))));
                     if (halted != null)
                     {
                         RecordRelocation(relocated, relocations, messages.Count);

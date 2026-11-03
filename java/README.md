@@ -129,23 +129,72 @@ A `beforeLLM` hook may return `LLMOverride.withModel(id)`: that turn only is sen
 
 ## Media generation
 
-Generate images, video and speech (plus transcription, voice cloning and talking-head video)
-from a **JSON style** instead of provider code. Async jobs are started and polled for you. The same
-verbs become agent tools (`generate_image`, `generate_video`, `generate_speech`, …), and whatever
-they produce lands in `RunResult.files`. `examples/media-styles/a2e.json` ships first and reads
-`A2E_API_KEY` at call time. Its result URLs expire in 3–30 days, so save what you keep. SPEC §7G;
+Images, video, speech, music, transcription, voice cloning and talking-head video through **named
+media clients** — `OpenAIMediaClient`, `OpenRouterMediaClient`, `ElevenLabsMediaClient`,
+`FalMediaClient`, `A2EMediaClient` (HTTP APIs, key from the env var at call time) and
+`GrokMediaClient`, `CodexMediaClient` (local CLIs). `Media.createMedia(...)` sends each verb to the
+first client that supports it and falls through to the next **only** when a client is
+`unavailable` (no key, no credit, CLI not installed). Async jobs are polled for you. SPEC §7G;
 guide: <https://muthuishere.github.io/toolnexus/media/>.
 
 ```java
-Media media = Media.create(Media.loadStyle("examples/media-styles/a2e.json"),
-        new Media.Options().onProgress(p -> System.out.println(p.verb() + " " + p.status())));
-var img = media.image(new Media.ImageInput("a red fox in fresh snow", 1024, 768, null, null, null));
-var vid = media.video(new Media.VideoInput("the fox blinks", img.files().get(0).url(), 5, null, null));
-
-Toolkit tk = Toolkit.create(new Toolkit.Options().media(media));   // generate_image, …
-var res = agent.run("Draw a fox, then animate it.", tk);
-for (var f : res.files) System.out.println(f.from() + " " + f.mimeType() + " " + f.url());
+var cfg = new Media.Config().gather(new Media.Gather().mode("download").dir("out")); // url | download | inline
+Media media = Media.createMedia(new FalMediaClient(cfg), new ElevenLabsMediaClient(cfg), new A2EMediaClient(cfg));
+try {
+    var img = media.image(new Media.ImageInput("a red fox in fresh snow"));            // fal, else a2e
+    var vid = media.video(new Media.VideoInput("the fox blinks", img.files().get(0).url(), 5, null, null));
+    var mp3 = media.speech(new Media.SpeechInput("Hello from toolnexus."));            // elevenlabs
+    System.out.println(vid.files().get(0).path() + " " + mp3.files().get(0).path());
+} catch (Media.MediaUnavailableException e) {   // every candidate was unavailable
+    System.err.println(e.getMessage());
+}
 ```
+
+`Media.Config` is one shape for every client: `model`, `models` (per verb), `key`, `url`, `command`
+(CLI argv), `loop` (`intervalMs`, `timeoutMs`, `onProgress`), `gather` (`mode`, `dir`, `maxBytes`,
+`keep`) and `httpClient`. Errors are `Media.MediaException` with `status()`
+`failed | timeout | cancelled | unavailable`; `unavailable` is the subclass
+`Media.MediaUnavailableException`.
+
+**As agent tools.** `new Toolkit.Options().media(media)` registers `generate_image`,
+`generate_video`, `generate_speech`, … (one per verb any client supports). Files a run produces land
+in `RunResult.files`; only image parts are shown to the model, the rest it sees as text.
+
+```java
+Toolkit tk = Toolkit.create(new Toolkit.Options().media(media));
+LlmClient.RunResult res = agent.run("Draw a fox, then animate it.", tk);
+for (LlmClient.RunFile f : res.files) System.out.println(f.from() + " " + f.mimeType() + " " + f.url());
+```
+
+**Your own provider.** Implement `MediaClient`: `name()`, `supports(verb)` and only the verbs you
+serve (the rest default to unsupported); `args(verb)` optionally narrows the accepted args.
+
+```java
+MediaClient mine = new MediaClient() {
+    @Override public String name() { return "mine"; }
+    @Override public boolean supports(String verb) { return verb.equals("image"); }
+    @Override public Media.MediaResult image(Map<String, Object> args, Media.Ctx ctx) {
+        return new Media.MediaResult(List.of(Media.MediaFile.ofUrl("image", "image/png",
+                "https://img.example.com/fox.png")), null, null, null);
+    }
+};
+```
+
+Advanced: a provider described in JSON instead of code —
+`Media.styleMediaClient(Media.loadMediaStyle("my-style.json"))`.
+
+Run the example. It uses the `grok` / `codex` CLIs when they are on `PATH` and ElevenLabs, OpenAI,
+fal and A2E when their key is set (in that order), makes an image, ElevenLabs speech (`MEDIA_VOICE`
+picks the voice) and a `generate_image` tool call, and prints client, path, mime type, size and
+usage. `MEDIA_VIDEO=1` adds a Grok video, `MEDIA_PAID=1` paid video and talk. It exits non-zero if
+a step fails, and 0 with a hint when no client is available:
+
+```sh
+ELEVENLABS_API_KEY=... ./gradlew runMedia
+```
+
+`RunResult.files[].path` carries a media file's local path, and `MediaResult.usage()` /
+tool `metadata.usage` carry the tokens or cost the provider reported (OpenAI, OpenRouter, Grok).
 
 ## Documentation
 
