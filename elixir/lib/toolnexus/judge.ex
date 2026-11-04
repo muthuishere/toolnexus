@@ -42,6 +42,16 @@ defmodule Toolnexus.Judge do
     do: {to_string(name), %C.Score{instructions: instructions, criteria: levels}}
 
   @doc """
+  A named RAW question: a System One type the library does not model (e.g. Jev
+  1.14 `box`), sent as `{"criteria"?, "instructions", "type"}`. Its answer decodes
+  to a `Toolnexus.Classifier.RawAnswer`; banded it is always uncertain.
+  """
+  def raw(name, type, instructions, criteria \\ nil),
+    do:
+      {to_string(name),
+       %C.Raw{type: to_string(type), instructions: instructions, criteria: criteria}}
+
+  @doc """
   An ordered question list -> the §8B questions map. A duplicate name is an error
   naming it, before any request. A map is passed through unchanged.
   """
@@ -139,6 +149,10 @@ defmodule Toolnexus.Judge do
 
   defp answer(k, %C.ScoreAnswer{} = a, %{high: hi}),
     do: %Answer{name: k, type: "score", raw: a, sure: a.confidence > hi}
+
+  # An unmodelled (raw) answer is never confident enough to act on.
+  defp answer(k, %C.RawAnswer{type: t} = a, _bands),
+    do: %Answer{name: k, type: t, raw: a, band: :uncertain, sure: false}
 
   # ------------------------------------------------------------------ ask / gate
 

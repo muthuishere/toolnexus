@@ -591,7 +591,7 @@ defmodule Toolnexus.Issues8693Test do
     test "the backend preset sets baseUrl + model + apiKeyEnv AS A UNIT" do
       {:ok, c} = Toolnexus.Classifier.create(backend: "openrouter")
       assert c.base_url == "https://openrouter.ai/api/v1"
-      assert c.model == "typesafe/jev-1.13"
+      assert c.model == "typesafe/jev-1.14"
       assert c.api_key_env == "OPENROUTER_API_KEY"
 
       {:ok, t} = Toolnexus.Classifier.create(backend: "typesafe")
@@ -607,7 +607,7 @@ defmodule Toolnexus.Issues8693Test do
                )
 
       assert msg =~ ~s(model "jev-latest" is TypeSafe's spelling)
-      assert msg =~ ~s(on openrouter.ai use "typesafe/jev-1.13")
+      assert msg =~ ~s(on openrouter.ai use "typesafe/jev-1.14")
     end
 
     test "an unknown backend name is refused by name" do

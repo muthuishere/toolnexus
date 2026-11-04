@@ -113,6 +113,44 @@ Batteries (SPEC §8B): `Toolnexus.Judge.ToolGuard`, `ToolRelevance`, `SkillRelev
 verdict from `check`/`select`/`filter`/`pick`, and `as_hook(battery, next)` where a hook seam
 exists. A `before_llm` hook may also return `%{model: "id"}` to override the model for that turn.
 
+### Backends, images, cache and helpers
+
+Proposed defaults, owner to confirm (`openspec/changes/add-classifier-backends`, SPEC §8B).
+
+```elixir
+alias Toolnexus.Classifier
+alias Toolnexus.Classifier.{MemoryCache, Thresholds}
+import Toolnexus.Judge
+
+# Backends are data: Classifier.backends() — typesafe (default) | openrouter
+# (typesafe/jev-1.14) | cloudflare | vercel | custom. ${NAME} in base_url expands at
+# call time; errors name the endpoint unexpanded. custom needs base_url + supports.
+{:ok, c} = Classifier.create(backend: "openrouter", cache: MemoryCache.new(3_600_000, 1000))
+
+# A ContentPart image in the state is lifted into `assets` (PNG/JPEG, 280..1568 px
+# a side, 16 MiB each, 32 MiB a request; never resized). A backend whose row says no
+# images fails BEFORE the network with %Classifier.Unsupported{}; `supports:` overrides.
+photo = Toolnexus.ContentPart.image!("listing.png")
+
+{:ok, d} = c |> Classifier.state(%{"photo" => photo}) |> Classifier.evaluate([noul(:red, "Is the photo's object red?")])
+d.cached # true when served from the cache, no request sent
+
+# Batch: per-item %BatchResult{decision | error}, state order, 16 in flight.
+{:ok, results} = c |> Classifier.states(["a", "b"]) |> Classifier.evaluate([noul(:q, "…")])
+```
+
+- `state(v) |> evaluate(qs)` validates the reply fail-closed (`validate_decision/2`); plain
+  `evaluate/3` keeps its old behaviour and does not.
+- The cache is opt-in (`%{get:, set:}` or `MemoryCache`), per request, keyed on the SERVED model,
+  and stores only valid replies. Key bytes match every port (`model_cache_key/2`,
+  `decision_cache_key/5`).
+- Helpers: `validate_decision/2`, `Thresholds.band/2` (inclusive 0.8 / 0.2 / 0.6; `ask`/`gate` keep
+  their bands), `chunk_questions/2`, `Judge.raw/4` (an unmodelled question type; unknown answer
+  types decode to `%RawAnswer{}`).
+- `classifier.evaluate` metric events carry `questions`, `questions_hash` and `cached`.
+- `style: "llm"` is **deprecated**: it still works unchanged for at least one minor release, with
+  no runtime warning.
+
 ## Why the BEAM port
 
 Long-running agents want supervision. Every MCP connection is a supervised process; a crashed
