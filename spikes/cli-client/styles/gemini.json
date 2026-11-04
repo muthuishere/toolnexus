@@ -1,0 +1,15 @@
+{
+  "name": "gemini",
+  "args": [
+    "-p",
+    "{{prompt}}",
+    [
+      "--model",
+      "{{model}}"
+    ]
+  ],
+  "prompt": "arg",
+  "answer": "stdout",
+  "verified": "UNVERIFIED: gemini is not installed on the spike machine",
+  "notes": "From the Gemini CLI docs: -p/--prompt is non-interactive mode, -m/--model picks the model."
+}

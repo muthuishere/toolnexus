@@ -1,0 +1,18 @@
+{
+  "name": "claude",
+  "args": [
+    "-p",
+    "--tools",
+    "",
+    "--output-format",
+    "text",
+    [
+      "--model",
+      "{{model}}"
+    ]
+  ],
+  "prompt": "stdin",
+  "answer": "stdout",
+  "verified": "claude 2.1.318 --help, 2026-11-04",
+  "notes": "--tools \"\" disables Claude Code's own tools so the client executes them. Prompt on stdin: no argv length limit."
+}

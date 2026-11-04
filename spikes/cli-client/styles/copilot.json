@@ -1,0 +1,17 @@
+{
+  "name": "copilot",
+  "args": [
+    "-p",
+    "{{prompt}}",
+    "--silent",
+    "--no-color",
+    [
+      "--model",
+      "{{model}}"
+    ]
+  ],
+  "prompt": "arg",
+  "answer": "stdout",
+  "verified": "GitHub Copilot CLI 1.0.98 --help, 2026-11-04",
+  "notes": "Prompt as one argv element: Linux caps a single argument at 128 KiB (MAX_ARG_STRLEN)."
+}

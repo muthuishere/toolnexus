@@ -1,0 +1,13 @@
+{
+  "name": "goose",
+  "args": [
+    "run",
+    "--no-session",
+    "--text",
+    "{{prompt}}"
+  ],
+  "prompt": "arg",
+  "answer": "stdout",
+  "verified": "UNVERIFIED: goose is not installed on the spike machine",
+  "notes": "From the goose docs: 'goose run --text' is the one-shot mode; the model comes from goose's own config (GOOSE_MODEL), so this style takes no model."
+}
