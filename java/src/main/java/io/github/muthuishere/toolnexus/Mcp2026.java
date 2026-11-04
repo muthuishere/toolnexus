@@ -294,7 +294,7 @@ final class Mcp2026 {
                     Map<String, Object> a = args == null ? Map.of() : args;
                     int limit = a.get("limit") instanceof Number n && n.doubleValue() > 0 ? n.intValue() : 5;
                     List<Map<String, Object>> hits = c.client.searchTools(str(a.get("query")), limit, about);
-                    return new ToolResult(Mcp.json(hits), false, meta);
+                    return new ToolResult(Mcp.jsonOrdered(hits), false, meta);
                 } catch (Exception e) {
                     return new ToolResult(msg(e), true, meta);
                 }

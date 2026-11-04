@@ -301,7 +301,10 @@ class Mcp2026ClientTest {
             assertEquals("{\"properties\":{\"limit\":{\"type\":\"integer\"},\"query\":{\"type\":\"string\"}},\"required\":[\"query\"],\"type\":\"object\"}",
                     json(search.inputSchema()));
             assertEquals("Run a tool found with search_tools.", tool(src, "fx_call_tool").description());
-            List<Object> hits = list(parse(search.execute(obj("query", "echo text"), null).output().getBytes()));
+            String out = search.execute(obj("query", "echo text"), null).output();
+            assertTrue(out.startsWith("[{\"name\":\"echo\",\"description\":\"Echo the given text back.\",\"inputSchema\":{\"properties\":{\"text\":{\"type\":\"string\"}},\"required\":[\"text\"],\"type\":\"object\"},\"server\":\"the demo server\"}"), out);
+            assertEquals("[]", search.execute(obj("query", "zzzqqq"), null).output());
+            List<Object> hits = list(parse(out.getBytes()));
             Map<String, Object> top = map(hits.get(0));
             assertEquals("echo", top.get("name"));
             assertEquals(List.of("description", "inputSchema", "name", "server"), new ArrayList<>(new java.util.TreeSet<>(top.keySet())));

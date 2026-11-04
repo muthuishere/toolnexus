@@ -43,6 +43,17 @@ public final class Mcp {
         }
     }
 
+    private static final ObjectMapper JSON_ORDERED = new ObjectMapper();
+
+    /** Compact JSON keeping each map's insertion order (byte parity for search_tools hits, §2.8). */
+    public static String jsonOrdered(Object v) {
+        try {
+            return JSON_ORDERED.writeValueAsString(v);
+        } catch (IOException e) {
+            throw new McpException("not JSON: " + e.getMessage(), e);
+        }
+    }
+
     static byte[] jsonBytes(Object v) { return json(v).getBytes(StandardCharsets.UTF_8); }
 
     static Object parse(byte[] b) throws IOException { return JSON.readValue(b, Object.class); }
