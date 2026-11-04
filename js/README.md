@@ -135,6 +135,41 @@ const out = await gate(c, state, questions, [
   filter, content and model batteries into `hooks`. A `beforeLLM` hook may return `{ model }` to
   send another model for that turn only.
 
+### Backends, images, cache and helpers
+
+Every default below is a **proposed default, owner to confirm**
+(`openspec/changes/add-classifier-backends`).
+
+```ts
+import { createClassifier, judge, MemoryCache, validateDecision, thresholdBand, chunkQuestions } from "toolnexus"
+
+const c = createClassifier({ backend: "openrouter", cache: new MemoryCache(3_600_000, 1000) })
+const d = await c.state({ note: "listing", photo: { type: "image", mimeType: "image/png", data: b64 } })
+  .evaluate(judge.noul("red", "Is the object in `photo` red?"))         // fails closed on an invalid reply
+const rs = await c.states("a", "b").evaluate(judge.noul("q", "…"))      // [{ decision } | { error }], in order
+```
+
+- `backend`: `typesafe` (default) · `openrouter` (`typesafe/jev-1.14`) · `cloudflare` (`/ai/run`
+  envelope; `${CLOUDFLARE_ACCOUNT_ID}` in the URL expands at call time, errors name it unexpanded)
+  · `vercel` · `custom` (requires `baseUrl` and `supports`). The table is data:
+  `CLASSIFIER_BACKENDS`; `supports: { images }` overrides it per classifier.
+- Images (style `systemone` only): image parts in the state are lifted into `assets` (cloudflare:
+  data URLs). PNG/JPEG, 280–1568 px a side, ≤ 16 MiB each and 32 MiB per request — never resized.
+  A backend without image support throws `ClassifierUnsupported` before any request. A state with
+  no content part is sent byte-identically to before. JS has no distinct part type, so **any**
+  object shaped like a `ContentPart` (`{type:"text",text}`, `{type:"image",mimeType,…}`) inside a
+  systemone state is treated as a part.
+- `cache: { get(key), set(key, value) }` (sync or async, string values) — off when absent; only
+  valid replies are stored; keys follow the served model. A hit sets `decision.cached` and the
+  `classifier.evaluate` event's `cached`. Every such event also carries `questions` and
+  `questionsHash`.
+- Helpers: `validateDecision(questions, decision)` → `Error | undefined`; `thresholdBand(answer,
+  thresholds?)` with `DEFAULT_THRESHOLDS` 0.8 / 0.2 / 0.6 (inclusive; `Bands` stays the `ask`/`gate`
+  default); `chunkQuestions(questions, size)`.
+- Open union: `judge.raw(name, type, instructions, criteria?)` / `raw(...)`; an answer of an
+  unmodelled type decodes to `{ type, value }` (`decision.raw(key)`).
+- `style: "llm"` is **deprecated** — it still works unchanged, with no runtime warning.
+
 ## Media generation
 
 Generate images, video and speech (plus transcription, voice cloning and talking-head video)

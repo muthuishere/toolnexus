@@ -227,6 +227,12 @@ export type MetricEvent =
       promptTokens: number
       completionTokens: number
       error?: string
+      /** L1: how many questions were asked. */
+      questions: number
+      /** L1: sha256 hex of `canonicalRequest(model, questions)` ("" when unencodable). */
+      questionsHash: string
+      /** True when the decision came from the classifier cache and no request was sent. */
+      cached: boolean
     }
   // `warning`, never `error`: a degenerate-criteria report is advisory, and a consumer that
   // counts "has an error" as a failure must not count this.

@@ -12,8 +12,10 @@ import {
   Decision,
   type DecisionAnswer,
   type NoulCriteria,
-  type Question,
+  type AnyQuestion,
   type RecordedDecision,
+  isRawAnswer,
+  raw as rawQ,
   noul as noulQ,
   choice as choiceQ,
   score as scoreQ,
@@ -25,7 +27,7 @@ import type { Request } from "./types.js"
 /** One named question of an ordered question list. */
 export interface NamedQuestion {
   name: string
-  question: Question
+  question: AnyQuestion
 }
 
 /** `noul` question with a name. Name the state field it judges in `instructions`. */
@@ -41,9 +43,15 @@ export function score(name: string, instructions: string, levels: string[]): Nam
   return { name, question: scoreQ(instructions, levels) }
 }
 
+/** A raw question with a name: a System One type the library does not model (e.g. `box`), sent
+ * as written. Its answer decodes to a raw answer `{type, value}`. */
+export function raw(name: string, type: string, instructions: string, criteria?: unknown): NamedQuestion {
+  return { name, question: rawQ(type, instructions, criteria) }
+}
+
 /** Ordered list -> the §8B questions map. A duplicate name is an error naming it. */
-export function questionMap(questions: readonly NamedQuestion[]): Record<string, Question> {
-  const out: Record<string, Question> = {}
+export function questionMap(questions: readonly NamedQuestion[]): Record<string, AnyQuestion> {
+  const out: Record<string, AnyQuestion> = {}
   for (const { name, question } of questions) {
     if (Object.prototype.hasOwnProperty.call(out, name)) throw new Error(`duplicate question name ${JSON.stringify(name)}`)
     out[name] = question
@@ -93,6 +101,13 @@ function noulBand(p: number, b: Bands): Band {
 }
 
 function wrap(a: DecisionAnswer, b: Bands): Answer {
+  if (isRawAnswer(a)) {
+    // An unmodelled answer type is never sure: there is no number to band.
+    const out = { ...(a as object), sure: false } as Answer
+    Object.defineProperty(out, "value", { value: () => 0, enumerable: false })
+    Object.defineProperty(out, "pick", { value: () => "", enumerable: false })
+    return out
+  }
   const extra =
     a.type === "noul"
       ? { band: noulBand(a.noul, b) }
