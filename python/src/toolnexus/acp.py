@@ -60,6 +60,7 @@ from __future__ import annotations
 import json
 import os
 import queue
+import signal
 import subprocess
 import threading
 from dataclasses import dataclass, field
@@ -69,6 +70,9 @@ __all__ = [
     "ACPOptions",
     "ACPClient",
     "ACPError",
+    "ACPExitedError",
+    "ACPLaunchError",
+    "ACPMCPServer",
     "ACPPermissionTimeoutError",
     "load_acp",
 ]
@@ -88,6 +92,20 @@ _HANDSHAKE_TIMEOUT = 30.0
 class ACPError(RuntimeError):
     """An ACP protocol-level failure — a JSON-RPC error reply, or a call that timed
     out waiting on the wire."""
+
+
+class ACPLaunchError(ACPError):
+    """The agent failed to start, or to answer ``initialize`` (SPEC §8C: the only
+    failures on which a CLI client in Auto falls back to the one-shot CLI)."""
+
+
+class ACPExitedError(ACPError):
+    """The agent process ended (its stdout closed) while a request was waiting for
+    its reply — raised at once instead of waiting out a timeout (SPEC §8C)."""
+
+    def __init__(self, method: str) -> None:
+        super().__init__(f"acp: agent exited before replying to {method}")
+        self.method = method
 
 
 class ACPPermissionTimeoutError(ACPError):
@@ -119,6 +137,49 @@ class ACPOptions:
     protocol_version: int = 1
     permission_timeout: float = 5.0
     mode: Optional[str] = None
+    # Bounds initialize / session/new / session/set_mode / model calls (seconds).
+    # None => 30s.
+    request_timeout: Optional[float] = None
+    # session/new mcpServers (SPEC §8C). None/empty => []. An entry with both url and
+    # command is resolved against the agent's advertised mcpCapabilities.http.
+    mcp_servers: Optional[list["ACPMCPServer"]] = None
+    # Sent as initialize clientCapabilities._meta (vendor flags). Opaque.
+    client_caps_meta: Optional[dict[str, Any]] = None
+    # Passed through unchanged after session/new: session/set_config_option
+    # {configId:"model"}, then session/set_model; both failing is a load error.
+    model: Optional[str] = None
+    # Receives the agent's stderr (anything with .write(str)); None => discarded.
+    stderr: Any = None
+    # Decides every session/request_permission: given the request params, return an
+    # optionId; None/"" (or raising) answers with the first reject-kind option, else
+    # "cancelled". None => the first allow-kind option (the historical default).
+    on_permission: Optional[Callable[[dict[str, Any]], Optional[str]]] = None
+    # Observes every raw session/update params (runs on the reader thread: must not
+    # block).
+    on_update: Optional[Callable[[dict[str, Any]], None]] = None
+
+
+@dataclass
+class ACPMCPServer:
+    """One ``session/new`` mcpServers entry (SPEC §8C). ``url`` => the http shape
+    ``{type:"http",name,url,headers:[{name,value}]}``; ``command`` => the stdio shape
+    ``{name,command,args,env:[{name,value}]}`` (no ``type``); both => the agent's
+    advertised ``mcpCapabilities.http`` picks. Header/env values are never logged."""
+
+    name: str
+    url: str = ""
+    headers: dict[str, str] = field(default_factory=dict)
+    command: str = ""
+    args: list[str] = field(default_factory=list)
+    env: dict[str, str] = field(default_factory=dict)
+
+    def wire(self, http_ok: bool) -> dict[str, Any]:
+        def nv(m: dict[str, str]) -> list[dict[str, str]]:
+            return [{"name": k, "value": m[k]} for k in sorted(m)]
+
+        if self.url and (http_ok or not self.command):
+            return {"type": "http", "name": self.name, "url": self.url, "headers": nv(self.headers)}
+        return {"name": self.name, "command": self.command, "args": list(self.args), "env": nv(self.env)}
 
 
 def _content_to_text(content: Any) -> str:
@@ -189,8 +250,13 @@ class ACPClient:
 
         self._id_counter = 0
         self._pending: dict[str, "queue.Queue[dict[str, Any]]"] = {}
+        self._pending_method: dict[str, str] = {}
         self._session_id: Optional[str] = None
         self._closed = False
+        self._exited = False
+        # The exact mcpServers list sent in session/new, and the raw initialize result.
+        self.mcp_servers_sent: list[dict[str, Any]] = []
+        self.initialize_result: dict[str, Any] = {}
 
         self._accum: list[str] = []
 
@@ -216,11 +282,16 @@ class ACPClient:
             except (BrokenPipeError, ValueError, OSError) as exc:
                 raise ACPError(f"acp: failed to write to child process: {exc}") from exc
 
-    def _call(self, method: str, params: dict[str, Any], timeout: float = _HANDSHAKE_TIMEOUT) -> dict[str, Any]:
+    def _call(self, method: str, params: dict[str, Any], timeout: Optional[float] = None) -> dict[str, Any]:
+        if timeout is None:
+            timeout = self._opts.request_timeout or _HANDSHAKE_TIMEOUT
         req_id = self._next_id()
         reply_q: "queue.Queue[dict[str, Any]]" = queue.Queue(maxsize=1)
         with self._state_lock:
+            if self._exited:
+                raise ACPExitedError(method)
             self._pending[req_id] = reply_q
+            self._pending_method[req_id] = method
         self._write({"jsonrpc": "2.0", "id": req_id, "method": method, "params": params})
         try:
             msg = reply_q.get(timeout=timeout)
@@ -228,6 +299,8 @@ class ACPClient:
             with self._state_lock:
                 self._pending.pop(req_id, None)
             raise ACPError(f"acp: {method} timed out after {timeout}s") from None
+        if msg.get("_exited"):
+            raise ACPExitedError(method)
         error = msg.get("error")
         if error:
             raise ACPError(f"acp error {error.get('code')}: {error.get('message')}")
@@ -253,10 +326,13 @@ class ACPClient:
             self._drain_pending_on_eof()
 
     def _drain_pending_on_eof(self) -> None:
+        # Fail fast: every waiting request learns at once that the agent is gone.
         with self._state_lock:
+            self._exited = True
             pending = list(self._pending.items())
             self._pending.clear()
-        eof_error = {"error": {"code": -1, "message": "acp: child process closed the connection"}}
+            self._pending_method.clear()
+        eof_error = {"_exited": True, "error": {"code": -1, "message": "acp: child process closed the connection"}}
         for _req_id, q in pending:
             try:
                 q.put_nowait(eof_error)
@@ -273,6 +349,7 @@ class ACPClient:
             req_id = msg["id"]
             with self._state_lock:
                 q = self._pending.pop(req_id, None)
+                self._pending_method.pop(req_id, None)
             if q is not None:
                 try:
                     q.put_nowait(msg)
@@ -281,19 +358,29 @@ class ACPClient:
             return
 
         if method == "session/update":
-            self._handle_update(msg.get("params") or {})
+            params = msg.get("params") or {}
+            if self._opts.on_update is not None:
+                try:
+                    self._opts.on_update(params)
+                except Exception:  # noqa: BLE001 — an observer never breaks the wire
+                    pass
+            self._handle_update(params)
             return
 
         if method == "session/request_permission" and has_id:
             self._answer_permission(msg)
             return
 
-        # Any other server-initiated request/notification is outside this client's
-        # scope (e.g. fs/read_text_file — this client declares fs capabilities as
-        # false, so a conformant agent won't send one). Reply with an empty result
-        # to any unknown *request* so a strict peer doesn't itself hang on us.
-        if has_id:
-            self._write({"jsonrpc": "2.0", "id": msg["id"], "result": {}})
+        # Any other agent->client REQUEST (fs/*, terminal/* — declared unsupported in
+        # clientCapabilities) is answered with -32601, or the agent waits forever.
+        if has_id and method:
+            self._write(
+                {
+                    "jsonrpc": "2.0",
+                    "id": msg["id"],
+                    "error": {"code": -32601, "message": f"method not found: {method}"},
+                }
+            )
 
     def _handle_update(self, params: dict[str, Any]) -> None:
         update = params.get("update") or {}
@@ -312,11 +399,19 @@ class ACPClient:
         params = request.get("params") or {}
         options = params.get("options") or []
         chosen: Optional[str] = None
-        for option in options:
-            kind = (option or {}).get("kind") or ""
-            if kind.startswith("allow"):
-                chosen = option.get("optionId")
-                break
+        want = "allow"
+        if self._opts.on_permission is not None:
+            try:
+                chosen = self._opts.on_permission(params) or None
+            except Exception:  # noqa: BLE001 — a failing host decision rejects
+                chosen = None
+            want = "reject"
+        if chosen is None:
+            for option in options:
+                kind = (option or {}).get("kind") or ""
+                if isinstance(kind, str) and kind.startswith(want):
+                    chosen = option.get("optionId")
+                    break
         if chosen is not None:
             result = {"outcome": {"outcome": "selected", "optionId": chosen}}
         else:
@@ -326,20 +421,41 @@ class ACPClient:
     # -- handshake -------------------------------------------------------- #
 
     def _connect(self) -> None:
-        self._call(
-            "initialize",
-            {
-                "protocolVersion": self._opts.protocol_version,
-                "clientCapabilities": {"fs": {"readTextFile": False, "writeTextFile": False}},
-            },
-        )
+        caps: dict[str, Any] = {"fs": {"readTextFile": False, "writeTextFile": False}, "terminal": False}
+        if self._opts.client_caps_meta is not None:
+            caps["_meta"] = self._opts.client_caps_meta
+        try:
+            init = self._call("initialize", {"protocolVersion": self._opts.protocol_version, "clientCapabilities": caps})
+        except ACPError as exc:
+            raise ACPLaunchError(f"acp: initialize: {exc}") from exc
+        self.initialize_result = init
+        mcp_caps = (init.get("agentCapabilities") or {}).get("mcpCapabilities") or {}
+        http_ok = mcp_caps.get("http") is True
         cwd = self._opts.cwd or os.getcwd()
         if not os.path.isabs(cwd):
             cwd = os.path.abspath(cwd)
-        result = self._call("session/new", {"cwd": cwd, "mcpServers": []})
+        servers = [s.wire(http_ok) for s in (self._opts.mcp_servers or [])]
+        self.mcp_servers_sent = servers
+        try:
+            result = self._call("session/new", {"cwd": cwd, "mcpServers": servers})
+        except ACPError as exc:
+            raise ACPError(f"acp: session/new: {exc}") from exc
         self._session_id = result.get("sessionId")
         if self._opts.mode:
             self._call("session/set_mode", {"sessionId": self._session_id, "modeId": self._opts.mode})
+        model = self._opts.model
+        if model:
+            # Passed through unchanged: the stable spelling first, then set_model.
+            try:
+                self._call(
+                    "session/set_config_option",
+                    {"sessionId": self._session_id, "configId": "model", "value": model},
+                )
+            except ACPError as e1:
+                try:
+                    self._call("session/set_model", {"sessionId": self._session_id, "modelId": model})
+                except ACPError as e2:
+                    raise ACPError(f"acp: set model {json.dumps(model)}: {e1}; {e2}") from e2
 
     # -- public API --------------------------------------------------------- #
 
@@ -357,7 +473,10 @@ class ACPClient:
             req_id = self._next_id()
             reply_q: "queue.Queue[dict[str, Any]]" = queue.Queue(maxsize=1)
             with self._state_lock:
+                if self._exited:
+                    raise ACPExitedError("session/prompt")
                 self._pending[req_id] = reply_q
+                self._pending_method[req_id] = "session/prompt"
 
             self._write(
                 {
@@ -381,6 +500,8 @@ class ACPClient:
                     f"session/request_permission) after {self._opts.permission_timeout}s"
                 ) from None
 
+            if msg.get("_exited"):
+                raise ACPExitedError("session/prompt")
             error = msg.get("error")
             if error:
                 raise ACPError(f"acp error {error.get('code')}: {error.get('message')}")
@@ -408,20 +529,44 @@ class ACPClient:
                 stdin.close()
             except (BrokenPipeError, ValueError, OSError):
                 pass
+        # The agent runs in its own process group, so an adapter's children (an
+        # `npx …` launch is a tree) end with it.
+        _signal_group(self._proc, signal.SIGTERM)
         try:
-            self._proc.terminate()
-        except OSError:
+            self._proc.wait(timeout=3)
+        except subprocess.TimeoutExpired:
             pass
+        _signal_group(self._proc, getattr(signal, "SIGKILL", signal.SIGTERM))
         try:
             self._proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            try:
-                self._proc.kill()
-                self._proc.wait(timeout=5)
-            except (OSError, subprocess.TimeoutExpired):  # pragma: no cover - best effort
-                pass
+        except (OSError, subprocess.TimeoutExpired):  # pragma: no cover - best effort
+            pass
 
         self._drain_pending_on_eof()
+
+
+def _signal_group(proc: "subprocess.Popen[Any]", sig: int) -> None:
+    """Signal the child's whole process group (POSIX), else the child alone."""
+    try:
+        if os.name == "posix":
+            os.killpg(proc.pid, sig)
+        elif sig == signal.SIGTERM:
+            proc.terminate()
+        else:
+            proc.kill()
+    except (OSError, ProcessLookupError):
+        pass
+
+
+def _pump_stderr(stream: Any, sink: Any) -> None:
+    try:
+        for line in stream:
+            try:
+                sink.write(line)
+            except Exception:  # noqa: BLE001
+                pass
+    except (ValueError, OSError):
+        pass
 
 
 def load_acp(opts: ACPOptions) -> ACPClient:
@@ -438,16 +583,22 @@ def load_acp(opts: ACPOptions) -> ACPClient:
     if not os.path.isabs(cwd):
         cwd = os.path.abspath(cwd)
 
-    proc = subprocess.Popen(
-        [opts.command, *opts.args],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-        cwd=cwd,
-        env=env,
-        text=True,
-        bufsize=1,
-    )
+    try:
+        proc = subprocess.Popen(
+            [opts.command, *opts.args],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE if opts.stderr is not None else subprocess.DEVNULL,
+            cwd=cwd,
+            env=env,
+            text=True,
+            bufsize=1,
+            start_new_session=os.name == "posix",
+        )
+    except OSError as exc:
+        raise ACPLaunchError(f"acp: start {json.dumps(opts.command)}: {exc}") from exc
+    if opts.stderr is not None and proc.stderr is not None:
+        threading.Thread(target=_pump_stderr, args=(proc.stderr, opts.stderr), daemon=True).start()
 
     client = ACPClient(opts, proc)
     try:

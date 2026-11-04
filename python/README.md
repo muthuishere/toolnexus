@@ -157,6 +157,46 @@ for f in res.files:
     print(f["from"], f["mimeType"], f["url"])
 ```
 
+## CLI client: your agent CLI as the model
+
+An agent CLI you already have installed (and pay for) becomes the model behind an ordinary
+client. SPEC §8C, ADR 0037.
+
+```python
+from toolnexus import CliStyles, CliTransports, create_cli_client
+
+tk = await create_toolkit(mcp_config="mcp.json", skills_dir="skills")
+client = create_cli_client(style=CliStyles.OPENCODE, command="opencode", toolkit=tk)
+res = await client.run("What is my badge number?", tk)
+print(client.transport(), res.text)   # "acp" — the agent called your tools itself
+client.close()                        # ends the agent, stops the served toolkit
+```
+
+- **`style`** is the `CliStyles` enum (`CLAUDE`, `CODEX`, `COPILOT`, `OPENCODE`, `DEVIN`,
+  `GEMINI`, `GOOSE`, `CUSTOM`), never a string. A user style comes from
+  `load_cli_style(path_or_json)` as `style_def=`; `CUSTOM` takes `args`, `prompt`, `answer`.
+- **`command` is required** — the binary's path or name. Nothing is embedded or defaulted.
+  `model` is passed to the CLI unchanged.
+- **`transport`** is `CliTransports.AUTO` (default), `ACP` or `CLI`. Auto uses ACP when the
+  style has an ACP launch (or `acp_command`), and falls back to the one-shot CLI only when
+  the agent fails to start or answer `initialize` (`client.fallback_reason()` says why).
+  `client.transport()` is `"auto"` until the first model call.
+- **ACP**: `toolkit` is served on `127.0.0.1:<ephemeral>/mcp` behind a per-session bearer
+  token; `skill` is served as `load_skill`; `before_tool`/`after_tool` hooks run at that
+  server; only permission requests for the served tools are allowed, the agent's own
+  shell/edit/fetch are rejected. claude has no ACP mode of its own: set
+  `acp_command=["npx", "-y", "@agentclientprotocol/claude-agent-acp@0.100.0"]`.
+- **One-shot CLI**: the conversation goes in under a fixed preamble, the reply is parsed as
+  an OpenAI-shaped envelope, and tool calls run in the toolnexus loop.
+- Errors are `CliError` with pinned messages (`cli: command not found: <bin>`,
+  `cli: exit <code>: <stderr>`, `cli: empty reply`, `cli: no output file`,
+  `cli: timed out after <ms>ms`). Default call timeout 300000 ms (`call_timeout_ms`).
+  `usage` is zero. Streaming is refused (Python: on both transports — the in-process seam
+  does not stream).
+- `python -m toolnexus.cli_acp mcp-bridge <url>` is the stdio⇄HTTP bridge for agents that
+  accept only stdio MCP servers (pass it as `bridge_command`; default `toolnexus mcp-bridge`
+  when the Go CLI is on PATH). Live check: `examples/cli_client.py`.
+
 ## Documentation
 
 Everything else — the full surface, with runnable examples — lives on the docs site:
