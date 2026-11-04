@@ -131,7 +131,7 @@ the style (`{{prompt}}`, `{{file}}`, `{{out}}`, `{{model}}`; optional groups kep
 model) and spawned without a shell, in its own process group. The reply SHALL be parsed by the
 six-step parser (trim; one fence; whole object; else first `{` to last `}`; unwrap
 `choices[0].message`/`message`; `tool_calls` win, else `content`); anything else is content
-verbatim. Tool calls SHALL be executed by the toolnexus loop. Streaming SHALL be refused.
+verbatim. Tool calls SHALL be executed by the toolnexus loop. A streaming call SHALL NOT error: it SHALL run the turn and emit the loop's tool events, the whole answer as one text chunk, then done.
 
 #### Scenario: Tool round trip
 - **WHEN** the CLI replies with a fenced `tool_calls` envelope and then, given the tool result, a `content` envelope
@@ -140,6 +140,16 @@ verbatim. Tool calls SHALL be executed by the toolnexus loop. Streaming SHALL be
 #### Scenario: Pinned errors
 - **WHEN** the CLI is missing, exits non-zero, prints nothing, writes no `out` file, or exceeds the call timeout (default 300000 ms)
 - **THEN** the error is `cli: command not found: <bin>`, `cli: exit <code>: <stderr ≤1000 code points>`, `cli: empty reply`, `cli: no output file`, or `cli: timed out after <ms>ms`, and temp files are removed
+
+### Requirement: Streaming a CLI client degrades to a non-incremental stream
+
+`stream` / `askStream` on a CLI client SHALL NOT fail because the transport cannot stream. On the
+one-shot transport, and on ACP where the port's ACP client does not stream, the client SHALL run
+the turn and emit `tool_call`/`tool_result` events, the whole answer as one `text` event, then `done`.
+
+#### Scenario: one-shot stream with a tool call
+- **WHEN** a one-shot CLI client streams a prompt whose reply calls a tool, then answers
+- **THEN** the events are `tool_call`, `tool_result`, one `text` holding the whole answer, and `done`, with no `error`
 
 ### Requirement: The model passes through unchanged
 

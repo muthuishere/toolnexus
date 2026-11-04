@@ -63,8 +63,12 @@ tool-call channel.
 8. **Model selection.** `model` fills `{{model}}`. A model set on a style without `{{model}}` is a
    construction error (`cli: style "goose" takes no model`); `{{model}}` outside an optional group
    with no model set is also an error.
-9. **Streaming.** Refused, exactly as for any in-process `generate`: a one-shot CLI returns a
-   whole answer, and a single-chunk stream would be a fake one.
+9. **Streaming.** ~~Refused~~ — revised 2026-11-05 on consumer feedback (Spot, codex style live):
+   a caller that streams every client must not crash on a CLI client. Streaming **degrades to a
+   non-incremental stream**: the turn runs normally, the loop's tool events are emitted, the whole
+   answer arrives as one text chunk, then done. Honest rather than fake: no claim of incremental
+   deltas is made, and the documented shape is one chunk. Go's ACP transport still streams
+   incrementally.
 10. **Errors and timeouts.** Pinned messages: `cli: command not found: <bin>`, `cli: timed out
     after <ms>ms` (default 300000 ms — owner 2026-11-04; the whole process group is killed), `cli: exit <code>:
     <stderr, capped at 1000 code points>`, `cli: no output file`, `cli: empty reply`. Failures are

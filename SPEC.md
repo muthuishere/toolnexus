@@ -2674,8 +2674,8 @@ Idiom (behaviour identical; constructor and method spelling follow each port):
 `createCliClient({ style, command, model?, transport?, toolkit?, acpCommand?, bridgeCommand?,
 args?, prompt?, answer?, env?, callTimeoutMs?, cwd?, …every in-process client option })` returns an
 ordinary client (§8, built on the in-process seam) plus `close()` and `transport()`. Status: **all
-eight ports**. Streaming over the ACP transport is Go-only (js/python/java/csharp/elixir/clojure/rust
-refuse it); ports without process groups (java, csharp, elixir, clojure) kill the process tree.
+eight ports**. Streaming never errors: Go streams ACP incrementally; every other case is a non-incremental
+stream (see below). Ports without process groups (java, csharp, elixir, clojure) kill the process tree.
 
 - **`style`** is a closed enum, never a string: `CliStyles.Claude | Codex | Copilot | Opencode |
   Devin | Gemini | Goose | Custom` (Go: typed `CliStyle` values on a `CliStyles` struct; TS/Java/
@@ -2735,8 +2735,7 @@ refuse it); ports without process groups (java, csharp, elixir, clojure) kill th
   the span first `{`…last `}` (trailing text after a complete object is a failure); unwrap
   `choices[0].message` or `message`; non-empty `tool_calls` (flat or `{function:{}}`, string or object
   `arguments`) win; else `content`; anything else ⇒ the raw text as content.
-- Tool calls run in the toolnexus loop (hooks, MCP, skills, suspension all apply). Streaming is
-  refused (`cli: streaming is not supported by the one-shot CLI transport; use Run`).
+- Tool calls run in the toolnexus loop (hooks, MCP, skills, suspension all apply). Streaming is not refused: `stream`/`askStream` run the turn normally and emit a **non-incremental** stream — the loop's `tool_call`/`tool_result` events as they happen, the whole answer as one `text` chunk, then `done` (a `usage` event, zero, may precede `done`). Same on the ACP transport in ports whose ACP client does not stream incrementally (all but Go).
 - Pinned errors: `cli: command not found: <bin>` · `cli: exit <code>: <stderr, ≤1000 code points>`
   (`cli: exit <code>` when stderr is empty) · `cli: empty reply` · `cli: no output file` ·
   `cli: timed out after <ms>ms`. Temp files are removed on every path.

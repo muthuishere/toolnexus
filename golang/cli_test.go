@@ -528,21 +528,32 @@ func TestCliPinnedErrors(t *testing.T) {
 	}
 }
 
-func TestCliOneShotRefusesStreaming(t *testing.T) {
-	c, err := CreateCliClient(fakeCLIOpts("x"))
+func TestCliOneShotStreamsNonIncrementally(t *testing.T) {
+	c, err := CreateCliClient(fakeCLIOpts("tool"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	ch, err := c.Stream(context.Background(), "hi", nil)
-	if err == nil {
-		for ev := range ch {
-			if ev.Type == "error" {
-				err = ev.Err
-			}
+	defer c.Close()
+	ch, err := c.Stream(context.Background(), "What is my badge number?", cliBadgeToolkit(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var types []string
+	text := ""
+	for ev := range ch {
+		if ev.Type == "error" {
+			t.Fatalf("stream must not error: %v", ev.Err)
+		}
+		if ev.Type == "text" {
+			text += ev.Delta
+		}
+		if ev.Type != "usage" && (len(types) == 0 || types[len(types)-1] != ev.Type) {
+			types = append(types, ev.Type)
 		}
 	}
-	if err == nil || !strings.Contains(err.Error(), "streaming is not supported") {
-		t.Fatalf("one-shot stream must be refused, got %v", err)
+	got := strings.Join(types, ",")
+	if !strings.Contains(got, "tool_call,tool_result") || !strings.HasSuffix(got, "text,done") || !strings.Contains(text, "BADGE-77Q") {
+		t.Fatalf("events %s text %q", got, text)
 	}
 }
 

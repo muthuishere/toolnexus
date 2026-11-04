@@ -346,9 +346,9 @@ func (c *CliClient) generate(ctx context.Context, req InProcessRequest, emit fun
 	if s != nil {
 		return s.generate(ctx, req, emit)
 	}
-	if stream, _ := req.Body["stream"].(bool); stream {
-		return InProcessResponse{}, errors.New("cli: streaming is not supported by the one-shot CLI transport; use Run")
-	}
+	// Streaming degrades to a non-incremental stream: the whole reply comes
+	// back as one response; the loop emits its tool events and the answer as
+	// a single text chunk, then done.
 	prompt := RenderCliPrompt(req.Messages, req.Tools)
 	text, err := c.invoke(ctx, prompt)
 	if err != nil {
