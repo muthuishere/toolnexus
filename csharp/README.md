@@ -87,6 +87,32 @@ Batteries (§8B): `ToolGuardClassifier`, `ToolRelevanceClassifier`, `SkillReleva
 `CheckAsync(...)` standalone or `AsHook(next)` as a client hook. A `BeforeLLM` override may carry
 `Model` for that turn only (the opt-in `ModelRouterClassifier` sets it).
 
+## Classifier backends, images, cache and helpers
+
+Proposed defaults, owner to confirm (`openspec/changes/add-classifier-backends`, SPEC.md §8B).
+
+- **Backends** are data: `ClassifierBackends.Table` has `TypeSafe` (default), `OpenRouter`
+  (`typesafe/jev-1.14`), `Cloudflare` (`/ai/run` envelope; `${CLOUDFLARE_ACCOUNT_ID}` in the URL
+  expands at call time, and errors name the unexpanded URL), `Vercel` and `Custom` (needs `BaseUrl`
+  and `Supports`). `Supports = new ClassifierSupports(Images: true)` overrides the image column.
+  `WithBackend("name")` parses the wire name.
+- **Images**: put a `ContentPart` image (PNG/JPEG, inline data) anywhere in the state. It is sent
+  as an asset and a reference string; a state with no parts is sent verbatim. A backend without
+  image support throws `ClassifierUnsupportedException` before any request; the 16 MiB / 32 MiB and
+  280–1568 px limits are checked client-side. Images are never resized.
+- **Value builders**: `await c.State(v).EvaluateAsync(Judge.Noul(...), ...)` fails closed on an
+  invalid reply; `await c.States(a, b, c).EvaluateAsync(...)` returns one `BatchResult`
+  (`Decision` or `Error`) per state, in order, at most 16 in flight.
+- **Cache** (off by default): `Cache = new MemoryCache(TimeSpan.FromHours(1), 1000)` or your own
+  `IClassifierCache` (async `GetAsync`/`SetAsync`). Per request, keyed on the served model, only
+  valid replies stored; a hit sets `Decision.Cached` and the metric's `Cached`.
+- **Helpers**: `Classifier.ValidateDecision(qs, d)` (returns the error or null),
+  `Thresholds` (inclusive 0.8 / 0.2 / 0.6, next to the unchanged `Bands`),
+  `Classifier.ChunkQuestions(qs, size)`, `Judge.Raw(name, type, instructions, criteria?)` for
+  unmodelled question types (answers decode to `RawAnswer`).
+- `classifier.evaluate` events carry `Questions`, `QuestionsHash` and `Cached`.
+- `ClassifierStyle.Llm` is `[Obsolete]`: it still works unchanged for at least one minor release.
+
 ## API key by host (BREAKING in 0.22.0)
 
 With no `ApiKey`, the client reads `ApiKeyEnv` (the NAME of an env var) if set, else ONLY the env

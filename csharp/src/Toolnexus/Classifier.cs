@@ -17,7 +17,7 @@ namespace Toolnexus;
 // control.
 
 /// <summary>Thrown by every classifier failure path. Never carries a credential value.</summary>
-public sealed class ClassifierException : Exception
+public class ClassifierException : Exception
 {
     public ClassifierException(string message) : base(message) { }
     public ClassifierException(string message, Exception inner) : base(message, inner) { }
@@ -30,7 +30,10 @@ public enum ClassifierStyle
     SystemOne,
 
     /// <summary>The questions rendered as ONE structured-output call on a §8 <see cref="LlmClient"/>.
-    /// Reports <c>Calibrated = false</c> unless the backend read token probabilities.</summary>
+    /// Reports <c>Calibrated = false</c> unless the backend read token probabilities.
+    /// <para><b>Deprecated</b> (ADR 0038 D3, PD-15): System One is the single product wire. It keeps
+    /// working byte-identically as an alias for at least one minor release; no runtime warning.</para></summary>
+    [Obsolete("ClassifierStyle.Llm is deprecated (ADR 0038): System One is the single product wire. It keeps working unchanged for at least one minor release.")]
     Llm,
 
     /// <summary>The host's own <see cref="ClassifierOptions.Evaluate"/>.</summary>
@@ -43,9 +46,10 @@ public enum ClassifierStyle
 // ---------------------------------------------------------------- questions
 
 /// <summary>
-/// One pre-declared question. The set is CLOSED — the only subclasses are
-/// <see cref="NoulQuestion"/>, <see cref="ChoiceQuestion"/> and <see cref="ScoreQuestion"/>,
-/// enforced by the internal constructor. The three shapes differ only in what <c>criteria</c>
+/// One pre-declared question. The modelled subclasses are <see cref="NoulQuestion"/>,
+/// <see cref="ChoiceQuestion"/> and <see cref="ScoreQuestion"/>; <see cref="RawQuestion"/> is the
+/// OPEN end of the union (§8B) for a System One type the library does not model yet. Subclasses
+/// stay inside this assembly (the internal constructor). The three shapes differ only in what <c>criteria</c>
 /// is on the wire (absent, an object, or an ordered array), so the abstraction is "give me
 /// your wire form", not a field set.
 /// </summary>
@@ -169,7 +173,8 @@ public abstract record DecisionAnswer
 {
     internal DecisionAnswer() { }
 
-    /// <summary>The wire discriminator: <c>"noul"</c> | <c>"choice"</c> | <c>"score"</c>.</summary>
+    /// <summary>The wire discriminator: <c>"noul"</c> | <c>"choice"</c> | <c>"score"</c>, or a
+    /// <see cref="RawAnswer"/>'s own type.</summary>
     public abstract string AnswerType { get; }
 }
 
@@ -254,6 +259,10 @@ public sealed record Decision
     /// </summary>
     public bool Calibrated { get; init; } = true;
 
+    /// <summary>True when the decision came from <see cref="ClassifierOptions.Cache"/> and no request
+    /// was sent. Never on the wire.</summary>
+    public bool Cached { get; init; }
+
     /// <summary>Typed read of a <c>noul</c> answer. Throws on a wrong-type or absent key, so a
     /// caller never casts by hand and a mistake is never a silent default.</summary>
     public NoulAnswer Noul(string key) => Typed<NoulAnswer>(key, "noul");
@@ -336,7 +345,11 @@ public sealed record Decision
                     Confidence = Num(el, "confidence") ?? 0,
                 };
             default:
-                throw new ClassifierException($"classifier: answer \"{key}\": unknown type \"{type}\"");
+                // The union is OPEN (§8B): a type the library does not model (e.g. Jev 1.14 "box")
+                // decodes to a RawAnswer instead of failing the whole decision.
+                if (el.ValueKind != JsonValueKind.Object)
+                    throw new ClassifierException($"classifier: answer \"{key}\": not an object");
+                return new RawAnswer { Type = type ?? "", Value = el.Clone() };
         }
     }
 
@@ -395,8 +408,20 @@ public enum ClassifierBackend
     /// <summary>api.typesafe.ai — <c>jev-latest</c>, <c>TYPESAFE_API_KEY</c>.</summary>
     TypeSafe,
 
-    /// <summary>openrouter.ai — <c>typesafe/jev-1.13</c>, <c>OPENROUTER_API_KEY</c>.</summary>
+    /// <summary>openrouter.ai — <c>typesafe/jev-1.14</c>, <c>OPENROUTER_API_KEY</c>.</summary>
     OpenRouter,
+
+    /// <summary>Cloudflare Workers AI's <c>/ai/run</c> envelope — <c>typesafe/jev</c>,
+    /// <c>CLOUDFLARE_JEV_API_KEY</c>; <c>${CLOUDFLARE_ACCOUNT_ID}</c> expands at call time.</summary>
+    Cloudflare,
+
+    /// <summary>Vercel AI Gateway's TypeSafe-compatible System One route — <c>typesafe-ai/jev</c>,
+    /// <c>AI_GATEWAY_API_KEY</c>.</summary>
+    Vercel,
+
+    /// <summary>A self-hosted System One endpoint. Requires <see cref="ClassifierOptions.BaseUrl"/>
+    /// AND <see cref="ClassifierOptions.Supports"/>: the library cannot know what it takes.</summary>
+    Custom,
 }
 
 public sealed class ClassifierOptions
@@ -490,6 +515,20 @@ public sealed class ClassifierOptions
     /// <summary>The recorded corpus. <see cref="ClassifierStyle.Static"/> only.</summary>
     public IReadOnlyList<RecordedDecision>? Decisions { get; set; }
 
+    /// <summary>Overrides the backend table's support row for this classifier. Required with
+    /// <see cref="ClassifierBackend.Custom"/>.</summary>
+    public ClassifierSupports? Supports { get; set; }
+
+    /// <summary>Opt-in answer cache (§8B). Null ⇒ no caching and nothing global. Consulted by
+    /// <see cref="ClassifierStyle.SystemOne"/> only; stores only replies that pass
+    /// <see cref="Classifier.ValidateDecision"/>. See <see cref="MemoryCache"/>.</summary>
+    public IClassifierCache? Cache { get; set; }
+
+    /// <summary>Sets <see cref="Backend"/> by its wire name (<c>"typesafe"</c>, <c>"openrouter"</c>,
+    /// <c>"cloudflare"</c>, <c>"vercel"</c>, <c>"custom"</c>); an unknown name throws, listing the five.</summary>
+    public ClassifierOptions WithBackend(string name) { Backend = ClassifierBackends.Parse(name); return this; }
+    public ClassifierOptions WithSupports(ClassifierSupports v) { Supports = v; return this; }
+    public ClassifierOptions WithCache(IClassifierCache v) { Cache = v; return this; }
     public ClassifierOptions WithStyle(ClassifierStyle v) { Style = v; return this; }
     public ClassifierOptions WithBackend(ClassifierBackend v) { Backend = v; return this; }
     public ClassifierOptions WithBaseUrl(string v) { BaseUrl = v; return this; }
@@ -513,7 +552,7 @@ public sealed class ClassifierOptions
 // ---------------------------------------------------------------- classifier
 
 /// <summary>The whole seam: one verb, <see cref="EvaluateAsync"/>.</summary>
-public sealed class Classifier
+public sealed partial class Classifier
 {
     /// <summary>The System One endpoint base.</summary>
     public const string DefaultBaseUrl = "https://api.typesafe.ai/v1";
@@ -527,7 +566,7 @@ public sealed class Classifier
     /// <summary>(ADR 0027 D1) The OpenRouter preset's base, model and credential env-var name.
     /// <c>jev-latest</c> is TypeSafe's alias and is NOT servable here — the pinned spelling is.</summary>
     public const string OpenRouterBaseUrl = "https://openrouter.ai/api/v1";
-    public const string OpenRouterModel = "typesafe/jev-1.13";
+    public const string OpenRouterModel = "typesafe/jev-1.14";
     public const string OpenRouterApiKeyEnv = "OPENROUTER_API_KEY";
 
     /// <summary>Bounds ONE request (a classifier has no loop to bound).</summary>
@@ -557,6 +596,9 @@ public sealed class Classifier
     private readonly int _retries;
     private readonly long _retryBaseMs;
     private readonly HttpClient _http;
+    private readonly ClassifierBackend _backend;
+    private readonly ClassifierBackendPreset _preset;
+    private readonly ClassifierSupports _supports;
     private readonly Dictionary<string, string> _static = new(StringComparer.Ordinal);
 
     // The once-per-question-key set for the degenerate-criteria warning, so a per-turn judge does
@@ -576,15 +618,17 @@ public sealed class Classifier
     {
         _opts = options ?? new ClassifierOptions();
         // (ADR 0027 D1) The preset fills the three-as-a-unit; an explicit option still wins.
-        var (presetBase, presetModel, presetKeyEnv) = _opts.Backend switch
-        {
-            ClassifierBackend.TypeSafe => (DefaultBaseUrl, DefaultModel, DefaultApiKeyEnv),
-            ClassifierBackend.OpenRouter => (OpenRouterBaseUrl, OpenRouterModel, OpenRouterApiKeyEnv),
-            _ => (DefaultBaseUrl, DefaultModel, DefaultApiKeyEnv),
-        };
-        _baseUrl = string.IsNullOrEmpty(_opts.BaseUrl) ? presetBase : _opts.BaseUrl!;
-        _model = string.IsNullOrEmpty(_opts.Model) ? presetModel : _opts.Model!;
-        _apiKeyEnv = string.IsNullOrEmpty(_opts.ApiKeyEnv) ? presetKeyEnv : _opts.ApiKeyEnv!;
+        _backend = _opts.Backend == ClassifierBackend.Unset ? ClassifierBackend.TypeSafe : _opts.Backend;
+        if (!ClassifierBackends.Table.TryGetValue(_backend, out var preset))
+            throw new ClassifierException(ClassifierBackends.UnknownBackendMessage(_opts.Backend.ToString()));
+        _preset = preset;
+        if (_backend == ClassifierBackend.Custom && _opts.Style == ClassifierStyle.SystemOne
+            && (string.IsNullOrEmpty(_opts.BaseUrl) || _opts.Supports == null))
+            throw new ClassifierException("classifier: backend \"custom\" requires baseUrl and supports");
+        _baseUrl = string.IsNullOrEmpty(_opts.BaseUrl) ? preset.BaseUrl ?? "" : _opts.BaseUrl!;
+        _model = string.IsNullOrEmpty(_opts.Model) ? preset.Model : _opts.Model!;
+        _apiKeyEnv = string.IsNullOrEmpty(_opts.ApiKeyEnv) ? preset.ApiKeyEnv : _opts.ApiKeyEnv!;
+        _supports = _opts.Supports ?? preset.Supports?.Invoke(_model) ?? new ClassifierSupports();
         // Fail at CONSTRUCTION on the one mismatch we know about, naming the right spelling. The
         // cost of not doing this is a 404 at the first live call, in production, saying nothing.
         if (_model == DefaultModel && IsOpenRouter(_baseUrl))
@@ -603,7 +647,9 @@ public sealed class Classifier
         {
             case ClassifierStyle.SystemOne:
                 break;
+#pragma warning disable CS0618 // the deprecated alias still has to work
             case ClassifierStyle.Llm:
+#pragma warning restore CS0618
                 if (_opts.Client == null)
                     throw new ClassifierException("classifier: style \"llm\" requires Client");
                 break;
@@ -651,10 +697,26 @@ public sealed class Classifier
     /// The whole contract: a state plus typed questions in, a <see cref="Decision"/> out.
     /// Questions are INDEPENDENT — one answer is never context for another.
     /// </summary>
-    public async Task<Decision> EvaluateAsync(object? state, IReadOnlyDictionary<string, Question> questions,
+    public Task<Decision> EvaluateAsync(object? state, IReadOnlyDictionary<string, Question> questions,
         CancellationToken cancellationToken = default)
+        => EvaluateCoreAsync(state, questions, validate: false, cancellationToken);
+
+    /// <summary>The one path. <paramref name="validate"/> = fail closed on
+    /// <see cref="ValidateDecision"/> (the <see cref="State"/> builders); plain
+    /// <see cref="EvaluateAsync"/> keeps its old behaviour.</summary>
+    internal async Task<Decision> EvaluateCoreAsync(object? state, IReadOnlyDictionary<string, Question> questions,
+        bool validate, CancellationToken cancellationToken)
     {
         var started = DateTimeOffset.UtcNow;
+        // L1: count + hash of the canonical request on every evaluate event.
+        var qCount = questions?.Count ?? 0;
+        var qHash = "";
+        if (questions != null)
+        {
+            try { qHash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(CanonicalRequest(_model, questions))).ToLowerInvariant(); }
+            catch (Exception) { qHash = ""; }
+        }
+        Exception Fail(DateTimeOffset s, Exception e) => FailEvent(s, e, qCount, qHash);
         if (questions == null || questions.Count == 0)
             throw Fail(started, new ClassifierException("classifier: no questions to evaluate"));
 
@@ -680,9 +742,13 @@ public sealed class Classifier
             {
                 ClassifierStyle.Custom => await _opts.Evaluate!(state, questions, cancellationToken).ConfigureAwait(false),
                 ClassifierStyle.Static => EvaluateStatic(state, questions),
+#pragma warning disable CS0618 // the deprecated alias still has to work
                 ClassifierStyle.Llm => await EvaluateLlmAsync(state, questions, cancellationToken).ConfigureAwait(false),
-                _ => await EvaluateSystemOneAsync(state, questions, cancellationToken).ConfigureAwait(false),
+#pragma warning restore CS0618
+                _ => await EvaluateWireAsync(state, questions, validate, cancellationToken).ConfigureAwait(false),
             };
+            if (validate && _opts.Style != ClassifierStyle.SystemOne && ValidateDecision(questions, d) is { } verr)
+                throw verr;
         }
         catch (Exception e)
         {
@@ -697,6 +763,9 @@ public sealed class Classifier
             Ms = (long)(DateTimeOffset.UtcNow - started).TotalMilliseconds,
             PromptTokens = d.Usage.InputTokens,
             CompletionTokens = d.Usage.OutputTokens,
+            Questions = qCount,
+            QuestionsHash = qHash,
+            Cached = d.Cached,
         });
         return d;
     }
@@ -960,21 +1029,18 @@ public sealed class Classifier
 
     // ---------------------------------------------------------------- backends
 
-    /// <summary>
-    /// Assembles the request: the canonical model + questions, plus state VERBATIM as the host
-    /// supplied it, then the §8 Gap 1 pipeline in §8 order
-    /// (base → RequestParams merge → BodyTransform → marshal).
-    /// </summary>
-    private byte[] Body(object? state, IReadOnlyDictionary<string, Question> questions)
+    /// <summary>Identifies a recorded decision by the canonical request AND the state. See
+    /// <see cref="RecordedDecision"/> for why the state is load-bearing here.</summary>
+    private static string StaticKey(string model, object? state, IReadOnlyDictionary<string, Question> questions)
+        => CanonicalRequestString(model, questions) + "\0" + CanonicalJsonString(state);
+
+    internal ClassifierBackend BackendName => _backend;
+    internal ClassifierBackendPreset Preset => _preset;
+    internal ClassifierSupports SupportsRow => _supports;
+    internal IClassifierCache? CacheOpt => _opts.Cache;
+
+    internal void ApplyBodyPipeline(ref IDictionary<string, object?> body)
     {
-        var qs = new Dictionary<string, object?>();
-        foreach (var (k, q) in questions) qs[k] = q.Wire();
-        IDictionary<string, object?> body = new Dictionary<string, object?>
-        {
-            ["model"] = _model,
-            ["questions"] = qs,
-            ["state"] = state,
-        };
         if (_opts.RequestParams != null)
             foreach (var (k, v) in _opts.RequestParams) body[k] = v; // a RequestParams key WINS
         if (_opts.BodyTransform != null)
@@ -982,13 +1048,7 @@ public sealed class Classifier
             var output = _opts.BodyTransform(body);
             if (output != null) body = output;
         }
-        return CanonicalJsonBytes(body);
     }
-
-    /// <summary>Identifies a recorded decision by the canonical request AND the state. See
-    /// <see cref="RecordedDecision"/> for why the state is load-bearing here.</summary>
-    private static string StaticKey(string model, object? state, IReadOnlyDictionary<string, Question> questions)
-        => CanonicalRequestString(model, questions) + "\0" + CanonicalJsonString(state);
 
     private Decision EvaluateStatic(object? state, IReadOnlyDictionary<string, Question> questions)
     {
@@ -998,9 +1058,6 @@ public sealed class Classifier
         return Decision.FromJson(raw);
     }
 
-    private async Task<Decision> EvaluateSystemOneAsync(object? state, IReadOnlyDictionary<string, Question> questions,
-        CancellationToken cancellationToken)
-        => Decision.FromJson(await PostAsync(Body(state, questions), cancellationToken).ConfigureAwait(false));
 
     /// <summary>
     /// The one POST, with the §8 retry budget — reusing the client's
@@ -1011,9 +1068,14 @@ public sealed class Classifier
     /// failure names the status and the endpoint and nothing else, and a 401/403 body is never
     /// echoed back (a gateway happily reflects a bad Authorization header into its own 401 text).
     /// </summary>
-    private async Task<string> PostAsync(byte[] payload, CancellationToken cancellationToken)
+    internal async Task<string> PostAsync(byte[] payload, IReadOnlyDictionary<string, string>? extraHeaders,
+        CancellationToken cancellationToken)
     {
-        var endpoint = _baseUrl.TrimEnd('/') + "/systemone";
+        // endpoint is what errors name: the CONFIGURED base, ${ENV} unexpanded, so an account id in
+        // a templated URL never reaches an error. url is what is dialled, expanded at call time.
+        var endpoint = _baseUrl.TrimEnd('/');
+        if (_preset.Wire != ClassifierBackends.WireCloudflare) endpoint += "/systemone";
+        var url = ClassifierBackends.ExpandEnvRefs(endpoint);
         var classify = _opts.OnError ?? (info => info.Retryable ? LlmClient.Tier.Retry : LlmClient.Tier.Fail);
 
         for (var attempt = 0; ; attempt++)
@@ -1028,7 +1090,7 @@ public sealed class Classifier
             timeoutCts.CancelAfter(_timeout);
             try
             {
-                using var req = new HttpRequestMessage(HttpMethod.Post, endpoint)
+                using var req = new HttpRequestMessage(HttpMethod.Post, url)
                 {
                     Content = new ByteArrayContent(payload),
                 };
@@ -1037,7 +1099,12 @@ public sealed class Classifier
                 var key = Environment.GetEnvironmentVariable(_apiKeyEnv);
                 if (!string.IsNullOrEmpty(key))
                     req.Headers.TryAddWithoutValidation("Authorization", "Bearer " + key);
-                foreach (var (hk, hv) in McpSource.ExpandEnvHeaders(_opts.Headers) ?? new Dictionary<string, string>())
+                var hostHeaders = McpSource.ExpandEnvHeaders(_opts.Headers) ?? new Dictionary<string, string>();
+                if (extraHeaders != null)
+                    foreach (var (hk, hv) in extraHeaders)
+                        if (!hostHeaders.Keys.Any(k => string.Equals(k, hk, StringComparison.OrdinalIgnoreCase)))
+                            req.Headers.TryAddWithoutValidation(hk, hv); // host headers win
+                foreach (var (hk, hv) in hostHeaders)
                     req.Headers.TryAddWithoutValidation(hk, hv); // ${ENV_VAR} expanded at call time
 
                 using var res = await _http.SendAsync(req, timeoutCts.Token).ConfigureAwait(false);
@@ -1138,7 +1205,7 @@ public sealed class Classifier
 
     /// <summary>Emits the terminal error event and returns the exception to throw, so every failure
     /// path is one statement and none can forget the metric.</summary>
-    private Exception Fail(DateTimeOffset started, Exception e)
+    private Exception FailEvent(DateTimeOffset started, Exception e, int questions, string questionsHash)
     {
         Emit(new MetricEvent
         {
@@ -1147,6 +1214,8 @@ public sealed class Classifier
             Status = "error",
             Ms = (long)(DateTimeOffset.UtcNow - started).TotalMilliseconds,
             Error = e.Message,
+            Questions = questions,
+            QuestionsHash = questionsHash,
         });
         return e;
     }

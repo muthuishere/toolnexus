@@ -91,6 +91,12 @@ public static class Judge
     public static Ask Score(string name, string instructions, params string[] levels)
         => new(name, new ScoreQuestion { Instructions = instructions, Criteria = levels });
 
+    /// <summary>A raw question: a System One type the library does not model (e.g. <c>box</c>), sent
+    /// as written. <paramref name="criteria"/> is omitted when null. Its answer decodes to a
+    /// <see cref="RawAnswer"/>.</summary>
+    public static Ask Raw(string name, string type, string instructions, object? criteria = null)
+        => new(name, new RawQuestion { Type = type, Instructions = instructions, Criteria = criteria });
+
     /// <summary>The ordered list to the §8B question map. A duplicate name throws, naming it.</summary>
     public static Dictionary<string, Question> Questions(IEnumerable<Ask> asks)
     {

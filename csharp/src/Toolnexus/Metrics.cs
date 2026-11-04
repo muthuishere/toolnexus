@@ -52,6 +52,18 @@ public sealed record MetricEvent
     /// Null on every other event. Neither classifier event is folded into the Prometheus registry,
     /// so <see cref="LlmClient.Metrics"/> text is unchanged by this field.</summary>
     public string? Question { get; init; }
+
+    /// <summary>L1: the number of questions a <c>"classifier.evaluate"</c> asked. 0 elsewhere.</summary>
+    public int Questions { get; init; }
+
+    /// <summary>L1: sha256 hex of <c>CanonicalRequest(model, questions)</c> of a
+    /// <c>"classifier.evaluate"</c> (the fixtures' <c>canonicalSha256</c>); empty when the questions
+    /// could not be encoded. Null on every other event.</summary>
+    public string? QuestionsHash { get; init; }
+
+    /// <summary>True on a <c>"classifier.evaluate"</c> answered from the classifier cache, with no
+    /// request sent.</summary>
+    public bool Cached { get; init; }
     // llm + tool + run
     public long Ms { get; init; }
 
