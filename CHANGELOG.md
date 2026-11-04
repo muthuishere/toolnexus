@@ -8,8 +8,7 @@ GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
 
 ## Unreleased
 
-**MCP serve you can mount yourself, with auth, per-request tools and a confirm gate (golang only so
-far).** `Serve(addr, {mcp})` owns its port and shows everyone the same tools, so a host that wanted
+**MCP serve you can mount yourself, with auth, per-request tools and a confirm gate, in all eight ports.** `Serve(addr, {mcp})` owns its port and shows everyone the same tools, so a host that wanted
 an MCP endpoint behind its own login had to write its own MCP server (#139). Now
 `tk.MCPHandler(cfg)` returns an `http.Handler` to mount on your own mux, behind your own TLS, CORS
 and OAuth, with plain hooks:
@@ -36,9 +35,27 @@ and OAuth, with plain hooks:
   arguments come back as an error result, not a protocol error). 2025-03-26 is not accepted (it allows
   batches, which the handler rejects) and 2026-07-28 waits for #134 — listing them does nothing.
 
-toolnexus has no tenant, role or storage concepts here: those stay in your hooks (ADR 0039). `Serve(addr, {mcp})` is unchanged. **Not done:** js,
-python, java, csharp, elixir, clojure and rust (tracked in `openspec/changes/add-mcp-serve-handler`);
-elicitation answers need sticky routing when you run several replicas.
+Every port ships it in its own native handler shape: Go `http.Handler`, JS Node request listener
+(`toolkit.mcpHandler`), Python ASGI app (`toolkit.mcp_handler`), Java JDK `HttpHandler`
+(`toolkit.mcpHandler`; give the `HttpServer` a multi-threaded executor), C# `McpHttpHandler` over
+`HttpListenerContext` or a host-supplied `McpHttpExchange` (`toolkit.McpHandler`), Elixir Plug
+(`Toolnexus.mcp_handler/2`), Clojure Ring handler (`toolnexus.mcp-handler/mcp-handler`; SSE bodies are
+lazy seqs, so the Ring adapter must stream seq bodies), Rust hyper `Service` (`toolkit.mcp_handler`,
+`serve` feature). A shared fixture, `conformance/mcp_handler/cases.json`, pins the wire and every
+port's suite replays it.
+
+Port notes: outside Go, `beforeCall` receives the parsed arguments object rather than raw JSON bytes.
+The Java, Elixir and Clojure GET streams send a `: keepalive` comment every 15 s (Java and Elixir) or
+end on session DELETE (Clojure), because those servers cannot see a client disconnect. In Elixir a
+confirm timeout reads "confirmation failed: timeout"; the other ports use Go's "context deadline
+exceeded". The official MCP Java SDK 2.0.0 client sends `MCP-Protocol-Version: 2025-11-25` on later
+requests even after it negotiated 2025-06-18, so it needs `supportedProtocolVersions(List.of("2025-06-18"))`
+against a default handler.
+
+toolnexus has no tenant, role or storage concepts here: those stay in your hooks (ADR 0039).
+`Serve(addr, {mcp})` is unchanged apart from the optional structured fields. **Not done:** when you
+run several replicas, elicitation answers need sticky routing. The docs-page examples are run in CI
+for Go, Python and Java only; the JS, C#, Elixir, Clojure and Rust pages are not run yet.
 
 ## 0.24.0 — 2026-11-04
 
