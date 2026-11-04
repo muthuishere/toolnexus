@@ -27,7 +27,7 @@ your own login.
 - **One-shot fallback.** A CLI without ACP (codex today), or one whose ACP launch fails to start,
   is run once per turn with the conversation in a fixed JSON envelope; its reply is parsed
   tolerantly (fences, prose around JSON, OpenAI wrappers) and tool calls run in the toolnexus loop.
-  Streaming is refused there rather than faked. Errors are pinned (`cli: command not found`,
+  Streaming does not error (see below). Errors are pinned (`cli: command not found`,
   `cli: exit <code>: …`, `cli: timed out after <ms>ms`, …); the default per-call timeout is 300 s.
 - **Styles are shared data** in `conformance/cli-styles/`. Each records the CLI version it was
   checked against; goose (both transports) and gemini's one-shot args are marked `UNVERIFIED`.
@@ -54,8 +54,13 @@ your own login.
   passed MCP, skill and native checks; python's run caught opencode opening `GET /mcp`, which a
   stateless endpoint held open forever — the served endpoint now answers non-POST with 405.
 
-Not done: streaming over the ACP transport is Go only (the other seven refuse it rather than fake
-it); java, csharp, elixir and clojure have no process groups and kill the process tree instead
+- **Streaming a CLI client never errors** (consumer feedback, 2026-11-05: a host that streams every
+  client had to special-case CLI clients). On every style and both transports, in all eight ports,
+  `stream`/`askStream` run the turn and yield the loop's tool events, then the whole answer as one
+  text chunk, then done — a non-incremental stream, documented as such. Go's ACP transport still
+  streams incrementally. Tested for every style × both transports against the fakes.
+
+Not done: incremental streaming is Go-ACP only; java, csharp, elixir and clojure have no process groups and kill the process tree instead
 (clojure's ACP close kills only the agent process, so an `npx` adapter's children can outlive it);
 rust needs the `serve` feature for ACP (without it Auto always uses the one-shot CLI); java,
 csharp, elixir, clojure and rust are tested hermetically only, not against live agents; goose and

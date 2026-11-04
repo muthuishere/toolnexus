@@ -39,6 +39,6 @@ fallback with the pinned errors, and a stdio bridge story (the Go CLI's `mcp-bri
 
 ## 5. Known per-port gaps (shipped, tracked)
 
-- [ ] 5.1 Streaming over the ACP transport: Go only; the other seven refuse it with a port-named message.
+- [x] 5.1 Streaming never errors (all 8 ports, every style × both transports, tested); incremental only on Go ACP.
 - [ ] 5.2 Process groups: java, csharp, elixir, clojure kill the process tree instead; clojure's ACP close kills only the agent process (an `npx` adapter's children can outlive it).
 - [ ] 5.3 Live checks: Go (all), js + python (claude ACP+one-shot, opencode ACP); java/csharp/elixir/clojure/rust hermetic only.

@@ -120,9 +120,10 @@ client.close().await;                                         // ends the agent,
   the conversation in a JSON envelope; tool calls come back to the toolnexus loop.
 - Default per-call timeout 300 s; pinned errors (`cli: command not found: …`, `cli: exit <code>: …`,
   `cli: timed out after <ms>ms`, `cli: empty reply`, `cli: no output file`); `usage` is zero.
+- **Streaming** works everywhere but is non-incremental: tool events, the whole answer as one text chunk, then done.
 
 <Aside type="caution" title="Port gaps">
-Streaming over ACP is Go only (other ports refuse it). Java, C#, Elixir and Clojure kill the process tree
+Streaming never errors: every style and transport yields the tool events, then the whole answer as one chunk, then done (Go's ACP transport streams incrementally). Java, C#, Elixir and Clojure kill the process tree
 instead of a process group. Rust needs the `serve` feature for ACP. goose and gemini's one-shot mode are
 marked UNVERIFIED. Contract: SPEC §8C, ADR 0037.
 </Aside>
