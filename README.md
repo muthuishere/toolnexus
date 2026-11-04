@@ -10,7 +10,12 @@ one of them.**
 [![NuGet](https://img.shields.io/nuget/v/Toolnexus?logo=nuget&label=NuGet)](https://www.nuget.org/packages/Toolnexus)
 [![Maven Central](https://img.shields.io/maven-central/v/io.github.muthuishere/toolnexus?label=Maven%20Central)](https://central.sonatype.com/artifact/io.github.muthuishere/toolnexus)
 [![Hex.pm](https://img.shields.io/hexpm/v/toolnexus?logo=elixir&label=Hex)](https://hex.pm/packages/toolnexus)
+[![Clojars](https://img.shields.io/maven-metadata/v?metadataUrl=https%3A%2F%2Frepo.clojars.org%2Fnet%2Fclojars%2Fmuthuishere%2Ftoolnexus%2Fmaven-metadata.xml&logo=clojure&logoColor=white&label=Clojars)](https://clojars.org/net.clojars.muthuishere/toolnexus)
+[![crates.io](https://img.shields.io/crates/v/toolnexus?logo=rust&label=crates.io)](https://crates.io/crates/toolnexus)
+[![Go](https://img.shields.io/github/v/tag/muthuishere/toolnexus?filter=golang%2Fv*&logo=go&logoColor=white&label=Go&color=00ADD8)](https://pkg.go.dev/github.com/muthuishere/toolnexus/golang)
 [![Go Reference](https://pkg.go.dev/badge/github.com/muthuishere/toolnexus/golang.svg)](https://pkg.go.dev/github.com/muthuishere/toolnexus/golang)
+[![docs.rs](https://img.shields.io/docsrs/toolnexus?logo=docsdotrs&label=docs.rs)](https://docs.rs/toolnexus)
+[![Docs](https://img.shields.io/badge/docs-toolnexus-blue?logo=astro&logoColor=white)](https://muthuishere.github.io/toolnexus/)
 [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Discord](https://img.shields.io/badge/AgentNexus-join%20the%20community-5865F2?logo=discord&logoColor=white)](https://discord.gg/V9C2kvHC8D)
 
