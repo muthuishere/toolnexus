@@ -84,9 +84,24 @@ func LoadCliStyle(pathOrJSON string) (Style, error) {
 // family); Command is REQUIRED and names the binary (path or name). No style
 // carries a default binary: "claude" style can drive any claude-compatible CLI. Style "custom" takes Args/Prompt/Answer explicitly; StyleDef passes
 // a loaded user style. Every in-process client option applies.
+// CliStyle is the closed set of CLI families a client can drive. Each is a
+// shape (argv, prompt mode, answer source), never a binary.
+type CliStyle string
+
+const (
+	StyleClaude   CliStyle = "claude"
+	StyleCodex    CliStyle = "codex"
+	StyleCopilot  CliStyle = "copilot"
+	StyleOpencode CliStyle = "opencode"
+	StyleDevin    CliStyle = "devin"
+	StyleGemini   CliStyle = "gemini"
+	StyleGoose    CliStyle = "goose"
+	StyleCustom   CliStyle = "custom"
+)
+
 type CliOptions struct {
 	tn.InProcessOptions
-	Style     string
+	Style     CliStyle
 	StyleDef  *Style
 	Command   string
 	Args      []any
@@ -113,7 +128,7 @@ func (o CliOptions) resolve() (Style, error) {
 	if err != nil {
 		return Style{}, err
 	}
-	s, ok := all[o.Style]
+	s, ok := all[string(o.Style)]
 	if !ok {
 		names := make([]string, 0, len(all)+1)
 		for n := range all {

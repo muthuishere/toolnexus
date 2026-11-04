@@ -21,7 +21,7 @@ func fake(t *testing.T) string {
 
 // custom runs the fake CLI through `sh <fake> <args...>`.
 func custom(t *testing.T, prompt string, args ...any) CliOptions {
-	return CliOptions{Style: "custom", Command: "sh", Args: append([]any{fake(t)}, args...), Prompt: prompt, Answer: "stdout"}
+	return CliOptions{Style: StyleCustom, Command: "sh", Args: append([]any{fake(t)}, args...), Prompt: prompt, Answer: "stdout"}
 }
 
 func addToolkit(t *testing.T) *tn.Toolkit {
@@ -101,7 +101,7 @@ func TestUnknownStyleListsKnown(t *testing.T) {
 }
 
 func TestModelRules(t *testing.T) {
-	if _, err := CreateCliClient(CliOptions{Style: "goose", Command: "x", InProcessOptions: tn.InProcessOptions{Model: "x"}}, nil); err == nil || err.Error() != `cli: style "goose" takes no model` {
+	if _, err := CreateCliClient(CliOptions{Style: StyleGoose, Command: "x", InProcessOptions: tn.InProcessOptions{Model: "x"}}, nil); err == nil || err.Error() != `cli: style "goose" takes no model` {
 		t.Fatalf("goose+model: %v", err)
 	}
 	o := custom(t, "stdin", "argv", []any{"--model", "{{model}}"}, "x")
@@ -118,7 +118,7 @@ func TestModelRules(t *testing.T) {
 
 func TestCommandIsTheBinary(t *testing.T) {
 	var argv []string
-	c, err := CreateCliClient(CliOptions{Style: "claude", Command: "/nonexistent/claude-x"}, func(tr Trace) { argv = tr.Argv })
+	c, err := CreateCliClient(CliOptions{Style: StyleClaude, Command: "/nonexistent/claude-x"}, func(tr Trace) { argv = tr.Argv })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -218,7 +218,7 @@ func TestErrors(t *testing.T) {
 }
 
 func TestCommandRequired(t *testing.T) {
-	_, err := CreateCliClient(CliOptions{Style: "claude"}, nil)
+	_, err := CreateCliClient(CliOptions{Style: StyleClaude}, nil)
 	if err == nil || err.Error() != "cli: Command is required (path or name of the CLI binary)" {
 		t.Fatalf("err: %v", err)
 	}

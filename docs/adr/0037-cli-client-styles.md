@@ -21,7 +21,7 @@ tool-call channel.
 
 1. **One constructor, selected by style name.** `createCliClient({ style, command, model?, …every
    in-process client option })` (idiomatic per port, e.g. Go `CreateCliClient(CliOptions{Style:
-   "claude", Command: "/usr/local/bin/claude", Model: "sonnet"})`). It returns an ordinary in-process client.
+   StyleClaude, Command: "/usr/local/bin/claude", Model: "sonnet"})`). It returns an ordinary in-process client.
 2. **Built-in styles are shared data.** One JSON file per CLI (`claude`, `codex`, `copilot`,
    `opencode`, `devin`, `gemini`, `goose`) in one shared directory, embedded byte-identically by
    every port. A style holds **no binary**: it is the argv template, the prompt mode
