@@ -13,6 +13,10 @@ identity, no gate and no way to change the list. Owner ruling (2026-11-04): tool
   `beforeCall` allow/deny/confirm (elicitation when the client supports it; else the host's shaped
   `result` or a plain isError), `onCall` metering event, `serverInfo(ctx)`, resources and prompts
   hooks, `sessionIds` (generate/validate/terminate) and `stateless`.
+- Core types (SPEC §1): optional `ToolResult.structured` / `meta` and `Tool.outputSchema`, emitted by
+  both MCP serve surfaces as `structuredContent` / `_meta` / `outputSchema`; absent ⇒ byte-identical.
+- Handler: request `_meta` on ctx, per-handler `protocolVersions` (2025-06-18 default, 2025-11-25 opt-in),
+  `statelessSessionId`, `serverInfo.title`.
 - New optional `Tool.annotations` (MCP tool annotations, passed through verbatim).
 - SPEC §7C.1. `serve(addr, {mcp})` is unchanged.
 - Go first; the other seven ports are tracked as unchecked tasks.

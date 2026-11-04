@@ -539,3 +539,149 @@ func TestMCPHandler_DefaultsToToolkitTools(t *testing.T) {
 		t.Fatalf("tools %v", got)
 	}
 }
+
+// ── PR #140 review follow-ups ─────────────────────────────────────────────
+
+func TestMCPHandler_StructuredContentAndOutputSchema(t *testing.T) {
+	st := Tool{
+		Name: "stats", Source: SourceNative,
+		InputSchema:  JSONSchema{"type": "object"},
+		OutputSchema: JSONSchema{"type": "object", "properties": map[string]any{"count": map[string]any{"type": "integer"}}},
+		Execute: func(map[string]any, *ToolContext) (ToolResult, error) {
+			return ToolResult{Structured: map[string]any{"count": 3}}, nil
+		},
+	}
+	plain := hTestTool("plain", nil)
+	h := newHandlerTK(t).MCPHandler(MCPHandlerConfig{ListTools: func(context.Context) ([]Tool, error) { return []Tool{st, plain}, nil }})
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+	c := hDial(t, srv.URL, "")
+	lt, err := c.ListTools(context.Background(), mcp.ListToolsRequest{})
+	if err != nil || lt.Tools[0].OutputSchema.Type != "object" {
+		t.Fatalf("outputSchema %+v %v", lt.Tools[0], err)
+	}
+	r, err := hCall(t, c, "stats", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sc, _ := json.Marshal(r.StructuredContent)
+	if string(sc) != `{"count":3}` || hText(r) != `{"count":3}` {
+		t.Fatalf("structured %s text %q", sc, hText(r))
+	}
+	// absent ⇒ no structuredContent / outputSchema on the wire
+	raw, _ := json.Marshal(toolResultToMcp(ToolResult{Output: "x"}))
+	if strings.Contains(string(raw), "structuredContent") || strings.Contains(string(raw), "_meta") {
+		t.Fatalf("absent leaked: %s", raw)
+	}
+	if _, ok := mcpWireTool(plain)["outputSchema"]; ok {
+		t.Fatal("outputSchema emitted when unset")
+	}
+}
+
+func TestMCPHandler_MetaPassthrough(t *testing.T) {
+	var seen map[string]any
+	var seenHook map[string]any
+	tool := Tool{Name: "m", Source: SourceNative, Execute: func(_ map[string]any, tc *ToolContext) (ToolResult, error) {
+		seen = MCPRequestMetaFrom(tc.Ctx)
+		return ToolResult{Output: "ok", Meta: map[string]any{"usage": map[string]any{"units": 2}}}, nil
+	}}
+	h := newHandlerTK(t).MCPHandler(MCPHandlerConfig{
+		Stateless: true,
+		ListTools: func(context.Context) ([]Tool, error) { return []Tool{tool}, nil },
+		BeforeCall: func(ctx context.Context, _ Tool, _ json.RawMessage) (MCPDecision, error) {
+			seenHook = MCPRequestMetaFrom(ctx)
+			return MCPDecision{}, nil
+		},
+	})
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+	b := hReadAll(hRawPost(t, srv.URL, "", `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"m","_meta":{"clientCaps":{"elicitation":{}}}}}`, nil))
+	if !strings.Contains(b, `"_meta":{"usage":{"units":2}}`) {
+		t.Fatalf("result _meta: %s", b)
+	}
+	if _, ok := seen["clientCaps"]; !ok {
+		t.Fatalf("tool meta %v", seen)
+	}
+	if _, ok := seenHook["clientCaps"]; !ok {
+		t.Fatalf("hook meta %v", seenHook)
+	}
+}
+
+func TestMCPHandler_ProtocolVersionsPerHandler(t *testing.T) {
+	initBody := func(v string) string {
+		return `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"` + v + `"}}`
+	}
+	def := httptest.NewServer(newHandlerTK(t).MCPHandler(MCPHandlerConfig{Stateless: true}))
+	defer def.Close()
+	newer := httptest.NewServer(newHandlerTK(t).MCPHandler(MCPHandlerConfig{
+		Stateless:        true,
+		ProtocolVersions: []string{"2026-07-28", "2025-11-25", "2025-06-18", "2025-03-26"},
+		ListTools:        func(context.Context) ([]Tool, error) { return []Tool{hTestTool("a", nil)}, nil },
+	}))
+	defer newer.Close()
+
+	// default handler: 2025-06-18 only
+	if b := hReadAll(hRawPost(t, def.URL, "", initBody("2025-11-25"), nil)); !strings.Contains(b, `"protocolVersion":"2025-06-18"`) {
+		t.Fatalf("default negotiate %s", b)
+	}
+	if r := hRawPost(t, def.URL, "", `{"jsonrpc":"2.0","id":2,"method":"ping"}`, map[string]string{"MCP-Protocol-Version": "2025-11-25"}); r.StatusCode != 400 {
+		t.Fatalf("default header %d", r.StatusCode)
+	}
+	// configured handler: 2025-11-25 accepted; unimplemented 2026-07-28 / 2025-03-26 dropped
+	if b := hReadAll(hRawPost(t, newer.URL, "", initBody("2025-11-25"), nil)); !strings.Contains(b, `"protocolVersion":"2025-11-25"`) {
+		t.Fatalf("newer negotiate %s", b)
+	}
+	if b := hReadAll(hRawPost(t, newer.URL, "", initBody("2026-07-28"), nil)); !strings.Contains(b, `"protocolVersion":"2025-11-25"`) {
+		t.Fatalf("2026-07-28 must fall back to newest implemented: %s", b)
+	}
+	if r := hRawPost(t, newer.URL, "", `{"jsonrpc":"2.0","id":2,"method":"ping"}`, map[string]string{"MCP-Protocol-Version": "2025-03-26"}); r.StatusCode != 400 {
+		t.Fatalf("2025-03-26 header %d", r.StatusCode)
+	}
+	// 2025-11-25 rule: invalid arguments ⇒ isError result, not -32602
+	b := hReadAll(hRawPost(t, newer.URL, "", `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"a","arguments":[1]}}`, map[string]string{"MCP-Protocol-Version": "2025-11-25"}))
+	if !strings.Contains(b, `"isError":true`) || strings.Contains(b, "-32602") {
+		t.Fatalf("11-25 validation %s", b)
+	}
+	b = hReadAll(hRawPost(t, newer.URL, "", `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"a","arguments":[1]}}`, map[string]string{"MCP-Protocol-Version": "2025-06-18"}))
+	if !strings.Contains(b, "-32602") {
+		t.Fatalf("06-18 validation %s", b)
+	}
+}
+
+func TestMCPHandler_StatelessSessionIDAndTitle(t *testing.T) {
+	h := newHandlerTK(t).MCPHandler(MCPHandlerConfig{Stateless: true, StatelessSessionID: "stateless", Title: "Records API"})
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+	r := hRawPost(t, srv.URL, "", `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}`, nil)
+	b := hReadAll(r)
+	if r.Header.Get("Mcp-Session-Id") != "stateless" || !strings.Contains(b, `"title":"Records API"`) {
+		t.Fatalf("sid %q body %s", r.Header.Get("Mcp-Session-Id"), b)
+	}
+	// never validated: any or no id works
+	if b := hReadAll(hRawPost(t, srv.URL, "whatever", `{"jsonrpc":"2.0","id":2,"method":"ping"}`, nil)); !strings.Contains(b, `"result":{}`) {
+		t.Fatalf("ping %s", b)
+	}
+	// title omitted when unset
+	h2 := httptest.NewServer(newHandlerTK(t).MCPHandler(MCPHandlerConfig{Stateless: true}))
+	defer h2.Close()
+	if b := hReadAll(hRawPost(t, h2.URL, "", `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`, nil)); strings.Contains(b, `"title"`) {
+		t.Fatalf("title leaked %s", b)
+	}
+}
+
+func TestServe_StructuredResultViaMcpServer(t *testing.T) {
+	// The §7C Serve path maps Structured/Meta/OutputSchema too, and stays
+	// byte-identical when they are absent.
+	tl := mcpToolFor(Tool{Name: "x", InputSchema: JSONSchema{"type": "object"}})
+	if b, _ := json.Marshal(tl); strings.Contains(string(b), "outputSchema") {
+		t.Fatalf("outputSchema leaked %s", b)
+	}
+	tl = mcpToolFor(Tool{Name: "x", InputSchema: JSONSchema{"type": "object"}, OutputSchema: JSONSchema{"type": "object"}})
+	if b, _ := json.Marshal(tl); !strings.Contains(string(b), `"outputSchema":{"type":"object"}`) {
+		t.Fatalf("outputSchema missing %s", b)
+	}
+	b, _ := json.Marshal(toolResultToMcp(ToolResult{Output: "hi", Structured: map[string]any{"a": 1}, Meta: map[string]any{"k": "v"}}))
+	if !strings.Contains(string(b), `"structuredContent":{"a":1}`) || !strings.Contains(string(b), `"_meta":{"k":"v"}`) || !strings.Contains(string(b), `"text":"hi"`) {
+		t.Fatalf("wire %s", b)
+	}
+}

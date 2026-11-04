@@ -31,10 +31,22 @@ import (
 	"time"
 )
 
-// MCPHandlerProtocolVersions are the MCP protocol versions MCPHandler speaks,
-// newest first. initialize echoes the client's version when listed, else the
-// first entry.
-var MCPHandlerProtocolVersions = []string{"2025-06-18", "2025-03-26"}
+// MCPHandlerImplementedVersions are the MCP protocol versions whose wire
+// MCPHandler actually implements (ADR 0039 §versions). A handler accepts only
+// these, however it is configured:
+//
+//   - 2025-06-18 — the baseline (the default).
+//   - 2025-11-25 — its server-visible wire deltas over 2025-06-18 are optional
+//     fields (icons, title/description on Implementation, tasks, URL-mode
+//     elicitation) plus one rule the handler implements: invalid tool
+//     arguments are a tool execution error (isError), not -32602.
+//
+// Not accepted: 2025-03-26 (permits JSON-RPC batching, which this handler
+// rejects) and 2026-07-28 (its stateless-first wire is the #134 upgrade).
+var MCPHandlerImplementedVersions = []string{"2025-11-25", "2025-06-18"}
+
+// mcpDefaultVersions is the default MCPHandlerConfig.ProtocolVersions.
+var mcpDefaultVersions = []string{"2025-06-18"}
 
 // MCPDecisionKind is the outcome of a BeforeCall gate.
 type MCPDecisionKind string
@@ -64,6 +76,7 @@ type MCPDecision struct {
 // MCPServerInfo is advertised at initialize.
 type MCPServerInfo struct {
 	Name         string
+	Title        string // serverInfo.title (display name); "" ⇒ omitted
 	Version      string
 	Instructions string
 }
@@ -141,9 +154,15 @@ type MCPHandlerConfig struct {
 	// Name/Version/Instructions are the static serverInfo; ServerInfo, when
 	// set, wins. Defaults "toolnexus" / "0.1.0".
 	Name         string
+	Title        string
 	Version      string
 	Instructions string
 	ServerInfo   func(ctx context.Context) MCPServerInfo
+
+	// ProtocolVersions this handler accepts, newest first. Entries outside
+	// MCPHandlerImplementedVersions are dropped. Default ["2025-06-18"].
+	// initialize echoes the client's version when accepted, else the first.
+	ProtocolVersions []string
 
 	// Authenticate runs on every HTTP request before JSON-RPC parsing. Its
 	// result reaches every hook and tool via IdentityFrom(ctx). An error ⇒
@@ -176,6 +195,10 @@ type MCPHandlerConfig struct {
 	// Stateless issues no Mcp-Session-Id and checks none; elicitation is then
 	// never used (confirm takes the no-elicitation path).
 	Stateless bool
+	// StatelessSessionID, when non-empty in Stateless mode, is returned as
+	// Mcp-Session-Id on initialize (for clients that expect one) and is never
+	// validated.
+	StatelessSessionID string
 
 	// MaxBodyBytes caps a POST body. Default 4 MiB.
 	MaxBodyBytes int64
@@ -187,7 +210,18 @@ const (
 	mcpIdentityKey mcpCtxKey = iota
 	mcpRequestKey
 	mcpSessionKey
+	mcpMetaKey
 )
+
+// MCPRequestMetaFrom returns the `params._meta` of the JSON-RPC request being
+// served (nil when absent), e.g. per-request client hints.
+func MCPRequestMetaFrom(ctx context.Context) map[string]any {
+	if ctx == nil {
+		return nil
+	}
+	m, _ := ctx.Value(mcpMetaKey).(map[string]any)
+	return m
+}
 
 // IdentityFrom returns the value Authenticate produced for this request (nil
 // when no Authenticate is configured).
@@ -219,9 +253,10 @@ func MCPSessionIDFrom(ctx context.Context) string {
 
 // MCPHTTPHandler is the embeddable MCP server returned by MCPHandler.
 type MCPHTTPHandler struct {
-	tk  *Toolkit
-	cfg MCPHandlerConfig
-	ids MCPSessionIDs
+	tk       *Toolkit
+	cfg      MCPHandlerConfig
+	ids      MCPSessionIDs
+	versions []string
 
 	mu      sync.Mutex
 	caps    map[string]bool          // session → client declared elicitation
@@ -238,6 +273,14 @@ func (tk *Toolkit) MCPHandler(cfg MCPHandlerConfig) *MCPHTTPHandler {
 		caps:    map[string]bool{},
 		streams: map[chan []byte]struct{}{},
 		pending: map[string]chan json.RawMessage{},
+	}
+	for _, v := range cfg.ProtocolVersions {
+		if mcpHasVersion(MCPHandlerImplementedVersions, v) && !mcpHasVersion(h.versions, v) {
+			h.versions = append(h.versions, v)
+		}
+	}
+	if len(h.versions) == 0 {
+		h.versions = mcpDefaultVersions
 	}
 	if h.ids == nil {
 		h.ids = &memorySessionIDs{live: map[string]bool{}}
@@ -337,7 +380,7 @@ type mcpRPCMessage struct {
 // checkSession validates the Mcp-Session-Id header (stateful mode) and the
 // MCP-Protocol-Version header. It writes the HTTP error itself on failure.
 func (h *MCPHTTPHandler) checkSession(ctx context.Context, w http.ResponseWriter, r *http.Request) (context.Context, string, bool) {
-	if v := r.Header.Get("MCP-Protocol-Version"); v != "" && !mcpHasVersion(MCPHandlerProtocolVersions, v) {
+	if v := r.Header.Get("MCP-Protocol-Version"); v != "" && !mcpHasVersion(h.versions, v) {
 		http.Error(w, "Bad Request: unsupported MCP-Protocol-Version", http.StatusBadRequest)
 		return ctx, "", false
 	}
@@ -407,6 +450,12 @@ func (h *MCPHTTPHandler) handlePost(ctx context.Context, w http.ResponseWriter, 
 		return
 	}
 
+	var pm struct {
+		Meta map[string]any `json:"_meta"`
+	}
+	if json.Unmarshal(msg.Params, &pm) == nil && pm.Meta != nil {
+		ctx = context.WithValue(ctx, mcpMetaKey, pm.Meta)
+	}
 	rw := &mcpRPCWriter{w: w}
 	result, rerr := h.dispatch(ctx, rw, sid, msg)
 	rw.respond(msg.ID, result, rerr)
@@ -420,13 +469,15 @@ func (h *MCPHTTPHandler) handleInitialize(ctx context.Context, w http.ResponseWr
 		} `json:"capabilities"`
 	}
 	_ = json.Unmarshal(msg.Params, &p)
-	version := MCPHandlerProtocolVersions[0]
-	if mcpHasVersion(MCPHandlerProtocolVersions, p.ProtocolVersion) {
+	version := h.versions[0]
+	if mcpHasVersion(h.versions, p.ProtocolVersion) {
 		version = p.ProtocolVersion
 	}
 
 	sid := ""
-	if !h.cfg.Stateless {
+	if h.cfg.Stateless {
+		sid = h.cfg.StatelessSessionID
+	} else {
 		var err error
 		if sid, err = h.ids.Generate(ctx); err != nil {
 			writeMcpRPCError(w, msg.ID, -32603, "cannot create session")
@@ -439,7 +490,7 @@ func (h *MCPHTTPHandler) handleInitialize(ctx context.Context, w http.ResponseWr
 		h.mu.Unlock()
 	}
 
-	info := MCPServerInfo{Name: h.cfg.Name, Version: h.cfg.Version, Instructions: h.cfg.Instructions}
+	info := MCPServerInfo{Name: h.cfg.Name, Title: h.cfg.Title, Version: h.cfg.Version, Instructions: h.cfg.Instructions}
 	if h.cfg.ServerInfo != nil {
 		info = h.cfg.ServerInfo(ctx)
 	}
@@ -459,7 +510,7 @@ func (h *MCPHTTPHandler) handleInitialize(ctx context.Context, w http.ResponseWr
 	res := map[string]any{
 		"protocolVersion": version,
 		"capabilities":    caps,
-		"serverInfo":      map[string]any{"name": info.Name, "version": info.Version},
+		"serverInfo":      omitEmpty(map[string]any{"name": info.Name, "title": info.Title, "version": info.Version}),
 	}
 	if info.Instructions != "" {
 		res["instructions"] = info.Instructions
@@ -664,6 +715,11 @@ func (h *MCPHTTPHandler) callTool(ctx context.Context, rw *mcpRPCWriter, sid str
 	args := map[string]any{}
 	if len(p.Arguments) > 0 && string(p.Arguments) != "null" {
 		if err := json.Unmarshal(p.Arguments, &args); err != nil {
+			if r := RequestFrom(ctx); r != nil && r.Header.Get("MCP-Protocol-Version") == "2025-11-25" {
+				// 2025-11-25: input validation errors are tool execution errors.
+				b, _ := json.Marshal(toolResultToMcp(ToolResult{Output: "invalid arguments: must be an object", IsError: true}))
+				return json.RawMessage(b), nil
+			}
 			return nil, &rpcError{-32602, "arguments must be an object"}
 		}
 	} else {
@@ -882,6 +938,9 @@ func mcpWireTool(t Tool) map[string]any {
 		schema = JSONSchema{"type": "object"}
 	}
 	m := map[string]any{"name": t.Name, "description": t.Description, "inputSchema": schema}
+	if t.OutputSchema != nil {
+		m["outputSchema"] = t.OutputSchema
+	}
 	ann := map[string]any{}
 	if a := t.Annotations; a != nil {
 		if a.Title != "" {

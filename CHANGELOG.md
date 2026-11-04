@@ -24,10 +24,19 @@ and OAuth, with plain hooks:
   "re-call with this nonce") or a plain "confirmation required" error.
 - `Tool.Annotations` (`title`, `readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`)
   go out unchanged; `OnCall` reports identity, duration, error and result size for metering;
-  `ServerInfo(ctx)` brands `initialize`; resources and prompts hooks; your own `SessionIDs`, or `Stateless`.
+  `ServerInfo(ctx)` brands `initialize` (now with `title`); resources and prompts hooks; your own
+  `SessionIDs`, or `Stateless` (optionally with a fixed `StatelessSessionID` for clients that expect one).
+- **Structured results.** A tool can return `ToolResult.Structured` and declare `Tool.OutputSchema`;
+  MCP serve sends them as `structuredContent` and `outputSchema`, with a JSON text block when the
+  tool sets no text. `ToolResult.Meta` goes out as the result's `_meta`, and a request's
+  `params._meta` is readable in hooks and tools via `MCPRequestMetaFrom(ctx)`. All optional:
+  tools that do not set them produce exactly the same output as before, on `Serve` too.
+- **Protocol versions you can trust.** `ProtocolVersions` per handler; the default is 2025-06-18 only.
+  2025-11-25 can be turned on (the handler implements its one server-side rule change: bad tool
+  arguments come back as an error result, not a protocol error). 2025-03-26 is not accepted (it allows
+  batches, which the handler rejects) and 2026-07-28 waits for #134 — listing them does nothing.
 
-toolnexus has no tenant, role or storage concepts here: those stay in your hooks (ADR 0039). Speaks
-MCP protocol 2025-06-18 (and 2025-03-26). `Serve(addr, {mcp})` is unchanged. **Not done:** js,
+toolnexus has no tenant, role or storage concepts here: those stay in your hooks (ADR 0039). `Serve(addr, {mcp})` is unchanged. **Not done:** js,
 python, java, csharp, elixir, clojure and rust (tracked in `openspec/changes/add-mcp-serve-handler`);
 elicitation answers need sticky routing when you run several replicas.
 

@@ -65,6 +65,29 @@ on the replica holding the waiting call — so **elicitation needs sticky routin
 never saw the session's `initialize`, confirm takes the no-elicitation path. `Stateless: true`
 issues no session id at all, and so never elicits.
 
+## Protocol versions (review follow-up, 2026-11-04)
+
+A handler advertises and accepts **only** versions whose wire it implements. Default
+`ProtocolVersions: ["2025-06-18"]`; a host may opt into more, filtered against the implemented set.
+
+| version | server-visible difference from 2025-06-18 | verdict |
+|---|---|---|
+| 2025-03-26 | allows JSON-RPC batching; no `structuredContent`/`outputSchema`/elicitation/`MCP-Protocol-Version` header | **not accepted** — the handler rejects batches, so a conforming 2025-03-26 client could break |
+| 2025-06-18 | baseline | default |
+| 2025-11-25 | optional fields only (`icons`, `Implementation.title/description/websiteUrl`, tasks, URL-mode elicitation, sampling with tools), SSE polling/resumption is optional for the server, plus one rule: **invalid tool input is a tool execution error (`isError`), not `-32602`** | **implemented, opt-in** — the rule is applied when the request carries `MCP-Protocol-Version: 2025-11-25` |
+| 2026-07-28 | the stateless-first rewrite tracked in #134 (spike only) | **not accepted** until #134 lands |
+
+The 2025-11-25 Origin-validation (403) requirement is the host's: it sits in the host's CORS/Origin
+middleware outside the handler, like TLS.
+
+## Structured results and `_meta` (review follow-up)
+
+`ToolResult.Structured` → `structuredContent` (with a JSON text block when `Output` is empty),
+`Tool.OutputSchema` → `outputSchema`, `ToolResult.Meta` → `_meta`, request `params._meta` →
+`MCPRequestMetaFrom(ctx)`. These are SPEC §1 core-type additions, optional, absent ⇒ byte-identical;
+the §7C `Serve` path maps them too. `MCPServerInfo.Title` → `serverInfo.title`. In stateless mode
+`StatelessSessionID` returns a fixed `Mcp-Session-Id` on initialize, never validated.
+
 ## Why an in-house transport over mcp-go's types, not mcp-go's `server`
 
 Verified in `mark3labs/mcp-go v0.48` source:

@@ -76,3 +76,62 @@ request with 404 on false, terminate on DELETE); `cfg.stateless` SHALL issue and
 
 - **WHEN** a host supplies `sessionIds`
 - **THEN** initialize uses its `generate`, every later request is checked with its `validate`, and an unknown id gets HTTP 404
+
+### Requirement: Structured tool results and output schema
+
+`ToolResult` SHALL accept an optional `structured` value and `Tool` an optional `outputSchema`. Both MCP
+serve surfaces SHALL emit `structured` as `structuredContent` beside the text block (the JSON text of
+`structured` when `output` is empty) and `outputSchema` in `tools/list`. When both are absent the wire
+output SHALL be byte-identical to before.
+
+#### Scenario: Structured result
+
+- **WHEN** a tool with an `outputSchema` returns `structured:{count:3}` and no output text
+- **THEN** `tools/list` carries that `outputSchema`
+- **AND** the call result carries `structuredContent:{count:3}` and a text block `{"count":3}`
+
+#### Scenario: Absent stays identical
+
+- **WHEN** a tool sets neither field
+- **THEN** no `structuredContent`, `_meta` or `outputSchema` key appears on the wire
+
+### Requirement: _meta passthrough
+
+A request's `params._meta` SHALL be readable by every hook and tool through the call context, and a
+`ToolResult.meta` SHALL leave as the result's `_meta`.
+
+#### Scenario: Request and result metadata
+
+- **WHEN** a `tools/call` carries `_meta:{clientCaps:{…}}` and the tool returns `meta:{usage:{units:2}}`
+- **THEN** `beforeCall` and the tool both read `clientCaps` from the context
+- **AND** the result carries `_meta:{usage:{units:2}}`
+
+### Requirement: Honest per-handler protocol versions
+
+`cfg.protocolVersions` SHALL set the versions a handler accepts, newest first, default `["2025-06-18"]`,
+filtered to the versions the port implements (`2025-06-18`, `2025-11-25`). For a request carrying
+`MCP-Protocol-Version: 2025-11-25`, invalid tool arguments SHALL be an `isError` tool result rather than
+`-32602`. `2025-03-26` and `2026-07-28` SHALL NOT be accepted.
+
+#### Scenario: Opt-in 2025-11-25
+
+- **WHEN** a handler lists `["2026-07-28","2025-11-25","2025-06-18"]` and a client initializes with `2026-07-28`
+- **THEN** the handler answers `2025-11-25`
+- **AND** a `MCP-Protocol-Version: 2025-03-26` header gets HTTP 400
+
+#### Scenario: Default handler
+
+- **WHEN** a handler has no `protocolVersions` and a client asks for `2025-11-25`
+- **THEN** `initialize` answers `2025-06-18`
+
+### Requirement: Stateless session id and server title
+
+In stateless mode a non-empty `statelessSessionId` SHALL be returned as `Mcp-Session-Id` on `initialize`
+and never validated. A non-empty `title` (static or from `serverInfo`) SHALL be sent as `serverInfo.title`;
+an empty one SHALL be omitted.
+
+#### Scenario: Fixed stateless id
+
+- **WHEN** a stateless handler sets `statelessSessionId:"stateless"` and `title:"Records API"`
+- **THEN** `initialize` returns header `Mcp-Session-Id: stateless` and `serverInfo.title:"Records API"`
+- **AND** later requests with any or no session id are served
