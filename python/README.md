@@ -191,8 +191,9 @@ client.close()                        # ends the agent, stops the served toolkit
 - Errors are `CliError` with pinned messages (`cli: command not found: <bin>`,
   `cli: exit <code>: <stderr>`, `cli: empty reply`, `cli: no output file`,
   `cli: timed out after <ms>ms`). Default call timeout 300000 ms (`call_timeout_ms`).
-  `usage` is zero. Streaming is refused (Python: on both transports — the in-process seam
-  does not stream).
+  `usage` is zero. `stream` does not error but is not incremental (on both transports): the
+  turn runs normally, the loop's `tool_call` / `tool_result` events are emitted, the whole
+  answer arrives as ONE `text` event, then `done`.
 - `python -m toolnexus.cli_acp mcp-bridge <url>` is the stdio⇄HTTP bridge for agents that
   accept only stdio MCP servers (pass it as `bridge_command`; default `toolnexus mcp-bridge`
   when the Go CLI is on PATH). Live check: `examples/cli_client.py`.

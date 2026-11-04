@@ -269,12 +269,25 @@ async def test_env_expands_from_process_env(monkeypatch):
         await run_cli(fake_cli_opts("${TN_TEST_EXPANDED}"))
 
 
-async def test_one_shot_refuses_streaming():
-    c = create_cli_client(**fake_cli_opts("x"))
-    with pytest.raises(Exception) as ei:
-        async for _ in c.stream("hi"):
-            pass
-    assert "cli: streaming is not supported by the one-shot CLI transport; use Run" in str(ei.value)
+async def collect_stream(c, tk, prompt="What is my badge number?"):
+    evs = []
+    async for ev in c.stream(prompt, tk):
+        evs.append(ev)
+    return evs
+
+
+async def test_one_shot_streams_non_incrementally():
+    tk = await badge_toolkit()
+    c = create_cli_client(**fake_cli_opts("tool"))
+    try:
+        evs = await collect_stream(c, tk)
+    finally:
+        c.close()
+    kinds = [e["type"] for e in evs if e["type"] != "usage"]
+    assert "error" not in kinds
+    assert kinds == ["tool_call", "tool_result", "text", "done"], kinds
+    text = next(e for e in evs if e["type"] == "text")["delta"]
+    assert "BADGE-77Q" in text
 
 
 # --------------------------------------------------------------------------- #
@@ -504,3 +517,46 @@ def test_conformance_cases():
         assert str(ei.value) == case["error"], case
 
     assert render_cli_prompt(None, None) == fx["renderEmpty"].replace("<PREAMBLE>", CLI_PREAMBLE, 1)
+
+
+async def test_acp_streams_non_incrementally(tmp_path):
+    o, _, tk = await fake_acp_opts(tmp_path, FAKE_HTTP="1")
+    c = create_cli_client(**o, transport=CliTransports.ACP)
+    try:
+        evs = await collect_stream(c, tk, "hi")
+    finally:
+        c.close()
+    kinds = [e["type"] for e in evs if e["type"] != "usage"]
+    assert kinds == ["text", "done"], kinds
+    assert "BADGE-77Q" in evs[0]["delta"]
+
+
+ALL_STYLES = [CliStyles.CLAUDE, CliStyles.CODEX, CliStyles.COPILOT, CliStyles.OPENCODE,
+              CliStyles.DEVIN, CliStyles.GEMINI, CliStyles.GOOSE, CliStyles.CUSTOM]
+
+
+@pytest.mark.parametrize("transport", [CliTransports.CLI, CliTransports.ACP], ids=lambda t: t.value)
+@pytest.mark.parametrize("style", ALL_STYLES, ids=lambda s: s.value)
+async def test_stream_every_style_both_transports(tmp_path, style, transport):
+    # A real executable for built-in styles' argv: [command, *style args].
+    wrapper = tmp_path / "fakecli"
+    wrapper.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{FAKE}" "$@"\n')
+    wrapper.chmod(0o755)
+    tk = await badge_toolkit()
+    o = dict(style=style, command=str(wrapper), transport=transport, toolkit=tk, env={"TN_FAKE_CLI": "tool"})
+    if style is CliStyles.CUSTOM:
+        o.update(args=[], prompt="stdin", answer="stdout")
+    if transport is CliTransports.ACP:
+        fo, _, _ = await fake_acp_opts(tmp_path, FAKE_HTTP="1")
+        o.update(env=fo["env"], bridge_command=fo["bridge_command"], acp_command=[sys.executable, FAKE, "acp"])
+    c = create_cli_client(**o)
+    try:
+        evs = await collect_stream(c, tk)
+        assert c.transport() == transport.value
+    finally:
+        c.close()
+    kinds = [e["type"] for e in evs]
+    assert "error" not in kinds and kinds[-1] == "done", kinds
+    assert "BADGE-77Q" in "".join(e["delta"] for e in evs if e["type"] == "text")
+    if transport is CliTransports.CLI:
+        assert "tool_call" in kinds

@@ -17,6 +17,7 @@ and holds no binary: ``command`` is always the caller's.
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import os
 import re
@@ -320,20 +321,29 @@ def _kill_group(proc: "subprocess.Popen[Any]") -> None:
 
 
 class _CliTransport(InProcessTransport):
-    """The in-process seam, with streaming refused per transport."""
+    """The in-process seam. Streaming degrades to a non-incremental stream on both
+    transports (SPEC §8C): the turn runs as a normal call and its reply is replayed
+    as one SSE chunk, so the loop emits its tool events, the whole answer as ONE
+    text event, then done."""
 
     def __init__(self, owner: "CliClient") -> None:
         super().__init__(owner._generate)
         self._owner = owner
 
     def open(self, url: str, headers: dict[str, str], payload: dict[str, Any], timeout: float):  # noqa: A003
-        session = self._owner._session()
-        if session is None:
-            raise CliError("cli: streaming is not supported by the one-shot CLI transport; use Run")
-        raise CliError(
-            "cli: streaming is not supported by the ACP transport in the Python port "
-            "(the in-process seam does not stream); use run"
-        )
+        reply = self.post(url, headers, payload, timeout)
+        choice = (reply.get("choices") or [{}])[0]
+        msg = choice.get("message") or {}
+        delta: dict[str, Any] = {"role": "assistant"}
+        if msg.get("tool_calls"):
+            delta["tool_calls"] = [{"index": i, **tc} for i, tc in enumerate(msg["tool_calls"])]
+        else:
+            delta["content"] = msg.get("content") or ""
+        chunk = {
+            "choices": [{"index": 0, "delta": delta, "finish_reason": choice.get("finish_reason")}],
+            "usage": reply.get("usage"),
+        }
+        return io.BytesIO(("data: " + json.dumps(chunk) + "\n\ndata: [DONE]\n\n").encode("utf-8"))
 
 
 class CliClient(Client):

@@ -9,6 +9,8 @@ helpers in golang/cli_test.go.
   records every method.
 * ``TN_FAKE_CLI=<mode>``: a fake one-shot CLI. Prompt from stdin, or the arg after
   ``--p``, or the file after ``--f``; answer to stdout, or to the file after ``--o``.
+  Style-agnostic too: an arg starting with the preamble is the prompt, a
+  ``toolnexus-cli-*`` path is the prompt file if it exists, else the out file.
 """
 from __future__ import annotations
 
@@ -23,6 +25,12 @@ import urllib.request
 
 def _j(v) -> str:
     return json.dumps(v, separators=(",", ":"))
+
+
+_PREAMBLE20 = open(
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "src", "toolnexus", "clistyles", "preamble.txt"),
+    encoding="utf-8",
+).read()[:20]
 
 
 def fake_cli(mode: str) -> None:
@@ -44,6 +52,16 @@ def fake_cli(mode: str) -> None:
         elif a == "--argv":
             sys.stdout.write('{"content":' + _j(" ".join(args)) + "}")
             return
+        elif a.startswith(_PREAMBLE20):
+            # Style-agnostic detection, so every built-in style's real argv works:
+            # the prompt as an arg, the {{file}} temp file, the {{out}} temp path.
+            prompt = a
+        elif "toolnexus-cli-" in os.path.basename(a):
+            if os.path.exists(a):
+                with open(a, encoding="utf-8") as f:
+                    prompt = f.read()
+            else:
+                out_file = a
         i += 1
     if not prompt:
         prompt = sys.stdin.read()
