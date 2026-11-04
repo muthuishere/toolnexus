@@ -78,7 +78,23 @@ fn fake_one_shot(mode: &str, args: &[String]) {
                 print!("{}", json!({"content": args.join(" ")}));
                 return;
             }
-            _ => {}
+            a => {
+                // Style-agnostic detection, so every built-in style's real argv
+                // works: the prompt as an arg, the {{file}} temp file, the
+                // {{out}} temp path (not created yet).
+                let base = std::path::Path::new(a)
+                    .file_name()
+                    .map(|f| f.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                if a.starts_with(&toolnexus::cli::CLI_PREAMBLE[..20]) {
+                    prompt = a.to_owned();
+                } else if base.contains("toolnexus-cli-") {
+                    match std::fs::read_to_string(a) {
+                        Ok(b) => prompt = b,
+                        Err(_) => out_file = a.to_owned(),
+                    }
+                }
+            }
         }
         i += 1;
     }

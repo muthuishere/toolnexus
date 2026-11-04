@@ -151,8 +151,9 @@ client.close().await;                                         // ends the agent,
   `acp_command: vec!["npx".into(), "-y".into(), "@agentclientprotocol/claude-agent-acp@0.100.0".into()]`.
   `client.acp_session().await` shows what was sent (token redacted) and every permission decision.
 - **One-shot CLI**: the conversation goes in under a fixed preamble, the reply is parsed as
-  an OpenAI-shaped envelope, and tool calls run in the toolnexus loop. Streaming is refused
-  on this transport.
+  an OpenAI-shaped envelope, and tool calls run in the toolnexus loop. `stream` works but is not
+  incremental: the loop's `tool_call` / `tool_result` events, the whole answer as one `text`
+  event, then `done`.
 - Errors carry pinned messages (`cli: command not found: <bin>`, `cli: exit <code>: <stderr>`,
   `cli: empty reply`, `cli: no output file`, `cli: timed out after <ms>ms`). Default call
   timeout 300000 ms (`call_timeout_ms`). `usage` is zero.

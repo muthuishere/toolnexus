@@ -515,11 +515,9 @@ async fn generate(
         return acp.generate(cancel, req, emit).await;
     }
     let _ = &emit;
-    if req.body.get("stream").and_then(Value::as_bool) == Some(true) {
-        return Err(
-            "cli: streaming is not supported by the one-shot CLI transport; use Run".into(),
-        );
-    }
+    // Streaming degrades to a non-incremental stream: the whole reply comes
+    // back as one response; the loop emits its tool events and the answer as
+    // a single text chunk, then done.
     let prompt = render_cli_prompt(&req.messages, &req.tools);
     let text = invoke(&s, &cancel, &prompt).await.map_err(|e| e.0)?;
     Ok(parse_cli_reply(&text))

@@ -344,19 +344,90 @@ async fn pinned_errors() {
     }
 }
 
-#[tokio::test]
-async fn one_shot_refuses_streaming() {
-    let tk = empty_toolkit().await;
-    let c = create_cli_client(fake_cli_opts("x", &[])).unwrap();
-    let mut rx = c.stream("hi", &tk).unwrap();
-    let mut err = String::new();
+async fn collect(c: &CliClient, tk: &Toolkit) -> (Vec<String>, String) {
+    let mut rx = c.stream("What is my badge number?", tk).unwrap();
+    let (mut kinds, mut text) = (Vec::new(), String::new());
     while let Some(ev) = rx.recv().await {
         let ev: StreamEvent = ev;
-        if ev.kind == "error" {
-            err = ev.error.map(|e| e.to_string()).unwrap_or_default();
+        assert_ne!(ev.kind, "error", "stream must not error: {:?}", ev.error);
+        if ev.kind == "text" {
+            text.push_str(&ev.delta);
+        }
+        kinds.push(ev.kind.clone());
+    }
+    (kinds, text)
+}
+
+#[tokio::test]
+async fn one_shot_streams_non_incrementally() {
+    let tk = badge_toolkit().await;
+    let c = create_cli_client(fake_cli_opts("tool", &[])).unwrap();
+    let (kinds, text) = collect(&c, &tk).await;
+    c.close().await;
+    let k: Vec<&str> = kinds
+        .iter()
+        .map(String::as_str)
+        .filter(|k| *k != "usage")
+        .collect();
+    assert_eq!(k, ["tool_call", "tool_result", "text", "done"], "{kinds:?}");
+    assert!(text.contains("BADGE-77Q"), "{text:?}");
+}
+
+/// Streaming never errors on a CLI client, for every built-in style and
+/// custom, over the one-shot CLI and ACP.
+#[tokio::test]
+async fn stream_every_style_both_transports() {
+    let styles = [
+        CliStyles::Claude,
+        CliStyles::Codex,
+        CliStyles::Copilot,
+        CliStyles::Opencode,
+        CliStyles::Devin,
+        CliStyles::Gemini,
+        CliStyles::Goose,
+        CliStyles::Custom,
+    ];
+    let mut transports = vec![CliTransports::Cli];
+    if cfg!(feature = "serve") {
+        transports.push(CliTransports::Acp);
+    }
+    for st in styles {
+        for &tr in &transports {
+            let tk = badge_toolkit().await;
+            let mut o = CliOptions {
+                style: Some(st),
+                command: fake(),
+                transport: tr,
+                toolkit: Some(tk.clone()),
+                env: BTreeMap::from([("TN_FAKE_CLI".into(), "tool".into())]),
+                ..Default::default()
+            };
+            if st == CliStyles::Custom {
+                o.args = vec![];
+                o.prompt = "stdin".into();
+                o.answer = "stdout".into();
+            }
+            if tr == CliTransports::Acp {
+                o.env.insert("TN_FAKE_ACP".into(), "1".into());
+                o.env.insert("FAKE_HTTP".into(), "1".into());
+                o.bridge_command = vec![fake(), "mcp-bridge".into()];
+                o.acp_command = vec![fake(), "acp".into()];
+            }
+            let c = create_cli_client(o).unwrap();
+            let (kinds, text) = collect(&c, &tk).await;
+            assert_eq!(c.transport(), tr, "{st:?}/{tr:?}");
+            c.close().await;
+            assert_eq!(
+                kinds.last().map(String::as_str),
+                Some("done"),
+                "{st:?}/{tr:?}: {kinds:?}"
+            );
+            assert!(text.contains("BADGE-77Q"), "{st:?}/{tr:?}: {text:?}");
+            if tr == CliTransports::Cli {
+                assert!(kinds.iter().any(|k| k == "tool_call"), "{st:?}: {kinds:?}");
+            }
         }
     }
-    assert!(err.contains("streaming is not supported"), "{err:?}");
 }
 
 #[test]
