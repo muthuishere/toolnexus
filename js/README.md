@@ -158,6 +158,41 @@ const res = await agent.run("Draw a fox, then animate it.", { toolkit: tk })
 for (const f of res.files) console.log(f.from, f.mimeType, f.url)
 ```
 
+## CLI client (agent CLIs as the model)
+
+`createCliClient` makes an agent CLI you already have installed (and pay for) the model behind
+an ordinary client. The style is a closed enum, never a string: `CliStyles.Claude | Codex |
+Copilot | Opencode | Devin | Gemini | Goose | Custom`. `command` is required: nothing is
+embedded or defaulted. SPEC §8C.
+
+```ts
+import { createCliClient, CliStyles, createToolkit } from "toolnexus"
+
+const tk = await createToolkit({ skillsDir: "./skills" })
+const client = createCliClient({ style: CliStyles.Opencode, command: "opencode", toolkit: tk })
+const res = await client.run("What is my badge number?", { toolkit: tk })
+console.log(client.transport(), res.text)   // "acp" …
+await client.close()
+```
+
+- **Transports** `CliTransports.Auto | ACP | CLI`. Auto uses ACP when the style has an ACP launch
+  (`[command] + style.acp.args`, or `acpCommand` verbatim, e.g. claude's
+  `["npx", "-y", "@agentclientprotocol/claude-agent-acp@0.100.0"]`) and falls back to the one-shot
+  CLI only when the agent fails to start or answer `initialize` (`fallbackReason()` says why).
+  `transport()` is `"auto"` until the first call.
+- **ACP**: the toolkit is served as MCP on `127.0.0.1:<ephemeral>/mcp` behind a per-session
+  bearer token, `skill` is served as `load_skill`, and `beforeTool`/`afterTool` run at that
+  server. Only calls to served tools are allowed; the agent's own shell, edit and fetch are
+  rejected. Agents without http MCP get a stdio bridge (`bridgeCommand`, default
+  `toolnexus mcp-bridge`; `runMcpBridge` is the same thing as a function).
+- **One-shot**: the conversation goes in under a fixed preamble, the reply is parsed as an
+  OpenAI-shaped envelope, and tool calls run in the toolnexus loop. Streaming is refused.
+- Errors are pinned (`cli: command not found: <bin>`, `cli: exit <code>: <stderr>`,
+  `cli: empty reply`, `cli: no output file`, `cli: timed out after <ms>ms`). Default call timeout
+  300000 ms (`callTimeoutMs`). `usage` is always zero. Styles are data: `loadCliStyle(path | json)`
+  for your own.
+- Live check: `npm run example:cli -- claude opencode`.
+
 ## Documentation
 
 Everything else — the full surface, with runnable examples — lives on the docs site:
