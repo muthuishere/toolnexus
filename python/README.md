@@ -157,6 +157,34 @@ for f in res.files:
     print(f["from"], f["mimeType"], f["url"])
 ```
 
+## Embeddable MCP server (SPEC §7C.1)
+
+`toolkit.mcp_handler(...)` returns a plain ASGI app — `async (scope, receive, send)` — that
+you mount on your own router (Starlette `Mount`, FastAPI `app.mount`, bare uvicorn), behind
+your own TLS, CORS and OAuth. Every policy is a hook; toolnexus has no tenant or role concept.
+
+```python
+from toolnexus import McpDecision, create_toolkit, identity_from
+
+tk = await create_toolkit()
+app = tk.mcp_handler(
+    authenticate=lambda req: verify(req.header("Authorization")),   # raise => 401
+    www_authenticate=lambda req, err: 'Bearer resource_metadata="https://…"',
+    list_tools=lambda ctx: tools_for(identity_from(ctx)),           # per request
+    before_call=lambda ctx, tool, args: McpDecision(kind="confirm", message="Sure?"),
+    on_call=lambda ev: print(ev.name, ev.decision, ev.ms),
+)
+app.notify_tools_changed()   # notifications/tools/list_changed on every GET stream
+```
+
+Inside a tool, `identity_from()`, `request_from()`, `mcp_session_id_from()` and
+`mcp_request_meta_from()` read the current request. A confirm is sent as
+`elicitation/create` on the same POST's event stream when the client can elicit; otherwise
+the decision's `result` (e.g. a "re-call with a nonce" message) is returned. Also:
+resources/prompts hooks, pluggable `session_ids`, `stateless`, `protocol_versions`
+(`2025-06-18` default, `2025-11-25` opt-in), and `ToolResult.structured` / `meta`,
+`Tool.output_schema` / `annotations`. Runnable: `python examples/mcp_handler.py`.
+
 ## Documentation
 
 Everything else — the full surface, with runnable examples — lives on the docs site:
