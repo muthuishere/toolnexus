@@ -1,0 +1,120 @@
+[
+  {
+    "style": "claude",
+    "installed": true,
+    "ok": true,
+    "totalMs": 6381,
+    "invocationMs": [
+      3750,
+      2630
+    ],
+    "promptBytes": [
+      1223,
+      1511
+    ],
+    "toolCalls": [
+      "lookup_order"
+    ],
+    "text": "Order A-1042 has shipped, and its tracking number is ZX-7731-QP.",
+    "rawReplies": [
+      "{\"tool_calls\": [{\"id\": \"call_1\", \"type\": \"function\", \"function\": {\"name\": \"lookup_order\", \"arguments\": \"{\\\"order_id\\\": \\\"A-1042\\\"}\"}}]}\n",
+      "{\"content\": \"Order A-1042 has shipped, and its tracking number is ZX-7731-QP.\"}\n"
+    ]
+  },
+  {
+    "style": "codex",
+    "installed": true,
+    "ok": true,
+    "totalMs": 11804,
+    "invocationMs": [
+      6821,
+      4983
+    ],
+    "promptBytes": [
+      1223,
+      1510
+    ],
+    "toolCalls": [
+      "lookup_order"
+    ],
+    "text": "The tracking number for order A-1042 is ZX-7731-QP.",
+    "rawReplies": [
+      "{\"tool_calls\":[{\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"lookup_order\",\"arguments\":\"{\\\"order_id\\\":\\\"A-1042\\\"}\"}}]}",
+      "{\"content\":\"The tracking number for order A-1042 is ZX-7731-QP.\"}"
+    ]
+  },
+  {
+    "style": "copilot",
+    "installed": true,
+    "ok": true,
+    "totalMs": 37505,
+    "invocationMs": [
+      23240,
+      14264
+    ],
+    "promptBytes": [
+      1223,
+      1544
+    ],
+    "toolCalls": [
+      "lookup_order"
+    ],
+    "text": "The tracking number for order A-1042 is ZX-7731-QP.",
+    "rawReplies": [
+      "{\"tool_calls\":[{\"id\":\"call_lookup_order_A1042\",\"type\":\"function\",\"function\":{\"name\":\"lookup_order\",\"arguments\":\"{\\\"order_id\\\":\\\"A-1042\\\"}\"}}]}\n\n",
+      "{\"content\":\"The tracking number for order A-1042 is ZX-7731-QP.\"}\n\n"
+    ]
+  },
+  {
+    "style": "devin",
+    "installed": true,
+    "ok": true,
+    "totalMs": 28715,
+    "invocationMs": [
+      14941,
+      13773
+    ],
+    "promptBytes": [
+      1223,
+      1511
+    ],
+    "toolCalls": [
+      "lookup_order"
+    ],
+    "text": "The tracking number for order A-1042 is ZX-7731-QP.",
+    "rawReplies": [
+      "{\"tool_calls\": [{\"id\": \"call_1\", \"type\": \"function\", \"function\": {\"name\": \"lookup_order\", \"arguments\": \"{\\\"order_id\\\": \\\"A-1042\\\"}\"}}]}\n",
+      "```json\n{\"content\": \"The tracking number for order A-1042 is ZX-7731-QP.\"}\n```\n"
+    ]
+  },
+  {
+    "style": "opencode",
+    "installed": true,
+    "ok": true,
+    "totalMs": 5117,
+    "invocationMs": [
+      2946,
+      2170
+    ],
+    "promptBytes": [
+      1223,
+      1510
+    ],
+    "toolCalls": [
+      "lookup_order"
+    ],
+    "text": "The tracking number for order A-1042 is ZX-7731-QP.",
+    "rawReplies": [
+      "{\"tool_calls\": [{\"id\": \"call_1\", \"type\": \"function\", \"function\": {\"name\": \"lookup_order\", \"arguments\": \"{\\\"order_id\\\":\\\"A-1042\\\"}\"}}]}\n",
+      "{\"content\": \"The tracking number for order A-1042 is ZX-7731-QP.\"}\n"
+    ]
+  },
+  {
+    "style": "gemini",
+    "installed": false
+  },
+  {
+    "style": "goose",
+    "installed": false
+  }
+]

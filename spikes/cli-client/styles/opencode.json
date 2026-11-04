@@ -1,0 +1,16 @@
+{
+  "name": "opencode",
+  "binary": "opencode",
+  "args": [
+    "run",
+    [
+      "--model",
+      "{{model}}"
+    ],
+    "{{prompt}}"
+  ],
+  "prompt": "arg",
+  "answer": "stdout",
+  "verified": "opencode v2.0.23 run --help, 2026-11-04",
+  "notes": "Model is provider/model. Prompt as one argv element (128 KiB per-argument cap on Linux)."
+}

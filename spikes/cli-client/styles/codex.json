@@ -1,0 +1,24 @@
+{
+  "name": "codex",
+  "binary": "codex",
+  "args": [
+    "exec",
+    "--skip-git-repo-check",
+    "--ephemeral",
+    "--color",
+    "never",
+    "--sandbox",
+    "read-only",
+    "--output-last-message",
+    "{{out}}",
+    [
+      "--model",
+      "{{model}}"
+    ],
+    "-"
+  ],
+  "prompt": "stdin",
+  "answer": "out",
+  "verified": "codex-cli 0.160.0 exec --help, 2026-11-04",
+  "notes": "'-' reads the prompt from stdin; the final message comes from --output-last-message, stdout carries progress."
+}
