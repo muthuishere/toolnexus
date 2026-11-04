@@ -28,6 +28,9 @@ type liveResult struct {
 }
 
 func main() {
+	if subcommand() {
+		return
+	}
 	all, err := BuiltinStyles()
 	if err != nil {
 		panic(err)

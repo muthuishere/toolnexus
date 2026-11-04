@@ -1,0 +1,612 @@
+[
+  {
+    "agent": "claude",
+    "path": "acp-http",
+    "command": "npx -y @agentclientprotocol/claude-agent-acp@0.100.0",
+    "version": "2.1.318 (Claude Code)",
+    "agentInfo": {
+      "name": "@agentclientprotocol/claude-agent-acp",
+      "title": "Claude Agent",
+      "version": "0.100.0"
+    },
+    "mcpCapabilities": {
+      "http": true,
+      "sse": true
+    },
+    "mcpServersEntry": {
+      "headers": [],
+      "name": "toolnexus",
+      "type": "http",
+      "url": "http://127.0.0.1:<port>/mcp"
+    },
+    "openMs": 68326,
+    "checks": [
+      {
+        "check": "mcp",
+        "pass": true,
+        "ms": 6184,
+        "toolRanOnOurServer": true,
+        "tokenInText": true,
+        "servedToolCalls": [
+          "vault_get_vault_code"
+        ],
+        "text": "MCP-E73E2655B36C"
+      },
+      {
+        "check": "skill",
+        "pass": true,
+        "ms": 5117,
+        "toolRanOnOurServer": true,
+        "tokenInText": true,
+        "servedToolCalls": [
+          "skill"
+        ],
+        "text": "SKL-D70FC9B91374"
+      },
+      {
+        "check": "native",
+        "pass": true,
+        "ms": 4373,
+        "toolRanOnOurServer": true,
+        "tokenInText": true,
+        "servedToolCalls": [
+          "get_badge_number"
+        ],
+        "text": "FN-E059B324DBD3"
+      }
+    ],
+    "stderrTail": "e] sessionId=67e7ddf2-f98e-4ced-b472-cae94c7378a2 phase=agents durationMs=0 totalMs=3758\n[session/create] sessionId=67e7ddf2-f98e-4ced-b472-cae94c7378a2 phase=ultracode durationMs=3 totalMs=3761\n[session/create] sessionId=67e7ddf2-f98e-4ced-b472-cae94c7378a2 phase=register durationMs=1 totalMs=3762\n"
+  },
+  {
+    "agent": "claude",
+    "path": "acp-stdio-bridge",
+    "command": "npx -y @agentclientprotocol/claude-agent-acp@0.100.0",
+    "version": "2.1.318 (Claude Code)",
+    "agentInfo": {
+      "name": "@agentclientprotocol/claude-agent-acp",
+      "title": "Claude Agent",
+      "version": "0.100.0"
+    },
+    "mcpCapabilities": {
+      "http": true,
+      "sse": true
+    },
+    "mcpServersEntry": {
+      "args": [
+        "bridge",
+        "http://127.0.0.1:<port>/mcp"
+      ],
+      "command": "<this binary>",
+      "env": [],
+      "name": "toolnexus"
+    },
+    "openMs": 1707,
+    "checks": [
+      {
+        "check": "mcp",
+        "pass": true,
+        "ms": 5852,
+        "toolRanOnOurServer": true,
+        "tokenInText": true,
+        "servedToolCalls": [
+          "vault_get_vault_code"
+        ],
+        "text": "MCP-AE169CDB71D3"
+      },
+      {
+        "check": "skill",
+        "pass": true,
+        "ms": 5224,
+        "toolRanOnOurServer": true,
+        "tokenInText": true,
+        "servedToolCalls": [
+          "skill"
+        ],
+        "text": "SKL-9965B6167764"
+      },
+      {
+        "check": "native",
+        "pass": true,
+        "ms": 4543,
+        "toolRanOnOurServer": true,
+        "tokenInText": true,
+        "servedToolCalls": [
+          "get_badge_number"
+        ],
+        "text": "FN-11D01428518B"
+      }
+    ],
+    "stderrTail": "eate] sessionId=ee661059-3550-4843-aff6-58d9fbaea9b1 phase=agents durationMs=0 totalMs=511\n[session/create] sessionId=ee661059-3550-4843-aff6-58d9fbaea9b1 phase=ultracode durationMs=3 totalMs=514\n[session/create] sessionId=ee661059-3550-4843-aff6-58d9fbaea9b1 phase=register durationMs=1 totalMs=515\n"
+  },
+  {
+    "agent": "codex",
+    "path": "acp-http",
+    "command": "npx -y @zed-industries/codex-acp@0.16.0",
+    "version": "codex-cli 0.160.0",
+    "agentInfo": {
+      "name": "codex-acp",
+      "title": "Codex",
+      "version": "0.16.0"
+    },
+    "mcpCapabilities": {
+      "http": true,
+      "sse": false,
+      "acp": false
+    },
+    "mcpServersEntry": {
+      "headers": [],
+      "name": "toolnexus",
+      "type": "http",
+      "url": "http://127.0.0.1:<port>/mcp"
+    },
+    "openMs": 14518,
+    "checks": [
+      {
+        "check": "mcp",
+        "pass": false,
+        "ms": 2559,
+        "toolRanOnOurServer": false,
+        "tokenInText": false,
+        "text": "Model metadata for `gpt-6.1-sol` not found. Defaulting to fallback metadata; this can degrade performance and cause issues.",
+        "error": "-32603 Internal error {\"message\":\"{\\\"type\\\":\\\"error\\\",\\\"status\\\":400,\\\"error\\\":{\\\"type\\\":\\\"invalid_request_error\\\",\\\"message\\\":\\\"The 'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account.\\\",\\\"code\\\":\\\"model_not_found\\\"}}\",\"codex_error_info\":\"other\"}"
+      },
+      {
+        "check": "skill",
+        "pass": false,
+        "ms": 3885,
+        "toolRanOnOurServer": false,
+        "tokenInText": false,
+        "text": "Model metadata for `gpt-6.1-sol` not found. Defaulting to fallback metadata; this can degrade performance and cause issues.",
+        "error": "-32603 Internal error {\"message\":\"{\\\"type\\\":\\\"error\\\",\\\"status\\\":400,\\\"error\\\":{\\\"type\\\":\\\"invalid_request_error\\\",\\\"message\\\":\\\"The 'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account.\\\",\\\"code\\\":\\\"model_not_found\\\"}}\",\"codex_error_info\":\"other\"}"
+      },
+      {
+        "check": "native",
+        "pass": false,
+        "ms": 3249,
+        "toolRanOnOurServer": false,
+        "tokenInText": false,
+        "text": "Model metadata for `gpt-6.1-sol` not found. Defaulting to fallback metadata; this can degrade performance and cause issues.",
+        "error": "-32603 Internal error {\"message\":\"{\\\"type\\\":\\\"error\\\",\\\"status\\\":400,\\\"error\\\":{\\\"type\\\":\\\"invalid_request_error\\\",\\\"message\\\":\\\"The 'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account.\\\",\\\"code\\\":\\\"model_not_found\\\"}}\",\"codex_error_info\":\"other\"}"
+      }
+    ],
+    "stderrTail": ":32:42.096004Z\u001b[0m \u001b[31mERROR\u001b[0m \u001b[2mcodex_acp::thread\u001b[0m\u001b[2m:\u001b[0m Unhandled error during turn: {\"type\":\"error\",\"status\":400,\"error\":{\"type\":\"invalid_request_error\",\"message\":\"The 'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account.\",\"code\":\"model_not_found\"}} Some(Other)\n"
+  },
+  {
+    "agent": "codex",
+    "path": "cli",
+    "command": "codex",
+    "version": "codex-cli 0.160.0",
+    "openMs": 0,
+    "checks": [
+      {
+        "check": "mcp",
+        "pass": true,
+        "ms": 21170,
+        "toolRanOnOurServer": true,
+        "tokenInText": true,
+        "servedToolCalls": [
+          "vault_get_vault_code"
+        ],
+        "text": "MCP-5051658FD89B"
+      },
+      {
+        "check": "skill",
+        "pass": true,
+        "ms": 19382,
+        "toolRanOnOurServer": true,
+        "tokenInText": true,
+        "servedToolCalls": [
+          "skill"
+        ],
+        "text": "SKL-CA3207741C35"
+      },
+      {
+        "check": "native",
+        "pass": true,
+        "ms": 19534,
+        "toolRanOnOurServer": true,
+        "tokenInText": true,
+        "servedToolCalls": [
+          "get_badge_number"
+        ],
+        "text": "FN-D480047C9285"
+      }
+    ]
+  },
+  {
+    "agent": "copilot",
+    "path": "acp-http",
+    "command": "copilot --acp",
+    "version": "GitHub Copilot CLI 1.0.105.",
+    "agentInfo": {
+      "name": "Copilot",
+      "title": "Copilot",
+      "version": "1.0.105"
+    },
+    "mcpCapabilities": {
+      "http": true,
+      "sse": true
+    },
+    "mcpServersEntry": {
+      "headers": [],
+      "name": "toolnexus",
+      "type": "http",
+      "url": "http://127.0.0.1:<port>/mcp"
+    },
+    "openMs": 2290,
+    "checks": [
+      {
+        "check": "mcp",
+        "pass": true,
+        "ms": 8220,
+        "toolRanOnOurServer": true,
+        "tokenInText": true,
+        "servedToolCalls": [
+          "vault_get_vault_code"
+        ],
+        "agentToolCalls": [
+          "toolnexus-vault_get_vault_code"
+        ],
+        "permissions": [
+          {
+            "title": "vault_get_vault_code",
+            "ours": true,
+            "optionId": "allow_once"
+          }
+        ],
+        "text": "MCP-C13D71568B17"
+      },
+      {
+        "check": "skill",
+        "pass": true,
+        "ms": 6845,
+        "toolRanOnOurServer": true,
+        "tokenInText": true,
+        "servedToolCalls": [
+          "skill"
+        ],
+        "agentToolCalls": [
+          "toolnexus-skill"
+        ],
+        "permissions": [
+          {
+            "title": "skill",
+            "ours": true,
+            "optionId": "allow_once"
+          }
+        ],
+        "text": "SKL-6A55F0771E43"
+      },
+      {
+        "check": "native",
+        "pass": true,
+        "ms": 3592,
+        "toolRanOnOurServer": true,
+        "tokenInText": true,
+        "servedToolCalls": [
+          "get_badge_number"
+        ],
+        "agentToolCalls": [
+          "toolnexus-get_badge_number"
+        ],
+        "permissions": [
+          {
+            "title": "get_badge_number",
+            "ours": true,
+            "optionId": "allow_once"
+          }
+        ],
+        "text": "FN-3870F45C3B9A"
+      }
+    ]
+  },
+  {
+    "agent": "devin",
+    "path": "acp-project-mcp-json",
+    "command": "devin acp",
+    "version": "devin 2026.8.18 (16737566)",
+    "agentInfo": {
+      "name": "affogato",
+      "title": "Affogato Agent",
+      "version": "0.0.0-dev"
+    },
+    "mcpCapabilities": {
+      "http": false,
+      "sse": false
+    },
+    "mcpServersEntry": {
+      "args": [
+        "bridge",
+        "http://127.0.0.1:<port>/mcp"
+      ],
+      "command": "<this binary>",
+      "env": [],
+      "name": "toolnexus"
+    },
+    "openMs": 3828,
+    "checks": [
+      {
+        "check": "mcp",
+        "pass": true,
+        "ms": 15703,
+        "toolRanOnOurServer": true,
+        "tokenInText": true,
+        "servedToolCalls": [
+          "vault_get_vault_code"
+        ],
+        "agentToolCalls": [
+          "Listed MCP tools for toolnexus",
+          "Calling vault_get_vault_code from toolnexus"
+        ],
+        "permissions": [
+          {
+            "title": "Calling vault_get_vault_code from toolnexus",
+            "ours": true,
+            "optionId": "allow_once"
+          }
+        ],
+        "text": "MCP-4F884B8B87ED"
+      },
+      {
+        "check": "skill",
+        "pass": true,
+        "ms": 5312,
+        "toolRanOnOurServer": true,
+        "tokenInText": true,
+        "servedToolCalls": [
+          "skill"
+        ],
+        "agentToolCalls": [
+          "Calling skill from toolnexus"
+        ],
+        "permissions": [
+          {
+            "title": "Calling skill from toolnexus",
+            "ours": true,
+            "optionId": "allow_once"
+          }
+        ],
+        "text": "SKL-7C94F1F94A1C"
+      },
+      {
+        "check": "native",
+        "pass": true,
+        "ms": 18866,
+        "toolRanOnOurServer": true,
+        "tokenInText": true,
+        "servedToolCalls": [
+          "get_badge_number"
+        ],
+        "agentToolCalls": [
+          "Calling get_badge_number from toolnexus"
+        ],
+        "permissions": [
+          {
+            "title": "Calling get_badge_number from toolnexus",
+            "ours": true,
+            "optionId": "allow_once"
+          }
+        ],
+        "text": "FN-67021FACAB4C"
+      }
+    ],
+    "stderrTail": "aved 1 message nodes (starting from 45) for session deserted-venom\n2026-11-04T12:36:19.158002Z  INFO chisel_agent::session_db: Saved 46 message nodes (starting from 0) for session deserted-venom\n2026-11-04T12:36:19.159384Z  INFO chisel_agent::acp_server: ACP: saved session deserted-venom (46 nodes)\n"
+  },
+  {
+    "agent": "gemini",
+    "path": "acp-http",
+    "command": "npx -y @google/gemini-cli@0.66.0 --acp --skip-trust",
+    "version": "@google/gemini-cli@0.66.0",
+    "agentInfo": {
+      "name": "gemini-cli",
+      "title": "Gemini CLI",
+      "version": "0.66.0"
+    },
+    "mcpCapabilities": {
+      "http": true,
+      "sse": true
+    },
+    "mcpServersEntry": {
+      "headers": [],
+      "name": "toolnexus",
+      "type": "http",
+      "url": "http://127.0.0.1:<port>/mcp"
+    },
+    "openMs": 1891,
+    "checks": [
+      {
+        "check": "mcp",
+        "pass": true,
+        "ms": 27858,
+        "toolRanOnOurServer": true,
+        "tokenInText": true,
+        "servedToolCalls": [
+          "vault_get_vault_code"
+        ],
+        "permissions": [
+          {
+            "title": "vault_get_vault_code (toolnexus MCP Server)",
+            "ours": true,
+            "optionId": "proceed_once"
+          }
+        ],
+        "text": "MCP-F681D2814AD7"
+      },
+      {
+        "check": "skill",
+        "pass": true,
+        "ms": 13543,
+        "toolRanOnOurServer": true,
+        "tokenInText": true,
+        "servedToolCalls": [
+          "skill"
+        ],
+        "permissions": [
+          {
+            "title": "skill(name: secret-recipe)",
+            "ours": true,
+            "optionId": "proceed_once"
+          }
+        ],
+        "text": "SKL-A67E61D1A725"
+      },
+      {
+        "check": "native",
+        "pass": true,
+        "ms": 16251,
+        "toolRanOnOurServer": true,
+        "tokenInText": true,
+        "servedToolCalls": [
+          "get_badge_number"
+        ],
+        "permissions": [
+          {
+            "title": "get_badge_number (toolnexus MCP Server)",
+            "ours": true,
+            "optionId": "proceed_once"
+          }
+        ],
+        "text": "FN-73EFC403D94F"
+      }
+    ],
+    "stderrTail": "npm notice run npx\nnpm notice run 'gemini' --acp --skip-trust\n"
+  },
+  {
+    "agent": "opencode",
+    "path": "acp-http",
+    "command": "opencode acp",
+    "version": "opencode v2.0.23",
+    "agentInfo": {
+      "name": "OpenCode",
+      "version": "2.0.23"
+    },
+    "mcpCapabilities": {
+      "http": true,
+      "sse": false
+    },
+    "mcpServersEntry": {
+      "headers": [],
+      "name": "toolnexus",
+      "type": "http",
+      "url": "http://127.0.0.1:<port>/mcp"
+    },
+    "openMs": 499,
+    "checks": [
+      {
+        "check": "mcp",
+        "pass": true,
+        "ms": 15625,
+        "toolRanOnOurServer": true,
+        "tokenInText": true,
+        "servedToolCalls": [
+          "vault_get_vault_code"
+        ],
+        "agentToolCalls": [
+          "execute"
+        ],
+        "text": "I'll call the vault tool to retrieve the code for you.MCP-39A62E0B420B"
+      },
+      {
+        "check": "skill",
+        "pass": true,
+        "ms": 11878,
+        "toolRanOnOurServer": true,
+        "tokenInText": true,
+        "servedToolCalls": [
+          "skill"
+        ],
+        "agentToolCalls": [
+          "execute"
+        ],
+        "text": "SKL-E6FFB142CE3F"
+      },
+      {
+        "check": "native",
+        "pass": true,
+        "ms": 11494,
+        "toolRanOnOurServer": true,
+        "tokenInText": true,
+        "servedToolCalls": [
+          "get_badge_number"
+        ],
+        "agentToolCalls": [
+          "execute"
+        ],
+        "text": "FN-758377E2D033"
+      }
+    ]
+  },
+  {
+    "agent": "opencode",
+    "path": "acp-stdio-bridge",
+    "command": "opencode acp",
+    "version": "opencode v2.0.23",
+    "agentInfo": {
+      "name": "OpenCode",
+      "version": "2.0.23"
+    },
+    "mcpCapabilities": {
+      "http": true,
+      "sse": false
+    },
+    "mcpServersEntry": {
+      "args": [
+        "bridge",
+        "http://127.0.0.1:<port>/mcp"
+      ],
+      "command": "<this binary>",
+      "env": [],
+      "name": "toolnexus"
+    },
+    "openMs": 532,
+    "checks": [
+      {
+        "check": "mcp",
+        "pass": true,
+        "ms": 9020,
+        "toolRanOnOurServer": true,
+        "tokenInText": true,
+        "servedToolCalls": [
+          "vault_get_vault_code"
+        ],
+        "agentToolCalls": [
+          "execute"
+        ],
+        "text": "Calling vault_get_vault_code to retrieve the code.MCP-50A03C8C9D2F"
+      },
+      {
+        "check": "skill",
+        "pass": true,
+        "ms": 8416,
+        "toolRanOnOurServer": true,
+        "tokenInText": true,
+        "servedToolCalls": [
+          "skill"
+        ],
+        "agentToolCalls": [
+          "execute"
+        ],
+        "text": "Loading secret-recipe via toolnexus skill — fetching its code now.SKL-1CAF4A5829AE"
+      },
+      {
+        "check": "native",
+        "pass": true,
+        "ms": 6363,
+        "toolRanOnOurServer": true,
+        "tokenInText": true,
+        "servedToolCalls": [
+          "get_badge_number"
+        ],
+        "agentToolCalls": [
+          "execute"
+        ],
+        "text": "Calling get_badge_number to retrieve your badge.FN-663571EF27E5"
+      }
+    ]
+  },
+  {
+    "agent": "goose",
+    "path": "acp",
+    "error": "not installed"
+  }
+]
