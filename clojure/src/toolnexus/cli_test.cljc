@@ -170,6 +170,10 @@ while [ $# -gt 0 ]; do
     --f) shift; prompt=$(cat \"$1\"); pset=1;;
     --o) shift; out=\"$1\";;
     --argv) printf '{\"content\":\"%s\"}' \"$all\"; exit 0;;
+    # style-agnostic: every built-in style's real argv works — the prompt as an
+    # arg, the {{file}} temp file, the {{out}} temp path (not created yet)
+    \"__PRE__\"*) prompt=\"$1\"; pset=1;;
+    *toolnexus-cli*) if [ -f \"$1\" ]; then prompt=$(cat \"$1\"); pset=1; else out=\"$1\"; fi;;
   esac
   shift
 done
@@ -203,7 +207,8 @@ printf '%s' \"$reply\"
         path (str dir "/fakecli")]
     (fs/write-file path (-> fake-script
                             (str/replace "__DIR__" (sh-quote (fs/real-path ".")))
-                            (str/replace "__SELF__" (self-command))))
+                            (str/replace "__SELF__" (self-command))
+                            (str/replace "__PRE__" (subs cli/preamble 0 20))))
     (proc/sh ["chmod" "755" path] {:timeout-ms 5000})
     path))
 
@@ -560,3 +565,59 @@ printf '%s' \"$reply\"
                  (:transport o) (assoc :transport (keyword (:transport o))))]
         (is (= (:error cs) (err-of #(cli/create-cli-client o'))) (pr-str o))))
     (is (= (str/replace (:renderEmpty fx) "<PREAMBLE>" cli/preamble) (cli/render-cli-prompt nil nil)))))
+
+;; ===========================================================================
+;; streaming never errors (SPEC §8C, ADR 0037 decision 9)
+;; ===========================================================================
+;; This port has no streaming entry point: `:on-event` is a sink on the
+;; non-streaming loop. What the contract asks of it is that a request carrying
+;; {:stream true} is answered whole, never refused, on either transport.
+
+(deftest generate-answers-a-stream-request-whole
+  (let [c   (cli/create-cli-client (fake-cli-opts "x"))
+        gen #'cli/generate]
+    (try
+      (is (= "hello" (:content (gen (::cli/cli c) {:messages [{:role "user" :content "hi"}]
+                                                   :tools [] :body {:stream true}}))))
+      (finally (cli/close! c)))))
+
+(defn- run-with-events [opts tk]
+  (let [evs (atom [])
+        c   (cli/create-cli-client opts)]
+    (try
+      (let [res (client/run c "What is my badge number?" {:toolkit tk :on-event #(swap! evs conj %)})]
+        [res (mapv :type @evs) (cli/transport c)])
+      (finally (cli/close! c)))))
+
+(deftest one-shot-stream-request-with-a-tool-call
+  (let [[res types] (run-with-events (fake-cli-opts "tool") (badge-toolkit))]
+    (is (str/includes? (str (:text res)) "BADGE-77Q"))
+    (is (= ["tool_call" "tool_result"] (filterv #{"tool_call" "tool_result"} types)))
+    (is (= "done" (last types)))
+    (is (not-any? #{"error"} types))))
+
+(deftest acp-stream-request-against-the-fake-agent
+  (let [[o _]       (fake-acp-opts {"FAKE_HTTP" "1"})
+        [res types] (run-with-events (assoc o :transport :acp) (:toolkit o))]
+    (is (str/includes? (str (:text res)) "BADGE-77Q"))
+    (is (= "done" (last types)))
+    (is (not-any? #{"error"} types))))
+
+(deftest stream-every-style-both-transports
+  (doseq [st [:claude :codex :copilot :opencode :devin :gemini :goose :custom]
+          tr [:cli :acp]]
+    (testing (str (name st) "/" (name tr))
+      (let [fake (fake-cli!)
+            tk   (badge-toolkit)
+            o    (cond-> {:style st :command fake :transport tr :toolkit tk
+                          :env {"TN_FAKE_CLI" "tool"}}
+                   (= :custom st) (assoc :args [] :prompt "stdin" :answer "stdout")
+                   (= :acp tr) (merge (select-keys (first (fake-acp-opts {"FAKE_HTTP" "1"}))
+                                                   [:env :bridge-command :call-timeout-ms])
+                                      {:acp-command [fake "acp"]}))
+            [res types t] (run-with-events o tk)]
+        (is (not-any? #{"error"} types))
+        (is (= "done" (last types)))
+        (is (str/includes? (str (:text res)) "BADGE-77Q"))
+        (when (= :cli tr) (is (some #{"tool_call"} types) "one-shot carries the loop's tool_call"))
+        (is (= (name tr) t))))))

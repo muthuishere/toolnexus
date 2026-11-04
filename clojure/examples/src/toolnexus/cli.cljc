@@ -342,10 +342,10 @@
 (defn- generate [c req]
   (if-let [s (session! c)]
     (cli-acp/generate s req)
-    (do
-      (when (true? (get-in req [:body :stream]))
-        (fail! "cli: streaming is not supported by the one-shot CLI transport; use Run"))
-      (parse-cli-reply (invoke c (render-cli-prompt (:messages req) (:tools req)))))))
+    ;; SPEC §8C: a CLI client never refuses to stream. A request that asks for
+    ;; one (:body {:stream true}) is answered whole — one non-incremental reply —
+    ;; on the one-shot transport and on ACP alike.
+    (parse-cli-reply (invoke c (render-cli-prompt (:messages req) (:tools req))))))
 
 (defn create-cli-client
   "A client whose model is an installed agent CLI — an ordinary in-process
