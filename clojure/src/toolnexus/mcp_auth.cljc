@@ -526,7 +526,7 @@
                                             (str (:clientMetadataUrl c))))
                             _ (when-not client-id
                                 (throw (ex-info (str "no client identity for " issuer ": "
-                                                     (if cimd? "clientMetadataUrl is not set"
+                                                     (if cimd? "auth.clientMetadataUrl is not set"
                                                          "it does not support Client ID Metadata Documents")
                                                      " and no client id is configured — register an app with "
                                                      issuer " and set auth.clientId (dynamic client registration is not supported)")
