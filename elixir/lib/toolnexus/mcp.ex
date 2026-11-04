@@ -15,7 +15,7 @@ defmodule Toolnexus.Mcp do
   require Logger
 
   alias Toolnexus.{ContentPart, Tool, ToolResult}
-  alias Toolnexus.Mcp.Connection
+  alias Toolnexus.Mcp.{Connection, Direct}
   alias Toolnexus.Mcp.Transport.StreamableHttp
 
   @default_timeout 30_000
@@ -23,13 +23,14 @@ defmodule Toolnexus.Mcp do
 
   defmodule Source do
     @moduledoc "A loaded MCP source: tools, per-server status, and its own supervisor."
-    defstruct tools: [], status: %{}, sup: nil, connections: %{}
+    defstruct tools: [], status: %{}, sup: nil, connections: %{}, skills: []
 
     @type t :: %__MODULE__{
             tools: [Toolnexus.Tool.t()],
             status: %{String.t() => String.t()},
             sup: pid() | nil,
-            connections: %{String.t() => pid()}
+            connections: %{String.t() => pid() | Toolnexus.Mcp.Client2026.t()},
+            skills: [map()]
           }
   end
 
@@ -126,7 +127,13 @@ defmodule Toolnexus.Mcp do
   `"disabled"`). Options:
 
     * `:wait_for` — `(Request.t() -> Answer.t())`; advertises the elicitation
-      capability and bridges server `elicitation/create` onto it (§10).
+      capability and bridges server `elicitation/create` onto it (§10). On the
+      2026 path it also answers MRTR `input_required` requests and OAuth `pause`
+      authorizations inline; without it those suspend the tool call (§10 pending).
+    * `:token_store` — OAuth token store (`Toolnexus.Mcp.TokenStore`), default
+      in-memory per load (§2A.1a).
+    * `:open_url` — `(url -> :ok | {:error, reason})`, how OAuth `auto` mode opens
+      the browser (default: the OS opener).
     * `:deadline` (ms, alias `:timeout`) — overall load deadline; on exceed the
       whole load is aborted (in-flight connects torn down promptly) and a
       `RuntimeError` is raised (§2 Gap 3).
@@ -141,16 +148,17 @@ defmodule Toolnexus.Mcp do
   @spec load(String.t() | map(), keyword()) :: Source.t()
   def load(input, opts \\ []) do
     config = parse_config(input)
-    wait_for = Keyword.get(opts, :wait_for)
     on_server = Keyword.get(opts, :on_server)
     deadline = Keyword.get(opts, :deadline) || Keyword.get(opts, :timeout) || :infinity
     deadline_at = if deadline == :infinity, do: :infinity, else: now_ms() + deadline
 
     {:ok, sup} = DynamicSupervisor.start_link(strategy: :one_for_one)
 
+    load_opts = Keyword.take(opts, [:wait_for, :token_store, :open_url, :http])
+
     entries =
       Enum.map(config, fn {name, cfg} ->
-        {name, Task.async(fn -> safe_load_server(sup, name, cfg, wait_for) end)}
+        {name, Task.async(fn -> safe_load_server(sup, name, cfg, load_opts) end)}
       end)
 
     outcomes =
@@ -175,12 +183,13 @@ defmodule Toolnexus.Mcp do
     |> Enum.map(fn {name, _t} -> {name, Map.fetch!(outcomes, name)} end)
     |> Enum.reduce(acc, fn {name, outcome}, acc ->
       case outcome do
-        {:connected, tools, pid} ->
+        {:connected, tools, pid, skills} ->
           %{
             acc
             | tools: acc.tools ++ tools,
               status: Map.put(acc.status, name, "connected"),
-              connections: Map.put(acc.connections, name, pid)
+              connections: Map.put(acc.connections, name, pid),
+              skills: acc.skills ++ skills
           }
 
         {:failed, _reason} ->
@@ -213,7 +222,9 @@ defmodule Toolnexus.Mcp do
   defp report(f, name, outcome) when is_function(f, 1) do
     f.(
       case outcome do
-        {:connected, tools, _pid} -> %{name: name, status: "connected", tools: tools, error: nil}
+        {:connected, tools, _pid, _skills} ->
+          %{name: name, status: "connected", tools: tools, error: nil}
+
         {:failed, reason} -> %{name: name, status: "failed", tools: [], error: reason}
         :disabled -> %{name: name, status: "disabled", tools: [], error: nil}
       end
@@ -299,7 +310,7 @@ defmodule Toolnexus.Mcp do
 
         with {:ok, pid} <- conn.(server),
              {:uri, true} <- {:uri, uri != ""},
-             {:ok, res} <- Connection.request(pid, "resources/read", %{"uri" => uri}) do
+             {:ok, res} <- resource_request(pid, "resources/read", %{"uri" => uri}) do
           text =
             (res["contents"] || [])
             |> Enum.flat_map(fn
@@ -334,7 +345,7 @@ defmodule Toolnexus.Mcp do
   defp list_resources(servers, conns) do
     {lines, items} =
       Enum.reduce(servers, {[], []}, fn name, {lines, items} ->
-        case Connection.request(conns[name], "resources/list", %{}) do
+        case resource_request(conns[name], "resources/list", %{}) do
           {:ok, res} ->
             Enum.reduce(res["resources"] || [], {lines, items}, fn r, {lines, items} ->
               line =
@@ -368,6 +379,17 @@ defmodule Toolnexus.Mcp do
           output: Enum.join(lines, "\n"),
           metadata: %{count: length(items), resources: Enum.reverse(items)}
         }
+    end
+  end
+
+  defp resource_request(pid, method, params) when is_pid(pid),
+    do: Connection.request(pid, method, params)
+
+  defp resource_request(%Toolnexus.Mcp.Client2026{} = c, method, params) do
+    case Toolnexus.Mcp.Client2026.request(c, method, params) do
+      {:ok, r} -> {:ok, r}
+      {:pending, _, _} -> {:error, "authorization pending"}
+      {:error, e} -> {:error, Toolnexus.Mcp.Direct.text(e)}
     end
   end
 
@@ -407,7 +429,7 @@ defmodule Toolnexus.Mcp do
     try do
       entries =
         Enum.map(config, fn {name, cfg} ->
-          {name, Task.async(fn -> safe_list_server(sup, name, cfg) end)}
+          {name, Task.async(fn -> safe_list_server(sup, name, cfg, opts) end)}
         end)
 
       results = Task.yield_many(Enum.map(entries, &elem(&1, 1)), deadline)
@@ -452,10 +474,29 @@ defmodule Toolnexus.Mcp do
 
   # --- per-server load ---------------------------------------------------------------
 
-  defp safe_load_server(sup, name, cfg, wait_for) do
+  defp safe_load_server(sup, name, cfg, opts) do
     if enabled?(cfg) do
       try do
-        load_server(sup, name, cfg, wait_for)
+        case Direct.probe(sup, cfg, opts) do
+          {:modern, c, discover} ->
+            filter = &apply_tools_filter(name, &1, cfg["tools"])
+
+            case Direct.load(sup, name, cfg, c, discover, opts, filter) do
+              {:failed, reason} = f ->
+                warn_failed(name, reason)
+                f
+
+              ok ->
+                ok
+            end
+
+          {:fallback, cfg} ->
+            load_server(sup, name, cfg, opts[:wait_for])
+
+          {:failed, reason} = f ->
+            warn_failed(name, reason)
+            f
+        end
       rescue
         e ->
           warn_failed(name, Exception.message(e))
@@ -477,7 +518,7 @@ defmodule Toolnexus.Mcp do
     with :ok <- Connection.connect(pid, timeout),
          {:ok, defs} <- Connection.list_tools(pid) do
       kept = apply_tools_filter(name, defs, cfg["tools"])
-      {:connected, Enum.map(kept, &convert_tool(name, &1, pid)), pid}
+      {:connected, Enum.map(kept, &convert_tool(name, &1, pid)), pid, []}
     else
       {:error, reason} ->
         _ = DynamicSupervisor.terminate_child(sup, pid)
@@ -486,24 +527,31 @@ defmodule Toolnexus.Mcp do
     end
   end
 
-  defp safe_list_server(sup, name, cfg) do
+  defp safe_list_server(sup, name, cfg, opts) do
     if enabled?(cfg) do
       try do
-        {:ok, pid} = start_connection(sup, cfg, nil)
-        timeout = cfg["timeout"] || @default_timeout
+        case Direct.probe(sup, cfg, opts) do
+          {:modern, c, _discover} ->
+            result =
+              case Direct.list_defs(c, opts[:wait_for]) do
+                {:ok, defs} ->
+                  {:connected, defs}
 
-        result =
-          with :ok <- Connection.connect(pid, timeout),
-               {:ok, defs} <- Connection.list_tools(pid) do
-            {:connected, defs}
-          else
-            {:error, reason} ->
-              warn_failed(name, inspect(reason))
-              {:failed, inspect(reason)}
-          end
+                {:error, reason} ->
+                  warn_failed(name, reason)
+                  {:failed, reason}
+              end
 
-        _ = DynamicSupervisor.terminate_child(sup, pid)
-        result
+            Toolnexus.Mcp.Client2026.close(c)
+            result
+
+          {:fallback, cfg} ->
+            list_server_fallback(sup, name, cfg)
+
+          {:failed, reason} = f ->
+            warn_failed(name, reason)
+            f
+        end
       rescue
         e ->
           warn_failed(name, Exception.message(e))
@@ -516,6 +564,25 @@ defmodule Toolnexus.Mcp do
     else
       :disabled
     end
+  end
+
+  # The frozen path's list (§2.F); exceptions are caught by safe_list_server.
+  defp list_server_fallback(sup, name, cfg) do
+    {:ok, pid} = start_connection(sup, cfg, nil)
+    timeout = cfg["timeout"] || @default_timeout
+
+    result =
+      with :ok <- Connection.connect(pid, timeout),
+           {:ok, defs} <- Connection.list_tools(pid) do
+        {:connected, defs}
+      else
+        {:error, reason} ->
+          warn_failed(name, inspect(reason))
+          {:failed, inspect(reason)}
+      end
+
+    _ = DynamicSupervisor.terminate_child(sup, pid)
+    result
   end
 
   defp start_connection(sup, cfg, wait_for) do
@@ -597,7 +664,8 @@ defmodule Toolnexus.Mcp do
 
   def mcp_hints(_), do: nil
 
-  defp merged_schema(def, additional_properties?) do
+  @doc false
+  def merged_schema(def, additional_properties?) do
     base = def["inputSchema"] || %{}
     props = base["properties"] || %{}
     merged = base |> Map.put("type", "object") |> Map.put("properties", props)
@@ -608,7 +676,8 @@ defmodule Toolnexus.Mcp do
   #
   # Parts are collected BEFORE either short-circuit (SPEC §2): a server returning structured
   # content — or an error — alongside an image must keep the image. Nothing is dropped silently.
-  defp map_call_result(result, server) do
+  @doc false
+  def map_call_result(result, server) do
     metadata = %{server: server}
     content = result["content"]
     parts = content_parts(content)
