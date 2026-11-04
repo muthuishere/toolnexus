@@ -2669,6 +2669,82 @@ Idiom (behaviour identical; constructor and method spelling follow each port):
 - Conformance: `examples/judge/batteries/*.json` (recorded `static` calls → verdict) and
   `user-text-cases.json`.
 
+## 8C. CLI client — agent CLIs as tool-calling models (ADR 0037)
+
+`createCliClient({ style, command, model?, transport?, toolkit?, acpCommand?, bridgeCommand?,
+args?, prompt?, answer?, env?, callTimeoutMs?, cwd?, …every in-process client option })` returns an
+ordinary client (§8, built on the in-process seam) plus `close()` and `transport()`. Status: **golang
+only**; the other seven ports are tracked in `openspec/changes/add-cli-client-styles`.
+
+- **`style`** is a closed enum, never a string: `CliStyles.Claude | Codex | Copilot | Opencode |
+  Devin | Gemini | Goose | Custom` (Go: typed `CliStyle` values on a `CliStyles` struct; TS/Java/
+  C#/Rust `enum`; Python `Enum`; Elixir/Clojure a closed atom/keyword set checked at construction).
+  A user style (`loadCliStyle(path | json)`) may replace it.
+- **`command` is required** — path or name. Nothing is embedded or defaulted.
+  Missing ⇒ `cli: Command is required (path or name of the CLI binary)`.
+- **Styles are data**: `conformance/cli-styles/<name>.json` + `preamble.txt`, embedded
+  byte-identically (test-asserted). Fields: `name`, `args` (strings; an array element is an optional
+  group kept only when a model is set), `prompt` `stdin|arg|file`, `answer` `stdout|out`,
+  `timeoutMs?`, `env?`, `verified`, `notes`, `acp?` `{args, projectMcpFile?, verified, notes}`.
+  Placeholders: `{{prompt}}`, `{{file}}`, `{{out}}`, `{{model}}`; anything else is
+  `cli: unknown placeholder {{x}}`. A model on a style without `{{model}}` ⇒
+  `cli: style "<name>" takes no model`.
+- **`transport`** enum `CliTransports.Auto | ACP | CLI`. Auto: ACP when an ACP launch exists
+  (`[command] + style.acp.args`, or `acpCommand` verbatim), falling back to the one-shot CLI **only**
+  when the agent fails to start or to answer `initialize`; later failures are errors. `transport()`
+  is `auto` until the first model call, then `acp` or `cli`.
+- **Default call timeout 300000 ms** per CLI invocation / ACP prompt. Failures are final (no retries).
+
+### ACP transport — the toolkit goes in as MCP
+
+1. Serve `toolkit` as streamable-HTTP MCP (§7C tool mapping) on `127.0.0.1:<ephemeral>/mcp`,
+   requiring `Authorization: Bearer <token>` (401 otherwise); token = 32 random bytes, hex, per
+   session, never logged.
+2. The `skill` tool is served as **`load_skill`** with the §3 skills prompt appended to its
+   description (copilot and devin ship a built-in `skill`). No served tool is named `skill`.
+3. `initialize` sends `clientCapabilities {fs:{readTextFile:false,writeTextFile:false},terminal:false}`.
+   `session/new` `mcpServers` holds one entry named `toolnexus`:
+   - agent advertises `agentCapabilities.mcpCapabilities.http` ⇒
+     `{"type":"http","name":"toolnexus","url":"…/mcp","headers":[{"name":"Authorization","value":"Bearer …"}]}`
+   - otherwise, with a bridge (`bridgeCommand`, default `toolnexus mcp-bridge` on PATH) ⇒
+     `{"name":"toolnexus","command":…,"args":[…,"<url>"],"env":[{"name":"TOOLNEXUS_MCP_TOKEN","value":…}]}` (no `type`)
+   - style `acp.projectMcpFile` (devin) ⇒ **no** entry; the session cwd is a fresh temp dir holding
+     that file (0600): `{"mcpServers":{"toolnexus":{"type":"http","url":…,"headers":{"Authorization":"Bearer …"}}}}`.
+4. `model` ⇒ `session/set_config_option {configId:"model",value}`, else `session/set_model {modelId}`;
+   both failing is an error. Passed through unchanged.
+5. **Permissions, per `toolCallId`**: decided once per id and cached; identity = the request's title,
+   else the first non-empty title of that id's `tool_call`/`tool_call_update`. Allowed only if it
+   equals `<tool>`, `mcp__toolnexus__<tool>`, `toolnexus/<tool>`, `<tool> (toolnexus MCP Server)`,
+   `Calling <tool> from toolnexus`, or is `<tool>(…)`, for a served tool ⇒ `allow_once` (else first
+   `allow*`). Everything else, and any request without an id ⇒ a `reject*` option.
+6. Each turn is one `session/prompt` (the §8 ACP rendering); only `agent_message_chunk` text is the
+   answer. The agent runs the tools, so `beforeTool`/`afterTool` run at the server boundary;
+   `usage` is zero.
+7. `close()` ends the agent's process group, stops the server, removes the temp dir.
+
+### One-shot CLI transport — our envelope
+
+- Prompt = `PREAMBLE + "\nREQUEST:\n" + {"messages":[…],"tools":[…]}` (compact JSON, no HTML escaping);
+  the system prompt and skills prompt are the first message.
+- Argv from the style, spawned without a shell in its own process group; `stdin` mode writes the
+  prompt to stdin, otherwise stdin is empty. `env` values expand `${VAR}` and are never logged.
+- Reply parsing (six steps): trim; strip one markdown fence; parse the whole text as one object, else
+  the span first `{`…last `}` (trailing text after a complete object is a failure); unwrap
+  `choices[0].message` or `message`; non-empty `tool_calls` (flat or `{function:{}}`, string or object
+  `arguments`) win; else `content`; anything else ⇒ the raw text as content.
+- Tool calls run in the toolnexus loop (hooks, MCP, skills, suspension all apply). Streaming is
+  refused (`cli: streaming is not supported by the one-shot CLI transport; use Run`).
+- Pinned errors: `cli: command not found: <bin>` · `cli: exit <code>: <stderr, ≤1000 code points>`
+  (`cli: exit <code>` when stderr is empty) · `cli: empty reply` · `cli: no output file` ·
+  `cli: timed out after <ms>ms`. Temp files are removed on every path.
+
+### ACP model source (`LoadACP`) additions
+
+`ACPOptions` gains `MCPServers` (entries with URL and/or command; both ⇒ the agent's http capability
+picks; none ⇒ `[]`), `ClientCapsMeta`, `Model`, `Stderr`. A pending request fails with
+`agent exited before replying to <method>` as soon as the agent's stdout closes. Unimplemented
+agent→client requests are answered with JSON-RPC error `-32601`.
+
 ## 9. Go CLI (`toolnexus`)
 
 A single binary that wraps the library into a continuous interactive agent loop —
@@ -2690,6 +2766,9 @@ toolnexus run \
   read a line from stdin → `client.Run(line, toolkit)` → print the answer → repeat.
 - `toolnexus tools --config ... --skills ...` lists the resolved tools and exits.
   `toolnexus --help` documents flags.
+- `toolnexus mcp-bridge <url>` relays MCP JSON-RPC lines between stdio and a streamable-HTTP MCP
+  endpoint, sending `Authorization: Bearer $TOOLNEXUS_MCP_TOKEN` when set — the stdio side of a
+  §8C ACP `mcpServers` entry for agents that do not accept http servers.
 - Ctrl-D / `exit` quits; the toolkit is closed (MCP servers torn down) on exit.
 
 ---
