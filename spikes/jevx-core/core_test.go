@@ -129,8 +129,8 @@ func TestRetriesOn429(t *testing.T) {
 
 func TestFailClosedOnBadReply(t *testing.T) {
 	for name, f := range map[string]*fakeSystemOne{
-		"unoffered choice": {choice: `{"type":"choice","choice":"sales","probabilities":{"web":0.5,"api":0.5},"confidence":0.9}`},
-		"bad sum":          {choice: `{"type":"choice","choice":"web","probabilities":{"web":0.9,"api":0.9},"confidence":0.9}`},
+		"unoffered choice":  {choice: `{"type":"choice","choice":"sales","probabilities":{"web":0.5,"api":0.5},"confidence":0.9}`},
+		"bad sum":           {choice: `{"type":"choice","choice":"web","probabilities":{"web":0.9,"api":0.9},"confidence":0.9}`},
 		"noul out of range": {noul: `{"type":"noul","noul":1.4}`},
 	} {
 		c := setup(t, f)
