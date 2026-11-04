@@ -68,14 +68,26 @@ public sealed partial class McpSource : IAsyncDisposable
     /// <summary>The connected clients by server name, with each server's timeout (for <see cref="ResourceTools"/>).</summary>
     private readonly Dictionary<string, (McpClient Client, long TimeoutMs)> _servers;
 
+    /// <summary>Servers on the MCP 2026-07-28 path (SPEC §2.2), disposed with the source.</summary>
+    private readonly List<Mcp2026.Server26> _servers26;
+
     private McpSource(List<ITool> tools, Dictionary<string, string> status, List<McpClient> clients,
-        Dictionary<string, (McpClient Client, long TimeoutMs)> servers)
+        Dictionary<string, (McpClient Client, long TimeoutMs)> servers,
+        List<Mcp2026.Server26>? servers26 = null, List<SkillSource.SkillDef>? remoteSkills = null)
     {
         _tools = tools;
         _status = status;
         _clients = clients;
         _servers = servers;
+        _servers26 = servers26 ?? new();
+        RemoteSkills = remoteSkills ?? new();
     }
+
+    /// <summary>
+    /// (SPEC §2.7) Skills published by 2026-07-28 servers through the skills extension, as data skills
+    /// (<c>skill://&lt;name&gt;/</c> base). <see cref="Toolkit"/> merges them into the one <c>skill</c> tool.
+    /// </summary>
+    public IReadOnlyList<SkillSource.SkillDef> RemoteSkills { get; }
 
     public IReadOnlyList<ITool> Tools => _tools;
 
@@ -87,6 +99,11 @@ public sealed partial class McpSource : IAsyncDisposable
         foreach (var c in _clients)
         {
             try { await c.DisposeAsync().ConfigureAwait(false); }
+            catch { /* best-effort teardown */ }
+        }
+        foreach (var s in _servers26)
+        {
+            try { await s.DisposeAsync().ConfigureAwait(false); }
             catch { /* best-effort teardown */ }
         }
     }
@@ -259,6 +276,9 @@ public sealed partial class McpSource : IAsyncDisposable
         var status = new Dictionary<string, string>();
         var clients = new List<McpClient>();
         var servers = new Dictionary<string, (McpClient Client, long TimeoutMs)>();
+        var servers26 = new List<Mcp2026.Server26>();
+        var remoteSkills = new List<SkillSource.SkillDef>();
+        var store = options.TokenStore ?? new MemoryTokenStore();
         var gate = new object();
         var cbGate = new object();
         void Report(McpServerResult r)
@@ -282,13 +302,33 @@ public sealed partial class McpSource : IAsyncDisposable
                 }
                 var timeout = TimeoutOf(cfg);
                 McpClient? client = null;
+                Mcp2026.Server26? s26 = null;
                 try
                 {
+                    // SPEC §2.2: discover first; a 2026-07-28 server never reaches the SDK path below.
+                    var auth = IsRemote(cfg) ? new Mcp2026.OAuthClient(Mcp2026.AuthConfig.From(cfg.Get("auth")), store, options.OpenUrl) : null;
+                    s26 = await Open26Async(name, cfg, timeout, waitFor, auth, cancellationToken).ConfigureAwait(false);
+                    if (s26 != null)
+                    {
+                        var converted26 = await Tools26Async(name, cfg, s26, cancellationToken).ConfigureAwait(false);
+                        var skills26 = s26.HasSkills ? await s26.LoadSkillsAsync(cancellationToken).ConfigureAwait(false) : new();
+                        lock (gate)
+                        {
+                            tools.AddRange(converted26);
+                            remoteSkills.AddRange(skills26);
+                            servers26.Add(s26);
+                            status[name] = "connected";
+                        }
+                        Report(new McpServerResult(name, "connected", converted26, null));
+                        return;
+                    }
+
+                    // Frozen fallback (SPEC §2.F), unchanged except OAuth (§2A) on its HTTP transport.
                     // Bound this server's connect+list by its own timeout, but LINKED to the caller's
                     // token so a parent cancel/deadline propagates through (§2 Gap 3).
                     using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
                     cts.CancelAfter(TimeSpan.FromMilliseconds(timeout));
-                    IClientTransport transport = IsRemote(cfg) ? BuildRemoteTransport(cfg) : BuildLocalTransport(name, cfg);
+                    IClientTransport transport = IsRemote(cfg) ? BuildRemoteTransport(cfg, auth, waitFor) : BuildLocalTransport(name, cfg);
                     client = await McpClient.CreateAsync(transport, BuildClientOptions(waitFor), cancellationToken: cts.Token).ConfigureAwait(false);
                     var defs = await client.ListToolsAsync(cancellationToken: cts.Token).ConfigureAwait(false);
 
@@ -314,6 +354,10 @@ public sealed partial class McpSource : IAsyncDisposable
                     {
                         try { await client.DisposeAsync().ConfigureAwait(false); } catch { }
                     }
+                    if (s26 != null)
+                    {
+                        try { await s26.DisposeAsync().ConfigureAwait(false); } catch { }
+                    }
                     Console.Error.WriteLine($"[toolnexus] MCP server \"{name}\" failed: {e.Message}");
                     Report(new McpServerResult(name, "failed", Array.Empty<ITool>(), e));
                 }
@@ -330,9 +374,13 @@ public sealed partial class McpSource : IAsyncDisposable
             {
                 try { await c.DisposeAsync().ConfigureAwait(false); } catch { }
             }
+            foreach (var s in servers26)
+            {
+                try { await s.DisposeAsync().ConfigureAwait(false); } catch { }
+            }
             cancellationToken.ThrowIfCancellationRequested();
         }
-        return new McpSource(tools, status, clients, servers);
+        return new McpSource(tools, status, clients, servers, servers26, remoteSkills);
     }
 
     /// <summary>
@@ -434,11 +482,26 @@ public sealed partial class McpSource : IAsyncDisposable
                 }
                 var timeout = TimeoutOf(cfg);
                 McpClient? client = null;
+                Mcp2026.Server26? s26 = null;
                 try
                 {
+                    var auth = IsRemote(cfg) ? new Mcp2026.OAuthClient(Mcp2026.AuthConfig.From(cfg.Get("auth")), new MemoryTokenStore(), null) : null;
+                    s26 = await Open26Async(name, cfg, timeout, null, auth, cancellationToken).ConfigureAwait(false);
+                    if (s26 != null)
+                    {
+                        var defs26 = await s26.ListToolsAsync(cancellationToken).ConfigureAwait(false);
+                        var infos26 = defs26.Select(d => new ToolInfo(Mcp2026.J.Str(d["name"], ""), Mcp2026.J.Str(d["description"], ""),
+                            Mcp2026.McpTool26.BuildInputSchema(d["inputSchema"]))).ToList();
+                        lock (gate)
+                        {
+                            byServer[name] = infos26;
+                            status[name] = "connected";
+                        }
+                        return;
+                    }
                     using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
                     cts.CancelAfter(TimeSpan.FromMilliseconds(timeout));
-                    IClientTransport transport = IsRemote(cfg) ? BuildRemoteTransport(cfg) : BuildLocalTransport(name, cfg);
+                    IClientTransport transport = IsRemote(cfg) ? BuildRemoteTransport(cfg, auth, null) : BuildLocalTransport(name, cfg);
                     client = await McpClient.CreateAsync(transport, null, cancellationToken: cts.Token).ConfigureAwait(false);
                     var defs = await client.ListToolsAsync(cancellationToken: cts.Token).ConfigureAwait(false);
                     var infos = defs
@@ -461,6 +524,10 @@ public sealed partial class McpSource : IAsyncDisposable
                     if (client != null)
                     {
                         try { await client.DisposeAsync().ConfigureAwait(false); } catch { }
+                    }
+                    if (s26 != null)
+                    {
+                        try { await s26.DisposeAsync().ConfigureAwait(false); } catch { }
                     }
                 }
             }));
@@ -523,7 +590,66 @@ public sealed partial class McpSource : IAsyncDisposable
         return new StdioClientTransport(opts);
     }
 
-    private static IClientTransport BuildRemoteTransport(IDictionary<string, object?> cfg)
+    /// <summary>
+    /// SPEC §2.2/§2.2a: open a server on the 2026-07-28 path. Returns <c>null</c> when it must fall back to the
+    /// frozen SDK path (the stdio probe child is terminated first); throws on a load failure.
+    /// </summary>
+    private static async Task<Mcp2026.Server26?> Open26Async(string name, IDictionary<string, object?> cfg, long timeout,
+        Func<Request, Task<Answer>>? waitFor, Mcp2026.OAuthClient? auth, CancellationToken ct)
+    {
+        Mcp2026.Conn conn;
+        if (IsRemote(cfg))
+        {
+            var headers = new Dictionary<string, string>();
+            if (cfg.Get("headers") is IDictionary<string, object?> raw)
+            {
+                var stringified = new Dictionary<string, string>();
+                foreach (var (k, v) in raw) stringified[k] = v?.ToString() ?? "";
+                headers = ExpandEnvHeaders(stringified)!;
+            }
+            conn = new Mcp2026.Conn(cfg.Get("url")?.ToString() ?? "") { Headers = headers, Auth = auth };
+        }
+        else
+        {
+            if (!cfg.ContainsKey("command")) throw new ArgumentException("local server has no command");
+            var env = new Dictionary<string, string>();
+            if ((cfg.Get("environment") ?? cfg.Get("env")) is IDictionary<string, object?> extra)
+                foreach (var (k, v) in extra) env[k] = v?.ToString() ?? "";
+            conn = Mcp2026.Conn.StartStdio(ResolveCommand(name, cfg), env, cfg.Get("cwd") as string);
+        }
+        var s = new Mcp2026.Server26(name, conn, timeout, waitFor)
+        {
+            ToolSearch = cfg.Get("toolSearch") is true,
+            Description = cfg.Get("description") as string ?? "",
+        };
+        try
+        {
+            await s.DiscoverAsync(ct).ConfigureAwait(false);
+            return s;
+        }
+        catch (Mcp2026.FallbackException)
+        {
+            await s.DisposeAsync().ConfigureAwait(false);
+            return null;
+        }
+        catch
+        {
+            await s.DisposeAsync().ConfigureAwait(false);
+            throw;
+        }
+    }
+
+    /// <summary>The toolkit tools for a 2026-path server: every (filtered) server tool, or the two tool-search tools.</summary>
+    private static async Task<List<ITool>> Tools26Async(string name, IDictionary<string, object?> cfg, Mcp2026.Server26 s, CancellationToken ct)
+    {
+        var defs = await s.ListToolsAsync(ct).ConfigureAwait(false);
+        if (s.ToolSearch) return new List<ITool> { new Mcp2026.SearchTool26(s, false), new Mcp2026.SearchTool26(s, true) };
+        var kept = ApplyToolsFilter(name, defs, d => Mcp2026.J.Str(d["name"], ""), ToolsFilterOf(cfg));
+        return kept.Select(d => (ITool)new Mcp2026.McpTool26(s, d)).ToList();
+    }
+
+    private static IClientTransport BuildRemoteTransport(IDictionary<string, object?> cfg,
+        Mcp2026.OAuthClient? auth = null, Func<Request, Task<Answer>>? waitFor = null)
     {
         var url = cfg.Get("url")?.ToString() ?? "";
         var opts = new HttpClientTransportOptions
@@ -542,7 +668,13 @@ public sealed partial class McpSource : IAsyncDisposable
             opts.AdditionalHeaders = ExpandEnvHeaders(stringified)!;
         }
 
-        return new HttpClientTransport(opts);
+        if (auth == null) return new HttpClientTransport(opts);
+        // SPEC §2A.1a: the bearer rides the SDK's HTTP transport through a delegating handler (dynamic per request).
+        var http = new HttpClient(new Mcp2026.BearerHandler(auth, url, waitFor) { InnerHandler = new HttpClientHandler() })
+        {
+            Timeout = Timeout.InfiniteTimeSpan,
+        };
+        return new HttpClientTransport(opts, http, null, ownsHttpClient: true);
     }
 
     /// <summary>A single MCP tool wrapped as a uniform <see cref="ITool"/>.</summary>

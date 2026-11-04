@@ -20,6 +20,13 @@ public sealed class McpLoadOptions
     /// <summary>Called once per server as soon as it is connected, failed or found disabled. Calls
     /// are serialized (never concurrent with each other) but come from load tasks; keep them short.</summary>
     public Action<McpServerResult>? OnServer { get; set; }
+
+    /// <summary>(SPEC §2A.1a) Where MCP OAuth tokens are kept, keyed by resource. Default: in memory, per load.</summary>
+    public ITokenStore? TokenStore { get; set; }
+
+    /// <summary>(SPEC §2A.1a) How <c>auto</c>-mode OAuth opens the authorization URL. Default: the OS opener.
+    /// Tests inject an HTTP GET.</summary>
+    public Func<string, Task>? OpenUrl { get; set; }
 }
 
 public sealed partial class McpSource

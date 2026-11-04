@@ -231,6 +231,13 @@ public sealed partial class SkillSource
         return new SkillInventory(skills.Values.ToList(), skipped);
     }
 
+    /// <summary>(SPEC §2.7) Split a SKILL.md exactly as a directory skill is read: frontmatter fields + body.</summary>
+    internal static (Dictionary<string, string> Fields, string Body) SplitFrontmatter(string text)
+    {
+        var (data, content, _, _) = ParseFrontmatterDetailed(text);
+        return (data, content);
+    }
+
     /// <summary>Discover skills (dirs and/or data) and build the <c>skill</c> loader tool.</summary>
     public static SkillSource LoadWith(LoadOptions opts)
     {
