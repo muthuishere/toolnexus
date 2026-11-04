@@ -33,6 +33,9 @@ tool-call channel.
    drives any claude-compatible binary at any path, and `style: "codex"` any codex-compatible one.
    A missing command fails with `cli: Command is required (path or name of the CLI binary)`.
    (Owner, 2026-11-04: "we dont want the cli to be embedded let them give manually".)
+   Why: toolnexus then never ships, picks or launches a vendor's product by itself. The user
+   chooses and runs their own installed CLI under their own subscription, which keeps us out of
+   vendor terms disputes and lets anyone (a vendor, a fork, a wrapper) bring a compatible CLI.
 4. **Escape hatches.** `style: "custom"` with an explicit `args` template, `prompt` and `answer`;
    or a user style file via `loadCliStyle(path | json)`. An unknown style fails with the list of
    known names.
