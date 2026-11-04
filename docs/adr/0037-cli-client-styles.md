@@ -22,7 +22,7 @@ tool-call channel.
 1. **One constructor, selected by style name.** `createCliClient({ style, command, model?, …every
    in-process client option })` (idiomatic per port, e.g. Go `CreateCliClient(CliOptions{Style:
    CliStyles.Claude, Command: "/usr/local/bin/claude", Model: "sonnet"})`). It returns an ordinary in-process client. **`style` is a real enum, never a string**
-   (owner 2026-11-04: "no string"): spelled `CliStyles.Claude`, `CliStyles.Codex`, … in every port (Go: a `CliStyles` struct of typed `CliStyle` values, then TS/Java/C#/Rust
+   (owner 2026-11-04: "no string"): spelled `CliStyles.Claude`, `CliStyles.Codex`, … in every port (Go: a `CliStyles` struct of typed `CliStyle` values), then TS/Java/C#/Rust
    `enum CliStyles`, Python `Enum`, Elixir/Clojure a closed set of atoms/keywords checked at construction.
    Members: Claude, Codex, Copilot, Opencode, Devin, Gemini, Goose, Custom. The lowercase name is
    used only internally to find the shared style file; no API accepts a style as free text.

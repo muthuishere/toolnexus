@@ -92,9 +92,9 @@ func TestBuiltinStylesLoadAndValidate(t *testing.T) {
 	}
 }
 
-func TestUnknownStyleListsKnown(t *testing.T) {
+func TestStyleRequired(t *testing.T) {
 	_, err := CreateCliClient(CliOptions{Command: "x"}, nil)
-	want := "cli: Style is required (CliStyles.Claude, StyleCodex, ...)"
+	want := "cli: Style is required (CliStyles.Claude, CliStyles.Codex, ...)"
 	if err == nil || err.Error() != want {
 		t.Fatalf("got %v", err)
 	}
