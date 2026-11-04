@@ -1,0 +1,374 @@
+{
+  "_doc": "SPEC §8C cross-port CLI client cases. Every port replays this file: argv rendering ({{file}}/{{out}} temp paths shown as <file>/<out>), the six-step reply parser, and the pinned construction errors. Style names here are fixture keys mapped to the enum; no API accepts them as strings. Error strings are pinned byte-identically in every port (they name the Go spellings ACPCommand / CliStyles.X / CliTransports.CLI on purpose). toolCall.arguments is compared after JSON-decoding a string argument.",
+  "argv": [
+    {
+      "style": "claude",
+      "command": "CMD",
+      "model": "",
+      "prompt": "PROMPT",
+      "argv": [
+        "CMD",
+        "-p",
+        "--tools",
+        "",
+        "--output-format",
+        "text"
+      ],
+      "stdin": true
+    },
+    {
+      "style": "claude",
+      "command": "CMD",
+      "model": "prov/m-1",
+      "prompt": "PROMPT",
+      "argv": [
+        "CMD",
+        "-p",
+        "--tools",
+        "",
+        "--output-format",
+        "text",
+        "--model",
+        "prov/m-1"
+      ],
+      "stdin": true
+    },
+    {
+      "style": "codex",
+      "command": "CMD",
+      "model": "",
+      "prompt": "PROMPT",
+      "argv": [
+        "CMD",
+        "exec",
+        "--skip-git-repo-check",
+        "--ephemeral",
+        "--color",
+        "never",
+        "--sandbox",
+        "read-only",
+        "--output-last-message",
+        "<out>",
+        "-"
+      ],
+      "stdin": true
+    },
+    {
+      "style": "codex",
+      "command": "CMD",
+      "model": "prov/m-1",
+      "prompt": "PROMPT",
+      "argv": [
+        "CMD",
+        "exec",
+        "--skip-git-repo-check",
+        "--ephemeral",
+        "--color",
+        "never",
+        "--sandbox",
+        "read-only",
+        "--output-last-message",
+        "<out>",
+        "--model",
+        "prov/m-1",
+        "-"
+      ],
+      "stdin": true
+    },
+    {
+      "style": "copilot",
+      "command": "CMD",
+      "model": "",
+      "prompt": "PROMPT",
+      "argv": [
+        "CMD",
+        "-p",
+        "PROMPT",
+        "--silent",
+        "--no-color"
+      ],
+      "stdin": false
+    },
+    {
+      "style": "copilot",
+      "command": "CMD",
+      "model": "prov/m-1",
+      "prompt": "PROMPT",
+      "argv": [
+        "CMD",
+        "-p",
+        "PROMPT",
+        "--silent",
+        "--no-color",
+        "--model",
+        "prov/m-1"
+      ],
+      "stdin": false
+    },
+    {
+      "style": "devin",
+      "command": "CMD",
+      "model": "",
+      "prompt": "PROMPT",
+      "argv": [
+        "CMD",
+        "-p",
+        "--prompt-file",
+        "<file>"
+      ],
+      "stdin": false
+    },
+    {
+      "style": "devin",
+      "command": "CMD",
+      "model": "prov/m-1",
+      "prompt": "PROMPT",
+      "argv": [
+        "CMD",
+        "-p",
+        "--prompt-file",
+        "<file>",
+        "--model",
+        "prov/m-1"
+      ],
+      "stdin": false
+    },
+    {
+      "style": "gemini",
+      "command": "CMD",
+      "model": "",
+      "prompt": "PROMPT",
+      "argv": [
+        "CMD",
+        "-p",
+        "PROMPT"
+      ],
+      "stdin": false
+    },
+    {
+      "style": "gemini",
+      "command": "CMD",
+      "model": "prov/m-1",
+      "prompt": "PROMPT",
+      "argv": [
+        "CMD",
+        "-p",
+        "PROMPT",
+        "--model",
+        "prov/m-1"
+      ],
+      "stdin": false
+    },
+    {
+      "style": "goose",
+      "command": "CMD",
+      "model": "",
+      "prompt": "PROMPT",
+      "argv": [
+        "CMD",
+        "run",
+        "--no-session",
+        "--text",
+        "PROMPT"
+      ],
+      "stdin": false
+    },
+    {
+      "style": "opencode",
+      "command": "CMD",
+      "model": "",
+      "prompt": "PROMPT",
+      "argv": [
+        "CMD",
+        "run",
+        "PROMPT"
+      ],
+      "stdin": false
+    },
+    {
+      "style": "opencode",
+      "command": "CMD",
+      "model": "prov/m-1",
+      "prompt": "PROMPT",
+      "argv": [
+        "CMD",
+        "run",
+        "--model",
+        "prov/m-1",
+        "PROMPT"
+      ],
+      "stdin": false
+    }
+  ],
+  "parse": [
+    {
+      "in": "{\"content\":\"hi\"}",
+      "content": "hi"
+    },
+    {
+      "in": "```json\n{\"content\":\"fenced\"}\n```\n\n",
+      "content": "fenced"
+    },
+    {
+      "in": "Sure! {\"content\":\"wrapped\"} done",
+      "content": "wrapped"
+    },
+    {
+      "in": "{\"choices\":[{\"message\":{\"content\":\"openai\"}}]}",
+      "content": "openai"
+    },
+    {
+      "in": "{\"message\":{\"content\":\"msg\"}}",
+      "content": "msg"
+    },
+    {
+      "in": "{\"tool_calls\":[{\"id\":\"a\",\"function\":{\"name\":\"t\",\"arguments\":\"{\\\"x\\\":1}\"}}]}",
+      "toolCall": {
+        "name": "t",
+        "id": "a",
+        "arguments": {
+          "x": 1
+        }
+      }
+    },
+    {
+      "in": "{\"tool_calls\":[{\"name\":\"flat\",\"arguments\":{\"x\":1}}]}",
+      "toolCall": {
+        "name": "flat",
+        "arguments": {
+          "x": 1
+        }
+      }
+    },
+    {
+      "in": "plain text answer",
+      "content": "plain text answer"
+    },
+    {
+      "in": "{\"content\":\"x\"} trailing {",
+      "content": "x"
+    },
+    {
+      "in": "{\"answer\":1}",
+      "content": "{\"answer\":1}"
+    },
+    {
+      "in": "{\"content\":\"x\"} {\"content\":\"y\"}",
+      "content": "{\"content\":\"x\"} {\"content\":\"y\"}"
+    },
+    {
+      "in": "{\"content\":null}",
+      "content": ""
+    },
+    {
+      "in": "{\"tool_calls\":[],\"content\":\"empty calls\"}",
+      "content": "empty calls"
+    }
+  ],
+  "constructionErrors": [
+    {
+      "options": {
+        "style": "claude"
+      },
+      "error": "cli: Command is required (path or name of the CLI binary)"
+    },
+    {
+      "options": {
+        "command": "x"
+      },
+      "error": "cli: Style is required (CliStyles.Claude, CliStyles.Codex, ...)"
+    },
+    {
+      "options": {
+        "style": "goose",
+        "command": "goose",
+        "model": "m",
+        "transport": "cli"
+      },
+      "error": "cli: style \"goose\" takes no model"
+    },
+    {
+      "options": {
+        "style": "codex",
+        "command": "codex",
+        "transport": "acp"
+      },
+      "error": "cli: style \"codex\" has no ACP launch; set ACPCommand or use CliTransports.CLI"
+    },
+    {
+      "options": {
+        "style": "custom",
+        "command": "x",
+        "args": [
+          "{{model}}"
+        ],
+        "prompt": "stdin",
+        "answer": "stdout"
+      },
+      "error": "cli: the style needs a model: {{model}} is outside an optional group"
+    },
+    {
+      "options": {
+        "style": "custom",
+        "command": "x",
+        "args": [
+          "{{nope}}"
+        ],
+        "prompt": "stdin",
+        "answer": "stdout"
+      },
+      "error": "cli: unknown placeholder {{nope}}"
+    },
+    {
+      "options": {
+        "style": "custom",
+        "command": "x",
+        "args": [],
+        "prompt": "arg",
+        "answer": "stdout"
+      },
+      "error": "cli: prompt \"arg\" needs {{prompt}} in args"
+    },
+    {
+      "options": {
+        "style": "custom",
+        "command": "x",
+        "args": [],
+        "prompt": "file",
+        "answer": "stdout"
+      },
+      "error": "cli: prompt \"file\" needs {{file}} in args"
+    },
+    {
+      "options": {
+        "style": "custom",
+        "command": "x",
+        "args": [],
+        "prompt": "stdin",
+        "answer": "out"
+      },
+      "error": "cli: answer \"out\" needs {{out}} in args"
+    },
+    {
+      "options": {
+        "style": "custom",
+        "command": "x",
+        "args": [],
+        "prompt": "pipe",
+        "answer": "stdout"
+      },
+      "error": "cli: prompt must be stdin, arg or file, not \"pipe\""
+    },
+    {
+      "options": {
+        "style": "custom",
+        "command": "x",
+        "args": [],
+        "prompt": "stdin",
+        "answer": "json"
+      },
+      "error": "cli: answer must be stdout or out, not \"json\""
+    }
+  ],
+  "renderEmpty": "<PREAMBLE>\nREQUEST:\n{\"messages\":[],\"tools\":[]}"
+}

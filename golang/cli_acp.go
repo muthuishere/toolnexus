@@ -66,6 +66,7 @@ type cliACPSession struct {
 	tempDir string
 	served  map[string]bool
 	timeout int
+	hint    string
 
 	mu        sync.Mutex
 	calls     map[string]string // toolCallId -> first non-empty title seen
@@ -140,6 +141,9 @@ func openCliACPSession(ctx context.Context, c *CliClient) (*cliACPSession, error
 		calls:     map[string]string{},
 		decisions: map[string]bool{},
 		timeout:   c.timeout,
+	}
+	if c.style.ACP != nil {
+		s.hint = c.style.ACP.SystemHint
 	}
 	tools := cliServedTools(c.opts.Toolkit, c.opts.Hooks, func(name string) {
 		s.mu.Lock()
@@ -278,12 +282,41 @@ func (s *cliACPSession) Close() error {
 }
 
 func (s *cliACPSession) generate(ctx context.Context, req InProcessRequest, emit func(StreamEvent)) (InProcessResponse, error) {
+	req.Messages = cliWithSystemHint(req.Messages, s.hint)
 	res, err := s.client.GenerateStream(ctx, req, emit)
 	var pt *ACPPermissionTimeoutError
 	if errors.As(err, &pt) {
 		return InProcessResponse{}, fmt.Errorf("cli: timed out after %dms", s.timeout)
 	}
 	return res, err
+}
+
+// cliWithSystemHint appends a style's ACP system hint to the first system
+// message (a copy; the caller's messages are not mutated), or prepends a system
+// message holding only the hint when the conversation has none.
+func cliWithSystemHint(msgs []any, hint string) []any {
+	if hint == "" {
+		return msgs
+	}
+	out := make([]any, 0, len(msgs)+1)
+	if len(msgs) > 0 {
+		if m, ok := msgs[0].(map[string]any); ok && m["role"] == "system" {
+			if c, ok := m["content"].(string); ok {
+				cp := make(map[string]any, len(m))
+				for k, v := range m {
+					cp[k] = v
+				}
+				if c == "" {
+					cp["content"] = hint
+				} else {
+					cp["content"] = c + "\n\n" + hint
+				}
+				return append(append(out, cp), msgs[1:]...)
+			}
+		}
+	}
+	out = append(out, map[string]any{"role": "system", "content": hint})
+	return append(out, msgs...)
 }
 
 // update remembers the first non-empty title of each toolCallId (devin puts

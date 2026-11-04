@@ -718,3 +718,141 @@ func TestCliIsServedCallExactForms(t *testing.T) {
 		}
 	}
 }
+
+func TestCliACPSystemHintFromStyle(t *testing.T) {
+	d, _ := CliStyleDefFor(CliStyles.Devin)
+	if d.ACP == nil || !strings.Contains(d.ACP.SystemHint, `"toolnexus"`) {
+		t.Fatalf("devin style must carry a systemHint naming the toolnexus server: %+v", d.ACP)
+	}
+	o, rec := fakeACPOpts(t, map[string]string{"FAKE_HTTP": "1"})
+	o.StyleDef.ACP.SystemHint = "HINT-USE-TOOLNEXUS"
+	o.SystemPrompt = "You are terse."
+	c, _ := CreateCliClient(o)
+	defer c.Close()
+	if _, err := c.Run(context.Background(), "badge?", nil); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(rec)
+	if !strings.Contains(string(b), `You are terse.\n\nHINT-USE-TOOLNEXUS`) {
+		t.Errorf("hint must be appended to the system prompt of the ACP turn: %s", b)
+	}
+	// No system prompt: the hint becomes the system message on its own.
+	if got := cliWithSystemHint([]any{map[string]any{"role": "user", "content": "x"}}, "H"); len(got) != 2 ||
+		got[0].(map[string]any)["content"] != "H" {
+		t.Errorf("hint without a system message: %+v", got)
+	}
+	msgs := []any{map[string]any{"role": "system", "content": "S"}}
+	_ = cliWithSystemHint(msgs, "H")
+	if msgs[0].(map[string]any)["content"] != "S" {
+		t.Error("caller's messages must not be mutated")
+	}
+}
+
+// TestCliConformanceCases replays conformance/cli-client/cases.json, the
+// fixture every port runs.
+func TestCliConformanceCases(t *testing.T) {
+	b, err := os.ReadFile("../conformance/cli-client/cases.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fx struct {
+		Argv []struct {
+			Style, Command, Model, Prompt string
+			Argv                          []string
+			Stdin                         bool
+		}
+		Parse []struct {
+			In       string
+			Content  *string
+			ToolCall *struct {
+				Name, ID  string
+				Arguments any
+			}
+		}
+		ConstructionErrors []struct {
+			Options map[string]any
+			Error   string
+		}
+		RenderEmpty string
+	}
+	if err := json.Unmarshal(b, &fx); err != nil {
+		t.Fatal(err)
+	}
+	byName := map[string]CliStyle{}
+	for s, n := range cliStyleNames {
+		byName[n] = s
+	}
+	for _, c := range fx.Argv {
+		cl, err := CreateCliClient(CliOptions{Style: byName[c.Style], Command: c.Command, Transport: CliTransports.CLI,
+			InProcessOptions: InProcessOptions{Model: c.Model}})
+		if err != nil {
+			t.Fatalf("%s: %v", c.Style, err)
+		}
+		argv, out, tmp, err := cl.cliArgv(c.Prompt)
+		for _, f := range tmp {
+			_ = os.Remove(f)
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i, a := range argv {
+			if out != "" && a == out {
+				argv[i] = "<out>"
+			} else if a != out && len(tmp) > 0 && a == tmp[0] {
+				argv[i] = "<file>"
+			}
+		}
+		if cliJSON(argv) != cliJSON(c.Argv) || (cl.style.Prompt == "stdin") != c.Stdin {
+			t.Errorf("%s model=%q: argv %v want %v", c.Style, c.Model, argv, c.Argv)
+		}
+	}
+	norm := func(v any) string {
+		if s, ok := v.(string); ok {
+			var x any
+			if json.Unmarshal([]byte(s), &x) == nil {
+				v = x
+			}
+		}
+		var x any
+		_ = json.Unmarshal([]byte(cliJSON(v)), &x)
+		return cliJSON(x)
+	}
+	for _, c := range fx.Parse {
+		r := ParseCliReply(c.In)
+		if c.ToolCall != nil {
+			if len(r.ToolCalls) != 1 || r.ToolCalls[0].Name != c.ToolCall.Name || r.ToolCalls[0].ID != c.ToolCall.ID ||
+				norm(r.ToolCalls[0].Arguments) != norm(c.ToolCall.Arguments) {
+				t.Errorf("%q: %+v", c.In, r.ToolCalls)
+			}
+			continue
+		}
+		if r.Content != *c.Content || len(r.ToolCalls) != 0 {
+			t.Errorf("%q: got %+v", c.In, r)
+		}
+	}
+	for _, c := range fx.ConstructionErrors {
+		o := CliOptions{}
+		if s, ok := c.Options["style"].(string); ok {
+			o.Style = byName[s]
+		}
+		o.Command, _ = c.Options["command"].(string)
+		o.Model, _ = c.Options["model"].(string)
+		o.Prompt, _ = c.Options["prompt"].(string)
+		o.Answer, _ = c.Options["answer"].(string)
+		if a, ok := c.Options["args"].([]any); ok {
+			o.Args = a
+		}
+		switch c.Options["transport"] {
+		case "cli":
+			o.Transport = CliTransports.CLI
+		case "acp":
+			o.Transport = CliTransports.ACP
+		}
+		if _, err := CreateCliClient(o); err == nil || err.Error() != c.Error {
+			t.Errorf("%v: got %v, want %q", c.Options, err, c.Error)
+		}
+	}
+	if want := strings.Replace(fx.RenderEmpty, "<PREAMBLE>", CliPreamble, 1); RenderCliPrompt(nil, nil) != want {
+		t.Error("renderEmpty")
+	}
+}
