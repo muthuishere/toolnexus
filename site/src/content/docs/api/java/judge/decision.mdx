@@ -222,6 +222,7 @@ public class Example {
                 case Classifier.ChoiceAnswer a -> a.choice()
                     + (a.nearUniform() ? " (nearUniform — nothing to rank on)" : "");
                 case Classifier.ScoreAnswer a -> "score " + a.score();
+                case Classifier.RawAnswer a -> "raw " + a.type();
             });
         }
 

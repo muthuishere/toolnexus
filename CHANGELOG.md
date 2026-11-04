@@ -35,6 +35,9 @@ ADR 0038; every default is proposed and awaits the owner's confirmation).
   decision.
 - **Changed defaults:** `openrouter` now defaults to `typesafe/jev-1.14` (was `typesafe/jev-1.13`).
   **`style: "llm"` is deprecated** — it keeps working unchanged for at least one minor release.
+  Source-level notes: rust `Decision` gains a `cached` field (struct literals need `cached: false`) and
+  `ClassifierError` gains a private second field (build it with `ClassifierError::new`); java code
+  that switches exhaustively over `DecisionAnswer` needs a `RawAnswer` case.
 
 Not done: the Decisions API (second wire), multipart image upload, Vercel and Cloudflare-Jev
 images (not proven live, so refused), per-question caching, and the jevx cutover gate (ADR 0038
