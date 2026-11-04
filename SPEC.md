@@ -369,7 +369,8 @@ is surfaced through §10 `waitFor`, one `Request` per input request:
 - `Answer` → input response: `ok` ⇒ `{action:"accept", content: answer.data}`; `!ok` ⇒ `decline` when
   `answer.reason=="declined"`, else `cancel` (same mapping as the §2.F elicitation bridge).
 - The client re-sends the **same** `tools/call` with `params.inputResponses = {<key>: <response>}` and
-  `params.requestState` echoed verbatim from the server. Further `input_required` rounds repeat; a paused
+  `params.requestState` echoed verbatim from the server (each MRTR `Request.id` is `mrtr-<random>`; an
+  OAuth pause's is `auth-<random>`). Further `input_required` rounds repeat; a paused
   round resumes that round, earlier rounds are never re-asked.
 - Without a `waitFor`, the loop returns `{status:"pending"}` per §10 (no hang).
 
@@ -605,8 +606,8 @@ omitRefreshResource?: bool, allowHttp?: bool }`, plus a host-supplied **token st
    `clientId`), optional `clientSecret` via `tokenAuthMethod`; then a **Client ID Metadata Document** URL as
    `client_id` when the AS advertises `client_id_metadata_document_supported`. **No Dynamic Client
    Registration, ever.** Neither ⇒ error naming the issuer: `no client identity for <issuer>: <why> and no
-   client id is configured — register an app with <issuer> and set OAuth.ClientID (dynamic client registration
-   is not supported)` (the setter name is per-port: `clientId` in config).
+   client id is configured — register an app with <issuer> and set auth.clientId (dynamic client registration
+   is not supported)` (byte-exact in every port; `auth.clientId` is the mcp.json key).
 5. **Authorization code + PKCE S256**, `resource=<server URI>` on the authorize and token requests, `scope` =
    the challenge `scope`, else PRM `scopes_supported`. Random `state`.
 6. **Callback validation** (before acting on `error`): when the AS advertises
