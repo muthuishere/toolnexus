@@ -8,24 +8,56 @@ GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
 
 ## Unreleased
 
-### In progress — MCP 2026-07-28 (not yet in any shipped port)
+### MCP 2026-07-28 client: hosted servers, OAuth login, remote skills and tool search (all eight ports)
 
-toolnexus is moving its MCP layer to the 2026-07-28 protocol, which hosted servers (GitHub's MCP server among
-them) already speak and which most of them pair with OAuth. Today no shipped port speaks it and none can log
-in to an OAuth-protected server; you still pass a bearer token through `headers`. Nothing you install changes
-with this entry.
+**toolnexus now speaks MCP 2026-07-28 to every server first, and can log in to OAuth-protected ones.**
+Until now each port drove its MCP SDK (or, in Elixir and Clojure, our own client) on the 2025 protocol,
+and an OAuth-protected server meant pasting a bearer token into `headers`. Hosted servers such as
+GitHub's already speak 2026-07-28, and most of them ask for OAuth.
 
-What exists: the contract is pinned in `SPEC.md` (§2 rewritten, new §2A authorization, §7C server), with
-shared conformance fixtures in `examples/mcp-2026/`. Spikes in all eight languages under `spikes/mcp-2026/`
-pass an 8×8 client×server interop matrix; the Go spike was also run live against Keycloak 26.8.1 and GitHub's
-hosted server. Planned behaviour: `server/discover` first with today's client frozen as the fallback for older
-servers; OAuth with no config when the server's authorization server supports Client ID Metadata Documents, or
-one `clientId` when it does not (no Dynamic Client Registration), in browser or §10 pause/resume mode; skills
-over MCP; opt-in lazy `toolSearch`; and `serve` protected with one `auth` line.
+- **Discover first, nothing to configure.** Each server is asked `server/discover` before anything else.
+  A 2026 server is used through toolnexus's own client (no SDK) over stdio or Streamable HTTP. An older
+  server answers that with an error, an HTTP 400/404/405/5xx or silence on stdio (5 s), and gets
+  **exactly the client you had before**, frozen. `mcp.json` files keep working unchanged, and tool names,
+  result mapping, filters, timeouts and status are the same on both paths.
+- **Questions a tool asks mid-call** (2026 `input_required`) arrive through your `waitFor` as §10 requests:
+  form → `input`, URL → `authorization`. With no `waitFor` the call returns `{status:"pending"}` and resumes
+  at the round it paused on. A `tools/call` is never re-sent after a timeout, 5xx or dropped connection,
+  because the server may already have run it.
+- **OAuth login** (new optional `auth` per server): protected-resource and authorization-server
+  discovery, PKCE S256 with `resource`, `state`/`iss` checks, refresh (one request shared by concurrent
+  callers) and step-up on `insufficient_scope`. The client identity is a pre-registered `clientId` or a
+  Client ID Metadata Document. **Dynamic Client Registration is deliberately not supported**; without an
+  identity you get an error naming the issuer and `auth.clientId`. Two modes: `auto` opens the browser
+  and takes the callback on `127.0.0.1`; `pause` hands your host a §10 `authorization` request and you
+  answer it with `data.callbackUrl`. New load/toolkit options `tokenStore` (default in-memory) and
+  `openUrl`. Tokens, codes and secrets never reach logs or error text.
+- **Skills over MCP** (SEP-2640): a server that offers skills adds them to the same `skill` tool as your
+  local ones, with digest and path-containment checks.
+- **Lazy tool search** (`"toolSearch": true`, optional `"description"`): the toolkit exposes
+  `<server>_search_tools` and `<server>_call_tool` instead of every tool, for servers with hundreds of
+  tools. Your `tools` filter and `disableTools` apply first.
 
-Not done: no port code, no fallback wiring, no release. When it ships, `serve /mcp` becomes **BREAKING** —
-old-era MCP clients will not be able to call it — and golang drops `mark3labs/mcp-go`. Out of scope: Tasks,
-roots/sampling/logging, DCR, MCP server over stdio. Tracked in `openspec/changes/upgrade-mcp-2026-07-28`.
+Contract: SPEC §2 (2.2a fallback rule and resolved questions), §2A.1/§2A.1a, fixtures `examples/mcp-2026/`;
+change `openspec/changes/upgrade-mcp-2026-07-28`.
+
+**Not done yet** (tracked in that change and #134):
+- **The server side.** `serve /mcp` still speaks the pre-2026 profile; the 2026 server, its `auth`
+  (PRM, 401/403, JWT via JWKS, principal) and the in-process dev authorization server come in a follow-up
+  on top of the MCP handler from PR #140. When that lands it is **BREAKING**: old-era clients will no
+  longer be able to call `serve /mcp`. The MCP SDK dependencies stay for now because they power the frozen
+  fallback; golang keeps `mark3labs/mcp-go`.
+- **OAuth on the frozen fallback**: JS, Python, Java and C# attach the bearer per request and re-run the
+  flow on a 401. Rust (rmcp), Elixir and Clojure send the token as a fixed header at connect, so a token
+  that expires mid-session is not refreshed on an old server.
+- **`resourceTools()`** (`list_mcp_resources` / `read_mcp_resource`) sees fallback servers only.
+- No progress notifications or `nextCursor` pagination on the 2026 path; roots, sampling, logging and the
+  Tasks extension are out of scope.
+- Elixir and Clojure re-encode a search hit's `inputSchema` (keys sorted) instead of passing the server's
+  bytes through. Clojure resumes only one input request per MRTR round without a `waitFor`, and its
+  `auto` callback page needs a browser (koine gives a server no query string).
+- Not yet verified: the 8×8 client×server interop matrix on the shipped code, and live Keycloak/GitHub
+  logins (the Go spike passed both).
 
 ## 0.24.0 — 2026-11-04
 

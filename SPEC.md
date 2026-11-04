@@ -283,10 +283,10 @@ Answer  { id, ok, data? }
 
 ## 2. MCP source
 
-> **Status: contract pinned, ports pending.** This section is the target contract of OpenSpec change
-> `upgrade-mcp-2026-07-28`. The reference implementation is the Go spike `spikes/mcp-2026/golang`; all
+> **Status: client shipped in all eight ports; server side pending** (OpenSpec change
+> `upgrade-mcp-2026-07-28`; the 2026 server builds on PR #140's MCP handler). The reference implementation is the Go spike `spikes/mcp-2026/golang`; all
 > eight language spikes under `spikes/mcp-2026/` pass the 8×8 interop matrix (`spikes/mcp-2026/interop.sh`).
-> Until a port ships it, that port's shipped behaviour is the frozen pre-2026 path (§2.F below).
+> Servers that fail `server/discover` (§2.2a) get the frozen pre-2026 path (§2.F below).
 > Shared conformance fixtures: `examples/mcp-2026/`.
 
 toolnexus **owns its MCP layer** (no MCP SDK) and speaks protocol **`2026-07-28`** first, over **stdio**
@@ -582,7 +582,7 @@ byte-identical behavior.
 
 ## 2A. MCP authorization (OAuth 2.1, MCP 2026-07-28 `basic/authorization`)
 
-> **Status: contract pinned, ports pending** (change `upgrade-mcp-2026-07-28`; reference
+> **Status: client (§2A.1) shipped in all eight ports; server (§2A.2) pending** (change `upgrade-mcp-2026-07-28`; reference
 > `spikes/mcp-2026/golang` `auth.go`, `serverauth.go`, `devauth.go`; verified live against Keycloak 26.8.1 and
 > GitHub's hosted MCP server). Applies to the 2026 path and to the frozen fallback (§2.F). stdio has no auth.
 
