@@ -427,6 +427,119 @@
       }
     ]
   },
+  "cliClientOptions": {
+    "_doc": "SPEC §8C createCliClient options (ADR 0037). Every in-process client option is also accepted and is checked by clientOptions/§8, not here.",
+    "files": {
+      "js": "js/src/cli.ts",
+      "python": "python/src/toolnexus/cli.py",
+      "go": "golang/cli.go",
+      "java": "java/src/main/java/io/github/muthuishere/toolnexus/CliClient.java",
+      "csharp": "csharp/src/Toolnexus/CliClient.cs",
+      "elixir": "elixir/lib/toolnexus/cli.ex",
+      "clojure": "clojure/src/toolnexus/cli.cljc",
+      "rust": "rust/src/cli.rs"
+    },
+    "options": [
+      {
+        "name": "command",
+        "aliases": [
+          "command"
+        ],
+        "tier": "core"
+      },
+      {
+        "name": "style",
+        "aliases": [
+          "style"
+        ],
+        "tier": "core"
+      },
+      {
+        "name": "styleDef",
+        "aliases": [
+          "styledef"
+        ],
+        "tier": "core"
+      },
+      {
+        "name": "args",
+        "aliases": [
+          "args"
+        ],
+        "tier": "core"
+      },
+      {
+        "name": "prompt",
+        "aliases": [
+          "prompt"
+        ],
+        "tier": "core"
+      },
+      {
+        "name": "answer",
+        "aliases": [
+          "answer"
+        ],
+        "tier": "core"
+      },
+      {
+        "name": "env",
+        "aliases": [
+          "env"
+        ],
+        "tier": "core"
+      },
+      {
+        "name": "callTimeoutMs",
+        "aliases": [
+          "calltimeoutms"
+        ],
+        "tier": "core"
+      },
+      {
+        "name": "cwd",
+        "aliases": [
+          "cwd"
+        ],
+        "tier": "core"
+      },
+      {
+        "name": "transport",
+        "aliases": [
+          "transport"
+        ],
+        "tier": "core"
+      },
+      {
+        "name": "toolkit",
+        "aliases": [
+          "toolkit"
+        ],
+        "tier": "core"
+      },
+      {
+        "name": "acpCommand",
+        "aliases": [
+          "acpcommand"
+        ],
+        "tier": "core"
+      },
+      {
+        "name": "bridgeCommand",
+        "aliases": [
+          "bridgecommand"
+        ],
+        "tier": "core"
+      },
+      {
+        "name": "onAcpUpdate",
+        "aliases": [
+          "onacpupdate"
+        ],
+        "tier": "core"
+      }
+    ]
+  },
   "portTiers": {
     "_doc": "The tier a port is HELD TO, declared here and nowhere else. A port declaring its own tier is a self-graded exam: the claim must live in the shared contract, where changing it is a visible diff reviewed by the other ports. 'full' = every option. 'core' = the SPEC §0 conformance contract only; full-tier options are permitted absences, counted and printed on every run so the debt can never go quiet.",
     "js": "full",

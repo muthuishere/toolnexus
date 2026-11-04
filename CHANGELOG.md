@@ -9,7 +9,7 @@ GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
 ## Unreleased
 
 **Use the coding-agent CLI you already pay for as the model — with your own tools inside it
-(golang only).** `CreateCliClient(CliOptions{Style: CliStyles.Claude, Command: "claude", …})`
+(all eight ports).** `CreateCliClient(CliOptions{Style: CliStyles.Claude, Command: "claude", …})`
 turns an installed Claude Code, Codex, Copilot, opencode, Devin, Gemini CLI or goose into an
 ordinary toolnexus client: system prompt, skills, memory, hooks and metrics behave as on any
 in-process client. The style is an enum (`CliStyles.X`), never a string, and `Command` is
@@ -32,18 +32,35 @@ your own login.
 - **Styles are shared data** in `conformance/cli-styles/`. Each records the CLI version it was
   checked against; goose (both transports) and gemini's one-shot args are marked `UNVERIFIED`.
 - Live-checked on 2026-11-04 with toolkit MCP, skill and native tools (3/3 each): claude and
-  opencode over ACP and one-shot, copilot over ACP, codex one-shot, devin over ACP **only when the
-  prompt names the `toolnexus` MCP server** (devin keeps MCP tools behind a lookup tool; 0/3
-  without that).
+  opencode over ACP and one-shot, copilot over ACP, codex one-shot, devin over ACP once the prompt
+  names the `toolnexus` MCP server (now automatic, see below).
 - `LoadACP` now sends the MCP servers you give it (`ACPOptions.MCPServers`; it always sent an
   empty list before), can set the model (`ACPOptions.Model`), runs the agent in its own process
   group, and fails a request as soon as the agent exits instead of waiting out the timeout.
 - New Go CLI command `toolnexus mcp-bridge <url>` (stdio ⇄ HTTP MCP, token from
   `TOOLNEXUS_MCP_TOKEN`) for agents that accept only stdio MCP servers.
 
-Not done: **js, python, java, csharp, elixir, clojure and rust** do not have the CLI client yet;
-each is an unchecked task in `openspec/changes/add-cli-client-styles`. Open owner questions there:
-whether to add the devin MCP hint automatically, and verifying goose and gemini's one-shot mode.
+- **devin finds your tools without being told.** devin keeps MCP tools behind a lookup tool and
+  missed them 0/3 unless the prompt named the server. The devin style now carries an
+  `acp.systemHint` that is appended to the system prompt on every ACP turn — data in the shared
+  style file, not code.
+- **Every port** (js `createCliClient`, python `create_cli_client`, java `CliClient.create`, C#
+  `CliClient.Create`, elixir `Toolnexus.Cli.create_client`, clojure `toolnexus.cli/create-cli-client`,
+  rust `create_cli_client`) embeds the same style files (drift-tested) and replays the shared
+  `conformance/cli-client/cases.json` (argv, parser, pinned errors). Each port's ACP client now
+  sends the MCP servers it is given instead of `[]`, declares `terminal:false`, can set the model,
+  and answers unknown agent requests with `-32601`.
+- Live-checked beyond Go: js and python with claude (ACP adapter and one-shot) and opencode (ACP)
+  passed MCP, skill and native checks; python's run caught opencode opening `GET /mcp`, which a
+  stateless endpoint held open forever — the served endpoint now answers non-POST with 405.
+
+Not done: streaming over the ACP transport is Go only (the other seven refuse it rather than fake
+it); java, csharp, elixir and clojure have no process groups and kill the process tree instead
+(clojure's ACP close kills only the agent process, so an `npx` adapter's children can outlive it);
+rust needs the `serve` feature for ACP (without it Auto always uses the one-shot CLI); java,
+csharp, elixir, clojure and rust are tested hermetically only, not against live agents; goose and
+gemini's one-shot mode remain `UNVERIFIED`. Tracked in `openspec/changes/add-cli-client-styles`.
+#114's ACP envelope tool calling is superseded by this change (ADR 0037 "Relation to #114").
 
 ## 0.24.0 — 2026-11-04
 

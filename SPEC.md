@@ -2673,8 +2673,9 @@ Idiom (behaviour identical; constructor and method spelling follow each port):
 
 `createCliClient({ style, command, model?, transport?, toolkit?, acpCommand?, bridgeCommand?,
 args?, prompt?, answer?, env?, callTimeoutMs?, cwd?, …every in-process client option })` returns an
-ordinary client (§8, built on the in-process seam) plus `close()` and `transport()`. Status: **golang
-only**; the other seven ports are tracked in `openspec/changes/add-cli-client-styles`.
+ordinary client (§8, built on the in-process seam) plus `close()` and `transport()`. Status: **all
+eight ports**. Streaming over the ACP transport is Go-only (js/python/java/csharp/elixir/clojure/rust
+refuse it); ports without process groups (java, csharp, elixir, clojure) kill the process tree.
 
 - **`style`** is a closed enum, never a string: `CliStyles.Claude | Codex | Copilot | Opencode |
   Devin | Gemini | Goose | Custom` (Go: typed `CliStyle` values on a `CliStyles` struct; TS/Java/

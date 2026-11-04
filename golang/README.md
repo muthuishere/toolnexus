@@ -170,6 +170,32 @@ for _, f := range res.Files { fmt.Println(f.From, f.MimeType, f.URL) }
 In the typed inputs a zero value means "not set" (`Seed: 0` is never sent). To send a real
 zero, use `media.Generate(ctx, "image", map[string]any{"prompt": "…", "seed": 0}, nil)`.
 
+## CLI client: your agent CLI as the model
+
+Use a coding-agent CLI you already have installed (and pay for) as the model behind an ordinary
+client. The style is an enum, `Command` is required (toolnexus never picks the binary), and the
+CLI runs under its own login.
+
+```go
+c, err := toolnexus.CreateCliClient(toolnexus.CliOptions{
+    Style:   toolnexus.CliStyles.Opencode,
+    Command: "opencode",
+    Toolkit: tk, // served to the agent as a local MCP server over ACP
+})
+defer c.Close()
+res, err := c.Run(ctx, "What is my badge number?", tk)
+fmt.Println(c.Transport(), res.Text) // "acp" or "cli"
+```
+
+- **ACP first** (`CliTransports.Auto`): when the style has an ACP launch and the binary answers
+  `initialize`, your toolkit (MCP servers, skills as `load_skill`, native tools) is served on
+  `127.0.0.1` behind a per-session bearer token and the agent calls it natively. Only your tools
+  are permitted; the agent's own shell/edit/fetch are rejected. claude needs an adapter:
+  `ACPCommand: []string{"npx", "-y", "@agentclientprotocol/claude-agent-acp@0.100.0"}`.
+- **One-shot fallback** (codex, or a failed ACP launch): the conversation goes in a JSON envelope;
+  tool calls come back to the toolnexus loop. Streaming is refused; `usage` is zero.
+- Default per-call timeout 300 s. Styles live in `conformance/cli-styles/`. See SPEC §8C.
+
 ## Documentation
 
 Everything else — the full surface, with runnable examples — lives on the docs site:

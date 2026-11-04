@@ -99,6 +99,7 @@ export default defineConfig({
 										{ label: 'Images, video & speech', slug: 'cookbook/media' },
 										{ label: 'Bring your own HTTP client', slug: 'cookbook/bring-your-own-http-client' },
 										{ label: 'Local & in-process models', slug: 'cookbook/local-and-in-process-models' },
+										{ label: 'Your agent CLI as the model', slug: 'cookbook/agent-cli-as-model' },
 										{ label: 'Fail fast, or retry', slug: 'cookbook/fail-fast-or-retry' },
 										{ label: 'API key by host', slug: 'cookbook/api-key-by-host' },
 										{ label: 'Tool scheduling', slug: 'cookbook/tool-scheduling' },

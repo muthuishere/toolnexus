@@ -1,0 +1,128 @@
+---
+title: Your agent CLI as the model
+description: Use an installed Claude Code, Codex, Copilot, opencode, Devin, Gemini CLI or goose as the model behind a toolnexus client, with your own toolkit inside it — in all eight languages.
+---
+
+import { Tabs, TabItem, Aside } from '@astrojs/starlight/components';
+
+<Aside type="tip" title="Why you need this">
+You already pay for a coding-agent subscription. `createCliClient` makes that CLI the model behind an
+ordinary toolnexus client — system prompt, skills, memory, hooks and metrics as usual — and your
+toolkit (MCP servers, skills, native tools) is what it calls. toolnexus never picks or ships the
+binary: `command` is required and the CLI runs under your own login.
+</Aside>
+
+<Tabs syncKey="lang">
+<TabItem label="JavaScript">
+```ts
+import { createCliClient, CliStyles, createToolkit } from "toolnexus"
+
+const tk = await createToolkit({ skillsDir: "./skills" })
+const client = createCliClient({ style: CliStyles.Opencode, command: "opencode", toolkit: tk })
+const res = await client.run("What is my badge number?", { toolkit: tk })
+console.log(client.transport(), res.text)   // "acp" …
+await client.close()
+```
+</TabItem>
+<TabItem label="Python">
+```python
+from toolnexus import CliStyles, CliTransports, create_cli_client
+
+tk = await create_toolkit(mcp_config="mcp.json", skills_dir="skills")
+client = create_cli_client(style=CliStyles.OPENCODE, command="opencode", toolkit=tk)
+res = await client.run("What is my badge number?", tk)
+print(client.transport(), res.text)   # "acp" — the agent called your tools itself
+client.close()                        # ends the agent, stops the served toolkit
+```
+</TabItem>
+<TabItem label="Go">
+```go
+c, err := toolnexus.CreateCliClient(toolnexus.CliOptions{
+    Style: toolnexus.CliStyles.Opencode, Command: "opencode", Toolkit: tk,
+})
+defer c.Close()
+res, err := c.Run(ctx, "What is my badge number?", tk)
+fmt.Println(c.Transport(), res.Text) // "acp" or "cli"
+```
+</TabItem>
+<TabItem label="Java">
+```java
+Toolkit tk = Toolkit.create(new Toolkit.Options().skillsDir("./skills"));
+try (CliClient cli = CliClient.create(new CliClient.Options()
+        .style(CliStyles.OPENCODE).command("opencode").toolkit(tk))) {
+    var res = cli.run("What is my badge number?", tk);   // or cli.client() for the full LlmClient
+    System.out.println(cli.transport() + " " + res.text);  // "acp" …
+}
+```
+</TabItem>
+<TabItem label="C#">
+```csharp
+await using var tk = await Toolkit.CreateAsync(new Toolkit.Options { SkillsDir = ["./skills"] });
+using var client = CliClient.Create(new CliOptions
+{
+    Style = CliStyles.Opencode, Command = "opencode", Toolkit = tk,
+});
+var res = await client.RunAsync("What is my badge number?", tk);
+Console.WriteLine($"{client.Transport} {res.Text}");   // "acp" …
+LlmClient plain = client;                               // usable anywhere an LlmClient goes
+```
+</TabItem>
+<TabItem label="Elixir">
+```elixir
+{:ok, cli} = Toolnexus.Cli.create_client(style: :copilot, command: "copilot", toolkit: tk)
+result = Toolnexus.Cli.run(cli, "What is my badge number?", tk)
+Toolnexus.Cli.transport(cli)   # "auto" until the first call, then "acp" or "cli"
+Toolnexus.Cli.close(cli)
+```
+</TabItem>
+<TabItem label="Clojure">
+```clojure
+(require '[toolnexus.cli :as cli] '[toolnexus.client :as client] '[toolnexus.core :as tn])
+
+(def tk (tn/build {:skills "skills"}))
+(def c  (cli/create-cli-client {:style :gemini :command "gemini" :toolkit tk}))
+(def res (client/run c "What is my badge number?" {:toolkit tk}))
+(cli/transport c)        ; "acp" | "cli" ("auto" until the first call)
+(cli/fallback-reason c)  ; why :auto fell back, or ""
+(cli/close! c)           ; ends the agent, stops the served toolkit
+```
+</TabItem>
+<TabItem label="Rust">
+```rust
+use toolnexus::{CliOptions, CliStyles, create_cli_client};
+
+let tk = create_toolkit(ToolkitOptions { skills_dir: vec!["skills".into()], ..Default::default() }).await?;
+let client = create_cli_client(CliOptions {
+    style: Some(CliStyles::Opencode),
+    command: "opencode".into(),
+    toolkit: Some(tk.clone()),
+    ..Default::default()
+})?;
+let res = client.run("What is my badge number?", &tk).await?; // CliClient derefs to Client
+println!("{} {}", client.transport(), res.text);              // "acp": the agent called your tools
+client.close().await;                                         // ends the agent, stops the served toolkit
+```
+</TabItem>
+</Tabs>
+
+## How it reaches the agent
+
+- **`style`** is an enum (`CliStyles.Claude | Codex | Copilot | Opencode | Devin | Gemini | Goose | Custom`),
+  never a string. Styles are shared data in `conformance/cli-styles/`, each with the CLI version it was
+  verified against.
+- **ACP first** (`transport` Auto): when the style has an ACP launch and the binary answers `initialize`,
+  your toolkit is served on `127.0.0.1/mcp` behind a per-session bearer token and handed to the agent in
+  `session/new`. The agent calls your tools natively; `skill` is served as `load_skill`; only your tools
+  are permitted, the agent's own shell/edit/fetch are rejected. Hooks run at the server boundary.
+  claude needs an adapter as `acpCommand` (`npx -y @agentclientprotocol/claude-agent-acp@0.100.0`).
+  devin's style adds a system hint naming the `toolnexus` MCP server so it finds the tools.
+- **One-shot fallback**: a CLI without ACP (codex) or whose ACP launch fails is run once per turn with
+  the conversation in a JSON envelope; tool calls come back to the toolnexus loop.
+- Default per-call timeout 300 s; pinned errors (`cli: command not found: …`, `cli: exit <code>: …`,
+  `cli: timed out after <ms>ms`, `cli: empty reply`, `cli: no output file`); `usage` is zero.
+
+<Aside type="caution" title="Port gaps">
+Streaming over ACP is Go only (other ports refuse it). Java, C#, Elixir and Clojure kill the process tree
+instead of a process group. Rust needs the `serve` feature for ACP. goose and gemini's one-shot mode are
+marked UNVERIFIED. Contract: SPEC §8C, ADR 0037.
+</Aside>

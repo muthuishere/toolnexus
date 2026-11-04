@@ -3,7 +3,7 @@
 - [x] 1.1 ADR 0037 accepted decisions recorded (owner, 2026-11-04); spike on `spike/cli-client`.
 - [x] 1.2 `SPEC.md §8C` CLI client: enum, styles, transports, served toolkit, permissions, envelope, errors.
 - [x] 1.3 `conformance/cli-styles/` — seven styles + `preamble.txt`, `acp` launches, verified notes.
-- [ ] 1.4 Cross-port conformance cases (argv rendering, parser table, pinned errors) as a JSON fixture replayed by every port (Go asserts these in `cli_test.go` today).
+- [x] 1.4 Cross-port conformance cases `conformance/cli-client/cases.json` (argv rendering, parser table, pinned errors, renderEmpty), replayed by all eight ports.
 
 ## 2. golang (first port)
 
@@ -16,14 +16,14 @@
 
 ## 3. Parity checklist (a port that has not shipped stays UNCHECKED)
 
-- [ ] 3.1 js
-- [ ] 3.2 python
+- [x] 3.1 js
+- [x] 3.2 python
 - [x] 3.3 golang
-- [ ] 3.4 java
-- [ ] 3.5 csharp
-- [ ] 3.6 elixir
-- [ ] 3.7 clojure
-- [ ] 3.8 rust
+- [x] 3.4 java
+- [x] 3.5 csharp
+- [x] 3.6 elixir
+- [x] 3.7 clojure
+- [x] 3.8 rust
 
 Each port: embed `conformance/cli-styles/` byte-identically (test-asserted), the enum (never a string),
 required command, ACP with served toolkit + token + `load_skill` + per-id permissions, the one-shot
@@ -32,6 +32,13 @@ fallback with the pinned errors, and a stdio bridge story (the Go CLI's `mcp-bri
 ## 4. Documentation
 
 - [x] 4.1 `CHANGELOG.md` `## Unreleased` entry naming the seven ports not done.
-- [ ] 4.2 Per-port README sections once each port ships; `golang/README.md` / `GUIDE.md` section.
-- [ ] 4.3 Owner: devin MCP-lookup hint (design "Open"); verify gemini one-shot and goose.
-- [ ] 4.4 `conformance/options_manifest.json` row for the CLI client options once a second port lands.
+- [x] 4.2 Per-port README sections (all eight) and docs-site cookbook page `cookbook/agent-cli-as-model`.
+- [x] 4.3a devin MCP-lookup hint: automatic, as style data (`acp.systemHint`), tested in every port.
+- [ ] 4.3b Owner: verify gemini one-shot and goose (still UNVERIFIED).
+- [x] 4.4 `conformance/options_manifest.json` `cliClientOptions` group (14 options, 8 ports) for the CLI client options once a second port lands.
+
+## 5. Known per-port gaps (shipped, tracked)
+
+- [ ] 5.1 Streaming over the ACP transport: Go only; the other seven refuse it with a port-named message.
+- [ ] 5.2 Process groups: java, csharp, elixir, clojure kill the process tree instead; clojure's ACP close kills only the agent process (an `npx` adapter's children can outlive it).
+- [ ] 5.3 Live checks: Go (all), js + python (claude ACP+one-shot, opencode ACP); java/csharp/elixir/clojure/rust hermetic only.
