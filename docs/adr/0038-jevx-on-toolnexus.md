@@ -1,142 +1,134 @@
-# ADR 0038 — jevx on toolnexus: toolnexus is the classifier core, jevx is a thin CLI
+# ADR 0038 — jevx on toolnexus: a stateless classifier library under a stateful CLI
 
 - **Status:** **Proposed.** This ADR changes no library code. The evidence is a spike
   (`spikes/jevx-core/`) and an 11-item live gate run.
 - **Date:** 2026-11-04
-- **Driver:** the owner, 2026-11-04: *"jevx is actually a cli, so it should use toolnexus
-  classifier and all stuff … find out [how to make] it similar to jevx with toolnexus being core."*
-  The owner also wants several classifiers with named profiles, and image items, in toolnexus.
-  Jev is our own product, so a Jev (`systemone`) default is allowed. The CEO set a gate: before
-  any cutover, run the current judge and the new toolnexus path on the same 20–30 real items, and
-  cut over only where the decisions match.
-- **Related:** ADR 0020/0021 (Classifier seam, encoding carries the judgment), ADR 0035 (judge
-  adapters + batteries), SPEC §8B (Classifier), §8A (content parts), ADR 0027 (backend pairing).
+- **Driver:** the owner, 2026-11-04:
+  - *"jevx is actually a cli, so it should use toolnexus classifier and all stuff … with toolnexus
+    being core."*
+  - Then: *"jevx is frontend, they will use ours, and it is jevx's job to maintain state and all
+    stuff. Profile belongs to jevx; ours is a stateless library."*
+  - And: the latest TypeSafe API accepts images. toolnexus should support Cloudflare, OpenAI
+    decisions and OpenRouter System One, all selected by one enum.
+
+  The CEO set a gate: before any cutover, run the current judge and the toolnexus path on the
+  same 20–30 real items, and cut over only where the decisions match.
+- **Related:** ADR 0020/0021 (Classifier seam), ADR 0027 (backend pairing), ADR 0035 (judge
+  adapters), SPEC §8B (Classifier), §8A (content parts).
 
 ## Context
 
-Three codebases call System One today. Each one makes the same decisions in its own way.
+Three codebases call System One today:
 
 | implementation | where | builds the request | thresholds | on toolnexus? |
 |---|---|---|---|---|
 | **jevx** | `~/muthu/gitworkspace/jevcli` (Go, v0.12.13) | its own: `core/core.go:750` `AskRaw` | inclusive 0.8 / 0.2, min-confidence 0.6 (`cmd/jevx/ask.go:109`) | **no** |
-| **wfnexus** `wfx judge` / `POST /judge` / `decide:` step | `wfnexus-main/apps/api/internal/judge/judge.go`, `engine/decide.go:116` | toolnexus `CreateClassifier` | its own `Bands` copy, 0.30 / 0.70 (`judge.go:46–115`) | **yes** (v0.19.0, `apps/api/go.mod:13`) |
-| **toolnexus** judge layer | `golang/judge.go`, `judge_batteries.go` | `classifier.go:620` | `Bands` exclusive 0.30 / 0.70 (`judge.go:89`) | it is the library |
+| **wfnexus** `wfx judge` / `POST /judge` / `decide:` | `wfnexus-main/apps/api/internal/judge/judge.go`, `engine/decide.go:116` | toolnexus `CreateClassifier` | its own `Bands` copy, 0.30 / 0.70 (`judge.go:46–115`) | **yes** (v0.19.0) |
+| **toolnexus** judge layer | `golang/judge.go`, `judge_batteries.go` | `classifier.go:620` | `Bands`, exclusive (`judge.go:89`) | it is the library |
 
-There are also smaller Python callers that post to `/systemone` directly, in
-`model-training-workspace/myjev/scripts/` and `jev-converters/scripts/`. They are training and
-labelling tools, not product paths, so this ADR does not cover them.
-
-`spikes/jevx-core/MAP.md` sorts each jevx function into "core" (a call into toolnexus) or "CLI"
-(stays in jevx), with file:line on both sides. In short, about 60% of jevx's `core/core.go` is
-decision plumbing that toolnexus already has or should have. The rest (hooks/plugins, skill
-install, `## Jev` context reading, transcript turns, memory, exit codes, config file) belongs to
-the CLI.
+`spikes/jevx-core/MAP.md` sorts each jevx function into toolnexus, jevx, or a gap, with file:line
+on both sides.
 
 ## Decisions
 
-**D1. toolnexus owns the decision core.** That means request building, the wire, retries
-(including Retry-After, which jevx ignores today), key handling, batching, metric events, and the
-answer types. jevx stops building System One requests itself. `AskRaw`, `post` and the retry loop
-are replaced by `Classifier.Evaluate` / `EvaluateBatch`.
+**D1. The split is stateless library vs stateful host.** toolnexus does one thing: given
+`ClassifierOptions`, a state and questions, it returns a `Decision`. That covers:
+- building the request and encoding it for each backend;
+- retries, including `Retry-After`, which jevx ignores today;
+- reading the key from the env var named in the options, at call time;
+- batches and metric events.
 
-**D2. Named profiles and a registry of classifiers go into toolnexus (gap R1).** A profile is a
-`ClassifierOptions` plus a name, optional thresholds, and an optional `Fallback` profile. A
-registry resolves a name, or the default, to one built `*Classifier`. jevx and wfnexus each
-rebuild this map today. The spike's `Registry` (`spikes/jevx-core/core.go`) is the shape to
-standardise.
+toolnexus keeps **no** state: no profiles, no default profile, no fallback, no cache, no config
+file, no log file.
 
-**D3. The default profile is Jev with an llm fallback.** `jev` = `systemone`, base
-`https://api.typesafe.ai/v1`, `jev-latest`, `TYPESAFE_API_KEY`. When that key is unset **and** the
-host supplied a §8 client, the registry falls back to an `llm` profile, which reports
-`Calibrated=false`. With no client, the call fails with need-key and is never silently skipped.
-A threshold tuned on one backend does not carry over to the other (§8B). So a fallback answer is
-labelled with the profile that answered it.
+**D2. jevx owns profiles and every other piece of state.** That includes:
+- named profiles, the default profile and the Jev→llm fallback;
+- the config file and saved questions, with their thresholds;
+- the answer cache and the content-free log file;
+- scrubbing the state before a hosted call (`core/redact.go`);
+- the `## Jev` context from AGENTS.md / CLAUDE.md, transcript turns, memory;
+- hooks and plugins, skill install, the commands, and exit codes 0/1/3/4.
 
-**D4. Keys come from the environment only.** Profiles store the env var's name (`APIKeyEnv`) and
-`${ENV}` header templates. They never store a value. This matches jevx (`core.go:76`) and
-toolnexus (`classifier.go:968`). Error text never contains the key; a spike test checks this.
+A jevx profile *resolves to* a `ClassifierOptions`, and that is the only thing that reaches
+toolnexus. The spike's `Registry` (`spikes/jevx-core/core.go`) is jevx-side code.
 
-**D5. Image items reuse §8A content parts (gap I1).** An item is text or a `ContentPart`. Until
-the wire can carry them, image items fail loudly (`ErrImageUnsupported`) on every style. They are
-never turned into a text description. Two steps:
-1. `StyleLLM` sends the state through `Client.RunParts` (`client.go:846`) instead of the text-only
-   `Run` (`classifier.go:997`). This is possible today.
-2. `systemone` needs TypeSafe to confirm that the wire accepts image parts. That is an open
-   question.
+**D3. One backend enum covers every decision source.** `ClassifierBackend` already has `typesafe`
+and `openrouter` (`classifier.go:469`). It grows to:
 
-**D6. Verdict thresholds become per profile and per question, with jevx's inclusive rule
-available (gap T1).** jevx says yes at `P >= yes`. toolnexus `Bands` says yes at `P > High`, and
-also demotes a near-uniform choice. With the same numbers, the two disagree at the boundary
-(spike test `TestBoundaryDiffersFromToolnexusBands`). jevx users' saved thresholds must keep their
-meaning, so toolnexus gets `Thresholds{Yes, No, MinConfidence}`, inclusive. Each profile and each
-question can carry its own. `Bands` stays as it is.
+| enum | wire | default base / model / key env |
+|---|---|---|
+| `typesafe` | System One `POST {base}/systemone` | `api.typesafe.ai/v1`, `jev-latest`, `TYPESAFE_API_KEY` (existing) |
+| `openrouter` | System One `POST {base}/systemone` | `openrouter.ai/api/v1`, `typesafe/jev-1.13`, `OPENROUTER_API_KEY` (existing) |
+| `cloudflare` | System One inside Cloudflare's `/ai/run` envelope (`{model, input}` → `{result, success}`, with the nested `state: Completed` unwrap) | account URL from `${CLOUDFLARE_ACCOUNT_ID}`, `typesafe/jev`, `CLOUDFLARE_JEV_API_KEY`. This ports jevx `core/core.go:770–815` |
+| `openai` | **decisions from an OpenAI-compatible chat model**: the existing `StyleLLM` structured-output rendering over a §8 client, `Calibrated=false` | `api.openai.com/v1`, the host's model, `OPENAI_API_KEY` |
 
-**D7. Fail-closed reply validation moves into toolnexus (gap V1).** A reply is rejected if:
-- an answer is missing, or there is an extra one;
-- a probability is outside [0,1];
-- a distribution does not sum to 1 ± 0.02;
-- a choice is not one of the offered keys.
+An explicit `BaseURL`, `Model` or `APIKeyEnv` still wins over the preset. This replaces the
+earlier "full-URL endpoint" gap (U1). jevx's custom profiles keep working as `BaseURL` overrides
+on `typesafe`.
 
-jevx does this (`core.go:865`) and toolnexus does not. This is a bug class for every port, not
-just jevx.
+*Assumption:* "openai decisions" means a chat model answering through structured output, not a
+System One endpoint hosted by OpenAI. If OpenAI should instead be a System One-shaped wire, it
+becomes a fifth row.
 
-**D8. Opt-in cache and pre-send state transform (gaps K1, P1), as library hooks.**
-- `Cache`: the key is a hash of (url, model, state, question wire), with a TTL, off by default.
-  Headers are not part of the key, so rotating a key does not empty the cache.
-- `StateTransform func(state) (state, n)`: toolnexus provides the hook. jevx keeps its hosted-only
-  scrub rules (`core/redact.go`), because what counts as a secret is the host's policy.
-- The content-free ledger stays a jevx sink on `OnMetric`. toolnexus adds a question hash and
-  count to the `classifier.evaluate` event (gap L1).
+**D4. Image items go into the System One wire (gap I1).** The latest TypeSafe API accepts
+images. An item that holds a §8A `ContentPart` is encoded into the System One request for
+`typesafe` and `openrouter`, once the gateway is confirmed to pass images through. `openai` sends
+it through `Client.RunParts` (`client.go:846`) instead of the text-only `Run`
+(`classifier.go:997`). A backend that cannot carry an image fails loudly; it never turns the
+image into a description.
 
-**D9. jevx stays a thin CLI.** These stay in jevx: commands and compact question syntax, exit
-codes 0/1/3/4, skill install, hooks and plugins (they *call* the core), the `## Jev` context from
-AGENTS.md / CLAUDE.md, transcript turns, memory, the question pack *wording* (a Jev model is
-trained on that wording), and the config file. These go to toolnexus: the full-URL / Cloudflare
-envelope style (gap U1) and question chunking (gap C1). Until U1 lands, jevx can keep the
-Cloudflare profile as a `StyleCustom` profile.
+The exact image wire shape, and whether `cloudflare` accepts images, is taken from TypeSafe's
+current API reference when the change is written. It is not guessed here.
 
-**D10. wfnexus moves the same way.** It already calls toolnexus. It drops its copied `Bands` /
-`Read` (`internal/judge/judge.go:46–115`) for the registry plus `Thresholds`. `wfx judge`'s
-`--backend/--url/--classifier` flags become profile names, and its `POST /judge` resolves a
-profile from the same registry. That is one decision path for all three.
+**D5. Stateless verdict helpers come into toolnexus.** These are pure functions, with no state:
+- **T1** `Thresholds{Yes, No, MinConfidence}`, inclusive, applied to a `Decision`. jevx's saved
+  thresholds must keep their meaning. `Bands` is exclusive and disagrees at the boundary (spike
+  test `TestBoundaryDiffersFromToolnexusBands`). `Bands` stays as it is.
+- **V1** fail-closed reply validation:
+  - an answer is missing, or there is an extra one;
+  - a probability is outside [0,1];
+  - a distribution does not sum to 1 ± 0.02;
+  - a choice is not one of the offered keys.
 
-**D11. Cutover gate (CEO).** jevx switches a verb to the toolnexus path only after `spikes/jevx-core/cmd/gate`
-shows that `jevx` and the toolnexus path give the **same verdict** on **20–30 real items** for that verb,
-with the same profile, `--fresh` and `--no-context`. Any mismatch blocks that verb and is investigated as a
-threshold-semantics (T1) or validation (V1) difference first.
+  jevx does this (`core.go:865`); toolnexus does not, in any port.
+- **C1** splitting large question sets into chunks. **L1** a question hash and count in the
+  `classifier.evaluate` metric event.
+
+**D6. Keys come from the environment only.** The options carry an env var's name, never a value.
+Error text never contains the key (spike test).
+
+**D7. wfnexus moves the same way.** It already calls toolnexus. It drops its copied `Bands` /
+`Read` for the T1/V1 helpers. Its backend flags map onto the D3 enum, and it keeps its own
+profiles, because those are its state.
+
+**D8. Cutover gate (CEO).** jevx switches a verb to the toolnexus path only after
+`spikes/jevx-core/cmd/gate` shows the **same verdict** on **20–30 real items** for that verb,
+with the same profile, `--fresh` and `--no-context`. Any mismatch blocks that verb.
 
 ## Evidence
 
 - Spike `spikes/jevx-core`: `go vet` passes and `go test ./...` passes, hermetic, against a fake
   System One endpoint (thresholds, profile selection, 429/503 retries, fail-closed checks, no key
   in errors, Jev→llm fallback, loud image failure, gate parsing).
-- Live gate, 2026-11-04, hosted Jev, key brokered by `sec run`: **11/11 verdicts matched** on the
-  jevx README quickstart items (`items/readme-quickstart.jsonl`, source jevcli
-  `README.md:81-108`). That covers 9 `is`, 1 `pick` and 1 `rate`. It is **not** a cutover
-  decision: it is below the 20–30-item gate, and the items are documentation examples, not work
-  traffic.
+- Live gate, 2026-11-04, hosted Jev, key brokered by `sec run`: **11/11 verdicts matched** on
+  jevx's README quickstart items (9 `is`, 1 `pick`, 1 `rate`). It is **not** a cutover decision:
+  it is below 20–30 items, and the items are documentation examples.
 
 ## Not done
 
-- No toolnexus library change and no OpenSpec change yet. Gaps R1, T1, V1, K1, P1, I1, U1, C1
-  and L1 need one change across all eight ports (`add-classifier-profiles`, to be proposed after
-  the owner answers below).
-- jevx's repo was not modified.
-- The full 20–30-item gate has not run.
+- No library change and no OpenSpec change yet. The follow-up change (e.g.
+  `add-classifier-backends`) covers D3 (`cloudflare` and `openai` enum values), D4 (images) and
+  D5 (T1, V1, C1, L1) across all eight ports.
+- The spike still uses `ErrImageUnsupported`, because toolnexus cannot send images yet.
+- jevx's repo was not modified. The full 20–30-item gate has not run.
 
 ## Open questions for the owner
 
-1. **Item source for the gate.** jevx's ledger has no content by design. Which real items should
-   we use: Stop-hook turns you pick, wfnexus `wfx judge` item files, or the myjev question pack?
-2. **Threshold semantics.** Should toolnexus adopt jevx's inclusive `Thresholds` alongside
-   `Bands` (proposed), or should jevx migrate users to `Bands`? Migrating changes saved
-   thresholds' meaning at the boundary.
-3. **Fallback.** Should the Jev→llm fallback be automatic when `TYPESAFE_API_KEY` is unset, or
-   opt-in per profile? Automatic fallback changes calibration silently, apart from the profile
-   label.
-4. **Images on `systemone`.** Will the TypeSafe wire accept image parts? If not, image items are
-   llm-only.
-5. **Cache in the library.** Is a cache a toolnexus option (K1), or does it stay jevx-only
-   (persistence is host policy)?
-6. **Profile file.** Should toolnexus read a profile file (shared by jevx and wfnexus), or take
-   profiles only in code and leave the file to each host?
+1. **Gate items.** Which real items should the gate use: Stop-hook turns you pick, wfnexus
+   `wfx judge` item files, or the myjev question pack?
+2. **`openai` meaning.** Is "openai decisions" a chat model answering through structured output
+   (assumed above), or a System One endpoint?
+3. **Images on OpenRouter and Cloudflare.** Do these gateways pass the image wire through, or is
+   it TypeSafe-only at first?
+4. **Thresholds.** Should toolnexus ship jevx's inclusive `Thresholds` alongside `Bands`
+   (proposed), or should jevx migrate its users to `Bands`?

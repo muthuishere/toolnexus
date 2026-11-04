@@ -48,8 +48,9 @@ type Profile struct {
 	Evaluate func(ctx context.Context, state any, qs map[string]tn.Question) (tn.Decision, error)
 }
 
-// Registry holds several named classifiers. GAP R1: toolnexus has no registry
-// or profile concept; every host (jevx, wfnexus) rebuilds this map itself.
+// Registry holds several named classifiers. JEVX-OWNED (ADR 0038 D2): profiles,
+// the default, the fallback and their config file are host state; toolnexus is
+// a stateless library and only receives ClassifierOptions.
 type Registry struct {
 	Default  string
 	Profiles map[string]Profile
