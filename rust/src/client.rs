@@ -6,7 +6,7 @@
 //! Mirrors `golang/client.go`. Gemini is a schema adapter only (§0 item 7), as in
 //! every other port: there is no Gemini wire style in the loop.
 
-mod acp_bridge;
+pub(crate) mod acp_bridge;
 mod cache;
 mod emit;
 mod inprocess;

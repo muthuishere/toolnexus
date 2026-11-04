@@ -12,6 +12,9 @@ pub mod adapters;
 pub mod agents;
 pub mod builtins;
 pub mod classifier;
+pub mod cli;
+#[cfg(feature = "serve")]
+pub mod cli_acp;
 pub mod client;
 pub mod http;
 pub mod judge;
@@ -32,6 +35,10 @@ pub use builtins::{BuiltinsConfig, select_builtins};
 pub use classifier::{
     Classifier, ClassifierError, ClassifierOptions, ClassifierStyle, Decision, Question, Questions,
     create_classifier,
+};
+pub use cli::{
+    CliAcpLaunch, CliArg, CliClient, CliError, CliOptions, CliStyleDef, CliStyles, CliTransports,
+    create_cli_client, load_cli_style,
 };
 pub use media::{
     CloneVoiceInput, ImageInput, Media, MediaError, MediaFile, MediaOptions, MediaProgress,

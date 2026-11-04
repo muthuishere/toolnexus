@@ -112,6 +112,54 @@ let res = agent.run("Draw a fox, then animate it.", &tk).await?;
 for f in &res.files { println!("{} {} {}", f.from, f.mime_type, f.url); }
 ```
 
+## CLI client: your agent CLI as the model
+
+An agent CLI you already have installed (and pay for) becomes the model behind an ordinary
+client. SPEC §8C, ADR 0037.
+
+```rust
+use toolnexus::{CliOptions, CliStyles, create_cli_client};
+
+let tk = create_toolkit(ToolkitOptions { skills_dir: vec!["skills".into()], ..Default::default() }).await?;
+let client = create_cli_client(CliOptions {
+    style: Some(CliStyles::Opencode),
+    command: "opencode".into(),
+    toolkit: Some(tk.clone()),
+    ..Default::default()
+})?;
+let res = client.run("What is my badge number?", &tk).await?; // CliClient derefs to Client
+println!("{} {}", client.transport(), res.text);              // "acp": the agent called your tools
+client.close().await;                                         // ends the agent, stops the served toolkit
+```
+
+- **`style`** is the `CliStyles` enum (`Claude`, `Codex`, `Copilot`, `Opencode`, `Devin`,
+  `Gemini`, `Goose`, `Custom`), never a string. A user style comes from
+  `load_cli_style(path_or_json)` as `style_def`; `Custom` takes `args` (`CliArg::Arg` /
+  optional `CliArg::Group`), `prompt`, `answer`.
+- **`command` is required**: the binary's path or name. Nothing is embedded or defaulted.
+  `in_process.model` is passed to the CLI unchanged; every other `InProcessOptions` field
+  (system prompt, hooks, `wait_for`, …) works as on any in-process client.
+- **`transport`** is `CliTransports::Auto` (default), `Acp` or `Cli`. Auto uses ACP when the
+  style has an ACP launch (or `acp_command`), and falls back to the one-shot CLI only when
+  the agent fails to start or answer `initialize` (`client.fallback_reason()` says why).
+  `client.transport()` is `Auto` until the first model call.
+- **ACP** (needs the `serve` feature; without it Auto always uses the one-shot CLI): `toolkit`
+  is served on `127.0.0.1:<ephemeral>/mcp` behind a per-session bearer token; `skill` is
+  served as `load_skill`; `before_tool`/`after_tool` hooks run at that server; only permission
+  requests for the served tools are allowed, the agent's own shell/edit/fetch are rejected.
+  claude has no ACP mode of its own: set
+  `acp_command: vec!["npx".into(), "-y".into(), "@agentclientprotocol/claude-agent-acp@0.100.0".into()]`.
+  `client.acp_session().await` shows what was sent (token redacted) and every permission decision.
+- **One-shot CLI**: the conversation goes in under a fixed preamble, the reply is parsed as
+  an OpenAI-shaped envelope, and tool calls run in the toolnexus loop. Streaming is refused
+  on this transport.
+- Errors carry pinned messages (`cli: command not found: <bin>`, `cli: exit <code>: <stderr>`,
+  `cli: empty reply`, `cli: no output file`, `cli: timed out after <ms>ms`). Default call
+  timeout 300000 ms (`call_timeout_ms`). `usage` is zero.
+- `toolnexus::cli::run_mcp_bridge(url, token, stdin, stdout)` is the stdio⇄HTTP bridge for
+  agents that accept only stdio MCP servers (wrap it in a binary and pass it as
+  `bridge_command`; default `toolnexus mcp-bridge` when the Go CLI is on PATH).
+
 ## Cargo features
 
 | feature | default | what it adds |

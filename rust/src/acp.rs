@@ -199,6 +199,53 @@ pub struct AcpOptions {
     pub on_update: Option<UpdateHandler>,
     /// Wait between SIGTERM and SIGKILL of the agent's process group on close; default 2s.
     pub kill_grace: Duration,
+    /// Sent in `session/new` `mcpServers` (empty ⇒ `[]`). An entry with both a
+    /// URL and a command is resolved against the agent's `initialize` result:
+    /// the http shape when it advertises `agentCapabilities.mcpCapabilities.http`,
+    /// else the stdio shape (SPEC §8C).
+    pub mcp_servers: Vec<AcpMcpServer>,
+    /// Sent as `initialize` `clientCapabilities._meta` (vendor flags); opaque.
+    pub client_caps_meta: Option<Value>,
+    /// Passed through unchanged after `session/new`: `session/set_config_option
+    /// {configId:"model"}`, then `session/set_model` if the agent rejects that.
+    /// Both failing fails `load`.
+    pub model: Option<String>,
+    /// Receives the agent's stderr as it arrives (default: discarded).
+    pub stderr: Option<StderrHandler>,
+}
+
+/// Receives chunks of the agent's stderr.
+pub type StderrHandler = Arc<dyn Fn(&[u8]) + Send + Sync>;
+
+/// One `session/new` `mcpServers` entry. Set `url` for the http shape
+/// (`{type:"http",name,url,headers[]}`), `command` for the stdio shape
+/// (`{name,command,args[],env[]}` — no `type`), or both to let the agent's
+/// advertised `mcpCapabilities.http` pick. Headers and env go on the wire as
+/// `[{name,value}]` arrays sorted by name; their values are never logged.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct AcpMcpServer {
+    pub name: String,
+    pub url: String,
+    pub headers: std::collections::BTreeMap<String, String>,
+    pub command: String,
+    pub args: Vec<String>,
+    pub env: std::collections::BTreeMap<String, String>,
+}
+
+impl AcpMcpServer {
+    /// The ACP wire shape for an agent that does (`http_ok`) or does not accept http servers.
+    pub fn wire(&self, http_ok: bool) -> Value {
+        let nv = |m: &std::collections::BTreeMap<String, String>| {
+            m.iter()
+                .map(|(k, v)| json!({"name": k, "value": v}))
+                .collect::<Vec<_>>()
+        };
+        if !self.url.is_empty() && (http_ok || self.command.is_empty()) {
+            json!({"type": "http", "name": self.name, "url": self.url, "headers": nv(&self.headers)})
+        } else {
+            json!({"name": self.name, "command": self.command, "args": self.args, "env": nv(&self.env)})
+        }
+    }
 }
 
 impl AcpOptions {
@@ -216,6 +263,10 @@ impl AcpOptions {
             on_permission: None,
             on_update: None,
             kill_grace: Duration::from_secs(2),
+            mcp_servers: Vec::new(),
+            client_caps_meta: None,
+            model: None,
+            stderr: None,
         }
     }
     pub fn args<I, S>(mut self, args: I) -> Self
@@ -279,29 +330,43 @@ pub struct AcpClient {
     request_timeout: Duration,
     agent_info: Value,
     pid: Option<u32>,
+    mcp_servers_sent: Vec<Value>,
 }
 
 impl AcpClient {
     /// Spawn the agent and complete `initialize` + `session/new` (+ `session/set_mode`).
     pub async fn load(opts: AcpOptions) -> Result<Self, AcpError> {
+        Self::load_phased(opts).await.map_err(|(_, e)| e)
+    }
+
+    /// [`load`](Self::load) that also says whether the failure came before the
+    /// agent answered `initialize` (`true`: it failed to start or to initialize).
+    pub(crate) async fn load_phased(opts: AcpOptions) -> Result<Self, (bool, AcpError)> {
+        let early = |e: AcpError| (true, e);
         if opts.command.is_empty() {
-            return Err(AcpError::Config("AcpOptions.command is required".into()));
+            return Err(early(AcpError::Config(
+                "AcpOptions.command is required".into(),
+            )));
         }
         let cwd = match &opts.cwd {
             Some(c) => c.clone(),
-            None => std::env::current_dir()?,
+            None => std::env::current_dir().map_err(|e| early(e.into()))?,
         };
         if !cwd.is_absolute() {
-            return Err(AcpError::Config(format!(
+            return Err(early(AcpError::Config(format!(
                 "cwd must be absolute, got {cwd:?}"
-            )));
+            ))));
         }
         let mut cmd = Command::new(&opts.command);
         cmd.args(&opts.args)
             .envs(opts.env.iter().cloned())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null());
+            .stderr(if opts.stderr.is_some() {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            });
         let mut wrap = CommandWrap::from(cmd);
         // Its own process group (POSIX) / Job Object (Windows), so close stops
         // everything it started — an npx adapter AND the agent it spawned.
@@ -310,13 +375,27 @@ impl AcpClient {
         #[cfg(windows)]
         wrap.wrap(process_wrap::tokio::JobObject);
         wrap.wrap(process_wrap::tokio::KillOnDrop);
-        let mut child = wrap.spawn().map_err(|source| AcpError::Spawn {
-            command: opts.command.clone(),
-            source,
+        let mut child = wrap.spawn().map_err(|source| {
+            early(AcpError::Spawn {
+                command: opts.command.clone(),
+                source,
+            })
         })?;
         let pid = child.id();
         let stdin = child.stdin().take().expect("piped stdin");
         let stdout = child.stdout().take().expect("piped stdout");
+        if let (Some(h), Some(mut err)) = (opts.stderr.clone(), child.stderr().take()) {
+            tokio::spawn(async move {
+                use tokio::io::AsyncReadExt;
+                let mut buf = [0u8; 4096];
+                while let Ok(n) = err.read(&mut buf).await {
+                    if n == 0 {
+                        break;
+                    }
+                    h(&buf[..n]);
+                }
+            });
+        }
 
         let shared = Arc::new(Shared {
             stdin: Mutex::new(Some(stdin)),
@@ -342,13 +421,21 @@ impl AcpClient {
             request_timeout: opts.request_timeout,
             agent_info: Value::Null,
             pid,
+            mcp_servers_sent: Vec::new(),
         };
+        let mut caps = json!({
+            "fs": {"readTextFile": false, "writeTextFile": false},
+            "terminal": false,
+        });
+        if let Some(meta) = &opts.client_caps_meta {
+            caps["_meta"] = meta.clone();
+        }
         let init = client
             .call(
                 "initialize",
                 json!({
                     "protocolVersion": opts.protocol_version,
-                    "clientCapabilities": {"fs": {"readTextFile": false, "writeTextFile": false}},
+                    "clientCapabilities": caps,
                 }),
                 opts.initialize_timeout,
             )
@@ -357,14 +444,20 @@ impl AcpClient {
             Ok(v) => v,
             Err(e) => {
                 client.close().await;
-                return Err(e);
+                return Err(early(e));
             }
         };
+        let http_ok = init
+            .pointer("/agentCapabilities/mcpCapabilities/http")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
         client.agent_info = init;
+        client.mcp_servers_sent = opts.mcp_servers.iter().map(|s| s.wire(http_ok)).collect();
+        let late = |e: AcpError| (false, e);
         let sn = client
             .call(
                 "session/new",
-                json!({"cwd": cwd.to_string_lossy(), "mcpServers": []}),
+                json!({"cwd": cwd.to_string_lossy(), "mcpServers": client.mcp_servers_sent}),
                 opts.request_timeout,
             )
             .await;
@@ -376,13 +469,13 @@ impl AcpClient {
             Ok(Some(s)) if !s.is_empty() => s,
             Ok(_) => {
                 client.close().await;
-                return Err(AcpError::Protocol(
+                return Err(late(AcpError::Protocol(
                     "session/new: no sessionId in response".into(),
-                ));
+                )));
             }
             Err(e) => {
                 client.close().await;
-                return Err(e);
+                return Err(late(e));
             }
         };
         client.session_id = sid;
@@ -396,10 +489,42 @@ impl AcpClient {
                 .await;
             if let Err(e) = r {
                 client.close().await;
-                return Err(e);
+                return Err(late(e));
+            }
+        }
+        if let Some(model) = opts.model.as_deref().filter(|m| !m.is_empty()) {
+            // Passed through unchanged: the stable ACP spelling first, then
+            // the older unstable session/set_model.
+            let sid = client.session_id.clone();
+            let first = client
+                .call(
+                    "session/set_config_option",
+                    json!({"sessionId": sid, "configId": "model", "value": model}),
+                    opts.request_timeout,
+                )
+                .await;
+            if let Err(e1) = first {
+                let second = client
+                    .call(
+                        "session/set_model",
+                        json!({"sessionId": sid, "modelId": model}),
+                        opts.request_timeout,
+                    )
+                    .await;
+                if let Err(e2) = second {
+                    client.close().await;
+                    return Err(late(AcpError::Protocol(format!(
+                        "set model {model:?}: {e1}; {e2}"
+                    ))));
+                }
             }
         }
         Ok(client)
+    }
+
+    /// The exact `mcpServers` list sent in `session/new`.
+    pub fn mcp_servers_sent(&self) -> &[Value] {
+        &self.mcp_servers_sent
     }
 
     /// The agent's process id (on unix also its process-group id).

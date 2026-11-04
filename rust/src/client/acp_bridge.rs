@@ -36,7 +36,7 @@ pub fn acp_messages(req: &InProcessRequest) -> Vec<(String, String)> {
         .collect()
 }
 
-fn to_stream_event(ev: AcpStreamEvent) -> StreamEvent {
+pub(crate) fn to_stream_event(ev: AcpStreamEvent) -> StreamEvent {
     match ev {
         AcpStreamEvent::Text { delta } => StreamEvent::text(delta),
         AcpStreamEvent::ToolCall {
