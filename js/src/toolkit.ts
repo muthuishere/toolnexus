@@ -9,6 +9,7 @@ import { selectBuiltins, type BuiltinsConfig } from "./builtin.js"
 import { agentTools, parseAgentsConfig, type Agent } from "./a2a.js"
 import { startA2AServer, type A2AConfig, type OnTask, type ServeHandle } from "./serve.js"
 import { type MCPServeConfig, type OnCall } from "./mcpserve.js"
+import { createMcpHandler, type McpHandler, type McpHandlerConfig } from "./mcphandler.js"
 import { toAnthropic, toGemini, toOpenAI } from "./adapters.js"
 import type { Client } from "./client.js"
 import type { Media } from "./media.js"
@@ -219,6 +220,16 @@ export class Toolkit {
       mcpTools: mcp ? this.tools() : undefined,
       onCall: opts.onCall,
     })
+  }
+
+  /**
+   * §7C.1 (ADR 0039). An embeddable streamable-HTTP MCP server as a Node request listener
+   * `(req, res) => void` (+ `notifyToolsChanged()`), to mount on the host's own server/router
+   * behind its own TLS, CORS and OAuth. Every policy is a hook in `cfg`; `serve()` is unchanged.
+   * Without `cfg.listTools` it exposes this toolkit's tools.
+   */
+  mcpHandler(cfg: McpHandlerConfig = {}): McpHandler {
+    return createMcpHandler(() => this.tools(), cfg)
   }
 
   async execute(name: string, args: Record<string, unknown>, ctx?: ToolContext): Promise<ToolResult> {

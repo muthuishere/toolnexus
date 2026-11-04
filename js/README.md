@@ -158,6 +158,34 @@ const res = await agent.run("Draw a fox, then animate it.", { toolkit: tk })
 for (const f of res.files) console.log(f.from, f.mimeType, f.url)
 ```
 
+## Embeddable MCP server (`mcpHandler`)
+
+`serve(addr, { mcp })` owns a port and exposes one static tool list. `toolkit.mcpHandler(cfg)`
+returns a plain Node request listener `(req, res) => void` (plus `notifyToolsChanged()`) that you
+mount on **your** server or router, behind your own TLS, CORS and OAuth. Every policy is a hook:
+`authenticate` (+ `wwwAuthenticate` for the 401), `listTools` per request (a name outside it is never
+executed), `beforeCall` allow / deny / confirm (confirm uses MCP elicitation when the client supports
+it, otherwise returns your fallback `result`), `onCall` telemetry, `serverInfo`, resources/prompts,
+pluggable `sessionIds`, `stateless`, `protocolVersions`. Hooks and tools read the caller with
+`identityFrom(ctx)`, `requestFrom(ctx)`, `mcpSessionIdFrom(ctx)` and `mcpRequestMetaFrom(ctx)`.
+`ToolResult.structured` / `meta` and `Tool.outputSchema` / `annotations` go on the wire as
+`structuredContent` / `_meta` / `outputSchema` / `annotations`. SPEC §7C.1; runnable:
+`npm run example:mcp-handler`.
+
+```ts
+import http from "node:http"
+import { createToolkit, identityFrom } from "toolnexus"
+
+const tk = await createToolkit({ builtins: false })
+const mcp = tk.mcpHandler({
+  authenticate: (req) => verifyBearer(req.headers.authorization),   // throw ⇒ 401
+  listTools: (ctx) => toolsFor(identityFrom(ctx)),
+  beforeCall: (_ctx, tool) =>
+    tool.annotations?.destructiveHint ? { kind: "confirm", message: `Run ${tool.name}?` } : { kind: "allow" },
+})
+http.createServer((req, res) => (req.url?.startsWith("/mcp") ? mcp(req, res) : res.writeHead(404).end())).listen(8080)
+```
+
 ## Documentation
 
 Everything else — the full surface, with runnable examples — lives on the docs site:

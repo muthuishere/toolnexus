@@ -1,0 +1,160 @@
+---
+title: "mcpHandler"
+description: "An embeddable MCP server you mount on your own HTTP server, with per-request hooks. — JavaScript."
+sidebar:
+  label: "serve / mcp-handler"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>JavaScript</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md#7c1-embeddable-mcp-handler-mcphandler--adr-0039">SPEC §7C.1</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/js/src/mcphandler.ts">js/src/mcphandler.ts</a>
+</p>
+
+```ts
+class Toolkit {
+  mcpHandler(cfg?: McpHandlerConfig): McpHandler
+}
+interface McpHandler {
+  (req: IncomingMessage, res: ServerResponse): void   // a Node request listener
+  notifyToolsChanged(): void
+}
+interface McpHandlerConfig {
+  name?: string; title?: string; version?: string; instructions?: string
+  serverInfo?: (ctx: McpContext) => McpServerInfo | Promise<McpServerInfo>
+  protocolVersions?: string[]                       // default ["2025-06-18"]; implemented: 2025-11-25, 2025-06-18
+  authenticate?: (req: IncomingMessage) => unknown  // throw ⇒ HTTP 401
+  wwwAuthenticate?: (req: IncomingMessage, err: unknown) => string | undefined
+  listTools?: (ctx: McpContext) => Tool[] | Promise<Tool[]>
+  beforeCall?: (ctx: McpContext, tool: Tool, args: Record<string, unknown>) =>
+    McpDecision | void | Promise<McpDecision | void>  // { kind: "allow" | "deny" | "confirm", message?, result? }
+  confirmTimeout?: number                           // ms, default 5 minutes
+  onCall?: (ev: McpCallEvent) => void
+  listResources?, readResource?, listPrompts?, getPrompt?
+  sessionIds?: McpSessionIds                        // { generate, validate, terminate }
+  stateless?: boolean; statelessSessionId?: string; maxBodyBytes?: number
+}
+function identityFrom(ctx): unknown
+function requestFrom(ctx): IncomingMessage | undefined
+function mcpSessionIdFrom(ctx): string
+function mcpRequestMetaFrom(ctx): Record<string, unknown> | undefined
+```
+
+A plain streamable-HTTP MCP server with **generic** per-request hooks. It has no notion of tenant,
+user, role or storage: you decide those inside the hooks. Every `ctx` (hook argument, or the
+`ToolContext` a tool receives) carries the caller's identity, the `IncomingMessage`, the session id
+and the request's `params._meta`. `tools/list` and the `tools/call` lookup both go through
+`listTools(ctx)`, so a name the caller cannot see is answered `-32602 tool not found: <name>` and
+never executed. `ToolResult.structured` / `meta` leave as `structuredContent` / `_meta`;
+`Tool.outputSchema` and `Tool.annotations` (else derived from `hints`) go on the `tools/list` entry.
+
+## When to use it
+
+Reach for `mcpHandler` when your product already has an HTTP server — with its own auth, TLS, CORS
+and routing — and you want to expose an MCP endpoint on it whose tools depend on **who is calling**:
+per-user or per-tenant tool lists, a confirmation step before destructive tools, usage telemetry per
+call, and tool lists that change at runtime (`notifyToolsChanged()`).
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Use toolkit.serve({ mcp }) instead for a one-line, single-audience server">
+[`toolkit.serve(addr, { mcp })`](/api/javascript/serve/mcp/) owns its own port and exposes one
+static tool list to everyone. `mcpHandler` owns nothing: you mount it, you authenticate, and every
+list/call is resolved per request. It is hand-written JSON-RPC, so no MCP SDK server type leaks
+into your code, and a confirm rides the same POST as an MCP elicitation.
+</Aside>
+
+Without `listTools` it serves the toolkit's own tools, so the step up from `serve` is one line.
+
+## Examples
+
+### 1. The smallest useful mount — the toolkit's tools on your own server
+
+```ts
+import http from "node:http"
+import { createToolkit, defineTool } from "toolnexus"
+
+const echo = defineTool({ name: "echo", description: "echo", run: (a: any) => String(a.text ?? "") })
+const tk = await createToolkit({ builtins: false, extraTools: [echo] })
+const mcp = tk.mcpHandler({ name: "gateway", version: "1.0.0" })
+
+http.createServer((req, res) => (req.url?.startsWith("/mcp") ? mcp(req, res) : res.writeHead(404).end())).listen(8080)
+```
+
+### 2. A realistic case — bearer auth and per-caller tools
+
+The identity `authenticate` returns reaches every hook and tool. A tool bob cannot see is never
+executed for bob, even if he guesses its name.
+
+```ts
+import { createToolkit, identityFrom, type Tool } from "toolnexus"
+
+const users: Record<string, { name: string; admin: boolean }> = {
+  "Bearer t-alice": { name: "alice", admin: true },
+  "Bearer t-bob": { name: "bob", admin: false },
+}
+const whoami: Tool = {
+  name: "whoami", description: "Who is calling", source: "native", inputSchema: { type: "object" },
+  execute: async (_args, ctx) => ({ output: (identityFrom(ctx) as any).name, isError: false }),
+}
+const reset: Tool = { ...whoami, name: "admin_reset", description: "Reset everything",
+  execute: async () => ({ output: "reset", isError: false }) }
+
+const tk = await createToolkit({ builtins: false })
+const mcp = tk.mcpHandler({
+  authenticate: (req) => {
+    const u = users[req.headers.authorization ?? ""]
+    if (!u) throw new Error("invalid token")              // ⇒ 401
+    return u
+  },
+  wwwAuthenticate: () => `Bearer resource_metadata="https://api.example.com/.well-known/oauth-protected-resource"`,
+  listTools: (ctx) => ((identityFrom(ctx) as any).admin ? [whoami, reset] : [whoami]),
+})
+```
+
+### 3. The full surface — confirm gate, nonce fallback, telemetry, live tool changes
+
+`confirm` asks the client through MCP elicitation when it declared that capability; otherwise the
+caller gets your `result`, and your own `beforeCall` admits the re-call.
+
+```ts
+import { createToolkit, mcpRequestMetaFrom } from "toolnexus"
+
+const tk = await createToolkit({ builtins: false })
+const mcp = tk.mcpHandler({
+  title: "Records API",
+  protocolVersions: ["2025-11-25", "2025-06-18"],
+  listTools: () => currentTools(),                     // re-read on every request
+  beforeCall: (ctx, tool, args) => {
+    if (!tool.annotations?.destructiveHint) return { kind: "allow" }
+    if (args.nonce === issuedNonce(ctx)) return { kind: "allow" }
+    return {
+      kind: "confirm",
+      message: `Really run ${tool.name}?`,
+      result: { output: `Re-call ${tool.name} with "nonce":"${issuedNonce(ctx)}".`, isError: false },
+    }
+  },
+  onCall: (ev) => metrics.record(ev.name, ev.decision, ev.ms, ev.resultBytes, ev.identity),
+})
+
+onToolsChanged(() => mcp.notifyToolsChanged())         // pushed on every open GET stream
+```
+
+## Options
+
+| Field | What it does |
+|---|---|
+| `name` / `title` / `version` / `instructions` | Static `serverInfo` (defaults `"toolnexus"` / `"0.1.0"`; `title` omitted when empty). `serverInfo(ctx)` wins. |
+| `protocolVersions` | Accepted versions; entries other than `2025-11-25` / `2025-06-18` are dropped. Default `["2025-06-18"]`. |
+| `authenticate` / `wwwAuthenticate` | Runs on every HTTP request; a throw is HTTP 401 with the header when non-empty. |
+| `listTools` | Per-request tool list for `tools/list` and the `tools/call` lookup. Omit ⇒ the toolkit's tools. |
+| `beforeCall` / `confirmTimeout` | allow / deny / confirm gate; a throw is a deny with its message. |
+| `onCall` | `{name, source, ms, isError, err, resultBytes, decision, identity, sessionId}`; throws isolated. |
+| `listResources` / `readResource` / `listPrompts` / `getPrompt` | Absent ⇒ not advertised, methods answer `-32601`. |
+| `sessionIds` / `stateless` / `statelessSessionId` | Session id issuing/validation; stateless never checks one. |
+| `maxBodyBytes` | POST body cap, default 4 MiB (HTTP 413 above it). |
+
+## See also
+
+- [`buildMcpServer`](/api/javascript/serve/mcp/) — the fixed-port, single-audience MCP serve profile.
+- [`startA2AServer`](/api/javascript/serve/a2a/) — expose the toolkit as a remote A2A agent.
