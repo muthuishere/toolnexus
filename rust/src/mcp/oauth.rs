@@ -370,7 +370,7 @@ impl OAuth {
         if client_id.is_empty() {
             // no DCR, ever: the user registers an app once and configures its id
             let why = if cimd {
-                "clientMetadataUrl is not set"
+                "auth.clientMetadataUrl is not set"
             } else {
                 "it does not support Client ID Metadata Documents"
             };
