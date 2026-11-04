@@ -218,7 +218,8 @@ final class Mcp2026 {
                     if (disabled == null || !disabled.contains(Tool.sanitize(c.name) + "_" + Tool.sanitize(str(d.get("name"))))) keep.add(d);
                 return keep;
             };
-            return searchTools(c, about, allowed);
+            String hitServer = cfg.get("description") instanceof String s2 ? s2 : "";
+            return searchTools(c, about, hitServer, allowed);
         }
         List<Tool> out = new ArrayList<>();
         for (Map<String, Object> d : applyFilter(c.name, defs, filter)) out.add(serverTool(c, d));
@@ -282,7 +283,7 @@ final class Mcp2026 {
 
     /** §2.8: {@code <server>_search_tools} + {@code <server>_call_tool}. */
     @SuppressWarnings("unchecked")
-    private static List<Tool> searchTools(Conn c, String about,
+    private static List<Tool> searchTools(Conn c, String about, String hitServer,
                                           java.util.function.Supplier<List<Map<String, Object>>> allowed) {
         List<Map<String, Object>> meta = Client.searchMetaTools(about);
         String prefix = Tool.sanitize(c.name) + "_";
@@ -298,7 +299,7 @@ final class Mcp2026 {
                 try {
                     Map<String, Object> a = args == null ? Map.of() : args;
                     int limit = a.get("limit") instanceof Number n && n.doubleValue() > 0 ? n.intValue() : 5;
-                    List<Map<String, Object>> hits = c.client.searchTools(allowed.get(), str(a.get("query")), limit, about);
+                    List<Map<String, Object>> hits = c.client.searchTools(allowed.get(), str(a.get("query")), limit, hitServer);
                     return new ToolResult(Mcp.jsonOrdered(hits), false, meta);
                 } catch (Exception e) {
                     return new ToolResult(msg(e), true, meta);
