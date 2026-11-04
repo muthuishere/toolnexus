@@ -141,6 +141,32 @@ res = Toolnexus.Client.run(client, "Draw a fox, then animate it.", tk)
 for f <- res.files, do: IO.puts("#{f.from} #{f.mime_type} #{f[:url]}")
 ```
 
+## Embeddable MCP handler
+
+`Toolnexus.mcp_handler(toolkit, cfg)` is a `Plug` you mount on **your** listener (Bandit, Phoenix),
+behind your own TLS, CORS and OAuth. Every policy is a hook: `authenticate` (401 +
+`www_authenticate`), `list_tools` per request (a name outside it is never executed), `before_call`
+(`:allow` / `{:deny, msg}` / `{:confirm, msg}` — confirm elicits on the same POST's SSE stream when
+the client can), `on_call`, `server_info`, resources/prompts, pluggable `session_ids`, `stateless`.
+`Toolnexus.McpHandler.notify_tools_changed/1` pushes `tools/list_changed` to open GET streams.
+SPEC §7C.1; runnable: `mix run examples/mcp_handler.exs`.
+
+```elixir
+handler =
+  Toolnexus.mcp_handler(toolkit,
+    authenticate: fn conn -> MyAuth.verify(conn) end,          # {:ok, identity} | {:error, _}
+    list_tools: fn ctx -> MyTools.for(Toolnexus.McpHandler.identity(ctx)) end,
+    before_call: fn _ctx, tool, _args ->
+      if tool.annotations && tool.annotations.destructive_hint, do: {:confirm, "Sure?"}, else: :allow
+    end
+  )
+
+Bandit.start_link(plug: {Toolnexus.McpHandler, handler}, port: 4000)
+```
+
+Tools may also return `%ToolResult{structured: map, meta: map}` (→ `structuredContent` / `_meta`)
+and declare `output_schema` / `annotations`; absent, the wire is unchanged.
+
 ## Documentation
 
 Everything else — the full surface, with runnable examples — lives on the docs site:
