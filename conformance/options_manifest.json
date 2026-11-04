@@ -284,6 +284,20 @@
           "media"
         ],
         "tier": "full"
+      },
+      {
+        "name": "tokenStore",
+        "aliases": [
+          "tokenstore"
+        ],
+        "tier": "full"
+      },
+      {
+        "name": "openUrl",
+        "aliases": [
+          "openurl"
+        ],
+        "tier": "full"
       }
     ]
   },
