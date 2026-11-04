@@ -354,7 +354,7 @@ public final class CliClient implements AutoCloseable {
     /** Shorthand for {@code client().run(prompt)}. */
     public LlmClient.RunResult run(String prompt) { return client.run(prompt); }
 
-    /** Shorthand for {@code client().stream(prompt, toolkit, onEvent)} (refused by the one-shot transport). */
+    /** Shorthand for {@code client().stream(prompt, toolkit, onEvent)} (non-incremental: the whole answer arrives as one text event). */
     public LlmClient.RunResult stream(String prompt, Toolkit toolkit, Consumer<LlmClient.StreamEvent> onEvent) {
         return client.stream(prompt, toolkit, onEvent);
     }
@@ -418,15 +418,6 @@ public final class CliClient implements AutoCloseable {
                 throw new CliException(e.getMessage(), e);
             }
         }
-    }
-
-    /** Whether streaming is possible on the current transport; the one-shot CLI refuses it. */
-    private void refuseStreaming() {
-        CliAcpSession s = session();
-        if (s == null) {
-            throw new CliException("cli: streaming is not supported by the one-shot CLI transport; use Run");
-        }
-        throw new CliException("cli: streaming over ACP is not supported in the java port; use run");
     }
 
     // ---------------------------------------------------------------------------------------
@@ -796,7 +787,9 @@ public final class CliClient implements AutoCloseable {
     }
 
     // ---------------------------------------------------------------------------------------
-    // The HTTP shim: refuses streaming with the CLI's own message, else the shared shim.
+    // The HTTP shim: the shared shim, plus a non-incremental stream. Neither transport
+    // streams incrementally here, so a stream runs the turn whole and replays it as one
+    // SSE chunk: the loop then emits its tool events and the answer as a single text event.
     // ---------------------------------------------------------------------------------------
 
     private final class CliHttpClient extends HttpClient {
@@ -804,15 +797,48 @@ public final class CliClient implements AutoCloseable {
 
         CliHttpClient(InProcess.GenerateBackedHttpClient inner) { this.inner = inner; }
 
-        @Override
+        @Override @SuppressWarnings("unchecked")
         public <T> HttpResponse<T> send(HttpRequest req, HttpResponse.BodyHandler<T> handler) throws IOException {
-            if (isStream(req)) refuseStreaming();
-            return inner.send(req, handler);
+            Map<String, Object> body = readBody(req);
+            if (body == null || !Boolean.TRUE.equals(body.get("stream"))) return inner.send(req, handler);
+            Map<String, Object> plain = new LinkedHashMap<>(body);
+            plain.remove("stream");
+            plain.remove("stream_options");
+            HttpRequest once = HttpRequest.newBuilder(req.uri())
+                    .POST(HttpRequest.BodyPublishers.ofString(Json.stringify(plain))).build();
+            HttpResponse<String> whole = inner.send(once, HttpResponse.BodyHandlers.ofString());
+            return (HttpResponse<T>) new LinesResponse(req, toSse(Json.toMap(whole.body())));
         }
 
-        private boolean isStream(HttpRequest req) {
+        @SuppressWarnings("unchecked")
+        private static List<String> toSse(Map<String, Object> envelope) {
+            Map<String, Object> choice = (Map<String, Object>) ((List<Object>) envelope.get("choices")).get(0);
+            Map<String, Object> message = (Map<String, Object>) choice.get("message");
+            Map<String, Object> delta = new LinkedHashMap<>();
+            delta.put("role", "assistant");
+            if (message.get("content") != null) delta.put("content", message.get("content"));
+            if (message.get("tool_calls") instanceof List<?> calls) {
+                List<Object> indexed = new ArrayList<>();
+                for (int i = 0; i < calls.size(); i++) {
+                    Map<String, Object> c = new LinkedHashMap<>((Map<String, Object>) calls.get(i));
+                    c.put("index", i);
+                    indexed.add(c);
+                }
+                delta.put("tool_calls", indexed);
+            }
+            Map<String, Object> ch = new LinkedHashMap<>();
+            ch.put("index", 0);
+            ch.put("delta", delta);
+            ch.put("finish_reason", choice.get("finish_reason"));
+            Map<String, Object> chunk = new LinkedHashMap<>();
+            chunk.put("choices", List.of(ch));
+            chunk.put("usage", envelope.get("usage"));
+            return List.of("data: " + Json.stringify(chunk), "", "data: [DONE]", "");
+        }
+
+        private static Map<String, Object> readBody(HttpRequest req) {
             Optional<HttpRequest.BodyPublisher> bp = req.bodyPublisher();
-            if (bp.isEmpty()) return false;
+            if (bp.isEmpty()) return null;
             StringBuilder sb = new StringBuilder();
             bp.get().subscribe(new java.util.concurrent.Flow.Subscriber<>() {
                 @Override public void onSubscribe(java.util.concurrent.Flow.Subscription s) { s.request(Long.MAX_VALUE); }
@@ -821,10 +847,9 @@ public final class CliClient implements AutoCloseable {
                 @Override public void onComplete() {}
             });
             try {
-                Map<String, Object> body = Json.toMap(sb.toString());
-                return body != null && Boolean.TRUE.equals(body.get("stream"));
+                return Json.toMap(sb.toString());
             } catch (RuntimeException e) {
-                return false;
+                return null;
             }
         }
 
@@ -850,5 +875,18 @@ public final class CliClient implements AutoCloseable {
                                                                         HttpResponse.PushPromiseHandler<T> p) {
             return sendAsync(r, h);
         }
+    }
+
+    private record LinesResponse(HttpRequest req, List<String> lines) implements HttpResponse<java.util.stream.Stream<String>> {
+        @Override public int statusCode() { return 200; }
+        @Override public java.util.stream.Stream<String> body() { return lines.stream(); }
+        @Override public HttpRequest request() { return req; }
+        @Override public java.net.http.HttpHeaders headers() {
+            return java.net.http.HttpHeaders.of(Map.of("content-type", List.of("text/event-stream")), (a, b) -> true);
+        }
+        @Override public Optional<HttpResponse<java.util.stream.Stream<String>>> previousResponse() { return Optional.empty(); }
+        @Override public Optional<javax.net.ssl.SSLSession> sslSession() { return Optional.empty(); }
+        @Override public java.net.URI uri() { return req.uri(); }
+        @Override public HttpClient.Version version() { return HttpClient.Version.HTTP_1_1; }
     }
 }

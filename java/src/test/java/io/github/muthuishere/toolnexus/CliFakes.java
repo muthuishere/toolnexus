@@ -77,7 +77,18 @@ public final class CliFakes {
                     System.out.flush();
                     return;
                 }
-                default -> { }
+                default -> {
+                    // Style-agnostic detection, so every built-in style's real argv works: the
+                    // prompt as an arg, the {{file}} temp file, the {{out}} temp path (not created yet).
+                    String a = args[i];
+                    if (a.startsWith(CliClient.PREAMBLE.substring(0, 20))) {
+                        prompt = a;
+                    } else if (Path.of(a).getFileName() != null
+                            && Path.of(a).getFileName().toString().contains("toolnexus-cli-")) {
+                        if (Files.exists(Path.of(a))) prompt = Files.readString(Path.of(a));
+                        else outFile = a;
+                    }
+                }
             }
         }
         if (prompt.isEmpty()) prompt = new String(System.in.readAllBytes(), StandardCharsets.UTF_8);

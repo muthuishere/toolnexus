@@ -176,7 +176,7 @@ try (CliClient cli = CliClient.create(new CliClient.Options()
   `session/set_config_option`, then `session/set_model`, unchanged.
 - **One-shot**: the conversation goes in under a fixed preamble, the reply is parsed as an
   OpenAI-shaped envelope (`CliClient.parseReply`), and tool calls run in the toolnexus loop.
-  Streaming is refused (and is not supported over ACP in this port yet).
+  Streaming works but is not incremental on either transport: the loop's tool events, then the whole answer as one text event, then done.
 - Errors are pinned: construction throws `IllegalArgumentException`; calls throw
   `CliClient.CliException` (`cli: command not found: <bin>`, `cli: exit <code>: <stderr>`,
   `cli: empty reply`, `cli: no output file`, `cli: timed out after <ms>ms`). Default call timeout

@@ -271,11 +271,50 @@ class CliClientTest {
     }
 
     @Test
-    void oneShotRefusesStreaming() {
-        CliClient c = client(fakeCliOpts("x"));
-        String err = errorOf(() -> c.stream("hi", null, ev -> { }));
-        assertNotNull(err);
-        assertTrue(err.contains("cli: streaming is not supported by the one-shot CLI transport; use Run"), err);
+    void oneShotStreamsNonIncrementally() {
+        CliClient c = client(fakeCliOpts("tool"));
+        List<LlmClient.StreamEvent.Kind> types = new ArrayList<>();
+        StringBuilder text = new StringBuilder();
+        c.stream("What is my badge number?", badgeToolkit(), ev -> {
+            if (ev.type() == LlmClient.StreamEvent.Kind.TEXT) text.append(ev.delta());
+            if (ev.type() != LlmClient.StreamEvent.Kind.USAGE
+                    && (types.isEmpty() || types.get(types.size() - 1) != ev.type())) types.add(ev.type());
+        });
+        String got = types.toString();
+        assertTrue(got.contains("TOOL_CALL, TOOL_RESULT") && got.endsWith("TEXT, DONE]")
+                && text.toString().contains("BADGE-77Q"), "events " + got + " text " + text);
+    }
+
+    /** Streaming never errors on a CLI client, for every style, over the one-shot CLI and ACP. */
+    @Test
+    void streamEveryStyleBothTransports() {
+        for (CliStyles st : CliStyles.values()) {
+            for (CliTransports tr : List.of(CliTransports.CLI, CliTransports.ACP)) {
+                String label = st + "/" + tr;
+                Toolkit tk = badgeToolkit();
+                CliClient.Options o = new CliClient.Options().style(st).command(fake.toString()).transport(tr)
+                        .toolkit(tk).env(new HashMap<>(Map.of("TN_FAKE_CLI", "tool"))).callTimeoutMs(60_000);
+                if (st == CliStyles.CUSTOM) o.args(new ArrayList<>()).prompt("stdin").answer("stdout");
+                if (tr == CliTransports.ACP) {
+                    CliClient.Options fo = fakeAcpOpts(Map.of("FAKE_HTTP", "1")).opts();
+                    o.env(fo.env).bridgeCommand(fo.bridgeCommand).acpCommand(List.of(fake.toString(), "acp"));
+                }
+                CliClient c = client(o);
+                StringBuilder text = new StringBuilder();
+                boolean[] sawTool = {false};
+                LlmClient.StreamEvent.Kind[] last = {null};
+                String err = errorOf(() -> c.stream("What is my badge number?", tk, ev -> {
+                    if (ev.type() == LlmClient.StreamEvent.Kind.TEXT) text.append(ev.delta());
+                    if (ev.type() == LlmClient.StreamEvent.Kind.TOOL_CALL) sawTool[0] = true;
+                    last[0] = ev.type();
+                }));
+                assertNull(err, label + ": stream must not error");
+                assertEquals(LlmClient.StreamEvent.Kind.DONE, last[0], label);
+                assertTrue(text.toString().contains("BADGE-77Q"), label + ": " + text);
+                if (tr == CliTransports.CLI) assertTrue(sawTool[0], label + ": one-shot stream must carry tool_call");
+                assertEquals(tr == CliTransports.CLI ? "cli" : "acp", c.transport(), label);
+            }
+        }
     }
 
     @Test
@@ -340,6 +379,19 @@ class CliClientTest {
         assertFakeAcpRun(c, res, "<nil>");
         String rec = Files.readString(a.rec());
         assertTrue(rec.contains("\"env\":[{\"name\":\"TOOLNEXUS_MCP_TOKEN\"") && !rec.contains("\"type\":\"stdio\""), rec);
+    }
+
+    @Test
+    void acpStreamsNonIncrementally() {
+        CliClient c = client(fakeAcpOpts(Map.of("FAKE_HTTP", "1")).opts());
+        StringBuilder text = new StringBuilder();
+        LlmClient.StreamEvent.Kind[] last = {null};
+        c.stream("badge?", null, ev -> {
+            if (ev.type() == LlmClient.StreamEvent.Kind.TEXT) text.append(ev.delta());
+            last[0] = ev.type();
+        });
+        assertEquals(LlmClient.StreamEvent.Kind.DONE, last[0]);
+        assertTrue(text.toString().contains("BADGE-77Q") && text.toString().contains("Hello"), text.toString());
     }
 
     @Test
