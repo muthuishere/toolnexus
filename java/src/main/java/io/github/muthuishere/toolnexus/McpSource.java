@@ -176,9 +176,15 @@ public final class McpSource implements AutoCloseable {
         public io.github.muthuishere.toolnexus.mcp.TokenStore tokenStore;
         /** How {@code auto}-mode OAuth opens the browser (§2A.1a). Null ⇒ the OS opener. */
         public OpenUrl openUrl;
+        /** Toolkit {@code disableTools} (final exposed names); also hides tools from MCP tool search (§2.8). */
+        java.util.Set<String> disableTools;
 
         public LoadOptions tokenStore(io.github.muthuishere.toolnexus.mcp.TokenStore v) { this.tokenStore = v; return this; }
         public LoadOptions openUrl(OpenUrl v) { this.openUrl = v; return this; }
+        LoadOptions disableToolsInternal(List<String> v) {
+            this.disableTools = v == null ? null : new java.util.HashSet<>(v);
+            return this;
+        }
         public LoadOptions waitFor(Function<Request, Answer> v) { this.waitFor = v; return this; }
         public LoadOptions cancel(CancelSignal v) { this.cancel = v; return this; }
         public LoadOptions onServer(java.util.function.Consumer<ServerResult> v) { this.onServer = v; return this; }
@@ -469,7 +475,7 @@ public final class McpSource implements AutoCloseable {
                         if (isRemote(cfg)) fallbackAuth = Mcp2026.oauthFor(name, cfg, o, store);
                     }
                     if (conn != null) {
-                        List<Tool> converted = Mcp2026.tools(conn, cfg, toolsFilterOf(cfg));
+                        List<Tool> converted = Mcp2026.tools(conn, cfg, toolsFilterOf(cfg), o.disableTools);
                         Mcp2026.loadSkills(conn);
                         synchronized (lock) {
                             tools.addAll(converted);

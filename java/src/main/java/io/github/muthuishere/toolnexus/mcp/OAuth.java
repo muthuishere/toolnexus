@@ -166,7 +166,7 @@ public final class OAuth {
         if (cid.isEmpty()) { // no DCR, ever: the user registers an app once and configures its id
             String why = cimd ? "OAuth.ClientMetadataURL is not set" : "it does not support Client ID Metadata Documents";
             throw new McpException("no client identity for " + iss + ": " + why + " and no client id is configured — register an app with "
-                    + iss + " and set OAuth.ClientID (dynamic client registration is not supported)");
+                    + iss + " and set auth.clientId (dynamic client registration is not supported)");
         }
         Authorizer az = authorizer != null ? authorizer : new LoopbackAuthorizer();
         Authorizer.Session sess;
@@ -397,6 +397,9 @@ public final class OAuth {
         new TreeMap<>(m).forEach((k, v) -> sb.append(sb.isEmpty() ? "" : "&").append(qesc(k)).append('=').append(qesc(v)));
         return sb.toString();
     }
+
+    /** A random URL-safe id suffix (used for {@code mrtr-} / {@code auth-} request ids). */
+    public static String randomId() { return randStr(12); }
 
     static String randStr(int n) {
         byte[] b = new byte[n];

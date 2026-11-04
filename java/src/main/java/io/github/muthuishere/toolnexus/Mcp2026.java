@@ -25,7 +25,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
 import java.util.stream.Stream;
 
@@ -48,7 +47,6 @@ final class Mcp2026 {
     }
 
     private static final int MAX_ROUNDS = 8;
-    private static final AtomicInteger SEQ = new AtomicInteger();
 
     /** One server connected on the 2026 path. */
     static final class Conn implements AutoCloseable {
@@ -210,11 +208,17 @@ final class Mcp2026 {
 
     /** tools/list (filtered by the per-server allowlist) → toolkit tools, or the two §2.8 meta tools. */
     @SuppressWarnings("unchecked")
-    static List<Tool> tools(Conn c, Map<String, Object> cfg, Map<String, Boolean> filter) {
+    static List<Tool> tools(Conn c, Map<String, Object> cfg, Map<String, Boolean> filter, java.util.Set<String> disabled) {
         List<Map<String, Object>> defs = c.client.listTools();
         if (Boolean.TRUE.equals(cfg.get("toolSearch"))) {
             String about = cfg.get("description") instanceof String s && !s.isEmpty() ? s : c.name;
-            return searchTools(c, about);
+            java.util.function.Supplier<List<Map<String, Object>>> allowed = () -> {
+                List<Map<String, Object>> keep = new ArrayList<>();
+                for (Map<String, Object> d : applyFilter(c.name, c.client.listTools(), filter))
+                    if (disabled == null || !disabled.contains(Tool.sanitize(c.name) + "_" + Tool.sanitize(str(d.get("name"))))) keep.add(d);
+                return keep;
+            };
+            return searchTools(c, about, allowed);
         }
         List<Tool> out = new ArrayList<>();
         for (Map<String, Object> d : applyFilter(c.name, defs, filter)) out.add(serverTool(c, d));
@@ -278,7 +282,8 @@ final class Mcp2026 {
 
     /** §2.8: {@code <server>_search_tools} + {@code <server>_call_tool}. */
     @SuppressWarnings("unchecked")
-    private static List<Tool> searchTools(Conn c, String about) {
+    private static List<Tool> searchTools(Conn c, String about,
+                                          java.util.function.Supplier<List<Map<String, Object>>> allowed) {
         List<Map<String, Object>> meta = Client.searchMetaTools(about);
         String prefix = Tool.sanitize(c.name) + "_";
         Map<String, Object> searchDef = meta.get(0), callDef = meta.get(1);
@@ -293,7 +298,7 @@ final class Mcp2026 {
                 try {
                     Map<String, Object> a = args == null ? Map.of() : args;
                     int limit = a.get("limit") instanceof Number n && n.doubleValue() > 0 ? n.intValue() : 5;
-                    List<Map<String, Object>> hits = c.client.searchTools(str(a.get("query")), limit, about);
+                    List<Map<String, Object>> hits = c.client.searchTools(allowed.get(), str(a.get("query")), limit, about);
                     return new ToolResult(Mcp.jsonOrdered(hits), false, meta);
                 } catch (Exception e) {
                     return new ToolResult(msg(e), true, meta);
@@ -310,7 +315,7 @@ final class Mcp2026 {
                 String name = str(a.get("name"));
                 boolean known;
                 try {
-                    known = c.client.listTools().stream().anyMatch(t -> name.equals(str(t.get("name"))));
+                    known = allowed.get().stream().anyMatch(t -> name.equals(str(t.get("name"))));
                 } catch (Exception e) {
                     return new ToolResult(msg(e), true, new LinkedHashMap<>(Map.of("server", c.name)));
                 }
@@ -419,7 +424,7 @@ final class Mcp2026 {
     /** §2.5: an {@code elicitation/create} input request → a §10 Request. */
     static Request inputToRequest(Map<String, Object> params) {
         Map<String, Object> pr = params == null ? Map.of() : params;
-        String id = "elc-" + Long.toString(System.currentTimeMillis(), 36) + "-" + SEQ.incrementAndGet();
+        String id = "mrtr-" + io.github.muthuishere.toolnexus.mcp.OAuth.randomId();
         String message = str(pr.get("message"));
         if ("url".equals(pr.get("mode"))) return new Request(id, "authorization", message, str(pr.get("url")), null, null);
         Map<String, Object> data = map(pr.get("requestedSchema")) == null ? null : Map.of("schema", pr.get("requestedSchema"));

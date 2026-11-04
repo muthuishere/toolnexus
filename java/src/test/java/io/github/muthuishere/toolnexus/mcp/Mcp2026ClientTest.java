@@ -264,6 +264,7 @@ class Mcp2026ClientTest {
             Request rq = ToolResult.pendingOf(p);
             assertNotNull(rq, p.output());
             assertEquals("input", rq.kind());
+            assertTrue(rq.id().matches("mrtr-[A-Za-z0-9_-]+"), rq.id());
             assertEquals("What is your name?", rq.prompt());
             assertNotNull(rq.data().get("schema"));
             ToolResult done = greet.execute(obj(), answering(new Answer(rq.id(), true, Map.of("name", "toolnexus"))));
@@ -317,6 +318,25 @@ class Mcp2026ClientTest {
         }
         try (Recorded s = new Recorded(); McpSource src = McpSource.load(cfg("fx", obj("url", s.url(), "toolSearch", true)))) {
             assertTrue(tool(src, "fx_search_tools").description().startsWith("Search the tools of fx by keywords."));
+        }
+    }
+
+    @Test
+    void toolSearchHonoursFilterAndDisableTools() {
+        try (Recorded s = new Recorded()) {
+            try (McpSource src = McpSource.load(cfg("fx", obj("url", s.url(), "toolSearch", true, "tools", obj("echo", false))))) {
+                assertEquals("[]", tool(src, "fx_search_tools").execute(obj("query", "echo"), null).output());
+                ToolResult r = tool(src, "fx_call_tool").execute(obj("name", "echo", "arguments", obj("text", "x")), null);
+                assertTrue(r.isError());
+                assertEquals("unknown tool \"echo\" on fx", r.output());
+                assertFalse(tool(src, "fx_call_tool").execute(obj("name", "greet", "arguments", obj()), null).output().startsWith("unknown"));
+            }
+            try (Toolkit tk = Toolkit.create(new Toolkit.Options().builtins(false).disableTools("fx_echo")
+                    .mcpConfig(cfg("fx", obj("url", s.url(), "toolSearch", true))))) {
+                assertEquals("unknown tool \"echo\" on fx",
+                        tk.get("fx_call_tool").execute(obj("name", "echo", "arguments", obj("text", "x")), null).output());
+                assertFalse(tk.get("fx_search_tools").execute(obj("query", "echo greet"), null).output().contains("\"echo\""));
+            }
         }
     }
 
@@ -477,7 +497,7 @@ class Mcp2026ClientTest {
                 Request auth = ToolResult.pendingOf(greet.execute(obj(), null));
                 assertNotNull(auth);
                 assertEquals("authorization", auth.kind());
-                assertTrue(auth.id().startsWith("auth-"));
+                assertTrue(auth.id().matches("auth-[A-Za-z0-9_-]+"), auth.id());
                 assertEquals(before, e.mcp.executions.get(), "nothing ran before authorization");
                 String cb = e.visit(auth.url());
                 assertEquals("mcp:read mcp:greet", e.as.lastAuthorizeQuery().get("scope"));
@@ -519,7 +539,7 @@ class Mcp2026ClientTest {
             e.as.noCimd = true;
             String m = loadError(cfg("sec", obj("url", e.url(), "auth", obj("allowHttp", true))), e.auto(new MemoryTokenStore())).getMessage();
             assertTrue(m.startsWith("no client identity for " + e.as.issuer()), m);
-            assertTrue(m.contains("register an app with") && m.contains("dynamic client registration is not supported"), m);
+            assertTrue(m.endsWith("register an app with " + e.as.issuer() + " and set auth.clientId (dynamic client registration is not supported)"), m);
         }
     }
 

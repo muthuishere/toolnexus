@@ -133,7 +133,8 @@ public final class Toolkit implements AutoCloseable {
         // §2 Gap 3: thread the caller's cancellation signal into the MCP connect/init/list.
         McpSource mcp = opts.mcpConfig != null
                 ? McpSource.load(opts.mcpConfig, new McpSource.LoadOptions().waitFor(opts.waitFor)
-                        .cancel(opts.cancelSignal).tokenStore(opts.tokenStore).openUrl(opts.openUrl)) : null;
+                        .cancel(opts.cancelSignal).tokenStore(opts.tokenStore).openUrl(opts.openUrl)
+                        .disableToolsInternal(opts.disableTools)) : null;
         // §2.7: skills served by MCP servers join the same `skill` inventory (local roots first).
         List<String> remoteSkillDirs = mcp != null ? mcp.skillDirs() : List.of();
         // Skills come from directories, in-memory data, and/or a lazy provider (§3,

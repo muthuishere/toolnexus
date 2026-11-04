@@ -210,8 +210,8 @@ public class Client implements AutoCloseable {
     }
 
     /** Ranks the server's tools against query (BM25; name tokens count twice). §2.8. */
-    public List<Map<String, Object>> searchTools(String query, int limit, String server) {
-        return ToolSearch.rank(listTools(), query, limit, server);
+    public List<Map<String, Object>> searchTools(List<Map<String, Object>> tools, String query, int limit, String server) {
+        return ToolSearch.rank(tools, query, limit, server);
     }
 
     /** The two tool-search meta tools (name, description, inputSchema) for {@code about}. */
