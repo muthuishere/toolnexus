@@ -325,12 +325,12 @@ config keys (absent ⇒ byte-identical behaviour): `auth` (§2A), `description` 
 ### 2.2a Fallback trigger and stdio (pinned for the library, change `upgrade-mcp-2026-07-28` task 1.2)
 
 - **Fallback ⇒ frozen path (§2.F)** when `server/discover` gets: any JSON-RPC **error response** (old
-  servers answer `-32601`, `-32600` or a "not initialized" code before `initialize`), an HTTP **400, 404 or
-  405**, or a 2xx reply that is not a JSON-RPC response for the request, or a result without
+  servers answer `-32601`, `-32600` or a "not initialized" code before `initialize`), an HTTP **400, 404, 405 or 5xx** (the Java SDK's stateless server answers an unknown method with 500; a
+  server that is really down then fails on the frozen path too, so the outcome is still `failed`), or a 2xx reply that is not a JSON-RPC response for the request, or a result without
   `"2026-07-28"` in `supportedVersions`. Over **stdio**, a discover that gets no reply within
   `min(timeout, 5 s)` also falls back (older servers may ignore a pre-`initialize` request). The probe child
   is terminated and the frozen path starts its own process; its `env`/`cwd`/`command` are unchanged.
-- **Load failure** (status `failed`, isolated): connection refused / DNS, an HTTP 5xx, an HTTP 401/403 that
+- **Load failure** (status `failed`, isolated): connection refused / DNS, an HTTP 401/403 that
   OAuth (§2A) could not satisfy, a stdio child that exits before replying.
 - **Caching (resolved):** `tools/list` is fetched once at load on the direct path (as §2.F); tool search
   caches it for `ttlMs` (no hint ⇒ fetched once per load). **stdio concurrency (resolved):** allowed,
