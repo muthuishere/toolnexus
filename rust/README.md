@@ -89,6 +89,53 @@ An API key from the environment is sent only to the host it belongs to: `OPENAI_
 | **Serve** | `tk.serve(addr, ..)` publishes the toolkit as an A2A agent and/or an MCP server. |
 | **Agents** | Sub-agents, a runtime with budgets and durable resume, personas, conversation compaction, and a judge/classifier for guardrails and routing. |
 
+## Classifier backends, images, cache and helpers
+
+Every default below is a **proposed default, owner to confirm**
+(`openspec/changes/add-classifier-backends`).
+
+```rust
+use std::{sync::Arc, time::Duration};
+use serde_json::json;
+use toolnexus::classifier::*;
+use toolnexus::judge::noul;
+
+let c = create_classifier(ClassifierOptions {
+    backend: ClassifierBackend::OpenRouter,
+    cache: Some(Arc::new(MemoryCache::new(Duration::from_secs(3600), 1000))),
+    ..Default::default()
+})?;
+let photo = serde_json::to_value(toolnexus::ContentPart::from_path("mug.png")?)?;
+let d = c.state(json!({"note": "listing", "photo": photo}))
+    .evaluate(&[noul("red", "Is the object in `photo` red?")]).await?; // fails closed on an invalid reply
+let rs = c.states(vec![json!("a"), json!("b")])
+    .evaluate(&[noul("q", "…")]).await?;                                // Vec<Result<Decision, _>>, in order
+```
+
+- `backend`: `TypeSafe` (default) · `OpenRouter` (`typesafe/jev-1.14`) · `Cloudflare` (`/ai/run`
+  envelope; `${CLOUDFLARE_ACCOUNT_ID}` in the URL expands at call time, errors name it unexpanded)
+  · `Vercel` · `Custom` (requires `base_url` and `supports`). The table is data:
+  `CLASSIFIER_BACKENDS`; `supports: Some(ClassifierSupports { images })` overrides it per
+  classifier. `ClassifierBackend::parse` takes the wire spelling.
+- Images (style `SystemOne` only): image parts in the state are lifted into `assets` (Cloudflare:
+  data URLs). PNG/JPEG, 280–1568 px a side, ≤ 16 MiB each and 32 MiB per request — never resized.
+  A backend without image support fails before any request with an error whose
+  `.unsupported()` is the typed `ClassifierUnsupported`. A state with no content part is sent
+  byte-identically to before. The state is a `serde_json::Value`, so **any** object shaped like a
+  serialised `ContentPart` (`{"type":"text","text"}`, `{"type":"image","mimeType",…}`) inside a
+  `SystemOne` state is treated as a part.
+- `cache: Option<Arc<dyn ClassifierCache>>` (`get`/`set`, string values) — off when `None`; only
+  valid replies are stored; keys follow the served model. A hit sets `decision.cached` and the
+  `classifier.evaluate` event's `cached`. Every such event also carries `questions` and
+  `questions_hash`.
+- Helpers: `validate_decision(&questions, &decision)`; `judge::Thresholds` with
+  `DEFAULT_THRESHOLDS` 0.8 / 0.2 / 0.6 (inclusive; `Bands` stays the `ask`/`gate` default);
+  `chunk_questions(&questions, size)`.
+- Open union: `judge::raw(name, kind, instructions, criteria)`; an answer of an unmodelled type
+  decodes to `DecisionAnswer::Raw(RawAnswer { kind, value })`.
+- `ClassifierStyle::Llm` is **deprecated** (`#[deprecated]`) — it still works unchanged, with no
+  runtime warning.
+
 ## Media generation
 
 Generate images, video and speech (plus transcription, voice cloning and talking-head video)

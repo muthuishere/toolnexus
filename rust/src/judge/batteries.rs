@@ -42,7 +42,7 @@ impl OnError {
 
 fn check_on_error(battery: &str, o: Option<OnError>) -> Result<OnError, ClassifierError> {
     o.ok_or_else(|| {
-        ClassifierError(format!(
+        ClassifierError::new(format!(
             "{battery}: onError is required and must be \"open\" or \"closed\""
         ))
     })

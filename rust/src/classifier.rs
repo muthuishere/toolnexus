@@ -22,6 +22,9 @@ use crate::client::{
     redact_provider_body, retry_after_seconds,
 };
 
+mod backends;
+pub use backends::*;
+
 // ---------------------------------------------------------------- constants
 
 /// The System One endpoint base.
@@ -34,7 +37,7 @@ pub const DEFAULT_CLASSIFIER_API_KEY_ENV: &str = "TYPESAFE_API_KEY";
 pub const DEFAULT_CLASSIFIER_TIMEOUT_MS: u64 = 10_000;
 /// The OpenRouter pairing. The model id differs from TypeSafe's own spelling.
 pub const OPENROUTER_CLASSIFIER_BASE_URL: &str = "https://openrouter.ai/api/v1";
-pub const OPENROUTER_CLASSIFIER_MODEL: &str = "typesafe/jev-1.13";
+pub const OPENROUTER_CLASSIFIER_MODEL: &str = "typesafe/jev-1.14";
 pub const OPENROUTER_CLASSIFIER_API_KEY_ENV: &str = "OPENROUTER_API_KEY";
 /// Client-side cap on a choice's named options.
 pub const MAX_CHOICE_OPTIONS: usize = 255;
@@ -49,13 +52,33 @@ pub const METRIC_CLASSIFIER_WARNING: &str = "classifier.warning";
 /// How many states `evaluate_batch` has in flight at once.
 pub const DEFAULT_CLASSIFIER_BATCH_CONCURRENCY: usize = 16;
 
-/// A classifier failure. The text is the shared cross-port message.
+/// A classifier failure. The text is the shared cross-port message. When the
+/// failure is a backend-table gap, [`ClassifierError::unsupported`] returns the
+/// typed [`ClassifierUnsupported`].
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 #[error("{0}")]
-pub struct ClassifierError(pub String);
+pub struct ClassifierError(pub String, Option<ClassifierUnsupported>);
+
+impl ClassifierError {
+    /// A plain failure with this message.
+    pub fn new(s: impl Into<String>) -> Self {
+        ClassifierError(s.into(), None)
+    }
+
+    /// The typed error when this failure is [`ClassifierUnsupported`].
+    pub fn unsupported(&self) -> Option<&ClassifierUnsupported> {
+        self.1.as_ref()
+    }
+}
+
+impl From<ClassifierUnsupported> for ClassifierError {
+    fn from(u: ClassifierUnsupported) -> Self {
+        ClassifierError(u.to_string(), Some(u))
+    }
+}
 
 fn err(s: impl Into<String>) -> ClassifierError {
-    ClassifierError(s.into())
+    ClassifierError::new(s)
 }
 
 /// Selects the backend (§8B Backends).
@@ -65,6 +88,11 @@ pub enum ClassifierStyle {
     #[default]
     SystemOne,
     /// One structured-output call on a §8 [`Client`]; reports `calibrated: false`.
+    ///
+    /// Deprecated: System One is the single product wire (ADR 0038 D3). `Llm`
+    /// keeps working byte-identically as an alias for at least one minor
+    /// release; there is no runtime warning.
+    #[deprecated(note = "System One is the single product wire (ADR 0038 D3); kept as an alias")]
     Llm,
     /// The host's own `evaluate`.
     Custom,
@@ -72,6 +100,7 @@ pub enum ClassifierStyle {
     Static,
 }
 
+#[allow(deprecated)]
 impl ClassifierStyle {
     /// Parse the wire spelling (`systemone` | `llm` | `custom` | `static`).
     pub fn parse(s: &str) -> Result<Self, ClassifierError> {
@@ -85,12 +114,55 @@ impl ClassifierStyle {
     }
 }
 
-/// Whose endpoint answers: sets base URL + model + key env AS A UNIT.
+/// Whose endpoint answers: sets base URL + model + key env AS A UNIT. The
+/// table is [`CLASSIFIER_BACKENDS`]; `Custom` is a self-hosted System One
+/// endpoint and requires `base_url` + `supports`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ClassifierBackend {
     #[default]
     TypeSafe,
     OpenRouter,
+    Cloudflare,
+    Vercel,
+    Custom,
+}
+
+impl ClassifierBackend {
+    /// The wire spelling.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::TypeSafe => "typesafe",
+            Self::OpenRouter => "openrouter",
+            Self::Cloudflare => "cloudflare",
+            Self::Vercel => "vercel",
+            Self::Custom => "custom",
+        }
+    }
+
+    /// Parse the wire spelling (`""` ⇒ `typesafe`); an unknown name lists all five.
+    pub fn parse(s: &str) -> Result<Self, ClassifierError> {
+        match s {
+            "" | "typesafe" => Ok(Self::TypeSafe),
+            "openrouter" => Ok(Self::OpenRouter),
+            "cloudflare" => Ok(Self::Cloudflare),
+            "vercel" => Ok(Self::Vercel),
+            "custom" => Ok(Self::Custom),
+            _ => Err(err(format!(
+                "classifier: unknown backend {s:?} (want \"typesafe\", \"openrouter\", \"cloudflare\", \"vercel\" or \"custom\")"
+            ))),
+        }
+    }
+
+    /// This backend's row of [`CLASSIFIER_BACKENDS`].
+    pub fn preset(&self) -> &'static ClassifierBackendPreset {
+        match self {
+            Self::TypeSafe => &CLASSIFIER_BACKENDS[0],
+            Self::OpenRouter => &CLASSIFIER_BACKENDS[1],
+            Self::Cloudflare => &CLASSIFIER_BACKENDS[2],
+            Self::Vercel => &CLASSIFIER_BACKENDS[3],
+            Self::Custom => &CLASSIFIER_BACKENDS[4],
+        }
+    }
 }
 
 // ---------------------------------------------------------------- questions
@@ -125,12 +197,14 @@ pub struct ScoreQuestion {
     pub criteria: Vec<String>,
 }
 
-/// One pre-declared question. The set is closed.
+/// One pre-declared question. `Raw` is the OPEN end of the union (§8B): a
+/// System One type the library does not model yet, sent as written.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Question {
     Noul(NoulQuestion),
     Choice(ChoiceQuestion),
     Score(ScoreQuestion),
+    Raw(RawQuestion),
 }
 
 impl From<NoulQuestion> for Question {
@@ -146,6 +220,11 @@ impl From<ChoiceQuestion> for Question {
 impl From<ScoreQuestion> for Question {
     fn from(q: ScoreQuestion) -> Self {
         Question::Score(q)
+    }
+}
+impl From<RawQuestion> for Question {
+    fn from(q: RawQuestion) -> Self {
+        Question::Raw(q)
     }
 }
 
@@ -174,6 +253,17 @@ impl Question {
             Question::Score(q) => {
                 json!({"type": "score", "instructions": q.instructions, "criteria": q.criteria})
             }
+            Question::Raw(q) => q.wire(),
+        }
+    }
+
+    /// The wire `type` of this question.
+    pub fn question_type(&self) -> &str {
+        match self {
+            Question::Noul(_) => "noul",
+            Question::Choice(_) => "choice",
+            Question::Score(_) => "score",
+            Question::Raw(q) => &q.kind,
         }
     }
 
@@ -230,7 +320,13 @@ impl Question {
                 }
                 .into())
             }
-            t => Err(err(format!("classifier: unknown question type {t:?}"))),
+            "" => Err(err("classifier: unknown question type \"\"")),
+            t => Ok(RawQuestion {
+                kind: t.into(),
+                instructions,
+                criteria: crit.cloned(),
+            }
+            .into()),
         }
     }
 
@@ -255,6 +351,7 @@ impl Question {
                 }
                 Ok(())
             }
+            Question::Raw(q) => q.validate(key),
         }
     }
 }
@@ -421,21 +518,24 @@ impl ScoreAnswer {
     }
 }
 
-/// One typed answer, discriminated by the wire's `type`.
+/// One typed answer, discriminated by the wire's `type`. An answer of a type
+/// the library does not model decodes to `Raw` instead of failing the decision.
 #[derive(Debug, Clone, PartialEq)]
 pub enum DecisionAnswer {
     Noul(NoulAnswer),
     Choice(ChoiceAnswer),
     Score(ScoreAnswer),
+    Raw(RawAnswer),
 }
 
 impl DecisionAnswer {
-    /// The wire discriminator: `noul` | `choice` | `score`.
-    pub fn answer_type(&self) -> &'static str {
+    /// The wire discriminator: `noul` | `choice` | `score` | a raw answer's type.
+    pub fn answer_type(&self) -> &str {
         match self {
             DecisionAnswer::Noul(_) => "noul",
             DecisionAnswer::Choice(_) => "choice",
             DecisionAnswer::Score(_) => "score",
+            DecisionAnswer::Raw(a) => &a.kind,
         }
     }
 
@@ -445,6 +545,7 @@ impl DecisionAnswer {
             DecisionAnswer::Noul(a) => serde_json::to_value(a),
             DecisionAnswer::Choice(a) => serde_json::to_value(a),
             DecisionAnswer::Score(a) => serde_json::to_value(a),
+            DecisionAnswer::Raw(a) => return a.value.clone(),
         };
         let mut m = match v {
             Ok(Value::Object(m)) => m,
@@ -473,11 +574,19 @@ impl DecisionAnswer {
                 DecisionAnswer::Choice(a)
             }
             "score" => DecisionAnswer::Score(ScoreAnswer::deserialize(v).map_err(wrap)?),
-            other => {
-                return Err(err(format!(
-                    "classifier: answer {key:?}: unknown type {other:?}"
-                )));
-            }
+            // The union is OPEN (§8B): a type the library does not model (e.g.
+            // Jev 1.14 "box") decodes to a raw answer instead of failing.
+            other => match v {
+                Value::Object(m) => DecisionAnswer::Raw(RawAnswer {
+                    kind: other.into(),
+                    value: m.clone(),
+                }),
+                _ => {
+                    return Err(err(format!(
+                        "classifier: answer {key:?}: not a JSON object"
+                    )));
+                }
+            },
         })
     }
 }
@@ -518,6 +627,9 @@ pub struct Decision {
     pub usage: ClassifierUsage,
     /// Calibrated probabilities? A threshold tuned on one backend does not transfer.
     pub calibrated: bool,
+    /// True when the decision came from the classifier cache and no request was
+    /// sent. Never on the wire.
+    pub cached: bool,
 }
 
 impl Decision {
@@ -560,6 +672,7 @@ impl Decision {
             answers,
             usage,
             calibrated,
+            cached: false,
         })
     }
 
@@ -669,6 +782,13 @@ pub struct ClassifierOptions {
     pub evaluate: Option<EvaluateFn>,
     /// `style: Static` only.
     pub decisions: Vec<RecordedDecision>,
+    /// Overrides the backend table's support row for this classifier.
+    /// Required with [`ClassifierBackend::Custom`].
+    pub supports: Option<ClassifierSupports>,
+    /// Opt-in answer cache (§8B). `None` = no caching. Consulted by
+    /// `style: SystemOne` only; stores only replies that pass
+    /// [`validate_decision`].
+    pub cache: Option<Arc<dyn ClassifierCache>>,
 }
 
 impl std::fmt::Debug for ClassifierOptions {
@@ -676,6 +796,7 @@ impl std::fmt::Debug for ClassifierOptions {
         f.debug_struct("ClassifierOptions")
             .field("style", &self.style)
             .field("base_url", &self.base_url)
+            .field("backend", &self.backend)
             .field("model", &self.model)
             .field("api_key_env", &self.api_key_env)
             .field("timeout_ms", &self.timeout_ms)
@@ -687,6 +808,8 @@ impl std::fmt::Debug for ClassifierOptions {
 
 struct Inner {
     opts: ClassifierOptions,
+    preset: &'static ClassifierBackendPreset,
+    supports: ClassifierSupports,
     statics: BTreeMap<String, Vec<u8>>,
     warned: Mutex<BTreeSet<String>>,
 }
@@ -706,27 +829,29 @@ impl std::fmt::Debug for Classifier {
 /// Build a classifier, applying the §8B defaults and rejecting a style whose
 /// required option is missing before any call is made.
 pub fn create_classifier(mut opts: ClassifierOptions) -> Result<Classifier, ClassifierError> {
-    let (base, model, key_env) = match opts.backend {
-        ClassifierBackend::TypeSafe => (
-            DEFAULT_CLASSIFIER_BASE_URL,
-            DEFAULT_CLASSIFIER_MODEL,
-            DEFAULT_CLASSIFIER_API_KEY_ENV,
-        ),
-        ClassifierBackend::OpenRouter => (
-            OPENROUTER_CLASSIFIER_BASE_URL,
-            OPENROUTER_CLASSIFIER_MODEL,
-            OPENROUTER_CLASSIFIER_API_KEY_ENV,
-        ),
-    };
+    let preset = opts.backend.preset();
+    if opts.backend == ClassifierBackend::Custom
+        && opts.style == ClassifierStyle::SystemOne
+        && (opts.base_url.is_empty() || opts.supports.is_none())
+    {
+        return Err(err(
+            "classifier: backend \"custom\" requires baseUrl and supports",
+        ));
+    }
     if opts.base_url.is_empty() {
-        opts.base_url = base.into();
+        opts.base_url = preset.base_url.into();
     }
     if opts.model.is_empty() {
-        opts.model = model.into();
+        opts.model = preset.model.into();
     }
     if opts.api_key_env.is_empty() {
-        opts.api_key_env = key_env.into();
+        opts.api_key_env = preset.api_key_env.into();
     }
+    let supports = match (opts.supports, preset.supports) {
+        (Some(s), _) => s,
+        (None, Some(f)) => f(&opts.model),
+        (None, None) => ClassifierSupports::default(),
+    };
     check_pairing(&opts.base_url, &opts.model)?;
     if opts.timeout_ms == 0 {
         opts.timeout_ms = DEFAULT_CLASSIFIER_TIMEOUT_MS;
@@ -734,6 +859,7 @@ pub fn create_classifier(mut opts: ClassifierOptions) -> Result<Classifier, Clas
     let mut statics = BTreeMap::new();
     match opts.style {
         ClassifierStyle::SystemOne => {}
+        #[allow(deprecated)]
         ClassifierStyle::Llm => {
             if opts.client.is_none() {
                 return Err(err("classifier: style \"llm\" requires Client"));
@@ -756,6 +882,8 @@ pub fn create_classifier(mut opts: ClassifierOptions) -> Result<Classifier, Clas
     Ok(Classifier {
         inner: Arc::new(Inner {
             opts,
+            preset,
+            supports,
             statics,
             warned: Mutex::new(BTreeSet::new()),
         }),
@@ -803,19 +931,35 @@ impl Classifier {
         state: Value,
         questions: &Questions,
     ) -> Result<Decision, ClassifierError> {
+        self.evaluate_inner(ctx, state, questions, false).await
+    }
+
+    /// The one path. `validate` = fail closed on [`validate_decision`] (the
+    /// [`state`](Self::state) builders); plain `evaluate` keeps its old behaviour.
+    pub(crate) async fn evaluate_inner(
+        &self,
+        ctx: EvalContext,
+        state: Value,
+        questions: &Questions,
+        validate: bool,
+    ) -> Result<Decision, ClassifierError> {
         let start = Instant::now();
         if questions.is_empty() {
             return Err(err("classifier: no questions to evaluate"));
         }
+        // L1: count + hash of the canonical request on every evaluate event.
+        let o = &self.inner.opts;
+        let hash = sha256_hex(canonical_request(&o.model, questions).as_bytes());
+        let count = questions.len() as i64;
         for (key, q) in questions {
             if let Err(e) = q.validate(key) {
-                self.emit_error(start, &e);
+                self.emit_error(start, &e, count, &hash);
                 return Err(e);
             }
         }
         // Detection, never repair: the request goes out byte-unchanged.
         self.report_degenerate(questions);
-        let o = &self.inner.opts;
+        #[allow(deprecated)]
         let res = match o.style {
             ClassifierStyle::Custom => match &o.evaluate {
                 Some(f) => f(ctx, state, questions.clone()).await.map_err(err),
@@ -823,11 +967,19 @@ impl Classifier {
             },
             ClassifierStyle::Static => self.evaluate_static(&state, questions),
             ClassifierStyle::Llm => self.evaluate_llm(&ctx, &state, questions).await,
-            ClassifierStyle::SystemOne => self.evaluate_system_one(&ctx, &state, questions).await,
+            ClassifierStyle::SystemOne => {
+                self.evaluate_wire(&ctx, &state, questions, validate).await
+            }
+        };
+        let res = match res {
+            Ok(d) if validate && o.style != ClassifierStyle::SystemOne => {
+                validate_decision(questions, &d).map(|()| d)
+            }
+            r => r,
         };
         match res {
             Err(e) => {
-                self.emit_error(start, &e);
+                self.emit_error(start, &e, count, &hash);
                 Err(e)
             }
             Ok(d) => {
@@ -838,6 +990,9 @@ impl Classifier {
                     ms: start.elapsed().as_millis() as i64,
                     prompt_tokens: d.usage.input_tokens,
                     completion_tokens: d.usage.output_tokens,
+                    questions: count,
+                    questions_hash: hash,
+                    cached: d.cached,
                     ..Default::default()
                 });
                 Ok(d)
@@ -902,24 +1057,6 @@ impl Classifier {
 
     // ---- backends ----
 
-    fn body(&self, state: &Value, questions: &Questions) -> String {
-        let o = &self.inner.opts;
-        let mut b = Map::new();
-        b.insert("model".into(), json!(o.model));
-        b.insert("questions".into(), wire_questions(questions));
-        b.insert("state".into(), state.clone());
-        for (k, v) in &o.request_params {
-            b.insert(k.clone(), v.clone());
-        }
-        let mut body = Value::Object(b);
-        if let Some(t) = &o.body_transform
-            && let Some(out) = t(body.clone())
-        {
-            body = out;
-        }
-        canonical_json(&body)
-    }
-
     fn evaluate_static(
         &self,
         state: &Value,
@@ -932,26 +1069,24 @@ impl Classifier {
         Decision::from_slice(raw)
     }
 
-    async fn evaluate_system_one(
-        &self,
-        ctx: &EvalContext,
-        state: &Value,
-        questions: &Questions,
-    ) -> Result<Decision, ClassifierError> {
-        let raw = self.body(state, questions);
-        let res = self.post(&ctx.cancel, raw.into_bytes()).await?;
-        Decision::from_slice(&res)
-    }
-
     /// One POST with the §8 retry budget. No credential value and no expanded
     /// header value appears on any path out of here.
+    ///
+    /// `endpoint` is what errors name: the CONFIGURED base, `${ENV}`
+    /// unexpanded, so an account id in a templated URL never reaches an error.
+    /// `url` is what is dialled, expanded at call time.
     async fn post(
         &self,
         cancel: &CancellationToken,
         raw: Vec<u8>,
+        extra: &[(&str, &str)],
     ) -> Result<Vec<u8>, ClassifierError> {
         let o = &self.inner.opts;
-        let endpoint = format!("{}/systemone", o.base_url.trim_end_matches('/'));
+        let mut endpoint = o.base_url.trim_end_matches('/').to_owned();
+        if self.inner.preset.wire != ClassifierWire::Cloudflare {
+            endpoint.push_str("/systemone");
+        }
+        let url = expand_env_refs(&endpoint);
         let retries: u32 = match o.retries {
             -1 => 0,
             n if n > 0 => n as u32,
@@ -967,7 +1102,7 @@ impl Classifier {
         loop {
             let r = tokio::select! {
                 _ = cancel.cancelled() => return Err(err("context canceled")),
-                r = tokio::time::timeout(Duration::from_millis(o.timeout_ms), self.attempt(&hc, &endpoint, &raw)) => r,
+                r = tokio::time::timeout(Duration::from_millis(o.timeout_ms), self.attempt(&hc, &url, &raw, extra)) => r,
             };
             let (outcome, status, retry_after) = match r {
                 Err(_) => (
@@ -1032,6 +1167,7 @@ impl Classifier {
         hc: &reqwest::Client,
         endpoint: &str,
         raw: &[u8],
+        extra: &[(&str, &str)],
     ) -> Result<(u16, String, Vec<u8>), String> {
         let o = &self.inner.opts;
         let mut req = hc.post(endpoint).header("Content-Type", "application/json");
@@ -1040,6 +1176,12 @@ impl Classifier {
             && !key.is_empty()
         {
             req = req.header("Authorization", format!("Bearer {key}"));
+        }
+        // Library headers first; a host header of the same name wins.
+        for (k, v) in extra {
+            if !o.headers.keys().any(|h| h.eq_ignore_ascii_case(k)) {
+                req = req.header(*k, *v);
+            }
         }
         for (k, v) in crate::mcp::expand_env_headers(&o.headers) {
             req = req.header(k, v);
@@ -1119,13 +1261,15 @@ impl Classifier {
         }
     }
 
-    fn emit_error(&self, start: Instant, e: &ClassifierError) {
+    fn emit_error(&self, start: Instant, e: &ClassifierError, questions: i64, hash: &str) {
         self.emit(MetricEvent {
             event: METRIC_CLASSIFIER_EVALUATE.into(),
             model: self.inner.opts.model.clone(),
             status: "error".into(),
             ms: start.elapsed().as_millis() as i64,
             error: e.0.clone(),
+            questions,
+            questions_hash: hash.into(),
             ..Default::default()
         });
     }
