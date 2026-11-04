@@ -127,6 +127,38 @@ new LlmClient.Hooks().beforeTool(guard.asHook(null)).beforeLLM(router.asHook(nul
 
 A `beforeLLM` hook may return `LLMOverride.withModel(id)`: that turn only is sent to `id`.
 
+### Backends, images, cache and helpers
+
+Every default below is a **proposed default, owner to confirm**
+(`openspec/changes/add-classifier-backends`).
+
+```java
+var c = Classifier.create(new Classifier.Options().backend("openrouter")
+        .cache(new Classifier.MemoryCache(Duration.ofHours(1), 1000)));
+var d = c.state(Map.of("note", "listing", "photo", ContentPart.ofFile(Path.of("mug.png"))))
+        .evaluate(noul("red", "Is the object in `photo` red?"));       // fails closed on an invalid reply
+List<Classifier.BatchResult> rs = c.states("a", "b").evaluate(noul("q", "…")); // decision | error, in order
+```
+
+- `backend`: `typesafe` (default) · `openrouter` (`typesafe/jev-1.14`) · `cloudflare` (`/ai/run`
+  envelope; `${CLOUDFLARE_ACCOUNT_ID}` in the URL expands at call time, errors name it unexpanded)
+  · `vercel` · `custom` (requires `baseUrl` and `supports`). The table is data:
+  `Classifier.BACKENDS`; `.supports(new Classifier.Supports(true))` overrides it per classifier.
+- Images (style `systemone` only): `ContentPart` images in the state are lifted into `assets`
+  (cloudflare: data URLs). PNG/JPEG, 280–1568 px a side, ≤ 16 MiB each and 32 MiB per request —
+  never resized. A backend without image support throws `Classifier.ClassifierUnsupported` before
+  any request. A state with no `ContentPart` is sent byte-identically to before.
+- `cache(Classifier.Cache)` (`get` returns `null` when absent, string values) — off when unset;
+  only valid replies are stored; keys follow the served model (`modelCacheKey` /
+  `decisionCacheKey`). A hit sets `decision.cached()` and the `ClassifierEvaluate` event's
+  `cached`. Every such event also carries `questions` and `questionsHash`.
+- Helpers: `Classifier.validateDecision(questions, decision)` → `Optional<ClassifierException>`;
+  `Classifier.Thresholds.DEFAULT.band(answer)` (0.8 / 0.2 / 0.6, inclusive; `Bands` stays the
+  `ask`/`gate` default); `Classifier.chunkQuestions(questions, size)`.
+- Open union: `Judge.raw(name, type, instructions, criteria?)` / `Classifier.RawQuestion`; an
+  answer of an unmodelled type decodes to `Classifier.RawAnswer` (`decision.raw(key)`).
+- `STYLE_LLM` is `@Deprecated` — `style("llm")` still works unchanged, with no runtime warning.
+
 ## Media generation
 
 Generate images, video and speech (plus transcription, voice cloning and talking-head video)

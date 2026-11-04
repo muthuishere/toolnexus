@@ -8,6 +8,8 @@ import io.github.muthuishere.toolnexus.Classifier.DecisionAnswer;
 import io.github.muthuishere.toolnexus.Classifier.NoulAnswer;
 import io.github.muthuishere.toolnexus.Classifier.NoulQuestion;
 import io.github.muthuishere.toolnexus.Classifier.Question;
+import io.github.muthuishere.toolnexus.Classifier.RawAnswer;
+import io.github.muthuishere.toolnexus.Classifier.RawQuestion;
 import io.github.muthuishere.toolnexus.Classifier.ScoreAnswer;
 import io.github.muthuishere.toolnexus.Classifier.ScoreQuestion;
 
@@ -59,6 +61,16 @@ public final class Judge {
 
     public static Named score(String name, String instructions, String... levels) {
         return score(name, instructions, List.of(levels));
+    }
+
+    /** The open end of the union (§8B): a type the library does not model, sent as written.
+     * {@code criteria} may be null (omitted). */
+    public static Named raw(String name, String type, String instructions, Object criteria) {
+        return new Named(name, new RawQuestion(type, instructions, criteria));
+    }
+
+    public static Named raw(String name, String type, String instructions) {
+        return raw(name, type, instructions, null);
     }
 
     /** Ordered list → the §8B question map. A duplicate name is an error naming it, before any request. */
@@ -135,6 +147,7 @@ public final class Judge {
                 case NoulAnswer n -> of(n.noul()) != Band.UNCERTAIN;
                 case ChoiceAnswer c -> !c.nearUniform() && c.confidence() > high;
                 case ScoreAnswer s -> s.confidence() > high;
+                case RawAnswer r -> false; // an unmodelled type has no number to band: never sure
             };
         }
     }
@@ -152,6 +165,7 @@ public final class Judge {
                 case NoulAnswer n -> n.noul();
                 case ScoreAnswer s -> s.score();
                 case ChoiceAnswer c -> c.confidence();
+                case RawAnswer r -> 0.0;
             };
         }
 
@@ -242,6 +256,7 @@ public final class Judge {
                 case ChoiceAnswer ch -> ch.choice().equals(r.is());
                 case NoulAnswer n -> r.below() != null ? n.noul() < r.below() : n.noul() >= r.atLeast();
                 case ScoreAnswer s -> r.below() != null ? s.score() < r.below() : s.score() >= r.atLeast();
+                case RawAnswer raw -> false;
             };
             if (fired) return new Outcome(r.action(), r.target() == null ? "" : r.target(), false, null, answers);
         }
