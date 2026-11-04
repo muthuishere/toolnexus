@@ -104,8 +104,8 @@ type CliACPLaunch struct {
 	// turn (a new system message when there is none). Data, not code: devin
 	// only finds MCP tools when the prompt names the server.
 	SystemHint string `json:"systemHint,omitempty"`
-	Verified       string   `json:"verified,omitempty"`
-	Notes          string   `json:"notes,omitempty"`
+	Verified   string `json:"verified,omitempty"`
+	Notes      string `json:"notes,omitempty"`
 }
 
 // CliStyleDef is one CLI's invocation recipe — data shared by every port.

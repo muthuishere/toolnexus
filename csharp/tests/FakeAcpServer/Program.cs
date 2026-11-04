@@ -197,8 +197,10 @@ while ((line = await reader.ReadLineAsync().ConfigureAwait(false)) is not null)
         {
             // A reply to one of OUR server-initiated requests (session/request_permission).
             var key = idEl.ValueKind == JsonValueKind.String ? idEl.GetString() ?? "" : idEl.GetRawText();
-            if (permReplies.TryRemove(key, out var tcs))
-                tcs.TrySetResult(root.Clone());
+            // GetOrAdd, not TryRemove: a fast client can answer before the scenario
+            // registers its waiter, and a dropped reply hangs the turn.
+            permReplies.GetOrAdd(key, _ => new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously))
+                .TrySetResult(root.Clone());
             continue;
         }
 

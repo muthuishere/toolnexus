@@ -397,9 +397,12 @@
        (let [caps     (cond-> {:fs {:readTextFile false :writeTextFile false}
                                :terminal false}
                         client-caps-meta (assoc :_meta client-caps-meta))
-             init-res (call! client "initialize"
-                              {:protocolVersion   1
-                               :clientCapabilities caps})]
+             ;; An agent that dies at once makes the write itself throw
+             ;; (Stream closed / Broken pipe): that is an initialize failure.
+             init-res (try (call! client "initialize"
+                                  {:protocolVersion   1
+                                   :clientCapabilities caps})
+                           (catch Throwable e {:error (ex-message e)}))]
          (when (:error init-res)
            (kill-and-throw! client "initialize" init-res))
          (let [http-ok? (true? (get-in init-res [:ok :agentCapabilities :mcpCapabilities :http]))
