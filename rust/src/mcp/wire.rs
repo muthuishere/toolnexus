@@ -67,6 +67,8 @@ pub(crate) struct Session {
     next_id: AtomicI64,
     pub(crate) timeout: Duration,
     tool_cache: tokio::sync::Mutex<Option<(Vec<Obj>, Instant)>>,
+    /// tool name → its `inputSchema` exactly as the server sent it.
+    raw_schemas: Mutex<HashMap<String, String>>,
 }
 
 enum Transport {
@@ -118,6 +120,7 @@ impl Session {
             next_id: AtomicI64::new(0),
             timeout,
             tool_cache: tokio::sync::Mutex::new(None),
+            raw_schemas: Mutex::new(HashMap::new()),
         }
     }
 
@@ -126,6 +129,11 @@ impl Session {
             Transport::Http(h) => Some(&h.auth),
             Transport::Stdio(_) => None,
         }
+    }
+
+    /// A tool's `inputSchema` as the server sent it (last `tools/list`).
+    pub(crate) fn raw_schema(&self, tool: &str) -> Option<String> {
+        lock(&self.raw_schemas).get(tool).cloned()
     }
 
     /// Stop a stdio child (close stdin, kill after 2 s). No-op for HTTP.
@@ -147,6 +155,16 @@ impl Session {
         params: Value,
         timeout: Duration,
     ) -> Result<Obj, WireError> {
+        self.call_raw(method, params, timeout).await.map(|(r, _)| r)
+    }
+
+    /// [`Session::call_within`] plus the response message exactly as received.
+    async fn call_raw(
+        &self,
+        method: &str,
+        params: Value,
+        timeout: Duration,
+    ) -> Result<(Obj, String), WireError> {
         let mut p = match params {
             Value::Object(m) => m,
             _ => Obj::new(),
@@ -165,7 +183,7 @@ impl Session {
                 .unwrap_or_default();
         // The timeout bounds each exchange with the server, never an OAuth
         // login in between (a user may take minutes to authorize).
-        let msg = match &self.transport {
+        let (msg, raw) = match &self.transport {
             Transport::Stdio(s) => tokio::time::timeout(timeout, s.round_trip(id, body))
                 .await
                 .map_err(|_| WireError::Timeout(timeout))??,
@@ -189,7 +207,7 @@ impl Session {
             .or_insert_with(|| json!("complete"))
             .clone();
         match rt.as_str() {
-            Some("complete" | "input_required") => Ok(r),
+            Some("complete" | "input_required") => Ok((r, raw)),
             _ => Err(WireError::Other(format!("unsupported resultType {rt}"))),
         }
     }
@@ -203,7 +221,10 @@ impl Session {
         {
             return Ok(tools.clone());
         }
-        let r = self.call("tools/list", Value::Null).await?;
+        let (r, raw) = self
+            .call_raw("tools/list", Value::Null, self.timeout)
+            .await?;
+        *lock(&self.raw_schemas) = raw_input_schemas(&raw);
         let tools: Vec<Obj> = r
             .get("tools")
             .and_then(Value::as_array)
@@ -226,7 +247,7 @@ impl HttpTransport {
         params: &Obj,
         body: Vec<u8>,
         timeout: Duration,
-    ) -> Result<Value, WireError> {
+    ) -> Result<(Value, String), WireError> {
         let mut attempt = 0;
         let resp = loop {
             let sent = self.auth.bearer(&self.url).await;
@@ -268,6 +289,7 @@ impl HttpTransport {
             .map_err(|_| WireError::Timeout(timeout))?
             .map_err(|e| WireError::Other(format!("HTTP {status}: {}", err_chain(&e))))?;
         let mut msg = Value::Null;
+        let mut raw = String::new();
         if sse {
             // the last `data:` payload carrying a result or error is the response
             for line in String::from_utf8_lossy(&bytes).lines() {
@@ -276,10 +298,12 @@ impl HttpTransport {
                     && (v.get("result").is_some() || v.get("error").is_some())
                 {
                     msg = v;
+                    raw = d.trim().to_owned();
                 }
             }
         } else {
             msg = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+            raw = String::from_utf8_lossy(&bytes).into_owned();
         }
         let has = |k: &str| msg.get(k).is_some_and(|v| !v.is_null());
         if !has("result") && !has("error") {
@@ -290,7 +314,7 @@ impl HttpTransport {
                 "HTTP {status}: response has neither result nor error"
             )));
         }
-        Ok(msg)
+        Ok((msg, raw))
     }
 
     async fn post(
@@ -326,6 +350,37 @@ impl HttpTransport {
         }
         req.body(body.to_vec()).send().await
     }
+}
+
+/// The raw `inputSchema` text of every tool in a `tools/list` response.
+fn raw_input_schemas(raw: &str) -> HashMap<String, String> {
+    use serde_json::value::RawValue;
+    #[derive(serde::Deserialize)]
+    struct Msg<'a> {
+        #[serde(borrow)]
+        result: Res<'a>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Res<'a> {
+        #[serde(borrow, default)]
+        tools: Vec<RawTool<'a>>,
+    }
+    #[derive(serde::Deserialize)]
+    struct RawTool<'a> {
+        #[serde(default)]
+        name: String,
+        #[serde(rename = "inputSchema", borrow, default)]
+        input_schema: Option<&'a RawValue>,
+    }
+    serde_json::from_str::<Msg>(raw)
+        .map(|m| {
+            m.result
+                .tools
+                .into_iter()
+                .filter_map(|t| Some((t.name, t.input_schema?.get().to_owned())))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Header-safe value, else the `=?base64?…?=` sentinel (§2.3).
@@ -365,7 +420,7 @@ pub(crate) fn err_chain(e: &dyn std::error::Error) -> String {
 pub(crate) struct StdioConn {
     child: tokio::sync::Mutex<Option<Child>>,
     stdin: tokio::sync::Mutex<Option<ChildStdin>>,
-    pending: Mutex<HashMap<String, oneshot::Sender<Value>>>,
+    pending: Mutex<HashMap<String, oneshot::Sender<(Value, String)>>>,
     err: Mutex<Option<String>>,
     done: watch::Receiver<bool>,
 }
@@ -418,7 +473,7 @@ impl StdioConn {
                         }
                         let key = m["id"].to_string();
                         if let Some(ch) = lock(&c2.pending).remove(&key) {
-                            let _ = ch.send(m);
+                            let _ = ch.send((m, line));
                         }
                     }
                     Ok(None) => break,
@@ -435,7 +490,7 @@ impl StdioConn {
         Ok(conn)
     }
 
-    async fn round_trip(&self, id: i64, mut body: Vec<u8>) -> Result<Value, WireError> {
+    async fn round_trip(&self, id: i64, mut body: Vec<u8>) -> Result<(Value, String), WireError> {
         let key = id.to_string();
         let (tx, rx) = oneshot::channel();
         {

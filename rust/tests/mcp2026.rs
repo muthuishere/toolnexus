@@ -828,3 +828,24 @@ async fn oauth_omit_refresh_resource() {
         assert_eq!(tokens, if omit { 2 } else { 3 }, "omit={omit}");
     }
 }
+
+#[tokio::test]
+async fn search_hit_input_schema_is_byte_exact_as_sent() {
+    // a server whose schema has "type" before "properties" (not sorted)
+    let s = common::serve(|r: common::Req| async move {
+        let id = r.body["id"].to_string();
+        let body = match r.body["method"].as_str().unwrap_or("") {
+            "server/discover" => format!(r#"{{"jsonrpc":"2.0","id":{id},"result":{{"supportedVersions":["2026-07-28"],"capabilities":{{}}}}}}"#),
+            "tools/list" => format!(r#"{{"jsonrpc":"2.0","id":{id},"result":{{"tools":[{{"name":"lookup","description":"Look up a word.","inputSchema":{{"type":"object","properties":{{"word":{{"type":"string"}}}},"required":["word"]}}}}]}}}}"#),
+            _ => format!(r#"{{"jsonrpc":"2.0","id":{id},"error":{{"code":-32601,"message":"Method not found"}}}}"#),
+        };
+        common::Resp { status: 200, headers: vec![("Content-Type".into(), "application/json".into())], body }
+    })
+    .await;
+    let src = load(json!({"raw": {"url": format!("{}/mcp", s.url), "toolSearch": true, "description": "words"}}), opts()).await;
+    let r = call(&src, "raw_search_tools", json!({"query": "word"})).await;
+    assert_eq!(
+        r.output,
+        r#"[{"name":"lookup","description":"Look up a word.","inputSchema":{"type":"object","properties":{"word":{"type":"string"}},"required":["word"]},"server":"words"}]"#
+    );
+}

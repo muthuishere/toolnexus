@@ -476,7 +476,10 @@ fn search_tools(server: &Arc<DirectServer>, description: Option<&str>) -> Vec<To
                             "{{\"name\":{},\"description\":{},\"inputSchema\":{},\"server\":{}}}",
                             enc(t.get("name")),
                             enc(t.get("description")),
-                            enc(t.get("inputSchema")),
+                            t.get("name")
+                                .and_then(Value::as_str)
+                                .and_then(|n| srv.session.raw_schema(n))
+                                .unwrap_or_else(|| enc(t.get("inputSchema"))),
                             enc(Some(&json!(description)))
                         )
                     })
