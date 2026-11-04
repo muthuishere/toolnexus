@@ -103,6 +103,8 @@ fn reencode_json(text: &str) -> String {
 pub fn http_tool(opts: HttpToolOptions) -> Tool {
     let opts = Arc::new(opts);
     Tool {
+        output_schema: None,
+        annotations: None,
         concurrency_safe: None,
         name: opts.name.clone(),
         description: opts.description.clone(),

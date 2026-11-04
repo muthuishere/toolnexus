@@ -17,6 +17,8 @@ pub mod http;
 pub mod judge;
 pub mod mcp;
 #[cfg(feature = "serve")]
+pub mod mcp_handler;
+#[cfg(feature = "serve")]
 pub mod mcp_serve;
 pub mod media;
 pub mod relay;
@@ -40,8 +42,8 @@ pub use media::{
 };
 pub use tool::{
     Answer, ConcurrencySafeFn, ContentPart, DEFAULT_MAX_TOOL_CONCURRENCY, PartError, Request, Tool,
-    ToolContext, ToolHints, ToolResult, ToolSource, auth_required, define_tool, define_typed_tool,
-    empty_schema, is_concurrency_safe, pending, pending_of, resolve_max_tool_concurrency,
-    resolve_max_tool_concurrency_with, sanitize,
+    ToolAnnotations, ToolContext, ToolHints, ToolResult, ToolSource, auth_required, define_tool,
+    define_typed_tool, empty_schema, is_concurrency_safe, pending, pending_of,
+    resolve_max_tool_concurrency, resolve_max_tool_concurrency_with, sanitize,
 };
 pub use toolkit::{McpConfigInput, Toolkit, ToolkitError, ToolkitOptions, create_toolkit};

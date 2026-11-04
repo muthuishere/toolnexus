@@ -525,6 +525,8 @@ pub fn load_skills_with(opts: LoadSkillsOptions) -> SkillSource {
     let shared = Arc::new(skills.clone());
     let limit = opts.sample_limit;
     let tool = Tool {
+        output_schema: None,
+        annotations: None,
         concurrency_safe: None,
         name: "skill".into(),
         description: SKILL_TOOL_DESCRIPTION.into(),
