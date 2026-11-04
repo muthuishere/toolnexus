@@ -164,7 +164,7 @@ public final class OAuth {
         boolean cimd = Boolean.TRUE.equals(md.get("client_id_metadata_document_supported"));
         if (cid.isEmpty() && !clientMetadataUrl.isEmpty() && cimd) cid = clientMetadataUrl;
         if (cid.isEmpty()) { // no DCR, ever: the user registers an app once and configures its id
-            String why = cimd ? "OAuth.ClientMetadataURL is not set" : "it does not support Client ID Metadata Documents";
+            String why = cimd ? "auth.clientMetadataUrl is not set" : "it does not support Client ID Metadata Documents";
             throw new McpException("no client identity for " + iss + ": " + why + " and no client id is configured — register an app with "
                     + iss + " and set auth.clientId (dynamic client registration is not supported)");
         }

@@ -275,7 +275,7 @@ export class OAuth {
       if (!clientId && this.clientMetadataUrl && cimd) clientId = this.clientMetadataUrl
       if (!clientId) {
         // no DCR, ever: the user registers an app once and configures its id
-        const why = cimd ? "clientMetadataUrl is not set" : "it does not support Client ID Metadata Documents"
+        const why = cimd ? "auth.clientMetadataUrl is not set" : "it does not support Client ID Metadata Documents"
         throw new Error(`no client identity for ${issuer}: ${why} and no client id is configured — register an app with ${issuer} and set auth.clientId (dynamic client registration is not supported)`)
       }
       const sess = await this.authorizer.begin()
