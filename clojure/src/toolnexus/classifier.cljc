@@ -21,12 +21,14 @@
 ;; is the §8 one, reused from `toolnexus.client` rather than copied.
 (ns toolnexus.classifier
   (:require [clojure.string :as str]
+            [koine.codec :as codec]
             [koine.env :as env]
             [koine.http :as khttp]
             [koine.json :as json]
             [koine.process :as proc]
             [koine.time :as ktime]
-            [toolnexus.client :as client]))
+            [toolnexus.client :as client]
+            [toolnexus.content :as content]))
 
 ;; ---------------------------------------------------------------------------
 ;; constants — pinned across every port
@@ -49,20 +51,59 @@
   "TYPESAFE_API_KEY")
 
 (def backends
-  "§8B `:backend` — a PRESET that sets base-url + model + api-key-env AS A UNIT
-  (D5 / ADR 0027).
+  "§8B `:backend` — the backend table, AS DATA (change add-classifier-backends,
+  PD-2). Each row is a PRESET that sets base-url + model + api-key-env AS A UNIT
+  (D5 / ADR 0027), plus the wire it speaks, whether it sends the
+  `TypeSafe-Danger-Zone-Images` header, and `:supports` — `(fn [model]
+  {:images bool})`, the image column. `custom` has no base-url and no
+  `:supports`: the caller must declare both.
 
-  The three travel together and were three independent options, so the obvious
-  half-configuration — TypeSafe's model spelling pointed at openrouter.ai — was
-  expressible, and produced a 404 whose body said nothing about the model. A
-  preset makes the working combination the short path and the broken one
-  impossible to reach by accident."
+  The table is a fail-fast for WHAT THE TABLE SAYS, never a claim about the
+  vendor; `:supports {:images true}` on a classifier overrides it. Every default
+  here is a PROPOSED default, owner to confirm (design.md PD-1..PD-4)."
   {"typesafe"   {:base-url "https://api.typesafe.ai/v1"
                  :model    "jev-latest"
-                 :api-key-env "TYPESAFE_API_KEY"}
+                 :api-key-env "TYPESAFE_API_KEY"
+                 :wire "systemone" :images-header true
+                 :supports (fn [_] {:images true})}
    "openrouter" {:base-url "https://openrouter.ai/api/v1"
-                 :model    "typesafe/jev-1.13"
-                 :api-key-env "OPENROUTER_API_KEY"}})
+                 :model    "typesafe/jev-1.14"
+                 :api-key-env "OPENROUTER_API_KEY"
+                 :wire "systemone" :images-header true
+                 :supports (fn [_] {:images true})}
+   "cloudflare" {:base-url "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/ai/run"
+                 :model    "typesafe/jev"
+                 :api-key-env "CLOUDFLARE_JEV_API_KEY"
+                 :wire "cloudflare" :images-header false
+                 :supports (fn [model] {:images (str/includes? (str model) "clef")})}
+   "vercel"     {:base-url "https://ai-gateway.vercel.sh/typesafe/v1"
+                 :model    "typesafe-ai/jev"
+                 :api-key-env "AI_GATEWAY_API_KEY"
+                 :wire "systemone" :images-header true
+                 :supports (fn [_] {:images false})}
+   "custom"     {:base-url nil
+                 :model    "jev-latest"
+                 :api-key-env "TYPESAFE_API_KEY"
+                 :wire "systemone" :images-header true
+                 :supports nil}})
+
+(def backend-names
+  "The five backend values, in the order every port's error message lists them."
+  ["typesafe" "openrouter" "cloudflare" "vercel" "custom"])
+
+(def images-header
+  "TypeSafe's opt-in for image (\"danger zone\") input. Sent as `true` only when
+  a request carries assets AND the backend row says so."
+  "TypeSafe-Danger-Zone-Images")
+
+(def image-min-side 280)
+(def image-max-side 1568)
+(def image-max-bytes
+  "Per image, DECODED bytes (16 MiB)."
+  (* 16 1024 1024))
+(def request-image-max-bytes
+  "All images of one request, decoded bytes (32 MiB)."
+  (* 32 1024 1024))
 
 (def default-timeout-ms
   "Bounds ONE request. A classifier has no loop to bound."
@@ -92,8 +133,13 @@
   "classifier.warning")
 
 (def styles
-  "The four backends (§8B). `:systemone` is the default; `:static` is what CI
-  runs — no network, no credential."
+  "The four styles (§8B). `\"systemone\"` is the default; `\"static\"` is what
+  CI runs — no network, no credential.
+
+  `\"llm\"` is DEPRECATED (ADR 0038 D3, PD-15): System One is the single
+  product wire. It keeps working byte-identically, as an alias, for at least one
+  minor release, with no runtime warning. A string value carries no `:deprecated`
+  metadata, so this docstring is the marker."
   #{"systemone" "llm" "custom" "static"})
 
 ;; ---------------------------------------------------------------------------
@@ -146,6 +192,17 @@
   everything\" canonicaliser silently renumbers the rubric."
   [instructions criteria]
   {:type "score" :instructions instructions :criteria (vec criteria)})
+
+(defn raw-question
+  "The OPEN end of the question union (§8B, PD-14): a System One question type
+  the library does not model yet (e.g. Jev 1.14 `box`), sent AS WRITTEN —
+  `{type, instructions, criteria?}` — with no client-side limits, because the
+  library does not know the type. `type` must be non-empty. Its answer decodes
+  to a raw answer `{:type t :value <the answer object>}`."
+  ([type instructions] {:type type :instructions instructions})
+  ([type instructions criteria]
+   (cond-> {:type type :instructions instructions}
+     (some? criteria) (assoc :criteria criteria))))
 
 (defn- option-id
   "An option key as its PLAIN NAME, which is what §8B says reaches the wire.
@@ -205,10 +262,12 @@
                                           max-score-levels " ordered levels, got " n)
                                  {:limit :score-levels :count n}))))
 
+      ;; Any other type is a RAW question (the open union): sent as written,
+      ;; no limits — only a type is required.
+      (and (string? t) (not= "" t)) nil
+
       :else
-      (throw (question-error key (str "unknown type " (pr-str t)
-                                      " — expected \"noul\", \"choice\" or \"score\"")
-                             {:type t})))))
+      (throw (question-error key "a raw question needs a type" {:type t})))))
 
 ;; ---------------------------------------------------------------------------
 ;; the canonical request
@@ -230,6 +289,89 @@
   themselves before handing it over."
   [model questions]
   (json/write-str {:model model :questions questions}))
+
+;; ---------------------------------------------------------------------------
+;; sha256, portable — the cache keys and the metric's questions hash
+;; ---------------------------------------------------------------------------
+;;
+;; Neither koine nor the JVM-free subset of clojure.core has a digest, and the
+;; cache keys are SPECIFIED BYTES (a cache written by one port reads in
+;; another), so this is ~50 lines of clojure.core over 32-bit words: both hosts
+;; run the same code rather than two digests that agree until they don't.
+
+(defn- utf8-bytes
+  "The UTF-8 bytes of `s` as unsigned 0..255 values, through koine's base64 seam
+  — the one place in the stack that owns string <-> UTF-8 bytes on BOTH hosts."
+  [s]
+  (mapv (fn [b] (bit-and (long b) 255)) (seq (codec/decode-bytes (codec/encode s)))))
+
+(def ^:private sha-k
+  [0x428a2f98 0x71374491 0xb5c0fbcf 0xe9b5dba5 0x3956c25b 0x59f111f1 0x923f82a4 0xab1c5ed5
+   0xd807aa98 0x12835b01 0x243185be 0x550c7dc3 0x72be5d74 0x80deb1fe 0x9bdc06a7 0xc19bf174
+   0xe49b69c1 0xefbe4786 0x0fc19dc6 0x240ca1cc 0x2de92c6f 0x4a7484aa 0x5cb0a9dc 0x76f988da
+   0x983e5152 0xa831c66d 0xb00327c8 0xbf597fc7 0xc6e00bf3 0xd5a79147 0x06ca6351 0x14292967
+   0x27b70a85 0x2e1b2138 0x4d2c6dfc 0x53380d13 0x650a7354 0x766a0abb 0x81c2c92e 0x92722c85
+   0xa2bfe8a1 0xa81a664b 0xc24b8b70 0xc76c51a3 0xd192e819 0xd6990624 0xf40e3585 0x106aa070
+   0x19a4c116 0x1e376c08 0x2748774c 0x34b0bcb5 0x391c0cb3 0x4ed8aa4a 0x5b9cca4f 0x682e6ff3
+   0x748f82ee 0x78a5636f 0x84c87814 0x8cc70208 0x90befffa 0xa4506ceb 0xbef9a3f7 0xc67178f2])
+
+(defn- m32 [x] (bit-and x 0xFFFFFFFF))
+(defn- rotr [x n] (m32 (bit-or (bit-shift-right x n) (bit-shift-left x (- 32 n)))))
+(defn- shr [x n] (bit-shift-right x n))
+
+(defn- sha-schedule [block]
+  (loop [w (mapv (fn [i] (m32 (+ (bit-shift-left (nth block (* 4 i)) 24)
+                                 (bit-shift-left (nth block (+ 1 (* 4 i))) 16)
+                                 (bit-shift-left (nth block (+ 2 (* 4 i))) 8)
+                                 (nth block (+ 3 (* 4 i))))))
+                 (range 16))
+         t 16]
+    (if (= t 64)
+      w
+      (let [w15 (nth w (- t 15))
+            w2  (nth w (- t 2))
+            s0  (bit-xor (rotr w15 7) (rotr w15 18) (shr w15 3))
+            s1  (bit-xor (rotr w2 17) (rotr w2 19) (shr w2 10))]
+        (recur (conj w (m32 (+ (nth w (- t 16)) s0 (nth w (- t 7)) s1))) (inc t))))))
+
+(defn- sha-compress [h block]
+  (let [w (sha-schedule block)]
+    (loop [t 0 v h]
+      (if (= t 64)
+        (mapv (fn [i] (m32 (+ (nth h i) (nth v i)))) (range 8))
+        (let [[a b c d e f g hh] v
+              s1    (bit-xor (rotr e 6) (rotr e 11) (rotr e 25))
+              ch    (bit-xor (bit-and e f) (bit-and (bit-xor e 0xFFFFFFFF) g))
+              temp1 (m32 (+ hh s1 ch (nth sha-k t) (nth w t)))
+              s0    (bit-xor (rotr a 2) (rotr a 13) (rotr a 22))
+              maj   (bit-xor (bit-and a b) (bit-and a c) (bit-and b c))
+              temp2 (m32 (+ s0 maj))]
+          (recur (inc t) [(m32 (+ temp1 temp2)) a b c (m32 (+ d temp1)) e f g]))))))
+
+(defn sha256-hex
+  "SHA-256 of the UTF-8 bytes of `s`, lower-case hex. Pure Clojure: correct on
+  both hosts, not fast — a cache key over megabytes of image data costs real
+  time, which is one more reason the cache is opt-in."
+  [s]
+  (let [bs     (utf8-bytes s)
+        len    (count bs)
+        bitlen (* 8 len)
+        padded (vec (concat bs
+                            [0x80]
+                            (repeat (mod (- 56 (inc len)) 64) 0)
+                            (mapv (fn [i] (bit-and (bit-shift-right bitlen (* 8 (- 7 i))) 255))
+                                  (range 8))))
+        digest (loop [i 0
+                      h [0x6a09e667 0xbb67ae85 0x3c6ef372 0xa54ff53a
+                         0x510e527f 0x9b05688c 0x1f83d9ab 0x5be0cd19]]
+                 (if (>= i (count padded))
+                   h
+                   (recur (+ i 64) (sha-compress h (subvec padded i (+ i 64))))))]
+    (apply str (map (fn [x]
+                      (apply str (map (fn [sh] (nth "0123456789abcdef"
+                                                   (bit-and (bit-shift-right x sh) 15)))
+                                      [28 24 20 16 12 8 4 0])))
+                    digest))))
 
 ;; ---------------------------------------------------------------------------
 ;; nearUniform — derived, advisory, pinned to one tolerance
@@ -297,8 +439,10 @@
 (defn- num* [x] (when (number? x) x))
 
 (defn- parse-answer
-  "One answer, discriminated by the wire's `type`. The set is CLOSED: an unknown
-  type is an error, never a guess (ADR 0020 — never repair a bad response)."
+  "One answer, discriminated by the wire's `type`. The union is OPEN (§8B,
+  PD-14): a type the library does not model (Jev 1.14 `box`) decodes to a RAW
+  answer `{:type t :value <the answer object, string keys>}` instead of failing
+  the whole decision. Nothing is guessed or repaired (ADR 0020)."
   [key a]
   (let [t (get a "type")]
     (cond
@@ -320,6 +464,9 @@
        :legend        (or (get a "legend") {})
        :probabilities (or (get a "probabilities") {})
        :confidence    (get a "confidence")}
+
+      (and (string? t) (not= "" t))
+      {:type t :value a}
 
       :else
       (throw (ex-info (str "classifier: answer \"" key "\": unknown type " (pr-str t))
@@ -365,6 +512,19 @@
 (defn noul   "The noul answer at `key`, or an error." [decision key] (answer-of decision key "noul"))
 (defn choice "The choice answer at `key`, or an error." [decision key] (answer-of decision key "choice"))
 (defn score  "The score answer at `key`, or an error." [decision key] (answer-of decision key "score"))
+
+(defn raw-answer
+  "The raw answer at `key` — an answer of a type the library does not model —
+  or an error when absent or when it IS a modelled type."
+  [decision key]
+  (let [a (get-in decision [:answers key])]
+    (cond
+      (nil? a) (throw (ex-info (str "classifier: no answer \"" key "\" in this decision")
+                               {:question key :want "raw"}))
+      (contains? #{"noul" "choice" "score"} (:type a))
+      (throw (ex-info (str "classifier: answer \"" key "\" is a " (:type a) " answer, not raw")
+                      {:question key :want "raw" :got (:type a)}))
+      :else a)))
 
 (defn levels
   "A score answer's legend in LEVEL order, which the map itself loses. Sorted
@@ -437,17 +597,38 @@
                     every wire option is ignored
     :decisions      `:style \"static\"` only — a vector of
                     `{:state … :questions … :response <parsed body>}`
+    :backend        \"typesafe\" (default) | \"openrouter\" | \"cloudflare\" |
+                    \"vercel\" | \"custom\" — a row of `backends`. An explicit
+                    `:base-url` / `:model` / `:api-key-env` still wins.
+                    `${NAME}` in the base URL expands AT CALL TIME; errors
+                    name it unexpanded. `custom` requires `:base-url` and
+                    `:supports` (systemone style).
+    :supports       `{:images bool}` — overrides the backend row's image column
+    :cache          opt-in `{:get (fn [k]) -> string|nil, :set (fn [k v])}`;
+                    systemone style only; see `memory-cache`. Absent = off.
+
+  `:style \"llm\"` is DEPRECATED (kept working, no runtime warning).
 
   A style whose required option is missing, and an unknown style, are rejected
   HERE rather than at the first call."
   [opts]
   (let [style   (str (or (:style opts) "systemone"))
-        backend (when (some? (:backend opts)) (str (:backend opts)))
-        _       (when (and backend (not (contains? backends backend)))
+        backend (if (some? (:backend opts)) (str (:backend opts)) "typesafe")
+        _       (when-not (contains? backends backend)
                   (throw (ex-info (str "classifier: unknown backend " (pr-str backend)
-                                       " — expected one of " (pr-str (vec (sort (keys backends)))))
+                                       " (want " (str/join ", " (map pr-str (butlast backend-names)))
+                                       " or " (pr-str (last backend-names)) ")")
                                   {:backend backend})))
-        preset  (get backends backend)
+        ;; A self-hosted endpoint: the library cannot know what an unknown
+        ;; server takes, so both are declarations. Wire styles only — static,
+        ;; custom and llm never touch the wire.
+        _       (when (and (= "custom" backend) (= "systemone" style)
+                           (or (nil? (:base-url opts)) (nil? (:supports opts))))
+                  (throw (ex-info "classifier: backend \"custom\" requires baseUrl and supports"
+                                  {:backend backend})))
+        row     (get backends backend)
+        preset  (into {} (remove (fn [e] (nil? (val e))))
+                      (select-keys row [:base-url :model :api-key-env]))
         opts    (merge preset opts)
         ;; The KNOWN mismatch, refused at construction rather than at the first
         ;; 404: `jev-latest` is TypeSafe's own spelling of the floating alias and
@@ -456,12 +637,22 @@
                       model (str (or (:model opts) default-model))]
                   (when (and (str/includes? url "openrouter.ai") (= "jev-latest" model))
                     (throw (ex-info (str "classifier: model \"jev-latest\" is TypeSafe's spelling; "
-                                         "on openrouter.ai use \"typesafe/jev-1.13\"")
+                                         "on openrouter.ai use "
+                                         (pr-str (get-in backends ["openrouter" :model])))
                                     {:base-url url :model model}))))
-        opts  (assoc (dissoc opts :backend)
+        model   (or (:model opts) default-model)
+        opts  (assoc opts
+                     :backend     backend
+                     :wire        (:wire row)
+                     :images-header? (boolean (:images-header row))
+                     ;; The resolved image column: the caller's `:supports`
+                     ;; overrides the table row.
+                     :supports    (merge {:images false}
+                                         (or (:supports opts)
+                                             (when-let [f (:supports row)] (f model))))
                      :style       style
                      :base-url    (or (:base-url opts) default-base-url)
-                     :model       (or (:model opts) default-model)
+                     :model       model
                      :api-key-env (or (:api-key-env opts) default-api-key-env)
                      :timeout-ms  (or (:timeout-ms opts) default-timeout-ms)
                      :retries     (or (:retries opts) 2)
@@ -522,16 +713,28 @@
   do it deliberately rather than by collision."
   #{:questions "questions"})
 
-(defn- request-body
-  "The request: the canonical model + questions, plus `state` VERBATIM as the
-  host supplied it, then the §8 Gap 1 pipeline in §8 order —
+(defn- wire-body
+  "The request for the backend's wire, then the §8 Gap 1 pipeline in §8 order —
 
      base body -> :request-params merge -> :body-transform -> marshal
 
-  Marshalled through the SAME encoder as `canonical-request`, so the `model` +
-  `questions` region of the body is byte-for-byte the region the claim covers."
-  [c state questions]
-  (let [base   {:model (:model c) :questions questions :state state}
+  systemone: `{model, questions, state}` + `assets` when the state carried
+  images — with no images this is byte-for-byte the body before backends
+  existed. cloudflare: `{model, input:{questions, state, images?}}`, images as
+  data URLs in collection order. Marshalled through the SAME encoder as
+  `canonical-request`, so the `model` + `questions` region is the claimed one."
+  [c prepared questions]
+  (let [{:keys [state images assets]} prepared
+        base   (if (= "cloudflare" (:wire c))
+                 {:model (:model c)
+                  :input (cond-> {:questions questions :state state}
+                           (seq images)
+                           (assoc :images (mapv (fn [im]
+                                                  (str "data:image/" (:format im)
+                                                       ";base64," (:data im)))
+                                                images)))}
+                 (cond-> {:model (:model c) :questions questions :state state}
+                   (seq assets) (assoc :assets assets)))
         params (apply dissoc (:request-params c) forbidden-request-params)
         merged (if (seq params) (merge base params) base)]
     (json/write-str (if-let [f (:body-transform c)] (f merged) merged))))
@@ -540,13 +743,14 @@
   "Built at CALL TIME and never logged, returned or put in an error. The
   credential is read from the NAMED environment variable and `${ENV_VAR}` in a
   header value expands here — both are use-only values that must not reach an
-  agent's context, a log line or a metric."
-  [c]
+  agent's context, a log line or a metric. `extra` (the images header) goes in
+  BEFORE the host's headers, so a host header wins."
+  [c extra]
   (let [credential (env/get-env (:api-key-env c))]
     (cond-> (reduce (fn [m e]
                       (assoc m (str/lower-case (str (if (keyword? (key e)) (name (key e)) (key e))))
                              (env/expand (str (val e)))))
-                    {"content-type" "application/json"}
+                    (merge {"content-type" "application/json"} extra)
                     (:headers c))
       (seq (str credential)) (assoc "authorization" (str "Bearer " credential)))))
 
@@ -565,45 +769,229 @@
 (defn- post!
   "The one POST, with the §8 retry loop around it — `toolnexus.client/classify`
   and `toolnexus.client/retry-after-ms` are called, not reimplemented, so there
-  is exactly one retry policy in this library."
-  [c body]
-  (let [url     (str (str/replace (str (:base-url c)) #"/+$" "") "/systemone")
-        headers (request-headers c)
-        budget  (or (:retries c) 2)
-        base-ms (or (:retry-base-ms c) 500)]
-    (loop [attempt 0]
-      (let [res     (if-let [f (:http-client c)]
-                      (f url headers body)
-                      (khttp/request {:method :post :url url :headers headers
-                                      :body body :timeout-ms (:timeout-ms c)}))
-            failed? (khttp/failed? res)
-            status  (:status res)
-            ok?     (and (not failed?) status (<= 200 status) (< status 300))]
-        (if ok?
-          (:body res)
-          (let [info    {:error      (if failed? (:error res) status)
-                         :status     status
-                         :attempt    attempt
-                         :retryable? (boolean (or failed?
-                                                  (= 408 status)
-                                                  (client/retryable-status?
-                                                   status (:retryable-statuses c))))}
-                verdict (client/classify c info)]
-            (if (and (= :retry verdict) (< attempt budget))
-              (do (ktime/sleep! (or (client/retry-after-ms res)
-                                    (* base-ms (bit-shift-left 1 attempt))))
-                  (recur (inc attempt)))
-              (throw (if failed?
-                       (ex-info (str "classifier: POST " url " transport " (name (:error res)))
-                                {:url url :error (:error res)})
-                       ;; The status and the ENDPOINT, and — on an auth status —
-                       ;; nothing else.
-                       ;; The typed error carries the FULL redacted body; only the
-                       ;; message is capped (addendum A5).
-                       (ex-info (str "classifier: POST " url " HTTP " status
-                                     (safe-cause status (:body res)))
-                                {:toolnexus/error :provider :url url :status status
-                                 :body (client/safe-body status (:body res))}))))))))))
+  is exactly one retry policy in this library.
+
+  `endpoint` is what errors NAME: the configured base, `${ENV}` UNEXPANDED, so
+  an account id in a templated URL never reaches an error. `url` is what is
+  dialled, expanded here at call time (unset => empty)."
+  ([c body] (post! c body nil))
+  ([c body extra-headers]
+   (let [base     (str/replace (str (:base-url c)) #"/+$" "")
+         endpoint (if (= "cloudflare" (:wire c)) base (str base "/systemone"))
+         url      (if (str/includes? endpoint "${") (env/expand endpoint) endpoint)
+         headers  (request-headers c extra-headers)
+         budget   (or (:retries c) 2)
+         base-ms  (or (:retry-base-ms c) 500)]
+     (loop [attempt 0]
+       (let [res     (if-let [f (:http-client c)]
+                       (f url headers body)
+                       (khttp/request {:method :post :url url :headers headers
+                                       :body body :timeout-ms (:timeout-ms c)}))
+             failed? (khttp/failed? res)
+             status  (:status res)
+             ok?     (and (not failed?) status (<= 200 status) (< status 300))]
+         (if ok?
+           (:body res)
+           (let [info    {:error      (if failed? (:error res) status)
+                          :status     status
+                          :attempt    attempt
+                          :retryable? (boolean (or failed?
+                                                   (= 408 status)
+                                                   (client/retryable-status?
+                                                    status (:retryable-statuses c))))}
+                 verdict (client/classify c info)]
+             (if (and (= :retry verdict) (< attempt budget))
+               (do (ktime/sleep! (or (client/retry-after-ms res)
+                                     (* base-ms (bit-shift-left 1 attempt))))
+                   (recur (inc attempt)))
+               (throw (if failed?
+                        (ex-info (str "classifier: POST " endpoint " transport " (name (:error res)))
+                                 {:url endpoint :error (:error res)})
+                        ;; The status and the ENDPOINT, and — on an auth status —
+                        ;; nothing else.
+                        ;; The typed error carries the FULL redacted body; only the
+                        ;; message is capped (addendum A5).
+                        (ex-info (str "classifier: POST " endpoint " HTTP " status
+                                      (safe-cause status (:body res)))
+                                 {:toolnexus/error :provider :url endpoint :status status
+                                  :body (client/safe-body status (:body res))})))))))))))
+
+;; ---------------------------------------------------------------------------
+;; ClassifierUnsupported — raised BEFORE the network, for the table only
+;; ---------------------------------------------------------------------------
+
+(defn classifier-unsupported
+  "The typed `ClassifierUnsupported` error (§8B, PD-5): an ex-info whose data
+  carries `:toolnexus/error :classifier-unsupported` plus `:backend`, `:model`
+  and `:feature`. Message, exact: `classifier: <backend> (<model>) does not
+  support <feature>`."
+  [backend model feature]
+  (ex-info (str "classifier: " backend " (" model ") does not support " feature)
+           {:toolnexus/error :classifier-unsupported
+            :backend backend :model model :feature feature}))
+
+(defn unsupported?
+  "True when `e` is a `ClassifierUnsupported` error."
+  [e]
+  (= :classifier-unsupported (:toolnexus/error (ex-data e))))
+
+;; ---------------------------------------------------------------------------
+;; images — lifted out of the state into `assets` (systemone style only)
+;; ---------------------------------------------------------------------------
+
+(defn- contains-part? [v]
+  (cond
+    (content/content-part? v) true
+    (map? v)        (boolean (some contains-part? (vals v)))
+    (sequential? v) (boolean (some contains-part? v))
+    :else           false))
+
+(defn- key-name [k]
+  (if (keyword? k)
+    (if-let [ns (namespace k)] (str ns "/" (name k)) (name k))
+    (str k)))
+
+(defn- lift-images
+  "The §8B lifting walk. Returns `{:state <to send> :images [{:ref :mime :data}]}`
+  with images in COLLECTION order. A state holding no content part comes back
+  VERBATIM (the same value), so a text-only state is byte-identical to before.
+
+  Depth-first, object keys in ASCII order, arrays in order. An image part with
+  inline data becomes a reference string — the enclosing key when unused, else
+  the smallest unused `image<n>` — a text part becomes its text, any other part
+  is an error."
+  [state]
+  (if-not (contains-part? state)
+    {:state state :images []}
+    (let [used   (atom #{})
+          images (atom [])
+          next!  (fn [] (loop [n 1]
+                          (let [nm (str "image" n)]
+                            (if (contains? @used nm) (recur (inc n)) nm))))
+          walk   (fn walk [v k]
+                   (cond
+                     (content/content-part? v)
+                     (let [t (:type v)]
+                       (cond
+                         (= "text" t) (:text v)
+                         (= "image" t)
+                         (do (when (nil? (:data v))
+                               (throw (ex-info (str "classifier: state: an image part needs inline "
+                                                    "data (a URL image cannot be sent)")
+                                               {:type t})))
+                             (let [ref (if (or (nil? k) (contains? @used k)) (next!) k)]
+                               (swap! used conj ref)
+                               (swap! images conj {:ref ref :mime (:mimeType v) :data (str (:data v))})
+                               ref))
+                         :else
+                         (throw (ex-info (str "classifier: state: " t " parts are not supported")
+                                         {:type t}))))
+
+                     (map? v)
+                     (reduce (fn [m kk] (assoc m kk (walk (get v kk) (key-name kk))))
+                             {}
+                             (sort-by key-name (keys v)))
+
+                     (sequential? v) (mapv (fn [e] (walk e nil)) v)
+                     :else v))
+          out    (walk state nil)]
+      {:state out :images @images})))
+
+(defn- byte-at [bs i] (bit-and (long (nth bs i)) 255))
+
+(defn image-size
+  "`[width height]` read from a PNG IHDR or the first JPEG SOF marker of the
+  decoded bytes `bs` (a host byte array or a seq of byte values), or nil when
+  the bytes are not a readable header of `format` (\"png\" | \"jpeg\")."
+  [format bs]
+  (let [n    (count bs)
+        b    (fn [i] (byte-at bs i))
+        be16 (fn [i] (+ (* 256 (b i)) (b (inc i))))
+        be32 (fn [i] (+ (* 16777216 (b i)) (* 65536 (b (+ i 1))) (* 256 (b (+ i 2))) (b (+ i 3))))]
+    (if (= "png" format)
+      (when (and (>= n 24)
+                 (= [0x89 0x50 0x4E 0x47 0x0D 0x0A 0x1A 0x0A] (mapv b (range 8)))
+                 (= [0x49 0x48 0x44 0x52] (mapv b (range 12 16))))
+        [(be32 16) (be32 20)])
+      (when (and (>= n 4) (= 0xFF (b 0)) (= 0xD8 (b 1)))
+        (loop [i 2]
+          (when (< (+ i 3) n)
+            (when (= 0xFF (b i))
+              (let [m (b (inc i))]
+                (cond
+                  (= 0xFF m) (recur (inc i))
+                  (and (<= 0xC0 m 0xCF) (not (contains? #{0xC4 0xC8 0xCC} m)))
+                  (when (< (+ i 8) n) [(be16 (+ i 7)) (be16 (+ i 5))])
+                  :else (recur (+ i 2 (be16 (+ i 2)))))))))))))
+
+(def ^:private image-formats
+  {"image/png" "png" "image/jpeg" "jpeg" "image/jpg" "jpeg"})
+
+(defn- check-images
+  "Format, per-image and per-request limits, in collection order, BEFORE the
+  network. Errors start `classifier: image \"<ref>\": `. Returns the images with
+  `:format` normalised. Never resized, never described as text."
+  [images]
+  (let [out (mapv (fn [im]
+                    (let [ref    (:ref im)
+                          fail   (fn [msg] (throw (ex-info (str "classifier: image " (pr-str ref) ": " msg)
+                                                           {:image ref})))
+                          format (get image-formats (:mime im))
+                          _      (when-not format
+                                   (fail (str "type " (pr-str (str (:mime im)))
+                                              " is not supported (PNG or JPEG only)")))
+                          bs     (try (codec/decode-bytes (:data im))
+                                      (catch Throwable _ (fail "data is not base64")))
+                          size   (count bs)
+                          _      (when (> size image-max-bytes)
+                                   (fail (str size " bytes, over 16 MiB")))
+                          [w h]  (or (image-size format bs)
+                                     (fail (str "not a readable " (str/upper-case format))))]
+                      (when (or (< w image-min-side) (> w image-max-side)
+                                (< h image-min-side) (> h image-max-side))
+                        (fail (str w "x" h "; each side must be " image-min-side ".."
+                                   image-max-side " px")))
+                      (assoc im :format format :bytes size)))
+                  images)
+        total (reduce + 0 (map :bytes out))]
+    (when (> total request-image-max-bytes)
+      (throw (ex-info (str "classifier: image " (pr-str (:ref (peek out)))
+                           ": request images total " total " bytes, over 32 MiB")
+                      {:image (:ref (peek out))})))
+    out))
+
+(defn- prepare
+  "Lift, then (in this order) unsupported, then limits — all before the network."
+  [c state]
+  (let [{sent :state images :images} (lift-images state)]
+    (when (and (seq images) (not (:images (:supports c))))
+      (throw (classifier-unsupported (:backend c) (:model c) "images")))
+    (let [images (check-images images)]
+      {:state  sent
+       :images images
+       :assets (when (seq images)
+                 (reduce (fn [m im] (assoc m (:ref im) {"type" "image" "format" (:format im)
+                                                       "data_base64" (:data im)}))
+                         {} images))})))
+
+;; ---------------------------------------------------------------------------
+;; cloudflare envelope
+;; ---------------------------------------------------------------------------
+
+(defn- unwrap-cloudflare
+  "The System One reply inside a Cloudflare `/ai/run` envelope, as parsed JSON.
+  The envelope's own error list is NEVER echoed: it can carry an account id."
+  [body]
+  (let [env (try (json/read-str (str body) {:key-fn str}) (catch Throwable _ nil))]
+    (when-not (and (map? env) (true? (get env "success")))
+      (throw (ex-info "classifier: cloudflare: envelope not successful" {:wire "cloudflare"})))
+    (let [res (get env "result")]
+      (if (and (map? res) (string? (get res "state")))
+        (if (= "Completed" (get res "state"))
+          (get res "result")
+          (throw (ex-info (str "classifier: cloudflare: run state " (pr-str (get res "state")))
+                          {:wire "cloudflare"})))
+        res))))
 
 (defn- evaluate-static
   "Recorded decisions. THIS IS WHAT CI RUNS: no network, no credential. It is not
@@ -661,8 +1049,249 @@
                      :output-tokens (get-in r [:usage :completion-tokens])}))))
 
 ;; ---------------------------------------------------------------------------
+;; cache — opt-in, per REQUEST, keyed on the SERVED model
+;; ---------------------------------------------------------------------------
+
+(defn- wire-questions-of
+  "Caller key -> question wire, keys as strings (what the body carries)."
+  [questions]
+  (reduce (fn [m e] (assoc m (str (key e)) (val e))) {} questions))
+
+(defn model-cache-key
+  "§8B modelKey = sha256hex(canon({endpoint, kind:\"model\", model})). Its
+  value is the model the endpoint SERVED for this requested model last time."
+  [endpoint model]
+  (sha256-hex (json/write-str {"endpoint" endpoint "kind" "model" "model" model})))
+
+(defn decision-cache-key
+  "§8B decisionKey = sha256hex(canon({assets?, endpoint, kind:\"decision\",
+  model:<served>, questions, state})). `endpoint` is the configured base URL,
+  `${ENV}` unexpanded; `state` is the state AS SENT (after lifting); an empty or
+  nil `assets` omits the member."
+  [endpoint served state assets questions]
+  (sha256-hex (json/write-str (cond-> {"endpoint" endpoint "kind" "decision" "model" served
+                                       "questions" (wire-questions-of questions) "state" state}
+                                (seq assets) (assoc "assets" assets)))))
+
+(defn memory-cache
+  "An in-process `{:get :set}` cache, safe for concurrent use. `ttl-ms` 0 => no
+  expiry; `max` 0 => unbounded; over `max` the OLDEST-INSERTED entries go first.
+  toolnexus persists nothing itself — a host persists by implementing
+  `:get`/`:set`."
+  ([] (memory-cache 0 0))
+  ([ttl-ms max]
+   (let [state (atom {:seq 0 :m {}})]
+     {:get (fn [k]
+             (let [e (get-in @state [:m k])]
+               (cond
+                 (nil? e) nil
+                 (and (pos? ttl-ms) (> (- (ktime/now-ms) (:at e)) ttl-ms))
+                 (do (swap! state update :m dissoc k) nil)
+                 :else (:v e))))
+      :set (fn [k v]
+             (swap! state
+                    (fn [{n :seq m :m}]
+                      (let [n (inc n)
+                            m (assoc m k {:v (str v) :at (ktime/now-ms) :seq n})
+                            m (if (and (pos? max) (> (count m) max))
+                                (let [drop (take (- (count m) max)
+                                                 (sort-by (fn [k] (:seq (get m k))) (keys m)))]
+                                  (apply dissoc m drop))
+                                m)]
+                        {:seq n :m m})))
+             nil)})))
+
+;; ---------------------------------------------------------------------------
+;; V1 — validate-decision, fail closed, first failure wins
+;; ---------------------------------------------------------------------------
+
+(defn- in01? [p] (and (number? p) (== p p) (<= 0 p) (<= p 1)))
+
+(defn validate-decision
+  "nil when `decision` answers EXACTLY `questions` within their schema, else an
+  ex-info whose message starts `classifier: invalid decision: ` and names the
+  key as `\"<key>\"`. Checks, first failure wins: a missing answer (question
+  keys ASCII), an unexpected answer (ASCII), then per key the type, noul in
+  [0,1], choice offered / probability keys offered / each in [0,1] / a
+  non-empty map sums to 1 ± 0.02 / confidence in [0,1], score in
+  [0, levels-1] with the same probability rules over level indices. A raw
+  question only needs an answer of its own type."
+  [questions decision]
+  (let [qs      (wire-questions-of questions)
+        answers (or (:answers decision) {})
+        qkeys   (sort (keys qs))
+        bad     (fn [msg] (ex-info (str "classifier: invalid decision: " msg)
+                                   {:toolnexus/error :invalid-decision}))
+        dist    (fn [k probs offered?]
+                  (or (some (fn [o]
+                              (let [p (get probs o)]
+                                (cond
+                                  (not (offered? o))
+                                  (bad (str "answer " (pr-str k) ": probability for " (pr-str o)
+                                            ", which was not offered"))
+                                  (not (in01? p))
+                                  (bad (str "answer " (pr-str k) ": probability " p " outside [0,1]")))))
+                            (sort (map str (keys probs))))
+                      (let [sum (reduce + 0.0 (map double (vals probs)))]
+                        (when (and (seq probs) (> (abs* (- sum 1.0)) 0.02))
+                          (bad (str "answer " (pr-str k) ": probabilities sum to " sum))))))]
+    (or (some (fn [k] (when-not (contains? answers k) (bad (str "no answer " (pr-str k))))) qkeys)
+        (some (fn [k] (bad (str "unexpected answer " (pr-str k))))
+              (sort (remove (fn [k] (contains? qs k)) (map str (keys answers)))))
+        (some (fn [k]
+                (let [q (get qs k) a (get answers k) qt (:type q)]
+                  (cond
+                    (not= (:type a) qt)
+                    (bad (str "answer " (pr-str k) " is a " (:type a) " answer, not " qt))
+
+                    (= "noul" qt)
+                    (when-not (in01? (:noul a))
+                      (bad (str "answer " (pr-str k) ": noul " (:noul a) " outside [0,1]")))
+
+                    (= "choice" qt)
+                    (let [offered (set (map option-id (keys (:criteria q))))]
+                      (cond
+                        (not (contains? offered (:choice a)))
+                        (bad (str "answer " (pr-str k) ": choice " (pr-str (:choice a)) " was not offered"))
+                        :else
+                        (or (dist k (:probabilities a) offered)
+                            (when-not (in01? (:confidence a))
+                              (bad (str "answer " (pr-str k) ": confidence " (:confidence a)
+                                        " outside [0,1]"))))))
+
+                    (= "score" qt)
+                    (let [n       (count (:criteria q))
+                          sc      (:score a)
+                          offered (set (map str (range n)))]
+                      (if (not (and (number? sc) (== sc sc) (<= 0 sc) (<= sc (dec n))))
+                        (bad (str "answer " (pr-str k) ": score " sc " outside [0," (dec n) "]"))
+                        (or (dist k (:probabilities a) offered)
+                            (when-not (in01? (:confidence a))
+                              (bad (str "answer " (pr-str k) ": confidence " (:confidence a)
+                                        " outside [0,1]"))))))
+
+                    :else nil)))
+              qkeys))))
+
+;; ---------------------------------------------------------------------------
+;; T1 thresholds and C1 chunking — pure helpers
+;; ---------------------------------------------------------------------------
+
+(def default-thresholds
+  "jevx's INCLUSIVE cut-points (T1): 0.8 / 0.2 / 0.6. They sit ALONGSIDE the
+  judge layer's exclusive `default-bands`, which stay the default of `ask` /
+  `gate`."
+  {:yes 0.8 :no 0.2 :min-confidence 0.6})
+
+(defn threshold-band
+  "\"yes\" | \"no\" | \"uncertain\" for one answer, INCLUSIVE: noul `p >= yes`
+  => yes, else `p <= no` => no; choice/score `confidence >= min-confidence` =>
+  yes. No near-uniform demotion (that is the bands' rule). A raw answer is
+  uncertain. `thresholds` merges over `default-thresholds`."
+  ([answer] (threshold-band answer nil))
+  ([answer thresholds]
+   (let [{:keys [yes no min-confidence]} (merge default-thresholds thresholds)
+         t (:type answer)]
+     (cond
+       (= "noul" t) (let [p (:noul answer)]
+                      (cond (>= p yes) "yes" (<= p no) "no" :else "uncertain"))
+       (contains? #{"choice" "score"} t)
+       (if (>= (:confidence answer) min-confidence) "yes" "uncertain")
+       :else "uncertain"))))
+
+(defn chunk-questions
+  "Split a question map into consecutive chunks of `size`, keys in ASCII order.
+  A helper, NOT automatic: joint calibration across a split is unproven, so the
+  host decides to split and merges. `size < 1` is an error."
+  [questions size]
+  (when (or (not (integer? size)) (< size 1))
+    (throw (ex-info (str "classifier: chunk size must be at least 1, got " size) {:size size})))
+  (->> (sort-by first (map (fn [e] [(str (key e)) (val e)]) questions))
+       (partition-all size)
+       (mapv (fn [chunk] (into {} chunk)))))
+
+;; ---------------------------------------------------------------------------
 ;; evaluate — the whole contract, one verb
 ;; ---------------------------------------------------------------------------
+
+(defn- evaluate-wire
+  "The systemone style on every backend: lift, check, cache, post, decode.
+  `validate?` fails closed on V1; either way only a V1-valid reply is cached."
+  [c state questions validate?]
+  (let [prepared (prepare c state)
+        cache    (:cache c)
+        endpoint (:base-url c)
+        mkey     (when cache (model-cache-key endpoint (:model c)))
+        hit      (when cache
+                   (when-let [served ((:get cache) mkey)]
+                     (when-let [raw ((:get cache) (decision-cache-key endpoint served (:state prepared)
+                                                                      (:assets prepared) questions))]
+                       ;; A corrupt or invalid entry is a MISS, never an error.
+                       (let [d (try (parse-decision (json/read-str (str raw) {:key-fn str}))
+                                    (catch Throwable _ nil))]
+                         (when (and d (nil? (validate-decision questions d)))
+                           (assoc d :cached true))))))]
+    (or hit
+        (let [extra (when (and (seq (:images prepared)) (:images-header? c))
+                      {(str/lower-case images-header) "true"})
+              body  (post! c (wire-body c prepared questions) extra)
+              [parsed raw] (if (= "cloudflare" (:wire c))
+                             (let [r (unwrap-cloudflare body)] [r (json/write-str r)])
+                             [(json/read-str body {:key-fn str}) body])
+              d     (parse-decision parsed)
+              verr  (validate-decision questions d)]
+          (when (and validate? verr) (throw verr))
+          (when (and cache (nil? verr))
+            (let [served (or (:model d) (:model c))]
+              ((:set cache) mkey served)
+              ((:set cache) (decision-cache-key endpoint served (:state prepared)
+                                                (:assets prepared) questions)
+                            raw)))
+          d))))
+
+(defn- evaluate*
+  "The one path. `validate?` = fail closed on V1 (the `state` builders); plain
+  `evaluate` keeps its old behaviour."
+  [c state questions validate?]
+  (let [t0    (ktime/now-ms)
+        n     (count questions)
+        qhash (try (sha256-hex (canonical-request (:model c) questions))
+                   (catch Throwable _ ""))
+        fail! (fn [e]
+                (emit! c {:event metric-evaluate :model (:model c) :status "error"
+                          :ms (- (ktime/now-ms) t0) :error (ex-message e)
+                          :questions n :questions_hash qhash :cached false})
+                (throw e))]
+    (when (empty? questions)
+      (fail! (ex-info "classifier: no questions to evaluate" {})))
+    ;; Limits are enforced CLIENT-SIDE, before the request. Keys are walked in
+    ;; sorted order so the same malformed set always names the same key first.
+    (doseq [[key q] (sort-by first (map (fn [e] [(str (key e)) (val e)]) questions))]
+      (try (validate-question key q)
+           (catch Throwable e (fail! e))))
+    ;; Detection, never repair: the request goes out BYTE-UNCHANGED.
+    (report-degenerate! c questions)
+    (let [d (try
+              (let [style (:style c)
+                    d     (cond
+                            (= "custom" style) ((:evaluate c) state questions)
+                            (= "static" style) (evaluate-static c state questions)
+                            (= "llm" style)    (evaluate-llm c state questions)
+                            :else              (evaluate-wire c state questions validate?))]
+                (when (and validate? (not= "systemone" style))
+                  (when-let [e (validate-decision questions d)] (throw e)))
+                d)
+              (catch Throwable e (fail! e)))]
+      (emit! c {:event             metric-evaluate
+                :model             (:model d)
+                :status            "ok"
+                :ms                (- (ktime/now-ms) t0)
+                :prompt_tokens     (get-in d [:usage :input-tokens])
+                :completion_tokens (get-in d [:usage :output-tokens])
+                :questions         n
+                :questions_hash    qhash
+                :cached            (true? (:cached d))})
+      d)))
 
 (defn evaluate
   "A state plus typed questions in, a decision out.
@@ -675,38 +1304,14 @@
 
   Questions are INDEPENDENT — one answer is never context for another. A backend
   that cannot guarantee that reports `:calibrated false`, which carries both
-  caveats."
+  caveats.
+
+  On style systemone, content parts in the state are lifted into `assets`
+  (§8B images). A reply that fails `validate-decision` is still RETURNED here
+  (unchanged behaviour) but never cached; `evaluate-state` fails closed on it.
+  A decision served from `:cache` carries `:cached true`."
   [c state questions]
-  (let [t0 (ktime/now-ms)
-        fail! (fn [e]
-                (emit! c {:event metric-evaluate :model (:model c) :status "error"
-                          :ms (- (ktime/now-ms) t0) :error (ex-message e)})
-                (throw e))]
-    (when (empty? questions)
-      (fail! (ex-info "classifier: no questions to evaluate" {})))
-    ;; Limits are enforced CLIENT-SIDE, before the request. Keys are walked in
-    ;; sorted order so the same malformed set always names the same key first.
-    (doseq [[key q] (sort-by first (map (fn [e] [(str (key e)) (val e)]) questions))]
-      (try (validate-question key q)
-           (catch Throwable e (fail! e))))
-    ;; Detection, never repair: the request goes out BYTE-UNCHANGED.
-    (report-degenerate! c questions)
-    (let [d (try
-              (let [style (:style c)]
-                (cond
-                  (= "custom" style) ((:evaluate c) state questions)
-                  (= "static" style) (evaluate-static c state questions)
-                  (= "llm" style)    (evaluate-llm c state questions)
-                  :else (parse-decision (json/read-str (post! c (request-body c state questions))
-                                                       {:key-fn str}))))
-              (catch Throwable e (fail! e)))]
-      (emit! c {:event             metric-evaluate
-                :model             (:model d)
-                :status            "ok"
-                :ms                (- (ktime/now-ms) t0)
-                :prompt_tokens     (get-in d [:usage :input-tokens])
-                :completion_tokens (get-in d [:usage :output-tokens])})
-      d)))
+  (evaluate* c state questions false))
 
 ;; ---------------------------------------------------------------------------
 ;; static in one line, and the batch
@@ -767,3 +1372,60 @@
          (throw (ex-info (str "classifier: evaluateBatch: state " i " failed: " (ex-message e))
                          {:index i} e))))
      (mapv :value outcomes))))
+
+;; ---------------------------------------------------------------------------
+;; value builders — state(v).evaluate(qs…) and states(…).evaluate(qs…)
+;; ---------------------------------------------------------------------------
+
+(defn- named->questions
+  "An ordered list of NAMED questions (`toolnexus.judge/noul` …, or any question
+  map with a `:name`) as the §8B `{name -> question}` map. A duplicate name
+  throws naming it, before any request."
+  [qs]
+  (reduce (fn [m q]
+            (let [n (:name q)]
+              (when (contains? m n)
+                (throw (ex-info (str "duplicate question name \"" n "\"") {:name n})))
+              (assoc m n (dissoc q :name))))
+          {} qs))
+
+(defn state
+  "Bind a state to a classifier. A VALUE, not a session: nothing is sent or
+  stored until `evaluate-state`."
+  [c v]
+  {::classifier c ::state v})
+
+(defn states
+  "Bind a batch of states. See `evaluate-states`."
+  [c vs]
+  {::classifier c ::states (vec vs)})
+
+(defn evaluate-state
+  "`state(v).evaluate(questions…)`: one request with the NAMED questions `qs`,
+  and the reply validated FAIL-CLOSED (`validate-decision`) — an invalid reply
+  is an error, reported on the metric event."
+  [bound & qs]
+  (evaluate* (::classifier bound) (::state bound) (named->questions qs) true))
+
+(defn evaluate-states
+  "`states(…).evaluate(questions…)`: `evaluate-state` per state, at most 16 in
+  flight, results IN STATE ORDER, one per state: `{:decision d}` or
+  `{:error e}`. One state's failure NEVER fails the batch. A question-set error
+  (duplicate name) throws once, before any request. No states => `[]`.
+  `evaluate-batch` (fail-closed) is unchanged."
+  [bound & qs]
+  (let [c         (::classifier bound)
+        questions (named->questions qs)]
+    (into []
+          (mapcat
+           (fn [wave]
+             (->> wave
+                  (mapv (fn [st]
+                          (let [p (promise)]
+                            (proc/run-async!
+                             (fn []
+                               (deliver p (try {:decision (evaluate* c st questions true)}
+                                               (catch Throwable e {:error e})))))
+                            p)))
+                  (mapv deref))))
+          (partition-all default-batch-concurrency (::states bound)))))
