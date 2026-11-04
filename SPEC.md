@@ -415,6 +415,8 @@ Opt-in per server: `"toolSearch": true` (+ optional `"description": "<what this 
   `unknown tool "<name>" on <server>`.
 - **`search_tools` result text** is the JSON array of hits (`[{name, description, inputSchema, server}, …]`,
   best first, at most `limit`, default 5), serialised compactly with keys in exactly that order (`name`, `description`, `inputSchema`, `server`; the inputSchema object as the server sent it); no match ⇒ `[]`.
+- The per-server `tools` filter and the disable lists apply **before** search: `search_tools` ranks, and
+  `call_tool` accepts, only tools the filter allows (a filtered-out name is `unknown tool "<name>" on <server>`).
 - Direct server-tool names are hidden in this mode. Search is client-side (the spec has no search method):
   `tools/list` is fetched once and cached for its `ttlMs`.
 
