@@ -497,7 +497,7 @@ async def test_d4_the_answer_reaches_the_tool_itself():
 def test_d5_backend_preset_sets_three_fields_as_a_unit():
     c = create_classifier(backend="openrouter")
     assert c.base_url == "https://openrouter.ai/api/v1"
-    assert c.model == "typesafe/jev-1.13"
+    assert c.model == "typesafe/jev-1.14"
     assert c.api_key_env == "OPENROUTER_API_KEY"
     d = create_classifier(backend="typesafe")
     assert d.base_url == "https://api.typesafe.ai/v1"
@@ -507,7 +507,7 @@ def test_d5_backend_preset_sets_three_fields_as_a_unit():
 def test_d5_the_known_mismatch_fails_at_construction():
     with pytest.raises(ClassifierError) as e:
         create_classifier(base_url="https://openrouter.ai/api/v1", model="jev-latest")
-    assert "typesafe/jev-1.13" in str(e.value)
+    assert "typesafe/jev-1.14" in str(e.value)
 
 
 def test_d5_two_status_vocabularies_are_both_named():
