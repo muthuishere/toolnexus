@@ -408,6 +408,11 @@ Opt-in per server: `"toolSearch": true` (+ optional `"description": "<what this 
   `{name, description, inputSchema, server}` where `server` is the configured `description`.
 - `call_tool` — description `"Run a tool found with search_tools."`, args `{name, arguments}`; the result
   is identical to a direct call (MRTR still routes through §10).
+- **Toolkit names:** the two tools follow normal naming, `sanitize(server)_search_tools` and
+  `sanitize(server)_call_tool` (source `mcp`, server = the configured server); `about` = the configured
+  `description`, else the server name. In `call_tool`, `name` is the **server's** tool name (as returned by
+  `search_tools`), not the prefixed toolkit name; an unknown name is a tool error
+  `unknown tool "<name>" on <server>`.
 - Direct server-tool names are hidden in this mode. Search is client-side (the spec has no search method):
   `tools/list` is fetched once and cached for its `ttlMs`.
 
