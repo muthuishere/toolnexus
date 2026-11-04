@@ -285,13 +285,20 @@ defmodule Toolnexus.Cli do
     generate = fn req -> __MODULE__.Server.generate(server, cfg, req) end
     inner = Client.in_process_transport(generate)
 
+    # Streaming degrades to a non-incremental stream (SPEC §8C, ADR 0037 d9):
+    # the turn runs as one complete reply, re-shaped as an SSE body, so the
+    # loop emits its tool events and the answer as a single text chunk, then done.
     transport = fn req ->
-      if (req.body || %{})["stream"] && __MODULE__.Server.decide(server) == :cli do
-        raise RuntimeError,
-              "cli: streaming is not supported by the one-shot CLI transport; use Run"
-      end
+      body = req.body || %{}
 
-      inner.(req)
+      if body["stream"] do
+        req
+        |> Map.put(:body, Map.drop(body, ["stream", "stream_options"]))
+        |> inner.()
+        |> to_sse()
+      else
+        inner.(req)
+      end
     end
 
     opts
@@ -313,6 +320,36 @@ defmodule Toolnexus.Cli do
     |> Client.create()
   end
 
+  defp to_sse({:ok, %{body: %{"choices" => [choice | _]} = b} = resp}) do
+    msg = choice["message"] || %{}
+
+    delta =
+      case msg["tool_calls"] do
+        [_ | _] = calls ->
+          %{
+            "tool_calls" =>
+              calls |> Enum.with_index() |> Enum.map(fn {c, i} -> Map.put(c, "index", i) end)
+          }
+
+        _ ->
+          %{"content" => msg["content"] || ""}
+      end
+
+    chunk = %{
+      "choices" => [%{"index" => 0, "delta" => delta, "finish_reason" => choice["finish_reason"]}],
+      "usage" => b["usage"]
+    }
+
+    {:ok,
+     %{
+       resp
+       | body: "data: " <> Jason.encode!(chunk) <> "\n\ndata: [DONE]\n\n",
+         headers: %{"content-type" => "text/event-stream"}
+     }}
+  end
+
+  defp to_sse(other), do: other
+
   # ---------------------------------------------------------------------------
   # The client surface.
   # ---------------------------------------------------------------------------
@@ -321,7 +358,7 @@ defmodule Toolnexus.Cli do
   def run(%__MODULE__{client: c}, prompt, toolkit \\ nil, opts \\ []),
     do: Client.run(c, prompt, toolkit, opts)
 
-  @doc "`Toolnexus.Client.stream/4` on the CLI client (refused by the one-shot transport)."
+  @doc "`Toolnexus.Client.stream/4` on the CLI client: a non-incremental stream (tool events, the whole answer as one text event, then done)."
   def stream(%__MODULE__{client: c}, prompt, toolkit \\ nil, opts \\ []),
     do: Client.stream(c, prompt, toolkit, opts)
 

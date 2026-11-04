@@ -103,7 +103,23 @@ defmodule FakeCli do
   defp scan(["--f", f | rest], _p, o, a), do: scan(rest, File.read!(f), o, a)
   defp scan(["--o", f | rest], p, _o, a), do: scan(rest, p, f, a)
   defp scan(["--argv" | _], p, o, _a), do: {p, o, true}
-  defp scan([_ | rest], p, o, a), do: scan(rest, p, o, a)
+  # Style-agnostic detection, so every built-in style's real argv works: the
+  # prompt as an arg, the {{file}} temp file, the {{out}} temp path (not yet created).
+  defp scan([x | rest], p, o, a) do
+    cond do
+      String.starts_with?(x, String.slice(Toolnexus.Cli.preamble(), 0, 20)) ->
+        scan(rest, x, o, a)
+
+      String.contains?(Path.basename(x), "toolnexus-cli-") ->
+        case File.read(x) do
+          {:ok, b} -> scan(rest, b, o, a)
+          _ -> scan(rest, p, x, a)
+        end
+
+      true ->
+        scan(rest, p, o, a)
+    end
+  end
 end
 
 defmodule FakeAgent do

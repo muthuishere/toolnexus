@@ -34,16 +34,6 @@ defmodule Toolnexus.Cli.Server do
     end
   end
 
-  @doc false
-  # Decide the transport (opening the ACP session when due) and report it.
-  def decide(server) do
-    case GenServer.call(server, :session, :infinity) do
-      {:acp, _} -> :acp
-      :cli -> :cli
-      {:error, _} -> :error
-    end
-  end
-
   @impl true
   def init({cfg, owner}) do
     Process.flag(:trap_exit, true)

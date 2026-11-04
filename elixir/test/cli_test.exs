@@ -332,14 +332,30 @@ defmodule Toolnexus.CliTest do
     assert res.text == String.trim(real)
   end
 
-  test "one-shot refuses streaming with the pinned message" do
-    cli = create!(fake_cli_opts("x"))
+  defp collect_stream(cli, tk) do
+    cli
+    |> Cli.stream("What is my badge number?", tk)
+    |> Enum.to_list()
+  end
 
-    assert_raise RuntimeError,
-                 ~r/cli: streaming is not supported by the one-shot CLI transport; use Run/,
-                 fn ->
-                   cli |> Cli.stream("hi") |> Enum.to_list()
-                 end
+  defp stream_text(events),
+    do: events |> Enum.filter(&(&1.type == "text")) |> Enum.map_join(& &1.delta)
+
+  test "one-shot streams non-incrementally: tool_call, tool_result, one text, done" do
+    tk = badge_toolkit()
+    cli = create!(fake_cli_opts("tool"))
+    events = collect_stream(cli, tk)
+    types = Enum.map(events, & &1.type)
+
+    refute "error" in types
+    assert List.last(types) == "done"
+    assert Enum.count(types, &(&1 == "text")) == 1
+    i_call = Enum.find_index(types, &(&1 == "tool_call"))
+    i_res = Enum.find_index(types, &(&1 == "tool_result"))
+    i_text = Enum.find_index(types, &(&1 == "text"))
+    assert i_call < i_res and i_res < i_text
+    assert stream_text(events) =~ "BADGE-77Q"
+    assert List.last(events).result.text =~ "BADGE-77Q"
   end
 
   test "transport is cli from construction when the style has no ACP launch" do
@@ -805,5 +821,60 @@ defmodule Toolnexus.CliTest do
 
     assert {:ok, "PERMITTED:" <> _} = Toolnexus.Acp.prompt(pid, "x")
     Toolnexus.Acp.close(pid)
+  end
+
+  test "ACP streams non-incrementally: the answer as text, then done" do
+    {opts, _rec} = fake_acp_opts(%{"FAKE_HTTP" => "1"})
+    cli = create!(opts)
+    events = collect_stream(cli, opts[:toolkit])
+    types = Enum.map(events, & &1.type)
+
+    refute "error" in types
+    assert List.last(types) == "done"
+    assert Cli.transport(cli) == "acp"
+    assert stream_text(events) =~ "BADGE-77Q"
+  end
+
+  test "stream every style over both transports without error" do
+    for st <- Cli.styles(), tr <- [:cli, :acp] do
+      tk = badge_toolkit()
+
+      opts = [
+        style: st,
+        command: wrapper!(),
+        transport: tr,
+        toolkit: tk,
+        env: %{"TN_FAKE_CLI" => "tool"}
+      ]
+
+      opts =
+        if st == :custom,
+          do: Keyword.merge(opts, args: [], prompt: "stdin", answer: "stdout"),
+          else: opts
+
+      opts =
+        if tr == :acp do
+          {fo, _} = fake_acp_opts(%{"FAKE_HTTP" => "1"})
+
+          Keyword.merge(opts,
+            env: fo[:env],
+            bridge_command: fo[:bridge_command],
+            acp_command: [wrapper!(), "acp"]
+          )
+        else
+          opts
+        end
+
+      cli = create!(opts)
+      events = collect_stream(cli, tk)
+      types = Enum.map(events, & &1.type)
+      label = "#{st}/#{tr}"
+
+      refute "error" in types, label
+      assert List.last(types) == "done", label
+      assert stream_text(events) =~ "BADGE-77Q", label
+      if tr == :cli, do: assert("tool_call" in types, label)
+      assert Cli.transport(cli) == Atom.to_string(tr), label
+    end
   end
 end
