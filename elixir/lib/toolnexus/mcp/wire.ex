@@ -80,7 +80,9 @@ defmodule Toolnexus.Mcp.Wire do
 
   @doc "A header value from a response (or header list); `\"\"` when absent."
   def header(%{headers: hs}, name), do: header(hs, name)
-  def header(hs, name) when is_list(hs), do: Enum.find_value(hs, "", fn {k, v} -> k == name && v end)
+
+  def header(hs, name) when is_list(hs),
+    do: Enum.find_value(hs, "", fn {k, v} -> k == name && v end)
 
   @doc "GET and decode a 200 JSON body."
   def get_json(http, url) do

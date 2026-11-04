@@ -34,8 +34,10 @@ defmodule Mcp2026T.Server do
   """
   def tool(%__MODULE__{} = s, name, description, handler) when is_function(handler, 2) do
     tools =
-      [%{"name" => name, "description" => description, "inputSchema" => %{"type" => "object"}}
-       | Enum.reject(s.tools, &(&1["name"] == name))]
+      [
+        %{"name" => name, "description" => description, "inputSchema" => %{"type" => "object"}}
+        | Enum.reject(s.tools, &(&1["name"] == name))
+      ]
 
     %{s | handlers: Map.put(s.handlers, name, handler), tools: Enum.sort_by(tools, & &1["name"])}
   end
@@ -54,7 +56,13 @@ defmodule Mcp2026T.Server do
       if Enum.all?(tools, &is_binary(&1["name"])) do
         root = Path.join(Path.dirname(path), fx["skillsDir"] || ".")
         skills = Skills.load_dir(root)
-        {:ok, %__MODULE__{info: fx["server"] || %{}, tools: Enum.sort_by(tools, & &1["name"]), skills: skills}}
+
+        {:ok,
+         %__MODULE__{
+           info: fx["server"] || %{},
+           tools: Enum.sort_by(tools, & &1["name"]),
+           skills: skills
+         }}
       else
         {:error, "fixture tool without a name"}
       end
@@ -67,8 +75,13 @@ defmodule Mcp2026T.Server do
   @doc false
   def start_plug(plug, port, path \\ "") do
     {:ok, pid} =
-      Bandit.start_link(plug: plug, ip: {127, 0, 0, 1}, port: port, startup_log: false,
-        thousand_island_options: [shutdown_timeout: 100])
+      Bandit.start_link(
+        plug: plug,
+        ip: {127, 0, 0, 1},
+        port: port,
+        startup_log: false,
+        thousand_island_options: [shutdown_timeout: 100]
+      )
 
     {:ok, {_, p}} = ThousandIsland.listener_info(pid)
     %{url: "http://127.0.0.1:#{p}" <> path, base: "http://127.0.0.1:#{p}", port: p, pid: pid}
@@ -104,19 +117,27 @@ defmodule Mcp2026T.Server do
     case read_body(conn, length: @max_body, read_length: @max_body) do
       {:ok, body, conn} ->
         case Jason.decode(body) do
-          {:ok, %{} = req} when not is_map_key(req, "params") or is_map(:erlang.map_get("params", req)) or
-                                   :erlang.map_get("params", req) == nil ->
+          {:ok, %{} = req}
+          when not is_map_key(req, "params") or is_map(:erlang.map_get("params", req)) or
+                 :erlang.map_get("params", req) == nil ->
             handle_req(conn, s, req)
-          _ -> write_rpc(conn, 400, nil, nil, %RpcError{code: -32700, message: "Parse error"})
+
+          _ ->
+            write_rpc(conn, 400, nil, nil, %RpcError{code: -32700, message: "Parse error"})
         end
 
       _ ->
-        write_rpc(conn, 413, nil, nil, %RpcError{code: -32600, message: "Request body too large or unreadable"})
+        write_rpc(conn, 413, nil, nil, %RpcError{
+          code: -32600,
+          message: "Request body too large or unreadable"
+        })
     end
   end
 
   defp handle_req(conn, _s, %{"id" => nil}), do: send_resp(conn, 202, "")
-  defp handle_req(conn, s, req) when not is_map_key(req, "id"), do: handle_req(conn, s, Map.put(req, "id", nil))
+
+  defp handle_req(conn, s, req) when not is_map_key(req, "id"),
+    do: handle_req(conn, s, Map.put(req, "id", nil))
 
   defp handle_req(conn, s, req) do
     method = if is_binary(req["method"]), do: req["method"], else: ""
@@ -159,19 +180,33 @@ defmodule Mcp2026T.Server do
     {got, ok} = decode_header(hdr(conn, "mcp-name"))
 
     cond do
-      hv == "" -> mismatch.("MCP-Protocol-Version header missing")
-      hm != method -> mismatch.("Mcp-Method header value '#{hm}' does not match body value '#{method}'")
-      named and (not ok or got != want) -> mismatch.("Mcp-Name header value '#{got}' does not match body value '#{want}'")
-      mv != hv -> mismatch.("MCP-Protocol-Version header value '#{hv}' does not match _meta value '#{mv}'")
-      mv != Toolnexus.Mcp.Wire.protocol_version() -> {400, unsupported(mv)}
-      true -> :ok
+      hv == "" ->
+        mismatch.("MCP-Protocol-Version header missing")
+
+      hm != method ->
+        mismatch.("Mcp-Method header value '#{hm}' does not match body value '#{method}'")
+
+      named and (not ok or got != want) ->
+        mismatch.("Mcp-Name header value '#{got}' does not match body value '#{want}'")
+
+      mv != hv ->
+        mismatch.("MCP-Protocol-Version header value '#{hv}' does not match _meta value '#{mv}'")
+
+      mv != Toolnexus.Mcp.Wire.protocol_version() ->
+        {400, unsupported(mv)}
+
+      true ->
+        :ok
     end
   end
 
   @doc false
   def unsupported(mv),
-    do: %RpcError{code: -32022, message: "Unsupported protocol version",
-      data: %{"supported" => [Toolnexus.Mcp.Wire.protocol_version()], "requested" => mv}}
+    do: %RpcError{
+      code: -32022,
+      message: "Unsupported protocol version",
+      data: %{"supported" => [Toolnexus.Mcp.Wire.protocol_version()], "requested" => mv}
+    }
 
   defp decode_header("=?base64?" <> rest = v) when byte_size(v) >= 11 do
     if String.ends_with?(rest, "?=") do
@@ -192,28 +227,58 @@ defmodule Mcp2026T.Server do
 
     case method do
       "server/discover" ->
-        {:ok, %{"resultType" => "complete", "supportedVersions" => [pv],
-          "capabilities" => %{"tools" => %{}, "resources" => %{}, "extensions" => %{Toolnexus.Mcp.Wire.skills_ext() => %{}}},
-          "_meta" => server_info(s), "ttlMs" => 3_600_000, "cacheScope" => "public"}}
+        {:ok,
+         %{
+           "resultType" => "complete",
+           "supportedVersions" => [pv],
+           "capabilities" => %{
+             "tools" => %{},
+             "resources" => %{},
+             "extensions" => %{Toolnexus.Mcp.Wire.skills_ext() => %{}}
+           },
+           "_meta" => server_info(s),
+           "ttlMs" => 3_600_000,
+           "cacheScope" => "public"
+         }}
 
       "tools/list" ->
-        {:ok, %{"resultType" => "complete", "tools" => s.tools, "ttlMs" => 60_000, "cacheScope" => "public",
-          "_meta" => server_info(s)}}
+        {:ok,
+         %{
+           "resultType" => "complete",
+           "tools" => s.tools,
+           "ttlMs" => 60_000,
+           "cacheScope" => "public",
+           "_meta" => server_info(s)
+         }}
 
       "tools/call" ->
         call_tool(s, ctx, p)
 
       "skills/list" ->
-        {:ok, %{"resultType" => "complete", "skills" => Enum.map(s.skills, &Skills.entry/1), "ttlMs" => 60_000,
-          "cacheScope" => "public", "_meta" => server_info(s)}}
+        {:ok,
+         %{
+           "resultType" => "complete",
+           "skills" => Enum.map(s.skills, &Skills.entry/1),
+           "ttlMs" => 60_000,
+           "cacheScope" => "public",
+           "_meta" => server_info(s)
+         }}
 
       "skills/get" ->
         uri = str(p["uri"])
 
         with {:ok, _, _} <- uri_ok(uri, "Invalid skill URI: ") do
           case Enum.find(s.skills, &(&1.uri == uri)) do
-            nil -> {:error, invalid("Unknown skill: " <> uri)}
-            sk -> {:ok, %{"resultType" => "complete", "skill" => Skills.entry(sk), "_meta" => server_info(s)}}
+            nil ->
+              {:error, invalid("Unknown skill: " <> uri)}
+
+            sk ->
+              {:ok,
+               %{
+                 "resultType" => "complete",
+                 "skill" => Skills.entry(sk),
+                 "_meta" => server_info(s)
+               }}
           end
         end
 
@@ -228,8 +293,14 @@ defmodule Mcp2026T.Server do
             {_, data} ->
               mime = if String.ends_with?(uri, ".md"), do: "text/markdown", else: "text/plain"
 
-              {:ok, %{"resultType" => "complete", "contents" => [%{"uri" => uri, "mimeType" => mime, "text" => data}],
-                "ttlMs" => 60_000, "cacheScope" => "public", "_meta" => server_info(s)}}
+              {:ok,
+               %{
+                 "resultType" => "complete",
+                 "contents" => [%{"uri" => uri, "mimeType" => mime, "text" => data}],
+                 "ttlMs" => 60_000,
+                 "cacheScope" => "public",
+                 "_meta" => server_info(s)
+               }}
           end
         end
 
@@ -260,21 +331,39 @@ defmodule Mcp2026T.Server do
   end
 
   defp tool_result({:error, e}),
-    do: %{"resultType" => "complete", "content" => [%{"type" => "text", "text" => to_string(e)}], "isError" => true}
+    do: %{
+      "resultType" => "complete",
+      "content" => [%{"type" => "text", "text" => to_string(e)}],
+      "isError" => true
+    }
 
   defp tool_result(t) when is_binary(t),
-    do: %{"resultType" => "complete", "content" => [%{"type" => "text", "text" => t}], "isError" => false}
+    do: %{
+      "resultType" => "complete",
+      "content" => [%{"type" => "text", "text" => t}],
+      "isError" => false
+    }
 
   defp tool_result(%{"content" => _} = r), do: Map.put_new(r, "resultType", "complete")
 
   defp tool_result(v),
-    do: %{"resultType" => "complete", "content" => [%{"type" => "text", "text" => Jason.encode!(v)}],
-      "structuredContent" => v, "isError" => false}
+    do: %{
+      "resultType" => "complete",
+      "content" => [%{"type" => "text", "text" => Jason.encode!(v)}],
+      "structuredContent" => v,
+      "isError" => false
+    }
 
   defp fixture_tool(s, name, args, p) do
     text = fn t, structured ->
-      {:ok, %{"resultType" => "complete", "content" => [%{"type" => "text", "text" => t}], "isError" => false,
-        "_meta" => server_info(s), "structuredContent" => structured}}
+      {:ok,
+       %{
+         "resultType" => "complete",
+         "content" => [%{"type" => "text", "text" => t}],
+         "isError" => false,
+         "_meta" => server_info(s),
+         "structuredContent" => structured
+       }}
     end
 
     case name do
@@ -284,16 +373,31 @@ defmodule Mcp2026T.Server do
 
       "greet" ->
         case p["inputResponses"] do
-          %{"name" => %{"action" => "accept", "content" => %{"name" => n}}} when is_binary(n) and n != "" ->
+          %{"name" => %{"action" => "accept", "content" => %{"name" => n}}}
+          when is_binary(n) and n != "" ->
             text.("Hello, #{n}!", %{"greeting" => "Hello, #{n}!"})
 
           _ ->
             # Missing/declined answer: ask (again), per MRTR error-handling guidance.
-            {:ok, %{"resultType" => "input_required", "_meta" => server_info(s), "inputRequests" => %{
-              "name" => %{"method" => "elicitation/create", "params" => %{
-                "mode" => "form", "message" => "What is your name?",
-                "requestedSchema" => %{"type" => "object", "properties" => %{"name" => %{"type" => "string"}},
-                  "required" => ["name"]}}}}}}
+            {:ok,
+             %{
+               "resultType" => "input_required",
+               "_meta" => server_info(s),
+               "inputRequests" => %{
+                 "name" => %{
+                   "method" => "elicitation/create",
+                   "params" => %{
+                     "mode" => "form",
+                     "message" => "What is your name?",
+                     "requestedSchema" => %{
+                       "type" => "object",
+                       "properties" => %{"name" => %{"type" => "string"}},
+                       "required" => ["name"]
+                     }
+                   }
+                 }
+               }
+             }}
         end
 
       _ ->
@@ -302,10 +406,14 @@ defmodule Mcp2026T.Server do
   end
 
   defp write_rpc(conn, status, id, result, e) do
-    msg = if e, do: %{"jsonrpc" => "2.0", "id" => id, "error" => RpcError.to_map(e)},
-      else: %{"jsonrpc" => "2.0", "id" => id, "result" => result}
+    msg =
+      if e,
+        do: %{"jsonrpc" => "2.0", "id" => id, "error" => RpcError.to_map(e)},
+        else: %{"jsonrpc" => "2.0", "id" => id, "result" => result}
 
-    conn |> put_resp_content_type("application/json", nil) |> send_resp(status, Jason.encode!(msg))
+    conn
+    |> put_resp_content_type("application/json", nil)
+    |> send_resp(status, Jason.encode!(msg))
   end
 end
 
@@ -349,8 +457,12 @@ defmodule Mcp2026T.ServerAuth do
   @doc false
   # RFC 9728 PRM at both the path-inserted and root well-known URIs.
   def serve_metadata(a, conn) do
-    body = %{"resource" => audience(a, conn), "authorization_servers" => [a.issuer],
-             "scopes_supported" => a.scopes["*"], "bearer_methods_supported" => ["header"]}
+    body = %{
+      "resource" => audience(a, conn),
+      "authorization_servers" => [a.issuer],
+      "scopes_supported" => a.scopes["*"],
+      "bearer_methods_supported" => ["header"]
+    }
 
     conn |> put_resp_content_type("application/json", nil) |> send_resp(200, Jason.encode!(body))
   end
@@ -404,7 +516,9 @@ defmodule Mcp2026T.ServerAuth do
          true <- :public_key.verify(h <> "." <> c, :sha256, sig, key) || {:error, "bad signature"},
          true <- claims["iss"] == a.issuer || {:error, "wrong issuer"},
          true <- aud_contains(claims["aud"], aud) || {:error, "wrong audience"},
-         true <- (is_number(claims["exp"]) and claims["exp"] > System.system_time(:second)) || {:error, "expired"} do
+         true <-
+           (is_number(claims["exp"]) and claims["exp"] > System.system_time(:second)) ||
+             {:error, "expired"} do
       sc = if is_binary(claims["scope"]), do: String.split(claims["scope"]), else: []
       {:ok, %Principal{subject: to_string(claims["sub"] || ""), scopes: sc, claims: claims}}
     else
@@ -422,34 +536,42 @@ defmodule Mcp2026T.ServerAuth do
   end
 
   defp key(a, kid) do
-    :global.trans({{__MODULE__, a.cache}, self()}, fn ->
-      st = Agent.get(a.cache, & &1)
-      now = System.monotonic_time(:millisecond)
+    :global.trans(
+      {{__MODULE__, a.cache}, self()},
+      fn ->
+        st = Agent.get(a.cache, & &1)
+        now = System.monotonic_time(:millisecond)
 
-      cond do
-        st.keys != nil and Map.has_key?(st.keys, kid) ->
-          {:ok, st.keys[kid]}
+        cond do
+          st.keys != nil and Map.has_key?(st.keys, kid) ->
+            {:ok, st.keys[kid]}
 
-        st.keys != nil and now - st.fetched < 30_000 ->
-          {:error, "unknown kid"}  # garbage kids must not hammer the AS
+          st.keys != nil and now - st.fetched < 30_000 ->
+            # garbage kids must not hammer the AS
+            {:error, "unknown kid"}
 
-        true ->
-          with {:ok, md} <- Toolnexus.Mcp.OAuth.discover_as(a.http, a.issuer),
-               {:ok, %{"keys" => ks}} <- HTTP.get_json(a.http, to_string(md["jwks_uri"])) do
-            keys =
-              for %{"kty" => "RSA", "kid" => k, "n" => n, "e" => e} <- ks,
-                  {:ok, nb} <- [Base.url_decode64(n, padding: false)],
-                  {:ok, eb} <- [Base.url_decode64(e, padding: false)],
-                  into: %{},
-                  do: {k, {:RSAPublicKey, :binary.decode_unsigned(nb), :binary.decode_unsigned(eb)}}
+          true ->
+            with {:ok, md} <- Toolnexus.Mcp.OAuth.discover_as(a.http, a.issuer),
+                 {:ok, %{"keys" => ks}} <- HTTP.get_json(a.http, to_string(md["jwks_uri"])) do
+              keys =
+                for %{"kty" => "RSA", "kid" => k, "n" => n, "e" => e} <- ks,
+                    {:ok, nb} <- [Base.url_decode64(n, padding: false)],
+                    {:ok, eb} <- [Base.url_decode64(e, padding: false)],
+                    into: %{},
+                    do:
+                      {k,
+                       {:RSAPublicKey, :binary.decode_unsigned(nb), :binary.decode_unsigned(eb)}}
 
-            Agent.update(a.cache, fn _ -> %{keys: keys, fetched: now} end)
-            if Map.has_key?(keys, kid), do: {:ok, keys[kid]}, else: {:error, "unknown kid"}
-          else
-            _ -> {:error, "jwks unavailable"}
-          end
-      end
-    end, [node()], :infinity)
+              Agent.update(a.cache, fn _ -> %{keys: keys, fetched: now} end)
+              if Map.has_key?(keys, kid), do: {:ok, keys[kid]}, else: {:error, "unknown kid"}
+            else
+              _ -> {:error, "jwks unavailable"}
+            end
+        end
+      end,
+      [node()],
+      :infinity
+    )
   end
 end
 
@@ -497,8 +619,10 @@ defmodule Mcp2026T.Skills do
     md = String.replace(md, "\r\n", "\n")
 
     with "---\n" <> rest <- md, [head, _] <- :binary.split(rest, "\n---") do
-      for line <- String.split(head, "\n"), not String.starts_with?(line, " "),
-          [k, v] <- [:binary.split(line, ":")], into: %{} do
+      for line <- String.split(head, "\n"),
+          not String.starts_with?(line, " "),
+          [k, v] <- [:binary.split(line, ":")],
+          into: %{} do
         {String.trim(k), v |> String.trim() |> String.trim("\"") |> String.trim("'")}
       end
     else
@@ -551,5 +675,4 @@ defmodule Mcp2026T.Skills do
   rescue
     ArgumentError -> :error
   end
-
 end

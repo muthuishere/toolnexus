@@ -84,7 +84,8 @@ defmodule Toolnexus.Toolkit do
             wait_for: opts[:wait_for],
             deadline: opts[:deadline],
             token_store: opts[:token_store],
-            open_url: opts[:open_url]
+            open_url: opts[:open_url],
+            disable_tools: opts[:disable_tools]
           )
 
     # Remote skills (MCP skills extension, §2.7) join the same `skill` inventory.

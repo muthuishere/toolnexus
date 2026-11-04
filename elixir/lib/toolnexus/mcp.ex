@@ -154,7 +154,7 @@ defmodule Toolnexus.Mcp do
 
     {:ok, sup} = DynamicSupervisor.start_link(strategy: :one_for_one)
 
-    load_opts = Keyword.take(opts, [:wait_for, :token_store, :open_url, :http])
+    load_opts = Keyword.take(opts, [:wait_for, :token_store, :open_url, :http, :disable_tools])
 
     entries =
       Enum.map(config, fn {name, cfg} ->
@@ -225,8 +225,11 @@ defmodule Toolnexus.Mcp do
         {:connected, tools, _pid, _skills} ->
           %{name: name, status: "connected", tools: tools, error: nil}
 
-        {:failed, reason} -> %{name: name, status: "failed", tools: [], error: reason}
-        :disabled -> %{name: name, status: "disabled", tools: [], error: nil}
+        {:failed, reason} ->
+          %{name: name, status: "failed", tools: [], error: reason}
+
+        :disabled ->
+          %{name: name, status: "disabled", tools: [], error: nil}
       end
     )
   end
@@ -479,7 +482,16 @@ defmodule Toolnexus.Mcp do
       try do
         case Direct.probe(sup, cfg, opts) do
           {:modern, c, discover} ->
-            filter = &apply_tools_filter(name, &1, cfg["tools"])
+            # tools map and disableTools apply BEFORE tool search (§2.8)
+            disabled = MapSet.new(opts[:disable_tools] || [])
+
+            filter = fn defs ->
+              name
+              |> apply_tools_filter(defs, cfg["tools"])
+              |> Enum.reject(
+                &MapSet.member?(disabled, Tool.sanitize(name) <> "_" <> Tool.sanitize(&1["name"]))
+              )
+            end
 
             case Direct.load(sup, name, cfg, c, discover, opts, filter) do
               {:failed, reason} = f ->

@@ -6,7 +6,7 @@ defmodule Toolnexus.Mcp.Direct do
   # Everything stateful (stdio child, OAuth state, token store, pause store, tool
   # cache) lives under the source's supervisor so `Mcp.close/1` tears it down.
 
-  alias Toolnexus.{Answer, Context, Tool, ToolResult}
+  alias Toolnexus.{Answer, Tool, ToolResult}
   alias Toolnexus.Mcp.{Client2026, OAuth, RemoteSkills, Stdio2026, ToolSearch, Wire}
   alias Toolnexus.Mcp.Transport.StreamableHttp
 
@@ -54,7 +54,14 @@ defmodule Toolnexus.Mcp.Direct do
           start: start
         )
 
-      {:ok, Client2026.new(url: cfg["url"], headers: headers, auth: auth, timeout: timeout)}
+      {:ok,
+       Client2026.new(
+         url: cfg["url"],
+         headers: headers,
+         auth: auth,
+         timeout: timeout,
+         http: opts[:http]
+       )}
     else
       case DynamicSupervisor.start_child(sup, {Stdio2026, cfg}) do
         {:ok, pid} -> {:ok, Client2026.new(stdio: pid, timeout: timeout)}
@@ -67,8 +74,11 @@ defmodule Toolnexus.Mcp.Direct do
   # (fetched once at fallback start; it has no 401 hook of its own).
   defp fallback_cfg(cfg, %Client2026{auth: %OAuth{} = o, url: url}) do
     case OAuth.bearer(o, url) do
-      nil -> cfg
-      tok -> Map.put(cfg, "headers", Map.put(cfg["headers"] || %{}, "Authorization", "Bearer " <> tok))
+      nil ->
+        cfg
+
+      tok ->
+        Map.put(cfg, "headers", Map.put(cfg["headers"] || %{}, "Authorization", "Bearer " <> tok))
     end
   end
 
@@ -136,7 +146,9 @@ defmodule Toolnexus.Mcp.Direct do
       input_schema: Toolnexus.Mcp.merged_schema(def, true),
       source: "mcp",
       hints: Toolnexus.Mcp.mcp_hints(def["annotations"]),
-      execute: fn args, ctx -> run.(ctx, fn -> Client2026.call_tool(c, original, args || %{}) end) end
+      execute: fn args, ctx ->
+        run.(ctx, fn -> Client2026.call_tool(c, original, args || %{}) end)
+      end
     }
   end
 
@@ -174,11 +186,19 @@ defmodule Toolnexus.Mcp.Direct do
       source: "mcp",
       execute: fn args, _ctx ->
         args = args || %{}
-        limit = if is_number(args["limit"]) and args["limit"] > 0, do: trunc(args["limit"]), else: 5
+
+        limit =
+          if is_number(args["limit"]) and args["limit"] > 0, do: trunc(args["limit"]), else: 5
 
         case tools.() do
           {:ok, defs} ->
-            hits = ToolSearch.rank(defs, to_string(args["query"] || ""), limit, cfg["description"] || "")
+            hits =
+              ToolSearch.rank(
+                defs,
+                to_string(args["query"] || ""),
+                limit,
+                cfg["description"] || ""
+              )
 
             %ToolResult{output: Jason.encode!(hits), metadata: %{server: server}}
 
@@ -204,7 +224,7 @@ defmodule Toolnexus.Mcp.Direct do
             _ -> false
           end
 
-        if known or resuming?(ctx),
+        if known,
           do: run.(ctx, fn -> Client2026.call_tool(c, name, arguments) end),
           else: %ToolResult{
             output: ~s(unknown tool "#{name}" on #{server}),
@@ -216,9 +236,6 @@ defmodule Toolnexus.Mcp.Direct do
 
     [search, call]
   end
-
-  defp resuming?(%Context{answer: a}) when a != nil, do: true
-  defp resuming?(_), do: false
 
   # Run a tool call: resume a paused call when ctx.answer names it, else start
   # fresh; answer pendings inline through wait_for, or suspend (§10) without one.

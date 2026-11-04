@@ -8,7 +8,8 @@ defmodule Toolnexus.Mcp.Stdio2026 do
   """
   use GenServer, restart: :temporary, shutdown: 5_000
 
-  def child_spec(cfg), do: %{id: __MODULE__, start: {__MODULE__, :start_link, [cfg]}, restart: :temporary}
+  def child_spec(cfg),
+    do: %{id: __MODULE__, start: {__MODULE__, :start_link, [cfg]}, restart: :temporary}
 
   def start_link(cfg), do: GenServer.start_link(__MODULE__, cfg)
 
@@ -68,9 +69,14 @@ defmodule Toolnexus.Mcp.Stdio2026 do
 
   defp command(cfg) do
     case cfg["command"] do
-      [_ | _] = list -> {:ok, Enum.map(list, &to_string/1)}
-      c when is_binary(c) and c != "" -> {:ok, [c | Enum.map(List.wrap(cfg["args"]), &to_string/1)]}
-      _ -> {:error, :no_command}
+      [_ | _] = list ->
+        {:ok, Enum.map(list, &to_string/1)}
+
+      c when is_binary(c) and c != "" ->
+        {:ok, [c | Enum.map(List.wrap(cfg["args"]), &to_string/1)]}
+
+      _ ->
+        {:error, :no_command}
     end
   end
 

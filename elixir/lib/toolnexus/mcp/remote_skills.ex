@@ -13,10 +13,7 @@ defmodule Toolnexus.Mcp.RemoteSkills do
 
   @doc "Split `skill://<name>/<path>` into `{:ok, name, rel}` or `{:error, reason}`."
   def parse_uri("skill://" <> rest) do
-    case decode_once(rest) do
-      :error ->
-        {:error, "bad percent-encoding"}
-
+    case {:ok, URI.decode(rest)} do
       {:ok, dec} ->
         segs = String.split(dec, "/")
 
@@ -38,12 +35,6 @@ defmodule Toolnexus.Mcp.RemoteSkills do
   end
 
   def parse_uri(_), do: {:error, "not a skill:// URI"}
-
-  defp decode_once(s) do
-    {:ok, URI.decode(s)}
-  rescue
-    ArgumentError -> :error
-  end
 
   @doc false
   def digest(data), do: "sha256:" <> Base.encode16(:crypto.hash(:sha256, data), case: :lower)

@@ -4,7 +4,15 @@ defmodule Toolnexus.Mcp.Token do
   server URL) it is for (SPEC §2A.1a). Its `inspect`/`to_string` forms never show a
   token value.
   """
-  defstruct [:access_token, :refresh_token, :expires_at, :issuer, :client_id, :resource, scopes: []]
+  defstruct [
+    :access_token,
+    :refresh_token,
+    :expires_at,
+    :issuer,
+    :client_id,
+    :resource,
+    scopes: []
+  ]
 
   @type t :: %__MODULE__{
           access_token: String.t(),
@@ -173,7 +181,8 @@ defmodule Toolnexus.Mcp.OAuth do
   defp expired?(%Token{expires_at: nil}), do: false
   defp expired?(%Token{expires_at: e}), do: System.system_time(:second) > e - 10
 
-  defp refresh(_o, %Token{refresh_token: rt}) when rt in [nil, ""], do: {:error, "no refresh token"}
+  defp refresh(_o, %Token{refresh_token: rt}) when rt in [nil, ""],
+    do: {:error, "no refresh token"}
 
   defp refresh(o, t) do
     with {:ok, md} <- discover_as(o.http, t.issuer) do
@@ -187,7 +196,9 @@ defmodule Toolnexus.Mcp.OAuth do
 
       case token_request(o, md["token_endpoint"], form, t) do
         {:ok, nt} ->
-          nt = if nt.refresh_token in [nil, ""], do: %{nt | refresh_token: t.refresh_token}, else: nt
+          nt =
+            if nt.refresh_token in [nil, ""], do: %{nt | refresh_token: t.refresh_token}, else: nt
+
           TokenStore.save(o.store, t.resource, nt)
           :ok
 
@@ -289,7 +300,7 @@ defmodule Toolnexus.Mcp.OAuth do
           else: "it does not support Client ID Metadata Documents"
 
       {:error,
-       "no client identity for #{issuer}: #{why} and no client id is configured — register an app with #{issuer} and set clientId (dynamic client registration is not supported)"}
+       "no client identity for #{issuer}: #{why} and no client id is configured — register an app with #{issuer} and set auth.clientId (dynamic client registration is not supported)"}
     else
       run_flow(o, %{
         resource: resource,
@@ -455,7 +466,10 @@ defmodule Toolnexus.Mcp.OAuth do
   send the paused request for the first time; returns that request's outcome.
   """
   def resume(o, id, callback_url) do
-    f = Agent.get_and_update(o.pid, fn st -> {st.flows[id], %{st | flows: Map.delete(st.flows, id)}} end)
+    f =
+      Agent.get_and_update(o.pid, fn st ->
+        {st.flows[id], %{st | flows: Map.delete(st.flows, id)}}
+      end)
 
     cond do
       f == nil -> {:error, "unknown pending authorization #{inspect(id)}"}
@@ -493,7 +507,12 @@ defmodule Toolnexus.Mcp.OAuth do
           {"resource", f.resource}
         ]
 
-        t = %Token{issuer: f.issuer, resource: f.resource, client_id: f.client_id, scopes: f.scopes}
+        t = %Token{
+          issuer: f.issuer,
+          resource: f.resource,
+          client_id: f.client_id,
+          scopes: f.scopes
+        }
 
         with {:ok, t} <- token_request(o, f.token_endpoint, form, t) do
           TokenStore.save(o.store, f.resource, t)
@@ -525,7 +544,8 @@ defmodule Toolnexus.Mcp.OAuth do
             {"authorization",
              "Basic " <>
                Base.encode64(
-                 URI.encode_www_form(base.client_id) <> ":" <> URI.encode_www_form(o.client_secret)
+                 URI.encode_www_form(base.client_id) <>
+                   ":" <> URI.encode_www_form(o.client_secret)
                )}
           ],
           else: []
@@ -544,9 +564,12 @@ defmodule Toolnexus.Mcp.OAuth do
 
         _ ->
           # RFC 6749 §5.1 mandates JSON; some ASes (GitHub) still answer form-encoded.
-          if String.starts_with?(Wire.header(resp, "content-type"), "application/x-www-form-urlencoded"),
-            do: URI.decode_query(resp.body),
-            else: %{}
+          if String.starts_with?(
+               Wire.header(resp, "content-type"),
+               "application/x-www-form-urlencoded"
+             ),
+             do: URI.decode_query(resp.body),
+             else: %{}
       end
 
     at = tr["access_token"]
@@ -575,7 +598,8 @@ defmodule Toolnexus.Mcp.OAuth do
           do: String.split(tr["scope"]),
           else: base.scopes
 
-      {:ok, %{base | access_token: at, refresh_token: tr["refresh_token"], expires_at: exp, scopes: sc}}
+      {:ok,
+       %{base | access_token: at, refresh_token: tr["refresh_token"], expires_at: exp, scopes: sc}}
     end
   end
 

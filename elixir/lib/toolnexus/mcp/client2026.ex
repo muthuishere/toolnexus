@@ -32,7 +32,8 @@ defmodule Toolnexus.Mcp.Client2026 do
 
   @max_rounds 32
 
-  @type outcome :: {:ok, map()} | {:error, term()} | {:pending, Request.t(), (Answer.t() -> outcome)}
+  @type outcome ::
+          {:ok, map()} | {:error, term()} | {:pending, Request.t(), (Answer.t() -> outcome)}
 
   @doc """
   Options: `:url` (HTTP) or `:stdio` (a `Toolnexus.Mcp.Stdio2026` pid), `:headers`
@@ -94,7 +95,9 @@ defmodule Toolnexus.Mcp.Client2026 do
   defp unwrap(%{"id" => id, "error" => %{} = e}, id),
     do: {:error, %RpcError{code: e["code"], message: to_string(e["message"]), data: e["data"]}}
 
-  defp unwrap(%{"id" => id, "result" => %{} = r}, id), do: {:ok, Map.put_new(r, "resultType", "complete")}
+  defp unwrap(%{"id" => id, "result" => %{} = r}, id),
+    do: {:ok, Map.put_new(r, "resultType", "complete")}
+
   defp unwrap(_, _), do: {:error, :not_rpc}
 
   defp http_round_trip(c, method, params, body, attempt) do
@@ -136,7 +139,8 @@ defmodule Toolnexus.Mcp.Client2026 do
   defp answer_auth(_c, _req, %Answer{reason: r}),
     do: {:error, "authorization denied: #{if r in [nil, ""], do: "cancelled", else: r}"}
 
-  defp decode(%{status: status} = resp) when status >= 500, do: {:error, {:http_status, status, resp_text(resp)}}
+  defp decode(%{status: status} = resp) when status >= 500,
+    do: {:error, {:http_status, status, resp_text(resp)}}
 
   defp decode(resp) do
     msg =
@@ -269,7 +273,10 @@ defmodule Toolnexus.Mcp.Client2026 do
 
   defp after_call({:ok, %{"resultType" => "input_required"} = r}, c, name, args, n) do
     reqs = if is_map(r["inputRequests"]), do: Enum.sort(r["inputRequests"]), else: []
-    ask(reqs, %{}, name, fn responses -> round(c, name, args, responses, r["requestState"], n + 1) end)
+
+    ask(reqs, %{}, name, fn responses ->
+      round(c, name, args, responses, r["requestState"], n + 1)
+    end)
   end
 
   defp after_call({:ok, %{"resultType" => t}}, _c, name, _args, _n),
@@ -279,8 +286,13 @@ defmodule Toolnexus.Mcp.Client2026 do
 
   defp ask([], acc, _name, next), do: next.(acc)
 
-  defp ask([{key, %{"method" => "elicitation/create", "params" => %{} = p}} | rest], acc, name, next) do
-    req = Protocol.elicitation_to_request(p)
+  defp ask(
+         [{key, %{"method" => "elicitation/create", "params" => %{} = p}} | rest],
+         acc,
+         name,
+         next
+       ) do
+    req = %{Protocol.elicitation_to_request(p) | id: "mrtr-" <> Wire.rand_str(12)}
 
     {:pending, req,
      fn answer ->

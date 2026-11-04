@@ -113,6 +113,42 @@ Batteries (SPEC §8B): `Toolnexus.Judge.ToolGuard`, `ToolRelevance`, `SkillRelev
 verdict from `check`/`select`/`filter`/`pick`, and `as_hook(battery, next)` where a hook seam
 exists. A `before_llm` hook may also return `%{model: "id"}` to override the model for that turn.
 
+## MCP 2026-07-28 + OAuth
+
+Every MCP server is probed with `server/discover` first (SPEC §2.2). A server on
+`2026-07-28` is used directly — no `initialize`, no session, stdio and HTTP, MRTR input
+requests through `wait_for` — and anything older drops to the existing (frozen) client.
+Nothing in `mcp.json` has to change.
+
+```elixir
+tk =
+  Toolnexus.Toolkit.build(
+    mcp_config: %{
+      "mcpServers" => %{
+        "docs" => %{
+          "url" => "https://mcp.example.com/mcp",
+          "auth" => %{"clientId" => "my-registered-app"},   # or clientMetadataUrl (CIMD); never DCR
+          "toolSearch" => true,                             # expose docs_search_tools + docs_call_tool
+          "description" => "the product docs"
+        }
+      }
+    },
+    wait_for: &MyHost.wait_for/1,                # MRTR input + auth "pause" answered here
+    token_store: MyHost.TokenStore.new(),        # optional; default in-memory per load
+    open_url: &MyHost.open/1                     # optional; "auto" mode browser opener
+  )
+```
+
+- `auth.mode` is `"auto"` (browser + loopback callback) or `"pause"` (a §10
+  `kind:"authorization"` request; answer it with `data: %{"callbackUrl" => url}`).
+  Without `wait_for`, a pause during load marks the server `failed` (`authorization
+  pending`); during a tool call it returns a §10 pending result, resumed by the next
+  execution carrying `ctx.answer`.
+- Remote skills (the MCP skills extension) join the same `skill` tool as local skills.
+- Tokens are never logged; `inspect/1` on a `Toolnexus.Mcp.Token` is redacted.
+- **Gap:** the frozen fallback gets the bearer token as a static `Authorization` header
+  when it starts; a 401 *later* on the fallback path does not re-run the OAuth flow.
+
 ## Why the BEAM port
 
 Long-running agents want supervision. Every MCP connection is a supervised process; a crashed
