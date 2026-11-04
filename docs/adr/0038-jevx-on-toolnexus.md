@@ -165,6 +165,41 @@ profiles, because those are its state.
 `spikes/jevx-core/cmd/gate` shows the **same verdict** on **20–30 real items** for that verb,
 with the same profile, `--fresh` and `--no-context`. Any mismatch blocks that verb.
 
+**D9. The classifier UX: client → state → evaluate (owner, 2026-11-04).** Built and live-tested
+in `spikes/classifier-ux`.
+
+```go
+c, _ := tn.CreateClassifier(tn.ClassifierOptions{Backend: tn.BackendTypeSafe, Cache: tn.NewMemoryCache(ttl, max)})
+r, err := c.State(v).Evaluate(ctx, tn.Noul(…), tn.Choice(…), tn.Score(…))   // one request
+rs, err := c.States(a, b, c).Evaluate(ctx, qs...)                            // batch
+```
+
+- **The backend enum stays** (`typesafe | openrouter | cloudflare | vercel | custom`). There are no
+  vendor-named constructors. Each backend+model carries `Supports{Images, Box}`. `custom`
+  requires the host to declare it.
+- **What a backend can't do is `ErrUnsupported` before the network.** That covers images on a
+  backend that lacks them, a format that is not PNG/JPEG, and an image outside 280–1568 px.
+- **Batch is never an error.** No backend has a public native batch, so it fans out on the
+  client, results in order, and the lowest failing index is reported.
+- **`State(v)` is a value, not a session.** Nothing is uploaded or stored. Any image part
+  anywhere in `v` is moved into `assets` under its key.
+- **Client-level cache.** This **supersedes D2/D8 on caching**: the owner asked for caching at
+  client level. It is per question, keyed by a hash of (endpoint, model, state, image bytes,
+  question wire); the question name and headers are not part of the key. Adding one question
+  sends only that one. `MemoryCache` ships with the library; a host persists by implementing
+  `Cache{Get,Set}`. jevx's file cache becomes one such implementation. toolnexus still persists
+  nothing itself.
+
+**Live support table (2026-11-04):**
+
+| backend / model | text | images |
+|---|---|---|
+| typesafe `jev-1.14.0` | ✓ | ✓ (`assets` + `TypeSafe-Danger-Zone-Images`) |
+| openrouter `typesafe/jev-1.14` | ✓ | ✓ (the same `assets` body is forwarded) |
+| cloudflare `typesafe/jev` (served `jev-1.13.0`) | ✓ | not proven, so refused |
+| cloudflare `@cf/cloudflare/clef` | ✓ | ✓ (`input.images` data URLs) |
+| vercel `typesafe-ai/jev` | not run (no key in `sec`) | not proven, so refused |
+
 ## Evidence
 
 - Spike `spikes/jevx-core`: `go vet` passes and `go test ./...` passes, hermetic, against a fake
