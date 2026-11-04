@@ -296,7 +296,7 @@ defmodule Toolnexus.Mcp.OAuth do
     if client_id == nil do
       why =
         if cimd,
-          do: "clientMetadataUrl is not set",
+          do: "auth.clientMetadataUrl is not set",
           else: "it does not support Client ID Metadata Documents"
 
       {:error,
