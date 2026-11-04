@@ -303,7 +303,10 @@
                (filter (fn [t] (contains? allowed (:name t))) ts)
                ts))))
 
-(defn- mcp-rpc [tk cfg on-call body]
+(defn mcp-rpc
+  "One §7C MCP JSON-RPC exchange over a request body string -> a response map.
+  Public so the §8C CLI client can serve a toolkit behind its own bearer guard."
+  [tk cfg on-call body]
   (let [[tag msg] (parse-body body)]
     (if (= tag :parse-error)
       (rpc-error nil -32700 "Parse error")

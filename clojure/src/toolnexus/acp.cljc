@@ -155,25 +155,49 @@
   (with-lock! (:write-lock client)
     (fn [] (proc/send-line! (:child client) (json/write-str msg)))))
 
+(defn- first-option-of-kind
+  "The optionId of the first option whose kind starts with `prefix`, or nil."
+  [options prefix]
+  (some (fn [o] (when (str/starts-with? (str (:kind o)) prefix) (:optionId o))) options))
+
+(defn- reply-outcome!
+  [client id chosen]
+  (send-msg! client {:jsonrpc "2.0" :id id
+                     :result  (if chosen
+                                {:outcome {:outcome "selected" :optionId chosen}}
+                                {:outcome {:outcome "cancelled"}})}))
+
 (defn- answer-permission!
   "Answer a `session/request_permission` request with the first `allow`-kind
   option, inline — an unanswered permission request hangs the turn forever,
-  even in bypass mode (ADR 0031)."
+  even in bypass mode (ADR 0031).
+
+  With `:on-permission` set (SPEC §8C), the host decides instead: it is handed
+  the request's params and returns an optionId. A throw, nil or an empty id answers
+  with the first `reject`-kind option, else `cancelled`. It runs OFF the reader
+  thread, so it may block without stalling session/update delivery."
   [client req]
-  (let [options (get-in req [:params :options])
-        chosen  (some (fn [o] (when (str/starts-with? (str (:kind o)) "allow") (:optionId o)))
-                       options)
-        result  (if chosen
-                  {:outcome {:outcome "selected" :optionId chosen}}
-                  {:outcome {:outcome "cancelled"}})]
-    (send-msg! client {:jsonrpc "2.0" :id (:id req) :result result})))
+  (let [options (get-in req [:params :options])]
+    (if-let [decide (:on-permission client)]
+      (proc/run-async!
+       (fn []
+         (let [chosen (try (decide (:params req)) (catch Throwable _ nil))
+               chosen (if (str/blank? (str (or chosen "")))
+                        (first-option-of-kind options "reject")
+                        chosen)]
+           (reply-outcome! client (:id req) chosen))))
+      (reply-outcome! client (:id req) (first-option-of-kind options "allow")))))
 
 (defn- route!
   "Dispatch one parsed JSON-RPC line from the child:
     - an id with no method  -> a reply to one of OUR requests, filed by id
-    - session/update        -> only agent_message_chunk text is accumulated
-    - session/request_permission -> answered inline, never surfaced
-    - anything else         -> ignored (nothing this client needs)."
+    - session/update        -> handed to :on-update (raw params), then only
+                               agent_message_chunk text is accumulated
+    - session/request_permission -> answered (inline, or via :on-permission)
+    - any OTHER request (has an id) -> -32601: fs/* and terminal/* are declared
+      unsupported in clientCapabilities, and an unanswered request makes the
+      agent wait forever
+    - a notification        -> ignored (nothing this client needs)."
   [client msg]
   (cond
     (and (nil? (:method msg)) (some? (:id msg)))
@@ -181,11 +205,17 @@
 
     (= "session/update" (:method msg))
     (let [upd (get-in msg [:params :update])]
+      (when-let [on (:on-update client)]
+        (try (on (:params msg)) (catch Throwable _ nil)))
       (when (= "agent_message_chunk" (:sessionUpdate upd))
         (swap! (:state client) update :chunks conj (get-in upd [:content :text]))))
 
     (and (= "session/request_permission" (:method msg)) (some? (:id msg)))
     (answer-permission! client {:id (:id msg) :params (:params msg)})
+
+    (and (some? (:method msg)) (some? (:id msg)))
+    (send-msg! client {:jsonrpc "2.0" :id (:id msg)
+                       :error   {:code -32601 :message (str "method not found: " (:method msg))}})
 
     :else nil))
 
@@ -252,30 +282,75 @@
 ;; connect
 ;; ---------------------------------------------------------------------------
 
+(defn stderr
+  "The agent's most recent stderr lines (koine keeps a bounded tail), joined
+  with newlines — for error messages. Never contains anything we wrote."
+  [client]
+  ;; await-stderr, not stderr-lines: the drain is a background thread, so a
+  ;; child that just died routinely reads as silent for a few ms.
+  (try (str/join "\n" (proc/await-stderr (:child client) 300)) (catch Throwable _ "")))
+
 (defn- kill-and-throw!
-  "A handshake phase (`initialize` / `session/new` / `session/set_mode`)
-  failed: force-kill the half-open child so `connect` never leaks a process,
-  then throw."
+  "A handshake phase (`initialize` / `session/new` / `session/set_mode` / set
+  model) failed: force-kill the half-open child so `connect` never leaks a
+  process, then throw. `:phase` and the agent's `:stderr` tail ride in ex-data."
   [client phase res]
   (try (proc/kill! (:child client)) (catch Throwable _ nil))
-  (throw (ex-info (str "toolnexus: acp: " phase ": " (pr-str (:error res))) (assoc res :phase phase))))
+  (throw (ex-info (str "toolnexus: acp: " phase ": " (pr-str (:error res)))
+                  (assoc res :phase phase :stderr (stderr client)))))
+
+(defn- name-values
+  "A map as the ACP [{name,value}] array, sorted by name so the wire is
+  deterministic. An already-built vector passes through."
+  [m]
+  (if (map? m)
+    (let [sm (reduce (fn [acc [k v]] (assoc acc (if (keyword? k) (name k) (str k)) (str v))) {} m)]
+      (mapv (fn [k] {:name k :value (get sm k)}) (sort (keys sm))))
+    (vec (or m []))))
+
+(defn mcp-server-wire
+  "Resolve one `session/new` mcpServers entry (SPEC §8C). `:url` gives the http
+  shape {type:\"http\",name,url,headers[]}; `:command` the stdio shape
+  {name,command,args[],env[]} — no type field; an entry with BOTH picks http
+  only when the agent advertised agentCapabilities.mcpCapabilities.http.
+  Header and env values go on the wire as [{name,value}] and are never logged."
+  [entry http-ok?]
+  (if (and (:url entry) (or http-ok? (nil? (:command entry))))
+    {:type "http" :name (:name entry) :url (:url entry) :headers (name-values (:headers entry))}
+    {:name    (:name entry)
+     :command (:command entry)
+     :args    (vec (or (:args entry) []))
+     :env     (name-values (:env entry))}))
 
 (defn connect
   "Spawn `command` (a vector, e.g. [\"devin\" \"acp\"]) and complete
-  `initialize` -> `session/new` (-> optional `session/set_mode`). Returns a
-  live, warm client map. Throws (ex-info) on any handshake failure — a model
-  source that cannot connect is a construction-time error, matching
-  `toolnexus.agents.runtime/create-runtime`'s own validation.
+  `initialize` -> `session/new` (-> optional `session/set_mode`) (-> optional
+  model). Returns a live, warm client map. Throws (ex-info) on any handshake
+  failure — a model source that cannot connect is a construction-time error,
+  matching `toolnexus.agents.runtime/create-runtime`'s own validation. The
+  ex-data carries `:phase` (\"initialize\", \"session/new\", ...) and the
+  agent's `:stderr` tail.
 
   opts:
-    :cwd                 absolute working directory handed to `session/new`.
+    :cwd                 absolute working directory handed to `session/new`
+                          AND the child's working directory.
                           A real `devin acp` REJECTS session/new with -32602
                           without an absolute cwd (ADR 0031) — defaults to
                           the process's own resolved cwd (`koine.fs/real-path`
                           on \".\"), which is always absolute.
-    :mcp-servers          the `mcpServers` array on `session/new` (default
-                          []). Real `devin acp` requires the key to be
-                          present, even empty.
+    :mcp-servers          `session/new` mcpServers entries (default []). Each
+                          is resolved by `mcp-server-wire` against the agent's
+                          initialize result. Real `devin acp` requires the key
+                          to be present, even empty.
+    :client-caps-meta     sent as initialize clientCapabilities._meta (opaque).
+    :model                if set, passed through unchanged after session/new:
+                          session/set_config_option {configId \"model\"}, then
+                          session/set_model if that is rejected. Both failing
+                          is a connect error.
+    :on-permission        (fn [params] option-id) decides every
+                          session/request_permission (see answer-permission!).
+    :on-update            (fn [params]) sees every raw session/update (must not
+                          block — it runs on the reader thread).
     :environment / :env   extra env vars for the child (merged; matches
                           toolnexus.mcp's `environment`/`env` alias).
     :mode                 if set, issues an optional `session/set_mode` after
@@ -283,10 +358,14 @@
     :timeout               per-call timeout ms for the setup handshake.
                           Default 30000.
     :permission-timeout    the safety net bounding a `session/prompt` reply
-                          — see default-permission-timeout-ms. Default 30000."
+                          — see default-permission-timeout-ms. Default 30000.
+
+  The client map also carries `:mcp-servers-sent` (the exact list sent) and
+  `:initialize-result`."
   ([command] (connect command {}))
   ([command opts]
-   (let [{:keys [cwd mcp-servers environment env mode timeout permission-timeout]} opts
+   (let [{:keys [cwd mcp-servers environment env mode timeout permission-timeout
+                 client-caps-meta model on-permission on-update]} opts
          timeout-ms            (or timeout default-timeout-ms)
          permission-timeout-ms (or permission-timeout default-permission-timeout-ms)
          cwd                   (or cwd (fs/real-path "."))]
@@ -294,7 +373,13 @@
        (throw (ex-info (str "toolnexus: acp: :cwd must be absolute, got " (pr-str cwd))
                        {:cwd cwd})))
      (let [env-map    (merge (or environment {}) (or env {}))
-           child      (proc/spawn (vec command) (if (seq env-map) {:env env-map} {}))
+           child      (try
+                        (proc/spawn (vec command) (cond-> {:dir cwd}
+                                                    (seq env-map) (assoc :env env-map)))
+                        (catch Throwable e
+                          (throw (ex-info (str "toolnexus: acp: start " (pr-str (first command)) ": "
+                                               (or (ex-message e) (str e)))
+                                          {:phase "start" :stderr ""}))))
            state      (atom {:inbox {} :closed? false :close-reason nil :chunks []})
            write-lock (atom false)
            client     {:child               child
@@ -305,24 +390,44 @@
                        :session-id          nil
                        :timeout-ms          timeout-ms
                        :permission-timeout-ms permission-timeout-ms
+                       :on-permission       on-permission
+                       :on-update           on-update
                        :close-once          (atom false)}]
        (start-reader! client)
-       (let [init-res (call! client "initialize"
+       (let [caps     (cond-> {:fs {:readTextFile false :writeTextFile false}
+                               :terminal false}
+                        client-caps-meta (assoc :_meta client-caps-meta))
+             init-res (call! client "initialize"
                               {:protocolVersion   1
-                               :clientCapabilities {:fs {:readTextFile false :writeTextFile false}}})]
+                               :clientCapabilities caps})]
          (when (:error init-res)
            (kill-and-throw! client "initialize" init-res))
-         (let [new-res (call! client "session/new" {:cwd cwd :mcpServers (or mcp-servers [])})]
+         (let [http-ok? (true? (get-in init-res [:ok :agentCapabilities :mcpCapabilities :http]))
+               servers  (mapv (fn [e] (mcp-server-wire e http-ok?)) (or mcp-servers []))
+               new-res  (call! client "session/new" {:cwd cwd :mcpServers servers})]
            (when (:error new-res)
              (kill-and-throw! client "session/new" new-res))
            (let [session-id (get-in new-res [:ok :sessionId])]
              (when (str/blank? (str session-id))
                (kill-and-throw! client "session/new" {:error "no sessionId in response"}))
-             (let [client (assoc client :session-id session-id)]
+             (let [client (assoc client
+                                 :session-id session-id
+                                 :mcp-servers-sent servers
+                                 :initialize-result (:ok init-res))]
                (when mode
                  (let [mode-res (call! client "session/set_mode" {:sessionId session-id :modeId mode})]
                    (when (:error mode-res)
                      (kill-and-throw! client "session/set_mode" mode-res))))
+               (when-not (str/blank? (str (or model "")))
+                 ;; Passed through unchanged. Stable ACP spelling first, then
+                 ;; the older unstable session/set_model.
+                 (let [r1 (call! client "session/set_config_option"
+                                 {:sessionId session-id :configId "model" :value model})]
+                   (when (:error r1)
+                     (let [r2 (call! client "session/set_model" {:sessionId session-id :modelId model})]
+                       (when (:error r2)
+                         (kill-and-throw! client (str "set model " (pr-str model))
+                                          {:error [(:error r1) (:error r2)]}))))))
                client))))))))
 
 ;; ---------------------------------------------------------------------------

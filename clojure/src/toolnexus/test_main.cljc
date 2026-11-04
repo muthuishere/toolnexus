@@ -41,6 +41,8 @@
             [toolnexus.agents.runtime-test]
             [toolnexus.agents.runtime-fixture-test]
             [toolnexus.acp-test :as acp-test]
+            [toolnexus.cli-test :as cli-test]
+            [toolnexus.cli-acp :as cli-acp]
             [toolnexus.host-engine-asks-test]
             [toolnexus.media-test]))
 
@@ -71,6 +73,7 @@
     toolnexus.agents.runtime-test
     toolnexus.agents.runtime-fixture-test
     toolnexus.acp-test
+    toolnexus.cli-test
     toolnexus.host-engine-asks-test
     toolnexus.media-test])
 
@@ -86,7 +89,7 @@
 ;; and the count stays above any floor. Comparing `suites` against a constant is
 ;; the only check that can see the vector shrink, because every count derived
 ;; FROM the vector shrinks with it. Adding a suite is meant to be a two-line diff.
-(def expected-suite-count 28)
+(def expected-suite-count 29)
 
 (defn- declared-tests
   "How many deftests a namespace actually holds, read off its interns rather than
@@ -163,8 +166,22 @@
   ;; two hosts because neither has a lighter-weight standalone entry point
   ;; that all five all-modes-check.sh legs already prove works. See
   ;; toolnexus.acp-test/fake-server-command and run-fake-server!.
-  (if (= "1" (env/get-env "ACP_FAKE_SERVER"))
+  ;; TN_FAKE_ACP / TN_MCP_BRIDGE_URL: the same re-invoke trick for
+  ;; toolnexus.cli-test — the fake ACP agent behind a CLI client, and the
+  ;; stdio<->HTTP MCP bridge (env, not argv: `cljgo run` passes no args).
+  (cond
+    (= "1" (env/get-env "ACP_FAKE_SERVER"))
     (acp-test/run-fake-server!)
+
+    ;; checked before TN_FAKE_ACP: the bridge inherits the fake agent's env
+    (seq (env/get-env "TN_MCP_BRIDGE_URL"))
+    (do (cli-acp/run-mcp-bridge (env/get-env "TN_MCP_BRIDGE_URL") (env/get-env cli-acp/mcp-token-env))
+        (shutdown-agents))
+
+    (= "1" (env/get-env "TN_FAKE_ACP"))
+    (do (cli-test/run-fake-acp!) (shutdown-agents))
+
+    :else
     (do
       ;; Several suites read the shared fixture tree via toolnexus.shared-examples-test:
       ;; TN_EXAMPLES when set, else the repo's examples/ found from the working

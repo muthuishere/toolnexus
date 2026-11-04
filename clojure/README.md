@@ -157,6 +157,42 @@ guide: <https://muthuishere.github.io/toolnexus/media/>.
 (doseq [f (:files res)] (println (:from f) (:mimeType f) (:url f)))
 ```
 
+## CLI client
+
+Use an agent CLI you already have installed (and pay for) as the model behind an ordinary
+client. Pick the CLI family from a closed keyword set — `toolnexus.cli/styles`:
+`:claude :codex :copilot :opencode :devin :gemini :goose :custom`. Strings are refused. You
+always supply `:command`; the library never chooses the binary for you. SPEC §8C.
+
+`:transport :auto` (the default) uses ACP when the style declares an ACP launch. ACP serves
+your toolkit to the agent as a local MCP endpoint on `127.0.0.1`, guarded by a bearer token
+that lasts one session. The `skill` tool is served as `load_skill`. Permissions are decided per
+tool call: the agent may call tools from your toolkit and nothing else. If the agent fails to
+start or to answer `initialize`, the client falls back to running the CLI once per turn. In that
+mode the conversation goes in under a fixed preamble, and tool calls come back to the toolnexus
+loop.
+
+```clojure
+(require '[toolnexus.cli :as cli] '[toolnexus.client :as client] '[toolnexus.core :as tn])
+
+(def tk (tn/build {:skills "skills"}))
+(def c  (cli/create-cli-client {:style :gemini :command "gemini" :toolkit tk}))
+(def res (client/run c "What is my badge number?" {:toolkit tk}))
+(cli/transport c)        ; "acp" | "cli" ("auto" until the first call)
+(cli/fallback-reason c)  ; why :auto fell back, or ""
+(cli/close! c)           ; ends the agent, stops the served toolkit
+```
+
+Options: `:command` (required), `:style` / `:style-def` (`cli/load-cli-style` path-or-JSON),
+`:args` `:prompt` `:answer` (for `:custom`), `:env` (`${VAR}` expanded at call time, never
+logged), `:call-timeout-ms` (default 300000), `:cwd`, `:transport` (`:auto` `:acp` `:cli`),
+`:toolkit`, `:acp-command`, `:bridge-command`, `:on-acp-update`, plus every
+`create-in-process-client` option. `:model` is passed to the CLI unchanged.
+
+Known gaps in this port: there is no streaming entry point, so nothing needs refusing. A
+timeout kills the whole process tree of a one-shot call, found through `ps`. Closing an ACP
+agent kills only the agent process, because koine exposes no process groups.
+
 ## Documentation
 
 Everything else — the full surface, with runnable examples — lives on the docs site:
