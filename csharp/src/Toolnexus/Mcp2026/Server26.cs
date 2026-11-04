@@ -86,7 +86,7 @@ internal sealed class Server26 : IAsyncDisposable
         JsonObject res;
         try { res = await LoadCallAsync("server/discover", null, budget, ct).ConfigureAwait(false); }
         catch (RpcException e) { throw new FallbackException($"server/discover: {e.Code} {e.Message}"); }
-        catch (HttpStatusException e) when (e.Status is 400 or 404 or 405) { throw new FallbackException(e.Message); }
+        catch (HttpStatusException e) when (e.Status is 400 or 404 or 405 or >= 500) { throw new FallbackException(e.Message); } // 5xx: Java SDK servers answer unknown methods with 500
         catch (WireException e) when (!Conn.IsStdio && e.Message.Contains("neither result nor error")) { throw new FallbackException(e.Message); }
         catch (OperationCanceledException) when (Conn.IsStdio && !ct.IsCancellationRequested)
         {

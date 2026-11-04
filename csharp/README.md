@@ -168,3 +168,39 @@ Everything else — the full surface, with runnable examples — lives on the do
 | **Cookbook** | [Zero to agent](https://muthuishere.github.io/toolnexus/cookbook/zero-to-agent/) · [MCP servers](https://muthuishere.github.io/toolnexus/cookbook/mcp-servers/) · [Agent skills](https://muthuishere.github.io/toolnexus/cookbook/agent-skills/) · [Judge](https://muthuishere.github.io/toolnexus/cookbook/judge/) |
 
 Contract across all eight ports: [`SPEC.md`](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
+
+## MCP 2026-07-28 + OAuth
+
+`McpSource.LoadAsync` / `Toolkit.CreateAsync` speak MCP **2026-07-28** first (SPEC §2): every server gets
+`server/discover` before anything else, over stdio or stateless Streamable HTTP, with no MCP SDK on that
+path. A server that is not a 2026-07-28 server (a JSON-RPC error, HTTP 400/404/405/5xx, or a silent stdio
+child) falls back to the frozen pre-2026 path, which still runs on the `ModelContextProtocol` SDK. Your
+config stays the same.
+
+- **MRTR → §10:** `input_required` rounds go through `WaitFor`. Without a `WaitFor` the tool returns
+  `{status:"pending"}`; re-running it with the `Answer` resumes that same round. A `tools/call` is never
+  re-sent after a lost connection, a timeout or a 5xx.
+- **Skills over MCP:** skills a server publishes through the skills extension join the one `skill` tool
+  (base `skill://<name>/`).
+- **Lazy tool search:** set `"toolSearch": true` (and optionally `"description"`) on a server. You then get
+  `<server>_search_tools` and `<server>_call_tool` instead of every tool.
+- **OAuth 2.1 (SPEC §2A):** the per-server `auth` object takes `clientId`, `clientSecret`,
+  `tokenAuthMethod`, `clientIds`, `clientMetadataUrl`, `redirectUri`, `mode` (`auto`|`pause`),
+  `omitRefreshResource` and `allowHttp`. The client uses a pre-registered client id or a Client ID Metadata
+  Document; dynamic client registration is never used. It does PKCE S256 + `resource`, iss/state checks,
+  single-flight refresh and step-up. `auto` opens the browser and listens on loopback. `pause` sends a §10
+  `authorization` request; answer it with `Data = { ["callbackUrl"] = "<redirected URL>" }`.
+
+```csharp
+await using var tk = await Toolkit.CreateAsync(new Toolkit.Options
+{
+    McpConfig = "mcp.json",
+    TokenStore = myStore,            // ITokenStore; default in-memory per load
+    OpenUrl = url => OpenBrowser(url), // auto mode; default is the OS opener
+    WaitFor = WaitFor,               // MRTR input + pause-mode authorization
+});
+```
+
+On the frozen fallback, the bearer goes onto the SDK's HTTP transport through a delegating handler. A 401
+there runs the same flow once. Not yet on the 2026 path: `list_mcp_resources` / `read_mcp_resource`
+(`ResourceTools()` only sees fallback servers), progress notifications, and the server side (`serve`).
