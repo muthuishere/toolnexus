@@ -52,33 +52,64 @@ file, no log file.
 A jevx profile *resolves to* a `ClassifierOptions`, and that is the only thing that reaches
 toolnexus. The spike's `Registry` (`spikes/jevx-core/core.go`) is jevx-side code.
 
-**D3. One backend enum covers every decision source.** `ClassifierBackend` already has `typesafe`
-and `openrouter` (`classifier.go:469`). It grows to:
+**D3. One classifier, one style, one enum.** The owner, 2026-11-04: *"all should be one single
+style classifier and also should support images."* A host makes one `Classifier`, and the
+`ClassifierBackend` enum is the only thing that picks where it goes. Every backend:
+- takes the same System One questions (`noul`, `choice`, `score`);
+- returns the same `Decision`;
+- accepts the same text **or image** items.
 
-| enum | wire | default base / model / key env |
+There is no per-backend style for a host to choose.
+
+| enum | how the classifier reaches it | default base / model / key env |
 |---|---|---|
-| `typesafe` | System One `POST {base}/systemone` | `api.typesafe.ai/v1`, `jev-latest`, `TYPESAFE_API_KEY` (existing) |
-| `openrouter` | System One `POST {base}/systemone` | `openrouter.ai/api/v1`, `typesafe/jev-1.13`, `OPENROUTER_API_KEY` (existing) |
-| `cloudflare` | System One inside Cloudflare's `/ai/run` envelope (`{model, input}` → `{result, success}`, with the nested `state: Completed` unwrap) | account URL from `${CLOUDFLARE_ACCOUNT_ID}`, `typesafe/jev`, `CLOUDFLARE_JEV_API_KEY`. This ports jevx `core/core.go:770–815` |
-| `openai` | **decisions from an OpenAI-compatible chat model**: the existing `StyleLLM` structured-output rendering over a §8 client, `Calibrated=false` | `api.openai.com/v1`, the host's model, `OPENAI_API_KEY` |
+| `typesafe` | System One `POST {base}/systemone` | `api.typesafe.ai/v1`, `jev-latest`, `TYPESAFE_API_KEY` (exists) |
+| `openrouter` | System One `POST {base}/systemone` | `openrouter.ai/api/v1`, `typesafe/jev-1.13`, `OPENROUTER_API_KEY` (exists) |
+| `cloudflare` | the System One body inside Cloudflare's `/ai/run` wrapper (`{model, input}` → `{result, success}`, plus the nested `state: Completed` unwrap). This ports jevx `core/core.go:770–815` | account URL from `${CLOUDFLARE_ACCOUNT_ID}`, `typesafe/jev`, `CLOUDFLARE_JEV_API_KEY` |
+| `openai` | the same System One questions, answered by an OpenAI-compatible chat model through structured output. The classifier does the translation internally, so the host sees the same `Decision`, with `Calibrated=false` | `api.openai.com/v1`, the host's model, `OPENAI_API_KEY` |
 
-An explicit `BaseURL`, `Model` or `APIKeyEnv` still wins over the preset. This replaces the
-earlier "full-URL endpoint" gap (U1). jevx's custom profiles keep working as `BaseURL` overrides
-on `typesafe`.
+An explicit `BaseURL`, `Model` or `APIKeyEnv` still overrides the preset, and that covers
+self-hosted endpoints. The current `Style` option (`systemone | llm | custom | static`) is folded
+in:
+- `llm` becomes the `openai` backend;
+- `static` and `custom` stay as test and host-supplied seams, not product backends.
 
-*Assumption:* "openai decisions" means a chat model answering through structured output, not a
-System One endpoint hosted by OpenAI. If OpenAI should instead be a System One-shaped wire, it
-becomes a fifth row.
+Whether to deprecate `Style` or keep it as an alias is decided in the OpenSpec change.
 
-**D4. Image items go into the System One wire (gap I1).** The latest TypeSafe API accepts
-images. An item that holds a §8A `ContentPart` is encoded into the System One request for
-`typesafe` and `openrouter`, once the gateway is confirmed to pass images through. `openai` sends
-it through `Client.RunParts` (`client.go:846`) instead of the text-only `Run`
-(`classifier.go:997`). A backend that cannot carry an image fails loudly; it never turns the
-image into a description.
+**D4. Images are part of the contract on every backend (gap I1).** The latest TypeSafe API
+accepts images. An item is text or a §8A `ContentPart`:
+- `typesafe`, `openrouter`, `cloudflare`: the image goes on the System One wire. The exact
+  encoding is taken from TypeSafe's current API reference when the change is written; it is not
+  guessed here.
+- `openai`: the image goes as a native image part (the client's `RunParts` path), not through the
+  text-only `Run`.
 
-The exact image wire shape, and whether `cloudflare` accepts images, is taken from TypeSafe's
-current API reference when the change is written. It is not guessed here.
+If a gateway turns out to drop images, the call fails loudly. The image is never turned into a
+text description.
+
+### Cross-port check (2026-11-04, this branch)
+
+All eight ports are aligned today, and all of them have the same gaps:
+
+| port | backend enum today | styles | images in the classifier | llm path |
+|---|---|---|---|---|
+| js | `typesafe \| openrouter` (`classifier.ts:34`) | 4 | none | text `client.run` (`:767`) |
+| python | same (`classifier.py:126`) | 4 (`:120`) | none | text `client.run` (`:879`) |
+| golang | same (`classifier.go:469`) | 4 | none | text `Client.Run` (`:1019`) |
+| java | same (`Classifier.java:78`) | 4 | none | text `client.run` (`:949`) |
+| csharp | same (`Classifier.cs:582`) | 4 | none | text |
+| elixir | same (`classifier.ex:122`) | 4 | none | text `Client.run` (`:979`) |
+| clojure | same (`classifier.cljc:60`) | 4 | none | text |
+| rust | same (`classifier.rs:90`) | 4 | none | text |
+
+So the change is the same everywhere:
+- add `cloudflare` and `openai` to the enum;
+- fold `Style` into the backend;
+- add image items on all four backends;
+- add the D5 helpers.
+
+Every port already has `ContentPart` (§8A) for its chat client, so the image type itself exists
+in all eight.
 
 **D5. Stateless verdict helpers come into toolnexus.** These are pure functions, with no state:
 - **T1** `Thresholds{Yes, No, MinConfidence}`, inclusive, applied to a `Decision`. jevx's saved
@@ -117,7 +148,7 @@ with the same profile, `--fresh` and `--no-context`. Any mismatch blocks that ve
 ## Not done
 
 - No library change and no OpenSpec change yet. The follow-up change (e.g.
-  `add-classifier-backends`) covers D3 (`cloudflare` and `openai` enum values), D4 (images) and
+  `add-classifier-backends`) covers D3 (one style: `cloudflare` and `openai` enum values, `Style` folded in), D4 (images on all four) and
   D5 (T1, V1, C1, L1) across all eight ports.
 - The spike still uses `ErrImageUnsupported`, because toolnexus cannot send images yet.
 - jevx's repo was not modified. The full 20–30-item gate has not run.
@@ -126,8 +157,8 @@ with the same profile, `--fresh` and `--no-context`. Any mismatch blocks that ve
 
 1. **Gate items.** Which real items should the gate use: Stop-hook turns you pick, wfnexus
    `wfx judge` item files, or the myjev question pack?
-2. **`openai` meaning.** Is "openai decisions" a chat model answering through structured output
-   (assumed above), or a System One endpoint?
+2. **`Style` option.** Should it be removed in the next breaking release, or kept as a
+   deprecated alias for the enum?
 3. **Images on OpenRouter and Cloudflare.** Do these gateways pass the image wire through, or is
    it TypeSafe-only at first?
 4. **Thresholds.** Should toolnexus ship jevx's inclusive `Thresholds` alongside `Bands`
