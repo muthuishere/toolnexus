@@ -95,7 +95,7 @@ internal sealed class SearchTool26 : ITool
             if (_call)
             {
                 var name = args.Get("name") as string ?? "";
-                var tools = await _server.ListToolsAsync(ct).ConfigureAwait(false);
+                var tools = await _server.AllowedToolsAsync(ct).ConfigureAwait(false);
                 if (!tools.Any(t => J.Str(t["name"]) == name))
                     return new ToolResult($"unknown tool \"{name}\" on {_server.Name}", true, meta);
                 return await _server.CallToolAsync(name, args.Get("arguments") as IDictionary<string, object?>, ctx).ConfigureAwait(false);

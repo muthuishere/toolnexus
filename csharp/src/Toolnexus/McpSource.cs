@@ -643,8 +643,10 @@ public sealed partial class McpSource : IAsyncDisposable
     private static async Task<List<ITool>> Tools26Async(string name, IDictionary<string, object?> cfg, Mcp2026.Server26 s, CancellationToken ct)
     {
         var defs = await s.ListToolsAsync(ct).ConfigureAwait(false);
+        var filter = ToolsFilterOf(cfg);
+        if (filter != null) s.Filter = all => ApplyToolsFilter(name, all, d => Mcp2026.J.Str(d["name"], ""), filter);
         if (s.ToolSearch) return new List<ITool> { new Mcp2026.SearchTool26(s, false), new Mcp2026.SearchTool26(s, true) };
-        var kept = ApplyToolsFilter(name, defs, d => Mcp2026.J.Str(d["name"], ""), ToolsFilterOf(cfg));
+        var kept = s.Filter != null ? s.Filter(defs) : defs;
         return kept.Select(d => (ITool)new Mcp2026.McpTool26(s, d)).ToList();
     }
 

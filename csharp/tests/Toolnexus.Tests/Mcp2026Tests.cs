@@ -306,6 +306,23 @@ public class Mcp2026Tests
     }
 
     [Fact]
+    public async Task ToolsFilterAppliesBeforeToolSearch()
+    {
+        var server = Fx.Server.Fixture();
+        await using var host = await Fx.HttpHost.StartAsync(server);
+        await using var src = await McpSource.LoadAsync(Cfg("fx", Http(host.Url + "/mcp", new()
+        {
+            ["toolSearch"] = true, ["tools"] = new Dictionary<string, object?> { ["echo"] = false },
+        })));
+        Assert.Equal("[]", (await Tool(src, "fx_search_tools").ExecuteAsync(Args(("query", "echo text")))).Output);
+        Assert.Contains("\"greet\"", (await Tool(src, "fx_search_tools").ExecuteAsync(Args(("query", "greet")))).Output);
+        var r = await Tool(src, "fx_call_tool").ExecuteAsync(Args(("name", "echo"), ("arguments", Args(("text", "x")))));
+        Assert.True(r.IsError);
+        Assert.Equal("unknown tool \"echo\" on fx", r.Output);
+        Assert.Equal(0, server.Executions);
+    }
+
+    [Fact]
     public async Task ToolSearchAboutDefaultsToTheServerName()
     {
         await using var host = await Fx.HttpHost.StartAsync(Fx.Server.Fixture());

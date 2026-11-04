@@ -22,6 +22,15 @@ internal sealed class Server26 : IAsyncDisposable
     public JsonObject Discover { get; private set; } = new();
     public bool ToolSearch { get; init; }
     public string Description { get; init; } = "";
+    /// <summary>The per-server <c>tools</c> filter (original names); applied before tool search ranks or runs.</summary>
+    public Func<List<JsonObject>, List<JsonObject>>? Filter { get; set; }
+
+    /// <summary>tools/list after the per-server filter — the only tools search_tools ranks and call_tool runs.</summary>
+    public async Task<List<JsonObject>> AllowedToolsAsync(CancellationToken ct)
+    {
+        var all = await ListToolsAsync(ct).ConfigureAwait(false);
+        return Filter == null ? all : Filter(all);
+    }
 
     private List<JsonObject>? _toolCache;
     private DateTime _toolExpiry;
@@ -305,7 +314,7 @@ internal sealed class Server26 : IAsyncDisposable
     /// <summary>BM25 over name (×2, split on _ and camelCase) and description.</summary>
     public async Task<List<Dictionary<string, object?>>> SearchToolsAsync(string query, int limit, CancellationToken ct)
     {
-        var tools = await ListToolsAsync(ct).ConfigureAwait(false);
+        var tools = await AllowedToolsAsync(ct).ConfigureAwait(false);
         var docs = new List<List<string>>();
         var df = new Dictionary<string, int>();
         var total = 0;
