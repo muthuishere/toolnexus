@@ -170,6 +170,7 @@ from .mcp_source import (
     OnServer,
     mcp_hints,
 )
+from .mcp2026 import MemoryTokenStore, Token, TokenStore
 from .builtin_extras import BackgroundShellInfo, BackgroundShells, WebSearchResult
 from .client import ModelInfo, list_models
 from .prompt_cache import PromptCacheOptions
@@ -306,6 +307,10 @@ __all__ = [
     "parse_mcp_config",
     "elicitation_to_request",
     "answer_to_elicit_result",
+    # mcp oauth (§2A.1a)
+    "MemoryTokenStore",
+    "Token",
+    "TokenStore",
     # skill
     "SKILL_TOOL_DESCRIPTION",
     "SKILLS_PROMPT_PREAMBLE",
