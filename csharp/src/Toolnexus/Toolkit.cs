@@ -137,7 +137,7 @@ public sealed class Toolkit : IAsyncDisposable
     {
         // §2 Gap 3: the caller's token propagates through the MCP connect/list.
         var mcp = opts.McpConfig != null
-            ? await McpSource.LoadAsync(opts.McpConfig, new McpLoadOptions { WaitFor = opts.WaitFor, TokenStore = opts.TokenStore, OpenUrl = opts.OpenUrl }, cancellationToken).ConfigureAwait(false)
+            ? await McpSource.LoadAsync(opts.McpConfig, new McpLoadOptions { WaitFor = opts.WaitFor, TokenStore = opts.TokenStore, OpenUrl = opts.OpenUrl, DisableTools = opts.DisableTools }, cancellationToken).ConfigureAwait(false)
             : null;
         // Skills come from directories, in-memory data, and/or a lazy provider (§3,
         // S1). The provider is resolved here and merged with the data list; a

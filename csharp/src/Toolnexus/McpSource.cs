@@ -1,3 +1,4 @@
+using System.Text.Json.Nodes;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Threading;
@@ -310,7 +311,7 @@ public sealed partial class McpSource : IAsyncDisposable
                     s26 = await Open26Async(name, cfg, timeout, waitFor, auth, cancellationToken).ConfigureAwait(false);
                     if (s26 != null)
                     {
-                        var converted26 = await Tools26Async(name, cfg, s26, cancellationToken).ConfigureAwait(false);
+                        var converted26 = await Tools26Async(name, cfg, s26, options.DisableTools, cancellationToken).ConfigureAwait(false);
                         var skills26 = s26.HasSkills ? await s26.LoadSkillsAsync(cancellationToken).ConfigureAwait(false) : new();
                         lock (gate)
                         {
@@ -640,11 +641,19 @@ public sealed partial class McpSource : IAsyncDisposable
     }
 
     /// <summary>The toolkit tools for a 2026-path server: every (filtered) server tool, or the two tool-search tools.</summary>
-    private static async Task<List<ITool>> Tools26Async(string name, IDictionary<string, object?> cfg, Mcp2026.Server26 s, CancellationToken ct)
+    private static async Task<List<ITool>> Tools26Async(string name, IDictionary<string, object?> cfg, Mcp2026.Server26 s,
+        IReadOnlyList<string>? disableTools, CancellationToken ct)
     {
         var defs = await s.ListToolsAsync(ct).ConfigureAwait(false);
         var filter = ToolsFilterOf(cfg);
-        if (filter != null) s.Filter = all => ApplyToolsFilter(name, all, d => Mcp2026.J.Str(d["name"], ""), filter);
+        var disabled = disableTools is { Count: > 0 } ? new HashSet<string>(disableTools) : null;
+        string Direct(JsonObject d) => global::Toolnexus.Tools.Sanitize(name) + "_" + global::Toolnexus.Tools.Sanitize(Mcp2026.J.Str(d["name"], ""));
+        if (filter != null || disabled != null)
+            s.Filter = all =>
+            {
+                var kept = filter != null ? ApplyToolsFilter(name, all, d => Mcp2026.J.Str(d["name"], ""), filter) : all;
+                return disabled == null ? kept : kept.Where(d => !disabled.Contains(Direct(d))).ToList();
+            };
         if (s.ToolSearch) return new List<ITool> { new Mcp2026.SearchTool26(s, false), new Mcp2026.SearchTool26(s, true) };
         var kept = s.Filter != null ? s.Filter(defs) : defs;
         return kept.Select(d => (ITool)new Mcp2026.McpTool26(s, d)).ToList();
