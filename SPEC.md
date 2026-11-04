@@ -322,6 +322,21 @@ config keys (absent ⇒ byte-identical behaviour): `auth` (§2A), `description` 
   or an HTTP 400/404 equivalent from an old server) ⇒ **frozen fallback** (§2.F). Any other failure is a
   load failure (status `failed`, isolated, never fatal).
 
+### 2.2a Fallback trigger and stdio (pinned for the library, change `upgrade-mcp-2026-07-28` task 1.2)
+
+- **Fallback ⇒ frozen path (§2.F)** when `server/discover` gets: any JSON-RPC **error response** (old
+  servers answer `-32601`, `-32600` or a "not initialized" code before `initialize`), an HTTP **400, 404 or
+  405**, or a 2xx reply that is not a JSON-RPC response for the request, or a result without
+  `"2026-07-28"` in `supportedVersions`. Over **stdio**, a discover that gets no reply within
+  `min(timeout, 5 s)` also falls back (older servers may ignore a pre-`initialize` request). The probe child
+  is terminated and the frozen path starts its own process; its `env`/`cwd`/`command` are unchanged.
+- **Load failure** (status `failed`, isolated): connection refused / DNS, an HTTP 5xx, an HTTP 401/403 that
+  OAuth (§2A) could not satisfy, a stdio child that exits before replying.
+- **Caching (resolved):** `tools/list` is fetched once at load on the direct path (as §2.F); tool search
+  caches it for `ttlMs` (no hint ⇒ fetched once per load). **stdio concurrency (resolved):** allowed,
+  demultiplexed by `id`.
+- **Resource on refresh (resolved):** sent by default (spec MUST); `auth.omitRefreshResource: true` drops it.
+
 ### 2.3 Every request
 
 - `params._meta` carries `io.modelcontextprotocol/protocolVersion: "2026-07-28"`,
@@ -606,6 +621,29 @@ omitRefreshResource?: bool, allowHttp?: bool }`, plus a host-supplied **token st
     expired`. Hosts that already answer `authorization` requests (URL elicitation) get OAuth for free.
 11. **Token handling.** Credentials are keyed by issuer and sent only once the server's AS issuer is confirmed.
     Tokens, codes, verifiers and secrets are **never logged** and never appear in error text.
+
+### 2A.1a Library surface (pinned; names are per-port idiom of the same words)
+
+- **mcp.json** `auth` object exactly as 2A.1 (keys camelCase in every port's JSON).
+- **Load options** (the same place `waitFor` is passed to `loadMcp` / the toolkit today):
+  `tokenStore` — `{load(resource) -> Token|null, save(resource, Token), delete(resource)}`, default in-memory per
+  load; `openUrl(url)` — how `auto` mode opens the browser (default: the OS opener; tests inject an HTTP GET).
+- **Token** `{accessToken, refreshToken?, expiresAt?, scopes[], issuer, clientId}`; its string/debug form never
+  shows a token value.
+- **Pause answer:** the host answers the §10 `authorization` request with
+  `Answer{id, ok:true, data:{callbackUrl:"<the full URL the AS redirected to>"}}`; `ok:false` ⇒ the load or tool
+  call fails with `authorization denied: <reason or "cancelled">`. With no `waitFor`, a pause during **load**
+  marks that server `failed` with `authorization pending` (isolated); during a **tool call** it returns the §10
+  `{status:"pending"}` result like any other MRTR request, and the resumed answer completes the flow and
+  sends the paused request once.
+- **mode default:** `auto` unless the config says `pause`. A `redirectUri` is required for `pause`, optional for
+  `auto` (default loopback).
+- **Frozen fallback + OAuth:** a port whose fallback still uses an MCP SDK attaches the bearer token as an
+  `Authorization` header to that SDK's HTTP transport; a 401 from the SDK path triggers the same flow once.
+  Where a port's SDK cannot take a dynamic header, that port says so in its README and `CHANGELOG.md`.
+- **Server side (§2A.2, §7C) is a follow-up** that builds on `serve`'s MCP handler from change
+  `add-mcp-serve-handler` (PR #140); the in-process dev authorization server ships with it. Until then ports
+  carry a dev AS in **test support code** only.
 
 ### 2A.2 Server (`serve` MCP profile)
 
