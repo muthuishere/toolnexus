@@ -52,6 +52,11 @@ exceeded". The official MCP Java SDK 2.0.0 client sends `MCP-Protocol-Version: 2
 requests even after it negotiated 2025-06-18, so it needs `supportedProtocolVersions(List.of("2025-06-18"))`
 against a default handler.
 
+**Rust: a source change if you build `Tool` with a struct literal.** `Tool` has two new public fields,
+`output_schema` and `annotations`. A literal that names every field no longer compiles until you add
+`output_schema: None, annotations: None` (or end it with `..Default::default()`). The builders
+(`with_output_schema`, `with_annotations`) are unaffected.
+
 toolnexus has no tenant, role or storage concepts here: those stay in your hooks (ADR 0039).
 `Serve(addr, {mcp})` is unchanged apart from the optional structured fields. **Not done:** when you
 run several replicas, elicitation answers need sticky routing. The docs-page examples are run in CI
