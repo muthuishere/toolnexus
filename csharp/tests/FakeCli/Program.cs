@@ -61,6 +61,17 @@ static class FakeOneShot
                 case "--argv":
                     Console.Out.Write("{\"content\":" + Util.J(string.Join(" ", args)) + "}");
                     return 0;
+                default:
+                    // Style-agnostic: every built-in style's real argv works — the prompt as an
+                    // arg, the {{file}} temp file, the {{out}} temp path (not created yet).
+                    var a = args[i];
+                    if (a.StartsWith(CliClient.Preamble[..20])) prompt = a;
+                    else if (Path.GetFileName(a).Contains("toolnexus-cli-"))
+                    {
+                        if (File.Exists(a)) prompt = File.ReadAllText(a);
+                        else outFile = a;
+                    }
+                    break;
             }
         }
         if (prompt == "") prompt = Console.In.ReadToEnd();

@@ -182,9 +182,12 @@ LlmClient plain = client;                               // usable anywhere an Ll
   server. Only calls to served tools are allowed; the agent's own shell, edit and fetch are
   rejected. Agents without http MCP get a stdio bridge (`BridgeCommand`, default
   `toolnexus mcp-bridge` when the Go CLI is on PATH; `CliClient.RunMcpBridgeAsync` is the same
-  thing as a function). Streaming over ACP is not supported in the C# port yet; use `RunAsync`.
+  thing as a function).
 - **One-shot**: the conversation goes in under a fixed preamble, the reply is parsed as an
-  OpenAI-shaped envelope, and tool calls run in the toolnexus loop. Streaming is refused.
+  OpenAI-shaped envelope, and tool calls run in the toolnexus loop.
+- **Streaming** (`StreamAsync`) works on both transports but is not incremental: the turn runs
+  normally, the loop's `ToolCall`/`ToolResult` events arrive, then the whole answer as one `Text`
+  event, then `Done`.
 - Errors are pinned (`cli: command not found: <bin>`, `cli: exit <code>: <stderr>`,
   `cli: empty reply`, `cli: no output file`, `cli: timed out after <ms>ms`), thrown as
   `CliException`. Default call timeout 300000 ms (`CallTimeoutMs`). `Usage` is always zero.

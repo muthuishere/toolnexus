@@ -1,3 +1,4 @@
+using System.Text;
 using System.Text.Json;
 
 namespace Toolnexus.Tests;
@@ -255,12 +256,87 @@ public class CliClientTests
         }
     }
 
-    [Fact]
-    public async Task OneShotRefusesStreaming()
+    private static async Task<(List<LlmClient.StreamKind> Kinds, string Text)> StreamCli(CliClient c, string prompt, Toolkit? tk)
     {
-        using var c = CliClient.Create(FakeCliOpts("x"));
-        var e = await Assert.ThrowsAnyAsync<Exception>(() => c.StreamAsync("hi", null, _ => { }));
-        Assert.Contains("cli: streaming is not supported by the one-shot CLI transport; use Run", e.ToString());
+        var kinds = new List<LlmClient.StreamKind>();
+        var text = new StringBuilder();
+        await c.StreamAsync(prompt, tk, ev =>
+        {
+            lock (kinds)
+            {
+                kinds.Add(ev.Type);
+                if (ev.Type == LlmClient.StreamKind.Text) text.Append(ev.Delta);
+            }
+        });
+        return (kinds, text.ToString());
+    }
+
+    [Fact]
+    public async Task OneShotStreamsNonIncrementally()
+    {
+        await using var tk = await BadgeToolkit();
+        using var c = CliClient.Create(FakeCliOpts("tool"));
+        var (kinds, text) = await StreamCli(c, "What is my badge number?", tk);
+        Assert.Contains("BADGE-77Q", text);
+        var seq = kinds.Where(k => k != LlmClient.StreamKind.Usage).ToList();
+        Assert.Equal(new[] { LlmClient.StreamKind.ToolCall, LlmClient.StreamKind.ToolResult,
+            LlmClient.StreamKind.Text, LlmClient.StreamKind.Done }, seq);
+    }
+
+    /// <summary>A POSIX wrapper so a built-in style's argv reaches the fake CLI dll.</summary>
+    private static string FakeCliWrapper()
+    {
+        var p = TempFile() + ".sh";
+        File.WriteAllText(p, "#!/bin/sh\nexec dotnet \"" + FakeDll() + "\" \"$@\"\n");
+        if (!OperatingSystem.IsWindows()) File.SetUnixFileMode(p, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        return p;
+    }
+
+    [Fact]
+    public async Task StreamEveryStyleBothTransports()
+    {
+        var wrapper = FakeCliWrapper();
+        try
+        {
+            var styles = new[] { CliStyles.Claude, CliStyles.Codex, CliStyles.Copilot, CliStyles.Opencode,
+                CliStyles.Devin, CliStyles.Gemini, CliStyles.Goose, CliStyles.Custom };
+            foreach (var st in styles)
+                foreach (var tr in new[] { CliTransports.Cli, CliTransports.Acp })
+                {
+                    var tk = await BadgeToolkit();
+                    await using var _tk = tk;
+                    var o = new CliOptions
+                    {
+                        Style = st, Command = wrapper, Transport = tr, Toolkit = tk,
+                        Env = new Dictionary<string, string> { ["TN_FAKE_CLI"] = "tool" },
+                    };
+                    if (st == CliStyles.Custom)
+                    {
+                        o.Args = new List<object?>();
+                        o.Prompt = "stdin";
+                        o.Answer = "stdout";
+                    }
+                    if (tr == CliTransports.Acp)
+                    {
+                        var (fo, rec, ftk) = await FakeAcpOpts(new() { ["FAKE_HTTP"] = "1" });
+                        await ftk.DisposeAsync();
+                        File.Delete(rec);
+                        fo.Env!.Remove("TN_FAKE_REC");
+                        o.Env = fo.Env;
+                        o.BridgeCommand = fo.BridgeCommand;
+                        o.AcpCommand = new List<string> { "dotnet", FakeDll(), "acp" };
+                    }
+                    using var c = CliClient.Create(o);
+                    var (kinds, text) = await StreamCli(c, "What is my badge number?", tk);
+                    var tag = $"{st}/{tr}";
+                    Assert.True(kinds.Count > 0 && kinds[^1] == LlmClient.StreamKind.Done, tag + " last event not done");
+                    Assert.True(text.Contains("BADGE-77Q"), $"{tag} text={text}");
+                    if (tr == CliTransports.Cli)
+                        Assert.True(kinds.Contains(LlmClient.StreamKind.ToolCall), tag + " missing tool_call");
+                    Assert.Equal(tr == CliTransports.Cli ? "cli" : "acp", c.Transport);
+                }
+        }
+        finally { File.Delete(wrapper); }
     }
 
     // -----------------------------------------------------------------------
@@ -295,6 +371,20 @@ public class CliClientTests
         var info = c.AcpSession();
         Assert.NotNull(info);
         Assert.Equal(2, info!.ServedCalls.Count);
+    }
+
+    [Fact]
+    public async Task AcpStreamsNonIncrementally()
+    {
+        var (o, rec, tk) = await FakeAcpOpts(new() { ["FAKE_HTTP"] = "1" });
+        await using var _tk = tk;
+        using var c = CliClient.Create(o);
+        var (kinds, text) = await StreamCli(c, "badge?", null);
+        File.Delete(rec);
+        Assert.Equal("acp", c.Transport);
+        Assert.Contains("BADGE-77Q", text);
+        Assert.Equal(LlmClient.StreamKind.Done, kinds[^1]);
+        Assert.Equal(1, kinds.Count(k => k == LlmClient.StreamKind.Text));
     }
 
     [Fact]
