@@ -155,3 +155,19 @@ Everything else — the full surface, with runnable examples — lives on the do
 | **Cookbook** | [Zero to agent](https://muthuishere.github.io/toolnexus/cookbook/zero-to-agent/) · [MCP servers](https://muthuishere.github.io/toolnexus/cookbook/mcp-servers/) · [Agent skills](https://muthuishere.github.io/toolnexus/cookbook/agent-skills/) · [Judge](https://muthuishere.github.io/toolnexus/cookbook/judge/) |
 
 Contract across all eight ports: [`SPEC.md`](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
+
+## CLI client — an installed agent CLI as the model (SPEC §8C)
+
+```elixir
+{:ok, cli} = Toolnexus.Cli.create_client(style: :copilot, command: "copilot", toolkit: tk)
+result = Toolnexus.Cli.run(cli, "What is my badge number?", tk)
+Toolnexus.Cli.transport(cli)   # "auto" until the first call, then "acp" or "cli"
+Toolnexus.Cli.close(cli)
+```
+
+- `:style` is a closed atom set (`Toolnexus.Cli.styles/0`): `:claude :codex :copilot :opencode :devin :gemini :goose :custom`. Strings are refused. A user style comes from `Toolnexus.Cli.load_style/1` (`:style_def`).
+- `:command` is **required**, and nothing is defaulted: `cli: Command is required (path or name of the CLI binary)`.
+- `:transport` is `:auto` (the default), `:acp` or `:cli`. Auto uses ACP and falls back to the one-shot CLI only when the agent fails to start or to answer `initialize`; `fallback_reason/1` says why.
+- **ACP**: the toolkit is served as MCP on `127.0.0.1:<ephemeral>/mcp` behind a per-session bearer token. `skill` is served as `load_skill`, and `:before_tool`/`:after_tool` hooks run at the server boundary. Permissions are decided per `toolCallId`: our tools are allowed and everything else is rejected.
+- **One-shot**: a fixed preamble plus the OpenAI-shaped request. The reply is parsed tolerantly and tool calls run in the toolnexus loop. Streaming is refused. Errors are pinned (`cli: exit <code>: …`, `cli: empty reply`, `cli: no output file`, `cli: timed out after <ms>ms`, `cli: command not found: <bin>`). The default call timeout is 300000 ms.
+- `usage` is zero: the CLI owns the billing.

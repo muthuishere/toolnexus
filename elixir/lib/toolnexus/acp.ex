@@ -67,7 +67,23 @@ defmodule Toolnexus.Acp do
       Defaults to `File.cwd!()`. A real `devin acp` rejects `session/new`
       with `-32602 Invalid params` on a relative or missing `cwd`.
     * `:mcp_servers` — the `mcpServers` array on `session/new` (default `[]`).
-      Real `devin acp` requires the key to be present, even empty.
+      Real `devin acp` requires the key to be present, even empty. An entry
+      given as an atom-keyed map `%{name:, url:, headers:, command:, args:,
+      env:}` is resolved against the agent's `initialize` result (SPEC §8C):
+      the http shape `{type:"http",name,url,headers:[{name,value}]}` when the
+      agent advertises `agentCapabilities.mcpCapabilities.http` (or the entry
+      has no command), else the stdio shape `{name,command,args,env:[…]}` with
+      no `type`. String-keyed maps are sent verbatim.
+    * `:client_caps_meta` — sent as `initialize` `clientCapabilities._meta`.
+    * `:model` — passed through unchanged after `session/new`: first as
+      `session/set_config_option {configId:"model"}`, then, if the agent
+      rejects that, as `session/set_model`. Both failing fails the connect.
+    * `:stderr` — a file path that receives the agent's stderr (appended);
+      default: discarded.
+    * `:on_permission` — `(params -> option_id | nil)` decides each
+      `session/request_permission`; `nil` answers with a `reject*` option.
+      Absent ⇒ the first `allow*` option (the model-source default).
+    * `:on_update` — `(params -> any)` observes every raw `session/update`.
     * `:environment` / `:env` — extra env vars for the child.
     * `:timeout` — per-RPC-call timeout in ms (default 30000), covering
       `initialize` and `session/new` during connect, and each
@@ -182,7 +198,8 @@ defmodule Toolnexus.Acp do
     cfg = %{
       "command" => command,
       "cwd" => Keyword.get(opts, :cwd),
-      "environment" => Keyword.get(opts, :environment) || Keyword.get(opts, :env) || %{}
+      "environment" => Keyword.get(opts, :environment) || Keyword.get(opts, :env) || %{},
+      "stderr_path" => Keyword.get(opts, :stderr)
     }
 
     timeout = Keyword.get(opts, :timeout, @default_timeout)
@@ -190,10 +207,13 @@ defmodule Toolnexus.Acp do
     case Stdio.open(cfg) do
       {:ok, stdio} ->
         case handshake(stdio, opts, timeout) do
-          {:ok, session_id} ->
+          {:ok, session_id, sent} ->
             {:ok,
              %{
                stdio: stdio,
+               mcp_servers_sent: sent,
+               on_permission: Keyword.get(opts, :on_permission),
+               on_update: Keyword.get(opts, :on_update),
                buffer: "",
                next_id: 2,
                session_id: session_id,
@@ -211,8 +231,16 @@ defmodule Toolnexus.Acp do
         end
 
       {:error, reason} ->
-        {:stop, reason}
+        {:stop, {:start, reason}}
     end
+  end
+
+  @doc """
+  Read-only view of the live session: `%{mcp_servers_sent: [...], os_pid: integer | nil}`.
+  """
+  @spec info(pid()) :: map()
+  def info(pid) do
+    GenServer.call(pid, :info, 5_000)
   end
 
   # The handshake (`initialize` then `session/new`) runs synchronously inside
@@ -223,50 +251,140 @@ defmodule Toolnexus.Acp do
   defp handshake(stdio, opts, timeout) do
     init_id = "c-1"
 
-    send_req(stdio, init_id, "initialize", %{
-      "protocolVersion" => 1,
-      "clientCapabilities" => %{"fs" => %{"readTextFile" => false, "writeTextFile" => false}}
-    })
+    caps = %{"fs" => %{"readTextFile" => false, "writeTextFile" => false}, "terminal" => false}
 
-    with {:ok, _} <- await_handshake_reply(stdio, init_id, "", timeout) do
+    caps =
+      case Keyword.get(opts, :client_caps_meta) do
+        nil -> caps
+        meta -> Map.put(caps, "_meta", meta)
+      end
+
+    send_req(stdio, init_id, "initialize", %{"protocolVersion" => 1, "clientCapabilities" => caps})
+
+    with {:ok, init_result} <-
+           tag(:initialize, await_handshake_reply(stdio, init_id, "", timeout, "initialize")) do
+      http_ok =
+        get_in(init_result || %{}, ["agentCapabilities", "mcpCapabilities", "http"]) == true
+
       new_id = "c-2"
       cwd = Keyword.get(opts, :cwd) || File.cwd!()
-      mcp_servers = Keyword.get(opts, :mcp_servers, [])
+      mcp_servers = Enum.map(Keyword.get(opts, :mcp_servers, []), &wire_server(&1, http_ok))
 
       send_req(stdio, new_id, "session/new", %{"cwd" => cwd, "mcpServers" => mcp_servers})
 
-      case await_handshake_reply(stdio, new_id, "", timeout) do
-        {:ok, result} -> {:ok, result["sessionId"]}
-        {:error, _} = err -> err
+      with {:ok, result} <-
+             tag(:session_new, await_handshake_reply(stdio, new_id, "", timeout, "session/new")),
+           sid = result["sessionId"],
+           :ok <- set_model(stdio, sid, Keyword.get(opts, :model), timeout) do
+        {:ok, sid, mcp_servers}
       end
     end
   end
 
-  defp await_handshake_reply(%Stdio{port: port} = stdio, want_id, buffer, timeout) do
+  defp tag(_step, {:ok, _} = ok), do: ok
+  defp tag(step, {:error, reason}), do: {:error, {step, reason}}
+
+  defp set_model(_stdio, _sid, m, _timeout) when m in [nil, ""], do: :ok
+
+  defp set_model(stdio, sid, model, timeout) do
+    send_req(stdio, "c-3", "session/set_config_option", %{
+      "sessionId" => sid,
+      "configId" => "model",
+      "value" => model
+    })
+
+    case await_handshake_reply(stdio, "c-3", "", timeout, "session/set_config_option") do
+      {:ok, _} ->
+        :ok
+
+      {:error, e1} ->
+        send_req(stdio, "c-4", "session/set_model", %{"sessionId" => sid, "modelId" => model})
+
+        case await_handshake_reply(stdio, "c-4", "", timeout, "session/set_model") do
+          {:ok, _} -> :ok
+          {:error, e2} -> {:error, {:set_model, model, e1, e2}}
+        end
+    end
+  end
+
+  @doc false
+  # SPEC §8C: an atom-keyed entry picks its wire shape from the agent's
+  # advertised http capability; header/env maps go out as sorted [{name,value}].
+  def wire_server(%{} = s, http_ok) do
+    if Enum.any?(Map.keys(s), &is_atom/1) do
+      url = s[:url]
+      command = s[:command]
+
+      if url not in [nil, ""] and (http_ok or command in [nil, ""]) do
+        %{
+          "type" => "http",
+          "name" => s[:name],
+          "url" => url,
+          "headers" => name_values(s[:headers])
+        }
+      else
+        %{
+          "name" => s[:name],
+          "command" => command,
+          "args" => s[:args] || [],
+          "env" => name_values(s[:env])
+        }
+      end
+    else
+      s
+    end
+  end
+
+  defp name_values(nil), do: []
+
+  defp name_values(m) do
+    m
+    |> Enum.sort_by(fn {k, _} -> to_string(k) end)
+    |> Enum.map(fn {k, v} -> %{"name" => to_string(k), "value" => to_string(v)} end)
+  end
+
+  defp await_handshake_reply(%Stdio{port: port} = stdio, want_id, buffer, timeout, method) do
     receive do
       {^port, {:data, chunk}} ->
         {lines, rest} = Stdio.split_lines(buffer <> chunk)
 
-        case find_reply(lines, want_id) do
+        case find_reply(lines, want_id, stdio) do
           {:found, result} -> result
-          :not_found -> await_handshake_reply(stdio, want_id, rest, timeout)
+          :not_found -> await_handshake_reply(stdio, want_id, rest, timeout, method)
         end
 
-      {^port, {:exit_status, code}} ->
-        {:error, {:acp_process_exited, code}}
+      {^port, {:exit_status, _code}} ->
+        {:error, {:agent_exited, method}}
     after
       timeout -> {:error, :timeout}
     end
   end
 
-  defp find_reply([], _id), do: :not_found
+  defp find_reply([], _id, _stdio), do: :not_found
 
-  defp find_reply([line | rest], id) do
+  defp find_reply([line | rest], id, stdio) do
     case Jason.decode(line) do
-      {:ok, %{"id" => ^id, "result" => result}} -> {:found, {:ok, result}}
-      {:ok, %{"id" => ^id, "error" => err}} -> {:found, {:error, {:acp_error, err}}}
-      _ -> find_reply(rest, id)
+      {:ok, %{"id" => ^id, "result" => result}} ->
+        {:found, {:ok, result}}
+
+      {:ok, %{"id" => ^id, "error" => err}} ->
+        {:found, {:error, {:acp_error, err}}}
+
+      {:ok, %{"method" => m, "id" => rid}} when not is_nil(rid) ->
+        method_not_found(stdio, rid, m)
+        find_reply(rest, id, stdio)
+
+      _ ->
+        find_reply(rest, id, stdio)
     end
+  end
+
+  defp method_not_found(stdio, id, method) do
+    Stdio.send_msg(stdio, %{
+      "jsonrpc" => "2.0",
+      "id" => id,
+      "error" => %{"code" => -32601, "message" => "method not found: #{method}"}
+    })
   end
 
   defp send_req(stdio, id, method, params) do
@@ -293,6 +411,10 @@ defmodule Toolnexus.Acp do
     # A prior turn on this session is still in flight — one ACP session is
     # one conversation, so this turn is queued rather than interleaved.
     {:noreply, %{state | queue: :queue.in({text, from}, state.queue)}}
+  end
+
+  def handle_call(:info, _from, state) do
+    {:reply, %{mcp_servers_sent: state.mcp_servers_sent, os_pid: state.stdio.os_pid}, state}
   end
 
   def handle_call(:close, _from, state) do
@@ -326,7 +448,7 @@ defmodule Toolnexus.Acp do
   end
 
   def handle_info({port, {:exit_status, _code}}, %{stdio: %Stdio{port: port}} = state) do
-    state = fail_all(state, :acp_process_exited)
+    state = fail_all(state, {:agent_exited, "session/prompt"})
     {:noreply, %{state | closed: true}}
   end
 
@@ -348,11 +470,26 @@ defmodule Toolnexus.Acp do
   end
 
   defp route(%{"method" => "session/update", "params" => params}, state) do
+    if is_function(state.on_update, 1) do
+      try do
+        state.on_update.(params)
+      rescue
+        _ -> :ok
+      end
+    end
+
     accumulate(state, params)
   end
 
   defp route(%{"method" => "session/request_permission", "id" => id, "params" => params}, state) do
-    answer_permission(state.stdio, id, params)
+    answer_permission(state, id, params)
+    state
+  end
+
+  # An agent->client REQUEST we do not implement (fs/*, terminal/* — declared
+  # unsupported in clientCapabilities): answer it, or the agent waits forever.
+  defp route(%{"method" => m, "id" => id}, state) when not is_nil(id) do
+    method_not_found(state.stdio, id, m)
     state
   end
 
@@ -365,14 +502,25 @@ defmodule Toolnexus.Acp do
 
   defp accumulate(state, _params), do: state
 
-  defp answer_permission(stdio, id, params) do
+  defp answer_permission(%{stdio: stdio, on_permission: decide}, id, params) do
     options = params["options"] || []
 
-    chosen =
+    first_of = fn prefix ->
       Enum.find_value(options, fn o ->
         kind = to_string(o["kind"] || "")
-        if String.starts_with?(kind, "allow"), do: o["optionId"]
+        if String.starts_with?(kind, prefix), do: o["optionId"]
       end)
+    end
+
+    chosen =
+      if is_function(decide, 1) do
+        case safe_decide(decide, params) do
+          id when is_binary(id) and id != "" -> id
+          _ -> first_of.("reject")
+        end
+      else
+        first_of.("allow")
+      end
 
     result =
       if chosen do
@@ -382,6 +530,12 @@ defmodule Toolnexus.Acp do
       end
 
     Stdio.send_msg(stdio, %{"jsonrpc" => "2.0", "id" => id, "result" => result})
+  end
+
+  defp safe_decide(decide, params) do
+    decide.(params)
+  rescue
+    _ -> nil
   end
 
   defp join_chunks(state), do: state.chunks |> Enum.reverse() |> Enum.join("")
@@ -411,7 +565,14 @@ defmodule Toolnexus.Acp do
 
   @impl true
   def terminate(_reason, state) do
-    if state[:stdio], do: Stdio.close(state.stdio)
+    if state[:stdio] do
+      # The agent may be a tree (an `npx …` adapter): collect its descendants
+      # while it is alive, close it, then make sure none survive.
+      kids = Toolnexus.Cli.Proc.descendants(state.stdio.os_pid)
+      Stdio.close(state.stdio)
+      Toolnexus.Cli.Proc.kill(kids)
+    end
+
     :ok
   end
 end
