@@ -413,6 +413,8 @@ Opt-in per server: `"toolSearch": true` (+ optional `"description": "<what this 
   `description`, else the server name. In `call_tool`, `name` is the **server's** tool name (as returned by
   `search_tools`), not the prefixed toolkit name; an unknown name is a tool error
   `unknown tool "<name>" on <server>`.
+- **`search_tools` result text** is the JSON array of hits (`[{name, description, inputSchema, server}, …]`,
+  best first, at most `limit`, default 5), serialised compactly; no match ⇒ `[]`.
 - Direct server-tool names are hidden in this mode. Search is client-side (the spec has no search method):
   `tools/list` is fetched once and cached for its `ttlMs`.
 
