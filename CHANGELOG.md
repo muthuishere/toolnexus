@@ -8,6 +8,29 @@ GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
 
 ## Unreleased
 
+**MCP serve you can mount yourself, with auth, per-request tools and a confirm gate (golang only so
+far).** `Serve(addr, {mcp})` owns its port and shows everyone the same tools, so a host that wanted
+an MCP endpoint behind its own login had to write its own MCP server (#139). Now
+`tk.MCPHandler(cfg)` returns an `http.Handler` to mount on your own mux, behind your own TLS, CORS
+and OAuth, with plain hooks:
+
+- `Authenticate(r)` runs on every request; an error is HTTP 401 with your `WWW-Authenticate` header.
+  What it returns reaches every hook and tool via `IdentityFrom(ctx)`.
+- `ListTools(ctx)` decides the tools per request (they can be built at runtime). A `tools/call` for
+  a name not in that list is "tool not found" and never runs. `NotifyToolsChanged()` tells connected
+  clients to re-list.
+- `BeforeCall(ctx, tool, args)` returns allow, deny or confirm. Confirm asks the user through MCP
+  elicitation when the client supports it; otherwise the caller gets your own result (for example
+  "re-call with this nonce") or a plain "confirmation required" error.
+- `Tool.Annotations` (`title`, `readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`)
+  go out unchanged; `OnCall` reports identity, duration, error and result size for metering;
+  `ServerInfo(ctx)` brands `initialize`; resources and prompts hooks; your own `SessionIDs`, or `Stateless`.
+
+toolnexus has no tenant, role or storage concepts here: those stay in your hooks (ADR 0039). Speaks
+MCP protocol 2025-06-18 (and 2025-03-26). `Serve(addr, {mcp})` is unchanged. **Not done:** js,
+python, java, csharp, elixir, clojure and rust (tracked in `openspec/changes/add-mcp-serve-handler`);
+elicitation answers need sticky routing when you run several replicas.
+
 ## 0.24.0 — 2026-11-04
 
 **Media generation: images, video, speech, transcription, voice cloning and talking-head video,

@@ -1146,6 +1146,66 @@ Deferred (forward-compatible): a **stdio** transport (for local clients like Cla
 resources / prompts / sampling / completion (skills already reach clients via the `skill` tool), auth
 in core, and the Go CLI `serve --mcp` subcommand.
 
+### 7C.1 Embeddable MCP handler (`mcpHandler`) — ADR 0039
+
+A plain, embeddable streamable-HTTP MCP server with **generic** per-request hooks, for a host to mount
+on its own router behind its own TLS/CORS/OAuth. It has **no** tenant, user, role or storage concept:
+the host decides those inside the hooks. `serve(addr, {mcp})` above is unchanged. All types are
+toolnexus's own (never an SDK type), so every port can implement it on its own SDK or by hand.
+
+```
+toolkit.mcpHandler(cfg) -> Handler            // the port's native HTTP handler + notifyToolsChanged()
+cfg = {
+  name?, version?, instructions?,             // static serverInfo (defaults "toolnexus" / "0.1.0")
+  serverInfo?(ctx) -> {name, version, instructions}   // resolved at initialize; wins over the static fields
+  authenticate?(request) -> identity | error  // every HTTP request, before JSON-RPC parsing
+  wwwAuthenticate?(request, error) -> string  // header on the 401
+  listTools?(ctx) -> Tool[]                   // per request; nil ⇒ the toolkit's tools
+  beforeCall?(ctx, tool, rawArgs) -> {kind: allow|deny|confirm, message?, result?: ToolResult}
+  confirmTimeout?,                            // elicitation round-trip bound, default 5 min
+  onCall?({name, source, ms, isError, err, resultBytes, decision, identity, sessionId})
+  listResources?(ctx) -> Resource[], readResource?(ctx, uri) -> ResourceContent[]
+  listPrompts?(ctx) -> Prompt[], getPrompt?(ctx, name, args) -> {description?, messages:[{role, text}]}
+  sessionIds?: { generate(ctx), validate(ctx, id) -> bool, terminate(ctx, id) }   // default in-memory
+  stateless?: bool                            // no Mcp-Session-Id at all
+}
+identityFrom(ctx), requestFrom(ctx), mcpSessionIdFrom(ctx)
+Tool.annotations? = { title?, readOnlyHint?, destructiveHint?, idempotentHint?, openWorldHint? }
+```
+
+- **Transport** (protocol `2025-06-18`, also `2025-03-26`): `POST` JSON-RPC ⇒ `application/json`, or
+  `text/event-stream` when a server→client request is sent first; notifications and client responses
+  ⇒ `202`; `GET` with `Accept: text/event-stream` ⇒ a stream for server notifications, else `405`;
+  `DELETE` ⇒ terminate the session. `initialize` echoes the client's protocol version when supported,
+  else the newest supported, and returns `Mcp-Session-Id` (stateful). A non-initialize request without
+  a session ⇒ `400`; an id `validate` rejects ⇒ `404`; an unsupported `MCP-Protocol-Version` header ⇒
+  `400`; a JSON array body (batch) ⇒ JSON-RPC `-32600`; a non-JSON content type ⇒ `415`.
+- **Auth**: `authenticate` error ⇒ HTTP `401` with `WWW-Authenticate` from `wwwAuthenticate` when it
+  returns non-empty. The identity is opaque and reaches every hook and tool through the call context.
+- **Tools**: `tools/list` and the `tools/call` lookup both use `listTools(ctx)`; a name outside it ⇒
+  JSON-RPC `-32602` "tool not found: <name>", and the tool is **never executed**. Tools need not be
+  registered in the toolkit. `capabilities.tools.listChanged` is `true`; `notifyToolsChanged()` sends
+  `notifications/tools/list_changed` on every open GET stream. Wire entry: `{name, description,
+  inputSchema, annotations?}` — `annotations` verbatim from `Tool.annotations`, else derived from
+  `Tool.hints` (`readOnlyHint`/`destructiveHint`/`openWorldHint`), else omitted. Results map exactly as §7C.
+- **Gate**: `allow` (also the zero value) runs the tool. `deny` returns `result` when set, else an
+  `isError` result with `message` (default "denied"); a `beforeCall` error is a `deny` with its text.
+  `confirm`: when the session's client declared `capabilities.elicitation` at initialize, send
+  `elicitation/create` `{message, requestedSchema:{type:object, properties:{confirm:{type:boolean}}}}` on
+  the same POST's event stream and wait (≤ `confirmTimeout`); `accept` (with `confirm` not `false`) ⇒ run,
+  anything else ⇒ `isError` "declined"; a failure/timeout ⇒ `isError` "confirmation failed: …". When the
+  client cannot elicit (or `stateless`), return `result` when set, else `isError` "confirmation required:
+  <message>". Any nonce/re-call flow is the host's, built from `result` + its own `beforeCall`.
+- **onCall** fires once per `tools/call` (also for deny/confirm outcomes); its throws are isolated.
+- **Resources/prompts**: a nil `listResources`/`listPrompts` ⇒ the capability is not advertised and the
+  methods answer `-32601`.
+- **Sessions**: client capabilities are cached per process on the instance that saw `initialize`, and
+  an elicitation answer is delivered only to the instance holding the waiting call — a multi-instance
+  host needs sticky routing for confirms. The session *store* is always the host's.
+
+Left to the host: identity/tenant/role mapping, OAuth and RFC 9728 metadata, CORS, TLS, rate limits,
+what backs `sessionIds`, branding values.
+
 ---
 
 ## 7D. Sub-agents & agent runtime (source: "agent")
