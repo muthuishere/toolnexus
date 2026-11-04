@@ -41,7 +41,7 @@ func main() {
 	}
 	var results []liveResult
 	for _, name := range names {
-		r := liveResult{Style: name, Installed: Available(CliOptions{Style: CliStyle(name), Command: name})}
+		r := liveResult{Style: name, Installed: Available(CliOptions{Style: styleByName(name), Command: name})}
 		if !r.Installed {
 			fmt.Printf("%-9s not installed — skipped\n", name)
 			results = append(results, r)
@@ -75,7 +75,7 @@ func runOne(name string, r liveResult) liveResult {
 		return r
 	}
 	defer tk.Close()
-	o := CliOptions{Style: CliStyle(name), Command: name, TimeoutMs: 300000} // caller supplies the binary
+	o := CliOptions{Style: styleByName(name), Command: name, TimeoutMs: 300000} // caller supplies the binary
 	o.SystemPrompt = "You are a support assistant. Answer in one short sentence."
 	o.MaxTurns = 4
 	c, err := CreateCliClient(o, func(t Trace) {
@@ -107,4 +107,14 @@ func trunc(s string, n int) string {
 		return s
 	}
 	return string([]rune(s)[:n]) + "…"
+}
+
+// styleByName is the live runner's CLI-arg lookup only; the library takes the enum.
+func styleByName(n string) CliStyle {
+	for st, name := range styleNames {
+		if name == n {
+			return st
+		}
+	}
+	return 0
 }

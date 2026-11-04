@@ -21,7 +21,11 @@ tool-call channel.
 
 1. **One constructor, selected by style name.** `createCliClient({ style, command, model?, …every
    in-process client option })` (idiomatic per port, e.g. Go `CreateCliClient(CliOptions{Style:
-   StyleClaude, Command: "/usr/local/bin/claude", Model: "sonnet"})`). It returns an ordinary in-process client.
+   StyleClaude, Command: "/usr/local/bin/claude", Model: "sonnet"})`). It returns an ordinary in-process client. **`style` is a real enum, never a string**
+   (owner 2026-11-04: "no string"): Go `CliStyle` int constants (`StyleClaude`, …), TS/Java/C#/Rust
+   `enum`, Python `Enum`, Elixir/Clojure a closed set of atoms/keywords checked at construction.
+   Members: Claude, Codex, Copilot, Opencode, Devin, Gemini, Goose, Custom. The lowercase name is
+   used only internally to find the shared style file; no API accepts a style as free text.
 2. **Built-in styles are shared data.** One JSON file per CLI (`claude`, `codex`, `copilot`,
    `opencode`, `devin`, `gemini`, `goose`) in one shared directory, embedded byte-identically by
    every port. A style holds **no binary**: it is the argv template, the prompt mode
@@ -37,8 +41,7 @@ tool-call channel.
    chooses and runs their own installed CLI under their own subscription, which keeps us out of
    vendor terms disputes and lets anyone (a vendor, a fork, a wrapper) bring a compatible CLI.
 4. **Escape hatches.** `style: "custom"` with an explicit `args` template, `prompt` and `answer`;
-   or a user style file via `loadCliStyle(path | json)`. An unknown style fails with the list of
-   known names.
+   or a user style file via `loadCliStyle(path | json)`. A missing style fails at construction.
 5. **Argv template.** Placeholders `{{prompt}}`, `{{file}}` (temp file holding the prompt),
    `{{out}}` (temp file the CLI writes its answer to), `{{model}}`. An element may be an optional
    group (array), kept only when a model is set. The child is spawned with the argv directly,

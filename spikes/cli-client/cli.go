@@ -86,18 +86,26 @@ func LoadCliStyle(pathOrJSON string) (Style, error) {
 // a loaded user style. Every in-process client option applies.
 // CliStyle is the closed set of CLI families a client can drive. Each is a
 // shape (argv, prompt mode, answer source), never a binary.
-type CliStyle string
+type CliStyle int
 
 const (
-	StyleClaude   CliStyle = "claude"
-	StyleCodex    CliStyle = "codex"
-	StyleCopilot  CliStyle = "copilot"
-	StyleOpencode CliStyle = "opencode"
-	StyleDevin    CliStyle = "devin"
-	StyleGemini   CliStyle = "gemini"
-	StyleGoose    CliStyle = "goose"
-	StyleCustom   CliStyle = "custom"
+	StyleClaude CliStyle = iota + 1 // zero value = no style chosen
+	StyleCodex
+	StyleCopilot
+	StyleOpencode
+	StyleDevin
+	StyleGemini
+	StyleGoose
+	StyleCustom
 )
+
+var styleNames = map[CliStyle]string{
+	StyleClaude: "claude", StyleCodex: "codex", StyleCopilot: "copilot", StyleOpencode: "opencode",
+	StyleDevin: "devin", StyleGemini: "gemini", StyleGoose: "goose", StyleCustom: "custom",
+}
+
+// String is the style's shared file name; it is not an input.
+func (s CliStyle) String() string { return styleNames[s] }
 
 type CliOptions struct {
 	tn.InProcessOptions
@@ -121,22 +129,16 @@ func (o CliOptions) resolve() (Style, error) {
 		s.Binary = o.Command
 		return s, nil
 	}
-	if o.Style == "custom" {
+	if o.Style == StyleCustom {
 		return Style{Name: "custom", Binary: o.Command, Args: o.Args, Prompt: o.Prompt, Answer: o.Answer}, nil
 	}
 	all, err := BuiltinStyles()
 	if err != nil {
 		return Style{}, err
 	}
-	s, ok := all[string(o.Style)]
+	s, ok := all[o.Style.String()]
 	if !ok {
-		names := make([]string, 0, len(all)+1)
-		for n := range all {
-			names = append(names, n)
-		}
-		names = append(names, "custom")
-		sort.Strings(names)
-		return Style{}, fmt.Errorf("cli: unknown style %q (known: %s)", o.Style, strings.Join(names, ", "))
+		return Style{}, errors.New("cli: Style is required (StyleClaude, StyleCodex, ...)")
 	}
 	s.Binary = o.Command
 	return s, nil

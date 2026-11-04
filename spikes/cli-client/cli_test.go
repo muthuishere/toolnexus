@@ -93,8 +93,8 @@ func TestBuiltinStylesLoadAndValidate(t *testing.T) {
 }
 
 func TestUnknownStyleListsKnown(t *testing.T) {
-	_, err := CreateCliClient(CliOptions{Style: "nope", Command: "x"}, nil)
-	want := `cli: unknown style "nope" (known: claude, codex, copilot, custom, devin, gemini, goose, opencode)`
+	_, err := CreateCliClient(CliOptions{Command: "x"}, nil)
+	want := "cli: Style is required (StyleClaude, StyleCodex, ...)"
 	if err == nil || err.Error() != want {
 		t.Fatalf("got %v", err)
 	}
