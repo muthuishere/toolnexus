@@ -154,6 +154,32 @@ var res = await agent.RunAsync("Draw a fox, then animate it.", tk);
 foreach (var f in res.Files) Console.WriteLine($"{f.From} {f.MimeType} {f.Url}");
 ```
 
+## Embeddable MCP server (SPEC §7C.1)
+
+`tk.McpHandler(cfg)` returns an `McpHttpHandler` you mount on your own HTTP server, behind your own
+TLS, CORS and OAuth. `ServeAsync` is unchanged. Every policy is a hook:
+
+```csharp
+var handler = tk.McpHandler(new McpHandlerConfig
+{
+    Authenticate = ex => VerifyBearer(ex.Header("Authorization")),      // throw => 401 (+ WwwAuthenticate)
+    ListTools    = ctx => ToolsFor((User)ctx.Identity!),                 // per request; others are "tool not found"
+    BeforeCall   = (ctx, tool, args) => Task.FromResult(tool.Annotations?.DestructiveHint == true
+                       ? McpDecision.Confirm("Really delete?")          // elicitation on the same POST
+                       : McpDecision.Allow()),
+    OnCall       = ev => Log(ev.Name, ev.Decision, ev.ResultBytes),
+});
+// HttpListener host:  await handler.HandleAsync(httpListenerContext);
+// any other server:   subclass McpHttpExchange and call handler.HandleAsync(exchange).
+handler.NotifyToolsChanged(); // tools/list_changed on every open GET stream
+```
+
+Tools and hooks read the request through `McpContext` (`Identity`, `Request`, `SessionId`, `Meta` =
+`params._meta`); a tool uses `McpContext.Current`. Also: `ServerInfo`, resources/prompts hooks,
+pluggable `SessionIds`, `Stateless`, `ProtocolVersions` (`2025-06-18` default, `2025-11-25` opt-in).
+`ToolResult.Structured`/`Meta` and `ITool.OutputSchema`/`Annotations` map to `structuredContent`,
+`_meta`, `outputSchema` and `annotations`. Runnable: `dotnet run --project examples/Toolnexus.Examples -- mcphandler`.
+
 ## Documentation
 
 Everything else — the full surface, with runnable examples — lives on the docs site:

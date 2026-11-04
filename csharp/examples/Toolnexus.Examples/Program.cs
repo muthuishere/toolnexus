@@ -16,12 +16,13 @@ return which switch
     "acp" => await Acp.Run(args.Skip(1).ToArray()),
     "cache" => await Cache.Run(),
     "media" => await MediaExample.Run(),
+    "mcphandler" => await McpHandlerExample.Run(),
     _ => Unknown(which),
 };
 
 static int Unknown(string which)
 {
     Console.Error.WriteLine($"Unknown example: {which}");
-    Console.Error.WriteLine("Usage: dotnet run -- [basic|agent|hooks|streaming|memory|advanced|openrouter|multimodal|judge|acp|cache|media]");
+    Console.Error.WriteLine("Usage: dotnet run -- [basic|agent|hooks|streaming|memory|advanced|openrouter|multimodal|judge|acp|cache|media|mcphandler]");
     return 1;
 }
