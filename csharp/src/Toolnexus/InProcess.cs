@@ -90,6 +90,13 @@ public static class InProcess
     {
         if (opts?.Generate is null)
             throw new ArgumentException("toolnexus: InProcess.CreateClient requires a `Generate` function");
+        return CreateClient(opts, new GenerateBackedHandler(opts.Generate));
+    }
+
+    /// <summary>The same client over a caller-built handler (the CLI client wraps
+    /// <see cref="GenerateBackedHandler"/> to refuse streaming with its own message).</summary>
+    internal static LlmClient CreateClient(Options opts, HttpMessageHandler handler)
+    {
 
         var o = new LlmClient.Options
         {
@@ -98,7 +105,7 @@ public static class InProcess
             // An in-process model has no endpoint to authenticate to, so the host must never need a key — but the client resolves one from the environment and fails when it finds none. A sentinel keeps that resolution from ever running. Caught by CI, which has no OPENROUTER_API_KEY; every local run passed because a developer shell has one.
             ApiKey = "in-process",
             Model = opts.Model,
-            HttpHandler = new GenerateBackedHandler(opts.Generate),
+            HttpHandler = handler,
             SystemPrompt = opts.SystemPrompt,
             Hooks = opts.Hooks,
             Store = opts.Store,

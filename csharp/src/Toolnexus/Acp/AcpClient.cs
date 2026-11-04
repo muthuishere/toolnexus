@@ -53,15 +53,28 @@ public sealed class AcpClient : IDisposable
     private readonly SemaphoreSlim _turnLock = new(1, 1);
     private readonly ConcurrentDictionary<string, TaskCompletionSource<JsonElement>> _pending = new();
     private long _nextId;
+    private readonly ConcurrentDictionary<string, string> _pendingMethods = new();
     private volatile Action<JsonElement>? _updateSink;
     private int _closed;
+
+    // SPEC §8C "ACP model source additions" — set by the options overload of StartAsync.
+    private Func<JsonElement, string?>? _onPermission;
+    private Action<JsonElement>? _onUpdate;
+    private Action<string>? _stderr;
+
+    /// <summary>The exact <c>mcpServers</c> list sent in <c>session/new</c> (SPEC §8C).</summary>
+    public IReadOnlyList<object?> McpServersSent { get; private set; } = Array.Empty<object?>();
+
+    /// <summary>The agent's raw <c>initialize</c> result.</summary>
+    public JsonElement InitializeResult { get; private set; }
 
     /// <summary>The <c>sessionId</c> negotiated by <c>session/new</c>.</summary>
     public string SessionId { get; private set; } = "";
 
-    private AcpClient(Process process)
+    private AcpClient(Process process, Action<string>? stderr = null)
     {
         _process = process;
+        _stderr = stderr;
         _ = Task.Run(() => ReadLoopAsync(_lifetimeCts.Token));
         _ = Task.Run(() => DrainStderrAsync(_lifetimeCts.Token));
     }
@@ -73,12 +86,24 @@ public sealed class AcpClient : IDisposable
     /// <c>session/new</c> with <c>-32602</c> otherwise; it defaults to
     /// <see cref="Directory.GetCurrentDirectory"/>, which already is.
     /// </summary>
-    public static async Task<AcpClient> StartAsync(
+    public static Task<AcpClient> StartAsync(
         string command,
         IReadOnlyList<string>? arguments = null,
         string? cwd = null,
-        CancellationToken ct = default)
+        CancellationToken ct = default) =>
+        StartAsync(new AcpStartOptions { Command = command, Arguments = arguments, Cwd = cwd }, ct);
+
+    /// <summary>
+    /// Starts the agent with the full option set (SPEC §8C "ACP model source additions"):
+    /// <c>mcpServers</c> for <c>session/new</c>, initialize <c>clientCapabilities._meta</c>, a
+    /// model passed through after <c>session/new</c>, a stderr sink, a permission decider and a
+    /// raw update observer. A failure to start the process or to complete <c>initialize</c>
+    /// throws <see cref="AcpLaunchException"/>.
+    /// </summary>
+    public static async Task<AcpClient> StartAsync(AcpStartOptions options, CancellationToken ct = default)
     {
+        var command = options.Command;
+        var cwd = options.Cwd;
         var psi = new ProcessStartInfo
         {
             FileName = command,
@@ -87,34 +112,69 @@ public sealed class AcpClient : IDisposable
             RedirectStandardError = true,
             UseShellExecute = false,
         };
-        if (arguments != null)
-            foreach (var a in arguments) psi.ArgumentList.Add(a);
+        if (options.Arguments != null)
+            foreach (var a in options.Arguments) psi.ArgumentList.Add(a);
+        if (cwd != null) psi.WorkingDirectory = cwd;
+        if (options.Env != null)
+            foreach (var (k, v) in options.Env) psi.Environment[k] = v;
 
         var process = new Process { StartInfo = psi, EnableRaisingEvents = true };
-        if (!process.Start())
-            throw new InvalidOperationException($"toolnexus: failed to start ACP agent '{command}'");
-
-        var client = new AcpClient(process);
         try
         {
-            await client.CallAsync("initialize", new Dictionary<string, object?>
+            if (!process.Start())
+                throw new InvalidOperationException("process did not start");
+        }
+        catch (Exception e)
+        {
+            process.Dispose();
+            throw new AcpLaunchException("start", $"toolnexus: acp: start \"{command}\": {e.Message}", e);
+        }
+
+        var client = new AcpClient(process, options.Stderr)
+        {
+            _onPermission = options.OnPermission,
+            _onUpdate = options.OnUpdate,
+        };
+        if (options.CallTimeout is { } callTimeout) client.CallTimeout = callTimeout;
+        if (options.PromptTimeout is { } promptTimeout) client.PromptTimeout = promptTimeout;
+        try
+        {
+            var caps = new Dictionary<string, object?>
             {
-                ["protocolVersion"] = 1,
-                ["clientCapabilities"] = new Dictionary<string, object?>
+                // A model host serves no files and no terminal.
+                ["fs"] = new Dictionary<string, object?> { ["readTextFile"] = false, ["writeTextFile"] = false },
+                ["terminal"] = false,
+            };
+            if (options.ClientCapsMeta != null) caps["_meta"] = options.ClientCapsMeta;
+            JsonElement init;
+            try
+            {
+                init = await client.CallAsync("initialize", new Dictionary<string, object?>
                 {
-                    // A model host serves no files.
-                    ["fs"] = new Dictionary<string, object?> { ["readTextFile"] = false, ["writeTextFile"] = false },
-                },
-            }, ct).ConfigureAwait(false);
+                    ["protocolVersion"] = 1,
+                    ["clientCapabilities"] = caps,
+                }, ct).ConfigureAwait(false);
+            }
+            catch (Exception e) when (e is not OperationCanceledException)
+            {
+                throw new AcpLaunchException("initialize", "toolnexus: acp: initialize: " + e.Message, e);
+            }
+            client.InitializeResult = init;
+            var httpOk = init.ValueKind == JsonValueKind.Object &&
+                         init.TryGetProperty("agentCapabilities", out var ac) && ac.ValueKind == JsonValueKind.Object &&
+                         ac.TryGetProperty("mcpCapabilities", out var mc) && mc.ValueKind == JsonValueKind.Object &&
+                         mc.TryGetProperty("http", out var h) && h.ValueKind == JsonValueKind.True;
 
             var sessionCwd = cwd ?? Directory.GetCurrentDirectory();
             if (!Path.IsPathRooted(sessionCwd))
                 throw new ArgumentException("toolnexus: ACP session/new requires an absolute cwd", nameof(cwd));
 
+            var servers = (options.McpServers ?? Array.Empty<AcpMcpServer>()).Select(s => (object?)s.Wire(httpOk)).ToList();
+            client.McpServersSent = servers;
             var sessionResult = await client.CallAsync("session/new", new Dictionary<string, object?>
             {
                 ["cwd"] = sessionCwd,
-                ["mcpServers"] = new List<object?>(),
+                ["mcpServers"] = servers,
             }, ct).ConfigureAwait(false);
 
             if (sessionResult.ValueKind == JsonValueKind.Object &&
@@ -122,6 +182,34 @@ public sealed class AcpClient : IDisposable
                 sid.ValueKind == JsonValueKind.String)
             {
                 client.SessionId = sid.GetString() ?? "";
+            }
+
+            if (!string.IsNullOrEmpty(options.Model))
+            {
+                // Passed through unchanged: the stable spelling first, then the older
+                // session/set_model. Keys in sorted order, as every port sends them.
+                try
+                {
+                    await client.CallAsync("session/set_config_option", new Dictionary<string, object?>
+                    {
+                        ["configId"] = "model", ["sessionId"] = client.SessionId, ["value"] = options.Model,
+                    }, ct).ConfigureAwait(false);
+                }
+                catch (Exception e1) when (e1 is not OperationCanceledException)
+                {
+                    try
+                    {
+                        await client.CallAsync("session/set_model", new Dictionary<string, object?>
+                        {
+                            ["modelId"] = options.Model, ["sessionId"] = client.SessionId,
+                        }, ct).ConfigureAwait(false);
+                    }
+                    catch (Exception e2) when (e2 is not OperationCanceledException)
+                    {
+                        throw new InvalidOperationException(
+                            $"toolnexus: acp: set model \"{options.Model}\": {e1.Message}; {e2.Message}", e2);
+                    }
+                }
             }
         }
         catch
@@ -239,6 +327,7 @@ public sealed class AcpClient : IDisposable
     {
         var id = NextId();
         var tcs = new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously);
+        _pendingMethods[id] = "session/prompt";
         _pending[id] = tcs;
 
         var sb = new StringBuilder();
@@ -290,6 +379,7 @@ public sealed class AcpClient : IDisposable
         finally
         {
             _pending.TryRemove(id, out _);
+            _pendingMethods.TryRemove(id, out _);
             _updateSink = null;
         }
     }
@@ -298,6 +388,7 @@ public sealed class AcpClient : IDisposable
     {
         var id = NextId();
         var tcs = new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously);
+        _pendingMethods[id] = method;
         _pending[id] = tcs;
         try
         {
@@ -321,6 +412,7 @@ public sealed class AcpClient : IDisposable
         finally
         {
             _pending.TryRemove(id, out _);
+            _pendingMethods.TryRemove(id, out _);
         }
     }
 
@@ -382,9 +474,11 @@ public sealed class AcpClient : IDisposable
 
         // The process is gone (or we were cancelled): unblock anything still waiting rather than
         // let it ride out its full timeout.
+        // SPEC §8C: fail fast with the method that was waiting.
         foreach (var kv in _pending)
             if (_pending.TryRemove(kv.Key, out var tcs))
-                tcs.TrySetException(new IOException("toolnexus: ACP agent's stdout closed"));
+                tcs.TrySetException(new AcpExitedException(
+                    _pendingMethods.TryGetValue(kv.Key, out var m) ? m : "request"));
     }
 
     private async Task DrainStderrAsync(CancellationToken ct)
@@ -402,8 +496,9 @@ public sealed class AcpClient : IDisposable
                 break;
             }
             if (line is null) break;
-            // Discarded: a fake/real agent's stderr is not part of the ACP contract. Draining it
-            // (rather than leaving it unread) keeps the child from blocking on a full pipe buffer.
+            // Handed to the stderr sink when one is set, else discarded. Draining it (rather
+            // than leaving it unread) keeps the child from blocking on a full pipe buffer.
+            try { _stderr?.Invoke(line); } catch { /* a sink must not stop the drain */ }
         }
     }
 
@@ -443,8 +538,10 @@ public sealed class AcpClient : IDisposable
         {
             if (root.TryGetProperty("params", out var p))
             {
+                var raw = p.Clone();
+                try { _onUpdate?.Invoke(raw); } catch { /* an observer must not stop the loop */ }
                 var sink = _updateSink;
-                sink?.Invoke(p.Clone());
+                sink?.Invoke(raw);
             }
             return;
         }
@@ -455,10 +552,11 @@ public sealed class AcpClient : IDisposable
             return;
         }
 
-        // Any other server-initiated request this thin client doesn't implement: reply empty
-        // rather than leave the agent hanging on a method we silently ignored.
+        // Any other agent->client request this thin client doesn't implement (fs/*, terminal/* —
+        // declared unsupported in clientCapabilities): answer -32601 rather than leave the agent
+        // hanging on a method we silently ignored.
         if (hasId)
-            _ = ReplyAsync(IdValue(idEl), new Dictionary<string, object?>());
+            _ = ReplyErrorAsync(IdValue(idEl), -32601, "method not found: " + method);
     }
 
     private void HandlePermissionRequest(JsonElement idEl, JsonElement paramsEl)
@@ -466,6 +564,22 @@ public sealed class AcpClient : IDisposable
         var idValue = IdValue(idEl);
         if (!AutoAnswerPermission)
             return; // deliberately left unanswered — the hang case, test-only.
+
+        if (_onPermission != null)
+        {
+            // The decider names the allow option to pick; null ⇒ reject (SPEC §8C).
+            string? allow = null;
+            try { allow = _onPermission(paramsEl.ValueKind == JsonValueKind.Undefined ? default : paramsEl.Clone()); }
+            catch { allow = null; }
+            var picked = allow ?? FirstOptionOfKind(paramsEl, "reject");
+            _ = ReplyAsync(idValue, new Dictionary<string, object?>
+            {
+                ["outcome"] = picked is not null
+                    ? new Dictionary<string, object?> { ["outcome"] = "selected", ["optionId"] = picked }
+                    : new Dictionary<string, object?> { ["outcome"] = "cancelled" },
+            });
+            return;
+        }
 
         string? chosen = null;
         if (paramsEl.ValueKind == JsonValueKind.Object &&
@@ -488,6 +602,38 @@ public sealed class AcpClient : IDisposable
             ? new Dictionary<string, object?> { ["outcome"] = "selected", ["optionId"] = chosen }
             : new Dictionary<string, object?> { ["outcome"] = "cancelled" };
         _ = ReplyAsync(idValue, new Dictionary<string, object?> { ["outcome"] = outcome });
+    }
+
+    private static string? FirstOptionOfKind(JsonElement paramsEl, string prefix)
+    {
+        if (paramsEl.ValueKind != JsonValueKind.Object ||
+            !paramsEl.TryGetProperty("options", out var optsEl) || optsEl.ValueKind != JsonValueKind.Array)
+            return null;
+        foreach (var opt in optsEl.EnumerateArray())
+        {
+            var kind = opt.TryGetProperty("kind", out var k) && k.ValueKind == JsonValueKind.String ? k.GetString()! : "";
+            if (kind.StartsWith(prefix, StringComparison.Ordinal) &&
+                opt.TryGetProperty("optionId", out var oid) && oid.ValueKind == JsonValueKind.String)
+                return oid.GetString();
+        }
+        return null;
+    }
+
+    private async Task ReplyErrorAsync(object idValue, int code, string message)
+    {
+        try
+        {
+            await WriteAsync(new Dictionary<string, object?>
+            {
+                ["jsonrpc"] = "2.0",
+                ["id"] = idValue,
+                ["error"] = new Dictionary<string, object?> { ["code"] = code, ["message"] = message },
+            }, CancellationToken.None).ConfigureAwait(false);
+        }
+        catch
+        {
+            // Best effort: the process may already be closing.
+        }
     }
 
     private async Task ReplyAsync(object idValue, object result)
@@ -558,4 +704,88 @@ public sealed class AcpRpcException : Exception
 {
     public int Code { get; }
     public AcpRpcException(int code, string message) : base($"acp error {code}: {message}") => Code = code;
+}
+
+/// <summary>The agent process ended (its stdout closed) while a request waited for its reply.</summary>
+public sealed class AcpExitedException : IOException
+{
+    public string Method { get; }
+    public AcpExitedException(string method)
+        : base($"toolnexus: acp: agent exited before replying to {method}") => Method = method;
+}
+
+/// <summary>The agent could not be started, or did not complete <c>initialize</c>.
+/// <see cref="Stage"/> is <c>start</c> or <c>initialize</c>.</summary>
+public sealed class AcpLaunchException : Exception
+{
+    public string Stage { get; }
+    public AcpLaunchException(string stage, string message, Exception? inner = null)
+        : base(message, inner) => Stage = stage;
+}
+
+/// <summary>
+/// One entry of <c>session/new</c> <c>mcpServers</c> (SPEC §8C). Set <see cref="Url"/> for the
+/// http shape (<c>{type:"http",name,url,headers[]}</c>), <see cref="Command"/> for the stdio shape
+/// (<c>{name,command,args[],env[]}</c> — no type), or both to let the agent's advertised
+/// <c>mcpCapabilities.http</c> pick. Headers and env go on the wire as <c>[{name,value}]</c>
+/// arrays sorted by name; their values are never logged.
+/// </summary>
+public sealed class AcpMcpServer
+{
+    public string Name { get; init; } = "";
+    public string? Url { get; init; }
+    public IReadOnlyDictionary<string, string>? Headers { get; init; }
+    public string? Command { get; init; }
+    public IReadOnlyList<string>? Args { get; init; }
+    public IReadOnlyDictionary<string, string>? Env { get; init; }
+
+    internal Dictionary<string, object?> Wire(bool httpOk)
+    {
+        if (!string.IsNullOrEmpty(Url) && (httpOk || string.IsNullOrEmpty(Command)))
+            return new Dictionary<string, object?>
+            {
+                ["type"] = "http", ["name"] = Name, ["url"] = Url, ["headers"] = NameValues(Headers),
+            };
+        return new Dictionary<string, object?>
+        {
+            ["name"] = Name,
+            ["command"] = Command ?? "",
+            ["args"] = (Args ?? Array.Empty<string>()).Cast<object?>().ToList(),
+            ["env"] = NameValues(Env),
+        };
+    }
+
+    private static List<object?> NameValues(IReadOnlyDictionary<string, string>? m) =>
+        (m ?? new Dictionary<string, string>())
+            .OrderBy(kv => kv.Key, StringComparer.Ordinal)
+            .Select(kv => (object?)new Dictionary<string, object?> { ["name"] = kv.Key, ["value"] = kv.Value })
+            .ToList();
+}
+
+/// <summary>Options for <see cref="AcpClient.StartAsync(AcpStartOptions, CancellationToken)"/>.</summary>
+public sealed class AcpStartOptions
+{
+    public string Command { get; init; } = "";
+    public IReadOnlyList<string>? Arguments { get; init; }
+    /// <summary>Absolute session cwd; also the agent process's working directory.</summary>
+    public string? Cwd { get; init; }
+    /// <summary>Added to the agent's environment.</summary>
+    public IReadOnlyDictionary<string, string>? Env { get; init; }
+    /// <summary>Sent in <c>session/new</c> <c>mcpServers</c> (none ⇒ <c>[]</c>).</summary>
+    public IReadOnlyList<AcpMcpServer>? McpServers { get; init; }
+    /// <summary>Sent as initialize <c>clientCapabilities._meta</c>. Opaque to toolnexus.</summary>
+    public IDictionary<string, object?>? ClientCapsMeta { get; init; }
+    /// <summary>Passed through unchanged: <c>session/set_config_option {configId:"model"}</c>,
+    /// then <c>session/set_model</c>. Both failing fails the start.</summary>
+    public string? Model { get; init; }
+    /// <summary>Receives each line of the agent's stderr (default: discarded).</summary>
+    public Action<string>? Stderr { get; init; }
+    /// <summary>Decides each <c>session/request_permission</c> (its raw params): return the
+    /// optionId to select, or null to answer with the first <c>reject*</c> option. Unset ⇒ the
+    /// first <c>allow*</c> option, as before.</summary>
+    public Func<JsonElement, string?>? OnPermission { get; init; }
+    /// <summary>Observes every raw <c>session/update</c> params (runs on the read loop: must not block).</summary>
+    public Action<JsonElement>? OnUpdate { get; init; }
+    public TimeSpan? CallTimeout { get; init; }
+    public TimeSpan? PromptTimeout { get; init; }
 }

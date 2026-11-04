@@ -29,6 +29,11 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- SPEC §8C: the CLI styles + preamble, byte-identical to conformance/cli-styles (drift-tested). -->
+    <EmbeddedResource Include="CliStyles/*" LogicalName="Toolnexus.CliStyles.%(Filename)%(Extension)" />
+  </ItemGroup>
+
+  <ItemGroup>
     <None Include="../../README.md" Pack="true" PackagePath="\" />
   </ItemGroup>
 

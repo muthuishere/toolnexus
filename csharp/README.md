@@ -154,6 +154,44 @@ var res = await agent.RunAsync("Draw a fox, then animate it.", tk);
 foreach (var f in res.Files) Console.WriteLine($"{f.From} {f.MimeType} {f.Url}");
 ```
 
+## CLI client (agent CLIs as the model)
+
+`CliClient.Create` makes an agent CLI you already have installed (and pay for) the model behind
+an ordinary client. The style is a closed enum, never a string: `CliStyles.Claude | Codex |
+Copilot | Opencode | Devin | Gemini | Goose | Custom`. `Command` is required: nothing is
+embedded or defaulted. SPEC §8C.
+
+```csharp
+await using var tk = await Toolkit.CreateAsync(new Toolkit.Options { SkillsDir = ["./skills"] });
+using var client = CliClient.Create(new CliOptions
+{
+    Style = CliStyles.Opencode, Command = "opencode", Toolkit = tk,
+});
+var res = await client.RunAsync("What is my badge number?", tk);
+Console.WriteLine($"{client.Transport} {res.Text}");   // "acp" …
+LlmClient plain = client;                               // usable anywhere an LlmClient goes
+```
+
+- **Transports** `CliTransports.Auto | Acp | Cli`. Auto uses ACP when the style has an ACP launch
+  (`[Command] + style.acp.args`, or `AcpCommand` verbatim, e.g. claude's
+  `["npx", "-y", "@agentclientprotocol/claude-agent-acp@0.100.0"]`) and falls back to the one-shot
+  CLI only when the agent fails to start or answer `initialize` (`FallbackReason` says why).
+  `Transport` is `"auto"` until the first call.
+- **ACP**: the toolkit is served as MCP on `127.0.0.1:<ephemeral>/mcp` behind a per-session
+  bearer token, `skill` is served as `load_skill`, and `BeforeTool`/`AfterTool` run at that
+  server. Only calls to served tools are allowed; the agent's own shell, edit and fetch are
+  rejected. Agents without http MCP get a stdio bridge (`BridgeCommand`, default
+  `toolnexus mcp-bridge` when the Go CLI is on PATH; `CliClient.RunMcpBridgeAsync` is the same
+  thing as a function). Streaming over ACP is not supported in the C# port yet; use `RunAsync`.
+- **One-shot**: the conversation goes in under a fixed preamble, the reply is parsed as an
+  OpenAI-shaped envelope, and tool calls run in the toolnexus loop. Streaming is refused.
+- Errors are pinned (`cli: command not found: <bin>`, `cli: exit <code>: <stderr>`,
+  `cli: empty reply`, `cli: no output file`, `cli: timed out after <ms>ms`), thrown as
+  `CliException`. Default call timeout 300000 ms (`CallTimeoutMs`). `Usage` is always zero.
+  Styles are data: `CliClient.LoadStyle(pathOrJson)` for your own.
+- `AcpClient.StartAsync(new AcpStartOptions { McpServers, Model, Stderr, OnPermission, … })`
+  is the lower-level ACP model source the CLI client is built on.
+
 ## Documentation
 
 Everything else — the full surface, with runnable examples — lives on the docs site:

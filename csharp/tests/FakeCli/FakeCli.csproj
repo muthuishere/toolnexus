@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+    <!--
+      Test-only helper for CliClientTests (SPEC §8C): plays a fake one-shot agent CLI
+      (TN_FAKE_CLI=<mode>), a fake ACP agent (TN_FAKE_ACP=1 + first arg "acp"), and the stdio MCP
+      bridge (first arg "mcp-bridge <url>"). Ported from golang/cli_test.go. Not published.
+    -->
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../src/Toolnexus/Toolnexus.csproj" />
+  </ItemGroup>
+
+</Project>

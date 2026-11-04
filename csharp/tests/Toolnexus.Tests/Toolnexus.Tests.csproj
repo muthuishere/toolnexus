@@ -26,6 +26,8 @@
          its runtime files next to Toolnexus.Tests.dll so AcpClientTests can find it by a
          same-directory path instead of searching the tree. -->
     <ProjectReference Include="../FakeAcpServer/FakeAcpServer.csproj" />
+    <!-- Test-only helper (CliClientTests): fake one-shot CLI, fake ACP agent and the MCP bridge. -->
+    <ProjectReference Include="../FakeCli/FakeCli.csproj" />
   </ItemGroup>
 
 </Project>
