@@ -193,6 +193,27 @@ fn parse_frontmatter(text: &str) -> (Frontmatter, String, bool, String) {
     (fm, body.to_owned(), false, String::new())
 }
 
+/// A remote (MCP skills extension) skill as data: the same frontmatter parse
+/// as a local `SKILL.md`, so the loaded body is identical. `None` when the
+/// file has no usable name.
+pub(crate) fn skill_def_from_markdown(
+    text: &str,
+    base: String,
+    resources: Vec<String>,
+) -> Option<SkillDef> {
+    let (fm, content, malformed, _) = parse_frontmatter(text);
+    if malformed || fm.name.is_empty() {
+        return None;
+    }
+    Some(SkillDef {
+        name: fm.name,
+        description: fm.description,
+        content,
+        resources,
+        base,
+    })
+}
+
 fn lenient_frontmatter(block: &str) -> Frontmatter {
     let mut fm = Frontmatter::default();
     let mut seen = HashSet::new();
