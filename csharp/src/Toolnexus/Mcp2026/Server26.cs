@@ -234,7 +234,6 @@ internal sealed class Server26 : IAsyncDisposable
         return ToolResult.Pending(req);
     }
 
-    private static long _seq;
 
     /// <summary>SPEC §2.5: an MRTR input request → a §10 Request (same mapping as the §2.F elicitation bridge).</summary>
     internal static Request InputToRequest(JsonObject r)
@@ -243,7 +242,7 @@ internal sealed class Server26 : IAsyncDisposable
         var isUrl = J.Str(p["mode"]) == "url";
         return new Request
         {
-            Id = $"elc-{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds():x}-{Interlocked.Increment(ref _seq)}",
+            Id = "mrtr-" + OAuthClient.RandStr(12),
             Kind = isUrl ? "authorization" : "input",
             Prompt = J.Str(p["message"], ""),
             Url = isUrl ? J.Str(p["url"]) : null,

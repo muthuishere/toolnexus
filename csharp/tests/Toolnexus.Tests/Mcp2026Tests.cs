@@ -101,6 +101,7 @@ public class Mcp2026Tests
         Assert.Contains((string)Step("tools/call greet (MRTR input_required round trip)")["text"]!, r.Output);
         var req = Assert.Single(asked);
         Assert.Equal("input", req.Kind);
+        Assert.StartsWith("mrtr-", req.Id);
         Assert.Equal("What is your name?", req.Prompt);
         Assert.NotNull(req.Data!["schema"]);
         Assert.Equal(1, server.Executions);
@@ -482,6 +483,7 @@ public class Mcp2026Tests
         var pending = ToolResult.PendingOf(r);
         Assert.NotNull(pending);
         Assert.Equal("authorization", pending!.Kind);
+        Assert.StartsWith("auth-", pending.Id);
         Assert.Equal(0, e.Server.Executions);
         // 4) resume with the callback URL: the flow completes and the paused request is sent once
         var cb = await Fx.DevAuthServer.CaptureRedirectAsync(pending.Url!);
@@ -550,7 +552,7 @@ public class Mcp2026Tests
         var msg = Assert.Single(errors).Message;
         Assert.StartsWith("no client identity for " + e.As.Issuer + ":", msg);
         Assert.Contains("register an app with", msg);
-        Assert.Contains("dynamic client registration is not supported", msg);
+        Assert.EndsWith("register an app with " + e.As.Issuer + " and set auth.clientId (dynamic client registration is not supported)", msg);
     }
 
     [Fact]
