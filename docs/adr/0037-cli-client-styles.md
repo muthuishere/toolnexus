@@ -1,7 +1,9 @@
-# ADR 0037 — A one-shot agent CLI as a tool-calling client, chosen by style name
+# ADR 0037 — Agent CLIs as tool-calling clients: ACP first, one-shot CLI as the fallback, chosen by style
 
 - Status: **PROPOSED** (2026-11-04)
-- Spike: `spikes/cli-client/` (Go, live-verified against 5 installed CLIs; see `SPIKE.md`)
+- Spike: `spikes/cli-client/` (Go; one-shot path live-verified against 5 CLIs, ACP-with-toolkit path
+  against 6 agents; see `SPIKE.md` and `acp-results.json`)
+- Revised 2026-11-04: ACP is primary (see "ACP primary" below); owner decisions recorded.
 - Supersedes for this transport: issue #97 (CLI-backed model source)
 
 ## Context
@@ -64,11 +66,59 @@ tool-call channel.
 9. **Streaming.** Refused, exactly as for any in-process `generate`: a one-shot CLI returns a
    whole answer, and a single-chunk stream would be a fake one.
 10. **Errors and timeouts.** Pinned messages: `cli: command not found: <bin>`, `cli: timed out
-    after <ms>ms` (default 600000 ms; the whole process group is killed), `cli: exit <code>:
+    after <ms>ms` (default 300000 ms — owner 2026-11-04; the whole process group is killed), `cli: exit <code>:
     <stderr, capped at 1000 code points>`, `cli: no output file`, `cli: empty reply`. Failures are
     final — no retries — as for every in-process model. Temp files are removed on every path.
     `env` values expand `${VAR}` and are never logged. The library never reads, stores or proxies
     a CLI's credentials: the CLI uses its own login.
+
+## ACP primary (revision, 2026-11-04)
+
+The first draft rejected ACP. The second spike reverses that: when an agent speaks ACP, the user's
+**own toolkit** (MCP servers from `mcp.json`, skills, `defineTool` functions) runs inside the agent
+as ordinary MCP tools, with the agent's native tool calling instead of our JSON envelope. Live:
+claude, copilot, devin, gemini and opencode passed all three checks (MCP, skill, native) over ACP;
+codex passed through the one-shot fallback.
+
+11. **Transport choice.** `CliStyles.X` selects ACP when the style declares an ACP launch (`acp`
+    argv, e.g. `["acp"]`, `["--acp"]`, or an adapter command) **and** the given binary supports
+    it; otherwise the one-shot CLI client above is used. The same `CreateCliClient(CliOptions{Style:
+    CliStyles.X, Command: …})` call covers both; the user never picks a transport by string.
+    A style without an ACP launch (codex today: its `codex-acp` adapter cannot reach current
+    account models) is CLI-only.
+12. **The toolkit goes in as MCP.** On session open the toolkit is served with `Toolkit.Serve`'s MCP
+    profile (SPEC §7C) on `127.0.0.1:<ephemeral>/mcp` and listed in `session/new` `mcpServers`:
+    - agent advertises `agentCapabilities.mcpCapabilities.http` →
+      `{"type":"http","name":"toolnexus","url":"http://127.0.0.1:<port>/mcp","headers":[…]}`;
+    - otherwise → `{"name":"toolnexus","command":<bridge>,"args":[…,"<url>"],"env":[]}`, a stdio
+      ⇄ HTTP bridge (no `type` field);
+    - a style may declare a **project MCP file** for agents that ignore session `mcpServers`
+      (devin: `.mcp.json` in a fresh temp cwd). The server, the bridge and any temp dir are closed
+      with the session. The served endpoint gets a per-session bearer token (spike gap: none yet).
+13. **Permissions.** The ACP permission hook auto-approves only tools served by our toolkit server
+    and rejects every other request (the agent's own shell, edit, fetch). Matching is by the
+    request's `toolCallId` against the tool our server is about to run, not by title text (titles
+    differ per agent and devin sends none).
+14. **In ACP mode the agent executes the tools**, so toolnexus hooks, tool scheduling and
+    suspension apply at the MCP server boundary (`OnCall`), not in the client loop. The one-shot
+    fallback keeps the full loop (decision 6).
+15. The `golang/acp.go` `session/new` sends `"mcpServers": []` today; wiring decision 12 into the
+    library is the first Go task.
+
+## Owner decisions, 2026-11-04 (accepted)
+
+- **Switch off each CLI's own tools where a flag or mode exists** (claude `--tools ""`, codex
+  `--sandbox read-only` / ACP mode `read-only`); where none exists, the permission hook rejects
+  the agent's own tools. Styles record which applies.
+- **Default timeout 300 s** per invocation / prompt (was 600 s in decision 10).
+- **gemini and goose ship marked `UNVERIFIED`** when not runnable on the verifying machine.
+  (gemini was since verified over ACP with `--acp --skip-trust`; goose remains unverified.)
+- **Model passed through unchanged.** Each style documents its model format: opencode wants
+  `provider/model`; over ACP the id goes to `session/set_config_option` (`configId: "model"`),
+  falling back to `session/set_model`.
+- **Port order: Go first**, then the other seven ports.
+- **Style is an enum `CliStyles.X`, never a string; `Command` is required; there is no default
+  binary.** (Restated from decisions 1 and 3.)
 
 ## Owner ruling, 2026-11-04: vendor names in CLI styles
 
@@ -84,9 +134,9 @@ function, type, option or code path, and adding a CLI is adding a JSON file.
 - **Raw argv only (no styles).** Rejected by the owner: it pushes every user to rediscover each
   CLI's flags (prompt mode, answer file, how to switch off the CLI's own tools), which is exactly
   what the spike found to be the hard part. Kept as the `custom` escape hatch.
-- **ACP transport.** Rejected for this change: one-shot mode is what every listed CLI supports out
-  of the box, while ACP needs a separate adapter for several of them (`claude-code-acp`,
-  `codex-acp`) and a warm-session protocol. ACP remains a separate transport (ADR 0031).
+- **ACP transport only.** First rejected (adapters, warm sessions), then adopted as primary by the
+  revision above once the spike showed the toolkit-as-MCP route works on five agents. Not
+  ACP-only: codex shows an agent can have a working CLI and a broken ACP adapter at the same time.
 - **Merging or depending on PR #114.** Rejected: #114 is an ACP change that is 116 commits behind
   and conflicts with the ACP host hooks. Only its envelope design (preamble + parser) is reused,
   re-implemented for the CLI transport. #114 is left open as it is.

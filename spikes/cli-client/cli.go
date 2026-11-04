@@ -26,7 +26,7 @@ var stylesFS embed.FS
 //go:embed preamble.txt
 var Preamble string
 
-const defaultTimeoutMs = 600000
+const defaultTimeoutMs = 300000 // owner 2026-11-04
 
 // Style is one CLI's invocation recipe — data, shared by every port.
 type Style struct {

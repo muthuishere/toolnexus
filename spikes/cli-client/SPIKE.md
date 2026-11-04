@@ -159,8 +159,8 @@ Session open (initialize + session/new + MCP connect) is 0.5–3.8 s once the np
 4. **Permission requests differ per agent.** copilot titles them with the bare tool name, gemini
    `"<tool> (toolnexus MCP Server)"` or `"skill(name: …)"`, devin sends an **empty title** (the
    name is only on the earlier `tool_call` update: `"Calling <tool> from toolnexus"`), and
-   claude and opencode never asked at all (claude respects the user's own Claude Code permission
-   settings; opencode auto-allows MCP). The hook therefore remembers `toolCallId → title` from
+   claude and opencode never asked at all (opencode auto-allows MCP tools; for claude-agent-acp the
+   cause was not checked — likely this machine's Claude Code permission settings). The hook therefore remembers `toolCallId → title` from
    `tool_call` updates and matches our server name and tool names. Matching on titles is
    heuristic: a library version should match on `toolCallId` against what our server is about to
    execute, or require the agent to name the server.
