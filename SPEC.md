@@ -607,7 +607,9 @@ omitRefreshResource?: bool, allowHttp?: bool }`, plus a host-supplied **token st
    `client_id` when the AS advertises `client_id_metadata_document_supported`. **No Dynamic Client
    Registration, ever.** Neither ⇒ error naming the issuer: `no client identity for <issuer>: <why> and no
    client id is configured — register an app with <issuer> and set auth.clientId (dynamic client registration
-   is not supported)` (byte-exact in every port; `auth.clientId` is the mcp.json key).
+   is not supported)` (byte-exact in every port; `auth.clientId` is the mcp.json key). `<why>` is
+   `it does not support Client ID Metadata Documents`, or `auth.clientMetadataUrl is not set` when the AS supports
+   CIMD but no URL is configured.
 5. **Authorization code + PKCE S256**, `resource=<server URI>` on the authorize and token requests, `scope` =
    the challenge `scope`, else PRM `scopes_supported`. Random `state`.
 6. **Callback validation** (before acting on `error`): when the AS advertises
