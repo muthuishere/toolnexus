@@ -157,6 +157,42 @@ guide: <https://muthuishere.github.io/toolnexus/media/>.
 (doseq [f (:files res)] (println (:from f) (:mimeType f) (:url f)))
 ```
 
+## MCP 2026-07-28 + OAuth
+
+Every server is probed with `server/discover` first. A 2026-07-28 server is used on the in-house 2026
+path (no `initialize`, no session; `_meta` envelope, `MCP-Protocol-Version` / `Mcp-Method` / `Mcp-Name`
+headers, JSON or SSE replies, stdio demultiplexed by id). Anything else falls back to the frozen pre-2026
+path unchanged (SPEC §2.2a). Tools, naming, results and status are identical on both paths.
+
+```clojure
+(core/build {:mcp {:mcpServers
+                   {"docs" {:url "https://mcp.example/mcp"
+                            :auth {:clientId "my-app"}           ; pre-registered, or :clientMetadataUrl (CIMD)
+                            :toolSearch true :description "the docs server"}}}
+             :wait-for    (fn [request] ...)        ; MRTR input + `pause`-mode OAuth (§10)
+             :token-store {:load f :save f :delete f} ; default in-memory
+             :open-url    (fn [url] ...)})          ; `auto` mode browser opener; default the OS opener
+```
+
+- **MRTR** (`input_required`) goes through `:wait-for`; without one the tool returns a §10 `pending`
+  result and re-executing it with `ctx :answer` resumes that exact round. Request ids are `mrtr-<random>`.
+- **OAuth** (§2A.1): PRM → AS metadata → pre-registered `clientId`/`clientIds` or CIMD (never DCR) →
+  PKCE S256 + `resource` → iss/state check → token (JSON or form reply) → single-flight refresh → step-up.
+  `auth.mode` `"auto"` (default; loopback callback) or `"pause"` (a §10 `authorization` request answered
+  with `{:data {:callbackUrl …}}`; needs `auth.redirectUri`). Tokens print as `#object[fn]`.
+- **Skills** a 2026 server serves join the `skill` tool; `mcp/download-skill!` fetches one, digest-checked.
+- **Tool search** (`toolSearch`): `<server>_search_tools` + `<server>_call_tool` replace the server's tools.
+
+Known gaps, honestly:
+
+- The frozen fallback carries a bearer obtained during `server/discover` as a **static** `Authorization`
+  header; it does not refresh it or react to a later 401 there.
+- `koine.server` exposes no query string, so the `auto` loopback callback page re-POSTs `location.search`
+  with a line of script. A real browser runs it; a non-browser `open-url` must POST the query itself.
+- `search_tools` hits keep the pinned key order, but `inputSchema` is re-encoded by koine (sorted keys),
+  not byte-for-byte as the server sent it.
+- Only one input request per MRTR round can be resumed without `:wait-for` (the §10 loop resumes once).
+
 ## Documentation
 
 Everything else — the full surface, with runnable examples — lives on the docs site:
