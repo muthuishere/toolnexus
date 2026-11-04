@@ -8,6 +8,43 @@ GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
 
 ## Unreleased
 
+**Use the coding-agent CLI you already pay for as the model — with your own tools inside it
+(golang only).** `CreateCliClient(CliOptions{Style: CliStyles.Claude, Command: "claude", …})`
+turns an installed Claude Code, Codex, Copilot, opencode, Devin, Gemini CLI or goose into an
+ordinary toolnexus client: system prompt, skills, memory, hooks and metrics behave as on any
+in-process client. The style is an enum (`CliStyles.X`), never a string, and `Command` is
+required — toolnexus never picks, ships or launches a vendor binary by itself; the CLI runs under
+your own login.
+
+- **ACP first.** When the agent speaks ACP (copilot `--acp`, opencode/devin/goose `acp`, gemini
+  `--acp --skip-trust`, or claude through an adapter given as `ACPCommand`), your whole toolkit —
+  MCP servers from `mcp.json`, skills, `defineTool` functions — is served to it as a local MCP
+  server and the agent calls those tools natively. The endpoint takes a fresh bearer token per
+  session, so other local processes cannot call your tools. The `skill` tool is served as
+  `load_skill`, because copilot and devin ship their own `skill` and the model picked theirs.
+  Permission requests are decided per tool-call id: your tools are allowed, the agent's own shell,
+  edit and fetch tools are rejected.
+- **One-shot fallback.** A CLI without ACP (codex today), or one whose ACP launch fails to start,
+  is run once per turn with the conversation in a fixed JSON envelope; its reply is parsed
+  tolerantly (fences, prose around JSON, OpenAI wrappers) and tool calls run in the toolnexus loop.
+  Streaming is refused there rather than faked. Errors are pinned (`cli: command not found`,
+  `cli: exit <code>: …`, `cli: timed out after <ms>ms`, …); the default per-call timeout is 300 s.
+- **Styles are shared data** in `conformance/cli-styles/`. Each records the CLI version it was
+  checked against; goose (both transports) and gemini's one-shot args are marked `UNVERIFIED`.
+- Live-checked on 2026-11-04 with toolkit MCP, skill and native tools (3/3 each): claude and
+  opencode over ACP and one-shot, copilot over ACP, codex one-shot, devin over ACP **only when the
+  prompt names the `toolnexus` MCP server** (devin keeps MCP tools behind a lookup tool; 0/3
+  without that).
+- `LoadACP` now sends the MCP servers you give it (`ACPOptions.MCPServers`; it always sent an
+  empty list before), can set the model (`ACPOptions.Model`), runs the agent in its own process
+  group, and fails a request as soon as the agent exits instead of waiting out the timeout.
+- New Go CLI command `toolnexus mcp-bridge <url>` (stdio ⇄ HTTP MCP, token from
+  `TOOLNEXUS_MCP_TOKEN`) for agents that accept only stdio MCP servers.
+
+Not done: **js, python, java, csharp, elixir, clojure and rust** do not have the CLI client yet;
+each is an unchecked task in `openspec/changes/add-cli-client-styles`. Open owner questions there:
+whether to add the devin MCP hint automatically, and verifying goose and gemini's one-shot mode.
+
 ## 0.24.0 — 2026-11-04
 
 **Media generation: images, video, speech, transcription, voice cloning and talking-head video,

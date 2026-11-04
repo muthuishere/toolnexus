@@ -28,6 +28,9 @@ func TestMain(m *testing.M) {
 		_ = server.ServeStdio(buildMcpServer([]Tool{mkTool("a"), mkTool("b"), mkTool("c")}, nil, nil))
 		return
 	}
+	if cliTestHelperMain() { // cli_test.go: fake ACP agent, fake one-shot CLI, mcp-bridge
+		return
+	}
 	os.Exit(m.Run())
 }
 

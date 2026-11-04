@@ -1,0 +1,284 @@
+[
+  {
+    "check": "mcp",
+    "ms": 6852,
+    "pass": true,
+    "permissions": [],
+    "servedCalls": [
+      "vault_get_code"
+    ],
+    "style": "opencode",
+    "transport": "acp",
+    "run": "live-opencode-auto.json"
+  },
+  {
+    "check": "skill",
+    "ms": 10894,
+    "pass": true,
+    "permissions": [],
+    "servedCalls": [
+      "load_skill"
+    ],
+    "style": "opencode",
+    "transport": "acp",
+    "run": "live-opencode-auto.json"
+  },
+  {
+    "check": "native",
+    "ms": 9338,
+    "pass": true,
+    "permissions": [],
+    "servedCalls": [
+      "get_badge_number"
+    ],
+    "style": "opencode",
+    "transport": "acp",
+    "run": "live-opencode-auto.json"
+  },
+  {
+    "check": "mcp",
+    "ms": 6727,
+    "pass": true,
+    "permissions": [],
+    "servedCalls": [
+      "vault_get_code"
+    ],
+    "style": "claude",
+    "transport": "acp",
+    "run": "live-claude-auto.json"
+  },
+  {
+    "check": "skill",
+    "ms": 7362,
+    "pass": true,
+    "permissions": [],
+    "servedCalls": [
+      "load_skill"
+    ],
+    "style": "claude",
+    "transport": "acp",
+    "run": "live-claude-auto.json"
+  },
+  {
+    "check": "native",
+    "ms": 6106,
+    "pass": true,
+    "permissions": [],
+    "servedCalls": [
+      "get_badge_number"
+    ],
+    "style": "claude",
+    "transport": "acp",
+    "run": "live-claude-auto.json"
+  },
+  {
+    "check": "mcp",
+    "ms": 8735,
+    "pass": true,
+    "style": "claude",
+    "transport": "cli",
+    "run": "live-cli.json"
+  },
+  {
+    "check": "skill",
+    "ms": 7902,
+    "pass": true,
+    "style": "claude",
+    "transport": "cli",
+    "run": "live-cli.json"
+  },
+  {
+    "check": "native",
+    "ms": 9229,
+    "pass": true,
+    "style": "claude",
+    "transport": "cli",
+    "run": "live-cli.json"
+  },
+  {
+    "check": "mcp",
+    "ms": 9053,
+    "pass": true,
+    "style": "opencode",
+    "transport": "cli",
+    "run": "live-cli.json"
+  },
+  {
+    "check": "skill",
+    "ms": 9827,
+    "pass": true,
+    "style": "opencode",
+    "transport": "cli",
+    "run": "live-cli.json"
+  },
+  {
+    "check": "native",
+    "ms": 7164,
+    "pass": true,
+    "style": "opencode",
+    "transport": "cli",
+    "run": "live-cli.json"
+  },
+  {
+    "check": "mcp",
+    "ms": 14395,
+    "pass": true,
+    "permissions": [
+      {
+        "ToolCallID": "call_airHBySurEqxBxIeKOeKz9en",
+        "Title": "vault_get_code",
+        "Allowed": true
+      }
+    ],
+    "servedCalls": [
+      "vault_get_code"
+    ],
+    "style": "copilot",
+    "transport": "acp",
+    "run": "live-copilot.json"
+  },
+  {
+    "check": "skill",
+    "ms": 16532,
+    "pass": true,
+    "permissions": [
+      {
+        "ToolCallID": "call_01QF5ID7009k5JQc0g87dTxb",
+        "Title": "load_skill",
+        "Allowed": true
+      }
+    ],
+    "servedCalls": [
+      "load_skill"
+    ],
+    "style": "copilot",
+    "transport": "acp",
+    "run": "live-copilot.json"
+  },
+  {
+    "check": "native",
+    "ms": 12280,
+    "pass": true,
+    "permissions": [
+      {
+        "ToolCallID": "call_X1zjtTVSDp9H0B3nrMlNIqxf",
+        "Title": "get_badge_number",
+        "Allowed": true
+      }
+    ],
+    "servedCalls": [
+      "get_badge_number"
+    ],
+    "style": "copilot",
+    "transport": "acp",
+    "run": "live-copilot.json"
+  },
+  {
+    "check": "mcp",
+    "ms": 22529,
+    "pass": true,
+    "style": "codex",
+    "transport": "cli",
+    "run": "live-codex.json"
+  },
+  {
+    "check": "skill",
+    "ms": 20956,
+    "pass": true,
+    "style": "codex",
+    "transport": "cli",
+    "run": "live-codex.json"
+  },
+  {
+    "check": "native",
+    "ms": 20846,
+    "pass": true,
+    "style": "codex",
+    "transport": "cli",
+    "run": "live-codex.json"
+  },
+  {
+    "check": "mcp",
+    "ms": 18189,
+    "pass": false,
+    "permissions": [],
+    "servedCalls": [],
+    "style": "devin",
+    "transport": "acp",
+    "run": "live-devin.json"
+  },
+  {
+    "check": "skill",
+    "ms": 16621,
+    "pass": false,
+    "permissions": [],
+    "servedCalls": [],
+    "style": "devin",
+    "transport": "acp",
+    "run": "live-devin.json"
+  },
+  {
+    "check": "native",
+    "ms": 49784,
+    "pass": false,
+    "permissions": [],
+    "servedCalls": [],
+    "style": "devin",
+    "transport": "acp",
+    "run": "live-devin.json"
+  },
+  {
+    "check": "mcp",
+    "ms": 30119,
+    "pass": true,
+    "permissions": [
+      {
+        "ToolCallID": "call_5d03383360044717a4864830",
+        "Title": "Calling vault_get_code from toolnexus",
+        "Allowed": true
+      }
+    ],
+    "servedCalls": [
+      "vault_get_code"
+    ],
+    "style": "devin",
+    "transport": "acp",
+    "run": "live-devin2.json"
+  },
+  {
+    "check": "skill",
+    "ms": 23120,
+    "pass": true,
+    "permissions": [
+      {
+        "ToolCallID": "call_4d4d1d5d5a76494caa0f3e5a",
+        "Title": "Calling load_skill from toolnexus",
+        "Allowed": true
+      }
+    ],
+    "servedCalls": [
+      "load_skill"
+    ],
+    "style": "devin",
+    "transport": "acp",
+    "run": "live-devin2.json"
+  },
+  {
+    "check": "native",
+    "ms": 19471,
+    "pass": true,
+    "permissions": [
+      {
+        "ToolCallID": "call_5435318ba11147df9d262b05",
+        "Title": "Calling get_badge_number from toolnexus",
+        "Allowed": true
+      }
+    ],
+    "servedCalls": [
+      "get_badge_number"
+    ],
+    "style": "devin",
+    "transport": "acp",
+    "run": "live-devin2.json"
+  }
+]

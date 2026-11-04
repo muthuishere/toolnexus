@@ -22,6 +22,8 @@ const usage = `toolnexus — point any OpenAI- or Anthropic-style endpoint at mc
 Usage:
   toolnexus run   [flags]    Start an interactive agent loop (or a single --once prompt).
   toolnexus tools [flags]    List the resolved tools (name + source) and exit.
+  toolnexus mcp-bridge <url> Relay MCP JSON-RPC between stdio and a streamable-HTTP MCP endpoint
+                             (bearer token from TOOLNEXUS_MCP_TOKEN). Used by CLI clients over ACP.
   toolnexus --help           Show this help.
 
 run flags:
@@ -58,6 +60,15 @@ func main() {
 		runCmd(os.Args[2:])
 	case "tools":
 		toolsCmd(os.Args[2:])
+	case "mcp-bridge":
+		if len(os.Args) != 3 {
+			fmt.Fprintln(os.Stderr, "usage: toolnexus mcp-bridge <url>")
+			os.Exit(2)
+		}
+		if err := toolnexus.RunMCPBridge(os.Args[2], os.Getenv(toolnexus.CliMCPTokenEnv), os.Stdin, os.Stdout); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
 	case "-h", "--help", "help":
 		fmt.Print(usage)
 	default:
