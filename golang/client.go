@@ -238,6 +238,14 @@ type MetricEvent struct {
 	// event is folded into the Prometheus registry, so Client.Metrics() text is
 	// unchanged by this field.
 	Question string
+	// Questions is the number of questions a "classifier.evaluate" asked (L1).
+	Questions int
+	// QuestionsHash is the sha256 hex of the canonical request (model +
+	// questions) of a "classifier.evaluate" — the fixtures' canonicalSha256 (L1).
+	QuestionsHash string
+	// Cached marks a "classifier.evaluate" answered from the classifier cache,
+	// with no request sent.
+	Cached bool
 }
 
 // retryableStatuses is the default retryable set: 429 plus the 5xx worth another
