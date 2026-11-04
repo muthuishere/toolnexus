@@ -2685,7 +2685,7 @@ only**; the other seven ports are tracked in `openspec/changes/add-cli-client-st
 - **Styles are data**: `conformance/cli-styles/<name>.json` + `preamble.txt`, embedded
   byte-identically (test-asserted). Fields: `name`, `args` (strings; an array element is an optional
   group kept only when a model is set), `prompt` `stdin|arg|file`, `answer` `stdout|out`,
-  `timeoutMs?`, `env?`, `verified`, `notes`, `acp?` `{args, projectMcpFile?, verified, notes}`.
+  `timeoutMs?`, `env?`, `verified`, `notes`, `acp?` `{args, projectMcpFile?, systemHint?, verified, notes}`.
   Placeholders: `{{prompt}}`, `{{file}}`, `{{out}}`, `{{model}}`; anything else is
   `cli: unknown placeholder {{x}}`. A model on a style without `{{model}}` ⇒
   `cli: style "<name>" takes no model`.
@@ -2718,7 +2718,9 @@ only**; the other seven ports are tracked in `openspec/changes/add-cli-client-st
    `Calling <tool> from toolnexus`, or is `<tool>(…)`, for a served tool ⇒ `allow_once` (else first
    `allow*`). Everything else, and any request without an id ⇒ a `reject*` option.
 6. Each turn is one `session/prompt` (the §8 ACP rendering); only `agent_message_chunk` text is the
-   answer. The agent runs the tools, so `beforeTool`/`afterTool` run at the server boundary;
+   answer. A style's `acp.systemHint` is appended to the turn's first system message as
+   `"\n\n" + hint` (a system message holding only the hint is prepended when there is none); the
+   caller's messages are not mutated. Built-in: devin, whose MCP tools sit behind a lookup tool. The agent runs the tools, so `beforeTool`/`afterTool` run at the server boundary;
    `usage` is zero.
 7. `close()` ends the agent's process group, stops the server, removes the temp dir.
 

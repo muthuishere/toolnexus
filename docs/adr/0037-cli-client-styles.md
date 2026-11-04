@@ -129,6 +129,43 @@ or `"codex"` are allowed as data identifiers passed to the one generic construct
 style files ship inside the library. The rule still holds everywhere else: there is no per-vendor
 function, type, option or code path, and adding a CLI is adding a JSON file.
 
+## Relation to #114 (decided 2026-11-04)
+
+PR #114 ("ACP agents as real tool-calling models (7 ports) + session delta (Go only)") carries two
+OpenSpec changes. They are judged separately.
+
+**Evidence.**
+
+- *Same goal, different channel.* #114 `add-acp-tool-calling` makes the generic ACP model source
+  (`LoadACP` / `createAcpClient`) tool-calling by sending tool *schemas* in our JSON envelope and
+  keeping `session/new` `mcpServers: []`; the toolnexus loop runs the tools. This change serves the
+  toolkit *as MCP* into `session/new` and the agent calls the tools natively. Shipping both gives an
+  ACP agent two ways to call the same tools.
+- *The envelope is literally shared.* #114's `SPEC.md §8` preamble block is byte-identical to
+  `conformance/cli-styles/preamble.txt`, and its six-step reply parser is the parser of decision 6.
+- *Live evidence is one-sided.* #114's own PR body: "nothing has run against a real ACP agent".
+  This change's MCP route passed MCP, skill and native checks live on claude (adapter), copilot,
+  devin, gemini and opencode (`spikes/cli-client/acp-results.json`, `golang/examples/cliclient`).
+- *Mergeability.* #114 is `CONFLICTING`, 116 commits behind `main`, predates the Rust port, and
+  flips `LoadACP`'s permission default to reject-first; this change decides permissions per
+  `toolCallId` instead.
+
+**Decision.**
+
+1. **Superseded: `add-acp-tool-calling` as an ACP feature.** Tool calling over ACP has one way:
+   the toolkit served as MCP (decisions 11–14). The envelope is *not* added to the generic ACP
+   model source; it lives only in the one-shot CLI transport, where a CLI has no other channel.
+2. **Reused, not rewritten: #114's per-port envelope code.** Its preamble constant, six-step parser
+   and parser test table in js / python / java / csharp / elixir / clojure are taken into each
+   port's CLI envelope (re-homed from the ACP module into the CLI module; Rust is new). The prompt
+   used by the CLI transport drops #114's `SUPERSEDES-ALL-PRIOR` tail: a one-shot CLI has no prior
+   session to supersede.
+3. **Complementary, not superseded: `add-acp-session-delta` (Go only).** It is about *how much*
+   of the conversation each turn re-sends into a warm session, which this change's ACP path still
+   does in full. It should be rebased onto this change after it merges, applied to the ACP model
+   source that both paths share, without its `mcpServers: []` assumption.
+4. #114 is left open for the owner: close it, or cut it down to `add-acp-session-delta`.
+
 ## Alternatives considered
 
 - **Raw argv only (no styles).** Rejected by the owner: it pushes every user to rediscover each
@@ -137,9 +174,7 @@ function, type, option or code path, and adding a CLI is adding a JSON file.
 - **ACP transport only.** First rejected (adapters, warm sessions), then adopted as primary by the
   revision above once the spike showed the toolkit-as-MCP route works on five agents. Not
   ACP-only: codex shows an agent can have a working CLI and a broken ACP adapter at the same time.
-- **Merging or depending on PR #114.** Rejected: #114 is an ACP change that is 116 commits behind
-  and conflicts with the ACP host hooks. Only its envelope design (preamble + parser) is reused,
-  re-implemented for the CLI transport. #114 is left open as it is.
+- **Merging or depending on PR #114.** See "Relation to #114" above.
 - **Plain text only, no tool calling.** Considered and withdrawn by the owner: a model that
   cannot call the toolkit is not a toolnexus client.
 - **Per-vendor constructors.** Rejected: the revision above allows names as data, not as API.

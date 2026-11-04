@@ -77,6 +77,21 @@ logged.
 - **WHEN** the style declares `projectMcpFile` `.mcp.json`
 - **THEN** no session entry is sent, the session cwd is a temp dir holding `.mcp.json`, and the dir and server are gone after `close()`
 
+### Requirement: A style's ACP system hint is appended to every ACP turn
+
+When a style's `acp.systemHint` is set, the client SHALL append `"\n\n" + hint` to the first
+system message of every ACP turn, or prepend a system message holding only the hint when there is
+none, without mutating the caller's messages. The built-in devin style SHALL carry a hint naming
+the `toolnexus` MCP server.
+
+#### Scenario: devin is told where its tools are
+- **WHEN** a devin-style client with system prompt `S` runs a turn over ACP
+- **THEN** the `session/prompt` text carries `S`, a blank line, and the devin hint naming `toolnexus`
+
+#### Scenario: no system prompt
+- **WHEN** a style with a hint runs a conversation that has no system message
+- **THEN** a system message holding only the hint is sent first
+
 ### Requirement: The skill tool is served as load_skill
 
 The toolkit's `skill` tool SHALL be served to an ACP agent as `load_skill`, with the §3 skills

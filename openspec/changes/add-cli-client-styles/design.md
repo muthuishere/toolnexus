@@ -81,7 +81,6 @@ waiting out a timeout — this is what makes Auto's fallback fast.
 
 ## Open (owner)
 
-- Devin hides MCP tools behind a lookup tool; live 0/3 unless the prompt names the `toolnexus`
-  server, 3/3 when it does. Should the client add that hint to the system prompt automatically for
-  styles that need it (a style flag), or leave it documented?
+- ~~Devin MCP-lookup hint~~ RESOLVED (owner 2026-11-04): automatic, as data — `acp.systemHint` in
+  the style file is appended to the system prompt of every ACP turn (§8C ACP step 6).
 - `gemini` one-shot args and all of `goose` remain UNVERIFIED (not installed / not live-run here).
