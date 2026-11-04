@@ -62,6 +62,21 @@ func fakeOneShotCLI(mode string) {
 		case "--argv":
 			fmt.Print(`{"content":` + cliJSON(strings.Join(args, " ")) + `}`)
 			return
+		default:
+			// Style-agnostic detection, so every built-in style's real argv
+			// works: the prompt as an arg, the {{file}} temp file, the {{out}}
+			// temp path (not created yet).
+			a := args[i]
+			switch {
+			case strings.HasPrefix(a, CliPreamble[:20]):
+				prompt = a
+			case strings.Contains(filepath.Base(a), "toolnexus-cli-"):
+				if b, err := os.ReadFile(a); err == nil {
+					prompt = string(b)
+				} else {
+					outFile = a
+				}
+			}
 		}
 	}
 	if prompt == "" {
@@ -865,5 +880,59 @@ func TestCliConformanceCases(t *testing.T) {
 	}
 	if want := strings.Replace(fx.RenderEmpty, "<PREAMBLE>", CliPreamble, 1); RenderCliPrompt(nil, nil) != want {
 		t.Error("renderEmpty")
+	}
+}
+
+// TestCliStreamEveryStyleBothTransports: streaming never errors on a CLI
+// client, for every built-in style and custom, over the one-shot CLI and ACP.
+func TestCliStreamEveryStyleBothTransports(t *testing.T) {
+	styles := []CliStyle{CliStyles.Claude, CliStyles.Codex, CliStyles.Copilot, CliStyles.Opencode,
+		CliStyles.Devin, CliStyles.Gemini, CliStyles.Goose, CliStyles.Custom}
+	for _, st := range styles {
+		for _, tr := range []CliTransport{CliTransports.CLI, CliTransports.ACP} {
+			t.Run(st.String()+"/"+tr.String(), func(t *testing.T) {
+				tk := cliBadgeToolkit(t)
+				o := CliOptions{Style: st, Command: os.Args[0], Transport: tr, Toolkit: tk,
+					Env: map[string]string{"TN_FAKE_CLI": "tool"}}
+				if st == CliStyles.Custom {
+					o.Args, o.Prompt, o.Answer = []any{}, "stdin", "stdout"
+				}
+				if tr == CliTransports.ACP {
+					fo, _ := fakeACPOpts(t, map[string]string{"FAKE_HTTP": "1"})
+					o.Env, o.BridgeCommand = fo.Env, fo.BridgeCommand
+					o.ACPCommand = []string{os.Args[0], "acp"}
+				}
+				c, err := CreateCliClient(o)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer c.Close()
+				ch, err := c.Stream(context.Background(), "What is my badge number?", tk)
+				if err != nil {
+					t.Fatal(err)
+				}
+				text, last, sawTool := "", "", false
+				for ev := range ch {
+					switch ev.Type {
+					case "error":
+						t.Fatalf("stream must not error: %v", ev.Err)
+					case "text":
+						text += ev.Delta
+					case "tool_call":
+						sawTool = true
+					}
+					last = ev.Type
+				}
+				if last != "done" || !strings.Contains(text, "BADGE-77Q") {
+					t.Fatalf("last=%s text=%q", last, text)
+				}
+				if tr == CliTransports.CLI && !sawTool {
+					t.Error("one-shot stream must carry the loop's tool_call event")
+				}
+				if c.Transport() != tr.String() {
+					t.Errorf("transport %s", c.Transport())
+				}
+			})
+		}
 	}
 }
