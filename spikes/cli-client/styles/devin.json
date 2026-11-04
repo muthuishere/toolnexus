@@ -1,6 +1,5 @@
 {
   "name": "devin",
-  "binary": "devin",
   "args": [
     "-p",
     "--prompt-file",

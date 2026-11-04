@@ -1,6 +1,5 @@
 {
   "name": "codex",
-  "binary": "codex",
   "args": [
     "exec",
     "--skip-git-repo-check",

@@ -19,16 +19,20 @@ tool-call channel.
 
 ## Decision
 
-1. **One constructor, selected by style name.** `createCliClient({ style, model?, command?, …every
+1. **One constructor, selected by style name.** `createCliClient({ style, command, model?, …every
    in-process client option })` (idiomatic per port, e.g. Go `CreateCliClient(CliOptions{Style:
-   "claude", Model: "sonnet"})`). It returns an ordinary in-process client.
+   "claude", Command: "/usr/local/bin/claude", Model: "sonnet"})`). It returns an ordinary in-process client.
 2. **Built-in styles are shared data.** One JSON file per CLI (`claude`, `codex`, `copilot`,
    `opencode`, `devin`, `gemini`, `goose`) in one shared directory, embedded byte-identically by
-   every port. A style holds the binary name, the argv template, the prompt mode
+   every port. A style holds **no binary**: it is the argv template, the prompt mode
    (`stdin` | `arg` | `file`), the answer source (`stdout` | `out` file), the model flag as an
    optional group, and a `verified` note (which CLI version's `--help` it was checked against, or
    `UNVERIFIED`).
-3. **`command` overrides only the binary** (path or name); it defaults to the style's binary.
+3. **`command` is required** (path or name). Nothing is embedded or defaulted: the library never
+   decides which executable runs. A style describes a CLI *family's* shape, so `style: "claude"`
+   drives any claude-compatible binary at any path, and `style: "codex"` any codex-compatible one.
+   A missing command fails with `cli: Command is required (path or name of the CLI binary)`.
+   (Owner, 2026-11-04: "we dont want the cli to be embedded let them give manually".)
 4. **Escape hatches.** `style: "custom"` with an explicit `args` template, `prompt` and `answer`;
    or a user style file via `loadCliStyle(path | json)`. An unknown style fails with the list of
    known names.

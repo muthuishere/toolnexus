@@ -81,6 +81,7 @@ func TestBuiltinStylesLoadAndValidate(t *testing.T) {
 		t.Fatalf("styles: %d", len(all))
 	}
 	for name, s := range all {
+		s.Binary = "x" // styles carry no binary; the caller always supplies Command
 		elems, err := normalize(s.Args)
 		if err != nil {
 			t.Fatalf("%s: %v", name, err)
@@ -92,7 +93,7 @@ func TestBuiltinStylesLoadAndValidate(t *testing.T) {
 }
 
 func TestUnknownStyleListsKnown(t *testing.T) {
-	_, err := CreateCliClient(CliOptions{Style: "nope"}, nil)
+	_, err := CreateCliClient(CliOptions{Style: "nope", Command: "x"}, nil)
 	want := `cli: unknown style "nope" (known: claude, codex, copilot, custom, devin, gemini, goose, opencode)`
 	if err == nil || err.Error() != want {
 		t.Fatalf("got %v", err)
@@ -100,7 +101,7 @@ func TestUnknownStyleListsKnown(t *testing.T) {
 }
 
 func TestModelRules(t *testing.T) {
-	if _, err := CreateCliClient(CliOptions{Style: "goose", InProcessOptions: tn.InProcessOptions{Model: "x"}}, nil); err == nil || err.Error() != `cli: style "goose" takes no model` {
+	if _, err := CreateCliClient(CliOptions{Style: "goose", Command: "x", InProcessOptions: tn.InProcessOptions{Model: "x"}}, nil); err == nil || err.Error() != `cli: style "goose" takes no model` {
 		t.Fatalf("goose+model: %v", err)
 	}
 	o := custom(t, "stdin", "argv", []any{"--model", "{{model}}"}, "x")
@@ -115,7 +116,7 @@ func TestModelRules(t *testing.T) {
 	}
 }
 
-func TestCommandOverridesBinary(t *testing.T) {
+func TestCommandIsTheBinary(t *testing.T) {
 	var argv []string
 	c, err := CreateCliClient(CliOptions{Style: "claude", Command: "/nonexistent/claude-x"}, func(tr Trace) { argv = tr.Argv })
 	if err != nil {
@@ -213,5 +214,12 @@ func TestErrors(t *testing.T) {
 	r, err := cl.Run(context.Background(), "hi", addToolkit(t))
 	if err != nil || r.Text != "from file" {
 		t.Fatalf("out file: %q %v", r.Text, err)
+	}
+}
+
+func TestCommandRequired(t *testing.T) {
+	_, err := CreateCliClient(CliOptions{Style: "claude"}, nil)
+	if err == nil || err.Error() != "cli: Command is required (path or name of the CLI binary)" {
+		t.Fatalf("err: %v", err)
 	}
 }

@@ -32,7 +32,7 @@ const defaultTimeoutMs = 600000
 // Style is one CLI's invocation recipe — data, shared by every port.
 type Style struct {
 	Name      string            `json:"name"`
-	Binary    string            `json:"binary"`
+	Binary    string            `json:"-"` // always the caller's Command
 	Args      []any             `json:"args"`
 	Prompt    string            `json:"prompt"` // stdin | arg | file
 	Answer    string            `json:"answer"` // stdout | out
@@ -80,8 +80,9 @@ func LoadCliStyle(pathOrJSON string) (Style, error) {
 	return s, nil
 }
 
-// CliOptions: Style picks a built-in recipe; Command overrides only its
-// binary. Style "custom" takes Args/Prompt/Answer explicitly; StyleDef passes
+// CliOptions: Style picks a built-in recipe (the argv/answer shape of a CLI
+// family); Command is REQUIRED and names the binary (path or name). No style
+// carries a default binary: "claude" style can drive any claude-compatible CLI. Style "custom" takes Args/Prompt/Answer explicitly; StyleDef passes
 // a loaded user style. Every in-process client option applies.
 type CliOptions struct {
 	tn.InProcessOptions
@@ -97,17 +98,15 @@ type CliOptions struct {
 }
 
 func (o CliOptions) resolve() (Style, error) {
+	if o.Command == "" {
+		return Style{}, errors.New("cli: Command is required (path or name of the CLI binary)")
+	}
 	if o.StyleDef != nil {
 		s := *o.StyleDef
-		if o.Command != "" {
-			s.Binary = o.Command
-		}
+		s.Binary = o.Command
 		return s, nil
 	}
 	if o.Style == "custom" {
-		if o.Command == "" {
-			return Style{}, errors.New("cli: style \"custom\" needs a Command")
-		}
 		return Style{Name: "custom", Binary: o.Command, Args: o.Args, Prompt: o.Prompt, Answer: o.Answer}, nil
 	}
 	all, err := BuiltinStyles()
@@ -124,9 +123,7 @@ func (o CliOptions) resolve() (Style, error) {
 		sort.Strings(names)
 		return Style{}, fmt.Errorf("cli: unknown style %q (known: %s)", o.Style, strings.Join(names, ", "))
 	}
-	if o.Command != "" {
-		s.Binary = o.Command
-	}
+	s.Binary = o.Command
 	return s, nil
 }
 

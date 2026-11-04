@@ -1,6 +1,5 @@
 {
   "name": "opencode",
-  "binary": "opencode",
   "args": [
     "run",
     [

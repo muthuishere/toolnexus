@@ -1,6 +1,5 @@
 {
   "name": "claude",
-  "binary": "claude",
   "args": [
     "-p",
     "--tools",

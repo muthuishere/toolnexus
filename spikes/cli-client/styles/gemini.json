@@ -1,6 +1,5 @@
 {
   "name": "gemini",
-  "binary": "gemini",
   "args": [
     "-p",
     "{{prompt}}",

@@ -1,6 +1,5 @@
 {
   "name": "goose",
-  "binary": "goose",
   "args": [
     "run",
     "--no-session",

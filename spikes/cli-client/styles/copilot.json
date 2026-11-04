@@ -1,6 +1,5 @@
 {
   "name": "copilot",
-  "binary": "copilot",
   "args": [
     "-p",
     "{{prompt}}",
