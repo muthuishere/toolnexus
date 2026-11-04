@@ -1,0 +1,23 @@
+{
+  "name": "gemini",
+  "args": [
+    "-p",
+    "{{prompt}}",
+    [
+      "--model",
+      "{{model}}"
+    ]
+  ],
+  "prompt": "arg",
+  "answer": "stdout",
+  "verified": "UNVERIFIED: gemini is not installed on the spike machine",
+  "notes": "From the Gemini CLI docs: -p/--prompt is non-interactive mode, -m/--model picks the model.",
+  "acp": {
+    "args": [
+      "--acp",
+      "--skip-trust"
+    ],
+    "verified": "gemini-cli 0.66.0 --acp --skip-trust, 2026-11-04 (ACP only; the one-shot args are UNVERIFIED)",
+    "notes": "Without --skip-trust gemini drops every session MCP server in an untrusted folder."
+  }
+}

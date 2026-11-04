@@ -147,6 +147,42 @@ var res = agent.run("Draw a fox, then animate it.", tk);
 for (var f : res.files) System.out.println(f.from() + " " + f.mimeType() + " " + f.url());
 ```
 
+## CLI client (agent CLIs as the model)
+
+`CliClient.create` makes an agent CLI you already have installed (and pay for) the model behind
+an ordinary `LlmClient`. The style is a closed enum, never a string: `CliStyles.CLAUDE | CODEX |
+COPILOT | OPENCODE | DEVIN | GEMINI | GOOSE | CUSTOM`. `command` is required: nothing is embedded
+or defaulted. SPEC §8C.
+
+```java
+Toolkit tk = Toolkit.create(new Toolkit.Options().skillsDir("./skills"));
+try (CliClient cli = CliClient.create(new CliClient.Options()
+        .style(CliStyles.OPENCODE).command("opencode").toolkit(tk))) {
+    var res = cli.run("What is my badge number?", tk);   // or cli.client() for the full LlmClient
+    System.out.println(cli.transport() + " " + res.text);  // "acp" …
+}
+```
+
+- **Transports** `CliTransports.AUTO | ACP | CLI`. AUTO uses ACP when the style has an ACP launch
+  (`command` + the style's `acp.args`, or `acpCommand` verbatim, e.g. claude's
+  `List.of("npx", "-y", "@agentclientprotocol/claude-agent-acp@0.100.0")`) and falls back to the
+  one-shot CLI only when the agent fails to start or answer `initialize` (`fallbackReason()` says
+  why). `transport()` is `"auto"` until the first call.
+- **ACP**: the toolkit is served as MCP on `127.0.0.1:<ephemeral>/mcp` behind a per-session bearer
+  token, `skill` is served as `load_skill`, and `beforeTool`/`afterTool` run at that server. Only
+  calls to served tools are allowed; the agent's own shell, edit and fetch are rejected. Agents
+  without http MCP get a stdio bridge (`bridgeCommand`, default `toolnexus mcp-bridge`;
+  `CliAcpSession.runMcpBridge` is the same thing as a method). `model(...)` goes to
+  `session/set_config_option`, then `session/set_model`, unchanged.
+- **One-shot**: the conversation goes in under a fixed preamble, the reply is parsed as an
+  OpenAI-shaped envelope (`CliClient.parseReply`), and tool calls run in the toolnexus loop.
+  Streaming is refused (and is not supported over ACP in this port yet).
+- Errors are pinned: construction throws `IllegalArgumentException`; calls throw
+  `CliClient.CliException` (`cli: command not found: <bin>`, `cli: exit <code>: <stderr>`,
+  `cli: empty reply`, `cli: no output file`, `cli: timed out after <ms>ms`). Default call timeout
+  300000 ms (`callTimeoutMs`). `usage` is always zero. Styles are data: `CliClient.loadStyle(path | json)`
+  for your own.
+
 ## Documentation
 
 Everything else — the full surface, with runnable examples — lives on the docs site:

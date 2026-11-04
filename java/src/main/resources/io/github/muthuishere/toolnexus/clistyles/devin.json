@@ -1,0 +1,25 @@
+{
+  "name": "devin",
+  "args": [
+    "-p",
+    "--prompt-file",
+    "{{file}}",
+    [
+      "--model",
+      "{{model}}"
+    ]
+  ],
+  "prompt": "file",
+  "answer": "stdout",
+  "verified": "devin 2026.8.18 --help, 2026-11-04",
+  "notes": "--prompt-file avoids argv limits. The default --permission-mode auto approves only read-only tools.",
+  "acp": {
+    "args": [
+      "acp"
+    ],
+    "projectMcpFile": ".mcp.json",
+    "verified": "devin 2026.8.18 acp, 2026-11-04",
+    "notes": "Ignores session/new mcpServers: the session runs in a fresh temp cwd holding .mcp.json with the toolkit server. Its MCP tools sit behind a lookup tool: a prompt that does not name the MCP server 'toolnexus' may never find them (live 2026-11-04: 0/3 without, 3/3 with), so systemHint names it on every ACP turn.",
+    "systemHint": "Your tools include those of the MCP server named \"toolnexus\". When the request needs a tool, look up the toolnexus MCP server and use its tools."
+  }
+}

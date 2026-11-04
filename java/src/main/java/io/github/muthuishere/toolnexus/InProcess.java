@@ -151,13 +151,19 @@ public final class InProcess {
         if (opts == null || opts.generate == null) {
             throw new IllegalArgumentException("toolnexus: InProcess.createClient requires a `generate` function");
         }
+        return createClient(opts, new GenerateBackedHttpClient(opts.generate));
+    }
+
+    /** {@link #createClient(Options)} over a caller-built shim (the CLI client wraps it to
+     * refuse streaming with its own message). */
+    static LlmClient createClient(Options opts, HttpClient http) {
         LlmClient.Options o = new LlmClient.Options();
         o.baseUrl = BASE_URL;
         o.style = "openai";
         // An in-process model has no endpoint to authenticate to, so the host must never need a key — but the client resolves one from the environment and fails when it finds none. A sentinel keeps that resolution from ever running. Caught by CI, which has no OPENROUTER_API_KEY; every local run passed because a developer shell has one.
         o.apiKey = "in-process";
         o.model = opts.model;
-        o.httpClient = new GenerateBackedHttpClient(opts.generate);
+        o.httpClient = http;
         o.systemPrompt = opts.systemPrompt;
         if (opts.maxTurns > 0) o.maxTurns = opts.maxTurns;
         if (opts.maxToolConcurrency > 0) o.maxToolConcurrency = opts.maxToolConcurrency;
