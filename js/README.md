@@ -93,7 +93,9 @@ tool. Runnable: `npm run example:prompt-cache` ([`examples/prompt_cache.ts`](exa
 - `agents.compactor({ onCompact })`, `agent.asToolWith(ctx => ({ hooks, waitFor }))`, runtime
   `waitFor`, `ctx.callId` on tools, `listModels(opts)`.
 
-ACP host hooks (permission choice, update stream, cancel, streaming) are Go-only for now.
+ACP host hooks (permission choice, update stream, cancel) are Go-only for now. `stream()` on a CLI
+client never errors: on both transports it degrades to a non-incremental stream (tool_call /
+tool_result events, the whole answer as one text event, then done).
 
 ## Simple judgments
 

@@ -211,15 +211,30 @@ test("cli: pinned one-shot errors", async () => {
   }
 })
 
-test("cli: one-shot refuses streaming", async () => {
-  const c = createCliClient(fakeCLIOpts("x"))
-  let err: Error | undefined
-  try {
-    for await (const ev of c.stream("hi")) if ((ev as any).type === "error") err = (ev as any).error
-  } catch (e) {
-    err = e as Error
+async function collectStream(c: ReturnType<typeof createCliClient>, tk?: Toolkit) {
+  const types: string[] = []
+  let text = ""
+  for await (const ev of c.stream("What is my badge number?", { toolkit: tk })) {
+    const e = ev as any
+    if (e.type === "error") assert.fail(`stream must not error: ${e.error?.message ?? e.error}`)
+    if (e.type === "text") text += e.delta
+    types.push(e.type)
   }
-  assert.match(String(err?.message ?? err), /cli: streaming is not supported by the one-shot CLI transport; use Run/)
+  return { types, text }
+}
+
+test("cli: one-shot streams non-incrementally (tool_call, tool_result, one text, done)", async () => {
+  const tk = await badgeToolkit()
+  const c = createCliClient(fakeCLIOpts("tool"))
+  try {
+    const { types, text } = await collectStream(c, tk)
+    const core = types.filter((t) => t === "tool_call" || t === "tool_result" || t === "text" || t === "done")
+    assert.deepEqual(core, ["tool_call", "tool_result", "text", "done"], types.join(","))
+    assert.equal(types[types.length - 1], "done")
+    assert.ok(text.includes("BADGE-77Q"), text)
+  } finally {
+    await c.close()
+  }
 })
 
 // --------------------------------------------------------------------------- //
@@ -404,4 +419,45 @@ test("cli: conformance/cli-client/cases.json replay", () => {
     assert.throws(() => createCliClient(o), (e: Error) => e.message === c.error, c.error)
   }
   assert.equal(renderCliPrompt([], []), fx.renderEmpty.replace("<PREAMBLE>", CLI_PREAMBLE))
+})
+
+test("cli: ACP streams non-incrementally (text with the answer, then done)", async () => {
+  const { o } = await fakeACPOpts({ FAKE_HTTP: "1" })
+  const c = createCliClient(o)
+  try {
+    const { types, text } = await collectStream(c, o.toolkit)
+    assert.equal(c.transport(), "acp", c.fallbackReason())
+    assert.equal(types[types.length - 1], "done")
+    assert.ok(types.includes("text"))
+    assert.ok(text.includes("BADGE-77Q"), text)
+  } finally {
+    await c.close()
+  }
+})
+
+test("cli: stream every style over both transports without error", async () => {
+  const styles = [CliStyles.Claude, CliStyles.Codex, CliStyles.Copilot, CliStyles.Opencode,
+    CliStyles.Devin, CliStyles.Gemini, CliStyles.Goose, CliStyles.Custom]
+  for (const st of styles) {
+    for (const tr of [CliTransports.CLI, CliTransports.ACP]) {
+      const name = `${st}/${tr}`
+      const tk = await badgeToolkit()
+      let o: CliOptions = { style: st, command: FAKE, transport: tr, toolkit: tk, env: { TN_FAKE_CLI: "tool" } }
+      if (st === CliStyles.Custom) o = { ...o, args: [], prompt: "stdin", answer: "stdout" }
+      if (tr === CliTransports.ACP) {
+        const { o: fo } = await fakeACPOpts({ FAKE_HTTP: "1" })
+        o = { ...o, env: fo.env, bridgeCommand: fo.bridgeCommand, acpCommand: [FAKE, "acp"] }
+      }
+      const c = createCliClient(o)
+      try {
+        const { types, text } = await collectStream(c, tk)
+        assert.equal(types[types.length - 1], "done", name)
+        assert.ok(text.includes("BADGE-77Q"), `${name}: ${text}`)
+        if (tr === CliTransports.CLI) assert.ok(types.includes("tool_call"), `${name}: one-shot stream carries tool_call`)
+        assert.equal(c.transport(), tr, name)
+      } finally {
+        await c.close()
+      }
+    }
+  }
 })

@@ -220,9 +220,14 @@ export class CliClient extends Client {
     const cliFetch: typeof fetch = async (url, init) => {
       const body = JSON.parse(String((init as any)?.body ?? "{}"))
       if (body.stream) {
-        const s = await self!.session()
-        if (!s) throw new Error("cli: streaming is not supported by the one-shot CLI transport; use Run")
-        throw new Error("cli: streaming over ACP is not supported in the js port; use run")
+        // SPEC §8C: neither transport streams incrementally here, so a stream degrades
+        // instead of erroring — run the turn whole and replay it as one SSE chunk. The
+        // loop then emits its usual tool_call / tool_result events, the answer as ONE
+        // text event, and done.
+        delete body.stream
+        delete body.stream_options
+        const res = await inner(url, { ...(init as any), body: JSON.stringify(body) })
+        return cliReplayAsSSE(await res.json())
       }
       return inner(url, init)
     }
@@ -906,4 +911,22 @@ export async function runMcpBridge(url: string, token: string, input: Readable, 
     const b = body.trim()
     if (b.startsWith("{")) output.write(b + "\n")
   }
+}
+
+/** Re-encodes one whole OpenAI chat completion as a single-chunk SSE stream (the
+ *  non-incremental stream of SPEC §8C). */
+function cliReplayAsSSE(j: any): Response {
+  const msg = j?.choices?.[0]?.message ?? {}
+  const delta: Record<string, any> = {}
+  if (msg.tool_calls?.length) {
+    delta.tool_calls = msg.tool_calls.map((c: any, index: number) => ({ index, ...c }))
+  } else {
+    delta.content = msg.content ?? ""
+  }
+  const chunks = [
+    { choices: [{ index: 0, delta, finish_reason: msg.tool_calls?.length ? "tool_calls" : "stop" }] },
+    { choices: [], usage: j?.usage ?? { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 } },
+  ]
+  const sse = chunks.map((c) => `data: ${JSON.stringify(c)}\n\n`).join("") + "data: [DONE]\n\n"
+  return new Response(sse, { status: 200, headers: { "content-type": "text/event-stream" } })
 }

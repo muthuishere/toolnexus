@@ -33,6 +33,9 @@ if (argv.length === 2 && argv[0] === "mcp-bridge") {
 // Answers on stdout, or into the file after --o.
 // ---------------------------------------------------------------------------
 async function fakeOneShot(mode) {
+  const PREAMBLE20 = fs
+    .readFileSync(new URL("../../../conformance/cli-styles/preamble.txt", import.meta.url), "utf8")
+    .slice(0, 20)
   let prompt = ""
   let outFile = ""
   for (let i = 0; i < argv.length; i++) {
@@ -42,6 +45,15 @@ async function fakeOneShot(mode) {
     else if (argv[i] === "--argv") {
       process.stdout.write(JSON.stringify({ content: argv.join(" ") }))
       return
+    } else {
+      // Style-agnostic detection, so every built-in style's real argv works: the prompt
+      // as an arg, the {{file}} temp file, the {{out}} temp path (not created yet).
+      const a = argv[i]
+      if (a.startsWith(PREAMBLE20)) prompt = a
+      else if (path.basename(a).includes("toolnexus-cli-")) {
+        if (fs.existsSync(a)) prompt = fs.readFileSync(a, "utf8")
+        else outFile = a
+      }
     }
   }
   if (!prompt) {
