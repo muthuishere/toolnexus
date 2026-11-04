@@ -24,6 +24,8 @@ public final class ToolResult {
     private final boolean isError;
     private final Map<String, Object> metadata;
     private final List<ContentPart> parts;
+    private final Object structured;
+    private final Map<String, Object> meta;
 
     public ToolResult(String output, boolean isError, Map<String, Object> metadata) {
         this(output, isError, metadata, null);
@@ -31,10 +33,47 @@ public final class ToolResult {
 
     /** §1B: a result that also carries non-text content parts. */
     public ToolResult(String output, boolean isError, Map<String, Object> metadata, List<ContentPart> parts) {
+        this(output, isError, metadata, parts, null, null);
+    }
+
+    /**
+     * SPEC §1: a result that also carries a machine-readable {@code structured} value (MCP
+     * {@code structuredContent}) and/or protocol {@code meta} (MCP {@code _meta}). Either may be
+     * {@code null}; absent ⇒ byte-identical output everywhere.
+     */
+    public ToolResult(String output, boolean isError, Map<String, Object> metadata, List<ContentPart> parts,
+                      Object structured, Map<String, Object> meta) {
         this.output = output == null ? "" : output;
         this.isError = isError;
         this.metadata = metadata;
         this.parts = parts == null || parts.isEmpty() ? null : List.copyOf(parts);
+        this.structured = structured;
+        this.meta = meta;
+    }
+
+    /** SPEC §1: machine-readable result (MCP {@code structuredContent}), or {@code null}. */
+    public Object structured() {
+        return structured;
+    }
+
+    /** SPEC §1: protocol metadata (MCP {@code _meta}), or {@code null}. */
+    public Map<String, Object> meta() {
+        return meta;
+    }
+
+    /** A copy of this result carrying {@code structured} (SPEC §1). */
+    public ToolResult withStructured(Object structured) {
+        return new ToolResult(output, isError, metadata, parts, structured, meta);
+    }
+
+    /** A copy of this result carrying {@code meta} (SPEC §1). */
+    public ToolResult withMeta(Map<String, Object> meta) {
+        return new ToolResult(output, isError, metadata, parts, structured, meta);
+    }
+
+    /** SPEC §1: a successful structured result; {@code output} empty (MCP serve emits its JSON text). */
+    public static ToolResult structured(Object structured) {
+        return new ToolResult("", false, null, null, structured, null);
     }
 
     public String output() {

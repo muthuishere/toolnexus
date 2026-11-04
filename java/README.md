@@ -147,6 +147,32 @@ var res = agent.run("Draw a fox, then animate it.", tk);
 for (var f : res.files) System.out.println(f.from() + " " + f.mimeType() + " " + f.url());
 ```
 
+## Embeddable MCP server
+
+`toolkit.mcpHandler(cfg)` is a streamable-HTTP MCP server as a JDK `HttpHandler`, to mount on your
+own `HttpServer` behind your own TLS and auth. Every policy is a per-request hook: `authenticate`
+(401 + `WWW-Authenticate`), `listTools` (each caller sees its own tools; a name outside the list is
+never executed), `beforeCall` (allow / deny / confirm through MCP elicitation), `onCall`, resources,
+prompts and pluggable session ids. The identity, HTTP exchange, session id and request `_meta`
+reach every hook and, through `ToolContext.mcp()`, the tool. SPEC §7C.1; run
+`./gradlew runMcpHandler` for the full demo.
+
+```java
+HttpServer server = HttpServer.create(new InetSocketAddress(8080), 0);
+server.setExecutor(Executors.newVirtualThreadPerTaskExecutor()); // confirms wait on a second request
+server.createContext("/mcp", tk.mcpHandler(new McpHandler.Config()
+        .authenticate(ex -> verifyBearer(ex.getRequestHeaders().getFirst("Authorization")))
+        .listTools(ctx -> toolsFor(ctx.identity()))
+        .beforeCall((ctx, tool, rawArgs) -> tool.annotations() != null
+                && Boolean.TRUE.equals(tool.annotations().destructiveHint())
+                ? McpHandler.Decision.confirm("Really delete?") : McpHandler.Decision.allow())));
+server.start();
+```
+
+`ToolResult.structured(...)` / `withMeta(...)` and `Tool.withOutputSchema` / `withAnnotations`
+are sent as `structuredContent`, `_meta`, `outputSchema` and `annotations`, also on the existing
+`serve(addr, mcp)` path. Without them, the output is the same as before.
+
 ## Documentation
 
 Everything else — the full surface, with runnable examples — lives on the docs site:

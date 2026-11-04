@@ -117,13 +117,15 @@ public final class McpServe {
     }
 
     /** Convert a uniform {@link Tool} into an SDK {@link McpSchema.Tool} (name verbatim). */
-    private static McpSchema.Tool toMcpTool(Tool t) {
+    static McpSchema.Tool toMcpTool(Tool t) {
         Map<String, Object> schema = t.inputSchema() == null ? new LinkedHashMap<>() : t.inputSchema();
-        return McpSchema.Tool.builder()
+        McpSchema.Tool.Builder b = McpSchema.Tool.builder()
                 .name(t.name())
                 .description(t.description() == null ? "" : t.description())
-                .inputSchema(schema)
-                .build();
+                .inputSchema(schema);
+        // SPEC §1: outputSchema rides along only when the tool sets one (absent ⇒ byte-identical).
+        if (t.outputSchema() != null) b.outputSchema(t.outputSchema());
+        return b.build();
     }
 
     /**
@@ -142,6 +144,7 @@ public final class McpServe {
             String msg = e.getMessage() == null ? String.valueOf(e) : e.getMessage();
             result = ToolResult.error(msg);
         }
+        if (result == null) result = ToolResult.ok("");
         if (onCall != null) {
             try {
                 onCall.accept(new OnCallEvent(tool.name(), tool.source(),
@@ -150,9 +153,22 @@ public final class McpServe {
                 // Host callback errors are isolated.
             }
         }
+        return toCallToolResult(result);
+    }
+
+    /**
+     * Map a {@link ToolResult} to the SDK {@link McpSchema.CallToolResult}: output → text part (the
+     * JSON of {@code structured} when output is empty), {@code structured} → structuredContent,
+     * {@code meta} → _meta (both omitted when absent), then §1B parts.
+     */
+    static McpSchema.CallToolResult toCallToolResult(ToolResult result) {
+        String text = result.output();
+        if (result.structured() != null && text.isEmpty()) text = Json.stringify(result.structured());
         McpSchema.CallToolResult.Builder out = McpSchema.CallToolResult.builder()
-                .addTextContent(result.output())
+                .addTextContent(text)
                 .isError(result.isError());
+        if (result.structured() != null) out.structuredContent(result.structured());
+        if (result.meta() != null) out.meta(result.meta());
         // §1B parts ride back out as native MCP content blocks, appended after the text part in
         // order: image ⇒ image content, audio ⇒ audio content, file ⇒ an embedded resource.
         if (result.parts() != null) {

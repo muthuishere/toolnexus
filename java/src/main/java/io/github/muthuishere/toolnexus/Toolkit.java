@@ -330,6 +330,14 @@ public final class Toolkit implements AutoCloseable {
         }
     }
 
+    /**
+     * An embeddable streamable-HTTP MCP server for this toolkit (SPEC §7C.1, ADR 0039), to mount on
+     * the host's own {@code HttpServer} context. {@link #serve} is unchanged.
+     */
+    public McpHandler mcpHandler(McpHandler.Config cfg) {
+        return new McpHandler(this, cfg);
+    }
+
     public ToolResult execute(String name, Map<String, Object> args, ToolContext ctx) {
         Tool tool = get(name);
         if (tool == null) {

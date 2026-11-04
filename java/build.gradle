@@ -159,6 +159,13 @@ tasks.register('runPromptCache', JavaExec) {
     mainClass = 'io.github.muthuishere.toolnexus.examples.PromptCacheTiers'
 }
 
+tasks.register('runMcpHandler', JavaExec) {
+    group = 'application'
+    description = 'Run the McpHandlerExample (embeddable MCP server: auth, per-caller tools, confirm gate; no API key, no network).'
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = 'io.github.muthuishere.toolnexus.examples.McpHandlerExample'
+}
+
 tasks.register('runAcp', JavaExec) {
     group = 'application'
     description = 'Run the Acp example (ACP agent CLI — devin/opencode — as the model behind the unified client). NOT run in CI: needs the agent CLI installed + authenticated.'
