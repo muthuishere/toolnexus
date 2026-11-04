@@ -52,40 +52,66 @@ file, no log file.
 A jevx profile *resolves to* a `ClassifierOptions`, and that is the only thing that reaches
 toolnexus. The spike's `Registry` (`spikes/jevx-core/core.go`) is jevx-side code.
 
-**D3. One classifier, one style, one enum.** The owner, 2026-11-04: *"all should be one single
-style classifier and also should support images."* A host makes one `Classifier`, and the
-`ClassifierBackend` enum is the only thing that picks where it goes. Every backend:
-- takes the same System One questions (`noul`, `choice`, `score`);
-- returns the same `Decision`;
-- accepts the same text **or image** items.
+**D3. One classifier, one style (System One), one backend enum.** Owner, 2026-11-04: *"all
+should be one single style classifier and also should support images"*; *"typesafe, openrouter,
+cloudflare and whatever available."*
 
-There is no per-backend style for a host to choose.
+A host makes one `Classifier`. It always sends the System One body
+(`{model, state, questions}` → `{model, answers, usage}`). The `ClassifierBackend` enum is the
+only choice the host makes. Research (2026-11-04, sources below) found these routes that serve
+the System One wire:
 
-| enum | how the classifier reaches it | default base / model / key env |
-|---|---|---|
-| `typesafe` | System One `POST {base}/systemone` | `api.typesafe.ai/v1`, `jev-latest`, `TYPESAFE_API_KEY` (exists) |
-| `openrouter` | System One `POST {base}/systemone` | `openrouter.ai/api/v1`, `typesafe/jev-1.13`, `OPENROUTER_API_KEY` (exists) |
-| `cloudflare` | the System One body inside Cloudflare's `/ai/run` wrapper (`{model, input}` → `{result, success}`, plus the nested `state: Completed` unwrap). This ports jevx `core/core.go:770–815` | account URL from `${CLOUDFLARE_ACCOUNT_ID}`, `typesafe/jev`, `CLOUDFLARE_JEV_API_KEY` |
-| `openai` | the same System One questions, answered by an OpenAI-compatible chat model through structured output. The classifier does the translation internally, so the host sees the same `Decision`, with `Calibrated=false` | `api.openai.com/v1`, the host's model, `OPENAI_API_KEY` |
+| enum | endpoint | default model | key env | wire differences | images |
+|---|---|---|---|---|---|
+| `typesafe` (exists) | `https://api.typesafe.ai/v1/systemone` | `jev-latest` (pin `jev-1.14.0` for images and box) | `TYPESAFE_API_KEY` | none | **yes**: Jev 1.13 and 1.14, behind a required header (D4) |
+| `openrouter` (exists) | `https://openrouter.ai/api/v1/systemone` | `typesafe/jev-1.14` (`~typesafe/jev-latest` alias; 1.13 still served) | `OPENROUTER_API_KEY` | the reply adds `id`, `provider`, `usage.cost` | Jev listed as text+image. The image wire through `/systemone` is unverified |
+| `cloudflare` (new) | `https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/ai/run/<model>` | `typesafe/jev`; also `@cf/cloudflare/clef`, `@cf/cloudflare/clef-flash` | `CLOUDFLARE_JEV_API_KEY` (jevx's name) | request is `{model, input:{state,questions}}`; reply is `{success, result}`, with a nested `state:"Completed"` unwrap (jevx `core/core.go:770–815`). Clef returns 422 on any unknown field | Clef: **yes**, through its own `images` field (base64). Jev on Cloudflare: not documented |
+| `vercel` (new) | `https://ai-gateway.vercel.sh/typesafe/v1/systemone` | `typesafe-ai/jev` | `AI_GATEWAY_API_KEY` | the reply adds `provider_metadata.gateway`. Optional gateway fallbacks go in `providerOptions.gateway` | not documented |
 
-An explicit `BaseURL`, `Model` or `APIKeyEnv` still overrides the preset, and that covers
-self-hosted endpoints. The current `Style` option (`systemone | llm | custom | static`) is folded
-in:
-- `llm` becomes the `openai` backend;
-- `static` and `custom` stay as test and host-supplied seams, not product backends.
+**Left out on purpose:**
+- Generic gateways that put their own host in front of these same routes (TrueFoundry, Zuplo,
+  LiteLLM pass-through). They are reachable with the `typesafe` preset and a `BaseURL` override,
+  and they add no preset value.
+- The **Decisions API** (`openrouter.ai/api/alpha/decisions`, Vercel's Decision API). It serves 22
+  decision models, among them `openai/gpt-6-luna-decisions`, Perplexity, Clef and Liquid d1. Its
+  body is close to System One but is a different, **alpha** wire, and the docs I found don't
+  confirm it is byte-identical. It would be a second wire, so it is an open question (Q2), not a
+  fifth preset. Inside one wire, the *model* is free: any decision model that a backend serves
+  under `/systemone` is just a `Model` value.
 
-Whether to deprecate `Style` or keep it as an alias is decided in the OpenSpec change.
+Within a backend, an explicit `BaseURL`, `Model` or `APIKeyEnv` overrides the preset; that covers
+self-hosted endpoints such as openjevx. The current `Style` option
+(`systemone | llm | custom | static`) folds away:
+- `systemone` is the only product wire;
+- `static` and `custom` stay as test and host-supplied seams;
+- `llm` (a chat model imitating System One, uncalibrated) is deprecated. That is the owner's
+  "single style". Whether it is removed or kept as an alias is decided in the OpenSpec change.
 
-**D4. Images are part of the contract on every backend (gap I1).** The latest TypeSafe API
-accepts images. An item is text or a §8A `ContentPart`:
-- `typesafe`, `openrouter`, `cloudflare`: the image goes on the System One wire. The exact
-  encoding is taken from TypeSafe's current API reference when the change is written; it is not
-  guessed here.
-- `openai`: the image goes as a native image part (the client's `RunParts` path), not through the
-  text-only `Run`.
+**D4. Images are part of the System One contract (gap I1).** An item is text or a §8A
+`ContentPart`. The TypeSafe images reference (docs.typesafe.ai/images) defines the wire:
+- a top-level `assets` map, with one entry per image, keyed by a plain-text reference:
+  `"<ref>": {"type":"image","format":"png|jpg|jpeg","data_base64":"<no data: prefix>"}`;
+- each reference must appear in `state`, `instructions` or `criteria`. A string that is exactly
+  the reference *becomes* that image;
+- the header `TypeSafe-Danger-Zone-Images: true` is **required** on any request with an image or a
+  box question; without it the request is rejected;
+- multipart (JSON in the part named `request`, each file in its own part referenced by `part`) is
+  recommended. Base64 JSON is about a third larger. toolnexus starts with base64 JSON, which is one
+  body shape for every port, and leaves multipart as a follow-up;
+- limits: PNG or JPEG still images only, 16 MiB per image, 280–1568 px per side, 32 MiB per
+  request. Images outside these limits are **rejected, not resized**, so toolnexus checks them
+  client-side before sending, as it already does for choice and score limits.
 
-If a gateway turns out to drop images, the call fails loudly. The image is never turned into a
-text description.
+Per backend:
+- `typesafe` uses the wire above.
+- `cloudflare` maps the images to Clef's `images` field when the model is Clef.
+- `openrouter` and `vercel` send the same `assets` body. Whether a gateway actually forwards it
+  (and the header) is checked live before the change ships.
+
+A backend that rejects the image fails loudly. The image is never turned into a text
+description. TypeSafe calls images and box questions "danger zone" (no production guarantees), so
+an image call must be explicit: the host passes an image item. The library never sends an image
+on its own.
 
 ### Cross-port check (2026-11-04, this branch)
 
@@ -103,10 +129,13 @@ All eight ports are aligned today, and all of them have the same gaps:
 | rust | same (`classifier.rs:90`) | 4 | none | text |
 
 So the change is the same everywhere:
-- add `cloudflare` and `openai` to the enum;
-- fold `Style` into the backend;
-- add image items on all four backends;
+- add `cloudflare` and `vercel` to the enum;
+- deprecate `Style` `llm`;
+- add image items (`assets` + the danger-zone header + client-side limits);
 - add the D5 helpers.
+
+The `openrouter` model default should also move from `typesafe/jev-1.13` to the 1.14 or latest
+alias.
 
 Every port already has `ContentPart` (§8A) for its chat client, so the image type itself exists
 in all eight.
@@ -148,7 +177,7 @@ with the same profile, `--fresh` and `--no-context`. Any mismatch blocks that ve
 ## Not done
 
 - No library change and no OpenSpec change yet. The follow-up change (e.g.
-  `add-classifier-backends`) covers D3 (one style: `cloudflare` and `openai` enum values, `Style` folded in), D4 (images on all four) and
+  `add-classifier-backends`) covers D3 (one System One style; `cloudflare` and `vercel` enum values), D4 (images via `assets`) and
   D5 (T1, V1, C1, L1) across all eight ports.
 - The spike still uses `ErrImageUnsupported`, because toolnexus cannot send images yet.
 - jevx's repo was not modified. The full 20–30-item gate has not run.
@@ -157,9 +186,22 @@ with the same profile, `--fresh` and `--no-context`. Any mismatch blocks that ve
 
 1. **Gate items.** Which real items should the gate use: Stop-hook turns you pick, wfnexus
    `wfx judge` item files, or the myjev question pack?
-2. **`Style` option.** Should it be removed in the next breaking release, or kept as a
-   deprecated alias for the enum?
-3. **Images on OpenRouter and Cloudflare.** Do these gateways pass the image wire through, or is
+2. **The Decisions API.** OpenRouter's and Vercel's alpha Decisions API serves 22 decision models,
+   including `openai/gpt-6-luna-decisions`. Should toolnexus support it as a second wire, or stay
+   System One only (proposed)?
+3. **Images on the gateways.** Do OpenRouter, Vercel and Cloudflare-Jev pass the image wire through, or is
    it TypeSafe-only at first?
 4. **Thresholds.** Should toolnexus ship jevx's inclusive `Thresholds` alongside `Bands`
    (proposed), or should jevx migrate its users to `Bands`?
+5. **`llm` style.** Should it be removed in the next breaking release, or kept as a deprecated
+   alias?
+
+## Sources (researched 2026-11-04)
+
+- TypeSafe images reference: https://docs.typesafe.ai/images
+- OpenRouter, Jev on OpenRouter: https://openrouter.ai/docs/guides/community/jev
+- OpenRouter, TypeSafe SDK (System One at `/api/v1/systemone`): https://openrouter.ai/docs/guides/community/typesafe-sdk
+- Vercel AI Gateway, TypeSafe API: https://vercel.com/docs/ai-gateway/sdks-and-apis/typesafe
+- TrueFoundry gateway (Cloudflare `/ai/run` envelope, Clef `images` field): https://www.truefoundry.com/docs/ai-gateway/typesafe
+- Jev 1.14 release coverage (images, box, danger-zone header): https://pasqualepillitteri.it/en/news/26048/jev-1-14-image-input-box-typesafe-warns
+- Clef overview (System One-compatible, `images` field): https://dev.classmethod.jp/en/articles/cloudflare-clef-overview/

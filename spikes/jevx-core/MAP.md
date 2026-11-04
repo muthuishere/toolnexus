@@ -12,7 +12,7 @@ toolnexus has to add something before jevx can move.
 | `core/core.go:205` `Config.Profiles` + `:312` `Config.Profile(name)` | named profiles, a default | none, by design | **jevx** (stateless library; ADR 0038 D2) |
 | `core/core.go:624` `MissingEnv`, `:636` `Expanded` | `$VAR` in headers, expanded per request | `attempt` `classifier.go:968`: key from `APIKeyEnv` and `${ENV}` headers, both at call time | **Core** (same rule) |
 | `core/core.go:750` `AskRaw` | builds `{model,state,questions}` and POSTs it | `Evaluate` `classifier.go:620` → `evaluateSystemOne` `:867` | **Core** |
-| `core/core.go:770` Cloudflare `/ai/run` envelope | wraps the request, unwraps `result` | the base URL always gets `/systemone` appended (`post` `:890`) | **Gap U1 → D3**: a `cloudflare` value on the `ClassifierBackend` enum (with `typesafe`, `openrouter`, `openai`) |
+| `core/core.go:770` Cloudflare `/ai/run` envelope | wraps the request, unwraps `result` | the base URL always gets `/systemone` appended (`post` `:890`) | **Gap U1 → D3**: a `cloudflare` value on the `ClassifierBackend` enum (with `typesafe`, `openrouter`, `vercel`) |
 | `core/core.go:789` retry loop + `:844` `post` | 3 tries, 429/5xx/network, backoff `try²·500ms` | `post` `:890`: 2 retries, 408/429/5xx/529, `500·2ⁿ`, **honours Retry-After** | **Core** (toolnexus is stricter; jevx ignores Retry-After) |
 | `core/core.go:865` `validate` | fails closed: answer count, P in [0,1], probabilities sum to ~1, choice is an offered key | `Decision.UnmarshalJSON` `:340` decodes the type only | **Gap V1**: fail-closed reply validation |
 | `core/core.go:903` `ledger` | one content-free JSONL line per call (host, model, qhash, ms, usage, redacted, error) | `OnMetric` emits `classifier.evaluate` `:1058` (model, status, ms, tokens) | **Core** for the event. The file, profile and caller stay **CLI**. Small gap L1: no question hash or count in the event |
@@ -43,8 +43,8 @@ toolnexus has to add something before jevx can move.
 
 ## Gaps toolnexus must fill (stateless only; follow-up OpenSpec change across all ports)
 
-T1 inclusive thresholds as a pure verdict function · V1 fail-closed reply validation · I1 image items (TypeSafe now accepts them) ·
-D3 backend enum `typesafe | openrouter | cloudflare | openai` · C1 question chunking · L1 question hash in the metric event.
+T1 inclusive thresholds as a pure verdict function · V1 fail-closed reply validation · I1 image items (TypeSafe `assets` + danger-zone header) ·
+D3 backend enum `typesafe | openrouter | cloudflare | vercel` (System One wire only) · C1 question chunking · L1 question hash in the metric event.
 
 Owned by jevx, not gaps (owner 2026-11-04: "jevx is frontend … profile belongs to jevx, ours is a stateless
 library"): R1 profiles/registry/default/fallback, K1 answer cache, P1 redaction, the ledger file, config.
