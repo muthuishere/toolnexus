@@ -406,7 +406,8 @@ Opt-in per server: `"toolSearch": true` (+ optional `"description": "<what this 
   inputSchema of the best matches; run one with call_tool."`, schema
   `{type:"object", properties:{query:{type:"string"}, limit:{type:"integer"}}, required:["query"]}`.
   Ranking is BM25 over the tool name (weight ×2, split on `_` and camelCase) and description; each hit is
-  `{name, description, inputSchema, server}` where `server` is the configured `description`.
+  `{name, description, inputSchema, server}` where `server` is the configured `description`, or `""` when
+  none is configured.
 - `call_tool` — description `"Run a tool found with search_tools."`, args `{name, arguments}`; the result
   is identical to a direct call (MRTR still routes through §10).
 - **Toolkit names:** the two tools follow normal naming, `sanitize(server)_search_tools` and
