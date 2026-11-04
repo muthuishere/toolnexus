@@ -170,6 +170,33 @@ for _, f := range res.Files { fmt.Println(f.From, f.MimeType, f.URL) }
 In the typed inputs a zero value means "not set" (`Seed: 0` is never sent). To send a real
 zero, use `media.Generate(ctx, "image", map[string]any{"prompt": "…", "seed": 0}, nil)`.
 
+## MCP 2026-07-28 + OAuth
+
+Every MCP server is asked `server/discover` first. A server that speaks protocol
+`2026-07-28` is used through toolnexus's own client: stateless HTTP (JSON or SSE
+replies) or line-delimited stdio. There is no `initialize` and no session. Older
+servers fall back to the previous `mark3labs/mcp-go` path, which is frozen. The
+config format, tool names and result mapping are the same on both paths.
+
+```json
+{
+  "mcpServers": {
+    "github": {
+      "url": "https://example.com/mcp",
+      "auth": { "clientId": "YOUR_CLIENT_ID", "mode": "auto" },
+      "toolSearch": true,
+      "description": "GitHub issues and pull requests"
+    }
+  }
+}
+```
+
+- **OAuth** (`auth`): a 401 starts the flow: protected-resource metadata, then authorization-server metadata, then PKCE S256 with `resource`. The client identity is a pre-registered `clientId`/`clientIds`, or a client ID metadata document (`clientMetadataUrl`). Dynamic client registration is never used. In `auto` mode the browser opens and the callback lands on a loopback listener. In `pause` mode the client sends a §10 `authorization` request; the host answers with `Answer{Ok: true, Data: {"callbackUrl": ...}}`. Tokens are refreshed single-flight and step up on `insufficient_scope`. Pass `Options.TokenStore` (default: in-memory) and `Options.OpenURL` (default: the OS opener). Both are also on `McpLoadOptions`. Tokens never appear in logs or errors.
+- **Input requests** (`input_required`) go through `WaitFor`. Without a `WaitFor`, the run returns `{status:"pending"}`, and resuming continues the same round.
+- **Tool search** (`toolSearch: true`) exposes `<server>_search_tools` and `<server>_call_tool` in place of every server tool.
+- **Skills**: skills from a server's skills extension join the same `skill` tool.
+- **Fallback and OAuth**: the bearer token is attached to the SDK transport for each request (`WithHTTPHeaderFunc`). A 401 from that path runs the same OAuth flow once.
+
 ## Documentation
 
 Everything else — the full surface, with runnable examples — lives on the docs site:
