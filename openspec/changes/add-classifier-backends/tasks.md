@@ -7,19 +7,19 @@
 - [x] 1.4 CHANGELOG `## Unreleased`
 
 ## 2. Per-language parity (backend enum + cloudflare wire + images + ClassifierUnsupported + state/states + cache/MemoryCache + validateDecision + Thresholds + chunkQuestions + L1 metric fields + raw question/answer + llm deprecation + openrouter jev-1.14 + all backends fixtures, hermetic fake endpoint)
-- [ ] 2.1 golang
-- [ ] 2.2 js
-- [ ] 2.3 python
-- [ ] 2.4 java
-- [ ] 2.5 csharp
-- [ ] 2.6 elixir (coverage gate ≥ 95%)
-- [ ] 2.7 clojure (JVM; cljgo in CI)
-- [ ] 2.8 rust
+- [x] 2.1 golang
+- [x] 2.2 js
+- [x] 2.3 python
+- [x] 2.4 java
+- [x] 2.5 csharp
+- [x] 2.6 elixir (coverage gate ≥ 95%)
+- [x] 2.7 clojure (JVM; cljgo in CI)
+- [x] 2.8 rust
 
 ## 3. Verify
-- [ ] 3.1 Every port's CI command green locally
+- [x] 3.1 Every port's CI command green locally
 - [ ] 3.2 CI green on the PR
-- [ ] 3.3 Docs: classifier backends section in each port README + docs site
+- [x] 3.3 Docs: classifier backends section in each port README (docs site page: follow-up)
 
 ## 4. Owner-gated (not in this change)
 - [ ] 4.1 Confirm PD-1 … PD-15
