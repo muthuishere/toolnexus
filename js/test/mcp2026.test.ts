@@ -209,15 +209,33 @@ test("mcp2026 fallback: an old-era HTTP server gets the frozen SDK path (discove
   assert.equal((await byName(src.tools, "old_echo").execute({ text: "legacy" })).output, "legacy")
 })
 
-test("mcp2026 load failures: 5xx and connection refused are failed (not fallback)", async (t) => {
-  const hs = http.createServer((_q, s) => s.writeHead(503).end())
-  await new Promise<void>((r) => hs.listen(0, "127.0.0.1", () => r()))
-  t.after(() => closeServer(hs))
+test("mcp2026 discover 5xx tries the frozen fallback; connection refused is a load failure", async (t) => {
+  const old = await oldServer(t)
+  let discovers = 0
+  const front = http.createServer((req, res) => {
+    const chunks: Buffer[] = []
+    req.on("data", (c) => chunks.push(c))
+    req.on("end", () => {
+      const body = Buffer.concat(chunks).toString("utf8")
+      if (body.includes('"server/discover"')) return void (discovers++, res.writeHead(503).end())
+      const u = new URL(old.url)
+      const p = http.request({ host: u.hostname, port: u.port, path: req.url, method: req.method, headers: req.headers }, (r) => {
+        res.writeHead(r.statusCode ?? 502, r.headers)
+        r.pipe(res)
+      })
+      p.end(body)
+    })
+  })
+  await new Promise<void>((r) => front.listen(0, "127.0.0.1", () => r()))
+  t.after(() => closeServer(front))
   const src = await loadMcp({
-    five: { url: `http://127.0.0.1:${(hs.address() as { port: number }).port}/mcp`, timeout: 2000 },
+    five: { url: `http://127.0.0.1:${(front.address() as { port: number }).port}/mcp`, timeout: 2000 },
     refused: { url: "http://127.0.0.1:1/mcp", timeout: 2000 },
   })
-  assert.deepEqual(src.status, { five: "failed", refused: "failed" })
+  t.after(() => src.close())
+  assert.deepEqual(src.status, { five: "connected", refused: "failed" })
+  assert.equal(discovers, 1)
+  assert.ok(old.methods.includes("initialize"))
 })
 
 // ---------------------------------------------------------------------------

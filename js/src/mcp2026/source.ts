@@ -91,7 +91,7 @@ export type Probe = { kind: "modern"; server: ModernServer } | { kind: "fallback
 /** §2.2a: which discover failures mean "old server". */
 function isFallbackError(e: unknown): boolean {
   if (e instanceof RpcError) return true
-  if (e instanceof HttpStatusError) return e.status === 400 || e.status === 404 || e.status === 405
+  if (e instanceof HttpStatusError) return e.status === 400 || e.status === 404 || e.status === 405 || e.status >= 500
   if (e instanceof NotJsonRpcError) return true
   return false
 }
