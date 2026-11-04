@@ -8,6 +8,38 @@ GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
 
 ## Unreleased
 
+**Classifier backends: one System One classifier for TypeSafe, OpenRouter, Cloudflare, Vercel or
+your own server, with images, a cache and reply validation** (change `add-classifier-backends`,
+ADR 0038; every default is proposed and awaits the owner's confirmation).
+
+- **`backend`** is now `typesafe | openrouter | cloudflare | vercel | custom`. Cloudflare's `/ai/run`
+  envelope is built in (no more hand-written `custom` evaluator); `custom` is a self-hosted System One
+  endpoint and must declare `baseUrl` and `supports`. The table is data you can read and override.
+  `${ENV}` in `baseUrl` expands at call time and never appears in an error.
+- **Images in the state.** Put an image content part anywhere in the state and it travels as a
+  TypeSafe `assets` entry (Cloudflare Clef: `input.images`), with the
+  `TypeSafe-Danger-Zone-Images` header only where the backend needs it. PNG/JPEG, 16 MiB, 280–1568 px
+  and 32 MiB per request are checked before sending; a backend that cannot take images fails with
+  `ClassifierUnsupported` before the network. Images are never resized or described as text.
+- **`classifier.state(v).evaluate(qs…)`** validates the reply fail-closed; **`states(…).evaluate`**
+  returns one decision-or-error per state, so one bad item no longer loses the rest.
+- **Opt-in cache** (`cache` + `MemoryCache`): off by default, stores only valid replies, keyed per
+  request on the model the server actually served, with key bytes specified so a cache written by
+  one port is readable by another. Per-question splitting is not done: whether System One calibrates
+  questions jointly is unproven (test plan in the change's design).
+- **Helpers:** `validateDecision`, inclusive `Thresholds` (jevx's 0.8/0.2/0.6, alongside the
+  unchanged `Bands`), `chunkQuestions`. `classifier.evaluate` events now carry `questions`,
+  `questionsHash` and `cached`.
+- **Raw questions/answers:** send a System One question type the library does not model yet (e.g.
+  Jev 1.14 `box`); an unknown answer type now decodes to a raw answer instead of failing the whole
+  decision.
+- **Changed defaults:** `openrouter` now defaults to `typesafe/jev-1.14` (was `typesafe/jev-1.13`).
+  **`style: "llm"` is deprecated** — it keeps working unchanged for at least one minor release.
+
+Not done: the Decisions API (second wire), multipart image upload, Vercel and Cloudflare-Jev
+images (not proven live, so refused), per-question caching, and the jevx cutover gate (ADR 0038
+D8). Tracked in `openspec/changes/add-classifier-backends`.
+
 ## 0.24.0 — 2026-11-04
 
 **Media generation: images, video, speech, transcription, voice cloning and talking-head video,

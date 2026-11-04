@@ -1,0 +1,236 @@
+{
+  "why": "Image lifting, reference naming, the danger-zone header per backend, and the client-side limits. A state value {\"$image\":{mimeType,data}} is an image content part and {\"$text\":s} a text part; the port builds its own ContentPart from them. Every case asks the one question in `questions` with no model override unless `model` is given. `body` is the exact request bytes; `url` (when present) is the endpoint before ${ENV} expansion (systemone cases post to {baseUrl}/systemone). Errors fire before any request.",
+  "questions": {
+    "q": {
+      "instructions": "Is the object red?",
+      "type": "noul"
+    }
+  },
+  "cases": [
+    {
+      "name": "no-parts-verbatim",
+      "backend": "typesafe",
+      "state": {
+        "note": "plain <b>&\"text\""
+      },
+      "expect": {
+        "body": "{\"model\":\"jev-latest\",\"questions\":{\"q\":{\"instructions\":\"Is the object red?\",\"type\":\"noul\"}},\"state\":{\"note\":\"plain <b>&\\\"text\\\"\"}}",
+        "imagesHeader": false
+      }
+    },
+    {
+      "name": "lift-under-key",
+      "backend": "typesafe",
+      "state": {
+        "note": "listing photo",
+        "photo": {
+          "$image": {
+            "mimeType": "image/png",
+            "data": "iVBORw0KGgoAAAANSUhEUgAAASwAAAEsCAIAAAAAAAAA"
+          }
+        }
+      },
+      "expect": {
+        "body": "{\"assets\":{\"photo\":{\"data_base64\":\"iVBORw0KGgoAAAANSUhEUgAAASwAAAEsCAIAAAAAAAAA\",\"format\":\"png\",\"type\":\"image\"}},\"model\":\"jev-latest\",\"questions\":{\"q\":{\"instructions\":\"Is the object red?\",\"type\":\"noul\"}},\"state\":{\"note\":\"listing photo\",\"photo\":\"photo\"}}",
+        "imagesHeader": true
+      }
+    },
+    {
+      "name": "array-and-collision",
+      "backend": "openrouter",
+      "state": {
+        "a": [
+          {
+            "$image": {
+              "mimeType": "image/png",
+              "data": "iVBORw0KGgoAAAANSUhEUgAAASwAAAEsCAIAAAAAAAAA"
+            }
+          },
+          {
+            "$image": {
+              "mimeType": "image/jpg",
+              "data": "/9j/4AAQSkZJRgABAQAAAQABAAD/xAAEAAD/wAALCAEsAZABAREA/9k="
+            }
+          }
+        ],
+        "image1": {
+          "$image": {
+            "mimeType": "image/png",
+            "data": "iVBORw0KGgoAAAANSUhEUgAAASwAAAEsCAIAAAAAAAAA"
+          }
+        }
+      },
+      "why": "keys walk in ASCII order: the array images take image1, image2; the key image1 is then used, so its image takes image3",
+      "expect": {
+        "body": "{\"assets\":{\"image1\":{\"data_base64\":\"iVBORw0KGgoAAAANSUhEUgAAASwAAAEsCAIAAAAAAAAA\",\"format\":\"png\",\"type\":\"image\"},\"image2\":{\"data_base64\":\"/9j/4AAQSkZJRgABAQAAAQABAAD/xAAEAAD/wAALCAEsAZABAREA/9k=\",\"format\":\"jpeg\",\"type\":\"image\"},\"image3\":{\"data_base64\":\"iVBORw0KGgoAAAANSUhEUgAAASwAAAEsCAIAAAAAAAAA\",\"format\":\"png\",\"type\":\"image\"}},\"model\":\"typesafe/jev-1.14\",\"questions\":{\"q\":{\"instructions\":\"Is the object red?\",\"type\":\"noul\"}},\"state\":{\"a\":[\"image1\",\"image2\"],\"image1\":\"image3\"}}",
+        "imagesHeader": true
+      }
+    },
+    {
+      "name": "text-part",
+      "backend": "typesafe",
+      "state": {
+        "t": {
+          "$text": "hello"
+        }
+      },
+      "expect": {
+        "body": "{\"model\":\"jev-latest\",\"questions\":{\"q\":{\"instructions\":\"Is the object red?\",\"type\":\"noul\"}},\"state\":{\"t\":\"hello\"}}",
+        "imagesHeader": false
+      }
+    },
+    {
+      "name": "top-level-image",
+      "backend": "typesafe",
+      "state": {
+        "$image": {
+          "mimeType": "image/jpeg",
+          "data": "/9j/4AAQSkZJRgABAQAAAQABAAD/xAAEAAD/wAALCAEsAZABAREA/9k="
+        }
+      },
+      "expect": {
+        "body": "{\"assets\":{\"image1\":{\"data_base64\":\"/9j/4AAQSkZJRgABAQAAAQABAAD/xAAEAAD/wAALCAEsAZABAREA/9k=\",\"format\":\"jpeg\",\"type\":\"image\"}},\"model\":\"jev-latest\",\"questions\":{\"q\":{\"instructions\":\"Is the object red?\",\"type\":\"noul\"}},\"state\":\"image1\"}",
+        "imagesHeader": true
+      }
+    },
+    {
+      "name": "cloudflare-clef",
+      "backend": "cloudflare",
+      "model": "@cf/cloudflare/clef",
+      "state": {
+        "photo": {
+          "$image": {
+            "mimeType": "image/png",
+            "data": "iVBORw0KGgoAAAANSUhEUgAAASwAAAEsCAIAAAAAAAAA"
+          }
+        }
+      },
+      "expect": {
+        "url": "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/ai/run",
+        "body": "{\"input\":{\"images\":[\"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAASwAAAEsCAIAAAAAAAAA\"],\"questions\":{\"q\":{\"instructions\":\"Is the object red?\",\"type\":\"noul\"}},\"state\":{\"photo\":\"photo\"}},\"model\":\"@cf/cloudflare/clef\"}",
+        "imagesHeader": false
+      }
+    },
+    {
+      "name": "cloudflare-text",
+      "backend": "cloudflare",
+      "state": "a red mug",
+      "expect": {
+        "url": "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/ai/run",
+        "body": "{\"input\":{\"questions\":{\"q\":{\"instructions\":\"Is the object red?\",\"type\":\"noul\"}},\"state\":\"a red mug\"},\"model\":\"typesafe/jev\"}",
+        "imagesHeader": false
+      }
+    },
+    {
+      "name": "vercel-unsupported",
+      "backend": "vercel",
+      "state": {
+        "photo": {
+          "$image": {
+            "mimeType": "image/png",
+            "data": "iVBORw0KGgoAAAANSUhEUgAAASwAAAEsCAIAAAAAAAAA"
+          }
+        }
+      },
+      "expect": {
+        "unsupported": true,
+        "error": "classifier: vercel (typesafe-ai/jev) does not support images"
+      }
+    },
+    {
+      "name": "cloudflare-jev-unsupported",
+      "backend": "cloudflare",
+      "state": {
+        "photo": {
+          "$image": {
+            "mimeType": "image/png",
+            "data": "iVBORw0KGgoAAAANSUhEUgAAASwAAAEsCAIAAAAAAAAA"
+          }
+        }
+      },
+      "expect": {
+        "unsupported": true,
+        "error": "classifier: cloudflare (typesafe/jev) does not support images"
+      }
+    },
+    {
+      "name": "supports-override",
+      "backend": "vercel",
+      "supports": {
+        "images": true
+      },
+      "state": {
+        "photo": {
+          "$image": {
+            "mimeType": "image/png",
+            "data": "iVBORw0KGgoAAAANSUhEUgAAASwAAAEsCAIAAAAAAAAA"
+          }
+        }
+      },
+      "expect": {
+        "body": "{\"assets\":{\"photo\":{\"data_base64\":\"iVBORw0KGgoAAAANSUhEUgAAASwAAAEsCAIAAAAAAAAA\",\"format\":\"png\",\"type\":\"image\"}},\"model\":\"typesafe-ai/jev\",\"questions\":{\"q\":{\"instructions\":\"Is the object red?\",\"type\":\"noul\"}},\"state\":{\"photo\":\"photo\"}}",
+        "imagesHeader": true
+      }
+    },
+    {
+      "name": "too-small",
+      "backend": "typesafe",
+      "state": {
+        "photo": {
+          "$image": {
+            "mimeType": "image/png",
+            "data": "iVBORw0KGgoAAAANSUhEUgAAAGQAAABkCAIAAAAAAAAA"
+          }
+        }
+      },
+      "expect": {
+        "errorPrefix": "classifier: image \"photo\": "
+      }
+    },
+    {
+      "name": "too-wide",
+      "backend": "typesafe",
+      "state": {
+        "photo": {
+          "$image": {
+            "mimeType": "image/png",
+            "data": "iVBORw0KGgoAAAANSUhEUgAAB9AAAAEsCAIAAAAAAAAA"
+          }
+        }
+      },
+      "expect": {
+        "errorPrefix": "classifier: image \"photo\": "
+      }
+    },
+    {
+      "name": "gif",
+      "backend": "typesafe",
+      "state": {
+        "photo": {
+          "$image": {
+            "mimeType": "image/gif",
+            "data": "iVBORw0KGgoAAAANSUhEUgAAASwAAAEsCAIAAAAAAAAA"
+          }
+        }
+      },
+      "expect": {
+        "errorPrefix": "classifier: image \"photo\": "
+      }
+    },
+    {
+      "name": "not-a-png",
+      "backend": "typesafe",
+      "state": {
+        "photo": {
+          "$image": {
+            "mimeType": "image/png",
+            "data": "/9j/4AAQSkZJRgABAQAAAQABAAD/xAAEAAD/wAALCAEsAZABAREA/9k="
+          }
+        }
+      },
+      "expect": {
+        "errorPrefix": "classifier: image \"photo\": "
+      }
+    }
+  ]
+}
