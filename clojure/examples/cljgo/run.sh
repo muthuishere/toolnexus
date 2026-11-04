@@ -9,14 +9,15 @@ command -v cljgo >/dev/null || { echo "cljgo not on PATH — install it or run c
 
 cljgo build >/dev/null || { echo "cljgo build FAILED"; cljgo build 2>&1 | tail -15; exit 1; }
 
-declare -a NAMES=(demo native_and_http skills persona_memory compaction multimodal judge prompt_cache media)
+declare -a NAMES=(demo native_and_http skills persona_memory compaction multimodal judge prompt_cache media mcp_handler)
 # The INTERPRETED entries, not the namespace files: `cljgo run` evaluates
 # top-level forms and never calls -main, so pointing it at the ns file would
 # print the dependency banner, exit 0, and prove nothing.
 declare -a SRCS=(src/run_interpreted.cljc src/run_native_and_http.cljc
                  src/run_skills.cljc src/run_persona_memory.cljc
                  src/run_compaction.cljc src/run_multimodal.cljc
-                 src/run_judge.cljc src/run_prompt_cache.cljc src/run_media.cljc)
+                 src/run_judge.cljc src/run_prompt_cache.cljc src/run_media.cljc
+                 src/run_mcp_handler.cljc)
 fail=0
 for i in "${!NAMES[@]}"; do
   n=${NAMES[$i]}

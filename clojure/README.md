@@ -157,6 +157,28 @@ guide: <https://muthuishere.github.io/toolnexus/media/>.
 (doseq [f (:files res)] (println (:from f) (:mimeType f) (:url f)))
 ```
 
+## Embeddable MCP server
+
+`toolnexus.mcp-handler/mcp-handler` returns a **Ring handler** you mount on your own stack, behind
+your own TLS, CORS and OAuth (SPEC §7C.1, ADR 0039). Every policy is a hook — auth, the tool list
+*per request* (a name outside it is never executed), an allow/deny/confirm gate (confirm asks the
+client over MCP elicitation, else returns your shaped result), an audit event, server info,
+resources, prompts and pluggable session ids. `toolnexus.serve/serve` is unchanged. Tools may set
+`:output-schema` and `:annotations`; results may carry `:structured` / `:meta`
+(`tool/with-structured`), which become `structuredContent` / `_meta` on both MCP paths.
+
+```clojure
+(require '[toolnexus.mcp-handler :as mh])
+
+(def h (mh/mcp-handler tk {:authenticate (fn [req] (user-for (get-in req [:headers "authorization"])))
+                           :list-tools   (fn [ctx] (tools-for (mh/mcp-identity ctx)))
+                           :before-call  (fn [ctx tool args] (when (destructive? tool) {:kind :confirm :message "Sure?"}))}))
+;; mount (:handler h) at /mcp on any Ring server; (mh/notify-tools-changed! h) when tools move
+```
+
+SSE responses (GET streams, a confirm round trip) are lazy-seq Ring bodies, so the adapter must
+write a seq body chunk by chunk. Example: `examples/src/examples/mcp_handler.cljc`.
+
 ## Documentation
 
 Everything else — the full surface, with runnable examples — lives on the docs site:

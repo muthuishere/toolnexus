@@ -170,6 +170,22 @@
 
       :else nil)))
 
+(defn tool-result->mcp
+  "SPEC §1 + §7C — a ToolResult as the MCP CallToolResult, the shape
+  `mcp-handler` (§7C.1) emits: output → one text block (when `:structured` is
+  set and output is empty, the JSON of `:structured` is that text, as the MCP
+  spec asks), §1B parts follow, `isError` only when true, `structuredContent`
+  only when `:structured` is set, `_meta` only when `:meta` is set."
+  [r]
+  (let [structured (:structured r)
+        out        (str (or (:output r) ""))
+        text       (if (and (some? structured) (= "" out)) (json/write-str structured) out)]
+    (cond-> {:content (into [{:type "text" :text text}]
+                            (keep part->content-block (:parts r)))}
+      (true? (:isError r)) (assoc :isError true)
+      (some? structured)   (assoc :structuredContent structured)
+      (some? (:meta r))    (assoc :_meta (:meta r)))))
+
 ;; ---------------------------------------------------------------------------
 ;; JSON-RPC plumbing shared by both profiles
 ;; ---------------------------------------------------------------------------
@@ -321,9 +337,12 @@
           {:jsonrpc "2.0" :id id
            :result  {:tools (mapv (fn [t]
                                     ;; §7C: Tool.name VERBATIM. No sanitize here.
-                                    {:name        (:name t)
-                                     :description (:description t)
-                                     :inputSchema (:input-schema t)})
+                                    (cond-> {:name        (:name t)
+                                             :description (:description t)
+                                             :inputSchema (:input-schema t)}
+                                      ;; SPEC §1: absent ⇒ byte-identical.
+                                      (:output-schema t)
+                                      (assoc :outputSchema (:output-schema t))))
                                   (exposed-tools tk cfg))}}
 
           "tools/call"
@@ -347,9 +366,9 @@
                  ;; §1B: each non-text ContentPart follows it as the matching MCP
                  ;; content block, in order. `metadata` is NOT on the MCP wire
                  ;; (on-call only).
-                 :result  {:content (into [{:type "text" :text (str (:output r))}]
-                                          (keep part->content-block (:parts r)))
-                           :isError (boolean (:isError r))}})))
+                 ;; §1: structured ⇒ structuredContent, meta ⇒ _meta. This
+                 ;; profile always carries isError (unchanged wire).
+                 :result  (assoc (tool-result->mcp r) :isError (boolean (:isError r)))})))
 
           (rpc-error id -32601 "Method not found"))))))
 
