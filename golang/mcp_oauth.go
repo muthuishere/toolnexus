@@ -371,7 +371,7 @@ func (o *mcpOAuth) challenge(ctx context.Context, resource string, status int, w
 	if clientID == "" { // no DCR, ever
 		why := "it does not support Client ID Metadata Documents"
 		if cimd {
-			why = "clientMetadataUrl is not set"
+			why = "auth.clientMetadataUrl is not set"
 		}
 		return fmt.Errorf("no client identity for %s: %s and no client id is configured — register an app with %s and set auth.clientId (dynamic client registration is not supported)", issuer, why, issuer)
 	}
