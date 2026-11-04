@@ -361,3 +361,16 @@ async def test_oauth_form_token_refresh_single_flight_and_omit_resource(prot):
     res = await asyncio.gather(*(asyncio.to_thread(c.call, "tools/list") for _ in range(20)))
     assert len(res) == 20 and as_.refreshes == 1
     assert "resource" not in as_.last_token_form
+
+
+async def test_tool_search_respects_filter_and_disable(plain):
+    src = await load_mcp(cfg(plain.url, toolSearch=True, tools={"greet": False}))
+    r = await src.tools[0].execute({"query": "echo greet"})
+    assert [h["name"] for h in json.loads(r.output)] == ["echo"]
+    bad = await src.tools[1].execute({"name": "greet"})
+    assert bad.is_error and bad.output == 'unknown tool "greet" on fx'
+    await src.close()
+    tk = await create_toolkit(cfg(plain.url, toolSearch=True), builtins=False, disable_tools=["fx_echo"])
+    bad = await tk.execute("fx_call_tool", {"name": "echo", "arguments": {"text": "x"}})
+    assert bad.is_error and bad.output == 'unknown tool "echo" on fx'
+    await tk.close()

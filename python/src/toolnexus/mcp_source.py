@@ -546,7 +546,9 @@ class _ToolSearch:
         async with self._lock:
             if self.expiry is not None and time.monotonic() >= self.expiry:
                 defs = await _paginate_tools(self.session)
-                self._set(apply_tools_filter(self.server, defs, self.cfg.get("tools")))
+                dis = set(self.cfg.get("_disable_tools") or ())
+                defs = apply_tools_filter(self.server, defs, self.cfg.get("tools"))
+                self._set([d for d in defs if sanitize(self.server) + "_" + sanitize(d.name) not in dis])
             return self.defs
 
     def tools(self) -> list[Tool]:
@@ -617,6 +619,9 @@ def _server_tools(
     """The Tools one connected server contributes: every (filtered) server tool, or — with
     ``toolSearch: true`` — the two lazy meta-tools (§2.8)."""
     if cfg.get("toolSearch") is True:
+        # Disable lists apply BEFORE search (by the final name the tool would have had).
+        dis = set(cfg.get("_disable_tools") or ())
+        defs = [d for d in defs if sanitize(server) + "_" + sanitize(d.name) not in dis]
         return _ToolSearch(server, cfg, session, defs, timeout).tools()
     return [_server_tool(server, d, session, timeout) for d in defs]
 
@@ -998,6 +1003,7 @@ async def load_mcp_with_context(
     on_server: Optional[OnServer] = None,
     token_store: Optional[TokenStore] = None,
     open_url: Optional[OpenUrl] = None,
+    disable_tools: Optional[list[str]] = None,
 ) -> McpSource:
     """Cancellation/timeout-aware MCP load (§2 Gap 3). Mirrors Go
     ``LoadMcpWithContext``: each server's connect + list is bounded by that server's
@@ -1022,6 +1028,11 @@ async def load_mcp_with_context(
     (§2A.1a).
     """
     config = parse_mcp_config(input)
+    if disable_tools:
+        config = {
+            k: ({**v, "_disable_tools": list(disable_tools)} if isinstance(v, dict) and v.get("toolSearch") is True else v)
+            for k, v in config.items()
+        }
     opts = _LoadOpts(token_store=token_store, open_url=open_url)
     if on_server is not None:
         return await _load_mcp_concurrent(config, wait_for, cancel, on_server, opts)

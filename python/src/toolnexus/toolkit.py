@@ -112,7 +112,8 @@ class Toolkit:
         # (default in-memory per load) and how ``auto`` mode opens the browser.
         mcp = (
             await load_mcp_with_context(
-                mcp_config, wait_for=wait_for, cancel=cancel, token_store=token_store, open_url=open_url
+                mcp_config, wait_for=wait_for, cancel=cancel, token_store=token_store, open_url=open_url,
+                disable_tools=disable_tools,
             )
             if mcp_config is not None
             else None
