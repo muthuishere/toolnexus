@@ -487,7 +487,7 @@ test("mcp2026 oauth errors: iss mismatch, state mismatch, no S256, no client ide
   const noId = await failOf({ fx: { url: e.url } }, { openUrl: e.open })
   for (const s of expected.auth.cases.find((x: any) => x.id === "no CIMD and no clientId").expect.errorContains) assert.ok(noId.includes(s), noId)
   assert.ok(noId.startsWith(`no client identity for ${e.as.issuer}: `), noId)
-  assert.ok(noId.includes("set clientId"), noId)
+  assert.equal(noId, `no client identity for ${e.as.issuer}: it does not support Client ID Metadata Documents and no client id is configured — register an app with ${e.as.issuer} and set auth.clientId (dynamic client registration is not supported)`)
 })
 
 test("mcp2026 oauth: AS without PKCE S256 is refused", async (t) => {
