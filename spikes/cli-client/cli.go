@@ -88,19 +88,24 @@ func LoadCliStyle(pathOrJSON string) (Style, error) {
 type CliStyle int
 
 const (
-	StyleClaude CliStyle = iota + 1 // zero value = no style chosen
-	StyleCodex
-	StyleCopilot
-	StyleOpencode
-	StyleDevin
-	StyleGemini
-	StyleGoose
-	StyleCustom
+	styleClaude CliStyle = iota + 1 // zero value = no style chosen
+	styleCodex
+	styleCopilot
+	styleOpencode
+	styleDevin
+	styleGemini
+	styleGoose
+	styleCustom
 )
 
+// CliStyles is the enum namespace: CliStyles.Claude, CliStyles.Codex, ...
+var CliStyles = struct {
+	Claude, Codex, Copilot, Opencode, Devin, Gemini, Goose, Custom CliStyle
+}{styleClaude, styleCodex, styleCopilot, styleOpencode, styleDevin, styleGemini, styleGoose, styleCustom}
+
 var styleNames = map[CliStyle]string{
-	StyleClaude: "claude", StyleCodex: "codex", StyleCopilot: "copilot", StyleOpencode: "opencode",
-	StyleDevin: "devin", StyleGemini: "gemini", StyleGoose: "goose", StyleCustom: "custom",
+	styleClaude: "claude", styleCodex: "codex", styleCopilot: "copilot", styleOpencode: "opencode",
+	styleDevin: "devin", styleGemini: "gemini", styleGoose: "goose", styleCustom: "custom",
 }
 
 // String is the style's shared file name; it is not an input.
@@ -128,7 +133,7 @@ func (o CliOptions) resolve() (Style, error) {
 		s.Binary = o.Command
 		return s, nil
 	}
-	if o.Style == StyleCustom {
+	if o.Style == styleCustom {
 		return Style{Name: "custom", Binary: o.Command, Args: o.Args, Prompt: o.Prompt, Answer: o.Answer}, nil
 	}
 	all, err := BuiltinStyles()
@@ -137,7 +142,7 @@ func (o CliOptions) resolve() (Style, error) {
 	}
 	s, ok := all[o.Style.String()]
 	if !ok {
-		return Style{}, errors.New("cli: Style is required (StyleClaude, StyleCodex, ...)")
+		return Style{}, errors.New("cli: Style is required (CliStyles.Claude, CliStyles.Codex, ...)")
 	}
 	s.Binary = o.Command
 	return s, nil
