@@ -35,6 +35,8 @@ export interface Load2026Options {
   tokenStore?: TokenStore
   openUrl?: (url: string) => unknown | Promise<unknown>
   signal?: AbortSignal
+  /** Final exposed names to drop (Toolkit `disableTools`); applied before tool search too. */
+  disableTools?: string[]
 }
 
 /** The OAuth engine for one remote server (§2A.1). */
@@ -219,7 +221,9 @@ export class ModernServer {
   private async refreshTools(): Promise<void> {
     const r = await this.req(() => this.client.listTools({ signal: this.o.signal }))
     this.all = r.tools
-    this.defs = filterDefs(this.t.name, r.tools, this.t.tools)
+    const off = new Set(this.o.disableTools ?? [])
+    const prefix = sanitize(this.t.name) + "_"
+    this.defs = filterDefs(this.t.name, r.tools, this.t.tools).filter((d) => !off.has(prefix + sanitize(d.name)))
     this.cacheUntil = typeof r.ttlMs === "number" ? Date.now() + r.ttlMs : Infinity
   }
 

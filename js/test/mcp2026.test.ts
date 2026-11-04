@@ -329,6 +329,22 @@ test("mcp2026 tool search: two tools, byte-exact descriptions, BM25 hits, call_t
   await noDesc.close()
 })
 
+test("mcp2026 tool search: tools filter and disableTools apply before search_tools / call_tool", async (t) => {
+  const s = fixtureServer()
+  s.tool("tick", "tick counter", () => "tick")
+  const { url } = await serve(t, s)
+  for (const [cfg, opts] of [[{ tools: { greet: false, tick: false } }, {}], [{}, { disableTools: ["fx_greet", "fx_tick"] }]] as const) {
+    const tk = await Toolkit.create({ mcpConfig: { fx: { url, toolSearch: true, ...cfg } }, builtins: false, ...opts })
+    const hits = JSON.parse((await tk.execute("fx_search_tools", { query: "greet tick echo user name counter", limit: 10 })).output)
+    assert.deepEqual(hits.map((h: any) => h.name), ["echo"])
+    for (const n of ["greet", "tick"]) {
+      const r = await tk.execute("fx_call_tool", { name: n, arguments: {} })
+      assert.deepEqual([r.output, r.isError], [`unknown tool "${n}" on fx`, true])
+    }
+    await tk.close()
+  }
+})
+
 test("mcp2026 listMcpTools uses the 2026 path too", async (t) => {
   const { url } = await serve(t, fixtureServer())
   const inv = await listMcpTools({ fx: { url } })

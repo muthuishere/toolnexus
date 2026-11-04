@@ -539,6 +539,8 @@ export interface McpLoadOptions {
   tokenStore?: TokenStore
   /** How `auto` OAuth mode opens the authorization URL (default: the OS opener). */
   openUrl?: (url: string) => unknown | Promise<unknown>
+  /** Final exposed names to drop; on a tool-search server they are also hidden from search/call. */
+  disableTools?: string[]
 }
 
 type Connected =
@@ -550,7 +552,7 @@ type Connected =
  * path, with the OAuth bearer attached for remote servers. Throws ⇒ the server failed.
  */
 async function connectServer(name: string, cfg: ServerConfig, timeout: number, opts: McpLoadOptions, store: TokenStore, sdkClient: () => Client, onSdk: (c: Client) => void): Promise<Connected> {
-  const o: Load2026Options = { waitFor: opts.waitFor, tokenStore: store, openUrl: opts.openUrl, signal: opts.signal }
+  const o: Load2026Options = { waitFor: opts.waitFor, tokenStore: store, openUrl: opts.openUrl, signal: opts.signal, disableTools: opts.disableTools }
   const remote = isRemote(cfg)
   const oauth = remote ? newOAuth(cfg.auth, o, store) : undefined
   const p = await probe(
