@@ -185,6 +185,35 @@ resources/prompts hooks, pluggable `session_ids`, `stateless`, `protocol_version
 (`2025-06-18` default, `2025-11-25` opt-in), and `ToolResult.structured` / `meta`,
 `Tool.output_schema` / `annotations`. Runnable: `python examples/mcp_handler.py`.
 
+### MCP 2026-07-28 (opt-in, SPEC §7C.2)
+
+List `"2026-07-28"` in `protocol_versions` and the same handler speaks the stateless 2026
+wire: `server/discover`, header validation, sorted `tools/list`, and MRTR — a `confirm` or a
+§10 tool suspension leaves as an `input_required` result the client answers on retry. It is
+never a default, and `initialize` never negotiates it. List a legacy version too to serve
+both wires on one mount.
+
+```python
+from toolnexus import McpServerAuth, load_mcp_skills, start_mcp_dev_auth_server
+
+auth = McpServerAuth("https://login.example", scopes={"*": ["mcp"], "wipe": ["mcp:admin"]})
+app = tk.mcp_handler(
+    protocol_versions=["2026-07-28", "2025-06-18"],
+    authenticate=auth.authenticate,                      # McpPrincipal => identity_from(ctx)
+    list_skills=lambda ctx: load_mcp_skills("skills"),   # skills/list, skills/get, skill:// reads
+)
+prm = auth.metadata()   # mount at /.well-known/oauth-protected-resource[/mcp] (RFC 9728)
+```
+
+`McpServerAuth` verifies RS256 JWTs against the issuer's JWKS by default (standard-library
+RSA, no extra dependency) or calls your `verify(request, token, audience)`; a missing scope
+is a `403` naming the full needed set, and per-tool scopes apply on the 2026 wire.
+
+`start_mcp_dev_auth_server(clients=…)` is an in-process OAuth authorization server on
+`127.0.0.1` (pre-registered + CIMD clients, PKCE S256, refresh rotation, `mint(claims)`).
+**DEVELOPMENT AND TESTS ONLY** — it auto-approves everyone as `dev-user` over plain HTTP.
+Never run it in production.
+
 ## Documentation
 
 Everything else — the full surface, with runnable examples — lives on the docs site:
