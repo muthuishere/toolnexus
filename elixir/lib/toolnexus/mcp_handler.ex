@@ -14,7 +14,8 @@ defmodule Toolnexus.McpHandler do
       Toolnexus.McpHandler.notify_tools_changed(handler)
 
   The JSON-RPC transport is implemented here by hand (protocol 2025-06-18,
-  optionally 2025-11-25). A confirm elicitation rides the SAME POST's SSE
+  optionally 2025-11-25, and opt-in 2026-07-28 — the stateless wire of SPEC
+  §7C.2, see `Toolnexus.McpHandler.Wire2026`). A confirm elicitation rides the SAME POST's SSE
   response; the client's answer arrives on a later POST and is routed back to
   the waiting request process.
 
@@ -41,6 +42,22 @@ defmodule Toolnexus.McpHandler do
     * `:stateless` — no `Mcp-Session-Id` issued or checked; confirm never elicits
     * `:stateless_session_id` — in stateless mode, returned on initialize, never validated
     * `:max_body_bytes` — POST body cap (default 4 MiB ⇒ 413 above it)
+    * `:list_skills` — `fn ctx -> {:ok, [Toolnexus.McpHandler.Skill.t()]} | [..] | {:error, r} end`:
+      publishes skills through the SEP-2640 skills extension on the 2026-07-28 wire
+      (`skills/list`, `skills/get`, `resources/read` of `skill://` URIs). Absent ⇒ not
+      advertised. `load_mcp_skills/1` builds the list from a skills directory.
+
+  ## MCP 2026-07-28 (opt-in, SPEC §7C.2)
+
+  List `"2026-07-28"` in `:protocol_versions` (alone, or with legacy versions on the
+  same mount). That wire is stateless: no `initialize`, no `Mcp-Session-Id`, no
+  server→client request, no GET stream (GET/DELETE ⇒ 405 on a 2026-only handler).
+  A confirm decision and a §10 tool suspension leave as an MRTR `input_required`
+  result; the client's retry carries `inputResponses` + the echoed `requestState`,
+  and a suspended tool sees the answer as `ctx.answer`. `initialize` never
+  negotiates 2026-07-28. An `:authenticate` error that is a `Toolnexus.McpAuthError`
+  (what `Toolnexus.McpServerAuth` returns) is answered with its status and challenge
+  on both wires.
 
   Hooks and tools reach the request through `identity/1`, `request/1` (the
   `Plug.Conn`), `session_id/1` and `request_meta/1` (the JSON-RPC `params._meta`).
@@ -52,16 +69,18 @@ defmodule Toolnexus.McpHandler do
 
   alias Toolnexus.{Context, McpServe, Tool, ToolResult}
 
-  @implemented ["2025-11-25", "2025-06-18"]
+  @implemented ["2026-07-28", "2025-11-25", "2025-06-18"]
+  @v2026 "2026-07-28"
   @default_versions ["2025-06-18"]
 
-  defstruct [:toolkit, :cfg, :server, :versions]
+  defstruct [:toolkit, :cfg, :server, :versions, legacy: []]
 
   @type t :: %__MODULE__{
           toolkit: Toolnexus.Toolkit.t() | nil,
           cfg: map(),
           server: pid(),
-          versions: [String.t()]
+          versions: [String.t()],
+          legacy: [String.t()]
         }
 
   defmodule Ctx do
@@ -96,6 +115,22 @@ defmodule Toolnexus.McpHandler do
           }
   end
 
+  defmodule Skill do
+    @moduledoc """
+    One skill published through the skills extension (SEP-2640, SPEC §7C.2).
+    `files` are `%{path:, text:}` maps, paths relative to the skill directory,
+    `/`-separated, and MUST include `"SKILL.md"`. `frontmatter` `nil` ⇒ `%{"name" => name}`.
+    """
+    @enforce_keys [:name]
+    defstruct name: nil, frontmatter: nil, files: []
+
+    @type t :: %__MODULE__{
+            name: String.t(),
+            frontmatter: map() | nil,
+            files: [%{path: String.t(), text: String.t()}]
+          }
+  end
+
   defmodule SessionIds do
     @moduledoc """
     Issues and checks `Mcp-Session-Id` values. Plug your own (signed ids, a DB
@@ -124,14 +159,25 @@ defmodule Toolnexus.McpHandler do
       |> Enum.uniq()
 
     {:ok, server} = GenServer.start(__MODULE__.State, nil)
+    versions = if(versions == [], do: @default_versions, else: versions)
 
     %__MODULE__{
       toolkit: toolkit,
       cfg: cfg,
       server: server,
-      versions: if(versions == [], do: @default_versions, else: versions)
+      versions: versions,
+      legacy: Enum.reject(versions, &(&1 == @v2026))
     }
   end
+
+  @doc """
+  Read every skill under `dir` (any depth, `**/SKILL.md`, symlinks not followed) for
+  `:list_skills`. Frontmatter is `%{"name", "description"}` parsed as SPEC §3; a skill
+  without a name is skipped. Files are every regular UTF-8 file under the skill
+  directory (binary files are skipped — the wire carries text), sorted by path.
+  """
+  @spec load_mcp_skills(String.t()) :: {:ok, [Skill.t()]} | {:error, term()}
+  defdelegate load_mcp_skills(dir), to: __MODULE__.Wire2026
 
   @doc "Stop the handler's state process (open streams end on their next write)."
   @spec stop(t()) :: :ok
@@ -174,12 +220,31 @@ defmodule Toolnexus.McpHandler do
 
   def call(conn, %__MODULE__{} = h) do
     ctx = %Ctx{conn: conn}
+    v2026? = @v2026 in h.versions
 
+    cond do
+      conn.method == "POST" and v2026? ->
+        case __MODULE__.Wire2026.post(conn, h, ctx) do
+          {:handled, conn} -> conn
+          {:legacy, conn, read} -> legacy(conn, h, ctx, read)
+        end
+
+      v2026? and h.legacy == [] ->
+        conn
+        |> put_resp_header("allow", "POST")
+        |> text(405, "Method Not Allowed")
+
+      true ->
+        legacy(conn, h, ctx, nil)
+    end
+  end
+
+  defp legacy(conn, h, ctx, read) do
     case authenticate(conn, h, ctx) do
       {:ok, ctx} ->
         case conn.method do
           "POST" ->
-            handle_post(conn, h, ctx)
+            handle_post(conn, h, ctx, read)
 
           "GET" ->
             handle_get(conn, h, ctx)
@@ -207,34 +272,60 @@ defmodule Toolnexus.McpHandler do
         reason =
           case other do
             {:error, r} -> r
+            {:raised, r} -> r
             r -> r
           end
 
-        conn =
-          case cfg[:www_authenticate] do
-            f when is_function(f, 2) ->
-              case f.(conn, reason) do
-                v when is_binary(v) and v != "" -> put_resp_header(conn, "www-authenticate", v)
-                _ -> conn
-              end
-
-            _ ->
-              conn
-          end
-
-        {:halt, text(conn, 401, "Unauthorized")}
+        {:halt, write_auth_failure(conn, cfg, reason)}
     end
   end
 
   defp authenticate(_conn, _h, ctx), do: {:ok, ctx}
 
+  @doc false
+  # Answers an `:authenticate` failure (both wires). A `Toolnexus.McpAuthError`
+  # keeps its status + challenge and gets the JSON body; anything else is §7C.1's
+  # plain 401. A non-empty `:www_authenticate` hook result always wins.
+  def write_auth_failure(conn, cfg, reason) do
+    hooked =
+      case cfg[:www_authenticate] do
+        f when is_function(f, 2) ->
+          case safe(fn -> f.(conn, reason) end) do
+            v when is_binary(v) and v != "" -> v
+            _ -> nil
+          end
+
+        _ ->
+          nil
+      end
+
+    case reason do
+      %Toolnexus.McpAuthError{} = e ->
+        challenge = hooked || e.challenge
+        status = if e.status in [nil, 0], do: 401, else: e.status
+
+        conn =
+          if challenge not in [nil, ""],
+            do: put_resp_header(conn, "www-authenticate", challenge),
+            else: conn
+
+        conn
+        |> put_resp_header("content-type", "application/json")
+        |> send_resp(status, ~s({"error":"unauthorized"}))
+
+      _ ->
+        conn = if hooked, do: put_resp_header(conn, "www-authenticate", hooked), else: conn
+        text(conn, 401, "Unauthorized")
+    end
+  end
+
   # ── POST ────────────────────────────────────────────────────────────────
 
-  defp handle_post(conn, h, ctx) do
+  defp handle_post(conn, h, ctx, read) do
     if json_content_type?(conn) do
-      max = h.cfg[:max_body_bytes] || 4 * 1024 * 1024
+      max = max_body(h)
 
-      case read_body(conn, length: max + 1, read_length: max + 1) do
+      case read || read_body(conn, length: max + 1, read_length: max + 1) do
         {:ok, body, conn} when byte_size(body) <= max -> handle_body(conn, h, ctx, body)
         {:ok, _body, conn} -> text(conn, 413, "Request Entity Too Large")
         {:more, _, conn} -> text(conn, 413, "Request Entity Too Large")
@@ -245,7 +336,11 @@ defmodule Toolnexus.McpHandler do
     end
   end
 
-  defp json_content_type?(conn) do
+  @doc false
+  def max_body(h), do: h.cfg[:max_body_bytes] || 4 * 1024 * 1024
+
+  @doc false
+  def json_content_type?(conn) do
     case get_req_header(conn, "content-type") do
       [ct | _] -> match?({:ok, "application", "json", _}, Plug.Conn.Utils.media_type(ct))
       _ -> false
@@ -306,7 +401,7 @@ defmodule Toolnexus.McpHandler do
     version = header(conn, "mcp-protocol-version")
 
     cond do
-      version != nil and version not in h.versions ->
+      version != nil and version not in h.legacy ->
         {:halt, text(conn, 400, "Bad Request: unsupported MCP-Protocol-Version")}
 
       h.cfg[:stateless] ->
@@ -329,9 +424,9 @@ defmodule Toolnexus.McpHandler do
     params = if is_map(msg["params"]), do: msg["params"], else: %{}
 
     version =
-      if params["protocolVersion"] in h.versions,
+      if params["protocolVersion"] in h.legacy,
         do: params["protocolVersion"],
-        else: hd(h.versions)
+        else: hd(h.legacy)
 
     sid_result =
       if h.cfg[:stateless] do
@@ -448,6 +543,10 @@ defmodule Toolnexus.McpHandler do
   end
 
   # ── JSON-RPC dispatch ──────────────────────────────────────────────────
+
+  @doc false
+  # The §7C.1 payloads, reused by the 2026 wire for resources and prompts.
+  def dispatch_legacy(conn, h, ctx, method, p), do: dispatch(conn, h, ctx, method, p)
 
   defp dispatch(conn, _h, _ctx, "ping", _p), do: {conn, {:ok, %{}}}
 
@@ -568,7 +667,8 @@ defmodule Toolnexus.McpHandler do
   defp dispatch(conn, _h, _ctx, method, _p),
     do: {conn, {:error, -32601, "method not found: #{method}"}}
 
-  defp tools(h, ctx) do
+  @doc false
+  def tools(h, ctx) do
     case h.cfg[:list_tools] do
       f when is_function(f, 1) -> hook(fn -> f.(ctx) end)
       _ -> {:ok, if(h.toolkit, do: Toolnexus.Toolkit.tools(h.toolkit), else: [])}
@@ -689,7 +789,8 @@ defmodule Toolnexus.McpHandler do
     end
   end
 
-  defp normalize_decision(d) do
+  @doc false
+  def normalize_decision(d) do
     case d do
       %Decision{kind: k} = d when k in [:allow, :deny, :confirm] -> d
       %Decision{} = d -> %{d | kind: :allow}
@@ -705,8 +806,9 @@ defmodule Toolnexus.McpHandler do
     end
   end
 
-  defp execute(tool, args, ctx) do
-    tctx = %Context{extra: %{mcp: ctx}}
+  @doc false
+  def execute(tool, args, ctx, answer \\ nil) do
+    tctx = %Context{extra: %{mcp: ctx}, answer: answer}
 
     try do
       case tool.execute.(args, tctx) do
@@ -911,13 +1013,15 @@ defmodule Toolnexus.McpHandler do
     |> send_resp(status, Jason.encode!(payload))
   end
 
-  defp text(conn, status, body) do
+  @doc false
+  def text(conn, status, body) do
     conn
     |> put_resp_header("content-type", "text/plain; charset=utf-8")
     |> send_resp(status, body <> "\n")
   end
 
-  defp header(conn, name) do
+  @doc false
+  def header(conn, name) do
     case get_req_header(conn, name) do
       [v | _] when v != "" -> v
       _ -> nil
@@ -925,7 +1029,8 @@ defmodule Toolnexus.McpHandler do
   end
 
   # A hook's result: {:ok, x} | {:error, reason} | bare x; a raise is an error.
-  defp hook(fun) do
+  @doc false
+  def hook(fun) do
     case safe(fun) do
       {:ok, v} -> {:ok, v}
       {:error, reason} -> {:error, reason_text(reason)}
@@ -934,7 +1039,8 @@ defmodule Toolnexus.McpHandler do
     end
   end
 
-  defp safe(fun) do
+  @doc false
+  def safe(fun) do
     fun.()
   rescue
     e -> {:raised, e}
@@ -949,13 +1055,15 @@ defmodule Toolnexus.McpHandler do
 
   defp g(m, k) when is_map(m), do: Map.get(m, k, Map.get(m, Atom.to_string(k)))
 
-  defp omit_empty(m), do: m |> Enum.reject(fn {_, v} -> v in [nil, ""] end) |> Map.new()
+  @doc false
+  def omit_empty(m), do: m |> Enum.reject(fn {_, v} -> v in [nil, ""] end) |> Map.new()
 
   defp put_nonempty(m, _k, v) when v in [nil, ""], do: m
   defp put_nonempty(m, k, v), do: Map.put(m, k, v)
 
-  defp blank_default(v, d) when v in [nil, ""], do: d
-  defp blank_default(v, _d), do: v
+  @doc false
+  def blank_default(v, d) when v in [nil, ""], do: d
+  def blank_default(v, _d), do: v
 
   defmodule State do
     @moduledoc false

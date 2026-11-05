@@ -3,10 +3,13 @@ defmodule Toolnexus.McpHandlerHelpers do
   # Shared HTTP helpers for the McpHandler suites: run a handler on a real
   # Bandit listener and talk raw streamable HTTP to it.
 
-  def start_handler(handler) do
+  def start_handler(handler), do: start_plug({Toolnexus.McpHandler, handler})
+
+  @doc "Serve any plug spec on an ephemeral loopback port; returns its base URL."
+  def start_plug(plug) do
     {:ok, pid} =
       Bandit.start_link(
-        plug: {Toolnexus.McpHandler, handler},
+        plug: plug,
         ip: {127, 0, 0, 1},
         port: 0,
         startup_log: false
@@ -28,6 +31,14 @@ defmodule Toolnexus.McpHandlerHelpers do
         if(opts[:sid], do: [{"mcp-session-id", opts[:sid]}], else: []) ++
         if(opts[:version], do: [{"mcp-protocol-version", opts[:version]}], else: []) ++
         if(opts[:token], do: [{"authorization", opts[:token]}], else: [])
+
+    # `:headers` apply last: an empty value removes that header.
+    headers =
+      Enum.reduce(opts[:headers] || [], headers, fn {k, v}, acc ->
+        k = String.downcase(k)
+        acc = Enum.reject(acc, fn {n, _} -> n == k end)
+        if v in [nil, ""], do: acc, else: acc ++ [{k, v}]
+      end)
 
     body =
       cond do

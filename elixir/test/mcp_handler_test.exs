@@ -795,7 +795,7 @@ defmodule Toolnexus.McpHandlerTest do
     assert r["result"]["isError"] == true
     assert text_of(r) == "invalid arguments: must be an object"
     assert decode(post(newer, bad, version: "2025-06-18"))["error"]["code"] == -32602
-    assert McpHandler.implemented_versions() == ["2025-11-25", "2025-06-18"]
+    assert McpHandler.implemented_versions() == ["2026-07-28", "2025-11-25", "2025-06-18"]
   end
 
   test "stateless session id and title" do
