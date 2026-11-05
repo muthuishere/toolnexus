@@ -6,6 +6,7 @@ Every port runs against these. Outputs must match (SPEC.md §0).
 |---|---|
 | `mcp.json` | Example MCP config (one local server, one disabled remote). |
 | `skills/` | Shared skill fixtures (`hello-world` and others). |
+| `mcp-2026/` | MCP 2026-07-28 conformance fixtures (SPEC.md §2, §2A, §7C): `fixture.json` (server tools `echo` + `greet`, skills from `../skills`, resolved relative to the fixture file) and `expected.json` (the 8 conformance steps, header errors, skill-URI rejections, no-hidden-retry and auth cases). Change `upgrade-mcp-2026-07-28`; the spikes under `spikes/mcp-2026/` run against them. |
 | `mcp-progress-server.mjs` | Dependency-free stdio MCP server for the idle-timeout contract (SPEC.md §2). Run with plain `node`. |
 
 ## `mcp-progress-server.mjs`

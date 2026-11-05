@@ -104,9 +104,9 @@ pub struct SkillSource {
 // ---------------------------------------------------------------------------
 
 #[derive(Default)]
-struct Frontmatter {
-    name: String,
-    description: String,
+pub(crate) struct Frontmatter {
+    pub(crate) name: String,
+    pub(crate) description: String,
 }
 
 /// Split `---`-fenced frontmatter: `^---\r?\n(.*?)\r?\n---\r?\n?(.*)$` (dotall).
@@ -150,7 +150,7 @@ fn scalar_string(y: &Yaml) -> Option<String> {
 
 /// Real YAML first; only when it refuses, a guarded line-wise rescue of
 /// `name`/`description` (ADR 0028). Returns (frontmatter, body, malformed, detail).
-fn parse_frontmatter(text: &str) -> (Frontmatter, String, bool, String) {
+pub(crate) fn parse_frontmatter(text: &str) -> (Frontmatter, String, bool, String) {
     let Some((block, body)) = split_frontmatter(text) else {
         return (
             Frontmatter::default(),
@@ -191,6 +191,27 @@ fn parse_frontmatter(text: &str) -> (Frontmatter, String, bool, String) {
         return (fm, body.to_owned(), true, detail);
     }
     (fm, body.to_owned(), false, String::new())
+}
+
+/// A remote (MCP skills extension) skill as data: the same frontmatter parse
+/// as a local `SKILL.md`, so the loaded body is identical. `None` when the
+/// file has no usable name.
+pub(crate) fn skill_def_from_markdown(
+    text: &str,
+    base: String,
+    resources: Vec<String>,
+) -> Option<SkillDef> {
+    let (fm, content, malformed, _) = parse_frontmatter(text);
+    if malformed || fm.name.is_empty() {
+        return None;
+    }
+    Some(SkillDef {
+        name: fm.name,
+        description: fm.description,
+        content,
+        resources,
+        base,
+    })
 }
 
 fn lenient_frontmatter(block: &str) -> Frontmatter {
@@ -525,6 +546,8 @@ pub fn load_skills_with(opts: LoadSkillsOptions) -> SkillSource {
     let shared = Arc::new(skills.clone());
     let limit = opts.sample_limit;
     let tool = Tool {
+        output_schema: None,
+        annotations: None,
         concurrency_safe: None,
         name: "skill".into(),
         description: SKILL_TOOL_DESCRIPTION.into(),

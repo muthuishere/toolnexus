@@ -1,0 +1,283 @@
+---
+title: "MCPHandler — an embeddable MCP server with per-request hooks"
+description: "Mount a streamable-HTTP MCP server on your own mux, with auth, per-identity tools and a confirm gate. — Go."
+sidebar:
+  label: "serve / mcp-handler"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Go</strong> · package <code>github.com/muthuishere/toolnexus/golang</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7C.1</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/golang/mcphandler.go">golang/mcphandler.go</a>
+</p>
+
+```go
+func (tk *Toolkit) MCPHandler(cfg MCPHandlerConfig) *MCPHTTPHandler // http.Handler + NotifyToolsChanged()
+
+type MCPHandlerConfig struct {
+	Name, Title, Version, Instructions string
+	ServerInfo       func(ctx context.Context) MCPServerInfo
+	ProtocolVersions []string // default ["2025-06-18"]; "2025-11-25" opt-in
+	Authenticate     func(r *http.Request) (any, error)
+	WWWAuthenticate  func(r *http.Request, err error) string
+	ListTools        func(ctx context.Context) ([]Tool, error)
+	BeforeCall       func(ctx context.Context, tool Tool, args json.RawMessage) (MCPDecision, error)
+	ConfirmTimeout   time.Duration
+	OnCall           func(ev MCPCallEvent)
+	ListResources, ReadResource, ListPrompts, GetPrompt // optional hooks
+	SessionIDs         MCPSessionIDs
+	Stateless          bool
+	StatelessSessionID string
+	MaxBodyBytes       int64
+}
+
+IdentityFrom(ctx) any · RequestFrom(ctx) *http.Request · MCPSessionIDFrom(ctx) string · MCPRequestMetaFrom(ctx) map[string]any
+```
+
+[`Serve`](/api/go/serve/mcp/) owns a listener and exposes one static tool list. `MCPHandler` is the
+other shape: a plain `http.Handler` you mount on **your** mux, behind your own TLS, CORS and OAuth,
+where every policy is a hook. toolnexus has no notion of tenant, user, role or storage — the host
+decides those inside `Authenticate`, `ListTools` and `BeforeCall`.
+
+## When to use it
+
+Reach for `MCPHandler` when one MCP endpoint serves many callers who must see different tools: a
+multi-tenant SaaS, a gateway that maps an OAuth token to a workspace, or a server whose tools are
+built at request time from a database. `ListTools` runs per request for both `tools/list` and the
+`tools/call` lookup, so a name outside the caller's list is answered with `-32602` and never runs.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Serve vs MCPHandler">
+`Serve(addr, {MCP})` is the zero-config gateway: one listener, one tool list, no auth. Once you need
+an identity, per-caller tools, a human confirmation before a destructive call or your own session
+store, `Serve` would have to grow every one of those as an option. `MCPHandler` makes each a hook
+instead and leaves the HTTP server, and every policy, to you.
+</Aside>
+
+## Examples
+
+### 1. Mount it — auth, 401 with `WWW-Authenticate`, identity on the context
+
+```go test
+package main
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"log"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	tk, err := toolnexus.CreateToolkit(context.Background(), toolnexus.Options{})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer tk.Close()
+
+	whoami := toolnexus.Tool{
+		Name: "whoami", Description: "who is calling", Source: toolnexus.SourceNative,
+		InputSchema: toolnexus.JSONSchema{"type": "object"},
+		Execute: func(_ map[string]any, tc *toolnexus.ToolContext) (toolnexus.ToolResult, error) {
+			return toolnexus.ToolResult{Output: fmt.Sprint(toolnexus.IdentityFrom(tc.Ctx))}, nil
+		},
+	}
+	h := tk.MCPHandler(toolnexus.MCPHandlerConfig{
+		Stateless: true,
+		Authenticate: func(r *http.Request) (any, error) {
+			if r.Header.Get("Authorization") == "Bearer alice" {
+				return "alice", nil
+			}
+			return nil, errors.New("bad token")
+		},
+		WWWAuthenticate: func(*http.Request, error) string { return `Bearer realm="mcp"` },
+		ListTools:       func(context.Context) ([]toolnexus.Tool, error) { return []toolnexus.Tool{whoami}, nil },
+	})
+	mux := http.NewServeMux()
+	mux.Handle("/mcp", h)
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	post := func(token, body string) (*http.Response, string) {
+		req, _ := http.NewRequest("POST", srv.URL+"/mcp", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", token)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			log.Fatal(err)
+		}
+		b, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		return resp, string(b)
+	}
+
+	resp, _ := post("Bearer mallory", `{"jsonrpc":"2.0","id":1,"method":"ping"}`)
+	if resp.StatusCode != 401 || resp.Header.Get("WWW-Authenticate") != `Bearer realm="mcp"` {
+		log.Fatalf("expected 401 + challenge, got %d", resp.StatusCode)
+	}
+	_, body := post("Bearer alice", `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"whoami"}}`)
+	if !strings.Contains(body, `"text":"alice"`) {
+		log.Fatalf("unexpected: %s", body)
+	}
+	fmt.Println("ok: 401 for mallory, identity alice reached the tool")
+}
+```
+
+### 2. Per-identity tools — a name outside `ListTools` is never executed
+
+```go test
+package main
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"log"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	tk, _ := toolnexus.CreateToolkit(context.Background(), toolnexus.Options{})
+	defer tk.Close()
+
+	ran := 0
+	wipe := toolnexus.Tool{
+		Name: "wipe", Description: "admin only", Source: toolnexus.SourceNative,
+		Hints: &toolnexus.ToolHints{Destructive: true},
+		Execute: func(map[string]any, *toolnexus.ToolContext) (toolnexus.ToolResult, error) {
+			ran++
+			return toolnexus.ToolResult{Output: "wiped"}, nil
+		},
+	}
+	h := tk.MCPHandler(toolnexus.MCPHandlerConfig{
+		Stateless:    true,
+		Authenticate: func(r *http.Request) (any, error) { return r.Header.Get("X-User"), nil },
+		ListTools: func(ctx context.Context) ([]toolnexus.Tool, error) {
+			if toolnexus.IdentityFrom(ctx) == "admin" {
+				return []toolnexus.Tool{wipe}, nil
+			}
+			return nil, nil
+		},
+	})
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+
+	call := func(user string) string {
+		req, _ := http.NewRequest("POST", srv.URL, strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"wipe"}}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-User", user)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			log.Fatal(err)
+		}
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(resp.Body)
+		return string(b)
+	}
+
+	if b := call("bob"); !strings.Contains(b, `"tool not found: wipe"`) {
+		log.Fatalf("bob: %s", b)
+	}
+	if ran != 0 {
+		log.Fatal("a tool outside ListTools ran")
+	}
+	if b := call("admin"); !strings.Contains(b, `"text":"wiped"`) {
+		log.Fatalf("admin: %s", b)
+	}
+	fmt.Println("ok: bob got -32602, admin ran it once:", ran)
+}
+```
+
+### 3. A confirm gate with a shaped fallback, structured results and `OnCall`
+
+```go test
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+
+	toolnexus "github.com/muthuishere/toolnexus/golang"
+)
+
+func main() {
+	tk, _ := toolnexus.CreateToolkit(context.Background(), toolnexus.Options{})
+	defer tk.Close()
+
+	del := toolnexus.Tool{
+		Name: "delete_record", Description: "deletes a record", Source: toolnexus.SourceNative,
+		Execute: func(map[string]any, *toolnexus.ToolContext) (toolnexus.ToolResult, error) {
+			return toolnexus.ToolResult{Output: "deleted"}, nil
+		},
+	}
+	stats := toolnexus.Tool{
+		Name: "stats", Description: "counts", Source: toolnexus.SourceNative,
+		OutputSchema: toolnexus.JSONSchema{"type": "object", "properties": map[string]any{"count": map[string]any{"type": "integer"}}},
+		Execute: func(map[string]any, *toolnexus.ToolContext) (toolnexus.ToolResult, error) {
+			return toolnexus.ToolResult{Structured: map[string]any{"count": 3}}, nil
+		},
+	}
+	var decisions []string
+	h := tk.MCPHandler(toolnexus.MCPHandlerConfig{
+		Stateless: true, // stateless ⇒ no elicitation ⇒ confirm takes the fallback path
+		ListTools: func(context.Context) ([]toolnexus.Tool, error) { return []toolnexus.Tool{del, stats}, nil },
+		BeforeCall: func(_ context.Context, t toolnexus.Tool, _ json.RawMessage) (toolnexus.MCPDecision, error) {
+			if t.Name == "delete_record" {
+				return toolnexus.MCPDecision{Kind: toolnexus.MCPConfirm, Message: "Delete it?",
+					Result: &toolnexus.ToolResult{Output: "re-call with nonce n-1"}}, nil
+			}
+			return toolnexus.MCPDecision{}, nil
+		},
+		OnCall: func(ev toolnexus.MCPCallEvent) { decisions = append(decisions, ev.Name+"="+string(ev.Decision)) },
+	})
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+
+	call := func(name string) string {
+		resp, err := http.Post(srv.URL, "application/json", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"`+name+`"}}`))
+		if err != nil {
+			log.Fatal(err)
+		}
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(resp.Body)
+		return string(b)
+	}
+
+	if b := call("delete_record"); !strings.Contains(b, "re-call with nonce n-1") {
+		log.Fatalf("fallback: %s", b)
+	}
+	if b := call("stats"); !strings.Contains(b, `"structuredContent":{"count":3}`) {
+		log.Fatalf("structured: %s", b)
+	}
+	fmt.Println("ok:", strings.Join(decisions, ", "))
+}
+```
+
+<Aside type="note" title="Confirm over elicitation">
+When the session's client declared `capabilities.elicitation` at `initialize`, a `Confirm` decision
+sends `elicitation/create` on the same POST's event stream and waits (≤ `ConfirmTimeout`); `accept`
+runs the tool, anything else is `isError` "declined". Client capabilities are cached on the instance
+that saw `initialize`, so a multi-instance host needs sticky routing for confirms.
+</Aside>
+
+## See also
+
+- [`ExposedMcpTools`](/api/go/serve/mcp/) — The inbound MCP profile on `Serve`: any MCP client can call your tools.
+- [`Toolkit.Serve`](/api/go/serve/a2a/) — Publish an Agent Card and answer JSON-RPC over the client loop.

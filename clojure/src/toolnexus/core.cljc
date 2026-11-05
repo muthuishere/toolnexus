@@ -86,6 +86,13 @@
     :wait-for            — the ONE §10 host resolver. Passed to the MCP source so a
                            connected server may elicit input mid-`tools/call`; absent
                            ⇒ the `elicitation` capability is not advertised at all.
+                           Also answers MCP 2026 `input_required` rounds and
+                           `pause`-mode OAuth (§2.5, §2A.1a).
+    :token-store         — §2A.1a MCP OAuth token store, a map of fns
+                           {:load (fn [resource]) :save (fn [resource token])
+                            :delete (fn [resource])}; default in-memory per build
+    :open-url            — §2A.1a how `auto` mode opens the browser, (fn [url]);
+                           default the OS opener
 
   Returns a toolkit plus what it took to get there:
     {:tools .. :sources .. :skills .. :statuses .. :errors .. :connections .. :wait-for ..}
@@ -94,16 +101,23 @@
   a status, never an exception. A toolkit with one dead MCP server is still a
   working toolkit — that is the whole point of the status map."
   [{:keys [mcp skills skill-defs skill-provider builtins tools agents
-           disable-tools wait-for] media-src :media :as opts}]
-  (let [skill?   (or (some? skills) (some? skill-defs) (some? skill-provider))
-        loaded   (when skill? (skill/load-skills (skill-source-opts opts)))
-        skill-ts (when loaded [(skill/skill-tool loaded)])
-        agent-ts (agent-tools agents mcp)
-        mcp-res  (when mcp
-                   (try (mcp/from-config mcp {:wait-for wait-for})
+           disable-tools wait-for token-store open-url] media-src :media :as opts}]
+  (let [mcp-res  (when mcp
+                   (try (mcp/from-config mcp (cond-> {:wait-for wait-for :disable-tools disable-tools}
+                                               token-store (assoc :token-store token-store)
+                                               open-url    (assoc :open-url open-url)))
                         (catch Throwable e
                           {:tools [] :statuses {} :connections []
-                           :errors {"<config>" (or (ex-message e) (str e))}})))]
+                           :errors {"<config>" (or (ex-message e) (str e))}})))
+        ;; §2.7 — skills a 2026 MCP server serves join the SAME inventory, after
+        ;; the caller's own, so a local skill wins a name clash (first wins).
+        remote-sk (seq (:skills mcp-res))
+        skill?   (or (some? skills) (some? skill-defs) (some? skill-provider) (some? remote-sk))
+        loaded   (when skill? (skill/load-skills (skill-source-opts
+                                                  (cond-> opts
+                                                    remote-sk (assoc :skill-defs (into (vec skill-defs) remote-sk))))))
+        skill-ts (when loaded [(skill/skill-tool loaded)])
+        agent-ts (agent-tools agents mcp)]
     (-> (builtin/builtin-toolkit builtins)          ; first: lowest precedence
         (tool/add-tools (or skill-ts []))
         ;; Agents sit between the local skill tool and host-supplied extras.

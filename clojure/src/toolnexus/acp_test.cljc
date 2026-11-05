@@ -27,9 +27,13 @@
             [koine.json :as json]
             [koine.process :as proc]
             [koine.time :as ktime]
+            [koine.http :as http]
             [toolnexus.acp :as acp]
             [toolnexus.client :as client]
-            [toolnexus.core :as toolnexus]))
+            [toolnexus.core :as toolnexus]
+            [toolnexus.native :as native]
+            [toolnexus.serve :as serve]
+            [toolnexus.shared-examples-test :as te]))
 
 ;; ===========================================================================
 ;; the fake ACP agent — see toolnexus.test-main/-main for how it is reached
@@ -145,13 +149,44 @@
       (fake-reply! ctx id {:stopReason "end_turn"})
       (reset! (:busy ctx) false))))
 
+(defn- fake-chunk! [ctx sid kind text]
+  (fake-notify! ctx "session/update"
+                {:sessionId sid :update {:sessionUpdate kind :content {:type "text" :text text}}}))
+
+(defn- fake-handle-drip!
+  "conformance/acp-client stream.acpDrip: one thought, then each chunk gapMs
+  apart — a buffered stream would show ~0ms lead before done."
+  [ctx id sid]
+  (fake-chunk! ctx sid "agent_thought_chunk" "pondering")
+  (fake-chunk! ctx sid "agent_message_chunk" "drip-1 ")
+  (ktime/sleep! 200)
+  (fake-chunk! ctx sid "agent_message_chunk" "drip-2 ")
+  (ktime/sleep! 200)
+  (fake-chunk! ctx sid "agent_message_chunk" "drip-3")
+  (fake-reply! ctx id {:stopReason "end_turn"}))
+
+(defn- fake-handle-fs-request!
+  "conformance/acp-client unknownRequest: ask the client for something it does
+  not implement, record the answer, then finish the turn with \"ok\"."
+  [ctx id sid]
+  (let [[req-id p] (fake-request! ctx "fs/read_text_file" {:sessionId sid :path "/etc/hosts"})
+        reply      @p]
+    (swap! (:pending ctx) dissoc req-id)
+    (fake-emit! ctx {:type "fs-reply" :data reply})
+    (fake-chunk! ctx sid "agent_message_chunk" "ok")
+    (fake-reply! ctx id {:stopReason "end_turn"})))
+
 (defn- fake-handle-prompt! [scenario ctx id sid text]
+  (cond
+    (= "1" (env/get-env "TN_FAKE_DRIP"))       (fake-handle-drip! ctx id sid)
+    (= "1" (env/get-env "TN_FAKE_FS_REQUEST")) (fake-handle-fs-request! ctx id sid)
+    :else
   (case scenario
     "stale"      (fake-handle-stale! ctx id sid text)
     "permission" (fake-handle-permission! ctx id sid text)
     "noisy"      (fake-handle-noisy! ctx id sid text)
     "serialize"  (fake-handle-serialize! ctx id sid text)
-    (fake-handle-warm! ctx id sid text)))
+    (fake-handle-warm! ctx id sid text))))
 
 (defn- fake-lock []
   (let [lock (atom false)]
@@ -183,7 +218,8 @@
   []
   (let [scenario (env/get-env "ACP_SCENARIO" "warm")
         out-file (env/get-env "ACP_OUT_FILE")
-        ctx      (new-fake-ctx out-file)]
+        ctx      (new-fake-ctx out-file)
+        stop     (atom false)]
     (loop []
       (when-let [line (read-line)]
         (when-not (str/blank? line)
@@ -195,7 +231,18 @@
                   (deliver p msg))
 
                 (= "initialize" (:method msg))
-                (fake-reply! ctx (:id msg) {:protocolVersion 1 :agentCapabilities {:loadSession false}})
+                (do (fake-emit! ctx {:type "initialize" :data (:params msg)})
+                    (fake-reply! ctx (:id msg) {:protocolVersion 1 :agentCapabilities {:loadSession false}}))
+
+                (= "session/set_config_option" (:method msg))
+                (do (fake-emit! ctx {:type "session/set_config_option" :data (:params msg)})
+                    (if (= "1" (env/get-env "TN_FAKE_NO_CONFIG_OPTION"))
+                      (fake-reply-err! ctx (:id msg) -32601 "method not found")
+                      (fake-reply! ctx (:id msg) {})))
+
+                (= "session/set_model" (:method msg))
+                (do (fake-emit! ctx {:type "session/set_model" :data (:params msg)})
+                    (fake-reply! ctx (:id msg) {}))
 
                 (= "session/new" (:method msg))
                 (do (fake-emit! ctx {:type "session/new" :data (:params msg)})
@@ -210,7 +257,10 @@
                       text   (str/join "" (map :text (:prompt params)))
                       id     (:id msg)]
                   (fake-emit! ctx {:type "session/prompt" :data {:text text}})
-                  (proc/run-async! (fn [] (fake-handle-prompt! scenario ctx id sid text))))
+                  (if (= "1" (env/get-env "TN_FAKE_EXIT_ON_PROMPT"))
+                    ;; conformance agentExit: never reply — just exit
+                    (reset! stop true)
+                    (proc/run-async! (fn [] (fake-handle-prompt! scenario ctx id sid text)))))
 
                 (= "session/cancel" (:method msg))
                 (fake-reply! ctx (:id msg) {})
@@ -219,7 +269,7 @@
                 (fake-reply! ctx (:id msg) {})
 
                 :else nil))))
-        (recur)))))
+        (when-not @stop (recur))))))
 
 ;; ===========================================================================
 ;; parent-side test helpers
@@ -396,3 +446,209 @@
       (is (nil? (:error r2)))
       (is (str/includes? (:ok r2) "second")))
     (acp/close c)))
+
+;; ===========================================================================
+;; conformance/acp-client/cases.json — SPEC §8C, replayed case by case
+;; ===========================================================================
+
+(defn- cases []
+  (json/read-str (fs/read-file (str (te/examples-dir) "/../conformance/acp-client/cases.json"))))
+
+(defn- err-of [f]
+  (try (f) nil (catch Throwable e (ex-message e))))
+
+(defn- fake-env [scenario out-file extra]
+  (cond-> (merge {"ACP_FAKE_SERVER" "1" "ACP_SCENARIO" scenario}
+                 (into {} (map (fn [[k v]] [(name k) (str v)]) extra)))
+    out-file (assoc "ACP_OUT_FILE" out-file)))
+
+(defn- connect-with! [extra-env opts & {:keys [out-file]}]
+  (acp/connect (fake-server-command)
+               (merge {:environment (fake-env "warm" out-file extra-env)
+                       :timeout 20000 :permission-timeout 20000}
+                      opts)))
+
+(defn- events-of [out-file type]
+  (filterv #(= type (:type %)) (read-events out-file)))
+
+(deftest conformance-stream-in-process-is-incremental
+  (let [cs     (get-in (cases) [:stream :inProcess])
+        evs    (atom [])
+        wait!  (fn [delta]
+                 (let [deadline (+ (ktime/mono-ms) (:waitMs cs))]
+                   (loop []
+                     (cond
+                       (some #(and (= "text" (:type %)) (= delta (:delta %))) @evs) nil
+                       (> (ktime/mono-ms) deadline) (throw (ex-info (:notIncrementalError cs) {}))
+                       :else (do (ktime/sleep! 1) (recur))))))
+        c      (client/create-in-process-client
+                {:model "m"
+                 :generate-stream
+                 (fn [_req emit]
+                   (doseq [e (:emits cs)]
+                     (emit (dissoc e :awaitConsumer))
+                     (when (:awaitConsumer e) (wait! (:delta e))))
+                   {:content (get-in cs [:returns :content])})})
+        r      (client/run c (:prompt cs) {:toolkit (toolnexus/build {:builtins false})
+                                           :on-event #(swap! evs conj %)})
+        texts  (mapv :delta (filter #(= "text" (:type %)) @evs))
+        others (filterv #(contains? #{"thought" "tool_call"} (:type %)) @evs)
+        done   (:result (last @evs))]
+    (is (= (:expectTextDeltas cs) texts))
+    (is (= (:expectPassThrough cs)
+           (mapv (fn [want got] (select-keys got (keys want))) (:expectPassThrough cs) others)))
+    (is (= (count (:expectPassThrough cs)) (count others)))
+    (is (= "done" (:type (last @evs))))
+    (is (= (:expectDoneText cs) (:text done) (:text r)))
+    (is (= (:expectDoneToolCalls cs) (count (:tool-calls done))))
+    (testing "a stream that never reaches the consumer trips the latch loudly"
+      (let [c2 (client/create-in-process-client
+                {:model "m"
+                 :generate-stream (fn [_ emit]
+                                    (emit {:type "text" :delta "al"})
+                                    (throw (ex-info (:notIncrementalError cs) {})))})]
+        (is (str/includes? (str (err-of #(client/run c2 "q" {:toolkit (toolnexus/build {:builtins false})})))
+                           (:notIncrementalError cs)))))
+    (when (:plainGenerateStillRefuses cs)
+      ;; This port has no separate streaming entry point (the :on-event sink is
+      ;; the event channel), so there is nothing to refuse: a plain :generate
+      ;; serves the run whole and yields no text deltas.
+      (testing "a plain :generate yields no text deltas"
+        (let [seen (atom [])
+              c3   (client/create-in-process-client {:model "m" :generate (fn [_] {:content "whole"})})
+              r3   (client/run c3 "q" {:toolkit (toolnexus/build {:builtins false})
+                                       :on-event #(swap! seen conj %)})]
+          (is (= "whole" (:text r3)))
+          (is (not-any? #(= "text" (:type %)) @seen)))))))
+
+(deftest conformance-stream-acp-drip-is-incremental
+  (let [cs  (get-in (cases) [:stream :acpDrip])
+        a   (connect-with! (:fakeEnv cs) {})
+        c   (client/create-in-process-client {:model "m" :generate-stream (acp/generate-stream a)})
+        tk  (toolnexus/build {:builtins false})
+        evs (atom [])]
+    (try
+      (let [r       (client/run c "drip please" {:toolkit tk :on-event #(swap! evs conj [(ktime/mono-ms) %])})
+            ev      (mapv second @evs)
+            texts   (filterv #(= "text" (:type %)) ev)
+            th      (filterv #(= "thought" (:type %)) ev)
+            first-t (some (fn [[t e]] (when (= "text" (:type e)) t)) @evs)
+            done-t  (some (fn [[t e]] (when (= "done" (:type e)) t)) @evs)]
+        (is (= (:chunks cs) (mapv :delta texts)))
+        (is (= [(:expectThought cs)] (mapv #(select-keys % [:type :delta :via]) th)))
+        (is (= (:expectDoneText cs) (:text (:result (last ev))) (:text r)))
+        (is (>= (- done-t first-t) (:minLeadMs cs))
+            (str "first text delta only " (- done-t first-t) "ms before done"))
+        (is (= (:expectDoneText cs) (:text (client/run c "again" {:toolkit tk})))))
+      (finally (acp/close a)))))
+
+(deftest conformance-passthrough
+  (let [cs  (:passthrough (cases))
+        o   (:options cs)
+        opts {:mcp-servers (:mcpServers o) :session-meta (:sessionMeta o)
+              :client-caps-meta (:clientCapsMeta o) :model (:model o)}]
+    (testing "every option arrives verbatim"
+      (let [out (str (fs/temp-dir! "acp") "/events.ndjson")
+            a   (connect-with! {} opts :out-file out)]
+        (acp/close a)
+        (let [init (:data (first (events-of out "initialize")))
+              sn   (:data (first (events-of out "session/new")))
+              sco  (:data (first (events-of out "session/set_config_option")))]
+          (is (= (:expectInitializeClientCapabilities cs) (:clientCapabilities init)))
+          (is (= (:mcpServers o) (:mcpServers sn)) "mcpServers deep-equal and in order")
+          (is (= (:sessionMeta o) (:_meta sn)))
+          (is (= (:expectSetConfigOption cs) (select-keys sco [:configId :value])))
+          (is (empty? (events-of out "session/set_model"))))))
+    (testing "set_model fallback"
+      (let [fb  (:fallbackSetModel cs)
+            out (str (fs/temp-dir! "acp") "/events.ndjson")
+            a   (connect-with! (:fakeEnv fb) opts :out-file out)]
+        (acp/close a)
+        (is (= (:expectSetModel fb)
+               (select-keys (:data (first (events-of out "session/set_model"))) [:modelId])))))
+    (testing "bare: nothing set"
+      (let [be  (:bareExpect cs)
+            out (str (fs/temp-dir! "acp") "/events.ndjson")
+            a   (connect-with! {} {} :out-file out)]
+        (acp/close a)
+        (let [init (:data (first (events-of out "initialize")))
+              sn   (:data (first (events-of out "session/new")))]
+          (is (= (:mcpServers be) (:mcpServers sn)))
+          (is (contains? sn :mcpServers))
+          (is (= (:sessionNewHasMeta be) (contains? sn :_meta)))
+          (is (= (:clientCapabilitiesHasMeta be) (contains? (:clientCapabilities init) :_meta)))
+          (is (empty? (events-of out "session/set_config_option"))))))))
+
+(deftest conformance-agent-exit
+  (let [cs (:agentExit (cases))
+        a  (connect-with! (:fakeEnv cs) {:permission-timeout 30000})
+        t0 (ktime/mono-ms)]
+    (try
+      (let [e (err-of #((acp/generate a) {:messages [{:role "user" :content "hi"}]}))]
+        (is (str/includes? (str e) (:expectError cs)) (str e))
+        (is (< (- (ktime/mono-ms) t0) 15000) "failed promptly, not by the 30s timeout"))
+      (finally (acp/close a)))))
+
+(deftest conformance-unknown-request
+  (let [cs  (:unknownRequest (cases))
+        out (str (fs/temp-dir! "acp") "/events.ndjson")
+        a   (connect-with! (:fakeEnv cs) {} :out-file out)]
+    (try
+      (is (= (:expectText cs) (:content ((acp/generate a) {:messages [{:role "user" :content "hi"}]}))))
+      (finally (acp/close a)))
+    (let [reply (:data (first (events-of out "fs-reply")))]
+      (is (= (:expectCode cs) (get-in reply [:error :code])) (pr-str reply)))))
+
+(deftest conformance-as-mcp-server
+  (let [cs   (:asMcpServer (cases))
+        tk   (toolnexus/build
+              {:builtins false
+               :skills   (str (te/examples-dir) "/skills")
+               :tools    [(native/native-tool {:name "echo" :description "Echo text back."
+                                               :input-schema {:type "object"
+                                                              :properties {:text {:type "string"}}}
+                                               :run (fn [a] (str (:text a)))})]})
+        srv  (serve/as-mcp-server tk)
+        srv2 (serve/as-mcp-server tk)
+        url  (:url srv)
+        auth {"Authorization" (str "Bearer " (:token srv))}
+        init "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}"
+        post (fn [u headers]
+               (http/request {:method :post :url u :body init :timeout-ms 5000
+                              :headers (merge {"Content-Type" "application/json"} headers)}))
+        hdr  (fn [res k] (some (fn [[hk v]] (when (= (str/lower-case (str hk)) (str/lower-case k)) v))
+                               (:headers res)))]
+    (try
+      (is (re-matches (re-pattern (:urlPattern cs)) url))
+      (is (re-matches (re-pattern (:tokenPattern cs)) (:token srv)))
+      (let [r (post url {})]
+        (is (= (:noTokenStatus cs) (:status r)))
+        (doseq [[k v] (:noTokenHeader cs)]
+          (is (= v (str (let [x (hdr r (name k))] (if (sequential? x) (first x) x)))))))
+      (is (= (:wrongTokenStatus cs) (:status (post url {"Authorization" "Bearer nope"}))))
+      (is (= (:getWithTokenStatus cs)
+             (:status (http/request {:method :get :url url :headers auth :timeout-ms 5000}))))
+      (is (= (:otherPathStatus cs)
+             (:status (post (str/replace url #"/mcp$" "/other") auth))))
+      (is (= 200 (:status (post url auth))))
+      (when (:twoServersDistinctTokens cs)
+        (is (not= (:token srv) (:token srv2)))
+        (is (= 401 (:status (post url {"Authorization" (str "Bearer " (:token srv2))})))))
+      (testing "through this port's own MCP client"
+        (let [mtk   (toolnexus/build {:builtins false
+                                      :mcp {:mcpServers {"tn" {:type "remote" :url url
+                                                               :headers auth}}}})
+              names (toolnexus/tool-names mtk)
+              find  (fn [n] (some #(when (or (= n %) (str/ends-with? % (str "_" n))) %) names))]
+          (try
+            (doseq [n (:toolsListContains cs)]
+              (is (find n) (str n " in " (pr-str names))))
+            (let [ce (:callEcho cs)
+                  r  (toolnexus/execute mtk (find (:name ce)) (:arguments ce))]
+              (is (= (:expectText ce) (:output r))))
+            (finally (toolnexus/shutdown! mtk)))))
+      (finally
+        ((:close srv)) ((:close srv)) ((:close srv2))))
+    (when (:afterCloseRefused cs)
+      ;; koine answers a refused connection with no :status (or a throw)
+      (is (nil? (try (:status (post url auth)) (catch Throwable _ nil)))))))

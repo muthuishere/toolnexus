@@ -543,6 +543,8 @@ pub(crate) type Args = Map<String, Value>;
 
 pub(crate) fn b_err(output: impl Into<String>, meta: Option<Args>) -> ToolResult {
     ToolResult {
+        structured: None,
+        meta: None,
         output: output.into(),
         is_error: true,
         parts: Vec::new(),
@@ -552,6 +554,8 @@ pub(crate) fn b_err(output: impl Into<String>, meta: Option<Args>) -> ToolResult
 
 pub(crate) fn b_ok(output: impl Into<String>, meta: Option<Args>) -> ToolResult {
     ToolResult {
+        structured: None,
+        meta: None,
         output: output.into(),
         is_error: false,
         parts: Vec::new(),
@@ -596,6 +600,8 @@ where
     let run = Arc::new(run);
     let tool_name = name.to_owned();
     Tool {
+        output_schema: None,
+        annotations: None,
         concurrency_safe: None,
         name: name.into(),
         description: description.into(),

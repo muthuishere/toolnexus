@@ -403,7 +403,7 @@ public static class A2AServer
     /// (no session), matching the JS reference's <c>sessionIdGenerator: undefined</c>. The SDK
     /// server processes the message and writes the response over the SSE response body.
     /// </summary>
-    private static async Task HandleMcpAsync(
+    internal static async Task HandleMcpAsync(
         HttpListenerContext ctx, IReadOnlyList<ITool> tools, MCPServeConfig mcp, OnCall? onCall)
     {
         if (ctx.Request.HttpMethod != "POST")
@@ -624,7 +624,7 @@ public static class A2AServer
     private static int ParsePort(string s) => int.TryParse(s, out var p) ? p : 0;
 
     /// <summary>HttpListener cannot bind port 0; pick a free ephemeral port ourselves.</summary>
-    private static int FreePort()
+    internal static int FreePort()
     {
         var l = new TcpListener(IPAddress.Loopback, 0);
         l.Start();

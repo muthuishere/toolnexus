@@ -1,0 +1,13 @@
+{
+  "name": "toolnexus-mcp-2026-spike",
+  "version": "0.0.1",
+  "private": true,
+  "description": "JS port of the in-house MCP 2026-07-28 spike (no MCP SDK, no dependencies).",
+  "type": "module",
+  "engines": { "node": ">=22.18" },
+  "scripts": {
+    "test": "node --test --test-concurrency=4 test/*.test.ts",
+    "selftest": "node src/cli.ts selftest",
+    "typecheck": "tsc -p tsconfig.json"
+  }
+}

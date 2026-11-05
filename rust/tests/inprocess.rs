@@ -153,3 +153,83 @@ async fn generate_error_fails_the_run() {
     let err = c.run("x", &tk().await).await.unwrap_err();
     assert!(err.to_string().contains("model crashed"), "{err}");
 }
+
+/// conformance/acp-client/cases.json `stream.inProcess`: the generate blocks
+/// after each text delta until the consumer has received it, so a buffered
+/// stream fails with `notIncrementalError`.
+#[tokio::test]
+async fn generate_stream_is_incremental() {
+    let cases: Value = serde_json::from_str(
+        &std::fs::read_to_string("../conformance/acp-client/cases.json").unwrap(),
+    )
+    .unwrap();
+    let case = cases["stream"]["inProcess"].clone();
+    let wait = std::time::Duration::from_millis(case["waitMs"].as_u64().unwrap());
+    let not_incr = case["notIncrementalError"].as_str().unwrap().to_owned();
+    // count of text deltas the consumer has seen
+    let (seen_tx, seen_rx) = tokio::sync::watch::channel(0usize);
+    let emits = case["emits"].as_array().unwrap().clone();
+    let returns = case["returns"]["content"].as_str().unwrap().to_owned();
+    let gs: GenerateStreamFn = Arc::new(move |_c, _req, emit: EmitFn| {
+        let (emits, returns, not_incr) = (emits.clone(), returns.clone(), not_incr.clone());
+        let mut seen = seen_rx.clone();
+        Box::pin(async move {
+            let mut texts = 0usize;
+            for e in &emits {
+                let s = |k: &str| e[k].as_str().unwrap_or("").to_owned();
+                let ev = StreamEvent {
+                    kind: s("type"),
+                    delta: s("delta"),
+                    id: s("id"),
+                    name: s("name"),
+                    via: s("via"),
+                    args: e.get("args").cloned().unwrap_or(Value::Null),
+                    ..Default::default()
+                };
+                emit(ev);
+                if e["awaitConsumer"] == json!(true) {
+                    texts += 1;
+                    let ok = tokio::time::timeout(wait, seen.wait_for(|n| *n >= texts)).await;
+                    if !matches!(ok, Ok(Ok(_))) {
+                        return Err(not_incr.clone());
+                    }
+                }
+            }
+            Ok(InProcessResponse {
+                content: returns,
+                ..Default::default()
+            })
+        })
+    });
+    let c = create_in_process_client(InProcessOptions {
+        generate_stream: Some(gs),
+        ..Default::default()
+    });
+    let mut rx = c
+        .stream(case["prompt"].as_str().unwrap(), &tk().await)
+        .unwrap();
+    let (mut deltas, mut pass, mut done) = (Vec::<String>::new(), Vec::new(), None);
+    while let Some(ev) = rx.recv().await {
+        match ev.kind.as_str() {
+            "text" => {
+                deltas.push(ev.delta.clone());
+                seen_tx.send_modify(|n| *n += 1);
+            }
+            "thought" => pass.push(json!({"type": "thought", "delta": ev.delta, "via": ev.via})),
+            "tool_call" => {
+                pass.push(json!({"type": "tool_call", "id": ev.id, "name": ev.name, "via": ev.via}))
+            }
+            "done" => done = ev.result,
+            "error" => panic!("{:?}", ev.error),
+            _ => {}
+        }
+    }
+    assert_eq!(json!(deltas), case["expectTextDeltas"]);
+    assert_eq!(json!(pass), case["expectPassThrough"]);
+    let done = done.expect("done");
+    assert_eq!(done.text, case["expectDoneText"].as_str().unwrap());
+    assert_eq!(
+        done.tool_calls.len() as u64,
+        case["expectDoneToolCalls"].as_u64().unwrap()
+    );
+}

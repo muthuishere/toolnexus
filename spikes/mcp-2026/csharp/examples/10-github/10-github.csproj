@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>10-github</AssemblyName>
+    <RootNamespace>Example10</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../src/Mcp2026/Mcp2026.csproj" />
+  </ItemGroup>
+</Project>

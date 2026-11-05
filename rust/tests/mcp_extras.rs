@@ -317,7 +317,7 @@ async fn remote_falls_back_to_legacy_sse_with_hints_and_parts() {
 
 #[cfg(feature = "mcp-http")]
 #[tokio::test]
-async fn remote_with_neither_transport_fails_naming_both() {
+async fn remote_that_refuses_connections_fails() {
     let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = l.local_addr().unwrap();
     drop(l);
@@ -327,9 +327,11 @@ async fn remote_with_neither_transport_fails_naming_both() {
     .unwrap();
     let src = load_mcp(&cfg).await;
     assert_eq!(src.status["dead"], McpStatus::Failed);
+    // SPEC §2.2a: connection refused is a load failure at `server/discover`
+    // (never a fallback), so the error names the connection, not the transports.
     let e = &src.errors["dead"];
     assert!(
-        e.contains("streamable-http failed") && e.contains("sse start failed"),
+        e.contains("Connection refused") || e.contains("connect"),
         "{e}"
     );
 }

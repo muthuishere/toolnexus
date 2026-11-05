@@ -126,6 +126,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         input_schema: empty_schema(),
         source: ToolSource::Custom,
         hints: None,
+        output_schema: None,
+        annotations: None,
         execute: Arc::new(|_a, ctx| {
             Box::pin(async move {
                 match ctx.answer {

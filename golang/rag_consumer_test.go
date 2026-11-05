@@ -24,8 +24,15 @@ import (
 // TN_STDIO_MCP=1, so TestStdioOutboundChildStaysAlive can drive a genuine outbound stdio
 // connection hermetically (no external process, no network).
 func TestMain(m *testing.M) {
+	if os.Getenv("TN_STDIO_MCP26") == "1" { // MCP 2026-07-28 fixture over stdio
+		serveFxStdio(newFxServer(&testing.T{}), os.Stdin, os.Stdout)
+		return
+	}
 	if os.Getenv("TN_STDIO_MCP") == "1" {
 		_ = server.ServeStdio(buildMcpServer([]Tool{mkTool("a"), mkTool("b"), mkTool("c")}, nil, nil))
+		return
+	}
+	if acpSeamHelperMain() { // acp_seam_test.go: fake ACP agent (SPEC §8C)
 		return
 	}
 	os.Exit(m.Run())

@@ -104,7 +104,11 @@ fn wire_tool(t: &Tool) -> rmcp::model::Tool {
         Value::Object(m) => m.clone(),
         _ => Map::new(),
     };
-    rmcp::model::Tool::new(t.name.clone(), t.description.clone(), Arc::new(schema))
+    let mut tool = rmcp::model::Tool::new(t.name.clone(), t.description.clone(), Arc::new(schema));
+    if let Some(Value::Object(os)) = &t.output_schema {
+        tool.output_schema = Some(Arc::new(os.clone()));
+    }
+    tool
 }
 
 /// §1B parts → MCP content blocks (after the text block, in order): image ⇒
@@ -202,7 +206,14 @@ impl ServerHandler for McpToolServer {
             };
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| cb(ev)));
         }
-        let mut content = vec![ContentBlock::text(res.output.clone())];
+        let mut text = res.output.clone();
+        if text.is_empty() {
+            if let Some(st) = &res.structured {
+                // A structured result carries an equivalent text block.
+                text = serde_json::to_string(st).unwrap_or_default();
+            }
+        }
+        let mut content = vec![ContentBlock::text(text)];
         content.extend(parts_to_content(&res.parts));
         let mut out = if res.is_error {
             CallToolResult::error(content)
@@ -210,6 +221,10 @@ impl ServerHandler for McpToolServer {
             CallToolResult::success(content)
         };
         out.is_error = Some(res.is_error);
+        out.structured_content = res.structured.clone();
+        if let Some(m) = &res.meta {
+            out.meta = Some(rmcp::model::MetaObject(m.clone()));
+        }
         Ok(out.into())
     }
 }

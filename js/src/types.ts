@@ -25,6 +25,22 @@ export interface ToolResult {
    */
   parts?: ContentPart[]
   metadata?: Record<string, unknown>
+  /**
+   * Machine-readable result (MCP `structuredContent`, SPEC §1). Absent ⇒ byte-identical wire.
+   * When set and `output` is empty, MCP serve emits the JSON text of `structured` as the text block.
+   */
+  structured?: unknown
+  /** Protocol metadata for the wire result (MCP `_meta`, SPEC §1). Absent ⇒ omitted. */
+  meta?: Record<string, unknown>
+}
+
+/** MCP tool annotations (SPEC §1, §7C.1), sent verbatim on an MCP `tools/list` entry. */
+export interface ToolAnnotations {
+  title?: string
+  readOnlyHint?: boolean
+  destructiveHint?: boolean
+  idempotentHint?: boolean
+  openWorldHint?: boolean
 }
 
 export interface ToolContext {
@@ -35,6 +51,9 @@ export interface ToolContext {
   /** The model's id for this tool call, set by the client loop (§4C). A message's calls run
    * concurrently, so this is how a tool tells its sibling calls apart. Absent outside the loop. */
   callId?: string
+  /** Set by `toolkit.mcpHandler` (§7C.1): the inbound MCP request this call serves. Read it with
+   * `identityFrom(ctx)` / `requestFrom(ctx)` / `mcpSessionIdFrom(ctx)` / `mcpRequestMetaFrom(ctx)`. */
+  mcp?: import("./mcphandler.js").McpContext
 }
 
 /**
@@ -133,6 +152,10 @@ export interface Tool {
   /** Decides per call whether this tool may run alongside other safe calls of the same model
    * response (SPEC §8 "Tool scheduling"). Absent ⇒ safe only when `hints.readOnly`. */
   concurrencySafe?: (args: Record<string, unknown>) => boolean
+  /** JSON Schema of `ToolResult.structured` (SPEC §1); absent ⇒ omitted everywhere. */
+  outputSchema?: Record<string, unknown>
+  /** MCP annotations (§7C.1), verbatim on the MCP wire; absent ⇒ derived from `hints`, else omitted. */
+  annotations?: ToolAnnotations
 }
 
 export type McpStatus = "connected" | "disabled" | "failed"

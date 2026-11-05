@@ -85,7 +85,7 @@ opt-in builtins via the builtins config keys `background` (a `BackgroundShells`)
 `WebSearch`) and `notebookEdit`; `McpSource.resourceTools()`; `grep` `context`/`before`/`after` and
 truncation metadata; `Agent.asToolWith(ctx -> runtimeOptions)` with `RuntimeOptions.waitFor`;
 `ToolContext.callId()`; `LlmClient.listModels(options)`. The ACP host hooks (permission callback,
-update stream, cancel, streaming) are Go-only for now.
+update stream, cancel) are Go-only for now; ACP streaming is `AcpClient.generateStream`.
 
 ## Simple judgments
 
@@ -147,6 +147,83 @@ var res = agent.run("Draw a fox, then animate it.", tk);
 for (var f : res.files) System.out.println(f.from() + " " + f.mimeType() + " " + f.url());
 ```
 
+## Embeddable MCP server
+
+`toolkit.mcpHandler(cfg)` is a streamable-HTTP MCP server as a JDK `HttpHandler`, to mount on your
+own `HttpServer` behind your own TLS and auth. Every policy is a per-request hook: `authenticate`
+(401 + `WWW-Authenticate`), `listTools` (each caller sees its own tools; a name outside the list is
+never executed), `beforeCall` (allow / deny / confirm through MCP elicitation), `onCall`, resources,
+prompts and pluggable session ids. The identity, HTTP exchange, session id and request `_meta`
+reach every hook and, through `ToolContext.mcp()`, the tool. SPEC §7C.1; run
+`./gradlew runMcpHandler` for the full demo.
+
+```java
+HttpServer server = HttpServer.create(new InetSocketAddress(8080), 0);
+server.setExecutor(Executors.newVirtualThreadPerTaskExecutor()); // confirms wait on a second request
+server.createContext("/mcp", tk.mcpHandler(new McpHandler.Config()
+        .authenticate(ex -> verifyBearer(ex.getRequestHeaders().getFirst("Authorization")))
+        .listTools(ctx -> toolsFor(ctx.identity()))
+        .beforeCall((ctx, tool, rawArgs) -> tool.annotations() != null
+                && Boolean.TRUE.equals(tool.annotations().destructiveHint())
+                ? McpHandler.Decision.confirm("Really delete?") : McpHandler.Decision.allow())));
+server.start();
+```
+
+`ToolResult.structured(...)` / `withMeta(...)` and `Tool.withOutputSchema` / `withAnnotations`
+are sent as `structuredContent`, `_meta`, `outputSchema` and `annotations`, also on the existing
+`serve(addr, mcp)` path. Without them, the output is the same as before.
+
+### MCP 2026-07-28 (opt-in)
+
+List `"2026-07-28"` in `protocolVersions` and the same handler also speaks the stateless 2026 wire:
+`server/discover`, header validation, `resultType` + `_meta` serverInfo, and MRTR instead of
+elicitation (a `confirm` decision or a §10 tool suspension comes back as `input_required`; the
+client's retry runs the tool with the `Answer` on `ctx.answer()`). Without it the handler is
+unchanged, and `initialize` never negotiates 2026-07-28. `listSkills` publishes skills through
+the skills extension (`skills/list`, `skills/get`, `resources/read` of `skill://` URIs);
+`McpHandler.loadMcpSkills(dir)` builds that list from a skills directory. `McpServerAuth` makes the
+handler an OAuth protected resource: `authenticate` verifies RS256 JWTs against the issuer's JWKS
+(or your own `verify`), checks per-tool scopes, and answers 401/403 with the exact challenge;
+`metadata()` serves the RFC 9728 document. SPEC §7C.2.
+
+```java
+McpServerAuth auth = new McpServerAuth("https://login.example")
+        .scopes(Map.of("*", List.of("mcp"), "delete_record", List.of("mcp:admin")));
+server.createContext("/mcp", tk.mcpHandler(new McpHandler.Config()
+        .protocolVersions("2026-07-28", "2025-06-18")      // both wires on one mount
+        .authenticate(auth::authenticate)
+        .listSkills(ctx -> McpHandler.loadMcpSkills(Path.of("skills")))));
+server.createContext("/.well-known/oauth-protected-resource", auth.metadata());
+```
+
+Bring your own authorization server: `McpServerAuth` verifies its tokens. The auto-approving dev authorization server the suite uses is test tooling (`src/test/java/.../McpDevAuthServer.java`), not part of the library.
+
+## Agents via ACP
+
+toolnexus ships no per-agent client; it ships three vendor-neutral pieces (SPEC §8C) and driving a
+particular agent is a recipe on top of them:
+
+- `toolkit.asMcpServer(cfg?)` serves the toolkit on `127.0.0.1:<ephemeral>/mcp` behind a fresh
+  bearer token (`McpServe.LocalServer`: `url()`, `token()`, `close()`).
+- `AcpClient.start(new AcpClient.Options()...)` is a plain ACP client: `mcpServers` (raw JSON
+  objects, sent verbatim), `sessionMeta`, `clientCapsMeta` and `model` are passed through unchanged.
+- `InProcess.Options.generateStream(acp::generateStream)` makes it a streaming `LlmClient`.
+
+```java
+try (Toolkit tk = Toolkit.create(new Toolkit.Options().skillsDir("./skills"));
+     McpServe.LocalServer srv = tk.asMcpServer();
+     AcpClient acp = AcpClient.start(new AcpClient.Options()
+             .command(List.of("my-agent", "acp"))
+             .mcpServers(List.of(Map.of("type", "http", "name", "toolnexus", "url", srv.url(),
+                     "headers", List.of(Map.of("name", "Authorization", "value", "Bearer " + srv.token()))))))) {
+    LlmClient client = InProcess.createClient(new InProcess.Options().model("acp")
+            .generateStream((req, emit) -> {
+                try { return acp.generateStream(req, emit); } catch (IOException e) { throw new UncheckedIOException(e); }
+            }));
+    client.stream("What is my badge number?", tk, ev -> { /* TEXT, THOUGHT (via "acp"), DONE ... */ });
+}
+```
+
 ## Documentation
 
 Everything else — the full surface, with runnable examples — lives on the docs site:
@@ -161,3 +238,36 @@ Everything else — the full surface, with runnable examples — lives on the do
 | **Cookbook** | [Zero to agent](https://muthuishere.github.io/toolnexus/cookbook/zero-to-agent/) · [MCP servers](https://muthuishere.github.io/toolnexus/cookbook/mcp-servers/) · [Agent skills](https://muthuishere.github.io/toolnexus/cookbook/agent-skills/) · [Judge](https://muthuishere.github.io/toolnexus/cookbook/judge/) |
 
 Contract across all eight ports: [`SPEC.md`](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
+
+## MCP 2026-07-28 + OAuth
+
+`McpSource` / `Toolkit` speak MCP **2026-07-28** first (SPEC §2): every server gets `server/discover`
+(stdio and HTTP). A server that answers it is used statelessly (no `initialize`, no session) with
+`_meta` + `MCP-Protocol-Version` / `Mcp-Method` / `Mcp-Name` headers, JSON or SSE replies, and MRTR
+`input_required` rounds routed through `waitFor` (or returned as a `pending` result without one; answer
+it by re-running the tool with `ToolContext.answer`). An older server falls back to the frozen
+SDK-based path (§2.F), unchanged. A `tools/call` is never re-sent after a timeout, lost connection or 5xx.
+
+Per-server extras in `mcp.json`:
+
+```json
+{ "mcpServers": { "docs": {
+    "url": "https://mcp.example.com/mcp",
+    "toolSearch": true, "description": "the docs server",
+    "auth": { "clientId": "my-registered-app", "mode": "auto" }
+} } }
+```
+
+- `toolSearch` exposes `docs_search_tools` + `docs_call_tool` instead of every tool (BM25, §2.8).
+- Skills served via the skills extension join the `skill` tool (§2.7).
+- `auth` (§2A.1): PRM → AS metadata → pre-registered `clientId`/`clientIds` or `clientMetadataUrl`
+  (CIMD) — no dynamic client registration — PKCE S256 + `resource`, `iss`/`state` checks, single-flight
+  refresh, step-up. `mode: "auto"` opens the browser and listens on loopback; `mode: "pause"` (needs
+  `redirectUri`) raises a §10 `authorization` request — answer it with
+  `new Answer(id, true, Map.of("callbackUrl", "<URL the AS redirected to>"))`.
+- Load options: `new McpSource.LoadOptions().tokenStore(store).openUrl(url -> ...)` (same on
+  `Toolkit.Options`). Tokens are never logged.
+
+The frozen fallback carries the bearer token too (the SDK's per-request customizer) and runs the same
+OAuth flow on a 401/403. Not on the 2026 path yet: `list_mcp_resources`/`read_mcp_resource`
+(`resourceTools()`) only see fallback servers; no progress notifications (per §2.9).

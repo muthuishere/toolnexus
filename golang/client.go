@@ -444,10 +444,13 @@ type RunResult struct {
 // union; the "error" variant (with Err set) is the Go-idiomatic way errors
 // surface on a channel — see Stream.
 type StreamEvent struct {
-	// Type discriminates the event: "text" | "tool_call" | "tool_result" |
-	// "usage" | "done" | "error".
+	// Type discriminates the event: "text" | "thought" | "tool_call" |
+	// "tool_result" | "usage" | "done" | "error". "thought" comes only from an
+	// in-process stream source (ACP agent_thought_chunk, Via "acp") and is
+	// never part of the answer.
 	Type string
-	// Delta is the incremental assistant text (Type == "text").
+	// Delta is the incremental assistant text (Type == "text"), or the
+	// agent's reasoning text (Type == "thought").
 	Delta string
 	// Name is the tool name (Type == "tool_call" | "tool_result"). For a
 	// ToolTiers call_tool call it is the REAL tool, Args are its inner

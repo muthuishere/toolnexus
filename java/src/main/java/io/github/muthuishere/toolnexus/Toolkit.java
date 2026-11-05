@@ -87,6 +87,12 @@ public final class Toolkit implements AutoCloseable {
         public Options disableSkills(List<String> v) { this.disableSkills = v; return this; }
         public Options disableSkills(String... v) { this.disableSkills = List.of(v); return this; }
         public Options cancelSignal(McpSource.CancelSignal v) { this.cancelSignal = v; return this; }
+        /** §2A.1a: where MCP OAuth tokens are kept (null ⇒ in-memory for this toolkit). */
+        public io.github.muthuishere.toolnexus.mcp.TokenStore tokenStore;
+        /** §2A.1a: how {@code auto}-mode MCP OAuth opens the browser (null ⇒ the OS opener). */
+        public McpSource.OpenUrl openUrl;
+        public Options tokenStore(io.github.muthuishere.toolnexus.mcp.TokenStore v) { this.tokenStore = v; return this; }
+        public Options openUrl(McpSource.OpenUrl v) { this.openUrl = v; return this; }
         public Options media(Media v) { this.media = v; return this; }
     }
 
@@ -126,12 +132,16 @@ public final class Toolkit implements AutoCloseable {
         if (opts == null) opts = new Options(); // null = defaults, like a no-arg call in the other ports
         // §2 Gap 3: thread the caller's cancellation signal into the MCP connect/init/list.
         McpSource mcp = opts.mcpConfig != null
-                ? McpSource.load(opts.mcpConfig, opts.waitFor, opts.cancelSignal) : null;
+                ? McpSource.load(opts.mcpConfig, new McpSource.LoadOptions().waitFor(opts.waitFor)
+                        .cancel(opts.cancelSignal).tokenStore(opts.tokenStore).openUrl(opts.openUrl)
+                        .disableToolsInternal(opts.disableTools)) : null;
+        // §2.7: skills served by MCP servers join the same `skill` inventory (local roots first).
+        List<String> remoteSkillDirs = mcp != null ? mcp.skillDirs() : List.of();
         // Skills come from directories, in-memory data, and/or a lazy provider (§3,
         // S1). The provider is resolved here and merged with the data list; a
         // provider failure is isolated so other sources still load.
         SkillSource skill = null;
-        if (opts.skillsDir != null || opts.skills != null || opts.skillProvider != null) {
+        if (opts.skillsDir != null || opts.skills != null || opts.skillProvider != null || !remoteSkillDirs.isEmpty()) {
             java.util.List<SkillSource.SkillDef> dataDefs = new java.util.ArrayList<>();
             if (opts.skills != null) dataDefs.addAll(opts.skills);
             if (opts.skillProvider != null) {
@@ -152,7 +162,10 @@ public final class Toolkit implements AutoCloseable {
                 filter = merged;
             }
             SkillSource.LoadOptions so = new SkillSource.LoadOptions();
-            so.dirs = opts.skillsDir;
+            List<String> dirs = new ArrayList<>();
+            if (opts.skillsDir != null) dirs.addAll(opts.skillsDir);
+            dirs.addAll(remoteSkillDirs);
+            so.dirs = dirs.isEmpty() ? null : dirs;
             so.skills = dataDefs.isEmpty() ? null : dataDefs;
             so.filter = filter;
             so.sampleLimit = opts.skillSampleLimit;
@@ -328,6 +341,32 @@ public final class Toolkit implements AutoCloseable {
         } catch (java.io.IOException e) {
             throw new RuntimeException("serve failed: " + e.getMessage(), e);
         }
+    }
+
+    /**
+     * An embeddable streamable-HTTP MCP server for this toolkit (SPEC §7C.1, ADR 0039), to mount on
+     * the host's own {@code HttpServer} context. {@link #serve} is unchanged.
+     */
+    public McpHandler mcpHandler(McpHandler.Config cfg) {
+        return new McpHandler(this, cfg);
+    }
+
+    /**
+     * Serve this toolkit for a local agent to call (SPEC §8C): the §7C MCP server on
+     * {@code 127.0.0.1:<ephemeral>/mcp} behind a fresh 32-byte bearer token. Tool names are
+     * verbatim; {@code cfg} (nullable) names the server and filters tools. Close it when done.
+     */
+    public McpServe.LocalServer asMcpServer(McpServe.MCPServeConfig cfg) {
+        try {
+            return McpServe.serveLocal(tools(), cfg);
+        } catch (java.io.IOException e) {
+            throw new RuntimeException("asMcpServer failed: " + e.getMessage(), e);
+        }
+    }
+
+    /** {@link #asMcpServer(McpServe.MCPServeConfig)} with defaults. */
+    public McpServe.LocalServer asMcpServer() {
+        return asMcpServer(null);
     }
 
     public ToolResult execute(String name, Map<String, Object> args, ToolContext ctx) {

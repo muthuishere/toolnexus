@@ -78,6 +78,34 @@ defmodule Toolnexus.AcpTest do
     Acp.close(pid)
   end
 
+  test "generate_stream/1 reports text, thought and the agent's own tool use as they arrive; the loop never runs them" do
+    pid = connect!("noisy")
+
+    client =
+      Toolnexus.Client.create_in_process(model: "acp", generate_stream: Acp.generate_stream(pid))
+
+    {:ok, tk} = Toolnexus.create_toolkit(builtins: false)
+    events = client |> Toolnexus.Client.stream("q", tk) |> Enum.to_list()
+
+    deltas = for %{type: "text", delta: d} <- events, do: d
+    assert length(deltas) == 2 and hd(deltas) == ~s({"answer":)
+
+    assert [%{id: "t1", name: "reading files", via: "acp"}] =
+             Enum.filter(events, &(&1.type == "tool_call"))
+
+    assert [%{id: "t1", name: "reading files", is_error: false, via: "acp"}] =
+             Enum.filter(events, &(&1.type == "tool_result"))
+
+    assert [%{delta: "Let me think... "}, %{delta: "double-checking... "}] =
+             Enum.filter(events, &(&1.type == "thought"))
+
+    %{type: "done", result: done} = List.last(events)
+    assert done.text == Enum.join(deltas)
+    assert done.tool_calls == []
+
+    Acp.close(pid)
+  end
+
   # -- permission answered inline, never awaited by the caller -----------------
 
   test "a session/request_permission is answered with the first allow-kind option, inline, without the caller ever seeing it" do
