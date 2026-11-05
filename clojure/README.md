@@ -202,12 +202,8 @@ scopes) and the RFC 9728 metadata handler. The Principal `{:subject :scopes :cla
 ;; route GET /.well-known/oauth-protected-resource[/mcp] to (:metadata auth)
 ```
 
-`toolnexus.mcp-dev-auth/start-mcp-dev-auth-server` is an in-process OAuth server that approves
-everyone as `dev-user` (pre-registered and Client ID Metadata Document clients, PKCE S256, refresh
-rotation, `:mint` for test tokens). **It is for development and tests only. Never use it in
-production.** It runs on plain HTTP. Because koine's server cannot read a query string,
-`GET /authorize` serves a page that POSTs the query back to itself. On cljgo it listens on every
-interface.
+Bring your own authorization server: `mcp-server-auth` verifies its tokens. The auto-approving dev authorization
+server the suite uses is test tooling (`src/toolnexus/mcp_dev_auth_test_support.cljc`, kept out of the jar), not part of the library.
 
 ## Documentation
 

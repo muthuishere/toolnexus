@@ -2,6 +2,10 @@
 ;;
 ;; *** DEVELOPMENT AND TESTS ONLY. NEVER USE IN PRODUCTION. ***
 ;;
+;; TEST TOOLING, not part of the library: `build.clj` keeps `*test_support.cljc`
+;; out of the jar and the examples mirror does not copy it. Bring your own
+;; authorization server; `toolnexus.mcp-server-auth` verifies its tokens.
+;;
 ;; An in-process OAuth 2.1 authorization server that auto-approves every request
 ;; as "dev-user" (no login, no consent): RFC 8414 metadata, JWKS, authorization
 ;; code + PKCE S256, resource indicators (RFC 8707), `iss` in the response
@@ -14,7 +18,7 @@
 ;;   (def auth (sa/mcp-server-auth {:issuer (:issuer as) :scopes {"*" ["mcp"]}}))
 ;;   ((:close as))
 ;;
-;; Mirrors golang/mcp_devauth.go, with ONE host-driven difference on
+;; Mirrors golang/internal/devauth/devauth.go, with ONE host-driven difference on
 ;; /authorize: koine.server hands a handler the request PATH and never its query
 ;; string (on both hosts), so the query OAuth puts on GET /authorize cannot be
 ;; read. GET /authorize therefore answers a tiny page whose script POSTs its own
@@ -28,7 +32,7 @@
 ;; HOST NOTE: koine.server cannot bind a specific interface on cljgo (its
 ;; `:host` option is JVM-only), so there the dev server listens on every
 ;; interface of the machine — keep it to a trusted network, as dev-only says.
-(ns toolnexus.mcp-dev-auth
+(ns toolnexus.mcp-dev-auth-test-support
   (:require [clojure.string :as str]
             [koine.http :as http]
             [koine.json :as json]

@@ -1,5 +1,5 @@
 ;; SPEC §7C.2 — the 2026-07-28 server half, mirroring golang/mcphandler2026_test.go:
-;; the default RS256/JWKS verifier against the in-library dev authorization
+;; the default RS256/JWKS verifier against the test-only dev authorization
 ;; server, the dev AS's code + PKCE flow (pre-registered and CIMD clients) and
 ;; refresh, onCall/prompts/discover on the 2026 wire, and load-mcp-skills.
 ;; Everything is loopback; the handler is mounted on a real koine.server.
@@ -12,7 +12,7 @@
             [koine.server :as server]
             [koine.time :as ktime]
             [toolnexus.mcp-crypto :as crypto]
-            [toolnexus.mcp-dev-auth :as da]
+            [toolnexus.mcp-dev-auth-test-support :as da]
             [toolnexus.mcp-handler :as mh]
             [toolnexus.mcp-server-auth :as sa]
             [toolnexus.shared-examples-test :as te]

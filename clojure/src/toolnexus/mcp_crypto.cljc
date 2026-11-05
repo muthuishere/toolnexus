@@ -17,8 +17,9 @@
 ;;
 ;; None of this is constant-time. That is acceptable for its two uses: VERIFY
 ;; handles only public values, and SIGNING exists for the DEV-ONLY
-;; authorization server (`toolnexus.mcp-dev-auth`), which SPEC §7C.2 forbids in
-;; production. Do not reuse `rsa-sign` for a production key.
+;; authorization server, which is test tooling (`toolnexus.mcp-dev-auth-test-support`,
+;; kept out of the jar) and which SPEC §7C.2 forbids in production. Do not reuse
+;; `rsa-sign` for a production key.
 ;;
 ;; Randomness comes from `random-uuid` — a CSPRNG on both hosts
 ;; (java.util.UUID/randomUUID is SecureRandom; cljgo's is crypto/rand). Each
