@@ -1,0 +1,850 @@
+[
+  {
+    "id": "is-hex-revoked",
+    "verb": "is",
+    "image": false,
+    "oldPath": "jevx --json --fresh --no-context",
+    "old": {
+      "verdict": "no",
+      "answer": {
+        "noul": 0.0024086395,
+        "type": "noul"
+      },
+      "model": "myjev",
+      "latencyMs": 65
+    },
+    "toolnexus": {
+      "verdict": "no",
+      "answer": {
+        "noul": 0.0024086395,
+        "type": "noul"
+      },
+      "model": "myjev",
+      "latencyMs": 14,
+      "inputTokens": 25
+    },
+    "match": true,
+    "maxDelta": 0
+  },
+  {
+    "id": "is-default-url-400",
+    "verb": "is",
+    "image": false,
+    "oldPath": "jevx --json --fresh --no-context",
+    "old": {
+      "verdict": "no",
+      "answer": {
+        "noul": 0.0021034423,
+        "type": "noul"
+      },
+      "model": "myjev",
+      "latencyMs": 44
+    },
+    "toolnexus": {
+      "verdict": "no",
+      "answer": {
+        "noul": 0.0021034423,
+        "type": "noul"
+      },
+      "model": "myjev",
+      "latencyMs": 15,
+      "inputTokens": 30
+    },
+    "match": true,
+    "maxDelta": 0
+  },
+  {
+    "id": "is-rust-bench",
+    "verb": "is",
+    "image": false,
+    "oldPath": "jevx --json --fresh --no-context",
+    "old": {
+      "verdict": "no",
+      "answer": {
+        "noul": 0.011871127,
+        "type": "noul"
+      },
+      "model": "myjev",
+      "latencyMs": 26
+    },
+    "toolnexus": {
+      "verdict": "no",
+      "answer": {
+        "noul": 0.011871127,
+        "type": "noul"
+      },
+      "model": "myjev",
+      "latencyMs": 12,
+      "inputTokens": 16
+    },
+    "match": true,
+    "maxDelta": 0
+  },
+  {
+    "id": "is-bash-timeout",
+    "verb": "is",
+    "image": false,
+    "oldPath": "jevx --json --fresh --no-context",
+    "old": {
+      "verdict": "no",
+      "answer": {
+        "noul": 0.0017254504,
+        "type": "noul"
+      },
+      "model": "myjev",
+      "latencyMs": 49
+    },
+    "toolnexus": {
+      "verdict": "no",
+      "answer": {
+        "noul": 0.0017254504,
+        "type": "noul"
+      },
+      "model": "myjev",
+      "latencyMs": 19,
+      "inputTokens": 40
+    },
+    "match": true,
+    "maxDelta": 0
+  },
+  {
+    "id": "is-flaky-elixir",
+    "verb": "is",
+    "image": false,
+    "oldPath": "jevx --json --fresh --no-context",
+    "old": {
+      "verdict": "yes",
+      "answer": {
+        "noul": 0.9418399,
+        "type": "noul"
+      },
+      "model": "myjev",
+      "latencyMs": 38
+    },
+    "toolnexus": {
+      "verdict": "yes",
+      "answer": {
+        "noul": 0.9418399,
+        "type": "noul"
+      },
+      "model": "myjev",
+      "latencyMs": 20,
+      "inputTokens": 37
+    },
+    "match": true,
+    "maxDelta": 0
+  },
+  {
+    "id": "is-leak-user-id",
+    "verb": "is",
+    "image": false,
+    "oldPath": "jevx --json --fresh --no-context",
+    "old": {
+      "verdict": "no",
+      "answer": {
+        "noul": 0.0027530608,
+        "type": "noul"
+      },
+      "model": "myjev",
+      "latencyMs": 46
+    },
+    "toolnexus": {
+      "verdict": "no",
+      "answer": {
+        "noul": 0.0027530608,
+        "type": "noul"
+      },
+      "model": "myjev",
+      "latencyMs": 21,
+      "inputTokens": 46
+    },
+    "match": true,
+    "maxDelta": 0
+  },
+  {
+    "id": "is-commit-docs",
+    "verb": "is",
+    "image": false,
+    "oldPath": "jevx --json --fresh --no-context",
+    "old": {
+      "verdict": "no",
+      "answer": {
+        "noul": 0.00021533793,
+        "type": "noul"
+      },
+      "model": "myjev",
+      "latencyMs": 38
+    },
+    "toolnexus": {
+      "verdict": "no",
+      "answer": {
+        "noul": 0.00021533793,
+        "type": "noul"
+      },
+      "model": "myjev",
+      "latencyMs": 20,
+      "inputTokens": 36
+    },
+    "match": true,
+    "maxDelta": 0
+  },
+  {
+    "id": "is-commit-feat",
+    "verb": "is",
+    "image": false,
+    "oldPath": "jevx --json --fresh --no-context",
+    "old": {
+      "verdict": "no",
+      "answer": {
+        "noul": 0.010667355,
+        "type": "noul"
+      },
+      "model": "myjev",
+      "latencyMs": 30
+    },
+    "toolnexus": {
+      "verdict": "no",
+      "answer": {
+        "noul": 0.010667355,
+        "type": "noul"
+      },
+      "model": "myjev",
+      "latencyMs": 15,
+      "inputTokens": 28
+    },
+    "match": true,
+    "maxDelta": 0
+  },
+  {
+    "id": "is-commit-release",
+    "verb": "is",
+    "image": false,
+    "oldPath": "jevx --json --fresh --no-context",
+    "old": {
+      "verdict": "no",
+      "answer": {
+        "noul": 0.036348566,
+        "type": "noul"
+      },
+      "model": "myjev",
+      "latencyMs": 29
+    },
+    "toolnexus": {
+      "verdict": "no",
+      "answer": {
+        "noul": 0.036348566,
+        "type": "noul"
+      },
+      "model": "myjev",
+      "latencyMs": 13,
+      "inputTokens": 17
+    },
+    "match": true,
+    "maxDelta": 0
+  },
+  {
+    "id": "is-yaml-skip",
+    "verb": "is",
+    "image": false,
+    "oldPath": "jevx --json --fresh --no-context",
+    "old": {
+      "verdict": "no",
+      "answer": {
+        "noul": 0.0015803209,
+        "type": "noul"
+      },
+      "model": "myjev",
+      "latencyMs": 47
+    },
+    "toolnexus": {
+      "verdict": "no",
+      "answer": {
+        "noul": 0.0015803209,
+        "type": "noul"
+      },
+      "model": "myjev",
+      "latencyMs": 23,
+      "inputTokens": 59
+    },
+    "match": true,
+    "maxDelta": 0
+  },
+  {
+    "id": "is-mcp-timeout",
+    "verb": "is",
+    "image": false,
+    "oldPath": "jevx --json --fresh --no-context",
+    "old": {
+      "verdict": "unsure",
+      "answer": {
+        "noul": 0.28233775,
+        "type": "noul"
+      },
+      "model": "myjev",
+      "latencyMs": 38
+    },
+    "toolnexus": {
+      "verdict": "unsure",
+      "answer": {
+        "noul": 0.28233775,
+        "type": "noul"
+      },
+      "model": "myjev",
+      "latencyMs": 22,
+      "inputTokens": 38
+    },
+    "match": true,
+    "maxDelta": 0
+  },
+  {
+    "id": "pick-area-gemini",
+    "verb": "pick",
+    "image": false,
+    "oldPath": "jevx --json --fresh --no-context",
+    "old": {
+      "verdict": "unsure",
+      "answer": {
+        "choice": "client",
+        "confidence": 0.49371696,
+        "probabilities": {
+          "client": 0.6202877,
+          "mcp": 0.06565635,
+          "release": 0.29641712,
+          "tests": 0.017638829
+        },
+        "type": "choice"
+      },
+      "model": "myjev",
+      "latencyMs": 54
+    },
+    "toolnexus": {
+      "verdict": "unsure",
+      "answer": {
+        "choice": "client",
+        "confidence": 0.49371696,
+        "probabilities": {
+          "client": 0.6202877,
+          "mcp": 0.06565635,
+          "release": 0.29641712,
+          "tests": 0.017638829
+        },
+        "type": "choice"
+      },
+      "model": "myjev",
+      "latencyMs": 39,
+      "inputTokens": 108
+    },
+    "match": true,
+    "maxDelta": 0
+  },
+  {
+    "id": "pick-area-hex",
+    "verb": "pick",
+    "image": false,
+    "oldPath": "jevx --json --fresh --no-context",
+    "old": {
+      "verdict": "unsure",
+      "answer": {
+        "choice": "client",
+        "confidence": 0.5628207,
+        "probabilities": {
+          "client": 0.6721155,
+          "mcp": 0.072987765,
+          "release": 0.2137758,
+          "tests": 0.041120898
+        },
+        "type": "choice"
+      },
+      "model": "myjev",
+      "latencyMs": 64
+    },
+    "toolnexus": {
+      "verdict": "unsure",
+      "answer": {
+        "choice": "client",
+        "confidence": 0.5628207,
+        "probabilities": {
+          "client": 0.6721155,
+          "mcp": 0.072987765,
+          "release": 0.2137758,
+          "tests": 0.041120898
+        },
+        "type": "choice"
+      },
+      "model": "myjev",
+      "latencyMs": 48,
+      "inputTokens": 148
+    },
+    "match": true,
+    "maxDelta": 0
+  },
+  {
+    "id": "pick-area-mcp-serve",
+    "verb": "pick",
+    "image": false,
+    "oldPath": "jevx --json --fresh --no-context",
+    "old": {
+      "verdict": "mcp",
+      "answer": {
+        "choice": "mcp",
+        "confidence": 0.88013506,
+        "probabilities": {
+          "client": 0.040270355,
+          "mcp": 0.9101013,
+          "release": 0.045323513,
+          "tests": 0.004304918
+        },
+        "type": "choice"
+      },
+      "model": "myjev",
+      "latencyMs": 76
+    },
+    "toolnexus": {
+      "verdict": "mcp",
+      "answer": {
+        "choice": "mcp",
+        "confidence": 0.88013506,
+        "probabilities": {
+          "client": 0.040270355,
+          "mcp": 0.9101013,
+          "release": 0.045323513,
+          "tests": 0.004304918
+        },
+        "type": "choice"
+      },
+      "model": "myjev",
+      "latencyMs": 73,
+      "inputTokens": 192
+    },
+    "match": true,
+    "maxDelta": 0
+  },
+  {
+    "id": "pick-area-mutation",
+    "verb": "pick",
+    "image": false,
+    "oldPath": "jevx --json --fresh --no-context",
+    "old": {
+      "verdict": "unsure",
+      "answer": {
+        "choice": "client",
+        "confidence": 0.43478474,
+        "probabilities": {
+          "client": 0.57608855,
+          "mcp": 0.058257535,
+          "release": 0.24788792,
+          "tests": 0.117766
+        },
+        "type": "choice"
+      },
+      "model": "myjev",
+      "latencyMs": 58
+    },
+    "toolnexus": {
+      "verdict": "unsure",
+      "answer": {
+        "choice": "client",
+        "confidence": 0.43478474,
+        "probabilities": {
+          "client": 0.57608855,
+          "mcp": 0.058257535,
+          "release": 0.24788792,
+          "tests": 0.117766
+        },
+        "type": "choice"
+      },
+      "model": "myjev",
+      "latencyMs": 49,
+      "inputTokens": 128
+    },
+    "match": true,
+    "maxDelta": 0
+  },
+  {
+    "id": "pick-type-commit-ci",
+    "verb": "pick",
+    "image": false,
+    "oldPath": "jevx --json --fresh --no-context",
+    "old": {
+      "verdict": "docs",
+      "answer": {
+        "choice": "docs",
+        "confidence": 0.89198446,
+        "probabilities": {
+          "chore": 0.04535873,
+          "docs": 0.91898835,
+          "feat": 0.009643849,
+          "fix": 0.026009006
+        },
+        "type": "choice"
+      },
+      "model": "myjev",
+      "latencyMs": 83
+    },
+    "toolnexus": {
+      "verdict": "docs",
+      "answer": {
+        "choice": "docs",
+        "confidence": 0.89198446,
+        "probabilities": {
+          "chore": 0.04535873,
+          "docs": 0.91898835,
+          "feat": 0.009643849,
+          "fix": 0.026009006
+        },
+        "type": "choice"
+      },
+      "model": "myjev",
+      "latencyMs": 68,
+      "inputTokens": 201
+    },
+    "match": true,
+    "maxDelta": 0
+  },
+  {
+    "id": "pick-type-commit-fix",
+    "verb": "pick",
+    "image": false,
+    "oldPath": "jevx --json --fresh --no-context",
+    "old": {
+      "verdict": "unsure",
+      "answer": {
+        "choice": "docs",
+        "confidence": 0.35240936,
+        "probabilities": {
+          "chore": 0.21759863,
+          "docs": 0.514307,
+          "feat": 0.03769067,
+          "fix": 0.23040365
+        },
+        "type": "choice"
+      },
+      "model": "myjev",
+      "latencyMs": 56
+    },
+    "toolnexus": {
+      "verdict": "unsure",
+      "answer": {
+        "choice": "docs",
+        "confidence": 0.35240936,
+        "probabilities": {
+          "chore": 0.21759863,
+          "docs": 0.514307,
+          "feat": 0.03769067,
+          "fix": 0.23040365
+        },
+        "type": "choice"
+      },
+      "model": "myjev",
+      "latencyMs": 47,
+      "inputTokens": 173
+    },
+    "match": true,
+    "maxDelta": 0
+  },
+  {
+    "id": "pick-type-commit-archive",
+    "verb": "pick",
+    "image": false,
+    "oldPath": "jevx --json --fresh --no-context",
+    "old": {
+      "verdict": "chore",
+      "answer": {
+        "choice": "chore",
+        "confidence": 0.7571115,
+        "probabilities": {
+          "chore": 0.8178336,
+          "docs": 0.0447339,
+          "feat": 0.0050887354,
+          "fix": 0.13234374
+        },
+        "type": "choice"
+      },
+      "model": "myjev",
+      "latencyMs": 45
+    },
+    "toolnexus": {
+      "verdict": "chore",
+      "answer": {
+        "choice": "chore",
+        "confidence": 0.7571115,
+        "probabilities": {
+          "chore": 0.8178336,
+          "docs": 0.0447339,
+          "feat": 0.0050887354,
+          "fix": 0.13234374
+        },
+        "type": "choice"
+      },
+      "model": "myjev",
+      "latencyMs": 36,
+      "inputTokens": 117
+    },
+    "match": true,
+    "maxDelta": 0
+  },
+  {
+    "id": "rate-sev-resume",
+    "verb": "rate",
+    "image": false,
+    "oldPath": "jevx --json --fresh --no-context",
+    "old": {
+      "verdict": "unsure",
+      "answer": {
+        "confidence": 0.04485452,
+        "probabilities": {
+          "0": 0.35248652,
+          "1": 0.2842771,
+          "2": 0.36323634
+        },
+        "score": 1.0107498,
+        "type": "score"
+      },
+      "model": "myjev",
+      "latencyMs": 41
+    },
+    "toolnexus": {
+      "verdict": "unsure",
+      "answer": {
+        "confidence": 0.04485452,
+        "legend": {
+          "0": "low",
+          "1": "medium",
+          "2": "high"
+        },
+        "probabilities": {
+          "0": 0.35248652,
+          "1": 0.2842771,
+          "2": 0.36323634
+        },
+        "score": 1.0107498,
+        "type": "score"
+      },
+      "model": "myjev",
+      "latencyMs": 34,
+      "inputTokens": 102
+    },
+    "match": true,
+    "maxDelta": 0
+  },
+  {
+    "id": "rate-sev-answer-data",
+    "verb": "rate",
+    "image": false,
+    "oldPath": "jevx --json --fresh --no-context",
+    "old": {
+      "verdict": "unsure",
+      "answer": {
+        "confidence": 0.13650304,
+        "probabilities": {
+          "0": 0.18438682,
+          "1": 0.39127782,
+          "2": 0.42433536
+        },
+        "score": 1.2399485,
+        "type": "score"
+      },
+      "model": "myjev",
+      "latencyMs": 46
+    },
+    "toolnexus": {
+      "verdict": "unsure",
+      "answer": {
+        "confidence": 0.13650304,
+        "legend": {
+          "0": "low",
+          "1": "medium",
+          "2": "high"
+        },
+        "probabilities": {
+          "0": 0.18438682,
+          "1": 0.39127782,
+          "2": 0.42433536
+        },
+        "score": 1.2399485,
+        "type": "score"
+      },
+      "model": "myjev",
+      "latencyMs": 34,
+      "inputTokens": 123
+    },
+    "match": true,
+    "maxDelta": 0
+  },
+  {
+    "id": "rate-sev-benchmark",
+    "verb": "rate",
+    "image": false,
+    "oldPath": "jevx --json --fresh --no-context",
+    "old": {
+      "verdict": "unsure",
+      "answer": {
+        "confidence": 0.053991497,
+        "probabilities": {
+          "0": 0.28231856,
+          "1": 0.34835383,
+          "2": 0.36932766
+        },
+        "score": 1.0870092,
+        "type": "score"
+      },
+      "model": "myjev",
+      "latencyMs": 28
+    },
+    "toolnexus": {
+      "verdict": "unsure",
+      "answer": {
+        "confidence": 0.053991497,
+        "legend": {
+          "0": "low",
+          "1": "medium",
+          "2": "high"
+        },
+        "probabilities": {
+          "0": 0.28231856,
+          "1": 0.34835383,
+          "2": 0.36932766
+        },
+        "score": 1.0870092,
+        "type": "score"
+      },
+      "model": "myjev",
+      "latencyMs": 21,
+      "inputTokens": 60
+    },
+    "match": true,
+    "maxDelta": 0
+  },
+  {
+    "id": "rate-effort-acp",
+    "verb": "rate",
+    "image": false,
+    "oldPath": "jevx --json --fresh --no-context",
+    "old": {
+      "verdict": "unsure",
+      "answer": {
+        "confidence": 0.08991933,
+        "probabilities": {
+          "0": 0.23180318,
+          "1": 0.37491727,
+          "2": 0.39327955
+        },
+        "score": 1.1614764,
+        "type": "score"
+      },
+      "model": "myjev",
+      "latencyMs": 45
+    },
+    "toolnexus": {
+      "verdict": "unsure",
+      "answer": {
+        "confidence": 0.08991933,
+        "legend": {
+          "0": "small",
+          "1": "medium",
+          "2": "large"
+        },
+        "probabilities": {
+          "0": 0.23180318,
+          "1": 0.37491727,
+          "2": 0.39327955
+        },
+        "score": 1.1614764,
+        "type": "score"
+      },
+      "model": "myjev",
+      "latencyMs": 35,
+      "inputTokens": 117
+    },
+    "match": true,
+    "maxDelta": 0
+  },
+  {
+    "id": "rate-effort-retries",
+    "verb": "rate",
+    "image": false,
+    "oldPath": "jevx --json --fresh --no-context",
+    "old": {
+      "verdict": "unsure",
+      "answer": {
+        "confidence": 0.5370952,
+        "probabilities": {
+          "0": 0.6913968,
+          "1": 0.09201217,
+          "2": 0.21659105
+        },
+        "score": 0.5251943,
+        "type": "score"
+      },
+      "model": "myjev",
+      "latencyMs": 37
+    },
+    "toolnexus": {
+      "verdict": "unsure",
+      "answer": {
+        "confidence": 0.5370952,
+        "legend": {
+          "0": "small",
+          "1": "medium",
+          "2": "large"
+        },
+        "probabilities": {
+          "0": 0.6913968,
+          "1": 0.09201217,
+          "2": 0.21659105
+        },
+        "score": 0.5251943,
+        "type": "score"
+      },
+      "model": "myjev",
+      "latencyMs": 30,
+      "inputTokens": 93
+    },
+    "match": true,
+    "maxDelta": 0
+  },
+  {
+    "id": "rate-effort-guardrails",
+    "verb": "rate",
+    "image": false,
+    "oldPath": "jevx --json --fresh --no-context",
+    "old": {
+      "verdict": "unsure",
+      "answer": {
+        "confidence": 0.31702107,
+        "probabilities": {
+          "0": 0.17104448,
+          "1": 0.28427476,
+          "2": 0.5446807
+        },
+        "score": 1.3736362,
+        "type": "score"
+      },
+      "model": "myjev",
+      "latencyMs": 54
+    },
+    "toolnexus": {
+      "verdict": "unsure",
+      "answer": {
+        "confidence": 0.31702107,
+        "legend": {
+          "0": "small",
+          "1": "medium",
+          "2": "large"
+        },
+        "probabilities": {
+          "0": 0.17104448,
+          "1": 0.28427476,
+          "2": 0.5446807
+        },
+        "score": 1.3736362,
+        "type": "score"
+      },
+      "model": "myjev",
+      "latencyMs": 45,
+      "inputTokens": 132
+    },
+    "match": true,
+    "maxDelta": 0
+  }
+]

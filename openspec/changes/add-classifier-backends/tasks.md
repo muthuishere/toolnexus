@@ -23,6 +23,8 @@
 
 ## 4. Owner-gated (not in this change)
 - [ ] 4.1 Confirm PD-1 … PD-15
-- [ ] 4.2 Live joint-calibration A/B (design §9) before any per-question cache or automatic chunking
+- [x] 4.2 Live joint-calibration A/B (design §9) run 2026-11-05 (`validation/README.md`): myjev independent (Δ 0); hosted Jev NOT proven (max |Δ| 0.08 > 0.05 floor, but identical repeats move 0.07)
+  - [ ] 4.2b Per-question cache / automatic chunking stay blocked until a split-vs-repeat test with more samples shows independence on hosted Jev
 - [ ] 4.3 Live probe: Vercel text + images, Cloudflare-Jev images
-- [ ] 4.4 ADR 0038 D8 gate (20–30 real items, no cache)
+- [x] 4.4 ADR 0038 D8 gate run 2026-11-05 on 28 real items (`validation/README.md`): wire 24/24 byte-identical; myjev 24/24; hosted Jev 27/28 (is 11/11, pick 7/7, images 4/4, rate 5/6)
+  - [ ] 4.4b `rate` is blocked under D8's strict rule: one band-edge miss (confidence 0.62 vs 0.58 at 0.6), shown to be endpoint noise by a 6x repeat; owner to accept or amend D8
