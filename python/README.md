@@ -185,6 +185,29 @@ resources/prompts hooks, pluggable `session_ids`, `stateless`, `protocol_version
 (`2025-06-18` default, `2025-11-25` opt-in), and `ToolResult.structured` / `meta`,
 `Tool.output_schema` / `annotations`. Runnable: `python examples/mcp_handler.py`.
 
+## Agents via ACP
+
+A local coding agent that speaks ACP can be the model behind an ordinary client, calling
+your toolkit as an MCP server. Three vendor-neutral pieces (SPEC §8C); which binary, flags
+and permissions to use is yours.
+
+```python
+tk = await create_toolkit(skills_dir="skills")
+srv = tk.as_mcp_server()          # 127.0.0.1:<ephemeral>/mcp behind a bearer token
+acp = load_acp(ACPOptions(
+    command="my-agent", args=["acp"],
+    mcp_servers=[{"type": "http", "name": "toolnexus", "url": srv.url,
+                  "headers": [{"name": "Authorization", "value": "Bearer " + srv.token}]}],
+))
+client = create_in_process_client(model="agent", generate_stream=acp.generate_stream)
+async for ev in client.stream("What is in the skill?", toolkit=tk):
+    ...                           # text deltas, plus thought / tool_call / tool_result via "acp"
+acp.close(); srv.close()
+```
+
+`mcp_servers` entries, `session_meta` (session/new `_meta`), `client_caps_meta` and `model`
+are passed through to the agent unchanged.
+
 ## Documentation
 
 Everything else — the full surface, with runnable examples — lives on the docs site:

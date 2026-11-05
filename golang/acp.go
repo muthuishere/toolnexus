@@ -78,6 +78,14 @@ type acpError struct {
 // arrives (see ACPClient.readLoop), so the turn completes immediately after.
 type ACPPermissionTimeoutError struct{ Waited time.Duration }
 
+// ACPExitedError is returned when the agent process ends (its stdout closes)
+// while a request is waiting for its reply — instead of waiting out a timeout.
+type ACPExitedError struct{ Method string }
+
+func (e *ACPExitedError) Error() string {
+	return fmt.Sprintf("toolnexus: acp: agent exited before replying to %s", e.Method)
+}
+
 func (e *ACPPermissionTimeoutError) Error() string {
 	return fmt.Sprintf("toolnexus: acp: turn hung waiting on session/request_permission for %s", e.Waited)
 }
@@ -135,6 +143,26 @@ type ACPOptions struct {
 	// tool_call_update, plan, ...), before toolnexus' own filtering. It runs
 	// on the read loop: it must not block.
 	OnUpdate func(json.RawMessage)
+
+	// MCPServers is sent as `session/new` mcpServers verbatim and in order
+	// (nil ⇒ an empty list). toolnexus does not validate, rename or reshape the
+	// entries: build whatever shape the agent accepts (SPEC §8C).
+	MCPServers []map[string]any
+
+	// SessionMeta, if set, is sent as session/new `_meta`; absent otherwise.
+	SessionMeta map[string]any
+
+	// ClientCapsMeta, if set, is sent as initialize clientCapabilities._meta
+	// (vendor extension flags). Opaque to toolnexus.
+	ClientCapsMeta map[string]any
+
+	// Model, if set, is passed through unchanged after session/new: first as
+	// session/set_config_option {configId:"model"}, then, if the agent rejects
+	// that, as session/set_model. Both failing is a LoadACP error.
+	Model string
+
+	// Stderr, if set, receives the agent's stderr (default: discarded).
+	Stderr io.Writer
 }
 
 // ACPClient is one warm ACP session: one child process, one session id,
@@ -166,6 +194,8 @@ type ACPClient struct {
 
 	closeOnce sync.Once
 	closeErr  error
+
+	exited chan struct{} // closed when the agent's stdout ends
 }
 
 // LoadACP spawns the ACP agent as a child process, completes `initialize` +
@@ -207,9 +237,11 @@ func LoadACP(ctx context.Context, opts ACPOptions) (*ACPClient, error) {
 	// NOT ctx — so it is never killed by the caller cancelling the setup
 	// context after LoadACP has returned. ctx only bounds the handshake below.
 	cmd := exec.Command(opts.Command, opts.Args...)
+	cmd.Dir = cwd
 	if len(opts.Env) > 0 {
 		cmd.Env = append(os.Environ(), opts.Env...)
 	}
+	cmd.Stderr = opts.Stderr
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, fmt.Errorf("toolnexus: acp: stdin pipe: %w", err)
@@ -218,7 +250,9 @@ func LoadACP(ctx context.Context, opts ACPOptions) (*ACPClient, error) {
 	if err != nil {
 		return nil, fmt.Errorf("toolnexus: acp: stdout pipe: %w", err)
 	}
-	if err := cmd.Start(); err != nil {
+	// Its own process group, so Close reaches an adapter's children too (an
+	// `npx …` launch is a tree, not one process).
+	if err := startJob(cmd); err != nil {
 		return nil, fmt.Errorf("toolnexus: acp: start %q: %w", opts.Command, err)
 	}
 
@@ -231,21 +265,35 @@ func LoadACP(ctx context.Context, opts ACPOptions) (*ACPClient, error) {
 		requestTimeout:    requestTimeout,
 		onPermission:      opts.OnPermission,
 		onUpdate:          opts.OnUpdate,
+		exited:            make(chan struct{}),
 	}
 	c.stdout.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
 	go c.readLoop()
 
+	clientCaps := map[string]any{
+		"fs":       map[string]any{"readTextFile": false, "writeTextFile": false},
+		"terminal": false,
+	}
+	if opts.ClientCapsMeta != nil {
+		clientCaps["_meta"] = opts.ClientCapsMeta
+	}
 	if _, err := c.call(ctx, "initialize", map[string]any{
-		"protocolVersion": protocolVersion,
-		"clientCapabilities": map[string]any{
-			"fs": map[string]any{"readTextFile": false, "writeTextFile": false},
-		},
+		"protocolVersion":    protocolVersion,
+		"clientCapabilities": clientCaps,
 	}); err != nil {
 		_ = c.Close()
 		return nil, fmt.Errorf("toolnexus: acp: initialize: %w", err)
 	}
 
-	res, err := c.call(ctx, "session/new", map[string]any{"cwd": cwd, "mcpServers": []any{}})
+	servers := make([]any, 0, len(opts.MCPServers))
+	for _, s := range opts.MCPServers {
+		servers = append(servers, s)
+	}
+	newParams := map[string]any{"cwd": cwd, "mcpServers": servers}
+	if opts.SessionMeta != nil {
+		newParams["_meta"] = opts.SessionMeta
+	}
+	res, err := c.call(ctx, "session/new", newParams)
 	if err != nil {
 		_ = c.Close()
 		return nil, fmt.Errorf("toolnexus: acp: session/new: %w", err)
@@ -269,6 +317,21 @@ func LoadACP(ctx context.Context, opts ACPOptions) (*ACPClient, error) {
 		}
 	}
 
+	if opts.Model != "" {
+		// Passed through unchanged. Stable ACP spelling first, then the older
+		// unstable session/set_model.
+		if _, err := c.call(ctx, "session/set_config_option", map[string]any{
+			"sessionId": c.sessionID, "configId": "model", "value": opts.Model,
+		}); err != nil {
+			if _, err2 := c.call(ctx, "session/set_model", map[string]any{
+				"sessionId": c.sessionID, "modelId": opts.Model,
+			}); err2 != nil {
+				_ = c.Close()
+				return nil, fmt.Errorf("toolnexus: acp: set model %q: %v; %v", opts.Model, err, err2)
+			}
+		}
+	}
+
 	return c, nil
 }
 
@@ -277,6 +340,7 @@ func LoadACP(ctx context.Context, opts ACPOptions) (*ACPClient, error) {
 // ---------------------------------------------------------------------------
 
 func (c *ACPClient) readLoop() {
+	defer close(c.exited)
 	for c.stdout.Scan() {
 		line := c.stdout.Bytes()
 		if len(strings.TrimSpace(string(line))) == 0 {
@@ -322,10 +386,15 @@ func (c *ACPClient) readLoop() {
 				c.answerPermissionFirstAllow(msg)
 			}
 
+		case msg.Method != "" && len(msg.ID) > 0:
+			// An agent->client REQUEST we do not implement (fs/*, terminal/*
+			// — declared unsupported in clientCapabilities). Answer it, or
+			// the agent waits on it forever.
+			c.write(map[string]any{"jsonrpc": "2.0", "id": msg.ID,
+				"error": map[string]any{"code": -32601, "message": "method not found: " + msg.Method}})
+
 		default:
-			// Unhandled server->client notification/request; nothing this
-			// client needs (e.g. other session/update variants, fs/* calls
-			// we declared unsupported in clientCapabilities).
+			// Unhandled notification; nothing this client needs.
 		}
 	}
 }
@@ -430,6 +499,19 @@ func (c *ACPClient) call(ctx context.Context, method string, params any) (json.R
 			return nil, fmt.Errorf("acp error %d: %s", msg.Error.Code, msg.Error.Message)
 		}
 		return msg.Result, nil
+	case <-c.exited:
+		c.mu.Lock()
+		delete(c.pending, id)
+		c.mu.Unlock()
+		select { // the reply is delivered before exited closes; prefer it
+		case msg := <-ch:
+			if msg.Error != nil {
+				return nil, fmt.Errorf("acp error %d: %s", msg.Error.Code, msg.Error.Message)
+			}
+			return msg.Result, nil
+		default:
+		}
+		return nil, &ACPExitedError{Method: method}
 	case <-timer.C:
 		c.mu.Lock()
 		delete(c.pending, id)
@@ -492,6 +574,15 @@ func (c *ACPClient) sendPrompt(ctx context.Context, text string, emit func(Strea
 			if emit != nil && part.Text != "" {
 				emit(StreamEvent{Type: "text", Delta: part.Text})
 			}
+		case "agent_thought_chunk":
+			// Reported, never part of the answer.
+			var part struct {
+				Text string `json:"text"`
+			}
+			_ = json.Unmarshal(u.Content, &part)
+			if emit != nil && part.Text != "" {
+				emit(StreamEvent{Type: "thought", Delta: part.Text, Via: "acp"})
+			}
 		case "tool_call":
 			name := u.Title
 			if name == "" {
@@ -546,6 +637,19 @@ func (c *ACPClient) sendPrompt(ctx context.Context, text string, emit func(Strea
 		accMu.Lock()
 		defer accMu.Unlock()
 		return clean.String(), nil
+	case <-c.exited:
+		finish()
+		select { // a reply delivered just before exit still counts
+		case msg := <-replyCh:
+			if msg.Error != nil {
+				return "", fmt.Errorf("acp error %d: %s", msg.Error.Code, msg.Error.Message)
+			}
+			accMu.Lock()
+			defer accMu.Unlock()
+			return clean.String(), nil
+		default:
+		}
+		return "", &ACPExitedError{Method: "session/prompt"}
 	case <-timer.C:
 		finish()
 		return "", &ACPPermissionTimeoutError{Waited: c.permissionTimeout}
@@ -607,7 +711,8 @@ func (c *ACPClient) GenerateCtx(ctx context.Context, req InProcessRequest) (InPr
 
 // GenerateStream is GenerateCtx that also reports the turn as it happens:
 // each agent_message_chunk is emitted as a {Type:"text"} StreamEvent, each
-// tool_call as {Type:"tool_call"} and each completed/failed tool_call_update
+// agent_thought_chunk as {Type:"thought", Via:"acp"} (never part of the
+// answer), each tool_call as {Type:"tool_call"} and each completed/failed tool_call_update
 // as {Type:"tool_result"} (both with Via "acp": the AGENT ran these tools,
 // not the toolkit). emit may be nil. Its shape is
 // InProcessOptions.GenerateStream, so a Client built on it streams.
@@ -683,7 +788,12 @@ func (c *ACPClient) Close() error {
 	c.closeOnce.Do(func() {
 		_ = c.stdin.Close()
 		if c.cmd.Process != nil {
-			_ = c.cmd.Process.Kill()
+			_ = signalJob(c.cmd, true)
+			select {
+			case <-c.exited:
+			case <-time.After(3 * time.Second):
+			}
+			_ = signalJob(c.cmd, false)
 		}
 		c.closeErr = c.cmd.Wait()
 	})

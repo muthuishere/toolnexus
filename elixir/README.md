@@ -181,3 +181,20 @@ Everything else — the full surface, with runnable examples — lives on the do
 | **Cookbook** | [Zero to agent](https://muthuishere.github.io/toolnexus/cookbook/zero-to-agent/) · [MCP servers](https://muthuishere.github.io/toolnexus/cookbook/mcp-servers/) · [Agent skills](https://muthuishere.github.io/toolnexus/cookbook/agent-skills/) · [Judge](https://muthuishere.github.io/toolnexus/cookbook/judge/) |
 
 Contract across all eight ports: [`SPEC.md`](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
+
+## Agents via ACP (SPEC §8C)
+
+toolnexus ships no per-agent client. Three vendor-neutral pieces compose instead:
+`Toolnexus.Toolkit.as_mcp_server/2` serves the toolkit to a local agent
+(`%{url, token, close}`, loopback + bearer), `Toolnexus.Acp.connect/2` drives any
+ACP agent (`:mcp_servers` sent verbatim, `:session_meta`, `:client_caps_meta`,
+`:model`), and `Toolnexus.Acp.generate_stream/1` plugs into
+`Toolnexus.Client.create_in_process(generate_stream: …)` for incremental streaming.
+
+```elixir
+srv = Toolnexus.Toolkit.as_mcp_server(tk)
+entry = %{"type" => "http", "name" => "toolnexus", "url" => srv.url,
+          "headers" => [%{"name" => "Authorization", "value" => "Bearer " <> srv.token}]}
+{:ok, acp} = Toolnexus.Acp.connect(["my-agent", "acp"], mcp_servers: [entry])
+client = Toolnexus.Client.create_in_process(model: "acp", generate_stream: Toolnexus.Acp.generate_stream(acp))
+```

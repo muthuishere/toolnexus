@@ -85,7 +85,7 @@ opt-in builtins via the builtins config keys `background` (a `BackgroundShells`)
 `WebSearch`) and `notebookEdit`; `McpSource.resourceTools()`; `grep` `context`/`before`/`after` and
 truncation metadata; `Agent.asToolWith(ctx -> runtimeOptions)` with `RuntimeOptions.waitFor`;
 `ToolContext.callId()`; `LlmClient.listModels(options)`. The ACP host hooks (permission callback,
-update stream, cancel, streaming) are Go-only for now.
+update stream, cancel) are Go-only for now; ACP streaming is `AcpClient.generateStream`.
 
 ## Simple judgments
 
@@ -172,6 +172,32 @@ server.start();
 `ToolResult.structured(...)` / `withMeta(...)` and `Tool.withOutputSchema` / `withAnnotations`
 are sent as `structuredContent`, `_meta`, `outputSchema` and `annotations`, also on the existing
 `serve(addr, mcp)` path. Without them, the output is the same as before.
+
+## Agents via ACP
+
+toolnexus ships no per-agent client; it ships three vendor-neutral pieces (SPEC §8C) and driving a
+particular agent is a recipe on top of them:
+
+- `toolkit.asMcpServer(cfg?)` serves the toolkit on `127.0.0.1:<ephemeral>/mcp` behind a fresh
+  bearer token (`McpServe.LocalServer`: `url()`, `token()`, `close()`).
+- `AcpClient.start(new AcpClient.Options()...)` is a plain ACP client: `mcpServers` (raw JSON
+  objects, sent verbatim), `sessionMeta`, `clientCapsMeta` and `model` are passed through unchanged.
+- `InProcess.Options.generateStream(acp::generateStream)` makes it a streaming `LlmClient`.
+
+```java
+try (Toolkit tk = Toolkit.create(new Toolkit.Options().skillsDir("./skills"));
+     McpServe.LocalServer srv = tk.asMcpServer();
+     AcpClient acp = AcpClient.start(new AcpClient.Options()
+             .command(List.of("my-agent", "acp"))
+             .mcpServers(List.of(Map.of("type", "http", "name", "toolnexus", "url", srv.url(),
+                     "headers", List.of(Map.of("name", "Authorization", "value", "Bearer " + srv.token()))))))) {
+    LlmClient client = InProcess.createClient(new InProcess.Options().model("acp")
+            .generateStream((req, emit) -> {
+                try { return acp.generateStream(req, emit); } catch (IOException e) { throw new UncheckedIOException(e); }
+            }));
+    client.stream("What is my badge number?", tk, ev -> { /* TEXT, THOUGHT (via "acp"), DONE ... */ });
+}
+```
 
 ## Documentation
 
