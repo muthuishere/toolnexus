@@ -77,7 +77,7 @@ public class McpHandlerConformanceTests
                 ? new ToolHints(Bool(h, "readOnly"), Bool(h, "destructive"), Bool(h, "openWorld"))
                 : null;
             var behavior = Str(ft, "behavior");
-            tools.Add(new FnTool(name, args =>
+            tools.Add(new CtxTool(name, (args, tc) =>
             {
                 lock (gate) executed.Add(name);
                 switch (behavior)
@@ -87,7 +87,25 @@ public class McpHandlerConformanceTests
                     case "whoami":
                         var c = McpContext.Current;
                         var trace = c?.Meta != null && c.Meta.TryGetValue("trace", out var tr) ? tr as string : null;
-                        return new ToolResult((c?.Identity as string ?? "") + "|" + (trace ?? ""), false);
+                        return new ToolResult(IdentityName(c?.Identity) + "|" + (trace ?? ""), false);
+                    case "ask":
+                        if (tc?.Answer is { Ok: true } ans)
+                            return new ToolResult("Hello, " + (ans.Data != null && ans.Data.TryGetValue("name", out var nm) ? nm as string : "") + "!", false);
+                        return ToolResult.Pending(new Request
+                        {
+                            Id = "name",
+                            Kind = "input",
+                            Prompt = "What is your name?",
+                            Data = new Dictionary<string, object?>
+                            {
+                                ["schema"] = new Dictionary<string, object?>
+                                {
+                                    ["type"] = "object",
+                                    ["properties"] = new Dictionary<string, object?> { ["name"] = new Dictionary<string, object?> { ["type"] = "string" } },
+                                    ["required"] = new List<object?> { "name" },
+                                },
+                            },
+                        });
                     case "error":
                         throw new InvalidOperationException(Str(ft, "error"));
                 }
@@ -113,7 +131,7 @@ public class McpHandlerConformanceTests
             ProtocolVersions = Has(config, "protocolVersions", out var pv) ? pv.EnumerateArray().Select(v => v.GetString()!).ToList() : null,
             ListTools = ctx =>
             {
-                var id = ctx.Identity as string;
+                var id = IdentityName(ctx.Identity);
                 IReadOnlyList<ITool> visible = tools.Where(t =>
                     !Has(byName[t.Name], "visibleTo", out var vt) || vt.EnumerateArray().Any(v => v.GetString() == id)).ToList();
                 return Task.FromResult(visible);
@@ -151,16 +169,44 @@ public class McpHandlerConformanceTests
             cfg.WwwAuthenticate = (_, _) => Str(auth, "wwwAuthenticate");
         }
 
+        if (Bool(config, "skills"))
+        {
+            var skillsDir = Path.Combine(Path.GetDirectoryName(Path.GetDirectoryName(Path.GetDirectoryName(CasesPath())!)!)!, "examples", "skills");
+            cfg.ListSkills = _ => Task.FromResult(McpHttpHandler.LoadMcpSkills(skillsDir));
+        }
+        McpServerAuth? serverAuth = null;
+        if (Bool(config, "serverAuth"))
+        {
+            var fa = fixture.GetProperty("serverAuth");
+            serverAuth = new McpServerAuth
+            {
+                Issuer = Str(fa, "issuer")!,
+                Audience = Str(fa, "audience"),
+                Scopes = fa.GetProperty("scopes").EnumerateObject()
+                    .ToDictionary(kv => kv.Name, kv => (IReadOnlyList<string>)kv.Value.EnumerateArray().Select(x => x.GetString()!).ToList()),
+                Verify = (token, _, _) =>
+                {
+                    if (!fa.GetProperty("principals").TryGetProperty(token, out var pr)) throw new UnauthorizedAccessException("bad token");
+                    return Task.FromResult(new McpPrincipal(Str(pr, "subject")!, pr.GetProperty("scopes").EnumerateArray().Select(x => x.GetString()!).ToList()));
+                },
+            };
+            cfg.Authenticate = serverAuth.AuthenticateAsync;
+        }
+
         await using var tk = await Toolkit.CreateAsync(new Toolkit.Options { Builtins = false });
         using var host = new HandlerHost(tk.McpHandler(cfg));
+        using var metaHost = serverAuth != null ? new ListenerHost(serverAuth.MetadataAsync) : null;
         string? sid = null;
         var i = 0;
         foreach (var st in sc.GetProperty("steps").EnumerateArray())
         {
             var rq = st.GetProperty("request");
             var method = Str(rq, "method")!;
-            var req = new HttpRequestMessage(new HttpMethod(method), host.Url);
+            var target = Str(rq, "target") is { } tg ? metaHost!.Url.TrimEnd('/') + tg : host.Url;
+            var req = new HttpRequestMessage(new HttpMethod(method), target);
             string? body = Str(rq, "rawBody") ?? (Has(rq, "body", out var b) ? b.GetRawText() : null);
+            var mcp2026 = Bool(rq, "mcp2026") && Has(rq, "body", out _);
+            if (mcp2026) body = Stamp2026(body!);
             if (body != null || method == "POST")
             {
                 req.Content = new ByteArrayContent(Encoding.UTF8.GetBytes(body ?? ""));
@@ -173,6 +219,15 @@ public class McpHandlerConformanceTests
             if (!string.IsNullOrEmpty(Str(rq, "sessionId"))) req.Headers.TryAddWithoutValidation("Mcp-Session-Id", Str(rq, "sessionId"));
             else if (Bool(rq, "session") && sid != null) req.Headers.TryAddWithoutValidation("Mcp-Session-Id", sid);
             if (Str(rq, "version") is { } ver) req.Headers.TryAddWithoutValidation("MCP-Protocol-Version", ver);
+            void SetHeader(string k, string? v)
+            {
+                req.Headers.Remove(k);
+                if (!string.IsNullOrEmpty(v)) req.Headers.TryAddWithoutValidation(k, v);
+            }
+            if (mcp2026)
+                foreach (var (k, v) in Headers2026(body!)) SetHeader(k, v);
+            if (Has(rq, "headers", out var extra))
+                foreach (var hp in extra.EnumerateObject()) SetHeader(hp.Name, hp.Value.GetString());
 
             var resp = await McpHandlerTests.Http.SendAsync(req);
             var rb = await resp.Content.ReadAsStringAsync();
@@ -224,6 +279,36 @@ public class McpHandlerConformanceTests
             })).ToList(), onCalls);
     }
 
+    /// <summary>A string identity verbatim, an McpPrincipal's subject, else "" (README: identity name).</summary>
+    private static string IdentityName(object? v) => v switch
+    {
+        string s => s,
+        McpPrincipal p => p.Subject,
+        _ => "",
+    };
+
+    /// <summary>Adds params._meta["io.modelcontextprotocol/protocolVersion"] = "2026-07-28" unless set.</summary>
+    private static string Stamp2026(string body)
+    {
+        var m = System.Text.Json.Nodes.JsonNode.Parse(body)!.AsObject();
+        if (m["params"] is not System.Text.Json.Nodes.JsonObject p) m["params"] = p = new System.Text.Json.Nodes.JsonObject();
+        if (p["_meta"] is not System.Text.Json.Nodes.JsonObject meta) p["_meta"] = meta = new System.Text.Json.Nodes.JsonObject();
+        if (!meta.ContainsKey("io.modelcontextprotocol/protocolVersion")) meta["io.modelcontextprotocol/protocolVersion"] = "2026-07-28";
+        return m.ToJsonString();
+    }
+
+    /// <summary>MCP-Protocol-Version, Mcp-Method and (tools/call, prompts/get: name; resources/read: uri) Mcp-Name.</summary>
+    private static Dictionary<string, string> Headers2026(string body)
+    {
+        var m = JsonDocument.Parse(body).RootElement;
+        var method = Str(m, "method") ?? "";
+        var h = new Dictionary<string, string> { ["MCP-Protocol-Version"] = "2026-07-28", ["Mcp-Method"] = method };
+        var p = m.TryGetProperty("params", out var pp) ? pp : default;
+        if (method is "tools/call" or "prompts/get") h["Mcp-Name"] = Str(p, "name") ?? "";
+        else if (method == "resources/read") h["Mcp-Name"] = Str(p, "uri") ?? "";
+        return h;
+    }
+
     private static JsonElement? JsonPathOf(JsonElement v, string path)
     {
         foreach (var seg in path.Split('.'))
@@ -261,5 +346,60 @@ public class McpHandlerConformanceTests
             default:
                 return true;
         }
+    }
+}
+
+/// <summary>A test tool whose body sees the <see cref="ToolContext"/> (for §10 Answer).</summary>
+internal sealed class CtxTool(string name, Func<IDictionary<string, object?>, ToolContext?, ToolResult> fn) : ITool
+{
+    public string Name => name;
+    public string Description { get; init; } = name + " tool";
+    public IDictionary<string, object?> InputSchema { get; init; } = new Dictionary<string, object?> { ["type"] = "object" };
+    public string Source => "native";
+    public ToolHints? Hints { get; init; }
+    public IDictionary<string, object?>? OutputSchema { get; init; }
+    public ToolAnnotations? Annotations { get; init; }
+    public Task<ToolResult> ExecuteAsync(IDictionary<string, object?> args, ToolContext? ctx = null) => Task.FromResult(fn(args, ctx));
+}
+
+/// <summary>Hosts any HttpListener request handler on an ephemeral loopback port.</summary>
+internal sealed class ListenerHost : IDisposable
+{
+    private readonly System.Net.HttpListener _listener = new();
+    public string Url { get; }
+
+    public ListenerHost(Func<System.Net.HttpListenerContext, Task> handle)
+    {
+        for (var attempt = 0; ; attempt++)
+        {
+            var l = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0);
+            l.Start();
+            var port = ((System.Net.IPEndPoint)l.LocalEndpoint).Port;
+            l.Stop();
+            _listener.Prefixes.Clear();
+            _listener.Prefixes.Add($"http://127.0.0.1:{port}/");
+            try { _listener.Start(); Url = $"http://127.0.0.1:{port}/"; break; }
+            catch (System.Net.HttpListenerException) when (attempt < 20) { }
+        }
+        _ = Task.Run(async () =>
+        {
+            while (true)
+            {
+                System.Net.HttpListenerContext ctx;
+                try { ctx = await _listener.GetContextAsync(); }
+                catch { break; }
+                _ = Task.Run(async () =>
+                {
+                    try { await handle(ctx); }
+                    finally { try { ctx.Response.Close(); } catch { } }
+                });
+            }
+        });
+    }
+
+    public void Dispose()
+    {
+        try { _listener.Stop(); } catch { }
+        try { _listener.Close(); } catch { }
     }
 }

@@ -1,6 +1,6 @@
 //! SPEC §7C.1 cross-port conformance: replays ../conformance/mcp_handler/cases.json
 //! (harness contract in conformance/mcp_handler/README.md). Mirrors
-//! golang/mcphandler_conformance_test.go.
+//! golang/mcphandler_conformance_test.go (incl. the §7C.2 `mcp2026_*` cases).
 #![cfg(feature = "serve")]
 
 mod common_mcp_handler;
@@ -10,9 +10,44 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::{Map, Value, json};
 use toolnexus::mcp_handler::*;
-use toolnexus::{Tool, ToolAnnotations, ToolHints, ToolResult, ToolSource};
+use toolnexus::{
+    Request as Pending, Tool, ToolAnnotations, ToolHints, ToolResult, ToolSource, pending,
+};
 
-use common_mcp_handler::{serve, tk};
+use common_mcp_handler::{serve, serve_metadata, tk};
+
+/// The identity name: a string identity verbatim, a principal's subject, else "".
+fn identity_name(id: Option<&McpIdentity>) -> String {
+    let Some(id) = id else {
+        return String::new();
+    };
+    if let Some(s) = id.downcast_ref::<String>() {
+        return s.clone();
+    }
+    id.downcast_ref::<McpPrincipal>()
+        .map(|p| p.subject.clone())
+        .unwrap_or_default()
+}
+
+/// README `mcp2026`: stamp `params._meta[protocolVersion]` unless present.
+fn stamp_2026(body: &Value) -> Value {
+    let mut b = body.clone();
+    let p = b
+        .as_object_mut()
+        .unwrap()
+        .entry("params")
+        .or_insert(json!({}));
+    let meta = p
+        .as_object_mut()
+        .unwrap()
+        .entry("_meta")
+        .or_insert(json!({}));
+    meta.as_object_mut()
+        .unwrap()
+        .entry("io.modelcontextprotocol/protocolVersion")
+        .or_insert(json!(MCP_PROTOCOL_2026));
+    b
+}
 
 fn to_result(v: &Value) -> ToolResult {
     ToolResult {
@@ -80,9 +115,30 @@ async fn conformance_cases() {
                     ex.lock().unwrap().push(ft["name"].as_str().unwrap().into());
                     match ft["behavior"].as_str().unwrap() {
                         "echo" => ToolResult::ok(args["text"].as_str().unwrap_or("")),
+                        "ask" => match &ctx.answer {
+                            Some(a) if a.ok => {
+                                let n = a
+                                    .data
+                                    .as_ref()
+                                    .and_then(|d| d.get("name"))
+                                    .and_then(Value::as_str)
+                                    .unwrap_or("");
+                                ToolResult::ok(format!("Hello, {n}!"))
+                            }
+                            _ => pending(Pending {
+                                id: "name".into(),
+                                kind: "input".into(),
+                                prompt: "What is your name?".into(),
+                                data: json!({"schema": {"type": "object",
+                                    "properties": {"name": {"type": "string"}}, "required": ["name"]}})
+                                .as_object()
+                                .cloned(),
+                                ..Default::default()
+                            }),
+                        },
                         "whoami" => {
                             let rc = mcp_request_context(&ctx).unwrap();
-                            let id = rc.identity_as::<String>().cloned().unwrap_or_default();
+                            let id = identity_name(rc.identity());
                             let tr = rc
                                 .meta()
                                 .and_then(|m| m.get("trace"))
@@ -121,7 +177,7 @@ async fn conformance_cases() {
             )
             .unwrap(),
             list_tools: Some(Arc::new(move |rc| {
-                let id = rc.identity_as::<String>().cloned().unwrap_or_default();
+                let id = identity_name(rc.identity());
                 let out: Vec<Tool> = t2
                     .iter()
                     .filter(|t| match bn2[&t.name].get("visibleTo") {
@@ -161,11 +217,42 @@ async fn conformance_cases() {
                 let r = tokens
                     .get(rc.header("authorization"))
                     .map(|id| Arc::new(id.clone()) as McpIdentity)
-                    .ok_or_else(|| "unauthorized".to_owned());
+                    .ok_or_else(|| "unauthorized".into());
                 Box::pin(async move { r })
             }));
             let www = www.clone();
             cfg.www_authenticate = Some(Arc::new(move |_, _| www.clone()));
+        }
+        if c["skills"].as_bool().unwrap_or(false) {
+            let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../examples/skills");
+            cfg.list_skills = Some(Arc::new(move |_| {
+                let r = load_mcp_skills(&dir).map_err(|e| e.to_string());
+                Box::pin(async move { r })
+            }));
+        }
+        let mut meta_url = String::new();
+        if c["serverAuth"].as_bool().unwrap_or(false) {
+            let fa = fixture["serverAuth"].clone();
+            let principals = fa["principals"].clone();
+            let auth = McpServerAuth {
+                issuer: fa["issuer"].as_str().unwrap().into(),
+                audience: fa["audience"].as_str().unwrap().into(),
+                scopes: serde_json::from_value(fa["scopes"].clone()).unwrap(),
+                verify: Some(Arc::new(move |_, token, _| {
+                    let r = match principals.get(&token) {
+                        Some(p) => Ok(McpPrincipal {
+                            subject: p["subject"].as_str().unwrap().into(),
+                            scopes: serde_json::from_value(p["scopes"].clone()).unwrap(),
+                            ..Default::default()
+                        }),
+                        None => Err("bad token".to_owned()),
+                    };
+                    Box::pin(async move { r })
+                })),
+                ..Default::default()
+            };
+            cfg.authenticate = Some(auth.authenticate());
+            meta_url = serve_metadata(auth.metadata()).await;
         }
         let url = serve(tk().await.mcp_handler(cfg)).await;
 
@@ -173,10 +260,18 @@ async fn conformance_cases() {
         for (i, st) in sc["steps"].as_array().unwrap().iter().enumerate() {
             let rq = &st["request"];
             let method = rq["method"].as_str().unwrap();
-            let mut b = client.request(method.parse().unwrap(), &url);
+            let mcp2026 = rq["mcp2026"].as_bool().unwrap_or(false);
+            let target = match rq["target"].as_str() {
+                Some(t) => format!("{meta_url}{t}"),
+                None => url.clone(),
+            };
+            let mut b = client.request(method.parse().unwrap(), &target);
+            let body = rq
+                .get("body")
+                .map(|b| if mcp2026 { stamp_2026(b) } else { b.clone() });
             if let Some(raw) = rq["rawBody"].as_str() {
                 b = b.body(raw.to_owned());
-            } else if let Some(body) = rq.get("body") {
+            } else if let Some(body) = &body {
                 b = b.body(serde_json::to_vec(body).unwrap());
             }
             if method == "POST" {
@@ -203,7 +298,37 @@ async fn conformance_cases() {
             if let Some(v) = rq["version"].as_str() {
                 b = b.header("MCP-Protocol-Version", v);
             }
-            let resp = b.send().await.unwrap();
+            let mut req = b.build().unwrap();
+            let hs = req.headers_mut();
+            if mcp2026 {
+                let body = body.clone().unwrap_or(json!({}));
+                let m = body["method"].as_str().unwrap_or("").to_owned();
+                hs.insert("MCP-Protocol-Version", MCP_PROTOCOL_2026.parse().unwrap());
+                hs.insert("Mcp-Method", m.parse().unwrap());
+                let key = match m.as_str() {
+                    "tools/call" | "prompts/get" => Some("name"),
+                    "resources/read" => Some("uri"),
+                    _ => None,
+                };
+                if let Some(k) = key {
+                    let v = body["params"][k].as_str().unwrap_or("");
+                    hs.insert("Mcp-Name", v.parse().unwrap());
+                }
+            }
+            if let Some(Value::Object(extra)) = rq.get("headers") {
+                for (k, v) in extra {
+                    let name: reqwest::header::HeaderName = k.parse().unwrap();
+                    match v.as_str().unwrap_or("") {
+                        "" => {
+                            hs.remove(&name);
+                        }
+                        v => {
+                            hs.insert(name, v.parse().unwrap());
+                        }
+                    }
+                }
+            }
+            let resp = client.execute(req).await.unwrap();
             let status = resp.status().as_u16();
             let headers = resp.headers().clone();
             let body = resp.bytes().await.unwrap();

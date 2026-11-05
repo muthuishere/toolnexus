@@ -161,6 +161,13 @@ public abstract class McpHttpExchange
 
     public abstract Stream ResponseBody { get; }
 
+    /// <summary>The request path (e.g. "/mcp"); <see cref="McpServerAuth.Metadata"/> routes on it.
+    /// Default "/"; the HttpListener adapter returns the real path.</summary>
+    public virtual string Path => "/";
+
+    /// <summary>"http" or "https" — used to derive a default audience / metadata URL. Default "http".</summary>
+    public virtual string Scheme => "http";
+
     /// <summary>Adapt an <see cref="HttpListenerContext"/>.</summary>
     public static McpHttpExchange FromListener(HttpListenerContext ctx) => new ListenerExchange(ctx);
 
@@ -172,6 +179,8 @@ public abstract class McpHttpExchange
         public override string? Header(string name) => ctx.Request.Headers[name];
         public override Stream RequestBody => ctx.Request.InputStream;
         public override object? Native => ctx;
+        public override string Path => ctx.Request.Url?.AbsolutePath ?? "/";
+        public override string Scheme => ctx.Request.Url?.Scheme ?? "http";
         public override void SetStatus(int status) => ctx.Response.StatusCode = status;
 
         public override void SetHeader(string name, string value)
@@ -235,6 +244,11 @@ public sealed class McpHandlerConfig
     public Func<McpContext, Task<IReadOnlyList<McpPrompt>>>? ListPrompts { get; set; }
     public Func<McpContext, string, IReadOnlyDictionary<string, string>, Task<McpPromptResult>>? GetPrompt { get; set; }
 
+    /// <summary>Publishes skills through the SEP-2640 skills extension on the 2026-07-28 wire
+    /// (skills/list, skills/get, resources/read of skill:// URIs; SPEC §7C.2). null ⇒ not advertised.
+    /// <see cref="McpHttpHandler.LoadMcpSkills"/> builds the list from a skills directory.</summary>
+    public Func<McpContext, Task<IReadOnlyList<McpSkill>>>? ListSkills { get; set; }
+
     /// <summary>Replaces the default in-memory session set.</summary>
     public IMcpSessionIds? SessionIds { get; set; }
 
@@ -252,10 +266,11 @@ public sealed class McpHandlerConfig
 /// The embeddable streamable-HTTP MCP server returned by <see cref="Toolkit.McpHandler"/> (SPEC §7C.1).
 /// Mount <see cref="HandleAsync(McpHttpExchange)"/> (or the HttpListener overload) on the host's server.
 /// </summary>
-public sealed class McpHttpHandler
+public sealed partial class McpHttpHandler
 {
-    /// <summary>The MCP protocol versions whose wire this handler implements (ADR 0039).</summary>
-    public static readonly IReadOnlyList<string> ImplementedVersions = new[] { "2025-11-25", "2025-06-18" };
+    /// <summary>The MCP protocol versions whose wire this handler implements (ADR 0039). 2026-07-28 is
+    /// opt-in only (never a default): the stateless wire of SPEC §7C.2, served by McpHandler2026.cs.</summary>
+    public static readonly IReadOnlyList<string> ImplementedVersions = new[] { "2026-07-28", "2025-11-25", "2025-06-18" };
 
     private static readonly string[] DefaultVersions = { "2025-06-18" };
 
@@ -268,6 +283,7 @@ public sealed class McpHttpHandler
     private readonly McpHandlerConfig _cfg;
     private readonly IMcpSessionIds _ids;
     private readonly List<string> _versions = new();
+    private readonly List<string> _legacy = new(); // _versions minus 2026-07-28: the initialize/session wire
     private readonly TimeSpan _confirmTimeout;
     private readonly long _maxBody;
     private readonly ConcurrentDictionary<string, bool> _caps = new();
@@ -282,6 +298,7 @@ public sealed class McpHttpHandler
         foreach (var v in _cfg.ProtocolVersions ?? Array.Empty<string>())
             if (ImplementedVersions.Contains(v) && !_versions.Contains(v)) _versions.Add(v);
         if (_versions.Count == 0) _versions.AddRange(DefaultVersions);
+        _legacy.AddRange(_versions.Where(v => v != Protocol2026));
         _ids = _cfg.SessionIds ?? new MemorySessionIds();
         _confirmTimeout = _cfg.ConfirmTimeout > TimeSpan.Zero ? _cfg.ConfirmTimeout : TimeSpan.FromMinutes(5);
         _maxBody = _cfg.MaxBodyBytes > 0 ? _cfg.MaxBodyBytes : 4 << 20;
@@ -326,6 +343,18 @@ public sealed class McpHttpHandler
     /// <summary>Serve one HTTP request (any method; the host routes the MCP path here).</summary>
     public async Task HandleAsync(McpHttpExchange ex)
     {
+        if (ex.Method == "POST" && _versions.Contains(Protocol2026))
+        {
+            var (handled, buffered) = await HandlePost2026Async(ex).ConfigureAwait(false);
+            if (handled) return;
+            ex = buffered ?? ex;
+        }
+        if (Only2026 && ex.Method != "POST")
+        {
+            ex.SetHeader("Allow", "POST");
+            await PlainAsync(ex, 405, "Method Not Allowed").ConfigureAwait(false);
+            return;
+        }
         var ctx = new McpContext(ex);
         ctx.MakeCurrent();
         if (_cfg.Authenticate != null)
@@ -336,9 +365,7 @@ public sealed class McpHttpHandler
             }
             catch (Exception err)
             {
-                var v = _cfg.WwwAuthenticate?.Invoke(ex, err);
-                if (!string.IsNullOrEmpty(v)) ex.SetHeader("WWW-Authenticate", v);
-                await PlainAsync(ex, 401, "Unauthorized").ConfigureAwait(false);
+                await WriteAuthFailureAsync(ex, err).ConfigureAwait(false);
                 return;
             }
         }
@@ -358,7 +385,7 @@ public sealed class McpHttpHandler
     private async Task<bool> CheckSessionAsync(McpContext ctx, McpHttpExchange ex)
     {
         var v = ex.Header("MCP-Protocol-Version");
-        if (!string.IsNullOrEmpty(v) && !_versions.Contains(v))
+        if (!string.IsNullOrEmpty(v) && !_legacy.Contains(v))
         {
             await PlainAsync(ex, 400, "Bad Request: unsupported MCP-Protocol-Version").ConfigureAwait(false);
             return false;
@@ -497,7 +524,7 @@ public sealed class McpHttpHandler
                 && caps.TryGetProperty("elicitation", out var el) && el.ValueKind != JsonValueKind.Null)
                 elicit = true;
         }
-        var version = clientVersion != null && _versions.Contains(clientVersion) ? clientVersion : _versions[0];
+        var version = clientVersion != null && _legacy.Contains(clientVersion) ? clientVersion : _legacy[0];
 
         string? sid;
         if (_cfg.Stateless)
@@ -592,7 +619,7 @@ public sealed class McpHttpHandler
 
     private sealed record RpcError(int Code, string Message);
 
-    private async Task<(JsonNode?, RpcError?)> DispatchAsync(McpContext ctx, RpcWriter rw, RpcMessage msg)
+    private async Task<(JsonNode?, RpcError?)> DispatchAsync(McpContext ctx, RpcWriter? rw, RpcMessage msg)
     {
         var p = msg.Params is { ValueKind: JsonValueKind.Object } pe ? pe : (JsonElement?)null;
         switch (msg.Method)
@@ -609,7 +636,7 @@ public sealed class McpHttpHandler
                 return (new JsonObject { ["tools"] = arr }, null);
             }
             case "tools/call":
-                return await CallToolAsync(ctx, rw, msg.Params).ConfigureAwait(false);
+                return await CallToolAsync(ctx, rw!, msg.Params).ConfigureAwait(false);
             case "resources/list" when _cfg.ListResources != null:
             {
                 IReadOnlyList<McpResource> rs;

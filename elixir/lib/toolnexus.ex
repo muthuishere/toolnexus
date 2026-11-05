@@ -47,4 +47,11 @@ defmodule Toolnexus do
   """
   @spec mcp_handler(Toolkit.t() | nil, keyword() | map()) :: Toolnexus.McpHandler.t()
   def mcp_handler(toolkit, cfg \\ []), do: Toolnexus.McpHandler.new(toolkit, cfg)
+
+  @doc """
+  Skills for `mcp_handler/2`'s `:list_skills` (SPEC §7C.2): every `**/SKILL.md` under
+  `dir`. See `Toolnexus.McpHandler.load_mcp_skills/1`.
+  """
+  @spec load_mcp_skills(String.t()) :: {:ok, [Toolnexus.McpHandler.Skill.t()]} | {:error, term()}
+  defdelegate load_mcp_skills(dir), to: Toolnexus.McpHandler
 end

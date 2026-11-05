@@ -6,12 +6,39 @@ defmodule Toolnexus.McpHandlerConformanceTest do
 
   import Toolnexus.McpHandlerHelpers
 
-  alias Toolnexus.{McpHandler, Tool, ToolAnnotations, ToolHints, ToolResult}
+  alias Toolnexus.{McpHandler, McpPrincipal, McpServerAuth, Request, Tool, ToolAnnotations}
+  alias Toolnexus.{ToolHints, ToolResult}
   alias Toolnexus.McpHandler.Decision
 
   @cases Path.expand("../../conformance/mcp_handler/cases.json", __DIR__)
   @external_resource @cases
   @file_data @cases |> File.read!() |> Jason.decode!()
+  @skills_dir Path.expand("../../examples/skills", __DIR__)
+  @meta_version "io.modelcontextprotocol/protocolVersion"
+
+  # README identity-name rule: a string verbatim, a Principal's subject, else "".
+  defp identity_name(id) when is_binary(id), do: id
+  defp identity_name(%McpPrincipal{subject: s}), do: s
+  defp identity_name(_), do: ""
+
+  # `mcp2026: true`: stamp params._meta protocolVersion unless present.
+  defp stamp_2026(body) do
+    params = if is_map(body["params"]), do: body["params"], else: %{}
+    meta = if is_map(params["_meta"]), do: params["_meta"], else: %{}
+    meta = Map.put_new(meta, @meta_version, "2026-07-28")
+    Map.put(body, "params", Map.put(params, "_meta", meta))
+  end
+
+  defp headers_2026(body) do
+    p = body["params"] || %{}
+
+    [{"mcp-protocol-version", "2026-07-28"}, {"mcp-method", body["method"] || ""}] ++
+      case body["method"] do
+        m when m in ["tools/call", "prompts/get"] -> [{"mcp-name", p["name"] || ""}]
+        "resources/read" -> [{"mcp-name", p["uri"] || ""}]
+        _ -> []
+      end
+  end
 
   defp to_result(nil), do: nil
 
@@ -69,7 +96,31 @@ defmodule Toolnexus.McpHandlerConformanceTest do
 
           "whoami" ->
             trace = (McpHandler.request_meta(ctx) || %{})["trace"] || ""
-            ToolResult.ok("#{McpHandler.identity(ctx) || ""}|#{trace}")
+            ToolResult.ok("#{identity_name(McpHandler.identity(ctx))}|#{trace}")
+
+          "ask" ->
+            case ctx.answer do
+              %Toolnexus.Answer{ok: true, data: data} ->
+                ToolResult.ok("Hello, #{data["name"]}!")
+
+              _ ->
+                %ToolResult{
+                  metadata: %{
+                    pending: %Request{
+                      id: "name",
+                      kind: "input",
+                      prompt: "What is your name?",
+                      data: %{
+                        "schema" => %{
+                          "type" => "object",
+                          "properties" => %{"name" => %{"type" => "string"}},
+                          "required" => ["name"]
+                        }
+                      }
+                    }
+                  }
+                }
+            end
 
           "error" ->
             {:error, ft["error"]}
@@ -115,7 +166,7 @@ defmodule Toolnexus.McpHandlerConformanceTest do
     cfg =
       [
         list_tools: fn ctx ->
-          id = McpHandler.identity(ctx)
+          id = identity_name(McpHandler.identity(ctx))
 
           Enum.filter(tools, fn t ->
             case by_name[t.name]["visibleTo"] do
@@ -189,6 +240,34 @@ defmodule Toolnexus.McpHandlerConformanceTest do
         cfg
       end
 
+    cfg =
+      if c["skills"],
+        do: cfg ++ [list_skills: fn _ -> Toolnexus.load_mcp_skills(@skills_dir) end],
+        else: cfg
+
+    {cfg, meta_url} =
+      if c["serverAuth"] do
+        fa = fixture["serverAuth"]
+
+        auth =
+          McpServerAuth.new(
+            issuer: fa["issuer"],
+            audience: fa["audience"],
+            scopes: fa["scopes"],
+            verify: fn _conn, token, _aud ->
+              case fa["principals"][token] do
+                nil -> {:error, "bad token"}
+                p -> {:ok, %McpPrincipal{subject: p["subject"], scopes: p["scopes"]}}
+              end
+            end
+          )
+
+        {cfg ++ [authenticate: McpServerAuth.authenticator(auth)],
+         start_plug(McpServerAuth.metadata(auth))}
+      else
+        {cfg, nil}
+      end
+
     h = Toolnexus.mcp_handler(nil, cfg)
     url = start_handler(h)
 
@@ -196,9 +275,21 @@ defmodule Toolnexus.McpHandlerConformanceTest do
       rq = st["request"]
       method = rq["method"] |> String.downcase() |> String.to_atom()
 
+      body = if rq["mcp2026"] && rq["body"], do: stamp_2026(rq["body"]), else: rq["body"]
+
+      extra =
+        if(rq["mcp2026"] && body, do: headers_2026(body), else: []) ++
+          Enum.to_list(rq["headers"] || %{})
+
+      target =
+        if rq["target"],
+          do: String.trim_trailing(meta_url, "/") <> rq["target"],
+          else: url
+
       opts =
         [
-          body: rq["rawBody"] || rq["body"],
+          headers: extra,
+          body: rq["rawBody"] || body,
           accept: rq["accept"],
           content_type: rq["contentType"],
           token: rq["token"] || sc["token"],
@@ -207,7 +298,7 @@ defmodule Toolnexus.McpHandlerConformanceTest do
         ]
         |> Enum.reject(fn {_, v} -> v in [nil, ""] end)
 
-      {status, hdrs, body} = raw(method, url, opts)
+      {status, hdrs, body} = raw(method, target, opts)
       ex = st["expect"]
       where = "#{sc["name"]} step #{i}"
 

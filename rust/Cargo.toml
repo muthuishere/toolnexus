@@ -25,6 +25,7 @@ serve = [
     "dep:hyper",
     "dep:hyper-util",
     "dep:http-body-util",
+    "dep:ring",
 ]
 
 [dependencies]
@@ -45,11 +46,17 @@ uuid = { version = "1", features = ["v4"] }
 hyper = { version = "1", features = ["server", "http1"], optional = true }
 hyper-util = { version = "0.1", features = ["tokio"], optional = true }
 http-body-util = { version = "0.1", optional = true }
+# serve: RS256 verify/sign + SHA-256 for the MCP 2026 server auth (SPEC §7C.2).
+# ring is already in the tree via rustls.
+ring = { version = "0.17", optional = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
 [dev-dependencies]
+# rsa generates the test-only dev authorization server's key (ring cannot
+# generate RSA keys); tests/common_dev_auth.
+rsa = { version = "0.9", default-features = false, features = ["std", "u64_digit", "getrandom"] }
 serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["full"] }
 
@@ -59,3 +66,10 @@ libc = "0.2"
 [[example]]
 name = "mcp_handler"
 required-features = ["serve", "mcp-http"]
+
+# The test-only dev authorization server generates a 2048-bit RSA key per start; keep that
+# fast in debug test builds. (Profiles apply only when this crate is the root.)
+[profile.dev.package.num-bigint-dig]
+opt-level = 3
+[profile.dev.package.rsa]
+opt-level = 3

@@ -41,8 +41,16 @@
         "behavior": "static", "result": { "output": "", "structured": { "count": 3 }, "meta": { "usage": { "units": 2 } } } },
       { "name": "boom", "description": "Execute fails",
         "inputSchema": { "type": "object" },
-        "behavior": "error", "error": "kaboom" }
-    ]
+        "behavior": "error", "error": "kaboom" },
+      { "name": "confirm_run", "description": "Confirm, then run",
+        "inputSchema": { "type": "object" },
+        "decision": { "kind": "confirm", "message": "Run it?" },
+        "behavior": "static", "result": { "output": "confirmed" } },
+      { "name": "ask_name", "description": "Suspends for a name (§10 input)",
+        "inputSchema": { "type": "object" },
+        "behavior": "ask" }
+    ],
+    "serverAuth": {"issuer": "https://as.example.test", "audience": "https://mcp.example.test/mcp", "scopes": {"*": ["mcp"], "wipe": ["mcp:admin"]}, "principals": {"jwt-alice": {"subject": "alice", "scopes": ["mcp"]}, "jwt-admin": {"subject": "admin", "scopes": ["mcp", "mcp:admin"]}}}
   },
   "scenarios": [
     {
@@ -124,7 +132,9 @@
             { "name": "confirm_fallback", "description": "Confirm with a shaped fallback", "inputSchema": { "type": "object" } },
             { "name": "stats", "description": "Structured result", "inputSchema": { "type": "object" },
               "outputSchema": { "type": "object", "properties": { "count": { "type": "integer" } } } },
-            { "name": "boom", "description": "Execute fails", "inputSchema": { "type": "object" } }
+            { "name": "boom", "description": "Execute fails", "inputSchema": { "type": "object" } },
+            { "name": "confirm_run", "description": "Confirm, then run", "inputSchema": { "type": "object" } },
+            { "name": "ask_name", "description": "Suspends for a name (§10 input)", "inputSchema": { "type": "object" } }
           ] } } } },
         { "request": { "method": "POST", "token": "Bearer admin",
                        "body": { "jsonrpc": "2.0", "id": 2, "method": "tools/list" } },
@@ -222,6 +232,191 @@
         { "request": { "method": "POST", "version": "2025-06-18",
                        "body": { "jsonrpc": "2.0", "id": 8, "method": "tools/call", "params": { "name": "echo", "arguments": [1] } } },
           "expect": { "status": 200, "json": { "jsonrpc": "2.0", "id": 8, "error": { "code": -32602, "message": "arguments must be an object" } } } }
+      ],
+      "expectExecuted": []
+    },
+    {
+      "name": "mcp2026_discover_list_ping",
+      "config": {"protocolVersions": ["2026-07-28"], "name": "fixture", "title": "Fixture Server", "version": "1.2.3", "instructions": "Use the tools.", "skills": true},
+      "steps": [
+        { "request": {"method": "POST", "mcp2026": true, "body": {"jsonrpc": "2.0", "id": 1, "method": "server/discover"}},
+          "expect": {"status": 200, "json": {"id": 1, "jsonrpc": "2.0", "result": {"_meta": {"io.modelcontextprotocol/serverInfo": {"name": "fixture", "title": "Fixture Server", "version": "1.2.3"}}, "cacheScope": "public", "capabilities": {"extensions": {"io.modelcontextprotocol/skills": {}}, "resources": {}, "tools": {}}, "instructions": "Use the tools.", "resultType": "complete", "supportedVersions": ["2026-07-28"], "ttlMs": 3600000}}} },
+        { "request": {"method": "POST", "mcp2026": true, "body": {"jsonrpc": "2.0", "id": 2, "method": "tools/list"}},
+          "expect": {"status": 200, "json": {"id": 2, "jsonrpc": "2.0", "result": {"_meta": {"io.modelcontextprotocol/serverInfo": {"name": "fixture", "title": "Fixture Server", "version": "1.2.3"}}, "cacheScope": "public", "resultType": "complete", "tools": [{"description": "Suspends for a name (§10 input)", "inputSchema": {"type": "object"}, "name": "ask_name"}, {"description": "Execute fails", "inputSchema": {"type": "object"}, "name": "boom"}, {"description": "Confirm with a shaped fallback", "inputSchema": {"type": "object"}, "name": "confirm_fallback"}, {"description": "Confirm without fallback", "inputSchema": {"type": "object"}, "name": "confirm_plain"}, {"description": "Confirm, then run", "inputSchema": {"type": "object"}, "name": "confirm_run"}, {"description": "Always denied", "inputSchema": {"type": "object"}, "name": "denied"}, {"description": "Denied with no message", "inputSchema": {"type": "object"}, "name": "denied_default"}, {"annotations": {"readOnlyHint": true, "title": "Echo"}, "description": "Echo text back", "inputSchema": {"properties": {"text": {"type": "string"}}, "type": "object"}, "name": "echo"}, {"description": "Structured result", "inputSchema": {"type": "object"}, "name": "stats", "outputSchema": {"properties": {"count": {"type": "integer"}}, "type": "object"}}, {"description": "Identity and request _meta.trace", "inputSchema": {"type": "object"}, "name": "whoami"}], "ttlMs": 60000}}} },
+        { "request": {"method": "POST", "mcp2026": true, "body": {"jsonrpc": "2.0", "id": 3, "method": "ping"}},
+          "expect": {"status": 200, "json": {"id": 3, "jsonrpc": "2.0", "result": {"_meta": {"io.modelcontextprotocol/serverInfo": {"name": "fixture", "title": "Fixture Server", "version": "1.2.3"}}, "resultType": "complete"}}} }
+      ],
+      "expectExecuted": []
+    },
+    {
+      "name": "mcp2026_header_validation",
+      "config": {"protocolVersions": ["2026-07-28"]},
+      "steps": [
+        { "request": {"method": "POST", "mcp2026": true, "body": {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}, "headers": {"MCP-Protocol-Version": ""}},
+          "expect": {"status": 400, "json": {"error": {"code": -32020, "message": "Header mismatch: MCP-Protocol-Version header missing"}, "id": 1, "jsonrpc": "2.0"}} },
+        { "request": {"method": "POST", "mcp2026": true, "body": {"jsonrpc": "2.0", "id": 2, "method": "tools/list"}, "headers": {"Mcp-Method": "tools/call"}},
+          "expect": {"status": 400, "json": {"error": {"code": -32020, "message": "Header mismatch: Mcp-Method header value 'tools/call' does not match body value 'tools/list'"}, "id": 2, "jsonrpc": "2.0"}} },
+        { "request": {"method": "POST", "mcp2026": true, "body": {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "echo", "arguments": {"text": "x"}}}, "headers": {"Mcp-Name": "greet"}},
+          "expect": {"status": 400, "json": {"error": {"code": -32020, "message": "Header mismatch: Mcp-Name header value 'greet' does not match body value 'echo'"}, "id": 3, "jsonrpc": "2.0"}} },
+        { "request": {"method": "POST", "mcp2026": true, "body": {"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {"name": "echo", "arguments": {"text": "b64"}}}, "headers": {"Mcp-Name": "=?base64?ZWNobw==?="}},
+          "expect": {"status": 200, "json": {"id": 4, "jsonrpc": "2.0", "result": {"_meta": {"io.modelcontextprotocol/serverInfo": {"name": "toolnexus", "version": "0.1.0"}}, "content": [{"text": "b64", "type": "text"}], "resultType": "complete"}}} },
+        { "request": {"method": "POST", "mcp2026": true, "body": {"jsonrpc": "2.0", "id": 5, "method": "tools/list", "params": {"_meta": {"io.modelcontextprotocol/protocolVersion": "2025-11-25"}}}},
+          "expect": {"status": 400, "json": {"error": {"code": -32020, "message": "Header mismatch: MCP-Protocol-Version header value '2026-07-28' does not match _meta value '2025-11-25'"}, "id": 5, "jsonrpc": "2.0"}} },
+        { "request": {"method": "POST", "mcp2026": true, "body": {"jsonrpc": "2.0", "id": 6, "method": "tools/list", "params": {"_meta": {"io.modelcontextprotocol/protocolVersion": "2025-11-25"}}}, "headers": {"MCP-Protocol-Version": "2025-11-25"}},
+          "expect": {"status": 400, "json": {"error": {"code": -32022, "data": {"requested": "2025-11-25", "supported": ["2026-07-28"]}, "message": "Unsupported protocol version"}, "id": 6, "jsonrpc": "2.0"}} },
+        { "request": {"method": "POST", "mcp2026": true, "body": {"jsonrpc": "2.0", "id": 7, "method": "nope/nope"}},
+          "expect": {"status": 404, "json": {"error": {"code": -32601, "message": "Method not found: nope/nope"}, "id": 7, "jsonrpc": "2.0"}} },
+        { "request": {"method": "POST", "rawBody": "{not json"},
+          "expect": {"status": 400, "json": {"error": {"code": -32700, "message": "Parse error"}, "id": null, "jsonrpc": "2.0"}} },
+        { "request": {"method": "POST", "mcp2026": true, "body": {"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {}}},
+          "expect": {"status": 202} },
+        { "request": {"method": "POST", "mcp2026": true, "body": {"jsonrpc": "2.0", "id": 8, "method": "tools/call", "params": {"name": "nope", "arguments": {}}}},
+          "expect": {"status": 200, "json": {"error": {"code": -32602, "message": "Unknown tool: nope"}, "id": 8, "jsonrpc": "2.0"}} },
+        { "request": {"method": "POST", "body": {"jsonrpc": "2.0", "id": 9, "method": "initialize", "params": {"protocolVersion": "2025-06-18"}}},
+          "expect": {"status": 400, "json": {"error": {"code": -32020, "message": "Header mismatch: MCP-Protocol-Version header missing"}, "id": 9, "jsonrpc": "2.0"}} },
+        { "request": {"method": "GET", "accept": "text/event-stream"},
+          "expect": {"status": 405} },
+        { "request": {"method": "POST", "mcp2026": true, "body": {"jsonrpc": "2.0", "id": 10, "method": "tools/call", "params": {"name": "echo", "arguments": {"text": "x"}}}, "headers": {"Mcp-Name": "=?base64?!!!?="}},
+          "expect": {"status": 400, "json": {"jsonrpc": "2.0", "id": 10, "error": {"code": -32020, "message": "Header mismatch: Mcp-Name header value '' does not match body value 'echo'"}}} },
+        { "request": {"method": "POST", "mcp2026": true, "body": {"jsonrpc": "2.0", "id": 11, "method": "tools/call", "params": {"name": "", "arguments": {}}}, "headers": {"Mcp-Name": ""}},
+          "expect": {"status": 400, "json": {"jsonrpc": "2.0", "id": 11, "error": {"code": -32020, "message": "Header mismatch: Mcp-Name header value '' does not match body value ''"}}} }
+      ],
+      "expectExecuted": ["echo"]
+    },
+    {
+      "name": "mcp2026_tools_call_results",
+      "config": {"protocolVersions": ["2026-07-28"]},
+      "steps": [
+        { "request": {"method": "POST", "mcp2026": true, "body": {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "echo", "arguments": {"text": "hi"}}}},
+          "expect": {"status": 200, "json": {"id": 1, "jsonrpc": "2.0", "result": {"_meta": {"io.modelcontextprotocol/serverInfo": {"name": "toolnexus", "version": "0.1.0"}}, "content": [{"text": "hi", "type": "text"}], "resultType": "complete"}}} },
+        { "request": {"method": "POST", "mcp2026": true, "body": {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "stats", "arguments": {}}}},
+          "expect": {"status": 200, "json": {"id": 2, "jsonrpc": "2.0", "result": {"_meta": {"io.modelcontextprotocol/serverInfo": {"name": "toolnexus", "version": "0.1.0"}, "usage": {"units": 2}}, "content": [{"text": "{\"count\":3}", "type": "text"}], "resultType": "complete", "structuredContent": {"count": 3}}}} },
+        { "request": {"method": "POST", "mcp2026": true, "body": {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "boom", "arguments": {}}}},
+          "expect": {"status": 200, "json": {"id": 3, "jsonrpc": "2.0", "result": {"_meta": {"io.modelcontextprotocol/serverInfo": {"name": "toolnexus", "version": "0.1.0"}}, "content": [{"text": "kaboom", "type": "text"}], "isError": true, "resultType": "complete"}}} },
+        { "request": {"method": "POST", "mcp2026": true, "body": {"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {"name": "echo", "arguments": [1]}}},
+          "expect": {"status": 200, "json": {"id": 4, "jsonrpc": "2.0", "result": {"_meta": {"io.modelcontextprotocol/serverInfo": {"name": "toolnexus", "version": "0.1.0"}}, "content": [{"text": "invalid arguments: must be an object", "type": "text"}], "isError": true, "resultType": "complete"}}} },
+        { "request": {"method": "POST", "mcp2026": true, "body": {"jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": {"name": "denied", "arguments": {}}}},
+          "expect": {"status": 200, "json": {"id": 5, "jsonrpc": "2.0", "result": {"_meta": {"io.modelcontextprotocol/serverInfo": {"name": "toolnexus", "version": "0.1.0"}}, "content": [{"text": "not for you", "type": "text"}], "isError": true, "resultType": "complete"}}} },
+        { "request": {"method": "POST", "mcp2026": true, "body": {"jsonrpc": "2.0", "id": 6, "method": "tools/call", "params": {"name": "whoami", "arguments": {}, "_meta": {"trace": "t-26"}}}},
+          "expect": {"status": 200, "json": {"id": 6, "jsonrpc": "2.0", "result": {"_meta": {"io.modelcontextprotocol/serverInfo": {"name": "toolnexus", "version": "0.1.0"}}, "content": [{"text": "|t-26", "type": "text"}], "resultType": "complete"}}} }
+      ],
+      "expectExecuted": ["echo", "stats", "boom", "whoami"]
+    },
+    {
+      "name": "mcp2026_mrtr_confirm",
+      "config": {"protocolVersions": ["2026-07-28"]},
+      "steps": [
+        { "request": {"method": "POST", "mcp2026": true, "body": {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "confirm_run", "arguments": {}}}},
+          "expect": {"status": 200, "json": {"id": 1, "jsonrpc": "2.0", "result": {"_meta": {"io.modelcontextprotocol/serverInfo": {"name": "toolnexus", "version": "0.1.0"}}, "content": [{"text": "confirmation required: Run it?", "type": "text"}], "isError": true, "resultType": "complete"}}} },
+        { "request": {"method": "POST", "mcp2026": true, "body": {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "confirm_run", "arguments": {}, "_meta": {"io.modelcontextprotocol/clientCapabilities": {"elicitation": {"form": {}}}}}}},
+          "expect": {"status": 200, "json": {"id": 2, "jsonrpc": "2.0", "result": {"_meta": {"io.modelcontextprotocol/serverInfo": {"name": "toolnexus", "version": "0.1.0"}}, "inputRequests": {"confirm": {"method": "elicitation/create", "params": {"message": "Run it?", "mode": "form", "requestedSchema": {"properties": {"confirm": {"description": "Run it?", "title": "Confirm", "type": "boolean"}}, "type": "object"}}}}, "requestState": "eyJ0b29sIjoiY29uZmlybV9ydW4ifQ", "resultType": "input_required"}}} },
+        { "request": {"method": "POST", "mcp2026": true, "body": {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "confirm_run", "arguments": {}, "requestState": "eyJ0b29sIjoiY29uZmlybV9ydW4ifQ", "inputResponses": {"confirm": {"action": "decline"}}, "_meta": {"io.modelcontextprotocol/clientCapabilities": {"elicitation": {"form": {}}}}}}},
+          "expect": {"status": 200, "json": {"id": 3, "jsonrpc": "2.0", "result": {"_meta": {"io.modelcontextprotocol/serverInfo": {"name": "toolnexus", "version": "0.1.0"}}, "content": [{"text": "declined", "type": "text"}], "isError": true, "resultType": "complete"}}} },
+        { "request": {"method": "POST", "mcp2026": true, "body": {"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {"name": "confirm_run", "arguments": {}, "requestState": "eyJ0b29sIjoiY29uZmlybV9ydW4ifQ", "inputResponses": {"confirm": {"action": "accept", "content": {"confirm": false}}}, "_meta": {"io.modelcontextprotocol/clientCapabilities": {"elicitation": {"form": {}}}}}}},
+          "expect": {"status": 200, "json": {"id": 4, "jsonrpc": "2.0", "result": {"_meta": {"io.modelcontextprotocol/serverInfo": {"name": "toolnexus", "version": "0.1.0"}}, "content": [{"text": "declined", "type": "text"}], "isError": true, "resultType": "complete"}}} },
+        { "request": {"method": "POST", "mcp2026": true, "body": {"jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": {"name": "confirm_run", "arguments": {}, "inputResponses": {"confirm": {"action": "accept", "content": {"confirm": true}}}, "_meta": {"io.modelcontextprotocol/clientCapabilities": {"elicitation": {"form": {}}}}}}},
+          "expect": {"status": 200, "json": {"id": 5, "jsonrpc": "2.0", "result": {"_meta": {"io.modelcontextprotocol/serverInfo": {"name": "toolnexus", "version": "0.1.0"}}, "inputRequests": {"confirm": {"method": "elicitation/create", "params": {"message": "Run it?", "mode": "form", "requestedSchema": {"properties": {"confirm": {"description": "Run it?", "title": "Confirm", "type": "boolean"}}, "type": "object"}}}}, "requestState": "eyJ0b29sIjoiY29uZmlybV9ydW4ifQ", "resultType": "input_required"}}} },
+        { "request": {"method": "POST", "mcp2026": true, "body": {"jsonrpc": "2.0", "id": 6, "method": "tools/call", "params": {"name": "confirm_run", "arguments": {}, "requestState": "eyJ0b29sIjoiY29uZmlybV9ydW4ifQ", "inputResponses": {"confirm": {"action": "accept", "content": {"confirm": true}}}, "_meta": {"io.modelcontextprotocol/clientCapabilities": {"elicitation": {"form": {}}}}}}},
+          "expect": {"status": 200, "json": {"id": 6, "jsonrpc": "2.0", "result": {"_meta": {"io.modelcontextprotocol/serverInfo": {"name": "toolnexus", "version": "0.1.0"}}, "content": [{"text": "confirmed", "type": "text"}], "resultType": "complete"}}} },
+        { "request": {"method": "POST", "mcp2026": true, "body": {"jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": {"name": "confirm_fallback", "arguments": {}, "_meta": {}}}},
+          "expect": {"status": 200, "json": {"id": 7, "jsonrpc": "2.0", "result": {"_meta": {"io.modelcontextprotocol/serverInfo": {"name": "toolnexus", "version": "0.1.0"}}, "content": [{"text": "re-call with nonce n-1", "type": "text"}], "resultType": "complete", "structuredContent": {"nonce": "n-1"}}}} },
+        { "request": {"method": "POST", "mcp2026": true, "body": {"jsonrpc": "2.0", "id": 8, "method": "tools/call", "params": {"name": "denied", "arguments": {}, "requestState": "eyJ0b29sIjoiZGVuaWVkIiwiY29uZmlybWVkIjp0cnVlfQ", "_meta": {"io.modelcontextprotocol/clientCapabilities": {"elicitation": {"form": {}}}}}}},
+          "expect": {"status": 200, "json": {"id": 8, "jsonrpc": "2.0", "result": {"_meta": {"io.modelcontextprotocol/serverInfo": {"name": "toolnexus", "version": "0.1.0"}}, "content": [{"text": "not for you", "type": "text"}], "isError": true, "resultType": "complete"}}} }
+      ],
+      "expectExecuted": ["confirm_run"]
+    },
+    {
+      "name": "mcp2026_mrtr_tool_suspension",
+      "config": {"protocolVersions": ["2026-07-28"]},
+      "steps": [
+        { "request": {"method": "POST", "mcp2026": true, "body": {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "ask_name", "arguments": {}, "_meta": {"io.modelcontextprotocol/clientCapabilities": {"elicitation": {"form": {}}}}}}},
+          "expect": {"status": 200, "json": {"id": 1, "jsonrpc": "2.0", "result": {"_meta": {"io.modelcontextprotocol/serverInfo": {"name": "toolnexus", "version": "0.1.0"}}, "inputRequests": {"name": {"method": "elicitation/create", "params": {"message": "What is your name?", "mode": "form", "requestedSchema": {"properties": {"name": {"type": "string"}}, "required": ["name"], "type": "object"}}}}, "requestState": "eyJ0b29sIjoiYXNrX25hbWUifQ", "resultType": "input_required"}}} },
+        { "request": {"method": "POST", "mcp2026": true, "body": {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "ask_name", "arguments": {}, "requestState": "eyJ0b29sIjoiYXNrX25hbWUifQ", "inputResponses": {"name": {"action": "accept", "content": {"name": "toolnexus"}}}, "_meta": {"io.modelcontextprotocol/clientCapabilities": {"elicitation": {"form": {}}}}}}},
+          "expect": {"status": 200, "json": {"id": 2, "jsonrpc": "2.0", "result": {"_meta": {"io.modelcontextprotocol/serverInfo": {"name": "toolnexus", "version": "0.1.0"}}, "content": [{"text": "Hello, toolnexus!", "type": "text"}], "resultType": "complete"}}} },
+        { "request": {"method": "POST", "mcp2026": true, "body": {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "ask_name", "arguments": {}, "requestState": "eyJ0b29sIjoiYXNrX25hbWUifQ", "inputResponses": {"name": {"action": "decline"}}, "_meta": {"io.modelcontextprotocol/clientCapabilities": {"elicitation": {"form": {}}}}}}},
+          "expect": {"status": 200, "json": {"id": 3, "jsonrpc": "2.0", "result": {"_meta": {"io.modelcontextprotocol/serverInfo": {"name": "toolnexus", "version": "0.1.0"}}, "inputRequests": {"name": {"method": "elicitation/create", "params": {"message": "What is your name?", "mode": "form", "requestedSchema": {"properties": {"name": {"type": "string"}}, "required": ["name"], "type": "object"}}}}, "requestState": "eyJ0b29sIjoiYXNrX25hbWUifQ", "resultType": "input_required"}}} },
+        { "request": {"method": "POST", "mcp2026": true, "body": {"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {"name": "ask_name", "arguments": {}, "requestState": "eyJ0b29sIjoiY29uZmlybV9ydW4iLCJjb25maXJtZWQiOnRydWV9", "inputResponses": {"name": {"action": "accept", "content": {"name": "x"}}}, "_meta": {"io.modelcontextprotocol/clientCapabilities": {"elicitation": {"form": {}}}}}}},
+          "expect": {"status": 200, "json": {"jsonrpc": "2.0", "id": 4, "result": {"_meta": {"io.modelcontextprotocol/serverInfo": {"name": "toolnexus", "version": "0.1.0"}}, "inputRequests": {"name": {"method": "elicitation/create", "params": {"mode": "form", "message": "What is your name?", "requestedSchema": {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}}}}, "requestState": "eyJ0b29sIjoiYXNrX25hbWUifQ", "resultType": "input_required"}}} }
+      ],
+      "expectExecuted": ["ask_name", "ask_name", "ask_name", "ask_name"]
+    },
+    {
+      "name": "mcp2026_skills_extension",
+      "config": {"protocolVersions": ["2026-07-28"], "skills": true},
+      "steps": [
+        { "request": {"method": "POST", "mcp2026": true, "body": {"jsonrpc": "2.0", "id": 1, "method": "skills/list"}},
+          "expect": {"status": 200, "json": {"id": 1, "jsonrpc": "2.0", "result": {"_meta": {"io.modelcontextprotocol/serverInfo": {"name": "toolnexus", "version": "0.1.0"}}, "cacheScope": "public", "resultType": "complete", "skills": [{"frontmatter": {"description": "A tiny example skill. Use when you want to see how skill loading (progressive disclosure) works end to end.", "name": "hello-world"}, "uri": "skill://hello-world/SKILL.md"}], "ttlMs": 60000}}} },
+        { "request": {"method": "POST", "mcp2026": true, "body": {"jsonrpc": "2.0", "id": 2, "method": "skills/get", "params": {"uri": "skill://hello-world/SKILL.md"}}},
+          "expect": {"status": 200, "json": {"id": 2, "jsonrpc": "2.0", "result": {"_meta": {"io.modelcontextprotocol/serverInfo": {"name": "toolnexus", "version": "0.1.0"}}, "resultType": "complete", "skill": {"frontmatter": {"description": "A tiny example skill. Use when you want to see how skill loading (progressive disclosure) works end to end.", "name": "hello-world"}, "resources": [{"digest": "sha256:993feea49f5ffb77c188526bc6a551c2180a8c688c1d9d354e4807e4dc51e409", "size": 628, "uri": "skill://hello-world/SKILL.md"}, {"digest": "sha256:d9fd7bab4d31087ae7ba3f03df226e7544444dbff29e44fd01e834f3d5c3778b", "size": 147, "uri": "skill://hello-world/scripts/greet.sh"}], "uri": "skill://hello-world/SKILL.md"}}}} },
+        { "request": {"method": "POST", "mcp2026": true, "body": {"jsonrpc": "2.0", "id": 3, "method": "resources/read", "params": {"uri": "skill://hello-world/scripts/greet.sh"}}},
+          "expect": {"status": 200, "json": {"id": 3, "jsonrpc": "2.0", "result": {"_meta": {"io.modelcontextprotocol/serverInfo": {"name": "toolnexus", "version": "0.1.0"}}, "cacheScope": "public", "contents": [{"mimeType": "text/plain", "text": "#!/usr/bin/env bash\n# Example resource referenced by the hello-world skill.\nname=\"${1:-world}\"\necho \"Hello, ${name}! (from the hello-world skill)\"\n", "uri": "skill://hello-world/scripts/greet.sh"}], "resultType": "complete", "ttlMs": 60000}}} },
+        { "request": {"method": "POST", "mcp2026": true, "body": {"jsonrpc": "2.0", "id": 4, "method": "skills/get", "params": {"uri": "skill://nope/SKILL.md"}}},
+          "expect": {"status": 200, "json": {"error": {"code": -32602, "message": "Unknown skill: skill://nope/SKILL.md"}, "id": 4, "jsonrpc": "2.0"}} },
+        { "request": {"method": "POST", "mcp2026": true, "body": {"jsonrpc": "2.0", "id": 10, "method": "resources/read", "params": {"uri": "skill://hello-world/%2e%2e/secret"}}},
+          "expect": {"status": 200, "json": {"error": {"code": -32602, "message": "Invalid resource URI: skill URI path escapes the skill (empty, '.', '..' or ':' segment)"}, "id": 10, "jsonrpc": "2.0"}} },
+        { "request": {"method": "POST", "mcp2026": true, "body": {"jsonrpc": "2.0", "id": 11, "method": "resources/read", "params": {"uri": "skill://hello-world/../secret"}}},
+          "expect": {"status": 200, "json": {"error": {"code": -32602, "message": "Invalid resource URI: skill URI path escapes the skill (empty, '.', '..' or ':' segment)"}, "id": 11, "jsonrpc": "2.0"}} },
+        { "request": {"method": "POST", "mcp2026": true, "body": {"jsonrpc": "2.0", "id": 12, "method": "resources/read", "params": {"uri": "skill://hello-world//SKILL.md"}}},
+          "expect": {"status": 200, "json": {"error": {"code": -32602, "message": "Invalid resource URI: skill URI path escapes the skill (empty, '.', '..' or ':' segment)"}, "id": 12, "jsonrpc": "2.0"}} },
+        { "request": {"method": "POST", "mcp2026": true, "body": {"jsonrpc": "2.0", "id": 13, "method": "resources/read", "params": {"uri": "skill://hello-world/./SKILL.md"}}},
+          "expect": {"status": 200, "json": {"error": {"code": -32602, "message": "Invalid resource URI: skill URI path escapes the skill (empty, '.', '..' or ':' segment)"}, "id": 13, "jsonrpc": "2.0"}} },
+        { "request": {"method": "POST", "mcp2026": true, "body": {"jsonrpc": "2.0", "id": 14, "method": "resources/read", "params": {"uri": "skill://hello-world/a%5cb"}}},
+          "expect": {"status": 200, "json": {"error": {"code": -32602, "message": "Invalid resource URI: skill URI has encoded, backslash or NUL characters"}, "id": 14, "jsonrpc": "2.0"}} },
+        { "request": {"method": "POST", "mcp2026": true, "body": {"jsonrpc": "2.0", "id": 15, "method": "resources/read", "params": {"uri": "skill://hello-world/%252e%252e/x"}}},
+          "expect": {"status": 200, "json": {"error": {"code": -32602, "message": "Invalid resource URI: skill URI has encoded, backslash or NUL characters"}, "id": 15, "jsonrpc": "2.0"}} },
+        { "request": {"method": "POST", "mcp2026": true, "body": {"jsonrpc": "2.0", "id": 16, "method": "resources/read", "params": {"uri": "skill://hello-world/a:b"}}},
+          "expect": {"status": 200, "json": {"error": {"code": -32602, "message": "Invalid resource URI: skill URI path escapes the skill (empty, '.', '..' or ':' segment)"}, "id": 16, "jsonrpc": "2.0"}} },
+        { "request": {"method": "POST", "mcp2026": true, "body": {"jsonrpc": "2.0", "id": 17, "method": "resources/read", "params": {"uri": "skill://hello-world"}}},
+          "expect": {"status": 200, "json": {"error": {"code": -32602, "message": "Invalid resource URI: skill URI needs skill://<name>/<path>"}, "id": 17, "jsonrpc": "2.0"}} }
+      ],
+      "expectExecuted": []
+    },
+    {
+      "name": "mcp2026_server_auth",
+      "config": {"protocolVersions": ["2026-07-28"], "serverAuth": true},
+      "steps": [
+        { "request": {"method": "GET", "target": "/.well-known/oauth-protected-resource/mcp"},
+          "expect": {"status": 200, "json": {"authorization_servers": ["https://as.example.test"], "bearer_methods_supported": ["header"], "resource": "https://mcp.example.test/mcp", "scopes_supported": ["mcp"]}} },
+        { "request": {"method": "GET", "target": "/.well-known/oauth-protected-resource"},
+          "expect": {"status": 200, "json": {"authorization_servers": ["https://as.example.test"], "bearer_methods_supported": ["header"], "resource": "https://mcp.example.test/mcp", "scopes_supported": ["mcp"]}} },
+        { "request": {"method": "POST", "mcp2026": true, "body": {"jsonrpc": "2.0", "id": 1, "method": "server/discover"}},
+          "expect": {"status": 401, "headers": {"WWW-Authenticate": "Bearer resource_metadata=\"https://mcp.example.test/.well-known/oauth-protected-resource/mcp\", scope=\"mcp\""}, "json": {"error": "unauthorized"}} },
+        { "request": {"method": "POST", "mcp2026": true, "body": {"jsonrpc": "2.0", "id": 2, "method": "server/discover"}, "token": "Bearer forged"},
+          "expect": {"status": 401, "headers": {"WWW-Authenticate": "Bearer resource_metadata=\"https://mcp.example.test/.well-known/oauth-protected-resource/mcp\", scope=\"mcp\", error=\"invalid_token\""}, "json": {"error": "unauthorized"}} },
+        { "request": {"method": "POST", "mcp2026": true, "body": {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "wipe", "arguments": {}}}, "token": "Bearer jwt-alice"},
+          "expect": {"status": 403, "headers": {"WWW-Authenticate": "Bearer resource_metadata=\"https://mcp.example.test/.well-known/oauth-protected-resource/mcp\", scope=\"mcp mcp:admin\", error=\"insufficient_scope\""}, "json": {"error": "unauthorized"}} },
+        { "request": {"method": "POST", "mcp2026": true, "body": {"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {"name": "whoami", "arguments": {}}}, "token": "Bearer jwt-alice"},
+          "expect": {"status": 200, "json": {"id": 4, "jsonrpc": "2.0", "result": {"_meta": {"io.modelcontextprotocol/serverInfo": {"name": "toolnexus", "version": "0.1.0"}}, "content": [{"text": "alice|", "type": "text"}], "resultType": "complete"}}} },
+        { "request": {"method": "POST", "mcp2026": true, "body": {"jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": {"name": "wipe", "arguments": {}}}, "token": "Bearer jwt-admin"},
+          "expect": {"status": 200, "json": {"id": 5, "jsonrpc": "2.0", "result": {"_meta": {"io.modelcontextprotocol/serverInfo": {"name": "toolnexus", "version": "0.1.0"}}, "content": [{"text": "wiped", "type": "text"}], "resultType": "complete"}}} },
+        { "request": {"method": "POST", "mcp2026": true, "body": {"jsonrpc": "2.0", "id": 6, "method": "tools/list"}, "headers": {"Mcp-Method": "x"}},
+          "expect": {"status": 400, "json": {"error": {"code": -32020, "message": "Header mismatch: Mcp-Method header value 'x' does not match body value 'tools/list'"}, "id": 6, "jsonrpc": "2.0"}} }
+      ],
+      "expectExecuted": ["whoami", "wipe"]
+    },
+    {
+      "name": "mcp2026_mixed_with_legacy",
+      "config": {"protocolVersions": ["2026-07-28", "2025-06-18"], "stateless": true},
+      "steps": [
+        { "request": {"method": "POST", "body": {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2026-07-28"}}},
+          "expect": {"status": 200, "json": {"id": 1, "jsonrpc": "2.0", "result": {"capabilities": {"tools": {"listChanged": true}}, "protocolVersion": "2025-06-18", "serverInfo": {"name": "toolnexus", "version": "0.1.0"}}}} },
+        { "request": {"method": "POST", "version": "2025-06-18", "body": {"jsonrpc": "2.0", "id": 2, "method": "ping"}},
+          "expect": {"status": 200, "json": {"id": 2, "jsonrpc": "2.0", "result": {}}} },
+        { "request": {"method": "POST", "mcp2026": true, "body": {"jsonrpc": "2.0", "id": 3, "method": "ping"}},
+          "expect": {"status": 200, "json": {"id": 3, "jsonrpc": "2.0", "result": {"_meta": {"io.modelcontextprotocol/serverInfo": {"name": "toolnexus", "version": "0.1.0"}}, "resultType": "complete"}}} },
+        { "request": {"method": "POST", "body": {"jsonrpc": "2.0", "id": 4, "method": "server/discover"}},
+          "expect": {"status": 400, "json": {"error": {"code": -32020, "message": "Header mismatch: MCP-Protocol-Version header missing"}, "id": 4, "jsonrpc": "2.0"}} },
+        { "request": {"method": "POST", "version": "2025-06-18", "body": {"jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": {"name": "nope", "arguments": {}}}},
+          "expect": {"status": 200, "json": {"error": {"code": -32602, "message": "tool not found: nope"}, "id": 5, "jsonrpc": "2.0"}} }
+      ],
+      "expectExecuted": []
+    },
+    {
+      "name": "mcp2026_not_enabled_by_default",
+      "config": {"stateless": true},
+      "steps": [
+        { "request": {"method": "POST", "mcp2026": true, "body": {"jsonrpc": "2.0", "id": 1, "method": "server/discover"}},
+          "expect": {"status": 400} }
       ],
       "expectExecuted": []
     }

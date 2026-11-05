@@ -12,6 +12,19 @@
 //! The transport is JSON-RPC over HTTP written by hand (no rmcp server types in
 //! the public API): tools resolve per request, and a confirm elicitation rides
 //! the SAME POST's SSE response (protocol 2025-06-18).
+//!
+//! MCP 2026-07-28 (SPEC §7C.2, ADR 0040) is opt-in: list `"2026-07-28"` in
+//! [`McpHandlerConfig::protocol_versions`]. That stateless wire (server/discover,
+//! header validation, MRTR, the skills extension) lives in `v2026`; bearer-token
+//! protection in [`McpServerAuth`]. Bring your own authorization server; the
+//! auto-approving dev authorization server the suite uses is test tooling
+//! (`tests/common_dev_auth`), not part of the library.
+
+mod server_auth;
+mod v2026;
+
+pub use server_auth::{McpAuthMetadata, McpPrincipal, McpServerAuth, VerifyTokenFn};
+pub use v2026::{MCP_PROTOCOL_2026, MCP_SKILLS_EXTENSION, McpSkill, McpSkillFile, load_mcp_skills};
 
 use std::any::Any;
 use std::collections::HashMap;
@@ -35,7 +48,9 @@ use crate::toolkit::Toolkit;
 
 /// The MCP protocol versions whose wire [`McpHandler`] implements (ADR 0039).
 /// Configured versions outside this list are dropped.
-pub const MCP_HANDLER_IMPLEMENTED_VERSIONS: &[&str] = &["2025-11-25", "2025-06-18"];
+/// `2026-07-28` is opt-in only (never a default) and is served by the
+/// stateless wire of SPEC §7C.2; `initialize` never negotiates it.
+pub const MCP_HANDLER_IMPLEMENTED_VERSIONS: &[&str] = &["2026-07-28", "2025-11-25", "2025-06-18"];
 const DEFAULT_VERSIONS: &[&str] = &["2025-06-18"];
 const DEFAULT_NAME: &str = "toolnexus";
 const DEFAULT_VERSION: &str = "0.1.0";
@@ -281,8 +296,38 @@ impl std::fmt::Debug for McpCallEvent {
 
 type Ctx = Arc<McpRequestContext>;
 
-/// `authenticate`: an error ⇒ HTTP 401.
-pub type AuthenticateFn = Arc<dyn Fn(Ctx) -> BoxFuture<Result<McpIdentity, String>> + Send + Sync>;
+/// An `authenticate` failure. Any error ⇒ a plain HTTP 401; an
+/// [`McpAuthError`] (downcast) ⇒ its status, its challenge as
+/// `WWW-Authenticate` and the body `{"error":"unauthorized"}` (both wires).
+/// `"msg".into()` builds a plain one.
+pub type McpAuthFailure = Box<dyn std::error::Error + Send + Sync>;
+
+/// An `authenticate` failure with an explicit HTTP status and challenge
+/// ([`McpServerAuth`] returns it). `status` 0 ⇒ 401. A non-empty
+/// `www_authenticate` hook result wins over `challenge`. `reason` never
+/// reaches the wire.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct McpAuthError {
+    pub status: u16,
+    pub challenge: String,
+    pub reason: String,
+}
+
+impl std::fmt::Display for McpAuthError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(if self.reason.is_empty() {
+            "unauthorized"
+        } else {
+            &self.reason
+        })
+    }
+}
+
+impl std::error::Error for McpAuthError {}
+
+/// `authenticate`: an error ⇒ HTTP 401 (see [`McpAuthFailure`]).
+pub type AuthenticateFn =
+    Arc<dyn Fn(Ctx) -> BoxFuture<Result<McpIdentity, McpAuthFailure>> + Send + Sync>;
 /// `www_authenticate(ctx, err)`: the `WWW-Authenticate` value ("" ⇒ omitted).
 pub type WwwAuthenticateFn = Arc<dyn Fn(&McpRequestContext, &str) -> String + Send + Sync>;
 pub type ServerInfoFn = Arc<dyn Fn(&McpRequestContext) -> McpServerInfo + Send + Sync>;
@@ -297,6 +342,8 @@ pub type ReadResourceFn =
     Arc<dyn Fn(Ctx, String) -> BoxFuture<Result<Vec<McpResourceContent>, String>> + Send + Sync>;
 pub type ListPromptsFn =
     Arc<dyn Fn(Ctx) -> BoxFuture<Result<Vec<McpPrompt>, String>> + Send + Sync>;
+/// `list_skills`: the skills published through the SEP-2640 skills extension.
+pub type ListSkillsFn = Arc<dyn Fn(Ctx) -> BoxFuture<Result<Vec<McpSkill>, String>> + Send + Sync>;
 pub type GetPromptFn = Arc<
     dyn Fn(Ctx, String, HashMap<String, String>) -> BoxFuture<Result<McpPromptResult, String>>
         + Send
@@ -332,6 +379,10 @@ pub struct McpHandlerConfig {
     pub read_resource: Option<ReadResourceFn>,
     pub list_prompts: Option<ListPromptsFn>,
     pub get_prompt: Option<GetPromptFn>,
+    /// The SEP-2640 skills extension on the 2026-07-28 wire (skills/list,
+    /// skills/get, resources/read of `skill://` URIs). `None` ⇒ not
+    /// advertised. [`load_mcp_skills`] builds the list from a directory.
+    pub list_skills: Option<ListSkillsFn>,
     /// Replaces the default in-memory session set.
     pub session_ids: Option<Arc<dyn McpSessionIds>>,
     /// Issue and check no session id; confirm never elicits.
@@ -371,7 +422,10 @@ struct Inner {
     tk: Toolkit,
     cfg: McpHandlerConfig,
     ids: Arc<dyn McpSessionIds>,
+    /// Every accepted version, newest first.
     versions: Vec<String>,
+    /// `versions` minus 2026-07-28: the initialize / session wire.
+    legacy: Vec<String>,
     confirm_timeout: Duration,
     max_body: usize,
     caps: Mutex<HashMap<String, bool>>,
@@ -401,6 +455,11 @@ impl Toolkit {
         if versions.is_empty() {
             versions = DEFAULT_VERSIONS.iter().map(|s| s.to_string()).collect();
         }
+        let legacy: Vec<String> = versions
+            .iter()
+            .filter(|v| *v != MCP_PROTOCOL_2026)
+            .cloned()
+            .collect();
         let ids = cfg
             .session_ids
             .clone()
@@ -410,6 +469,7 @@ impl Toolkit {
                 tk: self.clone(),
                 ids,
                 versions,
+                legacy,
                 confirm_timeout: cfg
                     .confirm_timeout
                     .filter(|d| !d.is_zero())
@@ -430,6 +490,30 @@ impl Toolkit {
 }
 
 // ── responses ────────────────────────────────────────────────────────────
+
+/// Read a POST body under the size cap: too large ⇒ 413, a read failure ⇒
+/// JSON-RPC -32700.
+async fn read_body<B>(body: B, max: usize) -> Result<Bytes, Box<Response<McpBody>>>
+where
+    B: Body + Send + 'static,
+    B::Data: Send,
+    B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+{
+    match Limited::new(body, max).collect().await {
+        Ok(b) => Ok(b.to_bytes()),
+        Err(e) => {
+            if e.downcast_ref::<http_body_util::LengthLimitError>()
+                .is_some()
+            {
+                return Err(Box::new(plain_error(
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "Request Entity Too Large",
+                )));
+            }
+            Err(Box::new(rpc_error_response(None, -32700, "read error")))
+        }
+    }
+}
 
 fn plain_error(status: StatusCode, msg: &str) -> Response<McpBody> {
     let mut r = Response::new(Full::new(Bytes::from(format!("{msg}\n"))).boxed());
@@ -581,23 +665,54 @@ impl McpHandler {
             meta: None,
         };
         let h = &self.inner;
-        if let Some(auth) = &h.cfg.authenticate {
-            match auth(Arc::new(rc.clone())).await {
-                Ok(id) => rc.identity = Some(id),
-                Err(e) => {
-                    let mut r = plain_error(StatusCode::UNAUTHORIZED, "Unauthorized");
-                    if let Some(w) = &h.cfg.www_authenticate {
-                        let v = w(&rc, &e);
-                        if let (false, Ok(hv)) = (v.is_empty(), HeaderValue::from_str(&v)) {
-                            r.headers_mut().insert("www-authenticate", hv);
-                        }
-                    }
+        let is_json = {
+            let ct = rc.header("content-type");
+            ct.split(';')
+                .next()
+                .unwrap_or("")
+                .trim()
+                .eq_ignore_ascii_case("application/json")
+        };
+        let mut body = Some(body);
+        let mut pre: Option<Result<Bytes, Box<Response<McpBody>>>> = None;
+        if parts.method == Method::POST && self.has_2026() && is_json {
+            let read = read_body(body.take().expect("body"), h.max_body).await;
+            if let Ok(bytes) = &read {
+                if let Some(r) = self.try_2026(&rc, bytes).await {
                     return r;
                 }
             }
+            pre = Some(read);
+        }
+        if self.only_2026() && parts.method != Method::POST {
+            let mut r = plain_error(StatusCode::METHOD_NOT_ALLOWED, "Method Not Allowed");
+            r.headers_mut()
+                .insert("allow", HeaderValue::from_static("POST"));
+            return r;
+        }
+        if let Some(auth) = &h.cfg.authenticate {
+            match auth(Arc::new(rc.clone())).await {
+                Ok(id) => rc.identity = Some(id),
+                Err(e) => return self.auth_failure(&rc, e),
+            }
         }
         match parts.method {
-            Method::POST => self.handle_post(rc, body).await,
+            Method::POST => {
+                if !is_json {
+                    return plain_error(
+                        StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                        "Unsupported Media Type: must be application/json",
+                    );
+                }
+                let read = match pre {
+                    Some(r) => r,
+                    None => read_body(body.take().expect("body"), h.max_body).await,
+                };
+                match read {
+                    Ok(b) => self.handle_post(rc, b).await,
+                    Err(r) => *r,
+                }
+            }
             Method::GET => self.handle_get(rc).await,
             Method::DELETE => self.handle_delete(rc).await,
             _ => {
@@ -609,6 +724,35 @@ impl McpHandler {
         }
     }
 
+    /// Answer an `authenticate` failure (both wires): an [`McpAuthError`] ⇒
+    /// its status + challenge + `{"error":"unauthorized"}`; else plain 401.
+    fn auth_failure(&self, rc: &McpRequestContext, e: McpAuthFailure) -> Response<McpBody> {
+        let mut challenge = match &self.inner.cfg.www_authenticate {
+            Some(w) => w(rc, &e.to_string()),
+            None => String::new(),
+        };
+        let mut r = if let Some(ae) = e.downcast_ref::<McpAuthError>() {
+            if challenge.is_empty() {
+                challenge = ae.challenge.clone();
+            }
+            let status = StatusCode::from_u16(if ae.status == 0 { 401 } else { ae.status })
+                .unwrap_or(StatusCode::UNAUTHORIZED);
+            let mut r = Response::new(
+                Full::new(Bytes::from_static(b"{\"error\":\"unauthorized\"}")).boxed(),
+            );
+            *r.status_mut() = status;
+            r.headers_mut()
+                .insert("content-type", HeaderValue::from_static("application/json"));
+            r
+        } else {
+            plain_error(StatusCode::UNAUTHORIZED, "Unauthorized")
+        };
+        if let (false, Ok(hv)) = (challenge.is_empty(), HeaderValue::from_str(&challenge)) {
+            r.headers_mut().insert("www-authenticate", hv);
+        }
+        r
+    }
+
     /// Validate the `MCP-Protocol-Version` header and (stateful) the session.
     async fn check_session(
         &self,
@@ -616,7 +760,7 @@ impl McpHandler {
     ) -> Result<McpRequestContext, Box<Response<McpBody>>> {
         let h = &self.inner;
         let v = rc.header("mcp-protocol-version");
-        if !v.is_empty() && !h.versions.iter().any(|x| x == v) {
+        if !v.is_empty() && !h.legacy.iter().any(|x| x == v) {
             return Err(Box::new(plain_error(
                 StatusCode::BAD_REQUEST,
                 "Bad Request: unsupported MCP-Protocol-Version",
@@ -644,37 +788,8 @@ impl McpHandler {
         }
     }
 
-    async fn handle_post<B>(&self, rc: McpRequestContext, body: B) -> Response<McpBody>
-    where
-        B: Body + Send + 'static,
-        B::Data: Send,
-        B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
-    {
+    async fn handle_post(&self, rc: McpRequestContext, body: Bytes) -> Response<McpBody> {
         let h = &self.inner;
-        let ct = rc.header("content-type");
-        let mt = ct
-            .split(';')
-            .next()
-            .unwrap_or("")
-            .trim()
-            .to_ascii_lowercase();
-        if mt != "application/json" {
-            return plain_error(
-                StatusCode::UNSUPPORTED_MEDIA_TYPE,
-                "Unsupported Media Type: must be application/json",
-            );
-        }
-        let body = match Limited::new(body, h.max_body).collect().await {
-            Ok(b) => b.to_bytes(),
-            Err(e) => {
-                if e.downcast_ref::<http_body_util::LengthLimitError>()
-                    .is_some()
-                {
-                    return plain_error(StatusCode::PAYLOAD_TOO_LARGE, "Request Entity Too Large");
-                }
-                return rpc_error_response(None, -32700, "read error");
-            }
-        };
         let text = String::from_utf8_lossy(&body);
         if text.trim_start().starts_with('[') {
             // JSON-RPC batching was removed in protocol 2025-06-18.
@@ -760,10 +875,10 @@ impl McpHandler {
             .get("protocolVersion")
             .and_then(Value::as_str)
             .unwrap_or("");
-        let version = if h.versions.iter().any(|v| v == asked) {
+        let version = if h.legacy.iter().any(|v| v == asked) {
             asked.to_owned()
         } else {
-            h.versions[0].clone()
+            h.legacy.first().cloned().unwrap_or_default()
         };
         let id = msg.id.clone().unwrap_or(Value::Null);
         let sid;

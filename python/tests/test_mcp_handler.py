@@ -483,7 +483,8 @@ async def test_protocol_versions_per_handler():
             list_tools=lambda ctx: [ttool("a")],
         )
     )
-    assert newer.versions == ["2025-11-25", "2025-06-18"]
+    # 2025-03-26 dropped; 2026-07-28 accepted but initialize never negotiates it (§7C.2)
+    assert newer.versions == ["2026-07-28", "2025-11-25", "2025-06-18"]
     with running(default) as d, running(newer) as n:
         assert '"protocolVersion":"2025-06-18"' in (await raw_post(d, "", init_body("2025-11-25"))).text
         assert (await raw_post(d, "", '{"jsonrpc":"2.0","id":2,"method":"ping"}', {"MCP-Protocol-Version": "2025-11-25"})).status_code == 400

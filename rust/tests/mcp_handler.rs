@@ -52,7 +52,7 @@ fn bearer_auth() -> AuthenticateFn {
         Box::pin(async move {
             match tok.as_str() {
                 "alice" | "bob" => Ok(Arc::new(User(tok)) as McpIdentity),
-                _ => Err("bad token".to_owned()),
+                _ => Err("bad token".into()),
             }
         })
     })

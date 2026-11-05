@@ -31,13 +31,23 @@
   (:require [clojure.string :as str]
             [koine.json :as json]
             [koine.process :as proc]
+            [koine.codec :as codec]
+            [koine.fs :as fs]
             [koine.time :as ktime]
+            [toolnexus.frontmatter :as frontmatter]
+            [toolnexus.mcp-crypto :as crypto]
             [toolnexus.serve :as serve]
             [toolnexus.tool :as tool]))
 
+(def protocol-2026
+  "The MCP 2026-07-28 wire (SPEC §7C.2) — opt-in only, never a default."
+  "2026-07-28")
+
 (def implemented-versions
-  "MCP protocol versions whose wire this handler implements (ADR 0039)."
-  ["2025-11-25" "2025-06-18"])
+  "MCP protocol versions whose wire this handler implements (ADR 0039/0040).
+  2026-07-28 is the stateless wire of SPEC §7C.2 and is served only when listed
+  in `:protocol-versions`."
+  ["2026-07-28" "2025-11-25" "2025-06-18"])
 
 (def ^:private default-versions ["2025-06-18"])
 (def ^:private default-name "toolnexus")
@@ -51,6 +61,25 @@
 (defn mcp-request      "The inbound Ring request." [ctx] (:request ctx))
 (defn mcp-session-id   "The Mcp-Session-Id of the request (\"\" if none)." [ctx] (or (:session-id ctx) ""))
 (defn mcp-request-meta "The JSON-RPC request's `params._meta` (nil when absent)." [ctx] (:meta ctx))
+
+;; ---------------------------------------------------------------------------
+;; MCPAuthError — an :authenticate failure with an explicit status + challenge
+;; ---------------------------------------------------------------------------
+
+(defn mcp-auth-error
+  "SPEC §7C.2 `MCPAuthError`: THROW this from any `:authenticate` hook to answer
+  `status` (401|403; nil ⇒ 401) with `WWW-Authenticate: challenge` (a non-empty
+  `:www-authenticate` result wins) and the body `{\"error\":\"unauthorized\"}`,
+  on both wires. `reason` is the exception message and never reaches the wire."
+  ([status challenge] (mcp-auth-error status challenge nil))
+  ([status challenge reason]
+   (ex-info (or (not-empty reason) "unauthorized")
+            {:toolnexus/mcp-auth-error true :status status :challenge challenge})))
+
+(defn mcp-auth-error?
+  "True when `e` is an `mcp-auth-error`."
+  [e]
+  (true? (:toolnexus/mcp-auth-error (ex-data e))))
 
 ;; ---------------------------------------------------------------------------
 ;; small helpers
@@ -160,10 +189,10 @@
 (defn- check-session
   "[:ok ctx sid] or [:fail ring-response] — MCP-Protocol-Version, then (stateful)
   Mcp-Session-Id presence (400) and validity (404)."
-  [{:keys [cfg ids versions]} ctx req]
+  [{:keys [cfg ids legacy]} ctx req]
   (let [v (header req "mcp-protocol-version")]
     (cond
-      (and (seq v) (not (some #{v} versions)))
+      (and (seq v) (not (some #{v} legacy)))
       [:fail (text-response 400 "Bad Request: unsupported MCP-Protocol-Version")]
 
       (:stateless cfg) [:ok ctx ""]
@@ -357,9 +386,12 @@
 (defn- media-type [ct]
   (str/lower-case (str/trim (first (str/split (str (or ct "")) #";")))))
 
-(defn- handle-initialize [{:keys [cfg ids versions] :as h} ctx msg]
+(defn- handle-initialize [{:keys [cfg ids legacy] :as h} ctx msg]
   (let [p       (when (map? (:params msg)) (:params msg))
-        version (if (some #{(:protocolVersion p)} versions) (:protocolVersion p) (first versions))
+        ;; initialize NEVER negotiates 2026-07-28 (§7C.2): legacy versions only
+        version (if (some #{(:protocolVersion p)} legacy)
+                  (:protocolVersion p)
+                  (or (first legacy) (first default-versions)))
         gen     (when-not (:stateless cfg)
                   (try [:ok ((:generate ids) ctx)] (catch Throwable _ [:err])))]
     (if (= :err (first gen))
@@ -489,23 +521,503 @@
               (swap! (:streams h) (fn [ss] (set (remove #(= sid (:sid %)) ss))))
               {:status 200 :headers {} :body ""}))))))
 
+(defn- write-auth-failure
+  "Answer an :authenticate failure (both wires): an `mcp-auth-error` with its
+  status + challenge and a JSON body; anything else the §7C.1 plain 401."
+  [cfg req e]
+  (let [www (when-let [f (:www-authenticate cfg)]
+              (try (f req e) (catch Throwable _ nil)))]
+    (if (mcp-auth-error? e)
+      (let [{:keys [status challenge]} (ex-data e)
+            ch (if (seq www) www challenge)]
+        {:status  (if (pos? (or status 0)) status 401)
+         :headers (cond-> {"Content-Type" "application/json"}
+                    (seq ch) (assoc "WWW-Authenticate" ch))
+         :body    "{\"error\":\"unauthorized\"}"})
+      (cond-> (text-response 401 "Unauthorized")
+        (seq www) (assoc-in [:headers "WWW-Authenticate"] www)))))
+
+(declare handle-post-2026 only-2026?)
+
 (defn- ring-handler [{:keys [cfg] :as h}]
   (fn [req]
     (let [ctx    {:request req :session-id ""}
           method (keyword (str/lower-case (name (or (:request-method req) (:method req) :get))))
-          auth   (when-let [f (:authenticate cfg)]
-                   (try [:ok (f req)] (catch Throwable e [:err e])))]
-      (if (= :err (first auth))
-        (let [www (when-let [f (:www-authenticate cfg)]
-                    (try (f req (second auth)) (catch Throwable _ nil)))]
-          (cond-> (text-response 401 "Unauthorized")
-            (seq www) (assoc-in [:headers "WWW-Authenticate"] www)))
-        (let [ctx (cond-> ctx auth (assoc :identity (second auth)))]
-          (case method
-            :post   (handle-post h ctx req)
-            :get    (handle-get h ctx req)
-            :delete (handle-delete h ctx req)
-            (assoc-in (text-response 405 "Method Not Allowed") [:headers "Allow"] "GET, POST, DELETE")))))))
+          ;; the 2026 profile reads the body first; hand the string on
+          req    (if (and (= :post method) (some #{protocol-2026} (:versions h)) (not (string? (:body req))))
+                   (assoc req :body (body-string req))
+                   req)
+          r2026  (when (and (= :post method) (some #{protocol-2026} (:versions h)))
+                   (handle-post-2026 h ctx req))]
+      (cond
+        r2026 r2026
+
+        (and (only-2026? h) (not= :post method))
+        (assoc-in (text-response 405 "Method Not Allowed") [:headers "Allow"] "POST")
+
+        :else
+        (let [auth (when-let [f (:authenticate cfg)]
+                     (try [:ok (f req)] (catch Throwable e [:err e])))]
+          (if (= :err (first auth))
+            (write-auth-failure cfg req (second auth))
+            (let [ctx (cond-> ctx auth (assoc :identity (second auth)))]
+              (case method
+                :post   (handle-post h ctx req)
+                :get    (handle-get h ctx req)
+                :delete (handle-delete h ctx req)
+                (assoc-in (text-response 405 "Method Not Allowed") [:headers "Allow"] "GET, POST, DELETE")))))))))
+
+;; ---------------------------------------------------------------------------
+;; MCP 2026-07-28 (SPEC §7C.2, ADR 0040) — the stateless wire, opt-in
+;; ---------------------------------------------------------------------------
+;;
+;; Mirrors golang/mcphandler2026.go. No initialize, no Mcp-Session-Id, no
+;; server→client request, no GET stream. A confirm decision and a §10 tool
+;; suspension leave as an MRTR `input_required` result; the client's retry
+;; carries `inputResponses` and the echoed `requestState`.
+
+(def ^:private meta-version     (keyword "io.modelcontextprotocol/protocolVersion"))
+(def ^:private meta-client-caps (keyword "io.modelcontextprotocol/clientCapabilities"))
+(def ^:private meta-server-info (keyword "io.modelcontextprotocol/serverInfo"))
+
+(def skills-extension
+  "The SEP-2640 skills extension id advertised by server/discover."
+  "io.modelcontextprotocol/skills")
+
+(defn- only-2026? [h] (= [protocol-2026] (:versions h)))
+
+(defn- kname
+  "A JSON object key back to its string (keywords keep a namespace part)."
+  [k]
+  (if (keyword? k) (subs (str k) 1) (str k)))
+
+(defn- route-2026?
+  "Is this POST served on the 2026 profile? (§7C.2 Routing, pinned.)"
+  [h req method meta]
+  (cond
+    (not (some #{protocol-2026} (:versions h))) false
+    (empty? (:legacy h)) true
+    (= "initialize" method) false
+    :else
+    (let [hv (str (or (header req "mcp-protocol-version") ""))]
+      (cond
+        (= hv protocol-2026) true
+        (and (seq hv) (some #{hv} (:legacy h))) false
+        :else (or (= "server/discover" method)
+                  (seq (header req "mcp-method"))
+                  (and (map? meta) (contains? meta meta-version)))))))
+
+(defn decode-header-value
+  "An Mcp-Name header value with the `=?base64?<std-base64>?=` sentinel decoded
+  (SPEC §2.3). [value ok?] — an absent / empty header is [\"\" false]."
+  [v]
+  (let [v (str (or v ""))]
+    (if (and (str/starts-with? v "=?base64?") (str/ends-with? v "?=") (>= (count v) 11))
+      (if-let [d (crypto/b64-std-decode (subs v 9 (- (count v) 2)))]
+        [d true]
+        ["" false])
+      [v (not= "" v)])))
+
+(defn- err26
+  ([code msg] (err26 code msg nil nil))
+  ([code msg status] (err26 code msg status nil))
+  ([code msg status data] {:code code :message msg :status status :data data}))
+
+(defn- validate-2026
+  "§7C.2 header validation, in order; nil when the request passes."
+  [req method params meta]
+  (let [mismatch (fn [m] (err26 -32020 (str "Header mismatch: " m) 400))
+        hv       (str (or (header req "mcp-protocol-version") ""))
+        hm       (str (or (header req "mcp-method") ""))
+        mv       (let [x (when (map? meta) (get meta meta-version))] (if (string? x) x ""))
+        name-err (when (#{"tools/call" "prompts/get" "resources/read"} method)
+                   (let [k        (if (= "resources/read" method) :uri :name)
+                         want     (let [x (when (map? params) (get params k))] (if (string? x) x ""))
+                         [got ok] (decode-header-value (header req "mcp-name"))]
+                     (when (or (not ok) (not= got want))
+                       (mismatch (str "Mcp-Name header value '" got "' does not match body value '" want "'")))))]
+    (cond
+      (= "" hv) (mismatch "MCP-Protocol-Version header missing")
+
+      (not= hm method)
+      (mismatch (str "Mcp-Method header value '" hm "' does not match body value '" method "'"))
+
+      name-err name-err
+
+      (not= mv hv)
+      (mismatch (str "MCP-Protocol-Version header value '" hv "' does not match _meta value '" mv "'"))
+
+      (not= mv protocol-2026)
+      (err26 -32022 "Unsupported protocol version" 400 {:supported [protocol-2026] :requested mv})
+
+      :else nil)))
+
+(defn- info-2026 [{:keys [cfg]} ctx]
+  (let [info (if-let [f (:server-info cfg)]
+               (f ctx)
+               (select-keys cfg [:name :title :version :instructions]))]
+    (assoc info
+           :name (if (seq (:name info)) (:name info) default-name)
+           :version (if (seq (:version info)) (:version info) default-version))))
+
+(defn- complete-26
+  "Stamp `resultType` and `_meta[serverInfo]` (merged into any `_meta`)."
+  [h ctx m result-type]
+  (let [info (info-2026 h ctx)
+        meta (if (map? (:_meta m)) (:_meta m) {})]
+    (assoc m
+           :_meta (assoc meta meta-server-info (omit-empty (select-keys info [:name :title :version])))
+           :resultType result-type)))
+
+(defn- cache-scope [{:keys [cfg]}] (if (:authenticate cfg) "private" "public"))
+
+(defn- skills-26 [{:keys [cfg]} ctx]
+  (vec (sort-by :name tool/compare-strings ((:list-skills cfg) ctx))))
+
+(defn- skill-frontmatter [s]
+  (if (some? (:frontmatter s)) (:frontmatter s) {:name (:name s)}))
+
+(defn- skill-uri [s] (str "skill://" (:name s) "/SKILL.md"))
+
+(defn- skill-entry [s]
+  {:uri         (skill-uri s)
+   :frontmatter (skill-frontmatter s)
+   :resources   (mapv (fn [f]
+                        (let [vs (crypto/utf8-vals (:text f))]
+                          {:uri    (str "skill://" (:name s) "/" (:path f))
+                           :digest (str "sha256:" (crypto/hex (crypto/sha256 vs)))
+                           :size   (count vs)}))
+                      (sort-by :path tool/compare-strings (:files s)))})
+
+(defn parse-skill-uri
+  "SPEC §2.7 containment for `skill://<name>/<path>`: [name rel] or throws
+  ex-info whose message is the §7C.2 reason."
+  [uri]
+  (let [uri (str uri)]
+    (when-not (str/starts-with? uri "skill://")
+      (throw (ex-info "not a skill:// URI" {})))
+    (let [dec (try (crypto/url-decode (subs uri 8))
+                   (catch Throwable _ (throw (ex-info "bad percent-encoding" {}))))]
+      (when (some (fn [c] (or (= c \%) (= c \\) (= (int c) 0))) dec)
+        (throw (ex-info "skill URI has encoded, backslash or NUL characters" {})))
+      (let [segs (str/split dec #"/" -1)]
+        (when (< (count segs) 2)
+          (throw (ex-info "skill URI needs skill://<name>/<path>" {})))
+        (when (some (fn [s] (or (= "" s) (= "." s) (= ".." s) (str/includes? s ":"))) segs)
+          (throw (ex-info "skill URI path escapes the skill (empty, '.', '..' or ':' segment)" {})))
+        [(first segs) (str/join "/" (rest segs))]))))
+
+;; requestState — base64url-nopad(compact JSON {"tool":…[,"confirmed":true]})
+
+(defn- encode-state [tool-name confirmed?]
+  (crypto/b64url (str "{\"tool\":" (json/write-str tool-name)
+                      (when confirmed? ",\"confirmed\":true") "}")))
+
+(defn- decode-state [v]
+  (when (string? v)
+    (try
+      (let [m (json/read-str (crypto/vals->utf8 (crypto/b64url-decode-vals v)))]
+        (when (map? m)
+          {:tool (let [t (:tool m)] (if (string? t) t ""))
+           :confirmed (true? (:confirmed m))}))
+      (catch Throwable _ nil))))
+
+(defn- input-response
+  "One MRTR input response -> a §10 Answer, or nil."
+  [k v]
+  (when (map? v)
+    (let [action (:action v)
+          ok     (= "accept" action)]
+      (cond-> {:id (kname k) :ok ok}
+        (map? (:content v)) (assoc :data (:content v))
+        (not ok)            (assoc :reason (if (= "decline" action) "declined" "cancelled"))))))
+
+(defn- can-elicit-26? [meta]
+  (let [caps (when (map? meta) (get meta meta-client-caps))]
+    (and (map? caps) (contains? caps :elicitation))))
+
+(defn- input-request
+  "A §10 Request -> an MRTR input request (URL-mode for authorization + url)."
+  [r]
+  (if (and (= "authorization" (:kind r)) (seq (:url r)))
+    {:method "elicitation/create"
+     :params {:mode "url" :message (str (or (:prompt r) "")) :url (:url r) :elicitationId (:id r)}}
+    {:method "elicitation/create"
+     :params {:mode "form" :message (str (or (:prompt r) ""))
+              :requestedSchema (let [s (get-in r [:data :schema])]
+                                 (if (map? s) s {:type "object" :properties {}}))}}))
+
+(defn- call-tool-2026 [h ctx params meta]
+  (let [{:keys [cfg]} h
+        nm    (let [x (when (map? params) (:name params))] (if (string? x) x ""))
+        tools (try [:ok (list-tools h ctx)] (catch Throwable e [:err (msg-of e)]))]
+    (if (= :err (first tools))
+      [nil (err26 -32603 (second tools))]
+      (let [t (first (filter #(= nm (:name %)) (second tools)))]
+        (if (or (nil? t) (not (fn? (:execute t))))
+          [nil (err26 -32602 (str "Unknown tool: " nm))]
+          (let [started (ktime/mono-ms)
+                ev      (atom {:name (:name t) :source (:source t) :decision :allow
+                               :identity (:identity ctx) :session-id ""})
+                finish  (fn [m is-err err]
+                          (let [e (swap! ev assoc :ms (- (ktime/mono-ms) started) :is-error (true? is-err)
+                                         :err err :result-bytes (utf8-count (json/write-str m)))]
+                            (when-let [f (:on-call cfg)]
+                              (try (f e) (catch Throwable _ nil)))
+                            [m nil]))
+                result  (fn [res err]
+                          (finish (complete-26 h ctx (serve/tool-result->mcp res) "complete")
+                                  (:isError res) err))
+                has-args (and (map? params) (contains? params :arguments) (some? (:arguments params)))
+                args    (:arguments params)]
+            (if (and has-args (not (map? args)))
+              (result {:output "invalid arguments: must be an object" :isError true} nil)
+              (let [args      (or args {})
+                    st        (decode-state (:requestState params))
+                    st        (when (and st (= nm (:tool st))) st)
+                    responses (let [r (:inputResponses params)] (when (map? r) r))
+                    ;; [:return v] ends the call; [:run confirmed? responses] runs it
+                    gate      (if-let [bc (:before-call cfg)]
+                                (let [d    (try (or (bc ctx t args) {:kind :allow})
+                                                (catch Throwable e {:kind :deny :message (msg-of e)}))
+                                      kind (decision-kind (:kind d))]
+                                  (swap! ev assoc :decision kind)
+                                  (case kind
+                                    :deny
+                                    [:return (if (:result d)
+                                               (result (:result d) nil)
+                                               (result {:output (if (seq (:message d)) (:message d) "denied")
+                                                        :isError true} nil))]
+
+                                    :confirm
+                                    (let [ans (when st (input-response :confirm (:confirm responses)))]
+                                      (cond
+                                        (and st (:confirmed st)) [:run true responses]
+
+                                        ans
+                                        (if (or (not (:ok ans)) (false? (get-in ans [:data :confirm])))
+                                          [:return (result {:output "declined" :isError true} nil)]
+                                          [:run true nil]) ; the confirm round is consumed
+
+                                        (not (can-elicit-26? meta))
+                                        [:return (if (:result d)
+                                                   (result (:result d) nil)
+                                                   (result {:output (str "confirmation required: " (or (:message d) ""))
+                                                            :isError true} nil))]
+
+                                        :else
+                                        (let [msg (if (seq (:message d)) (:message d) "Confirm this action?")]
+                                          [:return (finish (complete-26 h ctx
+                                                                        {:inputRequests
+                                                                         {:confirm {:method "elicitation/create"
+                                                                                    :params {:mode "form" :message msg
+                                                                                             :requestedSchema
+                                                                                             {:type "object"
+                                                                                              :properties {:confirm {:type "boolean" :title "Confirm"
+                                                                                                                     :description msg}}}}}}
+                                                                         :requestState (encode-state nm false)}
+                                                                        "input_required")
+                                                           false nil)])))
+
+                                    [:run (boolean (and st (:confirmed st))) responses]))
+                                [:run (boolean (and st (:confirmed st))) responses])]
+                (if (= :return (first gate))
+                  (second gate)
+                  (let [[_ confirmed? responses] gate
+                        answer (when (and st (= 1 (count responses)))
+                                 (let [[k v] (first responses)] (input-response k v)))
+                        tctx   (cond-> ctx answer (assoc :answer answer))
+                        [res err] (run-tool t args tctx)
+                        pending (when-not err (get-in res [:metadata :pending]))]
+                    (if pending
+                      (finish (complete-26 h ctx {:inputRequests {(keyword (str (:id pending))) (input-request pending)}
+                                                  :requestState (encode-state nm confirmed?)}
+                                           "input_required")
+                              false nil)
+                      (result res err))))))))))))
+
+(defn- dispatch-2026 [{:keys [cfg] :as h} ctx method params meta]
+  (let [internal (fn [e] [nil (err26 -32603 (msg-of e))])
+        invalid  (fn [m] [nil (err26 -32602 m)])
+        nf       [nil (err26 -32601 (str "Method not found: " method) 404)]
+        ok       (fn [m] [(complete-26 h ctx m "complete") nil])
+        uri      (let [x (when (map? params) (:uri params))] (if (string? x) x ""))]
+    (case method
+      "server/discover"
+      (let [info (info-2026 h ctx)
+            caps (cond-> {:tools {}}
+                   (or (:list-resources cfg) (:list-skills cfg)) (assoc :resources {})
+                   (:list-prompts cfg) (assoc :prompts {})
+                   (:list-skills cfg)  (assoc :extensions {(keyword skills-extension) {}}))]
+        (ok (cond-> {:supportedVersions [protocol-2026] :capabilities caps
+                     :ttlMs 3600000 :cacheScope "public"}
+              (seq (:instructions info)) (assoc :instructions (:instructions info)))))
+
+      "ping" (ok {})
+
+      "tools/list"
+      (try (ok {:tools (mapv wire-tool (sort-by :name tool/compare-strings (list-tools h ctx)))
+                :ttlMs 60000 :cacheScope (cache-scope h)})
+           (catch Throwable e (internal e)))
+
+      "tools/call" (call-tool-2026 h ctx params meta)
+
+      "skills/list"
+      (if-not (:list-skills cfg) nf
+        (try (ok {:skills (mapv (fn [s] {:uri (skill-uri s) :frontmatter (skill-frontmatter s)}) (skills-26 h ctx))
+                  :ttlMs 60000 :cacheScope (cache-scope h)})
+             (catch Throwable e (internal e))))
+
+      "skills/get"
+      (if-not (:list-skills cfg) nf
+        (let [bad (try (parse-skill-uri uri) nil (catch Throwable e (msg-of e)))]
+          (if bad
+            (invalid (str "Invalid skill URI: " bad))
+            (let [ss (try [:ok (skills-26 h ctx)] (catch Throwable e [:err e]))]
+              (if (= :err (first ss))
+                (internal (second ss))
+                (if-let [s (first (filter #(= uri (skill-uri %)) (second ss)))]
+                  (ok {:skill (skill-entry s)})
+                  (invalid (str "Unknown skill: " uri))))))))
+
+      "resources/list"
+      (if-not (:list-resources cfg) nf
+        (try (ok {:resources (mapv (fn [r] (omit-empty (select-keys r [:uri :name :title :description :mimeType])))
+                                   ((:list-resources cfg) ctx))})
+             (catch Throwable e (internal e))))
+
+      "resources/read"
+      (if (and (str/starts-with? uri "skill://") (:list-skills cfg))
+        (let [parsed (try [:ok (parse-skill-uri uri)] (catch Throwable e [:err (msg-of e)]))]
+          (if (= :err (first parsed))
+            (invalid (str "Invalid resource URI: " (second parsed)))
+            (let [[sname rel] (second parsed)
+                  ss (try [:ok (skills-26 h ctx)] (catch Throwable e [:err e]))]
+              (if (= :err (first ss))
+                (internal (second ss))
+                (if-let [f (some (fn [s] (when (= sname (:name s))
+                                           (first (filter #(= rel (:path %)) (:files s)))))
+                                 (second ss))]
+                  (ok {:contents [{:uri uri :mimeType (if (str/ends-with? rel ".md") "text/markdown" "text/plain")
+                                   :text (str (:text f))}]
+                       :ttlMs 60000 :cacheScope (cache-scope h)})
+                  (invalid (str "Resource not found: " uri)))))))
+        (if-not (and (:list-resources cfg) (:read-resource cfg)) nf
+          (try (ok {:contents (mapv (fn [c]
+                                      (cond-> (omit-empty (select-keys c [:uri :mimeType :blob]))
+                                        (empty? (:blob c)) (assoc :text (str (or (:text c) "")))))
+                                    ((:read-resource cfg) ctx uri))})
+               (catch Throwable e [nil (err26 -32002 (msg-of e))]))))
+
+      ("prompts/list" "prompts/get")
+      (if-not (:list-prompts cfg) nf
+        ;; same wire as the legacy profile; only the envelope differs
+        (let [msg (cond-> {:jsonrpc "2.0" :id 0 :method method}
+                    (some? params) (assoc :params params))
+              [r e] (try (dispatch h ctx (fn [_] (throw (ex-info "no stream" {}))) "" msg)
+                         (catch Throwable e [nil {:code -32603 :message (msg-of e)}]))]
+          (if e
+            [nil (err26 (:code e) (:message e))]
+            (ok (if (map? r) r {})))))
+
+      nf)))
+
+(defn- json-26 [status id result e]
+  {:status  status
+   :headers {"Content-Type" "application/json"}
+   :body    (str (json/write-str (if e
+                                   {:jsonrpc "2.0" :id id
+                                    :error (cond-> {:code (:code e) :message (:message e)}
+                                             (some? (:data e)) (assoc :data (:data e)))}
+                                   {:jsonrpc "2.0" :id id :result result}))
+                 "\n")})
+
+(defn- serve-2026 [{:keys [cfg] :as h} ctx req msg meta]
+  (let [method (:method msg)]
+    (if (or (not (string? method)) (= "" method) (nil? (:id msg)))
+      {:status 202 :headers {} :body ""} ; a notification (or a stray response)
+      (let [params (:params msg)
+            id     (:id msg)]
+        (if-let [e (validate-2026 req method params meta)]
+          (json-26 (:status e) id nil e)
+          (let [auth (when-let [f (:authenticate cfg)]
+                       (try [:ok (f req)] (catch Throwable e [:err e])))]
+            (if (= :err (first auth))
+              (write-auth-failure cfg req (second auth))
+              (let [ctx   (cond-> ctx
+                            auth        (assoc :identity (second auth))
+                            (map? meta) (assoc :meta meta))
+                    [r e] (try (dispatch-2026 h ctx method params meta)
+                               (catch Throwable x [nil (err26 -32603 (msg-of x))]))]
+                (json-26 (if e (or (:status e) 200) 200) id r e)))))))))
+
+(defn- handle-post-2026
+  "Answer a POST on the 2026 profile, or nil when it belongs to the legacy wire
+  (or to the legacy path's 415 / 413 answers)."
+  [{:keys [cfg] :as h} ctx req]
+  (when (= "application/json" (media-type (header req "content-type")))
+    (let [body (:body req)]
+      (when-not (> (utf8-count body) (:max-body-bytes cfg))
+        (let [trimmed (str/trim body)
+              msg     (when-not (str/starts-with? trimmed "[")
+                        (try (json/read-str body) (catch Throwable _ nil)))]
+          (if-not (and (map? msg) (= "2.0" (:jsonrpc msg)))
+            (when (only-2026? h)
+              (if (str/starts-with? trimmed "[")
+                (json-26 400 nil nil (err26 -32600 "batch requests are not supported"))
+                (json-26 400 nil nil (err26 -32700 "Parse error"))))
+            (let [meta (let [p (:params msg)] (when (map? p) (let [m (:_meta p)] (when (map? m) m))))]
+              (when (route-2026? h req (:method msg) meta)
+                (serve-2026 h ctx req msg meta)))))))))
+
+;; ---------------------------------------------------------------------------
+;; load-mcp-skills
+;; ---------------------------------------------------------------------------
+
+(defn- file-vals [path]
+  (let [b (fs/read-bytes path)]
+    (if (zero? (count b)) [] (vec (codec/b64-decode-vals (codec/encode b))))))
+
+(defn load-mcp-skills
+  "SPEC §7C.2 `loadMcpSkills(dir)` — every skill under `dir` (`**/SKILL.md`, any
+  depth) as `:list-skills` entries {:name :frontmatter {:name :description}
+  :files [{:path :text}]}. Frontmatter is parsed as in §3 (trimmed strings); a
+  skill without a `name` is skipped. Files are every regular file under the
+  skill directory that is valid UTF-8 (binary files are skipped — the wire is
+  text), `/`-separated paths sorted by code point. A path reached THROUGH a
+  symlink is skipped (koine's walk follows links; this compares each path with
+  its real path, so a linked file or directory is never published)."
+  [dir]
+  (let [root  (str/replace (str dir) #"/+$" "")
+        real  (fs/real-path root)
+        rel   (fn [p] (let [r (subs (str p) (count root))] (str/replace r #"^/+" "")))
+        plain? (fn [p] (try (= (fs/real-path p) (str real "/" (rel p))) (catch Throwable _ false)))
+        all   (->> (fs/list-tree root) (map str) (filter #(str/starts-with? % (str root "/"))) vec)
+        mds   (filter (fn [p] (and (= "SKILL.md" (last (str/split p #"/")))
+                                   (not (fs/directory? p)) (plain? p)))
+                      all)]
+    (->> mds
+         (keep (fn [p]
+                 (let [fm   (frontmatter/read-frontmatter (fs/read-file p))
+                       nm   (str/trim (str (or (get-in fm [:data :name]) "")))
+                       desc (str/trim (str (or (get-in fm [:data :description]) "")))
+                       sdir (subs p 0 (- (count p) (count "/SKILL.md")))]
+                   (when (and (seq nm) (not= "malformed-frontmatter" (:reason fm)))
+                     {:name        nm
+                      :frontmatter {:name nm :description desc}
+                      :files       (->> all
+                                        (filter #(str/starts-with? % (str sdir "/")))
+                                        (remove fs/directory?)
+                                        (filter plain?)
+                                        (keep (fn [f]
+                                                (let [vs (file-vals f)]
+                                                  (when (crypto/valid-utf8? vs)
+                                                    {:path (subs f (inc (count sdir)))
+                                                     :text (crypto/vals->utf8 vs)}))))
+                                        (sort-by :path tool/compare-strings)
+                                        vec)}))))
+         (sort-by :name tool/compare-strings)
+         vec)))
 
 ;; ---------------------------------------------------------------------------
 ;; public API
@@ -521,8 +1033,15 @@
                                           \"toolnexus\" / \"0.1.0\"; empty title omitted)
     :server-info (fn [ctx] {:name :title :version :instructions})   wins when set
     :protocol-versions  newest first; entries outside `implemented-versions`
-                        dropped; default [\"2025-06-18\"]
-    :authenticate (fn [ring-request] identity)  — a THROW ⇒ 401
+                        dropped; default [\"2025-06-18\"]. Listing \"2026-07-28\"
+                        enables the stateless 2026 wire (SPEC §7C.2) — alone,
+                        or beside legacy versions on one mount
+    :list-skills (fn [ctx] skills)  — SEP-2640 skills extension on the 2026
+                        wire; skills are {:name :frontmatter? :files [{:path :text}]}
+                        (`load-mcp-skills` builds them); nil ⇒ not advertised
+    :authenticate (fn [ring-request] identity)  — a THROW ⇒ 401; a thrown
+                        `mcp-auth-error` ⇒ its status + challenge (both wires).
+                        `mcp-server-auth` builds one (toolnexus.mcp-server-auth)
     :www-authenticate (fn [ring-request ex] header-string)
     :list-tools (fn [ctx] tools)  — per request, for tools/list AND tools/call
                                   (a name outside it ⇒ -32602, never executed)
@@ -545,10 +1064,12 @@
    (let [cfg (cond-> cfg
                (not (pos? (or (:confirm-timeout-ms cfg) 0))) (assoc :confirm-timeout-ms 300000)
                (not (pos? (or (:max-body-bytes cfg) 0)))     (assoc :max-body-bytes (* 4 1024 1024)))
+         vs  (normalize-versions (:protocol-versions cfg))
          h   {:tk       tk
               :cfg      cfg
               :ids      (or (:session-ids cfg) (memory-session-ids))
-              :versions (normalize-versions (:protocol-versions cfg))
+              :versions vs
+              :legacy   (vec (remove #{protocol-2026} vs))
               :caps     (atom {})
               :streams  (atom #{})
               :pending  (atom {})

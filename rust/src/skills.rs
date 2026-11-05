@@ -104,9 +104,9 @@ pub struct SkillSource {
 // ---------------------------------------------------------------------------
 
 #[derive(Default)]
-struct Frontmatter {
-    name: String,
-    description: String,
+pub(crate) struct Frontmatter {
+    pub(crate) name: String,
+    pub(crate) description: String,
 }
 
 /// Split `---`-fenced frontmatter: `^---\r?\n(.*?)\r?\n---\r?\n?(.*)$` (dotall).
@@ -150,7 +150,7 @@ fn scalar_string(y: &Yaml) -> Option<String> {
 
 /// Real YAML first; only when it refuses, a guarded line-wise rescue of
 /// `name`/`description` (ADR 0028). Returns (frontmatter, body, malformed, detail).
-fn parse_frontmatter(text: &str) -> (Frontmatter, String, bool, String) {
+pub(crate) fn parse_frontmatter(text: &str) -> (Frontmatter, String, bool, String) {
     let Some((block, body)) = split_frontmatter(text) else {
         return (
             Frontmatter::default(),

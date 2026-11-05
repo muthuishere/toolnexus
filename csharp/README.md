@@ -180,6 +180,33 @@ pluggable `SessionIds`, `Stateless`, `ProtocolVersions` (`2025-06-18` default, `
 `ToolResult.Structured`/`Meta` and `ITool.OutputSchema`/`Annotations` map to `structuredContent`,
 `_meta`, `outputSchema` and `annotations`. Runnable: `dotnet run --project examples/Toolnexus.Examples -- mcphandler`.
 
+### MCP 2026-07-28 on the same handler (SPEC §7C.2, opt-in)
+
+List `"2026-07-28"` in `ProtocolVersions` (alone, or next to `"2025-06-18"` to serve both wires on one
+mount). The 2026 wire is stateless: `server/discover`, header validation, `resultType` + `_meta`
+serverInfo, and MRTR instead of elicitation — a `Confirm` decision or a §10 tool suspension
+(`ToolResult.Pending`) answers `input_required`, and the client's retry reaches the tool as
+`ToolContext.Answer`. Without the opt-in the handler is byte-identical to §7C.1.
+
+```csharp
+var auth = new McpServerAuth                                   // OAuth 2.1 protected resource (RS256/JWKS by default)
+{
+    Issuer = "https://login.example",
+    Scopes = new Dictionary<string, IReadOnlyList<string>> { ["*"] = ["mcp"], ["wipe"] = ["mcp:admin"] },
+};
+var handler = tk.McpHandler(new McpHandlerConfig
+{
+    ProtocolVersions = ["2026-07-28", "2025-06-18"],
+    Authenticate     = auth.AuthenticateAsync,                 // identity = McpPrincipal; 401/403 + exact challenge
+    ListSkills       = _ => Task.FromResult(McpHttpHandler.LoadMcpSkills("skills")), // skills/list, skills/get, skill:// reads
+});
+// route GET /.well-known/oauth-protected-resource[/mcp] to auth.Metadata() (or auth.MetadataAsync(listenerCtx))
+```
+
+`McpServerAuth.Verify` replaces the JWT verifier (opaque tokens, introspection). Bring your own authorization
+server: `McpServerAuth` verifies its tokens. The auto-approving dev authorization server the suite uses is test
+tooling (`tests/Toolnexus.Tests/McpDevAuth.cs`), not part of the library.
+
 ## Agents via ACP
 
 toolnexus ships no client per coding agent — three vendor-neutral pieces instead (SPEC §8C):

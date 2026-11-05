@@ -103,7 +103,7 @@ async fn main() {
             Box::pin(async move {
                 lookup(&tok)
                     .map(|u| Arc::new(u) as McpIdentity)
-                    .ok_or_else(|| "invalid token".to_owned())
+                    .ok_or_else(|| "invalid token".into())
             })
         })),
         www_authenticate: Some(Arc::new(|_, _| {

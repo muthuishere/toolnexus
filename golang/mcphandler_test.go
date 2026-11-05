@@ -627,7 +627,7 @@ func TestMCPHandler_ProtocolVersionsPerHandler(t *testing.T) {
 	if r := hRawPost(t, def.URL, "", `{"jsonrpc":"2.0","id":2,"method":"ping"}`, map[string]string{"MCP-Protocol-Version": "2025-11-25"}); r.StatusCode != 400 {
 		t.Fatalf("default header %d", r.StatusCode)
 	}
-	// configured handler: 2025-11-25 accepted; unimplemented 2026-07-28 / 2025-03-26 dropped
+	// configured handler: 2025-11-25 accepted; 2025-03-26 dropped; initialize never negotiates 2026-07-28 (stateless wire, §7C.2)
 	if b := hReadAll(hRawPost(t, newer.URL, "", initBody("2025-11-25"), nil)); !strings.Contains(b, `"protocolVersion":"2025-11-25"`) {
 		t.Fatalf("newer negotiate %s", b)
 	}

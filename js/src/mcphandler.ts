@@ -11,13 +11,28 @@
  * request, and a confirm elicitation rides the SAME POST's SSE response. No SDK server
  * types appear in this public API.
  */
-import { randomBytes } from "node:crypto"
+import { createHash, randomBytes } from "node:crypto"
 import type { IncomingMessage, ServerResponse } from "node:http"
-import type { Tool, ToolAnnotations, ToolContext, ToolResult, ToolSource } from "./types.js"
+import type { Answer, Request, Tool, ToolAnnotations, ToolContext, ToolResult, ToolSource } from "./types.js"
+import { pendingOf } from "./types.js"
 import { toolResultToMcp } from "./mcpserve.js"
+import { compareCodePoints } from "./order.js"
+import { decodeHeaderValue } from "./mcpheader.js"
+import type { McpSkill } from "./skill.js"
 
-/** The MCP protocol versions whose wire this handler implements (ADR 0039 §versions). */
-export const MCP_HANDLER_IMPLEMENTED_VERSIONS: readonly string[] = ["2025-11-25", "2025-06-18"]
+/** The MCP 2026-07-28 protocol version: an opt-in stateless wire (SPEC §7C.2), never a default. */
+export const MCP_PROTOCOL_2026 = "2026-07-28"
+/** The SEP-2640 skills extension id advertised by `server/discover` when `listSkills` is set. */
+export const MCP_SKILLS_EXTENSION = "io.modelcontextprotocol/skills"
+const META_VERSION = "io.modelcontextprotocol/protocolVersion"
+const META_CLIENT_CAPS = "io.modelcontextprotocol/clientCapabilities"
+const META_SERVER_INFO = "io.modelcontextprotocol/serverInfo"
+
+/**
+ * The MCP protocol versions whose wire this handler implements (ADR 0039 §versions).
+ * 2026-07-28 is opt-in only (list it in `protocolVersions`): the stateless wire of SPEC §7C.2.
+ */
+export const MCP_HANDLER_IMPLEMENTED_VERSIONS: readonly string[] = [MCP_PROTOCOL_2026, "2025-11-25", "2025-06-18"]
 const DEFAULT_VERSIONS = ["2025-06-18"]
 const DEFAULT_NAME = "toolnexus"
 const DEFAULT_VERSION = "0.1.0"
@@ -105,6 +120,25 @@ export interface McpSessionIds {
   terminate(ctx: McpContext, id: string): Awaitable<void>
 }
 
+/**
+ * An `authenticate` failure with an explicit HTTP status and challenge (`McpServerAuth` throws
+ * it; any hook may). On any wire the handler answers `status` (default 401) with
+ * `WWW-Authenticate` = `challenge` (a non-empty `wwwAuthenticate` result wins) and the body
+ * `{"error":"unauthorized"}`. `reason` is never sent on the wire.
+ */
+export class McpAuthError extends Error {
+  readonly status: number
+  readonly challenge: string
+  readonly reason: string
+  constructor(status: number, challenge: string, reason = "") {
+    super(reason || "unauthorized")
+    this.name = "McpAuthError"
+    this.status = status
+    this.challenge = challenge
+    this.reason = reason
+  }
+}
+
 /** Surfaced once per inbound tools/call. */
 export interface McpCallEvent {
   name: string
@@ -146,6 +180,12 @@ export interface McpHandlerConfig {
   readResource?: (ctx: McpContext, uri: string) => Awaitable<McpResourceContent[]>
   listPrompts?: (ctx: McpContext) => Awaitable<McpPrompt[]>
   getPrompt?: (ctx: McpContext, name: string, args: Record<string, string>) => Awaitable<McpPromptResult>
+  /**
+   * §7C.2: skills published through the SEP-2640 skills extension on the 2026-07-28 wire
+   * (skills/list, skills/get, resources/read of skill:// URIs). Omit ⇒ not advertised.
+   * `loadMcpSkills(dir)` builds the list from a skills directory.
+   */
+  listSkills?: (ctx: McpContext) => Awaitable<McpSkill[]>
   sessionIds?: McpSessionIds
   /** No Mcp-Session-Id issued or checked; elicitation never used. */
   stateless?: boolean
@@ -194,6 +234,19 @@ function omitEmpty(m: Record<string, unknown>): Record<string, unknown> {
 function httpError(res: ServerResponse, status: number, text: string, headers: Record<string, string> = {}) {
   res.writeHead(status, { "Content-Type": "text/plain; charset=utf-8", "X-Content-Type-Options": "nosniff", ...headers })
   res.end(text + "\n")
+}
+
+function writeAuthFailure(cfg: McpHandlerConfig, req: IncomingMessage, res: ServerResponse, err: unknown) {
+  let challenge = cfg.wwwAuthenticate?.(req, err) ?? ""
+  if (err instanceof McpAuthError) {
+    if (!challenge) challenge = err.challenge
+    const h: Record<string, string> = { "Content-Type": "application/json" }
+    if (challenge) h["WWW-Authenticate"] = challenge
+    res.writeHead(err.status || 401, h)
+    res.end('{"error":"unauthorized"}')
+    return
+  }
+  httpError(res, 401, "Unauthorized", challenge ? { "WWW-Authenticate": challenge } : {})
 }
 
 function writeRpcError(res: ServerResponse, id: unknown, code: number, message: string) {
@@ -272,6 +325,10 @@ export function createMcpHandler(toolkitTools: () => Tool[], cfg: McpHandlerConf
     if (MCP_HANDLER_IMPLEMENTED_VERSIONS.includes(v) && !versions.includes(v)) versions.push(v)
   }
   if (versions.length === 0) versions.push(...DEFAULT_VERSIONS)
+  /** The initialize/session wire: every accepted version but 2026-07-28. */
+  const legacy = versions.filter((v) => v !== MCP_PROTOCOL_2026)
+  const has2026 = versions.includes(MCP_PROTOCOL_2026)
+  const only2026 = has2026 && legacy.length === 0
   const ids = cfg.sessionIds ?? memorySessionIds()
   const confirmTimeout = cfg.confirmTimeout && cfg.confirmTimeout > 0 ? cfg.confirmTimeout : 5 * 60_000
   const maxBody = cfg.maxBodyBytes && cfg.maxBodyBytes > 0 ? cfg.maxBodyBytes : 4 << 20
@@ -291,7 +348,7 @@ export function createMcpHandler(toolkitTools: () => Tool[], cfg: McpHandlerConf
   /** Validates protocol header + session (stateful). Writes the HTTP error itself on failure. */
   async function checkSession(ctx: McpContext, req: IncomingMessage, res: ServerResponse): Promise<boolean> {
     const v = header(req, "MCP-Protocol-Version")
-    if (v !== "" && !versions.includes(v)) {
+    if (v !== "" && !legacy.includes(v)) {
       httpError(res, 400, "Bad Request: unsupported MCP-Protocol-Version")
       return false
     }
@@ -330,13 +387,15 @@ export function createMcpHandler(toolkitTools: () => Tool[], cfg: McpHandlerConf
     })
   }
 
-  async function handlePost(ctx: McpContext, req: IncomingMessage, res: ServerResponse) {
-    const mt = header(req, "Content-Type").split(";")[0]!.trim().toLowerCase()
-    if (mt !== "application/json") {
+  type ReadResult = Awaited<ReturnType<typeof readBody>>
+  const isJsonPost = (req: IncomingMessage) => header(req, "Content-Type").split(";")[0]!.trim().toLowerCase() === "application/json"
+
+  async function handlePost(ctx: McpContext, req: IncomingMessage, res: ServerResponse, pre?: ReadResult) {
+    if (!isJsonPost(req)) {
       httpError(res, 415, "Unsupported Media Type: must be application/json")
       return
     }
-    const rb = await readBody(req)
+    const rb = pre ?? (await readBody(req))
     if (rb.error) return writeRpcError(res, null, -32700, "read error")
     if (rb.tooLarge) return httpError(res, 413, "Request Entity Too Large")
     const body = rb.body!
@@ -383,7 +442,7 @@ export function createMcpHandler(toolkitTools: () => Tool[], cfg: McpHandlerConf
 
   async function handleInitialize(ctx: McpContext, res: ServerResponse, msg: Record<string, any>) {
     const p = isObj(msg.params) ? msg.params : {}
-    const version = typeof p.protocolVersion === "string" && versions.includes(p.protocolVersion) ? p.protocolVersion : versions[0]!
+    const version = typeof p.protocolVersion === "string" && legacy.includes(p.protocolVersion) ? p.protocolVersion : legacy[0]!
     let sid = ""
     if (cfg.stateless) {
       sid = cfg.statelessSessionId ?? ""
@@ -681,25 +740,375 @@ export function createMcpHandler(toolkitTools: () => Tool[], cfg: McpHandlerConf
     })
   }
 
+  // ---- MCP 2026-07-28 (SPEC §7C.2, ADR 0040): the stateless wire, opt-in ----
+
+  /** Routes and answers a POST on the 2026 profile; false ⇒ the legacy wire serves it (body pre-read). */
+  async function tryPost2026(ctx: McpContext, req: IncomingMessage, res: ServerResponse, rb: ReadResult): Promise<boolean> {
+    if (rb.error || rb.tooLarge) return false // the legacy path answers identically
+    const body = rb.body!
+    const trimmed = body.trim()
+    let msg: any
+    let bad = trimmed.startsWith("[")
+    if (!bad) {
+      try {
+        msg = JSON.parse(body)
+      } catch {
+        bad = true
+      }
+    }
+    if (!bad && (!isObj(msg) || msg.jsonrpc !== "2.0" || (msg.method !== undefined && msg.method !== null && typeof msg.method !== "string"))) bad = true
+    if (bad) {
+      if (!only2026) return false
+      if (trimmed.startsWith("[")) write26(res, 400, null, undefined, { code: -32600, message: "batch requests are not supported" })
+      else write26(res, 400, null, undefined, { code: -32700, message: "Parse error" })
+      return true
+    }
+    const method: string = msg.method ?? ""
+    const params = isObj(msg.params) ? msg.params : undefined
+    const meta = params && isObj(params._meta) ? (params._meta as Record<string, unknown>) : undefined
+    if (!route2026(req, method, meta)) return false
+    await serve2026(ctx, req, res, msg, method, params ?? {}, meta)
+    return true
+  }
+
+  function route2026(req: IncomingMessage, method: string, meta: Record<string, unknown> | undefined): boolean {
+    if (only2026) return true
+    if (method === "initialize") return false
+    const hv = header(req, "MCP-Protocol-Version")
+    if (hv === MCP_PROTOCOL_2026) return true
+    if (hv !== "" && versions.includes(hv)) return false
+    return method === "server/discover" || header(req, "Mcp-Method") !== "" || (meta !== undefined && META_VERSION in meta)
+  }
+
+  async function serve2026(
+    ctx: McpContext,
+    req: IncomingMessage,
+    res: ServerResponse,
+    msg: Record<string, any>,
+    method: string,
+    params: Record<string, any>,
+    meta: Record<string, unknown> | undefined,
+  ) {
+    if (method === "" || !("id" in msg) || msg.id === null) {
+      res.writeHead(202).end() // a notification (or a stray response): acknowledged
+      return
+    }
+    const v = validate2026(req, method, params, meta)
+    if (v) return write26(res, 400, msg.id, undefined, v)
+    if (cfg.authenticate) {
+      try {
+        ctx.identity = await cfg.authenticate(req)
+      } catch (err) {
+        return writeAuthFailure(cfg, req, res, err)
+      }
+    }
+    if (meta) ctx.meta = meta
+    let out: Out26
+    try {
+      out = await dispatch2026(ctx, method, params, meta)
+    } catch (e) {
+      out = { error: { code: -32603, message: errMsg(e) } }
+    }
+    write26(res, out.status ?? 200, msg.id, out.result, out.error)
+  }
+
+  function validate2026(
+    req: IncomingMessage,
+    method: string,
+    p: Record<string, any>,
+    meta: Record<string, unknown> | undefined,
+  ): Err26 | undefined {
+    const mismatch = (m: string): Err26 => ({ code: -32020, message: "Header mismatch: " + m })
+    const hv = header(req, "MCP-Protocol-Version")
+    if (hv === "") return mismatch("MCP-Protocol-Version header missing")
+    const hm = header(req, "Mcp-Method")
+    if (hm !== method) return mismatch(`Mcp-Method header value '${hm}' does not match body value '${method}'`)
+    if (method === "tools/call" || method === "prompts/get" || method === "resources/read") {
+      const want = typeof p[method === "resources/read" ? "uri" : "name"] === "string" ? p[method === "resources/read" ? "uri" : "name"] : ""
+      const [got, ok] = decodeHeaderValue(header(req, "Mcp-Name"))
+      if (!ok || got !== want) return mismatch(`Mcp-Name header value '${got}' does not match body value '${want}'`)
+    }
+    const mv = meta && typeof meta[META_VERSION] === "string" ? (meta[META_VERSION] as string) : ""
+    if (mv !== hv) return mismatch(`MCP-Protocol-Version header value '${hv}' does not match _meta value '${mv}'`)
+    if (mv !== MCP_PROTOCOL_2026) {
+      return { code: -32022, message: "Unsupported protocol version", data: { supported: [MCP_PROTOCOL_2026], requested: mv } }
+    }
+    return undefined
+  }
+
+  async function info2026(ctx: McpContext): Promise<McpServerInfo> {
+    const info: McpServerInfo = cfg.serverInfo
+      ? { ...(await cfg.serverInfo(ctx)) }
+      : { name: cfg.name, title: cfg.title, version: cfg.version, instructions: cfg.instructions }
+    if (!info.name) info.name = DEFAULT_NAME
+    if (!info.version) info.version = DEFAULT_VERSION
+    return info
+  }
+
+  /** Stamps resultType and _meta.serverInfo (set last, after any ToolResult.meta keys). */
+  async function complete26(ctx: McpContext, m: Record<string, unknown>, resultType = "complete"): Promise<Out26> {
+    const info = await info2026(ctx)
+    const meta: Record<string, unknown> = isObj(m._meta) ? { ...m._meta } : {}
+    delete meta[META_SERVER_INFO]
+    meta[META_SERVER_INFO] = omitEmpty({ name: info.name, title: info.title, version: info.version })
+    m._meta = meta
+    m.resultType = resultType
+    return { result: m }
+  }
+
+  const cacheScope26 = () => (cfg.authenticate ? "private" : "public")
+
+  async function skills26(ctx: McpContext): Promise<McpSkill[]> {
+    const ss = (await cfg.listSkills!(ctx)) ?? []
+    return [...ss].sort((a, b) => compareCodePoints(a.name, b.name))
+  }
+
+  async function dispatch2026(
+    ctx: McpContext,
+    method: string,
+    p: Record<string, any>,
+    meta: Record<string, unknown> | undefined,
+  ): Promise<Out26> {
+    const internal = (e: unknown): Out26 => ({ error: { code: -32603, message: errMsg(e) } })
+    const invalid = (m: string): Out26 => ({ error: { code: -32602, message: m } })
+    switch (method) {
+      case "server/discover": {
+        const info = await info2026(ctx)
+        const caps: Record<string, unknown> = { tools: {} }
+        if (cfg.listResources || cfg.listSkills) caps.resources = {}
+        if (cfg.listPrompts) caps.prompts = {}
+        if (cfg.listSkills) caps.extensions = { [MCP_SKILLS_EXTENSION]: {} }
+        const r: Record<string, unknown> = { supportedVersions: [MCP_PROTOCOL_2026], capabilities: caps, ttlMs: 3600000, cacheScope: "public" }
+        if (info.instructions) r.instructions = info.instructions
+        return complete26(ctx, r)
+      }
+      case "ping":
+        return complete26(ctx, {})
+      case "tools/list": {
+        let ts: Tool[]
+        try {
+          ts = (await tools(ctx)) ?? []
+        } catch (e) {
+          return internal(e)
+        }
+        const sorted = [...ts].sort((a, b) => compareCodePoints(a.name, b.name))
+        return complete26(ctx, { tools: sorted.map(mcpWireTool), ttlMs: 60000, cacheScope: cacheScope26() })
+      }
+      case "tools/call":
+        return callTool2026(ctx, p, meta)
+      case "skills/list": {
+        if (!cfg.listSkills) break
+        let ss: McpSkill[]
+        try {
+          ss = await skills26(ctx)
+        } catch (e) {
+          return internal(e)
+        }
+        const list = ss.map((s) => ({ uri: `skill://${s.name}/SKILL.md`, frontmatter: skillFrontmatter(s) }))
+        return complete26(ctx, { skills: list, ttlMs: 60000, cacheScope: cacheScope26() })
+      }
+      case "skills/get": {
+        if (!cfg.listSkills) break
+        const uri = typeof p.uri === "string" ? p.uri : ""
+        const parsed = parseSkillUri(uri)
+        if ("error" in parsed) return invalid("Invalid skill URI: " + parsed.error)
+        let ss: McpSkill[]
+        try {
+          ss = await skills26(ctx)
+        } catch (e) {
+          return internal(e)
+        }
+        const s = ss.find((x) => `skill://${x.name}/SKILL.md` === uri)
+        if (s) return complete26(ctx, { skill: skillEntry(s) })
+        return invalid("Unknown skill: " + uri)
+      }
+      case "resources/list": {
+        if (!cfg.listResources) break
+        const r = await dispatch(ctx, null as unknown as RpcWriter, method, p)
+        if (r.error) return { error: r.error }
+        return complete26(ctx, { ...(r.result as Record<string, unknown>) })
+      }
+      case "resources/read": {
+        const uri = typeof p.uri === "string" ? p.uri : ""
+        if (uri.startsWith("skill://") && cfg.listSkills) {
+          const parsed = parseSkillUri(uri)
+          if ("error" in parsed) return invalid("Invalid resource URI: " + parsed.error)
+          let ss: McpSkill[]
+          try {
+            ss = await skills26(ctx)
+          } catch (e) {
+            return internal(e)
+          }
+          for (const s of ss) {
+            if (s.name !== parsed.name) continue
+            const f = (s.files ?? []).find((x) => x.path === parsed.rel)
+            if (f) {
+              const mimeType = parsed.rel.endsWith(".md") ? "text/markdown" : "text/plain"
+              return complete26(ctx, { contents: [{ uri, mimeType, text: f.text }], ttlMs: 60000, cacheScope: cacheScope26() })
+            }
+          }
+          return invalid("Resource not found: " + uri)
+        }
+        if (!cfg.listResources || !cfg.readResource) break
+        const r = await dispatch(ctx, null as unknown as RpcWriter, method, p)
+        if (r.error) return { error: r.error }
+        return complete26(ctx, { ...(r.result as Record<string, unknown>) })
+      }
+      case "prompts/list":
+      case "prompts/get": {
+        if (!cfg.listPrompts) break
+        // Same payload as the legacy wire; only the envelope differs.
+        const r = await dispatch(ctx, null as unknown as RpcWriter, method, p)
+        if (r.error) return { error: r.error }
+        return complete26(ctx, isObj(r.result) ? { ...r.result } : {})
+      }
+    }
+    return { status: 404, error: { code: -32601, message: "Method not found: " + method } }
+  }
+
+  async function callTool2026(ctx: McpContext, p: Record<string, any>, meta: Record<string, unknown> | undefined): Promise<Out26> {
+    const name = typeof p.name === "string" ? p.name : ""
+    let ts: Tool[]
+    try {
+      ts = (await tools(ctx)) ?? []
+    } catch (e) {
+      return { error: { code: -32603, message: errMsg(e) } }
+    }
+    const tool = ts.find((t) => t.name === name)
+    if (!tool || typeof tool.execute !== "function") return { error: { code: -32602, message: "Unknown tool: " + name } }
+
+    const started = Date.now()
+    const ev: McpCallEvent = {
+      name: tool.name,
+      source: tool.source,
+      ms: 0,
+      isError: false,
+      resultBytes: 0,
+      decision: "allow",
+      identity: ctx.identity,
+      sessionId: "",
+    }
+    const finish = (out: Out26, isError: boolean, execErr?: unknown): Out26 => {
+      ev.ms = Date.now() - started
+      ev.isError = isError
+      if (execErr !== undefined) ev.err = execErr
+      ev.resultBytes = Buffer.byteLength(JSON.stringify(out.result))
+      if (cfg.onCall) {
+        try {
+          cfg.onCall(ev)
+        } catch {
+          // host callback throws are isolated
+        }
+      }
+      return out
+    }
+    const result = async (r: ToolResult, execErr?: unknown) =>
+      finish(await complete26(ctx, toolResultToMcp(r, true)), !!r.isError, execErr)
+    const inputRequired = async (m: Record<string, unknown>) => finish(await complete26(ctx, m, "input_required"), false)
+
+    let args: Record<string, unknown> = {}
+    const raw = p.arguments
+    if (raw !== undefined && raw !== null) {
+      if (!isObj(raw)) return result({ output: "invalid arguments: must be an object", isError: true })
+      args = raw
+    }
+
+    const state = decodeState26(p.requestState)
+    const hasState = state !== undefined && state.tool === name
+    let confirmed = hasState && state!.confirmed === true
+    let responses: Record<string, unknown> | undefined = isObj(p.inputResponses) ? p.inputResponses : undefined
+
+    if (cfg.beforeCall) {
+      let d: McpDecision
+      try {
+        d = (await cfg.beforeCall(ctx, tool, args)) ?? {}
+      } catch (e) {
+        d = { kind: "deny", message: errMsg(e) }
+      }
+      const kind: McpDecisionKind = d.kind || "allow"
+      ev.decision = kind
+      if (kind === "deny") {
+        if (d.result) return result(d.result)
+        return result({ output: d.message || "denied", isError: true })
+      }
+      if (kind === "confirm" && !confirmed) {
+        const ans = inputResponse26("confirm", responses?.confirm)
+        if (hasState && ans) {
+          if (!ans.ok) return result({ output: "declined", isError: true })
+          if (ans.data?.confirm === false) return result({ output: "declined", isError: true })
+          confirmed = true
+          responses = undefined // the confirm round is consumed
+        } else if (!canElicit26(meta)) {
+          if (d.result) return result(d.result)
+          return result({ output: "confirmation required: " + (d.message ?? ""), isError: true })
+        } else {
+          const msg = d.message || "Confirm this action?"
+          return inputRequired({
+            inputRequests: {
+              confirm: {
+                method: "elicitation/create",
+                params: {
+                  mode: "form",
+                  message: msg,
+                  requestedSchema: {
+                    type: "object",
+                    properties: { confirm: { type: "boolean", title: "Confirm", description: msg } },
+                  },
+                },
+              },
+            },
+            requestState: encodeState26(name, false),
+          })
+        }
+      }
+    }
+
+    const tc: ToolContext = { signal: ctx.signal, mcp: ctx }
+    if (hasState && responses && Object.keys(responses).length === 1) {
+      const [k, v] = Object.entries(responses)[0]!
+      const a = inputResponse26(k, v)
+      if (a) tc.answer = a
+    }
+    let res: ToolResult
+    let execErr: unknown
+    try {
+      res = await tool.execute(args, tc)
+    } catch (e) {
+      execErr = e
+      res = { output: errMsg(e), isError: true }
+    }
+    const req = execErr === undefined ? pendingOf(res) : undefined
+    if (req) {
+      return inputRequired({ inputRequests: { [req.id]: inputRequest26(req) }, requestState: encodeState26(name, confirmed) })
+    }
+    return result(res, execErr)
+  }
+
   const handler = ((req: IncomingMessage, res: ServerResponse) => {
     const ac = new AbortController()
     res.on("close", () => ac.abort())
     const ctx: McpContext = { request: req, sessionId: "", signal: ac.signal }
     void (async () => {
+      let pre: ReadResult | undefined
+      if (req.method === "POST" && has2026 && isJsonPost(req)) {
+        pre = await readBody(req)
+        if (await tryPost2026(ctx, req, res, pre)) return
+      }
+      if (only2026 && req.method !== "POST") {
+        req.resume()
+        return httpError(res, 405, "Method Not Allowed", { Allow: "POST" })
+      }
       if (cfg.authenticate) {
         try {
           ctx.identity = await cfg.authenticate(req)
         } catch (err) {
-          const h: Record<string, string> = {}
-          const v = cfg.wwwAuthenticate?.(req, err)
-          if (v) h["WWW-Authenticate"] = v
-          req.resume()
-          return httpError(res, 401, "Unauthorized", h)
+          if (!pre) req.resume()
+          return writeAuthFailure(cfg, req, res, err)
         }
       }
       switch (req.method) {
         case "POST":
-          return handlePost(ctx, req, res)
+          return handlePost(ctx, req, res, pre)
         case "GET":
           return handleGet(ctx, req, res)
         case "DELETE":
@@ -724,4 +1133,120 @@ export function createMcpHandler(toolkitTools: () => Tool[], cfg: McpHandlerConf
     }
   }
   return handler
+}
+
+// ---- §7C.2 helpers ----
+
+interface Err26 {
+  code: number
+  message: string
+  data?: unknown
+}
+interface Out26 {
+  status?: number
+  result?: Record<string, unknown>
+  error?: Err26
+}
+
+function write26(res: ServerResponse, status: number, id: unknown, result: Record<string, unknown> | undefined, error: Err26 | undefined) {
+  const msg: Record<string, unknown> = { jsonrpc: "2.0", id: id ?? null }
+  if (error) msg.error = error
+  else msg.result = result
+  res.writeHead(status, { "Content-Type": "application/json" })
+  res.end(JSON.stringify(msg) + "\n")
+}
+
+const skillFrontmatter = (s: McpSkill): Record<string, unknown> => s.frontmatter ?? { name: s.name }
+
+function skillEntry(s: McpSkill): Record<string, unknown> {
+  const files = [...(s.files ?? [])].sort((a, b) => compareCodePoints(a.path, b.path))
+  return {
+    uri: `skill://${s.name}/SKILL.md`,
+    frontmatter: skillFrontmatter(s),
+    resources: files.map((f) => ({
+      uri: `skill://${s.name}/${f.path}`,
+      digest: "sha256:" + createHash("sha256").update(f.text, "utf8").digest("hex"),
+      size: Buffer.byteLength(f.text, "utf8"),
+    })),
+  }
+}
+
+/** Percent-decodes once, like Go's url.PathUnescape; undefined on a malformed escape. */
+function pathUnescape(s: string): string | undefined {
+  if (!s.includes("%")) return s
+  const bytes: number[] = []
+  for (let i = 0; i < s.length; ) {
+    if (s[i] === "%") {
+      const hex = s.slice(i + 1, i + 3)
+      if (!/^[0-9a-fA-F]{2}$/.test(hex)) return undefined
+      bytes.push(parseInt(hex, 16))
+      i += 3
+    } else {
+      const cp = s.codePointAt(i)!
+      const ch = String.fromCodePoint(cp)
+      bytes.push(...Buffer.from(ch, "utf8"))
+      i += ch.length
+    }
+  }
+  return Buffer.from(bytes).toString("utf8")
+}
+
+/** Validates skill://<name>/<path> (SPEC §2.7 containment). */
+function parseSkillUri(uri: string): { name: string; rel: string } | { error: string } {
+  if (!uri.startsWith("skill://")) return { error: "not a skill:// URI" }
+  const dec = pathUnescape(uri.slice("skill://".length))
+  if (dec === undefined) return { error: "bad percent-encoding" }
+  if (/[%\\\0]/.test(dec)) return { error: "skill URI has encoded, backslash or NUL characters" }
+  const segs = dec.split("/")
+  if (segs.length < 2) return { error: "skill URI needs skill://<name>/<path>" }
+  for (const s of segs) {
+    if (s === "" || s === "." || s === ".." || s.includes(":")) {
+      return { error: "skill URI path escapes the skill (empty, '.', '..' or ':' segment)" }
+    }
+  }
+  return { name: segs[0]!, rel: segs.slice(1).join("/") }
+}
+
+/** requestState = base64url-nopad(compact JSON {"tool":…[,"confirmed":true]}); not integrity-protected. */
+function encodeState26(tool: string, confirmed: boolean): string {
+  const o: Record<string, unknown> = { tool }
+  if (confirmed) o.confirmed = true
+  return Buffer.from(JSON.stringify(o), "utf8").toString("base64url")
+}
+
+function decodeState26(v: unknown): { tool: string; confirmed?: boolean } | undefined {
+  if (typeof v !== "string" || !/^[A-Za-z0-9_-]+$/.test(v) || v.length % 4 === 1) return undefined
+  try {
+    const o = JSON.parse(Buffer.from(v, "base64url").toString("utf8"))
+    if (!isObj(o)) return undefined
+    if (o.tool !== undefined && o.tool !== null && typeof o.tool !== "string") return undefined
+    if (o.confirmed !== undefined && o.confirmed !== null && typeof o.confirmed !== "boolean") return undefined
+    return { tool: o.tool ?? "", confirmed: o.confirmed === true }
+  } catch {
+    return undefined
+  }
+}
+
+/** Maps one MRTR input response onto a §10 Answer. */
+function inputResponse26(key: string, v: unknown): Answer | undefined {
+  if (!isObj(v)) return undefined
+  const ok = v.action === "accept"
+  const a: Answer = { id: key, ok }
+  if (isObj(v.content)) a.data = v.content
+  if (!ok) a.reason = v.action === "decline" ? "declined" : "cancelled"
+  return a
+}
+
+const canElicit26 = (meta: Record<string, unknown> | undefined): boolean => {
+  const caps = meta?.[META_CLIENT_CAPS]
+  return isObj(caps) && "elicitation" in caps
+}
+
+/** A §10 Request as an MRTR input request: authorization+url ⇒ URL mode, else a form. */
+function inputRequest26(r: Request): Record<string, unknown> {
+  if (r.kind === "authorization" && r.url) {
+    return { method: "elicitation/create", params: { mode: "url", message: r.prompt, url: r.url, elicitationId: r.id } }
+  }
+  const schema = isObj(r.data?.schema) ? r.data!.schema : { type: "object", properties: {} }
+  return { method: "elicitation/create", params: { mode: "form", message: r.prompt, requestedSchema: schema } }
 }

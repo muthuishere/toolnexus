@@ -167,6 +167,34 @@ Bandit.start_link(plug: {Toolnexus.McpHandler, handler}, port: 4000)
 Tools may also return `%ToolResult{structured: map, meta: map}` (→ `structuredContent` / `_meta`)
 and declare `output_schema` / `annotations`; absent, the wire is unchanged.
 
+### MCP 2026-07-28 (opt-in)
+
+List `"2026-07-28"` in `protocol_versions` (alone, or next to `"2025-06-18"` for both wires on one
+mount) and the handler also speaks the stateless 2026 wire: `server/discover`, header validation,
+`resultType` + `_meta` serverInfo, and MRTR — a `{:confirm, msg}` or a tool's §10 suspension
+answers `input_required`, and the retry's answer reaches the tool as `ctx.answer`. `initialize`
+never negotiates 2026-07-28; without it in the list the handler is unchanged. `list_skills`
+publishes skills (`skills/list`, `skills/get`, `skill://` reads); `Toolnexus.load_mcp_skills/1`
+builds them from a directory. `Toolnexus.McpServerAuth` makes the handler an OAuth protected
+resource: bearer JWT (RS256, JWKS discovered from the issuer) or your own `verify`, per-tool
+scopes, exact 401/403 challenges, and an RFC 9728 metadata plug. SPEC §7C.2.
+
+```elixir
+auth = Toolnexus.McpServerAuth.new(issuer: "https://login.example", scopes: %{"*" => ["mcp"], "wipe" => ["mcp:admin"]})
+
+handler =
+  Toolnexus.mcp_handler(toolkit,
+    protocol_versions: ["2026-07-28", "2025-06-18"],
+    authenticate: Toolnexus.McpServerAuth.authenticator(auth),  # identity = %Toolnexus.McpPrincipal{}
+    list_skills: fn _ctx -> Toolnexus.load_mcp_skills("skills") end
+  )
+# mount {Toolnexus.McpHandler, handler} at /mcp and
+# Toolnexus.McpServerAuth.metadata(auth) at /.well-known/oauth-protected-resource[/mcp]
+```
+
+Bring your own authorization server: `Toolnexus.McpServerAuth` verifies its tokens. The auto-approving dev
+authorization server the suite uses is test tooling (`test/support/mcp_dev_auth_server.ex`), not part of the library.
+
 ## Documentation
 
 Everything else — the full surface, with runnable examples — lives on the docs site:
