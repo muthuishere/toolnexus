@@ -8,11 +8,11 @@
 - [x] CHANGELOG `## Unreleased` rewritten
 
 ## Per-port parity (remove CLI client; streaming generate; ACP passthrough; asMcpServer; conformance cases)
-- [ ] golang
-- [ ] js
-- [ ] python
-- [ ] java
-- [ ] csharp
-- [ ] elixir
-- [ ] clojure
-- [ ] rust
+- [x] golang
+- [x] js
+- [x] python
+- [x] java
+- [x] csharp
+- [x] elixir
+- [x] clojure
+- [x] rust
