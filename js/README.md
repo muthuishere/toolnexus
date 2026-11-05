@@ -93,7 +93,8 @@ tool. Runnable: `npm run example:prompt-cache` ([`examples/prompt_cache.ts`](exa
 - `agents.compactor({ onCompact })`, `agent.asToolWith(ctx => ({ hooks, waitFor }))`, runtime
   `waitFor`, `ctx.callId` on tools, `listModels(opts)`.
 
-ACP host hooks (permission choice, update stream, cancel, streaming) are Go-only for now.
+An in-process model streams for real when it is given as `generateStream(request, emit)`; a plain
+`generate` still refuses `stream()`.
 
 ## Simple judgments
 
@@ -156,6 +157,25 @@ const vid = await media.video({ prompt: "the fox blinks", image: img.files[0].ur
 const tk = await createToolkit({ media })            // the agent gets generate_image, …
 const res = await agent.run("Draw a fox, then animate it.", { toolkit: tk })
 for (const f of res.files) console.log(f.from, f.mimeType, f.url)
+```
+
+## Agents via ACP
+
+toolnexus ships no per-agent client. Three vendor-neutral pieces compose (SPEC §8C):
+`toolkit.asMcpServer()` serves the toolkit on `127.0.0.1` behind a bearer token (`{url, token,
+close}`); `loadACP({command, args, mcpServers, sessionMeta, clientCapsMeta, model})` drives any
+ACP agent, passing `mcpServers` verbatim; and its `generateStream` plugs into
+`createInProcessClient({ generateStream })` for incremental `stream()` (text, `thought`, and the
+agent's own `tool_call`/`tool_result` with `via: "acp"`).
+
+```ts
+const srv = await tk.asMcpServer()
+const acp = await loadACP({
+  command: "my-acp-agent",
+  mcpServers: [{ type: "http", name: "toolnexus", url: srv.url,
+                 headers: [{ name: "Authorization", value: `Bearer ${srv.token}` }] }],
+})
+const client = createInProcessClient({ generate: acp.generate, generateStream: acp.generateStream })
 ```
 
 ## Documentation

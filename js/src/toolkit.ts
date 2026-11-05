@@ -8,7 +8,7 @@ import { loadSkills, type SkillDef, type SkillSource } from "./skill.js"
 import { selectBuiltins, type BuiltinsConfig } from "./builtin.js"
 import { agentTools, parseAgentsConfig, type Agent } from "./a2a.js"
 import { startA2AServer, type A2AConfig, type OnTask, type ServeHandle } from "./serve.js"
-import { type MCPServeConfig, type OnCall } from "./mcpserve.js"
+import { serveLocalMcp, type LocalMcpServer, type MCPServeConfig, type OnCall } from "./mcpserve.js"
 import { toAnthropic, toGemini, toOpenAI } from "./adapters.js"
 import type { Client } from "./client.js"
 import type { Media } from "./media.js"
@@ -219,6 +219,16 @@ export class Toolkit {
       mcpTools: mcp ? this.tools() : undefined,
       onCall: opts.onCall,
     })
+  }
+
+  /**
+   * SPEC §8C. Serves this toolkit for a local agent to call: the §7C MCP mapping (tool names
+   * verbatim, `skill` stays `skill`, optional `config` filter) on `127.0.0.1:<ephemeral>/mcp`
+   * behind a fresh 64-hex bearer token. The caller builds whatever `mcpServers` entry its agent
+   * accepts from `{url, token}`; `close()` stops it (idempotent).
+   */
+  asMcpServer(config?: MCPServeConfig): Promise<LocalMcpServer> {
+    return serveLocalMcp(this.tools(), config)
   }
 
   async execute(name: string, args: Record<string, unknown>, ctx?: ToolContext): Promise<ToolResult> {
