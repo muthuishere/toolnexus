@@ -173,6 +173,34 @@ server.start();
 are sent as `structuredContent`, `_meta`, `outputSchema` and `annotations`, also on the existing
 `serve(addr, mcp)` path. Without them, the output is the same as before.
 
+### MCP 2026-07-28 (opt-in)
+
+List `"2026-07-28"` in `protocolVersions` and the same handler also speaks the stateless 2026 wire:
+`server/discover`, header validation, `resultType` + `_meta` serverInfo, and MRTR instead of
+elicitation (a `confirm` decision or a §10 tool suspension comes back as `input_required`; the
+client's retry runs the tool with the `Answer` on `ctx.answer()`). Without it the handler is
+unchanged, and `initialize` never negotiates 2026-07-28. `listSkills` publishes skills through
+the skills extension (`skills/list`, `skills/get`, `resources/read` of `skill://` URIs);
+`McpHandler.loadMcpSkills(dir)` builds that list from a skills directory. `McpServerAuth` makes the
+handler an OAuth protected resource: `authenticate` verifies RS256 JWTs against the issuer's JWKS
+(or your own `verify`), checks per-tool scopes, and answers 401/403 with the exact challenge;
+`metadata()` serves the RFC 9728 document. SPEC §7C.2.
+
+```java
+McpServerAuth auth = new McpServerAuth("https://login.example")
+        .scopes(Map.of("*", List.of("mcp"), "delete_record", List.of("mcp:admin")));
+server.createContext("/mcp", tk.mcpHandler(new McpHandler.Config()
+        .protocolVersions("2026-07-28", "2025-06-18")      // both wires on one mount
+        .authenticate(auth::authenticate)
+        .listSkills(ctx -> McpHandler.loadMcpSkills(Path.of("skills")))));
+server.createContext("/.well-known/oauth-protected-resource", auth.metadata());
+```
+
+`McpDevAuthServer.start(options)` is an in-process authorization server for **development and tests
+only — never production**: plain HTTP on `127.0.0.1`, auto-approves as `dev-user`, PKCE S256,
+pre-registered and Client ID Metadata Document clients, refresh rotation, `mint(claims)` for
+forging test tokens. No dynamic client registration.
+
 ## Documentation
 
 Everything else — the full surface, with runnable examples — lives on the docs site:

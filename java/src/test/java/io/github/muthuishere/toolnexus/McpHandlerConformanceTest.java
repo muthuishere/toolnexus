@@ -94,11 +94,24 @@ class McpHandlerConformanceTest {
                 switch (behavior) {
                     case "echo":
                         return ToolResult.ok(String.valueOf(args.getOrDefault("text", "")));
+                    case "ask": {
+                        Answer a = ctx == null ? null : ctx.answer();
+                        if (a != null && a.ok()) {
+                            Object n = a.data() == null ? null : a.data().get("name");
+                            return ToolResult.ok("Hello, " + (n instanceof String x ? x : "") + "!");
+                        }
+                        Map<String, Object> schema = new LinkedHashMap<>();
+                        schema.put("type", "object");
+                        schema.put("properties", Map.of("name", Map.of("type", "string")));
+                        schema.put("required", List.of("name"));
+                        return ToolResult.pending(new Request("name", "input", "What is your name?", null,
+                                Map.of("schema", schema), null));
+                    }
                     case "whoami": {
-                        Object id = McpHandler.identityFrom(ctx);
+                        String id = identityName(McpHandler.identityFrom(ctx));
                         Map<String, Object> meta = McpHandler.mcpRequestMetaFrom(ctx);
                         Object trace = meta == null ? null : meta.get("trace");
-                        return ToolResult.ok((id == null ? "" : id) + "|" + (trace == null ? "" : trace));
+                        return ToolResult.ok(id + "|" + (trace == null ? "" : trace));
                     }
                     case "static":
                         return result(ft.get("result"));
@@ -109,6 +122,30 @@ class McpHandlerConformanceTest {
                 }
             }
         };
+    }
+
+    /** README identity-name rule: a string verbatim, a Principal's subject, else "". */
+    private static String identityName(Object v) {
+        if (v instanceof String s) return s;
+        if (v instanceof McpServerAuth.Principal p) return p.subject() == null ? "" : p.subject();
+        return "";
+    }
+
+    /** README {@code mcp2026}: stamp params._meta protocolVersion unless already present. */
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> stamp2026(Map<String, Object> body) {
+        Object p = body.get("params");
+        Map<String, Object> params = p instanceof Map<?, ?> ? (Map<String, Object>) p : new LinkedHashMap<>();
+        Object m = params.get("_meta");
+        Map<String, Object> meta = m instanceof Map<?, ?> ? (Map<String, Object>) m : new LinkedHashMap<>();
+        meta.putIfAbsent("io.modelcontextprotocol/protocolVersion", "2026-07-28");
+        params.put("_meta", meta);
+        body.put("params", params);
+        return body;
+    }
+
+    private static Path repoRoot() {
+        return casesFile().getParent().getParent().getParent();
     }
 
     private static void runScenario(JsonNode fixture, JsonNode sc) throws Exception {
@@ -138,7 +175,7 @@ class McpHandlerConformanceTest {
             for (Tool t : tools) {
                 JsonNode vis = byName.get(t.name()).get("visibleTo");
                 if (vis == null) { visible.add(t); continue; }
-                for (JsonNode v : vis) if (v.asText().equals(ctx.identity())) { visible.add(t); break; }
+                for (JsonNode v : vis) if (v.asText().equals(identityName(ctx.identity()))) { visible.add(t); break; }
             }
             return visible;
         });
@@ -169,7 +206,40 @@ class McpHandlerConformanceTest {
             cfg.protocolVersions(vs);
         }
 
+        if (c.path("skills").asBoolean(false)) {
+            Path skillsDir = repoRoot().resolve("examples/skills");
+            cfg.listSkills(ctx -> McpHandler.loadMcpSkills(skillsDir));
+        }
+        McpServerAuth serverAuth = null;
+        if (c.path("serverAuth").asBoolean(false)) {
+            JsonNode fa = fixture.get("serverAuth");
+            Map<String, List<String>> scopes = new LinkedHashMap<>();
+            for (Iterator<Map.Entry<String, JsonNode>> it = fa.get("scopes").fields(); it.hasNext(); ) {
+                var e = it.next();
+                List<String> l = new ArrayList<>();
+                for (JsonNode x : e.getValue()) l.add(x.asText());
+                scopes.put(e.getKey(), l);
+            }
+            JsonNode principals = fa.get("principals");
+            serverAuth = new McpServerAuth(fa.get("issuer").asText()).audience(fa.path("audience").asText(""))
+                    .scopes(scopes).verify((ex, token, aud) -> {
+                        JsonNode pr = principals.get(token);
+                        if (pr == null) throw new IllegalArgumentException("bad token");
+                        List<String> psc = new ArrayList<>();
+                        for (JsonNode x : pr.get("scopes")) psc.add(x.asText());
+                        return new McpServerAuth.Principal(pr.get("subject").asText(), psc, null);
+                    });
+            McpServerAuth sa = serverAuth;
+            cfg.authenticate(sa::authenticate);
+        }
+
         Toolkit tk = Toolkit.create(new Toolkit.Options().builtins(false));
+        HttpServer metaSrv = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        metaSrv.setExecutor(Executors.newVirtualThreadPerTaskExecutor());
+        if (serverAuth != null) metaSrv.createContext("/", serverAuth.metadata());
+        else metaSrv.createContext("/", ex -> { ex.sendResponseHeaders(404, -1); ex.close(); });
+        metaSrv.start();
+        String metaUrl = "http://127.0.0.1:" + metaSrv.getAddress().getPort();
         HttpServer srv = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         srv.setExecutor(Executors.newVirtualThreadPerTaskExecutor());
         srv.createContext("/mcp", tk.mcpHandler(cfg));
@@ -182,18 +252,47 @@ class McpHandlerConformanceTest {
                 String where = sc.get("name").asText() + " step " + (i++);
                 JsonNode rq = step.get("request");
                 String method = rq.get("method").asText();
+                boolean is2026 = rq.path("mcp2026").asBoolean(false);
+                Map<String, Object> bodyMap = rq.has("body") && rq.get("body").isObject() ? map(rq.get("body")) : null;
+                if (is2026 && bodyMap != null) bodyMap = stamp2026(bodyMap);
                 String body = rq.hasNonNull("rawBody") ? rq.get("rawBody").asText()
+                        : bodyMap != null ? M.writeValueAsString(bodyMap)
                         : rq.has("body") ? M.writeValueAsString(rq.get("body")) : "";
-                HttpRequest.Builder b = HttpRequest.newBuilder(URI.create(url))
+                String target = rq.hasNonNull("target") ? metaUrl + rq.get("target").asText() : url;
+                HttpRequest.Builder b = HttpRequest.newBuilder(URI.create(target))
                         .method(method, body.isEmpty() ? HttpRequest.BodyPublishers.noBody()
                                 : HttpRequest.BodyPublishers.ofString(body));
-                if (method.equals("POST")) b.header("Content-Type", rq.path("contentType").asText("application/json"));
-                b.header("Accept", rq.path("accept").asText("application/json, text/event-stream"));
+                // Headers are collected case-insensitively so `headers` can override or remove them.
+                Map<String, String> hs = new java.util.TreeMap<>(String.CASE_INSENSITIVE_ORDER);
+                if (method.equals("POST")) hs.put("Content-Type", rq.path("contentType").asText("application/json"));
+                hs.put("Accept", rq.path("accept").asText("application/json, text/event-stream"));
                 String token = rq.hasNonNull("token") ? rq.get("token").asText() : sc.path("token").asText("");
-                if (!token.isEmpty()) b.header("Authorization", token);
-                if (rq.hasNonNull("sessionId")) b.header("Mcp-Session-Id", rq.get("sessionId").asText());
-                else if (rq.path("session").asBoolean(false) && !sid.isEmpty()) b.header("Mcp-Session-Id", sid);
-                if (rq.hasNonNull("version")) b.header("MCP-Protocol-Version", rq.get("version").asText());
+                if (!token.isEmpty()) hs.put("Authorization", token);
+                if (rq.hasNonNull("sessionId")) hs.put("Mcp-Session-Id", rq.get("sessionId").asText());
+                else if (rq.path("session").asBoolean(false) && !sid.isEmpty()) hs.put("Mcp-Session-Id", sid);
+                if (rq.hasNonNull("version")) hs.put("MCP-Protocol-Version", rq.get("version").asText());
+                if (is2026 && bodyMap != null) {
+                    String bm = bodyMap.get("method") instanceof String x ? x : "";
+                    hs.put("MCP-Protocol-Version", "2026-07-28");
+                    hs.put("Mcp-Method", bm);
+                    Object ps = bodyMap.get("params");
+                    Map<?, ?> pmap = ps instanceof Map<?, ?> pm ? pm : Map.of();
+                    if (bm.equals("tools/call") || bm.equals("prompts/get")) {
+                        hs.put("Mcp-Name", pmap.get("name") instanceof String x ? x : "");
+                    } else if (bm.equals("resources/read")) {
+                        hs.put("Mcp-Name", pmap.get("uri") instanceof String x ? x : "");
+                    }
+                }
+                if (rq.has("headers")) {
+                    for (Iterator<Map.Entry<String, JsonNode>> it = rq.get("headers").fields(); it.hasNext(); ) {
+                        var e = it.next();
+                        if (e.getValue().asText().isEmpty()) hs.remove(e.getKey());
+                        else hs.put(e.getKey(), e.getValue().asText());
+                    }
+                }
+                for (Map.Entry<String, String> e : hs.entrySet()) {
+                    if (!e.getValue().isEmpty()) b.header(e.getKey(), e.getValue());
+                }
 
                 HttpResponse<String> resp = HTTP.send(b.build(), HttpResponse.BodyHandlers.ofString());
                 if ("sid".equals(step.path("capture").asText())) sid = resp.headers().firstValue("Mcp-Session-Id").orElse("");
@@ -238,6 +337,7 @@ class McpHandlerConformanceTest {
             }
         } finally {
             srv.stop(0);
+            metaSrv.stop(0);
             tk.close();
         }
     }

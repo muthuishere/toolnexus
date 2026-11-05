@@ -50,7 +50,15 @@ import java.util.concurrent.atomic.AtomicLong;
 public final class McpHandler implements HttpHandler {
 
     /** The protocol versions whose wire this handler implements (ADR 0039 §versions). */
-    public static final List<String> IMPLEMENTED_VERSIONS = List.of("2025-11-25", "2025-06-18");
+    public static final List<String> IMPLEMENTED_VERSIONS = List.of("2026-07-28", "2025-11-25", "2025-06-18");
+    /**
+     * The MCP 2026-07-28 protocol version (SPEC §7C.2): opt-in only, never a default. Listing it in
+     * {@link Config#protocolVersions} enables the stateless wire (server/discover, header
+     * validation, MRTR, skills extension) on this handler.
+     */
+    public static final String PROTOCOL_2026 = "2026-07-28";
+    /** The SEP-2640 skills extension id advertised by server/discover when {@code listSkills} is set. */
+    public static final String SKILLS_EXTENSION = "io.modelcontextprotocol/skills";
     private static final List<String> DEFAULT_VERSIONS = List.of("2025-06-18");
     private static final String DEFAULT_NAME = "toolnexus";
     private static final String DEFAULT_VERSION = "0.1.0";
@@ -180,6 +188,28 @@ public final class McpHandler implements HttpHandler {
     @FunctionalInterface public interface ReadResource { List<ResourceContent> readResource(RequestContext ctx, String uri) throws Exception; }
     @FunctionalInterface public interface ListPrompts { List<Prompt> listPrompts(RequestContext ctx) throws Exception; }
     @FunctionalInterface public interface GetPrompt { PromptResult getPrompt(RequestContext ctx, String name, Map<String, String> args) throws Exception; }
+    /** SPEC §7C.2: the skills published through the SEP-2640 skills extension on the 2026-07-28 wire. */
+    @FunctionalInterface public interface ListSkills { List<Skill> listSkills(RequestContext ctx) throws Exception; }
+
+    /**
+     * One skill published through the skills extension (SEP-2640, SPEC §7C.2). {@code files} are
+     * paths relative to the skill directory ("/"-separated) and MUST include "SKILL.md".
+     * {@code frontmatter} null ⇒ {@code {name}}. {@link #loadMcpSkills} builds these from a directory.
+     */
+    public record Skill(String name, Map<String, Object> frontmatter, List<SkillFile> files) {}
+
+    /** One text file of a {@link Skill}. */
+    public record SkillFile(String path, String text) {}
+
+    /**
+     * SPEC §7C.2 loadMcpSkills: every skill under {@code dir} (any depth, {@code **}/SKILL.md, symlinks
+     * not followed) for {@link Config#listSkills}. Frontmatter is {@code {name, description}} (§3
+     * parsing); a skill without a name is skipped; files are every regular UTF-8 file under the skill
+     * directory (binary files skipped), sorted by path. Skills are sorted by name.
+     */
+    public static List<Skill> loadMcpSkills(java.nio.file.Path dir) throws IOException {
+        return Mcp2026.loadSkills(dir);
+    }
 
     /**
      * Issues and checks Mcp-Session-Id values. Default: an in-memory set. A host plugs its own
@@ -211,6 +241,8 @@ public final class McpHandler implements HttpHandler {
         public ReadResource readResource;
         public ListPrompts listPrompts;
         public GetPrompt getPrompt;
+        /** SPEC §7C.2 skills extension (2026-07-28 wire only); null ⇒ not advertised. */
+        public ListSkills listSkills;
         public SessionIds sessionIds;
         /** No Mcp-Session-Id issued or checked; confirm never elicits. */
         public boolean stateless;
@@ -236,6 +268,7 @@ public final class McpHandler implements HttpHandler {
         public Config readResource(ReadResource v) { this.readResource = v; return this; }
         public Config listPrompts(ListPrompts v) { this.listPrompts = v; return this; }
         public Config getPrompt(GetPrompt v) { this.getPrompt = v; return this; }
+        public Config listSkills(ListSkills v) { this.listSkills = v; return this; }
         public Config sessionIds(SessionIds v) { this.sessionIds = v; return this; }
         public Config stateless(boolean v) { this.stateless = v; return this; }
         public Config statelessSessionId(String v) { this.statelessSessionId = v; return this; }
@@ -247,7 +280,8 @@ public final class McpHandler implements HttpHandler {
     private final Toolkit toolkit;
     private final Config cfg;
     private final SessionIds ids;
-    private final List<String> versions;
+    private final List<String> versions;      // every accepted version, newest first
+    private final List<String> legacy;        // versions minus 2026-07-28: the initialize/session wire
     private final Duration confirmTimeout;
     private final long maxBodyBytes;
 
@@ -266,6 +300,9 @@ public final class McpHandler implements HttpHandler {
             }
         }
         this.versions = vs.isEmpty() ? DEFAULT_VERSIONS : List.copyOf(vs);
+        List<String> lg = new ArrayList<>(this.versions);
+        lg.remove(PROTOCOL_2026);
+        this.legacy = List.copyOf(lg);
         this.ids = this.cfg.sessionIds != null ? this.cfg.sessionIds : new MemorySessionIds();
         this.confirmTimeout = this.cfg.confirmTimeout == null || this.cfg.confirmTimeout.isNegative()
                 || this.cfg.confirmTimeout.isZero() ? Duration.ofMinutes(5) : this.cfg.confirmTimeout;
@@ -308,17 +345,19 @@ public final class McpHandler implements HttpHandler {
     @Override
     public void handle(HttpExchange ex) throws IOException {
         try {
+            if ("POST".equals(ex.getRequestMethod()) && versions.contains(PROTOCOL_2026) && handlePost2026(ex)) return;
+            if (only2026() && !"POST".equals(ex.getRequestMethod())) {
+                ex.getResponseHeaders().set("Allow", "POST");
+                httpError(ex, 405, "Method Not Allowed");
+                return;
+            }
             RequestContext ctx = new RequestContext(null, ex, "", null);
             if (cfg.authenticate != null) {
                 Object identity;
                 try {
                     identity = cfg.authenticate.authenticate(ex);
                 } catch (Exception e) {
-                    if (cfg.wwwAuthenticate != null) {
-                        String v = cfg.wwwAuthenticate.header(ex, e);
-                        if (v != null && !v.isEmpty()) ex.getResponseHeaders().set("WWW-Authenticate", v);
-                    }
-                    httpError(ex, 401, "Unauthorized");
+                    writeAuthFailure(ex, e);
                     return;
                 }
                 ctx = new RequestContext(identity, ex, "", null);
@@ -340,7 +379,7 @@ public final class McpHandler implements HttpHandler {
     /** Validates MCP-Protocol-Version and (stateful) Mcp-Session-Id; null ⇒ the error was written. */
     private RequestContext checkSession(RequestContext ctx, HttpExchange ex) throws IOException {
         String v = header(ex, "MCP-Protocol-Version");
-        if (!v.isEmpty() && !versions.contains(v)) {
+        if (!v.isEmpty() && !legacy.contains(v)) {
             httpError(ex, 400, "Bad Request: unsupported MCP-Protocol-Version");
             return null;
         }
@@ -435,7 +474,7 @@ public final class McpHandler implements HttpHandler {
 
     private void handleInitialize(RequestContext ctx, HttpExchange ex, JsonNode id, JsonNode params) throws IOException {
         String clientVersion = params != null ? textOrNull(params.get("protocolVersion")) : null;
-        String version = clientVersion != null && versions.contains(clientVersion) ? clientVersion : versions.get(0);
+        String version = clientVersion != null && legacy.contains(clientVersion) ? clientVersion : legacy.get(0);
 
         String sid = "";
         if (cfg.stateless) {
@@ -792,6 +831,408 @@ public final class McpHandler implements HttpHandler {
         if (!id.isTextual()) return;
         CompletableFuture<JsonNode> f = pending.get(sid + "\u0000" + id.asText());
         if (f != null) f.complete(msg);
+    }
+
+    // ── MCP 2026-07-28 (SPEC §7C.2, ADR 0040) ────────────────────────────
+
+    private boolean only2026() {
+        return versions.size() == 1 && PROTOCOL_2026.equals(versions.get(0));
+    }
+
+    /** Answers an {@code authenticate} failure (both wires). */
+    private void writeAuthFailure(HttpExchange ex, Exception e) throws IOException {
+        String challenge = "";
+        if (cfg.wwwAuthenticate != null) {
+            String v = cfg.wwwAuthenticate.header(ex, e);
+            if (v != null) challenge = v;
+        }
+        if (e instanceof McpAuthError ae) {
+            if (challenge.isEmpty() && ae.challenge() != null) challenge = ae.challenge();
+            if (!challenge.isEmpty()) ex.getResponseHeaders().set("WWW-Authenticate", challenge);
+            int status = ae.status() == 0 ? 401 : ae.status();
+            sendBytes(ex, status, "application/json", "{\"error\":\"unauthorized\"}");
+            return;
+        }
+        if (!challenge.isEmpty()) ex.getResponseHeaders().set("WWW-Authenticate", challenge);
+        httpError(ex, 401, "Unauthorized");
+    }
+
+    /**
+     * Reads and routes a POST when the 2026 profile is enabled. Returns false (body restored) when
+     * the request belongs to the legacy wire.
+     */
+    private boolean handlePost2026(HttpExchange ex) throws IOException {
+        if (!"application/json".equals(mediaType(header(ex, "Content-Type")))) return false; // legacy answers 415
+        byte[] body;
+        try {
+            body = readLimited(ex.getRequestBody(), maxBodyBytes + 1);
+        } catch (IOException e) {
+            return false;
+        }
+        ex.setStreams(new java.io.ByteArrayInputStream(body), null);
+        if (body.length > maxBodyBytes) return false;
+        String text = new String(body, StandardCharsets.UTF_8);
+        String trimmed = text.strip();
+        JsonNode msg = null;
+        if (!trimmed.startsWith("[") && Mcp2026.validUtf8(body)) {
+            try {
+                msg = MAPPER.readTree(text);
+            } catch (Exception e) {
+                msg = null;
+            }
+        }
+        if (msg == null || !msg.isObject() || !"2.0".equals(textOrNull(msg.get("jsonrpc")))
+                || !stringOrAbsent(msg.get("method"))) {
+            if (!only2026()) return false;
+            if (trimmed.startsWith("[")) write26(ex, 400, null, null, new Rpc26Error(400, -32600, "batch requests are not supported", null));
+            else write26(ex, 400, null, null, new Rpc26Error(400, -32700, "Parse error", null));
+            return true;
+        }
+        String method = msg.hasNonNull("method") ? msg.get("method").asText() : "";
+        JsonNode params = msg.get("params");
+        Map<String, Object> pm = params != null && params.isObject() ? toMap(params) : null;
+        Map<String, Object> meta = pm != null && pm.get("_meta") instanceof Map<?, ?> mm ? castMap(mm) : null;
+        if (!route2026(ex, method, meta)) return false;
+        serve2026(ex, msg, method, params, pm, meta);
+        return true;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> castMap(Map<?, ?> m) {
+        return (Map<String, Object>) m;
+    }
+
+    /** SPEC §7C.2 routing: whether this POST is served on the 2026-07-28 profile. */
+    private boolean route2026(HttpExchange ex, String method, Map<String, Object> meta) {
+        if (only2026()) return true;
+        if ("initialize".equals(method)) return false;
+        String hv = header(ex, "MCP-Protocol-Version");
+        if (PROTOCOL_2026.equals(hv)) return true;
+        if (!hv.isEmpty() && versions.contains(hv)) return false;
+        return "server/discover".equals(method) || !header(ex, "Mcp-Method").isEmpty()
+                || (meta != null && meta.containsKey(Mcp2026.META_VERSION));
+    }
+
+    static final class Rpc26Error extends Exception {
+        final int status;
+        final int code;
+        final Object data;
+
+        Rpc26Error(int status, int code, String message, Object data) {
+            super(message, null, false, false);
+            this.status = status;
+            this.code = code;
+            this.data = data;
+        }
+    }
+
+    private static Rpc26Error invalid26(String m) { return new Rpc26Error(200, -32602, m, null); }
+
+    private static Rpc26Error internal26(Throwable e) { return new Rpc26Error(200, -32603, msgOf(e), null); }
+
+    private void serve2026(HttpExchange ex, JsonNode msg, String method, JsonNode params,
+                           Map<String, Object> p, Map<String, Object> meta) throws IOException {
+        JsonNode id = msg.get("id");
+        if (method.isEmpty() || id == null || id.isNull()) {
+            empty(ex, 202); // a notification (or a stray response): acknowledged
+            return;
+        }
+        Rpc26Error bad = Mcp2026.validate(ex, method, p, meta);
+        if (bad != null) {
+            write26(ex, bad.status, id, null, bad);
+            return;
+        }
+        RequestContext ctx = new RequestContext(null, ex, "", null);
+        if (cfg.authenticate != null) {
+            Object identity;
+            try {
+                identity = cfg.authenticate.authenticate(ex);
+            } catch (Exception e) {
+                writeAuthFailure(ex, e);
+                return;
+            }
+            ctx = new RequestContext(identity, ex, "", null);
+        }
+        if (meta != null) ctx = ctx.withMeta(meta);
+        Map<String, Object> res = null;
+        Rpc26Error err = null;
+        try {
+            res = dispatch2026(ctx, method, params, p == null ? new LinkedHashMap<>() : p, meta);
+        } catch (Rpc26Error e) {
+            err = e;
+        }
+        write26(ex, err == null ? 200 : err.status, id, res, err);
+    }
+
+    private static void write26(HttpExchange ex, int status, JsonNode id, Map<String, Object> result, Rpc26Error e) throws IOException {
+        Map<String, Object> msg = new LinkedHashMap<>();
+        msg.put("jsonrpc", "2.0");
+        msg.put("id", id == null ? NullNode.getInstance() : id);
+        if (e != null) {
+            Map<String, Object> er = kv("code", e.code, "message", e.getMessage());
+            if (e.data != null) er.put("data", e.data);
+            msg.put("error", er);
+        } else {
+            msg.put("result", result);
+        }
+        sendBytes(ex, status, "application/json", Json.stringify(msg) + "\n");
+    }
+
+    private ServerInfo info2026(RequestContext ctx) {
+        ServerInfo info = new ServerInfo(cfg.name, cfg.title, cfg.version, cfg.instructions);
+        if (cfg.serverInfo != null) info = cfg.serverInfo.serverInfo(ctx);
+        if (info == null) info = new ServerInfo(null, null, null, null);
+        return new ServerInfo(isEmpty(info.name()) ? DEFAULT_NAME : info.name(), info.title(),
+                isEmpty(info.version()) ? DEFAULT_VERSION : info.version(), info.instructions());
+    }
+
+    /** Stamps resultType and _meta.serverInfo (merged after any existing _meta keys). */
+    private Map<String, Object> complete26(RequestContext ctx, Map<String, Object> m, String resultType) {
+        ServerInfo info = info2026(ctx);
+        Map<String, Object> meta = new LinkedHashMap<>();
+        if (m.get("_meta") instanceof Map<?, ?> old) meta.putAll(castMap(old));
+        meta.put(Mcp2026.META_SERVER_INFO, omitEmpty(kv("name", info.name(), "title", info.title(), "version", info.version())));
+        m.put("_meta", meta);
+        m.put("resultType", resultType);
+        return m;
+    }
+
+    private String cacheScope26() {
+        return cfg.authenticate != null ? "private" : "public";
+    }
+
+    private Map<String, Object> dispatch2026(RequestContext ctx, String method, JsonNode params,
+                                             Map<String, Object> p, Map<String, Object> meta) throws Rpc26Error {
+        switch (method) {
+            case "server/discover": {
+                ServerInfo info = info2026(ctx);
+                Map<String, Object> caps = new LinkedHashMap<>();
+                caps.put("tools", new LinkedHashMap<>());
+                if (cfg.listResources != null || cfg.listSkills != null) caps.put("resources", new LinkedHashMap<>());
+                if (cfg.listPrompts != null) caps.put("prompts", new LinkedHashMap<>());
+                if (cfg.listSkills != null) caps.put("extensions", kv(SKILLS_EXTENSION, new LinkedHashMap<>()));
+                Map<String, Object> res = kv("supportedVersions", List.of(PROTOCOL_2026), "capabilities", caps,
+                        "ttlMs", 3600000, "cacheScope", "public");
+                if (!isEmpty(info.instructions())) res.put("instructions", info.instructions());
+                return complete26(ctx, res, "complete");
+            }
+            case "ping":
+                return complete26(ctx, new LinkedHashMap<>(), "complete");
+            case "tools/list": {
+                List<Tool> ts;
+                try {
+                    ts = new ArrayList<>(tools(ctx));
+                } catch (RpcError e) {
+                    throw new Rpc26Error(200, e.code, e.getMessage(), null);
+                }
+                ts.removeIf(java.util.Objects::isNull);
+                ts.sort((a, b) -> Mcp2026.compareCodePoints(a.name(), b.name()));
+                List<Map<String, Object>> out = new ArrayList<>();
+                for (Tool t : ts) out.add(wireTool(t));
+                return complete26(ctx, kv("tools", out, "ttlMs", 60000, "cacheScope", cacheScope26()), "complete");
+            }
+            case "tools/call":
+                return callTool2026(ctx, p, meta);
+            case "skills/list": {
+                if (cfg.listSkills == null) break;
+                List<Map<String, Object>> list = new ArrayList<>();
+                for (Skill s : skills26(ctx)) {
+                    list.add(kv("uri", "skill://" + s.name() + "/SKILL.md", "frontmatter", Mcp2026.frontmatter(s)));
+                }
+                return complete26(ctx, kv("skills", list, "ttlMs", 60000, "cacheScope", cacheScope26()), "complete");
+            }
+            case "skills/get": {
+                if (cfg.listSkills == null) break;
+                String uri = p.get("uri") instanceof String s ? s : "";
+                try {
+                    Mcp2026.parseSkillUri(uri);
+                } catch (IllegalArgumentException e) {
+                    throw invalid26("Invalid skill URI: " + e.getMessage());
+                }
+                for (Skill s : skills26(ctx)) {
+                    if (("skill://" + s.name() + "/SKILL.md").equals(uri)) {
+                        return complete26(ctx, kv("skill", Mcp2026.skillEntry(s)), "complete");
+                    }
+                }
+                throw invalid26("Unknown skill: " + uri);
+            }
+            case "resources/read": {
+                String uri = p.get("uri") instanceof String s ? s : "";
+                if (uri.startsWith("skill://") && cfg.listSkills != null) {
+                    String[] nr;
+                    try {
+                        nr = Mcp2026.parseSkillUri(uri);
+                    } catch (IllegalArgumentException e) {
+                        throw invalid26("Invalid resource URI: " + e.getMessage());
+                    }
+                    for (Skill s : skills26(ctx)) {
+                        if (!s.name().equals(nr[0]) || s.files() == null) continue;
+                        for (SkillFile f : s.files()) {
+                            if (f.path().equals(nr[1])) {
+                                String mt = nr[1].endsWith(".md") ? "text/markdown" : "text/plain";
+                                List<Map<String, Object>> contents = List.of(kv("uri", uri, "mimeType", mt,
+                                        "text", f.text() == null ? "" : f.text()));
+                                return complete26(ctx, kv("contents", contents, "ttlMs", 60000,
+                                        "cacheScope", cacheScope26()), "complete");
+                            }
+                        }
+                    }
+                    throw invalid26("Resource not found: " + uri);
+                }
+                if (cfg.listResources == null || cfg.readResource == null) break;
+                return legacy26(ctx, method, params);
+            }
+            case "resources/list":
+                if (cfg.listResources == null) break;
+                return legacy26(ctx, method, params);
+            case "prompts/list":
+            case "prompts/get":
+                if (cfg.listPrompts == null) break;
+                return legacy26(ctx, method, params);
+            default:
+                break;
+        }
+        throw new Rpc26Error(404, -32601, "Method not found: " + method, null);
+    }
+
+    /** The §7C.1 payload of {@code method}, in the 2026 envelope. */
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> legacy26(RequestContext ctx, String method, JsonNode params) throws Rpc26Error {
+        Object res;
+        try {
+            res = dispatch(ctx, null, method, params);
+        } catch (RpcError e) {
+            throw new Rpc26Error(200, e.code, e.getMessage(), null);
+        } catch (IOException e) {
+            throw internal26(e);
+        }
+        Map<String, Object> m = new LinkedHashMap<>();
+        if (res instanceof Map<?, ?> rm) m.putAll((Map<String, Object>) rm);
+        return complete26(ctx, m, "complete");
+    }
+
+    private List<Skill> skills26(RequestContext ctx) throws Rpc26Error {
+        List<Skill> skills;
+        try {
+            skills = cfg.listSkills.listSkills(ctx);
+        } catch (Exception e) {
+            throw internal26(e);
+        }
+        List<Skill> out = new ArrayList<>();
+        if (skills != null) for (Skill s : skills) if (s != null && s.name() != null) out.add(s);
+        out.sort((a, b) -> Mcp2026.compareCodePoints(a.name(), b.name()));
+        return out;
+    }
+
+    private Map<String, Object> callTool2026(RequestContext ctx, Map<String, Object> p, Map<String, Object> meta) throws Rpc26Error {
+        String name = p.get("name") instanceof String s ? s : "";
+        List<Tool> ts;
+        try {
+            ts = tools(ctx);
+        } catch (RpcError e) {
+            throw new Rpc26Error(200, e.code, e.getMessage(), null);
+        }
+        Tool tool = null;
+        for (Tool t : ts) {
+            if (t != null && name.equals(t.name())) { tool = t; break; }
+        }
+        if (tool == null) throw invalid26("Unknown tool: " + name);
+        final Tool chosen = tool;
+        long started = System.nanoTime();
+        DecisionKind[] decision = {DecisionKind.ALLOW};
+
+        java.util.function.BiFunction<Map<String, Object>, Object[], Map<String, Object>> finish = (m, errs) -> {
+            boolean isErr = (Boolean) errs[0];
+            Throwable execErr = (Throwable) errs[1];
+            int bytes = Json.stringify(m).getBytes(StandardCharsets.UTF_8).length;
+            if (cfg.onCall != null) {
+                try {
+                    cfg.onCall.onCall(new CallEvent(chosen.name(), chosen.source(),
+                            TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started), isErr, execErr,
+                            bytes, decision[0], ctx.identity(), ""));
+                } catch (Throwable ignored) {
+                    // host callback failures are isolated
+                }
+            }
+            return m;
+        };
+        java.util.function.BiFunction<ToolResult, Throwable, Map<String, Object>> result = (res, execErr) ->
+                finish.apply(complete26(ctx, new LinkedHashMap<>(wireResult(res)), "complete"),
+                        new Object[]{res.isError(), execErr});
+
+        Object rawArgs = p.get("arguments");
+        Map<String, Object> args = new LinkedHashMap<>();
+        if (rawArgs != null) {
+            if (!(rawArgs instanceof Map<?, ?> am)) {
+                return result.apply(ToolResult.error("invalid arguments: must be an object"), null);
+            }
+            args = castMap(am);
+        }
+        String rawText = Json.stringify(args);
+
+        Mcp2026.State state = Mcp2026.decodeState(p.get("requestState"));
+        if (state != null && !name.equals(state.tool())) state = null;
+        Map<String, Object> responses = p.get("inputResponses") instanceof Map<?, ?> rm ? castMap(rm) : null;
+        boolean confirmed = state != null && state.confirmed();
+
+        if (cfg.beforeCall != null) {
+            Decision d;
+            try {
+                d = cfg.beforeCall.beforeCall(ctx, chosen, rawText);
+            } catch (Exception e) {
+                d = Decision.deny(msgOf(e));
+            }
+            if (d == null) d = Decision.allow();
+            DecisionKind kind = d.kind() == null ? DecisionKind.ALLOW : d.kind();
+            decision[0] = kind;
+            if (kind == DecisionKind.DENY) {
+                if (d.result() != null) return result.apply(d.result(), null);
+                return result.apply(ToolResult.error(isEmpty(d.message()) ? "denied" : d.message()), null);
+            }
+            if (kind == DecisionKind.CONFIRM && !confirmed) {
+                Answer ans = responses == null ? null : Mcp2026.inputResponse("confirm", responses.get("confirm"));
+                if (state != null && ans != null) {
+                    if (!ans.ok()) return result.apply(ToolResult.error("declined"), null);
+                    if (ans.data() != null && Boolean.FALSE.equals(ans.data().get("confirm"))) {
+                        return result.apply(ToolResult.error("declined"), null);
+                    }
+                    confirmed = true;
+                    responses = null; // the confirm round is consumed
+                } else if (!Mcp2026.canElicit(meta)) {
+                    if (d.result() != null) return result.apply(d.result(), null);
+                    return result.apply(ToolResult.error("confirmation required: " + (d.message() == null ? "" : d.message())), null);
+                } else {
+                    String msg = isEmpty(d.message()) ? "Confirm this action?" : d.message();
+                    Map<String, Object> schema = kv("type", "object", "properties",
+                            kv("confirm", kv("type", "boolean", "title", "Confirm", "description", msg)));
+                    Map<String, Object> ir = kv("method", "elicitation/create", "params",
+                            kv("mode", "form", "message", msg, "requestedSchema", schema));
+                    return finish.apply(complete26(ctx, kv("inputRequests", kv("confirm", ir),
+                            "requestState", Mcp2026.encodeState(name, false)), "input_required"), new Object[]{false, null});
+                }
+            }
+        }
+
+        Answer answer = null;
+        if (state != null && responses != null && responses.size() == 1) {
+            Map.Entry<String, Object> e = responses.entrySet().iterator().next();
+            answer = Mcp2026.inputResponse(e.getKey(), e.getValue());
+        }
+        ToolResult res;
+        Throwable execErr = null;
+        try {
+            res = chosen.execute(args, new ToolContext(null, null, answer, null, ctx));
+            if (res == null) res = ToolResult.ok("");
+        } catch (Throwable e) {
+            execErr = e;
+            res = ToolResult.error(msgOf(e));
+        }
+        Request req = execErr == null ? ToolResult.pendingOf(res) : null;
+        if (req != null) {
+            return finish.apply(complete26(ctx, kv("inputRequests", kv(req.id(), Mcp2026.inputRequest(req)),
+                    "requestState", Mcp2026.encodeState(name, confirmed)), "input_required"), new Object[]{false, null});
+        }
+        return result.apply(res, execErr);
     }
 
     // ── wire helpers ─────────────────────────────────────────────────────
