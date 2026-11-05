@@ -197,8 +197,9 @@ reaches the tool as `ctx.answer`. `listSkills` publishes skills through the skil
 list from a skills folder. `McpServerAuth` makes the handler an OAuth protected resource: its
 `authenticate` verifies RS256 JWTs against the issuer's JWKS (or your `verify`), applies per-tool
 `scopes`, answers with exact `WWW-Authenticate` challenges, and returns an `McpPrincipal`;
-`metadata()` serves the RFC 9728 document. `startMcpDevAuthServer()` is an auto-approving OAuth
-server on `127.0.0.1` — **DEVELOPMENT AND TESTS ONLY, never production**. SPEC §7C.2.
+`metadata()` serves the RFC 9728 document. Bring your own authorization server; the
+auto-approving dev authorization server the suite uses is test tooling (`test/support`), not part of
+the package. SPEC §7C.2.
 
 ```ts
 import { McpServerAuth, loadMcpSkills } from "toolnexus"

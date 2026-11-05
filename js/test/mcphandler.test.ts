@@ -23,8 +23,6 @@ import {
   buildMcpServer,
   loadMcpSkills,
   McpServerAuth,
-  startMcpDevAuthServer,
-  type McpDevAuthServer,
   type McpPrincipal,
   type Tool,
   type ToolResult,
@@ -33,6 +31,7 @@ import {
   type McpSessionIds,
   type McpHandlerConfig,
 } from "../dist/index.js"
+import { startMcpDevAuthServer, type McpDevAuthServer } from "./support/mcpdevauth.ts"
 
 type User = { name: string }
 

@@ -1,5 +1,6 @@
 /**
- * McpDevAuthServer — DEVELOPMENT AND TESTS ONLY. NEVER USE IN PRODUCTION (SPEC §7C.2).
+ * McpDevAuthServer — TEST AND INTEROP TOOLING ONLY, NOT LIBRARY SURFACE (SPEC §7C.2): it is not
+ * built into dist/ nor exported from the package. NEVER USE IN PRODUCTION.
  *
  * An in-process OAuth 2.1 authorization server that auto-approves every request as "dev-user"
  * (no login, no consent): RFC 8414 metadata, JWKS, authorization code + PKCE S256, resource
@@ -15,7 +16,7 @@
 import { createHash, generateKeyPairSync, randomBytes, sign as cryptoSign } from "node:crypto"
 import http from "node:http"
 import type { AddressInfo } from "node:net"
-import { getJson } from "./mcpheader.js"
+import { getJson } from "../../dist/mcpheader.js"
 
 export interface McpDevAuthOptions {
   /** Pre-registered client_id → allowed redirect URIs (a loopback redirect matches on any port). */
