@@ -330,6 +330,24 @@ public final class Toolkit implements AutoCloseable {
         }
     }
 
+    /**
+     * Serve this toolkit for a local agent to call (SPEC §8C): the §7C MCP server on
+     * {@code 127.0.0.1:<ephemeral>/mcp} behind a fresh 32-byte bearer token. Tool names are
+     * verbatim; {@code cfg} (nullable) names the server and filters tools. Close it when done.
+     */
+    public McpServe.LocalServer asMcpServer(McpServe.MCPServeConfig cfg) {
+        try {
+            return McpServe.serveLocal(tools(), cfg);
+        } catch (java.io.IOException e) {
+            throw new RuntimeException("asMcpServer failed: " + e.getMessage(), e);
+        }
+    }
+
+    /** {@link #asMcpServer(McpServe.MCPServeConfig)} with defaults. */
+    public McpServe.LocalServer asMcpServer() {
+        return asMcpServer(null);
+    }
+
     public ToolResult execute(String name, Map<String, Object> args, ToolContext ctx) {
         Tool tool = get(name);
         if (tool == null) {
