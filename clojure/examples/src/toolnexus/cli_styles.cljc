@@ -25,6 +25,11 @@ Never both. Use tool results already in \"messages\" instead of calling the same
     \"-p\",
     \"--tools\",
     \"\",
+    \"--disable-slash-commands\",
+    \"--strict-mcp-config\",
+    \"--setting-sources\",
+    \"\",
+    \"--no-session-persistence\",
     \"--output-format\",
     \"text\",
     [
@@ -35,7 +40,7 @@ Never both. Use tool results already in \"messages\" instead of calling the same
   \"prompt\": \"stdin\",
   \"answer\": \"stdout\",
   \"verified\": \"claude 2.1.318 --help, 2026-11-04\",
-  \"notes\": \"--tools \\\"\\\" disables Claude Code's own tools so the client executes them. Prompt on stdin: no argv length limit. ACP: the claude binary has no ACP mode; set ACPCommand to an ACP adapter (verified: npx -y @agentclientprotocol/claude-agent-acp@0.100.0).\"
+  \"notes\": \"--tools \\\"\\\" disables Claude Code's own tools so the client executes them. Isolation (default): --disable-slash-commands --strict-mcp-config --setting-sources \\\"\\\" --no-session-persistence load none of the user's skills, slash commands, MCP servers, settings, hooks or CLAUDE.md (live 2026-11-05: init lists no MCP server or skill; subscription login still works; never --bare, which drops keychain auth). Installed plugins still load. Prompt on stdin: no argv length limit. ACP: the claude binary has no ACP mode; set ACPCommand to an ACP adapter (verified: npx -y @agentclientprotocol/claude-agent-acp@0.100.0).\"
 }
 "
    "codex"
@@ -49,6 +54,11 @@ Never both. Use tool results already in \"messages\" instead of calling the same
     \"never\",
     \"--sandbox\",
     \"read-only\",
+    \"--ignore-user-config\",
+    \"-c\",
+    \"features.skills=false\",
+    \"-c\",
+    \"project_doc_max_bytes=0\",
     \"--output-last-message\",
     \"{{out}}\",
     [
@@ -60,7 +70,7 @@ Never both. Use tool results already in \"messages\" instead of calling the same
   \"prompt\": \"stdin\",
   \"answer\": \"out\",
   \"verified\": \"codex-cli 0.160.0 exec --help, 2026-11-04\",
-  \"notes\": \"'-' reads the prompt from stdin; the final message comes from --output-last-message, stdout carries progress. ACP: none (codex-acp 0.16.0 cannot reach current account models), so codex always uses the one-shot CLI.\"
+  \"notes\": \"'-' reads the prompt from stdin; the final message comes from --output-last-message, stdout carries progress. Isolation (partial): --ignore-user-config drops ~/.codex/config.toml (its MCP servers), skills off, project AGENTS.md off; ~/.codex/AGENTS.md and codex_apps still load (live 2026-11-05) and codex has no flag for them. ACP: none (codex-acp 0.16.0 cannot reach current account models), so codex always uses the one-shot CLI.\"
 }
 "
    "copilot"
@@ -71,6 +81,8 @@ Never both. Use tool results already in \"messages\" instead of calling the same
     \"{{prompt}}\",
     \"--silent\",
     \"--no-color\",
+    \"--disable-builtin-mcps\",
+    \"--no-custom-instructions\",
     [
       \"--model\",
       \"{{model}}\"
@@ -79,7 +91,7 @@ Never both. Use tool results already in \"messages\" instead of calling the same
   \"prompt\": \"arg\",
   \"answer\": \"stdout\",
   \"verified\": \"GitHub Copilot CLI 1.0.98 --help, 2026-11-04\",
-  \"notes\": \"Prompt as one argv element: Linux caps a single argument at 128 KiB (MAX_ARG_STRLEN).\",
+  \"notes\": \"Isolation (partial): --disable-builtin-mcps --no-custom-instructions drop the built-in GitHub MCP servers and AGENTS.md-style instructions (live 2026-11-05); user MCP servers from ~/.copilot config and skills have no off flag. Prompt as one argv element: Linux caps a single argument at 128 KiB (MAX_ARG_STRLEN).\",
   \"acp\": {
     \"args\": [
       \"--acp\"

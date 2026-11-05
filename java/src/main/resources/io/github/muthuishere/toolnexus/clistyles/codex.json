@@ -8,6 +8,11 @@
     "never",
     "--sandbox",
     "read-only",
+    "--ignore-user-config",
+    "-c",
+    "features.skills=false",
+    "-c",
+    "project_doc_max_bytes=0",
     "--output-last-message",
     "{{out}}",
     [
@@ -19,5 +24,5 @@
   "prompt": "stdin",
   "answer": "out",
   "verified": "codex-cli 0.160.0 exec --help, 2026-11-04",
-  "notes": "'-' reads the prompt from stdin; the final message comes from --output-last-message, stdout carries progress. ACP: none (codex-acp 0.16.0 cannot reach current account models), so codex always uses the one-shot CLI."
+  "notes": "'-' reads the prompt from stdin; the final message comes from --output-last-message, stdout carries progress. Isolation (partial): --ignore-user-config drops ~/.codex/config.toml (its MCP servers), skills off, project AGENTS.md off; ~/.codex/AGENTS.md and codex_apps still load (live 2026-11-05) and codex has no flag for them. ACP: none (codex-acp 0.16.0 cannot reach current account models), so codex always uses the one-shot CLI."
 }

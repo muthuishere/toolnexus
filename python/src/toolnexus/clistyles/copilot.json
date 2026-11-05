@@ -5,6 +5,8 @@
     "{{prompt}}",
     "--silent",
     "--no-color",
+    "--disable-builtin-mcps",
+    "--no-custom-instructions",
     [
       "--model",
       "{{model}}"
@@ -13,7 +15,7 @@
   "prompt": "arg",
   "answer": "stdout",
   "verified": "GitHub Copilot CLI 1.0.98 --help, 2026-11-04",
-  "notes": "Prompt as one argv element: Linux caps a single argument at 128 KiB (MAX_ARG_STRLEN).",
+  "notes": "Isolation (partial): --disable-builtin-mcps --no-custom-instructions drop the built-in GitHub MCP servers and AGENTS.md-style instructions (live 2026-11-05); user MCP servers from ~/.copilot config and skills have no off flag. Prompt as one argv element: Linux caps a single argument at 128 KiB (MAX_ARG_STRLEN).",
   "acp": {
     "args": [
       "--acp"

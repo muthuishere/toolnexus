@@ -8,6 +8,25 @@ GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
 
 ## Unreleased
 
+**A driven agent CLI no longer loads your own MCP servers, skills and instruction files by
+default (all eight ports — style data only).** Without this, a CLI-client turn carried the
+user's whole agent setup: every MCP server, skill, slash command, hook and CLAUDE.md/AGENTS.md
+from `~/.claude`, `~/.codex`, the project — measured on claude 2.1.318 at ~16.7k input tokens
+per call, and tools the toolkit never offered. The built-in styles' one-shot args now pass each CLI's own
+isolation flags, and nothing else (no temp HOME, no env tricks; subscription login keeps working):
+
+| style | ACP | one-shot CLI |
+|---|---|---|
+| claude | unchanged (ACP isolation researched separately) | **isolated**: `--disable-slash-commands --strict-mcp-config --setting-sources "" --no-session-persistence` (~3.0k tokens; installed plugins still load) |
+| codex | n/a (no ACP) | **partial**: `--ignore-user-config -c features.skills=false -c project_doc_max_bytes=0`; `~/.codex/AGENTS.md` and `codex_apps` still load |
+| copilot | unchanged | **partial**: `--disable-builtin-mcps --no-custom-instructions`; user MCP servers from Copilot's config and its skills have no off flag |
+| opencode, devin, gemini, goose | unchanged | gap — no such flag |
+
+Live-verified 2026-11-05 (claude: a project `.mcp.json` server, project skill and CLAUDE.md
+were invisible while a `--mcp-config` server was visible; codex and copilot: the project
+AGENTS.md canary disappeared). To keep the agent's own setup, override `args` or load a custom
+style (`loadCliStyle`); there is no separate option.
+
 **Use the coding-agent CLI you already pay for as the model — with your own tools inside it
 (all eight ports).** `CreateCliClient(CliOptions{Style: CliStyles.Claude, Command: "claude", …})`
 turns an installed Claude Code, Codex, Copilot, opencode, Devin, Gemini CLI or goose into an

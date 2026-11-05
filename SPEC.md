@@ -2705,6 +2705,10 @@ one-shot CLI transport is a non-incremental stream for every style (see below). 
   byte-identically (test-asserted). Fields: `name`, `args` (strings; an array element is an optional
   group kept only when a model is set), `prompt` `stdin|arg|file`, `answer` `stdout|out`,
   `timeoutMs?`, `env?`, `verified`, `notes`, `acp?` `{args, projectMcpFile?, systemHint?, verified, notes}`.
+  **Isolation:** a built-in style's one-shot `args` (not `acp.args`) include the CLI's own flags that stop it loading the user's
+  MCP servers, skills, settings and instruction files, where such a flag exists (claude: full;
+  codex, copilot: partial; others: none) — no temp HOME or env tricks. Pinned in `cases.json` `argv`.
+  Keeping the agent's own setup = overriding `args` / a custom style.
   Placeholders: `{{prompt}}`, `{{file}}`, `{{out}}`, `{{model}}`; anything else is
   `cli: unknown placeholder {{x}}`. A model on a style without `{{model}}` ⇒
   `cli: style "<name>" takes no model`.

@@ -4,6 +4,11 @@
     "-p",
     "--tools",
     "",
+    "--disable-slash-commands",
+    "--strict-mcp-config",
+    "--setting-sources",
+    "",
+    "--no-session-persistence",
     "--output-format",
     "text",
     [
@@ -14,5 +19,5 @@
   "prompt": "stdin",
   "answer": "stdout",
   "verified": "claude 2.1.318 --help, 2026-11-04",
-  "notes": "--tools \"\" disables Claude Code's own tools so the client executes them. Prompt on stdin: no argv length limit. ACP: the claude binary has no ACP mode; set ACPCommand to an ACP adapter (verified: npx -y @agentclientprotocol/claude-agent-acp@0.100.0)."
+  "notes": "--tools \"\" disables Claude Code's own tools so the client executes them. Isolation (default): --disable-slash-commands --strict-mcp-config --setting-sources \"\" --no-session-persistence load none of the user's skills, slash commands, MCP servers, settings, hooks or CLAUDE.md (live 2026-11-05: init lists no MCP server or skill; subscription login still works; never --bare, which drops keychain auth). Installed plugins still load. Prompt on stdin: no argv length limit. ACP: the claude binary has no ACP mode; set ACPCommand to an ACP adapter (verified: npx -y @agentclientprotocol/claude-agent-acp@0.100.0)."
 }
