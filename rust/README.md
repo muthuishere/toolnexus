@@ -115,6 +115,44 @@ let handler = tk.mcp_handler(McpHandlerConfig {
 Run `cargo run --example mcp_handler` for a self-contained demo (bearer auth, per-user tools,
 confirm via elicitation and via a nonce fallback).
 
+### MCP 2026-07-28 (opt-in)
+
+List `"2026-07-28"` in `protocol_versions` and the same handler also speaks the stateless
+2026-07-28 wire (SPEC §7C.2): `server/discover`, header validation, `resultType` + serverInfo
+`_meta`, and MRTR — a confirm or a §10 tool suspension comes back as `input_required` and the
+client's retry carries the answer (the tool sees it as `ctx.answer`). `["2026-07-28"]` serves only
+that wire; `["2026-07-28", "2025-06-18"]` serves both on one mount. It is never a default, and
+`initialize` never negotiates it. `list_skills` publishes skills through the skills extension
+(`skills/list`, `skills/get`, `resources/read` of `skill://` URIs); `load_mcp_skills(dir)` builds
+the list from a skills folder.
+
+`McpServerAuth` makes the handler an OAuth protected resource: `auth.authenticate()` is the
+`authenticate` hook (bearer RS256 JWT checked against the issuer's JWKS, or your own `verify`;
+401 `invalid_token` / 403 `insufficient_scope` with the exact challenge, per-tool scopes on the
+2026 wire) and `auth.metadata()` serves `/.well-known/oauth-protected-resource`. The caller is
+`rc.identity_as::<McpPrincipal>()`. Any `authenticate` hook may fail with an `McpAuthError`
+(status + challenge); other errors stay a plain 401.
+
+```rust
+use toolnexus::mcp_handler::{load_mcp_skills, McpHandlerConfig, McpServerAuth};
+
+let auth = McpServerAuth { issuer: "https://login.example".into(),
+    scopes: [("*".into(), vec!["mcp".into()])].into(), ..Default::default() };
+let handler = tk.mcp_handler(McpHandlerConfig {
+    protocol_versions: vec!["2026-07-28".into(), "2025-06-18".into()],
+    authenticate: Some(auth.authenticate()),
+    list_skills: Some(Arc::new(|_| Box::pin(async {
+        load_mcp_skills("skills").map_err(|e| e.to_string()) }))),
+    ..Default::default()
+});
+let prm = auth.metadata(); // mount at /.well-known/oauth-protected-resource[/mcp]
+```
+
+`start_mcp_dev_auth_server(McpDevAuthOptions { .. })` starts an in-process OAuth authorization
+server on `http://127.0.0.1:<random>` (pre-registered and Client ID Metadata Document clients,
+PKCE S256, refresh rotation, `mint(claims)` for tests). **It is for development and tests only —
+it approves everyone as `dev-user`; never run it in production.** No dynamic client registration.
+
 ## Media generation
 
 Generate images, video and speech (plus transcription, voice cloning and talking-head video)
