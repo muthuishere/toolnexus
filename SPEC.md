@@ -1266,7 +1266,8 @@ With legacy versions also listed, a POST is a 2026 request iff its method is not
 1. `MCP-Protocol-Version` missing ⇒ `-32020` `Header mismatch: MCP-Protocol-Version header missing`.
 2. `Mcp-Method` ≠ body method ⇒ `-32020` `Header mismatch: Mcp-Method header value '<h>' does not match body value '<b>'`.
 3. `tools/call`, `prompts/get` (`params.name`), `resources/read` (`params.uri`): `Mcp-Name` (the
-   `=?base64?<std-base64>?=` sentinel decoded; an absent header is `''`) ≠ body value ⇒ `-32020`
+   `=?base64?<std-base64>?=` sentinel decoded) ≠ body value, or the header is absent or its sentinel does not
+   decode (both reported as `''`, and a mismatch even when the body value is `''`) ⇒ `-32020`
    `Header mismatch: Mcp-Name header value '<h>' does not match body value '<b>'`.
 4. header version ≠ `params._meta["io.modelcontextprotocol/protocolVersion"]` (absent ⇒ `''`) ⇒ `-32020`
    `Header mismatch: MCP-Protocol-Version header value '<h>' does not match _meta value '<m>'`.
@@ -1322,7 +1323,7 @@ that are present and not an object ⇒ `isError` result `invalid arguments: must
   "accept", data: content, reason: (ok ? none : action == "decline" ? "declined" : "cancelled")}`.
   When `execute` returns a pending `Request` (no error), the result is `input_required` with
   `inputRequests: {<request.id>: …}` and `requestState` for `{tool, confirmed?}` (confirmed carried
-  over): `kind:"authorization"` with a `url` ⇒ `{method:"elicitation/create", params:{mode:"url",
+  over from a valid state for the same tool only): `kind:"authorization"` with a `url` ⇒ `{method:"elicitation/create", params:{mode:"url",
   message: prompt, url, elicitationId: id}}`; any other kind ⇒ `{method:"elicitation/create",
   params:{mode:"form", message: prompt, requestedSchema: request.data.schema or {type:"object",
   properties:{}}}}`. The tool MUST be idempotent (§10): the retry re-executes it.

@@ -275,7 +275,11 @@
         { "request": {"method": "POST", "body": {"jsonrpc": "2.0", "id": 9, "method": "initialize", "params": {"protocolVersion": "2025-06-18"}}},
           "expect": {"status": 400, "json": {"error": {"code": -32020, "message": "Header mismatch: MCP-Protocol-Version header missing"}, "id": 9, "jsonrpc": "2.0"}} },
         { "request": {"method": "GET", "accept": "text/event-stream"},
-          "expect": {"status": 405} }
+          "expect": {"status": 405} },
+        { "request": {"method": "POST", "mcp2026": true, "body": {"jsonrpc": "2.0", "id": 10, "method": "tools/call", "params": {"name": "echo", "arguments": {"text": "x"}}}, "headers": {"Mcp-Name": "=?base64?!!!?="}},
+          "expect": {"status": 400, "json": {"jsonrpc": "2.0", "id": 10, "error": {"code": -32020, "message": "Header mismatch: Mcp-Name header value '' does not match body value 'echo'"}}} },
+        { "request": {"method": "POST", "mcp2026": true, "body": {"jsonrpc": "2.0", "id": 11, "method": "tools/call", "params": {"name": "", "arguments": {}}}, "headers": {"Mcp-Name": ""}},
+          "expect": {"status": 400, "json": {"jsonrpc": "2.0", "id": 11, "error": {"code": -32020, "message": "Header mismatch: Mcp-Name header value '' does not match body value ''"}}} }
       ],
       "expectExecuted": ["echo"]
     },
@@ -330,9 +334,11 @@
         { "request": {"method": "POST", "mcp2026": true, "body": {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "ask_name", "arguments": {}, "requestState": "eyJ0b29sIjoiYXNrX25hbWUifQ", "inputResponses": {"name": {"action": "accept", "content": {"name": "toolnexus"}}}, "_meta": {"io.modelcontextprotocol/clientCapabilities": {"elicitation": {"form": {}}}}}}},
           "expect": {"status": 200, "json": {"id": 2, "jsonrpc": "2.0", "result": {"_meta": {"io.modelcontextprotocol/serverInfo": {"name": "toolnexus", "version": "0.1.0"}}, "content": [{"text": "Hello, toolnexus!", "type": "text"}], "resultType": "complete"}}} },
         { "request": {"method": "POST", "mcp2026": true, "body": {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "ask_name", "arguments": {}, "requestState": "eyJ0b29sIjoiYXNrX25hbWUifQ", "inputResponses": {"name": {"action": "decline"}}, "_meta": {"io.modelcontextprotocol/clientCapabilities": {"elicitation": {"form": {}}}}}}},
-          "expect": {"status": 200, "json": {"id": 3, "jsonrpc": "2.0", "result": {"_meta": {"io.modelcontextprotocol/serverInfo": {"name": "toolnexus", "version": "0.1.0"}}, "inputRequests": {"name": {"method": "elicitation/create", "params": {"message": "What is your name?", "mode": "form", "requestedSchema": {"properties": {"name": {"type": "string"}}, "required": ["name"], "type": "object"}}}}, "requestState": "eyJ0b29sIjoiYXNrX25hbWUifQ", "resultType": "input_required"}}} }
+          "expect": {"status": 200, "json": {"id": 3, "jsonrpc": "2.0", "result": {"_meta": {"io.modelcontextprotocol/serverInfo": {"name": "toolnexus", "version": "0.1.0"}}, "inputRequests": {"name": {"method": "elicitation/create", "params": {"message": "What is your name?", "mode": "form", "requestedSchema": {"properties": {"name": {"type": "string"}}, "required": ["name"], "type": "object"}}}}, "requestState": "eyJ0b29sIjoiYXNrX25hbWUifQ", "resultType": "input_required"}}} },
+        { "request": {"method": "POST", "mcp2026": true, "body": {"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {"name": "ask_name", "arguments": {}, "requestState": "eyJ0b29sIjoiY29uZmlybV9ydW4iLCJjb25maXJtZWQiOnRydWV9", "inputResponses": {"name": {"action": "accept", "content": {"name": "x"}}}, "_meta": {"io.modelcontextprotocol/clientCapabilities": {"elicitation": {"form": {}}}}}}},
+          "expect": {"status": 200, "json": {"jsonrpc": "2.0", "id": 4, "result": {"_meta": {"io.modelcontextprotocol/serverInfo": {"name": "toolnexus", "version": "0.1.0"}}, "inputRequests": {"name": {"method": "elicitation/create", "params": {"mode": "form", "message": "What is your name?", "requestedSchema": {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}}}}, "requestState": "eyJ0b29sIjoiYXNrX25hbWUifQ", "resultType": "input_required"}}} }
       ],
-      "expectExecuted": ["ask_name", "ask_name", "ask_name"]
+      "expectExecuted": ["ask_name", "ask_name", "ask_name", "ask_name"]
     },
     {
       "name": "mcp2026_skills_extension",

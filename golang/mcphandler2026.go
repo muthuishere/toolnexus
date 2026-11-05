@@ -211,7 +211,10 @@ func mcp26Validate(r *http.Request, method string, p map[string]any, meta map[st
 func mcpDecodeHeaderValue(v string) (string, bool) {
 	if strings.HasPrefix(v, "=?base64?") && strings.HasSuffix(v, "?=") && len(v) >= 11 {
 		b, err := base64.StdEncoding.DecodeString(v[9 : len(v)-2])
-		return string(b), err == nil
+		if err != nil {
+			return "", false
+		}
+		return string(b), true
 	}
 	return v, v != ""
 }
@@ -464,11 +467,16 @@ func encodeState26(s mcp26State) string {
 func decodeState26(v any) (mcp26State, bool) {
 	str, _ := v.(string)
 	b, err := base64.RawURLEncoding.DecodeString(str)
-	var s mcp26State
-	if err != nil || json.Unmarshal(b, &s) != nil {
+	var m map[string]any // exact keys (a struct would match "TOOL" case-insensitively)
+	if err != nil || json.Unmarshal(b, &m) != nil {
 		return mcp26State{}, false
 	}
-	return s, true
+	tool, ok := m["tool"].(string)
+	if !ok {
+		return mcp26State{}, false
+	}
+	confirmed, _ := m["confirmed"].(bool)
+	return mcp26State{Tool: tool, Confirmed: confirmed}, true
 }
 
 // inputResponse26 maps one MRTR input response onto a §10 Answer.
@@ -541,7 +549,7 @@ func (h *MCPHTTPHandler) callTool2026(ctx context.Context, p map[string]any, met
 
 	state, hasState := decodeState26(p["requestState"])
 	if hasState && state.Tool != name {
-		hasState = false
+		state, hasState = mcp26State{}, false
 	}
 	responses, _ := p["inputResponses"].(map[string]any)
 
