@@ -277,6 +277,27 @@ defmodule Toolnexus.Toolkit do
     )
   end
 
+  @doc """
+  Serve this toolkit for a local agent to call (SPEC §8C `asMcpServer`): the
+  §7C stateless MCP endpoint on `127.0.0.1:<ephemeral>/mcp`, guarded by a
+  fresh bearer token (32 random bytes, lowercase hex). Tool names are served
+  verbatim (`skill` stays `skill`); `config` is the §7C `MCPServeConfig`
+  (`name`, `version`, `tools` filter).
+
+  Returns `%{url: url, token: token, close: (-> :ok)}`; `close` is idempotent.
+  The caller builds whatever `mcpServers` entry its agent accepts, e.g.
+  `%{"type" => "http", "name" => "toolnexus", "url" => url,
+  "headers" => [%{"name" => "Authorization", "value" => "Bearer " <> token}]}`.
+  """
+  @spec as_mcp_server(t(), map() | nil) :: %{
+          url: String.t(),
+          token: String.t(),
+          close: (-> :ok)
+        }
+  def as_mcp_server(%__MODULE__{} = tk, config \\ nil) do
+    Toolnexus.McpServe.serve_loopback(tk.tools, config || %{})
+  end
+
   @doc "Disconnect every MCP client."
   @spec close(t()) :: :ok
   def close(%__MODULE__{mcp: nil}), do: :ok

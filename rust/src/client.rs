@@ -296,8 +296,9 @@ pub struct RunResult {
     pub pending: Option<Request>,
 }
 
-/// A streaming event. `kind`: `text` | `tool_call` | `tool_result` | `usage` |
-/// `pending` | `done` | `error`.
+/// A streaming event. `kind`: `text` | `thought` | `tool_call` | `tool_result` |
+/// `usage` | `pending` | `done` | `error`. `thought` (an ACP agent's
+/// `agent_thought_chunk`, `via: "acp"`) is never part of the answer text.
 #[derive(Debug, Clone, Default)]
 pub struct StreamEvent {
     pub kind: String,

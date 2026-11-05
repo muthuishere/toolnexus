@@ -212,6 +212,29 @@ is a `403` naming the full needed set, and per-tool scopes apply on the 2026 wir
 Bring your own authorization server. The auto-approving dev authorization server the suite
 uses is test tooling (`tests/_mcp_dev_auth.py`), not part of the package.
 
+## Agents via ACP
+
+A local coding agent that speaks ACP can be the model behind an ordinary client, calling
+your toolkit as an MCP server. Three vendor-neutral pieces (SPEC §8C); which binary, flags
+and permissions to use is yours.
+
+```python
+tk = await create_toolkit(skills_dir="skills")
+srv = tk.as_mcp_server()          # 127.0.0.1:<ephemeral>/mcp behind a bearer token
+acp = load_acp(ACPOptions(
+    command="my-agent", args=["acp"],
+    mcp_servers=[{"type": "http", "name": "toolnexus", "url": srv.url,
+                  "headers": [{"name": "Authorization", "value": "Bearer " + srv.token}]}],
+))
+client = create_in_process_client(model="agent", generate_stream=acp.generate_stream)
+async for ev in client.stream("What is in the skill?", toolkit=tk):
+    ...                           # text deltas, plus thought / tool_call / tool_result via "acp"
+acp.close(); srv.close()
+```
+
+`mcp_servers` entries, `session_meta` (session/new `_meta`), `client_caps_meta` and `model`
+are passed through to the agent unchanged.
+
 ## Documentation
 
 Everything else — the full surface, with runnable examples — lives on the docs site:

@@ -2116,6 +2116,8 @@ the thread's transcript is loaded as history before the stream, and saved back t
 `ConversationStore` when the `done` event fires (§ Conversation memory). No `id` ⇒ stateless.
 
 - `{ type: "text", delta }` — assistant text token deltas
+- `{ type: "thought", delta, via }` — the agent's reasoning text, only from an in-process stream
+  source (ACP `agent_thought_chunk`, `via:"acp"`); never part of the answer or `RunResult.text`
 - `{ type: "tool_call", id, name, args }` — a tool about to run
 - `{ type: "tool_result", id, name, output, isError }` — after it ran
 - `{ type: "usage", usage }` — token usage
@@ -2136,13 +2138,28 @@ the host. `generate(request) -> { content } | { toolCalls }` returns exactly one
 encodes tool arguments unless already a string. Tool calls cross flat: `{id?, name, arguments}`.
 
 Messages are always **OpenAI-shaped** (there is no wire to be neutral about). Failures are **final
-by default** — no wire means no transient failure to retry. The streaming path **raises**, because a
-`generate` returns a whole answer and a single-chunk stream is indistinguishable from a real one by
-content or delta count; the exception is Clojure, which has no streaming entry point to refuse from.
+by default** — no wire means no transient failure to retry. With only a plain `generate`, the
+streaming path **raises**, because a `generate` returns a whole answer and a single-chunk stream is
+indistinguishable from a real one by content or delta count; the exception is Clojure, which has no
+streaming entry point to refuse from.
+
+**Streaming generate (all eight ports).** The host MAY instead (or also) supply a streaming generate
+— Go `GenerateStream(ctx, req, emit)`, js `generateStream(req, emit)`, python
+`generate_stream(req, emit)`, java/C# `GenerateStream`, elixir `:generate_stream`, clojure
+`:generate-stream`, rust builder — that reports the turn as it happens through `emit(event)` and
+returns the same response as `generate`. With it, the client streams for real: each non-empty
+`text` event becomes a text delta **as it is emitted** (never buffered to the end of the turn);
+every other event (`thought`, `tool_call`, `tool_result`) goes straight to the stream consumer and
+is **never executed** by the loop. When the generate returns, returned tool calls are executed as
+usual; returned `content` is emitted as one delta only if no text was emitted; then usage and
+`done`. A non-streaming call with only a streaming generate calls it with a no-op `emit`. Clojure has
+no stream entry point: its `run` forwards the events to `:on-event` as they are emitted.
+Conformance: `conformance/acp-client/cases.json` `stream.inProcess` — the generate blocks after each
+delta until the consumer has received it, so a buffering implementation deadlocks and fails.
 The injectable transport (Gap 2) is unchanged and remains the answer for proxy, mTLS and
 record-replay — this is a second constructor over it, not a second seam.
 
-#### ACP model source — host hooks (golang-first; other ports pending, `openspec/changes/add-go-host-asks`)
+#### ACP model source — host hooks (golang-first; other ports pending, `openspec/changes/add-go-host-asks`; streaming: all eight ports)
 
 An ACP source (one warm `session/prompt` per turn over a child agent; ADR 0031) MAY take three
 opt-in hooks. With none set its behaviour is unchanged: `session/request_permission` is answered
@@ -2156,12 +2173,13 @@ with the first allow-kind option, and only `agent_message_chunk` text forms the 
 - **Cancellation** — a ctx-taking generate sends the `session/cancel` *notification* (no id) when
   its context is cancelled, waits up to the request timeout for the turn's reply, and returns the
   cancellation error. The process and session stay warm.
-- **Streaming** — a streaming generate emits `agent_message_chunk` → `{type:"text", delta}`,
+- **Streaming (all eight ports)** — a streaming generate emits, as each `session/update` is read,
+  `agent_message_chunk` → `{type:"text", delta}`, `agent_thought_chunk` → `{type:"thought", delta, via:"acp"}`,
   `tool_call` → `{type:"tool_call", id, name: title, args: rawInput, via:"acp"}`, and a
   `completed`/`failed` `tool_call_update` → `{type:"tool_result", id, name, output, isError, via:"acp"}`.
-  An in-process client given a streaming generate (Go: `InProcessOptions.GenerateStream`) streams
-  instead of refusing: text events become the stream's text deltas, other events pass straight to
-  the consumer and are **never executed** by the loop (the agent already ran them).
+  An in-process client given a streaming generate streams instead of refusing: text events become
+  the stream's text deltas, other events pass straight to the consumer and are **never executed** by
+  the loop (the agent already ran them).
 
 ### Resilience (retries + timeout/cancel)
 
@@ -2889,6 +2907,73 @@ Idiom (behaviour identical; constructor and method spelling follow each port):
 
 - Conformance: `examples/judge/batteries/*.json` (recorded `static` calls → verdict) and
   `user-text-cases.json`.
+
+## 8C. Vendor agents through the in-process seam (ADR 0041)
+
+toolnexus does not ship a client per coding agent. It ships three vendor-neutral pieces; driving a
+particular agent (which binary, which flags, which login, which quirks) is a **recipe** in the docs,
+written by the caller on top of them. No public API names a vendor. Status: **all eight ports**.
+
+1. **The seam** — `createInProcessClient({ generate? , generateStream?, … })` (§8 "In-process
+   models"), including the streaming generate: text events become stream deltas as emitted;
+   `thought`/`tool_call`/`tool_result` events pass straight to the consumer and are never executed.
+2. **A plain ACP client** — the §8 ACP model source (`loadACP`), whose `generate`/`generateStream`
+   plug straight into (1).
+3. **The toolkit as an MCP server for an agent** — `toolkit.asMcpServer(config?)`.
+
+### ACP client (`loadACP`) — passthrough, not policy
+
+`ACPOptions` = the existing §8 options (`command`, `args`, `env`, `cwd`, permission hook, timeouts,
+`onUpdate`) plus:
+
+- **`mcpServers`** — a list of JSON objects sent as `session/new` `mcpServers` **verbatim and in
+  order**: toolnexus does not validate, rename, reshape or pick between http/stdio forms. Absent ⇒ `[]`.
+- **`sessionMeta`** — a JSON object sent as `session/new` `_meta`; the key is absent when not set.
+- **`clientCapsMeta`** — a JSON object sent as `initialize` `clientCapabilities._meta`; absent when not set.
+- **`model`** — passed through unchanged after `session/new`: `session/set_config_option
+  {sessionId, configId:"model", value}`, and if the agent rejects that, `session/set_model
+  {sessionId, modelId}`; both failing fails `loadACP`. toolnexus never lists or validates models.
+- `args` and `env` reach the spawned agent untouched; `env` values are never logged.
+
+Wire behaviour:
+
+- `initialize` sends `clientCapabilities {fs:{readTextFile:false,writeTextFile:false},terminal:false}`
+  (+ `_meta` when given).
+- The agent is spawned without a shell in its own process group (ports without process groups kill
+  the process tree); `close()` ends the group.
+- A pending request fails with `agent exited before replying to <method>` as soon as the agent's
+  stdout closes — never by waiting out a timeout.
+- An agent→client **request** toolnexus does not implement (`fs/*`, `terminal/*`, …) is answered with
+  JSON-RPC error `-32601` so the agent never waits on it.
+- Each turn is one `session/prompt`; only `agent_message_chunk` text is the answer.
+  **Streaming** (`generateStream`): `agent_message_chunk` → `{type:"text", delta}` as each update is
+  read; `agent_thought_chunk` → `{type:"thought", delta, via:"acp"}`; `tool_call` /
+  completed-or-failed `tool_call_update` → `tool_call` / `tool_result` with `via:"acp"`.
+- Permission requests go to the caller's permission hook (default: first allow-kind option, as in §8).
+  Which agent tools to allow is policy, and policy belongs to the caller.
+
+### `toolkit.asMcpServer(config?) -> { url, token, close() }`
+
+Serves the toolkit for a local agent to call, built on the §7C server (same tool mapping, same
+`MCPServeConfig {name?, version?, tools?}` filter; tool names verbatim — the `skill` tool stays `skill`).
+
+- Listens on `127.0.0.1:<ephemeral>`; `url` = `http://127.0.0.1:<port>/mcp`. Other paths ⇒ 404.
+- `token` = 32 random bytes, lowercase hex (64 chars), fresh per call, never logged. Every request
+  must carry `Authorization: Bearer <token>`, else **401** with `WWW-Authenticate: Bearer`
+  (constant-time compare).
+- With a valid token, `POST /mcp` is the stateless §7C streamable-HTTP endpoint; any other method
+  ⇒ **405** (a stateless endpoint has no server-sent stream to hold open).
+- `close()` stops the listener; idempotent.
+
+The caller builds whatever `mcpServers` entry its agent accepts, e.g. ACP http:
+`{"type":"http","name":"toolnexus","url":url,"headers":[{"name":"Authorization","value":"Bearer "+token}]}`.
+
+**Not in the library** (recipes in the docs): per-vendor launch styles or enums, one-shot CLI
+transports and reply parsing, prompt preambles or system hints, permission allow-lists keyed on
+vendor tool titles, isolation flags, stdio↔HTTP bridges, model lists.
+
+Conformance: `conformance/acp-client/cases.json` — `stream.inProcess`, `stream.acpDrip`,
+`passthrough`, `agentExit`, `unknownRequest`, `asMcpServer`.
 
 ## 9. Go CLI (`toolnexus`)
 

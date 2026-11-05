@@ -207,6 +207,32 @@ var handler = tk.McpHandler(new McpHandlerConfig
 server: `McpServerAuth` verifies its tokens. The auto-approving dev authorization server the suite uses is test
 tooling (`tests/Toolnexus.Tests/McpDevAuth.cs`), not part of the library.
 
+## Agents via ACP
+
+toolnexus ships no client per coding agent — three vendor-neutral pieces instead (SPEC §8C):
+
+- `tk.AsMcpServer(cfg?)` serves the toolkit for a local agent on
+  `http://127.0.0.1:<ephemeral>/mcp` behind a fresh bearer token (`Url`, `Token`, `Close()`).
+- `AcpClient.StartAsync(new AcpStartOptions { Command, Arguments, McpServers, SessionMeta,
+  ClientCapsMeta, Model, OnPermission, … })` drives any ACP agent; `McpServers` entries are sent
+  verbatim, so you build whichever entry your agent accepts.
+- `InProcess.Options.GenerateStream = acp.GenerateStreamAsync` streams the agent's answer
+  (`Text` deltas, `Thought`, and its own `ToolCall`/`ToolResult` with `Via = "acp"`).
+
+```csharp
+await using var srv = tk.AsMcpServer();
+using var acp = await AcpClient.StartAsync(new AcpStartOptions
+{
+    Command = "my-agent", Arguments = ["acp"],
+    McpServers = [new Dictionary<string, object?>
+    {
+        ["type"] = "http", ["name"] = "toolnexus", ["url"] = srv.Url,
+        ["headers"] = new[] { new Dictionary<string, object?> { ["name"] = "Authorization", ["value"] = "Bearer " + srv.Token } },
+    }],
+});
+var client = InProcess.CreateClient(new InProcess.Options { Model = "acp", GenerateStream = acp.GenerateStreamAsync });
+```
+
 ## Documentation
 
 Everything else — the full surface, with runnable examples — lives on the docs site:

@@ -1,0 +1,191 @@
+{
+  "_doc": "SPEC §8C (ADR 0041): the vendor-neutral pieces — in-process streaming seam, plain ACP client (passthrough), toolkit.asMcpServer. Every port replays every case against its own fake ACP agent / its own MCP client. No case names a vendor.",
+  "stream": {
+    "_doc": "SPEC §8 'In-process models' + §8C. Real incremental streaming through the in-process seam and the ACP client. A faked stream (the whole answer buffered and re-emitted, or one chunk) MUST fail: inProcess blocks the generate until the consumer has observed each delta; acpDrip spaces its chunks in time and asserts the first delta lands well before done.",
+    "inProcess": {
+      "_doc": "A streaming generate (Go GenerateStream; idiomatic name per port) is driven through client.stream. After emitting each text delta the generate WAITS (up to waitMs) until the consumer has received that delta; if it never does the generate fails with notIncrementalError. Non-text events pass straight to the consumer and are never executed by the loop.",
+      "prompt": "q",
+      "waitMs": 5000,
+      "emits": [
+        {
+          "type": "text",
+          "delta": "al",
+          "awaitConsumer": true
+        },
+        {
+          "type": "thought",
+          "delta": "hmm",
+          "via": "acp"
+        },
+        {
+          "type": "tool_call",
+          "id": "t1",
+          "name": "reading files",
+          "args": {},
+          "via": "acp"
+        },
+        {
+          "type": "text",
+          "delta": "pha",
+          "awaitConsumer": true
+        }
+      ],
+      "returns": {
+        "content": "alpha"
+      },
+      "expectTextDeltas": [
+        "al",
+        "pha"
+      ],
+      "expectPassThrough": [
+        {
+          "type": "thought",
+          "delta": "hmm",
+          "via": "acp"
+        },
+        {
+          "type": "tool_call",
+          "id": "t1",
+          "name": "reading files",
+          "via": "acp"
+        }
+      ],
+      "expectDoneText": "alpha",
+      "expectDoneToolCalls": 0,
+      "notIncrementalError": "stream not incremental: consumer never saw the delta",
+      "plainGenerateStillRefuses": true
+    },
+    "acpDrip": {
+      "_doc": "An in-process client whose generateStream is loadACP(...).generateStream, against the port's fake ACP agent with fakeEnv set. On session/prompt the fake sends agent_thought_chunk thought, then each chunk as agent_message_chunk gapMs apart, then replies stopReason end_turn. Stream text deltas must equal chunks exactly, one thought event (via acp) must arrive, the first text delta must arrive at least minLeadMs before done; run() on the same client returns the concatenation.",
+      "fakeEnv": {
+        "TN_FAKE_DRIP": "1"
+      },
+      "thought": "pondering",
+      "chunks": [
+        "drip-1 ",
+        "drip-2 ",
+        "drip-3"
+      ],
+      "gapMs": 200,
+      "minLeadMs": 300,
+      "expectDoneText": "drip-1 drip-2 drip-3",
+      "expectThought": {
+        "type": "thought",
+        "delta": "pondering",
+        "via": "acp"
+      }
+    }
+  },
+  "passthrough": {
+    "_doc": "loadACP with these options against a fake agent that records the params it received. mcpServers MUST arrive deep-equal and in order (unknown fields and both http/stdio shapes untouched); sessionMeta as session/new _meta; clientCapsMeta as initialize clientCapabilities._meta; model via set_config_option. With none of the options set: mcpServers is [], and neither _meta key is present.",
+    "options": {
+      "mcpServers": [
+        {
+          "type": "http",
+          "name": "a",
+          "url": "http://127.0.0.1:1/mcp",
+          "headers": [
+            {
+              "name": "Authorization",
+              "value": "Bearer YOUR_TOKEN_HERE"
+            }
+          ],
+          "x-extra": {
+            "keep": true
+          }
+        },
+        {
+          "name": "b",
+          "command": "some-mcp",
+          "args": [
+            "--flag"
+          ],
+          "env": [
+            {
+              "name": "K",
+              "value": "v"
+            }
+          ]
+        }
+      ],
+      "sessionMeta": {
+        "vendor.example/opt": {
+          "on": true
+        }
+      },
+      "clientCapsMeta": {
+        "vendor.example/cap": 1
+      },
+      "model": "m-1"
+    },
+    "expectInitializeClientCapabilities": {
+      "fs": {
+        "readTextFile": false,
+        "writeTextFile": false
+      },
+      "terminal": false,
+      "_meta": {
+        "vendor.example/cap": 1
+      }
+    },
+    "expectSetConfigOption": {
+      "configId": "model",
+      "value": "m-1"
+    },
+    "fallbackSetModel": {
+      "_doc": "fake rejects set_config_option (fakeEnv) ⇒ set_model {modelId} is sent",
+      "fakeEnv": {
+        "TN_FAKE_NO_CONFIG_OPTION": "1"
+      },
+      "expectSetModel": {
+        "modelId": "m-1"
+      }
+    },
+    "bareExpect": {
+      "mcpServers": [],
+      "sessionNewHasMeta": false,
+      "clientCapabilitiesHasMeta": false
+    }
+  },
+  "agentExit": {
+    "_doc": "fake exits (no reply) on session/prompt; the generate fails promptly (well under the request timeout) with an error containing expectError.",
+    "fakeEnv": {
+      "TN_FAKE_EXIT_ON_PROMPT": "1"
+    },
+    "expectError": "agent exited before replying to session/prompt"
+  },
+  "unknownRequest": {
+    "_doc": "on session/prompt the fake first sends an agent→client request with this method and waits for the answer; it must be a JSON-RPC error with expectCode, after which the turn completes with expectText.",
+    "fakeEnv": {
+      "TN_FAKE_FS_REQUEST": "1"
+    },
+    "method": "fs/read_text_file",
+    "expectCode": -32601,
+    "expectText": "ok"
+  },
+  "asMcpServer": {
+    "_doc": "toolkit.asMcpServer() over a toolkit holding the shared examples skills (skill tool) plus one native tool echo. Check with raw HTTP and with the port's own MCP client.",
+    "urlPattern": "^http://127\\.0\\.0\\.1:[0-9]+/mcp$",
+    "tokenPattern": "^[0-9a-f]{64}$",
+    "noTokenStatus": 401,
+    "noTokenHeader": {
+      "WWW-Authenticate": "Bearer"
+    },
+    "wrongTokenStatus": 401,
+    "getWithTokenStatus": 405,
+    "otherPathStatus": 404,
+    "toolsListContains": [
+      "skill",
+      "echo"
+    ],
+    "callEcho": {
+      "name": "echo",
+      "arguments": {
+        "text": "hi"
+      },
+      "expectText": "hi"
+    },
+    "twoServersDistinctTokens": true,
+    "afterCloseRefused": true
+  }
+}

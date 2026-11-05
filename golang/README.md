@@ -189,6 +189,14 @@ mux.Handle("/.well-known/oauth-protected-resource", auth.Metadata())
 Bring your own authorization server: `MCPServerAuth` verifies its tokens. The auto-approving dev
 authorization server the suite uses is test tooling (`internal/devauth`), not part of the library.
 
+## Agents via ACP
+
+toolnexus ships no per-agent client. Three vendor-neutral pieces compose instead (SPEC §8C):
+`tk.AsMCPServer(nil)` serves your toolkit on `127.0.0.1` behind a bearer token, `LoadACP` drives any
+ACP agent (its `MCPServers` entries are sent verbatim — hand it that URL and token), and
+`CreateInProcessClient(InProcessOptions{GenerateStream: acp.GenerateStream})` makes it an ordinary
+streaming client. Launch flags, logins and permission policy are yours to choose.
+
 ## Documentation
 
 Everything else — the full surface, with runnable examples — lives on the docs site:

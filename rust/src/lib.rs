@@ -10,6 +10,8 @@ pub mod a2a;
 pub mod acp;
 pub mod adapters;
 pub mod agents;
+#[cfg(feature = "serve")]
+pub mod as_mcp_server;
 pub mod builtins;
 pub mod classifier;
 pub mod client;
@@ -30,6 +32,8 @@ pub mod tool;
 pub mod toolkit;
 
 pub use adapters::{to_anthropic, to_gemini, to_openai};
+#[cfg(feature = "serve")]
+pub use as_mcp_server::McpServerHandle;
 pub use builtins::{BuiltinsConfig, select_builtins};
 pub use classifier::{
     Classifier, ClassifierError, ClassifierOptions, ClassifierStyle, Decision, Question, Questions,
