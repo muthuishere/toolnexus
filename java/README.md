@@ -196,10 +196,7 @@ server.createContext("/mcp", tk.mcpHandler(new McpHandler.Config()
 server.createContext("/.well-known/oauth-protected-resource", auth.metadata());
 ```
 
-`McpDevAuthServer.start(options)` is an in-process authorization server for **development and tests
-only — never production**: plain HTTP on `127.0.0.1`, auto-approves as `dev-user`, PKCE S256,
-pre-registered and Client ID Metadata Document clients, refresh rotation, `mint(claims)` for
-forging test tokens. No dynamic client registration.
+Bring your own authorization server: `McpServerAuth` verifies its tokens. The auto-approving dev authorization server the suite uses is test tooling (`src/test/java/.../McpDevAuthServer.java`), not part of the library.
 
 ## Documentation
 
