@@ -23,7 +23,8 @@ instead, because the handler is where hosts mount MCP behind their own auth and 
    host's call. `loadMcpSkills(dir)` covers the common case. Text files only (the wire is text).
 6. **cacheScope** is `private` whenever `authenticate` is set (lists may depend on the caller), else `public`.
 7. **Dev AS over plain HTTP**, not self-signed TLS: trusting a dev cert process-wide (the spike's approach) is not
-   acceptable library behaviour; the 2026 client already has `allowHttp` for exactly this.
+   acceptable library behaviour; the 2026 client already has `allowHttp` for exactly this. The dev AS is
+   test/interop tooling in each port's test tree, not exported library API.
 8. **Tool search needs nothing server-side**: it is client-side (§2.8) over `tools/list`; the server's part is the
    deterministic order and `ttlMs` the client caches by. The interop runner proves it.
 

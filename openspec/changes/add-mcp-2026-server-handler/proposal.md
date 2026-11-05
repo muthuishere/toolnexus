@@ -16,8 +16,8 @@ the 2026 wire, its OAuth metadata, or SEP-2640 skills.
 - `MCPServerAuth`: the `authenticate` hook (bearer, default RS256/JWKS verifier or a `verify` hook, per-tool
   scopes, exact 401/403 challenges) and the RFC 9728 metadata handler. `MCPAuthError` lets any `authenticate`
   hook choose 401/403 and the challenge.
-- `startMcpDevAuthServer`: in-process dev authorization server (pre-registered + CIMD clients, PKCE, refresh) —
-  development and tests only. No DCR.
+- A dev authorization server (pre-registered + CIMD clients, PKCE, refresh, no DCR) for the tests and the interop
+  run — test/interop tooling in each port's test tree, **not library surface** (not exported by any port).
 - Shared conformance (`conformance/mcp_handler/cases.json`, `mcp2026_*`) and an interop runner
   (`interop/mcp2026/run.sh`): PR #142's Go client against this Go server.
 - Not changed: `serve(addr, {mcp})` stays on its pre-2026 profile (§7C.F); hooks stay plain (tenancy, storage and

@@ -1248,7 +1248,7 @@ MCPServerAuth { issuer, audience?, resourcePath? ("/mcp"), scopes?: {"*": [..], 
   .metadata()             -> HTTP handler for the RFC 9728 document
 Principal = { subject, scopes, claims }              // what identityFrom(ctx) returns under MCPServerAuth
 MCPAuthError = { status (401|403), challenge, reason } // any authenticate hook may return it
-startMcpDevAuthServer({clients?, secrets?, accessTtl?, noCimd?, rejectRefreshResource?}) -> { issuer, mint(claims), close() }   // DEV ONLY
+// NOT library surface: the dev authorization server below is test/interop tooling in every port
 ```
 
 **Routing (pinned).** With 2026-07-28 the only accepted version, every POST is a 2026 request
@@ -1348,7 +1348,10 @@ the wire. `metadata()` answers `GET /.well-known/oauth-protected-resource` and
 `…/oauth-protected-resource<resourcePath>` with `{resource: <audience>, authorization_servers:
 [issuer], scopes_supported: scopes["*"] or [], bearer_methods_supported: ["header"]}`; anything else `404`.
 
-**Dev authorization server** (every port, **development and tests only — never production**): plain
+**Dev authorization server — test and interop tooling, NOT library surface.** No port exports it: each
+keeps it in its test tree (Go: `internal/devauth`, used by the tests and `internal/interop/mcp2026server`),
+and a host brings its own authorization server, which `MCPServerAuth` verifies. Every port's tests use one
+that behaves as follows (never production): plain
 HTTP on `127.0.0.1:<random>`, issuer `http://127.0.0.1:<port>` (clients need `auth.allowHttp`);
 `/.well-known/oauth-authorization-server` (code flow, PKCE `S256` only, `authorization_response_iss_parameter_supported:
 true`, `client_id_metadata_document_supported: !noCimd`), `/jwks` (one RSA key, `kid:"dev"`),

@@ -50,8 +50,14 @@ When `listSkills` is set the handler SHALL advertise `io.modelcontextprotocol/sk
 
 `MCPServerAuth` SHALL provide an `authenticate` hook that answers a missing token with 401, an invalid token with
 401 `error="invalid_token"` and a missing scope with 403 `error="insufficient_scope"` naming the full needed set,
-plus an RFC 9728 metadata handler. Each port SHALL ship an in-process development authorization server supporting
-pre-registered and Client ID Metadata Document clients with PKCE S256, documented as not for production.
+plus an RFC 9728 metadata handler. Each port's test suite SHALL use an in-process development authorization server
+supporting pre-registered and Client ID Metadata Document clients with PKCE S256; it SHALL live in test/interop code
+and SHALL NOT be exported as library API.
+
+#### Scenario: Dev authorization server is not library surface
+
+- **WHEN** a consumer imports the published toolnexus package of any port
+- **THEN** no dev authorization server symbol (e.g. `StartMCPDevAuthServer`, `start_mcp_dev_auth_server`) is available
 
 #### Scenario: Step-up
 

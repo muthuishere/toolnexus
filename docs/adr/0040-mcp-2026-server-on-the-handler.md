@@ -21,7 +21,10 @@ hosts mount MCP, with every policy as a plain hook, and refused 2026-07-28 until
    configuration. The handler only learns `MCPAuthError {status, challenge}`. Tenancy, token issuance and storage
    stay the host's.
 4. Skills come from a `listSkills` hook (data), with `loadMcpSkills(dir)` for the common case.
-5. Every port ships a dev authorization server over plain HTTP (no process-wide trust of a dev certificate).
+5. Every port's tests use a dev authorization server over plain HTTP (no process-wide trust of a dev certificate).
+   It is test/interop tooling, **not library surface**: it lives in each port's test tree (Go: `internal/devauth`)
+   and is not exported. A server that approves everyone is not something a library should let a host import;
+   hosts bring their own AS and `MCPServerAuth` verifies its tokens.
 6. `serve(addr, {mcp})` is **not** switched to 2026 here. #142 marks that switch BREAKING; it needs an owner call.
 
 ## Consequences
