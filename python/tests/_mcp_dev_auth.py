@@ -1,4 +1,5 @@
-"""McpDevAuthServer — DEVELOPMENT AND TESTS ONLY. NEVER USE IN PRODUCTION.
+"""McpDevAuthServer — TEST AND INTEROP TOOLING ONLY, NOT LIBRARY SURFACE (SPEC §7C.2).
+Not shipped in the toolnexus package. NEVER USE IN PRODUCTION.
 
 An in-process OAuth 2.1 authorization server that auto-approves every request as
 ``dev-user`` (no login, no consent): RFC 8414 metadata, JWKS, authorization code + PKCE
@@ -26,7 +27,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Optional
 
-from ._rsa import RsaKey, b64url
+from toolnexus._rsa import RsaKey, b64url
 
 
 def _rand(n: int) -> str:

@@ -212,7 +212,6 @@ from .mcp_handler import (
     request_from,
 )
 from .mcp_server_auth import McpPrincipal, McpServerAuth
-from .mcp_dev_auth import McpDevAuthServer, start_mcp_dev_auth_server
 from .serve import (
     A2AConfig,
     FileTaskStore,
@@ -264,13 +263,11 @@ __all__ = [
     "MCP_PROTOCOL_2026",
     "MCP_SKILLS_EXTENSION",
     "McpAuthError",
-    "McpDevAuthServer",
     "McpPrincipal",
     "McpServerAuth",
     "McpSkill",
     "McpSkillFile",
     "load_mcp_skills",
-    "start_mcp_dev_auth_server",
     "McpCallEvent",
     "McpContext",
     "McpDecision",

@@ -29,8 +29,8 @@ from toolnexus import (
     create_toolkit,
     identity_from,
     load_mcp_skills,
-    start_mcp_dev_auth_server,
 )
+from _mcp_dev_auth import start_mcp_dev_auth_server
 
 SKILLS = Path(__file__).resolve().parents[2] / "examples" / "skills"
 

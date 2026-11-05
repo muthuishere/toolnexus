@@ -194,7 +194,7 @@ never a default, and `initialize` never negotiates it. List a legacy version too
 both wires on one mount.
 
 ```python
-from toolnexus import McpServerAuth, load_mcp_skills, start_mcp_dev_auth_server
+from toolnexus import McpServerAuth, load_mcp_skills
 
 auth = McpServerAuth("https://login.example", scopes={"*": ["mcp"], "wipe": ["mcp:admin"]})
 app = tk.mcp_handler(
@@ -209,10 +209,8 @@ prm = auth.metadata()   # mount at /.well-known/oauth-protected-resource[/mcp] (
 RSA, no extra dependency) or calls your `verify(request, token, audience)`; a missing scope
 is a `403` naming the full needed set, and per-tool scopes apply on the 2026 wire.
 
-`start_mcp_dev_auth_server(clients=…)` is an in-process OAuth authorization server on
-`127.0.0.1` (pre-registered + CIMD clients, PKCE S256, refresh rotation, `mint(claims)`).
-**DEVELOPMENT AND TESTS ONLY** — it auto-approves everyone as `dev-user` over plain HTTP.
-Never run it in production.
+Bring your own authorization server. The auto-approving dev authorization server the suite
+uses is test tooling (`tests/_mcp_dev_auth.py`), not part of the package.
 
 ## Documentation
 
