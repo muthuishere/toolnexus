@@ -185,9 +185,12 @@ LlmClient plain = client;                               // usable anywhere an Ll
   thing as a function).
 - **One-shot**: the conversation goes in under a fixed preamble, the reply is parsed as an
   OpenAI-shaped envelope, and tool calls run in the toolnexus loop.
-- **Streaming** (`StreamAsync`) works on both transports but is not incremental: the turn runs
-  normally, the loop's `ToolCall`/`ToolResult` events arrive, then the whole answer as one `Text`
-  event, then `Done`.
+- **Streaming** (`StreamAsync`) works on both transports. Over **ACP** it is incremental: each
+  `agent_message_chunk` is a `Text` delta as it arrives, `agent_thought_chunk` a `Thought` event
+  (never part of the answer), and the agent's own tool calls/results `ToolCall`/`ToolResult` events
+  with `Via = "acp"`. The **one-shot** transport is not incremental: the loop's
+  `ToolCall`/`ToolResult` events arrive, then the whole answer as one `Text` event, then `Done`.
+  Your own in-process model can stream the same way via `InProcess.Options.GenerateStream`.
 - Errors are pinned (`cli: command not found: <bin>`, `cli: exit <code>: <stderr>`,
   `cli: empty reply`, `cli: no output file`, `cli: timed out after <ms>ms`), thrown as
   `CliException`. Default call timeout 300000 ms (`CallTimeoutMs`). `Usage` is always zero.

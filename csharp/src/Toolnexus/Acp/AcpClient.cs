@@ -237,9 +237,22 @@ public sealed class AcpClient : IDisposable
     /// are synchronous seams; the work itself runs on the thread pool so a caller with a
     /// synchronization context (e.g. ASP.NET classic) cannot deadlock on it.
     /// </summary>
-    public InProcess.Response Generate(InProcess.Request request)
+    public InProcess.Response Generate(InProcess.Request request) =>
+        Task.Run(() => GenerateStreamAsync(request, null)).GetAwaiter().GetResult();
+
+    /// <summary>
+    /// The streaming model source (SPEC §8C): the same turn as <see cref="Generate"/>, but each
+    /// <c>session/update</c> is reported to <paramref name="emit"/> the moment the read loop
+    /// processes it — <c>agent_message_chunk</c> ⇒ a <c>Text</c> delta, <c>agent_thought_chunk</c> ⇒
+    /// a <c>Thought</c> (never part of the answer), <c>tool_call</c> ⇒ a <c>ToolCall</c> and a
+    /// completed/failed <c>tool_call_update</c> ⇒ a <c>ToolResult</c>, all with <c>Via = "acp"</c>
+    /// (the agent ran them; the loop never does). Plugs into
+    /// <see cref="InProcess.Options.GenerateStream"/>. A null <paramref name="emit"/> reports nothing.
+    /// </summary>
+    public async Task<InProcess.Response> GenerateStreamAsync(InProcess.Request request,
+        Action<LlmClient.StreamEvent>? emit, CancellationToken ct = default)
     {
-        var text = Task.Run(() => PromptAsync(request)).GetAwaiter().GetResult();
+        var text = await PromptStreamAsync(BuildPromptText(request), emit, ct).ConfigureAwait(false);
         return InProcess.Response.FromContent(text);
     }
 
@@ -254,12 +267,17 @@ public sealed class AcpClient : IDisposable
     /// <see cref="PromptAsync(InProcess.Request,CancellationToken)"/>). Turns are serialised:
     /// concurrent callers queue rather than interleave into the one ACP session.
     /// </summary>
-    public async Task<string> PromptAsync(string fullText, CancellationToken ct = default)
+    public Task<string> PromptAsync(string fullText, CancellationToken ct = default) =>
+        PromptStreamAsync(fullText, null, ct);
+
+    /// <summary><see cref="PromptAsync(string,CancellationToken)"/>, reporting each update to
+    /// <paramref name="emit"/> as it arrives (see <see cref="GenerateStreamAsync"/>).</summary>
+    public async Task<string> PromptStreamAsync(string fullText, Action<LlmClient.StreamEvent>? emit, CancellationToken ct = default)
     {
         await _turnLock.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            return await SendPromptAsync(fullText, ct).ConfigureAwait(false);
+            return await SendPromptAsync(fullText, emit, ct).ConfigureAwait(false);
         }
         finally
         {
@@ -323,7 +341,7 @@ public sealed class AcpClient : IDisposable
             ? t?.ToString() ?? ""
             : Json.Stringify(part);
 
-    private async Task<string> SendPromptAsync(string text, CancellationToken ct)
+    private async Task<string> SendPromptAsync(string text, Action<LlmClient.StreamEvent>? emit, CancellationToken ct)
     {
         var id = NextId();
         var tcs = new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -331,19 +349,61 @@ public sealed class AcpClient : IDisposable
         _pending[id] = tcs;
 
         var sb = new StringBuilder();
+        var toolNames = new Dictionary<string, string>();
         _updateSink = el =>
         {
             if (el.ValueKind != JsonValueKind.Object) return;
             if (!el.TryGetProperty("update", out var upd) || upd.ValueKind != JsonValueKind.Object) return;
             if (!upd.TryGetProperty("sessionUpdate", out var kindEl) || kindEl.ValueKind != JsonValueKind.String) return;
             // ONLY agent_message_chunk forms the reply — agent_thought_chunk and any
-            // tool_call/tool_call_update notification are dropped, or they wrap prose around
+            // tool_call/tool_call_update notification never reach it, or they wrap prose around
             // structured output (ADR 0031 gate item 3 / spec scenario "Only agent message
-            // chunks form the reply").
-            if (kindEl.GetString() != "agent_message_chunk") return;
-            if (!upd.TryGetProperty("content", out var contentEl)) return;
-            if (!contentEl.TryGetProperty("text", out var textEl) || textEl.ValueKind != JsonValueKind.String) return;
-            lock (sb) sb.Append(textEl.GetString());
+            // chunks form the reply"). They are reported to `emit` (on this read loop, as each
+            // notification arrives) so a stream sees them live.
+            switch (kindEl.GetString())
+            {
+                case "agent_message_chunk":
+                {
+                    var t = ChunkText(upd);
+                    lock (sb) sb.Append(t);
+                    if (emit != null && t.Length > 0) emit(new LlmClient.StreamEvent(LlmClient.StreamKind.Text, Delta: t));
+                    break;
+                }
+                case "agent_thought_chunk":
+                {
+                    // Reported, never part of the answer.
+                    var t = ChunkText(upd);
+                    if (emit != null && t.Length > 0)
+                        emit(new LlmClient.StreamEvent(LlmClient.StreamKind.Thought, Delta: t, Via: "acp"));
+                    break;
+                }
+                case "tool_call":
+                {
+                    var callId = StrProp(upd, "toolCallId");
+                    var name = StrProp(upd, "title");
+                    if (name.Length == 0) name = StrProp(upd, "kind");
+                    lock (toolNames) toolNames[callId] = name;
+                    if (emit == null) break;
+                    var args = upd.TryGetProperty("rawInput", out var ri) && ri.ValueKind == JsonValueKind.Object
+                        ? Json.FromElement(ri) as IDictionary<string, object?> : null;
+                    emit(new LlmClient.StreamEvent(LlmClient.StreamKind.ToolCall, Id: callId, Name: name,
+                        Args: args ?? new Dictionary<string, object?>(), Via: "acp"));
+                    break;
+                }
+                case "tool_call_update":
+                {
+                    var status = StrProp(upd, "status");
+                    if (emit == null || (status != "completed" && status != "failed")) break;
+                    var callId = StrProp(upd, "toolCallId");
+                    string? name;
+                    lock (toolNames) toolNames.TryGetValue(callId, out name);
+                    var title = StrProp(upd, "title");
+                    if (title.Length > 0) name = title;
+                    emit(new LlmClient.StreamEvent(LlmClient.StreamKind.ToolResult, Id: callId, Name: name ?? "",
+                        Output: ToolContentText(upd), IsError: status == "failed", Via: "acp"));
+                    break;
+                }
+            }
         };
 
         try
@@ -382,6 +442,23 @@ public sealed class AcpClient : IDisposable
             _pendingMethods.TryRemove(id, out _);
             _updateSink = null;
         }
+    }
+
+    private static string StrProp(JsonElement e, string k) =>
+        e.TryGetProperty(k, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() ?? "" : "";
+
+    private static string ChunkText(JsonElement upd) =>
+        upd.TryGetProperty("content", out var c) && c.ValueKind == JsonValueKind.Object ? StrProp(c, "text") : "";
+
+    /// <summary>The text of a tool_call_update's <c>content</c> array (<c>[{content:{text}}]</c>), joined.</summary>
+    private static string ToolContentText(JsonElement upd)
+    {
+        if (!upd.TryGetProperty("content", out var arr) || arr.ValueKind != JsonValueKind.Array) return "";
+        var b = new StringBuilder();
+        foreach (var p in arr.EnumerateArray())
+            if (p.ValueKind == JsonValueKind.Object && p.TryGetProperty("content", out var c) && c.ValueKind == JsonValueKind.Object)
+                b.Append(StrProp(c, "text"));
+        return b.ToString();
     }
 
     private async Task<JsonElement> CallAsync(string method, object? @params, CancellationToken ct)

@@ -201,6 +201,18 @@ func fakeACPAgent() {
 		case "session/set_model":
 			_ = out.Encode(map[string]any{"jsonrpc": "2.0", "id": m.ID, "result": map[string]any{}})
 		case "session/prompt":
+			if os.Getenv("TN_FAKE_DRIP") == "1" {
+				// conformance/cli-client/cases.json stream.acpDrip
+				update(map[string]any{"sessionUpdate": "agent_thought_chunk", "content": map[string]any{"type": "text", "text": "pondering"}})
+				for i, chunk := range []string{"drip-1 ", "drip-2 ", "drip-3"} {
+					if i > 0 {
+						time.Sleep(200 * time.Millisecond)
+					}
+					update(map[string]any{"sessionUpdate": "agent_message_chunk", "content": map[string]any{"type": "text", "text": chunk}})
+				}
+				_ = out.Encode(map[string]any{"jsonrpc": "2.0", "id": m.ID, "result": map[string]any{"stopReason": "end_turn"}})
+				continue
+			}
 			if os.Getenv("FAKE_PROJECT") == "1" {
 				b, _ := os.ReadFile(filepath.Join(cwd, ".mcp.json"))
 				var pf struct {
@@ -934,5 +946,59 @@ func TestCliStreamEveryStyleBothTransports(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// TestCliACPStreamsIncrementally pins conformance/cli-client/cases.json
+// stream.acpDrip: over ACP the chunks arrive as separate deltas, as they are
+// produced — a buffered or single-chunk stream fails the lead-time check.
+func TestCliACPStreamsIncrementally(t *testing.T) {
+	o, _ := fakeACPOpts(t, map[string]string{"FAKE_HTTP": "1", "TN_FAKE_DRIP": "1"})
+	o.Transport = CliTransports.ACP
+	c, err := CreateCliClient(o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	ch, err := c.Stream(context.Background(), "hi", o.Toolkit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var deltas, thoughts []string
+	var first, doneAt time.Time
+	var done *RunResult
+	for ev := range ch {
+		switch ev.Type {
+		case "error":
+			t.Fatalf("stream error: %v", ev.Err)
+		case "text":
+			if first.IsZero() {
+				first = time.Now()
+			}
+			deltas = append(deltas, ev.Delta)
+		case "thought":
+			if ev.Via != "acp" {
+				t.Errorf("thought via %q", ev.Via)
+			}
+			thoughts = append(thoughts, ev.Delta)
+		case "done":
+			doneAt, done = time.Now(), ev.Result
+		}
+	}
+	if strings.Join(deltas, "|") != "drip-1 |drip-2 |drip-3" {
+		t.Fatalf("deltas %q", deltas)
+	}
+	if strings.Join(thoughts, "|") != "pondering" {
+		t.Fatalf("thoughts %q", thoughts)
+	}
+	if done == nil || done.Text != "drip-1 drip-2 drip-3" {
+		t.Fatalf("done %+v", done)
+	}
+	if lead := doneAt.Sub(first); lead < 300*time.Millisecond {
+		t.Fatalf("first delta only %v before done: not incremental", lead)
+	}
+	res, err := c.Run(context.Background(), "hi", o.Toolkit)
+	if err != nil || res.Text != "drip-1 drip-2 drip-3" {
+		t.Fatalf("run %q %v", res.Text, err)
 	}
 }

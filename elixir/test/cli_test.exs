@@ -823,7 +823,7 @@ defmodule Toolnexus.CliTest do
     Toolnexus.Acp.close(pid)
   end
 
-  test "ACP streams non-incrementally: the answer as text, then done" do
+  test "ACP streams the answer as text (possibly several deltas), then done" do
     {opts, _rec} = fake_acp_opts(%{"FAKE_HTTP" => "1"})
     cli = create!(opts)
     events = collect_stream(cli, opts[:toolkit])
@@ -876,5 +876,35 @@ defmodule Toolnexus.CliTest do
       if tr == :cli, do: assert("tool_call" in types, label)
       assert Cli.transport(cli) == Atom.to_string(tr), label
     end
+  end
+
+  test "ACP streams incrementally (conformance stream.acpDrip)" do
+    fx = @cases |> File.read!() |> Jason.decode!() |> get_in(["stream", "acpDrip"])
+    {opts, _rec} = fake_acp_opts(fx["fakeEnv"])
+    cli = create!(opts)
+
+    events =
+      cli
+      |> Cli.stream("drip please", opts[:toolkit])
+      |> Enum.map(&Map.put(&1, :at, System.monotonic_time(:millisecond)))
+
+    refute Enum.any?(events, &(&1.type == "error"))
+    assert Cli.transport(cli) == "acp"
+    texts = Enum.filter(events, &(&1.type == "text"))
+    assert Enum.map(texts, & &1.delta) == fx["chunks"]
+
+    thoughts = Enum.filter(events, &(&1.type == "thought"))
+    assert [%{delta: d, via: via}] = thoughts
+    assert d == fx["expectThought"]["delta"] and via == fx["expectThought"]["via"]
+
+    done = List.last(events)
+    assert done.type == "done"
+    assert done.result.text == fx["expectDoneText"]
+    lead = done.at - hd(texts).at
+
+    assert lead >= fx["minLeadMs"],
+           "first text delta only #{lead}ms before done — stream is buffered"
+
+    assert Cli.run(cli, "drip again", opts[:toolkit]).text == fx["expectDoneText"]
   end
 end

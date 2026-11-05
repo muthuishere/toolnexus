@@ -4,6 +4,7 @@
  */
 import { strict as assert } from "node:assert"
 import test from "node:test"
+import fs from "node:fs"
 import { createInProcessClient, createToolkit, defineTool } from "../dist/index.js"
 
 const add = defineTool({
@@ -139,5 +140,58 @@ test("works with NO api key anywhere — not even in the environment", async () 
 })
 
 test("generate is required", () => {
-  assert.throws(() => createInProcessClient({ model: "m" } as any), /requires a `generate` function/)
+  assert.throws(() => createInProcessClient({ model: "m" } as any), /requires a `generate` \(or `generateStream`\) function/)
+})
+
+// conformance/cli-client/cases.json stream.inProcess — a streaming generate is incremental.
+test("generateStream streams incrementally; non-text events pass through", async () => {
+  const fx = JSON.parse(fs.readFileSync(new URL("../../conformance/cli-client/cases.json", import.meta.url), "utf8")).stream.inProcess
+  const seen: string[] = []
+  const waiters: Array<() => void> = []
+  const consumerSaw = (delta: string) =>
+    new Promise<void>((resolve, reject) => {
+      if (seen.includes(delta)) return resolve()
+      const t = setTimeout(() => reject(new Error(fx.notIncrementalError)), fx.waitMs)
+      waiters.push(() => {
+        if (seen.includes(delta)) {
+          clearTimeout(t)
+          resolve()
+        }
+      })
+    })
+  const client = createInProcessClient({
+    model: "m",
+    generateStream: async (_req, emit) => {
+      for (const e of fx.emits) {
+        const { awaitConsumer, ...ev } = e
+        emit(ev)
+        if (awaitConsumer) await consumerSaw(ev.delta)
+      }
+      return fx.returns
+    },
+  })
+  const deltas: string[] = []
+  const passThrough: any[] = []
+  let done: any
+  for await (const ev of client.stream(fx.prompt)) {
+    const e = ev as any
+    if (e.type === "text") {
+      deltas.push(e.delta)
+      seen.push(e.delta)
+      for (const w of waiters.splice(0)) w()
+    } else if (e.type === "thought" || e.type === "tool_call") passThrough.push(e)
+    else if (e.type === "done") done = e.result
+  }
+  assert.deepEqual(deltas, fx.expectTextDeltas)
+  assert.equal(passThrough.length, fx.expectPassThrough.length)
+  fx.expectPassThrough.forEach((want: any, i: number) => {
+    for (const k of Object.keys(want)) assert.deepEqual(passThrough[i][k], want[k], k)
+  })
+  assert.equal(done.text, fx.expectDoneText)
+  assert.equal(done.toolCalls.length, fx.expectDoneToolCalls)
+})
+
+test("generateStream alone also serves a non-streaming run", async () => {
+  const client = createInProcessClient({ model: "m", generateStream: (_r, emit) => (emit({ type: "text", delta: "x" }), { content: "whole" }) })
+  assert.equal((await client.run("q")).text, "whole")
 })

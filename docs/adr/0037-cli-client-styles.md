@@ -69,6 +69,10 @@ tool-call channel.
    answer arrives as one text chunk, then done. Honest rather than fake: no claim of incremental
    deltas is made, and the documented shape is one chunk. Go's ACP transport still streams
    incrementally.
+   Revised again 2026-11-05: the ACP transport now streams incrementally in **all eight ports**
+   (each port's in-process client gained Go's streaming-generate seam; ACP thoughts arrive as a
+   `thought` event). The one-shot CLI transport stays one chunk for every style — the envelope is
+   content *or* tool calls, known only once the whole reply has parsed.
 10. **Errors and timeouts.** Pinned messages: `cli: command not found: <bin>`, `cli: timed out
     after <ms>ms` (default 300000 ms — owner 2026-11-04; the whole process group is killed), `cli: exit <code>:
     <stderr, capped at 1000 code points>`, `cli: no output file`, `cli: empty reply`. Failures are

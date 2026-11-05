@@ -251,11 +251,11 @@ defmodule Toolnexus.Cli.AcpSession do
   # ---------------------------------------------------------------------------
 
   @doc false
-  def generate(%__MODULE__{} = s, req) do
+  def generate(%__MODULE__{} = s, req, emit \\ nil) do
     messages = Cli.with_system_hint(req[:messages] || [], s.hint)
     text = Acp.assemble_prompt_text(messages)
 
-    case Acp.prompt(s.acp, text, s.timeout) do
+    case Acp.prompt(s.acp, text, s.timeout, emit) do
       {:ok, answer} -> {:ok, %{content: answer}}
       {:error, {:acp_exit, :timeout}} -> {:error, "cli: timed out after #{s.timeout}ms"}
       {:error, reason} -> {:error, "cli: acp: #{describe(reason)}"}

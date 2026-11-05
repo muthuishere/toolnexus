@@ -256,9 +256,14 @@ public final class CliAcpSession {
     }
 
     InProcess.Response generate(InProcess.Request req) {
+        return generateStream(req, null);
+    }
+
+    /** One turn, reporting text/thought/tool events to {@code emit} as the agent sends them (null: none). */
+    InProcess.Response generateStream(InProcess.Request req, java.util.function.Consumer<LlmClient.StreamEvent> emit) {
         InProcess.Request r = new InProcess.Request(withSystemHint(req.messages, hint), req.tools, req.model, req.body);
         try {
-            return client.generate(r);
+            return client.generateStream(r, emit);
         } catch (IOException e) {
             String m = e.getMessage() == null ? "" : e.getMessage();
             if (m.contains("timed out")) throw new CliClient.CliException("cli: timed out after " + timeout + "ms", e);

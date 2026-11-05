@@ -146,3 +146,57 @@ def test_generate_is_required_and_wire_options_are_refused():
         create_in_process_client(model="m", generate=None)
     with pytest.raises(TypeError, match="has no wire to configure"):
         create_in_process_client(model="m", generate=lambda _r: {}, base_url="http://x")
+
+
+# conformance/cli-client/cases.json "stream.inProcess" — a real incremental stream.
+_STREAM = json.loads(
+    (__import__("pathlib").Path(__file__).resolve().parents[2] / "conformance" / "cli-client" / "cases.json").read_text()
+)["stream"]["inProcess"]
+
+
+async def test_generate_stream_is_incremental_and_passes_events_through():
+    import threading
+
+    case = _STREAM
+    seen: dict[str, threading.Event] = {}
+
+    def generate_stream(req, emit):
+        for ev in case["emits"]:
+            ev = {k: v for k, v in ev.items() if k != "awaitConsumer"}
+            if ev["type"] == "text":
+                seen[ev["delta"]] = threading.Event()
+            emit(ev)
+            if ev["type"] == "text":
+                if not seen[ev["delta"]].wait(case["waitMs"] / 1000):
+                    raise RuntimeError(case["notIncrementalError"])
+        return case["returns"]
+
+    client = create_in_process_client(model="m", generate_stream=generate_stream)
+    tk = await create_toolkit()
+    texts, passed, done = [], [], None
+    async for ev in client.stream(case["prompt"], toolkit=tk):
+        if ev["type"] == "text":
+            texts.append(ev["delta"])
+            seen[ev["delta"]].set()
+        elif ev["type"] == "done":
+            done = ev["result"]
+        elif ev["type"] in ("thought", "tool_call", "tool_result"):
+            passed.append(ev)
+    assert texts == case["expectTextDeltas"]
+    for want in case["expectPassThrough"]:
+        assert any(all(p.get(k) == v for k, v in want.items()) for p in passed), (want, passed)
+    assert done is not None and done.text == case["expectDoneText"]
+    assert len(done.tool_calls) == case["expectDoneToolCalls"]
+
+    # A non-stream run with only a stream func runs it with a no-op emit — so the
+    # await-the-consumer check would fail; use a plain stream func here.
+    plain = create_in_process_client(model="m", generate_stream=lambda req, emit: {"content": "ok"})
+    assert (await plain.run("q", toolkit=tk)).text == "ok"
+
+
+async def test_plain_generate_with_stream_still_refuses():
+    assert _STREAM["plainGenerateStillRefuses"] is True
+    client = create_in_process_client(model="m", generate=lambda req: {"content": "x"})
+    with pytest.raises(NotImplementedError, match="does not support streaming"):
+        async for _ in client.stream("hi", toolkit=await create_toolkit()):
+            pass

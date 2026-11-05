@@ -217,6 +217,17 @@ public final class CliFakes {
                 }
                 case "session/set_model" -> reply(id, Map.of());
                 case "session/prompt" -> {
+                    if ("1".equals(System.getenv("TN_FAKE_DRIP"))) {
+                        // Spaced chunks: a buffered stream cannot fake the lead before done.
+                        update(obj("sessionUpdate", "agent_thought_chunk", "content", obj("type", "text", "text", "pondering")));
+                        String[] chunks = {"drip-1 ", "drip-2 ", "drip-3"};
+                        for (int i = 0; i < chunks.length; i++) {
+                            if (i > 0) Thread.sleep(200);
+                            update(obj("sessionUpdate", "agent_message_chunk", "content", obj("type", "text", "text", chunks[i])));
+                        }
+                        reply(id, obj("stopReason", "end_turn"));
+                        break;
+                    }
                     if ("1".equals(System.getenv("FAKE_PROJECT"))) {
                         Map<String, Object> pf = Json.toMap(Files.readString(Path.of(cwd, ".mcp.json")));
                         Map<String, Object> e = (Map<String, Object>) ((Map<String, Object>) pf.get("mcpServers")).get("toolnexus");

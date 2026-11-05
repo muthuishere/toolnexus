@@ -311,18 +311,21 @@
               (throw (ex-info msg {})))))))))
 
 (defn generate
-  "One model turn over the live session."
-  [s req]
+  "One model turn over the live session. With `emit`, the turn's text /
+  thought / tool events reach it as each session/update arrives
+  (`toolnexus.acp/generate-stream`) — incremental, not after the turn."
+  ([s req] (generate s req nil))
+  ([s req emit]
   (let [c   @(:client s)
         msgs (with-system-hint (vec (:messages req)) (:hint s))]
     (try
-      ((acp/generate c) (assoc req :messages msgs))
+      ((acp/generate-stream c) (assoc req :messages msgs) emit)
       (catch Throwable e
         (let [err (:acp-error (ex-data e))]
           (cond
             (= "timeout" err)  (throw (ex-info (str "cli: timed out after " (:timeout s) "ms") {}))
             (= "peer-eof" err) (throw (ex-info "cli: acp: agent exited before replying to session/prompt" {}))
-            :else (throw e)))))))
+            :else (throw e))))))))
 
 (defn session-info
   "A read-only view of the live session. The bearer token is never exposed:

@@ -203,3 +203,60 @@ func TestInProcessDoesNotRetryByDefault(t *testing.T) {
 		t.Fatalf("took %v; a configuration error must fail immediately", elapsed)
 	}
 }
+
+// TestInProcessGenerateStreamIsIncremental pins conformance/cli-client/cases.json
+// stream.inProcess: the generate blocks after each text delta until the
+// consumer has seen it, so a stream that buffers the answer deadlocks and fails.
+func TestInProcessGenerateStreamIsIncremental(t *testing.T) {
+	seen := make(chan string, 4)
+	await := func(want string) error {
+		select {
+		case got := <-seen:
+			if got != want {
+				return fmt.Errorf("saw %q, want %q", got, want)
+			}
+			return nil
+		case <-time.After(5 * time.Second):
+			return fmt.Errorf("stream not incremental: consumer never saw the delta")
+		}
+	}
+	gen := func(ctx context.Context, req InProcessRequest, emit func(StreamEvent)) (InProcessResponse, error) {
+		emit(StreamEvent{Type: "text", Delta: "al"})
+		if err := await("al"); err != nil {
+			return InProcessResponse{}, err
+		}
+		emit(StreamEvent{Type: "thought", Delta: "hmm", Via: "acp"})
+		emit(StreamEvent{Type: "tool_call", ID: "t1", Name: "reading files", Args: map[string]any{}, Via: "acp"})
+		emit(StreamEvent{Type: "text", Delta: "pha"})
+		if err := await("pha"); err != nil {
+			return InProcessResponse{}, err
+		}
+		return InProcessResponse{Content: "alpha"}, nil
+	}
+	client := CreateInProcessClient(InProcessOptions{Model: "m", GenerateStream: gen})
+	ch, err := client.Stream(context.Background(), "q", bareToolkit(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var deltas, pass []string
+	var done *RunResult
+	for ev := range ch {
+		switch ev.Type {
+		case "error":
+			t.Fatalf("stream error: %v", ev.Err)
+		case "text":
+			deltas = append(deltas, ev.Delta)
+			seen <- ev.Delta
+		case "thought", "tool_call":
+			pass = append(pass, ev.Type+":"+ev.Via)
+		case "done":
+			done = ev.Result
+		}
+	}
+	if strings.Join(deltas, "|") != "al|pha" || strings.Join(pass, ",") != "thought:acp,tool_call:acp" {
+		t.Fatalf("deltas %q pass %q", deltas, pass)
+	}
+	if done == nil || done.Text != "alpha" || len(done.ToolCalls) != 0 {
+		t.Fatalf("done %+v", done)
+	}
+}

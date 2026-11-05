@@ -161,6 +161,110 @@ public class InProcessTests
         Assert.True(sw.ElapsedMilliseconds < 500, $"took {sw.ElapsedMilliseconds}ms; must fail immediately");
     }
 
+    /// <summary>conformance/cli-client/cases.json stream.inProcess: a streaming generate's text
+    /// reaches the consumer AS IT IS EMITTED (the generate blocks until the consumer saw each delta),
+    /// and its non-text events pass straight through without the loop executing them.</summary>
+    [Fact]
+    public async Task GenerateStreamIsIncremental()
+    {
+        string? path = null;
+        for (var dir = new DirectoryInfo(AppContext.BaseDirectory); dir != null && path == null; dir = dir.Parent)
+        {
+            var c = Path.Combine(dir.FullName, "conformance", "cli-client", "cases.json");
+            if (File.Exists(c)) path = c;
+        }
+        using var doc = System.Text.Json.JsonDocument.Parse(File.ReadAllText(path!));
+        var cs = doc.RootElement.GetProperty("stream").GetProperty("inProcess");
+        var waitMs = cs.GetProperty("waitMs").GetInt32();
+        var notIncremental = cs.GetProperty("notIncrementalError").GetString()!;
+
+        var seen = new List<string>();
+        var signal = new SemaphoreSlim(0);
+        var client = InProcess.CreateClient(new InProcess.Options
+        {
+            Model = "m",
+            GenerateStream = async (req, emit, ct) =>
+            {
+                foreach (var e in cs.GetProperty("emits").EnumerateArray())
+                {
+                    var type = e.GetProperty("type").GetString();
+                    var via = e.TryGetProperty("via", out var v) ? v.GetString() : null;
+                    switch (type)
+                    {
+                        case "text":
+                            emit(new LlmClient.StreamEvent(LlmClient.StreamKind.Text, Delta: e.GetProperty("delta").GetString()));
+                            if (e.TryGetProperty("awaitConsumer", out var a) && a.GetBoolean()
+                                && !await signal.WaitAsync(waitMs, ct))
+                                throw new InvalidOperationException(notIncremental);
+                            break;
+                        case "thought":
+                            emit(new LlmClient.StreamEvent(LlmClient.StreamKind.Thought, Delta: e.GetProperty("delta").GetString(), Via: via));
+                            break;
+                        case "tool_call":
+                            emit(new LlmClient.StreamEvent(LlmClient.StreamKind.ToolCall, Id: e.GetProperty("id").GetString(),
+                                Name: e.GetProperty("name").GetString(), Args: new Dictionary<string, object?>(), Via: via));
+                            break;
+                    }
+                }
+                return InProcess.Response.FromContent(cs.GetProperty("returns").GetProperty("content").GetString()!);
+            },
+        });
+
+        var passThrough = new List<LlmClient.StreamEvent>();
+        LlmClient.RunResult? done = null;
+        await client.StreamAsync(cs.GetProperty("prompt").GetString()!, null, ev =>
+        {
+            switch (ev.Type)
+            {
+                case LlmClient.StreamKind.Text:
+                    lock (seen) seen.Add(ev.Delta!);
+                    signal.Release();
+                    break;
+                case LlmClient.StreamKind.Thought:
+                case LlmClient.StreamKind.ToolCall:
+                case LlmClient.StreamKind.ToolResult:
+                    lock (passThrough) passThrough.Add(ev);
+                    break;
+                case LlmClient.StreamKind.Done:
+                    done = ev.Result;
+                    break;
+            }
+        });
+
+        Assert.Equal(cs.GetProperty("expectTextDeltas").EnumerateArray().Select(x => x.GetString()!), seen);
+        var want = cs.GetProperty("expectPassThrough").EnumerateArray().ToList();
+        Assert.Equal(want.Count, passThrough.Count);
+        for (var i = 0; i < want.Count; i++)
+        {
+            var w = want[i];
+            var got = passThrough[i];
+            Assert.Equal(w.GetProperty("type").GetString(), got.Type == LlmClient.StreamKind.Thought ? "thought" : "tool_call");
+            Assert.Equal(w.GetProperty("via").GetString(), got.Via);
+            if (w.TryGetProperty("delta", out var d)) Assert.Equal(d.GetString(), got.Delta);
+            if (w.TryGetProperty("id", out var id)) Assert.Equal(id.GetString(), got.Id);
+            if (w.TryGetProperty("name", out var n)) Assert.Equal(n.GetString(), got.Name);
+        }
+        Assert.Equal(cs.GetProperty("expectDoneText").GetString(), done!.Text);
+        Assert.Equal(cs.GetProperty("expectDoneToolCalls").GetInt32(), done.ToolCalls.Count);
+
+    }
+
+    [Fact]
+    public async Task StreamOnlyClientServesRunWithNoOpEmit()
+    {
+        var client = InProcess.CreateClient(new InProcess.Options
+        {
+            Model = "m",
+            GenerateStream = (req, emit, ct) =>
+            {
+                emit(new LlmClient.StreamEvent(LlmClient.StreamKind.Text, Delta: "ignored"));
+                return Task.FromResult(InProcess.Response.FromContent("alpha"));
+            },
+        });
+        var r = await client.RunAsync("q", null);
+        Assert.Equal("alpha", r.Text);
+    }
+
     [Fact]
     public void GenerateIsRequired() =>
         Assert.Throws<ArgumentException>(() =>

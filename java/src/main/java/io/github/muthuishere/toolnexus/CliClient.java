@@ -7,16 +7,9 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
-import java.net.Authenticator;
-import java.net.CookieHandler;
-import java.net.ProxySelector;
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.time.Duration;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -24,14 +17,10 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
-import javax.net.ssl.SSLContext;
-import javax.net.ssl.SSLParameters;
 
 /**
  * CLI client styles (SPEC §8C, ADR 0037): an agent CLI the user already has installed — and pays
@@ -273,7 +262,7 @@ public final class CliClient implements AutoCloseable {
         InProcess.Options ip = copy(o.inProcess);
         if (ip.model == null || ip.model.isEmpty()) ip.model = style.name;
         ip.generate = this::generate;
-        this.client = InProcess.createClient(ip, new CliHttpClient(new InProcess.GenerateBackedHttpClient(this::generate)));
+        this.client = InProcess.createClient(ip, new InProcess.GenerateBackedHttpClient(this::generate, this::generateStream));
     }
 
     private static InProcess.Options copy(InProcess.Options in) {
@@ -354,7 +343,9 @@ public final class CliClient implements AutoCloseable {
     /** Shorthand for {@code client().run(prompt)}. */
     public LlmClient.RunResult run(String prompt) { return client.run(prompt); }
 
-    /** Shorthand for {@code client().stream(prompt, toolkit, onEvent)} (non-incremental: the whole answer arrives as one text event). */
+    /** Shorthand for {@code client().stream(prompt, toolkit, onEvent)}. Over ACP the answer streams as the agent
+     * sends it (text, thought and tool events, {@code via = "acp"}); the one-shot CLI delivers the whole answer
+     * as one text event. */
     public LlmClient.RunResult stream(String prompt, Toolkit toolkit, Consumer<LlmClient.StreamEvent> onEvent) {
         return client.stream(prompt, toolkit, onEvent);
     }
@@ -393,8 +384,17 @@ public final class CliClient implements AutoCloseable {
     // ---------------------------------------------------------------------------------------
 
     private InProcess.Response generate(InProcess.Request req) {
+        return generateStream(req, null);
+    }
+
+    /**
+     * The streaming seam. ACP: events as the agent sends them. One-shot CLI: {@code emit} is
+     * ignored — its reply is content OR tool calls, known only once it has parsed, so the shim
+     * delivers the whole answer as one text chunk.
+     */
+    private InProcess.Response generateStream(InProcess.Request req, Consumer<LlmClient.StreamEvent> emit) {
         CliAcpSession s = session();
-        if (s != null) return s.generate(req);
+        if (s != null) return s.generateStream(req, emit);
         String prompt = renderPrompt(req.messages, req.tools);
         return parseReply(invoke(prompt));
     }
@@ -784,109 +784,5 @@ public final class CliClient implements AutoCloseable {
             if (Files.isRegularFile(p) && Files.isExecutable(p)) return p.toString();
         }
         return null;
-    }
-
-    // ---------------------------------------------------------------------------------------
-    // The HTTP shim: the shared shim, plus a non-incremental stream. Neither transport
-    // streams incrementally here, so a stream runs the turn whole and replays it as one
-    // SSE chunk: the loop then emits its tool events and the answer as a single text event.
-    // ---------------------------------------------------------------------------------------
-
-    private final class CliHttpClient extends HttpClient {
-        private final InProcess.GenerateBackedHttpClient inner;
-
-        CliHttpClient(InProcess.GenerateBackedHttpClient inner) { this.inner = inner; }
-
-        @Override @SuppressWarnings("unchecked")
-        public <T> HttpResponse<T> send(HttpRequest req, HttpResponse.BodyHandler<T> handler) throws IOException {
-            Map<String, Object> body = readBody(req);
-            if (body == null || !Boolean.TRUE.equals(body.get("stream"))) return inner.send(req, handler);
-            Map<String, Object> plain = new LinkedHashMap<>(body);
-            plain.remove("stream");
-            plain.remove("stream_options");
-            HttpRequest once = HttpRequest.newBuilder(req.uri())
-                    .POST(HttpRequest.BodyPublishers.ofString(Json.stringify(plain))).build();
-            HttpResponse<String> whole = inner.send(once, HttpResponse.BodyHandlers.ofString());
-            return (HttpResponse<T>) new LinesResponse(req, toSse(Json.toMap(whole.body())));
-        }
-
-        @SuppressWarnings("unchecked")
-        private static List<String> toSse(Map<String, Object> envelope) {
-            Map<String, Object> choice = (Map<String, Object>) ((List<Object>) envelope.get("choices")).get(0);
-            Map<String, Object> message = (Map<String, Object>) choice.get("message");
-            Map<String, Object> delta = new LinkedHashMap<>();
-            delta.put("role", "assistant");
-            if (message.get("content") != null) delta.put("content", message.get("content"));
-            if (message.get("tool_calls") instanceof List<?> calls) {
-                List<Object> indexed = new ArrayList<>();
-                for (int i = 0; i < calls.size(); i++) {
-                    Map<String, Object> c = new LinkedHashMap<>((Map<String, Object>) calls.get(i));
-                    c.put("index", i);
-                    indexed.add(c);
-                }
-                delta.put("tool_calls", indexed);
-            }
-            Map<String, Object> ch = new LinkedHashMap<>();
-            ch.put("index", 0);
-            ch.put("delta", delta);
-            ch.put("finish_reason", choice.get("finish_reason"));
-            Map<String, Object> chunk = new LinkedHashMap<>();
-            chunk.put("choices", List.of(ch));
-            chunk.put("usage", envelope.get("usage"));
-            return List.of("data: " + Json.stringify(chunk), "", "data: [DONE]", "");
-        }
-
-        private static Map<String, Object> readBody(HttpRequest req) {
-            Optional<HttpRequest.BodyPublisher> bp = req.bodyPublisher();
-            if (bp.isEmpty()) return null;
-            StringBuilder sb = new StringBuilder();
-            bp.get().subscribe(new java.util.concurrent.Flow.Subscriber<>() {
-                @Override public void onSubscribe(java.util.concurrent.Flow.Subscription s) { s.request(Long.MAX_VALUE); }
-                @Override public void onNext(java.nio.ByteBuffer item) { sb.append(StandardCharsets.UTF_8.decode(item)); }
-                @Override public void onError(Throwable t) {}
-                @Override public void onComplete() {}
-            });
-            try {
-                return Json.toMap(sb.toString());
-            } catch (RuntimeException e) {
-                return null;
-            }
-        }
-
-        @Override public Optional<CookieHandler> cookieHandler() { return Optional.empty(); }
-        @Override public Optional<Duration> connectTimeout() { return Optional.empty(); }
-        @Override public Redirect followRedirects() { return Redirect.NEVER; }
-        @Override public Optional<ProxySelector> proxy() { return Optional.empty(); }
-        @Override public SSLContext sslContext() { throw new UnsupportedOperationException("cli client"); }
-        @Override public SSLParameters sslParameters() { throw new UnsupportedOperationException("cli client"); }
-        @Override public Optional<Authenticator> authenticator() { return Optional.empty(); }
-        @Override public Version version() { return Version.HTTP_1_1; }
-        @Override public Optional<Executor> executor() { return Optional.empty(); }
-
-        @Override public <T> CompletableFuture<HttpResponse<T>> sendAsync(HttpRequest r, HttpResponse.BodyHandler<T> h) {
-            try {
-                return CompletableFuture.completedFuture(send(r, h));
-            } catch (IOException | RuntimeException e) {
-                return CompletableFuture.failedFuture(e);
-            }
-        }
-
-        @Override public <T> CompletableFuture<HttpResponse<T>> sendAsync(HttpRequest r, HttpResponse.BodyHandler<T> h,
-                                                                        HttpResponse.PushPromiseHandler<T> p) {
-            return sendAsync(r, h);
-        }
-    }
-
-    private record LinesResponse(HttpRequest req, List<String> lines) implements HttpResponse<java.util.stream.Stream<String>> {
-        @Override public int statusCode() { return 200; }
-        @Override public java.util.stream.Stream<String> body() { return lines.stream(); }
-        @Override public HttpRequest request() { return req; }
-        @Override public java.net.http.HttpHeaders headers() {
-            return java.net.http.HttpHeaders.of(Map.of("content-type", List.of("text/event-stream")), (a, b) -> true);
-        }
-        @Override public Optional<HttpResponse<java.util.stream.Stream<String>>> previousResponse() { return Optional.empty(); }
-        @Override public Optional<javax.net.ssl.SSLSession> sslSession() { return Optional.empty(); }
-        @Override public java.net.URI uri() { return req.uri(); }
-        @Override public HttpClient.Version version() { return HttpClient.Version.HTTP_1_1; }
     }
 }

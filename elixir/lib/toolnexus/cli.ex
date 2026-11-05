@@ -282,24 +282,15 @@ defmodule Toolnexus.Cli do
   end
 
   defp build_client(opts, cfg, server) do
-    generate = fn req -> __MODULE__.Server.generate(server, cfg, req) end
-    inner = Client.in_process_transport(generate)
+    generate = fn req -> __MODULE__.Server.generate(server, cfg, req, nil) end
+    generate_stream = fn req, emit -> __MODULE__.Server.generate(server, cfg, req, emit) end
 
-    # Streaming degrades to a non-incremental stream (SPEC §8C, ADR 0037 d9):
-    # the turn runs as one complete reply, re-shaped as an SSE body, so the
-    # loop emits its tool events and the answer as a single text chunk, then done.
-    transport = fn req ->
-      body = req.body || %{}
-
-      if body["stream"] do
-        req
-        |> Map.put(:body, Map.drop(body, ["stream", "stream_options"]))
-        |> inner.()
-        |> to_sse()
-      else
-        inner.(req)
-      end
-    end
+    # Streaming (SPEC §8C): over ACP the session's updates reach the consumer as
+    # they arrive (text deltas, thoughts, the agent's own tool use) through the
+    # in-process streaming seam. The one-shot CLI transport ignores `emit`: its
+    # reply is known only once whole, so it arrives as one text chunk (or tool
+    # calls the loop runs), then done.
+    transport = Client.in_process_transport(generate, generate_stream)
 
     opts
     |> Keyword.drop(@cli_options)
@@ -320,36 +311,6 @@ defmodule Toolnexus.Cli do
     |> Client.create()
   end
 
-  defp to_sse({:ok, %{body: %{"choices" => [choice | _]} = b} = resp}) do
-    msg = choice["message"] || %{}
-
-    delta =
-      case msg["tool_calls"] do
-        [_ | _] = calls ->
-          %{
-            "tool_calls" =>
-              calls |> Enum.with_index() |> Enum.map(fn {c, i} -> Map.put(c, "index", i) end)
-          }
-
-        _ ->
-          %{"content" => msg["content"] || ""}
-      end
-
-    chunk = %{
-      "choices" => [%{"index" => 0, "delta" => delta, "finish_reason" => choice["finish_reason"]}],
-      "usage" => b["usage"]
-    }
-
-    {:ok,
-     %{
-       resp
-       | body: "data: " <> Jason.encode!(chunk) <> "\n\ndata: [DONE]\n\n",
-         headers: %{"content-type" => "text/event-stream"}
-     }}
-  end
-
-  defp to_sse(other), do: other
-
   # ---------------------------------------------------------------------------
   # The client surface.
   # ---------------------------------------------------------------------------
@@ -358,7 +319,7 @@ defmodule Toolnexus.Cli do
   def run(%__MODULE__{client: c}, prompt, toolkit \\ nil, opts \\ []),
     do: Client.run(c, prompt, toolkit, opts)
 
-  @doc "`Toolnexus.Client.stream/4` on the CLI client: a non-incremental stream (tool events, the whole answer as one text event, then done)."
+  @doc "`Toolnexus.Client.stream/4` on the CLI client. Over ACP it is incremental (text deltas, `thought` and the agent's own `tool_call`/`tool_result` events, tagged `via: \"acp\"`, as they arrive); over the one-shot CLI it is tool events, the whole answer as one text event, then done."
   def stream(%__MODULE__{client: c}, prompt, toolkit \\ nil, opts \\ []),
     do: Client.stream(c, prompt, toolkit, opts)
 

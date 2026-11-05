@@ -141,15 +141,36 @@ verbatim. Tool calls SHALL be executed by the toolnexus loop. A streaming call S
 - **WHEN** the CLI is missing, exits non-zero, prints nothing, writes no `out` file, or exceeds the call timeout (default 300000 ms)
 - **THEN** the error is `cli: command not found: <bin>`, `cli: exit <code>: <stderr ≤1000 code points>`, `cli: empty reply`, `cli: no output file`, or `cli: timed out after <ms>ms`, and temp files are removed
 
-### Requirement: Streaming a CLI client degrades to a non-incremental stream
+### Requirement: Streaming a CLI client never errors and is incremental over ACP
 
-`stream` / `askStream` on a CLI client SHALL NOT fail because the transport cannot stream. On the
-one-shot transport, and on ACP where the port's ACP client does not stream, the client SHALL run
-the turn and emit `tool_call`/`tool_result` events, the whole answer as one `text` event, then `done`.
+`stream` / `askStream` on a CLI client SHALL NOT fail. Over ACP, in every port, each
+`agent_message_chunk` SHALL be emitted as a `text` delta as it is read, and thoughts and the agent's
+own tool calls as non-text events with `via:"acp"`. On the one-shot transport, for every style, the
+whole answer SHALL arrive as one `text` event.
 
 #### Scenario: one-shot stream with a tool call
 - **WHEN** a one-shot CLI client streams a prompt whose reply calls a tool, then answers
 - **THEN** the events are `tool_call`, `tool_result`, one `text` holding the whole answer, and `done`, with no `error`
+
+#### Scenario: ACP stream is incremental
+- **WHEN** an ACP CLI client streams against an agent that sends a thought, then chunks `drip-1 `, `drip-2 `, `drip-3` 200 ms apart
+- **THEN** the text deltas are exactly those three chunks, one `thought` event `pondering` with `via:"acp"` arrives, `done` holds `drip-1 drip-2 drip-3`, and the first delta arrived at least 300 ms before `done`
+
+### Requirement: An in-process client streams from a streaming generate
+
+An in-process client given a streaming generate SHALL emit each non-empty `text` event as a stream
+delta when it is emitted, pass every other event to the consumer without executing it, execute
+returned tool calls as usual, and emit returned content as one delta only when no text was emitted.
+With only a plain generate, streaming SHALL still raise (Clojure: no stream entry point; events go
+to `:on-event`).
+
+#### Scenario: the consumer sees each delta before the generate continues
+- **WHEN** a streaming generate emits `al`, waits until the consumer has received it, emits a `thought` and a `tool_call` (`via:"acp"`), emits `pha`, waits again, and returns content `alpha`
+- **THEN** the stream yields text deltas `al`, `pha`, passes the thought and tool_call through, and `done` holds `alpha` with no tool calls executed
+
+#### Scenario: a plain generate still refuses to stream
+- **WHEN** an in-process client built with only a plain generate is streamed
+- **THEN** the stream raises the in-process streaming refusal
 
 ### Requirement: The model passes through unchanged
 

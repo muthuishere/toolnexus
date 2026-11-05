@@ -15,8 +15,9 @@ notifications interleave with responses). It's two behaviors the spike at
 ``spikes/acp/`` proved matter:
 
 * **Only ``agent_message_chunk`` forms the reply.** ``agent_thought_chunk`` and tool
-  narration must be dropped, or they corrupt structured output the host expects to
-  parse.
+  narration must be kept out of the reply, or they corrupt structured output the host
+  expects to parse. ``generate_stream`` reports them to its emitter instead, as they
+  arrive (``thought`` / ``tool_call`` / ``tool_result`` events).
 * **A permission request is answered, never awaited.** ``session/request_permission``
   left unanswered hangs a turn forever, even in an agent's "bypass" mode — so this
   client answers inline, from the same thread that demultiplexes the wire, with the
@@ -182,6 +183,28 @@ class ACPMCPServer:
         return {"name": self.name, "command": self.command, "args": list(self.args), "env": nv(self.env)}
 
 
+def _safe_emit(emit: Optional[Callable[[dict[str, Any]], None]], ev: dict[str, Any]) -> None:
+    if emit is None:
+        return
+    try:
+        emit(ev)
+    except Exception:  # noqa: BLE001 — a consumer never breaks the wire
+        pass
+
+
+def _tool_content_text(content: Any) -> str:
+    """The text parts of a tool_call_update's content array
+    (``[{type: "content", content: {type: "text", text}}, ...]``), joined."""
+    if not isinstance(content, list):
+        return ""
+    out: list[str] = []
+    for part in content:
+        inner = (part or {}).get("content") if isinstance(part, dict) else None
+        if isinstance(inner, dict) and isinstance(inner.get("text"), str):
+            out.append(inner["text"])
+    return "".join(out)
+
+
 def _content_to_text(content: Any) -> str:
     """Flatten a message's ``content`` — a plain string, or a §1B content-part list
     — to text. Non-text parts (image/audio/file) are silently skipped: ACP's prompt
@@ -259,6 +282,10 @@ class ACPClient:
         self.initialize_result: dict[str, Any] = {}
 
         self._accum: list[str] = []
+        # The active turn's stream emitter (None outside a streaming turn) and the
+        # tool-call titles seen this turn, keyed by toolCallId.
+        self._emit: Optional[Callable[[dict[str, Any]], None]] = None
+        self._tool_names: dict[str, str] = {}
 
         self._reader = threading.Thread(target=self._read_loop, name="acp-reader", daemon=True)
         self._reader.start()
@@ -383,17 +410,55 @@ class ACPClient:
             )
 
     def _handle_update(self, params: dict[str, Any]) -> None:
+        # Runs on the reader thread, as each notification arrives — so a streaming
+        # turn's emitter sees every event the moment it is read off the wire.
         update = params.get("update") or {}
-        if update.get("sessionUpdate") != "agent_message_chunk":
-            # agent_thought_chunk and tool_call/tool_call_update narration are
-            # dropped here, on purpose — mixing them into the reply is exactly the
-            # corruption ADR 0031 gate item 3 proves against structured output.
-            return
-        content = update.get("content") or {}
-        text = content.get("text")
-        if text:
+        kind = update.get("sessionUpdate")
+        with self._state_lock:
+            emit = self._emit
+        if kind == "agent_message_chunk":
+            # Only agent_message_chunk forms the reply: agent_thought_chunk and
+            # tool_call/tool_call_update narration never reach the content — mixing
+            # them in is exactly the corruption ADR 0031 gate item 3 proves against
+            # structured output. They are REPORTED to a streaming emitter instead.
+            text = (update.get("content") or {}).get("text")
+            if text:
+                with self._state_lock:
+                    self._accum.append(str(text))
+                _safe_emit(emit, {"type": "text", "delta": str(text)})
+        elif kind == "agent_thought_chunk":
+            text = (update.get("content") or {}).get("text")
+            if text:
+                _safe_emit(emit, {"type": "thought", "delta": str(text), "via": "acp"})
+        elif kind == "tool_call":
+            call_id = update.get("toolCallId") or ""
+            name = update.get("title") or update.get("kind") or ""
             with self._state_lock:
-                self._accum.append(str(text))
+                self._tool_names[call_id] = name
+            _safe_emit(
+                emit,
+                {"type": "tool_call", "id": call_id, "name": name, "args": update.get("rawInput"), "via": "acp"},
+            )
+        elif kind == "tool_call_update":
+            status = update.get("status")
+            if emit is None or status not in ("completed", "failed"):
+                return
+            call_id = update.get("toolCallId") or ""
+            with self._state_lock:
+                name = self._tool_names.get(call_id, "")
+            if update.get("title"):
+                name = update["title"]
+            _safe_emit(
+                emit,
+                {
+                    "type": "tool_result",
+                    "id": call_id,
+                    "name": name,
+                    "output": _tool_content_text(update.get("content")),
+                    "is_error": status == "failed",
+                    "via": "acp",
+                },
+            )
 
     def _answer_permission(self, request: dict[str, Any]) -> None:
         params = request.get("params") or {}
@@ -465,50 +530,77 @@ class ACPClient:
         only ``agent_message_chunk`` text, and blocks (synchronously) until the
         reader thread delivers the reply or ``permission_timeout`` elapses.
         """
+        return self.generate_stream(request, None)
+
+    def generate_stream(
+        self, request: dict[str, Any], emit: Optional[Callable[[dict[str, Any]], None]]
+    ) -> dict[str, Any]:
+        """:meth:`generate` that also reports the turn AS IT HAPPENS — the shape
+        ``create_in_process_client(generate_stream=...)`` wants. ``emit`` is called
+        from the reader thread as each ``session/update`` is read:
+        ``agent_message_chunk`` -> ``{"type": "text", "delta"}``,
+        ``agent_thought_chunk`` -> ``{"type": "thought", "delta", "via": "acp"}``
+        (never part of the answer), ``tool_call`` -> ``{"type": "tool_call", "id",
+        "name": title, "args": rawInput, "via": "acp"}`` and each completed/failed
+        ``tool_call_update`` -> ``{"type": "tool_result", "id", "name", "output",
+        "is_error", "via": "acp"}``. The return value is :meth:`generate`'s.
+        """
         with self._turn_lock:
-            prompt_text = _render_prompt(request)
-            with self._state_lock:
-                self._accum = []
-
-            req_id = self._next_id()
-            reply_q: "queue.Queue[dict[str, Any]]" = queue.Queue(maxsize=1)
-            with self._state_lock:
-                if self._exited:
-                    raise ACPExitedError("session/prompt")
-                self._pending[req_id] = reply_q
-                self._pending_method[req_id] = "session/prompt"
-
-            self._write(
-                {
-                    "jsonrpc": "2.0",
-                    "id": req_id,
-                    "method": "session/prompt",
-                    "params": {
-                        "sessionId": self._session_id,
-                        "prompt": [{"type": "text", "text": prompt_text}],
-                    },
-                }
-            )
-
             try:
-                msg = reply_q.get(timeout=self._opts.permission_timeout)
-            except queue.Empty:
+                return self._prompt_turn(request, emit)
+            finally:
                 with self._state_lock:
-                    self._pending.pop(req_id, None)
-                raise ACPPermissionTimeoutError(
-                    "acp: turn hung waiting on a reply (possibly an unanswered "
-                    f"session/request_permission) after {self._opts.permission_timeout}s"
-                ) from None
+                    self._emit = None
+                    self._tool_names = {}
 
-            if msg.get("_exited"):
+    def _prompt_turn(
+        self, request: dict[str, Any], emit: Optional[Callable[[dict[str, Any]], None]]
+    ) -> dict[str, Any]:
+        prompt_text = _render_prompt(request)
+        with self._state_lock:
+            self._accum = []
+            self._tool_names = {}
+            self._emit = emit
+
+        req_id = self._next_id()
+        reply_q: "queue.Queue[dict[str, Any]]" = queue.Queue(maxsize=1)
+        with self._state_lock:
+            if self._exited:
                 raise ACPExitedError("session/prompt")
-            error = msg.get("error")
-            if error:
-                raise ACPError(f"acp error {error.get('code')}: {error.get('message')}")
+            self._pending[req_id] = reply_q
+            self._pending_method[req_id] = "session/prompt"
 
+        self._write(
+            {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "method": "session/prompt",
+                "params": {
+                    "sessionId": self._session_id,
+                    "prompt": [{"type": "text", "text": prompt_text}],
+                },
+            }
+        )
+
+        try:
+            msg = reply_q.get(timeout=self._opts.permission_timeout)
+        except queue.Empty:
             with self._state_lock:
-                content = "".join(self._accum)
-            return {"content": content}
+                self._pending.pop(req_id, None)
+            raise ACPPermissionTimeoutError(
+                "acp: turn hung waiting on a reply (possibly an unanswered "
+                f"session/request_permission) after {self._opts.permission_timeout}s"
+            ) from None
+
+        if msg.get("_exited"):
+            raise ACPExitedError("session/prompt")
+        error = msg.get("error")
+        if error:
+            raise ACPError(f"acp error {error.get('code')}: {error.get('message')}")
+
+        with self._state_lock:
+            content = "".join(self._accum)
+        return {"content": content}
 
     def is_alive(self) -> bool:
         """True while the child process is still running."""

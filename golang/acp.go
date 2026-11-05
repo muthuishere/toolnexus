@@ -627,6 +627,15 @@ func (c *ACPClient) sendPrompt(ctx context.Context, text string, emit func(Strea
 			if emit != nil && part.Text != "" {
 				emit(StreamEvent{Type: "text", Delta: part.Text})
 			}
+		case "agent_thought_chunk":
+			// Reported, never part of the answer.
+			var part struct {
+				Text string `json:"text"`
+			}
+			_ = json.Unmarshal(u.Content, &part)
+			if emit != nil && part.Text != "" {
+				emit(StreamEvent{Type: "thought", Delta: part.Text, Via: "acp"})
+			}
 		case "tool_call":
 			name := u.Title
 			if name == "" {
@@ -755,7 +764,8 @@ func (c *ACPClient) GenerateCtx(ctx context.Context, req InProcessRequest) (InPr
 
 // GenerateStream is GenerateCtx that also reports the turn as it happens:
 // each agent_message_chunk is emitted as a {Type:"text"} StreamEvent, each
-// tool_call as {Type:"tool_call"} and each completed/failed tool_call_update
+// agent_thought_chunk as {Type:"thought", Via:"acp"} (never part of the
+// answer), each tool_call as {Type:"tool_call"} and each completed/failed tool_call_update
 // as {Type:"tool_result"} (both with Via "acp": the AGENT ran these tools,
 // not the toolkit). emit may be nil. Its shape is
 // InProcessOptions.GenerateStream, so a Client built on it streams.

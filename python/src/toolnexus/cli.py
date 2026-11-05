@@ -321,16 +321,20 @@ def _kill_group(proc: "subprocess.Popen[Any]") -> None:
 
 
 class _CliTransport(InProcessTransport):
-    """The in-process seam. Streaming degrades to a non-incremental stream on both
-    transports (SPEC §8C): the turn runs as a normal call and its reply is replayed
-    as one SSE chunk, so the loop emits its tool events, the whole answer as ONE
-    text event, then done."""
+    """The in-process seam (SPEC §8C). Over the ACP transport the turn streams for
+    real: the session's ``generate_stream`` reports each ``agent_message_chunk`` as a
+    text delta (and thought / tool events) the moment it arrives. The one-shot CLI
+    transport does not stream incrementally for any style — its reply is a JSON
+    envelope that is content OR tool_calls, known only once it has parsed — so the
+    loop emits its tool events, the whole answer as ONE text event, then done."""
 
     def __init__(self, owner: "CliClient") -> None:
-        super().__init__(owner._generate)
+        super().__init__(owner._generate, owner._generate_stream)
         self._owner = owner
 
     def open(self, url: str, headers: dict[str, str], payload: dict[str, Any], timeout: float):  # noqa: A003
+        if self._owner._session() is not None:
+            return super().open(url, headers, payload, timeout)
         reply = self.post(url, headers, payload, timeout)
         choice = (reply.get("choices") or [{}])[0]
         msg = choice.get("message") or {}
@@ -470,9 +474,14 @@ class CliClient(Client):
     # -- the in-process model ------------------------------------------------ #
 
     def _generate(self, request: dict[str, Any]) -> dict[str, Any]:
+        return self._generate_stream(request, None)
+
+    def _generate_stream(
+        self, request: dict[str, Any], emit: Optional[Callable[[dict[str, Any]], None]]
+    ) -> dict[str, Any]:
         s = self._session()
         if s is not None:
-            return s.generate(request)
+            return s.generate(request, emit)
         return parse_cli_reply(self._invoke(render_cli_prompt(request.get("messages"), request.get("tools"))))
 
     def _session(self) -> Any:

@@ -222,6 +222,14 @@ def fake_acp() -> None:
                 send({"jsonrpc": "2.0", "id": mid, "result": {}})
         elif method == "session/set_model":
             send({"jsonrpc": "2.0", "id": mid, "result": {}})
+        elif method == "session/prompt" and os.environ.get("TN_FAKE_DRIP") == "1":
+            # conformance/cli-client/cases.json stream.acpDrip: chunks spaced in time.
+            update({"sessionUpdate": "agent_thought_chunk", "content": {"type": "text", "text": "pondering"}})
+            for i, chunk in enumerate(["drip-1 ", "drip-2 ", "drip-3"]):
+                if i:
+                    time.sleep(0.2)
+                update({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": chunk}})
+            send({"jsonrpc": "2.0", "id": mid, "result": {"stopReason": "end_turn"}})
         elif method == "session/prompt":
             if os.environ.get("FAKE_PROJECT") == "1":
                 with open(os.path.join(state["cwd"], ".mcp.json"), encoding="utf-8") as f:

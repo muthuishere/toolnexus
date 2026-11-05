@@ -166,4 +166,139 @@ defmodule Toolnexus.InProcessTest do
       Client.create_in_process(model: "m", generate: fn _ -> %{} end, base_url: "http://x")
     end
   end
+
+  # conformance/cli-client/cases.json "stream.inProcess" — replayed from the fixture.
+  @stream_case Path.expand("../../conformance/cli-client/cases.json", __DIR__)
+
+  defp ev_from_fixture(e) do
+    base = %{type: e["type"]}
+    base = if e["delta"], do: Map.put(base, :delta, e["delta"]), else: base
+    base = if e["via"], do: Map.put(base, :via, e["via"]), else: base
+    base = if e["id"], do: Map.put(base, :id, e["id"]), else: base
+    base = if e["name"], do: Map.put(base, :name, e["name"]), else: base
+    if Map.has_key?(e, "args"), do: Map.put(base, :args, e["args"]), else: base
+  end
+
+  defp await_seen(seen, delta, wait_ms, msg) do
+    deadline = System.monotonic_time(:millisecond) + wait_ms
+
+    Stream.repeatedly(fn -> delta in Agent.get(seen, & &1) end)
+    |> Enum.reduce_while(nil, fn
+      true, _ ->
+        {:halt, :ok}
+
+      false, _ ->
+        if System.monotonic_time(:millisecond) > deadline, do: raise(msg)
+        Process.sleep(5)
+        {:cont, nil}
+    end)
+  end
+
+  test "generate_stream streams incrementally: each delta reaches the consumer before generate continues" do
+    fx = @stream_case |> File.read!() |> Jason.decode!() |> get_in(["stream", "inProcess"])
+    {:ok, seen} = Agent.start_link(fn -> [] end)
+
+    client =
+      Client.create_in_process(
+        model: "m",
+        generate_stream: fn _req, emit ->
+          for e <- fx["emits"] do
+            emit.(ev_from_fixture(e))
+
+            if e["awaitConsumer"],
+              do: await_seen(seen, e["delta"], fx["waitMs"], fx["notIncrementalError"])
+          end
+
+          %{content: fx["returns"]["content"]}
+        end
+      )
+
+    events =
+      client
+      |> Client.stream(fx["prompt"], bare_toolkit())
+      |> Stream.each(fn
+        %{type: "text", delta: d} -> Agent.update(seen, &[d | &1])
+        _ -> :ok
+      end)
+      |> Enum.to_list()
+
+    refute Enum.any?(events, &(&1.type == "error"))
+    assert for(%{type: "text", delta: d} <- events, do: d) == fx["expectTextDeltas"]
+
+    for want <- fx["expectPassThrough"] do
+      assert Enum.any?(events, fn ev ->
+               ev.type == want["type"] and
+                 Enum.all?(Map.delete(want, "type"), fn {k, v} ->
+                   Map.get(ev, String.to_existing_atom(k)) == v
+                 end)
+             end),
+             "missing pass-through #{inspect(want)} in #{inspect(events)}"
+    end
+
+    %{type: "done", result: done} = List.last(events)
+    assert done.text == fx["expectDoneText"]
+    assert length(done.tool_calls) == fx["expectDoneToolCalls"]
+
+    # The fixture pins it: plain generate + stream still refuses loudly.
+    assert fx["plainGenerateStillRefuses"]
+  end
+
+  test "generate_stream alone serves run/4 with a no-op emit; with both, generate serves run/4" do
+    stream_only =
+      Client.create_in_process(
+        model: "m",
+        generate_stream: fn _req, emit ->
+          emit.(%{type: "text", delta: "ignored"})
+          %{content: "whole"}
+        end
+      )
+
+    assert Client.run(stream_only, "hi", bare_toolkit()).text == "whole"
+
+    both =
+      Client.create_in_process(
+        model: "m",
+        generate: fn _ -> %{content: "plain"} end,
+        generate_stream: fn _req, _emit -> %{content: "streamed"} end
+      )
+
+    assert Client.run(both, "hi", bare_toolkit()).text == "plain"
+
+    events = both |> Client.stream("hi", bare_toolkit()) |> Enum.to_list()
+    assert for(%{type: "text", delta: d} <- events, do: d) == ["streamed"]
+  end
+
+  test "generate_stream returning tool calls drives the loop; a raise surfaces to the consumer" do
+    {:ok, n} = Agent.start_link(fn -> 0 end)
+
+    client =
+      Client.create_in_process(
+        model: "m",
+        generate_stream: fn _req, _emit ->
+          case Agent.get_and_update(n, &{&1, &1 + 1}) do
+            0 -> %{tool_calls: [%{name: "add", arguments: %{"a" => 2, "b" => 3}}]}
+            _ -> %{content: "5"}
+          end
+        end
+      )
+
+    events = client |> Client.stream("add", add_toolkit()) |> Enum.to_list()
+    types = Enum.map(events, & &1.type)
+    assert "tool_call" in types and "tool_result" in types
+    assert List.last(events).result.text == "5"
+
+    boom = Client.create_in_process(model: "m", generate_stream: fn _, _ -> raise "boom" end)
+
+    assert_raise RuntimeError, ~r/boom/, fn ->
+      boom |> Client.stream("hi", bare_toolkit()) |> Enum.to_list()
+    end
+
+    assert_raise ArgumentError, ~r/arity 2/, fn ->
+      Client.create_in_process(model: "m", generate_stream: fn _ -> %{} end)
+    end
+
+    assert_raise ArgumentError, ~r/arity 1/, fn ->
+      Client.create_in_process(model: "m", generate: fn _, _ -> %{} end)
+    end
+  end
 end

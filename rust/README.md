@@ -150,6 +150,9 @@ client.close().await;                                         // ends the agent,
   claude has no ACP mode of its own: set
   `acp_command: vec!["npx".into(), "-y".into(), "@agentclientprotocol/claude-agent-acp@0.100.0".into()]`.
   `client.acp_session().await` shows what was sent (token redacted) and every permission decision.
+  `stream` over ACP is incremental: each `agent_message_chunk` is a `text` event as it arrives,
+  `agent_thought_chunk` a `thought` event (never part of the answer), and the agent's own tool
+  calls `tool_call` / `tool_result` events, all `via: "acp"`.
 - **One-shot CLI**: the conversation goes in under a fixed preamble, the reply is parsed as
   an OpenAI-shaped envelope, and tool calls run in the toolnexus loop. `stream` works but is not
   incremental: the loop's `tool_call` / `tool_result` events, the whole answer as one `text`

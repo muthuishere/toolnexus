@@ -519,7 +519,7 @@ def test_conformance_cases():
     assert render_cli_prompt(None, None) == fx["renderEmpty"].replace("<PREAMBLE>", CLI_PREAMBLE, 1)
 
 
-async def test_acp_streams_non_incrementally(tmp_path):
+async def test_acp_stream_reports_agent_events(tmp_path):
     o, _, tk = await fake_acp_opts(tmp_path, FAKE_HTTP="1")
     c = create_cli_client(**o, transport=CliTransports.ACP)
     try:
@@ -527,8 +527,37 @@ async def test_acp_streams_non_incrementally(tmp_path):
     finally:
         c.close()
     kinds = [e["type"] for e in evs if e["type"] != "usage"]
-    assert kinds == ["text", "done"], kinds
-    assert "BADGE-77Q" in evs[0]["delta"]
+    # The agent's own tool calls are reported (via acp), never executed by the loop.
+    assert kinds == ["tool_call", "tool_call", "text", "done"], kinds
+    assert all(e.get("via") == "acp" for e in evs if e["type"] == "tool_call")
+    assert "BADGE-77Q" in next(e for e in evs if e["type"] == "text")["delta"]
+
+
+async def test_acp_stream_is_incremental(tmp_path):
+    import time
+
+    with open(CASES, encoding="utf-8") as f:
+        case = json.load(f)["stream"]["acpDrip"]
+    o, _, tk = await fake_acp_opts(tmp_path, **case["fakeEnv"])
+    c = create_cli_client(**o, transport=CliTransports.ACP)
+    try:
+        texts, thoughts, first, done_at, done = [], [], None, None, None
+        async for ev in c.stream("drip please", tk):
+            if ev["type"] == "text":
+                if first is None:
+                    first = time.monotonic()
+                texts.append(ev["delta"])
+            elif ev["type"] == "thought":
+                thoughts.append(ev)
+            elif ev["type"] == "done":
+                done_at, done = time.monotonic(), ev["result"]
+        assert texts == case["chunks"]
+        assert thoughts == [case["expectThought"]]
+        assert done is not None and done.text == case["expectDoneText"]
+        assert (done_at - first) * 1000 >= case["minLeadMs"], (done_at - first)
+        assert (await c.run("again", tk)).text == case["expectDoneText"]
+    finally:
+        c.close()
 
 
 ALL_STYLES = [CliStyles.CLAUDE, CliStyles.CODEX, CliStyles.COPILOT, CliStyles.OPENCODE,

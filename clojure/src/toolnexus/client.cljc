@@ -507,6 +507,8 @@
     (string? v) v
     :else (json/write-str v)))
 
+(declare in-process-answer-client)
+
 (defn in-process-http-client
   "Turns a semantic `generate` into the shipped `:http-client` seam: the host returns
   ONE assistant message and this builds the provider envelope.
@@ -516,12 +518,22 @@
   same `:http-client` from a `generate` function with zero duplicated logic.
   `create-in-process-client` itself is unchanged: it still calls this."
   [generate]
-  (fn [_url _headers body]
+  (in-process-answer-client (fn [req _emit] (generate req))))
+
+(defn- in-process-answer-client
+  "The envelope builder behind both in-process seams: `answer-fn` is
+  (fn [req emit] -> answer). Returns (fn [url headers body]) and, with an
+  `emit`, (fn [url headers body emit])."
+  [answer-fn]
+  (fn in-process-call
+    ([url headers body] (in-process-call url headers body nil))
+    ([_url _headers body emit]
     (let [payload (json/read-str (if (string? body) body (json/write-str body)))
-          answer  (or (generate {:messages (:messages payload)
-                                 :tools    (:tools payload)
-                                 :model    (:model payload)
-                                 :body     payload})
+          answer  (or (answer-fn {:messages (:messages payload)
+                                  :tools    (:tools payload)
+                                  :model    (:model payload)
+                                  :body     payload}
+                                 emit)
                       {})
           calls   (or (:tool-calls answer) (:tool_calls answer))
           message (if (seq calls)
@@ -547,7 +559,23 @@
                           :finish_reason (if (seq calls) "tool_calls" "stop")}]
                :usage {:prompt_tokens prompt
                        :completion_tokens compl
-                       :total_tokens total}})})))
+                       :total_tokens total}})}))))
+
+(defn- stream-emitter
+  "The `emit` handed to a `:generate-stream` fn: every non-empty `text` event
+  goes to the run's `:on-event` sink THE MOMENT it is emitted (no buffering —
+  the loop is still blocked inside the generate call); every other event
+  (thought, ACP tool narration, ...) passes straight through to the sink and
+  never reaches the wire, so the loop never executes it. Without a sink it is a
+  no-op."
+  [on-event]
+  (fn [ev]
+    (when on-event
+      (if (= "text" (:type ev))
+        (when-not (= "" (str (:delta ev)))
+          (on-event {:type "text" :delta (str (:delta ev))}))
+        (on-event ev)))
+    nil))
 
 (defn create-in-process-client
   "A client backed by a model running IN THIS PROCESS — no server, no socket, and no
@@ -567,10 +595,20 @@
   `:generate` returns ONE assistant message; `:usage` is optional. There is no
   `:base-url`, `:api-key` or `:style` — there is no wire to configure.
 
-  NOTE this port has no streaming entry point (`:on-event` is a sink on the
-  non-streaming loop), so unlike the other six there is nothing here to refuse."
-  [{:keys [model generate] :as opts}]
-  (when-not (fn? generate)
+  `:generate-stream` (fn [req emit] -> the same answer) is the streaming form
+  (Go `GenerateStream`). This port has no separate streaming entry point: the
+  run's `:on-event` sink IS the event channel. Each `(emit {:type \"text\"
+  :delta s})` reaches `:on-event` as a `text` event AS IT IS EMITTED — genuinely
+  incremental, while the generate is still running — and any other event
+  (`thought`, an ACP `tool_call`/`tool_result` with `:via \"acp\"`) passes
+  straight through, never executed by the loop. The returned answer is what
+  the loop acts on (tool calls, final text). One of `:generate` /
+  `:generate-stream` is required; with both, `:generate` serves a run without
+  an `:on-event` sink and `:generate-stream` one with it. Without a
+  `:generate-stream` there are no text deltas — and, with no streaming entry
+  point, nothing here to refuse."
+  [{:keys [model generate generate-stream] :as opts}]
+  (when-not (or (fn? generate) (fn? generate-stream))
     (throw (ex-info "toolnexus: create-in-process-client requires a `:generate` function" {})))
   (doseq [reserved [:base-url :api-key :style :http-client]]
     (when (contains? opts reserved)
@@ -582,13 +620,37 @@
   ;; ride out, and retrying only buys backoff before the caller sees their own bug.
   (-> opts
       (update :retries #(or % 0))
-      (dissoc :generate)
+      (dissoc :generate :generate-stream)
+      (cond-> (fn? generate-stream)
+        (assoc ::stream-http-client
+               (in-process-answer-client
+                (fn [req emit]
+                  (if (and (nil? emit) (fn? generate))
+                    (generate req)
+                    ;; Go roundTripStream: an answer whose text was never
+                    ;; emitted (a one-shot CLI reply) still reaches the sink,
+                    ;; as ONE text event, before the loop acts on it.
+                    (let [said?  (atom false)
+                          sink   (stream-emitter emit)
+                          answer (generate-stream req (fn [ev]
+                                                        (when (and (= "text" (:type ev))
+                                                                   (not= "" (str (:delta ev))))
+                                                          (reset! said? true))
+                                                        (sink ev)))]
+                      (when (and emit (not @said?)
+                                 (empty? (or (:tool-calls answer) (:tool_calls answer)))
+                                 (not= "" (str (:content answer))))
+                        (sink {:type "text" :delta (str (:content answer))}))
+                      answer))))))
       (assoc :base-url in-process-base-url
              :style "openai"
              ;; An in-process model has no endpoint to authenticate to, so the host must never need a key — but the client resolves one from the environment and fails when it finds none. A sentinel keeps that resolution from ever running. Caught by CI, which has no OPENROUTER_API_KEY; every local run passed because a developer shell has one.
              :api-key "in-process"
              :model model
-             :http-client (in-process-http-client generate))
+             :http-client (if (fn? generate)
+                            (in-process-http-client generate)
+                            (in-process-answer-client
+                             (fn [req _] (generate-stream req (stream-emitter nil))))))
       create-client))
 
 (defn- metric!
@@ -949,6 +1011,10 @@
   Scope is the LLM path only, per the capability spec: MCP transports are their
   own seam and are NOT routed through this."
   [client url headers body]
+  (if-let [sf (::stream-http-client client)]
+    ;; an in-process :generate-stream: the run's :on-event sink rides along so
+    ;; text deltas reach it while the generate is still running.
+    (sf url headers body (::on-event client))
   (if-let [f (:http-client client)]
     (f url headers body)
     ;; `request` rather than `post-json`, because only `request` takes
@@ -960,7 +1026,7 @@
     ;; handing it to every attempt turned a 30s budget into 30s PER RETRY.
     (let [remaining (remaining-ms client)]
       (http/request (cond-> {:method :post :url url :headers headers :body body}
-                      remaining (assoc :timeout-ms (max 1 remaining)))))))
+                      remaining (assoc :timeout-ms (max 1 remaining))))))))
 
 (defn ^:no-doc classify
   "§resilience-policy — retry | fail, and NOTHING ELSE.
@@ -1722,16 +1788,21 @@
   `:on-event` is an optional synchronous sink for the §8 event vocabulary this
   non-streaming loop can honestly produce — `tool_call`, `tool_result`,
   `pending` (emitted BEFORE `wait-for` runs, so a channel handler can push the
-  link in real time), `usage`, `done`. There are no `text` deltas here: this
-  loop buffers the whole response, and faking deltas out of a buffered body
-  would be a lie. Real SSE streaming is a separate seam (`koine.stream/sse-post`
-  exists and is proven on both hosts) and is NOT implemented in this namespace."
+  link in real time), `usage`, `done`. A network-backed client produces no
+  `text` deltas here: this loop buffers the whole HTTP response, and faking
+  deltas out of a buffered body would be a lie (real SSE streaming is a separate
+  seam, `koine.stream/sse-post`, NOT implemented in this namespace). An
+  in-process client built with `:generate-stream` — including a CLI client over
+  ACP — DOES: its `text` deltas (and `thought` / ACP tool narration) reach this
+  sink as the model emits them, before `done`."
   [client prompt {:keys [toolkit history on-event conversation-id cancel]}]
   ;; §8 `timeoutMs` is a WHOLE-RUN deadline, so it is stamped ONCE here and every
   ;; attempt in every turn is measured against that one instant.
   (let [client     (cond-> (with-deadline client)
                      ;; SPEC §4C: the run's cancel token, for wait-for-ctx and tools
-                     cancel (assoc ::cancel cancel))
+                     cancel (assoc ::cancel cancel)
+                     ;; an in-process :generate-stream emits into this sink
+                     on-event (assoc ::on-event on-event))
         anthropic? (= "anthropic" (:style client))
         system     (system-message client toolkit)
         ;; §0.7 schema comes from toolnexus.adapter — one source of truth for

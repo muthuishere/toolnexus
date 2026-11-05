@@ -39,6 +39,8 @@ fallback with the pinned errors, and a stdio bridge story (the Go CLI's `mcp-bri
 
 ## 5. Known per-port gaps (shipped, tracked)
 
-- [x] 5.1 Streaming never errors (all 8 ports, every style × both transports, tested); incremental only on Go ACP.
+- [x] 5.1 Streaming never errors (all 8 ports, every style × both transports, tested).
+- [ ] 5.4 Incremental streaming: in-process streaming generate + ACP thought/text/tool events, all 8 ports (js · python · golang · java · csharp · elixir · clojure · rust), conformance `stream` cases replayed in each.
+- [x] 5.5 One-shot CLI transport stays non-incremental for every style (envelope is content XOR tool_calls; documented, `stream.cliTransport`).
 - [ ] 5.2 Process groups: java, csharp, elixir, clojure kill the process tree instead; clojure's ACP close kills only the agent process (an `npx` adapter's children can outlive it).
 - [ ] 5.3 Live checks: Go (all), js + python (claude ACP+one-shot, opencode ACP); java/csharp/elixir/clojure/rust hermetic only.

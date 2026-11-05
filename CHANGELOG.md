@@ -57,10 +57,28 @@ your own login.
 - **Streaming a CLI client never errors** (consumer feedback, 2026-11-05: a host that streams every
   client had to special-case CLI clients). On every style and both transports, in all eight ports,
   `stream`/`askStream` run the turn and yield the loop's tool events, then the whole answer as one
-  text chunk, then done — a non-incremental stream, documented as such. Go's ACP transport still
-  streams incrementally. Tested for every style × both transports against the fakes.
+  text chunk, then done — a non-incremental stream, documented as such. Tested for every style ×
+  both transports against the fakes.
+- **A CLI client over ACP now streams for real, in all eight ports** — each `agent_message_chunk`
+  reaches your stream as its own text delta the moment the agent sends it, instead of the whole
+  answer arriving at the end. Live against Claude Code through the ACP adapter, counting to 30
+  arrived as 9 deltas, the first ~0.7 s before the end (Go; js: 6 deltas). The agent's reasoning
+  arrives as a new **`thought`** event (`via: "acp"`), and the tools the agent ran itself as
+  `tool_call`/`tool_result` with `via: "acp"` — reported, never executed by your loop, never part
+  of the answer. The one-shot CLI transport still sends the whole answer as one chunk for every
+  style: its reply is a JSON envelope that is either text or tool calls, and which one is known
+  only once it has fully arrived.
+- **Your own in-process model can stream** (all eight ports): give `createInProcessClient` a
+  streaming generate — `generateStream(req, emit)` (Go `GenerateStream`, python `generate_stream`,
+  elixir `:generate_stream`, clojure `:generate-stream`, …) — and `stream` yields each text you
+  `emit` as it happens. Before, only Go had this seam and every other port refused `stream` on an
+  in-process client. A plain `generate` still refuses to stream, loudly, because one chunk
+  pretending to be a stream is the bug it exists to prevent. Clojure has no stream API; there the
+  events go to `run`'s `:on-event` as they are emitted. Pinned in `conformance/cli-client/cases.json`
+  (`stream`) so that a buffered stream fails: the in-process case blocks the generate until the
+  consumer has seen each delta, the ACP case requires the first delta well before the end.
 
-Not done: incremental streaming is Go-ACP only; java, csharp, elixir and clojure have no process groups and kill the process tree instead
+Not done: the one-shot CLI transport does not stream incrementally (any style); java, csharp, elixir and clojure have no process groups and kill the process tree instead
 (clojure's ACP close kills only the agent process, so an `npx` adapter's children can outlive it);
 rust needs the `serve` feature for ACP (without it Auto always uses the one-shot CLI); java,
 csharp, elixir, clojure and rust are tested hermetically only, not against live agents; goose and

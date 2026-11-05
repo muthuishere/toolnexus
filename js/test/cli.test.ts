@@ -421,7 +421,7 @@ test("cli: conformance/cli-client/cases.json replay", () => {
   assert.equal(renderCliPrompt([], []), fx.renderEmpty.replace("<PREAMBLE>", CLI_PREAMBLE))
 })
 
-test("cli: ACP streams non-incrementally (text with the answer, then done)", async () => {
+test("cli: ACP streams (text with the answer, then done)", async () => {
   const { o } = await fakeACPOpts({ FAKE_HTTP: "1" })
   const c = createCliClient(o)
   try {
@@ -459,5 +459,42 @@ test("cli: stream every style over both transports without error", async () => {
         await c.close()
       }
     }
+  }
+})
+
+// conformance/cli-client/cases.json stream.acpDrip — ACP streaming is incremental.
+test("cli: ACP stream is incremental (acpDrip)", async () => {
+  const fx = JSON.parse(fs.readFileSync(path.join(ROOT, "conformance/cli-client/cases.json"), "utf8")).stream.acpDrip
+  const { o } = await fakeACPOpts({ FAKE_HTTP: "1", ...fx.fakeEnv })
+  const c = createCliClient({ ...o, transport: CliTransports.ACP })
+  try {
+    const deltas: string[] = []
+    const thoughts: any[] = []
+    let firstDelta = -1
+    let doneAt = -1
+    let doneText = ""
+    for await (const ev of c.stream("drip please", { toolkit: o.toolkit })) {
+      const e = ev as any
+      if (e.type === "error") assert.fail(`stream must not error: ${e.error?.message ?? e.error}`)
+      if (e.type === "text") {
+        if (firstDelta < 0) firstDelta = performance.now()
+        deltas.push(e.delta)
+      }
+      if (e.type === "thought") thoughts.push(e)
+      if (e.type === "done") {
+        doneAt = performance.now()
+        doneText = e.result.text
+      }
+    }
+    assert.equal(c.transport(), "acp", c.fallbackReason())
+    assert.deepEqual(deltas, fx.chunks)
+    assert.equal(thoughts.length, 1)
+    assert.deepEqual({ type: thoughts[0].type, delta: thoughts[0].delta, via: thoughts[0].via }, fx.expectThought)
+    assert.equal(doneText, fx.expectDoneText)
+    assert.ok(doneAt - firstDelta >= fx.minLeadMs, `first delta led done by only ${doneAt - firstDelta}ms`)
+    const r = await c.run("drip again", { toolkit: o.toolkit })
+    assert.equal(r.text, fx.expectDoneText)
+  } finally {
+    await c.close()
   }
 })

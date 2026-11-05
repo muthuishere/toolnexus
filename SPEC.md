@@ -1895,6 +1895,8 @@ the thread's transcript is loaded as history before the stream, and saved back t
 `ConversationStore` when the `done` event fires (§ Conversation memory). No `id` ⇒ stateless.
 
 - `{ type: "text", delta }` — assistant text token deltas
+- `{ type: "thought", delta, via }` — the agent's reasoning text, only from an in-process stream
+  source (ACP `agent_thought_chunk`, `via:"acp"`); never part of the answer or `RunResult.text`
 - `{ type: "tool_call", id, name, args }` — a tool about to run
 - `{ type: "tool_result", id, name, output, isError }` — after it ran
 - `{ type: "usage", usage }` — token usage
@@ -1915,13 +1917,28 @@ the host. `generate(request) -> { content } | { toolCalls }` returns exactly one
 encodes tool arguments unless already a string. Tool calls cross flat: `{id?, name, arguments}`.
 
 Messages are always **OpenAI-shaped** (there is no wire to be neutral about). Failures are **final
-by default** — no wire means no transient failure to retry. The streaming path **raises**, because a
-`generate` returns a whole answer and a single-chunk stream is indistinguishable from a real one by
-content or delta count; the exception is Clojure, which has no streaming entry point to refuse from.
+by default** — no wire means no transient failure to retry. With only a plain `generate`, the
+streaming path **raises**, because a `generate` returns a whole answer and a single-chunk stream is
+indistinguishable from a real one by content or delta count; the exception is Clojure, which has no
+streaming entry point to refuse from.
+
+**Streaming generate (all eight ports).** The host MAY instead (or also) supply a streaming generate
+— Go `GenerateStream(ctx, req, emit)`, js `generateStream(req, emit)`, python
+`generate_stream(req, emit)`, java/C# `GenerateStream`, elixir `:generate_stream`, clojure
+`:generate-stream`, rust builder — that reports the turn as it happens through `emit(event)` and
+returns the same response as `generate`. With it, the client streams for real: each non-empty
+`text` event becomes a text delta **as it is emitted** (never buffered to the end of the turn);
+every other event (`thought`, `tool_call`, `tool_result`) goes straight to the stream consumer and
+is **never executed** by the loop. When the generate returns, returned tool calls are executed as
+usual; returned `content` is emitted as one delta only if no text was emitted; then usage and
+`done`. A non-streaming call with only a streaming generate calls it with a no-op `emit`. Clojure has
+no stream entry point: its `run` forwards the events to `:on-event` as they are emitted.
+Conformance: `conformance/cli-client/cases.json` `stream.inProcess` — the generate blocks after each
+delta until the consumer has received it, so a buffering implementation deadlocks and fails.
 The injectable transport (Gap 2) is unchanged and remains the answer for proxy, mTLS and
 record-replay — this is a second constructor over it, not a second seam.
 
-#### ACP model source — host hooks (golang-first; other ports pending, `openspec/changes/add-go-host-asks`)
+#### ACP model source — host hooks (golang-first; other ports pending, `openspec/changes/add-go-host-asks`; streaming: all eight ports)
 
 An ACP source (one warm `session/prompt` per turn over a child agent; ADR 0031) MAY take three
 opt-in hooks. With none set its behaviour is unchanged: `session/request_permission` is answered
@@ -1935,12 +1952,13 @@ with the first allow-kind option, and only `agent_message_chunk` text forms the 
 - **Cancellation** — a ctx-taking generate sends the `session/cancel` *notification* (no id) when
   its context is cancelled, waits up to the request timeout for the turn's reply, and returns the
   cancellation error. The process and session stay warm.
-- **Streaming** — a streaming generate emits `agent_message_chunk` → `{type:"text", delta}`,
+- **Streaming (all eight ports)** — a streaming generate emits, as each `session/update` is read,
+  `agent_message_chunk` → `{type:"text", delta}`, `agent_thought_chunk` → `{type:"thought", delta, via:"acp"}`,
   `tool_call` → `{type:"tool_call", id, name: title, args: rawInput, via:"acp"}`, and a
   `completed`/`failed` `tool_call_update` → `{type:"tool_result", id, name, output, isError, via:"acp"}`.
-  An in-process client given a streaming generate (Go: `InProcessOptions.GenerateStream`) streams
-  instead of refusing: text events become the stream's text deltas, other events pass straight to
-  the consumer and are **never executed** by the loop (the agent already ran them).
+  An in-process client given a streaming generate streams instead of refusing: text events become
+  the stream's text deltas, other events pass straight to the consumer and are **never executed** by
+  the loop (the agent already ran them).
 
 ### Resilience (retries + timeout/cancel)
 
@@ -2674,8 +2692,8 @@ Idiom (behaviour identical; constructor and method spelling follow each port):
 `createCliClient({ style, command, model?, transport?, toolkit?, acpCommand?, bridgeCommand?,
 args?, prompt?, answer?, env?, callTimeoutMs?, cwd?, …every in-process client option })` returns an
 ordinary client (§8, built on the in-process seam) plus `close()` and `transport()`. Status: **all
-eight ports**. Streaming never errors: Go streams ACP incrementally; every other case is a non-incremental
-stream (see below). Ports without process groups (java, csharp, elixir, clojure) kill the process tree.
+eight ports**. Streaming never errors: the ACP transport streams incrementally in every port; the
+one-shot CLI transport is a non-incremental stream for every style (see below). Ports without process groups (java, csharp, elixir, clojure) kill the process tree.
 
 - **`style`** is a closed enum, never a string: `CliStyles.Claude | Codex | Copilot | Opencode |
   Devin | Gemini | Goose | Custom` (Go: typed `CliStyle` values on a `CliStyles` struct; TS/Java/
@@ -2723,6 +2741,11 @@ stream (see below). Ports without process groups (java, csharp, elixir, clojure)
    `"\n\n" + hint` (a system message holding only the hint is prepended when there is none); the
    caller's messages are not mutated. Built-in: devin, whose MCP tools sit behind a lookup tool. The agent runs the tools, so `beforeTool`/`afterTool` run at the server boundary;
    `usage` is zero.
+   **Streaming:** the ACP session's streaming generate is the in-process client's streaming seam, so
+   `stream`/`askStream` over ACP yield each `agent_message_chunk` as a text delta as it arrives,
+   `thought`/`tool_call`/`tool_result` (`via:"acp"`) events alongside, then `done`. Conformance:
+   `cases.json` `stream.acpDrip` (three chunks 200 ms apart; the first delta must land ≥ 300 ms
+   before `done`).
 7. `close()` ends the agent's process group, stops the server, removes the temp dir.
 
 ### One-shot CLI transport — our envelope
@@ -2735,7 +2758,7 @@ stream (see below). Ports without process groups (java, csharp, elixir, clojure)
   the span first `{`…last `}` (trailing text after a complete object is a failure); unwrap
   `choices[0].message` or `message`; non-empty `tool_calls` (flat or `{function:{}}`, string or object
   `arguments`) win; else `content`; anything else ⇒ the raw text as content.
-- Tool calls run in the toolnexus loop (hooks, MCP, skills, suspension all apply). Streaming is not refused: `stream`/`askStream` run the turn normally and emit a **non-incremental** stream — the loop's `tool_call`/`tool_result` events as they happen, the whole answer as one `text` chunk, then `done` (a `usage` event, zero, may precede `done`). Same on the ACP transport in ports whose ACP client does not stream incrementally (all but Go).
+- Tool calls run in the toolnexus loop (hooks, MCP, skills, suspension all apply). Streaming is not refused: `stream`/`askStream` run the turn normally and emit a **non-incremental** stream — the loop's `tool_call`/`tool_result` events as they happen, the whole answer as one `text` chunk, then `done` (a `usage` event, zero, may precede `done`). This holds for **every style** (claude, codex, copilot, opencode, devin, gemini, goose, custom): the reply is the envelope — content *or* tool calls — and which one it is is known only once the whole reply has parsed, so emitting text early could emit a tool call as prose. Even claude's `--output-format stream-json` would stream the envelope's JSON text, not the answer. Pinned as `cases.json` `stream.cliTransport`.
 - Pinned errors: `cli: command not found: <bin>` · `cli: exit <code>: <stderr, ≤1000 code points>`
   (`cli: exit <code>` when stderr is empty) · `cli: empty reply` · `cli: no output file` ·
   `cli: timed out after <ms>ms`. Temp files are removed on every path.

@@ -394,6 +394,42 @@ class CliClientTest {
         assertTrue(text.toString().contains("BADGE-77Q") && text.toString().contains("Hello"), text.toString());
     }
 
+    /** conformance/cli-client/cases.json "stream.acpDrip": ACP streaming is incremental. */
+    @Test
+    @SuppressWarnings("unchecked")
+    void acpStreamsIncrementally() throws IOException {
+        Path file = Path.of(TestFixtures.fixture("")).getParent().resolve("conformance/cli-client/cases.json");
+        Map<String, Object> d = (Map<String, Object>) ((Map<String, Object>) Json.toMap(Files.readString(file))
+                .get("stream")).get("acpDrip");
+        CliClient.Options o = fakeAcpOpts((Map<String, String>) d.get("fakeEnv")).opts().transport(CliTransports.ACP);
+        CliClient c = client(o);
+        List<String> deltas = new ArrayList<>();
+        List<Map<String, Object>> thoughts = new ArrayList<>();
+        long[] firstText = {0}, doneAt = {0};
+        String[] doneText = {null};
+        c.stream("drip?", null, ev -> {
+            switch (ev.type()) {
+                case TEXT -> {
+                    if (deltas.isEmpty()) firstText[0] = System.nanoTime();
+                    deltas.add(ev.delta());
+                }
+                case THOUGHT -> thoughts.add(Map.of("type", "thought", "delta", ev.delta(), "via", ev.via()));
+                case DONE -> {
+                    doneAt[0] = System.nanoTime();
+                    doneText[0] = ev.result().text;
+                }
+                default -> { }
+            }
+        });
+        assertEquals(d.get("chunks"), deltas);
+        assertEquals(List.of(d.get("expectThought")), thoughts);
+        assertEquals(d.get("expectDoneText"), doneText[0]);
+        long leadMs = (doneAt[0] - firstText[0]) / 1_000_000;
+        assertTrue(leadMs >= ((Number) d.get("minLeadMs")).longValue(),
+                "first text delta must land well before done (stream not incremental): lead " + leadMs + "ms");
+        assertEquals(d.get("expectDoneText"), c.run("drip?").text);
+    }
+
     @Test
     void acpProjectMcpFile() throws Exception {
         Acp a = fakeAcpOpts(Map.of("FAKE_HTTP", "0", "FAKE_PROJECT", "1"));

@@ -357,6 +357,10 @@ async fn generate_stream_emits_text_and_agent_tool_events_via_acp() {
     assert_eq!(
         events,
         vec![
+            AcpStreamEvent::Thought {
+                delta: "hmm".into(),
+                via: "acp"
+            },
             AcpStreamEvent::ToolCall {
                 id: "t1".into(),
                 name: "Read file".into(),
@@ -387,7 +391,7 @@ async fn generate_stream_emits_text_and_agent_tool_events_via_acp() {
                 delta: "done".into()
             },
         ],
-        "thoughts and in-progress updates are not emitted"
+        "thoughts are emitted; in-progress updates are not"
     );
     c.close().await;
 }

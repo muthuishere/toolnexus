@@ -13,17 +13,18 @@ defmodule Toolnexus.Cli.Server do
   alias Toolnexus.Cli.AcpSession
 
   @doc false
-  def generate(server, cfg, req) do
+  def generate(server, cfg, req, emit \\ nil) do
     case GenServer.call(server, :session, :infinity) do
       {:error, msg} ->
         raise RuntimeError, msg
 
       {:acp, sess} ->
-        case AcpSession.generate(sess, req) do
+        case AcpSession.generate(sess, req, emit) do
           {:ok, answer} -> answer
           {:error, msg} -> raise RuntimeError, msg
         end
 
+      # The one-shot transport ignores `emit`: the whole answer is one chunk.
       :cli ->
         prompt = Cli.render_prompt(req[:messages], req[:tools])
 

@@ -115,6 +115,8 @@ pub type UpdateHandler = Arc<dyn Fn(&Value) + Send + Sync>;
 pub enum AcpStreamEvent {
     /// A reply text delta (`agent_message_chunk` only).
     Text { delta: String },
+    /// An agent thought delta (`agent_thought_chunk`). Never part of the reply text.
+    Thought { delta: String, via: &'static str },
     ToolCall {
         id: String,
         name: String,
@@ -653,8 +655,10 @@ impl AcpClient {
     /// [`generate_cancellable`](Self::generate_cancellable) that also reports
     /// the turn as it happens: message chunks as [`AcpStreamEvent::Text`], the
     /// agent's own tool calls as `ToolCall` / `ToolResult` (on a
-    /// `tool_call_update` with status `completed` or `failed`), all `via: "acp"`.
-    /// Thoughts and plans are not emitted (observe them with `on_update`).
+    /// `tool_call_update` with status `completed` or `failed`), thought chunks as
+    /// [`AcpStreamEvent::Thought`], all `via: "acp"`. Each event is emitted as its
+    /// `session/update` arrives, not after the turn. Plans are not emitted
+    /// (observe them with `on_update`).
     pub async fn generate_stream<F>(
         &self,
         messages: &[(String, String)],
@@ -693,6 +697,14 @@ impl AcpClient {
                     if let Some(t) = u.text().filter(|t| !t.is_empty()) {
                         emit(AcpStreamEvent::Text {
                             delta: t.to_owned(),
+                        });
+                    }
+                }
+                "agent_thought_chunk" => {
+                    if let Some(t) = u.text().filter(|t| !t.is_empty()) {
+                        emit(AcpStreamEvent::Thought {
+                            delta: t.to_owned(),
+                            via: "acp",
                         });
                     }
                 }

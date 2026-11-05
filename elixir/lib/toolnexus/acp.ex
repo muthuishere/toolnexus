@@ -17,7 +17,9 @@ defmodule Toolnexus.Acp do
     * Only `agent_message_chunk` `session/update` notifications are
       accumulated into the reply — `agent_thought_chunk` and tool-call
       narration are dropped, or they wrap prose around structured output and
-      break JSON parsing outright.
+      break JSON parsing outright. `generate_stream/1` REPORTS them as they
+      arrive (thought, tool_call, tool_result events tagged `via: "acp"`), but
+      they never become part of the answer.
     * Responses to OUR calls and `session/update` notifications interleave on
       the same stream, so replies are demultiplexed by JSON-RPC id.
     * `session/request_permission` is answered INLINE, from the read loop,
@@ -110,10 +112,36 @@ defmodule Toolnexus.Acp do
   """
   @spec generate(pid()) :: (map() -> map())
   def generate(pid) do
-    fn req ->
+    stream = generate_stream(pid)
+    fn req -> stream.(req, nil) end
+  end
+
+  @doc """
+  The streaming form of `generate/1`: a `(req, emit) -> map()` function in the
+  shape `Toolnexus.Client.create_in_process/1`'s `:generate_stream` accepts.
+
+      client =
+        Toolnexus.Client.create_in_process(model: "devin", generate_stream: Toolnexus.Acp.generate_stream(acp))
+
+  `emit` is called from the session's read loop AS EACH `session/update`
+  arrives — not after the turn:
+
+    * `agent_message_chunk` ⇒ `%{type: "text", delta: text}`
+    * `agent_thought_chunk` ⇒ `%{type: "thought", delta: text, via: "acp"}` —
+      reported, never part of the answer
+    * `tool_call` ⇒ `%{type: "tool_call", id:, name: title, args: rawInput, via: "acp"}`
+    * a `completed`/`failed` `tool_call_update` ⇒
+      `%{type: "tool_result", id:, name:, output:, is_error:, via: "acp"}`
+
+  The agent's own tool calls are reports — the loop never executes them. A
+  `nil` emit is the non-streaming `generate/1`.
+  """
+  @spec generate_stream(pid()) :: (map(), (map() -> any()) | nil -> map())
+  def generate_stream(pid) do
+    fn req, emit ->
       text = assemble_prompt_text(Map.get(req, :messages) || Map.get(req, "messages") || [])
 
-      case prompt(pid, text) do
+      case prompt(pid, text, :infinity, emit) do
         {:ok, answer} ->
           %{content: answer}
 
@@ -127,11 +155,13 @@ defmodule Toolnexus.Acp do
   Send one turn's FULL prompt text and wait for the accumulated
   `agent_message_chunk` reply. Turns on the same session are serialised.
   Exposed as the lower-level primitive `generate/1` builds on; most callers
-  should use `generate/1`.
+  should use `generate/1`. `emit` (optional) receives the turn's stream events
+  as they arrive — see `generate_stream/1`.
   """
-  @spec prompt(pid(), String.t(), timeout()) :: {:ok, String.t()} | {:error, term()}
-  def prompt(pid, text, timeout \\ :infinity) do
-    GenServer.call(pid, {:prompt, text}, timeout)
+  @spec prompt(pid(), String.t(), timeout(), (map() -> any()) | nil) ::
+          {:ok, String.t()} | {:error, term()}
+  def prompt(pid, text, timeout \\ :infinity, emit \\ nil) do
+    GenServer.call(pid, {:prompt, text, emit}, timeout)
   catch
     :exit, reason -> {:error, {:acp_exit, exit_brief(reason)}}
   end
@@ -220,6 +250,8 @@ defmodule Toolnexus.Acp do
                active_from: nil,
                active_id: nil,
                chunks: [],
+               emit: nil,
+               tool_names: %{},
                queue: :queue.new(),
                timeout: timeout,
                closed: false
@@ -399,18 +431,18 @@ defmodule Toolnexus.Acp do
   # -- turn serialisation -----------------------------------------------------
 
   @impl true
-  def handle_call({:prompt, _text}, _from, %{closed: true} = state) do
+  def handle_call({:prompt, _text, _emit}, _from, %{closed: true} = state) do
     {:reply, {:error, :closed}, state}
   end
 
-  def handle_call({:prompt, text}, from, %{active_from: nil} = state) do
-    {:noreply, start_prompt(state, text, from)}
+  def handle_call({:prompt, text, emit}, from, %{active_from: nil} = state) do
+    {:noreply, start_prompt(state, {text, emit}, from)}
   end
 
-  def handle_call({:prompt, text}, from, state) do
+  def handle_call({:prompt, text, emit}, from, state) do
     # A prior turn on this session is still in flight — one ACP session is
     # one conversation, so this turn is queued rather than interleaved.
-    {:noreply, %{state | queue: :queue.in({text, from}, state.queue)}}
+    {:noreply, %{state | queue: :queue.in({{text, emit}, from}, state.queue)}}
   end
 
   def handle_call(:info, _from, state) do
@@ -421,7 +453,7 @@ defmodule Toolnexus.Acp do
     {:stop, :normal, :ok, state}
   end
 
-  defp start_prompt(state, text, from) do
+  defp start_prompt(state, {text, emit}, from) do
     id = "p-#{state.next_id}"
 
     Stdio.send_msg(state.stdio, %{
@@ -434,7 +466,15 @@ defmodule Toolnexus.Acp do
       }
     })
 
-    %{state | next_id: state.next_id + 1, active_from: from, active_id: id, chunks: []}
+    %{
+      state
+      | next_id: state.next_id + 1,
+        active_from: from,
+        active_id: id,
+        chunks: [],
+        emit: emit,
+        tool_names: %{}
+    }
   end
 
   # -- inbound routing ----------------------------------------------------------
@@ -496,11 +536,78 @@ defmodule Toolnexus.Acp do
   defp route(_msg, state), do: state
 
   defp accumulate(state, %{"update" => %{"sessionUpdate" => "agent_message_chunk"} = update}) do
-    text = get_in(update, ["content", "text"]) || ""
+    text = update_text(update)
+    if text != "", do: emit_event(state, %{type: "text", delta: text})
     %{state | chunks: [text | state.chunks]}
   end
 
+  # Reported, never part of the answer.
+  defp accumulate(state, %{"update" => %{"sessionUpdate" => "agent_thought_chunk"} = update}) do
+    text = update_text(update)
+    if text != "", do: emit_event(state, %{type: "thought", delta: text, via: "acp"})
+    state
+  end
+
+  defp accumulate(state, %{"update" => %{"sessionUpdate" => "tool_call"} = u}) do
+    id = u["toolCallId"]
+    name = if u["title"] in [nil, ""], do: u["kind"] || "", else: u["title"]
+
+    emit_event(state, %{
+      type: "tool_call",
+      id: id,
+      name: name,
+      args: if(is_map(u["rawInput"]), do: u["rawInput"], else: %{}),
+      via: "acp"
+    })
+
+    %{state | tool_names: Map.put(state.tool_names, id, name)}
+  end
+
+  defp accumulate(
+         %{emit: emit} = state,
+         %{"update" => %{"sessionUpdate" => "tool_call_update", "status" => status} = u}
+       )
+       when is_function(emit, 1) and status in ["completed", "failed"] do
+    id = u["toolCallId"]
+    name = if u["title"] in [nil, ""], do: Map.get(state.tool_names, id, ""), else: u["title"]
+
+    emit_event(state, %{
+      type: "tool_result",
+      id: id,
+      name: name,
+      output: tool_content_text(u["content"]),
+      is_error: status == "failed",
+      via: "acp"
+    })
+
+    state
+  end
+
   defp accumulate(state, _params), do: state
+
+  defp update_text(update) do
+    case update["content"] do
+      %{"text" => t} when is_binary(t) -> t
+      _ -> ""
+    end
+  end
+
+  defp tool_content_text(parts) when is_list(parts) do
+    Enum.map_join(parts, fn
+      %{"content" => %{"text" => t}} when is_binary(t) -> t
+      _ -> ""
+    end)
+  end
+
+  defp tool_content_text(_), do: ""
+
+  defp emit_event(%{emit: emit}, ev) when is_function(emit, 1) do
+    emit.(ev)
+  rescue
+    _ -> :ok
+  end
+
+  defp emit_event(_state, _ev), do: :ok
 
   defp answer_permission(%{stdio: stdio, on_permission: decide}, id, params) do
     options = params["options"] || []
@@ -542,7 +649,7 @@ defmodule Toolnexus.Acp do
 
   defp finish_active(state, outcome) do
     if state.active_from, do: GenServer.reply(state.active_from, outcome)
-    state = %{state | active_from: nil, active_id: nil, chunks: []}
+    state = %{state | active_from: nil, active_id: nil, chunks: [], emit: nil, tool_names: %{}}
     dequeue_next(state)
   end
 
@@ -560,7 +667,7 @@ defmodule Toolnexus.Acp do
     |> :queue.to_list()
     |> Enum.each(fn {_text, from} -> GenServer.reply(from, {:error, reason}) end)
 
-    %{state | active_from: nil, active_id: nil, queue: :queue.new()}
+    %{state | active_from: nil, active_id: nil, emit: nil, queue: :queue.new()}
   end
 
   @impl true

@@ -36,6 +36,7 @@ import {
   type InProcessRequest,
   type InProcessResponse,
   type InProcessToolCall,
+  type StreamEvent,
 } from "./client.js"
 import type { Toolkit } from "./toolkit.js"
 import type { Tool, ToolResult } from "./types.js"
@@ -220,10 +221,13 @@ export class CliClient extends Client {
     const cliFetch: typeof fetch = async (url, init) => {
       const body = JSON.parse(String((init as any)?.body ?? "{}"))
       if (body.stream) {
-        // SPEC §8C: neither transport streams incrementally here, so a stream degrades
-        // instead of erroring — run the turn whole and replay it as one SSE chunk. The
-        // loop then emits its usual tool_call / tool_result events, the answer as ONE
-        // text event, and done.
+        // SPEC §8C: over ACP, a stream is incremental (text, thought and the agent's own
+        // tool events as they arrive).
+        const s = await self!.session()
+        if (s) return createInProcessFetch(undefined, (req, emit) => s.generate(req, emit))(url, init)
+        // The one-shot CLI does not stream incrementally, so a stream degrades instead of
+        // erroring — run the turn whole and replay it as one SSE chunk. The loop then emits
+        // its usual tool_call / tool_result events, the answer as ONE text event, and done.
         delete body.stream
         delete body.stream_options
         const res = await inner(url, { ...(init as any), body: JSON.stringify(body) })
@@ -617,7 +621,7 @@ interface CliACPSession {
   tempDir: string
   log: CliPermissionDecision[]
   ran: string[]
-  generate(req: InProcessRequest): Promise<InProcessResponse>
+  generate(req: InProcessRequest, emit?: (event: StreamEvent) => void): Promise<InProcessResponse>
   close(): Promise<void>
 }
 
@@ -732,9 +736,9 @@ async function openCliACPSession(cli: CliState): Promise<CliACPSession> {
     log,
     ran,
     close,
-    async generate(req) {
+    async generate(req, emit) {
       try {
-        return await acp.generate({ ...req, messages: cliWithSystemHint(req.messages, hint) })
+        return await acp.generateStream({ ...req, messages: cliWithSystemHint(req.messages, hint) }, emit ?? (() => {}))
       } catch (e) {
         const m = (e as Error).message
         if (/^toolnexus: ACP turn timed out/.test(m)) throw new Error(`cli: timed out after ${cli.timeout}ms`)

@@ -189,9 +189,12 @@ logged), `:call-timeout-ms` (default 300000), `:cwd`, `:transport` (`:auto` `:ac
 `:toolkit`, `:acp-command`, `:bridge-command`, `:on-acp-update`, plus every
 `create-in-process-client` option. `:model` is passed to the CLI unchanged.
 
-Streaming: this port has no streaming entry point (`:on-event` is a sink on the non-streaming
-loop), and a model request carrying `{:stream true}` is answered whole on both transports — a
-CLI client never refuses to stream. Known gaps in this port: a
+Streaming: this port has no separate streaming entry point — `run`'s `:on-event` sink is the
+event channel. Over the ACP transport the agent's text arrives there as incremental `text`
+deltas as it is produced (plus `thought` and ACP `tool_call`/`tool_result` events, `:via "acp"`);
+the one-shot CLI transport delivers the whole answer as one `text` event. A CLI client never
+refuses to stream. Any in-process model can do the same: `create-in-process-client` takes
+`:generate-stream (fn [req emit] ...)`. Known gaps in this port: a
 timeout kills the whole process tree of a one-shot call, found through `ps`. Closing an ACP
 agent kills only the agent process, because koine exposes no process groups.
 

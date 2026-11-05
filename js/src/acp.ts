@@ -35,7 +35,7 @@
 import { spawn } from "node:child_process"
 import { createInterface } from "node:readline"
 import path from "node:path"
-import type { InProcessRequest, InProcessResponse } from "./client.js"
+import type { InProcessRequest, InProcessResponse, StreamEvent } from "./client.js"
 
 /** Options for {@link loadACP}. `command`/`args` spawn the ACP agent as a child
  *  process; everything else tunes the session handshake. */
@@ -115,6 +115,13 @@ export function acpServerWire(s: ACPMCPServer, httpOK: boolean): Record<string, 
  *  wants, so it plugs straight into {@link createInProcessClient}. */
 export interface ACPClient {
   generate: (request: InProcessRequest) => Promise<InProcessResponse>
+  /** {@link generate}, streaming: `emit` fires as each `session/update` arrives —
+   *  agent_message_chunk → `text`, agent_thought_chunk → `thought` (via "acp"),
+   *  tool_call → `tool_call` and a completed/failed tool_call_update → `tool_result`
+   *  (both via "acp": the agent's own tools, reported, never executed by the loop).
+   *  Shaped for {@link InProcessOptions.generateStream}. The returned content is the
+   *  message text only. */
+  generateStream: (request: InProcessRequest, emit: (event: StreamEvent) => void) => Promise<InProcessResponse>
   /** Terminates the agent's process group. Idempotent — a second call is a no-op. */
   close: () => Promise<void>
   /** The exact `mcpServers` list sent in `session/new`. */
@@ -398,19 +405,57 @@ export async function loadACP(opts: ACPOptions): Promise<ACPClient> {
   // queue itself never rejects (a failed turn does not poison later ones).
   let turnQueue: Promise<unknown> = Promise.resolve()
 
-  async function promptOnce(request: InProcessRequest): Promise<InProcessResponse> {
+  async function promptOnce(request: InProcessRequest, emit?: (event: StreamEvent) => void): Promise<InProcessResponse> {
     const text = renderPrompt(request)
     const id = `c-${++nextId}`
 
     let content = ""
-    updateSink = (params: any) => {
-      const update = params?.update
-      if (update?.sessionUpdate === "agent_message_chunk") {
-        content += update?.content?.text ?? ""
+    const toolNames = new Map<string, string>()
+    const send = (ev: StreamEvent) => {
+      try {
+        emit?.(ev)
+      } catch {
+        // a consumer never breaks the session
       }
-      // agent_thought_chunk and tool_call/tool_call_update narration are
-      // deliberately dropped — mixing them into the reply corrupts
-      // structured output a caller expects to parse.
+    }
+    // Runs from the stdout read loop, so every event is emitted the moment its
+    // notification is processed — never buffered to the end of the turn.
+    updateSink = (params: any) => {
+      const u = params?.update
+      switch (u?.sessionUpdate) {
+        case "agent_message_chunk": {
+          const t: string = u?.content?.text ?? ""
+          content += t
+          if (t) send({ type: "text", delta: t })
+          break
+        }
+        // Thought and tool narration never reach the content — mixing them into
+        // the reply corrupts structured output a caller expects to parse.
+        case "agent_thought_chunk": {
+          const t: string = u?.content?.text ?? ""
+          if (t) send({ type: "thought", delta: t, via: "acp" })
+          break
+        }
+        case "tool_call": {
+          const name: string = u.title || u.kind || ""
+          toolNames.set(u.toolCallId ?? "", name)
+          send({ type: "tool_call", id: u.toolCallId ?? "", name, args: u.rawInput ?? {}, via: "acp" })
+          break
+        }
+        case "tool_call_update": {
+          if (u.status !== "completed" && u.status !== "failed") break
+          const name: string = u.title || toolNames.get(u.toolCallId ?? "") || ""
+          send({
+            type: "tool_result",
+            id: u.toolCallId ?? "",
+            name,
+            output: acpToolContentText(u.content),
+            isError: u.status === "failed",
+            via: "acp",
+          })
+          break
+        }
+      }
     }
 
     if (exited) throw new Error(exitMessage("session/prompt"))
@@ -437,9 +482,9 @@ export async function loadACP(opts: ACPOptions): Promise<ACPClient> {
     }
   }
 
-  const generate = (request: InProcessRequest): Promise<InProcessResponse> => {
+  const generateStream = (request: InProcessRequest, emit?: (event: StreamEvent) => void): Promise<InProcessResponse> => {
     if (closed) return Promise.reject(new Error("toolnexus: ACP client is closed"))
-    const turn = turnQueue.then(() => promptOnce(request))
+    const turn = turnQueue.then(() => promptOnce(request, emit))
     turnQueue = turn.then(
       () => undefined,
       () => undefined,
@@ -463,9 +508,11 @@ export async function loadACP(opts: ACPOptions): Promise<ACPClient> {
     if (t === "late") await Promise.race([childGone, new Promise((r) => setTimeout(r, 1000).unref())])
   }
 
-  const client: ACPClient = { generate, close, mcpServersSent, initializeResult }
+  const generate = (request: InProcessRequest): Promise<InProcessResponse> => generateStream(request)
+
+  const client: ACPClient = { generate, generateStream, close, mcpServersSent, initializeResult }
   // Non-enumerable, undocumented — internal test hook only, so the public
-  // ACPClient surface stays exactly {generate, close}.
+  // ACPClient surface stays exactly {generate, generateStream, close}.
   Object.defineProperty(client, "_pid", { value: child.pid, enumerable: false })
   return client
 }
@@ -485,4 +532,10 @@ export function killGroup(pid: number, signal: NodeJS.Signals): void {
   } catch {
     // already gone
   }
+}
+
+/** Joins the text of an ACP tool_call_update's `content` array ({content:{text}} parts). */
+function acpToolContentText(content: any): string {
+  if (!Array.isArray(content)) return ""
+  return content.map((p: any) => (typeof p?.content?.text === "string" ? p.content.text : "")).join("")
 }

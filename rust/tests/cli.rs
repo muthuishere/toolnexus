@@ -759,4 +759,68 @@ mod acp {
         assert_eq!(r.status().as_u16(), 405);
         c.close().await;
     }
+
+    /// conformance/cli-client/cases.json `stream.acpDrip`: the ACP transport
+    /// streams incrementally — each chunk as it arrives, a thought event, and
+    /// the first delta well before done.
+    #[tokio::test]
+    async fn acp_stream_is_incremental() {
+        let cases: Value = serde_json::from_str(
+            &std::fs::read_to_string("../conformance/cli-client/cases.json").unwrap(),
+        )
+        .unwrap();
+        let d = &cases["stream"]["acpDrip"];
+        let env: Vec<(String, String)> = d["fakeEnv"]
+            .as_object()
+            .unwrap()
+            .iter()
+            .map(|(k, v)| (k.clone(), v.as_str().unwrap().to_owned()))
+            .collect();
+        let env_ref: Vec<(&str, &str)> =
+            env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        let (o, _) = fake_acp_opts(&env_ref).await;
+        let tk = empty_toolkit().await;
+        let c = create_cli_client(o).unwrap();
+        let start = std::time::Instant::now();
+        let mut rx = c.stream("drip please", &tk).unwrap();
+        let (mut deltas, mut thoughts, mut first, mut done) =
+            (Vec::<String>::new(), Vec::new(), None, None);
+        while let Some(ev) = rx.recv().await {
+            match ev.kind.as_str() {
+                "text" => {
+                    first.get_or_insert_with(|| start.elapsed());
+                    deltas.push(ev.delta.clone());
+                }
+                "thought" => thoughts.push((ev.delta.clone(), ev.via.clone())),
+                "done" => done = Some((start.elapsed(), ev.result.unwrap().text)),
+                "error" => panic!("{:?}", ev.error),
+                _ => {}
+            }
+        }
+        let want: Vec<String> = d["chunks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(deltas, want);
+        let t = &d["expectThought"];
+        assert_eq!(
+            thoughts,
+            vec![(
+                t["delta"].as_str().unwrap().to_owned(),
+                t["via"].as_str().unwrap().to_owned()
+            )]
+        );
+        let (done_at, text) = done.expect("done");
+        assert_eq!(text, d["expectDoneText"].as_str().unwrap());
+        let lead = done_at - first.unwrap();
+        assert!(
+            lead.as_millis() as u64 >= d["minLeadMs"].as_u64().unwrap(),
+            "first delta only {lead:?} before done: stream not incremental"
+        );
+        let res = c.run("again", &tk).await.unwrap();
+        assert_eq!(res.text, d["expectDoneText"].as_str().unwrap());
+        c.close().await;
+    }
 }

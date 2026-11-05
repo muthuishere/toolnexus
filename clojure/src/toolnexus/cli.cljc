@@ -339,13 +339,17 @@
                 (throw e))
               (do (swap! st assoc :acp (:ok r) :chosen :acp) (:ok r)))))))))
 
-(defn- generate [c req]
-  (if-let [s (session! c)]
-    (cli-acp/generate s req)
-    ;; SPEC §8C: a CLI client never refuses to stream. A request that asks for
-    ;; one (:body {:stream true}) is answered whole — one non-incremental reply —
-    ;; on the one-shot transport and on ACP alike.
-    (parse-cli-reply (invoke c (render-cli-prompt (:messages req) (:tools req))))))
+(defn- generate
+  ([c req] (generate c req nil))
+  ([c req emit]
+   (if-let [s (session! c)]
+     ;; ACP: the session's events reach `emit` (the run's :on-event sink, via
+     ;; :generate-stream) as each session/update arrives — incremental.
+     (cli-acp/generate s req emit)
+     ;; SPEC §8C: a CLI client never refuses to stream. The one-shot transport
+     ;; ignores `emit`: its reply is the JSON envelope (content OR tool_calls),
+     ;; known only once whole, so the loop reports it as one answer.
+     (parse-cli-reply (invoke c (render-cli-prompt (:messages req) (:tools req)))))))
 
 (defn create-cli-client
   "A client whose model is an installed agent CLI — an ordinary in-process
@@ -407,7 +411,8 @@
                              :on-acp-update (:on-acp-update opts)}}
         ip        (-> (apply dissoc opts cli-keys)
                       (assoc :model (if (= "" model) (str (:name d)) model)
-                             :generate (fn [req] (generate c req))))]
+                             :generate (fn [req] (generate c req))
+                             :generate-stream (fn [req emit] (generate c req emit))))]
     (assoc (client/create-in-process-client ip) ::cli c)))
 
 (defn transport

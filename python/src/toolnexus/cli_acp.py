@@ -316,12 +316,14 @@ class _Session:
 
     # -- turns --------------------------------------------------------------- #
 
-    def generate(self, request: dict[str, Any]) -> dict[str, Any]:
+    def generate(
+        self, request: dict[str, Any], emit: Optional[Callable[[dict[str, Any]], None]] = None
+    ) -> dict[str, Any]:
         assert self.client is not None
         req = dict(request)
         req["messages"] = cli_with_system_hint(list(request.get("messages") or []), self.hint)
         try:
-            return self.client.generate(req)
+            return self.client.generate_stream(req, emit)
         except ACPPermissionTimeoutError:
             from .cli import CliError
 

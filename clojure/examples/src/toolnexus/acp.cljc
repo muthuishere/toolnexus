@@ -18,8 +18,9 @@
 ;;
 ;;   - only `agent_message_chunk` `session/update` notifications accumulate
 ;;     into a turn's reply — `agent_thought_chunk` and tool-call narration are
-;;     dropped, or they wrap prose around structured output and break JSON
-;;     parsing outright;
+;;     kept out of it, or they wrap prose around structured output and break
+;;     JSON parsing outright (`generate-stream` still REPORTS them, as
+;;     `thought` / `tool_call` / `tool_result` events, never as answer text);
 ;;   - replies to OUR calls and `session/update` notifications interleave on
 ;;     the same stream, so replies are demultiplexed by JSON-RPC id (the ONE
 ;;     reader thread files a reply in `:inbox`, keyed by id — same shape as
@@ -188,6 +189,47 @@
            (reply-outcome! client (:id req) chosen))))
       (reply-outcome! client (:id req) (first-option-of-kind options "allow")))))
 
+(defn- tool-content-text
+  "The text of a tool_call_update's content blocks, concatenated (Go
+  acpToolContentText)."
+  [content]
+  (if (sequential? content)
+    (str/join "" (map #(str (get-in % [:content :text])) content))
+    ""))
+
+(defn- stream-update!
+  "Hand one session/update to the CURRENT turn's emitter (if any), as it is
+  read — this runs on the reader thread, so delivery is incremental:
+    agent_message_chunk -> {:type \"text\" :delta}
+    agent_thought_chunk -> {:type \"thought\" :delta :via \"acp\"} (never part
+                           of the answer)
+    tool_call           -> {:type \"tool_call\" :id :name (title) :args (rawInput) :via \"acp\"}
+    tool_call_update completed|failed
+                        -> {:type \"tool_result\" :id :name :output :isError :via \"acp\"}
+  An emitter that throws never breaks the reader."
+  [client upd]
+  (let [st   (:state client)
+        kind (:sessionUpdate upd)
+        id   (:toolCallId upd)]
+    (when (= "tool_call" kind)
+      (swap! st assoc-in [:tool-names id] (if (str/blank? (str (:title upd))) (:kind upd) (:title upd))))
+    (when-let [emit (:emit @st)]
+      (let [txt (get-in upd [:content :text])
+            ev  (case (str kind)
+                  "agent_message_chunk" (when-not (= "" (str txt)) {:type "text" :delta (str txt)})
+                  "agent_thought_chunk" (when-not (= "" (str txt)) {:type "thought" :delta (str txt) :via "acp"})
+                  "tool_call"           {:type "tool_call" :id id :name (get-in @st [:tool-names id])
+                                         :args (or (:rawInput upd) {}) :via "acp"}
+                  "tool_call_update"    (when (contains? #{"completed" "failed"} (:status upd))
+                                          {:type "tool_result" :id id
+                                           :name (if (str/blank? (str (:title upd)))
+                                                   (get-in @st [:tool-names id])
+                                                   (:title upd))
+                                           :output (tool-content-text (:content upd))
+                                           :isError (= "failed" (:status upd)) :via "acp"})
+                  nil)]
+        (when ev (try (emit ev) (catch Throwable _ nil)))))))
+
 (defn- route!
   "Dispatch one parsed JSON-RPC line from the child:
     - an id with no method  -> a reply to one of OUR requests, filed by id
@@ -208,7 +250,8 @@
       (when-let [on (:on-update client)]
         (try (on (:params msg)) (catch Throwable _ nil)))
       (when (= "agent_message_chunk" (:sessionUpdate upd))
-        (swap! (:state client) update :chunks conj (get-in upd [:content :text]))))
+        (swap! (:state client) update :chunks conj (get-in upd [:content :text])))
+      (stream-update! client upd))
 
     (and (= "session/request_permission" (:method msg)) (some? (:id msg)))
     (answer-permission! client {:id (:id msg) :params (:params msg)})
@@ -441,16 +484,16 @@
   "One session/prompt turn, accumulating only agent_message_chunk text.
   Not serialised itself — the caller (`prompt`) holds :prompt-lock for the
   whole call, matching golang/acp.go's `promptMu`."
-  [client text]
+  [client text emit]
   (if (:closed? @(:state client))
     {:error (or (:close-reason @(:state client)) "closed")}
     (let [id (next-id! (:id-counter client))]
-      (swap! (:state client) assoc :chunks [])
+      (swap! (:state client) assoc :chunks [] :emit emit :tool-names {})
       (send-msg! client {:jsonrpc "2.0" :id id :method "session/prompt"
                          :params {:sessionId (:session-id client)
                                   :prompt    [{:type "text" :text text}]}})
       (let [res (unwrap-reply (await-response! (:state client) id (:permission-timeout-ms client)))]
-        (swap! (:state client) update :inbox dissoc id)
+        (swap! (:state client) #(-> % (update :inbox dissoc id) (assoc :emit nil)))
         (if (:error res)
           res
           {:ok (str/join "" (:chunks @(:state client)))})))))
@@ -458,9 +501,27 @@
 (defn prompt
   "Send one turn's FULL prompt text and wait for the accumulated
   agent_message_chunk reply. Turns on the same client are serialised —
-  {:ok content} or {:error reason}."
-  [client text]
-  (with-lock! (:prompt-lock client) (fn [] (send-prompt! client text))))
+  {:ok content} or {:error reason}. With `emit`, every session/update of the
+  turn is also handed to it AS IT ARRIVES (see `stream-update!`)."
+  ([client text] (prompt client text nil))
+  ([client text emit]
+   (with-lock! (:prompt-lock client) (fn [] (send-prompt! client text emit)))))
+
+(defn generate-stream
+  "Build a streaming semantic generate — (fn [req emit] -> {:content ...}) —
+  the shape `toolnexus.client/create-in-process-client`'s `:generate-stream`
+  accepts. `emit` receives text / thought / tool_call / tool_result events
+  from the reader thread while the turn runs (incremental, not after it);
+  the returned content is only the agent_message_chunk text. Throws like
+  `generate` on an ACP-level failure."
+  [client]
+  (fn [req emit]
+    (let [text (assemble-prompt-text (:messages req))
+          res  (prompt client text emit)]
+      (if (:error res)
+        (throw (ex-info (str "toolnexus: acp: generate failed: " (pr-str (:error res)))
+                        {:acp-error (:error res)}))
+        {:content (:ok res)}))))
 
 (defn generate
   "Build a semantic `generate` fn — (fn [req] -> {:content ...}) — backed by
@@ -476,13 +537,8 @@
   error) — the same failure shape any other `generate` fn raising surfaces to
   the caller."
   [client]
-  (fn [req]
-    (let [text (assemble-prompt-text (:messages req))
-          res  (prompt client text)]
-      (if (:error res)
-        (throw (ex-info (str "toolnexus: acp: generate failed: " (pr-str (:error res)))
-                        {:acp-error (:error res)}))
-        {:content (:ok res)}))))
+  (let [g (generate-stream client)]
+    (fn [req] (g req nil))))
 
 ;; ---------------------------------------------------------------------------
 ;; close

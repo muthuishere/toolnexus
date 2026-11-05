@@ -117,6 +117,17 @@
               "session/set_model"
               (out! {:jsonrpc "2.0" :id (:id m) :result {}})
               "session/prompt"
+              (if (= "1" (env/get-env "TN_FAKE_DRIP"))
+                ;; conformance stream.acpDrip: a thought, then three text chunks
+                ;; 200ms apart — a buffered stream has ~0ms lead before done.
+                (do
+                  (update {:sessionUpdate "agent_thought_chunk" :content {:type "text" :text "pondering"}})
+                  (update {:sessionUpdate "agent_message_chunk" :content {:type "text" :text "drip-1 "}})
+                  (ktime/sleep! 200)
+                  (update {:sessionUpdate "agent_message_chunk" :content {:type "text" :text "drip-2 "}})
+                  (ktime/sleep! 200)
+                  (update {:sessionUpdate "agent_message_chunk" :content {:type "text" :text "drip-3"}})
+                  (out! {:jsonrpc "2.0" :id (:id m) :result {:stopReason "end_turn"}}))
               (do
                 (when (= "1" (env/get-env "FAKE_PROJECT"))
                   (let [pf (json/read-str (fs/read-file (str @cwd "/.mcp.json")) {:key-fn str})
@@ -138,7 +149,7 @@
                                  "prompt=" (pr-str (str/join "" (map :text (get-in m [:params :prompt])))) "; "
                                  (call-served @entry))]
                   (update {:sessionUpdate "agent_message_chunk" :content {:type "text" :text text}})
-                  (out! {:jsonrpc "2.0" :id (:id m) :result {:stopReason "end_turn"}})))
+                  (out! {:jsonrpc "2.0" :id (:id m) :result {:stopReason "end_turn"}}))))
               nil)))
         (recur)))))
 
@@ -569,9 +580,10 @@ printf '%s' \"$reply\"
 ;; ===========================================================================
 ;; streaming never errors (SPEC §8C, ADR 0037 decision 9)
 ;; ===========================================================================
-;; This port has no streaming entry point: `:on-event` is a sink on the
-;; non-streaming loop. What the contract asks of it is that a request carrying
-;; {:stream true} is answered whole, never refused, on either transport.
+;; This port has no streaming entry point: `:on-event` is the event channel.
+;; A request carrying {:stream true} is answered, never refused, on either
+;; transport. Over ACP the text deltas are incremental (several, as the agent
+;; sends them); the one-shot CLI gives the whole answer as ONE text event.
 
 (deftest generate-answers-a-stream-request-whole
   (let [c   (cli/create-cli-client (fake-cli-opts "x"))
@@ -621,3 +633,83 @@ printf '%s' \"$reply\"
         (is (str/includes? (str (:text res)) "BADGE-77Q"))
         (when (= :cli tr) (is (some #{"tool_call"} types) "one-shot carries the loop's tool_call"))
         (is (= (name tr) t))))))
+
+;; ===========================================================================
+;; real incremental streaming (conformance/cli-client/cases.json "stream")
+;; ===========================================================================
+
+(defn- stream-cases []
+  (:stream (json/read-str (fs/read-file (str (conformance-dir) "/cli-client/cases.json")))))
+
+(deftest stream-in-process-is-incremental
+  (let [cs     (:inProcess (stream-cases))
+        evs    (atom [])
+        wait!  (fn [delta]
+                 (let [deadline (+ (ktime/mono-ms) (:waitMs cs))]
+                   (loop []
+                     (cond
+                       (some #(and (= "text" (:type %)) (= delta (:delta %))) @evs) nil
+                       (> (ktime/mono-ms) deadline) (throw (ex-info (:notIncrementalError cs) {}))
+                       :else (do (ktime/sleep! 1) (recur))))))
+        c      (client/create-in-process-client
+                {:model "m"
+                 :generate-stream
+                 (fn [_req emit]
+                   (doseq [e (:emits cs)]
+                     (emit (dissoc e :awaitConsumer))
+                     (when (:awaitConsumer e) (wait! (:delta e))))
+                   {:content (get-in cs [:returns :content])})})
+        r      (client/run c (:prompt cs) {:toolkit (toolnexus/build {:builtins false})
+                                           :on-event #(swap! evs conj %)})
+        texts  (mapv :delta (filter #(= "text" (:type %)) @evs))
+        others (filterv #(contains? #{"thought" "tool_call"} (:type %)) @evs)
+        done   (:result (last @evs))]
+    (is (= (:expectTextDeltas cs) texts))
+    (is (= (:expectPassThrough cs)
+           (mapv (fn [want got] (select-keys got (keys want))) (:expectPassThrough cs) others)))
+    (is (= 2 (count others)))
+    (is (= "done" (:type (last @evs))))
+    (is (= (:expectDoneText cs) (:text done) (:text r)))
+    (is (= (:expectDoneToolCalls cs) (count (:tool-calls done))))
+    (testing "a buffered (non-incremental) consumer trips the latch loudly"
+      ;; no :on-event sink: the delta can never be observed, so the generate's
+      ;; own latch fails — what a faked stream would hit.
+      (let [c2 (client/create-in-process-client
+                {:model "m"
+                 :generate-stream (fn [_ _emit]
+                                    (when-not (some #(= "al" (:delta %)) @evs)
+                                      (throw (ex-info (:notIncrementalError cs) {})))
+                                    {:content "x"})})]
+        (reset! evs [])
+        (is (str/includes? (str (err-of #(client/run c2 "q" {:toolkit (toolnexus/build {:builtins false})})))
+                           (:notIncrementalError cs)))))
+    (testing "without a sink a plain :generate still serves, with no text deltas"
+      (let [seen (atom [])
+            c3   (client/create-in-process-client
+                  {:model "m" :generate (fn [_] {:content "whole"})})
+            r3   (client/run c3 "q" {:toolkit (toolnexus/build {:builtins false})
+                                     :on-event #(swap! seen conj %)})]
+        (is (= "whole" (:text r3)))
+        (is (not-any? #(= "text" (:type %)) @seen))))))
+
+(deftest stream-acp-drip-is-incremental
+  (let [cs     (:acpDrip (stream-cases))
+        [o _]  (fake-acp-opts (:fakeEnv cs))
+        c      (cli/create-cli-client (assoc o :transport :acp))
+        evs    (atom [])]
+    (try
+      (let [r      (client/run c "drip please" {:toolkit (:toolkit o)
+                                                :on-event #(swap! evs conj [(ktime/mono-ms) %])})
+            ev     (mapv second @evs)
+            texts  (filterv #(= "text" (:type %)) ev)
+            th     (filterv #(= "thought" (:type %)) ev)
+            first-t (some (fn [[t e]] (when (= "text" (:type e)) t)) @evs)
+            done-t  (some (fn [[t e]] (when (= "done" (:type e)) t)) @evs)]
+        (is (= "acp" (cli/transport c)) (cli/fallback-reason c))
+        (is (= (:chunks cs) (mapv :delta texts)))
+        (is (= [(:expectThought cs)] (mapv #(select-keys % [:type :delta :via]) th)))
+        (is (= (:expectDoneText cs) (:text (:result (last ev))) (:text r)))
+        (is (>= (- done-t first-t) (:minLeadMs cs))
+            (str "first text delta only " (- done-t first-t) "ms before done"))
+        (is (= (:expectDoneText cs) (:text (client/run c "again" {:toolkit (:toolkit o)})))))
+      (finally (cli/close! c)))))

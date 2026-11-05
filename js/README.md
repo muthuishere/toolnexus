@@ -94,8 +94,12 @@ tool. Runnable: `npm run example:prompt-cache` ([`examples/prompt_cache.ts`](exa
   `waitFor`, `ctx.callId` on tools, `listModels(opts)`.
 
 ACP host hooks (permission choice, update stream, cancel) are Go-only for now. `stream()` on a CLI
-client never errors: on both transports it degrades to a non-incremental stream (tool_call /
-tool_result events, the whole answer as one text event, then done).
+client never errors. Over ACP it is incremental: text deltas, `thought` events and the agent's
+own `tool_call` / `tool_result` events (`via: "acp"`, reported, never executed) arrive as the
+agent sends them. The one-shot CLI transport degrades to a non-incremental stream (tool_call /
+tool_result events, the whole answer as one text event, then done). An in-process model streams
+for real when it is given as `generateStream(request, emit)`; a plain `generate` still refuses
+`stream()`.
 
 ## Simple judgments
 

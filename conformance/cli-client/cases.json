@@ -370,5 +370,94 @@
       "error": "cli: answer must be stdout or out, not \"json\""
     }
   ],
-  "renderEmpty": "<PREAMBLE>\nREQUEST:\n{\"messages\":[],\"tools\":[]}"
+  "renderEmpty": "<PREAMBLE>\nREQUEST:\n{\"messages\":[],\"tools\":[]}",
+  "stream": {
+    "_doc": "SPEC §8 'In-process models' + §8C 'Streaming'. Real incremental streaming through the in-process seam and the ACP transport. Every port replays both cases. A faked stream (the whole answer buffered and re-emitted, or one chunk) MUST fail them: inProcess blocks the generate until the consumer has observed each delta, and acpDrip spaces its chunks in time and asserts the first delta lands well before done.",
+    "inProcess": {
+      "_doc": "A streaming generate (Go GenerateStream; idiomatic name per port) is driven through client.stream. After emitting each text delta the generate WAITS (up to waitMs) until the consumer has received that delta; if it never does the generate fails with notIncrementalError. Non-text events pass straight to the consumer and are never executed by the loop.",
+      "prompt": "q",
+      "waitMs": 5000,
+      "emits": [
+        {
+          "type": "text",
+          "delta": "al",
+          "awaitConsumer": true
+        },
+        {
+          "type": "thought",
+          "delta": "hmm",
+          "via": "acp"
+        },
+        {
+          "type": "tool_call",
+          "id": "t1",
+          "name": "reading files",
+          "args": {},
+          "via": "acp"
+        },
+        {
+          "type": "text",
+          "delta": "pha",
+          "awaitConsumer": true
+        }
+      ],
+      "returns": {
+        "content": "alpha"
+      },
+      "expectTextDeltas": [
+        "al",
+        "pha"
+      ],
+      "expectPassThrough": [
+        {
+          "type": "thought",
+          "delta": "hmm",
+          "via": "acp"
+        },
+        {
+          "type": "tool_call",
+          "id": "t1",
+          "name": "reading files",
+          "via": "acp"
+        }
+      ],
+      "expectDoneText": "alpha",
+      "expectDoneToolCalls": 0,
+      "notIncrementalError": "stream not incremental: consumer never saw the delta",
+      "plainGenerateStillRefuses": true
+    },
+    "acpDrip": {
+      "_doc": "createCliClient over the ACP transport against the port's fake ACP agent with fakeEnv set. On session/prompt the fake sends agent_thought_chunk thought, then each chunk of chunks as agent_message_chunk with gapMs between them (no permissions, no tool calls), then replies stopReason end_turn. The stream's text deltas must equal chunks exactly, one thought event must arrive, and the first text delta must arrive at least minLeadMs before done (two gaps = 400ms; a buffered stream has ~0ms lead). run() on the same client returns the concatenation.",
+      "fakeEnv": {
+        "TN_FAKE_DRIP": "1"
+      },
+      "thought": "pondering",
+      "chunks": [
+        "drip-1 ",
+        "drip-2 ",
+        "drip-3"
+      ],
+      "gapMs": 200,
+      "minLeadMs": 300,
+      "expectDoneText": "drip-1 drip-2 drip-3",
+      "expectThought": {
+        "type": "thought",
+        "delta": "pondering",
+        "via": "acp"
+      }
+    },
+    "cliTransport": {
+      "_doc": "The one-shot CLI transport does not stream incrementally for any style: the reply is the §8C JSON envelope, which is content OR tool_calls, and which one it is is known only once the whole reply has parsed. Streaming it would mean emitting text that may turn out to be a tool call. Stream still never errors: tool events as they happen, the whole answer as ONE text event, then done.",
+      "incremental": {
+        "claude": false,
+        "codex": false,
+        "copilot": false,
+        "opencode": false,
+        "devin": false,
+        "gemini": false,
+        "goose": false,
+        "custom": false
+      }
+    }
+  }
 }

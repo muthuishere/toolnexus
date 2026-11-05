@@ -373,18 +373,89 @@ public class CliClientTests
         Assert.Equal(2, info!.ServedCalls.Count);
     }
 
+    /// <summary>Over ACP the agent's own updates stream live: its tool_call surfaces as a ToolCall
+    /// event (via "acp", never executed by the loop) and its message chunks as text.</summary>
     [Fact]
-    public async Task AcpStreamsNonIncrementally()
+    public async Task AcpStreamsAgentUpdates()
     {
         var (o, rec, tk) = await FakeAcpOpts(new() { ["FAKE_HTTP"] = "1" });
         await using var _tk = tk;
         using var c = CliClient.Create(o);
-        var (kinds, text) = await StreamCli(c, "badge?", null);
+        var events = new List<LlmClient.StreamEvent>();
+        var text = new StringBuilder();
+        await c.StreamAsync("badge?", null, ev =>
+        {
+            lock (events)
+            {
+                events.Add(ev);
+                if (ev.Type == LlmClient.StreamKind.Text) text.Append(ev.Delta);
+            }
+        });
         File.Delete(rec);
         Assert.Equal("acp", c.Transport);
-        Assert.Contains("BADGE-77Q", text);
-        Assert.Equal(LlmClient.StreamKind.Done, kinds[^1]);
-        Assert.Equal(1, kinds.Count(k => k == LlmClient.StreamKind.Text));
+        Assert.Contains("BADGE-77Q", text.ToString());
+        Assert.Equal(LlmClient.StreamKind.Done, events[^1].Type);
+        // The fake sends exactly one agent_message_chunk; ACP may give several in general.
+        Assert.Equal(1, events.Count(e => e.Type == LlmClient.StreamKind.Text));
+        Assert.Contains(events, e => e.Type == LlmClient.StreamKind.ToolCall && e.Id == "tc1" && e.Via == "acp"
+            && e.Name == "Calling get_badge_number from toolnexus");
+    }
+
+    /// <summary>conformance/cli-client/cases.json stream.acpDrip: ACP streaming is genuinely
+    /// incremental — the first delta lands well before done.</summary>
+    [Fact]
+    public async Task AcpDripStreamsIncrementally()
+    {
+        using var doc = JsonDocument.Parse(File.ReadAllText(Conformance("cli-client", "cases.json")));
+        var cs = doc.RootElement.GetProperty("stream").GetProperty("acpDrip");
+        var env = new Dictionary<string, string>();
+        foreach (var p in cs.GetProperty("fakeEnv").EnumerateObject()) env[p.Name] = p.Value.GetString()!;
+        var chunks = cs.GetProperty("chunks").EnumerateArray().Select(x => x.GetString()!).ToList();
+        var thought = cs.GetProperty("expectThought");
+        var (o, rec, tk) = await FakeAcpOpts(env);
+        await using var _tk = tk;
+        o.Transport = CliTransports.Acp;
+        using var c = CliClient.Create(o);
+
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        var texts = new List<string>();
+        var thoughts = new List<LlmClient.StreamEvent>();
+        long firstText = -1, done = -1;
+        LlmClient.RunResult? doneResult = null;
+        await c.StreamAsync("drip?", null, ev =>
+        {
+            lock (texts)
+            {
+                switch (ev.Type)
+                {
+                    case LlmClient.StreamKind.Text:
+                        if (firstText < 0) firstText = sw.ElapsedMilliseconds;
+                        texts.Add(ev.Delta!);
+                        break;
+                    case LlmClient.StreamKind.Thought:
+                        thoughts.Add(ev);
+                        break;
+                    case LlmClient.StreamKind.Done:
+                        done = sw.ElapsedMilliseconds;
+                        doneResult = ev.Result;
+                        break;
+                }
+            }
+        });
+        Assert.Equal("acp", c.Transport);
+        Assert.Equal(chunks, texts);
+        var th = Assert.Single(thoughts);
+        Assert.Equal(cs.GetProperty("thought").GetString(), th.Delta);
+        Assert.Equal(thought.GetProperty("delta").GetString(), th.Delta);
+        Assert.Equal(thought.GetProperty("via").GetString(), th.Via);
+        Assert.Equal(cs.GetProperty("expectDoneText").GetString(), doneResult!.Text);
+        var lead = done - firstText;
+        Assert.True(firstText >= 0 && lead >= cs.GetProperty("minLeadMs").GetInt64(),
+            $"stream not incremental: first delta {lead}ms before done");
+
+        var res = await c.RunAsync("drip?", null);
+        File.Delete(rec);
+        Assert.Equal(cs.GetProperty("expectDoneText").GetString(), res.Text);
     }
 
     [Fact]

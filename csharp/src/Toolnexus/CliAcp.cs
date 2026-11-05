@@ -423,7 +423,13 @@ internal sealed class CliAcpSession : IDisposable
         return copy;
     }
 
-    public InProcess.Response Generate(InProcess.Request req)
+    public InProcess.Response Generate(InProcess.Request req) =>
+        Task.Run(() => GenerateStreamAsync(req, null, CancellationToken.None)).GetAwaiter().GetResult();
+
+    /// <summary>One turn on the warm session, reporting each session/update to <paramref name="emit"/>
+    /// as the ACP read loop processes it (text, thought, the agent's own tool calls/results).</summary>
+    public async Task<InProcess.Response> GenerateStreamAsync(InProcess.Request req,
+        Action<LlmClient.StreamEvent>? emit, CancellationToken ct)
     {
         var turn = new InProcess.Request
         {
@@ -434,8 +440,7 @@ internal sealed class CliAcpSession : IDisposable
         };
         try
         {
-            var text = Task.Run(() => _client!.PromptAsync(turn)).GetAwaiter().GetResult();
-            return InProcess.Response.FromContent(text);
+            return await _client!.GenerateStreamAsync(turn, emit, ct).ConfigureAwait(false);
         }
         catch (TimeoutException e)
         {

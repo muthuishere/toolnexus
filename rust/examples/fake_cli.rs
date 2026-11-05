@@ -7,6 +7,7 @@
 //!   mcpCapabilities.http; FAKE_FAIL_INIT=1 exits before initialize;
 //!   FAKE_NO_CONFIG=1 rejects session/set_config_option; FAKE_PROJECT=1 reads
 //!   the MCP server from <cwd>/.mcp.json; TN_FAKE_REC records every method;
+//!   TN_FAKE_DRIP=1 answers a prompt with a thought then three spaced chunks;
 //! - `TN_FAKE_CLI=<mode> fake_cli …`: a fake one-shot CLI. Prompt from stdin,
 //!   or the arg after `--p`, or the file after `--f`; the answer goes to stdout,
 //!   or to the file after `--o`.
@@ -186,6 +187,22 @@ fn fake_acp() {
             }
             "session/set_model" => send(json!({"jsonrpc":"2.0","id":id,"result":{}})),
             "session/prompt" => {
+                if env1("TN_FAKE_DRIP") {
+                    // cases.json stream.acpDrip: a thought, then spaced chunks.
+                    update(
+                        json!({"sessionUpdate":"agent_thought_chunk","content":{"type":"text","text":"pondering"}}),
+                    );
+                    for (i, c) in ["drip-1 ", "drip-2 ", "drip-3"].iter().enumerate() {
+                        if i > 0 {
+                            std::thread::sleep(std::time::Duration::from_millis(200));
+                        }
+                        update(
+                            json!({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":c}}),
+                        );
+                    }
+                    send(json!({"jsonrpc":"2.0","id":id,"result":{"stopReason":"end_turn"}}));
+                    continue;
+                }
                 if env1("FAKE_PROJECT") {
                     let b = std::fs::read_to_string(std::path::Path::new(&cwd).join(".mcp.json"))
                         .unwrap_or_default();

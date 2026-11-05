@@ -515,9 +515,10 @@ async fn generate(
         return acp.generate(cancel, req, emit).await;
     }
     let _ = &emit;
-    // Streaming degrades to a non-incremental stream: the whole reply comes
-    // back as one response; the loop emits its tool events and the answer as
-    // a single text chunk, then done.
+    // The one-shot transport streams non-incrementally (the reply is the §8C
+    // envelope, content OR tool_calls, known only once parsed): the loop emits
+    // its tool events and the answer as a single text chunk, then done. The
+    // ACP transport above streams incrementally through `emit`.
     let prompt = render_cli_prompt(&req.messages, &req.tools);
     let text = invoke(&s, &cancel, &prompt).await.map_err(|e| e.0)?;
     Ok(parse_cli_reply(&text))

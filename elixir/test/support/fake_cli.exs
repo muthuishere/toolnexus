@@ -196,6 +196,36 @@ defmodule FakeAgent do
   end
 
   defp handle(%{"method" => "session/prompt", "id" => id} = m, st) do
+    if System.get_env("TN_FAKE_DRIP") == "1", do: drip(id, m, st), else: prompt(id, m, st)
+  end
+
+  defp handle(%{"id" => id} = m, st) when is_map_key(m, "method") do
+    rec(m)
+    reply(id, %{})
+    st
+  end
+
+  defp handle(m, st) do
+    rec(m)
+    st
+  end
+
+  # TN_FAKE_DRIP=1: a thought, then three text chunks 200ms apart, no tools, no
+  # permissions — conformance/cli-client/cases.json "stream.acpDrip".
+  defp drip(id, m, st) do
+    rec(m)
+    text = fn t -> %{"type" => "text", "text" => t} end
+    update(%{"sessionUpdate" => "agent_thought_chunk", "content" => text.("pondering")})
+    update(%{"sessionUpdate" => "agent_message_chunk", "content" => text.("drip-1 ")})
+    Process.sleep(200)
+    update(%{"sessionUpdate" => "agent_message_chunk", "content" => text.("drip-2 ")})
+    Process.sleep(200)
+    update(%{"sessionUpdate" => "agent_message_chunk", "content" => text.("drip-3")})
+    reply(id, %{"stopReason" => "end_turn"})
+    st
+  end
+
+  defp prompt(id, m, st) do
     rec(m)
 
     entry =
@@ -233,17 +263,6 @@ defmodule FakeAgent do
     })
 
     reply(id, %{"stopReason" => "end_turn"})
-    st
-  end
-
-  defp handle(%{"id" => id} = m, st) when is_map_key(m, "method") do
-    rec(m)
-    reply(id, %{})
-    st
-  end
-
-  defp handle(m, st) do
-    rec(m)
     st
   end
 

@@ -183,6 +183,17 @@ async function fakeACPAgent() {
         send({ jsonrpc: "2.0", id: m.id, result: {} })
         break
       case "session/prompt": {
+        if (process.env.TN_FAKE_DRIP === "1") {
+          // conformance/cli-client/cases.json stream.acpDrip: a thought, then chunks spaced in time.
+          update({ sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "pondering" } })
+          const chunks = ["drip-1 ", "drip-2 ", "drip-3"]
+          for (let i = 0; i < chunks.length; i++) {
+            if (i > 0) await new Promise((r) => setTimeout(r, 200))
+            update({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: chunks[i] } })
+          }
+          send({ jsonrpc: "2.0", id: m.id, result: { stopReason: "end_turn" } })
+          break
+        }
         if (process.env.FAKE_PROJECT === "1") {
           const pf = JSON.parse(fs.readFileSync(path.join(cwd, ".mcp.json"), "utf8"))
           const e = pf.mcpServers.toolnexus

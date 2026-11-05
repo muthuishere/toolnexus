@@ -309,6 +309,7 @@ public sealed partial class CliClient : IDisposable, IAsyncDisposable
         {
             Model = string.IsNullOrEmpty(o.Model) ? d.Name : o.Model,
             Generate = Generate,
+            GenerateStream = GenerateStreamAsync,
             SystemPrompt = o.SystemPrompt,
             MaxTurns = o.MaxTurns,
             MaxToolConcurrency = o.MaxToolConcurrency,
@@ -321,7 +322,7 @@ public sealed partial class CliClient : IDisposable, IAsyncDisposable
             RequestParams = o.RequestParams,
             Retries = o.Retries,
         };
-        Client = InProcess.CreateClient(ip, new CliHandler(this, new InProcess.GenerateBackedHandler(Generate)));
+        Client = InProcess.CreateClient(ip);
     }
 
     // ---------------------------------------------------------------------
@@ -370,6 +371,21 @@ public sealed partial class CliClient : IDisposable, IAsyncDisposable
         return ParseReply(Invoke(prompt));
     }
 
+    /// <summary>
+    /// The streaming seam (SPEC §8C). Over ACP the session reports every update to
+    /// <paramref name="emit"/> as it arrives, so a stream is genuinely incremental. The one-shot CLI
+    /// transport emits nothing: its reply is the §8C envelope — content OR tool_calls, known only
+    /// once the whole reply parsed — so the in-process seam replays it as one text chunk (or the
+    /// tool calls) after the call returns, for every style.
+    /// </summary>
+    private async Task<InProcess.Response> GenerateStreamAsync(InProcess.Request req,
+        Action<LlmClient.StreamEvent> emit, CancellationToken ct)
+    {
+        var s = await Task.Run(SessionAsync, ct).ConfigureAwait(false);
+        if (s != null) return await s.GenerateStreamAsync(req, emit, ct).ConfigureAwait(false);
+        return await Task.Run(() => ParseReply(Invoke(RenderPrompt(req.Messages, req.Tools))), ct).ConfigureAwait(false);
+    }
+
     /// <summary>The live ACP session, opening it on first use; null ⇒ the one-shot transport.</summary>
     private async Task<CliAcpSession?> SessionAsync()
     {
@@ -415,66 +431,6 @@ public sealed partial class CliClient : IDisposable, IAsyncDisposable
         finally
         {
             _open.Release();
-        }
-    }
-
-    /// <summary>Streaming degrades to a non-incremental stream (SPEC §8C, ADR 0037 decision 9):
-    /// neither transport streams incrementally here, so a streamed request runs as a normal turn
-    /// and its whole reply is replayed as one SSE chunk — the loop then emits its tool events, the
-    /// answer as a single text event, and done.</summary>
-    private sealed class CliHandler : DelegatingHandler
-    {
-        public CliHandler(CliClient c, HttpMessageHandler inner) : base(inner) { }
-
-        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
-        {
-            if (request.Content == null) return await base.SendAsync(request, ct).ConfigureAwait(false);
-            var raw = await request.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
-            if (string.IsNullOrWhiteSpace(raw) ||
-                System.Text.Json.Nodes.JsonNode.Parse(raw) is not System.Text.Json.Nodes.JsonObject body ||
-                body["stream"]?.GetValueKind() != JsonValueKind.True)
-                return await base.SendAsync(request, ct).ConfigureAwait(false);
-
-            body.Remove("stream");
-            body.Remove("stream_options");
-            using var plain = new HttpRequestMessage(request.Method, request.RequestUri)
-            {
-                Content = new StringContent(body.ToJsonString(), Encoding.UTF8, "application/json"),
-            };
-            using var resp = await base.SendAsync(plain, ct).ConfigureAwait(false);
-            var json = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
-            var whole = System.Text.Json.Nodes.JsonNode.Parse(json)!.AsObject();
-            var choice = whole["choices"]![0]!.AsObject();
-            var msg = choice["message"]!.AsObject();
-            var delta = new System.Text.Json.Nodes.JsonObject { ["role"] = "assistant" };
-            if (msg["tool_calls"] is System.Text.Json.Nodes.JsonArray calls)
-            {
-                var arr = new System.Text.Json.Nodes.JsonArray();
-                for (var i = 0; i < calls.Count; i++)
-                {
-                    var c = calls[i]!.DeepClone().AsObject();
-                    c["index"] = i;
-                    arr.Add(c);
-                }
-                delta["tool_calls"] = arr;
-            }
-            else delta["content"] = msg["content"]?.DeepClone() ?? "";
-            var chunk = new System.Text.Json.Nodes.JsonObject
-            {
-                ["choices"] = new System.Text.Json.Nodes.JsonArray(new System.Text.Json.Nodes.JsonObject
-                {
-                    ["index"] = 0, ["delta"] = delta, ["finish_reason"] = choice["finish_reason"]?.DeepClone(),
-                }),
-            };
-            var usage = new System.Text.Json.Nodes.JsonObject
-            {
-                ["choices"] = new System.Text.Json.Nodes.JsonArray(), ["usage"] = whole["usage"]?.DeepClone(),
-            };
-            var sse = "data: " + chunk.ToJsonString() + "\n\ndata: " + usage.ToJsonString() + "\n\ndata: [DONE]\n\n";
-            return new HttpResponseMessage(System.Net.HttpStatusCode.OK)
-            {
-                Content = new StringContent(sse, Encoding.UTF8, "text/event-stream"),
-            };
         }
     }
 

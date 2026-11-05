@@ -85,7 +85,7 @@ opt-in builtins via the builtins config keys `background` (a `BackgroundShells`)
 `WebSearch`) and `notebookEdit`; `McpSource.resourceTools()`; `grep` `context`/`before`/`after` and
 truncation metadata; `Agent.asToolWith(ctx -> runtimeOptions)` with `RuntimeOptions.waitFor`;
 `ToolContext.callId()`; `LlmClient.listModels(options)`. The ACP host hooks (permission callback,
-update stream, cancel, streaming) are Go-only for now.
+update stream, cancel) are Go-only for now; ACP streaming is `AcpClient.generateStream`.
 
 ## Simple judgments
 
@@ -176,7 +176,8 @@ try (CliClient cli = CliClient.create(new CliClient.Options()
   `session/set_config_option`, then `session/set_model`, unchanged.
 - **One-shot**: the conversation goes in under a fixed preamble, the reply is parsed as an
   OpenAI-shaped envelope (`CliClient.parseReply`), and tool calls run in the toolnexus loop.
-  Streaming works but is not incremental on either transport: the loop's tool events, then the whole answer as one text event, then done.
+  Streaming over ACP is incremental: text deltas as the agent sends them, plus `THOUGHT` and the agent's own tool events (`via = "acp"`). The one-shot CLI is not: the loop's tool events, then the whole answer as one text event, then done.
+  Any in-process model can stream the same way: `InProcess.Options.generateStream((req, emit) -> ...)` (`AcpClient.generateStream` plugs straight in).
 - Errors are pinned: construction throws `IllegalArgumentException`; calls throw
   `CliClient.CliException` (`cli: command not found: <bin>`, `cli: exit <code>: <stderr>`,
   `cli: empty reply`, `cli: no output file`, `cli: timed out after <ms>ms`). Default call timeout

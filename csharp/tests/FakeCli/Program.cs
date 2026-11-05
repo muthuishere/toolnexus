@@ -1,7 +1,7 @@
 // Test-only helper for CliClientTests (SPEC §8C) — a port of the fakes in golang/cli_test.go.
 // Three parts, picked by argv/env:
 //   mcp-bridge <url>             the stdio MCP bridge (CliClient.RunMcpBridgeAsync)
-//   TN_FAKE_ACP=1 + argv[0]=acp  a fake ACP agent
+//   TN_FAKE_ACP=1 + argv[0]=acp  a fake ACP agent (TN_FAKE_DRIP=1: drip three chunks 200ms apart)
 //   TN_FAKE_CLI=<mode>           a fake one-shot CLI
 using System.Diagnostics;
 using System.Text;
@@ -210,6 +210,28 @@ static class FakeAcp
                     Send(Reply(new Dictionary<string, object?>()));
                     break;
                 case "session/prompt":
+                    if (Environment.GetEnvironmentVariable("TN_FAKE_DRIP") == "1")
+                    {
+                        // conformance/cli-client/cases.json stream.acpDrip: a thought, then three
+                        // message chunks spaced 200ms apart, no permissions, no tool calls.
+                        Update(new Dictionary<string, object?>
+                        {
+                            ["sessionUpdate"] = "agent_thought_chunk",
+                            ["content"] = new Dictionary<string, object?> { ["type"] = "text", ["text"] = "pondering" },
+                        });
+                        var drips = new[] { "drip-1 ", "drip-2 ", "drip-3" };
+                        for (var i = 0; i < drips.Length; i++)
+                        {
+                            if (i > 0) await Task.Delay(200);
+                            Update(new Dictionary<string, object?>
+                            {
+                                ["sessionUpdate"] = "agent_message_chunk",
+                                ["content"] = new Dictionary<string, object?> { ["type"] = "text", ["text"] = drips[i] },
+                            });
+                        }
+                        Send(Reply(new Dictionary<string, object?> { ["stopReason"] = "end_turn" }));
+                        break;
+                    }
                     if (Environment.GetEnvironmentVariable("FAKE_PROJECT") == "1")
                     {
                         var pf = JsonNode.Parse(File.ReadAllText(Path.Combine(cwd, ".mcp.json")))!;

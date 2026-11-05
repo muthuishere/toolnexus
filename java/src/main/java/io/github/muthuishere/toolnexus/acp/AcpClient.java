@@ -2,6 +2,7 @@ package io.github.muthuishere.toolnexus.acp;
 
 import io.github.muthuishere.toolnexus.InProcess;
 import io.github.muthuishere.toolnexus.Json;
+import io.github.muthuishere.toolnexus.LlmClient;
 
 import java.io.BufferedReader;
 import java.io.BufferedWriter;
@@ -389,10 +390,24 @@ public final class AcpClient implements Closeable, Function<InProcess.Request, I
      * one session is one conversation, so concurrent callers are gated onto one turn at a time.
      */
     public InProcess.Response generate(InProcess.Request request) throws IOException {
+        return generateStream(request, null);
+    }
+
+    /**
+     * {@link #generate}, reporting the turn as it happens: each {@code session/update} is turned
+     * into a {@link LlmClient.StreamEvent} and handed to {@code emit} from the read loop the moment
+     * it arrives — {@code agent_message_chunk} → text, {@code agent_thought_chunk} → thought (never
+     * part of the answer), {@code tool_call} → tool_call (name = title, args = rawInput) and a
+     * completed/failed {@code tool_call_update} → tool_result; every non-text event carries
+     * {@code via = "acp"}. Plugs straight into {@link InProcess.Options#generateStream}.
+     * A null {@code emit} reports nothing.
+     */
+    public InProcess.Response generateStream(InProcess.Request request,
+                                             java.util.function.Consumer<LlmClient.StreamEvent> emit) throws IOException {
         String assembled = assemblePrompt(request);
         turnLock.lock();
         try {
-            String reply = prompt(assembled);
+            String reply = prompt(assembled, emit);
             return InProcess.Response.content(reply);
         } finally {
             turnLock.unlock();
@@ -442,25 +457,54 @@ public final class AcpClient implements Closeable, Function<InProcess.Request, I
         return Json.stringify(content);
     }
 
-    private String prompt(String text) throws IOException {
+    @SuppressWarnings("unchecked")
+    private String prompt(String text, java.util.function.Consumer<LlmClient.StreamEvent> emit) throws IOException {
         String id = "c-" + nextId.incrementAndGet();
         CompletableFuture<Map<String, Object>> future = new CompletableFuture<>();
         pending.put(id, future);
 
         StringBuilder accumulated = new StringBuilder();
+        Map<String, String> toolNames = new java.util.concurrent.ConcurrentHashMap<>();
         updateSink = params -> {
             Object update = params.get("update");
             if (!(update instanceof Map)) return;
             Map<?, ?> upd = (Map<?, ?>) update;
-            if (!"agent_message_chunk".equals(upd.get("sessionUpdate"))) return;
-            Object content = upd.get("content");
-            if (content instanceof Map<?, ?> c) {
-                Object t = c.get("text");
-                if (t != null) {
-                    synchronized (accumulated) {
-                        accumulated.append(String.valueOf(t));
+            Object kind = upd.get("sessionUpdate");
+            if ("agent_message_chunk".equals(kind)) {
+                // Only agent_message_chunk forms the reply (ADR 0031 gate item #3).
+                Object content = upd.get("content");
+                if (content instanceof Map<?, ?> c) {
+                    Object t = c.get("text");
+                    if (t != null) {
+                        synchronized (accumulated) {
+                            accumulated.append(String.valueOf(t));
+                        }
+                        String d = String.valueOf(t);
+                        if (emit != null && !d.isEmpty()) emit.accept(LlmClient.StreamEvent.text(d));
                     }
                 }
+                return;
+            }
+            if (emit == null) return;
+            String callId = upd.get("toolCallId") instanceof String sid ? sid : "";
+            String title = upd.get("title") instanceof String st ? st : "";
+            if ("agent_thought_chunk".equals(kind)) {
+                // Reported, never part of the answer.
+                if (upd.get("content") instanceof Map<?, ?> c && c.get("text") != null) {
+                    String d = String.valueOf(c.get("text"));
+                    if (!d.isEmpty()) emit.accept(LlmClient.StreamEvent.thought(d, "acp"));
+                }
+            } else if ("tool_call".equals(kind)) {
+                String name = !title.isEmpty() ? title : upd.get("kind") instanceof String k ? k : "";
+                toolNames.put(callId, name);
+                Map<String, Object> args = upd.get("rawInput") instanceof Map<?, ?> ri ? (Map<String, Object>) ri : null;
+                emit.accept(LlmClient.StreamEvent.toolCall(callId, name, args).withVia("acp"));
+            } else if ("tool_call_update".equals(kind)) {
+                Object status = upd.get("status");
+                if (!"completed".equals(status) && !"failed".equals(status)) return;
+                String name = !title.isEmpty() ? title : toolNames.getOrDefault(callId, "");
+                emit.accept(LlmClient.StreamEvent.toolResult(callId, name, toolContentText(upd.get("content")),
+                        "failed".equals(status)).withVia("acp"));
             }
         };
 
@@ -504,6 +548,18 @@ public final class AcpClient implements Closeable, Function<InProcess.Request, I
         synchronized (accumulated) {
             return accumulated.toString();
         }
+    }
+
+    /** The text of a tool_call_update's {@code content} list ({@code [{content:{text}}]}). */
+    private static String toolContentText(Object raw) {
+        if (!(raw instanceof List<?> parts)) return "";
+        StringBuilder b = new StringBuilder();
+        for (Object p : parts) {
+            if (p instanceof Map<?, ?> m && m.get("content") instanceof Map<?, ?> c && c.get("text") instanceof String t) {
+                b.append(t);
+            }
+        }
+        return b.toString();
     }
 
     // ---- transport: readLoop + call/reply/write -------------------------------------------

@@ -63,6 +63,16 @@ public static class InProcess
     {
         public string Model { get; set; } = "";
         public Func<Request, Response>? Generate { get; set; }
+        /// <summary>
+        /// (SPEC §8C) A model that streams: call <c>emit</c> as the answer arrives and return the
+        /// whole answer at the end. A <c>Text</c> event becomes a content delta the instant it is
+        /// emitted; any other event (a <c>Thought</c>, or a tool call/result the model ran itself)
+        /// goes straight to the stream consumer and never through the wire, so the loop never
+        /// executes it. Without this, <c>StreamAsync</c> on a plain <c>Generate</c> refuses.
+        /// When both are set, <c>Generate</c> serves non-streamed turns; when only this is set it
+        /// serves them too, with a no-op <c>emit</c>.
+        /// </summary>
+        public Func<Request, Action<LlmClient.StreamEvent>, CancellationToken, Task<Response>>? GenerateStream { get; set; }
         public string? SystemPrompt { get; set; }
         public int? MaxTurns { get; set; }
         public int? MaxToolConcurrency { get; set; }
@@ -88,15 +98,9 @@ public static class InProcess
     /// <summary>Build a client backed by a model running IN THIS PROCESS.</summary>
     public static LlmClient CreateClient(Options opts)
     {
-        if (opts?.Generate is null)
-            throw new ArgumentException("toolnexus: InProcess.CreateClient requires a `Generate` function");
-        return CreateClient(opts, new GenerateBackedHandler(opts.Generate));
-    }
-
-    /// <summary>The same client over a caller-built handler (the CLI client wraps
-    /// <see cref="GenerateBackedHandler"/> to refuse streaming with its own message).</summary>
-    internal static LlmClient CreateClient(Options opts, HttpMessageHandler handler)
-    {
+        if (opts is null || (opts.Generate is null && opts.GenerateStream is null))
+            throw new ArgumentException("toolnexus: InProcess.CreateClient requires a `Generate` (or `GenerateStream`) function");
+        var handler = new GenerateBackedHandler(opts.Generate, opts.GenerateStream);
 
         var o = new LlmClient.Options
         {
@@ -133,8 +137,19 @@ public static class InProcess
     /// </summary>
     public sealed class GenerateBackedHandler : HttpMessageHandler
     {
-        private readonly Func<Request, Response> _generate;
+        private readonly Func<Request, Response>? _generate;
+        private readonly Func<Request, Action<LlmClient.StreamEvent>, CancellationToken, Task<Response>>? _stream;
         public GenerateBackedHandler(Func<Request, Response> generate) => _generate = generate;
+
+        /// <summary>A handler over a plain and/or a streaming generate (at least one required).</summary>
+        public GenerateBackedHandler(Func<Request, Response>? generate,
+            Func<Request, Action<LlmClient.StreamEvent>, CancellationToken, Task<Response>>? generateStream)
+        {
+            if (generate is null && generateStream is null)
+                throw new ArgumentException("toolnexus: GenerateBackedHandler requires a `Generate` or `GenerateStream` function");
+            _generate = generate;
+            _stream = generateStream;
+        }
 
         protected override async Task<HttpResponseMessage> SendAsync(
             HttpRequestMessage request, CancellationToken cancellationToken)
@@ -146,7 +161,10 @@ public static class InProcess
 
             // A Generate returns a whole answer, so a stream would be one chunk pretending to be
             // many — indistinguishable from a real stream by content or delta count. Refuse.
-            if (root.TryGetProperty("stream", out var s) && s.ValueKind == JsonValueKind.True)
+            var streaming = root.TryGetProperty("stream", out var s) && s.ValueKind == JsonValueKind.True;
+            if (streaming && _stream != null)
+                return StreamResponse(root, raw, cancellationToken);
+            if (streaming)
                 throw new NotSupportedException(
                     "toolnexus: InProcess.CreateClient does not support streaming — `Generate` returns "
                     + "a complete answer. Use RunAsync, or supply an HttpHandler that streams.");
@@ -161,14 +179,11 @@ public static class InProcess
             // duration and silently serialize turns that should run concurrently.
             await Task.Yield();
 
-            var answer = _generate(new Request
-            {
-                Messages = ToList(root, "messages"),
-                Tools = ToList(root, "tools"),
-                Model = root.TryGetProperty("model", out var m) ? m.GetString() ?? "" : "",
-                Body = JsonSerializer.Deserialize<Dictionary<string, object?>>(raw)
-                       ?? new Dictionary<string, object?>(),
-            }) ?? Response.FromContent("");
+            var ipReq = BuildRequest(root, raw);
+            var answer = (_generate != null
+                ? _generate(ipReq)
+                : await _stream!(ipReq, static _ => { }, cancellationToken).ConfigureAwait(false))
+                ?? Response.FromContent("");
 
             var sb = new StringBuilder();
             sb.Append("{\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\"");
@@ -206,6 +221,134 @@ public static class InProcess
             {
                 Content = new StringContent(sb.ToString(), Encoding.UTF8, "application/json"),
             };
+        }
+
+        private static Request BuildRequest(JsonElement root, string raw) => new()
+        {
+            Messages = ToList(root, "messages"),
+            Tools = ToList(root, "tools"),
+            Model = root.TryGetProperty("model", out var m) ? m.GetString() ?? "" : "",
+            Body = JsonSerializer.Deserialize<Dictionary<string, object?>>(raw)
+                   ?? new Dictionary<string, object?>(),
+        };
+
+        /// <summary>
+        /// Runs <c>GenerateStream</c> in the background and answers at once with an OpenAI SSE body
+        /// fed as it emits: each non-empty text event is a <c>delta.content</c> chunk the moment it
+        /// arrives; other events go to the stream consumer directly (never through the wire, so the
+        /// loop never executes them). After it returns: tool calls ⇒ one tool_calls delta, else —
+        /// only if no text was emitted — the content as one delta; then finish_reason, usage, [DONE].
+        /// </summary>
+        private HttpResponseMessage StreamResponse(JsonElement root, string raw, CancellationToken ct)
+        {
+            var ipReq = BuildRequest(root, raw);
+            var side = LlmClient.StreamSide.Value;
+            var ch = System.Threading.Channels.Channel.CreateUnbounded<byte[]>(
+                new System.Threading.Channels.UnboundedChannelOptions { SingleReader = true });
+            void Chunk(object v) => ch.Writer.TryWrite(Encoding.UTF8.GetBytes("data: " + JsonSerializer.Serialize(v) + "\n\n"));
+            static Dictionary<string, object?> Delta(Dictionary<string, object?> delta, string? finish = null)
+            {
+                var c = new Dictionary<string, object?> { ["index"] = 0, ["delta"] = delta };
+                if (finish != null) c["finish_reason"] = finish;
+                return new Dictionary<string, object?> { ["choices"] = new object[] { c } };
+            }
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    var sawText = false;
+                    var answer = await _stream!(ipReq, ev =>
+                    {
+                        if (ev is null) return;
+                        if (ev.Type == LlmClient.StreamKind.Text)
+                        {
+                            if (!string.IsNullOrEmpty(ev.Delta))
+                            {
+                                sawText = true;
+                                Chunk(Delta(new() { ["content"] = ev.Delta }));
+                            }
+                            return;
+                        }
+                        side?.Invoke(ev);
+                    }, ct).ConfigureAwait(false) ?? Response.FromContent("");
+                    var finish = "stop";
+                    if (answer.ToolCalls is { Count: > 0 })
+                    {
+                        var calls = new List<object?>();
+                        for (var i = 0; i < answer.ToolCalls.Count; i++)
+                        {
+                            var c = answer.ToolCalls[i];
+                            calls.Add(new Dictionary<string, object?>
+                            {
+                                ["index"] = i, ["id"] = c.Id ?? $"call_{i}", ["type"] = "function",
+                                ["function"] = new Dictionary<string, object?> { ["name"] = c.Name, ["arguments"] = EncodeArgs(c.Arguments) },
+                            });
+                        }
+                        Chunk(Delta(new() { ["tool_calls"] = calls }));
+                        finish = "tool_calls";
+                    }
+                    else if (!sawText && !string.IsNullOrEmpty(answer.Content))
+                    {
+                        Chunk(Delta(new() { ["content"] = answer.Content }));
+                    }
+                    Chunk(Delta(new(), finish));
+                    if (answer.Usage is { } u)
+                    {
+                        var total = u.TotalTokens > 0 ? u.TotalTokens : u.PromptTokens + u.CompletionTokens;
+                        Chunk(new Dictionary<string, object?>
+                        {
+                            ["choices"] = Array.Empty<object>(),
+                            ["usage"] = new Dictionary<string, object?>
+                            {
+                                ["prompt_tokens"] = u.PromptTokens, ["completion_tokens"] = u.CompletionTokens, ["total_tokens"] = total,
+                            },
+                        });
+                    }
+                    ch.Writer.TryWrite(Encoding.UTF8.GetBytes("data: [DONE]\n\n"));
+                    ch.Writer.TryComplete();
+                }
+                catch (Exception e)
+                {
+                    ch.Writer.TryComplete(e);
+                }
+            });
+            var content = new StreamContent(new ChannelReadStream(ch.Reader));
+            content.Headers.TryAddWithoutValidation("Content-Type", "text/event-stream");
+            return new HttpResponseMessage(System.Net.HttpStatusCode.OK) { Content = content };
+        }
+
+        /// <summary>A read-only stream over a channel of byte chunks; a faulted channel rethrows its error.</summary>
+        private sealed class ChannelReadStream : Stream
+        {
+            private readonly System.Threading.Channels.ChannelReader<byte[]> _r;
+            private byte[]? _cur;
+            private int _pos;
+            public ChannelReadStream(System.Threading.Channels.ChannelReader<byte[]> r) => _r = r;
+            public override bool CanRead => true;
+            public override bool CanSeek => false;
+            public override bool CanWrite => false;
+            public override long Length => throw new NotSupportedException();
+            public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+            public override void Flush() { }
+            public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+            public override void SetLength(long value) => throw new NotSupportedException();
+            public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+            public override int Read(byte[] buffer, int offset, int count) =>
+                ReadAsync(buffer.AsMemory(offset, count)).AsTask().GetAwaiter().GetResult();
+            public override Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken ct) =>
+                ReadAsync(buffer.AsMemory(offset, count), ct).AsTask();
+            public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken ct = default)
+            {
+                while (_cur == null || _pos >= _cur.Length)
+                {
+                    if (!await _r.WaitToReadAsync(ct).ConfigureAwait(false)) return 0;
+                    if (_r.TryRead(out var next)) { _cur = next; _pos = 0; }
+                }
+                var n = Math.Min(buffer.Length, _cur.Length - _pos);
+                _cur.AsMemory(_pos, n).CopyTo(buffer);
+                _pos += n;
+                return n;
+            }
         }
 
         private static IReadOnlyList<object?> ToList(JsonElement root, string name) =>
