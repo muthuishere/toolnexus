@@ -192,9 +192,8 @@ handler =
 # Toolnexus.McpServerAuth.metadata(auth) at /.well-known/oauth-protected-resource[/mcp]
 ```
 
-`Toolnexus.start_mcp_dev_auth_server/1` is a **DEV ONLY** authorization server (plain HTTP on
-`127.0.0.1`, auto-approves as `dev-user`, pre-registered + CIMD clients, PKCE S256, refresh rotation,
-no DCR) for local development and tests — never run it in production.
+Bring your own authorization server: `Toolnexus.McpServerAuth` verifies its tokens. The auto-approving dev
+authorization server the suite uses is test tooling (`test/support/mcp_dev_auth_server.ex`), not part of the library.
 
 ## Documentation
 

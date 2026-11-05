@@ -2,6 +2,10 @@ defmodule Toolnexus.McpDevAuthServer do
   @moduledoc """
   DEVELOPMENT AND TESTS ONLY. NEVER USE IN PRODUCTION.
 
+  Test tooling, not part of the library (compiled only in `:test` from
+  `test/support`). Bring your own authorization server; `Toolnexus.McpServerAuth`
+  verifies its tokens.
+
   An in-process OAuth 2.1 authorization server (SPEC §7C.2) that auto-approves
   every request as `"dev-user"` (no login, no consent): RFC 8414 metadata, JWKS,
   authorization code + PKCE S256, resource indicators (RFC 8707), `iss` in the
@@ -9,7 +13,7 @@ defmodule Toolnexus.McpDevAuthServer do
   ID Metadata Documents. **No dynamic client registration.** Plain HTTP on
   `127.0.0.1:<random>`, so a toolnexus client needs `auth.allowHttp` against it.
 
-      {:ok, as} = Toolnexus.start_mcp_dev_auth_server(clients: %{"my-app" => ["http://127.0.0.1/callback"]})
+      {:ok, as} = Toolnexus.McpDevAuthServer.start(clients: %{"my-app" => ["http://127.0.0.1/callback"]})
       auth = Toolnexus.McpServerAuth.new(issuer: as.issuer, scopes: %{"*" => ["mcp"]})
       # ...
       Toolnexus.McpDevAuthServer.close(as)

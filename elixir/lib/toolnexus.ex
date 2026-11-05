@@ -54,12 +54,4 @@ defmodule Toolnexus do
   """
   @spec load_mcp_skills(String.t()) :: {:ok, [Toolnexus.McpHandler.Skill.t()]} | {:error, term()}
   defdelegate load_mcp_skills(dir), to: Toolnexus.McpHandler
-
-  @doc """
-  Start the DEV-ONLY OAuth authorization server (SPEC §7C.2). Never use it in
-  production. See `Toolnexus.McpDevAuthServer`.
-  """
-  @spec start_mcp_dev_auth_server(keyword() | map()) ::
-          {:ok, Toolnexus.McpDevAuthServer.t()} | {:error, term()}
-  defdelegate start_mcp_dev_auth_server(opts \\ []), to: Toolnexus.McpDevAuthServer, as: :start
 end

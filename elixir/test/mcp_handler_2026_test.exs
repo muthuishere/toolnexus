@@ -78,7 +78,7 @@ defmodule Toolnexus.McpHandler2026Test do
   defp text(out), do: get_in(out, ["result", "content", Access.at(0), "text"])
 
   test "default JWT verifier against the dev AS" do
-    {:ok, as} = Toolnexus.start_mcp_dev_auth_server()
+    {:ok, as} = McpDevAuthServer.start()
 
     auth =
       McpServerAuth.new(issuer: as.issuer, scopes: %{"*" => ["mcp"], "who" => ["mcp:who"]})
@@ -215,7 +215,7 @@ defmodule Toolnexus.McpHandler2026Test do
     Agent.update(agent, fn _ -> doc_url end)
 
     {:ok, as} =
-      Toolnexus.start_mcp_dev_auth_server(clients: %{"app" => ["http://127.0.0.1/cb"]})
+      McpDevAuthServer.start(clients: %{"app" => ["http://127.0.0.1/cb"]})
 
     auth = McpServerAuth.new(issuer: as.issuer, scopes: %{"*" => ["mcp"]})
 
