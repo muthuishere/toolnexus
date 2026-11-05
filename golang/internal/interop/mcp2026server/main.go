@@ -17,6 +17,7 @@ import (
 	"sync"
 
 	toolnexus "github.com/muthuishere/toolnexus/golang"
+	"github.com/muthuishere/toolnexus/golang/internal/devauth"
 )
 
 func main() {
@@ -24,7 +25,7 @@ func main() {
 	if len(os.Args) > 1 {
 		skillsDir = os.Args[1]
 	}
-	as, err := toolnexus.StartMCPDevAuthServer(toolnexus.MCPDevAuthOptions{
+	as, err := devauth.Start(devauth.Options{
 		Clients: map[string][]string{"interop-client": {"http://127.0.0.1/callback"}},
 	})
 	if err != nil {

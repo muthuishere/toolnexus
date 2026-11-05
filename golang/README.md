@@ -186,8 +186,8 @@ mux.Handle("/.well-known/oauth-protected-resource/", auth.Metadata())
 mux.Handle("/.well-known/oauth-protected-resource", auth.Metadata())
 ```
 
-`toolnexus.StartMCPDevAuthServer(...)` starts a local authorization server for development and tests
-(it approves everyone — never use it in production).
+Bring your own authorization server: `MCPServerAuth` verifies its tokens. The auto-approving dev
+authorization server the suite uses is test tooling (`internal/devauth`), not part of the library.
 
 ## Documentation
 

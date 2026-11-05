@@ -1,4 +1,7 @@
-// MCPDevAuthServer — DEVELOPMENT AND TESTS ONLY. NEVER USE IN PRODUCTION.
+// Package devauth is the MCP dev authorization server — TEST AND INTEROP
+// TOOLING ONLY, NOT LIBRARY SURFACE (SPEC §7C.2). It lives under internal/ so
+// it cannot be imported from outside this module and never ships as API.
+// NEVER USE IN PRODUCTION.
 //
 // An in-process OAuth 2.1 authorization server that auto-approves every
 // request as "dev-user" (no login, no consent): RFC 8414 metadata, JWKS,
@@ -7,13 +10,13 @@
 // Client ID Metadata Documents. No dynamic client registration. Plain HTTP on
 // 127.0.0.1, so a toolnexus client needs auth.allowHttp:true against it.
 //
-//	as, _ := toolnexus.StartMCPDevAuthServer(toolnexus.MCPDevAuthOptions{Clients: map[string][]string{"my-app": {"http://127.0.0.1/callback"}}})
+//	as, _ := devauth.Start(devauth.Options{Clients: map[string][]string{"my-app": {"http://127.0.0.1/callback"}}})
 //	defer as.Close()
 //	auth := &toolnexus.MCPServerAuth{Issuer: as.Issuer, Scopes: map[string][]string{"*": {"mcp"}}}
-
-package toolnexus
+package devauth
 
 import (
+	"context"
 	"crypto"
 	"crypto/rand"
 	"crypto/rsa"
@@ -21,6 +24,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"math/big"
 	"net"
 	"net/http"
@@ -30,8 +34,8 @@ import (
 	"time"
 )
 
-// MCPDevAuthOptions configures StartMCPDevAuthServer.
-type MCPDevAuthOptions struct {
+// Options configures Start.
+type Options struct {
 	// Clients: pre-registered client_id → allowed redirect URIs (a loopback
 	// redirect matches on any port, RFC 8252 §7.3).
 	Clients map[string][]string
@@ -48,11 +52,11 @@ type MCPDevAuthOptions struct {
 	MetadataClient *http.Client
 }
 
-// MCPDevAuthServer is the running dev authorization server.
-type MCPDevAuthServer struct {
+// Server is the running dev authorization server.
+type Server struct {
 	Issuer string // http://127.0.0.1:<port>
 
-	opts  MCPDevAuthOptions
+	opts  Options
 	key   *rsa.PrivateKey
 	ln    net.Listener
 	srv   *http.Server
@@ -64,8 +68,8 @@ type MCPDevAuthServer struct {
 
 type mcpDevGrant struct{ clientID, redirect, challenge, resource, scope string }
 
-// StartMCPDevAuthServer starts the dev AS on 127.0.0.1:<random>.
-func StartMCPDevAuthServer(opts MCPDevAuthOptions) (*MCPDevAuthServer, error) {
+// Start starts the dev AS on 127.0.0.1:<random>.
+func Start(opts Options) (*Server, error) {
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		return nil, err
@@ -77,7 +81,7 @@ func StartMCPDevAuthServer(opts MCPDevAuthOptions) (*MCPDevAuthServer, error) {
 	if opts.MetadataClient == nil {
 		opts.MetadataClient = &http.Client{Timeout: 10 * time.Second}
 	}
-	d := &MCPDevAuthServer{Issuer: "http://" + ln.Addr().String(), opts: opts, key: key, ln: ln,
+	d := &Server{Issuer: "http://" + ln.Addr().String(), opts: opts, key: key, ln: ln,
 		codes: map[string]mcpDevGrant{}, rts: map[string]mcpDevGrant{}}
 	d.srv = &http.Server{Handler: d, ReadHeaderTimeout: 10 * time.Second}
 	go func() { _ = d.srv.Serve(ln) }()
@@ -85,10 +89,10 @@ func StartMCPDevAuthServer(opts MCPDevAuthOptions) (*MCPDevAuthServer, error) {
 }
 
 // Close stops the server.
-func (d *MCPDevAuthServer) Close() { _ = d.srv.Close() }
+func (d *Server) Close() { _ = d.srv.Close() }
 
 // Authorizations is how many /authorize requests were served.
-func (d *MCPDevAuthServer) Authorizations() int {
+func (d *Server) Authorizations() int {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return d.auths
@@ -96,7 +100,7 @@ func (d *MCPDevAuthServer) Authorizations() int {
 
 // Mint signs an access token with the server's key (tests: forge expired or
 // wrong-audience tokens).
-func (d *MCPDevAuthServer) Mint(claims map[string]any) string {
+func (d *Server) Mint(claims map[string]any) string {
 	h, _ := json.Marshal(map[string]string{"alg": "RS256", "typ": "JWT", "kid": "dev"})
 	c, _ := json.Marshal(claims)
 	in := base64.RawURLEncoding.EncodeToString(h) + "." + base64.RawURLEncoding.EncodeToString(c)
@@ -111,7 +115,7 @@ func mcpDevRand(n int) string {
 	return hex.EncodeToString(b)
 }
 
-func (d *MCPDevAuthServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+func (d *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	js := func(status int, v any) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(status)
@@ -139,7 +143,7 @@ func (d *MCPDevAuthServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (d *MCPDevAuthServer) authorize(w http.ResponseWriter, r *http.Request) {
+func (d *Server) authorize(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	d.mu.Lock()
 	d.auths++
@@ -173,7 +177,7 @@ func (d *MCPDevAuthServer) authorize(w http.ResponseWriter, r *http.Request) {
 	back(url.Values{"code": {code}})
 }
 
-func (d *MCPDevAuthServer) redirectAllowed(r *http.Request, cid, redirect string) bool {
+func (d *Server) redirectAllowed(r *http.Request, cid, redirect string) bool {
 	allowed := d.opts.Clients[cid]
 	if strings.HasPrefix(cid, "https://") || strings.HasPrefix(cid, "http://") { // Client ID Metadata Document
 		if d.opts.NoCIMD {
@@ -184,7 +188,7 @@ func (d *MCPDevAuthServer) redirectAllowed(r *http.Request, cid, redirect string
 			ClientName   string   `json:"client_name"`
 			RedirectURIs []string `json:"redirect_uris"`
 		}
-		if mcpGetJSON(r.Context(), d.opts.MetadataClient, cid, &doc) != nil || doc.ClientID != cid || doc.ClientName == "" {
+		if getJSON(r.Context(), d.opts.MetadataClient, cid, &doc) != nil || doc.ClientID != cid || doc.ClientName == "" {
 			return false
 		}
 		allowed = doc.RedirectURIs
@@ -209,7 +213,7 @@ func (d *MCPDevAuthServer) redirectAllowed(r *http.Request, cid, redirect string
 	return false
 }
 
-func (d *MCPDevAuthServer) token(w http.ResponseWriter, r *http.Request, js func(int, any)) {
+func (d *Server) token(w http.ResponseWriter, r *http.Request, js func(int, any)) {
 	_ = r.ParseForm()
 	f := r.PostForm
 	bad := func(e string) { js(http.StatusBadRequest, map[string]any{"error": e}) }
@@ -268,4 +272,21 @@ func (d *MCPDevAuthServer) token(w http.ResponseWriter, r *http.Request, js func
 		"client_id": g.clientID, "jti": mcpDevRand(8), "exp": now.Add(ttl).Unix(), "iat": now.Unix()})
 	js(http.StatusOK, map[string]any{"access_token": at, "token_type": "Bearer", "expires_in": int(ttl.Seconds()),
 		"refresh_token": rt, "scope": g.scope})
+}
+
+func getJSON(ctx context.Context, hc *http.Client, u string, v any) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Accept", "application/json")
+	resp, err := hc.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("GET %s: HTTP %d", u, resp.StatusCode)
+	}
+	return json.NewDecoder(resp.Body).Decode(v)
 }

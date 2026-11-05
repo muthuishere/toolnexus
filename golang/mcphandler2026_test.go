@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/muthuishere/toolnexus/golang/internal/devauth"
 )
 
 // post26 sends one 2026-07-28 request (headers + _meta stamped) and returns status, header, body.
@@ -57,7 +59,7 @@ func whoTool() Tool {
 }
 
 func TestMCPServerAuth_DefaultJWTVerifierWithDevAS(t *testing.T) {
-	as, err := StartMCPDevAuthServer(MCPDevAuthOptions{})
+	as, err := devauth.Start(devauth.Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -112,7 +114,7 @@ func TestMCPServerAuth_DefaultJWTVerifierWithDevAS(t *testing.T) {
 }
 
 // pkceLogin runs the authorization-code + PKCE flow against the dev AS with no browser.
-func pkceLogin(t *testing.T, as *MCPDevAuthServer, clientID, redirect, resource, scope string) map[string]any {
+func pkceLogin(t *testing.T, as *devauth.Server, clientID, redirect, resource, scope string) map[string]any {
 	t.Helper()
 	verifier := "v-" + strings.Repeat("a", 50)
 	sum := sha256.Sum256([]byte(verifier))
@@ -154,7 +156,7 @@ func TestMCPDevAuthServer_PreRegisteredAndCIMD(t *testing.T) {
 	cimd.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"client_id": docURL, "client_name": "CIMD app", "redirect_uris": []string{"http://127.0.0.1/cb"}})
 	})
-	as, err := StartMCPDevAuthServer(MCPDevAuthOptions{Clients: map[string][]string{"app": {"http://127.0.0.1/cb"}}})
+	as, err := devauth.Start(devauth.Options{Clients: map[string][]string{"app": {"http://127.0.0.1/cb"}}})
 	if err != nil {
 		t.Fatal(err)
 	}
