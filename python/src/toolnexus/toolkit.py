@@ -284,7 +284,7 @@ class Toolkit:
             on_task=on_task,
             loop=asyncio.get_running_loop(),
             mcp=mcp_cfg,
-            mcp_tools=self.tools() if mcp_cfg else None,
+            mcp_tools=self.tools() if mcp_cfg is not None else None,
             on_call=on_call,
         )
 
