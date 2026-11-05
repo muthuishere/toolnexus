@@ -52,15 +52,18 @@ type mhcDecision struct {
 
 type mhcStep struct {
 	Request struct {
-		Method      string          `json:"method"`
-		Body        json.RawMessage `json:"body"`
-		RawBody     *string         `json:"rawBody"`
-		ContentType string          `json:"contentType"`
-		Accept      string          `json:"accept"`
-		Token       string          `json:"token"`
-		Session     bool            `json:"session"`
-		SessionID   string          `json:"sessionId"`
-		Version     string          `json:"version"`
+		Method      string            `json:"method"`
+		Body        json.RawMessage   `json:"body"`
+		RawBody     *string           `json:"rawBody"`
+		ContentType string            `json:"contentType"`
+		Accept      string            `json:"accept"`
+		Token       string            `json:"token"`
+		Session     bool              `json:"session"`
+		SessionID   string            `json:"sessionId"`
+		Version     string            `json:"version"`
+		MCP2026     bool              `json:"mcp2026"`
+		Headers     map[string]string `json:"headers"`
+		Target      string            `json:"target"`
 	} `json:"request"`
 	Capture string `json:"capture"`
 	Expect  struct {
@@ -84,6 +87,8 @@ type mhcScenario struct {
 		Stateless          bool     `json:"stateless"`
 		StatelessSessionID string   `json:"statelessSessionId"`
 		ProtocolVersions   []string `json:"protocolVersions"`
+		Skills             bool     `json:"skills"`
+		ServerAuth         bool     `json:"serverAuth"`
 	} `json:"config"`
 	Token          string           `json:"token"`
 	Steps          []mhcStep        `json:"steps"`
@@ -97,7 +102,16 @@ type mhcFile struct {
 			Tokens          map[string]string `json:"tokens"`
 			WWWAuthenticate string            `json:"wwwAuthenticate"`
 		} `json:"auth"`
-		Tools []mhcFixtureTool `json:"tools"`
+		Tools      []mhcFixtureTool `json:"tools"`
+		ServerAuth struct {
+			Issuer     string              `json:"issuer"`
+			Audience   string              `json:"audience"`
+			Scopes     map[string][]string `json:"scopes"`
+			Principals map[string]struct {
+				Subject string   `json:"subject"`
+				Scopes  []string `json:"scopes"`
+			} `json:"principals"`
+		} `json:"serverAuth"`
 	} `json:"fixture"`
 	Scenarios []mhcScenario `json:"scenarios"`
 }
@@ -142,8 +156,15 @@ func TestMCPHandler_Conformance(t *testing.T) {
 					case "echo":
 						s, _ := args["text"].(string)
 						return ToolResult{Output: s}, nil
+					case "ask":
+						if a := tc.Answer; a != nil && a.Ok {
+							n, _ := a.Data["name"].(string)
+							return ToolResult{Output: "Hello, " + n + "!"}, nil
+						}
+						return Pending(Request{ID: "name", Kind: "input", Prompt: "What is your name?", Data: map[string]any{
+							"schema": map[string]any{"type": "object", "properties": map[string]any{"name": map[string]any{"type": "string"}}, "required": []any{"name"}}}}), nil
 					case "whoami":
-						id, _ := IdentityFrom(tc.Ctx).(string)
+						id := mhcIdentityName(IdentityFrom(tc.Ctx))
 						tr, _ := MCPRequestMetaFrom(tc.Ctx)["trace"].(string)
 						return ToolResult{Output: id + "|" + tr}, nil
 					case "error":
@@ -162,7 +183,7 @@ func TestMCPHandler_Conformance(t *testing.T) {
 				Name: sc.Config.Name, Title: sc.Config.Title, Version: sc.Config.Version, Instructions: sc.Config.Instructions,
 				Stateless: sc.Config.Stateless, StatelessSessionID: sc.Config.StatelessSessionID, ProtocolVersions: sc.Config.ProtocolVersions,
 				ListTools: func(ctx context.Context) ([]Tool, error) {
-					id, _ := IdentityFrom(ctx).(string)
+					id := mhcIdentityName(IdentityFrom(ctx))
 					out := []Tool{}
 					for _, tl := range tools {
 						if v := byName[tl.Name].VisibleTo; v != nil {
@@ -205,8 +226,27 @@ func TestMCPHandler_Conformance(t *testing.T) {
 				}
 				cfg.WWWAuthenticate = func(*http.Request, error) string { return f.Fixture.Auth.WWWAuthenticate }
 			}
+			if sc.Config.Skills {
+				cfg.ListSkills = func(context.Context) ([]MCPSkill, error) { return LoadMCPSkills("../examples/skills") }
+			}
+			var meta http.Handler = http.NotFoundHandler()
+			if sc.Config.ServerAuth {
+				fa := f.Fixture.ServerAuth
+				auth := &MCPServerAuth{Issuer: fa.Issuer, Audience: fa.Audience, Scopes: fa.Scopes,
+					Verify: func(_ context.Context, token, _ string) (MCPPrincipal, error) {
+						p, ok := fa.Principals[token]
+						if !ok {
+							return MCPPrincipal{}, errors.New("bad token")
+						}
+						return MCPPrincipal{Subject: p.Subject, Scopes: p.Scopes}, nil
+					}}
+				cfg.Authenticate = auth.Authenticate
+				meta = auth.Metadata()
+			}
 			srv := httptest.NewServer(newHandlerTK(t).MCPHandler(cfg))
 			defer srv.Close()
+			metaSrv := httptest.NewServer(meta)
+			defer metaSrv.Close()
 
 			sid := ""
 			for i, st := range sc.Steps {
@@ -217,7 +257,15 @@ func TestMCPHandler_Conformance(t *testing.T) {
 				} else if len(rq.Body) > 0 {
 					body = bytes.NewReader(rq.Body)
 				}
-				req, _ := http.NewRequest(rq.Method, srv.URL, body)
+				target := srv.URL
+				if rq.Target != "" {
+					target = metaSrv.URL + rq.Target
+				}
+				if rq.MCP2026 && len(rq.Body) > 0 {
+					rq.Body = mhcStamp2026(t, rq.Body)
+					body = bytes.NewReader(rq.Body)
+				}
+				req, _ := http.NewRequest(rq.Method, target, body)
 				if rq.Method == "POST" {
 					ct := rq.ContentType
 					if ct == "" {
@@ -241,12 +289,31 @@ func TestMCPHandler_Conformance(t *testing.T) {
 				if rq.Version != "" {
 					req.Header.Set("MCP-Protocol-Version", rq.Version)
 				}
+				if rq.MCP2026 {
+					for k, v := range mhcHeaders2026(rq.Body) {
+						req.Header.Set(k, v)
+					}
+				}
+				for k, v := range rq.Headers {
+					if v == "" {
+						req.Header.Del(k)
+					} else {
+						req.Header.Set(k, v)
+					}
+				}
 				resp, err := http.DefaultClient.Do(req)
 				if err != nil {
 					t.Fatalf("step %d: %v", i, err)
 				}
 				rb, _ := io.ReadAll(resp.Body)
 				resp.Body.Close()
+				if rec := os.Getenv("MHC_RECORD"); rec != "" {
+					line, _ := json.Marshal(map[string]any{"scenario": sc.Name, "step": i, "status": resp.StatusCode,
+						"www": resp.Header.Get("WWW-Authenticate"), "body": string(rb)})
+					fh, _ := os.OpenFile(rec, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+					_, _ = fh.Write(append(line, '\n'))
+					_ = fh.Close()
+				}
 				ex := st.Expect
 				if ex.Status != 0 && resp.StatusCode != ex.Status {
 					t.Fatalf("step %d: status %d want %d (%s)", i, resp.StatusCode, ex.Status, rb)
@@ -325,4 +392,57 @@ func mhcPath(v any, path string) any {
 		}
 	}
 	return v
+}
+
+// mhcIdentityName: a string identity verbatim, an MCPPrincipal's subject, else "".
+func mhcIdentityName(v any) string {
+	switch x := v.(type) {
+	case string:
+		return x
+	case MCPPrincipal:
+		return x.Subject
+	}
+	return ""
+}
+
+// mhcStamp2026 adds params._meta["io.modelcontextprotocol/protocolVersion"] =
+// "2026-07-28" unless the body already sets that key (README: `mcp2026`).
+func mhcStamp2026(t *testing.T, body json.RawMessage) json.RawMessage {
+	var m map[string]any
+	if err := json.Unmarshal(body, &m); err != nil {
+		t.Fatal(err)
+	}
+	p, _ := m["params"].(map[string]any)
+	if p == nil {
+		p = map[string]any{}
+	}
+	meta, _ := p["_meta"].(map[string]any)
+	if meta == nil {
+		meta = map[string]any{}
+	}
+	if _, ok := meta[mcpMetaVersion]; !ok {
+		meta[mcpMetaVersion] = MCPProtocol2026
+	}
+	p["_meta"] = meta
+	m["params"] = p
+	b, _ := json.Marshal(m)
+	return b
+}
+
+// mhcHeaders2026: MCP-Protocol-Version, Mcp-Method and (tools/call,
+// prompts/get: name; resources/read: uri) Mcp-Name, from the body.
+func mhcHeaders2026(body json.RawMessage) map[string]string {
+	var m struct {
+		Method string         `json:"method"`
+		Params map[string]any `json:"params"`
+	}
+	_ = json.Unmarshal(body, &m)
+	h := map[string]string{"MCP-Protocol-Version": MCPProtocol2026, "Mcp-Method": m.Method}
+	switch m.Method {
+	case "tools/call", "prompts/get":
+		h["Mcp-Name"], _ = m.Params["name"].(string)
+	case "resources/read":
+		h["Mcp-Name"], _ = m.Params["uri"].(string)
+	}
+	return h
 }

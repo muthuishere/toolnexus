@@ -1191,8 +1191,9 @@ Tool.annotations? = { title?, readOnlyHint?, destructiveHint?, idempotentHint?, 
   `protocolVersions` lists of those. `2025-11-25` differs on the server side only by optional fields
   plus one rule a port MUST apply for a request carrying `MCP-Protocol-Version: 2025-11-25`: invalid
   tool arguments are an `isError` tool result, not `-32602`. `2025-03-26` is **not** accepted (it
-  permits JSON-RPC batches, which this surface rejects); `2026-07-28` is **not** accepted until the
-  #134 upgrade implements its wire.
+  permits JSON-RPC batches, which this surface rejects). `2026-07-28` is implemented as an **opt-in**
+  stateless wire (§7C.2) and is never a default; `initialize` never negotiates it (a legacy client
+  asking for it gets the newest legacy version listed).
 - **`_meta`**: a request's `params._meta` is exposed to every hook and tool via `mcpRequestMetaFrom(ctx)`;
   `ToolResult.meta` leaves as the result's `_meta`.
 - **Transport**: `POST` JSON-RPC ⇒ `application/json`, or
@@ -1227,6 +1228,140 @@ Tool.annotations? = { title?, readOnlyHint?, destructiveHint?, idempotentHint?, 
 
 Left to the host: identity/tenant/role mapping, OAuth and RFC 9728 metadata, CORS, TLS, rate limits,
 what backs `sessionIds`, branding values.
+
+### 7C.2 MCP 2026-07-28 on `mcpHandler` (opt-in) — ADR 0040
+
+The server half of change `upgrade-mcp-2026-07-28` (client: §2, §2A.1). Enabled by listing
+`"2026-07-28"` in `protocolVersions`; absent ⇒ the handler is byte-identical to §7C.1 (and a 2026
+client's `server/discover` gets the legacy `400`, which is the client's §2.2a fallback trigger).
+The wire is **stateless**: no `initialize`, no `Mcp-Session-Id`, no server→client request, no GET
+stream. Every §7C.1 hook keeps its meaning; nothing about tenants, users or storage is added.
+
+```
+cfg.protocolVersions: ["2026-07-28"]                 // 2026 only
+cfg.protocolVersions: ["2026-07-28", "2025-06-18"]   // both wires on one mount
+cfg.listSkills?(ctx) -> Skill[]                      // SEP-2640 skills extension; nil ⇒ not advertised
+Skill = { name, frontmatter?: {..}, files: [{path, text}] }   // files include "SKILL.md"; paths relative, "/"-separated
+loadMcpSkills(dir) -> Skill[]                        // helper: **/SKILL.md under dir
+MCPServerAuth { issuer, audience?, resourcePath? ("/mcp"), scopes?: {"*": [..], <tool>: [..]}, verify?(ctx, token, audience) -> Principal, httpClient? }
+  .authenticate(request)  -> Principal | MCPAuthError   // plug into cfg.authenticate
+  .metadata()             -> HTTP handler for the RFC 9728 document
+Principal = { subject, scopes, claims }              // what identityFrom(ctx) returns under MCPServerAuth
+MCPAuthError = { status (401|403), challenge, reason } // any authenticate hook may return it
+startMcpDevAuthServer({clients?, secrets?, accessTtl?, noCimd?, rejectRefreshResource?}) -> { issuer, mint(claims), close() }   // DEV ONLY
+```
+
+**Routing (pinned).** With 2026-07-28 the only accepted version, every POST is a 2026 request
+(including `initialize`, which then fails header validation) and GET/DELETE ⇒ `405` (`Allow: POST`).
+With legacy versions also listed, a POST is a 2026 request iff its method is not `initialize` and
+(`MCP-Protocol-Version` is `2026-07-28`, or the header is absent/not an accepted legacy version and
+(the method is `server/discover`, or an `Mcp-Method` header is present, or `params._meta` carries
+`io.modelcontextprotocol/protocolVersion`)); everything else is served by §7C.1 unchanged. Content type
+(`415`) and body size (`413`) are checked as in §7C.1; on a 2026-only handler a JSON array body ⇒
+`400` `-32600` "batch requests are not supported", an unparsable body ⇒ `400` `-32700` "Parse error".
+
+**Order:** notification (no `id`) ⇒ `202` · header validation · `authenticate` · dispatch.
+
+**Header validation** (HTTP `400`, JSON-RPC error, before auth), in this order:
+1. `MCP-Protocol-Version` missing ⇒ `-32020` `Header mismatch: MCP-Protocol-Version header missing`.
+2. `Mcp-Method` ≠ body method ⇒ `-32020` `Header mismatch: Mcp-Method header value '<h>' does not match body value '<b>'`.
+3. `tools/call`, `prompts/get` (`params.name`), `resources/read` (`params.uri`): `Mcp-Name` (the
+   `=?base64?<std-base64>?=` sentinel decoded; an absent header is `''`) ≠ body value ⇒ `-32020`
+   `Header mismatch: Mcp-Name header value '<h>' does not match body value '<b>'`.
+4. header version ≠ `params._meta["io.modelcontextprotocol/protocolVersion"]` (absent ⇒ `''`) ⇒ `-32020`
+   `Header mismatch: MCP-Protocol-Version header value '<h>' does not match _meta value '<m>'`.
+5. version ≠ `2026-07-28` ⇒ `-32022` `Unsupported protocol version`, `data: {supported: ["2026-07-28"], requested: <m>}`.
+
+**Results.** Every result carries `resultType` (`"complete"`, or `"input_required"` for MRTR) and
+`_meta["io.modelcontextprotocol/serverInfo"] = {name, title?, version}` (from `serverInfo(ctx)` / the
+static fields, defaults `toolnexus` / `0.1.0`), merged into any `_meta` the result already has
+(`ToolResult.meta` keys first, the serverInfo key set last). JSON-RPC errors carry no `_meta`.
+Unknown method ⇒ HTTP `404` `-32601` `Method not found: <method>`; other errors are HTTP `200`.
+`cacheScope` is `"private"` when `authenticate` is configured, else `"public"` (except discover).
+
+| method | result (besides `resultType` + `_meta`) |
+|---|---|
+| `server/discover` | `supportedVersions: ["2026-07-28"]`, `capabilities: {tools:{}, resources:{}` iff `listResources` or `listSkills`, `prompts:{}` iff `listPrompts`, `extensions: {"io.modelcontextprotocol/skills": {}}` iff `listSkills}`, `instructions` when non-empty, `ttlMs: 3600000`, `cacheScope: "public"` |
+| `ping` | — |
+| `tools/list` | `tools` = `listTools(ctx)` (else the toolkit's) **sorted by name (code point)**, each entry exactly §7C.1's wire entry; `ttlMs: 60000`, `cacheScope` |
+| `tools/call` | below |
+| `skills/list` | `skills: [{uri: "skill://<name>/SKILL.md", frontmatter}]` sorted by name; `ttlMs: 60000`, `cacheScope` |
+| `skills/get {uri}` | `skill: {uri, frontmatter, resources: [{uri: "skill://<name>/<path>", digest: "sha256:<hex of the UTF-8 text>", size: <UTF-8 byte length>}]}` (files sorted by path); bad URI ⇒ `-32602` `Invalid skill URI: <why>`; unknown ⇒ `-32602` `Unknown skill: <uri>` |
+| `resources/read {uri}` | `skill://` URI with `listSkills` set: `contents: [{uri, mimeType: "text/markdown" for .md else "text/plain", text}]`, `ttlMs: 60000`, `cacheScope`; bad URI ⇒ `-32602` `Invalid resource URI: <why>`; unknown ⇒ `-32602` `Resource not found: <uri>`. Any other URI ⇒ `readResource` as §7C.1 (error `-32002`) |
+| `resources/list`, `prompts/list`, `prompts/get` | §7C.1's payload |
+
+Frontmatter defaults to `{name}`; `loadMcpSkills` sets `{name, description}` (§3 parsing, trimmed
+strings), walks `**/SKILL.md` without following symlinks, skips a skill whose frontmatter has no
+`name`, and includes every regular file under the skill directory that is valid UTF-8 (binary files are
+skipped: the wire is text). **URI containment** (§2.7): strip `skill://`, percent-decode once, then
+reject a leftover `%`, `\` or NUL (`skill URI has encoded, backslash or NUL characters`), fewer than two
+`/`-segments (`skill URI needs skill://<name>/<path>`), or any empty / `.` / `..` / `:`-containing
+segment (`skill URI path escapes the skill (empty, '.', '..' or ':' segment)`); not `skill://` ⇒ `not a
+skill:// URI`; a decode failure ⇒ `bad percent-encoding`.
+
+**`tools/call`.** Lookup as §7C.1 (`listTools`); unknown ⇒ `-32602` `Unknown tool: <name>`. Arguments
+that are present and not an object ⇒ `isError` result `invalid arguments: must be an object` (the
+2025-11-25 rule). Results map exactly as §7C (text / structured / parts / `isError` / `meta`).
+`beforeCall` runs on every round: `deny` as §7C.1. **MRTR replaces elicitation:**
+
+- `requestState` is `base64url-nopad(compact JSON {"tool":"<name>"[, "confirmed":true]})` — exactly those
+  keys in that order. It is **not** integrity-protected (a client may equally answer "accept"); a
+  `requestState` that does not decode or names another tool is ignored. `beforeCall` still runs on a
+  retry, so a forged state never bypasses `deny`.
+- `confirm`: when the state says `confirmed`, the tool runs. Else, when the request has a valid state
+  and `inputResponses.confirm`: `action` ≠ `accept`, or `content.confirm === false` ⇒ `isError`
+  `declined`; otherwise the tool runs (the confirm round is consumed: it is not passed on as an
+  answer). Else, when `params._meta["io.modelcontextprotocol/clientCapabilities"]` has `elicitation`:
+  answer `input_required` with `inputRequests: {"confirm": {method: "elicitation/create", params:
+  {mode: "form", message: <message or "Confirm this action?">, requestedSchema: {type: "object",
+  properties: {confirm: {type: "boolean", title: "Confirm", description: <message>}}}}}}` and
+  `requestState` for `{tool}`. Else the §7C.1 no-elicitation result (`result`, or `confirmation
+  required: <message>`).
+- **Tool suspension (§10).** When the request has a valid state and `inputResponses` holds exactly one
+  entry `<key>: {action, content?}`, the tool's context carries `Answer{id: <key>, ok: action ==
+  "accept", data: content, reason: (ok ? none : action == "decline" ? "declined" : "cancelled")}`.
+  When `execute` returns a pending `Request` (no error), the result is `input_required` with
+  `inputRequests: {<request.id>: …}` and `requestState` for `{tool, confirmed?}` (confirmed carried
+  over): `kind:"authorization"` with a `url` ⇒ `{method:"elicitation/create", params:{mode:"url",
+  message: prompt, url, elicitationId: id}}`; any other kind ⇒ `{method:"elicitation/create",
+  params:{mode:"form", message: prompt, requestedSchema: request.data.schema or {type:"object",
+  properties:{}}}}`. The tool MUST be idempotent (§10): the retry re-executes it.
+- `onCall` fires once per round (an `input_required` round reports `isError:false` and its decision).
+
+**Auth (`MCPServerAuth`, §2A.2).** `authenticate(request)`: no `Authorization: Bearer <t>` ⇒ `401`;
+`verify` (default: RS256 JWT, key by `kid` from the issuer's `jwks_uri` discovered in §2A.1 step 3
+order with metadata `issuer` equal to the issuer, unknown `kid` refetches at most every 30 s; checks
+signature, `iss`, `aud` (string or array) = audience, `exp` > now) fails ⇒ `401` with `,
+error="invalid_token"`; a missing scope ⇒ `403` with the **full** needed set and `,
+error="insufficient_scope"`. Needed = `scopes["*"]` plus, when the `Mcp-Method` header is `tools/call`,
+`scopes[<decoded Mcp-Name>]` (de-duplicated, order kept) — so per-tool scopes apply on the 2026 wire;
+older wires check `scopes["*"]` only. Challenge: `Bearer resource_metadata="<metadata URL>"` then `,
+scope="<needed joined by space>"` when non-empty, then the error. Audience = `audience`, else
+`<scheme>://<Host><resourcePath>` of the request; metadata URL = origin of `audience` +
+`/.well-known/oauth-protected-resource` + its path, else `<scheme>://<Host>/.well-known/oauth-protected-resource<resourcePath>`.
+The returned `Principal` is the identity (`identityFrom(ctx)`). The handler answers any
+`MCPAuthError` (both wires) with its status, `WWW-Authenticate` = a non-empty `wwwAuthenticate` hook
+result else the error's challenge, `Content-Type: application/json` and body `{"error":"unauthorized"}`;
+other `authenticate` errors keep §7C.1's plain `401`. The token and the failure reason never appear on
+the wire. `metadata()` answers `GET /.well-known/oauth-protected-resource` and
+`…/oauth-protected-resource<resourcePath>` with `{resource: <audience>, authorization_servers:
+[issuer], scopes_supported: scopes["*"] or [], bearer_methods_supported: ["header"]}`; anything else `404`.
+
+**Dev authorization server** (every port, **development and tests only — never production**): plain
+HTTP on `127.0.0.1:<random>`, issuer `http://127.0.0.1:<port>` (clients need `auth.allowHttp`);
+`/.well-known/oauth-authorization-server` (code flow, PKCE `S256` only, `authorization_response_iss_parameter_supported:
+true`, `client_id_metadata_document_supported: !noCimd`), `/jwks` (one RSA key, `kid:"dev"`),
+`/authorize` (auto-approves as `dev-user`; pre-registered `clients` with exact redirect match, loopback
+redirects match on any port; an `http(s)://` client_id is fetched as a Client ID Metadata Document whose
+`client_id` must equal the URL and `client_name` be non-empty; an unknown client or redirect ⇒ `400`,
+never a redirect; missing `resource` ⇒ `error=invalid_target`), `/token` (code single-use + PKCE +
+client/redirect/resource match; refresh rotation; `rejectRefreshResource` ⇒ `invalid_target` when a
+refresh carries `resource`; `secrets` for confidential clients via basic or post). Access tokens are
+RS256 JWTs `{iss, sub:"dev-user", aud:<resource>, scope, client_id, jti, iat, exp}`. **No dynamic
+client registration.**
+
+Conformance: `conformance/mcp_handler/cases.json` scenarios `mcp2026_*`; interop: `interop/mcp2026/run.sh`
+(the Go 2026 client of change `upgrade-mcp-2026-07-28` against this server).
 
 ---
 

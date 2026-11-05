@@ -36,14 +36,19 @@ import (
 // these, however it is configured:
 //
 //   - 2025-06-18 — the baseline (the default).
+//
 //   - 2025-11-25 — its server-visible wire deltas over 2025-06-18 are optional
 //     fields (icons, title/description on Implementation, tasks, URL-mode
 //     elicitation) plus one rule the handler implements: invalid tool
 //     arguments are a tool execution error (isError), not -32602.
 //
+//   - 2026-07-28 — opt-in only (never a default): the stateless wire of
+//     SPEC §7C.2 (server/discover, header validation, MRTR, skills extension),
+//     served by mcphandler2026.go.
+//
 // Not accepted: 2025-03-26 (permits JSON-RPC batching, which this handler
-// rejects) and 2026-07-28 (its stateless-first wire is the #134 upgrade).
-var MCPHandlerImplementedVersions = []string{"2025-11-25", "2025-06-18"}
+// rejects).
+var MCPHandlerImplementedVersions = []string{"2026-07-28", "2025-11-25", "2025-06-18"}
 
 // mcpDefaultVersions is the default MCPHandlerConfig.ProtocolVersions.
 var mcpDefaultVersions = []string{"2025-06-18"}
@@ -190,6 +195,12 @@ type MCPHandlerConfig struct {
 	ListPrompts   func(ctx context.Context) ([]MCPPrompt, error)
 	GetPrompt     func(ctx context.Context, name string, args map[string]string) (MCPPromptResult, error)
 
+	// ListSkills publishes skills through the SEP-2640 skills extension on the
+	// 2026-07-28 wire (skills/list, skills/get, resources/read of skill://
+	// URIs). nil ⇒ the extension is not advertised. LoadMCPSkills(dir) builds
+	// the list from a skills directory; where skills live is the host's call.
+	ListSkills func(ctx context.Context) ([]MCPSkill, error)
+
 	// SessionIDs replaces the default in-memory session set.
 	SessionIDs MCPSessionIDs
 	// Stateless issues no Mcp-Session-Id and checks none; elicitation is then
@@ -256,7 +267,8 @@ type MCPHTTPHandler struct {
 	tk       *Toolkit
 	cfg      MCPHandlerConfig
 	ids      MCPSessionIDs
-	versions []string
+	versions []string // every accepted version, newest first
+	legacy   []string // versions minus 2026-07-28: the initialize/session wire
 
 	mu      sync.Mutex
 	caps    map[string]bool          // session → client declared elicitation
@@ -281,6 +293,11 @@ func (tk *Toolkit) MCPHandler(cfg MCPHandlerConfig) *MCPHTTPHandler {
 	}
 	if len(h.versions) == 0 {
 		h.versions = mcpDefaultVersions
+	}
+	for _, v := range h.versions {
+		if v != MCPProtocol2026 {
+			h.legacy = append(h.legacy, v)
+		}
 	}
 	if h.ids == nil {
 		h.ids = &memorySessionIDs{live: map[string]bool{}}
@@ -342,15 +359,18 @@ func (m *memorySessionIDs) Terminate(_ context.Context, id string) error {
 
 func (h *MCPHTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx := context.WithValue(r.Context(), mcpRequestKey, r)
+	if r.Method == http.MethodPost && mcpHasVersion(h.versions, MCPProtocol2026) && h.handlePost2026(ctx, w, r) {
+		return
+	}
+	if h.only2026() && r.Method != http.MethodPost {
+		w.Header().Set("Allow", "POST")
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
 	if h.cfg.Authenticate != nil {
 		id, err := h.cfg.Authenticate(r)
 		if err != nil {
-			if h.cfg.WWWAuthenticate != nil {
-				if v := h.cfg.WWWAuthenticate(r, err); v != "" {
-					w.Header().Set("WWW-Authenticate", v)
-				}
-			}
-			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			h.writeAuthFailure(w, r, err)
 			return
 		}
 		ctx = context.WithValue(ctx, mcpIdentityKey, id)
@@ -380,7 +400,7 @@ type mcpRPCMessage struct {
 // checkSession validates the Mcp-Session-Id header (stateful mode) and the
 // MCP-Protocol-Version header. It writes the HTTP error itself on failure.
 func (h *MCPHTTPHandler) checkSession(ctx context.Context, w http.ResponseWriter, r *http.Request) (context.Context, string, bool) {
-	if v := r.Header.Get("MCP-Protocol-Version"); v != "" && !mcpHasVersion(h.versions, v) {
+	if v := r.Header.Get("MCP-Protocol-Version"); v != "" && !mcpHasVersion(h.legacy, v) {
 		http.Error(w, "Bad Request: unsupported MCP-Protocol-Version", http.StatusBadRequest)
 		return ctx, "", false
 	}
@@ -469,8 +489,8 @@ func (h *MCPHTTPHandler) handleInitialize(ctx context.Context, w http.ResponseWr
 		} `json:"capabilities"`
 	}
 	_ = json.Unmarshal(msg.Params, &p)
-	version := h.versions[0]
-	if mcpHasVersion(h.versions, p.ProtocolVersion) {
+	version := h.legacy[0]
+	if mcpHasVersion(h.legacy, p.ProtocolVersion) {
 		version = p.ProtocolVersion
 	}
 
