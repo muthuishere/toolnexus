@@ -728,7 +728,9 @@ public sealed partial class LlmClient
 
     // ---------------------------------------------------------------- streaming events
 
-    public enum StreamKind { Text, ToolCall, ToolResult, Usage, Pending, Done }
+    /// <summary>Stream event kinds. <c>Thought</c> is a model's reasoning as reported by its source
+    /// (e.g. an ACP agent's <c>agent_thought_chunk</c>): surfaced live, never part of the answer.</summary>
+    public enum StreamKind { Text, ToolCall, ToolResult, Usage, Pending, Done, Thought }
 
     public sealed record StreamEvent(
         StreamKind Type, string? Delta = null, string? Id = null, string? Name = null,
@@ -958,9 +960,15 @@ public sealed partial class LlmClient
         string? id = null, CancellationToken cancellationToken = default)
         => StreamAsync((object)prompt, toolkit, onEvent, id, cancellationToken);
 
+    /// <summary>The live stream's consumer, visible to an in-process handler on the same async flow so a
+    /// streaming generate can pass non-text events (thought, a model's own tool calls) straight to it —
+    /// never through the wire, where the loop would execute them.</summary>
+    internal static readonly AsyncLocal<Action<StreamEvent>?> StreamSide = new();
+
     private async Task<RunResult> StreamAsync(object prompt, Toolkit? toolkit, Action<StreamEvent> onEvent,
         string? id, CancellationToken cancellationToken)
     {
+        StreamSide.Value = onEvent;
         var deadline = new Deadline(_opts.TimeoutMs);
         var history = id != null ? (await _store.GetAsync(id).ConfigureAwait(false) ?? new List<object?>()) : null;
         var intr = id != null ? new Interrupt() : null;

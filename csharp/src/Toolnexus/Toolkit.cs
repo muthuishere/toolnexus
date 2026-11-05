@@ -363,6 +363,18 @@ public sealed class Toolkit : IAsyncDisposable
             opts.OnCall);
     }
 
+    /// <summary>
+    /// Serve this toolkit as an MCP server for a local agent to call (SPEC §8C): a stateless
+    /// streamable-HTTP endpoint at <c>http://127.0.0.1:&lt;ephemeral&gt;/mcp</c> behind a fresh
+    /// bearer token. Same tool mapping and <see cref="MCPServeConfig"/> filter as §7C; tool names
+    /// are served verbatim (<c>skill</c> stays <c>skill</c>). Close the returned server when done.
+    /// </summary>
+    public ToolkitMcpServer AsMcpServer(MCPServeConfig? config = null)
+    {
+        var cfg = config ?? new MCPServeConfig();
+        return new ToolkitMcpServer(McpServe.ExposedMcpTools(Tools(), cfg), cfg);
+    }
+
     public async Task<ToolResult> ExecuteAsync(string name, IDictionary<string, object?>? args, ToolContext? ctx = null)
     {
         var tool = Get(name);
