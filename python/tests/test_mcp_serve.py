@@ -199,3 +199,45 @@ async def test_top_level_mcp_server_config_picked_up():
     finally:
         await srv.stop()
         await tk.close()
+
+
+async def test_empty_inline_mcp_profile_exposes_all_tools():
+    # Regression: mcp={} is "present with defaults", not absent.
+    tk = await create_toolkit(builtins=False, extra_tools=[echo_tool])
+    srv = await tk.serve("127.0.0.1:0", mcp={})
+    try:
+        async with streamable_http_client(srv.url + "/mcp") as (read, write, _):
+            async with ClientSession(read, write) as session:
+                init = await session.initialize()
+                assert init.serverInfo.name == "toolnexus"
+                res = await session.list_tools()
+                assert any(t.name == "echo" for t in res.tools)
+    finally:
+        await srv.stop()
+        await tk.close()
+
+
+async def test_get_mcp_answers_405_without_hanging():
+    # Regression: GET /mcp used to hang (no SSE stream is offered).
+    import urllib.error
+    import urllib.request
+
+    tk = await create_toolkit(builtins=False, extra_tools=[echo_tool])
+    srv = await tk.serve("127.0.0.1:0", mcp={})
+    try:
+        req = urllib.request.Request(
+            srv.url + "/mcp", headers={"Accept": "text/event-stream"}, method="GET"
+        )
+
+        def fetch() -> int:
+            try:
+                with urllib.request.urlopen(req, timeout=5) as resp:
+                    return resp.status
+            except urllib.error.HTTPError as e:
+                return e.code
+
+        status = await anyio.to_thread.run_sync(fetch)
+        assert status == 405
+    finally:
+        await srv.stop()
+        await tk.close()
