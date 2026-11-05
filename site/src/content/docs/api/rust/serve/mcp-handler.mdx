@@ -1,0 +1,196 @@
+---
+title: "mcp_handler — an MCP server you mount on your own router"
+description: "The embeddable MCP server: per-request tools, auth, confirm gates and session hooks. — Rust."
+sidebar:
+  label: "serve / mcp-handler"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Rust</strong> · crate <code>toolnexus</code> · feature <code>serve</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7C.1</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/docs/adr/0039-mcp-serve-embeddable-handler.md">ADR 0039</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/rust/src/mcp_handler.rs">rust/src/mcp_handler.rs</a>
+</p>
+
+```rust
+impl Toolkit { pub fn mcp_handler(&self, cfg: McpHandlerConfig) -> McpHandler }
+
+impl McpHandler {
+    pub async fn handle<B: hyper::body::Body>(&self, req: hyper::Request<B>) -> hyper::Response<McpBody>;
+    pub fn notify_tools_changed(&self);
+}
+impl<B> hyper::service::Service<hyper::Request<B>> for McpHandler { /* … */ }
+
+pub struct McpHandlerConfig {
+    pub name: String, pub title: String, pub version: String, pub instructions: String,
+    pub server_info: Option<ServerInfoFn>,          // per request; wins over the static fields
+    pub protocol_versions: Vec<String>,             // ⊆ ["2025-11-25", "2025-06-18"]; default ["2025-06-18"]
+    pub authenticate: Option<AuthenticateFn>,       // Err ⇒ 401
+    pub www_authenticate: Option<WwwAuthenticateFn>,
+    pub list_tools: Option<ListToolsFn>,            // None ⇒ the toolkit's tools
+    pub before_call: Option<BeforeCallFn>,          // allow | deny | confirm
+    pub confirm_timeout: Option<Duration>,          // default 5 min
+    pub on_call: Option<OnMcpCallFn>,
+    pub list_resources: Option<ListResourcesFn>, pub read_resource: Option<ReadResourceFn>,
+    pub list_prompts: Option<ListPromptsFn>,     pub get_prompt: Option<GetPromptFn>,
+    pub session_ids: Option<Arc<dyn McpSessionIds>>,
+    pub stateless: bool, pub stateless_session_id: String,
+    pub max_body_bytes: usize,                      // 0 ⇒ 4 MiB
+}
+
+pub fn mcp_request_context(ctx: &ToolContext) -> Option<&McpRequestContext>
+```
+
+`Toolkit::serve` owns a listener and exposes one fixed tool list. `mcp_handler` is the other
+shape: a streamable-HTTP MCP server (protocol 2025-06-18) that you mount on **your** server, behind
+your own TLS, CORS and OAuth. toolnexus has no idea what a tenant, user or role is — every policy is
+a hook, and every hook receives an `Arc<McpRequestContext>`: the HTTP method, URI and headers, the
+identity `authenticate` returned (`identity_as::<T>()`), the `Mcp-Session-Id`, and the JSON-RPC
+`params._meta`. A tool reads the same context with `mcp_request_context(&ctx)`.
+
+`list_tools` runs per request, for `tools/list` **and** for the `tools/call` lookup: a name the
+caller cannot see is `-32602 "tool not found: <name>"` and never executes. Tool annotations go out
+verbatim (`Tool.annotations`), else derived from `Tool.hints`, else omitted; `Tool.output_schema`
+becomes `outputSchema`, `ToolResult.structured` becomes `structuredContent` (and the text block when
+`output` is empty), `ToolResult.meta` becomes `_meta`.
+
+## When to use it
+
+When the MCP server is part of an application you already run: a multi-tenant SaaS where each
+caller gets their own tools, an API gateway that already does OAuth, or a server that must gate
+destructive tools behind a human confirmation.
+
+## Why this and not the alternative
+
+`serve(addr, { mcp })` is the zero-config path — one listener, one static tool list, no hooks. Use
+it for a local gateway. The moment the tool list depends on *who is asking*, or the server has to
+live inside your router, you want `mcp_handler`. It speaks JSON-RPC by hand rather than through
+rmcp's server so that tools can be resolved per request and a confirmation can ride the same
+`tools/call` response; the public API is toolnexus's own types only.
+
+<Aside type="tip" title="Mounting">
+`McpHandler` implements `hyper::service::Service`, so hyper serves it directly. In axum (or any
+framework on the `http` crate) call `handler.handle(req).await` from a route.
+</Aside>
+
+## Examples
+
+The complete runnable program is
+[`rust/examples/mcp_handler.rs`](https://github.com/muthuishere/toolnexus/blob/main/rust/examples/mcp_handler.rs)
+(`cargo run --example mcp_handler`). These snippets need `hyper` and `hyper-util` in your own
+`[dependencies]` to mount the handler.
+
+### 1. Mount it on hyper with bearer auth
+
+```rust
+use std::sync::Arc;
+use hyper::body::Incoming;
+use toolnexus::mcp_handler::{McpHandlerConfig, McpIdentity};
+use toolnexus::{ToolkitOptions, create_toolkit};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let tk = create_toolkit(ToolkitOptions::default()).await?;
+    let handler = tk.mcp_handler(McpHandlerConfig {
+        name: "records".into(),
+        authenticate: Some(Arc::new(|rc| {
+            let ok = rc.header("authorization") == "Bearer s3cret"; // verify a real token here
+            Box::pin(async move {
+                if ok { Ok(Arc::new("alice".to_string()) as McpIdentity) } else { Err("bad token".into()) }
+            })
+        })),
+        www_authenticate: Some(Arc::new(|_, _| {
+            r#"Bearer resource_metadata="https://example.test/.well-known/oauth-protected-resource""#.into()
+        })),
+        ..Default::default()
+    });
+
+    let ln = tokio::net::TcpListener::bind("127.0.0.1:8080").await?;
+    loop {
+        let (stream, _) = ln.accept().await?;
+        let h = handler.clone();
+        tokio::spawn(async move {
+            let svc = hyper::service::service_fn(move |req: hyper::Request<Incoming>| {
+                let h = h.clone();
+                async move { Ok::<_, std::convert::Infallible>(h.handle(req).await) }
+            });
+            let _ = hyper::server::conn::http1::Builder::new()
+                .serve_connection(hyper_util::rt::TokioIo::new(stream), svc)
+                .await;
+        });
+    }
+}
+```
+
+### 2. Per-caller tools, built at request time
+
+```rust
+use std::sync::Arc;
+use serde_json::{Value, json};
+use toolnexus::define_tool;
+use toolnexus::mcp_handler::{McpHandlerConfig, mcp_request_context};
+
+let cfg = McpHandlerConfig {
+    list_tools: Some(Arc::new(|rc| {
+        let who = rc.identity_as::<String>().cloned().unwrap_or_default();
+        let mut tools = vec![define_tool("whoami", "Who is calling", Some(json!({"type": "object"})),
+            |_: Value, ctx| async move {
+                let rc = mcp_request_context(&ctx).expect("served call");
+                Ok::<_, String>(format!("{} (session {})",
+                    rc.identity_as::<String>().cloned().unwrap_or_default(), rc.session_id()))
+            })];
+        if who == "admin" {
+            tools.push(define_tool("wipe", "Admin only", None,
+                |_: Value, _| async { Ok::<_, String>("wiped".to_string()) }));
+        }
+        Box::pin(async move { Ok(tools) })
+    })),
+    ..Default::default()
+};
+// Anyone but "admin" calling `wipe` gets -32602 "tool not found: wipe"; it never runs.
+// After a role change: handler.notify_tools_changed() — clients re-run tools/list.
+```
+
+### 3. Confirm a destructive call, with a fallback for clients that cannot elicit
+
+```rust
+use std::sync::Arc;
+use toolnexus::ToolResult;
+use toolnexus::mcp_handler::{McpDecision, McpHandlerConfig};
+
+let cfg = McpHandlerConfig {
+    before_call: Some(Arc::new(|_rc, tool, args| Box::pin(async move {
+        let destructive = tool.annotations.as_ref().and_then(|a| a.destructive_hint).unwrap_or(false);
+        if !destructive || args["nonce"] == "n-123" {
+            return Ok(McpDecision::allow());
+        }
+        // Elicitation-capable client: asked "Really delete?" on the same POST's SSE stream.
+        // Otherwise: this shaped result is returned instead and the tool does not run.
+        Ok(McpDecision::confirm("Really delete?")
+            .with_result(ToolResult::ok(r#"Call again with "nonce":"n-123"."#)))
+    }))),
+    on_call: Some(Arc::new(|ev| {
+        println!("{} decision={} is_error={} {}B", ev.name, ev.decision.as_str(), ev.is_error, ev.result_bytes);
+    })),
+    ..Default::default()
+};
+```
+
+## Wire rules (identical in every port)
+
+| Case | Result |
+|---|---|
+| `authenticate` fails | `401`, `WWW-Authenticate` from `www_authenticate` when non-empty |
+| POST not `application/json` | `415` |
+| body over `max_body_bytes` | `413` |
+| JSON-RPC batch (`[…]`) | `400`, `-32600 "batch requests are not supported"` |
+| missing / unknown `Mcp-Session-Id` (stateful) | `400` / `404` |
+| `MCP-Protocol-Version` not accepted | `400` |
+| GET without `Accept: text/event-stream`, other methods | `405` |
+| resources / prompts method without its hook | `-32601 "method not found: <method>"` |
+| non-object `arguments` | `-32602 "arguments must be an object"`; under `2025-11-25`, an isError result `"invalid arguments: must be an object"` |
+| deny without message / confirm without elicitation | isError `"denied"` / `"confirmation required: <message>"` |
+
+## See also
+
+- [`serve / mcp`](/api/rust/serve/mcp/) — the zero-config MCP profile of `Toolkit::serve`.
+- [`Toolkit::serve`](/api/rust/serve/a2a/) — expose the toolkit as an A2A agent and/or an MCP server.

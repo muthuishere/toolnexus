@@ -8,6 +8,60 @@ GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
 
 ## Unreleased
 
+**MCP serve you can mount yourself, with auth, per-request tools and a confirm gate, in all eight ports.** `Serve(addr, {mcp})` owns its port and shows everyone the same tools, so a host that wanted
+an MCP endpoint behind its own login had to write its own MCP server (#139). Now
+`tk.MCPHandler(cfg)` returns an `http.Handler` to mount on your own mux, behind your own TLS, CORS
+and OAuth, with plain hooks:
+
+- `Authenticate(r)` runs on every request; an error is HTTP 401 with your `WWW-Authenticate` header.
+  What it returns reaches every hook and tool via `IdentityFrom(ctx)`.
+- `ListTools(ctx)` decides the tools per request (they can be built at runtime). A `tools/call` for
+  a name not in that list is "tool not found" and never runs. `NotifyToolsChanged()` tells connected
+  clients to re-list.
+- `BeforeCall(ctx, tool, args)` returns allow, deny or confirm. Confirm asks the user through MCP
+  elicitation when the client supports it; otherwise the caller gets your own result (for example
+  "re-call with this nonce") or a plain "confirmation required" error.
+- `Tool.Annotations` (`title`, `readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`)
+  go out unchanged; `OnCall` reports identity, duration, error and result size for metering;
+  `ServerInfo(ctx)` brands `initialize` (now with `title`); resources and prompts hooks; your own
+  `SessionIDs`, or `Stateless` (optionally with a fixed `StatelessSessionID` for clients that expect one).
+- **Structured results.** A tool can return `ToolResult.Structured` and declare `Tool.OutputSchema`;
+  MCP serve sends them as `structuredContent` and `outputSchema`, with a JSON text block when the
+  tool sets no text. `ToolResult.Meta` goes out as the result's `_meta`, and a request's
+  `params._meta` is readable in hooks and tools via `MCPRequestMetaFrom(ctx)`. All optional:
+  tools that do not set them produce exactly the same output as before, on `Serve` too.
+- **Protocol versions you can trust.** `ProtocolVersions` per handler; the default is 2025-06-18 only.
+  2025-11-25 can be turned on (the handler implements its one server-side rule change: bad tool
+  arguments come back as an error result, not a protocol error). 2025-03-26 is not accepted (it allows
+  batches, which the handler rejects) and 2026-07-28 waits for #134 — listing them does nothing.
+
+Every port ships it in its own native handler shape: Go `http.Handler`, JS Node request listener
+(`toolkit.mcpHandler`), Python ASGI app (`toolkit.mcp_handler`), Java JDK `HttpHandler`
+(`toolkit.mcpHandler`; give the `HttpServer` a multi-threaded executor), C# `McpHttpHandler` over
+`HttpListenerContext` or a host-supplied `McpHttpExchange` (`toolkit.McpHandler`), Elixir Plug
+(`Toolnexus.mcp_handler/2`), Clojure Ring handler (`toolnexus.mcp-handler/mcp-handler`; SSE bodies are
+lazy seqs, so the Ring adapter must stream seq bodies), Rust hyper `Service` (`toolkit.mcp_handler`,
+`serve` feature). A shared fixture, `conformance/mcp_handler/cases.json`, pins the wire and every
+port's suite replays it.
+
+Port notes: outside Go, `beforeCall` receives the parsed arguments object rather than raw JSON bytes.
+The Java, Elixir and Clojure GET streams send a `: keepalive` comment every 15 s (Java and Elixir) or
+end on session DELETE (Clojure), because those servers cannot see a client disconnect. In Elixir a
+confirm timeout reads "confirmation failed: timeout"; the other ports use Go's "context deadline
+exceeded". The official MCP Java SDK 2.0.0 client sends `MCP-Protocol-Version: 2025-11-25` on later
+requests even after it negotiated 2025-06-18, so it needs `supportedProtocolVersions(List.of("2025-06-18"))`
+against a default handler.
+
+**Rust: a source change if you build `Tool` with a struct literal.** `Tool` has two new public fields,
+`output_schema` and `annotations`. A literal that names every field no longer compiles until you add
+`output_schema: None, annotations: None` (or end it with `..Default::default()`). The builders
+(`with_output_schema`, `with_annotations`) are unaffected.
+
+toolnexus has no tenant, role or storage concepts here: those stay in your hooks (ADR 0039).
+`Serve(addr, {mcp})` is unchanged apart from the optional structured fields. **Not done:** when you
+run several replicas, elicitation answers need sticky routing. The docs-page examples are run in CI
+for Go, Python and Java only; the JS, C#, Elixir, Clojure and Rust pages are not run yet.
+
 **Let any coding agent call your toolkit, through three vendor-neutral pieces (all eight ports).**
 toolnexus does not ship a client per coding agent: which binary, flags, login and quirks an agent
 needs changes on the vendor's schedule, so those live as **recipes in the docs**, written on top of

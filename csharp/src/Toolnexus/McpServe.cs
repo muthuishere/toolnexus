@@ -122,20 +122,7 @@ public static class McpServe
                 catch { /* Host callback errors are isolated. */ }
             }
 
-            // §7C: the text part first, then each non-text ContentPart as the corresponding MCP
-            // content block, in order — image ⇒ image, audio ⇒ audio, file ⇒ embedded resource.
-            var content = new List<ContentBlock> { new TextContentBlock { Text = result.Output } };
-            foreach (var part in result.Parts ?? Array.Empty<ContentPart>())
-            {
-                var block = ToContentBlock(part);
-                if (block != null) content.Add(block);
-            }
-
-            return new CallToolResult
-            {
-                Content = content,
-                IsError = result.IsError,
-            };
+            return ToCallToolResult(result);
         };
 
         return options;
@@ -145,12 +132,46 @@ public static class McpServe
     // Mapping helpers.
     // -----------------------------------------------------------------------
 
-    private static Tool ToMcpTool(ITool t) => new()
+    internal static Tool ToMcpTool(ITool t)
     {
-        Name = t.Name,
-        Description = t.Description,
-        InputSchema = SchemaElement(t.InputSchema),
-    };
+        var tool = new Tool
+        {
+            Name = t.Name,
+            Description = t.Description,
+            InputSchema = SchemaElement(t.InputSchema),
+        };
+        // SPEC §1: outputSchema only when the tool declares one (absent ⇒ byte-identical).
+        if (t.OutputSchema != null) tool.OutputSchema = SchemaElement(t.OutputSchema);
+        return tool;
+    }
+
+    /// <summary>
+    /// Map a <see cref="ToolResult"/> to the SDK <see cref="CallToolResult"/> (§7C): the text part
+    /// first, then each non-text ContentPart as the corresponding MCP content block, in order —
+    /// image ⇒ image, audio ⇒ audio, file ⇒ embedded resource. SPEC §1: <c>Structured</c> ⇒
+    /// <c>structuredContent</c> (and its JSON as the text when <c>Output</c> is empty), <c>Meta</c> ⇒
+    /// <c>_meta</c>; both absent ⇒ byte-identical to before.
+    /// </summary>
+    internal static CallToolResult ToCallToolResult(ToolResult result)
+    {
+        var content = new List<ContentBlock> { new TextContentBlock { Text = McpHttpHandler.ResultText(result) } };
+        foreach (var part in result.Parts ?? Array.Empty<ContentPart>())
+        {
+            var block = ToContentBlock(part);
+            if (block != null) content.Add(block);
+        }
+
+        var wire = new CallToolResult
+        {
+            Content = content,
+            IsError = result.IsError,
+        };
+        if (result.Structured != null)
+            wire.StructuredContent = JsonSerializer.SerializeToElement(JsonDocument.Parse(Json.Stringify(result.Structured)).RootElement);
+        if (result.Meta != null)
+            wire.Meta = System.Text.Json.Nodes.JsonNode.Parse(Json.Stringify(result.Meta))!.AsObject();
+        return wire;
+    }
 
     /// <summary>
     /// Map one §1B <see cref="ContentPart"/> onto its MCP content block. A <c>text</c> part is

@@ -158,6 +158,7 @@ defmodule Toolnexus.McpServe do
       "tools" =>
         Enum.map(tools, fn t ->
           %{"name" => t.name, "description" => t.description, "inputSchema" => t.input_schema}
+          |> put_some("outputSchema", t.output_schema)
         end)
     })
   end
@@ -197,15 +198,38 @@ defmodule Toolnexus.McpServe do
           end
         end
 
-        rpc_result(id, %{
-          "content" => [%{"type" => "text", "text" => result.output}] ++ mcp_blocks(result),
-          "isError" => result.is_error
-        })
+        rpc_result(
+          id,
+          result |> result_wire() |> Map.put("isError", result.is_error)
+        )
     end
   end
 
   defp handle_rpc(id, method, _params, _tools, _cfg, _on_call),
     do: rpc_error(id, -32601, "Method not found: #{method}")
+
+  @doc false
+  # The CallToolResult body shared with `Toolnexus.McpHandler` (isError excluded —
+  # each caller owns that rule). structured ⇒ structuredContent (an empty output
+  # then carries the JSON of structured as its text), meta ⇒ _meta. Both nil ⇒
+  # exactly the pre-§7C.1 shape.
+  @spec result_wire(ToolResult.t()) :: map()
+  def result_wire(%ToolResult{} = result) do
+    structured = Map.get(result, :structured)
+
+    text =
+      if structured != nil and result.output in ["", nil],
+        do: Jason.encode!(structured),
+        else: result.output
+
+    %{"content" => [%{"type" => "text", "text" => text}] ++ mcp_blocks(result)}
+    |> put_some("structuredContent", structured)
+    |> put_some("_meta", Map.get(result, :meta))
+  end
+
+  @doc false
+  def put_some(map, _key, nil), do: map
+  def put_some(map, key, value), do: Map.put(map, key, value)
 
   # SPEC §7B: a tool's non-text parts follow the text block as MCP content blocks —
   # image ⇒ image, audio ⇒ audio, file with data ⇒ embedded resource, file with url ⇒

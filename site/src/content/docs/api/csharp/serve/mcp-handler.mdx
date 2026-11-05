@@ -1,0 +1,177 @@
+---
+title: "Toolkit.McpHandler"
+description: "An embeddable MCP server you mount on your own HTTP server, with per-request auth, tools and confirmation hooks. — C#."
+sidebar:
+  label: "serve / mcp-handler"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>C#</strong> · package <code>Toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7C.1</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/csharp/src/Toolnexus/McpHandler.cs">McpHandler.cs</a>
+</p>
+
+```csharp
+public McpHttpHandler McpHandler(McpHandlerConfig? cfg = null)
+
+// McpHttpHandler
+public Task HandleAsync(HttpListenerContext ctx);
+public Task HandleAsync(McpHttpExchange exchange);
+public void NotifyToolsChanged();
+```
+
+A streamable-HTTP MCP server (protocol `2025-06-18`, `2025-11-25` opt-in) that you **mount** rather
+than run. Where [`McpServe.Build`](/api/csharp/serve/mcp/) behind `ServeAsync` owns a listener and
+exposes one static tool list, `McpHandler` hands you a handler for your own HTTP server, behind your
+own TLS, CORS and OAuth. Every policy is a hook; toolnexus has no notion of tenant, user or role.
+
+- `Authenticate` runs on every request; a throw ⇒ HTTP 401 with `WwwAuthenticate`'s header.
+- `ListTools` resolves the tool list **per request** for `tools/list` and the `tools/call` lookup — a
+  name outside it is `-32602 "tool not found: <name>"` and never runs.
+- `BeforeCall` returns `McpDecision.Allow()`, `Deny(msg, result?)` or `Confirm(msg, result?)`. A
+  confirm asks the client with `elicitation/create` on the same POST's SSE response when it declared
+  the capability, else returns `result` (or `isError "confirmation required: …"`).
+- Hooks receive an `McpContext` (`Identity`, `Request`, `SessionId`, `Meta` = `params._meta`); a tool
+  reads the same object from `McpContext.Current`.
+- `OnCall`, `ServerInfo`, resources/prompts hooks, pluggable `SessionIds`, `Stateless`,
+  `StatelessSessionId`, `ProtocolVersions`, `ConfirmTimeout`, `MaxBodyBytes`.
+
+## When to use it
+
+You already run an HTTP service and want MCP clients (Claude Desktop, an IDE, another agent) to call
+its tools **as the signed-in user**: each caller sees only the tools their identity allows, a
+destructive tool asks for confirmation, and every call is observable. Mount the handler at `/mcp`
+next to your existing routes; tools can be built at runtime per request, so they need not be
+registered in the toolkit at all.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Mount a handler, not a second server">
+`ServeAsync(addr, { Mcp })` is the zero-config path: one listener, one static tool list, no auth.
+Pick `McpHandler` as soon as tools depend on who is calling, or the endpoint must live behind your
+own auth and transport. It adds no framework dependency: an `HttpListener` host passes the
+`HttpListenerContext`; an ASP.NET Core host subclasses `McpHttpExchange` (method, headers, body in;
+status, headers, body out) over its `HttpContext`.
+</Aside>
+
+## Examples
+
+### 1. The smallest useful call — mount on an HttpListener
+
+```csharp
+using System.Net;
+using Toolnexus;
+
+await using var tk = await Toolkit.CreateAsync(new Toolkit.Options
+{
+    Builtins = false,
+    ExtraTools = new List<ITool> { NativeTool.Of("hello", "say hello", null, (IDictionary<string, object?> _) => "hello") },
+});
+var handler = tk.McpHandler(new McpHandlerConfig { Name = "demo", Stateless = true });
+
+var listener = new HttpListener();
+listener.Prefixes.Add("http://127.0.0.1:8765/mcp/");
+listener.Start();
+while (true)
+{
+    var ctx = await listener.GetContextAsync();
+    _ = Task.Run(() => handler.HandleAsync(ctx)); // closes the response when done
+}
+```
+
+### 2. The realistic case — per-identity tools and a confirmation gate
+
+```csharp
+using System.Text.Json;
+using Toolnexus;
+
+record User(string Name, bool Admin);
+
+var handler = tk.McpHandler(new McpHandlerConfig
+{
+    Authenticate = ex => ex.Header("Authorization") switch
+    {
+        "Bearer token-alice" => Task.FromResult<object?>(new User("alice", true)),
+        "Bearer token-bob" => Task.FromResult<object?>(new User("bob", false)),
+        _ => throw new UnauthorizedAccessException("invalid token"),
+    },
+    WwwAuthenticate = (_, _) => "Bearer resource_metadata=\"https://example.test/.well-known/oauth-protected-resource\"",
+    ListTools = ctx =>
+    {
+        var user = (User)ctx.Identity!;
+        var tools = new List<ITool> { listRecords };
+        if (user.Admin) tools.Add(deleteRecord); // deleteRecord.Annotations.DestructiveHint = true
+        return Task.FromResult<IReadOnlyList<ITool>>(tools);
+    },
+    BeforeCall = (ctx, tool, args) => Task.FromResult(
+        tool.Annotations?.DestructiveHint != true || args.GetRawText().Contains("\"nonce\":\"n-123\"")
+            ? McpDecision.Allow()
+            : McpDecision.Confirm("Really delete this record?",
+                new ToolResult("Confirmation needed: call again with \"nonce\":\"n-123\".", false))),
+    OnCall = ev => Console.WriteLine($"{ev.Name} by {((User)ev.Identity!).Name}: {ev.Decision} {ev.ResultBytes}B"),
+});
+```
+
+Bob's `tools/list` has no `delete_record`, and calling it anyway is `tool not found` — it never runs.
+Alice's client gets an `elicitation/create` prompt when it supports elicitation; otherwise she gets
+the shaped "re-call with a nonce" result.
+
+### 3. Full surface — structured results, list_changed and a custom host
+
+```csharp
+using System.Text.Json;
+using Toolnexus;
+
+var stats = NativeTool.Of("stats", "record counts", null,
+    (IDictionary<string, object?> _) => new ToolResult("", false)
+    {
+        Structured = new Dictionary<string, object?> { ["count"] = 3 },                     // structuredContent (+ its JSON as text)
+        Meta = new Dictionary<string, object?> { ["trace"] = McpContext.Current?.Meta?.GetValueOrDefault("trace") }, // _meta
+    });
+stats.OutputSchema = new Dictionary<string, object?> { ["type"] = "object" };
+
+var handler = tk.McpHandler(new McpHandlerConfig
+{
+    ProtocolVersions = new[] { "2025-11-25", "2025-06-18" },
+    ServerInfo = ctx => new McpServerInfo("records-" + ctx.Request.Header("Host"), "1.0.0", Title: "Records"),
+    ListTools = _ => Task.FromResult<IReadOnlyList<ITool>>(new List<ITool> { stats }),
+    ListResources = _ => Task.FromResult<IReadOnlyList<McpResource>>(new[] { new McpResource("docs://api", "api") }),
+    ReadResource = (_, uri) => Task.FromResult<IReadOnlyList<McpResourceContent>>(new[] { new McpResourceContent(uri, Text: "# API") }),
+});
+
+// Tools changed (e.g. a plan upgrade)? Clients holding a GET stream re-run tools/list.
+handler.NotifyToolsChanged();
+
+// ASP.NET Core (or any server): adapt its request once, then
+//   app.Map("/mcp", http => handler.HandleAsync(new AspNetExchange(http)));
+// where AspNetExchange : McpHttpExchange maps Method, Header, RequestBody, SetStatus, SetHeader, ResponseBody.
+```
+
+<Aside type="caution">
+Stateful mode (the default) keeps sessions in memory: behind several replicas, plug `SessionIds`
+(signed ids or a shared store), or set `Stateless = true` — confirmation then never elicits and
+always takes the shaped-result path. A confirm's elicitation answer must reach the replica holding
+the open POST.
+</Aside>
+
+## Parameters
+
+| Member | Type | What it is |
+|---|---|---|
+| `Name` / `Title` / `Version` / `Instructions` | `string?` | Static `serverInfo`; defaults `"toolnexus"` / `"0.1.0"`; empty title omitted. |
+| `ServerInfo` | `Func<McpContext, McpServerInfo>?` | Per-request `serverInfo`; wins over the static fields. |
+| `ProtocolVersions` | `IReadOnlyList<string>?` | Accepted versions, newest first; only `2025-11-25` and `2025-06-18` are kept. Default `["2025-06-18"]`. |
+| `Authenticate` / `WwwAuthenticate` | `Func<McpHttpExchange, Task<object?>>?` / `Func<McpHttpExchange, Exception, string?>?` | Identity per request; a throw ⇒ 401 with the header. |
+| `ListTools` | `Func<McpContext, Task<IReadOnlyList<ITool>>>?` | Per-request tool list; null ⇒ the toolkit's tools. |
+| `BeforeCall` | `Func<McpContext, ITool, JsonElement, Task<McpDecision>>?` | Allow / deny / confirm each call; a throw ⇒ deny with its message. |
+| `ConfirmTimeout` | `TimeSpan` | Bounds an elicitation round trip. Default 5 minutes. |
+| `OnCall` | `Action<McpCallEvent>?` | `{Name, Source, Ms, IsError, Err, ResultBytes, Decision, Identity, SessionId}`; throws isolated. |
+| `ListResources` / `ReadResource` / `ListPrompts` / `GetPrompt` | hooks | Absent ⇒ capability not advertised, method `-32601`. |
+| `SessionIds` | `IMcpSessionIds?` | `GenerateAsync` / `ValidateAsync` / `TerminateAsync`; default in-memory. |
+| `Stateless` / `StatelessSessionId` | `bool` / `string?` | No session issued or checked; optional fixed id echoed on initialize. |
+| `MaxBodyBytes` | `long` | POST body cap (413 above it). Default 4 MiB. |
+
+## See also
+
+- [`McpServe.Build`](/api/csharp/serve/mcp/) — The `ServeAsync` MCP profile: one listener, one static tool list.
+- [`A2AServer.Start`](/api/csharp/serve/a2a/) — Publish an Agent Card and answer JSON-RPC over the client loop.

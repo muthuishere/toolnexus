@@ -70,7 +70,11 @@ export function buildMcpServer(tools: Tool[], cfg?: MCPServeConfig, onCall?: OnC
   )
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: tools.map((t) => ({ name: t.name, description: t.description, inputSchema: t.inputSchema })),
+    tools: tools.map((t) =>
+      t.outputSchema
+        ? { name: t.name, description: t.description, inputSchema: t.inputSchema, outputSchema: t.outputSchema }
+        : { name: t.name, description: t.description, inputSchema: t.inputSchema },
+    ),
   }))
 
   server.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
@@ -93,10 +97,34 @@ export function buildMcpServer(tools: Tool[], cfg?: MCPServeConfig, onCall?: OnC
         // Host callback errors are isolated.
       }
     }
-    return { content: [{ type: "text", text: result.output }, ...partBlocks(result.parts)], isError: result.isError }
+    return toolResultToMcp(result) as any
   })
 
   return server
+}
+
+/**
+ * §7C / §1. Map a ToolResult to an MCP `CallToolResult`: `output` → the text block (or, when
+ * `output` is empty and `structured` is set, the JSON text of `structured`), `parts` → extra
+ * blocks, `structured` → `structuredContent`, `meta` → `_meta`. With neither set the shape is
+ * byte-identical to the pre-§7C.1 result. `omitFalseIsError` drops `isError:false` (the
+ * hand-written §7C.1 handler wire, like Go's omitempty); the SDK serve path keeps it.
+ */
+export function toolResultToMcp(result: ToolResult, omitFalseIsError = false): Record<string, unknown> {
+  let text = result.output ?? ""
+  if (result.structured !== undefined && result.structured !== null && text === "") {
+    try {
+      text = JSON.stringify(result.structured)
+    } catch {
+      // leave the text empty when structured is not serialisable
+    }
+  }
+  const out: Record<string, unknown> = { content: [{ type: "text", text }, ...partBlocks(result.parts)] }
+  if (!omitFalseIsError) out.isError = result.isError
+  else if (result.isError) out.isError = true
+  if (result.structured !== undefined && result.structured !== null) out.structuredContent = result.structured
+  if (result.meta) out._meta = result.meta
+  return out
 }
 
 /**

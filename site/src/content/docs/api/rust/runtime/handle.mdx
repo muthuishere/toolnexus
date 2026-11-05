@@ -156,6 +156,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         input_schema: json!({"type": "object", "properties": {}}),
         source: ToolSource::Custom,
         hints: None,
+        output_schema: None,
+        annotations: None,
         execute: Arc::new(|_args, ctx| {
             Box::pin(async move {
                 if ctx.answer.as_ref().is_some_and(|a| a.ok) {

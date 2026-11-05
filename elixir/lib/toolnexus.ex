@@ -40,4 +40,11 @@ defmodule Toolnexus do
 
   @doc "Build an A2A agent descriptor (SPEC §7A). See `Toolnexus.A2a.agent/1`."
   defdelegate agent(opts), to: Toolnexus.A2a
+
+  @doc """
+  An embeddable streamable-HTTP MCP server for `toolkit`, as a Plug with
+  per-request hooks (SPEC §7C.1). See `Toolnexus.McpHandler`.
+  """
+  @spec mcp_handler(Toolkit.t() | nil, keyword() | map()) :: Toolnexus.McpHandler.t()
+  def mcp_handler(toolkit, cfg \\ []), do: Toolnexus.McpHandler.new(toolkit, cfg)
 end

@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import hmac
 import inspect
+import json
 import secrets
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -96,10 +97,7 @@ def build_mcp_server(
 
     @server.list_tools()
     async def _list_tools() -> list[McpToolDef]:
-        return [
-            McpToolDef(name=t.name, description=t.description, inputSchema=t.input_schema)
-            for t in tools
-        ]
+        return [_mcp_tool_def(t) for t in tools]
 
     # validate_input=False: no input validation — execute() is called directly,
     # matching the JS reference (which does not validate against inputSchema).
@@ -130,12 +128,43 @@ def build_mcp_server(
                     await ev
             except Exception:  # noqa: BLE001 — host callback errors are isolated
                 pass
-        return CallToolResult(
-            content=[TextContent(type="text", text=result.output), *_parts_to_content(result.parts)],
-            isError=result.is_error,
-        )
+        return tool_result_to_call_result(result)
 
     return server
+
+
+def _mcp_tool_def(t: Tool) -> McpToolDef:
+    """The wire tool for ``t`` on the §7C serve path: name verbatim, description,
+    inputSchema, and ``outputSchema`` only when the tool declares one."""
+    kwargs: dict[str, Any] = {}
+    if t.output_schema is not None:
+        kwargs["outputSchema"] = t.output_schema
+    return McpToolDef(name=t.name, description=t.description, inputSchema=t.input_schema, **kwargs)
+
+
+def structured_text(result: ToolResult) -> str:
+    """The text block for a result: ``output``, or — when it is empty and ``structured``
+    is set — the compact JSON of ``structured`` (the MCP spec asks a structured result
+    to carry equivalent text). Keys are sorted to match the Go reference's encoding."""
+    if result.structured is not None and result.output == "":
+        return json.dumps(result.structured, separators=(",", ":"), sort_keys=True, ensure_ascii=False)
+    return result.output
+
+
+def tool_result_to_call_result(result: ToolResult) -> CallToolResult:
+    """Map a :class:`ToolResult` to the SDK ``CallToolResult`` (§7C): text block first,
+    §1B parts after it, ``isError`` propagates, ``structured`` ⇒ ``structuredContent``,
+    ``meta`` ⇒ ``_meta``. Absent ⇒ byte-identical to the pre-§7C.1 result."""
+    kwargs: dict[str, Any] = {}
+    if result.structured is not None:
+        kwargs["structuredContent"] = result.structured
+    if result.meta is not None:
+        kwargs["_meta"] = result.meta
+    return CallToolResult(
+        content=[TextContent(type="text", text=structured_text(result)), *_parts_to_content(result.parts)],
+        isError=result.is_error,
+        **kwargs,
+    )
 
 
 def _parts_to_content(parts: Optional[list[dict[str, Any]]]) -> list[Any]:

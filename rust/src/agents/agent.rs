@@ -202,6 +202,8 @@ impl Agent {
     pub fn as_tool_with(&self, per: AsToolOptionsFn) -> Tool {
         let agent = self.clone();
         Tool {
+            output_schema: None,
+            annotations: None,
             concurrency_safe: None,
             name: self.name.clone(),
             description: self.spec.does.clone(),

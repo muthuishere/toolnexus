@@ -44,7 +44,8 @@ A new language port is "correct" iff these hold. Run it against the shared
 `examples/` (same `mcp.json` + skill) and the outputs must match the others.
 
 1. **Tool** = `{ name, description, inputSchema (JSON-Schema object), source, execute(args,ctx)->ToolResult }`.
-   `ToolResult = { output: string, isError: bool, parts?: ContentPart[], metadata? }`.
+   `ToolResult = { output: string, isError: bool, parts?: ContentPart[], metadata?, structured?, meta? }`;
+   `Tool.outputSchema?` describes `structured`. Absent ⇒ byte-identical output everywhere.
 1b. **ContentPart** = `text | image | file | audio` (§1B). Non-text parts carry `mimeType` plus
    exactly one of `data` (standard base64, padded, unwrapped) or `url`. **Never a path.**
 2. **sanitize(x)** = replace `[^a-zA-Z0-9_-]` with `_`. **MCP tool name** = `sanitize(server)_sanitize(tool)`.
@@ -138,6 +139,8 @@ Tool {
   description: string
   inputSchema: JSONSchema      // a JSON-Schema object ({type:"object", properties, ...})
   source:      "mcp" | "skill" | "native" | "http" | "builtin" | "a2a" | "media" | "custom"
+  outputSchema?: JSONSchema    // schema of ToolResult.structured; absent ⇒ omitted everywhere
+  annotations?:  { title?, readOnlyHint?, destructiveHint?, idempotentHint?, openWorldHint? } // §7C.1
   execute(args: object, ctx?: Context) -> ToolResult
 }
 ```
@@ -149,9 +152,16 @@ ToolResult {
   output:    string            // text handed back to the model — ALWAYS required
   isError:   boolean
   parts?:    ContentPart[]     // non-text output (§1B); absent ⇒ byte-identical to pre-0.17
-  metadata?: object            // free-form (title, server, skill name, ...)
+  metadata?: object            // free-form (title, server, skill name, ...) — never on a wire
+  structured?: any             // machine-readable result (MCP structuredContent); absent ⇒ byte-identical
+  meta?: object                // protocol metadata for the wire result (MCP `_meta`); absent ⇒ omitted
 }
 ```
+
+`structured` does not replace `output`: when a tool sets `structured` and leaves `output` empty, MCP
+serve emits the JSON text of `structured` as the text block (the MCP spec asks for equivalent
+unstructured content). The client loop (§8) keeps using `output`; `structured` and `meta` are for the
+MCP serve surfaces (§7C, §7C.1) until a change says otherwise.
 
 `output` stays required even when `parts` is present: it is what the transcript, compaction,
 token estimation and any text-only provider see. A tool returning an image sets `output` to a
@@ -1125,12 +1135,13 @@ toolkit.serve(addr, { mcp?, onCall?, ...a2a })  -> ServeHandle { url, stop() }
 - **`initialize`** advertises `serverInfo:{name, version}` from the profile (defaults `name:"toolnexus"`,
   `version:"0.1.0"`) and `capabilities.tools`.
 - **`tools/list`** → one entry per exposed tool: `{ name, description, inputSchema }`, where `name` is
-  the toolkit `Tool.name` used **verbatim** (already sanitized at registration, §0.2 — *not*
+  the toolkit `Tool.name` used **verbatim** (plus `outputSchema` when the tool sets one) (already sanitized at registration, §0.2 — *not*
   re-sanitized, unlike §7A/§7B skill ids) and `inputSchema` is the tool's `parameters` (JSON Schema).
   When `mcp.tools` is set, the list is filtered to exactly those names; **unknown names are ignored**
   (never an error). Omit `mcp.tools` ⇒ all toolkit tools.
 - **`tools/call`** (`{ name, arguments }`) → `Tool.execute(arguments, ctx)`; map the `ToolResult` to a
-  `CallToolResult`: `output` → a `{type:"text", text}` content part, followed by one MCP content
+  `CallToolResult`: `output` → a `{type:"text", text}` content part (or the JSON of `structured` when
+  `output` is empty), `structured` → `structuredContent`, `meta` → `_meta` (both omitted when absent), followed by one MCP content
   block per non-text `ToolResult.parts` entry in order (`image`→image, `audio`→audio, `file` with
   `data`→embedded resource, `file` with `url`→`resource_link`); `isError` propagates. An
   `execute` throw becomes `isError:true` with the error text — **never crashes the server**. An unknown
@@ -1145,6 +1156,77 @@ toolkit.serve(addr, { mcp?, onCall?, ...a2a })  -> ServeHandle { url, stop() }
 Deferred (forward-compatible): a **stdio** transport (for local clients like Claude Desktop), MCP
 resources / prompts / sampling / completion (skills already reach clients via the `skill` tool), auth
 in core, and the Go CLI `serve --mcp` subcommand.
+
+### 7C.1 Embeddable MCP handler (`mcpHandler`) — ADR 0039
+
+A plain, embeddable streamable-HTTP MCP server with **generic** per-request hooks, for a host to mount
+on its own router behind its own TLS/CORS/OAuth. It has **no** tenant, user, role or storage concept:
+the host decides those inside the hooks. `serve(addr, {mcp})` above is unchanged. All types are
+toolnexus's own (never an SDK type), so every port can implement it on its own SDK or by hand.
+
+```
+toolkit.mcpHandler(cfg) -> Handler            // the port's native HTTP handler + notifyToolsChanged()
+cfg = {
+  name?, title?, version?, instructions?,     // static serverInfo (defaults "toolnexus" / "0.1.0"; title omitted when empty)
+  serverInfo?(ctx) -> {name, title?, version, instructions}   // resolved at initialize; wins over the static fields
+  protocolVersions?: string[]                 // accepted versions, newest first; default ["2025-06-18"];
+                                              // entries the port does not implement are dropped
+  authenticate?(request) -> identity | error  // every HTTP request, before JSON-RPC parsing
+  wwwAuthenticate?(request, error) -> string  // header on the 401
+  listTools?(ctx) -> Tool[]                   // per request; nil ⇒ the toolkit's tools
+  beforeCall?(ctx, tool, rawArgs) -> {kind: allow|deny|confirm, message?, result?: ToolResult}
+  confirmTimeout?,                            // elicitation round-trip bound, default 5 min
+  onCall?({name, source, ms, isError, err, resultBytes, decision, identity, sessionId})
+  listResources?(ctx) -> Resource[], readResource?(ctx, uri) -> ResourceContent[]
+  listPrompts?(ctx) -> Prompt[], getPrompt?(ctx, name, args) -> {description?, messages:[{role, text}]}
+  sessionIds?: { generate(ctx), validate(ctx, id) -> bool, terminate(ctx, id) }   // default in-memory
+  stateless?: bool                            // no Mcp-Session-Id checked
+  statelessSessionId?: string                 // stateless only: echoed as Mcp-Session-Id on initialize, never validated
+}
+identityFrom(ctx), requestFrom(ctx), mcpSessionIdFrom(ctx), mcpRequestMetaFrom(ctx)  // params._meta
+Tool.annotations? = { title?, readOnlyHint?, destructiveHint?, idempotentHint?, openWorldHint? }
+```
+
+- **Versions**: a port implements `2025-06-18` and `2025-11-25`, and accepts only what
+  `protocolVersions` lists of those. `2025-11-25` differs on the server side only by optional fields
+  plus one rule a port MUST apply for a request carrying `MCP-Protocol-Version: 2025-11-25`: invalid
+  tool arguments are an `isError` tool result, not `-32602`. `2025-03-26` is **not** accepted (it
+  permits JSON-RPC batches, which this surface rejects); `2026-07-28` is **not** accepted until the
+  #134 upgrade implements its wire.
+- **`_meta`**: a request's `params._meta` is exposed to every hook and tool via `mcpRequestMetaFrom(ctx)`;
+  `ToolResult.meta` leaves as the result's `_meta`.
+- **Transport**: `POST` JSON-RPC ⇒ `application/json`, or
+  `text/event-stream` when a server→client request is sent first; notifications and client responses
+  ⇒ `202`; `GET` with `Accept: text/event-stream` ⇒ a stream for server notifications, else `405`;
+  `DELETE` ⇒ terminate the session. `initialize` echoes the client's protocol version when supported,
+  else the newest supported, and returns `Mcp-Session-Id` (stateful). A non-initialize request without
+  a session ⇒ `400`; an id `validate` rejects ⇒ `404`; an unsupported `MCP-Protocol-Version` header ⇒
+  `400`; a JSON array body (batch) ⇒ JSON-RPC `-32600`; a non-JSON content type ⇒ `415`.
+- **Auth**: `authenticate` error ⇒ HTTP `401` with `WWW-Authenticate` from `wwwAuthenticate` when it
+  returns non-empty. The identity is opaque and reaches every hook and tool through the call context.
+- **Tools**: `tools/list` and the `tools/call` lookup both use `listTools(ctx)`; a name outside it ⇒
+  JSON-RPC `-32602` "tool not found: <name>", and the tool is **never executed**. Tools need not be
+  registered in the toolkit. `capabilities.tools.listChanged` is `true`; `notifyToolsChanged()` sends
+  `notifications/tools/list_changed` on every open GET stream. Wire entry: `{name, description,
+  inputSchema, annotations?}` — `annotations` verbatim from `Tool.annotations`, else derived from
+  `Tool.hints` (`readOnlyHint`/`destructiveHint`/`openWorldHint`), else omitted. Results map exactly as §7C.
+- **Gate**: `allow` (also the zero value) runs the tool. `deny` returns `result` when set, else an
+  `isError` result with `message` (default "denied"); a `beforeCall` error is a `deny` with its text.
+  `confirm`: when the session's client declared `capabilities.elicitation` at initialize, send
+  `elicitation/create` `{message, requestedSchema:{type:object, properties:{confirm:{type:boolean}}}}` on
+  the same POST's event stream and wait (≤ `confirmTimeout`); `accept` (with `confirm` not `false`) ⇒ run,
+  anything else ⇒ `isError` "declined"; a failure/timeout ⇒ `isError` "confirmation failed: …". When the
+  client cannot elicit (or `stateless`), return `result` when set, else `isError` "confirmation required:
+  <message>". Any nonce/re-call flow is the host's, built from `result` + its own `beforeCall`.
+- **onCall** fires once per `tools/call` (also for deny/confirm outcomes); its throws are isolated.
+- **Resources/prompts**: a nil `listResources`/`listPrompts` ⇒ the capability is not advertised and the
+  methods answer `-32601`.
+- **Sessions**: client capabilities are cached per process on the instance that saw `initialize`, and
+  an elicitation answer is delivered only to the instance holding the waiting call — a multi-instance
+  host needs sticky routing for confirms. The session *store* is always the host's.
+
+Left to the host: identity/tenant/role mapping, OAuth and RFC 9728 metadata, CORS, TLS, rate limits,
+what backs `sessionIds`, branding values.
 
 ---
 

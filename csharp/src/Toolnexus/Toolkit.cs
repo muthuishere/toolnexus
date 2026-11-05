@@ -274,6 +274,12 @@ public sealed class Toolkit : IAsyncDisposable
         _byName[t.Name] = t;
     }
 
+    /// <summary>
+    /// (SPEC §7C.1) An embeddable streamable-HTTP MCP server for this toolkit, to mount on the host's
+    /// own HTTP server. <see cref="ServeAsync"/> is unchanged.
+    /// </summary>
+    public McpHttpHandler McpHandler(McpHandlerConfig? cfg = null) => new(this, cfg);
+
     public List<ITool> Tools()
     {
         lock (_gate) return _byName.Values.ToList();

@@ -1,0 +1,138 @@
+---
+title: "toolnexus.mcp-handler/mcp-handler"
+description: "An embeddable MCP server as a Ring handler, with per-request hooks for auth, tools and confirmation. — Clojure."
+sidebar:
+  label: "serve / mcp-handler"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Clojure (JVM) + cljgo</strong> · package <code>net.clojars.muthuishere/toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md">SPEC §7C.1</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/docs/adr/0039-mcp-serve-embeddable-handler.md">ADR 0039</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/clojure/src/toolnexus/mcp_handler.cljc">clojure/src/toolnexus/mcp_handler.cljc</a>
+</p>
+
+```clojure
+(toolnexus.mcp-handler/mcp-handler toolkit cfg)
+;; => {:handler (fn [ring-request] ring-response) ...}
+
+(toolnexus.mcp-handler/notify-tools-changed! h)   ; list_changed on every open GET stream
+
+;; cfg — every key optional:
+;;   :name :title :version :instructions     static serverInfo ("toolnexus" / "0.1.0")
+;;   :server-info (fn [ctx] {...})           wins over the static keys
+;;   :authenticate (fn [req] identity)       a throw ⇒ HTTP 401
+;;   :www-authenticate (fn [req ex] string)  the 401's WWW-Authenticate
+;;   :list-tools (fn [ctx] tools)            per request: tools/list AND tools/call lookup
+;;   :before-call (fn [ctx tool args] {:kind :allow|:deny|:confirm :message :result})
+;;   :confirm-timeout-ms                     default 300000
+;;   :on-call (fn [event])                   {:name :source :ms :is-error :err :result-bytes
+;;                                            :decision :identity :session-id}
+;;   :list-resources :read-resource :list-prompts :get-prompt
+;;   :session-ids {:generate :validate :terminate}
+;;   :stateless :stateless-session-id
+;;   :protocol-versions                      ⊆ ["2025-11-25" "2025-06-18"], default ["2025-06-18"]
+;;   :max-body-bytes                         default 4 MiB ⇒ 413
+
+;; ctx = {:identity :request :session-id :meta}
+;;   (mcp-identity ctx) (mcp-request ctx) (mcp-session-id ctx) (mcp-request-meta ctx)
+```
+
+`mcp-handler` is the MCP server you **embed**. [`serve`](/api/clojure/serve/mcp/) owns a listener
+and exposes one fixed tool list; `mcp-handler` returns a plain Ring handler you mount on your own
+stack, behind your own TLS, CORS and OAuth. It speaks MCP streamable HTTP (protocol 2025-06-18,
+opt-in 2025-11-25) and leaves every policy to a hook: toolnexus has no idea what a tenant, a user or
+a role is — your hooks decide.
+
+`:list-tools` runs **per request** and is authoritative for calls: a name outside the list answers
+`-32602 tool not found: <name>` and is never executed, so per-identity catalogs need no second check.
+Tools may be built inside the hook at runtime. `:before-call` gates each call: `:deny` returns your
+`:result` or an error carrying `:message`; `:confirm` asks the client through `elicitation/create` on
+the same POST's SSE response when the client declared that capability, and otherwise returns your
+`:result` (for example a "re-call with this nonce" result) or `confirmation required: <message>`.
+
+Hooks and tools built with `:context? true` receive a `ctx` map carrying the authenticated identity,
+the Ring request, the session id and the request's `params._meta`.
+
+## When to use it
+
+- **Multi-tenant MCP** — one endpoint, a different tool list per caller, decided from the identity
+  your `:authenticate` produced.
+- **Mounting MCP inside an existing app** — the handler is a Ring fn; put it on a route next to your
+  REST API and share the auth middleware.
+- **Destructive tools that need a human** — `:confirm` asks over MCP elicitation where the client can,
+  and falls back to a result you shape where it cannot.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="serve for a fixed list, mcp-handler for anything per request">
+If one static toolkit should be reachable on its own port, [`serve`](/api/clojure/serve/mcp/) with an
+`:mcp` profile is less code. The moment the tool list, the auth, or the decision to run depends on
+who is calling, use `mcp-handler`: it is the same wire with the policy moved into your hands.
+</Aside>
+
+SSE responses (a GET notification stream, a confirm round trip) are **lazy-seq Ring bodies**; mount
+the handler on an adapter that writes a seq body chunk by chunk. Ring cannot see a client disconnect,
+so a GET stream ends when its session is DELETEd.
+
+## Examples
+
+### Per-identity tools with bearer auth
+
+```clojure
+(require '[toolnexus.mcp-handler :as mh]
+         '[toolnexus.tool :as tool])
+
+(def search (tool/tool {:name "search" :description "Search" :context? true
+                        :annotations {:title "Search" :readOnlyHint true}
+                        :execute (fn [args ctx] (tool/success (str (:q args) " for " (mh/mcp-identity ctx))))}))
+(def wipe   (tool/tool {:name "wipe" :description "Admins only" :execute (fn [_] (tool/success "wiped"))}))
+
+(def h (mh/mcp-handler (tool/toolkit [])
+         {:authenticate     (fn [req] (case (get-in req [:headers "authorization"])
+                                        "Bearer alice" "alice"
+                                        "Bearer bob"   "bob"
+                                        (throw (ex-info "bad token" {}))))
+          :www-authenticate (fn [_ _] "Bearer resource_metadata=\"https://example.test/.well-known/oauth-protected-resource\"")
+          :list-tools       (fn [ctx] (if (= "alice" (mh/mcp-identity ctx)) [search wipe] [search]))}))
+
+;; mount (:handler h) at /mcp on your Ring server
+```
+
+### A confirm gate with a shaped fallback
+
+```clojure
+(def h (mh/mcp-handler tk
+         {:before-call (fn [_ctx t args]
+                         (when (get-in t [:annotations :destructiveHint])
+                           (if (= "n-42" (:nonce args))
+                             {:kind :allow}
+                             {:kind    :confirm
+                              :message "Delete the record?"
+                              ;; returned when the client cannot elicit:
+                              :result  (tool/with-structured {:output "re-call with nonce n-42"} {:nonce "n-42"})})))}))
+```
+
+### Audit every call
+
+```clojure
+(def h (mh/mcp-handler tk
+         {:on-call (fn [{:keys [name decision is-error ms identity]}]
+                     (log/info "mcp call" name decision is-error ms identity))}))
+;; a throwing :on-call is isolated — it never changes the caller's result
+```
+
+## Error codes and statuses
+
+| Answer | Cause |
+|---|---|
+| HTTP 401 | `:authenticate` threw (with `WWW-Authenticate` when `:www-authenticate` returns one). |
+| HTTP 400 | Missing `Mcp-Session-Id`, unsupported `MCP-Protocol-Version`, a parse error (`-32700`) or a batch (`-32600`). |
+| HTTP 404 | An unknown or terminated session. |
+| HTTP 405 / 415 / 413 | Wrong method (or GET without `text/event-stream`), non-JSON POST, oversized body. |
+| `-32601` | Unknown method, or resources/prompts without their hooks. |
+| `-32602` | `tool not found: <name>`, or `arguments must be an object` (2025-11-25 turns the latter into an `isError` result). |
+
+## See also
+
+- [`toolnexus.serve/exposed-tools`](/api/clojure/serve/mcp/) — the listener-owning §7C profile
+- [`toolnexus.mcp/from-config`](/api/clojure/mcp/load/) — the outbound direction

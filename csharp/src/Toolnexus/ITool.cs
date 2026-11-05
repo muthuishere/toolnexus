@@ -33,6 +33,30 @@ public interface ITool
     /// says read-only; a tool without hints is unsafe.
     /// </summary>
     bool IsConcurrencySafe(IDictionary<string, object?> args) => Hints?.ReadOnly == true;
+
+    /// <summary>
+    /// (SPEC §1) Optional JSON Schema of the tool's structured result (MCP <c>outputSchema</c>).
+    /// Emitted by the MCP serve paths (§7C / §7C.1) when set; absent ⇒ omitted. Default: <c>null</c>.
+    /// </summary>
+    IDictionary<string, object?>? OutputSchema => null;
+
+    /// <summary>
+    /// (SPEC §1) Optional MCP tool annotations, emitted verbatim on <c>tools/list</c> by the
+    /// embeddable MCP handler (§7C.1). <c>null</c> ⇒ derived from <see cref="Hints"/>, else omitted.
+    /// </summary>
+    ToolAnnotations? Annotations => null;
+}
+
+/// <summary>
+/// (SPEC §1) MCP tool annotations. Every field is optional; a <c>null</c> hint is omitted from the wire.
+/// </summary>
+public sealed record ToolAnnotations
+{
+    public string? Title { get; init; }
+    public bool? ReadOnlyHint { get; init; }
+    public bool? DestructiveHint { get; init; }
+    public bool? IdempotentHint { get; init; }
+    public bool? OpenWorldHint { get; init; }
 }
 
 /// <summary>

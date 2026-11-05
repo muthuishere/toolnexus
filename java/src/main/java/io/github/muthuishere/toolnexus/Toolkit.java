@@ -331,6 +331,14 @@ public final class Toolkit implements AutoCloseable {
     }
 
     /**
+     * An embeddable streamable-HTTP MCP server for this toolkit (SPEC §7C.1, ADR 0039), to mount on
+     * the host's own {@code HttpServer} context. {@link #serve} is unchanged.
+     */
+    public McpHandler mcpHandler(McpHandler.Config cfg) {
+        return new McpHandler(this, cfg);
+    }
+
+    /**
      * Serve this toolkit for a local agent to call (SPEC §8C): the §7C MCP server on
      * {@code 127.0.0.1:<ephemeral>/mcp} behind a fresh 32-byte bearer token. Tool names are
      * verbatim; {@code cfg} (nullable) names the server and filters tools. Close it when done.

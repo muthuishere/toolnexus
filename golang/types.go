@@ -41,6 +41,11 @@ type ToolResult struct {
 	// compaction, token estimation and any text-only provider see.
 	Parts    []ContentPart  `json:"parts,omitempty"`
 	Metadata map[string]any `json:"metadata,omitempty"`
+	// Structured is the tool's machine-readable result (§1). MCP serve emits it
+	// as structuredContent, beside the text block. nil ⇒ byte-identical output.
+	Structured any `json:"structured,omitempty"`
+	// Meta is protocol metadata for the wire result (MCP `_meta`). nil ⇒ omitted.
+	Meta map[string]any `json:"meta,omitempty"`
 }
 
 // ToolContext is optional per-call context.
@@ -155,6 +160,22 @@ type Tool struct {
 	// alongside other safe calls of the same model response. nil ⇒ safe only
 	// when Hints.ReadOnly. See IsConcurrencySafe.
 	ConcurrencySafe func(args map[string]any) bool `json:"-"`
+	// Annotations are passed through verbatim on the MCP wire by MCPHandler
+	// (§7C.1). nil ⇒ derived from Hints when set, else omitted.
+	Annotations *ToolAnnotations `json:"-"`
+	// OutputSchema is the JSON Schema of ToolResult.Structured (§1). MCP serve
+	// advertises it as outputSchema. nil ⇒ omitted.
+	OutputSchema JSONSchema `json:"outputSchema,omitempty"`
+}
+
+// ToolAnnotations are the MCP tool annotations a served tool advertises
+// (§7C.1). Every field is optional; nil hints are omitted on the wire.
+type ToolAnnotations struct {
+	Title           string
+	ReadOnlyHint    *bool
+	DestructiveHint *bool
+	IdempotentHint  *bool
+	OpenWorldHint   *bool
 }
 
 // ToolHints are advisory behavior hints (named after MCP tool annotations).

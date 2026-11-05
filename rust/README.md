@@ -86,8 +86,34 @@ An API key from the environment is sent only to the host it belongs to: `OPENAI_
 | **Remote agents** | Calls remote A2A agents as tools. Drives local coding agents (Claude Code, Gemini CLI, Codex, goose) over the Agent Client Protocol, with permission and update hooks. |
 | **Client** | OpenAI and Anthropic styles. Parallel tool calls, hooks, streaming, retries that honour `Retry-After`, conversation memory, prompt caching, tool tiers, usage metrics, and model listing. |
 | **Human in the loop** | A tool can pause the run and ask for input or authorization. With a `wait_for` handler the answer comes back inline; without one the run returns `pending` and you resume it later. |
-| **Serve** | `tk.serve(addr, ..)` publishes the toolkit as an A2A agent and/or an MCP server. |
+| **Serve** | `tk.serve(addr, ..)` publishes the toolkit as an A2A agent and/or an MCP server; `tk.mcp_handler(..)` is an MCP server to mount on your own router, with per-request hooks. |
 | **Agents** | Sub-agents, a runtime with budgets and durable resume, personas, conversation compaction, and a judge/classifier for guardrails and routing. |
+
+## Embeddable MCP server
+
+`tk.mcp_handler(cfg)` is an MCP server you mount on **your own** hyper / axum router, behind your
+own TLS, CORS and OAuth (SPEC §7C.1). Every policy is a hook: `authenticate` (401 +
+`www_authenticate`), `list_tools` per request (a tool outside it is never executed), `before_call`
+(allow / deny / confirm — confirm asks the client over MCP elicitation, or returns your shaped
+fallback), `on_call`, `server_info`, resources and prompts, pluggable session ids or `stateless`.
+`handler.notify_tools_changed()` tells connected clients to re-list. Tools and hooks read the
+caller with `mcp_request_context(&ctx)` (identity, headers, session id, `params._meta`).
+
+```rust
+use toolnexus::mcp_handler::{McpDecision, McpHandlerConfig, McpIdentity};
+
+let handler = tk.mcp_handler(McpHandlerConfig {
+    authenticate: Some(Arc::new(|rc| { let ok = rc.header("authorization") == "Bearer s3cret";
+        Box::pin(async move { if ok { Ok(Arc::new("alice".to_string()) as McpIdentity) } else { Err("no".into()) } }) })),
+    before_call: Some(Arc::new(|_, tool, _| Box::pin(async move {
+        Ok(if tool.name == "delete_record" { McpDecision::confirm("Really delete?") } else { McpDecision::allow() }) }))),
+    ..Default::default()
+});
+// hyper: `handler` is a hyper::service::Service; any framework: `handler.handle(req).await`.
+```
+
+Run `cargo run --example mcp_handler` for a self-contained demo (bearer auth, per-user tools,
+confirm via elicitation and via a nonce fallback).
 
 ## Media generation
 
@@ -137,7 +163,7 @@ let client = create_in_process_client(InProcessOptions {
 | feature | default | what it adds |
 |---|---|---|
 | `mcp-http` | on | MCP over streamable HTTP. Without it you get stdio MCP servers only. |
-| `serve` | on | `Toolkit::serve`: the A2A agent and the MCP server. |
+| `serve` | on | `Toolkit::serve` (the A2A agent and the MCP server) and `Toolkit::mcp_handler`. |
 
 For a lean build, use `toolnexus = { version = "0.24", default-features = false }`.
 
@@ -153,6 +179,7 @@ directory has runnable programs. Run them with `cargo run --example <name>` from
 - `acp`: use a local coding agent as the model.
 - `agents`: a coordinator fanning out to sub-agents.
 - `prompt_cache`: prompt caching and tool tiers.
+- `mcp_handler`: the embeddable MCP server mounted on your own hyper server.
 
 ## Status
 

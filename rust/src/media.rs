@@ -1014,6 +1014,8 @@ impl Media {
         let me = self.clone();
         let verb = spec.verb;
         Tool {
+            output_schema: None,
+            annotations: None,
             name: spec.tool.into(),
             description: spec.description.into(),
             input_schema: json!({"type": "object", "properties": props, "required": required}),
