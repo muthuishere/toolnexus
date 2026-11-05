@@ -9,6 +9,7 @@
             [koine.fs :as fs]
             [koine.json :as json]
             [toolnexus.mcp-handler :as mh]
+            [toolnexus.mcp-server-auth :as sa]
             [toolnexus.shared-examples-test :as te]
             [toolnexus.tool :as tool]))
 
@@ -29,6 +30,29 @@
     (contains? r "structured") (assoc :structured (kw (get r "structured")))
     (contains? r "meta")       (assoc :meta (kw (get r "meta")))))
 
+(defn- identity-name
+  "README: a string identity verbatim, a Principal's subject, else \"\"."
+  [v]
+  (cond (string? v) v
+        (map? v) (str (or (:subject v) ""))
+        :else ""))
+
+(def ^:private v-key "io.modelcontextprotocol/protocolVersion")
+
+(defn- stamp-2026
+  "README `mcp2026`: set params._meta[protocolVersion] unless already present."
+  [body]
+  (let [p    (let [p (get body "params")] (if (map? p) p {}))
+        meta (let [m (get p "_meta")] (if (map? m) m {}))]
+    (assoc body "params" (assoc p "_meta" (if (contains? meta v-key) meta (assoc meta v-key "2026-07-28"))))))
+
+(defn- headers-2026 [body]
+  (let [m (get body "method")
+        p (let [p (get body "params")] (if (map? p) p {}))]
+    (cond-> {"mcp-protocol-version" "2026-07-28" "mcp-method" (str (or m ""))}
+      (#{"tools/call" "prompts/get"} m) (assoc "mcp-name" (let [x (get p "name")] (if (string? x) x "")))
+      (= "resources/read" m)            (assoc "mcp-name" (let [x (get p "uri")] (if (string? x) x ""))))))
+
 (defn- build-tools [fixture executed]
   (mapv (fn [ft]
           (let [nm (get ft "name")
@@ -39,8 +63,16 @@
                                            (swap! executed conj nm)
                                            (case (get ft "behavior")
                                              "echo"   (tool/success (str (or (:text args) "")))
-                                             "whoami" (tool/success (str (or (mh/mcp-identity ctx) "") "|"
+                                             "whoami" (tool/success (str (identity-name (mh/mcp-identity ctx)) "|"
                                                                          (or (:trace (mh/mcp-request-meta ctx)) "")))
+                                             "ask"    (let [a (:answer ctx)]
+                                                        (if (and a (:ok a))
+                                                          (tool/success (str "Hello, " (get-in a [:data :name]) "!"))
+                                                          {:output "" :isError true
+                                                           :metadata {:pending {:id "name" :kind "input" :prompt "What is your name?"
+                                                                                :data {:schema {:type "object"
+                                                                                                :properties {:name {:type "string"}}
+                                                                                                :required ["name"]}}}}}))
                                              "error"  (throw (ex-info (get ft "error") {}))
                                              (tool-result (get ft "result"))))}
                          (get ft "outputSchema") (assoc :output-schema (kw (get ft "outputSchema")))
@@ -70,7 +102,7 @@
         auth     (get fixture "auth")
         opts     (cond-> {:list-tools (fn [ctx]
                                         (filterv (fn [t] (let [v (get-in by-name [(:name t) "visibleTo"])]
-                                                           (or (nil? v) (some #{(mh/mcp-identity ctx)} v))))
+                                                           (or (nil? v) (some #{(identity-name (mh/mcp-identity ctx))} v))))
                                                  tools))
                           :before-call (fn [_ t _]
                                          (when-let [d (get-in by-name [(:name t) "decision"])]
@@ -87,14 +119,25 @@
                    (get cfg "instructions")       (assoc :instructions (get cfg "instructions"))
                    (get cfg "stateless")          (assoc :stateless true)
                    (get cfg "statelessSessionId") (assoc :stateless-session-id (get cfg "statelessSessionId"))
-                   (get cfg "protocolVersions")   (assoc :protocol-versions (get cfg "protocolVersions")))
+                   (get cfg "protocolVersions")   (assoc :protocol-versions (get cfg "protocolVersions"))
+                   (get cfg "skills")             (assoc :list-skills (fn [_] (mh/load-mcp-skills (str (te/examples-dir) "/skills")))))
+        sauth    (when (get cfg "serverAuth")
+                   (let [fa (get fixture "serverAuth")]
+                     (sa/mcp-server-auth {:issuer (get fa "issuer") :audience (get fa "audience") :scopes (get fa "scopes")
+                                          :verify (fn [_ctx token _aud]
+                                                    (if-let [p (get-in fa ["principals" token])]
+                                                      {:subject (get p "subject") :scopes (vec (get p "scopes"))}
+                                                      (throw (ex-info "bad token" {}))))})))
+        opts     (cond-> opts sauth (assoc :authenticate (:authenticate sauth)))
         handler  (:handler (mh/mcp-handler (tool/toolkit []) opts))
         sid      (atom "")]
     (doseq [[i st] (map-indexed vector (get sc "steps"))]
       (let [rq     (get st "request")
             method (keyword (str/lower-case (get rq "method")))
+            jbody  (when (contains? rq "body")
+                     (if (and (get rq "mcp2026") (map? (get rq "body"))) (stamp-2026 (get rq "body")) (get rq "body")))
             body   (cond (contains? rq "rawBody") (get rq "rawBody")
-                         (contains? rq "body")    (json/write-str (get rq "body"))
+                         (contains? rq "body")    (json/write-str jbody)
                          :else "")
             token  (or (not-empty (get rq "token")) (not-empty (get sc "token")))
             hs     (cond-> {"accept" (or (get rq "accept") "application/json, text/event-stream")}
@@ -103,7 +146,13 @@
                      (seq (get rq "sessionId")) (assoc "mcp-session-id" (get rq "sessionId"))
                      (and (empty? (get rq "sessionId")) (get rq "session")) (assoc "mcp-session-id" @sid)
                      (get rq "version")        (assoc "mcp-protocol-version" (get rq "version")))
-            res    (handler {:request-method method :headers hs :body body})
+            hs     (cond-> hs (and (get rq "mcp2026") (map? jbody)) (merge (headers-2026 jbody)))
+            hs     (reduce (fn [m [k v]] (let [k (str/lower-case k)] (if (= "" v) (dissoc m k) (assoc m k v))))
+                           hs (get rq "headers"))
+            res    (if (seq (get rq "target"))
+                     ((if sauth (:metadata sauth) (fn [_] {:status 404 :headers {} :body ""}))
+                      {:request-method method :uri (get rq "target") :headers hs :body body})
+                     (handler {:request-method method :headers hs :body body}))
             rb     (let [b (:body res)] (if (string? b) b (apply str b)))
             ex     (get st "expect")
             label  (str (get sc "name") " step " i)]

@@ -179,6 +179,36 @@ resources, prompts and pluggable session ids. `toolnexus.serve/serve` is unchang
 SSE responses (GET streams, a confirm round trip) are lazy-seq Ring bodies, so the adapter must
 write a seq body chunk by chunk. Example: `examples/src/examples/mcp_handler.cljc`.
 
+### MCP 2026-07-28 (opt-in)
+
+List `"2026-07-28"` in `:protocol-versions` and the same handler also speaks the stateless
+2026-07-28 wire (SPEC §7C.2, ADR 0040): `server/discover`, header validation, `resultType`, and
+MRTR — a `:confirm` decision or a §10 tool suspension comes back as `input_required`, and the
+retry's answer reaches the tool as `(:answer ctx)`. `["2026-07-28" "2025-06-18"]` serves both wires
+on one mount; leave it out and nothing changes. `:list-skills` publishes skills through the
+skills extension (`skills/list`, `skills/get`, `skill://` reads); `load-mcp-skills` builds the list
+from a directory. `mcp-server-auth` turns the handler into an OAuth 2.1 protected resource: an
+`:authenticate` hook (RS256 JWTs checked against the issuer's JWKS, or your own `:verify`; per-tool
+scopes) and the RFC 9728 metadata handler. The Principal `{:subject :scopes :claims}` is
+`(mh/mcp-identity ctx)`.
+
+```clojure
+(require '[toolnexus.mcp-server-auth :as sa])
+
+(def auth (sa/mcp-server-auth {:issuer "https://login.example" :scopes {"*" ["mcp"] "wipe" ["mcp:admin"]}}))
+(def h (mh/mcp-handler tk {:protocol-versions ["2026-07-28" "2025-06-18"]
+                           :list-skills  (fn [_] (mh/load-mcp-skills "skills"))
+                           :authenticate (:authenticate auth)}))
+;; route GET /.well-known/oauth-protected-resource[/mcp] to (:metadata auth)
+```
+
+`toolnexus.mcp-dev-auth/start-mcp-dev-auth-server` is an in-process OAuth server that approves
+everyone as `dev-user` (pre-registered and Client ID Metadata Document clients, PKCE S256, refresh
+rotation, `:mint` for test tokens). **It is for development and tests only. Never use it in
+production.** It runs on plain HTTP. Because koine's server cannot read a query string,
+`GET /authorize` serves a page that POSTs the query back to itself. On cljgo it listens on every
+interface.
+
 ## Documentation
 
 Everything else — the full surface, with runnable examples — lives on the docs site:
