@@ -24,7 +24,7 @@
 
 ## 4. Verify
 
-- [ ] 4.1 Every port's suite green locally and in CI
+- [x] 4.1 Every port's suite green locally and in CI
 - [x] 4.2 Go interop green locally
 - [ ] 4.3 Cross-port interop matrix (every port's 2026 client × every port's server) — needs #142 merged; not in this change
 - [ ] 4.4 Keycloak live suite against the server (owner, local)

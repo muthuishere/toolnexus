@@ -3,7 +3,7 @@
 ## 0. Design
 - [x] 0.1 ADR 0039 (PROPOSED) with the toolnexus/host split
 - [x] 0.2 SPEC §7C.1
-- [ ] 0.3 Owner accepts ADR 0039
+- [x] 0.3 Owner accepts ADR 0039
 
 ## 1. golang (reference)
 - [x] 1.1 `MCPHandler(cfg) *MCPHTTPHandler` (http.Handler) — own JSON-RPC transport, no new dependency
