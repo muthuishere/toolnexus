@@ -23,7 +23,7 @@ the same output in every language.
 
 ```toml
 [dependencies]
-toolnexus = "0.24"
+toolnexus = "0.25"
 tokio = { version = "1", features = ["full"] }
 serde_json = "1"
 ```
