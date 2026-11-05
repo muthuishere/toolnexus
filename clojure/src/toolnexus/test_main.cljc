@@ -43,6 +43,8 @@
             [toolnexus.acp-test :as acp-test]
             [toolnexus.host-engine-asks-test]
             [toolnexus.media-test]
+            [toolnexus.mcp2026-test]
+            [toolnexus.mcp-auth-test]
             [toolnexus.mcp-handler-test]
             [toolnexus.mcp-handler-conformance-test]
             [toolnexus.mcp-handler2026-test]))
@@ -76,6 +78,8 @@
     toolnexus.acp-test
     toolnexus.host-engine-asks-test
     toolnexus.media-test
+    toolnexus.mcp2026-test
+    toolnexus.mcp-auth-test
     toolnexus.mcp-handler-test
     toolnexus.mcp-handler-conformance-test
     toolnexus.mcp-handler2026-test])
@@ -92,7 +96,7 @@
 ;; and the count stays above any floor. Comparing `suites` against a constant is
 ;; the only check that can see the vector shrink, because every count derived
 ;; FROM the vector shrinks with it. Adding a suite is meant to be a two-line diff.
-(def expected-suite-count 31)
+(def expected-suite-count 33)
 
 (defn- declared-tests
   "How many deftests a namespace actually holds, read off its interns rather than

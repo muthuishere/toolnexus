@@ -238,3 +238,36 @@ Everything else — the full surface, with runnable examples — lives on the do
 | **Cookbook** | [Zero to agent](https://muthuishere.github.io/toolnexus/cookbook/zero-to-agent/) · [MCP servers](https://muthuishere.github.io/toolnexus/cookbook/mcp-servers/) · [Agent skills](https://muthuishere.github.io/toolnexus/cookbook/agent-skills/) · [Judge](https://muthuishere.github.io/toolnexus/cookbook/judge/) |
 
 Contract across all eight ports: [`SPEC.md`](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
+
+## MCP 2026-07-28 + OAuth
+
+`McpSource` / `Toolkit` speak MCP **2026-07-28** first (SPEC §2): every server gets `server/discover`
+(stdio and HTTP). A server that answers it is used statelessly (no `initialize`, no session) with
+`_meta` + `MCP-Protocol-Version` / `Mcp-Method` / `Mcp-Name` headers, JSON or SSE replies, and MRTR
+`input_required` rounds routed through `waitFor` (or returned as a `pending` result without one; answer
+it by re-running the tool with `ToolContext.answer`). An older server falls back to the frozen
+SDK-based path (§2.F), unchanged. A `tools/call` is never re-sent after a timeout, lost connection or 5xx.
+
+Per-server extras in `mcp.json`:
+
+```json
+{ "mcpServers": { "docs": {
+    "url": "https://mcp.example.com/mcp",
+    "toolSearch": true, "description": "the docs server",
+    "auth": { "clientId": "my-registered-app", "mode": "auto" }
+} } }
+```
+
+- `toolSearch` exposes `docs_search_tools` + `docs_call_tool` instead of every tool (BM25, §2.8).
+- Skills served via the skills extension join the `skill` tool (§2.7).
+- `auth` (§2A.1): PRM → AS metadata → pre-registered `clientId`/`clientIds` or `clientMetadataUrl`
+  (CIMD) — no dynamic client registration — PKCE S256 + `resource`, `iss`/`state` checks, single-flight
+  refresh, step-up. `mode: "auto"` opens the browser and listens on loopback; `mode: "pause"` (needs
+  `redirectUri`) raises a §10 `authorization` request — answer it with
+  `new Answer(id, true, Map.of("callbackUrl", "<URL the AS redirected to>"))`.
+- Load options: `new McpSource.LoadOptions().tokenStore(store).openUrl(url -> ...)` (same on
+  `Toolkit.Options`). Tokens are never logged.
+
+The frozen fallback carries the bearer token too (the SDK's per-request customizer) and runs the same
+OAuth flow on a 401/403. Not on the 2026 path yet: `list_mcp_resources`/`read_mcp_resource`
+(`resourceTools()`) only see fallback servers; no progress notifications (per §2.9).

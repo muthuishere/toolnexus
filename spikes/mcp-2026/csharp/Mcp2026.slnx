@@ -1,0 +1,15 @@
+<Solution>
+  <Project Path="src/Mcp2026/Mcp2026.csproj" />
+  <Project Path="src/Spike/Spike.csproj" />
+  <Project Path="examples/01-connect-http/01-connect-http.csproj" />
+  <Project Path="examples/02-connect-stdio/02-connect-stdio.csproj" />
+  <Project Path="examples/03-tool-input/03-tool-input.csproj" />
+  <Project Path="examples/04-skills/04-skills.csproj" />
+  <Project Path="examples/05-tool-search/05-tool-search.csproj" />
+  <Project Path="examples/06-oauth-zero-config/06-oauth-zero-config.csproj" />
+  <Project Path="examples/07-oauth-web-pause-resume/07-oauth-web-pause-resume.csproj" />
+  <Project Path="examples/08-serve-protected/08-serve-protected.csproj" />
+  <Project Path="examples/09-keycloak/09-keycloak.csproj" />
+  <Project Path="examples/10-github/10-github.csproj" />
+  <Project Path="tests/Mcp2026.Tests/Mcp2026.Tests.csproj" />
+</Solution>

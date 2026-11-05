@@ -146,6 +146,14 @@ defmodule Toolnexus.Skill do
   # refused — by construction such a block has no YAML semantics to preserve, so a
   # block scalar (`description: |`) can never be misparsed by it. Line-wise FIRST is
   # forbidden: it misreads exactly the files the six YAML ports handle today.
+  @doc false
+  # The same frontmatter read a directory skill gets: `{data, body}` (MCP remote
+  # skills, SPEC §2.7 — a remote skill's body is byte-identical to the local copy).
+  def split_skill_md(text) do
+    {data, body, _malformed, _detail} = parse_frontmatter(text)
+    {data, body}
+  end
+
   defp parse_frontmatter(text) do
     case Regex.run(@frontmatter_re, text) do
       nil ->

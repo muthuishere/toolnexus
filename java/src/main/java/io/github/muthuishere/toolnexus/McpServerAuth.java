@@ -177,7 +177,7 @@ public final class McpServerAuth {
         List<String> need = new ArrayList<>(base());
         if ("tools/call".equals(ex.getRequestHeaders().getFirst("Mcp-Method"))) {
             String mn = ex.getRequestHeaders().getFirst("Mcp-Name");
-            String[] name = Mcp2026.decodeHeaderValue(mn == null ? "" : mn);
+            String[] name = McpHandler2026.decodeHeaderValue(mn == null ? "" : mn);
             if (name[1] != null) {
                 for (String s : scopes.getOrDefault(name[0], List.of())) if (!need.contains(s)) need.add(s);
             }

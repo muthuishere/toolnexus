@@ -342,7 +342,7 @@ public final class McpDevAuthServer implements AutoCloseable {
                         return;
                     }
                     String ch = Base64.getUrlEncoder().withoutPadding().encodeToString(
-                            Mcp2026.sha256(f.getOrDefault("code_verifier", "").getBytes(StandardCharsets.UTF_8)));
+                            McpHandler2026.sha256(f.getOrDefault("code_verifier", "").getBytes(StandardCharsets.UTF_8)));
                     if (!ch.equals(g.challenge()) || !g.clientId().equals(f.get("client_id"))
                             || !g.redirect().equals(f.get("redirect_uri")) || !g.resource().equals(f.get("resource"))) {
                         json(ex, 400, kv("error", "invalid_grant"));

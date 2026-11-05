@@ -1,290 +1,554 @@
 package io.github.muthuishere.toolnexus;
 
-import com.sun.net.httpserver.HttpExchange;
+import io.github.muthuishere.toolnexus.mcp.Authorizer;
+import io.github.muthuishere.toolnexus.mcp.Client;
+import io.github.muthuishere.toolnexus.mcp.LoopbackAuthorizer;
+import io.github.muthuishere.toolnexus.mcp.Mcp;
+import io.github.muthuishere.toolnexus.mcp.McpException;
+import io.github.muthuishere.toolnexus.mcp.MemoryTokenStore;
+import io.github.muthuishere.toolnexus.mcp.OAuth;
+import io.github.muthuishere.toolnexus.mcp.PauseAuthorizer;
+import io.github.muthuishere.toolnexus.mcp.Pending;
+import io.github.muthuishere.toolnexus.mcp.PendingException;
+import io.github.muthuishere.toolnexus.mcp.RpcError;
+import io.github.muthuishere.toolnexus.mcp.TokenStore;
 
-import java.io.ByteArrayOutputStream;
+import java.io.File;
 import java.io.IOException;
-import java.nio.ByteBuffer;
-import java.nio.charset.CharacterCodingException;
-import java.nio.charset.CodingErrorAction;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
-import java.nio.file.LinkOption;
 import java.nio.file.Path;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
+import java.time.Duration;
 import java.util.ArrayList;
-import java.util.Base64;
-import java.util.HexFormat;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Function;
 import java.util.stream.Stream;
 
+import static io.github.muthuishere.toolnexus.mcp.Mcp.list;
+import static io.github.muthuishere.toolnexus.mcp.Mcp.map;
+import static io.github.muthuishere.toolnexus.mcp.Mcp.obj;
+import static io.github.muthuishere.toolnexus.mcp.Mcp.str;
+
 /**
- * Package-private helpers of the MCP 2026-07-28 wire on {@link McpHandler} (SPEC §7C.2): header
- * validation, skill URI containment, the MRTR requestState, MRTR ↔ §10 mapping, and
- * {@code loadMcpSkills}. Mirrors {@code golang/mcphandler2026.go}.
+ * The MCP 2026-07-28 path of {@link McpSource} (SPEC §2.2–§2.8, §2A.1). {@link #connect} sends
+ * {@code server/discover} first; a {@link Fallback} tells the caller to use the frozen SDK path (§2.F).
+ * Owns no MCP SDK.
  */
 final class Mcp2026 {
     private Mcp2026() {}
 
-    static final String META_VERSION = "io.modelcontextprotocol/protocolVersion";
-    static final String META_CLIENT_CAPS = "io.modelcontextprotocol/clientCapabilities";
-    static final String META_SERVER_INFO = "io.modelcontextprotocol/serverInfo";
-    static final int CODE_HEADER_MISMATCH = -32020;
-    static final int CODE_UNSUPPORTED = -32022;
-
-    private static String header(HttpExchange ex, String name) {
-        String v = ex.getRequestHeaders().getFirst(name);
-        return v == null ? "" : v;
+    /** §2.2a: discover says "old server" — use the frozen fallback (§2.F). */
+    static final class Fallback extends Exception {
+        Fallback(String why) { super(why, null, false, false); }
     }
 
-    private static McpHandler.Rpc26Error mismatch(String m) {
-        return new McpHandler.Rpc26Error(400, CODE_HEADER_MISMATCH, "Header mismatch: " + m, null);
-    }
+    private static final int MAX_ROUNDS = 8;
 
-    /** SPEC §7C.2 header validation, in order; null ⇒ valid. */
-    static McpHandler.Rpc26Error validate(HttpExchange ex, String method, Map<String, Object> p, Map<String, Object> meta) {
-        String hv = header(ex, "MCP-Protocol-Version");
-        if (hv.isEmpty()) return mismatch("MCP-Protocol-Version header missing");
-        String hm = header(ex, "Mcp-Method");
-        if (!hm.equals(method)) {
-            return mismatch("Mcp-Method header value '" + hm + "' does not match body value '" + method + "'");
-        }
-        if (method.equals("tools/call") || method.equals("prompts/get") || method.equals("resources/read")) {
-            String key = method.equals("resources/read") ? "uri" : "name";
-            String want = p != null && p.get(key) instanceof String s ? s : "";
-            String[] got = decodeHeaderValue(header(ex, "Mcp-Name"));
-            if (got[1] == null || !got[0].equals(want)) {
-                return mismatch("Mcp-Name header value '" + got[0] + "' does not match body value '" + want + "'");
-            }
-        }
-        String mv = meta != null && meta.get(META_VERSION) instanceof String s ? s : "";
-        if (!mv.equals(hv)) {
-            return mismatch("MCP-Protocol-Version header value '" + hv + "' does not match _meta value '" + mv + "'");
-        }
-        if (!mv.equals(McpHandler.PROTOCOL_2026)) {
-            Map<String, Object> data = new LinkedHashMap<>();
-            data.put("supported", List.of(McpHandler.PROTOCOL_2026));
-            data.put("requested", mv);
-            return new McpHandler.Rpc26Error(400, CODE_UNSUPPORTED, "Unsupported protocol version", data);
-        }
-        return null;
-    }
+    /** One server connected on the 2026 path. */
+    static final class Conn implements AutoCloseable {
+        final String name;
+        final Client client;
+        final long timeout;
+        final Function<Request, Answer> waitFor;
+        final Map<String, Object> discover;
+        /** Paused rounds by §10 request id (MRTR input or OAuth pause). */
+        private final Map<String, Round> paused = new ConcurrentHashMap<>();
+        Path skillsRoot; // temp dir holding remote skills (deleted on close), or null
 
-    /**
-     * Decodes the {@code =?base64?…?=} sentinel (SPEC §2.3). Returns {value, ok} where ok is non-null
-     * when the value is usable (a non-empty plain value or a well-formed sentinel).
-     */
-    static String[] decodeHeaderValue(String v) {
-        if (v.startsWith("=?base64?") && v.endsWith("?=") && v.length() >= 11) {
-            try {
-                return new String[]{new String(Base64.getDecoder().decode(v.substring(9, v.length() - 2)), StandardCharsets.UTF_8), "ok"};
-            } catch (IllegalArgumentException e) {
-                return new String[]{"", null};
-            }
+        Conn(String name, Client client, long timeout, Function<Request, Answer> waitFor, Map<String, Object> discover) {
+            this.name = name;
+            this.client = client;
+            this.timeout = timeout;
+            this.waitFor = waitFor;
+            this.discover = discover;
         }
-        return new String[]{v, v.isEmpty() ? null : "ok"};
-    }
 
-    /** Compares by Unicode code point (not UTF-16 unit), matching Go's byte-wise string order. */
-    static int compareCodePoints(String a, String b) {
-        int i = 0, j = 0;
-        while (i < a.length() && j < b.length()) {
-            int ca = a.codePointAt(i), cb = b.codePointAt(j);
-            if (ca != cb) return Integer.compare(ca, cb);
-            i += Character.charCount(ca);
-            j += Character.charCount(cb);
-        }
-        return Integer.compare(a.length() - i, b.length() - j);
-    }
-
-    static boolean validUtf8(byte[] b) {
-        try {
-            StandardCharsets.UTF_8.newDecoder().onMalformedInput(CodingErrorAction.REPORT)
-                    .onUnmappableCharacter(CodingErrorAction.REPORT).decode(ByteBuffer.wrap(b));
-            return true;
-        } catch (CharacterCodingException e) {
-            return false;
+        @Override
+        public void close() {
+            client.close();
+            if (skillsRoot != null) deleteTree(skillsRoot);
         }
     }
 
-    // ── skills ───────────────────────────────────────────────────────────
+    /** The state of one {@code tools/call} across MRTR rounds (§2.5). */
+    private static final class Round {
+        final String tool;
+        final Map<String, Object> args;
+        Map<String, Object> responses;      // inputResponses being built for the next send (null on round 0)
+        Object requestState;                // echoed verbatim
+        Map<String, Object> requests;       // this round's inputRequests (ordered)
+        String waitingKey;                  // the input request a paused round waits on
+        String authId;                      // set when paused on OAuth (§2A.1 step 10)
+        int round;
 
-    static Map<String, Object> frontmatter(McpHandler.Skill s) {
-        if (s.frontmatter() != null) return s.frontmatter();
-        Map<String, Object> m = new LinkedHashMap<>();
-        m.put("name", s.name());
-        return m;
-    }
-
-    static Map<String, Object> skillEntry(McpHandler.Skill s) {
-        List<McpHandler.SkillFile> files = new ArrayList<>(s.files() == null ? List.of() : s.files());
-        files.sort((a, b) -> compareCodePoints(a.path(), b.path()));
-        List<Map<String, Object>> res = new ArrayList<>();
-        for (McpHandler.SkillFile f : files) {
-            byte[] b = (f.text() == null ? "" : f.text()).getBytes(StandardCharsets.UTF_8);
-            Map<String, Object> m = new LinkedHashMap<>();
-            m.put("uri", "skill://" + s.name() + "/" + f.path());
-            m.put("digest", "sha256:" + HexFormat.of().formatHex(sha256(b)));
-            m.put("size", b.length);
-            res.add(m);
-        }
-        Map<String, Object> out = new LinkedHashMap<>();
-        out.put("uri", "skill://" + s.name() + "/SKILL.md");
-        out.put("frontmatter", frontmatter(s));
-        out.put("resources", res);
-        return out;
-    }
-
-    static byte[] sha256(byte[] b) {
-        try {
-            return MessageDigest.getInstance("SHA-256").digest(b);
-        } catch (NoSuchAlgorithmException e) {
-            throw new IllegalStateException(e);
+        Round(String tool, Map<String, Object> args) {
+            this.tool = tool;
+            this.args = args;
         }
     }
 
-    /**
-     * Validates {@code skill://<name>/<path>} (SPEC §2.7 containment). Returns {name, path};
-     * throws IllegalArgumentException with the pinned reason.
-     */
-    static String[] parseSkillUri(String uri) {
-        if (!uri.startsWith("skill://")) throw new IllegalArgumentException("not a skill:// URI");
-        String dec = percentDecode(uri.substring("skill://".length()));
-        if (dec.indexOf('%') >= 0 || dec.indexOf('\\') >= 0 || dec.indexOf('\0') >= 0) {
-            throw new IllegalArgumentException("skill URI has encoded, backslash or NUL characters");
-        }
-        String[] segs = dec.split("/", -1);
-        if (segs.length < 2) throw new IllegalArgumentException("skill URI needs skill://<name>/<path>");
-        for (String s : segs) {
-            if (s.isEmpty() || s.equals(".") || s.equals("..") || s.contains(":")) {
-                throw new IllegalArgumentException("skill URI path escapes the skill (empty, '.', '..' or ':' segment)");
-            }
-        }
-        return new String[]{segs[0], String.join("/", java.util.Arrays.copyOfRange(segs, 1, segs.length))};
-    }
+    // ------------------------------------------------------------------ connect
 
-    /** Go's url.PathUnescape: %XX only ('+' is literal); a malformed escape fails. */
-    private static String percentDecode(String s) {
-        ByteArrayOutputStream out = new ByteArrayOutputStream();
-        byte[] in = s.getBytes(StandardCharsets.UTF_8);
-        for (int i = 0; i < in.length; i++) {
-            if (in[i] == '%') {
-                if (i + 2 >= in.length || Character.digit(in[i + 1], 16) < 0 || Character.digit(in[i + 2], 16) < 0) {
-                    throw new IllegalArgumentException("bad percent-encoding");
-                }
-                out.write(Character.digit(in[i + 1], 16) * 16 + Character.digit(in[i + 2], 16));
-                i += 2;
-            } else {
-                out.write(in[i]);
-            }
-        }
-        return out.toString(StandardCharsets.UTF_8);
-    }
-
-    static List<McpHandler.Skill> loadSkills(Path dir) throws IOException {
-        List<McpHandler.Skill> out = new ArrayList<>();
-        List<Path> manifests;
-        try (Stream<Path> st = Files.walk(dir)) {
-            manifests = st.filter(f -> f.getFileName() != null && f.getFileName().toString().equals("SKILL.md")
-                    && Files.isRegularFile(f, LinkOption.NOFOLLOW_LINKS)).sorted().toList();
-        }
-        for (Path manifest : manifests) {
-            Map<String, Object> parsed = SkillSource.parseFrontmatter(Files.readString(manifest));
-            if (Boolean.TRUE.equals(parsed.get("malformed"))) continue;
-            @SuppressWarnings("unchecked")
-            Map<String, String> data = (Map<String, String>) parsed.get("data");
-            String name = data == null ? null : data.get("name");
-            if (name == null || name.isEmpty()) continue;
-            String desc = data.get("description");
-            Map<String, Object> fm = new LinkedHashMap<>();
-            fm.put("name", name);
-            fm.put("description", desc == null ? "" : desc);
-            Path root = manifest.getParent();
-            List<McpHandler.SkillFile> files = new ArrayList<>();
-            List<Path> all;
-            try (Stream<Path> st = Files.walk(root)) {
-                all = st.filter(f -> Files.isRegularFile(f, LinkOption.NOFOLLOW_LINKS)).toList();
-            }
-            for (Path f : all) {
-                byte[] b = Files.readAllBytes(f);
-                if (!validUtf8(b)) continue; // binary files are skipped: the wire is text
-                String rel = root.relativize(f).toString().replace(java.io.File.separatorChar, '/');
-                files.add(new McpHandler.SkillFile(rel, new String(b, StandardCharsets.UTF_8)));
-            }
-            files.sort((a, b) -> compareCodePoints(a.path(), b.path()));
-            out.add(new McpHandler.Skill(name, fm, List.copyOf(files)));
-        }
-        out.sort((a, b) -> compareCodePoints(a.name(), b.name()));
-        return out;
-    }
-
-    // ── MRTR ─────────────────────────────────────────────────────────────
-
-    /** The opaque requestState: which tool the round belongs to and whether a confirm was accepted. */
-    record State(String tool, boolean confirmed) {}
-
-    static String encodeState(String tool, boolean confirmed) {
-        String json = "{\"tool\":" + Json.stringify(tool) + (confirmed ? ",\"confirmed\":true" : "") + "}";
-        return Base64.getUrlEncoder().withoutPadding().encodeToString(json.getBytes(StandardCharsets.UTF_8));
-    }
-
-    static State decodeState(Object v) {
-        if (!(v instanceof String s)) return null;
-        try {
-            byte[] b = Base64.getUrlDecoder().decode(s);
-            Map<String, Object> m = Json.toMap(new String(b, StandardCharsets.UTF_8));
-            Object tool = m.get("tool"), confirmed = m.get("confirmed");
-            if ((tool != null && !(tool instanceof String)) || (confirmed != null && !(confirmed instanceof Boolean))) return null;
-            return new State(tool == null ? "" : (String) tool, Boolean.TRUE.equals(confirmed));
-        } catch (RuntimeException e) {
-            return null;
-        }
-    }
-
-    /** One MRTR input response as a §10 Answer; null when not an object. */
+    /** Builds the client, sends {@code server/discover}; throws {@link Fallback} for an old server (§2.2a). */
     @SuppressWarnings("unchecked")
-    static Answer inputResponse(String key, Object v) {
-        if (!(v instanceof Map<?, ?> m)) return null;
-        String action = m.get("action") instanceof String a ? a : "";
-        boolean ok = "accept".equals(action);
-        Map<String, Object> data = m.get("content") instanceof Map<?, ?> c ? (Map<String, Object>) c : null;
-        String reason = ok ? null : "decline".equals(action) ? "declined" : "cancelled";
-        return new Answer(key, ok, data, reason);
-    }
-
-    static boolean canElicit(Map<String, Object> meta) {
-        return meta != null && meta.get(META_CLIENT_CAPS) instanceof Map<?, ?> caps && caps.containsKey("elicitation");
-    }
-
-    /** A §10 Request as an MRTR input request: authorization+url ⇒ URL mode, else form. */
-    @SuppressWarnings("unchecked")
-    static Map<String, Object> inputRequest(Request r) {
-        Map<String, Object> params = new LinkedHashMap<>();
-        if ("authorization".equals(r.kind()) && r.url() != null && !r.url().isEmpty()) {
-            params.put("mode", "url");
-            params.put("message", r.prompt() == null ? "" : r.prompt());
-            params.put("url", r.url());
-            params.put("elicitationId", r.id());
+    static Conn connect(String name, Map<String, Object> cfg, boolean remote, long timeout,
+                        McpSource.LoadOptions o, TokenStore store) throws Exception {
+        Function<Request, Answer> waitFor = o.waitFor;
+        Client client;
+        if (remote) {
+            client = new Client(String.valueOf(cfg.get("url")));
+            Map<String, String> headers = McpSource.headersOf(cfg);
+            if (headers != null) headers.forEach((k, v) -> { if (v != null) client.header(k, v); });
+            client.auth(oauthFor(name, cfg, o, store));
+            client.timeout(Duration.ofMillis(timeout));
         } else {
-            Object schema = r.data() == null ? null : r.data().get("schema");
-            Map<String, Object> s;
-            if (schema instanceof Map<?, ?> sm) {
-                s = (Map<String, Object>) sm;
-            } else {
-                s = new LinkedHashMap<>();
-                s.put("type", "object");
-                s.put("properties", new LinkedHashMap<>());
-            }
-            params.put("mode", "form");
-            params.put("message", r.prompt() == null ? "" : r.prompt());
-            params.put("requestedSchema", s);
+            ProcessBuilder pb = new ProcessBuilder(McpSource.commandArgv(name, cfg));
+            Map<String, Object> extra = (Map<String, Object>) cfg.get("environment");
+            if (extra == null) extra = (Map<String, Object>) cfg.get("env");
+            if (extra != null) for (var e : extra.entrySet()) pb.environment().put(e.getKey(), String.valueOf(e.getValue()));
+            if (cfg.get("cwd") != null) pb.directory(new File(String.valueOf(cfg.get("cwd"))));
+            pb.redirectError(ProcessBuilder.Redirect.INHERIT); // stderr passes through, never parsed
+            client = Client.stdio(pb);
+            client.timeout(Duration.ofMillis(Math.min(timeout, 5000))); // §2.2a: silent old stdio server ⇒ fallback
         }
-        Map<String, Object> out = new LinkedHashMap<>();
-        out.put("method", "elicitation/create");
-        out.put("params", params);
+        Map<String, Object> d;
+        try {
+            d = client.discover();
+        } catch (RpcError e) {
+            client.close();
+            throw new Fallback("server/discover: " + e.getMessage());
+        } catch (Client.HttpStatusException e) {
+            client.close();
+            // 400/404/405 per §2.2a. 500 too: the official Java SDK's stateless server (and so toolnexus's own
+            // pre-2026 `serve`) answers an unknown pre-initialize method with HTTP 500. A server that is really
+            // down then fails on the frozen path instead, so the outcome is still `failed`.
+            if (e.status == 400 || e.status == 404 || e.status == 405 || e.status == 500) throw new Fallback(e.getMessage());
+            throw e;
+        } catch (Client.NotJsonRpcException e) {
+            client.close();
+            throw new Fallback(e.getMessage());
+        } catch (PendingException e) {
+            client.close();
+            throw new McpException("authorization pending");
+        } catch (McpException e) {
+            client.close();
+            if (!remote && Client.isTimeout(e)) throw new Fallback(e.getMessage());
+            throw e;
+        }
+        if (!Client.supports2026(d)) {
+            client.close();
+            throw new Fallback("server/discover: 2026-07-28 not supported");
+        }
+        client.timeout(Duration.ofMillis(timeout));
+        return new Conn(name, client, timeout, waitFor, d);
+    }
+
+    /** §2A.1 / §2A.1a: the OAuth client for a remote server, from its {@code auth} config + load options. */
+    @SuppressWarnings("unchecked")
+    static OAuth oauthFor(String server, Map<String, Object> cfg, McpSource.LoadOptions o, TokenStore store) {
+        Map<String, Object> a = cfg.get("auth") instanceof Map<?, ?> m ? (Map<String, Object>) m : Map.of();
+        OAuth oauth = new OAuth().store(store);
+        if (a.get("clientId") instanceof String s) oauth.clientId(s);
+        if (a.get("clientSecret") instanceof String s) oauth.clientSecret(s);
+        if (a.get("tokenAuthMethod") instanceof String s) oauth.tokenAuthMethod(s);
+        if (a.get("clientMetadataUrl") instanceof String s) oauth.clientMetadataUrl(s);
+        if (a.get("clientIds") instanceof Map<?, ?> ids) {
+            Map<String, String> m = new LinkedHashMap<>();
+            ids.forEach((k, v) -> m.put(String.valueOf(k), String.valueOf(v)));
+            oauth.clientIds(m);
+        }
+        oauth.omitRefreshResource(Boolean.TRUE.equals(a.get("omitRefreshResource")));
+        oauth.allowHttp(Boolean.TRUE.equals(a.get("allowHttp")));
+        if ("pause".equals(a.get("mode"))) {
+            String redirect = a.get("redirectUri") instanceof String s ? s : "";
+            if (redirect.isEmpty())
+                throw new IllegalArgumentException("mcp server \"" + server + "\": auth.redirectUri is required for mode \"pause\"");
+            oauth.authorizer(o.waitFor != null ? new WaitForAuthorizer(redirect, o.waitFor) : new PauseAuthorizer(redirect));
+        } else {
+            McpSource.OpenUrl open = o.openUrl;
+            oauth.authorizer(new LoopbackAuthorizer(open == null ? null : open::open));
+        }
+        return oauth;
+    }
+
+    /** {@code pause} mode with a {@code waitFor}: the §10 authorization request is answered inline. */
+    private record WaitForAuthorizer(String redirect, Function<Request, Answer> waitFor)
+            implements Authorizer, Authorizer.Session {
+        @Override public Session begin() { return this; }
+        @Override public String redirectUri() { return redirect; }
+        @Override public void close() {}
+
+        @Override
+        public String await(Pending p) {
+            Answer a = waitFor.apply(toRequest(p));
+            return callbackUrl(a);
+        }
+    }
+
+    static Request toRequest(Pending p) {
+        return new Request(p.id(), "authorization", p.prompt(), p.url(), null, p.expiresAt());
+    }
+
+    /** §2A.1a: the pause answer → the callback URL, or {@code authorization denied: <reason|cancelled>}. */
+    static String callbackUrl(Answer a) {
+        if (a == null || !a.ok()) {
+            String why = a != null && a.reason() != null && !a.reason().isEmpty() ? a.reason() : "cancelled";
+            throw new McpException("authorization denied: " + why);
+        }
+        String cb = a.data() == null ? "" : str(a.data().get("callbackUrl"));
+        if (cb.isEmpty()) throw new McpException("authorization answer has no data.callbackUrl");
+        return cb;
+    }
+
+    // ------------------------------------------------------------------ tools
+
+    /** tools/list (filtered by the per-server allowlist) → toolkit tools, or the two §2.8 meta tools. */
+    @SuppressWarnings("unchecked")
+    static List<Tool> tools(Conn c, Map<String, Object> cfg, Map<String, Boolean> filter, java.util.Set<String> disabled) {
+        List<Map<String, Object>> defs = c.client.listTools();
+        if (Boolean.TRUE.equals(cfg.get("toolSearch"))) {
+            String about = cfg.get("description") instanceof String s && !s.isEmpty() ? s : c.name;
+            java.util.function.Supplier<List<Map<String, Object>>> allowed = () -> {
+                List<Map<String, Object>> keep = new ArrayList<>();
+                for (Map<String, Object> d : applyFilter(c.name, c.client.listTools(), filter))
+                    if (disabled == null || !disabled.contains(Tool.sanitize(c.name) + "_" + Tool.sanitize(str(d.get("name"))))) keep.add(d);
+                return keep;
+            };
+            String hitServer = cfg.get("description") instanceof String s2 ? s2 : "";
+            return searchTools(c, about, hitServer, allowed);
+        }
+        List<Tool> out = new ArrayList<>();
+        for (Map<String, Object> d : applyFilter(c.name, defs, filter)) out.add(serverTool(c, d));
         return out;
+    }
+
+    static List<Map<String, Object>> applyFilter(String server, List<Map<String, Object>> defs, Map<String, Boolean> filter) {
+        if (filter == null || filter.isEmpty()) return defs;
+        boolean hasTrue = filter.values().stream().anyMatch(Boolean.TRUE::equals);
+        java.util.Set<String> present = new java.util.HashSet<>();
+        for (Map<String, Object> d : defs) present.add(str(d.get("name")));
+        for (String k : filter.keySet())
+            if (!present.contains(k))
+                System.err.println("[toolnexus] server \"" + server + "\" tools filter name \"" + k + "\" matched no tool");
+        List<Map<String, Object>> out = new ArrayList<>();
+        for (Map<String, Object> d : defs) {
+            Boolean v = filter.get(str(d.get("name")));
+            if (hasTrue ? Boolean.TRUE.equals(v) : !Boolean.FALSE.equals(v)) out.add(d);
+        }
+        return out;
+    }
+
+    static Map<String, Object> normalizeSchema(Object schema) {
+        Map<String, Object> base = map(schema) == null ? new LinkedHashMap<>() : new LinkedHashMap<>(map(schema));
+        base.put("type", "object");
+        Object props = base.get("properties");
+        base.put("properties", props == null ? new LinkedHashMap<>() : props);
+        base.put("additionalProperties", false);
+        return base;
+    }
+
+    static ToolHints hints(Object annotations) {
+        Map<String, Object> a = map(annotations);
+        if (a == null) return null;
+        Object ro = a.get("readOnlyHint"), de = a.get("destructiveHint"), ow = a.get("openWorldHint");
+        if (ro == null && de == null && ow == null) return null;
+        boolean readOnly = Boolean.TRUE.equals(ro);
+        boolean destructive = !Boolean.FALSE.equals(de);
+        boolean openWorld = !Boolean.FALSE.equals(ow);
+        if (readOnly) destructive = false;
+        return new ToolHints(readOnly, destructive, openWorld);
+    }
+
+    private static Tool serverTool(Conn c, Map<String, Object> def) {
+        String mcpName = str(def.get("name"));
+        String toolName = Tool.sanitize(c.name) + "_" + Tool.sanitize(mcpName);
+        String description = str(def.get("description"));
+        Map<String, Object> schema = normalizeSchema(def.get("inputSchema"));
+        ToolHints h = hints(def.get("annotations"));
+        return new Tool() {
+            @Override public String name() { return toolName; }
+            @Override public String description() { return description; }
+            @Override public Map<String, Object> inputSchema() { return schema; }
+            @Override public String source() { return "mcp"; }
+            @Override public ToolHints hints() { return h; }
+            @Override public ToolResult execute(Map<String, Object> args, ToolContext ctx) {
+                return callTool(c, mcpName, args, ctx);
+            }
+        };
+    }
+
+    /** §2.8: {@code <server>_search_tools} + {@code <server>_call_tool}. */
+    @SuppressWarnings("unchecked")
+    private static List<Tool> searchTools(Conn c, String about, String hitServer,
+                                          java.util.function.Supplier<List<Map<String, Object>>> allowed) {
+        List<Map<String, Object>> meta = Client.searchMetaTools(about);
+        String prefix = Tool.sanitize(c.name) + "_";
+        Map<String, Object> searchDef = meta.get(0), callDef = meta.get(1);
+        Tool search = new Tool() {
+            @Override public String name() { return prefix + "search_tools"; }
+            @Override public String description() { return str(searchDef.get("description")); }
+            @Override public Map<String, Object> inputSchema() { return (Map<String, Object>) searchDef.get("inputSchema"); }
+            @Override public String source() { return "mcp"; }
+            @Override public ToolHints hints() { return ToolHints.READ_ONLY; }
+            @Override public ToolResult execute(Map<String, Object> args, ToolContext ctx) {
+                Map<String, Object> meta = new LinkedHashMap<>(Map.of("server", c.name));
+                try {
+                    Map<String, Object> a = args == null ? Map.of() : args;
+                    int limit = a.get("limit") instanceof Number n && n.doubleValue() > 0 ? n.intValue() : 5;
+                    List<Map<String, Object>> hits = c.client.searchTools(allowed.get(), str(a.get("query")), limit, hitServer);
+                    return new ToolResult(Mcp.jsonOrdered(hits), false, meta);
+                } catch (Exception e) {
+                    return new ToolResult(msg(e), true, meta);
+                }
+            }
+        };
+        Tool call = new Tool() {
+            @Override public String name() { return prefix + "call_tool"; }
+            @Override public String description() { return str(callDef.get("description")); }
+            @Override public Map<String, Object> inputSchema() { return (Map<String, Object>) callDef.get("inputSchema"); }
+            @Override public String source() { return "mcp"; }
+            @Override public ToolResult execute(Map<String, Object> args, ToolContext ctx) {
+                Map<String, Object> a = args == null ? Map.of() : args;
+                String name = str(a.get("name"));
+                boolean known;
+                try {
+                    known = allowed.get().stream().anyMatch(t -> name.equals(str(t.get("name"))));
+                } catch (Exception e) {
+                    return new ToolResult(msg(e), true, new LinkedHashMap<>(Map.of("server", c.name)));
+                }
+                if (!known) return ToolResult.error("unknown tool \"" + name + "\" on " + c.name,
+                        new LinkedHashMap<>(Map.of("server", c.name)));
+                Map<String, Object> inner = map(a.get("arguments"));
+                return callTool(c, name, inner == null ? new LinkedHashMap<>() : inner, ctx);
+            }
+        };
+        return List.of(search, call);
+    }
+
+    // ------------------------------------------------------------------ tools/call + MRTR (§2.5) + OAuth pause
+
+    /** Runs one tools/call through MRTR rounds; a pause without {@code waitFor} returns a §10 pending result. */
+    static ToolResult callTool(Conn c, String tool, Map<String, Object> args, ToolContext ctx) {
+        Map<String, Object> meta = new LinkedHashMap<>();
+        meta.put("server", c.name);
+        try {
+            Answer ans = ctx == null ? null : ctx.answer();
+            Round r = ans == null ? null : c.paused.remove(ans.id());
+            Object step;
+            if (r == null) {
+                r = new Round(tool, args == null ? new LinkedHashMap<>() : args);
+                step = send(c, r, ctx);
+            } else if (r.authId != null) {
+                String id = r.authId;
+                r.authId = null;
+                String cb = callbackUrl(ans);
+                Round rr = r;
+                step = interruptible(() -> {
+                    try {
+                        return c.client.auth().resume(id, cb);
+                    } catch (PendingException pe) {
+                        return pause(c, rr, pe);
+                    }
+                }, ctx);
+            } else {
+                r.responses.put(r.waitingKey, toInputResponse(ans));
+                r.waitingKey = null;
+                step = askOrSend(c, r, ctx);
+            }
+            while (true) {
+                if (step instanceof ToolResult tr) return tr;
+                Map<String, Object> res = map(step);
+                String type = str(res.get("resultType"));
+                if ("complete".equals(type)) return mapResult(res, meta);
+                if (!"input_required".equals(type)) return new ToolResult("MCP tools/call " + tool + ": unknown resultType \"" + type + "\"", true, meta);
+                if (++r.round >= MAX_ROUNDS) return new ToolResult("tools/call " + tool + ": too many input_required rounds", true, meta);
+                r.requestState = res.get("requestState");
+                Map<String, Object> reqs = map(res.get("inputRequests"));
+                r.requests = reqs == null ? new LinkedHashMap<>() : new LinkedHashMap<>(reqs);
+                r.responses = new LinkedHashMap<>();
+                step = askOrSend(c, r, ctx);
+            }
+        } catch (Exception e) {
+            return new ToolResult(msg(e), true, meta);
+        }
+    }
+
+    /** Asks every unanswered input request of the round (inline via waitFor, else pauses), then sends. */
+    private static Object askOrSend(Conn c, Round r, ToolContext ctx) throws Exception {
+        for (var e : r.requests.entrySet()) {
+            if (r.responses.containsKey(e.getKey())) continue;
+            Map<String, Object> rq = map(e.getValue());
+            if (rq == null || !"elicitation/create".equals(rq.get("method")))
+                throw new McpException("tools/call " + r.tool + ": unsupported input request \"" + e.getKey() + "\"");
+            Request req = inputToRequest(map(rq.get("params")));
+            if (c.waitFor != null) {
+                r.responses.put(e.getKey(), toInputResponse(c.waitFor.apply(req)));
+            } else {
+                r.waitingKey = e.getKey();
+                c.paused.put(req.id(), r);
+                return ToolResult.pending(req);
+            }
+        }
+        return send(c, r, ctx);
+    }
+
+    /** Sends the round's tools/call; an OAuth pause without waitFor becomes a §10 pending result. */
+    private static Object send(Conn c, Round r, ToolContext ctx) throws Exception {
+        Map<String, Object> p = obj("name", r.tool, "arguments", r.args);
+        if (r.responses != null) p.put("inputResponses", r.responses);
+        if (r.requestState != null) p.put("requestState", r.requestState);
+        return interruptible(() -> {
+            try {
+                return c.client.call("tools/call", p);
+            } catch (PendingException pe) {
+                return pause(c, r, pe);
+            }
+        }, ctx);
+    }
+
+    /** §2A.1 step 10: the paused request is this exact round; resume sends it for the first time. */
+    private static ToolResult pause(Conn c, Round r, PendingException pe) {
+        Pending pd = pe.pending;
+        r.authId = pd.id();
+        c.paused.put(pd.id(), r);
+        Map<String, Object> p = obj("name", r.tool, "arguments", r.args);
+        if (r.responses != null) p.put("inputResponses", r.responses);
+        if (r.requestState != null) p.put("requestState", r.requestState);
+        c.client.auth().setRetry(pd.id(), () -> c.client.call("tools/call", p));
+        return ToolResult.pending(toRequest(pd));
+    }
+
+    /** §2.5: an {@code elicitation/create} input request → a §10 Request. */
+    static Request inputToRequest(Map<String, Object> params) {
+        Map<String, Object> pr = params == null ? Map.of() : params;
+        String id = "mrtr-" + io.github.muthuishere.toolnexus.mcp.OAuth.randomId();
+        String message = str(pr.get("message"));
+        if ("url".equals(pr.get("mode"))) return new Request(id, "authorization", message, str(pr.get("url")), null, null);
+        Map<String, Object> data = map(pr.get("requestedSchema")) == null ? null : Map.of("schema", pr.get("requestedSchema"));
+        return new Request(id, "input", message, null, data, null);
+    }
+
+    /** §2.5: Answer → input response (accept / decline / cancel). */
+    static Map<String, Object> toInputResponse(Answer a) {
+        if (a != null && a.ok()) return obj("action", "accept", "content", a.data() != null ? a.data() : Map.of());
+        return obj("action", a != null && "declined".equals(a.reason()) ? "decline" : "cancel");
+    }
+
+    /** Runs work on a virtual thread, abandoning it when {@code ctx} is cancelled. */
+    private static Object interruptible(Callable<Object> work, ToolContext ctx) throws Exception {
+        if (ctx == null) return work.call();
+        java.util.concurrent.FutureTask<Object> task = new java.util.concurrent.FutureTask<>(work);
+        Thread.ofVirtual().name("toolnexus-mcp-call").start(task);
+        while (true) {
+            if (ctx.isCancelled()) {
+                task.cancel(true);
+                throw new java.util.concurrent.CancellationException("MCP tool call cancelled");
+            }
+            try {
+                return task.get(20, java.util.concurrent.TimeUnit.MILLISECONDS);
+            } catch (java.util.concurrent.TimeoutException ignored) {
+                // poll again
+            } catch (java.util.concurrent.ExecutionException ee) {
+                if (ee.getCause() instanceof Exception ex) throw ex;
+                throw new RuntimeException(ee.getCause());
+            }
+        }
+    }
+
+    /** §2.F result mapping, on the raw 2026 result. */
+    static ToolResult mapResult(Map<String, Object> res, Map<String, Object> meta) {
+        List<Object> content = list(res.get("content"));
+        List<ContentPart> parts = new ArrayList<>();
+        List<String> texts = new ArrayList<>(), resourceText = new ArrayList<>();
+        for (Object o : content) {
+            Map<String, Object> ct = map(o);
+            if (ct == null) continue;
+            switch (str(ct.get("type"))) {
+                case "text" -> texts.add(str(ct.get("text")));
+                case "image" -> parts.add(ContentPart.ofBase64(ContentPart.IMAGE, str(ct.get("mimeType")), str(ct.get("data"))));
+                case "audio" -> parts.add(ContentPart.ofBase64(ContentPart.AUDIO, str(ct.get("mimeType")), str(ct.get("data"))));
+                case "resource_link" -> {
+                    String mt = str(ct.get("mimeType"));
+                    ContentPart p = ContentPart.ofUrl(ContentPart.FILE, mt.isEmpty() ? "application/octet-stream" : mt, str(ct.get("uri")));
+                    String n = str(ct.get("name"));
+                    parts.add(n.isEmpty() ? p : p.withName(n));
+                }
+                case "resource" -> {
+                    Map<String, Object> rs = map(ct.get("resource"));
+                    if (rs == null) break;
+                    if (rs.get("blob") instanceof String blob) {
+                        String mt = str(rs.get("mimeType"));
+                        ContentPart p = ContentPart.ofBase64(ContentPart.FILE, mt.isEmpty() ? "application/octet-stream" : mt, blob);
+                        String u = str(rs.get("uri"));
+                        parts.add(u.isEmpty() ? p : p.withName(u));
+                    } else if (!str(rs.get("text")).isEmpty()) {
+                        resourceText.add(str(rs.get("text")));
+                    }
+                }
+                default -> { }
+            }
+        }
+        if (Boolean.TRUE.equals(res.get("isError"))) {
+            List<String> nonBlank = texts.stream().filter(t -> !t.isBlank()).toList();
+            String joined = String.join("\n\n", nonBlank);
+            return new ToolResult(joined.isEmpty() ? "MCP tool returned an error" : joined, true, meta, parts);
+        }
+        if (res.get("structuredContent") != null)
+            return new ToolResult(Json.stringify(res.get("structuredContent")), false, meta, parts);
+        String output = String.join("\n", texts);
+        String rt = String.join("\n", resourceText);
+        if (!rt.isEmpty()) output = output.isEmpty() ? rt : output + "\n" + rt;
+        if (output.isEmpty() && !parts.isEmpty()) output = ContentParts.describeForOutput(parts);
+        return new ToolResult(output, false, meta, parts);
+    }
+
+    // ------------------------------------------------------------------ skills (§2.7)
+
+    /** Downloads every remote skill into a temp dir when the server advertises the skills extension. */
+    static void loadSkills(Conn c) {
+        Map<String, Object> caps = map(c.discover.get("capabilities"));
+        Map<String, Object> ext = caps == null ? null : map(caps.get("extensions"));
+        if (ext == null || !ext.containsKey(Mcp.SKILLS_EXT)) return;
+        Path root = null;
+        try {
+            root = Files.createTempDirectory("toolnexus-mcp-skills-");
+            for (String uri : c.client.listSkills()) {
+                try {
+                    c.client.downloadSkill(uri, root);
+                } catch (Exception e) {
+                    System.err.println("[toolnexus] MCP server \"" + c.name + "\" skill " + uri + " skipped: " + msg(e));
+                }
+            }
+            c.skillsRoot = root;
+        } catch (Exception e) {
+            if (root != null) deleteTree(root);
+            System.err.println("[toolnexus] MCP server \"" + c.name + "\" skills failed: " + msg(e));
+        }
+    }
+
+    static TokenStore defaultStore(McpSource.LoadOptions o) {
+        return o.tokenStore != null ? o.tokenStore : new MemoryTokenStore();
+    }
+
+    static String msg(Throwable e) {
+        return e.getMessage() == null ? String.valueOf(e) : e.getMessage();
+    }
+
+    static void deleteTree(Path root) {
+        try (Stream<Path> w = Files.walk(root)) {
+            w.sorted(Comparator.reverseOrder()).forEach(p -> {
+                try {
+                    Files.deleteIfExists(p);
+                } catch (IOException ignored) {
+                    // best effort
+                }
+            });
+        } catch (IOException ignored) {
+            // best effort
+        }
     }
 }

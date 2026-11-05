@@ -49,6 +49,10 @@ export interface ToolkitOptions {
   /** §2 Gap 3. Bounds the MCP load: each connect/list is capped by the server timeout and the
    * whole load aborts promptly if this signal fires. Omit ⇒ unbounded as before. */
   signal?: AbortSignal
+  /** §2A.1a where MCP OAuth tokens live (default: in memory, per load). */
+  tokenStore?: import("./mcp2026/auth.js").TokenStore
+  /** §2A.1a how `auto` MCP OAuth opens the authorization URL (default: the OS opener). */
+  openUrl?: (url: string) => unknown | Promise<unknown>
 }
 
 export class Toolkit {
@@ -84,12 +88,13 @@ export class Toolkit {
   }
 
   static async create(opts: ToolkitOptions = {}): Promise<Toolkit> {
-    const mcp = opts.mcpConfig !== undefined ? await loadMcp(opts.mcpConfig, { waitFor: opts.waitFor, signal: opts.signal }) : undefined
+    const mcp = opts.mcpConfig !== undefined ? await loadMcp(opts.mcpConfig, { waitFor: opts.waitFor, signal: opts.signal, tokenStore: opts.tokenStore, openUrl: opts.openUrl, disableTools: opts.disableTools }) : undefined
     // Skills come from directories, in-memory data, and/or a lazy provider (§3,
     // S1). The provider is resolved here (create() is async) and merged with the
     // data list; a provider failure is isolated so other sources still load.
     let skill: SkillSource | undefined
-    if (opts.skillsDir !== undefined || opts.skills !== undefined || opts.skillProvider !== undefined) {
+    const mcpSkills = mcp?.skills ?? []
+    if (opts.skillsDir !== undefined || opts.skills !== undefined || opts.skillProvider !== undefined || mcpSkills.length > 0) {
       let providerDefs: SkillDef[] = []
       if (opts.skillProvider) {
         try {
@@ -99,7 +104,8 @@ export class Toolkit {
           providerDefs = []
         }
       }
-      const dataDefs = [...(opts.skills ?? []), ...providerDefs]
+      // §2.7 remote skills (MCP skills extension) join the same inventory, after local ones.
+      const dataDefs = [...(opts.skills ?? []), ...providerDefs, ...mcpSkills]
       // disableSkills is sugar over a skillsFilter drop-list: fold each name in as false
       // WITHOUT overriding an explicit skillsFilter entry (explicit entries win).
       const filter =

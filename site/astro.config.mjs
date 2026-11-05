@@ -91,6 +91,7 @@ export default defineConfig({
 									items: [
 										{ label: 'Zero to agent', slug: 'cookbook/zero-to-agent' },
 										{ label: 'MCP servers', slug: 'cookbook/mcp-servers' },
+										{ label: 'Hosted MCP & OAuth', slug: 'cookbook/mcp-oauth' },
 										{ label: 'Agent skills', slug: 'cookbook/agent-skills' },
 										{ label: 'Native tools', slug: 'cookbook/native-tool' },
 										{ label: 'HTTP / REST tools', slug: 'cookbook/http-tool' },

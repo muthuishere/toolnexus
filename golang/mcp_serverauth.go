@@ -63,7 +63,7 @@ type MCPServerAuth struct {
 	fetched time.Time
 }
 
-const mcpPRMPath = "/.well-known/oauth-protected-resource"
+// mcpPRMPath is declared in mcp_oauth.go (shared with the client).
 
 func (a *MCPServerAuth) path() string {
 	if a.ResourcePath == "" {

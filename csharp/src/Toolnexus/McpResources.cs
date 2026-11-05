@@ -20,6 +20,18 @@ public sealed class McpLoadOptions
     /// <summary>Called once per server as soon as it is connected, failed or found disabled. Calls
     /// are serialized (never concurrent with each other) but come from load tasks; keep them short.</summary>
     public Action<McpServerResult>? OnServer { get; set; }
+
+    /// <summary>(SPEC §2A.1a) Where MCP OAuth tokens are kept, keyed by resource. Default: in memory, per load.</summary>
+    public ITokenStore? TokenStore { get; set; }
+
+    /// <summary>(SPEC §2A.1a) How <c>auto</c>-mode OAuth opens the authorization URL. Default: the OS opener.
+    /// Tests inject an HTTP GET.</summary>
+    public Func<string, Task>? OpenUrl { get; set; }
+
+    /// <summary>Final tool names to drop (<see cref="Toolkit.Options.DisableTools"/>). With tool search a server
+    /// tool is matched by its would-be direct name <c>sanitize(server)_sanitize(tool)</c>, so search_tools never
+    /// ranks it and call_tool refuses it.</summary>
+    public IReadOnlyList<string>? DisableTools { get; set; }
 }
 
 public sealed partial class McpSource

@@ -34,10 +34,8 @@ import (
 
 // MCP 2026-07-28 wire constants (SPEC §2.1).
 const (
-	MCPProtocol2026     = "2026-07-28"
-	mcpMetaVersion      = "io.modelcontextprotocol/protocolVersion"
-	mcpMetaClientCaps   = "io.modelcontextprotocol/clientCapabilities"
-	mcpMetaServerInfo   = "io.modelcontextprotocol/serverInfo"
+	MCPProtocol2026 = "2026-07-28"
+	// mcpMetaVersion, mcpMetaClientCaps, mcpMetaServerInfo: shared with the client, see mcp2026.go.
 	MCPSkillsExtension  = "io.modelcontextprotocol/skills"
 	mcpCodeHeaderMismat = -32020
 	mcpCodeUnsupported  = -32022

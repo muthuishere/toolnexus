@@ -1,0 +1,71 @@
+{
+  "$comment": "MCP 2026-07-28 conformance expectations (SPEC.md §2, §2A, §7C; change upgrade-mcp-2026-07-28). Server under test = fixture.json. Reference: spikes/mcp-2026/golang checks.go, auth_test.go, retry_test.go, skills_test.go, toolsearch_test.go.",
+  "protocolVersion": "2026-07-28",
+  "steps": [
+    { "id": "server/discover", "request": { "method": "server/discover" },
+      "expect": { "supportedVersionsContains": "2026-07-28", "capabilityExtension": "io.modelcontextprotocol/skills", "resultType": "complete", "metaKey": "io.modelcontextprotocol/serverInfo" } },
+    { "id": "unsupported version -> -32022", "request": { "method": "server/discover", "protocolVersion": "1900-01-01" },
+      "expect": { "httpStatus": 400, "errorCode": -32022, "errorData": { "supported": ["2026-07-28"], "requested": "1900-01-01" } } },
+    { "id": "header mismatch -> -32020", "transport": "http",
+      "request": { "method": "tools/call", "params": { "name": "echo", "arguments": { "text": "x" } }, "headerOverride": { "Mcp-Name": "greet" } },
+      "expect": { "httpStatus": 400, "errorCode": -32020 }, "stdio": "SKIP" },
+    { "id": "tools/list", "request": { "method": "tools/list" },
+      "expect": { "toolNames": ["echo", "greet"], "resultType": "complete", "hasKeys": ["ttlMs", "cacheScope"] } },
+    { "id": "tools/call echo", "request": { "method": "tools/call", "params": { "name": "echo", "arguments": { "text": "hi toolnexus" } } },
+      "expect": { "text": "hi toolnexus", "structuredContent": { "text": "hi toolnexus" }, "isError": false } },
+    { "id": "tools/call greet (MRTR input_required round trip)", "request": { "method": "tools/call", "params": { "name": "greet", "arguments": {} } },
+      "inputRequest": { "key": "name", "method": "elicitation/create", "mode": "form", "message": "What is your name?" },
+      "answer": { "action": "accept", "content": { "name": "toolnexus" } },
+      "expect": { "asked": 1, "text": "Hello, toolnexus!", "serverExecutions": 1 } },
+    { "id": "skills/list", "request": { "method": "skills/list" },
+      "expect": { "skillUri": "skill://hello-world/SKILL.md" } },
+    { "id": "skills/get hello-world", "request": { "method": "skills/get", "params": { "uri": "skill://hello-world/SKILL.md" } },
+      "expect": { "frontmatterName": "hello-world", "resourcesNonEmpty": true, "digestPrefix": "sha256:" } }
+  ],
+  "headerErrors": [
+    { "case": "MCP-Protocol-Version header missing", "errorCode": -32020 },
+    { "case": "Mcp-Method differs from body method", "errorCode": -32020 },
+    { "case": "header version unsupported AND differs from _meta", "errorCode": -32020 },
+    { "case": "header and _meta agree on 2025-11-25", "errorCode": -32022 },
+    { "case": "unknown method", "httpStatus": 404, "errorCode": -32601 },
+    { "case": "unknown tool", "errorCode": -32602, "message": "Unknown tool: <name>" }
+  ],
+  "skillUriRejected": [
+    "skill://x/%2e%2e/secret", "skill://x/../secret", "skill://x//SKILL.md", "skill://x/./SKILL.md",
+    "skill://x/a%252e", "skill://x/a\\b", "skill://x/a:b"
+  ],
+  "noHiddenRetry": [
+    { "case": "connection dropped after the tool ran", "expect": { "callerError": true, "serverExecutions": 1 } },
+    { "case": "HTTP 502 after the tool ran", "expect": { "callerError": true, "serverExecutions": 1 } }
+  ],
+  "auth": {
+    "server": { "scopes": { "*": ["mcp:read"], "greet": ["mcp:greet"] } },
+    "cases": [
+      { "id": "no token", "expect": { "httpStatus": 401, "wwwAuthenticateContains": ["resource_metadata=\"", "/.well-known/oauth-protected-resource/mcp\"", "scope=\"mcp:read\""], "body": { "error": "unauthorized" } } },
+      { "id": "wrong audience", "expect": { "httpStatus": 401, "wwwAuthenticateContains": ["error=\"invalid_token\""], "toolRan": false } },
+      { "id": "expired token", "expect": { "httpStatus": 401, "wwwAuthenticateContains": ["error=\"invalid_token\""] } },
+      { "id": "missing per-tool scope", "call": "greet", "expect": { "httpStatus": 403, "wwwAuthenticateContains": ["error=\"insufficient_scope\"", "scope=\"mcp:read mcp:greet\""] } },
+      { "id": "PRM document", "path": "/.well-known/oauth-protected-resource/mcp", "expect": { "keys": ["resource", "authorization_servers", "scopes_supported", "bearer_methods_supported"], "bearer_methods_supported": ["header"] } },
+      { "id": "auto mode login, 8 steps pass", "expect": { "allStepsPass": true } },
+      { "id": "pause then resume", "expect": { "pendingKind": "authorization", "pendingIdPrefix": "auth-", "promptPrefix": "Authorize access to ", "serverExecutions": 1 } },
+      { "id": "pause in MRTR round 1", "expect": { "resumesSameRound": true, "reasked": 0 } },
+      { "id": "iss mismatch", "expect": { "error": "authorization response iss mismatch (possible mix-up attack)", "tokenStored": false } },
+      { "id": "state mismatch", "expect": { "error": "authorization response state mismatch", "tokenStored": false } },
+      { "id": "AS without S256", "expect": { "error": "authorization server does not advertise PKCE S256; refusing" } },
+      { "id": "no CIMD and no clientId", "expect": { "errorContains": ["register an app with", "dynamic client registration is not supported"] } },
+      { "id": "form-encoded token response", "expect": { "tokenParsed": true } },
+      { "id": "refresh on expiry", "expect": { "refreshRequests": 1, "serverExecutions": 1 } },
+      { "id": "100 concurrent calls, expired token", "expect": { "refreshRequests": 1, "allSucceed": true } },
+      { "id": "omitRefreshResource against an AS rejecting resource on refresh", "expect": { "refreshSucceeds": true } },
+      { "id": "step-up on 403 insufficient_scope", "expect": { "scopeRequested": "mcp:read mcp:greet", "serverExecutions": 1 } },
+      { "id": "principal visible to tool", "call": "whoami", "expect": { "subject": "dev-user" } },
+      { "id": "custom verify hook", "expect": { "replacesJwtCheck": true } },
+      { "id": "tokens never logged", "expect": { "tokenInLogsOrErrors": false } }
+    ]
+  },
+  "toolSearch": {
+    "metaTools": ["search_tools", "call_tool"],
+    "hitKeys": ["name", "description", "inputSchema", "server"],
+    "directNameHidden": true
+  }
+}

@@ -174,6 +174,32 @@ let res = agent.run("Draw a fox, then animate it.", &tk).await?;
 for f in &res.files { println!("{} {} {}", f.from, f.mime_type, f.url); }
 ```
 
+## MCP 2026-07-28 + OAuth
+
+Every MCP server is probed with `server/discover` first (SPEC §2.2). A server that speaks
+`2026-07-28` is used through toolnexus's own client (no SDK): stdio or stateless HTTP, MRTR
+`input_required` rounds through §10 `wait_for` (or a resumable `pending` result without one), the
+skills extension (remote skills join the `skill` tool), and opt-in lazy tool search
+(`"toolSearch": true` ⇒ `<server>_search_tools` + `<server>_call_tool`). Anything else falls back to
+the frozen rmcp path, unchanged.
+
+Remote servers get OAuth 2.1 (§2A): PRM → AS metadata → pre-registered `clientId` / `clientIds` or a
+Client ID Metadata Document (never DCR) → PKCE S256 + `resource` → token, refresh, step-up.
+
+```json
+{"mcpServers": {"gh": {"url": "https://mcp.example.com/mcp",
+  "auth": {"clientId": "YOUR_CLIENT_ID", "mode": "auto"}}}}
+```
+
+`McpLoadOptions` / `ToolkitOptions` take `token_store` (default: in memory) and `open_url` (default:
+the OS opener). `"mode": "pause"` (+ `redirectUri`) raises a §10 `authorization` request instead;
+answer it with `Answer { ok: true, data: {"callbackUrl": "<redirected URL>"} }`.
+
+Gaps: on the frozen fallback the token is attached as a **static** `Authorization` header at connect
+(rmcp takes headers only then), so a fallback server's token is not refreshed mid-session. The 2026
+HTTP path does not need the `mcp-http` feature (it uses `reqwest`, always present); only the remote
+fallback does. `resource_tools()` covers fallback servers only.
+
 ## Agents via ACP
 
 toolnexus ships no per-agent client (SPEC §8C, ADR 0041). Three vendor-neutral pieces compose

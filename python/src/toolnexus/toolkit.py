@@ -101,6 +101,8 @@ class Toolkit:
         disable_skills: Optional[list[str]] = None,
         cancel: Optional[Any] = None,
         media: Optional[Any] = None,
+        token_store: Optional[Any] = None,
+        open_url: Optional[Any] = None,
     ) -> "Toolkit":
         # ``wait_for`` (§10): when set, connected MCP servers may elicit input from the
         # human mid-``tools/call``, bridged onto this resolver (form→kind:"input",
@@ -108,17 +110,25 @@ class Toolkit:
         # Omit ⇒ MCP elicitation is not advertised.
         # ``cancel`` (§2 Gap 3): an optional asyncio.Event; when set it aborts the whole
         # MCP load (the Python analogue of a cancelled parent context).
+        # ``token_store`` / ``open_url`` (§2A.1a): the MCP OAuth client's token store
+        # (default in-memory per load) and how ``auto`` mode opens the browser.
         mcp = (
-            await load_mcp_with_context(mcp_config, wait_for=wait_for, cancel=cancel)
+            await load_mcp_with_context(
+                mcp_config, wait_for=wait_for, cancel=cancel, token_store=token_store, open_url=open_url,
+                disable_tools=disable_tools,
+            )
             if mcp_config is not None
             else None
         )
+        # Remote skills (§2.7) from MCP servers with the skills extension join the same
+        # `skill` inventory as local ones (local first on a name clash).
+        remote_skills = list(mcp.skills) if mcp is not None else []
         # Skills come from directories, in-memory data, and/or a lazy provider
         # (§3, S1). The provider is resolved here (create() is async) and merged
         # with the data list; a provider failure is isolated so other sources
         # still load.
         skill = None
-        if skills_dir is not None or skills is not None or skill_provider is not None:
+        if skills_dir is not None or skills is not None or skill_provider is not None or remote_skills:
             provider_defs: list[SkillDef] = []
             if skill_provider is not None:
                 try:
@@ -129,7 +139,7 @@ class Toolkit:
                 except Exception as e:  # noqa: BLE001 — provider failure is isolated
                     print(f"[toolnexus] skill provider failed: {e}", file=sys.stderr)
                     provider_defs = []
-            data_defs = list(skills or []) + provider_defs
+            data_defs = list(skills or []) + provider_defs + remote_skills
             # DisableSkills is sugar over a drop-list: fold each name into the filter as
             # False (without overriding an explicit skills_filter entry). Mirrors Go.
             eff_filter = skills_filter
@@ -375,6 +385,8 @@ async def create_toolkit(
     disable_skills: Optional[list[str]] = None,
     cancel: Optional[Any] = None,
     media: Optional[Any] = None,
+    token_store: Optional[Any] = None,
+    open_url: Optional[Any] = None,
 ) -> Toolkit:
     """Async factory. The returned Toolkit is also an async context manager.
 
@@ -403,4 +415,6 @@ async def create_toolkit(
         disable_skills=disable_skills,
         cancel=cancel,
         media=media,
+        token_store=token_store,
+        open_url=open_url,
     )

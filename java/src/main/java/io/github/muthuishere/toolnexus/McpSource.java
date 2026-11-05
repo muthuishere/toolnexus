@@ -115,12 +115,33 @@ public final class McpSource implements AutoCloseable {
 
     private record ServerConn(McpSyncClient client, long timeout) {}
 
+    /** Servers connected on the MCP 2026-07-28 path (§2.2). */
+    private final List<Mcp2026.Conn> conns;
+
     private McpSource(List<Tool> tools, Map<String, String> status, List<McpSyncClient> clients,
-                      Map<String, ServerConn> servers) {
+                      Map<String, ServerConn> servers, List<Mcp2026.Conn> conns) {
         this.tools = tools;
         this.status = status;
         this.clients = clients;
         this.servers = servers;
+        this.conns = conns;
+    }
+
+    /** How {@code auto}-mode OAuth opens the authorization URL (§2A.1a {@code openUrl}). */
+    @FunctionalInterface
+    public interface OpenUrl {
+        void open(String url) throws Exception;
+    }
+
+    /**
+     * Skill roots fetched from MCP servers that advertise the skills extension (§2.7), one directory
+     * of skill folders per server. Valid until {@link #close()} (which deletes them). The toolkit adds
+     * them to the {@code skill} tool's inventory.
+     */
+    public List<String> skillDirs() {
+        List<String> out = new ArrayList<>();
+        for (Mcp2026.Conn c : conns) if (c.skillsRoot != null) out.add(c.skillsRoot.toString());
+        return out;
     }
 
     /**
@@ -148,7 +169,22 @@ public final class McpSource implements AutoCloseable {
          * keep them short.
          */
         public java.util.function.Consumer<ServerResult> onServer;
+        /**
+         * Where OAuth tokens for protected MCP servers are kept (§2A.1a), keyed by server URL.
+         * Null ⇒ an in-memory store for this load.
+         */
+        public io.github.muthuishere.toolnexus.mcp.TokenStore tokenStore;
+        /** How {@code auto}-mode OAuth opens the browser (§2A.1a). Null ⇒ the OS opener. */
+        public OpenUrl openUrl;
+        /** Toolkit {@code disableTools} (final exposed names); also hides tools from MCP tool search (§2.8). */
+        java.util.Set<String> disableTools;
 
+        public LoadOptions tokenStore(io.github.muthuishere.toolnexus.mcp.TokenStore v) { this.tokenStore = v; return this; }
+        public LoadOptions openUrl(OpenUrl v) { this.openUrl = v; return this; }
+        LoadOptions disableToolsInternal(List<String> v) {
+            this.disableTools = v == null ? null : new java.util.HashSet<>(v);
+            return this;
+        }
         public LoadOptions waitFor(Function<Request, Answer> v) { this.waitFor = v; return this; }
         public LoadOptions cancel(CancelSignal v) { this.cancel = v; return this; }
         public LoadOptions onServer(java.util.function.Consumer<ServerResult> v) { this.onServer = v; return this; }
@@ -165,6 +201,13 @@ public final class McpSource implements AutoCloseable {
 
     @Override
     public void close() {
+        for (Mcp2026.Conn c : conns) {
+            try {
+                c.close();
+            } catch (Exception ignored) {
+                // best-effort teardown
+            }
+        }
         for (McpSyncClient c : clients) {
             try {
                 c.closeGracefully();
@@ -393,6 +436,8 @@ public final class McpSource implements AutoCloseable {
         Map<String, String> status = new LinkedHashMap<>();
         List<McpSyncClient> clients = new ArrayList<>();
         Map<String, ServerConn> servers = new LinkedHashMap<>();
+        List<Mcp2026.Conn> conns = new ArrayList<>();
+        io.github.muthuishere.toolnexus.mcp.TokenStore store = Mcp2026.defaultStore(o);
         Object cbLock = new Object();
         java.util.function.Consumer<ServerResult> report = r -> {
             if (o.onServer == null) return;
@@ -420,9 +465,28 @@ public final class McpSource implements AutoCloseable {
                 }
                 long timeout = timeoutOf(cfg);
                 McpSyncClient client = null;
+                Mcp2026.Conn conn = null;
                 try {
+                    // §2.2 discover first; an old server ⇒ the frozen SDK path below (§2.2a / §2.F).
+                    io.github.muthuishere.toolnexus.mcp.OAuth fallbackAuth = null;
+                    try {
+                        conn = Mcp2026.connect(name, cfg, isRemote(cfg), timeout, o, store);
+                    } catch (Mcp2026.Fallback fb) {
+                        if (isRemote(cfg)) fallbackAuth = Mcp2026.oauthFor(name, cfg, o, store);
+                    }
+                    if (conn != null) {
+                        List<Tool> converted = Mcp2026.tools(conn, cfg, toolsFilterOf(cfg), o.disableTools);
+                        Mcp2026.loadSkills(conn);
+                        synchronized (lock) {
+                            tools.addAll(converted);
+                            conns.add(conn);
+                            status.put(name, "connected");
+                        }
+                        report.accept(new ServerResult(name, "connected", List.copyOf(converted), null));
+                        return;
+                    }
                     McpClientTransport transport = isRemote(cfg)
-                            ? buildRemoteTransport(cfg)
+                            ? buildRemoteTransport(cfg, fallbackAuth)
                             : buildLocalTransport(name, cfg);
                     // §2 idle timeout: the SDK's requestTimeout is a hard per-request deadline, so it
                     // is lifted out of the way and the budget is enforced by us — tools/list keeps a
@@ -469,6 +533,7 @@ public final class McpSource implements AutoCloseable {
                         } catch (Exception ignored) {
                         }
                     }
+                    if (conn != null) conn.close();
                     System.err.println("[toolnexus] MCP server \"" + name + "\" failed: " + e.getMessage());
                     report.accept(new ServerResult(name, "failed", List.of(), e));
                 }
@@ -488,11 +553,12 @@ public final class McpSource implements AutoCloseable {
                     } catch (Exception ignored) {
                     }
                 }
+                for (Mcp2026.Conn c : conns) c.close();
             }
             throw ce;
         }
 
-        return new McpSource(tools, status, clients, servers);
+        return new McpSource(tools, status, clients, servers, conns);
     }
 
     /**
@@ -530,8 +596,26 @@ public final class McpSource implements AutoCloseable {
                 long timeout = timeoutOf(cfg);
                 McpSyncClient client = null;
                 try {
+                    io.github.muthuishere.toolnexus.mcp.OAuth fallbackAuth = null;
+                    LoadOptions lo = new LoadOptions();
+                    io.github.muthuishere.toolnexus.mcp.TokenStore store = Mcp2026.defaultStore(lo);
+                    try (Mcp2026.Conn conn = Mcp2026.connect(name, cfg, isRemote(cfg), timeout, lo, store)) {
+                        List<ToolInfo> infos = new ArrayList<>();
+                        for (Map<String, Object> d : conn.client.listTools()) {
+                            Object desc = d.get("description");
+                            infos.add(new ToolInfo(String.valueOf(d.get("name")), desc instanceof String ds ? ds : "",
+                                    Mcp2026.normalizeSchema(d.get("inputSchema"))));
+                        }
+                        synchronized (lock) {
+                            byServer.put(name, infos);
+                            status.put(name, "connected");
+                        }
+                        return;
+                    } catch (Mcp2026.Fallback fb) {
+                        if (isRemote(cfg)) fallbackAuth = Mcp2026.oauthFor(name, cfg, lo, store);
+                    }
                     McpClientTransport transport = isRemote(cfg)
-                            ? buildRemoteTransport(cfg)
+                            ? buildRemoteTransport(cfg, fallbackAuth)
                             : buildLocalTransport(name, cfg);
                     client = McpClient.sync(transport)
                             .requestTimeout(Duration.ofMillis(timeout))
@@ -688,20 +772,24 @@ public final class McpSource implements AutoCloseable {
         };
     }
 
+    /** A remote server's {@code headers} with {@code ${ENV_VAR}} expanded (values never logged); null if none. */
     @SuppressWarnings("unchecked")
-    private static McpClientTransport buildRemoteTransport(Map<String, Object> cfg) {
-        String url = String.valueOf(cfg.get("url"));
+    static Map<String, String> headersOf(Map<String, Object> cfg) {
         Map<String, Object> rawHeaders = (Map<String, Object>) cfg.get("headers");
+        if (rawHeaders == null) return null;
+        Map<String, String> stringified = new LinkedHashMap<>();
+        for (Map.Entry<String, Object> e : rawHeaders.entrySet()) {
+            stringified.put(e.getKey(), e.getValue() == null ? null : String.valueOf(e.getValue()));
+        }
+        return expandEnvHeaders(stringified);
+    }
+
+    private static McpClientTransport buildRemoteTransport(Map<String, Object> cfg,
+                                                           io.github.muthuishere.toolnexus.mcp.OAuth auth) {
+        String url = String.valueOf(cfg.get("url"));
         // Expand ${ENV_VAR} in header values before they reach the transport so
         // tokens are read from the environment, not sent verbatim (never logged).
-        Map<String, String> headers = null;
-        if (rawHeaders != null) {
-            Map<String, String> stringified = new LinkedHashMap<>();
-            for (Map.Entry<String, Object> e : rawHeaders.entrySet()) {
-                stringified.put(e.getKey(), e.getValue() == null ? null : String.valueOf(e.getValue()));
-            }
-            headers = expandEnvHeaders(stringified);
-        }
+        Map<String, String> headers = headersOf(cfg);
 
         HttpRequest.Builder reqBuilder = HttpRequest.newBuilder();
         if (headers != null) {
@@ -710,10 +798,26 @@ public final class McpSource implements AutoCloseable {
             }
         }
         try {
-            return HttpClientStreamableHttpTransport.builder(url)
+            HttpClientStreamableHttpTransport.Builder b = HttpClientStreamableHttpTransport.builder(url)
                     .requestBuilder(reqBuilder)
-                    .jsonMapper(JSON_MAPPER)
-                    .build();
+                    .jsonMapper(JSON_MAPPER);
+            if (auth != null) {
+                // §2A.1a frozen fallback + OAuth: the SDK takes a per-request header, so the current bearer
+                // (refreshed when expired) rides on every request; a 401/403 with WWW-Authenticate runs the
+                // same OAuth flow and the SDK retries the request once.
+                b.httpRequestCustomizer((rb, method, uri, body, ctx) -> {
+                    String tok = auth.bearer(url);
+                    if (!tok.isEmpty()) rb.setHeader("Authorization", "Bearer " + tok);
+                });
+                b.authorizationErrorHandler(io.modelcontextprotocol.client.transport.customizer
+                        .McpHttpClientTransportAuthorizationErrorHandler.fromSync((req, info, ctx) -> {
+                    String www = info.headers().firstValue("WWW-Authenticate").orElse("");
+                    if ((info.statusCode() != 401 && info.statusCode() != 403) || www.isEmpty()) return false;
+                    auth.challenge(url, info.statusCode(), www, auth.bearer(url), null);
+                    return true;
+                }));
+            }
+            return b.build();
         } catch (Exception streamableFailed) {
             // Fall back to SSE transport.
             HttpRequest.Builder sseReq = HttpRequest.newBuilder();

@@ -26,6 +26,9 @@
          its runtime files next to Toolnexus.Tests.dll so AcpClientTests can find it by a
          same-directory path instead of searching the tree. -->
     <ProjectReference Include="../FakeAcpServer/FakeAcpServer.csproj" />
+    <!-- Test-only MCP 2026-07-28 fixture server + dev authorization server (in-process over HTTP, child
+         process over stdio). Ported from spikes/mcp-2026/csharp; never part of the Toolnexus package. -->
+    <ProjectReference Include="../Mcp2026Fixture/Mcp2026Fixture.csproj" />
   </ItemGroup>
 
 </Project>

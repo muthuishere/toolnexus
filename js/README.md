@@ -159,6 +159,46 @@ const res = await agent.run("Draw a fox, then animate it.", { toolkit: tk })
 for (const f of res.files) console.log(f.from, f.mimeType, f.url)
 ```
 
+## MCP 2026-07-28 + OAuth
+
+`loadMcp` / `Toolkit.create({ mcpConfig })` now speak MCP **2026-07-28** first, with no MCP SDK on
+that path: every server (stdio and HTTP) gets `server/discover` before anything else. A pre-2026
+server answers it with an error, a 400/404/405, or (stdio) silence for `min(timeout, 5 s)`, and is
+then served by the unchanged SDK path. Tool names, result mapping, status, `tools` filters and
+`disableTools` are the same on both paths.
+
+```ts
+const toolkit = await Toolkit.create({
+  mcpConfig: {
+    mcpServers: {
+      docs: { url: "https://mcp.example.com/mcp", auth: { clientId: "my-registered-app" } },
+      big: { command: ["my-server"], toolSearch: true, description: "the billing API" },
+    },
+  },
+  waitFor,                 // answers MRTR input requests and `pause`-mode authorization
+  tokenStore,              // { load(resource), save(resource, token), delete(resource) }; default in memory
+  openUrl: (url) => open(url), // how `auto` OAuth opens the browser; default: the OS opener
+})
+```
+
+- **MRTR** (`input_required`) goes through `waitFor` (form ⇒ `kind:"input"` with `data.schema`,
+  URL ⇒ `kind:"authorization"`). Without `waitFor` the tool returns a §10 pending result; the
+  resumed call (with `ctx.answer`) sends that round once and is never re-asked.
+- **OAuth 2.1** on a 401: protected-resource metadata → AS metadata → a pre-registered `clientId`
+  (`clientIds` per issuer, optional `clientSecret`) or a Client ID Metadata Document
+  (`clientMetadataUrl`). **No dynamic client registration.** PKCE S256 + `resource`, `iss`/`state`
+  checks, refresh (single-flight; `omitRefreshResource` for Entra) and step-up on
+  `insufficient_scope`. `mode: "auto"` (loopback callback + `openUrl`) or `mode: "pause"` (needs
+  `redirectUri`; answer the `authorization` request with `data: { callbackUrl }`). Tokens are never
+  logged or put in error text.
+- **Old servers + OAuth:** the bearer is attached to the SDK transport through its `fetch` hook,
+  and a 401 there runs the same flow once.
+- **Skills over MCP:** a server advertising the skills extension contributes its skills to the
+  `skill` tool (base `skill://<name>/`).
+- **Tool search:** `toolSearch: true` replaces a server's tools with `<server>_search_tools` and
+  `<server>_call_tool`.
+- A failed `tools/call` (timeout, 5xx, dropped connection) is never re-sent.
+
 ## Embeddable MCP server (`mcpHandler`)
 
 `serve(addr, { mcp })` owns a port and exposes one static tool list. `toolkit.mcpHandler(cfg)`

@@ -208,7 +208,7 @@ public final class McpHandler implements HttpHandler {
      * directory (binary files skipped), sorted by path. Skills are sorted by name.
      */
     public static List<Skill> loadMcpSkills(java.nio.file.Path dir) throws IOException {
-        return Mcp2026.loadSkills(dir);
+        return McpHandler2026.loadSkills(dir);
     }
 
     /**
@@ -874,7 +874,7 @@ public final class McpHandler implements HttpHandler {
         String text = new String(body, StandardCharsets.UTF_8);
         String trimmed = text.strip();
         JsonNode msg = null;
-        if (!trimmed.startsWith("[") && Mcp2026.validUtf8(body)) {
+        if (!trimmed.startsWith("[") && McpHandler2026.validUtf8(body)) {
             try {
                 msg = MAPPER.readTree(text);
             } catch (Exception e) {
@@ -910,7 +910,7 @@ public final class McpHandler implements HttpHandler {
         if (PROTOCOL_2026.equals(hv)) return true;
         if (!hv.isEmpty() && versions.contains(hv)) return false;
         return "server/discover".equals(method) || !header(ex, "Mcp-Method").isEmpty()
-                || (meta != null && meta.containsKey(Mcp2026.META_VERSION));
+                || (meta != null && meta.containsKey(McpHandler2026.META_VERSION));
     }
 
     static final class Rpc26Error extends Exception {
@@ -937,7 +937,7 @@ public final class McpHandler implements HttpHandler {
             empty(ex, 202); // a notification (or a stray response): acknowledged
             return;
         }
-        Rpc26Error bad = Mcp2026.validate(ex, method, p, meta);
+        Rpc26Error bad = McpHandler2026.validate(ex, method, p, meta);
         if (bad != null) {
             write26(ex, bad.status, id, null, bad);
             return;
@@ -991,7 +991,7 @@ public final class McpHandler implements HttpHandler {
         ServerInfo info = info2026(ctx);
         Map<String, Object> meta = new LinkedHashMap<>();
         if (m.get("_meta") instanceof Map<?, ?> old) meta.putAll(castMap(old));
-        meta.put(Mcp2026.META_SERVER_INFO, omitEmpty(kv("name", info.name(), "title", info.title(), "version", info.version())));
+        meta.put(McpHandler2026.META_SERVER_INFO, omitEmpty(kv("name", info.name(), "title", info.title(), "version", info.version())));
         m.put("_meta", meta);
         m.put("resultType", resultType);
         return m;
@@ -1026,7 +1026,7 @@ public final class McpHandler implements HttpHandler {
                     throw new Rpc26Error(200, e.code, e.getMessage(), null);
                 }
                 ts.removeIf(java.util.Objects::isNull);
-                ts.sort((a, b) -> Mcp2026.compareCodePoints(a.name(), b.name()));
+                ts.sort((a, b) -> McpHandler2026.compareCodePoints(a.name(), b.name()));
                 List<Map<String, Object>> out = new ArrayList<>();
                 for (Tool t : ts) out.add(wireTool(t));
                 return complete26(ctx, kv("tools", out, "ttlMs", 60000, "cacheScope", cacheScope26()), "complete");
@@ -1037,7 +1037,7 @@ public final class McpHandler implements HttpHandler {
                 if (cfg.listSkills == null) break;
                 List<Map<String, Object>> list = new ArrayList<>();
                 for (Skill s : skills26(ctx)) {
-                    list.add(kv("uri", "skill://" + s.name() + "/SKILL.md", "frontmatter", Mcp2026.frontmatter(s)));
+                    list.add(kv("uri", "skill://" + s.name() + "/SKILL.md", "frontmatter", McpHandler2026.frontmatter(s)));
                 }
                 return complete26(ctx, kv("skills", list, "ttlMs", 60000, "cacheScope", cacheScope26()), "complete");
             }
@@ -1045,13 +1045,13 @@ public final class McpHandler implements HttpHandler {
                 if (cfg.listSkills == null) break;
                 String uri = p.get("uri") instanceof String s ? s : "";
                 try {
-                    Mcp2026.parseSkillUri(uri);
+                    McpHandler2026.parseSkillUri(uri);
                 } catch (IllegalArgumentException e) {
                     throw invalid26("Invalid skill URI: " + e.getMessage());
                 }
                 for (Skill s : skills26(ctx)) {
                     if (("skill://" + s.name() + "/SKILL.md").equals(uri)) {
-                        return complete26(ctx, kv("skill", Mcp2026.skillEntry(s)), "complete");
+                        return complete26(ctx, kv("skill", McpHandler2026.skillEntry(s)), "complete");
                     }
                 }
                 throw invalid26("Unknown skill: " + uri);
@@ -1061,7 +1061,7 @@ public final class McpHandler implements HttpHandler {
                 if (uri.startsWith("skill://") && cfg.listSkills != null) {
                     String[] nr;
                     try {
-                        nr = Mcp2026.parseSkillUri(uri);
+                        nr = McpHandler2026.parseSkillUri(uri);
                     } catch (IllegalArgumentException e) {
                         throw invalid26("Invalid resource URI: " + e.getMessage());
                     }
@@ -1120,7 +1120,7 @@ public final class McpHandler implements HttpHandler {
         }
         List<Skill> out = new ArrayList<>();
         if (skills != null) for (Skill s : skills) if (s != null && s.name() != null) out.add(s);
-        out.sort((a, b) -> Mcp2026.compareCodePoints(a.name(), b.name()));
+        out.sort((a, b) -> McpHandler2026.compareCodePoints(a.name(), b.name()));
         return out;
     }
 
@@ -1170,7 +1170,7 @@ public final class McpHandler implements HttpHandler {
         }
         String rawText = Json.stringify(args);
 
-        Mcp2026.State state = Mcp2026.decodeState(p.get("requestState"));
+        McpHandler2026.State state = McpHandler2026.decodeState(p.get("requestState"));
         if (state != null && !name.equals(state.tool())) state = null;
         Map<String, Object> responses = p.get("inputResponses") instanceof Map<?, ?> rm ? castMap(rm) : null;
         boolean confirmed = state != null && state.confirmed();
@@ -1190,7 +1190,7 @@ public final class McpHandler implements HttpHandler {
                 return result.apply(ToolResult.error(isEmpty(d.message()) ? "denied" : d.message()), null);
             }
             if (kind == DecisionKind.CONFIRM && !confirmed) {
-                Answer ans = responses == null ? null : Mcp2026.inputResponse("confirm", responses.get("confirm"));
+                Answer ans = responses == null ? null : McpHandler2026.inputResponse("confirm", responses.get("confirm"));
                 if (state != null && ans != null) {
                     if (!ans.ok()) return result.apply(ToolResult.error("declined"), null);
                     if (ans.data() != null && Boolean.FALSE.equals(ans.data().get("confirm"))) {
@@ -1198,7 +1198,7 @@ public final class McpHandler implements HttpHandler {
                     }
                     confirmed = true;
                     responses = null; // the confirm round is consumed
-                } else if (!Mcp2026.canElicit(meta)) {
+                } else if (!McpHandler2026.canElicit(meta)) {
                     if (d.result() != null) return result.apply(d.result(), null);
                     return result.apply(ToolResult.error("confirmation required: " + (d.message() == null ? "" : d.message())), null);
                 } else {
@@ -1208,7 +1208,7 @@ public final class McpHandler implements HttpHandler {
                     Map<String, Object> ir = kv("method", "elicitation/create", "params",
                             kv("mode", "form", "message", msg, "requestedSchema", schema));
                     return finish.apply(complete26(ctx, kv("inputRequests", kv("confirm", ir),
-                            "requestState", Mcp2026.encodeState(name, false)), "input_required"), new Object[]{false, null});
+                            "requestState", McpHandler2026.encodeState(name, false)), "input_required"), new Object[]{false, null});
                 }
             }
         }
@@ -1216,7 +1216,7 @@ public final class McpHandler implements HttpHandler {
         Answer answer = null;
         if (state != null && responses != null && responses.size() == 1) {
             Map.Entry<String, Object> e = responses.entrySet().iterator().next();
-            answer = Mcp2026.inputResponse(e.getKey(), e.getValue());
+            answer = McpHandler2026.inputResponse(e.getKey(), e.getValue());
         }
         ToolResult res;
         Throwable execErr = null;
@@ -1229,8 +1229,8 @@ public final class McpHandler implements HttpHandler {
         }
         Request req = execErr == null ? ToolResult.pendingOf(res) : null;
         if (req != null) {
-            return finish.apply(complete26(ctx, kv("inputRequests", kv(req.id(), Mcp2026.inputRequest(req)),
-                    "requestState", Mcp2026.encodeState(name, confirmed)), "input_required"), new Object[]{false, null});
+            return finish.apply(complete26(ctx, kv("inputRequests", kv(req.id(), McpHandler2026.inputRequest(req)),
+                    "requestState", McpHandler2026.encodeState(name, confirmed)), "input_required"), new Object[]{false, null});
         }
         return result.apply(res, execErr);
     }

@@ -249,3 +249,33 @@ Everything else — the full surface, with runnable examples — lives on the do
 | **Cookbook** | [Zero to agent](https://muthuishere.github.io/toolnexus/cookbook/zero-to-agent/) · [MCP servers](https://muthuishere.github.io/toolnexus/cookbook/mcp-servers/) · [Agent skills](https://muthuishere.github.io/toolnexus/cookbook/agent-skills/) · [Judge](https://muthuishere.github.io/toolnexus/cookbook/judge/) |
 
 Contract across all eight ports: [`SPEC.md`](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
+
+## MCP 2026-07-28 + OAuth
+
+Every MCP server is asked `server/discover` first (SPEC §2.2). A server that speaks
+`2026-07-28` is driven by toolnexus's own client, over stdio or Streamable HTTP, with no MCP SDK
+involved. Any other server falls back to the frozen SDK path (§2.F), so existing configs behave as
+they did before.
+
+- **MRTR**: an `input_required` tool result goes through `wait_for` (form → `kind:"input"`,
+  url → `kind:"authorization"`). With no `wait_for`, the tool returns a §10 pending and resumes
+  when the client re-executes it with `ctx.answer`. A `tools/call` is never re-sent silently after
+  an error.
+- **Remote skills** (`io.modelcontextprotocol/skills`) join the same `skill` tool under
+  `skill://<name>/`.
+- **Tool search**: `"toolSearch": true` (+ `"description"`) exposes `<server>_search_tools` and
+  `<server>_call_tool` in place of the server's own tools.
+- **OAuth** (§2A): per-server `auth` = `{clientId, clientSecret, tokenAuthMethod, clientIds,
+  clientMetadataUrl, redirectUri, mode: "auto"|"pause", omitRefreshResource, allowHttp}`.
+  Dynamic client registration is not supported. Load options:
+
+```python
+tk = await create_toolkit("mcp.json", wait_for=wait_for,
+                          token_store=my_store,   # load/save/delete(resource); default in-memory
+                          open_url=my_opener)     # auto mode browser; default the OS opener
+```
+
+In `pause` mode the host gets `Request(kind="authorization", id="auth-…")` and answers with
+`Answer(id, ok=True, data={"callbackUrl": "<the URL the AS redirected to>"})`. On the frozen
+fallback, the bearer token goes on the SDK HTTP transport through an `httpx.Auth`, so a 401 there
+runs the same flow once. Progress notifications are not supported on the 2026 path (§2.9).
