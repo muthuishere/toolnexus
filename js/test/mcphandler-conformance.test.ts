@@ -10,10 +10,26 @@ import http from "node:http"
 import path from "node:path"
 import type { AddressInfo } from "node:net"
 import { fileURLToPath } from "node:url"
-import { createToolkit, identityFrom, mcpRequestMetaFrom, type Tool, type ToolResult, type McpHandlerConfig } from "../dist/index.js"
+import {
+  createToolkit,
+  identityFrom,
+  mcpRequestMetaFrom,
+  loadMcpSkills,
+  McpServerAuth,
+  pending,
+  type Tool,
+  type ToolResult,
+  type McpHandlerConfig,
+} from "../dist/index.js"
 
 const casesPath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../conformance/mcp_handler/cases.json")
 const cases = JSON.parse(fs.readFileSync(casesPath, "utf8"))
+const skillsDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../examples/skills")
+const META_VERSION = "io.modelcontextprotocol/protocolVersion"
+
+/** README identity-name rule: a string verbatim, a Principal's subject, else "". */
+const identityName = (v: unknown): string =>
+  typeof v === "string" ? v : v && typeof v === "object" && typeof (v as any).subject === "string" ? (v as any).subject : ""
 
 const toResult = (r: any): ToolResult => {
   const out: ToolResult = { output: r?.output ?? "", isError: !!r?.isError }
@@ -35,9 +51,19 @@ function buildTools(executed: string[]): Tool[] {
           case "echo":
             return { output: String((args as any).text ?? ""), isError: false }
           case "whoami": {
-            const id = identityFrom(ctx)
+            const id = identityName(identityFrom(ctx))
             const trace = mcpRequestMetaFrom(ctx)?.trace
-            return { output: `${id ?? ""}|${trace ?? ""}`, isError: false }
+            return { output: `${id}|${trace ?? ""}`, isError: false }
+          }
+          case "ask": {
+            const a = ctx?.answer
+            if (a?.ok) return { output: `Hello, ${(a.data as any)?.name}!`, isError: false }
+            return pending({
+              id: "name",
+              kind: "input",
+              prompt: "What is your name?",
+              data: { schema: { type: "object", properties: { name: { type: "string" } }, required: ["name"] } },
+            })
           }
           case "static":
             return toResult(ft.result)
@@ -72,7 +98,7 @@ for (const sc of cases.scenarios) {
     const cfg: McpHandlerConfig = {
       // listTools ⇒ every fixture tool minus those whose visibleTo excludes the identity
       listTools: (ctx) => {
-        const id = identityFrom(ctx)
+        const id = identityName(identityFrom(ctx))
         return tools.filter((_t, i) => {
           const vis = fx.tools[i].visibleTo
           return !vis || vis.includes(id)
@@ -96,10 +122,30 @@ for (const sc of cases.scenarios) {
     for (const k of ["name", "title", "version", "instructions", "stateless", "statelessSessionId", "protocolVersions"]) {
       if (k in c) (cfg as any)[k] = c[k]
     }
+    if (c.skills) cfg.listSkills = () => loadMcpSkills(skillsDir)
+    let meta: http.RequestListener = (_req, res) => void res.writeHead(404).end()
+    if (c.serverAuth) {
+      const fa = fx.serverAuth
+      const auth = new McpServerAuth({
+        issuer: fa.issuer,
+        audience: fa.audience,
+        scopes: fa.scopes,
+        verify: (_req, token) => {
+          const p = fa.principals[token]
+          if (!p) throw new Error("bad token")
+          return { subject: p.subject, scopes: p.scopes }
+        },
+      })
+      cfg.authenticate = auth.authenticate
+      meta = auth.metadata()
+    }
     const tk = await createToolkit({ builtins: false })
     const srv = http.createServer(tk.mcpHandler(cfg))
     await new Promise<void>((r) => srv.listen(0, "127.0.0.1", r))
     const url = `http://127.0.0.1:${(srv.address() as AddressInfo).port}/`
+    const metaSrv = http.createServer(meta)
+    await new Promise<void>((r) => metaSrv.listen(0, "127.0.0.1", r))
+    const metaUrl = `http://127.0.0.1:${(metaSrv.address() as AddressInfo).port}`
     let sid = ""
     try {
       for (const [i, step] of sc.steps.entries()) {
@@ -111,8 +157,24 @@ for (const sc of cases.scenarios) {
         if (rq.sessionId !== undefined) headers["Mcp-Session-Id"] = rq.sessionId
         else if (rq.session) headers["Mcp-Session-Id"] = sid
         if (rq.version) headers["MCP-Protocol-Version"] = rq.version
-        const body = rq.rawBody ?? (rq.body !== undefined ? JSON.stringify(rq.body) : undefined)
-        const resp = await fetch(url, { method: rq.method, headers, body })
+        let bodyObj = rq.body
+        if (rq.mcp2026 && bodyObj !== undefined) {
+          bodyObj = structuredClone(bodyObj)
+          bodyObj.params ??= {}
+          bodyObj.params._meta ??= {}
+          if (!(META_VERSION in bodyObj.params._meta)) bodyObj.params._meta[META_VERSION] = "2026-07-28"
+          headers["MCP-Protocol-Version"] = "2026-07-28"
+          headers["Mcp-Method"] = bodyObj.method
+          if (bodyObj.method === "tools/call" || bodyObj.method === "prompts/get") headers["Mcp-Name"] = bodyObj.params.name ?? ""
+          if (bodyObj.method === "resources/read") headers["Mcp-Name"] = bodyObj.params.uri ?? ""
+        }
+        for (const [k, v] of Object.entries((rq.headers ?? {}) as Record<string, string>)) {
+          for (const hk of Object.keys(headers)) if (hk.toLowerCase() === k.toLowerCase()) delete headers[hk]
+          if (v !== "") headers[k] = v
+        }
+        const body = rq.rawBody ?? (bodyObj !== undefined ? JSON.stringify(bodyObj) : undefined)
+        const target = rq.target ? metaUrl + rq.target : url
+        const resp = await fetch(target, { method: rq.method, headers, body })
         const text = await resp.text()
         const where = `${sc.name} step ${i}`
         if (step.capture === "sid") sid = resp.headers.get("mcp-session-id") ?? ""
@@ -130,6 +192,8 @@ for (const sc of cases.scenarios) {
       if (sc.expectExecuted) assert.deepEqual(executed, sc.expectExecuted, `${sc.name} executed`)
       if (sc.expectOnCall) assert.deepEqual(onCalls, sc.expectOnCall, `${sc.name} onCall`)
     } finally {
+      metaSrv.closeAllConnections()
+      await new Promise<void>((r) => metaSrv.close(() => r()))
       srv.closeAllConnections()
       await new Promise<void>((r) => srv.close(() => r()))
       await tk.close()

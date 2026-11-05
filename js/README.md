@@ -186,6 +186,32 @@ const mcp = tk.mcpHandler({
 http.createServer((req, res) => (req.url?.startsWith("/mcp") ? mcp(req, res) : res.writeHead(404).end())).listen(8080)
 ```
 
+### MCP 2026-07-28 (opt-in)
+
+List `"2026-07-28"` in `protocolVersions` to serve the stateless 2026 wire (`server/discover`,
+header validation, `resultType`, MRTR): `["2026-07-28"]` alone, or `["2026-07-28", "2025-06-18"]` for
+both wires on one mount. It is never a default and `initialize` never negotiates it. A `confirm`
+decision and a tool suspension (§10 `pending(...)`) leave as `input_required`; the client's retry
+reaches the tool as `ctx.answer`. `listSkills` publishes skills through the skills extension
+(`skills/list`, `skills/get`, `resources/read` of `skill://` URIs); `loadMcpSkills(dir)` builds that
+list from a skills folder. `McpServerAuth` makes the handler an OAuth protected resource: its
+`authenticate` verifies RS256 JWTs against the issuer's JWKS (or your `verify`), applies per-tool
+`scopes`, answers with exact `WWW-Authenticate` challenges, and returns an `McpPrincipal`;
+`metadata()` serves the RFC 9728 document. `startMcpDevAuthServer()` is an auto-approving OAuth
+server on `127.0.0.1` — **DEVELOPMENT AND TESTS ONLY, never production**. SPEC §7C.2.
+
+```ts
+import { McpServerAuth, loadMcpSkills } from "toolnexus"
+
+const auth = new McpServerAuth({ issuer: "https://login.example", scopes: { "*": ["mcp"], wipe: ["mcp:admin"] } })
+const mcp = tk.mcpHandler({
+  protocolVersions: ["2026-07-28", "2025-06-18"],
+  authenticate: auth.authenticate,
+  listSkills: () => loadMcpSkills("./skills"),
+})
+const prm = auth.metadata() // mount at /.well-known/oauth-protected-resource[/mcp]
+```
+
 ## Documentation
 
 Everything else — the full surface, with runnable examples — lives on the docs site:

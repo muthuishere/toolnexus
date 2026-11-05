@@ -6,6 +6,9 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
 import http from "node:http"
+import { createHash } from "node:crypto"
+import path from "node:path"
+import { fileURLToPath } from "node:url"
 import type { AddressInfo } from "node:net"
 import { Client as MCPClient } from "@modelcontextprotocol/sdk/client/index.js"
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js"
@@ -18,6 +21,11 @@ import {
   mcpWireTool,
   toolResultToMcp,
   buildMcpServer,
+  loadMcpSkills,
+  McpServerAuth,
+  startMcpDevAuthServer,
+  type McpDevAuthServer,
+  type McpPrincipal,
   type Tool,
   type ToolResult,
   type McpHandler,
@@ -643,3 +651,241 @@ test("serve (§7C): structured/meta/outputSchema mapped; absent ⇒ byte-identic
 // Keep the config type exercised (compile-time only).
 const _cfg: McpHandlerConfig = {}
 void _cfg
+
+// ---- MCP 2026-07-28 (SPEC §7C.2) — mirrors golang/mcphandler2026_test.go ----
+
+const V26 = "2026-07-28"
+
+/** One 2026-07-28 request (headers + _meta stamped). */
+async function post26(url: string, token: string, method: string, params: Record<string, any> = {}) {
+  params = { ...params, _meta: { ...(params._meta ?? {}), "io.modelcontextprotocol/protocolVersion": V26 } }
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    "MCP-Protocol-Version": V26,
+    "Mcp-Method": method,
+  }
+  if (typeof params.name === "string") headers["Mcp-Name"] = params.name
+  if (token) headers.Authorization = "Bearer " + token
+  const r = await fetch(url, { method: "POST", headers, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }) })
+  const raw = await r.text()
+  let body: any
+  try {
+    body = JSON.parse(raw)
+  } catch {
+    body = undefined
+  }
+  return { status: r.status, headers: r.headers, body }
+}
+
+function whoTool(): Tool {
+  return {
+    name: "who",
+    description: "who",
+    inputSchema: { type: "object" },
+    source: "native",
+    async execute(_a, ctx) {
+      return { output: (identityFrom(ctx) as McpPrincipal | undefined)?.subject ?? "", isError: false }
+    },
+  }
+}
+
+/** Mounts the handler at /mcp and the PRM listener under /.well-known/. */
+async function listenMux(h: McpHandler, meta?: http.RequestListener) {
+  const srv = http.createServer((req, res) => {
+    if (meta && (req.url ?? "").startsWith("/.well-known/")) return meta(req, res)
+    if ((req.url ?? "").split("?")[0] === "/mcp") return h(req, res)
+    res.writeHead(404).end()
+  })
+  await new Promise<void>((r) => srv.listen(0, "127.0.0.1", r))
+  const base = `http://127.0.0.1:${(srv.address() as AddressInfo).port}`
+  return {
+    base,
+    close: () =>
+      new Promise<void>((r) => {
+        srv.closeAllConnections()
+        srv.close(() => r())
+      }),
+  }
+}
+
+test("2026: default JWT verifier against the dev AS", async () => {
+  const as = await startMcpDevAuthServer()
+  const tk = await newTK()
+  tk.register(whoTool())
+  const auth = new McpServerAuth({ issuer: as.issuer, scopes: { "*": ["mcp"], who: ["mcp:who"] } })
+  const s = await listenMux(tk.mcpHandler({ protocolVersions: [V26], authenticate: auth.authenticate }), auth.metadata())
+  try {
+    const u = s.base + "/mcp"
+    const now = Math.floor(Date.now() / 1000)
+    const mint = (over: Record<string, unknown> = {}) =>
+      as.mint({ iss: as.issuer, sub: "dev-user", aud: u, scope: "mcp mcp:who", exp: now + 60, ...over })
+    const ok = await post26(u, mint(), "tools/call", { name: "who", arguments: {} })
+    assert.equal(ok.status, 200)
+    assert.equal(ok.body.result.content[0].text, "dev-user")
+    const good = mint()
+    const bad: Record<string, string> = {
+      "wrong audience": mint({ aud: "https://other.example/mcp" }),
+      "aud array miss": mint({ aud: ["x"] }),
+      expired: mint({ exp: now - 1 }),
+      "wrong issuer": mint({ iss: "https://evil.example" }),
+      tampered: good.slice(0, 20) + (good[20] === "x" ? "y" : "x") + good.slice(21),
+      "not a jwt": "opaque",
+    }
+    for (const [name, tok] of Object.entries(bad)) {
+      const r = await post26(u, tok, "server/discover")
+      const www = r.headers.get("www-authenticate") ?? ""
+      assert.equal(r.status, 401, name)
+      assert.ok(www.includes('error="invalid_token"'), name + ": " + www)
+      assert.ok(!www.includes(tok), name + ": token leaked")
+      assert.deepEqual(r.body, { error: "unauthorized" })
+    }
+    const up = await post26(u, mint({ scope: "mcp" }), "tools/call", { name: "who", arguments: {} })
+    assert.equal(up.status, 403)
+    assert.equal(
+      up.headers.get("www-authenticate"),
+      `Bearer resource_metadata="${s.base}/.well-known/oauth-protected-resource/mcp", scope="mcp mcp:who", error="insufficient_scope"`,
+    )
+    const prm = await (await fetch(s.base + "/.well-known/oauth-protected-resource/mcp")).json()
+    assert.deepEqual(prm, {
+      resource: u,
+      authorization_servers: [as.issuer],
+      scopes_supported: ["mcp"],
+      bearer_methods_supported: ["header"],
+    })
+  } finally {
+    await s.close()
+    await as.close()
+    await tk.close()
+  }
+})
+
+/** Authorization code + PKCE against the dev AS, no browser. */
+async function pkceLogin(as: McpDevAuthServer, clientId: string, redirect: string, resource: string, scope: string) {
+  const verifier = "v-" + "a".repeat(50)
+  const challenge = createHash("sha256").update(verifier).digest("base64url")
+  const q = new URLSearchParams({
+    response_type: "code",
+    client_id: clientId,
+    redirect_uri: redirect,
+    state: "s1",
+    code_challenge: challenge,
+    code_challenge_method: "S256",
+    resource,
+    scope,
+  })
+  const r = await fetch(as.issuer + "/authorize?" + q, { redirect: "manual" })
+  assert.equal(r.status, 302)
+  const cb = new URL(r.headers.get("location")!).searchParams
+  assert.equal(cb.get("iss"), as.issuer)
+  assert.equal(cb.get("state"), "s1")
+  assert.ok(cb.get("code"))
+  const tr = await fetch(as.issuer + "/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      grant_type: "authorization_code",
+      code: cb.get("code")!,
+      code_verifier: verifier,
+      client_id: clientId,
+      redirect_uri: redirect,
+      resource,
+    }),
+  })
+  const tok = await tr.json()
+  assert.equal(tr.status, 200, JSON.stringify(tok))
+  return tok
+}
+
+test("2026: dev AS — pre-registered and CIMD clients, refresh, unknown client, counter", async () => {
+  let docUrl = ""
+  const cimd = http.createServer((_req, res) => {
+    res.writeHead(200, { "Content-Type": "application/json" })
+    res.end(JSON.stringify({ client_id: docUrl, client_name: "CIMD app", redirect_uris: ["http://127.0.0.1/cb"] }))
+  })
+  await new Promise<void>((r) => cimd.listen(0, "127.0.0.1", r))
+  docUrl = `http://127.0.0.1:${(cimd.address() as AddressInfo).port}/client.json`
+  const as = await startMcpDevAuthServer({ clients: { app: ["http://127.0.0.1/cb"] } })
+  const tk = await newTK()
+  tk.register(whoTool())
+  const auth = new McpServerAuth({ issuer: as.issuer, scopes: { "*": ["mcp"] } })
+  const s = await listenMux(tk.mcpHandler({ protocolVersions: [V26], authenticate: auth.authenticate }))
+  try {
+    const u = s.base + "/mcp"
+    for (const cid of ["app", docUrl]) {
+      const tok = await pkceLogin(as, cid, "http://127.0.0.1:5555/cb", u, "mcp")
+      const r = await post26(u, tok.access_token, "tools/call", { name: "who", arguments: {} })
+      assert.equal(r.status, 200, cid)
+      assert.equal(r.body.result.content[0].text, "dev-user")
+      const rr = await fetch(as.issuer + "/token", {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({ grant_type: "refresh_token", refresh_token: tok.refresh_token, client_id: cid, resource: u }),
+      })
+      assert.equal(rr.status, 200, "refresh " + cid)
+      const rt = await rr.json()
+      assert.notEqual(rt.refresh_token, tok.refresh_token, "refresh rotates")
+      const again = await post26(u, rt.access_token, "tools/call", { name: "who", arguments: {} })
+      assert.equal(again.status, 200)
+    }
+    const unknown = await fetch(as.issuer + "/authorize?client_id=nobody&redirect_uri=http://127.0.0.1/cb", { redirect: "manual" })
+    assert.equal(unknown.status, 400)
+    await unknown.text()
+    assert.equal(as.authorizations(), 3)
+  } finally {
+    await s.close()
+    await as.close()
+    await tk.close()
+    cimd.closeAllConnections()
+    await new Promise<void>((r) => cimd.close(() => r()))
+  }
+})
+
+test("2026: onCall fires (throws isolated), prompts envelope, discover capabilities", async () => {
+  const events: McpCallEvent[] = []
+  const tk = await newTK()
+  tk.register(whoTool())
+  const s = await listen(
+    tk.mcpHandler({
+      protocolVersions: [V26],
+      onCall: (ev) => {
+        events.push(ev)
+        throw new Error("isolated")
+      },
+      listPrompts: () => [{ name: "p", description: "d" }],
+      getPrompt: (_ctx, name) => ({ messages: [{ role: "user", text: "hi " + name }] }),
+    }),
+  )
+  try {
+    const r = await post26(s.url, "", "tools/call", { name: "who", arguments: {} })
+    assert.equal(r.status, 200)
+    assert.equal(events.length, 1)
+    assert.equal(events[0]!.name, "who")
+    const d = await post26(s.url, "", "server/discover")
+    const caps = d.body.result.capabilities
+    assert.ok(caps.prompts)
+    assert.equal(caps.extensions, undefined)
+    assert.equal(caps.resources, undefined)
+    const g = await post26(s.url, "", "prompts/get", { name: "p" })
+    assert.equal(g.body.result.messages[0].content.text, "hi p")
+    assert.equal(g.body.result.resultType, "complete")
+    const get = await fetch(s.url, { headers: { Accept: "text/event-stream" } })
+    assert.equal(get.status, 405)
+    assert.equal(get.headers.get("allow"), "POST")
+    await get.text()
+  } finally {
+    await s.close()
+    await tk.close()
+  }
+})
+
+test("2026: loadMcpSkills on examples/skills", () => {
+  const dir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../examples/skills")
+  const skills = loadMcpSkills(dir)
+  assert.equal(skills.length, 1)
+  assert.equal(skills[0]!.name, "hello-world")
+  assert.deepEqual(
+    skills[0]!.files.map((f) => f.path),
+    ["SKILL.md", "scripts/greet.sh"],
+  )
+  assert.equal(typeof skills[0]!.frontmatter?.description, "string")
+})
