@@ -8,6 +8,23 @@ GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
 
 ## Unreleased
 
+**Docs: an "In-process client" section with copy-pasteable recipes for driving coding agents and
+CLIs yourself.** Driving a vendor CLI or ACP agent is not something toolnexus maintains as library
+surface; agents change their flags too often. Instead the new section shows how to do it on the
+public API that already exists: `createInProcessClient` (`generate`, or `GenerateStream` in Go)
+plus `toolkit.serve` with the MCP profile. Four pages: an overview, a complete ACP agent recipe
+(spawn, `initialize`, `session/new` with your toolkit as an MCP server, `session/prompt`, streamed
+`agent_message_chunk`s), a one-shot CLI recipe (`claude -p`, `codex exec`: render the request, run
+the process, parse text or tool calls), and "Extend it" (your own agent, isolation, model selection
+over `configOptions`, permission policies). Recipes are JavaScript, Python and Go, each run against
+a fake agent/CLI and live against Claude Code; per-agent isolation and model notes are labelled
+with the version and date they were verified on. The section is also published as plain markdown
+for agents at `/_llms-txt/in-process-client.txt` (listed in `llms.txt`). The research behind the
+notes is in `docs/references/acp-agent-isolation-2026-11-05.md`. Not done: recipes for the
+Java, C#, Elixir, Clojure and Rust ports; two Python serve gaps found while verifying are
+documented, not fixed (`mcp={}` exposes no tools; `GET /mcp` gets no response, which hangs the
+Claude ACP adapter).
+
 ### MCP 2026-07-28 client: hosted servers, OAuth login, remote skills and tool search (all eight ports)
 
 **toolnexus now speaks MCP 2026-07-28 to every server first, and can log in to OAuth-protected ones.**

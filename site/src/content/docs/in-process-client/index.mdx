@@ -1,0 +1,302 @@
+---
+title: "In-process client — overview"
+description: "createInProcessClient is the one seam for putting anything behind a toolnexus client — a local model, a coding agent over ACP, a CLI. You supply generate (or generateStream); toolnexus runs the tool loop. Plus how to hand your toolkit to an external agent as an MCP server."
+---
+
+import { Tabs, TabItem, Aside } from '@astrojs/starlight/components';
+
+<Aside type="tip" title="Why you need this">
+Not every "model" is an HTTP endpoint. It may be a weights file in your process, a coding agent
+you drive over the Agent Client Protocol (ACP), or a CLI you run once per turn. toolnexus does
+not need a vendor integration for any of them. It needs one function: **given the request, return
+one assistant message**. Everything above that function (the tool loop, MCP servers, skills,
+hooks, memory, metrics) stays exactly as it is against a hosted model.
+</Aside>
+
+<Aside type="note" title="These recipes are meant to be copied, not imported">
+Every recipe in this section is a **complete, self-contained file**: full imports, nothing elided,
+built only on toolnexus's public API. Copy it into your project, or hand it to a coding agent to
+drop in as-is, and change what you need. toolnexus does not ship or maintain vendor-specific
+CLI/ACP drivers as library surface; agents and CLIs change their flags every few weeks, and a
+copied recipe you own is easier to fix than a library release you wait for.
+The whole section is also published as plain markdown for LLMs and agents:
+[`_llms-txt/in-process-client.txt`](/toolnexus/_llms-txt/in-process-client.txt) (just these pages),
+listed in the site index [`llms.txt`](/toolnexus/llms.txt), and inside [`llms-full.txt`](/toolnexus/llms-full.txt) (the whole site).
+</Aside>
+
+## The seam
+
+`createInProcessClient` builds an ordinary `Client` with no `baseUrl`, no `apiKey` and no
+`style`. Instead you pass the model itself:
+
+| you supply | receives | returns | streams? |
+|---|---|---|---|
+| **`generate(request)`** (every port) | `messages`, `tools`, `model`, `body` (the assembled request for this turn) | one assistant message: `{ content }` to finish, or `{ toolCalls }` to ask for tools | no: `stream` / `runStream` is **refused** with an error naming why |
+| **`GenerateStream(ctx, request, emit)`** (Go; Rust has `generate_stream`) | the same request, plus the run's `ctx` (cancel / timeout) and an `emit` function | the same one message | yes: every `emit({Type:"text", Delta})` becomes a stream delta (the deltas must add up to `Content`); other event types pass through to the stream consumer and are never executed |
+
+Return `toolCalls` and toolnexus executes them against the toolkit, appends the results and calls
+you again. Return `content` and the run is over. The contract is the same one documented in
+[Run a model in-process](/toolnexus/cookbook/local-and-in-process-models/), which also covers
+retries (in-process failures are final by default) and the per-port request shapes.
+
+<Aside type="caution" title="Python's generate is synchronous">
+The Python client calls `generate` on a worker thread and refuses a coroutine. If your model is
+async, keep a reference to your event loop and block on it inside `generate` with
+`asyncio.run_coroutine_threadsafe(coro, loop).result()`; the [ACP recipe](/toolnexus/in-process-client/acp-agent/) does exactly this.
+</Aside>
+
+## A complete example
+
+A "model" that asks for the `add` tool on its first turn and answers with the result on the second.
+This is the whole integration; swap the body of `generate` for your real model.
+
+<Tabs syncKey="lang">
+<TabItem label="JavaScript">
+```js title="main.mjs"
+import { createInProcessClient, createToolkit, defineTool } from "toolnexus"
+
+const add = defineTool({
+  name: "add", description: "Add two numbers.",
+  inputSchema: { type: "object", properties: { a: { type: "number" }, b: { type: "number" } }, required: ["a", "b"] },
+  run: ({ a, b }) => `${a + b}`,
+})
+
+// Your "model": first turn asks for a tool, second turn answers with its result.
+const client = createInProcessClient({
+  model: "my-model",
+  generate: (req) => {
+    const last = req.messages.at(-1)
+    if (last.role !== "tool") return { toolCalls: [{ name: "add", arguments: { a: 2, b: 3 } }] }
+    return { content: `The sum is ${last.content}.` }
+  },
+})
+
+const toolkit = await createToolkit({ builtins: false, extraTools: [add] })
+const result = await client.run("What is 2 + 3?", { toolkit })
+console.log(result.text) // The sum is 5.
+```
+</TabItem>
+<TabItem label="Python">
+```python title="main.py"
+import asyncio
+from toolnexus import create_in_process_client, create_toolkit, define_tool
+
+
+def add(a: float, b: float) -> str:
+    """Add two numbers."""
+    return str(int(a + b))
+
+
+def generate(req):  # sync: runs on the client's worker thread
+    last = req["messages"][-1]
+    if last["role"] != "tool":
+        return {"tool_calls": [{"name": "add", "arguments": {"a": 2, "b": 3}}]}
+    return {"content": f"The sum is {last['content']}."}
+
+
+async def main():
+    client = create_in_process_client(model="my-model", generate=generate)
+    toolkit = await create_toolkit(builtins=False, extra_tools=[define_tool(add, name="add")])
+    result = await client.run("What is 2 + 3?", toolkit)
+    print(result.text)  # The sum is 5.
+
+
+asyncio.run(main())
+```
+</TabItem>
+<TabItem label="Go">
+Go also has `GenerateStream`, so this version streams for real through `client.Stream`.
+
+```go title="main.go"
+package main
+
+import (
+	"context"
+	"fmt"
+	"strconv"
+	"strings"
+
+	tn "github.com/muthuishere/toolnexus/golang"
+)
+
+type addArgs struct {
+	A float64 `json:"a"`
+	B float64 `json:"b"`
+}
+
+func main() {
+	ctx := context.Background()
+	add := tn.NativeToolReflect("add", "Add two numbers.", func(_ context.Context, in addArgs) (string, error) {
+		return strconv.FormatFloat(in.A+in.B, 'f', -1, 64), nil
+	})
+	toolkit, err := tn.CreateToolkit(ctx, tn.Options{Builtins: false, ExtraTools: []tn.Tool{add}})
+	if err != nil {
+		panic(err)
+	}
+
+	// GenerateStream: ctx-aware, and every emitted text delta reaches Client.Stream.
+	client := tn.CreateInProcessClient(tn.InProcessOptions{
+		Model: "my-model",
+		GenerateStream: func(ctx context.Context, req tn.InProcessRequest, emit func(tn.StreamEvent)) (tn.InProcessResponse, error) {
+			last, _ := req.Messages[len(req.Messages)-1].(map[string]any)
+			if last["role"] != "tool" {
+				return tn.InProcessResponse{ToolCalls: []tn.InProcessToolCall{
+					{Name: "add", Arguments: map[string]any{"a": 2, "b": 3}},
+				}}, nil
+			}
+			words := []string{"The ", "sum ", "is ", fmt.Sprint(last["content"]), "."}
+			for _, w := range words {
+				emit(tn.StreamEvent{Type: "text", Delta: w}) // deltas must add up to Content
+			}
+			return tn.InProcessResponse{Content: strings.Join(words, "")}, nil
+		},
+	})
+
+	events, err := client.Stream(ctx, "What is 2 + 3?", toolkit)
+	if err != nil {
+		panic(err)
+	}
+	for ev := range events {
+		switch ev.Type {
+		case "text":
+			fmt.Print(ev.Delta)
+		case "tool_call":
+			fmt.Printf("[calling %s]\n", ev.Name)
+		case "error":
+			panic(ev.Err)
+		}
+	}
+	fmt.Println()
+}
+```
+</TabItem>
+</Tabs>
+
+## When to use which
+
+There are two very different things you can put behind `generate`, and they split the tool loop
+differently:
+
+| | who runs the tools | what `generate` returns | recipe |
+|---|---|---|---|
+| **A plain model** (weights in-process, a CLI asked for one reply) | **toolnexus**: the model asks, the client executes | `toolCalls` or `content` | [One-shot CLI](/toolnexus/in-process-client/one-shot-cli/), [Run a model in-process](/toolnexus/cookbook/local-and-in-process-models/) |
+| **An agent** (Claude Code, Copilot, opencode… over ACP) | **the agent**: it has its own loop, and reaches your tools over MCP | only `content`: the agent's final text | [ACP agent](/toolnexus/in-process-client/acp-agent/) |
+
+An agent already has a tool loop of its own. You do not want two loops fighting over the same
+call, so in the agent case you **give the agent your toolkit as an MCP server**, run the toolnexus
+client with an empty toolkit, and let `generate` return the agent's answer.
+
+## Give your toolkit to an external agent: serve it as MCP
+
+Any toolkit, whatever it aggregates (MCP servers, skills, native functions, HTTP tools, builtins,
+A2A agents), can be served as **one streamable-HTTP MCP server** with the `mcp` profile of
+`toolkit.serve` ([SPEC §7C](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md)).
+`tools/list` lists the toolkit's tools, `tools/call` dispatches straight to `Tool.execute`, and
+`onCall` fires for every inbound call. Point any MCP client at `<url>/mcp`.
+
+<Tabs syncKey="lang">
+<TabItem label="JavaScript">
+```js title="serve.mjs"
+import { createToolkit, defineTool } from "toolnexus"
+
+const add = defineTool({
+  name: "add", description: "Add two numbers.",
+  inputSchema: { type: "object", properties: { a: { type: "number" }, b: { type: "number" } }, required: ["a", "b"] },
+  run: ({ a, b }) => `${a + b}`,
+})
+
+// Any toolkit (MCP servers, skills, native, HTTP, builtins) can be served as one MCP server.
+const toolkit = await createToolkit({ builtins: false, extraTools: [add] })
+const server = await toolkit.serve("127.0.0.1:0", {
+  mcp: { name: "toolnexus" },                       // tools: [...] narrows what is exposed
+  onCall: (e) => console.log("called", e.name, e.isError ? "(error)" : ""),
+})
+console.log(`MCP endpoint: ${server.url}/mcp`)       // streamable HTTP
+await server.stop()
+```
+</TabItem>
+<TabItem label="Python">
+```python title="serve.py"
+import asyncio
+from toolnexus import create_toolkit, define_tool
+
+
+def add(a: float, b: float) -> str:
+    """Add two numbers."""
+    return str(int(a + b))
+
+
+async def main():
+    # Any toolkit (MCP servers, skills, native, HTTP, builtins) can be served as one MCP server.
+    toolkit = await create_toolkit(builtins=False, extra_tools=[define_tool(add, name="add")])
+    server = await toolkit.serve(
+        "127.0.0.1:0",
+        mcp={"name": "toolnexus"},  # pass a non-empty dict; "tools": [...] narrows what is exposed
+        on_call=lambda e: print("called", e["name"], "(error)" if e["is_error"] else ""),
+    )
+    print(f"MCP endpoint: {server.url}/mcp")  # streamable HTTP
+    await server.stop()
+
+
+asyncio.run(main())
+```
+
+<Aside type="caution" title="Two Python serve gaps (verified on 0.24.0)">
+`mcp={}` currently exposes **no tools** (the empty dict is treated as "absent"), so pass at least
+`{"name": ...}`. And a `GET /mcp` (the SSE stream a streamable-HTTP client may open) gets no
+response, so clients that open it, such as the Claude ACP adapter, hang at `session/new`.
+Use the JavaScript or Go serve for agent MCP until this is fixed.
+</Aside>
+</TabItem>
+<TabItem label="Go">
+```go title="main.go"
+package main
+
+import (
+	"context"
+	"fmt"
+	"strconv"
+
+	tn "github.com/muthuishere/toolnexus/golang"
+)
+
+type addArgs struct {
+	A float64 `json:"a"`
+	B float64 `json:"b"`
+}
+
+func main() {
+	ctx := context.Background()
+	add := tn.NativeToolReflect("add", "Add two numbers.", func(_ context.Context, in addArgs) (string, error) {
+		return strconv.FormatFloat(in.A+in.B, 'f', -1, 64), nil
+	})
+	// Any toolkit (MCP servers, skills, native, HTTP, builtins) can be served as one MCP server.
+	toolkit, err := tn.CreateToolkit(ctx, tn.Options{Builtins: false, ExtraTools: []tn.Tool{add}})
+	if err != nil {
+		panic(err)
+	}
+	server, err := toolkit.Serve("127.0.0.1:0", tn.ServeOptions{
+		MCP: &tn.MCPServeConfig{Name: "toolnexus"}, // Tools: []string{...} narrows what is exposed
+		OnCall: func(e tn.OnCallEvent) {
+			fmt.Println("called", e.Name, e.IsError)
+		},
+	})
+	if err != nil {
+		panic(err)
+	}
+	defer server.Stop()
+	fmt.Printf("MCP endpoint: %s/mcp\n", server.URL) // streamable HTTP
+}
+```
+</TabItem>
+</Tabs>
+
+Transport is streamable HTTP only; a stdio MCP server and an embeddable HTTP **handler** (so you
+can mount `/mcp` inside your own server instead of letting `serve` own the listener) are
+**coming** (PR #140), not on main yet.
+
+## In this section
+
+- [ACP agent recipe](/toolnexus/in-process-client/acp-agent/): drive any ACP agent, with your toolkit attached over MCP, streaming its text.
+- [One-shot CLI recipe](/toolnexus/in-process-client/one-shot-cli/): one CLI process per turn (`claude -p`, `codex exec`), toolnexus runs the tools.
+- [Extend it](/toolnexus/in-process-client/extend/): add your own agent, isolation, model selection, permissions.
