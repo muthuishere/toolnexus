@@ -8,6 +8,14 @@ GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
 
 ## Unreleased
 
+**Fixed (python only): `toolkit.serve(mcp={})` now exposes the toolkit's tools, and `GET /mcp` answers
+`405` instead of hanging.** An empty MCP serve profile was treated as absent, so `/mcp` was mounted
+but advertised no tools; it now means "present with defaults" (`name: "toolnexus"`, every tool), as
+in every other port and `SPEC.md §7C`. `GET /mcp` used to hold the connection open forever, which
+hung clients that probe it for a server stream (e.g. the Claude ACP adapter, whose `session/new`
+waited on it); the stateless profile offers no stream, so it now returns `405` (`Allow: POST`),
+matching Java, Elixir, C# and Rust. Other ports were not affected by either bug.
+
 ## 0.24.0 — 2026-11-04
 
 **Media generation: images, video, speech, transcription, voice cloning and talking-head video,
