@@ -203,10 +203,9 @@ var handler = tk.McpHandler(new McpHandlerConfig
 // route GET /.well-known/oauth-protected-resource[/mcp] to auth.Metadata() (or auth.MetadataAsync(listenerCtx))
 ```
 
-`McpServerAuth.Verify` replaces the JWT verifier (opaque tokens, introspection). For local work and tests,
-`await McpDevAuthServer.StartAsync(new McpDevAuthOptions { Clients = … })` runs an authorization server on
-`http://127.0.0.1:<random>` (PKCE S256, pre-registered + CIMD clients, refresh rotation, `Mint(claims)`).
-**DEV ONLY — it approves every request as `dev-user` without a login; never run it in production.**
+`McpServerAuth.Verify` replaces the JWT verifier (opaque tokens, introspection). Bring your own authorization
+server: `McpServerAuth` verifies its tokens. The auto-approving dev authorization server the suite uses is test
+tooling (`tests/Toolnexus.Tests/McpDevAuth.cs`), not part of the library.
 
 ## Documentation
 
