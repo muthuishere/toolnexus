@@ -14,13 +14,13 @@
 
 ## 3. Port parity (handler wire + MCPServerAuth + dev AS + loadMcpSkills + conformance + tests + README)
 
-- [ ] 3.1 js
-- [ ] 3.2 python
-- [ ] 3.3 java
-- [ ] 3.4 csharp
-- [ ] 3.5 rust
-- [ ] 3.6 elixir (coverage gate ≥ 95%)
-- [ ] 3.7 clojure (plain .cljc, JVM + cljgo)
+- [x] 3.1 js
+- [x] 3.2 python
+- [x] 3.3 java
+- [x] 3.4 csharp
+- [x] 3.5 rust
+- [x] 3.6 elixir (coverage gate ≥ 95%)
+- [x] 3.7 clojure (plain .cljc, JVM + cljgo)
 
 ## 4. Verify
 
@@ -32,5 +32,5 @@
 ## 5. Docs
 
 - [x] 5.1 CHANGELOG `## Unreleased` entry, incl. what is not done
-- [ ] 5.2 Per-port README section (golang done; others with 3.x)
+- [x] 5.2 Per-port README section
 - [ ] 5.3 site API pages for the new symbols (not in this change)
