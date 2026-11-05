@@ -157,6 +157,36 @@ guide: <https://muthuishere.github.io/toolnexus/media/>.
 (doseq [f (:files res)] (println (:from f) (:mimeType f) (:url f)))
 ```
 
+## Agents via ACP
+
+A local coding agent that speaks ACP can be the model behind an ordinary client, with no
+per-agent code in the library (SPEC §8C). Three plain pieces:
+
+- `toolnexus.serve/as-mcp-server` serves your toolkit on `127.0.0.1` behind a fresh bearer
+  token: `{:url :token :close}`.
+- `toolnexus.acp/connect` starts the agent and passes `:mcp-servers`, `:session-meta`,
+  `:client-caps-meta` and `:model` through unchanged.
+- `toolnexus.acp/generate-stream` plugs into `create-in-process-client`'s `:generate-stream`, so
+  the agent's text reaches `run`'s `:on-event` sink as incremental `text` deltas (plus `thought`
+  and ACP `tool_call`/`tool_result` events, `:via "acp"`).
+
+```clojure
+(require '[toolnexus.acp :as acp] '[toolnexus.client :as client]
+         '[toolnexus.core :as tn] '[toolnexus.serve :as serve])
+
+(def tk  (tn/build {:skills "skills"}))
+(def srv (serve/as-mcp-server tk))
+(def a   (acp/connect ["my-agent" "acp"]
+                      {:mcp-servers [{:type "http" :name "toolnexus" :url (:url srv)
+                                      :headers [{:name "Authorization"
+                                                 :value (str "Bearer " (:token srv))}]}]}))
+(def c   (client/create-in-process-client {:model "agent" :generate-stream (acp/generate-stream a)}))
+(client/run c "What is my badge number?" {:on-event prn})
+(acp/close a) ((:close srv))
+```
+
+Which binary, flags and permissions an agent needs is the caller's recipe, not library API.
+
 ## Documentation
 
 Everything else — the full surface, with runnable examples — lives on the docs site:

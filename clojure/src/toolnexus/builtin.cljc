@@ -434,7 +434,7 @@
            vec)
       [])))
 
-(defn- child-pids
+(defn child-pids
   "Every live descendant of `root`, captured WHILE THE PARENT IS ALIVE — after it
   dies its children are reparented and are unreachable from its pid (measured,
   spikes/builtin-host-boundary/SPIKE.md §1.1)."
