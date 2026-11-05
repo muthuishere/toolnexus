@@ -5,6 +5,7 @@
 //! load_mcp_skills.
 #![cfg(feature = "serve")]
 
+mod common_dev_auth;
 mod common_mcp_handler;
 
 use std::collections::HashMap;
@@ -16,6 +17,7 @@ use serde_json::{Map, Value, json};
 use toolnexus::mcp_handler::*;
 use toolnexus::{Tool, ToolResult, define_tool};
 
+use common_dev_auth::{McpDevAuthOptions, McpDevAuthServer, start_mcp_dev_auth_server};
 use common_mcp_handler::{serve, tk};
 
 /// One 2026-07-28 request (headers + `_meta` stamped) ⇒ (status, headers, body).

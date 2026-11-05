@@ -1,5 +1,6 @@
 //! McpDevAuthServer — DEVELOPMENT AND TESTS ONLY. NEVER USE IN PRODUCTION.
-//! Port of `golang/mcp_devauth.go` (SPEC §7C.2).
+//! Port of `golang/internal/devauth/devauth.go` (SPEC §7C.2). Test tooling, not
+//! part of the library: bring your own authorization server in production.
 //!
 //! An in-process OAuth 2.1 authorization server that auto-approves every
 //! request as `dev-user` (no login, no consent): RFC 8414 metadata, JWKS,
@@ -31,9 +32,86 @@ use ring::signature::RsaKeyPair;
 use serde_json::{Map, Value, json};
 use tokio_util::sync::CancellationToken;
 
-use super::server_auth::{default_client, get_json, split_url};
-use super::v2026::percent_decode;
-use super::{McpBody, json_response, plain_error};
+use toolnexus::mcp_handler::McpBody;
+
+// Private copies of the library's crate-internal helpers this server uses.
+fn default_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .unwrap_or_default()
+}
+
+/// (scheme, authority, path) of an absolute URL, without a URL crate.
+fn split_url(u: &str) -> Option<(String, String, String)> {
+    let (scheme, rest) = u.split_once("://")?;
+    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let host = &rest[..end];
+    let tail = &rest[end..];
+    let path = &tail[..tail.find(['?', '#']).unwrap_or(tail.len())];
+    (!host.is_empty()).then(|| (scheme.to_owned(), host.to_owned(), path.to_owned()))
+}
+
+async fn get_json(hc: &reqwest::Client, u: &str) -> Result<Value, String> {
+    let resp = hc
+        .get(u)
+        .header("accept", "application/json")
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if resp.status() != reqwest::StatusCode::OK {
+        return Err(format!("GET {u}: HTTP {}", resp.status().as_u16()));
+    }
+    resp.json::<Value>().await.map_err(|e| e.to_string())
+}
+
+fn percent_decode(s: &str) -> Option<Vec<u8>> {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' {
+            let hex = |c: u8| (c as char).to_digit(16);
+            let (Some(h), Some(l)) = (
+                b.get(i + 1).copied().and_then(hex),
+                b.get(i + 2).copied().and_then(hex),
+            ) else {
+                return None;
+            };
+            out.push((h * 16 + l) as u8);
+            i += 3;
+        } else {
+            out.push(b[i]);
+            i += 1;
+        }
+    }
+    Some(out)
+}
+
+fn plain_error(status: StatusCode, msg: &str) -> Response<McpBody> {
+    let mut r = Response::new(Full::new(Bytes::from(format!("{msg}\n"))).boxed());
+    *r.status_mut() = status;
+    let h = r.headers_mut();
+    h.insert(
+        "content-type",
+        HeaderValue::from_static("text/plain; charset=utf-8"),
+    );
+    h.insert(
+        "x-content-type-options",
+        HeaderValue::from_static("nosniff"),
+    );
+    r
+}
+
+fn json_response(status: StatusCode, v: &Value) -> Response<McpBody> {
+    let mut body = serde_json::to_vec(v).unwrap_or_default();
+    body.push(b'\n');
+    let mut r = Response::new(Full::new(Bytes::from(body)).boxed());
+    *r.status_mut() = status;
+    r.headers_mut()
+        .insert("content-type", HeaderValue::from_static("application/json"));
+    r
+}
 
 /// Configures [`start_mcp_dev_auth_server`].
 #[derive(Clone, Default)]

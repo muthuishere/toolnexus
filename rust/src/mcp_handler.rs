@@ -16,14 +16,13 @@
 //! MCP 2026-07-28 (SPEC §7C.2, ADR 0040) is opt-in: list `"2026-07-28"` in
 //! [`McpHandlerConfig::protocol_versions`]. That stateless wire (server/discover,
 //! header validation, MRTR, the skills extension) lives in `v2026`; bearer-token
-//! protection in [`McpServerAuth`]; a DEV-ONLY authorization server in
-//! [`start_mcp_dev_auth_server`].
+//! protection in [`McpServerAuth`]. Bring your own authorization server; the
+//! auto-approving dev authorization server the suite uses is test tooling
+//! (`tests/common_dev_auth`), not part of the library.
 
-mod dev_auth;
 mod server_auth;
 mod v2026;
 
-pub use dev_auth::{McpDevAuthOptions, McpDevAuthServer, start_mcp_dev_auth_server};
 pub use server_auth::{McpAuthMetadata, McpPrincipal, McpServerAuth, VerifyTokenFn};
 pub use v2026::{MCP_PROTOCOL_2026, MCP_SKILLS_EXTENSION, McpSkill, McpSkillFile, load_mcp_skills};
 

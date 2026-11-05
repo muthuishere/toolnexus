@@ -148,10 +148,8 @@ let handler = tk.mcp_handler(McpHandlerConfig {
 let prm = auth.metadata(); // mount at /.well-known/oauth-protected-resource[/mcp]
 ```
 
-`start_mcp_dev_auth_server(McpDevAuthOptions { .. })` starts an in-process OAuth authorization
-server on `http://127.0.0.1:<random>` (pre-registered and Client ID Metadata Document clients,
-PKCE S256, refresh rotation, `mint(claims)` for tests). **It is for development and tests only —
-it approves everyone as `dev-user`; never run it in production.** No dynamic client registration.
+Bring your own authorization server: `McpServerAuth` verifies its tokens. The auto-approving dev authorization
+server the suite uses is test tooling (`tests/common_dev_auth`), not part of the library.
 
 ## Media generation
 
