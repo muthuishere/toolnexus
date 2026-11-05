@@ -26,6 +26,7 @@ import asyncio
 import inspect
 import json
 import os
+import queue as queue_mod
 import random
 import re
 import sys
@@ -2413,6 +2414,9 @@ class Client:
                 acc: dict[int, dict[str, str]] = {}
                 try:
                     async for line in self._sse_lines(url, req_headers, payload, deadline, cancel):
+                        if isinstance(line, dict):  # an in-process side-channel event
+                            yield line
+                            continue
                         if not line.startswith("data:"):
                             continue
                         data_str = line[5:].strip()
@@ -2688,6 +2692,12 @@ class Client:
         queue: asyncio.Queue = asyncio.Queue(maxsize=256)
         _SENTINEL = object()
         stop = threading.Event()
+        # An in-process streaming generate reports non-text events (thought,
+        # tool_call, tool_result) on a side channel — never through the SSE wire, so
+        # the loop never executes them; they reach the consumer as-is, in order.
+        bind = getattr(resp, "bind_events", None)
+        if callable(bind):
+            bind(lambda ev: loop.call_soon_threadsafe(queue.put_nowait, ev))
 
         # Transport-level abort (SPEC §7D python row): once the response is live we DO
         # hold something closeable, so an external cancel closes the streaming response
@@ -2941,71 +2951,188 @@ class InProcessTransport:
     share one adapter, never two copies of the request/response assembly.
     """
 
-    def __init__(self, generate: Callable[[dict[str, Any]], Any]) -> None:
+    def __init__(
+        self,
+        generate: Optional[Callable[[dict[str, Any]], Any]] = None,
+        generate_stream: Optional[Callable[[dict[str, Any], Callable[[dict[str, Any]], None]], Any]] = None,
+    ) -> None:
         self._generate = generate
+        self._generate_stream = generate_stream
 
-    def post(self, url: str, headers: dict[str, str], payload: dict[str, Any], timeout: float) -> dict[str, Any]:
-        request = {
+    @staticmethod
+    def _request(payload: dict[str, Any]) -> dict[str, Any]:
+        return {
             "messages": payload.get("messages") or [],
             "tools": payload.get("tools"),
             "model": payload.get("model"),
             "body": payload,
         }
-        answer = self._generate(request)
+
+    @staticmethod
+    def _checked(answer: Any) -> dict[str, Any]:
         if inspect.isawaitable(answer):  # pragma: no cover - a coroutine cannot be awaited here
             raise TypeError(
                 "toolnexus: create_in_process_client's `generate` must be synchronous — it runs on "
                 "the client's worker thread. Do async work before the call, or block inside it."
             )
-        answer = answer or {}
+        return answer or {}
 
-        tool_calls = answer.get("tool_calls") or answer.get("toolCalls")
-        message: dict[str, Any] = {"role": "assistant"}
-        if tool_calls:
-            message["tool_calls"] = [
-                {
-                    "id": c.get("id") or f"call_{i}",
-                    "type": "function",
-                    "function": {
-                        "name": c.get("name"),
-                        # A string is already encoded; anything else is encoded here so
-                        # a model author never has to think about the wire.
-                        "arguments": c["arguments"] if isinstance(c.get("arguments"), str)
-                        else json.dumps(c.get("arguments") or {}),
-                    },
-                }
-                for i, c in enumerate(tool_calls)
-            ]
+    def post(self, url: str, headers: dict[str, str], payload: dict[str, Any], timeout: float) -> dict[str, Any]:
+        request = self._request(payload)
+        if self._generate is not None:
+            answer = self._checked(self._generate(request))
         else:
-            message["content"] = answer.get("content") or ""
-
-        usage = answer.get("usage") or {}
-        prompt = usage.get("prompt_tokens", usage.get("promptTokens", 0)) or 0
-        completion = usage.get("completion_tokens", usage.get("completionTokens", 0)) or 0
+            # Only a streaming generate: a non-stream request runs it with a no-op emit.
+            answer = self._checked(self._generate_stream(request, lambda _ev: None))  # type: ignore[misc]
+        message = _in_process_message(answer)
         return {
             "choices": [{
                 "index": 0,
                 "message": message,
                 "finish_reason": "tool_calls" if "tool_calls" in message else "stop",
             }],
-            "usage": {
-                "prompt_tokens": prompt,
-                "completion_tokens": completion,
-                "total_tokens": usage.get("total_tokens", usage.get("totalTokens")) or prompt + completion,
-            },
+            "usage": _in_process_usage(answer),
         }
 
     def open(self, url: str, headers: dict[str, str], payload: dict[str, Any], timeout: float):  # noqa: A003
-        # A generate() returns a whole answer, so a stream would be one chunk pretending
-        # to be many. Content and delta-count assertions cannot tell that from a real
-        # stream, so refuse instead of degrading silently.
-        raise NotImplementedError(
-            "toolnexus: create_in_process_client does not support streaming — `generate` returns a "
-            "complete answer. Use the non-streaming run, or supply an http_transport that streams."
-        )
+        if self._generate_stream is None:
+            # A generate() returns a whole answer, so a stream would be one chunk pretending
+            # to be many. Content and delta-count assertions cannot tell that from a real
+            # stream, so refuse instead of degrading silently.
+            raise NotImplementedError(
+                "toolnexus: create_in_process_client does not support streaming — `generate` returns a "
+                "complete answer. Use the non-streaming run, supply `generate_stream`, or supply an "
+                "http_transport that streams."
+            )
+        return _InProcessStream(self._generate_stream, self._request(payload))
 
 
-def create_in_process_client(*, model: str, generate: Callable[[dict[str, Any]], Any], **options: Any) -> Client:
+def _in_process_message(answer: dict[str, Any]) -> dict[str, Any]:
+    tool_calls = answer.get("tool_calls") or answer.get("toolCalls")
+    message: dict[str, Any] = {"role": "assistant"}
+    if tool_calls:
+        message["tool_calls"] = [
+            {
+                "id": c.get("id") or f"call_{i}",
+                "type": "function",
+                "function": {
+                    "name": c.get("name"),
+                    # A string is already encoded; anything else is encoded here so
+                    # a model author never has to think about the wire.
+                    "arguments": c["arguments"] if isinstance(c.get("arguments"), str)
+                    else json.dumps(c.get("arguments") or {}),
+                },
+            }
+            for i, c in enumerate(tool_calls)
+        ]
+    else:
+        message["content"] = answer.get("content") or ""
+    return message
+
+
+def _in_process_usage(answer: dict[str, Any]) -> dict[str, Any]:
+    usage = answer.get("usage") or {}
+    prompt = usage.get("prompt_tokens", usage.get("promptTokens", 0)) or 0
+    completion = usage.get("completion_tokens", usage.get("completionTokens", 0)) or 0
+    return {
+        "prompt_tokens": prompt,
+        "completion_tokens": completion,
+        "total_tokens": usage.get("total_tokens", usage.get("totalTokens")) or prompt + completion,
+    }
+
+
+class _InProcessStream:
+    """The live "response" of a streaming in-process generate (SPEC §8 'In-process
+    models'). ``generate_stream`` runs on its own thread; each non-empty text event
+    becomes one OpenAI ``delta.content`` SSE chunk the moment it is emitted. Non-text
+    events (thought / tool_call / tool_result reported by the model) never touch the
+    wire — the loop must never execute them — and go to the side sink bound by
+    ``Client._sse_lines`` straight to the stream consumer, in emit order. After the
+    generate returns: tool calls -> one ``tool_calls`` delta, else (when no text was
+    emitted) the content as one delta; then finish_reason, usage and ``[DONE]``."""
+
+    def __init__(self, generate_stream: Callable[..., Any], request: dict[str, Any]) -> None:
+        self._q: "queue_mod.Queue[Any]" = queue_mod.Queue()
+        self._sink: Optional[Callable[[dict[str, Any]], None]] = None
+        self._closed = threading.Event()
+        self._gs = generate_stream
+        self._request = request
+        threading.Thread(target=self._run, name="in-process-stream", daemon=True).start()
+
+    @staticmethod
+    def _sse(chunk: dict[str, Any]) -> bytes:
+        return ("data: " + json.dumps(chunk) + "\n\n").encode("utf-8")
+
+    def _chunk(self, delta: dict[str, Any], finish: Optional[str] = None) -> bytes:
+        return self._sse({"choices": [{"index": 0, "delta": delta, "finish_reason": finish}]})
+
+    def _run(self) -> None:
+        texted = False
+
+        def emit(ev: dict[str, Any]) -> None:
+            nonlocal texted
+            if self._closed.is_set() or not isinstance(ev, dict):
+                return
+            if ev.get("type") == "text":
+                delta = ev.get("delta")
+                if delta:
+                    texted = True
+                    self._q.put(self._chunk({"content": str(delta)}))
+                return
+            if ev.get("type"):
+                self._q.put(dict(ev))
+
+        try:
+            answer = InProcessTransport._checked(self._gs(self._request, emit))
+            message = _in_process_message(answer)
+            finish = "stop"
+            if message.get("tool_calls"):
+                finish = "tool_calls"
+                self._q.put(self._chunk(
+                    {"role": "assistant", "tool_calls": [{"index": i, **tc} for i, tc in enumerate(message["tool_calls"])]}
+                ))
+            elif not texted and message.get("content"):
+                self._q.put(self._chunk({"role": "assistant", "content": message["content"]}))
+            self._q.put(self._chunk({}, finish))
+            self._q.put(self._sse({"choices": [], "usage": _in_process_usage(answer)}))
+            self._q.put(b"data: [DONE]\n\n")
+            self._q.put(None)
+        except BaseException as e:  # noqa: BLE001 — surfaced to the reader
+            self._q.put(e)
+
+    def bind_events(self, sink: Callable[[dict[str, Any]], None]) -> None:
+        """Route non-text events to ``sink`` (called on the reading thread, in order)."""
+        self._sink = sink
+
+    def read1(self, n: int = -1) -> bytes:
+        while True:
+            if self._closed.is_set():
+                return b""
+            item = self._q.get()
+            if item is None:
+                return b""
+            if isinstance(item, BaseException):
+                raise item
+            if isinstance(item, dict):
+                if self._sink is not None:
+                    self._sink(item)
+                continue
+            return item
+
+    read = read1
+
+    def close(self) -> None:
+        self._closed.set()
+        self._q.put(None)
+
+
+def create_in_process_client(
+    *,
+    model: str,
+    generate: Optional[Callable[[dict[str, Any]], Any]] = None,
+    generate_stream: Optional[Callable[[dict[str, Any], Callable[[dict[str, Any]], None]], Any]] = None,
+    **options: Any,
+) -> Client:
     """A client backed by a model running IN THIS PROCESS — no server, no socket, and
     no HTTP types to construct.
 
@@ -3016,9 +3143,21 @@ def create_in_process_client(*, model: str, generate: Callable[[dict[str, Any]],
     ``generate(request) -> {"content": ...}`` finishes the run;
     ``-> {"tool_calls": [{"name": ..., "arguments": {...}}]}`` asks for tools.
     ``usage`` is optional. No ``base_url``, ``api_key`` or ``style`` — there is no wire.
+
+    ``generate_stream(request, emit) -> answer`` is the streaming form: ``emit`` takes
+    ``{"type": "text", "delta": ...}`` events, each delivered to :meth:`Client.stream`
+    as it is emitted, and any other event (``thought``, ``tool_call``,
+    ``tool_result``) passed straight through to the consumer, never executed. With
+    both set, ``generate`` serves non-stream calls; with only ``generate_stream``, a
+    non-stream call runs it with a no-op ``emit``. With only ``generate``,
+    :meth:`Client.stream` refuses.
     """
-    if not callable(generate):
+    if generate is not None and not callable(generate):
         raise TypeError("toolnexus: create_in_process_client requires a callable `generate`")
+    if generate_stream is not None and not callable(generate_stream):
+        raise TypeError("toolnexus: create_in_process_client's `generate_stream` must be callable")
+    if generate is None and generate_stream is None:
+        raise TypeError("toolnexus: create_in_process_client requires a callable `generate` or `generate_stream`")
     for reserved in ("base_url", "api_key", "style", "http_transport"):
         if reserved in options:
             raise TypeError(
@@ -3033,6 +3172,6 @@ def create_in_process_client(*, model: str, generate: Callable[[dict[str, Any]],
         # An in-process model has no endpoint to authenticate to, so the host must never need a key — but the client resolves one from the environment and fails when it finds none. A sentinel keeps that resolution from ever running. Caught by CI, which has no OPENROUTER_API_KEY; every local run passed because a developer shell has one.
         api_key="in-process",
         model=model,
-        http_transport=InProcessTransport(generate),
+        http_transport=InProcessTransport(generate, generate_stream),
         **options,
     )
