@@ -8,6 +8,8 @@ GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
 
 ## Unreleased
 
+## 0.25.0 — 2026-11-06
+
 **Docs: an "In-process client" section with copy-pasteable recipes for driving coding agents and
 CLIs yourself.** Driving a vendor CLI or ACP agent is not something toolnexus maintains as library
 surface; agents change their flags too often. Instead the new section shows how to do it on the
