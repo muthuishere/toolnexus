@@ -8,6 +8,8 @@ from __future__ import annotations
 from .acp import (
     ACPClient,
     ACPError,
+    ACPExitedError,
+    ACPLaunchError,
     ACPOptions,
     ACPPermissionTimeoutError,
     load_acp,
@@ -176,6 +178,7 @@ from .prompt_cache import PromptCacheOptions
 from .tool_tiers import TIER_CORE, TIER_DEFERRED, TIER_LISTED, ToolTier, ToolTierOptions
 from .tool_concurrency import DEFAULT_MAX_TOOL_CONCURRENCY, is_concurrency_safe, resolve_max_tool_concurrency
 from .mcp_serve import (
+    LoopbackMCPServer,
     MCPServeConfig,
     OnCall,
     build_mcp_server,
@@ -256,6 +259,8 @@ __all__ = [
     "ACPError",
     "ACPOptions",
     "ACPPermissionTimeoutError",
+    "ACPExitedError",
+    "ACPLaunchError",
     "load_acp",
     # types
     "JSONSchema",
@@ -356,6 +361,7 @@ __all__ = [
     "OnTask",
     # mcp serve (inbound)
     "MCPServeConfig",
+    "LoopbackMCPServer",
     "OnCall",
     "build_mcp_server",
     "exposed_mcp_tools",

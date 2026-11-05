@@ -8,6 +8,39 @@ GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
 
 ## Unreleased
 
+**Let any coding agent call your toolkit, through three vendor-neutral pieces (all eight ports).**
+toolnexus does not ship a client per coding agent: which binary, flags, login and quirks an agent
+needs changes on the vendor's schedule, so those live as **recipes in the docs**, written on top of
+what the library now provides (ADR 0041, SPEC §8C):
+
+- **Your in-process model can stream.** Give `createInProcessClient` a streaming generate —
+  `generateStream(req, emit)` (Go `GenerateStream`, python `generate_stream`, elixir
+  `:generate_stream`, clojure `:generate-stream`, …) — and `stream` yields each text you `emit` as it
+  happens. Before, only Go had this and every other port refused `stream` on an in-process client.
+  A new **`thought`** stream event carries model reasoning; `tool_call`/`tool_result` events with
+  `via: "acp"` report tools an agent ran itself — passed to you, never executed by your loop. A plain
+  `generate` still refuses to stream, because one chunk pretending to be a stream is the bug this
+  prevents. Clojure has no stream API; there the events go to `run`'s `:on-event` as emitted.
+- **The ACP client passes your configuration through untouched.** `loadACP` now sends the
+  `mcpServers` you give it verbatim (it always sent `[]` before), `sessionMeta` as `session/new`
+  `_meta`, `clientCapsMeta` as `initialize` `clientCapabilities._meta`, and passes `model` through
+  (`session/set_config_option`, then `session/set_model`). It streams every `agent_message_chunk` the
+  moment it arrives in every port (was Go only), fails a request as soon as the agent exits instead of
+  waiting out the timeout, answers agent requests it does not implement with `-32601` so the agent
+  never hangs, declares `terminal:false`, and tears down the agent's whole process group on `close`.
+- **`toolkit.asMcpServer()` → `{url, token, close}`** serves your toolkit (MCP servers, skills,
+  your own tools) on a loopback port behind a fresh bearer token, so an agent you launch can call it
+  and other local processes cannot. You put `url` and the token into the agent's `mcpServers` entry.
+
+Pinned without any vendor binary in `conformance/acp-client/cases.json` (streaming that is really
+incremental, verbatim passthrough, agent exit, unknown requests, the server's 401/404/405 rules).
+
+Not in the library, by decision: per-vendor styles or enums, a one-shot CLI transport for agents
+without ACP (write a `generate` that runs your CLI — that is what the seam is for), vendor
+permission allow-lists or prompt hints, a stdio-to-HTTP MCP bridge, model lists. The default
+permission policy is unchanged (first allow option); a docs recipe shows how to allow only your
+toolkit's tools.
+
 **Fixed (python only): `toolkit.serve(mcp={})` now exposes the toolkit's tools, and `GET /mcp` answers
 `405` instead of hanging.** An empty MCP serve profile was treated as absent, so `/mcp` was mounted
 but advertised no tools; it now means "present with defaults" (`name: "toolnexus"`, every tool), as

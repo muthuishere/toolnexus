@@ -18,6 +18,8 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
+import java.util.function.BiFunction;
+import java.util.function.Consumer;
 import java.util.function.Function;
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLParameters;
@@ -108,6 +110,14 @@ public final class InProcess {
     public static final class Options {
         public String model;
         public Function<Request, Response> generate;
+        /**
+         * A streaming model: call {@code emit} with {@link LlmClient.StreamEvent}s as they are
+         * produced, then return the final answer. Text events become content deltas the instant
+         * they are emitted; any other event (a thought, an agent's tool narration) goes straight to
+         * the stream consumer and is never executed by the loop. Either this or {@link #generate}
+         * is required; with both, {@code generate} serves {@code run()} and this serves streams.
+         */
+        public BiFunction<Request, Consumer<LlmClient.StreamEvent>, Response> generateStream;
         public String systemPrompt;
         public int maxTurns;
         public int maxToolConcurrency;
@@ -125,6 +135,7 @@ public final class InProcess {
 
         public Options model(String v) { this.model = v; return this; }
         public Options generate(Function<Request, Response> v) { this.generate = v; return this; }
+        public Options generateStream(BiFunction<Request, Consumer<LlmClient.StreamEvent>, Response> v) { this.generateStream = v; return this; }
         public Options systemPrompt(String v) { this.systemPrompt = v; return this; }
         public Options maxTurns(int v) { this.maxTurns = v; return this; }
         public Options maxToolConcurrency(int v) { this.maxToolConcurrency = v; return this; }
@@ -148,16 +159,21 @@ public final class InProcess {
 
     /** Build a client backed by a model running IN THIS PROCESS. */
     public static LlmClient createClient(Options opts) {
-        if (opts == null || opts.generate == null) {
-            throw new IllegalArgumentException("toolnexus: InProcess.createClient requires a `generate` function");
+        if (opts == null || (opts.generate == null && opts.generateStream == null)) {
+            throw new IllegalArgumentException("toolnexus: InProcess.createClient requires a `generate` (or `generateStream`) function");
         }
+        return createClient(opts, new GenerateBackedHttpClient(opts.generate, opts.generateStream));
+    }
+
+    /** {@link #createClient(Options)} over a caller-built shim. */
+    static LlmClient createClient(Options opts, HttpClient http) {
         LlmClient.Options o = new LlmClient.Options();
         o.baseUrl = BASE_URL;
         o.style = "openai";
         // An in-process model has no endpoint to authenticate to, so the host must never need a key — but the client resolves one from the environment and fails when it finds none. A sentinel keeps that resolution from ever running. Caught by CI, which has no OPENROUTER_API_KEY; every local run passed because a developer shell has one.
         o.apiKey = "in-process";
         o.model = opts.model;
-        o.httpClient = new GenerateBackedHttpClient(opts.generate);
+        o.httpClient = http;
         o.systemPrompt = opts.systemPrompt;
         if (opts.maxTurns > 0) o.maxTurns = opts.maxTurns;
         if (opts.maxToolConcurrency > 0) o.maxToolConcurrency = opts.maxToolConcurrency;
@@ -185,24 +201,36 @@ public final class InProcess {
      */
     public static final class GenerateBackedHttpClient extends HttpClient {
         private final Function<Request, Response> generate;
+        private final BiFunction<Request, Consumer<LlmClient.StreamEvent>, Response> generateStream;
 
-        public GenerateBackedHttpClient(Function<Request, Response> generate) { this.generate = generate; }
+        public GenerateBackedHttpClient(Function<Request, Response> generate) { this(generate, null); }
+
+        /** Either may be null (not both): see {@link Options#generateStream}. */
+        public GenerateBackedHttpClient(Function<Request, Response> generate,
+                                        BiFunction<Request, Consumer<LlmClient.StreamEvent>, Response> generateStream) {
+            this.generate = generate;
+            this.generateStream = generateStream;
+        }
 
         @Override @SuppressWarnings("unchecked")
         public <T> HttpResponse<T> send(HttpRequest req, HttpResponse.BodyHandler<T> handler) throws IOException {
             Map<String, Object> body = readBody(req);
-
-            // A generate returns a whole answer, so a stream would be one chunk pretending to be
-            // many — indistinguishable from a real stream by content or delta count. Refuse.
-            if (Boolean.TRUE.equals(body.get("stream"))) {
-                throw new IOException("toolnexus: InProcess.createClient does not support streaming — "
-                        + "`generate` returns a complete answer. Use run(), or supply an httpClient that streams.");
-            }
-
             List<Object> messages = asList(body.get("messages"));
             List<Object> tools = asList(body.get("tools"));
-            Response answer = generate.apply(
-                    new Request(messages, tools, String.valueOf(body.get("model")), body));
+            Request request = new Request(messages, tools, String.valueOf(body.get("model")), body);
+
+            if (Boolean.TRUE.equals(body.get("stream"))) {
+                // A plain generate returns a whole answer, so a stream would be one chunk pretending
+                // to be many — indistinguishable from a real stream by content or delta count. Refuse.
+                if (generateStream == null) {
+                    throw new IOException("toolnexus: InProcess.createClient does not support streaming — "
+                            + "`generate` returns a complete answer. Use run(), or supply an httpClient that streams.");
+                }
+                return (HttpResponse<T>) streamResponse(req, request);
+            }
+
+            Response answer = generate != null ? generate.apply(request)
+                    : generateStream.apply(request, ev -> {});
             if (answer == null) answer = Response.content("");
 
             Map<String, Object> message = new LinkedHashMap<>();
@@ -245,6 +273,125 @@ public final class InProcess {
             envelope.put("usage", usage);
 
             return (HttpResponse<T>) new JsonResponse(req, Json.stringify(envelope));
+        }
+
+        private static final Object END = new Object();
+
+        private static String chunk(Map<String, Object> delta, String finish) {
+            Map<String, Object> ch = new LinkedHashMap<>();
+            ch.put("index", 0);
+            ch.put("delta", delta);
+            if (finish != null) ch.put("finish_reason", finish);
+            Map<String, Object> c = new LinkedHashMap<>();
+            c.put("choices", List.of(ch));
+            return "data: " + Json.stringify(c);
+        }
+
+        /**
+         * Runs {@code generateStream} on its own thread and answers with an OpenAI SSE body whose
+         * lines are produced AS the model emits: each text event is a content delta the instant it
+         * is emitted; any other event is queued in order and handed to the side channel (the
+         * stream consumer) on the reading thread, never put on the wire. After the generate
+         * returns: tool calls (one delta), else the content when no text was emitted; then the
+         * finish chunk, usage and [DONE].
+         */
+        private HttpResponse<java.util.stream.Stream<String>> streamResponse(HttpRequest req, Request request) {
+            Consumer<LlmClient.StreamEvent> side = STREAM_SIDE.get();
+            java.util.concurrent.LinkedBlockingQueue<Object> q = new java.util.concurrent.LinkedBlockingQueue<>();
+            Thread.ofVirtual().name("toolnexus-inprocess-stream").start(() -> {
+                boolean[] sawText = {false};
+                try {
+                    Response answer = generateStream.apply(request, ev -> {
+                        if (ev == null) return;
+                        if (ev.type() == LlmClient.StreamEvent.Kind.TEXT) {
+                            if (ev.delta() != null && !ev.delta().isEmpty()) {
+                                sawText[0] = true;
+                                Map<String, Object> d = new LinkedHashMap<>();
+                                d.put("content", ev.delta());
+                                q.add(chunk(d, null));
+                            }
+                            return;
+                        }
+                        q.add(ev);
+                    });
+                    if (answer == null) answer = Response.content("");
+                    String finish = "stop";
+                    if (answer.toolCalls != null && !answer.toolCalls.isEmpty()) {
+                        List<Object> calls = new ArrayList<>();
+                        for (int i = 0; i < answer.toolCalls.size(); i++) {
+                            ToolCall c = answer.toolCalls.get(i);
+                            Map<String, Object> fn = new LinkedHashMap<>();
+                            fn.put("name", c.name);
+                            fn.put("arguments", encodeArgs(c.arguments));
+                            Map<String, Object> call = new LinkedHashMap<>();
+                            call.put("index", i);
+                            call.put("id", c.id != null ? c.id : "call_" + i);
+                            call.put("type", "function");
+                            call.put("function", fn);
+                            calls.add(call);
+                        }
+                        Map<String, Object> d = new LinkedHashMap<>();
+                        d.put("tool_calls", calls);
+                        q.add(chunk(d, null));
+                        finish = "tool_calls";
+                    } else if (!sawText[0] && answer.content != null && !answer.content.isEmpty()) {
+                        Map<String, Object> d = new LinkedHashMap<>();
+                        d.put("content", answer.content);
+                        q.add(chunk(d, null));
+                    }
+                    q.add(chunk(new LinkedHashMap<>(), finish));
+                    if (answer.usage != null) {
+                        Usage u = answer.usage;
+                        Map<String, Object> usage = new LinkedHashMap<>();
+                        usage.put("prompt_tokens", u.promptTokens);
+                        usage.put("completion_tokens", u.completionTokens);
+                        usage.put("total_tokens", u.totalTokens > 0 ? u.totalTokens : u.promptTokens + u.completionTokens);
+                        Map<String, Object> c = new LinkedHashMap<>();
+                        c.put("choices", List.of());
+                        c.put("usage", usage);
+                        q.add("data: " + Json.stringify(c));
+                    }
+                    q.add("data: [DONE]");
+                } catch (Throwable t) {
+                    q.add(t);
+                } finally {
+                    q.add(END);
+                }
+            });
+            java.util.Iterator<String> it = new java.util.Iterator<>() {
+                private String next;
+                private boolean ended;
+
+                @Override public boolean hasNext() {
+                    while (next == null && !ended) {
+                        Object item;
+                        try {
+                            item = q.take();
+                        } catch (InterruptedException e) {
+                            Thread.currentThread().interrupt();
+                            throw new RuntimeException("toolnexus: in-process stream interrupted", e);
+                        }
+                        if (item == END) ended = true;
+                        else if (item instanceof String line) next = line;
+                        else if (item instanceof LlmClient.StreamEvent ev) {
+                            if (side != null) side.accept(ev);
+                        } else if (item instanceof RuntimeException re) throw re;
+                        else if (item instanceof Error er) throw er;
+                        else if (item instanceof Throwable t) throw new RuntimeException(t.getMessage(), t);
+                    }
+                    return next != null;
+                }
+
+                @Override public String next() {
+                    if (!hasNext()) throw new java.util.NoSuchElementException();
+                    String s = next;
+                    next = null;
+                    return s;
+                }
+            };
+            java.util.stream.Stream<String> lines = java.util.stream.StreamSupport.stream(
+                    java.util.Spliterators.spliteratorUnknownSize(it, java.util.Spliterator.ORDERED), false);
+            return new LinesResponse(req, lines);
         }
 
         @SuppressWarnings("unchecked")
@@ -300,6 +447,23 @@ public final class InProcess {
                 HttpRequest r, HttpResponse.BodyHandler<T> h, HttpResponse.PushPromiseHandler<T> p) {
             return sendAsync(r, h);
         }
+    }
+
+    /** Set by the client's streaming loop around its model calls: where non-text events go. */
+    static final ThreadLocal<Consumer<LlmClient.StreamEvent>> STREAM_SIDE = new ThreadLocal<>();
+
+    record LinesResponse(HttpRequest req, java.util.stream.Stream<String> lines)
+            implements HttpResponse<java.util.stream.Stream<String>> {
+        @Override public int statusCode() { return 200; }
+        @Override public java.util.stream.Stream<String> body() { return lines; }
+        @Override public HttpRequest request() { return req; }
+        @Override public HttpHeaders headers() {
+            return HttpHeaders.of(Map.of("content-type", List.of("text/event-stream")), (a, b) -> true);
+        }
+        @Override public Optional<HttpResponse<java.util.stream.Stream<String>>> previousResponse() { return Optional.empty(); }
+        @Override public Optional<SSLSession> sslSession() { return Optional.empty(); }
+        @Override public URI uri() { return req.uri(); }
+        @Override public HttpClient.Version version() { return HttpClient.Version.HTTP_1_1; }
     }
 
     record JsonResponse(HttpRequest req, String payload) implements HttpResponse<String> {

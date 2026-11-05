@@ -71,6 +71,73 @@ defmodule Toolnexus.McpServe do
     end
   end
 
+  @doc false
+  # SPEC §8C `asMcpServer`: the §7C endpoint on a loopback ephemeral port
+  # behind a per-call bearer token. See `Toolnexus.Toolkit.as_mcp_server/2`.
+  @spec serve_loopback([Tool.t()], map()) :: %{
+          url: String.t(),
+          token: String.t(),
+          close: (-> :ok)
+        }
+  def serve_loopback(tools, cfg) do
+    token = Base.encode16(:crypto.strong_rand_bytes(32), case: :lower)
+    exposed = exposed_tools(tools, cfg)
+
+    {:ok, pid} =
+      Bandit.start_link(
+        plug: {__MODULE__.Guard, %{token: token, tools: exposed, cfg: cfg}},
+        scheme: :http,
+        ip: {127, 0, 0, 1},
+        port: 0,
+        startup_log: false
+      )
+
+    Process.unlink(pid)
+    {:ok, {_ip, port}} = ThousandIsland.listener_info(pid)
+
+    close = fn ->
+      try do
+        if Process.alive?(pid), do: Supervisor.stop(pid, :normal, 5_000)
+      catch
+        :exit, _ -> :ok
+      end
+
+      :ok
+    end
+
+    %{url: "http://127.0.0.1:#{port}/mcp", token: token, close: close}
+  end
+
+  defmodule Guard do
+    @moduledoc false
+    @behaviour Plug
+    import Plug.Conn
+
+    def init(st), do: st
+
+    def call(conn, st) do
+      cond do
+        conn.request_path != "/mcp" ->
+          send_resp(conn, 404, "not found")
+
+        not Plug.Crypto.secure_compare(auth(conn), "Bearer " <> st.token) ->
+          conn
+          |> put_resp_header("www-authenticate", "Bearer")
+          |> send_resp(401, "unauthorized")
+
+        true ->
+          Toolnexus.McpServe.handle_http(conn, st.tools, st.cfg, nil)
+      end
+    end
+
+    defp auth(conn) do
+      case get_req_header(conn, "authorization") do
+        [v | _] -> v
+        _ -> ""
+      end
+    end
+  end
+
   # --- JSON-RPC method dispatch (§7C) ------------------------------------------
 
   defp handle_rpc(id, "initialize", params, _tools, cfg, _on_call) do

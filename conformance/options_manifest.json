@@ -427,6 +427,52 @@
       }
     ]
   },
+  "acpOptions": {
+    "_doc": "SPEC §8C ACPOptions passthrough fields (ADR 0041).",
+    "files": {
+      "js": "js/src/acp.ts",
+      "python": "python/src/toolnexus/acp.py",
+      "go": "golang/acp.go",
+      "java": "java/src/main/java/io/github/muthuishere/toolnexus/acp/AcpClient.java",
+      "csharp": "csharp/src/Toolnexus/Acp/AcpClient.cs",
+      "elixir": "elixir/lib/toolnexus/acp.ex",
+      "clojure": "clojure/src/toolnexus/acp.cljc",
+      "rust": "rust/src/acp.rs"
+    },
+    "options": [
+      {
+        "name": "mcpServers",
+        "aliases": [
+          "mcpServers",
+          "mcp_servers"
+        ],
+        "tier": "core"
+      },
+      {
+        "name": "sessionMeta",
+        "aliases": [
+          "sessionMeta",
+          "session_meta"
+        ],
+        "tier": "core"
+      },
+      {
+        "name": "clientCapsMeta",
+        "aliases": [
+          "clientCapsMeta",
+          "client_caps_meta"
+        ],
+        "tier": "core"
+      },
+      {
+        "name": "model",
+        "aliases": [
+          "model"
+        ],
+        "tier": "core"
+      }
+    ]
+  },
   "portTiers": {
     "_doc": "The tier a port is HELD TO, declared here and nowhere else. A port declaring its own tier is a self-graded exam: the claim must live in the shared contract, where changing it is a visible diff reviewed by the other ports. 'full' = every option. 'core' = the SPEC §0 conformance contract only; full-tier options are permitted absences, counted and printed on every run so the debt can never go quiet.",
     "js": "full",

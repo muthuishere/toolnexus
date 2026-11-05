@@ -223,6 +223,82 @@ public final class McpServe {
         return spec.build();
     }
 
+    /**
+     * A running {@link Toolkit#asMcpServer} endpoint (SPEC §8C): {@code url} is
+     * {@code http://127.0.0.1:<port>/mcp}; every request must carry
+     * {@code Authorization: Bearer <token>}. {@link #close()} is idempotent. The token is never logged.
+     */
+    public static final class LocalServer implements AutoCloseable {
+        private final String url;
+        private final String token;
+        private final com.sun.net.httpserver.HttpServer http;
+        private final java.util.concurrent.ExecutorService executor;
+        private final java.util.concurrent.atomic.AtomicBoolean closed = new java.util.concurrent.atomic.AtomicBoolean();
+
+        private LocalServer(String url, String token, com.sun.net.httpserver.HttpServer http,
+                            java.util.concurrent.ExecutorService executor) {
+            this.url = url;
+            this.token = token;
+            this.http = http;
+            this.executor = executor;
+        }
+
+        public String url() { return url; }
+        public String token() { return token; }
+
+        @Override
+        public void close() {
+            if (!closed.compareAndSet(false, true)) return;
+            http.stop(0);
+            executor.shutdownNow();
+        }
+
+        @Override
+        public String toString() { return "McpServe.LocalServer[url=" + url + "]"; }
+    }
+
+    /** Serves {@code tools} on loopback behind a fresh bearer token — {@link Toolkit#asMcpServer}. */
+    static LocalServer serveLocal(List<Tool> tools, MCPServeConfig cfg) throws IOException {
+        JdkStatelessHttpTransport transport = new JdkStatelessHttpTransport();
+        buildStatelessServer(transport, exposedMcpTools(tools, cfg), cfg, null);
+        byte[] raw = new byte[32];
+        new java.security.SecureRandom().nextBytes(raw);
+        String token = java.util.HexFormat.of().formatHex(raw);
+        byte[] want = ("Bearer " + token).getBytes(StandardCharsets.UTF_8);
+        var http = com.sun.net.httpserver.HttpServer.create(
+                new java.net.InetSocketAddress(java.net.InetAddress.getLoopbackAddress(), 0), 0);
+        http.createContext("/", ex -> {
+            try {
+                if (!"/mcp".equals(ex.getRequestURI().getPath())) {
+                    ex.sendResponseHeaders(404, -1);
+                    return;
+                }
+                String got = ex.getRequestHeaders().getFirst("Authorization");
+                if (got == null || !java.security.MessageDigest.isEqual(got.getBytes(StandardCharsets.UTF_8), want)) {
+                    byte[] body = "unauthorized\n".getBytes(StandardCharsets.UTF_8);
+                    ex.getResponseHeaders().set("WWW-Authenticate", "Bearer");
+                    ex.getResponseHeaders().set("Content-Type", "text/plain; charset=utf-8");
+                    ex.sendResponseHeaders(401, body.length);
+                    try (OutputStream os = ex.getResponseBody()) {
+                        os.write(body);
+                    }
+                    return;
+                }
+                transport.handle(ex);
+            } finally {
+                ex.close();
+            }
+        });
+        var executor = java.util.concurrent.Executors.newCachedThreadPool(r -> {
+            Thread t = new Thread(r, "toolnexus-local-mcp");
+            t.setDaemon(true);
+            return t;
+        });
+        http.setExecutor(executor);
+        http.start();
+        return new LocalServer("http://127.0.0.1:" + http.getAddress().getPort() + "/mcp", token, http, executor);
+    }
+
     // -----------------------------------------------------------------------
     // streamable-HTTP transport shim — bridges the JDK HttpServer to the SDK's
     // stateless MCP handler (the SDK's own HTTP transports are servlet-based;

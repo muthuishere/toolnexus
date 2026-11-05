@@ -16,7 +16,11 @@ Mirrors the JS reference (``js/src/mcpserve.ts``).
 from __future__ import annotations
 
 import asyncio
+import hmac
 import inspect
+import secrets
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Awaitable, Callable, Optional, Union
 
 import anyio
@@ -247,3 +251,106 @@ async def serve_mcp_http_request(
         tg.cancel_scope.cancel()
 
     return captured["status"], captured["headers"], bytes(captured["body"])
+
+
+# ---------------------------------------------------------------------------
+# Loopback + bearer — the toolkit as an MCP server for a local agent (SPEC §8C).
+# ---------------------------------------------------------------------------
+
+
+class _LoopThread:
+    """A private event loop on a daemon thread: runs the MCP request handling."""
+
+    def __init__(self) -> None:
+        self.loop = asyncio.new_event_loop()
+        self._t = threading.Thread(target=self.loop.run_forever, name="toolnexus-mcp-loopback", daemon=True)
+        self._t.start()
+
+    def run(self, coro: Any) -> Any:
+        return asyncio.run_coroutine_threadsafe(coro, self.loop).result()
+
+    def stop(self) -> None:
+        self.loop.call_soon_threadsafe(self.loop.stop)
+        self._t.join(timeout=3)
+
+
+class LoopbackMCPServer:
+    """The handle :meth:`Toolkit.as_mcp_server` returns: ``url``
+    (``http://127.0.0.1:<port>/mcp``), ``token`` (64 lowercase hex chars — never
+    logged) and an idempotent :meth:`close`."""
+
+    def __init__(self, tools: Callable[[], list[Tool]], cfg: Optional[MCPServeConfig] = None) -> None:
+        self.token: str = secrets.token_hex(32)
+        loop = _LoopThread()
+        self._loop: Optional[_LoopThread] = loop
+        want = ("Bearer " + self.token).encode("latin-1")
+        cfg = dict(cfg or {})
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *a: Any) -> None:  # never log (the token is in headers)
+                pass
+
+            def _empty(self, status: int, extra: Optional[dict[str, str]] = None) -> None:
+                self.send_response(status)
+                for k, v in (extra or {}).items():
+                    self.send_header(k, v)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            def _handle(self) -> None:
+                if self.path != "/mcp" and not self.path.startswith("/mcp?"):
+                    self._empty(404)
+                    return
+                got = (self.headers.get("Authorization") or "").encode("latin-1", errors="replace")
+                if not hmac.compare_digest(got, want):
+                    self._empty(401, {"WWW-Authenticate": "Bearer"})
+                    return
+                if self.command != "POST":
+                    # Stateless: no server-sent stream to hold open, no session to DELETE.
+                    self._empty(405, {"Allow": "POST"})
+                    return
+                length = int(self.headers.get("Content-Length", 0) or 0)
+                data = self.rfile.read(length) if length else b""
+                headers = [(k.lower().encode("latin-1"), v.encode("latin-1")) for k, v in self.headers.items()]
+                try:
+                    server = build_mcp_server(exposed_mcp_tools(tools(), cfg), cfg)
+                    status, rh, rb = loop.run(serve_mcp_http_request(server, "POST", "/mcp", headers, data))
+                except Exception:  # noqa: BLE001
+                    self._empty(500)
+                    return
+                self.send_response(status)
+                for hk, hv in rh:
+                    if hk.lower() == b"content-length":
+                        continue
+                    self.send_header(hk.decode("latin-1"), hv.decode("latin-1"))
+                self.send_header("Content-Length", str(len(rb)))
+                self.end_headers()
+                if rb:
+                    self.wfile.write(rb)
+
+            do_POST = _handle  # noqa: N815
+            do_GET = _handle  # noqa: N815
+            do_DELETE = _handle  # noqa: N815
+            do_PUT = _handle  # noqa: N815
+            do_PATCH = _handle  # noqa: N815
+
+        httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        httpd.daemon_threads = True
+        self._httpd: Optional[ThreadingHTTPServer] = httpd
+        self.url: str = f"http://127.0.0.1:{httpd.server_address[1]}/mcp"
+        self._lock = threading.Lock()
+        threading.Thread(target=httpd.serve_forever, name="toolnexus-mcp-loopback-http", daemon=True).start()
+
+    def close(self) -> None:
+        """Stop the listener. Idempotent."""
+        with self._lock:
+            httpd, loop = self._httpd, self._loop
+            self._httpd, self._loop = None, None
+        if httpd is not None:
+            httpd.shutdown()
+            httpd.server_close()
+        if loop is not None:
+            loop.stop()
+
+    def __repr__(self) -> str:  # never show the token
+        return f"LoopbackMCPServer(url={self.url!r})"

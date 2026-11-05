@@ -170,6 +170,14 @@ for _, f := range res.Files { fmt.Println(f.From, f.MimeType, f.URL) }
 In the typed inputs a zero value means "not set" (`Seed: 0` is never sent). To send a real
 zero, use `media.Generate(ctx, "image", map[string]any{"prompt": "…", "seed": 0}, nil)`.
 
+## Agents via ACP
+
+toolnexus ships no per-agent client. Three vendor-neutral pieces compose instead (SPEC §8C):
+`tk.AsMCPServer(nil)` serves your toolkit on `127.0.0.1` behind a bearer token, `LoadACP` drives any
+ACP agent (its `MCPServers` entries are sent verbatim — hand it that URL and token), and
+`CreateInProcessClient(InProcessOptions{GenerateStream: acp.GenerateStream})` makes it an ordinary
+streaming client. Launch flags, logins and permission policy are yours to choose.
+
 ## Documentation
 
 Everything else — the full surface, with runnable examples — lives on the docs site:

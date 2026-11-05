@@ -112,6 +112,26 @@ let res = agent.run("Draw a fox, then animate it.", &tk).await?;
 for f in &res.files { println!("{} {} {}", f.from, f.mime_type, f.url); }
 ```
 
+## Agents via ACP
+
+toolnexus ships no per-agent client (SPEC §8C, ADR 0041). Three vendor-neutral pieces compose
+into one: `toolkit.as_mcp_server(None)` serves your tools on `127.0.0.1:<ephemeral>/mcp`
+behind a fresh bearer token (`{url, token}`, `close()`); `AcpClient::load(AcpOptions)` spawns
+any ACP agent, passing `mcp_servers` (raw JSON, verbatim), `session_meta`, `client_caps_meta`
+and `model` straight through; and `acp_generate` / `acp_generate_stream` plug it into
+`create_in_process_client`, so `stream` yields `text` deltas as they arrive plus `thought` /
+`tool_call` / `tool_result` events `via: "acp"`.
+
+```rust
+let srv = tk.as_mcp_server(None).await?;
+let mut o = AcpOptions::new("my-acp-agent");
+o.mcp_servers = vec![json!({"type": "http", "name": "toolnexus", "url": srv.url,
+    "headers": [{"name": "Authorization", "value": format!("Bearer {}", srv.token)}]})];
+let acp = Arc::new(AcpClient::load(o).await?);
+let client = create_in_process_client(InProcessOptions {
+    generate_stream: Some(acp_generate_stream(acp.clone())), ..Default::default() });
+```
+
 ## Cargo features
 
 | feature | default | what it adds |
