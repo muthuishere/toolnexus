@@ -59,6 +59,112 @@ change `openspec/changes/upgrade-mcp-2026-07-28`.
 - Not yet verified: the 8×8 client×server interop matrix on the shipped code, and live Keycloak/GitHub
   logins (the Go spike passed both).
 
+**MCP 2026-07-28 on the server side: `MCPHandler` speaks the new wire when you opt in, with OAuth metadata and skills over MCP, in all eight ports.** The 2026-07-28 client (change `upgrade-mcp-2026-07-28`) could talk to GitHub's hosted server but not to a toolnexus server: `MCPHandler` refused 2026-07-28, so a toolnexus client always fell back to the old wire. Now add `"2026-07-28"` to `ProtocolVersions` and the same handler, with the same hooks, serves it:
+
+- **The stateless wire.** `server/discover`, header validation (`-32020` header mismatch, `-32022` unsupported version, checked before auth), `resultType` and `_meta` serverInfo on every result, `tools/list` sorted by name with `ttlMs`/`cacheScope`. No `initialize`, no session id, no GET stream. List both `"2026-07-28"` and a 2025 version to serve old and new clients on one mount; without the opt-in nothing changes (an old-only handler answers a 2026 `server/discover` with HTTP 400, which the 2026 client takes as its cue to fall back).
+- **Confirm and suspensions without elicitation streams.** A `BeforeCall` confirm becomes an `input_required` round the client answers through its `waitFor`; a tool that returns a §10 `Pending` request gets the answer back as `ToolContext.Answer` on the retry. `BeforeCall` still runs on every round, so a forged `requestState` cannot get past a deny.
+- **Skills over MCP (SEP-2640).** `ListSkills(ctx)` publishes skills (`skills/list`, `skills/get`, `resources/read` of `skill://` URIs with sha256 digests and traversal-safe URIs); `LoadMCPSkills(dir)` reads a skills folder. A toolnexus client loads them into its `skill` tool byte-identical to the local copy.
+- **OAuth for the server.** `MCPServerAuth{Issuer, Scopes, Verify?}` gives you an `Authenticate` hook (bearer token, RS256 JWT checked against the issuer's JWKS — signature, `iss`, `aud`, `exp` — or your own `Verify`; per-tool scopes; exact 401 / 403 `insufficient_scope` challenges) and the RFC 9728 metadata handler to mount at `/.well-known/oauth-protected-resource`. The verified `Principal` is what `IdentityFrom(ctx)` returns. Any `Authenticate` hook can now return an `MCPAuthError` to pick 401 or 403 and the challenge.
+- **Bring your own authorization server.** The auto-approving dev authorization server the suites and the interop run use (pre-registered and Client ID Metadata Document clients, PKCE, refresh, no dynamic client registration) is test tooling in every port's test tree, not library API: nothing named `StartMCPDevAuthServer` / `McpDevAuthServer` / `start_mcp_dev_auth_server` ships, so a server that approves everyone cannot end up in production by import.
+- Proven end to end by `interop/mcp2026/run.sh`: the Go 2026 client against the Go server — discover, MRTR input, confirm, skills, tool search, OAuth with a pre-registered client id, with a CIMD URL and with a scope step-up, and the fallback against a handler without the opt-in. Shared wire cases: `conformance/mcp_handler/cases.json` (`mcp2026_*`).
+
+Not done: `Serve(addr, {mcp})` still serves the pre-2026 profile (switching it is the BREAKING step change `upgrade-mcp-2026-07-28` describes, left for a decision); per-tool scopes are enforced only on the 2026 wire (older wires check `"*"` only); a multi-round tool sees only the latest round's answer; the cross-port interop matrix (every port's client × every port's server) and the Keycloak live run against the server are not run here; the site API pages for the new symbols are not written. Tracked in `openspec/changes/add-mcp-2026-server-handler`.
+
+**MCP serve you can mount yourself, with auth, per-request tools and a confirm gate, in all eight ports.** `Serve(addr, {mcp})` owns its port and shows everyone the same tools, so a host that wanted
+an MCP endpoint behind its own login had to write its own MCP server (#139). Now
+`tk.MCPHandler(cfg)` returns an `http.Handler` to mount on your own mux, behind your own TLS, CORS
+and OAuth, with plain hooks:
+
+- `Authenticate(r)` runs on every request; an error is HTTP 401 with your `WWW-Authenticate` header.
+  What it returns reaches every hook and tool via `IdentityFrom(ctx)`.
+- `ListTools(ctx)` decides the tools per request (they can be built at runtime). A `tools/call` for
+  a name not in that list is "tool not found" and never runs. `NotifyToolsChanged()` tells connected
+  clients to re-list.
+- `BeforeCall(ctx, tool, args)` returns allow, deny or confirm. Confirm asks the user through MCP
+  elicitation when the client supports it; otherwise the caller gets your own result (for example
+  "re-call with this nonce") or a plain "confirmation required" error.
+- `Tool.Annotations` (`title`, `readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`)
+  go out unchanged; `OnCall` reports identity, duration, error and result size for metering;
+  `ServerInfo(ctx)` brands `initialize` (now with `title`); resources and prompts hooks; your own
+  `SessionIDs`, or `Stateless` (optionally with a fixed `StatelessSessionID` for clients that expect one).
+- **Structured results.** A tool can return `ToolResult.Structured` and declare `Tool.OutputSchema`;
+  MCP serve sends them as `structuredContent` and `outputSchema`, with a JSON text block when the
+  tool sets no text. `ToolResult.Meta` goes out as the result's `_meta`, and a request's
+  `params._meta` is readable in hooks and tools via `MCPRequestMetaFrom(ctx)`. All optional:
+  tools that do not set them produce exactly the same output as before, on `Serve` too.
+- **Protocol versions you can trust.** `ProtocolVersions` per handler; the default is 2025-06-18 only.
+  2025-11-25 can be turned on (the handler implements its one server-side rule change: bad tool
+  arguments come back as an error result, not a protocol error). 2025-03-26 is not accepted (it allows
+  batches, which the handler rejects) and 2026-07-28 waits for #134 — listing them does nothing.
+
+Every port ships it in its own native handler shape: Go `http.Handler`, JS Node request listener
+(`toolkit.mcpHandler`), Python ASGI app (`toolkit.mcp_handler`), Java JDK `HttpHandler`
+(`toolkit.mcpHandler`; give the `HttpServer` a multi-threaded executor), C# `McpHttpHandler` over
+`HttpListenerContext` or a host-supplied `McpHttpExchange` (`toolkit.McpHandler`), Elixir Plug
+(`Toolnexus.mcp_handler/2`), Clojure Ring handler (`toolnexus.mcp-handler/mcp-handler`; SSE bodies are
+lazy seqs, so the Ring adapter must stream seq bodies), Rust hyper `Service` (`toolkit.mcp_handler`,
+`serve` feature). A shared fixture, `conformance/mcp_handler/cases.json`, pins the wire and every
+port's suite replays it.
+
+Port notes: outside Go, `beforeCall` receives the parsed arguments object rather than raw JSON bytes.
+The Java, Elixir and Clojure GET streams send a `: keepalive` comment every 15 s (Java and Elixir) or
+end on session DELETE (Clojure), because those servers cannot see a client disconnect. In Elixir a
+confirm timeout reads "confirmation failed: timeout"; the other ports use Go's "context deadline
+exceeded". The official MCP Java SDK 2.0.0 client sends `MCP-Protocol-Version: 2025-11-25` on later
+requests even after it negotiated 2025-06-18, so it needs `supportedProtocolVersions(List.of("2025-06-18"))`
+against a default handler.
+
+**Rust: a source change if you build `Tool` with a struct literal.** `Tool` has two new public fields,
+`output_schema` and `annotations`. A literal that names every field no longer compiles until you add
+`output_schema: None, annotations: None` (or end it with `..Default::default()`). The builders
+(`with_output_schema`, `with_annotations`) are unaffected.
+
+toolnexus has no tenant, role or storage concepts here: those stay in your hooks (ADR 0039).
+`Serve(addr, {mcp})` is unchanged apart from the optional structured fields. **Not done:** when you
+run several replicas, elicitation answers need sticky routing. The docs-page examples are run in CI
+for Go, Python and Java only; the JS, C#, Elixir, Clojure and Rust pages are not run yet.
+
+**Let any coding agent call your toolkit, through three vendor-neutral pieces (all eight ports).**
+toolnexus does not ship a client per coding agent: which binary, flags, login and quirks an agent
+needs changes on the vendor's schedule, so those live as **recipes in the docs**, written on top of
+what the library now provides (ADR 0041, SPEC §8C):
+
+- **Your in-process model can stream.** Give `createInProcessClient` a streaming generate —
+  `generateStream(req, emit)` (Go `GenerateStream`, python `generate_stream`, elixir
+  `:generate_stream`, clojure `:generate-stream`, …) — and `stream` yields each text you `emit` as it
+  happens. Before, only Go had this and every other port refused `stream` on an in-process client.
+  A new **`thought`** stream event carries model reasoning; `tool_call`/`tool_result` events with
+  `via: "acp"` report tools an agent ran itself — passed to you, never executed by your loop. A plain
+  `generate` still refuses to stream, because one chunk pretending to be a stream is the bug this
+  prevents. Clojure has no stream API; there the events go to `run`'s `:on-event` as emitted.
+- **The ACP client passes your configuration through untouched.** `loadACP` now sends the
+  `mcpServers` you give it verbatim (it always sent `[]` before), `sessionMeta` as `session/new`
+  `_meta`, `clientCapsMeta` as `initialize` `clientCapabilities._meta`, and passes `model` through
+  (`session/set_config_option`, then `session/set_model`). It streams every `agent_message_chunk` the
+  moment it arrives in every port (was Go only), fails a request as soon as the agent exits instead of
+  waiting out the timeout, answers agent requests it does not implement with `-32601` so the agent
+  never hangs, declares `terminal:false`, and tears down the agent's whole process group on `close`.
+- **`toolkit.asMcpServer()` → `{url, token, close}`** serves your toolkit (MCP servers, skills,
+  your own tools) on a loopback port behind a fresh bearer token, so an agent you launch can call it
+  and other local processes cannot. You put `url` and the token into the agent's `mcpServers` entry.
+
+Pinned without any vendor binary in `conformance/acp-client/cases.json` (streaming that is really
+incremental, verbatim passthrough, agent exit, unknown requests, the server's 401/404/405 rules).
+
+Not in the library, by decision: per-vendor styles or enums, a one-shot CLI transport for agents
+without ACP (write a `generate` that runs your CLI — that is what the seam is for), vendor
+permission allow-lists or prompt hints, a stdio-to-HTTP MCP bridge, model lists. The default
+permission policy is unchanged (first allow option); a docs recipe shows how to allow only your
+toolkit's tools.
+
+**Fixed (python only): `toolkit.serve(mcp={})` now exposes the toolkit's tools, and `GET /mcp` answers
+`405` instead of hanging.** An empty MCP serve profile was treated as absent, so `/mcp` was mounted
+but advertised no tools; it now means "present with defaults" (`name: "toolnexus"`, every tool), as
+in every other port and `SPEC.md §7C`. `GET /mcp` used to hold the connection open forever, which
+hung clients that probe it for a server stream (e.g. the Claude ACP adapter, whose `session/new`
+waited on it); the stateless profile offers no stream, so it now returns `405` (`Allow: POST`),
+matching Java, Elixir, C# and Rust. Other ports were not affected by either bug.
+
 ## 0.24.0 — 2026-11-04
 
 **Media generation: images, video, speech, transcription, voice cloning and talking-head video,

@@ -57,8 +57,9 @@ pub enum AcpError {
     PermissionTimeout(Duration),
     #[error("acp error {code}: {message}")]
     Rpc { code: i64, message: String },
-    #[error("toolnexus: acp: agent exited{}", .code.map(|c| format!(" with code {c}")).unwrap_or_default())]
-    AgentExited { code: Option<i32> },
+    /// The agent's stdout closed while `method` (empty: none) awaited a reply.
+    #[error("toolnexus: acp: agent exited{}{}", if .method.is_empty() { String::new() } else { format!(" before replying to {}", .method) }, .code.map(|c| format!(" with code {c}")).unwrap_or_default())]
+    AgentExited { method: String, code: Option<i32> },
     #[error("toolnexus: acp: {0}")]
     Protocol(String),
     #[error("toolnexus: acp: io: {0}")]
@@ -115,6 +116,8 @@ pub type UpdateHandler = Arc<dyn Fn(&Value) + Send + Sync>;
 pub enum AcpStreamEvent {
     /// A reply text delta (`agent_message_chunk` only).
     Text { delta: String },
+    /// An agent thought delta (`agent_thought_chunk`). Never part of the reply text.
+    Thought { delta: String, via: &'static str },
     ToolCall {
         id: String,
         name: String,
@@ -199,7 +202,23 @@ pub struct AcpOptions {
     pub on_update: Option<UpdateHandler>,
     /// Wait between SIGTERM and SIGKILL of the agent's process group on close; default 2s.
     pub kill_grace: Duration,
+    /// Sent as `session/new` `mcpServers` verbatim and in order (empty ⇒ `[]`);
+    /// never validated or reshaped (SPEC §8C).
+    pub mcp_servers: Vec<Value>,
+    /// Sent as `session/new` `_meta`; absent when `None`. Opaque.
+    pub session_meta: Option<Value>,
+    /// Sent as `initialize` `clientCapabilities._meta` (vendor flags); opaque.
+    pub client_caps_meta: Option<Value>,
+    /// Passed through unchanged after `session/new`: `session/set_config_option
+    /// {configId:"model"}`, then `session/set_model` if the agent rejects that.
+    /// Both failing fails `load`.
+    pub model: Option<String>,
+    /// Receives the agent's stderr as it arrives (default: discarded).
+    pub stderr: Option<StderrHandler>,
 }
+
+/// Receives chunks of the agent's stderr.
+pub type StderrHandler = Arc<dyn Fn(&[u8]) + Send + Sync>;
 
 impl AcpOptions {
     pub fn new(command: impl Into<String>) -> Self {
@@ -216,6 +235,11 @@ impl AcpOptions {
             on_permission: None,
             on_update: None,
             kill_grace: Duration::from_secs(2),
+            mcp_servers: Vec::new(),
+            session_meta: None,
+            client_caps_meta: None,
+            model: None,
+            stderr: None,
         }
     }
     pub fn args<I, S>(mut self, args: I) -> Self
@@ -256,7 +280,7 @@ type Reply = Result<Value, AcpError>;
 
 struct Shared {
     stdin: Mutex<Option<ChildStdin>>,
-    pending: std::sync::Mutex<HashMap<String, oneshot::Sender<Reply>>>,
+    pending: std::sync::Mutex<HashMap<String, (String, oneshot::Sender<Reply>)>>,
     /// Where the running turn's updates go (None between turns).
     sink: std::sync::Mutex<Option<mpsc::UnboundedSender<TurnEvent>>>,
     exited: std::sync::Mutex<Option<Option<i32>>>,
@@ -301,7 +325,11 @@ impl AcpClient {
             .envs(opts.env.iter().cloned())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null());
+            .stderr(if opts.stderr.is_some() {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            });
         let mut wrap = CommandWrap::from(cmd);
         // Its own process group (POSIX) / Job Object (Windows), so close stops
         // everything it started — an npx adapter AND the agent it spawned.
@@ -317,6 +345,18 @@ impl AcpClient {
         let pid = child.id();
         let stdin = child.stdin().take().expect("piped stdin");
         let stdout = child.stdout().take().expect("piped stdout");
+        if let (Some(h), Some(mut err)) = (opts.stderr.clone(), child.stderr().take()) {
+            tokio::spawn(async move {
+                use tokio::io::AsyncReadExt;
+                let mut buf = [0u8; 4096];
+                while let Ok(n) = err.read(&mut buf).await {
+                    if n == 0 {
+                        break;
+                    }
+                    h(&buf[..n]);
+                }
+            });
+        }
 
         let shared = Arc::new(Shared {
             stdin: Mutex::new(Some(stdin)),
@@ -343,12 +383,19 @@ impl AcpClient {
             agent_info: Value::Null,
             pid,
         };
+        let mut caps = json!({
+            "fs": {"readTextFile": false, "writeTextFile": false},
+            "terminal": false,
+        });
+        if let Some(meta) = &opts.client_caps_meta {
+            caps["_meta"] = meta.clone();
+        }
         let init = client
             .call(
                 "initialize",
                 json!({
                     "protocolVersion": opts.protocol_version,
-                    "clientCapabilities": {"fs": {"readTextFile": false, "writeTextFile": false}},
+                    "clientCapabilities": caps,
                 }),
                 opts.initialize_timeout,
             )
@@ -361,12 +408,12 @@ impl AcpClient {
             }
         };
         client.agent_info = init;
+        let mut session_new = json!({"cwd": cwd.to_string_lossy(), "mcpServers": opts.mcp_servers});
+        if let Some(meta) = &opts.session_meta {
+            session_new["_meta"] = meta.clone();
+        }
         let sn = client
-            .call(
-                "session/new",
-                json!({"cwd": cwd.to_string_lossy(), "mcpServers": []}),
-                opts.request_timeout,
-            )
+            .call("session/new", session_new, opts.request_timeout)
             .await;
         let sid = match sn.map(|v| {
             v.get("sessionId")
@@ -399,6 +446,33 @@ impl AcpClient {
                 return Err(e);
             }
         }
+        if let Some(model) = opts.model.as_deref().filter(|m| !m.is_empty()) {
+            // Passed through unchanged: the stable ACP spelling first, then
+            // the older unstable session/set_model.
+            let sid = client.session_id.clone();
+            let first = client
+                .call(
+                    "session/set_config_option",
+                    json!({"sessionId": sid, "configId": "model", "value": model}),
+                    opts.request_timeout,
+                )
+                .await;
+            if let Err(e1) = first {
+                let second = client
+                    .call(
+                        "session/set_model",
+                        json!({"sessionId": sid, "modelId": model}),
+                        opts.request_timeout,
+                    )
+                    .await;
+                if let Err(e2) = second {
+                    client.close().await;
+                    return Err(AcpError::Protocol(format!(
+                        "set model {model:?}: {e1}; {e2}"
+                    )));
+                }
+            }
+        }
         Ok(client)
     }
 
@@ -423,7 +497,7 @@ impl AcpClient {
 
     async fn call(&self, method: &str, params: Value, timeout: Duration) -> Reply {
         let id = self.new_id();
-        let rx = self.register(&id)?;
+        let rx = self.register(&id, method)?;
         write_line(
             &self.shared,
             &json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}),
@@ -431,7 +505,7 @@ impl AcpClient {
         .await?;
         match tokio::time::timeout(timeout, rx).await {
             Ok(Ok(r)) => r,
-            Ok(Err(_)) => Err(self.exit_error()),
+            Ok(Err(_)) => Err(self.exit_error(method)),
             Err(_) => {
                 self.shared.pending.lock().unwrap().remove(&id);
                 Err(AcpError::Timeout {
@@ -442,21 +516,22 @@ impl AcpClient {
         }
     }
 
-    fn register(&self, id: &str) -> Result<oneshot::Receiver<Reply>, AcpError> {
+    fn register(&self, id: &str, method: &str) -> Result<oneshot::Receiver<Reply>, AcpError> {
         if self.shared.exited.lock().unwrap().is_some() {
-            return Err(self.exit_error());
+            return Err(self.exit_error(method));
         }
         let (tx, rx) = oneshot::channel();
         self.shared
             .pending
             .lock()
             .unwrap()
-            .insert(id.to_owned(), tx);
+            .insert(id.to_owned(), (method.to_owned(), tx));
         Ok(rx)
     }
 
-    fn exit_error(&self) -> AcpError {
+    fn exit_error(&self, method: &str) -> AcpError {
         AcpError::AgentExited {
+            method: method.to_owned(),
             code: self.shared.exited.lock().unwrap().flatten(),
         }
     }
@@ -475,7 +550,7 @@ impl AcpClient {
         let (tx, rx) = mpsc::unbounded_channel();
         *self.shared.sink.lock().unwrap() = Some(tx);
         let id = self.new_id();
-        let reply = match self.register(&id) {
+        let reply = match self.register(&id, "session/prompt") {
             Ok(r) => r,
             Err(e) => {
                 *self.shared.sink.lock().unwrap() = None;
@@ -528,8 +603,10 @@ impl AcpClient {
     /// [`generate_cancellable`](Self::generate_cancellable) that also reports
     /// the turn as it happens: message chunks as [`AcpStreamEvent::Text`], the
     /// agent's own tool calls as `ToolCall` / `ToolResult` (on a
-    /// `tool_call_update` with status `completed` or `failed`), all `via: "acp"`.
-    /// Thoughts and plans are not emitted (observe them with `on_update`).
+    /// `tool_call_update` with status `completed` or `failed`), thought chunks as
+    /// [`AcpStreamEvent::Thought`], all `via: "acp"`. Each event is emitted as its
+    /// `session/update` arrives, not after the turn. Plans are not emitted
+    /// (observe them with `on_update`).
     pub async fn generate_stream<F>(
         &self,
         messages: &[(String, String)],
@@ -568,6 +645,14 @@ impl AcpClient {
                     if let Some(t) = u.text().filter(|t| !t.is_empty()) {
                         emit(AcpStreamEvent::Text {
                             delta: t.to_owned(),
+                        });
+                    }
+                }
+                "agent_thought_chunk" => {
+                    if let Some(t) = u.text().filter(|t| !t.is_empty()) {
+                        emit(AcpStreamEvent::Thought {
+                            delta: t.to_owned(),
+                            via: "acp",
                         });
                     }
                 }
@@ -698,7 +783,7 @@ impl PromptStream<'_> {
                 }
                 r = reply => {
                     self.reply = None;
-                    self.finished = Some(r.unwrap_or_else(|_| Err(self.client.exit_error())));
+                    self.finished = Some(r.unwrap_or_else(|_| Err(self.client.exit_error("session/prompt"))));
                     // updates written before the reply line are already queued
                     while let Ok(ev) = self.updates.try_recv() {
                         if let Some(u) = self.absorb(ev) {
@@ -740,7 +825,10 @@ async fn write_line(shared: &Shared, v: &Value) -> Result<(), AcpError> {
     let mut line = serde_json::to_vec(v).map_err(|e| AcpError::Protocol(e.to_string()))?;
     line.push(b'\n');
     let mut stdin = shared.stdin.lock().await;
-    let w = stdin.as_mut().ok_or(AcpError::AgentExited { code: None })?;
+    let w = stdin.as_mut().ok_or(AcpError::AgentExited {
+        method: String::new(),
+        code: None,
+    })?;
     w.write_all(&line).await?;
     w.flush().await?;
     Ok(())
@@ -766,7 +854,7 @@ async fn read_loop(
                     Value::String(s) => s.clone(),
                     other => other.to_string(),
                 };
-                if let Some(tx) = shared.pending.lock().unwrap().remove(&key) {
+                if let Some((_, tx)) = shared.pending.lock().unwrap().remove(&key) {
                     let r = match msg.get("error") {
                         Some(e) => Err(AcpError::Rpc {
                             code: e.get("code").and_then(Value::as_i64).unwrap_or(0),
@@ -859,8 +947,8 @@ async fn read_loop(
     }
     *shared.exited.lock().unwrap() = Some(code);
     let waiting: Vec<_> = shared.pending.lock().unwrap().drain().collect();
-    for (_, tx) in waiting {
-        let _ = tx.send(Err(AcpError::AgentExited { code }));
+    for (_, (method, tx)) in waiting {
+        let _ = tx.send(Err(AcpError::AgentExited { method, code }));
     }
 }
 

@@ -65,6 +65,8 @@ fn check_secret() -> Tool {
         input_schema: empty_schema(),
         source: ToolSource::Custom,
         hints: None,
+        output_schema: None,
+        annotations: None,
         execute: Arc::new(|_args, ctx| {
             Box::pin(async move {
                 if ctx.answer.as_ref().is_some_and(|a| a.ok) {
@@ -139,6 +141,8 @@ fn check_secret() -> Tool {
         input_schema: empty_schema(),
         source: ToolSource::Custom,
         hints: None,
+        output_schema: None,
+        annotations: None,
         execute: Arc::new(|_args, ctx| {
             Box::pin(async move {
                 if let Some(a) = &ctx.answer {
@@ -213,6 +217,8 @@ fn check_secret() -> Tool {
         input_schema: empty_schema(),
         source: ToolSource::Custom,
         hints: None,
+        output_schema: None,
+        annotations: None,
         execute: Arc::new(|_args, ctx| {
             Box::pin(async move {
                 if ctx.answer.as_ref().is_some_and(|a| a.ok) {

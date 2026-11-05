@@ -73,6 +73,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         input_schema: empty_schema(),
         source: ToolSource::Custom,
         hints: None,
+        output_schema: None,
+        annotations: None,
         execute: Arc::new(|_args, ctx| {
             Box::pin(async move {
                 if ctx.answer.is_some() {
@@ -145,6 +147,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         input_schema: empty_schema(),
         source: ToolSource::Custom,
         hints: None,
+        output_schema: None,
+        annotations: None,
         execute: Arc::new(|_args, _ctx| {
             Box::pin(async move {
                 pending(Request { kind: "input".into(), prompt: "confirm?".into(), ..Default::default() })
@@ -212,6 +216,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         input_schema: empty_schema(),
         source: ToolSource::Custom,
         hints: None,
+        output_schema: None,
+        annotations: None,
         execute: Arc::new(|_args, ctx| {
             Box::pin(async move {
                 if ctx.answer.is_some() {
@@ -301,6 +307,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         input_schema: empty_schema(),
         source: ToolSource::Custom,
         hints: None,
+        output_schema: None,
+        annotations: None,
         execute: Arc::new(|_args, _ctx| {
             Box::pin(async move {
                 pending(Request { kind: "input".into(), prompt: "deploy?".into(), ..Default::default() })

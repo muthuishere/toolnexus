@@ -824,6 +824,24 @@
 			}
 		},
 		{
+			"id": "serve/mcp-handler",
+			"group": "serve",
+			"member": "mcp-handler",
+			"title": "mcpHandler — an embeddable MCP server with per-request hooks",
+			"spec": "§7C.1",
+			"summary": "Mount a streamable-HTTP MCP server on your own router, with auth, per-identity tools and a confirm gate.",
+			"symbols": {
+				"javascript": "Toolkit.mcpHandler",
+				"python": "Toolkit.mcp_handler",
+				"golang": "Toolkit.MCPHandler",
+				"java": "Toolkit.mcpHandler",
+				"csharp": "Toolkit.McpHandler",
+				"elixir": "Toolnexus.mcp_handler",
+				"clojure": "toolnexus.mcp-handler/mcp-handler",
+				"rust": "Toolkit.mcp_handler"
+			}
+		},
+		{
 			"id": "runtime/agent",
 			"group": "runtime",
 			"member": "agent",

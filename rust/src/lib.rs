@@ -10,12 +10,16 @@ pub mod a2a;
 pub mod acp;
 pub mod adapters;
 pub mod agents;
+#[cfg(feature = "serve")]
+pub mod as_mcp_server;
 pub mod builtins;
 pub mod classifier;
 pub mod client;
 pub mod http;
 pub mod judge;
 pub mod mcp;
+#[cfg(feature = "serve")]
+pub mod mcp_handler;
 #[cfg(feature = "serve")]
 pub mod mcp_serve;
 pub mod media;
@@ -28,6 +32,8 @@ pub mod tool;
 pub mod toolkit;
 
 pub use adapters::{to_anthropic, to_gemini, to_openai};
+#[cfg(feature = "serve")]
+pub use as_mcp_server::McpServerHandle;
 pub use builtins::{BuiltinsConfig, select_builtins};
 pub use classifier::{
     Classifier, ClassifierError, ClassifierOptions, ClassifierStyle, Decision, Question, Questions,
@@ -40,8 +46,8 @@ pub use media::{
 };
 pub use tool::{
     Answer, ConcurrencySafeFn, ContentPart, DEFAULT_MAX_TOOL_CONCURRENCY, PartError, Request, Tool,
-    ToolContext, ToolHints, ToolResult, ToolSource, auth_required, define_tool, define_typed_tool,
-    empty_schema, is_concurrency_safe, pending, pending_of, resolve_max_tool_concurrency,
-    resolve_max_tool_concurrency_with, sanitize,
+    ToolAnnotations, ToolContext, ToolHints, ToolResult, ToolSource, auth_required, define_tool,
+    define_typed_tool, empty_schema, is_concurrency_safe, pending, pending_of,
+    resolve_max_tool_concurrency, resolve_max_tool_concurrency_with, sanitize,
 };
 pub use toolkit::{McpConfigInput, Toolkit, ToolkitError, ToolkitOptions, create_toolkit};

@@ -35,7 +35,7 @@ fn s(v: &Value, k: &str) -> String {
 pub(crate) fn resource_tools(servers: BTreeMap<String, ServerConn>) -> Vec<Tool> {
     let servers = Arc::new(servers);
     let ls = servers.clone();
-    let list = Tool {
+    let list = Tool { output_schema: None, annotations: None,
         concurrency_safe: None,
         name: "list_mcp_resources".into(),
         description: "List the resources MCP servers offer (uri, name, description, mimeType). Optionally for one server.".into(),
@@ -103,7 +103,7 @@ pub(crate) fn resource_tools(servers: BTreeMap<String, ServerConn>) -> Vec<Tool>
         }),
     };
     let rs = servers;
-    let read = Tool {
+    let read = Tool { output_schema: None, annotations: None,
         concurrency_safe: None,
         name: "read_mcp_resource".into(),
         description: "Read one MCP resource by server and uri. Text comes back as text; binary content is described, not inlined.".into(),

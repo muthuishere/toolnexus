@@ -11,6 +11,7 @@ public final class ToolContext {
     private final AtomicBoolean cancelled;
     private final Answer answer;
     private final String callId;
+    private final McpHandler.RequestContext mcp;
 
     public ToolContext() {
         this(null, new AtomicBoolean(false), null);
@@ -30,6 +31,13 @@ public final class ToolContext {
 
     /** Full constructor, with the model's id for this tool call (SPEC §4C). */
     public ToolContext(Long timeoutMs, AtomicBoolean cancelled, Answer answer, String callId) {
+        this(timeoutMs, cancelled, answer, callId, null);
+    }
+
+    /** Full constructor plus the inbound MCP request context (SPEC §7C.1). */
+    public ToolContext(Long timeoutMs, AtomicBoolean cancelled, Answer answer, String callId,
+                       McpHandler.RequestContext mcp) {
+        this.mcp = mcp;
         this.timeoutMs = timeoutMs;
         this.cancelled = cancelled == null ? new AtomicBoolean(false) : cancelled;
         this.answer = answer;
@@ -42,6 +50,15 @@ public final class ToolContext {
      */
     public String callId() {
         return callId;
+    }
+
+    /**
+     * The inbound MCP request this call is serving when the {@link McpHandler} runs the tool
+     * (identity, HTTP exchange, session id, request {@code params._meta}); {@code null} otherwise.
+     * SPEC §7C.1 {@code identityFrom/requestFrom/mcpSessionIdFrom/mcpRequestMetaFrom}.
+     */
+    public McpHandler.RequestContext mcp() {
+        return mcp;
     }
 
     /** Timeout in milliseconds, or null for "use the tool default". */

@@ -193,6 +193,84 @@ Known gaps, honestly:
   not byte-for-byte as the server sent it.
 - Only one input request per MRTR round can be resumed without `:wait-for` (the §10 loop resumes once).
 
+## Embeddable MCP server
+
+`toolnexus.mcp-handler/mcp-handler` returns a **Ring handler** you mount on your own stack, behind
+your own TLS, CORS and OAuth (SPEC §7C.1, ADR 0039). Every policy is a hook — auth, the tool list
+*per request* (a name outside it is never executed), an allow/deny/confirm gate (confirm asks the
+client over MCP elicitation, else returns your shaped result), an audit event, server info,
+resources, prompts and pluggable session ids. `toolnexus.serve/serve` is unchanged. Tools may set
+`:output-schema` and `:annotations`; results may carry `:structured` / `:meta`
+(`tool/with-structured`), which become `structuredContent` / `_meta` on both MCP paths.
+
+```clojure
+(require '[toolnexus.mcp-handler :as mh])
+
+(def h (mh/mcp-handler tk {:authenticate (fn [req] (user-for (get-in req [:headers "authorization"])))
+                           :list-tools   (fn [ctx] (tools-for (mh/mcp-identity ctx)))
+                           :before-call  (fn [ctx tool args] (when (destructive? tool) {:kind :confirm :message "Sure?"}))}))
+;; mount (:handler h) at /mcp on any Ring server; (mh/notify-tools-changed! h) when tools move
+```
+
+SSE responses (GET streams, a confirm round trip) are lazy-seq Ring bodies, so the adapter must
+write a seq body chunk by chunk. Example: `examples/src/examples/mcp_handler.cljc`.
+
+### MCP 2026-07-28 (opt-in)
+
+List `"2026-07-28"` in `:protocol-versions` and the same handler also speaks the stateless
+2026-07-28 wire (SPEC §7C.2, ADR 0040): `server/discover`, header validation, `resultType`, and
+MRTR — a `:confirm` decision or a §10 tool suspension comes back as `input_required`, and the
+retry's answer reaches the tool as `(:answer ctx)`. `["2026-07-28" "2025-06-18"]` serves both wires
+on one mount; leave it out and nothing changes. `:list-skills` publishes skills through the
+skills extension (`skills/list`, `skills/get`, `skill://` reads); `load-mcp-skills` builds the list
+from a directory. `mcp-server-auth` turns the handler into an OAuth 2.1 protected resource: an
+`:authenticate` hook (RS256 JWTs checked against the issuer's JWKS, or your own `:verify`; per-tool
+scopes) and the RFC 9728 metadata handler. The Principal `{:subject :scopes :claims}` is
+`(mh/mcp-identity ctx)`.
+
+```clojure
+(require '[toolnexus.mcp-server-auth :as sa])
+
+(def auth (sa/mcp-server-auth {:issuer "https://login.example" :scopes {"*" ["mcp"] "wipe" ["mcp:admin"]}}))
+(def h (mh/mcp-handler tk {:protocol-versions ["2026-07-28" "2025-06-18"]
+                           :list-skills  (fn [_] (mh/load-mcp-skills "skills"))
+                           :authenticate (:authenticate auth)}))
+;; route GET /.well-known/oauth-protected-resource[/mcp] to (:metadata auth)
+```
+
+Bring your own authorization server: `mcp-server-auth` verifies its tokens. The auto-approving dev authorization
+server the suite uses is test tooling (`src/toolnexus/mcp_dev_auth_test_support.cljc`, kept out of the jar), not part of the library.
+
+## Agents via ACP
+
+A local coding agent that speaks ACP can be the model behind an ordinary client, with no
+per-agent code in the library (SPEC §8C). Three plain pieces:
+
+- `toolnexus.serve/as-mcp-server` serves your toolkit on `127.0.0.1` behind a fresh bearer
+  token: `{:url :token :close}`.
+- `toolnexus.acp/connect` starts the agent and passes `:mcp-servers`, `:session-meta`,
+  `:client-caps-meta` and `:model` through unchanged.
+- `toolnexus.acp/generate-stream` plugs into `create-in-process-client`'s `:generate-stream`, so
+  the agent's text reaches `run`'s `:on-event` sink as incremental `text` deltas (plus `thought`
+  and ACP `tool_call`/`tool_result` events, `:via "acp"`).
+
+```clojure
+(require '[toolnexus.acp :as acp] '[toolnexus.client :as client]
+         '[toolnexus.core :as tn] '[toolnexus.serve :as serve])
+
+(def tk  (tn/build {:skills "skills"}))
+(def srv (serve/as-mcp-server tk))
+(def a   (acp/connect ["my-agent" "acp"]
+                      {:mcp-servers [{:type "http" :name "toolnexus" :url (:url srv)
+                                      :headers [{:name "Authorization"
+                                                 :value (str "Bearer " (:token srv))}]}]}))
+(def c   (client/create-in-process-client {:model "agent" :generate-stream (acp/generate-stream a)}))
+(client/run c "What is my badge number?" {:on-event prn})
+(acp/close a) ((:close srv))
+```
+
+Which binary, flags and permissions an agent needs is the caller's recipe, not library API.
+
 ## Documentation
 
 Everything else — the full surface, with runnable examples — lives on the docs site:

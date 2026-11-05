@@ -574,6 +574,8 @@ fn skill_tool(agent_name: &str, endpoint: &str, skill: &A2aSkill, agent: &Agent)
         agent: agent.clone(),
     });
     Tool {
+        output_schema: None,
+        annotations: None,
         concurrency_safe: None,
         name: format!("{}_{}", sanitize(agent_name), sanitize(skill_id)),
         description,

@@ -259,6 +259,8 @@ fn direct_tool(server: &Arc<DirectServer>, def: &Obj) -> Tool {
         .unwrap_or(&empty);
     let srv = server.clone();
     Tool {
+        output_schema: None,
+        annotations: None,
         concurrency_safe: None,
         name: format!("{}_{}", sanitize(&server.name), sanitize(&original)),
         description: def
@@ -437,6 +439,8 @@ fn search_tools(server: &Arc<DirectServer>, description: Option<&str>) -> Vec<To
     let prefix = sanitize(&server.name);
     let (s1, s2) = (server.clone(), server.clone());
     let search = Tool {
+        output_schema: None,
+        annotations: None,
         concurrency_safe: None,
         name: format!("{prefix}_search_tools"),
         description: format!(
@@ -489,6 +493,8 @@ fn search_tools(server: &Arc<DirectServer>, description: Option<&str>) -> Vec<To
         }),
     };
     let call = Tool {
+        output_schema: None,
+        annotations: None,
         concurrency_safe: None,
         name: format!("{prefix}_call_tool"),
         description: "Run a tool found with search_tools.".into(),

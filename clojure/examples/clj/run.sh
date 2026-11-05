@@ -6,7 +6,8 @@ export TN_EXAMPLES="${TN_EXAMPLES:-$(cd ../../../examples && pwd)}"
 
 EXAMPLES=(toolnexus.demo examples.native-and-http examples.skills
           examples.persona-memory examples.compaction examples.multimodal
-          examples.judge examples.prompt-cache examples.media)
+          examples.judge examples.prompt-cache examples.media
+          examples.mcp-handler)
 fail=0
 for ns in "${EXAMPLES[@]}"; do
   out=$(clojure -M -m "$ns" 2>&1)

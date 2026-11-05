@@ -25,6 +25,13 @@ public sealed record ToolResult(
 {
     public string Output { get; init; } = Output ?? "";
 
+    /// <summary>(SPEC §1) Optional structured result — MCP <c>structuredContent</c> on the serve paths.
+    /// With an empty <c>Output</c>, its JSON text becomes the text block. Absent ⇒ byte-identical output.</summary>
+    public object? Structured { get; init; }
+
+    /// <summary>(SPEC §1) Optional result metadata — MCP <c>_meta</c> on the serve paths. Absent ⇒ omitted.</summary>
+    public IDictionary<string, object?>? Meta { get; init; }
+
     public static ToolResult Ok(string output, IDictionary<string, object?>? metadata = null)
         => new(output, false, metadata);
 

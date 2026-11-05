@@ -109,7 +109,13 @@ func mcpToolFor(t Tool) mcp.Tool {
 	if err != nil {
 		raw = []byte("{}")
 	}
-	return mcp.NewToolWithRawSchema(t.Name, t.Description, raw)
+	tool := mcp.NewToolWithRawSchema(t.Name, t.Description, raw)
+	if t.OutputSchema != nil {
+		if os, err := json.Marshal(t.OutputSchema); err == nil {
+			tool.RawOutputSchema = os
+		}
+	}
+	return tool
 }
 
 // mcpHandlerFor wraps Tool.Execute as an MCP tool handler. An Execute error (or a
@@ -140,13 +146,30 @@ func mcpHandlerFor(t Tool, onCall OnCall) server.ToolHandlerFunc {
 			}()
 		}
 
-		out := mcp.NewToolResultText(res.Output)
-		out.IsError = res.IsError
-		// §1B parts leave as native MCP content blocks, appended after the text
-		// part, in order — image⇒image, audio⇒audio, file⇒embedded resource.
-		out.Content = append(out.Content, partsToMcpContent(res.Parts)...)
-		return out, nil
+		return toolResultToMcp(res), nil
 	}
+}
+
+// toolResultToMcp maps a ToolResult to the MCP CallToolResult (shared by Serve
+// and MCPHandler): output → text part, isError propagates, and §1B parts leave
+// as native MCP content blocks, appended after the text part, in order —
+// image⇒image, audio⇒audio, file⇒embedded resource.
+func toolResultToMcp(res ToolResult) *mcp.CallToolResult {
+	text := res.Output
+	if res.Structured != nil && text == "" {
+		// The spec asks a structured result to carry an equivalent text block.
+		if b, err := json.Marshal(res.Structured); err == nil {
+			text = string(b)
+		}
+	}
+	out := mcp.NewToolResultText(text)
+	out.IsError = res.IsError
+	out.Content = append(out.Content, partsToMcpContent(res.Parts)...)
+	out.StructuredContent = res.Structured
+	if res.Meta != nil {
+		out.Meta = mcp.NewMetaFromMap(res.Meta)
+	}
+	return out
 }
 
 // partsToMcpContent maps §1B content parts to MCP content blocks for an inbound

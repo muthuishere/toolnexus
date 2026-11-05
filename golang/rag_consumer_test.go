@@ -32,6 +32,9 @@ func TestMain(m *testing.M) {
 		_ = server.ServeStdio(buildMcpServer([]Tool{mkTool("a"), mkTool("b"), mkTool("c")}, nil, nil))
 		return
 	}
+	if acpSeamHelperMain() { // acp_seam_test.go: fake ACP agent (SPEC §8C)
+		return
+	}
 	os.Exit(m.Run())
 }
 

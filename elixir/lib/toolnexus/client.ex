@@ -894,17 +894,41 @@ defmodule Toolnexus.Client do
   `generate` returns ONE assistant message. `:usage` is optional. There is no
   `:base_url`, `:api_key` or `:style` — there is no wire to configure.
 
-  Streaming raises: a `generate` returns a whole answer, and a single-chunk stream is
-  indistinguishable from a real one by content or delta count.
+  `:generate_stream` — `(req, emit) -> answer` — is the streaming form (SPEC §8C).
+  It receives the same `req` plus an `emit` function taking an event map, and returns
+  the same answer shape as `generate`. On `stream/4` every non-empty
+  `%{type: "text", delta: d}` it emits reaches the consumer AS IT IS EMITTED (the
+  stream is genuinely incremental); any other event (`"thought"`, `"tool_call"`,
+  `"tool_result"` — e.g. a coding agent's own tool use, tagged `via: "acp"`) passes
+  straight to the consumer and is never executed by the loop. When it returns, its
+  `tool_calls` (if any) go back to the loop as usual; if it emitted no text, its
+  `content` is delivered as one text delta. Either `:generate` or `:generate_stream`
+  is required; with both, `generate` serves `run/4` and `generate_stream` serves
+  `stream/4`. With only `generate_stream`, `run/4` calls it with a no-op `emit`.
+
+  Streaming with only `:generate` raises: a `generate` returns a whole answer, and a
+  single-chunk stream is indistinguishable from a real one by content or delta count.
   """
   @spec create_in_process(keyword() | map()) :: t()
   def create_in_process(opts) do
     opts = if is_map(opts), do: Map.to_list(opts), else: opts
     generate = Keyword.get(opts, :generate)
+    generate_stream = Keyword.get(opts, :generate_stream)
 
-    unless is_function(generate, 1) do
+    if generate != nil and not is_function(generate, 1) do
       raise ArgumentError,
-            "toolnexus: create_in_process requires a `:generate` function of arity 1"
+            "toolnexus: create_in_process `:generate` must be a function of arity 1"
+    end
+
+    if generate_stream != nil and not is_function(generate_stream, 2) do
+      raise ArgumentError,
+            "toolnexus: create_in_process `:generate_stream` must be a function of arity 2"
+    end
+
+    if generate == nil and generate_stream == nil do
+      raise ArgumentError,
+            "toolnexus: create_in_process requires a `:generate` function of arity 1 " <>
+              "(or a `:generate_stream` function of arity 2)"
     end
 
     for reserved <- [:base_url, :api_key, :style, :transport] do
@@ -919,13 +943,13 @@ defmodule Toolnexus.Client do
     # ride out, and retrying only buys backoff before the caller sees their own bug.
     opts
     |> Keyword.put_new(:retries, 0)
-    |> Keyword.drop([:generate])
+    |> Keyword.drop([:generate, :generate_stream])
     |> Keyword.merge(
       base_url: @in_process_base_url,
       style: "openai",
       # An in-process model has no endpoint to authenticate to, so the host must never need a key — but the client resolves one from the environment and fails when it finds none. A sentinel keeps that resolution from ever running. Caught by CI, which has no OPENROUTER_API_KEY; every local run passed because a developer shell has one.
       api_key: "in-process",
-      transport: in_process_transport(generate)
+      transport: in_process_transport(generate, generate_stream)
     )
     |> create()
   end
@@ -939,80 +963,198 @@ defmodule Toolnexus.Client do
   code rather than hand-rolling a second wire adapter. `generate` and its
   request/response shapes are exactly those documented on `create_in_process/1`.
   """
-  @spec in_process_transport((map() -> map())) :: (map() -> map())
-  def in_process_transport(generate) do
+  @spec in_process_transport((map() -> map()) | nil, (map(), (map() -> any()) -> map()) | nil) ::
+          (map() -> map())
+  def in_process_transport(generate, generate_stream \\ nil) do
     fn req ->
       body = req.body || %{}
 
-      if body["stream"] do
-        raise ArgumentError,
-              "toolnexus: create_in_process does not support streaming — `generate` returns a " <>
-                "complete answer. Use run/4, or supply a `:transport` that streams."
+      sem = %{
+        messages: body["messages"] || [],
+        tools: body["tools"],
+        model: body["model"],
+        body: body
+      }
+
+      cond do
+        body["stream"] && generate_stream ->
+          in_process_stream_response(generate_stream, sem)
+
+        body["stream"] ->
+          raise ArgumentError,
+                "toolnexus: create_in_process does not support streaming — `generate` returns a " <>
+                  "complete answer. Use run/4, supply `:generate_stream`, or a `:transport` that streams."
+
+        generate ->
+          in_process_response(generate.(sem) || %{})
+
+        true ->
+          in_process_response(generate_stream.(sem, fn _ -> :ok end) || %{})
+      end
+    end
+  end
+
+  defp answer_tool_calls(answer),
+    do: Map.get(answer, :tool_calls) || Map.get(answer, "tool_calls")
+
+  defp answer_content(answer), do: Map.get(answer, :content) || Map.get(answer, "content") || ""
+
+  defp wire_tool_calls(tool_calls) do
+    tool_calls
+    |> Enum.with_index()
+    |> Enum.map(fn {c, i} ->
+      %{
+        "id" => Map.get(c, :id) || Map.get(c, "id") || "call_#{i}",
+        "type" => "function",
+        "function" => %{
+          "name" => Map.get(c, :name) || Map.get(c, "name"),
+          "arguments" => encode_args(Map.get(c, :arguments) || Map.get(c, "arguments"))
+        }
+      }
+    end)
+  end
+
+  defp wire_usage(answer) do
+    usage = Map.get(answer, :usage) || %{}
+    prompt = Map.get(usage, :prompt_tokens) || Map.get(usage, "prompt_tokens") || 0
+    completion = Map.get(usage, :completion_tokens) || Map.get(usage, "completion_tokens") || 0
+    total = Map.get(usage, :total_tokens) || Map.get(usage, "total_tokens") || prompt + completion
+    %{"prompt_tokens" => prompt, "completion_tokens" => completion, "total_tokens" => total}
+  end
+
+  # The streaming form: the body is a LAZY enumerable the loop consumes as it is produced.
+  # `generate_stream` runs in its own process; each non-empty text event becomes one SSE
+  # `delta.content` chunk the moment it is emitted, every other event is handed to the
+  # loop's emitter as `{:event, ev}` (never through the wire, so it is never executed),
+  # and when it returns the tool calls / fallback content, finish_reason, usage and
+  # [DONE] follow.
+  defp in_process_stream_response(generate_stream, sem) do
+    body =
+      Stream.resource(
+        fn ->
+          owner = self()
+          ref = make_ref()
+
+          {pid, mon} =
+            spawn_monitor(fn ->
+              emit = fn ev -> send(owner, {ref, :ev, ev}) end
+
+              try do
+                send(owner, {ref, :ret, generate_stream.(sem, emit) || %{}})
+              rescue
+                e -> send(owner, {ref, :raise, e, __STACKTRACE__})
+              end
+            end)
+
+          %{ref: ref, pid: pid, mon: mon, texted: false, done: false}
+        end,
+        fn
+          %{done: true} = st ->
+            {:halt, st}
+
+          %{ref: ref, mon: mon} = st ->
+            receive do
+              {^ref, :ev, ev} ->
+                type = to_string(Map.get(ev, :type) || Map.get(ev, "type") || "")
+                delta = Map.get(ev, :delta) || Map.get(ev, "delta")
+
+                cond do
+                  type == "text" and is_binary(delta) and delta != "" ->
+                    {[sse_chunk(%{"content" => delta}, nil)], %{st | texted: true}}
+
+                  type == "text" ->
+                    {[], st}
+
+                  true ->
+                    {[{:event, ev}], st}
+                end
+
+              {^ref, :ret, answer} ->
+                {stream_tail(answer, st.texted), %{st | done: true}}
+
+              {^ref, :raise, e, stack} ->
+                reraise e, stack
+
+              {:DOWN, ^mon, :process, _, reason} ->
+                exit(reason)
+            end
+        end,
+        fn %{pid: pid, mon: mon} ->
+          Process.demonitor(mon, [:flush])
+          if Process.alive?(pid), do: Process.exit(pid, :kill)
+        end
+      )
+
+    {:ok,
+     %{status: 200, headers: %{"content-type" => "text/event-stream"}, body: {:sse_stream, body}}}
+  end
+
+  defp stream_tail(answer, texted) do
+    tool_calls = answer_tool_calls(answer)
+    content = answer_content(answer)
+
+    {head, finish} =
+      cond do
+        tool_calls && tool_calls != [] ->
+          calls =
+            tool_calls
+            |> wire_tool_calls()
+            |> Enum.with_index()
+            |> Enum.map(fn {c, i} -> Map.put(c, "index", i) end)
+
+          {[sse_chunk(%{"tool_calls" => calls}, nil)], "tool_calls"}
+
+        not texted and content != "" ->
+          {[sse_chunk(%{"content" => content}, nil)], "stop"}
+
+        true ->
+          {[], "stop"}
       end
 
-      answer =
-        generate.(%{
-          messages: body["messages"] || [],
-          tools: body["tools"],
-          model: body["model"],
-          body: body
-        }) || %{}
+    head ++
+      [
+        sse_chunk(%{}, finish),
+        "data: " <> Jason.encode!(%{"choices" => [], "usage" => wire_usage(answer)}) <> "\n\n",
+        "data: [DONE]\n\n"
+      ]
+  end
 
-      tool_calls = Map.get(answer, :tool_calls) || Map.get(answer, "tool_calls")
+  defp sse_chunk(delta, finish) do
+    "data: " <>
+      Jason.encode!(%{
+        "choices" => [%{"index" => 0, "delta" => delta, "finish_reason" => finish}]
+      }) <> "\n\n"
+  end
 
-      message =
-        if tool_calls && tool_calls != [] do
-          %{
-            "role" => "assistant",
-            "tool_calls" =>
-              tool_calls
-              |> Enum.with_index()
-              |> Enum.map(fn {c, i} ->
-                %{
-                  "id" => Map.get(c, :id) || Map.get(c, "id") || "call_#{i}",
-                  "type" => "function",
-                  "function" => %{
-                    "name" => Map.get(c, :name) || Map.get(c, "name"),
-                    "arguments" => encode_args(Map.get(c, :arguments) || Map.get(c, "arguments"))
-                  }
-                }
-              end)
-          }
-        else
-          %{
-            "role" => "assistant",
-            "content" => Map.get(answer, :content) || Map.get(answer, "content") || ""
-          }
-        end
+  defp in_process_response(answer) do
+    tool_calls = answer_tool_calls(answer)
 
-      usage = Map.get(answer, :usage) || %{}
-      prompt = Map.get(usage, :prompt_tokens) || Map.get(usage, "prompt_tokens") || 0
-      completion = Map.get(usage, :completion_tokens) || Map.get(usage, "completion_tokens") || 0
+    message =
+      if tool_calls && tool_calls != [] do
+        %{
+          "role" => "assistant",
+          "tool_calls" => wire_tool_calls(tool_calls)
+        }
+      else
+        %{"role" => "assistant", "content" => answer_content(answer)}
+      end
 
-      total =
-        Map.get(usage, :total_tokens) || Map.get(usage, "total_tokens") || prompt + completion
-
-      {:ok,
-       %{
-         status: 200,
-         headers: %{"content-type" => "application/json"},
-         body: %{
-           "choices" => [
-             %{
-               "index" => 0,
-               "message" => message,
-               "finish_reason" =>
-                 if(Map.has_key?(message, "tool_calls"), do: "tool_calls", else: "stop")
-             }
-           ],
-           "usage" => %{
-             "prompt_tokens" => prompt,
-             "completion_tokens" => completion,
-             "total_tokens" => total
+    {:ok,
+     %{
+       status: 200,
+       headers: %{"content-type" => "application/json"},
+       body: %{
+         "choices" => [
+           %{
+             "index" => 0,
+             "message" => message,
+             "finish_reason" =>
+               if(Map.has_key?(message, "tool_calls"), do: "tool_calls", else: "stop")
            }
-         }
-       }}
-    end
+         ],
+         "usage" => wire_usage(answer)
+       }
+     }}
   end
 
   # Pass an already-encoded string through; encode anything else, so a model author
@@ -1510,7 +1652,11 @@ defmodule Toolnexus.Client do
   defp llm_call_sse(client, url, headers, body) do
     case llm_request(client, url, headers, body) do
       {:ok, %Req.Response{status: status, body: data}} when status in 200..299 ->
-        if is_binary(data), do: data, else: error_text(data)
+        cond do
+          is_binary(data) -> data
+          match?({:sse_stream, _}, data) -> data
+          true -> error_text(data)
+        end
 
       {:ok, %Req.Response{} = resp} ->
         raise provider_error(resp)
@@ -2478,21 +2624,39 @@ defmodule Toolnexus.Client do
   defp parse_openai_sse(body, usage, emit) do
     acc0 = %{content: "", slots: %{}, order: [], usage: usage}
 
-    acc =
-      body
-      |> sse_lines()
-      |> Enum.reduce_while(acc0, fn line, acc ->
-        if String.starts_with?(line, "data:") do
-          payload = line |> String.slice(5..-1//1) |> String.trim()
+    lines =
+      case body do
+        {:sse_stream, chunks} ->
+          Stream.flat_map(chunks, fn
+            {:event, _} = ev -> [ev]
+            chunk -> sse_lines(chunk)
+          end)
 
-          if payload == "[DONE]" do
-            {:halt, acc}
-          else
-            {:cont, apply_openai_chunk(acc, safe_parse(payload), emit)}
-          end
-        else
+        _ ->
+          sse_lines(body)
+      end
+
+    acc =
+      lines
+      |> Enum.reduce_while(acc0, fn
+        {:event, ev}, acc ->
+          # A pass-through event from an in-process streaming generate (a thought, a
+          # coding agent's own tool use): reported to the consumer, never executed.
+          emit.(ev)
           {:cont, acc}
-        end
+
+        line, acc ->
+          if String.starts_with?(line, "data:") do
+            payload = line |> String.slice(5..-1//1) |> String.trim()
+
+            if payload == "[DONE]" do
+              {:halt, acc}
+            else
+              {:cont, apply_openai_chunk(acc, safe_parse(payload), emit)}
+            end
+          else
+            {:cont, acc}
+          end
       end)
 
     calls = Enum.map(acc.order, &acc.slots[&1])

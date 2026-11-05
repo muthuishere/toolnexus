@@ -154,6 +154,85 @@ var res = await agent.RunAsync("Draw a fox, then animate it.", tk);
 foreach (var f in res.Files) Console.WriteLine($"{f.From} {f.MimeType} {f.Url}");
 ```
 
+## Embeddable MCP server (SPEC §7C.1)
+
+`tk.McpHandler(cfg)` returns an `McpHttpHandler` you mount on your own HTTP server, behind your own
+TLS, CORS and OAuth. `ServeAsync` is unchanged. Every policy is a hook:
+
+```csharp
+var handler = tk.McpHandler(new McpHandlerConfig
+{
+    Authenticate = ex => VerifyBearer(ex.Header("Authorization")),      // throw => 401 (+ WwwAuthenticate)
+    ListTools    = ctx => ToolsFor((User)ctx.Identity!),                 // per request; others are "tool not found"
+    BeforeCall   = (ctx, tool, args) => Task.FromResult(tool.Annotations?.DestructiveHint == true
+                       ? McpDecision.Confirm("Really delete?")          // elicitation on the same POST
+                       : McpDecision.Allow()),
+    OnCall       = ev => Log(ev.Name, ev.Decision, ev.ResultBytes),
+});
+// HttpListener host:  await handler.HandleAsync(httpListenerContext);
+// any other server:   subclass McpHttpExchange and call handler.HandleAsync(exchange).
+handler.NotifyToolsChanged(); // tools/list_changed on every open GET stream
+```
+
+Tools and hooks read the request through `McpContext` (`Identity`, `Request`, `SessionId`, `Meta` =
+`params._meta`); a tool uses `McpContext.Current`. Also: `ServerInfo`, resources/prompts hooks,
+pluggable `SessionIds`, `Stateless`, `ProtocolVersions` (`2025-06-18` default, `2025-11-25` opt-in).
+`ToolResult.Structured`/`Meta` and `ITool.OutputSchema`/`Annotations` map to `structuredContent`,
+`_meta`, `outputSchema` and `annotations`. Runnable: `dotnet run --project examples/Toolnexus.Examples -- mcphandler`.
+
+### MCP 2026-07-28 on the same handler (SPEC §7C.2, opt-in)
+
+List `"2026-07-28"` in `ProtocolVersions` (alone, or next to `"2025-06-18"` to serve both wires on one
+mount). The 2026 wire is stateless: `server/discover`, header validation, `resultType` + `_meta`
+serverInfo, and MRTR instead of elicitation — a `Confirm` decision or a §10 tool suspension
+(`ToolResult.Pending`) answers `input_required`, and the client's retry reaches the tool as
+`ToolContext.Answer`. Without the opt-in the handler is byte-identical to §7C.1.
+
+```csharp
+var auth = new McpServerAuth                                   // OAuth 2.1 protected resource (RS256/JWKS by default)
+{
+    Issuer = "https://login.example",
+    Scopes = new Dictionary<string, IReadOnlyList<string>> { ["*"] = ["mcp"], ["wipe"] = ["mcp:admin"] },
+};
+var handler = tk.McpHandler(new McpHandlerConfig
+{
+    ProtocolVersions = ["2026-07-28", "2025-06-18"],
+    Authenticate     = auth.AuthenticateAsync,                 // identity = McpPrincipal; 401/403 + exact challenge
+    ListSkills       = _ => Task.FromResult(McpHttpHandler.LoadMcpSkills("skills")), // skills/list, skills/get, skill:// reads
+});
+// route GET /.well-known/oauth-protected-resource[/mcp] to auth.Metadata() (or auth.MetadataAsync(listenerCtx))
+```
+
+`McpServerAuth.Verify` replaces the JWT verifier (opaque tokens, introspection). Bring your own authorization
+server: `McpServerAuth` verifies its tokens. The auto-approving dev authorization server the suite uses is test
+tooling (`tests/Toolnexus.Tests/McpDevAuth.cs`), not part of the library.
+
+## Agents via ACP
+
+toolnexus ships no client per coding agent — three vendor-neutral pieces instead (SPEC §8C):
+
+- `tk.AsMcpServer(cfg?)` serves the toolkit for a local agent on
+  `http://127.0.0.1:<ephemeral>/mcp` behind a fresh bearer token (`Url`, `Token`, `Close()`).
+- `AcpClient.StartAsync(new AcpStartOptions { Command, Arguments, McpServers, SessionMeta,
+  ClientCapsMeta, Model, OnPermission, … })` drives any ACP agent; `McpServers` entries are sent
+  verbatim, so you build whichever entry your agent accepts.
+- `InProcess.Options.GenerateStream = acp.GenerateStreamAsync` streams the agent's answer
+  (`Text` deltas, `Thought`, and its own `ToolCall`/`ToolResult` with `Via = "acp"`).
+
+```csharp
+await using var srv = tk.AsMcpServer();
+using var acp = await AcpClient.StartAsync(new AcpStartOptions
+{
+    Command = "my-agent", Arguments = ["acp"],
+    McpServers = [new Dictionary<string, object?>
+    {
+        ["type"] = "http", ["name"] = "toolnexus", ["url"] = srv.Url,
+        ["headers"] = new[] { new Dictionary<string, object?> { ["name"] = "Authorization", ["value"] = "Bearer " + srv.Token } },
+    }],
+});
+var client = InProcess.CreateClient(new InProcess.Options { Model = "acp", GenerateStream = acp.GenerateStreamAsync });
+```
+
 ## Documentation
 
 Everything else — the full surface, with runnable examples — lives on the docs site:

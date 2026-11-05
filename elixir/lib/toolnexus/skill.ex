@@ -187,6 +187,14 @@ defmodule Toolnexus.Skill do
     end
   end
 
+  @doc false
+  # The §3 frontmatter parse, for `Toolnexus.McpHandler.load_mcp_skills/1`:
+  # `{data, malformed?}` with trimmed string values.
+  def frontmatter(text) do
+    {data, _body, malformed, _detail} = parse_frontmatter(text)
+    {data, malformed}
+  end
+
   # Merge the lenient rescue UNDER the YAML-derived data — it may only fill keys
   # YAML did not supply. `malformed` distinguishes the two skip reasons: a parser
   # that THREW yields `malformed-frontmatter`, anything else `missing-name`.

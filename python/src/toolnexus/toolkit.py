@@ -17,6 +17,7 @@ from .a2a import Agent, agent_tools, parse_agents_config
 from .adapters import to_anthropic, to_gemini, to_openai
 from .builtin import BuiltinsConfig, select_builtins
 from .mcp_serve import (
+    LoopbackMCPServer,
     MCPServeConfig,
     OnCall,
 )
@@ -25,7 +26,8 @@ from .serve import A2AConfig, OnTask, ServeHandle, start_a2a_server
 from .skill import SkillDef, SkillProvider, SkillSource, load_skills
 from .types import McpStatus, Tool, ToolContext, ToolResult
 
-if TYPE_CHECKING:  # typing-only, avoid a runtime import cycle with client.py
+if TYPE_CHECKING:
+    from .mcp_handler import McpHandler, McpHandlerConfig  # typing-only, avoid a runtime import cycle with client.py
     from .client import Client
 
 
@@ -293,9 +295,34 @@ class Toolkit:
             on_task=on_task,
             loop=asyncio.get_running_loop(),
             mcp=mcp_cfg,
-            mcp_tools=self.tools() if mcp_cfg else None,
+            mcp_tools=self.tools() if mcp_cfg is not None else None,
             on_call=on_call,
         )
+
+    def mcp_handler(self, cfg: "Optional[McpHandlerConfig]" = None, **kwargs: Any) -> "McpHandler":
+        """An embeddable streamable-HTTP MCP server for this toolkit (SPEC §7C.1): an
+        ASGI app to mount on the host's own router, plus ``notify_tools_changed()``.
+        Pass an :class:`McpHandlerConfig` or its fields as keywords. ``serve`` is
+        unchanged."""
+        from .mcp_handler import McpHandler, McpHandlerConfig
+
+        if cfg is None:
+            cfg = McpHandlerConfig(**kwargs)
+        elif kwargs:
+            raise TypeError("mcp_handler: pass either cfg or keyword options, not both")
+        return McpHandler(self, cfg)
+
+    def as_mcp_server(self, config: Optional[MCPServeConfig] = None) -> LoopbackMCPServer:
+        """Serve this toolkit for a local agent to call (SPEC §8C): the §7C
+        streamable-HTTP MCP server (same tool mapping, names verbatim — ``skill``
+        stays ``skill``; same ``{name?, version?, tools?}`` filter) on
+        ``127.0.0.1:<ephemeral>/mcp`` behind a fresh bearer token. Returns a handle
+        with ``url``, ``token`` and an idempotent ``close()``. The caller builds
+        whatever ``mcp_servers`` entry its agent accepts, e.g.
+        ``{"type": "http", "name": "toolnexus", "url": h.url, "headers":
+        [{"name": "Authorization", "value": "Bearer " + h.token}]}``.
+        """
+        return LoopbackMCPServer(self.tools, config)
 
     def tools(self) -> list[Tool]:
         with self._lock:

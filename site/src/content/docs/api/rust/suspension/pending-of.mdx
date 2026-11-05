@@ -115,6 +115,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         input_schema: empty_schema(),
         source: ToolSource::Custom,
         hints: None,
+        output_schema: None,
+        annotations: None,
         execute: Arc::new(move |_args, _ctx| {
             let seen = seen.clone();
             Box::pin(async move {

@@ -177,6 +177,60 @@ res = Toolnexus.Client.run(client, "Draw a fox, then animate it.", tk)
 for f <- res.files, do: IO.puts("#{f.from} #{f.mime_type} #{f[:url]}")
 ```
 
+## Embeddable MCP handler
+
+`Toolnexus.mcp_handler(toolkit, cfg)` is a `Plug` you mount on **your** listener (Bandit, Phoenix),
+behind your own TLS, CORS and OAuth. Every policy is a hook: `authenticate` (401 +
+`www_authenticate`), `list_tools` per request (a name outside it is never executed), `before_call`
+(`:allow` / `{:deny, msg}` / `{:confirm, msg}` — confirm elicits on the same POST's SSE stream when
+the client can), `on_call`, `server_info`, resources/prompts, pluggable `session_ids`, `stateless`.
+`Toolnexus.McpHandler.notify_tools_changed/1` pushes `tools/list_changed` to open GET streams.
+SPEC §7C.1; runnable: `mix run examples/mcp_handler.exs`.
+
+```elixir
+handler =
+  Toolnexus.mcp_handler(toolkit,
+    authenticate: fn conn -> MyAuth.verify(conn) end,          # {:ok, identity} | {:error, _}
+    list_tools: fn ctx -> MyTools.for(Toolnexus.McpHandler.identity(ctx)) end,
+    before_call: fn _ctx, tool, _args ->
+      if tool.annotations && tool.annotations.destructive_hint, do: {:confirm, "Sure?"}, else: :allow
+    end
+  )
+
+Bandit.start_link(plug: {Toolnexus.McpHandler, handler}, port: 4000)
+```
+
+Tools may also return `%ToolResult{structured: map, meta: map}` (→ `structuredContent` / `_meta`)
+and declare `output_schema` / `annotations`; absent, the wire is unchanged.
+
+### MCP 2026-07-28 (opt-in)
+
+List `"2026-07-28"` in `protocol_versions` (alone, or next to `"2025-06-18"` for both wires on one
+mount) and the handler also speaks the stateless 2026 wire: `server/discover`, header validation,
+`resultType` + `_meta` serverInfo, and MRTR — a `{:confirm, msg}` or a tool's §10 suspension
+answers `input_required`, and the retry's answer reaches the tool as `ctx.answer`. `initialize`
+never negotiates 2026-07-28; without it in the list the handler is unchanged. `list_skills`
+publishes skills (`skills/list`, `skills/get`, `skill://` reads); `Toolnexus.load_mcp_skills/1`
+builds them from a directory. `Toolnexus.McpServerAuth` makes the handler an OAuth protected
+resource: bearer JWT (RS256, JWKS discovered from the issuer) or your own `verify`, per-tool
+scopes, exact 401/403 challenges, and an RFC 9728 metadata plug. SPEC §7C.2.
+
+```elixir
+auth = Toolnexus.McpServerAuth.new(issuer: "https://login.example", scopes: %{"*" => ["mcp"], "wipe" => ["mcp:admin"]})
+
+handler =
+  Toolnexus.mcp_handler(toolkit,
+    protocol_versions: ["2026-07-28", "2025-06-18"],
+    authenticate: Toolnexus.McpServerAuth.authenticator(auth),  # identity = %Toolnexus.McpPrincipal{}
+    list_skills: fn _ctx -> Toolnexus.load_mcp_skills("skills") end
+  )
+# mount {Toolnexus.McpHandler, handler} at /mcp and
+# Toolnexus.McpServerAuth.metadata(auth) at /.well-known/oauth-protected-resource[/mcp]
+```
+
+Bring your own authorization server: `Toolnexus.McpServerAuth` verifies its tokens. The auto-approving dev
+authorization server the suite uses is test tooling (`test/support/mcp_dev_auth_server.ex`), not part of the library.
+
 ## Documentation
 
 Everything else — the full surface, with runnable examples — lives on the docs site:
@@ -191,3 +245,20 @@ Everything else — the full surface, with runnable examples — lives on the do
 | **Cookbook** | [Zero to agent](https://muthuishere.github.io/toolnexus/cookbook/zero-to-agent/) · [MCP servers](https://muthuishere.github.io/toolnexus/cookbook/mcp-servers/) · [Agent skills](https://muthuishere.github.io/toolnexus/cookbook/agent-skills/) · [Judge](https://muthuishere.github.io/toolnexus/cookbook/judge/) |
 
 Contract across all eight ports: [`SPEC.md`](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
+
+## Agents via ACP (SPEC §8C)
+
+toolnexus ships no per-agent client. Three vendor-neutral pieces compose instead:
+`Toolnexus.Toolkit.as_mcp_server/2` serves the toolkit to a local agent
+(`%{url, token, close}`, loopback + bearer), `Toolnexus.Acp.connect/2` drives any
+ACP agent (`:mcp_servers` sent verbatim, `:session_meta`, `:client_caps_meta`,
+`:model`), and `Toolnexus.Acp.generate_stream/1` plugs into
+`Toolnexus.Client.create_in_process(generate_stream: …)` for incremental streaming.
+
+```elixir
+srv = Toolnexus.Toolkit.as_mcp_server(tk)
+entry = %{"type" => "http", "name" => "toolnexus", "url" => srv.url,
+          "headers" => [%{"name" => "Authorization", "value" => "Bearer " <> srv.token}]}
+{:ok, acp} = Toolnexus.Acp.connect(["my-agent", "acp"], mcp_servers: [entry])
+client = Toolnexus.Client.create_in_process(model: "acp", generate_stream: Toolnexus.Acp.generate_stream(acp))
+```

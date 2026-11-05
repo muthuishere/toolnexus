@@ -25,12 +25,18 @@
     :concurrency-safe  (fn [args] bool) — decides per call whether this tool may
                run alongside other safe calls of one model response (SPEC §8
                Tool scheduling). Absent ⇒ safe only when `:hints :read-only`.
+    :output-schema  JSON Schema of the result's `:structured` (SPEC §1);
+               MCP serve advertises it as `outputSchema`.
+    :annotations    MCP tool annotations, wire-named:
+               {:title :readOnlyHint :destructiveHint :idempotentHint
+                :openWorldHint} — passed verbatim by `mcp-handler` (§7C.1).
     :context?  true when `execute` has the (args ctx) arity and wants the loop's
                ToolContext on EVERY call — `{:call-id :cancel}` (plus `:answer`
                on a §10 re-run). Absent, the loop calls (execute args) exactly as
                before: there is no portable way to ask a fn its arity, and a
                single-arity tool handed a ctx would fail."
-  [{:keys [name description input-schema source execute hints context? concurrency-safe]}]
+  [{:keys [name description input-schema source execute hints context? concurrency-safe
+           output-schema annotations]}]
   {:pre [(some? name) (fn? execute)]}
   (cond-> {:name        (str name)
            :description (or description "")
@@ -39,7 +45,10 @@
            :execute     execute}
     hints    (assoc :hints hints)
     context? (assoc :context? true)
-    concurrency-safe (assoc :concurrency-safe concurrency-safe)))
+    concurrency-safe (assoc :concurrency-safe concurrency-safe)
+    ;; SPEC §1 / §7C.1 — both absent ⇒ the map is byte-identical to before.
+    output-schema (assoc :output-schema output-schema)
+    annotations (assoc :annotations annotations)))
 
 (defn concurrency-safe?
   "SPEC §8 \"Tool scheduling\" — may a call to tool `t` with `args` run alongside
@@ -73,6 +82,15 @@
   ([output metadata]
    (cond-> {:output (str output) :isError true}
      metadata (assoc :metadata metadata))))
+
+(defn with-structured
+  "SPEC §1 — attach a machine-readable `structured` value (MCP
+  `structuredContent`) and/or wire `meta` (MCP `_meta`). nil ⇒ unchanged."
+  ([result structured] (with-structured result structured nil))
+  ([result structured meta]
+   (cond-> result
+     (some? structured) (assoc :structured structured)
+     (some? meta)       (assoc :meta meta))))
 
 (defn with-parts
   "SPEC §1B — attach non-text `parts` to a ToolResult.
