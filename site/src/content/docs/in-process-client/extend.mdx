@@ -3,7 +3,7 @@ title: "Extend it — your agent, isolation, models, permissions"
 description: "How to grow the in-process recipes yourself — add another ACP agent or CLI, isolate it from the agent's own config, list and pick models over ACP, and decide permission requests."
 ---
 
-import { Aside } from '@astrojs/starlight/components';
+import { Tabs, TabItem, Aside } from '@astrojs/starlight/components';
 
 <Aside type="tip" title="Why you need this">
 The recipes are deliberately small so you can own them. Everything an agent integration needs
@@ -11,20 +11,23 @@ beyond "send a prompt, get text back" is a few lines on top of them, and lives i
 next to the agent version you actually run. Nothing here needs a toolnexus release.
 </Aside>
 
-The snippets below extend the JavaScript [ACP recipe](/toolnexus/in-process-client/acp-agent/),
-which returns `{ client, call, session, close }` so you can extend it without editing it. The same
-moves apply to the Python and Go recipes (`call` and the `session/new` result are right there in the driver).
+Everything below is an option on the ACP client (`loadACP` and its per-port equivalents) from the
+[ACP recipe](/toolnexus/in-process-client/acp-agent/), passed through to the agent untouched.
+The [recipe at the end](#the-recipe-isolation-model-and-a-permission-policy) uses all of them, in all eight ports.
 
 ## Add your own agent
 
-There is nothing to register. An ACP agent is a launch command:
+There is nothing to register. An ACP agent is a launch command plus a few pass-through options:
 
-| what changes per agent | where it goes |
+| what changes per agent | `loadACP` option |
 |---|---|
 | how to start it (`copilot --acp`, `opencode acp`, a binary path) | `command` + `args` |
 | isolation and auth that live in the environment | `env` |
-| per-session options the agent reads from `session/new` | `meta` (becomes `_meta`) |
-| anything it needs that ACP does not carry (Devin's `.mcp.json`, a prompt hint) | write it before `acpClient(...)`, in the `cwd` you pass |
+| per-session options the agent reads from `session/new` | `sessionMeta` (sent as `_meta`) |
+| vendor flags on `initialize` | `clientCapsMeta` (sent as `clientCapabilities._meta`) |
+| which model | `model` |
+| which of its tool calls to allow | `onPermission` |
+| anything ACP does not carry (Devin's `.mcp.json`, a prompt hint) | write it before `loadACP(...)`, in the `cwd` you pass |
 
 A CLI with no ACP mode goes in the [one-shot recipe](/toolnexus/in-process-client/one-shot-cli/)
 the same way: it is just `command` + `args`. Keep a small table of your agents in your own config,
@@ -34,7 +37,7 @@ for example:
 const AGENTS = {
   claude: {
     command: "npx", args: ["-y", "@agentclientprotocol/claude-agent-acp@0.100.0"],
-    meta: { claudeCode: { options: { settingSources: [], strictMcpConfig: true, plugins: [], skills: [], tools: [] } } },
+    sessionMeta: { claudeCode: { options: { settingSources: [], strictMcpConfig: true, plugins: [], skills: [], tools: [] } } },
   },
   opencode: {
     command: "opencode", args: ["acp"],
@@ -46,7 +49,7 @@ const AGENTS = {
   copilot: { command: "copilot", args: ["--acp", "--disable-builtin-mcps", "--no-custom-instructions"] },
 }
 
-const { client, close } = await acpClient({ ...AGENTS.claude, mcpUrl: `${server.url}/mcp` })
+const agent = await loadACP({ ...AGENTS.claude, mcpServers: [toolnexusEntry], permissionTimeoutMs: 300_000 })
 ```
 
 ## Isolation
@@ -63,91 +66,587 @@ it do things you did not ask for. The knobs per agent, with measured numbers, ar
 3. **Do not swap `HOME` / config dirs** to isolate. Subscription logins live there or in a
    keychain entry keyed by it; it breaks login and, for opencode, measured *worse*.
 
-Check it worked: ask a trivial question and compare the agent's own token count
-(`usage_update` notifications, or `usage` in the `session/prompt` result) with and without the knob.
+Check it worked: ask a trivial question and compare the agent's own token count with and without
+the knob. `onUpdate` sees every raw `session/update`, including `usage_update`; the recipe below
+logs those to stderr.
 
 ## Model selection
 
-Agents list their models in the `session/new` result under `configOptions`, as the entry whose
-`category` is `"model"`, and switch with `session/set_config_option`:
+Pass `model` to `loadACP`. toolnexus sends it unchanged after `session/new`, first as
+`session/set_config_option {configId: "model", value}` and, if the agent rejects that, as
+`session/set_model {modelId}`; if both fail, `loadACP` fails. It never lists or validates models.
+Verified live: Claude Code with `model: "haiku"` reported `claude-haiku-5-5` in its `usage_update`s.
 
-```js title="acp_models.mjs"
-// Model discovery and selection over ACP: add to acp_agent.mjs, call after session/new.
-
-// Every model the agent offers, from the session/new result (flat or grouped values).
-export function listModels(session) {
-  const opt = (session.configOptions ?? []).find((o) => o.category === "model")
-  if (!opt) return { configId: null, current: null, models: [] }
-  const flat = (opt.options ?? []).flatMap((o) => (o.options ? o.options : [o])) // groups hold options
-  return { configId: opt.id, current: opt.currentValue, models: flat.map((o) => o.value) }
-}
-
-// Switch the session's model and refuse unless the agent confirms it.
-export async function setModel(call, sessionId, configId, value) {
-  const r = await call("session/set_config_option", { sessionId, configId, value })
-  const now = (r?.configOptions ?? []).find((o) => o.id === configId)?.currentValue
-  if (now !== value) throw new Error(`agent did not switch model to ${value} (now ${now})`)
-}
-```
-
-```js title="main.mjs"
-// usage: node main_models.mjs npx -y @agentclientprotocol/claude-agent-acp@0.100.0
-import { createToolkit } from "toolnexus"
-import { acpClient } from "./acp_agent.mjs"
-import { listModels, setModel } from "./acp_models.mjs"
-
-const [command, ...args] = process.argv.slice(2)
-const { client, call, session, close } = await acpClient({ command, args })
-const { configId, current, models } = listModels(session)
-console.log(`current: ${current}; offered: ${models.join(", ")}`)
-if (models.includes("haiku")) await setModel(call, session.sessionId, configId, "haiku")
-
-const result = await client.run("Reply with just: ok", { toolkit: await createToolkit({ builtins: false }) })
-console.log(result.text)
-close()
-```
-
-Verified live against Claude Code (`@agentclientprotocol/claude-agent-acp@0.100.0`), which offered
-13 models (`default, opus, fable, sonnet, haiku`, and full ids) on 2026-11-05. Older agents use a
-top-level `models` object and `session/set_model` instead; fall back to them if `configOptions` is
-missing. Always check `currentValue` after setting: some agents (Copilot) only offer `auto`, and
-Codex lists models a ChatGPT account cannot use.
+To **list** what an agent offers, read the `session/new` result yourself: `configOptions`, the
+entry with `category: "model"` (values flat or grouped), or a top-level `models` object on older
+agents. `loadACP` does not expose that result, so this is a few lines of your own ACP code (the
+[per-agent notes](/toolnexus/in-process-client/acp-agent/#listing-and-choosing-models) have what
+each agent returned). Always check what you got: some agents (Copilot) only offer `auto`, and Codex
+lists models a ChatGPT account cannot use.
 
 ## Permissions
 
 ACP agents ask before running a tool: a `session/request_permission` request with `options`, each
-with a `kind` (`allow_once`, `allow_always`, `reject_once`, `reject_always`). The recipe allows
-everything, which is right only when the agent has nothing but your tools. A policy is a function:
-
-```js title="permissions.mjs"
-// A permission policy: replace the auto-allow branch in acp_agent.mjs's line handler with
-//   } else if (msg.method === "session/request_permission") {
-//     send({ id: msg.id, result: { outcome: decidePermission(msg.params, ["toolnexus"]) } })
-// Allows tool calls whose title names one of your served tools, rejects everything else.
-export function decidePermission(params, allowedPrefixes) {
-  const title = params.toolCall?.title ?? ""
-  const ok = allowedPrefixes.some((p) => title.includes(p))
-  const pick = params.options.find((o) => o.kind.startsWith(ok ? "allow" : "reject"))
-  return pick ? { outcome: "selected", optionId: pick.optionId } : { outcome: "cancelled" }
-}
-```
+with a `kind` (`allow_once`, `allow_always`, `reject_once`, `reject_always`). With no hook, the
+client picks the first `allow*` option, which is right only when the agent has nothing but your
+tools. A policy is the `onPermission` hook: it gets the raw request params and returns the
+`optionId` to select; returning nothing answers with the first `reject*` option (or `cancelled`
+when the agent offered none).
 
 Other policies follow the same shape: ask a human through your UI and reply when they answer
-(the agent waits), log every request, or route the decision to a
-[judge](/toolnexus/cookbook/judge/). Answer `{ outcome: "cancelled" }` to refuse without picking
-an option. Isolation is still the better first line: an agent with no shell tool cannot ask to
-run one.
+(the agent waits, up to the turn timeout), log every request, or route the decision to a
+[judge](/toolnexus/cookbook/judge/). Isolation is still the better first line: an agent with no
+shell tool cannot ask to run one.
+
+## The recipe: isolation, model and a permission policy
+
+Claude Code's isolation `_meta`, the model from `ACP_MODEL` when set, a policy that allows only tool
+calls whose title names one of your toolkit's tools, and `usage_update`s logged to stderr.
+
+{/* recipe:extend/main */}
+<Tabs syncKey="lang">
+<TabItem label="JavaScript">
+```js title="main.mjs"
+// usage: node main.mjs npx -y @agentclientprotocol/claude-agent-acp@0.100.0
+import { createInProcessClient, createToolkit, defineTool, loadACP } from "toolnexus"
+
+const add = defineTool({
+  name: "add", description: "Add two numbers.",
+  inputSchema: { type: "object", properties: { a: { type: "number" }, b: { type: "number" } }, required: ["a", "b"] },
+  run: ({ a, b }) => `${a + b}`,
+})
+const toolkit = await createToolkit({ builtins: false, extraTools: [add] })
+const server = await toolkit.asMcpServer()
+
+// Permission policy: allow tool calls whose title names one of your tools, reject the rest.
+// Return an optionId to pick it; return undefined to answer with the first reject option.
+function allowOnly(names) {
+  return (params) => {
+    const title = params.toolCall?.title ?? ""
+    const ok = names.some((n) => title.includes(n))
+    return params.options.find((o) => o.kind.startsWith(ok ? "allow" : "reject"))?.optionId
+  }
+}
+
+const [command, ...args] = process.argv.slice(2)
+const agent = await loadACP({
+  command, args,
+  mcpServers: [{ type: "http", name: "toolnexus", url: server.url,
+                 headers: [{ name: "Authorization", value: `Bearer ${server.token}` }] }],
+  // Agent-specific knobs are opaque data: this one isolates Claude Code (see the per-agent notes).
+  sessionMeta: { claudeCode: { options: { settingSources: [], strictMcpConfig: true, plugins: [], skills: [], tools: [] } } },
+  model: process.env.ACP_MODEL,                    // e.g. "haiku"; passed through, never validated
+  onPermission: allowOnly(toolkit.tools().map((t) => t.name)),
+  onUpdate: (u) => { if (u.update?.sessionUpdate === "usage_update") console.error("[usage]", JSON.stringify(u.update)) },
+  permissionTimeoutMs: 300_000,
+})
+
+const client = createInProcessClient({ model: command, generate: agent.generate })
+try {
+  const result = await client.run("Use the add tool to add 17 and 25. Reply with just the sum.", { toolkit: await createToolkit({ builtins: false }) })
+  console.log(result.text)
+} finally {
+  await agent.close()
+  await server.close()
+}
+```
+</TabItem>
+<TabItem label="Python">
+```python title="main.py"
+# usage: python main.py npx -y @agentclientprotocol/claude-agent-acp@0.100.0
+import asyncio
+import json
+import os
+import sys
+
+from toolnexus import ACPOptions, create_in_process_client, create_toolkit, define_tool, load_acp
+
+
+def add(a: float, b: float) -> str:
+    """Add two numbers."""
+    return str(int(a + b))
+
+
+def allow_only(names):
+    """Permission policy: allow tool calls whose title names one of your tools, reject the rest.
+    Return an optionId to pick it; return None to answer with the first reject option."""
+    def decide(params):
+        title = (params.get("toolCall") or {}).get("title") or ""
+        ok = any(n in title for n in names)
+        return next((o["optionId"] for o in params["options"] if o["kind"].startswith("allow" if ok else "reject")), None)
+    return decide
+
+
+def log_usage(params):
+    if params.get("update", {}).get("sessionUpdate") == "usage_update":
+        print("[usage]", json.dumps(params["update"]), file=sys.stderr)
+
+
+async def main():
+    toolkit = await create_toolkit(builtins=False, extra_tools=[define_tool(add, name="add")])
+    server = toolkit.as_mcp_server()
+    agent = load_acp(ACPOptions(
+        command=sys.argv[1], args=sys.argv[2:],
+        mcp_servers=[{"type": "http", "name": "toolnexus", "url": server.url,
+                      "headers": [{"name": "Authorization", "value": "Bearer " + server.token}]}],
+        # Agent-specific knobs are opaque data: this one isolates Claude Code (see the per-agent notes).
+        session_meta={"claudeCode": {"options": {"settingSources": [], "strictMcpConfig": True,
+                                                 "plugins": [], "skills": [], "tools": []}}},
+        model=os.environ.get("ACP_MODEL"),  # e.g. "haiku"; passed through, never validated
+        on_permission=allow_only([t.name for t in toolkit.tools()]),
+        on_update=log_usage,
+        permission_timeout=300,
+    ))
+    client = create_in_process_client(model=sys.argv[1], generate=agent.generate)
+    try:
+        result = await client.run("Use the add tool to add 17 and 25. Reply with just the sum.",
+                                  await create_toolkit(builtins=False))
+        print(result.text)
+    finally:
+        agent.close()
+        server.close()
+
+
+asyncio.run(main())
+```
+</TabItem>
+<TabItem label="Go">
+```go title="main.go"
+// usage: go run . npx -y @agentclientprotocol/claude-agent-acp@0.100.0
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"os"
+	"strconv"
+	"strings"
+	"time"
+
+	tn "github.com/muthuishere/toolnexus/golang"
+)
+
+type addArgs struct {
+	A float64 `json:"a"`
+	B float64 `json:"b"`
+}
+
+// allowOnly is a permission policy: allow tool calls whose title names one of your tools,
+// reject the rest. Return an optionId to pick it; "" answers with the first reject option.
+func allowOnly(names []string) func(context.Context, json.RawMessage) (string, error) {
+	return func(_ context.Context, raw json.RawMessage) (string, error) {
+		var p struct {
+			ToolCall struct{ Title string } `json:"toolCall"`
+			Options  []struct{ OptionID, Kind string }
+		}
+		if err := json.Unmarshal(raw, &p); err != nil {
+			return "", err
+		}
+		want := "reject"
+		for _, n := range names {
+			if strings.Contains(p.ToolCall.Title, n) {
+				want = "allow"
+			}
+		}
+		for _, o := range p.Options {
+			if strings.HasPrefix(o.Kind, want) {
+				return o.OptionID, nil
+			}
+		}
+		return "", nil
+	}
+}
+
+func main() {
+	ctx := context.Background()
+	add := tn.NativeToolReflect("add", "Add two numbers.", func(_ context.Context, in addArgs) (string, error) {
+		return strconv.FormatFloat(in.A+in.B, 'f', -1, 64), nil
+	})
+	toolkit, err := tn.CreateToolkit(ctx, tn.Options{Builtins: false, ExtraTools: []tn.Tool{add}})
+	if err != nil {
+		panic(err)
+	}
+	server, err := toolkit.AsMCPServer(nil)
+	if err != nil {
+		panic(err)
+	}
+	defer server.Close()
+
+	names := []string{}
+	for _, t := range toolkit.Tools() {
+		names = append(names, t.Name)
+	}
+	agent, err := tn.LoadACP(ctx, tn.ACPOptions{
+		Command: os.Args[1], Args: os.Args[2:],
+		MCPServers: []map[string]any{{"type": "http", "name": "toolnexus", "url": server.URL,
+			"headers": []map[string]any{{"name": "Authorization", "value": "Bearer " + server.Token}}}},
+		// Agent-specific knobs are opaque data: this one isolates Claude Code (see the per-agent notes).
+		SessionMeta: map[string]any{"claudeCode": map[string]any{"options": map[string]any{
+			"settingSources": []any{}, "strictMcpConfig": true, "plugins": []any{}, "skills": []any{}, "tools": []any{}}}},
+		Model:        os.Getenv("ACP_MODEL"), // e.g. "haiku"; passed through, never validated
+		OnPermission: allowOnly(names),
+		OnUpdate: func(raw json.RawMessage) {
+			if strings.Contains(string(raw), `"sessionUpdate":"usage_update"`) {
+				fmt.Fprintln(os.Stderr, "[usage]", string(raw))
+			}
+		},
+		PermissionTimeout: 5 * time.Minute,
+		RequestTimeout:    5 * time.Minute,
+	})
+	if err != nil {
+		panic(err)
+	}
+	defer agent.Close()
+
+	client := tn.CreateInProcessClient(tn.InProcessOptions{Model: os.Args[1], GenerateStream: agent.GenerateStream})
+	empty, err := tn.CreateToolkit(ctx, tn.Options{Builtins: false})
+	if err != nil {
+		panic(err)
+	}
+	result, err := client.Run(ctx, "Use the add tool to add 17 and 25. Reply with just the sum.", empty)
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println(result.Text)
+}
+```
+</TabItem>
+<TabItem label="Java">
+```java title="Main.java"
+// run: java -cp 'lib/*' Main.java npx -y @agentclientprotocol/claude-agent-acp@0.100.0
+//      (lib/ = toolnexus-0.25.0.jar + its runtime deps; optional env ACP_MODEL, e.g. haiku)
+import io.github.muthuishere.toolnexus.InProcess;
+import io.github.muthuishere.toolnexus.LlmClient;
+import io.github.muthuishere.toolnexus.McpServe;
+import io.github.muthuishere.toolnexus.NativeTool;
+import io.github.muthuishere.toolnexus.Tool;
+import io.github.muthuishere.toolnexus.Toolkit;
+import io.github.muthuishere.toolnexus.acp.AcpClient;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+
+import java.util.List;
+import java.util.Map;
+import java.util.function.Function;
+
+public class Main {
+    // Permission policy: allow tool calls whose title names one of your tools, reject the rest.
+    // Return an optionId to pick it; return null to answer with the first reject option.
+    @SuppressWarnings("unchecked")
+    static Function<Map<String, Object>, String> allowOnly(List<String> names) {
+        return params -> {
+            Map<String, Object> toolCall = (Map<String, Object>) params.get("toolCall");
+            String title = toolCall == null || toolCall.get("title") == null ? "" : toolCall.get("title").toString();
+            String want = names.stream().anyMatch(title::contains) ? "allow" : "reject";
+            for (Object o : (List<Object>) params.get("options")) {
+                Map<String, Object> opt = (Map<String, Object>) o;
+                if (String.valueOf(opt.get("kind")).startsWith(want)) return (String) opt.get("optionId");
+            }
+            return null;
+        };
+    }
+
+    public static void main(String[] argv) throws Exception {
+        NativeTool add = NativeTool.of("add", "Add two numbers.",
+                Map.of("type", "object",
+                        "properties", Map.of("a", Map.of("type", "number"), "b", Map.of("type", "number")),
+                        "required", List.of("a", "b")),
+                args -> String.valueOf(((Number) args.get("a")).intValue() + ((Number) args.get("b")).intValue()));
+        ObjectMapper json = new ObjectMapper();
+
+        try (Toolkit toolkit = Toolkit.create(new Toolkit.Options().builtins(false).extraTools(add));
+             McpServe.LocalServer server = toolkit.asMcpServer();
+             AcpClient agent = AcpClient.start(new AcpClient.Options()
+                     .command(List.of(argv))
+                     .mcpServers(List.of(Map.of("type", "http", "name", "toolnexus", "url", server.url(),
+                             "headers", List.of(Map.of("name", "Authorization", "value", "Bearer " + server.token())))))
+                     // Agent-specific knobs are opaque data: this one isolates Claude Code (see the per-agent notes).
+                     .sessionMeta(Map.of("claudeCode", Map.of("options", Map.of("settingSources", List.of(),
+                             "strictMcpConfig", true, "plugins", List.of(), "skills", List.of(), "tools", List.of()))))
+                     .model(System.getenv("ACP_MODEL")) // e.g. "haiku"; null = unset; passed through, never validated
+                     .onPermission(allowOnly(toolkit.tools().stream().map(Tool::name).toList()))
+                     .onUpdate(u -> {
+                         if (u.get("update") instanceof Map<?, ?> up && "usage_update".equals(up.get("sessionUpdate"))) {
+                             try { System.err.println("[usage] " + json.writeValueAsString(up)); } catch (Exception ignored) { }
+                         }
+                     })
+                     .timeoutMs(300_000));
+             Toolkit empty = Toolkit.create(new Toolkit.Options().builtins(false))) {
+
+            LlmClient client = InProcess.createClient(new InProcess.Options().model(argv[0]).generate(agent));
+            LlmClient.RunResult result = client.run("Use the add tool to add 17 and 25. Reply with just the sum.", empty);
+            System.out.println(result.text);
+        }
+    }
+}
+```
+</TabItem>
+<TabItem label="C#">
+```csharp title="Program.cs"
+// usage: dotnet run -- npx -y @agentclientprotocol/claude-agent-acp@0.100.0   (dotnet add package Toolnexus)
+using System.Text.Json;
+using Toolnexus;
+using Toolnexus.Acp;
+
+var add = NativeTool.Of("add", "Add two numbers.",
+    new Dictionary<string, object?>
+    {
+        ["type"] = "object",
+        ["properties"] = new Dictionary<string, object?> { ["a"] = new { type = "number" }, ["b"] = new { type = "number" } },
+        ["required"] = new[] { "a", "b" },
+    },
+    args => $"{Convert.ToDouble(args["a"]?.ToString()) + Convert.ToDouble(args["b"]?.ToString())}");
+await using var toolkit = await Toolkit.CreateAsync(new Toolkit.Options { Builtins = false, ExtraTools = [add] });
+await using var server = toolkit.AsMcpServer();
+
+// Permission policy: allow tool calls whose title names one of your tools, reject the rest.
+// Return an optionId to pick it; return null to answer with the first reject option.
+static Func<JsonElement, string?> AllowOnly(IEnumerable<string> names) => p =>
+{
+    var title = p.TryGetProperty("toolCall", out var tc) && tc.TryGetProperty("title", out var t) ? t.GetString() ?? "" : "";
+    var ok = names.Any(title.Contains);
+    foreach (var o in p.GetProperty("options").EnumerateArray())
+        if (o.GetProperty("kind").GetString()!.StartsWith(ok ? "allow" : "reject")) return o.GetProperty("optionId").GetString();
+    return null;
+};
+
+using var agent = await AcpClient.StartAsync(new AcpStartOptions
+{
+    Command = args[0], Arguments = args[1..],
+    McpServers = [new Dictionary<string, object?>
+    {
+        ["type"] = "http", ["name"] = "toolnexus", ["url"] = server.Url,
+        ["headers"] = new[] { new Dictionary<string, object?> { ["name"] = "Authorization", ["value"] = "Bearer " + server.Token } },
+    }],
+    // Agent-specific knobs are opaque data: this one isolates Claude Code (see the per-agent notes).
+    SessionMeta = new Dictionary<string, object?>
+    {
+        ["claudeCode"] = new { options = new { settingSources = Array.Empty<string>(), strictMcpConfig = true,
+                                               plugins = Array.Empty<string>(), skills = Array.Empty<string>(), tools = Array.Empty<string>() } },
+    },
+    Model = Environment.GetEnvironmentVariable("ACP_MODEL"), // e.g. "haiku"; passed through, never validated
+    OnPermission = AllowOnly(toolkit.Tools().Select(t => t.Name).ToList()),
+    OnUpdate = u =>
+    {
+        if (u.TryGetProperty("update", out var up) && up.TryGetProperty("sessionUpdate", out var k) && k.GetString() == "usage_update")
+            Console.Error.WriteLine($"[usage] {up.GetRawText()}");
+    },
+    PromptTimeout = TimeSpan.FromMinutes(5),
+});
+
+var client = InProcess.CreateClient(new InProcess.Options { Model = args[0], Generate = agent.Generate });
+await using var empty = await Toolkit.CreateAsync(new Toolkit.Options { Builtins = false });
+var result = await client.RunAsync("Use the add tool to add 17 and 25. Reply with just the sum.", empty);
+Console.WriteLine(result.Text);
+```
+</TabItem>
+<TabItem label="Elixir">
+```elixir title="main.exs"
+# usage: elixir main.exs npx -y @agentclientprotocol/claude-agent-acp@0.100.0
+Mix.install([{:toolnexus, "~> 0.25"}])
+
+add =
+  Toolnexus.define_tool(
+    name: "add",
+    description: "Add two numbers.",
+    input_schema: %{"type" => "object", "properties" => %{"a" => %{"type" => "number"}, "b" => %{"type" => "number"}}, "required" => ["a", "b"]},
+    execute: fn %{"a" => a, "b" => b} -> "#{a + b}" end
+  )
+
+toolkit = Toolnexus.create_toolkit!(builtins: false, extra_tools: [add])
+server = Toolnexus.Toolkit.as_mcp_server(toolkit)
+
+# Permission policy: allow tool calls whose title names one of your tools, reject the rest.
+# Return an optionId to pick it; return nil to answer with the first reject option.
+allow_only = fn names ->
+  fn params ->
+    title = get_in(params, ["toolCall", "title"]) || ""
+    if Enum.any?(names, &String.contains?(title, &1)),
+      do: Enum.find_value(params["options"], &(String.starts_with?(&1["kind"], "allow") && &1["optionId"])),
+      else: nil
+  end
+end
+
+argv = System.argv()
+model_opt = if m = System.get_env("ACP_MODEL"), do: [model: m], else: [] # e.g. "haiku"; never validated
+
+{:ok, agent} =
+  Toolnexus.Acp.connect(argv,
+    [
+      mcp_servers: [%{"type" => "http", "name" => "toolnexus", "url" => server.url,
+                      "headers" => [%{"name" => "Authorization", "value" => "Bearer " <> server.token}]}],
+      # Agent-specific knobs are opaque data: this one isolates Claude Code (see the per-agent notes).
+      session_meta: %{"claudeCode" => %{"options" => %{"settingSources" => [], "strictMcpConfig" => true,
+                                                       "plugins" => [], "skills" => [], "tools" => []}}},
+      on_permission: allow_only.(Enum.map(toolkit.tools, & &1.name)),
+      on_update: fn u ->
+        if get_in(u, ["update", "sessionUpdate"]) == "usage_update",
+          do: IO.puts(:stderr, "[usage] " <> JSON.encode!(u["update"]))
+      end,
+      timeout: 300_000
+    ] ++ model_opt
+  )
+
+client = Toolnexus.Client.create_in_process(model: hd(argv), generate: Toolnexus.Acp.generate(agent))
+
+try do
+  result = Toolnexus.Client.run(client, "Use the add tool to add 17 and 25. Reply with just the sum.",
+                                Toolnexus.create_toolkit!(builtins: false))
+  IO.puts(result.text)
+after
+  Toolnexus.Acp.close(agent)
+  server.close.()
+end
+```
+</TabItem>
+<TabItem label="Clojure">
+```clojure title="main.clj"
+;; deps.edn: {:deps {net.clojars.muthuishere/toolnexus {:mvn/version "0.25.0"}}}
+;; run:      clojure -M main.clj npx -y @agentclientprotocol/claude-agent-acp@0.100.0
+(ns main
+  (:require [clojure.string :as str]
+            [koine.json :as json] ; ships with toolnexus
+            [toolnexus.acp :as acp]
+            [toolnexus.client :as client]
+            [toolnexus.core :as tn]
+            [toolnexus.native :as native]
+            [toolnexus.serve :as serve]))
+
+(def add
+  (native/native-tool
+   {:name "add" :description "Add two numbers."
+    :input-schema {:type "object" :properties {:a {:type "number"} :b {:type "number"}} :required ["a" "b"]}
+    :run (fn [{:keys [a b]}] (str (+ a b)))}))
+(def toolkit (tn/build {:builtins false :tools [add]}))
+(def server (serve/as-mcp-server toolkit))
+
+;; Permission policy: allow tool calls whose title names one of your tools, reject the rest.
+;; Return an optionId to pick it; return nil to answer with the first reject option.
+(defn allow-only [names]
+  (fn [params]
+    (let [title (str (get-in params [:toolCall :title]))
+          ok?   (some #(str/includes? title %) names)]
+      (some #(when (str/starts-with? (str (:kind %)) (if ok? "allow" "reject")) (:optionId %))
+            (:options params)))))
+
+(def command (vec *command-line-args*))
+(def acp-agent
+  (acp/connect command
+               (cond-> {:mcp-servers [{:type "http" :name "toolnexus" :url (:url server)
+                                       :headers [{:name "Authorization" :value (str "Bearer " (:token server))}]}]
+                        ;; Agent-specific knobs are opaque data: this one isolates Claude Code.
+                        :session-meta {:claudeCode {:options {:settingSources [] :strictMcpConfig true
+                                                              :plugins [] :skills [] :tools []}}}
+                        :on-permission (allow-only (tn/tool-names toolkit))
+                        :on-update (fn [u] (when (= "usage_update" (get-in u [:update :sessionUpdate]))
+                                             (binding [*out* *err*] (println "[usage]" (json/write-str (:update u))))))
+                        :permission-timeout 300000}
+                 (System/getenv "ACP_MODEL") (assoc :model (System/getenv "ACP_MODEL"))))) ; e.g. "haiku"; never validated
+
+(def c (client/create-in-process-client {:model (first command) :generate (acp/generate acp-agent)}))
+(try
+  (println (:text (client/run c "Use the add tool to add 17 and 25. Reply with just the sum."
+                              {:toolkit (tn/build {:builtins false})})))
+  (finally
+    (acp/close acp-agent)
+    ((:close server))
+    (shutdown-agents)))
+```
+</TabItem>
+<TabItem label="Rust">
+```rust title="main.rs"
+// Cargo.toml:
+//   toolnexus = { version = "0.25", features = ["serve"] }  # "serve" is on by default
+//   tokio = { version = "1", features = ["full"] }
+//   serde_json = "1"
+// run: cargo run -- npx -y @agentclientprotocol/claude-agent-acp@0.100.0
+use std::sync::Arc;
+use std::time::Duration;
+
+use serde_json::json;
+use toolnexus::acp::{AcpClient, AcpOptions, PermissionHandler, PermissionOutcome, permission_handler};
+use toolnexus::client::{InProcessOptions, acp_generate, create_in_process_client};
+use toolnexus::{BuiltinsConfig, ToolkitOptions, create_toolkit, define_tool};
+
+// Permission policy: allow tool calls whose title names one of your tools, reject the rest.
+// Reject answers with the agent's first reject option.
+fn allow_only(names: Vec<String>) -> PermissionHandler {
+    permission_handler(move |req| {
+        let title = req.tool_call["title"].as_str().unwrap_or_default().to_string();
+        let ok = names.iter().any(|n| title.contains(n.as_str()));
+        let allow = req.first_allow().map(|o| o.option_id.clone());
+        async move {
+            match allow {
+                Some(id) if ok => PermissionOutcome::Selected(id),
+                _ => PermissionOutcome::Reject,
+            }
+        }
+    })
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let schema = json!({"type": "object", "properties": {"a": {"type": "number"}, "b": {"type": "number"}}, "required": ["a", "b"]});
+    let add = define_tool("add", "Add two numbers.", Some(schema), |a, _ctx| async move {
+        Ok::<_, String>((a["a"].as_f64().unwrap_or(0.0) + a["b"].as_f64().unwrap_or(0.0)).to_string())
+    });
+    let off = || Some(BuiltinsConfig::off());
+    let toolkit = create_toolkit(ToolkitOptions { builtins: off(), extra_tools: vec![add], ..Default::default() }).await?;
+    let server = toolkit.as_mcp_server(None).await?;
+
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    let (command, args) = argv.split_first().ok_or("usage: main <agent command> [args...]")?;
+    let names = toolkit.tools().into_iter().map(|t| t.name).collect();
+    let mut opts = AcpOptions::new(command)
+        .args(args)
+        .on_permission(allow_only(names))
+        .on_update(|u| {
+            if u["update"]["sessionUpdate"] == "usage_update" {
+                eprintln!("[usage] {}", u["update"]);
+            }
+        });
+    opts.mcp_servers = vec![json!({"type": "http", "name": "toolnexus", "url": server.url,
+        "headers": [{"name": "Authorization", "value": format!("Bearer {}", server.token)}]})];
+    // Agent-specific knobs are opaque data: this one isolates Claude Code (see the per-agent notes).
+    opts.session_meta = Some(json!({"claudeCode": {"options": {
+        "settingSources": [], "strictMcpConfig": true, "plugins": [], "skills": [], "tools": []}}}));
+    opts.model = std::env::var("ACP_MODEL").ok(); // e.g. "haiku"; passed through, never validated
+    opts.permission_timeout = Duration::from_secs(300);
+    let agent = Arc::new(AcpClient::load(opts).await?);
+
+    let client = create_in_process_client(InProcessOptions {
+        model: command.clone(),
+        generate: Some(acp_generate(agent.clone())),
+        ..Default::default()
+    });
+    let empty = create_toolkit(ToolkitOptions { builtins: off(), ..Default::default() }).await?;
+    let result = client.run("Use the add tool to add 17 and 25. Reply with just the sum.", &empty).await;
+    agent.close().await;
+    server.close();
+    println!("{}", result?.text);
+    Ok(())
+}
+```
+</TabItem>
+</Tabs>
+{/* /recipe */}
+
+Verified on 0.25.0 against the fake ACP agent in all eight ports (the agent received the `_meta`,
+the policy answered `allow`, `The sum is 42.`), and live in Python against
+`@agentclientprotocol/claude-agent-acp@0.100.0` with `ACP_MODEL=haiku`.
 
 ## Cancelling a turn
 
-ACP has a `session/cancel` notification: send `{ method: "session/cancel", params: { sessionId } }`
-(no `id`) and the pending `session/prompt` resolves with `stopReason: "cancelled"`; the process and
-session stay warm. Wire it to the run's abort signal in JavaScript, or to `ctx.Done()` in the Go
-recipe's `GenerateStream`.
+ACP has a `session/cancel` notification (`{ method: "session/cancel", params: { sessionId } }`, no
+`id`): the pending `session/prompt` resolves with `stopReason: "cancelled"` and the process and
+session stay warm. Go and Rust send it for you: cancel the run's `ctx` (Go `GenerateStream` /
+`GenerateCtx`) or fire the cancellation token (Rust). In the other ports the ACP client does not
+send it today; to stop a turn there, `close()` the agent and start a new one.
 
 ## Streaming more than text
 
-`session/update` carries more than `agent_message_chunk`: `agent_thought_chunk`, `tool_call`,
-`tool_call_update`, `plan`, `usage_update`. Handle them in the same `if` chain. In Go you can
-`emit` them as non-text `StreamEvent`s (`Type: "tool_call"`, for example); the client passes those
-to the stream consumer and never executes them.
+The ACP client's `generateStream` already maps `agent_thought_chunk` to `thought` events and the
+agent's `tool_call` / completed `tool_call_update` to `tool_call` / `tool_result` events with
+`via: "acp"`; the stream consumer gets them, the loop never executes them. Everything else
+(`plan`, `usage_update`, `available_commands_update`, …) reaches `onUpdate` as raw params.

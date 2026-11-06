@@ -8,6 +8,23 @@ GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
 
 ## Unreleased
 
+**Docs: the in-process client recipes now cover all eight ports and use the 0.25.0 ACP seam.** The
+ACP agent recipe is now one short file per language on `toolkit.asMcpServer()` + the ACP client
+(`loadACP` / `load_acp` / `LoadACP` / `AcpClient.start` / `AcpClient.StartAsync` /
+`Toolnexus.Acp.connect` / `toolnexus.acp/connect` / `AcpClient::load`) + a streaming
+`createInProcessClient`, instead of a hand-written JSON-RPC driver; the toolkit is reached with a
+bearer token instead of an open port. Every recipe (overview, `asMcpServer`, ACP agent, one-shot
+CLI, and a new "Extend it" recipe with isolation `_meta`, `model` passthrough and an allow-only
+`onPermission` policy) now has JavaScript, Python, Go, Java, C#, Elixir, Clojure and Rust tabs.
+The tabs are generated from the files that were run (`site/recipes/in-process-client/`, synced by
+`site/scripts/sync-recipes.mjs`, `--check` fails on drift), each run on 0.25.0 against a bundled fake
+ACP agent and fake CLI, and the ACP recipe live against `@agentclientprotocol/claude-agent-acp@0.100.0`
+in JavaScript, Python, Go, Java, C# and Rust. The pages also document the per-port default turn
+timeouts (Python 5 s, Java and C# 10 s, others 30 s), which are too short for a real agent; the
+recipes set 300 s. The Java and C# README "Agents via ACP" snippets now compile (missing
+`acp` package import / `using Toolnexus.Acp;`; Java also needed the checked `IOException` wrapped
+and a turn timeout). Not done: Elixir and Clojure were verified against the fake agent only, not live.
+
 ## 0.25.0 — 2026-11-06
 
 **Docs: an "In-process client" section with copy-pasteable recipes for driving coding agents and
@@ -22,8 +39,7 @@ over `configOptions`, permission policies). Recipes are JavaScript, Python and G
 a fake agent/CLI and live against Claude Code; per-agent isolation and model notes are labelled
 with the version and date they were verified on. The section is also published as plain markdown
 for agents at `/_llms-txt/in-process-client.txt` (listed in `llms.txt`). The research behind the
-notes is in `docs/references/acp-agent-isolation-2026-11-05.md`. Not done: recipes for the
-Java, C#, Elixir, Clojure and Rust ports; two Python serve gaps found while verifying are
+notes is in `docs/references/acp-agent-isolation-2026-11-05.md`. Not done: two Python serve gaps found while verifying are
 documented, not fixed (`mcp={}` exposes no tools; `GET /mcp` gets no response, which hangs the
 Claude ACP adapter).
 

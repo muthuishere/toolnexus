@@ -41,6 +41,9 @@ jobs:
       #    Content depth (when/why/3 examples) is reported but not yet blocking; see the
       #    script header for the outstanding backlog and why it is tiered.
       - run: node site/scripts/coverage-gate.mjs --strict
+      # 3. The in-process-client pages show exactly the recipe files that were run
+      #    (site/recipes/in-process-client/); a hand edit to a page block fails here.
+      - run: node site/scripts/sync-recipes.mjs --check
 
   js:
     name: JS (node)
