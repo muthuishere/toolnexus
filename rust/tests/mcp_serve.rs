@@ -323,3 +323,47 @@ async fn top_level_mcp_server_block() {
     );
     c.cancel().await.ok();
 }
+
+fn stats() -> Tool {
+    let mut t = echo();
+    t.name = "stats".into();
+    t.output_schema = Some(json!({"type": "object", "properties": {"count": {"type": "integer"}}}));
+    t.execute = Arc::new(|_, _: ToolContext| {
+        Box::pin(async {
+            let mut meta = Map::new();
+            meta.insert("usage".into(), json!({"units": 2}));
+            ToolResult::ok("")
+                .with_structured(json!({"count": 3}))
+                .with_meta(meta)
+        })
+    });
+    t
+}
+
+#[tokio::test]
+async fn structured_meta_and_output_schema_on_the_serve_path() {
+    let tk = tk_with(vec![stats(), echo()], None).await;
+    let h = serve_mcp(&tk, Some(McpServeConfig::default()), None).await;
+    let c = connect(&h).await;
+    let list = c.list_all_tools().await.unwrap();
+    let s = list.iter().find(|t| t.name == "stats").unwrap();
+    assert_eq!(
+        Value::Object((**s.output_schema.as_ref().unwrap()).clone()),
+        json!({"type": "object", "properties": {"count": {"type": "integer"}}})
+    );
+    let e = list.iter().find(|t| t.name == "echo").unwrap();
+    assert!(e.output_schema.is_none());
+    let r = call(&c, "stats", json!({"text": ""})).await;
+    assert_eq!(text0(&r), r#"{"count":3}"#);
+    assert_eq!(r.structured_content, Some(json!({"count": 3})));
+    assert_eq!(
+        serde_json::to_value(r.meta.as_ref().unwrap()).unwrap(),
+        json!({"usage": {"units": 2}})
+    );
+    // Absent ⇒ the wire is unchanged: no structuredContent, no _meta.
+    let plain = call(&c, "echo", json!({"text": "hi"})).await;
+    let wire = serde_json::to_value(&plain).unwrap();
+    assert!(wire.get("structuredContent").is_none());
+    assert!(wire.get("_meta").is_none());
+    c.cancel().await.ok();
+}

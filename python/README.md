@@ -191,6 +191,84 @@ for f in res.files:
     print(f["from"], f["mimeType"], f["url"])
 ```
 
+## Embeddable MCP server (SPEC §7C.1)
+
+`toolkit.mcp_handler(...)` returns a plain ASGI app — `async (scope, receive, send)` — that
+you mount on your own router (Starlette `Mount`, FastAPI `app.mount`, bare uvicorn), behind
+your own TLS, CORS and OAuth. Every policy is a hook; toolnexus has no tenant or role concept.
+
+```python
+from toolnexus import McpDecision, create_toolkit, identity_from
+
+tk = await create_toolkit()
+app = tk.mcp_handler(
+    authenticate=lambda req: verify(req.header("Authorization")),   # raise => 401
+    www_authenticate=lambda req, err: 'Bearer resource_metadata="https://…"',
+    list_tools=lambda ctx: tools_for(identity_from(ctx)),           # per request
+    before_call=lambda ctx, tool, args: McpDecision(kind="confirm", message="Sure?"),
+    on_call=lambda ev: print(ev.name, ev.decision, ev.ms),
+)
+app.notify_tools_changed()   # notifications/tools/list_changed on every GET stream
+```
+
+Inside a tool, `identity_from()`, `request_from()`, `mcp_session_id_from()` and
+`mcp_request_meta_from()` read the current request. A confirm is sent as
+`elicitation/create` on the same POST's event stream when the client can elicit; otherwise
+the decision's `result` (e.g. a "re-call with a nonce" message) is returned. Also:
+resources/prompts hooks, pluggable `session_ids`, `stateless`, `protocol_versions`
+(`2025-06-18` default, `2025-11-25` opt-in), and `ToolResult.structured` / `meta`,
+`Tool.output_schema` / `annotations`. Runnable: `python examples/mcp_handler.py`.
+
+### MCP 2026-07-28 (opt-in, SPEC §7C.2)
+
+List `"2026-07-28"` in `protocol_versions` and the same handler speaks the stateless 2026
+wire: `server/discover`, header validation, sorted `tools/list`, and MRTR — a `confirm` or a
+§10 tool suspension leaves as an `input_required` result the client answers on retry. It is
+never a default, and `initialize` never negotiates it. List a legacy version too to serve
+both wires on one mount.
+
+```python
+from toolnexus import McpServerAuth, load_mcp_skills
+
+auth = McpServerAuth("https://login.example", scopes={"*": ["mcp"], "wipe": ["mcp:admin"]})
+app = tk.mcp_handler(
+    protocol_versions=["2026-07-28", "2025-06-18"],
+    authenticate=auth.authenticate,                      # McpPrincipal => identity_from(ctx)
+    list_skills=lambda ctx: load_mcp_skills("skills"),   # skills/list, skills/get, skill:// reads
+)
+prm = auth.metadata()   # mount at /.well-known/oauth-protected-resource[/mcp] (RFC 9728)
+```
+
+`McpServerAuth` verifies RS256 JWTs against the issuer's JWKS by default (standard-library
+RSA, no extra dependency) or calls your `verify(request, token, audience)`; a missing scope
+is a `403` naming the full needed set, and per-tool scopes apply on the 2026 wire.
+
+Bring your own authorization server. The auto-approving dev authorization server the suite
+uses is test tooling (`tests/_mcp_dev_auth.py`), not part of the package.
+
+## Agents via ACP
+
+A local coding agent that speaks ACP can be the model behind an ordinary client, calling
+your toolkit as an MCP server. Three vendor-neutral pieces (SPEC §8C); which binary, flags
+and permissions to use is yours.
+
+```python
+tk = await create_toolkit(skills_dir="skills")
+srv = tk.as_mcp_server()          # 127.0.0.1:<ephemeral>/mcp behind a bearer token
+acp = load_acp(ACPOptions(
+    command="my-agent", args=["acp"],
+    mcp_servers=[{"type": "http", "name": "toolnexus", "url": srv.url,
+                  "headers": [{"name": "Authorization", "value": "Bearer " + srv.token}]}],
+))
+client = create_in_process_client(model="agent", generate_stream=acp.generate_stream)
+async for ev in client.stream("What is in the skill?", toolkit=tk):
+    ...                           # text deltas, plus thought / tool_call / tool_result via "acp"
+acp.close(); srv.close()
+```
+
+`mcp_servers` entries, `session_meta` (session/new `_meta`), `client_caps_meta` and `model`
+are passed through to the agent unchanged.
+
 ## Documentation
 
 Everything else — the full surface, with runnable examples — lives on the docs site:
@@ -205,3 +283,33 @@ Everything else — the full surface, with runnable examples — lives on the do
 | **Cookbook** | [Zero to agent](https://muthuishere.github.io/toolnexus/cookbook/zero-to-agent/) · [MCP servers](https://muthuishere.github.io/toolnexus/cookbook/mcp-servers/) · [Agent skills](https://muthuishere.github.io/toolnexus/cookbook/agent-skills/) · [Judge](https://muthuishere.github.io/toolnexus/cookbook/judge/) |
 
 Contract across all eight ports: [`SPEC.md`](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
+
+## MCP 2026-07-28 + OAuth
+
+Every MCP server is asked `server/discover` first (SPEC §2.2). A server that speaks
+`2026-07-28` is driven by toolnexus's own client, over stdio or Streamable HTTP, with no MCP SDK
+involved. Any other server falls back to the frozen SDK path (§2.F), so existing configs behave as
+they did before.
+
+- **MRTR**: an `input_required` tool result goes through `wait_for` (form → `kind:"input"`,
+  url → `kind:"authorization"`). With no `wait_for`, the tool returns a §10 pending and resumes
+  when the client re-executes it with `ctx.answer`. A `tools/call` is never re-sent silently after
+  an error.
+- **Remote skills** (`io.modelcontextprotocol/skills`) join the same `skill` tool under
+  `skill://<name>/`.
+- **Tool search**: `"toolSearch": true` (+ `"description"`) exposes `<server>_search_tools` and
+  `<server>_call_tool` in place of the server's own tools.
+- **OAuth** (§2A): per-server `auth` = `{clientId, clientSecret, tokenAuthMethod, clientIds,
+  clientMetadataUrl, redirectUri, mode: "auto"|"pause", omitRefreshResource, allowHttp}`.
+  Dynamic client registration is not supported. Load options:
+
+```python
+tk = await create_toolkit("mcp.json", wait_for=wait_for,
+                          token_store=my_store,   # load/save/delete(resource); default in-memory
+                          open_url=my_opener)     # auto mode browser; default the OS opener
+```
+
+In `pause` mode the host gets `Request(kind="authorization", id="auth-…")` and answers with
+`Answer(id, ok=True, data={"callbackUrl": "<the URL the AS redirected to>"})`. On the frozen
+fallback, the bearer token goes on the SDK HTTP transport through an `httpx.Auth`, so a 401 there
+runs the same flow once. Progress notifications are not supported on the 2026 path (§2.9).

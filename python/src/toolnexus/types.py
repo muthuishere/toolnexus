@@ -28,6 +28,11 @@ class ToolResult:
     # ``parts`` absent ⇒ byte-identical to a pre-0.17 result. Appended AFTER ``metadata``
     # so every existing keyword construction keeps working.
     parts: Optional[list[dict[str, Any]]] = None
+    # §1 machine-readable result, sent as MCP ``structuredContent`` by the MCP serve
+    # surfaces (§7C, §7C.1). None ⇒ omitted, byte-identical to before.
+    structured: Optional[Any] = None
+    # §1 protocol metadata for the wire result (MCP ``_meta``). None ⇒ omitted.
+    meta: Optional[dict[str, Any]] = None
 
 
 @dataclass
@@ -150,6 +155,18 @@ class ToolHints:
 
 
 @dataclass
+class ToolAnnotations:
+    """MCP tool annotations advertised by the MCP handler (SPEC §1, §7C.1). Sent
+    verbatim on ``tools/list``; a field left ``None`` is omitted from the wire."""
+
+    title: Optional[str] = None
+    read_only_hint: Optional[bool] = None
+    destructive_hint: Optional[bool] = None
+    idempotent_hint: Optional[bool] = None
+    open_world_hint: Optional[bool] = None
+
+
+@dataclass
 class Tool:
     name: str
     description: str
@@ -163,6 +180,10 @@ class Tool:
     # Decides per call whether this tool may run alongside other safe calls of the same
     # model response (SPEC §8 "Tool scheduling"). None ⇒ safe only when hints.read_only.
     concurrency_safe: Optional[Callable[[dict[str, Any]], bool]] = field(default=None, repr=False)
+    # §1 JSON Schema of ``ToolResult.structured``; None ⇒ omitted everywhere.
+    output_schema: Optional[JSONSchema] = None
+    # §1/§7C.1 MCP annotations; None ⇒ derived from ``hints`` by the MCP handler.
+    annotations: Optional[ToolAnnotations] = None
 
 
 _SANITIZE_RE = re.compile(r"[^a-zA-Z0-9_-]")

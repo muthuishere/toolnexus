@@ -249,6 +249,8 @@ impl ToolGuard {
                         Ok(Some(ToolOverride {
                             args: None,
                             result: Some(ToolResult {
+                                structured: None,
+                                meta: None,
                                 output: format!("approval required: {}", ev.name),
                                 is_error: true,
                                 parts: Vec::new(),

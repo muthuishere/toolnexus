@@ -17,6 +17,7 @@ from .a2a import Agent, agent_tools, parse_agents_config
 from .adapters import to_anthropic, to_gemini, to_openai
 from .builtin import BuiltinsConfig, select_builtins
 from .mcp_serve import (
+    LoopbackMCPServer,
     MCPServeConfig,
     OnCall,
 )
@@ -25,7 +26,8 @@ from .serve import A2AConfig, OnTask, ServeHandle, start_a2a_server
 from .skill import SkillDef, SkillProvider, SkillSource, load_skills
 from .types import McpStatus, Tool, ToolContext, ToolResult
 
-if TYPE_CHECKING:  # typing-only, avoid a runtime import cycle with client.py
+if TYPE_CHECKING:
+    from .mcp_handler import McpHandler, McpHandlerConfig  # typing-only, avoid a runtime import cycle with client.py
     from .client import Client
 
 
@@ -99,6 +101,8 @@ class Toolkit:
         disable_skills: Optional[list[str]] = None,
         cancel: Optional[Any] = None,
         media: Optional[Any] = None,
+        token_store: Optional[Any] = None,
+        open_url: Optional[Any] = None,
     ) -> "Toolkit":
         # ``wait_for`` (§10): when set, connected MCP servers may elicit input from the
         # human mid-``tools/call``, bridged onto this resolver (form→kind:"input",
@@ -106,17 +110,25 @@ class Toolkit:
         # Omit ⇒ MCP elicitation is not advertised.
         # ``cancel`` (§2 Gap 3): an optional asyncio.Event; when set it aborts the whole
         # MCP load (the Python analogue of a cancelled parent context).
+        # ``token_store`` / ``open_url`` (§2A.1a): the MCP OAuth client's token store
+        # (default in-memory per load) and how ``auto`` mode opens the browser.
         mcp = (
-            await load_mcp_with_context(mcp_config, wait_for=wait_for, cancel=cancel)
+            await load_mcp_with_context(
+                mcp_config, wait_for=wait_for, cancel=cancel, token_store=token_store, open_url=open_url,
+                disable_tools=disable_tools,
+            )
             if mcp_config is not None
             else None
         )
+        # Remote skills (§2.7) from MCP servers with the skills extension join the same
+        # `skill` inventory as local ones (local first on a name clash).
+        remote_skills = list(mcp.skills) if mcp is not None else []
         # Skills come from directories, in-memory data, and/or a lazy provider
         # (§3, S1). The provider is resolved here (create() is async) and merged
         # with the data list; a provider failure is isolated so other sources
         # still load.
         skill = None
-        if skills_dir is not None or skills is not None or skill_provider is not None:
+        if skills_dir is not None or skills is not None or skill_provider is not None or remote_skills:
             provider_defs: list[SkillDef] = []
             if skill_provider is not None:
                 try:
@@ -127,7 +139,7 @@ class Toolkit:
                 except Exception as e:  # noqa: BLE001 — provider failure is isolated
                     print(f"[toolnexus] skill provider failed: {e}", file=sys.stderr)
                     provider_defs = []
-            data_defs = list(skills or []) + provider_defs
+            data_defs = list(skills or []) + provider_defs + remote_skills
             # DisableSkills is sugar over a drop-list: fold each name into the filter as
             # False (without overriding an explicit skills_filter entry). Mirrors Go.
             eff_filter = skills_filter
@@ -283,9 +295,34 @@ class Toolkit:
             on_task=on_task,
             loop=asyncio.get_running_loop(),
             mcp=mcp_cfg,
-            mcp_tools=self.tools() if mcp_cfg else None,
+            mcp_tools=self.tools() if mcp_cfg is not None else None,
             on_call=on_call,
         )
+
+    def mcp_handler(self, cfg: "Optional[McpHandlerConfig]" = None, **kwargs: Any) -> "McpHandler":
+        """An embeddable streamable-HTTP MCP server for this toolkit (SPEC §7C.1): an
+        ASGI app to mount on the host's own router, plus ``notify_tools_changed()``.
+        Pass an :class:`McpHandlerConfig` or its fields as keywords. ``serve`` is
+        unchanged."""
+        from .mcp_handler import McpHandler, McpHandlerConfig
+
+        if cfg is None:
+            cfg = McpHandlerConfig(**kwargs)
+        elif kwargs:
+            raise TypeError("mcp_handler: pass either cfg or keyword options, not both")
+        return McpHandler(self, cfg)
+
+    def as_mcp_server(self, config: Optional[MCPServeConfig] = None) -> LoopbackMCPServer:
+        """Serve this toolkit for a local agent to call (SPEC §8C): the §7C
+        streamable-HTTP MCP server (same tool mapping, names verbatim — ``skill``
+        stays ``skill``; same ``{name?, version?, tools?}`` filter) on
+        ``127.0.0.1:<ephemeral>/mcp`` behind a fresh bearer token. Returns a handle
+        with ``url``, ``token`` and an idempotent ``close()``. The caller builds
+        whatever ``mcp_servers`` entry its agent accepts, e.g.
+        ``{"type": "http", "name": "toolnexus", "url": h.url, "headers":
+        [{"name": "Authorization", "value": "Bearer " + h.token}]}``.
+        """
+        return LoopbackMCPServer(self.tools, config)
 
     def tools(self) -> list[Tool]:
         with self._lock:
@@ -348,6 +385,8 @@ async def create_toolkit(
     disable_skills: Optional[list[str]] = None,
     cancel: Optional[Any] = None,
     media: Optional[Any] = None,
+    token_store: Optional[Any] = None,
+    open_url: Optional[Any] = None,
 ) -> Toolkit:
     """Async factory. The returned Toolkit is also an async context manager.
 
@@ -376,4 +415,6 @@ async def create_toolkit(
         disable_skills=disable_skills,
         cancel=cancel,
         media=media,
+        token_store=token_store,
+        open_url=open_url,
     )

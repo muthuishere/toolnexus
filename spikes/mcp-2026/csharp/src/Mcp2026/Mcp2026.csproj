@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- In-house MCP 2026-07-28 client + server. No MCP SDK: BCL + the ASP.NET Core shared framework (Kestrel). -->
+  <PropertyGroup>
+    <RootNamespace>Mcp2026</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+    <InternalsVisibleTo Include="Mcp2026.Tests" />
+  </ItemGroup>
+</Project>

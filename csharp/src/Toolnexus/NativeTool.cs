@@ -19,6 +19,12 @@ public sealed class NativeTool : ITool
     /// <summary>(SPEC §4C) Advisory hints for a host permission gate; <c>null</c> = unknown. Settable.</summary>
     public ToolHints? Hints { get; set; }
 
+    /// <summary>(SPEC §1) JSON Schema of the structured result (MCP <c>outputSchema</c>); <c>null</c> = none. Settable.</summary>
+    public IDictionary<string, object?>? OutputSchema { get; set; }
+
+    /// <summary>(SPEC §1) MCP tool annotations, emitted verbatim by the MCP handler; <c>null</c> = none. Settable.</summary>
+    public ToolAnnotations? Annotations { get; set; }
+
     /// <summary>(SPEC §8 "Tool scheduling") Decides per call whether this tool may run alongside
     /// other safe calls of one response; <c>null</c> ⇒ safe only when <see cref="Hints"/> is read-only.</summary>
     public Func<IDictionary<string, object?>, bool>? ConcurrencySafe { get; set; }

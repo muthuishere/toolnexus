@@ -5,7 +5,7 @@ plugins {
 }
 
 group = 'io.github.muthuishere'
-version = '0.24.0'
+version = '0.25.0'
 
 java {
     toolchain {
@@ -157,6 +157,13 @@ tasks.register('runPromptCache', JavaExec) {
     description = 'Run the PromptCacheTiers example (promptCache + toolTiers against a local mock server; no API key, no network).'
     classpath = sourceSets.main.runtimeClasspath
     mainClass = 'io.github.muthuishere.toolnexus.examples.PromptCacheTiers'
+}
+
+tasks.register('runMcpHandler', JavaExec) {
+    group = 'application'
+    description = 'Run the McpHandlerExample (embeddable MCP server: auth, per-caller tools, confirm gate; no API key, no network).'
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = 'io.github.muthuishere.toolnexus.examples.McpHandlerExample'
 }
 
 tasks.register('runAcp', JavaExec) {

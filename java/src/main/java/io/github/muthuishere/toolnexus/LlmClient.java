@@ -1051,6 +1051,8 @@ public final class LlmClient {
      *   <li>{@code TOOL_CALL} — a tool about to run ({@code id}, {@code name}, {@code args} set).</li>
      *   <li>{@code TOOL_RESULT} — after it ran ({@code id}, {@code name}, {@code output},
      *       {@code isError}, {@code metadata} set).</li>
+     *   <li>{@code THOUGHT} — a model's reasoning delta reported by an in-process/ACP model
+     *       ({@code delta}, {@code via} set). Never part of the answer or {@link RunResult#text}.</li>
      *   <li>{@code USAGE} — token usage so far ({@code usage} set).</li>
      *   <li>{@code DONE} — terminal event carrying the final {@link RunResult} ({@code result} set).</li>
      * </ul>
@@ -1060,7 +1062,7 @@ public final class LlmClient {
                               Usage usage, RunResult result, Request request,
                               List<Map<String, Object>> parts, Map<String, Object> metadata,
                               String via) {
-        public enum Kind { TEXT, TOOL_CALL, TOOL_RESULT, USAGE, PENDING, DONE }
+        public enum Kind { TEXT, TOOL_CALL, TOOL_RESULT, USAGE, PENDING, DONE, THOUGHT }
 
         /** Without {@code via} (every event that is not a tool-tiers {@code call_tool} call). */
         public StreamEvent(Kind type, String delta, String id, String name,
@@ -1076,13 +1078,24 @@ public final class LlmClient {
                     isError, usage, result, request, parts, metadata, "call_tool");
         }
 
-        static StreamEvent text(String delta) {
+        /** A copy carrying {@code via} (e.g. {@code "acp"} for events an ACP agent reported). */
+        public StreamEvent withVia(String v) {
+            return new StreamEvent(type, delta, id, name, args, output, isError, usage, result, request, parts,
+                    metadata, v);
+        }
+
+        /** A reasoning delta from a streaming in-process model; passed to the consumer, never answer text. */
+        public static StreamEvent thought(String delta, String via) {
+            return new StreamEvent(Kind.THOUGHT, delta, null, null, null, null, false, null, null, null, null, null, via);
+        }
+
+        public static StreamEvent text(String delta) {
             return new StreamEvent(Kind.TEXT, delta, null, null, null, null, false, null, null, null, null, null);
         }
-        static StreamEvent toolCall(String id, String name, Map<String, Object> args) {
+        public static StreamEvent toolCall(String id, String name, Map<String, Object> args) {
             return new StreamEvent(Kind.TOOL_CALL, null, id, name, args, null, false, null, null, null, null, null);
         }
-        static StreamEvent toolResult(String id, String name, String output, boolean isError) {
+        public static StreamEvent toolResult(String id, String name, String output, boolean isError) {
             return toolResult(id, name, output, isError, null);
         }
         /** §9: parts are rendered as {@code {type, mimeType, bytes}} — a part's {@code data}
@@ -2514,6 +2527,10 @@ public final class LlmClient {
         // §8A: tool message -> the synthetic user message spliced in after it on the wire only.
         java.util.IdentityHashMap<Object, Object> relocated = new java.util.IdentityHashMap<>();
 
+        // An in-process streaming model's non-text events (thought, ACP tool narration) reach the
+        // consumer through this side channel — never the wire, so the loop never executes them.
+        // The shim reads it on this thread, inside http.send.
+        InProcess.STREAM_SIDE.set(onEvent);
         ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
         try {
             for (int turn = 0; turn < maxTurns(); turn++) {
@@ -2697,6 +2714,7 @@ public final class LlmClient {
             throw e;
         } finally {
             executor.shutdown();
+            InProcess.STREAM_SIDE.remove();
         }
     }
 

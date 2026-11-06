@@ -180,6 +180,85 @@ var res = await agent.RunAsync("Draw a fox, then animate it.", tk);
 foreach (var f in res.Files) Console.WriteLine($"{f.From} {f.MimeType} {f.Url}");
 ```
 
+## Embeddable MCP server (SPEC §7C.1)
+
+`tk.McpHandler(cfg)` returns an `McpHttpHandler` you mount on your own HTTP server, behind your own
+TLS, CORS and OAuth. `ServeAsync` is unchanged. Every policy is a hook:
+
+```csharp
+var handler = tk.McpHandler(new McpHandlerConfig
+{
+    Authenticate = ex => VerifyBearer(ex.Header("Authorization")),      // throw => 401 (+ WwwAuthenticate)
+    ListTools    = ctx => ToolsFor((User)ctx.Identity!),                 // per request; others are "tool not found"
+    BeforeCall   = (ctx, tool, args) => Task.FromResult(tool.Annotations?.DestructiveHint == true
+                       ? McpDecision.Confirm("Really delete?")          // elicitation on the same POST
+                       : McpDecision.Allow()),
+    OnCall       = ev => Log(ev.Name, ev.Decision, ev.ResultBytes),
+});
+// HttpListener host:  await handler.HandleAsync(httpListenerContext);
+// any other server:   subclass McpHttpExchange and call handler.HandleAsync(exchange).
+handler.NotifyToolsChanged(); // tools/list_changed on every open GET stream
+```
+
+Tools and hooks read the request through `McpContext` (`Identity`, `Request`, `SessionId`, `Meta` =
+`params._meta`); a tool uses `McpContext.Current`. Also: `ServerInfo`, resources/prompts hooks,
+pluggable `SessionIds`, `Stateless`, `ProtocolVersions` (`2025-06-18` default, `2025-11-25` opt-in).
+`ToolResult.Structured`/`Meta` and `ITool.OutputSchema`/`Annotations` map to `structuredContent`,
+`_meta`, `outputSchema` and `annotations`. Runnable: `dotnet run --project examples/Toolnexus.Examples -- mcphandler`.
+
+### MCP 2026-07-28 on the same handler (SPEC §7C.2, opt-in)
+
+List `"2026-07-28"` in `ProtocolVersions` (alone, or next to `"2025-06-18"` to serve both wires on one
+mount). The 2026 wire is stateless: `server/discover`, header validation, `resultType` + `_meta`
+serverInfo, and MRTR instead of elicitation — a `Confirm` decision or a §10 tool suspension
+(`ToolResult.Pending`) answers `input_required`, and the client's retry reaches the tool as
+`ToolContext.Answer`. Without the opt-in the handler is byte-identical to §7C.1.
+
+```csharp
+var auth = new McpServerAuth                                   // OAuth 2.1 protected resource (RS256/JWKS by default)
+{
+    Issuer = "https://login.example",
+    Scopes = new Dictionary<string, IReadOnlyList<string>> { ["*"] = ["mcp"], ["wipe"] = ["mcp:admin"] },
+};
+var handler = tk.McpHandler(new McpHandlerConfig
+{
+    ProtocolVersions = ["2026-07-28", "2025-06-18"],
+    Authenticate     = auth.AuthenticateAsync,                 // identity = McpPrincipal; 401/403 + exact challenge
+    ListSkills       = _ => Task.FromResult(McpHttpHandler.LoadMcpSkills("skills")), // skills/list, skills/get, skill:// reads
+});
+// route GET /.well-known/oauth-protected-resource[/mcp] to auth.Metadata() (or auth.MetadataAsync(listenerCtx))
+```
+
+`McpServerAuth.Verify` replaces the JWT verifier (opaque tokens, introspection). Bring your own authorization
+server: `McpServerAuth` verifies its tokens. The auto-approving dev authorization server the suite uses is test
+tooling (`tests/Toolnexus.Tests/McpDevAuth.cs`), not part of the library.
+
+## Agents via ACP
+
+toolnexus ships no client per coding agent — three vendor-neutral pieces instead (SPEC §8C):
+
+- `tk.AsMcpServer(cfg?)` serves the toolkit for a local agent on
+  `http://127.0.0.1:<ephemeral>/mcp` behind a fresh bearer token (`Url`, `Token`, `Close()`).
+- `AcpClient.StartAsync(new AcpStartOptions { Command, Arguments, McpServers, SessionMeta,
+  ClientCapsMeta, Model, OnPermission, … })` drives any ACP agent; `McpServers` entries are sent
+  verbatim, so you build whichever entry your agent accepts.
+- `InProcess.Options.GenerateStream = acp.GenerateStreamAsync` streams the agent's answer
+  (`Text` deltas, `Thought`, and its own `ToolCall`/`ToolResult` with `Via = "acp"`).
+
+```csharp
+await using var srv = tk.AsMcpServer();
+using var acp = await AcpClient.StartAsync(new AcpStartOptions
+{
+    Command = "my-agent", Arguments = ["acp"],
+    McpServers = [new Dictionary<string, object?>
+    {
+        ["type"] = "http", ["name"] = "toolnexus", ["url"] = srv.Url,
+        ["headers"] = new[] { new Dictionary<string, object?> { ["name"] = "Authorization", ["value"] = "Bearer " + srv.Token } },
+    }],
+});
+var client = InProcess.CreateClient(new InProcess.Options { Model = "acp", GenerateStream = acp.GenerateStreamAsync });
+```
+
 ## Documentation
 
 Everything else — the full surface, with runnable examples — lives on the docs site:
@@ -194,3 +273,39 @@ Everything else — the full surface, with runnable examples — lives on the do
 | **Cookbook** | [Zero to agent](https://muthuishere.github.io/toolnexus/cookbook/zero-to-agent/) · [MCP servers](https://muthuishere.github.io/toolnexus/cookbook/mcp-servers/) · [Agent skills](https://muthuishere.github.io/toolnexus/cookbook/agent-skills/) · [Judge](https://muthuishere.github.io/toolnexus/cookbook/judge/) |
 
 Contract across all eight ports: [`SPEC.md`](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md).
+
+## MCP 2026-07-28 + OAuth
+
+`McpSource.LoadAsync` / `Toolkit.CreateAsync` speak MCP **2026-07-28** first (SPEC §2): every server gets
+`server/discover` before anything else, over stdio or stateless Streamable HTTP, with no MCP SDK on that
+path. A server that is not a 2026-07-28 server (a JSON-RPC error, HTTP 400/404/405/5xx, or a silent stdio
+child) falls back to the frozen pre-2026 path, which still runs on the `ModelContextProtocol` SDK. Your
+config stays the same.
+
+- **MRTR → §10:** `input_required` rounds go through `WaitFor`. Without a `WaitFor` the tool returns
+  `{status:"pending"}`; re-running it with the `Answer` resumes that same round. A `tools/call` is never
+  re-sent after a lost connection, a timeout or a 5xx.
+- **Skills over MCP:** skills a server publishes through the skills extension join the one `skill` tool
+  (base `skill://<name>/`).
+- **Lazy tool search:** set `"toolSearch": true` (and optionally `"description"`) on a server. You then get
+  `<server>_search_tools` and `<server>_call_tool` instead of every tool.
+- **OAuth 2.1 (SPEC §2A):** the per-server `auth` object takes `clientId`, `clientSecret`,
+  `tokenAuthMethod`, `clientIds`, `clientMetadataUrl`, `redirectUri`, `mode` (`auto`|`pause`),
+  `omitRefreshResource` and `allowHttp`. The client uses a pre-registered client id or a Client ID Metadata
+  Document; dynamic client registration is never used. It does PKCE S256 + `resource`, iss/state checks,
+  single-flight refresh and step-up. `auto` opens the browser and listens on loopback. `pause` sends a §10
+  `authorization` request; answer it with `Data = { ["callbackUrl"] = "<redirected URL>" }`.
+
+```csharp
+await using var tk = await Toolkit.CreateAsync(new Toolkit.Options
+{
+    McpConfig = "mcp.json",
+    TokenStore = myStore,            // ITokenStore; default in-memory per load
+    OpenUrl = url => OpenBrowser(url), // auto mode; default is the OS opener
+    WaitFor = WaitFor,               // MRTR input + pause-mode authorization
+});
+```
+
+On the frozen fallback, the bearer goes onto the SDK's HTTP transport through a delegating handler. A 401
+there runs the same flow once. Not yet on the 2026 path: `list_mcp_resources` / `read_mcp_resource`
+(`ResourceTools()` only sees fallback servers), progress notifications, and the server side (`serve`).

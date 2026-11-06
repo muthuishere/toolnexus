@@ -1,0 +1,551 @@
+---
+title: "Recipe — drive any ACP agent"
+description: "A complete, copy-pasteable recipe (JavaScript, Python, Go) that drives any Agent Client Protocol agent as the model behind a toolnexus client, with your toolkit attached as an MCP server and the agent's text streamed. Plus per-agent isolation and model-selection notes."
+---
+
+import { Tabs, TabItem, Aside } from '@astrojs/starlight/components';
+
+<Aside type="tip" title="Why you need this">
+Coding agents such as Claude Code, GitHub Copilot CLI, opencode and Devin speak the
+[Agent Client Protocol](https://agentclientprotocol.com) (ACP): JSON-RPC over the agent's stdin and
+stdout. Drive one from toolnexus and you get a subscription-backed agent behind the same `Client`
+your app already uses, and the agent gets **your** tools: the MCP servers, skills and functions in
+your toolkit, through one MCP server you serve yourself.
+</Aside>
+
+## How it works
+
+1. **Serve your toolkit as MCP** with `toolkit.serve(addr, { mcp })`, see the [overview](/toolnexus/in-process-client/).
+2. **Spawn the agent** and send `initialize`.
+3. **`session/new`** with `cwd` and `mcpServers: [{ type: "http", name: "toolnexus", url: "<serve url>/mcp", headers: [] }]`.
+   The agent connects to your server and lists your tools.
+4. **Each turn, inside `generate`:** send `session/prompt` with the latest user message. While it
+   runs the agent sends `session/update` notifications; collect the
+   `agent_message_chunk` text (and emit it as a stream delta in Go). Answer any
+   `session/request_permission` request. When `session/prompt` replies (`stopReason`), return
+   `{ content: <collected text> }`.
+
+The agent calls your tools itself, over MCP, inside its own loop. So the toolnexus client runs
+with an **empty toolkit** and `generate` only ever returns `content`; toolnexus never sees a
+tool call it would execute a second time.
+
+<Aside type="caution" title="Permissions: this recipe allows every request">
+The recipe answers every `session/request_permission` with the first `allow_*` option, which is
+what you want for tools you served yourself and nothing else. If the agent still has its own
+shell or file tools, that means it may run them unasked. Turn those off with the isolation knobs
+below, or decide per request: see [Extend it](/toolnexus/in-process-client/extend/#permissions).
+</Aside>
+
+## The recipe
+
+Two files per language: the driver (copy it as-is) and a `main` that uses it. Run it with the
+agent's launch command as arguments, for example
+`npx -y @agentclientprotocol/claude-agent-acp@0.100.0`, `copilot --acp`, or `opencode acp`.
+
+<Tabs syncKey="lang">
+<TabItem label="JavaScript">
+```js title="acp_agent.mjs"
+import { spawn } from "node:child_process"
+import { createInterface } from "node:readline"
+import { createInProcessClient } from "toolnexus"
+
+// Drive any ACP agent as the model behind a toolnexus client.
+export async function acpClient({ command, args = [], env, mcpUrl, onChunk, meta }) {
+  const proc = spawn(command, args, { env: { ...process.env, ...env }, stdio: ["pipe", "pipe", "inherit"] })
+  const pending = new Map()
+  let nextId = 0, text = ""
+  const send = (msg) => proc.stdin.write(JSON.stringify({ jsonrpc: "2.0", ...msg }) + "\n")
+  const call = (method, params) => new Promise((resolve, reject) => {
+    const id = ++nextId
+    pending.set(id, { resolve, reject })
+    send({ id, method, params })
+  })
+  createInterface({ input: proc.stdout }).on("line", (line) => {
+    const msg = JSON.parse(line)
+    if (msg.method === "session/update") {                       // notification
+      const u = msg.params.update
+      if (u.sessionUpdate === "agent_message_chunk" && u.content?.type === "text") {
+        text += u.content.text
+        onChunk?.(u.content.text)
+      }
+    } else if (msg.method === "session/request_permission") {    // agent -> us request
+      const allow = msg.params.options.find((o) => o.kind.startsWith("allow"))
+      send({ id: msg.id, result: { outcome: allow ? { outcome: "selected", optionId: allow.optionId } : { outcome: "cancelled" } } })
+    } else if (pending.has(msg.id)) {                            // reply to our request
+      const p = pending.get(msg.id); pending.delete(msg.id)
+      msg.error ? p.reject(new Error(msg.error.message)) : p.resolve(msg.result)
+    }
+  })
+
+  proc.on("exit", (code) => {                                   // fail fast if the agent dies
+    for (const p of pending.values()) p.reject(new Error(`${command} exited (${code})`))
+    pending.clear()
+  })
+
+  await call("initialize", { protocolVersion: 1, clientCapabilities: {} })
+  const session = await call("session/new", {
+    cwd: process.cwd(),
+    mcpServers: mcpUrl ? [{ type: "http", name: "toolnexus", url: mcpUrl, headers: [] }] : [],
+    ...(meta ? { _meta: meta } : {}),
+  })
+
+  const client = createInProcessClient({
+    model: command,
+    generate: async (req) => {
+      const last = req.messages.at(-1)
+      text = ""
+      await call("session/prompt", { sessionId: session.sessionId, prompt: [{ type: "text", text: String(last.content) }] })
+      return { content: text }
+    },
+  })
+  // call + session are returned so you can extend it (models, config) without editing this file.
+  return { client, call, session, close: () => proc.kill() }
+}
+```
+```js title="main.mjs"
+// usage: node main.mjs npx -y @agentclientprotocol/claude-agent-acp@0.100.0
+import { createToolkit, defineTool } from "toolnexus"
+import { acpClient } from "./acp_agent.mjs"
+
+const add = defineTool({
+  name: "add", description: "Add two numbers.",
+  inputSchema: { type: "object", properties: { a: { type: "number" }, b: { type: "number" } }, required: ["a", "b"] },
+  run: ({ a, b }) => `${a + b}`,
+})
+
+// 1. Serve YOUR toolkit as an MCP server the agent can reach.
+const toolkit = await createToolkit({ builtins: false, extraTools: [add] })
+const server = await toolkit.serve("127.0.0.1:0", { mcp: { name: "toolnexus" }, onCall: (e) => console.log("[tool]", e.name) })
+
+// 2. Start the agent with that server in session/new.mcpServers.
+const [command, ...args] = process.argv.slice(2)
+const { client, close } = await acpClient({
+  command, args,
+  mcpUrl: `${server.url}/mcp`,
+  onChunk: (text) => process.stdout.write(text),     // live text as the agent writes it
+})
+
+// 3. The agent runs the tools itself (over MCP), so the client's own toolkit is empty.
+const empty = await createToolkit({ builtins: false })
+const result = await client.run("Use the add tool to add 17 and 25. Reply with just the sum.", { toolkit: empty })
+console.log("\nfinal:", result.text)
+close()
+await server.stop()
+```
+
+JavaScript's `createInProcessClient` takes `generate` only, so `client.runStream` is refused;
+`onChunk` is how you see the text live.
+</TabItem>
+<TabItem label="Python">
+```python title="acp_agent.py"
+import asyncio, itertools, json, os
+from toolnexus import create_in_process_client
+
+
+async def acp_client(command, args=(), *, env=None, mcp_url=None, on_chunk=None, meta=None):
+    """Drive any ACP agent as the model behind a toolnexus client."""
+    proc = await asyncio.create_subprocess_exec(
+        command, *args, env={**os.environ, **(env or {})},
+        stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, limit=1 << 24)
+    pending, ids, state = {}, itertools.count(1), {"text": ""}
+
+    def send(msg):
+        proc.stdin.write((json.dumps({"jsonrpc": "2.0", **msg}) + "\n").encode())
+
+    async def call(method, params):
+        i = next(ids)
+        pending[i] = asyncio.get_running_loop().create_future()
+        send({"id": i, "method": method, "params": params})
+        return await pending[i]
+
+    async def read_loop():
+        async for line in proc.stdout:
+            msg = json.loads(line)
+            method = msg.get("method")
+            if method == "session/update":                      # notification
+                u = msg["params"]["update"]
+                if u.get("sessionUpdate") == "agent_message_chunk" and u["content"].get("type") == "text":
+                    state["text"] += u["content"]["text"]
+                    if on_chunk:
+                        on_chunk(u["content"]["text"])
+            elif method == "session/request_permission":        # agent -> us request
+                allow = next((o for o in msg["params"]["options"] if o["kind"].startswith("allow")), None)
+                outcome = {"outcome": "selected", "optionId": allow["optionId"]} if allow else {"outcome": "cancelled"}
+                send({"id": msg["id"], "result": {"outcome": outcome}})
+            elif msg.get("id") in pending:                      # reply to our request
+                fut = pending.pop(msg["id"])
+                if "error" in msg:
+                    fut.set_exception(RuntimeError(msg["error"].get("message")))
+                else:
+                    fut.set_result(msg.get("result"))
+
+    async def read_until_exit():
+        try:
+            await read_loop()
+        finally:  # fail fast if the agent dies
+            for fut in pending.values():
+                if not fut.done():
+                    fut.set_exception(RuntimeError(f"{command} exited"))
+
+    reader = asyncio.create_task(read_until_exit())
+    await call("initialize", {"protocolVersion": 1, "clientCapabilities": {}})
+    servers = [{"type": "http", "name": "toolnexus", "url": mcp_url, "headers": []}] if mcp_url else []
+    session = await call("session/new", {"cwd": os.getcwd(), "mcpServers": servers, **({"_meta": meta} if meta else {})})
+
+    loop = asyncio.get_running_loop()
+
+    def generate(req):  # sync: toolnexus calls it on a worker thread
+        state["text"] = ""
+        prompt = str(req["messages"][-1]["content"])
+        turn = call("session/prompt", {"sessionId": session["sessionId"], "prompt": [{"type": "text", "text": prompt}]})
+        asyncio.run_coroutine_threadsafe(turn, loop).result()
+        return {"content": state["text"]}
+
+    def close():
+        reader.cancel()
+        proc.kill()
+
+    return create_in_process_client(model=command, generate=generate), close
+```
+```python title="main.py"
+# usage: python main.py npx -y @agentclientprotocol/claude-agent-acp@0.100.0
+import asyncio
+import sys
+
+from toolnexus import create_toolkit, define_tool
+
+from acp_agent import acp_client
+
+
+def add(a: float, b: float) -> str:
+    """Add two numbers."""
+    return str(int(a + b))
+
+
+async def main():
+    # 1. Serve YOUR toolkit as an MCP server the agent can reach.
+    toolkit = await create_toolkit(builtins=False, extra_tools=[define_tool(add, name="add")])
+    server = await toolkit.serve("127.0.0.1:0", mcp={"name": "toolnexus"}, on_call=lambda e: print("[tool]", e["name"]))
+
+    # 2. Start the agent with that server in session/new.mcpServers.
+    client, close = await acp_client(
+        sys.argv[1], sys.argv[2:],
+        mcp_url=f"{server.url}/mcp",
+        on_chunk=lambda text: print(text, end="", flush=True),  # live text as the agent writes it
+    )
+
+    # 3. The agent runs the tools itself (over MCP), so the client's own toolkit is empty.
+    empty = await create_toolkit(builtins=False)
+    result = await client.run("Use the add tool to add 17 and 25. Reply with just the sum.", empty)
+    print("\nfinal:", result.text)
+    close()
+    await server.stop()
+
+
+asyncio.run(main())
+```
+
+<Aside type="caution" title="Python serve gap">
+The driver above works against any MCP server. Python's own `toolkit.serve` MCP endpoint does not
+answer `GET /mcp` today, and the Claude ACP adapter opens that stream, so with the Python serve
+it hangs at `session/new` (verified 2026-11-05 on 0.24.0). Until that is fixed, point `mcp_url`
+at a toolkit served from JavaScript or Go, or use an agent that only POSTs.
+</Aside>
+</TabItem>
+<TabItem label="Go">
+Go has `GenerateStream`, so the agent's chunks are real stream deltas through `client.Stream`.
+
+```go title="acp.go"
+package main
+
+import (
+	"bufio"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"strings"
+	"sync"
+
+	tn "github.com/muthuishere/toolnexus/golang"
+)
+
+// ACPAgent drives any ACP agent over stdio as the model behind a toolnexus client.
+type ACPAgent struct {
+	stdin     io.WriteCloser
+	cmd       *exec.Cmd
+	mu        sync.Mutex
+	nextID    int
+	pending   map[int]chan json.RawMessage
+	onChunk   func(string) // set per turn
+	sessionID string
+}
+
+func StartACP(ctx context.Context, mcpURL string, meta map[string]any, env []string, name string, args ...string) (*ACPAgent, error) {
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Env, cmd.Stderr = append(os.Environ(), env...), os.Stderr
+	stdin, _ := cmd.StdinPipe()
+	stdout, _ := cmd.StdoutPipe()
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+	a := &ACPAgent{stdin: stdin, cmd: cmd, pending: map[int]chan json.RawMessage{}}
+	go a.readLoop(stdout)
+	if _, err := a.call("initialize", map[string]any{"protocolVersion": 1, "clientCapabilities": map[string]any{}}); err != nil {
+		return nil, err
+	}
+	servers := []any{}
+	if mcpURL != "" {
+		servers = append(servers, map[string]any{"type": "http", "name": "toolnexus", "url": mcpURL, "headers": []any{}})
+	}
+	cwd, _ := os.Getwd()
+	params := map[string]any{"cwd": cwd, "mcpServers": servers}
+	if meta != nil {
+		params["_meta"] = meta
+	}
+	raw, err := a.call("session/new", params)
+	if err != nil {
+		return nil, err
+	}
+	var s struct {
+		SessionID string `json:"sessionId"`
+	}
+	_ = json.Unmarshal(raw, &s)
+	a.sessionID = s.SessionID
+	return a, nil
+}
+
+func (a *ACPAgent) send(msg map[string]any) {
+	msg["jsonrpc"] = "2.0"
+	b, _ := json.Marshal(msg)
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.stdin.Write(append(b, '\n'))
+}
+
+func (a *ACPAgent) call(method string, params any) (json.RawMessage, error) {
+	a.mu.Lock()
+	a.nextID++
+	id, ch := a.nextID, make(chan json.RawMessage, 1)
+	a.pending[id] = ch
+	a.mu.Unlock()
+	a.send(map[string]any{"id": id, "method": method, "params": params})
+	raw, ok := <-ch
+	if !ok {
+		return nil, fmt.Errorf("acp: agent exited during %s", method)
+	}
+	var r struct {
+		Result json.RawMessage           `json:"result"`
+		Error  *struct{ Message string } `json:"error"`
+	}
+	_ = json.Unmarshal(raw, &r)
+	if r.Error != nil {
+		return nil, fmt.Errorf("acp %s: %s", method, r.Error.Message)
+	}
+	return r.Result, nil
+}
+
+func (a *ACPAgent) readLoop(r io.Reader) {
+	sc := bufio.NewScanner(r)
+	sc.Buffer(make([]byte, 1<<20), 1<<26)
+	for sc.Scan() {
+		var m struct {
+			ID     *int            `json:"id"`
+			Method string          `json:"method"`
+			Params json.RawMessage `json:"params"`
+		}
+		line := append([]byte(nil), sc.Bytes()...)
+		if json.Unmarshal(line, &m) != nil {
+			continue
+		}
+		switch m.Method {
+		case "session/update": // notification
+			var p struct {
+				Update struct {
+					SessionUpdate string                      `json:"sessionUpdate"`
+					Content       struct{ Type, Text string } `json:"content"`
+				} `json:"update"`
+			}
+			_ = json.Unmarshal(m.Params, &p)
+			if p.Update.SessionUpdate == "agent_message_chunk" && p.Update.Content.Type == "text" && a.onChunk != nil {
+				a.onChunk(p.Update.Content.Text)
+			}
+		case "session/request_permission": // agent -> us request: pick the first allow option
+			var p struct {
+				Options []struct{ OptionID, Kind string } `json:"options"`
+			}
+			_ = json.Unmarshal(m.Params, &p)
+			outcome := map[string]any{"outcome": "cancelled"}
+			for _, o := range p.Options {
+				if strings.HasPrefix(o.Kind, "allow") {
+					outcome = map[string]any{"outcome": "selected", "optionId": o.OptionID}
+					break
+				}
+			}
+			a.send(map[string]any{"id": *m.ID, "result": map[string]any{"outcome": outcome}})
+		case "": // reply to one of our requests
+			a.mu.Lock()
+			if ch, ok := a.pending[*m.ID]; ok {
+				delete(a.pending, *m.ID)
+				ch <- line
+			}
+			a.mu.Unlock()
+		}
+	}
+	a.mu.Lock()
+	for id, ch := range a.pending {
+		delete(a.pending, id)
+		close(ch)
+	}
+	a.mu.Unlock()
+}
+
+// GenerateStream has the shape of tn.InProcessOptions.GenerateStream: each
+// agent_message_chunk becomes a text delta, so Client.Stream streams for real.
+func (a *ACPAgent) GenerateStream(ctx context.Context, req tn.InProcessRequest, emit func(tn.StreamEvent)) (tn.InProcessResponse, error) {
+	last, _ := req.Messages[len(req.Messages)-1].(map[string]any)
+	var text strings.Builder
+	a.onChunk = func(t string) { text.WriteString(t); emit(tn.StreamEvent{Type: "text", Delta: t}) }
+	_, err := a.call("session/prompt", map[string]any{"sessionId": a.sessionID,
+		"prompt": []any{map[string]any{"type": "text", "text": fmt.Sprint(last["content"])}}})
+	return tn.InProcessResponse{Content: text.String()}, err
+}
+
+func (a *ACPAgent) Close() error { a.stdin.Close(); return a.cmd.Process.Kill() }
+```
+```go title="main.go"
+// usage: go run . npx -y @agentclientprotocol/claude-agent-acp@0.100.0
+package main
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"strconv"
+
+	tn "github.com/muthuishere/toolnexus/golang"
+)
+
+type addArgs struct {
+	A float64 `json:"a"`
+	B float64 `json:"b"`
+}
+
+func main() {
+	ctx := context.Background()
+	add := tn.NativeToolReflect("add", "Add two numbers.", func(_ context.Context, in addArgs) (string, error) {
+		return strconv.FormatFloat(in.A+in.B, 'f', -1, 64), nil
+	})
+
+	// 1. Serve YOUR toolkit as an MCP server the agent can reach.
+	toolkit, err := tn.CreateToolkit(ctx, tn.Options{Builtins: false, ExtraTools: []tn.Tool{add}})
+	if err != nil {
+		panic(err)
+	}
+	server, err := toolkit.Serve("127.0.0.1:0", tn.ServeOptions{
+		MCP:    &tn.MCPServeConfig{Name: "toolnexus"},
+		OnCall: func(e tn.OnCallEvent) { fmt.Println("[tool]", e.Name) },
+	})
+	if err != nil {
+		panic(err)
+	}
+	defer server.Stop()
+
+	// 2. Start the agent with that server in session/new.mcpServers.
+	agent, err := StartACP(ctx, server.URL+"/mcp", nil, nil, os.Args[1], os.Args[2:]...)
+	if err != nil {
+		panic(err)
+	}
+	defer agent.Close()
+	client := tn.CreateInProcessClient(tn.InProcessOptions{Model: os.Args[1], GenerateStream: agent.GenerateStream})
+
+	// 3. The agent runs the tools itself (over MCP), so the client's own toolkit is empty.
+	empty, err := tn.CreateToolkit(ctx, tn.Options{Builtins: false})
+	if err != nil {
+		panic(err)
+	}
+	events, err := client.Stream(ctx, "Use the add tool to add 17 and 25. Reply with just the sum.", empty)
+	if err != nil {
+		panic(err)
+	}
+	for ev := range events {
+		switch ev.Type {
+		case "text":
+			fmt.Print(ev.Delta) // live text as the agent writes it
+		case "error":
+			panic(ev.Err)
+		}
+	}
+	fmt.Println()
+}
+```
+</TabItem>
+</Tabs>
+
+<Aside type="caution" title="Kill the agent, not just npx">
+`npx …` starts the agent as a **child** of the npm process, so killing the process you spawned
+can leave the agent running. For long-lived hosts, run the agent's binary directly (install it
+once), or spawn it in its own process group and kill the group.
+</Aside>
+
+## What was verified
+
+| | how |
+|---|---|
+| all three recipes | run against a fake ACP agent (a 40-line Python script that answers `initialize` / `session/new`, sends a `session/request_permission`, calls `tools/list` + `tools/call` on the served MCP URL and streams two `agent_message_chunk`s) |
+| JavaScript and Go, live | `@agentclientprotocol/claude-agent-acp@0.100.0` (Claude Code 2.1.318): the agent called our `add` tool over MCP (`onCall` fired) and answered `42`; Go streamed it through `client.Stream` |
+| Python, live | blocked by the Python serve gap above; the driver itself works with a non-Python MCP server |
+
+## Per-agent notes
+
+<Aside type="note" title="Verified on the versions below, 2026-11-05; may change">
+Agents change their flags and config loading often. Each row is what was measured on the named
+version on 2026-11-05 (source: [`docs/references/acp-agent-isolation-2026-11-05.md`](https://github.com/muthuishere/toolnexus/blob/main/docs/references/acp-agent-isolation-2026-11-05.md)).
+Re-check before relying on it.
+</Aside>
+
+By default an agent loads its own world into every session: instruction files, skills, plugins,
+its own MCP servers, hooks and ~30 built-in tools. That is 3k to 34k tokens per turn you pay for and
+did not ask for. Isolation turns it off while subscription login and your MCP server keep working.
+The big win is always turning off the agent's **built-in tools**, which you do not want it running anyway.
+
+| agent (verified on) | launch | isolation knob | context per trivial turn, default → isolated | your MCP server | gaps |
+|---|---|---|---|---|---|
+| **Claude Code** (`@agentclientprotocol/claude-agent-acp@0.100.0`, claude 2.1.318) | `npx -y @agentclientprotocol/claude-agent-acp@0.100.0` | `session/new` `_meta`: `{"claudeCode":{"options":{"settingSources":[],"strictMcpConfig":true,"plugins":[],"skills":[],"tools":[]}}}` | 34,073 → 3,368 | works (HTTP verified live here); with `tools:[]` it calls your tool directly | none found; subscription login unaffected. Without isolation it inherits your `permissionMode` setting |
+| **Copilot CLI** (1.0.105) | `copilot --acp` | launch flags `--disable-builtin-mcps --no-custom-instructions --available-tools=toolnexus-<tool>,…` | 16,343 → ~3,000 | **HTTP only**: stdio servers in `session/new` are silently dropped. Tools appear as `toolnexus-<tool>` | `--available-tools` needs your tool names at launch; it emits an `Info: Disabled tools: …` message chunk you should filter from the answer |
+| **opencode** (2.0.23) | `opencode acp` | env `OPENCODE_DISABLE_PROJECT_CONFIG=1` and `OPENCODE_CONFIG_CONTENT={"tools":{"*":false,"execute":true,"toolnexus_*":true}}` | 11,859 → ~1,000 | works, reached through its `execute` code-mode tool | `"*":false` alone also hides your MCP tools: re-allow `execute` **and** `toolnexus_*`. An empty `OPENCODE_CONFIG_DIR` made it worse |
+| **Devin** (2026.8.18) | `devin acp` | `devin --agent-config <file> acp` (keys `system-instructions`, `allowed-tools`, `permissions`, `mcp-servers`, `extensions`) | 24,040 → 24,039 (no effect) | **ignores `session/new` mcpServers**: write a `.mcp.json` in the session `cwd`, and hint the tool name in the prompt | no knob measurably shrank context; MCP discovery was flaky |
+| **Codex** (codex-acp 0.16.0) | `codex-acp` | `-c mcp_servers={} --disable apps --disable plugins --disable hooks -c project_doc_max_bytes=0 -c skills.include_instructions=false` | ACP unmeasurable; `codex exec` 26,905 → 17,204 | n/a | every model returns 400 over ACP with a ChatGPT account. Use the [one-shot recipe](/toolnexus/in-process-client/one-shot-cli/) with `codex exec` instead |
+| **Gemini CLI** (0.66.0) | ACP mode per `gemini --help` | from `--help`, unmeasured: `--extensions none`, `--allowed-mcp-server-names toolnexus`, `--skip-trust` | not measured | not measured | not authenticated on the test machine; unverified |
+| **goose** | n/a | profiles / `GOOSE_*` env per its docs | not measured | not measured | not installed; unverified |
+
+### Passing the knobs with this recipe
+
+- **`_meta`** (Claude): JavaScript `acpClient({ meta })`, Python `acp_client(..., meta=...)`, Go `StartACP(ctx, url, meta, …)`.
+  Verified live with the JavaScript recipe and the Claude meta above.
+- **env** (opencode): JavaScript `env`, Python `env=`, Go the `env` slice (`"KEY=value"`).
+- **flags** (Copilot, Codex, Devin): append them to the launch command.
+
+## Listing and choosing models
+
+Most ACP agents advertise their models in the `session/new` result and let you switch per session:
+
+1. Read `configOptions` from the `session/new` result and take the entry with `category: "model"`
+   (its values may be flat or grouped). Older agents use a top-level `models` object instead.
+2. Select with `session/set_config_option { sessionId, configId: <that entry's id>, value }`.
+   Check that the returned `currentValue` is what you asked for; do not assume.
+
+| agent | models over ACP (2026-11-05) | other ways |
+|---|---|---|
+| Claude | 13 values (`default`, `opus`, `sonnet`, `haiku`, full ids); setting `haiku` verified | none from the CLI |
+| Copilot | only `auto` | `--model <id>` / `COPILOT_MODEL` at launch |
+| opencode | 592 `provider/model` values; setting one verified | `opencode models` |
+| Devin | 2 values; setting one verified | `--model`, `DEVIN_MODEL` |
+| Codex | 5 values, all rejected for ChatGPT accounts | `codex debug models`; `-m` on `codex exec` |
+| Gemini, goose | not measured | |
+
+Vendor-specific hints, such as Copilot's `_meta.copilotUsage` or opencode's `-free` suffix, are
+raw data; filter on them in your own code if you need to. See
+[Extend it](/toolnexus/in-process-client/extend/#model-selection) for the code.

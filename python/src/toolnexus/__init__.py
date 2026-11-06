@@ -8,6 +8,8 @@ from __future__ import annotations
 from .acp import (
     ACPClient,
     ACPError,
+    ACPExitedError,
+    ACPLaunchError,
     ACPOptions,
     ACPPermissionTimeoutError,
     load_acp,
@@ -189,17 +191,50 @@ from .mcp_source import (
     OnServer,
     mcp_hints,
 )
+from .mcp2026 import MemoryTokenStore, Token, TokenStore
 from .builtin_extras import BackgroundShellInfo, BackgroundShells, WebSearchResult
 from .client import ModelInfo, list_models
 from .prompt_cache import PromptCacheOptions
 from .tool_tiers import TIER_CORE, TIER_DEFERRED, TIER_LISTED, ToolTier, ToolTierOptions
 from .tool_concurrency import DEFAULT_MAX_TOOL_CONCURRENCY, is_concurrency_safe, resolve_max_tool_concurrency
 from .mcp_serve import (
+    LoopbackMCPServer,
     MCPServeConfig,
     OnCall,
     build_mcp_server,
     exposed_mcp_tools,
 )
+from .mcp_handler import (
+    MCP_ALLOW,
+    MCP_CONFIRM,
+    MCP_DENY,
+    MCP_HANDLER_IMPLEMENTED_VERSIONS,
+    MCP_PROTOCOL_2026,
+    MCP_SKILLS_EXTENSION,
+    McpAuthError,
+    McpCallEvent,
+    McpContext,
+    McpDecision,
+    McpHandler,
+    McpHandlerConfig,
+    McpPrompt,
+    McpPromptArgument,
+    McpPromptMessage,
+    McpPromptResult,
+    McpRequest,
+    McpResource,
+    McpResourceContent,
+    McpServerInfo,
+    McpSessionIds,
+    McpSkill,
+    McpSkillFile,
+    identity_from,
+    load_mcp_skills,
+    mcp_request_meta_from,
+    mcp_session_id_from,
+    request_from,
+)
+from .mcp_server_auth import McpPrincipal, McpServerAuth
 from .serve import (
     A2AConfig,
     FileTaskStore,
@@ -229,6 +264,7 @@ from .types import (
     McpStatus,
     Request,
     Tool,
+    ToolAnnotations,
     ToolContext,
     ToolHints,
     ToolResult,
@@ -242,6 +278,38 @@ from .types import (
 )
 
 __all__ = [
+    # embeddable MCP handler (SPEC §7C.1)
+    "MCP_ALLOW",
+    "MCP_CONFIRM",
+    "MCP_DENY",
+    "MCP_HANDLER_IMPLEMENTED_VERSIONS",
+    "MCP_PROTOCOL_2026",
+    "MCP_SKILLS_EXTENSION",
+    "McpAuthError",
+    "McpPrincipal",
+    "McpServerAuth",
+    "McpSkill",
+    "McpSkillFile",
+    "load_mcp_skills",
+    "McpCallEvent",
+    "McpContext",
+    "McpDecision",
+    "McpHandler",
+    "McpHandlerConfig",
+    "McpPrompt",
+    "McpPromptArgument",
+    "McpPromptMessage",
+    "McpPromptResult",
+    "McpRequest",
+    "McpResource",
+    "McpResourceContent",
+    "McpServerInfo",
+    "McpSessionIds",
+    "ToolAnnotations",
+    "identity_from",
+    "mcp_request_meta_from",
+    "mcp_session_id_from",
+    "request_from",
     # media generation (SPEC §7G)
     "Media",
     "MediaError",
@@ -275,6 +343,8 @@ __all__ = [
     "ACPError",
     "ACPOptions",
     "ACPPermissionTimeoutError",
+    "ACPExitedError",
+    "ACPLaunchError",
     "load_acp",
     # types
     "JSONSchema",
@@ -325,6 +395,10 @@ __all__ = [
     "parse_mcp_config",
     "elicitation_to_request",
     "answer_to_elicit_result",
+    # mcp oauth (§2A.1a)
+    "MemoryTokenStore",
+    "Token",
+    "TokenStore",
     # skill
     "SKILL_TOOL_DESCRIPTION",
     "SKILLS_PROMPT_PREAMBLE",
@@ -375,6 +449,7 @@ __all__ = [
     "OnTask",
     # mcp serve (inbound)
     "MCPServeConfig",
+    "LoopbackMCPServer",
     "OnCall",
     "build_mcp_server",
     "exposed_mcp_tools",

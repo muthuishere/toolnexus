@@ -93,7 +93,8 @@ tool. Runnable: `npm run example:prompt-cache` ([`examples/prompt_cache.ts`](exa
 - `agents.compactor({ onCompact })`, `agent.asToolWith(ctx => ({ hooks, waitFor }))`, runtime
   `waitFor`, `ctx.callId` on tools, `listModels(opts)`.
 
-ACP host hooks (permission choice, update stream, cancel, streaming) are Go-only for now.
+An in-process model streams for real when it is given as `generateStream(request, emit)`; a plain
+`generate` still refuses `stream()`.
 
 ## Simple judgments
 
@@ -191,6 +192,120 @@ const vid = await media.video({ prompt: "the fox blinks", image: img.files[0].ur
 const tk = await createToolkit({ media })            // the agent gets generate_image, …
 const res = await agent.run("Draw a fox, then animate it.", { toolkit: tk })
 for (const f of res.files) console.log(f.from, f.mimeType, f.url)
+```
+
+## MCP 2026-07-28 + OAuth
+
+`loadMcp` / `Toolkit.create({ mcpConfig })` now speak MCP **2026-07-28** first, with no MCP SDK on
+that path: every server (stdio and HTTP) gets `server/discover` before anything else. A pre-2026
+server answers it with an error, a 400/404/405, or (stdio) silence for `min(timeout, 5 s)`, and is
+then served by the unchanged SDK path. Tool names, result mapping, status, `tools` filters and
+`disableTools` are the same on both paths.
+
+```ts
+const toolkit = await Toolkit.create({
+  mcpConfig: {
+    mcpServers: {
+      docs: { url: "https://mcp.example.com/mcp", auth: { clientId: "my-registered-app" } },
+      big: { command: ["my-server"], toolSearch: true, description: "the billing API" },
+    },
+  },
+  waitFor,                 // answers MRTR input requests and `pause`-mode authorization
+  tokenStore,              // { load(resource), save(resource, token), delete(resource) }; default in memory
+  openUrl: (url) => open(url), // how `auto` OAuth opens the browser; default: the OS opener
+})
+```
+
+- **MRTR** (`input_required`) goes through `waitFor` (form ⇒ `kind:"input"` with `data.schema`,
+  URL ⇒ `kind:"authorization"`). Without `waitFor` the tool returns a §10 pending result; the
+  resumed call (with `ctx.answer`) sends that round once and is never re-asked.
+- **OAuth 2.1** on a 401: protected-resource metadata → AS metadata → a pre-registered `clientId`
+  (`clientIds` per issuer, optional `clientSecret`) or a Client ID Metadata Document
+  (`clientMetadataUrl`). **No dynamic client registration.** PKCE S256 + `resource`, `iss`/`state`
+  checks, refresh (single-flight; `omitRefreshResource` for Entra) and step-up on
+  `insufficient_scope`. `mode: "auto"` (loopback callback + `openUrl`) or `mode: "pause"` (needs
+  `redirectUri`; answer the `authorization` request with `data: { callbackUrl }`). Tokens are never
+  logged or put in error text.
+- **Old servers + OAuth:** the bearer is attached to the SDK transport through its `fetch` hook,
+  and a 401 there runs the same flow once.
+- **Skills over MCP:** a server advertising the skills extension contributes its skills to the
+  `skill` tool (base `skill://<name>/`).
+- **Tool search:** `toolSearch: true` replaces a server's tools with `<server>_search_tools` and
+  `<server>_call_tool`.
+- A failed `tools/call` (timeout, 5xx, dropped connection) is never re-sent.
+
+## Embeddable MCP server (`mcpHandler`)
+
+`serve(addr, { mcp })` owns a port and exposes one static tool list. `toolkit.mcpHandler(cfg)`
+returns a plain Node request listener `(req, res) => void` (plus `notifyToolsChanged()`) that you
+mount on **your** server or router, behind your own TLS, CORS and OAuth. Every policy is a hook:
+`authenticate` (+ `wwwAuthenticate` for the 401), `listTools` per request (a name outside it is never
+executed), `beforeCall` allow / deny / confirm (confirm uses MCP elicitation when the client supports
+it, otherwise returns your fallback `result`), `onCall` telemetry, `serverInfo`, resources/prompts,
+pluggable `sessionIds`, `stateless`, `protocolVersions`. Hooks and tools read the caller with
+`identityFrom(ctx)`, `requestFrom(ctx)`, `mcpSessionIdFrom(ctx)` and `mcpRequestMetaFrom(ctx)`.
+`ToolResult.structured` / `meta` and `Tool.outputSchema` / `annotations` go on the wire as
+`structuredContent` / `_meta` / `outputSchema` / `annotations`. SPEC §7C.1; runnable:
+`npm run example:mcp-handler`.
+
+```ts
+import http from "node:http"
+import { createToolkit, identityFrom } from "toolnexus"
+
+const tk = await createToolkit({ builtins: false })
+const mcp = tk.mcpHandler({
+  authenticate: (req) => verifyBearer(req.headers.authorization),   // throw ⇒ 401
+  listTools: (ctx) => toolsFor(identityFrom(ctx)),
+  beforeCall: (_ctx, tool) =>
+    tool.annotations?.destructiveHint ? { kind: "confirm", message: `Run ${tool.name}?` } : { kind: "allow" },
+})
+http.createServer((req, res) => (req.url?.startsWith("/mcp") ? mcp(req, res) : res.writeHead(404).end())).listen(8080)
+```
+
+### MCP 2026-07-28 (opt-in)
+
+List `"2026-07-28"` in `protocolVersions` to serve the stateless 2026 wire (`server/discover`,
+header validation, `resultType`, MRTR): `["2026-07-28"]` alone, or `["2026-07-28", "2025-06-18"]` for
+both wires on one mount. It is never a default and `initialize` never negotiates it. A `confirm`
+decision and a tool suspension (§10 `pending(...)`) leave as `input_required`; the client's retry
+reaches the tool as `ctx.answer`. `listSkills` publishes skills through the skills extension
+(`skills/list`, `skills/get`, `resources/read` of `skill://` URIs); `loadMcpSkills(dir)` builds that
+list from a skills folder. `McpServerAuth` makes the handler an OAuth protected resource: its
+`authenticate` verifies RS256 JWTs against the issuer's JWKS (or your `verify`), applies per-tool
+`scopes`, answers with exact `WWW-Authenticate` challenges, and returns an `McpPrincipal`;
+`metadata()` serves the RFC 9728 document. Bring your own authorization server; the
+auto-approving dev authorization server the suite uses is test tooling (`test/support`), not part of
+the package. SPEC §7C.2.
+
+```ts
+import { McpServerAuth, loadMcpSkills } from "toolnexus"
+
+const auth = new McpServerAuth({ issuer: "https://login.example", scopes: { "*": ["mcp"], wipe: ["mcp:admin"] } })
+const mcp = tk.mcpHandler({
+  protocolVersions: ["2026-07-28", "2025-06-18"],
+  authenticate: auth.authenticate,
+  listSkills: () => loadMcpSkills("./skills"),
+})
+const prm = auth.metadata() // mount at /.well-known/oauth-protected-resource[/mcp]
+```
+
+## Agents via ACP
+
+toolnexus ships no per-agent client. Three vendor-neutral pieces compose (SPEC §8C):
+`toolkit.asMcpServer()` serves the toolkit on `127.0.0.1` behind a bearer token (`{url, token,
+close}`); `loadACP({command, args, mcpServers, sessionMeta, clientCapsMeta, model})` drives any
+ACP agent, passing `mcpServers` verbatim; and its `generateStream` plugs into
+`createInProcessClient({ generateStream })` for incremental `stream()` (text, `thought`, and the
+agent's own `tool_call`/`tool_result` with `via: "acp"`).
+
+```ts
+const srv = await tk.asMcpServer()
+const acp = await loadACP({
+  command: "my-acp-agent",
+  mcpServers: [{ type: "http", name: "toolnexus", url: srv.url,
+                 headers: [{ name: "Authorization", value: `Bearer ${srv.token}` }] }],
+})
+const client = createInProcessClient({ generate: acp.generate, generateStream: acp.generateStream })
 ```
 
 ## Documentation

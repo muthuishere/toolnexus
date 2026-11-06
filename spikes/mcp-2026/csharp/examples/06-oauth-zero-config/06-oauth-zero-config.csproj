@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>06-oauth-zero-config</AssemblyName>
+    <RootNamespace>Example06</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../src/Mcp2026/Mcp2026.csproj" />
+  </ItemGroup>
+</Project>

@@ -284,6 +284,20 @@
           "media"
         ],
         "tier": "full"
+      },
+      {
+        "name": "tokenStore",
+        "aliases": [
+          "tokenstore"
+        ],
+        "tier": "full"
+      },
+      {
+        "name": "openUrl",
+        "aliases": [
+          "openurl"
+        ],
+        "tier": "full"
       }
     ]
   },
@@ -422,6 +436,52 @@
         "name": "evaluate",
         "aliases": [
           "evaluate"
+        ],
+        "tier": "core"
+      }
+    ]
+  },
+  "acpOptions": {
+    "_doc": "SPEC §8C ACPOptions passthrough fields (ADR 0041).",
+    "files": {
+      "js": "js/src/acp.ts",
+      "python": "python/src/toolnexus/acp.py",
+      "go": "golang/acp.go",
+      "java": "java/src/main/java/io/github/muthuishere/toolnexus/acp/AcpClient.java",
+      "csharp": "csharp/src/Toolnexus/Acp/AcpClient.cs",
+      "elixir": "elixir/lib/toolnexus/acp.ex",
+      "clojure": "clojure/src/toolnexus/acp.cljc",
+      "rust": "rust/src/acp.rs"
+    },
+    "options": [
+      {
+        "name": "mcpServers",
+        "aliases": [
+          "mcpServers",
+          "mcp_servers"
+        ],
+        "tier": "core"
+      },
+      {
+        "name": "sessionMeta",
+        "aliases": [
+          "sessionMeta",
+          "session_meta"
+        ],
+        "tier": "core"
+      },
+      {
+        "name": "clientCapsMeta",
+        "aliases": [
+          "clientCapsMeta",
+          "client_caps_meta"
+        ],
+        "tier": "core"
+      },
+      {
+        "name": "model",
+        "aliases": [
+          "model"
         ],
         "tier": "core"
       }

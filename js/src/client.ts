@@ -394,8 +394,12 @@ export interface RunResult {
 /** Events yielded by client.stream(). */
 export type StreamEvent =
   | { type: "text"; delta: string }
-  | { type: "tool_call"; id: string; name: string; args: Record<string, unknown>; via?: "call_tool" }
-  | { type: "tool_result"; id: string; name: string; output: string; isError: boolean; metadata?: Record<string, unknown>; via?: "call_tool" }
+  /** Model reasoning narration (e.g. an ACP agent's `agent_thought_chunk`). Never part of
+   *  the answer text or the RunResult. */
+  | { type: "thought"; delta: string; via?: "acp" }
+  /** `via: "acp"` marks a tool the ACP agent ran itself: reported, never executed by the loop. */
+  | { type: "tool_call"; id: string; name: string; args: Record<string, unknown>; via?: "call_tool" | "acp" }
+  | { type: "tool_result"; id: string; name: string; output: string; isError: boolean; metadata?: Record<string, unknown>; via?: "call_tool" | "acp" }
   | { type: "usage"; usage: Usage }
   | { type: "pending"; request: Request }
   | { type: "done"; result: RunResult }
@@ -1413,6 +1417,13 @@ export class Client {
             const payload = line.slice(5).trim()
             if (payload === "[DONE]") break
             const j = safeParse(payload)
+            // A non-text event from an in-process streaming generate rides in-band so it keeps
+            // its order and arrives as it happens; it goes straight to the consumer and is never
+            // executed. Honoured only on the in-process sentinel URL, never from a real server.
+            if (j && j[IN_PROCESS_SIDE_KEY] && this.opts.baseUrl === IN_PROCESS_BASE_URL) {
+              yield j[IN_PROCESS_SIDE_KEY] as StreamEvent
+              continue
+            }
             if (j?.usage) addUsage(usage, j.usage, "openai")
             const choice = j?.choices?.[0]
             const d = choice?.delta
@@ -1617,11 +1628,27 @@ export interface InProcessResponse {
   usage?: { promptTokens?: number; completionTokens?: number; totalTokens?: number }
 }
 
+/** A streaming in-process model: `emit` each event as it happens — `text` deltas become
+ *  the streamed answer as they arrive; any other event (thought, an agent's own tool_call /
+ *  tool_result) goes straight to the stream consumer and is never executed by the loop.
+ *  Return the whole message when done (its `toolCalls`, if any, are what the loop runs). */
+export type InProcessGenerateStream = (
+  request: InProcessRequest,
+  emit: (event: StreamEvent) => void,
+) => InProcessResponse | Promise<InProcessResponse>
+
+type InProcessGenerate = (request: InProcessRequest) => InProcessResponse | Promise<InProcessResponse>
+
 /** Options for {@link createInProcessClient}: every client option EXCEPT the three
- *  that describe a wire — `baseUrl`, `apiKey` and `style` — plus `generate`. */
+ *  that describe a wire — `baseUrl`, `apiKey` and `style` — plus `generate` and/or
+ *  `generateStream` (at least one). */
 export type InProcessOptions = Omit<ClientOptions, "baseUrl" | "apiKey" | "style" | "fetch"> & {
   /** Your model. Receives the assembled request, returns one assistant message. */
-  generate: (request: InProcessRequest) => InProcessResponse | Promise<InProcessResponse>
+  generate?: InProcessGenerate
+  /** Your model, streaming for real. With it, `stream()` is incremental; without it a
+   *  `stream()` on a plain `generate` is refused. When both are set, `generate` serves
+   *  non-streaming calls; alone, it serves them too (with a no-op `emit`). */
+  generateStream?: InProcessGenerateStream
 }
 
 /** The sentinel base URL. Never dialled — the transport below answers every request
@@ -1629,6 +1656,10 @@ export type InProcessOptions = Omit<ClientOptions, "baseUrl" | "apiKey" | "style
  *  it must be syntactically valid. `.invalid` is reserved by RFC 2606 precisely so a
  *  name can never resolve. */
 const IN_PROCESS_BASE_URL = "http://in-process.invalid/v1"
+
+/** The in-band SSE key that carries a non-text stream event from an in-process
+ *  streaming generate to the consumer (honoured only on {@link IN_PROCESS_BASE_URL}). */
+const IN_PROCESS_SIDE_KEY = "toolnexus_event"
 
 /**
  * Build a `fetch`-shaped adapter over a semantic `generate` function (ADR 0030):
@@ -1638,15 +1669,20 @@ const IN_PROCESS_BASE_URL = "http://in-process.invalid/v1"
  * or the agent runtime's `inProcess` option) goes through this ONE function, so there
  * is no second copy of the request/response assembly to drift.
  *
- * Streaming is refused rather than faked — see the thrown error.
+ * Streaming with only a plain `generate` is refused rather than faked — see the thrown
+ * error. With `generateStream` it streams for real: each text event is written to the
+ * SSE body the moment it is emitted.
  */
-export function createInProcessFetch(generate: (request: InProcessRequest) => InProcessResponse | Promise<InProcessResponse>): typeof fetch {
-  if (typeof generate !== "function") {
-    throw new Error("toolnexus: createInProcessFetch requires a `generate` function")
+export function createInProcessFetch(generate?: InProcessGenerate, generateStream?: InProcessGenerateStream): typeof fetch {
+  if (typeof generate !== "function" && typeof generateStream !== "function") {
+    throw new Error("toolnexus: createInProcessFetch requires a `generate` (or `generateStream`) function")
   }
 
   const inProcessFetch: typeof fetch = async (_url, init) => {
     const body = JSON.parse(String((init as any)?.body ?? "{}"))
+    const request: InProcessRequest = { messages: body.messages ?? [], tools: body.tools, model: body.model, body }
+
+    if (body.stream && generateStream) return inProcessStream(generateStream, request)
 
     // A generate() returns a whole answer, so a stream would be one chunk pretending
     // to be many. Content and delta-count assertions cannot tell that from a real
@@ -1658,25 +1694,11 @@ export function createInProcessFetch(generate: (request: InProcessRequest) => In
       )
     }
 
-    const answer = await generate({
-      messages: body.messages ?? [],
-      tools: body.tools,
-      model: body.model,
-      body,
-    })
+    const answer = generate ? await generate(request) : await generateStream!(request, () => {})
 
     const message: Record<string, any> = { role: "assistant" }
     if (answer.toolCalls && answer.toolCalls.length > 0) {
-      message.tool_calls = answer.toolCalls.map((c, i) => ({
-        id: c.id ?? `call_${i}`,
-        type: "function",
-        function: {
-          name: c.name,
-          // A string is already encoded; anything else is encoded here so a model
-          // author never has to think about the wire.
-          arguments: typeof c.arguments === "string" ? c.arguments : JSON.stringify(c.arguments ?? {}),
-        },
-      }))
+      message.tool_calls = wireToolCalls(answer.toolCalls, false)
     } else {
       message.content = answer.content ?? ""
     }
@@ -1700,6 +1722,77 @@ export function createInProcessFetch(generate: (request: InProcessRequest) => In
   return inProcessFetch
 }
 
+function wireToolCalls(calls: InProcessToolCall[], indexed: boolean): any[] {
+  return calls.map((c, i) => ({
+    ...(indexed ? { index: i } : {}),
+    id: c.id ?? `call_${i}`,
+    type: "function",
+    function: {
+      name: c.name,
+      // A string is already encoded; anything else is encoded here so a model
+      // author never has to think about the wire.
+      arguments: typeof c.arguments === "string" ? c.arguments : JSON.stringify(c.arguments ?? {}),
+    },
+  }))
+}
+
+/** Runs a streaming generate and answers with an OpenAI SSE body written AS EVENTS ARRIVE:
+ *  text → a content delta; any other event → an in-band side chunk for the consumer; then
+ *  (tool calls as one delta | the content as one delta when no text was emitted), the
+ *  finish_reason chunk, usage, and [DONE]. */
+function inProcessStream(generateStream: InProcessGenerateStream, request: InProcessRequest): Response {
+  const enc = new TextEncoder()
+  let open = true
+  const sse = new ReadableStream<Uint8Array>({
+    start(controller) {
+      const chunk = (v: unknown) => {
+        if (open) controller.enqueue(enc.encode(`data: ${JSON.stringify(v)}\n\n`))
+      }
+      let sawText = false
+      void (async () => {
+        try {
+          const answer = await generateStream(request, (ev) => {
+            if (!ev || typeof ev !== "object") return
+            if (ev.type === "text") {
+              if (ev.delta) {
+                sawText = true
+                chunk({ choices: [{ index: 0, delta: { content: ev.delta } }] })
+              }
+              return
+            }
+            chunk({ [IN_PROCESS_SIDE_KEY]: ev })
+          })
+          let finish = "stop"
+          if (answer.toolCalls && answer.toolCalls.length > 0) {
+            chunk({ choices: [{ index: 0, delta: { tool_calls: wireToolCalls(answer.toolCalls, true) } }] })
+            finish = "tool_calls"
+          } else if (!sawText && answer.content) {
+            chunk({ choices: [{ index: 0, delta: { content: answer.content } }] })
+          }
+          chunk({ choices: [{ index: 0, delta: {}, finish_reason: finish }] })
+          const u = answer.usage
+          if (u) {
+            const p = u.promptTokens ?? 0, c = u.completionTokens ?? 0
+            chunk({ choices: [], usage: { prompt_tokens: p, completion_tokens: c, total_tokens: u.totalTokens || p + c } })
+          }
+          if (open) controller.enqueue(enc.encode("data: [DONE]\n\n"))
+          open = false
+          controller.close()
+        } catch (e) {
+          if (open) {
+            open = false
+            controller.error(e)
+          }
+        }
+      })()
+    },
+    cancel() {
+      open = false
+    },
+  })
+  return new Response(sse, { status: 200, headers: { "content-type": "text/event-stream" } })
+}
+
 /**
  * A client backed by a model running IN THIS PROCESS — no server, no socket, and no
  * HTTP types to construct.
@@ -1710,11 +1803,15 @@ export function createInProcessFetch(generate: (request: InProcessRequest) => In
  * The `fetch`-shaped adapter itself is {@link createInProcessFetch} — this function
  * is just that adapter wired into a `Client`.
  *
- * Streaming is refused rather than faked — see {@link createInProcessFetch}.
+ * Streaming is refused rather than faked for a plain `generate`; with `generateStream`
+ * it streams for real — see {@link createInProcessFetch}.
  */
 export function createInProcessClient(opts: InProcessOptions): Client {
-  const { generate, ...rest } = opts
-  const inProcessFetch = createInProcessFetch(generate)
+  const { generate, generateStream, ...rest } = opts
+  if (typeof generate !== "function" && typeof generateStream !== "function") {
+    throw new Error("toolnexus: createInProcessClient requires a `generate` (or `generateStream`) function")
+  }
+  const inProcessFetch = createInProcessFetch(generate, generateStream)
 
   return new Client({
     // Retries default to ZERO here, unlike a network client. There is no wire, so

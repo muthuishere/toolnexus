@@ -297,7 +297,14 @@ class _A2AHandler(http.server.BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
         srv = self.server
         if srv._mcp is not None and self._is_mcp_path():  # type: ignore[attr-defined]
-            return self._handle_mcp()
+            # Stateless profile offers no server-initiated SSE stream; answer GET
+            # immediately with 405 (MCP streamable-HTTP) instead of holding the
+            # connection open forever (the buffered ASGI bridge never returns).
+            self.send_response(405)
+            self.send_header("Allow", "POST")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
         # No A2A profile ⇒ no routes.
         if srv._a2a is None or srv._store is None:  # type: ignore[attr-defined]
             return self._not_found()
@@ -377,7 +384,7 @@ async def start_a2a_server(
     # MCP inbound profile (independent of A2A): the exposed tool subset is computed
     # once; a fresh MCP server is built per request from it.
     httpd._mcp = mcp  # type: ignore[attr-defined]
-    httpd._mcp_tools = exposed_mcp_tools(mcp_tools or [], mcp) if mcp else []  # type: ignore[attr-defined]
+    httpd._mcp_tools = exposed_mcp_tools(mcp_tools or [], mcp) if mcp is not None else []  # type: ignore[attr-defined]
     httpd._on_call = on_call  # type: ignore[attr-defined]
     httpd._loop = loop or asyncio.get_running_loop()  # type: ignore[attr-defined]
     httpd._base_url = _base_url(host, httpd)  # type: ignore[attr-defined]

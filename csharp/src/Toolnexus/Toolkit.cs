@@ -84,6 +84,12 @@ public sealed class Toolkit : IAsyncDisposable
         /// </summary>
         public Func<Request, Task<Answer>>? WaitFor { get; set; }
 
+        /// <summary>(SPEC §2A.1a) MCP OAuth token store, keyed by resource. Default: in memory, per load.</summary>
+        public ITokenStore? TokenStore { get; set; }
+
+        /// <summary>(SPEC §2A.1a) How <c>auto</c>-mode MCP OAuth opens the authorization URL. Default: the OS opener.</summary>
+        public Func<string, Task>? OpenUrl { get; set; }
+
         /// <summary>
         /// §7G media generation: registers <c>Media.Tools()</c> (source <c>"media"</c>) — equivalent to
         /// <c>toolkit.Register(media.Tools())</c>. They follow A2A agent tools and precede
@@ -130,15 +136,20 @@ public sealed class Toolkit : IAsyncDisposable
     public static async Task<Toolkit> CreateAsync(Options opts, CancellationToken cancellationToken = default)
     {
         // §2 Gap 3: the caller's token propagates through the MCP connect/list.
-        var mcp = opts.McpConfig != null ? await McpSource.LoadAsync(opts.McpConfig, opts.WaitFor, cancellationToken).ConfigureAwait(false) : null;
+        var mcp = opts.McpConfig != null
+            ? await McpSource.LoadAsync(opts.McpConfig, new McpLoadOptions { WaitFor = opts.WaitFor, TokenStore = opts.TokenStore, OpenUrl = opts.OpenUrl, DisableTools = opts.DisableTools }, cancellationToken).ConfigureAwait(false)
+            : null;
         // Skills come from directories, in-memory data, and/or a lazy provider (§3,
         // S1). The provider is resolved here and merged with the data list; a
         // provider failure is isolated so other sources still load.
         SkillSource? skill = null;
-        if (opts.SkillsDir != null || opts.Skills != null || opts.SkillProvider != null)
+        // §2.7: skills published by 2026-07-28 MCP servers join the same `skill` tool as data skills.
+        var remoteSkills = mcp?.RemoteSkills ?? Array.Empty<SkillSource.SkillDef>();
+        if (opts.SkillsDir != null || opts.Skills != null || opts.SkillProvider != null || remoteSkills.Count > 0)
         {
             var dataDefs = new List<SkillSource.SkillDef>();
             if (opts.Skills != null) dataDefs.AddRange(opts.Skills);
+            dataDefs.AddRange(remoteSkills);
             if (opts.SkillProvider != null)
             {
                 try
@@ -274,6 +285,12 @@ public sealed class Toolkit : IAsyncDisposable
         _byName[t.Name] = t;
     }
 
+    /// <summary>
+    /// (SPEC §7C.1) An embeddable streamable-HTTP MCP server for this toolkit, to mount on the host's
+    /// own HTTP server. <see cref="ServeAsync"/> is unchanged.
+    /// </summary>
+    public McpHttpHandler McpHandler(McpHandlerConfig? cfg = null) => new(this, cfg);
+
     public List<ITool> Tools()
     {
         lock (_gate) return _byName.Values.ToList();
@@ -361,6 +378,18 @@ public sealed class Toolkit : IAsyncDisposable
             mcp,
             mcp != null ? Tools() : null,
             opts.OnCall);
+    }
+
+    /// <summary>
+    /// Serve this toolkit as an MCP server for a local agent to call (SPEC §8C): a stateless
+    /// streamable-HTTP endpoint at <c>http://127.0.0.1:&lt;ephemeral&gt;/mcp</c> behind a fresh
+    /// bearer token. Same tool mapping and <see cref="MCPServeConfig"/> filter as §7C; tool names
+    /// are served verbatim (<c>skill</c> stays <c>skill</c>). Close the returned server when done.
+    /// </summary>
+    public ToolkitMcpServer AsMcpServer(MCPServeConfig? config = null)
+    {
+        var cfg = config ?? new MCPServeConfig();
+        return new ToolkitMcpServer(McpServe.ExposedMcpTools(Tools(), cfg), cfg);
     }
 
     public async Task<ToolResult> ExecuteAsync(string name, IDictionary<string, object?>? args, ToolContext? ctx = null)

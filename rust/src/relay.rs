@@ -61,6 +61,8 @@ pub fn relay_tool(
     let name: String = name.into();
     let n = name.clone();
     Tool {
+        output_schema: None,
+        annotations: None,
         // The host runs a relay call, and every relay call of a turn surfaces in
         // one Request (§10), so relay calls are never serialised here.
         concurrency_safe: Some(Arc::new(|_| true)),

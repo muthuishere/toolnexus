@@ -1,0 +1,9 @@
+;; MCP 2026-07-28 spike, Clojure port. JVM host; koine (JSON) is the only third-party dep,
+;; the same one the repo's clojure/ port uses.
+;;
+;;   ./run.sh test                         full suite (hermetic; Keycloak/GitHub env-gated)
+;;   ./run.sh server | client <url> | selftest
+{:paths ["src"]
+ :deps  {org.clojure/clojure           {:mvn/version "1.12.5"}
+         net.clojars.muthuishere/koine {:mvn/version "0.11.0"}}
+ :aliases {:test {:extra-paths ["test"]}}}

@@ -1,6 +1,9 @@
 // Dynamic MCP source. Mirrors opencode's mcp/index.ts + mcp/catalog.ts, but
 // standalone: connect to every configured server, list tools, and convert each
-// into a uniform Tool. Built on github.com/mark3labs/mcp-go.
+// into a uniform Tool. Protocol 2026-07-28 is spoken first by toolnexus's own
+// client (mcp2026.go); this SDK-based path (github.com/mark3labs/mcp-go) is the
+// FROZEN FALLBACK for older servers (SPEC §2.2a, §2.F), reached only when
+// server/discover is not answered the 2026 way.
 
 package toolnexus
 
@@ -12,6 +15,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -119,6 +123,14 @@ type ServerConfig struct {
 	// allowlist; only-false ⇒ drop-list; unknown ⇒ ignore+warn). Applied to the
 	// listed defs before sanitize/prefix.
 	Tools map[string]bool `json:"tools"`
+	// Auth configures OAuth for a remote server (§2A). Absent ⇒ a 401 still
+	// triggers the flow (CIMD if the AS supports it).
+	Auth *McpAuthConfig `json:"auth,omitempty"`
+	// Description says what this server is for (tool search, §2.8).
+	Description string `json:"description,omitempty"`
+	// ToolSearch exposes <server>_search_tools + <server>_call_tool instead of
+	// every server tool (§2.8; 2026 path only).
+	ToolSearch bool `json:"toolSearch,omitempty"`
 }
 
 // McpConfig maps server name -> config.
@@ -553,10 +565,14 @@ type McpSource struct {
 	close  func()
 	// servers are the connected clients by server name (for ResourceTools).
 	servers map[string]mcpServerConn
+	// SkillDirs hold skills downloaded from 2026 servers' skills extension
+	// (§2.7); CreateToolkit adds them to the `skill` inventory. Removed on Close.
+	SkillDirs []string
 }
 
 type mcpServerConn struct {
-	client  *mcpclient.Client
+	client  *mcpclient.Client // frozen-fallback SDK client (nil on the 2026 path)
+	v26     *mcp26Server      // 2026 path (nil on fallback)
 	timeout time.Duration
 }
 
@@ -570,6 +586,11 @@ func (m *McpSource) Close() {
 // applyToolsFilter (§2 Gap 7) applies a per-server tool allowlist to the listed
 // defs. Same semantics as the builtins/skills filter. Keyed on ORIGINAL tool name.
 func applyToolsFilter(server string, defs []mcp.Tool, filter map[string]bool) []mcp.Tool {
+	return applyNameFilter(server, defs, func(d mcp.Tool) string { return d.Name }, filter)
+}
+
+// applyNameFilter is applyToolsFilter over any def shape (shared with the 2026 path).
+func applyNameFilter[T any](server string, defs []T, nameOf func(T) string, filter map[string]bool) []T {
 	if len(filter) == 0 {
 		return defs
 	}
@@ -582,16 +603,16 @@ func applyToolsFilter(server string, defs []mcp.Tool, filter map[string]bool) []
 	}
 	present := map[string]bool{}
 	for _, d := range defs {
-		present[d.Name] = true
+		present[nameOf(d)] = true
 	}
 	for k := range filter {
 		if !present[k] {
 			log.Printf("[toolnexus] server %q tools filter name %q matched no tool", server, k)
 		}
 	}
-	out := make([]mcp.Tool, 0, len(defs))
+	out := make([]T, 0, len(defs))
 	for _, d := range defs {
-		v, ok := filter[d.Name]
+		v, ok := filter[nameOf(d)]
 		keep := false
 		if hasTrue {
 			keep = ok && v
@@ -605,16 +626,40 @@ func applyToolsFilter(server string, defs []mcp.Tool, filter map[string]bool) []
 	return out
 }
 
-func connectServer(ctx context.Context, name string, cfg ServerConfig, waitFor func(Request) (Answer, error)) (*mcpclient.Client, error) {
+func connectServer(ctx context.Context, name string, cfg ServerConfig, waitFor func(Request) (Answer, error), auth ...*mcpOAuth) (*mcpclient.Client, error) {
 	timeout := cfg.timeout()
 
 	if cfg.isRemote() {
-		client, err := newRemoteClient(ctx, cfg, waitFor)
-		if err != nil {
-			return nil, err
+		var oa *mcpOAuth
+		if len(auth) > 0 {
+			oa = auth[0]
 		}
-		if err := initClient(ctx, client, timeout); err != nil {
-			client.Close()
+		client, err := newRemoteClient(ctx, cfg, waitFor, oa)
+		if err == nil {
+			err = initClient(ctx, client, timeout)
+			if err != nil {
+				client.Close()
+			}
+		}
+		// §2A.1a: a 401 from the SDK path triggers the same OAuth flow once
+		// (through a token-less 2026 probe that reads WWW-Authenticate), then retries.
+		if err != nil && oa != nil && errors.Is(err, transport.ErrUnauthorized) {
+			probe := &mcp26Client{url: cfg.URL, headers: cfg.Headers, auth: oa}
+			pctx, cancel := context.WithTimeout(ctx, timeout)
+			_, perr := probe.call(pctx, "server/discover", nil)
+			cancel()
+			var ap *mcpAuthPending
+			if errors.As(perr, &ap) {
+				return nil, perr
+			}
+			client, err = newRemoteClient(ctx, cfg, waitFor, oa)
+			if err == nil {
+				if err = initClient(ctx, client, timeout); err != nil {
+					client.Close()
+				}
+			}
+		}
+		if err != nil {
 			return nil, err
 		}
 		return client, nil
@@ -665,11 +710,22 @@ func connectServer(ctx context.Context, name string, cfg ServerConfig, waitFor f
 	return client, nil
 }
 
-func newRemoteClient(ctx context.Context, cfg ServerConfig, waitFor func(Request) (Answer, error)) (*mcpclient.Client, error) {
+func newRemoteClient(ctx context.Context, cfg ServerConfig, waitFor func(Request) (Answer, error), auth *mcpOAuth) (*mcpclient.Client, error) {
 	timeout := cfg.timeout()
 	// Expand ${ENV_VAR} in header values so tokens live in the environment, not
 	// the committed config. Values are never logged.
 	headers := ExpandEnvHeaders(cfg.Headers)
+	// OAuth (§2A.1a): the bearer is attached per request, so a refreshed token is
+	// picked up without reconnecting.
+	bearerHeader := func(ctx context.Context) map[string]string {
+		if auth == nil {
+			return nil
+		}
+		if t := auth.bearer(ctx, cfg.URL); t != "" {
+			return map[string]string{"Authorization": "Bearer " + t}
+		}
+		return nil
+	}
 
 	// Prefer streamable HTTP, fall back to SSE. Build transport + client directly
 	// (instead of the NewStreamableHttpClient / NewSSEMCPClient convenience) so the
@@ -677,6 +733,9 @@ func newRemoteClient(ctx context.Context, cfg ServerConfig, waitFor func(Request
 	var httpOpts []transport.StreamableHTTPCOption
 	if len(headers) > 0 {
 		httpOpts = append(httpOpts, transport.WithHTTPHeaders(headers))
+	}
+	if auth != nil {
+		httpOpts = append(httpOpts, transport.WithHTTPHeaderFunc(bearerHeader))
 	}
 	httpTransport, err := transport.NewStreamableHTTP(cfg.URL, httpOpts...)
 	if err == nil {
@@ -699,6 +758,9 @@ func newRemoteClient(ctx context.Context, cfg ServerConfig, waitFor func(Request
 	var sseOpts []transport.ClientOption
 	if len(headers) > 0 {
 		sseOpts = append(sseOpts, mcpclient.WithHeaders(headers))
+	}
+	if auth != nil {
+		sseOpts = append(sseOpts, transport.WithHeaderFunc(bearerHeader))
 	}
 	sseTransport, sseErr := transport.NewSSE(cfg.URL, sseOpts...)
 	if sseErr != nil {
@@ -781,6 +843,12 @@ type McpLoadOptions struct {
 	// serialized (never concurrent with each other) but come from load
 	// goroutines; keep them short.
 	OnServer func(McpServerResult)
+	// TokenStore persists OAuth tokens per resource (§2A.1a). nil ⇒ in-memory per load.
+	TokenStore TokenStore
+	// OpenURL opens the authorization URL in `auto` mode. nil ⇒ the OS opener.
+	OpenURL func(string) error
+	// DisableTools (final names) are also hidden from tool search (§2.8).
+	DisableTools []string
 }
 
 // LoadMcpWithOptions is LoadMcpWithContext plus per-server readiness
@@ -802,8 +870,18 @@ func LoadMcpWithOptions(ctx context.Context, input any, opts McpLoadOptions) (*M
 		tools   []Tool
 		status  = map[string]McpStatus{}
 		clients []*mcpclient.Client
+		v26s    []*mcp26Server
 		wg      sync.WaitGroup
 	)
+	store := opts.TokenStore
+	if store == nil {
+		store = &MemoryTokenStore{}
+	}
+	disabled := map[string]bool{}
+	for _, n := range opts.DisableTools {
+		disabled[n] = true
+	}
+	copts := mcpConnectOpts{waitFor: wf, tokenStore: store, openURL: opts.OpenURL, disabled: disabled}
 	report := func(r McpServerResult) {
 		if opts.OnServer == nil {
 			return
@@ -811,6 +889,14 @@ func LoadMcpWithOptions(ctx context.Context, input any, opts McpLoadOptions) (*M
 		cbMu.Lock()
 		defer cbMu.Unlock()
 		opts.OnServer(r)
+	}
+
+	fail := func(name string, err error) {
+		mu.Lock()
+		status[name] = StatusFailed
+		mu.Unlock()
+		log.Printf("[toolnexus] MCP server %q failed: %v", name, err)
+		report(McpServerResult{Name: name, Status: StatusFailed, Err: err})
 	}
 
 	for name, cfg := range config {
@@ -825,7 +911,36 @@ func LoadMcpWithOptions(ctx context.Context, input any, opts McpLoadOptions) (*M
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			client, cErr := connectServer(ctx, name, cfg, wf)
+			// Discover first (§2.2); the SDK path below is the frozen fallback.
+			s26, auth, fallback, dErr := connect2026(ctx, name, cfg, copts)
+			if dErr != nil {
+				var ap *mcpAuthPending
+				if errors.As(dErr, &ap) {
+					dErr = errors.New("authorization pending")
+				}
+				fail(name, dErr)
+				return
+			}
+			if !fallback {
+				converted, tErr := s26.tools(ctx)
+				if tErr != nil {
+					s26.close()
+					fail(name, tErr)
+					return
+				}
+				if d := s26.discovery; d != nil && d.skills {
+					s26.loadSkills(ctx)
+				}
+				mu.Lock()
+				tools = append(tools, converted...)
+				v26s = append(v26s, s26)
+				servers[name] = mcpServerConn{v26: s26, timeout: cfg.timeout()}
+				status[name] = StatusConnected
+				mu.Unlock()
+				report(McpServerResult{Name: name, Status: StatusConnected, Tools: converted})
+				return
+			}
+			client, cErr := connectServer(ctx, name, cfg, wf, auth)
 			if cErr != nil {
 				mu.Lock()
 				status[name] = StatusFailed
@@ -862,22 +977,31 @@ func LoadMcpWithOptions(ctx context.Context, input any, opts McpLoadOptions) (*M
 	wg.Wait()
 
 	// Parent cancellation/deadline aborts the whole build (§2 Gap 3, A1).
-	if ctx.Err() != nil {
+	closeAll := func() {
 		for _, c := range clients {
 			_ = c.Close()
 		}
+		for _, s := range v26s {
+			s.close()
+		}
+	}
+	if ctx.Err() != nil {
+		closeAll()
 		return nil, ctx.Err()
 	}
-
+	var skillDirs []string
+	for _, s := range v26s {
+		if s.skillDir != "" {
+			skillDirs = append(skillDirs, s.skillDir)
+		}
+	}
+	sort.Strings(skillDirs)
 	return &McpSource{
-		Tools:   tools,
-		Status:  status,
-		servers: servers,
-		close: func() {
-			for _, c := range clients {
-				_ = c.Close()
-			}
-		},
+		Tools:     tools,
+		Status:    status,
+		servers:   servers,
+		SkillDirs: skillDirs,
+		close:     closeAll,
 	}, nil
 }
 
@@ -922,7 +1046,28 @@ func ListMcpTools(ctx context.Context, input any) (*McpInventory, error) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			client, cErr := connectServer(ctx, name, cfg, nil)
+			s26, auth, fallback, dErr := connect2026(ctx, name, cfg, mcpConnectOpts{})
+			if dErr == nil && !fallback {
+				infos, lErr := s26.toolInfos(ctx)
+				s26.close()
+				mu.Lock()
+				if lErr != nil {
+					status[name] = StatusFailed
+				} else {
+					byServer[name] = infos
+					status[name] = StatusConnected
+				}
+				mu.Unlock()
+				return
+			}
+			if dErr != nil {
+				mu.Lock()
+				status[name] = StatusFailed
+				mu.Unlock()
+				log.Printf("[toolnexus] MCP server %q failed: %v", name, dErr)
+				return
+			}
+			client, cErr := connectServer(ctx, name, cfg, nil, auth)
 			if cErr != nil {
 				mu.Lock()
 				status[name] = StatusFailed

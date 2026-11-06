@@ -39,6 +39,16 @@ export default defineConfig({
 						'A small, vendor-neutral library that gives any LLM dynamic tool-calling: an MCP host, agent skills, native + HTTP + built-in tools, remote A2A agents, a human-in-the-loop suspension layer, and a unified client loop — byte-identical across JavaScript, Python, Go, Java, C#, Elixir, Clojure and Rust — all eight published to their registries.',
 					details:
 						'toolnexus unifies every tool source (MCP servers, agent skills, your own functions via defineTool, HTTP/REST endpoints, built-in shell/file tools, and remote A2A agents) behind one Tool interface, emits schema in OpenAI/Anthropic/Gemini formats, and ships a client with a built-in tool-calling loop (skills injection, parallel + chained calls, hooks, streaming, retries, conversation memory, observability). The same examples/ fixtures produce identical behavior in all eight ports, each held to the full tier by a shared conformance gate. The Rust port is async on tokio. The Clojure port runs one .cljc source tree on both the JVM and cljgo, published to Clojars.',
+					// One plain-markdown file per recipe set, listed in llms.txt, so a coding agent can
+					// fetch exactly the in-process client recipes (/_llms-txt/in-process-client.txt).
+					customSets: [
+						{
+							label: 'In-process client',
+							description:
+								'Copy-pasteable recipes: createInProcessClient, serving a toolkit as MCP, driving any ACP agent, one CLI process per turn, and how to extend them.',
+							paths: ['in-process-client', 'in-process-client/**'],
+						},
+					],
 				}),
 				// Splits the whole site into topics, each with its own dedicated sidebar (switchable
 				// via the topic picker at the top of the nav): the main "Docs" topic below, plus one
@@ -91,6 +101,7 @@ export default defineConfig({
 									items: [
 										{ label: 'Zero to agent', slug: 'cookbook/zero-to-agent' },
 										{ label: 'MCP servers', slug: 'cookbook/mcp-servers' },
+										{ label: 'Hosted MCP & OAuth', slug: 'cookbook/mcp-oauth' },
 										{ label: 'Agent skills', slug: 'cookbook/agent-skills' },
 										{ label: 'Native tools', slug: 'cookbook/native-tool' },
 										{ label: 'HTTP / REST tools', slug: 'cookbook/http-tool' },
@@ -108,6 +119,15 @@ export default defineConfig({
 										{ label: 'Multi-turn memory', slug: 'cookbook/memory' },
 										{ label: 'Sub-agents & teams', slug: 'cookbook/subagents' },
 										{ label: 'Typed decisions (judge)', slug: 'cookbook/judge' },
+									],
+								},
+								{
+									label: 'In-process client',
+									items: [
+										{ label: 'Overview', slug: 'in-process-client' },
+										{ label: 'Recipe: ACP agent', slug: 'in-process-client/acp-agent' },
+										{ label: 'Recipe: one-shot CLI', slug: 'in-process-client/one-shot-cli' },
+										{ label: 'Extend it', slug: 'in-process-client/extend' },
 									],
 								},
 								{

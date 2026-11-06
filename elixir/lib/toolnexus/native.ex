@@ -24,6 +24,8 @@ defmodule Toolnexus.Native do
     * `:execute` (required) — `fn args -> ... end` or `fn args, ctx -> ... end`
     * `:hints` — `Toolnexus.ToolHints` (SPEC §4C)
     * `:concurrency_safe` — `fn args -> boolean end` (SPEC §8 "Tool scheduling")
+    * `:output_schema` — JSON Schema of `ToolResult.structured` (SPEC §1)
+    * `:annotations` — `Toolnexus.ToolAnnotations` (SPEC §7C.1)
   """
   @spec define_tool(keyword() | map()) :: Tool.t()
   def define_tool(opts) do
@@ -37,6 +39,8 @@ defmodule Toolnexus.Native do
       source: Map.get(opts, :source) || "native",
       hints: Map.get(opts, :hints),
       concurrency_safe: Map.get(opts, :concurrency_safe),
+      output_schema: Map.get(opts, :output_schema),
+      annotations: Map.get(opts, :annotations),
       execute: fn args, ctx ->
         try do
           case call_run(run, args || %{}, ctx) do

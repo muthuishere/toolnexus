@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>08-serve-protected</AssemblyName>
+    <RootNamespace>Example08</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../src/Mcp2026/Mcp2026.csproj" />
+  </ItemGroup>
+</Project>

@@ -23,7 +23,7 @@ the same output in every language.
 
 ```toml
 [dependencies]
-toolnexus = "0.24"
+toolnexus = "0.25"
 tokio = { version = "1", features = ["full"] }
 serde_json = "1"
 ```
@@ -86,7 +86,7 @@ An API key from the environment is sent only to the host it belongs to: `OPENAI_
 | **Remote agents** | Calls remote A2A agents as tools. Drives local coding agents (Claude Code, Gemini CLI, Codex, goose) over the Agent Client Protocol, with permission and update hooks. |
 | **Client** | OpenAI and Anthropic styles. Parallel tool calls, hooks, streaming, retries that honour `Retry-After`, conversation memory, prompt caching, tool tiers, usage metrics, and model listing. |
 | **Human in the loop** | A tool can pause the run and ask for input or authorization. With a `wait_for` handler the answer comes back inline; without one the run returns `pending` and you resume it later. |
-| **Serve** | `tk.serve(addr, ..)` publishes the toolkit as an A2A agent and/or an MCP server. |
+| **Serve** | `tk.serve(addr, ..)` publishes the toolkit as an A2A agent and/or an MCP server; `tk.mcp_handler(..)` is an MCP server to mount on your own router, with per-request hooks. |
 | **Agents** | Sub-agents, a runtime with budgets and durable resume, personas, conversation compaction, and a judge/classifier for guardrails and routing. |
 
 ## Classifier backends, images, cache and helpers
@@ -136,6 +136,68 @@ let rs = c.states(vec![json!("a"), json!("b")])
 - `ClassifierStyle::Llm` is **deprecated** (`#[deprecated]`) — it still works unchanged, with no
   runtime warning.
 
+## Embeddable MCP server
+
+`tk.mcp_handler(cfg)` is an MCP server you mount on **your own** hyper / axum router, behind your
+own TLS, CORS and OAuth (SPEC §7C.1). Every policy is a hook: `authenticate` (401 +
+`www_authenticate`), `list_tools` per request (a tool outside it is never executed), `before_call`
+(allow / deny / confirm — confirm asks the client over MCP elicitation, or returns your shaped
+fallback), `on_call`, `server_info`, resources and prompts, pluggable session ids or `stateless`.
+`handler.notify_tools_changed()` tells connected clients to re-list. Tools and hooks read the
+caller with `mcp_request_context(&ctx)` (identity, headers, session id, `params._meta`).
+
+```rust
+use toolnexus::mcp_handler::{McpDecision, McpHandlerConfig, McpIdentity};
+
+let handler = tk.mcp_handler(McpHandlerConfig {
+    authenticate: Some(Arc::new(|rc| { let ok = rc.header("authorization") == "Bearer s3cret";
+        Box::pin(async move { if ok { Ok(Arc::new("alice".to_string()) as McpIdentity) } else { Err("no".into()) } }) })),
+    before_call: Some(Arc::new(|_, tool, _| Box::pin(async move {
+        Ok(if tool.name == "delete_record" { McpDecision::confirm("Really delete?") } else { McpDecision::allow() }) }))),
+    ..Default::default()
+});
+// hyper: `handler` is a hyper::service::Service; any framework: `handler.handle(req).await`.
+```
+
+Run `cargo run --example mcp_handler` for a self-contained demo (bearer auth, per-user tools,
+confirm via elicitation and via a nonce fallback).
+
+### MCP 2026-07-28 (opt-in)
+
+List `"2026-07-28"` in `protocol_versions` and the same handler also speaks the stateless
+2026-07-28 wire (SPEC §7C.2): `server/discover`, header validation, `resultType` + serverInfo
+`_meta`, and MRTR — a confirm or a §10 tool suspension comes back as `input_required` and the
+client's retry carries the answer (the tool sees it as `ctx.answer`). `["2026-07-28"]` serves only
+that wire; `["2026-07-28", "2025-06-18"]` serves both on one mount. It is never a default, and
+`initialize` never negotiates it. `list_skills` publishes skills through the skills extension
+(`skills/list`, `skills/get`, `resources/read` of `skill://` URIs); `load_mcp_skills(dir)` builds
+the list from a skills folder.
+
+`McpServerAuth` makes the handler an OAuth protected resource: `auth.authenticate()` is the
+`authenticate` hook (bearer RS256 JWT checked against the issuer's JWKS, or your own `verify`;
+401 `invalid_token` / 403 `insufficient_scope` with the exact challenge, per-tool scopes on the
+2026 wire) and `auth.metadata()` serves `/.well-known/oauth-protected-resource`. The caller is
+`rc.identity_as::<McpPrincipal>()`. Any `authenticate` hook may fail with an `McpAuthError`
+(status + challenge); other errors stay a plain 401.
+
+```rust
+use toolnexus::mcp_handler::{load_mcp_skills, McpHandlerConfig, McpServerAuth};
+
+let auth = McpServerAuth { issuer: "https://login.example".into(),
+    scopes: [("*".into(), vec!["mcp".into()])].into(), ..Default::default() };
+let handler = tk.mcp_handler(McpHandlerConfig {
+    protocol_versions: vec!["2026-07-28".into(), "2025-06-18".into()],
+    authenticate: Some(auth.authenticate()),
+    list_skills: Some(Arc::new(|_| Box::pin(async {
+        load_mcp_skills("skills").map_err(|e| e.to_string()) }))),
+    ..Default::default()
+});
+let prm = auth.metadata(); // mount at /.well-known/oauth-protected-resource[/mcp]
+```
+
+Bring your own authorization server: `McpServerAuth` verifies its tokens. The auto-approving dev authorization
+server the suite uses is test tooling (`tests/common_dev_auth`), not part of the library.
+
 ## Media generation
 
 Generate images, video and speech (plus transcription, voice cloning and talking-head video)
@@ -159,14 +221,60 @@ let res = agent.run("Draw a fox, then animate it.", &tk).await?;
 for f in &res.files { println!("{} {} {}", f.from, f.mime_type, f.url); }
 ```
 
+## MCP 2026-07-28 + OAuth
+
+Every MCP server is probed with `server/discover` first (SPEC §2.2). A server that speaks
+`2026-07-28` is used through toolnexus's own client (no SDK): stdio or stateless HTTP, MRTR
+`input_required` rounds through §10 `wait_for` (or a resumable `pending` result without one), the
+skills extension (remote skills join the `skill` tool), and opt-in lazy tool search
+(`"toolSearch": true` ⇒ `<server>_search_tools` + `<server>_call_tool`). Anything else falls back to
+the frozen rmcp path, unchanged.
+
+Remote servers get OAuth 2.1 (§2A): PRM → AS metadata → pre-registered `clientId` / `clientIds` or a
+Client ID Metadata Document (never DCR) → PKCE S256 + `resource` → token, refresh, step-up.
+
+```json
+{"mcpServers": {"gh": {"url": "https://mcp.example.com/mcp",
+  "auth": {"clientId": "YOUR_CLIENT_ID", "mode": "auto"}}}}
+```
+
+`McpLoadOptions` / `ToolkitOptions` take `token_store` (default: in memory) and `open_url` (default:
+the OS opener). `"mode": "pause"` (+ `redirectUri`) raises a §10 `authorization` request instead;
+answer it with `Answer { ok: true, data: {"callbackUrl": "<redirected URL>"} }`.
+
+Gaps: on the frozen fallback the token is attached as a **static** `Authorization` header at connect
+(rmcp takes headers only then), so a fallback server's token is not refreshed mid-session. The 2026
+HTTP path does not need the `mcp-http` feature (it uses `reqwest`, always present); only the remote
+fallback does. `resource_tools()` covers fallback servers only.
+
+## Agents via ACP
+
+toolnexus ships no per-agent client (SPEC §8C, ADR 0041). Three vendor-neutral pieces compose
+into one: `toolkit.as_mcp_server(None)` serves your tools on `127.0.0.1:<ephemeral>/mcp`
+behind a fresh bearer token (`{url, token}`, `close()`); `AcpClient::load(AcpOptions)` spawns
+any ACP agent, passing `mcp_servers` (raw JSON, verbatim), `session_meta`, `client_caps_meta`
+and `model` straight through; and `acp_generate` / `acp_generate_stream` plug it into
+`create_in_process_client`, so `stream` yields `text` deltas as they arrive plus `thought` /
+`tool_call` / `tool_result` events `via: "acp"`.
+
+```rust
+let srv = tk.as_mcp_server(None).await?;
+let mut o = AcpOptions::new("my-acp-agent");
+o.mcp_servers = vec![json!({"type": "http", "name": "toolnexus", "url": srv.url,
+    "headers": [{"name": "Authorization", "value": format!("Bearer {}", srv.token)}]})];
+let acp = Arc::new(AcpClient::load(o).await?);
+let client = create_in_process_client(InProcessOptions {
+    generate_stream: Some(acp_generate_stream(acp.clone())), ..Default::default() });
+```
+
 ## Cargo features
 
 | feature | default | what it adds |
 |---|---|---|
 | `mcp-http` | on | MCP over streamable HTTP. Without it you get stdio MCP servers only. |
-| `serve` | on | `Toolkit::serve`: the A2A agent and the MCP server. |
+| `serve` | on | `Toolkit::serve` (the A2A agent and the MCP server) and `Toolkit::mcp_handler`. |
 
-For a lean build, use `toolnexus = { version = "0.24", default-features = false }`.
+For a lean build, use `toolnexus = { version = "0.25", default-features = false }`.
 
 ## More examples
 
@@ -180,6 +288,7 @@ directory has runnable programs. Run them with `cargo run --example <name>` from
 - `acp`: use a local coding agent as the model.
 - `agents`: a coordinator fanning out to sub-agents.
 - `prompt_cache`: prompt caching and tool tiers.
+- `mcp_handler`: the embeddable MCP server mounted on your own hyper server.
 
 ## Status
 

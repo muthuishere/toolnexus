@@ -1,0 +1,153 @@
+---
+title: "Extend it — your agent, isolation, models, permissions"
+description: "How to grow the in-process recipes yourself — add another ACP agent or CLI, isolate it from the agent's own config, list and pick models over ACP, and decide permission requests."
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<Aside type="tip" title="Why you need this">
+The recipes are deliberately small so you can own them. Everything an agent integration needs
+beyond "send a prompt, get text back" is a few lines on top of them, and lives in **your** code,
+next to the agent version you actually run. Nothing here needs a toolnexus release.
+</Aside>
+
+The snippets below extend the JavaScript [ACP recipe](/toolnexus/in-process-client/acp-agent/),
+which returns `{ client, call, session, close }` so you can extend it without editing it. The same
+moves apply to the Python and Go recipes (`call` and the `session/new` result are right there in the driver).
+
+## Add your own agent
+
+There is nothing to register. An ACP agent is a launch command:
+
+| what changes per agent | where it goes |
+|---|---|
+| how to start it (`copilot --acp`, `opencode acp`, a binary path) | `command` + `args` |
+| isolation and auth that live in the environment | `env` |
+| per-session options the agent reads from `session/new` | `meta` (becomes `_meta`) |
+| anything it needs that ACP does not carry (Devin's `.mcp.json`, a prompt hint) | write it before `acpClient(...)`, in the `cwd` you pass |
+
+A CLI with no ACP mode goes in the [one-shot recipe](/toolnexus/in-process-client/one-shot-cli/)
+the same way: it is just `command` + `args`. Keep a small table of your agents in your own config,
+for example:
+
+```js
+const AGENTS = {
+  claude: {
+    command: "npx", args: ["-y", "@agentclientprotocol/claude-agent-acp@0.100.0"],
+    meta: { claudeCode: { options: { settingSources: [], strictMcpConfig: true, plugins: [], skills: [], tools: [] } } },
+  },
+  opencode: {
+    command: "opencode", args: ["acp"],
+    env: {
+      OPENCODE_DISABLE_PROJECT_CONFIG: "1",
+      OPENCODE_CONFIG_CONTENT: JSON.stringify({ tools: { "*": false, execute: true, "toolnexus_*": true } }),
+    },
+  },
+  copilot: { command: "copilot", args: ["--acp", "--disable-builtin-mcps", "--no-custom-instructions"] },
+}
+
+const { client, close } = await acpClient({ ...AGENTS.claude, mcpUrl: `${server.url}/mcp` })
+```
+
+## Isolation
+
+By default an agent brings its whole world into your session: its instruction files, skills,
+plugins, its own MCP servers, hooks and built-in tools. That costs 3k to 34k tokens a turn and lets
+it do things you did not ask for. The knobs per agent, with measured numbers, are in the
+[per-agent notes](/toolnexus/in-process-client/acp-agent/#per-agent-notes). Three rules from those measurements:
+
+1. **Turn off built-in tools first.** That is the 10x win (Claude 34k → 3.4k, Copilot 16k → 3k,
+   opencode 12k → 1k). "Settings off" alone saves far less.
+2. **Re-allow your own tools explicitly** when the knob is a deny-all (opencode `"*": false`
+   also hides MCP tools unless you allow `toolnexus_*`).
+3. **Do not swap `HOME` / config dirs** to isolate. Subscription logins live there or in a
+   keychain entry keyed by it; it breaks login and, for opencode, measured *worse*.
+
+Check it worked: ask a trivial question and compare the agent's own token count
+(`usage_update` notifications, or `usage` in the `session/prompt` result) with and without the knob.
+
+## Model selection
+
+Agents list their models in the `session/new` result under `configOptions`, as the entry whose
+`category` is `"model"`, and switch with `session/set_config_option`:
+
+```js title="acp_models.mjs"
+// Model discovery and selection over ACP: add to acp_agent.mjs, call after session/new.
+
+// Every model the agent offers, from the session/new result (flat or grouped values).
+export function listModels(session) {
+  const opt = (session.configOptions ?? []).find((o) => o.category === "model")
+  if (!opt) return { configId: null, current: null, models: [] }
+  const flat = (opt.options ?? []).flatMap((o) => (o.options ? o.options : [o])) // groups hold options
+  return { configId: opt.id, current: opt.currentValue, models: flat.map((o) => o.value) }
+}
+
+// Switch the session's model and refuse unless the agent confirms it.
+export async function setModel(call, sessionId, configId, value) {
+  const r = await call("session/set_config_option", { sessionId, configId, value })
+  const now = (r?.configOptions ?? []).find((o) => o.id === configId)?.currentValue
+  if (now !== value) throw new Error(`agent did not switch model to ${value} (now ${now})`)
+}
+```
+
+```js title="main.mjs"
+// usage: node main_models.mjs npx -y @agentclientprotocol/claude-agent-acp@0.100.0
+import { createToolkit } from "toolnexus"
+import { acpClient } from "./acp_agent.mjs"
+import { listModels, setModel } from "./acp_models.mjs"
+
+const [command, ...args] = process.argv.slice(2)
+const { client, call, session, close } = await acpClient({ command, args })
+const { configId, current, models } = listModels(session)
+console.log(`current: ${current}; offered: ${models.join(", ")}`)
+if (models.includes("haiku")) await setModel(call, session.sessionId, configId, "haiku")
+
+const result = await client.run("Reply with just: ok", { toolkit: await createToolkit({ builtins: false }) })
+console.log(result.text)
+close()
+```
+
+Verified live against Claude Code (`@agentclientprotocol/claude-agent-acp@0.100.0`), which offered
+13 models (`default, opus, fable, sonnet, haiku`, and full ids) on 2026-11-05. Older agents use a
+top-level `models` object and `session/set_model` instead; fall back to them if `configOptions` is
+missing. Always check `currentValue` after setting: some agents (Copilot) only offer `auto`, and
+Codex lists models a ChatGPT account cannot use.
+
+## Permissions
+
+ACP agents ask before running a tool: a `session/request_permission` request with `options`, each
+with a `kind` (`allow_once`, `allow_always`, `reject_once`, `reject_always`). The recipe allows
+everything, which is right only when the agent has nothing but your tools. A policy is a function:
+
+```js title="permissions.mjs"
+// A permission policy: replace the auto-allow branch in acp_agent.mjs's line handler with
+//   } else if (msg.method === "session/request_permission") {
+//     send({ id: msg.id, result: { outcome: decidePermission(msg.params, ["toolnexus"]) } })
+// Allows tool calls whose title names one of your served tools, rejects everything else.
+export function decidePermission(params, allowedPrefixes) {
+  const title = params.toolCall?.title ?? ""
+  const ok = allowedPrefixes.some((p) => title.includes(p))
+  const pick = params.options.find((o) => o.kind.startsWith(ok ? "allow" : "reject"))
+  return pick ? { outcome: "selected", optionId: pick.optionId } : { outcome: "cancelled" }
+}
+```
+
+Other policies follow the same shape: ask a human through your UI and reply when they answer
+(the agent waits), log every request, or route the decision to a
+[judge](/toolnexus/cookbook/judge/). Answer `{ outcome: "cancelled" }` to refuse without picking
+an option. Isolation is still the better first line: an agent with no shell tool cannot ask to
+run one.
+
+## Cancelling a turn
+
+ACP has a `session/cancel` notification: send `{ method: "session/cancel", params: { sessionId } }`
+(no `id`) and the pending `session/prompt` resolves with `stopReason: "cancelled"`; the process and
+session stay warm. Wire it to the run's abort signal in JavaScript, or to `ctx.Done()` in the Go
+recipe's `GenerateStream`.
+
+## Streaming more than text
+
+`session/update` carries more than `agent_message_chunk`: `agent_thought_chunk`, `tool_call`,
+`tool_call_update`, `plan`, `usage_update`. Handle them in the same `if` chain. In Go you can
+`emit` them as non-text `StreamEvent`s (`Type: "tool_call"`, for example); the client passes those
+to the stream consumer and never executes them.

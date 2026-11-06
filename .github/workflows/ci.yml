@@ -4,7 +4,8 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
+    # feat/** too: stacked PRs (e.g. the MCP 2026 server on #140's branch) get CI before their base merges.
+    branches: [main, "feat/**"]
 
 # Each language's suite is hermetic (no network, no LLM): local HTTP servers for
 # the HTTP/client tests, the shared examples/ fixtures for skills.
@@ -85,6 +86,28 @@ jobs:
       - run: go build ./...
       - run: go vet ./...
       - run: go test -race ./...
+
+  interop-mcp2026:
+    name: Interop (MCP 2026-07-28, Go client x Go server)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+      # The 2026 client lives on the upgrade-mcp-2026-07-28 branch (PR #142) until it merges; once it is in
+      # this branch's history the runner can point CLIENT_DIR at this checkout instead.
+      - name: Fetch the client branch
+        id: client
+        run: |
+          if git fetch --no-tags origin feat/mcp-2026-07-28; then echo "ref=FETCH_HEAD" >> "$GITHUB_OUTPUT"; else echo "ref=" >> "$GITHUB_OUTPUT"; fi
+      - name: Run interop
+        if: steps.client.outputs.ref != ''
+        run: CLIENT_REF=${{ steps.client.outputs.ref }} interop/mcp2026/run.sh
+      - name: Client branch missing
+        if: steps.client.outputs.ref == ''
+        run: echo "::warning::feat/mcp-2026-07-28 not found; interop skipped"
 
   rust:
     name: Rust (cargo)

@@ -33,6 +33,8 @@
             [koine.stream :as stream]
             [koine.time :as ktime]
             [toolnexus.content :as content]
+            [toolnexus.mcp-auth :as auth]
+            [toolnexus.mcp2026 :as m26]
             [toolnexus.tool :as tool]))
 
 ;; ---------------------------------------------------------------------------
@@ -219,7 +221,11 @@
      :url         (:url m)
      :raw-headers raw-headers
      :headers     (expand-headers raw-headers)
-     :timeout     (or (:timeout m) default-timeout-ms)}))
+     :timeout     (or (:timeout m) default-timeout-ms)
+     ;; SPEC §2 — new optional keys; absent ⇒ byte-identical behaviour.
+     :auth        (:auth m)
+     :description (:description m)
+     :tool-search (true? (:toolSearch m))}))
 
 (defn parse-config
   "SPEC §0.3 / §2 — a JSON string or an already-parsed map becomes a vector of
@@ -883,8 +889,11 @@
            :server      server-name
            :remote-name remote-name)))
 
-(defn connect
-  "SPEC §2 — reach the server, `initialize`, `notifications/initialized`,
+(defn connect-frozen
+  "SPEC §2.F — THE FROZEN FALLBACK: the pre-2026 path, reached only when
+  `server/discover` says the server is not a 2026-07-28 server (§2.2a).
+
+  Reach the server, `initialize`, `notifications/initialized`,
   `tools/list`. Returns a CONNECTION:
 
     {:name … :status \"connected\"|\"disabled\"|\"failed\" :tools [Tool…]
@@ -919,7 +928,7 @@
   `:exit-code` so there is ONE source of truth for has-it-exited — two would
   drift. The child's stderr ring remains attached to the failure, because a
   status code says THAT it died and the stderr says WHY."
-  ([server] (connect server nil))
+  ([server] (connect-frozen server nil))
   ([server {:keys [wait-for] :as conn-opts}]
   (let [timeout-ms (or (:timeout server) default-timeout-ms)
         fail       (fn [phase transport failure]
@@ -1014,6 +1023,336 @@
                                        (sort-by :name)
                                        vec)})))))))))))
 
+;; ---------------------------------------------------------------------------
+;; §2 (2026-07-28) — discover first; the frozen path above is the fallback
+;; ---------------------------------------------------------------------------
+;;
+;; `connect` sends `server/discover` before anything else. A 2026 server is used
+;; on the path below: no `initialize`, no session, every request enveloped
+;; (`toolnexus.mcp2026`). Anything §2.2a calls a fallback goes to
+;; `connect-frozen`, untouched. Both paths build Tools through the SAME
+;; `mcp-tool-name`, `mcp-hints` and `shape-result`, so naming and the result
+;; mapping cannot drift between them.
+
+(def ^:private discover-probe-ms
+  "§2.2a — a stdio discover that gets no reply within min(timeout, 5 s) falls back."
+  5000)
+
+(def ^:private max-input-rounds 8)
+
+(defn- answer-map
+  "A §10 Answer with its top-level keys as keywords (a host may round-trip it
+  through JSON). Same normalisation as `toolnexus.client/as-answer`."
+  [a]
+  (when (map? a)
+    (reduce (fn [m e] (assoc m (if (keyword? (key e)) (key e) (keyword (str (key e)))) (val e))) {} a)))
+
+(defn- pending-result
+  "§0.12 — a suspension is data on an ordinary ToolResult."
+  [request]
+  {:output (str (:prompt request)) :isError true :metadata {:pending request}})
+
+(defn- resolve-auth!
+  "Answer a paused authorization through `wait-for` inline. nil on success, else
+  the failure text (§2A.1a: `authorization denied: <reason or \"cancelled\">`)."
+  [engine wait-for request]
+  (try
+    (let [a (answer-map (wait-for request))]
+      (if (:ok a)
+        (do (auth/resume! engine (:id request) (auth/answer-callback a)) nil)
+        (auth/answer-denied-text a)))
+    (catch Throwable x (or (ex-message x) "authorization failed"))))
+
+(defn- failure-text-2026 [server-name phase failure]
+  (if (and (= "auth" (:error failure)) (:message failure))
+    (str "mcp server \"" server-name "\" failed at " phase ": " (:message failure))
+    (failure-text server-name phase failure)))
+
+(defn- load-rpc!
+  "A load-phase request: a paused authorization is answered inline through
+  `wait-for`; without one the server fails with `authorization pending` (§2A.1a)."
+  [transport engine wait-for method params timeout-ms]
+  (loop [n 0]
+    (let [r ((:rpc! transport) method params timeout-ms)]
+      (if (= "auth-pending" (:error r))
+        (cond
+          (nil? wait-for) {:error "auth" :message "authorization pending"}
+          (>= n m26/max-auth-retries) {:error "auth" :message "authorization failed"}
+          :else (if-let [msg (resolve-auth! engine wait-for (:request r))]
+                  {:error "auth" :message msg}
+                  (recur (inc n))))
+        r))))
+
+(defn- input->request
+  "One MRTR input request as a §10 Request (same mapping as the §2.F
+  elicitation bridge), or nil for a method §2.5 does not define."
+  [ir]
+  (when (= "elicitation/create" (:method ir))
+    ;; same mapping as the bridge; the id is pinned `mrtr-<random>`
+    (assoc (elicitation->request (or (:params ir) {})) :id (str "mrtr-" (auth/rand-str 16)))))
+
+(declare answer-inputs)
+
+(defn- run-tool-call
+  "SPEC §2.5 — tools/call, looping over `input_required` rounds.
+
+  `st` is the round being sent: {:name :args :responses :request-state :round}.
+  With `wait-for` every input request is answered inline; without one the call
+  returns a §10 `pending` result and the round is SAVED under the request id,
+  so re-executing the tool with `ctx :answer` resumes exactly that round —
+  earlier rounds are never re-asked and nothing is re-sent behind the caller's
+  back (§2.6). A paused AUTHORIZATION is the same: the paused round is sent for
+  the first time after the answer."
+  [{:keys [server-name transport engine wait-for timeout-ms saved] :as env} st]
+  (loop [st st auth-n 0]
+    (if (>= (:round st) max-input-rounds)
+      (tool/failure (str "tools/call " (:name st) ": too many input_required rounds"))
+      (let [params (cond-> {:name (:name st) :arguments (or (:args st) {})}
+                     (:responses st)           (assoc :inputResponses (:responses st))
+                     (some? (:request-state st)) (assoc :requestState (:request-state st)))
+            r ((:rpc! transport) "tools/call" params timeout-ms)]
+        (cond
+          (= "auth-pending" (:error r))
+          (let [req (:request r)]
+            (cond
+              (nil? wait-for)
+              (do (swap! saved assoc (:id req) {:type :auth :round st})
+                  (pending-result req))
+              (>= auth-n m26/max-auth-retries) (tool/failure "authorization failed")
+              :else (if-let [msg (resolve-auth! engine wait-for req)]
+                      (tool/failure msg)
+                      (recur st (inc auth-n)))))
+
+          (:error r)
+          (tool/failure (if (= "auth" (:error r))
+                          (str (:message r))
+                          (failure-text-2026 server-name "tools/call" r)))
+
+          :else
+          (let [result (get-in r [:ok :result])
+                rt     (str (:resultType result))]
+            (cond
+              (= "complete" rt) (shape-result result)
+              (not= "input_required" rt)
+              (tool/failure (str "tools/call " (:name st) ": unknown resultType \"" rt "\""))
+              :else
+              (let [asks (vec (sort-by (fn [e] (str (key e))) (seq (:inputRequests result))))
+                    next-st {:name (:name st) :args (:args st) :request-state (:requestState result)
+                             :round (inc (:round st))}
+                    out (answer-inputs env next-st asks {})]
+                (if (:pending out) (:pending out) (recur (assoc next-st :responses (:responses out)) 0))))))))))
+
+(defn- answer-inputs
+  "Answer `asks` ([key input-request]…) in key order into `responses`. Returns
+  {:responses …} or {:pending <ToolResult>} after saving the rest of the round."
+  [{:keys [wait-for saved]} next-st asks responses]
+  (loop [[[k ir] & more :as asks] asks responses responses]
+    (if (empty? asks)
+      {:responses responses}
+      (let [req (when (map? ir) (input->request ir))]
+        (cond
+          (nil? req)
+          (recur more (assoc responses k {:action "cancel"}))
+
+          wait-for
+          (recur more (assoc responses k
+                             (try (answer->elicit-result (answer-map (wait-for req)))
+                                  (catch Throwable _ {:action "cancel"}))))
+
+          :else
+          (do (swap! saved assoc (:id req) {:type :input :round next-st :key k
+                                            :rest (vec more) :responses responses})
+              {:pending (pending-result req)}))))))
+
+(defn- resume-tool-call
+  "Resume a saved round with the §10 Answer that names it."
+  [{:keys [engine] :as env} s answer]
+  (case (:type s)
+    :auth  (if (:ok answer)
+             (if-let [msg (try (auth/resume! engine (:id answer) (auth/answer-callback answer)) nil
+                               (catch Throwable x (or (ex-message x) "authorization failed")))]
+               (tool/failure msg)
+               (run-tool-call env (:round s)))
+             (tool/failure (auth/answer-denied-text answer)))
+    :input (let [responses (assoc (:responses s) (:key s) (answer->elicit-result answer))
+                 out (answer-inputs env (:round s) (:rest s) responses)]
+             (or (:pending out)
+                 (run-tool-call env (assoc (:round s) :responses (:responses out)))))))
+
+(defn- call-2026
+  "The execute body every 2026 tool shares: resume a saved round when ctx
+  carries the Answer for it, else start a fresh call."
+  [env remote-name args ctx]
+  (let [answer (answer-map (:answer ctx))
+        [old _] (if answer (swap-vals! (:saved env) dissoc (:id answer)) [nil nil])
+        s (when answer (get old (:id answer)))]
+    (if s
+      (resume-tool-call env s answer)
+      (run-tool-call env {:name remote-name :args args :round 0}))))
+
+(defn- def->tool [server-name call-fn t]
+  (let [remote-name (:name t)]
+    (assoc (tool/tool {:name         (mcp-tool-name server-name remote-name)
+                       :description  (or (:description t) "")
+                       :input-schema (or (:inputSchema t) {:type "object"})
+                       :source       "mcp"
+                       :hints        (mcp-hints (:annotations t))
+                       :context?     true
+                       :execute      (fn ex ([args] (ex args nil))
+                                       ([args ctx] (call-fn remote-name args ctx)))})
+           :server server-name :remote-name remote-name)))
+
+(defn search-tools-pair
+  "SPEC §2.8 — the two meta-tools that replace every server tool when
+  `toolSearch` is on. `defs-fn` returns the server's tool defs
+  ({:name :description :inputSchema}); `call-fn` runs one by its SERVER name.
+  `disabled` (final toolkit names, the `:disable-tools` list) is applied BEFORE
+  search: a disabled tool is neither ranked nor callable."
+  ([server-name description defs-fn call-fn] (search-tools-pair server-name description defs-fn call-fn nil))
+  ([server-name description defs-fn0 call-fn disabled]
+  (let [off     (set (map str disabled))
+        defs-fn (fn [] (vec (remove (fn [d] (contains? off (mcp-tool-name server-name (:name d)))) (defs-fn0))))
+        about (if (str/blank? (str description)) server-name (str description))]
+    [(assoc (tool/tool {:name (mcp-tool-name server-name "search_tools")
+                        :description (m26/search-description about)
+                        :input-schema m26/search-schema
+                        :source "mcp"
+                        :execute (fn ex ([args] (ex args nil))
+                                   ([args _ctx]
+                                    (let [l    (:limit args)
+                                          hits (m26/search (defs-fn) (str (or (:query args) ""))
+                                                           (if (and (number? l) (pos? l)) (long l) 5)
+                                                           (str (or description "")))]
+                                      ;; SPEC §2.8 pin: the text IS the compact JSON array of hits
+                                      (tool/success (m26/hits-json hits)))))})
+            :server server-name :remote-name "search_tools")
+     (assoc (tool/tool {:name (mcp-tool-name server-name "call_tool")
+                        :description m26/call-description
+                        :input-schema m26/call-schema
+                        :source "mcp"
+                        :context? true
+                        :execute (fn ex ([args] (ex args nil))
+                                   ([args ctx]
+                                    (let [n (str (or (:name args) ""))]
+                                      (if (some (fn [d] (= n (:name d))) (defs-fn))
+                                        (call-fn n (let [a (:arguments args)] (if (map? a) a {})) ctx)
+                                        (tool/failure (str "unknown tool \"" n "\" on " server-name))))))})
+            :server server-name :remote-name "call_tool")])))
+
+(defn- frozen-with-search
+  "§2.8 is client-side, so it applies to a fallback server too: the frozen
+  connection's own Tools are the search corpus."
+  [conn server conn-opts]
+  (if (and (:tool-search server) (= "connected" (:status conn)))
+    (let [by-remote (into {} (map (fn [t] [(:remote-name t) t]) (:tools conn)))
+          defs (mapv (fn [t] {:name (:remote-name t) :description (:description t)
+                              :inputSchema (:input-schema t)})
+                     (:tools conn))]
+      (assoc conn :tools (search-tools-pair (:name server) (:description server) (constantly defs)
+                                            (fn [n args ctx] (let [f (:execute (get by-remote n))] (if ctx (f args ctx) (f args))))
+                                            (:disable-tools conn-opts))))
+    conn))
+
+(defn- finish-2026
+  "A discovered 2026 server: tools/list once (§2.2a), remote skills (§2.7),
+  tool search (§2.8). Returns the connection."
+  [server transport engine wait-for timeout-ms discover-result fail disabled]
+  (let [listed (load-rpc! transport engine wait-for "tools/list" {} timeout-ms)]
+    (if (:error listed)
+      (fail "tools/list" listed)
+      (let [lr    (get-in listed [:ok :result])
+            cache (atom {:defs (vec (filter map? (:tools lr)))
+                         :expiry (when-let [ttl (:ttlMs lr)] (+ (ktime/now-ms) (long ttl)))})
+            defs-fn (fn []
+                      (let [{:keys [defs expiry]} @cache]
+                        (if (and expiry (> (ktime/now-ms) expiry))
+                          (let [r (load-rpc! transport engine wait-for "tools/list" {} timeout-ms)]
+                            (if (:ok r)
+                              (let [nr (get-in r [:ok :result])
+                                    d  (vec (filter map? (:tools nr)))]
+                                (reset! cache {:defs d :expiry (when-let [ttl (:ttlMs nr)] (+ (ktime/now-ms) (long ttl)))})
+                                d)
+                              defs))
+                          defs)))
+            env   {:server-name (:name server) :transport transport :engine engine
+                   :wait-for wait-for :timeout-ms timeout-ms :saved (atom {})}
+            call-fn (fn [n args ctx] (call-2026 env n args ctx))
+            tools (if (:tool-search server)
+                    (search-tools-pair (:name server) (:description server) defs-fn call-fn disabled)
+                    (->> (:defs @cache) (map (fn [t] (def->tool (:name server) call-fn t))) (sort-by :name) vec))
+            skills (if (m26/skills-extension? discover-result)
+                     (m26/remote-skill-defs (fn [m p] ((:rpc! transport) m p timeout-ms)))
+                     [])]
+        {:name        (:name server)
+         :status      "connected"
+         :protocol    m26/protocol-version
+         :transport   transport
+         :timeout-ms  timeout-ms
+         :server-info (m26/server-info discover-result)
+         :skills      skills
+         :tools       tools}))))
+
+(defn- connect-2026
+  [server {:keys [wait-for] :as conn-opts}]
+  (let [timeout-ms (or (:timeout server) default-timeout-ms)
+        fail (fn [phase transport failure]
+               (when transport (try ((:close! transport)) (catch Throwable _ nil)))
+               {:name (:name server) :status "failed" :phase phase :error failure
+                :message (failure-text-2026 (:name server) phase failure) :tools []})]
+    (if (= "remote" (:kind server))
+      (let [engine (auth/engine (:auth server) conn-opts)
+            t      (m26/http-transport server engine)
+            disc   (load-rpc! t engine wait-for "server/discover" {} timeout-ms)]
+        (case (m26/discover-outcome disc)
+          :2026 (finish-2026 server t engine wait-for timeout-ms (get-in disc [:ok :result])
+                             (fn [phase f] (fail phase t f)) (:disable-tools conn-opts))
+          ;; §2A.1a: the frozen path carries the bearer obtained during discover
+          ;; as a static header. It cannot refresh it (see README).
+          :fallback (let [b (auth/bearer engine (:url server))]
+                      (frozen-with-search
+                       (connect-frozen (cond-> server b (assoc-in [:headers "authorization"] (str "Bearer " b)))
+                                       conn-opts)
+                       server conn-opts))
+          (fail "server/discover" nil disc)))
+      (let [raw (try (stdio-transport server nil)
+                     (catch Throwable e {:spawn-error (or (ex-message e) (str e))}))]
+        (if (:spawn-error raw)
+          (fail "connect" nil {:error "transport" :transport-error "spawn-failed" :message (:spawn-error raw)})
+          (let [t    (m26/stdio-wrap raw)
+                disc ((:rpc! t) "server/discover" {} (min timeout-ms discover-probe-ms))]
+            (if (= :2026 (m26/discover-outcome disc))
+              (finish-2026 server t nil (:wait-for conn-opts) timeout-ms (get-in disc [:ok :result])
+                           (fn [phase f] (fail phase t f)) (:disable-tools conn-opts))
+              ;; §2.2a: the probe child is terminated and the frozen path starts
+              ;; its own process. A child that died before replying is ALSO
+              ;; routed here: the frozen path re-observes the death and reports
+              ;; it as the load failure it is, with its exit status and stderr.
+              (do ((:close! raw))
+                  (frozen-with-search (connect-frozen server conn-opts) server conn-opts)))))))))
+
+(defn connect
+  "SPEC §2 — connect one server: `server/discover` first (§2.2), the 2026 path
+  for a 2026-07-28 server, the frozen path (§2.F, `connect-frozen`) otherwise.
+  Never throws; a server that fails is `failed`, isolated (§0.3).
+
+  conn-opts: `:wait-for` (§10), `:token-store`, `:open-url` (§2A.1a)."
+  ([server] (connect server nil))
+  ([server conn-opts]
+   (if (or (not (:enabled server)) (= "unknown" (:kind server)))
+     (connect-frozen server conn-opts)
+     (try (connect-2026 server conn-opts)
+          (catch Throwable e
+            {:name (:name server) :status "failed" :phase "connect" :tools []
+             :error {:error "transport" :message (or (ex-message e) (str e))}
+             :message (str "mcp server \"" (:name server) "\" failed at connect: " (or (ex-message e) (str e)))})))))
+
+(defn download-skill!
+  "SPEC §2.7 — fetch a remote skill from a connected 2026 server into
+  dir/<name>/, digest- and containment-checked before anything is written."
+  [connection uri dir]
+  (let [t (:transport connection)]
+    (m26/download-skill! (fn [m p] ((:rpc! t) m p (or (:timeout-ms connection) default-timeout-ms))) uri dir)))
+
 (defn disconnect
   "Close a connection's transport. Idempotent, never throws, and BOUNDED — for
   stdio it kills rather than politely waits, because an unkillable disconnect is
@@ -1100,6 +1439,8 @@
      :statuses    (reduce (fn [acc c] (assoc acc (:name c) (:status c))) {} conns)
      :errors      (reduce (fn [acc c] (if (:message c) (assoc acc (:name c) (:message c)) acc))
                           {} conns)
+     ;; §2.7 remote skills, as §3 S1 defs, in server-name order
+     :skills      (vec (mapcat :skills conns))
      :connections conns})))
 
 (defn disconnect-all

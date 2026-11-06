@@ -1,7 +1,7 @@
 defmodule Toolnexus.MixProject do
   use Mix.Project
 
-  @version "0.24.0"
+  @version "0.25.0"
   @source_url "https://github.com/muthuishere/toolnexus"
 
   def project do
@@ -26,7 +26,7 @@ defmodule Toolnexus.MixProject do
   end
 
   def application do
-    [extra_applications: [:logger, :inets, :ssl]]
+    [extra_applications: [:logger, :inets, :ssl, :crypto, :public_key]]
   end
 
   defp elixirc_paths(:test), do: ["lib", "test/support"]

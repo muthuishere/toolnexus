@@ -517,3 +517,53 @@ export function loadSkills(input: string | string[] | LoadSkillsOptions): SkillS
     },
   }
 }
+
+/**
+ * §7C.2: one skill published through the MCP 2026-07-28 skills extension (SEP-2640) by
+ * `mcpHandler({listSkills})`. `files` are paths relative to the skill directory
+ * ("/"-separated) and MUST include "SKILL.md". Frontmatter defaults to `{name}`.
+ */
+export interface McpSkill {
+  name: string
+  frontmatter?: Record<string, unknown>
+  files: { path: string; text: string }[]
+}
+
+/**
+ * §7C.2: every skill under `dir` (any depth, `**∕SKILL.md`, symlinks NOT followed) for
+ * `mcpHandler({listSkills})`. Frontmatter is `{name, description}` parsed as §3 (trimmed); a
+ * skill whose frontmatter has no `name` is skipped. Files are every regular file under the
+ * skill directory that is valid UTF-8 (binary files are skipped — the wire carries text),
+ * sorted by path; skills sorted by name. A missing `dir` throws.
+ */
+export function loadMcpSkills(dir: string): McpSkill[] {
+  const utf8 = new TextDecoder("utf-8", { fatal: true })
+  const out: McpSkill[] = []
+  const walk = (d: string, visit: (full: string) => void) => {
+    for (const e of sortEntriesByName(readdirSync(d, { withFileTypes: true }))) {
+      const full = path.join(d, e.name)
+      if (e.isDirectory()) walk(full, visit)
+      else if (e.isFile()) visit(full)
+    }
+  }
+  walk(dir, (p) => {
+    if (path.basename(p) !== "SKILL.md") return
+    const fm = parseFrontmatter(readFileSync(p, "utf8"))
+    if (fm.malformed || !fm.data.name) return
+    const root = path.dirname(p)
+    const files: { path: string; text: string }[] = []
+    walk(root, (fp) => {
+      let text: string
+      try {
+        text = utf8.decode(readFileSync(fp))
+      } catch (e) {
+        if (e instanceof TypeError) return // not UTF-8
+        throw e
+      }
+      files.push({ path: path.relative(root, fp).split(path.sep).join("/"), text })
+    })
+    files.sort((a, b) => compareCodePoints(a.path, b.path))
+    out.push({ name: fm.data.name, frontmatter: { name: fm.data.name, description: fm.data.description ?? "" }, files })
+  })
+  return out.sort((a, b) => compareCodePoints(a.name, b.name))
+}

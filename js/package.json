@@ -1,6 +1,6 @@
 {
   "name": "toolnexus",
-  "version": "0.24.0",
+  "version": "0.25.0",
   "description": "Dynamic MCP servers + agent skills as uniform tools for any LLM (opencode-style).",
   "type": "module",
   "main": "./dist/index.js",
@@ -17,12 +17,13 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test": "npm run build && node --experimental-strip-types --test test/unit.test.ts test/agents.test.ts test/agent-hooks.test.ts test/agent-inprocess.test.ts test/home.test.ts test/compaction.test.ts test/loop.test.ts test/in-process.test.ts test/translate.test.ts test/multimodal.test.ts test/classifier.test.ts test/classifier-backends.test.ts test/acp.test.ts test/issues.test.ts test/host-boundary.test.ts test/judge.test.ts test/batteries.test.ts test/host-engine.test.ts test/host-turn-durability.test.ts test/host-engine-asks.test.ts test/tool-concurrency.test.ts test/media.test.ts test/examples.test.ts",
+    "test": "npm run build && node --experimental-strip-types --test test/unit.test.ts test/agents.test.ts test/agent-hooks.test.ts test/agent-inprocess.test.ts test/home.test.ts test/compaction.test.ts test/loop.test.ts test/in-process.test.ts test/translate.test.ts test/multimodal.test.ts test/classifier.test.ts test/classifier-backends.test.ts test/acp.test.ts test/acp-client.test.ts test/issues.test.ts test/host-boundary.test.ts test/judge.test.ts test/batteries.test.ts test/host-engine.test.ts test/host-turn-durability.test.ts test/host-engine-asks.test.ts test/tool-concurrency.test.ts test/media.test.ts test/examples.test.ts test/mcphandler.test.ts test/mcphandler-conformance.test.ts test/mcp2026.test.ts",
     "example": "node --experimental-strip-types examples/basic.ts",
     "example:judge": "node --experimental-strip-types examples/judge.ts",
     "example:multimodal": "node --experimental-strip-types examples/multimodal.ts",
     "example:media": "node --experimental-strip-types examples/media.ts",
-    "example:prompt-cache": "node --experimental-strip-types examples/prompt_cache.ts"
+    "example:prompt-cache": "node --experimental-strip-types examples/prompt_cache.ts",
+    "example:mcp-handler": "node --experimental-strip-types examples/mcp_handler.ts"
   },
   "keywords": [
     "mcp",
