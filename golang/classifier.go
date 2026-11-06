@@ -979,7 +979,7 @@ func (c *Classifier) post(ctx context.Context, raw []byte, extraHeaders map[stri
 			return nil, ctx.Err()
 		}
 		if err != nil {
-			lastErr = fmt.Errorf("classifier: POST %s: %w", endpoint, redactURLError(err, url, endpoint))
+			lastErr = fmt.Errorf("classifier: POST %s: %w", endpoint, redactClassifierURLError(err, url, endpoint))
 		} else {
 			// The backend's own cause is surfaced INTACT so a caller can tell a
 			// limit error from a transport fault — but only for a non-auth status.
@@ -1136,9 +1136,9 @@ func checkClassifierPairing(baseURL, model string) error {
 	return fmt.Errorf("model %q is TypeSafe's spelling; on openrouter.ai use %q", model, OpenRouterClassifierModel)
 }
 
-// redactURLError keeps an expanded ${ENV} URL (an account id) out of a
+// redactClassifierURLError keeps an expanded ${ENV} URL (an account id) out of a
 // transport error: the dialled url is replaced by the configured endpoint.
-func redactURLError(err error, url, endpoint string) error {
+func redactClassifierURLError(err error, url, endpoint string) error {
 	if url == endpoint || !strings.Contains(err.Error(), url) {
 		return err
 	}
