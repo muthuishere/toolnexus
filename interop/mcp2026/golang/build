@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Build the Go interop runners into $OUT (interop/mcp2026/.build/golang).
+set -euo pipefail
+ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"; OUT="$ROOT/interop/mcp2026/.build/golang"; mkdir -p "$OUT"
+cd "$ROOT/golang"
+go build -o "$OUT/server" ./internal/interop/mcp2026server
+go build -o "$OUT/client" ./internal/interop/mcp2026client

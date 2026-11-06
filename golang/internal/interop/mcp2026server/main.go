@@ -3,6 +3,8 @@
 // wire, protected by MCPServerAuth + the dev authorization server, plus an
 // unprotected mount and a legacy-only mount. It prints one JSON line
 // {"base","issuer"} and serves until stdin closes. Test tooling, not shipped.
+//
+//	mcp2026server [--keycloak] <skillsDir>
 package main
 
 import (
@@ -20,18 +22,33 @@ import (
 	"github.com/muthuishere/toolnexus/golang/internal/devauth"
 )
 
+// Live mode (--keycloak): interop/mcp2026/keycloak/docker-compose.yml.
+const (
+	keycloakIssuer = "http://localhost:8180/realms/toolnexus"
+	keycloakAddr   = "127.0.0.1:7199"
+)
+
 func main() {
+	args := os.Args[1:]
+	keycloak := len(args) > 0 && args[0] == "--keycloak"
+	if keycloak {
+		args = args[1:]
+	}
 	skillsDir := "../examples/skills"
-	if len(os.Args) > 1 {
-		skillsDir = os.Args[1]
+	if len(args) > 0 {
+		skillsDir = args[0]
 	}
-	as, err := devauth.Start(devauth.Options{
-		Clients: map[string][]string{"interop-client": {"http://127.0.0.1/callback"}},
-	})
-	if err != nil {
-		log.Fatal(err)
+	issuer := keycloakIssuer
+	if !keycloak {
+		as, err := devauth.Start(devauth.Options{
+			Clients: map[string][]string{"interop-client": {"http://127.0.0.1/callback"}},
+		})
+		if err != nil {
+			log.Fatal(err)
+		}
+		defer as.Close()
+		issuer = as.Issuer
 	}
-	defer as.Close()
 
 	obj := toolnexus.JSONSchema{"type": "object"}
 	tools := []toolnexus.Tool{
@@ -95,7 +112,14 @@ func main() {
 			},
 		}
 	}
-	auth := &toolnexus.MCPServerAuth{Issuer: as.Issuer, Scopes: map[string][]string{"*": {"mcp"}, "whoami": {"mcp:whoami"}}}
+	auth := &toolnexus.MCPServerAuth{Issuer: issuer, Scopes: map[string][]string{"*": {"mcp"}, "whoami": {"mcp:whoami"}}}
+	addr := "127.0.0.1:0"
+	if keycloak {
+		// The realm's audience mapper pins aud = http://127.0.0.1:7199/mcp.
+		addr = keycloakAddr
+		auth.Audience = "http://" + keycloakAddr + "/mcp"
+		auth.Scopes = map[string][]string{"*": {"mcp:tools"}, "whoami": {"mcp:greet"}}
+	}
 	protected := cfg()
 	protected.Authenticate = auth.Authenticate
 
@@ -111,12 +135,12 @@ func main() {
 		defer mu.Unlock()
 		_ = json.NewEncoder(w).Encode(map[string]any{"seen": seen, "calls": executions})
 	})
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		log.Fatal(err)
 	}
 	go func() { _ = http.Serve(ln, mux) }()
-	line, _ := json.Marshal(map[string]string{"base": "http://" + ln.Addr().String(), "issuer": as.Issuer})
+	line, _ := json.Marshal(map[string]string{"base": "http://" + ln.Addr().String(), "issuer": issuer})
 	fmt.Println(string(line))
 	// Serve until stdin closes (the runner owns our lifetime).
 	_, _ = bufio.NewReader(os.Stdin).ReadString(0)
