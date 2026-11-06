@@ -518,12 +518,22 @@ defmodule Toolnexus.HostEngineAsksTest do
       if node?() do
         me = self()
         t0 = System.monotonic_time(:millisecond)
+        # "slow" starts only once on_server has reported "fast" (it waits for this gate
+        # file), so the order is guaranteed by causality, not by a sleep racing node startup.
+        gate =
+          Path.join(System.tmp_dir!(), "tn-fast-gate-#{System.unique_integer([:positive])}")
+
+        on_exit(fn -> File.rm(gate) end)
 
         cfg = %{
           "fast" => %{"command" => ["node", @fixture], "timeout" => 5000},
           "slow" => %{
-            "command" => ["sh", "-c", "sleep 1; exec node #{@fixture}"],
-            "timeout" => 5000
+            "command" => [
+              "sh",
+              "-c",
+              "while [ ! -f '#{gate}' ]; do sleep 0.02; done; exec node #{@fixture}"
+            ],
+            "timeout" => 10_000
           },
           "bad" => %{"command" => ["/nonexistent/toolnexus-no-such-binary"], "timeout" => 2000},
           "off" => %{"command" => ["node", @fixture], "enabled" => false}
@@ -533,14 +543,18 @@ defmodule Toolnexus.HostEngineAsksTest do
           Mcp.load(cfg,
             on_server: fn r ->
               send(me, {:server, r.name, r, System.monotonic_time(:millisecond) - t0})
+              if r.name == "fast", do: File.write!(gate, "")
             end
           )
 
-        results =
-          for _ <- 1..4, into: %{} do
-            assert_receive {:server, name, r, at}, 10_000
+        received =
+          for _ <- 1..4 do
+            assert_receive {:server, name, r, at}, 15_000
             {name, {r, at}}
           end
+
+        order = Enum.map(received, &elem(&1, 0))
+        results = Map.new(received)
 
         {fast, fast_at} = results["fast"]
         {slow, slow_at} = results["slow"]
@@ -558,7 +572,8 @@ defmodule Toolnexus.HostEngineAsksTest do
                  error: nil
                }
 
-        assert fast_at < slow_at and slow_at - fast_at >= 500
+        assert fast_at <= slow_at
+        assert Enum.find_index(order, &(&1 == "fast")) < Enum.find_index(order, &(&1 == "slow"))
 
         tk = Toolkit.register(Toolnexus.create_toolkit!(builtins: false), fast.tools)
         out = Toolkit.execute(tk, "fast_slow", %{"totalMs" => 0, "intervalMs" => 0})

@@ -367,3 +367,45 @@ async fn structured_meta_and_output_schema_on_the_serve_path() {
     assert!(wire.get("_meta").is_none());
     c.cancel().await.ok();
 }
+
+/// Replays ../conformance/serve_mcp/cases.json (SPEC §7C), the shared serve wire.
+#[tokio::test]
+async fn serve_mcp_conformance_cases() {
+    let raw = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../conformance/serve_mcp/cases.json"
+    ))
+    .unwrap();
+    let doc: Value = serde_json::from_str(&raw).unwrap();
+    let tk = tk_with(vec![echo()], None).await;
+    let h = serve_mcp(&tk, Some(McpServeConfig::default()), None).await;
+    for c in doc["cases"].as_array().unwrap() {
+        let rq = &c["request"];
+        let method =
+            reqwest::Method::from_bytes(rq["method"].as_str().unwrap().as_bytes()).unwrap();
+        let mut b = reqwest::Client::new()
+            .request(method, format!("{}{}", h.url, rq["path"].as_str().unwrap()))
+            .timeout(std::time::Duration::from_secs(5));
+        if let Some(hs) = rq["headers"].as_object() {
+            for (k, v) in hs {
+                b = b.header(k.as_str(), v.as_str().unwrap());
+            }
+        }
+        let res = b
+            .send()
+            .await
+            .unwrap_or_else(|e| panic!("{}: {e}", c["name"]));
+        assert_eq!(
+            res.status().as_u16() as u64,
+            c["expect"]["status"].as_u64().unwrap(),
+            "{}",
+            c["name"]
+        );
+        if let Some(hs) = c["expect"]["headers"].as_object() {
+            for (k, v) in hs {
+                let got = res.headers().get(k.as_str()).and_then(|x| x.to_str().ok());
+                assert_eq!(got, v.as_str(), "{} header {k}", c["name"]);
+            }
+        }
+    }
+}

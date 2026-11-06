@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Resolve the clojure port's classpath ONCE (src + the interop runner root) into
+# interop/mcp2026/.build/clojure/classpath; server/client then start a plain JVM.
+set -euo pipefail
+ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"; OUT="$ROOT/interop/mcp2026/.build/clojure"; mkdir -p "$OUT"
+cd "$ROOT/clojure"
+CP="$(clojure -Spath -Sdeps '{:paths ["src" "interop"]}')"
+# absolute paths, so the runners work from any cwd
+CP="$(tr ':' '\n' <<<"$CP" | while read -r e; do [[ "$e" = /* ]] && echo "$e" || echo "$ROOT/clojure/$e"; done | paste -sd: -)"
+printf '%s' "$CP" >"$OUT/classpath"
+# smoke: both runner namespaces load
+java -cp "$CP" clojure.main -e "(require 'toolnexus.interop.mcp2026-server 'toolnexus.interop.mcp2026-client)"

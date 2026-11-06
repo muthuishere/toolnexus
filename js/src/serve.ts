@@ -233,6 +233,13 @@ export async function startA2AServer(opts: StartServerOptions): Promise<ServeHan
     // per request (stateless — sessionIdGenerator undefined). Checked first so
     // `/mcp` is never shadowed by the A2A POST handler.
     if (mcp && req.url && (req.url === "/mcp" || req.url.startsWith("/mcp?"))) {
+      // Stateless profile: no server-initiated SSE stream exists, so only POST is
+      // served. Refuse anything else at once (§7C) instead of holding a GET open.
+      if (req.method !== "POST") {
+        res.writeHead(405, { Allow: "POST" })
+        res.end()
+        return
+      }
       void (async () => {
         const body = req.method === "POST" ? await readBody(req) : ""
         const parsed = body ? safeJson(body) : undefined

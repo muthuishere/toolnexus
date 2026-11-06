@@ -241,3 +241,37 @@ async def test_get_mcp_answers_405_without_hanging():
     finally:
         await srv.stop()
         await tk.close()
+
+
+async def test_serve_mcp_conformance_cases():
+    # Replays ../conformance/serve_mcp/cases.json (SPEC §7C), shared by all 8 ports.
+    import json
+    import pathlib
+    import urllib.error
+    import urllib.request
+
+    path = pathlib.Path(__file__).resolve().parents[2] / "conformance" / "serve_mcp" / "cases.json"
+    cases = json.loads(path.read_text(encoding="utf-8"))["cases"]
+    tk = await create_toolkit(builtins=False, extra_tools=[echo_tool])
+    srv = await tk.serve("127.0.0.1:0", mcp={})
+    try:
+        for c in cases:
+            rq = c["request"]
+            req = urllib.request.Request(
+                srv.url + rq["path"], headers=rq.get("headers", {}), method=rq["method"]
+            )
+
+            def fetch(req=req):
+                try:
+                    with urllib.request.urlopen(req, timeout=5) as resp:
+                        return resp.status, resp.headers
+                except urllib.error.HTTPError as e:
+                    return e.code, e.headers
+
+            status, headers = await anyio.to_thread.run_sync(fetch)
+            assert status == c["expect"]["status"], c["name"]
+            for k, v in c["expect"].get("headers", {}).items():
+                assert headers.get(k) == v, (c["name"], k)
+    finally:
+        await srv.stop()
+        await tk.close()

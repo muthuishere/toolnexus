@@ -1,0 +1,2 @@
+#!/usr/bin/env bash
+ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"; exec dotnet "$ROOT/interop/mcp2026/.build/csharp/Mcp2026Interop.dll" server "$@"

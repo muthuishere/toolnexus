@@ -206,3 +206,26 @@ mavenPublishing {
         }
     }
 }
+
+// MCP 2026-07-28 interop runners (interop/mcp2026/java): a separate source set over main + test
+// (for the test-only McpDevAuthServer). Never part of the published jar.
+sourceSets {
+    interop {
+        java.srcDir 'src/interop/java'
+        compileClasspath += sourceSets.main.output + sourceSets.test.output + configurations.testRuntimeClasspath
+        runtimeClasspath += output + compileClasspath
+    }
+}
+
+tasks.register('interopClasspath') {
+    group = 'verification'
+    description = 'Compile the MCP interop runners and write their runtime classpath to build/interop/classpath.txt.'
+    dependsOn tasks.named('interopClasses'), tasks.named('testClasses')
+    def out = layout.buildDirectory.file('interop/classpath.txt')
+    outputs.file out
+    doLast {
+        def f = out.get().asFile
+        f.parentFile.mkdirs()
+        f.text = sourceSets.interop.runtimeClasspath.files.collect { it.absolutePath }.join(File.pathSeparator)
+    }
+}

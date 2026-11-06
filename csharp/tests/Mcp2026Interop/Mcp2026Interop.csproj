@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+    <!--
+      TEST TOOLING ONLY (never shipped): the C# server + client runners of the MCP 2026-07-28 interop
+      matrix (interop/mcp2026/README.md). Built by interop/mcp2026/csharp/build; not in Toolnexus.slnx.
+        Mcp2026Interop server [keycloak-flag] <skillsDir>
+        Mcp2026Interop client <base> <skillsDir> | client keycloak-flag <mcpURL> <skillsDir>
+    -->
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../src/Toolnexus/Toolnexus.csproj" />
+    <!-- The test-only dev authorization server (DevAuthServer, DEV/TESTS ONLY) and its Kestrel host. -->
+    <ProjectReference Include="../Mcp2026Fixture/Mcp2026Fixture.csproj" />
+  </ItemGroup>
+
+</Project>
