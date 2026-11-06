@@ -184,7 +184,7 @@ func main() {
 </TabItem>
 <TabItem label="Java">
 ```java title="Main.java"
-// run: java -cp 'lib/*' Main.java   (lib/ = toolnexus-0.25.0.jar + its runtime deps)
+// run: java -cp 'lib/*' Main.java   (lib/ = toolnexus-0.26.0.jar + its runtime deps)
 import io.github.muthuishere.toolnexus.InProcess;
 import io.github.muthuishere.toolnexus.LlmClient;
 import io.github.muthuishere.toolnexus.NativeTool;
@@ -270,7 +270,7 @@ Console.WriteLine(); // The sum is 5.
 <TabItem label="Elixir">
 ```elixir title="main.exs"
 # usage: elixir main.exs
-Mix.install([{:toolnexus, "~> 0.25"}])
+Mix.install([{:toolnexus, "~> 0.26"}])
 
 add =
   Toolnexus.define_tool(
@@ -314,7 +314,7 @@ IO.puts("") # The sum is 5.
 Clojure has no stream API: the emitted events reach `run`'s `:on-event` as they happen.
 
 ```clojure title="main.clj"
-;; deps.edn: {:deps {net.clojars.muthuishere/toolnexus {:mvn/version "0.25.0"}}}
+;; deps.edn: {:deps {net.clojars.muthuishere/toolnexus {:mvn/version "0.26.0"}}}
 ;; run:      clojure -M main.clj
 (ns main
   (:require [toolnexus.client :as client]
@@ -573,7 +573,7 @@ func main() {
 </TabItem>
 <TabItem label="Java">
 ```java title="Serve.java"
-// run: java -cp 'lib/*' Serve.java   (lib/ = toolnexus-0.25.0.jar + its runtime deps)
+// run: java -cp 'lib/*' Serve.java   (lib/ = toolnexus-0.26.0.jar + its runtime deps)
 import io.github.muthuishere.toolnexus.McpServe;
 import io.github.muthuishere.toolnexus.NativeTool;
 import io.github.muthuishere.toolnexus.Toolkit;
@@ -656,7 +656,7 @@ Console.WriteLine($"tools/list: {(int)res.StatusCode}");
 <TabItem label="Elixir">
 ```elixir title="serve.exs"
 # usage: elixir serve.exs
-Mix.install([{:toolnexus, "~> 0.25"}])
+Mix.install([{:toolnexus, "~> 0.26"}])
 
 add =
   Toolnexus.define_tool(
@@ -688,7 +688,7 @@ server.close.()
 </TabItem>
 <TabItem label="Clojure">
 ```clojure title="serve.clj"
-;; deps.edn: {:deps {net.clojars.muthuishere/toolnexus {:mvn/version "0.25.0"}}}
+;; deps.edn: {:deps {net.clojars.muthuishere/toolnexus {:mvn/version "0.26.0"}}}
 ;; run:      clojure -M serve.clj
 (ns serve
   (:require [koine.http :as http] ; koine ships with toolnexus; no extra dependency

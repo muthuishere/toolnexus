@@ -1,4 +1,4 @@
-// run: java -cp 'lib/*' Main.java   (lib/ = toolnexus-0.25.0.jar + its runtime deps)
+// run: java -cp 'lib/*' Main.java   (lib/ = toolnexus-0.26.0.jar + its runtime deps)
 import io.github.muthuishere.toolnexus.InProcess;
 import io.github.muthuishere.toolnexus.LlmClient;
 import io.github.muthuishere.toolnexus.NativeTool;

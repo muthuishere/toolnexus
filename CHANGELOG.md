@@ -8,6 +8,8 @@ GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
 
 ## Unreleased
 
+## 0.26.0 — 2026-11-06
+
 **Classifier backends: one System One classifier for TypeSafe, OpenRouter, Cloudflare, Vercel or
 your own server, with images, a cache and reply validation** (change `add-classifier-backends`,
 ADR 0038; every default is proposed and awaits the owner's confirmation).

@@ -1,5 +1,5 @@
 # usage: elixir main.exs npx -y @agentclientprotocol/claude-agent-acp@0.100.0
-Mix.install([{:toolnexus, "~> 0.25"}])
+Mix.install([{:toolnexus, "~> 0.26"}])
 
 add =
   Toolnexus.define_tool(

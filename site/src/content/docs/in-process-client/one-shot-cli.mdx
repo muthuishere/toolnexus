@@ -426,7 +426,7 @@ public final class OneShot {
 ```
 ```java title="Main.java"
 // run (Java 22+, multi-file source launcher): java -cp 'lib/*' Main.java python3 fake_cli.py
-//      (lib/ = toolnexus-0.25.0.jar + its runtime deps; OneShot.java sits next to this file)
+//      (lib/ = toolnexus-0.26.0.jar + its runtime deps; OneShot.java sits next to this file)
 import io.github.muthuishere.toolnexus.LlmClient;
 import io.github.muthuishere.toolnexus.NativeTool;
 import io.github.muthuishere.toolnexus.Toolkit;
@@ -636,7 +636,7 @@ end
 ```
 ```elixir title="main.exs"
 # usage: elixir main.exs <cli> [args...]    (oneshot.exs sits next to this file)
-Mix.install([{:toolnexus, "~> 0.25"}])
+Mix.install([{:toolnexus, "~> 0.26"}])
 Code.require_file("oneshot.exs", __DIR__)
 
 add =
@@ -708,7 +708,7 @@ koine's JSON writer sorts object keys, so the rendered tool schemas differ in ke
                   (parse (:out r))))}))
 ```
 ```clojure title="main.clj"
-;; deps.edn: {:paths ["."] :deps {net.clojars.muthuishere/toolnexus {:mvn/version "0.25.0"}}}
+;; deps.edn: {:paths ["."] :deps {net.clojars.muthuishere/toolnexus {:mvn/version "0.26.0"}}}
 ;; run:      clojure -M -m main claude -p        (any CLI that reads a prompt on stdin)
 (ns main
   (:require [koine.json :as json]
