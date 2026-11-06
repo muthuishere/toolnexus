@@ -345,6 +345,7 @@ public final class McpServe {
             String method = exchange.getRequestMethod();
             if (!"POST".equals(method)) {
                 // Stateless: no standalone SSE stream. Matches the SDK servlet's doGet → 405.
+                exchange.getResponseHeaders().set("Allow", "POST");
                 sendText(exchange, 405, "");
                 return;
             }

@@ -1,0 +1,11 @@
+{
+  "_doc": "toolkit.serve MCP profile wire (SPEC §7C). Every port starts toolkit.serve with an `mcp` profile (no a2a needed), sends each case's request to <url><path> over real HTTP, and asserts the exact status and the listed response headers (names case-insensitive). Change a byte here => change it in all eight ports in the same PR.",
+  "cases": [
+    {
+      "name": "get_mcp_is_405_allow_post",
+      "why": "The serve profile is stateless: there is no server-initiated SSE stream. A GET must be refused at once, not held open (a client that opens one waits forever).",
+      "request": { "method": "GET", "path": "/mcp", "headers": { "Accept": "text/event-stream" } },
+      "expect": { "status": 405, "headers": { "Allow": "POST" } }
+    }
+  ]
+}

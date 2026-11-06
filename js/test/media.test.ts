@@ -21,14 +21,23 @@ const VERBS = read("verbs.json")
 
 type Recorded = { method: string; path: string; headers: http.IncomingHttpHeaders; body: string }
 
-/** Fake provider: serves script[] in order, last entry repeats; records every request. */
+/**
+ * Fake provider: serves script[] in order, last entry repeats; records every request.
+ * `reset()` starts a new generation: connections opened before it are destroyed and any request
+ * still arriving on them (e.g. a poll the client aborted at its deadline) is dropped, so it can
+ * never be recorded into — and shift the script position of — the next face's requests.
+ */
 async function fakeServer(script: any[]) {
   const requests: Recorded[] = []
   let url = ""
+  let gen = 0
+  const sockets = new Set<import("node:net").Socket>()
   const server = http.createServer((req, res) => {
+    const reqGen = (req.socket as any).__gen
     let body = ""
     req.on("data", (c) => (body += c))
     req.on("end", () => {
+      if (reqGen !== gen) { req.socket.destroy(); return }
       requests.push({ method: req.method!, path: req.url!, headers: req.headers, body })
       const entry = script[Math.min(requests.length - 1, script.length - 1)]
       const extra: Record<string, string> = {}
@@ -37,9 +46,19 @@ async function fakeServer(script: any[]) {
       res.end(entry.rawBody !== undefined ? entry.rawBody : JSON.stringify(entry.body))
     })
   })
+  server.on("connection", (s) => {
+    ;(s as any).__gen = gen
+    sockets.add(s)
+    s.on("close", () => sockets.delete(s))
+  })
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", r))
   url = `http://127.0.0.1:${(server.address() as any).port}`
-  return { url, requests, reset: () => { requests.length = 0 }, close: () => new Promise((r) => server.close(r)) }
+  const reset = () => {
+    gen++
+    for (const s of sockets) s.destroy()
+    requests.length = 0
+  }
+  return { url, requests, reset, close: () => new Promise((r) => server.close(r)) }
 }
 
 const withServer = (style: any, url: string) => JSON.parse(JSON.stringify(style).split("{server}").join(url))

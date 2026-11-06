@@ -231,7 +231,7 @@ async def main():
     toolkit = await create_toolkit(builtins=False, extra_tools=[define_tool(add, name="add")])
     server = await toolkit.serve(
         "127.0.0.1:0",
-        mcp={"name": "toolnexus"},  # pass a non-empty dict; "tools": [...] narrows what is exposed
+        mcp={},  # defaults: name "toolnexus"; "tools": [...] narrows what is exposed
         on_call=lambda e: print("called", e["name"], "(error)" if e["is_error"] else ""),
     )
     print(f"MCP endpoint: {server.url}/mcp")  # streamable HTTP
@@ -241,12 +241,6 @@ async def main():
 asyncio.run(main())
 ```
 
-<Aside type="caution" title="Two Python serve gaps (verified on 0.24.0)">
-`mcp={}` currently exposes **no tools** (the empty dict is treated as "absent"), so pass at least
-`{"name": ...}`. And a `GET /mcp` (the SSE stream a streamable-HTTP client may open) gets no
-response, so clients that open it, such as the Claude ACP adapter, hang at `session/new`.
-Use the JavaScript or Go serve for agent MCP until this is fixed.
-</Aside>
 </TabItem>
 <TabItem label="Go">
 ```go title="main.go"

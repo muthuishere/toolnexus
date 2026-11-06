@@ -165,9 +165,9 @@ async def test_in_memory_list_delete():
 needs_node = pytest.mark.skipif(NODE is None, reason="node not installed")
 
 
-async def _slow(args):
+async def _slow(args, timeout=300):
     src = await load_mcp(
-        {"mcp": {"p": {"command": [NODE, str(FIXTURE)], "timeout": 300}}}
+        {"mcp": {"p": {"command": [NODE, str(FIXTURE)], "timeout": timeout}}}
     )
     try:
         assert src.status["p"] == "connected"
@@ -186,7 +186,11 @@ async def _slow(args):
 
 @needs_node
 async def test_idle_timeout_progress_extends_call():
-    r = await _slow({"totalMs": 1200, "intervalMs": 100})
+    # The call outlives the idle budget (2000 ms vs 800 ms), so it only succeeds if
+    # progress extends it. Progress every 20 ms gives a 40x margin over the budget:
+    # with 100 ms vs 300 ms, one scheduler stall under parallel CI load starved a gap
+    # past the budget and the call timed out.
+    r = await _slow({"totalMs": 2000, "intervalMs": 20}, timeout=800)
     assert not r.is_error, r.output
     body = json.loads(r.output)
     assert body["progressTokenReceived"] is True

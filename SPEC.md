@@ -1395,6 +1395,10 @@ state); **no stdio transport**. `MCPServeConfig = { name?, version?, tools?, aut
      support, design decision 8).
   5. Version ≠ `2026-07-28` ⇒ `-32022` `Unsupported protocol version`, `data: {supported:["2026-07-28"], requested}`.
   Unknown method ⇒ HTTP 404 + `-32601`; parse error ⇒ `-32700`; notifications ⇒ 202.
+- **Only `POST /mcp` is served.** The profile is stateless and offers no server-initiated SSE stream, so any
+  other method on `/mcp` (notably `GET`) ⇒ HTTP **405** with `Allow: POST`, answered at once — never a held-open
+  stream. This holds for the pre-change profile (§7C.F) too. Pinned by `conformance/serve_mcp/cases.json`, replayed
+  by all eight ports.
 - **Every result** carries `resultType` (`"complete"` unless MRTR) and `_meta["io.modelcontextprotocol/serverInfo"]
   = {name, version}` (defaults `toolnexus` / `0.1.0`).
 - **`server/discover`** ⇒ `{resultType, supportedVersions:["2026-07-28"], capabilities:{tools:{}, resources:{},
