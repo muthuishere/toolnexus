@@ -32,7 +32,7 @@ listed in the site index [`llms.txt`](/toolnexus/llms.txt), and inside [`llms-fu
 | you supply | receives | returns | streams? |
 |---|---|---|---|
 | **`generate(request)`** (every port) | `messages`, `tools`, `model`, `body` (the assembled request for this turn) | one assistant message: `{ content }` to finish, or `{ toolCalls }` to ask for tools | no: `stream` / `runStream` is **refused** with an error naming why |
-| **`GenerateStream(ctx, request, emit)`** (Go; Rust has `generate_stream`) | the same request, plus the run's `ctx` (cancel / timeout) and an `emit` function | the same one message | yes: every `emit({Type:"text", Delta})` becomes a stream delta (the deltas must add up to `Content`); other event types pass through to the stream consumer and are never executed |
+| **`generateStream(request, emit)`** (every port since 0.25.0: Go `GenerateStream(ctx, …)`, Python `generate_stream`, Elixir `:generate_stream`, Clojure `:generate-stream`, …) | the same request, plus an `emit` function (Go also gets the run's `ctx`) | the same one message | yes: every `emit({type:"text", delta})` becomes a stream delta as it happens (the deltas must add up to `content`); `thought`, `tool_call` and `tool_result` events pass through to the stream consumer and are never executed |
 
 Return `toolCalls` and toolnexus executes them against the toolkit, appends the results and calls
 you again. Return `content` and the run is over. The contract is the same one documented in
@@ -40,16 +40,18 @@ you again. Return `content` and the run is over. The contract is the same one do
 retries (in-process failures are final by default) and the per-port request shapes.
 
 <Aside type="caution" title="Python's generate is synchronous">
-The Python client calls `generate` on a worker thread and refuses a coroutine. If your model is
-async, keep a reference to your event loop and block on it inside `generate` with
-`asyncio.run_coroutine_threadsafe(coro, loop).result()`; the [ACP recipe](/toolnexus/in-process-client/acp-agent/) does exactly this.
+The Python client calls `generate` / `generate_stream` on a worker thread and refuses a coroutine.
+If your model is async, keep a reference to your event loop and block on it inside `generate` with
+`asyncio.run_coroutine_threadsafe(coro, loop).result()`. (The ACP client, `load_acp`, is already
+synchronous, so the ACP recipe needs none of this.)
 </Aside>
 
 ## A complete example
 
-A "model" that asks for the `add` tool on its first turn and answers with the result on the second.
-This is the whole integration; swap the body of `generate` for your real model.
+A "model" that asks for the `add` tool on its first turn and streams the answer on the second.
+This is the whole integration; swap the body of the generate function for your real model.
 
+{/* recipe:overview/main */}
 <Tabs syncKey="lang">
 <TabItem label="JavaScript">
 ```js title="main.mjs"
@@ -61,19 +63,24 @@ const add = defineTool({
   run: ({ a, b }) => `${a + b}`,
 })
 
-// Your "model": first turn asks for a tool, second turn answers with its result.
+// Your "model": first turn asks for a tool, second turn streams the answer.
 const client = createInProcessClient({
   model: "my-model",
-  generate: (req) => {
+  generateStream: async (req, emit) => {
     const last = req.messages.at(-1)
     if (last.role !== "tool") return { toolCalls: [{ name: "add", arguments: { a: 2, b: 3 } }] }
-    return { content: `The sum is ${last.content}.` }
+    const words = ["The ", "sum ", "is ", String(last.content), "."]
+    for (const w of words) emit({ type: "text", delta: w }) // deltas must add up to content
+    return { content: words.join("") }
   },
 })
 
 const toolkit = await createToolkit({ builtins: false, extraTools: [add] })
-const result = await client.run("What is 2 + 3?", { toolkit })
-console.log(result.text) // The sum is 5.
+for await (const ev of client.stream("What is 2 + 3?", { toolkit })) {
+  if (ev.type === "text") process.stdout.write(ev.delta)
+  else if (ev.type === "tool_call") console.log(`[calling ${ev.name}]`)
+}
+console.log() // The sum is 5.
 ```
 </TabItem>
 <TabItem label="Python">
@@ -87,26 +94,31 @@ def add(a: float, b: float) -> str:
     return str(int(a + b))
 
 
-def generate(req):  # sync: runs on the client's worker thread
+def generate_stream(req, emit):  # sync: runs on its own thread
     last = req["messages"][-1]
     if last["role"] != "tool":
         return {"tool_calls": [{"name": "add", "arguments": {"a": 2, "b": 3}}]}
-    return {"content": f"The sum is {last['content']}."}
+    words = ["The ", "sum ", "is ", str(last["content"]), "."]
+    for w in words:
+        emit({"type": "text", "delta": w})  # deltas must add up to content
+    return {"content": "".join(words)}
 
 
 async def main():
-    client = create_in_process_client(model="my-model", generate=generate)
+    client = create_in_process_client(model="my-model", generate_stream=generate_stream)
     toolkit = await create_toolkit(builtins=False, extra_tools=[define_tool(add, name="add")])
-    result = await client.run("What is 2 + 3?", toolkit)
-    print(result.text)  # The sum is 5.
+    async for ev in client.stream("What is 2 + 3?", toolkit):
+        if ev["type"] == "text":
+            print(ev["delta"], end="", flush=True)
+        elif ev["type"] == "tool_call":
+            print(f"[calling {ev['name']}]")
+    print()  # The sum is 5.
 
 
 asyncio.run(main())
 ```
 </TabItem>
 <TabItem label="Go">
-Go also has `GenerateStream`, so this version streams for real through `client.Stream`.
-
 ```go title="main.go"
 package main
 
@@ -170,7 +182,244 @@ func main() {
 }
 ```
 </TabItem>
+<TabItem label="Java">
+```java title="Main.java"
+// run: java -cp 'lib/*' Main.java   (lib/ = toolnexus-0.25.0.jar + its runtime deps)
+import io.github.muthuishere.toolnexus.InProcess;
+import io.github.muthuishere.toolnexus.LlmClient;
+import io.github.muthuishere.toolnexus.NativeTool;
+import io.github.muthuishere.toolnexus.Toolkit;
+
+import java.util.List;
+import java.util.Map;
+
+public class Main {
+    public static void main(String[] argv) throws Exception {
+        NativeTool add = NativeTool.of("add", "Add two numbers.",
+                Map.of("type", "object",
+                        "properties", Map.of("a", Map.of("type", "number"), "b", Map.of("type", "number")),
+                        "required", List.of("a", "b")),
+                args -> String.valueOf(((Number) args.get("a")).intValue() + ((Number) args.get("b")).intValue()));
+
+        // Your "model": first turn asks for a tool, second turn streams the answer.
+        LlmClient client = InProcess.createClient(new InProcess.Options()
+                .model("my-model")
+                .generateStream((req, emit) -> {
+                    @SuppressWarnings("unchecked")
+                    Map<String, Object> last = (Map<String, Object>) req.messages.get(req.messages.size() - 1);
+                    if (!"tool".equals(last.get("role")))
+                        return InProcess.Response.toolCalls(new InProcess.ToolCall("add", Map.of("a", 2, "b", 3)));
+                    List<String> words = List.of("The ", "sum ", "is ", String.valueOf(last.get("content")), ".");
+                    for (String w : words) emit.accept(LlmClient.StreamEvent.text(w)); // deltas must add up to content
+                    return InProcess.Response.content(String.join("", words));
+                }));
+
+        try (Toolkit toolkit = Toolkit.create(new Toolkit.Options().builtins(false).extraTools(add))) {
+            client.stream("What is 2 + 3?", toolkit, ev -> {
+                switch (ev.type()) {
+                    case TEXT -> System.out.print(ev.delta());
+                    case TOOL_CALL -> System.out.println("[calling " + ev.name() + "]");
+                    default -> { }
+                }
+            });
+            System.out.println(); // The sum is 5.
+        }
+    }
+}
+```
+</TabItem>
+<TabItem label="C#">
+```csharp title="Program.cs"
+// dotnet new console && dotnet add package Toolnexus && dotnet run
+using Toolnexus;
+using static Toolnexus.LlmClient;
+
+var add = NativeTool.Of("add", "Add two numbers.",
+    new Dictionary<string, object?>
+    {
+        ["type"] = "object",
+        ["properties"] = new Dictionary<string, object?> { ["a"] = new { type = "number" }, ["b"] = new { type = "number" } },
+        ["required"] = new[] { "a", "b" },
+    },
+    args => $"{Convert.ToDouble(args["a"]?.ToString()) + Convert.ToDouble(args["b"]?.ToString())}");
+
+// Your "model": first turn asks for a tool, second turn streams the answer.
+var client = InProcess.CreateClient(new InProcess.Options
+{
+    Model = "my-model",
+    GenerateStream = async (req, emit, ct) =>
+    {
+        var last = (System.Text.Json.JsonElement)req.Messages[^1]!;
+        if (last.GetProperty("role").GetString() != "tool")
+            return InProcess.Response.FromToolCalls(new InProcess.ToolCall { Name = "add", Arguments = new { a = 2, b = 3 } });
+        string[] words = ["The ", "sum ", "is ", last.GetProperty("content").GetString()!, "."];
+        foreach (var w in words) emit(new StreamEvent(StreamKind.Text, Delta: w)); // deltas must add up to content
+        return InProcess.Response.FromContent(string.Concat(words));
+    },
+});
+
+await using var toolkit = await Toolkit.CreateAsync(new Toolkit.Options { Builtins = false, ExtraTools = [add] });
+await client.StreamAsync("What is 2 + 3?", toolkit, ev =>
+{
+    if (ev.Type == StreamKind.Text) Console.Write(ev.Delta);
+    else if (ev.Type == StreamKind.ToolCall) Console.WriteLine($"[calling {ev.Name}]");
+});
+Console.WriteLine(); // The sum is 5.
+```
+</TabItem>
+<TabItem label="Elixir">
+```elixir title="main.exs"
+# usage: elixir main.exs
+Mix.install([{:toolnexus, "~> 0.25"}])
+
+add =
+  Toolnexus.define_tool(
+    name: "add",
+    description: "Add two numbers.",
+    input_schema: %{"type" => "object", "properties" => %{"a" => %{"type" => "number"}, "b" => %{"type" => "number"}}, "required" => ["a", "b"]},
+    execute: fn %{"a" => a, "b" => b} -> "#{a + b}" end
+  )
+
+# Your "model": first turn asks for a tool, second turn streams the answer.
+client =
+  Toolnexus.Client.create_in_process(
+    model: "my-model",
+    generate_stream: fn req, emit ->
+      last = List.last(req.messages)
+
+      if last["role"] != "tool" do
+        %{tool_calls: [%{name: "add", arguments: %{"a" => 2, "b" => 3}}]}
+      else
+        words = ["The ", "sum ", "is ", to_string(last["content"]), "."]
+        Enum.each(words, &emit.(%{type: "text", delta: &1})) # deltas must add up to content
+        %{content: Enum.join(words)}
+      end
+    end
+  )
+
+toolkit = Toolnexus.create_toolkit!(builtins: false, extra_tools: [add])
+
+for ev <- Toolnexus.Client.stream(client, "What is 2 + 3?", toolkit) do
+  case ev.type do
+    "text" -> IO.write(ev.delta)
+    "tool_call" -> IO.puts("[calling #{ev.name}]")
+    _ -> :ok
+  end
+end
+
+IO.puts("") # The sum is 5.
+```
+</TabItem>
+<TabItem label="Clojure">
+Clojure has no stream API: the emitted events reach `run`'s `:on-event` as they happen.
+
+```clojure title="main.clj"
+;; deps.edn: {:deps {net.clojars.muthuishere/toolnexus {:mvn/version "0.25.0"}}}
+;; run:      clojure -M main.clj
+(ns main
+  (:require [toolnexus.client :as client]
+            [toolnexus.core :as tn]
+            [toolnexus.native :as native]))
+
+(def add
+  (native/native-tool
+   {:name "add" :description "Add two numbers."
+    :input-schema {:type "object" :properties {:a {:type "number"} :b {:type "number"}} :required ["a" "b"]}
+    :run (fn [{:keys [a b]}] (str (+ a b)))}))
+
+;; Your "model": first turn asks for a tool, second turn streams the answer.
+(def c
+  (client/create-in-process-client
+   {:model "my-model"
+    :generate-stream
+    (fn [req emit]
+      (let [last-msg (last (:messages req))]
+        (if (not= "tool" (:role last-msg))
+          {:tool-calls [{:name "add" :arguments {:a 2 :b 3}}]}
+          (let [words ["The " "sum " "is " (str (:content last-msg)) "."]]
+            (doseq [w words] (emit {:type "text" :delta w})) ; deltas must add up to content
+            {:content (apply str words)}))))}))
+
+(def toolkit (tn/build {:builtins false :tools [add]}))
+
+;; No stream API in this port: events go to run's :on-event sink as they happen.
+(client/run c "What is 2 + 3?"
+            {:toolkit toolkit
+             :on-event (fn [ev]
+                         (case (:type ev)
+                           "text"      (do (print (:delta ev)) (flush))
+                           "tool_call" (println (str "[calling " (:name ev) "]"))
+                           nil))})
+(println) ; The sum is 5.
+(shutdown-agents)
+```
+</TabItem>
+<TabItem label="Rust">
+```rust title="main.rs"
+// Cargo.toml:
+//   toolnexus = "0.25"
+//   tokio = { version = "1", features = ["full"] }
+//   serde_json = "1"
+// run: cargo run
+use std::sync::Arc;
+
+use serde_json::json;
+use toolnexus::client::{
+    EmitFn, GenerateStreamFn, InProcessOptions, InProcessRequest, InProcessResponse,
+    InProcessToolCall, StreamEvent, create_in_process_client,
+};
+use toolnexus::{BuiltinsConfig, ToolkitOptions, create_toolkit, define_tool};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let schema = json!({"type": "object", "properties": {"a": {"type": "number"}, "b": {"type": "number"}}, "required": ["a", "b"]});
+    let add = define_tool("add", "Add two numbers.", Some(schema), |a, _ctx| async move {
+        Ok::<_, String>((a["a"].as_f64().unwrap_or(0.0) + a["b"].as_f64().unwrap_or(0.0)).to_string())
+    });
+
+    // Your "model": first turn asks for a tool, second turn streams the answer.
+    let model: GenerateStreamFn = Arc::new(|_cancel, req: InProcessRequest, emit: EmitFn| {
+        Box::pin(async move {
+            let last = req.messages.last().cloned().unwrap_or_default();
+            if last["role"] != "tool" {
+                let call = InProcessToolCall { id: String::new(), name: "add".into(), arguments: json!({"a": 2, "b": 3}) };
+                return Ok(InProcessResponse { tool_calls: vec![call], ..Default::default() });
+            }
+            let sum = last["content"].as_str().unwrap_or_default().to_string();
+            let words = ["The ", "sum ", "is ", &sum, "."];
+            for w in words {
+                emit(StreamEvent::text(w)); // deltas must add up to content
+            }
+            Ok(InProcessResponse { content: words.concat(), ..Default::default() })
+        })
+    });
+    let client = create_in_process_client(InProcessOptions {
+        model: "my-model".into(),
+        generate_stream: Some(model),
+        ..Default::default()
+    });
+
+    let toolkit = create_toolkit(ToolkitOptions {
+        builtins: Some(BuiltinsConfig::off()),
+        extra_tools: vec![add],
+        ..Default::default()
+    })
+    .await?;
+    let mut events = client.stream("What is 2 + 3?", &toolkit)?;
+    while let Some(ev) = events.recv().await {
+        match ev.kind.as_str() {
+            "text" => print!("{}", ev.delta),
+            "tool_call" => println!("[calling {}]", ev.name),
+            _ => {}
+        }
+    }
+    println!(); // The sum is 5.
+    Ok(())
+}
+```
+</TabItem>
 </Tabs>
+{/* /recipe */}
 
 ## When to use which
 
@@ -186,14 +435,25 @@ An agent already has a tool loop of its own. You do not want two loops fighting 
 call, so in the agent case you **give the agent your toolkit as an MCP server**, run the toolnexus
 client with an empty toolkit, and let `generate` return the agent's answer.
 
-## Give your toolkit to an external agent: serve it as MCP
+## Give your toolkit to an external agent: `asMcpServer`
 
 Any toolkit, whatever it aggregates (MCP servers, skills, native functions, HTTP tools, builtins,
-A2A agents), can be served as **one streamable-HTTP MCP server** with the `mcp` profile of
-`toolkit.serve` ([SPEC §7C](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md)).
-`tools/list` lists the toolkit's tools, `tools/call` dispatches straight to `Tool.execute`, and
-`onCall` fires for every inbound call. Point any MCP client at `<url>/mcp`.
+A2A agents), can be handed to an agent you launch as **one MCP server** with
+`toolkit.asMcpServer()` ([SPEC §8C](https://github.com/muthuishere/toolnexus/blob/main/SPEC.md)):
+Go `AsMCPServer(nil)`, Python `as_mcp_server()`, Java `asMcpServer()`, C# `AsMcpServer()`, Elixir
+`Toolnexus.Toolkit.as_mcp_server/2`, Clojure `toolnexus.serve/as-mcp-server`, Rust
+`as_mcp_server` (crate feature `serve`). It returns `{url, token, close}`:
 
+- it listens on `127.0.0.1:<ephemeral>` only, and `url` is `http://127.0.0.1:<port>/mcp`;
+- every request must carry `Authorization: Bearer <token>` (a fresh 64-hex token per call), so
+  other local processes cannot call your tools; a missing or wrong token is `401`;
+- `POST /mcp` is the stateless streamable-HTTP endpoint; any other method is `405` (there is no
+  server stream to hold open), any other path `404`;
+- the optional config is the usual `{name, version, tools}`, and `tools` narrows what is exposed.
+
+You build whatever `mcpServers` entry your agent accepts; for an ACP agent that is the entry below.
+
+{/* recipe:overview/serve */}
 <Tabs syncKey="lang">
 <TabItem label="JavaScript">
 ```js title="serve.mjs"
@@ -205,19 +465,29 @@ const add = defineTool({
   run: ({ a, b }) => `${a + b}`,
 })
 
-// Any toolkit (MCP servers, skills, native, HTTP, builtins) can be served as one MCP server.
+// Any toolkit (MCP servers, skills, native, HTTP, builtins) can be served to a local agent.
 const toolkit = await createToolkit({ builtins: false, extraTools: [add] })
-const server = await toolkit.serve("127.0.0.1:0", {
-  mcp: { name: "toolnexus" },                       // tools: [...] narrows what is exposed
-  onCall: (e) => console.log("called", e.name, e.isError ? "(error)" : ""),
+const server = await toolkit.asMcpServer() // { tools: [...] } narrows what is exposed
+console.log("MCP endpoint:", server.url)   // http://127.0.0.1:<port>/mcp, POST only
+
+// Every request needs the bearer token; this is the entry an ACP agent takes in session/new.
+const entry = { type: "http", name: "toolnexus", url: server.url,
+                headers: [{ name: "Authorization", value: `Bearer ${server.token}` }] }
+const res = await fetch(entry.url, {
+  method: "POST",
+  headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream", Authorization: entry.headers[0].value },
+  body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }),
 })
-console.log(`MCP endpoint: ${server.url}/mcp`)       // streamable HTTP
-await server.stop()
+console.log("tools/list:", res.status)
+await server.close()
 ```
 </TabItem>
 <TabItem label="Python">
 ```python title="serve.py"
 import asyncio
+import json
+import urllib.request
+
 from toolnexus import create_toolkit, define_tool
 
 
@@ -227,29 +497,37 @@ def add(a: float, b: float) -> str:
 
 
 async def main():
-    # Any toolkit (MCP servers, skills, native, HTTP, builtins) can be served as one MCP server.
+    # Any toolkit (MCP servers, skills, native, HTTP, builtins) can be served to a local agent.
     toolkit = await create_toolkit(builtins=False, extra_tools=[define_tool(add, name="add")])
-    server = await toolkit.serve(
-        "127.0.0.1:0",
-        mcp={},  # defaults: name "toolnexus"; "tools": [...] narrows what is exposed
-        on_call=lambda e: print("called", e["name"], "(error)" if e["is_error"] else ""),
-    )
-    print(f"MCP endpoint: {server.url}/mcp")  # streamable HTTP
-    await server.stop()
+    server = toolkit.as_mcp_server()  # MCPServeConfig(tools=[...]) narrows what is exposed
+    print("MCP endpoint:", server.url)  # http://127.0.0.1:<port>/mcp, POST only
+
+    # Every request needs the bearer token; this is the entry an ACP agent takes in session/new.
+    entry = {"type": "http", "name": "toolnexus", "url": server.url,
+             "headers": [{"name": "Authorization", "value": "Bearer " + server.token}]}
+    req = urllib.request.Request(
+        entry["url"],
+        json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}).encode(),
+        {"Content-Type": "application/json", "Accept": "application/json, text/event-stream",
+         "Authorization": entry["headers"][0]["value"]})
+    with urllib.request.urlopen(req) as res:
+        print("tools/list:", res.status)
+    server.close()
 
 
 asyncio.run(main())
 ```
-
 </TabItem>
 <TabItem label="Go">
-```go title="main.go"
+```go title="serve/main.go"
 package main
 
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"strconv"
+	"strings"
 
 	tn "github.com/muthuishere/toolnexus/golang"
 )
@@ -264,33 +542,248 @@ func main() {
 	add := tn.NativeToolReflect("add", "Add two numbers.", func(_ context.Context, in addArgs) (string, error) {
 		return strconv.FormatFloat(in.A+in.B, 'f', -1, 64), nil
 	})
-	// Any toolkit (MCP servers, skills, native, HTTP, builtins) can be served as one MCP server.
+	// Any toolkit (MCP servers, skills, native, HTTP, builtins) can be served to a local agent.
 	toolkit, err := tn.CreateToolkit(ctx, tn.Options{Builtins: false, ExtraTools: []tn.Tool{add}})
 	if err != nil {
 		panic(err)
 	}
-	server, err := toolkit.Serve("127.0.0.1:0", tn.ServeOptions{
-		MCP: &tn.MCPServeConfig{Name: "toolnexus"}, // Tools: []string{...} narrows what is exposed
-		OnCall: func(e tn.OnCallEvent) {
-			fmt.Println("called", e.Name, e.IsError)
-		},
-	})
+	server, err := toolkit.AsMCPServer(nil) // &tn.MCPServeConfig{Tools: []string{...}} narrows what is exposed
 	if err != nil {
 		panic(err)
 	}
-	defer server.Stop()
-	fmt.Printf("MCP endpoint: %s/mcp\n", server.URL) // streamable HTTP
+	defer server.Close()
+	fmt.Println("MCP endpoint:", server.URL) // http://127.0.0.1:<port>/mcp, POST only
+
+	// Every request needs the bearer token; this is the entry an ACP agent takes in session/new.
+	entry := map[string]any{"type": "http", "name": "toolnexus", "url": server.URL,
+		"headers": []map[string]any{{"name": "Authorization", "value": "Bearer " + server.Token}}}
+	req, _ := http.NewRequest("POST", entry["url"].(string),
+		strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	req.Header.Set("Authorization", "Bearer "+server.Token)
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		panic(err)
+	}
+	res.Body.Close()
+	fmt.Println("tools/list:", res.StatusCode)
+}
+```
+</TabItem>
+<TabItem label="Java">
+```java title="Serve.java"
+// run: java -cp 'lib/*' Serve.java   (lib/ = toolnexus-0.25.0.jar + its runtime deps)
+import io.github.muthuishere.toolnexus.McpServe;
+import io.github.muthuishere.toolnexus.NativeTool;
+import io.github.muthuishere.toolnexus.Toolkit;
+
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.util.List;
+import java.util.Map;
+
+public class Serve {
+    public static void main(String[] argv) throws Exception {
+        NativeTool add = NativeTool.of("add", "Add two numbers.",
+                Map.of("type", "object",
+                        "properties", Map.of("a", Map.of("type", "number"), "b", Map.of("type", "number")),
+                        "required", List.of("a", "b")),
+                args -> String.valueOf(((Number) args.get("a")).intValue() + ((Number) args.get("b")).intValue()));
+
+        // Any toolkit (MCP servers, skills, native, HTTP, builtins) can be served to a local agent.
+        try (Toolkit toolkit = Toolkit.create(new Toolkit.Options().builtins(false).extraTools(add));
+             McpServe.LocalServer server = toolkit.asMcpServer()) { // asMcpServer(cfg) narrows what is exposed
+            System.out.println("MCP endpoint: " + server.url());   // http://127.0.0.1:<port>/mcp, POST only
+
+            // Every request needs the bearer token; this is the entry an ACP agent takes in session/new.
+            Map<String, Object> entry = Map.of("type", "http", "name", "toolnexus", "url", server.url(),
+                    "headers", List.of(Map.of("name", "Authorization", "value", "Bearer " + server.token())));
+            HttpResponse<String> res = HttpClient.newHttpClient().send(HttpRequest.newBuilder(URI.create(server.url()))
+                    .header("Content-Type", "application/json")
+                    .header("Accept", "application/json, text/event-stream")
+                    .header("Authorization", "Bearer " + server.token())
+                    .POST(HttpRequest.BodyPublishers.ofString(
+                            "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\",\"params\":{}}"))
+                    .build(), HttpResponse.BodyHandlers.ofString());
+            System.out.println("tools/list: " + res.statusCode());
+        }
+    }
+}
+```
+</TabItem>
+<TabItem label="C#">
+```csharp title="Serve.cs"
+// dotnet new console && dotnet add package Toolnexus && dotnet run   (this file as Program.cs)
+using System.Net.Http.Headers;
+using System.Text;
+using Toolnexus;
+
+var add = NativeTool.Of("add", "Add two numbers.",
+    new Dictionary<string, object?>
+    {
+        ["type"] = "object",
+        ["properties"] = new Dictionary<string, object?> { ["a"] = new { type = "number" }, ["b"] = new { type = "number" } },
+        ["required"] = new[] { "a", "b" },
+    },
+    args => $"{Convert.ToDouble(args["a"]?.ToString()) + Convert.ToDouble(args["b"]?.ToString())}");
+
+// Any toolkit (MCP servers, skills, native, HTTP, builtins) can be served to a local agent.
+await using var toolkit = await Toolkit.CreateAsync(new Toolkit.Options { Builtins = false, ExtraTools = [add] });
+await using var server = toolkit.AsMcpServer(); // an MCPServeConfig { Tools = ... } narrows what is exposed
+Console.WriteLine($"MCP endpoint: {server.Url}"); // http://127.0.0.1:<port>/mcp, POST only
+
+// Every request needs the bearer token; this is the entry an ACP agent takes in session/new.
+var entry = new Dictionary<string, object?>
+{
+    ["type"] = "http", ["name"] = "toolnexus", ["url"] = server.Url,
+    ["headers"] = new[] { new Dictionary<string, object?> { ["name"] = "Authorization", ["value"] = "Bearer " + server.Token } },
+};
+using var http = new HttpClient();
+var req = new HttpRequestMessage(HttpMethod.Post, (string)entry["url"]!)
+{
+    Content = new StringContent("""{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}""", Encoding.UTF8, "application/json"),
+};
+req.Headers.Accept.ParseAdd("application/json");
+req.Headers.Accept.ParseAdd("text/event-stream");
+req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", server.Token);
+var res = await http.SendAsync(req);
+Console.WriteLine($"tools/list: {(int)res.StatusCode}");
+```
+</TabItem>
+<TabItem label="Elixir">
+```elixir title="serve.exs"
+# usage: elixir serve.exs
+Mix.install([{:toolnexus, "~> 0.25"}])
+
+add =
+  Toolnexus.define_tool(
+    name: "add",
+    description: "Add two numbers.",
+    input_schema: %{"type" => "object", "properties" => %{"a" => %{"type" => "number"}, "b" => %{"type" => "number"}}, "required" => ["a", "b"]},
+    execute: fn %{"a" => a, "b" => b} -> "#{a + b}" end
+  )
+
+# Any toolkit (MCP servers, skills, native, HTTP, builtins) can be served to a local agent.
+toolkit = Toolnexus.create_toolkit!(builtins: false, extra_tools: [add])
+server = Toolnexus.Toolkit.as_mcp_server(toolkit) # %{"tools" => [...]} narrows what is exposed
+IO.puts("MCP endpoint: #{server.url}")            # http://127.0.0.1:<port>/mcp, POST only
+
+# Every request needs the bearer token; this is the entry an ACP agent takes in session/new.
+entry = %{"type" => "http", "name" => "toolnexus", "url" => server.url,
+          "headers" => [%{"name" => "Authorization", "value" => "Bearer " <> server.token}]}
+
+# Plain OTP :httpc, so the recipe needs no HTTP dependency.
+{:ok, _} = Application.ensure_all_started(:inets)
+headers = [{~c"accept", ~c"application/json, text/event-stream"},
+           {~c"authorization", String.to_charlist(hd(entry["headers"])["value"])}]
+body = JSON.encode!(%{jsonrpc: "2.0", id: 1, method: "tools/list", params: %{}})
+{:ok, {{_, status, _}, _, _}} =
+  :httpc.request(:post, {String.to_charlist(entry["url"]), headers, ~c"application/json", body}, [], [])
+IO.puts("tools/list: #{status}")
+server.close.()
+```
+</TabItem>
+<TabItem label="Clojure">
+```clojure title="serve.clj"
+;; deps.edn: {:deps {net.clojars.muthuishere/toolnexus {:mvn/version "0.25.0"}}}
+;; run:      clojure -M serve.clj
+(ns serve
+  (:require [koine.http :as http] ; koine ships with toolnexus; no extra dependency
+            [koine.json :as json]
+            [toolnexus.core :as tn]
+            [toolnexus.native :as native]
+            [toolnexus.serve :as serve]))
+
+(def add
+  (native/native-tool
+   {:name "add" :description "Add two numbers."
+    :input-schema {:type "object" :properties {:a {:type "number"} :b {:type "number"}} :required ["a" "b"]}
+    :run (fn [{:keys [a b]}] (str (+ a b)))}))
+
+;; Any toolkit (MCP servers, skills, native, HTTP, builtins) can be served to a local agent.
+(def toolkit (tn/build {:builtins false :tools [add]}))
+(def server (serve/as-mcp-server toolkit)) ; (as-mcp-server tk {:tools [...]}) narrows what is exposed
+(println "MCP endpoint:" (:url server))    ; http://127.0.0.1:<port>/mcp, POST only
+
+;; Every request needs the bearer token; this is the entry an ACP agent takes in session/new.
+(def entry {:type "http" :name "toolnexus" :url (:url server)
+            :headers [{:name "Authorization" :value (str "Bearer " (:token server))}]})
+(def res (http/request {:method :post :url (:url entry)
+                        :headers {"Content-Type" "application/json"
+                                  "Accept" "application/json, text/event-stream"
+                                  "Authorization" (-> entry :headers first :value)}
+                        :body (json/write-str {:jsonrpc "2.0" :id 1 :method "tools/list" :params {}})}))
+(println "tools/list:" (:status res))
+((:close server))
+(shutdown-agents)
+```
+</TabItem>
+<TabItem label="Rust">
+```rust title="serve.rs"
+// Cargo.toml:
+//   toolnexus = { version = "0.25", features = ["serve"] }  # "serve" is on by default
+//   tokio = { version = "1", features = ["full"] }
+//   serde_json = "1"
+// run: cargo run
+use serde_json::json;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
+use toolnexus::{BuiltinsConfig, ToolkitOptions, create_toolkit, define_tool};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let schema = json!({"type": "object", "properties": {"a": {"type": "number"}, "b": {"type": "number"}}, "required": ["a", "b"]});
+    let add = define_tool("add", "Add two numbers.", Some(schema), |a, _ctx| async move {
+        Ok::<_, String>((a["a"].as_f64().unwrap_or(0.0) + a["b"].as_f64().unwrap_or(0.0)).to_string())
+    });
+
+    // Any toolkit (MCP servers, skills, native, HTTP, builtins) can be served to a local agent.
+    let toolkit = create_toolkit(ToolkitOptions {
+        builtins: Some(BuiltinsConfig::off()),
+        extra_tools: vec![add],
+        ..Default::default()
+    })
+    .await?;
+    let server = toolkit.as_mcp_server(None).await?; // Some(McpServeConfig { tools, .. }) narrows it
+    println!("MCP endpoint: {}", server.url); // http://127.0.0.1:<port>/mcp, POST only
+
+    // Every request needs the bearer token; this is the entry an ACP agent takes in session/new.
+    let entry = json!({"type": "http", "name": "toolnexus", "url": server.url,
+                       "headers": [{"name": "Authorization", "value": format!("Bearer {}", server.token)}]});
+
+    // A bare HTTP/1.1 POST, so the recipe needs no HTTP client crate.
+    let body = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}).to_string();
+    let host = server.url.trim_start_matches("http://").split('/').next().unwrap_or_default();
+    let request = format!(
+        "POST /mcp HTTP/1.1\r\nHost: {host}\r\nContent-Type: application/json\r\n\
+         Accept: application/json, text/event-stream\r\nAuthorization: {}\r\n\
+         Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        entry["headers"][0]["value"].as_str().unwrap_or_default(),
+        body.len()
+    );
+    let mut conn = TcpStream::connect(host).await?;
+    conn.write_all(request.as_bytes()).await?;
+    let mut reply = String::new();
+    conn.read_to_string(&mut reply).await?;
+    let status = reply.split_whitespace().nth(1).unwrap_or("?");
+    println!("tools/list: {status}");
+    server.close();
+    Ok(())
 }
 ```
 </TabItem>
 </Tabs>
+{/* /recipe */}
 
-Transport is streamable HTTP only; a stdio MCP server and an embeddable HTTP **handler** (so you
-can mount `/mcp` inside your own server instead of letting `serve` own the listener) are
-**coming** (PR #140), not on main yet.
+To serve a toolkit to the network rather than to one local agent, use `toolkit.serve(addr, { mcp })`
+(owns a port, no token) or mount `toolkit.mcpHandler(cfg)` in your own HTTP server, behind your own
+auth: see [serve MCP](/toolnexus/api/javascript/serve/mcp/) and [mcpHandler](/toolnexus/api/javascript/serve/mcp-handler/).
 
 ## In this section
 
-- [ACP agent recipe](/toolnexus/in-process-client/acp-agent/): drive any ACP agent, with your toolkit attached over MCP, streaming its text.
+- [ACP agent recipe](/toolnexus/in-process-client/acp-agent/): drive any ACP agent with `loadACP`, your toolkit attached through `asMcpServer`, streaming its text.
 - [One-shot CLI recipe](/toolnexus/in-process-client/one-shot-cli/): one CLI process per turn (`claude -p`, `codex exec`), toolnexus runs the tools.
 - [Extend it](/toolnexus/in-process-client/extend/): add your own agent, isolation, model selection, permissions.

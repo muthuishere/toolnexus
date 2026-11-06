@@ -45,7 +45,7 @@ export default defineConfig({
 						{
 							label: 'In-process client',
 							description:
-								'Copy-pasteable recipes: createInProcessClient, serving a toolkit as MCP, driving any ACP agent, one CLI process per turn, and how to extend them.',
+								'Copy-pasteable recipes in all eight ports: createInProcessClient, serving a toolkit to an agent (asMcpServer), driving any ACP agent, one CLI process per turn, and how to extend them.',
 							paths: ['in-process-client', 'in-process-client/**'],
 						},
 					],

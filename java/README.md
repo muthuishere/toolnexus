@@ -207,15 +207,18 @@ particular agent is a recipe on top of them:
   bearer token (`McpServe.LocalServer`: `url()`, `token()`, `close()`).
 - `AcpClient.start(new AcpClient.Options()...)` is a plain ACP client: `mcpServers` (raw JSON
   objects, sent verbatim), `sessionMeta`, `clientCapsMeta` and `model` are passed through unchanged.
-- `InProcess.Options.generateStream(acp::generateStream)` makes it a streaming `LlmClient`.
+- `InProcess.Options.generateStream(...)` over `acp.generateStream(req, emit)` makes it a streaming
+  `LlmClient` (it throws `IOException`, so wrap it as below; `generate(acp)` works as-is for `run`).
 
 ```java
+// import io.github.muthuishere.toolnexus.acp.AcpClient;  (the rest are in io.github.muthuishere.toolnexus)
 try (Toolkit tk = Toolkit.create(new Toolkit.Options().skillsDir("./skills"));
      McpServe.LocalServer srv = tk.asMcpServer();
      AcpClient acp = AcpClient.start(new AcpClient.Options()
              .command(List.of("my-agent", "acp"))
              .mcpServers(List.of(Map.of("type", "http", "name", "toolnexus", "url", srv.url(),
-                     "headers", List.of(Map.of("name", "Authorization", "value", "Bearer " + srv.token()))))))) {
+                     "headers", List.of(Map.of("name", "Authorization", "value", "Bearer " + srv.token())))))
+             .timeoutMs(300_000))) { // per request incl. a whole turn; the 10 s default is too short for a real agent
     LlmClient client = InProcess.createClient(new InProcess.Options().model("acp")
             .generateStream((req, emit) -> {
                 try { return acp.generateStream(req, emit); } catch (IOException e) { throw new UncheckedIOException(e); }

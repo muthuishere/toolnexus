@@ -220,6 +220,8 @@ toolnexus ships no client per coding agent — three vendor-neutral pieces inste
   (`Text` deltas, `Thought`, and its own `ToolCall`/`ToolResult` with `Via = "acp"`).
 
 ```csharp
+using Toolnexus.Acp; // AcpClient, AcpStartOptions
+
 await using var srv = tk.AsMcpServer();
 using var acp = await AcpClient.StartAsync(new AcpStartOptions
 {
