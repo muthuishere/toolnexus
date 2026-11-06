@@ -34,6 +34,7 @@ import re
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable, Literal, Mapping, Optional, Protocol, Sequence, Union
@@ -210,9 +211,34 @@ CLASSIFIER_BACKENDS: dict[str, ClassifierBackendPreset] = {
         "systemone", True, lambda m: ClassifierSupports(images=False),
     ),
     "custom": ClassifierBackendPreset(
-        "", DEFAULT_CLASSIFIER_MODEL, DEFAULT_CLASSIFIER_API_KEY_ENV, "systemone", True, None,
+        "", DEFAULT_CLASSIFIER_MODEL, "", "systemone", True, None,
     ),
 }
+
+
+def classifier_key_env(backend: str, base_url: str) -> str:
+    """The env var whose key may be sent to ``base_url`` (already ``${NAME}``-expanded):
+    the backend's own variable, and only when ``base_url`` is that backend's own host
+    over https (OpenRouter also its ``*.openrouter.ai`` subdomains, as in the §8
+    client). ``""`` when none may — ``custom`` has no preset key at all. A key is
+    never sent to a host the caller did not name (#155, SPEC §8B)."""
+    p = CLASSIFIER_BACKENDS.get(backend)
+    if p is None or not p.api_key_env or not p.base_url:
+        return ""
+
+    def host(u: str) -> str:
+        try:
+            sp = urllib.parse.urlsplit(u)
+            return (sp.hostname or "").lower() if sp.scheme.lower() == "https" else ""
+        except ValueError:
+            return ""
+
+    h, own = host(base_url), host(p.base_url)
+    if not h or not own:
+        return ""
+    if h == own or (backend == "openrouter" and h.endswith(".openrouter.ai")):
+        return p.api_key_env
+    return ""
 
 #: The one mismatch worth failing at construction: a model alias only TypeSafe
 #: serves, pointed at OpenRouter.
@@ -744,6 +770,7 @@ class Classifier:
         backend: str = "typesafe",
         supports: Optional[Union[ClassifierSupports, Mapping[str, Any]]] = None,
         cache: Optional["ClassifierCache"] = None,
+        key_env_explicit: Optional[bool] = None,
     ) -> None:
         self.style = style
         self.backend = backend
@@ -760,6 +787,11 @@ class Classifier:
         self.base_url = base_url
         self.model = model
         self.api_key_env = api_key_env
+        # Did the caller NAME the key variable? A named one goes wherever base_url
+        # points; the preset's own only to its own host (classifier_key_env, #155).
+        if key_env_explicit is None:
+            key_env_explicit = api_key_env not in (self.preset.api_key_env, DEFAULT_CLASSIFIER_API_KEY_ENV)
+        self.key_env_explicit = key_env_explicit
         self.headers = dict(headers or {})
         self.timeout = timeout
         self.http_transport: ClassifierTransport = http_transport or _UrllibTransport()
@@ -1047,7 +1079,7 @@ class Classifier:
             retry_after_header: Optional[str] = None
             try:
                 res = await asyncio.to_thread(
-                    self.http_transport.post, url, self._headers(extra_headers), raw, self.timeout
+                    self.http_transport.post, url, self._headers(extra_headers, url), raw, self.timeout
                 )
                 status, retry_after_header = res.status, res.retry_after
                 if status < 300:
@@ -1069,12 +1101,13 @@ class Classifier:
             await asyncio.sleep(delay if delay is not None else base * (2**attempt))
             attempt += 1
 
-    def _headers(self, extra: Optional[Mapping[str, str]] = None) -> dict[str, str]:
+    def _headers(self, extra: Optional[Mapping[str, str]] = None, url: str = "") -> dict[str, str]:
         """Built fresh per attempt: the credential is read from the NAMED env var
         at call time, and ``${ENV_VAR}`` header references expand at call time.
         ``extra`` (the images opt-in) goes before host headers, which win."""
         h = {"Content-Type": "application/json"}
-        key = os.environ.get(self.api_key_env)
+        key_env = self.api_key_env if self.key_env_explicit else classifier_key_env(self.backend, url)
+        key = os.environ.get(key_env) if key_env else None
         if key:
             h["Authorization"] = f"Bearer {key}"
         h.update(extra or {})
@@ -1220,6 +1253,7 @@ def create_classifier(
     # The preset is a UNIT; an explicit field still wins over it.
     effective_base = base_url or preset.base_url
     effective_model = model or preset.model
+    explicit_key_env = bool(api_key_env)
     api_key_env = api_key_env or preset.api_key_env
     if "openrouter.ai" in effective_base and effective_model in _TYPESAFE_ONLY_MODELS:
         raise ClassifierError(
@@ -1235,6 +1269,7 @@ def create_classifier(
         base_url=effective_base,
         model=effective_model,
         api_key_env=api_key_env or DEFAULT_CLASSIFIER_API_KEY_ENV,
+        key_env_explicit=explicit_key_env,
         headers=headers,
         timeout=timeout if timeout else DEFAULT_CLASSIFIER_TIMEOUT,
         http_transport=http_transport,
@@ -1403,11 +1438,30 @@ def _image_size(fmt: str, b: bytes) -> Optional[tuple[int, int]]:
     return None
 
 
+def _cloudflare_cause(env: Any) -> str:
+    """``": <code> <message>"`` from ``errors[0]`` of a failed envelope (SPEC §8B).
+    Cloudflare reports a missing balance, a bad model id and a malformed request
+    alike as HTTP 200 with ``success:false``, so this is the only thing that tells
+    them apart. ``""`` when there is nothing to show."""
+    errs = env.get("errors") if isinstance(env, Mapping) else None
+    if not isinstance(errs, list) or not errs or not isinstance(errs[0], Mapping):
+        return ""
+    code, msg = errs[0].get("code"), errs[0].get("message")
+    parts = []
+    if code is not None and not isinstance(code, (bool, dict, list)) and str(code) != "":
+        parts.append(str(code))
+    if isinstance(msg, str) and msg:
+        parts.append(msg)
+    text = capped_error_body(200, " ".join(parts))
+    return ": " + text if text else ""
+
+
 def _unwrap_cloudflare(env: Any) -> Any:
-    """The System One reply inside a Cloudflare ``/ai/run`` envelope. The
-    envelope's own error list is never echoed (it can carry an account id)."""
+    """The System One reply inside a Cloudflare ``/ai/run`` envelope. A failed
+    envelope surfaces only ``errors[0]`` as ``<code> <message>``, through the same
+    redaction and cap as :func:`_cause` (it can carry an account id)."""
     if not isinstance(env, Mapping) or env.get("success") is not True:
-        raise ClassifierError("classifier: cloudflare: envelope not successful")
+        raise ClassifierError("classifier: cloudflare: envelope not successful" + _cloudflare_cause(env))
     res = env.get("result")
     if isinstance(res, Mapping) and isinstance(res.get("state"), str):
         if res["state"] != "Completed":

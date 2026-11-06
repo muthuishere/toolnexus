@@ -514,3 +514,69 @@ func TestCloudflareErrorKeepsAccountTemplate(t *testing.T) {
 		t.Fatalf("%v", err)
 	}
 }
+
+// TestKeyRoutingFixture is the #155 gate: a preset's env key is never sent to a
+// host that is not its own; an explicit APIKeyEnv / header still goes where the
+// caller says. Fixture: examples/judge/backends/key-routing.json.
+func TestKeyRoutingFixture(t *testing.T) {
+	var fx struct {
+		Questions    map[string]map[string]any `json:"questions"`
+		CaptureCases []struct {
+			Name                string            `json:"name"`
+			Backend             string            `json:"backend"`
+			APIKeyEnv           string            `json:"apiKeyEnv"`
+			Headers             map[string]string `json:"headers"`
+			Env                 map[string]string `json:"env"`
+			ExpectAuthorization *string           `json:"expectAuthorization"`
+		} `json:"captureCases"`
+		HostCases []struct {
+			Backend      string `json:"backend"`
+			BaseURL      string `json:"baseUrl"`
+			ExpectKeyEnv string `json:"expectKeyEnv"`
+		} `json:"hostCases"`
+	}
+	loadBackendFixture(t, "key-routing.json", &fx)
+	qs := fixtureQuestions(t, fx.Questions)
+	for _, c := range fx.CaptureCases {
+		t.Run(c.Name, func(t *testing.T) {
+			for k, v := range c.Env {
+				t.Setenv(k, v)
+			}
+			f := newFakeSystemOne(t, func(int, string) (int, string) {
+				if c.Backend == "cloudflare" {
+					return 200, `{"success":true,"result":` + noulReply + `}`
+				}
+				return 200, noulReply
+			})
+			o := ClassifierOptions{Backend: ClassifierBackend(c.Backend), BaseURL: f.srv.URL + "/v1",
+				APIKeyEnv: c.APIKeyEnv, Headers: c.Headers, Retries: -1}
+			if c.Backend == "custom" {
+				o.Supports = &ClassifierSupports{}
+			}
+			cl, err := CreateClassifier(o)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := cl.Evaluate(context.Background(), "x", qs); err != nil {
+				t.Fatal(err)
+			}
+			if len(f.hdrs) == 0 {
+				t.Fatal("no request reached the capture server")
+			}
+			for _, h := range f.hdrs {
+				got, has := h["Authorization"]
+				switch {
+				case c.ExpectAuthorization == nil && has:
+					t.Fatalf("a key was sent to a host that is not its own: Authorization present")
+				case c.ExpectAuthorization != nil && (!has || got[0] != *c.ExpectAuthorization):
+					t.Fatalf("Authorization = %v, want %q", got, *c.ExpectAuthorization)
+				}
+			}
+		})
+	}
+	for _, c := range fx.HostCases {
+		if got := classifierKeyEnv(ClassifierBackend(c.Backend), c.BaseURL); got != c.ExpectKeyEnv {
+			t.Errorf("%s %s: key env %q, want %q", c.Backend, c.BaseURL, got, c.ExpectKeyEnv)
+		}
+	}
+}

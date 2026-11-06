@@ -134,12 +134,40 @@ pub const CLASSIFIER_BACKENDS: [ClassifierBackendPreset; 5] = [
         backend: ClassifierBackend::Custom,
         base_url: "",
         model: DEFAULT_CLASSIFIER_MODEL,
-        api_key_env: DEFAULT_CLASSIFIER_API_KEY_ENV,
+        api_key_env: "",
         wire: ClassifierWire::SystemOne,
         images_header: true,
         supports: None,
     },
 ];
+
+/// The env var whose key may be sent to `base_url` (already `${NAME}`-expanded):
+/// the backend's own variable, and only when `base_url` is that backend's own
+/// host over https (OpenRouter also its subdomains). `""` when none may; custom
+/// has no preset key. A key is never sent to a host the caller did not name
+/// (#155, SPEC §8B).
+#[doc(hidden)]
+pub fn classifier_key_env(backend: ClassifierBackend, base_url: &str) -> &'static str {
+    let p = backend.preset();
+    if p.api_key_env.is_empty() || p.base_url.is_empty() {
+        return "";
+    }
+    let host_of = |u: &str| -> Option<String> {
+        let u = url::Url::parse(u).ok()?;
+        if u.scheme() != "https" {
+            return None;
+        }
+        u.host_str().map(str::to_ascii_lowercase)
+    };
+    let (Some(h), Some(own)) = (host_of(base_url), host_of(p.base_url)) else {
+        return "";
+    };
+    if h == own || (backend == ClassifierBackend::OpenRouter && h.ends_with(".openrouter.ai")) {
+        p.api_key_env
+    } else {
+        ""
+    }
+}
 
 /// Raised BEFORE any network call when the backend's support table says it
 /// cannot take what the request carries. Reach it from a [`ClassifierError`]
@@ -771,13 +799,16 @@ struct Prepared {
     assets: Option<Map<String, Value>>,
 }
 
-/// The System One reply inside a Cloudflare envelope. The envelope's own
-/// error list is never echoed (it can carry an account id).
+/// The System One reply inside a Cloudflare envelope. A failed envelope names
+/// `errors[0]` only, through the §8B cause policy (redacted, capped).
 fn unwrap_cloudflare(body: &[u8]) -> Result<Vec<u8>, ClassifierError> {
-    let not_ok = || err("classifier: cloudflare: envelope not successful");
-    let env: Value = serde_json::from_slice(body).map_err(|_| not_ok())?;
+    let env: Value = serde_json::from_slice(body)
+        .map_err(|_| err("classifier: cloudflare: envelope not successful"))?;
     if env.get("success") != Some(&Value::Bool(true)) {
-        return Err(not_ok());
+        return Err(err(format!(
+            "classifier: cloudflare: envelope not successful{}",
+            super::cloudflare_cause(env.get("errors"))
+        )));
     }
     let mut res = env.get("result").cloned().unwrap_or(Value::Null);
     if let Some(st) = res.get("state").and_then(Value::as_str) {

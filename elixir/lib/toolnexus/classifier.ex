@@ -156,7 +156,7 @@ defmodule Toolnexus.Classifier do
     "custom" => %{
       base_url: nil,
       model: "jev-latest",
-      api_key_env: "TYPESAFE_API_KEY",
+      api_key_env: "",
       wire: "systemone",
       images_header: true,
       supports_images: nil
@@ -449,6 +449,7 @@ defmodule Toolnexus.Classifier do
             base_url: @default_base_url,
             model: @default_model,
             api_key_env: @default_api_key_env,
+            key_explicit: false,
             headers: %{},
             timeout: @default_timeout,
             http_options: [],
@@ -540,13 +541,26 @@ defmodule Toolnexus.Classifier do
         Keyword.take(
           opts,
           Map.keys(%__MODULE__{}) --
-            [:__struct__, :static, :warned, :wire, :send_images_header, :supports_images]
+            [
+              :__struct__,
+              :static,
+              :warned,
+              :wire,
+              :send_images_header,
+              :supports_images,
+              :key_explicit
+            ]
         )
       )
 
     # A `:backend` sets base_url + model + api_key_env AS A UNIT. The struct already
     # carries the TypeSafe defaults, so "did the caller pass it?" is read off `opts`,
     # never off the struct — an explicit option still wins over the preset.
+    #
+    # `key_explicit`: a CALLER-named `:api_key_env` goes wherever base_url points; the
+    # preset's own variable only to the preset's own host (`key_env/2`, #155).
+    c = %{c | key_explicit: Keyword.get(opts, :api_key_env) not in [nil, ""]}
+
     c =
       case c.backend && Map.get(@backends, to_string(c.backend)) do
         nil ->
@@ -554,7 +568,7 @@ defmodule Toolnexus.Classifier do
 
         p ->
           Enum.reduce([:base_url, :model, :api_key_env], c, fn key, acc ->
-            if Keyword.has_key?(opts, key),
+            if Keyword.get(opts, key) != nil,
               do: acc,
               else: Map.put(acc, key, Map.fetch!(p, key))
           end)
@@ -577,6 +591,27 @@ defmodule Toolnexus.Classifier do
     with :ok <- validate_backend(c, opts),
          {:ok, c} <- validate_style(c) do
       {:ok, %{resolve_backend(c) | warned: start_warned()}}
+    end
+  end
+
+  @doc false
+  # The env var whose key may be sent to `url` (already ${NAME}-expanded): the
+  # backend's own variable, and only when `url` is that backend's own host over
+  # https (openrouter also its `*.openrouter.ai` subdomains). "" otherwise — custom
+  # has no preset key. Never a key to a host the caller did not name (#155, §8B).
+  def key_env(backend, url) do
+    row = Map.get(@backends, to_string(backend))
+
+    with %{api_key_env: env, base_url: own} when env not in [nil, ""] and is_binary(own) <- row,
+         %URI{scheme: "https", host: h} when is_binary(h) and h != "" <- URI.parse(url),
+         %URI{host: oh} <- URI.parse(own),
+         h = String.downcase(h),
+         true <-
+           h == String.downcase(oh) or
+             (to_string(backend) == "openrouter" and String.ends_with?(h, ".openrouter.ai")) do
+      env
+    else
+      _ -> ""
     end
   end
 
@@ -1182,12 +1217,32 @@ defmodule Toolnexus.Classifier do
             unwrapped(r)
         end
 
+      {:ok, env} ->
+        {:error, "classifier: cloudflare: envelope not successful" <> envelope_cause(env)}
+
       _ ->
         {:error, "classifier: cloudflare: envelope not successful"}
     end
   end
 
   defp unwrap(_c, raw), do: {:ok, raw}
+
+  # errors[0] of a failed envelope as ": <code> <message>" (§8B), through the same
+  # redaction and cap as every other backend cause; "" when there is nothing to show.
+  # Cloudflare reports a missing balance, a bad model id and a malformed request all
+  # as HTTP 200 + success:false, so this is the only thing that tells them apart.
+  defp envelope_cause(%{"errors" => [%{} = e | _]}) do
+    code =
+      case e["code"] do
+        c when is_binary(c) or is_number(c) -> to_string(c)
+        _ -> ""
+      end
+
+    msg = if is_binary(e["message"]), do: e["message"], else: ""
+    cause(200, String.trim(code <> " " <> msg))
+  end
+
+  defp envelope_cause(_), do: ""
 
   defp unwrapped(%{} = r), do: {:ok, Canonical.encode(r)}
   defp unwrapped(_), do: {:error, "classifier: cloudflare: no result in the envelope"}
@@ -1304,7 +1359,7 @@ defmodule Toolnexus.Classifier do
     request = %{
       method: :post,
       url: endpoint,
-      headers: request_headers(c, extra),
+      headers: request_headers(c, endpoint, extra),
       body: raw,
       receive_timeout: c.timeout
     }
@@ -1328,7 +1383,7 @@ defmodule Toolnexus.Classifier do
       [
         method: :post,
         url: endpoint,
-        headers: request_headers(c, extra),
+        headers: request_headers(c, endpoint, extra),
         body: raw,
         receive_timeout: c.timeout,
         retry: false,
@@ -1348,13 +1403,14 @@ defmodule Toolnexus.Classifier do
   # Credentials resolve AT CALL TIME from the NAMED env var, and ${ENV_VAR} header
   # references expand at call time. Neither value is ever logged, returned, or put
   # in an error or a metric.
-  defp request_headers(c, extra) do
+  defp request_headers(c, endpoint, extra) do
     base = Map.merge(%{"content-type" => "application/json"}, extra)
 
+    env = if c.key_explicit, do: c.api_key_env, else: key_env(backend_name(c), endpoint)
+
     base =
-      case System.get_env(c.api_key_env) do
-        nil -> base
-        "" -> base
+      case env != "" and System.get_env(env) do
+        k when k in [false, nil, ""] -> base
         key -> Map.put(base, "authorization", "Bearer " <> key)
       end
 

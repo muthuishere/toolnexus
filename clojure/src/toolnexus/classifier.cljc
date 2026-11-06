@@ -83,7 +83,9 @@
                  :supports (fn [_] {:images false})}
    "custom"     {:base-url nil
                  :model    "jev-latest"
-                 :api-key-env "TYPESAFE_API_KEY"
+                 ;; No default key: a self-hosted endpoint is not TypeSafe's host,
+                 ;; so no preset credential may go to it (#155).
+                 :api-key-env ""
                  :wire "systemone" :images-header true
                  :supports nil}})
 
@@ -627,6 +629,9 @@
                   (throw (ex-info "classifier: backend \"custom\" requires baseUrl and supports"
                                   {:backend backend})))
         row     (get backends backend)
+        ;; Did the caller NAME the key variable? A named one goes wherever the
+        ;; base URL points; the preset's own only to its own host (#155).
+        explicit-key-env? (boolean (seq (str (:api-key-env opts))))
         preset  (into {} (remove (fn [e] (nil? (val e))))
                       (select-keys row [:base-url :model :api-key-env]))
         opts    (merge preset opts)
@@ -654,6 +659,7 @@
                      :base-url    (or (:base-url opts) default-base-url)
                      :model       model
                      :api-key-env (or (:api-key-env opts) default-api-key-env)
+                     :explicit-key-env? explicit-key-env?
                      :timeout-ms  (or (:timeout-ms opts) default-timeout-ms)
                      :retries     (or (:retries opts) 2)
                      :retry-base-ms (or (:retry-base-ms opts) 500))]
@@ -739,14 +745,36 @@
         merged (if (seq params) (merge base params) base)]
     (json/write-str (if-let [f (:body-transform c)] (f merged) merged))))
 
+(defn key-env-for-backend
+  "The NAME of the env var whose key may be sent to `base-url` (already
+  `${NAME}`-expanded, i.e. as dialled) for `backend`, or \"\" when none may
+  (SPEC §8B key-to-host, #155): the backend's own variable, and only when
+  `base-url` is that backend's own host over https (case-insensitive hostname;
+  openrouter also its `*.openrouter.ai` subdomains). `custom` has no preset key,
+  so it is always \"\". A key is never sent to a host the caller did not name."
+  [backend base-url]
+  (let [row (get backends (str backend))
+        env (:api-key-env row)
+        own (client/host-of (:base-url row))
+        h   (client/host-of base-url)]
+    (if (and (seq env) own h
+             (or (= h own)
+                 (and (= "openrouter" (str backend)) (str/ends-with? h ".openrouter.ai"))))
+      env
+      "")))
+
 (defn- request-headers
   "Built at CALL TIME and never logged, returned or put in an error. The
   credential is read from the NAMED environment variable and `${ENV_VAR}` in a
   header value expands here — both are use-only values that must not reach an
   agent's context, a log line or a metric. `extra` (the images header) goes in
   BEFORE the host's headers, so a host header wins."
-  [c extra]
-  (let [credential (env/get-env (:api-key-env c))]
+  [c url extra]
+  (let [key-env    (if (:explicit-key-env? c)
+                     (:api-key-env c)
+                     (key-env-for-backend (:backend c) url))
+        get-env    (or (:get-env c) env/get-env)
+        credential (when (seq (str key-env)) (get-env key-env))]
     (cond-> (reduce (fn [m e]
                       (assoc m (str/lower-case (str (if (keyword? (key e)) (name (key e)) (key e))))
                              (env/expand (str (val e)))))
@@ -779,7 +807,7 @@
    (let [base     (str/replace (str (:base-url c)) #"/+$" "")
          endpoint (if (= "cloudflare" (:wire c)) base (str base "/systemone"))
          url      (if (str/includes? endpoint "${") (env/expand endpoint) endpoint)
-         headers  (request-headers c extra-headers)
+         headers  (request-headers c url extra-headers)
          budget   (or (:retries c) 2)
          base-ms  (or (:retry-base-ms c) 500)]
      (loop [attempt 0]
@@ -980,11 +1008,22 @@
 
 (defn- unwrap-cloudflare
   "The System One reply inside a Cloudflare `/ai/run` envelope, as parsed JSON.
-  The envelope's own error list is NEVER echoed: it can carry an account id."
+  A failed envelope surfaces `errors[0]` as `<code> <message>` through the same
+  redaction and 200-character cap as every other backend cause (SPEC §8B): the
+  list can carry an account id, which `safe-cause` redacts."
   [body]
   (let [env (try (json/read-str (str body) {:key-fn str}) (catch Throwable _ nil))]
     (when-not (and (map? env) (true? (get env "success")))
-      (throw (ex-info "classifier: cloudflare: envelope not successful" {:wire "cloudflare"})))
+      (let [e0   (let [es (when (map? env) (get env "errors"))]
+                   (when (and (sequential? es) (seq es) (map? (first es))) (first es)))
+            code (get e0 "code")
+            msg  (get e0 "message")
+            text (str/join " " (remove str/blank?
+                                       [(if (or (string? code) (number? code)) (str code) "")
+                                        (if (string? msg) msg "")]))]
+        (throw (ex-info (str "classifier: cloudflare: envelope not successful"
+                             (safe-cause 200 text))
+                        {:wire "cloudflare"}))))
     (let [res (get env "result")]
       (if (and (map? res) (string? (get res "state")))
         (if (= "Completed" (get res "state"))

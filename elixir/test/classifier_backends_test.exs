@@ -758,4 +758,66 @@ defmodule Toolnexus.ClassifierBackendsTest do
 
     assert_received {:hit, "/v1/systemone", ["true"]}
   end
+
+  defmodule AuthCapture do
+    @moduledoc false
+    import Plug.Conn
+    def init(o), do: o
+
+    def call(conn, %{owner: owner, reply: reply}) do
+      {:ok, _body, conn} = read_body(conn)
+      send(owner, {:auth, get_req_header(conn, "authorization")})
+      send_resp(conn, 200, reply)
+    end
+  end
+
+  test "key-routing.json: a preset key goes only to its own host (#155)" do
+    fx = fixture("key-routing.json")
+    qs = questions(fx["questions"])
+
+    for hc <- fx["hostCases"] do
+      assert Classifier.key_env(hc["backend"], hc["baseUrl"]) == hc["expectKeyEnv"],
+             "#{hc["backend"]} #{hc["baseUrl"]}"
+    end
+
+    for cc <- fx["captureCases"] do
+      saved = for {k, _} <- cc["env"], do: {k, System.get_env(k)}
+      for {k, v} <- cc["env"], do: System.put_env(k, v)
+
+      try do
+        reply =
+          if cc["backend"] == "cloudflare",
+            do: ~s({"success":true,"result":#{@noul_reply}}),
+            else: @noul_reply
+
+        {:ok, pid} =
+          Bandit.start_link(
+            plug: {AuthCapture, %{owner: self(), reply: reply}},
+            port: 0,
+            ip: {127, 0, 0, 1}
+          )
+
+        {:ok, {_, port}} = ThousandIsland.listener_info(pid)
+
+        opts =
+          [backend: cc["backend"], base_url: "http://127.0.0.1:#{port}/v1", retries: 0]
+          |> then(
+            &if(cc["backend"] == "custom", do: [{:supports, %{images: false}} | &1], else: &1)
+          )
+          |> then(&if(cc["apiKeyEnv"], do: [{:api_key_env, cc["apiKeyEnv"]} | &1], else: &1))
+          |> then(&if(cc["headers"], do: [{:headers, cc["headers"]} | &1], else: &1))
+
+        {:ok, c} = Classifier.create(opts)
+        assert {:ok, _} = Classifier.evaluate(c, "x", qs), cc["name"]
+        assert_received {:auth, got}
+
+        want = if cc["expectAuthorization"], do: [cc["expectAuthorization"]], else: []
+        assert got == want, cc["name"]
+        refute_received {:auth, _}
+        Process.exit(pid, :normal)
+      after
+        for {k, v} <- saved, do: if(v, do: System.put_env(k, v), else: System.delete_env(k))
+      end
+    end
+  end
 end

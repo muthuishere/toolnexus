@@ -104,11 +104,34 @@ export const CLASSIFIER_BACKENDS: Readonly<Record<ClassifierBackend, Readonly<Cl
   custom: {
     baseUrl: "",
     model: DEFAULT_CLASSIFIER_MODEL,
-    apiKeyEnv: DEFAULT_CLASSIFIER_API_KEY_ENV,
+    apiKeyEnv: "",
     wire: "systemone",
     imagesHeader: true,
   },
 })
+
+/**
+ * The env var whose key may be sent to `baseUrl` (already `${NAME}`-expanded): the backend's own
+ * variable, and only when `baseUrl` is that backend's own host over https (OpenRouter also its
+ * subdomains). `""` when none may — `custom` has no preset key at all. A key is never sent to a
+ * host the caller did not name (#155, SPEC §8B).
+ */
+export function classifierKeyEnv(backend: ClassifierBackend, baseUrl: string): string {
+  const p = Object.prototype.hasOwnProperty.call(CLASSIFIER_BACKENDS, backend) ? CLASSIFIER_BACKENDS[backend] : undefined
+  if (!p || !p.apiKeyEnv || !p.baseUrl) return ""
+  const hostOf = (u: string): string => {
+    try {
+      const url = new URL(u)
+      return url.protocol === "https:" ? url.hostname.toLowerCase() : ""
+    } catch {
+      return ""
+    }
+  }
+  const h = hostOf(baseUrl)
+  const own = hostOf(p.baseUrl)
+  if (!h || !own) return ""
+  return h === own || (backend === "openrouter" && h.endsWith(".openrouter.ai")) ? p.apiKeyEnv : ""
+}
 
 /**
  * Raised BEFORE any network call when the backend table says the backend cannot take what the
@@ -650,6 +673,9 @@ export class Classifier {
   private readonly baseUrl: string
   private readonly model: string
   private readonly apiKeyEnv: string
+  /** The caller NAMED apiKeyEnv: sent wherever baseUrl points. Otherwise the preset's own key,
+   * and only to its own host (classifierKeyEnv, #155). */
+  private readonly explicitKeyEnv: boolean
   private readonly timeoutMs: number
   private readonly backend: ClassifierBackend
   private readonly preset: Readonly<ClassifierBackendPreset>
@@ -675,6 +701,7 @@ export class Classifier {
     this.baseUrl = opts.baseUrl || preset.baseUrl
     this.model = opts.model ?? preset.model
     this.apiKeyEnv = opts.apiKeyEnv ?? preset.apiKeyEnv
+    this.explicitKeyEnv = opts.apiKeyEnv !== undefined
     const mismatch = backendMismatch(this.baseUrl, this.model)
     if (mismatch) throw new Error(mismatch)
     this.timeoutMs = opts.timeoutMs ?? DEFAULT_CLASSIFIER_TIMEOUT_MS
@@ -1019,7 +1046,7 @@ export class Classifier {
       try {
         res = await doFetch(url, {
           method: "POST",
-          headers: this.requestHeaders(extraHeaders),
+          headers: this.requestHeaders(extraHeaders, url),
           body: payload,
           signal: timer.signal,
         })
@@ -1049,9 +1076,10 @@ export class Classifier {
   }
 
   /** Credential and `${ENV_VAR}` headers resolve AT CALL TIME. Never logged, never returned. */
-  private requestHeaders(extra: Record<string, string> = {}): Record<string, string> {
+  private requestHeaders(extra: Record<string, string>, url: string): Record<string, string> {
     const headers: Record<string, string> = { "Content-Type": "application/json" }
-    const key = process.env[this.apiKeyEnv]
+    const keyEnv = this.explicitKeyEnv ? this.apiKeyEnv : classifierKeyEnv(this.backend, url)
+    const key = keyEnv ? process.env[keyEnv] : undefined
     if (key) headers["Authorization"] = `Bearer ${key}`
     // The image opt-in header goes BEFORE host headers, which win.
     for (const [k, v] of Object.entries(extra)) headers[k] = v
@@ -1341,10 +1369,27 @@ function imageSize(format: string, b: Uint8Array): [number, number] | undefined 
   return undefined
 }
 
-/** The System One reply inside a Cloudflare `/ai/run` envelope. Its error list is never echoed. */
+/**
+ * `: <code> <message>` from errors[0] of a failed envelope (SPEC §8B), through the same redaction
+ * and cap as cause(). Cloudflare reports a missing balance, a bad model id and a malformed
+ * request alike as HTTP 200 + success:false, so this is the only thing that tells them apart.
+ * `""` when there is nothing to show.
+ */
+function cloudflareCause(env: unknown): string {
+  const errs = env !== null && typeof env === "object" ? (env as any).errors : undefined
+  const e0 = Array.isArray(errs) ? errs[0] : undefined
+  if (e0 === null || typeof e0 !== "object") return ""
+  const parts: string[] = []
+  if ((typeof e0.code === "number" || typeof e0.code === "string") && String(e0.code) !== "") parts.push(String(e0.code))
+  if (typeof e0.message === "string" && e0.message !== "") parts.push(e0.message)
+  const s = capErrorBody(redactErrorBody(parts.join(" ")))
+  return s ? ": " + s : ""
+}
+
+/** The System One reply inside a Cloudflare `/ai/run` envelope. Only errors[0] is ever echoed. */
 function unwrapCloudflare(env: unknown): unknown {
   if (env === null || typeof env !== "object" || Array.isArray(env) || (env as any).success !== true) {
-    throw new Error("classifier: cloudflare: envelope not successful")
+    throw new Error("classifier: cloudflare: envelope not successful" + cloudflareCause(env))
   }
   let result = (env as any).result
   if (result !== null && typeof result === "object" && !Array.isArray(result) && typeof result.state === "string") {

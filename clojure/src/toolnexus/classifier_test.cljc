@@ -834,6 +834,35 @@
               (is (= (get want "model") (:model d)))
               (is (== (get want "noul") (:noul (jev/noul d "q")))))))))))
 
+(deftest key-routing-fixture
+  ;; #155: an env-default key goes only to the preset's own host. The suite cannot
+  ;; set an env var in-process, so each case's `env` is served through the
+  ;; classifier's :get-env seam; every request's Authorization is asserted.
+  (let [f  (fixture "backends/key-routing")
+        qs (->questions f)]
+    (doseq [cs (get f "captureCases")]
+      (testing (get cs "name")
+        (let [backend (get cs "backend")
+              envm    (get cs "env")
+              {:keys [calls http]} (fake-http (fn [_ _]
+                                                [200 (if (= "cloudflare" backend)
+                                                       (str "{\"success\":true,\"result\":" noul-reply "}")
+                                                       noul-reply)]))
+              c   (jev/create-classifier
+                   (cond-> {:backend backend :http-client http :retries 0
+                            :base-url "http://127.0.0.1:9/v1"
+                            :get-env (fn [k] (get envm k))}
+                     (= "custom" backend)  (assoc :supports {:images false})
+                     (get cs "apiKeyEnv")  (assoc :api-key-env (get cs "apiKeyEnv"))
+                     (get cs "headers")    (assoc :headers (get cs "headers"))))]
+          (jev/evaluate c "x" qs)
+          (is (seq @calls))
+          (doseq [call @calls]
+            (is (= (get cs "expectAuthorization") (get (:headers call) "authorization")))))))
+    (doseq [cs (get f "hostCases")]
+      (is (= (get cs "expectKeyEnv") (jev/key-env-for-backend (get cs "backend") (get cs "baseUrl")))
+          (str (get cs "backend") " " (get cs "baseUrl"))))))
+
 (deftest cache-keys-fixture
   (doseq [cs (get (fixture "backends/cache-keys") "cases")]
     (testing (get cs "name")

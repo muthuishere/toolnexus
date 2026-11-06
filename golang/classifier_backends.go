@@ -85,7 +85,27 @@ var ClassifierBackends = map[ClassifierBackend]ClassifierBackendPreset{
 		func(m string) ClassifierSupports { return ClassifierSupports{Images: strings.Contains(m, "clef")} }},
 	BackendVercel: {"https://ai-gateway.vercel.sh/typesafe/v1", "typesafe-ai/jev", "AI_GATEWAY_API_KEY",
 		ClassifierWireSystemOne, true, func(string) ClassifierSupports { return ClassifierSupports{} }},
-	BackendCustom: {"", DefaultClassifierModel, DefaultClassifierAPIKeyEnv, ClassifierWireSystemOne, true, nil},
+	BackendCustom: {"", DefaultClassifierModel, "", ClassifierWireSystemOne, true, nil},
+}
+
+// classifierKeyEnv names the env var whose key may be sent to baseURL (already
+// ${NAME}-expanded): the backend's own variable, and only when baseURL is that
+// backend's own host over https (OpenRouter also its subdomains, as in the §8
+// client). "" when none may — custom has no preset key at all. A key is never
+// sent to a host the caller did not name (#155, SPEC §8B).
+func classifierKeyEnv(backend ClassifierBackend, baseURL string) string {
+	p, ok := ClassifierBackends[backend]
+	if !ok || p.APIKeyEnv == "" || p.BaseURL == "" {
+		return ""
+	}
+	h, own := hostOf(baseURL), hostOf(p.BaseURL)
+	if h == "" || own == "" {
+		return ""
+	}
+	if h == own || (backend == BackendOpenRouter && strings.HasSuffix(h, ".openrouter.ai")) {
+		return p.APIKeyEnv
+	}
+	return ""
 }
 
 // ErrClassifierUnsupported is returned BEFORE any network call when the
@@ -743,6 +763,33 @@ func (c *Classifier) wireBody(p preparedRequest, questions map[string]Question) 
 	return canonicalJSON(b)
 }
 
+// cloudflareCause renders errors[0] of a failed envelope as ": <code> <message>"
+// (SPEC §8B), through the same redaction and cap as cause(). Cloudflare reports
+// a missing balance, a bad model id and a malformed request alike as HTTP 200
+// with success:false, so this is the only thing that tells them apart. "" when
+// there is nothing to show.
+func cloudflareCause(raw json.RawMessage) string {
+	var errs []struct {
+		Code    json.RawMessage `json:"code"`
+		Message string          `json:"message"`
+	}
+	if json.Unmarshal(raw, &errs) != nil || len(errs) == 0 {
+		return ""
+	}
+	var parts []string
+	if code := strings.Trim(string(errs[0].Code), `" `); code != "" && code != "null" {
+		parts = append(parts, code)
+	}
+	if errs[0].Message != "" {
+		parts = append(parts, errs[0].Message)
+	}
+	s := capBody(RedactProviderBody(200, strings.Join(parts, " ")))
+	if s == "" {
+		return ""
+	}
+	return ": " + s
+}
+
 // unwrapCloudflare returns the System One reply inside a Cloudflare envelope.
 func unwrapCloudflare(body []byte) ([]byte, error) {
 	var env map[string]json.RawMessage
@@ -751,7 +798,7 @@ func unwrapCloudflare(body []byte) ([]byte, error) {
 	}
 	var ok bool
 	if json.Unmarshal(env["success"], &ok) != nil || !ok {
-		return nil, errors.New("classifier: cloudflare: envelope not successful")
+		return nil, errors.New("classifier: cloudflare: envelope not successful" + cloudflareCause(env["errors"]))
 	}
 	res := env["result"]
 	var inner map[string]json.RawMessage

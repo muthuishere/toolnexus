@@ -108,6 +108,7 @@ class ClassifierBackendsTest {
     private final List<String> paths = Collections.synchronizedList(new ArrayList<>());
     private final List<String> bodies = Collections.synchronizedList(new ArrayList<>());
     private final List<String> imageHeaders = Collections.synchronizedList(new ArrayList<>());
+    private final List<String> authHeaders = Collections.synchronizedList(new ArrayList<>());
 
     private String start(BiFunction<Integer, String, Object[]> reply) throws IOException {
         server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
@@ -119,6 +120,7 @@ class ClassifierBackendsTest {
                 paths.add(ex.getRequestURI().getPath());
                 bodies.add(b);
                 imageHeaders.add(ex.getRequestHeaders().getFirst(Classifier.IMAGES_HEADER));
+                authHeaders.add(ex.getRequestHeaders().getFirst("Authorization"));
                 n = bodies.size();
             }
             Object[] r = reply.apply(n, b);
@@ -285,6 +287,52 @@ class ClassifierBackendsTest {
         assertFalse(e.getMessage().contains("secretacct"), e.getMessage());
         assertTrue(e.getMessage().contains("${TN_TEST_ACCOUNT}"), e.getMessage());
         assertEquals("/accounts/secretacct/ai/run", paths.get(0));
+    }
+
+    // ------------------------------------------------------------------ key routing (#155)
+
+    /** A preset's env key is never sent to a host that is not its own; an explicit apiKeyEnv or
+     * header still goes where the caller says. */
+    @Test
+    void keyRoutingFixture() throws IOException {
+        JsonNode fx = fixture("key-routing.json");
+        Map<String, Classifier.Question> qs = questions(fx.get("questions"));
+        for (JsonNode c : fx.get("captureCases")) {
+            String name = c.get("name").asText();
+            String backend = c.get("backend").asText();
+            boolean cf = "cloudflare".equals(backend);
+            authHeaders.clear();
+            Map<String, String> envMap = new java.util.HashMap<>();
+            c.path("env").fields().forEachRemaining(e -> envMap.put(e.getKey(), e.getValue().asText()));
+            String base = start((n, b) -> new Object[]{200,
+                    cf ? "{\"success\":true,\"result\":" + NOUL_REPLY + "}" : NOUL_REPLY});
+            try {
+                Classifier.Options o = new Classifier.Options().backend(backend).baseUrl(base + "/v1")
+                        .retries(1).env(envMap::get);
+                if (c.has("apiKeyEnv")) o.apiKeyEnv(c.get("apiKeyEnv").asText());
+                if (c.has("headers")) {
+                    Map<String, String> h = new LinkedHashMap<>();
+                    c.get("headers").fields().forEachRemaining(e -> h.put(e.getKey(), e.getValue().asText()));
+                    o.headers(h);
+                }
+                if ("custom".equals(backend)) o.supports(new Classifier.Supports(false));
+                Classifier.create(o).evaluate("x", qs);
+                assertFalse(authHeaders.isEmpty(), name + ": no request reached the capture server");
+                JsonNode want = c.get("expectAuthorization");
+                for (String got : authHeaders) {
+                    if (want.isNull()) assertNull(got, name + ": a key was sent to a host that is not its own");
+                    else assertEquals(want.asText(), got, name);
+                }
+            } finally {
+                stop();
+                server = null;
+            }
+        }
+        for (JsonNode c : fx.get("hostCases")) {
+            assertEquals(c.get("expectKeyEnv").asText(),
+                    ClassifierBackends.keyEnv(c.get("backend").asText(), c.get("baseUrl").asText()),
+                    c.get("backend").asText() + " " + c.get("baseUrl").asText());
+        }
     }
 
     // ------------------------------------------------------------------ cache keys

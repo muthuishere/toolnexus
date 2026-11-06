@@ -140,7 +140,7 @@ public final class Classifier {
                 "CLOUDFLARE_JEV_API_KEY", WIRE_CLOUDFLARE, false, m -> new Supports(m != null && m.contains("clef"))));
         t.put(BACKEND_VERCEL, new BackendPreset("https://ai-gateway.vercel.sh/typesafe/v1", "typesafe-ai/jev",
                 "AI_GATEWAY_API_KEY", WIRE_SYSTEMONE, true, m -> new Supports(false)));
-        t.put(BACKEND_CUSTOM, new BackendPreset(null, DEFAULT_MODEL, DEFAULT_API_KEY_ENV,
+        t.put(BACKEND_CUSTOM, new BackendPreset(null, DEFAULT_MODEL, "",
                 WIRE_SYSTEMONE, true, null));
         BACKENDS = java.util.Collections.unmodifiableMap(t);
     }
@@ -727,6 +727,9 @@ public final class Classifier {
     private final String baseUrl;
     private final String model;
     private final String apiKeyEnv;
+    /** The caller NAMED {@code apiKeyEnv}: sent wherever baseUrl points. Otherwise the preset's
+     * own variable goes only to the preset's own host (#155). */
+    private final boolean explicitKeyEnv;
     private final long timeoutMs;
     private final int retries;
     private final long retryBaseMs;
@@ -752,6 +755,7 @@ public final class Classifier {
         }
         this.baseUrl = opts.baseUrl != null ? opts.baseUrl : (preset.baseUrl() == null ? "" : preset.baseUrl());
         this.model = opts.model != null ? opts.model : preset.model();
+        this.explicitKeyEnv = opts.apiKeyEnv != null && !opts.apiKeyEnv.isEmpty();
         this.apiKeyEnv = opts.apiKeyEnv != null ? opts.apiKeyEnv : preset.apiKeyEnv();
         this.supports = opts.supports != null ? opts.supports
                 : preset.supports() != null ? preset.supports().apply(this.model) : new Supports(false);
@@ -1335,7 +1339,10 @@ public final class Classifier {
                         .header("Content-Type", "application/json")
                         .POST(HttpRequest.BodyPublishers.ofString(payload, StandardCharsets.UTF_8));
                 // Read at call time. Never logged, never returned, never in an error.
-                String key = env.apply(apiKeyEnv);
+                // An explicit apiKeyEnv goes where the caller says; the preset's own variable
+                // only to the preset's own host (#155).
+                String keyEnv = explicitKeyEnv ? apiKeyEnv : ClassifierBackends.keyEnv(backend, url);
+                String key = keyEnv.isEmpty() ? null : env.apply(keyEnv);
                 if (key != null && !key.isEmpty()) rb.header("Authorization", "Bearer " + key);
                 for (Map.Entry<String, String> e : extraHeaders.entrySet()) {
                     if (!hostHeader(e.getKey())) rb.header(e.getKey(), e.getValue()); // host headers win
@@ -1395,6 +1402,26 @@ public final class Classifier {
     /** Keep an expanded {@code ${ENV}} URL (an account id) out of a transport error. */
     private static String redact(String text, String url, String endpoint) {
         return url.equals(endpoint) ? text : text.replace(url, endpoint);
+    }
+
+    /** {@code ": <code> <message>"} from errors[0] of a failed Cloudflare envelope, through the
+     * same redaction and cap as {@link #cause}; "" when there is nothing to show. */
+    static String cloudflareCause(Object errors) {
+        if (!(errors instanceof List<?> l) || l.isEmpty() || !(l.get(0) instanceof Map<?, ?> e)) return "";
+        StringBuilder sb = new StringBuilder();
+        Object code = e.get("code");
+        if (code instanceof Number n) {
+            sb.append(n instanceof Double || n instanceof Float
+                    ? (n.doubleValue() == Math.rint(n.doubleValue()) ? String.valueOf(n.longValue()) : n.toString())
+                    : n.toString());
+        } else if (code instanceof String cs) {
+            sb.append(cs);
+        }
+        if (e.get("message") instanceof String m && !m.isEmpty()) {
+            if (sb.length() > 0) sb.append(' ');
+            sb.append(m);
+        }
+        return cause(200, sb.toString());
     }
 
     private static String cause(int status, String body) {
