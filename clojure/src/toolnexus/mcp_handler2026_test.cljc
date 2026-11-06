@@ -194,6 +194,25 @@
       (is (str/includes? (:body (http/request {:method :get :url (str (:issuer as) "/authorize?client_id=app")})) "location.search"))
       (finally ((:close as)) (server/stop! srv) (server/stop! cimd)))))
 
+(deftest dev-auth-server-get-authorize-with-query
+  ;; interop contract (interop/mcp2026/README.md): `openUrl` is a plain HTTP GET
+  ;; of the authorize URL. A listener that passes :query-string (the :serve
+  ;; option) makes GET /authorize?… answer the 302 itself, as Go's dev AS does.
+  (let [h  (atom nil)
+        as (da/start-mcp-dev-auth-server {:clients {"app" ["http://127.0.0.1/cb"]}
+                                          :serve (fn [f] (reset! h f) {:port 1 :stop (fn [])})})
+        q  (crypto/form-encode {"response_type" "code" "client_id" "app" "redirect_uri" "http://127.0.0.1:5/cb"
+                                "state" "s1" "code_challenge" "x" "code_challenge_method" "S256"
+                                "resource" "http://127.0.0.1:9/mcp"})
+        r  (@h {:method :get :path "/authorize" :query-string q :headers {} :body ""})]
+    (is (= "http://127.0.0.1:1" (:issuer as)))
+    (is (= 302 (:status r)))
+    (is (str/starts-with? (get-in r [:headers "Location"]) "http://127.0.0.1:5/cb?code="))
+    (is (str/includes? (get-in r [:headers "Location"]) "state=s1"))
+    ;; no query ⇒ still the page
+    (is (= 200 (:status (@h {:method :get :path "/authorize" :headers {} :body ""}))))
+    ((:close as))))
+
 (deftest dev-auth-server-confidential-client
   (let [as (da/start-mcp-dev-auth-server {:clients {"conf" ["http://127.0.0.1/cb"]} :secrets {"conf" "s3cret"}
                                           :reject-refresh-resource true})]

@@ -923,3 +923,15 @@ def test_mcp_elicitation_maps_to_section10_request_and_answer():
     assert answer_to_elicit_result(
         Answer(id="1", ok=False, reason="expired")
     ).action == "cancel"
+
+
+def test_mcp_structured_content_output_is_compact_json_stringify():
+    """SPEC §2: structuredContent ⇒ JSON.stringify — no spaces after ``,``/``:`` and
+    non-ASCII kept, so the output is byte-identical to the other ports (interop discover)."""
+    from mcp.types import CallToolResult
+
+    from toolnexus.mcp_source import _map_call_result
+
+    r = _map_call_result("srv", CallToolResult(content=[], structuredContent={"text": "hi", "n": [1, 2], "u": "é"}))
+    assert not r.is_error
+    assert r.output == '{"text":"hi","n":[1,2],"u":"é"}'

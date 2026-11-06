@@ -798,7 +798,15 @@ public final class McpSource implements AutoCloseable {
             }
         }
         try {
-            HttpClientStreamableHttpTransport.Builder b = HttpClientStreamableHttpTransport.builder(url)
+            // The SDK resolves a fixed endpoint (default "/mcp") against its base URI, so a server URL
+            // whose path is not exactly "/mcp" (e.g. ".../legacy/mcp") would be silently posted to
+            // "<origin>/mcp". Split the configured URL so every request goes to exactly that URL.
+            URI u = URI.create(url);
+            String endpoint = (u.getRawPath() == null || u.getRawPath().isEmpty() ? "/" : u.getRawPath())
+                    + (u.getRawQuery() == null ? "" : "?" + u.getRawQuery());
+            HttpClientStreamableHttpTransport.Builder b = HttpClientStreamableHttpTransport
+                    .builder(u.getScheme() + "://" + u.getRawAuthority())
+                    .endpoint(endpoint)
                     .requestBuilder(reqBuilder)
                     .jsonMapper(JSON_MAPPER);
             if (auth != null) {

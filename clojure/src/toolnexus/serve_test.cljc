@@ -22,6 +22,7 @@
             [koine.json :as json]
             [koine.time :as time]
             [toolnexus.serve :as serve]
+            [toolnexus.shared-examples-test :as te]
             [toolnexus.tool :as tool]))
 
 ;; ---------------------------------------------------------------------------
@@ -464,3 +465,23 @@
         (is (= ["submitted" "working" "completed"] @saved)
             "every Task read/write goes through the store"))
       (finally (serve/stop! h)))))
+
+;; ---------------------------------------------------------------------------
+;; conformance/serve_mcp/cases.json — the shared §7C serve wire, all 8 ports
+;; ---------------------------------------------------------------------------
+
+(deftest serve-mcp-conformance-cases
+  (let [doc (json/read-str (fs/read-file (str (te/examples-dir) "/../conformance/serve_mcp/cases.json"))
+                           {:key-fn str})]
+    (doseq [c (get doc "cases")]
+      (testing (get c "name")
+        (let [rq  (get c "request")
+              res (http/request {:method  (keyword (str/lower-case (get rq "method")))
+                                 :url     (str (url :s4) (get rq "path"))
+                                 :headers (get rq "headers" {})})
+              hdr (fn [k] (some (fn [[hk v]] (when (= (str/lower-case (name hk)) (str/lower-case k)) v))
+                                (:headers res)))]
+          (is (not (http/failed? res)))
+          (is (= (get-in c ["expect" "status"]) (:status res)))
+          (doseq [[k v] (get-in c ["expect" "headers"])]
+            (is (= v (hdr k)) k)))))))

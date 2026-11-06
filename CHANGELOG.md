@@ -43,6 +43,61 @@ Not done: the Decisions API (second wire), multipart image upload, Vercel and Cl
 images (not proven live, so refused), per-question caching, and the jevx cutover gate (ADR 0038
 D8). Tracked in `openspec/changes/add-classifier-backends`.
 
+**Docs: the in-process client recipes now cover all eight ports and use the 0.25.0 ACP seam.** The
+ACP agent recipe is now one short file per language on `toolkit.asMcpServer()` + the ACP client
+(`loadACP` / `load_acp` / `LoadACP` / `AcpClient.start` / `AcpClient.StartAsync` /
+`Toolnexus.Acp.connect` / `toolnexus.acp/connect` / `AcpClient::load`) + a streaming
+`createInProcessClient`, instead of a hand-written JSON-RPC driver; the toolkit is reached with a
+bearer token instead of an open port. Every recipe (overview, `asMcpServer`, ACP agent, one-shot
+CLI, and a new "Extend it" recipe with isolation `_meta`, `model` passthrough and an allow-only
+`onPermission` policy) now has JavaScript, Python, Go, Java, C#, Elixir, Clojure and Rust tabs.
+The tabs are generated from the files that were run (`site/recipes/in-process-client/`, synced by
+`site/scripts/sync-recipes.mjs`, `--check` fails on drift), each run on 0.25.0 against a bundled fake
+ACP agent and fake CLI, and the ACP recipe live against `@agentclientprotocol/claude-agent-acp@0.100.0`
+in JavaScript, Python, Go, Java, C# and Rust. The pages also document the per-port default turn
+timeouts (Python 5 s, Java and C# 10 s, others 30 s), which are too short for a real agent; the
+recipes set 300 s. The Java and C# README "Agents via ACP" snippets now compile (missing
+`acp` package import / `using Toolnexus.Acp;`; Java also needed the checked `IOException` wrapped
+and a turn timeout). Not done: Elixir and Clojure were verified against the fake agent only, not live.
+
+- **MCP 2026-07-28 interop matrix: every port's client against every port's server.** `interop/mcp2026/matrix.sh` builds a small client runner and server runner per port (js, python, golang, java, csharp, elixir, clojure, rust) that speak one shared 11-scenario list (discover, MRTR input/confirm/pending, skills, tool search, OAuth with a pre-registered id, scope step-up, CIMD, no-identity error, legacy fallback) against each port's test-only dev authorization server. 64/64 pairs pass; a new CI job runs it hermetically. `interop/mcp2026/keycloak.sh` (`KEYCLOAK=1`, docker, local only) runs the OAuth login and step-up for all eight clients against a real Keycloak 26.8.1; it never runs in CI. Contract: `interop/mcp2026/README.md`. This replaces the Go-only `run.sh`.
+- **fix(python):** a remote MCP tool result carrying `structuredContent` was rendered with `json.dumps` defaults (`{"text": "hi"}`, non-ASCII escaped), where SPEC section 2 requires `JSON.stringify` (`{"text":"hi"}`). It now matches the other ports, on both the 2026 and fallback paths.
+- **fix(java):** the pre-2026 fallback posted to `<origin>/mcp` whatever the configured URL, so a remote server mounted at any other path (for example `/legacy/mcp`) could never be reached once discovery fell back. It now uses the configured path. The SSE transport builds its URL the same way and is probably affected; not changed here.
+
+**Not done:** live GitHub login and tool call per port (needs an interactive browser consent on the OAuth App, owner-run). Clojure's loopback callback and dev authorization server cannot answer a bare GET with a query string (koine does not expose it), so the Clojure runner performs that step itself. Tracked in `openspec/changes/upgrade-mcp-2026-07-28`.
+
+**Fixed: `GET /mcp` on `toolkit.serve` is refused with 405 and `Allow: POST` in every port.** The
+serve MCP profile is stateless and has no server-initiated SSE stream, but Go and JavaScript passed a
+`GET` to their SDK, which answered `200`, and Clojure answered it as a JSON-RPC call (`200` with an
+error body). Python, Java, C#, Elixir and Rust already
+answered 405; Java, C# and Elixir did so without the `Allow: POST` header the status requires, now
+added. The rule is pinned in `SPEC.md §7C` and in a new shared case file,
+`conformance/serve_mcp/cases.json`, which all eight suites replay, so the next drift fails a test
+instead of hanging a client. `POST /mcp` behaviour is unchanged.
+
+**Docs: removed the stale "Python serve gap" warnings** from the In-process client overview and the
+ACP agent recipe. Both gaps (`mcp={}` exposing no tools, `GET /mcp` hanging) were fixed in 0.25.0
+by #147; the Python serve snippet now uses `mcp={}` and was re-run (tools listed, `add` called,
+`GET /mcp` ⇒ 405). Not done: the live Claude ACP adapter run in Python has not been repeated.
+
+**Tests: six timing-flaky tests made deterministic (test-only, no behaviour change).** JS media
+conformance `async_timeout`: a poll aborted at the deadline could reach the fake server late and
+shift the next pass's script; the fake now drops requests from closed connections. C#
+`LoadMcpOnServerReportsFastServerFirst` and Elixir "MCP on_server reports the fast server first": the
+slow server raced a `sleep 1`; it now waits for a gate file `on_server` writes after reporting the fast
+one. C# `ShortGraceKillsTermIgnoringJobAndDescendantFast` could read a half-written pid line; it now
+waits for complete lines (its bound was also widened 1000→1500 ms, still under the 2000 ms grace).
+Python `test_idle_timeout_progress_extends_call` now has a 40x margin between progress ticks and the
+idle budget. Each passed 20/20 runs under parallel load. Java `CliClientTest` is not on main (only on
+the unmerged `feat/cli-acp-client` branch), so nothing changed there.
+
+**Go: one name for the MCP 2026-07-28 version constant.** 0.25.0 shipped the same string twice,
+`McpProtocolVersion` (client, #142) and `MCPProtocol2026` (handler, #143). `MCPProtocol2026` is the
+canonical name; `McpProtocolVersion` stays as a `// Deprecated:` alias of it, so nothing breaks. golang
+only: no other port exports two names for it in the same namespace (Python, Java, Rust and Clojure
+keep a client-wire constant in their MCP client module beside the handler's, which is module scoping,
+not a duplicate public name; JS and C# keep the client one internal; Elixir's are private).
+
 ## 0.25.0 — 2026-11-06
 
 **Docs: an "In-process client" section with copy-pasteable recipes for driving coding agents and
@@ -57,8 +112,7 @@ over `configOptions`, permission policies). Recipes are JavaScript, Python and G
 a fake agent/CLI and live against Claude Code; per-agent isolation and model notes are labelled
 with the version and date they were verified on. The section is also published as plain markdown
 for agents at `/_llms-txt/in-process-client.txt` (listed in `llms.txt`). The research behind the
-notes is in `docs/references/acp-agent-isolation-2026-11-05.md`. Not done: recipes for the
-Java, C#, Elixir, Clojure and Rust ports; two Python serve gaps found while verifying are
+notes is in `docs/references/acp-agent-isolation-2026-11-05.md`. Not done: two Python serve gaps found while verifying are
 documented, not fixed (`mcp={}` exposes no tools; `GET /mcp` gets no response, which hangs the
 Claude ACP adapter).
 

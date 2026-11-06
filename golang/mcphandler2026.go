@@ -34,6 +34,9 @@ import (
 
 // MCP 2026-07-28 wire constants (SPEC §2.1).
 const (
+	// MCPProtocol2026 is the MCP 2026-07-28 wire version, used by both the client
+	// (§2.1) and the handler (§7C.2). The canonical name; McpProtocolVersion is a
+	// deprecated alias of it.
 	MCPProtocol2026 = "2026-07-28"
 	// mcpMetaVersion, mcpMetaClientCaps, mcpMetaServerInfo: shared with the client, see mcp2026.go.
 	MCPSkillsExtension  = "io.modelcontextprotocol/skills"

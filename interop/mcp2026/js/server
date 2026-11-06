@@ -1,0 +1,2 @@
+#!/usr/bin/env bash
+ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"; exec node --experimental-strip-types --no-warnings "$ROOT/js/interop/mcp2026/server.ts" "$@"

@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Build the C# interop runners (csharp/tests/Mcp2026Interop, test tooling, not packed) into $OUT.
+set -euo pipefail
+ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"; OUT="$ROOT/interop/mcp2026/.build/csharp"; mkdir -p "$OUT"
+dotnet build "$ROOT/csharp/tests/Mcp2026Interop/Mcp2026Interop.csproj" -c Release -o "$OUT" --nologo -v q

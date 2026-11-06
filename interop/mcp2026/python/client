@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
+exec "$ROOT/interop/mcp2026/.build/python/venv/bin/python" "$ROOT/python/interop/mcp2026/client.py" "$@"
