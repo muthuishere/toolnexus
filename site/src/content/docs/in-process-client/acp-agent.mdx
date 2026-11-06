@@ -225,7 +225,7 @@ def add(a: float, b: float) -> str:
 async def main():
     # 1. Serve YOUR toolkit as an MCP server the agent can reach.
     toolkit = await create_toolkit(builtins=False, extra_tools=[define_tool(add, name="add")])
-    server = await toolkit.serve("127.0.0.1:0", mcp={"name": "toolnexus"}, on_call=lambda e: print("[tool]", e["name"]))
+    server = await toolkit.serve("127.0.0.1:0", mcp={}, on_call=lambda e: print("[tool]", e["name"]))
 
     # 2. Start the agent with that server in session/new.mcpServers.
     client, close = await acp_client(
@@ -245,12 +245,6 @@ async def main():
 asyncio.run(main())
 ```
 
-<Aside type="caution" title="Python serve gap">
-The driver above works against any MCP server. Python's own `toolkit.serve` MCP endpoint does not
-answer `GET /mcp` today, and the Claude ACP adapter opens that stream, so with the Python serve
-it hangs at `session/new` (verified 2026-11-05 on 0.24.0). Until that is fixed, point `mcp_url`
-at a toolkit served from JavaScript or Go, or use an agent that only POSTs.
-</Aside>
 </TabItem>
 <TabItem label="Go">
 Go has `GenerateStream`, so the agent's chunks are real stream deltas through `client.Stream`.
@@ -496,7 +490,7 @@ once), or spawn it in its own process group and kill the group.
 |---|---|
 | all three recipes | run against a fake ACP agent (a 40-line Python script that answers `initialize` / `session/new`, sends a `session/request_permission`, calls `tools/list` + `tools/call` on the served MCP URL and streams two `agent_message_chunk`s) |
 | JavaScript and Go, live | `@agentclientprotocol/claude-agent-acp@0.100.0` (Claude Code 2.1.318): the agent called our `add` tool over MCP (`onCall` fired) and answered `42`; Go streamed it through `client.Stream` |
-| Python, live | blocked by the Python serve gap above; the driver itself works with a non-Python MCP server |
+| Python | against the fake ACP agent above; Python `serve` answers `GET /mcp` with 405 since 0.25.0, the gap that blocked the live run, but the live adapter run has not been repeated |
 
 ## Per-agent notes
 

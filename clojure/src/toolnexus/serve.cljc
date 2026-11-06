@@ -423,6 +423,12 @@
                       (and a2a (= path "/"))
                       (json-res (guarded #(a2a-rpc st run-fn on-task (:body req))))
 
+                      ;; stateless: no server-initiated stream exists, so only POST
+                      ;; is served; anything else is refused at once (§7C).
+                      (and mcp (= path "/mcp") (not= :post (:method req)))
+                      {:status 405 :headers {"content-type" "text/plain" "allow" "POST"}
+                       :body "Method Not Allowed"}
+
                       (and mcp (= path "/mcp"))
                       (json-res (guarded #(mcp-rpc tk mcp on-call (:body req))))
 

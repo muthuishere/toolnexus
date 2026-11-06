@@ -408,6 +408,8 @@ public static class A2AServer
     {
         if (ctx.Request.HttpMethod != "POST")
         {
+            // Stateless: no server-initiated SSE stream exists, so only POST is served (§7C).
+            ctx.Response.AddHeader("Allow", "POST");
             Respond(ctx, 405, "method not allowed", "text/plain");
             return;
         }

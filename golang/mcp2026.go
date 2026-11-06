@@ -27,7 +27,10 @@ import (
 
 // Wire constants (§2.1, byte-exact).
 const (
-	McpProtocolVersion = "2026-07-28"
+	// McpProtocolVersion is the MCP 2026-07-28 wire version.
+	//
+	// Deprecated: use MCPProtocol2026, the same value under the canonical name.
+	McpProtocolVersion = MCPProtocol2026
 	mcpMetaVersion     = "io.modelcontextprotocol/protocolVersion"
 	mcpMetaClientCaps  = "io.modelcontextprotocol/clientCapabilities"
 	mcpMetaClientInfo  = "io.modelcontextprotocol/clientInfo"
@@ -104,7 +107,7 @@ var mcp26HTTP = &http.Client{} // deadlines come from the per-request context
 
 func mcpClientMeta() jsonObj {
 	return jsonObj{
-		mcpMetaVersion:    McpProtocolVersion,
+		mcpMetaVersion:    MCPProtocol2026,
 		mcpMetaClientCaps: jsonObj{"elicitation": jsonObj{"form": jsonObj{}}},
 		mcpMetaClientInfo: jsonObj{"name": "toolnexus", "version": "0.1.0"},
 	}
@@ -218,7 +221,7 @@ func (c *mcp26Client) post(ctx context.Context, method string, params jsonObj, b
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json, text/event-stream")
-	req.Header.Set("MCP-Protocol-Version", McpProtocolVersion)
+	req.Header.Set("MCP-Protocol-Version", MCPProtocol2026)
 	req.Header.Set("Mcp-Method", method)
 	switch method {
 	case "tools/call", "prompts/get":
@@ -420,7 +423,7 @@ func (c *mcp26Client) discover(ctx context.Context) (*mcp26Discovery, error) {
 		return nil, err
 	}
 	versions, _ := res["supportedVersions"].([]any)
-	if !slices.Contains(versions, any(McpProtocolVersion)) {
+	if !slices.Contains(versions, any(MCPProtocol2026)) {
 		return nil, errMcpNotRPC // treated as fallback
 	}
 	d := &mcp26Discovery{}

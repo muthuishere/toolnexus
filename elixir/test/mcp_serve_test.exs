@@ -220,6 +220,32 @@ defmodule Toolnexus.McpServeTest do
     assert resp.status == 405
   end
 
+  test "conformance/serve_mcp/cases.json (shared §7C serve wire, all 8 ports)" do
+    path = Path.expand("../../conformance/serve_mcp/cases.json", __DIR__)
+    %{"cases" => cases} = path |> File.read!() |> Jason.decode!()
+    handle = serve!(toolkit(), mcp: %{})
+
+    for c <- cases do
+      rq = c["request"]
+
+      resp =
+        Req.request!(
+          method: rq["method"] |> String.downcase() |> String.to_atom(),
+          url: handle.url <> rq["path"],
+          headers: Map.to_list(rq["headers"] || %{}),
+          retry: false,
+          decode_body: false,
+          receive_timeout: 5_000
+        )
+
+      assert resp.status == c["expect"]["status"], c["name"]
+
+      for {k, v} <- c["expect"]["headers"] || %{} do
+        assert Req.Response.get_header(resp, String.downcase(k)) == [v], "#{c["name"]} #{k}"
+      end
+    end
+  end
+
   test "an MCP-only server 404s every non-/mcp path" do
     tk = toolkit()
     handle = serve!(tk, mcp: %{})

@@ -32,3 +32,13 @@ of Rust's output fails it. To add a port, add a dump command for it.
 ```sh
 conformance/skills_parity/run.sh   # needs go, cargo, python3
 ```
+
+## Serve MCP profile wire (`serve_mcp/cases.json`)
+
+Pins the `toolkit.serve` MCP profile's HTTP wire (SPEC §7C) — today: `GET /mcp` ⇒ 405 with
+`Allow: POST`, answered at once. Each port starts `serve` with an `mcp` profile, sends every case's
+request over real HTTP and asserts status and the listed headers. Replayed by
+`golang/serve_mcp_conformance_test.go`, `js/test/serve-mcp-conformance.test.ts`,
+`python/tests/test_mcp_serve.py`, `java/.../ServeMcpConformanceTest.java`,
+`csharp/tests/Toolnexus.Tests/ServeMcpConformanceTests.cs`, `elixir/test/mcp_serve_test.exs`,
+`clojure/src/toolnexus/serve_test.cljc` and `rust/tests/mcp_serve.rs`.

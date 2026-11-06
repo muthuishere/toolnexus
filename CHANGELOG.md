@@ -14,6 +14,38 @@ GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
 
 **Not done:** live GitHub login and tool call per port (needs an interactive browser consent on the OAuth App, owner-run). Clojure's loopback callback and dev authorization server cannot answer a bare GET with a query string (koine does not expose it), so the Clojure runner performs that step itself. Tracked in `openspec/changes/upgrade-mcp-2026-07-28`.
 
+**Fixed: `GET /mcp` on `toolkit.serve` is refused with 405 and `Allow: POST` in every port.** The
+serve MCP profile is stateless and has no server-initiated SSE stream, but Go and JavaScript passed a
+`GET` to their SDK, which answered `200`, and Clojure answered it as a JSON-RPC call (`200` with an
+error body). Python, Java, C#, Elixir and Rust already
+answered 405; Java, C# and Elixir did so without the `Allow: POST` header the status requires, now
+added. The rule is pinned in `SPEC.md §7C` and in a new shared case file,
+`conformance/serve_mcp/cases.json`, which all eight suites replay, so the next drift fails a test
+instead of hanging a client. `POST /mcp` behaviour is unchanged.
+
+**Docs: removed the stale "Python serve gap" warnings** from the In-process client overview and the
+ACP agent recipe. Both gaps (`mcp={}` exposing no tools, `GET /mcp` hanging) were fixed in 0.25.0
+by #147; the Python serve snippet now uses `mcp={}` and was re-run (tools listed, `add` called,
+`GET /mcp` ⇒ 405). Not done: the live Claude ACP adapter run in Python has not been repeated.
+
+**Tests: six timing-flaky tests made deterministic (test-only, no behaviour change).** JS media
+conformance `async_timeout`: a poll aborted at the deadline could reach the fake server late and
+shift the next pass's script; the fake now drops requests from closed connections. C#
+`LoadMcpOnServerReportsFastServerFirst` and Elixir "MCP on_server reports the fast server first": the
+slow server raced a `sleep 1`; it now waits for a gate file `on_server` writes after reporting the fast
+one. C# `ShortGraceKillsTermIgnoringJobAndDescendantFast` could read a half-written pid line; it now
+waits for complete lines (its bound was also widened 1000→1500 ms, still under the 2000 ms grace).
+Python `test_idle_timeout_progress_extends_call` now has a 40x margin between progress ticks and the
+idle budget. Each passed 20/20 runs under parallel load. Java `CliClientTest` is not on main (only on
+the unmerged `feat/cli-acp-client` branch), so nothing changed there.
+
+**Go: one name for the MCP 2026-07-28 version constant.** 0.25.0 shipped the same string twice,
+`McpProtocolVersion` (client, #142) and `MCPProtocol2026` (handler, #143). `MCPProtocol2026` is the
+canonical name; `McpProtocolVersion` stays as a `// Deprecated:` alias of it, so nothing breaks. golang
+only: no other port exports two names for it in the same namespace (Python, Java, Rust and Clojure
+keep a client-wire constant in their MCP client module beside the handler's, which is module scoping,
+not a duplicate public name; JS and C# keep the client one internal; Elixir's are private).
+
 ## 0.25.0 — 2026-11-06
 
 **Docs: an "In-process client" section with copy-pasteable recipes for driving coding agents and
