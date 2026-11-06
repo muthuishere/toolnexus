@@ -80,11 +80,80 @@ public final class Classifier {
 
     /** OpenRouter's base, its spelling of {@link #DEFAULT_MODEL}, and its credential env name. */
     public static final String OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1";
-    public static final String OPENROUTER_MODEL = "typesafe/jev-1.13";
+    public static final String OPENROUTER_MODEL = "typesafe/jev-1.14";
     public static final String OPENROUTER_API_KEY_ENV = "OPENROUTER_API_KEY";
 
-    /** The four backends. */
+    /** Cloudflare Workers AI's {@code /ai/run} envelope (§8B "Backends"). */
+    public static final String BACKEND_CLOUDFLARE = "cloudflare";
+    /** Vercel AI Gateway's TypeSafe-compatible System One route. */
+    public static final String BACKEND_VERCEL = "vercel";
+    /** A self-hosted System One endpoint. Requires {@link Options#baseUrl} and
+     * {@link Options#supports}: the library cannot know what an unknown server takes. */
+    public static final String BACKEND_CUSTOM = "custom";
+
+    /** The two request shapes a backend row can use. */
+    public static final String WIRE_SYSTEMONE = "systemone";
+    public static final String WIRE_CLOUDFLARE = "cloudflare";
+
+    /** TypeSafe's required opt-in header for image ("danger zone") input. */
+    public static final String IMAGES_HEADER = "TypeSafe-Danger-Zone-Images";
+
+    /** Image limits (docs.typesafe.ai/images). Outside them the API rejects, never resizes, so
+     * they are checked client-side before any request. */
+    public static final int IMAGE_MIN_SIDE = 280;
+    public static final int IMAGE_MAX_SIDE = 1568;
+    public static final int IMAGE_MAX_BYTES = 16 << 20;
+    public static final int REQUEST_IMAGE_BYTES = 32 << 20;
+
+    /**
+     * What a backend + model can take. It is DATA: a fail-fast for what the table says, never a
+     * claim about the vendor. Override it per classifier with {@link Options#supports}.
+     */
+    public record Supports(boolean images) {}
+
+    /**
+     * One row of the backend table.
+     *
+     * @param wire         {@link #WIRE_SYSTEMONE} or {@link #WIRE_CLOUDFLARE}
+     * @param imagesHeader send {@link #IMAGES_HEADER}{@code : true} when a request carries images
+     * @param supports     the default support for a model on this backend; {@code null} on
+     *                     {@link #BACKEND_CUSTOM}, which requires {@link Options#supports}
+     */
+    public record BackendPreset(String baseUrl, String model, String apiKeyEnv, String wire,
+                                boolean imagesHeader, Function<String, Supports> supports) {}
+
+    /**
+     * The backend table (live-probed 2026-11-04, ADR 0038), in enum order. Every value is a
+     * PROPOSED default, owner to confirm. Vercel and Cloudflare-Jev images stay false until a live
+     * probe proves them: an unproven image path fails loudly rather than send bytes a gateway may
+     * silently drop.
+     */
+    public static final Map<String, BackendPreset> BACKENDS;
+    static {
+        Map<String, BackendPreset> t = new LinkedHashMap<>();
+        t.put(BACKEND_TYPESAFE, new BackendPreset(DEFAULT_BASE_URL, DEFAULT_MODEL, DEFAULT_API_KEY_ENV,
+                WIRE_SYSTEMONE, true, m -> new Supports(true)));
+        t.put(BACKEND_OPENROUTER, new BackendPreset(OPENROUTER_BASE_URL, OPENROUTER_MODEL, OPENROUTER_API_KEY_ENV,
+                WIRE_SYSTEMONE, true, m -> new Supports(true)));
+        t.put(BACKEND_CLOUDFLARE, new BackendPreset(
+                "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/ai/run", "typesafe/jev",
+                "CLOUDFLARE_JEV_API_KEY", WIRE_CLOUDFLARE, false, m -> new Supports(m != null && m.contains("clef"))));
+        t.put(BACKEND_VERCEL, new BackendPreset("https://ai-gateway.vercel.sh/typesafe/v1", "typesafe-ai/jev",
+                "AI_GATEWAY_API_KEY", WIRE_SYSTEMONE, true, m -> new Supports(false)));
+        t.put(BACKEND_CUSTOM, new BackendPreset(null, DEFAULT_MODEL, DEFAULT_API_KEY_ENV,
+                WIRE_SYSTEMONE, true, null));
+        BACKENDS = java.util.Collections.unmodifiableMap(t);
+    }
+
+    /** The four styles. */
     public static final String STYLE_SYSTEMONE = "systemone";
+    /**
+     * Renders the questions as one structured-output call on a §8 client.
+     *
+     * @deprecated System One is the single product wire (ADR 0038 D3). {@code "llm"} keeps working
+     * byte-identically, as an alias, for at least one minor release. No runtime warning.
+     */
+    @Deprecated
     public static final String STYLE_LLM = "llm";
     public static final String STYLE_CUSTOM = "custom";
     public static final String STYLE_STATIC = "static";
@@ -108,19 +177,42 @@ public final class Classifier {
     // ------------------------------------------------------------------ failures
 
     /** Every failure out of this seam. Never carries a credential or an expanded header value. */
-    public static final class ClassifierException extends RuntimeException {
+    public static class ClassifierException extends RuntimeException {
         public ClassifierException(String message) { super(message); }
         public ClassifierException(String message, Throwable cause) { super(message, cause); }
+    }
+
+    /**
+     * Thrown BEFORE any network call when the backend's support table (or {@link Options#supports})
+     * says it cannot take what the request carries. Message, exact:
+     * {@code classifier: <backend> (<model>) does not support <feature>}.
+     */
+    public static final class ClassifierUnsupported extends ClassifierException {
+        private final String backend;
+        private final String model;
+        private final String feature;
+
+        public ClassifierUnsupported(String backend, String model, String feature) {
+            super("classifier: " + backend + " (" + model + ") does not support " + feature);
+            this.backend = backend;
+            this.model = model;
+            this.feature = feature;
+        }
+
+        public String backend() { return backend; }
+        public String model() { return model; }
+        public String feature() { return feature; }
     }
 
     // ------------------------------------------------------------------ questions
 
     /**
-     * One pre-declared question. The set is CLOSED — sealed over the three §8B shapes, which
-     * differ only in what {@code criteria} is on the wire: absent, an object, or an ordered array.
+     * One pre-declared question, sealed over the three modelled §8B shapes — which differ only in
+     * what {@code criteria} is on the wire: absent, an object, or an ordered array — plus
+     * {@link RawQuestion}, the OPEN end of the union for a type the library does not model yet.
      */
-    public sealed interface Question permits NoulQuestion, ChoiceQuestion, ScoreQuestion {
-        /** The wire discriminator: {@code "noul" | "choice" | "score"}. */
+    public sealed interface Question permits NoulQuestion, ChoiceQuestion, ScoreQuestion, RawQuestion {
+        /** The wire discriminator: {@code "noul" | "choice" | "score"}, or a raw question's type. */
         String type();
 
         /** The question's wire projection — what the canonical bytes are built from. */
@@ -226,6 +318,31 @@ public final class Classifier {
     }
 
     /**
+     * The open end of the question union (§8B): a System One question type the library does not
+     * model (e.g. Jev 1.14 {@code box}), sent as written — {@code {"criteria"?, "instructions",
+     * "type"}}. It gets no client-side limits; only {@code type} must be non-empty.
+     *
+     * @param criteria sent verbatim when non-null, omitted when null
+     */
+    public record RawQuestion(String type, String instructions, Object criteria) implements Question {
+        public RawQuestion(String type, String instructions) { this(type, instructions, null); }
+
+        @Override public Map<String, Object> wire() {
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("type", type);
+            m.put("instructions", instructions);
+            if (criteria != null) m.put("criteria", criteria);
+            return m;
+        }
+
+        @Override public void validate(String key) {
+            if (type == null || type.isEmpty()) {
+                throw new ClassifierException("classifier: question \"" + key + "\": a raw question needs a type");
+            }
+        }
+    }
+
+    /**
      * Build a {@link ChoiceQuestion} from any (name, description) pairs — a {@link Tool}, a skill,
      * an agent, an A2A card skill. The description must say what picking that option would MEAN;
      * see the encoding obligation on {@link ChoiceQuestion}.
@@ -242,8 +359,8 @@ public final class Classifier {
      * <p>Named {@code DecisionAnswer} rather than {@code Answer} because §10 already owns
      * {@link Answer} (the suspension resolution). Same idea, different seam.
      */
-    public sealed interface DecisionAnswer permits NoulAnswer, ChoiceAnswer, ScoreAnswer {
-        /** The wire discriminator: {@code "noul" | "choice" | "score"}. */
+    public sealed interface DecisionAnswer permits NoulAnswer, ChoiceAnswer, ScoreAnswer, RawAnswer {
+        /** The wire discriminator: {@code "noul" | "choice" | "score"}, or a raw answer's type. */
         String type();
     }
 
@@ -292,6 +409,16 @@ public final class Classifier {
         }
     }
 
+    /**
+     * An answer of a type the library does not model (§8B open union). {@code value} is the whole
+     * answer object as decoded, {@code type} included.
+     */
+    public record RawAnswer(String type, Map<String, Object> value) implements DecisionAnswer {
+        public RawAnswer {
+            value = value == null ? Map.of() : java.util.Collections.unmodifiableMap(new LinkedHashMap<>(value));
+        }
+    }
+
     /** The wire's usage block. {@code cost} is absent on some backends ({@code null}). */
     public record Usage(long inputTokens, long outputTokens, Double cost) {}
 
@@ -300,14 +427,25 @@ public final class Classifier {
      * they are never transmitted, so a key may be a tool, skill or agent name verbatim.
      *
      * @param model      echoes what actually answered, which may be more specific than what was asked for
+     * @param cached     true when the decision came from {@link Options#cache} and no request was
+     *                   sent. Never on the wire.
      * @param calibrated {@code systemone} reports true; {@code llm} reports false unless it derived
      *                   the probabilities from provider token probabilities. A THRESHOLD TUNED
      *                   AGAINST ONE BACKEND DOES NOT TRANSFER TO ANOTHER.
      */
-    public record Decision(String model, Map<String, DecisionAnswer> answers, Usage usage, boolean calibrated) {
+    public record Decision(String model, Map<String, DecisionAnswer> answers, Usage usage, boolean calibrated,
+                           boolean cached) {
         public Decision {
             answers = answers == null ? Map.of() : Map.copyOf(answers);
         }
+
+        /** A live (not cached) decision — the pre-cache shape. */
+        public Decision(String model, Map<String, DecisionAnswer> answers, Usage usage, boolean calibrated) {
+            this(model, answers, usage, calibrated, false);
+        }
+
+        /** @throws ClassifierException if {@code key} is absent or is not a raw (unmodelled) answer. */
+        public RawAnswer raw(String key) { return typed(key, RawAnswer.class, "raw"); }
 
         /** @throws ClassifierException if {@code key} is absent or is not a noul answer. */
         public NoulAnswer noul(String key) { return typed(key, NoulAnswer.class, "noul"); }
@@ -488,11 +626,14 @@ public final class Classifier {
     public static final class Options {
         /** {@code "systemone" | "llm" | "custom" | "static"}. Null ⇒ {@code "systemone"}. */
         public String style;
-        /** {@code "typesafe" | "openrouter"} — sets {@link #baseUrl}, {@link #model} and
-         * {@link #apiKeyEnv} AS A UNIT. An explicitly-set field still wins over the preset, so a
-         * host can pin a model on either backend. Null ⇒ the TypeSafe defaults, as before. */
+        /** {@code "typesafe" | "openrouter" | "cloudflare" | "vercel" | "custom"} ({@link #BACKENDS})
+         * — sets {@link #baseUrl}, {@link #model} and {@link #apiKeyEnv} AS A UNIT. An explicitly-set
+         * field still wins over the preset, so a host can pin a model on any backend. Null ⇒ the
+         * TypeSafe defaults, as before. {@code custom} requires {@link #baseUrl} and
+         * {@link #supports} (style {@code systemone}). */
         public String backend;
-        /** The API base. Null ⇒ {@link #DEFAULT_BASE_URL}. OpenRouter serves this wire today. */
+        /** The API base. Null ⇒ the backend's. {@code ${NAME}} expands from the environment AT
+         * CALL TIME (unset ⇒ empty); errors name it UNEXPANDED, so an account id never reaches one. */
         public String baseUrl;
         /** Null ⇒ {@link #DEFAULT_MODEL}. Pin it once thresholds are tuned. */
         public String model;
@@ -543,6 +684,12 @@ public final class Classifier {
         public java.util.function.BiFunction<Object, Map<String, Question>, Decision> evaluate;
         /** The recorded corpus. {@code style: "static"} only. */
         public List<RecordedDecision> decisions;
+        /** Overrides the backend table's support row for this classifier. Required with
+         * {@link #BACKEND_CUSTOM}. */
+        public Supports supports;
+        /** Opt-in answer cache (§8B). Null ⇒ no caching. Consulted by style {@code systemone} only;
+         * stores only replies that pass {@link #validateDecision}. */
+        public Cache cache;
 
         /** Environment lookup, for tests only — the process environment otherwise. */
         Function<String, String> env;
@@ -565,6 +712,8 @@ public final class Classifier {
         public Options client(LlmClient v) { this.client = v; return this; }
         public Options evaluate(java.util.function.BiFunction<Object, Map<String, Question>, Decision> v) { this.evaluate = v; return this; }
         public Options decisions(List<RecordedDecision> v) { this.decisions = v; return this; }
+        public Options supports(Supports v) { this.supports = v; return this; }
+        public Options cache(Cache v) { this.cache = v; return this; }
         Options env(Function<String, String> v) { this.env = v; return this; }
     }
 
@@ -572,6 +721,9 @@ public final class Classifier {
 
     private final Options opts;
     private final String style;
+    private final String backend;
+    private final BackendPreset preset;
+    private final Supports supports;
     private final String baseUrl;
     private final String model;
     private final String apiKeyEnv;
@@ -587,16 +739,22 @@ public final class Classifier {
     private Classifier(Options opts, Map<String, String> staticCorpus) {
         this.opts = opts;
         this.style = opts.style == null ? STYLE_SYSTEMONE : opts.style;
-        boolean openrouter = BACKEND_OPENROUTER.equals(opts.backend);
-        if (opts.backend != null && !openrouter && !BACKEND_TYPESAFE.equals(opts.backend)) {
-            throw new ClassifierException("classifier: unknown backend \"" + opts.backend
-                    + "\" (expected \"" + BACKEND_TYPESAFE + "\" or \"" + BACKEND_OPENROUTER + "\")");
+        this.backend = opts.backend == null || opts.backend.isEmpty() ? BACKEND_TYPESAFE : opts.backend;
+        this.preset = BACKENDS.get(this.backend);
+        if (preset == null) {
+            throw new ClassifierException("classifier: unknown backend \"" + opts.backend + "\" (want \""
+                    + BACKEND_TYPESAFE + "\", \"" + BACKEND_OPENROUTER + "\", \"" + BACKEND_CLOUDFLARE + "\", \""
+                    + BACKEND_VERCEL + "\" or \"" + BACKEND_CUSTOM + "\")");
         }
-        this.baseUrl = opts.baseUrl != null ? opts.baseUrl
-                : (openrouter ? OPENROUTER_BASE_URL : DEFAULT_BASE_URL);
-        this.model = opts.model != null ? opts.model : (openrouter ? OPENROUTER_MODEL : DEFAULT_MODEL);
-        this.apiKeyEnv = opts.apiKeyEnv != null ? opts.apiKeyEnv
-                : (openrouter ? OPENROUTER_API_KEY_ENV : DEFAULT_API_KEY_ENV);
+        if (BACKEND_CUSTOM.equals(this.backend) && STYLE_SYSTEMONE.equals(style)
+                && (opts.baseUrl == null || opts.baseUrl.isEmpty() || opts.supports == null)) {
+            throw new ClassifierException("classifier: backend \"" + BACKEND_CUSTOM + "\" requires baseUrl and supports");
+        }
+        this.baseUrl = opts.baseUrl != null ? opts.baseUrl : (preset.baseUrl() == null ? "" : preset.baseUrl());
+        this.model = opts.model != null ? opts.model : preset.model();
+        this.apiKeyEnv = opts.apiKeyEnv != null ? opts.apiKeyEnv : preset.apiKeyEnv();
+        this.supports = opts.supports != null ? opts.supports
+                : preset.supports() != null ? preset.supports().apply(this.model) : new Supports(false);
         // The known mismatch, caught at CONSTRUCTION rather than as a 400 three layers away:
         // the defaults are only JOINTLY valid, and nothing else said so (#91).
         if (DEFAULT_MODEL.equals(this.model) && this.baseUrl.contains("openrouter.ai")) {
@@ -657,10 +815,27 @@ public final class Classifier {
      * @param state a string, a map, or a list — whatever the host already has. Transmitted verbatim.
      */
     public Decision evaluate(Object state, Map<String, Question> questions) {
+        return evaluate(state, questions, false);
+    }
+
+    /** The one path. {@code validate} = fail closed on {@link #validateDecision} (the
+     * {@link #state} builders); plain {@link #evaluate(Object, Map)} keeps its old behaviour. */
+    private Decision evaluate(Object state, Map<String, Question> questions, boolean validate) {
         long t0 = System.currentTimeMillis();
         if (questions == null || questions.isEmpty()) {
             throw new ClassifierException("classifier: no questions to evaluate");
         }
+        // L1: count + hash of the canonical request on every evaluate event.
+        String qHash;
+        try {
+            qHash = ClassifierBackends.sha256Hex(canonicalRequest(model, questions));
+        } catch (RuntimeException e) {
+            qHash = "";
+        }
+        final String hash = qHash;
+        Consumer<RuntimeException> emitError = e -> emit(new LlmClient.MetricEvent.ClassifierEvaluate(
+                model, "error", System.currentTimeMillis() - t0, 0, 0, e.getMessage(),
+                questions.size(), hash, false));
         // Limits are enforced CLIENT-SIDE, before the request: the caller finds out faster and more
         // legibly than from the backend's own 400. Keys are walked in sorted order so the same
         // malformed set always names the same key first.
@@ -670,7 +845,7 @@ public final class Classifier {
             try {
                 q.validate(key);
             } catch (RuntimeException e) {
-                emitError(t0, e);
+                emitError.accept(e);
                 throw e;
             }
         }
@@ -684,16 +859,21 @@ public final class Classifier {
                 case STYLE_CUSTOM -> opts.evaluate.apply(state, questions);
                 case STYLE_STATIC -> evaluateStatic(state, questions);
                 case STYLE_LLM -> evaluateLlm(state, questions);
-                default -> evaluateSystemOne(state, questions);
+                default -> evaluateWire(state, questions, validate);
             };
+            if (validate && !STYLE_SYSTEMONE.equals(style)) {
+                ClassifierException invalid = ClassifierBackends.validate(questions, d);
+                if (invalid != null) throw invalid;
+            }
         } catch (RuntimeException e) {
-            emitError(t0, e);
+            emitError.accept(e);
             throw e;
         }
         emit(new LlmClient.MetricEvent.ClassifierEvaluate(
                 d.model(), "ok", System.currentTimeMillis() - t0,
                 d.usage() == null ? 0 : d.usage().inputTokens(),
-                d.usage() == null ? 0 : d.usage().outputTokens(), null));
+                d.usage() == null ? 0 : d.usage().outputTokens(), null,
+                questions.size(), hash, d.cached()));
         return d;
     }
 
@@ -766,6 +946,219 @@ public final class Classifier {
         return keys;
     }
 
+    // ------------------------------------------------------------------ value builders
+
+    /**
+     * Bind a state (§8B "Value builders"). A VALUE, not a session: nothing is sent or stored until
+     * {@link StateBuilder#evaluate}.
+     */
+    public StateBuilder state(Object v) { return new StateBuilder(this, v); }
+
+    /** Bind a batch of states. See {@link StatesBuilder#evaluate}. */
+    public StatesBuilder states(Object... vs) { return new StatesBuilder(this, List.of(vs)); }
+
+    /** Bind a batch of states. See {@link StatesBuilder#evaluate}. */
+    public StatesBuilder states(List<?> vs) { return new StatesBuilder(this, List.copyOf(vs)); }
+
+    /** One bound state. */
+    public static final class StateBuilder {
+        private final Classifier c;
+        private final Object v;
+
+        private StateBuilder(Classifier c, Object v) { this.c = c; this.v = v; }
+
+        /**
+         * Ask {@code qs} about the state in one request and validate the reply FAIL-CLOSED
+         * ({@link #validateDecision}): an invalid reply is an error. A duplicate name is an error
+         * before any request.
+         */
+        public Decision evaluate(Judge.Named... qs) { return evaluate(List.of(qs)); }
+
+        public Decision evaluate(List<Judge.Named> qs) {
+            return c.evaluate(v, Judge.questions(qs), true);
+        }
+    }
+
+    /** One state's outcome in a {@link StatesBuilder#evaluate} batch: exactly one of
+     * {@code decision} / {@code error} is non-null. */
+    public record BatchResult(Decision decision, RuntimeException error) {}
+
+    /** A batch of bound states. */
+    public static final class StatesBuilder {
+        private final Classifier c;
+        private final List<?> vs;
+
+        private StatesBuilder(Classifier c, List<?> vs) { this.c = c; this.vs = vs; }
+
+        public List<BatchResult> evaluate(Judge.Named... qs) { return evaluate(List.of(qs)); }
+
+        /**
+         * {@link StateBuilder#evaluate} per state, at most {@value #DEFAULT_BATCH_CONCURRENCY} in
+         * flight, one result per state IN ORDER. One state's failure never fails the batch; only a
+         * question-set error (a duplicate name) throws, once, before any request. No states ⇒ an
+         * empty list and no request. {@link #evaluateBatch} (fail-closed) is unchanged.
+         */
+        public List<BatchResult> evaluate(List<Judge.Named> qs) {
+            Map<String, Question> questions = Judge.questions(qs);
+            int n = vs.size();
+            if (n == 0) return List.of();
+            java.util.concurrent.Semaphore gate = new java.util.concurrent.Semaphore(DEFAULT_BATCH_CONCURRENCY);
+            List<java.util.concurrent.Future<BatchResult>> futures = new ArrayList<>(n);
+            try (var pool = java.util.concurrent.Executors.newVirtualThreadPerTaskExecutor()) {
+                for (Object state : vs) {
+                    futures.add(pool.submit(() -> {
+                        gate.acquire();
+                        try {
+                            return new BatchResult(c.evaluate(state, questions, true), null);
+                        } catch (RuntimeException e) {
+                            return new BatchResult(null, e);
+                        } finally {
+                            gate.release();
+                        }
+                    }));
+                }
+                List<BatchResult> out = new ArrayList<>(n);
+                for (var f : futures) {
+                    try {
+                        out.add(f.get());
+                    } catch (java.util.concurrent.ExecutionException e) {
+                        Throwable cause = e.getCause() == null ? e : e.getCause();
+                        out.add(new BatchResult(null, cause instanceof RuntimeException re ? re
+                                : new ClassifierException(String.valueOf(cause.getMessage()), cause)));
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        throw new ClassifierException("classifier: states: interrupted", e);
+                    }
+                }
+                return List.copyOf(out);
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------ cache
+
+    /**
+     * An injected answer cache (§8B). Values are opaque strings: the served model under a model
+     * key, the System One reply body under a decision key. Implementations must be safe for
+     * concurrent use. toolnexus persists nothing itself; a host persists by implementing this.
+     */
+    public interface Cache {
+        /** The value under {@code key}, or {@code null} when absent. */
+        String get(String key);
+
+        void set(String key, String value);
+    }
+
+    /**
+     * An in-process TTL cache with a size cap, oldest-inserted out first. {@code ttl} zero or null
+     * ⇒ no expiry; {@code max} 0 ⇒ unbounded. Safe for concurrent use.
+     */
+    public static final class MemoryCache implements Cache {
+        private final long ttlNanos;
+        private final int max;
+        private final LinkedHashMap<String, long[]> at = new LinkedHashMap<>(); // insertion order
+        private final Map<String, String> values = new java.util.HashMap<>();
+        private final java.util.function.LongSupplier clock;
+
+        public MemoryCache(Duration ttl, int max) { this(ttl, max, System::nanoTime); }
+
+        MemoryCache(Duration ttl, int max, java.util.function.LongSupplier nanoClock) {
+            this.ttlNanos = ttl == null ? 0 : ttl.toNanos();
+            this.max = Math.max(0, max);
+            this.clock = nanoClock;
+        }
+
+        @Override public synchronized String get(String key) {
+            long[] t = at.get(key);
+            if (t == null) return null;
+            if (ttlNanos > 0 && clock.getAsLong() - t[0] > ttlNanos) {
+                at.remove(key);
+                values.remove(key);
+                return null;
+            }
+            return values.get(key);
+        }
+
+        @Override public synchronized void set(String key, String value) {
+            at.remove(key); // re-insertion moves it to the newest end
+            at.put(key, new long[]{clock.getAsLong()});
+            values.put(key, value);
+            if (max > 0) {
+                var it = at.keySet().iterator();
+                while (at.size() > max && it.hasNext()) {
+                    String oldest = it.next();
+                    it.remove();
+                    values.remove(oldest);
+                }
+            }
+        }
+    }
+
+    /** §8B model key: which model {@code endpoint} (configured, unexpanded) + {@code model} served last. */
+    public static String modelCacheKey(String endpoint, String model) {
+        return ClassifierBackends.modelKey(endpoint, model);
+    }
+
+    /** §8B decision key, on the SERVED model. {@code assets} null/empty ⇒ the member is omitted. */
+    public static String decisionCacheKey(String endpoint, String servedModel, Object state,
+                                          Map<String, ?> assets, Map<String, Question> questions) {
+        return ClassifierBackends.decisionKey(endpoint, servedModel, state, assets, questionsWire(questions));
+    }
+
+    // ------------------------------------------------------------------ helpers (V1 / T1 / C1)
+
+    /**
+     * V1: fail closed on a reply that does not answer exactly the questions asked within their
+     * schema. First failure wins in the §8B order; every message starts
+     * {@code classifier: invalid decision: } and names the key as {@code "<key>"}.
+     *
+     * @return the failure, or empty when the decision is valid
+     */
+    public static java.util.Optional<ClassifierException> validateDecision(Map<String, Question> questions,
+                                                                          Decision decision) {
+        return java.util.Optional.ofNullable(ClassifierBackends.validate(questions, decision));
+    }
+
+    /**
+     * T1: jevx's INCLUSIVE cut-points, alongside {@link Judge.Bands} (exclusive), which stays the
+     * default of {@code ask}/{@code gate}.
+     */
+    public record Thresholds(double yes, double no, double minConfidence) {
+        /** 0.8 / 0.2 / 0.6 (jevx's builtin profile). */
+        public static final Thresholds DEFAULT = new Thresholds(0.8, 0.2, 0.6);
+
+        /**
+         * noul {@code p >= yes} ⇒ YES, {@code p <= no} ⇒ NO, else UNCERTAIN; choice/score
+         * {@code confidence >= minConfidence} ⇒ YES, else UNCERTAIN (no near-uniform demotion —
+         * that is Bands' rule). A raw answer is UNCERTAIN.
+         */
+        public Judge.Band band(DecisionAnswer a) {
+            return switch (a) {
+                case NoulAnswer n -> n.noul() >= yes ? Judge.Band.YES : n.noul() <= no ? Judge.Band.NO
+                        : Judge.Band.UNCERTAIN;
+                case ChoiceAnswer c -> c.confidence() >= minConfidence ? Judge.Band.YES : Judge.Band.UNCERTAIN;
+                case ScoreAnswer sc -> sc.confidence() >= minConfidence ? Judge.Band.YES : Judge.Band.UNCERTAIN;
+                case RawAnswer r -> Judge.Band.UNCERTAIN;
+            };
+        }
+    }
+
+    /**
+     * C1: split a question set into chunks of {@code size}, keys in ASCII order. A helper, not
+     * automatic: joint calibration across a split is unproven, so the host decides and merges.
+     */
+    public static List<Map<String, Question>> chunkQuestions(Map<String, Question> questions, int size) {
+        if (size < 1) throw new ClassifierException("classifier: chunk size must be at least 1, got " + size);
+        List<String> keys = sortedKeys(questions);
+        List<Map<String, Question>> out = new ArrayList<>();
+        for (int i = 0; i < keys.size(); i += size) {
+            Map<String, Question> m = new LinkedHashMap<>();
+            for (String k : keys.subList(i, Math.min(i + size, keys.size()))) m.put(k, questions.get(k));
+            out.add(m);
+        }
+        return out;
+    }
+
     // ------------------------------------------------------------------ degenerate
 
     /**
@@ -819,11 +1212,28 @@ public final class Classifier {
      * supplied it, then the §8 Gap 1 pipeline in §8 order (base → requestParams merge →
      * bodyTransform → marshal).
      */
-    private String body(Object state, Map<String, Question> questions) {
+    private String body(ClassifierBackends.LiftResult p, Map<String, Object> assets,
+                        Map<String, Question> questions) {
         Map<String, Object> b = new LinkedHashMap<>();
-        b.put("model", model);
-        b.put("questions", questionsWire(questions));
-        b.put("state", state);
+        if (WIRE_CLOUDFLARE.equals(preset.wire())) {
+            Map<String, Object> input = new LinkedHashMap<>();
+            if (!p.images().isEmpty()) {
+                List<Object> urls = new ArrayList<>();
+                for (ClassifierBackends.Lifted im : p.images()) {
+                    urls.add("data:image/" + im.format + ";base64," + im.data);
+                }
+                input.put("images", urls);
+            }
+            input.put("questions", questionsWire(questions));
+            input.put("state", p.state());
+            b.put("input", input);
+            b.put("model", model);
+        } else {
+            if (!assets.isEmpty()) b.put("assets", assets);
+            b.put("model", model);
+            b.put("questions", questionsWire(questions));
+            b.put("state", p.state());
+        }
         if (opts.requestParams != null) b.putAll(opts.requestParams); // a requestParams key WINS
         if (opts.bodyTransform != null) {
             Map<String, Object> out = opts.bodyTransform.apply(b);
@@ -846,8 +1256,55 @@ public final class Classifier {
         return toDecision(Json.toMap(raw));
     }
 
-    private Decision evaluateSystemOne(Object state, Map<String, Question> questions) {
-        return toDecision(Json.toMap(post(body(state, questions))));
+    /** The systemone style on every backend: lift, check, cache, post, decode. */
+    private Decision evaluateWire(Object state, Map<String, Question> questions, boolean validate) {
+        ClassifierBackends.LiftResult p = ClassifierBackends.lift(state);
+        if (!p.images().isEmpty() && !supports.images()) {
+            throw new ClassifierUnsupported(backend, model, "images");
+        }
+        ClassifierBackends.checkImages(p.images());
+        Map<String, Object> assets = new LinkedHashMap<>();
+        for (ClassifierBackends.Lifted im : p.images()) {
+            Map<String, Object> a = new LinkedHashMap<>();
+            a.put("data_base64", im.data);
+            a.put("format", im.format);
+            a.put("type", "image");
+            assets.put(im.ref, a);
+        }
+        Cache cache = opts.cache;
+        String modelKey = null;
+        if (cache != null) {
+            modelKey = ClassifierBackends.modelKey(baseUrl, model);
+            String served = cache.get(modelKey);
+            if (served != null) {
+                String raw = cache.get(ClassifierBackends.decisionKey(baseUrl, served, p.state(), assets,
+                        questionsWire(questions)));
+                if (raw != null) {
+                    try {
+                        Decision d = toDecision(Json.toMap(raw));
+                        if (ClassifierBackends.validate(questions, d) == null) {
+                            return new Decision(d.model(), d.answers(), d.usage(), d.calibrated(), true);
+                        }
+                    } catch (RuntimeException corrupt) {
+                        // a corrupt entry is a miss
+                    }
+                }
+            }
+        }
+        Map<String, String> extra = !p.images().isEmpty() && preset.imagesHeader()
+                ? Map.of(IMAGES_HEADER, "true") : Map.of();
+        String body = post(body(p, assets, questions), extra);
+        if (WIRE_CLOUDFLARE.equals(preset.wire())) body = ClassifierBackends.unwrapCloudflare(body);
+        Decision d = toDecision(Json.toMap(body));
+        ClassifierException invalid = ClassifierBackends.validate(questions, d);
+        if (validate && invalid != null) throw invalid;
+        if (cache != null && invalid == null) {
+            String served = d.model() == null || d.model().isEmpty() ? model : d.model();
+            cache.set(modelKey, served);
+            cache.set(ClassifierBackends.decisionKey(baseUrl, served, p.state(), assets, questionsWire(questions)),
+                    body);
+        }
+        return d;
     }
 
     /**
@@ -859,8 +1316,12 @@ public final class Classifier {
      * is never echoed back (a gateway happily reflects a bad Authorization header into its own
      * error text).
      */
-    private String post(String payload) {
-        String endpoint = baseUrl.replaceAll("/+$", "") + "/systemone";
+    private String post(String payload, Map<String, String> extraHeaders) {
+        // endpoint is what errors name: the CONFIGURED base, ${ENV} unexpanded, so an account id in
+        // a templated URL never reaches an error. url is what is dialled, expanded at call time.
+        String endpoint = baseUrl.replaceAll("/+$", "");
+        if (!WIRE_CLOUDFLARE.equals(preset.wire())) endpoint += "/systemone";
+        String url = ClassifierBackends.expandEnvRefs(endpoint, env);
         ClassifierException last = null;
         for (int attempt = 0; ; attempt++) {
             int status = 0;
@@ -869,13 +1330,16 @@ public final class Classifier {
             Throwable thrown = null;
             try {
                 HttpRequest.Builder rb = HttpRequest.newBuilder()
-                        .uri(URI.create(endpoint))
+                        .uri(URI.create(url))
                         .timeout(Duration.ofMillis(timeoutMs))
                         .header("Content-Type", "application/json")
                         .POST(HttpRequest.BodyPublishers.ofString(payload, StandardCharsets.UTF_8));
                 // Read at call time. Never logged, never returned, never in an error.
                 String key = env.apply(apiKeyEnv);
                 if (key != null && !key.isEmpty()) rb.header("Authorization", "Bearer " + key);
+                for (Map.Entry<String, String> e : extraHeaders.entrySet()) {
+                    if (!hostHeader(e.getKey())) rb.header(e.getKey(), e.getValue()); // host headers win
+                }
                 if (opts.headers != null) {
                     // ${ENV_VAR} expands at call time, exactly as remote-MCP headers do (§2).
                     for (Map.Entry<String, String> e
@@ -895,7 +1359,8 @@ public final class Classifier {
                 thrown = e;
             }
             last = thrown != null
-                    ? new ClassifierException("classifier: POST " + endpoint + ": " + thrown, thrown)
+                    ? new ClassifierException("classifier: POST " + endpoint + ": "
+                            + redact(String.valueOf(thrown), url, endpoint), url.equals(endpoint) ? thrown : null)
                     : new ClassifierException("classifier: POST " + endpoint + ": HTTP " + status
                             + cause(status, bodyText));
             if (attempt >= retries) throw last;
@@ -919,6 +1384,19 @@ public final class Classifier {
      * transport fault — EXCEPT on an authentication status, whose body routinely reflects the
      * credential or the header that was sent.
      */
+    private boolean hostHeader(String name) {
+        if (opts.headers == null) return false;
+        for (Map.Entry<String, String> e : opts.headers.entrySet()) {
+            if (e.getValue() != null && e.getKey().equalsIgnoreCase(name)) return true;
+        }
+        return false;
+    }
+
+    /** Keep an expanded {@code ${ENV}} URL (an account id) out of a transport error. */
+    private static String redact(String text, String url, String endpoint) {
+        return url.equals(endpoint) ? text : text.replace(url, endpoint);
+    }
+
     private static String cause(int status, String body) {
         // ONE policy, defined on the §8 path and reused here: 401/403 blanked, ACCOUNT
         // IDENTIFIERS REDACTED, then capped. The cap alone never helped — the leaking body in
@@ -997,8 +1475,9 @@ public final class Classifier {
                     case "score" -> new ScoreAnswer(num(ans.get("score")),
                             strings(ans.get("legend")), numbers(ans.get("probabilities")),
                             num(ans.get("confidence")));
-                    default -> throw new ClassifierException(
-                            "classifier: answer \"" + key + "\": unknown type \"" + type + "\"");
+                    // The union is OPEN (§8B): a type the library does not model (e.g. Jev 1.14
+                    // "box") decodes to a RawAnswer instead of failing the whole decision.
+                    default -> new RawAnswer(type, ans);
                 });
             }
         }
@@ -1058,8 +1537,4 @@ public final class Classifier {
         if (opts.onMetric != null) opts.onMetric.accept(ev);
     }
 
-    private void emitError(long t0, RuntimeException e) {
-        emit(new LlmClient.MetricEvent.ClassifierEvaluate(
-                model, "error", System.currentTimeMillis() - t0, 0, 0, e.getMessage()));
-    }
 }

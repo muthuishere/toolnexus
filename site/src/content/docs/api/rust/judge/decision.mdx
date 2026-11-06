@@ -213,6 +213,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // An llm-style backend self-reports; no threshold tuned elsewhere transfers.
                     calibrated: false,
                     usage: ClassifierUsage { input_tokens: 516, output_tokens: 72, cost: None },
+                    cached: false,
                 })
             })
         })),

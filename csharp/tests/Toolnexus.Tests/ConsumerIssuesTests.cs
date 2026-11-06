@@ -824,7 +824,7 @@ public class ConsumerIssuesTests
             .WithBaseUrl(Classifier.OpenRouterBaseUrl).WithModel(Classifier.DefaultModel)));
 
         Assert.Contains("jev-latest", e.Message);
-        Assert.Contains("typesafe/jev-1.13", e.Message);
+        Assert.Contains("typesafe/jev-1.14", e.Message);
     }
 
     /// <summary>

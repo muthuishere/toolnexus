@@ -1,0 +1,25 @@
+{
+  "why": "design.md §9 joint-calibration A/B: each state is asked once with all three questions together and three times with one question each. Questions are the same objects in both arms. States are real toolnexus issue titles.",
+  "questions": {
+    "urgent": {"type": "noul", "instructions": "Is this urgent?"},
+    "area": {"type": "choice", "instructions": "Which area does this belong to?", "criteria": {
+      "client": "the LLM client and its providers",
+      "mcp": "MCP servers and transports",
+      "release": "packaging and publishing",
+      "tests": "test suites and CI"
+    }},
+    "severity": {"type": "score", "instructions": "How severe is this for a user?", "criteria": ["low", "medium", "high"]}
+  },
+  "states": [
+    "MCP serve: embeddable, per-request auth, per-principal tools and confirm gate (for multi-tenant hosting)",
+    "elixir: flaky on_server ordering test (host_engine_asks_test.exs:517)",
+    "Clojure (cljgo): media redirects forward custom headers across origins",
+    "Clojure: tool scheduling waits on the oldest running call, not the first to finish",
+    "No Gemini client style in any port",
+    "builtin bash: hardcodes `sh -c` — no shell on native Windows, and bashisms fail on dash",
+    "Export the in-process round tripper — agents.Options.Transport forces re-implementing it",
+    "agents: TaskResult.TotalTokens is parent-only, contradicting the documented whole-tree rollup",
+    "Client: a toolkit-less completion works in Go and JS, and is impossible in the other five ports",
+    "Skill descriptions are sent verbatim with no length guard — a description authored for Claude Code costs 5x more here (7 ports)"
+  ]
+}

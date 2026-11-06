@@ -15,6 +15,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -41,12 +42,12 @@ const (
 
 	// OpenRouterClassifierBaseURL, OpenRouterClassifierModel and
 	// OpenRouterClassifierAPIKeyEnv are the OpenRouter pairing. Note the MODEL ID
-	// differs: `jev-latest` is TypeSafe's own spelling and `typesafe/jev-1.13` is
+	// differs: `jev-latest` is TypeSafe's own spelling and `typesafe/jev-1.14` is
 	// the gateway's. The three values are only jointly valid, which is why
 	// ClassifierBackend exists — assembling them by hand is how a caller ends up
 	// sending TypeSafe's model id to a gateway that has never heard of it.
 	OpenRouterClassifierBaseURL   = "https://openrouter.ai/api/v1"
-	OpenRouterClassifierModel     = "typesafe/jev-1.13"
+	OpenRouterClassifierModel     = "typesafe/jev-1.14"
 	OpenRouterClassifierAPIKeyEnv = "OPENROUTER_API_KEY"
 
 	// MaxChoiceOptions is the client-side cap on a choice's named options (§8B).
@@ -74,6 +75,9 @@ const (
 	StyleSystemOne ClassifierStyle = "systemone"
 	// StyleLLM renders the questions as one structured-output call on a §8 Client.
 	// It reports Calibrated false unless the backend read token probabilities.
+	//
+	// Deprecated: System One is the single product wire (ADR 0038 D3). StyleLLM
+	// keeps working unchanged as an alias for at least one minor release.
 	StyleLLM ClassifierStyle = "llm"
 	// StyleCustom delegates to the host's own Evaluate.
 	StyleCustom ClassifierStyle = "custom"
@@ -84,9 +88,10 @@ const (
 
 // ---------------------------------------------------------------- questions
 
-// Question is one pre-declared question. The set is CLOSED: the only
-// implementations are NoulQuestion, ChoiceQuestion and ScoreQuestion, enforced by
-// the unexported marker method. The three shapes differ only in what `criteria`
+// Question is one pre-declared question. The modelled types are NoulQuestion,
+// ChoiceQuestion and ScoreQuestion; RawQuestion is the OPEN end of the union
+// (§8B), for a System One type the library does not model yet. Implementations
+// stay inside this package (the unexported marker method). The three shapes differ only in what `criteria`
 // is on the wire — absent, an object, or an ordered array — so the interface is
 // "give me your wire form", not a field set.
 //
@@ -332,6 +337,9 @@ type Decision struct {
 	// probabilities. A THRESHOLD TUNED AGAINST ONE BACKEND DOES NOT TRANSFER TO
 	// ANOTHER.
 	Calibrated bool
+	// Cached is true when the decision came from ClassifierOptions.Cache and no
+	// request was sent. Never on the wire.
+	Cached bool
 }
 
 // UnmarshalJSON performs the discriminated decode. One custom unmarshaller for
@@ -381,7 +389,14 @@ func (d *Decision) UnmarshalJSON(b []byte) error {
 			}
 			a = v
 		default:
-			return fmt.Errorf("classifier: answer %q: unknown type %q", k, disc.Type)
+			// The union is OPEN (§8B): a type the library does not model (e.g.
+			// Jev 1.14 "box") decodes to a RawAnswer instead of failing the whole
+			// decision.
+			var v map[string]any
+			if err := json.Unmarshal(r, &v); err != nil {
+				return fmt.Errorf("classifier: answer %q: %w", k, err)
+			}
+			a = RawAnswer{Type: disc.Type, Value: v}
 		}
 		d.Answers[k] = a
 	}
@@ -471,8 +486,9 @@ type ClassifierBackend string
 const (
 	// BackendTypeSafe is TypeSafe's own API: jev-latest, TYPESAFE_API_KEY.
 	BackendTypeSafe ClassifierBackend = "typesafe"
-	// BackendOpenRouter is the openrouter.ai gateway: typesafe/jev-1.13,
-	// OPENROUTER_API_KEY.
+	// BackendOpenRouter is the openrouter.ai gateway: typesafe/jev-1.14,
+	// OPENROUTER_API_KEY. BackendCloudflare, BackendVercel and BackendCustom
+	// (classifier_backends.go) complete the enum; ClassifierBackends is the table.
 	BackendOpenRouter ClassifierBackend = "openrouter"
 )
 
@@ -542,14 +558,23 @@ type ClassifierOptions struct {
 	Evaluate func(ctx context.Context, state any, questions map[string]Question) (Decision, error)
 	// Decisions is the recorded corpus. StyleStatic only.
 	Decisions []RecordedDecision
+	// Supports overrides the backend table's support row for this classifier.
+	// Required with BackendCustom.
+	Supports *ClassifierSupports
+	// Cache is an opt-in answer cache (§8B). Nil = no caching. Consulted by
+	// StyleSystemOne only; stores only replies that pass ValidateDecision.
+	Cache ClassifierCache
 }
 
 // ---------------------------------------------------------------- classifier
 
 // Classifier is the whole seam: one verb.
 type Classifier struct {
-	opts   ClassifierOptions
-	static map[string][]byte
+	opts     ClassifierOptions
+	backend  ClassifierBackend
+	preset   ClassifierBackendPreset
+	supports ClassifierSupports
+	static   map[string][]byte
 	// warned is the once-per-question-key set for the degenerate-criteria
 	// warning, so a per-turn judge does not flood the sink.
 	mu     sync.Mutex
@@ -562,22 +587,26 @@ func CreateClassifier(opts ClassifierOptions) (*Classifier, error) {
 	if opts.Style == "" {
 		opts.Style = StyleSystemOne
 	}
-	base, model, keyEnv := DefaultClassifierBaseURL, DefaultClassifierModel, DefaultClassifierAPIKeyEnv
-	switch opts.Backend {
-	case "", BackendTypeSafe:
-	case BackendOpenRouter:
-		base, model, keyEnv = OpenRouterClassifierBaseURL, OpenRouterClassifierModel, OpenRouterClassifierAPIKeyEnv
-	default:
-		return nil, fmt.Errorf("classifier: unknown backend %q (want %q or %q)", opts.Backend, BackendTypeSafe, BackendOpenRouter)
+	backend := opts.Backend
+	if backend == "" {
+		backend = BackendTypeSafe
+	}
+	preset, known := ClassifierBackends[backend]
+	if !known {
+		return nil, fmt.Errorf("classifier: unknown backend %q (want %q, %q, %q, %q or %q)", opts.Backend,
+			BackendTypeSafe, BackendOpenRouter, BackendCloudflare, BackendVercel, BackendCustom)
+	}
+	if backend == BackendCustom && opts.Style == StyleSystemOne && (opts.BaseURL == "" || opts.Supports == nil) {
+		return nil, fmt.Errorf("classifier: backend %q requires baseUrl and supports", BackendCustom)
 	}
 	if opts.BaseURL == "" {
-		opts.BaseURL = base
+		opts.BaseURL = preset.BaseURL
 	}
 	if opts.Model == "" {
-		opts.Model = model
+		opts.Model = preset.Model
 	}
 	if opts.APIKeyEnv == "" {
-		opts.APIKeyEnv = keyEnv
+		opts.APIKeyEnv = preset.APIKeyEnv
 	}
 	// Fail BEFORE the wire on the one mismatch the defaults invite: keeping
 	// TypeSafe's model id while pointing BaseURL at the gateway. A wrong-endpoint
@@ -589,7 +618,13 @@ func CreateClassifier(opts ClassifierOptions) (*Classifier, error) {
 	if opts.Timeout == 0 {
 		opts.Timeout = DefaultClassifierTimeout
 	}
-	c := &Classifier{opts: opts, warned: map[string]bool{}}
+	c := &Classifier{opts: opts, backend: backend, preset: preset, warned: map[string]bool{}}
+	switch {
+	case opts.Supports != nil:
+		c.supports = *opts.Supports
+	case preset.Supports != nil:
+		c.supports = preset.Supports(opts.Model)
+	}
 	switch opts.Style {
 	case StyleSystemOne:
 	case StyleLLM:
@@ -618,9 +653,31 @@ func CreateClassifier(opts ClassifierOptions) (*Classifier, error) {
 // Evaluate is the whole contract: a state plus typed questions in, a Decision
 // out. Questions are INDEPENDENT — one answer is never context for another.
 func (c *Classifier) Evaluate(ctx context.Context, state any, questions map[string]Question) (Decision, error) {
+	return c.evaluate(ctx, state, questions, false)
+}
+
+// evaluate is the one path. validate = fail closed on ValidateDecision (the
+// State(...).Evaluate builders); plain Evaluate keeps its old behaviour.
+func (c *Classifier) evaluate(ctx context.Context, state any, questions map[string]Question, validate bool) (Decision, error) {
 	start := time.Now()
 	if len(questions) == 0 {
 		return Decision{}, fmt.Errorf("classifier: no questions to evaluate")
+	}
+	// L1: count + hash of the canonical request on every evaluate event.
+	qHash := ""
+	if req, err := CanonicalRequest(c.opts.Model, questions); err == nil {
+		qHash = sha256Hex(req)
+	}
+	emitError := func(err error) {
+		c.emit(MetricEvent{
+			Event:         MetricClassifierEvaluate,
+			Model:         c.opts.Model,
+			Status:        "error",
+			Ms:            time.Since(start).Milliseconds(),
+			Error:         err.Error(),
+			Questions:     len(questions),
+			QuestionsHash: qHash,
+		})
 	}
 	// Limits are enforced CLIENT-SIDE, before the request: the caller finds out
 	// faster and more legibly than from the backend's own 400. Keys are walked in
@@ -631,7 +688,7 @@ func (c *Classifier) Evaluate(ctx context.Context, state any, questions map[stri
 			return Decision{}, fmt.Errorf("classifier: question %q is nil", key)
 		}
 		if err := q.validate(key); err != nil {
-			c.emitError(start, err)
+			emitError(err)
 			return Decision{}, err
 		}
 	}
@@ -651,10 +708,13 @@ func (c *Classifier) Evaluate(ctx context.Context, state any, questions map[stri
 	case StyleLLM:
 		d, err = c.evaluateLLM(ctx, state, questions)
 	default:
-		d, err = c.evaluateSystemOne(ctx, state, questions)
+		d, err = c.evaluateWire(ctx, state, questions, validate)
+	}
+	if err == nil && validate && c.opts.Style != StyleSystemOne {
+		err = ValidateDecision(questions, d)
 	}
 	if err != nil {
-		c.emitError(start, err)
+		emitError(err)
 		return Decision{}, err
 	}
 	c.emit(MetricEvent{
@@ -664,6 +724,9 @@ func (c *Classifier) Evaluate(ctx context.Context, state any, questions map[stri
 		Ms:               time.Since(start).Milliseconds(),
 		PromptTokens:     d.Usage.InputTokens,
 		CompletionTokens: d.Usage.OutputTokens,
+		Questions:        len(questions),
+		QuestionsHash:    qHash,
+		Cached:           d.Cached,
 	})
 	return d, nil
 }
@@ -864,22 +927,6 @@ func (c *Classifier) evaluateStatic(state any, questions map[string]Question) (D
 	return d, nil
 }
 
-func (c *Classifier) evaluateSystemOne(ctx context.Context, state any, questions map[string]Question) (Decision, error) {
-	raw, err := c.body(state, questions)
-	if err != nil {
-		return Decision{}, err
-	}
-	res, err := c.post(ctx, raw)
-	if err != nil {
-		return Decision{}, err
-	}
-	var d Decision
-	if err := json.Unmarshal(res, &d); err != nil {
-		return Decision{}, err
-	}
-	return d, nil
-}
-
 // post issues the one POST with the §8 retry budget, reusing the client's
 // ErrorInfo/Tier classifier and the Retry-After delay-seconds rule verbatim.
 //
@@ -887,8 +934,15 @@ func (c *Classifier) evaluateSystemOne(ctx context.Context, state any, questions
 // HERE: an authentication failure names the status and the endpoint, nothing
 // else, and the response body is never echoed back (a gateway happily reflects
 // a bad Authorization header into its own 401 text).
-func (c *Classifier) post(ctx context.Context, raw []byte) ([]byte, error) {
-	endpoint := strings.TrimRight(c.opts.BaseURL, "/") + "/systemone"
+func (c *Classifier) post(ctx context.Context, raw []byte, extraHeaders map[string]string) ([]byte, error) {
+	// endpoint is what errors name: the CONFIGURED base, ${ENV} unexpanded, so
+	// an account id in a templated URL never reaches an error. url is what is
+	// dialled, expanded at call time.
+	endpoint := strings.TrimRight(c.opts.BaseURL, "/")
+	if c.preset.Wire != ClassifierWireCloudflare {
+		endpoint += "/systemone"
+	}
+	url := expandEnvRefs(endpoint)
 	retries := c.opts.Retries
 	if retries == -1 { // SPIKE (ADR-0029): explicit-zero sentinel
 		retries = 0
@@ -915,7 +969,7 @@ func (c *Classifier) post(ctx context.Context, raw []byte) ([]byte, error) {
 	var lastErr error
 	for attempt := 0; ; attempt++ {
 		reqCtx, cancel := context.WithTimeout(ctx, c.opts.Timeout)
-		body, status, retryAfter, err := c.attempt(reqCtx, hc, endpoint, raw)
+		body, status, retryAfter, err := c.attempt(reqCtx, hc, url, raw, extraHeaders)
 		cancel()
 		if err == nil && status < 300 {
 			return body, nil
@@ -925,7 +979,7 @@ func (c *Classifier) post(ctx context.Context, raw []byte) ([]byte, error) {
 			return nil, ctx.Err()
 		}
 		if err != nil {
-			lastErr = fmt.Errorf("classifier: POST %s: %w", endpoint, err)
+			lastErr = fmt.Errorf("classifier: POST %s: %w", endpoint, redactClassifierURLError(err, url, endpoint))
 		} else {
 			// The backend's own cause is surfaced INTACT so a caller can tell a
 			// limit error from a transport fault — but only for a non-auth status.
@@ -965,7 +1019,7 @@ func cause(status int, body []byte) string {
 	return ": " + s
 }
 
-func (c *Classifier) attempt(ctx context.Context, hc *http.Client, endpoint string, raw []byte) (body []byte, status int, retryAfter string, err error) {
+func (c *Classifier) attempt(ctx context.Context, hc *http.Client, endpoint string, raw []byte, extraHeaders map[string]string) (body []byte, status int, retryAfter string, err error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(raw))
 	if err != nil {
 		return nil, 0, "", err
@@ -974,6 +1028,9 @@ func (c *Classifier) attempt(ctx context.Context, hc *http.Client, endpoint stri
 	// Read at call time. Never logged, never returned, never in an error.
 	if key := os.Getenv(c.opts.APIKeyEnv); key != "" {
 		req.Header.Set("Authorization", "Bearer "+key)
+	}
+	for k, v := range extraHeaders {
+		req.Header.Set(k, v)
 	}
 	for k, v := range c.opts.Headers {
 		req.Header.Set(k, os.ExpandEnv(v)) // ${ENV_VAR} expands at call time
@@ -1061,16 +1118,6 @@ func (c *Classifier) emit(ev MetricEvent) {
 	}
 }
 
-func (c *Classifier) emitError(start time.Time, err error) {
-	c.emit(MetricEvent{
-		Event:  MetricClassifierEvaluate,
-		Model:  c.opts.Model,
-		Status: "error",
-		Ms:     time.Since(start).Milliseconds(),
-		Error:  err.Error(),
-	})
-}
-
 // unqualifiedJevRe matches TypeSafe's own model spelling — a bare `jev-*` with
 // no vendor prefix, which only TypeSafe's API serves.
 var unqualifiedJevRe = regexp.MustCompile(`^jev-`)
@@ -1087,4 +1134,13 @@ func checkClassifierPairing(baseURL, model string) error {
 		return nil
 	}
 	return fmt.Errorf("model %q is TypeSafe's spelling; on openrouter.ai use %q", model, OpenRouterClassifierModel)
+}
+
+// redactClassifierURLError keeps an expanded ${ENV} URL (an account id) out of a
+// transport error: the dialled url is replaced by the configured endpoint.
+func redactClassifierURLError(err error, url, endpoint string) error {
+	if url == endpoint || !strings.Contains(err.Error(), url) {
+		return err
+	}
+	return errors.New(strings.ReplaceAll(err.Error(), url, endpoint))
 }

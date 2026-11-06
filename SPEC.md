@@ -3011,6 +3011,9 @@ configured one client has configured the other. Idiomatic names per port, as eve
 | option | default | notes / §8 counterpart |
 |---|---|---|
 | `style` | `"systemone"` | `"systemone" \| "llm" \| "custom" \| "static"`. Same slot as the client's `style`; the values differ because the wires differ |
+| `backend` | `"typesafe"` | `typesafe \| openrouter \| cloudflare \| vercel \| custom` — sets baseUrl, model and apiKeyEnv as a unit (table below) |
+| `supports` | the backend row | `{images}`; overrides the table; required with `custom` |
+| `cache` | — | opt-in `{get, set}` answer cache (below); absent ⇒ none |
 | `baseUrl` | `https://api.typesafe.ai/v1` | same as §8. OpenRouter (`https://openrouter.ai/api/v1`) serves this wire today; self-hosted and open-weights implementations speak it too |
 | `model` | `"jev-latest"` | **pin it** (e.g. `jev-1.13.0`) once thresholds are tuned. `Decision.model` echoes what actually answered, which may be more specific |
 | `apiKeyEnv` | `"TYPESAFE_API_KEY"` | the **name** of the env var, not the value — read at call time and never logged. §8's `apiKey` takes a value; this option deliberately does not |
@@ -3058,6 +3061,82 @@ section**, and constructing one alters no request the client loop makes. This is
 not asserted.
 
 ---
+
+### Backends, images, cache and validation (change `add-classifier-backends`, ADR 0038)
+
+Every default below is a **proposed default, owner to confirm**
+(`openspec/changes/add-classifier-backends/design.md`, PD-1…PD-15). Fixtures:
+`examples/judge/backends/`.
+
+**Backend table** — data in every port; `supports` overrides the image column per classifier;
+explicit `baseUrl`/`model`/`apiKeyEnv` still win. `${NAME}` in `baseUrl` expands at call time and
+error text names the endpoint **unexpanded**.
+
+| backend | baseUrl | model | apiKeyEnv | wire | images | image header |
+|---|---|---|---|---|---|---|
+| `typesafe` | `https://api.typesafe.ai/v1` | `jev-latest` | `TYPESAFE_API_KEY` | systemone | yes | yes |
+| `openrouter` | `https://openrouter.ai/api/v1` | `typesafe/jev-1.14` | `OPENROUTER_API_KEY` | systemone | yes | yes |
+| `cloudflare` | `https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/ai/run` | `typesafe/jev` | `CLOUDFLARE_JEV_API_KEY` | cloudflare | model contains `clef` | no |
+| `vercel` | `https://ai-gateway.vercel.sh/typesafe/v1` | `typesafe-ai/jev` | `AI_GATEWAY_API_KEY` | systemone | no | yes |
+| `custom` | required | `jev-latest` | `TYPESAFE_API_KEY` | systemone | required (`supports`) | yes |
+
+System One is the only wire (the alpha Decisions API is not supported). Unknown backend:
+`classifier: unknown backend "<b>" (want "typesafe", "openrouter", "cloudflare", "vercel" or "custom")`;
+custom without declarations: `classifier: backend "custom" requires baseUrl and supports`.
+
+**Cloudflare wire** — `POST {baseUrl}` (no suffix) with
+`{"input":{"images"?,"questions","state"},"model"}`; reply `{success, result}`, `result` may be
+`{"state":"Completed","result":…}`. `success` not `true` ⇒ `classifier: cloudflare: envelope not successful`;
+another run state ⇒ `classifier: cloudflare: run state "<s>"`. The envelope's errors are never echoed.
+
+**Images** (style `systemone` only; `static`/`custom`/`llm` get the state verbatim). A state with no
+content part is sent verbatim. Otherwise walk it depth-first, object keys in ASCII order, arrays in
+order: an image part with inline data becomes a reference string (the enclosing key if unused,
+else the smallest unused `image<n>`, `n ≥ 1`) and an asset
+`{"type":"image","format":"png"|"jpeg","data_base64"}` in a top-level `assets` map (cloudflare:
+data URLs in `input.images`, in collection order); a text part becomes its text; any other part is
+an error. Before any request: images on a backend without image support ⇒ `ClassifierUnsupported`
+(`classifier: <backend> (<model>) does not support images`); then per image PNG/JPEG only, ≤ 16 MiB,
+each side 280–1568 px (read from the PNG IHDR / first JPEG SOF), then ≤ 32 MiB per request — these
+errors start `classifier: image "<ref>": `. Never resized, never described as text.
+`TypeSafe-Danger-Zone-Images: true` is sent only when assets are present **and** the backend row says
+so; host headers win.
+
+**Value builders.** `classifier.state(v).evaluate(questions…)` = `evaluate` + fail-closed
+validation. `classifier.states(v…).evaluate(questions…)` → one `{decision | error}` per state, in
+order, ≤ 16 in flight; one failure never fails the batch; a duplicate question name fails before
+any request; no states ⇒ empty list. `evaluateBatch` is unchanged.
+
+**Cache** (opt-in `cache: {get(key) → string?, set(key, string)}`, systemone style only, nothing
+when absent; `MemoryCache(ttl, max)` ships). Per **request**: joint calibration across a split
+question set is unproven. Only validated replies are stored. Keys, with `canon` the canonical JSON
+above and `E` the configured `baseUrl` unexpanded:
+
+```
+modelKey    = sha256hex(canon({"endpoint":E,"kind":"model","model":<requested>}))      -> served model
+decisionKey = sha256hex(canon({"assets"?:A,"endpoint":E,"kind":"decision","model":<served>,
+                               "questions":Q,"state":<state as sent>}))                 -> reply body
+```
+
+A hit sends nothing and sets `decision.cached` and the event's `cached`. When an alias starts
+serving another model, the next live call re-points `modelKey`; otherwise the TTL is the guard. A
+cutover gate (ADR 0038 D8) runs with no cache.
+
+**Helpers.** `validateDecision(questions, decision)` — first failure, in order: missing answer
+(question keys ASCII), unexpected answer (ASCII), then per key: type mismatch, noul ∉ [0,1], choice
+not offered / probability key not offered / probability ∉ [0,1] / non-empty sum outside 1 ± 0.02 /
+confidence ∉ [0,1], score ∉ [0, levels−1] / same probability rules over level indices / confidence;
+messages start `classifier: invalid decision: ` and name `"<key>"`. `Thresholds{yes 0.8, no 0.2,
+minConfidence 0.6}` — inclusive (`p ≥ yes`, `p ≤ no`, `confidence ≥ minConfidence`), no near-uniform
+demotion; `Bands` unchanged. `chunkQuestions(questions, size)` — ASCII key order, `size ≥ 1`.
+
+**Metric** — every `classifier.evaluate` event carries `questions` (count), `questionsHash`
+(sha256 hex of `canonicalRequest(model, questions)`) and `cached`.
+
+**Open union.** A raw question `{type, instructions, criteria?}` is sent as written (type
+non-empty, no limits); an answer of an unknown type decodes to a raw answer `{type, value}`.
+
+**`style: "llm"` is deprecated**, kept byte-identical as an alias for at least one minor release.
 
 ### Batch — `evaluateBatch(states, questions)`
 

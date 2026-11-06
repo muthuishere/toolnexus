@@ -9,9 +9,11 @@
  * the declared schema. Numeric limits, permission checks and allowlists stay in code. Nothing
  * here is a security control.
  */
+import { createHash } from "node:crypto"
 import type { Client } from "./client.js"
 import { type ErrorInfo, type ErrorTier, type MetricEvent, redactErrorBody, capErrorBody } from "./client.js"
 import { retryAfterMs, isRetryableStatus } from "./retry.js"
+import { isContentPart, type ContentPart } from "./content.js"
 
 // ---------------------------------------------------------------- constants
 
@@ -29,14 +31,98 @@ export const DEFAULT_BATCH_CONCURRENCY = 16
 /**
  * A named BACKEND: `baseUrl`, `model` and `apiKeyEnv` are only jointly valid, so they travel as
  * a UNIT (ADR 0027 D1). `jev-latest` is TypeSafe's spelling; the gateway spells the same model
- * `typesafe/jev-1.13`, and mixing the two is issue #91.
+ * `typesafe/jev-1.14`, and mixing the two is issue #91. `custom` is a self-hosted System One
+ * endpoint and requires `baseUrl` + `supports` (SPEC §8B "Backends, images, cache and validation").
  */
-export type ClassifierBackend = "typesafe" | "openrouter"
+export type ClassifierBackend = "typesafe" | "openrouter" | "cloudflare" | "vercel" | "custom"
 
-/** The two servable pairings, as configurations rather than six independently-choosable cells. */
-export const CLASSIFIER_BACKENDS: Readonly<Record<ClassifierBackend, { baseUrl: string; model: string; apiKeyEnv: string }>> = {
-  typesafe: { baseUrl: DEFAULT_CLASSIFIER_BASE_URL, model: DEFAULT_CLASSIFIER_MODEL, apiKeyEnv: DEFAULT_CLASSIFIER_API_KEY_ENV },
-  openrouter: { baseUrl: "https://openrouter.ai/api/v1", model: "typesafe/jev-1.13", apiKeyEnv: "OPENROUTER_API_KEY" },
+/** What a backend+model can take. DATA: a fail-fast for what the table says, never a claim about
+ * the vendor. Override per classifier with `ClassifierOptions.supports`. */
+export interface ClassifierSupports {
+  images: boolean
+}
+
+/** One row of the backend table. */
+export interface ClassifierBackendPreset {
+  /** `""` on `custom`, which requires `baseUrl`. May carry `${NAME}`, expanded at call time. */
+  baseUrl: string
+  model: string
+  apiKeyEnv: string
+  /** `systemone`: POST {baseUrl}/systemone. `cloudflare`: POST {baseUrl}, `/ai/run` envelope. */
+  wire: "systemone" | "cloudflare"
+  /** Send `TypeSafe-Danger-Zone-Images: true` when a request carries images. */
+  imagesHeader: boolean
+  /** The default support for a model on this backend; absent on `custom`. */
+  supports?: (model: string) => ClassifierSupports
+}
+
+/** TypeSafe's required opt-in header for image ("danger zone") input. */
+export const CLASSIFIER_IMAGES_HEADER = "TypeSafe-Danger-Zone-Images"
+/** Image limits (docs.typesafe.ai/images): checked client-side, never resized. */
+export const CLASSIFIER_IMAGE_MIN_SIDE = 280
+export const CLASSIFIER_IMAGE_MAX_SIDE = 1568
+export const CLASSIFIER_IMAGE_MAX_BYTES = 16 * 1024 * 1024
+export const CLASSIFIER_REQUEST_IMAGE_BYTES = 32 * 1024 * 1024
+
+/**
+ * The backend table (PROPOSED defaults, owner to confirm — design.md PD-1..PD-4). Vercel and
+ * Cloudflare-Jev images stay false until a live probe proves them.
+ */
+export const CLASSIFIER_BACKENDS: Readonly<Record<ClassifierBackend, Readonly<ClassifierBackendPreset>>> = Object.freeze({
+  typesafe: {
+    baseUrl: DEFAULT_CLASSIFIER_BASE_URL,
+    model: DEFAULT_CLASSIFIER_MODEL,
+    apiKeyEnv: DEFAULT_CLASSIFIER_API_KEY_ENV,
+    wire: "systemone",
+    imagesHeader: true,
+    supports: () => ({ images: true }),
+  },
+  openrouter: {
+    baseUrl: "https://openrouter.ai/api/v1",
+    model: "typesafe/jev-1.14",
+    apiKeyEnv: "OPENROUTER_API_KEY",
+    wire: "systemone",
+    imagesHeader: true,
+    supports: () => ({ images: true }),
+  },
+  cloudflare: {
+    baseUrl: "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/ai/run",
+    model: "typesafe/jev",
+    apiKeyEnv: "CLOUDFLARE_JEV_API_KEY",
+    wire: "cloudflare",
+    imagesHeader: false,
+    supports: (model: string) => ({ images: model.includes("clef") }),
+  },
+  vercel: {
+    baseUrl: "https://ai-gateway.vercel.sh/typesafe/v1",
+    model: "typesafe-ai/jev",
+    apiKeyEnv: "AI_GATEWAY_API_KEY",
+    wire: "systemone",
+    imagesHeader: true,
+    supports: () => ({ images: false }),
+  },
+  custom: {
+    baseUrl: "",
+    model: DEFAULT_CLASSIFIER_MODEL,
+    apiKeyEnv: DEFAULT_CLASSIFIER_API_KEY_ENV,
+    wire: "systemone",
+    imagesHeader: true,
+  },
+})
+
+/**
+ * Raised BEFORE any network call when the backend table says the backend cannot take what the
+ * request carries. Message, exact: `classifier: <backend> (<model>) does not support <feature>`.
+ */
+export class ClassifierUnsupported extends Error {
+  constructor(
+    readonly backend: string,
+    readonly model: string,
+    readonly feature: string,
+  ) {
+    super(`classifier: ${backend} (${model}) does not support ${feature}`)
+    this.name = "ClassifierUnsupported"
+  }
 }
 
 /** Client-side cap on a choice's named options (§8B). */
@@ -97,8 +183,35 @@ export interface ScoreQuestion {
   criteria: string[]
 }
 
-/** The closed set of question types, discriminated by `type`. */
+/** The modelled question types, discriminated by `type`. */
 export type Question = NoulQuestion | ChoiceQuestion | ScoreQuestion
+
+/**
+ * The OPEN end of the question union (§8B): a System One type the library does not model (e.g.
+ * Jev 1.14 `box`), sent as written with no client-side limits. `type` must be non-empty.
+ */
+export interface RawQuestion {
+  type: string
+  instructions: string
+  /** Sent verbatim when present, absent otherwise. */
+  criteria?: unknown
+}
+
+/** Every question `evaluate` accepts: the modelled three plus a raw one. */
+export type AnyQuestion = Question | RawQuestion
+
+const MODELLED_TYPES = new Set(["noul", "choice", "score"])
+
+/** True when `q` is a raw question (its type is not noul/choice/score). Not a type guard: every
+ * modelled question is structurally a `RawQuestion` too. */
+export function isRawQuestion(q: AnyQuestion): boolean {
+  return !MODELLED_TYPES.has(q?.type as string)
+}
+
+/** A raw question, sent as written. */
+export function raw(type: string, instructions: string, criteria?: unknown): RawQuestion {
+  return criteria === undefined ? { type, instructions } : { type, instructions, criteria }
+}
 
 /** A noul question. Pass `criteria` only when you mean it — absent ≠ empty on the wire. */
 export function noul(instructions: string, criteria?: NoulCriteria): NoulQuestion {
@@ -125,7 +238,14 @@ export function choiceOver(instructions: string, items: Record<string, string>):
 }
 
 /** The wire form of one question — the object itself, minus an absent `criteria`. */
-export function questionWire(q: Question): Record<string, unknown> {
+export function questionWire(question: AnyQuestion): Record<string, unknown> {
+  if (isRawQuestion(question)) {
+    const r = question as RawQuestion
+    return r.criteria === undefined
+      ? { type: r.type, instructions: r.instructions }
+      : { type: r.type, instructions: r.instructions, criteria: r.criteria }
+  }
+  const q = question as Question
   switch (q.type) {
     case "noul":
       return q.criteria === undefined
@@ -139,7 +259,12 @@ export function questionWire(q: Question): Record<string, unknown> {
 }
 
 /** Client-side limits, enforced BEFORE the request. The error names the key and the limit. */
-function validateQuestion(key: string, q: Question): void {
+function validateQuestion(key: string, question: AnyQuestion): void {
+  const q = question as Question
+  if (isRawQuestion(question)) {
+    if (!question?.type) throw new Error(`classifier: question "${key}": a raw question needs a type`)
+    return
+  }
   if (q.type === "choice") {
     const n = Object.keys(q.criteria ?? {}).length
     if (n < 1 || n > MAX_CHOICE_OPTIONS) {
@@ -192,7 +317,7 @@ export function canonicalJson(value: unknown): string {
  * ways across our own seven runtimes). Do not re-widen this: a caller who needs their state
  * pinned canonicalises it themselves before handing it over.
  */
-export function canonicalRequest(model: string, questions: Record<string, Question>): string {
+export function canonicalRequest(model: string, questions: Record<string, AnyQuestion>): string {
   const qs: Record<string, unknown> = {}
   for (const [key, q] of Object.entries(questions)) {
     if (!q) throw new Error(`classifier: question "${key}" is missing`)
@@ -241,6 +366,22 @@ export interface ScoreAnswer {
  */
 export type DecisionAnswer = NoulAnswer | ChoiceAnswer | ScoreAnswer
 
+/**
+ * An answer of a type the library does not model (the open union, §8B). It may appear in
+ * `Decision.answers` at runtime (read it with `decision.raw(key)` or `isRawAnswer`); `value` is the
+ * whole answer object as decoded, `type` included. It is kept out of `DecisionAnswer` so existing
+ * `switch (a.type)` narrowing keeps compiling.
+ */
+export interface RawAnswer {
+  type: string
+  value: Record<string, unknown>
+}
+
+/** True when an answer is a raw (unmodelled-type) answer. */
+export function isRawAnswer(a: unknown): a is RawAnswer {
+  return !!a && typeof a === "object" && !MODELLED_TYPES.has((a as any).type) && "value" in (a as any)
+}
+
 /** The wire's usage block. `cost` is absent on some backends. */
 export interface ClassifierUsage {
   inputTokens: number
@@ -271,7 +412,17 @@ export class Decision {
      * BACKEND DOES NOT TRANSFER TO ANOTHER.
      */
     readonly calibrated: boolean,
+    /** True when the decision came from `ClassifierOptions.cache` and no request was sent. */
+    readonly cached: boolean = false,
   ) {}
+
+  /** Typed read of a raw (unmodelled-type) answer. Throws on an absent key or a modelled type. */
+  raw(key: string): RawAnswer {
+    const a: unknown = this.answers[key]
+    if (a === undefined) throw new Error(`classifier: no answer "${key}" in this decision`)
+    if (!isRawAnswer(a)) throw new Error(`classifier: answer "${key}" is a ${(a as any).type} answer, not raw`)
+    return a
+  }
 
   /** Typed read. Throws (never returns undefined) on a wrong-type or absent key. */
   noul(key: string): NoulAnswer {
@@ -345,7 +496,9 @@ export function decodeDecision(raw: unknown, fallbackModel: string): Decision {
         }
         break
       default:
-        throw new Error(`classifier: answer "${key}": unknown type ${JSON.stringify(a.type)}`)
+        // The union is OPEN (§8B): an unmodelled type (e.g. Jev 1.14 "box") decodes to a raw
+        // answer instead of failing the whole decision.
+        ;(answers as Record<string, unknown>)[key] = { type: String(a.type ?? ""), value: { ...a } } satisfies RawAnswer
     }
   }
   const usage: ClassifierUsage = {
@@ -376,7 +529,12 @@ function strings(v: unknown): Record<string, string> {
 
 // ---------------------------------------------------------------- options
 
-/** `"systemone" | "llm" | "custom" | "static"` — the same slot as the client's `style`. */
+/**
+ * `"systemone" | "llm" | "custom" | "static"` — the same slot as the client's `style`.
+ *
+ * `"llm"` is DEPRECATED (ADR 0038 D3: System One is the single product wire). It keeps working
+ * byte-identically, as an alias, for at least one minor release; there is no runtime warning.
+ */
 export type ClassifierStyle = "systemone" | "llm" | "custom" | "static"
 
 /**
@@ -387,7 +545,7 @@ export type ClassifierStyle = "systemone" | "llm" | "custom" | "static"
  */
 export interface RecordedDecision {
   state: unknown
-  questions: Record<string, Question>
+  questions: Record<string, AnyQuestion>
   /** The recorded backend response body, verbatim. */
   response: unknown
 }
@@ -395,7 +553,7 @@ export interface RecordedDecision {
 /** The host's own backend (`style: "custom"`). Every wire option is ignored. */
 export type EvaluateFn = (
   state: unknown,
-  questions: Record<string, Question>,
+  questions: Record<string, AnyQuestion>,
   signal?: AbortSignal,
 ) => Promise<Decision> | Decision
 
@@ -406,7 +564,7 @@ export type EvaluateFn = (
 export interface ClassifierOptions {
   /** Default `"systemone"`. */
   style?: ClassifierStyle
-  /** A named `baseUrl` + `model` + `apiKeyEnv` pairing (`"typesafe"` | `"openrouter"`), set as a
+  /** A named backend row (`"typesafe"` | `"openrouter"` | `"cloudflare"` | `"vercel"` | `"custom"`), set as a
    * UNIT. Default `"typesafe"`. The three individual options still win where given, for a
    * self-hosted origin — but a known-bad mixture is refused at construction, not 700 ms later
    * as an "Unknown model" 400. */
@@ -451,12 +609,37 @@ export interface ClassifierOptions {
   /** Emits `classifier.evaluate` events into the SAME §8 sink, and carries the
    * degenerate-criteria warning as `classifier.warning`. */
   onMetric?: (ev: MetricEvent) => void
-  /** `style: "llm"` only — the §8 Client to emulate over. */
+  /** `style: "llm"` only — the §8 Client to emulate over.
+   * @deprecated `style: "llm"` is deprecated (System One is the single wire); it still works. */
   client?: Client
   /** `style: "custom"` only — the host's own function. */
   evaluate?: EvaluateFn
   /** `style: "static"` only — the recorded corpus. */
   decisions?: RecordedDecision[]
+  /** Overrides the backend table's support row for this classifier. Required with `backend: "custom"`. */
+  supports?: ClassifierSupports
+  /** Opt-in answer cache (§8B). Absent ⇒ no caching. Consulted by style `systemone` only; only
+   * replies that pass `validateDecision` are stored. Methods may return values or Promises. */
+  cache?: ClassifierCache
+}
+
+/** An injected answer cache. Values are opaque strings: the served model under a model key, the
+ * System One reply body under a decision key. */
+export interface ClassifierCache {
+  get(key: string): string | undefined | null | Promise<string | undefined | null>
+  set(key: string, value: string): void | Promise<void>
+}
+
+/** One state's outcome from `states(...).evaluate`: exactly one of `decision` / `error` is set. */
+export interface BatchResult {
+  decision?: Decision
+  error?: Error
+}
+
+/** A named question (`judge.noul(...)` etc. build these). */
+export interface NamedClassifierQuestion {
+  name: string
+  question: AnyQuestion
 }
 
 // ---------------------------------------------------------------- classifier
@@ -468,6 +651,9 @@ export class Classifier {
   private readonly model: string
   private readonly apiKeyEnv: string
   private readonly timeoutMs: number
+  private readonly backend: ClassifierBackend
+  private readonly preset: Readonly<ClassifierBackendPreset>
+  private readonly supports: ClassifierSupports
   private readonly corpus = new Map<string, unknown>()
   /** The once-per-question-key set for the degenerate warning, so a per-turn judge does not
    * flood the sink. */
@@ -475,13 +661,24 @@ export class Classifier {
 
   constructor(private readonly opts: ClassifierOptions) {
     this.style = opts.style ?? "systemone"
-    const preset = CLASSIFIER_BACKENDS[opts.backend ?? "typesafe"]
-    this.baseUrl = opts.baseUrl ?? preset.baseUrl
+    this.backend = opts.backend ?? "typesafe"
+    if (!Object.prototype.hasOwnProperty.call(CLASSIFIER_BACKENDS, this.backend)) {
+      throw new Error(
+        `classifier: unknown backend "${this.backend}" (want "typesafe", "openrouter", "cloudflare", "vercel" or "custom")`,
+      )
+    }
+    const preset = CLASSIFIER_BACKENDS[this.backend]
+    this.preset = preset
+    if (this.backend === "custom" && this.style === "systemone" && (!opts.baseUrl || !opts.supports)) {
+      throw new Error('classifier: backend "custom" requires baseUrl and supports')
+    }
+    this.baseUrl = opts.baseUrl || preset.baseUrl
     this.model = opts.model ?? preset.model
     this.apiKeyEnv = opts.apiKeyEnv ?? preset.apiKeyEnv
     const mismatch = backendMismatch(this.baseUrl, this.model)
     if (mismatch) throw new Error(mismatch)
     this.timeoutMs = opts.timeoutMs ?? DEFAULT_CLASSIFIER_TIMEOUT_MS
+    this.supports = opts.supports ? { ...opts.supports } : (preset.supports?.(this.model) ?? { images: false })
     switch (this.style) {
       case "systemone":
         break
@@ -511,12 +708,67 @@ export class Classifier {
    * The whole contract: a state plus typed questions in, a Decision out. Questions are
    * INDEPENDENT — one answer is never context for another.
    */
-  async evaluate(state: unknown, questions: Record<string, Question>, signal?: AbortSignal): Promise<Decision> {
+  async evaluate(state: unknown, questions: Record<string, AnyQuestion>, signal?: AbortSignal): Promise<Decision> {
+    return this.run(state, questions, signal, false)
+  }
+
+  /**
+   * Binds one state (a VALUE, not a session: nothing is sent until `evaluate`). Its `evaluate`
+   * runs the same path as `evaluate` PLUS fail-closed validation (`validateDecision`).
+   */
+  state(value: unknown, opts: { signal?: AbortSignal } = {}): { evaluate(...questions: NamedClassifierQuestion[]): Promise<Decision> } {
+    return {
+      evaluate: async (...qs: NamedClassifierQuestion[]) => this.run(value, namedQuestions(qs), opts.signal, true),
+    }
+  }
+
+  /**
+   * Binds a batch of states. Its `evaluate` runs `state(v).evaluate` per state, at most 16 in
+   * flight, and returns one `{decision | error}` per state IN ORDER. One state's failure never
+   * fails the batch; only a question-set error (duplicate name) throws, before any request.
+   */
+  states(...values: unknown[]): { evaluate(...questions: NamedClassifierQuestion[]): Promise<BatchResult[]> } {
+    return {
+      evaluate: async (...qs: NamedClassifierQuestion[]) => {
+        const questions = namedQuestions(qs)
+        const out: BatchResult[] = new Array(values.length)
+        let next = 0
+        const worker = async () => {
+          while (next < values.length) {
+            const i = next++
+            try {
+              out[i] = { decision: await this.run(values[i], questions, undefined, true) }
+            } catch (e) {
+              out[i] = { error: e instanceof Error ? e : new Error(String(e)) }
+            }
+          }
+        }
+        await Promise.all(Array.from({ length: Math.min(DEFAULT_BATCH_CONCURRENCY, values.length) }, worker))
+        return out
+      },
+    }
+  }
+
+  /** The one path. `validate` = fail closed on `validateDecision` (the value builders). */
+  private async run(
+    state: unknown,
+    questions: Record<string, AnyQuestion>,
+    signal: AbortSignal | undefined,
+    validate: boolean,
+  ): Promise<Decision> {
     const start = Date.now()
     const keys = Object.keys(questions ?? {}).sort()
+    // L1: count + hash of the canonical request on every evaluate event ("" when unencodable).
+    let qHash = ""
+    try {
+      qHash = sha256Hex(canonicalRequest(this.model, questions ?? {}))
+    } catch {
+      qHash = ""
+    }
+    const l1 = { questions: keys.length, questionsHash: qHash }
     if (keys.length === 0) {
       const err = new Error("classifier: no questions to evaluate")
-      this.emitError(start, err)
+      this.emitError(start, err, l1)
       throw err
     }
     try {
@@ -529,7 +781,7 @@ export class Classifier {
         validateQuestion(key, q)
       }
     } catch (e) {
-      this.emitError(start, e)
+      this.emitError(start, e, l1)
       throw e
     }
     // Detection, never repair (ADR 0020/0021): the request goes out BYTE-UNCHANGED and the
@@ -549,10 +801,14 @@ export class Classifier {
           decision = await this.evaluateLLM(state, questions, signal)
           break
         default:
-          decision = await this.evaluateSystemOne(state, questions, signal)
+          decision = await this.evaluateWire(state, questions, signal, validate)
+      }
+      if (validate && this.style !== "systemone") {
+        const verr = validateDecision(questions, decision)
+        if (verr) throw verr
       }
     } catch (e) {
-      this.emitError(start, e)
+      this.emitError(start, e, l1)
       throw e
     }
     this.emit({
@@ -562,6 +818,8 @@ export class Classifier {
       ms: Date.now() - start,
       promptTokens: decision.usage.inputTokens,
       completionTokens: decision.usage.outputTokens,
+      ...l1,
+      cached: decision.cached === true,
     })
     return decision
   }
@@ -574,7 +832,7 @@ export class Classifier {
    */
   async evaluateBatch(
     states: readonly unknown[],
-    questions: Record<string, Question>,
+    questions: Record<string, AnyQuestion>,
     opts: { signal?: AbortSignal; concurrency?: number } = {},
   ): Promise<Decision[]> {
     if (!states || states.length === 0) throw new Error("classifier: no states to evaluate")
@@ -606,9 +864,9 @@ export class Classifier {
    * nothing about the request. Repairing would invent option descriptions the caller did not
    * write, and the library has no way to know what the options mean.
    */
-  private reportDegenerate(keys: string[], questions: Record<string, Question>): void {
+  private reportDegenerate(keys: string[], questions: Record<string, AnyQuestion>): void {
     for (const key of keys) {
-      const q = questions[key]
+      const q = questions[key] as Question
       if (q.type !== "choice") continue
       const reason = degenerateCriteria(q.criteria)
       if (!reason || this.warned.has(key)) continue
@@ -627,14 +885,22 @@ export class Classifier {
   // ---------------------------------------------------------------- backends
 
   /**
-   * Assembles the request: the canonical model + questions, plus state VERBATIM as the host
-   * supplied it, then the §8 Gap 1 pipeline in §8 order (base → requestParams merge →
-   * bodyTransform → marshal).
+   * Assembles the request for the backend's wire: the canonical model + questions, plus the state
+   * (VERBATIM unless it carried content parts) and, on systemone, `assets`; then the §8 Gap 1
+   * pipeline in §8 order (base → requestParams merge → bodyTransform → marshal).
    */
-  private body(state: unknown, questions: Record<string, Question>): string {
+  private body(p: PreparedRequest, questions: Record<string, AnyQuestion>): string {
     const qs: Record<string, unknown> = {}
     for (const [key, q] of Object.entries(questions)) qs[key] = questionWire(q)
-    let body: Record<string, any> = { model: this.model, questions: qs, state }
+    let body: Record<string, any>
+    if (this.preset.wire === "cloudflare") {
+      const input: Record<string, unknown> = { questions: qs, state: p.state }
+      if (p.images.length > 0) input.images = p.images.map((im) => `data:image/${im.format};base64,${im.data}`)
+      body = { model: this.model, input }
+    } else {
+      body = { model: this.model, questions: qs, state: p.state }
+      if (p.assets) body.assets = p.assets
+    }
     // A requestParams key WINS on collision.
     if (this.opts.requestParams) body = { ...body, ...this.opts.requestParams }
     if (this.opts.bodyTransform) body = this.opts.bodyTransform(body) || body
@@ -642,29 +908,76 @@ export class Classifier {
   }
 
   /** Identifies a recorded decision by the canonical request AND the state. */
-  private staticKey(state: unknown, questions: Record<string, Question>): string {
+  private staticKey(state: unknown, questions: Record<string, AnyQuestion>): string {
     return canonicalRequest(this.model, questions) + "\u0000" + canonicalJson(state)
   }
 
-  private evaluateStatic(state: unknown, questions: Record<string, Question>): Decision {
+  private evaluateStatic(state: unknown, questions: Record<string, AnyQuestion>): Decision {
     const raw = this.corpus.get(this.staticKey(state, questions))
     if (raw === undefined) throw new Error("classifier: static: no recorded decision for this request+state")
     return decodeDecision(raw, this.model)
   }
 
-  private async evaluateSystemOne(
+  /** Lift images, apply the support table and the limits — all before any request. */
+  private prepare(state: unknown): PreparedRequest {
+    const { state: sent, images } = liftImages(state)
+    if (images.length > 0 && !this.supports.images) throw new ClassifierUnsupported(this.backend, this.model, "images")
+    checkImages(images)
+    let assets: Record<string, unknown> | undefined
+    if (images.length > 0) {
+      assets = {}
+      for (const im of images) assets[im.ref] = { type: "image", format: im.format, data_base64: im.data }
+    }
+    return { state: sent, images, assets }
+  }
+
+  /** The systemone style on every backend: lift, check, cache, post, decode. */
+  private async evaluateWire(
     state: unknown,
-    questions: Record<string, Question>,
-    signal?: AbortSignal,
+    questions: Record<string, AnyQuestion>,
+    signal: AbortSignal | undefined,
+    validate: boolean,
   ): Promise<Decision> {
-    const text = await this.post(this.body(state, questions), signal)
+    const p = this.prepare(state)
+    const cache = this.opts.cache
+    let modelKey = ""
+    if (cache) {
+      modelKey = classifierModelCacheKey(this.baseUrl, this.model)
+      const served = await cache.get(modelKey)
+      if (typeof served === "string") {
+        const hit = await cache.get(classifierDecisionCacheKey(this.baseUrl, served, p.state, p.assets, questions))
+        if (typeof hit === "string") {
+          try {
+            const d = decodeDecision(JSON.parse(hit), served)
+            if (!validateDecision(questions, d)) return new Decision(d.model, d.answers, d.usage, d.calibrated, true)
+          } catch {
+            // a corrupt entry is a miss
+          }
+        }
+      }
+    }
+    const extra: Record<string, string> =
+      p.images.length > 0 && this.preset.imagesHeader ? { [CLASSIFIER_IMAGES_HEADER]: "true" } : {}
+    let text = await this.post(this.body(p, questions), signal, extra)
     let parsed: unknown
     try {
       parsed = JSON.parse(text)
     } catch (e) {
       throw new Error(`classifier: response was not JSON: ${(e as Error).message}`)
     }
-    return decodeDecision(parsed, this.model)
+    if (this.preset.wire === "cloudflare") {
+      parsed = unwrapCloudflare(parsed)
+      text = canonicalJson(parsed)
+    }
+    const d = decodeDecision(parsed, this.model)
+    const verr = validateDecision(questions, d)
+    if (validate && verr) throw verr
+    if (cache && !verr) {
+      const served = d.model || this.model
+      await cache.set(modelKey, served)
+      await cache.set(classifierDecisionCacheKey(this.baseUrl, served, p.state, p.assets, questions), text)
+    }
+    return d
   }
 
   /**
@@ -676,8 +989,12 @@ export class Classifier {
    * is never echoed back (a gateway happily reflects a bad Authorization header into its own
    * 401 text).
    */
-  private async post(payload: string, signal?: AbortSignal): Promise<string> {
-    const endpoint = this.baseUrl.replace(/\/+$/, "") + "/systemone"
+  private async post(payload: string, signal?: AbortSignal, extraHeaders: Record<string, string> = {}): Promise<string> {
+    // `endpoint` is what errors name: the CONFIGURED base, ${ENV} unexpanded, so an account id in
+    // a templated URL never reaches an error. `url` is what is dialled, expanded at call time.
+    let endpoint = this.baseUrl.replace(/\/+$/, "")
+    if (this.preset.wire !== "cloudflare") endpoint += "/systemone"
+    const url = endpoint.includes("${") ? expandEnv(endpoint) : endpoint
     const retries = this.opts.retries ?? 2
     const base = this.opts.retryBaseMs ?? 500
     const classify = this.opts.onError ?? ((info: ErrorInfo): ErrorTier => (info.retryable ? "retry" : "fail"))
@@ -700,9 +1017,9 @@ export class Classifier {
       let res: Response | undefined
       let thrown: unknown
       try {
-        res = await doFetch(endpoint, {
+        res = await doFetch(url, {
           method: "POST",
-          headers: this.requestHeaders(),
+          headers: this.requestHeaders(extraHeaders),
           body: payload,
           signal: timer.signal,
         })
@@ -720,7 +1037,7 @@ export class Classifier {
         retryAfter = res.headers.get("retry-after")
         lastErr = new Error(`classifier: POST ${endpoint}: HTTP ${res.status}${cause(res.status, text)}`)
       } else {
-        lastErr = new Error(`classifier: POST ${endpoint}: ${errText(thrown)}`)
+        lastErr = new Error(`classifier: POST ${endpoint}: ${errText(thrown).split(url).join(endpoint)}`)
       }
       const retryable = res ? res.status === 408 || isRetryableStatus(res.status, this.opts.retryableStatuses) : true
       if (attempt >= retries) throw lastErr
@@ -732,10 +1049,12 @@ export class Classifier {
   }
 
   /** Credential and `${ENV_VAR}` headers resolve AT CALL TIME. Never logged, never returned. */
-  private requestHeaders(): Record<string, string> {
+  private requestHeaders(extra: Record<string, string> = {}): Record<string, string> {
     const headers: Record<string, string> = { "Content-Type": "application/json" }
     const key = process.env[this.apiKeyEnv]
     if (key) headers["Authorization"] = `Bearer ${key}`
+    // The image opt-in header goes BEFORE host headers, which win.
+    for (const [k, v] of Object.entries(extra)) headers[k] = v
     for (const [k, v] of Object.entries(this.opts.headers ?? {})) headers[k] = expandEnv(v)
     return headers
   }
@@ -748,7 +1067,7 @@ export class Classifier {
    */
   private async evaluateLLM(
     state: unknown,
-    questions: Record<string, Question>,
+    questions: Record<string, AnyQuestion>,
     signal?: AbortSignal,
   ): Promise<Decision> {
     const qs: Record<string, unknown> = {}
@@ -789,7 +1108,7 @@ export class Classifier {
     this.opts.onMetric?.(ev)
   }
 
-  private emitError(start: number, e: unknown): void {
+  private emitError(start: number, e: unknown, l1: { questions: number; questionsHash: string }): void {
     this.emit({
       event: "classifier.evaluate",
       model: this.model,
@@ -798,6 +1117,8 @@ export class Classifier {
       promptTokens: 0,
       completionTokens: 0,
       error: errText(e),
+      ...l1,
+      cached: false,
     })
   }
 }
@@ -883,3 +1204,313 @@ function sleep(ms: number): Promise<void> {
   })
 }
 
+
+// ---------------------------------------------------------------- backends, images, cache, validation
+// SPEC.md §8B "Backends, images, cache and validation" (change add-classifier-backends, ADR 0038).
+// Every default here is a PROPOSED default, owner to confirm (design.md PD-1..PD-15).
+
+/** Ordered named questions -> the questions map. A duplicate name is an error naming it. */
+function namedQuestions(qs: readonly NamedClassifierQuestion[]): Record<string, AnyQuestion> {
+  const out: Record<string, AnyQuestion> = {}
+  for (const { name, question } of qs) {
+    if (Object.prototype.hasOwnProperty.call(out, name)) throw new Error(`duplicate question name ${JSON.stringify(name)}`)
+    out[name] = question
+  }
+  return out
+}
+
+function sha256Hex(s: string): string {
+  return createHash("sha256").update(s, "utf8").digest("hex")
+}
+
+interface LiftedImage {
+  ref: string
+  /** The MIME type until `checkImages` normalises it to `png` | `jpeg`. */
+  format: string
+  data: string
+}
+
+interface PreparedRequest {
+  state: unknown
+  images: LiftedImage[]
+  assets?: Record<string, unknown>
+}
+
+function containsPart(v: unknown): boolean {
+  if (Array.isArray(v)) return v.some(containsPart)
+  if (v !== null && typeof v === "object") {
+    if (isContentPart(v)) return true
+    return Object.values(v as Record<string, unknown>).some(containsPart)
+  }
+  return false
+}
+
+/**
+ * The §8B lifting walk. A state with no content part is returned VERBATIM (the same value), so a
+ * text-only state is byte-identical to before. Otherwise depth-first, object keys in ASCII order,
+ * arrays in order: an image part with inline data becomes a reference (its key when unused, else
+ * the smallest unused `image<n>`), a text part becomes its text, any other part is an error.
+ */
+function liftImages(state: unknown): { state: unknown; images: LiftedImage[] } {
+  if (!containsPart(state)) return { state, images: [] }
+  const used = new Set<string>()
+  const images: LiftedImage[] = []
+  const nextRef = () => {
+    for (let n = 1; ; n++) if (!used.has(`image${n}`)) return `image${n}`
+  }
+  const walk = (v: unknown, key: string): unknown => {
+    if (Array.isArray(v)) return v.map((e) => walk(e, ""))
+    if (v === null || typeof v !== "object") return v
+    if (isContentPart(v)) {
+      const part = v as ContentPart
+      if (part.type === "text") return part.text
+      if (part.type === "image") {
+        if (!part.data) throw new Error("classifier: state: an image part needs inline data (a URL image cannot be sent)")
+        const ref = key === "" || used.has(key) ? nextRef() : key
+        used.add(ref)
+        images.push({ ref, format: part.mimeType, data: part.data })
+        return ref
+      }
+      throw new Error(`classifier: state: ${part.type} parts are not supported`)
+    }
+    const obj = v as Record<string, unknown>
+    const out: Record<string, unknown> = {}
+    for (const k of Object.keys(obj).sort()) out[k] = walk(obj[k], k)
+    return out
+  }
+  return { state: walk(state, ""), images }
+}
+
+const IMAGE_FORMATS: Record<string, string> = { "image/png": "png", "image/jpeg": "jpeg", "image/jpg": "jpeg" }
+
+/** Format, per-image and per-request limits, in collection order; normalises `format`. */
+function checkImages(images: LiftedImage[]): void {
+  let total = 0
+  for (const im of images) {
+    const format = IMAGE_FORMATS[im.format]
+    if (!format) throw new Error(`classifier: image "${im.ref}": type "${im.format}" is not supported (PNG or JPEG only)`)
+    im.format = format
+    if (im.data.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(im.data)) {
+      throw new Error(`classifier: image "${im.ref}": data is not base64`)
+    }
+    const raw = Buffer.from(im.data, "base64")
+    if (raw.length > CLASSIFIER_IMAGE_MAX_BYTES) {
+      throw new Error(`classifier: image "${im.ref}": ${raw.length} bytes, over 16 MiB`)
+    }
+    const size = imageSize(format, raw)
+    if (!size) throw new Error(`classifier: image "${im.ref}": not a readable ${format.toUpperCase()}`)
+    const [w, h] = size
+    const ok = (n: number) => n >= CLASSIFIER_IMAGE_MIN_SIDE && n <= CLASSIFIER_IMAGE_MAX_SIDE
+    if (!ok(w) || !ok(h)) {
+      throw new Error(
+        `classifier: image "${im.ref}": ${w}x${h}; each side must be ${CLASSIFIER_IMAGE_MIN_SIDE}..${CLASSIFIER_IMAGE_MAX_SIDE} px`,
+      )
+    }
+    total += raw.length
+  }
+  if (total > CLASSIFIER_REQUEST_IMAGE_BYTES) {
+    throw new Error(`classifier: image "${images[images.length - 1].ref}": request images total ${total} bytes, over 32 MiB`)
+  }
+}
+
+/** Width/height from a PNG IHDR or the first JPEG SOF marker; undefined when unreadable. */
+function imageSize(format: string, b: Uint8Array): [number, number] | undefined {
+  const be16 = (i: number) => (b[i] << 8) | b[i + 1]
+  const be32 = (i: number) => ((b[i] << 24) >>> 0) + (b[i + 1] << 16) + (b[i + 2] << 8) + b[i + 3]
+  if (format === "png") {
+    const sig = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]
+    if (b.length < 24 || sig.some((x, i) => b[i] !== x)) return undefined
+    if (String.fromCharCode(b[12], b[13], b[14], b[15]) !== "IHDR") return undefined
+    return [be32(16), be32(20)]
+  }
+  if (b.length < 4 || b[0] !== 0xff || b[1] !== 0xd8) return undefined
+  let i = 2
+  while (i + 3 < b.length) {
+    if (b[i] !== 0xff) return undefined
+    const m = b[i + 1]
+    if (m === 0xff) {
+      i++
+      continue
+    }
+    if (m >= 0xc0 && m <= 0xcf && m !== 0xc4 && m !== 0xc8 && m !== 0xcc) {
+      if (i + 8 >= b.length) return undefined
+      return [be16(i + 7), be16(i + 5)]
+    }
+    i += 2 + be16(i + 2)
+  }
+  return undefined
+}
+
+/** The System One reply inside a Cloudflare `/ai/run` envelope. Its error list is never echoed. */
+function unwrapCloudflare(env: unknown): unknown {
+  if (env === null || typeof env !== "object" || Array.isArray(env) || (env as any).success !== true) {
+    throw new Error("classifier: cloudflare: envelope not successful")
+  }
+  let result = (env as any).result
+  if (result !== null && typeof result === "object" && !Array.isArray(result) && typeof result.state === "string") {
+    if (result.state !== "Completed") throw new Error(`classifier: cloudflare: run state "${result.state}"`)
+    result = result.result
+  }
+  return result
+}
+
+/** §8B model key: which model an endpoint + requested model (alias) served last. */
+export function classifierModelCacheKey(endpoint: string, model: string): string {
+  return sha256Hex(canonicalJson({ endpoint, kind: "model", model }))
+}
+
+/** §8B decision key, on the SERVED model. No assets ⇒ the `assets` member is omitted. */
+export function classifierDecisionCacheKey(
+  endpoint: string,
+  servedModel: string,
+  state: unknown,
+  assets: Record<string, unknown> | undefined,
+  questions: Record<string, AnyQuestion>,
+): string {
+  return sha256Hex(classifierDecisionCacheKeyBytes(endpoint, servedModel, state, assets, questions))
+}
+
+/** The canonical JSON a decision key hashes (exported for conformance tests). */
+export function classifierDecisionCacheKeyBytes(
+  endpoint: string,
+  servedModel: string,
+  state: unknown,
+  assets: Record<string, unknown> | undefined,
+  questions: Record<string, AnyQuestion>,
+): string {
+  const qs: Record<string, unknown> = {}
+  for (const [k, q] of Object.entries(questions)) qs[k] = questionWire(q)
+  const m: Record<string, unknown> = { endpoint, kind: "decision", model: servedModel, questions: qs, state }
+  if (assets && Object.keys(assets).length > 0) m.assets = assets
+  return canonicalJson(m)
+}
+
+/**
+ * In-process TTL cache with a size cap (oldest-inserted out first). `ttlMs` 0 = no expiry; `max`
+ * 0 = unbounded. toolnexus persists nothing itself: implement `ClassifierCache` to persist.
+ */
+export class MemoryCache implements ClassifierCache {
+  private readonly m = new Map<string, { v: string; at: number }>()
+  constructor(
+    readonly ttlMs = 0,
+    readonly max = 0,
+    private readonly now: () => number = Date.now,
+  ) {}
+  get(key: string): string | undefined {
+    const e = this.m.get(key)
+    if (!e) return undefined
+    if (this.ttlMs > 0 && this.now() - e.at > this.ttlMs) {
+      this.m.delete(key)
+      return undefined
+    }
+    return e.v
+  }
+  set(key: string, value: string): void {
+    this.m.delete(key) // a re-set is a fresh insertion
+    this.m.set(key, { v: value, at: this.now() })
+    if (this.max > 0) while (this.m.size > this.max) this.m.delete(this.m.keys().next().value as string)
+  }
+  get size(): number {
+    return this.m.size
+  }
+}
+
+/**
+ * V1: fail closed on a reply that does not answer exactly the questions asked, within their
+ * schema. First failure wins, in the §8B order. Returns the error, or undefined when valid.
+ */
+export function validateDecision(
+  questions: Record<string, AnyQuestion>,
+  decision: { answers: Record<string, unknown> },
+): Error | undefined {
+  const bad = (msg: string) => new Error(`classifier: invalid decision: ${msg}`)
+  const answers = decision.answers ?? {}
+  const has = (o: object, k: string) => Object.prototype.hasOwnProperty.call(o, k)
+  const qKeys = Object.keys(questions).sort()
+  for (const k of qKeys) if (!has(answers, k)) return bad(`no answer "${k}"`)
+  const extra = Object.keys(answers)
+    .filter((k) => !has(questions, k))
+    .sort()
+  if (extra.length > 0) return bad(`unexpected answer "${extra[0]}"`)
+  const in01 = (p: unknown) => typeof p === "number" && !Number.isNaN(p) && p >= 0 && p <= 1
+  const dist = (k: string, probs: Record<string, number>, offered: (o: string) => boolean): Error | undefined => {
+    let sum = 0
+    const pk = Object.keys(probs ?? {}).sort()
+    for (const o of pk) {
+      if (!offered(o)) return bad(`answer "${k}": probability for "${o}", which was not offered`)
+      if (!in01(probs[o])) return bad(`answer "${k}": probability ${probs[o]} outside [0,1]`)
+      sum += probs[o]
+    }
+    if (pk.length > 0 && Math.abs(sum - 1) > 0.02) return bad(`answer "${k}": probabilities sum to ${sum.toFixed(4)}`)
+    return undefined
+  }
+  for (const k of qKeys) {
+    const raw = questions[k]
+    const q = raw as Question
+    const a = answers[k] as any
+    const qType = raw.type
+    const aType = a?.type
+    if (aType !== qType) return bad(`answer "${k}" is a ${aType} answer, not ${qType}`)
+    if (isRawQuestion(raw)) continue
+    if (q.type === "noul") {
+      if (!in01(a.noul)) return bad(`answer "${k}": noul ${a.noul} outside [0,1]`)
+    } else if (q.type === "choice") {
+      const offered = (o: string) => has(q.criteria ?? {}, o)
+      if (!offered(a.choice)) return bad(`answer "${k}": choice "${a.choice}" was not offered`)
+      const err = dist(k, a.probabilities, offered)
+      if (err) return err
+      if (!in01(a.confidence)) return bad(`answer "${k}": confidence ${a.confidence} outside [0,1]`)
+    } else {
+      const n = (q.criteria ?? []).length
+      if (typeof a.score !== "number" || Number.isNaN(a.score) || a.score < 0 || a.score > n - 1) {
+        return bad(`answer "${k}": score ${a.score} outside [0,${n - 1}]`)
+      }
+      const offered = (o: string) => Array.from({ length: n }, (_, i) => String(i)).includes(o)
+      const err = dist(k, a.probabilities, offered)
+      if (err) return err
+      if (!in01(a.confidence)) return bad(`answer "${k}": confidence ${a.confidence} outside [0,1]`)
+    }
+  }
+  return undefined
+}
+
+/** jevx's INCLUSIVE cut-points (T1). They sit alongside `Bands` (exclusive), which stays the
+ * default of `ask` / `gate`. */
+export interface Thresholds {
+  yes: number
+  no: number
+  minConfidence: number
+}
+
+/** 0.8 / 0.2 / 0.6 (jevx's builtin profile). */
+export const DEFAULT_THRESHOLDS: Readonly<Thresholds> = Object.freeze({ yes: 0.8, no: 0.2, minConfidence: 0.6 })
+
+/**
+ * The band of one answer under `Thresholds`: noul `p >= yes` ⇒ yes, `p <= no` ⇒ no, else
+ * uncertain; choice/score `confidence >= minConfidence` ⇒ yes, else uncertain. No near-uniform
+ * demotion (that is `Bands`' rule). A raw answer is uncertain.
+ */
+export function thresholdBand(answer: DecisionAnswer | RawAnswer, t: Thresholds = DEFAULT_THRESHOLDS): "yes" | "no" | "uncertain" {
+  const a = answer as any
+  if (a.type === "noul") {
+    if (a.noul >= t.yes) return "yes"
+    if (a.noul <= t.no) return "no"
+  } else if ((a.type === "choice" || a.type === "score") && a.confidence >= t.minConfidence) {
+    return "yes"
+  }
+  return "uncertain"
+}
+
+/**
+ * Split a question set into chunks of `size`, keys in ASCII order. A helper, not automatic:
+ * joint calibration across a split is unproven, so the host decides to split and merges.
+ */
+export function chunkQuestions<Q extends AnyQuestion>(questions: Record<string, Q>, size: number): Record<string, Q>[] {
+  if (!(size >= 1)) throw new Error(`classifier: chunk size must be at least 1, got ${size}`)
+  const keys = Object.keys(questions).sort()
+  const out: Record<string, Q>[] = []
+  for (let i = 0; i < keys.length; i += size) {
+    out.push(Object.fromEntries(keys.slice(i, i + size).map((k) => [k, questions[k]])))
+  }
+  return out
+}

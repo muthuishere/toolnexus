@@ -1,0 +1,108 @@
+{
+  "why": "The Cloudflare /ai/run envelope and its nested run-state unwrap. The envelope's own errors are never echoed.",
+  "questions": {
+    "q": {
+      "instructions": "Is the object red?",
+      "type": "noul"
+    }
+  },
+  "cases": [
+    {
+      "name": "flat",
+      "reply": {
+        "success": true,
+        "result": {
+          "model": "jev-1.13.0",
+          "answers": {
+            "q": {
+              "type": "noul",
+              "noul": 0.91
+            }
+          },
+          "usage": {
+            "input_tokens": 10,
+            "output_tokens": 1
+          }
+        }
+      },
+      "expect": {
+        "model": "jev-1.13.0",
+        "noul": 0.91
+      }
+    },
+    {
+      "name": "nested-completed",
+      "reply": {
+        "success": true,
+        "result": {
+          "state": "Completed",
+          "result": {
+            "model": "jev-1.13.0",
+            "answers": {
+              "q": {
+                "type": "noul",
+                "noul": 0.91
+              }
+            },
+            "usage": {
+              "input_tokens": 10,
+              "output_tokens": 1
+            }
+          }
+        }
+      },
+      "expect": {
+        "model": "jev-1.13.0",
+        "noul": 0.91
+      }
+    },
+    {
+      "name": "nested-running",
+      "reply": {
+        "success": true,
+        "result": {
+          "state": "Running"
+        }
+      },
+      "expect": {
+        "error": "classifier: cloudflare: run state \"Running\""
+      }
+    },
+    {
+      "name": "unsuccessful",
+      "reply": {
+        "success": false,
+        "errors": [
+          {
+            "code": 7000,
+            "message": "account 0123abcd not found"
+          }
+        ]
+      },
+      "expect": {
+        "error": "classifier: cloudflare: envelope not successful"
+      }
+    },
+    {
+      "name": "no-success-field",
+      "reply": {
+        "result": {
+          "model": "jev-1.13.0",
+          "answers": {
+            "q": {
+              "type": "noul",
+              "noul": 0.91
+            }
+          },
+          "usage": {
+            "input_tokens": 10,
+            "output_tokens": 1
+          }
+        }
+      },
+      "expect": {
+        "error": "classifier: cloudflare: envelope not successful"
+      }
+    }
+  ]
+}

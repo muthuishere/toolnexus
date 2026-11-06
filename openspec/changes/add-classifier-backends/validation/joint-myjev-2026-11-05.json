@@ -1,0 +1,1121 @@
+{
+  "rows": [
+    {
+      "state": "MCP serve: embeddable, per-request auth, per-principal tools and confirm gate (for multi-tenant hosting)",
+      "joint": {
+        "area": {
+          "choice": "mcp",
+          "confidence": 0.88013506,
+          "probabilities": {
+            "client": 0.040270355,
+            "mcp": 0.9101013,
+            "release": 0.045323513,
+            "tests": 0.004304918
+          }
+        },
+        "severity": {
+          "confidence": 0.25005883,
+          "legend": {
+            "0": "low",
+            "1": "medium",
+            "2": "high"
+          },
+          "probabilities": {
+            "0": 0.23632362,
+            "1": 0.26363716,
+            "2": 0.5000392
+          },
+          "score": 1.2637156
+        },
+        "urgent": {
+          "noul": 0.00078650465
+        }
+      },
+      "jointRepeat": {
+        "area": {
+          "choice": "mcp",
+          "confidence": 0.88013506,
+          "probabilities": {
+            "client": 0.040270355,
+            "mcp": 0.9101013,
+            "release": 0.045323513,
+            "tests": 0.004304918
+          }
+        },
+        "severity": {
+          "confidence": 0.25005883,
+          "legend": {
+            "0": "low",
+            "1": "medium",
+            "2": "high"
+          },
+          "probabilities": {
+            "0": 0.23632362,
+            "1": 0.26363716,
+            "2": 0.5000392
+          },
+          "score": 1.2637156
+        },
+        "urgent": {
+          "noul": 0.00078650465
+        }
+      },
+      "single": {
+        "area": {
+          "choice": "mcp",
+          "confidence": 0.88013506,
+          "probabilities": {
+            "client": 0.040270355,
+            "mcp": 0.9101013,
+            "release": 0.045323513,
+            "tests": 0.004304918
+          }
+        },
+        "severity": {
+          "confidence": 0.2500546,
+          "legend": {
+            "0": "low",
+            "1": "medium",
+            "2": "high"
+          },
+          "probabilities": {
+            "0": 0.23632342,
+            "1": 0.26364017,
+            "2": 0.5000364
+          },
+          "score": 1.263713
+        },
+        "urgent": {
+          "noul": 0.00078650465
+        }
+      },
+      "deltaJointVsSingle": {
+        "area": 0,
+        "severity": 0.000004229999999993961,
+        "urgent": 0
+      },
+      "deltaJointVsRepeat": {
+        "area": 0,
+        "severity": 0,
+        "urgent": 0
+      },
+      "verdictSame": {
+        "area": true,
+        "severity": true,
+        "urgent": true
+      },
+      "latencyMs": {
+        "area": 103,
+        "joint": 287,
+        "severity": 82,
+        "urgent": 31
+      }
+    },
+    {
+      "state": "elixir: flaky on_server ordering test (host_engine_asks_test.exs:517)",
+      "joint": {
+        "area": {
+          "choice": "client",
+          "confidence": 0.260807,
+          "probabilities": {
+            "client": 0.44560525,
+            "mcp": 0.042887617,
+            "release": 0.4273887,
+            "tests": 0.08411838
+          }
+        },
+        "severity": {
+          "confidence": 0.37034786,
+          "legend": {
+            "0": "low",
+            "1": "medium",
+            "2": "high"
+          },
+          "probabilities": {
+            "0": 0.16775012,
+            "1": 0.25201795,
+            "2": 0.5802319
+          },
+          "score": 1.4124818
+        },
+        "urgent": {
+          "noul": 0.0028831272
+        }
+      },
+      "jointRepeat": {
+        "area": {
+          "choice": "client",
+          "confidence": 0.260807,
+          "probabilities": {
+            "client": 0.44560525,
+            "mcp": 0.042887617,
+            "release": 0.4273887,
+            "tests": 0.08411838
+          }
+        },
+        "severity": {
+          "confidence": 0.37034786,
+          "legend": {
+            "0": "low",
+            "1": "medium",
+            "2": "high"
+          },
+          "probabilities": {
+            "0": 0.16775012,
+            "1": 0.25201795,
+            "2": 0.5802319
+          },
+          "score": 1.4124818
+        },
+        "urgent": {
+          "noul": 0.0028831272
+        }
+      },
+      "single": {
+        "area": {
+          "choice": "client",
+          "confidence": 0.260807,
+          "probabilities": {
+            "client": 0.44560525,
+            "mcp": 0.042887617,
+            "release": 0.4273887,
+            "tests": 0.08411838
+          }
+        },
+        "severity": {
+          "confidence": 0.37034893,
+          "legend": {
+            "0": "low",
+            "1": "medium",
+            "2": "high"
+          },
+          "probabilities": {
+            "0": 0.1677507,
+            "1": 0.25201666,
+            "2": 0.5802326
+          },
+          "score": 1.4124819
+        },
+        "urgent": {
+          "noul": 0.0028831272
+        }
+      },
+      "deltaJointVsSingle": {
+        "area": 0,
+        "severity": 0.0000012899999999871348,
+        "urgent": 0
+      },
+      "deltaJointVsRepeat": {
+        "area": 0,
+        "severity": 0,
+        "urgent": 0
+      },
+      "verdictSame": {
+        "area": true,
+        "severity": true,
+        "urgent": true
+      },
+      "latencyMs": {
+        "area": 98,
+        "joint": 176,
+        "severity": 73,
+        "urgent": 22
+      }
+    },
+    {
+      "state": "Clojure (cljgo): media redirects forward custom headers across origins",
+      "joint": {
+        "area": {
+          "choice": "client",
+          "confidence": 0.471459,
+          "probabilities": {
+            "client": 0.60359424,
+            "mcp": 0.08001366,
+            "release": 0.2530589,
+            "tests": 0.0633332
+          }
+        },
+        "severity": {
+          "confidence": 0.34268802,
+          "legend": {
+            "0": "low",
+            "1": "medium",
+            "2": "high"
+          },
+          "probabilities": {
+            "0": 0.18306935,
+            "1": 0.25513864,
+            "2": 0.561792
+          },
+          "score": 1.3787227
+        },
+        "urgent": {
+          "noul": 0.0012792522
+        }
+      },
+      "jointRepeat": {
+        "area": {
+          "choice": "client",
+          "confidence": 0.471459,
+          "probabilities": {
+            "client": 0.60359424,
+            "mcp": 0.08001366,
+            "release": 0.2530589,
+            "tests": 0.0633332
+          }
+        },
+        "severity": {
+          "confidence": 0.34268802,
+          "legend": {
+            "0": "low",
+            "1": "medium",
+            "2": "high"
+          },
+          "probabilities": {
+            "0": 0.18306935,
+            "1": 0.25513864,
+            "2": 0.561792
+          },
+          "score": 1.3787227
+        },
+        "urgent": {
+          "noul": 0.0012792522
+        }
+      },
+      "single": {
+        "area": {
+          "choice": "client",
+          "confidence": 0.471459,
+          "probabilities": {
+            "client": 0.60359424,
+            "mcp": 0.08001366,
+            "release": 0.2530589,
+            "tests": 0.0633332
+          }
+        },
+        "severity": {
+          "confidence": 0.34268332,
+          "legend": {
+            "0": "low",
+            "1": "medium",
+            "2": "high"
+          },
+          "probabilities": {
+            "0": 0.18307227,
+            "1": 0.25513893,
+            "2": 0.56178886
+          },
+          "score": 1.3787167
+        },
+        "urgent": {
+          "noul": 0.0012792756
+        }
+      },
+      "deltaJointVsSingle": {
+        "area": 0,
+        "severity": 0.000005999999999950489,
+        "urgent": 2.3399999999956442e-8
+      },
+      "deltaJointVsRepeat": {
+        "area": 0,
+        "severity": 0,
+        "urgent": 0
+      },
+      "verdictSame": {
+        "area": true,
+        "severity": true,
+        "urgent": true
+      },
+      "latencyMs": {
+        "area": 89,
+        "joint": 150,
+        "severity": 61,
+        "urgent": 27
+      }
+    },
+    {
+      "state": "Clojure: tool scheduling waits on the oldest running call, not the first to finish",
+      "joint": {
+        "area": {
+          "choice": "client",
+          "confidence": 0.40723976,
+          "probabilities": {
+            "client": 0.5554298,
+            "mcp": 0.03600309,
+            "release": 0.3632095,
+            "tests": 0.045357578
+          }
+        },
+        "severity": {
+          "confidence": 0.24756384,
+          "legend": {
+            "0": "low",
+            "1": "medium",
+            "2": "high"
+          },
+          "probabilities": {
+            "0": 0.18960136,
+            "1": 0.4983759,
+            "2": 0.31202278
+          },
+          "score": 1.1224215
+        },
+        "urgent": {
+          "noul": 0.02643166
+        }
+      },
+      "jointRepeat": {
+        "area": {
+          "choice": "client",
+          "confidence": 0.40723976,
+          "probabilities": {
+            "client": 0.5554298,
+            "mcp": 0.03600309,
+            "release": 0.3632095,
+            "tests": 0.045357578
+          }
+        },
+        "severity": {
+          "confidence": 0.24756384,
+          "legend": {
+            "0": "low",
+            "1": "medium",
+            "2": "high"
+          },
+          "probabilities": {
+            "0": 0.18960136,
+            "1": 0.4983759,
+            "2": 0.31202278
+          },
+          "score": 1.1224215
+        },
+        "urgent": {
+          "noul": 0.02643166
+        }
+      },
+      "single": {
+        "area": {
+          "choice": "client",
+          "confidence": 0.40723976,
+          "probabilities": {
+            "client": 0.5554298,
+            "mcp": 0.03600309,
+            "release": 0.3632095,
+            "tests": 0.045357578
+          }
+        },
+        "severity": {
+          "confidence": 0.24755657,
+          "legend": {
+            "0": "low",
+            "1": "medium",
+            "2": "high"
+          },
+          "probabilities": {
+            "0": 0.18960065,
+            "1": 0.49837103,
+            "2": 0.31202835
+          },
+          "score": 1.1224277
+        },
+        "urgent": {
+          "noul": 0.02643166
+        }
+      },
+      "deltaJointVsSingle": {
+        "area": 0,
+        "severity": 0.000007270000000003662,
+        "urgent": 0
+      },
+      "deltaJointVsRepeat": {
+        "area": 0,
+        "severity": 0,
+        "urgent": 0
+      },
+      "verdictSame": {
+        "area": true,
+        "severity": true,
+        "urgent": true
+      },
+      "latencyMs": {
+        "area": 97,
+        "joint": 175,
+        "severity": 69,
+        "urgent": 30
+      }
+    },
+    {
+      "state": "No Gemini client style in any port",
+      "joint": {
+        "area": {
+          "choice": "client",
+          "confidence": 0.49371696,
+          "probabilities": {
+            "client": 0.6202877,
+            "mcp": 0.06565635,
+            "release": 0.29641712,
+            "tests": 0.017638829
+          }
+        },
+        "severity": {
+          "confidence": 0.18150914,
+          "legend": {
+            "0": "low",
+            "1": "medium",
+            "2": "high"
+          },
+          "probabilities": {
+            "0": 0.36741623,
+            "1": 0.17824438,
+            "2": 0.4543394
+          },
+          "score": 1.0869232
+        },
+        "urgent": {
+          "noul": 0.006082393
+        }
+      },
+      "jointRepeat": {
+        "area": {
+          "choice": "client",
+          "confidence": 0.49371696,
+          "probabilities": {
+            "client": 0.6202877,
+            "mcp": 0.06565635,
+            "release": 0.29641712,
+            "tests": 0.017638829
+          }
+        },
+        "severity": {
+          "confidence": 0.18150914,
+          "legend": {
+            "0": "low",
+            "1": "medium",
+            "2": "high"
+          },
+          "probabilities": {
+            "0": 0.36741623,
+            "1": 0.17824438,
+            "2": 0.4543394
+          },
+          "score": 1.0869232
+        },
+        "urgent": {
+          "noul": 0.006082393
+        }
+      },
+      "single": {
+        "area": {
+          "choice": "client",
+          "confidence": 0.49371696,
+          "probabilities": {
+            "client": 0.6202877,
+            "mcp": 0.06565635,
+            "release": 0.29641712,
+            "tests": 0.017638829
+          }
+        },
+        "severity": {
+          "confidence": 0.18150854,
+          "legend": {
+            "0": "low",
+            "1": "medium",
+            "2": "high"
+          },
+          "probabilities": {
+            "0": 0.3674154,
+            "1": 0.1782455,
+            "2": 0.45433903
+          },
+          "score": 1.0869236
+        },
+        "urgent": {
+          "noul": 0.0060823644
+        }
+      },
+      "deltaJointVsSingle": {
+        "area": 0,
+        "severity": 0.0000011199999999933485,
+        "urgent": 2.860000000021179e-8
+      },
+      "deltaJointVsRepeat": {
+        "area": 0,
+        "severity": 0,
+        "urgent": 0
+      },
+      "verdictSame": {
+        "area": true,
+        "severity": true,
+        "urgent": true
+      },
+      "latencyMs": {
+        "area": 74,
+        "joint": 119,
+        "severity": 66,
+        "urgent": 21
+      }
+    },
+    {
+      "state": "builtin bash: hardcodes `sh -c` — no shell on native Windows, and bashisms fail on dash",
+      "joint": {
+        "area": {
+          "choice": "client",
+          "confidence": 0.3297206,
+          "probabilities": {
+            "client": 0.49729043,
+            "mcp": 0.14460135,
+            "release": 0.26099113,
+            "tests": 0.09711707
+          }
+        },
+        "severity": {
+          "confidence": 0.21358502,
+          "legend": {
+            "0": "low",
+            "1": "medium",
+            "2": "high"
+          },
+          "probabilities": {
+            "0": 0.24116129,
+            "1": 0.28311533,
+            "2": 0.47572336
+          },
+          "score": 1.234562
+        },
+        "urgent": {
+          "noul": 0.0007753514
+        }
+      },
+      "jointRepeat": {
+        "area": {
+          "choice": "client",
+          "confidence": 0.3297206,
+          "probabilities": {
+            "client": 0.49729043,
+            "mcp": 0.14460135,
+            "release": 0.26099113,
+            "tests": 0.09711707
+          }
+        },
+        "severity": {
+          "confidence": 0.21358502,
+          "legend": {
+            "0": "low",
+            "1": "medium",
+            "2": "high"
+          },
+          "probabilities": {
+            "0": 0.24116129,
+            "1": 0.28311533,
+            "2": 0.47572336
+          },
+          "score": 1.234562
+        },
+        "urgent": {
+          "noul": 0.0007753514
+        }
+      },
+      "single": {
+        "area": {
+          "choice": "client",
+          "confidence": 0.3297206,
+          "probabilities": {
+            "client": 0.49729043,
+            "mcp": 0.14460135,
+            "release": 0.26099113,
+            "tests": 0.09711707
+          }
+        },
+        "severity": {
+          "confidence": 0.21358573,
+          "legend": {
+            "0": "low",
+            "1": "medium",
+            "2": "high"
+          },
+          "probabilities": {
+            "0": 0.24116035,
+            "1": 0.28311583,
+            "2": 0.4757238
+          },
+          "score": 1.2345635
+        },
+        "urgent": {
+          "noul": 0.0007753514
+        }
+      },
+      "deltaJointVsSingle": {
+        "area": 0,
+        "severity": 0.0000014999999999876223,
+        "urgent": 0
+      },
+      "deltaJointVsRepeat": {
+        "area": 0,
+        "severity": 0,
+        "urgent": 0
+      },
+      "verdictSame": {
+        "area": true,
+        "severity": true,
+        "urgent": true
+      },
+      "latencyMs": {
+        "area": 109,
+        "joint": 178,
+        "severity": 71,
+        "urgent": 28
+      }
+    },
+    {
+      "state": "Export the in-process round tripper — agents.Options.Transport forces re-implementing it",
+      "joint": {
+        "area": {
+          "choice": "release",
+          "confidence": 0.32803568,
+          "probabilities": {
+            "client": 0.34277338,
+            "mcp": 0.04992346,
+            "release": 0.49602675,
+            "tests": 0.11127639
+          }
+        },
+        "severity": {
+          "confidence": 0.03777504,
+          "legend": {
+            "0": "low",
+            "1": "medium",
+            "2": "high"
+          },
+          "probabilities": {
+            "0": 0.29409584,
+            "1": 0.34738746,
+            "2": 0.3585167
+          },
+          "score": 1.0644208
+        },
+        "urgent": {
+          "noul": 0.004461694
+        }
+      },
+      "jointRepeat": {
+        "area": {
+          "choice": "release",
+          "confidence": 0.32803568,
+          "probabilities": {
+            "client": 0.34277338,
+            "mcp": 0.04992346,
+            "release": 0.49602675,
+            "tests": 0.11127639
+          }
+        },
+        "severity": {
+          "confidence": 0.03777504,
+          "legend": {
+            "0": "low",
+            "1": "medium",
+            "2": "high"
+          },
+          "probabilities": {
+            "0": 0.29409584,
+            "1": 0.34738746,
+            "2": 0.3585167
+          },
+          "score": 1.0644208
+        },
+        "urgent": {
+          "noul": 0.004461694
+        }
+      },
+      "single": {
+        "area": {
+          "choice": "release",
+          "confidence": 0.32803568,
+          "probabilities": {
+            "client": 0.34277338,
+            "mcp": 0.04992346,
+            "release": 0.49602675,
+            "tests": 0.11127639
+          }
+        },
+        "severity": {
+          "confidence": 0.03777504,
+          "legend": {
+            "0": "low",
+            "1": "medium",
+            "2": "high"
+          },
+          "probabilities": {
+            "0": 0.29409584,
+            "1": 0.34738746,
+            "2": 0.3585167
+          },
+          "score": 1.0644208
+        },
+        "urgent": {
+          "noul": 0.0044616675
+        }
+      },
+      "deltaJointVsSingle": {
+        "area": 0,
+        "severity": 0,
+        "urgent": 2.650000000079672e-8
+      },
+      "deltaJointVsRepeat": {
+        "area": 0,
+        "severity": 0,
+        "urgent": 0
+      },
+      "verdictSame": {
+        "area": true,
+        "severity": true,
+        "urgent": true
+      },
+      "latencyMs": {
+        "area": 97,
+        "joint": 173,
+        "severity": 67,
+        "urgent": 27
+      }
+    },
+    {
+      "state": "agents: TaskResult.TotalTokens is parent-only, contradicting the documented whole-tree rollup",
+      "joint": {
+        "area": {
+          "choice": "client",
+          "confidence": 0.6362486,
+          "probabilities": {
+            "client": 0.72718644,
+            "mcp": 0.023569854,
+            "release": 0.24089423,
+            "tests": 0.008349561
+          }
+        },
+        "severity": {
+          "confidence": 0.20063782,
+          "legend": {
+            "0": "low",
+            "1": "medium",
+            "2": "high"
+          },
+          "probabilities": {
+            "0": 0.21618408,
+            "1": 0.31672403,
+            "2": 0.4670919
+          },
+          "score": 1.2509078
+        },
+        "urgent": {
+          "noul": 0.00930088
+        }
+      },
+      "jointRepeat": {
+        "area": {
+          "choice": "client",
+          "confidence": 0.6362486,
+          "probabilities": {
+            "client": 0.72718644,
+            "mcp": 0.023569854,
+            "release": 0.24089423,
+            "tests": 0.008349561
+          }
+        },
+        "severity": {
+          "confidence": 0.20063782,
+          "legend": {
+            "0": "low",
+            "1": "medium",
+            "2": "high"
+          },
+          "probabilities": {
+            "0": 0.21618408,
+            "1": 0.31672403,
+            "2": 0.4670919
+          },
+          "score": 1.2509078
+        },
+        "urgent": {
+          "noul": 0.00930088
+        }
+      },
+      "single": {
+        "area": {
+          "choice": "client",
+          "confidence": 0.6362486,
+          "probabilities": {
+            "client": 0.72718644,
+            "mcp": 0.023569854,
+            "release": 0.24089423,
+            "tests": 0.008349561
+          }
+        },
+        "severity": {
+          "confidence": 0.20063305,
+          "legend": {
+            "0": "low",
+            "1": "medium",
+            "2": "high"
+          },
+          "probabilities": {
+            "0": 0.21618466,
+            "1": 0.31672665,
+            "2": 0.4670887
+          },
+          "score": 1.2509041
+        },
+        "urgent": {
+          "noul": 0.009300853
+        }
+      },
+      "deltaJointVsSingle": {
+        "area": 0,
+        "severity": 0.000004769999999987284,
+        "urgent": 2.699999999966618e-8
+      },
+      "deltaJointVsRepeat": {
+        "area": 0,
+        "severity": 0,
+        "urgent": 0
+      },
+      "verdictSame": {
+        "area": true,
+        "severity": true,
+        "urgent": true
+      },
+      "latencyMs": {
+        "area": 96,
+        "joint": 171,
+        "severity": 67,
+        "urgent": 29
+      }
+    },
+    {
+      "state": "Client: a toolkit-less completion works in Go and JS, and is impossible in the other five ports",
+      "joint": {
+        "area": {
+          "choice": "client",
+          "confidence": 0.6745414,
+          "probabilities": {
+            "client": 0.75590605,
+            "mcp": 0.029191796,
+            "release": 0.17806126,
+            "tests": 0.036840886
+          }
+        },
+        "severity": {
+          "confidence": 0.13973647,
+          "legend": {
+            "0": "low",
+            "1": "medium",
+            "2": "high"
+          },
+          "probabilities": {
+            "0": 0.22488545,
+            "1": 0.426491,
+            "2": 0.34862357
+          },
+          "score": 1.1237382
+        },
+        "urgent": {
+          "noul": 0.0023902266
+        }
+      },
+      "jointRepeat": {
+        "area": {
+          "choice": "client",
+          "confidence": 0.6745414,
+          "probabilities": {
+            "client": 0.75590605,
+            "mcp": 0.029191796,
+            "release": 0.17806126,
+            "tests": 0.036840886
+          }
+        },
+        "severity": {
+          "confidence": 0.13973647,
+          "legend": {
+            "0": "low",
+            "1": "medium",
+            "2": "high"
+          },
+          "probabilities": {
+            "0": 0.22488545,
+            "1": 0.426491,
+            "2": 0.34862357
+          },
+          "score": 1.1237382
+        },
+        "urgent": {
+          "noul": 0.0023902266
+        }
+      },
+      "single": {
+        "area": {
+          "choice": "client",
+          "confidence": 0.6745414,
+          "probabilities": {
+            "client": 0.75590605,
+            "mcp": 0.029191796,
+            "release": 0.17806126,
+            "tests": 0.036840886
+          }
+        },
+        "severity": {
+          "confidence": 0.13973087,
+          "legend": {
+            "0": "low",
+            "1": "medium",
+            "2": "high"
+          },
+          "probabilities": {
+            "0": 0.22488643,
+            "1": 0.42648724,
+            "2": 0.3486263
+          },
+          "score": 1.1237398
+        },
+        "urgent": {
+          "noul": 0.0023902266
+        }
+      },
+      "deltaJointVsSingle": {
+        "area": 0,
+        "severity": 0.000005599999999994498,
+        "urgent": 0
+      },
+      "deltaJointVsRepeat": {
+        "area": 0,
+        "severity": 0,
+        "urgent": 0
+      },
+      "verdictSame": {
+        "area": true,
+        "severity": true,
+        "urgent": true
+      },
+      "latencyMs": {
+        "area": 109,
+        "joint": 188,
+        "severity": 68,
+        "urgent": 21
+      }
+    },
+    {
+      "state": "Skill descriptions are sent verbatim with no length guard — a description authored for Claude Code costs 5x more here (7 ports)",
+      "joint": {
+        "area": {
+          "choice": "client",
+          "confidence": 0.44715324,
+          "probabilities": {
+            "client": 0.58536494,
+            "mcp": 0.031057507,
+            "release": 0.37036663,
+            "tests": 0.013210823
+          }
+        },
+        "severity": {
+          "confidence": 0.24397743,
+          "legend": {
+            "0": "low",
+            "1": "medium",
+            "2": "high"
+          },
+          "probabilities": {
+            "0": 0.21979557,
+            "1": 0.28421944,
+            "2": 0.49598497
+          },
+          "score": 1.2761893
+        },
+        "urgent": {
+          "noul": 0.00092834653
+        }
+      },
+      "jointRepeat": {
+        "area": {
+          "choice": "client",
+          "confidence": 0.44715324,
+          "probabilities": {
+            "client": 0.58536494,
+            "mcp": 0.031057507,
+            "release": 0.37036663,
+            "tests": 0.013210823
+          }
+        },
+        "severity": {
+          "confidence": 0.24397743,
+          "legend": {
+            "0": "low",
+            "1": "medium",
+            "2": "high"
+          },
+          "probabilities": {
+            "0": 0.21979557,
+            "1": 0.28421944,
+            "2": 0.49598497
+          },
+          "score": 1.2761893
+        },
+        "urgent": {
+          "noul": 0.00092834653
+        }
+      },
+      "single": {
+        "area": {
+          "choice": "client",
+          "confidence": 0.44715324,
+          "probabilities": {
+            "client": 0.58536494,
+            "mcp": 0.031057507,
+            "release": 0.37036663,
+            "tests": 0.013210823
+          }
+        },
+        "severity": {
+          "confidence": 0.24398148,
+          "legend": {
+            "0": "low",
+            "1": "medium",
+            "2": "high"
+          },
+          "probabilities": {
+            "0": 0.21979791,
+            "1": 0.28421447,
+            "2": 0.49598765
+          },
+          "score": 1.2761898
+        },
+        "urgent": {
+          "noul": 0.0009283496
+        }
+      },
+      "deltaJointVsSingle": {
+        "area": 0,
+        "severity": 0.0000049699999999930355,
+        "urgent": 3.06999999998437e-9
+      },
+      "deltaJointVsRepeat": {
+        "area": 0,
+        "severity": 0,
+        "urgent": 0
+      },
+      "verdictSame": {
+        "area": true,
+        "severity": true,
+        "urgent": true
+      },
+      "latencyMs": {
+        "area": 105,
+        "joint": 190,
+        "severity": 75,
+        "urgent": 31
+      }
+    }
+  ],
+  "maxDeltaJointVsSingle": 0.000007270000000003662,
+  "maxDeltaJointVsRepeat": 0,
+  "verdictFlips": 0,
+  "floor": 0.05,
+  "withinFloor": true,
+  "inputTokens": 9390,
+  "calls": 50
+}

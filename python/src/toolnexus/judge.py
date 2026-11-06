@@ -25,6 +25,8 @@ from .classifier import (
     NoulCriteria,
     NoulQuestion,
     Question,
+    RawAnswer,
+    RawQuestion,
     RecordedDecision,
     ScoreQuestion,
     create_classifier,
@@ -70,6 +72,12 @@ def choice(name: str, instructions: str, options: Mapping[str, str]) -> NamedQue
 
 def score(name: str, instructions: str, levels: Sequence[str]) -> NamedQuestion:
     return name, ScoreQuestion(instructions, list(levels))
+
+
+def raw(name: str, type: str, instructions: str, criteria: Any = None) -> NamedQuestion:  # noqa: A002
+    """A question of a System One type the library does not model (e.g. ``box``),
+    sent as written (§8B open union). ``criteria`` is omitted when ``None``."""
+    return name, RawQuestion(type, instructions, criteria)
 
 
 def questions(qs: Sequence[NamedQuestion]) -> dict[str, Question]:
@@ -124,6 +132,8 @@ class JudgeAnswer:
             return a.noul
         if isinstance(a, ChoiceAnswer):
             return a.confidence
+        if isinstance(a, RawAnswer):
+            raise ClassifierError(f"judge: answer is a raw {a.type} answer, it has no single value")
         return a.score
 
     def choice(self) -> str:
@@ -137,6 +147,8 @@ def _read(a: DecisionAnswer, b: Bands) -> JudgeAnswer:
         return JudgeAnswer(a, band=b.noul(a.noul))
     if isinstance(a, ChoiceAnswer):
         return JudgeAnswer(a, sure=b.sure(a.confidence, a.near_uniform))
+    if isinstance(a, RawAnswer):
+        return JudgeAnswer(a, sure=False)
     return JudgeAnswer(a, sure=b.sure(a.confidence))
 
 
@@ -280,6 +292,8 @@ def decision_wire(d: Decision) -> dict[str, Any]:
     for k, a in d.answers.items():
         if isinstance(a, NoulAnswer):
             answers[k] = {"type": "noul", "noul": a.noul}
+        elif isinstance(a, RawAnswer):
+            answers[k] = dict(a.value)
         elif isinstance(a, ChoiceAnswer):
             answers[k] = {"type": "choice", "choice": a.choice,
                           "probabilities": dict(a.probabilities), "confidence": a.confidence}
@@ -337,6 +351,8 @@ def _q_from_wire(w: Mapping[str, Any]) -> Question:
                             NoulCriteria(true=c["true"], false=c["false"]) if c is not None else None)
     if t == "choice":
         return ChoiceQuestion(w["instructions"], dict(w["criteria"]))
+    if t != "score":
+        return RawQuestion(t, w["instructions"], w.get("criteria"))
     return ScoreQuestion(w["instructions"], list(w["criteria"]))
 
 

@@ -1,0 +1,152 @@
+{
+  "why": "T1 inclusive Thresholds (default yes 0.8, no 0.2, minConfidence 0.6) next to the exclusive default Bands (0.30/0.70), which stay unchanged. bandsBand is what default Bands gives the same answer; the two disagree at the boundary on purpose.",
+  "default": {
+    "yes": 0.8,
+    "no": 0.2,
+    "minConfidence": 0.6
+  },
+  "cases": [
+    {
+      "name": "noul-at-yes",
+      "answer": {
+        "type": "noul",
+        "noul": 0.8
+      },
+      "band": "yes",
+      "bandsBand": "yes"
+    },
+    {
+      "name": "noul-at-bands-high",
+      "answer": {
+        "type": "noul",
+        "noul": 0.7
+      },
+      "band": "uncertain",
+      "bandsBand": "uncertain"
+    },
+    {
+      "name": "noul-0.75",
+      "answer": {
+        "type": "noul",
+        "noul": 0.75
+      },
+      "band": "uncertain",
+      "bandsBand": "yes"
+    },
+    {
+      "name": "noul-at-no",
+      "answer": {
+        "type": "noul",
+        "noul": 0.2
+      },
+      "band": "no",
+      "bandsBand": "no"
+    },
+    {
+      "name": "noul-at-bands-low",
+      "answer": {
+        "type": "noul",
+        "noul": 0.3
+      },
+      "band": "uncertain",
+      "bandsBand": "uncertain"
+    },
+    {
+      "name": "noul-0.25",
+      "answer": {
+        "type": "noul",
+        "noul": 0.25
+      },
+      "band": "uncertain",
+      "bandsBand": "no"
+    },
+    {
+      "name": "choice-at-min-confidence",
+      "answer": {
+        "type": "choice",
+        "choice": "a",
+        "probabilities": {
+          "a": 0.6,
+          "b": 0.4
+        },
+        "confidence": 0.6
+      },
+      "band": "yes",
+      "bandsBand": "uncertain"
+    },
+    {
+      "name": "choice-near-uniform-still-yes",
+      "answer": {
+        "type": "choice",
+        "choice": "a",
+        "probabilities": {
+          "a": 0.52,
+          "b": 0.48
+        },
+        "confidence": 0.9
+      },
+      "band": "yes",
+      "bandsBand": "uncertain"
+    },
+    {
+      "name": "choice-below",
+      "answer": {
+        "type": "choice",
+        "choice": "a",
+        "probabilities": {
+          "a": 0.6,
+          "b": 0.4
+        },
+        "confidence": 0.59
+      },
+      "band": "uncertain",
+      "bandsBand": "uncertain"
+    },
+    {
+      "name": "score-at-min-confidence",
+      "answer": {
+        "type": "score",
+        "score": 1,
+        "legend": {
+          "0": "x",
+          "1": "y"
+        },
+        "probabilities": {
+          "0": 0.4,
+          "1": 0.6
+        },
+        "confidence": 0.6
+      },
+      "band": "yes",
+      "bandsBand": "uncertain"
+    },
+    {
+      "name": "custom-thresholds",
+      "answer": {
+        "type": "noul",
+        "noul": 0.65
+      },
+      "band": "yes",
+      "bandsBand": "uncertain",
+      "thresholds": {
+        "yes": 0.65,
+        "no": 0.35,
+        "minConfidence": 0.5
+      }
+    },
+    {
+      "name": "raw-answer",
+      "answer": {
+        "type": "box",
+        "box": [
+          0,
+          0,
+          1,
+          1
+        ]
+      },
+      "band": "uncertain",
+      "bandsBand": "uncertain"
+    }
+  ]
+}

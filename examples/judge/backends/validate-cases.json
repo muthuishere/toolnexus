@@ -1,0 +1,999 @@
+{
+  "why": "V1 fail-closed reply validation (design.md §7). `key` is the question/answer key the first failure names, as \"<key>\" in a message starting `classifier: invalid decision: `. A question with a type other than noul/choice/score is a raw question; an answer of an unknown type decodes as a raw answer.",
+  "cases": [
+    {
+      "name": "valid",
+      "questions": {
+        "refund": {
+          "type": "noul",
+          "instructions": "Refund?"
+        },
+        "team": {
+          "type": "choice",
+          "instructions": "Team?",
+          "criteria": {
+            "billing": "charges",
+            "tech": "bugs"
+          }
+        },
+        "urgency": {
+          "type": "score",
+          "instructions": "Urgency?",
+          "criteria": [
+            "low",
+            "mid",
+            "high"
+          ]
+        }
+      },
+      "response": {
+        "model": "jev-1.14.0",
+        "answers": {
+          "refund": {
+            "type": "noul",
+            "noul": 0.7
+          },
+          "team": {
+            "type": "choice",
+            "choice": "billing",
+            "probabilities": {
+              "billing": 0.9,
+              "tech": 0.1
+            },
+            "confidence": 0.8
+          },
+          "urgency": {
+            "type": "score",
+            "score": 1.21,
+            "legend": {
+              "0": "low",
+              "1": "mid",
+              "2": "high"
+            },
+            "probabilities": {
+              "0": 0.1,
+              "1": 0.6,
+              "2": 0.3
+            },
+            "confidence": 0.5
+          }
+        },
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1
+        }
+      },
+      "valid": true
+    },
+    {
+      "name": "missing",
+      "questions": {
+        "refund": {
+          "type": "noul",
+          "instructions": "Refund?"
+        },
+        "team": {
+          "type": "choice",
+          "instructions": "Team?",
+          "criteria": {
+            "billing": "charges",
+            "tech": "bugs"
+          }
+        },
+        "urgency": {
+          "type": "score",
+          "instructions": "Urgency?",
+          "criteria": [
+            "low",
+            "mid",
+            "high"
+          ]
+        }
+      },
+      "response": {
+        "model": "jev-1.14.0",
+        "answers": {
+          "refund": {
+            "type": "noul",
+            "noul": 0.7
+          },
+          "urgency": {
+            "type": "score",
+            "score": 1.21,
+            "legend": {
+              "0": "low",
+              "1": "mid",
+              "2": "high"
+            },
+            "probabilities": {
+              "0": 0.1,
+              "1": 0.6,
+              "2": 0.3
+            },
+            "confidence": 0.5
+          }
+        },
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1
+        }
+      },
+      "valid": false,
+      "key": "team"
+    },
+    {
+      "name": "missing-first-in-ascii-order",
+      "questions": {
+        "refund": {
+          "type": "noul",
+          "instructions": "Refund?"
+        },
+        "team": {
+          "type": "choice",
+          "instructions": "Team?",
+          "criteria": {
+            "billing": "charges",
+            "tech": "bugs"
+          }
+        },
+        "urgency": {
+          "type": "score",
+          "instructions": "Urgency?",
+          "criteria": [
+            "low",
+            "mid",
+            "high"
+          ]
+        }
+      },
+      "response": {
+        "model": "jev-1.14.0",
+        "answers": {
+          "refund": {
+            "type": "noul",
+            "noul": 0.7
+          }
+        },
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1
+        }
+      },
+      "valid": false,
+      "key": "team"
+    },
+    {
+      "name": "extra",
+      "questions": {
+        "refund": {
+          "type": "noul",
+          "instructions": "Refund?"
+        },
+        "team": {
+          "type": "choice",
+          "instructions": "Team?",
+          "criteria": {
+            "billing": "charges",
+            "tech": "bugs"
+          }
+        },
+        "urgency": {
+          "type": "score",
+          "instructions": "Urgency?",
+          "criteria": [
+            "low",
+            "mid",
+            "high"
+          ]
+        }
+      },
+      "response": {
+        "model": "jev-1.14.0",
+        "answers": {
+          "refund": {
+            "type": "noul",
+            "noul": 0.7
+          },
+          "team": {
+            "type": "choice",
+            "choice": "billing",
+            "probabilities": {
+              "billing": 0.9,
+              "tech": 0.1
+            },
+            "confidence": 0.8
+          },
+          "urgency": {
+            "type": "score",
+            "score": 1.21,
+            "legend": {
+              "0": "low",
+              "1": "mid",
+              "2": "high"
+            },
+            "probabilities": {
+              "0": 0.1,
+              "1": 0.6,
+              "2": 0.3
+            },
+            "confidence": 0.5
+          },
+          "zzz": {
+            "type": "noul",
+            "noul": 0.1
+          }
+        },
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1
+        }
+      },
+      "valid": false,
+      "key": "zzz"
+    },
+    {
+      "name": "wrong-type",
+      "questions": {
+        "refund": {
+          "type": "noul",
+          "instructions": "Refund?"
+        },
+        "team": {
+          "type": "choice",
+          "instructions": "Team?",
+          "criteria": {
+            "billing": "charges",
+            "tech": "bugs"
+          }
+        },
+        "urgency": {
+          "type": "score",
+          "instructions": "Urgency?",
+          "criteria": [
+            "low",
+            "mid",
+            "high"
+          ]
+        }
+      },
+      "response": {
+        "model": "jev-1.14.0",
+        "answers": {
+          "refund": {
+            "type": "score",
+            "score": 1,
+            "legend": {},
+            "probabilities": {},
+            "confidence": 0.5
+          },
+          "team": {
+            "type": "choice",
+            "choice": "billing",
+            "probabilities": {
+              "billing": 0.9,
+              "tech": 0.1
+            },
+            "confidence": 0.8
+          },
+          "urgency": {
+            "type": "score",
+            "score": 1.21,
+            "legend": {
+              "0": "low",
+              "1": "mid",
+              "2": "high"
+            },
+            "probabilities": {
+              "0": 0.1,
+              "1": 0.6,
+              "2": 0.3
+            },
+            "confidence": 0.5
+          }
+        },
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1
+        }
+      },
+      "valid": false,
+      "key": "refund"
+    },
+    {
+      "name": "noul-above-1",
+      "questions": {
+        "refund": {
+          "type": "noul",
+          "instructions": "Refund?"
+        },
+        "team": {
+          "type": "choice",
+          "instructions": "Team?",
+          "criteria": {
+            "billing": "charges",
+            "tech": "bugs"
+          }
+        },
+        "urgency": {
+          "type": "score",
+          "instructions": "Urgency?",
+          "criteria": [
+            "low",
+            "mid",
+            "high"
+          ]
+        }
+      },
+      "response": {
+        "model": "jev-1.14.0",
+        "answers": {
+          "refund": {
+            "type": "noul",
+            "noul": 1.2
+          },
+          "team": {
+            "type": "choice",
+            "choice": "billing",
+            "probabilities": {
+              "billing": 0.9,
+              "tech": 0.1
+            },
+            "confidence": 0.8
+          },
+          "urgency": {
+            "type": "score",
+            "score": 1.21,
+            "legend": {
+              "0": "low",
+              "1": "mid",
+              "2": "high"
+            },
+            "probabilities": {
+              "0": 0.1,
+              "1": 0.6,
+              "2": 0.3
+            },
+            "confidence": 0.5
+          }
+        },
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1
+        }
+      },
+      "valid": false,
+      "key": "refund"
+    },
+    {
+      "name": "noul-negative",
+      "questions": {
+        "refund": {
+          "type": "noul",
+          "instructions": "Refund?"
+        },
+        "team": {
+          "type": "choice",
+          "instructions": "Team?",
+          "criteria": {
+            "billing": "charges",
+            "tech": "bugs"
+          }
+        },
+        "urgency": {
+          "type": "score",
+          "instructions": "Urgency?",
+          "criteria": [
+            "low",
+            "mid",
+            "high"
+          ]
+        }
+      },
+      "response": {
+        "model": "jev-1.14.0",
+        "answers": {
+          "refund": {
+            "type": "noul",
+            "noul": -0.01
+          },
+          "team": {
+            "type": "choice",
+            "choice": "billing",
+            "probabilities": {
+              "billing": 0.9,
+              "tech": 0.1
+            },
+            "confidence": 0.8
+          },
+          "urgency": {
+            "type": "score",
+            "score": 1.21,
+            "legend": {
+              "0": "low",
+              "1": "mid",
+              "2": "high"
+            },
+            "probabilities": {
+              "0": 0.1,
+              "1": 0.6,
+              "2": 0.3
+            },
+            "confidence": 0.5
+          }
+        },
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1
+        }
+      },
+      "valid": false,
+      "key": "refund"
+    },
+    {
+      "name": "choice-not-offered",
+      "questions": {
+        "refund": {
+          "type": "noul",
+          "instructions": "Refund?"
+        },
+        "team": {
+          "type": "choice",
+          "instructions": "Team?",
+          "criteria": {
+            "billing": "charges",
+            "tech": "bugs"
+          }
+        },
+        "urgency": {
+          "type": "score",
+          "instructions": "Urgency?",
+          "criteria": [
+            "low",
+            "mid",
+            "high"
+          ]
+        }
+      },
+      "response": {
+        "model": "jev-1.14.0",
+        "answers": {
+          "refund": {
+            "type": "noul",
+            "noul": 0.7
+          },
+          "team": {
+            "type": "choice",
+            "choice": "sales",
+            "probabilities": {
+              "billing": 0.9,
+              "tech": 0.1
+            },
+            "confidence": 0.8
+          },
+          "urgency": {
+            "type": "score",
+            "score": 1.21,
+            "legend": {
+              "0": "low",
+              "1": "mid",
+              "2": "high"
+            },
+            "probabilities": {
+              "0": 0.1,
+              "1": 0.6,
+              "2": 0.3
+            },
+            "confidence": 0.5
+          }
+        },
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1
+        }
+      },
+      "valid": false,
+      "key": "team"
+    },
+    {
+      "name": "choice-prob-not-offered",
+      "questions": {
+        "refund": {
+          "type": "noul",
+          "instructions": "Refund?"
+        },
+        "team": {
+          "type": "choice",
+          "instructions": "Team?",
+          "criteria": {
+            "billing": "charges",
+            "tech": "bugs"
+          }
+        },
+        "urgency": {
+          "type": "score",
+          "instructions": "Urgency?",
+          "criteria": [
+            "low",
+            "mid",
+            "high"
+          ]
+        }
+      },
+      "response": {
+        "model": "jev-1.14.0",
+        "answers": {
+          "refund": {
+            "type": "noul",
+            "noul": 0.7
+          },
+          "team": {
+            "type": "choice",
+            "choice": "billing",
+            "probabilities": {
+              "billing": 0.9,
+              "sales": 0.1
+            },
+            "confidence": 0.8
+          },
+          "urgency": {
+            "type": "score",
+            "score": 1.21,
+            "legend": {
+              "0": "low",
+              "1": "mid",
+              "2": "high"
+            },
+            "probabilities": {
+              "0": 0.1,
+              "1": 0.6,
+              "2": 0.3
+            },
+            "confidence": 0.5
+          }
+        },
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1
+        }
+      },
+      "valid": false,
+      "key": "team"
+    },
+    {
+      "name": "choice-sum-low",
+      "questions": {
+        "refund": {
+          "type": "noul",
+          "instructions": "Refund?"
+        },
+        "team": {
+          "type": "choice",
+          "instructions": "Team?",
+          "criteria": {
+            "billing": "charges",
+            "tech": "bugs"
+          }
+        },
+        "urgency": {
+          "type": "score",
+          "instructions": "Urgency?",
+          "criteria": [
+            "low",
+            "mid",
+            "high"
+          ]
+        }
+      },
+      "response": {
+        "model": "jev-1.14.0",
+        "answers": {
+          "refund": {
+            "type": "noul",
+            "noul": 0.7
+          },
+          "team": {
+            "type": "choice",
+            "choice": "billing",
+            "probabilities": {
+              "billing": 0.5,
+              "tech": 0.4
+            },
+            "confidence": 0.8
+          },
+          "urgency": {
+            "type": "score",
+            "score": 1.21,
+            "legend": {
+              "0": "low",
+              "1": "mid",
+              "2": "high"
+            },
+            "probabilities": {
+              "0": 0.1,
+              "1": 0.6,
+              "2": 0.3
+            },
+            "confidence": 0.5
+          }
+        },
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1
+        }
+      },
+      "valid": false,
+      "key": "team"
+    },
+    {
+      "name": "choice-sum-within-tolerance",
+      "questions": {
+        "refund": {
+          "type": "noul",
+          "instructions": "Refund?"
+        },
+        "team": {
+          "type": "choice",
+          "instructions": "Team?",
+          "criteria": {
+            "billing": "charges",
+            "tech": "bugs"
+          }
+        },
+        "urgency": {
+          "type": "score",
+          "instructions": "Urgency?",
+          "criteria": [
+            "low",
+            "mid",
+            "high"
+          ]
+        }
+      },
+      "response": {
+        "model": "jev-1.14.0",
+        "answers": {
+          "refund": {
+            "type": "noul",
+            "noul": 0.7
+          },
+          "team": {
+            "type": "choice",
+            "choice": "billing",
+            "probabilities": {
+              "billing": 0.89,
+              "tech": 0.1
+            },
+            "confidence": 0.8
+          },
+          "urgency": {
+            "type": "score",
+            "score": 1.21,
+            "legend": {
+              "0": "low",
+              "1": "mid",
+              "2": "high"
+            },
+            "probabilities": {
+              "0": 0.1,
+              "1": 0.6,
+              "2": 0.3
+            },
+            "confidence": 0.5
+          }
+        },
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1
+        }
+      },
+      "valid": true
+    },
+    {
+      "name": "choice-confidence-above-1",
+      "questions": {
+        "refund": {
+          "type": "noul",
+          "instructions": "Refund?"
+        },
+        "team": {
+          "type": "choice",
+          "instructions": "Team?",
+          "criteria": {
+            "billing": "charges",
+            "tech": "bugs"
+          }
+        },
+        "urgency": {
+          "type": "score",
+          "instructions": "Urgency?",
+          "criteria": [
+            "low",
+            "mid",
+            "high"
+          ]
+        }
+      },
+      "response": {
+        "model": "jev-1.14.0",
+        "answers": {
+          "refund": {
+            "type": "noul",
+            "noul": 0.7
+          },
+          "team": {
+            "type": "choice",
+            "choice": "billing",
+            "probabilities": {
+              "billing": 0.9,
+              "tech": 0.1
+            },
+            "confidence": 1.5
+          },
+          "urgency": {
+            "type": "score",
+            "score": 1.21,
+            "legend": {
+              "0": "low",
+              "1": "mid",
+              "2": "high"
+            },
+            "probabilities": {
+              "0": 0.1,
+              "1": 0.6,
+              "2": 0.3
+            },
+            "confidence": 0.5
+          }
+        },
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1
+        }
+      },
+      "valid": false,
+      "key": "team"
+    },
+    {
+      "name": "score-above-top",
+      "questions": {
+        "refund": {
+          "type": "noul",
+          "instructions": "Refund?"
+        },
+        "team": {
+          "type": "choice",
+          "instructions": "Team?",
+          "criteria": {
+            "billing": "charges",
+            "tech": "bugs"
+          }
+        },
+        "urgency": {
+          "type": "score",
+          "instructions": "Urgency?",
+          "criteria": [
+            "low",
+            "mid",
+            "high"
+          ]
+        }
+      },
+      "response": {
+        "model": "jev-1.14.0",
+        "answers": {
+          "refund": {
+            "type": "noul",
+            "noul": 0.7
+          },
+          "team": {
+            "type": "choice",
+            "choice": "billing",
+            "probabilities": {
+              "billing": 0.9,
+              "tech": 0.1
+            },
+            "confidence": 0.8
+          },
+          "urgency": {
+            "type": "score",
+            "score": 2.5,
+            "legend": {
+              "0": "low",
+              "1": "mid",
+              "2": "high"
+            },
+            "probabilities": {
+              "0": 0.1,
+              "1": 0.6,
+              "2": 0.3
+            },
+            "confidence": 0.5
+          }
+        },
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1
+        }
+      },
+      "valid": false,
+      "key": "urgency"
+    },
+    {
+      "name": "score-prob-level-out-of-range",
+      "questions": {
+        "refund": {
+          "type": "noul",
+          "instructions": "Refund?"
+        },
+        "team": {
+          "type": "choice",
+          "instructions": "Team?",
+          "criteria": {
+            "billing": "charges",
+            "tech": "bugs"
+          }
+        },
+        "urgency": {
+          "type": "score",
+          "instructions": "Urgency?",
+          "criteria": [
+            "low",
+            "mid",
+            "high"
+          ]
+        }
+      },
+      "response": {
+        "model": "jev-1.14.0",
+        "answers": {
+          "refund": {
+            "type": "noul",
+            "noul": 0.7
+          },
+          "team": {
+            "type": "choice",
+            "choice": "billing",
+            "probabilities": {
+              "billing": 0.9,
+              "tech": 0.1
+            },
+            "confidence": 0.8
+          },
+          "urgency": {
+            "type": "score",
+            "score": 1.21,
+            "legend": {
+              "0": "low",
+              "1": "mid",
+              "2": "high"
+            },
+            "probabilities": {
+              "0": 0.1,
+              "1": 0.6,
+              "3": 0.3
+            },
+            "confidence": 0.5
+          }
+        },
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1
+        }
+      },
+      "valid": false,
+      "key": "urgency"
+    },
+    {
+      "name": "score-empty-probabilities-ok",
+      "questions": {
+        "refund": {
+          "type": "noul",
+          "instructions": "Refund?"
+        },
+        "team": {
+          "type": "choice",
+          "instructions": "Team?",
+          "criteria": {
+            "billing": "charges",
+            "tech": "bugs"
+          }
+        },
+        "urgency": {
+          "type": "score",
+          "instructions": "Urgency?",
+          "criteria": [
+            "low",
+            "mid",
+            "high"
+          ]
+        }
+      },
+      "response": {
+        "model": "jev-1.14.0",
+        "answers": {
+          "refund": {
+            "type": "noul",
+            "noul": 0.7
+          },
+          "team": {
+            "type": "choice",
+            "choice": "billing",
+            "probabilities": {
+              "billing": 0.9,
+              "tech": 0.1
+            },
+            "confidence": 0.8
+          },
+          "urgency": {
+            "type": "score",
+            "score": 1.21,
+            "legend": {
+              "0": "low",
+              "1": "mid",
+              "2": "high"
+            },
+            "probabilities": {},
+            "confidence": 0.5
+          }
+        },
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1
+        }
+      },
+      "valid": true
+    },
+    {
+      "name": "raw-type-matches",
+      "questions": {
+        "spot": {
+          "type": "box",
+          "instructions": "Where is the mug?"
+        }
+      },
+      "response": {
+        "model": "jev-1.14.0",
+        "answers": {
+          "spot": {
+            "type": "box",
+            "box": [
+              1,
+              2,
+              3,
+              4
+            ]
+          }
+        },
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1
+        }
+      },
+      "valid": true
+    },
+    {
+      "name": "raw-type-differs",
+      "questions": {
+        "spot": {
+          "type": "box",
+          "instructions": "Where is the mug?"
+        }
+      },
+      "response": {
+        "model": "jev-1.14.0",
+        "answers": {
+          "spot": {
+            "type": "noul",
+            "noul": 0.5
+          }
+        },
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1
+        }
+      },
+      "valid": false,
+      "key": "spot"
+    }
+  ]
+}

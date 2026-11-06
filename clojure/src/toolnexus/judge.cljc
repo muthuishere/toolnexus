@@ -36,6 +36,14 @@
   [nm instructions levels]
   (assoc (jev/score-question instructions levels) :name (qname nm)))
 
+(defn raw
+  "A named RAW question — a System One type the library does not model (e.g.
+  Jev 1.14 `box`), sent as written. Its answer decodes to a raw answer
+  `{:type t :value <answer object>}`."
+  ([nm type instructions] (assoc (jev/raw-question type instructions) :name (qname nm)))
+  ([nm type instructions criteria]
+   (assoc (jev/raw-question type instructions criteria) :name (qname nm))))
+
 (defn wire-questions
   "The public question -> wire conversion: an ordered list of named questions
   as the §8B `{name -> question}` map. A duplicate name throws naming it, before

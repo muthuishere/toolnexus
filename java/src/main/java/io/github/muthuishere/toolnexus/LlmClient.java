@@ -245,11 +245,20 @@ public final class LlmClient {
         }
 
         /** §8B: one {@link Classifier#evaluate} call. {@code status} is {@code "ok"} or
-         * {@code "error"}; {@code error} is null on success. NOT folded into the Prometheus
+         * {@code "error"}; {@code error} is null on success. {@code questions} is the count asked,
+         * {@code questionsHash} the sha256 hex of {@link Classifier#canonicalRequest} (empty when
+         * the questions could not be encoded), {@code cached} marks an answer served from
+         * {@link Classifier.Options#cache} with no request sent (L1). NOT folded into the Prometheus
          * registry, so {@link LlmClient#metrics()} text stays byte-identical. */
         record ClassifierEvaluate(String model, String status, long ms,
-                                  long promptTokens, long completionTokens, String error)
+                                  long promptTokens, long completionTokens, String error,
+                                  int questions, String questionsHash, boolean cached)
                 implements MetricEvent {
+            /** The pre-L1 shape: no question count, no hash, not cached. */
+            public ClassifierEvaluate(String model, String status, long ms,
+                                      long promptTokens, long completionTokens, String error) {
+                this(model, status, ms, promptTokens, completionTokens, error, 0, "", false);
+            }
             @Override public String event() { return "classifier.evaluate"; }
         }
 

@@ -13,8 +13,8 @@ use serde_json::{Map, Value, json};
 
 use crate::classifier::{
     ChoiceQuestion, Classifier, ClassifierError, ClassifierOptions, ClassifierStyle, Decision,
-    DecisionAnswer, EvalContext, NoulCriteria, NoulQuestion, Question, Questions, RecordedDecision,
-    ScoreQuestion, create_classifier,
+    DecisionAnswer, EvalContext, NoulCriteria, NoulQuestion, Question, Questions, RawQuestion,
+    RecordedDecision, ScoreQuestion, create_classifier,
 };
 use crate::tool::Request;
 
@@ -93,12 +93,27 @@ pub fn score<S: Into<String>>(
     }
 }
 
+/// A question of a System One type the library does not model (e.g. Jev 1.14
+/// `box`), sent as written: `{type, instructions, criteria?}`. No client-side
+/// limits; `kind` must be non-empty (checked at evaluate).
+pub fn raw(name: &str, kind: &str, instructions: &str, criteria: Option<Value>) -> JudgeQuestion {
+    JudgeQuestion {
+        name: name.into(),
+        question: RawQuestion {
+            kind: kind.into(),
+            instructions: instructions.into(),
+            criteria,
+        }
+        .into(),
+    }
+}
+
 /// The ordered list as the §8B map; a repeated name is an error naming it.
 pub fn questions(qs: &[JudgeQuestion]) -> Result<Questions, ClassifierError> {
     let mut m = Questions::new();
     for q in qs {
         if m.contains_key(&q.name) {
-            return Err(ClassifierError(format!(
+            return Err(ClassifierError::new(format!(
                 "duplicate question name {:?}",
                 q.name
             )));
@@ -181,6 +196,60 @@ impl Bands {
                     return BAND_YES;
                 }
             }
+            DecisionAnswer::Raw(_) => {}
+        }
+        BAND_UNCERTAIN
+    }
+}
+
+/// jevx's INCLUSIVE cut-points (ADR 0038 T1). They sit alongside [`Bands`]
+/// (exclusive), which stays the default of [`ask`] / [`gate`].
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Thresholds {
+    pub yes: f64,
+    pub no: f64,
+    #[serde(rename = "minConfidence")]
+    pub min_confidence: f64,
+}
+
+/// 0.8 / 0.2 / 0.6 (jevx's builtin profile).
+pub const DEFAULT_THRESHOLDS: Thresholds = Thresholds {
+    yes: 0.8,
+    no: 0.2,
+    min_confidence: 0.6,
+};
+
+impl Default for Thresholds {
+    fn default() -> Self {
+        DEFAULT_THRESHOLDS
+    }
+}
+
+impl Thresholds {
+    /// Noul `p >= yes` ⇒ yes, `p <= no` ⇒ no, else uncertain; choice/score
+    /// `confidence >= min_confidence` ⇒ yes, else uncertain. No near-uniform
+    /// demotion (that is [`Bands`]' rule). A raw answer is uncertain.
+    pub fn band(&self, a: &DecisionAnswer) -> &'static str {
+        match a {
+            DecisionAnswer::Noul(x) => {
+                if x.noul >= self.yes {
+                    return BAND_YES;
+                }
+                if x.noul <= self.no {
+                    return BAND_NO;
+                }
+            }
+            DecisionAnswer::Choice(x) => {
+                if x.confidence >= self.min_confidence {
+                    return BAND_YES;
+                }
+            }
+            DecisionAnswer::Score(x) => {
+                if x.confidence >= self.min_confidence {
+                    return BAND_YES;
+                }
+            }
+            DecisionAnswer::Raw(_) => {}
         }
         BAND_UNCERTAIN
     }
@@ -209,6 +278,7 @@ impl JudgeAnswer {
             DecisionAnswer::Noul(x) => x.noul,
             DecisionAnswer::Score(x) => x.score,
             DecisionAnswer::Choice(x) => x.confidence,
+            DecisionAnswer::Raw(_) => 0.0,
         }
     }
 
@@ -273,7 +343,7 @@ pub async fn ask_ctx(
     bands: Option<Bands>,
 ) -> Result<Answers, ClassifierError> {
     let m = questions(qs)?;
-    let st = serde_json::to_value(state).map_err(|e| ClassifierError(e.to_string()))?;
+    let st = serde_json::to_value(state).map_err(|e| ClassifierError::new(e.to_string()))?;
     let d = c.evaluate_ctx(ctx, st, &m).await?;
     Ok(band_all(&d, pick_bands(bands)))
 }
@@ -410,6 +480,7 @@ fn check_rule(answers: &Answers, r: &Rule) -> (bool, String) {
                 return (a.choice() == r.is, String::new());
             }
         }
+        DecisionAnswer::Raw(_) => {}
     }
     (
         false,
@@ -502,13 +573,14 @@ impl Tape {
 
     /// Read a tape file.
     pub fn load(path: impl AsRef<std::path::Path>) -> Result<Arc<Tape>, ClassifierError> {
-        let b = std::fs::read(path).map_err(|e| ClassifierError(e.to_string()))?;
+        let b = std::fs::read(path).map_err(|e| ClassifierError::new(e.to_string()))?;
         #[derive(Deserialize)]
         struct File {
             #[serde(default)]
             decisions: Option<BTreeMap<String, Value>>,
         }
-        let f: File = serde_json::from_slice(&b).map_err(|e| ClassifierError(e.to_string()))?;
+        let f: File =
+            serde_json::from_slice(&b).map_err(|e| ClassifierError::new(e.to_string()))?;
         Ok(Arc::new(Tape {
             decisions: Mutex::new(f.decisions.unwrap_or_default()),
         }))
@@ -523,9 +595,10 @@ impl Tape {
             json!({"decisions": *d})
         };
         drop(d);
-        let mut s = serde_json::to_string_pretty(&v).map_err(|e| ClassifierError(e.to_string()))?;
+        let mut s =
+            serde_json::to_string_pretty(&v).map_err(|e| ClassifierError::new(e.to_string()))?;
         s.push('\n');
-        std::fs::write(path, s).map_err(|e| ClassifierError(e.to_string()))
+        std::fs::write(path, s).map_err(|e| ClassifierError::new(e.to_string()))
     }
 
     /// The recorded decisions by call name (wire shape).

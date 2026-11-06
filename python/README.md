@@ -134,6 +134,40 @@ Also: `context(ctx, message, extra)`, `score(...)`, `Tape` (record live, replay 
 name), `static_classifier((state, questions, response), ...)`, `questions_wire(...)`, and
 `classifier.evaluate_batch(states, questions)` (state order, fail-closed, 16 in flight).
 
+### Backends, images, cache and helpers
+
+Every default below is a **proposed default, owner to confirm**
+(`openspec/changes/add-classifier-backends`).
+
+```python
+from toolnexus import create_classifier, noul, MemoryCache, image, validate_decision, Thresholds, chunk_questions
+
+c = create_classifier(backend="openrouter", cache=MemoryCache(ttl=3600, max=1000))
+d = await c.state({"note": "listing", "photo": image("photo.png")}).evaluate(
+    noul("red", "Is the object in `photo` red?"))           # fails closed on an invalid reply
+rs = await c.states("a", "b").evaluate(noul("q", "…"))      # [BatchResult(decision=… | error=…)], in order
+```
+
+- `backend`: `typesafe` (default) · `openrouter` (`typesafe/jev-1.14`) · `cloudflare` (`/ai/run`
+  envelope; `${CLOUDFLARE_ACCOUNT_ID}` in the URL expands at call time, errors name it unexpanded)
+  · `vercel` · `custom` (requires `base_url` and `supports`). The table is data:
+  `CLASSIFIER_BACKENDS`; `supports=ClassifierSupports(images=True)` (or `{"images": True}`)
+  overrides it per classifier.
+- Images (style `systemone` only): `ContentPart` image parts in the state are lifted into `assets`
+  (cloudflare: data URLs). PNG/JPEG, 280–1568 px a side, ≤ 16 MiB each and 32 MiB per request —
+  never resized. A backend without image support raises `ClassifierUnsupported` before any
+  request. A state with no content part is sent byte-identically to before.
+- `cache=` any object with `get(key) -> str | None` and `set(key, value)` (sync or async) — off
+  when absent; only valid replies are stored; keys follow the served model. A hit sets
+  `decision.cached` and the `classifier.evaluate` event's `cached`. Every such event also carries
+  `questions` and `questions_hash`.
+- Helpers: `validate_decision(questions, decision)` → `ClassifierError | None`;
+  `Thresholds(yes=0.8, no=0.2, min_confidence=0.6).band(answer)` (inclusive; `Bands` stays the
+  `ask`/`gate` default); `chunk_questions(questions, size)`.
+- Open union: `raw(name, type, instructions, criteria=None)` / `RawQuestion`; an answer of an
+  unmodelled type decodes to `RawAnswer(type, value)` (`decision.raw(key)`).
+- `style="llm"` is **deprecated** — it still works unchanged, with no runtime warning.
+
 ## Media generation
 
 Generate images, video and speech (plus transcription, voice cloning and talking-head video)

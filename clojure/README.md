@@ -112,6 +112,41 @@ five run on every change (`./all-modes-check.sh`).
 - `jev/static-classifier` builds a hermetic classifier in one call; `jev/evaluate-batch` runs the
   same questions over many states (state order, fail-closed, 16 in flight).
 
+### Backends, images, cache and helpers
+
+Every default below is a **proposed default, owner to confirm**
+(`openspec/changes/add-classifier-backends`).
+
+```clojure
+(def c (jev/create-classifier {:backend "openrouter" :cache (jev/memory-cache 3600000 1000)}))
+
+(jev/evaluate-state (jev/state c {"note" "listing" "photo" {:type "image" :mimeType "image/png" :data b64}})
+                    (j/noul "red" "Is the object in `photo` red?"))   ; fails closed on an invalid reply
+(jev/evaluate-states (jev/states c ["a" "b"]) (j/noul "q" "…"))       ;=> [{:decision d} | {:error e}], in order
+```
+
+- `:backend`: `"typesafe"` (default) · `"openrouter"` (`typesafe/jev-1.14`) · `"cloudflare"` (`/ai/run`
+  envelope; `${CLOUDFLARE_ACCOUNT_ID}` in the URL expands at call time, errors name it unexpanded)
+  · `"vercel"` · `"custom"` (requires `:base-url` and `:supports`). The table is data:
+  `jev/backends`; `:supports {:images true}` overrides it per classifier.
+- Images (style `systemone` only): content-part maps in the state are lifted into `assets`
+  (cloudflare: data URLs). PNG/JPEG, 280–1568 px a side, ≤ 16 MiB each and 32 MiB per request —
+  never resized. A backend without image support throws a `ClassifierUnsupported` ex-info
+  (`jev/unsupported?`) before any request. A state with no content part is sent byte-identically
+  to before. Any map shaped like a §1B part (`{:type "text" :text …}`, `{:type "image" :mimeType …}`)
+  counts as a part.
+- `:cache {:get (fn [k]) :set (fn [k v])}` (string values) — off when absent; only valid replies
+  are stored; keys follow the served model (`jev/model-cache-key`, `jev/decision-cache-key`). A hit
+  sets `:cached true` on the decision and on the `classifier.evaluate` event. Every such event
+  also carries `:questions` and `:questions_hash`. The digest is pure Clojure (both hosts), so
+  caching megabytes of image data costs real time.
+- Helpers: `jev/validate-decision` → nil or an ex-info; `jev/threshold-band` with
+  `jev/default-thresholds` 0.8 / 0.2 / 0.6 (inclusive; the bands stay the `ask`/`gate` default);
+  `jev/chunk-questions`.
+- Open union: `j/raw` / `jev/raw-question`; an answer of an unmodelled type decodes to
+  `{:type t :value <answer>}` (`jev/raw-answer`).
+- `:style "llm"` is **deprecated** — it still works unchanged, with no runtime warning.
+
 ### Batteries
 
 `toolnexus.batteries` ships eight ready-made judgments (SPEC §8B *Batteries*): `tool-guard`,

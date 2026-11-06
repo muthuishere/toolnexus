@@ -92,6 +92,8 @@ defmodule Toolnexus.Classifier do
   # across every port; `examples/judge/near-uniform.json` pins both sides.
   @near_uniform_tolerance 0.05
 
+  @default_batch_concurrency 16
+
   @metric_evaluate "classifier.evaluate"
   @metric_warning "classifier.warning"
 
@@ -113,22 +115,69 @@ defmodule Toolnexus.Classifier do
   # `base_url`, `model` and `api_key_env` are only JOINTLY valid. Two combinations
   # work; nothing in three independent options said so. A `:backend` sets all three
   # as a unit; the individual options stay available for a self-hosted origin.
+  #
+  # The table is DATA (§8B, design.md PD-2): a fail-fast for what the table says,
+  # never a claim about the vendor. `:supports_images` is `true | false |
+  # {:model_contains, s} | nil` (nil = `"custom"`, which requires `:supports`).
+  # Vercel and Cloudflare-Jev images stay false until a live probe proves them.
   @backends %{
     "typesafe" => %{
       base_url: "https://api.typesafe.ai/v1",
       model: "jev-latest",
-      api_key_env: "TYPESAFE_API_KEY"
+      api_key_env: "TYPESAFE_API_KEY",
+      wire: "systemone",
+      images_header: true,
+      supports_images: true
     },
     "openrouter" => %{
       base_url: "https://openrouter.ai/api/v1",
-      model: "typesafe/jev-1.13",
-      api_key_env: "OPENROUTER_API_KEY"
+      model: "typesafe/jev-1.14",
+      api_key_env: "OPENROUTER_API_KEY",
+      wire: "systemone",
+      images_header: true,
+      supports_images: true
+    },
+    "cloudflare" => %{
+      base_url: "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/ai/run",
+      model: "typesafe/jev",
+      api_key_env: "CLOUDFLARE_JEV_API_KEY",
+      wire: "cloudflare",
+      images_header: false,
+      supports_images: {:model_contains, "clef"}
+    },
+    "vercel" => %{
+      base_url: "https://ai-gateway.vercel.sh/typesafe/v1",
+      model: "typesafe-ai/jev",
+      api_key_env: "AI_GATEWAY_API_KEY",
+      wire: "systemone",
+      images_header: true,
+      supports_images: false
+    },
+    "custom" => %{
+      base_url: nil,
+      model: "jev-latest",
+      api_key_env: "TYPESAFE_API_KEY",
+      wire: "systemone",
+      images_header: true,
+      supports_images: nil
     }
   }
 
-  @doc "The named backend presets: `\"typesafe\"` | `\"openrouter\"`."
+  @backend_names ["typesafe", "openrouter", "cloudflare", "vercel", "custom"]
+
+  # TypeSafe's required opt-in for image ("danger zone") input.
+  @images_header "TypeSafe-Danger-Zone-Images"
+
+  @doc """
+  The backend table: `"typesafe"` (default) | `"openrouter"` | `"cloudflare"` |
+  `"vercel"` | `"custom"`. Each row: `base_url`, `model`, `api_key_env`, `wire`
+  (`"systemone"` | `"cloudflare"`), `images_header`, `supports_images`.
+  """
   @spec backends() :: map()
   def backends, do: @backends
+
+  @doc "The image opt-in header name, sent iff a request carries images and the row says so."
+  def images_header, do: @images_header
   @doc "The floating model alias. Pin it once thresholds are tuned."
   def default_model, do: @default_model
   @doc "The NAME of the env var holding the credential (§8B default)."
@@ -181,7 +230,7 @@ defmodule Toolnexus.Classifier do
     @type t :: %__MODULE__{instructions: String.t(), criteria: [String.t()]}
   end
 
-  @type question :: Noul.t() | Choice.t() | Score.t()
+  @type question :: Noul.t() | Choice.t() | Score.t() | Toolnexus.Classifier.Raw.t()
 
   @doc """
   Build a `Choice` from any (name, description) pairs — a tool, a skill, an agent,
@@ -269,13 +318,18 @@ defmodule Toolnexus.Classifier do
     probabilities. **A threshold tuned against one backend does not transfer to
     another.**
     """
-    defstruct model: nil, answers: %{}, usage: %Toolnexus.Classifier.Usage{}, calibrated: true
+    defstruct model: nil,
+              answers: %{},
+              usage: %Toolnexus.Classifier.Usage{},
+              calibrated: true,
+              cached: false
 
     @type t :: %__MODULE__{
             model: String.t() | nil,
             answers: %{String.t() => struct()},
             usage: Toolnexus.Classifier.Usage.t(),
-            calibrated: boolean()
+            calibrated: boolean(),
+            cached: boolean()
           }
 
     alias Toolnexus.Classifier.{ChoiceAnswer, NoulAnswer, ScoreAnswer}
@@ -308,6 +362,7 @@ defmodule Toolnexus.Classifier do
     defp tag(%NoulAnswer{}), do: "noul"
     defp tag(%ChoiceAnswer{}), do: "choice"
     defp tag(%ScoreAnswer{}), do: "score"
+    defp tag(%Toolnexus.Classifier.RawAnswer{type: t}), do: t
   end
 
   # ---------------------------------------------------------------- the wire
@@ -351,6 +406,12 @@ defmodule Toolnexus.Classifier do
 
   defp wire(%Score{instructions: i, criteria: c}),
     do: %{"type" => "score", "instructions" => i, "criteria" => Enum.map(c, &to_string/1)}
+
+  defp wire(%Toolnexus.Classifier.Raw{type: t, instructions: i, criteria: nil}),
+    do: %{"type" => t, "instructions" => i}
+
+  defp wire(%Toolnexus.Classifier.Raw{type: t, instructions: i, criteria: c}),
+    do: %{"type" => t, "instructions" => i, "criteria" => c}
 
   defp stringify(map), do: Map.new(map, fn {k, v} -> {to_string(k), v} end)
 
@@ -402,8 +463,13 @@ defmodule Toolnexus.Classifier do
             client: nil,
             evaluate: nil,
             decisions: [],
+            supports: nil,
+            cache: nil,
             static: %{},
-            warned: nil
+            warned: nil,
+            wire: "systemone",
+            send_images_header: true,
+            supports_images: true
 
   @type t :: %__MODULE__{}
 
@@ -414,7 +480,23 @@ defmodule Toolnexus.Classifier do
   Options (`ClassifierOptions`, §8B — mirrors §8 `ClientOptions` wherever a field
   makes sense, so a host that has configured one has configured the other):
 
-    * `:style` — `"systemone"` (default) | `"llm"` | `"custom"` | `"static"`
+    * `:style` — `"systemone"` (default) | `"llm"` | `"custom"` | `"static"`.
+      **`"llm"` is deprecated** (System One is the single product wire, ADR 0038):
+      it keeps working byte-identically as an alias for at least one minor
+      release, with no runtime warning
+    * `:backend` — `"typesafe"` (default) | `"openrouter"` | `"cloudflare"` |
+      `"vercel"` | `"custom"` (see `backends/0`); sets `:base_url` + `:model` +
+      `:api_key_env` as a unit, an explicit option still wins. `"custom"` (a
+      self-hosted endpoint) requires `:base_url` and `:supports` on style
+      `"systemone"`. `${NAME}` in `:base_url` expands from the environment at
+      call time; errors name the endpoint UNEXPANDED
+    * `:supports` — `%{images: boolean}`, overrides the backend table's image
+      column. A state carrying images on a backend that does not support them
+      fails before the network with `Toolnexus.Classifier.Unsupported`
+    * `:cache` — opt-in answer cache `%{get: (key -> string | nil), set: (key,
+      string -> any)}` (e.g. `Toolnexus.Classifier.MemoryCache.new/2`). Absent ⇒
+      no caching. Style `"systemone"` only; keyed per request on the SERVED model;
+      only V1-valid replies are stored
     * `:base_url` — default `"https://api.typesafe.ai/v1"`
     * `:model` — default `"jev-latest"`; pin it once thresholds are tuned
     * `:api_key_env` — the **name** of the env var, never the value. Default
@@ -455,7 +537,11 @@ defmodule Toolnexus.Classifier do
     c =
       struct!(
         __MODULE__,
-        Keyword.take(opts, Map.keys(%__MODULE__{}) -- [:__struct__, :static, :warned])
+        Keyword.take(
+          opts,
+          Map.keys(%__MODULE__{}) --
+            [:__struct__, :static, :warned, :wire, :send_images_header, :supports_images]
+        )
       )
 
     # A `:backend` sets base_url + model + api_key_env AS A UNIT. The struct already
@@ -488,27 +574,55 @@ defmodule Toolnexus.Classifier do
         decisions: c.decisions || []
     }
 
-    with :ok <- validate_backend(c),
+    with :ok <- validate_backend(c, opts),
          {:ok, c} <- validate_style(c) do
-      {:ok, %{c | warned: start_warned()}}
+      {:ok, %{resolve_backend(c) | warned: start_warned()}}
     end
   end
 
+  # The row's wire + header, and the image support: the `:supports` override wins,
+  # else the table's column for this model.
+  defp resolve_backend(c) do
+    row = Map.fetch!(@backends, backend_name(c))
+
+    images =
+      case {supports_images(c.supports), row.supports_images} do
+        {b, _} when is_boolean(b) -> b
+        {_, {:model_contains, s}} -> String.contains?(c.model, s)
+        {_, b} -> b == true
+      end
+
+    %{c | wire: row.wire, send_images_header: row.images_header, supports_images: images}
+  end
+
+  defp backend_name(%{backend: nil}), do: "typesafe"
+  defp backend_name(%{backend: b}), do: to_string(b)
+
+  defp supports_images(nil), do: nil
+  defp supports_images(s) when is_map(s), do: Map.get(s, :images, Map.get(s, "images")) == true
+
   # An unknown preset name, and the ONE mismatch that costs a 700ms "Unknown model"
   # round trip: TypeSafe's floating alias pointed at the OpenRouter gateway.
-  defp validate_backend(c) do
+  defp validate_backend(c, opts) do
     name = c.backend && to_string(c.backend)
 
     cond do
       name != nil and not Map.has_key?(@backends, name) ->
         {:error,
-         "classifier: unknown backend #{inspect(name)} (expected " <>
-           Enum.map_join(Enum.sort(Map.keys(@backends)), " | ", &inspect/1) <> ")"}
+         "classifier: unknown backend #{inspect(name)} (want " <>
+           (@backend_names |> Enum.take(4) |> Enum.map_join(", ", &inspect/1)) <>
+           " or \"custom\")"}
+
+      # A self-hosted endpoint: the library cannot know what an unknown server takes.
+      # Wire styles only — static/custom/llm never touch it.
+      name == "custom" and c.style == "systemone" and
+          (Keyword.get(opts, :base_url) in [nil, ""] or Keyword.get(opts, :supports) == nil) ->
+        {:error, ~s(classifier: backend "custom" requires baseUrl and supports)}
 
       String.contains?(c.base_url, "openrouter.ai") and
         is_binary(c.model) and String.starts_with?(c.model, "jev-") ->
         {:error,
-         ~s(classifier: model "#{c.model}" is TypeSafe's spelling; on openrouter.ai use "typesafe/jev-1.13")}
+         ~s(classifier: model "#{c.model}" is TypeSafe's spelling; on openrouter.ai use "typesafe/jev-1.14")}
 
       true ->
         :ok
@@ -569,39 +683,175 @@ defmodule Toolnexus.Classifier do
   """
   @spec evaluate(t(), term(), %{String.t() => question()}) ::
           {:ok, Decision.t()} | {:error, String.t()}
-  def evaluate(%__MODULE__{} = c, state, questions) do
+  def evaluate(%__MODULE__{} = c, state, questions), do: do_evaluate(c, state, questions, false)
+
+  # The one path. `validate?` = fail closed on `validate_decision/2` (the
+  # `state/2` builders); plain `evaluate/3` keeps its old behaviour.
+  defp do_evaluate(c, state, questions, validate?) do
     t0 = System.monotonic_time(:millisecond)
+    l1 = l1(c, questions)
 
     with :ok <- validate_questions(questions) do
       # Detection, never repair (ADR 0020/0021): the request goes out BYTE-UNCHANGED
       # and the warning is the entire observable effect.
       report_degenerate(c, questions)
 
-      case backend(c, state, questions) do
+      result =
+        case backend(c, state, questions, validate?) do
+          {:ok, %Decision{} = d} when validate? and c.style != "systemone" ->
+            with :ok <- validate_decision(questions, d), do: {:ok, d}
+
+          other ->
+            other
+        end
+
+      case result do
         {:ok, %Decision{} = d} ->
-          emit(c, %{
-            event: @metric_evaluate,
-            model: d.model || c.model,
-            status: "ok",
-            ms: System.monotonic_time(:millisecond) - t0,
-            prompt_tokens: d.usage.input_tokens,
-            completion_tokens: d.usage.output_tokens
-          })
+          emit(
+            c,
+            Map.merge(l1, %{
+              event: @metric_evaluate,
+              model: d.model || c.model,
+              status: "ok",
+              ms: System.monotonic_time(:millisecond) - t0,
+              prompt_tokens: d.usage.input_tokens,
+              completion_tokens: d.usage.output_tokens,
+              cached: d.cached
+            })
+          )
 
           {:ok, d}
 
         {:error, reason} ->
-          emit_error(c, t0, reason)
+          emit_error(c, t0, reason, l1)
           {:error, reason}
       end
     else
       {:error, reason} ->
-        emit_error(c, t0, reason)
+        emit_error(c, t0, reason, l1)
         {:error, reason}
     end
   end
 
-  @default_batch_concurrency 16
+  # L1: count + sha256 of the canonical request on every evaluate event; the hash
+  # is "" when the questions could not be encoded.
+  defp l1(c, questions) when is_map(questions) do
+    hash =
+      try do
+        :crypto.hash(:sha256, canonical_request(c.model, questions))
+        |> Base.encode16(case: :lower)
+      rescue
+        _ -> ""
+      end
+
+    %{questions: map_size(questions), questions_hash: hash, cached: false}
+  end
+
+  defp l1(_c, _), do: %{questions: 0, questions_hash: "", cached: false}
+
+  # ---------------------------------------------------------------- builders
+
+  alias Toolnexus.Classifier.{BatchResult, Images, Raw, RawAnswer, State, States, Validate}
+
+  @doc """
+  Bind a state (§8B value builder). Nothing is sent until `evaluate/2`:
+
+      c |> Classifier.state("a red mug") |> Classifier.evaluate([Judge.noul(:q, "Is it red?")])
+  """
+  @spec state(t(), term()) :: State.t()
+  def state(%__MODULE__{} = c, value), do: %State{classifier: c, value: value}
+
+  @doc "Bind a batch of states; see `evaluate/2`."
+  @spec states(t(), [term()]) :: States.t()
+  def states(%__MODULE__{} = c, values) when is_list(values),
+    do: %States{classifier: c, values: values}
+
+  @doc """
+  Evaluate a bound state or batch against ordered questions (`Toolnexus.Judge`
+  builders: `noul`, `choice`, `score`, `raw`) or a questions map. A duplicate
+  name is an error before any request.
+
+    * `%State{}` → `{:ok, Decision}` | `{:error, reason}`: one request, and the
+      reply is validated FAIL-CLOSED (`validate_decision/2`).
+    * `%States{}` → `{:ok, [%BatchResult{}]}` in state order, at most 16 in
+      flight. One state's failure never fails the batch; `{:error, _}` is only for
+      the question set. No states ⇒ `{:ok, []}` and no request.
+  """
+  def evaluate(%State{classifier: c, value: v}, qs) do
+    with {:ok, questions} <- Toolnexus.Judge.questions(qs) do
+      do_evaluate(c, v, questions, true)
+    end
+  end
+
+  def evaluate(%States{classifier: c, values: vs}, qs) do
+    with {:ok, questions} <- Toolnexus.Judge.questions(qs) do
+      results =
+        vs
+        |> Task.async_stream(
+          fn v ->
+            case do_evaluate(c, v, questions, true) do
+              {:ok, d} -> %BatchResult{decision: d}
+              {:error, e} -> %BatchResult{error: e}
+            end
+          end,
+          max_concurrency: @default_batch_concurrency,
+          ordered: true,
+          timeout: :infinity
+        )
+        |> Enum.map(fn {:ok, r} -> r end)
+
+      {:ok, results}
+    end
+  end
+
+  # ---------------------------------------------------------------- pure helpers
+
+  @doc """
+  V1: fail closed on a reply that does not answer exactly the questions asked,
+  within their schema. First failure wins, in the §8B order. Every message starts
+  `classifier: invalid decision: `.
+  """
+  @spec validate_decision(map(), Decision.t()) :: :ok | {:error, String.t()}
+  def validate_decision(questions, %Decision{} = d), do: Validate.run(questions, d)
+
+  @doc "C1: split a questions map into chunks of `size`, keys in ASCII order. A helper, not automatic."
+  @spec chunk_questions(map(), integer()) :: {:ok, [map()]} | {:error, String.t()}
+  def chunk_questions(_questions, size) when not is_integer(size) or size < 1,
+    do: {:error, "classifier: chunk size must be at least 1, got #{inspect(size)}"}
+
+  def chunk_questions(questions, size) do
+    {:ok,
+     questions
+     |> Enum.sort_by(fn {k, _} -> to_string(k) end)
+     |> Enum.chunk_every(size)
+     |> Enum.map(&Map.new/1)}
+  end
+
+  @doc "§8B cache model key: which model an endpoint + alias served last."
+  @spec model_cache_key(String.t(), String.t()) :: String.t()
+  def model_cache_key(endpoint, model),
+    do:
+      sha256_hex(Canonical.encode(%{"endpoint" => endpoint, "kind" => "model", "model" => model}))
+
+  @doc """
+  §8B cache decision key, on the SERVED model. `assets` nil/empty ⇒ the `"assets"`
+  member is omitted. `state` is the state as sent (after lifting).
+  """
+  @spec decision_cache_key(String.t(), String.t(), term(), map() | nil, map()) :: String.t()
+  def decision_cache_key(endpoint, served, state, assets, questions) do
+    m = %{
+      "endpoint" => endpoint,
+      "kind" => "decision",
+      "model" => served,
+      "questions" => wire_questions(questions),
+      "state" => state
+    }
+
+    m = if assets in [nil, %{}], do: m, else: Map.put(m, "assets", assets)
+    sha256_hex(Canonical.encode(m))
+  end
+
+  defp sha256_hex(b), do: :crypto.hash(:sha256, b) |> Base.encode16(case: :lower)
 
   @doc """
   The same questions over many states (§8B "Batch"). Each state goes through
@@ -678,6 +928,12 @@ defmodule Toolnexus.Classifier do
   end
 
   defp validate_question(_key, %Noul{}), do: :ok
+
+  defp validate_question(key, %Raw{type: t}) do
+    if is_binary(t) and t != "",
+      do: :ok,
+      else: {:error, "classifier: question #{inspect(key)}: a raw question needs a type"}
+  end
 
   defp validate_question(key, other),
     do: {:error, "classifier: question #{inspect(key)} is not a question: #{inspect(other)}"}
@@ -756,16 +1012,40 @@ defmodule Toolnexus.Classifier do
 
   # ---------------------------------------------------------------- backends
 
-  defp backend(%{style: "custom"} = c, state, questions), do: c.evaluate.(state, questions)
-  defp backend(%{style: "static"} = c, state, questions), do: evaluate_static(c, state, questions)
-  defp backend(%{style: "llm"} = c, state, questions), do: evaluate_llm(c, state, questions)
-  defp backend(c, state, questions), do: evaluate_systemone(c, state, questions)
+  defp backend(%{style: "custom"} = c, state, questions, _v), do: c.evaluate.(state, questions)
 
-  # The request: the canonical model + questions, plus state VERBATIM as the host
-  # supplied it, then the §8 Gap 1 pipeline in §8 order (base → :request_params
-  # merge → :body_transform → marshal).
-  defp body(c, state, questions) do
-    base = %{"model" => c.model, "questions" => wire_questions(questions), "state" => state}
+  defp backend(%{style: "static"} = c, state, questions, _v),
+    do: evaluate_static(c, state, questions)
+
+  defp backend(%{style: "llm"} = c, state, questions, _v), do: evaluate_llm(c, state, questions)
+  defp backend(c, state, questions, v), do: evaluate_systemone(c, state, questions, v)
+
+  # The request for the backend's wire: systemone = model + questions + state (as
+  # sent, after lifting) + `assets` when the state carried images; cloudflare =
+  # `{model, input: {questions, state, images?}}`. Then the §8 Gap 1 pipeline in §8
+  # order (base → :request_params merge → :body_transform → marshal).
+  defp body(c, state, questions, imgs, assets) do
+    qs = wire_questions(questions)
+
+    base =
+      if c.wire == "cloudflare" do
+        input = %{"questions" => qs, "state" => state}
+
+        input =
+          if imgs == [],
+            do: input,
+            else:
+              Map.put(
+                input,
+                "images",
+                Enum.map(imgs, fn {_ref, fmt, data} -> "data:image/#{fmt};base64,#{data}" end)
+              )
+
+        %{"model" => c.model, "input" => input}
+      else
+        b = %{"model" => c.model, "questions" => qs, "state" => state}
+        if assets == nil, do: b, else: Map.put(b, "assets", assets)
+      end
 
     merged =
       case c.request_params do
@@ -798,11 +1078,119 @@ defmodule Toolnexus.Classifier do
     end
   end
 
-  defp evaluate_systemone(c, state, questions) do
-    with {:ok, raw} <- post(c, body(c, state, questions)) do
-      decode_decision(raw)
+  # The systemone style (every backend): lift, check, cache, post, unwrap, decode.
+  defp evaluate_systemone(c, state, questions, validate?) do
+    with {:ok, sent, imgs} <- Images.lift(state),
+         :ok <- check_supported(c, imgs),
+         {:ok, imgs} <- Images.check(imgs) do
+      assets =
+        if imgs == [],
+          do: nil,
+          else:
+            Map.new(imgs, fn {ref, fmt, data} ->
+              {ref, %{"type" => "image", "format" => fmt, "data_base64" => data}}
+            end)
+
+      case cache_lookup(c, sent, assets, questions) do
+        {:hit, d} -> {:ok, d}
+        :miss -> evaluate_live(c, sent, imgs, assets, questions, validate?)
+      end
     end
   end
+
+  defp check_supported(%{supports_images: false} = c, [_ | _]),
+    do:
+      {:error,
+       %Toolnexus.Classifier.Unsupported{
+         backend: backend_name(c),
+         model: c.model,
+         feature: "images"
+       }}
+
+  defp check_supported(_c, _imgs), do: :ok
+
+  defp evaluate_live(c, sent, imgs, assets, questions, validate?) do
+    extra =
+      if imgs != [] and c.send_images_header, do: %{@images_header => "true"}, else: %{}
+
+    with {:ok, raw} <- post(c, body(c, sent, questions, imgs, assets), extra),
+         {:ok, reply} <- unwrap(c, raw),
+         {:ok, d} <- decode_decision(reply) do
+      verdict = validate_decision(questions, d)
+
+      cond do
+        validate? and verdict != :ok ->
+          verdict
+
+        verdict == :ok and c.cache != nil ->
+          served = d.model || c.model
+          reply = if is_binary(reply), do: reply, else: Canonical.encode(reply)
+          cache_set(c.cache, model_cache_key(c.base_url, c.model), served)
+
+          cache_set(
+            c.cache,
+            decision_cache_key(c.base_url, served, sent, assets, questions),
+            reply
+          )
+
+          {:ok, d}
+
+        true ->
+          {:ok, d}
+      end
+    end
+  end
+
+  # Lookup: model key -> served model; decision key (on it) -> reply, decoded and
+  # V1-checked. A corrupt or invalid entry is a miss.
+  defp cache_lookup(%{cache: nil}, _sent, _assets, _questions), do: :miss
+
+  defp cache_lookup(c, sent, assets, questions) do
+    with served when is_binary(served) <- cache_get(c.cache, model_cache_key(c.base_url, c.model)),
+         raw when is_binary(raw) <-
+           cache_get(c.cache, decision_cache_key(c.base_url, served, sent, assets, questions)),
+         {:ok, d} <- decode_decision(raw),
+         :ok <- validate_decision(questions, d) do
+      {:hit, %{d | cached: true}}
+    else
+      _ -> :miss
+    end
+  end
+
+  defp cache_get(%{get: g}, k) when is_function(g, 1), do: g.(k)
+  defp cache_set(%{set: s}, k, v) when is_function(s, 2), do: s.(k, v)
+
+  # Cloudflare's /ai/run envelope -> the System One reply inside it. The envelope's
+  # own error list is never echoed (it can carry an account id).
+  defp unwrap(%{wire: "cloudflare"}, raw) do
+    env =
+      case raw do
+        b when is_binary(b) -> Jason.decode(b)
+        m -> {:ok, m}
+      end
+
+    case env do
+      {:ok, %{"success" => true} = env} ->
+        case env["result"] do
+          %{"state" => st} when is_binary(st) and st != "Completed" ->
+            {:error, "classifier: cloudflare: run state #{inspect(st)}"}
+
+          %{"state" => st} = r when is_binary(st) ->
+            unwrapped(r["result"])
+
+          r ->
+            unwrapped(r)
+        end
+
+      _ ->
+        {:error, "classifier: cloudflare: envelope not successful"}
+    end
+  end
+
+  defp unwrap(_c, raw), do: {:ok, raw}
+
+  defp unwrapped(%{} = r), do: {:ok, Canonical.encode(r)}
+  defp unwrapped(_), do: {:error, "classifier: cloudflare: no result in the envelope"}
 
   # ---------------------------------------------------------------- transport
 
@@ -813,12 +1201,16 @@ defmodule Toolnexus.Classifier do
   # HERE: an authentication failure names the status and the endpoint, nothing
   # else, and a 401/403 body is never echoed back (a gateway happily reflects a bad
   # Authorization header into its own 401 text).
-  defp post(c, raw), do: post(c, raw, 0)
+  defp post(c, raw, extra), do: post(c, raw, extra, 0)
 
-  defp post(c, raw, attempt) do
-    endpoint = String.trim_trailing(c.base_url, "/") <> "/systemone"
+  defp post(c, raw, extra, attempt) do
+    # `endpoint` is what errors name: the CONFIGURED base, ${ENV} unexpanded, so an
+    # account id in a templated URL never reaches an error. `url` is what is dialled.
+    endpoint = String.trim_trailing(c.base_url, "/")
+    endpoint = if c.wire == "cloudflare", do: endpoint, else: endpoint <> "/systemone"
+    url = expand_env_refs(endpoint)
 
-    case wire_call(c, endpoint, raw) do
+    case wire_call(c, url, raw, extra) do
       {:ok, %{status: status, body: body}} when status in 200..299 ->
         {:ok, body}
 
@@ -831,18 +1223,20 @@ defmodule Toolnexus.Classifier do
           {:error, error}
         else
           Process.sleep(backoff_ms(c, resp, attempt))
-          post(c, raw, attempt + 1)
+          post(c, raw, extra, attempt + 1)
         end
 
       {:error, e} ->
-        error = "classifier: POST #{endpoint}: #{exception_message(e)}"
+        error =
+          "classifier: POST #{endpoint}: " <>
+            String.replace(exception_message(e), url, endpoint)
 
         if attempt >= c.retries or
              classify_error(c, %{error: e, attempt: attempt, retryable: true}) == :fail do
           {:error, error}
         else
           Process.sleep(base_backoff_ms(c, attempt))
-          post(c, raw, attempt + 1)
+          post(c, raw, extra, attempt + 1)
         end
     end
   end
@@ -895,11 +1289,22 @@ defmodule Toolnexus.Classifier do
 
   # §8 Gap 2 — one wire call. With a :transport the host's function makes it
   # (retries, backoff, Retry-After and classification still run around it here).
-  defp wire_call(%{transport: transport} = c, endpoint, raw) when is_function(transport, 1) do
+  # ${NAME} only (not $NAME), at call time; unset ⇒ empty. No `${` ⇒ unchanged.
+  defp expand_env_refs(s) do
+    if String.contains?(s, "${"),
+      do:
+        Regex.replace(~r/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/, s, fn _, n ->
+          System.get_env(n) || ""
+        end),
+      else: s
+  end
+
+  defp wire_call(%{transport: transport} = c, endpoint, raw, extra)
+       when is_function(transport, 1) do
     request = %{
       method: :post,
       url: endpoint,
-      headers: request_headers(c),
+      headers: request_headers(c, extra),
       body: raw,
       receive_timeout: c.timeout
     }
@@ -918,12 +1323,12 @@ defmodule Toolnexus.Classifier do
     end
   end
 
-  defp wire_call(c, endpoint, raw) do
+  defp wire_call(c, endpoint, raw, extra) do
     opts =
       [
         method: :post,
         url: endpoint,
-        headers: request_headers(c),
+        headers: request_headers(c, extra),
         body: raw,
         receive_timeout: c.timeout,
         retry: false,
@@ -943,8 +1348,8 @@ defmodule Toolnexus.Classifier do
   # Credentials resolve AT CALL TIME from the NAMED env var, and ${ENV_VAR} header
   # references expand at call time. Neither value is ever logged, returned, or put
   # in an error or a metric.
-  defp request_headers(c) do
-    base = %{"content-type" => "application/json"}
+  defp request_headers(c, extra) do
+    base = Map.merge(%{"content-type" => "application/json"}, extra)
 
     base =
       case System.get_env(c.api_key_env) do
@@ -1075,6 +1480,11 @@ defmodule Toolnexus.Classifier do
      }}
   end
 
+  # The union is OPEN (§8B): a type the library does not model (e.g. Jev 1.14
+  # `box`) decodes to a RawAnswer instead of failing the whole decision.
+  defp decode_answer(%{"type" => other} = a) when is_binary(other),
+    do: {:ok, %RawAnswer{type: other, value: a}}
+
   defp decode_answer(%{"type" => other}), do: {:error, "unknown type #{inspect(other)}"}
   defp decode_answer(other), do: {:error, "no type discriminator: #{inspect(other)}"}
 
@@ -1092,15 +1502,18 @@ defmodule Toolnexus.Classifier do
   defp emit(%{on_metric: f}, ev) when is_function(f, 1), do: f.(ev)
   defp emit(_, _), do: :ok
 
-  defp emit_error(c, t0, reason) do
-    emit(c, %{
-      event: @metric_evaluate,
-      model: c.model,
-      status: "error",
-      ms: System.monotonic_time(:millisecond) - t0,
-      prompt_tokens: 0,
-      completion_tokens: 0,
-      error: reason
-    })
+  defp emit_error(c, t0, reason, l1) do
+    emit(
+      c,
+      Map.merge(l1, %{
+        event: @metric_evaluate,
+        model: c.model,
+        status: "error",
+        ms: System.monotonic_time(:millisecond) - t0,
+        prompt_tokens: 0,
+        completion_tokens: 0,
+        error: if(is_exception(reason), do: Exception.message(reason), else: reason)
+      })
+    )
   end
 end
