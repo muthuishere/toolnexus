@@ -447,7 +447,8 @@ def _map_call_result(server: str, result: Any) -> ToolResult:
         )
     if result.structuredContent is not None:
         return ToolResult(
-            output=json.dumps(result.structuredContent),
+            # §2: JSON.stringify — compact separators, non-ASCII kept (byte-identical across ports).
+            output=json.dumps(result.structuredContent, separators=(",", ":"), ensure_ascii=False),
             is_error=False,
             metadata={"server": server},
             parts=parts,

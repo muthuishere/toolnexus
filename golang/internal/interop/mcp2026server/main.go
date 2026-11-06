@@ -1,5 +1,5 @@
 // Command mcp2026server is the server half of the MCP 2026-07-28 interop test
-// (interop/mcp2026/run.sh): a toolkit behind MCPHandler on the 2026-07-28
+// (interop/mcp2026/matrix.sh): a toolkit behind MCPHandler on the 2026-07-28
 // wire, protected by MCPServerAuth + the dev authorization server, plus an
 // unprotected mount and a legacy-only mount. It prints one JSON line
 // {"base","issuer"} and serves until stdin closes. Test tooling, not shipped.

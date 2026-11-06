@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Build the Python interop runners: a venv under interop/mcp2026/.build/python with the
+# port installed editable. Reused when present; reinstalls only when pyproject.toml changed.
+set -euo pipefail
+ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"; OUT="$ROOT/interop/mcp2026/.build/python"; mkdir -p "$OUT"
+PY="${PYTHON:-python3}"
+[[ -x "$OUT/venv/bin/python" ]] || "$PY" -m venv "$OUT/venv"
+STAMP="$OUT/pyproject.sha"
+SUM="$(shasum "$ROOT/python/pyproject.toml" | cut -d' ' -f1)"
+if [[ "$(cat "$STAMP" 2>/dev/null)" != "$SUM" ]]; then
+  "$OUT/venv/bin/python" -m pip install -q --upgrade pip
+  "$OUT/venv/bin/python" -m pip install -q -e "$ROOT/python"
+  echo "$SUM" >"$STAMP"
+fi
+"$OUT/venv/bin/python" -c 'import toolnexus, uvicorn'

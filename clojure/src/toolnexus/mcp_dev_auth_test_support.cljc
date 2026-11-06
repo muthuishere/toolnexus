@@ -95,9 +95,12 @@
        ".catch(function(e){document.getElementById('m').textContent=String(e.message||e)})</script>"))
 
 (defn- authorize [as req]
-  (if (not= :post (:method req))
+  ;; A listener that DOES hand over the query (the `:serve` option, a Ring
+  ;; adapter's :query-string) gets the plain-GET flow every other port's dev
+  ;; server has: GET /authorize?<request> answers the 302 directly.
+  (if (and (not= :post (:method req)) (str/blank? (:query-string req)))
     {:status 200 :headers {"Content-Type" "text/html; charset=utf-8"} :body authorize-page}
-    (let [q        (crypto/parse-query (:body req))
+    (let [q        (crypto/parse-query (if (= :post (:method req)) (:body req) (:query-string req)))
           g        (fn [k] (get q k ""))
           _        (swap! (:auths as) inc)
           cid      (g "client_id")
@@ -211,6 +214,10 @@
     :no-cimd                  stop accepting / advertising Client ID Metadata Documents
     :reject-refresh-resource  invalid_target when a refresh carries `resource`
     :http-request             (fn [koine-request] koine-response) for CIMD fetches
+    :serve                    (fn [handler] {:port n :stop (fn [])}) — your own
+              loopback listener instead of koine.server. When it puts the URL
+              query on the request as `:query-string`, GET /authorize?… answers
+              the 302 itself (no page), as the Go dev server does
 
   Returns {:issuer \"http://127.0.0.1:<port>\"
            :mint (fn [claims] jwt)   sign any claims with the server key
@@ -226,10 +233,14 @@
                :auths  (atom 0)
                :http-request (or (:http-request opts) http/request)}
          self (atom nil)
-         srv  (server/serve (fn [req] (handle @self req)) {:port 0 :host "127.0.0.1"})
-         as   (assoc as :issuer (str "http://127.0.0.1:" (server/port srv)))]
+         h    (fn [req] (handle @self req))
+         srv  (if-let [serve (:serve opts)]
+                (serve h)
+                (let [s (server/serve h {:port 0 :host "127.0.0.1"})]
+                  {:port (server/port s) :stop (fn [] (server/stop! s))}))
+         as   (assoc as :issuer (str "http://127.0.0.1:" (:port srv)))]
      (reset! self as)
      (assoc as
             :mint           (fn [claims] (mint as claims))
             :authorizations (fn [] @(:auths as))
-            :close          (fn [] (server/stop! srv))))))
+            :close          (fn [] ((:stop srv)))))))

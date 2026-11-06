@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
+exec java -XX:+UseSerialGC -XX:TieredStopAtLevel=1 -Xshare:auto -cp "$(cat "$ROOT/java/build/interop/classpath.txt")" io.github.muthuishere.toolnexus.interop.Mcp2026Client "$@"
