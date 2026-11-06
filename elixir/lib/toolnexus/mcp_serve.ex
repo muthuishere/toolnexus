@@ -42,7 +42,7 @@ defmodule Toolnexus.McpServe do
   @doc """
   Handle one streamable-HTTP MCP request (`/mcp`). Stateless: each POST is a
   self-contained JSON-RPC exchange; notifications are accepted with `202`.
-  Non-POST methods answer `405` (like the JS SDK's stateless transport).
+  Non-POST methods answer `405` with `Allow: POST` (like the JS SDK's stateless transport).
   """
   @spec handle_http(Plug.Conn.t(), [Tool.t()], map() | nil, (map() -> any()) | nil) ::
           Plug.Conn.t()
@@ -67,7 +67,9 @@ defmodule Toolnexus.McpServe do
         end
 
       _ ->
-        send_resp(conn, 405, "Method Not Allowed")
+        conn
+        |> put_resp_header("allow", "POST")
+        |> send_resp(405, "Method Not Allowed")
     end
   end
 

@@ -196,7 +196,15 @@ public class KillGraceTests
                 var task = bash.ExecuteAsync(new Dictionary<string, object?> { ["command"] = cmd, ["timeout"] = 60000L },
                     new ToolContext(cancellationToken: cts.Token));
                 var deadline = DateTime.UtcNow.AddSeconds(5);
-                while ((!File.Exists(pidFile) || File.ReadAllLines(pidFile).Length < 3) && DateTime.UtcNow < deadline)
+                // Wait for three COMPLETE lines: a read between the shell's write of the digits and
+                // of the newline would otherwise parse a truncated pid.
+                static bool Complete(string f)
+                {
+                    if (!File.Exists(f)) return false;
+                    var text = File.ReadAllText(f);
+                    return text.EndsWith('\n') && text.Split('\n', StringSplitOptions.RemoveEmptyEntries).Length >= 3;
+                }
+                while (!Complete(pidFile) && DateTime.UtcNow < deadline)
                     await Task.Delay(10);
                 var pids = File.ReadAllLines(pidFile).Select(int.Parse).ToList();
                 Assert.Equal(3, pids.Count);
@@ -209,7 +217,10 @@ public class KillGraceTests
                 var result = await task;
                 Assert.True(result.IsError);
                 Assert.False(pids.Any(Alive), "a job process survived");
-                Assert.True(elapsed < 1000, $"job gone after {elapsed:F0} ms");
+                // The claim is "killGraceMs is honoured, not the 2000 ms default": any time clearly
+                // below the default proves it. 1000 ms was tighter than that claim and failed when
+                // a loaded machine was slow to reap the reparented sleeps.
+                Assert.True(elapsed < 1500, $"job gone after {elapsed:F0} ms (default grace is 2000 ms)");
                 timings.Add(elapsed);
             }
         }

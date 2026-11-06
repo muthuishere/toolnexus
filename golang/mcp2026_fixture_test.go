@@ -148,9 +148,9 @@ func (s *fxServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	meta, _ := req.Params["_meta"].(map[string]any)
-	if mv, _ := meta[mcpMetaVersion].(string); mv != McpProtocolVersion || hv != mv {
+	if mv, _ := meta[mcpMetaVersion].(string); mv != MCPProtocol2026 || hv != mv {
 		fxWrite(w, 400, req.ID, nil, &McpRPCError{Code: mcpCodeUnsupportedProtocol, Message: "Unsupported protocol version",
-			Data: jsonObj{"supported": []string{McpProtocolVersion}, "requested": mv}})
+			Data: jsonObj{"supported": []string{MCPProtocol2026}, "requested": mv}})
 		return
 	}
 	sub := ""
@@ -220,7 +220,7 @@ func (s *fxServer) dispatch(method string, p jsonObj, sub string) (jsonObj, *Mcp
 	info := jsonObj{mcpMetaServerInfo: jsonObj{"name": "toolnexus-spike", "version": "0.0.1"}}
 	switch method {
 	case "server/discover":
-		return jsonObj{"resultType": "complete", "supportedVersions": []string{McpProtocolVersion},
+		return jsonObj{"resultType": "complete", "supportedVersions": []string{MCPProtocol2026},
 			"capabilities": jsonObj{"tools": jsonObj{}, "extensions": jsonObj{mcpSkillsExt: jsonObj{}}}, "_meta": info}, nil
 	case "tools/list":
 		return jsonObj{"resultType": "complete", "tools": s.tools, "ttlMs": 60000, "cacheScope": "public"}, nil
