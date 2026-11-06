@@ -315,7 +315,7 @@ func main() {
 <TabItem label="Java">
 ```java title="Main.java"
 // run: java -cp 'lib/*' Main.java npx -y @agentclientprotocol/claude-agent-acp@0.100.0
-//      (lib/ = toolnexus-0.25.0.jar + its runtime deps; optional env ACP_MODEL, e.g. haiku)
+//      (lib/ = toolnexus-0.26.0.jar + its runtime deps; optional env ACP_MODEL, e.g. haiku)
 import io.github.muthuishere.toolnexus.InProcess;
 import io.github.muthuishere.toolnexus.LlmClient;
 import io.github.muthuishere.toolnexus.McpServe;
@@ -444,7 +444,7 @@ Console.WriteLine(result.Text);
 <TabItem label="Elixir">
 ```elixir title="main.exs"
 # usage: elixir main.exs npx -y @agentclientprotocol/claude-agent-acp@0.100.0
-Mix.install([{:toolnexus, "~> 0.25"}])
+Mix.install([{:toolnexus, "~> 0.26"}])
 
 add =
   Toolnexus.define_tool(
@@ -502,7 +502,7 @@ end
 </TabItem>
 <TabItem label="Clojure">
 ```clojure title="main.clj"
-;; deps.edn: {:deps {net.clojars.muthuishere/toolnexus {:mvn/version "0.25.0"}}}
+;; deps.edn: {:deps {net.clojars.muthuishere/toolnexus {:mvn/version "0.26.0"}}}
 ;; run:      clojure -M main.clj npx -y @agentclientprotocol/claude-agent-acp@0.100.0
 (ns main
   (:require [clojure.string :as str]
