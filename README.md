@@ -43,6 +43,8 @@ dotnet add package Toolnexus                       # C#
 cargo add toolnexus                                # Rust (crates.io)
 ```
 
+**[▶ Watch the 51s demo](https://github.com/deemwario/toolnexus/releases/download/demo-assets/final.mp4)** — the problem, the fix, and byte-identical output across ports.
+
 The insight (borrowed from [opencode](https://github.com/anomalyco/opencode)): MCP server
 tools, agent skills, your own functions, remote HTTP endpoints, the built-in shell/file
 tools, remote A2A agents, and in-process **sub-agents** are all *the same thing* to an LLM — a
