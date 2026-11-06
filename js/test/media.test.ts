@@ -23,15 +23,14 @@ type Recorded = { method: string; path: string; headers: http.IncomingHttpHeader
 
 /**
  * Fake provider: serves script[] in order, last entry repeats; records every request.
- * `reset()` starts a new generation: connections opened before it are destroyed and any request
- * still arriving on them (e.g. a poll the client aborted at its deadline) is dropped, so it can
+ * `reset()` starts a new generation: every response closes its connection (no pooling), so any request
+ * still arriving on a connection opened before it (e.g. a poll the client aborted at its deadline) is dropped, so it can
  * never be recorded into — and shift the script position of — the next face's requests.
  */
 async function fakeServer(script: any[]) {
   const requests: Recorded[] = []
   let url = ""
   let gen = 0
-  const sockets = new Set<import("node:net").Socket>()
   const server = http.createServer((req, res) => {
     const reqGen = (req.socket as any).__gen
     let body = ""
@@ -42,20 +41,17 @@ async function fakeServer(script: any[]) {
       const entry = script[Math.min(requests.length - 1, script.length - 1)]
       const extra: Record<string, string> = {}
       for (const [k, v] of Object.entries(entry.headers ?? {})) extra[k] = String(v).split("{server}").join(url)
-      res.writeHead(entry.status, { "content-type": "application/json", ...extra })
+      res.writeHead(entry.status, { "content-type": "application/json", connection: "close", ...extra })
       res.end(entry.rawBody !== undefined ? entry.rawBody : JSON.stringify(entry.body))
     })
   })
   server.on("connection", (s) => {
     ;(s as any).__gen = gen
-    sockets.add(s)
-    s.on("close", () => sockets.delete(s))
   })
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", r))
   url = `http://127.0.0.1:${(server.address() as any).port}`
   const reset = () => {
     gen++
-    for (const s of sockets) s.destroy()
     requests.length = 0
   }
   return { url, requests, reset, close: () => new Promise((r) => server.close(r)) }
