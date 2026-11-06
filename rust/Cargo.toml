@@ -11,6 +11,8 @@ documentation = "https://docs.rs/toolnexus"
 readme = "README.md"
 keywords = ["llm", "agents", "mcp", "acp", "tools"]
 categories = ["api-bindings", "asynchronous"]
+# Interop-matrix runners (interop/mcp2026/rust) are test tooling: never published.
+exclude = ["examples/interop_*"]
 
 [features]
 default = ["mcp-http", "serve"]
@@ -67,6 +69,15 @@ libc = "0.2"
 
 [[example]]
 name = "mcp_handler"
+required-features = ["serve", "mcp-http"]
+
+# MCP 2026-07-28 interop runners (interop/mcp2026/rust); excluded from the package.
+[[example]]
+name = "interop_mcp2026_server"
+required-features = ["serve", "mcp-http"]
+
+[[example]]
+name = "interop_mcp2026_client"
 required-features = ["serve", "mcp-http"]
 
 # The test-only dev authorization server generates a 2048-bit RSA key per start; keep that

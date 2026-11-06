@@ -576,4 +576,30 @@ class McpHandlerTest {
                 .name("x").description("d").inputSchema(Map.of("type", "object")).build());
         assertEquals(toolBefore, toolNow);
     }
+
+    /**
+     * Regression (interop matrix legacy_fallback): the frozen-fallback SDK transport resolved its
+     * default "/mcp" endpoint against the configured URL, so a legacy server mounted anywhere but
+     * "<origin>/mcp" was never reached. The fallback must POST to exactly the configured URL.
+     */
+    @Test
+    void frozenFallbackHonoursANonRootMcpPath() throws Exception {
+        AtomicInteger ran = new AtomicInteger();
+        HttpServer srv = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        srv.setExecutor(Executors.newVirtualThreadPerTaskExecutor());
+        srv.createContext("/legacy/mcp", tk().mcpHandler(new McpHandler.Config().stateless(true)
+                .listTools(ctx -> List.of(testTool("a", ran)))));
+        AtomicInteger stray = new AtomicInteger();
+        srv.createContext("/mcp", ex -> { stray.incrementAndGet(); ex.sendResponseHeaders(404, -1); ex.close(); });
+        srv.start();
+        cleanup.add(() -> srv.stop(0));
+        String url = "http://127.0.0.1:" + srv.getAddress().getPort() + "/legacy/mcp";
+        try (McpSource src = McpSource.load(Map.of("srv", Map.of("url", url)))) {
+            assertEquals("connected", src.status().get("srv"), src.status().toString());
+            Tool a = src.tools().stream().filter(t -> t.name().equals("srv_a")).findFirst().orElseThrow();
+            assertEquals("a:", a.execute(Map.of(), new ToolContext()).output());
+        }
+        assertEquals(1, ran.get());
+        assertEquals(0, stray.get(), "fallback requests leaked to <origin>/mcp");
+    }
 }

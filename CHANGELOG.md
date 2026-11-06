@@ -8,6 +8,12 @@ GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
 
 ## Unreleased
 
+- **MCP 2026-07-28 interop matrix: every port's client against every port's server.** `interop/mcp2026/matrix.sh` builds a small client runner and server runner per port (js, python, golang, java, csharp, elixir, clojure, rust) that speak one shared 11-scenario list (discover, MRTR input/confirm/pending, skills, tool search, OAuth with a pre-registered id, scope step-up, CIMD, no-identity error, legacy fallback) against each port's test-only dev authorization server. 64/64 pairs pass; a new CI job runs it hermetically. `interop/mcp2026/keycloak.sh` (`KEYCLOAK=1`, docker, local only) runs the OAuth login and step-up for all eight clients against a real Keycloak 26.8.1; it never runs in CI. Contract: `interop/mcp2026/README.md`. This replaces the Go-only `run.sh`.
+- **fix(python):** a remote MCP tool result carrying `structuredContent` was rendered with `json.dumps` defaults (`{"text": "hi"}`, non-ASCII escaped), where SPEC section 2 requires `JSON.stringify` (`{"text":"hi"}`). It now matches the other ports, on both the 2026 and fallback paths.
+- **fix(java):** the pre-2026 fallback posted to `<origin>/mcp` whatever the configured URL, so a remote server mounted at any other path (for example `/legacy/mcp`) could never be reached once discovery fell back. It now uses the configured path. The SSE transport builds its URL the same way and is probably affected; not changed here.
+
+**Not done:** live GitHub login and tool call per port (needs an interactive browser consent on the OAuth App, owner-run). Clojure's loopback callback and dev authorization server cannot answer a bare GET with a query string (koine does not expose it), so the Clojure runner performs that step itself. Tracked in `openspec/changes/upgrade-mcp-2026-07-28`.
+
 **Fixed: `GET /mcp` on `toolkit.serve` is refused with 405 and `Allow: POST` in every port.** The
 serve MCP profile is stateless and has no server-initiated SSE stream, but Go and JavaScript passed a
 `GET` to their SDK, which answered `200`, and Clojure answered it as a JSON-RPC call (`200` with an

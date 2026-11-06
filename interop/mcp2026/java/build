@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Build the Java interop runners (java/src/interop) once; server/client then run plain `java -cp`.
+set -euo pipefail
+ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
+cd "$ROOT/java"
+./gradlew interopClasspath --no-daemon -q

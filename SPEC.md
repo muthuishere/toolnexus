@@ -1666,7 +1666,7 @@ refresh carries `resource`; `secrets` for confidential clients via basic or post
 RS256 JWTs `{iss, sub:"dev-user", aud:<resource>, scope, client_id, jti, iat, exp}`. **No dynamic
 client registration.**
 
-Conformance: `conformance/mcp_handler/cases.json` scenarios `mcp2026_*`; interop: `interop/mcp2026/run.sh`
+Conformance: `conformance/mcp_handler/cases.json` scenarios `mcp2026_*`; interop: `interop/mcp2026/matrix.sh` (8 clients × 8 servers)
 (the Go 2026 client of change `upgrade-mcp-2026-07-28` against this server).
 
 ---

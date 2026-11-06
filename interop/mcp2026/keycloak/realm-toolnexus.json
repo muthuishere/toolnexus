@@ -1,0 +1,164 @@
+{
+  "realm": "toolnexus",
+  "enabled": true,
+  "accessTokenLifespan": 300,
+  "users": [
+    {
+      "username": "alice",
+      "enabled": true,
+      "email": "alice@example.test",
+      "emailVerified": true,
+      "firstName": "Alice",
+      "lastName": "Test",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "alice-test-pw",
+          "temporary": false
+        }
+      ]
+    }
+  ],
+  "clientScopes": [
+    {
+      "name": "basic",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "false",
+        "display.on.consent.screen": "false"
+      },
+      "protocolMappers": [
+        {
+          "name": "sub",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-sub-mapper",
+          "config": {
+            "access.token.claim": "true",
+            "introspection.token.claim": "true"
+          }
+        }
+      ]
+    },
+    {
+      "name": "mcp:tools",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "true",
+        "display.on.consent.screen": "false"
+      },
+      "protocolMappers": [
+        {
+          "name": "mcp-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "config": {
+            "included.custom.audience": "http://127.0.0.1:7199/mcp",
+            "access.token.claim": "true",
+            "id.token.claim": "false",
+            "introspection.token.claim": "true"
+          }
+        }
+      ]
+    },
+    {
+      "name": "mcp:greet",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "true",
+        "display.on.consent.screen": "false"
+      }
+    },
+    {
+      "name": "offline_access",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "true",
+        "display.on.consent.screen": "false"
+      }
+    }
+  ],
+  "defaultDefaultClientScopes": [
+    "basic"
+  ],
+  "defaultOptionalClientScopes": [
+    "mcp:tools",
+    "mcp:greet",
+    "offline_access"
+  ],
+  "clients": [
+    {
+      "clientId": "toolnexus-mcp",
+      "name": "toolnexus MCP client (public, PKCE)",
+      "enabled": true,
+      "publicClient": true,
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": false,
+      "consentRequired": false,
+      "redirectUris": [
+        "http://127.0.0.1/*"
+      ],
+      "webOrigins": [],
+      "attributes": {
+        "pkce.code.challenge.method": "S256",
+        "post.logout.redirect.uris": "+"
+      },
+      "defaultClientScopes": [
+        "basic",
+        "mcp:tools"
+      ],
+      "optionalClientScopes": [
+        "mcp:greet",
+        "offline_access"
+      ],
+      "fullScopeAllowed": false
+    }
+  ],
+  "clientProfiles": {
+    "profiles": [
+      {
+        "name": "cimd-dev",
+        "description": "CIMD for local dev: http allowed, host.docker.internal only",
+        "executors": [
+          {
+            "executor": "client-id-metadata-document",
+            "configuration": {
+              "cimd-allow-http-scheme": "true",
+              "cimd-allow-permitted-domains": [
+                "127.0.0.1",
+                "host.docker.internal"
+              ],
+              "cimd-resource-indicator-allow-list": [
+                "http://127.0.0.1:7199/mcp"
+              ]
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "clientPolicies": {
+    "policies": [
+      {
+        "name": "cimd-dev",
+        "enabled": true,
+        "conditions": [
+          {
+            "condition": "client-id-uri",
+            "configuration": {
+              "client-id-uri-scheme": [
+                "http",
+                "https"
+              ],
+              "client-id-uri-allow-permitted-domains": [
+                "host.docker.internal"
+              ]
+            }
+          }
+        ],
+        "profiles": [
+          "cimd-dev"
+        ]
+      }
+    ]
+  }
+}

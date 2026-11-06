@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
+cd "$ROOT/elixir" && MIX_ENV=test exec mix run --no-compile --no-deps-check "$ROOT/interop/mcp2026/elixir/server.exs" "$@"
