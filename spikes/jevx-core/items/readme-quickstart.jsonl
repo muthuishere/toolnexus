@@ -1,0 +1,11 @@
+{"id": "urgent-checkout", "verb": "is", "question": "Is this urgent?", "in": "Checkout is down, customers are being charged twice", "source": "jevcli README.md:81-108 (documented real answers, hosted Jev 2026-10-04)"}
+{"id": "team-charged", "verb": "pick", "question": "Which team?", "options": ["web=frontend", "api=backend", "billing=money"], "in": "I was charged twice", "source": "jevcli README.md:81-108 (documented real answers, hosted Jev 2026-10-04)"}
+{"id": "applog-1", "verb": "is", "question": "Is this an error or failure?", "in": "INFO  request served /checkout 200 in 84ms", "source": "jevcli README.md:81-108 (documented real answers, hosted Jev 2026-10-04)"}
+{"id": "applog-2", "verb": "is", "question": "Is this an error or failure?", "in": "ERROR payment gateway timeout after 30s", "source": "jevcli README.md:81-108 (documented real answers, hosted Jev 2026-10-04)"}
+{"id": "applog-3", "verb": "is", "question": "Is this an error or failure?", "in": "INFO  cache warmed 1200 keys", "source": "jevcli README.md:81-108 (documented real answers, hosted Jev 2026-10-04)"}
+{"id": "applog-4", "verb": "is", "question": "Is this an error or failure?", "in": "FATAL db connection refused", "source": "jevcli README.md:81-108 (documented real answers, hosted Jev 2026-10-04)"}
+{"id": "docs-1", "verb": "is", "question": "Is this about money?", "in": "Changing your avatar", "source": "jevcli README.md:81-108 (documented real answers, hosted Jev 2026-10-04)"}
+{"id": "docs-2", "verb": "is", "question": "Is this about money?", "in": "Pricing of the enterprise plan", "source": "jevcli README.md:81-108 (documented real answers, hosted Jev 2026-10-04)"}
+{"id": "docs-3", "verb": "is", "question": "Is this about money?", "in": "Refund policy for annual plans", "source": "jevcli README.md:81-108 (documented real answers, hosted Jev 2026-10-04)"}
+{"id": "docs-4", "verb": "is", "question": "Is this about money?", "in": "Keyboard shortcuts", "source": "jevcli README.md:81-108 (documented real answers, hosted Jev 2026-10-04)"}
+{"id": "sev-checkout", "verb": "rate", "question": "How severe is this?", "levels": ["low", "medium", "high"], "in": "Checkout is down, customers are being charged twice", "source": "jevcli README.md:81-108 (documented real answers, hosted Jev 2026-10-04)"}
