@@ -153,6 +153,14 @@ defmodule Toolnexus.Classifier do
       images_header: true,
       supports_images: false
     },
+    "openai" => %{
+      base_url: "https://api.openai.com/v1",
+      model: "gpt-6-luna",
+      api_key_env: "OPENAI_API_KEY",
+      wire: "decisions",
+      images_header: false,
+      supports_images: true
+    },
     "custom" => %{
       base_url: nil,
       model: "jev-latest",
@@ -163,15 +171,16 @@ defmodule Toolnexus.Classifier do
     }
   }
 
-  @backend_names ["typesafe", "openrouter", "cloudflare", "vercel", "custom"]
+  @backend_names ["typesafe", "openrouter", "cloudflare", "vercel", "openai", "custom"]
 
   # TypeSafe's required opt-in for image ("danger zone") input.
   @images_header "TypeSafe-Danger-Zone-Images"
 
   @doc """
   The backend table: `"typesafe"` (default) | `"openrouter"` | `"cloudflare"` |
-  `"vercel"` | `"custom"`. Each row: `base_url`, `model`, `api_key_env`, `wire`
-  (`"systemone"` | `"cloudflare"`), `images_header`, `supports_images`.
+  `"vercel"` | `"openai"` | `"custom"`. Each row: `base_url`, `model`, `api_key_env`,
+  `wire` (`"systemone"` | `"cloudflare"` | `"decisions"`), `images_header`,
+  `supports_images`.
   """
   @spec backends() :: map()
   def backends, do: @backends
@@ -486,7 +495,7 @@ defmodule Toolnexus.Classifier do
       it keeps working byte-identically as an alias for at least one minor
       release, with no runtime warning
     * `:backend` — `"typesafe"` (default) | `"openrouter"` | `"cloudflare"` |
-      `"vercel"` | `"custom"` (see `backends/0`); sets `:base_url` + `:model` +
+      `"vercel"` | `"openai"` | `"custom"` (see `backends/0`); sets `:base_url` + `:model` +
       `:api_key_env` as a unit, an explicit option still wins. `"custom"` (a
       self-hosted endpoint) requires `:base_url` and `:supports` on style
       `"systemone"`. `${NAME}` in `:base_url` expands from the environment at
@@ -645,7 +654,7 @@ defmodule Toolnexus.Classifier do
       name != nil and not Map.has_key?(@backends, name) ->
         {:error,
          "classifier: unknown backend #{inspect(name)} (want " <>
-           (@backend_names |> Enum.take(4) |> Enum.map_join(", ", &inspect/1)) <>
+           (@backend_names |> Enum.drop(-1) |> Enum.map_join(", ", &inspect/1)) <>
            " or \"custom\")"}
 
       # A self-hosted endpoint: the library cannot know what an unknown server takes.
@@ -786,7 +795,16 @@ defmodule Toolnexus.Classifier do
 
   # ---------------------------------------------------------------- builders
 
-  alias Toolnexus.Classifier.{BatchResult, Images, Raw, RawAnswer, State, States, Validate}
+  alias Toolnexus.Classifier.{
+    BatchResult,
+    Decisions,
+    Images,
+    Raw,
+    RawAnswer,
+    State,
+    States,
+    Validate
+  }
 
   @doc """
   Bind a state (§8B value builder). Nothing is sent until `evaluate/2`:
@@ -1057,9 +1075,34 @@ defmodule Toolnexus.Classifier do
 
   # The request for the backend's wire: systemone = model + questions + state (as
   # sent, after lifting) + `assets` when the state carried images; cloudflare =
-  # `{model, input: {questions, state, images?}}`. Then the §8 Gap 1 pipeline in §8
+  # `{model, input: {questions, state, images?}}`; decisions = `{model, input,
+  # questions: [..]}` (Toolnexus.Classifier.Decisions). Then the §8 Gap 1 pipeline in §8
   # order (base → :request_params merge → :body_transform → marshal).
   defp body(c, state, questions, imgs, assets) do
+    with {:ok, base} <- base_body(c, state, questions, imgs, assets) do
+      merged =
+        case c.request_params do
+          nil -> base
+          params -> Map.merge(base, Map.new(params, fn {k, v} -> {to_string(k), v} end))
+        end
+
+      final =
+        case c.body_transform do
+          f when is_function(f, 1) -> f.(merged) || merged
+          _ -> merged
+        end
+
+      {:ok, Canonical.encode(final)}
+    end
+  end
+
+  defp base_body(%{wire: "decisions"} = c, state, questions, imgs, _assets) do
+    with {:ok, list} <- Decisions.questions(backend_name(c), c.model, questions) do
+      {:ok, %{"model" => c.model, "input" => Decisions.input(state, imgs), "questions" => list}}
+    end
+  end
+
+  defp base_body(c, state, questions, imgs, assets) do
     qs = wire_questions(questions)
 
     base =
@@ -1082,19 +1125,7 @@ defmodule Toolnexus.Classifier do
         if assets == nil, do: b, else: Map.put(b, "assets", assets)
       end
 
-    merged =
-      case c.request_params do
-        nil -> base
-        params -> Map.merge(base, Map.new(params, fn {k, v} -> {to_string(k), v} end))
-      end
-
-    final =
-      case c.body_transform do
-        f when is_function(f, 1) -> f.(merged) || merged
-        _ -> merged
-      end
-
-    Canonical.encode(final)
+    {:ok, base}
   end
 
   # A recorded decision is identified by the canonical request AND the state:
@@ -1148,8 +1179,9 @@ defmodule Toolnexus.Classifier do
     extra =
       if imgs != [] and c.send_images_header, do: %{@images_header => "true"}, else: %{}
 
-    with {:ok, raw} <- post(c, body(c, sent, questions, imgs, assets), extra),
-         {:ok, reply} <- unwrap(c, raw),
+    with {:ok, raw_body} <- body(c, sent, questions, imgs, assets),
+         {:ok, raw} <- post(c, raw_body, extra),
+         {:ok, reply} <- unwrap(c, raw, questions),
          {:ok, d} <- decode_decision(reply) do
       verdict = validate_decision(questions, d)
 
@@ -1197,7 +1229,9 @@ defmodule Toolnexus.Classifier do
 
   # Cloudflare's /ai/run envelope -> the System One reply inside it. The envelope's
   # own error list is never echoed (it can carry an account id).
-  defp unwrap(%{wire: "cloudflare"}, raw) do
+  defp unwrap(%{wire: "decisions"}, raw, questions), do: Decisions.reply(raw, questions)
+
+  defp unwrap(%{wire: "cloudflare"}, raw, _questions) do
     env =
       case raw do
         b when is_binary(b) -> Jason.decode(b)
@@ -1225,7 +1259,7 @@ defmodule Toolnexus.Classifier do
     end
   end
 
-  defp unwrap(_c, raw), do: {:ok, raw}
+  defp unwrap(_c, raw, _questions), do: {:ok, raw}
 
   # errors[0] of a failed envelope as ": <code> <message>" (§8B), through the same
   # redaction and cap as every other backend cause; "" when there is nothing to show.
@@ -1262,7 +1296,14 @@ defmodule Toolnexus.Classifier do
     # `endpoint` is what errors name: the CONFIGURED base, ${ENV} unexpanded, so an
     # account id in a templated URL never reaches an error. `url` is what is dialled.
     endpoint = String.trim_trailing(c.base_url, "/")
-    endpoint = if c.wire == "cloudflare", do: endpoint, else: endpoint <> "/systemone"
+
+    endpoint =
+      case c.wire do
+        "cloudflare" -> endpoint
+        "decisions" -> endpoint <> "/decisions"
+        _ -> endpoint <> "/systemone"
+      end
+
     url = expand_env_refs(endpoint)
 
     case wire_call(c, url, raw, extra) do
