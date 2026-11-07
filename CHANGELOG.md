@@ -74,7 +74,7 @@ defaults to `declined`), the same text the inline `waitFor` path already produce
 the same thing whether the host waited inline or durably. SPEC §10; fixture
 `conformance/resume_decline/cases.json`. Only golang and rust ship the durable resume entry point, so
 only they were affected and fixed; the other six ports have no durable resume yet and must replay the
-same fixture when they add one. Change: `openspec/changes/fix-resume-decline-reason`.
+same fixture when they add one. Change: `openspec/changes/archive/2026-11-07-fix-resume-decline-reason`.
 
 **Oversized skill descriptions are now reported** (issue #84). The skills catalog sends each
 `description` in full on every turn, and nothing told the author when one was huge: a 4,443-character
@@ -85,7 +85,7 @@ description is cut to ~1,536 by Claude Code but paid in full here. The loader re
 also logs it through the channel it already uses for duplicate skill names, never stdout. Nothing is
 truncated: the catalog and the `skill` tool output are byte-identical to before. All eight ports;
 fixture `conformance/skill_description/`. Not done: the threshold is fixed, not configurable.
-Change: `openspec/changes/add-skill-description-length-warning`.
+Change: `openspec/changes/archive/2026-11-07-add-skill-description-length-warning`.
 
 **Docs: a new "Where toolnexus stands — Nov 2026" page** (Benchmarks & comparison). It has a feature
 matrix re-checked against official docs on 2026-11-07, covering MCP client/server, MCP 2026-07-28, A2A,
