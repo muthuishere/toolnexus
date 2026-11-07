@@ -13,7 +13,7 @@ description: >-
 > **unverified** — that means *not checked*, never *no*.
 >
 > toolnexus **0.26.0**, eight ports (JS · Python · Go · Java · C# · Elixir · Clojure · Rust).
-> Everything was checked or measured on **2026-11-07**. Frameworks ship weekly; re-verify before quoting.
+> Everything was checked or measured on **2026-11-07**, except the native-tool and Spring AI skills rows, which are labelled **2026-11-08**. Frameworks ship weekly; re-verify before quoting.
 
 ## What we do NOT claim
 
@@ -103,6 +103,18 @@ Clojure (5.5 → 7.4–8.3 ms).
 
 **Win.** 2.5× lower than the next framework, Microsoft Agent Framework. Lowest memory and smallest install. Our cold init (42.8 ms) is not the lowest: ADK and OpenAI Agents start faster.
 
+**Native-tool row (2026-11-08 sitting).**
+
+> **Measured 2026-11-08**, a second sitting (N = 30, warmup 5, same machine) that added the native-tool rows and re-ran the directly compared rows next to them. The machine was busy (1-min load average ≈ 15 on 18 cores), so absolute numbers are noisier than the 2026-11-07 table above. Compare rows **inside** this table only. [MEASURED]
+
+| framework | version | tools | init ms | p50 ms | p95 ms | RSS MB |
+|---|---|---|--:|--:|--:|--:|
+| **toolnexus** | 0.26.0 | native | 0.1 | **1.21** | 1.42 | **60.5** |
+| **toolnexus** | 0.26.0 | MCP | 53.6 | 1.82 | 2.76 | 62.1 |
+| **toolnexus** (full: MCP + skill + native) | 0.26.0 | MCP + skill | 42.1 | 2.08 | 2.67 | 61.8 |
+
+No Python competitor has a native-tools row in this harness, so this row has no direct neighbour. It shows our loop cost without MCP.
+
 ### JavaScript / TypeScript
 
 | framework | version | tools | init ms | p50 ms | p95 ms | RSS MB | install |
@@ -116,6 +128,20 @@ Clojure (5.5 → 7.4–8.3 ms).
 
 **Tie with Vercel AI SDK.** The 0.11 ms gap is inside noise. Vercel wins on init, RSS and install
 size. We are about 2.5–3× lower than the rest.
+
+**Native-tool rows, same sitting (2026-11-08).**
+
+> **Measured 2026-11-08**, a second sitting (N = 30, warmup 5, same machine) that added the native-tool rows and re-ran the directly compared rows next to them. The machine was busy (1-min load average ≈ 15 on 18 cores), so absolute numbers are noisier than the 2026-11-07 table above. Compare rows **inside** this table only. [MEASURED]
+
+| framework | version | tools | init ms | p50 ms | p95 ms | RSS MB |
+|---|---|---|--:|--:|--:|--:|
+| **toolnexus** | 0.26.0 | native | 0.2 | **0.94** | 1.52 | 135.4 |
+| Vercel AI SDK | ai 7.0.164 | native | 0.2 | 1.14 | 2.72 | **134.8** |
+| Vercel AI SDK | ai 7.0.164 · @ai-sdk/mcp 2.0.92 | MCP | **16.8** | 1.32 | 1.84 | 135.2 |
+| **toolnexus** | 0.26.0 | MCP | 34.7 | 1.61 | 2.38 | 136.0 |
+| **toolnexus** (full) | 0.26.0 | MCP + skill | 37.4 | 1.72 | 3.03 | 136.3 |
+
+Native vs native we are 0.2 ms lower than Vercel. In this sitting Vercel was lower over MCP (1.32 vs 1.61 ms), which flips the 2026-11-07 order. Read the JS MCP pair as a tie that noise can swing either way.
 
 ### Go
 
@@ -146,6 +172,26 @@ MCP connect.
 **Loss to LangChain4j** on every metric. We beat Spring AI (with about a third of its memory), Koog
 and ADK Java. ² ADK Java connects to MCP lazily, so its init time leaves out the MCP connect.
 
+**Native-tool row and Spring AI skills row (2026-11-08 sitting).**
+
+> **Measured 2026-11-08**, a second sitting (N = 30, warmup 5, same machine) that added the native-tool rows and re-ran the directly compared rows next to them. The machine was busy (1-min load average ≈ 15 on 18 cores), so absolute numbers are noisier than the 2026-11-07 table above. Compare rows **inside** this table only. [MEASURED]
+
+| framework | version | tools | init ms | p50 ms | p95 ms | RSS MB |
+|---|---|---|--:|--:|--:|--:|
+| **toolnexus** | 0.26.0 | native | **148** | **3.30** | **3.98** | **120.1** |
+| LangChain4j | 1.23.0 · mcp 1.23.0-beta33 | MCP | 310 | 3.97 | 8.30 | 145.8 |
+| **toolnexus** | 0.26.0 · MCP Java SDK 2.0.0 | MCP | 486 | 4.31 | 5.22 | 177.1 |
+| **toolnexus** (full: MCP + `skill` + native) | 0.26.0 | MCP + skill | 512 | 5.11 | 7.80 | 180.8 |
+| Spring AI + SkillsTool | 2.0.2 · spring-ai-agent-utils 0.13.0 | MCP + skill | 1446 ⁴ | 5.18 | 8.34 | 593.6 |
+| Spring AI | 2.0.2 · Boot 4.1.2 | MCP | 1701 ⁴ | 5.87 | 8.56 | 556.9 |
+
+**Skills: tie on latency with Spring AI** (5.11 vs 5.18 ms). Both rows advertise the shared
+`examples/skills/hello-world` skill next to the MCP tools; the scenario does not call it, so the row
+measures the cost of carrying a skill tool, not of loading one. Our row also carries one native tool that
+Spring's does not. We use about 30% of Spring's memory and start about 3× faster. No JVM competitor ships a
+native-tools row in this harness, so the toolnexus native row has no direct neighbour. ⁴ Spring's init
+is Spring Boot context start including MCP discovery.
+
 ### .NET (C#)
 
 | framework | version | tools | init ms | p50 ms | p95 ms | RSS MB | install |
@@ -157,6 +203,26 @@ and ADK Java. ² ADK Java connects to MCP lazily, so its init time leaves out th
 
 **Tie on MCP** with Microsoft Agent Framework: 0.966 vs 0.958 ms. We **lose on cold init**, the slowest
 on this table. MEAI and Semantic Kernel are faster, but they ran native tools, not MCP.
+
+**Native vs native, same sitting (2026-11-08).** This is the fair comparison with MEAI and Semantic
+Kernel, which only ran native tools.
+
+> **Measured 2026-11-08**, a second sitting (N = 30, warmup 5, same machine) that added the native-tool rows and re-ran the directly compared rows next to them. The machine was busy (1-min load average ≈ 15 on 18 cores), so absolute numbers are noisier than the 2026-11-07 table above. Compare rows **inside** this table only. [MEASURED]
+
+| framework | version | tools | init ms | p50 ms | p95 ms | RSS MB |
+|---|---|---|--:|--:|--:|--:|
+| **toolnexus** | 0.26.0 | native | **11.9** | **0.594** | **0.69** | **63.6** |
+| Semantic Kernel | 1.82.0 | native | 55.6 | 0.646 | 0.73 | 78.3 |
+| Microsoft.Extensions.AI | 10.11.0 | native | 51.2 | 1.098 | 1.62 | 76.3 |
+| **toolnexus** (full) | 0.26.0 · ModelContextProtocol 1.4.0 | MCP + skill | 139.5 | 0.814 | 0.96 | 82.9 |
+| MS Agent Framework | 1.28.0 · MCP 2.4.0 | MCP | 103.2 | 0.918 | 1.28 | 87.2 |
+| **toolnexus** | 0.26.0 · ModelContextProtocol 1.4.0 | MCP | 185.3 | 2.074 | 3.52 | 80.1 |
+
+**Win on native tools**: lowest p50, lowest init and lowest RSS of the three. Treat the margin over
+Semantic Kernel (0.05 ms) as a tie inside noise. MEAI ran 1.10 ms here against 0.653 ms the day before,
+and our MCP row ran 2.07 ms against 0.966 ms, while the `full` row (which also uses MCP) ran 0.81 ms. That
+spread is what a busy machine does to a sub-millisecond number, so we do not claim an MCP result from this
+sitting. Our cold init is still the slowest on MCP.
 
 ### Elixir
 

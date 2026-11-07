@@ -64,6 +64,14 @@ If a port cannot hand the open process over, it respawns as before (Rust logs a 
   bytes, and they are unchanged. Not done in Go: the request body is still a `map[string]any`, because
   `BodyTransform` receives that map; the per-call `Metadata` map, the idle timer and the progress token
   stay, because each is observable (returned to the caller, the §2 idle timeout, and sent on the wire).
+- **Docs / benchmarks:** the Nov 2026 standing page gains native-tool rows for toolnexus in Python,
+  JavaScript, Java and C#, so .NET is finally compared like for like with Microsoft.Extensions.AI and
+  Semantic Kernel (which only run native tools): toolnexus native is lowest at 0.59 ms p50 with the lowest
+  init and RSS, a tie with Semantic Kernel inside noise. It also adds a skills row against Spring AI 2's
+  `SkillsTool` (spring-ai-agent-utils 0.13.0) over the shared `hello-world` skill: a latency tie with our
+  `full` config, at about 30% of Spring's memory. Measured 2026-11-08 on a busy machine and kept apart from
+  the 2026-11-07 rows; the C# MCP figure from that sitting is too noisy to claim. No Python or Java
+  competitor has a native row in the harness yet.
 
 **Security: the classifier no longer sends a default API key to a host that is not its own** (issue #155).
 Until now the classifier read `TYPESAFE_API_KEY` (or the backend's variable) and sent it as a bearer
