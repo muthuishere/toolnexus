@@ -109,7 +109,11 @@ fn type_name(v: &Value) -> &'static str {
 /// The tool_result text for a call resolved by a declined Answer — one spelling
 /// for the inline and the durable path (§10, issue #125).
 fn relay_declined_output(name: &str, reason: &str) -> String {
-    let reason = if reason.is_empty() { "declined" } else { reason };
+    let reason = if reason.is_empty() {
+        "declined"
+    } else {
+        reason
+    };
     format!("relay declined for {name}: {reason}")
 }
 

@@ -976,7 +976,11 @@ async fn resume_declined_carries_reason() {
     ))
     .unwrap();
     let fx: Value = serde_json::from_str(&raw).unwrap();
-    assert_eq!(fx["calls"], json!(["alpha", "beta"]), "fixture calls changed");
+    assert_eq!(
+        fx["calls"],
+        json!(["alpha", "beta"]),
+        "fixture calls changed"
+    );
     for case in fx["cases"].as_array().unwrap() {
         let reason = case["reason"].as_str().unwrap();
         let (url, _) = llm(
