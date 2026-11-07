@@ -136,3 +136,32 @@ test("acp: close() is idempotent and actually terminates the child process", asy
 
   assert.throws(() => process.kill(pid as number, 0), /ESRCH/, "the child process should no longer exist")
 })
+
+test("acp: an aborted signal sends session/cancel, rejects AbortError, and the session stays warm", async () => {
+  const client = await loadACP({ command: "node", args: [FIXTURE], env: { ACP_SCENARIO: "cancel" }, requestTimeoutMs: 5000 })
+  try {
+    const ac = new AbortController()
+    const seen: string[] = []
+    const turn = client.generateStream(
+      req("block"),
+      (ev) => {
+        if (ev.type === "text") {
+          seen.push(ev.delta)
+          ac.abort()
+        }
+      },
+      { signal: ac.signal },
+    )
+    await assert.rejects(turn, (e: any) => e.name === "AbortError")
+    assert.deepEqual(seen, ["working"])
+    // The fake ends the held turn only on the notification; the next turn proves it saw one.
+    const next = await client.generate(req("again"))
+    assert.equal(next.content, "after-cancel-seen:true")
+
+    const pre = new AbortController()
+    pre.abort()
+    await assert.rejects(client.generate(req("again"), { signal: pre.signal }), (e: any) => e.name === "AbortError")
+  } finally {
+    await client.close()
+  }
+})

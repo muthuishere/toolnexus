@@ -408,7 +408,25 @@ public sealed class AcpClient : IDisposable
             var winner = await Task.WhenAny(tcs.Task, delay).ConfigureAwait(false);
             if (winner == delay)
             {
-                if (ct.IsCancellationRequested) throw new OperationCanceledException(ct);
+                if (ct.IsCancellationRequested)
+                {
+                    // ACP: session/cancel is a notification (no id); the agent then ends the
+                    // turn with stopReason "cancelled". Wait (bounded by CallTimeout) for that
+                    // reply so the next turn never lands on a session still busy with this one.
+                    // The process and session stay warm.
+                    try
+                    {
+                        await WriteAsync(new Dictionary<string, object?>
+                        {
+                            ["jsonrpc"] = "2.0",
+                            ["method"] = "session/cancel",
+                            ["params"] = new Dictionary<string, object?> { ["sessionId"] = SessionId },
+                        }, CancellationToken.None).ConfigureAwait(false);
+                        await Task.WhenAny(tcs.Task, Task.Delay(CallTimeout)).ConfigureAwait(false);
+                    }
+                    catch (IOException) { /* agent gone: nothing to wait for */ }
+                    throw new OperationCanceledException(ct);
+                }
                 throw new TimeoutException(
                     $"toolnexus: ACP session/prompt timed out after {PromptTimeout} "
                     + "(a permission request may have gone unanswered)");

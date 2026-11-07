@@ -14,8 +14,29 @@ Every other port bounds the whole `session/prompt` turn by the permission timeou
 callback, so an agent that stalled mid-turn, or never answered, hung the turn forever. It now fails
 with `AcpError::PermissionTimeout` after `permission_timeout` (default 30 s) from the prompt being sent.
 A turn that legitimately runs longer than that needs a larger `permission_timeout`, same as in Go.
-Not done: cancelling a turn (`session/cancel` on a cancelled generate) still exists only in golang
-and rust (`openspec/changes/add-go-host-asks`, task 2.6e).
+
+**ACP: cancel a running turn in js, python, java and csharp** (#124). Before, only golang and rust could
+stop an ACP turn; the other ports either ignored cancellation or dropped the turn without telling the
+agent, which kept working. Now a cancelled turn sends the `session/cancel` notification, waits up to the
+request timeout for the agent to end the turn, and raises the cancellation error; the process and
+session stay warm for the next turn. Per port: js `generate(request, {signal})` /
+`generateStream(request, emit, {signal})` rejects with an `AbortError`; python
+`generate(request, cancel=event)` (a `threading.Event`) raises the new `ACPCancelledError`; csharp
+honours the `CancellationToken` it already took; java reacts to the thread interrupt that
+`LlmClient` cancellation already uses.
+
+- **java behaviour change:** an interrupted turn now throws `LlmClient.CancelledException` instead of
+  `IOException("...interrupted")`.
+- **Not done:** elixir (#169) and clojure (#170). In js and python, cancelling a run of
+  `createInProcessClient` does not yet reach the ACP turn — pass the signal/event to the ACP client
+  yourself; wiring it through changes the in-process seam in every port and needs an OpenSpec change.
+
+**Tool-scheduling tests are now mutation-checked in every port** (#129). Each scheduler was broken on
+purpose (unsafe calls overlapping, the cap ignored, everything serial, results in completion order) and
+the tests had to fail. Results-in-completion-order went unnoticed outside golang and csharp, so new tests
+finish calls out of order and check each output stays in emitted order. No library behaviour changed.
+Gap: in js the streaming modes are not covered by the reordering mutation.
+
 
 - **`mcpHandler` with the 2026-07-28 opt-in no longer rejects legacy clients that send the 2026 version
   header** (issue #150, all eight ports). On a mount listing `2026-07-28` next to legacy versions, a request
@@ -45,7 +66,6 @@ startup) and the two Jackson stacks in Java are tracked separately.
   both) and AutoAgents (the mock sent `input_tokens` alongside `prompt_tokens`, which AutoAgents rejects
   as a duplicate field; usage now carries the OpenAI-standard keys only). The standing tables are not
   re-run yet; a full quiet re-run will refresh them.
-||||||| parent of 2b552f50 (docs(changelog): rust ACP per-turn permission timeout (#124))
 
 - **Docs:** the docs-site hero video is re-cut for 0.26.0 (80 s, new narrator). It now covers eight
   languages including Rust, typed decisions (`createClassifier`), media generation, and serving the

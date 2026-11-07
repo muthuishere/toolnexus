@@ -12,6 +12,7 @@ from .acp import (
     ACPLaunchError,
     ACPOptions,
     ACPPermissionTimeoutError,
+    ACPCancelledError,
     load_acp,
 )
 from .a2a import (
@@ -344,6 +345,7 @@ __all__ = [
     "ACPError",
     "ACPOptions",
     "ACPPermissionTimeoutError",
+    "ACPCancelledError",
     "ACPExitedError",
     "ACPLaunchError",
     "load_acp",
