@@ -807,6 +807,8 @@ impl std::fmt::Debug for ClassifierOptions {
 // ---------------------------------------------------------------- classifier
 
 struct Inner {
+    /// The caller named `api_key_env`: it goes wherever `base_url` points.
+    explicit_key_env: bool,
     opts: ClassifierOptions,
     preset: &'static ClassifierBackendPreset,
     supports: ClassifierSupports,
@@ -844,6 +846,9 @@ pub fn create_classifier(mut opts: ClassifierOptions) -> Result<Classifier, Clas
     if opts.model.is_empty() {
         opts.model = preset.model.into();
     }
+    // A NAMED key variable goes where the caller says; the preset's own only to
+    // its own host (`classifier_key_env`, #155).
+    let explicit_key_env = !opts.api_key_env.is_empty();
     if opts.api_key_env.is_empty() {
         opts.api_key_env = preset.api_key_env.into();
     }
@@ -881,6 +886,7 @@ pub fn create_classifier(mut opts: ClassifierOptions) -> Result<Classifier, Clas
     }
     Ok(Classifier {
         inner: Arc::new(Inner {
+            explicit_key_env,
             opts,
             preset,
             supports,
@@ -1172,7 +1178,15 @@ impl Classifier {
         let o = &self.inner.opts;
         let mut req = hc.post(endpoint).header("Content-Type", "application/json");
         // Read at call time. Never logged, never returned, never in an error.
-        if let Ok(key) = std::env::var(&o.api_key_env)
+        // An explicit `api_key_env` goes where the caller says; otherwise the
+        // preset's own variable, and only to that preset's own host (#155).
+        let key_env = if self.inner.explicit_key_env {
+            o.api_key_env.as_str()
+        } else {
+            backends::classifier_key_env(o.backend, endpoint)
+        };
+        if !key_env.is_empty()
+            && let Ok(key) = std::env::var(key_env)
             && !key.is_empty()
         {
             req = req.header("Authorization", format!("Bearer {key}"));
@@ -1296,17 +1310,38 @@ pub fn degenerate_criteria(criteria: &BTreeMap<String, String>) -> Option<&'stat
 /// A backend's cause, intact — except an auth status's body, which is dropped.
 fn cause(status: u16, body: &[u8]) -> String {
     let s = redact_provider_body(status, &String::from_utf8_lossy(body));
+    cap_cause(&s)
+}
+
+/// `": <s>"`, capped at 200 chars with `…`; `""` when `s` is empty.
+fn cap_cause(s: &str) -> String {
     if s.is_empty() {
         return String::new();
     }
-    if s.len() > 200 {
-        let mut n = 200;
-        while !s.is_char_boundary(n) {
-            n -= 1;
-        }
-        return format!(": {}…", &s[..n]);
+    match s.char_indices().nth(200) {
+        Some((n, _)) => format!(": {}…", &s[..n]),
+        None => format!(": {s}"),
     }
-    format!(": {s}")
+}
+
+/// The cause text for a failed Cloudflare envelope: `errors[0]` as
+/// `<code> <message>`, through the same redaction and cap as [`cause`].
+pub(crate) fn cloudflare_cause(errors: Option<&Value>) -> String {
+    let Some(first) = errors.and_then(|e| e.as_array()).and_then(|a| a.first()) else {
+        return String::new();
+    };
+    let mut parts: Vec<String> = Vec::new();
+    match first.get("code") {
+        Some(Value::String(c)) if !c.is_empty() => parts.push(c.clone()),
+        Some(Value::Number(n)) => parts.push(n.to_string()),
+        _ => {}
+    }
+    if let Some(m) = first.get("message").and_then(Value::as_str)
+        && !m.is_empty()
+    {
+        parts.push(m.to_owned());
+    }
+    cap_cause(&redact_provider_body(200, &parts.join(" ")))
 }
 
 /// The outermost JSON object of a model reply (no repair).

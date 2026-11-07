@@ -78,9 +78,27 @@ public static class ClassifierBackends
                 m => new ClassifierSupports(m.Contains("clef", StringComparison.Ordinal))),
             [ClassifierBackend.Vercel] = new("https://ai-gateway.vercel.sh/typesafe/v1", "typesafe-ai/jev",
                 "AI_GATEWAY_API_KEY", WireSystemOne, true, _ => new ClassifierSupports(false)),
-            [ClassifierBackend.Custom] = new(null, Classifier.DefaultModel, Classifier.DefaultApiKeyEnv,
+            [ClassifierBackend.Custom] = new(null, Classifier.DefaultModel, "",
                 WireSystemOne, true, null),
         };
+
+    private static string? HttpsHost(string? url)
+        => Uri.TryCreate(url, UriKind.Absolute, out var u) && u.Scheme == Uri.UriSchemeHttps
+            ? u.IdnHost.ToLowerInvariant() : null;
+
+    /// <summary>The env var whose key may be sent to <paramref name="expandedBaseUrl"/> (already
+    /// ${NAME}-expanded): the backend's own variable, and only when the URL is that backend's own
+    /// host over https (OpenRouter also its subdomains). "" when none may — custom has no preset
+    /// key at all. A key is never sent to a host the caller did not name (#155, SPEC §8B).</summary>
+    internal static string KeyEnv(ClassifierBackend backend, string? expandedBaseUrl)
+    {
+        if (!Table.TryGetValue(backend, out var p) || string.IsNullOrEmpty(p.ApiKeyEnv)) return "";
+        var own = HttpsHost(p.BaseUrl);
+        var h = HttpsHost(expandedBaseUrl);
+        if (own == null || h == null) return "";
+        return h == own || (backend == ClassifierBackend.OpenRouter && h.EndsWith(".openrouter.ai", StringComparison.Ordinal))
+            ? p.ApiKeyEnv : "";
+    }
 
     private static readonly (string Name, ClassifierBackend Value)[] Names =
     {
@@ -604,8 +622,33 @@ public sealed partial class Classifier
         return CanonicalJsonBytes(body);
     }
 
-    /// <summary>The System One reply inside a Cloudflare envelope. The envelope's own errors are
-    /// never echoed (they can carry an account id).</summary>
+    /// <summary>": &lt;code&gt; &lt;message&gt;" from errors[0] of a failed envelope (SPEC §8B), through
+    /// the same redaction and 200-char cap as any provider cause; "" when there is nothing to show.</summary>
+    private static string CloudflareCause(JsonElement root)
+    {
+        if (!root.TryGetProperty("errors", out var errs) || errs.ValueKind != JsonValueKind.Array
+            || errs.GetArrayLength() == 0 || errs[0].ValueKind != JsonValueKind.Object) return "";
+        var e0 = errs[0];
+        var parts = new List<string>();
+        if (e0.TryGetProperty("code", out var code))
+        {
+            var c = code.ValueKind switch
+            {
+                JsonValueKind.String => code.GetString() ?? "",
+                JsonValueKind.Number => code.GetRawText(),
+                _ => "",
+            };
+            if (c.Length > 0) parts.Add(c);
+        }
+        if (e0.TryGetProperty("message", out var msg) && msg.ValueKind == JsonValueKind.String
+            && !string.IsNullOrEmpty(msg.GetString())) parts.Add(msg.GetString()!);
+        var s = LlmClient.RedactBody(200, string.Join(" ", parts));
+        return s.Length == 0 ? "" : ": " + s;
+    }
+
+    /// <summary>The System One reply inside a Cloudflare envelope. A failed envelope surfaces only
+    /// errors[0] (redacted, capped) — Cloudflare reports a missing balance, a bad model id and a
+    /// malformed request alike as HTTP 200 with success:false.</summary>
     internal static string UnwrapCloudflare(string text)
     {
         const string notOk = "classifier: cloudflare: envelope not successful";
@@ -615,9 +658,10 @@ public sealed partial class Classifier
         using (doc)
         {
             var root = doc.RootElement;
-            if (root.ValueKind != JsonValueKind.Object
-                || !root.TryGetProperty("success", out var ok) || ok.ValueKind != JsonValueKind.True)
+            if (root.ValueKind != JsonValueKind.Object)
                 throw new ClassifierException(notOk);
+            if (!root.TryGetProperty("success", out var ok) || ok.ValueKind != JsonValueKind.True)
+                throw new ClassifierException(notOk + CloudflareCause(root));
             if (!root.TryGetProperty("result", out var res))
                 throw new ClassifierException("classifier: cloudflare: no result");
             if (res.ValueKind == JsonValueKind.Object && res.TryGetProperty("state", out var st)

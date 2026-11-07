@@ -507,7 +507,9 @@ type ClassifierOptions struct {
 	// Model. "" ⇒ DefaultClassifierModel. Pin it once thresholds are tuned.
 	Model string
 	// APIKeyEnv is the NAME of the env var holding the credential, never the
-	// value — read at call time and never logged. "" ⇒ DefaultClassifierAPIKeyEnv.
+	// value — read at call time and never logged. "" ⇒ the backend's own variable,
+	// sent ONLY when the endpoint is that backend's own host (https); on any other
+	// host, and always on BackendCustom, no key is sent (#155).
 	// §8's APIKey takes a value; this option deliberately does not.
 	APIKeyEnv string
 	// Headers are extra request headers. Values expand ${ENV_VAR} from the
@@ -570,11 +572,13 @@ type ClassifierOptions struct {
 
 // Classifier is the whole seam: one verb.
 type Classifier struct {
-	opts     ClassifierOptions
-	backend  ClassifierBackend
-	preset   ClassifierBackendPreset
-	supports ClassifierSupports
-	static   map[string][]byte
+	// explicitKeyEnv: the caller named APIKeyEnv (sent wherever BaseURL points).
+	explicitKeyEnv bool
+	opts           ClassifierOptions
+	backend        ClassifierBackend
+	preset         ClassifierBackendPreset
+	supports       ClassifierSupports
+	static         map[string][]byte
 	// warned is the once-per-question-key set for the degenerate-criteria
 	// warning, so a per-turn judge does not flood the sink.
 	mu     sync.Mutex
@@ -605,6 +609,9 @@ func CreateClassifier(opts ClassifierOptions) (*Classifier, error) {
 	if opts.Model == "" {
 		opts.Model = preset.Model
 	}
+	// Remember whether the caller NAMED the key variable: a named one goes where
+	// the caller says, the preset's own only to its own host (classifierKeyEnv, #155).
+	explicitKeyEnv := opts.APIKeyEnv != ""
 	if opts.APIKeyEnv == "" {
 		opts.APIKeyEnv = preset.APIKeyEnv
 	}
@@ -618,7 +625,7 @@ func CreateClassifier(opts ClassifierOptions) (*Classifier, error) {
 	if opts.Timeout == 0 {
 		opts.Timeout = DefaultClassifierTimeout
 	}
-	c := &Classifier{opts: opts, backend: backend, preset: preset, warned: map[string]bool{}}
+	c := &Classifier{opts: opts, backend: backend, preset: preset, explicitKeyEnv: explicitKeyEnv, warned: map[string]bool{}}
 	switch {
 	case opts.Supports != nil:
 		c.supports = *opts.Supports
@@ -1026,8 +1033,18 @@ func (c *Classifier) attempt(ctx context.Context, hc *http.Client, endpoint stri
 	}
 	req.Header.Set("Content-Type", "application/json")
 	// Read at call time. Never logged, never returned, never in an error.
-	if key := os.Getenv(c.opts.APIKeyEnv); key != "" {
-		req.Header.Set("Authorization", "Bearer "+key)
+	// An explicit APIKeyEnv goes where the caller says. Otherwise the preset's
+	// own variable, and only to that preset's own host (#155).
+	keyEnv := ""
+	if c.explicitKeyEnv {
+		keyEnv = c.opts.APIKeyEnv
+	} else {
+		keyEnv = classifierKeyEnv(c.backend, endpoint)
+	}
+	if keyEnv != "" {
+		if key := os.Getenv(keyEnv); key != "" {
+			req.Header.Set("Authorization", "Bearer "+key)
+		}
 	}
 	for k, v := range extraHeaders {
 		req.Header.Set(k, v)

@@ -1,0 +1,13 @@
+[package]
+name = "run_swiftide"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.104"
+rmcp = { version = "2.2", features = ["client", "transport-child-process"] }
+serde_json = "1.0.154"
+swiftide = { version = "0.34.0", features = ["openai", "swiftide-agents", "mcp"] }
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros"] }
+
+[workspace]

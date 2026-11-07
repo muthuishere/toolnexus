@@ -1140,6 +1140,92 @@ async fn cloudflare_replies_fixture() {
     }
 }
 
+/// Process env is global and tests run in parallel: serialise the cases that set it.
+static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// #155: a preset's env key is never sent to a host that is not its own; an
+/// explicit api_key_env / header still goes where the caller says.
+#[tokio::test]
+async fn key_routing_fixture() {
+    let fx = backend_fixture("key-routing.json");
+    let qs = questions_of(&fx["questions"]);
+    for c in fx["captureCases"].as_array().unwrap() {
+        let name = c["name"].as_str().unwrap();
+        let backend = c["backend"].as_str().unwrap();
+        let reply = if backend == "cloudflare" {
+            format!(r#"{{"success":true,"result":{NOUL_REPLY}}}"#)
+        } else {
+            NOUL_REPLY.to_owned()
+        };
+        let (srv, seen) = fake(move |_, _| ok(&reply)).await;
+        let env: Vec<(String, String)> = c["env"]
+            .as_object()
+            .map(|m| {
+                m.iter()
+                    .map(|(k, v)| (k.clone(), v.as_str().unwrap().to_owned()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let headers: BTreeMap<String, String> = c["headers"]
+            .as_object()
+            .map(|m| {
+                m.iter()
+                    .map(|(k, v)| (k.clone(), v.as_str().unwrap().to_owned()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let guard = ENV_LOCK.lock().await;
+        let prior: Vec<(String, Option<String>)> = env
+            .iter()
+            .map(|(k, _)| (k.clone(), std::env::var(k).ok()))
+            .collect();
+        for (k, v) in &env {
+            // SAFETY: serialised by ENV_LOCK; no other test reads these names.
+            unsafe { std::env::set_var(k, v) };
+        }
+        let cl = create_classifier(ClassifierOptions {
+            backend: ClassifierBackend::parse(backend).unwrap(),
+            base_url: format!("{}/v1", srv.url),
+            api_key_env: c["apiKeyEnv"].as_str().unwrap_or("").into(),
+            headers,
+            supports: (backend == "custom").then_some(ClassifierSupports { images: false }),
+            retries: -1,
+            ..Default::default()
+        })
+        .unwrap();
+        let res = cl.evaluate(json!("x"), &qs).await;
+        for (k, v) in prior {
+            // SAFETY: as above.
+            unsafe {
+                match v {
+                    Some(v) => std::env::set_var(&k, v),
+                    None => std::env::remove_var(&k),
+                }
+            }
+        }
+        drop(guard);
+        res.unwrap_or_else(|e| panic!("{name}: {e}"));
+        let g = seen.lock().unwrap();
+        assert!(
+            !g.is_empty(),
+            "{name}: no request reached the capture server"
+        );
+        for r in g.iter() {
+            let got = r.headers.get("authorization").map(String::as_str);
+            assert_eq!(got, c["expectAuthorization"].as_str(), "{name}");
+        }
+    }
+    for c in fx["hostCases"].as_array().unwrap() {
+        let b = ClassifierBackend::parse(c["backend"].as_str().unwrap()).unwrap();
+        let url = c["baseUrl"].as_str().unwrap();
+        assert_eq!(
+            classifier_key_env(b, url),
+            c["expectKeyEnv"].as_str().unwrap(),
+            "{url}"
+        );
+    }
+}
+
 #[test]
 fn cache_keys_fixture() {
     let fx = backend_fixture("cache-keys.json");

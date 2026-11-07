@@ -17,5 +17,5 @@ defmodule RunLangchainElixir.MixProject do
 
   def application, do: [extra_applications: [:logger, :inets]]
 
-  defp deps, do: [{:langchain, "~> 0.9"}, {:jason, "~> 1.4"}, {:req, "~> 0.5"}]
+  defp deps, do: [{:langchain, "~> 0.15"}, {:jason, "~> 1.4"}, {:req, "~> 0.5"}]
 end

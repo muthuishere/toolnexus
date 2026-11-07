@@ -214,8 +214,34 @@ final class ClassifierBackends {
 
     // ------------------------------------------------------------------ cloudflare
 
-    /** The System One reply inside a Cloudflare envelope, as canonical JSON. Never echoes the
-     * envelope's own errors (they can carry an account id). */
+    /**
+     * The env var whose key may be sent to {@code baseUrl} (already {@code ${NAME}}-expanded): the
+     * backend's own variable, and only when baseUrl is that backend's own host over https
+     * (OpenRouter also its subdomains). "" when none may — custom has no preset key (#155).
+     */
+    static String keyEnv(String backend, String baseUrl) {
+        Classifier.BackendPreset p = Classifier.BACKENDS.get(backend);
+        if (p == null || p.apiKeyEnv() == null || p.apiKeyEnv().isEmpty() || p.baseUrl() == null) return "";
+        String h = httpsHost(baseUrl);
+        String own = httpsHost(ENV_REF.matcher(p.baseUrl()).replaceAll("x"));
+        if (h == null || own == null) return "";
+        boolean ok = h.equals(own)
+                || (Classifier.BACKEND_OPENROUTER.equals(backend) && h.endsWith(".openrouter.ai"));
+        return ok ? p.apiKeyEnv() : "";
+    }
+
+    private static String httpsHost(String url) {
+        try {
+            java.net.URI u = java.net.URI.create(url);
+            if (!"https".equalsIgnoreCase(u.getScheme()) || u.getHost() == null) return null;
+            return u.getHost().toLowerCase(Locale.ROOT);
+        } catch (RuntimeException e) {
+            return null;
+        }
+    }
+
+    /** The System One reply inside a Cloudflare envelope, as canonical JSON. A failed envelope
+     * surfaces errors[0] as {@code <code> <message>} through the cause policy; nothing else. */
     static String unwrapCloudflare(String body) {
         Object env;
         try {
@@ -224,7 +250,8 @@ final class ClassifierBackends {
             throw new ClassifierException("classifier: cloudflare: envelope not successful");
         }
         if (!(env instanceof Map<?, ?> m) || !Boolean.TRUE.equals(m.get("success"))) {
-            throw new ClassifierException("classifier: cloudflare: envelope not successful");
+            throw new ClassifierException("classifier: cloudflare: envelope not successful"
+                    + Classifier.cloudflareCause(env instanceof Map<?, ?> em ? em.get("errors") : null));
         }
         Object res = m.get("result");
         if (res instanceof Map<?, ?> inner && inner.get("state") instanceof String st) {

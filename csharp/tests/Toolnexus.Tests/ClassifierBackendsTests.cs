@@ -286,6 +286,55 @@ public class ClassifierBackendsTests
         Assert.Equal("https://fake.test/accounts/secretacct/ai/run", f.Urls[0]);
     }
 
+    // ---------------------------------------------------------------- key routing (#155)
+
+    [Fact]
+    public async Task KeyRoutingFixture()
+    {
+        var fx = Load("key-routing.json");
+        var qs = Qs(fx.GetProperty("questions"));
+        foreach (var c in fx.GetProperty("captureCases").EnumerateArray())
+        {
+            var name = Str(c, "name");
+            var env = c.TryGetProperty("env", out var e) ? e.EnumerateObject().ToList() : new();
+            var saved = env.ToDictionary(p => p.Name, p => Environment.GetEnvironmentVariable(p.Name));
+            try
+            {
+                foreach (var p in env) Environment.SetEnvironmentVariable(p.Name, p.Value.GetString());
+                var backend = Str(c, "backend")!;
+                var auths = new List<string?>();
+                using var srv = new StubServer(ctx =>
+                {
+                    lock (auths) auths.Add(ctx.Request.Headers["Authorization"]);
+                    new StreamReader(ctx.Request.InputStream).ReadToEnd();
+                    StubServer.Respond(ctx, 200, backend == "cloudflare"
+                        ? "{\"success\":true,\"result\":" + NoulReply + "}" : NoulReply);
+                });
+                var opts = new ClassifierOptions
+                {
+                    BaseUrl = srv.BaseUrl + "/v1",
+                    ApiKeyEnv = Str(c, "apiKeyEnv"),
+                    OnError = _ => LlmClient.Tier.Fail,
+                };
+                opts.WithBackend(backend);
+                if (backend == "custom") opts.Supports = new ClassifierSupports(false);
+                if (c.TryGetProperty("headers", out var hs) && hs.ValueKind == JsonValueKind.Object)
+                    opts.Headers = hs.EnumerateObject().ToDictionary(p => p.Name, p => p.Value.GetString()!);
+                await new Classifier(opts).EvaluateAsync("x", qs);
+                Assert.NotEmpty(auths);
+                var want = Str(c, "expectAuthorization");
+                foreach (var got in auths) Assert.True(want == got, $"{name}: Authorization = {got ?? "<absent>"}, want {want ?? "<absent>"}");
+            }
+            finally
+            {
+                foreach (var (k, v) in saved) Environment.SetEnvironmentVariable(k, v);
+            }
+        }
+        foreach (var c in fx.GetProperty("hostCases").EnumerateArray())
+            Assert.Equal(Str(c, "expectKeyEnv"),
+                ClassifierBackends.KeyEnv(ClassifierBackends.Parse(Str(c, "backend")!), Str(c, "baseUrl")));
+    }
+
     // ---------------------------------------------------------------- cache
 
     [Fact]
