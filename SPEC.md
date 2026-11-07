@@ -732,6 +732,15 @@ omitRefreshResource?: bool, allowHttp?: bool }`, plus a host-supplied **token st
   carries the native parser's own error message for a human. A host must not have to call the
   inventory surface to learn that six of eighty-seven skills vanished. A port that also has a warn
   slot MAY call it; the returned data is what conformance compares.
+- **Oversized descriptions are warned, never modified** (issue #84). A skill whose `description`
+  is longer than **1,024 Unicode code points** (the published Agent Skills limit) is reported in a
+  `warnings` list — a sibling of `skipped` on the loader result (over the exposed skills) and on
+  the S3 inventory (unfiltered) — as `{ location, reason: "oversized-description", chars }`, where
+  `chars` is the description's length in **code points** (not bytes, not UTF-16 units). Exactly
+  1,024 does not warn. Order is normative discovery order. The catalog still carries the
+  description **in full**; the catalog and the `skill` tool output stay byte-identical, and the
+  warning is the entire observable effect. A port also emits it through the warn channel it uses
+  for duplicate names (never stdout). Fixture: `conformance/skill_description/`.
 - Skill `Info { name, description, location (abs path to SKILL.md), content }`.
 - Duplicate names: first wins, log a warning.
 - **Discovery order is normative, not each ecosystem's directory walk.** "First wins" only decides
@@ -3771,6 +3780,13 @@ answer.data.isError  : boolean         // optional, pairs with `output`
   providers require.
 - A call for which the host supplied no result gets an explicit **error** `tool_result`
   rather than an absent slot, because an unanswered tool call is rejected by the provider.
+- **A declined answer carries its reason** (issue #125). `answer.ok == false` (e.g.
+  `answerDeclined(id, reason)`) resolves **every** outstanding call of the halted turn with an
+  error `tool_result` whose content is exactly `relay declined for <name>: <reason>` — the same
+  text as the inline relay path — with `reason` defaulting to `declined` and `<name>` falling back
+  to the call id. Any `data` on a declined answer is ignored; it is never the
+  `"no result supplied on resume"` filler, and the resume does not fail. Fixture:
+  `conformance/resume_decline/cases.json`.
 - The resume continues from the transcript and appends **no new user turn**.
 - Because `Request` and `Answer` are plain serializable data, resume works across a
   process boundary: persist both, restart, resume with a fresh client.

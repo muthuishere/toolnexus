@@ -1,0 +1,16 @@
+{
+  "_doc": "SPEC §10 durable resume, issue #125. A run halts on a two-call relay turn; the host resumes with answerDeclined(pending.id, reason). Every outstanding call gets an error tool_result whose content is exactly `expect[i]`, in call order. Replayed by golang/relay_test.go and rust/tests/relay.rs — the two ports that ship the durable resume entry point.",
+  "calls": ["alpha", "beta"],
+  "cases": [
+    {
+      "name": "reason is carried to every call",
+      "reason": "user said no",
+      "expect": ["relay declined for alpha: user said no", "relay declined for beta: user said no"]
+    },
+    {
+      "name": "empty reason defaults to declined",
+      "reason": "",
+      "expect": ["relay declined for alpha: declined", "relay declined for beta: declined"]
+    }
+  ]
+}
