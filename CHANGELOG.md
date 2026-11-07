@@ -24,9 +24,10 @@ client. It is now resolved the first time a tool result is actually validated ag
 schema. The SDK's Jackson 3 mapper is built on first use of the legacy SDK path, not when `McpSource`
 loads, and a config with only stdio servers no longer builds an OAuth token store. C# now creates
 the shared MCP `HttpClient` on the first remote request, so a host with only stdio servers does not
-load the HTTP/TLS stack at startup. Validation, auth and the wire format are unchanged. **Not done:**
-the second process that the Java and C# stdio probe spawns for older servers (the larger cost at
-startup) and the two Jackson stacks in Java are tracked separately.
+load the HTTP/TLS stack at startup. Validation, auth and the wire format are unchanged. The second
+process that the Java and C# stdio probe used to spawn for older servers (the larger cost at startup)
+is gone too: #167 now reuses the probe child (see the entry below). **Not done:** Java still loads two
+Jackson stacks.
 
 - **Benchmarks (harness only, no published numbers changed):** the fake model server
   (`benchmarks/mock_llm.py`) now speaks HTTP/1.1 keep-alive, so frameworks that pool connections
@@ -34,8 +35,8 @@ startup) and the two Jackson stacks in Java are tracked separately.
   per call. It also lets two frameworks that previously could not run do so: smolagents (tool results
   arrive as role `user` and the agent stops only on a `final_answer` tool call; the mock now handles
   both) and AutoAgents (the mock sent `input_tokens` alongside `prompt_tokens`, which AutoAgents rejects
-  as a duplicate field; usage now carries the OpenAI-standard keys only). The standing tables are not
-  re-run yet; a full quiet re-run will refresh them.
+  as a duplicate field; usage now carries the OpenAI-standard keys only). The standing tables were
+  re-run against it on 2026-11-08 (see the docs entry below).
 **Faster load of pre-2026 stdio MCP servers: one process start instead of two.** Until now, when a
 stdio server answered the `server/discover` probe with an error (every server older than MCP
 2026-07-28 does), the client killed that process and started a second one for the old protocol. A JVM
@@ -72,6 +73,17 @@ If a port cannot hand the open process over, it respawns as before (Rust logs a 
   `full` config, at about 30% of Spring's memory. Measured 2026-11-08 on a busy machine and kept apart from
   the 2026-11-07 rows; the C# MCP figure from that sitting is too noisy to claim. No Python or Java
   competitor has a native row in the harness yet.
+- **Docs / benchmarks: quiet re-run of the Nov 2026 standing page** (2026-11-08, every row started at
+  1-minute load < 4, keep-alive mock). All per-language tables now come from one sitting of the full suite,
+  with toolnexus `main` (the 0.27.0 candidate) and smolagents and AutoAgents, which run for the first time. A
+  new table puts 0.26.0 and `main` side by side per port: MCP cold init drops 14–20 ms in Python, JS, Go,
+  Elixir, Clojure and Rust and 14 ms in C# (the stdio probe child is reused, #167; JS/Go lazy loading, #166;
+  C# lazy `HttpClient`, #171), and per-request latency is unchanged. Where we still lose: Eino in Go,
+  LangChain4j on the JVM, AutoAgents in Rust (new, by 8%), and C# MCP cold init against Microsoft Agent
+  Framework. Java did not show #171's cold-start gain in this run (init 462 vs 413 ms, one sample per
+  process), so the page does not claim it. .NET MCP is now ahead of Microsoft Agent Framework (0.52 vs
+  0.62 ms). Clojure remains the slowest port; its fix is deferred to issue #168. Raw rows are in
+  `benchmarks/results-2026-11.json` under `run: 2026-11-08-quiet`; earlier sittings are kept.
 
 **Security: the classifier no longer sends a default API key to a host that is not its own** (issue #155).
 Until now the classifier read `TYPESAFE_API_KEY` (or the backend's variable) and sent it as a bearer
