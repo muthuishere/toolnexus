@@ -328,10 +328,7 @@ impl McpHandler {
             return false;
         }
         let hv = rc.header("mcp-protocol-version");
-        if hv == MCP_PROTOCOL_2026 {
-            return true;
-        }
-        if !hv.is_empty() && self.inner.versions.iter().any(|v| v == hv) {
+        if !hv.is_empty() && self.inner.legacy.iter().any(|v| v == hv) {
             return false;
         }
         method == "server/discover"

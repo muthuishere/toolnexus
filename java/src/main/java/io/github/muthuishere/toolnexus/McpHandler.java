@@ -379,7 +379,7 @@ public final class McpHandler implements HttpHandler {
     /** Validates MCP-Protocol-Version and (stateful) Mcp-Session-Id; null ⇒ the error was written. */
     private RequestContext checkSession(RequestContext ctx, HttpExchange ex) throws IOException {
         String v = header(ex, "MCP-Protocol-Version");
-        if (!v.isEmpty() && !legacy.contains(v)) {
+        if (!v.isEmpty() && !versions.contains(v)) {
             httpError(ex, 400, "Bad Request: unsupported MCP-Protocol-Version");
             return null;
         }
@@ -907,8 +907,7 @@ public final class McpHandler implements HttpHandler {
         if (only2026()) return true;
         if ("initialize".equals(method)) return false;
         String hv = header(ex, "MCP-Protocol-Version");
-        if (PROTOCOL_2026.equals(hv)) return true;
-        if (!hv.isEmpty() && versions.contains(hv)) return false;
+        if (!hv.isEmpty() && legacy.contains(hv)) return false;
         return "server/discover".equals(method) || !header(ex, "Mcp-Method").isEmpty()
                 || (meta != null && meta.containsKey(McpHandler2026.META_VERSION));
     }
