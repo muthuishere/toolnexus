@@ -14,6 +14,7 @@ import {
   classifierKeyEnv,
   CLASSIFIER_IMAGES_HEADER,
   ClassifierUnsupported,
+  decisionsReply,
   MemoryCache,
   classifierModelCacheKey,
   classifierDecisionCacheKey,
@@ -184,6 +185,68 @@ test("cloudflare: envelope unwrap matches cloudflare-replies.json; errors never 
       assert.equal(d.noul("q").noul, c.expect.noul, c.name)
     }
     assert.equal(f.seen[0].url, "http://cf.test/run", `${c.name}: no /systemone suffix`)
+  }
+})
+
+// ---------------------------------------------------------------- openai (Decisions wire, #157)
+
+test("openai: the Decisions wire matches openai-decisions.json", async () => {
+  const fx = load("backends/openai-decisions.json")
+  const qs = questionsOf(fx.questions)
+  const okReply = JSON.stringify(fx.replyCases[0].reply)
+
+  for (const c of fx.requestCases) {
+    const f = fakeFetch(() => [200, okReply])
+    const cl = createClassifier({ backend: "openai", baseUrl: "http://oa.test/v1", model: c.model, fetch: f.fetch, retries: 0 })
+    await cl.evaluate(partsOf(c.state), qs)
+    assert.equal(f.seen[0].body, c.expect.body, c.name)
+    assert.equal(f.seen[0].url, "http://oa.test/v1/decisions", c.name)
+    assert.equal(f.seen[0].headers[CLASSIFIER_IMAGES_HEADER], undefined, `${c.name}: no danger-zone header`)
+  }
+
+  for (const c of fx.replyCases) {
+    if (c.expect.normalized) assert.equal(decisionsReply(c.reply, qs), c.expect.normalized, c.name)
+    const f = fakeFetch(() => [200, JSON.stringify(c.reply)])
+    const cl = createClassifier({ backend: "openai", baseUrl: "http://oa.test", fetch: f.fetch, retries: 0 })
+    const run = cl.evaluate("x", qs)
+    if (c.expect.error) {
+      await assert.rejects(run, (e: Error) => e.message === c.expect.error, c.name)
+      continue
+    }
+    const d = await run
+    assert.equal(d.model, c.expect.model, c.name)
+    assert.equal(d.calibrated, c.expect.calibrated, c.name)
+    for (const [k, v] of Object.entries(c.expect.noul ?? {})) assert.equal(d.noul(k).noul, v, `${c.name} ${k}`)
+    for (const [k, v] of Object.entries(c.expect.choice ?? {})) assert.equal(d.choice(k).choice, v, `${c.name} ${k}`)
+    for (const [k, v] of Object.entries(c.expect.score ?? {})) assert.equal(d.score(k).score, v, `${c.name} ${k}`)
+  }
+
+  for (const c of fx.errorCases) {
+    const f = fakeFetch(() => [200, okReply])
+    const cl = createClassifier({ backend: "openai", baseUrl: "http://oa.test", fetch: f.fetch, retries: 0 })
+    await assert.rejects(
+      cl.evaluate("x", questionsOf(c.questions)),
+      (e: Error) => e.message === c.expect.error && e instanceof ClassifierUnsupported === !!c.expect.unsupported,
+      c.name,
+    )
+    assert.equal(f.seen.length, 0, `${c.name}: a request was sent`)
+  }
+
+  for (const c of fx.captureCases) {
+    const saved: Record<string, string | undefined> = {}
+    for (const [k, v] of Object.entries<string>(c.env)) {
+      saved[k] = process.env[k]
+      process.env[k] = v
+    }
+    try {
+      const f = fakeFetch(() => [200, okReply])
+      const cl = createClassifier({ backend: "openai", baseUrl: "http://127.0.0.1:9/v1", apiKeyEnv: c.apiKeyEnv, fetch: f.fetch, retries: 0 })
+      await cl.evaluate("x", qs)
+      const auth = Object.entries(f.seen[0].headers).find(([k]) => k.toLowerCase() === "authorization")?.[1]
+      assert.equal(auth ?? null, c.expectAuthorization, c.name)
+    } finally {
+      for (const [k, v] of Object.entries(saved)) v === undefined ? delete process.env[k] : (process.env[k] = v)
+    }
   }
 })
 

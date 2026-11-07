@@ -152,7 +152,8 @@ const rs = await c.states("a", "b").evaluate(judge.noul("q", "…"))      // [{ 
 
 - `backend`: `typesafe` (default) · `openrouter` (`typesafe/jev-1.14`) · `cloudflare` (`/ai/run`
   envelope; `${CLOUDFLARE_ACCOUNT_ID}` in the URL expands at call time, errors name it unexpanded)
-  · `vercel` · `custom` (requires `baseUrl` and `supports`). The table is data:
+  · `vercel` · `openai` (OpenAI Decisions API, `POST {baseUrl}/decisions`, `gpt-6-luna`,
+  `OPENAI_API_KEY`; raw questions are unsupported, `calibrated` is false) · `custom` (requires `baseUrl` and `supports`). The table is data:
   `CLASSIFIER_BACKENDS`; `supports: { images }` overrides it per classifier.
 - Images (style `systemone` only): image parts in the state are lifted into `assets` (cloudflare:
   data URLs). PNG/JPEG, 280–1568 px a side, ≤ 16 MiB each and 32 MiB per request — never resized.
