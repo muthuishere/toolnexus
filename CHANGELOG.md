@@ -8,6 +8,23 @@ GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
 
 ## Unreleased
 
+**Classifier: an `openai` backend on OpenAI's Decisions API** (issue #157). `createClassifier({backend:
+"openai"})` sends the same noul / choice / score questions to `POST https://api.openai.com/v1/decisions`
+(`gpt-6-luna`) and returns the same `Decision` as every other backend. A front end such as jevx can now
+offer an `openai` profile type without its own adapter. Every shared option applies unchanged (baseUrl,
+headers, timeout, httpClient, retries, onError, requestParams, bodyTransform, cache, onMetric).
+`OPENAI_API_KEY` goes only to `api.openai.com` over https (the #155 rule). Images go as `input_image`
+data URLs. Caller keys are still never sent: questions travel in key order and answers are read back by
+position. A `refusal` answer is an error, never a "no". Three things this wire cannot take fail before
+any request: raw questions such as `box`, a one-option choice, and more than 400 questions.
+**Not done:** decisions from this backend report `calibrated: false` until calibration is measured, so
+thresholds tuned on Jev do not transfer. The Decisions API has no batch call, so `states().evaluate`
+still fans out one request per state. There is no model catalogue (#158). OpenRouter's and Vercel's
+Decisions routes have no preset yet; they work today with a `baseUrl` override and a named `apiKeyEnv`.
+The wire follows OpenAI's published reference; a live check is still pending, see
+`openspec/changes/add-classifier-openai-decisions`. Shared fixture
+`examples/judge/backends/openai-decisions.json`.
+
 - **Docs:** the docs-site hero video is re-cut for 0.26.0 (80 s, new narrator). It now covers eight
   languages including Rust, typed decisions (`createClassifier`), media generation, and serving the
   toolkit over MCP, A2A and ACP. Its benchmark claims come only from the Nov 2026 standing page: lowest

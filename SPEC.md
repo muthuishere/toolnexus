@@ -3011,7 +3011,7 @@ configured one client has configured the other. Idiomatic names per port, as eve
 | option | default | notes / §8 counterpart |
 |---|---|---|
 | `style` | `"systemone"` | `"systemone" \| "llm" \| "custom" \| "static"`. Same slot as the client's `style`; the values differ because the wires differ |
-| `backend` | `"typesafe"` | `typesafe \| openrouter \| cloudflare \| vercel \| custom` — sets baseUrl, model and apiKeyEnv as a unit (table below) |
+| `backend` | `"typesafe"` | `typesafe \| openrouter \| cloudflare \| vercel \| openai \| custom` — sets baseUrl, model and apiKeyEnv as a unit (table below) |
 | `supports` | the backend row | `{images}`; overrides the table; required with `custom` |
 | `cache` | — | opt-in `{get, set}` answer cache (below); absent ⇒ none |
 | `baseUrl` | `https://api.typesafe.ai/v1` | same as §8. OpenRouter (`https://openrouter.ai/api/v1`) serves this wire today; self-hosted and open-weights implementations speak it too |
@@ -3078,10 +3078,11 @@ error text names the endpoint **unexpanded**.
 | `openrouter` | `https://openrouter.ai/api/v1` | `typesafe/jev-1.14` | `OPENROUTER_API_KEY` | systemone | yes | yes |
 | `cloudflare` | `https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/ai/run` | `typesafe/jev` | `CLOUDFLARE_JEV_API_KEY` | cloudflare | model contains `clef` | no |
 | `vercel` | `https://ai-gateway.vercel.sh/typesafe/v1` | `typesafe-ai/jev` | `AI_GATEWAY_API_KEY` | systemone | no | yes |
+| `openai` | `https://api.openai.com/v1` | `gpt-6-luna` | `OPENAI_API_KEY` | decisions | yes | no |
 | `custom` | required | `jev-latest` | *(none)* | systemone | required (`supports`) | yes |
 
-System One is the only wire (the alpha Decisions API is not supported). Unknown backend:
-`classifier: unknown backend "<b>" (want "typesafe", "openrouter", "cloudflare", "vercel" or "custom")`;
+Three wires: `systemone`, `cloudflare`, and `decisions` (OpenAI's Decisions API, below). Unknown backend:
+`classifier: unknown backend "<b>" (want "typesafe", "openrouter", "cloudflare", "vercel", "openai" or "custom")`;
 custom without declarations: `classifier: backend "custom" requires baseUrl and supports`.
 
 **Key to host** (security, issue #155; the §8 client's *API key by host* rule applied to the classifier).
@@ -3098,6 +3099,37 @@ per port asserts the `Authorization` of every request).
 `{"input":{"images"?,"questions","state"},"model"}`; reply `{success, result}`, `result` may be
 `{"state":"Completed","result":…}`. `success` not `true` ⇒ `classifier: cloudflare: envelope not successful` followed by `: <code> <message>` of `errors[0]` when present (code and message each omitted when absent; code rendered as written; nothing else of the envelope), through the same redaction and 200-character cap as any backend's reported cause — Cloudflare reports a missing balance, a bad model and a malformed request alike as HTTP 200 with `success:false`;
 another run state ⇒ `classifier: cloudflare: run state "<s>"`.
+
+**Decisions wire** (backend `openai`, issue #157, change `add-classifier-openai-decisions`). Recorded
+from OpenAI's API reference (2026-11-08). `POST {baseUrl}/decisions` with `{"input","model","questions"}`.
+`questions` is a **list in ASCII caller-key order**, and caller keys are **not** sent (no `name`). The
+answers come back in order and are read by position.
+- `noul` ⇒ `{"type":"predicate","instructions"}`; criteria, when present, are appended to the
+  instructions as `"\n\nTrue means: <true>\nFalse means: <false>"`.
+- `choice` ⇒ `{"type":"choice","instructions","choices":[{"value":<id>,"description"?}]}`, ids in ASCII
+  order, an empty description omitted. The wire takes 2–255 options.
+- `score` ⇒ `{"type":"score","instructions","levels":[{"label"}]}`, in rubric order.
+- `input`: a string state verbatim; any other state as its canonical JSON text. With images (lifted and
+  checked as above), one message `[{"role":"user","content":[{"type":"input_text","text"},
+  {"type":"input_image","image_url":"data:image/<fmt>;base64,…"}…]}]`, images in collection order.
+- Before any request: a raw question ⇒ `ClassifierUnsupported` (`classifier: <backend> (<model>) does not
+  support raw question type "<t>"`); a one-option choice ⇒ `classifier: question "<key>": the decisions
+  wire needs 2..255 choice options, got 1`; more than 400 questions ⇒ `classifier: the decisions wire
+  takes at most 400 questions, got <n>`.
+- Reply `{model, answers:[…], usage}` is normalised to the System One shape, then decoded, validated,
+  cached and metered as any other. `probability` ⇒ `noul`. `choice` keeps `choice`, `confidence` and
+  `probabilities` keyed by value, with booleans as `"true"`/`"false"`. `score` keeps `score` and
+  `confidence`, with `probabilities` keyed by the 0-based level `value` and `legend` from the question.
+  The decision is `calibrated: false`: Decisions models are not System One models, and no calibration
+  claim is made. `usage` keeps `input_tokens` / `output_tokens`.
+- A `refusal` answer ⇒ `classifier: decisions: question "<key>" was refused`, an error and never a "no".
+  The other errors are `classifier: decisions: <n> answers for <m> questions`, `classifier: decisions:
+  answer "<key>" is a <t> answer, not <want>` and `classifier: decisions: malformed reply`.
+- No native batch: the API takes one `input` per request, so `states().evaluate` keeps its fan-out.
+  Gateways serving the same wire (OpenRouter `api/alpha/decisions`, Vercel) work as `backend:"openai"`
+  with a `baseUrl` override and a caller-named `apiKeyEnv`. They have no preset row until a live probe
+  proves them.
+Shared fixture: `examples/judge/backends/openai-decisions.json`.
 
 **Images** (style `systemone` only; `static`/`custom`/`llm` get the state verbatim). A state with no
 content part is sent verbatim. Otherwise walk it depth-first, object keys in ASCII order, arrays in
