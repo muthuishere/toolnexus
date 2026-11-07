@@ -1,0 +1,22 @@
+plugins {
+    id 'application'
+}
+
+java {
+    toolchain { languageVersion = JavaLanguageVersion.of(21) }
+}
+
+repositories { mavenCentral() }
+
+// keep build output (incl. installDist) out of the repo
+layout.buildDirectory.set(file(System.getProperty('user.home') + '/.cache/tn-bench-2026-11/build-adk-java'))
+
+dependencies {
+    implementation 'com.google.adk:google-adk:1.14.0'
+    implementation 'com.google.adk:google-adk-langchain4j:1.14.0'
+    implementation 'dev.langchain4j:langchain4j-open-ai:1.23.0'
+}
+
+application {
+    mainClass = 'bench.AdkJavaBench'
+}
