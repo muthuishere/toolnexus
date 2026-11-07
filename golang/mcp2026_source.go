@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"math"
 	"net/url"
@@ -64,11 +65,19 @@ type mcpConnectOpts struct {
 	disabled   map[string]bool
 }
 
+// mcpProbeHandoff is a stdio probe child that replied to server/discover
+// without 2026-07-28: the frozen path continues on it instead of respawning.
+type mcpProbeHandoff struct {
+	r io.Reader
+	w io.WriteCloser
+}
+
 // connect2026 probes a server with server/discover. fallback=true ⇒ the caller
 // uses the frozen SDK path (§2.2a); a non-nil err with fallback=false is a load
 // failure. On fallback the returned auth engine (may be nil) carries any token
-// obtained during the probe.
-func connect2026(ctx context.Context, name string, cfg ServerConfig, o mcpConnectOpts) (s *mcp26Server, auth *mcpOAuth, fallback bool, err error) {
+// obtained during the probe, and ho (stdio only, may be nil) is the probe child
+// to reuse — set when discover got a reply; nil after silence (respawn).
+func connect2026(ctx context.Context, name string, cfg ServerConfig, o mcpConnectOpts) (s *mcp26Server, auth *mcpOAuth, ho *mcpProbeHandoff, fallback bool, err error) {
 	timeout := cfg.timeout()
 	c := &mcp26Client{url: cfg.URL, headers: cfg.Headers}
 	if cfg.isRemote() {
@@ -76,11 +85,11 @@ func connect2026(ctx context.Context, name string, cfg ServerConfig, o mcpConnec
 		auth = c.auth
 	} else {
 		if len(cfg.Command) == 0 {
-			return nil, nil, false, fmt.Errorf("local server %q has no command", name)
+			return nil, nil, nil, false, fmt.Errorf("local server %q has no command", name)
 		}
 		st, sErr := startMcp26Stdio(cfg)
 		if sErr != nil {
-			return nil, nil, false, sErr
+			return nil, nil, nil, false, sErr
 		}
 		c.stdio = st
 	}
@@ -95,19 +104,28 @@ func connect2026(ctx context.Context, name string, cfg ServerConfig, o mcpConnec
 		dErr = errMcpStdioNoReply
 	}
 	if dErr != nil {
+		if c.stdio != nil && ctx.Err() == nil && discoverFallback(dErr) && !errors.Is(dErr, errMcpStdioNoReply) {
+			// §2.2a: a fast reply ⇒ the SAME child continues into initialize.
+			if r, w, ok := c.stdio.handoff(); ok {
+				return nil, auth, &mcpProbeHandoff{r: r, w: w}, true, nil
+			}
+		}
 		if c.stdio != nil {
-			c.stdio.kill() // the frozen path starts its own process
+			c.stdio.kill() // silence: the frozen path starts its own process
 		}
 		if ctx.Err() != nil {
-			return nil, nil, false, ctx.Err()
+			return nil, nil, nil, false, ctx.Err()
 		}
 		if discoverFallback(dErr) {
-			return nil, auth, true, nil
+			return nil, auth, nil, true, nil
 		}
-		return nil, nil, false, dErr
+		return nil, nil, nil, false, dErr
+	}
+	if c.stdio != nil {
+		c.stdio.keepReading()
 	}
 	s = &mcp26Server{name: name, cfg: cfg, c: c, waitFor: o.waitFor, timeout: timeout, paused: map[string]*mcp26CallState{}, disabled: o.disabled, discovery: disc}
-	return s, nil, false, nil
+	return s, nil, nil, false, nil
 }
 
 func (s *mcp26Server) close() {
