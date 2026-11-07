@@ -1679,7 +1679,10 @@
   (let [tk (tool/toolkit (mapv #(sched-tool tr % (str/starts-with? % "r")) names))]
     (with-llm style [{:calls (mapv (fn [n] {:id (str "c-" n) :name n}) names)} {:text "done"}]
       (fn [{:keys [base]}]
-        (names-of (client/run (client-for style base opts) "go" {:toolkit tk}))))))
+        (let [rr (client/run (client-for style base opts) "go" {:toolkit tk})]
+          ;; each result stays paired with its own call, whatever order they finished in
+          (is (= (mapv #(str "out " %) (names-of rr)) (outputs-of rr)) "result paired with wrong call")
+          (names-of rr))))))
 
 (def ^:private six ["r1" "r2" "r3" "r4" "r5" "r6"])
 

@@ -119,6 +119,23 @@ async fn permission_callback_timeout_is_typed_and_answers_cancelled() {
 }
 
 #[tokio::test]
+async fn permission_timeout_bounds_the_whole_turn() {
+    // SPEC §7 ACP host hooks: "the turn's permission timeout still applies" —
+    // a turn the agent never ends fails typed after the bound, not never.
+    let mut o = opts("cancel");
+    o.permission_timeout = Duration::from_millis(200);
+    let c = AcpClient::load(o).await.unwrap();
+    let started = Instant::now();
+    let err = tokio::time::timeout(Duration::from_secs(5), c.prompt_text("go"))
+        .await
+        .expect("turn must be bounded by permission_timeout")
+        .unwrap_err();
+    assert!(matches!(err, AcpError::PermissionTimeout(_)), "{err}");
+    assert!(started.elapsed() < Duration::from_secs(3));
+    c.close().await;
+}
+
+#[tokio::test]
 async fn slow_cold_start_within_initialize_timeout() {
     let c = AcpClient::load(opts("echo").args(["echo", "800"]))
         .await

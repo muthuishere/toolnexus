@@ -168,6 +168,26 @@ public class AcpClientTests
         }
     }
 
+    /// <summary>SPEC §7 ACP host hooks, "Cancellation": a cancelled turn sends the
+    /// <c>session/cancel</c> notification (no id), waits for the turn's reply, throws the
+    /// cancellation error, and leaves the process and session warm for the next turn.</summary>
+    [Fact]
+    public async Task CancelledTurn_SendsSessionCancelNotification_SessionStaysWarm()
+    {
+        var client = await StartAsync("cancel");
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(300));
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => client.PromptAsync("go", cts.Token));
+            var next = await client.PromptAsync("again");
+            Assert.Equal("warm:cancels=1;withId=False", next);
+        }
+        finally
+        {
+            client.Dispose();
+        }
+    }
+
     // ---------------------------------------------------------------------------------------
     // Stale-answer prevented by the supersedes marker
     // ---------------------------------------------------------------------------------------

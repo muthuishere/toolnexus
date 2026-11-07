@@ -86,15 +86,28 @@ export interface ACPOptions {
 /** One warm ACP connection: one child process, one session, alive across many
  *  turns. `.generate` has exactly the shape {@link InProcessOptions.generate}
  *  wants, so it plugs straight into {@link createInProcessClient}. */
+/** Per-call options for {@link ACPClient.generate} / {@link ACPClient.generateStream}. */
+export interface ACPGenerateOptions {
+  /** Cancels the turn: when it aborts mid-turn the `session/cancel` notification is sent,
+   *  the turn's reply is awaited (bounded by `requestTimeoutMs`, default 30s) so the next
+   *  turn never lands on a busy session, and the call rejects with an `AbortError`. The
+   *  process and session stay warm. */
+  signal?: AbortSignal
+}
+
 export interface ACPClient {
-  generate: (request: InProcessRequest) => Promise<InProcessResponse>
+  generate: (request: InProcessRequest, opts?: ACPGenerateOptions) => Promise<InProcessResponse>
   /** {@link generate}, streaming: `emit` fires as each `session/update` arrives —
    *  agent_message_chunk → `text`, agent_thought_chunk → `thought` (via "acp"),
    *  tool_call → `tool_call` and a completed/failed tool_call_update → `tool_result`
    *  (both via "acp": the agent's own tools, reported, never executed by the loop).
    *  Shaped for {@link InProcessOptions.generateStream}. The returned content is the
    *  message text only. */
-  generateStream: (request: InProcessRequest, emit: (event: StreamEvent) => void) => Promise<InProcessResponse>
+  generateStream: (
+    request: InProcessRequest,
+    emit: (event: StreamEvent) => void,
+    opts?: ACPGenerateOptions,
+  ) => Promise<InProcessResponse>
   /** Terminates the agent's process group. Idempotent — a second call is a no-op. */
   close: () => Promise<void>
   /** The agent's raw `initialize` result. */
@@ -375,7 +388,12 @@ export async function loadACP(opts: ACPOptions): Promise<ACPClient> {
   // queue itself never rejects (a failed turn does not poison later ones).
   let turnQueue: Promise<unknown> = Promise.resolve()
 
-  async function promptOnce(request: InProcessRequest, emit?: (event: StreamEvent) => void): Promise<InProcessResponse> {
+  async function promptOnce(
+    request: InProcessRequest,
+    emit?: (event: StreamEvent) => void,
+    signal?: AbortSignal,
+  ): Promise<InProcessResponse> {
+    if (signal?.aborted) throw acpAbortError()
     const text = renderPrompt(request)
     const id = `c-${++nextId}`
 
@@ -440,21 +458,48 @@ export async function loadACP(opts: ACPOptions): Promise<ACPClient> {
       )
     })
 
+    let onAbort: (() => void) | undefined
+    const cancelled = new Promise<"cancelled">((resolve) => {
+      if (!signal) return
+      onAbort = () => resolve("cancelled")
+      signal.addEventListener("abort", onAbort, { once: true })
+    })
+
     try {
-      const msg = await Promise.race([replyPromise, timeout])
+      const msg = await Promise.race([replyPromise, timeout, cancelled])
+      if (msg === "cancelled") {
+        // ACP: session/cancel is a notification (no id); the agent then ends the turn with
+        // stopReason "cancelled". Wait (bounded) for that reply so the session is idle again.
+        write({ jsonrpc: "2.0", method: "session/cancel", params: { sessionId } })
+        const waitMs = opts.requestTimeoutMs && opts.requestTimeoutMs > 0 ? opts.requestTimeoutMs : 30000
+        let wait: NodeJS.Timeout | undefined
+        await Promise.race([
+          replyPromise,
+          new Promise((r) => {
+            wait = setTimeout(r, waitMs)
+          }),
+        ])
+        clearTimeout(wait)
+        throw acpAbortError()
+      }
       if (msg.error && msg.error.code === 0) throw new Error(msg.error.message)
       if (msg.error) throw new Error(`toolnexus: ACP error ${msg.error.code}: ${msg.error.message}`)
       return { content }
     } finally {
       clearTimeout(timer)
+      if (onAbort) signal!.removeEventListener("abort", onAbort)
       pending.delete(id)
       updateSink = null
     }
   }
 
-  const generateStream = (request: InProcessRequest, emit?: (event: StreamEvent) => void): Promise<InProcessResponse> => {
+  const generateStream = (
+    request: InProcessRequest,
+    emit?: (event: StreamEvent) => void,
+    callOpts?: ACPGenerateOptions,
+  ): Promise<InProcessResponse> => {
     if (closed) return Promise.reject(new Error("toolnexus: ACP client is closed"))
-    const turn = turnQueue.then(() => promptOnce(request, emit))
+    const turn = turnQueue.then(() => promptOnce(request, emit, callOpts?.signal))
     turnQueue = turn.then(
       () => undefined,
       () => undefined,
@@ -478,13 +523,20 @@ export async function loadACP(opts: ACPOptions): Promise<ACPClient> {
     if (t === "late") await Promise.race([childGone, new Promise((r) => setTimeout(r, 1000).unref())])
   }
 
-  const generate = (request: InProcessRequest): Promise<InProcessResponse> => generateStream(request)
+  const generate = (request: InProcessRequest, callOpts?: ACPGenerateOptions): Promise<InProcessResponse> =>
+    generateStream(request, undefined, callOpts)
 
   const client: ACPClient = { generate, generateStream, close, initializeResult }
   // Non-enumerable, undocumented — internal test hook only, so the public
   // ACPClient surface stays exactly {generate, generateStream, close}.
   Object.defineProperty(client, "_pid", { value: child.pid, enumerable: false })
   return client
+}
+
+function acpAbortError(): Error {
+  const e = new Error("toolnexus: ACP turn cancelled")
+  e.name = "AbortError"
+  return e
 }
 
 /** Signals the child's whole process group (POSIX), else the child itself. Never throws. */

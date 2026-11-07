@@ -2481,7 +2481,7 @@ delta until the consumer has received it, so a buffering implementation deadlock
 The injectable transport (Gap 2) is unchanged and remains the answer for proxy, mTLS and
 record-replay — this is a second constructor over it, not a second seam.
 
-#### ACP model source — host hooks (golang-first; other ports pending, `openspec/changes/add-go-host-asks`; streaming: all eight ports)
+#### ACP model source — host hooks (onPermission/onUpdate/streaming: all eight ports; cancellation: all but elixir and clojure, `openspec/changes/add-go-host-asks` 2.6e)
 
 An ACP source (one warm `session/prompt` per turn over a child agent; ADR 0031) MAY take three
 opt-in hooks. With none set its behaviour is unchanged: `session/request_permission` is answered
