@@ -1,9 +1,9 @@
 ---
 title: toolnexus
-description: Your LLM, with MCP tools and agent skills built in — in 3 lines, in 8 languages. Vendor-neutral, byte-identical across JavaScript, Python, Go, Java, C#, Elixir, Clojure and Rust.
+description: "One vendor-neutral agent library, byte-identical in JavaScript, Python, Go, Java, C#, Elixir, Clojure and Rust: MCP client and server, agent skills, A2A and ACP agents, a typed decision classifier, image/video/speech generation, streaming, memory and resilience. Benchmarked against 21 frameworks; fastest or level in most languages."
 template: splash
 hero:
-  tagline: Give any LLM tool-calling, an MCP host, agent skills, and remote agents — in a few lines, in eight languages.
+  tagline: "Tool-calling, MCP, agent skills, typed decisions and media generation for any LLM: one agent library in eight languages, with the lowest or level overhead in most of them."
   actions:
     - text: Quickstart
       link: /toolnexus/quickstart/
@@ -226,6 +226,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 	<Card title="Human in the loop" icon="comment">
 		The suspension layer: an agent can pause, ask *you* a question, and resume — plus an
 		MCP elicitation bridge. Nobody else ships this across eight ports.
+	</Card>
+	<Card title="Typed decisions" icon="list-format">
+		`createClassifier` and the judge adapters: a yes/no, a pick-one or a score with confidence,
+		from any System One backend. [Judge &amp; classifier →](/toolnexus/judge/)
+	</Card>
+	<Card title="Media generation" icon="seti:image">
+		Image, video, speech, transcription, voice cloning and talking-head video, as typed verbs
+		and agent tools, from a JSON provider style. [Media →](/toolnexus/media/)
 	</Card>
 </CardGrid>
 

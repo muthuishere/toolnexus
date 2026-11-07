@@ -4,6 +4,10 @@
 C#, Elixir, Clojure, Rust — until the same conformance suite passes byte-identical output in every
 one of them.**
 
+MCP client and server, agent skills, A2A and ACP agents, a typed decision classifier,
+image/video/speech generation, streaming, memory and resilience — with the lowest or level overhead
+in most languages; [see the benchmark](https://muthuishere.github.io/toolnexus/standing-2026-11/).
+
 [![CI](https://github.com/muthuishere/toolnexus/actions/workflows/ci.yml/badge.svg)](https://github.com/muthuishere/toolnexus/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/toolnexus?logo=npm&label=npm)](https://www.npmjs.com/package/toolnexus)
 [![PyPI](https://img.shields.io/pypi/v/toolnexus?logo=pypi&logoColor=white&label=PyPI)](https://pypi.org/project/toolnexus/)
