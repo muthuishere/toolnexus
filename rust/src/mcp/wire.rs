@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 use base64::Engine as _;
 use serde_json::{Map, Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, ChildStdin};
+use tokio::process::{Child, ChildStdin, ChildStdout};
 use tokio::sync::{oneshot, watch};
 
 use super::oauth::OAuth;
@@ -134,6 +134,23 @@ impl Session {
     /// A tool's `inputSchema` as the server sent it (last `tools/list`).
     pub(crate) fn raw_schema(&self, tool: &str) -> Option<String> {
         lock(&self.raw_schemas).get(tool).cloned()
+    }
+
+    /// The discover reply came back and the 2026 path continues: let the
+    /// stdio reader go on serving. No-op for HTTP.
+    pub(crate) fn release_probe(&self) {
+        if let Transport::Stdio(c) = &self.transport {
+            c.release();
+        }
+    }
+
+    /// Hand a stdio child whose discover reply was delivered to the frozen
+    /// SDK path, alive and with no reader of ours left on stdout (§2.2a).
+    pub(crate) async fn take_stdio(&self) -> Option<StdioHandoff> {
+        match &self.transport {
+            Transport::Stdio(c) => c.handoff().await,
+            Transport::Http(_) => None,
+        }
     }
 
     /// Stop a stdio child (close stdin, kill after 2 s). No-op for HTTP.
@@ -423,6 +440,22 @@ pub(crate) struct StdioConn {
     pending: Mutex<HashMap<String, oneshot::Sender<(Value, String)>>>,
     err: Mutex<Option<String>>,
     done: watch::Receiver<bool>,
+    /// The probe gate (SPEC §2.2a): after delivering its FIRST reply (the
+    /// `server/discover` answer) the reader parks here, out of `read()`, until
+    /// the probe says continue (`None`, the 2026 path) or hands the buffered
+    /// stdout over to the frozen SDK path (`Some(tx)`), after which it exits.
+    gate: Mutex<Option<oneshot::Sender<Option<oneshot::Sender<StdoutReader>>>>>,
+}
+
+/// The child's stdout with whatever the probe reader had already buffered.
+pub(crate) type StdoutReader = BufReader<ChildStdout>;
+
+/// A live stdio child taken over by the frozen SDK path: no reader of ours is
+/// left on its stdout. Dropping it kills the child (`kill_on_drop`).
+pub(crate) struct StdioHandoff {
+    pub(crate) child: Child,
+    pub(crate) stdin: ChildStdin,
+    pub(crate) stdout: StdoutReader,
 }
 
 impl StdioConn {
@@ -450,7 +483,10 @@ impl StdioConn {
         let stdin = child.stdin.take();
         let stdout = child.stdout.take().ok_or("no stdout")?;
         let (tx, rx) = watch::channel(false);
+        let (gate_tx, gate_rx) = oneshot::channel::<Option<oneshot::Sender<StdoutReader>>>();
+        let mut gate_rx = Some(gate_rx);
         let conn = Arc::new(StdioConn {
+            gate: Mutex::new(Some(gate_tx)),
             child: tokio::sync::Mutex::new(Some(child)),
             stdin: tokio::sync::Mutex::new(stdin),
             pending: Mutex::new(HashMap::new()),
@@ -472,8 +508,17 @@ impl StdioConn {
                             continue;
                         }
                         let key = m["id"].to_string();
-                        if let Some(ch) = lock(&c2.pending).remove(&key) {
-                            let _ = ch.send((m, line));
+                        let Some(ch) = lock(&c2.pending).remove(&key) else {
+                            continue;
+                        };
+                        let _ = ch.send((m, line));
+                        // first reply delivered: park (not in read()) until the probe decides
+                        if let Some(g) = gate_rx.take()
+                            && let Ok(Some(hand)) = g.await
+                        {
+                            let _ = hand.send(lines.into_inner());
+                            why = "stdio handed to the frozen path".to_owned();
+                            break;
                         }
                     }
                     Ok(None) => break,
@@ -518,6 +563,29 @@ impl StdioConn {
             r = rx => r.map_err(|_| self.exited_or("stdio server exited before replying".into())),
             _ = done.wait_for(|d| *d) => Err(self.exited_or(String::new())),
         }
+    }
+
+    /// Release the probe gate: the reader keeps serving this session.
+    fn release(&self) {
+        if let Some(g) = lock(&self.gate).take() {
+            let _ = g.send(None);
+        }
+    }
+
+    /// Take the live child for the frozen path. Only valid once the reader has
+    /// delivered the discover reply (it is then parked on the gate).
+    async fn handoff(&self) -> Option<StdioHandoff> {
+        let g = lock(&self.gate).take()?;
+        let (tx, rx) = oneshot::channel();
+        g.send(Some(tx)).ok()?;
+        let stdout = rx.await.ok()?;
+        let stdin = self.stdin.lock().await.take()?;
+        let child = self.child.lock().await.take()?;
+        Some(StdioHandoff {
+            child,
+            stdin,
+            stdout,
+        })
     }
 
     fn exited_or(&self, fallback: String) -> WireError {
