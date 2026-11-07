@@ -47,7 +47,7 @@
     "custom": {
       "baseUrl": null,
       "model": "jev-latest",
-      "apiKeyEnv": "TYPESAFE_API_KEY",
+      "apiKeyEnv": "",
       "wire": "systemone",
       "imagesHeader": true,
       "supportsImages": null

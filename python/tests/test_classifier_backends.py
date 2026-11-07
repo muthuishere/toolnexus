@@ -37,7 +37,7 @@ from toolnexus import (
     raw,
     validate_decision,
 )
-from toolnexus.classifier import _decision_from_wire
+from toolnexus.classifier import _decision_from_wire, classifier_key_env
 from toolnexus.content import ContentPart, text
 
 FIX = Path(__file__).resolve().parents[2] / "examples" / "judge"
@@ -269,6 +269,40 @@ async def test_cloudflare_error_keeps_account_template(fake, monkeypatch) -> Non
         await c.evaluate("x", {"q": NoulQuestion("y")})
     assert "secretacct" not in str(e.value) and "${TN_TEST_ACCOUNT}" in str(e.value)
     assert f.paths[0] == "/accounts/secretacct/ai/run"
+
+
+# --------------------------------------------------------------------------- key routing (#155)
+
+
+@pytest.mark.parametrize("case", load("key-routing.json")["captureCases"], ids=lambda c: c["name"])
+async def test_key_routing_capture_fixture(case: dict[str, Any], fake, monkeypatch) -> None:
+    for k, v in case.get("env", {}).items():
+        monkeypatch.setenv(k, v)
+    qs = fixture_questions(load("key-routing.json")["questions"])
+
+    def reply(n: int, b: str) -> tuple[int, str]:
+        if case["backend"] == "cloudflare":
+            return 200, '{"success":true,"result":' + NOUL_REPLY + "}"
+        return 200, NOUL_REPLY
+
+    f = fake(reply)
+    kw: dict[str, Any] = {}
+    if case["backend"] == "custom":
+        kw["supports"] = {"images": False}
+    c = create_classifier(
+        backend=case["backend"], base_url=f.url + "/v1", api_key_env=case.get("apiKeyEnv"),
+        headers=case.get("headers"), retries=0, **kw,
+    )
+    await c.evaluate("x", qs)
+    assert f.headers
+    want = case["expectAuthorization"]
+    for h in f.headers:
+        assert h.get("authorization") == want, case["name"]
+
+
+def test_key_routing_host_fixture() -> None:
+    for c in load("key-routing.json")["hostCases"]:
+        assert classifier_key_env(c["backend"], c["baseUrl"]) == c["expectKeyEnv"], c
 
 
 # --------------------------------------------------------------------------- cache

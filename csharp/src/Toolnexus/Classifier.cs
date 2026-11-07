@@ -445,7 +445,9 @@ public sealed class ClassifierOptions
     public string? Model { get; set; }
 
     /// <summary>The NAME of the env var holding the credential, never the value — read at call time
-    /// and never logged. Null/empty ⇒ <see cref="Classifier.DefaultApiKeyEnv"/>.
+    /// and never logged. Null/empty ⇒ the backend's own variable, sent ONLY when
+    /// the endpoint is that backend's own host (https); on any other host, and always on
+    /// <c>custom</c>, no key is sent (#155).
     /// §8's <c>ApiKey</c> takes a value; this option deliberately does not.</summary>
     public string? ApiKeyEnv { get; set; }
 
@@ -592,6 +594,9 @@ public sealed partial class Classifier
     private readonly string _baseUrl;
     private readonly string _model;
     private readonly string _apiKeyEnv;
+    // The caller NAMED ApiKeyEnv: sent wherever BaseUrl points. Otherwise the preset's own variable,
+    // and only to that preset's own host (ClassifierBackends.KeyEnv, #155).
+    private readonly bool _explicitKeyEnv;
     private readonly TimeSpan _timeout;
     private readonly int _retries;
     private readonly long _retryBaseMs;
@@ -627,7 +632,8 @@ public sealed partial class Classifier
             throw new ClassifierException("classifier: backend \"custom\" requires baseUrl and supports");
         _baseUrl = string.IsNullOrEmpty(_opts.BaseUrl) ? preset.BaseUrl ?? "" : _opts.BaseUrl!;
         _model = string.IsNullOrEmpty(_opts.Model) ? preset.Model : _opts.Model!;
-        _apiKeyEnv = string.IsNullOrEmpty(_opts.ApiKeyEnv) ? preset.ApiKeyEnv : _opts.ApiKeyEnv!;
+        _explicitKeyEnv = !string.IsNullOrEmpty(_opts.ApiKeyEnv);
+        _apiKeyEnv = _explicitKeyEnv ? _opts.ApiKeyEnv! : preset.ApiKeyEnv;
         _supports = _opts.Supports ?? preset.Supports?.Invoke(_model) ?? new ClassifierSupports();
         // Fail at CONSTRUCTION on the one mismatch we know about, naming the right spelling. The
         // cost of not doing this is a 404 at the first live call, in production, saying nothing.
@@ -1096,7 +1102,8 @@ public sealed partial class Classifier
                 };
                 req.Content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/json");
                 // Read at call time. Never logged, never returned, never in an exception.
-                var key = Environment.GetEnvironmentVariable(_apiKeyEnv);
+                var keyEnv = _explicitKeyEnv ? _apiKeyEnv : ClassifierBackends.KeyEnv(_backend, url);
+                var key = string.IsNullOrEmpty(keyEnv) ? null : Environment.GetEnvironmentVariable(keyEnv);
                 if (!string.IsNullOrEmpty(key))
                     req.Headers.TryAddWithoutValidation("Authorization", "Bearer " + key);
                 var hostHeaders = McpSource.ExpandEnvHeaders(_opts.Headers) ?? new Dictionary<string, string>();

@@ -2812,7 +2812,7 @@ classifier = createClassifier({
   style,              // "systemone" | "llm" | "custom" | "static"   (default "systemone")
   baseUrl,            // default "https://api.typesafe.ai/v1"; OpenRouter: "https://openrouter.ai/api/v1"
   model,              // default "jev-latest"
-  apiKeyEnv?,         // the NAME of an env var; default "TYPESAFE_API_KEY"
+  apiKeyEnv?,         // the NAME of an env var; default: the backend's own variable, own host only (§8B Key to host)
   headers?,           // values expand ${ENV_VAR} at call time; never logged
   …                   // full table below
 })
@@ -3016,7 +3016,7 @@ configured one client has configured the other. Idiomatic names per port, as eve
 | `cache` | — | opt-in `{get, set}` answer cache (below); absent ⇒ none |
 | `baseUrl` | `https://api.typesafe.ai/v1` | same as §8. OpenRouter (`https://openrouter.ai/api/v1`) serves this wire today; self-hosted and open-weights implementations speak it too |
 | `model` | `"jev-latest"` | **pin it** (e.g. `jev-1.13.0`) once thresholds are tuned. `Decision.model` echoes what actually answered, which may be more specific |
-| `apiKeyEnv` | `"TYPESAFE_API_KEY"` | the **name** of the env var, not the value — read at call time and never logged. §8's `apiKey` takes a value; this option deliberately does not |
+| `apiKeyEnv` | the backend's own variable | the **name** of the env var, not the value — read at call time and never logged. Named by the caller, it is sent to wherever `baseUrl` points; left unset, the backend's own variable is sent **only to that backend's own host** (§8B *Key to host*). §8's `apiKey` takes a value; this option deliberately does not |
 | `headers` | — | extra headers; values expand `${ENV_VAR}` from the environment at call time and are **never logged**, identically to remote-MCP headers (§2) |
 | `httpClient` / `transport` | default | the §8 Gap 2 injectable transport. Scope is the classifier path only |
 | `timeout` | 10 s | per request, not per run — a classifier has no loop to bound |
@@ -3078,16 +3078,26 @@ error text names the endpoint **unexpanded**.
 | `openrouter` | `https://openrouter.ai/api/v1` | `typesafe/jev-1.14` | `OPENROUTER_API_KEY` | systemone | yes | yes |
 | `cloudflare` | `https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/ai/run` | `typesafe/jev` | `CLOUDFLARE_JEV_API_KEY` | cloudflare | model contains `clef` | no |
 | `vercel` | `https://ai-gateway.vercel.sh/typesafe/v1` | `typesafe-ai/jev` | `AI_GATEWAY_API_KEY` | systemone | no | yes |
-| `custom` | required | `jev-latest` | `TYPESAFE_API_KEY` | systemone | required (`supports`) | yes |
+| `custom` | required | `jev-latest` | *(none)* | systemone | required (`supports`) | yes |
 
 System One is the only wire (the alpha Decisions API is not supported). Unknown backend:
 `classifier: unknown backend "<b>" (want "typesafe", "openrouter", "cloudflare", "vercel" or "custom")`;
 custom without declarations: `classifier: backend "custom" requires baseUrl and supports`.
 
+**Key to host** (security, issue #155; the §8 client's *API key by host* rule applied to the classifier).
+A caller-named `apiKeyEnv` is read and sent as `Authorization: Bearer …` to wherever `baseUrl`
+points. Otherwise the backend's own variable is read **only when the dialled endpoint (after `${NAME}`
+expansion) is that backend's own host over https** — the host of the table's `baseUrl`, compared
+case-insensitively, userinfo and port ignored for matching, plus `*.openrouter.ai` for `openrouter`.
+Any other host, plain http, and always `custom` (no default variable), send **no** key, and no error:
+a keyless self-hosted server is legal, and credentials can still travel in `headers`. No
+cross-backend fallback. Shared fixture: `examples/judge/backends/key-routing.json` (a capture server
+per port asserts the `Authorization` of every request).
+
 **Cloudflare wire** — `POST {baseUrl}` (no suffix) with
 `{"input":{"images"?,"questions","state"},"model"}`; reply `{success, result}`, `result` may be
-`{"state":"Completed","result":…}`. `success` not `true` ⇒ `classifier: cloudflare: envelope not successful`;
-another run state ⇒ `classifier: cloudflare: run state "<s>"`. The envelope's errors are never echoed.
+`{"state":"Completed","result":…}`. `success` not `true` ⇒ `classifier: cloudflare: envelope not successful` followed by `: <code> <message>` of `errors[0]` when present (code and message each omitted when absent; code rendered as written; nothing else of the envelope), through the same redaction and 200-character cap as any backend's reported cause — Cloudflare reports a missing balance, a bad model and a malformed request alike as HTTP 200 with `success:false`;
+another run state ⇒ `classifier: cloudflare: run state "<s>"`.
 
 **Images** (style `systemone` only; `static`/`custom`/`llm` get the state verbatim). A state with no
 content part is sent verbatim. Otherwise walk it depth-first, object keys in ASCII order, arrays in

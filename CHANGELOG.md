@@ -8,6 +8,25 @@ GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
 
 ## Unreleased
 
+**Security: the classifier no longer sends a default API key to a host that is not its own** (issue #155).
+Until now the classifier read `TYPESAFE_API_KEY` (or the backend's variable) and sent it as a bearer
+token to whatever `baseUrl` pointed at, so a `custom` backend, or any backend with a `baseUrl` override,
+leaked the key to a self-hosted or third-party server whenever the variable was set. It now follows the
+§8 client rule: a caller-named `apiKeyEnv` goes where the caller says; the backend's own variable goes
+only to that backend's own https host (`api.typesafe.ai`, `openrouter.ai` and subdomains,
+`ai-gateway.vercel.sh`, `api.cloudflare.com`); `custom` has no default key. Anything else sends no
+`Authorization` (no error: keyless servers stay legal, and `headers` still work). All eight ports
+carried the same flaw. **Upgrade note:** a self-hosted endpoint that relied on the implicit
+`TYPESAFE_API_KEY` must now name `apiKeyEnv` (or send a header). Shared fixture
+`examples/judge/backends/key-routing.json`.
+
+**Cloudflare classifier errors now say why** (issue #156). A failed Workers AI envelope reports
+`classifier: cloudflare: envelope not successful: 2021 Insufficient balance` (`errors[0]` code and
+message, redacted and capped like any backend cause) instead of the fixed text, so a missing AI Gateway
+balance is distinguishable from a bad model id. All eight ports; fixture `cloudflare-replies.json`.
+
+Change: `openspec/changes/fix-classifier-key-and-errors`.
+
 **Docs: a new "Where toolnexus stands — Nov 2026" page** (Benchmarks & comparison). It has a feature
 matrix re-checked against official docs on 2026-11-07, covering MCP client/server, MCP 2026-07-28, A2A,
 skills, ACP, judges, media and languages. Cells we could not confirm say *unverified*. It also has new

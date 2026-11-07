@@ -18,14 +18,18 @@ The classifier SHALL accept `backend` as one of `typesafe`, `openrouter`, `cloud
 
 ### Requirement: Cloudflare envelope
 
-With `backend: cloudflare` the classifier SHALL post `{"input":{"questions","state","images"?},"model"}` to `baseUrl` with no suffix, and SHALL decode the reply from `result`, unwrapping a nested `{"state":"Completed","result":…}`. A reply whose `success` is not `true`, or whose nested state is not `Completed`, SHALL be an error that does not echo the envelope's error list.
+With `backend: cloudflare` the classifier SHALL post `{"input":{"questions","state","images"?},"model"}` to `baseUrl` with no suffix, and SHALL decode the reply from `result`, unwrapping a nested `{"state":"Completed","result":…}`. A reply whose nested state is not `Completed` SHALL be an error. A reply whose `success` is not `true` SHALL be an error `classifier: cloudflare: envelope not successful` followed by `: <code> <message>` of `errors[0]` when present, passed through the same redaction and 200-character cap as any backend cause; with no usable `errors[0]` the text is the fixed string alone.
 
 #### Scenario: Nested completed reply
 - **WHEN** the endpoint answers `{"success":true,"result":{"state":"Completed","result":<System One reply>}}`
 - **THEN** the decision is decoded from the inner reply
 
-#### Scenario: Unsuccessful envelope
-- **WHEN** the endpoint answers `{"success":false,"errors":[…]}`
+#### Scenario: Unsuccessful envelope with a reason
+- **WHEN** the endpoint answers `{"success":false,"errors":[{"code":2021,"message":"Insufficient balance"}]}`
+- **THEN** evaluate fails with `classifier: cloudflare: envelope not successful: 2021 Insufficient balance`
+
+#### Scenario: Unsuccessful envelope without a reason
+- **WHEN** the endpoint answers `{"success":false}`
 - **THEN** evaluate fails with `classifier: cloudflare: envelope not successful`
 
 ### Requirement: Images travel as assets

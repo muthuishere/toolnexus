@@ -6,10 +6,12 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
 import { readFileSync } from "node:fs"
+import { createServer } from "node:http"
 import { fileURLToPath } from "node:url"
 import {
   createClassifier,
   CLASSIFIER_BACKENDS,
+  classifierKeyEnv,
   CLASSIFIER_IMAGES_HEADER,
   ClassifierUnsupported,
   MemoryCache,
@@ -364,4 +366,45 @@ test("L1: every classifier.evaluate event carries questions / questionsHash / ca
   assert.equal(err.status, "error")
   assert.equal(err.questions, 1)
   assert.match(err.questionsHash, /^[0-9a-f]{64}$/)
+})
+
+// ---------------------------------------------------------------- key routing (#155)
+
+test("key routing: a preset's env key reaches only its own host (key-routing.json)", async () => {
+  const fx = load("backends/key-routing.json")
+  for (const c of fx.captureCases) {
+    const auths: (string | undefined)[] = []
+    const srv = createServer((req, res) => {
+      auths.push(req.headers.authorization)
+      req.resume()
+      req.on("end", () => {
+        const reply = c.backend === "cloudflare" ? JSON.stringify({ success: true, result: JSON.parse(NOUL_REPLY) }) : NOUL_REPLY
+        res.writeHead(200, { "content-type": "application/json" }).end(reply)
+      })
+    })
+    await new Promise<void>((r) => srv.listen(0, "127.0.0.1", r))
+    const saved: Record<string, string | undefined> = {}
+    for (const [k, v] of Object.entries<string>(c.env)) {
+      saved[k] = process.env[k]
+      process.env[k] = v
+    }
+    try {
+      const port = (srv.address() as any).port
+      const cl = createClassifier({
+        backend: c.backend,
+        baseUrl: `http://127.0.0.1:${port}/v1`,
+        apiKeyEnv: c.apiKeyEnv,
+        headers: c.headers,
+        supports: c.backend === "custom" ? { images: false } : undefined,
+        retries: 0,
+      })
+      await cl.evaluate("x", questionsOf(fx.questions))
+      assert.ok(auths.length > 0, `${c.name}: no request reached the capture server`)
+      for (const a of auths) assert.equal(a ?? null, c.expectAuthorization, c.name)
+    } finally {
+      for (const [k, v] of Object.entries(saved)) v === undefined ? delete process.env[k] : (process.env[k] = v)
+      await new Promise((r) => srv.close(r))
+    }
+  }
+  for (const h of fx.hostCases) assert.equal(classifierKeyEnv(h.backend, h.baseUrl), h.expectKeyEnv, `${h.backend} ${h.baseUrl}`)
 })
