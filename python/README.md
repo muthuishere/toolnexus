@@ -150,7 +150,9 @@ rs = await c.states("a", "b").evaluate(noul("q", "…"))      # [BatchResult(dec
 
 - `backend`: `typesafe` (default) · `openrouter` (`typesafe/jev-1.14`) · `cloudflare` (`/ai/run`
   envelope; `${CLOUDFLARE_ACCOUNT_ID}` in the URL expands at call time, errors name it unexpanded)
-  · `vercel` · `custom` (requires `base_url` and `supports`). The table is data:
+  · `vercel` · `openai` (OpenAI Decisions API, `POST {base_url}/decisions`, `gpt-6-luna`,
+  `OPENAI_API_KEY`; decisions report `calibrated=False`, raw questions raise `ClassifierUnsupported`)
+  · `custom` (requires `base_url` and `supports`). The table is data:
   `CLASSIFIER_BACKENDS`; `supports=ClassifierSupports(images=True)` (or `{"images": True}`)
   overrides it per classifier.
 - Images (style `systemone` only): `ContentPart` image parts in the state are lifted into `assets`
