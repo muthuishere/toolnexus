@@ -8,6 +8,16 @@ GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
 
 ## Unreleased
 
+**Faster cold start for MCP in Java and C#, with no change in behaviour** (Java and C# only). Java no
+longer builds the MCP SDK's default JSON-schema validator (about 220 networknt classes) for every
+client. It is now resolved the first time a tool result is actually validated against an output
+schema. The SDK's Jackson 3 mapper is built on first use of the legacy SDK path, not when `McpSource`
+loads, and a config with only stdio servers no longer builds an OAuth token store. C# now creates
+the shared MCP `HttpClient` on the first remote request, so a host with only stdio servers does not
+load the HTTP/TLS stack at startup. Validation, auth and the wire format are unchanged. **Not done:**
+the second process that the Java and C# stdio probe spawns for older servers (the larger cost at
+startup) and the two Jackson stacks in Java are tracked separately.
+
 - **Benchmarks (harness only, no published numbers changed):** the fake model server
   (`benchmarks/mock_llm.py`) now speaks HTTP/1.1 keep-alive, so frameworks that pool connections
   reuse them across LLM calls as they would against a real provider, instead of paying a TCP connect
