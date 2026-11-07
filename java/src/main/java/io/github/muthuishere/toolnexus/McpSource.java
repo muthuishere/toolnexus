@@ -529,7 +529,7 @@ public final class McpSource implements AutoCloseable {
                     }
                     McpClientTransport transport = isRemote(cfg)
                             ? buildRemoteTransport(cfg, fallbackAuth)
-                            : probeChild != null ? new ProcessStdioTransport(probeChild, JSON_MAPPER)
+                            : probeChild != null ? new ProcessStdioTransport(probeChild, jsonMapper())
                             : buildLocalTransport(name, cfg);
                     // §2 idle timeout: the SDK's requestTimeout is a hard per-request deadline, so it
                     // is lifted out of the way and the budget is enforced by us — tools/list keeps a
@@ -663,7 +663,7 @@ public final class McpSource implements AutoCloseable {
                     }
                     McpClientTransport transport = isRemote(cfg)
                             ? buildRemoteTransport(cfg, fallbackAuth)
-                            : probeChild != null ? new ProcessStdioTransport(probeChild, JSON_MAPPER)
+                            : probeChild != null ? new ProcessStdioTransport(probeChild, jsonMapper())
                             : buildLocalTransport(name, cfg);
                     client = McpClient.sync(transport)
                             .requestTimeout(Duration.ofMillis(timeout))
