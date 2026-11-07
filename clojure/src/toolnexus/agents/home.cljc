@@ -154,7 +154,10 @@
     (fn [args]
       (let [file    (memory-file dir (or (:target args) "self"))
             text    (str (:text args))
-            current (or (read-capped file) "")
+            ;; The FULL file, never `read-capped`: the cap is a soul-injection
+            ;; cap (§7E). Editing the capped view would truncate the file on disk
+            ;; and bake the notice into it once MEMORY.md passes 2 MB.
+            current (if (fs/exists? file) (fs/read-file file) "")
             action  (str (:action args))
             next-s  (case action
                       "add"     (str/triml (str (str/trimr current) "\n- " text "\n"))

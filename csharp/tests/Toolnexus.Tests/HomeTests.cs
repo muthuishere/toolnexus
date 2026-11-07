@@ -161,6 +161,44 @@ public class HomeTests
         finally { Directory.Delete(dir, recursive: true); }
     }
 
+    // A memory write keeps an existing file's permission bits (the atomic move must not hand
+    // MEMORY.md the temp file's mode). POSIX only.
+    [Fact]
+    public async Task MemoryWrite_KeepsExistingFileMode()
+    {
+        if (OperatingSystem.IsWindows()) return;
+        var dir = MkDir(new Dictionary<string, string> { ["MEMORY.md"] = "- a\n" });
+        try
+        {
+            var file = Path.Combine(dir, "MEMORY.md");
+            var mode = UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.GroupRead; // 0640
+            File.SetUnixFileMode(file, mode);
+            var r = await Home.MemoryTool(dir).ExecuteAsync(new Dictionary<string, object?> { ["action"] = "add", ["text"] = "b" });
+            Assert.False(r.IsError);
+            Assert.Equal(mode, File.GetUnixFileMode(file));
+        }
+        finally { Directory.Delete(dir, recursive: true); }
+    }
+
+    // H3_memoryWriteOver2MBPreservesDisk: the 2 MB cap is a COMPOSITION cap only — a memory write
+    // over a >2 MB file must keep every original byte and never bake the truncation notice in.
+    [Fact]
+    public async Task H3_MemoryWriteOver2MB_PreservesDisk()
+    {
+        var big = new string('a', 2097152 + 100000);
+        var dir = MkDir(new Dictionary<string, string> { ["MEMORY.md"] = big });
+        try
+        {
+            var r = await Home.MemoryTool(dir).ExecuteAsync(new Dictionary<string, object?> { ["action"] = "add", ["text"] = "x" });
+            var after = File.ReadAllText(Path.Combine(dir, "MEMORY.md"));
+            Assert.False(r.IsError);
+            Assert.True(after.StartsWith(big, StringComparison.Ordinal), "original bytes preserved as prefix");
+            Assert.EndsWith("\n- x\n", after);
+            Assert.DoesNotContain("[truncated", after);
+        }
+        finally { Directory.Delete(dir, recursive: true); }
+    }
+
     // ---- H4: frozen-snapshot — mid-session write does NOT change the live prompt ----
 
     [Fact]

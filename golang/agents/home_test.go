@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -225,6 +226,37 @@ func TestHomeH3MemoryToolPersists(t *testing.T) {
 	uw, _ := tool.Execute(map[string]any{"action": "add", "target": "user", "text": "Speaks Tamil"}, nil)
 	if uw.IsError || !strings.Contains(read("USER.md"), "Speaks Tamil") {
 		t.Error("H3.5 target=user did not write USER.md")
+	}
+}
+
+// A memory write keeps an existing file's permission bits (the atomic rename
+// must not hand MEMORY.md the temp file's mode). POSIX only.
+func TestHomeMemoryWriteKeepsFileMode(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX permission bits only")
+	}
+	dir := writeBootstrap(t, map[string]string{"MEMORY.md": "- a\n"})
+	file := filepath.Join(dir, "MEMORY.md")
+	if err := os.Chmod(file, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	res, _ := MemoryTool(dir).Execute(map[string]any{"action": "add", "text": "b"}, nil)
+	fi, err := os.Stat(file)
+	if res.IsError || err != nil || fi.Mode().Perm() != 0o640 {
+		t.Fatalf("mode not kept: %v (isError=%v, err=%v)", fi.Mode().Perm(), res.IsError, err)
+	}
+}
+
+// H3.6 (H3_memoryWriteOver2MBPreservesDisk) — the 2 MB cap applies only to soul
+// composition; a memory write over a >2 MB file keeps every on-disk byte.
+func TestHomeH3MemoryWriteOver2MBPreservesDisk(t *testing.T) {
+	orig := strings.Repeat("a", maxBootstrapBytes+100000)
+	dir := writeBootstrap(t, map[string]string{"MEMORY.md": orig})
+	res, _ := MemoryTool(dir).Execute(map[string]any{"action": "add", "text": "x"}, nil)
+	got, _ := os.ReadFile(filepath.Join(dir, "MEMORY.md"))
+	s := string(got)
+	if res.IsError || !strings.HasPrefix(s, orig) || !strings.HasSuffix(s, "\n- x\n") || strings.Contains(s, "[truncated:") {
+		t.Fatalf("H3.6 >2MB memory write corrupted disk (len=%d, isError=%v)", len(s), res.IsError)
 	}
 }
 

@@ -135,6 +135,33 @@ class AgentHomeTest {
                 !userWrite.isError() && read(dir, "USER.md").contains("Speaks Tamil"));
     }
 
+    // A memory write keeps an existing file's permission bits (the atomic move must not hand
+    // MEMORY.md the temp file's mode). POSIX only.
+    @Test
+    void memoryWriteKeepsFileMode() throws Exception {
+        Path dir = mkdir(Map.of("MEMORY.md", "- a\n"));
+        Path file = dir.resolve("MEMORY.md");
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                Files.getFileStore(file).supportsFileAttributeView("posix"), "POSIX permission bits only");
+        Files.setPosixFilePermissions(file, java.nio.file.attribute.PosixFilePermissions.fromString("rw-r-----"));
+        ToolResult r = memoryTool(dir).execute(Map.of("action", "add", "text", "b"), new ToolContext());
+        String mode = java.nio.file.attribute.PosixFilePermissions.toString(Files.getPosixFilePermissions(file));
+        check("memory write keeps an existing file's mode", !r.isError() && mode.equals("rw-r-----"), mode);
+    }
+
+    // H3_memoryWriteOver2MBPreservesDisk: the 2 MB cap is a COMPOSITION cap only — a memory write
+    // over a >2 MB file must keep every original byte and never bake the truncation notice in.
+    @Test
+    void h3_memoryWriteOver2MBPreservesDisk() throws Exception {
+        String big = "a".repeat(2097152 + 100000);
+        Path dir = mkdir(Map.of("MEMORY.md", big));
+        ToolResult r = memoryTool(dir).execute(Map.of("action", "add", "text", "x"), new ToolContext());
+        String after = read(dir, "MEMORY.md");
+        check("memory write over 2 MB preserves the on-disk file",
+                !r.isError() && after.startsWith(big) && after.endsWith("\n- x\n")
+                        && !after.contains("[truncated"), "len=" + after.length());
+    }
+
     // ---- H4: frozen-snapshot — a mid-session write loads NEXT session -------
     @Test
     void h4_frozenSnapshotInjection() throws Exception {

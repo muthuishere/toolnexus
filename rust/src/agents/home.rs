@@ -117,7 +117,7 @@ pub fn memory_tool(dir: impl AsRef<Path>) -> Tool {
                 {
                     return ToolResult::error(e.to_string());
                 }
-                if let Err(e) = std::fs::write(&file, next) {
+                if let Err(e) = write_atomic(&file, next.as_bytes()) {
                     return ToolResult::error(e.to_string());
                 }
                 let base = file
@@ -128,6 +128,50 @@ pub fn memory_tool(dir: impl AsRef<Path>) -> Tool {
             })
         }),
     }
+}
+
+/// Write `data` to a temp file in the same directory, then rename it over
+/// `p`, so a crash mid-write never leaves a partial memory file.
+fn write_atomic(p: &Path, data: &[u8]) -> std::io::Result<()> {
+    let dir = p.parent().unwrap_or_else(|| Path::new("."));
+    let base = p
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = dir.join(format!(".{base}.tmp-{}-{nanos}-{seq}", std::process::id()));
+    // fs::write creates with 0o666 & !umask, the platform default for a new file.
+    let res = std::fs::write(&tmp, data)
+        .and_then(|()| keep_mode(p, &tmp))
+        .and_then(|()| std::fs::rename(&tmp, p));
+    if res.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    res
+}
+
+/// Copy an existing target's permission bits onto the temp file, so the rename
+/// does not replace them with the temp's. No-op off unix or for a new file.
+#[cfg(unix)]
+fn keep_mode(target: &Path, tmp: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    match std::fs::metadata(target) {
+        Ok(m) => std::fs::set_permissions(
+            tmp,
+            std::fs::Permissions::from_mode(m.permissions().mode() & 0o777),
+        ),
+        Err(_) => Ok(()),
+    }
+}
+
+#[cfg(not(unix))]
+fn keep_mode(_target: &Path, _tmp: &Path) -> std::io::Result<()> {
+    Ok(())
 }
 
 /// `from_dir` tuning.

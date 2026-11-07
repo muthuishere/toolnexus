@@ -133,7 +133,18 @@ public static class Home
                     return (object)ToolResult.Error($"unknown action: {action}");
             }
             Directory.CreateDirectory(Path.GetDirectoryName(file)!);
-            File.WriteAllText(file, next);
+            // Atomic: temp file in the same dir, then replace. (Reads above are FULL/uncapped — the
+            // 2 MB cap is a soul-composition cap only, §7E.)
+            var tmp = Path.Combine(Path.GetDirectoryName(file)!, $".{Path.GetFileName(file)}.{Guid.NewGuid():N}.tmp");
+            try
+            {
+                File.WriteAllText(tmp, next); // new file: 0666 & ~umask
+                // Keep an existing file's permission bits (the move would otherwise give it the temp's).
+                if (!OperatingSystem.IsWindows() && File.Exists(file))
+                    File.SetUnixFileMode(tmp, File.GetUnixFileMode(file));
+                File.Move(tmp, file, overwrite: true);
+            }
+            finally { if (File.Exists(tmp)) File.Delete(tmp); }
             // Plain success string (a miss returns a loud isError above); parity with the JS reference.
             return (object)$"ok ({action} → {Path.GetFileName(file)}); loads next session";
         });

@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import secrets
 from typing import Any, Callable, Optional
 
 from ..client import ConversationStore, HttpTransport
@@ -111,8 +112,21 @@ def memory_tool(dir: str) -> Tool:  # noqa: A002
         else:
             return ToolResult(output=f"unknown action: {action}", is_error=True)
         os.makedirs(os.path.dirname(file) or ".", exist_ok=True)
-        with open(file, "w", encoding="utf-8") as fh:
-            fh.write(nxt)
+        # Atomic write: temp file in the same dir, then rename over the target.
+        # os.open with 0o666 (not mkstemp's 0o600) so a new file gets 0666 & ~umask.
+        tmp = os.path.join(os.path.dirname(file) or ".", f".memory-{secrets.token_hex(8)}.tmp")
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(nxt)
+            # Keep an existing file's permission bits (the rename would otherwise give it the temp's).
+            if os.name == "posix" and os.path.exists(file):
+                os.chmod(tmp, os.stat(file).st_mode & 0o777)
+            os.replace(tmp, file)
+        except BaseException:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+            raise
         return ToolResult(output=f"ok ({action} → {os.path.basename(file)}); loads next session", is_error=False)
 
     return Tool(

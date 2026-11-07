@@ -123,7 +123,9 @@ export function memoryTool(dir: string): Tool {
       const target = (args.target as MemoryTarget) ?? "self"
       const file = memoryFile(dir, target)
       const text = String(args.text)
-      const current = readCapped(file) ?? ""
+      // Read the FULL file: the 2 MB cap is a soul-composition (read-side) limit
+      // only — capping here would truncate the on-disk file on write (§7E).
+      const current = fs.existsSync(file) ? fs.readFileSync(file, "utf8") : ""
       let next: string
       switch (args.action) {
         case "add":
@@ -141,7 +143,19 @@ export function memoryTool(dir: string): Tool {
           return { output: `unknown action: ${String(args.action)}`, isError: true }
       }
       fs.mkdirSync(path.dirname(file), { recursive: true })
-      fs.writeFileSync(file, next)
+      // Atomic write: temp file in the same dir, then rename over the target.
+      const tmp = `${file}.${process.pid}.${Date.now()}.tmp`
+      try {
+        fs.writeFileSync(tmp, next) // new file: 0666 & ~umask
+        // Keep an existing file's permission bits (the rename would otherwise give it the temp's).
+        if (process.platform !== "win32" && fs.existsSync(file)) {
+          fs.chmodSync(tmp, fs.statSync(file).mode & 0o777)
+        }
+        fs.renameSync(tmp, file)
+      } catch (e) {
+        fs.rmSync(tmp, { force: true })
+        throw e
+      }
       return `ok (${String(args.action)} → ${path.basename(file)}); loads next session`
     },
   })

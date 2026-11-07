@@ -30,6 +30,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -140,12 +141,39 @@ func MemoryTool(dir string) tn.Tool {
 			if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
 				return tn.ToolResult{Output: err.Error(), IsError: true}, nil
 			}
-			if err := os.WriteFile(file, []byte(next), 0o644); err != nil {
+			if err := writeFileAtomic(file, []byte(next)); err != nil {
 				return tn.ToolResult{Output: err.Error(), IsError: true}, nil
 			}
 			return tn.ToolResult{Output: fmt.Sprintf("ok (%s → %s); loads next session", action, filepath.Base(file))}, nil
 		},
 	}
+}
+
+// writeFileAtomic writes data to a temp file in the same directory and renames
+// it over p, so a crash mid-write never leaves a partial memory file.
+func writeFileAtomic(p string, data []byte) error {
+	// OpenFile with 0o666 (not CreateTemp's 0o600) so a new file gets 0666 &^ umask,
+	// exactly as os.WriteFile would; O_EXCL guards the unique name.
+	name := filepath.Join(filepath.Dir(p), fmt.Sprintf(".%s.tmp-%d-%d", filepath.Base(p), os.Getpid(), time.Now().UnixNano()))
+	tmp, err := os.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o666)
+	if err != nil {
+		return err
+	}
+	_, err = tmp.Write(data)
+	// Keep an existing file's permission bits (the rename would otherwise give it the temp's).
+	if fi, serr := os.Stat(p); err == nil && serr == nil && runtime.GOOS != "windows" {
+		err = tmp.Chmod(fi.Mode().Perm())
+	}
+	if cerr := tmp.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil {
+		err = os.Rename(name, p)
+	}
+	if err != nil {
+		_ = os.Remove(name)
+	}
+	return err
 }
 
 // FromDirOptions tunes FromDir.

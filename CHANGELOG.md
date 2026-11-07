@@ -8,6 +8,21 @@ GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
 
 ## Unreleased
 
+**Fix: the persona `memory` tool no longer truncates a `MEMORY.md` / `USER.md` larger than 2 MB.**
+The tool read the file through the same 2 MB cap used to build the system prompt, then wrote that
+capped text back. So once the file went over 2 MB, a single `add`, `replace` or `remove` cut it down
+to 2 MB on disk and wrote the truncation notice into it, silently losing everything after the cap.
+SPEC §7E always said the cap leaves the on-disk file untouched. Affected: **js, java and clojure**;
+the other five already edited the full file. Those three now do too, and seven ports (all but
+clojure) now write atomically (temp file + rename), so a crash mid-write cannot leave a half-written
+file; an existing file keeps its permission bits, a new one gets the usual `0666 & ~umask`. The cap still applies only when building the system prompt. Pinned by fixture key
+`H3_memoryWriteOver2MBPreservesDisk` in `examples/persona-agent/fixture.json`. Not done here:
+a `MEMORY.md` that is a symlink is now replaced by a regular file on the first write (the rename
+replaces the link), so point the home dir at the real directory rather than linking the file;
+clojure's write is not atomic yet (koine has no rename/move, so it needs adding to koine first);
+several agents editing the same memory file at once can still lose an update (no per-file lock
+yet). That is tracked in `openspec/changes/add-memory-hierarchy`.
+
 - **Docs:** the docs-site hero video is re-cut for 0.26.0 (80 s, new narrator). It now covers eight
   languages including Rust, typed decisions (`createClassifier`), media generation, and serving the
   toolkit over MCP, A2A and ACP. Its benchmark claims come only from the Nov 2026 standing page: lowest

@@ -303,6 +303,29 @@ public final class Agents {
         return new String(bytes, StandardCharsets.UTF_8);
     }
 
+    /** Write via a temp file in the same dir + atomic move, so a crash never leaves a torn file. */
+    private static void writeAtomic(Path file, String content) throws IOException {
+        Path parent = file.toAbsolutePath().getParent();
+        // CREATE_NEW (not createTempFile's 0600) so a new file gets 0666 & ~umask.
+        Path tmp = parent.resolve("." + file.getFileName() + "." + java.util.UUID.randomUUID() + ".tmp");
+        try {
+            Files.writeString(tmp, content, java.nio.file.StandardOpenOption.CREATE_NEW,
+                    java.nio.file.StandardOpenOption.WRITE);
+            // Keep an existing file's permission bits (the move would otherwise give it the temp's).
+            if (Files.exists(file) && Files.getFileStore(tmp).supportsFileAttributeView("posix")) {
+                Files.setPosixFilePermissions(tmp, Files.getPosixFilePermissions(file));
+            }
+            try {
+                Files.move(tmp, file, java.nio.file.StandardCopyOption.REPLACE_EXISTING,
+                        java.nio.file.StandardCopyOption.ATOMIC_MOVE);
+            } catch (java.nio.file.AtomicMoveNotSupportedException e) {
+                Files.move(tmp, file, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            }
+        } finally {
+            Files.deleteIfExists(tmp);
+        }
+    }
+
     /**
      * The {@code memory} builtin (SPEC §7E, §4A note) — file-backed, opt-in, NOT a default builtin.
      * One tool, three actions ({@code add}/{@code replace}/{@code remove}) over {@code MEMORY.md}
@@ -342,8 +365,9 @@ public final class Agents {
                 String text = String.valueOf(args.get("text"));
                 String next;
                 try {
-                    String cur = readCapped(file);
-                    if (cur == null) cur = "";
+                    // FULL file, uncapped: the 2 MB cap is a soul-composition cap only (§7E) —
+                    // reading capped here would truncate the on-disk file on write.
+                    String cur = Files.exists(file) ? Files.readString(file) : "";
                     switch (action) {
                         case "add" -> next = (cur.stripTrailing() + "\n- " + text + "\n").stripLeading();
                         case "replace" -> {
@@ -358,7 +382,7 @@ public final class Agents {
                         default -> { return ToolResult.error("unknown action: " + action); }
                     }
                     if (file.getParent() != null) Files.createDirectories(file.getParent());
-                    Files.writeString(file, next);
+                    writeAtomic(file, next);
                 } catch (IOException e) {
                     throw new UncheckedIOException(e);
                 }

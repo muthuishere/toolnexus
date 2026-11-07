@@ -172,7 +172,7 @@ defmodule Toolnexus.Agents.Home do
     case compute_memory(action, cur, text, to_string(args["with"] || "")) do
       {:ok, next} ->
         File.mkdir_p!(Path.dirname(file))
-        File.write!(file, next)
+        write_atomic!(file, next)
         # plain success string (wrapped as a success ToolResult by define_tool);
         # a full isError result is reserved for the miss path (§7E / JS reference)
         "ok (#{action} → #{Path.basename(file)}); loads next session"
@@ -180,6 +180,32 @@ defmodule Toolnexus.Agents.Home do
       {:error, msg} ->
         %ToolResult{output: msg, is_error: true}
     end
+  end
+
+  # The memory tool edits the FULL file (§7E: the 2 MB cap is a soul-injection cap,
+  # never applied to the file on disk). Write to a temp file in the same directory,
+  # then rename over the target, so a crash mid-write cannot leave a torn file.
+  defp write_atomic!(file, body) do
+    tmp = "#{file}.tmp-#{System.unique_integer([:positive])}"
+
+    try do
+      # File.write! creates with 0666 & ~umask, the default for a new file.
+      File.write!(tmp, body)
+      keep_mode(file, tmp)
+      File.rename!(tmp, file)
+    after
+      File.rm(tmp)
+    end
+  end
+
+  # Keep an existing file's permission bits (the rename would otherwise give it the temp's).
+  defp keep_mode(file, tmp) do
+    with {:unix, _} <- :os.type(),
+         {:ok, %File.Stat{mode: mode}} <- File.stat(file) do
+      File.chmod!(tmp, Bitwise.band(mode, 0o777))
+    end
+
+    :ok
   end
 
   defp compute_memory("add", cur, text, _with),
