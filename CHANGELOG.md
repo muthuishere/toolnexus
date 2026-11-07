@@ -22,6 +22,21 @@ GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
   toolkit over MCP, A2A and ACP. Its benchmark claims come only from the Nov 2026 standing page: lowest
   in Python, Rust and Elixir, level in JavaScript and .NET, and behind in Go and on the JVM.
 
+- **Faster start in JavaScript, fewer allocations per turn in Go** (javascript and golang only; no
+  behaviour change). Importing `toolnexus` in JavaScript no longer loads code a host may never use: the
+  MCP server transport and `@hono/node-server` load on the first `serve()` with an MCP profile or `asMcpServer()`, the remote MCP
+  transports (streamable-HTTP, SSE) only when a remote server falls back to the SDK path, the
+  MCP 2026 client on the first MCP load, and `yaml` on the first skill parsed. A bare import drops
+  from 377 to 284 modules. Every public signature and export is unchanged (the built `.d.ts` files are
+  byte-identical); `yaml` is loaded with a synchronous `require`, so `listSkills`/`loadSkills` stay
+  synchronous. Not done: `buildMcpServer` is synchronous and returns the SDK `Server`, so the SDK
+  server core still loads at import. In Go, the non-streaming OpenAI and Anthropic loops marshal the
+  tools array once per `Run` instead of once per turn, when no `BeforeLLM` hook or `BodyTransform` can
+  see or change it, and the MCP progress token is built without `fmt`. A test pins the request-body
+  bytes, and they are unchanged. Not done in Go: the request body is still a `map[string]any`, because
+  `BodyTransform` receives that map; the per-call `Metadata` map, the idle timer and the progress token
+  stay, because each is observable (returned to the caller, the §2 idle timeout, and sent on the wire).
+
 **Security: the classifier no longer sends a default API key to a host that is not its own** (issue #155).
 Until now the classifier read `TYPESAFE_API_KEY` (or the backend's variable) and sent it as a bearer
 token to whatever `baseUrl` pointed at, so a `custom` backend, or any backend with a `baseUrl` override,

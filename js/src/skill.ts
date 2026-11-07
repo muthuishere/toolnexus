@@ -12,9 +12,18 @@
 import { readFileSync, readdirSync, realpathSync, statSync } from "node:fs"
 import path from "node:path"
 import { pathToFileURL } from "node:url"
-import { parse as parseYaml } from "yaml"
+import { createRequire } from "node:module"
 import { compareCodePoints, compareDiscovery, sortEntriesByName } from "./order.js"
 import type { Tool, ToolResult } from "./types.js"
+
+// yaml is required on the first frontmatter parse, not at import, so a host with no skills never
+// loads it. `require` keeps the parse synchronous (listSkills/loadSkills are sync); yaml's Node
+// entry is CommonJS, so this is the same module instance an `import` would get.
+let yamlParse: ((src: string) => unknown) | undefined
+function parseYaml(src: string): unknown {
+  yamlParse ??= (createRequire(import.meta.url)("yaml") as typeof import("yaml")).parse
+  return yamlParse(src)
+}
 
 export const SKILL_TOOL_DESCRIPTION = `Load a specialized skill when the task at hand matches one of the skills listed in the system prompt.
 
