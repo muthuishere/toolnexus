@@ -8,6 +8,15 @@ GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
 
 ## Unreleased
 
+- **Benchmarks (harness only, no published numbers changed):** the fake model server
+  (`benchmarks/mock_llm.py`) now speaks HTTP/1.1 keep-alive, so frameworks that pool connections
+  reuse them across LLM calls as they would against a real provider, instead of paying a TCP connect
+  per call. It also lets two frameworks that previously could not run do so: smolagents (tool results
+  arrive as role `user` and the agent stops only on a `final_answer` tool call; the mock now handles
+  both) and AutoAgents (the mock sent `input_tokens` alongside `prompt_tokens`, which AutoAgents rejects
+  as a duplicate field; usage now carries the OpenAI-standard keys only). The standing tables are not
+  re-run yet; a full quiet re-run will refresh them.
+
 - **Docs:** the docs-site hero video is re-cut for 0.26.0 (80 s, new narrator). It now covers eight
   languages including Rust, typed decisions (`createClassifier`), media generation, and serving the
   toolkit over MCP, A2A and ACP. Its benchmark claims come only from the Nov 2026 standing page: lowest

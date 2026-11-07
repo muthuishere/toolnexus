@@ -248,7 +248,6 @@ def targets():
             t.append((f"toolnexus-rust-{cfg}",
                       [os.environ["TN_RUST_BIN"], "-config", cfg, "-runs", RUNS, "-warmup", WARMUP], None))
     # swiftide builds a fresh Agent per request (it keeps history) inside the timed span.
-    # autoagents fails against the shared mock (duplicate prompt_tokens/input_tokens).
     for envv, nm in (("RIG_BIN", "rig-mcp"), ("SWIFTIDE_BIN", "swiftide-mcp"),
                      ("AUTOAGENTS_BIN", "autoagents-mcp")):
         if os.environ.get(envv):
