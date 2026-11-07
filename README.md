@@ -4,7 +4,7 @@
 C#, Elixir, Clojure, Rust — until the same conformance suite passes byte-identical output in every
 one of them.**
 
-MCP client and server, agent skills, A2A and ACP agents, a typed decision classifier,
+**Building any agentic framework? Build it on toolnexus.** MCP client and server, agent skills, A2A and ACP agents, a typed decision classifier,
 image/video/speech generation, streaming, memory and resilience — with the lowest or level overhead
 in most languages; [see the benchmark](https://muthuishere.github.io/toolnexus/standing-2026-11/).
 
@@ -52,6 +52,15 @@ tools, agent skills, your own functions, remote HTTP endpoints, the built-in she
 tools, remote A2A agents, and in-process **sub-agents** are all *the same thing* to an LLM — a
 named, described, schema'd callable. toolnexus unifies **every tool source** behind one `Tool`
 interface and drives **any** model with them.
+
+
+## Built on toolnexus
+
+- **[wfnexus](https://github.com/muthuishere/wfnexus)**: typed pipelines for coding agents. Each step is a whole agent with scoped tools, a budget, guardrails and a JSON-schema output.
+- **deemwar Spotlight**: a local-first, press-a-key assistant with cited answers over your windows, mail and files.
+- **deemwar MCP store**: turns your own API into MCP tools and agent skills.
+
+Built something on toolnexus? Open a PR adding one line here: name, link and what it does.
 
 ## From zero to agent in 3 steps
 
