@@ -37,7 +37,6 @@ the tests had to fail. Results-in-completion-order went unnoticed outside golang
 finish calls out of order and check each output stays in emitted order. No library behaviour changed.
 Gap: in js the streaming modes are not covered by the reordering mutation.
 
-
 - **`mcpHandler` with the 2026-07-28 opt-in no longer rejects legacy clients that send the 2026 version
   header** (issue #150, all eight ports). On a mount listing `2026-07-28` next to legacy versions, a request
   carrying `MCP-Protocol-Version: 2026-07-28` but no `Mcp-Method` header and no `_meta` version was routed to
@@ -47,6 +46,7 @@ Gap: in js the streaming modes are not covered by the reordering mutation.
   the newest listed legacy version when asked for `2026-07-28` (that wire has no `initialize`; use
   `server/discover`), and SPEC §7C.2 and the Go `ProtocolVersions` doc now say so. No hint is added to the
   `initialize` result: the `io.modelcontextprotocol/` `_meta` prefix is reserved by MCP.
+
 
 **Faster cold start for MCP in Java and C#, with no change in behaviour** (Java and C# only). Java no
 longer builds the MCP SDK's default JSON-schema validator (about 220 networknt classes) for every
