@@ -2179,3 +2179,34 @@ test("resilience: an integer Retry-After is honoured over backoff", async () => 
   const elapsed = await retryDelayMs("1", 5)
   assert.ok(elapsed >= 900, `Retry-After: 1 should wait a second, waited ${elapsed}ms`)
 })
+
+// SPEC §3, #84: oversized descriptions are warned, never modified. Shared fixture.
+test("skill description length: oversized warns (code points), never modified", () => {
+  const confDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../conformance/skill_description")
+  const cases = JSON.parse(fs.readFileSync(path.join(confDir, "cases.json"), "utf8"))
+  const dir = path.join(confDir, "skills")
+  const check = (ws: { location: string; reason: string; chars: number }[]) => {
+    assert.equal(ws.length, cases.expect_warnings.length)
+    cases.expect_warnings.forEach((e: { location_suffix: string; reason: string; chars: number }, i: number) => {
+      assert.ok(ws[i].location.split(path.sep).join("/").endsWith(e.location_suffix), ws[i].location)
+      assert.equal(ws[i].reason, e.reason)
+      assert.equal(ws[i].chars, e.chars)
+    })
+  }
+  const src = loadSkills(dir)
+  check(src.warnings)
+  check(listSkills(dir).warnings)
+  const prompt = src.prompt()
+  for (const [name, desc] of Object.entries(cases.full_descriptions as Record<string, string>)) {
+    assert.equal(src.skills[name].description, desc)
+    assert.ok(prompt.includes(`- **${name}**: ${desc}`), name)
+  }
+  // An allowlist that excludes the long skill ⇒ no loader warning (inventory stays unfiltered).
+  assert.deepEqual(loadSkills({ dirs: dir, filter: { "short-desc": true } }).warnings, [])
+})
+
+test("skill description length: short descriptions produce no warnings", () => {
+  const ex = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../examples/skills")
+  assert.deepEqual(loadSkills(ex).warnings, [])
+  assert.deepEqual(listSkills(ex).warnings, [])
+})

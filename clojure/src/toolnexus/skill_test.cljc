@@ -16,6 +16,7 @@
             [clojure.test :refer [deftest is testing use-fixtures]]
             [clojure.string :as str]
             [koine.fs :as fs]
+            [koine.json :as json]
             [toolnexus.skill :as skill]
             [toolnexus.tool :as tool]))
 
@@ -805,3 +806,36 @@
                                :sample-limit 2})]
     (is (= ["<file>a</file>" "<file>b</file>"]
            (file-lines (:output (skill/execute-skill ld "data-a")))))))
+
+;; ---------------------------------------------------------------------------
+;; SPEC §3 description length guard (#84) — conformance/skill_description
+;; ---------------------------------------------------------------------------
+
+(defn- desc-dir [] (str (te/examples-dir) "/../conformance/skill_description"))
+
+(defn- warnings-match? [warnings expected]
+  (and (= (count warnings) (count expected))
+       (every? true?
+               (map (fn [w e]
+                      (and (str/ends-with? (:location w) (:location_suffix e))
+                           (= (:reason w) (:reason e))
+                           (= (:chars w) (:chars e))))
+                    warnings expected))))
+
+(deftest oversized-descriptions-are-warned-never-modified
+  (let [c    (json/read-str (fs/read-file (str (desc-dir) "/cases.json")))
+        root (str (desc-dir) "/skills")
+        ld   (skill/load-skills root)
+        inv  (skill/list-skills root)]
+    (is (warnings-match? (:warnings ld) (:expect_warnings c)) (pr-str (:warnings ld)))
+    (is (warnings-match? (:warnings inv) (:expect_warnings c)) (pr-str (:warnings inv)))
+    (let [prompt (skill/skills-prompt ld)]
+      (doseq [[k d] (:full_descriptions c)]
+        (is (str/includes? prompt d) (str "full description of " (name k)))))
+    (doseq [s (:skills ld)]
+      (is (= (get (:full_descriptions c) (keyword (:name s))) (:description s))))
+    (testing "loader warnings are over the exposed skills; inventory is unfiltered"
+      (is (= [] (:warnings (skill/load-skills {:dirs [root] :filter {"long-desc" false}}))))
+      (is (= 1 (count (:warnings (skill/list-skills {:dirs [root] :filter {"long-desc" false}}))))))
+    (testing "absent description never warns"
+      (is (= [] (:warnings (skill/list-skills {:skills [{:name "n" :content "c"}]})))))))

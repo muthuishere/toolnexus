@@ -94,16 +94,22 @@ func RelayTool(name, description string, schema JSONSchema) Tool {
 	}
 }
 
+// relayDeclinedOutput is the tool_result text for a call resolved by a declined
+// Answer: "relay declined for <name>: <reason>", reason defaulting to "declined".
+// One spelling for the inline and the durable path (§10, issue #125).
+func relayDeclinedOutput(name, reason string) string {
+	if reason == "" {
+		reason = "declined"
+	}
+	return "relay declined for " + name + ": " + reason
+}
+
 // relayResultFromAnswer converts the host's Answer into the tool_result the model sees.
 // A host-side tool failure is an error result (the model recovers); a declined relay is
 // likewise an error result — neither aborts the run (§10, ADR-0010 D6).
 func relayResultFromAnswer(name string, a *Answer) ToolResult {
 	if !a.Ok {
-		reason := a.Reason
-		if reason == "" {
-			reason = "declined"
-		}
-		return ToolResult{Output: "relay declined for " + name + ": " + reason, IsError: true}
+		return ToolResult{Output: relayDeclinedOutput(name, a.Reason), IsError: true}
 	}
 	raw, present := a.Data[RelayOutputKey]
 	if !present {
@@ -395,6 +401,17 @@ func repairHaltedTurn(history []any, pending Request, answer Answer) ([]any, err
 	}
 
 	resultFor := func(i int, id string) RelayResult {
+		// A declined answer (ok:false) resolves EVERY outstanding call with the
+		// host's reason, exactly as the inline relay path reports it (issue #125).
+		// It used to fall through to the "no result supplied" filler and lose
+		// the reason the human gave.
+		if !answer.Ok {
+			name := relayNames[id]
+			if name == "" {
+				name = id
+			}
+			return RelayResult{ID: id, Output: relayDeclinedOutput(name, answer.Reason), IsError: true}
+		}
 		if r, ok := byID[id]; ok {
 			return r
 		}

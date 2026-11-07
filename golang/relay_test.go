@@ -7,6 +7,7 @@ package toolnexus
 import (
 	"context"
 	"encoding/json"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -820,5 +821,57 @@ func TestToolkitNeedNotBeTheSameInstanceOnResume(t *testing.T) {
 	}
 	if resumed.Status != "done" {
 		t.Fatalf("status = %q", resumed.Status)
+	}
+}
+
+// TestResumeDeclinedCarriesReason replays conformance/resume_decline/cases.json
+// (issue #125): a declined durable resume hands the model the host's reason on
+// every outstanding call, never the "no result supplied" filler.
+func TestResumeDeclinedCarriesReason(t *testing.T) {
+	raw, err := os.ReadFile("../conformance/resume_decline/cases.json")
+	if err != nil {
+		t.Fatalf("fixture: %v", err)
+	}
+	var fx struct {
+		Calls []string `json:"calls"`
+		Cases []struct {
+			Name   string   `json:"name"`
+			Reason string   `json:"reason"`
+			Expect []string `json:"expect"`
+		} `json:"cases"`
+	}
+	if err := json.Unmarshal(raw, &fx); err != nil {
+		t.Fatalf("fixture: %v", err)
+	}
+	if strings.Join(fx.Calls, ",") != "alpha,beta" {
+		t.Fatalf("fixture calls changed (%v): update this test", fx.Calls)
+	}
+	for _, tc := range fx.Cases {
+		t.Run(tc.Name, func(t *testing.T) {
+			llm := newSpikeScriptedLLM(t, [][]spikeCall{{
+				{"c1", "alpha", `{}`}, {"c2", "beta", `{}`},
+			}}, "ok")
+			c := CreateClient(ClientOptions{BaseURL: llm.srv.URL, Style: StyleOpenAI, Model: "stub", APIKey: "k"})
+			tk := spikeToolkit(t, relayTool("alpha"), relayTool("beta"))
+			halted, err := c.Run(context.Background(), "go", tk)
+			if err != nil {
+				t.Fatalf("run: %v", err)
+			}
+			resumed, err := c.RunWithAnswer(context.Background(), tk, halted.Messages, *halted.Pending,
+				AnswerDeclined(halted.Pending.ID, tc.Reason))
+			if err != nil {
+				t.Fatalf("a declined resume must not fail: %v", err)
+			}
+			var got []string
+			for _, m := range resumed.Messages {
+				if mm, ok := m.(map[string]any); ok && mm["role"] == "tool" {
+					s, _ := mm["content"].(string)
+					got = append(got, s)
+				}
+			}
+			if strings.Join(got, "\n") != strings.Join(tc.Expect, "\n") {
+				t.Fatalf("tool results = %q, want %q", got, tc.Expect)
+			}
+		})
 	}
 }
