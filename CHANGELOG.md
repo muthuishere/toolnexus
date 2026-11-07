@@ -47,7 +47,6 @@ Gap: in js the streaming modes are not covered by the reordering mutation.
   `server/discover`), and SPEC §7C.2 and the Go `ProtocolVersions` doc now say so. No hint is added to the
   `initialize` result: the `io.modelcontextprotocol/` `_meta` prefix is reserved by MCP.
 
-
 **Faster cold start for MCP in Java and C#, with no change in behaviour** (Java and C# only). Java no
 longer builds the MCP SDK's default JSON-schema validator (about 220 networknt classes) for every
 client. It is now resolved the first time a tool result is actually validated against an output
