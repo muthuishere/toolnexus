@@ -319,14 +319,19 @@ async def probe_http(
 
 async def probe_stdio(
     name: str, argv: list[str], env: dict[str, str], cwd: Optional[str], timeout: float, wait_for: Any
-) -> Optional[Session2026]:
-    """``server/discover`` over stdio, waiting ``min(timeout, 5 s)``. ``None`` ⇒ fallback (the probe child
-    is terminated); a child that exits before replying is a load failure."""
-    sc = await asyncio.to_thread(StdioConn, argv, env, cwd)
+) -> "Session2026 | StdioConn | None":
+    """``server/discover`` over stdio, waiting ``min(timeout, 5 s)``. Returns a :class:`Session2026`
+    for a 2026-07-28 server; the still-running probe :class:`StdioConn` when the server REPLIED without
+    2026 (error or old result) — the frozen path continues on that same child (§2.2a reuse);
+    ``None`` on silence (the probe child is killed, the caller spawns afresh). A child that exits
+    before replying is a load failure."""
+    sc = await asyncio.to_thread(StdioConn, argv, env, cwd, True)
     conn = Conn(stdio=sc, timeout=timeout, client_info=_client_info())
     try:
         res = await asyncio.to_thread(conn.call, "server/discover", None, min(timeout, STDIO_PROBE_MAX))
-    except (RpcError, NotJsonRpc, TimeoutError):
+    except (RpcError, NotJsonRpc):
+        return sc  # replied: the reader thread has stopped; hand the pipes to the SDK
+    except TimeoutError:
         await asyncio.to_thread(sc.kill)
         return None
     except StdioClosed:
@@ -336,8 +341,8 @@ async def probe_stdio(
         await asyncio.to_thread(sc.kill)
         raise
     if not _supports(res):
-        await asyncio.to_thread(sc.kill)
-        return None
+        return sc
+    sc.resume()
     return Session2026(name, conn, res, wait_for, timeout)
 
 
