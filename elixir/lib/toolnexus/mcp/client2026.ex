@@ -200,26 +200,38 @@ defmodule Toolnexus.Mcp.Client2026 do
   or `{:error, reason}` (a load failure). `discover_timeout` bounds a stdio probe.
   """
   def discover(%__MODULE__{} = c, wait_for) do
+    case probe(c, wait_for) do
+      {:fallback, _} -> :fallback
+      other -> other
+    end
+  end
+
+  @doc """
+  Like `discover/2`, but a fallback says why: `{:fallback, :reply}` (the server
+  answered, so a stdio child is reusable for the frozen path) or
+  `{:fallback, :silent}` (a stdio probe timed out; the child must be replaced).
+  """
+  def probe(%__MODULE__{} = c, wait_for) do
     c = if c.stdio, do: %{c | timeout: min(c.timeout, 5_000)}, else: c
 
     case resolve(request(c, "server/discover"), wait_for) do
       {:ok, r} ->
         if Wire.protocol_version() in List.wrap(r["supportedVersions"]),
           do: {:modern, r},
-          else: :fallback
+          else: {:fallback, :reply}
 
       {:error, %RpcError{}} ->
-        :fallback
+        {:fallback, :reply}
 
       {:error, :not_rpc} ->
-        :fallback
+        {:fallback, :reply}
 
       # 5xx: some SDK servers answer an unknown method with 500 (§2.2a, amended)
       {:error, {:http_status, s, _}} when s in [400, 404, 405] or s >= 500 ->
-        :fallback
+        {:fallback, :reply}
 
       {:error, :timeout} when c.stdio != nil ->
-        :fallback
+        {:fallback, :silent}
 
       {:pending, _req, _k} ->
         {:error, "authorization pending"}
