@@ -114,10 +114,12 @@ pub(crate) async fn probe(name: &str, cfg: &ServerConfig, ctx: &LoadCtx) -> Resu
         | Err(WireError::Http(400 | 404 | 405 | 500..=599)) => {
             // SPEC §2.2a (amended): a 5xx on discover also tries the frozen path
             // (some SDK servers answer unknown methods with 500)
-            return Ok(fallback(session, cfg, true).await);
+            return Ok(fallback(name, session, cfg, true, remote).await);
         }
         // silence: the probe child is killed and the frozen path respawns
-        Err(WireError::Timeout(_)) if !remote => return Ok(fallback(session, cfg, false).await),
+        Err(WireError::Timeout(_)) if !remote => {
+            return Ok(fallback(name, session, cfg, false, remote).await);
+        }
         Err(e) => {
             session.close().await;
             return Err(e.to_string());
@@ -166,14 +168,27 @@ pub(crate) async fn probe(name: &str, cfg: &ServerConfig, ctx: &LoadCtx) -> Resu
     }))
 }
 
-async fn fallback(session: Session, cfg: &ServerConfig, replied: bool) -> Probe {
+async fn fallback(
+    name: &str,
+    session: Session,
+    cfg: &ServerConfig,
+    replied: bool,
+    remote: bool,
+) -> Probe {
     let bearer = session
         .auth()
         .map(|a| a.stored_bearer(cfg.url.as_deref().unwrap_or_default()))
         .unwrap_or_default();
     // a stdio server that answered discover keeps its process (SPEC §2.2a)
-    let stdio = if replied {
-        session.take_stdio().await.map(Box::new)
+    let stdio = if replied && !remote {
+        let h = session.take_stdio().await.map(Box::new);
+        if h.is_none() {
+            // never silent: the hand-over failed, so the frozen path spawns a second process
+            eprintln!(
+                "[toolnexus] warn: MCP server {name:?} probe child hand-over failed; respawning for the frozen path"
+            );
+        }
+        h
     } else {
         None
     };

@@ -30,6 +30,7 @@ Each port: implementation + test against the shared fixture asserting `error` â‡
 
 ## Known gaps (from the per-port passes)
 
+- rust: if handing the probe child to rmcp fails (only possible if the probe reader already died), it falls back to a respawn and logs `[toolnexus] warn: MCP server ... probe child hand-over failed` on stderr (the port's existing diagnostic channel). It is not surfaced in `status`: the frozen load still succeeds, and there is no non-error status field to carry it.
 - python: the stdio connect budget is now `timeout + min(timeout, 5 s)` (it was one `timeout` covering probe + init, so a silent server could never reach the frozen path inside it). A dead stdio server can take up to ~2Ã— `timeout` to report `failed`.
 - java / js: the SDK's own stdio transport always spawns, so each has a small adapter transport (`ProcessStdioTransport`, `AdoptedStdioTransport`) used only for the reused child.
 - rust / elixir / java: a reused child keeps the probe's stderr (inherited); a freshly spawned frozen child had stderr nulled (elixir: `stderr_path` is ignored for a reused child).
