@@ -502,8 +502,8 @@ defmodule Toolnexus.Mcp do
                 ok
             end
 
-          {:fallback, cfg} ->
-            load_server(sup, name, cfg, opts[:wait_for])
+          {:fallback, cfg, adopt} ->
+            load_server(sup, name, cfg, opts[:wait_for], adopt)
 
           {:failed, reason} = f ->
             warn_failed(name, reason)
@@ -523,8 +523,8 @@ defmodule Toolnexus.Mcp do
     end
   end
 
-  defp load_server(sup, name, cfg, wait_for) do
-    {:ok, pid} = start_connection(sup, cfg, wait_for)
+  defp load_server(sup, name, cfg, wait_for, adopt) do
+    {:ok, pid} = start_connection(sup, cfg, wait_for, adopt)
     timeout = cfg["timeout"] || @default_timeout
 
     with :ok <- Connection.connect(pid, timeout),
@@ -557,8 +557,8 @@ defmodule Toolnexus.Mcp do
             Toolnexus.Mcp.Client2026.close(c)
             result
 
-          {:fallback, cfg} ->
-            list_server_fallback(sup, name, cfg)
+          {:fallback, cfg, adopt} ->
+            list_server_fallback(sup, name, cfg, adopt)
 
           {:failed, reason} = f ->
             warn_failed(name, reason)
@@ -579,8 +579,8 @@ defmodule Toolnexus.Mcp do
   end
 
   # The frozen path's list (§2.F); exceptions are caught by safe_list_server.
-  defp list_server_fallback(sup, name, cfg) do
-    {:ok, pid} = start_connection(sup, cfg, nil)
+  defp list_server_fallback(sup, name, cfg, adopt) do
+    {:ok, pid} = start_connection(sup, cfg, nil, adopt)
     timeout = cfg["timeout"] || @default_timeout
 
     result =
@@ -597,8 +597,11 @@ defmodule Toolnexus.Mcp do
     result
   end
 
-  defp start_connection(sup, cfg, wait_for) do
-    DynamicSupervisor.start_child(sup, {Connection, cfg: cfg, wait_for: wait_for})
+  defp start_connection(sup, cfg, wait_for, adopt) do
+    DynamicSupervisor.start_child(
+      sup,
+      {Connection, cfg: cfg, wait_for: wait_for, adopt: adopt}
+    )
   end
 
   defp enabled?(cfg) do

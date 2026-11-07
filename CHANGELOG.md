@@ -36,6 +36,14 @@ startup) and the two Jackson stacks in Java are tracked separately.
   both) and AutoAgents (the mock sent `input_tokens` alongside `prompt_tokens`, which AutoAgents rejects
   as a duplicate field; usage now carries the OpenAI-standard keys only). The standing tables are not
   re-run yet; a full quiet re-run will refresh them.
+**Faster load of pre-2026 stdio MCP servers: one process start instead of two.** Until now, when a
+stdio server answered the `server/discover` probe with an error (every server older than MCP
+2026-07-28 does), the client killed that process and started a second one for the old protocol. A JVM
+server paid that twice (two spawns 152 ms apart in a Java profile; 35–55 ms in C#, ~20 ms in Clojure).
+Now the same process carries on into `initialize`. A server that never answers the probe is still
+killed and restarted after `min(timeout, 5 s)`, as before. Discover-first, the 2026 path and HTTP are
+unchanged; SPEC §2.2a amended. Shared fixture `examples/mcp-2026/legacy-stdio/` counts process starts.
+If a port cannot hand the open process over, it respawns as before (Rust logs a warning on stderr when this happens). Port coverage and any gap: `openspec/changes/reuse-stdio-discover-probe/tasks.md`.
 
 - **Docs:** the docs-site hero video is re-cut for 0.26.0 (80 s, new narrator). It now covers eight
   languages including Rust, typed decisions (`createClassifier`), media generation, and serving the

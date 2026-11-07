@@ -626,8 +626,24 @@ func applyNameFilter[T any](server string, defs []T, nameOf func(T) string, filt
 	return out
 }
 
-func connectServer(ctx context.Context, name string, cfg ServerConfig, waitFor func(Request) (Answer, error), auth ...*mcpOAuth) (*mcpclient.Client, error) {
+func connectServer(ctx context.Context, name string, cfg ServerConfig, waitFor func(Request) (Answer, error), ho *mcpProbeHandoff, auth ...*mcpOAuth) (*mcpclient.Client, error) {
 	timeout := cfg.timeout()
+
+	if ho != nil {
+		// §2.2a: continue on the stdio probe child that answered discover. The
+		// in-house reader has parked; the SDK reads the rest of its stdout, and
+		// Close on ho.w closes stdin and reaps (kills if needed) the process.
+		client := mcpclient.NewClient(transport.NewIO(ho.r, ho.w, nil), elicitationOptions(waitFor)...)
+		if err := client.Start(context.Background()); err != nil {
+			client.Close()
+			return nil, fmt.Errorf("failed to start stdio client: %w", err)
+		}
+		if err := initClient(ctx, client, timeout); err != nil {
+			client.Close()
+			return nil, err
+		}
+		return client, nil
+	}
 
 	if cfg.isRemote() {
 		var oa *mcpOAuth
@@ -912,7 +928,7 @@ func LoadMcpWithOptions(ctx context.Context, input any, opts McpLoadOptions) (*M
 		go func() {
 			defer wg.Done()
 			// Discover first (§2.2); the SDK path below is the frozen fallback.
-			s26, auth, fallback, dErr := connect2026(ctx, name, cfg, copts)
+			s26, auth, ho, fallback, dErr := connect2026(ctx, name, cfg, copts)
 			if dErr != nil {
 				var ap *mcpAuthPending
 				if errors.As(dErr, &ap) {
@@ -940,7 +956,7 @@ func LoadMcpWithOptions(ctx context.Context, input any, opts McpLoadOptions) (*M
 				report(McpServerResult{Name: name, Status: StatusConnected, Tools: converted})
 				return
 			}
-			client, cErr := connectServer(ctx, name, cfg, wf, auth)
+			client, cErr := connectServer(ctx, name, cfg, wf, ho, auth)
 			if cErr != nil {
 				mu.Lock()
 				status[name] = StatusFailed
@@ -1046,7 +1062,7 @@ func ListMcpTools(ctx context.Context, input any) (*McpInventory, error) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			s26, auth, fallback, dErr := connect2026(ctx, name, cfg, mcpConnectOpts{})
+			s26, auth, ho, fallback, dErr := connect2026(ctx, name, cfg, mcpConnectOpts{})
 			if dErr == nil && !fallback {
 				infos, lErr := s26.toolInfos(ctx)
 				s26.close()
@@ -1067,7 +1083,7 @@ func ListMcpTools(ctx context.Context, input any) (*McpInventory, error) {
 				log.Printf("[toolnexus] MCP server %q failed: %v", name, dErr)
 				return
 			}
-			client, cErr := connectServer(ctx, name, cfg, nil, auth)
+			client, cErr := connectServer(ctx, name, cfg, nil, ho, auth)
 			if cErr != nil {
 				mu.Lock()
 				status[name] = StatusFailed

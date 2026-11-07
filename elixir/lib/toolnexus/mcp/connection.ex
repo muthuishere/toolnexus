@@ -93,6 +93,7 @@ defmodule Toolnexus.Mcp.Connection do
      %{
        cfg: cfg,
        wait_for: Keyword.get(opts, :wait_for),
+       adopt: Keyword.get(opts, :adopt),
        timeout: cfg["timeout"] || @default_timeout,
        mode: nil,
        stdio: nil,
@@ -163,6 +164,13 @@ defmodule Toolnexus.Mcp.Connection do
   end
 
   @impl true
+  # An adopted probe port (Stdio2026) is in `{:line, _}` mode.
+  def handle_info({port, {:data, {:eol, l}}}, %{stdio: %Stdio{port: port}} = s),
+    do: handle_info({port, {:data, l <> "\n"}}, s)
+
+  def handle_info({port, {:data, {:noeol, p}}}, %{stdio: %Stdio{port: port}} = s),
+    do: handle_info({port, {:data, p}}, s)
+
   def handle_info({port, {:data, chunk}}, %{stdio: %Stdio{port: port}} = s) do
     {lines, rest} = Stdio.split_lines(s.buffer <> chunk)
     s = %{s | buffer: rest}
@@ -265,7 +273,7 @@ defmodule Toolnexus.Mcp.Connection do
   # --- connect helpers ---------------------------------------------------------
 
   defp connect_stdio(from, s) do
-    case Stdio.open(s.cfg) do
+    case open_stdio(s) do
       {:ok, t} ->
         {id, s} = next_id(s)
         msg = Protocol.request(id, "initialize", Protocol.initialize_params(s.wait_for != nil))
@@ -280,6 +288,16 @@ defmodule Toolnexus.Mcp.Connection do
         {:reply, {:error, reason}, s}
     end
   end
+
+  # §2.2a (amended): continue on the 2026 probe's child when it answered discover.
+  defp open_stdio(%{adopt: pid} = s) when is_pid(pid) do
+    case Toolnexus.Mcp.Stdio2026.handoff(pid, self()) do
+      {:ok, port, os_pid} -> {:ok, %Stdio{port: port, os_pid: os_pid}}
+      {:error, _} -> Stdio.open(s.cfg)
+    end
+  end
+
+  defp open_stdio(s), do: Stdio.open(s.cfg)
 
   defp connect_remote(from, s) do
     conn = self()

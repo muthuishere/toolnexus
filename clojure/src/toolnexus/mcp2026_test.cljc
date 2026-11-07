@@ -183,6 +183,22 @@
         (is (= "stdio-legacy" (:name (:server-info c))) mode)
         (finally (mcp/disconnect c))))))
 
+(deftest stdio-discover-probe-child-reuse
+  ;; §2.2a (amended), shared fixture examples/mcp-2026/legacy-stdio: a fast
+  ;; discover error keeps the probe child (1 start); silence respawns (2).
+  (let [script (str (examples-dir) "/mcp-2026/legacy-stdio/server.mjs")]
+    (doseq [[mode timeout starts] [["error" 10000 1] ["silent" 1500 2]]]
+      (let [d (fs/temp-dir! "tn-spawn")
+            f (str d "/starts.txt")
+            c (mcp/connect {:name "legacy" :kind "local" :enabled true :timeout timeout
+                            :command ["node" script]
+                            :environment {"SPAWN_COUNT_FILE" f "DISCOVER_MODE" mode}})]
+        (try
+          (is (= "connected" (:status c)) mode)
+          (is (= "echo:hi" (:output (run c "legacy_echo" {:text "hi"}))) mode)
+          (is (= starts (count (remove str/blank? (str/split-lines (fs/read-file f))))) mode)
+          (finally (mcp/disconnect c) (fs/delete-tree! d)))))))
+
 ;; ---------------------------------------------------------------------------
 ;; §2.7 skills, §2.8 tool search
 ;; ---------------------------------------------------------------------------

@@ -279,6 +279,13 @@ type mcp26Stdio struct {
 	err     error
 	done    chan struct{}
 	once    sync.Once
+
+	// Probe handoff (§2.2a): the reader parks after the first response (the
+	// discover reply) so the frozen SDK path can take over the same child.
+	out    io.Reader
+	br     *bufio.Reader
+	parked chan struct{} // closed once the reader parked after the first reply
+	resume chan bool     // true ⇒ keep reading (2026 path); false ⇒ handed off
 }
 
 func startMcp26Stdio(cfg ServerConfig) (*mcp26Stdio, error) {
@@ -304,37 +311,111 @@ func startMcp26Stdio(cfg ServerConfig) (*mcp26Stdio, error) {
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("failed to start stdio server: %w", err)
 	}
-	s := &mcp26Stdio{cmd: cmd, in: in, pending: map[string]chan []byte{}, done: make(chan struct{})}
-	go s.read(out)
+	s := &mcp26Stdio{cmd: cmd, in: in, pending: map[string]chan []byte{}, done: make(chan struct{}),
+		out: out, br: bufio.NewReaderSize(out, 64<<10), parked: make(chan struct{}), resume: make(chan bool, 1)}
+	go s.read()
 	return s, nil
 }
 
-func (s *mcp26Stdio) read(out io.Reader) {
-	sc := bufio.NewScanner(out)
-	sc.Buffer(make([]byte, 64<<10), 16<<20)
-	for sc.Scan() {
-		var m struct {
-			ID     json.RawMessage `json:"id"`
-			Method string          `json:"method"`
+// read demultiplexes responses by id. After delivering the FIRST response (the
+// server/discover reply) it parks before issuing another read: either the 2026
+// path resumes it, or handoff() gives the unread stream to the frozen SDK path,
+// so no goroutine is left blocked in Read to steal the initialize reply.
+func (s *mcp26Stdio) read() {
+	first := true
+	var rerr error
+	for {
+		line, err := s.br.ReadBytes('\n')
+		line = bytes.TrimRight(line, "\r\n")
+		if len(line) > 0 {
+			var m struct {
+				ID     json.RawMessage `json:"id"`
+				Method string          `json:"method"`
+			}
+			if json.Unmarshal(line, &m) == nil && m.Method == "" && len(m.ID) > 0 {
+				s.mu.Lock()
+				ch := s.pending[string(m.ID)]
+				delete(s.pending, string(m.ID))
+				s.mu.Unlock()
+				if ch != nil {
+					ch <- line
+				}
+				if first && err == nil {
+					first = false
+					close(s.parked)
+					if !<-s.resume {
+						return // handed off: the SDK transport owns stdout now
+					}
+				}
+			}
 		}
-		if json.Unmarshal(sc.Bytes(), &m) != nil || m.Method != "" || len(m.ID) == 0 {
-			continue // notification / server request / noise
-		}
-		s.mu.Lock()
-		ch := s.pending[string(m.ID)]
-		delete(s.pending, string(m.ID))
-		s.mu.Unlock()
-		if ch != nil {
-			ch <- append([]byte(nil), sc.Bytes()...)
+		if err != nil {
+			if err != io.EOF {
+				rerr = err
+			}
+			break
 		}
 	}
 	s.mu.Lock()
 	s.err = errors.New("stdio server closed its stdout")
-	if e := sc.Err(); e != nil {
-		s.err = fmt.Errorf("stdio read: %w", e)
+	if rerr != nil {
+		s.err = fmt.Errorf("stdio read: %w", rerr)
 	}
 	s.mu.Unlock()
 	close(s.done)
+}
+
+// keepReading un-parks the reader for the 2026 path (no-op if never parked).
+func (s *mcp26Stdio) keepReading() {
+	select {
+	case <-s.parked:
+		s.resume <- true
+	default:
+		go func() {
+			select {
+			case <-s.parked:
+				s.resume <- true
+			case <-s.done:
+			}
+		}()
+	}
+}
+
+// handoff (§2.2a) stops the in-house reader after a discover REPLY and returns
+// the child's stdout (any bytes already buffered first) plus a stdin whose
+// Close also reaps the process. ok=false ⇒ the reader never parked (no reply).
+func (s *mcp26Stdio) handoff() (r io.Reader, w io.WriteCloser, ok bool) {
+	select {
+	case <-s.parked:
+	case <-s.done:
+		return nil, nil, false
+	case <-time.After(time.Second):
+		return nil, nil, false
+	}
+	s.resume <- false
+	rest, _ := s.br.Peek(s.br.Buffered())
+	r = io.MultiReader(bytes.NewReader(append([]byte(nil), rest...)), s.out)
+	return r, &mcp26HandoffStdin{s: s}, true
+}
+
+// mcp26HandoffStdin is the SDK's stdin after handoff; Close closes stdin, then
+// waits for the child to exit (kill after 2s), so the SDK Close still reaps it.
+type mcp26HandoffStdin struct{ s *mcp26Stdio }
+
+func (h *mcp26HandoffStdin) Write(p []byte) (int, error) { return h.s.in.Write(p) }
+func (h *mcp26HandoffStdin) Close() error {
+	h.s.once.Do(func() {
+		h.s.in.Close()
+		ch := make(chan struct{})
+		go func() { _ = h.s.cmd.Wait(); close(ch) }()
+		select {
+		case <-ch:
+		case <-time.After(2 * time.Second):
+			_ = h.s.cmd.Process.Kill()
+			<-ch
+		}
+	})
+	return nil
 }
 
 func (s *mcp26Stdio) roundTrip(ctx context.Context, id int64, body []byte, msg *rpcReply) error {

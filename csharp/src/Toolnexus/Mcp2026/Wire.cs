@@ -254,6 +254,17 @@ internal sealed class Conn : IAsyncDisposable
     }
 
     public ValueTask DisposeAsync() => _stdio?.DisposeAsync() ?? ValueTask.CompletedTask;
+
+    /// <summary>SPEC §2.2a: discover succeeded on stdio — restart the reader the probe paused.</summary>
+    public void EndProbe() => _stdio?.EndProbe();
+
+    /// <summary>
+    /// SPEC §2.2a: hand the stdio probe child (which answered discover) to the frozen SDK path. Returns the server's
+    /// stdin and a stream over its stdout that drains our reader's buffer first; disposing this Conn still kills
+    /// the child. Only valid on a stdio connection whose discover got a reply.
+    /// </summary>
+    public Task<(Stream Input, Stream Output)> HandOffAsync() =>
+        _stdio?.HandOffAsync() ?? throw new InvalidOperationException("not a stdio connection");
 }
 
 /// <summary>
@@ -268,11 +279,15 @@ internal sealed class StdioConn : IAsyncDisposable
     private readonly TaskCompletionSource _done = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly Task _stderrPump;
     private volatile string? _err;
+    /// <summary>SPEC §2.2a probe mode: the reader exits right after delivering the first response (the discover reply),
+    /// so no pending read can steal the frozen path's <c>initialize</c> reply.</summary>
+    private volatile bool _probe = true;
+    private Task _reader = Task.CompletedTask;
 
     public StdioConn(Process proc)
     {
         _proc = proc;
-        _ = Task.Run(ReadLoopAsync);
+        _reader = Task.Run(ReadLoopAsync);
         _stderrPump = Task.Run(async () =>
         {
             try
@@ -294,7 +309,12 @@ internal sealed class StdioConn : IAsyncDisposable
             {
                 var m = J.ParseObject(line);
                 if (m == null || m["method"] != null || m["id"] == null) continue; // notification / server request / noise
-                if (_pending.TryRemove(J.Serialize(m["id"]), out var tcs)) tcs.TrySetResult(m);
+                if (_pending.TryRemove(J.Serialize(m["id"]), out var tcs))
+                {
+                    var probe = _probe;
+                    tcs.TrySetResult(m);
+                    if (probe) return; // paused: EndProbe resumes, HandOff gives stdout to the SDK
+                }
             }
             _err = "stdio server exited";
         }
@@ -302,6 +322,23 @@ internal sealed class StdioConn : IAsyncDisposable
         _done.TrySetResult();
         foreach (var k in _pending.Keys)
             if (_pending.TryRemove(k, out var t)) t.TrySetException(new WireException(_err!));
+    }
+
+    public void EndProbe()
+    {
+        if (!_probe) return;
+        _probe = false;
+        // the probe reader returns right after delivering the discover reply; restart once it has
+        _reader = _reader.ContinueWith(_ => _done.Task.IsCompleted ? Task.CompletedTask : ReadLoopAsync(),
+            TaskScheduler.Default).Unwrap();
+    }
+
+    public async Task<(Stream Input, Stream Output)> HandOffAsync()
+    {
+        // the probe reader exits right after delivering the discover reply: wait for it so no read is in flight
+        await _reader.WaitAsync(TimeSpan.FromSeconds(5)).ConfigureAwait(false);
+        _probe = false;
+        return (_proc.StandardInput.BaseStream, new ReaderStream(_proc.StandardOutput));
     }
 
     public async Task<JsonObject> RoundTripAsync(long id, string body, CancellationToken ct)
@@ -329,11 +366,65 @@ internal sealed class StdioConn : IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         try { _proc.StandardInput.Close(); } catch { /* already gone */ }
-        if (await Task.WhenAny(_done.Task, Task.Delay(2000)).ConfigureAwait(false) != _done.Task)
+        var exited = _proc.WaitForExitAsync();
+        var first = await Task.WhenAny(_done.Task, exited, Task.Delay(2000)).ConfigureAwait(false);
+        if (first != _done.Task && first != exited)
             try { _proc.Kill(true); } catch { /* exited */ }
         try { if (!_proc.HasExited) _proc.Kill(true); } catch { }
         try { await _proc.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5)).ConfigureAwait(false); } catch { }
         try { await _stderrPump.WaitAsync(TimeSpan.FromSeconds(2)).ConfigureAwait(false); } catch { }
         _proc.Dispose();
+    }
+}
+
+/// <summary>
+/// SPEC §2.2a handoff: a read-only byte stream over the probe's <see cref="StreamReader"/>, so any bytes it already
+/// buffered past the discover reply reach the SDK reader instead of being lost.
+/// </summary>
+internal sealed class ReaderStream(StreamReader reader) : Stream
+{
+    private readonly Encoder _enc = new UTF8Encoding(false).GetEncoder();
+    private readonly char[] _chars = new char[4096];
+    private byte[] _bytes = Array.Empty<byte>();
+    private int _pos, _len;
+
+    public override bool CanRead => true;
+    public override bool CanSeek => false;
+    public override bool CanWrite => false;
+    public override long Length => throw new NotSupportedException();
+    public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+    public override void Flush() { }
+    public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+    public override void SetLength(long value) => throw new NotSupportedException();
+    public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+
+    public override int Read(byte[] buffer, int offset, int count) =>
+        ReadAsync(buffer.AsMemory(offset, count)).AsTask().GetAwaiter().GetResult();
+
+    public override Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken ct) =>
+        ReadAsync(buffer.AsMemory(offset, count), ct).AsTask();
+
+    public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken ct = default)
+    {
+        while (_pos >= _len)
+        {
+            var n = await reader.ReadAsync(_chars.AsMemory(), ct).ConfigureAwait(false);
+            var flush = n == 0;
+            var need = _enc.GetByteCount(_chars, 0, n, flush);
+            if (_bytes.Length < need) _bytes = new byte[Math.Max(need, 8192)];
+            _len = _enc.GetBytes(_chars, 0, n, _bytes, 0, flush);
+            _pos = 0;
+            if (n == 0) return 0;
+        }
+        var c = Math.Min(buffer.Length, _len - _pos);
+        _bytes.AsMemory(_pos, c).CopyTo(buffer);
+        _pos += c;
+        return c;
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing) reader.Dispose();
+        base.Dispose(disposing);
     }
 }

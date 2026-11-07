@@ -121,6 +121,27 @@ async def test_fallback_to_old_sdk_server_over_stdio():
         await src.close()
 
 
+LEGACY_STDIO = os.path.join(REPO, "examples", "mcp-2026", "legacy-stdio", "server.mjs")
+
+
+@pytest.mark.parametrize("mode,timeout,spawns", [("error", 5000, 1), ("silent", 1500, 2)])
+async def test_stdio_discover_probe_child_reused(tmp_path, mode, timeout, spawns):
+    """§2.2a: a discover REPLY (error) continues into initialize on the same child; only
+    discover silence kills the probe child and spawns a new one."""
+    count = tmp_path / "spawns.txt"
+    c = {"mcpServers": {"legacy": {"command": ["node", LEGACY_STDIO], "timeout": timeout,
+                                   "env": {"SPAWN_COUNT_FILE": str(count), "DISCOVER_MODE": mode}}}}
+    src = await load_mcp(c)
+    try:
+        assert src.status == {"legacy": "connected"}
+        echo = next(t for t in src.tools if t.name == "legacy_echo")
+        r = await echo.execute({"text": "hi"})
+        assert "echo:hi" in r.output
+        assert len(count.read_text().splitlines()) == spawns
+    finally:
+        await src.close()
+
+
 # ---- MRTR ----------------------------------------------------------------
 
 async def test_mrtr_inline_wait_for(plain):

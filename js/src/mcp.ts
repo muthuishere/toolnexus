@@ -6,6 +6,7 @@
 import { readFileSync } from "node:fs"
 import { Client } from "@modelcontextprotocol/sdk/client/index.js"
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
+import { AdoptedStdioTransport } from "./mcp2026/stdio.js"
 import type { Tool as McpToolDef, ElicitRequest, ElicitResult } from "@modelcontextprotocol/sdk/types.js"
 import { ElicitRequestSchema } from "@modelcontextprotocol/sdk/types.js"
 import { type JSONSchema, type Tool, type ToolContext, type ToolHints, type ToolResult, type McpStatus, type Request, type Answer, sanitize } from "./types.js"
@@ -578,7 +579,10 @@ async function connectServer(name: string, cfg: ServerConfig, timeout: number, o
   if (p.kind === "modern") return p
   const client = sdkClient()
   onSdk(client)
-  await raceTimeout(connectTransport(client, cfg, oauth ? { oauth, waitFor: opts.waitFor } : undefined), timeout, opts.signal)
+  const connecting = p.reuse
+    ? client.connect(new AdoptedStdioTransport(p.reuse.child, p.reuse.leftover)) // §2.2a: same child, no respawn
+    : connectTransport(client, cfg, oauth ? { oauth, waitFor: opts.waitFor } : undefined)
+  await raceTimeout(connecting, timeout, opts.signal)
   const defs = await raceTimeout(paginateTools(client, timeout), timeout, opts.signal)
   return { kind: "sdk", client, defs }
 }

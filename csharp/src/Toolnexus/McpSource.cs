@@ -308,7 +308,8 @@ public sealed partial class McpSource : IAsyncDisposable
                 {
                     // SPEC §2.2: discover first; a 2026-07-28 server never reaches the SDK path below.
                     var auth = IsRemote(cfg) ? new Mcp2026.OAuthClient(Mcp2026.AuthConfig.From(cfg.Get("auth")), store, options.OpenUrl) : null;
-                    s26 = await Open26Async(name, cfg, timeout, waitFor, auth, cancellationToken).ConfigureAwait(false);
+                    IClientTransport? reuse;
+                    (s26, reuse) = await Open26Async(name, cfg, timeout, waitFor, auth, cancellationToken).ConfigureAwait(false);
                     if (s26 != null)
                     {
                         var converted26 = await Tools26Async(name, cfg, s26, options.DisableTools, cancellationToken).ConfigureAwait(false);
@@ -329,7 +330,7 @@ public sealed partial class McpSource : IAsyncDisposable
                     // token so a parent cancel/deadline propagates through (§2 Gap 3).
                     using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
                     cts.CancelAfter(TimeSpan.FromMilliseconds(timeout));
-                    IClientTransport transport = IsRemote(cfg) ? BuildRemoteTransport(cfg, auth, waitFor) : BuildLocalTransport(name, cfg);
+                    IClientTransport transport = reuse ?? (IsRemote(cfg) ? BuildRemoteTransport(cfg, auth, waitFor) : BuildLocalTransport(name, cfg));
                     client = await McpClient.CreateAsync(transport, BuildClientOptions(waitFor), cancellationToken: cts.Token).ConfigureAwait(false);
                     var defs = await client.ListToolsAsync(cancellationToken: cts.Token).ConfigureAwait(false);
 
@@ -487,7 +488,8 @@ public sealed partial class McpSource : IAsyncDisposable
                 try
                 {
                     var auth = IsRemote(cfg) ? new Mcp2026.OAuthClient(Mcp2026.AuthConfig.From(cfg.Get("auth")), new MemoryTokenStore(), null) : null;
-                    s26 = await Open26Async(name, cfg, timeout, null, auth, cancellationToken).ConfigureAwait(false);
+                    IClientTransport? reuse;
+                    (s26, reuse) = await Open26Async(name, cfg, timeout, null, auth, cancellationToken).ConfigureAwait(false);
                     if (s26 != null)
                     {
                         var defs26 = await s26.ListToolsAsync(cancellationToken).ConfigureAwait(false);
@@ -502,7 +504,7 @@ public sealed partial class McpSource : IAsyncDisposable
                     }
                     using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
                     cts.CancelAfter(TimeSpan.FromMilliseconds(timeout));
-                    IClientTransport transport = IsRemote(cfg) ? BuildRemoteTransport(cfg, auth, null) : BuildLocalTransport(name, cfg);
+                    IClientTransport transport = reuse ?? (IsRemote(cfg) ? BuildRemoteTransport(cfg, auth, null) : BuildLocalTransport(name, cfg));
                     client = await McpClient.CreateAsync(transport, null, cancellationToken: cts.Token).ConfigureAwait(false);
                     var defs = await client.ListToolsAsync(cancellationToken: cts.Token).ConfigureAwait(false);
                     var infos = defs
@@ -595,7 +597,7 @@ public sealed partial class McpSource : IAsyncDisposable
     /// SPEC §2.2/§2.2a: open a server on the 2026-07-28 path. Returns <c>null</c> when it must fall back to the
     /// frozen SDK path (the stdio probe child is terminated first); throws on a load failure.
     /// </summary>
-    private static async Task<Mcp2026.Server26?> Open26Async(string name, IDictionary<string, object?> cfg, long timeout,
+    private static async Task<(Mcp2026.Server26? Server, IClientTransport? Reuse)> Open26Async(string name, IDictionary<string, object?> cfg, long timeout,
         Func<Request, Task<Answer>>? waitFor, Mcp2026.OAuthClient? auth, CancellationToken ct)
     {
         Mcp2026.Conn conn;
@@ -618,6 +620,7 @@ public sealed partial class McpSource : IAsyncDisposable
                 foreach (var (k, v) in extra) env[k] = v?.ToString() ?? "";
             conn = Mcp2026.Conn.StartStdio(ResolveCommand(name, cfg), env, cfg.Get("cwd") as string);
         }
+        IClientTransport? reuse = null;
         var s = new Mcp2026.Server26(name, conn, timeout, waitFor)
         {
             ToolSearch = cfg.Get("toolSearch") is true,
@@ -626,12 +629,28 @@ public sealed partial class McpSource : IAsyncDisposable
         try
         {
             await s.DiscoverAsync(ct).ConfigureAwait(false);
-            return s;
+            return (s, null);
+        }
+        catch (Mcp2026.FallbackException e) when (e.Replied && s.Conn.IsStdio)
+        {
+            // SPEC §2.2a (reuse-stdio-discover-probe): the child answered discover, so the SAME process continues
+            // into initialize on the frozen path — no kill + respawn.
+            try
+            {
+                var (input, output) = await s.Conn.HandOffAsync().ConfigureAwait(false);
+                reuse = new ProbeChildTransport(name, new StreamClientTransport(input, output), s.Conn);
+            }
+            catch
+            {
+                await s.DisposeAsync().ConfigureAwait(false);
+                throw;
+            }
+            return (null, reuse);
         }
         catch (Mcp2026.FallbackException)
         {
             await s.DisposeAsync().ConfigureAwait(false);
-            return null;
+            return (null, null);
         }
         catch
         {
@@ -657,6 +676,35 @@ public sealed partial class McpSource : IAsyncDisposable
         if (s.ToolSearch) return new List<ITool> { new Mcp2026.SearchTool26(s, false), new Mcp2026.SearchTool26(s, true) };
         var kept = s.Filter != null ? s.Filter(defs) : defs;
         return kept.Select(d => (ITool)new Mcp2026.McpTool26(s, d)).ToList();
+    }
+
+    /// <summary>
+    /// SPEC §2.2a: the frozen SDK client over the stdio probe child that already answered discover. The SDK sees a
+    /// plain <see cref="StreamClientTransport"/>; disposing its session also disposes the probe <see cref="Mcp2026.Conn"/>,
+    /// which closes stdin and kills the child exactly as before.
+    /// </summary>
+    private sealed class ProbeChildTransport(string name, StreamClientTransport inner, Mcp2026.Conn conn) : IClientTransport
+    {
+        public string Name => name;
+
+        public async Task<ITransport> ConnectAsync(CancellationToken cancellationToken = default)
+        {
+            try { return new Owned(await inner.ConnectAsync(cancellationToken).ConfigureAwait(false), conn); }
+            catch { await conn.DisposeAsync().ConfigureAwait(false); throw; }
+        }
+
+        private sealed class Owned(ITransport t, Mcp2026.Conn conn) : ITransport
+        {
+            public string? SessionId => t.SessionId;
+            public System.Threading.Channels.ChannelReader<JsonRpcMessage> MessageReader => t.MessageReader;
+            public Task SendMessageAsync(JsonRpcMessage message, CancellationToken cancellationToken = default) =>
+                t.SendMessageAsync(message, cancellationToken);
+            public async ValueTask DisposeAsync()
+            {
+                await conn.DisposeAsync().ConfigureAwait(false); // close stdin + kill the child first, so the reader ends
+                try { await t.DisposeAsync().ConfigureAwait(false); } catch { /* streams already gone with the child */ }
+            }
+        }
     }
 
     private static IClientTransport BuildRemoteTransport(IDictionary<string, object?> cfg,
