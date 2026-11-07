@@ -227,7 +227,7 @@ func main() {
 
 ```java title="Main.java"
 // run: java -cp 'lib/*' Main.java npx -y @agentclientprotocol/claude-agent-acp@0.100.0
-//      (lib/ = toolnexus-0.26.0.jar + its runtime deps)
+//      (lib/ = toolnexus-0.27.0.jar + its runtime deps)
 import io.github.muthuishere.toolnexus.InProcess;
 import io.github.muthuishere.toolnexus.LlmClient;
 import io.github.muthuishere.toolnexus.McpServe;
@@ -334,7 +334,7 @@ await client.StreamAsync("Use the add tool to add 17 and 25. Reply with just the
 <TabItem label="Elixir">
 ```elixir title="main.exs"
 # usage: elixir main.exs npx -y @agentclientprotocol/claude-agent-acp@0.100.0
-Mix.install([{:toolnexus, "~> 0.26"}])
+Mix.install([{:toolnexus, "~> 0.27"}])
 
 add =
   Toolnexus.define_tool(
@@ -380,7 +380,7 @@ end
 Clojure has no stream API: the agent's chunks reach `run`'s `:on-event` live, while the turn runs.
 
 ```clojure title="main.clj"
-;; deps.edn: {:deps {net.clojars.muthuishere/toolnexus {:mvn/version "0.26.0"}}}
+;; deps.edn: {:deps {net.clojars.muthuishere/toolnexus {:mvn/version "0.27.0"}}}
 ;; run:      clojure -M main.clj npx -y @agentclientprotocol/claude-agent-acp@0.100.0
 (ns main
   (:require [toolnexus.acp :as acp]
