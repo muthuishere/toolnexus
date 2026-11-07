@@ -64,8 +64,9 @@ MCP-client cells without a link are [MEASURED]: the framework connected to our s
 in the benchmark below. Streaming is supported by every framework above and is not a differentiator, so
 it has no column. [QUALITATIVE]
 
-**What the matrix says.** [QUALITATIVE] toolnexus is the only entry that covers every column, and the
-only one in eight languages with one contract. That's the real edge. It is *not* that any single
+**What the matrix says.** [QUALITATIVE] toolnexus covers every column. For most competitors several
+cells are still unverified, so read this as our coverage, not their absence. toolnexus is the only
+entry in eight languages with one contract. That's the real edge. It is *not* that any single
 column is ours alone: skills, ACP, evals, A2A and media each exist elsewhere now, and LangChain4j is
 the closest match in breadth on one runtime.
 
