@@ -509,9 +509,11 @@ public final class McpSource implements AutoCloseable {
                 try {
                     // §2.2 discover first; an old server ⇒ the frozen SDK path below (§2.2a / §2.F).
                     io.github.muthuishere.toolnexus.mcp.OAuth fallbackAuth = null;
+                    Process probeChild = null; // §2.2a: fast discover reply ⇒ continue on the same child
                     try {
                         conn = Mcp2026.connect(name, cfg, isRemote(cfg), timeout, o, isRemote(cfg) ? store.get() : null);
                     } catch (Mcp2026.Fallback fb) {
+                        probeChild = fb.proc;
                         if (isRemote(cfg)) fallbackAuth = Mcp2026.oauthFor(name, cfg, o, store.get());
                     }
                     if (conn != null) {
@@ -527,6 +529,7 @@ public final class McpSource implements AutoCloseable {
                     }
                     McpClientTransport transport = isRemote(cfg)
                             ? buildRemoteTransport(cfg, fallbackAuth)
+                            : probeChild != null ? new ProcessStdioTransport(probeChild, JSON_MAPPER)
                             : buildLocalTransport(name, cfg);
                     // §2 idle timeout: the SDK's requestTimeout is a hard per-request deadline, so it
                     // is lifted out of the way and the budget is enforced by us — tools/list keeps a
@@ -638,6 +641,7 @@ public final class McpSource implements AutoCloseable {
                 McpSyncClient client = null;
                 try {
                     io.github.muthuishere.toolnexus.mcp.OAuth fallbackAuth = null;
+                    Process probeChild = null; // §2.2a: fast discover reply ⇒ continue on the same child
                     LoadOptions lo = new LoadOptions();
                     java.util.function.Supplier<io.github.muthuishere.toolnexus.mcp.TokenStore> store = lazyStore(lo);
                     try (Mcp2026.Conn conn = Mcp2026.connect(name, cfg, isRemote(cfg), timeout, lo,
@@ -654,10 +658,12 @@ public final class McpSource implements AutoCloseable {
                         }
                         return;
                     } catch (Mcp2026.Fallback fb) {
+                        probeChild = fb.proc;
                         if (isRemote(cfg)) fallbackAuth = Mcp2026.oauthFor(name, cfg, lo, store.get());
                     }
                     McpClientTransport transport = isRemote(cfg)
                             ? buildRemoteTransport(cfg, fallbackAuth)
+                            : probeChild != null ? new ProcessStdioTransport(probeChild, JSON_MAPPER)
                             : buildLocalTransport(name, cfg);
                     client = McpClient.sync(transport)
                             .requestTimeout(Duration.ofMillis(timeout))

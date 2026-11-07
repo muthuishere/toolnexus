@@ -1,9 +1,7 @@
 package io.github.muthuishere.toolnexus.mcp;
 
-import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStream;
-import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.Map;
@@ -30,16 +28,25 @@ final class StdioConn {
     private final Map<String, CompletableFuture<Map<String, Object>>> pending = new ConcurrentHashMap<>();
     private volatile McpException err; // set once stdout closes
     private final CompletableFuture<Void> done = new CompletableFuture<>();
+    /**
+     * Probe mode (§2.2a): the reader stops after delivering the first response, BEFORE issuing another
+     * read, so the same child can be handed to the frozen SDK transport ({@link #detach}) or resumed
+     * ({@link #resume}). Reads are line-exact from the process stream (no private read-ahead buffer).
+     */
+    private volatile boolean probe;
 
     private StdioConn(Process proc) {
         this.proc = proc;
         this.in = proc.getOutputStream();
     }
 
-    static StdioConn start(ProcessBuilder pb, OutputStream stderr) throws IOException {
+    static StdioConn start(ProcessBuilder pb, OutputStream stderr) throws IOException { return start(pb, stderr, false); }
+
+    static StdioConn start(ProcessBuilder pb, OutputStream stderr, boolean probe) throws IOException {
         if (stderr == null && pb.redirectError() == ProcessBuilder.Redirect.PIPE) pb.redirectError(ProcessBuilder.Redirect.INHERIT);
         Process p = pb.start();
         StdioConn s = new StdioConn(p);
+        s.probe = probe;
         if (stderr != null && pb.redirectError() == ProcessBuilder.Redirect.PIPE)
             Thread.ofVirtual().start(() -> {
                 try (InputStream e = p.getErrorStream()) {
@@ -52,19 +59,31 @@ final class StdioConn {
         return s;
     }
 
+    /** One line, read byte-exact: nothing past the newline is consumed. Null at EOF. */
+    private static byte[] readLine(InputStream in) throws IOException {
+        java.io.ByteArrayOutputStream b = new java.io.ByteArrayOutputStream();
+        for (int c; (c = in.read()) != -1; ) {
+            if (c == '\n') return b.toByteArray();
+            b.write(c);
+        }
+        return b.size() > 0 ? b.toByteArray() : null;
+    }
+
     private void read(InputStream out) {
         McpException end = new McpException("stdio server closed its stdout");
-        try (BufferedReader r = new BufferedReader(new InputStreamReader(out, StandardCharsets.UTF_8))) {
-            for (String line; (line = r.readLine()) != null; ) {
+        try {
+            for (byte[] line; (line = readLine(out)) != null; ) {
                 Map<String, Object> m;
                 try {
-                    m = map(parse(line.getBytes(StandardCharsets.UTF_8)));
+                    m = map(parse(line));
                 } catch (IOException e) {
                     continue; // noise
                 }
                 if (m == null || m.get("method") != null || m.get("id") == null) continue; // not a response: ignored
                 CompletableFuture<Map<String, Object>> f = pending.remove(String.valueOf(m.get("id")));
+                boolean stop = probe; // decided before the waiter wakes: no further read() once handed over
                 if (f != null) f.complete(m);
+                if (stop) return; // reader parked; detach() or resume() decides who reads next
             }
         } catch (IOException e) {
             end = new McpException("stdio read: " + e.getMessage(), e);
@@ -102,6 +121,18 @@ final class StdioConn {
             pending.remove(key);
         }
     }
+
+    /** Probe answered with a 2026 result: keep reading on this conn. */
+    void resume() {
+        probe = false;
+        Thread.ofVirtual().start(() -> read(proc.getInputStream()));
+    }
+
+    /**
+     * Probe answered fast but the server is old: hand the live child (stdin/stdout untouched beyond the
+     * discover line) to the frozen path. The caller now owns the process, including destroying it.
+     */
+    Process detach() { return proc; }
 
     void close() {
         try {
