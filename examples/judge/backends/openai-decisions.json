@@ -1,0 +1,2018 @@
+{
+  "why": "SPEC §8B Decisions wire (issue #157): backend openai posts to {baseUrl}/decisions. Questions go as a list in ASCII caller-key order with NO name (keys are addressing, never sent); answers are read back by position. noul -> predicate (criteria folded into instructions), choice -> choices [{value, description?}] in ASCII id order, score -> levels [{label}] in rubric order. Replies normalise to the System One shape (`normalized`, canonical JSON) with calibrated:false; a refusal is an error. Wire shapes recorded from developers.openai.com/api/reference/resources/decisions/methods/create. requestCases: point baseUrl at a capture server, `body` is the exact request bytes, the path is /v1/decisions and no TypeSafe-Danger-Zone-Images header is sent. errorCases fire before any request. captureCases: baseUrl on a local server; every env value is a fake.",
+  "questions": {
+    "damaged": {
+      "type": "noul",
+      "instructions": "Does the customer report a damaged item?",
+      "criteria": {
+        "true": "the item is damaged",
+        "false": "the item is fine"
+      }
+    },
+    "team": {
+      "type": "choice",
+      "instructions": "Which team should handle this?",
+      "criteria": {
+        "shipping": "lost or late parcels",
+        "billing": "refunds and payments",
+        "other": ""
+      }
+    },
+    "upset": {
+      "type": "score",
+      "instructions": "How upset is the customer?",
+      "criteria": [
+        "calm",
+        "annoyed",
+        "furious"
+      ]
+    }
+  },
+  "requestCases": [
+    {
+      "name": "string-state-verbatim",
+      "state": "The package arrived with a broken screen.",
+      "expect": {
+        "body": "{\"input\":\"The package arrived with a broken screen.\",\"model\":\"gpt-6-luna\",\"questions\":[{\"instructions\":\"Does the customer report a damaged item?\\n\\nTrue means: the item is damaged\\nFalse means: the item is fine\",\"type\":\"predicate\"},{\"choices\":[{\"description\":\"refunds and payments\",\"value\":\"billing\"},{\"value\":\"other\"},{\"description\":\"lost or late parcels\",\"value\":\"shipping\"}],\"instructions\":\"Which team should handle this?\",\"type\":\"choice\"},{\"instructions\":\"How upset is the customer?\",\"levels\":[{\"label\":\"calm\"},{\"label\":\"annoyed\"},{\"label\":\"furious\"}],\"type\":\"score\"}]}"
+      }
+    },
+    {
+      "name": "object-state-as-canonical-json-text",
+      "state": {
+        "ticket": "The package arrived with a broken screen & I want <my> money back."
+      },
+      "expect": {
+        "body": "{\"input\":\"{\\\"ticket\\\":\\\"The package arrived with a broken screen & I want <my> money back.\\\"}\",\"model\":\"gpt-6-luna\",\"questions\":[{\"instructions\":\"Does the customer report a damaged item?\\n\\nTrue means: the item is damaged\\nFalse means: the item is fine\",\"type\":\"predicate\"},{\"choices\":[{\"description\":\"refunds and payments\",\"value\":\"billing\"},{\"value\":\"other\"},{\"description\":\"lost or late parcels\",\"value\":\"shipping\"}],\"instructions\":\"Which team should handle this?\",\"type\":\"choice\"},{\"instructions\":\"How upset is the customer?\",\"levels\":[{\"label\":\"calm\"},{\"label\":\"annoyed\"},{\"label\":\"furious\"}],\"type\":\"score\"}]}"
+      }
+    },
+    {
+      "name": "images-as-one-user-message",
+      "state": {
+        "note": "listing photo",
+        "photo": {
+          "$image": {
+            "mimeType": "image/png",
+            "data": "iVBORw0KGgoAAAANSUhEUgAAASwAAAEsCAIAAAAAAAAA"
+          }
+        },
+        "zz": {
+          "$image": {
+            "mimeType": "image/jpg",
+            "data": "/9j/4AAQSkZJRgABAQAAAQABAAD/xAAEAAD/wAALCAEsAZABAREA/9k="
+          }
+        }
+      },
+      "why": "the state is lifted as on every wire (photo, zz), sent as text, then the images as data URLs in collection order; no danger-zone header",
+      "expect": {
+        "body": "{\"input\":[{\"content\":[{\"text\":\"{\\\"note\\\":\\\"listing photo\\\",\\\"photo\\\":\\\"photo\\\",\\\"zz\\\":\\\"zz\\\"}\",\"type\":\"input_text\"},{\"image_url\":\"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAASwAAAEsCAIAAAAAAAAA\",\"type\":\"input_image\"},{\"image_url\":\"data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/xAAEAAD/wAALCAEsAZABAREA/9k=\",\"type\":\"input_image\"}],\"role\":\"user\"}],\"model\":\"gpt-6-luna\",\"questions\":[{\"instructions\":\"Does the customer report a damaged item?\\n\\nTrue means: the item is damaged\\nFalse means: the item is fine\",\"type\":\"predicate\"},{\"choices\":[{\"description\":\"refunds and payments\",\"value\":\"billing\"},{\"value\":\"other\"},{\"description\":\"lost or late parcels\",\"value\":\"shipping\"}],\"instructions\":\"Which team should handle this?\",\"type\":\"choice\"},{\"instructions\":\"How upset is the customer?\",\"levels\":[{\"label\":\"calm\"},{\"label\":\"annoyed\"},{\"label\":\"furious\"}],\"type\":\"score\"}]}"
+      }
+    },
+    {
+      "name": "model-override",
+      "model": "gpt-6-luna-2026-10-22",
+      "state": "x",
+      "expect": {
+        "body": "{\"input\":\"x\",\"model\":\"gpt-6-luna-2026-10-22\",\"questions\":[{\"instructions\":\"Does the customer report a damaged item?\\n\\nTrue means: the item is damaged\\nFalse means: the item is fine\",\"type\":\"predicate\"},{\"choices\":[{\"description\":\"refunds and payments\",\"value\":\"billing\"},{\"value\":\"other\"},{\"description\":\"lost or late parcels\",\"value\":\"shipping\"}],\"instructions\":\"Which team should handle this?\",\"type\":\"choice\"},{\"instructions\":\"How upset is the customer?\",\"levels\":[{\"label\":\"calm\"},{\"label\":\"annoyed\"},{\"label\":\"furious\"}],\"type\":\"score\"}]}"
+      }
+    }
+  ],
+  "replyCases": [
+    {
+      "name": "all-three-types",
+      "reply": {
+        "model": "gpt-6-luna",
+        "answers": [
+          {
+            "type": "predicate",
+            "name": null,
+            "probability": 0.95
+          },
+          {
+            "type": "choice",
+            "name": null,
+            "choice": "billing",
+            "confidence": 0.93,
+            "probabilities": [
+              {
+                "value": "billing",
+                "probability": 0.95
+              },
+              {
+                "value": "other",
+                "probability": 0.01
+              },
+              {
+                "value": "shipping",
+                "probability": 0.04
+              }
+            ]
+          },
+          {
+            "type": "score",
+            "name": null,
+            "score": 1.1,
+            "confidence": 0.62,
+            "probabilities": [
+              {
+                "value": 0,
+                "label": "calm",
+                "probability": 0.1
+              },
+              {
+                "value": 1,
+                "label": "annoyed",
+                "probability": 0.7
+              },
+              {
+                "value": 2,
+                "label": "furious",
+                "probability": 0.2
+              }
+            ]
+          }
+        ],
+        "usage": {
+          "input_tokens": 42,
+          "input_tokens_details": {
+            "cached_tokens": 0,
+            "cache_write_tokens": 0
+          },
+          "output_tokens": 0,
+          "output_tokens_details": {
+            "reasoning_tokens": 0
+          },
+          "total_tokens": 42
+        }
+      },
+      "expect": {
+        "normalized": "{\"answers\":{\"damaged\":{\"noul\":0.95,\"type\":\"noul\"},\"team\":{\"choice\":\"billing\",\"confidence\":0.93,\"probabilities\":{\"billing\":0.95,\"other\":0.01,\"shipping\":0.04},\"type\":\"choice\"},\"upset\":{\"confidence\":0.62,\"legend\":{\"0\":\"calm\",\"1\":\"annoyed\",\"2\":\"furious\"},\"probabilities\":{\"0\":0.1,\"1\":0.7,\"2\":0.2},\"score\":1.1,\"type\":\"score\"}},\"calibrated\":false,\"model\":\"gpt-6-luna\",\"usage\":{\"input_tokens\":42,\"output_tokens\":0}}",
+        "calibrated": false,
+        "model": "gpt-6-luna",
+        "noul": {
+          "damaged": 0.95
+        },
+        "choice": {
+          "team": "billing"
+        },
+        "score": {
+          "upset": 1.1
+        }
+      }
+    },
+    {
+      "name": "refusal-is-an-error-never-a-no",
+      "reply": {
+        "model": "gpt-6-luna",
+        "answers": [
+          {
+            "type": "predicate",
+            "name": null,
+            "probability": 0.95
+          },
+          {
+            "type": "refusal",
+            "name": null
+          },
+          {
+            "type": "score",
+            "name": null,
+            "score": 1.1,
+            "confidence": 0.62,
+            "probabilities": [
+              {
+                "value": 0,
+                "label": "calm",
+                "probability": 0.1
+              },
+              {
+                "value": 1,
+                "label": "annoyed",
+                "probability": 0.7
+              },
+              {
+                "value": 2,
+                "label": "furious",
+                "probability": 0.2
+              }
+            ]
+          }
+        ],
+        "usage": {
+          "input_tokens": 42,
+          "input_tokens_details": {
+            "cached_tokens": 0,
+            "cache_write_tokens": 0
+          },
+          "output_tokens": 0,
+          "output_tokens_details": {
+            "reasoning_tokens": 0
+          },
+          "total_tokens": 42
+        }
+      },
+      "expect": {
+        "error": "classifier: decisions: question \"team\" was refused"
+      }
+    },
+    {
+      "name": "answer-count-mismatch",
+      "reply": {
+        "model": "gpt-6-luna",
+        "answers": [
+          {
+            "type": "predicate",
+            "name": null,
+            "probability": 0.95
+          },
+          {
+            "type": "choice",
+            "name": null,
+            "choice": "billing",
+            "confidence": 0.93,
+            "probabilities": [
+              {
+                "value": "billing",
+                "probability": 0.95
+              },
+              {
+                "value": "other",
+                "probability": 0.01
+              },
+              {
+                "value": "shipping",
+                "probability": 0.04
+              }
+            ]
+          }
+        ],
+        "usage": {
+          "input_tokens": 42,
+          "input_tokens_details": {
+            "cached_tokens": 0,
+            "cache_write_tokens": 0
+          },
+          "output_tokens": 0,
+          "output_tokens_details": {
+            "reasoning_tokens": 0
+          },
+          "total_tokens": 42
+        }
+      },
+      "expect": {
+        "error": "classifier: decisions: 2 answers for 3 questions"
+      }
+    },
+    {
+      "name": "answer-type-mismatch",
+      "reply": {
+        "model": "gpt-6-luna",
+        "answers": [
+          {
+            "type": "choice",
+            "name": null,
+            "choice": "billing",
+            "confidence": 0.93,
+            "probabilities": [
+              {
+                "value": "billing",
+                "probability": 0.95
+              },
+              {
+                "value": "other",
+                "probability": 0.01
+              },
+              {
+                "value": "shipping",
+                "probability": 0.04
+              }
+            ]
+          },
+          {
+            "type": "predicate",
+            "name": null,
+            "probability": 0.95
+          },
+          {
+            "type": "score",
+            "name": null,
+            "score": 1.1,
+            "confidence": 0.62,
+            "probabilities": [
+              {
+                "value": 0,
+                "label": "calm",
+                "probability": 0.1
+              },
+              {
+                "value": 1,
+                "label": "annoyed",
+                "probability": 0.7
+              },
+              {
+                "value": 2,
+                "label": "furious",
+                "probability": 0.2
+              }
+            ]
+          }
+        ],
+        "usage": {
+          "input_tokens": 42,
+          "input_tokens_details": {
+            "cached_tokens": 0,
+            "cache_write_tokens": 0
+          },
+          "output_tokens": 0,
+          "output_tokens_details": {
+            "reasoning_tokens": 0
+          },
+          "total_tokens": 42
+        }
+      },
+      "expect": {
+        "error": "classifier: decisions: answer \"damaged\" is a choice answer, not predicate"
+      }
+    },
+    {
+      "name": "no-answers-array",
+      "reply": {
+        "model": "gpt-6-luna",
+        "usage": {
+          "input_tokens": 42,
+          "input_tokens_details": {
+            "cached_tokens": 0,
+            "cache_write_tokens": 0
+          },
+          "output_tokens": 0,
+          "output_tokens_details": {
+            "reasoning_tokens": 0
+          },
+          "total_tokens": 42
+        }
+      },
+      "expect": {
+        "error": "classifier: decisions: malformed reply"
+      }
+    }
+  ],
+  "errorCases": [
+    {
+      "name": "one-option-choice",
+      "questions": {
+        "c": {
+          "type": "choice",
+          "instructions": "y",
+          "criteria": {
+            "only": "the one"
+          }
+        }
+      },
+      "expect": {
+        "error": "classifier: question \"c\": the decisions wire needs 2..255 choice options, got 1"
+      }
+    },
+    {
+      "name": "raw-question",
+      "questions": {
+        "b": {
+          "type": "box",
+          "instructions": "where is the cat"
+        }
+      },
+      "expect": {
+        "error": "classifier: openai (gpt-6-luna) does not support raw question type \"box\"",
+        "unsupported": true
+      }
+    },
+    {
+      "name": "over-400-questions",
+      "questions": {
+        "q000": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q001": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q002": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q003": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q004": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q005": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q006": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q007": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q008": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q009": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q010": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q011": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q012": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q013": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q014": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q015": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q016": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q017": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q018": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q019": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q020": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q021": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q022": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q023": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q024": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q025": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q026": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q027": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q028": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q029": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q030": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q031": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q032": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q033": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q034": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q035": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q036": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q037": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q038": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q039": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q040": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q041": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q042": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q043": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q044": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q045": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q046": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q047": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q048": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q049": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q050": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q051": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q052": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q053": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q054": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q055": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q056": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q057": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q058": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q059": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q060": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q061": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q062": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q063": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q064": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q065": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q066": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q067": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q068": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q069": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q070": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q071": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q072": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q073": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q074": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q075": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q076": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q077": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q078": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q079": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q080": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q081": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q082": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q083": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q084": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q085": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q086": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q087": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q088": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q089": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q090": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q091": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q092": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q093": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q094": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q095": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q096": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q097": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q098": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q099": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q100": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q101": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q102": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q103": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q104": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q105": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q106": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q107": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q108": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q109": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q110": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q111": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q112": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q113": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q114": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q115": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q116": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q117": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q118": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q119": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q120": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q121": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q122": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q123": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q124": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q125": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q126": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q127": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q128": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q129": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q130": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q131": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q132": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q133": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q134": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q135": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q136": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q137": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q138": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q139": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q140": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q141": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q142": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q143": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q144": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q145": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q146": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q147": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q148": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q149": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q150": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q151": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q152": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q153": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q154": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q155": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q156": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q157": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q158": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q159": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q160": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q161": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q162": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q163": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q164": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q165": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q166": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q167": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q168": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q169": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q170": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q171": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q172": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q173": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q174": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q175": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q176": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q177": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q178": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q179": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q180": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q181": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q182": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q183": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q184": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q185": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q186": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q187": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q188": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q189": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q190": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q191": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q192": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q193": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q194": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q195": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q196": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q197": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q198": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q199": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q200": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q201": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q202": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q203": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q204": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q205": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q206": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q207": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q208": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q209": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q210": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q211": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q212": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q213": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q214": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q215": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q216": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q217": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q218": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q219": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q220": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q221": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q222": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q223": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q224": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q225": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q226": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q227": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q228": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q229": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q230": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q231": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q232": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q233": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q234": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q235": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q236": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q237": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q238": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q239": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q240": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q241": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q242": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q243": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q244": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q245": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q246": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q247": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q248": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q249": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q250": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q251": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q252": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q253": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q254": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q255": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q256": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q257": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q258": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q259": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q260": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q261": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q262": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q263": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q264": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q265": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q266": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q267": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q268": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q269": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q270": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q271": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q272": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q273": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q274": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q275": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q276": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q277": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q278": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q279": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q280": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q281": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q282": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q283": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q284": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q285": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q286": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q287": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q288": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q289": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q290": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q291": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q292": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q293": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q294": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q295": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q296": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q297": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q298": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q299": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q300": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q301": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q302": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q303": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q304": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q305": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q306": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q307": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q308": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q309": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q310": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q311": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q312": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q313": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q314": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q315": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q316": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q317": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q318": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q319": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q320": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q321": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q322": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q323": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q324": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q325": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q326": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q327": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q328": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q329": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q330": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q331": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q332": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q333": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q334": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q335": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q336": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q337": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q338": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q339": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q340": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q341": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q342": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q343": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q344": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q345": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q346": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q347": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q348": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q349": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q350": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q351": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q352": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q353": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q354": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q355": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q356": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q357": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q358": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q359": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q360": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q361": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q362": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q363": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q364": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q365": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q366": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q367": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q368": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q369": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q370": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q371": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q372": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q373": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q374": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q375": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q376": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q377": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q378": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q379": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q380": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q381": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q382": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q383": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q384": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q385": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q386": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q387": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q388": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q389": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q390": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q391": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q392": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q393": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q394": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q395": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q396": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q397": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q398": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q399": {
+          "type": "noul",
+          "instructions": "y"
+        },
+        "q400": {
+          "type": "noul",
+          "instructions": "y"
+        }
+      },
+      "expect": {
+        "error": "classifier: the decisions wire takes at most 400 questions, got 401"
+      }
+    }
+  ],
+  "captureCases": [
+    {
+      "name": "own-default-key-not-sent-to-other-host",
+      "env": {
+        "OPENAI_API_KEY": "fixture-openai-key"
+      },
+      "expectAuthorization": null
+    },
+    {
+      "name": "caller-named-env-sent",
+      "apiKeyEnv": "FIXTURE_CALLER_KEY",
+      "env": {
+        "FIXTURE_CALLER_KEY": "fixture-caller-key",
+        "OPENAI_API_KEY": "fixture-openai-key"
+      },
+      "expectAuthorization": "Bearer fixture-caller-key"
+    }
+  ]
+}
