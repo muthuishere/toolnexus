@@ -8,6 +8,11 @@ GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
 
 ## Unreleased
 
+- **Docs:** the docs-site hero video is re-cut for 0.26.0 (80 s, new narrator). It now covers eight
+  languages including Rust, typed decisions (`createClassifier`), media generation, and serving the
+  toolkit over MCP, A2A and ACP. Its benchmark claims come only from the Nov 2026 standing page: lowest
+  in Python, Rust and Elixir, level in JavaScript and .NET, and behind in Go and on the JVM.
+
 **Security: the classifier no longer sends a default API key to a host that is not its own** (issue #155).
 Until now the classifier read `TYPESAFE_API_KEY` (or the backend's variable) and sent it as a bearer
 token to whatever `baseUrl` pointed at, so a `custom` backend, or any backend with a `baseUrl` override,
