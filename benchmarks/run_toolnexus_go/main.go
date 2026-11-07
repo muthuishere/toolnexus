@@ -71,7 +71,7 @@ func main() {
 	}
 	defer tk.Close()
 	client := toolnexus.CreateClient(toolnexus.ClientOptions{
-		BaseURL: mockURL, Style: toolnexus.StyleOpenAI, Model: "mock-model",
+		BaseURL: mockURL, Style: toolnexus.StyleOpenAI, Model: "mock-model", APIKey: "sk-mock-not-a-real-key",
 	})
 	initMs := float64(time.Since(t0).Microseconds()) / 1000.0
 	toolCount := len(tk.Tools())

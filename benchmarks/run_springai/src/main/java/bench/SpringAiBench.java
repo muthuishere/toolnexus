@@ -57,11 +57,13 @@ public class SpringAiBench {
         System.err.println("[bench] tool callbacks discovered: " + callbacks.size()
                 + " names=" + callbacks.stream().map(ToolCallback::getToolDefinition).toList());
         ToolCallback[] cbArray = callbacks.toArray(new ToolCallback[0]);
-        OpenAiChatOptions opts = OpenAiChatOptions.builder()
+        var opts = OpenAiChatOptions.builder()
                 .model("mock-model")
                 .toolCallbacks(cbArray)
-                .internalToolExecutionEnabled(true)
                 .build();
+        // Spring AI 2.0 moved the tool-execution loop out of ChatModel.call into
+        // ChatClient, so the 2.x runner drives the loop through ChatClient.
+        ChatClient chat = ChatClient.create(model); // model name comes from application.properties
         double initMs = (System.nanoTime() - t0) / 1_000_000.0;
         int toolCount = callbacks.size();
 
@@ -69,15 +71,14 @@ public class SpringAiBench {
         // which was dropping the runtime tool callbacks). OpenAiChatModel runs the
         // internal tool-calling loop when internalToolExecutionEnabled is true.
         for (int i = 0; i < warmup; i++) {
-            model.call(new Prompt(question, opts)).getResult().getOutput().getText();
+            chat.prompt(question).toolCallbacks(cbArray).call().content();
         }
 
         List<Double> lat = new ArrayList<>();
         String finalText = "";
         for (int i = 0; i < runs; i++) {
             long s = System.nanoTime();
-            finalText = model.call(new Prompt(question, opts))
-                    .getResult().getOutput().getText();
+            finalText = chat.prompt(question).toolCallbacks(cbArray).call().content();
             lat.add((System.nanoTime() - s) / 1_000_000.0);
         }
 

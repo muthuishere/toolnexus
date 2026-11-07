@@ -133,6 +133,7 @@ export default defineConfig({
 								{
 									label: 'Benchmarks & comparison',
 									items: [
+										{ label: 'Where toolnexus stands — Nov 2026', slug: 'standing-2026-11' },
 										{ label: 'Comparison — Spring AI · LangGraph · ADK · Mastra', slug: 'comparison' },
 										{ label: 'Performance benchmarks', slug: 'performance' },
 										{ label: 'Resilience benchmark', slug: 'resilience' },
