@@ -109,11 +109,19 @@ internal static class J
 /// </summary>
 internal sealed class Conn : IAsyncDisposable
 {
-    /// <summary>One shared HttpClient; per-request deadlines come from cancellation tokens.</summary>
-    internal static readonly HttpClient SharedHttp = new() { Timeout = Timeout.InfiniteTimeSpan };
+    /// <summary>
+    /// One shared HttpClient; per-request deadlines come from cancellation tokens. Created on first
+    /// remote use, so a stdio-only host never loads the networking stack for it.
+    /// </summary>
+    private static readonly Lazy<HttpClient> s_sharedHttp =
+        new(() => new HttpClient { Timeout = Timeout.InfiniteTimeSpan });
+
+    internal static HttpClient SharedHttp => s_sharedHttp.Value;
+
+    private readonly HttpClient? _http;
 
     public string Url { get; }
-    public HttpClient Http { get; init; } = SharedHttp;
+    public HttpClient Http { get => _http ?? SharedHttp; init => _http = value; }
     /// <summary>Configured remote <c>headers</c>, already <c>${ENV}</c>-expanded. Never logged.</summary>
     public IReadOnlyDictionary<string, string> Headers { get; init; } = new Dictionary<string, string>();
     public OAuthClient? Auth { get; init; }

@@ -6,7 +6,10 @@ import io.modelcontextprotocol.client.transport.HttpClientSseClientTransport;
 import io.modelcontextprotocol.client.transport.HttpClientStreamableHttpTransport;
 import io.modelcontextprotocol.client.transport.ServerParameters;
 import io.modelcontextprotocol.client.transport.StdioClientTransport;
+import io.modelcontextprotocol.json.McpJsonDefaults;
 import io.modelcontextprotocol.json.McpJsonMapper;
+import io.modelcontextprotocol.json.schema.JsonSchemaValidator;
+import io.modelcontextprotocol.json.schema.JsonSchemaValidator.ValidationResponse;
 import io.modelcontextprotocol.json.jackson3.JacksonMcpJsonMapperSupplier;
 import io.modelcontextprotocol.spec.McpClientTransport;
 import io.modelcontextprotocol.spec.McpSchema;
@@ -39,7 +42,43 @@ import java.util.regex.Pattern;
 public final class McpSource implements AutoCloseable {
     private static final long DEFAULT_TIMEOUT = 30_000L;
     private static final int MAX_LIST_PAGES = 1_000;
-    private static final McpJsonMapper JSON_MAPPER = new JacksonMcpJsonMapperSupplier().get();
+    /** Built on first SDK-path use, not at class load (a 2026-native or MCP-free host never pays for it). */
+    private static final class JsonMapperHolder {
+        static final McpJsonMapper INSTANCE = new JacksonMcpJsonMapperSupplier().get();
+    }
+
+    /** One token store per load, shared by its remote servers, built only when the first one asks. */
+    private static java.util.function.Supplier<io.github.muthuishere.toolnexus.mcp.TokenStore> lazyStore(LoadOptions o) {
+        return new java.util.function.Supplier<>() {
+            private io.github.muthuishere.toolnexus.mcp.TokenStore value;
+
+            @Override
+            public synchronized io.github.muthuishere.toolnexus.mcp.TokenStore get() {
+                if (value == null) value = Mcp2026.defaultStore(o);
+                return value;
+            }
+        };
+    }
+
+    private static McpJsonMapper jsonMapper() {
+        return JsonMapperHolder.INSTANCE;
+    }
+
+    /**
+     * The SDK's default schema validator, resolved on the first structured-output validation
+     * rather than when each client is built (the default networknt validator is ~220 classes).
+     */
+    private static final JsonSchemaValidator LAZY_SCHEMA_VALIDATOR = new JsonSchemaValidator() {
+        @Override
+        public ValidationResponse validate(Map<String, Object> schema, Object structuredContent) {
+            return McpJsonDefaults.getSchemaValidator().validate(schema, structuredContent);
+        }
+
+        @Override
+        public ValidationResponse validateSchema(Map<String, Object> schema) {
+            return McpJsonDefaults.getSchemaValidator().validateSchema(schema);
+        }
+    };
     /** {@code ${ENV_VAR}} reference in a header value. */
     static final Pattern ENV_VAR = Pattern.compile("\\$\\{([A-Za-z0-9_]+)}");
 
@@ -437,7 +476,8 @@ public final class McpSource implements AutoCloseable {
         List<McpSyncClient> clients = new ArrayList<>();
         Map<String, ServerConn> servers = new LinkedHashMap<>();
         List<Mcp2026.Conn> conns = new ArrayList<>();
-        io.github.muthuishere.toolnexus.mcp.TokenStore store = Mcp2026.defaultStore(o);
+        // The token store only serves remote servers; a stdio-only config never builds one.
+        java.util.function.Supplier<io.github.muthuishere.toolnexus.mcp.TokenStore> store = lazyStore(o);
         Object cbLock = new Object();
         java.util.function.Consumer<ServerResult> report = r -> {
             if (o.onServer == null) return;
@@ -470,9 +510,9 @@ public final class McpSource implements AutoCloseable {
                     // §2.2 discover first; an old server ⇒ the frozen SDK path below (§2.2a / §2.F).
                     io.github.muthuishere.toolnexus.mcp.OAuth fallbackAuth = null;
                     try {
-                        conn = Mcp2026.connect(name, cfg, isRemote(cfg), timeout, o, store);
+                        conn = Mcp2026.connect(name, cfg, isRemote(cfg), timeout, o, isRemote(cfg) ? store.get() : null);
                     } catch (Mcp2026.Fallback fb) {
-                        if (isRemote(cfg)) fallbackAuth = Mcp2026.oauthFor(name, cfg, o, store);
+                        if (isRemote(cfg)) fallbackAuth = Mcp2026.oauthFor(name, cfg, o, store.get());
                     }
                     if (conn != null) {
                         List<Tool> converted = Mcp2026.tools(conn, cfg, toolsFilterOf(cfg), o.disableTools);
@@ -494,6 +534,7 @@ public final class McpSource implements AutoCloseable {
                     ProgressRegistry progress = new ProgressRegistry();
                     McpClient.SyncSpec spec = McpClient.sync(transport)
                             .requestTimeout(UNBOUNDED_REQUEST)
+                            .jsonSchemaValidator(LAZY_SCHEMA_VALIDATOR)
                             .progressConsumer(progress::onProgress)
                             .initializationTimeout(Duration.ofMillis(timeout))
                             .clientInfo(new McpSchema.Implementation("toolnexus", "0.1.0"));
@@ -598,8 +639,9 @@ public final class McpSource implements AutoCloseable {
                 try {
                     io.github.muthuishere.toolnexus.mcp.OAuth fallbackAuth = null;
                     LoadOptions lo = new LoadOptions();
-                    io.github.muthuishere.toolnexus.mcp.TokenStore store = Mcp2026.defaultStore(lo);
-                    try (Mcp2026.Conn conn = Mcp2026.connect(name, cfg, isRemote(cfg), timeout, lo, store)) {
+                    java.util.function.Supplier<io.github.muthuishere.toolnexus.mcp.TokenStore> store = lazyStore(lo);
+                    try (Mcp2026.Conn conn = Mcp2026.connect(name, cfg, isRemote(cfg), timeout, lo,
+                            isRemote(cfg) ? store.get() : null)) {
                         List<ToolInfo> infos = new ArrayList<>();
                         for (Map<String, Object> d : conn.client.listTools()) {
                             Object desc = d.get("description");
@@ -612,13 +654,14 @@ public final class McpSource implements AutoCloseable {
                         }
                         return;
                     } catch (Mcp2026.Fallback fb) {
-                        if (isRemote(cfg)) fallbackAuth = Mcp2026.oauthFor(name, cfg, lo, store);
+                        if (isRemote(cfg)) fallbackAuth = Mcp2026.oauthFor(name, cfg, lo, store.get());
                     }
                     McpClientTransport transport = isRemote(cfg)
                             ? buildRemoteTransport(cfg, fallbackAuth)
                             : buildLocalTransport(name, cfg);
                     client = McpClient.sync(transport)
                             .requestTimeout(Duration.ofMillis(timeout))
+                            .jsonSchemaValidator(LAZY_SCHEMA_VALIDATOR)
                             .initializationTimeout(Duration.ofMillis(timeout))
                             .clientInfo(new McpSchema.Implementation("toolnexus", "0.1.0"))
                             .build();
@@ -761,10 +804,10 @@ public final class McpSource implements AutoCloseable {
 
         final Object cwd = cfg.get("cwd");
         if (cwd == null) {
-            return new StdioClientTransport(params, JSON_MAPPER);
+            return new StdioClientTransport(params, jsonMapper());
         }
         // getProcessBuilder() is protected; subclass to set the working directory.
-        return new StdioClientTransport(params, JSON_MAPPER) {
+        return new StdioClientTransport(params, jsonMapper()) {
             @Override
             protected ProcessBuilder getProcessBuilder() {
                 return super.getProcessBuilder().directory(new java.io.File(String.valueOf(cwd)));
@@ -808,7 +851,7 @@ public final class McpSource implements AutoCloseable {
                     .builder(u.getScheme() + "://" + u.getRawAuthority())
                     .endpoint(endpoint)
                     .requestBuilder(reqBuilder)
-                    .jsonMapper(JSON_MAPPER);
+                    .jsonMapper(jsonMapper());
             if (auth != null) {
                 // §2A.1a frozen fallback + OAuth: the SDK takes a per-request header, so the current bearer
                 // (refreshed when expired) rides on every request; a 401/403 with WWW-Authenticate runs the
@@ -836,7 +879,7 @@ public final class McpSource implements AutoCloseable {
             }
             return HttpClientSseClientTransport.builder(url)
                     .requestBuilder(sseReq)
-                    .jsonMapper(JSON_MAPPER)
+                    .jsonMapper(jsonMapper())
                     .build();
         }
     }
