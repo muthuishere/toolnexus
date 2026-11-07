@@ -57,8 +57,8 @@ interface and drives **any** model with them.
 ## Built on toolnexus
 
 - **[wfnexus](https://github.com/muthuishere/wfnexus)**: typed pipelines for coding agents. Each step is a whole agent with scoped tools, a budget, guardrails and a JSON-schema output.
-- **deemwar Spotlight**: a local-first, press-a-key assistant with cited answers over your windows, mail and files.
-- **deemwar MCP store**: turns your own API into MCP tools and agent skills.
+- **[deemwar Spotlight](https://spot.deemwar.com/)**: a local-first, press-a-key assistant with cited answers over your windows, mail and files.
+- **[deemwar MCP store](https://mcp.deemwar.com/)**: turns your own API into MCP tools and agent skills.
 
 Built something on toolnexus? Open a PR adding one line here: name, link and what it does.
 
