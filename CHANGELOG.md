@@ -8,6 +8,15 @@ GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
 
 ## Unreleased
 
+**Rust: an ACP turn the agent never ends now fails after `permission_timeout`** (rust only, #124).
+Every other port bounds the whole `session/prompt` turn by the permission timeout, as SPEC §7 says
+("the turn's permission timeout still applies"). Rust bounded only the host's `on_permission`
+callback, so an agent that stalled mid-turn, or never answered, hung the turn forever. It now fails
+with `AcpError::PermissionTimeout` after `permission_timeout` (default 30 s) from the prompt being sent.
+A turn that legitimately runs longer than that needs a larger `permission_timeout`, same as in Go.
+Not done: cancelling a turn (`session/cancel` on a cancelled generate) still exists only in golang
+and rust (`openspec/changes/add-go-host-asks`, task 2.6e).
+
 - **`mcpHandler` with the 2026-07-28 opt-in no longer rejects legacy clients that send the 2026 version
   header** (issue #150, all eight ports). On a mount listing `2026-07-28` next to legacy versions, a request
   carrying `MCP-Protocol-Version: 2026-07-28` but no `Mcp-Method` header and no `_meta` version was routed to
@@ -36,6 +45,7 @@ startup) and the two Jackson stacks in Java are tracked separately.
   both) and AutoAgents (the mock sent `input_tokens` alongside `prompt_tokens`, which AutoAgents rejects
   as a duplicate field; usage now carries the OpenAI-standard keys only). The standing tables are not
   re-run yet; a full quiet re-run will refresh them.
+||||||| parent of 2b552f50 (docs(changelog): rust ACP per-turn permission timeout (#124))
 
 - **Docs:** the docs-site hero video is re-cut for 0.26.0 (80 s, new narrator). It now covers eight
   languages including Rust, typed decisions (`createClassifier`), media generation, and serving the
