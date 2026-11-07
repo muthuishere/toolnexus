@@ -8,6 +8,11 @@ GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
 
 ## Unreleased
 
+- **Docs:** the docs-site hero video is re-cut for 0.26.0 (80 s, new narrator). It now covers eight
+  languages including Rust, typed decisions (`createClassifier`), media generation, and serving the
+  toolkit over MCP, A2A and ACP. Its benchmark claims come only from the Nov 2026 standing page: lowest
+  in Python, Rust and Elixir, level in JavaScript and .NET, and behind in Go and on the JVM.
+
 ## 0.26.0 — 2026-11-06
 
 **Classifier backends: one System One classifier for TypeSafe, OpenRouter, Cloudflare, Vercel or
