@@ -254,6 +254,20 @@ defmodule Toolnexus.ToolSchedulingTest do
     end
   end
 
+  test "results keep emitted order when safe calls finish out of order (#129)" do
+    # the first call is the slowest, so completion order is the reverse of emitted order
+    items = [{"a", 120}, {"b", 60}, {"c", 0}, {"w", 0}, {"d", 80}, {"e", 0}]
+    safe? = fn {n, _} -> n != "w" end
+
+    got =
+      ToolScheduling.schedule(items, safe?, 10, fn {n, ms} ->
+        Process.sleep(ms)
+        n
+      end)
+
+    assert got == ["a", "b", "c", "w", "d", "e"]
+  end
+
   test "env override, option wins, invalid values fall back" do
     assert ToolScheduling.resolve_max_tool_concurrency(nil, fn _ -> "3" end) == 3
     assert ToolScheduling.resolve_max_tool_concurrency(4, fn _ -> "3" end) == 4
