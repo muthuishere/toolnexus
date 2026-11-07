@@ -22,8 +22,9 @@
 ;;    stable name.
 ;;
 ;; One `.cljc`, zero reader conditionals, zero `java.*`. Concurrency is `future`,
-;; `atom`, `compare-and-set!` and `koine.time/sleep!` — the four primitives both
-;; hosts have.
+;; `atom`, `compare-and-set!`, `promise`/`deliver`/timed `deref` and
+;; `koine.time/sleep!` — primitives both hosts have (timed deref is in cljgo
+;; since v0.9.0, the version CI pins).
 (ns toolnexus.mcp
   (:require [clojure.string :as str]
             [koine.env :as env]
@@ -279,14 +280,22 @@
   threads calling it can interleave one JSON-RPC frame INTO another, and a torn
   frame is unparseable to the peer and unattributable to either caller.
 
-  A compare-and-set! spin is the lock both hosts have — `locking` is a JVM
-  special form and an agent/executor is not portable. Contention here is
-  microscopic (a single line write), so spinning at 1 ms costs nothing."
+  A FIFO ticket lock built from promises — `locking` is a JVM special form and
+  an agent/executor is not portable. `lock` is an atom holding the last
+  holder's release promise (nil = free). A writer swaps its own promise in and
+  blocks on its predecessor's, so a waiter wakes the instant the previous write
+  finishes. (This replaced a compare-and-set! spin with a 1 ms sleep: a loser
+  paid up to 1 ms per contended write, on every concurrent tools/call.)"
   [lock f]
-  (loop []
-    (if (compare-and-set! lock false true)
-      (try (f) (finally (reset! lock false)))
-      (do (ktime/sleep! 1) (recur)))))
+  (let [mine (promise)
+        prev (first (swap-vals! lock (constantly mine)))]
+    (when prev (deref prev))
+    (try (f) (finally (deliver mine true)))))
+
+(defn- wake-all!
+  "Release every waiter parked in `await-response!` (the transport closed)."
+  [state]
+  (doseq [p (vals (:waiters @state))] (deliver p true)))
 
 (defn- start-reader!
   "THE dedicated reader loop. Exactly one per child — do not start a second:
@@ -345,7 +354,8 @@
                    ;; nil after the grace means UNKNOWN, not "alive". Say so.
                    :close-reason (if code
                                    (str "peer-exited (status " code ")")
-                                   "peer-eof (stdout closed, exit status unknown)")))
+                                   "peer-eof (stdout closed, exit status unknown)"))
+            (wake-all! state))
           (do
             (when-not (str/blank? line)
               (let [msg (try (json/read-str line) (catch Throwable _ ::bad))]
@@ -367,7 +377,8 @@
                                (assoc-in [:progress token] (ktime/mono-ms))))))
 
                   (contains? (:pending (deref state)) (:id msg))
-                  (swap! state assoc-in [:inbox (:id msg)] msg)
+                  (let [s (swap! state assoc-in [:inbox (:id msg)] msg)]
+                    (when-let [p (get-in s [:waiters (:id msg)])] (deliver p true)))
 
                   ;; an id we never sent, carrying a method — the server is
                   ;; asking US something (§10 elicitation)
@@ -380,28 +391,32 @@
             (if (:closed? @state) nil (recur)))))))))
 
 (defn- await-response!
-  "Poll for this id's response until it lands, the transport closes, or the
-  budget runs out. Polling rather than `promise`/`deref`-with-timeout because a
-  timed deref is the one concurrency primitive whose portability across these
-  hosts is not established; an atom and `koine.time/sleep!` are.
+  "Block until this id's response lands, the transport closes, or the budget
+  runs out. `wake` is this call's promise, registered under `:waiters`; the
+  reader delivers it when the response is filed, and every close delivers all
+  of them. The timed `deref` is bounded by the CURRENT deadline, then the
+  deadline is recomputed — a progress notification that arrived meanwhile
+  pushes it out, so no wake-up is needed for progress. (This replaced a 2 ms
+  sleep-poll, which added ~1 ms mean and far more at p95 to every MCP call.)
 
   With a progress `token` (§2, tools/call) the budget is an IDLE timeout: the
   deadline is `timeout-ms` after the later of the call's start and the last
   matching `notifications/progress` the reader recorded under that token. A
   closed transport (disconnect = cancellation) still wins over any progress."
-  ([state id timeout-ms] (await-response! state id timeout-ms nil))
-  ([state id timeout-ms token]
+  ([state id wake timeout-ms] (await-response! state id wake timeout-ms nil))
+  ([state id wake timeout-ms token]
   (let [started (ktime/mono-ms)
         budget  (long timeout-ms)]
     (loop []
       (let [s   (deref state)
             msg (get-in s [:inbox id])
-            last-seen (max started (long (or (when token (get-in s [:progress token])) 0)))]
+            last-seen (max started (long (or (when token (get-in s [:progress token])) 0)))
+            remaining (- (+ last-seen budget) (ktime/mono-ms))]
         (cond
           (some? msg) {:ok msg}
           (:closed? s) {:error (or (:close-reason s) "closed")}
-          (>= (ktime/mono-ms) (+ last-seen budget)) {:error "timeout" :timeout-ms timeout-ms}
-          :else (do (ktime/sleep! 2) (recur))))))))
+          (<= remaining 0) {:error "timeout" :timeout-ms timeout-ms}
+          :else (do (deref wake remaining nil) (recur))))))))
 
 (defn- stdio-rpc!
   "One request/response over stdio. Registers the id BEFORE writing — a fast
@@ -417,13 +432,17 @@
     (if (:closed? @state)
       {:error (or (:close-reason @state) "closed")}
       (do
-        (swap! state (fn [s] (cond-> (update s :pending conj id)
+        (let [wake (promise)]
+        (swap! state (fn [s] (cond-> (-> s (update :pending conj id)
+                                         (assoc-in [:waiters id] wake))
                                token (assoc-in [:progress token] 0))))
+        ;; a close that landed between the check above and the registration
+        ;; would never deliver `wake`; the loop's own :closed? check covers it.
         (try
           (with-write-lock! lock
             (fn [] (proc/send-line! child (json/write-str (cond-> {:jsonrpc "2.0" :id id :method method}
                                                             params (assoc :params params))))))
-          (let [res (await-response! state id timeout-ms token)]
+          (let [res (await-response! state id wake timeout-ms token)]
             (cond
               (rpc-failed? res) res
               (get-in res [:ok :error]) {:error "rpc-error"
@@ -435,8 +454,9 @@
           (finally
             (swap! state (fn [s] (-> s
                                      (update :pending disj id)
+                                     (update :waiters dissoc id)
                                      (update :inbox dissoc id)
-                                     (update :progress dissoc token))))))))))
+                                     (update :progress dissoc token)))))))))))
 
 (defn stdio-transport
   "Spawn the child and hand back a transport. §2: merged env = process env +
@@ -449,9 +469,9 @@
                           (cond-> {}
                             cwd          (assoc :dir cwd)
                             (seq environment) (assoc :env environment)))
-        state (atom {:pending #{} :inbox {} :progress {} :closed? false :close-reason nil
+        state (atom {:pending #{} :waiters {} :inbox {} :progress {} :closed? false :close-reason nil
                      :notifications [] :server-requests [] :unmatched 0 :junk 0})
-        lock  (atom false)
+        lock  (atom nil)
         respond! (fn [msg]
                    (when-let [reply (server-request-response wait-for msg)]
                      (with-write-lock! lock
@@ -478,6 +498,7 @@
      ;; waiter. One mechanism, no hang.
      :close!  (fn []
                 (swap! state assoc :closed? true :close-reason "closed")
+                (wake-all! state)
                 (try (proc/kill! child) (catch Throwable _ nil))
                 nil)})))
 
