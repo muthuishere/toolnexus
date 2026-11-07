@@ -1564,10 +1564,15 @@ MCPAuthError = { status (401|403), challenge, reason } // any authenticate hook 
 
 **Routing (pinned).** With 2026-07-28 the only accepted version, every POST is a 2026 request
 (including `initialize`, which then fails header validation) and GET/DELETE ⇒ `405` (`Allow: POST`).
-With legacy versions also listed, a POST is a 2026 request iff its method is not `initialize` and
-(`MCP-Protocol-Version` is `2026-07-28`, or the header is absent/not an accepted legacy version and
-(the method is `server/discover`, or an `Mcp-Method` header is present, or `params._meta` carries
-`io.modelcontextprotocol/protocolVersion`)); everything else is served by §7C.1 unchanged. Content type
+With legacy versions also listed, a POST is a 2026 request iff its method is not `initialize`, its
+`MCP-Protocol-Version` header is absent or not a listed legacy version, and (the method is
+`server/discover`, or an `Mcp-Method` header is present, or `params._meta` carries
+`io.modelcontextprotocol/protocolVersion`); everything else is served by §7C.1 unchanged. The header
+alone never selects the 2026 wire (issue #150): a real 2026 client always sends `Mcp-Method`, so a request
+with `MCP-Protocol-Version: 2026-07-28` and neither marker is a legacy request, and the §7C.1 wire accepts
+`2026-07-28` in that header whenever it is listed. `initialize` never answers `2026-07-28`, which has no
+`initialize`: it negotiates among the listed legacy versions only (newest listed when the requested one is
+not among them), and a client that wants 2026 uses `server/discover`. Content type
 (`415`) and body size (`413`) are checked as in §7C.1; on a 2026-only handler a JSON array body ⇒
 `400` `-32600` "batch requests are not supported", an unparsable body ⇒ `400` `-32700` "Parse error".
 

@@ -138,8 +138,7 @@ public sealed partial class McpHttpHandler
         if (_legacy.Count == 0) return true;
         if (method == "initialize") return false;
         var hv = ex.Header("MCP-Protocol-Version") ?? "";
-        if (hv == Protocol2026) return true;
-        if (hv != "" && _versions.Contains(hv)) return false;
+        if (hv != "" && _legacy.Contains(hv)) return false;
         return method == "server/discover" || !string.IsNullOrEmpty(ex.Header("Mcp-Method"))
             || (meta != null && meta.ContainsKey(MetaVersion));
     }

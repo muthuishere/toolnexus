@@ -101,10 +101,7 @@ func (h *MCPHTTPHandler) mcp2026Route(r *http.Request, method string, meta map[s
 		return false
 	}
 	hv := r.Header.Get("MCP-Protocol-Version")
-	if hv == MCPProtocol2026 {
-		return true
-	}
-	if hv != "" && mcpHasVersion(h.versions, hv) {
+	if hv != "" && mcpHasVersion(h.legacy, hv) {
 		return false
 	}
 	_, metaV := meta[mcpMetaVersion]
