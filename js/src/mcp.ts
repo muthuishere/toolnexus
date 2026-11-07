@@ -6,17 +6,20 @@
 import { readFileSync } from "node:fs"
 import { Client } from "@modelcontextprotocol/sdk/client/index.js"
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js"
-import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js"
 import type { Tool as McpToolDef, ElicitRequest, ElicitResult } from "@modelcontextprotocol/sdk/types.js"
 import { ElicitRequestSchema } from "@modelcontextprotocol/sdk/types.js"
 import { type JSONSchema, type Tool, type ToolContext, type ToolHints, type ToolResult, type McpStatus, type Request, type Answer, sanitize } from "./types.js"
 import { type ContentPart, summarizePart } from "./content.js"
 import type { SkillDef } from "./skill.js"
-import { probe, newOAuth, defaultTokenStore, type AuthConfig, type ModernServer, type Load2026Options } from "./mcp2026/source.js"
+import { type AuthConfig, type ModernServer, type Load2026Options } from "./mcp2026/source.js"
 import { PendingError, type OAuth, type TokenStore } from "./mcp2026/auth.js"
 export { Token, MemoryTokenStore, type TokenStore } from "./mcp2026/auth.js"
 export type { AuthConfig } from "./mcp2026/source.js"
+
+// Loaded on first use, not at import: the 2026 client is only needed once a config is loaded,
+// and the SDK's remote transports (streamable-HTTP, SSE) only when a remote server falls back.
+let mcp2026: Promise<typeof import("./mcp2026/source.js")> | undefined
+const loadMcp2026 = () => (mcp2026 ??= import("./mcp2026/source.js"))
 
 // ---------------------------------------------------------------------------
 // MCP elicitation bridge (§10). A server can ask US for input mid-`tools/call`
@@ -477,6 +480,10 @@ async function connectTransport(client: Client, cfg: ServerConfig, auth?: Fallba
     const expanded = expandEnvHeaders(cfg.headers)
     const requestInit = expanded ? { headers: expanded } : undefined
     const fetch = auth ? bearerFetch(cfg.url, auth) : undefined
+    const [{ StreamableHTTPClientTransport }, { SSEClientTransport }] = await Promise.all([
+      import("@modelcontextprotocol/sdk/client/streamableHttp.js"),
+      import("@modelcontextprotocol/sdk/client/sse.js"),
+    ])
     try {
       await client.connect(new StreamableHTTPClientTransport(url, { requestInit, ...(fetch ? { fetch } : {}) }))
     } catch {
@@ -552,6 +559,7 @@ type Connected =
  * path, with the OAuth bearer attached for remote servers. Throws ⇒ the server failed.
  */
 async function connectServer(name: string, cfg: ServerConfig, timeout: number, opts: McpLoadOptions, store: TokenStore, sdkClient: () => Client, onSdk: (c: Client) => void): Promise<Connected> {
+  const { newOAuth, probe } = await loadMcp2026()
   const o: Load2026Options = { waitFor: opts.waitFor, tokenStore: store, openUrl: opts.openUrl, signal: opts.signal, disableTools: opts.disableTools }
   const remote = isRemote(cfg)
   const oauth = remote ? newOAuth(cfg.auth, o, store) : undefined
@@ -596,7 +604,7 @@ export async function loadMcp(
   const clients: { close(): Promise<void> }[] = []
   const servers = new Map<string, ServerConn>()
   const skills: SkillDef[] = []
-  const store = defaultTokenStore({ tokenStore: opts?.tokenStore })
+  const store = (await loadMcp2026()).defaultTokenStore({ tokenStore: opts?.tokenStore })
   const waitFor = opts?.waitFor
   const signal = opts?.signal
   const onServer = opts?.onServer
@@ -701,7 +709,7 @@ export async function listMcpTools(input: string | object, opts?: McpLoadOptions
   const toolsByServer: Record<string, ToolInfo[]> = {}
   const status: Record<string, McpStatus> = {}
   const signal = opts?.signal
-  const store = defaultTokenStore({ tokenStore: opts?.tokenStore })
+  const store = (await loadMcp2026()).defaultTokenStore({ tokenStore: opts?.tokenStore })
 
   await Promise.all(
     Object.entries(config).map(async ([name, cfg]) => {

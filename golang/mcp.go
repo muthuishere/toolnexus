@@ -518,7 +518,7 @@ func convertTool(server string, def mcp.Tool, client *mcpclient.Client, defTimeo
 			req := mcp.CallToolRequest{}
 			req.Params.Name = name
 			req.Params.Arguments = args
-			token := fmt.Sprintf("toolnexus-%d", progressTokenSeq.Add(1))
+			token := "toolnexus-" + strconv.FormatUint(progressTokenSeq.Add(1), 10)
 			req.Params.Meta = &mcp.Meta{ProgressToken: token}
 			if router != nil {
 				defer router.register(token, func() {

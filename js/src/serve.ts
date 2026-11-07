@@ -18,7 +18,8 @@ import http from "node:http"
 import fs from "node:fs"
 import path from "node:path"
 import { randomUUID } from "node:crypto"
-import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js"
+// The SDK server transport (and the @hono/node-server it pulls in) is loaded only when an MCP
+// profile is actually served, so importing toolnexus does not pay for it.
 import { sanitize, type Tool } from "./types.js"
 import type { SkillInfo } from "./skill.js"
 import type { RunResult } from "./client.js"
@@ -213,6 +214,9 @@ export async function startA2AServer(opts: StartServerOptions): Promise<ServeHan
   const [host, portStr] = splitAddr(opts.addr)
   const store = a2a ? resolveStore(a2a.store) : undefined
   const exposedTools = mcp ? exposedMcpTools(mcpTools ?? [], mcp) : []
+  const StreamableHTTPServerTransport = mcp
+    ? (await import("@modelcontextprotocol/sdk/server/streamableHttp.js")).StreamableHTTPServerTransport
+    : undefined
 
   const server = http.createServer((req, res) => {
     const rpcRes = (id: unknown, payload: object) => {
@@ -244,7 +248,7 @@ export async function startA2AServer(opts: StartServerOptions): Promise<ServeHan
         const body = req.method === "POST" ? await readBody(req) : ""
         const parsed = body ? safeJson(body) : undefined
         const mcpServer = buildMcpServer(exposedTools, mcp, onCall)
-        const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined })
+        const transport = new StreamableHTTPServerTransport!({ sessionIdGenerator: undefined })
         res.on("close", () => {
           void transport.close()
           void mcpServer.close()
