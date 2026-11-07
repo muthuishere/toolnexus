@@ -1,9 +1,9 @@
 ---
 title: toolnexus
-description: Your LLM, with MCP tools and agent skills built in — in 3 lines, in 8 languages. Vendor-neutral, byte-identical across JavaScript, Python, Go, Java, C#, Elixir, Clojure and Rust.
+description: "One vendor-neutral agent library, byte-identical in JavaScript, Python, Go, Java, C#, Elixir, Clojure and Rust: MCP client and server, agent skills, A2A and ACP agents, a typed decision classifier, image/video/speech generation, streaming, memory and resilience. Benchmarked against 21 frameworks; fastest or level in most languages."
 template: splash
 hero:
-  tagline: Give any LLM tool-calling, an MCP host, agent skills, and remote agents — in a few lines, in eight languages.
+  tagline: "Building any agentic framework? Build it on toolnexus. Fast tool calling, any number of MCP servers, any agent skill and media generation, for any LLM, in eight languages."
   actions:
     - text: Quickstart
       link: /toolnexus/quickstart/
@@ -227,7 +227,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 		The suspension layer: an agent can pause, ask *you* a question, and resume — plus an
 		MCP elicitation bridge. Nobody else ships this across eight ports.
 	</Card>
+	<Card title="Typed decisions" icon="list-format">
+		`createClassifier` and the judge adapters: a yes/no, a pick-one or a score with confidence,
+		from any System One backend. [Judge &amp; classifier →](/toolnexus/judge/)
+	</Card>
+	<Card title="Media generation" icon="seti:image">
+		Image, video, speech, transcription, voice cloning and talking-head video, as typed verbs
+		and agent tools, from a JSON provider style. [Media →](/toolnexus/media/)
+	</Card>
 </CardGrid>
+
+## Built on toolnexus
+
+<CardGrid>
+	<Card title="wfnexus" icon="rocket">
+		Typed pipelines for coding agents: each step is a whole agent with scoped tools, a budget,
+		guardrails and a JSON-schema output. [github.com/muthuishere/wfnexus](https://github.com/muthuishere/wfnexus)
+	</Card>
+	<Card title="deemwar Spotlight" icon="magnifier">
+		A local-first, press-a-key assistant that knows your open windows, mail and files, and
+		answers with citations. [spot.deemwar.com](https://spot.deemwar.com/)
+	</Card>
+	<Card title="deemwar MCP store" icon="puzzle">
+		Turns your own API into MCP tools and agent skills, with your existing logins. [mcp.deemwar.com](https://mcp.deemwar.com/)
+	</Card>
+</CardGrid>
+
+Built something on toolnexus? [Open a pull request](https://github.com/muthuishere/toolnexus/edit/main/README.md)
+adding it to the **Built on toolnexus** list in `README.md` and here.
 
 ## Byte-identical across eight languages
 

@@ -9,8 +9,8 @@ java {
 repositories { mavenCentral() }
 
 ext {
-    lc4jVersion = '1.0.1'
-    lc4jMcpVersion = '1.0.1-beta6'
+    lc4jVersion = '1.23.0'
+    lc4jMcpVersion = '1.23.0-beta33'
 }
 
 dependencies {

@@ -27,6 +27,18 @@ balance is distinguishable from a bad model id. All eight ports; fixture `cloudf
 
 Change: `openspec/changes/fix-classifier-key-and-errors`.
 
+**Docs: a new "Where toolnexus stands — Nov 2026" page** (Benchmarks & comparison). It has a feature
+matrix re-checked against official docs on 2026-11-07, covering MCP client/server, MCP 2026-07-28, A2A,
+skills, ACP, judges, media and languages. Cells we could not confirm say *unverified*. It also has new
+fake-model overhead benchmarks with pinned versions for 53 framework configurations in eight languages,
+including Rust (vs rig and swiftide) and new rows for Microsoft Agent Framework, Agno, OpenAI Agents
+JS, LangGraph.js, Google ADK Go/Java, Genkit Go and Koog. The page says where we lose: Eino in Go,
+LangChain4j on the JVM, a tie in .NET, and Clojure as our slowest port. It ends with a ranked list of
+gaps. Raw results are in `benchmarks/results-2026-11.json`, and the August `results.json` is kept as
+it was. The page also lists what we could not run and why: smolagents and AutoAgents fail on the
+shared mock's wire format, and Google ADK TS has no OpenAI-compatible model. The July comparison page
+now points to the new one.
+
 ## 0.26.0 — 2026-11-06
 
 **Classifier backends: one System One classifier for TypeSafe, OpenRouter, Cloudflare, Vercel or

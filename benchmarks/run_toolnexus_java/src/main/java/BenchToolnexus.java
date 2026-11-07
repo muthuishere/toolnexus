@@ -58,7 +58,7 @@ public final class BenchToolnexus {
             for (Tool t : Tools.fromObject(new NativeTools())) tk.register(t);
         }
         LlmClient agent = LlmClient.create(new LlmClient.Options()
-                .baseUrl(mockUrl).style("openai").model("mock-model"));
+                .baseUrl(mockUrl).style("openai").model("mock-model").apiKey("sk-mock-not-a-real-key"));
         double initMs = (System.nanoTime() - t0) / 1_000_000.0;
         int toolCount = tk.tools().size();
 

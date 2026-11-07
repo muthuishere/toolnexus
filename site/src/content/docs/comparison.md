@@ -17,10 +17,9 @@ description: >-
 > a managed runtime, or the fullest MCP server, one of the others is the better tool, and we say so
 > below.
 >
-> Versions referenced: toolnexus **0.19.0** (all seven ports; `js/package.json`, `python/pyproject.toml`,
-> `golang/go.mod`, `java/build.gradle`, `csharp/src/Toolnexus/Toolnexus.csproj`, `elixir/mix.exs`,
-> `clojure/build.clj`). Competitor facts were checked in **July 2026**; frameworks move fast —
-> re-verify before quoting.
+> **This page is a July 2026 snapshot (toolnexus 0.19.0).** For the current picture — toolnexus 0.26.0,
+> eight ports, re-checked features and fresh benchmarks — see
+> [Where toolnexus stands — Nov 2026](/toolnexus/standing-2026-11/).
 
 ---
 

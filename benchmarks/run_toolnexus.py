@@ -72,7 +72,8 @@ async def main():
     # ---- cold init: toolkit build (MCP connect + discovery) + client ----
     t0 = time.perf_counter()
     tk = await build(args.config)
-    agent = create_client(base_url=MOCK_URL, style="openai", model="mock-model")
+    agent = create_client(base_url=MOCK_URL, style="openai", model="mock-model",
+                          api_key=os.environ["OPENAI_API_KEY"])
     init_ms = (time.perf_counter() - t0) * 1000.0
 
     tool_count = len(tk.tools())
