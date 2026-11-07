@@ -32,6 +32,27 @@ balance is distinguishable from a bad model id. All eight ports; fixture `cloudf
 
 Change: `openspec/changes/fix-classifier-key-and-errors`.
 
+**A declined durable resume now tells the model why** (issue #125). Resuming a halted run with
+`answerDeclined(id, reason)` through `runWithAnswer` / `askWithAnswer` used to fill every call's slot
+with "no result supplied on resume for <name>", so the reason the human gave never reached the
+model. Each outstanding call now gets the error result `relay declined for <name>: <reason>` (reason
+defaults to `declined`), the same text the inline `waitFor` path already produced, so an answer means
+the same thing whether the host waited inline or durably. SPEC §10; fixture
+`conformance/resume_decline/cases.json`. Only golang and rust ship the durable resume entry point, so
+only they were affected and fixed; the other six ports have no durable resume yet and must replay the
+same fixture when they add one. Change: `openspec/changes/fix-resume-decline-reason`.
+
+**Oversized skill descriptions are now reported** (issue #84). The skills catalog sends each
+`description` in full on every turn, and nothing told the author when one was huge: a 4,443-character
+description is cut to ~1,536 by Claude Code but paid in full here. The loader result and the
+`listSkills` inventory now carry `warnings`, next to `skipped`: one
+`{ location, reason: "oversized-description", chars }` per skill whose description is longer than
+1,024 Unicode code points (the published Agent Skills limit; exactly 1,024 does not warn). Each port
+also logs it through the channel it already uses for duplicate skill names, never stdout. Nothing is
+truncated: the catalog and the `skill` tool output are byte-identical to before. All eight ports;
+fixture `conformance/skill_description/`. Not done: the threshold is fixed, not configurable.
+Change: `openspec/changes/add-skill-description-length-warning`.
+
 **Docs: a new "Where toolnexus stands — Nov 2026" page** (Benchmarks & comparison). It has a feature
 matrix re-checked against official docs on 2026-11-07, covering MCP client/server, MCP 2026-07-28, A2A,
 skills, ACP, judges, media and languages. Cells we could not confirm say *unverified*. It also has new
