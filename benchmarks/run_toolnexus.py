@@ -10,6 +10,7 @@ Prints a JSON result line to stdout. Peak RSS is captured by the orchestrator
 Config selected by --config:
   mcp   : only the 3 MCP tools (builtins off)          -> apples-to-apples cell
   full  : 3 MCP tools + 1 agent skill + 1 native tool  -> toolnexus's real shape
+  native: 2 native tools (get_weather, add), no MCP     -> loop overhead only
 """
 from __future__ import annotations
 
@@ -47,7 +48,26 @@ def local_multiply(a: int, b: int) -> str:
     return str(a * b)
 
 
+def get_weather(city: str) -> str:
+    """Get the current weather for a city."""
+    return f"The weather in {city} is Sunny, 22C."
+
+
+def add(a: int, b: int) -> str:
+    """Add two integers."""
+    return str(a + b)
+
+
 async def build(config: str):
+    if config == "native":
+        return await create_toolkit(
+            extra_tools=[
+                define_tool(get_weather, name="get_weather",
+                            description="Get the current weather for a city."),
+                define_tool(add, name="add", description="Add two integers."),
+            ],
+            builtins=False,
+        )
     if config == "full":
         native = define_tool(local_multiply, name="multiply",
                              description="Multiply two integers locally.")
@@ -64,7 +84,7 @@ async def build(config: str):
 
 async def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--config", choices=["mcp", "full"], default="mcp")
+    ap.add_argument("--config", choices=["mcp", "full", "native"], default="mcp")
     ap.add_argument("--runs", type=int, default=30)
     ap.add_argument("--warmup", type=int, default=3)
     args = ap.parse_args()
