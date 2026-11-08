@@ -41,6 +41,13 @@ systemone and decisions wires pick the same option for the same state.
 
     "faults": [{"path": "/chat/completions", "status": 429, "times": 1, "retryAfter": "0"}]
 
+Tool sources: GET /.well-known/agent-card.json + POST /a2a is an A2A agent (SPEC 7A;
+card name "mockagent", skill "summarize", SendMessage then GetTask: one "working" poll,
+then "completed" with the text "A2A mock done: <task>"). POST /v1/tools/add {a, b} ->
+{"sum": a+b} and GET /v1/tools/echo?text=x -> {"echo": "x"} are HTTP tool endpoints.
+The MCP server, the one-shot CLI and the ACP agent are sibling entry points:
+mock_mcp.py (stdio / --http), fake_cli.py, fake_acp_agent.py; or `mock_llm.py --mcp|--cli|--acp`.
+
 Media (SPEC 7G): GET /v1/_mock/media-style.json returns a style whose baseUrl is this
 server; it declares all six verbs. image, video and talking are async (one
 "processing" poll, then "completed"; a body containing "[fail]" fails the job);
@@ -439,6 +446,44 @@ def media_poll(jid, base):
                                 **({"urls": [url]} if j["verb"] == "image" else {"url": url})}}
 
 
+# ---------- tool sources: A2A agent (SPEC 7A) and HTTP tool endpoints ----------
+
+TASKS: dict = {}  # a2a task id -> {"text", "polls"}
+
+
+def a2a_card(origin):
+    return {"name": "mockagent", "description": "Deterministic A2A agent from the toolnexus mock.",
+            "version": "1.0.0", "protocolVersion": "0.3.0", "url": origin + "/a2a",
+            "capabilities": {"streaming": False, "pushNotifications": False},
+            "defaultInputModes": ["text/plain"], "defaultOutputModes": ["text/plain"],
+            "skills": [{"id": "summarize", "name": "summarize", "description": "Summarise a task in one line."}]}
+
+
+def a2a_rpc(msg):
+    mid, method, p = msg.get("id"), msg.get("method"), msg.get("params") or {}
+    if method == "SendMessage":
+        parts = ((p.get("message") or {}).get("parts")) or []
+        text = " ".join(x.get("text", "") for x in parts if x.get("kind", x.get("type")) == "text")
+        with _LOCK:
+            tid = f"task-{len(TASKS) + 1}"
+            TASKS[tid] = {"text": text, "polls": 0}
+        return {"jsonrpc": "2.0", "id": mid, "result": {"id": tid, "kind": "task", "status": {"state": "submitted"}}}
+    if method == "GetTask":
+        tid = p.get("id")
+        with _LOCK:
+            t = TASKS.get(tid)
+            if t is not None:
+                t["polls"] += 1
+        if t is None:
+            return {"jsonrpc": "2.0", "id": mid, "error": {"code": -32001, "message": "Task not found"}}
+        if t["polls"] < 2:
+            return {"jsonrpc": "2.0", "id": mid, "result": {"id": tid, "kind": "task", "status": {"state": "working"}}}
+        return {"jsonrpc": "2.0", "id": mid, "result": {
+            "id": tid, "kind": "task", "status": {"state": "completed"},
+            "artifacts": [{"artifactId": "a1", "parts": [{"kind": "text", "text": "A2A mock done: " + t["text"]}]}]}}
+    return {"jsonrpc": "2.0", "id": mid, "error": {"code": -32601, "message": f"Method not found: {method}"}}
+
+
 # ---------- fault injection ----------
 
 def _take_fault(route, headers):
@@ -536,6 +581,8 @@ class Handler(BaseHTTPRequestHandler):
         if r == "/_mock/requests":
             with _LOCK:
                 return self._send(dict(COUNTS))
+        if r == "/.well-known/agent-card.json":
+            return self._send(a2a_card(self._base()[:-3]))
         if r == "/_mock/media-style.json":
             return self._send(media_style(self._base()))
         if r.startswith("/files/") and r[7:] in FILES:
@@ -547,6 +594,9 @@ class Handler(BaseHTTPRequestHandler):
             ids = ["mock-model", "jev-latest", "gpt-6-luna"]
             return self._send({"object": "list", "data": [
                 {"id": i, "object": "model", "created": 0, "owned_by": "toolnexus-mock"} for i in ids]})
+        if r == "/tools/echo":
+            from urllib.parse import parse_qs, urlparse
+            return self._send({"echo": (parse_qs(urlparse(self.path).query).get("text") or [""])[0]})
         if r.startswith("/media/jobs/"):
             out = media_poll(r[len("/media/jobs/"):], self._base())
             return self._send(out) if out else self._send({"code": 404, "message": "no such job"}, 404)
@@ -581,6 +631,10 @@ class Handler(BaseHTTPRequestHandler):
             inner = dict(body.get("input") or {}, model=body.get("model"))
             return self._send({"success": True, "errors": [], "messages": [],
                                "result": systemone_answers(inner)})
+        if r == "/a2a":
+            return self._send(a2a_rpc(body))
+        if r == "/tools/add":
+            return self._send({"sum": body.get("a", 0) + body.get("b", 0)})
         if r.startswith("/media/"):
             out = media_start(r[len("/media/"):], body, self._base())
             if out is not None:
@@ -594,6 +648,7 @@ def reset():
         FAULTS.clear()
         COUNTS.clear()
         JOBS.clear()
+        TASKS.clear()
         FAULTS.extend(json.loads(json.dumps(SCRIPT.get("faults") or [])))
 
 
@@ -613,6 +668,12 @@ def start(host="127.0.0.1", port=0, script=None, quiet=True):
 
 
 def main(argv=None):
+    argv = sys.argv[1:] if argv is None else argv
+    for flag, mod in (("--mcp", "mock_mcp"), ("--cli", "fake_cli"), ("--acp", "fake_acp_agent")):
+        if argv[:1] == [flag]:
+            import importlib
+            sys.path.insert(0, __import__("os").path.dirname(__import__("os").path.abspath(__file__)))
+            return importlib.import_module(mod).main(argv[1:])
     ap = argparse.ArgumentParser(description="Deterministic mock model server for toolnexus.")
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8787, help="0 picks a free port")

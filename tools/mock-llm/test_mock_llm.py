@@ -83,6 +83,70 @@ class MockTest(unittest.TestCase):
         code, _ = post(self.base, "/chat/completions", {}, {"X-Mock-Fault": "503"})
         self.assertEqual(code, 503)
 
+    def test_a2a_agent_submit_then_poll(self):
+        origin = self.base[:-3]
+        with urllib.request.urlopen(origin + "/.well-known/agent-card.json") as r:
+            card = json.loads(r.read())
+        self.assertEqual(card["url"], origin + "/a2a")
+        t = json.loads(post(origin, "/a2a", {"jsonrpc": "2.0", "id": 1, "method": "SendMessage", "params": {
+            "message": {"role": "user", "messageId": "m", "parts": [{"kind": "text", "text": "hi"}]}}})[1])["result"]
+        states = [json.loads(post(origin, "/a2a", {"jsonrpc": "2.0", "id": 2, "method": "GetTask",
+                                                  "params": {"id": t["id"]}})[1])["result"] for _ in range(2)]
+        self.assertEqual([s["status"]["state"] for s in states], ["working", "completed"])
+        self.assertEqual(states[1]["artifacts"][0]["parts"][0]["text"], "A2A mock done: hi")
+
+    def test_http_tool_endpoints(self):
+        self.assertEqual(json.loads(post(self.base, "/tools/add", {"a": 2, "b": 3})[1]), {"sum": 5})
+
+    def _stdio(self, args, lines):
+        import subprocess
+        p = subprocess.run([sys.executable, str(HERE / "mock_llm.py"), *args], text=True, capture_output=True,
+                           input="".join(json.dumps(m) + "\n" for m in lines), timeout=20)
+        return [json.loads(x) for x in p.stdout.splitlines() if x.strip()]
+
+    def test_mcp_stdio_both_paths(self):
+        meta = {"_meta": {"io.modelcontextprotocol/protocolVersion": "2026-07-28"}}
+        out = self._stdio(["--mcp"], [{"jsonrpc": "2.0", "id": 1, "method": "server/discover"},
+                                      {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                                       "params": {"name": "add", "arguments": {"a": 2, "b": 3}, **meta}}])
+        self.assertIn("2026-07-28", out[0]["result"]["supportedVersions"])
+        self.assertEqual(out[1]["result"]["content"][0]["text"], "5")
+        self.assertEqual(out[1]["result"]["resultType"], "complete")
+        old = self._stdio(["--mcp", "--legacy"], [{"jsonrpc": "2.0", "id": 1, "method": "server/discover"},
+                                                  {"jsonrpc": "2.0", "id": 2, "method": "initialize", "params": {}}])
+        self.assertEqual(old[0]["error"]["code"], -32601)
+        self.assertEqual(old[1]["result"]["serverInfo"]["name"], "mock-mcp")
+
+    def test_mcp_http(self):
+        import mock_mcp
+        srv, url = mock_mcp.start_http()
+        try:
+            origin, path = url.rsplit("/", 1)
+            r = json.loads(post(origin, "/" + path, {"jsonrpc": "2.0", "id": 1, "method": "tools/list"})[1])
+            self.assertEqual([t["name"] for t in r["result"]["tools"]], ["add", "echo"])
+        finally:
+            srv.shutdown()
+
+    def test_cli_and_acp(self):
+        import subprocess
+        cli = lambda inp: json.loads(subprocess.run([sys.executable, str(HERE / "mock_llm.py"), "--cli"], text=True,
+                                                    input=inp, capture_output=True, timeout=20).stdout)
+        self.assertEqual(cli("add please")["tool_calls"][0]["arguments"], {"a": 19, "b": 23})
+        self.assertEqual(cli("[tool add] 42\n"), {"content": "The sum is 42."})
+        out = self._stdio(["--acp"], [
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+            {"jsonrpc": "2.0", "id": 2, "method": "session/new", "params": {"cwd": "/", "mcpServers": []}},
+            {"jsonrpc": "2.0", "id": 3, "method": "session/prompt",
+             "params": {"sessionId": "fake-1", "prompt": [{"type": "text", "text": "hello"}]}},
+            {"jsonrpc": "2.0", "id": 4, "method": "session/prompt",
+             "params": {"sessionId": "fake-1", "prompt": [{"type": "text", "text": "[wait]"}]}},
+            {"jsonrpc": "2.0", "method": "session/cancel", "params": {"sessionId": "fake-1"}}])
+        text = "".join(m["params"]["update"]["content"]["text"] for m in out
+                       if m.get("method") == "session/update")
+        self.assertEqual(text, "Mock ACP reply to: helloWorking...")
+        stops = {m["id"]: m["result"]["stopReason"] for m in out if m.get("id") in (3, 4)}
+        self.assertEqual(stops, {3: "end_turn", 4: "cancelled"})
+
 
 if __name__ == "__main__":
     unittest.main()
