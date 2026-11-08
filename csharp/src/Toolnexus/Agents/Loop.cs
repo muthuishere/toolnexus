@@ -257,6 +257,7 @@ public static class LoopSupport
             {
                 BeforeLLM = hooks.BeforeLLM, AfterLLM = hooks.AfterLLM,
                 BeforeTool = hooks.BeforeTool, AfterTool = hooks.AfterTool,
+                AfterRound = hooks.AfterRound,
             };
 
         merged.BeforeTool = ev =>
