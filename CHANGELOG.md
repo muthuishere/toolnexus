@@ -8,7 +8,7 @@ GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
 
 ## Unreleased
 
-### Memory hierarchy and dreaming (js only so far)
+### Memory hierarchy and dreaming
 
 A persona's memory can now stay small and stay true. **Everything is opt-in; a persona built
 without the new options is byte-identical to before.**
@@ -23,12 +23,20 @@ without the new options is byte-identical to before.**
 - **`dreamer(dir, { store })`** and **`fromDir(dir, { dream: { everyMs, store } })`**: a built-in
   dream pass that verifies `MEMORY.md` against the transcripts, fixes or prunes claims, and
   records every change in `memory/log.md`. No `HEARTBEAT.md` to write.
-- Memory writes are now fsynced, and `replace`/`remove` are pinned to the **first** occurrence
-  in SPEC §7E.
+- Memory writes are fsynced and serialised per file within a runtime, so concurrent agents no
+  longer lose each other's entries.
+- **`replace`/`remove` now change only the first match in every port.** python and java used to
+  change every occurrence; a `remove "x"` there deleted every "x" in the file.
+- The notes-off `memory` tool's description and schema are now identical in all eight ports.
+  python, go, rust, csharp and elixir had drifted ("next session" vs "NEXT session", a missing
+  `(with)`, no `target` description), so the text their models see changes slightly.
 
-Not done: the other seven ports (tracked in `openspec/changes/add-memory-hierarchy`); python and
-java still replace every occurrence; no cross-process write locking; no semantic search; docs
-page "Dreaming" not written yet.
+All eight ports; fixtures `examples/memory-hierarchy/` and `examples/dreaming/` (the "Mt. Moon"
+case: a dream pass fixes a wrong note and the next session answers differently). Docs: new
+"Dreaming" page. Not done: no cross-process write locking; no semantic search; clojure writes
+are not atomic (koine has no rename) and its lock is in-process only; a go `IndexCap` field of 0
+means "use the preset" rather than an error; rust custom conversation stores must override
+`supports_list()` to be searchable. Change: `openspec/changes/add-memory-hierarchy`.
 
 **Fix: the persona `memory` tool no longer truncates a `MEMORY.md` / `USER.md` larger than 2 MB.**
 The tool read the file through the same 2 MB cap used to build the system prompt, then wrote that
@@ -42,8 +50,7 @@ file; an existing file keeps its permission bits, a new one gets the usual `0666
 a `MEMORY.md` that is a symlink is now replaced by a regular file on the first write (the rename
 replaces the link), so point the home dir at the real directory rather than linking the file;
 clojure's write is not atomic yet (koine has no rename/move, so it needs adding to koine first);
-several agents editing the same memory file at once can still lose an update (no per-file lock
-yet). That is tracked in `openspec/changes/add-memory-hierarchy`.
+concurrent writers are addressed by the memory hierarchy entry above.
 
 - **Docs:** the docs-site hero video is re-cut for 0.26.0 (80 s, new narrator). It now covers eight
   languages including Rust, typed decisions (`createClassifier`), media generation, and serving the
