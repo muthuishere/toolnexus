@@ -393,6 +393,28 @@ async def test_d2_idle_dreamer_writes_nothing(tmp_path):
     assert snapshot(home) == frozen
 
 
+async def test_d7_dream_guard(tmp_path):
+    e = DR["expect"]["D7_dreamGuard"]
+    home = mk_home(tmp_path, e["files"])
+    mem = dreamer(home, store=_store()).uses["tools"][0]
+    for c in e["cases"]:
+        r = await mem.execute(c["args"])
+        assert _res(r) == {"output": c["output"], "isError": c["isError"]}, c["name"]
+    snap = snapshot(home)
+    assert sorted(snap) == sorted(e["files"])
+    for f, body in e["filesAfter"].items():
+        assert snap[f] == body, f
+    p = e["plainToolStillWrites"]
+    r = await memory_tool(home, notes=True).execute(p["args"])
+    assert _res(r) == {"output": p["output"], "isError": p["isError"]}
+
+
+def test_d8_prompt_keeps_unmentioned_claims():
+    e = DR["expect"]["D8_promptKeepsUnmentionedClaims"]
+    assert e["dreamPromptContains"] in DREAM_PROMPT
+    assert e["dreamPromptNotContains"] not in DREAM_PROMPT
+
+
 def test_d3_dreamer_tools_exactly(tmp_path):
     e = DR["expect"]["D3_dreamerToolsExactly"]
     home = mk_home(tmp_path, DR["home"])

@@ -20,6 +20,7 @@ Naming note: the package namespace disambiguates from the outbound-A2A
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import os
 import re
 import secrets
@@ -352,7 +353,7 @@ DREAM_PROMPT = "\n".join(
     [
         'You are dreaming: an offline pass over your own memory. Memory exists so that a future session decides better. MEMORY.md is a short index loaded at the start of every session; notes (memory target "note:<slug>") hold the detail; the transcripts (transcript_search) are the ground truth of what actually happened.',
         "Work in this order:",
-        "1. Verify: read MEMORY.md and the notes it points to (memory read, memory list) and check each claim against the transcripts. Fix a claim the transcripts contradict; remove one they no longer support.",
+        "1. Verify: read MEMORY.md and the notes it points to (memory read, memory list) and check each claim against the transcripts. Fix or remove a claim only when it is contradicted by the transcripts; a claim they do not mention stays (transcripts may be pruned).",
         "2. Demote: move detail out of MEMORY.md into a note and leave a one-line [[slug]] pointer, so the index stays short.",
         "3. Merge: fold duplicate or conflicting notes into one.",
         "4. Repair links: point every [[slug]] at an existing note or create it; give every note an index line.",
@@ -626,6 +627,23 @@ def agent_from_dir(  # noqa: A002
     return persona
 
 
+def _dream_guard(mem: Tool) -> Tool:
+    """The dream guard (§7E "Dreaming"): the dreamer's ``memory`` tool refuses every action
+    on ``USER.md`` and ``replace``/``remove`` on ``note:log`` before anything is read or
+    written, so a dream never touches the user model and its audit trail is append-only."""
+    inner = mem.execute
+
+    async def execute(args: dict[str, Any], ctx: Any = None) -> ToolResult:
+        args = args or {}
+        if args.get("target") == "user":
+            return ToolResult(output="dreamer: USER.md is off-limits", is_error=True)
+        if args.get("target") == "note:log" and args.get("action") in ("replace", "remove"):
+            return ToolResult(output="dreamer: memory/log.md is append-only", is_error=True)
+        return await inner(args, ctx)
+
+    return dataclasses.replace(mem, execute=execute)
+
+
 def dreamer(  # noqa: A002
     dir: str,
     *,
@@ -655,7 +673,7 @@ def dreamer(  # noqa: A002
         does=f"dreams over the memory in {dir}",
         soul="## HEARTBEAT.md\n\n" + "\n\n".join(parts),
         model=model or "inherit",
-        uses={"tools": [memory_tool(dir, notes=True), search]},
+        uses={"tools": [_dream_guard(memory_tool(dir, notes=True)), search]},
     )
 
 
