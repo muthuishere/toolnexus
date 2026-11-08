@@ -109,6 +109,7 @@ export default defineConfig({
 										{ label: 'Attachments & multimodal', slug: 'cookbook/attachments' },
 										{ label: 'Images, video & speech', slug: 'cookbook/media' },
 										{ label: 'Bring your own HTTP client', slug: 'cookbook/bring-your-own-http-client' },
+										{ label: 'Run without a model (mock server)', slug: 'cookbook/mock-server' },
 										{ label: 'Local & in-process models', slug: 'cookbook/local-and-in-process-models' },
 										{ label: 'Fail fast, or retry', slug: 'cookbook/fail-fast-or-retry' },
 										{ label: 'API key by host', slug: 'cookbook/api-key-by-host' },

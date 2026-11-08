@@ -5,7 +5,7 @@
 //   node site/scripts/sync-recipes.mjs --check   exit 1 if a page is out of date
 //
 // The recipes live as real files under site/recipes/in-process-client/<lang>/<page>/, the
-// files that were compiled and run (against the fake agent/CLI in fakes/, and live). A page
+// files that were compiled and run (against the fake agent/CLI in tools/mock-llm/, and live). A page
 // marks where a recipe goes with
 //
 //     {/* recipe:<page>/<group> */}

@@ -135,7 +135,12 @@ toolnexus@<version> tokio -F tokio/full && cargo build`.
 **Indexing lag is normal and is not failure**: NuGet ~5 min, Maven Central ~15–20 min. Poll before
 concluding anything. Clojars is `net.clojars.muthuishere`, **not** `io.github.muthuishere`.
 
-### 7. If a leg failed
+### 7. Marketing
+
+Run the `marketing` skill for this version (drafts only; the owner posts). It builds
+`~/.marketing/toolnexus/<version>/` from the changelog section and the standing page.
+
+### 8. If a leg failed
 
 Diagnose first — `gh run view <id> --log-failed`. Credential failures (`API key revoked`,
 `401`, `403`) are owner fixes; report them and **file an issue** rather than retrying blindly.

@@ -45,6 +45,16 @@ jobs:
       #    (site/recipes/in-process-client/); a hand edit to a page block fails here.
       - run: node site/scripts/sync-recipes.mjs --check
 
+  mock-llm:
+    # The shared mock model server (tools/mock-llm). Every port's own test job also
+    # runs its integration suite against it (python3 is on the ubuntu runners).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: python3 -m unittest tools/mock-llm/test_mock_llm.py
+
   js:
     name: JS (node)
     runs-on: ubuntu-latest
