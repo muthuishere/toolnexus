@@ -547,6 +547,40 @@ impl RawResponse {
     }
 }
 
+/// Run `fut` on a runtime worker thread when the runtime is multi-threaded.
+///
+/// A host usually awaits a run from `block_on` (`#[tokio::main]`), whose
+/// thread is not a worker: every wake from the I/O driver (HTTP reply, MCP
+/// reply) then has to unpark that thread. On a worker the run is woken in
+/// place, one hand-off per run instead of one per await. Dropping the
+/// returned future aborts the task (cancel-on-drop, as before); a panic
+/// inside resumes on the caller.
+pub(crate) async fn on_worker<F>(fut: F) -> F::Output
+where
+    F: std::future::Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    use tokio::runtime::{Handle, RuntimeFlavor};
+    let multi =
+        Handle::try_current().is_ok_and(|h| h.runtime_flavor() == RuntimeFlavor::MultiThread);
+    if !multi {
+        return fut.await;
+    }
+    struct AbortOnDrop<T>(tokio::task::JoinHandle<T>);
+    impl<T> Drop for AbortOnDrop<T> {
+        fn drop(&mut self) {
+            self.0.abort();
+        }
+    }
+    let mut h = AbortOnDrop(tokio::spawn(fut));
+    match (&mut h.0).await {
+        Ok(v) => v,
+        Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
+        // we abort only when dropped, so this is a runtime shutting down
+        Err(e) => panic!("toolnexus: run task cancelled by the runtime: {e}"),
+    }
+}
+
 /// The §7D global turn gate: at most N LLM calls in flight across every
 /// client that shares it. It wraps ONLY the provider call (never a whole run),
 /// and the slot is released on any exit, including a cancelled caller.
@@ -2327,7 +2361,8 @@ impl Client {
                 validate_part(p, self.opts().max_part_bytes).map_err(ClientError::Part)?;
             }
         }
-        self.drive(&prompt, tk, history, cancel, None).await.0
+        let (this, tk) = (self.clone(), tk.clone());
+        on_worker(async move { this.drive(&prompt, &tk, history, cancel, None).await.0 }).await
     }
 
     /// Resume a run that halted with status `pending` (§10 durable path,

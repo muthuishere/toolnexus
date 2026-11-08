@@ -1,7 +1,7 @@
 package io.github.muthuishere.toolnexus;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpServer;
 import io.github.muthuishere.toolnexus.Batteries.Item;
 import io.github.muthuishere.toolnexus.Batteries.OnError;
@@ -37,7 +37,7 @@ class BatteriesTest {
     /** Typed questions from §8B wire JSON. */
     private static Map<String, Question> wireQuestions(JsonNode qs) {
         Map<String, Question> out = new LinkedHashMap<>();
-        qs.fields().forEachRemaining(e -> {
+        qs.properties().iterator().forEachRemaining(e -> {
             JsonNode q = e.getValue();
             String ins = q.get("instructions").asText();
             JsonNode cr = q.get("criteria");
@@ -46,7 +46,7 @@ class BatteriesTest {
                         : new Classifier.NoulCriteria(cr.get("true").asText(), cr.get("false").asText()));
                 case "choice" -> {
                     Map<String, String> m = new LinkedHashMap<>();
-                    cr.fields().forEachRemaining(f -> m.put(f.getKey(), f.getValue().asText()));
+                    cr.properties().iterator().forEachRemaining(f -> m.put(f.getKey(), f.getValue().asText()));
                     yield new Classifier.ChoiceQuestion(ins, m);
                 }
                 default -> {
@@ -132,7 +132,7 @@ class BatteriesTest {
         }
         if (a.isObject() && b.isObject()) {
             if (a.size() != b.size()) return false;
-            for (Iterator<String> it = a.fieldNames(); it.hasNext(); ) {
+            for (Iterator<String> it = a.propertyNames().iterator(); it.hasNext(); ) {
                 String k = it.next();
                 if (!b.has(k) || !same(a.get(k), b.get(k))) return false;
             }
@@ -143,7 +143,7 @@ class BatteriesTest {
 
     private static void assertVerdict(String name, JsonNode want, Record verdict) throws Exception {
         JsonNode got = verdictJson(verdict);
-        for (Iterator<String> it = want.fieldNames(); it.hasNext(); ) {
+        for (Iterator<String> it = want.propertyNames().iterator(); it.hasNext(); ) {
             String k = it.next();
             if (k.equals("error")) {
                 boolean has = got.hasNonNull("error");

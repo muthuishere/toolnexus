@@ -271,6 +271,84 @@ public class ClassifierBackendsTests
         }
     }
 
+    // ---------------------------------------------------------------- openai decisions (#157)
+
+    [Fact]
+    public async Task OpenAIDecisionsFixture()
+    {
+        var fx = Load("openai-decisions.json");
+        var qs = Qs(fx.GetProperty("questions"));
+        var okReply = fx.GetProperty("replyCases")[0].GetProperty("reply").GetRawText();
+        ClassifierOptions OpenAI(Fake f, string? model = null)
+        {
+            var o = Opts(f);
+            o.Backend = ClassifierBackend.OpenAI;
+            if (model != null) o.Model = model;
+            return o;
+        }
+
+        foreach (var c in fx.GetProperty("requestCases").EnumerateArray())
+        {
+            var f = new Fake(okReply);
+            await new Classifier(OpenAI(f, Str(c, "model"))).EvaluateAsync(State(c.GetProperty("state")), qs);
+            Assert.Equal(Str(c.GetProperty("expect"), "body"), f.Bodies[0]);
+            Assert.Equal("https://fake.test/v1/decisions", f.Urls[0]);
+            Assert.False(f.Requests[0].Headers.Contains(ClassifierBackends.ImagesHeader), Str(c, "name"));
+        }
+
+        foreach (var c in fx.GetProperty("replyCases").EnumerateArray())
+        {
+            var reply = c.GetProperty("reply").GetRawText();
+            var expect = c.GetProperty("expect");
+            if (Str(expect, "normalized") is { } norm)
+                Assert.Equal(norm, Classifier.DecisionsReply(reply, qs));
+            var cl = new Classifier(OpenAI(new Fake(reply)));
+            if (Str(expect, "error") is { } want)
+            {
+                var e = await Assert.ThrowsAsync<ClassifierException>(() => cl.EvaluateAsync("x", qs));
+                Assert.Equal(want, e.Message);
+                continue;
+            }
+            var d = await cl.EvaluateAsync("x", qs);
+            Assert.Equal(Str(expect, "model"), d.Model);
+            Assert.Equal(expect.GetProperty("calibrated").GetBoolean(), d.Calibrated);
+            foreach (var p in expect.GetProperty("noul").EnumerateObject()) Assert.Equal(p.Value.GetDouble(), d.Noul(p.Name).Noul);
+            foreach (var p in expect.GetProperty("choice").EnumerateObject()) Assert.Equal(p.Value.GetString(), d.Choice(p.Name).Choice);
+            foreach (var p in expect.GetProperty("score").EnumerateObject()) Assert.Equal(p.Value.GetDouble(), d.Score(p.Name).Score);
+        }
+
+        foreach (var c in fx.GetProperty("errorCases").EnumerateArray())
+        {
+            var f = new Fake(okReply);
+            var cl = new Classifier(OpenAI(f));
+            var expect = c.GetProperty("expect");
+            var e = await Assert.ThrowsAnyAsync<ClassifierException>(() => cl.EvaluateAsync("x", Qs(c.GetProperty("questions"))));
+            Assert.Equal(Str(expect, "error"), e.Message);
+            Assert.Equal(expect.TryGetProperty("unsupported", out var u) && u.GetBoolean(), e is ClassifierUnsupportedException);
+            Assert.Empty(f.Bodies);
+        }
+
+        foreach (var c in fx.GetProperty("captureCases").EnumerateArray())
+        {
+            var env = c.GetProperty("env").EnumerateObject().ToList();
+            var saved = env.ToDictionary(p => p.Name, p => Environment.GetEnvironmentVariable(p.Name));
+            try
+            {
+                foreach (var p in env) Environment.SetEnvironmentVariable(p.Name, p.Value.GetString());
+                var f = new Fake(okReply);
+                var o = OpenAI(f);
+                o.ApiKeyEnv = Str(c, "apiKeyEnv");
+                await new Classifier(o).EvaluateAsync("x", qs);
+                var got = f.Requests[0].Headers.Authorization?.ToString();
+                Assert.True(Str(c, "expectAuthorization") == got, $"{Str(c, "name")}: Authorization = {got ?? "<absent>"}");
+            }
+            finally
+            {
+                foreach (var (k, v) in saved) Environment.SetEnvironmentVariable(k, v);
+            }
+        }
+    }
+
     [Fact]
     public async Task CloudflareErrorKeepsTheAccountTemplate()
     {

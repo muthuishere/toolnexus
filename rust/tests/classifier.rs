@@ -1140,6 +1140,154 @@ async fn cloudflare_replies_fixture() {
     }
 }
 
+/// SPEC §8B Decisions wire (#157): request bytes, reply normalisation,
+/// preflight errors and key routing for the `openai` backend.
+#[tokio::test]
+async fn openai_decisions_fixture() {
+    let fx = backend_fixture("openai-decisions.json");
+    let qs = questions_of(&fx["questions"]);
+    let ok_reply = fx["replyCases"][0]["reply"].to_string();
+
+    for c in fx["requestCases"].as_array().unwrap() {
+        let name = c["name"].as_str().unwrap();
+        let r = ok_reply.clone();
+        let (srv, seen) = fake(move |_, _| ok(&r)).await;
+        let cl = create_classifier(ClassifierOptions {
+            backend: ClassifierBackend::OpenAi,
+            base_url: format!("{}/v1", srv.url),
+            model: c["model"].as_str().unwrap_or("").into(),
+            retries: -1,
+            ..Default::default()
+        })
+        .unwrap();
+        cl.evaluate(fixture_state(&c["state"]), &qs)
+            .await
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
+        let g = seen.lock().unwrap();
+        assert_eq!(g[0].raw, c["expect"]["body"].as_str().unwrap(), "{name}");
+        assert_eq!(g[0].path, "/v1/decisions", "{name}");
+        assert!(
+            !g[0].headers.contains_key("typesafe-danger-zone-images"),
+            "{name}: danger-zone header sent"
+        );
+    }
+
+    for c in fx["replyCases"].as_array().unwrap() {
+        let name = c["name"].as_str().unwrap();
+        let ex = &c["expect"];
+        if let Some(n) = ex["normalized"].as_str() {
+            let got = decisions_reply(c["reply"].to_string().as_bytes(), &qs).unwrap();
+            assert_eq!(got, n, "{name}");
+        }
+        let reply = c["reply"].to_string();
+        let (srv, _) = fake(move |_, _| ok(&reply)).await;
+        let cl = create_classifier(ClassifierOptions {
+            backend: ClassifierBackend::OpenAi,
+            base_url: srv.url.clone(),
+            retries: -1,
+            ..Default::default()
+        })
+        .unwrap();
+        let res = cl.evaluate(json!("x"), &qs).await;
+        if let Some(e) = ex["error"].as_str() {
+            assert_eq!(res.unwrap_err().0, e, "{name}");
+            continue;
+        }
+        let d = res.unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(d.model, ex["model"].as_str().unwrap(), "{name}");
+        assert_eq!(d.calibrated, ex["calibrated"].as_bool().unwrap(), "{name}");
+        for (k, v) in ex["noul"].as_object().into_iter().flatten() {
+            assert_eq!(d.noul(k).unwrap().noul, v.as_f64().unwrap(), "{name} {k}");
+        }
+        for (k, v) in ex["choice"].as_object().into_iter().flatten() {
+            assert_eq!(
+                d.choice(k).unwrap().choice,
+                v.as_str().unwrap(),
+                "{name} {k}"
+            );
+        }
+        for (k, v) in ex["score"].as_object().into_iter().flatten() {
+            assert_eq!(d.score(k).unwrap().score, v.as_f64().unwrap(), "{name} {k}");
+        }
+    }
+
+    for c in fx["errorCases"].as_array().unwrap() {
+        let name = c["name"].as_str().unwrap();
+        let r = ok_reply.clone();
+        let (srv, seen) = fake(move |_, _| ok(&r)).await;
+        let cl = create_classifier(ClassifierOptions {
+            backend: ClassifierBackend::OpenAi,
+            base_url: srv.url.clone(),
+            retries: -1,
+            ..Default::default()
+        })
+        .unwrap();
+        let e = cl
+            .evaluate(json!("x"), &questions_of(&c["questions"]))
+            .await
+            .unwrap_err();
+        assert_eq!(e.0, c["expect"]["error"].as_str().unwrap(), "{name}");
+        assert_eq!(
+            e.unsupported().is_some(),
+            c["expect"]["unsupported"].as_bool().unwrap_or(false),
+            "{name}"
+        );
+        assert!(
+            seen.lock().unwrap().is_empty(),
+            "{name}: a request was sent"
+        );
+    }
+
+    for c in fx["captureCases"].as_array().unwrap() {
+        let name = c["name"].as_str().unwrap();
+        let r = ok_reply.clone();
+        let (srv, seen) = fake(move |_, _| ok(&r)).await;
+        let env: Vec<(String, String)> = c["env"]
+            .as_object()
+            .map(|m| {
+                m.iter()
+                    .map(|(k, v)| (k.clone(), v.as_str().unwrap().to_owned()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let guard = ENV_LOCK.lock().await;
+        let prior: Vec<(String, Option<String>)> = env
+            .iter()
+            .map(|(k, _)| (k.clone(), std::env::var(k).ok()))
+            .collect();
+        for (k, v) in &env {
+            // SAFETY: serialised by ENV_LOCK.
+            unsafe { std::env::set_var(k, v) };
+        }
+        let cl = create_classifier(ClassifierOptions {
+            backend: ClassifierBackend::OpenAi,
+            base_url: format!("{}/v1", srv.url),
+            api_key_env: c["apiKeyEnv"].as_str().unwrap_or("").into(),
+            retries: -1,
+            ..Default::default()
+        })
+        .unwrap();
+        let res = cl.evaluate(json!("x"), &qs).await;
+        for (k, v) in prior {
+            // SAFETY: as above.
+            unsafe {
+                match v {
+                    Some(v) => std::env::set_var(&k, v),
+                    None => std::env::remove_var(&k),
+                }
+            }
+        }
+        drop(guard);
+        res.unwrap_or_else(|e| panic!("{name}: {e}"));
+        let g = seen.lock().unwrap();
+        assert_eq!(
+            g[0].headers.get("authorization").map(String::as_str),
+            c["expectAuthorization"].as_str(),
+            "{name}"
+        );
+    }
+}
+
 /// Process env is global and tests run in parallel: serialise the cases that set it.
 static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 

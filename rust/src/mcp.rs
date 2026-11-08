@@ -6,23 +6,27 @@
 //! named `sanitize(server)_sanitize(tool)`. One failing server is isolated:
 //! it is marked `failed` and the rest load. Port of `golang/mcp.go`.
 //!
+//! stdio servers on the frozen path run on our own JSON-RPC client
+//! ([`stdio`]); `rmcp` is kept only for remote (streamable HTTP / SSE) servers.
+//!
 //! Each `tools/call` carries a progress token, and its timeout is an IDLE
-//! timeout: a matching `notifications/progress` resets it (rmcp
-//! `reset_timeout_on_progress`). There is no absolute cap.
+//! timeout: a matching `notifications/progress` resets it. There is no
+//! absolute cap.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
+use rmcp::RoleClient;
+#[cfg(feature = "mcp-http")]
+use rmcp::ServiceExt;
 use rmcp::model::{CallToolRequestParams, ClientRequest, ContentBlock, ServerResult};
 use rmcp::service::{PeerRequestOptions, RunningService};
 #[cfg(feature = "mcp-http")]
 use rmcp::transport::StreamableHttpClientTransport;
-use rmcp::transport::TokioChildProcess;
 #[cfg(feature = "mcp-http")]
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
-use rmcp::{RoleClient, ServiceExt};
 use serde_json::{Map, Value, json};
 use tokio::sync::Mutex;
 
@@ -34,6 +38,7 @@ mod oauth;
 mod resources;
 #[cfg(feature = "mcp-http")]
 pub mod sse;
+mod stdio;
 mod wire;
 
 pub use direct::parse_skill_uri;
@@ -304,8 +309,17 @@ type Client = RunningService<RoleClient, elicit::Bridge>;
 /// One connected server's peer, for [`McpSource::resource_tools`].
 #[derive(Clone)]
 pub(crate) struct ServerConn {
-    pub(crate) peer: Arc<rmcp::Peer<RoleClient>>,
+    pub(crate) conn: Conn,
     pub(crate) timeout: Duration,
+}
+
+/// The client behind one frozen-path server.
+#[derive(Clone)]
+pub(crate) enum Conn {
+    /// A remote server, through the SDK.
+    Sdk(Arc<rmcp::Peer<RoleClient>>),
+    /// A stdio server, on our own client.
+    Stdio(Arc<stdio::StdioClient>),
 }
 
 /// The connected servers and their tools.
@@ -319,6 +333,7 @@ pub struct McpSource {
     /// adds them to the `skill` tool.
     pub skills: Vec<crate::skills::SkillDef>,
     clients: Mutex<Vec<Client>>,
+    stdio: Vec<Arc<stdio::StdioClient>>,
     direct: Vec<Arc<direct::DirectServer>>,
     servers: BTreeMap<String, ServerConn>,
 }
@@ -337,6 +352,9 @@ impl McpSource {
     pub async fn close(&self) {
         for c in self.clients.lock().await.drain(..) {
             let _ = c.cancel().await;
+        }
+        for s in &self.stdio {
+            s.close().await;
         }
         for d in &self.direct {
             d.close().await;
@@ -442,8 +460,9 @@ pub async fn load_mcp_with(config: &McpConfig, opts: McpLoadOptions) -> McpSourc
                     connect_and_list(&name, &cfg, bridge, bearer, stdio),
                 )
                 .await
-                .unwrap_or_else(|_| Err(format!("timed out after {}ms", cfg.timeout().as_millis())))
-                .map(|(c, d)| Loaded::Sdk(c, d)),
+                .unwrap_or_else(|_| {
+                    Err(format!("timed out after {}ms", cfg.timeout().as_millis()))
+                }),
                 Err(e) => Err(e),
             };
             (name, cfg, r)
@@ -454,6 +473,7 @@ pub async fn load_mcp_with(config: &McpConfig, opts: McpLoadOptions) -> McpSourc
     let mut clients = Vec::new();
     let mut servers = BTreeMap::new();
     let mut direct_servers = Vec::new();
+    let mut stdio_clients = Vec::new();
     let mut skills = Vec::new();
     while let Some(joined) = set.join_next().await {
         let Ok((name, cfg, r)) = joined else { continue };
@@ -481,10 +501,34 @@ pub async fn load_mcp_with(config: &McpConfig, opts: McpLoadOptions) -> McpSourc
                 servers.insert(
                     name.clone(),
                     ServerConn {
-                        peer,
+                        conn: Conn::Sdk(peer),
                         timeout: cfg.timeout(),
                     },
                 );
+                status.insert(name.clone(), McpStatus::Connected);
+                report(McpServerResult {
+                    name: name.clone(),
+                    status: McpStatus::Connected,
+                    tools: tools.clone(),
+                    error: None,
+                });
+                by_server.insert(name, tools);
+            }
+            Ok(Loaded::Stdio(client, defs)) => {
+                let tools: Vec<Tool> = apply_tools_filter(&name, defs, &cfg.tools, |d| {
+                    d.get("name").and_then(Value::as_str).unwrap_or("")
+                })
+                .into_iter()
+                .map(|def| stdio_tool(&name, &def, client.clone(), cfg.timeout()))
+                .collect();
+                servers.insert(
+                    name.clone(),
+                    ServerConn {
+                        conn: Conn::Stdio(client.clone()),
+                        timeout: cfg.timeout(),
+                    },
+                );
+                stdio_clients.push(client);
                 status.insert(name.clone(), McpStatus::Connected);
                 report(McpServerResult {
                     name: name.clone(),
@@ -513,41 +557,17 @@ pub async fn load_mcp_with(config: &McpConfig, opts: McpLoadOptions) -> McpSourc
         errors,
         skills,
         clients: Mutex::new(clients),
+        stdio: stdio_clients,
         direct: direct_servers,
         servers,
     }
 }
 
-/// The handed-over probe stdout, owning the child so the child lives exactly
-/// as long as the SDK transport (and is killed with it: `kill_on_drop`).
-struct HandedStdout {
-    stdout: direct::StdoutReader,
-    _child: tokio::process::Child,
-}
-
-impl tokio::io::AsyncRead for HandedStdout {
-    fn poll_read(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-        buf: &mut tokio::io::ReadBuf<'_>,
-    ) -> std::task::Poll<std::io::Result<()>> {
-        std::pin::Pin::new(&mut self.stdout).poll_read(cx, buf)
-    }
-}
-
-impl Drop for HandedStdout {
-    fn drop(&mut self) {
-        // the probe child leads its own process group: take its children too
-        #[cfg(unix)]
-        if let Some(pid) = self._child.id() {
-            unsafe { libc::killpg(pid as i32, libc::SIGKILL) };
-        }
-    }
-}
-
 enum Loaded {
     Direct(direct::Connected),
+    #[cfg_attr(not(feature = "mcp-http"), allow(dead_code))]
     Sdk(Client, Vec<rmcp::model::Tool>),
+    Stdio(Arc<stdio::StdioClient>, Vec<Value>),
 }
 
 async fn connect_and_list(
@@ -555,55 +575,42 @@ async fn connect_and_list(
     cfg: &ServerConfig,
     bridge: elicit::Bridge,
     bearer: String,
-    stdio: Option<Box<direct::StdioHandoff>>,
-) -> Result<(Client, Vec<rmcp::model::Tool>), String> {
-    let client = if let Some(h) = stdio.map(|b| *b) {
-        // SPEC §2.2a: the probe child answered discover; continue on it
-        let read = HandedStdout {
-            stdout: h.stdout,
-            _child: h.child,
-        };
-        bridge
-            .serve((read, h.stdin))
-            .await
-            .map_err(|e| e.to_string())?
-    } else if cfg.is_remote() {
+    handoff: Option<Box<direct::StdioHandoff>>,
+) -> Result<Loaded, String> {
+    if cfg.is_remote() {
         #[cfg(not(feature = "mcp-http"))]
-        let _ = bearer;
+        let _ = (bridge, bearer);
         #[cfg(not(feature = "mcp-http"))]
         return Err(format!(
             "remote server {name:?}: built without the `mcp-http` feature"
         ));
         #[cfg(feature = "mcp-http")]
         {
-            connect_remote(cfg, bridge, &bearer).await?
+            let client = connect_remote(cfg, bridge, &bearer).await?;
+            let defs = client
+                .list_all_tools()
+                .await
+                .map_err(|e| format!("list tools failed: {e}"))?;
+            return Ok(Loaded::Sdk(client, defs));
         }
+    }
+    let client = if let Some(h) = handoff {
+        // SPEC §2.2a: the probe child answered discover; continue on it
+        stdio::StdioClient::from_handoff(*h, bridge.wait_for).await?
     } else {
-        let Some((prog, args)) = cfg.command.split_first() else {
+        if cfg.command.is_empty() {
             return Err(format!("local server {name:?} has no command"));
-        };
-        let mut cmd = tokio::process::Command::new(prog);
-        cmd.args(args).envs(cfg.env.iter());
-        if let Some(cwd) = &cfg.cwd {
-            cmd.current_dir(cwd);
         }
-        let mut wrap = process_wrap::tokio::CommandWrap::from(cmd);
-        #[cfg(unix)]
-        wrap.wrap(process_wrap::tokio::ProcessGroup::leader());
-        #[cfg(windows)]
-        wrap.wrap(process_wrap::tokio::JobObject);
-        let transport = TokioChildProcess::builder(wrap)
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .map(|(t, _)| t)
-            .map_err(|e| format!("start {prog:?}: {e}"))?;
-        bridge.serve(transport).await.map_err(|e| e.to_string())?
+        stdio::StdioClient::spawn(&cfg.command, &cfg.env, cfg.cwd.as_deref(), bridge.wait_for)
+            .await?
     };
-    let defs = client
-        .list_all_tools()
-        .await
-        .map_err(|e| format!("list tools failed: {e}"))?;
-    Ok((client, defs))
+    match client.list_all("tools/list", "tools").await {
+        Ok(defs) => Ok(Loaded::Stdio(client, defs)),
+        Err(e) => {
+            client.close().await;
+            Err(format!("list tools failed: {e}"))
+        }
+    }
 }
 
 fn apply_tools_filter<T>(
@@ -783,6 +790,70 @@ fn convert_tool(
                         timeout.as_millis()
                     ))
                     .with_metadata(meta),
+                    Err(e) => ToolResult::error(e.to_string()).with_metadata(meta),
+                }
+            })
+        }),
+    }
+}
+
+/// A frozen-path stdio tool on our own client.
+fn stdio_tool(
+    server: &str,
+    def: &Value,
+    client: Arc<stdio::StdioClient>,
+    timeout: Duration,
+) -> Tool {
+    let original = def
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_owned();
+    let empty = Map::new();
+    let input = def
+        .get("inputSchema")
+        .and_then(Value::as_object)
+        .unwrap_or(&empty);
+    let server = server.to_owned();
+    // the metadata every result carries, built once
+    let mut meta = Map::new();
+    meta.insert("server".into(), json!(server));
+    Tool {
+        output_schema: None,
+        annotations: None,
+        concurrency_safe: None,
+        name: format!("{}_{}", sanitize(&server), sanitize(&original)),
+        description: def
+            .get("description")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_owned(),
+        input_schema: build_input_schema(input),
+        source: ToolSource::Mcp,
+        hints: hints_of(def),
+        execute: Arc::new(move |args, ctx| {
+            let (client, original, meta) = (client.clone(), original.clone(), meta.clone());
+            Box::pin(async move {
+                let args = match args {
+                    Value::Object(m) => Value::Object(m),
+                    _ => json!({}),
+                };
+                let r = client
+                    .call_tool(&original, args, timeout, &ctx.cancel)
+                    .await;
+                match r {
+                    Ok(mut r) => {
+                        let is_error = r.get("isError").and_then(Value::as_bool).unwrap_or(false);
+                        let structured = r
+                            .get_mut("structuredContent")
+                            .map(Value::take)
+                            .filter(|v| !v.is_null());
+                        let content = match r.get_mut("content").map(Value::take) {
+                            Some(Value::Array(a)) => a,
+                            _ => Vec::new(),
+                        };
+                        map_wire_result(is_error, structured, &content).with_metadata(meta)
+                    }
                     Err(e) => ToolResult::error(e.to_string()).with_metadata(meta),
                 }
             })

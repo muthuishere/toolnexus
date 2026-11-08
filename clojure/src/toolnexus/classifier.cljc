@@ -81,6 +81,12 @@
                  :api-key-env "AI_GATEWAY_API_KEY"
                  :wire "systemone" :images-header true
                  :supports (fn [_] {:images false})}
+   ;; OpenAI's Decisions API (#157): another wire, not a System One host.
+   "openai"     {:base-url "https://api.openai.com/v1"
+                 :model    "gpt-6-luna"
+                 :api-key-env "OPENAI_API_KEY"
+                 :wire "decisions" :images-header false
+                 :supports (fn [_] {:images true})}
    "custom"     {:base-url nil
                  :model    "jev-latest"
                  ;; No default key: a self-hosted endpoint is not TypeSafe's host,
@@ -90,8 +96,8 @@
                  :supports nil}})
 
 (def backend-names
-  "The five backend values, in the order every port's error message lists them."
-  ["typesafe" "openrouter" "cloudflare" "vercel" "custom"])
+  "The six backend values, in the order every port's error message lists them."
+  ["typesafe" "openrouter" "cloudflare" "vercel" "openai" "custom"])
 
 (def images-header
   "TypeSafe's opt-in for image (\"danger zone\") input. Sent as `true` only when
@@ -600,7 +606,7 @@
     :decisions      `:style \"static\"` only — a vector of
                     `{:state … :questions … :response <parsed body>}`
     :backend        \"typesafe\" (default) | \"openrouter\" | \"cloudflare\" |
-                    \"vercel\" | \"custom\" — a row of `backends`. An explicit
+                    \"vercel\" | \"openai\" | \"custom\" — a row of `backends`. An explicit
                     `:base-url` / `:model` / `:api-key-env` still wins.
                     `${NAME}` in the base URL expands AT CALL TIME; errors
                     name it unexpanded. `custom` requires `:base-url` and
@@ -719,6 +725,140 @@
   do it deliberately rather than by collision."
   #{:questions "questions"})
 
+;; ---------------------------------------------------------------------------
+;; the Decisions wire (SPEC §8B, issue #157)
+;; ---------------------------------------------------------------------------
+;;
+;; OpenAI's POST /v1/decisions takes the three question kinds under other names
+;; (predicate / choice / score) as an ORDERED LIST and answers in that order.
+;; Caller keys are NOT sent: they are addressing, not content.
+
+(declare classifier-unsupported)
+
+(def max-decisions-questions
+  "The Decisions API's per-request question cap."
+  400)
+
+(defn- question-by-name [questions]
+  (reduce (fn [m e] (assoc m (option-id (key e)) (val e))) {} questions))
+
+(defn- decisions-questions
+  "The question set as the Decisions API list, in ASCII key order. Every check
+  here fires before any request."
+  [c questions]
+  (when (> (count questions) max-decisions-questions)
+    (throw (ex-info (str "classifier: the decisions wire takes at most " max-decisions-questions
+                         " questions, got " (count questions))
+                    {:wire "decisions"})))
+  (let [by-name (question-by-name questions)]
+    (mapv (fn [k]
+            (let [q    (get by-name k)
+                  t    (:type q)
+                  crit (:criteria q)]
+              (cond
+                (= "noul" t)
+                {:type "predicate"
+                 :instructions (str (:instructions q)
+                                    (when (contains? q :criteria)
+                                      (str "\n\nTrue means: " (get crit "true")
+                                           "\nFalse means: " (get crit "false"))))}
+
+                (= "choice" t)
+                (let [n (count crit)]
+                  (when (or (< n 2) (> n max-choice-options))
+                    (throw (question-error k (str "the decisions wire needs 2.." max-choice-options
+                                                  " choice options, got " n)
+                                           {:wire "decisions"})))
+                  {:type "choice" :instructions (:instructions q)
+                   :choices (mapv (fn [[id d]]
+                                    (cond-> {:value id}
+                                      (not= "" (str d)) (assoc :description d)))
+                                  (sort-by first (map (fn [e] [(option-id (key e)) (val e)]) crit)))})
+
+                (= "score" t)
+                {:type "score" :instructions (:instructions q)
+                 :levels (mapv (fn [l] {:label l}) crit)}
+
+                :else
+                (throw (classifier-unsupported (:backend c) (:model c)
+                                               (str "raw question type " (pr-str (str t))))))))
+          (sort (keys by-name)))))
+
+(defn- decisions-input
+  "A string state verbatim, any other state as its canonical JSON text; with
+  images, one user message holding that text then the images as data URLs."
+  [{:keys [state images]}]
+  (let [text (if (string? state) state (json/write-str state))]
+    (if (empty? images)
+      text
+      [{:role "user"
+        :content (into [{:type "input_text" :text text}]
+                       (map (fn [im] {:type "input_image"
+                                      :image_url (str "data:image/" (:format im) ";base64," (:data im))}))
+                       images)}])))
+
+(defn- decisions-value
+  "A choice value or a level index as the §8B key: a string as written, a
+  boolean as \"true\"/\"false\", a number in its shortest form."
+  [v]
+  (cond (string? v) v
+        (boolean? v) (if v "true" "false")
+        (and (number? v) (== v (long v))) (str (long v))
+        :else (str v)))
+
+(defn decisions-reply
+  "A Decisions API reply (the raw body) read back into a System One-shaped body,
+  as canonical JSON text, so decode, validation and the cache are the one path.
+  `calibrated` is false: a Decisions model is not a System One model."
+  [body questions]
+  (let [malformed #(ex-info "classifier: decisions: malformed reply" {:wire "decisions"})
+        r       (try (json/read-str (str body) {:key-fn str}) (catch Throwable _ nil))
+        answers (when (map? r) (get r "answers"))
+        _       (when-not (sequential? answers) (throw (malformed)))
+        by-name (question-by-name questions)
+        ks      (vec (sort (keys by-name)))
+        _       (when (not= (count answers) (count ks))
+                  (throw (ex-info (str "classifier: decisions: " (count answers) " answers for "
+                                       (count ks) " questions")
+                                  {:wire "decisions"})))
+        num     (fn [v] (if (number? v) v 0))
+        out     (reduce
+                 (fn [m [k a]]
+                   (when-not (map? a) (throw (malformed)))
+                   (let [q     (get by-name k)
+                         at    (get a "type")
+                         _     (when (= "refusal" at)
+                                 (throw (ex-info (str "classifier: decisions: question " (pr-str k)
+                                                      " was refused")
+                                                 {:wire "decisions"})))
+                         want  (get {"noul" "predicate" "choice" "choice" "score" "score"} (:type q))
+                         _     (when (not= want at)
+                                 (throw (ex-info (str "classifier: decisions: answer " (pr-str k)
+                                                      " is a " at " answer, not " want)
+                                                 {:wire "decisions"})))
+                         probs (reduce (fn [pm p]
+                                         (assoc pm (decisions-value (get p "value"))
+                                                (num (get p "probability"))))
+                                       {} (get a "probabilities"))]
+                     (assoc m k
+                            (case (:type q)
+                              "noul"   {"type" "noul" "noul" (num (get a "probability"))}
+                              "choice" {"type" "choice" "choice" (decisions-value (get a "choice"))
+                                        "probabilities" probs
+                                        "confidence" (num (get a "confidence"))}
+                              "score"  {"type" "score" "score" (num (get a "score"))
+                                        "legend" (into {} (map-indexed (fn [i l] [(str i) l])
+                                                                       (:criteria q)))
+                                        "probabilities" probs
+                                        "confidence" (num (get a "confidence"))}))))
+                 {} (map vector ks answers))
+        usage   (get r "usage")]
+    (json/write-str {"answers"    out
+                     "calibrated" false
+                     "model"      (str (get r "model"))
+                     "usage"      {"input_tokens"  (long (num (get usage "input_tokens")))
+                                   "output_tokens" (long (num (get usage "output_tokens")))}})))
+
 (defn- wire-body
   "The request for the backend's wire, then the §8 Gap 1 pipeline in §8 order —
 
@@ -731,7 +871,13 @@
   `canonical-request`, so the `model` + `questions` region is the claimed one."
   [c prepared questions]
   (let [{:keys [state images assets]} prepared
-        base   (if (= "cloudflare" (:wire c))
+        base   (cond
+                 (= "decisions" (:wire c))
+                 {:model (:model c)
+                  :input (decisions-input prepared)
+                  :questions (decisions-questions c questions)}
+
+                 (= "cloudflare" (:wire c))
                  {:model (:model c)
                   :input (cond-> {:questions questions :state state}
                            (seq images)
@@ -739,6 +885,7 @@
                                                   (str "data:image/" (:format im)
                                                        ";base64," (:data im)))
                                                 images)))}
+                 :else
                  (cond-> {:model (:model c) :questions questions :state state}
                    (seq assets) (assoc :assets assets)))
         params (apply dissoc (:request-params c) forbidden-request-params)
@@ -805,7 +952,10 @@
   ([c body] (post! c body nil))
   ([c body extra-headers]
    (let [base     (str/replace (str (:base-url c)) #"/+$" "")
-         endpoint (if (= "cloudflare" (:wire c)) base (str base "/systemone"))
+         endpoint (case (:wire c)
+                    "cloudflare" base
+                    "decisions"  (str base "/decisions")
+                    (str base "/systemone"))
          url      (if (str/includes? endpoint "${") (env/expand endpoint) endpoint)
          headers  (request-headers c url extra-headers)
          budget   (or (:retries c) 2)
@@ -1274,6 +1424,9 @@
         (let [extra (when (and (seq (:images prepared)) (:images-header? c))
                       {(str/lower-case images-header) "true"})
               body  (post! c (wire-body c prepared questions) extra)
+              ;; Normalised to the System One shape right after the post, so
+              ;; decode, validation and the cache are the one path.
+              body  (if (= "decisions" (:wire c)) (decisions-reply body questions) body)
               [parsed raw] (if (= "cloudflare" (:wire c))
                              (let [r (unwrap-cloudflare body)] [r (json/write-str r)])
                              [(json/read-str body {:key-fn str}) body])

@@ -127,7 +127,8 @@ Every default below is a **proposed default, owner to confirm**
 
 - `:backend`: `"typesafe"` (default) · `"openrouter"` (`typesafe/jev-1.14`) · `"cloudflare"` (`/ai/run`
   envelope; `${CLOUDFLARE_ACCOUNT_ID}` in the URL expands at call time, errors name it unexpanded)
-  · `"vercel"` · `"custom"` (requires `:base-url` and `:supports`). The table is data:
+  · `"vercel"` · `"openai"` (OpenAI Decisions API, `gpt-6-luna`, `OPENAI_API_KEY`; POSTs
+  `{baseUrl}/decisions`, answers are `:calibrated false`, raw questions are unsupported) · `"custom"` (requires `:base-url` and `:supports`). The table is data:
   `jev/backends`; `:supports {:images true}` overrides it per classifier.
 - Images (style `systemone` only): content-part maps in the state are lifted into `assets`
   (cloudflare: data URLs). PNG/JPEG, 280–1568 px a side, ≤ 16 MiB each and 32 MiB per request —

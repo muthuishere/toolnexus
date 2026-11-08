@@ -150,7 +150,7 @@ ClassifierStyle = Literal["systemone", "llm", "custom", "static"]
 #: model and api_key_env AS A UNIT (D5, #91, ADR 0027) — mixing TypeSafe's model
 #: alias with OpenRouter's base URL is the documented 404 in issue #91, and it
 #: used to be discoverable only at request time.
-ClassifierBackend = Literal["typesafe", "openrouter", "cloudflare", "vercel", "custom"]
+ClassifierBackend = Literal["typesafe", "openrouter", "cloudflare", "vercel", "openai", "custom"]
 
 #: TypeSafe's required opt-in for image ("danger zone") input.
 IMAGES_HEADER = "TypeSafe-Danger-Zone-Images"
@@ -178,7 +178,7 @@ class ClassifierBackendPreset:
     base_url: str
     model: str
     api_key_env: str
-    #: ``"systemone"`` or ``"cloudflare"``.
+    #: ``"systemone"``, ``"cloudflare"`` or ``"decisions"``.
     wire: str
     #: Send ``TypeSafe-Danger-Zone-Images: true`` when a request carries images.
     images_header: bool
@@ -209,6 +209,11 @@ CLASSIFIER_BACKENDS: dict[str, ClassifierBackendPreset] = {
     "vercel": ClassifierBackendPreset(
         "https://ai-gateway.vercel.sh/typesafe/v1", "typesafe-ai/jev", "AI_GATEWAY_API_KEY",
         "systemone", True, lambda m: ClassifierSupports(images=False),
+    ),
+    # OpenAI's Decisions API (#157): its own wire, POST {base}/decisions.
+    "openai": ClassifierBackendPreset(
+        "https://api.openai.com/v1", "gpt-6-luna", "OPENAI_API_KEY",
+        "decisions", False, lambda m: ClassifierSupports(images=True),
     ),
     "custom": ClassifierBackendPreset(
         "", DEFAULT_CLASSIFIER_MODEL, "", "systemone", True, None,
@@ -983,7 +988,13 @@ class Classifier:
         """
         qs = {k: _question_wire(k, q) for k, q in questions.items()}
         body: dict[str, Any]
-        if self.preset.wire == "cloudflare":
+        if self.preset.wire == "decisions":
+            body = {
+                "model": self.model,
+                "input": _decisions_input(state, images),
+                "questions": _decisions_questions(self.backend, self.model, questions),
+            }
+        elif self.preset.wire == "cloudflare":
             inp: dict[str, Any] = {"questions": qs, "state": state}
             if images:
                 inp["images"] = [f"data:image/{im.format};base64,{im.data}" for im in images]
@@ -1042,6 +1053,9 @@ class Classifier:
         if self.preset.wire == "cloudflare":
             parsed = _unwrap_cloudflare(parsed)
             payload = canonical_json(parsed)
+        elif self.preset.wire == "decisions":
+            payload = _decisions_reply(parsed, questions)
+            parsed = json.loads(payload)
         d = _decision_from_wire(parsed)
         verr = validate_decision(questions, d)
         if validate and verr is not None:
@@ -1066,7 +1080,9 @@ class Classifier:
         # so an account id in a templated URL never reaches an error. ``url`` is
         # what is dialled, expanded at call time.
         endpoint = self.base_url.rstrip("/")
-        if self.preset.wire != "cloudflare":
+        if self.preset.wire == "decisions":
+            endpoint += "/decisions"
+        elif self.preset.wire != "cloudflare":
             endpoint += "/systemone"
         url = _expand_env(endpoint)
         retries = self.retries if self.retries > 0 else _DEFAULT_RETRIES
@@ -1245,7 +1261,7 @@ def create_classifier(
     if backend_name not in CLASSIFIER_BACKENDS:
         raise ClassifierError(
             f'classifier: unknown backend "{backend}" (want "typesafe", "openrouter", '
-            '"cloudflare", "vercel" or "custom")'
+            '"cloudflare", "vercel", "openai" or "custom")'
         )
     if backend_name == "custom" and style == "systemone" and (not base_url or supports is None):
         raise ClassifierError('classifier: backend "custom" requires baseUrl and supports')
@@ -1436,6 +1452,132 @@ def _image_size(fmt: str, b: bytes) -> Optional[tuple[int, int]]:
             return (b[i + 7] << 8) | b[i + 8], (b[i + 5] << 8) | b[i + 6]
         i += 2 + ((b[i + 2] << 8) | b[i + 3])
     return None
+
+
+# The Decisions API wire (SPEC §8B "Decisions wire", issue #157). OpenAI's POST
+# /v1/decisions takes the same three question kinds under other names (predicate
+# / choice / score) as an ORDERED LIST and answers in that order. These map a §8B
+# question set onto that list and read the answers back into a System One-shaped
+# body, so decode, validation and the cache stay one path.
+
+#: The Decisions API's per-request question cap.
+MAX_DECISIONS_QUESTIONS = 400
+_MAX_DECISIONS_CHOICES = 255
+
+
+def _decisions_questions(backend: str, model: str, questions: Mapping[str, Question]) -> list[dict[str, Any]]:
+    """The question list, in ASCII key order. Caller keys are NOT sent: they are
+    addressing, not content. Every check fires before any request."""
+    if len(questions) > MAX_DECISIONS_QUESTIONS:
+        raise ClassifierError(
+            f"classifier: the decisions wire takes at most {MAX_DECISIONS_QUESTIONS} questions, got {len(questions)}"
+        )
+    out: list[dict[str, Any]] = []
+    for k in sorted(questions):
+        q = questions[k]
+        if isinstance(q, NoulQuestion):
+            instr = q.instructions
+            if q.criteria is not None:
+                instr += f"\n\nTrue means: {q.criteria.true}\nFalse means: {q.criteria.false}"
+            out.append({"type": "predicate", "instructions": instr})
+        elif isinstance(q, ChoiceQuestion):
+            if len(q.criteria) < 2:
+                raise ClassifierError(
+                    f'classifier: question "{k}": the decisions wire needs 2..{_MAX_DECISIONS_CHOICES} '
+                    f"choice options, got {len(q.criteria)}"
+                )
+            choices: list[dict[str, Any]] = []
+            for cid in sorted(q.criteria):
+                c: dict[str, Any] = {"value": cid}
+                if q.criteria[cid]:
+                    c["description"] = q.criteria[cid]
+                choices.append(c)
+            out.append({"type": "choice", "instructions": q.instructions, "choices": choices})
+        elif isinstance(q, ScoreQuestion):
+            levels = [{"label": lv} for lv in q.criteria]
+            out.append({"type": "score", "instructions": q.instructions, "levels": levels})
+        elif isinstance(q, RawQuestion):
+            raise ClassifierUnsupported(backend, model, f'raw question type "{q.type}"')
+        else:
+            raise ClassifierError(f'classifier: question "{k}": unsupported question')
+    return out
+
+
+def _decisions_input(state: Any, images: Optional[Sequence["_LiftedImage"]]) -> Any:
+    """A string state verbatim, any other state as its canonical JSON text; with
+    images, one user message holding that text then the images as data URLs."""
+    txt = state if isinstance(state, str) else canonical_json(state).decode("utf-8")
+    if not images:
+        return txt
+    content: list[dict[str, Any]] = [{"type": "input_text", "text": txt}]
+    for im in images:
+        content.append({"type": "input_image", "image_url": f"data:image/{im.format};base64,{im.data}"})
+    return [{"role": "user", "content": content}]
+
+
+def _decisions_value(v: Any) -> str:
+    """A choice value or level index as the §8B key: a string as written, a bool
+    as ``true``/``false``, a number in its shortest form."""
+    if isinstance(v, str):
+        return v
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if isinstance(v, float) and v.is_integer():
+        return str(int(v))
+    return str(v)
+
+
+def _num(v: Any) -> Any:
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return 0
+    return v
+
+
+def _decisions_reply(reply: Any, questions: Mapping[str, Question]) -> bytes:
+    """A Decisions API reply as a System One-shaped body (canonical JSON).
+    ``calibrated`` is False: a Decisions model is not a System One model."""
+    malformed = ClassifierError("classifier: decisions: malformed reply")
+    if not isinstance(reply, dict) or not isinstance(reply.get("answers"), list):
+        raise malformed
+    keys = sorted(questions)
+    got = reply["answers"]
+    if len(got) != len(keys):
+        raise ClassifierError(f"classifier: decisions: {len(got)} answers for {len(keys)} questions")
+    want_type = {"noul": "predicate", "choice": "choice", "score": "score"}
+    answers: dict[str, Any] = {}
+    for k, a in zip(keys, got):
+        if not isinstance(a, dict):
+            raise malformed
+        t = a.get("type")
+        if t == "refusal":
+            raise ClassifierError(f'classifier: decisions: question "{k}" was refused')
+        q = questions[k]
+        want = want_type.get(getattr(q, "type", ""), "")
+        if t != want:
+            raise ClassifierError(f'classifier: decisions: answer "{k}" is a {t} answer, not {want}')
+        probs = {
+            _decisions_value(p.get("value")): _num(p.get("probability"))
+            for p in (a.get("probabilities") or [])
+            if isinstance(p, dict)
+        }
+        if isinstance(q, NoulQuestion):
+            answers[k] = {"type": "noul", "noul": _num(a.get("probability"))}
+        elif isinstance(q, ChoiceQuestion):
+            answers[k] = {"type": "choice", "choice": _decisions_value(a.get("choice")),
+                          "probabilities": probs, "confidence": _num(a.get("confidence"))}
+        elif isinstance(q, ScoreQuestion):
+            answers[k] = {"type": "score", "score": _num(a.get("score")),
+                          "legend": {str(i): lv for i, lv in enumerate(q.criteria)},
+                          "probabilities": probs, "confidence": _num(a.get("confidence"))}
+    usage = reply.get("usage") if isinstance(reply.get("usage"), dict) else {}
+    model = reply.get("model")
+    return canonical_json({
+        "answers": answers,
+        "calibrated": False,
+        "model": model if isinstance(model, str) else "",
+        "usage": {"input_tokens": int(_num(usage.get("input_tokens"))),
+                  "output_tokens": int(_num(usage.get("output_tokens")))},
+    })
 
 
 def _cloudflare_cause(env: Any) -> str:

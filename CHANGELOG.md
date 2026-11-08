@@ -29,6 +29,24 @@ before `onError` runs, in `run`, `ask` and `stream`. `onError` still has the fin
 - In-process clients have no wire and emit no retry event.
 
 Spec: `SPEC.md` § Streaming and § Resilience; `openspec/changes/add-retry-stream-event`.
+**Classifier: an `openai` backend on OpenAI's Decisions API** (issue #157). `createClassifier({backend:
+"openai"})` sends the same noul / choice / score questions to `POST https://api.openai.com/v1/decisions`
+(`gpt-6-luna`) and returns the same `Decision` as every other backend. A front end such as jevx can now
+offer an `openai` profile type without its own adapter. Every shared option applies unchanged (baseUrl,
+headers, timeout, httpClient, retries, onError, requestParams, bodyTransform, cache, onMetric).
+`OPENAI_API_KEY` goes only to `api.openai.com` over https (the #155 rule). Images go as `input_image`
+data URLs. Caller keys are still never sent: questions travel in key order and answers are read back by
+position. A `refusal` answer is an error, never a "no". Three things this wire cannot take fail before
+any request: raw questions such as `box`, a one-option choice, and more than 400 questions.
+**Not done:** decisions from this backend report `calibrated: false` until calibration is measured, so
+thresholds tuned on Jev do not transfer. The Decisions API has no batch call, so `states().evaluate`
+still fans out one request per state. There is no model catalogue (#158). OpenRouter's and Vercel's
+Decisions routes have no preset yet; they work today with a `baseUrl` override and a named `apiKeyEnv`.
+The wire was checked live against `gpt-6-luna` from Go, Python and Rust (yes/no, pick-one and
+score). Every port's mock-kit suite also covers it through `tools/mock-llm`'s `/v1/decisions`.
+Tracked in `openspec/changes/add-classifier-openai-decisions`. Shared fixture
+`examples/judge/backends/openai-decisions.json`. Docs: an "OpenAI (Decisions API)" section on the judge
+backends page and an openai recipe (yes/no, pick-one, score) in the judge cookbook, in all eight languages.
 
 ### Memory hierarchy and dreaming
 
@@ -117,6 +135,37 @@ and media engine against it, in its normal test command. Docs: cookbook "Run wit
   branch, so port-level Decisions cases land with that change. The existing in-process unit fakes
   stay as they are. ACP cancel is not exercised in elixir (#169) or clojure (#170), which lack it;
   clojure has no network streaming, so its suite has no streaming case. The benchmark's own mock (`benchmarks/mock_llm.py`) is unchanged.
+
+**Faster requests and cold starts in python, js, java, csharp and rust** (`openspec/changes/speed-up-request-path`).
+Measured against a no-framework floor, most of our per-request time was waiting, not computing: a new
+TCP connection per LLM call, a thread hand-off per MCP stdio line, an OS proxy lookup per call, and SDK
+code loaded only after the MCP child was up. Fixing those, against the shared benchmark (median p50
+per request, before → after, interleaved with a clean HEAD build on one machine): python 1.35 → 0.96 ms,
+js 3.28 → ~0.55 ms, java 2.89 → 2.54 ms (0.88 ms once the JIT is warm) with init 358 → 180 ms, csharp
+init 93 → 62 ms. These numbers are from a busy machine; the standing page changes only after a quiet re-run.
+
+- **python, js:** the default LLM transport keeps the connection open. A connection the server dropped
+  while idle is replaced before use; a request that failed after it was sent is never re-sent, so a
+  model call cannot be billed twice. js follows redirects from the target and leaves a host-installed
+  undici dispatcher in charge. It steps aside, exactly as before, when a proxy env var applies or you pass
+  your own transport/`fetch`. js uses it on Node only; Bun, Deno and browsers keep the platform `fetch`.
+- **python, csharp behaviour change:** the proxy decision is cached per scheme and host, so a system
+  proxy changed while the process runs is not picked up. Python's `urllib` already read it once per process.
+- **java:** drops `jackson-databind` 2.x; Jackson 3, which the MCP SDK already needs, is the only JSON
+  library. JSON output is byte-identical (new golden test). If you used the Jackson 2 that toolnexus
+  brought in transitively, declare it yourself.
+- **rust:** stdio MCP servers now run on our own client instead of rmcp: callers write straight to the
+  child's pipe and one reader routes replies by id. A `tools/call` fell from ~30 to ~17 µs; steady-state
+  p50 0.265 → 0.22 ms, ahead of AutoAgents and level with golang (golang still leads by ~10 µs under
+  heavy load). `Client::run_ctx` now runs the turn on a tokio worker thread. Wire changes on the
+  pre-2026 stdio path, all bringing rust in line with golang and SPEC §2: `initialize` offers
+  `2025-11-25` (rmcp sent `2026-07-28`) with `clientInfo` `toolnexus`; caller cancellation now sends
+  `notifications/cancelled`; a freshly spawned server's stderr passes through (§2.3); close kills the
+  whole process group after 3 s; a tool with a non-object `inputSchema` no longer fails the whole list.
+  rmcp remains for remote (HTTP/SSE) servers and the serve side; the `rmcp/transport-child-process`
+  feature is dropped.
+- **Not done:** golang needed nothing: it measured within ~8 µs of the floor. elixir and clojure are out
+  of scope (#168 tracks clojure).
 
 ## 0.27.0 — 2026-11-08
 

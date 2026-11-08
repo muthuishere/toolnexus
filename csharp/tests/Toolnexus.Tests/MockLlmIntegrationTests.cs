@@ -241,6 +241,17 @@ public class MockLlmIntegrationTests : IClassFixture<MockLlmServer>
     }
 
     [Fact]
+    public async Task Classifier_OpenAiBackend_DecisionsWire()
+    {
+        if (Skip()) return;
+        await AssertClassifier(new Classifier(new ClassifierOptions
+        {
+            Backend = ClassifierBackend.OpenAI, BaseUrl = Base,
+            ApiKeyEnv = "TN_MOCK_UNSET_KEY", OnError = _ => LlmClient.Tier.Fail,
+        }));
+    }
+
+    [Fact]
     public async Task Media_EveryVerbAndAnAsyncFailure()
     {
         if (Skip()) return;

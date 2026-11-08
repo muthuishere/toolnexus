@@ -62,7 +62,8 @@ type ClassifierBackendPreset struct {
 	BaseURL   string
 	Model     string
 	APIKeyEnv string
-	// Wire is ClassifierWireSystemOne or ClassifierWireCloudflare.
+	// Wire is ClassifierWireSystemOne, ClassifierWireCloudflare or
+	// ClassifierWireDecisions.
 	Wire string
 	// ImagesHeader: send ImagesHeader: true when a request carries images.
 	ImagesHeader bool
@@ -85,6 +86,8 @@ var ClassifierBackends = map[ClassifierBackend]ClassifierBackendPreset{
 		func(m string) ClassifierSupports { return ClassifierSupports{Images: strings.Contains(m, "clef")} }},
 	BackendVercel: {"https://ai-gateway.vercel.sh/typesafe/v1", "typesafe-ai/jev", "AI_GATEWAY_API_KEY",
 		ClassifierWireSystemOne, true, func(string) ClassifierSupports { return ClassifierSupports{} }},
+	BackendOpenAI: {"https://api.openai.com/v1", "gpt-6-luna", "OPENAI_API_KEY",
+		ClassifierWireDecisions, false, func(string) ClassifierSupports { return ClassifierSupports{Images: true} }},
 	BackendCustom: {"", DefaultClassifierModel, "", ClassifierWireSystemOne, true, nil},
 }
 
@@ -736,7 +739,17 @@ func (c *Classifier) wireBody(p preparedRequest, questions map[string]Question) 
 		qs[k] = q.wire()
 	}
 	var b map[string]any
-	if c.preset.Wire == ClassifierWireCloudflare {
+	if c.preset.Wire == ClassifierWireDecisions {
+		_, list, err := decisionsQuestions(c.backend, c.opts.Model, questions)
+		if err != nil {
+			return nil, err
+		}
+		input, err := decisionsInput(p)
+		if err != nil {
+			return nil, err
+		}
+		b = map[string]any{"model": c.opts.Model, "input": input, "questions": list}
+	} else if c.preset.Wire == ClassifierWireCloudflare {
 		input := map[string]any{"questions": qs, "state": p.state}
 		if len(p.imgs) > 0 {
 			urls := make([]any, len(p.imgs))
@@ -853,8 +866,13 @@ func (c *Classifier) evaluateWire(ctx context.Context, state any, questions map[
 	if err != nil {
 		return Decision{}, err
 	}
-	if c.preset.Wire == ClassifierWireCloudflare {
+	switch c.preset.Wire {
+	case ClassifierWireCloudflare:
 		if body, err = unwrapCloudflare(body); err != nil {
+			return Decision{}, err
+		}
+	case ClassifierWireDecisions:
+		if body, err = decisionsReply(body, questions); err != nil {
 			return Decision{}, err
 		}
 	}

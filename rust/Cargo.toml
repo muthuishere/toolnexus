@@ -37,7 +37,7 @@ serde_json = { version = "1", features = ["raw_value"] }
 thiserror = "2"
 yaml-rust2 = "0.13"
 tokio-util = "0.7"
-rmcp = { version = "3.8", default-features = false, features = ["client", "transport-child-process"] }
+rmcp = { version = "3.8", default-features = false, features = ["client"] }
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "stream", "json"] }
 regex = "1"
 base64 = "0.22"

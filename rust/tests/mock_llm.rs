@@ -331,6 +331,13 @@ async fn classifier_cloudflare() {
 }
 
 #[tokio::test]
+async fn classifier_openai_decisions() {
+    let _g = lock().lock().await;
+    let m = mock_or_skip!();
+    check_classifier(ClassifierBackend::OpenAi, m.base.clone()).await;
+}
+
+#[tokio::test]
 async fn media_every_verb_and_async_failure() {
     let _g = lock().lock().await;
     let m = mock_or_skip!();
