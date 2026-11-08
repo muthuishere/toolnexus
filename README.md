@@ -85,9 +85,8 @@ port's API reference.
 ## Benchmarks
 
 Measured against 21 frameworks on a zero-cost mock model, per language. Honest summary: **lowest
-per-request overhead over MCP in Python, JavaScript, C# and Rust, level with Eino in Go, and on the JVM 5% behind
-LangChain4j in the five-round table but ahead of it (1.63 vs 1.84 ms p50) in a separate 7-round sitting after
-the in-house Java stdio MCP client (#204)**. Every row, loss included: [Nov 2026 standing](https://muthuishere.github.io/toolnexus/standing-2026-11/).
+per-request overhead over MCP in Python, JavaScript, C# and Rust, level with Eino in Go, and level with LangChain4j on the JVM
+(2.15 vs 2.17 ms p50, 141 vs 140 MB, starting faster at 174 vs 259 ms)**. Every row, loss included: [Nov 2026 standing](https://muthuishere.github.io/toolnexus/standing-2026-11/).
 
 ## What it is not
 

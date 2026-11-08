@@ -10,6 +10,13 @@ GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
 
 - **Docs site: new "Reference" theme and the Toolnexus name.** The docs at muthuishere.github.io/toolnexus now use Source Serif 4 for headings and the hero, Source Sans 3 for text and JetBrains Mono for code, with a deep-green accent and matched light and dark themes (body text ≥ 11:1 contrast in both). Fonts are self-hosted, so the static site makes no third-party font calls. Code blocks, section rules, small-caps labels and a linked eight-language strip on the home page follow the same reference-book style. The product is written "Toolnexus" in titles and prose; package names, imports, commands and URLs stay lowercase `toolnexus`. Generated API reference pages are unchanged.
 
+**Benchmarks: one Java result (docs only).** The JVM rows were re-run on released 0.28.0 (with the in-house
+Java stdio MCP client, #204) by the same method as every other row: five alternating rounds, load below 4 at
+each start, medians (sitting `2026-11-08-quiet-0.28-java` in `benchmarks/results-2026-11.json`, replacing the
+pre-#204 JVM rows). Over MCP, toolnexus Java is **level with LangChain4j**: p50 2.15 vs 2.17 ms, RSS 141 vs
+140 MB, and it starts faster (init 174 vs 259 ms). This supersedes the 0.28.0 notes below that put Java "5%
+behind" in one sitting and ahead (1.63 vs 1.84 ms) in a separate 7-round one; that separate sitting is withdrawn.
+
 ## 0.28.0 — 2026-11-08
 
 **Upgrading — read this first.**

@@ -23,9 +23,9 @@ The per-language tables below are the August 2026 sitting. The current numbers a
 2026-11-08 re-run of the 0.28.0 candidate (five interleaved rounds, load < 4) on the
 [Nov 2026 standing page](/toolnexus/standing-2026-11/). In that run Toolnexus has the lowest
 per-request overhead over MCP in **Python, JavaScript, C# and Rust**, is **level with Eino in Go**, and is
-**5% behind LangChain4j on the JVM** (2.28 vs 2.17 ms p50) while starting faster than it. In a separate quiet 7-round sitting after the in-house Java stdio MCP client ([#204](https://github.com/muthuishere/toolnexus/pull/204)), Java
-measured **1.63 vs 1.84 ms p50** (init 137 vs 220 ms) against LangChain4j; that sitting is reported separately,
-not blended into the five-round medians.
+**level with LangChain4j on the JVM** (released 0.28.0 with the in-house Java stdio MCP client,
+[#204](https://github.com/muthuishere/toolnexus/pull/204), re-run the same way: 2.15 vs 2.17 ms p50, 141 vs
+140 MB) while starting faster than it (174 vs 259 ms).
 </Aside>
 
 ## TL;DR
@@ -363,7 +363,7 @@ competitor installs in its own isolated venv/module (Toolnexus from the local re
 ## Verdict
 
 In the **August** sitting, on pure **framework overhead** for a fixed MCP tool-calling scenario, Toolnexus was the **lowest**
-in Python, JavaScript, Go and Java (the November five-round re-run puts Java 5% behind LangChain4j, a later 7-round sitting after #204 puts it ahead, and Go level with Eino; see the
+in Python, JavaScript, Go and Java (the November re-run puts Java level with LangChain4j and Go level with Eino; see the
 [standing page](/toolnexus/standing-2026-11/)), and **within noise of the fastest** in C# and Elixir — where a
 lighter native-tool competitor edges it by hundredths of a millisecond at a floor where a real
 model call is 100–1000× larger. What holds in **every** language: Toolnexus does real MCP, carries
