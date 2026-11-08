@@ -24,8 +24,8 @@ import (
 type MediaStyle struct {
 	// Label is the client name in messages (JSON "name"); default "style".
 	Label string `json:"name,omitempty"`
-	// CLI is set only on a built-in CLI preset (MediaStyleGrokCli,
-	// MediaStyleCodexCli): the CLI client that serves the style.
+	// CLI is set only on a built-in CLI preset (MediaStyleXaiGrokCli,
+	// MediaStyleOpenAICodexCli): the CLI client that serves the style.
 	CLI string `json:"-"`
 	cfg MediaConfig
 	// BaseURL is joined with each request path; a trailing "/" is trimmed.
@@ -82,28 +82,28 @@ type MediaPoll struct {
 // Built-in CLI presets for LoadMediaStyle (ADR 0042): media through a locally
 // installed, logged-in CLI on the user's own subscription, no API key.
 const (
-	// MediaStyleGrokCli drives the `grok` CLI: image and video.
-	MediaStyleGrokCli = "grok-cli"
-	// MediaStyleCodexCli drives the `codex` CLI: image only.
-	MediaStyleCodexCli = "codex-cli"
+	// MediaStyleXaiGrokCli drives the `grok` CLI: image and video.
+	MediaStyleXaiGrokCli = "xai-grok-cli"
+	// MediaStyleOpenAICodexCli drives the `codex` CLI: image only.
+	MediaStyleOpenAICodexCli = "openai-codex-cli"
 	// MediaStyleGoogleAgyCli drives Google's Antigravity CLI `agy`: image only.
 	MediaStyleGoogleAgyCli = "google-agy-cli"
 
 	// The mock twins: same name, verbs, args, prompt folding and errors as the
 	// preset, but no process is started and a fixed file is returned (mock kit).
-	MediaStyleGrokCliMock      = "grok-cli-mock"
-	MediaStyleCodexCliMock     = "codex-cli-mock"
-	MediaStyleGoogleAgyCliMock = "google-agy-cli-mock"
+	MediaStyleXaiGrokCliMock     = "xai-grok-cli-mock"
+	MediaStyleOpenAICodexCliMock = "openai-codex-cli-mock"
+	MediaStyleGoogleAgyCliMock   = "google-agy-cli-mock"
 )
 
 // cliPresets maps a built-in preset to its client label.
 var cliPresets = map[string]string{
-	MediaStyleGrokCli: "grok", MediaStyleCodexCli: "codex", MediaStyleGoogleAgyCli: "agy",
-	MediaStyleGrokCliMock: "grok", MediaStyleCodexCliMock: "codex", MediaStyleGoogleAgyCliMock: "agy",
+	MediaStyleXaiGrokCli: "grok", MediaStyleOpenAICodexCli: "codex", MediaStyleGoogleAgyCli: "agy",
+	MediaStyleXaiGrokCliMock: "grok", MediaStyleOpenAICodexCliMock: "codex", MediaStyleGoogleAgyCliMock: "agy",
 }
 
 // LoadMediaStyle reads and validates one style JSON file, or returns a built-in
-// CLI preset when path is MediaStyleGrokCli or MediaStyleCodexCli. cfg (at most
+// CLI preset when path is MediaStyleXaiGrokCli or MediaStyleOpenAICodexCli. cfg (at most
 // one) configures the client behind the style (model, command, loop, gather).
 func LoadMediaStyle(path string, cfg ...MediaConfig) (MediaStyle, error) {
 	var c MediaConfig

@@ -3,7 +3,7 @@
 //
 //	toolnexus run   --config mcp.json --skills ./skills --base-url URL --style openai --model M [--system S] [--api-key K] [--once "prompt"]
 //	toolnexus tools --config mcp.json --skills ./skills
-//	toolnexus media image --style grok-cli --prompt "a red apple" [--aspect-ratio 16:9] [--out dir]
+//	toolnexus media image --style xai-grok-cli --prompt "a red apple" [--aspect-ratio 16:9] [--out dir]
 //	toolnexus --help
 package main
 

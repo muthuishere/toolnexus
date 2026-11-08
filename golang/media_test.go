@@ -642,7 +642,7 @@ func TestMediaConformanceCLI(t *testing.T) {
 				}
 				style, _ := c["style"].(string)
 				if style == "" {
-					style = c["client"].(string) + "-cli"
+					style = map[string]string{"grok": MediaStyleXaiGrokCli, "codex": MediaStyleOpenAICodexCli}[c["client"].(string)]
 				}
 				name := cliPresets[style]
 				cfg := configOf(t, c["config"])

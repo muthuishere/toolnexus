@@ -11,7 +11,7 @@ import (
 func TestMediaCmdMockPrintsPath(t *testing.T) {
 	dir := t.TempDir()
 	var out, errb bytes.Buffer
-	code := mediaCmd([]string{"image", "--style", "grok-cli-mock", "--prompt", "a red apple", "--aspect-ratio", "16:9", "--out", dir}, &out, &errb)
+	code := mediaCmd([]string{"image", "--style", "xai-grok-cli-mock", "--prompt", "a red apple", "--aspect-ratio", "16:9", "--out", dir}, &out, &errb)
 	if code != 0 {
 		t.Fatalf("exit %d: %s", code, errb.String())
 	}
@@ -26,7 +26,7 @@ func TestMediaCmdMockPrintsPath(t *testing.T) {
 
 func TestMediaCmdUnsupportedVerbFails(t *testing.T) {
 	var out, errb bytes.Buffer
-	code := mediaCmd([]string{"video", "--style", "codex-cli", "--prompt", "x"}, &out, &errb)
+	code := mediaCmd([]string{"video", "--style", "openai-codex-cli", "--prompt", "x"}, &out, &errb)
 	if code == 0 || !strings.Contains(errb.String(), `media: no style supports "video"`) {
 		t.Fatalf("exit %d, stderr %q", code, errb.String())
 	}
@@ -47,7 +47,7 @@ func TestMediaCmdFakeCLI(t *testing.T) {
 	t.Setenv("PATH", filepath.Dir(bin)+string(os.PathListSeparator)+os.Getenv("PATH"))
 	dir := t.TempDir()
 	var out, errb bytes.Buffer
-	if code := mediaCmd([]string{"image", "--style", "grok-cli", "--prompt", "cat", "--width", "64", "--out", dir}, &out, &errb); code != 0 {
+	if code := mediaCmd([]string{"image", "--style", "xai-grok-cli", "--prompt", "cat", "--width", "64", "--out", dir}, &out, &errb); code != 0 {
 		t.Fatalf("exit %d: %s", code, errb.String())
 	}
 	if p := strings.TrimSpace(out.String()); filepath.Dir(p) != dir {

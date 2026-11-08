@@ -16,7 +16,7 @@ One generation, then exit: prints the path (or URL) of each produced file, one
 per line. The twin of GenerateMedia(ctx, style, verb, args).
 
   <verb>                image | video (what the style declares)
-  --style string        grok-cli | codex-cli | google-agy-cli (or a -mock twin),
+  --style string        xai-grok-cli | openai-codex-cli | google-agy-cli (or a -mock twin),
                         or the path of an HTTP style JSON file
   --prompt string       What to make (required)
   --aspect-ratio string e.g. 16:9
