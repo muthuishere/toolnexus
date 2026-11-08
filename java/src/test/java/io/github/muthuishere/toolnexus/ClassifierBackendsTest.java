@@ -276,6 +276,101 @@ class ClassifierBackendsTest {
         }
     }
 
+    // ------------------------------------------------------------------ openai decisions (#157)
+
+    @Test
+    void openaiDecisionsFixture() throws IOException {
+        JsonNode fx = fixture("openai-decisions.json");
+        Map<String, Classifier.Question> qs = questions(fx.get("questions"));
+        String okReply = fx.get("replyCases").get(0).get("reply").toString();
+        for (JsonNode c : fx.get("requestCases")) {
+            String name = c.get("name").asText();
+            bodies.clear();
+            paths.clear();
+            imageHeaders.clear();
+            String base = start((n, b) -> new Object[]{200, okReply});
+            try {
+                Classifier.Options o = new Classifier.Options().backend(Classifier.BACKEND_OPENAI)
+                        .baseUrl(base + "/v1").retries(1);
+                if (c.has("model")) o.model(c.get("model").asText());
+                Classifier.create(o).evaluate(state(c.get("state")), qs);
+                assertEquals(c.get("expect").get("body").asText(), bodies.get(0), name);
+                assertEquals("/v1/decisions", paths.get(0), name);
+                assertNull(imageHeaders.get(0), name + ": danger-zone header sent on the decisions wire");
+            } finally {
+                stop();
+                server = null;
+            }
+        }
+        for (JsonNode c : fx.get("replyCases")) {
+            String name = c.get("name").asText();
+            JsonNode expect = c.get("expect");
+            if (expect.has("normalized")) {
+                assertEquals(expect.get("normalized").asText(),
+                        ClassifierDecisions.reply(c.get("reply").toString(), qs), name);
+            }
+            String base = start((n, b) -> new Object[]{200, c.get("reply").toString()});
+            try {
+                Classifier cl = Classifier.create(new Classifier.Options().backend(Classifier.BACKEND_OPENAI)
+                        .baseUrl(base).retries(1));
+                if (expect.has("error")) {
+                    var e = assertThrows(Classifier.ClassifierException.class, () -> cl.evaluate("x", qs), name);
+                    assertEquals(expect.get("error").asText(), e.getMessage(), name);
+                    continue;
+                }
+                Classifier.Decision d = cl.evaluate("x", qs);
+                assertEquals(expect.get("model").asText(), d.model(), name);
+                assertEquals(expect.get("calibrated").asBoolean(), d.calibrated(), name);
+                expect.path("noul").fields().forEachRemaining(e ->
+                        assertEquals(e.getValue().asDouble(), d.noul(e.getKey()).noul(), name));
+                expect.path("choice").fields().forEachRemaining(e ->
+                        assertEquals(e.getValue().asText(), d.choice(e.getKey()).choice(), name));
+                expect.path("score").fields().forEachRemaining(e ->
+                        assertEquals(e.getValue().asDouble(), d.score(e.getKey()).score(), name));
+            } finally {
+                stop();
+                server = null;
+            }
+        }
+        for (JsonNode c : fx.get("errorCases")) {
+            String name = c.get("name").asText();
+            bodies.clear();
+            String base = start((n, b) -> new Object[]{200, okReply});
+            try {
+                Classifier cl = Classifier.create(new Classifier.Options().backend(Classifier.BACKEND_OPENAI)
+                        .baseUrl(base).retries(1));
+                var e = assertThrows(Classifier.ClassifierException.class,
+                        () -> cl.evaluate("x", questions(c.get("questions"))), name);
+                assertEquals(c.get("expect").get("error").asText(), e.getMessage(), name);
+                assertEquals(c.get("expect").path("unsupported").asBoolean(false),
+                        e instanceof Classifier.ClassifierUnsupported, name);
+                assertTrue(bodies.isEmpty(), name + ": a request was sent");
+            } finally {
+                stop();
+                server = null;
+            }
+        }
+        for (JsonNode c : fx.get("captureCases")) {
+            String name = c.get("name").asText();
+            authHeaders.clear();
+            Map<String, String> envMap = new java.util.HashMap<>();
+            c.path("env").fields().forEachRemaining(e -> envMap.put(e.getKey(), e.getValue().asText()));
+            String base = start((n, b) -> new Object[]{200, okReply});
+            try {
+                Classifier.Options o = new Classifier.Options().backend(Classifier.BACKEND_OPENAI)
+                        .baseUrl(base + "/v1").retries(1).env(envMap::get);
+                if (c.has("apiKeyEnv")) o.apiKeyEnv(c.get("apiKeyEnv").asText());
+                Classifier.create(o).evaluate("x", qs);
+                JsonNode want = c.get("expectAuthorization");
+                if (want.isNull()) assertNull(authHeaders.get(0), name + ": a key was sent to a host that is not its own");
+                else assertEquals(want.asText(), authHeaders.get(0), name);
+            } finally {
+                stop();
+                server = null;
+            }
+        }
+    }
+
     @Test
     void cloudflareErrorKeepsTheAccountTemplate() throws IOException {
         String base = start((n, b) -> new Object[]{500, "boom"});

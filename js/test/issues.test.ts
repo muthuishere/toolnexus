@@ -364,7 +364,7 @@ test("#89 a non-string output is an ERROR, never a silent degrade to \"\"", () =
 // ===========================================================================
 
 test("#91 the classifier backend is a PAIRING, and a known mismatch fails at construction", () => {
-  assert.deepEqual(Object.keys(CLASSIFIER_BACKENDS).sort(), ["cloudflare", "custom", "openrouter", "typesafe", "vercel"])
+  assert.deepEqual(Object.keys(CLASSIFIER_BACKENDS).sort(), ["cloudflare", "custom", "openai", "openrouter", "typesafe", "vercel"])
   const c = createClassifier({ backend: "openrouter" })
   assert.ok(c, "the preset sets baseUrl + model + apiKeyEnv as a unit")
   assert.throws(

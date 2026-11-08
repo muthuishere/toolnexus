@@ -163,6 +163,11 @@
                                                :base-url (str origin "/v1/accounts/acc/ai/run")
                                                :api-key-env "MOCK_LLM_KEY"})))))
 
+(deftest openai-decisions-backend-against-the-mock
+  (when-mock
+   (check-classifier (jev/create-classifier {:backend "openai" :base-url b
+                                             :api-key-env "MOCK_LLM_KEY"}))))
+
 (deftest every-media-verb-against-the-mock
   (when-mock
    (let [dir  (fs/temp-dir! "tn-mock-media")

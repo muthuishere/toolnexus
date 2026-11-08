@@ -20,7 +20,8 @@ public sealed record ClassifierSupports(bool Images = false);
 
 /// <summary>One row of the backend table (<see cref="ClassifierBackends.Table"/>).</summary>
 /// <param name="BaseUrl">Null on <see cref="ClassifierBackend.Custom"/>, which requires one.</param>
-/// <param name="Wire"><see cref="ClassifierBackends.WireSystemOne"/> or <see cref="ClassifierBackends.WireCloudflare"/>.</param>
+/// <param name="Wire"><see cref="ClassifierBackends.WireSystemOne"/>, <see cref="ClassifierBackends.WireCloudflare"/>
+/// or <see cref="ClassifierBackends.WireDecisions"/>.</param>
 /// <param name="ImagesHeader">Send <c>TypeSafe-Danger-Zone-Images: true</c> when a request carries images.</param>
 /// <param name="Supports">Default support for a model on this backend. Null on
 /// <see cref="ClassifierBackend.Custom"/>, which requires <see cref="ClassifierOptions.Supports"/>.</param>
@@ -49,9 +50,13 @@ public sealed class ClassifierUnsupportedException : ClassifierException
 /// <summary>The backend table and its constants (§8B).</summary>
 public static class ClassifierBackends
 {
-    /// <summary>The two request shapes a backend row can use.</summary>
+    /// <summary>The request shapes a backend row can use.</summary>
     public const string WireSystemOne = "systemone";
     public const string WireCloudflare = "cloudflare";
+    public const string WireDecisions = "decisions";
+
+    /// <summary>The Decisions API's per-request question cap.</summary>
+    public const int MaxDecisionsQuestions = 400;
 
     /// <summary>TypeSafe's required opt-in for image ("danger zone") input.</summary>
     public const string ImagesHeader = "TypeSafe-Danger-Zone-Images";
@@ -78,6 +83,8 @@ public static class ClassifierBackends
                 m => new ClassifierSupports(m.Contains("clef", StringComparison.Ordinal))),
             [ClassifierBackend.Vercel] = new("https://ai-gateway.vercel.sh/typesafe/v1", "typesafe-ai/jev",
                 "AI_GATEWAY_API_KEY", WireSystemOne, true, _ => new ClassifierSupports(false)),
+            [ClassifierBackend.OpenAI] = new("https://api.openai.com/v1", "gpt-6-luna", "OPENAI_API_KEY",
+                WireDecisions, false, _ => new ClassifierSupports(true)),
             [ClassifierBackend.Custom] = new(null, Classifier.DefaultModel, "",
                 WireSystemOne, true, null),
         };
@@ -104,7 +111,7 @@ public static class ClassifierBackends
     {
         ("typesafe", ClassifierBackend.TypeSafe), ("openrouter", ClassifierBackend.OpenRouter),
         ("cloudflare", ClassifierBackend.Cloudflare), ("vercel", ClassifierBackend.Vercel),
-        ("custom", ClassifierBackend.Custom),
+        ("openai", ClassifierBackend.OpenAI), ("custom", ClassifierBackend.Custom),
     };
 
     /// <summary>The wire name of a backend (<c>typesafe</c> when unset).</summary>
@@ -115,7 +122,7 @@ public static class ClassifierBackends
         return b.ToString();
     }
 
-    /// <summary>Parses a wire name. An unknown name throws, listing all five.</summary>
+    /// <summary>Parses a wire name. An unknown name throws, listing all six.</summary>
     public static ClassifierBackend Parse(string name)
     {
         foreach (var (n, v) in Names) if (n == name) return v;
@@ -123,7 +130,7 @@ public static class ClassifierBackends
     }
 
     internal static string UnknownBackendMessage(string name)
-        => $"classifier: unknown backend \"{name}\" (want \"typesafe\", \"openrouter\", \"cloudflare\", \"vercel\" or \"custom\")";
+        => $"classifier: unknown backend \"{name}\" (want \"typesafe\", \"openrouter\", \"cloudflare\", \"vercel\", \"openai\" or \"custom\")";
 
     private static readonly Regex EnvRef = new(@"\$\{([A-Za-z_][A-Za-z0-9_]*)\}", RegexOptions.CultureInvariant);
 
@@ -606,7 +613,14 @@ public sealed partial class Classifier
         var qs = new Dictionary<string, object?>();
         foreach (var (k, q) in questions) qs[k] = q.Wire();
         IDictionary<string, object?> body;
-        if (Preset.Wire == ClassifierBackends.WireCloudflare)
+        if (Preset.Wire == ClassifierBackends.WireDecisions)
+        {
+            body = new Dictionary<string, object?>
+            {
+                ["model"] = Model, ["input"] = DecisionsInput(p), ["questions"] = DecisionsQuestions(questions),
+            };
+        }
+        else if (Preset.Wire == ClassifierBackends.WireCloudflare)
         {
             var input = new Dictionary<string, object?> { ["questions"] = qs, ["state"] = p.State };
             if (p.Images.Count > 0)
@@ -706,6 +720,7 @@ public sealed partial class Classifier
             : null;
         var text = await PostAsync(payload, extra, ct).ConfigureAwait(false);
         if (Preset.Wire == ClassifierBackends.WireCloudflare) text = UnwrapCloudflare(text);
+        else if (Preset.Wire == ClassifierBackends.WireDecisions) text = DecisionsReply(text, questions);
         var d = Decision.FromJson(text);
         var verr = ValidateDecision(questions, d);
         if (validate && verr != null) throw verr;
