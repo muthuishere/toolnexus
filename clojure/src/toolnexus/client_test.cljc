@@ -1730,3 +1730,74 @@
     (is (false? (tool/concurrency-safe? plain {})))
     (is (false? (tool/concurrency-safe? own {})))
     (is (true? (tool/concurrency-safe? own {:dry true})))))
+
+;; ---------------------------------------------------------------------------
+;; §8 :after-round (change add-round-boundary-hook, #192). Shared fixture:
+;; examples/round-boundary/fixture.json (R1-R5; R6 lives in agents/loop_test).
+;; This port has one loop: `run` (its :on-event sink is the stream surface).
+;; ---------------------------------------------------------------------------
+
+(defn- round-recorder [seen inject-fn]
+  (fn [ev] (swap! seen conj [(:turn ev) (:final ev) (:text ev)]) (inject-fn ev)))
+
+(deftest after-round-r1-injects-after-tool-results
+  (doseq [style ["openai" "anthropic"]]
+    (with-llm style [{:calls [{:id "c1" :name "upper" :args {:text "x"}}]} {:text "done"}]
+      (fn [{:keys [base requests]}]
+        (let [seen (atom [])
+              c    (client-for style base {:hooks {:after-round (round-recorder seen #(when-not (:final %) {:inject ["todo: 2 open"]}))}})
+              r    (client/run c "hi" {:toolkit toolkit})]
+          (is (= 2 (count @requests)) style)
+          (is (= "done" (:text r)) style)
+          (is (= {:role "user" :content "todo: 2 open"} (last (:messages (second @requests)))) style)
+          (is (= [[0 false ""] [1 true "done"]] @seen) style))))))
+
+(deftest after-round-r2-continues-when-the-model-stops
+  (doseq [style ["openai" "anthropic"]]
+    (with-llm style [{:text "first"} {:text "second"}]
+      (fn [{:keys [base requests]}]
+        (let [seen   (atom [])
+              events (atom [])
+              c      (client-for style base {:hooks {:after-round (round-recorder seen #(when (and (:final %) (zero? (:turn %))) {:inject ["keep going"]}))}})
+              r      (client/run c "hi" {:toolkit toolkit :on-event #(swap! events conj (:type %))})]
+          (is (= 2 (count @requests)) style)
+          (is (= "second" (:text r)) style)
+          (is (= "assistant" (:role (last (butlast (:messages (second @requests)))))) style)
+          (is (= {:role "user" :content "keep going"} (last (:messages (second @requests)))) style)
+          (is (= [[0 true "first"] [1 true "second"]] @seen) style)
+          (is (= 1 (count (filter #{"done"} @events))) "one terminal done"))))))
+
+(deftest after-round-r3-empty-injection-ends-normally
+  (with-llm "openai" [{:text "only"}]
+    (fn [{:keys [base requests]}]
+      (let [seen (atom [])
+            r    (client/run (client-for "openai" base {:hooks {:after-round (round-recorder seen (constantly {:inject [""]}))}}) "hi" {:toolkit toolkit})]
+        (is (= 1 (count @requests)))
+        (is (= "only" (:text r)))
+        (is (= "done" (:status r)))
+        (is (= [[0 true "only"]] @seen))))))
+
+(deftest after-round-r4-no-continuation-past-max-turns
+  (with-llm "openai" [{:text "only"}]
+    (fn [{:keys [base requests]}]
+      (let [seen (atom [])
+            r    (client/run (client-for "openai" base {:max-turns 1 :hooks {:after-round (round-recorder seen (constantly {:inject ["again"]}))}}) "hi" {:toolkit toolkit})]
+        (is (= 1 (count @requests)))
+        (is (= "only" (:text r)))
+        (is (= [] @seen))))))
+
+(deftest after-round-r5-a-failing-hook-stops-the-run
+  (with-llm "openai" [{:calls [{:id "c1" :name "upper" :args {:text "x"}}]} {:text "never"}]
+    (fn [{:keys [base requests]}]
+      (let [c (client-for "openai" base {:hooks {:after-round (fn [_] (throw (ex-info "round-boom" {})))}})]
+        (is (thrown-with-msg? Exception #"round-boom" (client/run c "hi" {:toolkit toolkit})))
+        (is (= 1 (count @requests)))))))
+
+(deftest after-round-absent-is-byte-identical
+  (let [script [{:calls [{:id "c1" :name "upper" :args {:text "x"}}]} {:text "done"}]
+        bodies (fn [opts]
+                 (with-llm "openai" script
+                   (fn [{:keys [base raw]}]
+                     (client/run (client-for "openai" base opts) "hi" {:toolkit toolkit})
+                     @raw)))]
+    (is (= (bodies {}) (bodies {:hooks {:after-round (constantly nil)}})))))
