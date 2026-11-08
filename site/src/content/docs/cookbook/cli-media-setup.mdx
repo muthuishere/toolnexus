@@ -222,6 +222,13 @@ decide whether that is acceptable. xAI also documents a ZDR video bucket
 (`[tools.zdr_video_output_s3]` in `~/.grok/managed_config.toml`); it did not work for us on a
 personal account ([details](/toolnexus/media/#grok-video-zdr)). Live after opting in: one video in 58 s.
 
+**Video length.** Pass `seconds` and it is folded into the prompt like the other size hints:
+`{ prompt: "waves", seconds: 6 }` asks Grok for
+`Generate exactly one video with your video generation tool: waves (about 6 seconds long). Do not write code. Reply only with the file path.`
+Without `seconds` the prompt carries no duration phrase and Grok picks its own default length.
+(0.29.0 asked for the "shortest duration available", which gave clips of about one second.)
+The CLI flag is `toolnexus media video --style xai-grok-cli --seconds 6`.
+
 ## Usage limits and quota
 
 Each CLI uses your plan's allowance. When it runs out the error status is `unavailable`:

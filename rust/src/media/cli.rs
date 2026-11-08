@@ -533,7 +533,7 @@ impl CliProfile for GrokProfile {
     }
     fn template(&self, verb: &str) -> Option<&str> {
         Some(if verb == "video" {
-            "Generate exactly one short video with your video generation tool, shortest duration available: {prompt}. Do not write code. Reply only with the file path."
+            "Generate exactly one video with your video generation tool: {prompt}. Do not write code. Reply only with the file path."
         } else {
             "Generate exactly one image with your image generation tool: {prompt}. Do not write code. Reply only with the file path."
         })

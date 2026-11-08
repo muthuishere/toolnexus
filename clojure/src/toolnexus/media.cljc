@@ -1567,7 +1567,7 @@
              (cond-> ["-p" prompt "--cwd" cwd "--output-format" "streaming-json" "--yolo" "--no-auto-update"]
                model (into ["-m" model])))
      :templates {"image" "Generate exactly one image with your image generation tool: {prompt}. Do not write code. Reply only with the file path."
-                 "video" "Generate exactly one short video with your video generation tool, shortest duration available: {prompt}. Do not write code. Reply only with the file path."}
+                 "video" "Generate exactly one video with your video generation tool: {prompt}. Do not write code. Reply only with the file path."}
      :parse (fn [o _]
               (case (get o "type")
                 "text" (let [d (get o "data")] (when (string? d) {:text d}))

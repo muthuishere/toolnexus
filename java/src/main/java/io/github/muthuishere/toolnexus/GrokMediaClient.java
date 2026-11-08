@@ -27,7 +27,7 @@ public final class GrokMediaClient extends CliMediaClient {
     protected String template(String verb) {
         return switch (verb) {
             case "image" -> "Generate exactly one image with your image generation tool: {prompt}. Do not write code. Reply only with the file path.";
-            case "video" -> "Generate exactly one short video with your video generation tool, shortest duration available: {prompt}. Do not write code. Reply only with the file path.";
+            case "video" -> "Generate exactly one video with your video generation tool: {prompt}. Do not write code. Reply only with the file path.";
             default -> null;
         };
     }

@@ -8,6 +8,15 @@ GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
 
 ## Unreleased
 
+**Fix: Grok CLI videos honour `seconds` and are no longer ~1 second long.** In 0.29.0 the
+`xai-grok-cli` preset (and its `-mock` twin) asked Grok for the "shortest duration available", so a
+real video came back about one second long even when you passed `seconds`. The video template is
+now `Generate exactly one video with your video generation tool: {prompt}. Do not write code. Reply
+only with the file path.`; `seconds` still folds in as `(about N seconds long)`, and with no
+`seconds` there is no duration phrase, so Grok uses its own default. All eight ports; pinned in
+`conformance/media/cli.json` and SPEC §7G.10. The Go `toolnexus media video --seconds N` flag reaches
+it unchanged.
+
 ## 0.29.0 — 2026-11-08
 
 **Images and video through the official Grok, Codex or Google Antigravity CLI.** A preset drives
