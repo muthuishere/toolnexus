@@ -12,17 +12,17 @@ description: >-
 > judgement call. A feature cell we could not confirm from an official source today says
 > **unverified** — that means *not checked*, never *no*.
 >
-> toolnexus **0.26.0**, eight ports (JS · Python · Go · Java · C# · Elixir · Clojure · Rust).
-> The feature matrix was checked on **2026-11-07**. The performance tables are a quiet re-run on **2026-11-08** (load < 4, keep-alive mock) of toolnexus `main` (the 0.27.0 candidate) next to 0.26.0 and every competitor. Frameworks ship weekly; re-verify before quoting.
+> toolnexus **0.26.0** for the feature matrix, eight ports (JS · Python · Go · Java · C# · Elixir · Clojure · Rust).
+> The feature matrix was checked on **2026-11-07**. The performance tables are a quiet re-run on **2026-11-08** (load < 4, five interleaved rounds) of toolnexus `main` (the 0.28.0 candidate) next to 0.27.0 and every competitor. Frameworks ship weekly; re-verify before quoting.
 
 ## What we do NOT claim
 
-> - **Not the fastest everywhere.** Eino beats us in Go over MCP, LangChain4j beats us on the JVM,
->   AutoAgents edges us in Rust over MCP, and our .NET MCP cold init is still slower than Microsoft
->   Agent Framework's. [MEASURED]
-> - **Not a Java speed-up yet.** The 0.27.0 candidate starts faster than 0.26.0 in seven ports, but our
->   quiet re-run did not show #171's Java cold-start gain. [MEASURED]
-> - **Clojure is our slowest port**: 6.9–7.8 ms per request over MCP, ~17× the Rust port; the fix is
+> - **Not the fastest everywhere.** LangChain4j still beats us on the JVM over MCP (2.17 vs 2.28 ms p50, and
+>   less memory); Eino in Go is level with us, not behind; AutoAgents in Rust uses less memory than we do.
+>   [MEASURED]
+> - **Not a JavaScript speed-up.** The 0.28.0 candidate is faster than 0.27.0 in Python, Java, C# and Rust, but
+>   our harness shows no JS per-request change (3.43 → 3.40 ms). [MEASURED]
+> - **Clojure is our slowest port**: 6.9–7.8 ms per request over MCP, ~20× the Rust port; the fix is
 >   deferred (issue #168). [MEASURED]
 > - **Not the only library that drives coding-agent CLIs over ACP.** Mastra ships first-party
 >   [`@mastra/acp`](https://mastra.ai/docs/agents/acp); rig ships an ACP *agent*
@@ -84,149 +84,148 @@ the closest match in breadth on one runtime.
 
 ---
 
-## Performance — fake model, quiet re-run 2026-11-08
+## Performance — fake model, quiet re-run for 0.28.0 (2026-11-08)
 
 **Method** (unchanged from the [performance page](/toolnexus/performance/)): every framework points at the
 same deterministic OpenAI-compatible mock and the same stdio MCP server. Scenario: *"What's the weather in
-Paris and what is 2+2?"*, which means 2 LLM round-trips and 2 parallel tool calls. **N = 30 runs after 5
-warmup** per row. Peak RSS comes from `/usr/bin/time -l`. Cold init is measured in-process, once per process, so
+Paris and what is 2+2?"*, which means 2 LLM round-trips and 2 parallel tool calls. Each row is **25 runs after 5
+warmup**. Peak RSS comes from `/usr/bin/time -l`. Cold init is measured in-process, once per process, so
 it is the noisiest column. $0 spent. [MEASURED]
 
-**This sitting** (2026-11-08, 04:00–04:20 IST): the whole suite in one pass, every row started only when the
-1-minute load average was **below 4** on 18 cores (the harness waited ~28 minutes for that; one row, brainlid/langchain,
-was re-run afterwards at load 5.1 and is marked). The mock now speaks **HTTP/1.1 keep-alive** (#165), so
-frameworks that pool connections reuse them as they would against a real provider. toolnexus rows are `main`
-at `f6edfbeb`, the 0.27.0 candidate. The JS runners start their own in-process mock, so JS absolute numbers are
-higher than the other languages'; compare JS rows with each other. Earlier sittings (2026-11-07, and the busy
-2026-11-08 native/skills sitting) stay in `results-2026-11.json` under their own `run` labels.
+**This sitting** (2026-11-08, afternoon IST): **five alternating rounds**. In each round toolnexus 0.27.0 (tag
+`v0.27.0`) and `main` at `e5ef449a` (the 0.28.0 candidate) ran back to back, MCP and native, in Python, JS, Go,
+Java, C# and Rust, with the order flipped every round; then every competitor in those six languages ran. Every row
+started only when the 1-minute load average was **below 4** on 18 cores (it was 2.95–3.63 at every start). **Every
+number below is the median of the five rounds**; the per-round values are on each row in
+[`results-2026-11.json`](https://github.com/muthuishere/toolnexus/blob/main/benchmarks/results-2026-11.json) under
+`run: "2026-11-08-quiet-0.28"`. Same harness (`benchmarks/run_all.py`) and same keep-alive mock
+(`benchmarks/mock_llm.py`) as the earlier sittings. The JS runners start their own in-process mock, so JS absolute
+numbers are higher than the other languages'; compare JS rows with each other. **Elixir and Clojure were not
+re-run** (nothing in them changed since 0.27.0); their tables below are from the earlier quiet sitting
+(`run: "2026-11-08-quiet"`, toolnexus `main` at `f6edfbeb`).
 
 **Machine:** Apple M5 Pro (18 cores, 48 GB), macOS 26.4 · Go 1.26.3 · OpenJDK 26.0.1 (Java 21 toolchain) ·
 .NET 10.0.301 · Node 24.18.0 · CPython 3.11.15 · Elixir 1.20.2/OTP 29 · rustc 1.99.0 `--release` ·
 Clojure CLI 1.12.5 + cljgo 0.9.0.
 
-### 0.26.0 → main (0.27.0 candidate), same sitting
+### 0.27.0 → main (0.28.0 candidate), same sitting
 
-Each 0.26.0 row was built from tag `v0.26.0` with `main`'s runner source and run right next to `main`'s row
-(MCP config; init ms / p50 ms / RSS MB). Changes on `main` since 0.26.0 that touch these numbers:
-[#167](https://github.com/muthuishere/toolnexus/pull/167) reuses the stdio `server/discover` probe child instead of
-spawning the MCP server twice (all ports), [#166](https://github.com/muthuishere/toolnexus/pull/166) lazy-loads
-JS modules and cuts Go per-turn allocations, [#171](https://github.com/muthuishere/toolnexus/pull/171) defers Java's
-schema validator and C#'s `HttpClient`, and [#165](https://github.com/muthuishere/toolnexus/pull/165) is the
-keep-alive mock both rows share. [MEASURED]
+Medians of five interleaved rounds, MCP config (init ms / p50 ms / RSS MB), then the native p50. The change on
+`main` that touches these numbers is the request-path speed-up
+([#185](https://github.com/muthuishere/toolnexus/pull/185), `openspec/changes/speed-up-request-path`): a kept-open
+LLM connection in Python and JS, no thread hand-off per MCP stdio line, a cached proxy lookup, deferred SDK
+loading in Java and C#, and Rust's own stdio MCP client in place of rmcp's. [MEASURED]
 
-| port | 0.26.0 init | main init | 0.26.0 p50 | main p50 | 0.26.0 RSS | main RSS |
-|---|--:|--:|--:|--:|--:|--:|
-| Python | 54.1 | **37.5** | 1.32 | 1.45 | 73.7 | **71.8** |
-| JavaScript | 33.1 | **19.5** | 3.39 | 3.34 | 133.7 | **127.0** |
-| Go | 28.8 | **13.9** | 0.341 | 0.356 | 17.4 | **16.8** |
-| Java | **413** | 462 | **2.64** | 2.97 | 174.5 | **161.6** |
-| C# | 135.7 | **121.6** | 0.530 | 0.522 | 79.8 | **74.4** |
-| Elixir | 49.4 | **29.6** | 0.446 | 0.438 | 117.7 | **114.7** |
-| Clojure (cljgo) | 32 | **27** | 6.8 | 6.9 | 35.0 | 35.0 |
-| Clojure (JVM) | 44 | **25** | 8.0 | 7.8 | **473.7** | 526.5 |
-| Rust | 27.1 | **13.6** | 0.399 | 0.395 | 16.8 | **13.5** |
+| port | 0.27.0 init | main init | 0.27.0 p50 | main p50 | 0.27.0 RSS | main RSS | native p50 0.27.0 → main |
+|---|--:|--:|--:|--:|--:|--:|--:|
+| Python | 21.9 | **19.9** | 1.378 | **0.924** | 61.9 | 61.9 | 0.727 → **0.533** |
+| JavaScript | 19.1 | 17.9 | 3.43 | 3.40 | 125.5 | 126.5 | 3.28 → 3.27 |
+| Go | 13.4 | 13.8 | 0.370 | 0.367 | 16.8 | 16.8 | 0.272 → 0.274 |
+| Java | 361 | **195** | 2.437 | **2.282** | 165.8 | **153.2** | 1.609 → **1.496** (init 100.5 → **24.0**) |
+| C# | 89.0 | **61.2** | 0.558 | 0.550 | 73.9 | 75.1 | 0.414 → **0.379** |
+| Rust | 21.1 | **18.2** | 0.376 | **0.342** | 16.6 | 16.8 | 0.295 → 0.300 |
 
-**What moved.** Cold init over MCP dropped 14–20 ms in Python, JS, Go, Elixir, Rust and Clojure: that is the second
-MCP-server spawn #167 removed (our test server is Python, so one spawn costs about that much). Per-request p50 did
-not move outside noise in any port, which is expected: none of these changes touch the request loop. Native-tool
-rows are unchanged within noise in every port (raw rows in the JSON). **Java did not improve in this sitting**:
-`main`'s init (462 vs 413 ms) and p50 (2.97 vs 2.64 ms) came out *worse* than 0.26.0's, with lower RSS. Init is one
-sample per process, so we do not claim a Java regression either, but we cannot claim #171's Java cold-start win from
-this run. C# init fell 14 ms. [MEASURED]
+**What moved.** Python per-request time fell a third (1.38 → 0.92 ms over MCP, 0.73 → 0.53 ms native). Java's cold
+init over MCP nearly halved (361 → 195 ms; native 100 → 24 ms) and its MCP p50 fell 6%. C#'s MCP cold init fell
+from 89 to 61 ms. Rust's MCP p50 fell 9% on its own stdio client. **Go did not move**, as expected (#185 left it
+alone). **JavaScript did not move in this harness** (3.43 → 3.40 ms): the CHANGELOG's JS figure (3.28 → ~0.55 ms)
+came from a different setup and does not reproduce here, so we do not claim it. Rust's MCP RSS (16.8 MB) is
+higher than the 13.5 MB of the earlier sitting in both 0.27.0 and `main`, so it is not new on `main`. [MEASURED]
 
 ### Python
 
 | framework | version | tools | init ms | p50 ms | p95 ms | RSS MB | install |
 |---|---|---|--:|--:|--:|--:|---|
-| **toolnexus** | main · mcp 1.30.0 | native | 0.1 | **0.84** | 2.44 | **61.0** | **33 MB** |
-| **toolnexus** | main · mcp 1.30.0 | MCP | 37.5 | **1.45** | 1.60 | 71.8 | **33 MB** |
-| **toolnexus** (full: MCP + skill + native) | main | MCP + skill | 25.7 | 1.39 | 1.54 | 61.6 | 33 MB |
-| MS Agent Framework | agent-framework-core 1.24.0 | MCP | 237.6 | 2.77 | 3.13 | 90.1 | 62 MB |
-| Agno | 3.1.12 · fastmcp 4.1.6 | MCP | 206.5 | 3.35 | 3.96 | 116.4 | 125 MB |
-| smolagents | 1.26.0 | MCP | 236.7 | 3.67 | 3.94 | 99.0 | — |
-| OpenAI Agents | 0.24.0 | MCP | **23.7** | 5.22 | 5.61 | 102.5 | 67 MB |
-| Pydantic AI | pydantic-ai-slim 2.66.0 | MCP | 46.0 | 5.57 | 6.91 | 127.6 | 109 MB |
-| LangGraph (persistent session) | 1.2.20 · mcp-adapters 0.3.2 | MCP | 43.5 | 5.63 | 6.03 | 114.5 | 87 MB |
-| Google ADK | 2.14.0 · litellm 1.108.2 | MCP | 24.4 | 7.08 | 7.35 | 301.0 | 300 MB |
-| CrewAI | 1.15.37 | MCP | 57.9 | 11.91 | 20.99 | 250.2 | 790 MB |
-| LangGraph (default, reconnect) | 1.2.20 | MCP | 69.8 | 25.03 | 26.33 | 113.5 | 87 MB |
+| **toolnexus** | main · mcp 1.30.0 | native | 0.1 | **0.533** | 0.60 | **60.7** | **33 MB** |
+| **toolnexus** | main · mcp 1.30.0 | MCP | **19.9** | **0.924** | 1.04 | 61.9 | **33 MB** |
+| **toolnexus** (full: MCP + skill + native) | main | MCP + skill | 17.4 | 0.925 | 1.07 | 61.9 | 33 MB |
+| MS Agent Framework | agent-framework-core 1.24.0 | MCP | 209.0 | 2.42 | 2.70 | 90.2 | 62 MB |
+| Agno | 3.1.12 · fastmcp 4.1.6 | MCP | 177.7 | 2.85 | 3.04 | 116.2 | 125 MB |
+| smolagents | 1.26.0 | MCP | 169.2 | 3.14 | 3.31 | 99.0 | — |
+| OpenAI Agents | 0.24.0 | MCP | 20.3 | 4.55 | 5.08 | 102.5 | 67 MB |
+| Pydantic AI | pydantic-ai-slim 2.66.0 | MCP | 37.6 | 4.72 | 5.12 | 127.6 | 109 MB |
+| LangGraph (persistent session) | 1.2.20 · mcp-adapters 0.3.2 | MCP | 38.5 | 4.95 | 5.24 | 114.1 | 87 MB |
+| Google ADK | 2.14.0 · litellm 1.108.2 | MCP | 24.5 | 6.17 | 7.01 | 300.9 | 300 MB |
+| CrewAI | 1.15.37 | MCP | 49.7 | 10.29 | 12.24 | 249.1 | 790 MB |
+| LangGraph (default, reconnect) | 1.2.20 | MCP | 61.2 | 23.41 | 24.66 | 113.7 | 87 MB |
 
-**Win.** Over MCP we are 1.9× lower than the next framework, Microsoft Agent Framework, with the lowest memory and
-smallest install. smolagents now runs (the keep-alive mock handles its role-`user` tool results and `final_answer`
-stop) and lands mid-table. Our cold init (37.5 ms) is still not the lowest: OpenAI Agents and ADK start faster.
-No Python competitor has a native-tools row in this harness.
+**Win.** Over MCP we are 2.6× lower than the next framework, Microsoft Agent Framework (0.92 vs 2.42 ms), with the
+lowest memory and smallest install. Our MCP cold init (19.9 ms) is now level with OpenAI Agents (20.3 ms), the
+fastest starter before. No Python competitor has a native-tools row in this harness.
 
 ### JavaScript / TypeScript
 
 | framework | version | tools | init ms | p50 ms | p95 ms | RSS MB | install |
 |---|---|---|--:|--:|--:|--:|---|
-| **toolnexus** | main | native | 0.2 | **3.21** | 3.43 | 124.5 | 1 MB + 51 MB deps |
-| **toolnexus** | main | MCP | 19.5 | **3.34** | 3.53 | 127.0 | 1 MB + 51 MB deps |
-| **toolnexus** (full) | main | MCP + skill | 44.0 | 3.37 | 3.56 | 129.8 | |
-| Vercel AI SDK | ai 7.0.164 | native | **0.1** | 3.50 | 3.87 | 126.5 | **30 MB** |
-| Vercel AI SDK | ai 7.0.164 · @ai-sdk/mcp 2.0.92 | MCP | **17.3** | 3.57 | 3.87 | **125.9** | **30 MB** |
-| OpenAI Agents JS | 0.21.0 | MCP | 38.5 | 4.19 | 4.89 | 161.0 | 83 MB |
-| LangGraph.js | 1.7.2 | MCP | 36.1 | 4.97 | 6.21 | 190.6 | 113 MB |
-| LangChain.js | 1.6.3 · mcp-adapters 2.0.2 | native | 2.3 | 5.03 | 5.68 | 248.3 | 117 MB |
-| LangChain.js | 1.6.3 · mcp-adapters 2.0.2 | MCP | 35.9 | 5.61 | 6.24 | 248.6 | 117 MB |
-| Mastra | core 1.82.0 · mcp 2.8.0 | native | 0.4 | 5.71 | 7.19 | 247.2 | 217 MB |
-| Mastra | core 1.82.0 · mcp 2.8.0 | MCP | 35.1 | 6.12 | 7.19 | 263.0 | 217 MB |
+| **toolnexus** | main | native | 0.2 | **3.27** | 3.40 | 124.8 | 1 MB + 51 MB deps |
+| **toolnexus** | main | MCP | 17.9 | **3.40** | 3.60 | 126.5 | 1 MB + 51 MB deps |
+| **toolnexus** (full) | main | MCP + skill | 26.1 | 3.46 | 3.65 | 129.3 | |
+| Vercel AI SDK | ai 7.0.164 | native | **0.1** | 3.53 | 3.82 | 125.9 | **30 MB** |
+| Vercel AI SDK | ai 7.0.164 · @ai-sdk/mcp 2.0.92 | MCP | **16.6** | 3.61 | 3.86 | 126.5 | **30 MB** |
+| OpenAI Agents JS | 0.21.0 | MCP | 36.9 | 4.24 | 4.79 | 160.6 | 83 MB |
+| LangGraph.js | 1.7.2 | MCP | 37.0 | 4.74 | 6.10 | 190.2 | 113 MB |
+| LangChain.js | 1.6.3 · mcp-adapters 2.0.2 | native | 2.2 | 4.94 | 5.32 | 246.0 | 117 MB |
+| LangChain.js | 1.6.3 · mcp-adapters 2.0.2 | MCP | 34.4 | 5.15 | 5.45 | 248.7 | 117 MB |
+| Mastra | core 1.82.0 · mcp 2.8.0 | native | 0.4 | 5.49 | 6.62 | 237.5 | 217 MB |
+| Mastra | core 1.82.0 · mcp 2.8.0 | MCP | 33.8 | 5.85 | 7.03 | 251.7 | 217 MB |
 
-**Narrow win over Vercel AI SDK** on p50, native and MCP (about 7%, 0.2–0.3 ms), and #166 halved our MCP init to
-19.5 ms. Vercel still starts a little faster (17.3 ms), uses about 1 MB less memory and installs smaller. Treat the
-p50 gap as small; we are 1.3–1.8× lower than the rest.
+**Narrow win over Vercel AI SDK** on p50, native and MCP (6–7%, about 0.2 ms). Vercel still starts a little faster
+(16.6 vs 17.9 ms), uses the same memory and installs smaller. Treat the p50 gap as small; we are 1.2–1.7× lower
+than the rest.
 
 ### Go
 
 | framework | version | tools | init ms | p50 ms | p95 ms | RSS MB | binary |
 |---|---|---|--:|--:|--:|--:|---|
-| **toolnexus** (native) | main | native | 0.0 | **0.266** | 0.29 | **14.6** | **11.7 MB** |
-| Eino | 0.9.22 · eino-ext mcp 0.0.9 | MCP | 14.9 | **0.326** | 0.46 | 31.6 | 24.8 MB |
-| **toolnexus** (full) | main | MCP + skill | 13.0 | 0.353 | 0.38 | 16.8 | 11.7 MB |
-| **toolnexus** | main · mcp-go 0.48.0 | MCP | **13.9** | 0.356 | 0.41 | **16.8** | **11.7 MB** |
-| langchaingo | 0.1.15 | native | 0.1 | 0.382 | 0.61 | 20.6 | 16.8 MB |
-| Google ADK Go | adk 1.9.0 · go-sdk 1.4.1 ¹ | MCP | 0.2 ¹ | 0.448 | 0.73 | 24.4 | 22.7 MB |
-| Genkit Go | 1.14.0 | MCP | 33.7 | 2.081 | 2.29 | 33.3 | 28.5 MB |
+| **toolnexus** (native) | main | native | 0.0 | **0.274** | 0.31 | **14.5** | **11.7 MB** |
+| Eino | 0.9.22 · eino-ext mcp 0.0.9 | MCP | 14.6 | **0.363** | 0.49 | 29.0 | 24.8 MB |
+| **toolnexus** | main · mcp-go 0.48.0 | MCP | **13.8** | 0.367 | **0.43** | **16.8** | **11.7 MB** |
+| **toolnexus** (full) | main | MCP + skill | 11.6 | 0.379 | 0.43 | 16.8 | 11.7 MB |
+| langchaingo | 0.1.15 | native | 0.1 | 0.423 | 0.72 | 21.1 | 16.8 MB |
+| Google ADK Go | adk 1.9.0 · go-sdk 1.4.1 ¹ | MCP | 0.1 ¹ | 0.477 | 0.69 | 24.5 | 22.7 MB |
+| Genkit Go | 1.14.0 | MCP | 33.4 | 2.111 | 2.42 | 33.8 | 28.5 MB |
 
-**Still a loss on MCP latency to Eino** (0.356 vs 0.326 ms, 9%). We now start faster than Eino (13.9 vs 14.9 ms)
-and use 47% less memory with half the binary. Our native row is the fastest Go row and beats langchaingo native by
-30%. ¹ ADK Go has no OpenAI-compatible model, so the runner adds a ~110-line adapter; it also connects to MCP
+**Level with Eino over MCP** (0.367 vs 0.363 ms median, 1%). Our five per-round p50s (0.33–0.41 ms) straddle
+Eino's (0.35–0.38 ms), so we no longer call it a loss, nor a win. We start faster (13.8 vs 14.6 ms), have a lower
+p95, and use 42% less memory with half the binary. Our native row is the fastest Go row, 35% below langchaingo
+native. ¹ ADK Go has no OpenAI-compatible model, so the runner adds a ~110-line adapter; it also connects to MCP
 lazily, so its init leaves out the MCP connect.
 
 ### JVM (Java, Kotlin)
 
 | framework | version | tools | init ms | p50 ms | p95 ms | RSS MB | install |
 |---|---|---|--:|--:|--:|--:|---|
-| **toolnexus** (native) | main | native | **101.5** | **1.59** | 2.07 | **117.1** | 11 MB |
-| LangChain4j | 1.23.0 · mcp 1.23.0-beta33 | MCP | 249.8 | 2.16 | 3.13 | 142.8 | **8.9 MB** |
-| **toolnexus** (full: MCP + `skill` + native) | main | MCP + skill | 341.6 | 2.50 | 3.19 | 169.9 | 11 MB |
-| **toolnexus** | main · MCP Java SDK 2.0.0 | MCP | 462.4 | 2.97 | 4.61 | 161.6 | 11 MB |
-| Spring AI + SkillsTool | 2.0.2 · spring-ai-agent-utils 0.13.0 | MCP + skill | 1109 ⁴ | 3.34 | 5.09 | 604.7 | 123 MB jar |
-| Spring AI | 2.0.2 · Boot 4.1.2 | MCP | 1212 ⁴ | 3.37 | 4.59 | 560.5 | 123 MB jar |
-| Koog (Kotlin) | 1.3.0 | MCP | 299.4 | 4.38 | 5.93 | 198.3 | 36 MB |
-| Google ADK Java | 1.14.0 + LangChain4j bridge ² | MCP | 338.5 ² | 5.12 | 6.88 | 231.5 | 174 MB |
+| **toolnexus** (native) | main | native | **24.0** | **1.50** | 1.98 | **118.5** | 11 MB |
+| LangChain4j | 1.23.0 · mcp 1.23.0-beta33 | MCP | 253.8 | **2.17** | 2.80 | **139.6** | **8.9 MB** |
+| **toolnexus** (full: MCP + `skill` + native) | main | MCP + skill | **173.6** | 2.20 | 2.64 | 155.9 | 11 MB |
+| **toolnexus** | main · MCP Java SDK 2.0.0 | MCP | **195.3** | 2.28 | 2.80 | 153.2 | 11 MB |
+| Spring AI | 2.0.2 · Boot 4.1.2 | MCP | 1224 ⁴ | 3.30 | 4.79 | 567.2 | 123 MB jar |
+| Spring AI + SkillsTool | 2.0.2 · spring-ai-agent-utils 0.13.0 | MCP + skill | 1084 ⁴ | 3.34 | 5.01 | 579.7 | 123 MB jar |
+| Koog (Kotlin) | 1.3.0 | MCP | 279.1 | 4.10 | 5.25 | 178.2 | 36 MB |
+| Google ADK Java | 1.14.0 + LangChain4j bridge ² | MCP | 312.5 ² | 5.01 | 6.55 | 239.3 | 174 MB |
 
-**Still a loss to LangChain4j over MCP** on init, p50 and RSS (2.97 vs 2.16 ms). We beat Spring AI with about 28%
-of its memory, Koog and ADK Java. **Skills:** our `full` row (MCP + skill + one native tool) is lower than Spring
-AI + SkillsTool (2.50 vs 3.34 ms) at 28% of the memory; both advertise the shared `hello-world` skill and the
-scenario does not call it. No JVM competitor has a native row. ² ADK Java connects to MCP lazily. ⁴ Spring's init
-is Spring Boot context start including MCP discovery.
+**Still behind LangChain4j over MCP on p50 and memory, but the gap shrank** from 37% (2.97 vs 2.16 ms in the
+earlier quiet sitting) to **5%** (2.28 vs 2.17 ms), with the same p95. We now **start faster** than LangChain4j
+(195 vs 254 ms) and are the fastest-starting JVM MCP row; we still use 10% more memory (153 vs 140 MB). We beat
+Spring AI at about 27% of its memory, Koog and ADK Java. **Skills:** our `full` row (MCP + skill + one native
+tool) is lower than Spring AI + SkillsTool (2.20 vs 3.34 ms) at 27% of the memory; both advertise the shared
+`hello-world` skill and the scenario does not call it. No JVM competitor has a native row. ² ADK Java connects to
+MCP lazily. ⁴ Spring's init is Spring Boot context start including MCP discovery.
 
 ### .NET (C#)
 
 | framework | version | tools | init ms | p50 ms | p95 ms | RSS MB | install |
 |---|---|---|--:|--:|--:|--:|---|
-| **toolnexus** (native) | main | native | **12.0** | **0.369** | **0.48** | **62.9** | **4.0 MB** |
-| Semantic Kernel | 1.82.0 | native | 58.1 | 0.426 | 0.50 | 76.7 | 9.5 MB |
-| Microsoft.Extensions.AI | 10.11.0 | native | 32.7 | 0.456 | 0.65 | 75.1 | 7.9 MB |
-| **toolnexus** | main · ModelContextProtocol 1.4.0 | MCP | 121.6 | **0.522** | 0.65 | **74.4** | **4.0 MB** |
-| **toolnexus** (full) | main | MCP + skill | 118.9 | 0.558 | 0.66 | 77.8 | 4.0 MB |
-| MS Agent Framework | Microsoft.Agents.AI 1.28.0 · MCP 2.4.0 | MCP | **101.8** | 0.623 | 0.78 | 86.1 | 12 MB |
+| **toolnexus** (native) | main | native | **12.2** | **0.379** | **0.45** | **63.1** | **4.0 MB** |
+| Semantic Kernel | 1.82.0 | native | 49.8 | 0.458 | 0.58 | 76.6 | 9.5 MB |
+| Microsoft.Extensions.AI | 10.11.0 | native | 29.9 | 0.488 | 0.58 | 74.7 | 7.9 MB |
+| **toolnexus** | main · ModelContextProtocol 1.4.0 | MCP | **61.2** | **0.550** | **0.64** | **75.1** | **4.0 MB** |
+| **toolnexus** (full) | main | MCP + skill | 83.6 | 0.581 | 0.66 | 78.9 | 4.0 MB |
+| MS Agent Framework | Microsoft.Agents.AI 1.28.0 · MCP 2.4.0 | MCP | 88.5 | 0.653 | 0.78 | 85.7 | 12 MB |
 
-**Win on native tools** against Semantic Kernel and MEAI (13% and 19% lower p50, lowest init and RSS), and **a win
-on MCP** against Microsoft Agent Framework this time (0.522 vs 0.623 ms, 16% lower, less memory). On 2026-11-07 the
-MCP pair was a tie, so read it as "level or ahead". We **still lose on MCP cold init** (121.6 vs 101.8 ms), even
-after #167/#171 took 14 ms off.
+**Win on native tools** against Semantic Kernel and MEAI (17% and 22% lower p50, lowest init and RSS), and **a win
+on MCP** against Microsoft Agent Framework (0.550 vs 0.653 ms, 16% lower, less memory). **The MCP cold-init loss is
+gone:** 61.2 ms against MAF's 88.5 ms (it was 121.6 vs 101.8 ms in the earlier sitting).
 
 ### Elixir
 
@@ -257,17 +256,18 @@ tools. The cause is a polling read loop in our in-house MCP client; the fix is d
 
 | framework | version | tools | init ms | p50 ms | p95 ms | RSS MB | binary |
 |---|---|---|--:|--:|--:|--:|---|
-| **toolnexus** (native) | main | native | 0.1 | **0.285** | 0.31 | **11.1** | 18.3 MB |
-| AutoAgents | 0.4.0 | MCP | 16.7 | **0.365** | 0.45 | **13.3** | — |
-| **toolnexus** (full) | main | MCP + skill | 12.2 | 0.393 | 0.45 | 13.8 | 18.3 MB |
-| **toolnexus** | main · rmcp 3.9.0 | MCP | 13.6 | 0.395 | 0.44 | 13.5 | 18.3 MB |
-| rig | rig-core 0.46.0 · rmcp 3.9.0 | MCP | 16.6 | 0.436 | 0.49 | 22.9 | **15.7 MB** |
-| swiftide | 0.34.0 · rmcp 2.2.0 ³ | MCP | **13.3** | 0.461 | 0.51 | 16.8 | 17.5 MB |
+| **toolnexus** (native) | main | native | 0.1 | **0.300** | 0.34 | **11.8** | 18.3 MB |
+| **toolnexus** | main · own stdio MCP client | MCP | 18.2 | **0.342** | **0.39** | 16.8 | 18.3 MB |
+| **toolnexus** (full) | main | MCP + skill | **11.7** | 0.363 | 0.46 | 16.8 | 18.3 MB |
+| AutoAgents | 0.4.0 | MCP | 19.0 | 0.368 | 0.44 | **13.2** | — |
+| swiftide | 0.34.0 · rmcp 2.2.0 ³ | MCP | 16.2 | 0.436 | 0.55 | 16.9 | 17.5 MB |
+| rig | rig-core 0.46.0 · rmcp 3.9.0 | MCP | 21.7 | 0.437 | 0.51 | 23.0 | **15.7 MB** |
 
-**New loss: AutoAgents is lower over MCP** (0.365 vs 0.395 ms, 8%) and level on memory. We still beat rig (9%)
-and swiftide, and our cold init is now level with swiftide and below rig and AutoAgents. Our binary is larger
-than rig's. toolnexus-rust native, at 0.285 ms, ties toolnexus-go native as the fastest rows in the run.
-³ swiftide builds a fresh agent inside each timed request, because its agents keep history.
+**The AutoAgents loss is gone on latency:** over MCP we are now 7% lower (0.342 vs 0.368 ms), after `main` moved
+stdio MCP servers onto our own client (rmcp stays for HTTP servers and the serve side). We beat rig and swiftide by
+about 22%. **AutoAgents still uses less memory** (13.2 vs 16.8 MB), and swiftide starts a little faster over MCP
+(16.2 vs 18.2 ms). Our binary is larger than rig's. ³ swiftide builds a fresh agent inside each timed request,
+because its agents keep history.
 
 ### Could not run, and why
 
@@ -305,10 +305,10 @@ All from [`CHANGELOG.md`](https://github.com/muthuishere/toolnexus/blob/main/CHA
    ask. [QUALITATIVE]
 2. **A2A beyond submit→poll.** We have no streaming, push or auth. ADK Python just made A2A stable, and
    LangChain4j, Spring AI and MAF all ship it. This matters most for agent-to-agent interop. [FROM DOCS]
-3. **JVM and Go overhead.** We still lose to LangChain4j (2.16 vs 2.97 ms) and Eino (0.326 vs 0.356 ms) on the
-   flagship MCP path, and Java's cold init did not improve in the quiet re-run. Both are profile-and-fix jobs. [MEASURED]
-4. **Rust MCP latency vs AutoAgents** (0.365 vs 0.395 ms). Small, but a loss. [MEASURED]
-5. **C# MCP cold init** of 121.6 ms against Microsoft Agent Framework's 101.8 ms. [MEASURED]
+3. **JVM MCP overhead.** We still lose to LangChain4j on the flagship MCP path (2.17 vs 2.28 ms p50, 140 vs
+   153 MB), though the gap fell from 37% to 5% and we now start faster. Go is level with Eino. [MEASURED]
+4. **Rust memory vs AutoAgents** (16.8 vs 13.2 MB RSS over MCP). Latency is now ours (0.342 vs 0.368 ms). [MEASURED]
+5. **JS request path.** The keep-alive change did not show up in this harness; per-request time is where it was. [MEASURED]
 6. **Clojure MCP path** at 6.9–7.8 ms against 1.4–1.8 ms native: the polling read loop in our in-house MCP
    client, fix deferred to [issue #168](https://github.com/muthuishere/toolnexus/issues/168). [MEASURED]
 7. **Eval story.** Five competitors now ship eval *runners* (`pydantic_evals`, `adk eval`, `crewai eval`,
