@@ -36,6 +36,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -43,6 +44,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -196,6 +198,7 @@ type ACPClient struct {
 	closeErr  error
 
 	exited chan struct{} // closed when the agent's stdout ends
+	closed atomic.Bool   // set by Close
 }
 
 // LoadACP spawns the ACP agent as a child process, completes `initialize` +
@@ -318,17 +321,9 @@ func LoadACP(ctx context.Context, opts ACPOptions) (*ACPClient, error) {
 	}
 
 	if opts.Model != "" {
-		// Passed through unchanged. Stable ACP spelling first, then the older
-		// unstable session/set_model.
-		if _, err := c.call(ctx, "session/set_config_option", map[string]any{
-			"sessionId": c.sessionID, "configId": "model", "value": opts.Model,
-		}); err != nil {
-			if _, err2 := c.call(ctx, "session/set_model", map[string]any{
-				"sessionId": c.sessionID, "modelId": opts.Model,
-			}); err2 != nil {
-				_ = c.Close()
-				return nil, fmt.Errorf("toolnexus: acp: set model %q: %v; %v", opts.Model, err, err2)
-			}
+		if err := c.applyModel(ctx, opts.Model); err != nil {
+			_ = c.Close()
+			return nil, err
 		}
 	}
 
@@ -595,14 +590,23 @@ func (c *ACPClient) sendPrompt(ctx context.Context, text string, emit func(Strea
 				emit(StreamEvent{Type: "tool_call", ID: u.ToolCallID, Name: name, Args: u.RawInput, Via: "acp"})
 			}
 		case "tool_call_update":
-			if emit == nil || (u.Status != "completed" && u.Status != "failed") {
-				return
-			}
+			// A non-empty title renames the call for every later event of
+			// this id; a non-empty rawInput carries its (late) arguments
+			// (SPEC: tool_call_args, issue #188).
 			accMu.Lock()
+			if u.Title != "" {
+				toolNames[u.ToolCallID] = u.Title
+			}
 			name := toolNames[u.ToolCallID]
 			accMu.Unlock()
-			if u.Title != "" {
-				name = u.Title
+			if emit == nil {
+				return
+			}
+			if len(u.RawInput) > 0 {
+				emit(StreamEvent{Type: "tool_call_args", ID: u.ToolCallID, Name: name, Args: u.RawInput, Via: "acp"})
+			}
+			if u.Status != "completed" && u.Status != "failed" {
+				return
 			}
 			emit(StreamEvent{Type: "tool_result", ID: u.ToolCallID, Name: name, Via: "acp",
 				Output: acpToolContentText(u.Content), IsError: u.Status == "failed"})
@@ -784,7 +788,50 @@ func acpFlattenMessage(m any) (role, content string) {
 
 // Close terminates the child process and is idempotent — calling it more
 // than once is a no-op past the first call.
+// SetMode changes the running session's mode: session/set_mode {sessionId, modeId}
+// (SPEC §8C). No restart, same session; sent at once, not queued behind a turn. The
+// agent's error is returned and the client stays usable.
+func (c *ACPClient) SetMode(ctx context.Context, mode string) error {
+	if c.closed.Load() {
+		return errACPClosed
+	}
+	if _, err := c.call(ctx, "session/set_mode", map[string]any{
+		"sessionId": c.sessionID, "modeId": mode,
+	}); err != nil {
+		return fmt.Errorf("toolnexus: acp: session/set_mode: %w", err)
+	}
+	return nil
+}
+
+// SetModel changes the running session's model exactly as ACPOptions.Model does at
+// load: session/set_config_option {configId:"model"}, then session/set_model. It
+// fails only when both fail; the client stays usable.
+func (c *ACPClient) SetModel(ctx context.Context, model string) error {
+	if c.closed.Load() {
+		return errACPClosed
+	}
+	return c.applyModel(ctx, model)
+}
+
+var errACPClosed = errors.New("toolnexus: ACP client is closed")
+
+// applyModel passes model through unchanged: stable ACP spelling first, then the
+// older unstable session/set_model.
+func (c *ACPClient) applyModel(ctx context.Context, model string) error {
+	if _, err := c.call(ctx, "session/set_config_option", map[string]any{
+		"sessionId": c.sessionID, "configId": "model", "value": model,
+	}); err != nil {
+		if _, err2 := c.call(ctx, "session/set_model", map[string]any{
+			"sessionId": c.sessionID, "modelId": model,
+		}); err2 != nil {
+			return fmt.Errorf("toolnexus: acp: set model %q: %v; %v", model, err, err2)
+		}
+	}
+	return nil
+}
+
 func (c *ACPClient) Close() error {
+	c.closed.Store(true)
 	c.closeOnce.Do(func() {
 		_ = c.stdin.Close()
 		if c.cmd.Process != nil {

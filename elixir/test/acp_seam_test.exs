@@ -64,6 +64,42 @@ defmodule Toolnexus.AcpSeamTest do
     assert Client.run(client, "again", bare_toolkit()).text == fx["expectDoneText"]
   end
 
+  # -- stream.acpToolUpdate (#188) ---------------------------------------------
+
+  test "stream.acpToolUpdate: rawInput emits tool_call_args, title is remembered" do
+    fx = cases()["stream"]["acpToolUpdate"]
+    pid = connect!(env: fx["fakeEnv"])
+    client = Client.create_in_process(model: "acp", generate_stream: Acp.generate_stream(pid))
+
+    events = client |> Client.stream("q", bare_toolkit()) |> Enum.to_list()
+
+    tool_events =
+      Enum.filter(events, &(&1.type in ["tool_call", "tool_call_args", "tool_result"]))
+
+    got =
+      Enum.map(tool_events, fn
+        %{type: "tool_call"} = e ->
+          %{"type" => e.type, "id" => e.id, "name" => e.name, "via" => e.via}
+
+        %{type: "tool_call_args"} = e ->
+          %{"type" => e.type, "id" => e.id, "name" => e.name, "args" => e.args, "via" => e.via}
+
+        %{type: "tool_result"} = e ->
+          %{
+            "type" => e.type,
+            "id" => e.id,
+            "name" => e.name,
+            "output" => e.output,
+            "isError" => e.is_error,
+            "via" => e.via
+          }
+      end)
+
+    assert got == fx["expectEvents"]
+    assert %{type: "done", result: done} = List.last(events)
+    assert done.text == fx["expectDoneText"]
+  end
+
   # -- passthrough ---------------------------------------------------------------
 
   test "passthrough: mcpServers verbatim and in order, sessionMeta, clientCapsMeta, model" do
@@ -96,6 +132,56 @@ defmodule Toolnexus.AcpSeamTest do
     rec = connect!(env: fb["fakeEnv"], model: fx["options"]["model"]) |> recorded()
 
     assert Map.take(rec["session/set_model"], ["modelId"]) == fb["expectSetModel"]
+  end
+
+  test "liveSwitch: set_mode and set_model on a running client, no restart" do
+    fx = cases()["liveSwitch"]
+    pid = connect!([])
+
+    assert :ok = Acp.set_mode(pid, fx["mode"])
+    assert :ok = Acp.set_model(pid, fx["model"])
+    rec = recorded(pid)
+
+    assert Map.take(rec["session/set_mode"], ["modeId"]) == fx["expectSetMode"]
+    assert rec["session/set_mode"]["sessionId"] == "sess-1"
+
+    assert Map.take(rec["session/set_config_option"], ["configId", "value"]) ==
+             fx["expectSetConfigOption"]
+
+    assert rec["session/set_config_option"]["sessionId"] == "sess-1"
+    assert rec["_counts"]["initialize"] == fx["expectInitializeCount"]
+    assert rec["_counts"]["session/new"] == fx["expectSessionNewCount"]
+  end
+
+  test "liveSwitch: set_model falls back to set_model on a running client" do
+    fx = cases()["liveSwitch"]
+    pid = connect!(env: fx["fallback"]["fakeEnv"])
+
+    assert :ok = Acp.set_model(pid, fx["model"])
+    rec = recorded(pid)
+    assert Map.take(rec["session/set_model"], ["modelId"]) == fx["fallback"]["expectSetModel"]
+  end
+
+  test "liveSwitch: both model requests rejected fails the call only" do
+    pid = connect!(env: %{"TN_FAKE_NO_CONFIG_OPTION" => "1", "TN_FAKE_NO_SET_MODEL" => "1"})
+    assert {:error, {:set_model, "m-2", _e1, _e2}} = Acp.set_model(pid, "m-2")
+    assert {:ok, _} = Acp.prompt(pid, "q")
+  end
+
+  test "liveSwitch: a rejected mode fails only that call" do
+    fx = cases()["liveSwitch"]
+    pid = connect!(env: fx["reject"]["fakeEnv"])
+
+    assert {:error, err} = Acp.set_mode(pid, fx["mode"])
+    assert inspect(err) =~ fx["reject"]["expectErrorContains"]
+    assert {:ok, _} = Acp.prompt(pid, "q")
+  end
+
+  test "liveSwitch: a closed client refuses" do
+    pid = connect!([])
+    Acp.close(pid)
+    assert {:error, _} = Acp.set_mode(pid, "plan")
+    assert {:error, _} = Acp.set_model(pid, "m")
   end
 
   test "passthrough: bare — mcpServers [] and no _meta keys" do

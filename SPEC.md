@@ -99,6 +99,8 @@ A new language port is "correct" iff these hold. Run it against the shared
    non-2xx⇒`HTTP <status>: <body>` isError, else body text.
 10. **Unified client**: `{baseUrl,style:"openai"|"anthropic",model,apiKey?}`; system = systemPrompt+`\n\n`+skillsPrompt();
     loop call→execute tool calls→feed back (provider's tool-result shape)→repeat to maxTurns(10).
+    Opt-in `stopRecovery` (default off, §8): malformed tool args ⇒ corrective ×1, truncated ⇒ continue ×3,
+    empty answer ⇒ nudge ×1, each with a byte-exact pinned user message.
 11. **Built-in tools** (`source:"builtin"`): the default toolset — `bash, read, write, edit, grep, glob,
     webfetch, question, apply_patch, todowrite` — names + input schemas per §4A. **On by default**;
     global toggle (`builtins:false` | `builtins.disabled:true` | `builtins.enabled:false` ⇒ whole source off, MCP
@@ -2277,6 +2279,64 @@ The compacted transcript is `[leading system prompt (verbatim), summary system m
 
 Absent a `compactor`, a run is byte-identical to today (compaction is entirely opt-in).
 
+### 7F.1 Reactive compaction on context overflow (change `add-reactive-compaction`, issue #194)
+
+A proactive compactor works from an **estimate**; the provider is the only authority on whether
+a prompt fits. When the provider rejects a request because the prompt is too long, the loop can
+compact and retry instead of failing the run — opt-in, through one client option:
+
+| option | meaning |
+|--------|---------|
+| `compactOnOverflow` | a hook with the `beforeLLM` signature (§8) — typically a `compactor(...)` with a **tighter** budget than the proactive one. Idiomatic spelling per port (`compactOnOverflow` / `CompactOnOverflow` / `compact_on_overflow` / `:compact-on-overflow`). **Absent ⇒ byte-identical**: an overflow surfaces as the typed `LlmHttpError` exactly as today. |
+
+**Detection (`isContextOverflow(status, body)`, exported from every port, idiomatic name).** True
+iff **both**:
+
+1. `status` is `400` or `413`, and
+2. the provider's (redacted) error body, lowercased, contains at least one of these markers:
+   `context_length_exceeded` (OpenAI `error.code`), `maximum context length` (OpenAI message),
+   `prompt is too long` (Anthropic message), `prompt_too_long`, `request_too_large` (Anthropic
+   413 `error.type`), `context window` (OpenAI-compatible gateways: "exceeds the context window").
+
+Nothing else counts: a 413 with no marker, a marker under any other status (e.g. a 429 or 500
+mentioning the context length), and transport errors are not overflows. Detection runs on the
+**final** failure of an LLM call — after the §8 retry layer and `onError` have finished (none of
+`400`/`413` is in the default retryable set, so in practice that is the first attempt).
+
+**Reaction.** On an overflow, with `compactOnOverflow` set, the loop calls the hook with
+`{messages, tools, model, turn}` (the working transcript and the values of the failing call). If
+it returns `messages` that are **strictly fewer** than the working transcript, they replace the
+working transcript (exactly as a `beforeLLM` rewrite does — they flow into `RunResult.messages`,
+the store, and every later turn) and the **same turn** is re-sent with the same tools and model.
+`beforeLLM` does **not** run again for the retry; the retry does **not** consume a turn (`turn`,
+`maxTurns` and `RunResult.turns` count turns, not attempts). If the hook returns nothing, or a
+transcript that is not shorter, the run fails at once with `ContextOverflowError` (below).
+
+**Breaker — "rapid refill", pinned.** The loop keeps two counters per run: `okSince` (successful
+LLM calls since the last reactive compaction) and `streak` (reactive compactions in the current
+rapid chain, initially `0`). An overflow is a **rapid refill** when `streak > 0` and
+`okSince < 2` — the transcript was compacted and overflowed again within fewer than two
+successful LLM calls (the retry itself counts as one when it succeeds). On each overflow:
+
+1. not a rapid refill ⇒ `streak = 0`;
+2. `streak == 3` ⇒ fail with `ContextOverflowError` (`compactions = 3`); no hook call;
+3. otherwise call the hook (Reaction, above); on success `streak += 1`, `okSince = 0`, retry.
+
+Every successful LLM call does `okSince += 1`. So a run fails after **3 compactions in a row that
+did not buy at least two successful calls each**; a run whose overflows are spaced by ≥ 2
+successful calls compacts as often as it needs.
+
+**`ContextOverflowError`** — typed, idiomatic per port (a subclass/variant of the port's error
+type), carrying `compactions` (the streak at failure: `3` from the breaker, else the number of
+compactions in the current chain), `status` and `body` (from the last provider error, same
+redaction as `LlmHttpError`). Its message is pinned byte-identical:
+`context overflow: <compactions> reactive compaction(s) did not make the prompt fit`.
+It is a failure, never a §10 `Pending`; an interrupted-turn save (§8) applies as for any error.
+
+Both loops (`run` and `stream`), both styles, and the resume paths apply it identically. In
+`stream` the overflow is an HTTP error before any event of that turn, so nothing is emitted for
+the failed attempt. Shared fixture: `conformance/reactive_compaction/cases.json`.
+
 ---
 
 ## 7G. Media generation (source: "media")
@@ -2546,9 +2606,66 @@ Before this change every call of a response ran concurrently with no cap, so two
 one file could race. A host that relied on unlabelled tools running in parallel marks them
 `readOnly` or gives them a predicate.
 
+### Stop-reason recovery (change `add-stop-reason-recovery`, opt-in)
+
+`ClientOptions.stopRecovery` (idiomatic spelling per port: `stopRecovery` / `stop_recovery` /
+`StopRecovery` / `:stop-recovery`), a boolean, **default `false`**. Off, the loop is
+byte-identical to the paragraphs above. On, three response shapes that today end a run badly are
+answered with one pinned user message and another model call instead. It applies in every loop
+that runs the provider: `run` and `stream`, both styles, the resume paths and §7D agent runs.
+`translate` (§11) and the in-process client are unaffected (they have no loop / no stop reason).
+
+Each response is classified **in this order**; the first rule that matches acts:
+
+1. **Malformed tool call** — the response has tool calls and at least one has arguments that are
+   not a JSON object. OpenAI: `function.arguments` is a non-empty string (after trimming
+   whitespace) that does not parse as JSON, or parses to anything but an object. Anthropic:
+   `input` is present and not an object (non-streaming), or the accumulated `partial_json` is
+   non-empty (after trimming) and does not parse to an object (streaming). An empty/absent
+   argument string is `{}` and is **not** malformed. At most **1** per run. Action: **no tool of
+   that response runs**, no `tool_call`/`tool_result` stream event and no `toolCalls` record is
+   produced for it, the assistant message is **removed** from the transcript, and the user message
+   `CORRECTIVE` is appended. Once the budget is spent, a malformed call runs as before this change
+   (its arguments become `{}`).
+2. **Truncated** — no tool calls and the stop reason is OpenAI `finish_reason: "length"` or
+   Anthropic `stop_reason: "max_tokens"`. At most **3** per run. Action: the partial assistant
+   message **stays** in the transcript, its text is carried, and the user message `CONTINUE` is
+   appended. Once the budget is spent, the run ends as before with the carried text.
+3. **Empty answer** — no tool calls, any other stop reason, and the response text is empty after
+   trimming whitespace (the observed case is a thinking-only `end_turn`: reasoning blocks and no
+   text; a reasoning model that hides its reasoning is indistinguishable and is treated the same).
+   At most **1** per run. Action: the assistant message is **removed** from the transcript and the
+   user message `NUDGE` is appended. Once spent, the run ends as before.
+
+Otherwise the loop proceeds exactly as without the option.
+
+**Carried text.** Text of a truncated response that was continued is carried; the run's final
+`text` (and `done.result.text` in a stream) is the carried text followed by the final response's
+text, concatenated with no separator. The carry resets to empty whenever a response's tools run.
+A stream emits the `text` deltas of every response as they arrive, so in a run where no tool
+ran its deltas concatenate to the same string (as today, text streamed before a tool turn is not
+part of the final `text`).
+
+**Accounting.** Every recovery call is an ordinary turn: it fires `beforeLLM`/`afterLLM`, counts in
+`turns` and usage, and is bounded by `maxTurns` (a recovery never extends `maxTurns`). A recovery is taken only when a turn remains: on the
+last permitted turn every rule is skipped and the run ends exactly as without the option. Budgets are
+per `run`/`stream` call and are not shared between calls of a conversation.
+
+**The appended user message** is `{ "role": "user", "content": TEXT }` in both styles (a plain
+string content). The three texts are byte-exact, ASCII, no trailing newline:
+
+```
+NUDGE      = "Your previous response contained no answer. Continue and give your answer."
+CONTINUE   = "Your previous response was cut off at the output token limit. Continue exactly where it stopped, without repeating anything."
+CORRECTIVE = "Your previous tool call could not be used: its arguments were not a valid JSON object. Call the tool again with arguments that are a single valid JSON object matching its input schema."
+```
+
+Fixture: `conformance/stop_recovery/cases.json` (scripted responses ⇒ expected appended messages,
+turn count and final text), replayed by every port's suite.
+
 ### Hooks (lifecycle middleware)
 
-`ClientOptions.hooks` — four optional, async-capable callbacks around the loop. Each may
+`ClientOptions.hooks` — five optional, async-capable callbacks around the loop. Each may
 observe; the noted ones may mutate or short-circuit.
 
 - `beforeLLM({ messages, tools, model, turn })` → optionally return `{ messages?, tools? }`
@@ -2579,6 +2696,34 @@ observe; the noted ones may mutate or short-circuit.
 - `afterTool({ name, args, result, id, turn })` → return `{ result }` to transform the output
   (redact, annotate).
 
+- `afterRound({ turn, final, text, messages })` → optionally return `{ inject: [string…] }` (change
+  `add-round-boundary-hook`, issue #192). The **round-boundary** seam: it fires once at the end of
+  each loop round, in run and stream, every style, both entry points:
+  - **non-final round** (the model called tools): after **all** of that round's tool results are
+    appended to the transcript, before the next round's `beforeLLM`. `final: false`, `text: ""`.
+  - **final round** (the model answered with no tool call): only when **a turn remains**
+    (`turn + 1 < maxTurns`). `final: true`, `text` = that round's answer text. If it returns a
+    non-empty `inject`, the loop **continues** — the round's answer stays in the transcript, the
+    stream emits no `usage`/`done` for it, and the next round is requested. Empty/absent ⇒ the run
+    ends exactly as without the hook.
+  - Each `inject` string is appended, in order, as one plain-text **user** message
+    (`{role:"user", content:"<string>"}`, same shape for every style) — the transcript, the
+    `ConversationStore` save and `RunResult.messages` all carry it. Empty strings are skipped.
+  - With `stopRecovery` on, recovery is classified first: a response answered with a recovery
+    message is not a round end and fires no `afterRound`. On a final round `text` is the full answer
+    (carried text + this response's text); if `afterRound` continues the loop, the carry resets.
+  - It does **not** fire on a §10 pending halt or a thrown error. A non-final round fires even when
+    it is the last allowed turn; its injection is appended and the run then ends at `maxTurns`
+    exactly as before (`incomplete` when there is no answer). `turn` is the 0-based round index
+    (same as `beforeLLM`). `messages` is the working transcript (read-only by contract).
+  - A failing `afterRound` propagates like a failing `beforeLLM`: the run/stream fails, no further
+    request is sent. `translate` (§11) never fires it (no round). An ACP model source never fires it — the
+    agent owns its own loop (an in-process model runs the normal loop and does fire it).
+  - Absent ⇒ byte-identical behaviour. Why not `beforeLLM`: `beforeLLM` can replace the transcript
+    but cannot tell a round boundary from the first call, cannot see the round's answer, and cannot
+    keep a loop going once the model stops — the loop has already returned. Todo reminders and
+    sub-agent notices need exactly those two things.
+
 These are what make it programmable as an agent: permissions/guardrails (deny in `beforeTool`),
 caching, arg rewriting, and observability (cost/latency in `afterLLM`).
 
@@ -2600,6 +2745,9 @@ the thread's transcript is loaded as history before the stream, and saved back t
 - `{ type: "tool_call", id, name, args }` — a tool about to run
 - `{ type: "tool_result", id, name, output, isError }` — after it ran
 - `{ type: "usage", usage }` — token usage
+- `{ type: "retry", attempt, max, delayMs, status?, reason }` — the LLM request failed retryably and
+  the loop is about to wait `delayMs` and try again (§ Resilience, "Retry event")
+- `{ type: "fallback", from, to }` — only with `fallbackModels` (§8 Resilience): the call is switching from model `from` to `to` after overload
 - `{ type: "done", result }` — the final `RunResult`
 
 OpenAI: `stream:true` + `stream_options.include_usage`, SSE deltas (assemble `tool_calls` by
@@ -2656,6 +2804,11 @@ with the first allow-kind option, and only `agent_message_chunk` text forms the 
   `agent_message_chunk` → `{type:"text", delta}`, `agent_thought_chunk` → `{type:"thought", delta, via:"acp"}`,
   `tool_call` → `{type:"tool_call", id, name: title, args: rawInput, via:"acp"}`, and a
   `completed`/`failed` `tool_call_update` → `{type:"tool_result", id, name, output, isError, via:"acp"}`.
+  Agents often send `rawInput` and the full `title` only on a later `tool_call_update` (#188): an
+  update carrying a non-empty `rawInput` object emits `{type:"tool_call_args", id, name, args: rawInput,
+  via:"acp"}` (before any `tool_result` that same update produces), and an update's non-empty `title`
+  becomes the call's name for every later event of that id. An update with neither emits nothing.
+  Conformance: `conformance/acp-client/cases.json` `stream.acpToolUpdate`.
   An in-process client given a streaming generate streams instead of refusing: text events become
   the stream's text deltas, other events pass straight to the consumer and are **never executed** by
   the loop (the agent already ran them).
@@ -2698,7 +2851,63 @@ skipping remaining retries. **Absent `onError` ⇒ the default classifier `retry
 "fail"`, i.e. byte-identical to the paragraph above.** There is **no `"suspend"` tier** — a failure
 is not a user action, so it never becomes a §10 `Pending`; suspension stays a user-action pause
 (§10). A `"fail"` result never carries `status:"pending"`. Aborts (timeout/cancel) bypass `onError`
-and are never retried.
+and are never retried. A context-overflow `400`/`413` is not retried here; with
+`compactOnOverflow` set it is answered by reactive compaction instead (§7F.1).
+
+**`x-should-retry` override.** A non-ok LLM response carrying the header `x-should-retry`
+(name case-insensitive) whose trimmed value is `true` or `false` (value case-insensitive) sets
+`retryable` to that value **before** `onError` runs — it overrides the default status
+classification in both directions (a `400` with `x-should-retry: true` is retried; a `503` with
+`x-should-retry: false` is terminal). Any other value, or no header, leaves the default
+classification unchanged. `onError` still has the final say, and `retries` still bounds every
+retry. Applies to `run`/`ask` and `stream` alike. It is never consulted on a network error.
+
+**Retry event (streaming only).** When `stream()` is about to retry the LLM request — the
+classifier said `"retry"` and the budget is not spent — it emits, **before** waiting,
+`{ type: "retry", attempt, max, delayMs, status?, reason }`:
+`attempt` is the 1-based number of the retry about to happen (the zero-based failed attempt + 1),
+`max` is the configured `retries`, `delayMs` is the exact wait the loop is about to sleep (an
+honoured `Retry-After` in milliseconds, otherwise the backoff-with-jitter value actually drawn),
+`status` is the HTTP status (absent on a network error), and `reason` is `"HTTP <status>"` or
+`"network"`. A host renders it as "Retrying in Ns · attempt A/M". No event is emitted for a
+failure that is not retried (terminal, `"fail"`, or budget spent), for aborts, or by
+`run`/`ask` (non-streaming output is unchanged). Field spelling is per-port idiom
+(`delay_ms` / `DelayMs` / `:delay-ms`). An in-process client has no wire and emits none.
+
+**`fallbackModels` — opt-in model fallback chain on overload (optional; change `add-model-fallback-chain`).**
+An ordered list of model ids (idiomatic per port: js `fallbackModels`, python `fallback_models`,
+Go `FallbackModels`, java `fallbackModels(List<String>)`, C# `FallbackModels`, elixir
+`:fallback_models`, clojure `:fallback-models`, rust `fallback_models(Vec<String>)`). It is the
+**model-only first slice** of `openspec/changes/add-llm-upstream-failover` (same `baseUrl`, `style`,
+credentials and transport — only the model changes), and follows that design's D1/D5/D6 verbatim.
+Pinned behaviour, identical in all eight ports:
+
+- **Chain.** For each model call the chain is `[turnModel, ...fallbackModels]`, where `turnModel` is
+  the model that call would send today (the configured model, or that turn's `beforeLLM` override).
+  Entries that are empty or equal to a model already earlier in the chain are skipped. `beforeLLM` is
+  **not** re-run per fallback: the fallback list is itself the operator's explicit, ordered choice.
+- **Trigger = overload, exactly `503` and `529`.** The retry budget (`retries`, `Retry-After`,
+  `onError`) is spent on the current model first, unchanged. Only when that budget is exhausted and
+  the **final** attempt's HTTP status is `503` or `529` does the call advance to the next model, with
+  a **fresh** retry budget. Nothing else advances: `429` (a rate limit — the same model will serve
+  later), other 5xx, network errors, `4xx`, aborts/timeouts, and any attempt `onError` classified
+  `"fail"` surface exactly as today. Worst case `(1 + retries) × chain length` attempts.
+- **Per call, not sticky.** Every model call (each turn) starts again at `turnModel`; no cooldown or
+  cross-call memory (v1).
+- **Exhausted chain** ⇒ the last model's error surfaces exactly as a non-fallback client's would.
+- **Reporting.** The model that actually served is "the model transmitted" for §8 Hooks reporting:
+  the `afterLLM` event's `model`, that turn's `llm` metric event, `RunResult.model` and the `run`
+  metric event carry it.
+- **Streaming.** Before switching, `stream` emits `{ type: "fallback", from, to }` (both model ids);
+  `run`/`ask` emit nothing new. Overload is an HTTP status received before any token, so a fallback
+  always precedes the call's first delta; a failure after the first token never falls back.
+- **Kill switch.** When the environment variable **`TOOLNEXUS_DISABLE_MODEL_FALLBACK`** is `1` or
+  `true` (case-insensitive), read at each model call, the chain is ignored. Any other value or unset
+  ⇒ the option applies.
+- **Absent / empty `fallbackModels` ⇒ byte-identical** to today. In-process and ACP model sources
+  (no wire, no HTTP status) ignore it.
+- **Model faithfulness (§8 Right-size routing) still holds:** the configured model is transmitted
+  verbatim first; a fallback is an operator-configured, reported substitution, never a silent one.
 
 **Cancellation** beyond `timeoutMs`/abort: the per-port cancellation contract used by the
 agent runtime's `interrupt` is tabled in §7D — ports differ only in abort latency, never in
@@ -3535,6 +3744,22 @@ written by the caller on top of them. No public API names a vendor. Status: **al
   {sessionId, modelId}`; both failing fails `loadACP`. toolnexus never lists or validates models.
 - `args` and `env` reach the spawned agent untouched; `env` values are never logged.
 
+Changing mode or model on a **running** client (#197) — no restart, same process, same `sessionId`:
+
+- **`setMode(mode)`** — sends `session/set_mode {sessionId, modeId: mode}` (the same request the
+  `mode` option sends once at load). The agent's error fails the call; the client stays usable.
+- **`setModel(model)`** — exactly the `model` option's logic: `session/set_config_option
+  {sessionId, configId:"model", value: model}`, and if the agent rejects that, `session/set_model
+  {sessionId, modelId: model}`; both failing fails the call (both errors in the message), the client
+  stays usable.
+- Values pass through unchanged — toolnexus never lists or validates modes or models. The request is
+  sent at once, not queued behind a running turn; when the change takes effect is the agent's call.
+  On a closed client both fail with the closed-client error.
+- Idiom: golang `SetMode(ctx, mode)` / `SetModel(ctx, model)`; js `setMode` / `setModel` (async);
+  python `set_mode` / `set_model` (sync, like its `generate`); java `setMode` / `setModel`; csharp `SetModeAsync` /
+  `SetModelAsync`; elixir `set_mode/2` / `set_model/2` (`:ok | {:error, reason}`); clojure
+  `set-mode!` / `set-model!`; rust `set_mode` / `set_model` (async, `Result`).
+
 Wire behaviour:
 
 - `initialize` sends `clientCapabilities {fs:{readTextFile:false,writeTextFile:false},terminal:false}`
@@ -3548,7 +3773,8 @@ Wire behaviour:
 - Each turn is one `session/prompt`; only `agent_message_chunk` text is the answer.
   **Streaming** (`generateStream`): `agent_message_chunk` → `{type:"text", delta}` as each update is
   read; `agent_thought_chunk` → `{type:"thought", delta, via:"acp"}`; `tool_call` /
-  completed-or-failed `tool_call_update` → `tool_call` / `tool_result` with `via:"acp"`.
+  completed-or-failed `tool_call_update` → `tool_call` / `tool_result` with `via:"acp"`; an update
+  carrying `rawInput` → `tool_call_args` (§8, ACP host hooks).
 - Permission requests go to the caller's permission hook (default: first allow-kind option, as in §8).
   Which agent tools to allow is policy, and policy belongs to the caller.
 
@@ -3573,7 +3799,7 @@ transports and reply parsing, prompt preambles or system hints, permission allow
 vendor tool titles, isolation flags, stdio↔HTTP bridges, model lists.
 
 Conformance: `conformance/acp-client/cases.json` — `stream.inProcess`, `stream.acpDrip`,
-`passthrough`, `agentExit`, `unknownRequest`, `asMcpServer`.
+`passthrough`, `liveSwitch`, `agentExit`, `unknownRequest`, `asMcpServer`.
 
 ## 9. Go CLI (`toolnexus`)
 

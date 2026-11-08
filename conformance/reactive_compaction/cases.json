@@ -1,0 +1,29 @@
+{
+  "_doc": "SPEC.md §7F.1 (change add-reactive-compaction, issue #194). `detection`: isContextOverflow(status, body) must equal `overflow`. `loops`: a scripted sequence of LLM responses, one per HTTP call, in order: `text` = final answer, `tool` = one tool call (the test's tool answers 'ok'), `overflow` = the given status/body. Each loop run starts from a `history` of 8 alternating user/assistant text messages ('h0'..'h7', user first), no system prompt, prompt 'go'. The compaction hook returns the working transcript minus its FIRST message (always strictly shorter) unless `hookNoop` is true (returns nothing). Run every loop case through run AND stream, in both styles. Expect either `text` (and `compactions` = hook calls) or an error: `LlmHttpError` with `status`, or `ContextOverflowError` with `compactions` and the pinned `message`. `calls` = total HTTP calls made.",
+  "overflowBodies": {
+    "openai": {"status": 400, "body": "{\"error\":{\"message\":\"This model's maximum context length is 128000 tokens. However, your messages resulted in 130000 tokens.\",\"type\":\"invalid_request_error\",\"param\":\"messages\",\"code\":\"context_length_exceeded\"}}"},
+    "anthropic": {"status": 400, "body": "{\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"prompt is too long: 210000 tokens > 200000 maximum\"}}"}
+  },
+  "detection": [
+    {"name": "openai 400 context_length_exceeded", "status": 400, "body": "{\"error\":{\"message\":\"This model's maximum context length is 128000 tokens.\",\"code\":\"context_length_exceeded\"}}", "overflow": true},
+    {"name": "anthropic 400 prompt is too long", "status": 400, "body": "{\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"prompt is too long: 210000 tokens > 200000 maximum\"}}", "overflow": true},
+    {"name": "anthropic 413 request_too_large", "status": 413, "body": "{\"type\":\"error\",\"error\":{\"type\":\"request_too_large\",\"message\":\"Request exceeds the maximum allowed number of bytes.\"}}", "overflow": true},
+    {"name": "gateway context window, mixed case", "status": 400, "body": "Input Exceeds The Context Window of this model", "overflow": true},
+    {"name": "prompt_too_long code", "status": 400, "body": "{\"error\":{\"code\":\"PROMPT_TOO_LONG\"}}", "overflow": true},
+    {"name": "plain 400", "status": 400, "body": "{\"error\":{\"message\":\"Invalid value for 'temperature'\"}}", "overflow": false},
+    {"name": "413 without marker", "status": 413, "body": "Payload Too Large", "overflow": false},
+    {"name": "marker under 429", "status": 429, "body": "maximum context length", "overflow": false},
+    {"name": "marker under 500", "status": 500, "body": "context_length_exceeded", "overflow": false},
+    {"name": "empty body", "status": 400, "body": "", "overflow": false}
+  ],
+  "loops": [
+    {"name": "absent option: overflow surfaces unchanged", "option": false, "script": ["overflow"], "expect": {"error": "LlmHttpError", "status": 400}, "calls": 1},
+    {"name": "compact once then answer", "option": true, "script": ["overflow", "text"], "expect": {"text": "done", "compactions": 1}, "calls": 2},
+    {"name": "retry keeps overflowing: breaker after 3", "option": true, "script": ["overflow", "overflow", "overflow", "overflow"], "expect": {"error": "ContextOverflowError", "compactions": 3, "message": "context overflow: 3 reactive compaction(s) did not make the prompt fit"}, "calls": 4},
+    {"name": "rapid refill one call apart: breaker after 3", "option": true, "script": ["overflow", "tool", "overflow", "tool", "overflow", "tool", "overflow"], "expect": {"error": "ContextOverflowError", "compactions": 3, "message": "context overflow: 3 reactive compaction(s) did not make the prompt fit"}, "calls": 7},
+    {"name": "spaced refills reset the streak", "option": true, "script": ["overflow", "tool", "tool", "overflow", "tool", "tool", "overflow", "tool", "tool", "overflow", "text"], "expect": {"text": "done", "compactions": 4}, "calls": 11},
+    {"name": "hook makes no progress", "option": true, "hookNoop": true, "script": ["overflow"], "expect": {"error": "ContextOverflowError", "compactions": 0, "message": "context overflow: 0 reactive compaction(s) did not make the prompt fit"}, "calls": 1},
+    {"name": "non-overflow 400 is not compacted", "option": true, "script": ["bad400"], "expect": {"error": "LlmHttpError", "status": 400}, "calls": 1}
+  ],
+  "bad400": {"status": 400, "body": "{\"error\":{\"message\":\"Invalid value for 'temperature'\"}}"}
+}

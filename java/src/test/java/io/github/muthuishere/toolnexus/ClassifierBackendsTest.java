@@ -321,11 +321,11 @@ class ClassifierBackendsTest {
                 Classifier.Decision d = cl.evaluate("x", qs);
                 assertEquals(expect.get("model").asText(), d.model(), name);
                 assertEquals(expect.get("calibrated").asBoolean(), d.calibrated(), name);
-                expect.path("noul").properties().forEach(e ->
+                expect.path("noul").properties().iterator().forEachRemaining(e ->
                         assertEquals(e.getValue().asDouble(), d.noul(e.getKey()).noul(), name));
-                expect.path("choice").properties().forEach(e ->
+                expect.path("choice").properties().iterator().forEachRemaining(e ->
                         assertEquals(e.getValue().asText(), d.choice(e.getKey()).choice(), name));
-                expect.path("score").properties().forEach(e ->
+                expect.path("score").properties().iterator().forEachRemaining(e ->
                         assertEquals(e.getValue().asDouble(), d.score(e.getKey()).score(), name));
             } finally {
                 stop();
@@ -354,7 +354,7 @@ class ClassifierBackendsTest {
             String name = c.get("name").asText();
             authHeaders.clear();
             Map<String, String> envMap = new java.util.HashMap<>();
-            c.path("env").properties().forEach(e -> envMap.put(e.getKey(), e.getValue().asText()));
+            c.path("env").properties().iterator().forEachRemaining(e -> envMap.put(e.getKey(), e.getValue().asText()));
             String base = start((n, b) -> new Object[]{200, okReply});
             try {
                 Classifier.Options o = new Classifier.Options().backend(Classifier.BACKEND_OPENAI)

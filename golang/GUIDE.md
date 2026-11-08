@@ -96,6 +96,13 @@ permission prompts; `WaitForCtx` answers them and ends with the turn;
 `LoadMcpWithOptions(..., McpLoadOptions{OnServer: ...})` lets you `tk.Register` each MCP server's
 tools as it connects; `agents.CompactorOptions.OnCompact` tells you when context was compacted.
 
+**Context overflow** — set `ClientOptions.CompactOnOverflow` (same signature as `Hooks.BeforeLLM`,
+typically `agents.Compactor(...)` with a tighter budget) and a provider "prompt too long" 400/413
+compacts the transcript and re-sends the same turn instead of failing. A breaker stops after 3
+compactions that each bought fewer than 2 successful calls, or when the hook does not shrink the
+transcript: the run fails with `*toolnexus.ContextOverflowError` (`errors.As`). Unset ⇒ the
+`*ProviderError` surfaces as before. `toolnexus.IsContextOverflow(status, body)` is the detector.
+
 **B) Bring your own LLM client** — take just the schema + executor:
 ```go
 tools := tk.ToOpenAI()            // or ToAnthropic() / ToGemini()

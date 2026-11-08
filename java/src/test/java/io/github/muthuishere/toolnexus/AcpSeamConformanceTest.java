@@ -121,6 +121,60 @@ class AcpSeamConformanceTest {
         }
     }
 
+    // ---- stream.acpToolUpdate (issue #188) -------------------------------------------------
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void streamAcpToolUpdate() throws Exception {
+        Map<String, Object> c = sub(cases(), "stream", "acpToolUpdate");
+        try (AcpClient acp = AcpClient.start(new AcpClient.Options().command(AcpSeamFake.command())
+                .env(env((Map<String, Object>) c.get("fakeEnv"), null)).timeoutMs(10_000))) {
+            LlmClient client = InProcess.createClient(new InProcess.Options().model("acp")
+                    .generateStream((req, emit) -> {
+                        try {
+                            return acp.generateStream(req, emit);
+                        } catch (java.io.IOException e) {
+                            throw new RuntimeException(e);
+                        }
+                    }));
+            List<Map<String, Object>> events = new ArrayList<>();
+            AtomicReference<LlmClient.RunResult> done = new AtomicReference<>();
+            try (Toolkit tk = Toolkit.create(new Toolkit.Options())) {
+                client.stream("go", tk, ev -> {
+                    Map<String, Object> e = new LinkedHashMap<>();
+                    switch (ev.type()) {
+                        case TOOL_CALL -> {
+                            e.put("type", "tool_call");
+                            e.put("id", ev.id());
+                            e.put("name", ev.name());
+                            e.put("via", ev.via());
+                        }
+                        case TOOL_CALL_ARGS -> {
+                            e.put("type", "tool_call_args");
+                            e.put("id", ev.id());
+                            e.put("name", ev.name());
+                            e.put("args", ev.args());
+                            e.put("via", ev.via());
+                        }
+                        case TOOL_RESULT -> {
+                            e.put("type", "tool_result");
+                            e.put("id", ev.id());
+                            e.put("name", ev.name());
+                            e.put("output", ev.output());
+                            e.put("isError", ev.isError());
+                            e.put("via", ev.via());
+                        }
+                        case DONE -> done.set(ev.result());
+                        default -> { }
+                    }
+                    if (!e.isEmpty()) events.add(e);
+                });
+            }
+            assertEquals(c.get("expectEvents"), events);
+            assertEquals(c.get("expectDoneText"), done.get().text);
+        }
+    }
+
     // ---- passthrough ---------------------------------------------------------------------
 
     @Test
@@ -177,6 +231,62 @@ class AcpSeamConformanceTest {
                 ((Map<String, Object>) paramsOf(r3, "initialize").get("clientCapabilities")).containsKey("_meta"));
         assertNull(paramsOf(r3, "session/set_config_option"));
         assertNull(paramsOf(r3, "session/set_model"));
+    }
+
+    // ---- liveSwitch (#197) ----------------------------------------------------------------
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void liveSwitch() throws Exception {
+        Map<String, Object> c = sub(cases(), "liveSwitch");
+        String mode = (String) c.get("mode");
+        String model = (String) c.get("model");
+        InProcess.Request req = new InProcess.Request(List.of(user("hi")), List.of(), "m", Map.of());
+        Path rec = Files.createTempFile("acp-rec", ".log");
+        Files.delete(rec);
+        try (AcpClient acp = AcpClient.start(new AcpClient.Options().command(AcpSeamFake.command())
+                .env(env(null, rec)).timeoutMs(10_000))) {
+            acp.setMode(mode);
+            acp.setModel(model);
+            assertEquals(c.get("expectText"), acp.generate(req).content);
+        }
+        var r = recorded(rec);
+        assertEquals(((Number) c.get("expectInitializeCount")).intValue(),
+                r.stream().filter(e -> e.getKey().equals("initialize")).count());
+        assertEquals(((Number) c.get("expectSessionNewCount")).intValue(),
+                r.stream().filter(e -> e.getKey().equals("session/new")).count());
+        Map<String, Object> wantMode = new LinkedHashMap<>((Map<String, Object>) c.get("expectSetMode"));
+        wantMode.put("sessionId", "s1");
+        assertEquals(wantMode, paramsOf(r, "session/set_mode"));
+        Map<String, Object> wantCfg = new LinkedHashMap<>((Map<String, Object>) c.get("expectSetConfigOption"));
+        wantCfg.put("sessionId", "s1");
+        assertEquals(wantCfg, paramsOf(r, "session/set_config_option"));
+        assertNull(paramsOf(r, "session/set_model"));
+
+        Map<String, Object> fb = (Map<String, Object>) c.get("fallback");
+        Path rec2 = Files.createTempFile("acp-rec", ".log");
+        Files.delete(rec2);
+        try (AcpClient acp = AcpClient.start(new AcpClient.Options().command(AcpSeamFake.command())
+                .env(env((Map<String, Object>) fb.get("fakeEnv"), rec2)).timeoutMs(10_000))) {
+            acp.setModel(model);
+        }
+        Map<String, Object> wantSm = new LinkedHashMap<>((Map<String, Object>) fb.get("expectSetModel"));
+        wantSm.put("sessionId", "s1");
+        assertEquals(wantSm, paramsOf(recorded(rec2), "session/set_model"));
+
+        Map<String, Object> rj = (Map<String, Object>) c.get("reject");
+        try (AcpClient acp = AcpClient.start(new AcpClient.Options().command(AcpSeamFake.command())
+                .env(env((Map<String, Object>) rj.get("fakeEnv"), null)).timeoutMs(10_000))) {
+            java.io.IOException e = org.junit.jupiter.api.Assertions.assertThrows(java.io.IOException.class,
+                    () -> acp.setMode(mode));
+            org.junit.jupiter.api.Assertions.assertTrue(
+                    e.getMessage().contains((String) rj.get("expectErrorContains")), e.getMessage());
+            assertEquals(rj.get("expectText"), acp.generate(req).content);
+        }
+        AcpClient closedAcp = AcpClient.start(new AcpClient.Options().command(AcpSeamFake.command()));
+        closedAcp.close();
+        org.junit.jupiter.api.Assertions.assertThrows(java.io.IOException.class, () -> closedAcp.setMode(mode));
+        org.junit.jupiter.api.Assertions.assertThrows(java.io.IOException.class, () -> closedAcp.setModel(model));
     }
 
     // ---- agentExit -----------------------------------------------------------------------

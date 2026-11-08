@@ -32,7 +32,7 @@ func acpSeamHelperMain() bool {
 }
 
 // fakeSeamACPAgent records every received method + params (one JSON line per
-// message, to TN_FAKE_REC) and honours TN_FAKE_DRIP, TN_FAKE_NO_CONFIG_OPTION,
+// message, to TN_FAKE_REC) and honours TN_FAKE_DRIP, TN_FAKE_NO_CONFIG_OPTION, TN_FAKE_REJECT_MODE,
 // TN_FAKE_EXIT_ON_PROMPT and TN_FAKE_FS_REQUEST.
 func fakeSeamACPAgent() {
 	in := bufio.NewScanner(os.Stdin)
@@ -76,6 +76,12 @@ func fakeSeamACPAgent() {
 			}
 		case "session/set_model":
 			reply(m.ID, map[string]any{})
+		case "session/set_mode":
+			if os.Getenv("TN_FAKE_REJECT_MODE") == "1" {
+				_ = out.Encode(map[string]any{"jsonrpc": "2.0", "id": m.ID, "error": map[string]any{"code": -32602, "message": "unknown mode"}})
+			} else {
+				reply(m.ID, map[string]any{})
+			}
 		case "session/prompt":
 			switch {
 			case os.Getenv("TN_FAKE_EXIT_ON_PROMPT") == "1":
@@ -87,6 +93,13 @@ func fakeSeamACPAgent() {
 						time.Sleep(200 * time.Millisecond)
 					}
 					update(text("agent_message_chunk", chunk))
+				}
+			case os.Getenv("TN_FAKE_TOOLUPDATE") == "1":
+				var cs acpCases
+				raw, _ := os.ReadFile("../conformance/acp-client/cases.json")
+				_ = json.Unmarshal(raw, &cs)
+				for _, u := range cs.Stream.AcpToolUpdate.Updates {
+					update(u)
 				}
 			case os.Getenv("TN_FAKE_FS_REQUEST") == "1":
 				_ = out.Encode(map[string]any{"jsonrpc": "2.0", "id": 9001, "method": "fs/read_text_file",
@@ -108,7 +121,7 @@ func fakeSeamACPAgent() {
 					}
 				}
 			default:
-				update(text("agent_message_chunk", "ok"))
+				update(text("agent_message_chunk", "hello"))
 			}
 			reply(m.ID, map[string]any{"stopReason": "end_turn"})
 		}
@@ -124,6 +137,12 @@ type acpCases struct {
 			ExpectDoneText string            `json:"expectDoneText"`
 			Thought        string            `json:"thought"`
 		} `json:"acpDrip"`
+		AcpToolUpdate struct {
+			FakeEnv        map[string]string `json:"fakeEnv"`
+			Updates        []map[string]any  `json:"updates"`
+			ExpectEvents   []map[string]any  `json:"expectEvents"`
+			ExpectDoneText string            `json:"expectDoneText"`
+		} `json:"acpToolUpdate"`
 	} `json:"stream"`
 	Passthrough struct {
 		Options struct {
@@ -377,6 +396,50 @@ func TestACPSeamStreamDrip(t *testing.T) {
 	}
 }
 
+// TestACPSeamStreamToolUpdate pins stream.acpToolUpdate (issue #188): a
+// tool_call_update's rawInput surfaces as tool_call_args and its title
+// renames the call for the later tool_result.
+func TestACPSeamStreamToolUpdate(t *testing.T) {
+	cs := loadACPCases(t).Stream.AcpToolUpdate
+	o, _ := fakeACP(t, cs.FakeEnv)
+	acp, err := LoadACP(context.Background(), o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer acp.Close()
+	client := CreateInProcessClient(InProcessOptions{Model: "m", GenerateStream: acp.GenerateStream})
+	ch, err := client.Stream(context.Background(), "hi", bareToolkit(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []map[string]any
+	var done *RunResult
+	for ev := range ch {
+		switch ev.Type {
+		case "error":
+			t.Fatalf("stream error: %v", ev.Err)
+		case "text", "usage":
+		case "done":
+			done = ev.Result
+		default:
+			m := map[string]any{"type": ev.Type, "id": ev.ID, "name": ev.Name, "via": ev.Via}
+			if ev.Type == "tool_call_args" {
+				m["args"] = ev.Args
+			}
+			if ev.Type == "tool_result" {
+				m["output"], m["isError"] = ev.Output, ev.IsError
+			}
+			got = append(got, m)
+		}
+	}
+	if !reflect.DeepEqual(got, cs.ExpectEvents) {
+		t.Fatalf("events\n got %v\nwant %v", got, cs.ExpectEvents)
+	}
+	if done == nil || done.Text != cs.ExpectDoneText {
+		t.Fatalf("done %+v", done)
+	}
+}
+
 func TestAsMCPServer(t *testing.T) {
 	cs := loadACPCases(t).AsMcpServer
 	echo := NativeTool("echo", "Echoes text.", JSONSchema{"type": "object", "properties": map[string]any{"text": map[string]any{"type": "string"}}},
@@ -480,5 +543,109 @@ func TestAsMCPServer(t *testing.T) {
 	_ = srv.Close()
 	if _, err := http.Post(srv.URL, "application/json", strings.NewReader("{}")); err == nil {
 		t.Fatal("request after close was served")
+	}
+}
+
+// TestACPSeamLiveSwitch: SetMode / SetModel on a running client (issue #197,
+// conformance liveSwitch).
+func TestACPSeamLiveSwitch(t *testing.T) {
+	var all struct {
+		LiveSwitch struct {
+			Mode                  string         `json:"mode"`
+			Model                 string         `json:"model"`
+			ExpectSetMode         map[string]any `json:"expectSetMode"`
+			ExpectSetConfigOption map[string]any `json:"expectSetConfigOption"`
+			ExpectInitializeCount int            `json:"expectInitializeCount"`
+			ExpectSessionNewCount int            `json:"expectSessionNewCount"`
+			ExpectText            string         `json:"expectText"`
+			Fallback              struct {
+				FakeEnv        map[string]string `json:"fakeEnv"`
+				ExpectSetModel map[string]any    `json:"expectSetModel"`
+			} `json:"fallback"`
+			Reject struct {
+				FakeEnv             map[string]string `json:"fakeEnv"`
+				ExpectErrorContains string            `json:"expectErrorContains"`
+				ExpectText          string            `json:"expectText"`
+			} `json:"reject"`
+		} `json:"liveSwitch"`
+	}
+	b, err := os.ReadFile("../conformance/acp-client/cases.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(b, &all); err != nil {
+		t.Fatal(err)
+	}
+	cs := all.LiveSwitch
+	ctx := context.Background()
+	turn := func(c *ACPClient) string {
+		t.Helper()
+		r, err := c.Generate(InProcessRequest{Messages: []any{map[string]any{"role": "user", "content": "q"}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return r.Content
+	}
+
+	o, rec := fakeACP(t, nil)
+	c, err := LoadACP(ctx, o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.SetMode(ctx, cs.Mode); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.SetModel(ctx, cs.Model); err != nil {
+		t.Fatal(err)
+	}
+	if got := turn(c); got != cs.ExpectText {
+		t.Fatalf("turn %q", got)
+	}
+	_ = c.Close()
+	if n := len(recorded(t, rec, "initialize")); n != cs.ExpectInitializeCount {
+		t.Fatalf("initialize x%d", n)
+	}
+	if n := len(recorded(t, rec, "session/new")); n != cs.ExpectSessionNewCount {
+		t.Fatalf("session/new x%d", n)
+	}
+	sm := recorded(t, rec, "session/set_mode")
+	if len(sm) != 1 || sm[0]["sessionId"] != "s1" || sm[0]["modeId"] != cs.ExpectSetMode["modeId"] {
+		t.Fatalf("set_mode %v", sm)
+	}
+	sc := recorded(t, rec, "session/set_config_option")
+	if len(sc) != 1 || sc[0]["sessionId"] != "s1" || sc[0]["configId"] != cs.ExpectSetConfigOption["configId"] || sc[0]["value"] != cs.ExpectSetConfigOption["value"] {
+		t.Fatalf("set_config_option %v", sc)
+	}
+	if err := c.SetMode(ctx, cs.Mode); err == nil || !strings.Contains(err.Error(), "closed") {
+		t.Fatalf("closed client: %v", err)
+	}
+
+	// fallback
+	o2, rec2 := fakeACP(t, cs.Fallback.FakeEnv)
+	c2, err := LoadACP(ctx, o2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c2.SetModel(ctx, cs.Model); err != nil {
+		t.Fatal(err)
+	}
+	_ = c2.Close()
+	fm := recorded(t, rec2, "session/set_model")
+	if len(fm) != 1 || fm[0]["sessionId"] != "s1" || fm[0]["modelId"] != cs.Fallback.ExpectSetModel["modelId"] {
+		t.Fatalf("set_model %v", fm)
+	}
+
+	// reject
+	o3, _ := fakeACP(t, cs.Reject.FakeEnv)
+	c3, err := LoadACP(ctx, o3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c3.Close()
+	if err := c3.SetMode(ctx, cs.Mode); err == nil || !strings.Contains(err.Error(), cs.Reject.ExpectErrorContains) {
+		t.Fatalf("reject: %v", err)
+	}
+	if got := turn(c3); got != cs.Reject.ExpectText {
+		t.Fatalf("after reject %q", got)
 	}
 }

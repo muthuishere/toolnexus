@@ -44,6 +44,7 @@ from .translate import TranslatedToolCall, TranslateResult
 from .client import (
     Client,
     ClientStyle,
+    ContextOverflowError,
     Conversation,
     WaitFor,
     ConversationStore,
@@ -64,6 +65,7 @@ from .client import (
     UrllibTransport,
     create_client,
     create_in_process_client,
+    is_context_overflow,
 )
 from .classifier import (
     BatchResult,
@@ -481,6 +483,8 @@ __all__ = [
     "RunResult",
     "RunTimeout",
     "WaitFor",
+    "ContextOverflowError",
+    "is_context_overflow",
     "create_client",
     "create_in_process_client",
     # typed decisions (SPEC.md §8B)

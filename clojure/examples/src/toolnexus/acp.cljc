@@ -206,8 +206,11 @@
     agent_thought_chunk -> {:type \"thought\" :delta :via \"acp\"} (never part
                            of the answer)
     tool_call           -> {:type \"tool_call\" :id :name (title) :args (rawInput) :via \"acp\"}
-    tool_call_update completed|failed
-                        -> {:type \"tool_result\" :id :name :output :isError :via \"acp\"}
+    tool_call_update    -> a non-empty :title is remembered as the call's name;
+                           a non-empty :rawInput object first emits
+                           {:type \"tool_call_args\" :id :name :args :via \"acp\"} (#188);
+                           completed|failed then emits
+                           {:type \"tool_result\" :id :name :output :isError :via \"acp\"}
   An emitter that throws never breaks the reader."
   [client upd]
   (let [st   (:state client)
@@ -215,6 +218,8 @@
         id   (:toolCallId upd)]
     (when (= "tool_call" kind)
       (swap! st assoc-in [:tool-names id] (if (str/blank? (str (:title upd))) (:kind upd) (:title upd))))
+    (when (and (= "tool_call_update" kind) (not (str/blank? (str (:title upd)))))
+      (swap! st assoc-in [:tool-names id] (:title upd)))
     (when-let [emit (:emit @st)]
       (let [txt (get-in upd [:content :text])
             ev  (case (str kind)
@@ -222,15 +227,19 @@
                   "agent_thought_chunk" (when-not (= "" (str txt)) {:type "thought" :delta (str txt) :via "acp"})
                   "tool_call"           {:type "tool_call" :id id :name (get-in @st [:tool-names id])
                                          :args (or (:rawInput upd) {}) :via "acp"}
-                  "tool_call_update"    (when (contains? #{"completed" "failed"} (:status upd))
-                                          {:type "tool_result" :id id
-                                           :name (if (str/blank? (str (:title upd)))
-                                                   (get-in @st [:tool-names id])
-                                                   (:title upd))
-                                           :output (tool-content-text (:content upd))
-                                           :isError (= "failed" (:status upd)) :via "acp"})
+                  "tool_call_update"    (let [nm   (get-in @st [:tool-names id])
+                                              args (:rawInput upd)]
+                                          (cond-> []
+                                            (and (map? args) (seq args))
+                                            (conj {:type "tool_call_args" :id id :name nm
+                                                   :args args :via "acp"})
+                                            (contains? #{"completed" "failed"} (:status upd))
+                                            (conj {:type "tool_result" :id id :name nm
+                                                   :output (tool-content-text (:content upd))
+                                                   :isError (= "failed" (:status upd)) :via "acp"})))
                   nil)]
-        (when ev (try (emit ev) (catch Throwable _ nil)))))))
+        (doseq [e (if (sequential? ev) ev (when ev [ev]))]
+          (try (emit e) (catch Throwable _ nil)))))))
 
 (defn- route!
   "Dispatch one parsed JSON-RPC line from the child:
@@ -332,6 +341,26 @@
     (let [res (unwrap-reply (await-reply! client id method (:timeout-ms client)))]
       (swap! (:state client) update :inbox dissoc id)
       res)))
+
+;; ---------------------------------------------------------------------------
+;; model / mode switch (shared by connect and the running client, #197)
+;; ---------------------------------------------------------------------------
+
+(defn- set-model-call!
+  "session/set_config_option {configId \"model\"}, then the older
+  session/set_model if the agent rejects that. {:ok _} or
+  {:error [err1 err2]} when both fail."
+  [client model]
+  (let [sid (:session-id client)
+        r1  (call! client "session/set_config_option" {:sessionId sid :configId "model" :value model})]
+    (if-not (:error r1)
+      r1
+      (let [r2 (call! client "session/set_model" {:sessionId sid :modelId model})]
+        (if (:error r2) {:error [r1 r2]} r2)))))
+
+(defn- closed-error [client]
+  (when (:closed? @(:state client))
+    {:error (or (:close-reason @(:state client)) "closed")}))
 
 ;; ---------------------------------------------------------------------------
 ;; connect
@@ -509,14 +538,26 @@
                (when-not (str/blank? (str (or model "")))
                  ;; Passed through unchanged. Stable ACP spelling first, then
                  ;; the older unstable session/set_model.
-                 (let [r1 (call! client "session/set_config_option"
-                                 {:sessionId session-id :configId "model" :value model})]
-                   (when (:error r1)
-                     (let [r2 (call! client "session/set_model" {:sessionId session-id :modelId model})]
-                       (when (:error r2)
-                         (kill-and-throw! client (str "set model " (pr-str model))
-                                          {:error [(:error r1) (:error r2)]}))))))
+                 (let [r (set-model-call! client model)]
+                   (when (:error r)
+                     (kill-and-throw! client (str "set model " (pr-str model)) r))))
                client))))))))
+
+(defn set-mode!
+  "Change the agent's mode on a RUNNING client (SPEC §8C, #197): sends
+  session/set_mode {sessionId, modeId} at once — no restart, same session,
+  value unvalidated. {:ok result} or {:error ...}; a rejection fails only
+  this call."
+  [client mode]
+  (or (closed-error client)
+      (call! client "session/set_mode" {:sessionId (:session-id client) :modeId mode})))
+
+(defn set-model!
+  "Change the agent's model on a RUNNING client (SPEC §8C, #197) — the
+  :model connect option's logic: session/set_config_option, then
+  session/set_model. {:ok result} or {:error [err1 err2]}."
+  [client model]
+  (or (closed-error client) (set-model-call! client model)))
 
 ;; ---------------------------------------------------------------------------
 ;; prompt / generate

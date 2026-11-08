@@ -21,8 +21,11 @@
 // Conformance flags (conformance/acp-client/cases.json, SPEC §8C), read from the environment
 // and applied on top of any scenario:
 //   TN_FAKE_REC=<file>         append one JSON line {method, params} per received request
+//   TN_FAKE_REJECT_MODE=1      reject session/set_mode (-32602 "unknown mode")
 //   TN_FAKE_NO_CONFIG_OPTION=1 reject session/set_config_option (-32601) so set_model is used
 //   TN_FAKE_DRIP=1             on session/prompt: a thought, then three chunks 200ms apart
+//   TN_FAKE_TOOLUPDATE=1       on session/prompt: stream.acpToolUpdate's updates (tool_call, then
+//                              tool_call_updates carrying title/rawInput), a "done" chunk, end_turn
 //   TN_FAKE_EXIT_ON_PROMPT=1   on session/prompt: exit without replying
 //   TN_FAKE_FS_REQUEST=1       on session/prompt: send fs/read_text_file and wait for the answer;
 //                              reply "ok" iff it was a -32601 error
@@ -255,7 +258,13 @@ while ((line = await reader.ReadLineAsync().ConfigureAwait(false)) is not null)
                 break;
 
             case "session/set_mode":
-                Reply(IdValue(idEl), new Dictionary<string, object?>());
+                if (Flag("TN_FAKE_REJECT_MODE"))
+                    Send(new Dictionary<string, object?>
+                    {
+                        ["jsonrpc"] = "2.0", ["id"] = IdValue(idEl),
+                        ["error"] = new Dictionary<string, object?> { ["code"] = -32602, ["message"] = "unknown mode" },
+                    });
+                else Reply(IdValue(idEl), new Dictionary<string, object?>());
                 break;
 
             case "session/set_config_option":
@@ -323,6 +332,28 @@ while ((line = await reader.ReadLineAsync().ConfigureAwait(false)) is not null)
                         }
                         Reply(id, new Dictionary<string, object?> { ["stopReason"] = "end_turn" });
                     });
+                    break;
+                }
+                if (Flag("TN_FAKE_TOOLUPDATE"))
+                {
+                    var t1 = new[]
+                    {
+                        new Dictionary<string, object?> { ["sessionUpdate"] = "tool_call", ["toolCallId"] = "t1",
+                            ["title"] = "Write", ["kind"] = "edit", ["status"] = "pending" },
+                        new Dictionary<string, object?> { ["sessionUpdate"] = "tool_call_update", ["toolCallId"] = "t1",
+                            ["status"] = "in_progress", ["title"] = "Write /tmp/a.txt",
+                            ["rawInput"] = new Dictionary<string, object?> { ["file_path"] = "/tmp/a.txt", ["content"] = "hi" } },
+                        new Dictionary<string, object?> { ["sessionUpdate"] = "tool_call_update", ["toolCallId"] = "t1",
+                            ["status"] = "in_progress" },
+                        new Dictionary<string, object?> { ["sessionUpdate"] = "tool_call_update", ["toolCallId"] = "t1",
+                            ["status"] = "completed",
+                            ["content"] = new object[] { new Dictionary<string, object?> { ["type"] = "content",
+                                ["content"] = new Dictionary<string, object?> { ["type"] = "text", ["text"] = "wrote" } } } },
+                    };
+                    foreach (var u in t1)
+                        SendNotification("session/update", new Dictionary<string, object?> { ["sessionId"] = sessionId, ["update"] = u });
+                    Chunk(sessionId, "agent_message_chunk", "done");
+                    Reply(id, new Dictionary<string, object?> { ["stopReason"] = "end_turn" });
                     break;
                 }
                 if (Flag("TN_FAKE_FS_REQUEST"))

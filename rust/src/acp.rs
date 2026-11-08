@@ -113,12 +113,21 @@ pub type UpdateHandler = Arc<dyn Fn(&Value) + Send + Sync>;
 /// One event of a streamed turn ([`AcpClient::generate_stream`]). Tool events
 /// carry `via: "acp"`: the AGENT ran these tools, a host loop must not.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum AcpStreamEvent {
     /// A reply text delta (`agent_message_chunk` only).
     Text { delta: String },
     /// An agent thought delta (`agent_thought_chunk`). Never part of the reply text.
     Thought { delta: String, via: &'static str },
     ToolCall {
+        id: String,
+        name: String,
+        args: Value,
+        via: &'static str,
+    },
+    /// Late arguments from a `tool_call_update` carrying a non-empty `rawInput`
+    /// object (issue #188); `name` is the latest known title.
+    ToolCallArgs {
         id: String,
         name: String,
         args: Value,
@@ -452,33 +461,70 @@ impl AcpClient {
             }
         }
         if let Some(model) = opts.model.as_deref().filter(|m| !m.is_empty()) {
-            // Passed through unchanged: the stable ACP spelling first, then
-            // the older unstable session/set_model.
-            let sid = client.session_id.clone();
-            let first = client
-                .call(
-                    "session/set_config_option",
-                    json!({"sessionId": sid, "configId": "model", "value": model}),
-                    opts.request_timeout,
-                )
-                .await;
-            if let Err(e1) = first {
-                let second = client
-                    .call(
-                        "session/set_model",
-                        json!({"sessionId": sid, "modelId": model}),
-                        opts.request_timeout,
-                    )
-                    .await;
-                if let Err(e2) = second {
-                    client.close().await;
-                    return Err(AcpError::Protocol(format!(
-                        "set model {model:?}: {e1}; {e2}"
-                    )));
-                }
+            if let Err(e) = client.apply_model(model, opts.request_timeout).await {
+                client.close().await;
+                return Err(e);
             }
         }
         Ok(client)
+    }
+
+    /// Passed through unchanged: the stable ACP spelling
+    /// (`session/set_config_option {configId:"model"}`) first, then the older
+    /// `session/set_model`. Both failing is an error carrying both messages.
+    async fn apply_model(&self, model: &str, timeout: Duration) -> Result<(), AcpError> {
+        let sid = self.session_id.clone();
+        let first = self
+            .call(
+                "session/set_config_option",
+                json!({"sessionId": sid, "configId": "model", "value": model}),
+                timeout,
+            )
+            .await;
+        if let Err(e1) = first {
+            let second = self
+                .call(
+                    "session/set_model",
+                    json!({"sessionId": sid, "modelId": model}),
+                    timeout,
+                )
+                .await;
+            if let Err(e2) = second {
+                return Err(AcpError::Protocol(format!(
+                    "set model {model:?}: {e1}; {e2}"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    async fn ensure_open(&self) -> Result<(), AcpError> {
+        if self.shared.stdin.lock().await.is_none() {
+            return Err(AcpError::Protocol("ACP client is closed".into()));
+        }
+        Ok(())
+    }
+
+    /// Change the agent's mode on the running session (`session/set_mode
+    /// {sessionId, modeId}`), SPEC §8C. Sent at once, not queued behind a running
+    /// turn; no restart. An agent rejection fails only this call.
+    pub async fn set_mode(&self, mode: &str) -> Result<(), AcpError> {
+        self.ensure_open().await?;
+        self.call(
+            "session/set_mode",
+            json!({"sessionId": self.session_id, "modeId": mode}),
+            self.request_timeout,
+        )
+        .await
+        .map(|_| ())
+    }
+
+    /// Change the model on the running session — exactly the load-time `model`
+    /// option: `session/set_config_option`, then `session/set_model` (SPEC §8C).
+    /// The value passes through unvalidated; an agent rejection fails only this call.
+    pub async fn set_model(&self, model: &str) -> Result<(), AcpError> {
+        self.ensure_open().await?;
+        self.apply_model(model, self.request_timeout).await
     }
 
     /// The agent's process id (on unix also its process-group id).
@@ -678,15 +724,29 @@ impl AcpClient {
                     });
                 }
                 "tool_call_update" => {
+                    // A non-empty title renames the call for every later event
+                    // of this id; a non-empty rawInput object carries its late
+                    // arguments (SPEC: tool_call_args, issue #188).
+                    if !title.is_empty() {
+                        names.insert(id.clone(), title);
+                    }
+                    let name = names.get(&id).cloned().unwrap_or_default();
+                    if let Some(raw) = u
+                        .update
+                        .get("rawInput")
+                        .filter(|v| v.as_object().is_some_and(|o| !o.is_empty()))
+                    {
+                        emit(AcpStreamEvent::ToolCallArgs {
+                            id: id.clone(),
+                            name: name.clone(),
+                            args: raw.clone(),
+                            via: "acp",
+                        });
+                    }
                     let status = field("status");
                     if status != "completed" && status != "failed" {
                         continue;
                     }
-                    let name = if title.is_empty() {
-                        names.get(&id).cloned().unwrap_or_default()
-                    } else {
-                        title
-                    };
                     emit(AcpStreamEvent::ToolResult {
                         id,
                         name,

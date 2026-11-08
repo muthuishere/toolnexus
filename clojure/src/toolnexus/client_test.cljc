@@ -1730,3 +1730,249 @@
     (is (false? (tool/concurrency-safe? plain {})))
     (is (false? (tool/concurrency-safe? own {})))
     (is (true? (tool/concurrency-safe? own {:dry true})))))
+
+;; ===========================================================================
+;; #189 — x-should-retry override + the retry event on the :on-event path
+;; ===========================================================================
+;; Clojure has no `stream` entry point: a run given `:on-event` is this port's
+;; streaming path, so the §8 retry event is emitted there and nowhere else.
+
+(defn- ok-res [style text]
+  {:status 200 :headers {} :body (json/write-str (text-response style text))})
+
+(defn- run-collecting [opts responses]
+  (let [[f n] (stub-http responses)
+        evs   (atom [])
+        c     (client/create-client (merge {:base-url "http://x.invalid" :model "m" :api-key "k"
+                                            :retries 2 :retry-base-ms 1 :http-client f}
+                                           opts))
+        r     (try (client/run c "hi" {:on-event #(swap! evs conj %)})
+                   (catch Throwable e {:thrown e}))]
+    {:r r :events @evs :calls @n}))
+
+(deftest a-429-with-retry-after-0-emits-a-retry-event-before-done
+  (doseq [style ["openai" "anthropic"]]
+    (let [{:keys [r events calls]}
+          (run-collecting {:style style}
+                          [{:status 429 :headers {"retry-after" "0"} :body "{}"}
+                           (ok-res style "ok")])]
+      (is (= "ok" (:text r)) style)
+      (is (= 2 calls))
+      (is (= {:type "retry" :attempt 1 :max 2 :delay-ms 0 :status 429 :reason "HTTP 429"}
+             (first events)) style)
+      (is (= "done" (:type (last events))) style))))
+
+(deftest a-network-error-emits-a-retry-event-without-status
+  (let [{:keys [r events]} (run-collecting {} [{:status nil :error :connect} (ok-res "openai" "ok")])
+        ev (first events)]
+    (is (= "ok" (:text r)))
+    (is (= "retry" (:type ev)))
+    (is (= "network" (:reason ev)))
+    (is (not (contains? ev :status)))
+    (is (pos-int? (:delay-ms ev)))))
+
+(deftest a-terminal-400-emits-no-retry-event
+  (let [{:keys [r events calls]} (run-collecting {} [{:status 400 :headers {} :body "{}"}])]
+    (is (:thrown r))
+    (is (= 1 calls))
+    (is (not-any? #(= "retry" (:type %)) events))))
+
+(deftest a-run-without-on-event-is-unchanged-by-a-retry
+  (let [[f n] (stub-http [{:status 429 :headers {"retry-after" "0"} :body "{}"} (ok-res "openai" "ok")])
+        r (client/run (client/create-client {:base-url "http://x.invalid" :model "m" :api-key "k"
+                                             :retries 2 :retry-base-ms 1 :http-client f})
+                      "hi" {})]
+    (is (= "ok" (:text r)))
+    (is (= 2 @n))))
+
+(deftest x-should-retry-true-makes-a-400-retryable
+  (let [{:keys [r calls]} (run-collecting {} [{:status 400 :headers {"x-should-retry" " true "} :body "{}"}
+                                              (ok-res "openai" "retried")])]
+    (is (= "retried" (:text r)))
+    (is (= 2 calls))))
+
+(deftest x-should-retry-false-makes-a-503-terminal
+  (let [{:keys [r calls events]} (run-collecting {} [{:status 503 :headers {"x-should-retry" "False"} :body "{}"}
+                                                     (ok-res "openai" "never")])]
+    (is (= 503 (:status (ex-data (:thrown r)))))
+    (is (= 1 calls))
+    (is (not-any? #(= "retry" (:type %)) events))))
+
+(deftest x-should-retry-other-values-keep-the-default
+  (let [{:keys [r calls]} (run-collecting {} [{:status 400 :headers {"x-should-retry" "maybe"} :body "{}"}])]
+    (is (:thrown r))
+    (is (= 1 calls))))
+
+(deftest on-error-has-the-final-say-over-x-should-retry
+  (let [seen (atom nil)
+        {:keys [r calls]} (run-collecting {:on-error (fn [info] (reset! seen info) :fail)}
+                                          [{:status 400 :headers {"x-should-retry" "true"} :body "{}"}
+                                           (ok-res "openai" "never")])]
+    (is (:thrown r))
+    (is (= 1 calls))
+    (is (true? (:retryable? @seen)))))
+;; ---------------------------------------------------------------------------
+;; §8 :after-round (change add-round-boundary-hook, #192). Shared fixture:
+;; examples/round-boundary/fixture.json (R1-R5; R6 lives in agents/loop_test).
+;; This port has one loop: `run` (its :on-event sink is the stream surface).
+;; ---------------------------------------------------------------------------
+
+(defn- round-recorder [seen inject-fn]
+  (fn [ev] (swap! seen conj [(:turn ev) (:final ev) (:text ev)]) (inject-fn ev)))
+
+(deftest after-round-r1-injects-after-tool-results
+  (doseq [style ["openai" "anthropic"]]
+    (with-llm style [{:calls [{:id "c1" :name "upper" :args {:text "x"}}]} {:text "done"}]
+      (fn [{:keys [base requests]}]
+        (let [seen (atom [])
+              c    (client-for style base {:hooks {:after-round (round-recorder seen #(when-not (:final %) {:inject ["todo: 2 open"]}))}})
+              r    (client/run c "hi" {:toolkit toolkit})]
+          (is (= 2 (count @requests)) style)
+          (is (= "done" (:text r)) style)
+          (is (= {:role "user" :content "todo: 2 open"} (last (:messages (second @requests)))) style)
+          (is (= [[0 false ""] [1 true "done"]] @seen) style))))))
+
+(deftest after-round-r2-continues-when-the-model-stops
+  (doseq [style ["openai" "anthropic"]]
+    (with-llm style [{:text "first"} {:text "second"}]
+      (fn [{:keys [base requests]}]
+        (let [seen   (atom [])
+              events (atom [])
+              c      (client-for style base {:hooks {:after-round (round-recorder seen #(when (and (:final %) (zero? (:turn %))) {:inject ["keep going"]}))}})
+              r      (client/run c "hi" {:toolkit toolkit :on-event #(swap! events conj (:type %))})]
+          (is (= 2 (count @requests)) style)
+          (is (= "second" (:text r)) style)
+          (is (= "assistant" (:role (last (butlast (:messages (second @requests)))))) style)
+          (is (= {:role "user" :content "keep going"} (last (:messages (second @requests)))) style)
+          (is (= [[0 true "first"] [1 true "second"]] @seen) style)
+          (is (= 1 (count (filter #{"done"} @events))) "one terminal done"))))))
+
+(deftest after-round-r3-empty-injection-ends-normally
+  (with-llm "openai" [{:text "only"}]
+    (fn [{:keys [base requests]}]
+      (let [seen (atom [])
+            r    (client/run (client-for "openai" base {:hooks {:after-round (round-recorder seen (constantly {:inject [""]}))}}) "hi" {:toolkit toolkit})]
+        (is (= 1 (count @requests)))
+        (is (= "only" (:text r)))
+        (is (= "done" (:status r)))
+        (is (= [[0 true "only"]] @seen))))))
+
+(deftest after-round-r4-no-continuation-past-max-turns
+  (with-llm "openai" [{:text "only"}]
+    (fn [{:keys [base requests]}]
+      (let [seen (atom [])
+            r    (client/run (client-for "openai" base {:max-turns 1 :hooks {:after-round (round-recorder seen (constantly {:inject ["again"]}))}}) "hi" {:toolkit toolkit})]
+        (is (= 1 (count @requests)))
+        (is (= "only" (:text r)))
+        (is (= [] @seen))))))
+
+(deftest after-round-r5-a-failing-hook-stops-the-run
+  (with-llm "openai" [{:calls [{:id "c1" :name "upper" :args {:text "x"}}]} {:text "never"}]
+    (fn [{:keys [base requests]}]
+      (let [c (client-for "openai" base {:hooks {:after-round (fn [_] (throw (ex-info "round-boom" {})))}})]
+        (is (thrown-with-msg? Exception #"round-boom" (client/run c "hi" {:toolkit toolkit})))
+        (is (= 1 (count @requests)))))))
+
+(deftest after-round-absent-is-byte-identical
+  (let [script [{:calls [{:id "c1" :name "upper" :args {:text "x"}}]} {:text "done"}]
+        bodies (fn [opts]
+                 (with-llm "openai" script
+                   (fn [{:keys [base raw]}]
+                     (client/run (client-for "openai" base opts) "hi" {:toolkit toolkit})
+                     @raw)))]
+    (is (= (bodies {}) (bodies {:hooks {:after-round (constantly nil)}})))))
+;; ---------------------------------------------------------------------------
+;; §8 fallbackModels — opt-in model fallback chain on overload (#190)
+;; ---------------------------------------------------------------------------
+
+(def ^:private fb-ok
+  {:status 200 :body "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"hi\"}}]}"})
+
+(defn- fb-stub
+  "Answers from `responses` in order and records each request's `model`."
+  [responses]
+  (let [seen (atom [])]
+    [(fn [_url _headers body]
+       (let [i (count (swap! seen conj (get (json/read-str body) :model)))]
+         (nth responses (dec i) (last responses))))
+     seen]))
+
+(defn- fb-client [f & {:as more}]
+  (client/create-client (merge {:base-url "http://127.0.0.1:1" :model "m1" :api-key "k"
+                                :retries 0 :retry-base-ms 1 :http-client f
+                                :fallback-models ["m2"]}
+                               more)))
+
+(deftest fallback-529-switches-to-the-next-model
+  (let [[f seen] (fb-stub [{:status 529 :body "{}"} fb-ok])
+        metrics  (atom [])
+        after    (atom nil)
+        c        (fb-client f :on-metric #(swap! metrics conj %)
+                            :hooks {:after-llm (fn [ev] (reset! after (:model ev)) nil)})
+        r        (client/run c "hi" {})]
+    (is (= ["m1" "m2"] @seen))
+    (is (= "m2" (:model r)))
+    (is (= "hi" (:text r)))
+    (is (= "m2" @after) "afterLLM sees the serving model")
+    (is (= ["m2"] (map :model (filter #(= "llm" (:event %)) @metrics))))
+    (is (= "m2" (:model (first (filter #(= "run" (:event %)) @metrics)))))))
+
+(deftest fallback-spends-the-budget-first-and-dedupes
+  (let [[f seen] (fb-stub [{:status 503 :body "{}"} {:status 503 :body "{}"} fb-ok])
+        c        (fb-client f :retries 1 :fallback-models ["" "m1" "m2" "m2"])]
+    (is (= "m2" (:model (client/run c "hi" {}))))
+    (is (= ["m1" "m1" "m2"] @seen))))
+
+(deftest fallback-429-never-switches
+  (let [[f seen] (fb-stub [{:status 429 :body "{}"} fb-ok])
+        e        (try (client/run (fb-client f) "hi" {}) nil (catch Throwable e e))]
+    (is (= 429 (:status (ex-data e))))
+    (is (= ["m1"] @seen))))
+
+(deftest fallback-on-error-fail-never-switches
+  (let [[f seen] (fb-stub [{:status 503 :body "{}"} fb-ok])
+        e        (try (client/run (fb-client f :on-error (fn [_] :fail)) "hi" {}) nil
+                      (catch Throwable e e))]
+    (is (= 503 (:status (ex-data e))))
+    (is (= ["m1"] @seen))))
+
+(deftest fallback-exhausted-chain-surfaces-the-last-error
+  (let [[f seen] (fb-stub [{:status 529 :body "{}"}])
+        e        (try (client/run (fb-client f) "hi" {}) nil (catch Throwable e e))]
+    (is (= 529 (:status (ex-data e))))
+    (is (= ["m1" "m2"] @seen))))
+
+(deftest fallback-kill-switch-disables-the-chain
+  (doseq [v ["1" "TRUE" "true"]]
+    (let [[f seen] (fb-stub [{:status 529 :body "{}"} fb-ok])
+          c        (assoc (fb-client f) ::client/get-env
+                          (fn [k] (when (= k "TOOLNEXUS_DISABLE_MODEL_FALLBACK") v)))
+          e        (try (client/run c "hi" {}) nil (catch Throwable e e))]
+      (is (= 529 (:status (ex-data e))))
+      (is (= ["m1"] @seen))))
+  (let [[f seen] (fb-stub [{:status 529 :body "{}"} fb-ok])
+        c        (assoc (fb-client f) ::client/get-env (constantly "no"))]
+    (is (= "m2" (:model (client/run c "hi" {}))))
+    (is (= ["m1" "m2"] @seen))))
+
+(deftest fallback-event-precedes-the-call-output
+  (let [[f _] (fb-stub [{:status 529 :body "{}"} fb-ok])
+        evs   (atom [])]
+    (client/run (fb-client f) "hi" {:on-event #(swap! evs conj %)})
+    (is (= {:type "fallback" :from "m1" :to "m2"} (first @evs)))
+    (is (= ["fallback" "usage" "done"] (map :type @evs)))))
+
+(deftest fallback-absent-option-is-unchanged
+  (let [[f seen] (fb-stub [{:status 529 :body "{}"} fb-ok])
+        evs      (atom [])
+        c        (fb-client f :fallback-models nil)
+        e        (try (client/run c "hi" {:on-event #(swap! evs conj %)}) nil (catch Throwable e e))]
+    (is (= 529 (:status (ex-data e))))
+    (is (= ["m1"] @seen))
+    (is (empty? @evs))))
+
+(deftest fallback-applies-to-call-provider
+  (let [[f seen] (fb-stub [{:status 503 :body "{}"} fb-ok])
+        [_ sent] (client/call-provider* (fb-client f) {:model "m1" :messages []})]
+    (is (= "m2" sent))
+    (is (= ["m1" "m2"] @seen))))

@@ -55,6 +55,31 @@ test("acp-client stream.acpDrip: incremental text + thought through the in-proce
   }
 })
 
+test("acp-client stream.acpToolUpdate: rawInput -> tool_call_args, title remembered (#188)", async () => {
+  const fx = CASES.stream.acpToolUpdate
+  const acp = await fake(fx.fakeEnv)
+  try {
+    const client = createInProcessClient({ model: "m", generate: acp.generate, generateStream: acp.generateStream })
+    const events: any[] = []
+    let done: any
+    for await (const ev of client.stream("go")) {
+      const e = ev as any
+      if (e.type === "done") done = e.result
+      else if (e.type !== "text" && e.type !== "usage") events.push(e)
+    }
+    const got = events.map((e, i) => {
+      const want = fx.expectEvents[i]
+      if (!want) return e
+      if (e.type === "tool_call") return { type: e.type, id: e.id, name: e.name, via: e.via }
+      return Object.fromEntries(Object.keys(want).map((k) => [k, e[k]]))
+    })
+    assert.deepEqual(got, fx.expectEvents)
+    assert.equal(done.text, fx.expectDoneText)
+  } finally {
+    await acp.close()
+  }
+})
+
 test("acp-client passthrough: mcpServers verbatim, _meta keys, model via set_config_option", async () => {
   const fx = CASES.passthrough
   const rec = recFile()
@@ -94,6 +119,48 @@ test("acp-client passthrough.bareExpect: no options ⇒ [] and no _meta keys", a
   assert.equal("_meta" in sn.params, fx.sessionNewHasMeta)
   assert.equal("_meta" in r.find((x) => x.method === "initialize")!.params.clientCapabilities, fx.clientCapabilitiesHasMeta)
   assert.ok(!r.some((x) => x.method.includes("set_")))
+})
+
+test("acp-client liveSwitch: setMode + setModel on a running client, no restart (#197)", async () => {
+  const fx = CASES.liveSwitch
+  const rec = recFile()
+  const acp = await fake({ TN_FAKE_REC: rec })
+  try {
+    await acp.setMode(fx.mode)
+    await acp.setModel(fx.model)
+    assert.equal((await acp.generate({ messages: [{ role: "user", content: "q" }] } as any)).content, fx.expectText)
+  } finally {
+    await acp.close()
+  }
+  const r = readRec(rec)
+  assert.equal(r.filter((x) => x.method === "initialize").length, fx.expectInitializeCount)
+  assert.equal(r.filter((x) => x.method === "session/new").length, fx.expectSessionNewCount)
+  const sm = r.find((x) => x.method === "session/set_mode")!
+  assert.deepEqual(sm.params, { sessionId: "s1", ...fx.expectSetMode })
+  const sc = r.find((x) => x.method === "session/set_config_option")!
+  assert.deepEqual(sc.params, { sessionId: "s1", ...fx.expectSetConfigOption })
+  await assert.rejects(acp.setMode(fx.mode), /closed/)
+})
+
+test("acp-client liveSwitch.fallback: running setModel falls back to set_model", async () => {
+  const fx = CASES.liveSwitch
+  const rec = recFile()
+  const acp = await fake({ ...fx.fallback.fakeEnv, TN_FAKE_REC: rec })
+  await acp.setModel(fx.model)
+  await acp.close()
+  const sm = readRec(rec).find((x) => x.method === "session/set_model")!
+  assert.deepEqual(sm.params, { sessionId: "s1", ...fx.fallback.expectSetModel })
+})
+
+test("acp-client liveSwitch.reject: a rejected mode fails the call, the client stays usable", async () => {
+  const fx = CASES.liveSwitch
+  const acp = await fake({ ...fx.reject.fakeEnv })
+  try {
+    await assert.rejects(acp.setMode(fx.mode), (e: Error) => e.message.includes(fx.reject.expectErrorContains))
+    assert.equal((await acp.generate({ messages: [{ role: "user", content: "q" }] } as any)).content, fx.reject.expectText)
+  } finally {
+    await acp.close()
+  }
 })
 
 test("acp-client agentExit: a pending prompt fails promptly", async () => {

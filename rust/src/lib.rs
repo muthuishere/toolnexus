@@ -40,6 +40,7 @@ pub use classifier::{
     Classifier, ClassifierError, ClassifierOptions, ClassifierStyle, Decision, Question, Questions,
     create_classifier,
 };
+pub use client::{ContextOverflowError, is_context_overflow};
 pub use media::{
     CloneVoiceInput, ImageInput, Media, MediaError, MediaFile, MediaOptions, MediaProgress,
     MediaResult, MediaStyle, SpeechInput, TalkingInput, TranscribeInput, VideoInput, create_media,

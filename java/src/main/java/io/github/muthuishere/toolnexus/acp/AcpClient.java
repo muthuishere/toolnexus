@@ -281,33 +281,51 @@ public final class AcpClient implements Closeable, Function<InProcess.Request, I
         this.sessionId = String.valueOf(sid);
 
         if (opts.model != null && !opts.model.isEmpty()) {
-            // Passed through unchanged: the stable ACP spelling first, then the older session/set_model.
-            Map<String, Object> cfg = new LinkedHashMap<>();
-            cfg.put("sessionId", sessionId);
-            cfg.put("configId", "model");
-            cfg.put("value", opts.model);
             try {
-                call("session/set_config_option", cfg);
-            } catch (IOException e1) {
-                Map<String, Object> sm = new LinkedHashMap<>();
-                sm.put("sessionId", sessionId);
-                sm.put("modelId", opts.model);
-                try {
-                    call("session/set_model", sm);
-                } catch (IOException e2) {
-                    throw new StartException("set model", "toolnexus: acp: set model \"" + opts.model + "\": "
-                            + e1.getMessage() + "; " + e2.getMessage(), e2);
-                }
+                setModel(opts.model);
+            } catch (IOException e) {
+                throw new StartException("set model", e.getMessage(), e);
             }
         }
     }
 
-    /** Optional: negotiate a session mode via {@code session/set_mode}. */
+    /**
+     * Sends {@code session/set_mode {sessionId, modeId}} — at load ({@code mode}) or on a running
+     * client (SPEC §8C, #197). Same process, same session; sent at once, not queued behind a turn.
+     * The agent's error fails only this call.
+     */
     public void setMode(String modeId) throws IOException {
+        if (closed.get()) throw new IOException("toolnexus: ACP client closed");
         Map<String, Object> params = new LinkedHashMap<>();
         params.put("sessionId", sessionId);
         params.put("modeId", modeId);
         call("session/set_mode", params);
+    }
+
+    /**
+     * Changes the model, passed through unchanged (SPEC §8C, #197): {@code session/set_config_option
+     * {configId:"model"}} first, then {@code session/set_model {modelId}} if the agent rejects that.
+     * Both failing fails this call (both errors in the message); the client stays usable.
+     */
+    public void setModel(String model) throws IOException {
+        if (closed.get()) throw new IOException("toolnexus: ACP client closed");
+        Map<String, Object> cfg = new LinkedHashMap<>();
+        cfg.put("sessionId", sessionId);
+        cfg.put("configId", "model");
+        cfg.put("value", model);
+        try {
+            call("session/set_config_option", cfg);
+        } catch (IOException e1) {
+            Map<String, Object> sm = new LinkedHashMap<>();
+            sm.put("sessionId", sessionId);
+            sm.put("modelId", model);
+            try {
+                call("session/set_model", sm);
+            } catch (IOException e2) {
+                throw new IOException("toolnexus: acp: set model \"" + model + "\": "
+                        + e1.getMessage() + "; " + e2.getMessage(), e2);
+            }
+        }
     }
 
     /** The ACP session id assigned by {@code session/new}, stable across every {@link #generate}. */
@@ -343,7 +361,8 @@ public final class AcpClient implements Closeable, Function<InProcess.Request, I
      * {@link #generate}, reporting the turn as it happens: each {@code session/update} is turned
      * into a {@link LlmClient.StreamEvent} and handed to {@code emit} from the read loop the moment
      * it arrives — {@code agent_message_chunk} → text, {@code agent_thought_chunk} → thought (never
-     * part of the answer), {@code tool_call} → tool_call (name = title, args = rawInput) and a
+     * part of the answer), {@code tool_call} → tool_call (name = title, args = rawInput), a {@code tool_call_update}
+     * with a non-empty rawInput → tool_call_args (its title, when set, renames the call) and a
      * completed/failed {@code tool_call_update} → tool_result; every non-text event carries
      * {@code via = "acp"}. Plugs straight into {@link InProcess.Options#generateStream}.
      * A null {@code emit} reports nothing.
@@ -446,9 +465,15 @@ public final class AcpClient implements Closeable, Function<InProcess.Request, I
                 Map<String, Object> args = upd.get("rawInput") instanceof Map<?, ?> ri ? (Map<String, Object>) ri : null;
                 emit.accept(LlmClient.StreamEvent.toolCall(callId, name, args).withVia("acp"));
             } else if ("tool_call_update".equals(kind)) {
+                // A title is remembered as the call's name for every later event of this id;
+                // a non-empty rawInput is the call's input arriving late (#188).
+                if (!title.isEmpty()) toolNames.put(callId, title);
+                String name = toolNames.getOrDefault(callId, "");
+                if (upd.get("rawInput") instanceof Map<?, ?> ri && !ri.isEmpty()) {
+                    emit.accept(LlmClient.StreamEvent.toolCallArgs(callId, name, (Map<String, Object>) ri, "acp"));
+                }
                 Object status = upd.get("status");
                 if (!"completed".equals(status) && !"failed".equals(status)) return;
-                String name = !title.isEmpty() ? title : toolNames.getOrDefault(callId, "");
                 emit.accept(LlmClient.StreamEvent.toolResult(callId, name, toolContentText(upd.get("content")),
                         "failed".equals(status)).withVia("acp"));
             }

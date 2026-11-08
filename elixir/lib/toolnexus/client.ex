@@ -305,6 +305,7 @@ defmodule Toolnexus.Client do
             headers: %{},
             system_prompt: nil,
             max_turns: 10,
+            stop_recovery: false,
             max_tool_concurrency: nil,
             hooks: %{},
             retries: 2,
@@ -323,10 +324,13 @@ defmodule Toolnexus.Client do
             http_options: [],
             transport: nil,
             on_error: nil,
+            compact_on_overflow: nil,
+            fallback_models: nil,
             on_unsupported_part: nil,
             max_part_bytes: nil,
             registry: nil,
-            deadline: nil
+            deadline: nil,
+            retry_emit: nil
 
   @type t :: %__MODULE__{}
 
@@ -342,13 +346,28 @@ defmodule Toolnexus.Client do
     belong to (SPEC §4C). Never logged.
   - `:system_prompt` — prepended to the toolkit's skills prompt (joined with `"\\n\\n"`)
   - `:max_turns` (default 10)
+  - `:stop_recovery` (default `false`) — SPEC §8 "Stop-reason recovery": a malformed tool call
+    gets a corrective message (once), a truncated reply (`length`/`max_tokens`) a continue
+    message (up to 3, text joined), an empty answer a nudge (once). Off ⇒ loop unchanged
   - `:max_tool_concurrency` — cap on concurrency-safe tool calls of one response running at
     once (SPEC §8 "Tool scheduling"). Absent ⇒ env `TOOLNEXUS_MAX_TOOL_CONCURRENCY` when a
     positive integer, else 10. Unsafe calls (anything not read-only) always run alone.
   - `:on_error` — `(%{error?, status?, attempt, retryable} -> :retry | :fail)` classifies each
     failed LLM attempt (§8 Resilience). Absent ⇒ default (`retryable ⇒ :retry, else :fail`),
     byte-identical to today. A `:retry` is bounded by `:retries`. No `:suspend` tier.
-  - `:hooks` — map with `:before_llm`, `:after_llm`, `:before_tool`, `:after_tool`
+  - `:compact_on_overflow` — a hook with the `:before_llm` signature (typically a tighter
+    `Toolnexus.Agents.compactor/1`), called when the provider rejects a turn as a context
+    overflow (`context_overflow?/2`, SPEC §7F.1). Strictly fewer messages ⇒ they replace the
+    transcript and the same turn is re-sent (no `before_llm` re-run, no turn consumed); no
+    progress, or 3 compactions in a row that each bought fewer than 2 successful calls ⇒
+    `Toolnexus.ContextOverflowError`. Absent ⇒ the overflow surfaces as `ProviderError`.
+  - `:fallback_models` — ordered list of model ids tried, in order, when a call's retry
+    budget is exhausted on HTTP `503`/`529` (overload) — §8 Resilience. Each switch gets a
+    fresh retry budget; `stream` emits `%{type: "fallback", from, to}` first. `429`, other
+    statuses, network errors and an `:on_error` `:fail` never switch. Env
+    `TOOLNEXUS_DISABLE_MODEL_FALLBACK=1|true` disables it. Absent/empty ⇒ unchanged
+  - `:hooks` — map with `:before_llm`, `:after_llm`, `:before_tool`, `:after_tool`,
+    `:after_round` (§8 round boundary: returns `%{inject: [String.t()]}`)
   - `:retries` (default 2), `:retry_base_ms` (default 500), `:timeout_ms` (whole-run deadline).
     `:retries` covers the transient LLM statuses `429`/`500`/`502`/`503`/`504`/`529` plus
     network errors; widen the set with `:retryable_statuses`
@@ -662,12 +681,12 @@ defmodule Toolnexus.Client do
         _ -> body
       end
 
-    data =
+    {data, tmodel} =
       llm_call_json(
         %{client | model: tmodel},
         openai_url(client),
         headers_for(client, key),
-        finalize_body(client, body)
+        fn m -> finalize_body(client, Map.put(body, "model", m)) end
       )
 
     after_llm(client, data, 0, tmodel)
@@ -731,12 +750,12 @@ defmodule Toolnexus.Client do
         tc -> Map.put(body, "tool_choice", tc)
       end
 
-    data =
+    {data, tmodel} =
       llm_call_json(
         %{client | model: tmodel},
         anthropic_url(client),
         headers_for(client, key),
-        finalize_body(client, body)
+        fn m -> finalize_body(client, Map.put(body, "model", m)) end
       )
 
     after_llm(client, data, 0, tmodel)
@@ -822,7 +841,9 @@ defmodule Toolnexus.Client do
   Streaming variant: returns an `Enumerable` of event maps —
   `%{type: "text", delta}`, `%{type: "tool_call", id, name, args}`,
   `%{type: "tool_result", id, name, output, is_error, metadata}`, `%{type: "usage", usage}`,
-  `%{type: "pending", request}` (§10), `%{type: "done", result}`.
+  `%{type: "pending", request}` (§10),
+  `%{type: "retry", attempt, max, delay_ms, status?, reason}` (§8 — emitted before each LLM
+  retry wait; never from `run`/`ask`), `%{type: "done", result}`.
 
   With an `:id` it is stateful like `ask`: history is loaded before streaming and the
   transcript is saved back to the store on the terminal `done` event.
@@ -1483,8 +1504,8 @@ defmodule Toolnexus.Client do
       else: :ok
   end
 
-  defp llm_request(client, url, headers, body), do: llm_request(client, url, headers, body, 0)
-
+  # Returns `{:ok, resp, :ok | :failed | :exhausted}` — `:failed` = on_error said fail,
+  # `:exhausted` = the retry budget ran out (the only case a fallback may advance on).
   defp llm_request(client, url, headers, body, attempt) do
     check_deadline(client)
 
@@ -1492,41 +1513,133 @@ defmodule Toolnexus.Client do
 
     case wire_call(client, url, headers, body, receive_timeout) do
       {:ok, %Req.Response{status: status} = resp} when status in 200..299 ->
-        {:ok, resp}
+        {:ok, resp, :ok}
 
       {:ok, %Req.Response{status: status} = resp} ->
-        retryable = retryable_status?(status, client.retryable_statuses)
+        retryable =
+          should_retry_override(resp, retryable_status?(status, client.retryable_statuses))
+
         tier = classify_error(client, %{status: status, attempt: attempt, retryable: retryable})
 
-        if tier == :fail or attempt >= client.retries do
-          {:ok, resp}
-        else
-          retry_after =
-            case Req.Response.get_header(resp, "retry-after") do
-              [v | _] -> parse_retry_after(v)
-              _ -> nil
-            end
-
-          # `!= nil`, not truthiness: `Retry-After: 0` means retry now, and 0 is
-          # truthy in Elixir but was previously rejected by the parser's `n > 0`.
-          sleep_ms =
-            if retry_after != nil,
-              do: retry_after * 1000,
-              else: client.retry_base_ms * Integer.pow(2, attempt) + :rand.uniform(100)
-
-          Process.sleep(sleep_ms)
-          llm_request(client, url, headers, body, attempt + 1)
+        cond do
+          tier == :fail -> {:ok, resp, :failed}
+          attempt >= client.retries -> {:ok, resp, :exhausted}
+          true -> retry_status(client, url, headers, body, attempt, resp)
         end
 
       {:error, e} ->
+        # `x-should-retry` is never consulted on a network error (there is no response).
         tier = classify_error(client, %{error: e, attempt: attempt, retryable: true})
 
         if tier == :fail or attempt >= client.retries do
           raise e
         else
-          Process.sleep(client.retry_base_ms * Integer.pow(2, attempt) + :rand.uniform(100))
+          sleep_ms = client.retry_base_ms * Integer.pow(2, attempt) + :rand.uniform(100)
+          emit_retry(client, attempt, sleep_ms, nil)
+          Process.sleep(sleep_ms)
           llm_request(client, url, headers, body, attempt + 1)
         end
+    end
+  end
+
+  # §8 "x-should-retry override": a trimmed `true`/`false` (case-insensitive) on a non-ok
+  # response overrides the default classification before on_error runs; anything else keeps it.
+  defp should_retry_override(resp, default) do
+    v =
+      Enum.find_value(resp.headers || %{}, fn {k, vs} ->
+        if String.downcase(to_string(k)) == "x-should-retry",
+          do: vs |> List.wrap() |> List.first()
+      end)
+
+    case v do
+      v when is_binary(v) ->
+        case v |> String.trim() |> String.downcase() do
+          "true" -> true
+          "false" -> false
+          _ -> default
+        end
+
+      _ ->
+        default
+    end
+  end
+
+  # §8 "Retry event (streaming only)": only the streaming path sets `retry_emit`, so
+  # run/ask never see it. Emitted BEFORE the wait, with the exact delay about to be slept.
+  defp emit_retry(%{retry_emit: nil}, _attempt, _delay, _status), do: :ok
+
+  defp emit_retry(%{retry_emit: emit} = client, attempt, delay, status) do
+    ev = %{type: "retry", attempt: attempt + 1, max: client.retries, delay_ms: delay}
+
+    ev =
+      if status,
+        do: ev |> Map.put(:status, status) |> Map.put(:reason, "HTTP #{status}"),
+        else: Map.put(ev, :reason, "network")
+
+    emit.(ev)
+  end
+
+  defp retry_status(client, url, headers, body, attempt, resp) do
+    retry_after =
+      case Req.Response.get_header(resp, "retry-after") do
+        [v | _] -> parse_retry_after(v)
+        _ -> nil
+      end
+
+    # `!= nil`, not truthiness: `Retry-After: 0` means retry now, and 0 is
+    # truthy in Elixir but was previously rejected by the parser's `n > 0`.
+    sleep_ms =
+      if retry_after != nil,
+        do: retry_after * 1000,
+        else: client.retry_base_ms * Integer.pow(2, attempt) + :rand.uniform(100)
+
+    emit_retry(client, attempt, sleep_ms, resp.status)
+    Process.sleep(sleep_ms)
+    llm_request(client, url, headers, body, attempt + 1)
+  end
+
+  # §8 Resilience — `:fallback_models`. The chain for one model call: the turn's model,
+  # then the configured fallbacks, skipping empties and duplicates. The kill switch env
+  # is read per call.
+  defp model_chain(client, turn_model) do
+    disabled =
+      String.downcase(System.get_env("TOOLNEXUS_DISABLE_MODEL_FALLBACK") || "") in ["1", "true"]
+
+    extra = if disabled, do: [], else: List.wrap(client.fallback_models)
+
+    [turn_model | extra]
+    |> Enum.reject(&(&1 in [nil, ""]))
+    |> Enum.uniq()
+    |> case do
+      [] -> [turn_model]
+      chain -> chain
+    end
+  end
+
+  # One model call over the chain. `build` rebuilds the request body for a model (beforeLLM
+  # is NOT re-run). Returns `{{:ok, resp} | {:raise, e, stacktrace}, served_model}`.
+  defp llm_request_chain(client, url, headers, build, turn_model, on_fallback) do
+    chain_step(client, url, headers, build, model_chain(client, turn_model), on_fallback)
+  end
+
+  defp chain_step(client, url, headers, build, [model | rest], on_fallback) do
+    result =
+      try do
+        llm_request(client, url, headers, build.(model), 0)
+      rescue
+        e -> {:raise, e, __STACKTRACE__}
+      end
+
+    case {result, rest} do
+      {{:ok, %Req.Response{status: status}, :exhausted}, [next | _]} when status in [503, 529] ->
+        on_fallback.(model, next)
+        chain_step(client, url, headers, build, rest, on_fallback)
+
+      {{:ok, resp, _}, _} ->
+        {{:ok, resp}, model}
+
+      {raised, _} ->
+        {raised, model}
     end
   end
 
@@ -1611,24 +1724,31 @@ defmodule Toolnexus.Client do
   defp error_text(body), do: Jason.encode!(body)
 
   # One non-streaming LLM call, with an `llm` metric event (ok/error + per-call tokens + ms).
-  defp llm_call_json(client, url, headers, body) do
+  # `build` is `(model -> body)`; returns `{data, served_model}` (§8 fallback_models).
+  defp llm_call_json(client, url, headers, build) do
     t0 = now_ms()
 
+    {result, served} =
+      llm_request_chain(client, url, headers, build, client.model, fn _, _ -> :ok end)
+
     try do
-      case llm_request(client, url, headers, body) do
+      case result do
+        {:raise, e, stack} ->
+          reraise e, stack
+
         {:ok, %Req.Response{status: status, body: data}} when status in 200..299 ->
           {p, c} = per_call(data["usage"], client.style)
 
           emit(client, %{
             event: "llm",
-            model: client.model,
+            model: served,
             status: "ok",
             ms: now_ms() - t0,
             prompt_tokens: p,
             completion_tokens: c
           })
 
-          data
+          {data, served}
 
         {:ok, %Req.Response{} = resp} ->
           raise provider_error(resp)
@@ -1637,7 +1757,7 @@ defmodule Toolnexus.Client do
       e ->
         emit(client, %{
           event: "llm",
-          model: client.model,
+          model: served,
           status: "error",
           ms: now_ms() - t0,
           prompt_tokens: 0,
@@ -1649,14 +1769,25 @@ defmodule Toolnexus.Client do
   end
 
   # One streaming LLM call: returns the raw SSE body text (parsed by the caller).
-  defp llm_call_sse(client, url, headers, body) do
-    case llm_request(client, url, headers, body) do
+  # `build` is `(model -> body)`; returns `{sse, served_model}`. `emit` receives the
+  # `fallback` stream event before each switch (§8 fallback_models).
+  defp llm_call_sse(client, url, headers, build, turn_model, emit) do
+    on_fallback = fn from, to -> emit.(%{type: "fallback", from: from, to: to}) end
+    {result, served} = llm_request_chain(client, url, headers, build, turn_model, on_fallback)
+
+    case result do
+      {:raise, e, stack} ->
+        reraise e, stack
+
       {:ok, %Req.Response{status: status, body: data}} when status in 200..299 ->
-        cond do
-          is_binary(data) -> data
-          match?({:sse_stream, _}, data) -> data
-          true -> error_text(data)
-        end
+        sse =
+          cond do
+            is_binary(data) -> data
+            match?({:sse_stream, _}, data) -> data
+            true -> error_text(data)
+          end
+
+        {sse, served}
 
       {:ok, %Req.Response{} = resp} ->
         raise provider_error(resp)
@@ -1679,6 +1810,83 @@ defmodule Toolnexus.Client do
       retry_after: retry_after,
       prefix: "LLM"
     )
+  end
+
+  # ---- §7F.1 reactive compaction ----
+
+  @overflow_markers [
+    "context_length_exceeded",
+    "maximum context length",
+    "prompt is too long",
+    "prompt_too_long",
+    "request_too_large",
+    "context window"
+  ]
+
+  @doc """
+  SPEC §7F.1 detection: true iff `status` is 400 or 413 AND the (lowercased) provider error
+  body contains a context-overflow marker. A non-binary body (a decoded JSON map) is
+  JSON-encoded first.
+  """
+  @spec context_overflow?(integer() | nil, term()) :: boolean()
+  def context_overflow?(status, body) when status in [400, 413] do
+    text = if is_binary(body), do: body, else: Jason.encode!(body || "")
+    text = String.downcase(text)
+    Enum.any?(@overflow_markers, &String.contains?(text, &1))
+  end
+
+  def context_overflow?(_status, _body), do: false
+
+  # One LLM call wrapped in the reactive-compaction reaction + breaker. `fun` receives the
+  # working transcript and performs the call. Returns `{result, st}`; `st` carries the
+  # possibly-compacted transcript and the `ok_since`/`streak` counters across turns.
+  defp with_overflow(client, st, turn, fun) do
+    result =
+      try do
+        {:ok, fun.(st.messages)}
+      rescue
+        e -> {:error, e, __STACKTRACE__}
+      end
+
+    case result do
+      {:ok, res} ->
+        {res, Map.put(st, :ok_since, Map.get(st, :ok_since, 0) + 1)}
+
+      {:error, %Toolnexus.ProviderError{status: status, body: body} = e, stack} ->
+        hook = client.compact_on_overflow
+
+        if is_function(hook, 1) and context_overflow?(status, body) do
+          react_overflow(client, st, turn, fun, hook, status, body)
+        else
+          reraise e, stack
+        end
+
+      {:error, e, stack} ->
+        reraise e, stack
+    end
+  end
+
+  defp react_overflow(client, st, turn, fun, hook, status, body) do
+    ok_since = Map.get(st, :ok_since, 0)
+    streak = Map.get(st, :streak, 0)
+    streak = if streak > 0 and ok_since < 2, do: streak, else: 0
+
+    if streak == 3 do
+      raise Toolnexus.ContextOverflowError, compactions: 3, status: status, body: body
+    end
+
+    compacted =
+      case hook.(%{messages: st.messages, tools: st.tools, model: st.model, turn: turn}) do
+        %{messages: m} when is_list(m) -> m
+        _ -> nil
+      end
+
+    if is_list(compacted) and length(compacted) < length(st.messages) do
+      st = st |> Map.put(:messages, compacted) |> Map.put(:streak, streak + 1)
+      with_overflow(client, Map.put(st, :ok_since, 0), turn, fun)
+    else
+      raise Toolnexus.ContextOverflowError, compactions: streak, status: status, body: body
+    end
   end
 
   # ---- hooks ----
@@ -1712,6 +1920,42 @@ defmodule Toolnexus.Client do
 
       _ ->
         {messages, tools, client.model}
+    end
+  end
+
+  # SPEC §8 after_round (#192): fire the round-boundary hook and append its injections
+  # as user messages. Returns {appended?, st}. A final round fires only when a turn
+  # remains; a non-empty injection there continues the loop.
+  defp round_end(client, st, turn, final, text) do
+    case hook(client, :after_round) do
+      f when is_function(f, 1) ->
+        if final and turn + 1 >= client.max_turns do
+          {false, st}
+        else
+          case f.(%{turn: turn, final: final, text: text, messages: st.messages}) do
+            {:error, reason} ->
+              raise Toolnexus.HookError, hook: "after_round", reason: reason
+
+            %{} = out ->
+              add =
+                (Map.get(out, :inject) || [])
+                |> Enum.filter(&(is_binary(&1) and &1 != ""))
+                |> Enum.map(&%{"role" => "user", "content" => &1})
+
+              {add != [], %{st | messages: st.messages ++ add}}
+
+            _ ->
+              {false, st}
+          end
+        end
+
+      f when is_function(f) ->
+        raise ArgumentError,
+              "hooks.after_round must be a 1-arity function taking " <>
+                "%{turn:, final:, text:, messages:}"
+
+      _ ->
+        {false, st}
     end
   end
 
@@ -2176,7 +2420,8 @@ defmodule Toolnexus.Client do
       tool_calls: [],
       usage: zero_usage(),
       turns: 0,
-      model: client.model
+      model: client.model,
+      rec: new_recovery()
     }
 
     loop_openai(client, toolkit, key, run_start, st, 0)
@@ -2203,38 +2448,63 @@ defmodule Toolnexus.Client do
     {messages, tools, tmodel} = before_llm(client, st.messages, st.tools, turn)
     st = %{st | messages: messages, tools: tools, model: tmodel}
 
-    data =
+    {{data, tmodel}, st} =
       try do
-        llm_call_json(
-          %{client | model: tmodel},
-          openai_url(client),
-          headers_for(client, key),
-          openai_body(%{client | model: tmodel}, messages, tools, false)
-        )
+        with_overflow(client, st, turn, fn messages ->
+          llm_call_json(
+            %{client | model: tmodel},
+            openai_url(client),
+            headers_for(client, key),
+            fn m -> openai_body(%{client | model: m}, messages, tools, false) end
+          )
+        end)
       rescue
         e ->
           emit_run_error(rc(client, st), run_start, st.tool_calls, st.turns, st.usage, e)
           reraise e, __STACKTRACE__
       end
 
+    st = %{st | model: tmodel}
+
     st = %{st | usage: add_usage(st.usage, data["usage"], client.style)}
     after_llm(client, data, turn, tmodel)
-    msg = data["choices"] |> List.first() |> Map.get("message")
+    choice = data["choices"] |> List.first()
+    msg = Map.get(choice, "message")
     st = %{st | messages: st.messages ++ [msg]}
     TurnGuard.checkpoint(st.messages)
     calls = msg["tool_calls"] || []
+    malformed = Enum.any?(calls, &malformed_args?(&1["function"]["arguments"]))
+    truncated = choice["finish_reason"] == "length"
 
+    case recover(client, st, turn, calls != [], malformed, truncated, msg["content"] || "") do
+      {:recover, st} ->
+        loop_openai(client, toolkit, key, run_start, st, turn + 1)
+
+      {:proceed, st} ->
+        loop_openai_tail(client, toolkit, key, run_start, st, turn, msg, calls)
+    end
+  end
+
+  defp loop_openai_tail(client, toolkit, key, run_start, st, turn, msg, calls) do
     if calls == [] do
-      end_run(
-        rc(client, st),
-        run_start,
-        msg["content"] || "",
-        st.messages,
-        st.tool_calls,
-        st.turns,
-        st.usage
-      )
+      case round_end(client, st, turn, true, st.rec.carry <> (msg["content"] || "")) do
+        {true, st} ->
+          loop_openai(client, toolkit, key, run_start, reset_carry(st), turn + 1)
+
+        {false, st} ->
+          end_run(
+            rc(client, st),
+            run_start,
+            st.rec.carry <> (msg["content"] || ""),
+            st.messages,
+            st.tool_calls,
+            st.turns,
+            st.usage
+          )
+      end
     else
+      st = reset_carry(st)
+
       call_specs =
         Enum.map(calls, fn call ->
           {call["id"], call["function"]["name"], safe_json(call["function"]["arguments"])}
@@ -2257,6 +2527,7 @@ defmodule Toolnexus.Client do
           )
 
         {:ok, st} ->
+          {_, st} = round_end(client, st, turn, false, "")
           loop_openai(client, toolkit, key, run_start, st, turn + 1)
       end
     end
@@ -2294,7 +2565,8 @@ defmodule Toolnexus.Client do
       tool_calls: [],
       usage: zero_usage(),
       turns: 0,
-      model: client.model
+      model: client.model,
+      rec: new_recovery()
     }
 
     loop_anthropic(client, toolkit, key, sys, run_start, st, 0)
@@ -2320,32 +2592,61 @@ defmodule Toolnexus.Client do
     {messages, tools, tmodel} = before_llm(client, st.messages, st.tools, turn)
     st = %{st | messages: messages, tools: tools, model: tmodel}
 
-    data =
+    {{data, tmodel}, st} =
       try do
-        llm_call_json(
-          %{client | model: tmodel},
-          anthropic_url(client),
-          headers_for(client, key),
-          anthropic_body(%{client | model: tmodel}, sys, messages, tools, false)
-        )
+        with_overflow(client, st, turn, fn messages ->
+          llm_call_json(
+            %{client | model: tmodel},
+            anthropic_url(client),
+            headers_for(client, key),
+            fn m -> anthropic_body(%{client | model: m}, sys, messages, tools, false) end
+          )
+        end)
       rescue
         e ->
           emit_run_error(rc(client, st), run_start, st.tool_calls, st.turns, st.usage, e)
           reraise e, __STACKTRACE__
       end
 
+    st = %{st | model: tmodel}
+
     st = %{st | usage: add_usage(st.usage, data["usage"], client.style)}
     after_llm(client, data, turn, tmodel)
-    content = data["content"] || []
+    raw_content = data["content"] || []
+    content = Enum.map(raw_content, &normalize_use/1)
     st = %{st | messages: st.messages ++ [%{"role" => "assistant", "content" => content}]}
     TurnGuard.checkpoint(st.messages)
     uses = Enum.filter(content, &(&1["type"] == "tool_use"))
+    text = content |> Enum.filter(&(&1["type"] == "text")) |> Enum.map_join("", & &1["text"])
 
+    malformed =
+      Enum.any?(raw_content, &(&1["type"] == "tool_use" and malformed_input?(&1["input"])))
+
+    truncated = data["stop_reason"] == "max_tokens"
+
+    case recover(client, st, turn, uses != [], malformed, truncated, text) do
+      {:recover, st} ->
+        loop_anthropic(client, toolkit, key, sys, run_start, st, turn + 1)
+
+      {:proceed, st} ->
+        loop_anthropic_tail(client, toolkit, key, sys, run_start, st, turn, uses, text)
+    end
+  end
+
+  defp loop_anthropic_tail(client, toolkit, key, sys, run_start, st, turn, uses, text) do
     if uses == [] do
-      text = content |> Enum.filter(&(&1["type"] == "text")) |> Enum.map_join("", & &1["text"])
-      end_run(rc(client, st), run_start, text, st.messages, st.tool_calls, st.turns, st.usage)
+      text = st.rec.carry <> text
+
+      case round_end(client, st, turn, true, text) do
+        {true, st} ->
+          loop_anthropic(client, toolkit, key, sys, run_start, reset_carry(st), turn + 1)
+
+        {false, st} ->
+          end_run(rc(client, st), run_start, text, st.messages, st.tool_calls, st.turns, st.usage)
+      end
     else
-      call_specs = Enum.map(uses, fn use -> {use["id"], use["name"], use["input"] || %{}} end)
+      st = reset_carry(st)
+      call_specs = Enum.map(uses, fn use -> {use["id"], use["name"], use["input"]} end)
       settled = exec_calls(client, toolkit, call_specs, turn)
 
       # Record in tool-call order; on the FIRST durable halt include that tool_result block,
@@ -2380,6 +2681,7 @@ defmodule Toolnexus.Client do
           st.usage
         )
       else
+        {_, st} = round_end(client, st, turn, false, "")
         loop_anthropic(client, toolkit, key, sys, run_start, st, turn + 1)
       end
     end
@@ -2405,12 +2707,15 @@ defmodule Toolnexus.Client do
         emit.(ev)
     end
 
+    # §8 Retry event: the streaming path alone carries a retry emitter into llm_request.
+    sclient = %{client | retry_emit: emit_ev}
+
     # A stream is cancelled by halting it (its worker is killed) or by an error;
     # either way the guard saves the partial transcript (SPEC §8).
     TurnGuard.run(id, client.store, client.style, fn ->
       case client.style do
-        "anthropic" -> stream_anthropic(client, prompt, toolkit, history, emit_ev)
-        _ -> stream_openai(client, prompt, toolkit, history, emit_ev)
+        "anthropic" -> stream_anthropic(sclient, prompt, toolkit, history, emit_ev)
+        _ -> stream_openai(sclient, prompt, toolkit, history, emit_ev)
       end
     end)
   end
@@ -2438,7 +2743,8 @@ defmodule Toolnexus.Client do
       tool_calls: [],
       usage: zero_usage(),
       turns: 0,
-      model: client.model
+      model: client.model,
+      rec: new_recovery()
     }
 
     stream_loop_openai(client, toolkit, key, run_start, st, 0, emit)
@@ -2470,17 +2776,22 @@ defmodule Toolnexus.Client do
     t0 = now_ms()
     %{prompt_tokens: before_p, completion_tokens: before_c} = st.usage
 
-    {content, calls, usage} =
+    {{content, calls, usage, finish, tmodel}, st} =
       try do
-        sse =
-          llm_call_sse(
-            client,
-            openai_url(client),
-            headers_for(client, key),
-            openai_body(%{client | model: tmodel}, messages, tools, true)
-          )
+        with_overflow(client, st, turn, fn messages ->
+          {sse, served} =
+            llm_call_sse(
+              client,
+              openai_url(client),
+              headers_for(client, key),
+              fn m -> openai_body(%{client | model: m}, messages, tools, true) end,
+              tmodel,
+              emit
+            )
 
-        parse_openai_sse(sse, st.usage, emit)
+          {content, calls, usage, finish} = parse_openai_sse(sse, st.usage, emit)
+          {content, calls, usage, finish, served}
+        end)
       rescue
         e ->
           emit(client, %{
@@ -2496,7 +2807,7 @@ defmodule Toolnexus.Client do
           reraise e, __STACKTRACE__
       end
 
-    st = %{st | usage: usage}
+    st = %{st | usage: usage, model: tmodel}
 
     emit(client, %{
       event: "llm",
@@ -2509,24 +2820,47 @@ defmodule Toolnexus.Client do
 
     after_llm(client, %{streamed: true, usage: usage}, turn, tmodel)
 
+    malformed = Enum.any?(calls, &malformed_args?(&1.args))
+    probe = %{st | messages: st.messages ++ [%{"role" => "assistant", "content" => content}]}
+
+    case recover(client, probe, turn, calls != [], malformed, finish == "length", content) do
+      {:recover, st} ->
+        stream_loop_openai(client, toolkit, key, run_start, st, turn + 1, emit)
+
+      {:proceed, probe} ->
+        st = %{st | rec: probe.rec}
+        stream_openai_tail(client, toolkit, key, run_start, st, turn, emit, content, calls)
+    end
+  end
+
+  defp stream_openai_tail(client, toolkit, key, run_start, st, turn, emit, content, calls) do
     if calls == [] do
       st = %{st | messages: st.messages ++ [%{"role" => "assistant", "content" => content}]}
-      emit.(%{type: "usage", usage: st.usage})
 
-      emit.(%{
-        type: "done",
-        result:
-          end_run(
-            rc(client, st),
-            run_start,
-            content,
-            st.messages,
-            st.tool_calls,
-            st.turns,
-            st.usage
-          )
-      })
+      case round_end(client, st, turn, true, st.rec.carry <> content) do
+        {true, st} ->
+          stream_loop_openai(client, toolkit, key, run_start, reset_carry(st), turn + 1, emit)
+
+        {false, st} ->
+          emit.(%{type: "usage", usage: st.usage})
+
+          emit.(%{
+            type: "done",
+            result:
+              end_run(
+                rc(client, st),
+                run_start,
+                st.rec.carry <> content,
+                st.messages,
+                st.tool_calls,
+                st.turns,
+                st.usage
+              )
+          })
+      end
     else
+      st = reset_carry(st)
+
       assistant = %{
         "role" => "assistant",
         "content" => if(content == "", do: nil, else: content),
@@ -2616,13 +2950,14 @@ defmodule Toolnexus.Client do
           })
 
         {:ok, st} ->
+          {_, st} = round_end(client, st, turn, false, "")
           stream_loop_openai(client, toolkit, key, run_start, st, turn + 1, emit)
       end
     end
   end
 
   defp parse_openai_sse(body, usage, emit) do
-    acc0 = %{content: "", slots: %{}, order: [], usage: usage}
+    acc0 = %{content: "", slots: %{}, order: [], usage: usage, finish: nil}
 
     lines =
       case body do
@@ -2660,14 +2995,21 @@ defmodule Toolnexus.Client do
       end)
 
     calls = Enum.map(acc.order, &acc.slots[&1])
-    {acc.content, calls, acc.usage}
+    {acc.content, calls, acc.usage, acc.finish}
   end
 
   defp apply_openai_chunk(acc, nil, _emit), do: acc
 
   defp apply_openai_chunk(acc, j, emit) do
     acc = if j["usage"], do: %{acc | usage: add_usage(acc.usage, j["usage"], "openai")}, else: acc
-    delta = j["choices"] |> List.wrap() |> List.first() |> then(&(&1 && &1["delta"]))
+    choice = j["choices"] |> List.wrap() |> List.first()
+    delta = choice && choice["delta"]
+
+    acc =
+      case choice && choice["finish_reason"] do
+        fr when is_binary(fr) and fr != "" -> %{acc | finish: fr}
+        _ -> acc
+      end
 
     acc =
       case delta && delta["content"] do
@@ -2711,7 +3053,8 @@ defmodule Toolnexus.Client do
       tool_calls: [],
       usage: zero_usage(),
       turns: 0,
-      model: client.model
+      model: client.model,
+      rec: new_recovery()
     }
 
     stream_loop_anthropic(client, toolkit, key, sys, run_start, st, 0, emit)
@@ -2743,17 +3086,22 @@ defmodule Toolnexus.Client do
     t0 = now_ms()
     %{prompt_tokens: before_p, completion_tokens: before_c} = st.usage
 
-    {blocks, stop_reason, usage} =
+    {{blocks, stop_reason, usage, tmodel}, st} =
       try do
-        sse =
-          llm_call_sse(
-            client,
-            anthropic_url(client),
-            headers_for(client, key),
-            anthropic_body(%{client | model: tmodel}, sys, messages, tools, true)
-          )
+        with_overflow(client, st, turn, fn messages ->
+          {sse, served} =
+            llm_call_sse(
+              client,
+              anthropic_url(client),
+              headers_for(client, key),
+              fn m -> anthropic_body(%{client | model: m}, sys, messages, tools, true) end,
+              tmodel,
+              emit
+            )
 
-        parse_anthropic_sse(sse, st.usage, emit)
+          {blocks, stop_reason, usage} = parse_anthropic_sse(sse, st.usage, emit)
+          {blocks, stop_reason, usage, served}
+        end)
       rescue
         e ->
           emit(client, %{
@@ -2769,7 +3117,7 @@ defmodule Toolnexus.Client do
           reraise e, __STACKTRACE__
       end
 
-    st = %{st | usage: usage}
+    st = %{st | usage: usage, model: tmodel}
 
     emit(client, %{
       event: "llm",
@@ -2799,17 +3147,59 @@ defmodule Toolnexus.Client do
     st = %{st | messages: st.messages ++ [%{"role" => "assistant", "content" => content}]}
     TurnGuard.checkpoint(st.messages)
     uses = Enum.filter(content, &(&1["type"] == "tool_use"))
+    text = content |> Enum.filter(&(&1["type"] == "text")) |> Enum.map_join("", & &1["text"])
+    malformed = Enum.any?(blocks, &(&1.type == "tool_use" and malformed_args?(&1.json)))
+    truncated = stop_reason == "max_tokens"
+
+    case recover(client, st, turn, uses != [], malformed, truncated, text) do
+      {:recover, st} ->
+        stream_loop_anthropic(client, toolkit, key, sys, run_start, st, turn + 1, emit)
+
+      {:proceed, st} ->
+        tail = {uses, text, stop_reason}
+        stream_anthropic_tail(client, toolkit, key, sys, run_start, st, turn, emit, tail)
+    end
+  end
+
+  defp stream_anthropic_tail(client, toolkit, key, sys, run_start, st, turn, emit, tail) do
+    {uses, text, stop_reason} = tail
 
     if stop_reason != "tool_use" or uses == [] do
-      text = content |> Enum.filter(&(&1["type"] == "text")) |> Enum.map_join("", & &1["text"])
-      emit.(%{type: "usage", usage: st.usage})
+      text = st.rec.carry <> text
 
-      emit.(%{
-        type: "done",
-        result:
-          end_run(rc(client, st), run_start, text, st.messages, st.tool_calls, st.turns, st.usage)
-      })
+      case round_end(client, st, turn, true, text) do
+        {true, st} ->
+          stream_loop_anthropic(
+            client,
+            toolkit,
+            key,
+            sys,
+            run_start,
+            reset_carry(st),
+            turn + 1,
+            emit
+          )
+
+        {false, st} ->
+          emit.(%{type: "usage", usage: st.usage})
+
+          emit.(%{
+            type: "done",
+            result:
+              end_run(
+                rc(client, st),
+                run_start,
+                text,
+                st.messages,
+                st.tool_calls,
+                st.turns,
+                st.usage
+              )
+          })
+      end
     else
+      st = reset_carry(st)
+
       Enum.each(uses, fn u ->
         emit.(tool_event(client, %{type: "tool_call", id: u["id"]}, u["name"], u["input"]))
       end)
@@ -2888,6 +3278,7 @@ defmodule Toolnexus.Client do
 
         {:ok, st, results} ->
           st = %{st | messages: st.messages ++ [%{"role" => "user", "content" => results}]}
+          {_, st} = round_end(client, st, turn, false, "")
           stream_loop_anthropic(client, toolkit, key, sys, run_start, st, turn + 1, emit)
       end
     end
@@ -2981,6 +3372,76 @@ defmodule Toolnexus.Client do
       _ -> %{}
     end
   end
+
+  # ---- stop-reason recovery (SPEC §8, opt-in `:stop_recovery`) ----
+
+  @stop_nudge "Your previous response contained no answer. Continue and give your answer."
+  @stop_continue "Your previous response was cut off at the output token limit. Continue exactly where it stopped, without repeating anything."
+  @stop_corrective "Your previous tool call could not be used: its arguments were not a valid JSON object. Call the tool again with arguments that are a single valid JSON object matching its input schema."
+
+  @doc false
+  def stop_recovery_messages,
+    do: %{nudge: @stop_nudge, continue: @stop_continue, corrective: @stop_corrective}
+
+  defp new_recovery, do: %{correct: 0, cont: 0, nudges: 0, carry: ""}
+
+  defp reset_carry(st), do: %{st | rec: %{st.rec | carry: ""}}
+
+  # `st.messages` ends with the assembled assistant message. Returns `{:recover, st}` with the
+  # pinned user message appended (assistant dropped for corrective/nudge), or `{:proceed, st}`.
+  defp recover(client, st, turn, has_calls, malformed, truncated, text) do
+    rec = st.rec
+
+    decision =
+      cond do
+        not client.stop_recovery or turn >= client.max_turns - 1 ->
+          nil
+
+        has_calls and malformed and rec.correct < 1 ->
+          {@stop_corrective, true, %{rec | correct: 1}}
+
+        not has_calls and truncated and rec.cont < 3 ->
+          {@stop_continue, false, %{rec | cont: rec.cont + 1, carry: rec.carry <> text}}
+
+        not has_calls and not truncated and String.trim(text) == "" and rec.nudges < 1 ->
+          {@stop_nudge, true, %{rec | nudges: 1}}
+
+        true ->
+          nil
+      end
+
+    case decision do
+      nil ->
+        {:proceed, st}
+
+      {msg, drop, rec} ->
+        messages = if drop, do: Enum.drop(st.messages, -1), else: st.messages
+
+        {:recover,
+         %{st | rec: rec, messages: messages ++ [%{"role" => "user", "content" => msg}]}}
+    end
+  end
+
+  # A raw arguments string is malformed when non-blank and not a JSON object.
+  defp malformed_args?(nil), do: false
+  defp malformed_args?(raw) when is_map(raw), do: false
+
+  defp malformed_args?(raw) when is_binary(raw) do
+    t = String.trim(raw)
+    t != "" and not match?({:ok, %{}}, Jason.decode(t))
+  end
+
+  defp malformed_args?(_), do: true
+
+  defp malformed_input?(nil), do: false
+  defp malformed_input?(in_) when is_map(in_), do: false
+  defp malformed_input?(_), do: true
+
+  # A tool_use whose input is not an object runs with (and is recorded as) `{}`.
+  defp normalize_use(%{"type" => "tool_use"} = b),
+    do: Map.put(b, "input", if(is_map(b["input"]), do: b["input"], else: %{}))
+
+  defp normalize_use(b), do: b
 
   defp last_text(messages) do
     messages

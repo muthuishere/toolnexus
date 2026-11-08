@@ -120,6 +120,92 @@ async fn passthrough_falls_back_to_set_model() {
     let _ = std::fs::remove_file(&rec);
 }
 
+fn recorded_all(p: &PathBuf, method: &str) -> Vec<Value> {
+    std::fs::read_to_string(p)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .filter(|v| v["method"] == method)
+        .map(|v| v["params"].clone())
+        .collect()
+}
+
+#[tokio::test]
+async fn live_switch_keeps_the_session() {
+    let case = cases()["liveSwitch"].clone();
+    let rec = record_file("ls");
+    let c = AcpClient::load(opts(&json!({})).env("TN_FAKE_RECORD", rec.to_string_lossy()))
+        .await
+        .unwrap();
+    c.set_mode(case["mode"].as_str().unwrap()).await.unwrap();
+    c.set_model(case["model"].as_str().unwrap()).await.unwrap();
+    let out = c
+        .prompt_text(case["expectText"].as_str().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(out.text, case["expectText"].as_str().unwrap());
+    c.close().await;
+    let sid = c.session_id().to_owned();
+    assert_eq!(
+        recorded_all(&rec, "initialize").len() as u64,
+        case["expectInitializeCount"].as_u64().unwrap()
+    );
+    assert_eq!(
+        recorded_all(&rec, "session/new").len() as u64,
+        case["expectSessionNewCount"].as_u64().unwrap()
+    );
+    let sm = recorded(&rec, "session/set_mode").unwrap();
+    assert_eq!(sm["sessionId"], json!(sid));
+    for (k, v) in case["expectSetMode"].as_object().unwrap() {
+        assert_eq!(&sm[k], v);
+    }
+    let sc = recorded(&rec, "session/set_config_option").unwrap();
+    assert_eq!(sc["sessionId"], json!(sid));
+    for (k, v) in case["expectSetConfigOption"].as_object().unwrap() {
+        assert_eq!(&sc[k], v);
+    }
+    assert!(recorded(&rec, "session/set_model").is_none());
+    assert!(c.set_mode("x").await.is_err(), "closed client refuses");
+    let _ = std::fs::remove_file(&rec);
+}
+
+#[tokio::test]
+async fn live_switch_model_falls_back() {
+    let case = cases()["liveSwitch"].clone();
+    let fb = &case["fallback"];
+    let rec = record_file("lsfb");
+    let c = AcpClient::load(opts(&fb["fakeEnv"]).env("TN_FAKE_RECORD", rec.to_string_lossy()))
+        .await
+        .unwrap();
+    c.set_model(case["model"].as_str().unwrap()).await.unwrap();
+    c.close().await;
+    let sm = recorded(&rec, "session/set_model").unwrap();
+    for (k, v) in fb["expectSetModel"].as_object().unwrap() {
+        assert_eq!(&sm[k], v);
+    }
+    let _ = std::fs::remove_file(&rec);
+}
+
+#[tokio::test]
+async fn live_switch_rejected_mode_keeps_client_usable() {
+    let case = cases()["liveSwitch"].clone();
+    let rj = &case["reject"];
+    let c = AcpClient::load(opts(&rj["fakeEnv"])).await.unwrap();
+    let err = c
+        .set_mode(case["mode"].as_str().unwrap())
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains(rj["expectErrorContains"].as_str().unwrap()),
+        "{err}"
+    );
+    let want = rj["expectText"].as_str().unwrap();
+    let out = c.prompt_text(want).await.unwrap();
+    assert_eq!(out.text, want);
+    c.close().await;
+}
+
 #[tokio::test]
 async fn passthrough_bare() {
     let bare = cases()["passthrough"]["bareExpect"].clone();
@@ -215,6 +301,42 @@ async fn stream_acp_drip_is_incremental() {
     assert_eq!(res.unwrap().text, case["expectDoneText"].as_str().unwrap());
     let r = c.run("again", &tk).await.unwrap();
     assert_eq!(r.text, case["expectDoneText"].as_str().unwrap());
+    acp.close().await;
+}
+
+#[tokio::test]
+async fn stream_acp_tool_update_emits_args_and_title() {
+    let case = cases()["stream"]["acpToolUpdate"].clone();
+    let acp = Arc::new(AcpClient::load(opts(&case["fakeEnv"])).await.unwrap());
+    let c = create_in_process_client(InProcessOptions {
+        generate_stream: Some(acp_generate_stream(acp.clone())),
+        ..Default::default()
+    });
+    let mut rx = c.stream("go", &empty_tk().await).unwrap();
+    let (mut events, mut done) = (Vec::new(), None);
+    while let Some(ev) = rx.recv().await {
+        match ev.kind.as_str() {
+            "text" | "usage" => {}
+            "done" => done = ev.result,
+            "error" => panic!("{:?}", ev.error),
+            k => {
+                let mut m = json!({"type": k, "id": ev.id, "name": ev.name, "via": ev.via});
+                if k == "tool_call_args" {
+                    m["args"] = ev.args.clone();
+                }
+                if k == "tool_result" {
+                    m["output"] = json!(ev.output);
+                    m["isError"] = json!(ev.is_error);
+                }
+                events.push(m);
+            }
+        }
+    }
+    assert_eq!(json!(events), case["expectEvents"]);
+    assert_eq!(
+        done.expect("done").text,
+        case["expectDoneText"].as_str().unwrap()
+    );
     acp.close().await;
 }
 

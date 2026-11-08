@@ -74,6 +74,84 @@
         "delta": "pondering",
         "via": "acp"
       }
+    },
+    "acpToolUpdate": {
+      "_doc": "Issue #188. Against the port's fake ACP agent with fakeEnv set, on session/prompt the fake sends `updates` in order, then replies stopReason end_turn. A streaming generate MUST emit exactly expectEvents (non-text events, in order; text deltas compared separately). A tool_call_update that carries rawInput emits tool_call_args with the latest known title; an update's title is remembered so the later tool_result carries it. An update with neither rawInput nor a terminal status emits nothing.",
+      "fakeEnv": {
+        "TN_FAKE_TOOLUPDATE": "1"
+      },
+      "updates": [
+        {
+          "sessionUpdate": "tool_call",
+          "toolCallId": "t1",
+          "title": "Write",
+          "kind": "edit",
+          "status": "pending"
+        },
+        {
+          "sessionUpdate": "tool_call_update",
+          "toolCallId": "t1",
+          "status": "in_progress",
+          "title": "Write /tmp/a.txt",
+          "rawInput": {
+            "file_path": "/tmp/a.txt",
+            "content": "hi"
+          }
+        },
+        {
+          "sessionUpdate": "tool_call_update",
+          "toolCallId": "t1",
+          "status": "in_progress"
+        },
+        {
+          "sessionUpdate": "tool_call_update",
+          "toolCallId": "t1",
+          "status": "completed",
+          "content": [
+            {
+              "type": "content",
+              "content": {
+                "type": "text",
+                "text": "wrote"
+              }
+            }
+          ]
+        },
+        {
+          "sessionUpdate": "agent_message_chunk",
+          "content": {
+            "type": "text",
+            "text": "done"
+          }
+        }
+      ],
+      "expectEvents": [
+        {
+          "type": "tool_call",
+          "id": "t1",
+          "name": "Write",
+          "via": "acp"
+        },
+        {
+          "type": "tool_call_args",
+          "id": "t1",
+          "name": "Write /tmp/a.txt",
+          "args": {
+            "file_path": "/tmp/a.txt",
+            "content": "hi"
+          },
+          "via": "acp"
+        },
+        {
+          "type": "tool_result",
+          "id": "t1",
+          "name": "Write /tmp/a.txt",
+          "output": "wrote",
+          "isError": false,
+          "via": "acp"
+        }
+      ],
+      "expectDoneText": "done"
     }
   },
   "passthrough": {
@@ -145,6 +223,36 @@
       "mcpServers": [],
       "sessionNewHasMeta": false,
       "clientCapabilitiesHasMeta": false
+    }
+  },
+  "liveSwitch": {
+    "_doc": "Issue #197. loadACP with no mode/model, then on the RUNNING client: setMode(mode) and setModel(model), then one generate. The fake records every method it receives. initialize and session/new MUST each be recorded exactly once (no restart); set_mode, set_config_option carry the same sessionId session/new returned; the turn still answers expectText. With fallback.fakeEnv the fake rejects set_config_option and set_model {modelId} follows. With reject.fakeEnv the fake rejects session/set_mode with an error; setMode fails with an error containing expectErrorContains and a following generate still answers expectText.",
+    "mode": "plan",
+    "model": "m-2",
+    "expectSetMode": {
+      "modeId": "plan"
+    },
+    "expectSetConfigOption": {
+      "configId": "model",
+      "value": "m-2"
+    },
+    "expectInitializeCount": 1,
+    "expectSessionNewCount": 1,
+    "expectText": "hello",
+    "fallback": {
+      "fakeEnv": {
+        "TN_FAKE_NO_CONFIG_OPTION": "1"
+      },
+      "expectSetModel": {
+        "modelId": "m-2"
+      }
+    },
+    "reject": {
+      "fakeEnv": {
+        "TN_FAKE_REJECT_MODE": "1"
+      },
+      "expectErrorContains": "unknown mode",
+      "expectText": "hello"
     }
   },
   "agentExit": {

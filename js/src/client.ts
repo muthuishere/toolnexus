@@ -42,11 +42,20 @@ export interface ClientOptions {
   headers?: Record<string, string>
   systemPrompt?: string
   maxTurns?: number
+  /** SPEC §8 "Stop-reason recovery". Default false. On, an empty answer is nudged once, a
+   * `length`/`max_tokens` cut is continued (up to 3 times, text carried) and malformed tool-call
+   * arguments get one corrective turn — each an ordinary turn, only while a turn remains. */
+  stopRecovery?: boolean
   /** Cap on concurrency-safe tool calls of one response running at once (SPEC §8 "Tool
    * scheduling"). Absent ⇒ env `TOOLNEXUS_MAX_TOOL_CONCURRENCY` when a positive integer, else 10.
    * Unsafe calls (anything not read-only) always run alone. */
   maxToolConcurrency?: number
   hooks?: Hooks
+  /** SPEC §7F.1 reactive compaction. Called (with the `beforeLLM` signature) when the provider
+   * rejects a call as a context overflow (`isContextOverflow`); strictly fewer `messages` replace
+   * the transcript and the same turn is re-sent. Breaker: 3 rapid compactions ⇒ `ContextOverflowError`.
+   * Absent ⇒ the overflow surfaces as `LlmHttpError`, unchanged. */
+  compactOnOverflow?: Hooks["beforeLLM"]
   /** Retries on transient LLM errors (`429`/`500`/`502`/`503`/`504`/`529` + network). Default 2.
    * Widen the status set with `retryableStatuses`. */
   retries?: number
@@ -112,6 +121,11 @@ export interface ClientOptions {
    * today. A "retry" is always bounded by `retries`; the classifier cannot loop unbounded.
    * There is no "suspend" tier — suspension (§10) stays a user-action pause, not an error path. */
   onError?: (info: ErrorInfo) => ErrorTier
+  /** §8 Resilience. Ordered fallback model ids tried, with a fresh retry budget each, when the
+   * current model's retry budget ends on an overload (`503`/`529`). Chain = [turnModel, ...these];
+   * empty/duplicate entries skipped. `TOOLNEXUS_DISABLE_MODEL_FALLBACK=1|true` disables it.
+   * `stream` emits `{ type: "fallback", from, to }` before switching. Omit ⇒ byte-identical. */
+  fallbackModels?: readonly string[]
   /** §1B. Reject a content part carrying more than this many **decoded** bytes (never the
    * +33% base64 string). Unset ⇒ no limit, as today. */
   maxPartBytes?: number
@@ -191,6 +205,35 @@ export async function llmHttpError(res: Response): Promise<LlmHttpError> {
   const body = res.status === 401 || res.status === 403 ? "" : redactErrorBody(raw)
   return new LlmHttpError(res.status, body, res.headers.get("retry-after") ?? undefined)
 }
+
+/** SPEC §7F.1 markers of a context-overflow rejection (matched lowercased). */
+const OVERFLOW_MARKERS = ["context_length_exceeded", "maximum context length", "prompt is too long", "prompt_too_long", "request_too_large", "context window"]
+
+/** SPEC §7F.1: true iff `status` is 400/413 AND the (redacted) body names a context overflow. */
+export function isContextOverflow(status: number, body: string): boolean {
+  if (status !== 400 && status !== 413) return false
+  const b = (body ?? "").toLowerCase()
+  return OVERFLOW_MARKERS.some((m) => b.includes(m))
+}
+
+/** SPEC §7F.1: reactive compaction could not make the prompt fit (breaker tripped, or the
+ *  `compactOnOverflow` hook made no progress). A failure, never a §10 pending. */
+export class ContextOverflowError extends Error {
+  readonly name = "ContextOverflowError"
+  constructor(
+    /** Reactive compactions in the current rapid chain (3 when the breaker tripped). */
+    readonly compactions: number,
+    /** Status of the last provider error. */
+    readonly status: number,
+    /** Redacted body of the last provider error (same redaction as `LlmHttpError`). */
+    readonly body: string,
+  ) {
+    super(`context overflow: ${compactions} reactive compaction(s) did not make the prompt fit`)
+  }
+}
+
+/** Per-run breaker counters for §7F.1. */
+interface OverflowState { okSince: number; streak: number }
 
 /** §8 Resilience. What to do with a failed LLM call. */
 export type ErrorTier = "retry" | "fail"
@@ -320,6 +363,23 @@ export interface Hooks {
   beforeTool?(ev: { name: string; args: Record<string, unknown>; id?: string; turn: number; hints?: ToolHints }): void | { args?: Record<string, unknown>; result?: ToolResult } | Promise<void | { args?: Record<string, unknown>; result?: ToolResult }>
   /** After a tool runs. Return { result } to replace the result. */
   afterTool?(ev: { name: string; args: Record<string, unknown>; result: ToolResult; id?: string; turn: number }): void | { result?: ToolResult } | Promise<void | { result?: ToolResult }>
+  /** At each round boundary (SPEC §8, #192): after a round's tool results (final=false), or when the
+   * model stopped with a turn remaining (final=true, text = its answer). Each `inject` string is
+   * appended as a user message; a non-empty inject on a final round CONTINUES the loop. */
+  afterRound?(ev: AfterRoundEvent): void | RoundInjection | Promise<void | RoundInjection>
+}
+
+/** The `afterRound` hook event. */
+export interface AfterRoundEvent {
+  turn: number
+  final: boolean
+  text: string
+  messages: any[]
+}
+
+/** What an `afterRound` hook may return. */
+export interface RoundInjection {
+  inject?: string[]
 }
 
 /** A tool call the model made, plus its result + metadata. */
@@ -399,9 +459,18 @@ export type StreamEvent =
   | { type: "thought"; delta: string; via?: "acp" }
   /** `via: "acp"` marks a tool the ACP agent ran itself: reported, never executed by the loop. */
   | { type: "tool_call"; id: string; name: string; args: Record<string, unknown>; via?: "call_tool" | "acp" }
+  /** An ACP agent's `tool_call_update` carrying `rawInput`: the call's arguments, known after
+   *  the initial `tool_call` (#188). Reported only; never executed by the loop. */
+  | { type: "tool_call_args"; id: string; name: string; args: Record<string, unknown>; via: "acp" }
   | { type: "tool_result"; id: string; name: string; output: string; isError: boolean; metadata?: Record<string, unknown>; via?: "call_tool" | "acp" }
   | { type: "usage"; usage: Usage }
+  /** Only with `fallbackModels`: switching from model `from` to `to` after overload (§8). */
+  | { type: "fallback"; from: string; to: string }
   | { type: "pending"; request: Request }
+  /** Emitted just before each LLM retry wait (streaming only). `attempt` is 1-based (the
+   *  failed zero-based attempt + 1), `max` the configured `retries`, `delayMs` the exact wait,
+   *  `status` the HTTP status (absent on a network error), `reason` "HTTP <status>" | "network". */
+  | { type: "retry"; attempt: number; max: number; delayMs: number; status?: number; reason: string }
   | { type: "done"; result: RunResult }
 
 function addUsage(acc: Usage, raw: any, style: ClientStyle): void {
@@ -717,17 +786,18 @@ export class Client {
 
     const signal = this.makeSignal(req.signal)
     try {
-      const data = await this.llmCallJson(
-        `${this.opts.baseUrl.replace(/\/$/, "")}/chat/completions`,
-        {
+      const r = await this.llmCallJson(
+        (m) => [`${this.opts.baseUrl.replace(/\/$/, "")}/chat/completions`, {
           method: "POST",
           headers: { "content-type": "application/json", authorization: `Bearer ${key}`, ...this.opts.headers },
-          body: JSON.stringify(this.finalizeBody(body)),
-        },
+          body: JSON.stringify(this.finalizeBody({ ...body, model: m })),
+        }],
         signal,
         "openai",
         turnModel,
       )
+      const data = r.data
+      turnModel = r.model
       if (this.opts.hooks?.afterLLM) await this.opts.hooks.afterLLM({ response: data, model: turnModel, turn: 0 })
       const usage: Usage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 }
       addUsage(usage, data.usage, "openai")
@@ -784,9 +854,8 @@ export class Client {
 
     const signal = this.makeSignal(req.signal)
     try {
-      const data = await this.llmCallJson(
-        endpoint,
-        {
+      const r = await this.llmCallJson(
+        (m) => [endpoint, {
           method: "POST",
           headers: {
             "content-type": "application/json",
@@ -794,12 +863,14 @@ export class Client {
             "anthropic-version": "2023-06-01",
             ...this.opts.headers,
           },
-          body: JSON.stringify(this.finalizeBody(body)),
-        },
+          body: JSON.stringify(this.finalizeBody({ ...body, model: m })),
+        }],
         signal,
         "anthropic",
         turnModel,
       )
+      const data = r.data
+      turnModel = r.model
       if (this.opts.hooks?.afterLLM) await this.opts.hooks.afterLLM({ response: data, model: turnModel, turn: 0 })
       const usage: Usage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 }
       addUsage(usage, data.usage, "anthropic")
@@ -948,7 +1019,19 @@ export class Client {
   /** fetch with retry + exponential backoff on the default retryable set (429/500/502/503/504/529)
    * plus network errors and anything `retryableStatuses` added, honoring Retry-After; aborts via signal.
    * The retry-vs-fail decision is the host's `onError` (default: retryable-within-budget ⇒ retry). */
-  private async llmFetch(url: string, init: RequestInit, signal: AbortSignal): Promise<Response> {
+  private async llmFetch(url: string, init: RequestInit, signal: AbortSignal, out?: { failed?: boolean }): Promise<Response> {
+    // Same loop as the streaming path; its retry events are simply dropped here.
+    const it = this.llmFetchEvents(url, init, signal, out)
+    for (;;) {
+      const r = await it.next()
+      if (r.done) return r.value
+    }
+  }
+
+  /** The retry loop behind `llmFetch`, as a generator: yields a `retry` StreamEvent just before
+   * each retry wait (its `delayMs` is the exact wait slept) and returns the final Response.
+   * The streaming generators consume it with `yield*`. */
+  private async *llmFetchEvents(url: string, init: RequestInit, signal: AbortSignal, out?: { failed?: boolean }): AsyncGenerator<StreamEvent, Response, unknown> {
     const retries = this.opts.retries ?? 2
     const base = this.opts.retryBaseMs ?? 500
     // Default classifier = today's behavior, expressed as an onError. A "retry" is always
@@ -956,25 +1039,77 @@ export class Client {
     const classify = this.opts.onError ?? ((info: ErrorInfo): ErrorTier => (info.retryable ? "retry" : "fail"))
     let lastErr: unknown
     for (let attempt = 0; attempt <= retries; attempt++) {
+      let res: Response
       try {
-        const res = await (this.opts.fetch ?? (await defaultFetch()))(url, { ...init, signal })
-        if (res.ok) return res
-        const retryable = isRetryableStatus(res.status, this.opts.retryableStatuses)
-        const tier = classify({ status: res.status, attempt, retryable })
-        if (tier === "fail" || attempt === retries) return res // caller surfaces the non-ok status
-        const ra = retryAfterMs(res.headers.get("retry-after"))
-        // `?? `, not `|| `: Retry-After: 0 means "retry now", not "no opinion".
-        await delay(ra ?? base * 2 ** attempt + Math.random() * 100, signal)
+        res = await (this.opts.fetch ?? (await defaultFetch()))(url, { ...init, signal })
       } catch (e) {
         if (signal.aborted) throw e // abort/timeout: don't retry
         lastErr = e
         const tier = classify({ error: e, attempt, retryable: true })
         if (tier === "fail" || attempt === retries) throw e
-        await delay(base * 2 ** attempt + Math.random() * 100, signal)
+        const wait = base * 2 ** attempt + Math.random() * 100
+        yield { type: "retry", attempt: attempt + 1, max: retries, delayMs: wait, reason: "network" }
+        await delay(wait, signal)
+        continue
       }
+      if (res.ok) return res
+      let retryable = isRetryableStatus(res.status, this.opts.retryableStatuses)
+      // The provider's own verdict wins over the status set (SPEC 8 x-should-retry).
+      const sr = res.headers.get("x-should-retry")?.trim().toLowerCase()
+      if (sr === "true") retryable = true
+      else if (sr === "false") retryable = false
+      const tier = classify({ status: res.status, attempt, retryable })
+      if (tier === "fail" || attempt === retries) {
+        if (out) out.failed = tier === "fail"
+        return res // caller surfaces the non-ok status
+      }
+      const ra = retryAfterMs(res.headers.get("retry-after"))
+      // `?? `, not `|| `: Retry-After: 0 means "retry now", not "no opinion".
+      const wait = ra ?? base * 2 ** attempt + Math.random() * 100
+      yield { type: "retry", attempt: attempt + 1, max: retries, delayMs: wait, status: res.status, reason: `HTTP ${res.status}` }
+      await delay(wait, signal)
     }
     throw lastErr
   }
+
+  /** §8 fallbackModels: the per-call model chain — [turnModel, ...fallbackModels], empty and
+   * duplicate entries skipped; just [turnModel] when the option is absent or the kill switch is set. */
+  private modelChain(turnModel: string): string[] {
+    const fb = this.opts.fallbackModels
+    if (!fb || fb.length === 0) return [turnModel]
+    const kill = (typeof process !== "undefined" ? process.env?.TOOLNEXUS_DISABLE_MODEL_FALLBACK : undefined)?.trim().toLowerCase()
+    if (kill === "1" || kill === "true") return [turnModel]
+    const chain: string[] = [turnModel]
+    for (const m of fb) if (m && !chain.includes(m)) chain.push(m)
+    return chain
+  }
+
+  /** llmFetch over the model chain: each model spends the full retry budget; only a budget that
+   * ends on 503/529 (not an onError "fail") advances to the next model. Returns the response and
+   * the model that produced it. `build` rebuilds the same request for a model. */
+  private async llmFetchChain(model: string, build: (m: string) => [string, RequestInit], signal: AbortSignal): Promise<{ res: Response; model: string }> {
+    const it = this.llmFetchChainEvents(model, build, signal)
+    for (;;) {
+      const r = await it.next()
+      if (r.done) return r.value
+    }
+  }
+
+  /** The fallback chain as a generator for the streaming loops: the #189 `retry` events of each
+   * model's attempts and a `fallback` event at each switch reach the stream as they happen. */
+  private async *llmFetchChainEvents(model: string, build: (m: string) => [string, RequestInit], signal: AbortSignal): AsyncGenerator<StreamEvent, { res: Response; model: string }, unknown> {
+    const chain = this.modelChain(model)
+    for (let i = 0; ; i++) {
+      const m = chain[i]
+      const [url, init] = build(m)
+      const out: { failed?: boolean } = {}
+      const res = yield* this.llmFetchEvents(url, init, signal, out)
+      if (res.ok || out.failed || i + 1 >= chain.length || (res.status !== 503 && res.status !== 529)) return { res, model: m }
+      try { await res.body?.cancel() } catch { /* ignore */ }
+      yield { type: "fallback", from: m, to: chain[i + 1] }
+    }
+  }
+
 
   /** Run one tool through beforeTool/afterTool hooks (mutate args, short-circuit, transform result). */
   private async runTool(toolkit: Toolkit | undefined, name: string, args: Record<string, unknown>, id: string | undefined, turn: number, signal?: AbortSignal) {
@@ -1122,18 +1257,58 @@ export class Client {
   }
 
   /** One non-streaming LLM call, with an `llm` metric event (ok/error + per-call tokens + ms). */
-  private async llmCallJson(url: string, init: RequestInit, signal: AbortSignal, style: ClientStyle, model: string): Promise<any> {
+  private async llmCallJson(build: (m: string) => [string, RequestInit], signal: AbortSignal, style: ClientStyle, turnModel: string): Promise<{ data: any; model: string }> {
     const t0 = Date.now()
+    let model = turnModel
     try {
-      const res = await this.llmFetch(url, init, signal)
+      const r = await this.llmFetchChain(turnModel, build, signal)
+      model = r.model
+      const res = r.res
       if (!res.ok) throw await llmHttpError(res)
       const data: any = await res.json()
       const tok = perCall(data.usage, style)
       this.emit({ event: "llm", model, status: "ok", ms: Date.now() - t0, promptTokens: tok.prompt, completionTokens: tok.completion })
-      return data
+      return { data, model }
     } catch (e) {
       this.emit({ event: "llm", model, status: "error", ms: Date.now() - t0, promptTokens: 0, completionTokens: 0 })
       throw e
+    }
+  }
+
+  /**
+   * SPEC §7F.1: one LLM call with reactive compaction. `call(messages)` makes the request and
+   * throws on a non-2xx (as `LlmHttpError`). On a context overflow with `compactOnOverflow` set,
+   * the hook compacts and the SAME turn is re-sent (no beforeLLM, no turn consumed), guarded by
+   * the rapid-refill breaker. Returns the call's value and the (possibly compacted) transcript.
+   */
+  private async callWithOverflow<T>(st: OverflowState, ev: BeforeLLMEvent, call: (messages: any[]) => Promise<T>): Promise<{ value: T; messages: any[] }> {
+    const it = this.callWithOverflowEvents(st, ev, async function* (m: any[]) { return await call(m) })
+    for (;;) {
+      const r = await it.next()
+      if (r.done) return r.value
+    }
+  }
+
+  /** `callWithOverflow` for the streaming loops: `call` is a generator so the #189 `retry` events
+   * of every attempt (including one after a compaction) still reach the stream before each wait. */
+  private async *callWithOverflowEvents<T>(st: OverflowState, ev: BeforeLLMEvent, call: (messages: any[]) => AsyncGenerator<StreamEvent, T, unknown>): AsyncGenerator<StreamEvent, { value: T; messages: any[] }, unknown> {
+    let messages = ev.messages
+    for (;;) {
+      try {
+        const value = yield* call(messages)
+        st.okSince++
+        return { value, messages }
+      } catch (e) {
+        const hook = this.opts.compactOnOverflow
+        if (!hook || !(e instanceof LlmHttpError) || !isContextOverflow(e.status, e.body)) throw e
+        if (!(st.streak > 0 && st.okSince < 2)) st.streak = 0
+        if (st.streak === 3) throw new ContextOverflowError(3, e.status, e.body)
+        const ov = await hook({ messages, tools: ev.tools, model: ev.model, turn: ev.turn })
+        if (!ov?.messages || ov.messages.length >= messages.length) throw new ContextOverflowError(st.streak, e.status, e.body)
+        messages = ov.messages
+        st.streak++
+        st.okSince = 0
+      }
     }
   }
 
@@ -1175,6 +1350,38 @@ export class Client {
     }
   }
 
+  /**
+   * §8 stop-reason recovery: classify the response just appended to `messages` and, when a rule
+   * fires, remove (or keep) that assistant message, append the pinned user message, and return
+   * true — the caller then takes another turn. Never on the last permitted turn.
+   */
+  private recover(rs: Recovery | undefined, turn: number, messages: any[], hasCalls: boolean, malformed: boolean, truncated: boolean, text: string): boolean {
+    if (!rs || turn >= (this.opts.maxTurns ?? 10) - 1) return false
+    let msg: string
+    if (hasCalls) {
+      if (!malformed || rs.corrected) return false
+      rs.corrected = true
+      messages.pop()
+      msg = CORRECTIVE
+    } else if (truncated) {
+      if (rs.continues >= 3) return false
+      rs.continues++
+      rs.carry += text
+      msg = CONTINUE
+    } else {
+      if (text.trim() !== "" || rs.nudged) return false
+      rs.nudged = true
+      messages.pop()
+      msg = NUDGE
+    }
+    messages.push({ role: "user", content: msg })
+    return true
+  }
+
+  private newRecovery(): Recovery | undefined {
+    return this.opts.stopRecovery ? { nudged: false, continues: 0, corrected: false, carry: "" } : undefined
+  }
+
   // ---- OpenAI-style: POST {baseUrl}/chat/completions ----
   private async runOpenAIWithSignal(signal: AbortSignal, prompt: PromptInput, toolkit: Toolkit | undefined, history?: any[], onInterrupt?: OnInterrupt): Promise<RunResult> {
     const key = resolveKey(this.opts)
@@ -1193,6 +1400,8 @@ export class Client {
     let lastModel = this.opts.model
     // Results finished in the current tool phase, by call id — what an interrupted save keeps.
     const done = new Map<string, ToolResult>()
+    const rs = this.newRecovery()
+    const overflow: OverflowState = { okSince: 0, streak: 0 }
 
     try {
       for (let turn = 0; turn < (this.opts.maxTurns ?? 10); turn++) {
@@ -1205,17 +1414,27 @@ export class Client {
           if (ov?.model) turnModel = ov.model
         }
         lastModel = turnModel
-        const data: any = await this.llmCallJson(`${this.opts.baseUrl.replace(/\/$/, "")}/chat/completions`, {
+        const sent = await this.callWithOverflow(overflow, { messages, tools, model: turnModel, turn }, (msgs) => this.llmCallJson((m) => [`${this.opts.baseUrl.replace(/\/$/, "")}/chat/completions`, {
           method: "POST",
           headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json", ...this.opts.headers },
-          body: JSON.stringify(this.openaiBody(messages, tools, false, turnModel)),
-        }, signal, "openai", turnModel)
+          body: JSON.stringify(this.openaiBody(msgs, tools, false, m)),
+        }], signal, "openai", turnModel))
+        messages = sent.messages
+        const data: any = sent.value.data
+        turnModel = lastModel = sent.value.model
         addUsage(usage, data.usage, "openai")
         if (this.opts.hooks?.afterLLM) await this.opts.hooks.afterLLM({ response: data, model: turnModel, turn })
         const msg = data.choices[0].message
         messages.push(msg)
         const calls = msg.tool_calls ?? []
-        if (calls.length === 0) return this.endRun(runStart, lastModel, msg.content ?? "", messages, toolCalls, turns, usage)
+        if (this.recover(rs, turn, messages, calls.length > 0, calls.some((c: any) => malformedArgs(c.function?.arguments)),
+          data.choices[0].finish_reason === "length", typeof msg.content === "string" ? msg.content : "")) continue
+        if (calls.length === 0) {
+          const text = (rs?.carry ?? "") + (msg.content ?? "")
+          if (await this.roundEnd(messages, turn, true, text)) { if (rs) rs.carry = ""; continue }
+          return this.endRun(runStart, lastModel, text, messages, toolCalls, turns, usage)
+        }
+        if (rs) rs.carry = ""
         // execute all tool calls in this turn concurrently (true parallel tool calling)
         done.clear()
         const settled = await untilAborted(signal, this.schedule(toolkit,
@@ -1240,6 +1459,7 @@ export class Client {
           messages.push(toolMessage(s.call.id, s.call.function.name, s.result))
           if (s.halted) return this.pendingRun(runStart, lastModel, s.halted, messages, toolCalls, turns, usage)
         }
+        await this.roundEnd(messages, turn, false, "")
       }
       return this.endRun(runStart, lastModel, lastText(messages), messages, toolCalls, turns, usage, true)
     } catch (e) {
@@ -1247,6 +1467,20 @@ export class Client {
       onInterrupt?.(interruptedTranscript(messages, this.opts.style === "anthropic", done))
       throw e
     }
+  }
+
+  /** §8 afterRound: fire the round-boundary hook and append its injections as user messages.
+   * Returns true when something was appended. A final round fires only when a turn remains. */
+  private async roundEnd(messages: any[], turn: number, final: boolean, text: string): Promise<boolean> {
+    const h = this.opts.hooks?.afterRound
+    if (!h) return false
+    if (final && turn + 1 >= (this.opts.maxTurns ?? 10)) return false
+    const out = await h({ turn, final, text, messages })
+    let added = false
+    for (const m of out?.inject ?? []) {
+      if (typeof m === "string" && m !== "") { messages.push({ role: "user", content: m }); added = true }
+    }
+    return added
   }
 
   private result(model: string, text: string, messages: any[], toolCalls: ToolCallRecord[], turns: number, usage: Usage, exhausted = false): RunResult {
@@ -1304,6 +1538,8 @@ export class Client {
     let lastModel = this.opts.model
     // Results finished in the current tool phase, by call id — what an interrupted save keeps.
     const done = new Map<string, ToolResult>()
+    const rs = this.newRecovery()
+    const overflow: OverflowState = { okSince: 0, streak: 0 }
 
     try {
       for (let turn = 0; turn < (this.opts.maxTurns ?? 10); turn++) {
@@ -1316,7 +1552,7 @@ export class Client {
           if (ov?.model) turnModel = ov.model
         }
         lastModel = turnModel
-        const data: any = await this.llmCallJson(endpoint, {
+        const sent = await this.callWithOverflow(overflow, { messages, tools, model: turnModel, turn }, (msgs) => this.llmCallJson((m) => [endpoint, {
           method: "POST",
           headers: {
             "x-api-key": key,
@@ -1324,21 +1560,29 @@ export class Client {
             "Content-Type": "application/json",
             ...this.opts.headers,
           },
-          body: JSON.stringify(this.anthropicBody(system, messages, tools, false, turnModel)),
-        }, signal, "anthropic", turnModel)
+          body: JSON.stringify(this.anthropicBody(system, msgs, tools, false, m)),
+        }], signal, "anthropic", turnModel))
+        messages = sent.messages
+        const data: any = sent.value.data
+        turnModel = lastModel = sent.value.model
         addUsage(usage, data.usage, "anthropic")
         if (this.opts.hooks?.afterLLM) await this.opts.hooks.afterLLM({ response: data, model: turnModel, turn })
         messages.push({ role: "assistant", content: data.content })
         const uses = (data.content ?? []).filter((b: any) => b.type === "tool_use")
+        const text = (data.content ?? []).filter((b: any) => b.type === "text").map((b: any) => b.text).join("")
+        if (this.recover(rs, turn, messages, uses.length > 0, uses.some((u: any) => u.input !== undefined && !isObj(u.input)),
+          data.stop_reason === "max_tokens", text)) continue
         if (uses.length === 0) {
-          const text = (data.content ?? []).filter((b: any) => b.type === "text").map((b: any) => b.text).join("")
-          return this.endRun(runStart, lastModel, text, messages, toolCalls, turns, usage)
+          const full = (rs?.carry ?? "") + text
+          if (await this.roundEnd(messages, turn, true, full)) { if (rs) rs.carry = ""; continue }
+          return this.endRun(runStart, lastModel, full, messages, toolCalls, turns, usage)
         }
+        if (rs) rs.carry = ""
         // execute all tool_use blocks in this turn concurrently (true parallel tool calling)
         done.clear()
         const settled = await untilAborted(signal, this.schedule(toolkit,
-          uses, (use: any) => [use.name, use.input ?? {}], async (use: any) => {
-            let { args, result } = await this.runTool(toolkit, use.name, use.input ?? {}, use.id, turn, signal)
+          uses, (use: any) => [use.name, objArgs(use.input)], async (use: any) => {
+            let { args, result } = await this.runTool(toolkit, use.name, objArgs(use.input), use.id, turn, signal)
             let halted: Request | undefined
             const req = pendingOf(result)
             if (req) {
@@ -1362,6 +1606,7 @@ export class Client {
         }
         messages.push({ role: "user", content })
         if (halted) return this.pendingRun(runStart, lastModel, halted, messages, toolCalls, turns, usage)
+        await this.roundEnd(messages, turn, false, "")
       }
       return this.endRun(runStart, lastModel, "", messages, toolCalls, turns, usage, true)
     } catch (e) {
@@ -1389,6 +1634,8 @@ export class Client {
     let lastModel = this.opts.model
     // Results finished in the current tool phase, by call id — what an interrupted save keeps.
     const done = new Map<string, ToolResult>()
+    const rs = this.newRecovery()
+    const overflow: OverflowState = { okSince: 0, streak: 0 }
 
     try {
       for (let turn = 0; turn < (this.opts.maxTurns ?? 10); turn++) {
@@ -1404,14 +1651,22 @@ export class Client {
         const t0 = Date.now()
         const beforeP = usage.promptTokens, beforeC = usage.completionTokens
         let content = ""
+        let finish = ""
         const acc = new Map<number, { id: string; name: string; args: string }>()
         try {
-          const res = await this.llmFetch(`${this.opts.baseUrl.replace(/\/$/, "")}/chat/completions`, {
-            method: "POST",
-            headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json", ...this.opts.headers },
-            body: JSON.stringify(this.openaiBody(messages, tools, true, turnModel)),
-          }, signal)
-          if (!res.ok || !res.body) throw await llmHttpError(res)
+          const sent = yield* this.callWithOverflowEvents(overflow, { messages, tools, model: turnModel, turn }, (msgs) => (async function* (self: Client) {
+            const r = yield* self.llmFetchChainEvents(turnModel, (m) => [`${self.opts.baseUrl.replace(/\/$/, "")}/chat/completions`, {
+              method: "POST",
+              headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json", ...self.opts.headers },
+              body: JSON.stringify(self.openaiBody(msgs, tools, true, m)),
+            }], signal)
+            if (!r.res.ok || !r.res.body) throw await llmHttpError(r.res)
+            return r
+          })(this))
+          messages = sent.messages
+          const res = sent.value.res
+          turnModel = lastModel = sent.value.model
+          if (!res.body) throw await llmHttpError(res)
           for await (const line of sseLines(res.body)) {
             if (!line.startsWith("data:")) continue
             const payload = line.slice(5).trim()
@@ -1427,6 +1682,7 @@ export class Client {
             if (j?.usage) addUsage(usage, j.usage, "openai")
             const choice = j?.choices?.[0]
             const d = choice?.delta
+            if (choice?.finish_reason) finish = choice.finish_reason
             if (d?.content) { content += d.content; yield { type: "text", delta: d.content } }
             for (const tc of d?.tool_calls ?? []) {
               const slot = acc.get(tc.index) ?? { id: "", name: "", args: "" }
@@ -1444,13 +1700,17 @@ export class Client {
         if (this.opts.hooks?.afterLLM) await this.opts.hooks.afterLLM({ response: { streamed: true, usage }, model: turnModel, turn })
 
         const calls = [...acc.values()]
+        messages.push(calls.length === 0
+          ? { role: "assistant", content }
+          : { role: "assistant", content: content || null, tool_calls: calls.map((c) => ({ id: c.id, type: "function", function: { name: c.name, arguments: c.args } })) })
+        if (this.recover(rs, turn, messages, calls.length > 0, calls.some((c) => malformedArgs(c.args)), finish === "length", content)) continue
         if (calls.length === 0) {
-          messages.push({ role: "assistant", content })
+          if (await this.roundEnd(messages, turn, true, (rs?.carry ?? "") + content)) { if (rs) rs.carry = ""; continue }
           yield { type: "usage", usage }
-          yield { type: "done", result: this.endRun(runStart, lastModel, content, messages, toolCalls, turns, usage) }
+          yield { type: "done", result: this.endRun(runStart, lastModel, (rs?.carry ?? "") + content, messages, toolCalls, turns, usage) }
           return
         }
-        messages.push({ role: "assistant", content: content || null, tool_calls: calls.map((c) => ({ id: c.id, type: "function", function: { name: c.name, arguments: c.args } })) })
+        if (rs) rs.carry = ""
         for (const c of calls) yield this.callEvent(c.id, c.name, safeJson(c.args))
         done.clear()
         const settled = await untilAborted(signal, this.schedule(toolkit, calls, (c) => [c.name, safeJson(c.args)], async (c) => {
@@ -1477,6 +1737,7 @@ export class Client {
           messages.push(toolMessage(c.id, c.name, result))
           yield this.resultEvent(c.id, c.name, safeJson(c.args), result)
         }
+        await this.roundEnd(messages, turn, false, "")
       }
       yield { type: "done", result: this.endRun(runStart, lastModel, lastText(messages), messages, toolCalls, turns, usage, true) }
     } catch (e) {
@@ -1502,6 +1763,8 @@ export class Client {
     let lastModel = this.opts.model
     // Results finished in the current tool phase, by call id — what an interrupted save keeps.
     const done = new Map<string, ToolResult>()
+    const rs = this.newRecovery()
+    const overflow: OverflowState = { okSince: 0, streak: 0 }
 
     try {
       for (let turn = 0; turn < (this.opts.maxTurns ?? 10); turn++) {
@@ -1519,12 +1782,19 @@ export class Client {
         const blocks = new Map<number, { type: string; text?: string; id?: string; name?: string; json?: string }>()
         let stopReason = ""
         try {
-          const res = await this.llmFetch(endpoint, {
-            method: "POST",
-            headers: { "x-api-key": key, "anthropic-version": "2023-06-01", "Content-Type": "application/json", ...this.opts.headers },
-            body: JSON.stringify(this.anthropicBody(system, messages, tools, true, turnModel)),
-          }, signal)
-          if (!res.ok || !res.body) throw await llmHttpError(res)
+          const sent = yield* this.callWithOverflowEvents(overflow, { messages, tools, model: turnModel, turn }, (msgs) => (async function* (self: Client) {
+            const r = yield* self.llmFetchChainEvents(turnModel, (m) => [endpoint, {
+              method: "POST",
+              headers: { "x-api-key": key, "anthropic-version": "2023-06-01", "Content-Type": "application/json", ...self.opts.headers },
+              body: JSON.stringify(self.anthropicBody(system, msgs, tools, true, m)),
+            }], signal)
+            if (!r.res.ok || !r.res.body) throw await llmHttpError(r.res)
+            return r
+          })(this))
+          messages = sent.messages
+          const res = sent.value.res
+          turnModel = lastModel = sent.value.model
+          if (!res.body) throw await llmHttpError(res)
           for await (const line of sseLines(res.body)) {
             if (!line.startsWith("data:")) continue
             const j = safeParse(line.slice(5).trim())
@@ -1547,12 +1817,17 @@ export class Client {
         const content = [...blocks.values()].map((b) => b.type === "tool_use" ? { type: "tool_use", id: b.id, name: b.name, input: safeJson(b.json || "{}") } : { type: "text", text: b.text })
         messages.push({ role: "assistant", content })
         const uses = content.filter((b: any) => b.type === "tool_use")
-        if (stopReason !== "tool_use" || uses.length === 0) {
-          const text = content.filter((b: any) => b.type === "text").map((b: any) => b.text).join("")
+        const hasCalls = stopReason === "tool_use" && uses.length > 0
+        const text = content.filter((b: any) => b.type === "text").map((b: any) => b.text).join("")
+        if (this.recover(rs, turn, messages, hasCalls, [...blocks.values()].some((b) => b.type === "tool_use" && malformedArgs(b.json)),
+          stopReason === "max_tokens", text)) continue
+        if (!hasCalls) {
+          if (await this.roundEnd(messages, turn, true, (rs?.carry ?? "") + text)) { if (rs) rs.carry = ""; continue }
           yield { type: "usage", usage }
-          yield { type: "done", result: this.endRun(runStart, lastModel, text, messages, toolCalls, turns, usage) }
+          yield { type: "done", result: this.endRun(runStart, lastModel, (rs?.carry ?? "") + text, messages, toolCalls, turns, usage) }
           return
         }
+        if (rs) rs.carry = ""
         for (const u of uses as any[]) yield this.callEvent(u.id, u.name, u.input)
         done.clear()
         const settled = await untilAborted(signal, this.schedule(toolkit, uses as any[], (u: any) => [u.name, u.input ?? {}], async (u: any) => {
@@ -1582,6 +1857,7 @@ export class Client {
           yield this.resultEvent(u.id, u.name, u.input, result)
         }
         messages.push({ role: "user", content: results })
+        await this.roundEnd(messages, turn, false, "")
       }
       yield { type: "done", result: this.endRun(runStart, lastModel, "", messages, toolCalls, turns, usage, true) }
     } catch (e) {
@@ -1874,12 +2150,29 @@ function safeParse(s: string): any {
   }
 }
 
+const NUDGE = "Your previous response contained no answer. Continue and give your answer."
+const CONTINUE = "Your previous response was cut off at the output token limit. Continue exactly where it stopped, without repeating anything."
+const CORRECTIVE = "Your previous tool call could not be used: its arguments were not a valid JSON object. Call the tool again with arguments that are a single valid JSON object matching its input schema."
+
+/** Per-run budgets + carried text of §8 stop-reason recovery. */
+interface Recovery { nudged: boolean; continues: number; corrected: boolean; carry: string }
+
+function isObj(v: unknown): boolean {
+  return typeof v === "object" && v !== null && !Array.isArray(v)
+}
+
+/** A raw argument string that is non-empty (trimmed) and not a JSON object (§8). */
+function malformedArgs(s: unknown): boolean {
+  return typeof s === "string" && s.trim() !== "" && !isObj(safeParse(s))
+}
+
+/** Tool-call arguments as an object: anything that is not a JSON object becomes `{}` (§8). */
 function safeJson(s: string): Record<string, unknown> {
-  try {
-    return JSON.parse(s || "{}")
-  } catch {
-    return {}
-  }
+  return objArgs(safeParse(s || "{}"))
+}
+
+function objArgs(v: unknown): Record<string, unknown> {
+  return isObj(v) ? (v as Record<string, unknown>) : {}
 }
 
 /**

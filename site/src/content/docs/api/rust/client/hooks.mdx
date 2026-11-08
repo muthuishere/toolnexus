@@ -218,6 +218,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 c3[3].fetch_add(1, Ordering::SeqCst);
                 Box::pin(async { Ok(None) }) // observe only
             })),
+            after_round: None,
         },
         ..Default::default()
     });

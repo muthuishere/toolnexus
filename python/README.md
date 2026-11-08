@@ -107,6 +107,10 @@ tools array (so the cached prefix) never changes. Under anthropic the real conte
   (call `BackgroundShells.close_all()` on shutdown). `grep` takes `context` / `before` / `after`;
   `read` and `grep` report truncation in `metadata`.
 - `compactor(..., on_compact=fn)` gets a `CompactInfo` after each compaction.
+- `create_client(compact_on_overflow=compactor(...))` — when the provider rejects the prompt as
+  too long (`is_context_overflow(status, body)`), compact with a tighter budget and re-send the
+  same turn; 3 compactions in a row that did not buy two successful calls each raise
+  `ContextOverflowError` (SPEC §7F.1). Absent, the overflow surfaces unchanged.
 - `agent.as_tool_with(lambda ctx: {"hooks": ..., "wait_for": ...})` runs a sub-agent under the
   parent's gates; `ctx.call_id` tells concurrent tool calls apart.
 

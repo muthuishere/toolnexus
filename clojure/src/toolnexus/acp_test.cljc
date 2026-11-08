@@ -165,6 +165,20 @@
   (fake-chunk! ctx sid "agent_message_chunk" "drip-3")
   (fake-reply! ctx id {:stopReason "end_turn"}))
 
+(defn- fake-handle-tool-update!
+  "conformance/acp-client stream.acpToolUpdate (#188): the case's updates in
+  order (the final agent_message_chunk included), then end_turn."
+  [ctx id sid]
+  (doseq [u [{:sessionUpdate "tool_call" :toolCallId "t1" :title "Write" :kind "edit" :status "pending"}
+             {:sessionUpdate "tool_call_update" :toolCallId "t1" :status "in_progress"
+              :title "Write /tmp/a.txt" :rawInput {:file_path "/tmp/a.txt" :content "hi"}}
+             {:sessionUpdate "tool_call_update" :toolCallId "t1" :status "in_progress"}
+             {:sessionUpdate "tool_call_update" :toolCallId "t1" :status "completed"
+              :content [{:type "content" :content {:type "text" :text "wrote"}}]}]]
+    (fake-notify! ctx "session/update" {:sessionId sid :update u}))
+  (fake-chunk! ctx sid "agent_message_chunk" "done")
+  (fake-reply! ctx id {:stopReason "end_turn"}))
+
 (defn- fake-handle-fs-request!
   "conformance/acp-client unknownRequest: ask the client for something it does
   not implement, record the answer, then finish the turn with \"ok\"."
@@ -179,6 +193,7 @@
 (defn- fake-handle-prompt! [scenario ctx id sid text]
   (cond
     (= "1" (env/get-env "TN_FAKE_DRIP"))       (fake-handle-drip! ctx id sid)
+    (= "1" (env/get-env "TN_FAKE_TOOLUPDATE")) (fake-handle-tool-update! ctx id sid)
     (= "1" (env/get-env "TN_FAKE_FS_REQUEST")) (fake-handle-fs-request! ctx id sid)
     :else
   (case scenario
@@ -242,14 +257,19 @@
 
                 (= "session/set_model" (:method msg))
                 (do (fake-emit! ctx {:type "session/set_model" :data (:params msg)})
-                    (fake-reply! ctx (:id msg) {}))
+                    (if (= "1" (env/get-env "TN_FAKE_NO_SET_MODEL"))
+                      (fake-reply-err! ctx (:id msg) -32601 "method not found")
+                      (fake-reply! ctx (:id msg) {})))
 
                 (= "session/new" (:method msg))
                 (do (fake-emit! ctx {:type "session/new" :data (:params msg)})
                     (fake-reply! ctx (:id msg) {:sessionId "sess-1"}))
 
                 (= "session/set_mode" (:method msg))
-                (fake-reply! ctx (:id msg) {})
+                (do (fake-emit! ctx {:type "session/set_mode" :data (:params msg)})
+                    (if (= "1" (env/get-env "TN_FAKE_REJECT_MODE"))
+                      (fake-reply-err! ctx (:id msg) -32602 "unknown mode")
+                      (fake-reply! ctx (:id msg) {})))
 
                 (= "session/prompt" (:method msg))
                 (let [params (:params msg)
@@ -542,6 +562,24 @@
         (is (= (:expectDoneText cs) (:text (client/run c "again" {:toolkit tk})))))
       (finally (acp/close a)))))
 
+(deftest conformance-stream-acp-tool-update
+  (let [cs  (get-in (cases) [:stream :acpToolUpdate])
+        a   (connect-with! (:fakeEnv cs) {})
+        c   (client/create-in-process-client {:model "m" :generate-stream (acp/generate-stream a)})
+        evs (atom [])]
+    (try
+      (let [r     (client/run c "q" {:toolkit (toolnexus/build {:builtins false})
+                                     :on-event #(swap! evs conj %)})
+            tools (filterv #(contains? #{"tool_call" "tool_call_args" "tool_result"} (:type %)) @evs)
+            got   (mapv (fn [e]
+                          (if (= "tool_call" (:type e))
+                            (select-keys e [:type :id :name :via])
+                            (select-keys e [:type :id :name :args :output :isError :via])))
+                        tools)]
+        (is (= (:expectEvents cs) got))
+        (is (= (:expectDoneText cs) (:text (:result (last @evs))) (:text r))))
+      (finally (acp/close a)))))
+
 (deftest conformance-passthrough
   (let [cs  (:passthrough (cases))
         o   (:options cs)
@@ -652,3 +690,46 @@
     (when (:afterCloseRefused cs)
       ;; koine answers a refused connection with no :status (or a throw)
       (is (nil? (try (:status (post url auth)) (catch Throwable _ nil)))))))
+
+(deftest conformance-live-switch
+  (let [cs (:liveSwitch (cases))]
+    (testing "set-mode! / set-model! on a running client, no restart"
+      (let [out (str (fs/temp-dir! "acp") "/events.ndjson")
+            a   (connect-with! {} {} :out-file out)]
+        (is (:ok (acp/set-mode! a (:mode cs))))
+        (is (:ok (acp/set-model! a (:model cs))))
+        (is (:ok (acp/prompt a "q")))
+        (acp/close a)
+        (let [sm  (:data (first (events-of out "session/set_mode")))
+              sco (:data (first (events-of out "session/set_config_option")))]
+          (is (= (:expectSetMode cs) (select-keys sm [:modeId])))
+          (is (= "sess-1" (:sessionId sm) (:sessionId sco)))
+          (is (= (:expectSetConfigOption cs) (select-keys sco [:configId :value])))
+          (is (= (:expectInitializeCount cs) (count (events-of out "initialize"))))
+          (is (= (:expectSessionNewCount cs) (count (events-of out "session/new")))))))
+    (testing "set-model! falls back to set_model"
+      (let [fb  (:fallback cs)
+            out (str (fs/temp-dir! "acp") "/events.ndjson")
+            a   (connect-with! (:fakeEnv fb) {} :out-file out)]
+        (is (:ok (acp/set-model! a (:model cs))))
+        (acp/close a)
+        (is (= (:expectSetModel fb)
+               (select-keys (:data (first (events-of out "session/set_model"))) [:modelId])))))
+    (testing "both model requests rejected: error, client still usable"
+      (let [a (connect-with! {"TN_FAKE_NO_CONFIG_OPTION" "1" "TN_FAKE_NO_SET_MODEL" "1"} {})]
+        (is (= 2 (count (:error (acp/set-model! a "m-2")))))
+        (is (:ok (acp/prompt a "q")))
+        (acp/close a)))
+    (testing "rejected mode fails only that call"
+      (let [rj (:reject cs)
+            a  (connect-with! (:fakeEnv rj) {})
+            r  (acp/set-mode! a (:mode cs))]
+        (is (:error r))
+        (is (str/includes? (str (:message r)) (:expectErrorContains rj)))
+        (is (:ok (acp/prompt a "q")))
+        (acp/close a)))
+    (testing "closed client refuses"
+      (let [a (connect-with! {} {})]
+        (acp/close a)
+        (is (:error (acp/set-mode! a "plan")))
+        (is (:error (acp/set-model! a "m")))))))
