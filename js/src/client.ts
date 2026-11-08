@@ -960,7 +960,7 @@ export class Client {
     let lastErr: unknown
     for (let attempt = 0; attempt <= retries; attempt++) {
       try {
-        const res = await (this.opts.fetch ?? fetch)(url, { ...init, signal })
+        const res = await (this.opts.fetch ?? (await defaultFetch()))(url, { ...init, signal })
         if (res.ok) return res
         const retryable = isRetryableStatus(res.status, this.opts.retryableStatuses)
         const tier = classify({ status: res.status, attempt, retryable })
@@ -1957,4 +1957,22 @@ function lastText(messages: any[]): string {
     if (messages[i].role === "assistant" && typeof messages[i].content === "string") return messages[i].content
   }
   return ""
+}
+
+/** The default LLM transport. On Node it is the keep-alive `node:http` transport in
+ * `nodefetch.ts` (loaded lazily so this module stays free of `node:` imports for browser
+ * bundles); on Bun, Deno, browsers, or if loading fails, it is the platform `fetch`. A
+ * caller-supplied `fetch` option always wins and never reaches here. */
+const platformFetch = globalThis.fetch
+let defaultFetchP: Promise<typeof fetch> | undefined
+function defaultFetch(): Promise<typeof fetch> {
+  // A host that replaced the global fetch (a stub, a proxy wrapper) keeps it.
+  if (globalThis.fetch !== platformFetch) return Promise.resolve(globalThis.fetch)
+  const g = globalThis as { Bun?: unknown; Deno?: unknown; process?: { versions?: { node?: string } } }
+  const onNode = !!g.process?.versions?.node && !g.Bun && !g.Deno
+  if (!onNode) return Promise.resolve((input, init) => globalThis.fetch(input, init))
+  return (defaultFetchP ??= import("./nodefetch.js").then(
+    (m) => m.nodeFetch,
+    () => (input: Parameters<typeof fetch>[0], init?: RequestInit) => globalThis.fetch(input, init),
+  ))
 }

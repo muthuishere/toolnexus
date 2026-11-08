@@ -40,14 +40,18 @@ pub enum ClassifierWire {
     /// `POST {base_url}` with `{model, input:{state, questions, images?}}`,
     /// reply `{success, result}`.
     Cloudflare,
+    /// `POST {base_url}/decisions` (OpenAI Decisions API): `{model, input,
+    /// questions:[…]}`, answers by position (issue #157).
+    Decisions,
 }
 
 impl ClassifierWire {
-    /// The wire spelling (`systemone` | `cloudflare`).
+    /// The wire spelling (`systemone` | `cloudflare` | `decisions`).
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::SystemOne => "systemone",
             Self::Cloudflare => "cloudflare",
+            Self::Decisions => "decisions",
         }
     }
 }
@@ -93,7 +97,7 @@ fn images_if_clef(model: &str) -> ClassifierSupports {
 /// Vercel and Cloudflare-Jev images stay false until a live probe proves them:
 /// an unproven image path fails loudly rather than send bytes a gateway may
 /// silently drop.
-pub const CLASSIFIER_BACKENDS: [ClassifierBackendPreset; 5] = [
+pub const CLASSIFIER_BACKENDS: [ClassifierBackendPreset; 6] = [
     ClassifierBackendPreset {
         backend: ClassifierBackend::TypeSafe,
         base_url: DEFAULT_CLASSIFIER_BASE_URL,
@@ -129,6 +133,15 @@ pub const CLASSIFIER_BACKENDS: [ClassifierBackendPreset; 5] = [
         wire: ClassifierWire::SystemOne,
         images_header: true,
         supports: Some(images_no),
+    },
+    ClassifierBackendPreset {
+        backend: ClassifierBackend::OpenAi,
+        base_url: "https://api.openai.com/v1",
+        model: "gpt-6-luna",
+        api_key_env: "OPENAI_API_KEY",
+        wire: ClassifierWire::Decisions,
+        images_header: false,
+        supports: Some(images_yes),
     },
     ClassifierBackendPreset {
         backend: ClassifierBackend::Custom,
@@ -793,9 +806,9 @@ impl ClassifierStates {
 // ---------------------------------------------------------------- wire path
 
 /// One systemone-style request after lifting and checks.
-struct Prepared {
-    state: Value,
-    imgs: Vec<LiftedImage>,
+pub(super) struct Prepared {
+    pub(super) state: Value,
+    pub(super) imgs: Vec<LiftedImage>,
     assets: Option<Map<String, Value>>,
 }
 
@@ -852,11 +865,15 @@ impl Classifier {
 
     /// The body for the backend's wire, then the §8 pipeline (request params
     /// merge → body transform → canonical bytes).
-    fn wire_body(&self, p: &Prepared, questions: &Questions) -> String {
+    fn wire_body(&self, p: &Prepared, questions: &Questions) -> Result<String, ClassifierError> {
         let o = &self.inner.opts;
         let mut b = Map::new();
         b.insert("model".into(), Value::String(o.model.clone()));
-        if self.inner.preset.wire == ClassifierWire::Cloudflare {
+        if self.inner.preset.wire == ClassifierWire::Decisions {
+            let list = super::decisions::decisions_questions(o.backend, &o.model, questions)?;
+            b.insert("input".into(), super::decisions::decisions_input(p));
+            b.insert("questions".into(), Value::Array(list));
+        } else if self.inner.preset.wire == ClassifierWire::Cloudflare {
             let mut input = Map::new();
             input.insert("questions".into(), wire_questions(questions));
             input.insert("state".into(), p.state.clone());
@@ -885,7 +902,7 @@ impl Classifier {
         {
             body = out;
         }
-        canonical_json(&body)
+        Ok(canonical_json(&body))
     }
 
     /// The systemone style (every backend): lift, check, cache, post, decode.
@@ -917,15 +934,19 @@ impl Classifier {
                 return Ok(d);
             }
         }
-        let raw = self.wire_body(&p, questions);
+        let raw = self.wire_body(&p, questions)?;
         let extra: &[(&str, &str)] = if !p.imgs.is_empty() && self.inner.preset.images_header {
             &[(IMAGES_HEADER, "true")]
         } else {
             &[]
         };
         let mut body = self.post(&ctx.cancel, raw.into_bytes(), extra).await?;
-        if self.inner.preset.wire == ClassifierWire::Cloudflare {
-            body = unwrap_cloudflare(&body)?;
+        match self.inner.preset.wire {
+            ClassifierWire::Cloudflare => body = unwrap_cloudflare(&body)?,
+            ClassifierWire::Decisions => {
+                body = super::decisions::decisions_reply(&body, questions)?.into_bytes()
+            }
+            ClassifierWire::SystemOne => {}
         }
         let d = Decision::from_slice(&body)?;
         let verdict = validate_decision(questions, &d);

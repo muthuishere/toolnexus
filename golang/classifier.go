@@ -597,8 +597,8 @@ func CreateClassifier(opts ClassifierOptions) (*Classifier, error) {
 	}
 	preset, known := ClassifierBackends[backend]
 	if !known {
-		return nil, fmt.Errorf("classifier: unknown backend %q (want %q, %q, %q, %q or %q)", opts.Backend,
-			BackendTypeSafe, BackendOpenRouter, BackendCloudflare, BackendVercel, BackendCustom)
+		return nil, fmt.Errorf("classifier: unknown backend %q (want %q, %q, %q, %q, %q or %q)", opts.Backend,
+			BackendTypeSafe, BackendOpenRouter, BackendCloudflare, BackendVercel, BackendOpenAI, BackendCustom)
 	}
 	if backend == BackendCustom && opts.Style == StyleSystemOne && (opts.BaseURL == "" || opts.Supports == nil) {
 		return nil, fmt.Errorf("classifier: backend %q requires baseUrl and supports", BackendCustom)
@@ -946,7 +946,11 @@ func (c *Classifier) post(ctx context.Context, raw []byte, extraHeaders map[stri
 	// an account id in a templated URL never reaches an error. url is what is
 	// dialled, expanded at call time.
 	endpoint := strings.TrimRight(c.opts.BaseURL, "/")
-	if c.preset.Wire != ClassifierWireCloudflare {
+	switch c.preset.Wire {
+	case ClassifierWireCloudflare:
+	case ClassifierWireDecisions:
+		endpoint += "/decisions"
+	default:
 		endpoint += "/systemone"
 	}
 	url := expandEnvRefs(endpoint)

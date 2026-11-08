@@ -715,7 +715,7 @@
 (deftest backend-presets-match-the-fixture
   (let [f (fixture "backends/presets")]
     (is (= (set (keys (get f "backends"))) (set (keys jev/backends))))
-    (is (= ["typesafe" "openrouter" "cloudflare" "vercel" "custom"] jev/backend-names))
+    (is (= ["typesafe" "openrouter" "cloudflare" "vercel" "openai" "custom"] jev/backend-names))
     (doseq [[nm want] (get f "backends")]
       (testing nm
         (let [row (get jev/backends nm)]
@@ -833,6 +833,57 @@
             (let [d (jev/evaluate c "x" qs)]
               (is (= (get want "model") (:model d)))
               (is (== (get want "noul") (:noul (jev/noul d "q")))))))))))
+
+(deftest openai-decisions-fixture
+  ;; #157: the Decisions wire — request bytes, reply normalisation, the errors
+  ;; that fire before any request, and the key-to-host rule.
+  (let [f  (fixture "backends/openai-decisions")
+        qs (->questions f)]
+    (doseq [cs (get f "requestCases")]
+      (testing (get cs "name")
+        (let [{:keys [calls http]} (fake-http (fn [_ _] [500 "{}"]))
+              c (jev/create-classifier (cond-> {:backend "openai" :http-client http :retries 0
+                                                :base-url "http://127.0.0.1:9/v1"
+                                                :get-env (constantly nil)}
+                                         (get cs "model") (assoc :model (get cs "model"))))]
+          (try (jev/evaluate c (fixture-state (get cs "state")) qs) (catch Throwable _ nil))
+          (let [call (first @calls)]
+            (is (= (get-in cs ["expect" "body"]) (:body call)))
+            (is (= "http://127.0.0.1:9/v1/decisions" (:url call)))
+            (is (not (contains? (:headers call) "typesafe-danger-zone-images")))))))
+    (doseq [cs (get f "replyCases")]
+      (testing (get cs "name")
+        (let [want (get cs "expect")
+              body (json/write-str (get cs "reply"))
+              {:keys [http]} (fake-http (fn [_ _] [200 body]))
+              c (jev/create-classifier {:backend "openai" :http-client http :retries 0})]
+          (if-let [e (get want "error")]
+            (is (= e (thrown-message #(jev/evaluate c "x" qs))))
+            (let [d (jev/evaluate c "x" qs)]
+              (is (= (get want "normalized") (jev/decisions-reply body qs)))
+              (is (= (get want "model") (:model d)))
+              (is (false? (:calibrated d)))
+              (doseq [[k v] (get want "noul")] (is (== v (:noul (jev/noul d k)))))
+              (doseq [[k v] (get want "choice")] (is (= v (:choice (get-in d [:answers k])))))
+              (doseq [[k v] (get want "score")] (is (== v (:score (get-in d [:answers k]))))))))))
+    (doseq [cs (get f "errorCases")]
+      (testing (get cs "name")
+        (let [{:keys [calls http]} (fake-http (fn [_ _] [200 "{}"]))
+              c   (jev/create-classifier {:backend "openai" :http-client http :retries 0})
+              err (try (jev/evaluate c "x" (->questions cs)) nil (catch Throwable e e))]
+          (is (= (get-in cs ["expect" "error"]) (some-> err ex-message)))
+          (is (= (boolean (get-in cs ["expect" "unsupported"])) (boolean (and err (jev/unsupported? err)))))
+          (is (empty? @calls) "nothing is sent"))))
+    (doseq [cs (get f "captureCases")]
+      (testing (get cs "name")
+        (let [envm (get cs "env")
+              {:keys [calls http]} (fake-http (fn [_ _] [500 "{}"]))
+              c (jev/create-classifier (cond-> {:backend "openai" :http-client http :retries 0
+                                                :base-url "http://127.0.0.1:9/v1"
+                                                :get-env (fn [k] (get envm k))}
+                                         (get cs "apiKeyEnv") (assoc :api-key-env (get cs "apiKeyEnv"))))]
+          (try (jev/evaluate c "x" qs) (catch Throwable _ nil))
+          (is (= (get cs "expectAuthorization") (get (:headers (first @calls)) "authorization"))))))))
 
 (deftest key-routing-fixture
   ;; #155: an env-default key goes only to the preset's own host. The suite cannot

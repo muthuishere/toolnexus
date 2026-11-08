@@ -74,6 +74,10 @@
     { "backend": "vercel", "baseUrl": "https://other.vercel.sh/typesafe/v1", "expectKeyEnv": "" },
     { "backend": "cloudflare", "baseUrl": "https://api.cloudflare.com/client/v4/accounts/acct123/ai/run", "expectKeyEnv": "CLOUDFLARE_JEV_API_KEY" },
     { "backend": "cloudflare", "baseUrl": "https://evil.example/client/v4/accounts/acct123/ai/run", "expectKeyEnv": "" },
+    { "backend": "openai", "baseUrl": "https://api.openai.com/v1", "expectKeyEnv": "OPENAI_API_KEY" },
+    { "backend": "openai", "baseUrl": "http://api.openai.com/v1", "expectKeyEnv": "" },
+    { "backend": "openai", "baseUrl": "https://openrouter.ai/api/alpha", "expectKeyEnv": "" },
+    { "backend": "openai", "baseUrl": "https://api.openai.com.evil.example/v1", "expectKeyEnv": "" },
     { "backend": "custom", "baseUrl": "https://api.typesafe.ai/v1", "expectKeyEnv": "" },
     { "backend": "custom", "baseUrl": "https://self-hosted.example/v1", "expectKeyEnv": "" }
   ]

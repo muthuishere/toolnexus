@@ -1566,7 +1566,7 @@ public final class BuiltinTools {
                     }
                     Map<String, Object> nb;
                     try {
-                        nb = Json.MAPPER.readValue(raw, new com.fasterxml.jackson.core.type.TypeReference<LinkedHashMap<String, Object>>() {});
+                        nb = Json.MAPPER.readValue(raw, new tools.jackson.core.type.TypeReference<LinkedHashMap<String, Object>>() {});
                     } catch (Exception e) {
                         return err("notebook_edit: " + p + " is not a notebook: " + e.getMessage());
                     }

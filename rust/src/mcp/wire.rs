@@ -14,9 +14,10 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use base64::Engine as _;
+use process_wrap::tokio::{ChildWrapper, CommandWrap};
 use serde_json::{Map, Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, ChildStdin, ChildStdout};
+use tokio::process::{ChildStdin, ChildStdout};
 use tokio::sync::{oneshot, watch};
 
 use super::oauth::OAuth;
@@ -435,7 +436,7 @@ pub(crate) fn err_chain(e: &dyn std::error::Error) -> String {
 /// `id`, stderr passed through and never parsed, a dead child fails every
 /// pending call.
 pub(crate) struct StdioConn {
-    child: tokio::sync::Mutex<Option<Child>>,
+    child: tokio::sync::Mutex<Option<Box<dyn ChildWrapper>>>,
     stdin: tokio::sync::Mutex<Option<ChildStdin>>,
     pending: Mutex<HashMap<String, oneshot::Sender<(Value, String)>>>,
     err: Mutex<Option<String>>,
@@ -450,10 +451,11 @@ pub(crate) struct StdioConn {
 /// The child's stdout with whatever the probe reader had already buffered.
 pub(crate) type StdoutReader = BufReader<ChildStdout>;
 
-/// A live stdio child taken over by the frozen SDK path: no reader of ours is
-/// left on its stdout. Dropping it kills the child (`kill_on_drop`).
+/// A live stdio child taken over by the frozen path: no reader of ours is
+/// left on its stdout. Dropping it kills the child's whole process group /
+/// Job Object (`KillOnDrop`).
 pub(crate) struct StdioHandoff {
-    pub(crate) child: Child,
+    pub(crate) child: Box<dyn ChildWrapper>,
     pub(crate) stdin: ChildStdin,
     pub(crate) stdout: StdoutReader,
 }
@@ -464,24 +466,8 @@ impl StdioConn {
         env: &BTreeMap<String, String>,
         cwd: Option<&str>,
     ) -> Result<Arc<StdioConn>, String> {
-        let Some((prog, args)) = argv.split_first() else {
-            return Err("no command".into());
-        };
-        let mut cmd = tokio::process::Command::new(prog);
-        cmd.args(args)
-            .envs(env.iter())
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .kill_on_drop(true);
-        if let Some(cwd) = cwd {
-            cmd.current_dir(cwd);
-        }
-        #[cfg(unix)]
-        cmd.process_group(0);
-        let mut child = cmd.spawn().map_err(|e| format!("start {prog:?}: {e}"))?;
-        let stdin = child.stdin.take();
-        let stdout = child.stdout.take().ok_or("no stdout")?;
+        let (child, stdin, stdout) = spawn_child(argv, env, cwd)?;
+        let stdin = Some(stdin);
         let (tx, rx) = watch::channel(false);
         let (gate_tx, gate_rx) = oneshot::channel::<Option<oneshot::Sender<StdoutReader>>>();
         let mut gate_rx = Some(gate_rx);
@@ -604,11 +590,43 @@ impl StdioConn {
             .is_ok();
         if let Some(mut child) = self.child.lock().await.take() {
             if !exited {
-                let _ = child.kill().await;
+                let _ = child.start_kill();
             }
             let _ = child.wait().await;
         }
     }
+}
+
+/// Start a stdio MCP server: piped stdin/stdout, stderr passed through (never
+/// parsed, SPEC §2.3), in its own process group (POSIX) / Job Object
+/// (Windows) that is killed when the child is dropped.
+pub(crate) fn spawn_child(
+    argv: &[String],
+    env: &BTreeMap<String, String>,
+    cwd: Option<&str>,
+) -> Result<(Box<dyn ChildWrapper>, ChildStdin, ChildStdout), String> {
+    let Some((prog, args)) = argv.split_first() else {
+        return Err("no command".into());
+    };
+    let mut cmd = tokio::process::Command::new(prog);
+    cmd.args(args)
+        .envs(env.iter())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit());
+    if let Some(cwd) = cwd {
+        cmd.current_dir(cwd);
+    }
+    let mut wrap = CommandWrap::from(cmd);
+    #[cfg(unix)]
+    wrap.wrap(process_wrap::tokio::ProcessGroup::leader());
+    #[cfg(windows)]
+    wrap.wrap(process_wrap::tokio::JobObject);
+    wrap.wrap(process_wrap::tokio::KillOnDrop);
+    let mut child = wrap.spawn().map_err(|e| format!("start {prog:?}: {e}"))?;
+    let stdin = child.stdin().take().ok_or("no stdin")?;
+    let stdout = child.stdout().take().ok_or("no stdout")?;
+    Ok((child, stdin, stdout))
 }
 
 struct Cleanup<'a>(&'a StdioConn, String);

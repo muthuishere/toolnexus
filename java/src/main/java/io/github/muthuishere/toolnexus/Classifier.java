@@ -90,10 +90,13 @@ public final class Classifier {
     /** A self-hosted System One endpoint. Requires {@link Options#baseUrl} and
      * {@link Options#supports}: the library cannot know what an unknown server takes. */
     public static final String BACKEND_CUSTOM = "custom";
+    /** OpenAI's Decisions API ({@code POST /v1/decisions}, §8B "Decisions wire", #157). */
+    public static final String BACKEND_OPENAI = "openai";
 
-    /** The two request shapes a backend row can use. */
+    /** The request shapes a backend row can use. */
     public static final String WIRE_SYSTEMONE = "systemone";
     public static final String WIRE_CLOUDFLARE = "cloudflare";
+    public static final String WIRE_DECISIONS = "decisions";
 
     /** TypeSafe's required opt-in header for image ("danger zone") input. */
     public static final String IMAGES_HEADER = "TypeSafe-Danger-Zone-Images";
@@ -114,7 +117,7 @@ public final class Classifier {
     /**
      * One row of the backend table.
      *
-     * @param wire         {@link #WIRE_SYSTEMONE} or {@link #WIRE_CLOUDFLARE}
+     * @param wire         {@link #WIRE_SYSTEMONE}, {@link #WIRE_CLOUDFLARE} or {@link #WIRE_DECISIONS}
      * @param imagesHeader send {@link #IMAGES_HEADER}{@code : true} when a request carries images
      * @param supports     the default support for a model on this backend; {@code null} on
      *                     {@link #BACKEND_CUSTOM}, which requires {@link Options#supports}
@@ -140,6 +143,8 @@ public final class Classifier {
                 "CLOUDFLARE_JEV_API_KEY", WIRE_CLOUDFLARE, false, m -> new Supports(m != null && m.contains("clef"))));
         t.put(BACKEND_VERCEL, new BackendPreset("https://ai-gateway.vercel.sh/typesafe/v1", "typesafe-ai/jev",
                 "AI_GATEWAY_API_KEY", WIRE_SYSTEMONE, true, m -> new Supports(false)));
+        t.put(BACKEND_OPENAI, new BackendPreset("https://api.openai.com/v1", "gpt-6-luna", "OPENAI_API_KEY",
+                WIRE_DECISIONS, false, m -> new Supports(true)));
         t.put(BACKEND_CUSTOM, new BackendPreset(null, DEFAULT_MODEL, "",
                 WIRE_SYSTEMONE, true, null));
         BACKENDS = java.util.Collections.unmodifiableMap(t);
@@ -747,7 +752,7 @@ public final class Classifier {
         if (preset == null) {
             throw new ClassifierException("classifier: unknown backend \"" + opts.backend + "\" (want \""
                     + BACKEND_TYPESAFE + "\", \"" + BACKEND_OPENROUTER + "\", \"" + BACKEND_CLOUDFLARE + "\", \""
-                    + BACKEND_VERCEL + "\" or \"" + BACKEND_CUSTOM + "\")");
+                    + BACKEND_VERCEL + "\", \"" + BACKEND_OPENAI + "\" or \"" + BACKEND_CUSTOM + "\")");
         }
         if (BACKEND_CUSTOM.equals(this.backend) && STYLE_SYSTEMONE.equals(style)
                 && (opts.baseUrl == null || opts.baseUrl.isEmpty() || opts.supports == null)) {
@@ -1219,7 +1224,12 @@ public final class Classifier {
     private String body(ClassifierBackends.LiftResult p, Map<String, Object> assets,
                         Map<String, Question> questions) {
         Map<String, Object> b = new LinkedHashMap<>();
-        if (WIRE_CLOUDFLARE.equals(preset.wire())) {
+        if (WIRE_DECISIONS.equals(preset.wire())) {
+            List<Object> list = ClassifierDecisions.questions(backend, model, questions);
+            b.put("input", ClassifierDecisions.input(p));
+            b.put("model", model);
+            b.put("questions", list);
+        } else if (WIRE_CLOUDFLARE.equals(preset.wire())) {
             Map<String, Object> input = new LinkedHashMap<>();
             if (!p.images().isEmpty()) {
                 List<Object> urls = new ArrayList<>();
@@ -1299,6 +1309,7 @@ public final class Classifier {
                 ? Map.of(IMAGES_HEADER, "true") : Map.of();
         String body = post(body(p, assets, questions), extra);
         if (WIRE_CLOUDFLARE.equals(preset.wire())) body = ClassifierBackends.unwrapCloudflare(body);
+        else if (WIRE_DECISIONS.equals(preset.wire())) body = ClassifierDecisions.reply(body, questions);
         Decision d = toDecision(Json.toMap(body));
         ClassifierException invalid = ClassifierBackends.validate(questions, d);
         if (validate && invalid != null) throw invalid;
@@ -1324,7 +1335,8 @@ public final class Classifier {
         // endpoint is what errors name: the CONFIGURED base, ${ENV} unexpanded, so an account id in
         // a templated URL never reaches an error. url is what is dialled, expanded at call time.
         String endpoint = baseUrl.replaceAll("/+$", "");
-        if (!WIRE_CLOUDFLARE.equals(preset.wire())) endpoint += "/systemone";
+        if (WIRE_DECISIONS.equals(preset.wire())) endpoint += "/decisions";
+        else if (!WIRE_CLOUDFLARE.equals(preset.wire())) endpoint += "/systemone";
         String url = ClassifierBackends.expandEnvRefs(endpoint, env);
         ClassifierException last = null;
         for (int attempt = 0; ; attempt++) {

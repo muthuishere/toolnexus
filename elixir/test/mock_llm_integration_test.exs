@@ -185,6 +185,19 @@ defmodule Toolnexus.MockLlmIntegrationTest do
     assert assert_decision(c, "my invoice is wrong") == first
   end
 
+  test "classifier: openai backend on the Decisions wire is deterministic", %{base: base} do
+    {:ok, c} =
+      Classifier.create(
+        backend: "openai",
+        base_url: base,
+        api_key_env: "TN_MOCK_LLM_TEST_KEY",
+        retries: 0
+      )
+
+    first = assert_decision(c, "my invoice is wrong")
+    assert assert_decision(c, "my invoice is wrong") == first
+  end
+
   test "media: every verb against the mock style, plus an async failure", %{base: base} do
     style_json = mock(base, :get, "/_mock/media-style.json", nil)
     style_json = if is_binary(style_json), do: style_json, else: Jason.encode!(style_json)

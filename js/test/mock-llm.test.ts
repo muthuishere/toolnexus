@@ -149,6 +149,11 @@ test("mock: classifier cloudflare backend", { skip }, async () => {
   await checkClassifier(createClassifier({ backend: "cloudflare", baseUrl: `${origin}/v1/accounts/acc/ai/run`, apiKeyEnv: "MOCK_LLM_KEY", supports: { images: false } }))
 })
 
+test("mock: classifier openai backend (decisions wire)", { skip }, async () => {
+  process.env.MOCK_LLM_KEY ??= "mock-key"
+  await checkClassifier(createClassifier({ backend: "openai", baseUrl: base, apiKeyEnv: "MOCK_LLM_KEY" }))
+})
+
 test("mock: media style drives all six verbs + an async failure", { skip }, async () => {
   process.env.MOCK_LLM_KEY ??= "mock-key"
   const style = await mockGet("/_mock/media-style.json")
