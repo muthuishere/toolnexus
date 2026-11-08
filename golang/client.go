@@ -52,6 +52,11 @@ type ClientOptions struct {
 	SystemPrompt string
 	// MaxTurns caps the tool-calling loop; 0 ⇒ 10.
 	MaxTurns int
+	// StopRecovery (SPEC §8 "Stop-reason recovery", default false) answers a malformed tool
+	// call with a corrective message (once), a truncated reply (length/max_tokens) with a
+	// continue message (up to 3 times, text joined) and an empty answer (e.g. thinking-only
+	// end_turn) with a nudge (once). Off ⇒ the loop is unchanged.
+	StopRecovery bool
 	// MaxToolConcurrency caps how many concurrency-safe tool calls of one model
 	// response run at once (SPEC §8 "Tool scheduling"). 0 ⇒ the env var
 	// TOOLNEXUS_MAX_TOOL_CONCURRENCY when it is a positive integer, else 10.
@@ -1169,6 +1174,7 @@ func (c *Client) runOpenAI(ctx context.Context, prompt any, tk *Toolkit, history
 	turns := 0
 	runStart := time.Now()
 	lastModel := c.opts.Model // the model of the last call made (SPEC §8: reported = transmitted)
+	rec := &stopRecovery{on: c.opts.StopRecovery}
 	// Any error path emits the terminal "run" error event exactly once; success
 	// paths emit via endRun (so err is nil here and this is a no-op).
 	defer func() {
@@ -1236,6 +1242,7 @@ func (c *Client) runOpenAI(ctx context.Context, prompt any, tk *Toolkit, history
 						} `json:"function"`
 					} `json:"tool_calls"`
 				} `json:"message"`
+				FinishReason string `json:"finish_reason"`
 			} `json:"choices"`
 			Usage map[string]any `json:"usage"`
 		}
@@ -1274,9 +1281,21 @@ func (c *Client) runOpenAI(ctx context.Context, prompt any, tk *Toolkit, history
 		}
 		messages = append(messages, asst)
 
-		if len(msg.ToolCalls) == 0 {
-			return c.endRun(lastModel, runStart, msg.Content, messages, toolCalls, turns, usage), nil
+		malformed := false
+		for _, tc := range msg.ToolCalls {
+			malformed = malformed || malformedArgs(tc.Function.Arguments)
 		}
+		if nudge, drop := rec.decide(turn == c.maxTurns()-1, len(msg.ToolCalls) > 0, malformed, data.Choices[0].FinishReason == "length", msg.Content); nudge != "" {
+			if drop {
+				messages = messages[:len(messages)-1]
+			}
+			messages = append(messages, map[string]any{"role": "user", "content": nudge})
+			continue
+		}
+		if len(msg.ToolCalls) == 0 {
+			return c.endRun(lastModel, runStart, rec.final(msg.Content), messages, toolCalls, turns, usage), nil
+		}
+		rec.carry = ""
 
 		// Execute all tool calls in this turn concurrently (true parallel tool
 		// calling). Each call writes its outcome to its own slot, so the transcript
@@ -1454,6 +1473,7 @@ func (c *Client) runAnthropic(ctx context.Context, prompt any, tk *Toolkit, hist
 	var usage Usage
 	turns := 0
 	runStart := time.Now()
+	rec := &stopRecovery{on: c.opts.StopRecovery}
 	lastModel := c.opts.Model // the model of the last call made (SPEC §8: reported = transmitted)
 	defer func() {
 		if err != nil {
@@ -1516,13 +1536,14 @@ func (c *Client) runAnthropic(ctx context.Context, prompt any, tk *Toolkit, hist
 		}
 		var data struct {
 			Content []struct {
-				Type  string         `json:"type"`
-				Text  string         `json:"text"`
-				ID    string         `json:"id"`
-				Name  string         `json:"name"`
-				Input map[string]any `json:"input"`
+				Type  string `json:"type"`
+				Text  string `json:"text"`
+				ID    string `json:"id"`
+				Name  string `json:"name"`
+				Input any    `json:"input"`
 			} `json:"content"`
-			Usage map[string]any `json:"usage"`
+			StopReason string         `json:"stop_reason"`
+			Usage      map[string]any `json:"usage"`
 		}
 		if err := json.Unmarshal(raw, &data); err != nil {
 			c.emitLLM(turnModel, "error", t0, 0, 0)
@@ -1545,30 +1566,41 @@ func (c *Client) runAnthropic(ctx context.Context, prompt any, tk *Toolkit, hist
 			Input map[string]any
 		}
 		var textParts []string
+		malformed := false
 		for _, b := range data.Content {
 			switch b.Type {
 			case "text":
 				content = append(content, map[string]any{"type": "text", "text": b.Text})
 				textParts = append(textParts, b.Text)
 			case "tool_use":
+				malformed = malformed || malformedInput(b.Input)
+				input, _ := b.Input.(map[string]any)
 				content = append(content, map[string]any{
 					"type":  "tool_use",
 					"id":    b.ID,
 					"name":  b.Name,
-					"input": b.Input,
+					"input": input,
 				})
 				uses = append(uses, struct {
 					ID    string
 					Name  string
 					Input map[string]any
-				}{b.ID, b.Name, b.Input})
+				}{b.ID, b.Name, input})
 			}
 		}
 		messages = append(messages, map[string]any{"role": "assistant", "content": content})
 
-		if len(uses) == 0 {
-			return c.endRun(lastModel, runStart, strings.Join(textParts, ""), messages, toolCalls, turns, usage), nil
+		if nudge, drop := rec.decide(turn == c.maxTurns()-1, len(uses) > 0, malformed, data.StopReason == "max_tokens", strings.Join(textParts, "")); nudge != "" {
+			if drop {
+				messages = messages[:len(messages)-1]
+			}
+			messages = append(messages, map[string]any{"role": "user", "content": nudge})
+			continue
 		}
+		if len(uses) == 0 {
+			return c.endRun(lastModel, runStart, rec.final(strings.Join(textParts, "")), messages, toolCalls, turns, usage), nil
+		}
+		rec.carry = ""
 
 		// Execute all tool_use blocks in this turn concurrently. Each block writes its
 		// outcome to its own slot so the tool_result blocks map deterministically to
@@ -1781,6 +1813,7 @@ func (c *Client) streamOpenAI(ctx context.Context, prompt any, tk *Toolkit, hist
 	var usage Usage
 	turns := 0
 	runStart := time.Now()
+	rec := &stopRecovery{on: c.opts.StopRecovery}
 	lastModel := c.opts.Model // the model of the last call made (SPEC §8: reported = transmitted)
 	defer func() {
 		if err != nil {
@@ -1853,6 +1886,7 @@ func (c *Client) streamOpenAI(ctx context.Context, prompt any, tk *Toolkit, hist
 		// acc maps tool_call index -> assembled call; order preserves first-seen index.
 		acc := map[int]*streamCall{}
 		var order []int
+		finish := ""
 		sErr := scanSSE(ctx, resp.Body, func(line string) (bool, error) {
 			if !strings.HasPrefix(line, "data:") {
 				return true, nil
@@ -1869,6 +1903,9 @@ func (c *Client) streamOpenAI(ctx context.Context, prompt any, tk *Toolkit, hist
 				addUsage(&usage, u, string(StyleOpenAI))
 			}
 			choice := firstChoice(j)
+			if fr, ok := choice["finish_reason"].(string); ok && fr != "" {
+				finish = fr
+			}
 			d, _ := choice["delta"].(map[string]any)
 			if d == nil {
 				return true, nil
@@ -1923,16 +1960,28 @@ func (c *Client) streamOpenAI(ctx context.Context, prompt any, tk *Toolkit, hist
 		for _, idx := range order {
 			calls = append(calls, acc[idx])
 		}
+		malformed := false
+		for _, cc := range calls {
+			malformed = malformed || malformedArgs(cc.args)
+		}
+		if nudge, drop := rec.decide(turn == c.maxTurns()-1, len(calls) > 0, malformed, finish == "length", content.String()); nudge != "" {
+			if !drop { // only a truncated text reply is kept
+				messages = append(messages, map[string]any{"role": "assistant", "content": content.String()})
+			}
+			messages = append(messages, map[string]any{"role": "user", "content": nudge})
+			continue
+		}
 		if len(calls) == 0 {
 			text := content.String()
 			messages = append(messages, map[string]any{"role": "assistant", "content": text})
 			u := usage
 			ch <- StreamEvent{Type: "usage", Usage: &u}
-			res := c.endRun(lastModel, runStart, text, messages, toolCalls, turns, usage)
+			res := c.endRun(lastModel, runStart, rec.final(text), messages, toolCalls, turns, usage)
 			ch <- StreamEvent{Type: "done", Result: &res, Usage: &u}
 			return nil
 		}
 
+		rec.carry = ""
 		// Append the assistant message with assembled tool_calls.
 		var rawCalls []any
 		for _, cc := range calls {
@@ -2062,6 +2111,7 @@ func (c *Client) streamAnthropic(ctx context.Context, prompt any, tk *Toolkit, h
 	var usage Usage
 	turns := 0
 	runStart := time.Now()
+	rec := &stopRecovery{on: c.opts.StopRecovery}
 	lastModel := c.opts.Model // the model of the last call made (SPEC §8: reported = transmitted)
 	defer func() {
 		if err != nil {
@@ -2212,9 +2262,11 @@ func (c *Client) streamAnthropic(ctx context.Context, prompt any, tk *Toolkit, h
 		}
 		var uses []useBlock
 		var textParts []string
+		malformed := false
 		for _, idx := range order {
 			b := blocks[idx]
 			if b.typ == "tool_use" {
+				malformed = malformed || malformedArgs(b.json)
 				in := safeJSONArgs(b.json)
 				content = append(content, map[string]any{"type": "tool_use", "id": b.id, "name": b.name, "input": in})
 				uses = append(uses, useBlock{b.id, b.name, in})
@@ -2225,8 +2277,15 @@ func (c *Client) streamAnthropic(ctx context.Context, prompt any, tk *Toolkit, h
 		}
 		messages = append(messages, map[string]any{"role": "assistant", "content": content})
 
+		if nudge, drop := rec.decide(turn == c.maxTurns()-1, len(uses) > 0, malformed, stopReason == "max_tokens", strings.Join(textParts, "")); nudge != "" {
+			if drop {
+				messages = messages[:len(messages)-1]
+			}
+			messages = append(messages, map[string]any{"role": "user", "content": nudge})
+			continue
+		}
 		if stopReason != "tool_use" || len(uses) == 0 {
-			text := strings.Join(textParts, "")
+			text := rec.final(strings.Join(textParts, ""))
 			u := usage
 			ch <- StreamEvent{Type: "usage", Usage: &u}
 			res := c.endRun(lastModel, runStart, text, messages, toolCalls, turns, usage)
@@ -2234,6 +2293,7 @@ func (c *Client) streamAnthropic(ctx context.Context, prompt any, tk *Toolkit, h
 			return nil
 		}
 
+		rec.carry = ""
 		for _, u := range uses {
 			ch <- c.callEvent(u.id, u.name, u.input)
 		}
