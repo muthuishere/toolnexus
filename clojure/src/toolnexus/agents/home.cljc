@@ -247,12 +247,24 @@
 
 (def ^:private path-locks (atom {}))
 
-(defn- lock-key [file]
-  (let [parent (skill/parent-dir file)]
-    (try (if (fs/exists? parent)
-           (str (fs/real-path parent) "/" (skill/file-name file))
-           file)
-         (catch Throwable _ file))))
+(defn- lock-key
+  "The per-path lock key is the resolved REAL path (§7E): symlinks resolved, so a
+  tool over a symlinked home and one over the real path share one lock. A file
+  that does not exist yet resolves its nearest existing ancestor and appends the
+  rest; failing that, the path as given."
+  [file]
+  (try
+    (if (fs/exists? file)
+      (fs/real-path file)
+      (loop [dir (skill/parent-dir file) tail [(skill/file-name file)]]
+        (cond
+          (or (nil? dir) (= "" dir) (= dir file)) file
+          (fs/exists? dir) (str (fs/real-path dir) "/" (str/join "/" tail))
+          :else (let [up (skill/parent-dir dir)]
+                  (if (or (nil? up) (= up dir))
+                    file
+                    (recur up (cons (skill/file-name dir) tail)))))))
+    (catch Throwable _ file)))
 
 (defn- with-path-lock [file f]
   (let [k    (lock-key file)
@@ -261,6 +273,13 @@
       (if (compare-and-set! lock false true)
         (try (f) (finally (reset! lock false)))
         (do (ktime/sleep! 1) (recur))))))
+
+(defn- replace-first-literal
+  "`s` with the first occurrence of `needle` swapped for `with`, verbatim; nil
+  when `needle` is absent."
+  [s needle with]
+  (when-let [i (str/index-of s needle)]
+    (str (subs s 0 i) with (subs s (+ i (count needle))))))
 
 (defn- rmw!
   "Read-modify-write over the FULL file (never the capped view — the cap is a
@@ -274,10 +293,11 @@
             next-s  (case action
                       "add"     (str/triml (str (str/trimr current) "\n- " text "\n"))
                       ;; FIRST occurrence only (§7E)
-                      "replace" (when (str/includes? current text)
-                                  (str/replace-first current text (str (or with-text ""))))
-                      "remove"  (when (str/includes? current text)
-                                  (str/replace-first current text ""))
+                      ;; FIRST occurrence, `with` inserted LITERALLY — splice by
+                      ;; index, so no host's replacement-string syntax ($&, $1,
+                      ;; \\1 …) can ever expand.
+                      "replace" (replace-first-literal current text (str (or with-text "")))
+                      "remove"  (replace-first-literal current text "")
                       nil)]
         (cond
           (and (nil? next-s) (contains? #{"replace" "remove"} action))
@@ -291,11 +311,26 @@
               (fs/write-file file next-s)
               nil))))))
 
+;; koine.fs has no lstat (KNOWN GAP, clojure only). Without following links is
+;; approximated: a path is a regular note when it exists, is not a directory,
+;; and its real path is exactly <real notes dir>/<name> — a symlink (to a file
+;; anywhere, even a sibling) resolves elsewhere, and a dangling one does not
+;; exist. Never throws. Residual difference: a FIFO/socket named x.md is not
+;; distinguishable from a regular file here.
+(defn- regular-note? [real-dir p]
+  (try
+    (and (fs/exists? p)
+         (not (fs/directory? p))
+         (= (fs/real-path p) (str real-dir "/" (skill/file-name p))))
+    (catch Throwable _ false)))
+
 (defn- list-notes
   "`list` (§7E): `<slug>\\t<bytes>` per regular file memory/<slug>.md with a valid
   slug, sorted by slug by EXPLICIT code-point sort; `(no notes)` when none."
   [notes-dir]
-  (let [rows (when (fs/directory? notes-dir)
+  (let [real-dir (when (fs/directory? notes-dir)
+                   (try (fs/real-path notes-dir) (catch Throwable _ nil)))
+        rows (when real-dir
                (keep (fn [p]
                        (let [p (str p)]
                          (when (and (str/starts-with? p (str notes-dir "/"))
@@ -304,7 +339,7 @@
                                  slug (subs nm 0 (- (count nm) 3))]
                              (when (and (not (str/includes? nm "/"))
                                         (valid-note-slug? slug)
-                                        (not (fs/directory? p)))
+                                        (regular-note? real-dir p))
                                [slug (count (fs/read-bytes p))])))))
                      (fs/list-tree notes-dir)))
         by   (into {} rows)
@@ -565,7 +600,12 @@
   (let [nm      (:name agent-def)
         dream   (::dream agent-def)
         persona (dissoc agent-def ::dream)
-        reg     (cond-> (assoc (:registry run-opts) nm persona)
+        base    (assoc (:registry run-opts) nm persona)
+        _       (when (and dream (contains? base (:name (:dreamer dream))))
+                  (throw (ex-info (str "startAgent: dreamer name collision: "
+                                       (:name (:dreamer dream)) " is already registered")
+                                  {:agent (:name (:dreamer dream))})))
+        reg     (cond-> base
                   dream (assoc (:name (:dreamer dream)) (:dreamer dream)))
         runtime (rt/create-runtime (assoc run-opts :registry reg))
         h       (rt/spawn runtime rt/root nm)]
@@ -578,7 +618,12 @@
                                        (when on-beat (on-beat text))))])]
       (when dream
         (let [dh (rt/spawn runtime rt/root (:name (:dreamer dream)))]
-          (when (rt/verb-error? dh) (throw (ex-info (:error dh) {:agent (:name (:dreamer dream))})))
+          (when (rt/verb-error? dh)
+            ;; Never leak the persona's heartbeat when the dreamer cannot start.
+            (reset! stopped true)
+            (doseq [c @cancels] (c))
+            (rt/close runtime rt/root)
+            (throw (ex-info (:error dh) {:agent (:name (:dreamer dream))})))
           ;; Housekeeping: a dream's reply never reaches on-beat.
           (swap! cancels conj (heartbeat! runtime dh (:every-ms dream) stopped (fn [_] nil)))))
       {:runtime runtime

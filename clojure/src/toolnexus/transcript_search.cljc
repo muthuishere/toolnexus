@@ -177,7 +177,7 @@
            (cond
              (= "" query) (tool/failure "query is required")
 
-             (and (contains? args :limit) (some? (:limit args)) (not (int-at-least-1? (:limit args))))
+             (and (contains? args :limit) (not (int-at-least-1? (:limit args))))
              (tool/failure "limit must be an integer >= 1")
 
              :else

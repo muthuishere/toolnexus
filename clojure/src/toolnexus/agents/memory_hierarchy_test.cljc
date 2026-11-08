@@ -165,6 +165,26 @@
     (fn [dir]
       (is (= "ok\t3" (:output (call (home/memory-tool dir {:notes true}) {:action "list"})))))))
 
+(defn- ln-s!
+  "Create a symlink with `ln -s` (neither koine nor a .cljc can); true if it
+  now exists as a link (checked via its listing, since a dangling link does
+  not `exists?`)."
+  [target link]
+  (try (proc/sh ["ln" "-s" target link] {:timeout-ms 5000}) (catch Throwable _ nil))
+  (boolean (some #(= link (str %)) (fs/list-tree (subs link 0 (str/last-index-of link "/"))))))
+
+(deftest list-skips-non-regular-files
+  (let [fx (:listSkipsNonRegular (:memoryTool (fixture "memory-hierarchy")))]
+    (with-home (:regular fx)
+      (fn [dir]
+        (doseq [d (:dirs fx)] (fs/mkdirs! (str dir "/" d)))
+        (let [made (doall (for [[k target] (:symlinks fx)]
+                            (ln-s! target (str dir "/" (kstr k)))))]
+          (if (every? true? made)
+            (is (= {:output (:expectList fx) :isError false}
+                   (call (home/memory-tool dir {:notes true}) {:action "list"})))
+            (println "SKIP list-skips-non-regular-files: symlinks unavailable")))))))
+
 ;; ---------------------------------------------------------------------------
 ;; G3 — transcript search
 ;; ---------------------------------------------------------------------------
@@ -185,11 +205,16 @@
     (doseq [c (:cases fx)]
       (testing (:name c)
         (let [o (:options c)
-              t (if o
+              t (cond
+                  (:emptyStore c) (ts/transcript-search-tool (stub-store [] (atom 0)))
+                  o
                   (ts/transcript-search-tool store (cond-> {}
                                                      (:snippetChars o) (assoc :snippet-chars (:snippetChars o))
                                                      (:maxResults o) (assoc :max-results (:maxResults o))))
-                  dflt)]
+                  :else dflt)]
+          (when (= "null-limit" (:name c))
+            (is (and (contains? (:args c) :limit) (nil? (:limit (:args c))))
+                "the fixture's limit is a REAL null, not an absent key"))
           (is (= {:output (:output (:expect c)) :isError (:isError (:expect c))}
                  (call t (:args c)))))))
     (testing "storeWithoutList"
@@ -225,6 +250,30 @@
             (is (= (:expectEntries ws) (count lines)))
             (doseq [[w n] jobs]
               (is (= 1 (count (filter #(= % (str "- w" w "-" n)) lines)))))))))))
+
+(deftest concurrent-adds-via-symlink-share-one-lock
+  (let [ws (:concurrentAddsViaSymlink (:writeSafety (fixture "memory-hierarchy")))
+        holder (str (fs/temp-dir! "tn-memh-link"))]
+    (try
+      (let [real (str holder "/home")
+            link (str holder "/link")]
+        (fs/mkdirs! real)
+        (if-not (ln-s! real link)
+          (println "SKIP concurrent-adds-via-symlink: symlinks unavailable")
+          (let [tools [(home/memory-tool link) (home/memory-tool real)]
+                done  (atom 0)
+                jobs  (for [w (range (:writers ws)) n (range (:addsEach ws))] [w n])]
+            (doseq [[w n] jobs]
+              (proc/run-async!
+               (fn []
+                 (call (nth tools w) {:action "add" :text (str "w" w "-" n)})
+                 (swap! done inc))))
+            (loop [i 0] (when (and (< @done (count jobs)) (< i 2000)) (ktime/sleep! 5) (recur (inc i))))
+            (let [lines (str/split-lines (fs/read-file (str real "/" (:file ws))))]
+              (is (= (:expectEntries ws) (count lines)))
+              (doseq [[w n] jobs]
+                (is (= 1 (count (filter #(= % (str "- w" w "-" n)) lines)))))))))
+      (finally (fs/delete-tree! holder)))))
 
 (deftest large-file-add-keeps-every-byte
   (let [lf  (:largeFileAdd (:writeSafety (fixture "memory-hierarchy")))
@@ -426,3 +475,25 @@
             (is (every? #(= "m-quiet" (:model %)) @requests))
             (is (= files (tree dir)))
             (finally ((:stop started)))))))))
+
+(deftest d6-dreamer-name-collision-throws-before-anything-starts
+  (let [fx (dream-fx)
+        g  (:D6_dreamerNameCollision (:expect fx))
+        {:keys [http-client requests]} (mock fx (atom :fix))]
+    (with-home (:home fx)
+      (fn [dir]
+        (let [clock   (rt/virtual-clock)
+              persona (home/from-dir dir {:name (:personaName g) :model "m-quiet"
+                                          :dream {:every-ms 50 :store (dream-store fx)}})
+              squatter {:name (str (:personaName g) "-dreamer") :instructions "x"}]
+          (is (= (:error g)
+                 (try (home/start-agent persona
+                                        {:llm {:base-url "http://mock.local" :model "m-base"}
+                                         :http-client http-client :clock clock
+                                         :registry {(:name squatter) squatter}}
+                                        {:every-ms 50})
+                      nil
+                      (catch Throwable e (ex-message e)))))
+          ((:advance! clock) 500)
+          (ktime/sleep! 20)
+          (is (zero? (count @requests)) "nothing was scheduled"))))))
