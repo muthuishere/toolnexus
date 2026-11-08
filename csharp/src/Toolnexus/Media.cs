@@ -25,7 +25,15 @@ public sealed record MediaResult(IReadOnlyList<MediaFile> Files, string Status, 
 {
     /// <summary>Provider-reported usage (§7G.12 D21); null when the provider reports none. Never estimated.</summary>
     public MediaUsage? Usage { get; init; }
+    /// <summary>Who served the call (§7G.10b): the preset id for a CLI preset, the style's name (else
+    /// <c>style</c>) for an HTTP style, else the client's name. Set by the router.</summary>
+    public string? Style { get; init; }
+    /// <summary>The configured model for the verb of a loaded style (<c>Models[verb]</c>, else <c>Model</c>); null when unset, never guessed.</summary>
+    public string? Model { get; init; }
 }
+
+/// <summary>§7G.10b the cheap pre-flight answer of <see cref="MediaStyle.Available"/>.</summary>
+public sealed record MediaAvailability(bool Installed, bool LoggedIn, string Reason);
 
 /// <summary>§7G.12 D21 provider-reported media usage. A field the provider omits stays null.</summary>
 public sealed record MediaUsage
@@ -105,6 +113,10 @@ public sealed class MediaGather
     public long? MaxBytes { get; set; }
     /// <summary>CLI clients: keep the CLI's original file after copying it out; default true.</summary>
     public bool? Keep { get; set; }
+    /// <summary>When set, saved files are <c>&lt;name&gt;&lt;ext&gt;</c>, then <c>&lt;name&gt;-2&lt;ext&gt;</c>, … (first free
+    /// name). Bytes outside <c>[A-Za-z0-9._-]</c> become <c>-</c>, leading <c>.</c>/<c>-</c> are dropped;
+    /// empty ⇒ the default naming (§7G.10b).</summary>
+    public string? Name { get; set; }
 }
 
 /// <summary>§7G.4 — the one config shape of every built-in media client. Fields a client does not use are ignored.</summary>
@@ -236,6 +248,18 @@ public sealed class Media
     /// <summary>True when any client supports <paramref name="verb"/>.</summary>
     public bool Supports(string verb) => _clients.Any(c => c.Supports(verb));
 
+    /// <summary>Every verb some source supports, in canonical verb order.</summary>
+    public IReadOnlyList<string> Verbs() => MediaVerbs.All.Where(v => Supports(v.Verb)).Select(v => v.Verb).ToList();
+
+    /// <summary>"style" when every source is a loaded <see cref="MediaStyle"/>, else "client".</summary>
+    private string Noun => _clients.All(c => c is MediaStyle) ? "style" : "client";
+
+    /// <summary>One-shot sugar (SPEC <c>generateMedia(style, verb, args, config?)</c>):
+    /// <c>Media.Create(MediaStyle.Load(style, config)).GenerateAsync(verb, args, ctx)</c>.</summary>
+    public static Task<MediaResult> GenerateMediaAsync(string style, string verb, IDictionary<string, object?>? args,
+        MediaClientConfig? config = null, MediaContext? ctx = null)
+        => Create(MediaStyle.Load(style, config)).GenerateAsync(verb, args, ctx);
+
     // ---------------------------------------------------------------- typed verbs
 
     public Task<MediaResult> ImageAsync(ImageInput input, CancellationToken cancellationToken = default)
@@ -287,7 +311,7 @@ public sealed class Media
     internal async Task<(MediaResult Result, string Client)> RouteAsync(string verb, IDictionary<string, object?>? args, MediaContext ctx)
     {
         var candidates = _clients.Where(c => c.Supports(verb)).ToList();
-        if (candidates.Count == 0) throw new MediaException($"media: no client supports \"{verb}\"");
+        if (candidates.Count == 0) throw new MediaException($"media: no {Noun} supports \"{verb}\"");
         var clean = new Dictionary<string, object?>();
         if (args != null)
             foreach (var (k, v) in args)
@@ -316,7 +340,8 @@ public sealed class Media
             }
             try
             {
-                return (await Dispatch(c, verb, clean, ctx).ConfigureAwait(false), c.Name);
+                var res = await Dispatch(c, verb, clean, ctx).ConfigureAwait(false);
+                return (res with { Style = res.Style ?? SourceId(c), Model = res.Model ?? SourceModel(c, verb) }, c.Name);
             }
             catch (MediaUnavailableException e)
             {
@@ -324,6 +349,15 @@ public sealed class Media
             }
         }
         throw new MediaUnavailableException($"media: no client available for \"{verb}\": " + string.Join("; ", errors));
+    }
+
+    private static string SourceId(IMediaClient c) => c is MediaStyle s ? s.Preset ?? s.Name : c.Name;
+
+    private static string? SourceModel(IMediaClient c, string verb)
+    {
+        if (c is not MediaStyle { Config: { } cfg }) return null;
+        if (cfg.Models?.TryGetValue(verb, out var m) == true && !string.IsNullOrEmpty(m)) return m;
+        return string.IsNullOrEmpty(cfg.Model) ? null : cfg.Model;
     }
 
     /// <summary>A client's accepted args in canonical order (non-canonical names are dropped):

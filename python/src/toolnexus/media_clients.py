@@ -30,6 +30,7 @@ from .media import (
     MediaResult,
     MediaUnavailableError,
     StyleMediaClient,
+    _VERB_SPEC,
     _Job,
     _ascii_lower,
     _cap,
@@ -462,6 +463,36 @@ def _kill(proc: asyncio.subprocess.Process) -> None:
             pass
 
 
+_CLI_HINTS = {
+    "width": ("width ", " px"), "height": ("height ", " px"),
+    "seconds": ("about ", " seconds long"), "aspectRatio": ("aspect ratio ", ""),
+}
+
+
+def _arg_text(v: Any) -> str:
+    if isinstance(v, str):
+        return v
+    if isinstance(v, (int, float)) and not isinstance(v, bool):
+        return _num_text(v)
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    return str(v)
+
+
+def fold_media_prompt(verb: str, args: dict[str, Any]) -> str:
+    """The prompt a CLI style receives: ``prompt``, then the present size hints in canonical
+    verb order as `` (h1, h2)`` (§7G CLI hint folding)."""
+    args = args or {}
+    prompt = _arg_text(args.get("prompt", ""))
+    hs = []
+    for a in _VERB_SPEC.get(verb, {"args": []})["args"]:
+        n = a["name"]
+        if n in _CLI_HINTS and args.get(n) is not None:
+            pre, post = _CLI_HINTS[n]
+            hs.append(pre + _arg_text(args[n]) + post)
+    return prompt + (" (" + ", ".join(hs) + ")" if hs else "")
+
+
 class CliMediaClient(BaseMediaClient):
     """Runs a local subscription CLI **once, headless**, reads its JSON-lines stdout and
     collects the files it made (§7G.10). Subclasses set ``name``, ``default_command``,
@@ -479,8 +510,12 @@ class CliMediaClient(BaseMediaClient):
     def supports(self, verb: str) -> bool:
         return verb in self.templates
 
+    #: When true the CLI is never started: a fixed file is written and returned (§7G CLI mock presets).
+    mock: bool = False
+
     def args(self, verb: str) -> list[dict[str, Any]]:
-        return [{"name": "prompt", "required": True}]
+        hints = ("seconds", "aspectRatio") if verb == "video" else ("width", "height", "aspectRatio")
+        return [{"name": "prompt", "required": True}] + [{"name": h, "required": False} for h in hints]
 
     def command(self) -> list[str]:
         c = self.config.command
@@ -504,8 +539,10 @@ class CliMediaClient(BaseMediaClient):
     async def generate(self, verb: str, args: dict[str, Any], ctx: Optional[MediaContext] = None) -> MediaResult:
         if not self.supports(verb):
             raise MediaError(f'media: no client supports "{verb}"')
-        prompt = self.templates[verb].replace("{prompt}", str(args.get("prompt", "")))
+        prompt = self.templates[verb].replace("{prompt}", fold_media_prompt(verb, args))
         job = _Job(self.name, verb, _VERB_KIND[verb], self.config, ctx)
+        if self.mock:
+            return self._mock_run(job, verb, prompt)
         cmd = self.command()
         cwd = os.path.realpath(tempfile.mkdtemp(prefix="toolnexus-cli-"))  # D17
         try:
@@ -571,6 +608,22 @@ class CliMediaClient(BaseMediaClient):
             return res
         finally:
             shutil.rmtree(cwd, ignore_errors=True)
+
+    def _mock_run(self, job: _Job, verb: str, prompt: str) -> MediaResult:
+        """The CLI mock: no process. Writes ``<gather.dir>/<client>-mock-<verb>.<png|mp4>``
+        (gather.dir default ``<tmp>/toolnexus-media``) holding ``toolnexus mock <verb>``,
+        gathers it like a CLI file; text = the exact prompt the CLI would have received."""
+        ext = ".mp4" if verb == "video" else ".png"
+        d = self.config.gather.dir or os.path.join(tempfile.gettempdir(), "toolnexus-media")
+        try:
+            os.makedirs(d, exist_ok=True)
+            p = os.path.abspath(os.path.join(d, f"{self.name}-mock-{verb}{ext}"))
+            with open(p, "wb") as f:
+                f.write(f"toolnexus mock {verb}".encode())
+        except OSError as e:
+            raise MediaError(f"{self.name}: {e}") from None
+        job.job_id = "mock"
+        return MediaResult(files=[job.gather_local(p)], text=prompt, job_id="mock", status="completed")
 
     def _collect(self, job: _Job, verb: str, text: str, paths: list[str], error: Optional[str], rc: int) -> MediaResult:
         cands = list(paths) + [m.group(0) for m in _PATH_RE.finditer(text)]
@@ -715,4 +768,76 @@ class CodexMediaClient(CliMediaClient):
         low = _ascii_lower(error)
         if "usage limit" in low or "quota" in low:
             return f"codex: {_cap(error, 400)}"
+        return None
+
+
+class _AgyMediaClient(CliMediaClient):
+    """Google Antigravity CLI (``agy``): image via ``agy -p … --output-format stream-json
+    --dangerously-skip-permissions``. The path is in the final result's response text, else
+    the newest image in the conversation's brain folder. Reached through the
+    ``MediaStyle.GOOGLE_AGY_CLI`` preset."""
+
+    name = "agy"
+    default_command = "agy"
+    templates = {
+        "image": "Generate exactly one image with your image generation tool: {prompt}. Do not write code. "
+                 "Reply only with the absolute path where the image was saved.",
+    }
+
+    def argv(self, prompt: str, cwd: str) -> list[str]:
+        out = ["-p", prompt, "--output-format", "stream-json", "--dangerously-skip-permissions"]
+        if self.config.model:
+            out += ["--model", self.config.model]
+        return out
+
+    def parse(self, obj: dict[str, Any], line: str) -> dict[str, Any]:
+        ev: dict[str, Any] = {}
+        e = obj.get("event")
+        if e == "init":
+            if isinstance(obj.get("conversation_id"), str):
+                ev["session"] = obj["conversation_id"]
+            ev["status"] = "init"
+        elif e == "step_update":
+            su = obj.get("step_update")
+            if isinstance(su, dict):
+                t, st = su.get("tool_name"), su.get("state")
+                if isinstance(t, str) and t and isinstance(st, str) and st:
+                    ev["status"] = f"tool {t} {st}"
+        elif e == "result":
+            r = obj.get("result")
+            r = r if isinstance(r, dict) else {}
+            if isinstance(r.get("conversation_id"), str):
+                ev["session"] = r["conversation_id"]
+            text = r.get("response") if isinstance(r.get("response"), str) else ""
+            if text:
+                ev["text"] = text
+            st = r.get("status") if isinstance(r.get("status"), str) else ""
+            ev["status"] = f"result {st}"
+            if st != "SUCCESS":
+                err = r.get("error")
+                if isinstance(err, str) and err:
+                    ev["error"] = err
+                elif isinstance(err, dict) and isinstance(err.get("message"), str) and err["message"]:
+                    ev["error"] = err["message"]
+                elif text:
+                    ev["error"] = text
+                else:
+                    ev["error"] = json.dumps(obj.get("result"), separators=(",", ":"), ensure_ascii=False,
+                                             sort_keys=True)
+            u = _usage(r.get("usage"), {"input_tokens": "inputTokens", "output_tokens": "outputTokens"})
+            if u:
+                ev["usage"] = u
+        elif e == "error":
+            m = obj.get("message")
+            if isinstance(m, str):
+                ev["error"] = m
+        return ev
+
+    def folder(self, session: str) -> Optional[str]:
+        return os.path.join(os.path.expanduser("~"), ".gemini", "antigravity-cli", "brain", session)
+
+    def unavailable_message(self, verb: str, error: str) -> Optional[str]:
+        low = _ascii_lower(error)
+        if "quota" in low or "usage limit" in low:
+            return f"agy: {_cap(error, 400)}"
         return None

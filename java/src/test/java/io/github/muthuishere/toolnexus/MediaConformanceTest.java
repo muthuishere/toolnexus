@@ -150,6 +150,7 @@ class MediaConformanceTest {
             if (g.get("dir") instanceof String s) gather.dir(s);
             if (g.get("maxBytes") instanceof Number n) gather.maxBytes(n.longValue());
             if (g.get("keep") instanceof Boolean b) gather.keep(b);
+            if (g.get("name") instanceof String s) gather.name(s);
             c.gather(gather);
         }
         return c;
@@ -208,6 +209,9 @@ class MediaConformanceTest {
         assertEquals(exp.get("status"), r.status(), name + " status");
         assertEquals(exp.get("text"), r.text(), name + " text");
         assertEquals(exp.get("jobId"), r.jobId(), name + " jobId");
+        // §7G.10b: style / model asserted only when the case names them
+        if (exp.containsKey("style")) assertEquals(exp.get("style"), r.style(), name + " style");
+        if (exp.containsKey("model")) assertEquals(exp.get("model"), r.model(), name + " model");
         // §7G.12 D21: usage exact when expected, absent otherwise
         assertEquals(normalise(exp.get("usage")), r.usage() == null ? null : normalise(r.usage().toMap()), name + " usage");
         List<Map<String, Object>> files = (List<Map<String, Object>>) exp.get("files");
@@ -595,7 +599,7 @@ class MediaConformanceTest {
     @SuppressWarnings("unchecked")
     List<DynamicTest> cliJson() throws IOException {
         List<Map<String, Object>> cases = (List<Map<String, Object>>) readJson("cli.json").get("cases");
-        assertEquals(24, cases.size(), "exact cli.json count");
+        assertEquals(35, cases.size(), "exact cli.json count");
         List<DynamicTest> tests = new ArrayList<>();
         for (Map<String, Object> c : cases) tests.add(DynamicTest.dynamicTest((String) c.get("name"), () -> runCliCase(c)));
         return tests;
@@ -605,7 +609,8 @@ class MediaConformanceTest {
     private void runCliCase(Map<String, Object> raw) throws Exception {
         Function<String, String> saved = Media.env;
         try {
-            String clientName = (String) raw.get("client");
+            String style = (String) raw.get("style");
+            String clientName = MediaStyle.label(style);
             String verb = (String) raw.get("verb");
             String fake = CONF.resolve("fake-cli/fake-cli.sh").toString();
             for (String face : List.of("function", "tool")) {
@@ -621,7 +626,7 @@ class MediaConformanceTest {
                 Media.Config cfg = config(c.get("config"));
                 cfg.command(c.get("command") instanceof List<?> cmd ? (List<String>) cmd
                         : List.of("/bin/sh", fake, fixture.toString(), out.toString()));
-                Media media = Media.create(builtIn(clientName, cfg));
+                Media media = Media.create(Media.loadMediaStyle(style, cfg));
                 Map<String, Object> args = (Map<String, Object>) c.get("args");
 
                 long t0 = System.nanoTime();
@@ -629,6 +634,15 @@ class MediaConformanceTest {
                     Outcome o = call(media, verb, args, c.get("ctxTimeoutMs"));
                     assertOutcome(c, o, dir, clientName, verb);
                     assertUsageAndRunFiles(name, c, o, null);
+                    if (Boolean.TRUE.equals(c.get("oneShot"))) {
+                        Outcome one;
+                        try {
+                            one = new Outcome(Media.generateMedia(style, verb, args, cfg), null, List.of());
+                        } catch (RuntimeException e) {
+                            one = new Outcome(null, e, List.of());
+                        }
+                        assertOutcome(c, one, dir, clientName, verb);
+                    }
                 } else {
                     Map<String, Object> tool = (Map<String, Object>) c.get("tool");
                     if (tool == null || c.containsKey("ctxTimeoutMs")) continue;
@@ -663,6 +677,82 @@ class MediaConformanceTest {
         } finally {
             Media.env = saved;
         }
+    }
+
+    @TestFactory
+    @SuppressWarnings("unchecked")
+    List<DynamicTest> cliAvailabilityCases() throws IOException {
+        List<Map<String, Object>> cases = (List<Map<String, Object>>) readJson("cli.json").get("availabilityCases");
+        assertEquals(7, cases.size(), "exact cli.json availabilityCases count");
+        List<DynamicTest> tests = new ArrayList<>();
+        for (Map<String, Object> raw : cases) {
+            tests.add(DynamicTest.dynamicTest((String) raw.get("name"), () -> {
+                Function<String, String> saved = Media.env;
+                try {
+                    String dir = tmp("media-avail").toRealPath().toString();
+                    Map<String, String> vars = Map.of("{dir}", dir);
+                    Map<String, Object> c = (Map<String, Object>) subst(raw, vars);
+                    Function<String, String> caseEnv = envOf(c.get("env"), vars);
+                    List<?> unset = c.get("unsetEnv") instanceof List<?> u ? u : List.of();
+                    Media.env = k -> {
+                        String v = caseEnv.apply(k);
+                        if (v != null) return v;
+                        return unset.contains(k) ? null : System.getenv(k);
+                    };
+                    if (c.get("createFiles") instanceof List<?> cf) for (Object f : cf) Files.createFile(Path.of((String) f));
+                    Media.Style st;
+                    if (c.get("style") instanceof String preset) {
+                        st = Media.loadMediaStyle(preset, config(c.get("config")));
+                    } else {
+                        st = Media.Style.of((Map<String, Object>) c.get("style"));
+                        StyleMediaClient.validate(st);
+                    }
+                    long t0 = System.nanoTime();
+                    Media.Availability a = st.available();
+                    assertTrue((System.nanoTime() - t0) / 1_000_000L < 1000, "available() took too long");
+                    Map<String, Object> got = new LinkedHashMap<>();
+                    got.put("installed", a.installed());
+                    got.put("loggedIn", a.loggedIn());
+                    got.put("reason", a.reason());
+                    assertEquals(c.get("expect"), got);
+                } finally {
+                    Media.env = saved;
+                }
+            }));
+        }
+        return tests;
+    }
+
+    @TestFactory
+    @SuppressWarnings("unchecked")
+    List<DynamicTest> cliVerbCases() throws IOException {
+        List<Map<String, Object>> cases = (List<Map<String, Object>>) readJson("cli.json").get("verbCases");
+        assertEquals(8, cases.size(), "exact cli.json verbCases count");
+        List<DynamicTest> tests = new ArrayList<>();
+        for (Map<String, Object> vc : cases) {
+            tests.add(DynamicTest.dynamicTest((String) vc.get("name"), () -> {
+                List<MediaClient> srcs = new ArrayList<>();
+                for (Object s : (List<Object>) vc.get("styles")) {
+                    if (s instanceof String preset) {
+                        srcs.add(Media.loadMediaStyle(preset,
+                                new Media.Config().command("/nonexistent/toolnexus-must-not-run")));
+                    } else {
+                        Media.Style st = Media.Style.of((Map<String, Object>) s);
+                        StyleMediaClient.validate(st);
+                        srcs.add(st);
+                    }
+                }
+                Media m = Media.create(srcs);
+                assertEquals(vc.get("expectVerbs"), m.verbs(), "verbs");
+                List<String> names = new ArrayList<>();
+                for (Tool t : m.tools()) names.add(t.name());
+                assertEquals(vc.get("expectTools"), names, "tools");
+                Media.MediaException e = assertThrows(Media.MediaException.class,
+                        () -> m.generate((String) vc.get("unsupported"), Map.of()));
+                assertEquals(vc.get("error"), e.getMessage());
+            }));
+        }
+        return tests;
     }
 
     // ------------------------------------------------------------------

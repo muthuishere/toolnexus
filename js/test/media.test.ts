@@ -12,10 +12,10 @@ import os from "node:os"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
 import {
-  createMedia, createToolkit, createClient, loadMediaStyle, styleMediaClient, modelParts, toOpenAIWire, toAnthropicWire,
+  createMedia, generateMedia, createToolkit, createClient, loadMediaStyle, styleMediaClient, modelParts, toOpenAIWire, toAnthropicWire,
   MEDIA_VERBS, A2E_STYLE, runFiles, MediaError, MediaUnavailableError,
   A2EMediaClient, ElevenLabsMediaClient, OpenAIMediaClient, OpenRouterMediaClient, FalMediaClient, GrokMediaClient, CodexMediaClient,
-  type MediaClient, type Tool, type ToolResult,
+  MediaStyle, type MediaClient, type Tool, type ToolResult,
 } from "../dist/index.js"
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
@@ -24,6 +24,8 @@ const read = (f: string) => JSON.parse(fs.readFileSync(path.join(CONF, f), "utf8
 const CASES = read("cases.json").cases as any[]
 const CLIENTS = read("clients.json").cases as any[]
 const CLI = read("cli.json").cases as any[]
+const CLI_VERBS = read("cli.json").verbCases as any[]
+const CLI_AVAIL = read("cli.json").availabilityCases as any[]
 const ROUTING = read("routing.json")
 const SCHEMAS = read("schemas.json")
 const VERBS = read("verbs.json")
@@ -32,7 +34,9 @@ const FAKE_CLI = path.join(CONF, "fake-cli", "fake-cli.sh")
 test("media conformance: exact case counts", () => {
   assert.equal(CASES.length, 49)
   assert.equal(CLIENTS.length, 76)
-  assert.equal(CLI.length, 24)
+  assert.equal(CLI.length, 35)
+  assert.equal(CLI_AVAIL.length, 7)
+  assert.equal(CLI_VERBS.length, 8)
   assert.equal(ROUTING.cases.length, 19)
   assert.equal(ROUTING.schemaCases.length, 1)
   assert.equal(VERBS.verbs.length, 7)
@@ -159,11 +163,21 @@ function assertRunFiles(c: any, tr: ToolResult, toolName: string) {
   })
 }
 
+/** §7G.10b: style/model are asserted only when the expected result names them. */
+function dropSource(got: any, want: any): any {
+  if (!got || typeof got !== "object") return got
+  const out = { ...got }
+  for (const k of ["style", "model"]) if (!want || !(k in want)) delete out[k]
+  return out
+}
+
 /** Compare a MediaResult, checking `saved` files on disk (§7G.11). */
 function assertResult(name: string, got: any, want: any, client: string, verb: string, dir?: string) {
   assert.ok(got, `${name}: no result`)
   const { files: gotFiles, ...gotRest } = got
   const { files: wantFiles, ...wantRest } = want
+  // §7G.10b: style/model are asserted only when the case names them.
+  for (const k of ["style", "model"]) if (!(k in wantRest)) delete gotRest[k]
   assert.deepEqual(gotRest, wantRest, `${name}: result fields`)
   assert.equal(gotFiles.length, wantFiles.length, `${name}: file count`)
   wantFiles.forEach((wf: any, i: number) => {
@@ -254,7 +268,7 @@ for (const c of CASES) {
       if (c.error !== undefined) assertError(c, err, {})
       else {
         assert.equal(err, undefined, `${c.name}: unexpected error ${(err as Error)?.message}`)
-        assert.deepEqual(result, c.result, `${c.name}: result`)
+        assert.deepEqual(dropSource(result, c.result), c.result, `${c.name}: result`)
       }
       assertRequests(c, srv.requests, true)
       if (c.expectProgress) assert.deepEqual(progress, c.expectProgress, `${c.name}: progress`)
@@ -342,10 +356,12 @@ for (const c of CLIENTS) {
 
 // ---- cli.json: CLI clients over the fake CLI -------------------------------------------------
 
-const CLI_CLIENT: Record<string, (cfg: any) => MediaClient> = {
-  grok: (cfg) => new GrokMediaClient(cfg),
-  codex: (cfg) => new CodexMediaClient(cfg),
-}
+// The legacy named clients stay public and equal their presets.
+test("media cli: GrokMediaClient / CodexMediaClient match the presets", () => {
+  assert.equal(new GrokMediaClient().name, loadMediaStyle(MediaStyle.XaiGrokCli).name)
+  assert.equal(new CodexMediaClient().name, loadMediaStyle(MediaStyle.OpenAICodexCli).name)
+  assert.equal(loadMediaStyle(MediaStyle.GoogleAgyCliMock).name, "agy")
+})
 
 for (const c of CLI) {
   test(`media cli: ${c.name}`, async () => {
@@ -359,7 +375,8 @@ for (const c of CLI) {
       const restore = withEnv(sub(c.env, map), undefined)
       try {
         const config = { ...sub(c.config, map), command: c.command ?? ["/bin/sh", FAKE_CLI, fixture, out] }
-        const media = createMedia(CLI_CLIENT[c.client](config))
+        const style = c.style
+        const media = createMedia(loadMediaStyle(style, config))
         const t0 = Date.now()
         if (face === "function") {
           const progress: string[] = []
@@ -369,10 +386,14 @@ for (const c of CLI) {
           if (c.error !== undefined || c.errorPrefix !== undefined) assertError(c, err, map)
           else {
             assert.equal(err, undefined, `${c.name}: unexpected error ${(err as Error)?.message}`)
-            assertResult(c.name, result, sub(c.result, map), c.client, c.verb, dir)
+            assertResult(c.name, result, sub(c.result, map), media.clients[0].name, c.verb, dir)
             if (c.noUsage) assert.equal("usage" in result, false, `${c.name}: no usage`)
           }
           if (c.expectProgress) assert.deepEqual(progress, c.expectProgress, `${c.name}: progress`)
+          if (c.oneShot) {
+            const one = await generateMedia(style, c.verb, c.args, config)
+            assertResult(c.name, one, sub(c.result, map), media.clients[0].name, c.verb, dir)
+          }
           for (const p of sub(c.expectExists ?? [], map)) assert.ok(fs.existsSync(p), `${c.name}: exists ${p}`)
           for (const p of sub(c.expectMissing ?? [], map)) assert.ok(!fs.existsSync(p), `${c.name}: missing ${p}`)
         } else {
@@ -432,7 +453,7 @@ for (const c of ROUTING.cases) {
     try { result = await media.generate(c.verb, c.args) } catch (e) { err = e }
     if (c.expectCalls) assert.deepEqual(calls, c.expectCalls, `${c.name}: calls`)
     if (c.error !== undefined) assertError(c, err, {})
-    else assert.deepEqual(result, c.result, `${c.name}: result`)
+    else assert.deepEqual(dropSource(result, c.result), c.result, `${c.name}: result`)
     if (c.tool) {
       const fresh = createMedia(routingClients(c.clients, []))
       const tool = fresh.tools().find((t: Tool) => t.name === (c.tool.name ?? MEDIA_VERBS.find((v) => v.verb === c.verb)!.tool))
@@ -478,7 +499,7 @@ test("media: createToolkit({ media }) registers the tools; loadMediaStyle reads 
   const tmp = tmpDir("tn-media-")
   const f = path.join(tmp, "style.json")
   fs.writeFileSync(f, JSON.stringify(SCHEMAS.style))
-  const media = createMedia(styleMediaClient(loadMediaStyle(f)))
+  const media = createMedia(loadMediaStyle(f))
   const tk = await createToolkit({ builtins: false, media })
   assert.deepEqual(tk.tools().filter((t: Tool) => t.source === "media").map((t: Tool) => t.name), SCHEMAS.tools.map((t: any) => t.name))
   fs.writeFileSync(f, JSON.stringify({ baseUrl: "http://x", verbs: { talking: { mode: "sync", kind: "video", start: { path: "/t" }, args: {}, resultPath: "u" } } }))
@@ -510,7 +531,7 @@ test("media: typed verbs pass providerOptions last; first client supporting a ve
     const b = { baseUrl: srv.url, verbs: { image: { mode: "sync", kind: "image", start: { path: "/b" }, args: { prompt: "p" }, resultPath: "u" } } }
     const media = createMedia([styleMediaClient(a as any), styleMediaClient(b as any)])
     const r = await media.image({ prompt: "cat", providerOptions: { q: 2, p: "over" } })
-    assert.deepEqual(r, { files: [{ type: "image", mimeType: "image/png", url: "https://x/a.png" }], status: "completed" })
+    assert.deepEqual(r, { files: [{ type: "image", mimeType: "image/png", url: "https://x/a.png" }], status: "completed", style: "style" })
     assert.equal(srv.requests[0].path, "/a")
     assert.deepEqual(JSON.parse(srv.requests[0].body.toString()), { q: 2, p: "over" })
   } finally { await srv.close() }
@@ -762,3 +783,46 @@ test("media D9: a media result with modelParts [] sends the plain output in open
   assert.equal("parts" in block, false)
   // Gemini: the JS port has no Gemini client style (SPEC §8 lists openai|anthropic for js).
 })
+
+// ---- cli.json verbCases: verbs() / tools() / unsupported-verb error over loaded styles -------
+
+for (const vc of CLI_VERBS) {
+  test(`media cli verbs: ${vc.name}`, async () => {
+    const srcs = vc.styles.map((s: any) => {
+      if (typeof s === "string") return loadMediaStyle(s, { command: ["/nonexistent/toolnexus-must-not-run"] })
+      const f = path.join(tmpDir("tn-style-"), "style.json")
+      fs.writeFileSync(f, JSON.stringify(s))
+      return loadMediaStyle(f)
+    })
+    const media = createMedia(srcs)
+    assert.deepEqual(media.verbs(), vc.expectVerbs)
+    assert.deepEqual(media.tools().map((t: Tool) => t.name), vc.expectTools)
+    await assert.rejects(media.generate(vc.unsupported, {}), { message: vc.error })
+  })
+}
+
+// ---- cli.json availabilityCases: style.available() (§7G.10b) ----------------------------------
+
+for (const ac of CLI_AVAIL) {
+  test(`media cli available: ${ac.name}`, () => {
+    const dir = fs.realpathSync(tmpDir("tn-avail-"))
+    const c = sub(ac, { "{dir}": dir })
+    const restore = withEnv(c.env, c.unsetEnv)
+    try {
+      for (const p of c.createFiles ?? []) fs.writeFileSync(p, "")
+      let style
+      if (typeof c.style === "string") style = loadMediaStyle(c.style, c.config ?? {})
+      else {
+        const f = path.join(tmpDir("tn-style-"), "style.json")
+        fs.writeFileSync(f, JSON.stringify(c.style))
+        style = loadMediaStyle(f, c.config ?? {})
+      }
+      const t0 = Date.now()
+      const got = style.available()
+      assert.ok(Date.now() - t0 < 1000, `${ac.name}: available() took ${Date.now() - t0}ms`)
+      assert.deepEqual(got, c.expect)
+    } finally {
+      restore()
+    }
+  })
+}

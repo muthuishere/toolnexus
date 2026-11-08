@@ -169,7 +169,7 @@ test("mock: media style drives all six verbs + an async failure", { skip }, asyn
     }
     one(await m.image({ prompt: "a cat" }), "/files/image.png", "image/png")
     one(await m.video({ prompt: "a cat running" }), "/files/video.mp4", "video/mp4")
-    one(await m.talking({ image: "https://x/a.png", audio: "https://x/a.wav" }), "/files/talking.mp4", "video/mp4")
+    one(await m.talk({ image: "https://x/a.png", audio: "https://x/a.wav" }), "/files/talking.mp4", "video/mp4")
     one(await m.speech({ text: "hello" }), "/files/speech.wav", "audio/wav")
     const tr = await m.transcribe({ audio: "https://x/a.wav" })
     assert.equal(tr.text, "Mock transcript of https://x/a.wav.")

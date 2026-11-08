@@ -14,7 +14,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use super::http::{self, Gather, Raw};
 use super::{
     GatherMode, MediaArg, MediaArgs, MediaClient, MediaClientConfig, MediaCtx, MediaError,
-    MediaResult, MediaUsage, positive, report, verb_kind,
+    MediaResult, MediaUsage, canonical_args, positive, report, verb_kind,
 };
 
 /// What one stdout line contributed (§7G.10 step 2).
@@ -43,7 +43,13 @@ pub trait CliProfile: Send + Sync {
     fn default_command(&self) -> &str;
     /// The verbs this CLI serves (prompt-only, §7G.10).
     fn verbs(&self) -> &[&'static str];
-    /// The client argv after `command` for one run.
+    /// The prompt template for `verb` (`{prompt}` = the folded prompt);
+    /// `None` ⇒ the folded prompt as is. Also the mock's reply text.
+    fn template(&self, _verb: &str) -> Option<&str> {
+        None
+    }
+    /// The client argv after `command` for one run; `prompt` is the
+    /// templated prompt (see [`CliProfile::template`]).
     fn argv(&self, verb: &str, prompt: &str, cwd: &Path, model: Option<&str>) -> Vec<String>;
     /// Fixed env added to the process env.
     fn env(&self) -> Vec<(String, String)> {
@@ -64,6 +70,8 @@ pub trait CliProfile: Send + Sync {
 pub struct CliMediaClient {
     profile: Arc<dyn CliProfile>,
     cfg: MediaClientConfig,
+    /// Mock preset: never spawn; return a fixed file.
+    mock: bool,
 }
 
 impl std::fmt::Debug for CliMediaClient {
@@ -119,7 +127,76 @@ impl CliMediaClient {
         CliMediaClient {
             profile: Arc::new(profile),
             cfg,
+            mock: false,
         }
+    }
+
+    fn gatherer<'a>(
+        &'a self,
+        verb: &'a str,
+        http_client: &'a reqwest::Client,
+        deadline: Instant,
+        timeout_ms: u64,
+        session: Option<String>,
+    ) -> Gather<'a> {
+        let name = self.profile.name();
+        Gather {
+            client: name,
+            verb,
+            kind: verb_kind(verb),
+            mode: self.cfg.gather.mode.unwrap_or(GatherMode::Download),
+            dir: self.cfg.gather.dir.clone(),
+            name: self.cfg.gather.name.clone(),
+            max: self.cfg.gather.max_bytes.unwrap_or(http::DEFAULT_MAX_BYTES),
+            keep: self.cfg.gather.keep.unwrap_or(true),
+            http: http_client,
+            deadline,
+            timeout_msg: format!("{name}: timed out after {timeout_ms}ms"),
+            job_id: session,
+        }
+    }
+
+    /// The mock run (§7G CLI mock presets): no process. Writes
+    /// `<gather.dir>/<client>-mock-<verb>.<png|mp4>` holding
+    /// `toolnexus mock <verb>` and gathers it like a CLI file.
+    async fn mock_run(
+        &self,
+        verb: &str,
+        prompt: String,
+        deadline: Instant,
+        timeout_ms: u64,
+    ) -> Result<MediaResult, MediaError> {
+        let name = self.profile.name();
+        let ext = if verb == "video" { "mp4" } else { "png" };
+        let dir = self
+            .cfg
+            .gather
+            .dir
+            .clone()
+            .unwrap_or_else(|| std::env::temp_dir().join("toolnexus-media"));
+        let dir = std::path::absolute(&dir).unwrap_or(dir);
+        let io = |e: std::io::Error| MediaError::failed(format!("{name}: {e}"));
+        std::fs::create_dir_all(&dir).map_err(io)?;
+        let path = dir.join(format!("{name}-mock-{verb}.{ext}"));
+        std::fs::write(&path, format!("toolnexus mock {verb}")).map_err(io)?;
+        let http_client = http::default_http();
+        let g = self.gatherer(
+            verb,
+            &http_client,
+            deadline,
+            timeout_ms,
+            Some("mock".into()),
+        );
+        let f = g.gather(Raw::Local(path)).await?;
+        Ok(MediaResult {
+            files: vec![f],
+            text: Some(prompt),
+            job_id: Some("mock".into()),
+            status: "completed".into(),
+            usage: None,
+            style: None,
+            model: None,
+        })
     }
 
     async fn run(
@@ -135,15 +212,22 @@ impl CliMediaClient {
                 "{name}: {verb} is not supported"
             )));
         }
-        let prompt = args
-            .get("prompt")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
+        let folded = fold_media_prompt(verb, &args);
+        let prompt = match p.template(verb) {
+            Some(t) => t.replace("{prompt}", &folded),
+            None => folded,
+        };
+        let prompt = prompt.as_str();
         let timeout_ms = positive(self.cfg.r#loop.timeout_ms).unwrap_or(600_000);
         let start = Instant::now();
         let mut deadline = start + Duration::from_millis(timeout_ms);
         if let Some(d) = ctx.deadline {
             deadline = deadline.min(d);
+        }
+        if self.mock {
+            return self
+                .mock_run(verb, prompt.to_string(), deadline, timeout_ms)
+                .await;
         }
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -319,19 +403,7 @@ impl CliMediaClient {
             });
         }
         let http_client = http::default_http();
-        let g = Gather {
-            client: &name,
-            verb,
-            kind: verb_kind(verb),
-            mode: self.cfg.gather.mode.unwrap_or(GatherMode::Download),
-            dir: self.cfg.gather.dir.clone(),
-            max: self.cfg.gather.max_bytes.unwrap_or(http::DEFAULT_MAX_BYTES),
-            keep: self.cfg.gather.keep.unwrap_or(true),
-            http: &http_client,
-            deadline,
-            timeout_msg: format!("{name}: timed out after {timeout_ms}ms"),
-            job_id: session.clone(),
-        };
+        let g = self.gatherer(verb, &http_client, deadline, timeout_ms, session.clone());
         let mut files = Vec::with_capacity(kept.len());
         for k in kept {
             files.push(g.gather(Raw::Local(PathBuf::from(k))).await?);
@@ -342,6 +414,8 @@ impl CliMediaClient {
             job_id: session,
             status: "completed".into(),
             usage: usage.nonempty(),
+            style: None,
+            model: None,
         })
     }
 }
@@ -354,13 +428,76 @@ impl MediaClient for CliMediaClient {
         self.profile.verbs().contains(&verb)
     }
     fn args(&self, verb: &str) -> Option<Vec<MediaArg>> {
-        Some(if self.supports(verb) {
-            vec![MediaArg::new("prompt", true)]
-        } else {
+        Some(if !self.supports(verb) {
             Vec::new()
+        } else if verb == "video" {
+            vec![
+                MediaArg::new("prompt", true),
+                MediaArg::new("seconds", false),
+                MediaArg::new("aspectRatio", false),
+            ]
+        } else {
+            vec![
+                MediaArg::new("prompt", true),
+                MediaArg::new("width", false),
+                MediaArg::new("height", false),
+                MediaArg::new("aspectRatio", false),
+            ]
         })
     }
     verbs_via_run!();
+}
+
+/// How an argument value renders in a prompt: a string as is, an integral
+/// number as integer text.
+fn arg_text(v: &Value) -> String {
+    match v {
+        Value::String(s) => s.clone(),
+        Value::Number(n) => match (n.as_i64(), n.as_f64()) {
+            (Some(i), _) => i.to_string(),
+            (None, Some(f)) if f.fract() == 0.0 && f.abs() < 1e15 => (f as i64).to_string(),
+            _ => n.to_string(),
+        },
+        Value::Null => String::new(),
+        other => other.to_string(),
+    }
+}
+
+/// `FoldMediaPrompt`: the prompt a CLI style receives — `prompt`, then the
+/// present size hints in canonical verb order as ` (h1, h2)` (§7G CLI hint
+/// folding). Nothing is appended when no hint is present.
+pub fn fold_media_prompt(verb: &str, args: &MediaArgs) -> String {
+    let prompt = args.get("prompt").map(arg_text).unwrap_or_default();
+    let mut hs: Vec<String> = Vec::new();
+    for a in canonical_args(verb) {
+        let Some(v) = args.get(&a.name).filter(|v| !v.is_null()) else {
+            continue;
+        };
+        let t = arg_text(v);
+        match a.name.as_str() {
+            "width" => hs.push(format!("width {t} px")),
+            "height" => hs.push(format!("height {t} px")),
+            "seconds" => hs.push(format!("about {t} seconds long")),
+            "aspectRatio" => hs.push(format!("aspect ratio {t}")),
+            _ => {}
+        }
+    }
+    if hs.is_empty() {
+        prompt
+    } else {
+        format!("{prompt} ({})", hs.join(", "))
+    }
+}
+
+/// The client behind a built-in CLI preset (`xai-grok-cli`, …, `*-mock`).
+pub(crate) fn preset_client(preset: &str, cfg: MediaClientConfig) -> CliMediaClient {
+    let mut c = match preset.trim_end_matches("-mock") {
+        "xai-grok-cli" => GrokMediaClient::new(cfg),
+        "openai-codex-cli" => CodexMediaClient::new(cfg),
+        _ => CliMediaClient::new(AgyProfile, cfg),
+    };
+    c.mock = preset.ends_with("-mock");
+    c
 }
 
 fn str_at<'a>(v: &'a Value, k: &str) -> Option<&'a str> {
@@ -394,15 +531,17 @@ impl CliProfile for GrokProfile {
     fn verbs(&self) -> &[&'static str] {
         &["image", "video"]
     }
-    fn argv(&self, verb: &str, prompt: &str, cwd: &Path, model: Option<&str>) -> Vec<String> {
-        let template = if verb == "video" {
+    fn template(&self, verb: &str) -> Option<&str> {
+        Some(if verb == "video" {
             "Generate exactly one short video with your video generation tool, shortest duration available: {prompt}. Do not write code. Reply only with the file path."
         } else {
             "Generate exactly one image with your image generation tool: {prompt}. Do not write code. Reply only with the file path."
-        };
+        })
+    }
+    fn argv(&self, _verb: &str, prompt: &str, cwd: &Path, model: Option<&str>) -> Vec<String> {
         let mut a: Vec<String> = vec![
             "-p".into(),
-            template.replace("{prompt}", prompt),
+            prompt.into(),
             "--cwd".into(),
             cwd.to_string_lossy().into_owned(),
             "--output-format".into(),
@@ -531,11 +670,13 @@ impl CliProfile for CodexProfile {
             a.push("-m".into());
             a.push(m.into());
         }
-        a.push(
-            "Generate exactly one image with your built-in image generation tool: {prompt}. Do not write code or use scripts. Reply only with the absolute path where the image was saved."
-                .replace("{prompt}", prompt),
-        );
+        a.push(prompt.into());
         a
+    }
+    fn template(&self, _verb: &str) -> Option<&str> {
+        Some(
+            "Generate exactly one image with your built-in image generation tool: {prompt}. Do not write code or use scripts. Reply only with the absolute path where the image was saved.",
+        )
     }
     fn parse(&self, raw: &str, obj: &Value) -> CliEvent {
         let mut ev = CliEvent::default();
@@ -573,5 +714,116 @@ impl CliProfile for CodexProfile {
         let l = error.to_ascii_lowercase();
         (l.contains("usage limit") || l.contains("quota"))
             .then(|| format!("codex: {}", cap(error, 400)))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Google Antigravity (agy)
+// ---------------------------------------------------------------------------
+
+/// `agy` (preset `google-agy-cli`): image through `agy -p …
+/// --output-format stream-json --dangerously-skip-permissions`. The path is in
+/// the final result's response, else the conversation's brain folder.
+struct AgyProfile;
+
+fn dot<'a>(v: &'a Value, path: &str) -> Option<&'a Value> {
+    path.split('.').try_fold(v, |v, k| v.get(k))
+}
+
+fn dot_str<'a>(v: &'a Value, path: &str) -> Option<&'a str> {
+    dot(v, path).and_then(Value::as_str)
+}
+
+impl CliProfile for AgyProfile {
+    fn name(&self) -> &str {
+        "agy"
+    }
+    fn default_command(&self) -> &str {
+        "agy"
+    }
+    fn verbs(&self) -> &[&'static str] {
+        &["image"]
+    }
+    fn template(&self, _verb: &str) -> Option<&str> {
+        Some(
+            "Generate exactly one image with your image generation tool: {prompt}. Do not write code. Reply only with the absolute path where the image was saved.",
+        )
+    }
+    fn argv(&self, _verb: &str, prompt: &str, _cwd: &Path, model: Option<&str>) -> Vec<String> {
+        let mut a: Vec<String> = vec![
+            "-p".into(),
+            prompt.into(),
+            "--output-format".into(),
+            "stream-json".into(),
+            "--dangerously-skip-permissions".into(),
+        ];
+        if let Some(m) = model.filter(|m| !m.is_empty()) {
+            a.push("--model".into());
+            a.push(m.into());
+        }
+        a
+    }
+    fn parse(&self, _raw: &str, obj: &Value) -> CliEvent {
+        let mut ev = CliEvent::default();
+        match str_at(obj, "event") {
+            Some("init") => {
+                ev.session = str_at(obj, "conversation_id").map(str::to_string);
+                ev.status = Some("init".into());
+            }
+            Some("step_update") => {
+                if let (Some(t), Some(st)) = (
+                    dot_str(obj, "step_update.tool_name").filter(|t| !t.is_empty()),
+                    dot_str(obj, "step_update.state").filter(|s| !s.is_empty()),
+                ) {
+                    ev.status = Some(format!("tool {t} {st}"));
+                }
+            }
+            Some("result") => {
+                ev.session = dot_str(obj, "result.conversation_id").map(str::to_string);
+                ev.text = dot_str(obj, "result.response").map(str::to_string);
+                let st = dot_str(obj, "result.status").unwrap_or("");
+                ev.status = Some(format!("result {st}"));
+                if st != "SUCCESS" {
+                    let text = ev.text.clone().filter(|t| !t.is_empty());
+                    ev.error = Some(
+                        dot_str(obj, "result.error")
+                            .filter(|m| !m.is_empty())
+                            .or_else(|| {
+                                dot_str(obj, "result.error.message").filter(|m| !m.is_empty())
+                            })
+                            .map(str::to_string)
+                            .or(text)
+                            .unwrap_or_else(|| {
+                                obj.get("result").map(Value::to_string).unwrap_or_default()
+                            }),
+                    );
+                }
+                let usage = MediaUsage {
+                    input_tokens: dot(obj, "result.usage.input_tokens").and_then(Value::as_i64),
+                    output_tokens: dot(obj, "result.usage.output_tokens").and_then(Value::as_i64),
+                    cost_usd: None,
+                    raw: None,
+                };
+                ev.usage = usage.nonempty();
+            }
+            Some("error") => ev.error = str_at(obj, "message").map(str::to_string),
+            _ => {}
+        }
+        ev
+    }
+    fn folder(&self, session: &str) -> Option<PathBuf> {
+        let home = std::env::var("HOME").ok()?;
+        Some(
+            PathBuf::from(home)
+                .join(".gemini")
+                .join("antigravity-cli")
+                .join("brain")
+                .join(session),
+        )
+    }
+    fn unavailable(&self, _verb: &str, error: &str) -> Option<String> {
+        let l = error.to_lowercase();
+        (l.contains("quota") || l.contains("usage limit"))
+            .then(|| format!("agy: {}", cap(error, 400)))
     }
 }

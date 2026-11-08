@@ -156,7 +156,7 @@ async def test_media_every_verb(base, tmp_path):
     assert tr.text == "Mock transcript of https://x/a.wav." and tr.files == []
     cv = await m.clone_voice("muthu", ["https://x/s.wav"])
     assert cv.text.startswith("voice-") and len(cv.text) == 14
-    tk = await m.talking("https://x/face.png", "https://x/a.wav")
+    tk = await m.talk("https://x/face.png", audio="https://x/a.wav")
     assert tk.files[0].url.endswith("/files/talking.mp4") and tk.files[0].mime_type == "video/mp4"
     with pytest.raises(Exception, match="mock: job asked to fail"):
         await m.image("[fail] please")

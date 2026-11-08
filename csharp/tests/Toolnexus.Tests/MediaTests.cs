@@ -45,7 +45,9 @@ public class MediaTests
     {
         Assert.Equal(49, Cases("cases.json").Count);
         Assert.Equal(76, Cases("clients.json").Count);
-        Assert.Equal(24, Cases("cli.json").Count);
+        Assert.Equal(35, Cases("cli.json").Count);
+        Assert.Equal(7, Cases("cli.json", "availabilityCases").Count);
+        Assert.Equal(8, Cases("cli.json", "verbCases").Count);
         Assert.Equal(19, Cases("routing.json").Count);
         Assert.Single(Cases("routing.json", "schemaCases"));
     }
@@ -302,6 +304,9 @@ public class MediaTests
         else Assert.Null(r.Usage);
         Assert.Equal(expected.Get("text") as string, r.Text);
         Assert.Equal(expected.Get("jobId") as string, r.JobId);
+        // §7G.10b style/model: asserted only when the case names them
+        if (expected.ContainsKey("style")) Assert.Equal(expected["style"] as string, r.Style);
+        if (expected.ContainsKey("model")) Assert.Equal(expected["model"] as string, r.Model);
     }
 
     private static void AssertError(Dictionary<string, object?> c, Exception ex)
@@ -358,7 +363,7 @@ public class MediaTests
         if (cfg.Get("gather") is Dictionary<string, object?> g)
             c.Gather = new MediaGather
             {
-                Mode = g.Get("mode") as string, Dir = g.Get("dir") as string,
+                Name = g.Get("name") as string, Mode = g.Get("mode") as string, Dir = g.Get("dir") as string,
                 MaxBytes = g.Get("maxBytes") as long?, Keep = g.Get("keep") as bool?,
             };
         return c;
@@ -533,9 +538,11 @@ public class MediaTests
             cfg.Command = cs.Get("command") is List<object?> cmd
                 ? cmd.Select(x => (string)x!).ToList()
                 : new List<string> { "/bin/sh", ConformanceFile("fake-cli/fake-cli.sh"), fixture, outDir };
-            var client = (string)c["client"]!;
+            var style = (string)c["style"]!;
             var verb = (string)c["verb"]!;
-            var media = Media.Create(BuiltIn(client, cfg));
+            var loaded = MediaStyle.Load(style, cfg);
+            var client = loaded.Name;
+            var media = Media.Create(loaded);
             var args = (Dictionary<string, object?>)cs["args"]!;
             var sw = System.Diagnostics.Stopwatch.StartNew();
             if (!toolFace)
@@ -547,6 +554,8 @@ public class MediaTests
                     var res = await media.GenerateAsync(verb, args);
                     AssertResult((Dictionary<string, object?>)cs["result"]!, res, dir, client, verb);
                     AssertRunFilesAndUsage(c, res);
+                    if (c.Get("oneShot") is true)
+                        AssertResult((Dictionary<string, object?>)cs["result"]!, await Media.GenerateMediaAsync(style, verb, args, cfg), dir, client, verb);
                 }
                 if (c.Get("expectProgress") is List<object?> ep) Assert.Equal(ep.Select(x => (string)x!).ToList(), progress);
             }
@@ -588,6 +597,54 @@ public class MediaTests
     [Theory]
     [MemberData(nameof(CliCaseNames))]
     public Task Cli_ToolFace(string name) => RunCliCase(Case("cli.json", name), toolFace: true);
+
+    public static IEnumerable<object[]> CliVerbCaseNames() => Cases("cli.json", "verbCases").Select(c => new object[] { (string)c["name"]! });
+
+    public static IEnumerable<object[]> AvailabilityCaseNames() => Cases("cli.json", "availabilityCases").Select(c => new object[] { (string)c["name"]! });
+
+    /// <summary>cli.json availabilityCases (§7G.10b): {dir} = a fresh realpath'd temp dir.</summary>
+    [Theory]
+    [MemberData(nameof(AvailabilityCaseNames))]
+    public void Cli_AvailabilityCase(string name)
+    {
+        var c = Cases("cli.json", "availabilityCases").First(x => (string)x["name"]! == name);
+        var dir = MediaUtil.RealPath(TempDir());
+        try
+        {
+            var map = new Dictionary<string, string> { ["{dir}"] = dir };
+            var cs = (Dictionary<string, object?>)Subst(c, map)!;
+            using var env = new EnvScope(c, map);
+            if (cs.Get("createFiles") is List<object?> cf) foreach (var p in cf) File.WriteAllBytes((string)p!, Array.Empty<byte>());
+            var style = cs["style"] is string preset
+                ? MediaStyle.Load(preset, Config((Dictionary<string, object?>?)cs.Get("config"), new List<string>()))
+                : MediaStyle.FromDictionary((Dictionary<string, object?>)cs["style"]!);
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            var got = style.Available();
+            Assert.True(sw.ElapsedMilliseconds < 1000, $"took {sw.ElapsedMilliseconds}ms");
+            var exp = (Dictionary<string, object?>)cs["expect"]!;
+            Assert.Equal(((bool)exp["installed"]!, (bool)exp["loggedIn"]!, (string)exp["reason"]!), (got.Installed, got.LoggedIn, got.Reason));
+        }
+        finally
+        {
+            Directory.Delete(dir, true);
+        }
+    }
+
+    /// <summary>cli.json verbCases: createMedia over loaded styles (string = preset, object = HTTP style).</summary>
+    [Theory]
+    [MemberData(nameof(CliVerbCaseNames))]
+    public async Task Cli_VerbCase(string name)
+    {
+        var c = Cases("cli.json", "verbCases").First(x => (string)x["name"]! == name);
+        var noRun = new MediaClientConfig { Command = new[] { "/nonexistent/toolnexus-must-not-run" } };
+        var media = Media.Create(((List<object?>)c["styles"]!).Select(s => (IMediaClient)(s is string preset
+            ? MediaStyle.Load(preset, noRun)
+            : MediaStyle.FromDictionary((Dictionary<string, object?>)s!))));
+        Assert.Equal(((List<object?>)c["expectVerbs"]!).Select(x => (string)x!).ToList(), media.Verbs());
+        Assert.Equal(((List<object?>)c["expectTools"]!).Select(x => (string)x!).ToList(), media.Tools().Select(t => t.Name).ToList());
+        var e = await Assert.ThrowsAsync<MediaException>(() => media.GenerateAsync((string)c["unsupported"]!, new Dictionary<string, object?>()));
+        Assert.Equal((string)c["error"]!, e.Message);
+    }
 
     // ================================================================ routing.json — createMedia
 

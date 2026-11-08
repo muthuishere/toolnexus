@@ -2,18 +2,119 @@ namespace Toolnexus;
 
 /// <summary>
 /// §7G.7 provider style — JSON data, never code. Load one with <see cref="Load"/> (SPEC
-/// <c>loadMediaStyle(path)</c>), <see cref="Parse"/> (JSON text) or <see cref="FromDictionary"/>, and
-/// make a client of it with <see cref="StyleMediaClient"/>.
+/// <c>loadMediaStyle(pathOrPreset, config?)</c>), <see cref="Parse"/> (JSON text) or
+/// <see cref="FromDictionary"/>. A loaded style is itself an <see cref="IMediaClient"/>, so
+/// <c>Media.Create(style)</c> works; <see cref="Load"/> also accepts a built-in CLI preset name
+/// (<see cref="XaiGrokCli"/>, <see cref="OpenAICodexCli"/>, <see cref="GoogleAgyCli"/> and their mock twins).
 /// </summary>
-public sealed class MediaStyle
+public sealed class MediaStyle : IMediaClient
 {
+    /// <summary>Preset: the <c>grok</c> CLI (image, video) on the user's own subscription.</summary>
+    public const string XaiGrokCli = "xai-grok-cli";
+    /// <summary>Preset: the <c>codex</c> CLI (image).</summary>
+    public const string OpenAICodexCli = "openai-codex-cli";
+    /// <summary>Preset: Google's Antigravity CLI <c>agy</c> (image).</summary>
+    public const string GoogleAgyCli = "google-agy-cli";
+    /// <summary>Mock twin of <see cref="XaiGrokCli"/>: same name, verbs, args, folding and errors; never starts a process.</summary>
+    public const string XaiGrokCliMock = "xai-grok-cli-mock";
+    /// <summary>Mock twin of <see cref="OpenAICodexCli"/>.</summary>
+    public const string OpenAICodexCliMock = "openai-codex-cli-mock";
+    /// <summary>Mock twin of <see cref="GoogleAgyCli"/>.</summary>
+    public const string GoogleAgyCliMock = "google-agy-cli-mock";
+
+    private static readonly Dictionary<string, string> CliPresets = new()
+    {
+        [XaiGrokCli] = "grok", [OpenAICodexCli] = "codex", [GoogleAgyCli] = "agy",
+        [XaiGrokCliMock] = "grok", [OpenAICodexCliMock] = "codex", [GoogleAgyCliMock] = "agy",
+    };
+
+    /// <summary>The built-in preset this style is, or null for a JSON style.</summary>
+    public string? Preset { get; }
+
+    private readonly MediaClientConfig? _config;
+    internal MediaClientConfig? Config => _config;
+
+    /// <summary>Set to <c>0</c>, every mock preset reports unavailable (§7G.10b).</summary>
+    public const string MockAvailableEnv = "TOOLNEXUS_MEDIA_MOCK_AVAILABLE";
+
+    /// <summary>§7G.10b — whether this style can run, in well under a second, generating nothing and
+    /// reading no secret. CLI preset: the command is found and the CLI's own login file exists (never
+    /// read). HTTP style: config <c>Key</c> set, or every <c>${VAR}</c> in its headers set.</summary>
+    public MediaAvailability Available()
+    {
+        if (Preset == null)
+        {
+            if (!string.IsNullOrEmpty(_config?.Key)) return new(true, true, Name + ": key from config");
+            var vars = new SortedSet<string>(StringComparer.Ordinal);
+            if (Raw.Get("headers") is IDictionary<string, object?> hs)
+                foreach (var v in hs.Values)
+                    foreach (System.Text.RegularExpressions.Match m in System.Text.RegularExpressions.Regex.Matches(v?.ToString() ?? "", @"\$\{([A-Za-z_][A-Za-z0-9_]*)\}"))
+                        vars.Add(m.Groups[1].Value);
+            foreach (var name in vars)
+                if (string.IsNullOrEmpty(Environment.GetEnvironmentVariable(name))) return new(true, false, $"{Name}: {name} is not set");
+            return new(true, true, Name + ": env present");
+        }
+        var label = Name;
+        if (Preset.EndsWith("-mock", StringComparison.Ordinal))
+            return Environment.GetEnvironmentVariable(MockAvailableEnv) == "0"
+                ? new(false, false, $"{label}: mock set unavailable by {MockAvailableEnv}=0")
+                : new(true, true, label + ": mock");
+        var bin = _config?.Command is { Count: > 0 } cmd ? cmd[0] : label;
+        if (!OnPath(bin)) return new(false, false, $"{label}: \"{bin}\" not found on PATH");
+        var auth = AuthFile(label);
+        return File.Exists(auth)
+            ? new(true, true, $"{label}: installed, logged in ({auth} present)")
+            : new(true, false, $"{label}: installed, not logged in ({auth} missing)");
+    }
+
+    private static string Home => Environment.GetEnvironmentVariable("HOME") is { Length: > 0 } h
+        ? h : Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+
+    private static string AuthFile(string label) => label switch
+    {
+        "grok" => Path.Combine(Home, ".grok", "auth.json"),
+        "codex" => Path.Combine(Environment.GetEnvironmentVariable("CODEX_HOME") is { Length: > 0 } ch ? ch : Path.Combine(Home, ".codex"), "auth.json"),
+        _ => Path.Combine(Home, ".gemini", "antigravity-cli", "antigravity-oauth-token"),
+    };
+
+    private static bool OnPath(string bin)
+    {
+        if (bin.Contains('/') || bin.Contains(Path.DirectorySeparatorChar)) return IsExecutable(bin);
+        foreach (var d in (Environment.GetEnvironmentVariable("PATH") ?? "").Split(Path.PathSeparator))
+        {
+            if (d.Length == 0) continue;
+            if (IsExecutable(Path.Combine(d, bin))) return true;
+            if (OperatingSystem.IsWindows())
+                foreach (var ext in (Environment.GetEnvironmentVariable("PATHEXT") ?? ".EXE;.CMD;.BAT").Split(';'))
+                    if (ext.Length > 0 && File.Exists(Path.Combine(d, bin + ext))) return true;
+        }
+        return false;
+    }
+
+    private static bool IsExecutable(string p)
+    {
+        if (!File.Exists(p)) return false;
+        if (OperatingSystem.IsWindows()) return true;
+        const UnixFileMode x = UnixFileMode.UserExecute | UnixFileMode.GroupExecute | UnixFileMode.OtherExecute;
+        return (File.GetUnixFileMode(p) & x) != 0;
+    }
+    private IMediaClient? _client;
+
     private static readonly HashSet<string> Verbs = new() { "image", "video", "speech", "music", "transcribe", "cloneVoice", "talk" };
 
     internal Dictionary<string, object?> Raw { get; }
 
-    private MediaStyle(Dictionary<string, object?> raw)
+    private MediaStyle(string preset, MediaClientConfig? config)
+    {
+        Raw = new Dictionary<string, object?>();
+        Preset = preset;
+        _config = config;
+    }
+
+    private MediaStyle(Dictionary<string, object?> raw, MediaClientConfig? config = null)
     {
         Raw = raw;
+        _config = config;
         if (raw.Get("verbs") is IDictionary<string, object?> vs)
             foreach (var (name, vv) in vs)
             {
@@ -25,8 +126,13 @@ public sealed class MediaStyle
             }
     }
 
-    /// <summary>Read one style file (SPEC <c>loadMediaStyle(path)</c>).</summary>
-    public static MediaStyle Load(string path) => Parse(File.ReadAllText(path));
+    /// <summary>A built-in CLI preset name (<see cref="XaiGrokCli"/> …), or else a style file to read
+    /// (SPEC <c>loadMediaStyle(pathOrPreset, config?)</c>). <paramref name="config"/> configures the
+    /// client behind the style (model, command, loop, gather, …).</summary>
+    public static MediaStyle Load(string pathOrPreset, MediaClientConfig? config = null)
+        => CliPresets.ContainsKey(pathOrPreset)
+            ? new MediaStyle(pathOrPreset, config)
+            : new MediaStyle(Json.ToMap(File.ReadAllText(pathOrPreset)), config);
 
     /// <summary>Parse a style from JSON text.</summary>
     public static MediaStyle Parse(string json) => new(Json.ToMap(json));
@@ -34,8 +140,34 @@ public sealed class MediaStyle
     /// <summary>Wrap an already-parsed style object (deep-copied).</summary>
     public static MediaStyle FromDictionary(IDictionary<string, object?> style) => Parse(Json.Stringify(style));
 
-    /// <summary><c>style.name</c>, else <c>"style"</c>.</summary>
-    public string Name => Raw.Get("name") as string is { Length: > 0 } n ? n : "style";
+    /// <summary>The preset's client label (<c>grok</c>, <c>codex</c>, <c>agy</c>), else <c>style.name</c>, else <c>"style"</c>.</summary>
+    public string Name => Preset != null ? CliPresets[Preset] : Raw.Get("name") as string is { Length: > 0 } n ? n : "style";
+
+    /// <summary>The client behind this style.</summary>
+    private IMediaClient Client => _client ??= Build();
+
+    private IMediaClient Build()
+    {
+        if (Preset == null) return new StyleMediaClient(this, _config);
+        var mock = Preset.EndsWith("-mock", StringComparison.Ordinal);
+        return CliPresets[Preset] switch
+        {
+            "grok" => new GrokMediaClient(_config) { Mock = mock },
+            "codex" => new CodexMediaClient(_config) { Mock = mock },
+            _ => new AgyMediaClient(_config) { Mock = mock },
+        };
+    }
+
+    /// <summary>Whether the style declares <paramref name="verb"/> — the one verb-support mechanism, HTTP or CLI.</summary>
+    public bool Supports(string verb) => Client.Supports(verb);
+    public IReadOnlyList<MediaArg>? Args(string verb) => Client.Args(verb);
+    public Task<MediaResult> ImageAsync(IDictionary<string, object?> args, MediaContext ctx) => Client.ImageAsync(args, ctx);
+    public Task<MediaResult> VideoAsync(IDictionary<string, object?> args, MediaContext ctx) => Client.VideoAsync(args, ctx);
+    public Task<MediaResult> SpeechAsync(IDictionary<string, object?> args, MediaContext ctx) => Client.SpeechAsync(args, ctx);
+    public Task<MediaResult> MusicAsync(IDictionary<string, object?> args, MediaContext ctx) => Client.MusicAsync(args, ctx);
+    public Task<MediaResult> TranscribeAsync(IDictionary<string, object?> args, MediaContext ctx) => Client.TranscribeAsync(args, ctx);
+    public Task<MediaResult> CloneVoiceAsync(IDictionary<string, object?> args, MediaContext ctx) => Client.CloneVoiceAsync(args, ctx);
+    public Task<MediaResult> TalkAsync(IDictionary<string, object?> args, MediaContext ctx) => Client.TalkAsync(args, ctx);
 
     internal string BaseUrl => (Raw.Get("baseUrl") as string ?? "").TrimEnd('/');
 

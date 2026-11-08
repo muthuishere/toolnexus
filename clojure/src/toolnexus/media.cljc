@@ -23,9 +23,14 @@
 ;; way API clients are DEFINED), `a2e-media-client` (a style over the embedded
 ;; examples/media-styles/a2e.json), `elevenlabs-media-client`,
 ;; `openai-media-client`, `openrouter-media-client`, `fal-media-client`,
-;; `cli-media-client` and its two presets `grok-media-client` /
-;; `codex-media-client`. `create-media` routes each verb to the first client
-;; that supports it, falling through ONLY on `unavailable` (§7G.3).
+;; `cli-media-client` and its presets `grok-media-client` /
+;; `codex-media-client` (agy is internal). The preferred spelling for CLIs is
+;; the preset-as-style: `(load-media-style media/xai-grok-cli cfg)` — preset vars
+;; `xai-grok-cli` `openai-codex-cli` `google-agy-cli` and `-mock` twins
+;; (strings); `available` is the cheap pre-flight check (§7G.10b).
+;; `create-media` routes each verb to the first client that supports it,
+;; falling through ONLY on `unavailable` (§7G.3). A result carries `:style`
+;; (who served it) and `:model` (the configured model, when set).
 ;;
 ;; KNOWN GAP (both hosts): koine.http carries request and response bodies as
 ;; TEXT (UTF-8), so a provider's binary body (mp3 bytes, a downloaded image)
@@ -401,7 +406,7 @@
 
 (def version
   "The package version (kept equal to build.clj's `version`; a test pins it)."
-  "0.23.0")
+  "0.28.0")
 
 (def user-agent
   "§7G.12 D23: the default User-Agent of every media HTTP request."
@@ -675,6 +680,7 @@
   (let [g (get-in job [:cfg :gather])]
     {:mode      (let [m (:mode g)] (if (and m (seq (kname m))) (kname m) default-mode))
      :dir       (let [d (:dir g)] (if (and (string? d) (seq d)) d (str (temp-root) "/toolnexus-media")))
+     :name      (:name g)
      :max-bytes (positive-or (:max-bytes g) default-max-bytes)
      :keep      (not (false? (:keep g)))}))
 
@@ -690,12 +696,40 @@
 (defn- content-b64 [{:keys [text bytes]}]
   (if bytes (codec/encode bytes) (codec/encode (str text))))
 
+(defn- media-slug
+  "§7G.10b gather.name: every byte outside [A-Za-z0-9._-] becomes \"-\" (per
+  UTF-8 byte), then leading \".\" and \"-\" are dropped."
+  [n]
+  (let [ok? (fn [ch] (or (<= (int \a) (int ch) (int \z)) (<= (int \A) (int ch) (int \Z))
+                         (<= (int \0) (int ch) (int \9)) (contains? #{\. \_ \-} ch)))
+        s   (apply str (mapcat (fn [ch] (if (ok? ch) [ch] (repeat (text/utf8-length (str ch)) \-)))
+                               (str n)))]
+    (str/replace s #"^[.-]+" "")))
+
+;; names handed out but not yet written, so concurrent gathers never collide
+(def ^:private claimed-names (atom #{}))
+
+(defn- free-name!
+  "The first of <slug><ext>, <slug>-2<ext>, … not yet in `dir`; created empty."
+  [dir slug ext]
+  (loop [n 1]
+    (let [p    (str dir "/" slug (if (> n 1) (str "-" n) "") ext)
+          [old _] (swap-vals! claimed-names (fn [c] (if (or (contains? c p) (fs/exists? p)) c (conj c p))))]
+      (if (or (contains? old p) (fs/exists? p))
+        (recur (inc n))
+        (do (fs/write-file p "")
+            (swap! claimed-names disj p)
+            p)))))
+
 (defn- save! [job g mime c src-url]
   (let [dir  (:dir g)
         _    (fs/mkdirs! dir)
-        path (str dir "/" (:client job) "-" (:verb job) "-" (ktime/now-ms) "-"
-                  (swap! save-seq inc)
-                  (or (when src-url (url-save-ext src-url)) (get mime-ext mime ".bin")))]
+        ext  (or (when src-url (url-save-ext src-url)) (get mime-ext mime ".bin"))
+        slug (media-slug (or (:name g) ""))
+        path (if (seq slug)
+               (free-name! (trim-slash dir) slug ext)
+               (str dir "/" (:client job) "-" (:verb job) "-" (ktime/now-ms) "-"
+                    (swap! save-seq inc) ext))]
     (if (:bytes c) (fs/write-bytes path (:bytes c)) (fs/write-file path (str (:text c))))
     path))
 
@@ -835,8 +869,6 @@
   "Read one style JSON file (§7G `loadMediaStyle`)."
   [path]
   (json/read-str (fs/read-file path) {:key-fn str}))
-
-(def load-media-style "Alias of `load-style` (SPEC spelling)." load-style)
 
 (defn- validate-style! [s]
   (doseq [v (sort tool/compare-strings (keys (get s "verbs")))]
@@ -1352,15 +1384,70 @@
   (let [m (ext-mime-of p)]
     (and m (str/starts-with? m (str verb "/")))))
 
+(defn- arg-text
+  "An arg value as prompt text: a string as-is, an integral number as integer text."
+  [v]
+  (cond (string? v) v
+        (number? v) (render-number v)
+        (nil? v)    ""
+        :else       (str v)))
+
+(def ^:private cli-hints
+  [["width" "width " " px"] ["height" "height " " px"]
+   ["seconds" "about " " seconds long"] ["aspectRatio" "aspect ratio " ""]])
+
+(defn fold-media-prompt
+  "§7G CLI hint folding: the prompt a CLI style receives — `prompt`, then the
+  present size hints in canonical verb order as \" (h1, h2)\"; nothing appended
+  when none is present. `args` keys may be keywords or strings."
+  [verb args]
+  (let [get* (fn [k] (let [v (get args (keyword k))] (if (some? v) v (get args k))))
+        hs   (for [a (:args (verb-entry (kname verb)))
+                   [n pre post] cli-hints
+                   :when (= n (:name a))
+                   :let [v (get* n)]
+                   :when (some? v)]
+               (str pre (arg-text v) post))]
+    (if (seq hs)
+      (str (arg-text (get* "prompt")) " (" (str/join ", " hs) ")")
+      (arg-text (get* "prompt")))))
+
+(defn- absolute [p]
+  (if (str/starts-with? p "/") p (str (fs/real-path ".") "/" p)))
+
+(defn- cli-mock-run
+  "§7G CLI mock presets: no process. Writes \"<gather.dir>/<client>-mock-<verb>.<png|mp4>\"
+  holding \"toolnexus mock <verb>\", gathers it like a CLI file; text = the exact
+  prompt the CLI would have received; jobId \"mock\"."
+  [spec cfg job verb prompt]
+  (let [ext  (if (= "video" verb) ".mp4" ".png")
+        d    (get-in cfg [:gather :dir])
+        dir  (if (and (string? d) (seq d)) d (str (temp-root) "/toolnexus-media"))
+        _    (fs/mkdirs! dir)
+        p    (absolute (str (trim-slash dir) "/" (:name spec) "-mock-" verb ext))]
+    (fs/write-file p (str "toolnexus mock " verb))
+    {:files  (gather! job verb [{:path p}] "download")
+     :text   prompt
+     :jobId  "mock"
+     :status "completed"}))
+
+(declare cli-spawn-run)
+
 (defn- cli-run [spec cfg verb args ctx]
+  (let [cname   (:name spec)
+        timeout (loop-timeout cfg)
+        job     (make-job cname verb cfg ctx timeout)
+        prompt  (str/replace (get-in spec [:templates verb]) "{prompt}" (fold-media-prompt verb args))]
+    (if (:mock spec)
+      (cli-mock-run spec cfg job verb prompt)
+      (cli-spawn-run spec cfg job verb prompt timeout))))
+
+(defn- cli-spawn-run [spec cfg job verb prompt timeout]
   (let [cname   (:name spec)
         cmd     (let [c (:command cfg)]
                   (cond (string? c) [c]
                         (and (sequential? c) (seq c)) (mapv str c)
                         :else [(:default-command spec)]))
-        timeout (loop-timeout cfg)
-        job     (make-job cname verb cfg ctx timeout)
-        prompt  (str/replace (get-in spec [:templates verb]) "{prompt}" (str (:prompt args)))
         model   (cfg-model cfg verb verb nil)
         cwd     (fs/real-path (fs/temp-dir! "toolnexus-cli")) ; D17: realpath (macOS /var => /private/var)
         argv    ((:argv spec) {:prompt prompt :cwd cwd :model model})]
@@ -1430,6 +1517,11 @@
       (finally
         (try (fs/delete-tree! cwd) (catch Throwable _ nil))))))
 
+(defn- cli-args [verb]
+  (into [{:name "prompt" :required true}]
+        (map (fn [n] {:name n :required false})
+             (if (= "video" verb) ["seconds" "aspectRatio"] ["width" "height" "aspectRatio"]))))
+
 (defn cli-media-client
   "CliMediaClient (§7G.10): run a local CLI once, headless, read its JSON-lines
   stdout, collect files, kill on cancel/timeout. `spec`:
@@ -1442,13 +1534,17 @@
     :parse            (fn [obj line]) -> {:session :text :paths :error :status}
     :folder           optional (fn [config session]) -> dir to scan
     :unavailable      (fn [verb error]) -> message when unavailable, else nil
-  CLI clients accept `prompt` only."
+    :mock             true => never spawn; return a fixed file (§7G CLI mock presets)
+  CLI clients accept prompt plus size hints (image: width, height,
+  aspectRatio; video: seconds, aspectRatio), folded into the prompt by
+  `fold-media-prompt`."
   [spec config]
-  (let [cfg (or config {})
-        vs  (set (:verbs spec))]
+  (let [cfg  (or config {})
+        spec (cond-> spec (::mock cfg) (assoc :mock true))
+        vs   (set (:verbs spec))]
     (merge {:name     (:name spec)
             :supports (fn [verb] (contains? vs (kname verb)))
-            :args     (fn [_] [{:name "prompt" :required true}])}
+            :args     (fn [verb] (when (contains? vs (kname verb)) (cli-args (kname verb))))}
            (into {} (keep (fn [[verb k]]
                             (when (contains? vs verb)
                               [k (fn [args ctx] (cli-run spec cfg verb args ctx))]))
@@ -1534,11 +1630,166 @@
                       (str "codex: " (cap-cp err 400))))}
     config)))
 
+;; ---- Google Antigravity (agy)
+
+(defn- dig [o ks] (reduce (fn [m k] (when (map? m) (get m k))) o ks))
+
+(defn- agy-media-client
+  "`agy -p … --output-format stream-json --dangerously-skip-permissions`
+  (image). The path is in the final result's response text, else the newest
+  image in the conversation's brain folder."
+  [config]
+  (cli-media-client
+   {:name "agy" :verbs #{"image"} :default-command "agy"
+    :argv (fn [{:keys [prompt model]}]
+            (cond-> ["-p" prompt "--output-format" "stream-json" "--dangerously-skip-permissions"]
+              model (into ["--model" model])))
+    :templates {"image" "Generate exactly one image with your image generation tool: {prompt}. Do not write code. Reply only with the absolute path where the image was saved."}
+    :parse (fn [o line]
+             (case (get o "event")
+               "init" {:session (let [c (get o "conversation_id")] (when (string? c) c)) :status "init"}
+               "step_update" (let [t (dig o ["step_update" "tool_name"]) st (dig o ["step_update" "state"])]
+                               (when (and (string? t) (seq t) (string? st) (seq st))
+                                 {:status (str "tool " t " " st)}))
+               "result" (let [sess (dig o ["result" "conversation_id"])
+                              txt  (dig o ["result" "response"])
+                              txt  (when (string? txt) txt)
+                              st   (dig o ["result" "status"])
+                              st   (if (string? st) st "")
+                              e    (dig o ["result" "error"])
+                              em   (dig o ["result" "error" "message"])
+                              u    (usage-of (dig o ["result" "usage"]) [[:inputTokens "input_tokens"] [:outputTokens "output_tokens"]])]
+                          (cond-> {:status (str "result " st)}
+                            (string? sess) (assoc :session sess)
+                            (seq txt) (assoc :text txt)
+                            (not= "SUCCESS" st)
+                            (assoc :error (cond (and (string? e) (seq e)) e
+                                                (and (string? em) (seq em)) em
+                                                (seq txt) txt
+                                                :else (json/write-str (get o "result"))))
+                            u (assoc :usage u)))
+               "error" (let [m (get o "message")] (when (string? m) {:error m}))
+               nil))
+    :folder (fn [cfg session]
+              (let [home (or ((lookup-fn cfg) "HOME") (env/get-env "HOME") "")]
+                (str (trim-slash home) "/.gemini/antigravity-cli/brain/" session)))
+    :unavailable (fn [_ err]
+                   (when (or (lower-has? err "quota") (lower-has? err "usage limit"))
+                     (str "agy: " (cap-cp err 400))))}
+   config))
+
+;; ---------------------------------------------------------------------------
+;; loadMediaStyle — CLI presets as styles (ADR 0042)
+;; ---------------------------------------------------------------------------
+
+(def xai-grok-cli "Preset: the `grok` CLI (image, video)." "xai-grok-cli")
+(def openai-codex-cli "Preset: the `codex` CLI (image)." "openai-codex-cli")
+(def google-agy-cli "Preset: Google's Antigravity CLI `agy` (image)." "google-agy-cli")
+(def xai-grok-cli-mock "Mock twin of `xai-grok-cli`: never spawns, returns a fixed file." "xai-grok-cli-mock")
+(def openai-codex-cli-mock "Mock twin of `openai-codex-cli`." "openai-codex-cli-mock")
+(def google-agy-cli-mock "Mock twin of `google-agy-cli`." "google-agy-cli-mock")
+
+(def ^:private cli-presets
+  {"xai-grok-cli" grok-media-client "openai-codex-cli" codex-media-client "google-agy-cli" agy-media-client})
+
+(defn load-media-style
+  "§7G `loadMediaStyle(pathOrPreset, config?)` -> a loaded style, itself a
+  MediaClient (pass it to `create-media`). A built-in preset name (`xai-grok-cli`,
+  `openai-codex-cli`, `google-agy-cli`, or a `-mock` twin) is served by that CLI
+  client; anything else is a style JSON file path (or an already-parsed style
+  map). `config` (model, command, loop, gather, …) configures the client
+  behind the style."
+  ([path-or-preset] (load-media-style path-or-preset {}))
+  ([path-or-preset config]
+   (let [cfg  (or config {})
+         p    (when (string? path-or-preset) path-or-preset)
+         mock (and p (str/ends-with? p "-mock"))
+         base (when p (if mock (subs p 0 (- (count p) 5)) p))
+         preset (contains? cli-presets base)
+         sty  (when-not preset (stringify-keys (if p (load-style p) path-or-preset)))
+         c    (if preset
+                ((get cli-presets base) (cond-> cfg mock (assoc ::mock true)))
+                (style-client* sty cfg {}))]
+     (assoc c ::loaded-style true
+            ::source-id (if preset p (or (get sty "name") "style"))
+            ::preset (when preset p)
+            ::style-json sty
+            ::cfg cfg))))
+
+;; ---------------------------------------------------------------------------
+;; available() — the cheap pre-flight check (§7G.10b)
+;; ---------------------------------------------------------------------------
+
+(def mock-available-env
+  "Set to \"0\" to make every mock preset report unavailable."
+  "TOOLNEXUS_MEDIA_MOCK_AVAILABLE")
+
+(defn- on-path?
+  "A name with a path separator is checked as a file; otherwise searched on PATH."
+  [lookup name]
+  (if (or (str/includes? name "/") (str/includes? name "\\"))
+    (regular-file? name)
+    (boolean (some (fn [d] (regular-file? (str (trim-slash d) "/" name)))
+                   (remove str/blank? (str/split (or (lookup "PATH") (env/get-env "PATH") "") #":"))))))
+
+(defn- cli-auth-file [lookup label]
+  (let [home (trim-slash (or (lookup "HOME") (env/get-env "HOME") ""))]
+    (case label
+      "grok"  (str home "/.grok/auth.json")
+      "codex" (let [h (lookup "CODEX_HOME")]
+                (if (and (string? h) (seq h)) (str (trim-slash h) "/auth.json") (str home "/.codex/auth.json")))
+      "agy"   (str home "/.gemini/antigravity-cli/antigravity-oauth-token")
+      nil)))
+
+(defn available
+  "§7G.10b `style.available()` on a loaded style -> {:installed :loggedIn :reason},
+  fast, generating nothing and reading no secret. CLI preset: the command
+  (config :command first element, else the CLI name) is found, and the CLI's own
+  login file EXISTS (never read). Mock preset: always available unless
+  TOOLNEXUS_MEDIA_MOCK_AVAILABLE=0. HTTP style: config :key, or every ${VAR}
+  in its headers set. Env is read through config :env when given."
+  [style]
+  (let [cfg    (::cfg style)
+        lookup (lookup-fn cfg)
+        set?   (fn [k] (let [v (lookup k)] (and (string? v) (seq v))))
+        label  (:name style)]
+    (if-let [preset (::preset style)]
+      (if (str/ends-with? preset "-mock")
+        (if (= "0" (lookup mock-available-env))
+          {:installed false :loggedIn false :reason (str label ": mock set unavailable by " mock-available-env "=0")}
+          {:installed true :loggedIn true :reason (str label ": mock")})
+        (let [c   (:command cfg)
+              bin (cond (string? c) c
+                        (and (sequential? c) (seq c)) (str (first c))
+                        :else label)]
+          (if-not (on-path? lookup bin)
+            {:installed false :loggedIn false :reason (str label ": \"" bin "\" not found on PATH")}
+            (let [auth (cli-auth-file lookup label)]
+              (if (regular-file? auth)
+                {:installed true :loggedIn true :reason (str label ": installed, logged in (" auth " present)")}
+                {:installed true :loggedIn false :reason (str label ": installed, not logged in (" auth " missing)")})))))
+      (let [id (::source-id style)
+            k  (:key cfg)]
+        (if (and (string? k) (seq k))
+          {:installed true :loggedIn true :reason (str id ": key from config")}
+          (let [vars    (sort tool/compare-strings
+                              (distinct (mapcat (fn [v] (map second (re-seq #"\$\{([A-Za-z_][A-Za-z0-9_]*)\}" (str v))))
+                                                (vals (get (::style-json style) "headers")))))
+                missing (first (remove set? vars))]
+            (if missing
+              {:installed true :loggedIn false :reason (str id ": " missing " is not set")}
+              {:installed true :loggedIn true :reason (str id ": env present")})))))))
+
 ;; ---------------------------------------------------------------------------
 ;; createMedia — routing (§7G.3)
 ;; ---------------------------------------------------------------------------
 
 (defn- client-map? [x] (and (map? x) (contains? x :supports)))
+
+(defn- noun
+  "\"style\" when every source is a loaded style, else \"client\"."
+  [media]
+  (if (every? ::loaded-style (:clients media)) "style" "client"))
 
 (defn create-media
   "§7G.3 `createMedia`: one MediaClient or a seq of them. Each verb goes to the
@@ -1604,13 +1855,35 @@
 (defn- clean-args [args]
   (into {} (keep (fn [e] (when (some? (val e)) [(kname (key e)) (val e)])) (or args {}))))
 
+(defn- source-model
+  "The configured model for `verb` of a loaded style, or nil (never guessed)."
+  [c verb]
+  (when (::loaded-style c)
+    (let [cfg (::cfg c)
+          ms  (:models cfg)
+          m   (or (get ms (keyword verb)) (get ms verb))]
+      (cond (and (string? m) (seq m)) m
+            (and (string? (:model cfg)) (seq (:model cfg))) (:model cfg)
+            :else nil))))
+
+(defn- stamp
+  "§7G.10b: MediaResult :style (who served it) and :model, unless the client set them."
+  [r c verb]
+  (if (map? r)
+    (let [id (or (::source-id c) (:name c))
+          m  (source-model c verb)]
+      (cond-> r
+        (and (not (seq (:style r))) (seq id)) (assoc :style id)
+        (and (not (seq (:model r))) m) (assoc :model m)))
+    r))
+
 (defn- route
   "-> [MediaResult client-name]"
   [media verb args ctx]
   (let [verb  (canonical-verb verb)
         cands (when (contains? verb-entry verb)
                 (filterv (fn [c] (client-supports? c verb)) (:clients media)))
-        _     (when (empty? cands) (fail! (str "media: no client supports \"" verb "\"")))
+        _     (when (empty? cands) (fail! (str "media: no " (noun media) " supports \"" verb "\"")))
         args  (clean-args args)
         _     (check-canonical! verb args)
         kargs (into {} (map (fn [e] [(keyword (key e)) (val e)]) args))
@@ -1630,7 +1903,7 @@
                        (catch Throwable e
                          (if (unavailable? e) {:unavailable (ex-message e)} (throw e)))))]
           (if (contains? out :ok)
-            [(:ok out) (:name c)]
+            [(stamp (:ok out) c verb) (:name c)]
             (recur (rest cs) (conj msgs (:unavailable out)))))))))
 
 (defn generate
@@ -1659,6 +1932,17 @@
   (let [v (canonical-verb verb)]
     (boolean (and (contains? verb-entry v)
                   (some (fn [c] (client-supports? c v)) (:clients media))))))
+
+(defn supported-verbs
+  "§7G `media.verbs()`: every verb some source supports, in canonical order."
+  [media]
+  (vec (keep (fn [e] (when (supports? media (:verb e)) (:verb e))) verbs)))
+
+(defn generate-media
+  "One-shot sugar: `(generate (create-media (load-media-style style config)) verb args)`."
+  ([style verb args] (generate-media style verb args {}))
+  ([style verb args config]
+   (generate (create-media (load-media-style style config)) verb args)))
 
 ;; ---------------------------------------------------------------------------
 ;; tool face (§7G.6)

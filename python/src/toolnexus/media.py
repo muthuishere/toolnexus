@@ -156,6 +156,10 @@ class MediaResult:
     status: str = ""
     #: §7G.12 D21: provider-reported usage only (``inputTokens``/``outputTokens``/``costUsd``/``raw``).
     usage: Optional[dict[str, Any]] = None
+    #: Who served the call (§7G.10b): the preset id, an HTTP style's name, else the client name.
+    style: Optional[str] = None
+    #: The configured model for the verb, when one was set; never guessed (§7G.10b).
+    model: Optional[str] = None
 
     def to_dict(self) -> dict[str, Any]:
         """The canonical §7G shape (``jobId``/``text`` present only when set)."""
@@ -167,6 +171,10 @@ class MediaResult:
         out["status"] = self.status
         if self.usage:
             out["usage"] = self.usage
+        if self.style:
+            out["style"] = self.style
+        if self.model:
+            out["model"] = self.model
         return out
 
 
@@ -253,6 +261,10 @@ class LoopConfig:
 class GatherConfig:
     mode: Optional[str] = None  # "url" | "download" | "inline"
     dir: Optional[str] = None
+    #: When set, saved files are ``<slug><ext>``, ``<slug>-2<ext>``… (first free name); the slug
+    #: is the name with every byte outside ``[A-Za-z0-9._-]`` made ``-``, leading ``.``/``-``
+    #: dropped; empty ⇒ the default naming (§7G.10b).
+    name: Optional[str] = None
     max_bytes: Optional[int] = None
     keep: Optional[bool] = None
 
@@ -610,6 +622,24 @@ def _multipart(fields: list[tuple[Any, ...]]) -> tuple[bytes, str]:
 _SEQ = itertools.count(1)
 
 
+def _media_slug(name: str) -> str:
+    b = name.encode("utf-8")
+    out = "".join(chr(c) if (chr(c).isascii() and (chr(c).isalnum() or chr(c) in "._-")) else "-" for c in b)
+    return out.lstrip(".-")
+
+
+def _free_name(d: str, slug: str, ext: str) -> str:
+    """The first of ``<slug><ext>``, ``<slug>-2<ext>``… not in ``d``, created exclusively."""
+    n = 1
+    while True:
+        p = os.path.join(d, slug + ext if n == 1 else f"{slug}-{n}{ext}")
+        try:
+            os.close(os.open(p, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644))
+            return p
+        except FileExistsError:
+            n += 1
+
+
 class _Job:
     def __init__(
         self,
@@ -762,8 +792,11 @@ class _Job:
         d = os.path.abspath(self.dir)
         os.makedirs(d, exist_ok=True)
         ext = ext or _EXT.get(mime, ".bin")
-        name = f"{self.name}-{self.verb}-{int(time.time() * 1000)}-{next(_SEQ)}{ext}"
-        path = os.path.join(d, name)
+        slug = _media_slug(self.cfg.gather.name or "")
+        if slug:
+            path = _free_name(d, slug, ext)
+        else:
+            path = os.path.join(d, f"{self.name}-{self.verb}-{int(time.time() * 1000)}-{next(_SEQ)}{ext}")
         with open(path, "wb") as f:
             f.write(data)
         return MediaFile(self._ptype(), mime, url="file://" + path, path=path)
@@ -852,12 +885,157 @@ def _validate_style(style: dict[str, Any]) -> None:
                 raise MediaError(f'style: empty path for argument "{k}"')
 
 
-def load_media_style(path: str) -> dict[str, Any]:
-    """Read and validate one style JSON file (SPEC §7G.7)."""
+class MediaStyle(dict):
+    """A loaded style (SPEC §7G.7) — what :func:`load_media_style` returns, and itself a
+    :class:`MediaClient`, so ``create_media(style)`` works.
+
+    For a JSON style file it is the parsed style ``dict`` (so it still compares equal to the
+    JSON); for a built-in CLI preset it is empty and ``cli`` names the preset. The config
+    given to :func:`load_media_style` configures the client behind it (model, command, loop,
+    gather).
+
+    Built-in CLI presets (ADR 0042) — media through a locally installed, logged-in CLI on the
+    user's own subscription, no API key:
+
+    - ``MediaStyle.XAI_GROK_CLI`` (``"xai-grok-cli"``): the ``grok`` CLI, image and video;
+    - ``MediaStyle.OPENAI_CODEX_CLI`` (``"openai-codex-cli"``): the ``codex`` CLI, image;
+    - ``MediaStyle.GOOGLE_AGY_CLI`` (``"google-agy-cli"``): Google's Antigravity ``agy``, image;
+    - the ``*_MOCK`` twins: same name, verbs, args, prompt folding and errors, but no process
+      is started and a fixed file is returned (mock kit).
+    """
+
+    XAI_GROK_CLI = "xai-grok-cli"
+    OPENAI_CODEX_CLI = "openai-codex-cli"
+    GOOGLE_AGY_CLI = "google-agy-cli"
+    XAI_GROK_CLI_MOCK = "xai-grok-cli-mock"
+    OPENAI_CODEX_CLI_MOCK = "openai-codex-cli-mock"
+    GOOGLE_AGY_CLI_MOCK = "google-agy-cli-mock"
+
+    def __init__(
+        self, style: Optional[dict[str, Any]] = None, *, cli: Optional[str] = None,
+        config: Union["MediaConfig", dict[str, Any], None] = None, **kw: Any,
+    ) -> None:
+        super().__init__(style or {})
+        self.cli = cli
+        self._config = media_config(config, **kw)
+
+    @property
+    def name(self) -> str:  # type: ignore[override]
+        if self.cli:
+            return _CLI_PRESETS[self.cli]
+        return self.get("name") or "style"
+
+    def client(self) -> Any:
+        """The :class:`MediaClient` behind this style."""
+        if self.cli:
+            from .media_clients import CodexMediaClient, GrokMediaClient, _AgyMediaClient
+
+            cls = {"grok": GrokMediaClient, "codex": CodexMediaClient, "agy": _AgyMediaClient}[_CLI_PRESETS[self.cli]]
+            c = cls(self._config)
+            c.mock = self.cli.endswith("-mock")
+            return c
+        return StyleMediaClient(dict(self), self._config)
+
+    def supports(self, verb: str) -> bool:
+        """Whether the style declares ``verb`` (the one verb-support mechanism, HTTP or CLI)."""
+        return self.client().supports(verb)
+
+    def args(self, verb: str) -> list[dict[str, Any]]:
+        return _client_args(self.client(), verb)
+
+    async def generate(self, verb: str, args: dict[str, Any], ctx: Optional[MediaContext] = None) -> MediaResult:
+        return await self.client().generate(verb, args, ctx)
+
+    def available(self) -> dict[str, Any]:
+        """Cheap pre-flight (§7G.10b): ``{installed, loggedIn, reason}``. Generates nothing and
+        reads no secret: a CLI preset's login is the *existence* of the CLI's own auth file."""
+        cfg = self._config
+        if not self.cli:
+            sid = self.get("name") or "style"
+            if cfg.key:
+                return _avail(True, True, f"{sid}: key from config")
+            names = sorted({m for v in (self.get("headers") or {}).values()
+                            for m in _STYLE_ENV_RE.findall(str(v))})
+            for n in names:
+                if not os.environ.get(n):
+                    return _avail(True, False, f"{sid}: {n} is not set")
+            return _avail(True, True, f"{sid}: env present")
+        label = _CLI_PRESETS[self.cli]
+        if self.cli.endswith("-mock"):
+            if os.environ.get(MEDIA_MOCK_AVAILABLE_ENV) == "0":
+                return _avail(False, False, f"{label}: mock set unavailable by {MEDIA_MOCK_AVAILABLE_ENV}=0")
+            return _avail(True, True, f"{label}: mock")
+        cmd = cfg.command
+        bin_ = (cmd if isinstance(cmd, str) else cmd[0]) if cmd else label
+        if os.sep in bin_ or (os.altsep and os.altsep in bin_):
+            found = os.path.isfile(bin_) and os.access(bin_, os.X_OK)
+        else:
+            found = shutil.which(bin_) is not None
+        if not found:
+            return _avail(False, False, f'{label}: {json.dumps(bin_, ensure_ascii=False)} not found on PATH')
+        auth = _cli_auth_file(label)
+        if not os.path.isfile(auth):
+            return _avail(True, False, f"{label}: installed, not logged in ({auth} missing)")
+        return _avail(True, True, f"{label}: installed, logged in ({auth} present)")
+
+    def _source_id(self) -> str:
+        return self.cli or self.get("name") or "style"
+
+    def _source_model(self, verb: str) -> Optional[str]:
+        return (self._config.models or {}).get(verb) or self._config.model or None
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, MediaStyle) and (self.cli or other.cli):
+            return self.cli == other.cli
+        return dict.__eq__(self, other)
+
+    __hash__ = None  # type: ignore[assignment]
+
+    def __repr__(self) -> str:
+        return f"MediaStyle({self.cli!r})" if self.cli else f"MediaStyle({dict.__repr__(self)})"
+
+
+#: Set to ``"0"`` to make every mock preset report unavailable.
+MEDIA_MOCK_AVAILABLE_ENV = "TOOLNEXUS_MEDIA_MOCK_AVAILABLE"
+_STYLE_ENV_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+
+
+def _avail(installed: bool, logged_in: bool, reason: str) -> dict[str, Any]:
+    return {"installed": installed, "loggedIn": logged_in, "reason": reason}
+
+
+def _home() -> str:
+    return os.environ.get("HOME") or os.path.expanduser("~")
+
+
+def _cli_auth_file(label: str) -> str:
+    if label == "grok":
+        return os.path.join(_home(), ".grok", "auth.json")
+    if label == "codex":
+        h = os.environ.get("CODEX_HOME")
+        return os.path.join(h, "auth.json") if h else os.path.join(_home(), ".codex", "auth.json")
+    return os.path.join(_home(), ".gemini", "antigravity-cli", "antigravity-oauth-token")
+
+
+#: Built-in CLI preset ⇒ client label.
+_CLI_PRESETS: dict[str, str] = {
+    MediaStyle.XAI_GROK_CLI: "grok", MediaStyle.OPENAI_CODEX_CLI: "codex", MediaStyle.GOOGLE_AGY_CLI: "agy",
+    MediaStyle.XAI_GROK_CLI_MOCK: "grok", MediaStyle.OPENAI_CODEX_CLI_MOCK: "codex", MediaStyle.GOOGLE_AGY_CLI_MOCK: "agy",
+}
+
+
+def load_media_style(
+    path: str, config: Union["MediaConfig", dict[str, Any], None] = None, **kw: Any
+) -> MediaStyle:
+    """Load a style (SPEC §7G.7): a built-in CLI preset name (``MediaStyle.XAI_GROK_CLI`` …), else
+    read and validate one style JSON file. ``config`` (or keyword arguments) configures the
+    client behind the style (model, command, loop, gather)."""
+    if path in _CLI_PRESETS:
+        return MediaStyle(cli=path, config=config, **kw)
     with open(path, encoding="utf-8") as f:
         style = json.load(f)
     _validate_style(style)
-    return style
+    return MediaStyle(style, config=config, **kw)
 
 
 class StyleMediaClient(BaseMediaClient):
@@ -1040,6 +1218,8 @@ class Media:
         if not clients:
             raise MediaError("media: no clients")
         for c in clients:
+            if isinstance(c, MediaStyle):
+                continue
             if isinstance(c, dict) or not callable(getattr(c, "supports", None)):
                 raise TypeError(
                     "create_media takes MediaClient(s); wrap a JSON style with style_media_client(style)")
@@ -1048,6 +1228,14 @@ class Media:
     def supports(self, verb: str) -> bool:
         return any(c.supports(verb) for c in self.clients)
 
+    def verbs(self) -> list[str]:
+        """Every verb some source supports, in canonical (``verbs.json``) order."""
+        return [v["verb"] for v in VERBS if self.supports(v["verb"])]
+
+    def _noun(self) -> str:
+        """``style`` when every source is a loaded style, else ``client``."""
+        return "style" if all(isinstance(c, MediaStyle) for c in self.clients) else "client"
+
     async def _route(
         self, verb: str, args: Optional[dict[str, Any]], ctx: Optional[MediaContext]
     ) -> tuple[MediaResult, Any]:
@@ -1055,7 +1243,7 @@ class Media:
         ctx = ctx or MediaContext()
         cands = [c for c in self.clients if c.supports(verb)]
         if not cands:
-            raise MediaError(f'media: no client supports "{verb}"')
+            raise MediaError(f'media: no {self._noun()} supports "{verb}"')
         order = [a["name"] for a in _VERB_SPEC.get(verb, {"args": []})["args"]]
         for k in sorted(args):  # D7/D19: a non-canonical key fails at once
             if k not in order:
@@ -1086,6 +1274,10 @@ class Media:
                     messages.append(str(e))
                     continue
                 raise
+            if not res.style:
+                res.style = c._source_id() if isinstance(c, MediaStyle) else c.name
+            if not res.model and isinstance(c, MediaStyle):
+                res.model = c._source_model(verb)
             return res, c
         raise MediaUnavailableError(f'media: no client available for "{verb}": ' + "; ".join(messages))
 
@@ -1252,6 +1444,14 @@ def create_media(clients: Union[Any, list[Any]]) -> Media:
     return Media(lst)
 
 
+async def generate_media(
+    style: str, verb: str, args: Optional[dict[str, Any]] = None,
+    config: Union["MediaConfig", dict[str, Any], None] = None, **kw: Any,
+) -> MediaResult:
+    """One-shot sugar: ``create_media(load_media_style(style, config)).generate(verb, args)``."""
+    return await create_media(load_media_style(style, config, **kw)).generate(verb, args)
+
+
 # Built-in clients live in media_clients.py; re-exported here for one import path.
 from .media_clients import (  # noqa: E402
     A2E_STYLE_TEXT,
@@ -1260,6 +1460,7 @@ from .media_clients import (  # noqa: E402
     CliMediaClient,
     CodexMediaClient,
     ElevenLabsMediaClient,
+    fold_media_prompt,
     FalMediaClient,
     GrokMediaClient,
     OpenAIMediaClient,
@@ -1269,7 +1470,8 @@ from .media_clients import (  # noqa: E402
 __all__ = [
     "VERBS", "VERBS_JSON_TEXT", "MediaError", "MediaUnavailableError", "MediaFile", "MediaResult",
     "MediaContext", "MediaClient", "BaseMediaClient", "MediaConfig", "LoopConfig", "GatherConfig",
-    "MediaTransport", "UrllibMediaTransport", "media_config", "load_media_style", "StyleMediaClient",
+    "MediaTransport", "UrllibMediaTransport", "media_config", "load_media_style", "MediaStyle",
+    "generate_media", "fold_media_prompt", "MEDIA_MOCK_AVAILABLE_ENV", "StyleMediaClient",
     "style_media_client", "Media", "create_media", "tool_result", "model_parts",
     "A2E_STYLE_TEXT", "A2EMediaClient", "ApiMediaClient", "ElevenLabsMediaClient", "OpenAIMediaClient",
     "OpenRouterMediaClient", "FalMediaClient", "CliMediaClient", "GrokMediaClient", "CodexMediaClient",

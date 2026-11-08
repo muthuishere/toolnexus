@@ -12,6 +12,7 @@
             [clojure.test :refer [deftest is testing]]
             [koine.codec :as codec]
             [koine.fs :as fs]
+            [koine.env]
             [koine.host :as host]
             [koine.http :as khttp]
             [koine.time :as ktime]
@@ -176,7 +177,9 @@
         (is (= (:status c) (some-> e ex-data :status name)) "error status")))
     (let [r (:ok out) exp (:result c)]
       (is (some? r) (str "no error expected: " (some-> (:error out) ex-message)))
-      (is (= (dissoc exp :files) (dissoc r :files)))
+      ;; style/model are asserted only when the case names them (§7G.10b)
+      (is (= (dissoc exp :files)
+             (apply dissoc r :files (remove #(contains? exp %) [:style :model]))))
       (check-files (:files exp) (:files r) dir client (:verb c)))))
 
 (defn- check-tool [t res dir]
@@ -324,7 +327,13 @@
 ;; CLI clients (cli.json) over conformance/media/fake-cli/fake-cli.sh
 ;; ---------------------------------------------------------------------------
 
-(def ^:private cli-builders {"grok" media/grok-media-client "codex" media/codex-media-client})
+(defn- cli-style
+  "client grok|codex is the same as style xai-grok-cli|openai-codex-cli."
+  [c]
+  (or (:style c) ({"grok" media/xai-grok-cli "codex" media/openai-codex-cli} (:client c))))
+
+(defn- style-label [style]
+  (get {"xai-grok" "grok" "openai-codex" "codex" "google-agy" "agy"} (str/replace style #"-cli(-mock)?$" "")))
 
 (defn- read-lines [p] (let [s (fs/read-file p)] (if (= "" s) [] (str/split-lines s))))
 
@@ -342,7 +351,7 @@
             cfg      (assoc (kebab-config (:config c)) :command command :env (env-lookup (:env c)))
             t0       (ktime/mono-ms)
             res      (attempt (fn []
-                                (let [m (media/create-media ((get cli-builders (:client c)) cfg))]
+                                (let [m (media/create-media (media/load-media-style (cli-style c) cfg))]
                                   (if (= face :fn)
                                     (media/generate m (:verb c) (:args c) (ctx-for c progress))
                                     (run-tool m (:verb c) (:args c))))))
@@ -365,8 +374,11 @@
           (when (:expectNoSpawn c) (is (not (fs/exists? (str out "/argv.txt"))) "no spawn"))
           (when (contains? c :expectProgress)
             (is (= (:expectProgress c) (mapv :status @progress))))
-          (check-outcome c res dir (:client c))
-          (check-no-usage c res nil))
+          (check-outcome c res dir (style-label (cli-style c)))
+          (check-no-usage c res nil)
+          (when (:oneShot c)
+            (let [one (attempt #(media/generate-media (cli-style c) (:verb c) (:args c) cfg))]
+              (check-outcome c one dir (style-label (cli-style c))))))
         (when (= face :tool)
           (check-tool (:tool c) (:ok res) dir)
           (check-run-files c (:ok res))
@@ -375,11 +387,47 @@
 
 (deftest conformance-cli-replay
   (let [cases (:cases (fixture "cli.json"))]
-    (is (= 24 (count cases)) "every fixture case is replayed")
+    (is (= 35 (count cases)) "every fixture case is replayed")
     (doseq [c cases]
       (testing (:name c)
         (cli-face c :fn)
         (when (and (:tool c) (not (contains? c :ctxTimeoutMs))) (cli-face c :tool))))))
+
+(deftest conformance-cli-availability
+  (let [cases (:availabilityCases (fixture "cli.json"))]
+    (is (= 7 (count cases)) "every availability case is replayed")
+    (doseq [c0 cases]
+      (testing (:name c0)
+        (let [dir (fs/real-path (fs/temp-dir! "tn-avail"))]
+          (try
+            (let [c      (subst c0 [["{dir}" dir]] #{})
+                  _      (doseq [p (:createFiles c)] (fs/write-file p ""))
+                  envm   (:env c)
+                  unset  (set (:unsetEnv c))
+                  lookup (fn [k] (cond (contains? unset k) nil
+                                       (contains? envm (keyword k)) (get envm (keyword k))
+                                       :else (koine.env/get-env k)))
+                  cfg    (assoc (kebab-config (:config c)) :env lookup)
+                  s      (media/load-media-style (:style c) cfg)
+                  t0     (ktime/mono-ms)
+                  got    (media/available s)]
+              (is (< (- (ktime/mono-ms) t0) 1000) "fast")
+              (is (= (:expect c) got)))
+            (finally (fs/delete-tree! dir))))))))
+
+(deftest conformance-cli-verb-cases
+  (let [cases (:verbCases (fixture "cli.json"))]
+    (is (= 8 (count cases)) "every verb case is replayed")
+    (doseq [c cases]
+      (testing (:name c)
+        (let [m (media/create-media
+                 (mapv (fn [s] (if (string? s)
+                                 (media/load-media-style s {:command ["/nonexistent/toolnexus-must-not-run"]})
+                                 (media/load-media-style s)))
+                       (:styles c)))]
+          (is (= (:expectVerbs c) (media/supported-verbs m)))
+          (is (= (:expectTools c) (mapv :name (media/tools m))))
+          (is (= (:error c) (some-> (:error (attempt #(media/generate m (:unsupported c) {}))) ex-message))))))))
 
 ;; ---------------------------------------------------------------------------
 ;; routing (routing.json)

@@ -220,6 +220,7 @@ impl ApiBase {
             kind: verb_kind(verb),
             mode: self.cfg.gather.mode.unwrap_or(GatherMode::Download),
             dir: self.cfg.gather.dir.clone(),
+            name: self.cfg.gather.name.clone(),
             max: self.max(),
             keep: true,
             http: &self.http,
@@ -285,6 +286,8 @@ fn completed(files: Vec<MediaFile>, text: Option<String>, job_id: Option<String>
         job_id,
         status: "completed".into(),
         usage: None,
+        style: None,
+        model: None,
     }
 }
 

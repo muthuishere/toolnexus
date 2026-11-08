@@ -190,6 +190,9 @@ from .media import (
     create_media,
     load_media_style,
     style_media_client,
+    MediaStyle,
+    generate_media,
+    fold_media_prompt,
 )
 from .mcp_source import (
     DEFAULT_TIMEOUT,
@@ -359,6 +362,9 @@ __all__ = [
     "CodexMediaClient",
     "create_media",
     "load_media_style",
+    "MediaStyle",
+    "generate_media",
+    "fold_media_prompt",
     "style_media_client",
     # host engine asks + prompt cache (SPEC §4C, §8)
     "ToolHints",

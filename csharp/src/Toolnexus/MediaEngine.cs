@@ -412,6 +412,19 @@ internal sealed class MediaGatherer
     private readonly string _dir;
     private readonly long _maxBytes;
     private readonly bool _keep;
+    private readonly string _slug;
+    private static readonly object NameLock = new();
+
+    /// <summary>§7G.10b gather.name sanitised: bytes outside [A-Za-z0-9._-] ⇒ '-', leading '.'/'-' dropped.</summary>
+    internal static string Slug(string? name)
+    {
+        if (string.IsNullOrEmpty(name)) return "";
+        var sb = new StringBuilder();
+        foreach (var b in Encoding.UTF8.GetBytes(name))
+            sb.Append(b is >= (byte)'a' and <= (byte)'z' or >= (byte)'A' and <= (byte)'Z' or >= (byte)'0' and <= (byte)'9'
+                or (byte)'.' or (byte)'_' or (byte)'-' ? (char)b : '-');
+        return sb.ToString().TrimStart('.', '-');
+    }
     private readonly HttpClient _http;
     private readonly MediaJob _job;
     private readonly string _kind;
@@ -422,6 +435,7 @@ internal sealed class MediaGatherer
         _dir = cfg?.Dir is { Length: > 0 } d ? d : Path.Combine(Path.GetTempPath(), "toolnexus-media");
         _maxBytes = MediaUtil.Positive(cfg?.MaxBytes, 104857600);
         _keep = cfg?.Keep ?? true;
+        _slug = Slug(cfg?.Name);
         _http = http;
         _job = job;
         _kind = kind;
@@ -491,8 +505,26 @@ internal sealed class MediaGatherer
     private string Save(byte[] bytes, string mime, string? urlExt = null)
     {
         Directory.CreateDirectory(_dir);
-        var name = $"{_job.Client}-{_job.Verb}-{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()}-{Interlocked.Increment(ref _seq)}{urlExt ?? MediaUtil.ExtFor(mime)}";
-        var path = Path.GetFullPath(Path.Combine(_dir, name));
+        var ext = urlExt ?? MediaUtil.ExtFor(mime);
+        string path;
+        if (_slug.Length > 0)
+        {
+            lock (NameLock)
+                for (var n = 1; ; n++)
+                {
+                    path = Path.GetFullPath(Path.Combine(_dir, n == 1 ? _slug + ext : $"{_slug}-{n}{ext}"));
+                    try
+                    {
+                        using (new FileStream(path, FileMode.CreateNew, FileAccess.Write)) { }
+                        break;
+                    }
+                    catch (IOException) when (File.Exists(path) || Directory.Exists(path)) { /* taken: next */ }
+                }
+            File.WriteAllBytes(path, bytes);
+            return path;
+        }
+        var name = $"{_job.Client}-{_job.Verb}-{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()}-{Interlocked.Increment(ref _seq)}{ext}";
+        path = Path.GetFullPath(Path.Combine(_dir, name));
         File.WriteAllBytes(path, bytes);
         return path;
     }

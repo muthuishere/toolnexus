@@ -21,7 +21,7 @@ import java.util.stream.Stream;
  * §7G.10 — the CLI base: runs a local subscription CLI <b>once, headless</b>, reads its JSON-lines
  * stdout, and collects files. Subclasses ({@link GrokMediaClient}, {@link CodexMediaClient})
  * supply the argv, the prompt templates, the line parser, an optional session folder and the
- * unavailable matcher. CLI clients accept {@code prompt} only.
+ * unavailable matcher. CLI clients accept {@code prompt} plus size hints folded into it ({@link #foldMediaPrompt}).
  *
  * <p>A command that cannot be started is {@code unavailable}; cancellation or the deadline
  * ({@code loop.timeoutMs}) kills the process (and its descendants).
@@ -46,6 +46,8 @@ public abstract class CliMediaClient implements MediaClient {
     private final String name;
     protected final Media.Config config;
     private final List<String> defaultCommand;
+    /** Mock preset: never starts the CLI; writes a fixed file for the verb (§7G CLI mock presets). */
+    boolean mock;
 
     protected CliMediaClient(String name, Media.Config config, List<String> defaultCommand) {
         this.name = name;
@@ -83,8 +85,37 @@ public abstract class CliMediaClient implements MediaClient {
         return template(verb) != null;
     }
 
+    /** prompt (required) plus the size hints folded into it: image width/height/aspectRatio, video seconds/aspectRatio. */
     @Override public List<Media.ArgSpec> args(String verb) {
-        return List.of(new Media.ArgSpec("prompt", true));
+        if (!supports(verb)) return null;
+        if ("video".equals(verb)) {
+            return List.of(new Media.ArgSpec("prompt", true), new Media.ArgSpec("seconds", false),
+                    new Media.ArgSpec("aspectRatio", false));
+        }
+        return List.of(new Media.ArgSpec("prompt", true), new Media.ArgSpec("width", false),
+                new Media.ArgSpec("height", false), new Media.ArgSpec("aspectRatio", false));
+    }
+
+    private static final Map<String, String[]> HINTS = Map.of(
+            "width", new String[] {"width ", " px"},
+            "height", new String[] {"height ", " px"},
+            "seconds", new String[] {"about ", " seconds long"},
+            "aspectRatio", new String[] {"aspect ratio ", ""});
+
+    /**
+     * The prompt a CLI style receives: {@code prompt}, then the present size hints in canonical
+     * verb order as {@code " (h1, h2)"} (§7G CLI hint folding).
+     */
+    public static String foldMediaPrompt(String verb, Map<String, Object> args) {
+        String prompt = MediaSupport.strArg(args, "prompt");
+        if (prompt == null) prompt = "";
+        List<String> hs = new ArrayList<>();
+        for (Media.ArgSpec a : MediaSupport.canonicalArgs(verb)) {
+            String[] h = HINTS.get(a.name());
+            Object v = args.get(a.name());
+            if (h != null && v != null) hs.add(h[0] + MediaSupport.render(v) + h[1]);
+        }
+        return hs.isEmpty() ? prompt : prompt + " (" + String.join(", ", hs) + ")";
     }
 
     @Override public Media.MediaResult image(Map<String, Object> a, Media.Ctx c) { return call("image", a, c); }
@@ -110,8 +141,8 @@ public abstract class CliMediaClient implements MediaClient {
     }
 
     private Media.MediaResult run(String verb, Map<String, Object> args, Media.Ctx ctx) {
-        String prompt = template(verb).replace("{prompt}", MediaSupport.strArg(args, "prompt") == null
-                ? "" : MediaSupport.strArg(args, "prompt"));
+        String prompt = template(verb).replace("{prompt}", foldMediaPrompt(verb, args));
+        if (mock) return mockRun(verb, prompt);
         long timeoutMs = config.loop != null && config.loop.timeoutMs != null && config.loop.timeoutMs > 0
                 ? config.loop.timeoutMs : MediaSupport.DEFAULT_TIMEOUT_MS;
         long start = System.nanoTime();
@@ -260,6 +291,28 @@ public abstract class CliMediaClient implements MediaClient {
         } finally {
             deleteTree(cwd);
         }
+    }
+
+    /**
+     * The CLI mock: no process. Writes {@code <gather.dir>/<client>-mock-<verb>.<png|mp4>} (gather.dir
+     * default {@code <tmp>/toolnexus-media}) holding {@code "toolnexus mock <verb>"}, then gathers it
+     * like a real CLI file; text = the exact prompt the CLI would have received; jobId {@code mock}.
+     */
+    private Media.MediaResult mockRun(String verb, String prompt) {
+        String ext = "video".equals(verb) ? ".mp4" : ".png";
+        String d = config.gather != null && config.gather.dir != null && !config.gather.dir.isEmpty()
+                ? config.gather.dir : Path.of(System.getProperty("java.io.tmpdir"), "toolnexus-media").toString();
+        Path p;
+        try {
+            Path dir = Path.of(d);
+            Files.createDirectories(dir);
+            p = dir.resolve(name + "-mock-" + verb + ext).toAbsolutePath().normalize();
+            Files.writeString(p, "toolnexus mock " + verb, StandardCharsets.UTF_8);
+        } catch (IOException | RuntimeException e) {
+            throw new Media.MediaException(name + ": " + e.getMessage());
+        }
+        MediaSupport.Gather g = new MediaSupport.Gather(name, verb, MediaSupport.kindOf(verb), config, "download", null);
+        return new Media.MediaResult(List.of(g.local(p.toString())), prompt, "mock", "completed");
     }
 
     private static void kill(Process p) {

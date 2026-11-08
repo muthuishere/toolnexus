@@ -2,8 +2,8 @@
 //! [`MediaClient`]. A2E is a style client over the embedded preset.
 
 use std::collections::BTreeMap;
-use std::path::Path;
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -12,7 +12,7 @@ use serde_json::{Map, Value};
 use super::http::{self, Body, Gather, Raw, SendError};
 use super::{
     GatherMode, MEDIA_VERBS, MediaArg, MediaArgs, MediaClient, MediaClientConfig, MediaCtx,
-    MediaError, MediaResult, canonical_args, positive, report,
+    MediaError, MediaFuture, MediaResult, canonical_args, positive, report,
 };
 
 // ---------------------------------------------------------------------------
@@ -38,6 +38,302 @@ pub struct MediaStyle {
     pub error_envelope: Option<ErrorEnvelope>,
     /// verb ∈ the seven of §7G.1.
     pub verbs: BTreeMap<String, MediaVerb>,
+    /// What [`load_media_style_with`] attached: the preset (if any), the
+    /// client config, and the client built from them. Not part of the JSON.
+    #[doc(hidden)]
+    #[serde(skip)]
+    pub loaded: LoadedStyle,
+}
+
+/// The non-JSON half of a loaded [`MediaStyle`] (preset + config + client).
+#[doc(hidden)]
+#[derive(Clone, Default)]
+pub struct LoadedStyle {
+    preset: Option<&'static str>,
+    cfg: MediaClientConfig,
+    client: OnceLock<Arc<dyn MediaClient>>,
+}
+
+impl std::fmt::Debug for LoadedStyle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LoadedStyle")
+            .field("preset", &self.preset)
+            .finish_non_exhaustive()
+    }
+}
+
+impl PartialEq for LoadedStyle {
+    fn eq(&self, other: &Self) -> bool {
+        self.preset == other.preset
+    }
+}
+
+/// The built-in CLI presets (string value, client label).
+const PRESETS: [(&str, &str); 6] = [
+    (MediaStyle::XAI_GROK_CLI, "grok"),
+    (MediaStyle::OPENAI_CODEX_CLI, "codex"),
+    (MediaStyle::GOOGLE_AGY_CLI, "agy"),
+    (MediaStyle::XAI_GROK_CLI_MOCK, "grok"),
+    (MediaStyle::OPENAI_CODEX_CLI_MOCK, "codex"),
+    (MediaStyle::GOOGLE_AGY_CLI_MOCK, "agy"),
+];
+
+impl MediaStyle {
+    /// Preset: the `grok` CLI on the user's subscription (image, video).
+    pub const XAI_GROK_CLI: &'static str = "xai-grok-cli";
+    /// Preset: the `codex` CLI on the user's subscription (image).
+    pub const OPENAI_CODEX_CLI: &'static str = "openai-codex-cli";
+    /// Preset: Google's Antigravity CLI `agy` (image).
+    pub const GOOGLE_AGY_CLI: &'static str = "google-agy-cli";
+    /// Mock twin of [`MediaStyle::XAI_GROK_CLI`]: same client, never starts a process.
+    pub const XAI_GROK_CLI_MOCK: &'static str = "xai-grok-cli-mock";
+    /// Mock twin of [`MediaStyle::OPENAI_CODEX_CLI`].
+    pub const OPENAI_CODEX_CLI_MOCK: &'static str = "openai-codex-cli-mock";
+    /// Mock twin of [`MediaStyle::GOOGLE_AGY_CLI`].
+    pub const GOOGLE_AGY_CLI_MOCK: &'static str = "google-agy-cli-mock";
+
+    /// `available()` (§7G.10b): whether the style can run, in well under a
+    /// second, generating nothing and reading no secret. CLI preset: the
+    /// command is found and the CLI's own login file exists; HTTP style: the
+    /// config key is set or every `${VAR}` in its headers is.
+    pub fn available(&self) -> MediaAvailability {
+        let avail = |installed, logged_in, reason: String| MediaAvailability {
+            installed,
+            logged_in,
+            reason,
+        };
+        let Some(preset) = self.loaded.preset else {
+            let id = self.name.clone().unwrap_or_else(|| "style".into());
+            if self
+                .loaded
+                .cfg
+                .key
+                .as_deref()
+                .is_some_and(|k| !k.is_empty())
+            {
+                return avail(true, true, format!("{id}: key from config"));
+            }
+            for v in style_env_vars(self) {
+                if std::env::var(&v).map(|x| x.is_empty()).unwrap_or(true) {
+                    return avail(true, false, format!("{id}: {v} is not set"));
+                }
+            }
+            return avail(true, true, format!("{id}: env present"));
+        };
+        let label = PRESETS
+            .iter()
+            .find(|(k, _)| *k == preset)
+            .map(|(_, l)| *l)
+            .unwrap_or("style");
+        if preset.ends_with("-mock") {
+            if std::env::var(MEDIA_MOCK_AVAILABLE_ENV).as_deref() == Ok("0") {
+                return avail(
+                    false,
+                    false,
+                    format!("{label}: mock set unavailable by {MEDIA_MOCK_AVAILABLE_ENV}=0"),
+                );
+            }
+            return avail(true, true, format!("{label}: mock"));
+        }
+        let bin = self
+            .loaded
+            .cfg
+            .command
+            .first()
+            .cloned()
+            .unwrap_or_else(|| label.to_string());
+        if !look_path(&bin) {
+            return avail(false, false, format!("{label}: {bin:?} not found on PATH"));
+        }
+        let auth = cli_auth_file(label);
+        let auth_s = auth.to_string_lossy();
+        if std::fs::metadata(&auth).is_ok_and(|m| !m.is_dir()) {
+            avail(
+                true,
+                true,
+                format!("{label}: installed, logged in ({auth_s} present)"),
+            )
+        } else {
+            avail(
+                true,
+                false,
+                format!("{label}: installed, not logged in ({auth_s} missing)"),
+            )
+        }
+    }
+
+    /// The built-in preset this style was loaded from, if any.
+    pub fn preset(&self) -> Option<&'static str> {
+        self.loaded.preset
+    }
+
+    /// The client that serves this style (built once).
+    fn client(&self) -> &Arc<dyn MediaClient> {
+        self.loaded.client.get_or_init(|| {
+            let cfg = self.loaded.cfg.clone();
+            if let Some(p) = self.loaded.preset {
+                return Arc::new(super::cli::preset_client(p, cfg));
+            }
+            match StyleMediaClient::new(self.clone_data(), cfg) {
+                Ok(c) => Arc::new(c),
+                Err(e) => Arc::new(BrokenStyle {
+                    name: self.name.clone().unwrap_or_else(|| "style".into()),
+                    _err: e.to_string(),
+                }),
+            }
+        })
+    }
+
+    fn clone_data(&self) -> MediaStyle {
+        MediaStyle {
+            name: self.name.clone(),
+            base_url: self.base_url.clone(),
+            headers: self.headers.clone(),
+            error_envelope: self.error_envelope.clone(),
+            verbs: self.verbs.clone(),
+            loaded: LoadedStyle::default(),
+        }
+    }
+}
+
+/// The answer of [`MediaStyle::available`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MediaAvailability {
+    pub installed: bool,
+    #[serde(rename = "loggedIn")]
+    pub logged_in: bool,
+    pub reason: String,
+}
+
+/// Set to `0`, every mock preset reports unavailable.
+pub const MEDIA_MOCK_AVAILABLE_ENV: &str = "TOOLNEXUS_MEDIA_MOCK_AVAILABLE";
+
+fn home_dir() -> PathBuf {
+    PathBuf::from(std::env::var("HOME").unwrap_or_default())
+}
+
+/// The file each CLI writes when logged in (existence only, never read).
+fn cli_auth_file(label: &str) -> PathBuf {
+    match label {
+        "grok" => home_dir().join(".grok").join("auth.json"),
+        "codex" => match std::env::var("CODEX_HOME") {
+            Ok(h) if !h.is_empty() => PathBuf::from(h).join("auth.json"),
+            _ => home_dir().join(".codex").join("auth.json"),
+        },
+        _ => home_dir()
+            .join(".gemini")
+            .join("antigravity-cli")
+            .join("antigravity-oauth-token"),
+    }
+}
+
+fn is_exec(p: &Path) -> bool {
+    let Ok(m) = std::fs::metadata(p) else {
+        return false;
+    };
+    if m.is_dir() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        m.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
+/// `exec.LookPath`: a name with a separator is checked as a file, else PATH.
+fn look_path(bin: &str) -> bool {
+    if bin.contains('/') || bin.contains(std::path::MAIN_SEPARATOR) {
+        return is_exec(Path::new(bin));
+    }
+    let Some(path) = std::env::var_os("PATH") else {
+        return false;
+    };
+    std::env::split_paths(&path).any(|d| is_exec(&d.join(bin)))
+}
+
+/// The `${VAR}` names the style's headers use, sorted, unique.
+fn style_env_vars(s: &MediaStyle) -> Vec<String> {
+    static RE: OnceLock<regex::Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| regex::Regex::new(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}").expect("re"));
+    let mut out: Vec<String> = s
+        .headers
+        .values()
+        .flat_map(|v| re.captures_iter(v).map(|c| c[1].to_string()))
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// A style whose client could not be built: supports nothing.
+struct BrokenStyle {
+    name: String,
+    _err: String,
+}
+
+impl MediaClient for BrokenStyle {
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn supports(&self, _verb: &str) -> bool {
+        false
+    }
+}
+
+/// A loaded style is itself a [`MediaClient`], so `create_media([style])` works.
+impl MediaClient for MediaStyle {
+    fn name(&self) -> &str {
+        self.client().name()
+    }
+    fn supports(&self, verb: &str) -> bool {
+        self.client().supports(verb)
+    }
+    fn args(&self, verb: &str) -> Option<Vec<MediaArg>> {
+        self.client().args(verb)
+    }
+    fn is_media_style(&self) -> bool {
+        true
+    }
+    fn source_id(&self) -> String {
+        match self.loaded.preset {
+            Some(p) => p.to_string(),
+            None => self.name.clone().unwrap_or_else(|| "style".into()),
+        }
+    }
+    fn source_model(&self, verb: &str) -> Option<String> {
+        let c = &self.loaded.cfg;
+        c.models
+            .get(verb)
+            .filter(|m| !m.is_empty())
+            .or(c.model.as_ref().filter(|m| !m.is_empty()))
+            .cloned()
+    }
+    fn image<'a>(&'a self, args: MediaArgs, ctx: &'a MediaCtx) -> MediaFuture<'a> {
+        self.client().image(args, ctx)
+    }
+    fn video<'a>(&'a self, args: MediaArgs, ctx: &'a MediaCtx) -> MediaFuture<'a> {
+        self.client().video(args, ctx)
+    }
+    fn speech<'a>(&'a self, args: MediaArgs, ctx: &'a MediaCtx) -> MediaFuture<'a> {
+        self.client().speech(args, ctx)
+    }
+    fn music<'a>(&'a self, args: MediaArgs, ctx: &'a MediaCtx) -> MediaFuture<'a> {
+        self.client().music(args, ctx)
+    }
+    fn transcribe<'a>(&'a self, args: MediaArgs, ctx: &'a MediaCtx) -> MediaFuture<'a> {
+        self.client().transcribe(args, ctx)
+    }
+    fn clone_voice<'a>(&'a self, args: MediaArgs, ctx: &'a MediaCtx) -> MediaFuture<'a> {
+        self.client().clone_voice(args, ctx)
+    }
+    fn talk<'a>(&'a self, args: MediaArgs, ctx: &'a MediaCtx) -> MediaFuture<'a> {
+        self.client().talk(args, ctx)
+    }
 }
 
 /// HTTP-200 error signalling: `codePath` not in `okValues` ⇒ error.
@@ -132,9 +428,40 @@ fn lenient_ms<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<u64>, D::
     Ok(v.as_f64().filter(|f| *f > 0.0).map(|f| f.ceil() as u64))
 }
 
-/// Read one style file (`loadMediaStyle`); load-time style errors included.
+/// `loadMediaStyle(pathOrPreset)`: a built-in preset name
+/// ([`MediaStyle::XAI_GROK_CLI`], …) or a style JSON file; load-time style errors
+/// included. The result is a [`MediaClient`] for [`super::create_media`].
 pub fn load_media_style(path: impl AsRef<Path>) -> Result<MediaStyle, MediaError> {
+    load_media_style_with(path, MediaClientConfig::default())
+}
+
+/// [`load_media_style`] with the config of the client behind the style
+/// (model, command, loop, gather, …).
+pub fn load_media_style_with(
+    path: impl AsRef<Path>,
+    cfg: MediaClientConfig,
+) -> Result<MediaStyle, MediaError> {
     let p = path.as_ref();
+    if let Some((preset, label)) = p
+        .to_str()
+        .and_then(|n| PRESETS.iter().find(|(k, _)| *k == n))
+    {
+        return Ok(MediaStyle {
+            name: Some((*label).to_string()),
+            loaded: LoadedStyle {
+                preset: Some(preset),
+                cfg,
+                client: OnceLock::new(),
+            },
+            ..Default::default()
+        });
+    }
+    let mut style = read_style_file(p)?;
+    style.loaded.cfg = cfg;
+    Ok(style)
+}
+
+fn read_style_file(p: &Path) -> Result<MediaStyle, MediaError> {
     let text = std::fs::read_to_string(p)
         .map_err(|e| MediaError::failed(format!("media: cannot read {}: {e}", p.display())))?;
     let style: MediaStyle = serde_json::from_str(&text)
@@ -440,6 +767,8 @@ impl StyleMediaClient {
                 job_id,
                 status,
                 usage: None,
+                style: None,
+                model: None,
             });
         }
         let mut urls = Vec::new();
@@ -455,6 +784,7 @@ impl StyleMediaClient {
             kind: &vs.kind,
             mode: self.cfg.gather.mode.unwrap_or(self.default_mode),
             dir: self.cfg.gather.dir.clone(),
+            name: self.cfg.gather.name.clone(),
             max: self.cfg.gather.max_bytes.unwrap_or(http::DEFAULT_MAX_BYTES),
             keep: true,
             http: &self.http,
@@ -475,6 +805,8 @@ impl StyleMediaClient {
             job_id,
             status,
             usage: None,
+            style: None,
+            model: None,
         })
     }
 

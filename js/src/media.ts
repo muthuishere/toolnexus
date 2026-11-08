@@ -236,6 +236,10 @@ export interface MediaResult {
   status: MediaResultStatus
   /** Provider-reported usage only, never estimated (§7G.12 D21). */
   usage?: MediaUsage
+  /** Who served the call: the preset id, the HTTP style's name (else "style"), or the client's name (§7G.10b). */
+  style?: string
+  /** The configured model for the verb of a loaded style, when one was set; never guessed. */
+  model?: string
 }
 
 /** §7G.12 D21: what the provider reported; absent fields are absent. */
@@ -325,7 +329,11 @@ export interface MediaClientConfig {
   /** CLI argv prefix (a string is one executable, never shell-split). */
   command?: string | string[]
   loop?: { intervalMs?: number; timeoutMs?: number; onProgress?: (p: MediaProgress) => void }
-  gather?: { mode?: GatherMode; dir?: string; maxBytes?: number; keep?: boolean }
+  /**
+   * `name`, when set, names saved files `<name><ext>`, then `<name>-2<ext>`, … (first free name);
+   * sanitised to `[A-Za-z0-9._-]`, leading `.`/`-` dropped; empty ⇒ the default naming (§7G.10b).
+   */
+  gather?: { mode?: GatherMode; dir?: string; maxBytes?: number; keep?: boolean; name?: string }
   /** HTTP transport (the same seam as the LLM client's `fetch`). Omit ⇒ global fetch. */
   fetch?: typeof fetch
 }
@@ -512,11 +520,173 @@ export const A2E_STYLE: MediaStyle & { _doc?: string } = {
   "_doc": "a2e.ai preset (ADR 0036/0037). Embedded verbatim by every port as A2EMediaClient (SPEC §7G.9). Live-verified 2026-11-02: image, video, speech. talk is implemented per a2e's docs, UNVERIFIED. Set A2E_API_KEY. Result URLs expire (3-30 days); the built-in client downloads them by default."
 } as MediaStyle
 
-/** Read one style file (JSON). Throws the §7G.7 style errors. */
-export function loadMediaStyle(file: string): MediaStyle {
-  const style = JSON.parse(fs.readFileSync(file, "utf8")) as MediaStyle
+/**
+ * Built-in CLI presets for {@link loadMediaStyle} (ADR 0042): media through a locally installed,
+ * logged-in CLI on the user's own subscription, no API key. The `*Mock` twins behave the same
+ * (name, verbs, args, prompt folding, errors) but never start a process and return a fixed file.
+ */
+export const MediaStyle = {
+  /** The `grok` CLI: image and video. */
+  XaiGrokCli: "xai-grok-cli",
+  /** The `codex` CLI: image only. */
+  OpenAICodexCli: "openai-codex-cli",
+  /** Google's Antigravity CLI `agy`: image only. */
+  GoogleAgyCli: "google-agy-cli",
+  XaiGrokCliMock: "xai-grok-cli-mock",
+  OpenAICodexCliMock: "openai-codex-cli-mock",
+  GoogleAgyCliMock: "google-agy-cli-mock",
+} as const
+
+/** A built-in CLI preset name. */
+export type MediaStylePreset = (typeof MediaStyle)[keyof typeof MediaStyle]
+
+const CLI_PRESETS: Record<string, "grok" | "codex" | "agy"> = {
+  "xai-grok-cli": "grok", "openai-codex-cli": "codex", "google-agy-cli": "agy",
+  "xai-grok-cli-mock": "grok", "openai-codex-cli-mock": "codex", "google-agy-cli-mock": "agy",
+}
+
+/**
+ * A loaded style (§7G.7): an HTTP style file or a built-in CLI preset, configured and usable as a
+ * {@link MediaClient} anywhere one is accepted — `createMedia(loadMediaStyle("xai-grok-cli"))`.
+ */
+export class LoadedMediaStyle implements MediaClient {
+  readonly name: string
+  /** The preset name, when this is a built-in CLI preset. */
+  readonly preset?: MediaStylePreset
+  /** The parsed style, when this is an HTTP style. */
+  readonly style?: MediaStyle
+  /** The config the style was loaded with. */
+  readonly config: MediaClientConfig
+  private readonly client: MediaClient
+
+  constructor(source: MediaStyle | MediaStylePreset, config: MediaClientConfig = {}) {
+    this.config = config
+    if (typeof source === "string") {
+      const label = CLI_PRESETS[source]
+      if (label === undefined) throw new Error(`style: unknown preset "${source}"`)
+      this.preset = source
+      const mock = { mock: source.endsWith("-mock") }
+      this.client = label === "grok" ? new CliMediaClient(GROK_SPEC, config, mock)
+        : label === "codex" ? new CliMediaClient(CODEX_SPEC, config, mock)
+        : new CliMediaClient(AGY_SPEC, config, mock)
+    } else {
+      this.style = source
+      this.client = new StyleMediaClient(source, config)
+    }
+    this.name = this.client.name
+  }
+
+  supports(verb: MediaVerb | string): boolean { return this.client.supports(verb) }
+
+  /** Who serves calls: the preset id, else the HTTP style's name, else "style" (§7G.10b). */
+  get id(): string {
+    return this.preset ?? this.style?.name ?? "style"
+  }
+
+  /**
+   * Can this style run? Cheap and side-effect free (§7G.10b): a CLI preset's command is found and
+   * its own login file exists (never read); an HTTP style's config key or header `${VAR}`s are set.
+   */
+  available(): MediaAvailability {
+    if (this.preset === undefined) {
+      const id = this.id
+      if (this.config.key) return { installed: true, loggedIn: true, reason: `${id}: key from config` }
+      const vars = new Set<string>()
+      for (const v of Object.values(this.style?.headers ?? {})) for (const m of v.matchAll(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g)) vars.add(m[1])
+      for (const name of [...vars].sort(byCodePoint)) {
+        if (!process.env[name]) return { installed: true, loggedIn: false, reason: `${id}: ${name} is not set` }
+      }
+      return { installed: true, loggedIn: true, reason: `${id}: env present` }
+    }
+    const label = CLI_PRESETS[this.preset]
+    if (this.preset.endsWith("-mock")) {
+      if (process.env[MEDIA_MOCK_AVAILABLE_ENV] === "0") {
+        return { installed: false, loggedIn: false, reason: `${label}: mock set unavailable by ${MEDIA_MOCK_AVAILABLE_ENV}=0` }
+      }
+      return { installed: true, loggedIn: true, reason: `${label}: mock` }
+    }
+    const cmd = this.config.command
+    const bin = (Array.isArray(cmd) ? cmd[0] : cmd) || label
+    if (!findCommand(bin)) return { installed: false, loggedIn: false, reason: `${label}: ${JSON.stringify(bin)} not found on PATH` }
+    const auth = cliAuthFile(label)
+    let present = false
+    try {
+      present = !fs.statSync(auth).isDirectory()
+    } catch {
+      present = false
+    }
+    return present
+      ? { installed: true, loggedIn: true, reason: `${label}: installed, logged in (${auth} present)` }
+      : { installed: true, loggedIn: false, reason: `${label}: installed, not logged in (${auth} missing)` }
+  }
+
+  args(verb: MediaVerb | string): MediaArgSpec[] { return acceptedArgs(this.client, verb) }
+
+  private call(verb: MediaVerb, args: Record<string, unknown>, ctx: MediaContext): Promise<MediaResult> {
+    const fn = (this.client as any)[verb] as ((a: Record<string, unknown>, x: MediaContext) => Promise<MediaResult>) | undefined
+    if (typeof fn !== "function") return Promise.reject(new MediaError(`media: no style supports "${verb}"`))
+    return fn.call(this.client, args, ctx)
+  }
+
+  image(args: Record<string, unknown>, ctx: MediaContext = {}) { return this.call("image", args, ctx) }
+  video(args: Record<string, unknown>, ctx: MediaContext = {}) { return this.call("video", args, ctx) }
+  speech(args: Record<string, unknown>, ctx: MediaContext = {}) { return this.call("speech", args, ctx) }
+  music(args: Record<string, unknown>, ctx: MediaContext = {}) { return this.call("music", args, ctx) }
+  transcribe(args: Record<string, unknown>, ctx: MediaContext = {}) { return this.call("transcribe", args, ctx) }
+  cloneVoice(args: Record<string, unknown>, ctx: MediaContext = {}) { return this.call("cloneVoice", args, ctx) }
+  talk(args: Record<string, unknown>, ctx: MediaContext = {}) { return this.call("talk", args, ctx) }
+}
+
+/** The cheap pre-flight answer of {@link LoadedMediaStyle.available} (§7G.10b). */
+export interface MediaAvailability {
+  installed: boolean
+  loggedIn: boolean
+  reason: string
+}
+
+/** Set to "0", every mock preset reports unavailable. */
+export const MEDIA_MOCK_AVAILABLE_ENV = "TOOLNEXUS_MEDIA_MOCK_AVAILABLE"
+
+function homeDir(): string {
+  return process.env.HOME || os.homedir()
+}
+
+/** The file each CLI writes when logged in (checked for existence only). */
+function cliAuthFile(label: string): string {
+  if (label === "grok") return path.join(homeDir(), ".grok", "auth.json")
+  if (label === "codex") return path.join(process.env.CODEX_HOME || path.join(homeDir(), ".codex"), "auth.json")
+  return path.join(homeDir(), ".gemini", "antigravity-cli", "antigravity-oauth-token")
+}
+
+/** A name with a path separator is checked as a file; otherwise searched on PATH (executable). */
+function findCommand(bin: string): boolean {
+  const exec = (p: string) => {
+    try {
+      if (!fs.statSync(p).isFile()) return false
+      fs.accessSync(p, fs.constants.X_OK)
+      return true
+    } catch {
+      return false
+    }
+  }
+  if (bin.includes("/") || bin.includes(path.sep)) return exec(bin)
+  const exts = process.platform === "win32" ? (process.env.PATHEXT ?? ".EXE;.CMD;.BAT").split(";") : [""]
+  for (const dir of (process.env.PATH ?? "").split(path.delimiter)) {
+    if (dir === "") continue
+    for (const x of exts) if (exec(path.join(dir, bin + x))) return true
+  }
+  return false
+}
+
+/**
+ * Load a style: a built-in CLI preset ({@link MediaStyle}`.XaiGrokCli`, …) or a style JSON file
+ * (throws the §7G.7 style errors). `config` configures the client behind it (model, command, loop, gather).
+ */
+export function loadMediaStyle(pathOrPreset: MediaStylePreset | string, config: MediaClientConfig = {}): LoadedMediaStyle {
+  if (Object.prototype.hasOwnProperty.call(CLI_PRESETS, pathOrPreset)) return new LoadedMediaStyle(pathOrPreset as MediaStylePreset, config)
+  const style = JSON.parse(fs.readFileSync(pathOrPreset, "utf8")) as MediaStyle
   validateStyle(style)
-  return style
+  return new LoadedMediaStyle(style, config)
 }
 
 function validateStyle(style: MediaStyle): void {
@@ -896,6 +1066,12 @@ interface GatherCfg {
   dir: string
   maxBytes: number
   keep: boolean
+  slug: string
+}
+
+/** gather.name sanitised (§7G.10b). */
+function mediaSlug(name: string | undefined): string {
+  return Buffer.from(name ?? "", "utf8").toString("latin1").replace(/[^A-Za-z0-9._-]/g, "-").replace(/^[.-]+/, "")
 }
 
 function gatherCfg(config: MediaClientConfig, dflt: GatherMode): GatherCfg {
@@ -905,6 +1081,7 @@ function gatherCfg(config: MediaClientConfig, dflt: GatherMode): GatherCfg {
     dir: path.resolve(g.dir ?? path.join(os.tmpdir(), "toolnexus-media")),
     maxBytes: positive(g.maxBytes) ?? 104857600,
     keep: g.keep ?? true,
+    slug: mediaSlug(g.name),
   }
 }
 
@@ -934,6 +1111,19 @@ class Gatherer {
 
   private target(mimeType: string, ext?: string): string {
     fs.mkdirSync(this.cfg.dir, { recursive: true })
+    const e = ext ?? EXT[mimeType] ?? ".bin"
+    if (this.cfg.slug !== "") {
+      // First free <slug><ext>, <slug>-2<ext>, …; created exclusively so concurrent gathers never collide.
+      for (let n = 1; ; n++) {
+        const file = path.join(this.cfg.dir, `${this.cfg.slug}${n > 1 ? `-${n}` : ""}${e}`)
+        try {
+          fs.closeSync(fs.openSync(file, "wx"))
+          return file
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err
+        }
+      }
+    }
     return path.join(this.cfg.dir, `${this.client}-${this.verb}-${Date.now()}-${++saveSeq}${ext ?? EXT[mimeType] ?? ".bin"}`)
   }
 
@@ -1158,7 +1348,11 @@ export class StyleMediaClient implements MediaClient {
 }
 
 /** Make a media client from a parsed style (§7G.7). */
-export function styleMediaClient(style: MediaStyle, config: MediaClientConfig = {}): StyleMediaClient {
+export function styleMediaClient(style: MediaStyle | LoadedMediaStyle, config: MediaClientConfig = {}): StyleMediaClient {
+  if (style instanceof LoadedMediaStyle) {
+    if (!style.style) throw new Error(`style: "${style.preset}" is a CLI preset, not an HTTP style`)
+    return new StyleMediaClient(style.style, config)
+  }
   return new StyleMediaClient(style, config)
 }
 
@@ -1624,19 +1818,25 @@ export class CliMediaClient implements MediaClient {
   readonly name: string
   protected readonly config: MediaClientConfig
   private readonly spec: CliSpec
+  /** Never start the CLI; write a fixed file instead (§7G CLI mock presets). */
+  private readonly mock: boolean
 
-  constructor(spec: CliSpec, config: MediaClientConfig = {}) {
+  constructor(spec: CliSpec, config: MediaClientConfig = {}, opts: { mock?: boolean } = {}) {
     this.spec = spec
     this.name = spec.name
     this.config = config
+    this.mock = opts.mock === true
   }
 
   supports(verb: string): boolean {
     return Object.prototype.hasOwnProperty.call(this.spec.templates, verb)
   }
 
-  args(_verb: string): MediaArgSpec[] {
-    return [req("prompt")]
+  args(verb: string): MediaArgSpec[] {
+    if (!this.supports(verb)) return []
+    return verb === "video"
+      ? [req("prompt"), opt("seconds"), opt("aspectRatio")]
+      : [req("prompt"), opt("width"), opt("height"), opt("aspectRatio")]
   }
 
   image(args: Record<string, unknown>, ctx: MediaContext = {}) { return this.run("image", args, ctx) }
@@ -1650,7 +1850,8 @@ export class CliMediaClient implements MediaClient {
     const timeoutMs = positive(this.config.loop?.timeoutMs) ?? 600000
     const env = callEnv(name, verb, this.config, ctx, timeoutMs)
     if (ctx.signal?.aborted) throw abortError(ctx.signal)
-    const prompt = template.split("{prompt}").join(String(args.prompt ?? ""))
+    const prompt = template.split("{prompt}").join(foldMediaPrompt(verb, args))
+    if (this.mock) return this.mockRun(verb, prompt)
     const cwd = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "toolnexus-cli-")))
     try {
       const child = spawn(cmd[0], [...cmd.slice(1), ...this.spec.argv(prompt, cwd, this.config.model)], {
@@ -1758,6 +1959,47 @@ export class CliMediaClient implements MediaClient {
       fs.rmSync(cwd, { recursive: true, force: true })
     }
   }
+
+  /**
+   * The CLI mock (§7G CLI mock presets): no process. Writes `<gather.dir>/<client>-mock-<verb>.<png|mp4>`
+   * (gather.dir default `<tmp>/toolnexus-media`) holding `toolnexus mock <verb>` and gathers it like a
+   * real CLI file; text = the exact prompt the CLI would have received; jobId "mock".
+   */
+  private async mockRun(verb: MediaVerb, prompt: string): Promise<MediaResult> {
+    const dir = this.config.gather?.dir || path.join(os.tmpdir(), "toolnexus-media")
+    let file: string
+    try {
+      fs.mkdirSync(dir, { recursive: true })
+      file = path.resolve(dir, `${this.name}-mock-${verb}${verb === "video" ? ".mp4" : ".png"}`)
+      fs.writeFileSync(file, `toolnexus mock ${verb}`)
+    } catch (e) {
+      throw new MediaError(`${this.name}: ${(e as Error).message}`)
+    }
+    const g = new Gatherer(gatherCfg(this.config, "download"), this.name, verb, VERB_KIND[verb])
+    return { files: await g.all([{ path: file }]), text: prompt, jobId: "mock", status: "completed" }
+  }
+}
+
+const CLI_HINTS: Record<string, [string, string]> = {
+  width: ["width ", " px"],
+  height: ["height ", " px"],
+  seconds: ["about ", " seconds long"],
+  aspectRatio: ["aspect ratio ", ""],
+}
+
+/**
+ * The prompt a CLI style receives (§7G CLI hint folding): `prompt`, then the present size hints in
+ * canonical verb order as ` (h1, h2)`; nothing appended when none is present.
+ */
+export function foldMediaPrompt(verb: MediaVerb | string, args: Record<string, unknown>): string {
+  const prompt = args.prompt === undefined || args.prompt === null ? "" : renderScalar(args.prompt)
+  const hints: string[] = []
+  for (const a of VERB_SPEC.get(verb)?.args ?? []) {
+    const h = CLI_HINTS[a.name]
+    const v = args[a.name]
+    if (h && v !== undefined && v !== null) hints.push(h[0] + renderScalar(v) + h[1])
+  }
+  return hints.length === 0 ? prompt : `${prompt} (${hints.join(", ")})`
 }
 
 const str = (v: unknown): string | undefined => (typeof v === "string" ? v : undefined)
@@ -1861,6 +2103,47 @@ export class CodexMediaClient extends CliMediaClient {
   }
 }
 
+const AGY_SPEC: CliSpec = {
+  name: "agy",
+  command: "agy",
+  templates: {
+    image: "Generate exactly one image with your image generation tool: {prompt}. Do not write code. Reply only with the absolute path where the image was saved.",
+  },
+  argv: (prompt, _cwd, model) => ["-p", prompt, "--output-format", "stream-json", "--dangerously-skip-permissions", ...(model ? ["--model", model] : [])],
+  parse(o) {
+    switch (o.event) {
+      case "init":
+        return { session: str(o.conversation_id), status: "init" }
+      case "step_update": {
+        const su = o.step_update as any
+        const t = str(su?.tool_name)
+        const st = str(su?.state)
+        return t && st ? { status: `tool ${t} ${st}` } : {}
+      }
+      case "result": {
+        const r = o.result as any
+        const ev: CliEvent = { session: str(r?.conversation_id), text: str(r?.response), status: `result ${str(r?.status) ?? ""}` }
+        if (r?.status !== "SUCCESS") {
+          ev.error = (str(r?.error) || undefined) ?? (str(r?.error?.message) || undefined) ?? (ev.text || undefined)
+            ?? JSON.stringify(sortKeys(r ?? null))
+        }
+        const usage = reportedUsage({ inputTokens: r?.usage?.input_tokens, outputTokens: r?.usage?.output_tokens })
+        if (usage) ev.usage = usage
+        return ev
+      }
+      case "error":
+        return { error: str(o.message) }
+      default:
+        return {}
+    }
+  },
+  folder: (session) => path.join(os.homedir(), ".gemini", "antigravity-cli", "brain", session),
+  unavailable(error) {
+    const l = error.toLowerCase()
+    return l.includes("quota") || l.includes("usage limit") ? `agy: ${cap(error, 400)}` : undefined
+  },
+}
+
 // ---- createMedia: routing + tools (§7G.3, §7G.6) ----------------------------------------------
 
 type VerbInput<T> = T & MediaCallOptions
@@ -1913,6 +2196,16 @@ export class Media {
     return this.clients.some((c) => c.supports(verb))
   }
 
+  /** Every verb some source supports, in canonical verb order. */
+  verbs(): MediaVerb[] {
+    return MEDIA_VERBS.filter((v) => this.supports(v.verb)).map((v) => v.verb)
+  }
+
+  /** "style" when every source is a loaded style, else "client". */
+  private noun(): string {
+    return this.clients.every((c) => c instanceof LoadedMediaStyle) ? "style" : "client"
+  }
+
   /** Generic entry point: route `verb` with canonical `args`. */
   async generate(verb: MediaVerb | string, args: Record<string, unknown> = {}, ctx: MediaContext = {}): Promise<MediaResult> {
     return (await this.route(verb, args, ctx)).result
@@ -1920,7 +2213,7 @@ export class Media {
 
   private async route(verb: string, rawArgs: Record<string, unknown>, ctx: MediaContext): Promise<{ result: MediaResult; client: string }> {
     const candidates = this.clients.filter((c) => c.supports(verb))
-    if (candidates.length === 0) throw new MediaError(`media: no client supports "${verb}"`)
+    if (candidates.length === 0) throw new MediaError(`media: no ${this.noun()} supports "${verb}"`)
     const args = present(rawArgs)
     const canon = (VERB_SPEC.get(verb)?.args ?? []).map((a) => a.name)
     // D7/D19: a key no client can ever take fails the call at once.
@@ -1949,7 +2242,13 @@ export class Media {
       const fn = (c as any)[verb] as ((a: Record<string, unknown>, x: MediaContext) => Promise<MediaResult>) | undefined
       if (typeof fn !== "function") throw new MediaError(`media: client "${c.name}" has no ${verb} method`)
       try {
-        return { result: await fn.call(c, callArgs, ctx), client: c.name }
+        const result = await fn.call(c, callArgs, ctx)
+        if (result.style === undefined) result.style = c instanceof LoadedMediaStyle ? c.id : c.name
+        if (result.model === undefined && c instanceof LoadedMediaStyle) {
+          const model = c.config.models?.[verb as MediaVerb] || c.config.model
+          if (model) result.model = model
+        }
+        return { result, client: c.name }
       } catch (e) {
         if (!isUnavailable(e)) throw e
         messages.push((e as Error).message)
@@ -2050,4 +2349,14 @@ export function mediaPartPath(part: ContentPart): string | undefined {
 /** Route the seven verbs over one client or an ordered list (§7G.3). */
 export function createMedia(clients: MediaClient | MediaClient[]): Media {
   return new Media(clients)
+}
+
+/** One-shot sugar: `createMedia(loadMediaStyle(style, config)).generate(verb, args)`. */
+export function generateMedia(
+  style: MediaStylePreset | string,
+  verb: MediaVerb | string,
+  args: Record<string, unknown> = {},
+  config: MediaClientConfig = {},
+): Promise<MediaResult> {
+  return createMedia(loadMediaStyle(style, config)).generate(verb, args)
 }

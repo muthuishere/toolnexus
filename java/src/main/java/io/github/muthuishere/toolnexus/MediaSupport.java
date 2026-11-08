@@ -677,6 +677,35 @@ final class MediaSupport {
 
     private static final AtomicLong SEQ = new AtomicLong();
 
+    /** gather.name sanitised (§7G.10b): bytes outside [A-Za-z0-9._-] become "-", leading "." and "-" dropped. */
+    static String slug(String name) {
+        if (name == null) return "";
+        byte[] b = name.getBytes(StandardCharsets.UTF_8);
+        StringBuilder sb = new StringBuilder(b.length);
+        for (byte x : b) {
+            char c = (char) (x & 0xff);
+            boolean ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+                    || c == '.' || c == '_' || c == '-';
+            sb.append(ok ? c : '-');
+        }
+        int i = 0;
+        while (i < sb.length() && (sb.charAt(i) == '.' || sb.charAt(i) == '-')) i++;
+        return sb.substring(i);
+    }
+
+    /** The first of {@code <slug><ext>}, {@code <slug>-2<ext>}, … not yet in {@code dir}, created exclusively. */
+    static Path freeName(Path dir, String slug, String ext) throws IOException {
+        for (int n = 1; ; n++) {
+            Path p = dir.resolve(n == 1 ? slug + ext : slug + "-" + n + ext);
+            try {
+                Files.createFile(p);
+                return p;
+            } catch (java.nio.file.FileAlreadyExistsException e) {
+                // taken: try the next
+            }
+        }
+    }
+
     static final class Gather {
         final String client;
         final String verb;
@@ -685,6 +714,7 @@ final class MediaSupport {
         final String dir;
         final long maxBytes;
         final boolean keep;
+        final String slug;
         final Job job;
 
         Gather(String client, String verb, String kind, Media.Config cfg, String defaultMode, Job job) {
@@ -698,6 +728,7 @@ final class MediaSupport {
                     ? Path.of(System.getProperty("java.io.tmpdir"), "toolnexus-media").toString() : g.dir;
             this.maxBytes = g == null || g.maxBytes == null || g.maxBytes <= 0 ? DEFAULT_MAX_BYTES : g.maxBytes;
             this.keep = g == null || g.keep == null || g.keep;
+            this.slug = g == null ? "" : slug(g.name);
             this.job = job;
         }
 
@@ -714,8 +745,10 @@ final class MediaSupport {
             try {
                 Path d = Path.of(dir).toAbsolutePath();
                 Files.createDirectories(d);
-                Path p = d.resolve(client + "-" + verb + "-" + System.currentTimeMillis() + "-"
-                        + SEQ.incrementAndGet() + extFor(mime, fromUrl));
+                String ext = extFor(mime, fromUrl);
+                Path p = slug.isEmpty()
+                        ? d.resolve(client + "-" + verb + "-" + System.currentTimeMillis() + "-" + SEQ.incrementAndGet() + ext)
+                        : freeName(d, slug, ext);
                 Files.write(p, b);
                 return p;
             } catch (IOException e) {

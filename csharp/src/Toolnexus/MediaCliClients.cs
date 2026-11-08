@@ -9,11 +9,14 @@ namespace Toolnexus;
 /// §7G.10 — runs a local subscription CLI once, headless, reads its JSON-lines stdout and collects
 /// the files it made. Cancellation or the deadline kills the process tree. A CLI that cannot be
 /// started is <see cref="MediaUnavailableException"/>. Built-ins: <see cref="GrokMediaClient"/>,
-/// <see cref="CodexMediaClient"/>. CLI clients accept <c>prompt</c> only.
+/// <see cref="CodexMediaClient"/>, and the <c>google-agy-cli</c> preset. CLI clients accept <c>prompt</c> plus the
+/// size hints (image: width, height, aspectRatio; video: seconds, aspectRatio), folded into the prompt
+/// by <see cref="FoldMediaPrompt"/>.
 /// </summary>
 public abstract partial class CliMediaClient : IMediaClient
 {
-    private static readonly MediaArg[] PromptOnly = { new("prompt", true) };
+    private static readonly MediaArg[] ImageArgs = { new("prompt", true), new("width", false), new("height", false), new("aspectRatio", false) };
+    private static readonly MediaArg[] VideoArgs = { new("prompt", true), new("seconds", false), new("aspectRatio", false) };
 
     private protected readonly MediaClientConfig Config;
 
@@ -22,7 +25,12 @@ public abstract partial class CliMediaClient : IMediaClient
     public abstract string Name { get; }
     private protected abstract string DefaultCommand { get; }
     private protected abstract IReadOnlyCollection<string> Verbs { get; }
+    /// <summary>The prompt template of a verb; <c>{prompt}</c> is replaced by the folded prompt.</summary>
+    private protected abstract string Template(string verb);
+    /// <summary>The argv after the command; <paramref name="prompt"/> is the full templated prompt.</summary>
     private protected abstract List<string> Argv(string verb, string prompt, string cwd);
+    /// <summary>When true the CLI is never started: a fixed file is returned (§7G CLI mock presets).</summary>
+    internal bool Mock { get; init; }
     private protected virtual IReadOnlyDictionary<string, string> Env => new Dictionary<string, string>();
     private protected abstract CliEvent Parse(IDictionary<string, object?> obj, string line);
     private protected virtual string? Folder(string session) => null;
@@ -35,7 +43,33 @@ public abstract partial class CliMediaClient : IMediaClient
 
     public bool Supports(string verb) => Verbs.Contains(verb);
 
-    public IReadOnlyList<MediaArg>? Args(string verb) => Supports(verb) ? PromptOnly : null;
+    public IReadOnlyList<MediaArg>? Args(string verb) => !Supports(verb) ? null : verb == "video" ? VideoArgs : ImageArgs;
+
+    private static readonly (string Name, string Pre, string Post)[] Hints =
+    {
+        ("width", "width ", " px"), ("height", "height ", " px"),
+        ("seconds", "about ", " seconds long"), ("aspectRatio", "aspect ratio ", ""),
+    };
+
+    /// <summary>The prompt a CLI receives: <c>prompt</c>, then the present size hints in canonical
+    /// verb order as <c>" (h1, h2)"</c> (§7G CLI hint folding).</summary>
+    public static string FoldMediaPrompt(string verb, IDictionary<string, object?> args)
+    {
+        var prompt = ArgText(args.Get("prompt"));
+        var hs = new List<string>();
+        foreach (var a in MediaVerbs.Find(verb)?.Args ?? (IReadOnlyList<MediaVerbs.ArgSpec>)Array.Empty<MediaVerbs.ArgSpec>())
+            foreach (var h in Hints)
+                if (h.Name == a.Name && args.Get(a.Name) is { } v)
+                    hs.Add(h.Pre + ArgText(v) + h.Post);
+        return hs.Count == 0 ? prompt : prompt + " (" + string.Join(", ", hs) + ")";
+    }
+
+    private static string ArgText(object? v) => v switch
+    {
+        null => "",
+        string s => s,
+        _ => MediaUtil.ScalarText(v, false) ?? Convert.ToString(v, System.Globalization.CultureInfo.InvariantCulture) ?? "",
+    };
 
     public Task<MediaResult> ImageAsync(IDictionary<string, object?> args, MediaContext ctx) => RunAsync("image", args, ctx);
     public Task<MediaResult> VideoAsync(IDictionary<string, object?> args, MediaContext ctx) => RunAsync("video", args, ctx);
@@ -48,9 +82,10 @@ public abstract partial class CliMediaClient : IMediaClient
     private async Task<MediaResult> RunAsync(string verb, IDictionary<string, object?> args, MediaContext ctx)
     {
         if (!Supports(verb)) throw new MediaException($"{verb}: not supported by {Name}");
-        var prompt = args.Get("prompt")?.ToString() ?? "";
+        var prompt = Template(verb).Replace("{prompt}", FoldMediaPrompt(verb, args));
         var job = new MediaJob(verb, Name, MediaUtil.Positive(Config.Loop?.TimeoutMs, 600000), ctx, Config.Loop?.OnProgress);
         var command = Config.Command is { Count: > 0 } cmd ? cmd : new[] { DefaultCommand };
+        if (Mock) return MockRun(verb, prompt, job);
         var cwd = MediaUtil.RealPath(Directory.CreateTempSubdirectory("toolnexus-cli-").FullName);
         try
         {
@@ -145,6 +180,29 @@ public abstract partial class CliMediaClient : IMediaClient
             try { Directory.Delete(cwd, recursive: true); } catch { /* best effort */ }
         }
     }
+
+    /// <summary>The CLI mock: no process. Writes <c>&lt;gather.dir&gt;/&lt;client&gt;-mock-&lt;verb&gt;.&lt;png|mp4&gt;</c>
+    /// holding <c>toolnexus mock &lt;verb&gt;</c> and gathers it like a CLI file; text = the exact prompt
+    /// the CLI would have received; jobId <c>mock</c>.</summary>
+    private MediaResult MockRun(string verb, string prompt, MediaJob job)
+    {
+        var (ext, mime) = verb == "video" ? (".mp4", "video/mp4") : (".png", "image/png");
+        var dir = Config.Gather?.Dir is { Length: > 0 } d ? d : Path.Combine(Path.GetTempPath(), "toolnexus-media");
+        try
+        {
+            Directory.CreateDirectory(dir);
+            var p = Path.GetFullPath(Path.Combine(dir, $"{Name}-mock-{verb}{ext}"));
+            File.WriteAllBytes(p, Encoding.UTF8.GetBytes("toolnexus mock " + verb));
+            job.JobId = "mock";
+            var gather = new MediaGatherer(Config.Gather, "download", MediaHttp.Default, job, MediaVerbs.KindOf(verb));
+            var f = gather.FromLocal(p, mime, MediaUtil.TypeOfKind(MediaVerbs.KindOf(verb)));
+            return new MediaResult(new[] { f }, "completed", prompt, "mock");
+        }
+        catch (IOException e)
+        {
+            throw job.Fail($"{Name}: {e.Message}");
+        }
+    }
 }
 
 /// <summary>§7G.10 Grok Build CLI (<c>grok -p … --output-format streaming-json</c>, SuperGrok
@@ -165,12 +223,13 @@ public sealed class GrokMediaClient : CliMediaClient
         ["GROK_CONFIG"] = "{\"features\":{\"image_gen\":true,\"video_gen\":true}}",
     };
 
+    private protected override string Template(string verb) => verb == "video"
+        ? "Generate exactly one short video with your video generation tool, shortest duration available: {prompt}. Do not write code. Reply only with the file path."
+        : "Generate exactly one image with your image generation tool: {prompt}. Do not write code. Reply only with the file path.";
+
     private protected override List<string> Argv(string verb, string prompt, string cwd)
     {
-        var p = verb == "video"
-            ? $"Generate exactly one short video with your video generation tool, shortest duration available: {prompt}. Do not write code. Reply only with the file path."
-            : $"Generate exactly one image with your image generation tool: {prompt}. Do not write code. Reply only with the file path.";
-        var argv = new List<string> { "-p", p, "--cwd", cwd, "--output-format", "streaming-json", "--yolo", "--no-auto-update" };
+        var argv = new List<string> { "-p", prompt, "--cwd", cwd, "--output-format", "streaming-json", "--yolo", "--no-auto-update" };
         if (!string.IsNullOrEmpty(Config.Model)) argv.AddRange(new[] { "-m", Config.Model! });
         return argv;
     }
@@ -241,11 +300,14 @@ public sealed class CodexMediaClient : CliMediaClient
     private protected override string DefaultCommand => "codex";
     private protected override IReadOnlyCollection<string> Verbs => VerbList;
 
+    private protected override string Template(string verb)
+        => "Generate exactly one image with your built-in image generation tool: {prompt}. Do not write code or use scripts. Reply only with the absolute path where the image was saved.";
+
     private protected override List<string> Argv(string verb, string prompt, string cwd)
     {
         var argv = new List<string> { "exec", "--json", "--skip-git-repo-check", "-s", "workspace-write" };
         if (!string.IsNullOrEmpty(Config.Model)) argv.AddRange(new[] { "-m", Config.Model! });
-        argv.Add($"Generate exactly one image with your built-in image generation tool: {prompt}. Do not write code or use scripts. Reply only with the absolute path where the image was saved.");
+        argv.Add(prompt);
         return argv;
     }
 
@@ -277,4 +339,70 @@ public sealed class CodexMediaClient : CliMediaClient
 
     private protected override string? Unavailable(string verb, string error)
         => MediaHttp.ContainsAny(error, "usage limit", "quota") ? "codex: " + CapError(error) : null;
+}
+
+/// <summary>§7G.10 Google Antigravity CLI (<c>agy -p … --output-format stream-json
+/// --dangerously-skip-permissions</c>): image. The path is in the final result's response text,
+/// else the files of the conversation's brain folder. Reached through the <c>google-agy-cli</c> preset.</summary>
+internal sealed class AgyMediaClient : CliMediaClient
+{
+    private static readonly string[] VerbList = { "image" };
+
+    public AgyMediaClient(MediaClientConfig? config = null) : base(config) { }
+
+    public override string Name => "agy";
+    private protected override string DefaultCommand => "agy";
+    private protected override IReadOnlyCollection<string> Verbs => VerbList;
+
+    private protected override string Template(string verb)
+        => "Generate exactly one image with your image generation tool: {prompt}. Do not write code. Reply only with the absolute path where the image was saved.";
+
+    private protected override List<string> Argv(string verb, string prompt, string cwd)
+    {
+        var argv = new List<string> { "-p", prompt, "--output-format", "stream-json", "--dangerously-skip-permissions" };
+        if (!string.IsNullOrEmpty(Config.Model)) argv.AddRange(new[] { "--model", Config.Model! });
+        return argv;
+    }
+
+    private protected override CliEvent Parse(IDictionary<string, object?> obj, string line)
+    {
+        switch (obj.Get("event") as string)
+        {
+            case "init":
+                return new CliEvent(Session: obj.Get("conversation_id") as string, Status: "init");
+            case "step_update":
+                return MediaUtil.ReadPath(obj, "step_update.tool_name") is string { Length: > 0 } t
+                       && MediaUtil.ReadPath(obj, "step_update.state") is string { Length: > 0 } st
+                    ? new CliEvent(Status: "tool " + t + " " + st)
+                    : new CliEvent();
+            case "result":
+            {
+                var text = MediaUtil.ReadPath(obj, "result.response") as string;
+                var status = MediaUtil.ReadPath(obj, "result.status") as string ?? "";
+                string? error = null;
+                if (status != "SUCCESS")
+                    error = MediaUtil.ReadPath(obj, "result.error") is string { Length: > 0 } m1 ? m1
+                        : MediaUtil.ReadPath(obj, "result.error.message") is string { Length: > 0 } m2 ? m2
+                        : !string.IsNullOrEmpty(text) ? text
+                        : Json.Stringify(MediaUtil.SortKeys(obj.Get("result")));
+                var it = MediaUtil.ReadPath(obj, "result.usage.input_tokens");
+                var ot = MediaUtil.ReadPath(obj, "result.usage.output_tokens");
+                MediaUsage? usage = it != null || ot != null
+                    ? new MediaUsage { InputTokens = MediaUtil.ToLong(it), OutputTokens = MediaUtil.ToLong(ot) }
+                    : null;
+                return new CliEvent(Session: MediaUtil.ReadPath(obj, "result.conversation_id") as string, Text: text,
+                    Error: error, Status: "result " + status, Usage: usage);
+            }
+            case "error":
+                return new CliEvent(Error: obj.Get("message") as string);
+            default:
+                return new CliEvent();
+        }
+    }
+
+    private protected override string? Folder(string session)
+        => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".gemini", "antigravity-cli", "brain", session);
+
+    private protected override string? Unavailable(string verb, string error)
+        => MediaHttp.ContainsAny(error, "quota", "usage limit") ? "agy: " + CapError(error) : null;
 }

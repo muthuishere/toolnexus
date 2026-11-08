@@ -333,6 +333,8 @@ pub(crate) struct Gather<'a> {
     pub kind: &'a str,
     pub mode: GatherMode,
     pub dir: Option<PathBuf>,
+    /// `gather.name`: saved files are `<slug><ext>`, `<slug>-2<ext>`, …
+    pub name: Option<String>,
     pub max: u64,
     pub keep: bool,
     pub http: &'a reqwest::Client,
@@ -343,6 +345,45 @@ pub(crate) struct Gather<'a> {
 }
 
 static SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// `gather.name` sanitised (§7G.10b): every byte outside `[A-Za-z0-9._-]`
+/// becomes `-`, then leading `.` and `-` are dropped.
+pub(crate) fn media_slug(name: &str) -> String {
+    let s: String = name
+        .bytes()
+        .map(|b| {
+            if b.is_ascii_alphanumeric() || b == b'.' || b == b'_' || b == b'-' {
+                b as char
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    s.trim_start_matches(['.', '-']).to_string()
+}
+
+/// The first of `<slug><ext>`, `<slug>-2<ext>`, … not yet in `dir`, created
+/// exclusively (empty) so concurrent gathers never collide.
+fn free_name(dir: &std::path::Path, slug: &str, ext: &str) -> std::io::Result<PathBuf> {
+    for n in 1u64.. {
+        let name = if n == 1 {
+            format!("{slug}{ext}")
+        } else {
+            format!("{slug}-{n}{ext}")
+        };
+        let p = dir.join(name);
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&p)
+        {
+            Ok(_) => return Ok(p),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    unreachable!()
+}
 
 impl Gather<'_> {
     fn too_big(&self) -> MediaError {
@@ -387,7 +428,15 @@ impl Gather<'_> {
             src.and_then(url_ext)
                 .unwrap_or_else(|| ext_for_mime(mime).to_string())
         );
-        let path = dir.join(name);
+        let slug = self.name.as_deref().map(media_slug).unwrap_or_default();
+        let path = if slug.is_empty() {
+            dir.join(name)
+        } else {
+            let ext = src
+                .and_then(url_ext)
+                .unwrap_or_else(|| ext_for_mime(mime).to_string());
+            free_name(&dir, &slug, &ext).map_err(io)?
+        };
         std::fs::write(&path, bytes).map_err(io)?;
         let p = path.to_string_lossy().into_owned();
         let mut f = self.file(mime);

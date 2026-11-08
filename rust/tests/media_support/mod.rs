@@ -146,6 +146,7 @@ pub fn config(v: Option<&Value>) -> (MediaClientConfig, Progress) {
                 _ => GatherMode::Download,
             }),
             dir: g.get("dir").and_then(Value::as_str).map(PathBuf::from),
+            name: g.get("name").and_then(Value::as_str).map(str::to_string),
             max_bytes: g.get("maxBytes").and_then(Value::as_u64),
             keep: g.get("keep").and_then(Value::as_bool),
         },
@@ -242,6 +243,12 @@ pub fn check_result(
     let gv = serde_json::to_value(got).unwrap();
     for k in ["text", "jobId", "status", "usage"] {
         assert_eq!(gv.get(k), want.get(k), "{name}: result.{k}");
+    }
+    // style/model only when the expected result names them (§7G.10b)
+    for k in ["style", "model"] {
+        if want.get(k).is_some() {
+            assert_eq!(gv.get(k), want.get(k), "{name}: result.{k}");
+        }
     }
     let wf = want["files"].as_array().unwrap();
     assert_eq!(got.files.len(), wf.len(), "{name}: file count {gv}");

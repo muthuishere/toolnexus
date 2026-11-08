@@ -8,6 +8,180 @@ GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
 
 ## Unreleased
 
+**Images and video from the CLI you already pay for — Grok, Codex or Google Antigravity, no API
+key.** If you have a SuperGrok, ChatGPT or Google Antigravity login, one line now makes an image
+(and, on Grok, a video) through that CLI on your machine:
+
+```ts
+const r = await generateMedia(MediaStyle.XaiGrokCli, "image", { prompt: "a red apple", aspectRatio: "16:9" })
+```
+
+- **Presets are styles.** `loadMediaStyle(MediaStyle.XaiGrokCli | OpenAICodexCli | GoogleAgyCli)`
+  (spelled per port: `MediaStyleXaiGrokCli` in Go, `MediaStyle.XAI_GROK_CLI` in Python, …) returns a
+  style that `createMedia` takes like any HTTP style, so the typed verbs (`media.image(...)`,
+  `media.video(...)`) and the agent tools (`generate_image`, `generate_video`) both work.
+  `generateMedia(style, verb, args)` is the one-shot form, and the Go CLI has a shell twin:
+  `toolnexus media image --style xai-grok-cli --prompt "a red apple" --aspect-ratio 16:9`.
+  The vendor-named constants are a deliberate, owner-approved exception to "no vendor names in the
+  public API" (ADR 0042).
+- **What each preset can do comes from its declaration**: Grok image and video, Codex image,
+  Antigravity image. Asking a style for a verb it does not declare fails at once with
+  `media: no style supports "video"` (no process is started), the agent never sees a tool for
+  it, and `media.verbs()` lists what is available.
+- **Size hints become prompt text instead of an error** (reported by a consumer): a CLI has no
+  `--aspect-ratio` flag, so `aspectRatio`, `width`, `height` and `seconds` are appended to the
+  prompt as ` (width 1024 px, aspect ratio 16:9)`. Before, `aspectRatio` on a CLI client failed
+  with `argument "aspectRatio" not supported`. `seed` is still refused.
+- **Check before you call**: `style.available()` says in milliseconds whether the CLI is installed
+  and logged in (it checks the CLI's own login file exists, never its contents), or whether an HTTP
+  style's key env vars are set.
+- **Name your files**: `gather.name: "cover"` saves `cover.png`, then `cover-2.png`, …
+- **Who served it**: results carry `style` (e.g. `xai-grok-cli`) and, when you set one, `model`.
+  Usage and cost appear only when the CLI or API reports them (Grok's end event does); toolnexus
+  never estimates a price.
+- **Test without a CLI**: `MediaStyle.XaiGrokCliMock` (and the Codex/Antigravity twins) behave like
+  the preset (same verbs, tools, errors and prompt folding) but start no process and return a fixed
+  file whose result `text` is the exact prompt the CLI would have received.
+- **Grok images carry a visible "Grok" watermark** (bottom-right corner, seen on every live image).
+  toolnexus documents it and does not remove it.
+- **Permissions**: each preset runs headless with no prompt: Grok with `--yolo`, Antigravity with
+  `--dangerously-skip-permissions`, Codex sandboxed with `-s workspace-write`.
+
+Live-verified on 2026-11-08 through the shell command, at 16:9: Grok image (1280×720, 29 s), Grok
+video (58 s), Codex image (1672×941, 33 s), Antigravity image (1376×768, 55 s, agy 1.4.12), none
+of them stopping for a prompt. **Not verified**: the Antigravity failure output (its quota case is
+pinned from a guessed line shape, marked `liveVerified:false`), Antigravity video (not attempted;
+the preset declares image only), Windows (not run). Contract: SPEC §7G.10, §7G.10a, §7G.10b,
+ADR 0042, `conformance/media/cli.json`; tracked in `openspec/changes/add-cli-media-presets`.
+
+**BREAKING (media, every port) — named clients replace the 0.24 style-only API.** `createMedia`
+now takes clients or loaded styles (`createMedia(loadMediaStyle("a2e.json"))`) instead of
+`createMedia(style, options)`; the verb `talking` is renamed `talk` (the tool
+is still `talking_video`), and a seventh verb, `music`, is added. Details below.
+
+**Media generation: images, video, speech, music, transcription, voice cloning and talking-head
+video — from named clients you configure in one line, or from your own.** Until now toolnexus could
+carry an image or audio part but not make one. Now `createMedia(client)` gives your code seven verbs
+and your agent seven tools, and the provider is a small named client instead of request code:
+
+- **Seven verbs, seven tools** — `image`, `video`, `speech`, `music`, `transcribe`, `cloneVoice`,
+  `talk` for your code (result `{files, text?, jobId?, status}`); `generate_image`,
+  `generate_video`, `generate_speech`, `generate_music`, `transcribe_audio`, `clone_voice`,
+  `talking_video` for your agent via `createToolkit({ media })`. Tool names never change when you
+  switch provider, so prompts and skills keep working. Media tools are concurrency-safe.
+- **Built-in clients, one config shape** — `A2EMediaClient`, `ElevenLabsMediaClient`,
+  `OpenAIMediaClient` (its `url` reaches any OpenAI-compatible server), `OpenRouterMediaClient`,
+  `FalMediaClient` (any hosted model by id through fal's queue), and two local subscription CLIs,
+  `GrokMediaClient` and `CodexMediaClient`, which run the CLI once headless and pick up the file it
+  saved. Every client takes the same `{model, models, key, url, command, loop, gather}`; the key
+  defaults to the provider's usual env var (`OPENAI_API_KEY`, `FAL_API_KEY`, …).
+- **Typed errors** — every media error carries a status (`failed`, `timeout`, `cancelled`,
+  `unavailable`), so you can test for `unavailable` (no key, out of credits or quota, CLI not
+  installed, Grok's Zero Data Retention blocking video) without reading the message. An argument
+  a client cannot take is an error that names it; a misspelled argument fails at once.
+- **What a call cost, when the provider says** — results (and the tool's `metadata.usage`) carry
+  `usage` with `inputTokens` / `outputTokens` from OpenAI images, plus `costUsd` from OpenRouter.
+  Grok CLI reports tokens and `costUsd` from its headless `end` event (live-verified), with
+  `total_cost_usd_ticks` passed through unconverted as `usage.raw.total_cost_usd_ticks`. Other clients report nothing rather than an estimate. **Gap:** there
+  is no run-level total of media usage yet; `RunResult.usage` still counts LLM tokens only.
+- **Saved files keep their path and a real extension** — each `RunResult.files` entry for a saved
+  file carries its absolute `path` (never sent to the model); file names take the URL's own
+  extension, else one from the mime type (`audio/x-wav` is now `.wav`, not `.bin`). Every media
+  request sends `User-Agent: toolnexus/<version> (<port>)` unless you set one, since some CDNs
+  refuse requests without it.
+- **Files you can keep** — `gather.mode` decides what you get back: `download` (default for named
+  clients) saves every result under `gather.dir`, so a2e's URLs that expire in 3–30 days are no
+  longer your problem; `url` keeps provider URLs; `inline` returns the bytes. A `maxBytes` cap
+  (100 MiB) bounds every download, and downloads never carry your API key.
+- **Your own provider** — implement `MediaClient` (`supports` plus the verbs you have), or keep
+  writing JSON styles: `loadMediaStyle` + `styleMediaClient` is the advanced path, and the a2e
+  client is itself such a style.
+- **Grok video and privacy** — Grok's video tools refuse to run under Zero Data Retention. The Grok
+  client never changes your settings; it reports `grok: video blocked by Zero Data Retention — run
+  /privacy and opt in, …`. The setup page has the steps.
+- **`RunResult.files`** — every image, video or audio a run's tools produced, in order, tagged with
+  the tool name and call id; `toolCalls[].parts` carries them per call. The answer text never gets
+  markup. It is not media-only: image or file parts returned by MCP tools and built-in file reads
+  land there too, and each entry keeps the part's `name` when it had one. A media tool's parts
+  carry downloaded or inline files as bytes, never as a local path, and only images are shown to
+  the model: a generated video or audio clip goes to `RunResult.files`, while the model sees just
+  the `video ready: …` line, so a clip never floods its context.
+- **Bounded, safe requests** — every request (start, each poll, each download) is bounded by the
+  time left until the job's deadline, provider headers never reach a different origin, and
+  redirects follow one rule set in every port: 301/302/303/307/308 with a `Location`, at most 10
+  hops (then `<verb>: too many redirects`), 301/302/303 after a POST become a body-less GET,
+  307/308 keep the method and body. Error bodies echoed in `HTTP <status>: …` are capped at 1000
+  characters.
+
+Contract: SPEC §7G, ADRs 0036 and 0037, `conformance/media/` — every port replays the same style
+engine cases, built-in client cases, CLI cases (against a fake CLI script) and routing cases,
+hermetically.
+
+**Live-verified** (one real call each): a2e image, video and speech; ElevenLabs speech (including a
+cloned voice by name); OpenAI image; OpenRouter image; fal image; Codex image; Grok image and video
+(video after opting in under `/privacy`).
+
+**Implemented from the provider's docs, not yet verified live**: OpenAI speech, transcription and
+video (Sora); fal video; ElevenLabs music, transcription and voice cloning; a2e talking video.
+They are pinned by the conformance cases; a live check of each is tracked in
+`openspec/changes/add-media-clients`.
+
+**Not done yet** (tracked in `openspec/changes/add-media-clients`): cancelling the job at the
+provider (cancel stops polling or kills the CLI; a remote job keeps running), webhooks, price
+quotes, pausing a long job through `waitFor`, streaming `file` events, ComfyUI, a generic ACP
+media client, music lyrics on ElevenLabs, OpenRouter video/audio, image editing, and direct
+clients for Replicate, Gemini, the Grok API, Seedance, Kling and Runway (reachable today through a
+custom client or a style). A file kept with `gather.mode: "url"` from Grok lives in Grok's own
+session folder, whose lifetime Grok decides. Realtime/live voice conversation is deliberately out
+of scope.
+
+Breaking against the unreleased #123 API (never published): `createMedia` takes clients, not styles
+(`createMedia(styleMediaClient(loadMediaStyle(path)))` is the old behaviour); the verb `talking` is
+now `talk`; a style declaring `talking` fails to load; HTTP 402 from a style is now `unavailable`.
+
+Known redirect gaps: on Clojure's cljgo host the Go HTTP client follows redirects itself, because
+koine has no no-redirect option yet: custom headers reach another origin (and so does
+`Authorization` when only the port differs), and a redirect loop stops after 10 requests instead
+of 11 (same `too many redirects` error). The JVM build follows the §7G rules. An HTTP client or
+transport you inject yourself (Java, C#, Rust, Python, and JS's `opts.fetch`, which may ignore
+`redirect: "manual"`) may follow redirects before the engine sees them, so it must not forward
+headers cross-origin.
+
+**Status of the ports:** the contract (SPEC, conformance, OpenSpec change) lands first; the eight
+port implementations follow on this branch before release and are tracked per port in
+`openspec/changes/add-media-clients/tasks.md`.
+
+### Tool scheduling: reads run together, writes run alone (all eight ports)
+
+The tool calls of one model response no longer all run at once. Before, every call started
+immediately with no limit, so two `write` / `edit` calls on one file could race and a response
+with forty reads opened forty at once. Now each call is **safe** or **unsafe**: a tool's own
+`concurrencySafe(args)` predicate decides, otherwise only a tool whose hints say `readOnly` is
+safe. Calls run in emitted order: a run of safe calls overlaps, an unsafe call runs alone after
+everything before it and before anything after it. Results and the transcript keep emitted
+order, as before. New client option **`maxToolConcurrency`** (default 10; env
+`TOOLNEXUS_MAX_TOOL_CONCURRENCY` overrides the default, the option overrides both) caps how many
+safe calls run at once. It applies to run and stream, both styles, resume paths and agent runs,
+and to the in-process client. Relay tools and the subagent `task` tool always run concurrently.
+SPEC §8 "Tool scheduling"; change `openspec/changes/add-tool-concurrency`; recipe page
+`cookbook/tool-scheduling`.
+
+- **Behaviour change:** a tool **without hints** (most `defineTool` / HTTP tools, MCP tools
+  whose server sends no `readOnlyHint`) is now unsafe and runs alone. Mark it read-only or give
+  it a predicate to keep it parallel.
+- **rust only, source break:** `Tool` gained a `concurrency_safe` field, so a `Tool { .. }`
+  struct literal must add `concurrency_safe: None` (or use `..` from another tool).
+  `define_tool` callers are unaffected.
+- **Not done:** the cap is per response, not per tool; `todowrite` keeps its `readOnly` hint, so
+  two `todowrite` calls in one response may still overlap (last writer wins, as before).
+
+### Background subagents: a documented recipe (all eight ports)
+
+Running a subagent in the background — an id back at once, a callback when it finishes — needs
+no new API: `spawn` returns the id, `wake` returns before the turn ends, and a `wait` in a
+background task delivers the result. SPEC §7D "Background runs" documents it and each port now
+pins it with a test.
+
 - **Docs site: a Toolnexus logo, favicon and a calmer home page.** The site has its own mark (three tool connectors converging on one hub that points forward: many tools, one framework) in the header, and as the favicon (SVG that follows light/dark, plus PNG/ICO fallbacks and an apple-touch icon) in place of Starlight's default. The home tab now reads "Toolnexus" instead of "toolnexus | toolnexus". The home page plays one short, CSS-only load sequence: the title and tagline rise in, the mark's connectors draw in, and faint lines draw from one point to the eight languages. With reduced motion turned on there is none, and nothing waits on scrolling to appear.
 
 - **Docs site: new "Reference" theme and the Toolnexus name.** The docs at muthuishere.github.io/toolnexus now use Source Serif 4 for headings and the hero, Source Sans 3 for text and JetBrains Mono for code, with a deep-green accent and matched light and dark themes (body text ≥ 11:1 contrast in both). Fonts are self-hosted, so the static site makes no third-party font calls. Code blocks, section rules, small-caps labels and a linked eight-language strip on the home page follow the same reference-book style. The product is written "Toolnexus" in titles and prose; package names, imports, commands and URLs stay lowercase `toolnexus`. Generated API reference pages are unchanged.

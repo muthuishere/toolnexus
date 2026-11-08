@@ -37,6 +37,8 @@ from toolnexus import (
     create_toolkit,
     load_media_style,
     style_media_client,
+    MediaStyle,
+    generate_media,
 )
 import types
 
@@ -69,7 +71,7 @@ BUILTINS = {
 def test_case_counts_exact():
     assert len(CASES) == 49
     assert len(CLIENT_CASES) == 76
-    assert len(CLI_CASES) == 24
+    assert len(CLI_CASES) == 35
     assert len(ROUTING["cases"]) == 19
     assert len(ROUTING["schemaCases"]) == 1
 
@@ -195,6 +197,11 @@ def check_requests(case, requests, cases_json=False):
 
 def check_result(got: MediaResult, want, client, verb, gdir):
     d = got.to_dict()
+    for k in ("style", "model"):  # asserted only when the case names them (§7G.10b)
+        if k not in want:
+            d.pop(k, None)
+        else:
+            assert d.get(k) == want[k], (k, d.get(k), want[k])
     assert set(d) == set(want), (d, want)
     for k in ("text", "jobId", "status"):
         if k in want:
@@ -474,7 +481,9 @@ async def _cli_face(case, tmp, monkeypatch, face):
     cfg = dict(c.get("config") or {})
     cfg["command"] = c.get("command") or ["/bin/sh", FAKE_CLI, fixture, out]
     events, cb = _progress_sink()
-    media = create_media(BUILTINS[c["client"]](_with_progress(cfg, cb)))
+    style = _cli_style(c)
+    cfg = _with_progress(cfg, cb)
+    media = create_media(load_media_style(style, cfg))
     t0 = time.monotonic()
     if face == "function":
         try:
@@ -485,6 +494,15 @@ async def _cli_face(case, tmp, monkeypatch, face):
         tool = next(t for t in media.tools() if t.name == _tool_name(c["verb"]))
         res = ("tool", await tool.execute(c["args"]))
     return c, out, gdir, events, res, (time.monotonic() - t0) * 1000
+
+
+def _cli_style(c):
+    """Every cli.json case names its preset in ``style``."""
+    return c["style"]
+
+
+def _cli_name(c):
+    return {"xai": "grok", "openai": "codex", "google": "agy"}[_cli_style(c).split("-")[0]]
 
 
 def _check_cli_side_effects(c, out):
@@ -511,14 +529,20 @@ def _check_cli_side_effects(c, out):
 @pytest.mark.parametrize("case", CLI_CASES, ids=[c["name"] for c in CLI_CASES])
 async def test_cli_cases(case, monkeypatch, tmp_path):
     c, out, gdir, events, (kind, value), ms = await _cli_face(case, str(tmp_path), monkeypatch, "function")
+    name = _cli_name(c)
     if "result" in c:
         assert kind == "result", str(value)
-        check_result(value, c["result"], c["client"], c["verb"], gdir)
+        check_result(value, c["result"], name, c["verb"], gdir)
         if c.get("noUsage"):
             assert value.usage is None
     else:
         assert kind == "error", value
         check_error(value, c)
+    if c.get("oneShot"):
+        cfg = dict(c.get("config") or {})
+        cfg["command"] = c.get("command") or ["/nonexistent/toolnexus-must-not-run"]
+        one = await generate_media(_cli_style(c), c["verb"], c["args"], cfg)
+        check_result(one, c["result"], name, c["verb"], gdir)
     _check_cli_side_effects(c, out)
     for p in c.get("expectExists") or []:
         assert os.path.exists(p), p
@@ -526,12 +550,62 @@ async def test_cli_cases(case, monkeypatch, tmp_path):
         assert not os.path.exists(p), p
     if "maxElapsedMs" in c:
         assert ms < c["maxElapsedMs"]
-    check_progress(c, events, c["client"])
+    check_progress(c, events, name)
     if "tool" in case and "ctxTimeoutMs" not in case:
         c, out, gdir, _, (_, r), _ = await _cli_face(case, str(tmp_path), monkeypatch, "tool")
         check_tool(r, c["tool"], gdir)
         check_run_files(c, r, gdir)
         _check_cli_side_effects(c, out)
+
+
+CLI_AVAIL_CASES = _load("cli.json")["availabilityCases"]
+
+
+def test_cli_availability_case_count():
+    assert len(CLI_AVAIL_CASES) == 7
+
+
+@pytest.mark.parametrize("case", CLI_AVAIL_CASES, ids=[c["name"] for c in CLI_AVAIL_CASES])
+def test_cli_availability_cases(case, monkeypatch, tmp_path):
+    d = os.path.realpath(str(tmp_path))
+    c = sub(case, {"{dir}": d})
+    for k, v in (c.get("env") or {}).items():
+        monkeypatch.setenv(k, v)
+    for k in c.get("unsetEnv") or []:
+        monkeypatch.delenv(k, raising=False)
+    for p in c.get("createFiles") or []:
+        open(p, "wb").close()
+    if isinstance(c["style"], str):
+        style = load_media_style(c["style"], c.get("config"))
+    else:
+        style = MediaStyle(c["style"], config=c.get("config"))
+    t0 = time.monotonic()
+    got = style.available()
+    assert time.monotonic() - t0 < 1.0
+    assert got == c["expect"]
+
+
+CLI_VERB_CASES = _load("cli.json")["verbCases"]
+
+
+def test_cli_verb_case_count():
+    assert len(CLI_VERB_CASES) == 8
+
+
+@pytest.mark.parametrize("vc", CLI_VERB_CASES, ids=[v["name"] for v in CLI_VERB_CASES])
+async def test_cli_verb_cases(vc):
+    srcs = []
+    for s in vc["styles"]:
+        if isinstance(s, str):
+            srcs.append(load_media_style(s, command=["/nonexistent/toolnexus-must-not-run"]))
+        else:
+            srcs.append(MediaStyle(s))
+    m = create_media(srcs)
+    assert m.verbs() == vc["expectVerbs"]
+    assert [t.name for t in m.tools()] == vc["expectTools"]
+    with pytest.raises(MediaError) as ei:
+        await m.generate(vc["unsupported"], {})
+    assert str(ei.value) == vc["error"]
 
 
 # --------------------------------------------------------------------------- #
@@ -572,7 +646,11 @@ async def test_routing_cases(case):
     try:
         res = await media.generate(case["verb"], case["args"])
         assert "result" in case, res
-        assert res.to_dict() == case["result"]
+        got = res.to_dict()
+        for k in ("style", "model"):  # asserted only when the case names them (§7G.10b)
+            if k not in case["result"]:
+                got.pop(k, None)
+        assert got == case["result"]
     except MediaError as e:
         assert "result" not in case, str(e)
         check_error(e, case)

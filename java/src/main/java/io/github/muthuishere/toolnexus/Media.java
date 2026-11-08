@@ -89,18 +89,40 @@ public final class Media {
         }
     }
 
-    /** {@code MediaResult = {files, text?, jobId?, status, usage?}}. {@code files} is never null. */
+    /**
+     * {@code MediaResult = {files, text?, jobId?, status, usage?, style?, model?}}. {@code files} is
+     * never null. {@code style} is who served the call (preset id, HTTP style name, else client name);
+     * {@code model} the configured model for the verb of a loaded style, never guessed (§7G.10b).
+     */
     @JsonInclude(JsonInclude.Include.NON_NULL)
-    public record MediaResult(List<MediaFile> files, String text, String jobId, String status, MediaUsage usage) {
+    public record MediaResult(List<MediaFile> files, String text, String jobId, String status, MediaUsage usage,
+                              String style, String model) {
         public MediaResult {
             files = files == null ? List.of() : List.copyOf(files);
             if (status == null) status = "completed";
+            if (style != null && style.isEmpty()) style = null;
+            if (model != null && model.isEmpty()) model = null;
+        }
+
+        public MediaResult(List<MediaFile> files, String text, String jobId, String status, MediaUsage usage) {
+            this(files, text, jobId, status, usage, null, null);
         }
 
         public MediaResult(List<MediaFile> files, String text, String jobId, String status) {
             this(files, text, jobId, status, null);
         }
+
+        /** This result with {@code style}/{@code model} filled where still absent. */
+        MediaResult withSource(String s, String m) {
+            return new MediaResult(files, text, jobId, status, usage, style != null ? style : s, model != null ? model : m);
+        }
     }
+
+    /** {@code style.available()} (§7G.10b): {@code {installed, loggedIn, reason}}. */
+    public record Availability(boolean installed, boolean loggedIn, String reason) {}
+
+    /** Env var that, set to {@code 0}, makes every mock preset report unavailable. */
+    public static final String MOCK_AVAILABLE_ENV = "TOOLNEXUS_MEDIA_MOCK_AVAILABLE";
 
     /** A progress report: {@code {verb, client, jobId?, status, elapsedMs}}. */
     public record Progress(String verb, String client, String jobId, String status, long elapsedMs) {}
@@ -164,17 +186,24 @@ public final class Media {
         public Loop onProgress(Consumer<Progress> v) { this.onProgress = v; return this; }
     }
 
-    /** {@code gather} config (§7G.5): {@code mode} url|download|inline, {@code dir}, {@code maxBytes}, {@code keep}. */
+    /** {@code gather} config (§7G.5): {@code mode} url|download|inline, {@code dir}, {@code maxBytes}, {@code keep}, {@code name}. */
     public static final class Gather {
         public String mode;
         public String dir;
         public Long maxBytes;
         public Boolean keep;
+        public String name;
 
         public Gather mode(String v) { this.mode = v; return this; }
         public Gather dir(String v) { this.dir = v; return this; }
         public Gather maxBytes(long v) { this.maxBytes = v; return this; }
         public Gather keep(boolean v) { this.keep = v; return this; }
+        /**
+         * Name saved files {@code <name><ext>}, then {@code <name>-2<ext>}, … (first free name).
+         * Sanitised: anything outside {@code [A-Za-z0-9._-]} becomes {@code -}, leading {@code .}
+         * and {@code -} are dropped; empty ⇒ the default naming (§7G.10b).
+         */
+        public Gather name(String v) { this.name = v; return this; }
     }
 
     /**
@@ -207,10 +236,26 @@ public final class Media {
         }
     }
 
-    /** A provider style (§7G.7), held as its parsed JSON object. */
-    public record Style(Map<String, Object> spec) {
-        public Style {
-            Objects.requireNonNull(spec, "style");
+    /**
+     * A loaded provider style (§7G.7): either an HTTP style held as its parsed JSON object, or a
+     * built-in CLI preset ({@link MediaStyle#XAI_GROK_CLI}, …). A loaded style is itself a
+     * {@link MediaClient}, so {@code Media.create(Media.loadMediaStyle(...))} works; its verb support
+     * comes only from the style's own declaration.
+     */
+    public static final class Style implements MediaClient {
+        private final Map<String, Object> spec;
+        private final String preset;
+        private final Config config;
+        private volatile MediaClient client;
+
+        public Style(Map<String, Object> spec) {
+            this(Objects.requireNonNull(spec, "style"), null, null);
+        }
+
+        private Style(Map<String, Object> spec, String preset, Config config) {
+            this.spec = spec;
+            this.preset = preset;
+            this.config = config;
         }
 
         /** Parse a style from JSON text. */
@@ -222,6 +267,134 @@ public final class Media {
         public static Style of(Map<String, Object> spec) {
             return new Style(spec);
         }
+
+        /** The parsed JSON object ({@code null} for a CLI preset). */
+        public Map<String, Object> spec() { return spec; }
+
+        /** The CLI preset name ({@code "xai-grok-cli"}, …), or {@code null} for an HTTP style. */
+        public String preset() { return preset; }
+
+        Style withConfig(Config c) {
+            return new Style(spec, preset, c);
+        }
+
+        static Style ofPreset(String preset, Config c) {
+            return new Style(null, preset, c);
+        }
+
+        /** The client behind this style. */
+        MediaClient client() {
+            MediaClient c = client;
+            if (c == null) {
+                if (preset != null) {
+                    CliMediaClient cli = switch (MediaStyle.label(preset)) {
+                        case "grok" -> new GrokMediaClient(config);
+                        case "codex" -> new CodexMediaClient(config);
+                        default -> new AgyMediaClient(config);
+                    };
+                    cli.mock = preset.endsWith("-mock");
+                    c = cli;
+                } else {
+                    c = new StyleMediaClient(this, config);
+                }
+                client = c;
+            }
+            return c;
+        }
+
+        String styleId() {
+            return spec != null && spec.get("name") instanceof String n && !n.isEmpty() ? n : "style";
+        }
+
+        /**
+         * Whether this style can run, in well under a second, generating nothing and reading no
+         * secret (§7G.10b). CLI preset: the command is found and the CLI's own login file exists
+         * (never read). HTTP style: the config key is set, or every {@code ${VAR}} its headers use.
+         */
+        public Availability available() {
+            if (preset == null) {
+                String id = styleId();
+                if (config != null && config.key != null && !config.key.isEmpty()) {
+                    return new Availability(true, true, id + ": key from config");
+                }
+                for (String v : headerVars()) {
+                    String val = env.apply(v);
+                    if (val == null || val.isEmpty()) return new Availability(true, false, id + ": " + v + " is not set");
+                }
+                return new Availability(true, true, id + ": env present");
+            }
+            String label = MediaStyle.label(preset);
+            if (preset.endsWith("-mock")) {
+                if ("0".equals(env.apply(MOCK_AVAILABLE_ENV))) {
+                    return new Availability(false, false, label + ": mock set unavailable by " + MOCK_AVAILABLE_ENV + "=0");
+                }
+                return new Availability(true, true, label + ": mock");
+            }
+            String bin = config != null && config.command != null && !config.command.isEmpty() ? config.command.get(0) : label;
+            if (!onPath(bin)) return new Availability(false, false, label + ": \"" + bin + "\" not found on PATH");
+            Path auth = authFile(label);
+            if (!Files.isRegularFile(auth)) {
+                return new Availability(true, false, label + ": installed, not logged in (" + auth + " missing)");
+            }
+            return new Availability(true, true, label + ": installed, logged in (" + auth + " present)");
+        }
+
+        private List<String> headerVars() {
+            java.util.TreeSet<String> out = new java.util.TreeSet<>();
+            if (spec != null && spec.get("headers") instanceof Map<?, ?> h) {
+                java.util.regex.Matcher m;
+                for (Object v : h.values()) {
+                    if (!(v instanceof String sv)) continue;
+                    m = HEADER_VAR.matcher(sv);
+                    while (m.find()) out.add(m.group(1));
+                }
+            }
+            return new ArrayList<>(out);
+        }
+
+        private static final java.util.regex.Pattern HEADER_VAR =
+                java.util.regex.Pattern.compile("\\$\\{([A-Za-z_][A-Za-z0-9_]*)\\}");
+
+        private static boolean onPath(String bin) {
+            if (bin.contains("/") || bin.contains(java.io.File.separator)) {
+                Path p = Path.of(bin);
+                return Files.isRegularFile(p) && Files.isExecutable(p);
+            }
+            String path = env.apply("PATH");
+            if (path == null) return false;
+            for (String d : path.split(java.io.File.pathSeparator)) {
+                if (d.isEmpty()) d = ".";
+                Path p = Path.of(d, bin);
+                if (Files.isRegularFile(p) && Files.isExecutable(p)) return true;
+            }
+            return false;
+        }
+
+        private static Path authFile(String label) {
+            String home = env.apply("HOME");
+            if (home == null || home.isEmpty()) home = System.getProperty("user.home");
+            return switch (label) {
+                case "grok" -> Path.of(home, ".grok", "auth.json");
+                case "codex" -> {
+                    String ch = env.apply("CODEX_HOME");
+                    yield ch != null && !ch.isEmpty() ? Path.of(ch, "auth.json") : Path.of(home, ".codex", "auth.json");
+                }
+                default -> Path.of(home, ".gemini", "antigravity-cli", "antigravity-oauth-token");
+            };
+        }
+
+        @Override public String name() { return client().name(); }
+        @Override public boolean supports(String verb) { return client().supports(verb); }
+        @Override public List<ArgSpec> args(String verb) { return client().args(verb); }
+        @Override public MediaResult call(String verb, Map<String, Object> args, Ctx ctx) {
+            return client().call(verb, args, ctx);
+        }
+
+        @Override public boolean equals(Object o) {
+            return o instanceof Style s && Objects.equals(spec, s.spec) && Objects.equals(preset, s.preset);
+        }
+
+        @Override public int hashCode() { return Objects.hash(spec, preset); }
     }
 
     // Typed inputs (function face). Null fields are absent; providerOptions may be null.
@@ -287,29 +460,58 @@ public final class Media {
         return create(clients);
     }
 
-    /** Read one style file (JSON). Unknown verbs and empty arg paths fail here. */
-    public static Style loadMediaStyle(String path) {
-        Style s;
-        try {
-            s = Style.parse(Files.readString(Path.of(path), StandardCharsets.UTF_8));
-        } catch (IOException e) {
-            throw new MediaException("media: cannot read style " + path + ": " + e.getMessage());
-        }
-        StyleMediaClient.validate(s);
-        return s;
+    /**
+     * Load a style: a built-in CLI preset name ({@link MediaStyle#XAI_GROK_CLI}, {@link MediaStyle#OPENAI_CODEX_CLI},
+     * {@link MediaStyle#GOOGLE_AGY_CLI} or a {@code -mock} twin), else one style file (JSON). Unknown
+     * verbs and empty arg paths fail here.
+     */
+    public static Style loadMediaStyle(String pathOrPreset) {
+        return loadMediaStyle(pathOrPreset, null);
     }
 
-    /** Alias of {@link #loadMediaStyle}. */
+    /** {@link #loadMediaStyle(String)} with the config of the client behind the style (model, command, loop, gather). */
+    public static Style loadMediaStyle(String pathOrPreset, Config config) {
+        if (MediaStyle.isPreset(pathOrPreset)) return Style.ofPreset(pathOrPreset, config);
+        Style s;
+        try {
+            s = Style.parse(Files.readString(Path.of(pathOrPreset), StandardCharsets.UTF_8));
+        } catch (IOException e) {
+            throw new MediaException("media: cannot read style " + pathOrPreset + ": " + e.getMessage());
+        }
+        StyleMediaClient.validate(s);
+        return config == null ? s : s.withConfig(config);
+    }
+
+    /** Alias of {@link #loadMediaStyle(String)}. */
     public static Style loadStyle(String path) {
         return loadMediaStyle(path);
     }
 
+    /** Alias of {@link #loadMediaStyle(String, Config)}. */
+    public static Style loadStyle(String path, Config config) {
+        return loadMediaStyle(path, config);
+    }
+
+    /**
+     * One-shot sugar: {@code create(loadMediaStyle(style, config)).generate(verb, args)}.
+     */
+    public static MediaResult generateMedia(String style, String verb, Map<String, Object> args, Config config) {
+        return create(loadMediaStyle(style, config)).generate(verb, args);
+    }
+
+    public static MediaResult generateMedia(String style, String verb, Map<String, Object> args) {
+        return generateMedia(style, verb, args, null);
+    }
+
     /** A {@link MediaClient} over a parsed style (§7G.7), named {@code style.name ?? "style"}. */
     public static StyleMediaClient styleMediaClient(Style style) {
-        return new StyleMediaClient(style, null);
+        return styleMediaClient(style, null);
     }
 
     public static StyleMediaClient styleMediaClient(Style style, Config config) {
+        if (style.preset() != null) {
+            throw new MediaException("media: " + style.preset() + " is a CLI preset, not an HTTP style");
+        }
         return new StyleMediaClient(style, config);
     }
 
@@ -380,6 +582,38 @@ public final class Media {
         return false;
     }
 
+    /** Every verb some source supports, in canonical verb order. */
+    public List<String> verbs() {
+        List<String> out = new ArrayList<>();
+        for (Map<String, Object> v : MediaSupport.VERBS) {
+            String verb = (String) v.get("verb");
+            if (supports(verb)) out.add(verb);
+        }
+        return out;
+    }
+
+    /** Who served a call (MediaResult.style). */
+    private static String sourceId(MediaClient c) {
+        if (c instanceof Style s) return s.preset != null ? s.preset : s.styleId();
+        return c.name();
+    }
+
+    /** The configured model for {@code verb} of a loaded style, or null (never guessed). */
+    private static String sourceModel(MediaClient c, String verb) {
+        if (!(c instanceof Style s) || s.config == null) return null;
+        if (s.config.models != null) {
+            String m = s.config.models.get(verb);
+            if (m != null && !m.isEmpty()) return m;
+        }
+        return s.config.model;
+    }
+
+    /** "style" when every source is a loaded style, else "client". */
+    private String noun() {
+        for (MediaClient c : clients) if (!(c instanceof Style)) return "client";
+        return "style";
+    }
+
     /** Generic entry: run {@code verb} with canonical {@code args}. */
     public MediaResult generate(String verb, Map<String, Object> args) {
         return generate(verb, args, (Ctx) null);
@@ -439,7 +673,7 @@ public final class Media {
     private Served route(String verb, Map<String, Object> rawArgs, Ctx ctx) {
         List<MediaClient> candidates = new ArrayList<>();
         if (MediaSupport.isVerb(verb)) for (MediaClient c : clients) if (c.supports(verb)) candidates.add(c);
-        if (candidates.isEmpty()) throw new MediaException("media: no client supports \"" + verb + "\"");
+        if (candidates.isEmpty()) throw new MediaException("media: no " + noun() + " supports \"" + verb + "\"");
         Map<String, Object> args = MediaSupport.clean(rawArgs);
 
         // §7G.3 step 3 (D7/D19): a non-canonical key fails at once, before any client is tried.
@@ -468,7 +702,9 @@ public final class Media {
                 continue;
             }
             try {
-                return new Served(c.call(verb, new LinkedHashMap<>(args), ctx), c.name());
+                MediaResult r = c.call(verb, new LinkedHashMap<>(args), ctx);
+                if (r != null) r = r.withSource(sourceId(c), sourceModel(c, verb));
+                return new Served(r, c.name());
             } catch (MediaUnavailableException e) {
                 reasons.add(e.getMessage());
             }

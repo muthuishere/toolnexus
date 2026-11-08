@@ -271,7 +271,7 @@ public class MockLlmIntegrationTests : IClassFixture<MockLlmServer>
             Assert.EndsWith("/video.mp4", Assert.Single(vid.Files).Url);
             Assert.Equal("video/mp4", vid.Files[0].MimeType);
 
-            var talk = await media.TalkingAsync(new TalkingInput(Base + "/files/image.png", Base + "/files/speech.wav"));
+            var talk = await media.TalkAsync(new TalkInput(Base + "/files/image.png") { Audio = Base + "/files/speech.wav" });
             Assert.Matches("/(video|talking)\\.mp4$", Assert.Single(talk.Files).Url);
             Assert.Equal("video/mp4", talk.Files[0].MimeType);
 

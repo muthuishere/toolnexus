@@ -115,10 +115,13 @@ mod style;
 pub use api::{
     A2EMediaClient, ElevenLabsMediaClient, FalMediaClient, OpenAIMediaClient, OpenRouterMediaClient,
 };
-pub use cli::{CliEvent, CliMediaClient, CliProfile, CodexMediaClient, GrokMediaClient};
+pub use cli::{
+    CliEvent, CliMediaClient, CliProfile, CodexMediaClient, GrokMediaClient, fold_media_prompt,
+};
 pub use style::{
-    ErrorEnvelope, MediaPoll, MediaStart, MediaStyle, MediaVerb, StyleMediaClient,
-    load_media_style, style_media_client,
+    ErrorEnvelope, LoadedStyle, MEDIA_MOCK_AVAILABLE_ENV, MediaAvailability, MediaPoll, MediaStart,
+    MediaStyle, MediaVerb, StyleMediaClient, load_media_style, load_media_style_with,
+    style_media_client,
 };
 
 // ---------------------------------------------------------------------------
@@ -249,6 +252,13 @@ pub struct MediaResult {
     /// What the provider reported (§7G.12 D21); never estimated.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<MediaUsage>,
+    /// Who served the call (§7G.10b): the preset id, an HTTP style's name
+    /// (else `style`), or the client's name. Set by the router.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub style: Option<String>,
+    /// The configured model for the verb of a loaded style; never guessed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 /// Provider-reported usage of one media call (§7G.12 D21). A field the
@@ -402,6 +412,10 @@ pub struct MediaGather {
     pub mode: Option<GatherMode>,
     /// `None` ⇒ `<os temp dir>/toolnexus-media`, created when missing.
     pub dir: Option<PathBuf>,
+    /// `gather.name`: saved files are named `<slug><ext>`, then
+    /// `<slug>-2<ext>`, … (first free name). `slug` keeps only
+    /// `[A-Za-z0-9._-]` (others ⇒ `-`), leading `.`/`-` dropped; empty ⇒ default naming.
+    pub name: Option<String>,
     /// `None` ⇒ 104857600 (100 MiB).
     pub max_bytes: Option<u64>,
     /// CLI clients: `Some(false)` deletes the CLI's original after a copy.
@@ -523,6 +537,22 @@ pub trait MediaClient: Send + Sync {
     }
     fn talk<'a>(&'a self, _args: MediaArgs, _ctx: &'a MediaCtx) -> MediaFuture<'a> {
         unsupported(self.name(), "talk")
+    }
+    /// True only for a loaded [`MediaStyle`] (the unsupported-verb message
+    /// says "style" when every source is one).
+    #[doc(hidden)]
+    fn is_media_style(&self) -> bool {
+        false
+    }
+    /// `MediaResult.style` for a call this source served (default: its name).
+    #[doc(hidden)]
+    fn source_id(&self) -> String {
+        self.name().to_string()
+    }
+    /// `MediaResult.model` for `verb` (default: none).
+    #[doc(hidden)]
+    fn source_model(&self, _verb: &str) -> Option<String> {
+        None
     }
 }
 
@@ -748,6 +778,19 @@ where
     })
 }
 
+/// One-shot `generateMedia(style, verb, args, config)`:
+/// `create_media([load_media_style_with(style, config)?])?.generate(verb, args)`.
+pub async fn generate_media(
+    style: impl AsRef<std::path::Path>,
+    verb: &str,
+    args: MediaArgs,
+    cfg: MediaClientConfig,
+) -> Result<MediaResult, MediaError> {
+    create_media([load_media_style_with(style, cfg)?])?
+        .generate(verb, args)
+        .await
+}
+
 macro_rules! typed_verb {
     ($verb:literal, $f:ident, $fw:ident, $in:ty) => {
         #[doc = concat!("The `", $verb, "` verb.")]
@@ -774,6 +817,24 @@ impl Media {
     /// Whether any client supports `verb`.
     pub fn supports(&self, verb: &str) -> bool {
         self.clients.iter().any(|c| c.supports(verb))
+    }
+
+    /// Every verb some source supports, in canonical (`verbs.json`) order.
+    pub fn verbs(&self) -> Vec<String> {
+        MEDIA_VERBS
+            .iter()
+            .filter(|v| self.supports(v))
+            .map(|v| v.to_string())
+            .collect()
+    }
+
+    /// "style" when every source is a loaded style, else "client".
+    fn noun(&self) -> &'static str {
+        if self.clients.iter().all(|c| c.is_media_style()) {
+            "style"
+        } else {
+            "client"
+        }
     }
 
     typed_verb!("image", image, image_with, ImageInput);
@@ -827,7 +888,8 @@ impl Media {
             self.clients.iter().filter(|c| c.supports(verb)).collect();
         if cands.is_empty() {
             return Err(MediaError::failed(format!(
-                "media: no client supports \"{verb}\""
+                "media: no {} supports \"{verb}\"",
+                self.noun()
             )));
         }
         // D7/D19: a non-canonical key can be served by no client
@@ -851,7 +913,15 @@ impl Media {
             let a = args.clone();
             let r = cancellable(ctx, call_media_verb(c.as_ref(), verb, a, ctx)).await;
             match r {
-                Ok(res) => return Ok((res, c.name().to_string())),
+                Ok(mut res) => {
+                    if res.style.as_deref().is_none_or(str::is_empty) {
+                        res.style = Some(c.source_id());
+                    }
+                    if res.model.as_deref().is_none_or(str::is_empty) {
+                        res.model = c.source_model(verb);
+                    }
+                    return Ok((res, c.name().to_string()));
+                }
                 Err(MediaError::Unavailable { message }) => msgs.push(message),
                 Err(e) => return Err(e),
             }
