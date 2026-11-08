@@ -199,6 +199,11 @@
       "how": "fromDir(home) without dream, startAgent with everyMs 50, advance 200 ms with script m-quiet",
       "filesUnchanged": true,
       "runtimeSpawnsOnlyThePersona": true
+    },
+    "D6_dreamerNameCollision": {
+      "how": "A persona from fromDir(home, {name: 'ava', dream: {...}}) whose agent tree already holds an agent named 'ava-dreamer' (e.g. a team member). startAgent must throw this error before anything is spawned or scheduled; nothing keeps running.",
+      "personaName": "ava",
+      "error": "startAgent: dreamer name collision: ava-dreamer is already registered"
     }
   }
 }

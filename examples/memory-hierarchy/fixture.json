@@ -97,6 +97,96 @@
           "memorySectionTail": " yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy\n- yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy",
           "diskUnchanged": true
         }
+      },
+      {
+        "name": "exactly-at-max-lines",
+        "memory": "a\nb\nc",
+        "files": {},
+        "options": {
+          "memoryIndexCap": {
+            "maxLines": 3,
+            "maxBytes": 100
+          }
+        },
+        "expect": {
+          "soulSha256": "8df86c7a46df55b6d1e57ab00652f66954516fb1b00e237a2f030e9c619b7b17",
+          "soulBytes": 19,
+          "equalsUncappedSoul": true,
+          "memorySectionTail": "## MEMORY.md\n\na\nb\nc",
+          "diskUnchanged": true
+        }
+      },
+      {
+        "name": "one-over-max-lines",
+        "memory": "a\nb\nc\nd",
+        "files": {},
+        "options": {
+          "memoryIndexCap": {
+            "maxLines": 3,
+            "maxBytes": 100
+          }
+        },
+        "expect": {
+          "soulSha256": "32e6e16ae2f3648bd9837f353967591764345150873ec33f199dd61433d9ddf1",
+          "soulBytes": 123,
+          "equalsUncappedSoul": false,
+          "memorySectionTail": "## MEMORY.md\n\na\nb\nc\n\n[MEMORY.md index truncated at 3 lines / 100 bytes. Keep MEMORY.md a short index (keep entries short).]",
+          "diskUnchanged": true
+        }
+      },
+      {
+        "name": "exactly-at-max-bytes",
+        "memory": "abc\nde",
+        "files": {},
+        "options": {
+          "memoryIndexCap": {
+            "maxLines": 10,
+            "maxBytes": 6
+          }
+        },
+        "expect": {
+          "soulSha256": "7c377e45c5838cfbc5ee2004a7d78870c8190e3d4760be914f263e5cde3b4e75",
+          "soulBytes": 20,
+          "equalsUncappedSoul": true,
+          "memorySectionTail": "## MEMORY.md\n\nabc\nde",
+          "diskUnchanged": true
+        }
+      },
+      {
+        "name": "one-over-max-bytes",
+        "memory": "abc\ndef",
+        "files": {},
+        "options": {
+          "memoryIndexCap": {
+            "maxLines": 10,
+            "maxBytes": 6
+          }
+        },
+        "expect": {
+          "soulSha256": "a748538672af36931a9f1e75dc8265a1a60b7aed245aee2af228e3d793130fa9",
+          "soulBytes": 120,
+          "equalsUncappedSoul": false,
+          "memorySectionTail": "## MEMORY.md\n\nabc\n\n[MEMORY.md index truncated at 10 lines / 6 bytes. Keep MEMORY.md a short index (keep entries short).]",
+          "diskUnchanged": true
+        }
+      },
+      {
+        "name": "trailing-newline-at-cap",
+        "memory": "a\nb\nc\n",
+        "files": {},
+        "options": {
+          "memoryIndexCap": {
+            "maxLines": 3,
+            "maxBytes": 5
+          }
+        },
+        "expect": {
+          "soulSha256": "8df86c7a46df55b6d1e57ab00652f66954516fb1b00e237a2f030e9c619b7b17",
+          "soulBytes": 19,
+          "equalsUncappedSoul": true,
+          "memorySectionTail": "## MEMORY.md\n\na\nb\nc",
+          "diskUnchanged": true
+        }
       }
     ]
   },
@@ -491,8 +581,142 @@
           }
         ],
         "expectFiles": {}
+      },
+      {
+        "name": "replace-inserts-with-literally",
+        "notes": true,
+        "seed": {
+          "MEMORY.md": "- tea\n- milk\n"
+        },
+        "ops": [
+          {
+            "args": {
+              "action": "replace",
+              "text": "tea",
+              "with": "$&$&"
+            },
+            "expect": {
+              "output": "ok (replace → MEMORY.md); loads next session",
+              "isError": false
+            }
+          },
+          {
+            "args": {
+              "action": "replace",
+              "text": "milk",
+              "with": "$1 $$"
+            },
+            "expect": {
+              "output": "ok (replace → MEMORY.md); loads next session",
+              "isError": false
+            }
+          },
+          {
+            "args": {
+              "action": "add",
+              "target": "note:n",
+              "text": "x"
+            },
+            "expect": {
+              "output": "ok (add → memory/n.md)",
+              "isError": false
+            }
+          },
+          {
+            "args": {
+              "action": "replace",
+              "target": "note:n",
+              "text": "x",
+              "with": "$&$& $1 $$ $0 $` $' \\1 \\0 \\g<0> ${1}"
+            },
+            "expect": {
+              "output": "ok (replace → memory/n.md)",
+              "isError": false
+            }
+          }
+        ],
+        "expectFiles": {
+          "MEMORY.md": "- $&$&\n- $1 $$\n",
+          "memory/n.md": "- $&$& $1 $$ $0 $` $' \\1 \\0 \\g<0> ${1}\n"
+        }
+      },
+      {
+        "name": "slug-anchors-and-length",
+        "notes": true,
+        "seed": {},
+        "ops": [
+          {
+            "args": {
+              "action": "add",
+              "target": "note:abc\n",
+              "text": "x"
+            },
+            "expect": {
+              "output": "invalid note slug: abc\n",
+              "isError": true
+            }
+          },
+          {
+            "args": {
+              "action": "read",
+              "target": "note:abc\n"
+            },
+            "expect": {
+              "output": "invalid note slug: abc\n",
+              "isError": true
+            }
+          },
+          {
+            "args": {
+              "action": "add",
+              "target": "note:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "text": "x"
+            },
+            "expect": {
+              "output": "invalid note slug: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "isError": true
+            }
+          },
+          {
+            "args": {
+              "action": "add",
+              "target": "note:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "text": "x"
+            },
+            "expect": {
+              "output": "ok (add → memory/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.md)",
+              "isError": false
+            }
+          },
+          {
+            "args": {
+              "action": "list"
+            },
+            "expect": {
+              "output": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\t4",
+              "isError": false
+            }
+          }
+        ],
+        "expectFiles": {
+          "memory/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.md": "- x\n"
+        }
       }
-    ]
+    ],
+    "listSkipsNonRegular": {
+      "note": "Create these at test time (skip on a platform without symlinks). memory/real.md is a regular file; memory/link.md is a symlink to it; memory/dangling.md is a symlink to a missing file; memory/dir.md is a directory. `list` must not error and lists only the regular file.",
+      "regular": {
+        "memory/real.md": "- r\n"
+      },
+      "symlinks": {
+        "memory/link.md": "real.md",
+        "memory/dangling.md": "missing.md"
+      },
+      "dirs": [
+        "memory/dir.md"
+      ],
+      "expectList": "real\t4"
+    }
   },
   "transcriptSearch": {
     "description": "Search past conversation transcripts — the ground truth of what actually happened. Case-insensitive substring match over message text. Returns one line per matching message: <conversationId>#<index> <role>: <snippet>. Read-only.",
@@ -522,7 +746,7 @@
       "snippetChars": 200
     },
     "store": {
-      "note": "A stub store: list() returns these ids in THIS order (newest first), get(id) returns the messages, save() is never called. Construct the tool with each case's `options` (defaults when absent).",
+      "note": "A stub store: list() returns these ids in THIS order (newest first), get(id) returns the messages, save() is never called. Construct the tool with each case's `options` (defaults when absent). A case with emptyStore: true runs instead against a store whose list() returns [] (and get() nothing).",
       "conversations": [
         {
           "id": "s2",
@@ -606,6 +830,19 @@
                     "s": 4,
                     "r": 5,
                     "B": 6
+                  }
+                }
+              ]
+            },
+            {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "tool_use",
+                  "id": "t3",
+                  "name": "note",
+                  "input": {
+                    "q": "ünï code ☃  end <&>"
                   }
                 }
               ]
@@ -769,6 +1006,38 @@
           "output": "s2#0 user: …d me: MT. MOON has Zubat…\ns2#3 assistant: …nside mt. moon take the …\n(+4 more)",
           "isError": false
         }
+      },
+      {
+        "name": "tool-use-input-non-ascii-and-line-separators-as-is",
+        "args": {
+          "query": "ünï"
+        },
+        "expect": {
+          "output": "s2#5 assistant: {\"q\":\"ünï code ☃  end <&>\"}",
+          "isError": false
+        }
+      },
+      {
+        "name": "null-limit",
+        "args": {
+          "query": "moon",
+          "limit": null
+        },
+        "expect": {
+          "output": "limit must be an integer >= 1",
+          "isError": true
+        }
+      },
+      {
+        "name": "empty-store",
+        "emptyStore": true,
+        "args": {
+          "query": "moon"
+        },
+        "expect": {
+          "output": "no matches",
+          "isError": false
+        }
       }
     ],
     "storeWithoutList": {
@@ -792,6 +1061,14 @@
       "addText": "x",
       "expectDisk": "original bytes + '\\n- x\\n'",
       "noTempFileLeft": true
+    },
+    "concurrentAddsViaSymlink": {
+      "note": "Like concurrentAdds, but writer 1's memoryTool is built over a symlink to the home dir and writer 2's over the real path. The per-path lock key is the resolved real path, so all 40 entries land. Skip where symlinks are unavailable.",
+      "writers": 2,
+      "addsEach": 20,
+      "file": "MEMORY.md",
+      "text": "w<writer>-<n>",
+      "expectEntries": 40
     }
   }
 }

@@ -2065,7 +2065,9 @@ tool (schema, description, behavior) and the files on disk are byte-identical to
 
 **Index cap — `fromDir(dir, { memoryIndexCap })`** (also `composeSoul(dir, { memoryIndexCap, notes })`).
 Value `true` ⇒ preset `{maxLines: 200, maxBytes: 25600}`; an object's missing field takes the
-preset's; a value `< 1` or non-integer ⇒ construction error. Applies to `MEMORY.md` only,
+preset's; a value `< 1` or non-integer ⇒ construction error. *Permitted per-port difference:*
+Go's `IndexCap` is a struct of plain `int`s, so a zero field means "missing ⇒ the preset's"
+(`&IndexCap{}` is the preset) and only a negative field is rejected; every other port rejects `0`. Applies to `MEMORY.md` only,
 **after** the 2 MB read cap and **before** the section `trim`. Algorithm (exact):
 1. `lines` = content split on `"\n"`; if content ends with `"\n"`, drop the final empty element.
 2. If `len(lines) <= maxLines` and UTF-8 length of `join(lines, "\n") <= maxBytes` ⇒ content unchanged.
@@ -2089,16 +2091,20 @@ Notes off ⇒ the tool is exactly the one above (an unrecognised `target` still 
   as above; `required: ["action"]` (property order as listed; fixture-pinned).
 - `target` resolution: absent ⇒ `self`; `self`/`user` as above; `note:<slug>` ⇒
   `<home>/memory/<slug>.md` when slug matches `^[a-z0-9][a-z0-9._-]{0,63}$` **and** does not
-  contain `..`, else `isError` `invalid note slug: <slug>` with **no I/O**; anything else ⇒
+  contain `..`, else `isError` `invalid note slug: <slug>` with **no I/O**. The match is anchored at
+  the true end of the string — `abc\n` is invalid (use `\z` / a full match where `$` also
+  matches before a final newline); 64 characters is the longest valid slug; anything else ⇒
   `isError` `unknown target: <target>`.
-- `add`/`replace`/`remove`: same semantics as `self`; `text` not a string ⇒ `isError`
+- `add`/`replace`/`remove`: same semantics as `self` (in every target, `replace` inserts
+  `with` **literally** — `$&`, `$1`, `$$`, `\1`, `${1}` are never expanded); `text` not a string ⇒ `isError`
   `text is required`. `add` to a missing note creates it (and `memory/`). Success:
   notes ⇒ `ok (<action> → memory/<slug>.md)`; `self`/`user` ⇒ unchanged
   (`ok (<action> → MEMORY.md); loads next session`).
 - `read`: the file's content with the 2 MB byte cap + bootstrap truncation notice (never
   written back); missing file ⇒ `isError` `not found: <target>` (`<target>` as given, `self`
   when absent).
-- `list` (ignores `target`): one line `<slug>\t<bytes>` per regular file `memory/<slug>.md` whose
+- `list` (ignores `target`): one line `<slug>\t<bytes>` per regular file (checked **without
+  following symlinks** — a symlink, dangling or not, and a directory are skipped, never an error) `memory/<slug>.md` whose
   slug is valid, sorted by slug ascending **by explicit sort** (code-point order — never rely on
   directory order), joined by `"\n"`, no trailing newline; none ⇒ `(no notes)`. `log.md` is listed.
 - Notes are **never** injected into the soul.
@@ -2106,8 +2112,11 @@ Notes off ⇒ the tool is exactly the one above (an unrecognised `target` still 
 **Write safety (always on).** Every `memory` write is atomic: a temp file in the same
 directory, flushed (fsync), renamed over the target; an existing file's permission bits are kept.
 Read-modify-write (`add`/`replace`/`remove`) reads the **full** file (never the capped view) and
-is serialized per **resolved absolute path** within one runtime/process (two tools over one home
-in one runtime lose nothing). Across processes the last rename wins (not fixed).
+is serialized per **resolved absolute path** — symlinks resolved (a file that does not exist
+yet: its directory resolved, the name appended), so a home reached through a symlink and through
+its real path shares one lock — within one runtime/process (two tools over one home
+in one runtime lose nothing). Across processes the last rename wins (not fixed). On a case-insensitive filesystem
+two spellings of one path may map to two locks — host-dependent, not normalized.
 
 **`transcriptSearchTool(store, { maxResults? = 20, snippetChars? = 200, name? = "transcript_search" })`** —
 a read-only `Tool` over a `ConversationStore`. Construction throws
@@ -2119,12 +2128,13 @@ Schema: `query` (string, `Text to find (case-insensitive substring).`), `convers
 - **Message text** = pieces joined by `"\n"`: string `content`; for array content, each part in
   order — `text` parts' `text`, `tool_use` parts' `input` as compact JSON (no spaces; object keys
   **sorted** lexicographically by code point, recursively for nested objects; arrays keep their
-  order; non-ASCII emitted as-is, `JSON.stringify` escaping otherwise), `tool_result` parts' content (recursively, same rules); other parts (images…)
+  order; non-ASCII — U+2028/U+2029 included — emitted as-is, never HTML-escaped (`<`, `>`, `&` raw too),
+  `JSON.stringify` escaping otherwise), `tool_result` parts' content (recursively, same rules); other parts (images…)
   contribute nothing; then each OpenAI `tool_calls[].function.arguments` string verbatim. The
   text is then **normalized**: every run of ASCII whitespace (space, `\t \n \r \f \v`) ⇒ one
   space, leading/trailing space trimmed.
 - **Query** is normalized the same way; empty ⇒ `isError` `query is required` **before** the
-  store is read. `limit` present and not an integer `>= 1` ⇒ `isError` `limit must be an integer >= 1`;
+  store is read. `limit` present (JSON `null` counts as present) and not an integer `>= 1` ⇒ `isError` `limit must be an integer >= 1`;
   else effective limit = `min(limit, maxResults)` (absent ⇒ `maxResults`).
 - **Match** = substring after **ASCII-only** case folding (`A–Z` ⇒ `a–z`; no Unicode
   lowercasing). One hit per message, at its first match. Positions and lengths are in **code
@@ -2175,7 +2185,10 @@ If nothing needs changing, write nothing and reply HEARTBEAT_OK.
 ⇒ throws. When the returned persona is started with `startAgent`, a
 `dreamer(dir, { store, instructions, name: "<persona name>-dreamer" })` is registered on the
 **same runtime**, spawned under its root, and given its own heartbeat at `everyMs` (same tick/
-coalesce/wake rules as above); `stop()` stops both. Dreamer replies never reach `onBeat` /
+coalesce/wake rules as above); `stop()` stops both. If the persona's agent tree already registers
+`<persona name>-dreamer`, `startAgent` throws `startAgent: dreamer name collision: <name> is already registered`
+before anything is spawned or scheduled; if the dreamer otherwise fails to spawn, the persona's
+heartbeat is cancelled before the error propagates (nothing keeps running). Dreamer replies never reach `onBeat` /
 `beats`. `run()`/`asTool()` of the persona never dream. Absent `dream` ⇒ only the persona is
 registered and spawned (byte-identical).
 
