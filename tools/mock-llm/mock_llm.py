@@ -16,7 +16,7 @@ Routes
   POST /v1/messages           Anthropic messages, same behaviour, SSE when streaming.
   POST /v1/systemone          The System One classifier wire (backends typesafe,
                               openrouter, vercel, custom): {model, questions, state}.
-  POST .../ai/run/<model>     The Cloudflare wire: {model, input:{questions,state}},
+  POST .../ai/run[/<model>]   The Cloudflare wire: {model, input:{questions,state}},
                               answered inside a {success, result} envelope.
   POST /v1/decisions          The OpenAI Decisions wire (backend openai):
                               {model, input, questions:[...]} answered by position.
@@ -577,7 +577,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(systemone_answers(body))
         if r == "/decisions":
             return self._send(decisions_reply(body))
-        if "/ai/run/" in r:  # Cloudflare Workers AI envelope
+        if "/ai/run" in r:  # Cloudflare Workers AI envelope
             inner = dict(body.get("input") or {}, model=body.get("model"))
             return self._send({"success": True, "errors": [], "messages": [],
                                "result": systemone_answers(inner)})
