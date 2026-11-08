@@ -9,8 +9,8 @@
 - [x] 2.1 js — `setMode` / `setModel`
 - [ ] 2.2 python — `set_mode` / `set_model`
 - [ ] 2.3 golang — `SetMode(ctx, mode)` / `SetModel(ctx, model)`
-- [ ] 2.4 java — `setMode` / `setModel`
-- [ ] 2.5 csharp — `SetModeAsync` / `SetModelAsync`
+- [x] 2.4 java — `setMode` / `setModel`
+- [x] 2.5 csharp — `SetModeAsync` / `SetModelAsync`
 - [ ] 2.6 elixir — `set_mode/2` / `set_model/2`
 - [ ] 2.7 clojure — `set-mode!` / `set-model!`
 - [ ] 2.8 rust — `set_mode` / `set_model`

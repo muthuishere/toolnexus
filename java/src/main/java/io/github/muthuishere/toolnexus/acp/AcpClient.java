@@ -281,33 +281,51 @@ public final class AcpClient implements Closeable, Function<InProcess.Request, I
         this.sessionId = String.valueOf(sid);
 
         if (opts.model != null && !opts.model.isEmpty()) {
-            // Passed through unchanged: the stable ACP spelling first, then the older session/set_model.
-            Map<String, Object> cfg = new LinkedHashMap<>();
-            cfg.put("sessionId", sessionId);
-            cfg.put("configId", "model");
-            cfg.put("value", opts.model);
             try {
-                call("session/set_config_option", cfg);
-            } catch (IOException e1) {
-                Map<String, Object> sm = new LinkedHashMap<>();
-                sm.put("sessionId", sessionId);
-                sm.put("modelId", opts.model);
-                try {
-                    call("session/set_model", sm);
-                } catch (IOException e2) {
-                    throw new StartException("set model", "toolnexus: acp: set model \"" + opts.model + "\": "
-                            + e1.getMessage() + "; " + e2.getMessage(), e2);
-                }
+                setModel(opts.model);
+            } catch (IOException e) {
+                throw new StartException("set model", e.getMessage(), e);
             }
         }
     }
 
-    /** Optional: negotiate a session mode via {@code session/set_mode}. */
+    /**
+     * Sends {@code session/set_mode {sessionId, modeId}} — at load ({@code mode}) or on a running
+     * client (SPEC §8C, #197). Same process, same session; sent at once, not queued behind a turn.
+     * The agent's error fails only this call.
+     */
     public void setMode(String modeId) throws IOException {
+        if (closed.get()) throw new IOException("toolnexus: ACP client closed");
         Map<String, Object> params = new LinkedHashMap<>();
         params.put("sessionId", sessionId);
         params.put("modeId", modeId);
         call("session/set_mode", params);
+    }
+
+    /**
+     * Changes the model, passed through unchanged (SPEC §8C, #197): {@code session/set_config_option
+     * {configId:"model"}} first, then {@code session/set_model {modelId}} if the agent rejects that.
+     * Both failing fails this call (both errors in the message); the client stays usable.
+     */
+    public void setModel(String model) throws IOException {
+        if (closed.get()) throw new IOException("toolnexus: ACP client closed");
+        Map<String, Object> cfg = new LinkedHashMap<>();
+        cfg.put("sessionId", sessionId);
+        cfg.put("configId", "model");
+        cfg.put("value", model);
+        try {
+            call("session/set_config_option", cfg);
+        } catch (IOException e1) {
+            Map<String, Object> sm = new LinkedHashMap<>();
+            sm.put("sessionId", sessionId);
+            sm.put("modelId", model);
+            try {
+                call("session/set_model", sm);
+            } catch (IOException e2) {
+                throw new IOException("toolnexus: acp: set model \"" + model + "\": "
+                        + e1.getMessage() + "; " + e2.getMessage(), e2);
+            }
+        }
     }
 
     /** The ACP session id assigned by {@code session/new}, stable across every {@link #generate}. */
