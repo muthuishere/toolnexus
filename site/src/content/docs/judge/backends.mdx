@@ -187,8 +187,7 @@ wire**, `decisions`, and the differences are ones you can hit:
 - **`usage`** keeps `input_tokens` / `output_tokens`, normalised to the System One shape.
 
 <Aside type="note" title="Not done yet">
-The wire follows OpenAI's published reference; a live check is still pending
-(`openspec/changes/add-classifier-openai-decisions`). There is no model catalogue (#158).
+Calibration is unmeasured, so decisions report `calibrated: false`. There is no model catalogue (#158).
 OpenRouter's and Vercel's Decisions routes have no preset: use `backend: "openai"` with a `baseUrl`
 override and your own `apiKeyEnv`.
 </Aside>

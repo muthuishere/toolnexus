@@ -21,8 +21,9 @@ any request: raw questions such as `box`, a one-option choice, and more than 400
 thresholds tuned on Jev do not transfer. The Decisions API has no batch call, so `states().evaluate`
 still fans out one request per state. There is no model catalogue (#158). OpenRouter's and Vercel's
 Decisions routes have no preset yet; they work today with a `baseUrl` override and a named `apiKeyEnv`.
-The wire follows OpenAI's published reference; a live check is still pending, see
-`openspec/changes/add-classifier-openai-decisions`. Shared fixture
+The wire was checked live against `gpt-6-luna` from Go, Python and Rust (yes/no, pick-one and
+score). Every port's mock-kit suite also covers it through `tools/mock-llm`'s `/v1/decisions`.
+Tracked in `openspec/changes/add-classifier-openai-decisions`. Shared fixture
 `examples/judge/backends/openai-decisions.json`. Docs: an "OpenAI (Decisions API)" section on the judge
 backends page and an openai recipe (yes/no, pick-one, score) in the judge cookbook, in all eight languages.
 

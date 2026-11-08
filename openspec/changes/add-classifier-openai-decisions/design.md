@@ -37,6 +37,6 @@ label, probability}]`. A refusal answer is `{type:"refusal", name}`. The API has
 
 ## Risks
 
-The wire is taken from the docs and has not been checked against the live API. A live check needs a
-valid `OPENAI_API_KEY`. The fixture records the documented shapes, so a drift will appear as a decode
+The wire is taken from the docs. It was checked live on 2026-11-08 from Go, Python and Rust
+(`gpt-6-luna`, `calibrated: false`): yes/no, pick-one and score all decoded. The fixture records the documented shapes, so a drift will appear as a decode
 error, not as a silent wrong answer.
