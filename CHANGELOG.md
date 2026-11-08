@@ -8,6 +8,15 @@ GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
 
 ## Unreleased
 
+**ACP tool rows now show their arguments and full title (#188).** Agents such as the Claude ACP
+adapter send a tool's `rawInput` (file path, command) and its full title only on a later
+`tool_call_update`; toolnexus read `rawInput` only from the first `tool_call`, so a host saw bare
+rows like `Write` or `Terminal`. A streaming ACP generate now emits
+`{type:"tool_call_args", id, name, args, via:"acp"}` when an update brings `rawInput`, and an
+update's title is kept, so the later `tool_result` carries `Write /tmp/a.txt` rather than `Write`.
+Additive: a consumer that ignores unknown event types sees no change. All eight ports; SPEC §8,
+conformance `stream.acpToolUpdate`.
+
 ### Memory hierarchy and dreaming
 
 A persona's memory can now stay small and stay true. **Everything is opt-in; a persona built
@@ -73,6 +82,7 @@ a `MEMORY.md` that is a symlink is now replaced by a regular file on the first w
 replaces the link), so point the home dir at the real directory rather than linking the file;
 clojure's write is not atomic yet (koine has no rename/move, so it needs adding to koine first);
 concurrent writers are addressed by the memory hierarchy entry above.
+||||||| parent of 3c9c7df2 (docs(spec): ACP tool_call_update rawInput/title → tool_call_args (#188))
 
 **A mock model server: run any toolnexus client, classifier or media job with no key and no cost.**
 `tools/mock-llm/mock_llm.py` is one stdlib-only Python file (`python3 tools/mock-llm/mock_llm.py

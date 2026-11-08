@@ -2656,6 +2656,11 @@ with the first allow-kind option, and only `agent_message_chunk` text forms the 
   `agent_message_chunk` → `{type:"text", delta}`, `agent_thought_chunk` → `{type:"thought", delta, via:"acp"}`,
   `tool_call` → `{type:"tool_call", id, name: title, args: rawInput, via:"acp"}`, and a
   `completed`/`failed` `tool_call_update` → `{type:"tool_result", id, name, output, isError, via:"acp"}`.
+  Agents often send `rawInput` and the full `title` only on a later `tool_call_update` (#188): an
+  update carrying a non-empty `rawInput` object emits `{type:"tool_call_args", id, name, args: rawInput,
+  via:"acp"}` (before any `tool_result` that same update produces), and an update's non-empty `title`
+  becomes the call's name for every later event of that id. An update with neither emits nothing.
+  Conformance: `conformance/acp-client/cases.json` `stream.acpToolUpdate`.
   An in-process client given a streaming generate streams instead of refusing: text events become
   the stream's text deltas, other events pass straight to the consumer and are **never executed** by
   the loop (the agent already ran them).
@@ -3516,7 +3521,8 @@ Wire behaviour:
 - Each turn is one `session/prompt`; only `agent_message_chunk` text is the answer.
   **Streaming** (`generateStream`): `agent_message_chunk` → `{type:"text", delta}` as each update is
   read; `agent_thought_chunk` → `{type:"thought", delta, via:"acp"}`; `tool_call` /
-  completed-or-failed `tool_call_update` → `tool_call` / `tool_result` with `via:"acp"`.
+  completed-or-failed `tool_call_update` → `tool_call` / `tool_result` with `via:"acp"`; an update
+  carrying `rawInput` → `tool_call_args` (§8, ACP host hooks).
 - Permission requests go to the caller's permission hook (default: first allow-kind option, as in §8).
   Which agent tools to allow is policy, and policy belongs to the caller.
 
