@@ -55,6 +55,9 @@ type CliMediaClient struct {
 	Folder func(session string) string
 	// Unavailable maps the last error to an unavailable message (ok=false ⇒ not unavailable).
 	Unavailable func(verb, errMsg string) (string, bool)
+	// Mock, when true, never starts the CLI: it writes a fixed file for the verb
+	// and returns it as if the CLI had (§7G CLI mock presets).
+	Mock bool
 }
 
 // Name is the client's name.
@@ -68,7 +71,39 @@ func (c *CliMediaClient) Args(verb string) []MediaArg {
 	if !c.Supports(verb) {
 		return nil
 	}
-	return mediaArgsOf([]string{"prompt"})
+	if verb == "video" {
+		return mediaArgsOf([]string{"prompt"}, "seconds", "aspectRatio")
+	}
+	return mediaArgsOf([]string{"prompt"}, "width", "height", "aspectRatio")
+}
+
+// cliPromptHint renders one size hint folded into a CLI prompt (§7G CLI hint folding).
+var cliHints = []struct{ name, pre, post string }{
+	{"width", "width ", " px"},
+	{"height", "height ", " px"},
+	{"seconds", "about ", " seconds long"},
+	{"aspectRatio", "aspect ratio ", ""},
+}
+
+// FoldMediaPrompt is the prompt a CLI style receives: prompt, then the present
+// size hints in canonical verb order as " (h1, h2)" (§7G CLI hint folding).
+func FoldMediaPrompt(verb string, args map[string]any) string {
+	prompt := argText(args["prompt"])
+	spec, _ := mediaVerbSpecOf(verb)
+	var hs []string
+	for _, a := range spec.args {
+		for _, h := range cliHints {
+			if h.name == a.name {
+				if v, ok := args[a.name]; ok && v != nil {
+					hs = append(hs, h.pre+argText(v)+h.post)
+				}
+			}
+		}
+	}
+	if len(hs) == 0 {
+		return prompt
+	}
+	return prompt + " (" + strings.Join(hs, ", ") + ")"
 }
 
 func (c *CliMediaClient) Image(ctx context.Context, args map[string]any, call MediaCall) (MediaResult, error) {
@@ -128,7 +163,10 @@ func (c *CliMediaClient) run(ctx context.Context, verb string, args map[string]a
 	if real, err := filepath.EvalSymlinks(cwd); err == nil { // D17: the realpath
 		cwd = real
 	}
-	prompt := strings.ReplaceAll(c.Templates[verb], "{prompt}", argText(args["prompt"]))
+	prompt := strings.ReplaceAll(c.Templates[verb], "{prompt}", FoldMediaPrompt(verb, args))
+	if c.Mock {
+		return c.mockRun(verb, prompt, cwd, fail)
+	}
 	argv := append(append([]string(nil), command[1:]...), c.Argv(verb, prompt, cwd)...)
 	cmd := exec.Command(command[0], argv...)
 	cmd.Dir = cwd
@@ -458,4 +496,102 @@ func NewCodexMediaClient(cfg MediaConfig) *CodexMediaClient {
 		return "", false
 	}
 	return &CodexMediaClient{c}
+}
+
+// mockRun is the CLI mock (§7G CLI mock presets): no process. It writes the
+// fixed file "<gather.dir>/<client>-mock-<verb>.<png|mp4>" (gather.dir default
+// <tmp>/toolnexus-media) holding "toolnexus mock <verb>", then gathers it like a
+// real CLI file; text = the exact prompt the CLI would have received; jobId "mock".
+func (c *CliMediaClient) mockRun(verb, prompt, cwd string, fail func(string) *MediaError) (MediaResult, error) {
+	ext, kind := ".png", "image"
+	if verb == "video" {
+		ext, kind = ".mp4", "video"
+	}
+	dir := c.Config.Gather.Dir
+	if dir == "" {
+		dir = filepath.Join(os.TempDir(), "toolnexus-media")
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return MediaResult{}, fail(fmt.Sprintf("%s: %v", c.ClientName, err))
+	}
+	p, err := filepath.Abs(filepath.Join(dir, c.ClientName+"-mock-"+verb+ext))
+	if err != nil {
+		return MediaResult{}, fail(fmt.Sprintf("%s: %v", c.ClientName, err))
+	}
+	if err := os.WriteFile(p, []byte("toolnexus mock "+verb), 0o644); err != nil {
+		return MediaResult{}, fail(fmt.Sprintf("%s: %v", c.ClientName, err))
+	}
+	f, err := c.gatherLocal(verb, kind, p, fail)
+	if err != nil {
+		return MediaResult{}, err
+	}
+	return MediaResult{Files: []MediaFile{f}, Text: prompt, JobID: "mock", Status: "completed"}, nil
+}
+
+// ---- Google Antigravity (agy) ----
+
+// newAgyMediaClient runs `agy -p … --output-format stream-json
+// --dangerously-skip-permissions` (image). The path is in the final result's
+// response text, else the newest image in the conversation's brain folder.
+func newAgyMediaClient(cfg MediaConfig) *CliMediaClient {
+	c := &CliMediaClient{ClientName: "agy", Verbs: []string{"image"}, Config: cfg,
+		DefaultCommand: []string{"agy"},
+		Templates: map[string]string{
+			"image": "Generate exactly one image with your image generation tool: {prompt}. Do not write code. Reply only with the absolute path where the image was saved.",
+		}}
+	c.Argv = func(verb, prompt, cwd string) []string {
+		a := []string{"-p", prompt, "--output-format", "stream-json", "--dangerously-skip-permissions"}
+		if cfg.Model != "" {
+			a = append(a, "--model", cfg.Model)
+		}
+		return a
+	}
+	c.Parse = func(l map[string]any, raw []byte) CliEvent {
+		var e CliEvent
+		switch l["event"] {
+		case "init":
+			e.Session, _ = l["conversation_id"].(string)
+			e.Status = "init"
+		case "step_update":
+			if t, _ := dotGet(l, "step_update.tool_name").(string); t != "" {
+				if st, _ := dotGet(l, "step_update.state").(string); st != "" {
+					e.Status = "tool " + t + " " + st
+				}
+			}
+		case "result":
+			e.Session, _ = dotGet(l, "result.conversation_id").(string)
+			e.Text, _ = dotGet(l, "result.response").(string)
+			st, _ := dotGet(l, "result.status").(string)
+			e.Status = "result " + st
+			if st != "SUCCESS" {
+				if m, _ := dotGet(l, "result.error").(string); m != "" {
+					e.Error = m
+				} else if m, _ := dotGet(l, "result.error.message").(string); m != "" {
+					e.Error = m
+				} else if e.Text != "" {
+					e.Error = e.Text
+				} else {
+					e.Error = rawField(raw, "result")
+				}
+			}
+			u := MediaUsage{InputTokens: usageInt(dotGet(l, "result.usage.input_tokens")),
+				OutputTokens: usageInt(dotGet(l, "result.usage.output_tokens"))}
+			e.Usage = mediaUsageOf(u)
+		case "error":
+			e.Error, _ = l["message"].(string)
+		}
+		return e
+	}
+	c.Folder = func(conv string) string {
+		h, _ := os.UserHomeDir()
+		return filepath.Join(h, ".gemini", "antigravity-cli", "brain", conv)
+	}
+	c.Unavailable = func(verb, m string) (string, bool) {
+		low := strings.ToLower(m)
+		if strings.Contains(low, "quota") || strings.Contains(low, "usage limit") {
+			return "agy: " + capRunes(m, 400), true
+		}
+		return "", false
+	}
+	return c
 }

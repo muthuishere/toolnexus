@@ -409,7 +409,7 @@ def media_style(base):
                 "speech": y("speech", "audio", {"text": "text", "voice": "voice"}, "data.url"),
                 "transcribe": y("transcribe", "text", {"audio": "audio_url"}, "data.text"),
                 "cloneVoice": y("cloneVoice", "text", {"name": "name", "samples": "samples"}, "data.voice_id"),
-                "talking": a("talking", "video", {"image": "image_url", "audio": "audio_url"}, "data.url"),
+                "talk": a("talking", "video", {"image": "image_url", "audio": "audio_url"}, "data.url"),
             },
             "_doc": "toolnexus mock model server (tools/mock-llm). Image/video/talking are async (one "
                     "'processing' poll, then 'completed'); a prompt containing [fail] fails the job."}

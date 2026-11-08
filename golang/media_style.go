@@ -22,8 +22,12 @@ import (
 
 // MediaStyle describes one provider as data (§7G.7 Style).
 type MediaStyle struct {
-	// Name is the client name in messages; default "style".
-	Name string `json:"name,omitempty"`
+	// Label is the client name in messages (JSON "name"); default "style".
+	Label string `json:"name,omitempty"`
+	// CLI is set only on a built-in CLI preset (MediaStyleGrokCli,
+	// MediaStyleCodexCli): the CLI client that serves the style.
+	CLI string `json:"-"`
+	cfg MediaConfig
 	// BaseURL is joined with each request path; a trailing "/" is trimmed.
 	BaseURL string `json:"baseUrl"`
 	// Headers are sent on every request. "${VAR}" expands from the process
@@ -75,8 +79,134 @@ type MediaPoll struct {
 	TimeoutMs  int      `json:"timeoutMs,omitempty"`  // default 600000
 }
 
-// LoadMediaStyle reads and validates one style JSON file.
-func LoadMediaStyle(path string) (MediaStyle, error) {
+// Built-in CLI presets for LoadMediaStyle (ADR 0042): media through a locally
+// installed, logged-in CLI on the user's own subscription, no API key.
+const (
+	// MediaStyleGrokCli drives the `grok` CLI: image and video.
+	MediaStyleGrokCli = "grok-cli"
+	// MediaStyleCodexCli drives the `codex` CLI: image only.
+	MediaStyleCodexCli = "codex-cli"
+	// MediaStyleGoogleAgyCli drives Google's Antigravity CLI `agy`: image only.
+	MediaStyleGoogleAgyCli = "google-agy-cli"
+
+	// The mock twins: same name, verbs, args, prompt folding and errors as the
+	// preset, but no process is started and a fixed file is returned (mock kit).
+	MediaStyleGrokCliMock      = "grok-cli-mock"
+	MediaStyleCodexCliMock     = "codex-cli-mock"
+	MediaStyleGoogleAgyCliMock = "google-agy-cli-mock"
+)
+
+// cliPresets maps a built-in preset to its client label.
+var cliPresets = map[string]string{
+	MediaStyleGrokCli: "grok", MediaStyleCodexCli: "codex", MediaStyleGoogleAgyCli: "agy",
+	MediaStyleGrokCliMock: "grok", MediaStyleCodexCliMock: "codex", MediaStyleGoogleAgyCliMock: "agy",
+}
+
+// LoadMediaStyle reads and validates one style JSON file, or returns a built-in
+// CLI preset when path is MediaStyleGrokCli or MediaStyleCodexCli. cfg (at most
+// one) configures the client behind the style (model, command, loop, gather).
+func LoadMediaStyle(path string, cfg ...MediaConfig) (MediaStyle, error) {
+	var c MediaConfig
+	if len(cfg) > 0 {
+		c = cfg[0]
+	}
+	if label, ok := cliPresets[path]; ok {
+		return MediaStyle{Label: label, CLI: path, cfg: c}, nil
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return MediaStyle{}, err
+	}
+	s, err := parseMediaStyle(b, path)
+	s.cfg = c
+	return s, err
+}
+
+// client is the MediaClient behind a loaded style.
+func (s MediaStyle) client() MediaClient {
+	if s.CLI != "" {
+		var c *CliMediaClient
+		switch cliPresets[s.CLI] {
+		case "grok":
+			c = NewGrokMediaClient(s.cfg).CliMediaClient
+		case "codex":
+			c = NewCodexMediaClient(s.cfg).CliMediaClient
+		default:
+			c = newAgyMediaClient(s.cfg)
+		}
+		c.Mock = strings.HasSuffix(s.CLI, "-mock")
+		return c
+	}
+	c, err := NewStyleMediaClient(s, s.cfg)
+	if err != nil {
+		return brokenStyle{s.Label, err}
+	}
+	return c
+}
+
+// A loaded style is itself a MediaClient, so CreateMedia(style) works.
+
+func (s MediaStyle) Name() string { return s.client().Name() }
+
+// Supports reports whether the style declares verb (the one verb-support
+// mechanism for every style, HTTP or CLI).
+func (s MediaStyle) Supports(verb string) bool { return s.client().Supports(verb) }
+
+// Args is the canonical args the style accepts for verb.
+func (s MediaStyle) Args(verb string) []MediaArg { return clientArgs(s.client(), verb) }
+
+func (s MediaStyle) Image(ctx context.Context, a map[string]any, c MediaCall) (MediaResult, error) {
+	return s.client().Image(ctx, a, c)
+}
+func (s MediaStyle) Video(ctx context.Context, a map[string]any, c MediaCall) (MediaResult, error) {
+	return s.client().Video(ctx, a, c)
+}
+func (s MediaStyle) Speech(ctx context.Context, a map[string]any, c MediaCall) (MediaResult, error) {
+	return s.client().Speech(ctx, a, c)
+}
+func (s MediaStyle) Music(ctx context.Context, a map[string]any, c MediaCall) (MediaResult, error) {
+	return s.client().Music(ctx, a, c)
+}
+func (s MediaStyle) Transcribe(ctx context.Context, a map[string]any, c MediaCall) (MediaResult, error) {
+	return s.client().Transcribe(ctx, a, c)
+}
+func (s MediaStyle) CloneVoice(ctx context.Context, a map[string]any, c MediaCall) (MediaResult, error) {
+	return s.client().CloneVoice(ctx, a, c)
+}
+func (s MediaStyle) Talk(ctx context.Context, a map[string]any, c MediaCall) (MediaResult, error) {
+	return s.client().Talk(ctx, a, c)
+}
+
+type brokenStyle struct {
+	name string
+	err  error
+}
+
+func (b brokenStyle) Name() string        { return b.name }
+func (brokenStyle) Supports(string) bool  { return false }
+func (b brokenStyle) Image(context.Context, map[string]any, MediaCall) (MediaResult, error) {
+	return MediaResult{}, b.err
+}
+func (b brokenStyle) Video(context.Context, map[string]any, MediaCall) (MediaResult, error) {
+	return MediaResult{}, b.err
+}
+func (b brokenStyle) Speech(context.Context, map[string]any, MediaCall) (MediaResult, error) {
+	return MediaResult{}, b.err
+}
+func (b brokenStyle) Music(context.Context, map[string]any, MediaCall) (MediaResult, error) {
+	return MediaResult{}, b.err
+}
+func (b brokenStyle) Transcribe(context.Context, map[string]any, MediaCall) (MediaResult, error) {
+	return MediaResult{}, b.err
+}
+func (b brokenStyle) CloneVoice(context.Context, map[string]any, MediaCall) (MediaResult, error) {
+	return MediaResult{}, b.err
+}
+func (b brokenStyle) Talk(context.Context, map[string]any, MediaCall) (MediaResult, error) {
+	return MediaResult{}, b.err
+}
+
+func loadMediaStyleFile(path string) (MediaStyle, error) {
 	var s MediaStyle
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -146,8 +276,8 @@ func NewStyleMediaClient(style MediaStyle, cfg MediaConfig) (*StyleMediaClient, 
 
 // Name is the style's name, default "style".
 func (s *StyleMediaClient) Name() string {
-	if s.style.Name != "" {
-		return s.style.Name
+	if s.style.Label != "" {
+		return s.style.Label
 	}
 	return "style"
 }

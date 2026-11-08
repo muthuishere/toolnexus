@@ -429,6 +429,41 @@ func (m *Media) candidates(verb string) []MediaClient {
 	return out
 }
 
+// noun is "style" when every source is a loaded style, else "client".
+func (m *Media) noun() string {
+	for _, c := range m.clients {
+		if _, ok := c.(MediaStyle); !ok {
+			return "client"
+		}
+	}
+	return "style"
+}
+
+// Verbs is every verb some source supports, in canonical verb order.
+func (m *Media) Verbs() []string {
+	out := []string{}
+	for _, spec := range mediaVerbs {
+		if m.Supports(spec.verb) {
+			out = append(out, spec.verb)
+		}
+	}
+	return out
+}
+
+// GenerateMedia is one-shot sugar for
+// CreateMedia(LoadMediaStyle(style)).Generate(ctx, verb, args, MediaCall{}).
+func GenerateMedia(ctx context.Context, style string, verb string, args map[string]any, cfg ...MediaConfig) (MediaResult, error) {
+	s, err := LoadMediaStyle(style, cfg...)
+	if err != nil {
+		return MediaResult{}, err
+	}
+	m, err := CreateMedia(s)
+	if err != nil {
+		return MediaResult{}, err
+	}
+	return m.Generate(ctx, verb, args, MediaCall{})
+}
+
 // Supports reports whether any client supports verb.
 func (m *Media) Supports(verb string) bool { return len(m.candidates(verb)) > 0 }
 
@@ -446,7 +481,7 @@ func (m *Media) Generate(ctx context.Context, verb string, args map[string]any, 
 func (m *Media) route(ctx context.Context, verb string, args map[string]any, call MediaCall) (MediaResult, string, error) {
 	cands := m.candidates(verb)
 	if len(cands) == 0 {
-		return MediaResult{}, "", mediaFailed("media: no client supports %q", verb)
+		return MediaResult{}, "", mediaFailed("media: no %s supports %q", m.noun(), verb)
 	}
 	clean := map[string]any{}
 	for k, v := range args {

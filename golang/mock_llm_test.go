@@ -329,7 +329,7 @@ func TestMockLLMMedia(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadMediaStyle: %v", err)
 	}
-	m := CreateMedia([]MediaStyle{style}, MediaOptions{})
+	m := MustCreateMedia(style)
 	ctx := context.Background()
 
 	file := func(name string, r MediaResult, err error, suffix, mime string) {
@@ -350,7 +350,7 @@ func TestMockLLMMedia(t *testing.T) {
 	file("video", r, err, "/files/video.mp4", "video/mp4")
 	r, err = m.Speech(ctx, SpeechInput{Text: "hello", Voice: "v1"})
 	file("speech", r, err, "/files/speech.wav", "audio/wav")
-	r, err = m.Talking(ctx, TalkingInput{Image: base + "/files/image.png", Audio: base + "/files/speech.wav"})
+	r, err = m.Talk(ctx, TalkInput{Image: base + "/files/image.png", Audio: base + "/files/speech.wav"})
 	file("talking", r, err, ".mp4", "video/mp4")
 
 	audio := base + "/files/speech.wav"

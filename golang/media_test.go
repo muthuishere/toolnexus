@@ -477,8 +477,8 @@ func TestMediaConformanceCases(t *testing.T) {
 				cfg := configOf(t, c["config"])
 				cfg.HTTPClient = srv.Client()
 				name := "style"
-				if style.Name != "" {
-					name = style.Name
+				if style.Label != "" {
+					name = style.Label
 				}
 				progress, onProgress := progressRecorder(t, c["verb"].(string), name)
 				cfg.Loop.OnProgress = onProgress
@@ -619,7 +619,7 @@ func TestMediaConformanceCLI(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, raw := range loadMediaFile(t, "cli.json", 24) {
+	for _, raw := range loadMediaFile(t, "cli.json", 33) {
 		var head struct{ Name string }
 		_ = json.Unmarshal(raw, &head)
 		t.Run(head.Name, func(t *testing.T) {
@@ -640,7 +640,11 @@ func TestMediaConformanceCLI(t *testing.T) {
 				if err := os.WriteFile(fixture, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
 					t.Fatal(err)
 				}
-				name := c["client"].(string)
+				style, _ := c["style"].(string)
+				if style == "" {
+					style = c["client"].(string) + "-cli"
+				}
+				name := cliPresets[style]
 				cfg := configOf(t, c["config"])
 				cfg.Command = []string{"/bin/sh", fake, fixture, out}
 				if cmd, ok := c["command"].([]any); ok {
@@ -651,14 +655,9 @@ func TestMediaConformanceCLI(t *testing.T) {
 				}
 				progress, onProgress := progressRecorder(t, c["verb"].(string), name)
 				cfg.Loop.OnProgress = onProgress
-				var client MediaClient
-				switch name {
-				case "grok":
-					client = NewGrokMediaClient(cfg)
-				case "codex":
-					client = NewCodexMediaClient(cfg)
-				default:
-					t.Fatalf("unknown client %s", name)
+				client, err := LoadMediaStyle(style, cfg)
+				if err != nil {
+					t.Fatal(err)
 				}
 				m := MustCreateMedia(client)
 				if face == "tool" && hasCtxTimeout(c) {
@@ -672,6 +671,14 @@ func TestMediaConformanceCLI(t *testing.T) {
 					cancel()
 					assertResult(t, c, name, dir, res, err)
 					assertProgress(t, c, *progress)
+					if c["oneShot"] == true {
+						res, err := GenerateMedia(context.Background(), style, c["verb"].(string), args, cfg)
+						assertResult(t, c, name, dir, res, err)
+					}
+					if c["oneShot"] == true {
+						res, err := GenerateMedia(context.Background(), style, c["verb"].(string), args, cfg)
+						assertResult(t, c, name, dir, res, err)
+					}
 				} else {
 					runToolFace(t, m, c)
 				}
@@ -1308,4 +1315,63 @@ func runFilePathOnly(t *testing.T, m *Media, c map[string]any) {
 		}
 	}
 	t.Fatalf("no tool %s", name)
+}
+
+func TestMediaConformanceCLIVerbs(t *testing.T) {
+	b, err := os.ReadFile("../conformance/media/cli.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var f struct {
+		VerbCases []struct {
+			Name          string
+			Styles        []json.RawMessage
+			ExpectVerbs   []string
+			ExpectTools   []string
+			Unsupported   string
+			Error         string
+		}
+	}
+	if err := json.Unmarshal(b, &f); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.VerbCases) != 8 {
+		t.Fatalf("verbCases = %d, want 8", len(f.VerbCases))
+	}
+	for _, vc := range f.VerbCases {
+		t.Run(vc.Name, func(t *testing.T) {
+			var srcs []MediaClient
+			for _, raw := range vc.Styles {
+				var name string
+				if json.Unmarshal(raw, &name) == nil {
+					s, err := LoadMediaStyle(name, MediaConfig{Command: []string{"/nonexistent/toolnexus-must-not-run"}})
+					if err != nil {
+						t.Fatal(err)
+					}
+					srcs = append(srcs, s)
+					continue
+				}
+				s, err := parseMediaStyle(raw, "inline")
+				if err != nil {
+					t.Fatal(err)
+				}
+				srcs = append(srcs, s)
+			}
+			m := MustCreateMedia(srcs...)
+			if got := m.Verbs(); strings.Join(got, ",") != strings.Join(vc.ExpectVerbs, ",") {
+				t.Errorf("verbs = %v, want %v", got, vc.ExpectVerbs)
+			}
+			var names []string
+			for _, tl := range m.Tools() {
+				names = append(names, tl.Name)
+			}
+			if strings.Join(names, ",") != strings.Join(vc.ExpectTools, ",") {
+				t.Errorf("tools = %v, want %v", names, vc.ExpectTools)
+			}
+			_, err := m.Generate(context.Background(), vc.Unsupported, map[string]any{}, MediaCall{})
+			if err == nil || err.Error() != vc.Error {
+				t.Errorf("error = %v, want %q", err, vc.Error)
+			}
+		})
+	}
 }

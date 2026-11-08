@@ -1,5 +1,5 @@
 {
-  "_doc": "CLI client conformance (SPEC §7G.10, §7G.11) over conformance/media/fake-cli/fake-cli.sh — see fake-cli/README.md for the exact harness steps. client = grok|codex. Placeholders: {out} the fake's out dir, {dir} gather.dir, {cwd} in expectArgv = must equal <out>/cwd.txt byte for byte after removing its one trailing newline (the fake writes `pwd -P`; D17: the client passes the realpath of its temp dir, so no symlink resolution on either side). command (when present) replaces the fake command entirely (spawn-failure case). env is set in the TEST process (the child inherits it; Codex's folder lookup reads it). expectExists / expectMissing: paths that must / must not exist after the run. expectNoSpawn: argv.txt must not exist. maxElapsedMs: the call must return within it (kill on timeout). Other fields as in clients.json. modelParts (SPEC §7G.6 model visibility): the parts of this tool result that message assembly (§8A) emits to the model — only image parts; video/audio parts stay in RunResult.files and toolCalls[].parts only. Assert with the port's assembly function on a transcript containing this tool result. ctxTimeoutMs (D12): function face only, ctx.deadline = now + ctxTimeoutMs; errorPrefix asserts the message start. D9 (SPEC §7G.12): when modelParts is [] the tool-result content the port sends to the model is the plain output string in every message style incl. Anthropic — never an empty content array, never a placeholder; assert it with the same assembly function. D19: a CLI client that does not accept a canonical arg is skipped (never spawned) ⇒ the joined 'media: no client available for …' error. D20 runFilePath / D21 noUsage: as in clients.json. D21: Grok's end event: usage.input_tokens ⇒ inputTokens, usage.output_tokens ⇒ outputTokens, total_cost_usd ⇒ costUsd, total_cost_usd_ticks ⇒ raw.total_cost_usd_ticks (verbatim); each only when present. D20 runFilePath is asserted within the tool face; in url mode a CLI file's path is the CLI's own absolute file, not under {dir}.",
+  "_doc": "CLI client conformance (SPEC §7G.10, §7G.11) over conformance/media/fake-cli/fake-cli.sh — see fake-cli/README.md for the exact harness steps. client = grok|codex. Placeholders: {out} the fake's out dir, {dir} gather.dir, {cwd} in expectArgv = must equal <out>/cwd.txt byte for byte after removing its one trailing newline (the fake writes `pwd -P`; D17: the client passes the realpath of its temp dir, so no symlink resolution on either side). command (when present) replaces the fake command entirely (spawn-failure case). env is set in the TEST process (the child inherits it; Codex's folder lookup reads it). expectExists / expectMissing: paths that must / must not exist after the run. expectNoSpawn: argv.txt must not exist. maxElapsedMs: the call must return within it (kill on timeout). Other fields as in clients.json. modelParts (SPEC §7G.6 model visibility): the parts of this tool result that message assembly (§8A) emits to the model — only image parts; video/audio parts stay in RunResult.files and toolCalls[].parts only. Assert with the port's assembly function on a transcript containing this tool result. ctxTimeoutMs (D12): function face only, ctx.deadline = now + ctxTimeoutMs; errorPrefix asserts the message start. D9 (SPEC §7G.12): when modelParts is [] the tool-result content the port sends to the model is the plain output string in every message style incl. Anthropic — never an empty content array, never a placeholder; assert it with the same assembly function. D19: a CLI client that does not accept a canonical arg is skipped (never spawned) ⇒ the joined 'media: no client available for …' error. D20 runFilePath / D21 noUsage: as in clients.json. D21: Grok's end event: usage.input_tokens ⇒ inputTokens, usage.output_tokens ⇒ outputTokens, total_cost_usd ⇒ costUsd, total_cost_usd_ticks ⇒ raw.total_cost_usd_ticks (verbatim); each only when present. D20 runFilePath is asserted within the tool face; in url mode a CLI file's path is the CLI's own absolute file, not under {dir}. style (instead of client) names a built-in preset loaded with loadMediaStyle(style, config) (grok-cli | codex-cli | google-agy-cli, or a -mock twin); client grok|codex is the same as style grok-cli|codex-cli. oneShot:true ⇒ also run generateMedia(style, verb, args, config) and assert the same result. verbCases: createMedia over the listed styles (a string = preset, an object = an HTTP style); assert verbs() == expectVerbs, tools() names == expectTools, and generate(unsupported, {}) fails with error without starting any process. The unsupported-verb message says 'style' because every source is a loaded style.",
   "cases": [
     {
       "name": "grok_image_path_from_tool_result_download",
@@ -493,17 +493,17 @@
       "verb": "image",
       "args": {
         "prompt": "x",
-        "width": 64
+        "seed": 64
       },
       "fixture": [
         "{\"type\":\"end\",\"stopReason\":\"end_turn\",\"sessionId\":\"s1\",\"num_turns\":1}"
       ],
       "expectNoSpawn": true,
       "status": "unavailable",
-      "error": "media: no client available for \"image\": grok: argument \"width\" not supported",
+      "error": "media: no client available for \"image\": grok: argument \"seed\" not supported",
       "tool": {
         "isError": true,
-        "output": "media: no client available for \"image\": grok: argument \"width\" not supported"
+        "output": "media: no client available for \"image\": grok: argument \"seed\" not supported"
       }
     },
     {
@@ -912,6 +912,662 @@
       },
       "liveVerified": true,
       "note": "D21: the live headless streaming-json end event carries usage.input_tokens / usage.output_tokens / total_cost_usd / total_cost_usd_ticks (1 tick = 1e-10 USD) and NO costUsdTicks. usage.input_tokens ⇒ inputTokens, usage.output_tokens ⇒ outputTokens, total_cost_usd ⇒ costUsd, total_cost_usd_ticks ⇒ raw.total_cost_usd_ticks verbatim (never converted). Token counts are illustrative; the line shape is live."
+    },
+    {
+      "name": "grok_size_hints_folded_into_prompt",
+      "style": "grok-cli",
+      "note": "Spot fix (a): width/height/aspectRatio/seconds are folded into the prompt as ' (h1, h2)' in canonical verb order; never 'not supported'.",
+      "config": {
+        "gather": {
+          "mode": "url",
+          "dir": "{dir}"
+        }
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "a red apple",
+        "aspectRatio": "16:9",
+        "width": 1024
+      },
+      "fixture": [
+        "{\"type\":\"tool_call\",\"toolCallId\":\"c0\",\"title\":\"image_gen\",\"kind\":\"image_gen\",\"status\":\"pending\",\"toolName\":\"image_gen\",\"rawInput\":{},\"content\":[],\"locations\":[]}",
+        "#file sessions/s1/images/1.png PNGBYTES",
+        "{\"type\":\"tool_call_update\",\"toolCallId\":\"c0\",\"status\":\"completed\",\"rawOutput\":{\"type\":\"ImageGen\",\"path\":\"{out}/sessions/s1/images/1.png\"},\"locations\":[]}",
+        "{\"type\":\"end\",\"stopReason\":\"end_turn\",\"sessionId\":\"s1\",\"num_turns\":1}"
+      ],
+      "expectArgv": [
+        "-p",
+        "Generate exactly one image with your image generation tool: a red apple (width 1024 px, aspect ratio 16:9). Do not write code. Reply only with the file path.",
+        "--cwd",
+        "{cwd}",
+        "--output-format",
+        "streaming-json",
+        "--yolo",
+        "--no-auto-update"
+      ],
+      "result": {
+        "files": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "path": "{out}/sessions/s1/images/1.png",
+            "url": "file://{out}/sessions/s1/images/1.png"
+          }
+        ],
+        "jobId": "s1",
+        "status": "completed"
+      },
+      "tool": {
+        "name": "generate_image",
+        "isError": false,
+        "output": "image ready: {out}/sessions/s1/images/1.png",
+        "parts": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "data": "UE5HQllURVM="
+          }
+        ],
+        "metadata": {
+          "source": "media",
+          "verb": "image",
+          "client": "grok",
+          "jobId": "s1",
+          "status": "completed"
+        }
+      },
+      "noUsage": true
+    },
+    {
+      "name": "grok_video_seconds_and_aspect_folded",
+      "style": "grok-cli",
+      "config": {
+        "gather": {
+          "mode": "url",
+          "dir": "{dir}"
+        }
+      },
+      "verb": "video",
+      "args": {
+        "prompt": "an apple rotates",
+        "seconds": 6,
+        "aspectRatio": "9:16"
+      },
+      "fixture": [
+        "#file sessions/s2/videos/1.mp4 MP4BYTES",
+        "{\"type\":\"tool_call_update\",\"toolCallId\":\"c0\",\"status\":\"completed\",\"rawOutput\":{\"type\":\"ImageToVideo\",\"path\":\"{out}/sessions/s2/videos/1.mp4\"},\"locations\":[]}",
+        "{\"type\":\"end\",\"stopReason\":\"end_turn\",\"sessionId\":\"s2\",\"num_turns\":1}"
+      ],
+      "expectArgv": [
+        "-p",
+        "Generate exactly one short video with your video generation tool, shortest duration available: an apple rotates (about 6 seconds long, aspect ratio 9:16). Do not write code. Reply only with the file path.",
+        "--cwd",
+        "{cwd}",
+        "--output-format",
+        "streaming-json",
+        "--yolo",
+        "--no-auto-update"
+      ],
+      "result": {
+        "files": [
+          {
+            "type": "file",
+            "mimeType": "video/mp4",
+            "path": "{out}/sessions/s2/videos/1.mp4",
+            "url": "file://{out}/sessions/s2/videos/1.mp4"
+          }
+        ],
+        "jobId": "s2",
+        "status": "completed"
+      },
+      "tool": {
+        "name": "generate_video",
+        "isError": false,
+        "output": "video ready: {out}/sessions/s2/videos/1.mp4",
+        "parts": [
+          {
+            "type": "file",
+            "mimeType": "video/mp4",
+            "data": "TVA0QllURVM="
+          }
+        ],
+        "metadata": {
+          "source": "media",
+          "verb": "video",
+          "client": "grok",
+          "jobId": "s2",
+          "status": "completed"
+        }
+      },
+      "noUsage": true
+    },
+    {
+      "name": "codex_aspect_folded",
+      "style": "codex-cli",
+      "config": {
+        "gather": {
+          "mode": "url",
+          "dir": "{dir}"
+        }
+      },
+      "env": {
+        "CODEX_HOME": "{out}/codexhome"
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "cat",
+        "height": 512,
+        "aspectRatio": "1:1"
+      },
+      "fixture": [
+        "{\"type\":\"thread.started\",\"thread_id\":\"t9\"}",
+        "#file codexhome/generated_images/t9/ig_1.png PNGBYTES",
+        "{\"type\":\"turn.completed\"}"
+      ],
+      "expectArgv": [
+        "exec",
+        "--json",
+        "--skip-git-repo-check",
+        "-s",
+        "workspace-write",
+        "Generate exactly one image with your built-in image generation tool: cat (height 512 px, aspect ratio 1:1). Do not write code or use scripts. Reply only with the absolute path where the image was saved."
+      ],
+      "result": {
+        "files": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "path": "{out}/codexhome/generated_images/t9/ig_1.png",
+            "url": "file://{out}/codexhome/generated_images/t9/ig_1.png"
+          }
+        ],
+        "jobId": "t9",
+        "status": "completed"
+      },
+      "tool": {
+        "name": "generate_image",
+        "isError": false,
+        "output": "image ready: {out}/codexhome/generated_images/t9/ig_1.png",
+        "parts": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "data": "UE5HQllURVM="
+          }
+        ],
+        "metadata": {
+          "source": "media",
+          "verb": "image",
+          "client": "codex",
+          "jobId": "t9",
+          "status": "completed"
+        }
+      },
+      "noUsage": true
+    },
+    {
+      "name": "agy_image_path_in_result_response",
+      "style": "google-agy-cli",
+      "liveVerified": true,
+      "note": "Shape from a live `agy -p … --output-format stream-json --dangerously-skip-permissions` run (agy 1.4.12, 2026-11-08): the path is in result.response; session = conversation_id.",
+      "config": {
+        "gather": {
+          "mode": "url",
+          "dir": "{dir}"
+        }
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "a red apple",
+        "aspectRatio": "4:3"
+      },
+      "fixture": [
+        "{\"event\":\"init\",\"conversation_id\":\"c1\",\"init\":{\"cwd\":\"/x\",\"permission_mode\":\"always-proceed\"}}",
+        "{\"event\":\"step_update\",\"step_update\":{\"conversation_id\":\"c1\",\"step_index\":2,\"state\":\"ACTIVE\",\"step_type\":\"subagent\",\"tool_name\":\"invoke_subagent\"}}",
+        "#file brain/c1/red_apple_1.jpg JPEGBYTES",
+        "{\"event\":\"step_update\",\"step_update\":{\"conversation_id\":\"c1\",\"step_index\":16,\"state\":\"ACTIVE\",\"step_type\":\"agent_response\",\"text_delta\":\"{out}/brain/c1/red_apple_1.jpg\"}}",
+        "{\"event\":\"result\",\"result\":{\"conversation_id\":\"c1\",\"status\":\"SUCCESS\",\"response\":\"{out}/brain/c1/red_apple_1.jpg\\n\",\"duration_seconds\":36.1,\"num_turns\":1,\"usage\":{\"input_tokens\":75935,\"output_tokens\":1613,\"thinking_tokens\":1155,\"cache_read_tokens\":0,\"total_tokens\":77548}}}"
+      ],
+      "expectArgv": [
+        "-p",
+        "Generate exactly one image with your image generation tool: a red apple (aspect ratio 4:3). Do not write code. Reply only with the absolute path where the image was saved.",
+        "--output-format",
+        "stream-json",
+        "--dangerously-skip-permissions"
+      ],
+      "result": {
+        "files": [
+          {
+            "type": "image",
+            "mimeType": "image/jpeg",
+            "path": "{out}/brain/c1/red_apple_1.jpg",
+            "url": "file://{out}/brain/c1/red_apple_1.jpg"
+          }
+        ],
+        "jobId": "c1",
+        "status": "completed",
+        "usage": {
+          "inputTokens": 75935,
+          "outputTokens": 1613
+        },
+        "text": "{out}/brain/c1/red_apple_1.jpg\n"
+      },
+      "tool": {
+        "name": "generate_image",
+        "isError": false,
+        "output": "image ready: {out}/brain/c1/red_apple_1.jpg",
+        "parts": [
+          {
+            "type": "image",
+            "mimeType": "image/jpeg",
+            "data": "SlBFR0JZVEVT"
+          }
+        ],
+        "metadata": {
+          "source": "media",
+          "verb": "image",
+          "client": "agy",
+          "jobId": "c1",
+          "status": "completed",
+          "usage": {
+            "inputTokens": 75935,
+            "outputTokens": 1613
+          }
+        }
+      }
+    },
+    {
+      "name": "agy_quota_is_unavailable",
+      "style": "google-agy-cli",
+      "liveVerified": false,
+      "note": "The failure line shape is not live-captured; a non-SUCCESS result whose text mentions quota is unavailable.",
+      "config": {
+        "gather": {
+          "dir": "{dir}"
+        }
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "x"
+      },
+      "fixture": [
+        "{\"event\":\"init\",\"conversation_id\":\"c2\",\"init\":{}}",
+        "{\"event\":\"result\",\"result\":{\"conversation_id\":\"c2\",\"status\":\"ERROR\",\"response\":\"Antigravity Starter Quota exhausted. Try again later.\"}}",
+        "#exit 1"
+      ],
+      "status": "unavailable",
+      "error": "media: no client available for \"image\": agy: Antigravity Starter Quota exhausted. Try again later.",
+      "tool": {
+        "isError": true,
+        "output": "media: no client available for \"image\": agy: Antigravity Starter Quota exhausted. Try again later."
+      }
+    },
+    {
+      "name": "mock_grok_cli_mock_image",
+      "style": "grok-cli-mock",
+      "oneShot": true,
+      "note": "Mock preset: no process; fixed file <gather.dir>/<client>-mock-<verb>.<png|mp4> holding 'toolnexus mock <verb>'; text = the exact folded prompt; jobId mock.",
+      "config": {
+        "gather": {
+          "mode": "url",
+          "dir": "{dir}"
+        }
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "a red apple",
+        "aspectRatio": "16:9"
+      },
+      "fixture": [],
+      "expectNoSpawn": true,
+      "result": {
+        "files": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "path": "{dir}/grok-mock-image.png",
+            "url": "file://{dir}/grok-mock-image.png"
+          }
+        ],
+        "jobId": "mock",
+        "status": "completed",
+        "text": "Generate exactly one image with your image generation tool: a red apple (aspect ratio 16:9). Do not write code. Reply only with the file path."
+      },
+      "tool": {
+        "name": "generate_image",
+        "isError": false,
+        "output": "image ready: {dir}/grok-mock-image.png",
+        "parts": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "data": "dG9vbG5leHVzIG1vY2sgaW1hZ2U="
+          }
+        ],
+        "metadata": {
+          "source": "media",
+          "verb": "image",
+          "client": "grok",
+          "jobId": "mock",
+          "status": "completed"
+        }
+      },
+      "noUsage": true
+    },
+    {
+      "name": "mock_grok_cli_mock_video",
+      "style": "grok-cli-mock",
+      "oneShot": true,
+      "note": "Mock preset: no process; fixed file <gather.dir>/<client>-mock-<verb>.<png|mp4> holding 'toolnexus mock <verb>'; text = the exact folded prompt; jobId mock.",
+      "config": {
+        "gather": {
+          "mode": "url",
+          "dir": "{dir}"
+        }
+      },
+      "verb": "video",
+      "args": {
+        "prompt": "waves",
+        "seconds": 5
+      },
+      "fixture": [],
+      "expectNoSpawn": true,
+      "result": {
+        "files": [
+          {
+            "type": "file",
+            "mimeType": "video/mp4",
+            "path": "{dir}/grok-mock-video.mp4",
+            "url": "file://{dir}/grok-mock-video.mp4"
+          }
+        ],
+        "jobId": "mock",
+        "status": "completed",
+        "text": "Generate exactly one short video with your video generation tool, shortest duration available: waves (about 5 seconds long). Do not write code. Reply only with the file path."
+      },
+      "tool": {
+        "name": "generate_video",
+        "isError": false,
+        "output": "video ready: {dir}/grok-mock-video.mp4",
+        "parts": [
+          {
+            "type": "file",
+            "mimeType": "video/mp4",
+            "data": "dG9vbG5leHVzIG1vY2sgdmlkZW8="
+          }
+        ],
+        "metadata": {
+          "source": "media",
+          "verb": "video",
+          "client": "grok",
+          "jobId": "mock",
+          "status": "completed"
+        }
+      },
+      "noUsage": true
+    },
+    {
+      "name": "mock_codex_cli_mock_image",
+      "style": "codex-cli-mock",
+      "oneShot": true,
+      "note": "Mock preset: no process; fixed file <gather.dir>/<client>-mock-<verb>.<png|mp4> holding 'toolnexus mock <verb>'; text = the exact folded prompt; jobId mock.",
+      "config": {
+        "gather": {
+          "mode": "url",
+          "dir": "{dir}"
+        }
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "cat",
+        "width": 640
+      },
+      "fixture": [],
+      "expectNoSpawn": true,
+      "result": {
+        "files": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "path": "{dir}/codex-mock-image.png",
+            "url": "file://{dir}/codex-mock-image.png"
+          }
+        ],
+        "jobId": "mock",
+        "status": "completed",
+        "text": "Generate exactly one image with your built-in image generation tool: cat (width 640 px). Do not write code or use scripts. Reply only with the absolute path where the image was saved."
+      },
+      "tool": {
+        "name": "generate_image",
+        "isError": false,
+        "output": "image ready: {dir}/codex-mock-image.png",
+        "parts": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "data": "dG9vbG5leHVzIG1vY2sgaW1hZ2U="
+          }
+        ],
+        "metadata": {
+          "source": "media",
+          "verb": "image",
+          "client": "codex",
+          "jobId": "mock",
+          "status": "completed"
+        }
+      },
+      "noUsage": true
+    },
+    {
+      "name": "mock_google_agy_cli_mock_image",
+      "style": "google-agy-cli-mock",
+      "oneShot": true,
+      "note": "Mock preset: no process; fixed file <gather.dir>/<client>-mock-<verb>.<png|mp4> holding 'toolnexus mock <verb>'; text = the exact folded prompt; jobId mock.",
+      "config": {
+        "gather": {
+          "mode": "url",
+          "dir": "{dir}"
+        }
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "cat",
+        "aspectRatio": "1:1"
+      },
+      "fixture": [],
+      "expectNoSpawn": true,
+      "result": {
+        "files": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "path": "{dir}/agy-mock-image.png",
+            "url": "file://{dir}/agy-mock-image.png"
+          }
+        ],
+        "jobId": "mock",
+        "status": "completed",
+        "text": "Generate exactly one image with your image generation tool: cat (aspect ratio 1:1). Do not write code. Reply only with the absolute path where the image was saved."
+      },
+      "tool": {
+        "name": "generate_image",
+        "isError": false,
+        "output": "image ready: {dir}/agy-mock-image.png",
+        "parts": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "data": "dG9vbG5leHVzIG1vY2sgaW1hZ2U="
+          }
+        ],
+        "metadata": {
+          "source": "media",
+          "verb": "image",
+          "client": "agy",
+          "jobId": "mock",
+          "status": "completed"
+        }
+      },
+      "noUsage": true
+    }
+  ],
+  "verbCases": [
+    {
+      "name": "grok_cli_verbs",
+      "styles": [
+        "grok-cli"
+      ],
+      "expectVerbs": [
+        "image",
+        "video"
+      ],
+      "expectTools": [
+        "generate_image",
+        "generate_video"
+      ],
+      "unsupported": "speech",
+      "error": "media: no style supports \"speech\""
+    },
+    {
+      "name": "codex_cli_verbs",
+      "styles": [
+        "codex-cli"
+      ],
+      "expectVerbs": [
+        "image"
+      ],
+      "expectTools": [
+        "generate_image"
+      ],
+      "unsupported": "video",
+      "error": "media: no style supports \"video\""
+    },
+    {
+      "name": "google_agy_cli_verbs",
+      "styles": [
+        "google-agy-cli"
+      ],
+      "expectVerbs": [
+        "image"
+      ],
+      "expectTools": [
+        "generate_image"
+      ],
+      "unsupported": "video",
+      "error": "media: no style supports \"video\""
+    },
+    {
+      "name": "grok_cli_mock_verbs",
+      "styles": [
+        "grok-cli-mock"
+      ],
+      "expectVerbs": [
+        "image",
+        "video"
+      ],
+      "expectTools": [
+        "generate_image",
+        "generate_video"
+      ],
+      "unsupported": "speech",
+      "error": "media: no style supports \"speech\""
+    },
+    {
+      "name": "codex_cli_mock_verbs",
+      "styles": [
+        "codex-cli-mock"
+      ],
+      "expectVerbs": [
+        "image"
+      ],
+      "expectTools": [
+        "generate_image"
+      ],
+      "unsupported": "video",
+      "error": "media: no style supports \"video\""
+    },
+    {
+      "name": "google_agy_cli_mock_verbs",
+      "styles": [
+        "google-agy-cli-mock"
+      ],
+      "expectVerbs": [
+        "image"
+      ],
+      "expectTools": [
+        "generate_image"
+      ],
+      "unsupported": "video",
+      "error": "media: no style supports \"video\""
+    },
+    {
+      "name": "http_style_with_cli_presets",
+      "styles": [
+        {
+          "name": "speaker",
+          "baseUrl": "https://example.invalid",
+          "verbs": {
+            "speech": {
+              "mode": "sync",
+              "kind": "audio",
+              "start": {
+                "path": "/s"
+              },
+              "args": {
+                "text": "text"
+              },
+              "resultPath": "url"
+            }
+          }
+        },
+        "codex-cli",
+        "google-agy-cli"
+      ],
+      "expectVerbs": [
+        "image",
+        "speech"
+      ],
+      "expectTools": [
+        "generate_image",
+        "generate_speech"
+      ],
+      "unsupported": "video",
+      "error": "media: no style supports \"video\""
+    },
+    {
+      "name": "http_style_with_grok_cli",
+      "styles": [
+        {
+          "name": "speaker",
+          "baseUrl": "https://example.invalid",
+          "verbs": {
+            "speech": {
+              "mode": "sync",
+              "kind": "audio",
+              "start": {
+                "path": "/s"
+              },
+              "args": {
+                "text": "text"
+              },
+              "resultPath": "url"
+            }
+          }
+        },
+        "grok-cli"
+      ],
+      "expectVerbs": [
+        "image",
+        "video",
+        "speech"
+      ],
+      "expectTools": [
+        "generate_image",
+        "generate_video",
+        "generate_speech"
+      ],
+      "unsupported": "transcribe",
+      "error": "media: no style supports \"transcribe\""
     }
   ]
 }

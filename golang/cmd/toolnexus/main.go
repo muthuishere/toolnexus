@@ -3,6 +3,7 @@
 //
 //	toolnexus run   --config mcp.json --skills ./skills --base-url URL --style openai --model M [--system S] [--api-key K] [--once "prompt"]
 //	toolnexus tools --config mcp.json --skills ./skills
+//	toolnexus media image --style grok-cli --prompt "a red apple" [--aspect-ratio 16:9] [--out dir]
 //	toolnexus --help
 package main
 
@@ -22,6 +23,7 @@ const usage = `toolnexus — point any OpenAI- or Anthropic-style endpoint at mc
 Usage:
   toolnexus run   [flags]    Start an interactive agent loop (or a single --once prompt).
   toolnexus tools [flags]    List the resolved tools (name + source) and exit.
+  toolnexus media <verb> [flags]  Generate one image/video (toolnexus media --help).
   toolnexus --help           Show this help.
 
 run flags:
@@ -58,6 +60,8 @@ func main() {
 		runCmd(os.Args[2:])
 	case "tools":
 		toolsCmd(os.Args[2:])
+	case "media":
+		os.Exit(mediaCmd(os.Args[2:], os.Stdout, os.Stderr))
 	case "-h", "--help", "help":
 		fmt.Print(usage)
 	default:
