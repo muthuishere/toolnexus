@@ -8,6 +8,22 @@ GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
 
 ## Unreleased
 
+### Model fallback chain on overload (issue #190)
+
+A provider under load answers `529 Overloaded` or `503`, and until now the client spent its
+`retries` on the one model and then failed the run — even when a sibling model on the same endpoint
+would have answered. The new opt-in client option **`fallbackModels`** (js `fallbackModels`, python
+`fallback_models`, Go `FallbackModels`, java `fallbackModels(...)`, C# `FallbackModels`, elixir
+`:fallback_models`, clojure `:fallback-models`, rust `fallback_models(...)`) is an ordered list of
+models to switch to: once the retry budget on the current model is used up **and the last answer was
+`503` or `529`**, the same request goes to the next model with a fresh budget. `429`, other errors
+and an `onError` `"fail"` never switch models. `stream` emits `{type:"fallback", from, to}` before
+switching, and `RunResult.model`, `afterLLM` and the metric events report the model that actually
+served. Set `TOOLNEXUS_DISABLE_MODEL_FALLBACK=1` to turn it off without a redeploy. Without the
+option nothing changes. Not done: no cooldown/stickiness across calls (each turn starts at its own
+model), and in-process/ACP sources ignore the option. Spec: `SPEC.md §8`,
+`openspec/changes/add-model-fallback-chain` (the model-only slice of `add-llm-upstream-failover`).
+
 ### Memory hierarchy and dreaming
 
 A persona's memory can now stay small and stay true. **Everything is opt-in; a persona built
