@@ -464,6 +464,10 @@
                     uniformly. Unset => an ATTACHED part the style cannot
                     represent stops the run, a TOOL-DERIVED one degrades to a
                     text placeholder and warns once.
+    :stop-recovery  §8 Stop-reason recovery (default false). When true, a
+                    turn that remains is spent on: a corrective after malformed
+                    tool-call args (once), a continue after a length stop (up to
+                    3, text carried), a nudge after an empty answer (once).
 
   On the name of that slot: §10 says \"never `await`\" because `await` is
   reserved in JS/Python/C#. In Clojure it is not reserved — it is
@@ -1183,9 +1187,13 @@
 ;; per-style response reading
 ;; ---------------------------------------------------------------------------
 
-(defn- parse-args [s]
-  (try (or (json/read-str (if (str/blank? (str s)) "{}" (str s))) {})
-       (catch Throwable _ {})))
+(defn- parse-args
+  "A call's arguments as a map. Anything that is not a JSON object — unparseable
+  text, `[1]`, a bare string — runs as `{}` (SPEC §8 Stop-reason recovery)."
+  [s]
+  (let [v (try (json/read-str (if (str/blank? (str s)) "{}" (str s)))
+               (catch Throwable _ nil))]
+    (if (map? v) v {})))
 
 (defn- openai-calls [body]
   (mapv (fn [tc] {:id   (:id tc)
@@ -1196,7 +1204,8 @@
 (defn- anthropic-calls [body]
   (->> (:content body)
        (filter #(= "tool_use" (:type %)))
-       (mapv (fn [b] {:id (:id b) :name (:name b) :args (or (:input b) {})}))))
+       (mapv (fn [b] {:id (:id b) :name (:name b)
+                      :args (let [in (:input b)] (if (map? in) in {}))}))))
 
 (defn- tool-calls-of [client body]
   (if (= "anthropic" (:style client)) (anthropic-calls body) (openai-calls body)))
@@ -1208,6 +1217,50 @@
   (if (= "anthropic" (:style client))
     {:role "assistant" :content (:content body)}
     (get-in body [:choices 0 :message])))
+
+;; SPEC §8 "Stop-reason recovery" — the three pinned user messages, byte-exact
+;; in every port.
+(def stop-recovery-nudge
+  "Your previous response contained no answer. Continue and give your answer.")
+(def stop-recovery-continue
+  "Your previous response was cut off at the output token limit. Continue exactly where it stopped, without repeating anything.")
+(def stop-recovery-corrective
+  "Your previous tool call could not be used: its arguments were not a valid JSON object. Call the tool again with arguments that are a single valid JSON object matching its input schema.")
+
+(defn- malformed-calls?
+  "Any tool call whose raw arguments are not a JSON object: OpenAI `arguments`
+  non-blank and not an object; Anthropic `input` present and not an object."
+  [client body]
+  (if (= "anthropic" (:style client))
+    (boolean (some (fn [b] (and (= "tool_use" (:type b))
+                                (some? (:input b))
+                                (not (map? (:input b)))))
+                   (:content body)))
+    (boolean (some (fn [tc]
+                     (let [raw (get-in tc [:function :arguments])]
+                       (and (string? raw) (not (str/blank? raw))
+                            (not (map? (try (json/read-str raw) (catch Throwable _ nil)))))))
+                   (get-in body [:choices 0 :message :tool_calls])))))
+
+(defn- truncated? [client body]
+  (if (= "anthropic" (:style client))
+    (= "max_tokens" (:stop_reason body))
+    (= "length" (get-in body [:choices 0 :finish_reason]))))
+
+(defn- stop-recovery
+  "Classify one response (SPEC §8 order) against the run's budgets in `st`
+  (an atom {:correct :cont :nudge :carry}). Returns nil, or [text drop?]."
+  [st last-turn? has-calls? malformed? truncated? text]
+  (when-not last-turn?
+    (let [{:keys [correct cont nudge]} @st]
+      (cond
+        (and has-calls? malformed? (< correct 1))
+        (do (swap! st update :correct inc) [stop-recovery-corrective true])
+        (and (not has-calls?) truncated? (< cont 3))
+        (do (swap! st #(-> % (update :cont inc) (update :carry str text)))
+            [stop-recovery-continue false])
+        (and (not has-calls?) (not truncated?) (str/blank? text) (< nudge 1))
+        (do (swap! st update :nudge inc) [stop-recovery-nudge true])))))
 
 (defn- final-text [client body]
   (if (= "anthropic" (:style client))
@@ -1820,6 +1873,9 @@
         ;; §conversation-store — the turn as it stands, for the interrupted-turn
         ;; save: {:messages complete-so-far :calls unanswered :done {id settled}}.
         progress   (atom nil)
+        ;; SPEC §8 Stop-reason recovery — per-run budgets + carried text.
+        recovery   (when (:stop-recovery client) (atom {:correct 0 :cont 0 :nudge 0 :carry ""}))
+        carry      (fn [] (if recovery (:carry @recovery) ""))
         ;; ONE exit path for the store save and the run metric. Two `run-result`
         ;; call sites return from this loop, and a save wired into only one of
         ;; them is the classic half-fix — the turn-limit exit would silently
@@ -1888,13 +1944,27 @@
                   turns   (inc turns)
                   msg     (assistant-message client body)
                   calls   (tool-calls-of client body)
+                  before  messages
                   messages (conj messages msg)
-                  _       (reset! progress {:messages messages :calls calls :done {}})]
-              (if (empty? calls)
-                (let [r (finish! (assoc (run-result client (final-text client body) messages tool-calls turns usage false) :model turn-model))]
+                  recover (when recovery
+                            (stop-recovery recovery (>= turn (dec max-turns)) (boolean (seq calls))
+                                           (malformed-calls? client body) (truncated? client body)
+                                           (final-text client body)))
+                  _       (reset! progress {:messages (if recover before messages)
+                                            :calls (if recover [] calls) :done {}})]
+              (cond
+                recover
+                (let [[text drop?] recover]
+                  (recur (conj (if drop? before messages) {:role "user" :content text})
+                         tools (inc turn) turns tool-calls usage turn-model))
+
+                (empty? calls)
+                (let [r (finish! (assoc (run-result client (str (carry) (final-text client body)) messages tool-calls turns usage false) :model turn-model))]
                   (emit! on-event {:type "done" :result r})
                   r)
-                (let [_       (doseq [c calls]
+                :else
+                (let [_       (when recovery (swap! recovery assoc :carry ""))
+                      _       (doseq [c calls]
                                 (emit! on-event
                                        ;; SPEC §4C: a call_tool call names the REAL tool
                                        (let [[nm a w?] (unwrap-call client (:name c) (:args c))]
