@@ -348,7 +348,8 @@ defmodule Toolnexus.Client do
   - `:on_error` — `(%{error?, status?, attempt, retryable} -> :retry | :fail)` classifies each
     failed LLM attempt (§8 Resilience). Absent ⇒ default (`retryable ⇒ :retry, else :fail`),
     byte-identical to today. A `:retry` is bounded by `:retries`. No `:suspend` tier.
-  - `:hooks` — map with `:before_llm`, `:after_llm`, `:before_tool`, `:after_tool`
+  - `:hooks` — map with `:before_llm`, `:after_llm`, `:before_tool`, `:after_tool`,
+    `:after_round` (§8 round boundary: returns `%{inject: [String.t()]}`)
   - `:retries` (default 2), `:retry_base_ms` (default 500), `:timeout_ms` (whole-run deadline).
     `:retries` covers the transient LLM statuses `429`/`500`/`502`/`503`/`504`/`529` plus
     network errors; widen the set with `:retryable_statuses`
@@ -1715,6 +1716,42 @@ defmodule Toolnexus.Client do
     end
   end
 
+  # SPEC §8 after_round (#192): fire the round-boundary hook and append its injections
+  # as user messages. Returns {appended?, st}. A final round fires only when a turn
+  # remains; a non-empty injection there continues the loop.
+  defp round_end(client, st, turn, final, text) do
+    case hook(client, :after_round) do
+      f when is_function(f, 1) ->
+        if final and turn + 1 >= client.max_turns do
+          {false, st}
+        else
+          case f.(%{turn: turn, final: final, text: text, messages: st.messages}) do
+            {:error, reason} ->
+              raise Toolnexus.HookError, hook: "after_round", reason: reason
+
+            %{} = out ->
+              add =
+                (Map.get(out, :inject) || [])
+                |> Enum.filter(&(is_binary(&1) and &1 != ""))
+                |> Enum.map(&%{"role" => "user", "content" => &1})
+
+              {add != [], %{st | messages: st.messages ++ add}}
+
+            _ ->
+              {false, st}
+          end
+        end
+
+      f when is_function(f) ->
+        raise ArgumentError,
+              "hooks.after_round must be a 1-arity function taking " <>
+                "%{turn:, final:, text:, messages:}"
+
+      _ ->
+        {false, st}
+    end
+  end
+
   # SPEC §8: a non-empty `model` override applies to THIS turn only (request body +
   # after_llm event); absent/nil/empty => the configured model verbatim.
   defp turn_model(_client, m) when is_binary(m) and m != "", do: m
@@ -2225,15 +2262,21 @@ defmodule Toolnexus.Client do
     calls = msg["tool_calls"] || []
 
     if calls == [] do
-      end_run(
-        rc(client, st),
-        run_start,
-        msg["content"] || "",
-        st.messages,
-        st.tool_calls,
-        st.turns,
-        st.usage
-      )
+      case round_end(client, st, turn, true, msg["content"] || "") do
+        {true, st} ->
+          loop_openai(client, toolkit, key, run_start, st, turn + 1)
+
+        {false, st} ->
+          end_run(
+            rc(client, st),
+            run_start,
+            msg["content"] || "",
+            st.messages,
+            st.tool_calls,
+            st.turns,
+            st.usage
+          )
+      end
     else
       call_specs =
         Enum.map(calls, fn call ->
@@ -2257,6 +2300,7 @@ defmodule Toolnexus.Client do
           )
 
         {:ok, st} ->
+          {_, st} = round_end(client, st, turn, false, "")
           loop_openai(client, toolkit, key, run_start, st, turn + 1)
       end
     end
@@ -2343,7 +2387,14 @@ defmodule Toolnexus.Client do
 
     if uses == [] do
       text = content |> Enum.filter(&(&1["type"] == "text")) |> Enum.map_join("", & &1["text"])
-      end_run(rc(client, st), run_start, text, st.messages, st.tool_calls, st.turns, st.usage)
+
+      case round_end(client, st, turn, true, text) do
+        {true, st} ->
+          loop_anthropic(client, toolkit, key, sys, run_start, st, turn + 1)
+
+        {false, st} ->
+          end_run(rc(client, st), run_start, text, st.messages, st.tool_calls, st.turns, st.usage)
+      end
     else
       call_specs = Enum.map(uses, fn use -> {use["id"], use["name"], use["input"] || %{}} end)
       settled = exec_calls(client, toolkit, call_specs, turn)
@@ -2380,6 +2431,7 @@ defmodule Toolnexus.Client do
           st.usage
         )
       else
+        {_, st} = round_end(client, st, turn, false, "")
         loop_anthropic(client, toolkit, key, sys, run_start, st, turn + 1)
       end
     end
@@ -2511,21 +2563,28 @@ defmodule Toolnexus.Client do
 
     if calls == [] do
       st = %{st | messages: st.messages ++ [%{"role" => "assistant", "content" => content}]}
-      emit.(%{type: "usage", usage: st.usage})
 
-      emit.(%{
-        type: "done",
-        result:
-          end_run(
-            rc(client, st),
-            run_start,
-            content,
-            st.messages,
-            st.tool_calls,
-            st.turns,
-            st.usage
-          )
-      })
+      case round_end(client, st, turn, true, content) do
+        {true, st} ->
+          stream_loop_openai(client, toolkit, key, run_start, st, turn + 1, emit)
+
+        {false, st} ->
+          emit.(%{type: "usage", usage: st.usage})
+
+          emit.(%{
+            type: "done",
+            result:
+              end_run(
+                rc(client, st),
+                run_start,
+                content,
+                st.messages,
+                st.tool_calls,
+                st.turns,
+                st.usage
+              )
+          })
+      end
     else
       assistant = %{
         "role" => "assistant",
@@ -2616,6 +2675,7 @@ defmodule Toolnexus.Client do
           })
 
         {:ok, st} ->
+          {_, st} = round_end(client, st, turn, false, "")
           stream_loop_openai(client, toolkit, key, run_start, st, turn + 1, emit)
       end
     end
@@ -2802,13 +2862,28 @@ defmodule Toolnexus.Client do
 
     if stop_reason != "tool_use" or uses == [] do
       text = content |> Enum.filter(&(&1["type"] == "text")) |> Enum.map_join("", & &1["text"])
-      emit.(%{type: "usage", usage: st.usage})
 
-      emit.(%{
-        type: "done",
-        result:
-          end_run(rc(client, st), run_start, text, st.messages, st.tool_calls, st.turns, st.usage)
-      })
+      case round_end(client, st, turn, true, text) do
+        {true, st} ->
+          stream_loop_anthropic(client, toolkit, key, sys, run_start, st, turn + 1, emit)
+
+        {false, st} ->
+          emit.(%{type: "usage", usage: st.usage})
+
+          emit.(%{
+            type: "done",
+            result:
+              end_run(
+                rc(client, st),
+                run_start,
+                text,
+                st.messages,
+                st.tool_calls,
+                st.turns,
+                st.usage
+              )
+          })
+      end
     else
       Enum.each(uses, fn u ->
         emit.(tool_event(client, %{type: "tool_call", id: u["id"]}, u["name"], u["input"]))
@@ -2888,6 +2963,7 @@ defmodule Toolnexus.Client do
 
         {:ok, st, results} ->
           st = %{st | messages: st.messages ++ [%{"role" => "user", "content" => results}]}
+          {_, st} = round_end(client, st, turn, false, "")
           stream_loop_anthropic(client, toolkit, key, sys, run_start, st, turn + 1, emit)
       end
     end
