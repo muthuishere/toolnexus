@@ -223,6 +223,9 @@ test("mcp2026 discover 5xx tries the frozen fallback; connection refused is a lo
         res.writeHead(r.statusCode ?? 502, r.headers)
         r.pipe(res)
       })
+      // The client may hang up mid-proxy; without handlers the reset is an uncaught exception.
+      p.on("error", () => res.destroy())
+      req.on("error", () => p.destroy())
       p.end(body)
     })
   })

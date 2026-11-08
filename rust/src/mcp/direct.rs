@@ -16,8 +16,8 @@ use serde_json::{Value, json};
 
 use super::elicit::{answer_to_elicit_result, elicitation_to_request};
 use super::oauth::{OAuth, OpenUrlFn, TokenStore};
+pub(crate) use super::wire::StdioHandoff;
 use super::wire::{Obj, PROTOCOL_VERSION, SKILLS_EXT, Session, WireError, lock, sha256_hex};
-pub(crate) use super::wire::{StdioHandoff, StdoutReader};
 use super::{
     ServerConfig, apply_tools_filter, build_input_schema, expand_env_headers, hints_of,
     map_wire_result,

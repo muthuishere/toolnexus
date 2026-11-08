@@ -1,7 +1,7 @@
 package io.github.muthuishere.toolnexus;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpServer;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -52,17 +52,17 @@ class ClassifierBackendsTest {
     /** Wire question map → typed questions (raw for unmodelled types). */
     private static Map<String, Classifier.Question> questions(JsonNode qs) {
         Map<String, Classifier.Question> out = new LinkedHashMap<>();
-        for (Iterator<String> it = qs.fieldNames(); it.hasNext(); ) {
+        for (Iterator<String> it = qs.propertyNames().iterator(); it.hasNext(); ) {
             String k = it.next();
             JsonNode q = qs.get(k);
-            String ins = q.path("instructions").asText();
+            String ins = q.path("instructions").asText("");
             JsonNode c = q.get("criteria");
             out.put(k, switch (q.get("type").asText()) {
                 case "noul" -> new Classifier.NoulQuestion(ins, c == null ? null
                         : new Classifier.NoulCriteria(c.get("true").asText(), c.get("false").asText()));
                 case "choice" -> {
                     Map<String, String> m = new LinkedHashMap<>();
-                    c.fields().forEachRemaining(e -> m.put(e.getKey(), e.getValue().asText()));
+                    c.properties().iterator().forEachRemaining(e -> m.put(e.getKey(), e.getValue().asText()));
                     yield new Classifier.ChoiceQuestion(ins, m);
                 }
                 case "score" -> {
@@ -87,7 +87,7 @@ class ClassifierBackendsTest {
             }
             if (n.has("$text")) return ContentPart.text(n.get("$text").asText());
             Map<String, Object> m = new LinkedHashMap<>();
-            n.fields().forEachRemaining(e -> m.put(e.getKey(), state(e.getValue())));
+            n.properties().iterator().forEachRemaining(e -> m.put(e.getKey(), state(e.getValue())));
             return m;
         }
         if (n.isArray()) {
@@ -144,7 +144,7 @@ class ClassifierBackendsTest {
         JsonNode fx = fixture("presets.json");
         JsonNode backends = fx.get("backends");
         assertEquals(backends.size(), Classifier.BACKENDS.size());
-        backends.fields().forEachRemaining(e -> {
+        backends.properties().iterator().forEachRemaining(e -> {
             Classifier.BackendPreset p = Classifier.BACKENDS.get(e.getKey());
             assertNotNull(p, e.getKey());
             JsonNode w = e.getValue();
@@ -156,7 +156,7 @@ class ClassifierBackendsTest {
             if (w.get("supportsImages").isNull()) {
                 assertNull(p.supports(), e.getKey());
             } else {
-                w.get("supportsImages").fields().forEachRemaining(m ->
+                w.get("supportsImages").properties().iterator().forEachRemaining(m ->
                         assertEquals(m.getValue().asBoolean(), p.supports().apply(m.getKey()).images(),
                                 e.getKey() + " " + m.getKey()));
             }
@@ -303,7 +303,7 @@ class ClassifierBackendsTest {
             boolean cf = "cloudflare".equals(backend);
             authHeaders.clear();
             Map<String, String> envMap = new java.util.HashMap<>();
-            c.path("env").fields().forEachRemaining(e -> envMap.put(e.getKey(), e.getValue().asText()));
+            c.path("env").properties().iterator().forEachRemaining(e -> envMap.put(e.getKey(), e.getValue().asText()));
             String base = start((n, b) -> new Object[]{200,
                     cf ? "{\"success\":true,\"result\":" + NOUL_REPLY + "}" : NOUL_REPLY});
             try {
@@ -312,7 +312,7 @@ class ClassifierBackendsTest {
                 if (c.has("apiKeyEnv")) o.apiKeyEnv(c.get("apiKeyEnv").asText());
                 if (c.has("headers")) {
                     Map<String, String> h = new LinkedHashMap<>();
-                    c.get("headers").fields().forEachRemaining(e -> h.put(e.getKey(), e.getValue().asText()));
+                    c.get("headers").properties().iterator().forEachRemaining(e -> h.put(e.getKey(), e.getValue().asText()));
                     o.headers(h);
                 }
                 if ("custom".equals(backend)) o.supports(new Classifier.Supports(false));

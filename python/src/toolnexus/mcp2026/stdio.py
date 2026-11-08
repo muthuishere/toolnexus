@@ -4,11 +4,13 @@ stderr is passed through and never parsed; a dead child fails every pending call
 from __future__ import annotations
 
 import json
+import os
 import queue
 import subprocess
+import sys
 import threading
 from contextlib import asynccontextmanager
-from typing import Any, AsyncIterator, Optional
+from typing import Any, AsyncIterator, Awaitable, Callable, Optional
 
 
 class StdioClosed(ConnectionError):
@@ -120,6 +122,104 @@ class StdioConn:
             pass
 
 
+def _loop_pipes() -> bool:
+    """True when pipes can be awaited on the running event loop: POSIX asyncio only."""
+    if sys.platform == "win32":
+        return False
+    import asyncio
+
+    try:
+        asyncio.get_running_loop()  # absent under trio: keep the thread path there
+    except RuntimeError:
+        return False
+    return True
+
+
+def _pipe_lines(out: Any) -> Callable[[], Awaitable[bytes]]:
+    """Returns an async ``readline`` for a child's stdout. On POSIX the pipe is made
+    non-blocking and awaited with the event loop's ``add_reader``, so a line costs no worker
+    thread round-trip (two thread hand-offs per MCP call were most of the per-request
+    overhead). Bytes the probe reader already buffered inside ``out`` are consumed first.
+    On Windows the selector cannot watch pipes, so it falls back to a worker thread."""
+    import anyio
+
+    if not _loop_pipes():
+        return lambda: anyio.to_thread.run_sync(out.readline, abandon_on_cancel=True)
+    fd = out.fileno()
+    os.set_blocking(fd, False)
+    buf = bytearray()
+    try:
+        pending = out.peek(1)  # whatever the probe reader left buffered (b"" if none)
+    except BlockingIOError:
+        pending = b""
+    if pending:
+        buf.extend(out.read(len(pending)))
+    eof = False
+
+    async def readline() -> bytes:
+        nonlocal eof
+        while True:
+            i = buf.find(b"\n")
+            if i >= 0:
+                line = bytes(buf[: i + 1])
+                del buf[: i + 1]
+                return line
+            if eof:
+                line = bytes(buf)
+                buf.clear()
+                return line
+            try:
+                chunk: Optional[bytes] = os.read(fd, 65536)
+            except BlockingIOError:
+                chunk = None
+            if chunk is None:
+                await _wait_fd(fd, readable=True)
+                continue
+            if not chunk:
+                eof = True
+                continue
+            buf.extend(chunk)
+
+    return readline
+
+
+def _pipe_writer(stdin: Any, blocking_write: Callable[[bytes], None]) -> Callable[[bytes], Awaitable[None]]:
+    """Returns an async writer for a child's stdin: a direct non-blocking ``os.write`` that
+    waits on ``add_writer`` only when the pipe is full. Windows keeps the worker thread."""
+    import anyio
+
+    if not _loop_pipes():
+        return lambda data: anyio.to_thread.run_sync(blocking_write, data)
+    stdin.flush()
+    fd = stdin.fileno()
+    os.set_blocking(fd, False)
+
+    async def write(data: bytes) -> None:
+        view = memoryview(data)
+        while view:
+            try:
+                n = os.write(fd, view)
+            except BlockingIOError:
+                await _wait_fd(fd, readable=False)
+                continue
+            view = view[n:]
+
+    return write
+
+
+async def _wait_fd(fd: int, *, readable: bool) -> None:
+    import asyncio
+
+    loop = asyncio.get_running_loop()
+    fut = loop.create_future()
+    add, remove = (loop.add_reader, loop.remove_reader) if readable else (loop.add_writer, loop.remove_writer)
+    add(fd, lambda: fut.done() or fut.set_result(None))
+    try:
+        await fut
+    finally:
+        remove(fd)
+
+
 @asynccontextmanager
 async def sdk_streams(sc: StdioConn) -> AsyncIterator[tuple[Any, Any]]:
     """Hands a probed child to the ``mcp`` SDK: the ``(read, write)`` anyio memory streams
@@ -141,11 +241,13 @@ async def sdk_streams(sc: StdioConn) -> AsyncIterator[tuple[Any, Any]]:
     read_writer, read_stream = anyio.create_memory_object_stream(0)
     write_stream, write_reader = anyio.create_memory_object_stream(0)
 
+    lines = _pipe_lines(out)
+
     async def reader() -> None:
         try:
             async with read_writer:
                 while True:
-                    line = await anyio.to_thread.run_sync(out.readline, abandon_on_cancel=True)
+                    line = await lines()
                     if not line:
                         return
                     if not line.strip():
@@ -163,6 +265,8 @@ async def sdk_streams(sc: StdioConn) -> AsyncIterator[tuple[Any, Any]]:
         stdin.write(data)
         stdin.flush()
 
+    write = _pipe_writer(stdin, _write)
+
     async def writer() -> None:
         try:
             async with write_reader:
@@ -170,7 +274,7 @@ async def sdk_streams(sc: StdioConn) -> AsyncIterator[tuple[Any, Any]]:
                     m = sm.message if SessionMessage else sm
                     data = (m.model_dump_json(by_alias=True, exclude_none=True) + "\n").encode()
                     try:
-                        await anyio.to_thread.run_sync(_write, data)
+                        await write(data)
                     except OSError:
                         return
         except (anyio.ClosedResourceError, anyio.BrokenResourceError):

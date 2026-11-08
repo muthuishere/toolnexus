@@ -6,6 +6,8 @@
 import { readFileSync } from "node:fs"
 import { Client } from "@modelcontextprotocol/sdk/client/index.js"
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
+import { AjvJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/ajv"
+import type { jsonSchemaValidator } from "@modelcontextprotocol/sdk/validation"
 import { AdoptedStdioTransport } from "./mcp2026/stdio.js"
 import type { Tool as McpToolDef, ElicitRequest, ElicitResult } from "@modelcontextprotocol/sdk/types.js"
 import { ElicitRequestSchema } from "@modelcontextprotocol/sdk/types.js"
@@ -464,8 +466,23 @@ function resourceTools(servers: Map<string, ServerConn>): Tool[] {
  *  exists. Separated from connect so the caller ALWAYS holds a closeable reference — even if the
  *  connect is later abandoned by a timeout/abort, `client.close()` still terminates any spawned
  *  stdio child (no orphaned processes on cancellation). */
+/**
+ * The SDK's default validator, built on first use instead of per Client. Building an Ajv instance
+ * (meta-schemas + formats) costs ~2-3 ms on every connect, yet it is only consulted when a tool
+ * declares an `outputSchema`. Same validator, same results — just not paid for up front.
+ */
+class LazyAjvValidator implements jsonSchemaValidator {
+  private inner?: AjvJsonSchemaValidator
+  getValidator<T>(schema: Parameters<jsonSchemaValidator["getValidator"]>[0]) {
+    return (this.inner ??= new AjvJsonSchemaValidator()).getValidator<T>(schema)
+  }
+}
+
 function newMcpClient(waitFor?: (request: Request) => Promise<Answer>): Client {
-  const client = new Client({ name: "toolnexus", version: "0.1.0" }, { capabilities: waitFor ? { elicitation: {} } : {} })
+  const client = new Client(
+    { name: "toolnexus", version: "0.1.0" },
+    { capabilities: waitFor ? { elicitation: {} } : {}, jsonSchemaValidator: new LazyAjvValidator() },
+  )
   if (waitFor) {
     client.setRequestHandler(ElicitRequestSchema, async (request) =>
       answerToElicitResult(await waitFor(elicitationToRequest(request.params))),

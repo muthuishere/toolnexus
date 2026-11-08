@@ -29,7 +29,7 @@ Every direct and indirect dependency across all six ports is permissive.
 | Dependency | Version | Licence |
 |---|---|---|
 | `io.modelcontextprotocol.sdk:mcp` | 2.0.0 | MIT |
-| `com.fasterxml.jackson.core:jackson-databind` | 2.18.2 | Apache-2.0 |
+| `tools.jackson.core:jackson-databind` (via the MCP SDK; with `com.fasterxml.jackson.core:jackson-annotations`) | 3.0.3 | Apache-2.0 |
 | `org.yaml:snakeyaml` | 2.3 | Apache-2.0 |
 
 Test-only (not distributed): JUnit 5 / junit-platform-launcher — EPL-2.0.

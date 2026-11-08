@@ -1,7 +1,7 @@
 package io.github.muthuishere.toolnexus;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpServer;
 import org.junit.jupiter.api.DynamicTest;
 import org.junit.jupiter.api.TestFactory;
@@ -167,7 +167,7 @@ class McpHandlerConformanceTest {
                 if (id == null) throw new IllegalArgumentException("unauthorized");
                 return id.asText();
             });
-            String www = fixture.path("auth").path("wwwAuthenticate").asText();
+            String www = fixture.path("auth").path("wwwAuthenticate").asText("");
             cfg.wwwAuthenticate((ex, e) -> www);
         }
         cfg.listTools(ctx -> {
@@ -214,7 +214,7 @@ class McpHandlerConformanceTest {
         if (c.path("serverAuth").asBoolean(false)) {
             JsonNode fa = fixture.get("serverAuth");
             Map<String, List<String>> scopes = new LinkedHashMap<>();
-            for (Iterator<Map.Entry<String, JsonNode>> it = fa.get("scopes").fields(); it.hasNext(); ) {
+            for (Iterator<Map.Entry<String, JsonNode>> it = fa.get("scopes").properties().iterator(); it.hasNext(); ) {
                 var e = it.next();
                 List<String> l = new ArrayList<>();
                 for (JsonNode x : e.getValue()) l.add(x.asText());
@@ -284,7 +284,7 @@ class McpHandlerConformanceTest {
                     }
                 }
                 if (rq.has("headers")) {
-                    for (Iterator<Map.Entry<String, JsonNode>> it = rq.get("headers").fields(); it.hasNext(); ) {
+                    for (Iterator<Map.Entry<String, JsonNode>> it = rq.get("headers").properties().iterator(); it.hasNext(); ) {
                         var e = it.next();
                         if (e.getValue().asText().isEmpty()) hs.remove(e.getKey());
                         else hs.put(e.getKey(), e.getValue().asText());
@@ -295,12 +295,12 @@ class McpHandlerConformanceTest {
                 }
 
                 HttpResponse<String> resp = HTTP.send(b.build(), HttpResponse.BodyHandlers.ofString());
-                if ("sid".equals(step.path("capture").asText())) sid = resp.headers().firstValue("Mcp-Session-Id").orElse("");
+                if ("sid".equals(step.path("capture").asText(""))) sid = resp.headers().firstValue("Mcp-Session-Id").orElse("");
 
                 JsonNode ex = step.get("expect");
                 if (ex.has("status")) assertEquals(ex.get("status").asInt(), resp.statusCode(), where + " status; body=" + resp.body());
                 if (ex.has("headers")) {
-                    for (Iterator<Map.Entry<String, JsonNode>> it = ex.get("headers").fields(); it.hasNext(); ) {
+                    for (Iterator<Map.Entry<String, JsonNode>> it = ex.get("headers").properties().iterator(); it.hasNext(); ) {
                         var e = it.next();
                         assertEquals(e.getValue().asText(), resp.headers().firstValue(e.getKey()).orElse(null), where + " header " + e.getKey());
                     }
@@ -315,7 +315,7 @@ class McpHandlerConformanceTest {
                     JsonNode got = M.readTree(resp.body());
                     if (ex.has("json")) assertEquals(ex.get("json"), got, where + " json");
                     if (ex.has("jsonPath")) {
-                        for (Iterator<Map.Entry<String, JsonNode>> it = ex.get("jsonPath").fields(); it.hasNext(); ) {
+                        for (Iterator<Map.Entry<String, JsonNode>> it = ex.get("jsonPath").properties().iterator(); it.hasNext(); ) {
                             var e = it.next();
                             JsonNode cur = got;
                             for (String seg : e.getKey().split("\\.")) {

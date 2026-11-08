@@ -68,7 +68,12 @@ public sealed record ConversationInfo(string Id, DateTimeOffset UpdatedAt);
 /// </summary>
 public sealed partial class LlmClient
 {
-    private static readonly HttpClient DefaultHttp = new() { Timeout = Timeout.InfiniteTimeSpan };
+    // The system proxy is resolved once per scheme+host+port (CachedProxy) rather than per request:
+    // on macOS the default proxy asks CFNetwork on every send, which was a measurable slice of a turn.
+    private static readonly HttpClient DefaultHttp = new(new SocketsHttpHandler { Proxy = new CachedProxy(() => HttpClient.DefaultProxy) })
+    {
+        Timeout = Timeout.InfiniteTimeSpan,
+    };
     /// <summary>
     /// The default retryable set (§8 Resilience): <c>429</c> plus the 5xx worth another try — and
     /// <c>529 Overloaded</c>, which TypeSafe documents as "retry with backoff" and which this

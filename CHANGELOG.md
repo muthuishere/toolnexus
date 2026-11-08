@@ -96,6 +96,37 @@ and media engine against it, in its normal test command. Docs: cookbook "Run wit
   stay as they are. ACP cancel is not exercised in elixir (#169) or clojure (#170), which lack it;
   clojure has no network streaming, so its suite has no streaming case. The benchmark's own mock (`benchmarks/mock_llm.py`) is unchanged.
 
+**Faster requests and cold starts in python, js, java, csharp and rust** (`openspec/changes/speed-up-request-path`).
+Measured against a no-framework floor, most of our per-request time was waiting, not computing: a new
+TCP connection per LLM call, a thread hand-off per MCP stdio line, an OS proxy lookup per call, and SDK
+code loaded only after the MCP child was up. Fixing those, against the shared benchmark (median p50
+per request, before → after, interleaved with a clean HEAD build on one machine): python 1.35 → 0.96 ms,
+js 3.28 → ~0.55 ms, java 2.89 → 2.54 ms (0.88 ms once the JIT is warm) with init 358 → 180 ms, csharp
+init 93 → 62 ms. These numbers are from a busy machine; the standing page changes only after a quiet re-run.
+
+- **python, js:** the default LLM transport keeps the connection open. A connection the server dropped
+  while idle is replaced before use; a request that failed after it was sent is never re-sent, so a
+  model call cannot be billed twice. js follows redirects from the target and leaves a host-installed
+  undici dispatcher in charge. It steps aside, exactly as before, when a proxy env var applies or you pass
+  your own transport/`fetch`. js uses it on Node only; Bun, Deno and browsers keep the platform `fetch`.
+- **python, csharp behaviour change:** the proxy decision is cached per scheme and host, so a system
+  proxy changed while the process runs is not picked up. Python's `urllib` already read it once per process.
+- **java:** drops `jackson-databind` 2.x; Jackson 3, which the MCP SDK already needs, is the only JSON
+  library. JSON output is byte-identical (new golden test). If you used the Jackson 2 that toolnexus
+  brought in transitively, declare it yourself.
+- **rust:** stdio MCP servers now run on our own client instead of rmcp: callers write straight to the
+  child's pipe and one reader routes replies by id. A `tools/call` fell from ~30 to ~17 µs; steady-state
+  p50 0.265 → 0.22 ms, ahead of AutoAgents and level with golang (golang still leads by ~10 µs under
+  heavy load). `Client::run_ctx` now runs the turn on a tokio worker thread. Wire changes on the
+  pre-2026 stdio path, all bringing rust in line with golang and SPEC §2: `initialize` offers
+  `2025-11-25` (rmcp sent `2026-07-28`) with `clientInfo` `toolnexus`; caller cancellation now sends
+  `notifications/cancelled`; a freshly spawned server's stderr passes through (§2.3); close kills the
+  whole process group after 3 s; a tool with a non-object `inputSchema` no longer fails the whole list.
+  rmcp remains for remote (HTTP/SSE) servers and the serve side; the `rmcp/transport-child-process`
+  feature is dropped.
+- **Not done:** golang needed nothing: it measured within ~8 µs of the floor. elixir and clojure are out
+  of scope (#168 tracks clojure).
+
 ## 0.27.0 — 2026-11-08
 
 **Rust: an ACP turn the agent never ends now fails after `permission_timeout`** (rust only, #124).

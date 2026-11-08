@@ -1,7 +1,7 @@
 package io.github.muthuishere.toolnexus;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.ObjectMapper;
 import io.github.muthuishere.toolnexus.Classifier.ClassifierException;
 import io.github.muthuishere.toolnexus.Classifier.Decision;
 import io.github.muthuishere.toolnexus.Classifier.Question;
@@ -37,7 +37,7 @@ class JudgeTest {
                 case "noul" -> noul(name, ins);
                 case "choice" -> {
                     Map<String, String> opts = new LinkedHashMap<>();
-                    q.get("options").fields().forEachRemaining(e -> opts.put(e.getKey(), e.getValue().asText()));
+                    q.get("options").properties().iterator().forEachRemaining(e -> opts.put(e.getKey(), e.getValue().asText()));
                     yield choice(name, ins, opts);
                 }
                 default -> {
@@ -53,7 +53,7 @@ class JudgeTest {
     /** Typed questions from §8B wire JSON. */
     private static Map<String, Question> wireQuestions(JsonNode qs) {
         Map<String, Question> out = new LinkedHashMap<>();
-        qs.fields().forEachRemaining(e -> {
+        qs.properties().iterator().forEachRemaining(e -> {
             JsonNode q = e.getValue();
             String ins = q.get("instructions").asText();
             JsonNode cr = q.get("criteria");
@@ -62,7 +62,7 @@ class JudgeTest {
                         : new Classifier.NoulCriteria(cr.get("true").asText(), cr.get("false").asText()));
                 case "choice" -> {
                     Map<String, String> m = new LinkedHashMap<>();
-                    cr.fields().forEachRemaining(f -> m.put(f.getKey(), f.getValue().asText()));
+                    cr.properties().iterator().forEachRemaining(f -> m.put(f.getKey(), f.getValue().asText()));
                     yield new Classifier.ChoiceQuestion(ins, m);
                 }
                 default -> {
@@ -164,7 +164,7 @@ class JudgeTest {
             var got = ask(recorded(qs, c.get("answers")), GATE_STATE, asNamed(qs), bands);
             JsonNode wa = c.get("wantAnswers");
             assertEquals(wa.size(), got.size(), name);
-            wa.fields().forEachRemaining(e -> {
+            wa.properties().iterator().forEachRemaining(e -> {
                 Judge.Answer a = got.get(e.getKey());
                 JsonNode x = e.getValue();
                 String at = name + "/" + e.getKey();

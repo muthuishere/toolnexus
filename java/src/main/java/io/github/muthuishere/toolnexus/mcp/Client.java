@@ -28,11 +28,17 @@ public class Client implements AutoCloseable {
     /** Bounds every request unless {@link #timeout(Duration)} says otherwise. */
     public static final Duration DEFAULT_TIMEOUT = Duration.ofSeconds(30);
 
-    private static final HttpClient DEFAULT_HTTP = HttpClient.newBuilder().version(HttpClient.Version.HTTP_1_1)
-            .connectTimeout(Duration.ofSeconds(10)).followRedirects(HttpClient.Redirect.NEVER).build();
+    /**
+     * Lazy holder: building a JDK {@code HttpClient} initialises the default {@code SSLContext}
+     * (~100 ms cold), which a stdio-only connection never needs.
+     */
+    private static final class DefaultHttp {
+        static final HttpClient CLIENT = HttpClient.newBuilder().version(HttpClient.Version.HTTP_1_1)
+                .connectTimeout(Duration.ofSeconds(10)).followRedirects(HttpClient.Redirect.NEVER).build();
+    }
 
     /** The shared default HTTP client: HTTP/1.1, no redirects, system trust. */
-    public static HttpClient defaultHttp() { return DEFAULT_HTTP; }
+    public static HttpClient defaultHttp() { return DefaultHttp.CLIENT; }
 
     /** Thrown when an HTTP reply is not a JSON-RPC response (status kept for the §2.2a fallback rule). */
     public static final class HttpStatusException extends McpException {
@@ -82,8 +88,11 @@ public class Client implements AutoCloseable {
      * {@link #resumeStdio()} (2026 server) or {@link #detachStdio()} (old server, same child continues).
      */
     public static Client stdio(ProcessBuilder pb, boolean probe) throws IOException {
+        // Spawn first: constructing a Client initialises Mcp's ObjectMapper (~50 ms cold), and the
+        // child's own startup (an interpreter boot, typically) can overlap that instead of following it.
+        StdioConn conn = StdioConn.start(pb, null, probe);
         Client c = new Client("");
-        c.stdio = StdioConn.start(pb, null, probe);
+        c.stdio = conn;
         return c;
     }
 
@@ -192,7 +201,7 @@ public class Client implements AutoCloseable {
         if (!bearer.isEmpty()) h.put("Authorization", "Bearer " + bearer);
         h.forEach(b::setHeader);
         try {
-            return (http != null ? http : DEFAULT_HTTP).send(b.build(), HttpResponse.BodyHandlers.ofByteArray());
+            return (http != null ? http : DefaultHttp.CLIENT).send(b.build(), HttpResponse.BodyHandlers.ofByteArray());
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new McpException("interrupted", e);

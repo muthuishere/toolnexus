@@ -1,9 +1,9 @@
 package io.github.muthuishere.toolnexus;
 
-import com.fasterxml.jackson.databind.DeserializationFeature;
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.NullNode;
+import tools.jackson.databind.DeserializationFeature;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.ObjectMapper;
+import tools.jackson.databind.node.NullNode;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 
@@ -63,8 +63,8 @@ public final class McpHandler implements HttpHandler {
     private static final String DEFAULT_NAME = "toolnexus";
     private static final String DEFAULT_VERSION = "0.1.0";
 
-    private static final ObjectMapper MAPPER = new ObjectMapper()
-            .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
+    private static final ObjectMapper MAPPER = Json.builder()
+            .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS).build();
 
     // ── public types ─────────────────────────────────────────────────────
 
@@ -435,7 +435,7 @@ public final class McpHandler implements HttpHandler {
             writeRpcError(ex, null, -32700, "parse error");
             return;
         }
-        String method = msg.hasNonNull("method") ? msg.get("method").asText() : "";
+        String method = msg.hasNonNull("method") ? scalarText(msg.get("method")) : "";
         JsonNode id = msg.get("id");
         JsonNode params = msg.get("params");
 
@@ -659,7 +659,7 @@ public final class McpHandler implements HttpHandler {
                     if (a != null && !a.isNull()) {
                         if (!a.isObject()) throw new RpcError(-32602, "invalid params");
                         args = new LinkedHashMap<>();
-                        for (Iterator<Map.Entry<String, JsonNode>> it = a.fields(); it.hasNext(); ) {
+                        for (Iterator<Map.Entry<String, JsonNode>> it = a.properties().iterator(); it.hasNext(); ) {
                             Map.Entry<String, JsonNode> e = it.next();
                             if (e.getValue().isNull()) { args.put(e.getKey(), ""); continue; }
                             if (!e.getValue().isTextual()) throw new RpcError(-32602, "invalid params");
@@ -888,7 +888,7 @@ public final class McpHandler implements HttpHandler {
             else write26(ex, 400, null, null, new Rpc26Error(400, -32700, "Parse error", null));
             return true;
         }
-        String method = msg.hasNonNull("method") ? msg.get("method").asText() : "";
+        String method = msg.hasNonNull("method") ? scalarText(msg.get("method")) : "";
         JsonNode params = msg.get("params");
         Map<String, Object> pm = params != null && params.isObject() ? toMap(params) : null;
         Map<String, Object> meta = pm != null && pm.get("_meta") instanceof Map<?, ?> mm ? castMap(mm) : null;
@@ -1385,6 +1385,14 @@ public final class McpHandler implements HttpHandler {
     }
 
     @SuppressWarnings("unchecked")
+    /**
+     * Jackson 2 {@code asText()}: a scalar's text, and {@code ""} for an object/array (Jackson 3
+     * throws there), so a non-string {@code method} keeps answering method-not-found.
+     */
+    private static String scalarText(JsonNode n) {
+        return n.isContainer() ? "" : n.asText();
+    }
+
     private static Map<String, Object> toMap(JsonNode n) {
         return MAPPER.convertValue(n, LinkedHashMap.class);
     }

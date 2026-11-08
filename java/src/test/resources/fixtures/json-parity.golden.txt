@@ -1,0 +1,64 @@
+stringify: {"zeta":"last-inserted-first","alpha":1,"url":"https://example.com/a/b?x=1&y=<2>","escapes":"quote\" back\\ nl\n tab\t cr\r bell\u0007 nul\u0000 del","unicode":"é ü 中文 😀    ","html":"</script><b>&amp;</b>'","nullValue":null,"bool":true,"int":42,"negLong":-9007199254740993,"big":123456789012345678901234567890,"dec":1.10,"doubles":[1.0,0.1,1.0E20,1.0E-7,1.23456789123E8,-0.0,3.0E300],"float":1.5,"emptyMap":{},"emptyList":[],"nested":{"k":[{"deep":[]}]},"enum":"GREEN","tier":"RETRY","answer":{"id":"a1","ok":false,"reason":"declined"},"answerData":{"id":"a2","ok":true,"data":{"output":"x"}},"request":{"id":"r1","kind":"input","prompt":"Name?","expiresAt":"2026-01-01T00:00:00Z"},"part":{"type":"text","text":"hi"},"chars":"ab"}
+pretty:
+{
+  "zeta" : "last-inserted-first",
+  "alpha" : 1,
+  "url" : "https://example.com/a/b?x=1&y=<2>",
+  "escapes" : "quote\" back\\ nl\n tab\t cr\r bell\u0007 nul\u0000 del",
+  "unicode" : "é ü 中文 😀    ",
+  "html" : "</script><b>&amp;</b>'",
+  "nullValue" : null,
+  "bool" : true,
+  "int" : 42,
+  "negLong" : -9007199254740993,
+  "big" : 123456789012345678901234567890,
+  "dec" : 1.10,
+  "doubles" : [ 1.0, 0.1, 1.0E20, 1.0E-7, 1.23456789123E8, -0.0, 3.0E300 ],
+  "float" : 1.5,
+  "emptyMap" : { },
+  "emptyList" : [ ],
+  "nested" : {
+    "k" : [ {
+      "deep" : [ ]
+    } ]
+  },
+  "enum" : "GREEN",
+  "tier" : "RETRY",
+  "answer" : {
+    "id" : "a1",
+    "ok" : false,
+    "reason" : "declined"
+  },
+  "answerData" : {
+    "id" : "a2",
+    "ok" : true,
+    "data" : {
+      "output" : "x"
+    }
+  },
+  "request" : {
+    "id" : "r1",
+    "kind" : "input",
+    "prompt" : "Name?",
+    "expiresAt" : "2026-01-01T00:00:00Z"
+  },
+  "part" : {
+    "type" : "text",
+    "text" : "hi"
+  },
+  "chars" : "ab"
+}
+pretty-empty: { } [ ]
+mcp-sorted: {"alpha":1,"answer":{"id":"a1","ok":false,"reason":"declined"},"answerData":{"id":"a2","ok":true,"data":{"output":"x"}},"big":123456789012345678901234567890,"bool":true,"chars":"ab","dec":1.10,"doubles":[1.0,0.1,1.0E20,1.0E-7,1.23456789123E8,-0.0,3.0E300],"emptyList":[],"emptyMap":{},"enum":"GREEN","escapes":"quote\" back\\ nl\n tab\t cr\r bell\u0007 nul\u0000 del","float":1.5,"html":"</script><b>&amp;</b>'","int":42,"negLong":-9007199254740993,"nested":{"k":[{"deep":[]}]},"nullValue":null,"part":{"type":"text","text":"hi"},"request":{"id":"r1","kind":"input","prompt":"Name?","expiresAt":"2026-01-01T00:00:00Z"},"tier":"RETRY","unicode":"é ü 中文 😀    ","url":"https://example.com/a/b?x=1&y=<2>","zeta":"last-inserted-first"}
+mcp-ordered: {"zeta":"last-inserted-first","alpha":1,"url":"https://example.com/a/b?x=1&y=<2>","escapes":"quote\" back\\ nl\n tab\t cr\r bell\u0007 nul\u0000 del","unicode":"é ü 中文 😀    ","html":"</script><b>&amp;</b>'","nullValue":null,"bool":true,"int":42,"negLong":-9007199254740993,"big":123456789012345678901234567890,"dec":1.10,"doubles":[1.0,0.1,1.0E20,1.0E-7,1.23456789123E8,-0.0,3.0E300],"float":1.5,"emptyMap":{},"emptyList":[],"nested":{"k":[{"deep":[]}]},"enum":"GREEN","tier":"RETRY","answer":{"id":"a1","ok":false,"reason":"declined"},"answerData":{"id":"a2","ok":true,"data":{"output":"x"}},"request":{"id":"r1","kind":"input","prompt":"Name?","expiresAt":"2026-01-01T00:00:00Z"},"part":{"type":"text","text":"hi"},"chars":"ab"}
+go-json: {"alpha":1,"answer":{"id":"a1","ok":false,"reason":"declined"},"answerData":{"id":"a2","ok":true,"data":{"output":"x"}},"big":123456789012345678901234567890,"bool":true,"chars":"ab","dec":1.10,"doubles":[1.0,0.1,1.0E20,1.0E-7,1.23456789123E8,-0.0,3.0E300],"emptyList":[],"emptyMap":{},"enum":"GREEN","escapes":"quote\" back\\ nl\n tab\t cr\r bell\u0007 nul\u0000 del","float":1.5,"html":"\u003c/script\u003e\u003cb\u003e\u0026amp;\u003c/b\u003e'","int":42,"negLong":-9007199254740993,"nested":{"k":[{"deep":[]}]},"nullValue":null,"part":{"type":"text","text":"hi"},"request":{"id":"r1","kind":"input","prompt":"Name?","expiresAt":"2026-01-01T00:00:00Z"},"tier":"RETRY","unicode":"é ü 中文 😀 \u2028 \u2029","url":"https://example.com/a/b?x=1\u0026y=\u003c2\u003e","zeta":"last-inserted-first"}
+toMap-types: {i=Integer:1,l=Long:12345678901,b=BigInteger:123456789012345678901234567890,d=Double:1.5,e=Double:100.0,z=Double:0.1,n=null,t=Boolean:true,a=[Integer:1,Double:2.0,String:x,],o={y=Integer:2,x=Integer:1,},}
+toMap-roundtrip: {"i":1,"l":12345678901,"b":123456789012345678901234567890,"d":1.5,"e":100.0,"z":0.1,"n":null,"t":true,"a":[1,2.0,"x"],"o":{"y":2,"x":1}}
+loose-trailing: {a=1}
+loose-bad: {}
+loose-blank: {}
+parseLoose-scalar: Double:12.5
+parseLoose-trailing: [Integer:1,]
+parseLoose-text: String:not json
+parseLoose-dupkeys: {"a":2}
+toMap-trailing: {a=1}

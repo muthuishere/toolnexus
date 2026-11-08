@@ -288,6 +288,9 @@ public sealed partial class McpSource : IAsyncDisposable
             lock (cbGate) options.OnServer(r); // serialized: never concurrent with itself
         }
 
+        // Perf only: JIT the SDK client path in the background while the probe waits on the child (§2.2a).
+        if (config.Values.Any(v => v is IDictionary<string, object?> c && IsEnabled(c))) McpSdkWarmup.Start();
+
         var tasks = new List<Task>();
         foreach (var (name, value) in config)
         {

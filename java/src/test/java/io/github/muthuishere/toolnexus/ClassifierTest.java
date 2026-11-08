@@ -1,7 +1,7 @@
 package io.github.muthuishere.toolnexus;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 import com.sun.net.httpserver.HttpServer;
@@ -56,7 +56,7 @@ class ClassifierTest {
     private static Map<String, Classifier.Question> questions(JsonNode request) {
         Map<String, Classifier.Question> out = new LinkedHashMap<>();
         JsonNode qs = request.get("questions");
-        for (Iterator<String> it = qs.fieldNames(); it.hasNext(); ) {
+        for (Iterator<String> it = qs.propertyNames().iterator(); it.hasNext(); ) {
             String key = it.next();
             JsonNode q = qs.get(key);
             String instructions = q.get("instructions").asText();
@@ -67,7 +67,7 @@ class ClassifierTest {
                                 criteria.get("true").asText(), criteria.get("false").asText()));
                 case "choice" -> {
                     Map<String, String> c = new LinkedHashMap<>();
-                    criteria.fields().forEachRemaining(e -> c.put(e.getKey(), e.getValue().asText()));
+                    criteria.properties().iterator().forEachRemaining(e -> c.put(e.getKey(), e.getValue().asText()));
                     yield new Classifier.ChoiceQuestion(instructions, c);
                 }
                 case "score" -> {
@@ -239,7 +239,7 @@ class ClassifierTest {
         Classifier.Decision d = c.evaluate(state(f.get("request")), questions(f.get("request")));
         JsonNode answers = f.get("expect").get("answers");
         assertEquals(4, answers.size());
-        for (Iterator<String> it = answers.fieldNames(); it.hasNext(); ) {
+        for (Iterator<String> it = answers.propertyNames().iterator(); it.hasNext(); ) {
             String key = it.next();
             assertEquals(answers.get(key).get("nearUniform").asBoolean(), d.choice(key).nearUniform(),
                     key + ": nearUniform");
