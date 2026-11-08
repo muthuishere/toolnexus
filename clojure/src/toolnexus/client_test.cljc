@@ -1747,7 +1747,7 @@
                                             :retries 2 :retry-base-ms 1 :http-client f}
                                            opts))
         r     (try (client/run c "hi" {:on-event #(swap! evs conj %)})
-                   (catch #?(:clj Throwable :default :default) e {:thrown e}))]
+                   (catch Throwable e {:thrown e}))]
     {:r r :events @evs :calls @n}))
 
 (deftest a-429-with-retry-after-0-emits-a-retry-event-before-done
