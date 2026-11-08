@@ -8,6 +8,29 @@ GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
 
 ## Unreleased
 
+**Java: local MCP servers run on an in-house stdio client** (java only). Pre-2026 stdio servers no longer
+go through the official MCP Java SDK session. That covers nearly every local server in use today: those
+that answer `server/discover` as an old server, plus the child respawned after a silent discover. The SDK
+put a Reactor chain and scheduler hops on every request, and built a JSON tree for every line. The new
+client writes each request straight to the child's stdin. One reader thread routes replies by id and
+hands their raw bytes to the waiting caller, which parses them straight into the same `McpSchema` result
+types. That is the shape LangChain4j and our Rust port use. Server→client requests (ping, elicitation,
+roots) are answered off the reader thread, so a server that floods requests while not reading stdin
+cannot deadlock a call. Measured on the mock-LLM benchmark (same machine, runs interleaved, medians of 7):
+cold init went from 167 ms to 137 ms, and per-request p50 went from 1.88 ms to 1.63 ms. LangChain4j's
+MCP client on the same harness: 220 ms init, 1.84 ms p50. A raw `tools/call` round trip went from ~40 µs
+to ~20 µs. Behaviour is otherwise unchanged: the same protocol versions are offered (2025-11-25, down to
+2024-11-05), with the same error texts, idle timeout, cancellation and content mapping. One addition, as
+the Rust client already does: when a call is given up on, the server now gets `notifications/cancelled`
+with `requestId` and a reason (`"request timeout"` for an idle timeout, `"cancelled"` for a caller
+cancel). A late reply to that id is dropped quietly.
+**Not changed:** remote HTTP/SSE servers and `serve` still use the SDK. 2026-07-28 servers were already
+in-house (`Mcp2026`). One visible difference: a respawned child's stderr now passes through to the host's
+stderr, as the probe child's already did, instead of going to SLF4J. Requests are written by one
+writer thread, so a server that stops reading stdin can no longer park a caller past its call timeout,
+and `close` also kills the server's children after the server itself has exited. Tracked in
+`openspec/changes/java-inhouse-stdio-mcp`.
+
 **Benchmarks re-measured for 0.28.0 (docs only).** A quiet re-run (load < 4, five interleaved rounds of 0.27.0
 against `main`, medians) replaces the standing page's numbers and adds sitting `2026-11-08-quiet-0.28` to
 `benchmarks/results-2026-11.json`. Over MCP, `main` vs 0.27.0: python p50 1.38 → 0.92 ms; java init 361 → 195 ms

@@ -1,7 +1,5 @@
 package io.github.muthuishere.toolnexus;
 
-import io.modelcontextprotocol.client.McpClient;
-import io.modelcontextprotocol.client.McpSyncClient;
 import io.modelcontextprotocol.json.jackson3.JacksonMcpJsonMapperSupplier;
 import io.modelcontextprotocol.spec.McpSchema;
 import org.junit.jupiter.api.AfterAll;
@@ -10,7 +8,6 @@ import org.junit.jupiter.api.Test;
 
 import java.net.URISyntaxException;
 import java.nio.file.Path;
-import java.time.Duration;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -134,11 +131,10 @@ class McpToolCallIdleTimeoutTest {
     @Test
     void replyRacingTheTimeoutCompletesOnceAndLeaksNothing() throws Exception {
         Process proc = new ProcessBuilder("python3", fixture()).redirectError(ProcessBuilder.Redirect.INHERIT).start();
-        McpSyncClient client = McpClient.sync(new ProcessStdioTransport(proc, new JacksonMcpJsonMapperSupplier().get()))
-                .requestTimeout(Duration.ofSeconds(10)).build();
+        McpSource.ProgressRegistry progress = new McpSource.ProgressRegistry();
+        StdioMcpClient client = StdioMcpClient.attach(proc, new JacksonMcpJsonMapperSupplier().get(), progress::onToken, null);
         try {
-            client.initialize();
-            McpSource.ProgressRegistry progress = new McpSource.ProgressRegistry();
+            client.initialize(10_000);
             long budget = 30;
             int replied = 0, timedOut = 0;
             for (int i = 0; i < 20; i++) {

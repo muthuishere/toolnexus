@@ -35,7 +35,7 @@ below.
 | `js/` | TypeScript port — `toolnexus` (npm). MCP SDK: `@modelcontextprotocol/sdk` (same as opencode). |
 | `python/` | Python port — `toolnexus` (PyPI), Python ≥ 3.11. MCP SDK: `mcp`. |
 | `golang/` | Go port — `github.com/muthuishere/toolnexus/golang`, Go 1.23. MCP SDK: `mark3labs/mcp-go`. Also ships the `toolnexus` CLI under `cmd/`. |
-| `java/` | Java port — `io.github.muthuishere:toolnexus`, Java 21. MCP SDK: official `io.modelcontextprotocol.sdk:mcp`. |
+| `java/` | Java port — `io.github.muthuishere:toolnexus`, Java 21. MCP: in-house stdio client for local servers (`StdioMcpClient`, `Mcp2026`); official `io.modelcontextprotocol.sdk:mcp` for remote HTTP/SSE servers and the serve side. |
 | `csharp/` | C# port — `Toolnexus` (NuGet), .NET. MCP SDK: `ModelContextProtocol`. |
 | `elixir/` | Elixir port — `toolnexus` (Hex), Elixir ≥ 1.16/OTP 26. MCP client: **in-house** (`Toolnexus.Mcp.*` — no mature Elixir SDK exists); coverage gate ≥ 95%. |
 | `clojure/` | Clojure port — `net.clojars.muthuishere/toolnexus` (Clojars). One `.cljc` source tree for the JVM and cljgo; koine is its only dependency. |
