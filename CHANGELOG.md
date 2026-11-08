@@ -28,7 +28,6 @@ cancel). A late reply to that id is dropped quietly.
 in-house (`Mcp2026`). One visible difference: a respawned child's stderr now passes through to the host's
 stderr, as the probe child's already did, instead of going to SLF4J. Tracked in
 `openspec/changes/java-inhouse-stdio-mcp`.
-||||||| c6d5ec37
 **Change an ACP agent's mode or model without restarting it (#197).** A running ACP client now has
 `setMode(mode)` and `setModel(model)` (Go `SetMode(ctx, mode)` / `SetModel(ctx, model)`, Python
 `set_mode` / `set_model`, C# `SetModeAsync` / `SetModelAsync`, Clojure `set-mode!` / `set-model!`).
