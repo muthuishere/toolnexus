@@ -29,7 +29,21 @@ import java.util.stream.Stream;
  * a {@link Toolkit}. Mirrors the JS reference ({@code js/src/client.ts}).
  */
 public final class LlmClient {
-    private static final HttpClient HTTP = HttpClient.newHttpClient();
+    /**
+     * Shared default LLM transport. {@code executor(Runnable::run)} completes the response
+     * future on the client's selector thread instead of hopping to the default cached pool:
+     * {@link #llmSend} blocks in {@code send()} and every body handler used here only buffers
+     * or enqueues, so nothing user-supplied ever runs on that thread. It removes one thread
+     * hand-off per LLM round-trip (~0.15 ms on loopback). A host that supplies
+     * {@code opts.httpClient} keeps its own client unchanged.
+     *
+     * <p>Built lazily (holder idiom): constructing a JDK {@code HttpClient} initialises the default
+     * {@code SSLContext} — ~100 ms of class loading on a cold JVM — which a client that never sends
+     * (or always sends through {@code opts.httpClient}) should not pay at {@code create()}.
+     */
+    private static final class DefaultHttp {
+        static final HttpClient CLIENT = HttpClient.newBuilder().executor(Runnable::run).build();
+    }
 
     /**
      * The default retryable set: {@code 429} plus the 5xx worth another try — and
@@ -1166,14 +1180,14 @@ public final class LlmClient {
     /** Conversation provider for {@link #ask} — from {@code opts.store}, else in-memory. */
     private final ConversationStore store;
     /** §8 Gap 2: HTTP client for LLM requests — from {@code opts.httpClient}, else the shared default. */
-    private final HttpClient http;
+    private final HttpClient http; // null ⇒ the lazily-built shared default (see DefaultHttp)
     /** Cumulative Prometheus registry fed by the same events {@code onMetric} sees. */
     private final MetricsRegistry registry = new MetricsRegistry();
 
     private LlmClient(Options opts) {
         this.opts = opts;
         this.store = opts.store != null ? opts.store : new InMemoryConversationStore();
-        this.http = opts.httpClient != null ? opts.httpClient : HTTP;
+        this.http = opts.httpClient;
     }
 
     /**
@@ -2012,7 +2026,7 @@ public final class LlmClient {
     @SuppressWarnings("unchecked")
     public static List<ModelInfo> listModels(Options opts) {
         String key = resolveKey(opts, System::getenv);
-        HttpClient http = opts.httpClient != null ? opts.httpClient : HTTP;
+        HttpClient http = opts.httpClient != null ? opts.httpClient : DefaultHttp.CLIENT;
         String base = opts.baseUrl == null ? "" : opts.baseUrl.replaceAll("/+$", "");
         List<ModelInfo> out = new ArrayList<>();
         if ("anthropic".equals(opts.style)) {
@@ -3175,7 +3189,7 @@ public final class LlmClient {
             deadline.check();
             HttpRequest req = buildRequest(url, headers, body, deadline);
             try {
-                HttpResponse<T> res = http.send(req, handler);
+                HttpResponse<T> res = (http != null ? http : DefaultHttp.CLIENT).send(req, handler);
                 int status = res.statusCode();
                 if (status >= 200 && status < 300) return res;
                 // §8 Resilience: classify EVERY non-2xx (the host may retry a normally-terminal

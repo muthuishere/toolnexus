@@ -1,7 +1,7 @@
 package io.github.muthuishere.toolnexus;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 
 import java.nio.file.Files;
@@ -49,7 +49,7 @@ class SkillDescriptionWarningTest {
         assertWarnings(expect, inv.warnings);
 
         String prompt = src.prompt();
-        Iterator<Map.Entry<String, JsonNode>> it = cases.get("full_descriptions").fields();
+        Iterator<Map.Entry<String, JsonNode>> it = cases.get("full_descriptions").properties().iterator();
         while (it.hasNext()) {
             Map.Entry<String, JsonNode> e = it.next();
             assertTrue(prompt.contains(e.getValue().asText()), "description modified: " + e.getKey());

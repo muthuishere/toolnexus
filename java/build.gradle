@@ -23,8 +23,6 @@ dependencies {
     // The `mcp` aggregator pulls in mcp-core + the (Jackson 3) json mapper.
     api 'io.modelcontextprotocol.sdk:mcp:2.0.0'
 
-    // Jackson (databind) for our own JSON: config parsing, adapters, LLM client.
-    api 'com.fasterxml.jackson.core:jackson-databind:2.18.2'
 
     // SnakeYAML — a real YAML parser for SKILL.md frontmatter, so folded (>)/
     // literal (|) block scalars, quoting, and multi-line values resolve. SPEC.md §3.
