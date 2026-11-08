@@ -323,6 +323,7 @@ defmodule Toolnexus.Client do
             http_options: [],
             transport: nil,
             on_error: nil,
+            compact_on_overflow: nil,
             on_unsupported_part: nil,
             max_part_bytes: nil,
             registry: nil,
@@ -348,6 +349,12 @@ defmodule Toolnexus.Client do
   - `:on_error` — `(%{error?, status?, attempt, retryable} -> :retry | :fail)` classifies each
     failed LLM attempt (§8 Resilience). Absent ⇒ default (`retryable ⇒ :retry, else :fail`),
     byte-identical to today. A `:retry` is bounded by `:retries`. No `:suspend` tier.
+  - `:compact_on_overflow` — a hook with the `:before_llm` signature (typically a tighter
+    `Toolnexus.Agents.compactor/1`), called when the provider rejects a turn as a context
+    overflow (`context_overflow?/2`, SPEC §7F.1). Strictly fewer messages ⇒ they replace the
+    transcript and the same turn is re-sent (no `before_llm` re-run, no turn consumed); no
+    progress, or 3 compactions in a row that each bought fewer than 2 successful calls ⇒
+    `Toolnexus.ContextOverflowError`. Absent ⇒ the overflow surfaces as `ProviderError`.
   - `:hooks` — map with `:before_llm`, `:after_llm`, `:before_tool`, `:after_tool`
   - `:retries` (default 2), `:retry_base_ms` (default 500), `:timeout_ms` (whole-run deadline).
     `:retries` covers the transient LLM statuses `429`/`500`/`502`/`503`/`504`/`529` plus
@@ -1681,6 +1688,83 @@ defmodule Toolnexus.Client do
     )
   end
 
+  # ---- §7F.1 reactive compaction ----
+
+  @overflow_markers [
+    "context_length_exceeded",
+    "maximum context length",
+    "prompt is too long",
+    "prompt_too_long",
+    "request_too_large",
+    "context window"
+  ]
+
+  @doc """
+  SPEC §7F.1 detection: true iff `status` is 400 or 413 AND the (lowercased) provider error
+  body contains a context-overflow marker. A non-binary body (a decoded JSON map) is
+  JSON-encoded first.
+  """
+  @spec context_overflow?(integer() | nil, term()) :: boolean()
+  def context_overflow?(status, body) when status in [400, 413] do
+    text = if is_binary(body), do: body, else: Jason.encode!(body || "")
+    text = String.downcase(text)
+    Enum.any?(@overflow_markers, &String.contains?(text, &1))
+  end
+
+  def context_overflow?(_status, _body), do: false
+
+  # One LLM call wrapped in the reactive-compaction reaction + breaker. `fun` receives the
+  # working transcript and performs the call. Returns `{result, st}`; `st` carries the
+  # possibly-compacted transcript and the `ok_since`/`streak` counters across turns.
+  defp with_overflow(client, st, turn, fun) do
+    result =
+      try do
+        {:ok, fun.(st.messages)}
+      rescue
+        e -> {:error, e, __STACKTRACE__}
+      end
+
+    case result do
+      {:ok, res} ->
+        {res, Map.put(st, :ok_since, Map.get(st, :ok_since, 0) + 1)}
+
+      {:error, %Toolnexus.ProviderError{status: status, body: body} = e, stack} ->
+        hook = client.compact_on_overflow
+
+        if is_function(hook, 1) and context_overflow?(status, body) do
+          react_overflow(client, st, turn, fun, hook, status, body)
+        else
+          reraise e, stack
+        end
+
+      {:error, e, stack} ->
+        reraise e, stack
+    end
+  end
+
+  defp react_overflow(client, st, turn, fun, hook, status, body) do
+    ok_since = Map.get(st, :ok_since, 0)
+    streak = Map.get(st, :streak, 0)
+    streak = if streak > 0 and ok_since < 2, do: streak, else: 0
+
+    if streak == 3 do
+      raise Toolnexus.ContextOverflowError, compactions: 3, status: status, body: body
+    end
+
+    compacted =
+      case hook.(%{messages: st.messages, tools: st.tools, model: st.model, turn: turn}) do
+        %{messages: m} when is_list(m) -> m
+        _ -> nil
+      end
+
+    if is_list(compacted) and length(compacted) < length(st.messages) do
+      st = st |> Map.put(:messages, compacted) |> Map.put(:streak, streak + 1)
+      with_overflow(client, Map.put(st, :ok_since, 0), turn, fun)
+    else
+      raise Toolnexus.ContextOverflowError, compactions: streak, status: status, body: body
+    end
+  end
+
   # ---- hooks ----
 
   defp hook(client, name), do: Map.get(client.hooks || %{}, name)
@@ -2203,14 +2287,16 @@ defmodule Toolnexus.Client do
     {messages, tools, tmodel} = before_llm(client, st.messages, st.tools, turn)
     st = %{st | messages: messages, tools: tools, model: tmodel}
 
-    data =
+    {data, st} =
       try do
-        llm_call_json(
-          %{client | model: tmodel},
-          openai_url(client),
-          headers_for(client, key),
-          openai_body(%{client | model: tmodel}, messages, tools, false)
-        )
+        with_overflow(client, st, turn, fn messages ->
+          llm_call_json(
+            %{client | model: tmodel},
+            openai_url(client),
+            headers_for(client, key),
+            openai_body(%{client | model: tmodel}, messages, tools, false)
+          )
+        end)
       rescue
         e ->
           emit_run_error(rc(client, st), run_start, st.tool_calls, st.turns, st.usage, e)
@@ -2320,14 +2406,16 @@ defmodule Toolnexus.Client do
     {messages, tools, tmodel} = before_llm(client, st.messages, st.tools, turn)
     st = %{st | messages: messages, tools: tools, model: tmodel}
 
-    data =
+    {data, st} =
       try do
-        llm_call_json(
-          %{client | model: tmodel},
-          anthropic_url(client),
-          headers_for(client, key),
-          anthropic_body(%{client | model: tmodel}, sys, messages, tools, false)
-        )
+        with_overflow(client, st, turn, fn messages ->
+          llm_call_json(
+            %{client | model: tmodel},
+            anthropic_url(client),
+            headers_for(client, key),
+            anthropic_body(%{client | model: tmodel}, sys, messages, tools, false)
+          )
+        end)
       rescue
         e ->
           emit_run_error(rc(client, st), run_start, st.tool_calls, st.turns, st.usage, e)
@@ -2470,17 +2558,19 @@ defmodule Toolnexus.Client do
     t0 = now_ms()
     %{prompt_tokens: before_p, completion_tokens: before_c} = st.usage
 
-    {content, calls, usage} =
+    {{content, calls, usage}, st} =
       try do
-        sse =
-          llm_call_sse(
-            client,
-            openai_url(client),
-            headers_for(client, key),
-            openai_body(%{client | model: tmodel}, messages, tools, true)
-          )
+        with_overflow(client, st, turn, fn messages ->
+          sse =
+            llm_call_sse(
+              client,
+              openai_url(client),
+              headers_for(client, key),
+              openai_body(%{client | model: tmodel}, messages, tools, true)
+            )
 
-        parse_openai_sse(sse, st.usage, emit)
+          parse_openai_sse(sse, st.usage, emit)
+        end)
       rescue
         e ->
           emit(client, %{
@@ -2743,17 +2833,19 @@ defmodule Toolnexus.Client do
     t0 = now_ms()
     %{prompt_tokens: before_p, completion_tokens: before_c} = st.usage
 
-    {blocks, stop_reason, usage} =
+    {{blocks, stop_reason, usage}, st} =
       try do
-        sse =
-          llm_call_sse(
-            client,
-            anthropic_url(client),
-            headers_for(client, key),
-            anthropic_body(%{client | model: tmodel}, sys, messages, tools, true)
-          )
+        with_overflow(client, st, turn, fn messages ->
+          sse =
+            llm_call_sse(
+              client,
+              anthropic_url(client),
+              headers_for(client, key),
+              anthropic_body(%{client | model: tmodel}, sys, messages, tools, true)
+            )
 
-        parse_anthropic_sse(sse, st.usage, emit)
+          parse_anthropic_sse(sse, st.usage, emit)
+        end)
       rescue
         e ->
           emit(client, %{
