@@ -42,12 +42,17 @@ public sealed class MockLlmServer : IDisposable
         BaseUrl = line[prefix.Length..].Trim().TrimEnd('/');
     }
 
-    private static string? FindScript()
+    private static string? FindScript() => KitFile("mock_llm.py");
+
+    /// <summary>A file of the mock kit: <c>TN_MOCK_KIT_DIR</c> if set, else <c>tools/mock-llm/</c> found upward.</summary>
+    public static string? KitFile(string name)
     {
+        var kit = Environment.GetEnvironmentVariable("TN_MOCK_KIT_DIR");
+        if (!string.IsNullOrEmpty(kit)) return File.Exists(Path.Combine(kit, name)) ? Path.Combine(kit, name) : null;
         var dir = new DirectoryInfo(AppContext.BaseDirectory);
         while (dir != null)
         {
-            var p = Path.Combine(dir.FullName, "tools", "mock-llm", "mock_llm.py");
+            var p = Path.Combine(dir.FullName, "tools", "mock-llm", name);
             if (File.Exists(p)) return p;
             dir = dir.Parent;
         }
@@ -275,5 +280,314 @@ public class MockLlmIntegrationTests : IClassFixture<MockLlmServer>
             Assert.Contains("mock: job asked to fail", e.Message);
         }
         finally { File.Delete(tmp); }
+    }
+}
+
+/// <summary>
+/// Round 2 of the mock kit: a mixed toolkit (MCP stdio + http + legacy, HTTP tool, A2A agent,
+/// native tool, skills), a client run over it, the in-process one-shot CLI client
+/// (<c>fake_cli.py</c>) and the ACP client (<c>fake_acp_agent.py</c>: approve, reject, cancel).
+/// </summary>
+public class MockKitIntegrationTests : IClassFixture<MockLlmServer>
+{
+    private readonly MockLlmServer _mock;
+    public MockKitIntegrationTests(MockLlmServer mock) { _mock = mock; }
+
+    private bool Skip()
+    {
+        if (_mock.BaseUrl != null && MockLlmServer.KitFile("mock_mcp.py") != null) return false;
+        Console.WriteLine("SKIP mock-kit suite: " + (_mock.SkipReason ?? "tools/mock-llm kit not found"));
+        return true;
+    }
+
+    private string Base => _mock.BaseUrl!;
+    private string Origin => new Uri(Base).GetLeftPart(UriPartial.Authority);
+    private static string Kit(string name) => MockLlmServer.KitFile(name)!;
+
+    private static readonly List<(double, double)> NoCalls = new();
+
+    private static NativeTool Add(List<(double, double)> calls) => NativeTool.Of("add", "Add two numbers.",
+        new Dictionary<string, object?>
+        {
+            ["type"] = "object",
+            ["properties"] = new Dictionary<string, object?>
+            {
+                ["a"] = new Dictionary<string, object?> { ["type"] = "number" },
+                ["b"] = new Dictionary<string, object?> { ["type"] = "number" },
+            },
+            ["required"] = new List<object?> { "a", "b" },
+        },
+        args =>
+        {
+            var inv = System.Globalization.CultureInfo.InvariantCulture;
+            double a = Convert.ToDouble(args["a"]?.ToString(), inv), b = Convert.ToDouble(args["b"]?.ToString(), inv);
+            lock (calls) calls.Add((a, b));
+            return ((long)(a + b)).ToString(inv);
+        });
+
+    /// <summary>Starts <c>mock_mcp.py --http</c> (optionally legacy) and returns it with its URL.</summary>
+    private static (Process, string) StartHttpMcp(bool legacy = false)
+    {
+        var psi = new ProcessStartInfo("python3")
+        {
+            ArgumentList = { Kit("mock_mcp.py"), "--http", "--port", "0" },
+            RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false,
+        };
+        if (legacy) psi.ArgumentList.Add("--legacy");
+        var p = Process.Start(psi)!;
+        var line = p.StandardOutput.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(15)).GetAwaiter().GetResult();
+        const string prefix = "toolnexus mock mcp at ";
+        if (line is null || !line.StartsWith(prefix)) { p.Kill(true); throw new InvalidOperationException("mock mcp: " + line); }
+        return (p, line[prefix.Length..].Trim());
+    }
+
+    private static void Stop(Process p) { try { if (!p.HasExited) { p.Kill(true); p.WaitForExit(5000); } } catch { } p.Dispose(); }
+
+    private async Task<Toolkit> MixedToolkit(string httpMcpUrl, List<(double, double)> calls)
+    {
+        var http = HttpTool.Of(new HttpTool.Options
+        {
+            Name = "http_add", Description = "Add two numbers over HTTP.", Method = "POST", Url = Base + "/tools/add",
+            InputSchema = new Dictionary<string, object?>
+            {
+                ["type"] = "object",
+                ["properties"] = new Dictionary<string, object?>
+                {
+                    ["a"] = new Dictionary<string, object?> { ["type"] = "integer" },
+                    ["b"] = new Dictionary<string, object?> { ["type"] = "integer" },
+                },
+                ["required"] = new List<object?> { "a", "b" },
+            },
+        });
+        return await Toolkit.CreateAsync(new Toolkit.Options
+        {
+            Builtins = false,
+            SkillsDir = new List<string> { TestFixtures.SkillsDir() },
+            ExtraTools = new List<ITool> { Add(calls), http },
+            McpConfig = new Dictionary<string, object?>
+            {
+                ["mcpServers"] = new Dictionary<string, object?>
+                {
+                    ["mstdio"] = new Dictionary<string, object?>
+                    { ["type"] = "local", ["command"] = new List<object?> { "python3", Kit("mock_mcp.py") } },
+                    ["mlegacy"] = new Dictionary<string, object?>
+                    { ["type"] = "local", ["command"] = new List<object?> { "python3", Kit("mock_mcp.py"), "--legacy" } },
+                    ["mhttp"] = new Dictionary<string, object?> { ["type"] = "remote", ["url"] = httpMcpUrl },
+                },
+                ["agents"] = new Dictionary<string, object?>
+                {
+                    ["mock"] = new Dictionary<string, object?>
+                    { ["card"] = Origin + "/.well-known/agent-card.json", ["pollEvery"] = 20 },
+                },
+            },
+        });
+    }
+
+    [Fact]
+    public async Task MixedToolkit_EverySourceExecutes()
+    {
+        if (Skip()) return;
+        var (mcp, url) = StartHttpMcp();
+        try
+        {
+            var calls = new List<(double, double)>();
+            await using var tk = await MixedToolkit(url, calls);
+            var names = tk.Tools().Select(t => t.Name).ToHashSet();
+            foreach (var n in new[] { "mstdio_add", "mstdio_echo", "mlegacy_add", "mhttp_add", "mhttp_echo",
+                         "mockagent_summarize", "http_add", "add", "skill" })
+                Assert.Contains(n, names);
+
+            var two3 = new Dictionary<string, object?> { ["a"] = 2, ["b"] = 3 };
+            foreach (var n in new[] { "mstdio_add", "mlegacy_add", "mhttp_add" })
+            {
+                var r = await tk.ExecuteAsync(n, two3);
+                Assert.False(r.IsError, n + ": " + r.Output);
+                Assert.Equal("5", r.Output.Trim());
+            }
+            var echo = await tk.ExecuteAsync("mhttp_echo", new Dictionary<string, object?> { ["text"] = "hi" });
+            // SPEC §0.4: structuredContent wins, as JSON.stringify.
+            Assert.Equal("""{"text":"hi"}""", echo.Output.Trim());
+
+            var a2a = await tk.ExecuteAsync("mockagent_summarize", new Dictionary<string, object?> { ["task"] = "x" });
+            Assert.Equal("A2A mock done: x", a2a.Output.Trim());
+
+            var h = await tk.ExecuteAsync("http_add", two3);
+            Assert.False(h.IsError, h.Output);
+            Assert.Equal(5L, Convert.ToInt64(Json.ToMap(h.Output)["sum"]));
+
+            Assert.Equal("5", (await tk.ExecuteAsync("add", two3)).Output);
+            Assert.Equal(new[] { (2.0, 3.0) }, calls);
+
+            var sk = await tk.ExecuteAsync("skill", new Dictionary<string, object?> { ["name"] = "hello-world" });
+            Assert.False(sk.IsError, sk.Output);
+            Assert.Contains("# Hello World Skill", sk.Output);
+        }
+        finally { Stop(mcp); }
+    }
+
+    [Fact]
+    public async Task ClientRun_OverTheMixedToolkit()
+    {
+        if (Skip()) return;
+        var (mcp, url) = StartHttpMcp();
+        try
+        {
+            await using var tk = await MixedToolkit(url, new List<(double, double)>());
+            var client = LlmClient.Create(new LlmClient.Options { BaseUrl = Base, Style = "openai", Model = "mock", ApiKey = "mock-key" });
+            var r = await client.RunAsync("use a tool", tk);
+            var call = Assert.Single(r.ToolCalls);
+            Assert.Equal(tk.ToOpenAI().Select(t => (string)((Dictionary<string, object?>)t["function"]!)["name"]!).First(), call.Name);
+            Assert.False(string.IsNullOrWhiteSpace(call.Output));
+            Assert.Equal("Tool result: " + call.Output.Trim(), r.Text);
+        }
+        finally { Stop(mcp); }
+    }
+
+    [Fact]
+    public async Task InProcess_OneShotCli_DrivesFakeCli()
+    {
+        if (Skip()) return;
+        var calls = new List<(double, double)>();
+        await using var tk = await Toolkit.CreateAsync(new Toolkit.Options { Builtins = false, ExtraTools = new List<ITool> { Add(calls) } });
+        var client = InProcess.CreateClient(new InProcess.Options
+        {
+            Model = "fake-cli",
+            Generate = req =>
+            {
+                var psi = new ProcessStartInfo("python3")
+                {
+                    ArgumentList = { Kit("fake_cli.py") },
+                    RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true,
+                };
+                using var p = Process.Start(psi)!;
+                var stdout = p.StandardOutput.ReadToEndAsync();
+                p.StandardInput.Write(Render(req));
+                p.StandardInput.Close();
+                Assert.True(p.WaitForExit(30_000));
+                return Parse(stdout.Result);
+            },
+        });
+        var r = await client.RunAsync("Use the add tool to add 19 and 23, then tell me the sum.", tk);
+        Assert.Equal("The sum is 42.", r.Text);
+        Assert.Equal(new[] { (19.0, 23.0) }, calls);
+    }
+
+    // The one-shot CLI contract from site/recipes/in-process-client/csharp/one-shot-cli/OneShot.cs.
+    private static string Render(InProcess.Request req)
+    {
+        var lines = new List<string> { "You are the model inside a tool-calling loop. Tools you may call:" };
+        foreach (var t in req.Tools.Select(o => System.Text.Json.JsonSerializer.SerializeToNode(o)!["function"]!))
+            lines.Add($"- {t["name"]}: {t["description"]} args={t["parameters"]?.ToJsonString()}");
+        lines.AddRange(new[] { "", "Conversation:" });
+        var called = new Dictionary<string, string>();
+        foreach (var m in req.Messages.Select(o => System.Text.Json.JsonSerializer.SerializeToNode(o)!))
+        {
+            var role = (string)m["role"]!;
+            if (role == "tool")
+            {
+                var id = (string)m["tool_call_id"]!;
+                lines.Add($"[tool {called.GetValueOrDefault(id, id)}] {m["content"]}");
+            }
+            else if (m["tool_calls"] is System.Text.Json.Nodes.JsonArray tcs)
+            {
+                foreach (var c in tcs) called[(string)c!["id"]!] = (string)c["function"]!["name"]!;
+                lines.Add("[assistant called] " + tcs.ToJsonString());
+            }
+            else lines.Add($"[{role}] {m["content"]}");
+        }
+        lines.AddRange(new[] { "", """Reply with ONLY one JSON object: {"tool_calls":[{"name":"...","arguments":{...}}]} to call tools,""",
+            """or {"content":"..."} with the final answer. No prose, no code fences.""" });
+        return string.Join("\n", lines);
+    }
+
+    private static InProcess.Response Parse(string output)
+    {
+        int start = output.IndexOf('{'), end = output.LastIndexOf('}');
+        var r = System.Text.Json.Nodes.JsonNode.Parse(output[start..(end + 1)])!;
+        if (r["tool_calls"] is System.Text.Json.Nodes.JsonArray { Count: > 0 } calls)
+            return new InProcess.Response
+            {
+                ToolCalls = calls.Select(c => new InProcess.ToolCall
+                { Name = (string)c!["name"]!, Arguments = c["arguments"]?.ToJsonString() ?? "{}" }).ToList(),
+            };
+        return InProcess.Response.FromContent((string)r["content"]!);
+    }
+
+    private async Task<(string Text, List<(double, double)> Calls, List<string> Names)> AcpRun(bool approve)
+    {
+        var calls = new List<(double, double)>();
+        await using var tk = await Toolkit.CreateAsync(new Toolkit.Options { Builtins = false, ExtraTools = new List<ITool> { Add(calls) } });
+        await using var server = tk.AsMcpServer();
+        using var agent = await Toolnexus.Acp.AcpClient.StartAsync(new Toolnexus.Acp.AcpStartOptions
+        {
+            Command = "python3", Arguments = new[] { Kit("fake_acp_agent.py") },
+            McpServers = new List<object?>
+            {
+                new Dictionary<string, object?>
+                {
+                    ["type"] = "http", ["name"] = "toolnexus", ["url"] = server.Url,
+                    ["headers"] = new[] { new Dictionary<string, object?> { ["name"] = "Authorization", ["value"] = "Bearer " + server.Token } },
+                },
+            },
+            OnPermission = approve ? null : _ => null,
+            PromptTimeout = TimeSpan.FromSeconds(30),
+        });
+        var client = InProcess.CreateClient(new InProcess.Options { Model = "fake-acp", GenerateStream = agent.GenerateStreamAsync });
+        await using var empty = await Toolkit.CreateAsync(new Toolkit.Options { Builtins = false });
+        var sb = new StringBuilder();
+        var names = new List<string>();
+        var r = await client.StreamAsync("Use the add tool to add 17 and 25.", empty, ev =>
+        {
+            if (ev.Type == LlmClient.StreamKind.Text) sb.Append(ev.Delta);
+            else if (ev.Type == LlmClient.StreamKind.ToolCall && ev.Via == "acp") lock (names) names.Add(ev.Name ?? "");
+        });
+        Assert.Equal(sb.ToString(), r.Text);
+        return (r.Text, calls, names);
+    }
+
+    [Fact]
+    public async Task Acp_PermissionApproved_RunsTheServedTool()
+    {
+        if (Skip()) return;
+        var (text, calls, names) = await AcpRun(approve: true);
+        Assert.Equal("The sum is 42.", text);
+        Assert.Equal(new[] { (17.0, 25.0) }, calls);
+        Assert.Contains("add", names);
+    }
+
+    [Fact]
+    public async Task Acp_PermissionRejected()
+    {
+        if (Skip()) return;
+        var (text, calls, _) = await AcpRun(approve: false);
+        Assert.Equal("Permission denied.", text);
+        Assert.Empty(calls);
+    }
+
+    [Fact]
+    public async Task Acp_CancelEndsTheTurnAndSessionStaysWarm()
+    {
+        if (Skip()) return;
+        var log = Path.Combine(Path.GetTempPath(), "tn-fake-acp-" + Guid.NewGuid().ToString("N") + ".log");
+        try
+        {
+            using var agent = await Toolnexus.Acp.AcpClient.StartAsync(new Toolnexus.Acp.AcpStartOptions
+            {
+                Command = "python3", Arguments = new[] { Kit("fake_acp_agent.py") },
+                Env = new Dictionary<string, string> { ["FAKE_ACP_LOG"] = log },
+                PromptTimeout = TimeSpan.FromSeconds(30), CallTimeout = TimeSpan.FromSeconds(10),
+            });
+            var seen = new StringBuilder();
+            using var cts = new CancellationTokenSource();
+            var turn = agent.PromptStreamAsync("please [wait]", ev =>
+            {
+                if (ev.Type == LlmClient.StreamKind.Text) { lock (seen) seen.Append(ev.Delta); cts.Cancel(); }
+            }, cts.Token);
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => turn);
+            Assert.Equal("Working...", seen.ToString());
+            Assert.Contains(File.ReadAllLines(log), l => l.Contains("\"cancel\""));
+            Assert.Equal("Mock ACP reply to: hi", await agent.PromptAsync("hi"));
+        }
+        finally { File.Delete(log); }
     }
 }
