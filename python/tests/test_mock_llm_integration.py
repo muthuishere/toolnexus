@@ -160,3 +160,153 @@ async def test_media_every_verb(base, tmp_path):
     assert tk.files[0].url.endswith("/files/talking.mp4") and tk.files[0].mime_type == "video/mp4"
     with pytest.raises(Exception, match="mock: job asked to fail"):
         await m.image("[fail] please")
+
+
+# ---------------------------------------------------------------- every tool source, CLI and ACP
+
+KIT = Path(os.environ.get("TN_MOCK_KIT_DIR") or ROOT / "tools" / "mock-llm")
+
+
+@pytest.fixture(scope="module")
+def mcp_http():
+    p = subprocess.Popen([sys.executable, str(KIT / "mock_mcp.py"), "--http", "--port", "0"],
+                         stdout=subprocess.PIPE, text=True)
+    try:
+        yield p.stdout.readline().strip().rsplit(" ", 1)[-1]
+    finally:
+        p.terminate()
+        p.wait(5)
+
+
+async def _mixed_toolkit(base, mcp_url):
+    from toolnexus import agent, http_tool
+
+    def add(a: int, b: int) -> str:
+        return str(a + b)
+
+    origin = base[: -len("/v1")]
+    return await create_toolkit(
+        builtins=False,
+        mcp_config={"mcpServers": {
+            "stdio": {"type": "local", "command": [sys.executable, str(KIT / "mock_mcp.py")]},
+            "legacy": {"type": "local", "command": [sys.executable, str(KIT / "mock_mcp.py"), "--legacy"]},
+            "web": {"type": "remote", "url": mcp_url},
+        }},
+        skills_dir=str(ROOT / "examples" / "skills"),
+        agents=[agent(origin + "/.well-known/agent-card.json", poll_every=20)],
+        extra_tools=[
+            define_tool(add, name="native_add", description="Add two integers."),
+            http_tool(name="http_add", description="Add via HTTP.", method="POST", url=base + "/tools/add",
+                      input_schema={"type": "object", "properties": {"a": {"type": "integer"}, "b": {"type": "integer"}},
+                                    "required": ["a", "b"]}),
+        ],
+    )
+
+
+async def test_mixed_toolkit_every_source(base, mcp_http):
+    tk = await _mixed_toolkit(base, mcp_http)
+    try:
+        names = {t.name for t in tk.tools()}
+        for n in ("stdio_add", "legacy_add", "web_echo", "mockagent_summarize", "native_add", "http_add", "skill"):
+            assert n in names, (n, sorted(names))
+        by = {t.name: t for t in tk.tools()}
+        assert (await by["stdio_add"].execute({"a": 2, "b": 3})).output == "5"
+        assert (await by["legacy_add"].execute({"a": 2, "b": 3})).output == "5"
+        assert json.loads((await by["web_echo"].execute({"text": "hi"})).output) == {"text": "hi"}
+        assert (await by["mockagent_summarize"].execute({"task": "x"})).output == "A2A mock done: x"
+        assert json.loads((await by["http_add"].execute({"a": 2, "b": 3})).output) == {"sum": 5}
+        assert (await by["native_add"].execute({"a": 2, "b": 3})).output == "5"
+        sk = await by["skill"].execute({"name": "hello-world"})
+        assert not sk.is_error and "hello-world" in sk.output
+    finally:
+        await tk.close()
+
+
+async def test_client_run_over_mixed_toolkit(base, mcp_http):
+    tk = await _mixed_toolkit(base, mcp_http)
+    try:
+        r = await create_client(base_url=base, style="openai", model="mock-model", api_key="mock-key").run("go", tk)
+    finally:
+        await tk.close()
+    assert len(r.tool_calls) == 1
+    assert r.text.startswith("Tool result: ") and r.text != "Tool result: "
+
+
+async def test_in_process_cli_client():
+    from toolnexus import create_in_process_client
+
+    calls = []
+
+    def add(a: int, b: int) -> str:
+        calls.append((a, b))
+        return str(a + b)
+
+    def generate(req):
+        lines, called = [], {}
+        for m in req["messages"]:
+            for c in m.get("tool_calls") or []:
+                called[c["id"]] = c["function"]["name"]
+            if m["role"] == "tool":
+                lines.append(f"[tool {called.get(m.get('tool_call_id'))}] {m['content']}")
+            elif isinstance(m.get("content"), str):
+                lines.append(f"[{m['role']}] {m['content']}")
+        out = subprocess.run([sys.executable, str(KIT / "fake_cli.py")], input="\n".join(lines),
+                             capture_output=True, text=True, timeout=20).stdout
+        return json.loads(out)
+
+    tk = await create_toolkit(builtins=False, extra_tools=[define_tool(add, name="add")])
+    try:
+        r = await create_in_process_client(model="fake-cli", generate=generate).run("add 19 and 23", tk)
+    finally:
+        await tk.close()
+    assert calls == [(19, 23)]
+    assert r.text == "The sum is 42."
+
+
+async def test_acp_agent_tool_call_and_stream():
+    from toolnexus import ACPOptions, create_in_process_client, load_acp
+
+    calls = []
+
+    def add(a: int, b: int) -> str:
+        calls.append((a, b))
+        return str(a + b)
+
+    tk = await create_toolkit(builtins=False, extra_tools=[define_tool(add, name="add")])
+    server = tk.as_mcp_server()
+    acp = load_acp(ACPOptions(command=sys.executable, args=[str(KIT / "fake_acp_agent.py")],
+                              mcp_servers=[{"type": "http", "name": "toolnexus", "url": server.url,
+                                            "headers": [{"name": "Authorization", "value": "Bearer " + server.token}]}]))
+    try:
+        client = create_in_process_client(model="fake-acp", generate_stream=acp.generate_stream)
+        empty = await create_toolkit(builtins=False)
+        deltas, final = [], None
+        async for ev in client.stream("add 17 and 25", empty):
+            if ev["type"] == "text":
+                deltas.append(ev["delta"])
+            elif ev["type"] == "done":
+                final = ev["result"]
+        await empty.close()
+    finally:
+        acp.close()
+        server.close()
+        await tk.close()
+    assert calls == [(17, 25)]
+    assert "".join(deltas) == "The sum is 42." and final.text == "The sum is 42."
+
+
+async def test_acp_cancel():
+    import asyncio
+    import threading
+
+    from toolnexus import ACPCancelledError, ACPOptions, load_acp
+
+    acp = load_acp(ACPOptions(command=sys.executable, args=[str(KIT / "fake_acp_agent.py")]))
+    try:
+        assert acp.generate({"messages": [{"role": "user", "content": "hello"}]})["content"].endswith("hello")
+        cancel = threading.Event()
+        threading.Timer(0.3, cancel.set).start()
+        with pytest.raises(ACPCancelledError):
+            await asyncio.to_thread(acp.generate, {"messages": [{"role": "user", "content": "[wait]"}]}, cancel)
+    finally:
+        acp.close()
