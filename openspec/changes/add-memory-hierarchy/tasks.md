@@ -29,8 +29,8 @@ byte-identity test with all options absent.
 - [x] `python/`
 - [x] `golang/`
 - [x] `java/`
-- [ ] `csharp/`
-- [ ] `elixir/` (keep coverage ≥ 95%)
+- [x] `csharp/`
+- [x] `elixir/` (keep coverage ≥ 95%)
 - [x] `clojure/` (`.cljc`, JVM + cljgo)
 - [x] `rust/`
 
