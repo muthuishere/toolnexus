@@ -150,6 +150,13 @@
         "tier": "full"
       },
       {
+        "name": "fallbackModels",
+        "aliases": [
+          "fallbackmodels"
+        ],
+        "tier": "full"
+      },
+      {
         "name": "apiKeyEnv",
         "aliases": [
           "apikeyenv"
@@ -174,6 +181,20 @@
         "name": "maxToolConcurrency",
         "aliases": [
           "maxtoolconcurrency"
+        ],
+        "tier": "full"
+      },
+      {
+        "name": "stopRecovery",
+        "aliases": [
+          "stoprecovery"
+        ],
+        "tier": "full"
+      },
+      {
+        "name": "compactOnOverflow",
+        "aliases": [
+          "compactonoverflow"
         ],
         "tier": "full"
       }

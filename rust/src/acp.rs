@@ -113,12 +113,21 @@ pub type UpdateHandler = Arc<dyn Fn(&Value) + Send + Sync>;
 /// One event of a streamed turn ([`AcpClient::generate_stream`]). Tool events
 /// carry `via: "acp"`: the AGENT ran these tools, a host loop must not.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum AcpStreamEvent {
     /// A reply text delta (`agent_message_chunk` only).
     Text { delta: String },
     /// An agent thought delta (`agent_thought_chunk`). Never part of the reply text.
     Thought { delta: String, via: &'static str },
     ToolCall {
+        id: String,
+        name: String,
+        args: Value,
+        via: &'static str,
+    },
+    /// Late arguments from a `tool_call_update` carrying a non-empty `rawInput`
+    /// object (issue #188); `name` is the latest known title.
+    ToolCallArgs {
         id: String,
         name: String,
         args: Value,
@@ -678,15 +687,29 @@ impl AcpClient {
                     });
                 }
                 "tool_call_update" => {
+                    // A non-empty title renames the call for every later event
+                    // of this id; a non-empty rawInput object carries its late
+                    // arguments (SPEC: tool_call_args, issue #188).
+                    if !title.is_empty() {
+                        names.insert(id.clone(), title);
+                    }
+                    let name = names.get(&id).cloned().unwrap_or_default();
+                    if let Some(raw) = u
+                        .update
+                        .get("rawInput")
+                        .filter(|v| v.as_object().is_some_and(|o| !o.is_empty()))
+                    {
+                        emit(AcpStreamEvent::ToolCallArgs {
+                            id: id.clone(),
+                            name: name.clone(),
+                            args: raw.clone(),
+                            via: "acp",
+                        });
+                    }
                     let status = field("status");
                     if status != "completed" && status != "failed" {
                         continue;
                     }
-                    let name = if title.is_empty() {
-                        names.get(&id).cloned().unwrap_or_default()
-                    } else {
-                        title
-                    };
                     emit(AcpStreamEvent::ToolResult {
                         id,
                         name,

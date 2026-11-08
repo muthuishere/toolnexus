@@ -88,6 +88,13 @@ func fakeSeamACPAgent() {
 					}
 					update(text("agent_message_chunk", chunk))
 				}
+			case os.Getenv("TN_FAKE_TOOLUPDATE") == "1":
+				var cs acpCases
+				raw, _ := os.ReadFile("../conformance/acp-client/cases.json")
+				_ = json.Unmarshal(raw, &cs)
+				for _, u := range cs.Stream.AcpToolUpdate.Updates {
+					update(u)
+				}
 			case os.Getenv("TN_FAKE_FS_REQUEST") == "1":
 				_ = out.Encode(map[string]any{"jsonrpc": "2.0", "id": 9001, "method": "fs/read_text_file",
 					"params": map[string]any{"sessionId": "s1", "path": "/x"}})
@@ -124,6 +131,12 @@ type acpCases struct {
 			ExpectDoneText string            `json:"expectDoneText"`
 			Thought        string            `json:"thought"`
 		} `json:"acpDrip"`
+		AcpToolUpdate struct {
+			FakeEnv        map[string]string `json:"fakeEnv"`
+			Updates        []map[string]any  `json:"updates"`
+			ExpectEvents   []map[string]any  `json:"expectEvents"`
+			ExpectDoneText string            `json:"expectDoneText"`
+		} `json:"acpToolUpdate"`
 	} `json:"stream"`
 	Passthrough struct {
 		Options struct {
@@ -374,6 +387,50 @@ func TestACPSeamStreamDrip(t *testing.T) {
 	res, err := client.Run(context.Background(), "hi", tk)
 	if err != nil || res.Text != cs.ExpectDoneText {
 		t.Fatalf("run %q %v", res.Text, err)
+	}
+}
+
+// TestACPSeamStreamToolUpdate pins stream.acpToolUpdate (issue #188): a
+// tool_call_update's rawInput surfaces as tool_call_args and its title
+// renames the call for the later tool_result.
+func TestACPSeamStreamToolUpdate(t *testing.T) {
+	cs := loadACPCases(t).Stream.AcpToolUpdate
+	o, _ := fakeACP(t, cs.FakeEnv)
+	acp, err := LoadACP(context.Background(), o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer acp.Close()
+	client := CreateInProcessClient(InProcessOptions{Model: "m", GenerateStream: acp.GenerateStream})
+	ch, err := client.Stream(context.Background(), "hi", bareToolkit(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []map[string]any
+	var done *RunResult
+	for ev := range ch {
+		switch ev.Type {
+		case "error":
+			t.Fatalf("stream error: %v", ev.Err)
+		case "text", "usage":
+		case "done":
+			done = ev.Result
+		default:
+			m := map[string]any{"type": ev.Type, "id": ev.ID, "name": ev.Name, "via": ev.Via}
+			if ev.Type == "tool_call_args" {
+				m["args"] = ev.Args
+			}
+			if ev.Type == "tool_result" {
+				m["output"], m["isError"] = ev.Output, ev.IsError
+			}
+			got = append(got, m)
+		}
+	}
+	if !reflect.DeepEqual(got, cs.ExpectEvents) {
+		t.Fatalf("events\n got %v\nwant %v", got, cs.ExpectEvents)
+	}
+	if done == nil || done.Text != cs.ExpectDoneText {
+		t.Fatalf("done %+v", done)
 	}
 }
 

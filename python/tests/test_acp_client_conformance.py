@@ -144,6 +144,32 @@ async def test_stream_acp_drip(tmp_path):
         acp.close()
 
 
+async def test_stream_acp_tool_update(tmp_path):
+    case = CASES["stream"]["acpToolUpdate"]
+    acp, _ = _load(tmp_path, fake_env=case["fakeEnv"])
+    try:
+        client = create_in_process_client(model="m", generate_stream=acp.generate_stream)
+        tk = await create_toolkit(builtins=False)
+        events, done = [], None
+        async for ev in client.stream("q", toolkit=tk):
+            if ev["type"] == "done":
+                done = ev["result"]
+            elif ev["type"] not in ("text", "usage"):
+                events.append(ev)
+        alias = {"isError": "is_error"}  # python spells the stream field snake_case
+        got = []
+        for ev, want in zip(events, case["expectEvents"]):
+            if ev["type"] == "tool_call":
+                got.append({k: ev.get(k) for k in ("type", "id", "name", "via")})
+            else:
+                got.append({k: ev.get(alias.get(k, k)) for k in want})
+        assert len(events) == len(case["expectEvents"]), events
+        assert got == case["expectEvents"]
+        assert done is not None and done.text == case["expectDoneText"]
+    finally:
+        acp.close()
+
+
 # --------------------------------------------------------------------------- #
 # asMcpServer
 # --------------------------------------------------------------------------- #

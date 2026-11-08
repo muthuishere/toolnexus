@@ -8,6 +8,67 @@ GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
 
 ## Unreleased
 
+**ACP tool rows now show their arguments and full title (#188).** Agents such as the Claude ACP
+adapter send a tool's `rawInput` (file path, command) and its full title only on a later
+`tool_call_update`; toolnexus read `rawInput` only from the first `tool_call`, so a host saw bare
+rows like `Write` or `Terminal`. A streaming ACP generate now emits
+`{type:"tool_call_args", id, name, args, via:"acp"}` when an update brings `rawInput`, and an
+update's title is kept, so the later `tool_result` carries `Write /tmp/a.txt` rather than `Write`.
+Additive: a consumer that ignores unknown event types sees no change. **BREAKING (rust only):**
+`AcpStreamEvent` gains a `ToolCallArgs` variant and is now `#[non_exhaustive]`, so a `match`
+needs a `_` arm once (future variants will not break again); Java
+(`StreamEvent.Kind.TOOL_CALL_ARGS`) and C# (`StreamKind.ToolCallArgs`) gain an enum member. All eight ports; SPEC §8,
+conformance `stream.acpToolUpdate`.
+
+### A streamed turn now says when it is retrying (#189)
+
+When the provider answers `429`, `529` or a `5xx`, `stream()` now emits
+`{type: "retry", attempt, max, delayMs, status?, reason}` **before** it waits, so a host can show
+"Retrying in 4s · attempt 1/2" instead of a frozen spinner. `delayMs` is the exact wait the loop
+is about to sleep — a server's `Retry-After` when it sent one, otherwise the backoff actually
+drawn. `reason` is `"HTTP 429"` or `"network"`; `status` is absent on a network error. No event
+is emitted for a failure that will not be retried, and `run`/`ask` output is unchanged.
+
+The client also obeys the **`x-should-retry: true|false`** response header (the one Anthropic
+and OpenAI send, and their own SDKs obey): it overrides the default retryable classification
+before `onError` runs, in `run`, `ask` and `stream`. `onError` still has the final say and
+`retries` still bounds every retry. Without the header nothing changes.
+
+- Additive in every port: the event type gains a `retry` kind and fields (Rust: `kind == "retry"`
+  with `attempt`, `max`, `delay_ms`, `status: Option<u16>`, `reason` on the `StreamEvent` struct;
+  no exhaustive match breaks). Clojure has no stream entry point, so the event goes to
+  `:on-event` (a run without `:on-event` emits none).
+- In-process clients have no wire and emit no retry event.
+
+Spec: `SPEC.md` § Streaming and § Resilience; `openspec/changes/add-retry-stream-event`.
+### Round-boundary hook: append a message between rounds, or keep a stopped loop going (#192)
+
+A new optional hook, `afterRound({ turn, final, text, messages })`, fires at the end of every loop
+round — after the round's tool results are in the transcript and before the next request. Return
+`{ inject: ["…"] }` and each string is appended as a user message: todo reminders, sub-agent
+notices, budget warnings, without rebuilding the transcript in `beforeLLM`.
+
+It also fires when the model **stops** (no tool call) as long as a turn remains: a non-empty
+injection there continues the loop ("you still have 2 open todos"). `maxTurns` still bounds it.
+Without the hook nothing changes. Run and stream, OpenAI and Anthropic styles, and the §7D agent
+path (hooks are forwarded verbatim). It never fires on a pending halt, an error, `translate`, or an
+ACP model source. Spec: SPEC.md §8 Hooks; change `openspec/changes/add-round-boundary-hook`.
+### Model fallback chain on overload (issue #190)
+
+A provider under load answers `529 Overloaded` or `503`, and until now the client spent its
+`retries` on the one model and then failed the run — even when a sibling model on the same endpoint
+would have answered. The new opt-in client option **`fallbackModels`** (js `fallbackModels`, python
+`fallback_models`, Go `FallbackModels`, java `fallbackModels(...)`, C# `FallbackModels`, elixir
+`:fallback_models`, clojure `:fallback-models`, rust `fallback_models(...)`) is an ordered list of
+models to switch to: once the retry budget on the current model is used up **and the last answer was
+`503` or `529`**, the same request goes to the next model with a fresh budget. `429`, other errors
+and an `onError` `"fail"` never switch models. `stream` emits `{type:"fallback", from, to}` before
+switching, and `RunResult.model`, `afterLLM` and the metric events report the model that actually
+served. Set `TOOLNEXUS_DISABLE_MODEL_FALLBACK=1` to turn it off without a redeploy. Without the
+option nothing changes. Not done: no cooldown/stickiness across calls (each turn starts at its own
+model), and in-process/ACP sources ignore the option. Spec: `SPEC.md §8`,
+`openspec/changes/add-model-fallback-chain` (the model-only slice of `add-llm-upstream-failover`).
+
 **Classifier: an `openai` backend on OpenAI's Decisions API** (issue #157). `createClassifier({backend:
 "openai"})` sends the same noul / choice / score questions to `POST https://api.openai.com/v1/decisions`
 (`gpt-6-luna`) and returns the same `Decision` as every other backend. A front end such as jevx can now
@@ -26,6 +87,66 @@ score). Every port's mock-kit suite also covers it through `tools/mock-llm`'s `/
 Tracked in `openspec/changes/add-classifier-openai-decisions`. Shared fixture
 `examples/judge/backends/openai-decisions.json`. Docs: an "OpenAI (Decisions API)" section on the judge
 backends page and an openai recipe (yes/no, pick-one, score) in the judge cookbook, in all eight languages.
+
+### Stop-reason recovery (`stopRecovery`, opt-in)
+
+A run no longer has to end on a reply that is not an answer. Set **`stopRecovery: true`**
+(`stop_recovery` / `StopRecovery` / `:stop-recovery`) and the loop recovers from the three stop
+shapes Karya (go-agent-cli) hit in real runs (issue #191):
+
+- **Empty answer** (a thinking-only `end_turn`: reasoning, no text) — the empty reply is dropped
+  and the model is nudged once to give its answer. Before, `text` came back `""`.
+- **Truncated** (OpenAI `finish_reason: "length"`, Anthropic `stop_reason: "max_tokens"`) — the
+  partial stays and the model is asked to continue, up to 3 times; `text` is the joined answer.
+  Before, a half answer came back as if it were final.
+- **Malformed tool call** (arguments that are not a JSON object) — no tool runs, the reply is
+  dropped and the model is told once to call again with valid JSON. Before, the tool silently ran
+  with `{}`.
+
+Each recovery appends one byte-exact user message pinned in `SPEC.md` §8, so every port sends the
+same words. Recoveries are ordinary turns: they fire `beforeLLM`/`afterLLM`, count in `turns` and
+usage, and never exceed `maxTurns`. Applies to `run` and `stream`, both styles, resume paths and
+agent runs; not to `translate` or the in-process client. **Off by default** — with the option
+absent a run is byte-identical to before. Not done: no stream event or metric announces a
+recovery (watch for the pinned text in `beforeLLM`), and the budgets and texts are not
+configurable. Fixture: `conformance/stop_recovery/cases.json`; change
+`openspec/changes/add-stop-reason-recovery`.
+
+**Small behaviour change with the option off:** tool arguments that are valid JSON but not an
+object (`[1]`, `"x"`, or an Anthropic `input` that is not an object) now reach the tool as `{}`
+in every port, as malformed text already did. Before, js and python passed the raw value through
+(and the Go Anthropic loop failed the whole response on a non-object `input`).
+### Reactive compaction on context overflow (issue #194)
+
+A long agent run no longer dies the first time the provider says the prompt is too long. Set
+the new client option **`compactOnOverflow`** (a `beforeLLM`-shaped hook — usually a
+`compactor(...)` with a tighter budget than your proactive one) and the loop answers an
+overflow by compacting the transcript and re-sending the same turn. **Without the option a run
+is byte-identical to before**: the overflow still surfaces as the typed `LlmHttpError`.
+
+Why: the proactive compactor works from an estimate (`ceil(chars/4)`); only the provider knows
+whether a prompt fits, and one huge tool result can push a turn over between estimates. Karya
+(go-agent-cli) asked for this, with a breaker.
+
+- **Detection is pinned and exported** as `isContextOverflow(status, body)`: status `400` or
+  `413` **and** one of `context_length_exceeded`, `maximum context length`,
+  `prompt is too long`, `prompt_too_long`, `request_too_large`, `context window` in the
+  lowercased body. Covers OpenAI, Anthropic and OpenAI-compatible gateways; a bare 413 or a
+  429 that mentions context length is not an overflow.
+- **The breaker**: an overflow within fewer than two successful LLM calls of the last reactive
+  compaction is a *rapid refill*; after three compactions in a rapid chain the run fails with the
+  typed **`ContextOverflowError`** (`compactions`, `status`, `body`; message
+  `context overflow: <n> reactive compaction(s) did not make the prompt fit`). Overflows spaced
+  further apart reset the chain. A hook that returns nothing, or a transcript that is not
+  shorter, fails at once (`compactions` 0) instead of looping.
+- The retry does not run `beforeLLM` again and does not consume a turn. Applies to `run` and
+  `stream`, both styles, and the resume paths. SPEC §7F.1; fixture
+  `conformance/reactive_compaction/cases.json`; change `openspec/changes/add-reactive-compaction`.
+- Not done: no per-agent (`AgentDef`) option; a §7D agent run uses its client's option.
+- Not done: the single-call `translate` paths do not react to an overflow (they are not
+  loops). Resume paths are covered because they run through the same loops, but no port has a
+  dedicated resume test. In golang, `ContextOverflowError` unwraps to the last `*ProviderError`;
+  elixir and rust carry it as a separate error type, with no unwrap equivalent.
 
 ### Memory hierarchy and dreaming
 

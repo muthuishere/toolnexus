@@ -16,7 +16,7 @@ import java.util.Map;
  * The fake ACP agent {@code AcpSeamConformanceTest} spawns (SPEC §8C,
  * {@code conformance/acp-client/cases.json}). Records each received request as
  * {@code <method> <params-json>} lines to {@code TN_FAKE_REC} and honours TN_FAKE_DRIP,
- * TN_FAKE_NO_CONFIG_OPTION, TN_FAKE_EXIT_ON_PROMPT and TN_FAKE_FS_REQUEST.
+ * TN_FAKE_TOOLUPDATE, TN_FAKE_NO_CONFIG_OPTION, TN_FAKE_EXIT_ON_PROMPT and TN_FAKE_FS_REQUEST.
  */
 public final class AcpSeamFake {
     private AcpSeamFake() {}
@@ -90,6 +90,25 @@ public final class AcpSeamFake {
                             if (i > 0) Thread.sleep(200);
                             chunk("agent_message_chunk", chunks[i]);
                         }
+                        reply(id, obj("stopReason", "end_turn"));
+                        break;
+                    }
+                    if (on("TN_FAKE_TOOLUPDATE")) {
+                        // stream.acpToolUpdate (issue #188): rawInput + title arrive on tool_call_update.
+                        for (Map<String, Object> u : List.of(
+                                obj("sessionUpdate", "tool_call", "toolCallId", "t1", "title", "Write",
+                                        "kind", "edit", "status", "pending"),
+                                obj("sessionUpdate", "tool_call_update", "toolCallId", "t1", "status", "in_progress",
+                                        "title", "Write /tmp/a.txt",
+                                        "rawInput", obj("file_path", "/tmp/a.txt", "content", "hi")),
+                                obj("sessionUpdate", "tool_call_update", "toolCallId", "t1", "status", "in_progress"),
+                                obj("sessionUpdate", "tool_call_update", "toolCallId", "t1", "status", "completed",
+                                        "content", List.of(obj("type", "content",
+                                                "content", obj("type", "text", "text", "wrote")))))) {
+                            send(obj("jsonrpc", "2.0", "method", "session/update",
+                                    "params", obj("sessionId", "s1", "update", u)));
+                        }
+                        chunk("agent_message_chunk", "done");
                         reply(id, obj("stopReason", "end_turn"));
                         break;
                     }

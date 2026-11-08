@@ -3,6 +3,7 @@
 // Built-ins only. Records initialize / session/new / set_config_option / set_model params as
 // JSON lines to TN_FAKE_REC (when set) and honours the fakeEnv flags:
 //   TN_FAKE_DRIP             thought, then drip-1..3 message chunks 200ms apart
+//   TN_FAKE_TOOLUPDATE       send stream.acpToolUpdate.updates from cases.json, then end_turn
 //   TN_FAKE_NO_CONFIG_OPTION reject session/set_config_option (⇒ client falls back to set_model)
 //   TN_FAKE_EXIT_ON_PROMPT   exit without replying to session/prompt
 //   TN_FAKE_FS_REQUEST       send fs/read_text_file first; reply "ok" only after its error lands
@@ -63,6 +64,11 @@ readline.createInterface({ input: process.stdin }).on("line", async (line) => {
           if (i > 0) await sleep(200)
           chunk("agent_message_chunk", parts[i])
         }
+        return send({ id, result: { stopReason: "end_turn" } })
+      }
+      if (env.TN_FAKE_TOOLUPDATE) {
+        const cases = JSON.parse(fs.readFileSync(new URL("../../../conformance/acp-client/cases.json", import.meta.url), "utf8"))
+        for (const update of cases.stream.acpToolUpdate.updates) send({ method: "session/update", params: { sessionId: "s1", update } })
         return send({ id, result: { stopReason: "end_turn" } })
       }
       chunk("agent_message_chunk", "hello")

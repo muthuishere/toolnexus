@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -52,6 +53,21 @@ type ClientOptions struct {
 	SystemPrompt string
 	// MaxTurns caps the tool-calling loop; 0 ⇒ 10.
 	MaxTurns int
+	// StopRecovery (SPEC §8 "Stop-reason recovery", default false) answers a malformed tool
+	// call with a corrective message (once), a truncated reply (length/max_tokens) with a
+	// continue message (up to 3 times, text joined) and an empty answer (e.g. thinking-only
+	// end_turn) with a nudge (once). Off ⇒ the loop is unchanged.
+	StopRecovery bool
+	// CompactOnOverflow (SPEC §7F.1) is called when the provider rejects a call
+	// as a context overflow (see IsContextOverflow) — typically a compactor with
+	// a tighter budget than the proactive BeforeLLM one. Returning strictly fewer
+	// Messages replaces the working transcript and re-sends the same turn
+	// (BeforeLLM is not re-run, no turn is consumed); returning nothing or not
+	// fewer messages fails the run with *ContextOverflowError, as does a breaker
+	// of 3 compactions that each bought fewer than 2 successful calls. Only
+	// Messages of the returned override is used. Nil ⇒ the overflow surfaces as
+	// the *ProviderError, byte-identical to before.
+	CompactOnOverflow func(ctx context.Context, ev BeforeLLMEvent) (*LLMOverride, error)
 	// MaxToolConcurrency caps how many concurrency-safe tool calls of one model
 	// response run at once (SPEC §8 "Tool scheduling"). 0 ⇒ the env var
 	// TOOLNEXUS_MAX_TOOL_CONCURRENCY when it is a positive integer, else 10.
@@ -63,6 +79,12 @@ type ClientOptions struct {
 	// Retries on transient LLM errors (429/500/502/503/504/529 + network). 0 ⇒ 2.
 	// Widen the status set with RetryableStatuses.
 	Retries int
+	// FallbackModels (§8 Resilience) is an opt-in ordered model fallback chain on
+	// overload. Per model call the chain is [turnModel, ...FallbackModels]; only
+	// when the retry budget is exhausted on a final 503/529 does the call advance
+	// to the next model with a fresh budget. Nil/empty ⇒ byte-identical. The env
+	// TOOLNEXUS_DISABLE_MODEL_FALLBACK=1|true disables it at each call.
+	FallbackModels []string
 	// RetryBaseMs is the base backoff in ms (exponential + jitter). 0 ⇒ 500.
 	RetryBaseMs int
 	// RetryableStatuses are extra HTTP statuses to treat as retryable, ADDED to
@@ -300,6 +322,50 @@ type Hooks struct {
 	// AfterTool runs after a tool executes. Return an override with Result set to
 	// replace (redact / annotate) the output.
 	AfterTool func(ctx context.Context, ev AfterToolEvent) (*ToolOverride, error)
+	// AfterRound runs at each round boundary (SPEC §8, #192): after a round's
+	// tool results are appended (Final=false), or when the model answered with a
+	// turn remaining (Final=true, Text = its answer). Each non-empty Inject string
+	// is appended as a {role:"user", content:s} message; a non-empty Inject on a
+	// final round CONTINUES the loop. It never fires on a §10 pending halt.
+	AfterRound func(ctx context.Context, ev AfterRoundEvent) (*RoundInjection, error)
+}
+
+// AfterRoundEvent is passed to Hooks.AfterRound. Messages is the working
+// transcript (read-only by contract).
+type AfterRoundEvent struct {
+	Turn     int
+	Final    bool
+	Text     string
+	Messages []any
+}
+
+// RoundInjection is returned by Hooks.AfterRound. Each non-empty string in
+// Inject becomes one plain-text user message, in order.
+type RoundInjection struct {
+	Inject []string
+}
+
+// roundEnd fires Hooks.AfterRound (SPEC §8 afterRound, #192) and appends its
+// injections as user messages. added reports whether anything was appended. A
+// final round fires only when a turn remains.
+func (c *Client) roundEnd(ctx context.Context, messages []any, turn int, final bool, text string) (out []any, added bool, err error) {
+	if c.opts.Hooks == nil || c.opts.Hooks.AfterRound == nil {
+		return messages, false, nil
+	}
+	if final && turn+1 >= c.maxTurns() {
+		return messages, false, nil
+	}
+	inj, err := c.opts.Hooks.AfterRound(ctx, AfterRoundEvent{Turn: turn, Final: final, Text: text, Messages: messages})
+	if err != nil || inj == nil {
+		return messages, false, err
+	}
+	for _, m := range inj.Inject {
+		if m != "" {
+			messages = append(messages, map[string]any{"role": "user", "content": m})
+			added = true
+		}
+	}
+	return messages, added, nil
 }
 
 // BeforeLLMEvent is passed to Hooks.BeforeLLM.
@@ -453,7 +519,7 @@ type RunResult struct {
 // surface on a channel — see Stream.
 type StreamEvent struct {
 	// Type discriminates the event: "text" | "thought" | "tool_call" |
-	// "tool_result" | "usage" | "done" | "error". "thought" comes only from an
+	// "tool_result" | "usage" | "retry" | "fallback" | "done" | "error". "thought" comes only from an
 	// in-process stream source (ACP agent_thought_chunk, Via "acp") and is
 	// never part of the answer.
 	Type string
@@ -485,6 +551,19 @@ type StreamEvent struct {
 	Request *Request
 	// Err is the terminal error (Type == "error"); the channel closes right after.
 	Err error
+	// Attempt (1-based failed attempt), Max (the effective retry budget),
+	// DelayMs (the exact wait about to be slept), Status (HTTP status; 0 on a
+	// network error) and Reason ("HTTP <status>" | "network") describe a
+	// retry (Type == "retry"), emitted just before the wait.
+	Attempt int
+	Max     int
+	DelayMs int64
+	Status  int
+	Reason  string
+	// From / To are the model ids of a fallback switch (Type == "fallback",
+	// §8 Resilience FallbackModels): emitted before the call is re-sent to To.
+	From string
+	To   string
 }
 
 // addUsage sums one response's usage object into acc. Numbers arrive from JSON
@@ -987,6 +1066,18 @@ func retryAfterSeconds(v string) (time.Duration, bool) {
 	return time.Duration(secs) * time.Second, true
 }
 
+// shouldRetryHeader parses an x-should-retry value: trimmed "true"/"false"
+// (case-insensitive) overrides the default classification; anything else is ignored.
+func shouldRetryHeader(v string) (bool, bool) {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "true":
+		return true, true
+	case "false":
+		return false, true
+	}
+	return false, false
+}
+
 // backoff computes the exponential-backoff-with-jitter delay for an attempt, or
 // honors a Retry-After header (in whole seconds) when present.
 func (c *Client) backoff(attempt int, retryAfter string) time.Duration {
@@ -1002,7 +1093,73 @@ func (c *Client) backoff(attempt int, retryAfter string) time.Duration {
 // (429/500/502/503/504/529) plus network errors and anything RetryableStatuses added,
 // honoring Retry-After. ctx cancellation/timeout aborts the in-flight request
 // and is NOT retried. The caller owns resp.Body. Mirrors js Client.llmFetch.
-func (c *Client) llmFetch(ctx context.Context, endpoint string, headers map[string]string, raw []byte) (*http.Response, error) {
+//
+// onRetry (streaming only, nil elsewhere) receives a Type "retry" event just
+// before each retry wait, carrying the exact delay about to be slept (SPEC
+// § Resilience, "Retry event"). A non-ok response's x-should-retry header
+// (true/false) overrides the default retryable classification before OnError.
+func (c *Client) llmFetch(ctx context.Context, endpoint string, headers map[string]string, raw []byte, onRetry func(StreamEvent)) (*http.Response, error) {
+	resp, _, err := c.llmFetchBudget(ctx, endpoint, headers, raw, onRetry)
+	return resp, err
+}
+
+// fallbackChain (§8 Resilience FallbackModels) is [turnModel, ...FallbackModels]
+// minus empty and duplicate entries; just [turnModel] when the option is absent
+// or the TOOLNEXUS_DISABLE_MODEL_FALLBACK kill switch is set (read per call).
+func (c *Client) fallbackChain(turnModel string) []string {
+	chain := []string{turnModel}
+	if len(c.opts.FallbackModels) == 0 {
+		return chain
+	}
+	if v := strings.ToLower(os.Getenv("TOOLNEXUS_DISABLE_MODEL_FALLBACK")); v == "1" || v == "true" {
+		return chain
+	}
+	for _, m := range c.opts.FallbackModels {
+		if m == "" || slices.Contains(chain, m) {
+			continue
+		}
+		chain = append(chain, m)
+	}
+	return chain
+}
+
+// llmFetchModels runs llmFetch (retry events via onRetry, live, per model) over the model fallback chain. body is the
+// finalized request body for turnModel; each fallback re-sends a shallow copy with
+// only "model" replaced. It advances only when a model's retry budget ended on a
+// 503/529 (never on onError "fail", 429, other statuses, network errors or
+// aborts). onSwitch (may be nil) runs before each switch. Returns the response,
+// the model that served (or failed last) and any error, like llmFetch.
+func (c *Client) llmFetchModels(ctx context.Context, endpoint string, headers map[string]string, body map[string]any, raw []byte, turnModel string, onRetry func(StreamEvent), onSwitch func(from, to string)) (*http.Response, string, error) {
+	chain := c.fallbackChain(turnModel)
+	for i, m := range chain {
+		if i > 0 {
+			next := make(map[string]any, len(body))
+			for k, v := range body {
+				next[k] = v
+			}
+			next["model"] = m
+			b, err := json.Marshal(next)
+			if err != nil {
+				return nil, m, err
+			}
+			raw = b
+		}
+		resp, exhausted, err := c.llmFetchBudget(ctx, endpoint, headers, raw, onRetry)
+		if err != nil || resp.StatusCode < 300 || i == len(chain)-1 ||
+			!exhausted || (resp.StatusCode != 503 && resp.StatusCode != 529) {
+			return resp, m, err
+		}
+		resp.Body.Close()
+		if onSwitch != nil {
+			onSwitch(m, chain[i+1])
+		}
+	}
+	return nil, turnModel, fmt.Errorf("toolnexus: empty model chain") // unreachable
+}
+
+// llmFetchBudget is llmFetch plus whether a returned non-ok response ended
+// because the retry budget ran out (true) rather than OnError saying fail.
+func (c *Client) llmFetchBudget(ctx context.Context, endpoint string, headers map[string]string, raw []byte, onRetry func(StreamEvent)) (*http.Response, bool, error) {
 	retries := c.retries()
 	// Default classifier = today's behavior, expressed as an OnError. A TierRetry is
 	// always capped by the budget below (attempt == retries stops regardless).
@@ -1019,7 +1176,7 @@ func (c *Client) llmFetch(ctx context.Context, endpoint string, headers map[stri
 	for attempt := 0; attempt <= retries; attempt++ {
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(raw))
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		req.Header.Set("Content-Type", "application/json")
 		for k, v := range headers {
@@ -1032,36 +1189,47 @@ func (c *Client) llmFetch(ctx context.Context, endpoint string, headers map[stri
 		if err != nil {
 			// ctx cancelled/timed out: abort, never retry.
 			if ctx.Err() != nil {
-				return nil, ctx.Err()
+				return nil, false, ctx.Err()
 			}
 			lastErr = err
 			tier := classify(ErrorInfo{Err: err, Attempt: attempt, Retryable: true})
 			if tier == TierFail || attempt == retries {
-				return nil, err
+				return nil, false, err
 			}
-			if werr := sleep(ctx, c.backoff(attempt, "")); werr != nil {
-				return nil, werr
+			d := c.backoff(attempt, "")
+			if onRetry != nil {
+				onRetry(StreamEvent{Type: "retry", Attempt: attempt + 1, Max: retries, DelayMs: d.Milliseconds(), Reason: "network"})
+			}
+			if werr := sleep(ctx, d); werr != nil {
+				return nil, false, werr
 			}
 			continue
 		}
 		if resp.StatusCode < 300 {
-			return resp, nil
+			return resp, false, nil
 		}
 		retryable := isRetryableStatus(resp.StatusCode, c.opts.RetryableStatuses)
+		if v, ok := shouldRetryHeader(resp.Header.Get("X-Should-Retry")); ok {
+			retryable = v
+		}
 		tier := classify(ErrorInfo{Status: resp.StatusCode, Attempt: attempt, Retryable: retryable})
 		if tier == TierFail || attempt == retries {
-			return resp, nil // caller surfaces the non-ok status
+			return resp, tier != TierFail, nil // caller surfaces the non-ok status
 		}
 		ra := resp.Header.Get("Retry-After")
 		resp.Body.Close()
-		if werr := sleep(ctx, c.backoff(attempt, ra)); werr != nil {
-			return nil, werr
+		d := c.backoff(attempt, ra)
+		if onRetry != nil {
+			onRetry(StreamEvent{Type: "retry", Attempt: attempt + 1, Max: retries, DelayMs: d.Milliseconds(), Status: resp.StatusCode, Reason: fmt.Sprintf("HTTP %d", resp.StatusCode)})
+		}
+		if werr := sleep(ctx, d); werr != nil {
+			return nil, false, werr
 		}
 	}
 	if lastErr != nil {
-		return nil, lastErr
+		return nil, false, lastErr
 	}
-	return nil, fmt.Errorf("LLM request failed after %d retries", retries)
+	return nil, false, fmt.Errorf("LLM request failed after %d retries", retries)
 }
 
 // ConversationStore (§8 Gap 4) returns the client's conversation provider — the
@@ -1125,21 +1293,23 @@ func (w *toolsWire) apply(c *Client, body map[string]any) {
 	body["tools"] = w.raw
 }
 
-func (c *Client) postJSON(ctx context.Context, endpoint string, headers map[string]string, body any) ([]byte, error) {
+// postJSONModels is postJSON over the model fallback chain (§8 Resilience
+// FallbackModels); it also returns the model that served (or failed last).
+func (c *Client) postJSONModels(ctx context.Context, endpoint string, headers map[string]string, body map[string]any, turnModel string) ([]byte, string, error) {
 	raw, err := json.Marshal(body)
 	if err != nil {
-		return nil, err
+		return nil, turnModel, err
 	}
-	resp, err := c.llmFetch(ctx, endpoint, headers, raw)
+	resp, model, err := c.llmFetchModels(ctx, endpoint, headers, body, raw, turnModel, nil, nil)
 	if err != nil {
-		return nil, err
+		return nil, model, err
 	}
 	defer resp.Body.Close()
 	out, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, newProviderError(resp.StatusCode, out, resp.Header.Get("Retry-After"))
+		return nil, model, newProviderError(resp.StatusCode, out, resp.Header.Get("Retry-After"))
 	}
-	return out, nil
+	return out, model, nil
 }
 
 // ---- OpenAI-style: POST {baseURL}/chat/completions ----
@@ -1169,6 +1339,7 @@ func (c *Client) runOpenAI(ctx context.Context, prompt any, tk *Toolkit, history
 	turns := 0
 	runStart := time.Now()
 	lastModel := c.opts.Model // the model of the last call made (SPEC §8: reported = transmitted)
+	rec := &stopRecovery{on: c.opts.StopRecovery}
 	// Any error path emits the terminal "run" error event exactly once; success
 	// paths emit via endRun (so err is nil here and this is a no-op).
 	defer func() {
@@ -1181,6 +1352,7 @@ func (c *Client) runOpenAI(ctx context.Context, prompt any, tk *Toolkit, history
 		}
 	}()
 
+	var overflow overflowBreaker // §7F.1 per-run counters
 	for turn := 0; turn < c.maxTurns(); turn++ {
 		turns++
 		turnModel := c.opts.Model
@@ -1201,26 +1373,38 @@ func (c *Client) runOpenAI(ctx context.Context, prompt any, tk *Toolkit, history
 				}
 			}
 		}
-		wire, err := c.emitMessages(messages)
-		if err != nil {
-			return RunResult{}, err
-		}
-		body := map[string]any{
-			"model":    turnModel,
-			"messages": wire,
-		}
-		if len(tools) > 0 {
-			body["tools"] = tools
-			body["tool_choice"] = "auto"
-		}
-		body = c.finalizeBody(body)
-		toolsJSON.apply(c, body)
-		t0 := time.Now()
-		lastModel = turnModel
-		raw, err := c.postJSON(ctx, endpoint, authHeader, body)
-		if err != nil {
+		var raw []byte
+		var t0 time.Time
+		for { // one pass per attempt; only a reactive compaction (§7F.1) loops
+			wire, err := c.emitMessages(messages)
+			if err != nil {
+				return RunResult{}, err
+			}
+			body := map[string]any{
+				"model":    turnModel,
+				"messages": wire,
+			}
+			if len(tools) > 0 {
+				body["tools"] = tools
+				body["tool_choice"] = "auto"
+			}
+			body = c.finalizeBody(body)
+			toolsJSON.apply(c, body)
+			t0 = time.Now()
+			var served string
+			raw, served, err = c.postJSONModels(ctx, endpoint, authHeader, body, turnModel)
+			turnModel = served
+			lastModel = turnModel
+			if err == nil {
+				overflow.ok()
+				break
+			}
 			c.emitLLM(turnModel, "error", t0, 0, 0)
-			return RunResult{}, err
+			compacted, retry, rerr := c.reactOverflow(ctx, &overflow, err, messages, tools, turnModel, turn)
+			if !retry {
+				return RunResult{}, rerr
+			}
+			messages = compacted
 		}
 		var data struct {
 			Choices []struct {
@@ -1236,6 +1420,7 @@ func (c *Client) runOpenAI(ctx context.Context, prompt any, tk *Toolkit, history
 						} `json:"function"`
 					} `json:"tool_calls"`
 				} `json:"message"`
+				FinishReason string `json:"finish_reason"`
 			} `json:"choices"`
 			Usage map[string]any `json:"usage"`
 		}
@@ -1274,9 +1459,28 @@ func (c *Client) runOpenAI(ctx context.Context, prompt any, tk *Toolkit, history
 		}
 		messages = append(messages, asst)
 
-		if len(msg.ToolCalls) == 0 {
-			return c.endRun(lastModel, runStart, msg.Content, messages, toolCalls, turns, usage), nil
+		malformed := false
+		for _, tc := range msg.ToolCalls {
+			malformed = malformed || malformedArgs(tc.Function.Arguments)
 		}
+		if nudge, drop := rec.decide(turn == c.maxTurns()-1, len(msg.ToolCalls) > 0, malformed, data.Choices[0].FinishReason == "length", msg.Content); nudge != "" {
+			if drop {
+				messages = messages[:len(messages)-1]
+			}
+			messages = append(messages, map[string]any{"role": "user", "content": nudge})
+			continue
+		}
+		if len(msg.ToolCalls) == 0 {
+			var more bool
+			if messages, more, err = c.roundEnd(ctx, messages, turn, true, rec.final(msg.Content)); err != nil {
+				return RunResult{}, err
+			} else if more {
+				rec.carry = ""
+				continue
+			}
+			return c.endRun(lastModel, runStart, rec.final(msg.Content), messages, toolCalls, turns, usage), nil
+		}
+		rec.carry = ""
 
 		// Execute all tool calls in this turn concurrently (true parallel tool
 		// calling). Each call writes its outcome to its own slot, so the transcript
@@ -1340,6 +1544,9 @@ func (c *Client) runOpenAI(ctx context.Context, prompt any, tk *Toolkit, history
 			if haltedAt[i] != nil {
 				return c.pendingRun(lastModel, runStart, *haltedAt[i], messages, toolCalls, turns, usage), nil
 			}
+		}
+		if messages, _, err = c.roundEnd(ctx, messages, turn, false, ""); err != nil {
+			return RunResult{}, err
 		}
 	}
 	return c.endRunExhausted(lastModel, runStart, lastText(messages), messages, toolCalls, turns, usage), nil
@@ -1454,6 +1661,7 @@ func (c *Client) runAnthropic(ctx context.Context, prompt any, tk *Toolkit, hist
 	var usage Usage
 	turns := 0
 	runStart := time.Now()
+	rec := &stopRecovery{on: c.opts.StopRecovery}
 	lastModel := c.opts.Model // the model of the last call made (SPEC §8: reported = transmitted)
 	defer func() {
 		if err != nil {
@@ -1470,6 +1678,7 @@ func (c *Client) runAnthropic(ctx context.Context, prompt any, tk *Toolkit, hist
 		"anthropic-version": "2023-06-01",
 	}
 
+	var overflow overflowBreaker // §7F.1 per-run counters
 	for turn := 0; turn < c.maxTurns(); turn++ {
 		turns++
 		turnModel := c.opts.Model
@@ -1490,39 +1699,52 @@ func (c *Client) runAnthropic(ctx context.Context, prompt any, tk *Toolkit, hist
 				}
 			}
 		}
-		wire, err := c.emitMessages(messages)
-		if err != nil {
-			return RunResult{}, err
-		}
-		body := map[string]any{
-			"model":      turnModel,
-			"max_tokens": 4096,
-			"messages":   wire,
-		}
-		if system != "" {
-			body["system"] = system
-		}
-		if len(tools) > 0 {
-			body["tools"] = tools
-		}
-		body = c.finalizeBody(body)
-		toolsJSON.apply(c, body)
-		t0 := time.Now()
-		lastModel = turnModel
-		raw, err := c.postJSON(ctx, endpoint, headers, body)
-		if err != nil {
+		var raw []byte
+		var t0 time.Time
+		for { // one pass per attempt; only a reactive compaction (§7F.1) loops
+			wire, err := c.emitMessages(messages)
+			if err != nil {
+				return RunResult{}, err
+			}
+			body := map[string]any{
+				"model":      turnModel,
+				"max_tokens": 4096,
+				"messages":   wire,
+			}
+			if system != "" {
+				body["system"] = system
+			}
+			if len(tools) > 0 {
+				body["tools"] = tools
+			}
+			body = c.finalizeBody(body)
+			toolsJSON.apply(c, body)
+			t0 = time.Now()
+			var served string
+			raw, served, err = c.postJSONModels(ctx, endpoint, headers, body, turnModel)
+			turnModel = served
+			lastModel = turnModel
+			if err == nil {
+				overflow.ok()
+				break
+			}
 			c.emitLLM(turnModel, "error", t0, 0, 0)
-			return RunResult{}, err
+			compacted, retry, rerr := c.reactOverflow(ctx, &overflow, err, messages, tools, turnModel, turn)
+			if !retry {
+				return RunResult{}, rerr
+			}
+			messages = compacted
 		}
 		var data struct {
 			Content []struct {
-				Type  string         `json:"type"`
-				Text  string         `json:"text"`
-				ID    string         `json:"id"`
-				Name  string         `json:"name"`
-				Input map[string]any `json:"input"`
+				Type  string `json:"type"`
+				Text  string `json:"text"`
+				ID    string `json:"id"`
+				Name  string `json:"name"`
+				Input any    `json:"input"`
 			} `json:"content"`
-			Usage map[string]any `json:"usage"`
+			StopReason string         `json:"stop_reason"`
+			Usage      map[string]any `json:"usage"`
 		}
 		if err := json.Unmarshal(raw, &data); err != nil {
 			c.emitLLM(turnModel, "error", t0, 0, 0)
@@ -1545,30 +1767,48 @@ func (c *Client) runAnthropic(ctx context.Context, prompt any, tk *Toolkit, hist
 			Input map[string]any
 		}
 		var textParts []string
+		malformed := false
 		for _, b := range data.Content {
 			switch b.Type {
 			case "text":
 				content = append(content, map[string]any{"type": "text", "text": b.Text})
 				textParts = append(textParts, b.Text)
 			case "tool_use":
+				malformed = malformed || malformedInput(b.Input)
+				input, _ := b.Input.(map[string]any)
 				content = append(content, map[string]any{
 					"type":  "tool_use",
 					"id":    b.ID,
 					"name":  b.Name,
-					"input": b.Input,
+					"input": input,
 				})
 				uses = append(uses, struct {
 					ID    string
 					Name  string
 					Input map[string]any
-				}{b.ID, b.Name, b.Input})
+				}{b.ID, b.Name, input})
 			}
 		}
 		messages = append(messages, map[string]any{"role": "assistant", "content": content})
 
-		if len(uses) == 0 {
-			return c.endRun(lastModel, runStart, strings.Join(textParts, ""), messages, toolCalls, turns, usage), nil
+		if nudge, drop := rec.decide(turn == c.maxTurns()-1, len(uses) > 0, malformed, data.StopReason == "max_tokens", strings.Join(textParts, "")); nudge != "" {
+			if drop {
+				messages = messages[:len(messages)-1]
+			}
+			messages = append(messages, map[string]any{"role": "user", "content": nudge})
+			continue
 		}
+		if len(uses) == 0 {
+			var more bool
+			if messages, more, err = c.roundEnd(ctx, messages, turn, true, rec.final(strings.Join(textParts, ""))); err != nil {
+				return RunResult{}, err
+			} else if more {
+				rec.carry = ""
+				continue
+			}
+			return c.endRun(lastModel, runStart, rec.final(strings.Join(textParts, "")), messages, toolCalls, turns, usage), nil
+		}
+		rec.carry = ""
 
 		// Execute all tool_use blocks in this turn concurrently. Each block writes its
 		// outcome to its own slot so the tool_result blocks map deterministically to
@@ -1640,6 +1880,9 @@ func (c *Client) runAnthropic(ctx context.Context, prompt any, tk *Toolkit, hist
 		messages = append(messages, map[string]any{"role": "user", "content": blocks})
 		if haltReq != nil {
 			return c.pendingRun(lastModel, runStart, *haltReq, messages, toolCalls, turns, usage), nil
+		}
+		if messages, _, err = c.roundEnd(ctx, messages, turn, false, ""); err != nil {
+			return RunResult{}, err
 		}
 	}
 	return c.endRunExhausted(lastModel, runStart, "", messages, toolCalls, turns, usage), nil
@@ -1781,6 +2024,7 @@ func (c *Client) streamOpenAI(ctx context.Context, prompt any, tk *Toolkit, hist
 	var usage Usage
 	turns := 0
 	runStart := time.Now()
+	rec := &stopRecovery{on: c.opts.StopRecovery}
 	lastModel := c.opts.Model // the model of the last call made (SPEC §8: reported = transmitted)
 	defer func() {
 		if err != nil {
@@ -1795,6 +2039,7 @@ func (c *Client) streamOpenAI(ctx context.Context, prompt any, tk *Toolkit, hist
 		}
 	}()
 
+	var overflow overflowBreaker // §7F.1 per-run counters
 	for turn := 0; turn < c.maxTurns(); turn++ {
 		turns++
 		turnModel := c.opts.Model
@@ -1815,44 +2060,60 @@ func (c *Client) streamOpenAI(ctx context.Context, prompt any, tk *Toolkit, hist
 				}
 			}
 		}
-		wire, err := c.emitMessages(messages)
-		if err != nil {
-			return err
-		}
-		sbody := map[string]any{
-			"model":          turnModel,
-			"messages":       wire,
-			"stream":         true,
-			"stream_options": map[string]any{"include_usage": true},
-		}
-		if len(tools) > 0 {
-			sbody["tools"] = tools
-			sbody["tool_choice"] = "auto"
-		}
-		body, err := json.Marshal(c.finalizeBody(sbody))
-		if err != nil {
-			return err
-		}
-		t0 := time.Now()
-		lastModel = turnModel
-		beforeP, beforeC := usage.PromptTokens, usage.CompletionTokens
-		resp, err := c.llmFetch(ctx, endpoint, map[string]string{"Authorization": "Bearer " + key}, body)
-		if err != nil {
-			c.emitLLM(turnModel, "error", t0, 0, 0)
-			return err
-		}
-		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		var resp *http.Response
+		var t0 time.Time
+		for { // one pass per attempt; only a reactive compaction (§7F.1) loops
+			wire, err := c.emitMessages(messages)
+			if err != nil {
+				return err
+			}
+			sbody := map[string]any{
+				"model":          turnModel,
+				"messages":       wire,
+				"stream":         true,
+				"stream_options": map[string]any{"include_usage": true},
+			}
+			if len(tools) > 0 {
+				sbody["tools"] = tools
+				sbody["tool_choice"] = "auto"
+			}
+			fbody := c.finalizeBody(sbody)
+			body, err := json.Marshal(fbody)
+			if err != nil {
+				return err
+			}
+			t0 = time.Now()
+			var served string
+			resp, served, err = c.llmFetchModels(ctx, endpoint, map[string]string{"Authorization": "Bearer " + key}, fbody, body, turnModel, func(e StreamEvent) { ch <- e }, func(from, to string) {
+				ch <- StreamEvent{Type: "fallback", From: from, To: to}
+			})
+			turnModel = served
+			lastModel = turnModel
+			if err != nil {
+				c.emitLLM(turnModel, "error", t0, 0, 0)
+				return err
+			}
+			if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+				overflow.ok()
+				break
+			}
 			out, _ := io.ReadAll(resp.Body)
 			ra := resp.Header.Get("Retry-After")
 			resp.Body.Close()
 			c.emitLLM(turnModel, "error", t0, 0, 0)
-			return newProviderError(resp.StatusCode, out, ra)
+			compacted, retry, rerr := c.reactOverflow(ctx, &overflow, newProviderError(resp.StatusCode, out, ra), messages, tools, turnModel, turn)
+			if !retry {
+				return rerr
+			}
+			messages = compacted
 		}
+		beforeP, beforeC := usage.PromptTokens, usage.CompletionTokens
 
 		var content strings.Builder
 		// acc maps tool_call index -> assembled call; order preserves first-seen index.
 		acc := map[int]*streamCall{}
 		var order []int
+		finish := ""
 		sErr := scanSSE(ctx, resp.Body, func(line string) (bool, error) {
 			if !strings.HasPrefix(line, "data:") {
 				return true, nil
@@ -1869,6 +2130,9 @@ func (c *Client) streamOpenAI(ctx context.Context, prompt any, tk *Toolkit, hist
 				addUsage(&usage, u, string(StyleOpenAI))
 			}
 			choice := firstChoice(j)
+			if fr, ok := choice["finish_reason"].(string); ok && fr != "" {
+				finish = fr
+			}
 			d, _ := choice["delta"].(map[string]any)
 			if d == nil {
 				return true, nil
@@ -1923,16 +2187,35 @@ func (c *Client) streamOpenAI(ctx context.Context, prompt any, tk *Toolkit, hist
 		for _, idx := range order {
 			calls = append(calls, acc[idx])
 		}
+		malformed := false
+		for _, cc := range calls {
+			malformed = malformed || malformedArgs(cc.args)
+		}
+		if nudge, drop := rec.decide(turn == c.maxTurns()-1, len(calls) > 0, malformed, finish == "length", content.String()); nudge != "" {
+			if !drop { // only a truncated text reply is kept
+				messages = append(messages, map[string]any{"role": "assistant", "content": content.String()})
+			}
+			messages = append(messages, map[string]any{"role": "user", "content": nudge})
+			continue
+		}
 		if len(calls) == 0 {
 			text := content.String()
 			messages = append(messages, map[string]any{"role": "assistant", "content": text})
+			var more bool
+			if messages, more, err = c.roundEnd(ctx, messages, turn, true, rec.final(text)); err != nil {
+				return err
+			} else if more {
+				rec.carry = ""
+				continue
+			}
 			u := usage
 			ch <- StreamEvent{Type: "usage", Usage: &u}
-			res := c.endRun(lastModel, runStart, text, messages, toolCalls, turns, usage)
+			res := c.endRun(lastModel, runStart, rec.final(text), messages, toolCalls, turns, usage)
 			ch <- StreamEvent{Type: "done", Result: &res, Usage: &u}
 			return nil
 		}
 
+		rec.carry = ""
 		// Append the assistant message with assembled tool_calls.
 		var rawCalls []any
 		for _, cc := range calls {
@@ -2016,6 +2299,9 @@ func (c *Client) streamOpenAI(ctx context.Context, prompt any, tk *Toolkit, hist
 			}
 			ch <- events[i]
 		}
+		if messages, _, err = c.roundEnd(ctx, messages, turn, false, ""); err != nil {
+			return err
+		}
 	}
 	res := c.endRunExhausted(lastModel, runStart, lastText(messages), messages, toolCalls, turns, usage)
 	u := usage
@@ -2062,6 +2348,7 @@ func (c *Client) streamAnthropic(ctx context.Context, prompt any, tk *Toolkit, h
 	var usage Usage
 	turns := 0
 	runStart := time.Now()
+	rec := &stopRecovery{on: c.opts.StopRecovery}
 	lastModel := c.opts.Model // the model of the last call made (SPEC §8: reported = transmitted)
 	defer func() {
 		if err != nil {
@@ -2078,6 +2365,7 @@ func (c *Client) streamAnthropic(ctx context.Context, prompt any, tk *Toolkit, h
 
 	headers := map[string]string{"x-api-key": key, "anthropic-version": "2023-06-01"}
 
+	var overflow overflowBreaker // §7F.1 per-run counters
 	for turn := 0; turn < c.maxTurns(); turn++ {
 		turns++
 		turnModel := c.opts.Model
@@ -2098,41 +2386,56 @@ func (c *Client) streamAnthropic(ctx context.Context, prompt any, tk *Toolkit, h
 				}
 			}
 		}
-		wire, err := c.emitMessages(messages)
-		if err != nil {
-			return err
-		}
-		reqBody := map[string]any{
-			"model":      turnModel,
-			"max_tokens": 4096,
-			"messages":   wire,
-			"stream":     true,
-		}
-		if system != "" {
-			reqBody["system"] = system
-		}
-		if len(tools) > 0 {
-			reqBody["tools"] = tools
-		}
-		body, err := json.Marshal(c.finalizeBody(reqBody))
-		if err != nil {
-			return err
-		}
-		t0 := time.Now()
-		lastModel = turnModel
-		beforeP, beforeC := usage.PromptTokens, usage.CompletionTokens
-		resp, err := c.llmFetch(ctx, endpoint, headers, body)
-		if err != nil {
-			c.emitLLM(turnModel, "error", t0, 0, 0)
-			return err
-		}
-		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		var resp *http.Response
+		var t0 time.Time
+		for { // one pass per attempt; only a reactive compaction (§7F.1) loops
+			wire, err := c.emitMessages(messages)
+			if err != nil {
+				return err
+			}
+			reqBody := map[string]any{
+				"model":      turnModel,
+				"max_tokens": 4096,
+				"messages":   wire,
+				"stream":     true,
+			}
+			if system != "" {
+				reqBody["system"] = system
+			}
+			if len(tools) > 0 {
+				reqBody["tools"] = tools
+			}
+			fbody := c.finalizeBody(reqBody)
+			body, err := json.Marshal(fbody)
+			if err != nil {
+				return err
+			}
+			t0 = time.Now()
+			var served string
+			resp, served, err = c.llmFetchModels(ctx, endpoint, headers, fbody, body, turnModel, func(e StreamEvent) { ch <- e }, func(from, to string) {
+				ch <- StreamEvent{Type: "fallback", From: from, To: to}
+			})
+			turnModel = served
+			lastModel = turnModel
+			if err != nil {
+				c.emitLLM(turnModel, "error", t0, 0, 0)
+				return err
+			}
+			if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+				overflow.ok()
+				break
+			}
 			out, _ := io.ReadAll(resp.Body)
 			ra := resp.Header.Get("Retry-After")
 			resp.Body.Close()
 			c.emitLLM(turnModel, "error", t0, 0, 0)
-			return newProviderError(resp.StatusCode, out, ra)
+			compacted, retry, rerr := c.reactOverflow(ctx, &overflow, newProviderError(resp.StatusCode, out, ra), messages, tools, turnModel, turn)
+			if !retry {
+				return rerr
+			}
+			messages = compacted
 		}
+		beforeP, beforeC := usage.PromptTokens, usage.CompletionTokens
 
 		blocks := map[int]*streamBlock{}
 		var order []int
@@ -2212,9 +2515,11 @@ func (c *Client) streamAnthropic(ctx context.Context, prompt any, tk *Toolkit, h
 		}
 		var uses []useBlock
 		var textParts []string
+		malformed := false
 		for _, idx := range order {
 			b := blocks[idx]
 			if b.typ == "tool_use" {
+				malformed = malformed || malformedArgs(b.json)
 				in := safeJSONArgs(b.json)
 				content = append(content, map[string]any{"type": "tool_use", "id": b.id, "name": b.name, "input": in})
 				uses = append(uses, useBlock{b.id, b.name, in})
@@ -2225,8 +2530,22 @@ func (c *Client) streamAnthropic(ctx context.Context, prompt any, tk *Toolkit, h
 		}
 		messages = append(messages, map[string]any{"role": "assistant", "content": content})
 
+		if nudge, drop := rec.decide(turn == c.maxTurns()-1, len(uses) > 0, malformed, stopReason == "max_tokens", strings.Join(textParts, "")); nudge != "" {
+			if drop {
+				messages = messages[:len(messages)-1]
+			}
+			messages = append(messages, map[string]any{"role": "user", "content": nudge})
+			continue
+		}
 		if stopReason != "tool_use" || len(uses) == 0 {
-			text := strings.Join(textParts, "")
+			text := rec.final(strings.Join(textParts, ""))
+			var more bool
+			if messages, more, err = c.roundEnd(ctx, messages, turn, true, text); err != nil {
+				return err
+			} else if more {
+				rec.carry = ""
+				continue
+			}
 			u := usage
 			ch <- StreamEvent{Type: "usage", Usage: &u}
 			res := c.endRun(lastModel, runStart, text, messages, toolCalls, turns, usage)
@@ -2234,6 +2553,7 @@ func (c *Client) streamAnthropic(ctx context.Context, prompt any, tk *Toolkit, h
 			return nil
 		}
 
+		rec.carry = ""
 		for _, u := range uses {
 			ch <- c.callEvent(u.id, u.name, u.input)
 		}
@@ -2302,6 +2622,9 @@ func (c *Client) streamAnthropic(ctx context.Context, prompt any, tk *Toolkit, h
 			ch <- events[i]
 		}
 		messages = append(messages, map[string]any{"role": "user", "content": resultBlocks})
+		if messages, _, err = c.roundEnd(ctx, messages, turn, false, ""); err != nil {
+			return err
+		}
 	}
 	res := c.endRunExhausted(lastModel, runStart, "", messages, toolCalls, turns, usage)
 	u := usage

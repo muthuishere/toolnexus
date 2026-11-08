@@ -55,6 +55,31 @@ test("acp-client stream.acpDrip: incremental text + thought through the in-proce
   }
 })
 
+test("acp-client stream.acpToolUpdate: rawInput -> tool_call_args, title remembered (#188)", async () => {
+  const fx = CASES.stream.acpToolUpdate
+  const acp = await fake(fx.fakeEnv)
+  try {
+    const client = createInProcessClient({ model: "m", generate: acp.generate, generateStream: acp.generateStream })
+    const events: any[] = []
+    let done: any
+    for await (const ev of client.stream("go")) {
+      const e = ev as any
+      if (e.type === "done") done = e.result
+      else if (e.type !== "text" && e.type !== "usage") events.push(e)
+    }
+    const got = events.map((e, i) => {
+      const want = fx.expectEvents[i]
+      if (!want) return e
+      if (e.type === "tool_call") return { type: e.type, id: e.id, name: e.name, via: e.via }
+      return Object.fromEntries(Object.keys(want).map((k) => [k, e[k]]))
+    })
+    assert.deepEqual(got, fx.expectEvents)
+    assert.equal(done.text, fx.expectDoneText)
+  } finally {
+    await acp.close()
+  }
+})
+
 test("acp-client passthrough: mcpServers verbatim, _meta keys, model via set_config_option", async () => {
   const fx = CASES.passthrough
   const rec = recFile()

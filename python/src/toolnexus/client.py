@@ -133,6 +133,11 @@ def _is_retryable_status(status: int, extra: Optional[Iterable[int]] = None) -> 
 #       -> {"result": ToolResult} to SHORT-CIRCUIT, or {"args": {...}} to rewrite.
 #   after_tool({"name", "args", "result", "id", "turn"})
 #       -> {"result": ToolResult} to replace the result.
+#   after_round({"turn", "final", "text", "messages"})  (#192)
+#       -> optionally {"inject": [str, ...]}: each non-empty string is appended as a
+#          {"role": "user", "content": s} message. Fires after a round's tool results
+#          (final=False), or when the model answered with a turn remaining (final=True);
+#          a non-empty inject on a final round CONTINUES the loop.
 Hooks = Any
 
 
@@ -315,6 +320,15 @@ def _resolve_key(api_key: Optional[str], base_url: str, api_key_env: Optional[st
 _RETRY_AFTER_MAX = 2147483647  # ~68 years; the widest second count all seven ports hold exactly
 
 
+def _should_retry_override(value: Optional[str]) -> Optional[bool]:
+    """The provider's ``x-should-retry`` verdict (§8): trimmed ``true``/``false``,
+    case-insensitive; anything else (or absent) is no opinion."""
+    if value is None:
+        return None
+    v = value.strip().lower()
+    return True if v == "true" else False if v == "false" else None
+
+
 def _parse_retry_after(value: Optional[str]) -> Optional[int]:
     """Honour ``Retry-After`` only in its delay-seconds form.
 
@@ -389,7 +403,7 @@ class ProviderError(Exception):
     deprecated alias for ``body``.
     """
 
-    def __init__(self, status: int, text: str, retry_after: Optional[str]) -> None:
+    def __init__(self, status: int, text: str, retry_after: Optional[str], should_retry: Optional[str] = None) -> None:
         body = safe_error_body(status, text)
         shown = capped_error_body(status, text)
         super().__init__(f"LLM {status}: {shown}" if shown else f"LLM {status}")
@@ -397,10 +411,60 @@ class ProviderError(Exception):
         self.body = body
         self.text = body
         self.retry_after = retry_after
+        #: The raw ``x-should-retry`` header, or None (§8 x-should-retry override).
+        self.should_retry = should_retry
 
 
 #: Back-compat alias — the type was private before it was worth catching.
 _HttpError = ProviderError
+
+#: §7F.1 — the provider-body markers that mean "the prompt does not fit".
+_OVERFLOW_MARKERS = (
+    "context_length_exceeded",
+    "maximum context length",
+    "prompt is too long",
+    "prompt_too_long",
+    "request_too_large",
+    "context window",
+)
+
+
+def is_context_overflow(status: int, body: Optional[str]) -> bool:
+    """SPEC §7F.1: True iff ``status`` is 400 or 413 AND the (redacted) provider body,
+    lowercased, contains one of the pinned overflow markers. Nothing else counts."""
+    if status not in (400, 413) or not body:
+        return False
+    low = body.lower()
+    return any(m in low for m in _OVERFLOW_MARKERS)
+
+
+class ContextOverflowError(ProviderError):
+    """SPEC §7F.1: reactive compaction could not make the prompt fit.
+
+    ``compactions`` is the rapid-refill streak at failure (3 from the breaker, else the
+    compactions in the current chain); ``status``/``body`` come from the last provider
+    error, redacted exactly as :class:`ProviderError`. A failure, never a Pending."""
+
+    def __init__(self, compactions: int, status: int, body: str) -> None:
+        Exception.__init__(
+            self, f"context overflow: {compactions} reactive compaction(s) did not make the prompt fit"
+        )
+        self.compactions = compactions
+        self.status = status
+        self.body = body
+        self.text = body
+        self.retry_after = None
+
+
+class _OverflowState:
+    """Per-run breaker counters (§7F.1): ``ok_since`` successful LLM calls since the last
+    reactive compaction; ``streak`` compactions in the current rapid chain."""
+
+    __slots__ = ("ok_since", "streak")
+
+    def __init__(self) -> None:
+        self.ok_since = 0
+        self.streak = 0
 
 
 def _open(url: str, headers: dict[str, str], payload: dict[str, Any], timeout: float):
@@ -412,7 +476,8 @@ def _open(url: str, headers: dict[str, str], payload: dict[str, Any], timeout: f
     except urllib.error.HTTPError as e:
         text = e.read().decode("utf-8", errors="replace")
         ra = e.headers.get("Retry-After") if e.headers else None
-        raise _HttpError(e.code, text, ra) from None
+        sr = e.headers.get("x-should-retry") if e.headers else None
+        raise _HttpError(e.code, text, ra, sr) from None
 
 
 _KEEPALIVE = threading.local()
@@ -628,9 +693,75 @@ def _safe_json(s: Any) -> dict[str, Any]:
     if isinstance(s, dict):
         return s
     try:
-        return json.loads(s or "{}")
+        v = json.loads(s or "{}")
     except Exception:
         return {}
+    # Arguments that are not a JSON object (an array, a scalar) become {} (SPEC §8).
+    return v if isinstance(v, dict) else {}
+
+
+# §8 stop-reason recovery: the three pinned user messages (byte-exact, SPEC §8).
+RECOVERY_NUDGE = "Your previous response contained no answer. Continue and give your answer."
+RECOVERY_CONTINUE = (
+    "Your previous response was cut off at the output token limit. "
+    "Continue exactly where it stopped, without repeating anything."
+)
+RECOVERY_CORRECTIVE = (
+    "Your previous tool call could not be used: its arguments were not a valid JSON object. "
+    "Call the tool again with arguments that are a single valid JSON object matching its input schema."
+)
+
+
+def _malformed_json_args(raw: Any) -> bool:
+    """A raw argument string that is non-empty after trimming and does not parse to a
+    JSON object. Empty/absent ⇒ ``{}`` ⇒ not malformed; an already-decoded dict is fine."""
+    if raw is None or isinstance(raw, dict):
+        return False
+    if not isinstance(raw, str):
+        return True
+    if not raw.strip():
+        return False
+    try:
+        return not isinstance(json.loads(raw), dict)
+    except Exception:
+        return True
+
+
+class _Recovery:
+    """Per-run recovery budgets (SPEC §8 stop-reason recovery). ``decide`` returns the
+    pinned message to append (spending its budget), or None to proceed as without it."""
+
+    def __init__(self, enabled: bool, max_turns: int) -> None:
+        self.enabled = enabled
+        self.max_turns = max_turns
+        self.corrective = 1
+        self.cont = 3
+        self.nudge = 1
+        self.carry = ""
+
+    def decide(self, turn: int, has_calls: bool, malformed: bool, truncated: bool, text: str) -> Optional[str]:
+        if not self.enabled or turn >= self.max_turns - 1:
+            return None
+        if has_calls:
+            if malformed and self.corrective > 0:
+                self.corrective -= 1
+                return RECOVERY_CORRECTIVE
+            return None
+        if truncated:
+            if self.cont > 0:
+                self.cont -= 1
+                return RECOVERY_CONTINUE
+            return None
+        if not text.strip() and self.nudge > 0:
+            self.nudge -= 1
+            return RECOVERY_NUDGE
+        return None
+
+
+def _object_input(v: Any) -> dict[str, Any]:
+    """An Anthropic ``tool_use.input`` that is not an object (a raw string a provider
+    could not parse, an array) runs as ``{}`` (SPEC §8)."""
+    return v if isinstance(v, dict) else {}
 
 
 def _last_text(messages: list[dict[str, Any]]) -> str:
@@ -1041,8 +1172,23 @@ class Client:
         prompt_cache: Optional[PromptCacheOptions] = None,
         tool_tiers: Optional[ToolTierOptions] = None,
         max_tool_concurrency: Optional[int] = None,
+        stop_recovery: bool = False,
+        compact_on_overflow: Optional[Callable[[dict[str, Any]], Any]] = None,
+        fallback_models: Optional[list[str]] = None,
     ) -> None:
         self.base_url = base_url
+        # §8 stop-reason recovery: answer a malformed tool call, a truncated response and
+        # an empty answer with one pinned user message and another turn. False ⇒ the loop
+        # is byte-identical to before.
+        self.stop_recovery = stop_recovery
+        # §7F.1: a before_llm-shaped hook run when the provider rejects the prompt as too
+        # long; its shorter transcript replaces the working one and the SAME turn is re-sent.
+        # None ⇒ byte-identical: the overflow surfaces as ProviderError.
+        self.compact_on_overflow = compact_on_overflow
+        # §8 Resilience: opt-in model fallback chain on overload (503/529 after the retry
+        # budget is spent). None/[] ⇒ byte-identical. Kill switch:
+        # TOOLNEXUS_DISABLE_MODEL_FALLBACK=1|true, read at each model call.
+        self.fallback_models = list(fallback_models) if fallback_models else None
         # §8 tool scheduling: cap on concurrency-safe calls of one response running at once.
         # None ⇒ env TOOLNEXUS_MAX_TOOL_CONCURRENCY when a positive integer, else 10. Unsafe
         # calls (anything not read-only) always run alone.
@@ -1397,6 +1543,24 @@ class Client:
     # ----------------------------------------------------------------------- #
     # §10 Suspension — Pending / wait_for
     # ----------------------------------------------------------------------- #
+    async def _round_end(self, messages: list[dict[str, Any]], turn: int, final: bool, text: str) -> bool:
+        """§8 ``after_round`` (#192): fire the round-boundary hook and append its injections
+        as user messages. Returns True when something was appended. A final round fires
+        only when a turn remains."""
+        hook = _get_hook(self.hooks, "after_round")
+        if hook is None:
+            return False
+        if final and turn + 1 >= self.max_turns:
+            return False
+        out = await _call_hook(hook, {"turn": turn, "final": final, "text": text, "messages": messages})
+        inject = (out.get("inject") if isinstance(out, Mapping) else getattr(out, "inject", None)) if out else None
+        added = False
+        for m in inject or []:
+            if isinstance(m, str) and m != "":
+                messages.append({"role": "user", "content": m})
+                added = True
+        return added
+
     def _pending_run(
         self,
         run_start: float,
@@ -1702,8 +1866,28 @@ class Client:
         ``Retry-After``. Aborts (timeout/cancel) are not retried.
 
         ``worker`` returns whatever it produces (a parsed dict for non-streaming, or
-        a live response for streaming). Mirrors JS ``llmFetch``.
+        a live response for streaming). Mirrors JS ``llmFetch``. Retry events from
+        :meth:`_llm_fetch_events` are dropped here: only streaming surfaces them.
         """
+        result: Any = None
+        async for kind, value in self._llm_fetch_events(worker, url, headers, payload, deadline, cancel):
+            if kind == "result":
+                result = value
+        return result
+
+    async def _llm_fetch_events(
+        self,
+        worker,
+        url: str,
+        headers: dict[str, str],
+        payload: dict[str, Any],
+        deadline: Optional[float],
+        cancel: Optional[asyncio.Event],
+    ) -> AsyncGenerator[tuple[str, Any], None]:
+        """The retry loop behind :meth:`_llm_fetch`. Yields ``("retry", event)``
+        immediately before each retry wait (the §8 streaming ``retry`` event, whose
+        ``delay_ms`` is the exact wait about to be slept) and finally
+        ``("result", value)``."""
         base = self.retry_base_ms / 1000.0
         # Default classifier = today's behavior, expressed as an on_error. A "retry" is
         # always capped by the budget below (attempt == retries stops regardless).
@@ -1714,12 +1898,19 @@ class Client:
         for attempt in range(self.retries + 1):
             per_req = self._remaining(deadline, cancel)
             try:
-                return await self._fetch_once(worker, url, headers, payload, per_req, cancel)
+                result = await self._fetch_once(worker, url, headers, payload, per_req, cancel)
             except _HttpError as e:
                 last_err = e
                 retryable = _is_retryable_status(e.status, self.retryable_statuses)
+                # The provider's own verdict wins over the status set (§8 x-should-retry).
+                override = _should_retry_override(getattr(e, "should_retry", None))
+                if override is not None:
+                    retryable = override
                 tier = classify({"status": e.status, "attempt": attempt, "retryable": retryable})
                 if tier == "fail" or attempt == self.retries:
+                    # §8 fallbackModels: only a spent budget (never an on_error "fail")
+                    # may advance the model chain.
+                    e._tn_budget_spent = tier != "fail"  # type: ignore[attr-defined]
                     raise
                 # The field carries the RAW header; the waiting rule parses it here and
                 # is unchanged. `is not None`, not truthiness: `Retry-After: 0` means
@@ -1730,7 +1921,16 @@ class Client:
                     if delay is not None
                     else base * (2 ** attempt) + random.random() * 0.1
                 )
+                yield "retry", {
+                    "type": "retry",
+                    "attempt": attempt + 1,
+                    "max": self.retries,
+                    "delay_ms": int(round(wait * 1000)),
+                    "status": e.status,
+                    "reason": f"HTTP {e.status}",
+                }
                 await self._sleep(wait, deadline, cancel)
+                continue
             except (RunTimeout, RunCancelled):
                 raise  # never retry an abort
             except (urllib.error.URLError, OSError, TimeoutError) as e:
@@ -1743,9 +1943,164 @@ class Client:
                 tier = classify({"error": e, "attempt": attempt, "retryable": True})
                 if tier == "fail" or attempt == self.retries:
                     raise
-                await self._sleep(base * (2 ** attempt) + random.random() * 0.1, deadline, cancel)
+                wait = base * (2 ** attempt) + random.random() * 0.1
+                yield "retry", {
+                    "type": "retry",
+                    "attempt": attempt + 1,
+                    "max": self.retries,
+                    "delay_ms": int(round(wait * 1000)),
+                    "reason": "network",
+                }
+                await self._sleep(wait, deadline, cancel)
+                continue
+            yield "result", result
+            return
         assert last_err is not None
         raise last_err
+
+    async def _compact_on_overflow(
+        self,
+        err: Exception,
+        state: _OverflowState,
+        messages: list[dict[str, Any]],
+        tools: Any,
+        model: str,
+        turn: int,
+    ) -> list[dict[str, Any]]:
+        """§7F.1 reaction + breaker for one failed LLM call. Returns the compacted
+        transcript to re-send the same turn with, or raises (the original error when
+        it is not an overflow / no hook is set, else :class:`ContextOverflowError`)."""
+        hook = self.compact_on_overflow
+        if (
+            hook is None
+            or not isinstance(err, ProviderError)
+            or isinstance(err, ContextOverflowError)
+            or not is_context_overflow(err.status, err.body)
+        ):
+            raise err
+        if not (state.streak > 0 and state.ok_since < 2):
+            state.streak = 0
+        if state.streak == 3:
+            raise ContextOverflowError(3, err.status, err.body) from err
+        ov = await _call_hook(hook, {"messages": messages, "tools": tools, "model": model, "turn": turn})
+        new = ov.get("messages") if isinstance(ov, dict) else None
+        if new is None or len(new) >= len(messages):
+            raise ContextOverflowError(state.streak, err.status, err.body) from err
+        state.streak += 1
+        state.ok_since = 0
+        return list(new)
+
+    async def _llm_json_compacting(
+        self,
+        url: str,
+        headers: dict[str, str],
+        build: Callable[[list[dict[str, Any]]], dict[str, Any]],
+        box: dict[str, Any],
+        state: _OverflowState,
+        tools: Any,
+        model: str,
+        turn: int,
+        deadline: Optional[float],
+        cancel: Optional[asyncio.Event],
+        style: ClientStyle,
+        log: Optional["_TurnLog"],
+        served_out: Optional[list[str]] = None,
+    ) -> dict[str, Any]:
+        """One non-streaming LLM call of a turn, re-sent after a §7F.1 reactive
+        compaction. ``box["messages"]`` is the working transcript, replaced in place."""
+        while True:
+            msgs = box["messages"]
+            try:
+                data = await self._llm_call_json(url, headers, build(msgs), deadline, cancel, style, self._part_summaries(msgs), model=model, served_out=served_out)
+            except ProviderError as e:
+                box["messages"] = await self._compact_on_overflow(e, state, msgs, tools, model, turn)
+                if log is not None:
+                    log.messages = box["messages"]
+                continue
+            state.ok_since += 1
+            return data
+
+    async def _sse_compacting(
+        self,
+        url: str,
+        headers: dict[str, str],
+        build: Callable[[list[dict[str, Any]]], dict[str, Any]],
+        box: dict[str, Any],
+        state: _OverflowState,
+        tools: Any,
+        model: str,
+        turn: int,
+        deadline: Optional[float],
+        cancel: Optional[asyncio.Event],
+        log: Optional["_TurnLog"],
+    ) -> AsyncGenerator[Any, None]:
+        """:meth:`_sse_lines` for one streamed turn, re-opened after a §7F.1 reactive
+        compaction. The overflow is an HTTP error at connect, before any line, so
+        nothing is yielded for the failed attempt. The caller counts the success
+        (``state.ok_since``) once the turn's stream is fully read — the consumer may
+        stop early at ``[DONE]``, so this generator cannot."""
+        while True:
+            msgs = box["messages"]
+            gen = self._sse_lines(url, headers, build(msgs), deadline, cancel)
+            try:
+                first = await gen.__anext__()
+            except StopAsyncIteration:
+                return
+            except ProviderError as e:
+                box["messages"] = await self._compact_on_overflow(e, state, msgs, tools, model, turn)
+                if log is not None:
+                    log.messages = box["messages"]
+                continue
+            yield first
+            async for line in gen:
+                yield line
+            return
+    def _model_chain(self, payload: dict[str, Any]) -> list[str]:
+        """§8 fallbackModels: ``[turnModel, ...fallback_models]`` (empty/duplicate entries
+        skipped), or just ``[turnModel]`` when the option is absent, the kill switch is
+        set, or the model source is in-process (no wire, no HTTP status)."""
+        turn_model = payload.get("model") or ""
+        if (
+            not self.fallback_models
+            or isinstance(self._transport, InProcessTransport)
+            or os.environ.get("TOOLNEXUS_DISABLE_MODEL_FALLBACK", "").lower() in ("1", "true")
+        ):
+            return [turn_model]
+        chain: list[str] = [turn_model]
+        for m in self.fallback_models:
+            if m and m not in chain:
+                chain.append(m)
+        return chain
+
+    @staticmethod
+    def _advances(e: BaseException) -> bool:
+        """Overload after a spent budget — exactly 503/529 — advances the chain."""
+        return (
+            isinstance(e, _HttpError)
+            and e.status in (503, 529)
+            and getattr(e, "_tn_budget_spent", False)
+        )
+
+    async def _llm_fetch_chain(
+        self,
+        worker,
+        url: str,
+        headers: dict[str, str],
+        payload: dict[str, Any],
+        deadline: Optional[float],
+        cancel: Optional[asyncio.Event],
+    ) -> tuple[Any, str]:
+        """:meth:`_llm_fetch` over the model chain; returns ``(result, served_model)``."""
+        chain = self._model_chain(payload)
+        for i, m in enumerate(chain):
+            body = payload if i == 0 else {**payload, "model": m}
+            try:
+                return await self._llm_fetch(worker, url, headers, body, deadline, cancel), m
+            except _HttpError as e:
+                if i + 1 < len(chain) and self._advances(e):
+                    continue
+                raise
+        raise AssertionError("unreachable")
 
     async def _run_tool(
         self,
@@ -1861,6 +2216,7 @@ class Client:
         style: ClientStyle,
         parts: Optional[list[dict[str, Any]]] = None,
         model: Optional[str] = None,
+        served_out: Optional[list[str]] = None,
     ) -> dict[str, Any]:
         """One non-streaming LLM call, with an ``llm`` metric event (ok/error + per-call
         tokens + ms). Mirrors JS ``llmCallJson``. ``parts`` describes the §1B content the
@@ -1868,7 +2224,11 @@ class Client:
         t0 = _now()
         model = model or self.model
         try:
-            data = await self._llm_fetch(self._transport.post, url, headers, payload, deadline, cancel)
+            data, served = await self._llm_fetch_chain(self._transport.post, url, headers, payload, deadline, cancel)
+            if served != payload.get("model"):
+                model = served  # §8: the serving model is "the model transmitted"
+            if served_out is not None:
+                served_out.append(served)
             prompt, completion = _per_call(data.get("usage"), style)
             ev: dict[str, Any] = {"event": "llm", "model": model, "status": "ok", "ms": _ms_since(t0), "prompt_tokens": prompt, "completion_tokens": completion}
             if parts:
@@ -1941,7 +2301,9 @@ class Client:
             payload["max_tokens"] = max_tokens
         payload = self._finalize_body(payload)
 
-        data = await self._llm_call_json(endpoint, req_headers, payload, self._deadline(), cancel, "openai", model=turn_model)
+        _served: list[str] = []
+        data = await self._llm_call_json(endpoint, req_headers, payload, self._deadline(), cancel, "openai", model=turn_model, served_out=_served)
+        turn_model = _served[-1] if _served else turn_model
         await self._translate_after_llm(data, turn_model)
 
         usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
@@ -2011,7 +2373,9 @@ class Client:
             payload["tool_choice"] = native_choice
         payload = self._finalize_body(payload)
 
-        data = await self._llm_call_json(endpoint, req_headers, payload, self._deadline(), cancel, "anthropic", model=turn_model)
+        _served: list[str] = []
+        data = await self._llm_call_json(endpoint, req_headers, payload, self._deadline(), cancel, "anthropic", model=turn_model, served_out=_served)
+        turn_model = _served[-1] if _served else turn_model
         await self._translate_after_llm(data, turn_model)
 
         usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
@@ -2181,7 +2545,8 @@ class Client:
         cancel: Optional[asyncio.Event] = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
         """Streaming variant: async-iterate live event dicts (text deltas,
-        tool_call/tool_result, usage, done). With an ``id`` it is stateful (like
+        tool_call/tool_result, usage, done, and ``retry`` — ``{type, attempt, max,
+        delay_ms, status?, reason}`` emitted just before each LLM retry wait). With an ``id`` it is stateful (like
         :meth:`ask`): the thread's transcript is loaded as history before streaming,
         and saved back to the ConversationStore on the terminal ``done`` event.
         No ``id`` ⇒ stateless. Mirrors the JS ``stream``.
@@ -2240,6 +2605,8 @@ class Client:
         turns = 0
         run_start = _now()
         last_model = self.model
+        rec = _Recovery(self.stop_recovery, self.max_turns)
+        overflow = _OverflowState()
 
         try:
             for turn in range(self.max_turns):
@@ -2261,18 +2628,27 @@ class Client:
                         # SPEC §8: a non-empty ``model`` applies to THIS turn only.
                         if ov.get("model"):
                             turn_model = ov["model"]
-                payload: dict[str, Any] = {
-                    "model": turn_model,
-                    "messages": self._wire_messages(messages, "openai"),
-                }
-                # Gap 5: omit tools/tool_choice entirely when the effective list is empty
-                # (including after a before_llm override) — many providers 400 on [].
-                if tools:
-                    payload["tools"] = tools
-                    payload["tool_choice"] = "auto"
-                payload = self._finalize_body(payload)
+                def build(msgs: list[dict[str, Any]], turn_model: str = turn_model, tools: Any = tools) -> dict[str, Any]:
+                    payload: dict[str, Any] = {
+                        "model": turn_model,
+                        "messages": self._wire_messages(msgs, "openai"),
+                    }
+                    # Gap 5: omit tools/tool_choice entirely when the effective list is empty
+                    # (including after a before_llm override) — many providers 400 on [].
+                    if tools:
+                        payload["tools"] = tools
+                        payload["tool_choice"] = "auto"
+                    return self._finalize_body(payload)
+
                 last_model = turn_model
-                data = await self._llm_call_json(url, req_headers, payload, deadline, cancel, "openai", self._part_summaries(messages), model=turn_model)
+                _served: list[str] = []
+                box = {"messages": messages}
+                try:
+                    data = await self._llm_json_compacting(url, req_headers, build, box, overflow, tools, turn_model, turn, deadline, cancel, "openai", log, served_out=_served)
+                finally:
+                    messages = box["messages"]
+                if _served:
+                    turn_model = last_model = _served[-1]
                 _add_usage(usage, data.get("usage"), "openai")
                 after = _get_hook(self.hooks, "after_llm")
                 if after is not None:
@@ -2280,10 +2656,28 @@ class Client:
                 msg = data["choices"][0]["message"]
                 messages.append(msg)
                 calls = msg.get("tool_calls") or []
+                fix = rec.decide(
+                    turn,
+                    bool(calls),
+                    any(_malformed_json_args((c.get("function") or {}).get("arguments")) for c in calls),
+                    data["choices"][0].get("finish_reason") == "length",
+                    msg.get("content") or "",
+                )
+                if fix is not None:
+                    if fix == RECOVERY_CONTINUE:
+                        rec.carry += msg.get("content") or ""
+                    else:
+                        messages.pop()
+                    messages.append({"role": "user", "content": fix})
+                    continue
                 if not calls:
+                    if await self._round_end(messages, turn, True, rec.carry + (msg.get("content") or "")):
+                        rec.carry = ""
+                        continue
                     return self._end_run(
-                        run_start, msg.get("content") or "", messages, tool_calls, turns, usage, model=last_model
+                        run_start, rec.carry + (msg.get("content") or ""), messages, tool_calls, turns, usage, model=last_model
                     )
+                rec.carry = ""
 
                 # Parse the tool calls in order, then execute them concurrently (true
                 # parallel tool calling). Each result is mapped back to its originating
@@ -2312,6 +2706,7 @@ class Client:
                     messages.append(_tool_message(call_id, name, result))
                     if halted is not None:
                         return self._pending_run(run_start, halted, messages, tool_calls, turns, usage, model=last_model)
+                await self._round_end(messages, turn, False, "")
 
             return self._end_run(
                 run_start, _last_text(messages), messages, tool_calls, turns, usage, at_limit=True, model=last_model
@@ -2355,6 +2750,8 @@ class Client:
         turns = 0
         run_start = _now()
         last_model = self.model
+        rec = _Recovery(self.stop_recovery, self.max_turns)
+        overflow = _OverflowState()
 
         try:
             for turn in range(self.max_turns):
@@ -2376,18 +2773,27 @@ class Client:
                         # SPEC §8: a non-empty ``model`` applies to THIS turn only.
                         if ov.get("model"):
                             turn_model = ov["model"]
-                payload: dict[str, Any] = {
-                    "model": turn_model,
-                    "max_tokens": 4096,
-                    "system": system,
-                    "messages": self._wire_messages(messages, "anthropic"),
-                }
-                # Gap 5: omit tools when the effective list is empty.
-                if tools:
-                    payload["tools"] = tools
-                payload = self._finalize_body(payload)
+                def build(msgs: list[dict[str, Any]], turn_model: str = turn_model, tools: Any = tools) -> dict[str, Any]:
+                    payload: dict[str, Any] = {
+                        "model": turn_model,
+                        "max_tokens": 4096,
+                        "system": system,
+                        "messages": self._wire_messages(msgs, "anthropic"),
+                    }
+                    # Gap 5: omit tools when the effective list is empty.
+                    if tools:
+                        payload["tools"] = tools
+                    return self._finalize_body(payload)
+
                 last_model = turn_model
-                data = await self._llm_call_json(endpoint, req_headers, payload, deadline, cancel, "anthropic", self._part_summaries(messages), model=turn_model)
+                _served: list[str] = []
+                box = {"messages": messages}
+                try:
+                    data = await self._llm_json_compacting(endpoint, req_headers, build, box, overflow, tools, turn_model, turn, deadline, cancel, "anthropic", log, served_out=_served)
+                finally:
+                    messages = box["messages"]
+                if _served:
+                    turn_model = last_model = _served[-1]
                 _add_usage(usage, data.get("usage"), "anthropic")
                 after = _get_hook(self.hooks, "after_llm")
                 if after is not None:
@@ -2395,9 +2801,27 @@ class Client:
                 content = data.get("content") or []
                 messages.append({"role": "assistant", "content": content})
                 uses = [b for b in content if b.get("type") == "tool_use"]
+                text = "".join(b.get("text", "") for b in content if b.get("type") == "text")
+                fix = rec.decide(
+                    turn,
+                    bool(uses),
+                    any("input" in u and not isinstance(u["input"], dict) for u in uses),
+                    data.get("stop_reason") == "max_tokens",
+                    text,
+                )
+                if fix is not None:
+                    if fix == RECOVERY_CONTINUE:
+                        rec.carry += text
+                    else:
+                        messages.pop()
+                    messages.append({"role": "user", "content": fix})
+                    continue
                 if not uses:
-                    text = "".join(b.get("text", "") for b in content if b.get("type") == "text")
-                    return self._end_run(run_start, text, messages, tool_calls, turns, usage, model=last_model)
+                    if await self._round_end(messages, turn, True, rec.carry + text):
+                        rec.carry = ""
+                        continue
+                    return self._end_run(run_start, rec.carry + text, messages, tool_calls, turns, usage, model=last_model)
+                rec.carry = ""
 
                 # Execute the tool_use blocks concurrently (true parallel tool calling).
                 # Each result is mapped back to its originating block by index so
@@ -2405,9 +2829,9 @@ class Client:
                 # AFTER execute so it carries output/is_error/metadata.
                 outputs = await self._schedule(
                     toolkit,
-                    [(use["name"], use.get("input") or {}) for use in uses],
+                    [(use["name"], _object_input(use.get("input"))) for use in uses],
                     lambda i: self._run_tool(
-                        toolkit, uses[i]["name"], uses[i].get("input") or {}, uses[i].get("id"), turn, log, cancel
+                        toolkit, uses[i]["name"], _object_input(uses[i].get("input")), uses[i].get("id"), turn, log, cancel
                     ),
                 )
                 # Record in tool-call order; on the FIRST durable halt, include that tool_result
@@ -2426,6 +2850,7 @@ class Client:
                 messages.append({"role": "user", "content": results})
                 if halted is not None:
                     return self._pending_run(run_start, halted, messages, tool_calls, turns, usage, model=last_model)
+                await self._round_end(messages, turn, False, "")
 
             return self._end_run(run_start, "", messages, tool_calls, turns, usage, at_limit=True, model=last_model)
         except Exception as e:
@@ -2465,6 +2890,8 @@ class Client:
         turns = 0
         run_start = _now()
         last_model = self.model
+        rec = _Recovery(self.stop_recovery, self.max_turns)
+        overflow = _OverflowState()
 
         try:
             for turn in range(self.max_turns):
@@ -2486,26 +2913,32 @@ class Client:
                         # SPEC §8: a non-empty ``model`` applies to THIS turn only.
                         if ov.get("model"):
                             turn_model = ov["model"]
-                payload: dict[str, Any] = {
-                    "model": turn_model,
-                    "messages": self._wire_messages(messages, "openai"),
-                    "stream": True,
-                    "stream_options": {"include_usage": True},
-                }
-                # Gap 5: omit tools/tool_choice when the effective list is empty.
-                if tools:
-                    payload["tools"] = tools
-                    payload["tool_choice"] = "auto"
-                payload = self._finalize_body(payload)
+                def build(msgs: list[dict[str, Any]], turn_model: str = turn_model, tools: Any = tools) -> dict[str, Any]:
+                    payload: dict[str, Any] = {
+                        "model": turn_model,
+                        "messages": self._wire_messages(msgs, "openai"),
+                        "stream": True,
+                        "stream_options": {"include_usage": True},
+                    }
+                    # Gap 5: omit tools/tool_choice when the effective list is empty.
+                    if tools:
+                        payload["tools"] = tools
+                        payload["tool_choice"] = "auto"
+                    return self._finalize_body(payload)
+
+                box = {"messages": messages}
 
                 model = last_model = turn_model
                 t0 = _now()
                 before_p, before_c = usage["prompt_tokens"], usage["completion_tokens"]
                 content = ""
+                finish = ""
                 acc: dict[int, dict[str, str]] = {}
                 try:
-                    async for line in self._sse_lines(url, req_headers, payload, deadline, cancel):
+                    async for line in self._sse_compacting(url, req_headers, build, box, overflow, tools, turn_model, turn, deadline, cancel, log):
                         if isinstance(line, dict):  # an in-process side-channel event
+                            if line.get("type") == "fallback":
+                                model = last_model = turn_model = line["to"]
                             yield line
                             continue
                         if not line.startswith("data:"):
@@ -2521,6 +2954,7 @@ class Client:
                         choices = j.get("choices") or []
                         if not choices:
                             continue
+                        finish = choices[0].get("finish_reason") or finish
                         d = choices[0].get("delta") or {}
                         if d.get("content"):
                             content += d["content"]
@@ -2536,8 +2970,11 @@ class Client:
                             if fn.get("arguments"):
                                 slot["args"] += fn["arguments"]
                 except Exception:
+                    messages = box["messages"]
                     self._emit({"event": "llm", "model": model, "status": "error", "ms": _ms_since(t0), "prompt_tokens": 0, "completion_tokens": 0})
                     raise
+                messages = box["messages"]
+                overflow.ok_since += 1
                 _ev: dict[str, Any] = {"event": "llm", "model": model, "status": "ok", "ms": _ms_since(t0), "prompt_tokens": usage["prompt_tokens"] - before_p, "completion_tokens": usage["completion_tokens"] - before_c}
                 _parts = self._part_summaries(messages)
                 if _parts:
@@ -2551,11 +2988,24 @@ class Client:
                     )
 
                 calls = [acc[i] for i in sorted(acc)]
+                fix = rec.decide(
+                    turn, bool(calls), any(_malformed_json_args(c["args"]) for c in calls), finish == "length", content
+                )
+                if fix is not None:
+                    if fix == RECOVERY_CONTINUE:
+                        messages.append({"role": "assistant", "content": content})
+                        rec.carry += content
+                    messages.append({"role": "user", "content": fix})
+                    continue
                 if not calls:
                     messages.append({"role": "assistant", "content": content})
+                    if await self._round_end(messages, turn, True, rec.carry + content):
+                        rec.carry = ""
+                        continue
                     yield {"type": "usage", "usage": usage}
-                    yield {"type": "done", "result": self._end_run(run_start, content, messages, tool_calls, turns, usage, model=last_model)}
+                    yield {"type": "done", "result": self._end_run(run_start, rec.carry + content, messages, tool_calls, turns, usage, model=last_model)}
                     return
+                rec.carry = ""
 
                 messages.append(
                     {
@@ -2593,6 +3043,7 @@ class Client:
                     tool_calls.append(self._tool_call_record(c["name"], args, result, c["id"]))
                     messages.append(_tool_message(c["id"], c["name"], result))
                     yield self._result_event(c["id"], c["name"], _safe_json(c["args"]), result)
+                await self._round_end(messages, turn, False, "")
 
             yield {"type": "done", "result": self._end_run(run_start, _last_text(messages), messages, tool_calls, turns, usage, at_limit=True, model=last_model)}
         except Exception as e:
@@ -2634,6 +3085,8 @@ class Client:
         turns = 0
         run_start = _now()
         last_model = self.model
+        rec = _Recovery(self.stop_recovery, self.max_turns)
+        overflow = _OverflowState()
 
         try:
             for turn in range(self.max_turns):
@@ -2655,17 +3108,20 @@ class Client:
                         # SPEC §8: a non-empty ``model`` applies to THIS turn only.
                         if ov.get("model"):
                             turn_model = ov["model"]
-                payload: dict[str, Any] = {
-                    "model": turn_model,
-                    "max_tokens": 4096,
-                    "system": system,
-                    "messages": self._wire_messages(messages, "anthropic"),
-                    "stream": True,
-                }
-                # Gap 5: omit tools when the effective list is empty.
-                if tools:
-                    payload["tools"] = tools
-                payload = self._finalize_body(payload)
+                def build(msgs: list[dict[str, Any]], turn_model: str = turn_model, tools: Any = tools) -> dict[str, Any]:
+                    payload: dict[str, Any] = {
+                        "model": turn_model,
+                        "max_tokens": 4096,
+                        "system": system,
+                        "messages": self._wire_messages(msgs, "anthropic"),
+                        "stream": True,
+                    }
+                    # Gap 5: omit tools when the effective list is empty.
+                    if tools:
+                        payload["tools"] = tools
+                    return self._finalize_body(payload)
+
+                box = {"messages": messages}
 
                 model = last_model = turn_model
                 t0 = _now()
@@ -2673,7 +3129,12 @@ class Client:
                 blocks: dict[int, dict[str, Any]] = {}
                 stop_reason = ""
                 try:
-                    async for line in self._sse_lines(endpoint, req_headers, payload, deadline, cancel):
+                    async for line in self._sse_compacting(endpoint, req_headers, build, box, overflow, tools, turn_model, turn, deadline, cancel, log):
+                        if isinstance(line, dict):  # a retry / fallback event (§8)
+                            if line.get("type") == "fallback":
+                                model = last_model = turn_model = line["to"]
+                            yield line
+                            continue
                         if not line.startswith("data:"):
                             continue
                         j = _safe_parse(line[5:].strip())
@@ -2705,8 +3166,11 @@ class Client:
                             stop_reason = (j.get("delta") or {}).get("stop_reason") or stop_reason
                             _add_usage(usage, j.get("usage"), "anthropic")
                 except Exception:
+                    messages = box["messages"]
                     self._emit({"event": "llm", "model": model, "status": "error", "ms": _ms_since(t0), "prompt_tokens": 0, "completion_tokens": 0})
                     raise
+                messages = box["messages"]
+                overflow.ok_since += 1
                 _ev: dict[str, Any] = {"event": "llm", "model": model, "status": "ok", "ms": _ms_since(t0), "prompt_tokens": usage["prompt_tokens"] - before_p, "completion_tokens": usage["completion_tokens"] - before_c}
                 _parts = self._part_summaries(messages)
                 if _parts:
@@ -2727,11 +3191,29 @@ class Client:
                 ]
                 messages.append({"role": "assistant", "content": content})
                 uses = [b for b in content if b["type"] == "tool_use"]
+                text = "".join(b["text"] for b in content if b["type"] == "text")
+                fix = rec.decide(
+                    turn,
+                    bool(uses),
+                    any(_malformed_json_args(b["json"]) for b in blocks.values() if b["type"] == "tool_use"),
+                    stop_reason == "max_tokens",
+                    text,
+                )
+                if fix is not None:
+                    if fix == RECOVERY_CONTINUE:
+                        rec.carry += text
+                    else:
+                        messages.pop()
+                    messages.append({"role": "user", "content": fix})
+                    continue
                 if stop_reason != "tool_use" or not uses:
-                    text = "".join(b["text"] for b in content if b["type"] == "text")
+                    if await self._round_end(messages, turn, True, rec.carry + text):
+                        rec.carry = ""
+                        continue
                     yield {"type": "usage", "usage": usage}
-                    yield {"type": "done", "result": self._end_run(run_start, text, messages, tool_calls, turns, usage, model=last_model)}
+                    yield {"type": "done", "result": self._end_run(run_start, rec.carry + text, messages, tool_calls, turns, usage, model=last_model)}
                     return
+                rec.carry = ""
 
                 for u in uses:
                     yield self._call_event(u["id"], u["name"], u["input"])
@@ -2755,6 +3237,7 @@ class Client:
                         yield {"type": "done", "result": self._pending_run(run_start, halted, messages, tool_calls, turns, usage, model=last_model)}
                         return
                 messages.append({"role": "user", "content": results})
+                await self._round_end(messages, turn, False, "")
 
             yield {"type": "done", "result": self._end_run(run_start, "", messages, tool_calls, turns, usage, at_limit=True, model=last_model)}
         except Exception as e:
@@ -2771,14 +3254,33 @@ class Client:
         payload: dict[str, Any],
         deadline: Optional[float],
         cancel: Optional[asyncio.Event],
-    ) -> AsyncGenerator[str, None]:
+    ) -> AsyncGenerator[Union[str, dict[str, Any]], None]:
         """Open the streaming POST (with retry on the initial connect) and yield SSE
         lines. Since urllib is blocking, a worker thread reads the response and feeds
         an :class:`asyncio.Queue`; this async generator awaits items from the queue.
         """
         loop = asyncio.get_running_loop()
         # Initial connection uses the retrying fetch (retries transient connect errors).
-        resp = await self._llm_fetch(self._transport.open, url, headers, payload, deadline, cancel)
+        # Each retry surfaces to the consumer as a §8 ``retry`` stream event (a dict,
+        # like the in-process side channel) before its wait.
+        # §8 fallbackModels: on overload after a spent budget, announce and switch model —
+        # always before the first delta (overload is an HTTP status, received pre-token).
+        chain = self._model_chain(payload)
+        resp: Any = None
+        for i, m in enumerate(chain):
+            body = payload if i == 0 else {**payload, "model": m}
+            try:
+                async for kind, value in self._llm_fetch_events(self._transport.open, url, headers, body, deadline, cancel):
+                    if kind == "retry":
+                        yield value
+                    else:
+                        resp = value
+                break
+            except _HttpError as e:
+                if i + 1 < len(chain) and self._advances(e):
+                    yield {"type": "fallback", "from": m, "to": chain[i + 1]}
+                    continue
+                raise
 
         queue: asyncio.Queue = asyncio.Queue(maxsize=256)
         _SENTINEL = object()
@@ -2921,9 +3423,15 @@ def create_client(
     prompt_cache: Optional[PromptCacheOptions] = None,
     tool_tiers: Optional[ToolTierOptions] = None,
     max_tool_concurrency: Optional[int] = None,
+    stop_recovery: bool = False,
+    compact_on_overflow: Optional[Callable[[dict[str, Any]], Any]] = None,
+    fallback_models: Optional[list[str]] = None,
 ) -> Client:
     return Client(
         max_tool_concurrency=max_tool_concurrency,
+        stop_recovery=stop_recovery,
+        compact_on_overflow=compact_on_overflow,
+        fallback_models=fallback_models,
         api_key_env=api_key_env,
         wait_for_ctx=wait_for_ctx,
         prompt_cache=prompt_cache,

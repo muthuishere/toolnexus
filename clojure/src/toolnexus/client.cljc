@@ -441,9 +441,25 @@
                     the final say, so `:on-error` returning `:fail` overrides a
                     status listed here. Example: a Cloudflare-fronted origin
                     that answers `520`–`527`.
+    :fallback-models
+                    §8 — ordered model ids tried, each with a fresh retry
+                    budget, only when the current model's budget ends on a
+                    `503`/`529`. Run's `:on-event` sees
+                    `{:type \"fallback\" :from :to}` before the switch. Env
+                    TOOLNEXUS_DISABLE_MODEL_FALLBACK=1|true ignores it. Absent
+                    ⇒ unchanged.
     :hooks          §8 lifecycle middleware — a map of any of
-                    {:before-llm :after-llm :before-tool :after-tool}; see
+                    {:before-llm :after-llm :before-tool :after-tool
+                     :after-round}; see
                     `before-llm!` / `execute-tool`. Absent => nothing changes.
+    :compact-on-overflow
+                    SPEC §7F.1 — a hook with the `:before-llm` shape, called when
+                    the provider rejects a prompt as too long (`context-overflow?`).
+                    Strictly fewer `:messages` replace the transcript and the SAME
+                    turn is re-sent (no `:before-llm` re-run, no turn consumed);
+                    nil / no progress, or 3 rapid compactions in a row, fail with
+                    `:toolnexus/error :context-overflow`. Absent => an overflow
+                    surfaces as the provider error, byte-identical.
     :wait-for       (fn [request] answer) — the ONE host slot of §10.
     :wait-for-ctx   (fn [ctx request] answer) — `:wait-for` that also receives
                     the turn's context `{:cancel :cancelled? :call-id :turn}`, so
@@ -464,6 +480,10 @@
                     uniformly. Unset => an ATTACHED part the style cannot
                     represent stops the run, a TOOL-DERIVED one degrades to a
                     text placeholder and warns once.
+    :stop-recovery  §8 Stop-reason recovery (default false). When true, a
+                    turn that remains is spent on: a corrective after malformed
+                    tool-call args (once), a continue after a length stop (up to
+                    3, text carried), a nudge after an empty answer (once).
 
   On the name of that slot: §10 says \"never `await`\" because `await` is
   reserved in JS/Python/C#. In Clojure it is not reserved — it is
@@ -672,6 +692,10 @@
 ;;   :before-tool {:name :args :id :turn}          -> {:result} short-circuits,
 ;;                                                    {:args} rewrites
 ;;   :after-tool  {:name :args :result :id :turn}  -> {:result} replaces
+;;   :after-round {:turn :final :text :messages}   -> {:inject ["..."]} appends
+;;                  user messages at the round boundary (#192); on a final
+;;                  round (only when a turn remains) a non-empty inject
+;;                  continues the loop
 ;;
 ;; The event maps are kebab-case because a hook never crosses the wire; the
 ;; `ToolResult` one carries keeps its pinned `:isError`, because that one does.
@@ -706,6 +730,20 @@
       [(or (:messages ov) messages) (or (:tools ov) tools)
        (if (and (string? m) (not= "" m)) m (:model client))])
     [messages tools (:model client)]))
+
+(defn- round-end
+  "§8 `afterRound` (#192): fire the round-boundary hook and append its non-empty
+  `:inject` strings as user messages. Returns `[appended? messages]`. A final
+  round fires only when a turn remains (`turn + 1 < max-turns`)."
+  [client messages turn final? text max-turns]
+  (let [f (hook-of client :after-round)]
+    (if (or (nil? f) (and final? (>= (inc turn) max-turns)))
+      [false messages]
+      (let [out (f {:turn turn :final final? :text text :messages messages})
+            add (->> (:inject out)
+                     (filter #(and (string? %) (not= "" %)))
+                     (mapv (fn [m] {:role "user" :content m})))]
+        [(boolean (seq add)) (into messages add)]))))
 
 (defn after-llm!
   "§8 `afterLLM` — observe only (logging, cost, tracing). `:response` is the
@@ -1050,6 +1088,36 @@
       (if (= :retry (f info)) :retry :fail)
       default)))
 
+;; NOTE: `failed?` (transport) results never reach this — §8 says x-should-retry is
+;; never consulted on a network error, and there is no response to read it from.
+(defn- should-retry-override
+  "§8 \"x-should-retry override\": a non-ok response whose `x-should-retry`
+  header (name case-insensitive) is a trimmed `true`/`false` (value
+  case-insensitive) sets `:retryable?` to that value BEFORE `:on-error` runs.
+  Any other value, or no header, keeps `default`."
+  [res default]
+  (let [v (some-> (http/header res "x-should-retry") str str/trim str/lower-case)]
+    (case v
+      "true"  true
+      "false" false
+      default)))
+
+(defn- emit-retry!
+  "§8 \"Retry event (streaming only)\". Clojure has no `stream` entry point: the
+  run's `:on-event` sink IS its event channel (SPEC §8 Streaming), so a run
+  given `:on-event` is this port's streaming path and receives
+  `{:type \"retry\" :attempt :max :delay-ms :status? :reason}` BEFORE the wait.
+  A run without `:on-event` (plain run/ask) emits nothing, and an in-process
+  `:generate-stream` client has no wire and emits none."
+  [client attempt budget delay-ms status]
+  (when-let [on-event (and (not (::stream-http-client client)) (::on-event client))]
+    (on-event (cond-> {:type     "retry"
+                       :attempt  (inc attempt)
+                       :max      budget
+                       :delay-ms delay-ms
+                       :reason   (if status (str "HTTP " status) "network")}
+                status (assoc :status status)))))
+
 (defn- post-with-retry
   "One LLM round trip, with the §resilience-policy retry loop around it. A
   transport failure and a non-2xx both become a thrown ex-info — unlike a TOOL
@@ -1090,8 +1158,10 @@
                          ;; caller set (D5).
                          :retryable? (boolean (and (not timed-out?)
                                                    (or failed?
-                                                       (retryable-status?
-                                                        status (:retryable-statuses client)))))}
+                                                       (should-retry-override
+                                                        res
+                                                        (retryable-status?
+                                                         status (:retryable-statuses client))))))}
                 verdict (if timed-out? :fail (classify client info))
                 throw!  (fn []
                           (cond
@@ -1105,15 +1175,22 @@
 
                             :else
                             (throw (provider-error status (:body res) (http/header res "retry-after")))))]
+            ;; §8 fallbackModels — the chain advances only when the budget ran
+            ;; out on a RETRY verdict; a `:fail` verdict must never advance.
+            (when-let [v (::last-verdict client)] (reset! v verdict))
             (if (and (= :retry verdict) (< attempt budget))
-              (do (ktime/sleep! (or (retry-after-ms res)
-                                    ;; exponential backoff + jitter, identical to
-                                    ;; the other six ports: base * 2^attempt plus
-                                    ;; a uniform 0..99ms so a fleet retrying the
-                                    ;; same upstream does not re-collide in lockstep.
-                                    (+ (* base-ms (bit-shift-left 1 attempt))
-                                       (rand-int 100))))
-                  (recur (inc attempt)))
+              ;; The wait is computed ONCE so the retry event reports exactly
+              ;; the delay that is then slept.
+              (let [delay-ms (or (retry-after-ms res)
+                                 ;; exponential backoff + jitter, identical to
+                                 ;; the other six ports: base * 2^attempt plus
+                                 ;; a uniform 0..99ms so a fleet retrying the
+                                 ;; same upstream does not re-collide in lockstep.
+                                 (+ (* base-ms (bit-shift-left 1 attempt))
+                                    (rand-int 100)))]
+                (emit-retry! client attempt budget delay-ms (when-not failed? status))
+                (ktime/sleep! delay-ms)
+                (recur (inc attempt)))
               (throw!))))))))
 
 (defn wire-opts
@@ -1141,32 +1218,88 @@
   (let [m (if (contains? shaped "model") (get shaped "model") (get shaped :model))]
     (if (string? m) m fallback)))
 
+(defn ^:no-doc fallback-disabled?
+  "§8 kill switch: TOOLNEXUS_DISABLE_MODEL_FALLBACK = `1`/`true` (any case),
+  read at each model call."
+  [client]
+  (let [raw (some-> ((or (::get-env client) env/get-env) "TOOLNEXUS_DISABLE_MODEL_FALLBACK")
+                    str/trim str/lower-case)]
+    (contains? #{"1" "true"} raw)))
+
+(defn ^:no-doc model-chain
+  "§8 fallbackModels — `[turn-model ...fallback-models]`, empty and duplicate
+  entries skipped. Absent option, kill switch, or an in-process source ⇒ just
+  `[turn-model]`, so behaviour is byte-identical."
+  [client turn-model]
+  (let [fbs (:fallback-models client)]
+    (if (or (empty? fbs)
+            (= in-process-base-url (:base-url client))
+            (fallback-disabled? client))
+      [turn-model]
+      (reduce (fn [acc m]
+                (if (or (not (string? m)) (= "" m) (some #(= m %) acc)) acc (conj acc m)))
+              [turn-model] fbs))))
+
+(defn- with-fallback
+  "Run `attempt` (model -> [decoded sent]) over the model chain. Each model gets
+  a fresh retry budget; the call advances only when that budget was exhausted on
+  a retry verdict AND the final status is 503/529. Anything else rethrows as
+  today; the last model's error surfaces when the chain is exhausted."
+  [client turn-model attempt]
+  (let [chain (model-chain client turn-model)]
+    (if (= 1 (count chain))
+      (attempt client turn-model)
+      (loop [[m & more] chain]
+        (let [verdict (atom nil)
+              c       (assoc client ::last-verdict verdict)
+              r       (try (attempt c m)
+                           (catch Throwable e
+                             (let [d (ex-data e)]
+                               (if (and (seq more)
+                                        (= :provider (:toolnexus/error d))
+                                        (contains? #{503 529} (:status d))
+                                        (= :retry @verdict))
+                                 ::advance
+                                 (throw e)))))]
+          (if (= ::advance r)
+            (do (when-let [sink (::on-event client)]
+                  (sink {:type "fallback" :from m :to (first more)}))
+                (recur more))
+            r))))))
+
 (defn- llm-call
   "The agent loop's round trip: build the loop's body, then post it."
   [client model system messages tools]
-  (let [shaped (body-map client model system messages tools)
-        ;; §8 — report the model TRANSMITTED: a :request-params / :body-transform
-        ;; model (the agent Loop's per-call override) wins over the hook's.
-        sent   (model-of shaped model)]
-    [(post-with-retry client
-                      (endpoint client)
-                      (merge {"content-type" "application/json"} (request-headers client))
-                      (json/write-str shaped)
-                      sent)
-     sent]))
+  (with-fallback
+    client model
+    (fn [client model]
+      (let [shaped (body-map client model system messages tools)
+            ;; §8 — report the model TRANSMITTED: a :request-params / :body-transform
+            ;; model (the agent Loop's per-call override) wins over the hook's.
+            sent   (model-of shaped model)]
+        [(post-with-retry client
+                          (endpoint client)
+                          (merge {"content-type" "application/json"} (request-headers client))
+                          (json/write-str shaped)
+                          sent)
+         sent]))))
 
 (defn call-provider*
   "`call-provider`, returning `[decoded-response transmitted-model]` — the model
   the shaped body actually carried (§8/§11: the model reported is the model sent)."
   [client body]
-  (let [shaped (shape-body client body)
-        m      (model-of shaped (or (:model body) (:model client)))]
-    [(post-with-retry client
-                      (endpoint client)
-                      (merge {"content-type" "application/json"} (request-headers client))
-                      (json/write-str shaped)
-                      m)
-     m]))
+  (with-fallback
+    client (or (:model body) (:model client))
+    (fn [client model]
+      (let [body   (if (= model (or (:model body) (:model client))) body (assoc body :model model))
+            shaped (shape-body client body)
+            m      (model-of shaped model)]
+        [(post-with-retry client
+                          (endpoint client)
+                          (merge {"content-type" "application/json"} (request-headers client))
+                          (json/write-str shaped)
+                          m)
+         m]))))
 
 (defn call-provider
   "ONE provider round trip for a CALLER-BUILT body map, through exactly the
@@ -1183,9 +1316,13 @@
 ;; per-style response reading
 ;; ---------------------------------------------------------------------------
 
-(defn- parse-args [s]
-  (try (or (json/read-str (if (str/blank? (str s)) "{}" (str s))) {})
-       (catch Throwable _ {})))
+(defn- parse-args
+  "A call's arguments as a map. Anything that is not a JSON object — unparseable
+  text, `[1]`, a bare string — runs as `{}` (SPEC §8 Stop-reason recovery)."
+  [s]
+  (let [v (try (json/read-str (if (str/blank? (str s)) "{}" (str s)))
+               (catch Throwable _ nil))]
+    (if (map? v) v {})))
 
 (defn- openai-calls [body]
   (mapv (fn [tc] {:id   (:id tc)
@@ -1196,7 +1333,8 @@
 (defn- anthropic-calls [body]
   (->> (:content body)
        (filter #(= "tool_use" (:type %)))
-       (mapv (fn [b] {:id (:id b) :name (:name b) :args (or (:input b) {})}))))
+       (mapv (fn [b] {:id (:id b) :name (:name b)
+                      :args (let [in (:input b)] (if (map? in) in {}))}))))
 
 (defn- tool-calls-of [client body]
   (if (= "anthropic" (:style client)) (anthropic-calls body) (openai-calls body)))
@@ -1208,6 +1346,50 @@
   (if (= "anthropic" (:style client))
     {:role "assistant" :content (:content body)}
     (get-in body [:choices 0 :message])))
+
+;; SPEC §8 "Stop-reason recovery" — the three pinned user messages, byte-exact
+;; in every port.
+(def stop-recovery-nudge
+  "Your previous response contained no answer. Continue and give your answer.")
+(def stop-recovery-continue
+  "Your previous response was cut off at the output token limit. Continue exactly where it stopped, without repeating anything.")
+(def stop-recovery-corrective
+  "Your previous tool call could not be used: its arguments were not a valid JSON object. Call the tool again with arguments that are a single valid JSON object matching its input schema.")
+
+(defn- malformed-calls?
+  "Any tool call whose raw arguments are not a JSON object: OpenAI `arguments`
+  non-blank and not an object; Anthropic `input` present and not an object."
+  [client body]
+  (if (= "anthropic" (:style client))
+    (boolean (some (fn [b] (and (= "tool_use" (:type b))
+                                (some? (:input b))
+                                (not (map? (:input b)))))
+                   (:content body)))
+    (boolean (some (fn [tc]
+                     (let [raw (get-in tc [:function :arguments])]
+                       (and (string? raw) (not (str/blank? raw))
+                            (not (map? (try (json/read-str raw) (catch Throwable _ nil)))))))
+                   (get-in body [:choices 0 :message :tool_calls])))))
+
+(defn- truncated? [client body]
+  (if (= "anthropic" (:style client))
+    (= "max_tokens" (:stop_reason body))
+    (= "length" (get-in body [:choices 0 :finish_reason]))))
+
+(defn- stop-recovery
+  "Classify one response (SPEC §8 order) against the run's budgets in `st`
+  (an atom {:correct :cont :nudge :carry}). Returns nil, or [text drop?]."
+  [st last-turn? has-calls? malformed? truncated? text]
+  (when-not last-turn?
+    (let [{:keys [correct cont nudge]} @st]
+      (cond
+        (and has-calls? malformed? (< correct 1))
+        (do (swap! st update :correct inc) [stop-recovery-corrective true])
+        (and (not has-calls?) truncated? (< cont 3))
+        (do (swap! st #(-> % (update :cont inc) (update :carry str text)))
+            [stop-recovery-continue false])
+        (and (not has-calls?) (not truncated?) (str/blank? text) (< nudge 1))
+        (do (swap! st update :nudge inc) [stop-recovery-nudge true])))))
 
 (defn- final-text [client body]
   (if (= "anthropic" (:style client))
@@ -1777,6 +1959,68 @@
 ;; the loop (§0.10)
 ;; ---------------------------------------------------------------------------
 
+;; ---------------------------------------------------------------------------
+;; SPEC §7F.1 — reactive compaction on context overflow
+;; ---------------------------------------------------------------------------
+
+(def ^:private overflow-markers
+  ["context_length_exceeded" "maximum context length" "prompt is too long"
+   "prompt_too_long" "request_too_large" "context window"])
+
+(defn context-overflow?
+  "SPEC §7F.1 detection: true iff `status` is 400 or 413 AND the (redacted)
+  error body, lowercased, carries one of the pinned overflow markers."
+  [status body]
+  (boolean (and (or (= 400 status) (= 413 status))
+                (let [b (str/lower-case (str body))]
+                  (some #(str/includes? b %) overflow-markers)))))
+
+(defn context-overflow-error
+  "The typed §7F.1 failure — a variant of the provider error (`ex-data`
+  `:toolnexus/error :context-overflow`) carrying `:compactions`, `:status` and
+  the redacted `:body` of the last provider error. Message pinned byte-identical."
+  [compactions status body]
+  (ex-info (str "context overflow: " compactions
+                " reactive compaction(s) did not make the prompt fit")
+           {:toolnexus/error :context-overflow :compactions compactions
+            :status status :body body}))
+
+(defn- overflow-data
+  "The ex-data of a final provider failure that is a context overflow, else nil."
+  [e]
+  (let [d (ex-data e)]
+    (when (and (= :provider (:toolnexus/error d))
+               (context-overflow? (:status d) (:body d)))
+      d)))
+
+(defn- send-compacting
+  "The ONE §7F.1 reaction + breaker, shared by every LLM call site of the loop.
+  `send!` takes the working transcript and performs the call. `breaker` is the
+  run's atom {:ok-since :streak}. Returns `[send-result messages]` — the
+  messages are the (possibly compacted) working transcript. Without
+  `:compact-on-overflow` this is exactly `(send! messages)`."
+  [client breaker messages tools model turn send!]
+  (if-let [hook (:compact-on-overflow client)]
+    (loop [messages messages]
+      (let [r (try {:ok (send! messages)}
+                   (catch Throwable e
+                     (if-let [d (overflow-data e)] {:overflow d} (throw e))))]
+        (if-let [d (:overflow r)]
+          (let [{:keys [ok-since streak]} @breaker
+                streak (if (and (pos? streak) (< ok-since 2)) streak 0)]
+            (swap! breaker assoc :streak streak)
+            (when (>= streak 3)
+              (throw (context-overflow-error streak (:status d) (:body d))))
+            (let [out (:messages (hook {:messages messages :tools tools
+                                        :model model :turn turn}))]
+              (when-not (and (some? out) (< (count out) (count messages)))
+                (throw (context-overflow-error streak (:status d) (:body d))))
+              (reset! breaker {:ok-since 0 :streak (inc streak)})
+              (recur (vec out))))
+          (do (swap! breaker update :ok-since inc)
+              [(:ok r) messages]))))
+    [(send! messages) messages]))
+
 (defn run
   "Run the agent loop. `ctx` = {:toolkit tk :history [...] :on-event f}.
 
@@ -1820,6 +2064,11 @@
         ;; §conversation-store — the turn as it stands, for the interrupted-turn
         ;; save: {:messages complete-so-far :calls unanswered :done {id settled}}.
         progress   (atom nil)
+        ;; SPEC §8 Stop-reason recovery — per-run budgets + carried text.
+        recovery   (when (:stop-recovery client) (atom {:correct 0 :cont 0 :nudge 0 :carry ""}))
+        carry      (fn [] (if recovery (:carry @recovery) ""))
+        ;; SPEC §7F.1 breaker state, per run.
+        breaker    (atom {:ok-since 0 :streak 0})
         ;; ONE exit path for the store save and the run metric. Two `run-result`
         ;; call sites return from this loop, and a save wired into only one of
         ;; them is the classic half-fix — the turn-limit exit would silently
@@ -1876,25 +2125,53 @@
               ;; `translate`) never sees a synthetic user turn or a provider
               ;; block. A part the style cannot send stops the run before any
               ;; HTTP call, as DATA.
-              wire    (content/build-wire messages (wire-opts client))]
-          (if (:error wire)
+              ;; SPEC §7F.1: an overflow may compact `messages` and re-send
+              ;; this same turn; the wire is rebuilt from the compacted transcript.
+              [sent messages] (send-compacting
+                               client breaker messages tools turn-model turn
+                               (fn [msgs]
+                                 (let [wire (content/build-wire msgs (wire-opts client))]
+                                   (if (:error wire)
+                                     {:wire wire}
+                                     {:resp (llm-call client turn-model system (:messages wire) tools)}))))
+              wire    (:wire sent)]
+          (if wire
             (let [r (finish! (assoc (content-error-result client wire messages tool-calls turns usage) :model last-model))]
               (emit! on-event {:type "done" :result r})
               r)
-            (let [[body turn-model] (llm-call client turn-model system (:messages wire) tools)
+            (let [[body turn-model] (:resp sent)
                   usage   (add-usage usage client (:usage body))
                   _       (after-llm! client body turn turn-model)
                   _       (emit! on-event {:type "usage" :usage usage})
                   turns   (inc turns)
                   msg     (assistant-message client body)
                   calls   (tool-calls-of client body)
+                  before  messages
                   messages (conj messages msg)
-                  _       (reset! progress {:messages messages :calls calls :done {}})]
-              (if (empty? calls)
-                (let [r (finish! (assoc (run-result client (final-text client body) messages tool-calls turns usage false) :model turn-model))]
-                  (emit! on-event {:type "done" :result r})
-                  r)
-                (let [_       (doseq [c calls]
+                  recover (when recovery
+                            (stop-recovery recovery (>= turn (dec max-turns)) (boolean (seq calls))
+                                           (malformed-calls? client body) (truncated? client body)
+                                           (final-text client body)))
+                  _       (reset! progress {:messages (if recover before messages)
+                                            :calls (if recover [] calls) :done {}})]
+              (cond
+                recover
+                (let [[text drop?] recover]
+                  (recur (conj (if drop? before messages) {:role "user" :content text})
+                         tools (inc turn) turns tool-calls usage turn-model))
+
+                (empty? calls)
+                (let [text (str (carry) (final-text client body))
+                      [more? messages] (round-end client messages turn true text max-turns)]
+                  (if more?
+                    (do (when recovery (swap! recovery assoc :carry ""))
+                        (recur messages tools (inc turn) turns tool-calls usage turn-model))
+                    (let [r (finish! (assoc (run-result client text messages tool-calls turns usage false) :model turn-model))]
+                      (emit! on-event {:type "done" :result r})
+                      r)))
+                :else
+                (let [_       (when recovery (swap! recovery assoc :carry ""))
+                      _       (doseq [c calls]
                                 (emit! on-event
                                        ;; SPEC §4C: a call_tool call names the REAL tool
                                        (let [[nm a w?] (unwrap-call client (:name c) (:args c))]
@@ -1965,7 +2242,8 @@
                     (let [r (run-metric! (assoc (pending-result client halted msgs (into tool-calls records) turns usage) :model turn-model))]
                       (emit! on-event {:type "done" :result r})
                       r)
-                    (recur msgs tools (inc turn) turns (into tool-calls records) usage turn-model)))))))))
+                    (recur (second (round-end client msgs turn false "" max-turns))
+                           tools (inc turn) turns (into tool-calls records) usage turn-model)))))))))
     ;; SPEC §8 "Interrupted turns are saved": an error or a cancellation still
     ;; saves the prompt and every complete message, unanswered tool calls
     ;; closed with an `interrupted` result. The ORIGINAL error is rethrown; a

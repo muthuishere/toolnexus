@@ -2,7 +2,7 @@
 """A fake ACP agent for conformance/acp-client/cases.json (SPEC §8C), stdlib only.
 
 Records every received request as one JSON line ``{"method", "params"}`` to the file
-named by ``TN_FAKE_REC``. Flags (env): ``TN_FAKE_DRIP`` (thought + chunks spaced in
+named by ``TN_FAKE_REC``. Flags (env): ``TN_FAKE_TOOLUPDATE`` (replay stream.acpToolUpdate.updates), ``TN_FAKE_DRIP`` (thought + chunks spaced in
 time), ``TN_FAKE_NO_CONFIG_OPTION`` (reject session/set_config_option),
 ``TN_FAKE_EXIT_ON_PROMPT`` (exit without replying to session/prompt),
 ``TN_FAKE_FS_REQUEST`` (send fs/read_text_file first and require a -32601 reply).
@@ -59,6 +59,12 @@ def main() -> None:
                     if i:
                         time.sleep(0.2)
                     text("agent_message_chunk", chunk)
+            elif os.environ.get("TN_FAKE_TOOLUPDATE") == "1":
+                cases_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "conformance", "acp-client", "cases.json")
+                with open(cases_path, encoding="utf-8") as f:
+                    updates = json.load(f)["stream"]["acpToolUpdate"]["updates"]
+                for update in updates:
+                    send({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "s1", "update": update}})
             elif os.environ.get("TN_FAKE_FS_REQUEST") == "1":
                 send({"jsonrpc": "2.0", "id": 9999, "method": "fs/read_text_file", "params": {"path": "/x"}})
                 code = None

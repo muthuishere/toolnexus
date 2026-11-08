@@ -373,13 +373,24 @@ public sealed class AcpClient : IDisposable
                 }
                 case "tool_call_update":
                 {
-                    var status = StrProp(upd, "status");
-                    if (emit == null || (status != "completed" && status != "failed")) break;
+                    // A title is remembered as the call's name for every later event of this id;
+                    // a non-empty rawInput is the call's input arriving late (#188).
                     var callId = StrProp(upd, "toolCallId");
-                    string? name;
-                    lock (toolNames) toolNames.TryGetValue(callId, out name);
                     var title = StrProp(upd, "title");
-                    if (title.Length > 0) name = title;
+                    string? name;
+                    lock (toolNames)
+                    {
+                        if (title.Length > 0) toolNames[callId] = title;
+                        toolNames.TryGetValue(callId, out name);
+                    }
+                    if (emit == null) break;
+                    if (upd.TryGetProperty("rawInput", out var ri) && ri.ValueKind == JsonValueKind.Object
+                        && ri.EnumerateObject().Any()
+                        && Json.FromElement(ri) is IDictionary<string, object?> rawArgs)
+                        emit(new LlmClient.StreamEvent(LlmClient.StreamKind.ToolCallArgs, Id: callId, Name: name ?? "",
+                            Args: rawArgs, Via: "acp"));
+                    var status = StrProp(upd, "status");
+                    if (status != "completed" && status != "failed") break;
                     emit(new LlmClient.StreamEvent(LlmClient.StreamKind.ToolResult, Id: callId, Name: name ?? "",
                         Output: ToolContentText(upd), IsError: status == "failed", Via: "acp"));
                     break;

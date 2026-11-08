@@ -58,6 +58,19 @@ fn to_stream_event(ev: AcpStreamEvent) -> StreamEvent {
             via: via.into(),
             ..Default::default()
         },
+        AcpStreamEvent::ToolCallArgs {
+            id,
+            name,
+            args,
+            via,
+        } => StreamEvent {
+            kind: "tool_call_args".into(),
+            id,
+            name,
+            args,
+            via: via.into(),
+            ..Default::default()
+        },
         AcpStreamEvent::ToolResult {
             id,
             name,

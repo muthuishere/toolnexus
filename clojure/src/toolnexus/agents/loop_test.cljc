@@ -334,3 +334,13 @@
           e  (try (tnloop/run lp "one") nil (catch Throwable t (ex-message t)))]
       (is (= "hook boom" e))
       (is (= [] (models))))))
+
+;; §8 :after-round reaches a §7D loop run (fixture examples/round-boundary R6).
+(deftest after-round-is-forwarded-on-the-agent-path
+  (let [[http _] (scripted [(say "first") (say "second")])
+        opts     (assoc (base-opts http)
+                        :hooks {:after-round (fn [ev] (when (and (:final ev) (zero? (:turn ev)))
+                                                        {:inject ["keep going"]}))})
+        lp       (tnloop/create {:name "plain" :does "answers"} opts (bare-toolkit))
+        [out _]  (tnloop/run lp "hi")]
+    (is (= "second" (:text out)))))

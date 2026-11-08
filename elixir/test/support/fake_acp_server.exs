@@ -130,6 +130,42 @@ defmodule FakeAcpServer do
 
         reply(id, %{"stopReason" => "end_turn"})
 
+      System.get_env("TN_FAKE_TOOLUPDATE") == "1" ->
+        # conformance/acp-client stream.acpToolUpdate (#188)
+        for u <- [
+              %{
+                "sessionUpdate" => "tool_call",
+                "toolCallId" => "t1",
+                "title" => "Write",
+                "kind" => "edit",
+                "status" => "pending"
+              },
+              %{
+                "sessionUpdate" => "tool_call_update",
+                "toolCallId" => "t1",
+                "status" => "in_progress",
+                "title" => "Write /tmp/a.txt",
+                "rawInput" => %{"file_path" => "/tmp/a.txt", "content" => "hi"}
+              },
+              %{
+                "sessionUpdate" => "tool_call_update",
+                "toolCallId" => "t1",
+                "status" => "in_progress"
+              },
+              %{
+                "sessionUpdate" => "tool_call_update",
+                "toolCallId" => "t1",
+                "status" => "completed",
+                "content" => [
+                  %{"type" => "content", "content" => %{"type" => "text", "text" => "wrote"}}
+                ]
+              }
+            ],
+            do: emit_notification(u)
+
+        emit_chunk("done")
+        reply(id, %{"stopReason" => "end_turn"})
+
       System.get_env("TN_FAKE_FS_REQUEST") == "1" ->
         send_msg(%{
           "jsonrpc" => "2.0",

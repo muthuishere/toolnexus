@@ -533,22 +533,39 @@ defmodule Toolnexus.Acp do
     %{state | tool_names: Map.put(state.tool_names, id, name)}
   end
 
-  defp accumulate(
-         %{emit: emit} = state,
-         %{"update" => %{"sessionUpdate" => "tool_call_update", "status" => status} = u}
-       )
-       when is_function(emit, 1) and status in ["completed", "failed"] do
+  # SPEC §7E (#188): a non-empty title is remembered as the call's name; a
+  # non-empty rawInput object emits tool_call_args before any tool_result.
+  defp accumulate(state, %{"update" => %{"sessionUpdate" => "tool_call_update"} = u}) do
     id = u["toolCallId"]
-    name = if u["title"] in [nil, ""], do: Map.get(state.tool_names, id, ""), else: u["title"]
 
-    emit_event(state, %{
-      type: "tool_result",
-      id: id,
-      name: name,
-      output: tool_content_text(u["content"]),
-      is_error: status == "failed",
-      via: "acp"
-    })
+    names =
+      if is_binary(u["title"]) and u["title"] != "",
+        do: Map.put(state.tool_names, id, u["title"]),
+        else: state.tool_names
+
+    state = %{state | tool_names: names}
+    name = Map.get(names, id, "")
+
+    if is_map(u["rawInput"]) and map_size(u["rawInput"]) > 0 do
+      emit_event(state, %{
+        type: "tool_call_args",
+        id: id,
+        name: name,
+        args: u["rawInput"],
+        via: "acp"
+      })
+    end
+
+    if u["status"] in ["completed", "failed"] do
+      emit_event(state, %{
+        type: "tool_result",
+        id: id,
+        name: name,
+        output: tool_content_text(u["content"]),
+        is_error: u["status"] == "failed",
+        via: "acp"
+      })
+    end
 
     state
   end

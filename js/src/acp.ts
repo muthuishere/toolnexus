@@ -431,11 +431,18 @@ export async function loadACP(opts: ACPOptions): Promise<ACPClient> {
           break
         }
         case "tool_call_update": {
+          const callId: string = u.toolCallId ?? ""
+          // A non-empty title is remembered as the call's name for every later event (#188).
+          if (u.title) toolNames.set(callId, u.title)
+          const name: string = toolNames.get(callId) || ""
+          const raw = u.rawInput
+          if (raw && typeof raw === "object" && !Array.isArray(raw) && Object.keys(raw).length > 0) {
+            send({ type: "tool_call_args", id: callId, name, args: raw, via: "acp" })
+          }
           if (u.status !== "completed" && u.status !== "failed") break
-          const name: string = u.title || toolNames.get(u.toolCallId ?? "") || ""
           send({
             type: "tool_result",
-            id: u.toolCallId ?? "",
+            id: callId,
             name,
             output: acpToolContentText(u.content),
             isError: u.status === "failed",

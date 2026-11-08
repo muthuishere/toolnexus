@@ -81,6 +81,20 @@ fn main() {
             send(serde_json::json!({"jsonrpc":"2.0","id":id,"result":{"stopReason":"end_turn"}}));
             continue;
         }
+        if method == "session/prompt" && flag("TN_FAKE_TOOLUPDATE") {
+            // The updates of conformance stream.acpToolUpdate (issue #188).
+            for u in [
+                serde_json::json!({"sessionUpdate":"tool_call","toolCallId":"t1","title":"Write","kind":"edit","status":"pending"}),
+                serde_json::json!({"sessionUpdate":"tool_call_update","toolCallId":"t1","status":"in_progress","title":"Write /tmp/a.txt","rawInput":{"file_path":"/tmp/a.txt","content":"hi"}}),
+                serde_json::json!({"sessionUpdate":"tool_call_update","toolCallId":"t1","status":"in_progress"}),
+                serde_json::json!({"sessionUpdate":"tool_call_update","toolCallId":"t1","status":"completed","content":[{"type":"content","content":{"type":"text","text":"wrote"}}]}),
+            ] {
+                update(session, u);
+            }
+            chunk(session, "agent_message_chunk", "done");
+            send(serde_json::json!({"jsonrpc":"2.0","id":id,"result":{"stopReason":"end_turn"}}));
+            continue;
+        }
         if method == "session/prompt" && flag("TN_FAKE_FS_REQUEST") {
             let rid = next_out_id;
             next_out_id += 1;

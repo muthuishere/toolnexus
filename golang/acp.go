@@ -595,14 +595,23 @@ func (c *ACPClient) sendPrompt(ctx context.Context, text string, emit func(Strea
 				emit(StreamEvent{Type: "tool_call", ID: u.ToolCallID, Name: name, Args: u.RawInput, Via: "acp"})
 			}
 		case "tool_call_update":
-			if emit == nil || (u.Status != "completed" && u.Status != "failed") {
-				return
-			}
+			// A non-empty title renames the call for every later event of
+			// this id; a non-empty rawInput carries its (late) arguments
+			// (SPEC: tool_call_args, issue #188).
 			accMu.Lock()
+			if u.Title != "" {
+				toolNames[u.ToolCallID] = u.Title
+			}
 			name := toolNames[u.ToolCallID]
 			accMu.Unlock()
-			if u.Title != "" {
-				name = u.Title
+			if emit == nil {
+				return
+			}
+			if len(u.RawInput) > 0 {
+				emit(StreamEvent{Type: "tool_call_args", ID: u.ToolCallID, Name: name, Args: u.RawInput, Via: "acp"})
+			}
+			if u.Status != "completed" && u.Status != "failed" {
+				return
 			}
 			emit(StreamEvent{Type: "tool_result", ID: u.ToolCallID, Name: name, Via: "acp",
 				Output: acpToolContentText(u.Content), IsError: u.Status == "failed"})
