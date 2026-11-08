@@ -26,13 +26,13 @@ Each port: G1 cap + notice, G2 notes (`note:<slug>`, `read`, `list`, slug reject
 byte-identity test with all options absent.
 
 - [x] `js/`
-- [ ] `python/`
-- [ ] `golang/`
-- [ ] `java/`
+- [x] `python/`
+- [x] `golang/`
+- [x] `java/`
 - [ ] `csharp/`
 - [ ] `elixir/` (keep coverage ≥ 95%)
-- [ ] `clojure/` (`.cljc`, JVM + cljgo)
-- [ ] `rust/`
+- [x] `clojure/` (`.cljc`, JVM + cljgo)
+- [x] `rust/`
 
 ## Conformance
 
