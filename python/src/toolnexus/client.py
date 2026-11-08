@@ -402,6 +402,54 @@ class ProviderError(Exception):
 #: Back-compat alias — the type was private before it was worth catching.
 _HttpError = ProviderError
 
+#: §7F.1 — the provider-body markers that mean "the prompt does not fit".
+_OVERFLOW_MARKERS = (
+    "context_length_exceeded",
+    "maximum context length",
+    "prompt is too long",
+    "prompt_too_long",
+    "request_too_large",
+    "context window",
+)
+
+
+def is_context_overflow(status: int, body: Optional[str]) -> bool:
+    """SPEC §7F.1: True iff ``status`` is 400 or 413 AND the (redacted) provider body,
+    lowercased, contains one of the pinned overflow markers. Nothing else counts."""
+    if status not in (400, 413) or not body:
+        return False
+    low = body.lower()
+    return any(m in low for m in _OVERFLOW_MARKERS)
+
+
+class ContextOverflowError(ProviderError):
+    """SPEC §7F.1: reactive compaction could not make the prompt fit.
+
+    ``compactions`` is the rapid-refill streak at failure (3 from the breaker, else the
+    compactions in the current chain); ``status``/``body`` come from the last provider
+    error, redacted exactly as :class:`ProviderError`. A failure, never a Pending."""
+
+    def __init__(self, compactions: int, status: int, body: str) -> None:
+        Exception.__init__(
+            self, f"context overflow: {compactions} reactive compaction(s) did not make the prompt fit"
+        )
+        self.compactions = compactions
+        self.status = status
+        self.body = body
+        self.text = body
+        self.retry_after = None
+
+
+class _OverflowState:
+    """Per-run breaker counters (§7F.1): ``ok_since`` successful LLM calls since the last
+    reactive compaction; ``streak`` compactions in the current rapid chain."""
+
+    __slots__ = ("ok_since", "streak")
+
+    def __init__(self) -> None:
+        self.ok_since = 0
+        self.streak = 0
+
 
 def _open(url: str, headers: dict[str, str], payload: dict[str, Any], timeout: float):
     """Open a POST request, returning the live response object (caller closes/reads)."""
@@ -1041,8 +1089,13 @@ class Client:
         prompt_cache: Optional[PromptCacheOptions] = None,
         tool_tiers: Optional[ToolTierOptions] = None,
         max_tool_concurrency: Optional[int] = None,
+        compact_on_overflow: Optional[Callable[[dict[str, Any]], Any]] = None,
     ) -> None:
         self.base_url = base_url
+        # §7F.1: a before_llm-shaped hook run when the provider rejects the prompt as too
+        # long; its shorter transcript replaces the working one and the SAME turn is re-sent.
+        # None ⇒ byte-identical: the overflow surfaces as ProviderError.
+        self.compact_on_overflow = compact_on_overflow
         # §8 tool scheduling: cap on concurrency-safe calls of one response running at once.
         # None ⇒ env TOOLNEXUS_MAX_TOOL_CONCURRENCY when a positive integer, else 10. Unsafe
         # calls (anything not read-only) always run alone.
@@ -1747,6 +1800,103 @@ class Client:
         assert last_err is not None
         raise last_err
 
+    async def _compact_on_overflow(
+        self,
+        err: Exception,
+        state: _OverflowState,
+        messages: list[dict[str, Any]],
+        tools: Any,
+        model: str,
+        turn: int,
+    ) -> list[dict[str, Any]]:
+        """§7F.1 reaction + breaker for one failed LLM call. Returns the compacted
+        transcript to re-send the same turn with, or raises (the original error when
+        it is not an overflow / no hook is set, else :class:`ContextOverflowError`)."""
+        hook = self.compact_on_overflow
+        if (
+            hook is None
+            or not isinstance(err, ProviderError)
+            or isinstance(err, ContextOverflowError)
+            or not is_context_overflow(err.status, err.body)
+        ):
+            raise err
+        if not (state.streak > 0 and state.ok_since < 2):
+            state.streak = 0
+        if state.streak == 3:
+            raise ContextOverflowError(3, err.status, err.body) from err
+        ov = await _call_hook(hook, {"messages": messages, "tools": tools, "model": model, "turn": turn})
+        new = ov.get("messages") if isinstance(ov, dict) else None
+        if new is None or len(new) >= len(messages):
+            raise ContextOverflowError(state.streak, err.status, err.body) from err
+        state.streak += 1
+        state.ok_since = 0
+        return list(new)
+
+    async def _llm_json_compacting(
+        self,
+        url: str,
+        headers: dict[str, str],
+        build: Callable[[list[dict[str, Any]]], dict[str, Any]],
+        box: dict[str, Any],
+        state: _OverflowState,
+        tools: Any,
+        model: str,
+        turn: int,
+        deadline: Optional[float],
+        cancel: Optional[asyncio.Event],
+        style: ClientStyle,
+        log: Optional["_TurnLog"],
+    ) -> dict[str, Any]:
+        """One non-streaming LLM call of a turn, re-sent after a §7F.1 reactive
+        compaction. ``box["messages"]`` is the working transcript, replaced in place."""
+        while True:
+            msgs = box["messages"]
+            try:
+                data = await self._llm_call_json(url, headers, build(msgs), deadline, cancel, style, self._part_summaries(msgs), model=model)
+            except ProviderError as e:
+                box["messages"] = await self._compact_on_overflow(e, state, msgs, tools, model, turn)
+                if log is not None:
+                    log.messages = box["messages"]
+                continue
+            state.ok_since += 1
+            return data
+
+    async def _sse_compacting(
+        self,
+        url: str,
+        headers: dict[str, str],
+        build: Callable[[list[dict[str, Any]]], dict[str, Any]],
+        box: dict[str, Any],
+        state: _OverflowState,
+        tools: Any,
+        model: str,
+        turn: int,
+        deadline: Optional[float],
+        cancel: Optional[asyncio.Event],
+        log: Optional["_TurnLog"],
+    ) -> AsyncGenerator[Any, None]:
+        """:meth:`_sse_lines` for one streamed turn, re-opened after a §7F.1 reactive
+        compaction. The overflow is an HTTP error at connect, before any line, so
+        nothing is yielded for the failed attempt. The caller counts the success
+        (``state.ok_since``) once the turn's stream is fully read — the consumer may
+        stop early at ``[DONE]``, so this generator cannot."""
+        while True:
+            msgs = box["messages"]
+            gen = self._sse_lines(url, headers, build(msgs), deadline, cancel)
+            try:
+                first = await gen.__anext__()
+            except StopAsyncIteration:
+                return
+            except ProviderError as e:
+                box["messages"] = await self._compact_on_overflow(e, state, msgs, tools, model, turn)
+                if log is not None:
+                    log.messages = box["messages"]
+                continue
+            yield first
+            async for line in gen:
+                yield line
+            return
+
     async def _run_tool(
         self,
         toolkit: Optional[Toolkit],
@@ -2240,6 +2390,7 @@ class Client:
         turns = 0
         run_start = _now()
         last_model = self.model
+        overflow = _OverflowState()
 
         try:
             for turn in range(self.max_turns):
@@ -2261,18 +2412,24 @@ class Client:
                         # SPEC §8: a non-empty ``model`` applies to THIS turn only.
                         if ov.get("model"):
                             turn_model = ov["model"]
-                payload: dict[str, Any] = {
-                    "model": turn_model,
-                    "messages": self._wire_messages(messages, "openai"),
-                }
-                # Gap 5: omit tools/tool_choice entirely when the effective list is empty
-                # (including after a before_llm override) — many providers 400 on [].
-                if tools:
-                    payload["tools"] = tools
-                    payload["tool_choice"] = "auto"
-                payload = self._finalize_body(payload)
+                def build(msgs: list[dict[str, Any]], turn_model: str = turn_model, tools: Any = tools) -> dict[str, Any]:
+                    payload: dict[str, Any] = {
+                        "model": turn_model,
+                        "messages": self._wire_messages(msgs, "openai"),
+                    }
+                    # Gap 5: omit tools/tool_choice entirely when the effective list is empty
+                    # (including after a before_llm override) — many providers 400 on [].
+                    if tools:
+                        payload["tools"] = tools
+                        payload["tool_choice"] = "auto"
+                    return self._finalize_body(payload)
+
                 last_model = turn_model
-                data = await self._llm_call_json(url, req_headers, payload, deadline, cancel, "openai", self._part_summaries(messages), model=turn_model)
+                box = {"messages": messages}
+                try:
+                    data = await self._llm_json_compacting(url, req_headers, build, box, overflow, tools, turn_model, turn, deadline, cancel, "openai", log)
+                finally:
+                    messages = box["messages"]
                 _add_usage(usage, data.get("usage"), "openai")
                 after = _get_hook(self.hooks, "after_llm")
                 if after is not None:
@@ -2355,6 +2512,7 @@ class Client:
         turns = 0
         run_start = _now()
         last_model = self.model
+        overflow = _OverflowState()
 
         try:
             for turn in range(self.max_turns):
@@ -2376,18 +2534,24 @@ class Client:
                         # SPEC §8: a non-empty ``model`` applies to THIS turn only.
                         if ov.get("model"):
                             turn_model = ov["model"]
-                payload: dict[str, Any] = {
-                    "model": turn_model,
-                    "max_tokens": 4096,
-                    "system": system,
-                    "messages": self._wire_messages(messages, "anthropic"),
-                }
-                # Gap 5: omit tools when the effective list is empty.
-                if tools:
-                    payload["tools"] = tools
-                payload = self._finalize_body(payload)
+                def build(msgs: list[dict[str, Any]], turn_model: str = turn_model, tools: Any = tools) -> dict[str, Any]:
+                    payload: dict[str, Any] = {
+                        "model": turn_model,
+                        "max_tokens": 4096,
+                        "system": system,
+                        "messages": self._wire_messages(msgs, "anthropic"),
+                    }
+                    # Gap 5: omit tools when the effective list is empty.
+                    if tools:
+                        payload["tools"] = tools
+                    return self._finalize_body(payload)
+
                 last_model = turn_model
-                data = await self._llm_call_json(endpoint, req_headers, payload, deadline, cancel, "anthropic", self._part_summaries(messages), model=turn_model)
+                box = {"messages": messages}
+                try:
+                    data = await self._llm_json_compacting(endpoint, req_headers, build, box, overflow, tools, turn_model, turn, deadline, cancel, "anthropic", log)
+                finally:
+                    messages = box["messages"]
                 _add_usage(usage, data.get("usage"), "anthropic")
                 after = _get_hook(self.hooks, "after_llm")
                 if after is not None:
@@ -2465,6 +2629,7 @@ class Client:
         turns = 0
         run_start = _now()
         last_model = self.model
+        overflow = _OverflowState()
 
         try:
             for turn in range(self.max_turns):
@@ -2486,17 +2651,20 @@ class Client:
                         # SPEC §8: a non-empty ``model`` applies to THIS turn only.
                         if ov.get("model"):
                             turn_model = ov["model"]
-                payload: dict[str, Any] = {
-                    "model": turn_model,
-                    "messages": self._wire_messages(messages, "openai"),
-                    "stream": True,
-                    "stream_options": {"include_usage": True},
-                }
-                # Gap 5: omit tools/tool_choice when the effective list is empty.
-                if tools:
-                    payload["tools"] = tools
-                    payload["tool_choice"] = "auto"
-                payload = self._finalize_body(payload)
+                def build(msgs: list[dict[str, Any]], turn_model: str = turn_model, tools: Any = tools) -> dict[str, Any]:
+                    payload: dict[str, Any] = {
+                        "model": turn_model,
+                        "messages": self._wire_messages(msgs, "openai"),
+                        "stream": True,
+                        "stream_options": {"include_usage": True},
+                    }
+                    # Gap 5: omit tools/tool_choice when the effective list is empty.
+                    if tools:
+                        payload["tools"] = tools
+                        payload["tool_choice"] = "auto"
+                    return self._finalize_body(payload)
+
+                box = {"messages": messages}
 
                 model = last_model = turn_model
                 t0 = _now()
@@ -2504,7 +2672,7 @@ class Client:
                 content = ""
                 acc: dict[int, dict[str, str]] = {}
                 try:
-                    async for line in self._sse_lines(url, req_headers, payload, deadline, cancel):
+                    async for line in self._sse_compacting(url, req_headers, build, box, overflow, tools, turn_model, turn, deadline, cancel, log):
                         if isinstance(line, dict):  # an in-process side-channel event
                             yield line
                             continue
@@ -2536,8 +2704,11 @@ class Client:
                             if fn.get("arguments"):
                                 slot["args"] += fn["arguments"]
                 except Exception:
+                    messages = box["messages"]
                     self._emit({"event": "llm", "model": model, "status": "error", "ms": _ms_since(t0), "prompt_tokens": 0, "completion_tokens": 0})
                     raise
+                messages = box["messages"]
+                overflow.ok_since += 1
                 _ev: dict[str, Any] = {"event": "llm", "model": model, "status": "ok", "ms": _ms_since(t0), "prompt_tokens": usage["prompt_tokens"] - before_p, "completion_tokens": usage["completion_tokens"] - before_c}
                 _parts = self._part_summaries(messages)
                 if _parts:
@@ -2634,6 +2805,7 @@ class Client:
         turns = 0
         run_start = _now()
         last_model = self.model
+        overflow = _OverflowState()
 
         try:
             for turn in range(self.max_turns):
@@ -2655,17 +2827,20 @@ class Client:
                         # SPEC §8: a non-empty ``model`` applies to THIS turn only.
                         if ov.get("model"):
                             turn_model = ov["model"]
-                payload: dict[str, Any] = {
-                    "model": turn_model,
-                    "max_tokens": 4096,
-                    "system": system,
-                    "messages": self._wire_messages(messages, "anthropic"),
-                    "stream": True,
-                }
-                # Gap 5: omit tools when the effective list is empty.
-                if tools:
-                    payload["tools"] = tools
-                payload = self._finalize_body(payload)
+                def build(msgs: list[dict[str, Any]], turn_model: str = turn_model, tools: Any = tools) -> dict[str, Any]:
+                    payload: dict[str, Any] = {
+                        "model": turn_model,
+                        "max_tokens": 4096,
+                        "system": system,
+                        "messages": self._wire_messages(msgs, "anthropic"),
+                        "stream": True,
+                    }
+                    # Gap 5: omit tools when the effective list is empty.
+                    if tools:
+                        payload["tools"] = tools
+                    return self._finalize_body(payload)
+
+                box = {"messages": messages}
 
                 model = last_model = turn_model
                 t0 = _now()
@@ -2673,7 +2848,7 @@ class Client:
                 blocks: dict[int, dict[str, Any]] = {}
                 stop_reason = ""
                 try:
-                    async for line in self._sse_lines(endpoint, req_headers, payload, deadline, cancel):
+                    async for line in self._sse_compacting(endpoint, req_headers, build, box, overflow, tools, turn_model, turn, deadline, cancel, log):
                         if not line.startswith("data:"):
                             continue
                         j = _safe_parse(line[5:].strip())
@@ -2705,8 +2880,11 @@ class Client:
                             stop_reason = (j.get("delta") or {}).get("stop_reason") or stop_reason
                             _add_usage(usage, j.get("usage"), "anthropic")
                 except Exception:
+                    messages = box["messages"]
                     self._emit({"event": "llm", "model": model, "status": "error", "ms": _ms_since(t0), "prompt_tokens": 0, "completion_tokens": 0})
                     raise
+                messages = box["messages"]
+                overflow.ok_since += 1
                 _ev: dict[str, Any] = {"event": "llm", "model": model, "status": "ok", "ms": _ms_since(t0), "prompt_tokens": usage["prompt_tokens"] - before_p, "completion_tokens": usage["completion_tokens"] - before_c}
                 _parts = self._part_summaries(messages)
                 if _parts:
@@ -2921,9 +3099,11 @@ def create_client(
     prompt_cache: Optional[PromptCacheOptions] = None,
     tool_tiers: Optional[ToolTierOptions] = None,
     max_tool_concurrency: Optional[int] = None,
+    compact_on_overflow: Optional[Callable[[dict[str, Any]], Any]] = None,
 ) -> Client:
     return Client(
         max_tool_concurrency=max_tool_concurrency,
+        compact_on_overflow=compact_on_overflow,
         api_key_env=api_key_env,
         wait_for_ctx=wait_for_ctx,
         prompt_cache=prompt_cache,
