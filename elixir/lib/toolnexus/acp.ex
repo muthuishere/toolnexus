@@ -163,6 +163,30 @@ defmodule Toolnexus.Acp do
     :exit, reason -> {:error, {:acp_exit, exit_brief(reason)}}
   end
 
+  @doc """
+  Change the agent's mode on this RUNNING session (SPEC §8C, #197): sends
+  `session/set_mode {sessionId, modeId}` at once — no restart, same session.
+  The value passes through unvalidated. An agent rejection fails only this
+  call; the session stays usable.
+  """
+  @spec set_mode(pid(), String.t()) :: :ok | {:error, term()}
+  def set_mode(pid, mode), do: control(pid, {:set_mode, mode})
+
+  @doc """
+  Change the agent's model on this RUNNING session (SPEC §8C, #197) — the
+  `:model` connect option's logic: `session/set_config_option
+  {configId:"model"}`, then `session/set_model` if the agent rejects that.
+  Both failing returns `{:error, {:set_model, model, e1, e2}}`.
+  """
+  @spec set_model(pid(), String.t()) :: :ok | {:error, term()}
+  def set_model(pid, model), do: control(pid, {:set_model, model})
+
+  defp control(pid, req) do
+    GenServer.call(pid, {:control, req}, :infinity)
+  catch
+    :exit, reason -> {:error, {:acp_exit, exit_brief(reason)}}
+  end
+
   @doc "Close the session. Idempotent — safe to call more than once."
   @spec close(pid()) :: :ok
   def close(pid) do
@@ -257,7 +281,8 @@ defmodule Toolnexus.Acp do
                tool_names: %{},
                queue: :queue.new(),
                timeout: timeout,
-               closed: false
+               closed: false,
+               ctl: %{}
              }}
 
           {:error, reason} ->
@@ -415,6 +440,22 @@ defmodule Toolnexus.Acp do
     {:noreply, %{state | queue: :queue.in({{text, emit}, from}, state.queue)}}
   end
 
+  def handle_call({:control, _req}, _from, %{closed: true} = state) do
+    {:reply, {:error, :closed}, state}
+  end
+
+  def handle_call({:control, {:set_mode, mode}}, from, state) do
+    {:noreply,
+     ctl_send(state, from, :mode, mode, nil, "session/set_mode", %{
+       "sessionId" => state.session_id,
+       "modeId" => mode
+     })}
+  end
+
+  def handle_call({:control, {:set_model, model}}, from, state) do
+    {:noreply, ctl_send_config(state, from, model)}
+  end
+
   def handle_call(:info, _from, state) do
     {:reply, %{os_pid: state.stdio.os_pid}, state}
   end
@@ -447,6 +488,47 @@ defmodule Toolnexus.Acp do
     }
   end
 
+  # -- live mode/model switch (#197): ids "k-N", routed apart from turns ------
+
+  defp ctl_send_config(state, from, model) do
+    ctl_send(state, from, :config, model, nil, "session/set_config_option", %{
+      "sessionId" => state.session_id,
+      "configId" => "model",
+      "value" => model
+    })
+  end
+
+  defp ctl_send(state, from, kind, value, e1, method, params) do
+    id = "k-#{state.next_id}"
+    send_req(state.stdio, id, method, params)
+    %{state | next_id: state.next_id + 1, ctl: Map.put(state.ctl, id, {from, kind, value, e1})}
+  end
+
+  defp ctl_done(state, id, outcome) do
+    {{from, kind, value, e1}, ctl} = Map.pop(state.ctl, id)
+    state = %{state | ctl: ctl}
+
+    case {kind, outcome} do
+      {_, :ok} ->
+        GenServer.reply(from, :ok)
+        state
+
+      {:config, {:error, e}} ->
+        ctl_send(state, from, :model, value, e, "session/set_model", %{
+          "sessionId" => state.session_id,
+          "modelId" => value
+        })
+
+      {:model, {:error, e2}} ->
+        GenServer.reply(from, {:error, {:set_model, value, e1, e2}})
+        state
+
+      {:mode, {:error, e}} ->
+        GenServer.reply(from, {:error, e})
+        state
+    end
+  end
+
   # -- inbound routing ----------------------------------------------------------
 
   @impl true
@@ -468,6 +550,14 @@ defmodule Toolnexus.Acp do
     case Jason.decode(line) do
       {:ok, msg} when is_map(msg) -> route(msg, state)
       _ -> state
+    end
+  end
+
+  defp route(%{"id" => id} = msg, %{ctl: ctl} = state)
+       when is_map_key(ctl, id) and not is_map_key(msg, "method") do
+    case msg do
+      %{"error" => err} -> ctl_done(state, id, {:error, {:acp_error, err}})
+      _ -> ctl_done(state, id, :ok)
     end
   end
 
@@ -654,7 +744,11 @@ defmodule Toolnexus.Acp do
     |> :queue.to_list()
     |> Enum.each(fn {_text, from} -> GenServer.reply(from, {:error, reason}) end)
 
-    %{state | active_from: nil, active_id: nil, emit: nil, queue: :queue.new()}
+    Enum.each(state.ctl, fn {_id, {from, _, _, _}} ->
+      GenServer.reply(from, {:error, {:agent_exited, "session/set_mode"}})
+    end)
+
+    %{state | active_from: nil, active_id: nil, emit: nil, queue: :queue.new(), ctl: %{}}
   end
 
   @impl true

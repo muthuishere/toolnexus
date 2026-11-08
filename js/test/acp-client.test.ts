@@ -121,6 +121,48 @@ test("acp-client passthrough.bareExpect: no options ⇒ [] and no _meta keys", a
   assert.ok(!r.some((x) => x.method.includes("set_")))
 })
 
+test("acp-client liveSwitch: setMode + setModel on a running client, no restart (#197)", async () => {
+  const fx = CASES.liveSwitch
+  const rec = recFile()
+  const acp = await fake({ TN_FAKE_REC: rec })
+  try {
+    await acp.setMode(fx.mode)
+    await acp.setModel(fx.model)
+    assert.equal((await acp.generate({ messages: [{ role: "user", content: "q" }] } as any)).content, fx.expectText)
+  } finally {
+    await acp.close()
+  }
+  const r = readRec(rec)
+  assert.equal(r.filter((x) => x.method === "initialize").length, fx.expectInitializeCount)
+  assert.equal(r.filter((x) => x.method === "session/new").length, fx.expectSessionNewCount)
+  const sm = r.find((x) => x.method === "session/set_mode")!
+  assert.deepEqual(sm.params, { sessionId: "s1", ...fx.expectSetMode })
+  const sc = r.find((x) => x.method === "session/set_config_option")!
+  assert.deepEqual(sc.params, { sessionId: "s1", ...fx.expectSetConfigOption })
+  await assert.rejects(acp.setMode(fx.mode), /closed/)
+})
+
+test("acp-client liveSwitch.fallback: running setModel falls back to set_model", async () => {
+  const fx = CASES.liveSwitch
+  const rec = recFile()
+  const acp = await fake({ ...fx.fallback.fakeEnv, TN_FAKE_REC: rec })
+  await acp.setModel(fx.model)
+  await acp.close()
+  const sm = readRec(rec).find((x) => x.method === "session/set_model")!
+  assert.deepEqual(sm.params, { sessionId: "s1", ...fx.fallback.expectSetModel })
+})
+
+test("acp-client liveSwitch.reject: a rejected mode fails the call, the client stays usable", async () => {
+  const fx = CASES.liveSwitch
+  const acp = await fake({ ...fx.reject.fakeEnv })
+  try {
+    await assert.rejects(acp.setMode(fx.mode), (e: Error) => e.message.includes(fx.reject.expectErrorContains))
+    assert.equal((await acp.generate({ messages: [{ role: "user", content: "q" }] } as any)).content, fx.reject.expectText)
+  } finally {
+    await acp.close()
+  }
+})
+
 test("acp-client agentExit: a pending prompt fails promptly", async () => {
   const fx = CASES.agentExit
   const acp = await fake(fx.fakeEnv, { permissionTimeoutMs: 30000 })

@@ -343,6 +343,26 @@
       res)))
 
 ;; ---------------------------------------------------------------------------
+;; model / mode switch (shared by connect and the running client, #197)
+;; ---------------------------------------------------------------------------
+
+(defn- set-model-call!
+  "session/set_config_option {configId \"model\"}, then the older
+  session/set_model if the agent rejects that. {:ok _} or
+  {:error [err1 err2]} when both fail."
+  [client model]
+  (let [sid (:session-id client)
+        r1  (call! client "session/set_config_option" {:sessionId sid :configId "model" :value model})]
+    (if-not (:error r1)
+      r1
+      (let [r2 (call! client "session/set_model" {:sessionId sid :modelId model})]
+        (if (:error r2) {:error [r1 r2]} r2)))))
+
+(defn- closed-error [client]
+  (when (:closed? @(:state client))
+    {:error (or (:close-reason @(:state client)) "closed")}))
+
+;; ---------------------------------------------------------------------------
 ;; connect
 ;; ---------------------------------------------------------------------------
 
@@ -518,14 +538,26 @@
                (when-not (str/blank? (str (or model "")))
                  ;; Passed through unchanged. Stable ACP spelling first, then
                  ;; the older unstable session/set_model.
-                 (let [r1 (call! client "session/set_config_option"
-                                 {:sessionId session-id :configId "model" :value model})]
-                   (when (:error r1)
-                     (let [r2 (call! client "session/set_model" {:sessionId session-id :modelId model})]
-                       (when (:error r2)
-                         (kill-and-throw! client (str "set model " (pr-str model))
-                                          {:error [(:error r1) (:error r2)]}))))))
+                 (let [r (set-model-call! client model)]
+                   (when (:error r)
+                     (kill-and-throw! client (str "set model " (pr-str model)) r))))
                client))))))))
+
+(defn set-mode!
+  "Change the agent's mode on a RUNNING client (SPEC §8C, #197): sends
+  session/set_mode {sessionId, modeId} at once — no restart, same session,
+  value unvalidated. {:ok result} or {:error ...}; a rejection fails only
+  this call."
+  [client mode]
+  (or (closed-error client)
+      (call! client "session/set_mode" {:sessionId (:session-id client) :modeId mode})))
+
+(defn set-model!
+  "Change the agent's model on a RUNNING client (SPEC §8C, #197) — the
+  :model connect option's logic: session/set_config_option, then
+  session/set_model. {:ok result} or {:error [err1 err2]}."
+  [client model]
+  (or (closed-error client) (set-model-call! client model)))
 
 ;; ---------------------------------------------------------------------------
 ;; prompt / generate

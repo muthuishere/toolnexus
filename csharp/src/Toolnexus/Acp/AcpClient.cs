@@ -166,32 +166,7 @@ public sealed class AcpClient : IDisposable
             }
 
             if (!string.IsNullOrEmpty(options.Model))
-            {
-                // Passed through unchanged: the stable spelling first, then the older
-                // session/set_model. Keys in sorted order, as every port sends them.
-                try
-                {
-                    await client.CallAsync("session/set_config_option", new Dictionary<string, object?>
-                    {
-                        ["configId"] = "model", ["sessionId"] = client.SessionId, ["value"] = options.Model,
-                    }, ct).ConfigureAwait(false);
-                }
-                catch (Exception e1) when (e1 is not OperationCanceledException)
-                {
-                    try
-                    {
-                        await client.CallAsync("session/set_model", new Dictionary<string, object?>
-                        {
-                            ["modelId"] = options.Model, ["sessionId"] = client.SessionId,
-                        }, ct).ConfigureAwait(false);
-                    }
-                    catch (Exception e2) when (e2 is not OperationCanceledException)
-                    {
-                        throw new InvalidOperationException(
-                            $"toolnexus: acp: set model \"{options.Model}\": {e1.Message}; {e2.Message}", e2);
-                    }
-                }
-            }
+                await client.SetModelAsync(options.Model, ct).ConfigureAwait(false);
         }
         catch
         {
@@ -202,13 +177,58 @@ public sealed class AcpClient : IDisposable
         return client;
     }
 
-    /// <summary>Optional <c>session/set_mode</c> negotiation on the already-open session.</summary>
-    public Task SetModeAsync(string modeId, CancellationToken ct = default) =>
-        CallAsync("session/set_mode", new Dictionary<string, object?>
+    /// <summary>
+    /// Sends <c>session/set_mode {sessionId, modeId}</c> on the open session — usable on a running
+    /// client (SPEC §8C, #197): same process, same session, sent at once rather than queued behind a
+    /// turn. The agent's error fails only this call.
+    /// </summary>
+    public Task SetModeAsync(string modeId, CancellationToken ct = default)
+    {
+        ThrowIfClosed();
+        return CallAsync("session/set_mode", new Dictionary<string, object?>
         {
             ["sessionId"] = SessionId,
             ["modeId"] = modeId,
         }, ct);
+    }
+
+    /// <summary>
+    /// Changes the model, passed through unchanged (SPEC §8C, #197): <c>session/set_config_option
+    /// {configId:"model"}</c> first, then <c>session/set_model {modelId}</c> if the agent rejects
+    /// that. Both failing fails this call with both errors; the client stays usable.
+    /// </summary>
+    public async Task SetModelAsync(string model, CancellationToken ct = default)
+    {
+        ThrowIfClosed();
+        // Keys in sorted order, as every port sends them.
+        try
+        {
+            await CallAsync("session/set_config_option", new Dictionary<string, object?>
+            {
+                ["configId"] = "model", ["sessionId"] = SessionId, ["value"] = model,
+            }, ct).ConfigureAwait(false);
+        }
+        catch (Exception e1) when (e1 is not OperationCanceledException)
+        {
+            try
+            {
+                await CallAsync("session/set_model", new Dictionary<string, object?>
+                {
+                    ["modelId"] = model, ["sessionId"] = SessionId,
+                }, ct).ConfigureAwait(false);
+            }
+            catch (Exception e2) when (e2 is not OperationCanceledException)
+            {
+                throw new InvalidOperationException(
+                    $"toolnexus: acp: set model \"{model}\": {e1.Message}; {e2.Message}", e2);
+            }
+        }
+    }
+
+    private void ThrowIfClosed()
+    {
+        if (Volatile.Read(ref _closed) != 0) throw new ObjectDisposedException(nameof(AcpClient));
+    }
 
     /// <summary>
     /// The model source: assembles the full request into one prompt string (plus the supersedes

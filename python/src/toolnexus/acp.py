@@ -501,21 +501,44 @@ class ACPClient:
         self._session_id = result.get("sessionId")
         if self._opts.mode:
             self._call("session/set_mode", {"sessionId": self._session_id, "modeId": self._opts.mode})
-        model = self._opts.model
-        if model:
-            # Passed through unchanged: the stable spelling first, then set_model.
+        if self._opts.model:
+            self._apply_model(self._opts.model)
+
+    def _apply_model(self, model: str) -> None:
+        # Passed through unchanged: the stable spelling first, then set_model.
+        try:
+            self._call(
+                "session/set_config_option",
+                {"sessionId": self._session_id, "configId": "model", "value": model},
+            )
+        except ACPError as e1:
             try:
-                self._call(
-                    "session/set_config_option",
-                    {"sessionId": self._session_id, "configId": "model", "value": model},
-                )
-            except ACPError as e1:
-                try:
-                    self._call("session/set_model", {"sessionId": self._session_id, "modelId": model})
-                except ACPError as e2:
-                    raise ACPError(f"acp: set model {json.dumps(model)}: {e1}; {e2}") from e2
+                self._call("session/set_model", {"sessionId": self._session_id, "modelId": model})
+            except ACPError as e2:
+                raise ACPError(f"acp: set model {json.dumps(model)}: {e1}; {e2}") from e2
 
     # -- public API --------------------------------------------------------- #
+
+    def set_mode(self, mode: str) -> None:
+        """Change the running session's mode: ``session/set_mode {sessionId, modeId}``
+        (SPEC §8C). No restart, same session; sent at once, not queued behind a turn.
+        The agent's error raises :class:`ACPError`; the client stays usable."""
+        self._check_open()
+        try:
+            self._call("session/set_mode", {"sessionId": self._session_id, "modeId": mode})
+        except ACPError as exc:
+            raise ACPError(f"acp: session/set_mode: {exc}") from exc
+
+    def set_model(self, model: str) -> None:
+        """Change the running session's model, exactly as the ``model`` option does at
+        load: ``session/set_config_option {configId:"model"}``, then ``session/set_model``.
+        Raises :class:`ACPError` only when both fail; the client stays usable."""
+        self._check_open()
+        self._apply_model(model)
+
+    def _check_open(self) -> None:
+        if self._closed:
+            raise ACPError("acp: client is closed")
 
     def generate(self, request: dict[str, Any], cancel: Optional[threading.Event] = None) -> dict[str, Any]:
         """``Callable[[dict], dict]`` — the exact shape ``create_in_process_client``
