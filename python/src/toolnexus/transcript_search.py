@@ -116,7 +116,7 @@ def transcript_search_tool(
         if query == "":
             return ToolResult(output="query is required", is_error=True)
         limit = max_results
-        if a.get("limit") is not None:
+        if "limit" in a:  # present-but-null is an error, not "absent" (§7E)
             lv = a["limit"]
             if not _is_int(lv) or lv < 1:
                 return ToolResult(output="limit must be an integer >= 1", is_error=True)

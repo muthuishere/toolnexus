@@ -20,6 +20,7 @@ from toolnexus import InMemoryConversationStore, Tool, ToolResult, transcript_se
 from toolnexus.agents import (
     DREAM_PROMPT,
     HEARTBEAT_PROMPT,
+    agent,
     agent_from_dir,
     compose_soul,
     dreamer,
@@ -163,6 +164,20 @@ async def test_g2_memory_tool(tmp_path, c):
         assert c["soulMustNotContain"] not in compose_soul(d, notes=True)[0]
 
 
+async def test_g2_list_skips_non_regular(tmp_path):
+    cfg = MH["memoryTool"]["listSkipsNonRegular"]
+    d = mk_home(tmp_path, cfg["regular"])
+    for rel in cfg["dirs"]:
+        os.makedirs(os.path.join(d, rel))
+    try:
+        for rel, target in cfg["symlinks"].items():
+            os.symlink(target, os.path.join(d, rel))
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks unavailable")
+    r = await memory_tool(d, notes=True).execute({"action": "list"})
+    assert _res(r) == {"output": cfg["expectList"], "isError": False}
+
+
 def test_g2_from_dir_notes_wires_notes_tool(tmp_path):
     d = mk_home(tmp_path, {"SOUL.md": "S"})
     mem = next(t for t in agent_from_dir(d, notes=True).uses["tools"] if t.name == "memory")
@@ -187,7 +202,8 @@ async def test_g3_transcript_search(c):
         kw["max_results"] = o["maxResults"]
     if "snippetChars" in o:
         kw["snippet_chars"] = o["snippetChars"]
-    t = transcript_search_tool(StubStore(MH["transcriptSearch"]["store"]["conversations"]), **kw)
+    convs = [] if c.get("emptyStore") else MH["transcriptSearch"]["store"]["conversations"]
+    t = transcript_search_tool(StubStore(convs), **kw)
     assert _res(await t.execute(c["args"])) == c["expect"]
 
 
@@ -245,6 +261,35 @@ def test_g4_concurrent_adds_from_threads(tmp_path):
     for th in threads:
         th.join()
     lines = (tmp_path / "MEMORY.md").read_text(encoding="utf-8").rstrip().split("\n")
+    assert len(lines) == cfg["expectEntries"] and len(set(lines)) == cfg["expectEntries"]
+
+
+def test_g4_concurrent_adds_via_symlink(tmp_path):
+    cfg = MH["writeSafety"]["concurrentAddsViaSymlink"]
+    real = tmp_path / "home"
+    real.mkdir()
+    link = tmp_path / "link"
+    try:
+        os.symlink(real, link)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks unavailable")
+    tools = [memory_tool(str(link)), memory_tool(str(real))]
+    barrier = threading.Barrier(cfg["writers"] * cfg["addsEach"])
+
+    def worker(t: Tool, text: str) -> None:
+        barrier.wait()
+        asyncio.run(t.execute({"action": "add", "text": text}))
+
+    threads = [
+        threading.Thread(target=worker, args=(t, f"w{w}-{n}"))
+        for w, t in enumerate(tools)
+        for n in range(cfg["addsEach"])
+    ]
+    for th in threads:
+        th.start()
+    for th in threads:
+        th.join()
+    lines = (real / cfg["file"]).read_text(encoding="utf-8").rstrip().split("\n")
     assert len(lines) == cfg["expectEntries"] and len(set(lines)) == cfg["expectEntries"]
 
 
@@ -400,6 +445,21 @@ async def test_d4_from_dir_dream_runs_on_same_runtime(tmp_path):
     await started.stop()
     assert reports == []
     assert started.handle.state == "closed"
+
+
+async def test_d6_dreamer_name_collision(tmp_path):
+    e = DR["expect"]["D6_dreamerNameCollision"]
+    home = mk_home(tmp_path, DR["home"])
+    squatter = agent(f"{e['personaName']}-dreamer", does="squats the dreamer name", model="m-quiet")
+    persona = agent_from_dir(
+        home, name=e["personaName"], model="m-quiet", team=[squatter],
+        dream={"every_ms": 50, "store": _store()},
+    )
+    before = len(asyncio.all_tasks())
+    with pytest.raises(RuntimeError) as ei:
+        start_agent(persona, every_ms=50, transport=DreamTransport(), clock=VirtualClock())
+    assert str(ei.value) == e["error"]
+    assert len(asyncio.all_tasks()) == before  # nothing scheduled
 
 
 async def test_d5_absent_dream_unchanged(tmp_path):

@@ -23,6 +23,7 @@ import asyncio
 import os
 import re
 import secrets
+import stat
 import threading
 from typing import Any, Callable, Optional
 
@@ -280,9 +281,12 @@ def _list_notes(notes_dir: str) -> str:
         slug = n[:-3]
         if not _valid_slug(slug):
             continue
-        p = os.path.join(notes_dir, n)
-        if os.path.isfile(p):
-            rows.append((slug, os.stat(p).st_size))
+        try:
+            st = os.lstat(os.path.join(notes_dir, n))  # never follow symlinks
+        except OSError:
+            continue
+        if stat.S_ISREG(st.st_mode):
+            rows.append((slug, st.st_size))
     rows.sort(key=lambda r: r[0])  # explicit sort: code-point order, never dir order
     return "\n".join(f"{s}\t{b}" for s, b in rows) if rows else "(no notes)"
 
@@ -685,8 +689,11 @@ def start_agent(
     """
     dream = a._dream
     if dream is not None:
+        own = a.registry()
+        if dream[0].name in own:
+            raise RuntimeError(f"startAgent: dreamer name collision: {dream[0].name} is already registered")
         reg = dream[0].registry()
-        reg.update(a.registry())
+        reg.update(own)
         rt = a._runtime(_registry=reg, **rt_opts)
     else:
         rt = a._runtime(**rt_opts)
@@ -729,6 +736,10 @@ def start_agent(
         # housekeeping — they never reach on_report; what it did is in memory/log.md.
         dh = rt.spawn(rt.root, dream[0].name)
         if not isinstance(dh, Handle):
+            # never leak the persona heartbeat or the runtime on a failed dreamer spawn
+            for bt in beat_tasks:
+                bt.cancel()
+            asyncio.ensure_future(rt.close(rt.root))
             raise RuntimeError(dh.error)
         beat_tasks.append(heartbeat(dh, dream[1], None))
 
