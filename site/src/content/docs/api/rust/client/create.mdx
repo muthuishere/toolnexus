@@ -310,6 +310,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Opt-in extras: see prompt-cache.mdx and tool-tiers.mdx.
         prompt_cache: None,
         tool_tiers: None,
+        compact_on_overflow: None, // §7F.1 reactive compaction
     });
 
     let tk = create_toolkit(ToolkitOptions { builtins: Some(BuiltinsConfig::off()), ..Default::default() }).await?;

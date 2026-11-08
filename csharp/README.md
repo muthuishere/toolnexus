@@ -161,6 +161,7 @@ never change mid-session. Runnable: `dotnet run --project examples/Toolnexus.Exa
 - `grep` `context` / `before` / `after`; `read` / `grep` report truncation in metadata.
 - `Compaction.Options.OnCompact`, `Agent.AsToolWith(ctx => runtimeOptions)` with `RuntimeOptions.WaitFor`, `ToolContext.CallId`, `LlmClient.ListModelsAsync`.
 - Not in C# yet: the ACP host hooks (Go only; `openspec/changes/add-go-host-asks`).
+- `Options.CompactOnOverflow` (SPEC §7F.1) — a `BeforeLLM`-shaped hook (e.g. a tighter `Compaction` compactor) called when the provider rejects a call as too long (`LlmClient.IsContextOverflow(status, body)`); the same turn is re-sent on the compacted transcript. A breaker throws `LlmClient.ContextOverflowException` after 3 compactions that did not buy two successful calls each, or at once if the hook makes no progress. Unset ⇒ the overflow surfaces as `ProviderException`, unchanged.
 
 ## Media generation
 

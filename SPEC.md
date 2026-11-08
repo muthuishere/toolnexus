@@ -2279,6 +2279,64 @@ The compacted transcript is `[leading system prompt (verbatim), summary system m
 
 Absent a `compactor`, a run is byte-identical to today (compaction is entirely opt-in).
 
+### 7F.1 Reactive compaction on context overflow (change `add-reactive-compaction`, issue #194)
+
+A proactive compactor works from an **estimate**; the provider is the only authority on whether
+a prompt fits. When the provider rejects a request because the prompt is too long, the loop can
+compact and retry instead of failing the run — opt-in, through one client option:
+
+| option | meaning |
+|--------|---------|
+| `compactOnOverflow` | a hook with the `beforeLLM` signature (§8) — typically a `compactor(...)` with a **tighter** budget than the proactive one. Idiomatic spelling per port (`compactOnOverflow` / `CompactOnOverflow` / `compact_on_overflow` / `:compact-on-overflow`). **Absent ⇒ byte-identical**: an overflow surfaces as the typed `LlmHttpError` exactly as today. |
+
+**Detection (`isContextOverflow(status, body)`, exported from every port, idiomatic name).** True
+iff **both**:
+
+1. `status` is `400` or `413`, and
+2. the provider's (redacted) error body, lowercased, contains at least one of these markers:
+   `context_length_exceeded` (OpenAI `error.code`), `maximum context length` (OpenAI message),
+   `prompt is too long` (Anthropic message), `prompt_too_long`, `request_too_large` (Anthropic
+   413 `error.type`), `context window` (OpenAI-compatible gateways: "exceeds the context window").
+
+Nothing else counts: a 413 with no marker, a marker under any other status (e.g. a 429 or 500
+mentioning the context length), and transport errors are not overflows. Detection runs on the
+**final** failure of an LLM call — after the §8 retry layer and `onError` have finished (none of
+`400`/`413` is in the default retryable set, so in practice that is the first attempt).
+
+**Reaction.** On an overflow, with `compactOnOverflow` set, the loop calls the hook with
+`{messages, tools, model, turn}` (the working transcript and the values of the failing call). If
+it returns `messages` that are **strictly fewer** than the working transcript, they replace the
+working transcript (exactly as a `beforeLLM` rewrite does — they flow into `RunResult.messages`,
+the store, and every later turn) and the **same turn** is re-sent with the same tools and model.
+`beforeLLM` does **not** run again for the retry; the retry does **not** consume a turn (`turn`,
+`maxTurns` and `RunResult.turns` count turns, not attempts). If the hook returns nothing, or a
+transcript that is not shorter, the run fails at once with `ContextOverflowError` (below).
+
+**Breaker — "rapid refill", pinned.** The loop keeps two counters per run: `okSince` (successful
+LLM calls since the last reactive compaction) and `streak` (reactive compactions in the current
+rapid chain, initially `0`). An overflow is a **rapid refill** when `streak > 0` and
+`okSince < 2` — the transcript was compacted and overflowed again within fewer than two
+successful LLM calls (the retry itself counts as one when it succeeds). On each overflow:
+
+1. not a rapid refill ⇒ `streak = 0`;
+2. `streak == 3` ⇒ fail with `ContextOverflowError` (`compactions = 3`); no hook call;
+3. otherwise call the hook (Reaction, above); on success `streak += 1`, `okSince = 0`, retry.
+
+Every successful LLM call does `okSince += 1`. So a run fails after **3 compactions in a row that
+did not buy at least two successful calls each**; a run whose overflows are spaced by ≥ 2
+successful calls compacts as often as it needs.
+
+**`ContextOverflowError`** — typed, idiomatic per port (a subclass/variant of the port's error
+type), carrying `compactions` (the streak at failure: `3` from the breaker, else the number of
+compactions in the current chain), `status` and `body` (from the last provider error, same
+redaction as `LlmHttpError`). Its message is pinned byte-identical:
+`context overflow: <compactions> reactive compaction(s) did not make the prompt fit`.
+It is a failure, never a §10 `Pending`; an interrupted-turn save (§8) applies as for any error.
+
+Both loops (`run` and `stream`), both styles, and the resume paths apply it identically. In
+`stream` the overflow is an HTTP error before any event of that turn, so nothing is emitted for
+the failed attempt. Shared fixture: `conformance/reactive_compaction/cases.json`.
+
 ---
 
 ## 7G. Media generation (source: "media")
@@ -2792,7 +2850,8 @@ skipping remaining retries. **Absent `onError` ⇒ the default classifier `retry
 "fail"`, i.e. byte-identical to the paragraph above.** There is **no `"suspend"` tier** — a failure
 is not a user action, so it never becomes a §10 `Pending`; suspension stays a user-action pause
 (§10). A `"fail"` result never carries `status:"pending"`. Aborts (timeout/cancel) bypass `onError`
-and are never retried.
+and are never retried. A context-overflow `400`/`413` is not retried here; with
+`compactOnOverflow` set it is answered by reactive compaction instead (§7F.1).
 
 **`x-should-retry` override.** A non-ok LLM response carrying the header `x-should-retry`
 (name case-insensitive) whose trimmed value is `true` or `false` (value case-insensitive) sets

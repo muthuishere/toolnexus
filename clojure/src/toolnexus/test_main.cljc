@@ -50,7 +50,8 @@
             [toolnexus.mcp-handler-conformance-test]
             [toolnexus.mcp-handler2026-test]
             [toolnexus.mock-llm-test]
-            [toolnexus.stop-recovery-test]))
+            [toolnexus.stop-recovery-test]
+            [toolnexus.reactive-compaction-test]))
 
 (def suites
   '[toolnexus.tool-test
@@ -88,7 +89,8 @@
     toolnexus.mcp-handler-conformance-test
     toolnexus.mcp-handler2026-test
     toolnexus.mock-llm-test
-    toolnexus.stop-recovery-test])
+    toolnexus.stop-recovery-test
+    toolnexus.reactive-compaction-test])
 
 ;; A floor, not an exact count — it must fail on an EMPTY collection without
 ;; needing an edit every time a test is added. RAISED from 100 after an audit

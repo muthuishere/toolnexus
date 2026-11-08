@@ -183,6 +183,13 @@
           "stoprecovery"
         ],
         "tier": "full"
+      },
+      {
+        "name": "compactOnOverflow",
+        "aliases": [
+          "compactonoverflow"
+        ],
+        "tier": "full"
       }
     ]
   },

@@ -92,6 +92,9 @@ tool. Runnable: `npm run example:prompt-cache` ([`examples/prompt_cache.ts`](exa
   `after`; `read` / `grep` report truncation in metadata.
 - `agents.compactor({ onCompact })`, `agent.asToolWith(ctx => ({ hooks, waitFor }))`, runtime
   `waitFor`, `ctx.callId` on tools, `listModels(opts)`.
+- `compactOnOverflow: agents.compactor({ maxTokens: tighter })` — when the provider rejects a prompt as too
+  long (`isContextOverflow(status, body)`), compact and re-send the same turn; three rapid
+  compactions in a row fail with `ContextOverflowError` (SPEC §7F.1).
 
 An in-process model streams for real when it is given as `generateStream(request, emit)`; a plain
 `generate` still refuses `stream()`.

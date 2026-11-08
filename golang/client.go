@@ -57,6 +57,16 @@ type ClientOptions struct {
 	// continue message (up to 3 times, text joined) and an empty answer (e.g. thinking-only
 	// end_turn) with a nudge (once). Off ⇒ the loop is unchanged.
 	StopRecovery bool
+	// CompactOnOverflow (SPEC §7F.1) is called when the provider rejects a call
+	// as a context overflow (see IsContextOverflow) — typically a compactor with
+	// a tighter budget than the proactive BeforeLLM one. Returning strictly fewer
+	// Messages replaces the working transcript and re-sends the same turn
+	// (BeforeLLM is not re-run, no turn is consumed); returning nothing or not
+	// fewer messages fails the run with *ContextOverflowError, as does a breaker
+	// of 3 compactions that each bought fewer than 2 successful calls. Only
+	// Messages of the returned override is used. Nil ⇒ the overflow surfaces as
+	// the *ProviderError, byte-identical to before.
+	CompactOnOverflow func(ctx context.Context, ev BeforeLLMEvent) (*LLMOverride, error)
 	// MaxToolConcurrency caps how many concurrency-safe tool calls of one model
 	// response run at once (SPEC §8 "Tool scheduling"). 0 ⇒ the env var
 	// TOOLNEXUS_MAX_TOOL_CONCURRENCY when it is a positive integer, else 10.
@@ -1268,6 +1278,7 @@ func (c *Client) runOpenAI(ctx context.Context, prompt any, tk *Toolkit, history
 		}
 	}()
 
+	var overflow overflowBreaker // §7F.1 per-run counters
 	for turn := 0; turn < c.maxTurns(); turn++ {
 		turns++
 		turnModel := c.opts.Model
@@ -1288,26 +1299,36 @@ func (c *Client) runOpenAI(ctx context.Context, prompt any, tk *Toolkit, history
 				}
 			}
 		}
-		wire, err := c.emitMessages(messages)
-		if err != nil {
-			return RunResult{}, err
-		}
-		body := map[string]any{
-			"model":    turnModel,
-			"messages": wire,
-		}
-		if len(tools) > 0 {
-			body["tools"] = tools
-			body["tool_choice"] = "auto"
-		}
-		body = c.finalizeBody(body)
-		toolsJSON.apply(c, body)
-		t0 := time.Now()
-		lastModel = turnModel
-		raw, err := c.postJSON(ctx, endpoint, authHeader, body)
-		if err != nil {
+		var raw []byte
+		var t0 time.Time
+		for { // one pass per attempt; only a reactive compaction (§7F.1) loops
+			wire, err := c.emitMessages(messages)
+			if err != nil {
+				return RunResult{}, err
+			}
+			body := map[string]any{
+				"model":    turnModel,
+				"messages": wire,
+			}
+			if len(tools) > 0 {
+				body["tools"] = tools
+				body["tool_choice"] = "auto"
+			}
+			body = c.finalizeBody(body)
+			toolsJSON.apply(c, body)
+			t0 = time.Now()
+			lastModel = turnModel
+			raw, err = c.postJSON(ctx, endpoint, authHeader, body)
+			if err == nil {
+				overflow.ok()
+				break
+			}
 			c.emitLLM(turnModel, "error", t0, 0, 0)
-			return RunResult{}, err
+			compacted, retry, rerr := c.reactOverflow(ctx, &overflow, err, messages, tools, turnModel, turn)
+			if !retry {
+				return RunResult{}, rerr
+			}
+			messages = compacted
 		}
 		var data struct {
 			Choices []struct {
@@ -1581,6 +1602,7 @@ func (c *Client) runAnthropic(ctx context.Context, prompt any, tk *Toolkit, hist
 		"anthropic-version": "2023-06-01",
 	}
 
+	var overflow overflowBreaker // §7F.1 per-run counters
 	for turn := 0; turn < c.maxTurns(); turn++ {
 		turns++
 		turnModel := c.opts.Model
@@ -1601,29 +1623,39 @@ func (c *Client) runAnthropic(ctx context.Context, prompt any, tk *Toolkit, hist
 				}
 			}
 		}
-		wire, err := c.emitMessages(messages)
-		if err != nil {
-			return RunResult{}, err
-		}
-		body := map[string]any{
-			"model":      turnModel,
-			"max_tokens": 4096,
-			"messages":   wire,
-		}
-		if system != "" {
-			body["system"] = system
-		}
-		if len(tools) > 0 {
-			body["tools"] = tools
-		}
-		body = c.finalizeBody(body)
-		toolsJSON.apply(c, body)
-		t0 := time.Now()
-		lastModel = turnModel
-		raw, err := c.postJSON(ctx, endpoint, headers, body)
-		if err != nil {
+		var raw []byte
+		var t0 time.Time
+		for { // one pass per attempt; only a reactive compaction (§7F.1) loops
+			wire, err := c.emitMessages(messages)
+			if err != nil {
+				return RunResult{}, err
+			}
+			body := map[string]any{
+				"model":      turnModel,
+				"max_tokens": 4096,
+				"messages":   wire,
+			}
+			if system != "" {
+				body["system"] = system
+			}
+			if len(tools) > 0 {
+				body["tools"] = tools
+			}
+			body = c.finalizeBody(body)
+			toolsJSON.apply(c, body)
+			t0 = time.Now()
+			lastModel = turnModel
+			raw, err = c.postJSON(ctx, endpoint, headers, body)
+			if err == nil {
+				overflow.ok()
+				break
+			}
 			c.emitLLM(turnModel, "error", t0, 0, 0)
-			return RunResult{}, err
+			compacted, retry, rerr := c.reactOverflow(ctx, &overflow, err, messages, tools, turnModel, turn)
+			if !retry {
+				return RunResult{}, rerr
+			}
+			messages = compacted
 		}
 		var data struct {
 			Content []struct {
@@ -1929,6 +1961,7 @@ func (c *Client) streamOpenAI(ctx context.Context, prompt any, tk *Toolkit, hist
 		}
 	}()
 
+	var overflow overflowBreaker // §7F.1 per-run counters
 	for turn := 0; turn < c.maxTurns(); turn++ {
 		turns++
 		turnModel := c.opts.Model
@@ -1949,39 +1982,49 @@ func (c *Client) streamOpenAI(ctx context.Context, prompt any, tk *Toolkit, hist
 				}
 			}
 		}
-		wire, err := c.emitMessages(messages)
-		if err != nil {
-			return err
-		}
-		sbody := map[string]any{
-			"model":          turnModel,
-			"messages":       wire,
-			"stream":         true,
-			"stream_options": map[string]any{"include_usage": true},
-		}
-		if len(tools) > 0 {
-			sbody["tools"] = tools
-			sbody["tool_choice"] = "auto"
-		}
-		body, err := json.Marshal(c.finalizeBody(sbody))
-		if err != nil {
-			return err
-		}
-		t0 := time.Now()
-		lastModel = turnModel
-		beforeP, beforeC := usage.PromptTokens, usage.CompletionTokens
-		resp, err := c.llmFetch(ctx, endpoint, map[string]string{"Authorization": "Bearer " + key}, body, func(e StreamEvent) { ch <- e })
-		if err != nil {
-			c.emitLLM(turnModel, "error", t0, 0, 0)
-			return err
-		}
-		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		var resp *http.Response
+		var t0 time.Time
+		for { // one pass per attempt; only a reactive compaction (§7F.1) loops
+			wire, err := c.emitMessages(messages)
+			if err != nil {
+				return err
+			}
+			sbody := map[string]any{
+				"model":          turnModel,
+				"messages":       wire,
+				"stream":         true,
+				"stream_options": map[string]any{"include_usage": true},
+			}
+			if len(tools) > 0 {
+				sbody["tools"] = tools
+				sbody["tool_choice"] = "auto"
+			}
+			body, err := json.Marshal(c.finalizeBody(sbody))
+			if err != nil {
+				return err
+			}
+			t0 = time.Now()
+			lastModel = turnModel
+			resp, err = c.llmFetch(ctx, endpoint, map[string]string{"Authorization": "Bearer " + key}, body, func(e StreamEvent) { ch <- e })
+			if err != nil {
+				c.emitLLM(turnModel, "error", t0, 0, 0)
+				return err
+			}
+			if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+				overflow.ok()
+				break
+			}
 			out, _ := io.ReadAll(resp.Body)
 			ra := resp.Header.Get("Retry-After")
 			resp.Body.Close()
 			c.emitLLM(turnModel, "error", t0, 0, 0)
-			return newProviderError(resp.StatusCode, out, ra)
+			compacted, retry, rerr := c.reactOverflow(ctx, &overflow, newProviderError(resp.StatusCode, out, ra), messages, tools, turnModel, turn)
+			if !retry {
+				return rerr
+			}
+			messages = compacted
 		}
+		beforeP, beforeC := usage.PromptTokens, usage.CompletionTokens
 
 		var content strings.Builder
 		// acc maps tool_call index -> assembled call; order preserves first-seen index.
@@ -2239,6 +2282,7 @@ func (c *Client) streamAnthropic(ctx context.Context, prompt any, tk *Toolkit, h
 
 	headers := map[string]string{"x-api-key": key, "anthropic-version": "2023-06-01"}
 
+	var overflow overflowBreaker // §7F.1 per-run counters
 	for turn := 0; turn < c.maxTurns(); turn++ {
 		turns++
 		turnModel := c.opts.Model
@@ -2259,41 +2303,51 @@ func (c *Client) streamAnthropic(ctx context.Context, prompt any, tk *Toolkit, h
 				}
 			}
 		}
-		wire, err := c.emitMessages(messages)
-		if err != nil {
-			return err
-		}
-		reqBody := map[string]any{
-			"model":      turnModel,
-			"max_tokens": 4096,
-			"messages":   wire,
-			"stream":     true,
-		}
-		if system != "" {
-			reqBody["system"] = system
-		}
-		if len(tools) > 0 {
-			reqBody["tools"] = tools
-		}
-		body, err := json.Marshal(c.finalizeBody(reqBody))
-		if err != nil {
-			return err
-		}
-		t0 := time.Now()
-		lastModel = turnModel
-		beforeP, beforeC := usage.PromptTokens, usage.CompletionTokens
-		resp, err := c.llmFetch(ctx, endpoint, headers, body, func(e StreamEvent) { ch <- e })
-		if err != nil {
-			c.emitLLM(turnModel, "error", t0, 0, 0)
-			return err
-		}
-		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		var resp *http.Response
+		var t0 time.Time
+		for { // one pass per attempt; only a reactive compaction (§7F.1) loops
+			wire, err := c.emitMessages(messages)
+			if err != nil {
+				return err
+			}
+			reqBody := map[string]any{
+				"model":      turnModel,
+				"max_tokens": 4096,
+				"messages":   wire,
+				"stream":     true,
+			}
+			if system != "" {
+				reqBody["system"] = system
+			}
+			if len(tools) > 0 {
+				reqBody["tools"] = tools
+			}
+			body, err := json.Marshal(c.finalizeBody(reqBody))
+			if err != nil {
+				return err
+			}
+			t0 = time.Now()
+			lastModel = turnModel
+			resp, err = c.llmFetch(ctx, endpoint, headers, body, func(e StreamEvent) { ch <- e })
+			if err != nil {
+				c.emitLLM(turnModel, "error", t0, 0, 0)
+				return err
+			}
+			if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+				overflow.ok()
+				break
+			}
 			out, _ := io.ReadAll(resp.Body)
 			ra := resp.Header.Get("Retry-After")
 			resp.Body.Close()
 			c.emitLLM(turnModel, "error", t0, 0, 0)
-			return newProviderError(resp.StatusCode, out, ra)
+			compacted, retry, rerr := c.reactOverflow(ctx, &overflow, newProviderError(resp.StatusCode, out, ra), messages, tools, turnModel, turn)
+			if !retry {
+				return rerr
+			}
+			messages = compacted
 		}
+		beforeP, beforeC := usage.PromptTokens, usage.CompletionTokens
 
 		blocks := map[int]*streamBlock{}
 		var order []int

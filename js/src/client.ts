@@ -51,6 +51,11 @@ export interface ClientOptions {
    * Unsafe calls (anything not read-only) always run alone. */
   maxToolConcurrency?: number
   hooks?: Hooks
+  /** SPEC §7F.1 reactive compaction. Called (with the `beforeLLM` signature) when the provider
+   * rejects a call as a context overflow (`isContextOverflow`); strictly fewer `messages` replace
+   * the transcript and the same turn is re-sent. Breaker: 3 rapid compactions ⇒ `ContextOverflowError`.
+   * Absent ⇒ the overflow surfaces as `LlmHttpError`, unchanged. */
+  compactOnOverflow?: Hooks["beforeLLM"]
   /** Retries on transient LLM errors (`429`/`500`/`502`/`503`/`504`/`529` + network). Default 2.
    * Widen the status set with `retryableStatuses`. */
   retries?: number
@@ -195,6 +200,35 @@ export async function llmHttpError(res: Response): Promise<LlmHttpError> {
   const body = res.status === 401 || res.status === 403 ? "" : redactErrorBody(raw)
   return new LlmHttpError(res.status, body, res.headers.get("retry-after") ?? undefined)
 }
+
+/** SPEC §7F.1 markers of a context-overflow rejection (matched lowercased). */
+const OVERFLOW_MARKERS = ["context_length_exceeded", "maximum context length", "prompt is too long", "prompt_too_long", "request_too_large", "context window"]
+
+/** SPEC §7F.1: true iff `status` is 400/413 AND the (redacted) body names a context overflow. */
+export function isContextOverflow(status: number, body: string): boolean {
+  if (status !== 400 && status !== 413) return false
+  const b = (body ?? "").toLowerCase()
+  return OVERFLOW_MARKERS.some((m) => b.includes(m))
+}
+
+/** SPEC §7F.1: reactive compaction could not make the prompt fit (breaker tripped, or the
+ *  `compactOnOverflow` hook made no progress). A failure, never a §10 pending. */
+export class ContextOverflowError extends Error {
+  readonly name = "ContextOverflowError"
+  constructor(
+    /** Reactive compactions in the current rapid chain (3 when the breaker tripped). */
+    readonly compactions: number,
+    /** Status of the last provider error. */
+    readonly status: number,
+    /** Redacted body of the last provider error (same redaction as `LlmHttpError`). */
+    readonly body: string,
+  ) {
+    super(`context overflow: ${compactions} reactive compaction(s) did not make the prompt fit`)
+  }
+}
+
+/** Per-run breaker counters for §7F.1. */
+interface OverflowState { okSince: number; streak: number }
 
 /** §8 Resilience. What to do with a failed LLM call. */
 export type ErrorTier = "retry" | "fail"
@@ -1187,6 +1221,43 @@ export class Client {
     }
   }
 
+  /**
+   * SPEC §7F.1: one LLM call with reactive compaction. `call(messages)` makes the request and
+   * throws on a non-2xx (as `LlmHttpError`). On a context overflow with `compactOnOverflow` set,
+   * the hook compacts and the SAME turn is re-sent (no beforeLLM, no turn consumed), guarded by
+   * the rapid-refill breaker. Returns the call's value and the (possibly compacted) transcript.
+   */
+  private async callWithOverflow<T>(st: OverflowState, ev: BeforeLLMEvent, call: (messages: any[]) => Promise<T>): Promise<{ value: T; messages: any[] }> {
+    const it = this.callWithOverflowEvents(st, ev, async function* (m: any[]) { return await call(m) })
+    for (;;) {
+      const r = await it.next()
+      if (r.done) return r.value
+    }
+  }
+
+  /** `callWithOverflow` for the streaming loops: `call` is a generator so the #189 `retry` events
+   * of every attempt (including one after a compaction) still reach the stream before each wait. */
+  private async *callWithOverflowEvents<T>(st: OverflowState, ev: BeforeLLMEvent, call: (messages: any[]) => AsyncGenerator<StreamEvent, T, unknown>): AsyncGenerator<StreamEvent, { value: T; messages: any[] }, unknown> {
+    let messages = ev.messages
+    for (;;) {
+      try {
+        const value = yield* call(messages)
+        st.okSince++
+        return { value, messages }
+      } catch (e) {
+        const hook = this.opts.compactOnOverflow
+        if (!hook || !(e instanceof LlmHttpError) || !isContextOverflow(e.status, e.body)) throw e
+        if (!(st.streak > 0 && st.okSince < 2)) st.streak = 0
+        if (st.streak === 3) throw new ContextOverflowError(3, e.status, e.body)
+        const ov = await hook({ messages, tools: ev.tools, model: ev.model, turn: ev.turn })
+        if (!ov?.messages || ov.messages.length >= messages.length) throw new ContextOverflowError(st.streak, e.status, e.body)
+        messages = ov.messages
+        st.streak++
+        st.okSince = 0
+      }
+    }
+  }
+
   // The run-scoped timeout timer is owned by these four wrappers, so it is cleared however the
   // run leaves: return, throw, or a consumer abandoning the stream half-way.
   private async runOpenAI(prompt: PromptInput, toolkit: Toolkit | undefined, external?: AbortSignal, history?: any[], onInterrupt?: OnInterrupt): Promise<RunResult> {
@@ -1276,6 +1347,7 @@ export class Client {
     // Results finished in the current tool phase, by call id — what an interrupted save keeps.
     const done = new Map<string, ToolResult>()
     const rs = this.newRecovery()
+    const overflow: OverflowState = { okSince: 0, streak: 0 }
 
     try {
       for (let turn = 0; turn < (this.opts.maxTurns ?? 10); turn++) {
@@ -1288,11 +1360,13 @@ export class Client {
           if (ov?.model) turnModel = ov.model
         }
         lastModel = turnModel
-        const data: any = await this.llmCallJson(`${this.opts.baseUrl.replace(/\/$/, "")}/chat/completions`, {
+        const sent = await this.callWithOverflow(overflow, { messages, tools, model: turnModel, turn }, (msgs) => this.llmCallJson(`${this.opts.baseUrl.replace(/\/$/, "")}/chat/completions`, {
           method: "POST",
           headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json", ...this.opts.headers },
-          body: JSON.stringify(this.openaiBody(messages, tools, false, turnModel)),
-        }, signal, "openai", turnModel)
+          body: JSON.stringify(this.openaiBody(msgs, tools, false, turnModel)),
+        }, signal, "openai", turnModel))
+        messages = sent.messages
+        const data: any = sent.value
         addUsage(usage, data.usage, "openai")
         if (this.opts.hooks?.afterLLM) await this.opts.hooks.afterLLM({ response: data, model: turnModel, turn })
         const msg = data.choices[0].message
@@ -1410,6 +1484,7 @@ export class Client {
     // Results finished in the current tool phase, by call id — what an interrupted save keeps.
     const done = new Map<string, ToolResult>()
     const rs = this.newRecovery()
+    const overflow: OverflowState = { okSince: 0, streak: 0 }
 
     try {
       for (let turn = 0; turn < (this.opts.maxTurns ?? 10); turn++) {
@@ -1422,7 +1497,7 @@ export class Client {
           if (ov?.model) turnModel = ov.model
         }
         lastModel = turnModel
-        const data: any = await this.llmCallJson(endpoint, {
+        const sent = await this.callWithOverflow(overflow, { messages, tools, model: turnModel, turn }, (msgs) => this.llmCallJson(endpoint, {
           method: "POST",
           headers: {
             "x-api-key": key,
@@ -1430,8 +1505,10 @@ export class Client {
             "Content-Type": "application/json",
             ...this.opts.headers,
           },
-          body: JSON.stringify(this.anthropicBody(system, messages, tools, false, turnModel)),
-        }, signal, "anthropic", turnModel)
+          body: JSON.stringify(this.anthropicBody(system, msgs, tools, false, turnModel)),
+        }, signal, "anthropic", turnModel))
+        messages = sent.messages
+        const data: any = sent.value
         addUsage(usage, data.usage, "anthropic")
         if (this.opts.hooks?.afterLLM) await this.opts.hooks.afterLLM({ response: data, model: turnModel, turn })
         messages.push({ role: "assistant", content: data.content })
@@ -1502,6 +1579,7 @@ export class Client {
     // Results finished in the current tool phase, by call id — what an interrupted save keeps.
     const done = new Map<string, ToolResult>()
     const rs = this.newRecovery()
+    const overflow: OverflowState = { okSince: 0, streak: 0 }
 
     try {
       for (let turn = 0; turn < (this.opts.maxTurns ?? 10); turn++) {
@@ -1520,12 +1598,18 @@ export class Client {
         let finish = ""
         const acc = new Map<number, { id: string; name: string; args: string }>()
         try {
-          const res = yield* this.llmFetchEvents(`${this.opts.baseUrl.replace(/\/$/, "")}/chat/completions`, {
-            method: "POST",
-            headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json", ...this.opts.headers },
-            body: JSON.stringify(this.openaiBody(messages, tools, true, turnModel)),
-          }, signal)
-          if (!res.ok || !res.body) throw await llmHttpError(res)
+          const sent = yield* this.callWithOverflowEvents(overflow, { messages, tools, model: turnModel, turn }, (msgs) => (async function* (self: Client) {
+            const r = yield* self.llmFetchEvents(`${self.opts.baseUrl.replace(/\/$/, "")}/chat/completions`, {
+              method: "POST",
+              headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json", ...self.opts.headers },
+              body: JSON.stringify(self.openaiBody(msgs, tools, true, turnModel)),
+            }, signal)
+            if (!r.ok || !r.body) throw await llmHttpError(r)
+            return r
+          })(this))
+          messages = sent.messages
+          const res = sent.value
+          if (!res.body) throw await llmHttpError(res)
           for await (const line of sseLines(res.body)) {
             if (!line.startsWith("data:")) continue
             const payload = line.slice(5).trim()
@@ -1623,6 +1707,7 @@ export class Client {
     // Results finished in the current tool phase, by call id — what an interrupted save keeps.
     const done = new Map<string, ToolResult>()
     const rs = this.newRecovery()
+    const overflow: OverflowState = { okSince: 0, streak: 0 }
 
     try {
       for (let turn = 0; turn < (this.opts.maxTurns ?? 10); turn++) {
@@ -1640,12 +1725,18 @@ export class Client {
         const blocks = new Map<number, { type: string; text?: string; id?: string; name?: string; json?: string }>()
         let stopReason = ""
         try {
-          const res = yield* this.llmFetchEvents(endpoint, {
-            method: "POST",
-            headers: { "x-api-key": key, "anthropic-version": "2023-06-01", "Content-Type": "application/json", ...this.opts.headers },
-            body: JSON.stringify(this.anthropicBody(system, messages, tools, true, turnModel)),
-          }, signal)
-          if (!res.ok || !res.body) throw await llmHttpError(res)
+          const sent = yield* this.callWithOverflowEvents(overflow, { messages, tools, model: turnModel, turn }, (msgs) => (async function* (self: Client) {
+            const r = yield* self.llmFetchEvents(endpoint, {
+              method: "POST",
+              headers: { "x-api-key": key, "anthropic-version": "2023-06-01", "Content-Type": "application/json", ...self.opts.headers },
+              body: JSON.stringify(self.anthropicBody(system, msgs, tools, true, turnModel)),
+            }, signal)
+            if (!r.ok || !r.body) throw await llmHttpError(r)
+            return r
+          })(this))
+          messages = sent.messages
+          const res = sent.value
+          if (!res.body) throw await llmHttpError(res)
           for await (const line of sseLines(res.body)) {
             if (!line.startsWith("data:")) continue
             const j = safeParse(line.slice(5).trim())

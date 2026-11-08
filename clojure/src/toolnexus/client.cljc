@@ -445,6 +445,14 @@
                     {:before-llm :after-llm :before-tool :after-tool
                      :after-round}; see
                     `before-llm!` / `execute-tool`. Absent => nothing changes.
+    :compact-on-overflow
+                    SPEC §7F.1 — a hook with the `:before-llm` shape, called when
+                    the provider rejects a prompt as too long (`context-overflow?`).
+                    Strictly fewer `:messages` replace the transcript and the SAME
+                    turn is re-sent (no `:before-llm` re-run, no turn consumed);
+                    nil / no progress, or 3 rapid compactions in a row, fail with
+                    `:toolnexus/error :context-overflow`. Absent => an overflow
+                    surfaces as the provider error, byte-identical.
     :wait-for       (fn [request] answer) — the ONE host slot of §10.
     :wait-for-ctx   (fn [ctx request] answer) — `:wait-for` that also receives
                     the turn's context `{:cancel :cancelled? :call-id :turn}`, so
@@ -1885,6 +1893,68 @@
 ;; the loop (§0.10)
 ;; ---------------------------------------------------------------------------
 
+;; ---------------------------------------------------------------------------
+;; SPEC §7F.1 — reactive compaction on context overflow
+;; ---------------------------------------------------------------------------
+
+(def ^:private overflow-markers
+  ["context_length_exceeded" "maximum context length" "prompt is too long"
+   "prompt_too_long" "request_too_large" "context window"])
+
+(defn context-overflow?
+  "SPEC §7F.1 detection: true iff `status` is 400 or 413 AND the (redacted)
+  error body, lowercased, carries one of the pinned overflow markers."
+  [status body]
+  (boolean (and (or (= 400 status) (= 413 status))
+                (let [b (str/lower-case (str body))]
+                  (some #(str/includes? b %) overflow-markers)))))
+
+(defn context-overflow-error
+  "The typed §7F.1 failure — a variant of the provider error (`ex-data`
+  `:toolnexus/error :context-overflow`) carrying `:compactions`, `:status` and
+  the redacted `:body` of the last provider error. Message pinned byte-identical."
+  [compactions status body]
+  (ex-info (str "context overflow: " compactions
+                " reactive compaction(s) did not make the prompt fit")
+           {:toolnexus/error :context-overflow :compactions compactions
+            :status status :body body}))
+
+(defn- overflow-data
+  "The ex-data of a final provider failure that is a context overflow, else nil."
+  [e]
+  (let [d (ex-data e)]
+    (when (and (= :provider (:toolnexus/error d))
+               (context-overflow? (:status d) (:body d)))
+      d)))
+
+(defn- send-compacting
+  "The ONE §7F.1 reaction + breaker, shared by every LLM call site of the loop.
+  `send!` takes the working transcript and performs the call. `breaker` is the
+  run's atom {:ok-since :streak}. Returns `[send-result messages]` — the
+  messages are the (possibly compacted) working transcript. Without
+  `:compact-on-overflow` this is exactly `(send! messages)`."
+  [client breaker messages tools model turn send!]
+  (if-let [hook (:compact-on-overflow client)]
+    (loop [messages messages]
+      (let [r (try {:ok (send! messages)}
+                   (catch Throwable e
+                     (if-let [d (overflow-data e)] {:overflow d} (throw e))))]
+        (if-let [d (:overflow r)]
+          (let [{:keys [ok-since streak]} @breaker
+                streak (if (and (pos? streak) (< ok-since 2)) streak 0)]
+            (swap! breaker assoc :streak streak)
+            (when (>= streak 3)
+              (throw (context-overflow-error streak (:status d) (:body d))))
+            (let [out (:messages (hook {:messages messages :tools tools
+                                        :model model :turn turn}))]
+              (when-not (and (some? out) (< (count out) (count messages)))
+                (throw (context-overflow-error streak (:status d) (:body d))))
+              (reset! breaker {:ok-since 0 :streak (inc streak)})
+              (recur (vec out))))
+          (do (swap! breaker update :ok-since inc)
+              [(:ok r) messages]))))
+    [(send! messages) messages]))
+
 (defn run
   "Run the agent loop. `ctx` = {:toolkit tk :history [...] :on-event f}.
 
@@ -1931,6 +2001,8 @@
         ;; SPEC §8 Stop-reason recovery — per-run budgets + carried text.
         recovery   (when (:stop-recovery client) (atom {:correct 0 :cont 0 :nudge 0 :carry ""}))
         carry      (fn [] (if recovery (:carry @recovery) ""))
+        ;; SPEC §7F.1 breaker state, per run.
+        breaker    (atom {:ok-since 0 :streak 0})
         ;; ONE exit path for the store save and the run metric. Two `run-result`
         ;; call sites return from this loop, and a save wired into only one of
         ;; them is the classic half-fix — the turn-limit exit would silently
@@ -1987,12 +2059,21 @@
               ;; `translate`) never sees a synthetic user turn or a provider
               ;; block. A part the style cannot send stops the run before any
               ;; HTTP call, as DATA.
-              wire    (content/build-wire messages (wire-opts client))]
-          (if (:error wire)
+              ;; SPEC §7F.1: an overflow may compact `messages` and re-send
+              ;; this same turn; the wire is rebuilt from the compacted transcript.
+              [sent messages] (send-compacting
+                               client breaker messages tools turn-model turn
+                               (fn [msgs]
+                                 (let [wire (content/build-wire msgs (wire-opts client))]
+                                   (if (:error wire)
+                                     {:wire wire}
+                                     {:resp (llm-call client turn-model system (:messages wire) tools)}))))
+              wire    (:wire sent)]
+          (if wire
             (let [r (finish! (assoc (content-error-result client wire messages tool-calls turns usage) :model last-model))]
               (emit! on-event {:type "done" :result r})
               r)
-            (let [[body turn-model] (llm-call client turn-model system (:messages wire) tools)
+            (let [[body turn-model] (:resp sent)
                   usage   (add-usage usage client (:usage body))
                   _       (after-llm! client body turn turn-model)
                   _       (emit! on-event {:type "usage" :usage usage})
