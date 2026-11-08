@@ -123,7 +123,7 @@ alias Toolnexus.Classifier.{MemoryCache, Thresholds}
 import Toolnexus.Judge
 
 # Backends are data: Classifier.backends() — typesafe (default) | openrouter
-# (typesafe/jev-1.14) | cloudflare | vercel | custom. ${NAME} in base_url expands at
+# (typesafe/jev-1.14) | cloudflare | vercel | openai (Decisions API) | custom. ${NAME} in base_url expands at
 # call time; errors name the endpoint unexpanded. custom needs base_url + supports.
 {:ok, c} = Classifier.create(backend: "openrouter", cache: MemoryCache.new(3_600_000, 1000))
 

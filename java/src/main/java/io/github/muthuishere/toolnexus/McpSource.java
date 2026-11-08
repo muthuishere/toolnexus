@@ -64,6 +64,45 @@ public final class McpSource implements AutoCloseable {
         return JsonMapperHolder.INSTANCE;
     }
 
+    private static final java.util.concurrent.atomic.AtomicBoolean PREWARMED = new java.util.concurrent.atomic.AtomicBoolean();
+
+    /**
+     * Startup overlap, no behaviour: a local server that answers {@code server/discover} as an old
+     * server (§2.2a — today, nearly all of them) continues on the frozen SDK path, whose Jackson 3
+     * mapper and McpSchema (de)serializers cost ~50–100 ms of cold class loading. That work has no
+     * dependency on the child, so a daemon thread does it while the connect thread is spawning the
+     * child, building the 2026 client and waiting for the discover reply. Once per JVM; pure
+     * (it only serializes/parses in memory) and every failure is swallowed — the connect path
+     * initialises the same classes itself if this has not finished.
+     */
+    @SuppressWarnings("unchecked")
+    private static void prewarmSdkFallback(Map<String, Object> config) {
+        boolean anyLocal = false;
+        for (Object v : config.values()) {
+            if (v instanceof Map<?, ?> m && !isRemote((Map<String, Object>) m) && isEnabled((Map<String, Object>) m)) anyLocal = true;
+        }
+        if (!anyLocal || !PREWARMED.compareAndSet(false, true)) return;
+        Thread t = new Thread(() -> {
+            try {
+                McpJsonMapper m = jsonMapper();
+                McpSchema.InitializeRequest init = new McpSchema.InitializeRequest("2025-06-18",
+                        McpSchema.ClientCapabilities.builder().build(), new McpSchema.Implementation("toolnexus", "0.1.0"));
+                m.writeValueAsString(new McpSchema.JSONRPCRequest(McpSchema.JSONRPC_VERSION, McpSchema.METHOD_INITIALIZE, 0, init));
+                McpSchema.deserializeJsonRpcMessage(m, "{\"jsonrpc\":\"2.0\",\"id\":0,\"result\":{\"tools\":[{\"name\":\"t\","
+                        + "\"inputSchema\":{\"type\":\"object\"}}]}}");
+                m.convertValue(Map.of("tools", List.of(Map.of("name", "t", "inputSchema", Map.of("type", "object")))),
+                        McpSchema.ListToolsResult.class);
+                m.convertValue(Map.of("protocolVersion", "2025-06-18", "capabilities", Map.of(),
+                        "serverInfo", Map.of("name", "s", "version", "1")), McpSchema.InitializeResult.class);
+                m.convertValue(Map.of("content", List.of(Map.of("type", "text", "text", "x"))), McpSchema.CallToolResult.class);
+            } catch (Throwable ignored) {
+                // best effort only
+            }
+        }, "toolnexus-mcp-prewarm");
+        t.setDaemon(true);
+        t.start();
+    }
+
     /**
      * The SDK's default schema validator, resolved on the first structured-output validation
      * rather than when each client is built (the default networknt validator is ~220 classes).
@@ -486,6 +525,7 @@ public final class McpSource implements AutoCloseable {
             }
         };
 
+        prewarmSdkFallback(config);
         // Connect each server in parallel (failures isolated per server).
         List<Thread> threads = new ArrayList<>();
         Object lock = new Object();
@@ -969,10 +1009,83 @@ public final class McpSource implements AutoCloseable {
         }
     }
 
+    /** One shared daemon timer for every in-flight {@code tools/call} watchdog (lazy). */
+    private static final class Watchdog {
+        static final java.util.concurrent.ScheduledThreadPoolExecutor TIMER;
+        static {
+            TIMER = new java.util.concurrent.ScheduledThreadPoolExecutor(1, r -> {
+                Thread t = new Thread(r, "toolnexus-mcp-watchdog");
+                t.setDaemon(true);
+                return t;
+            });
+            TIMER.setRemoveOnCancelPolicy(true);
+        }
+    }
+
+    /**
+     * The watchdog for one in-flight call. It re-arms itself at {@code min(20 ms, idle budget left)}
+     * — the same cadence the previous polling loop used — and on a trip interrupts the caller under
+     * {@code this} lock, so the caller can decide the reply/trip race without a stray interrupt.
+     */
+    private static final class CallWatch implements Runnable {
+        static final int RUNNING = 0, DONE = 1, TIMED_OUT = 2, CANCELLED = 3;
+        private final Thread caller = Thread.currentThread();
+        private final ToolContext ctx;
+        private final java.util.concurrent.atomic.AtomicLong last;
+        private final long budget;
+        private int state = RUNNING; // guarded by this
+        private java.util.concurrent.ScheduledFuture<?> next; // guarded by this
+
+        CallWatch(ToolContext ctx, java.util.concurrent.atomic.AtomicLong last, long budgetNanos) {
+            this.ctx = ctx;
+            this.last = last;
+            this.budget = budgetNanos;
+        }
+
+        synchronized void arm() {
+            if (state != RUNNING) return;
+            long remaining = budget - (System.nanoTime() - last.get());
+            long delay = Math.max(0, Math.min(remaining, java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(20)));
+            next = Watchdog.TIMER.schedule(this, delay, java.util.concurrent.TimeUnit.NANOSECONDS);
+        }
+
+        @Override
+        public void run() {
+            synchronized (this) {
+                if (state != RUNNING) return;
+                if (ctx != null && ctx.isCancelled()) state = CANCELLED;
+                else if (budget - (System.nanoTime() - last.get()) <= 0) state = TIMED_OUT;
+                if (state != RUNNING) {
+                    caller.interrupt();
+                    return;
+                }
+            }
+            arm();
+        }
+
+        /**
+         * Marks the call finished (idempotent); returns the trip state the FIRST time it is seen
+         * (RUNNING ⇒ none) after clearing the watchdog's own interrupt, DONE afterwards.
+         */
+        synchronized int finish() {
+            if (next != null) next.cancel(false);
+            int s = state;
+            if (s == TIMED_OUT || s == CANCELLED) Thread.interrupted(); // never leak our interrupt
+            state = DONE;
+            return s;
+        }
+    }
+
     /**
      * §2 idle timeout for {@code tools/call}: the call is abandoned after {@code timeoutMs} with no
      * matching progress notification (each one resets the budget), or promptly when {@code ctx} is
      * cancelled (cancellation wins over progress).
+     *
+     * <p>The call runs on the CALLING thread, so the reply wakes the caller directly (the previous
+     * design ran it on a helper virtual thread, one more hand-off per call). A shared timer checks
+     * cancellation + the idle budget and, when one trips, interrupts the caller's blocking
+     * {@code callTool} — the same interrupt {@code FutureTask.cancel(true)} sent before. If the reply
+     * and a trip race, the reply wins.
      */
     static McpSchema.CallToolResult callWithIdleTimeout(McpSyncClient client, String mcpName,
                                                         Map<String, Object> args, long timeoutMs,
@@ -981,36 +1094,38 @@ public final class McpSource implements AutoCloseable {
         Map<String, Object> meta = new LinkedHashMap<>();
         meta.put("progressToken", token);
         McpSchema.CallToolRequest req = new McpSchema.CallToolRequest(mcpName, args, meta);
+        if (ctx != null && ctx.isCancelled()) throw tripped(CallWatch.CANCELLED, timeoutMs);
         java.util.concurrent.atomic.AtomicLong last = progress.register(token);
-        java.util.concurrent.FutureTask<McpSchema.CallToolResult> task =
-                new java.util.concurrent.FutureTask<>(() -> client.callTool(req));
-        Thread.ofVirtual().name("toolnexus-mcp-call-" + mcpName).start(task);
-        long budget = java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(timeoutMs);
+        CallWatch watch = new CallWatch(ctx, last, java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(timeoutMs));
         try {
-            while (true) {
-                if (ctx != null && ctx.isCancelled()) {
-                    task.cancel(true);
-                    throw new java.util.concurrent.CancellationException("MCP tool call cancelled");
+            watch.arm();
+            McpSchema.CallToolResult result;
+            try {
+                result = client.callTool(req);
+            } catch (RuntimeException | Error e) {
+                int trip = watch.finish();
+                if (trip != CallWatch.RUNNING) throw tripped(trip, timeoutMs);
+                Throwable c = e;
+                while (c != null && !(c instanceof InterruptedException)) c = c.getCause();
+                if (c instanceof InterruptedException ie) { // an external interrupt of the caller
+                    Thread.interrupted();
+                    throw ie;
                 }
-                long remaining = budget - (System.nanoTime() - last.get());
-                if (remaining <= 0) {
-                    task.cancel(true);
-                    throw new RuntimeException("MCP tool call timed out after " + timeoutMs + "ms without progress");
-                }
-                try {
-                    return task.get(Math.min(remaining, java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(20)),
-                            java.util.concurrent.TimeUnit.NANOSECONDS);
-                } catch (java.util.concurrent.TimeoutException ignored) {
-                    // re-check cancellation + idle budget
-                } catch (java.util.concurrent.ExecutionException ee) {
-                    Throwable c = ee.getCause();
-                    if (c instanceof Exception ex) throw ex;
-                    throw new RuntimeException(c);
-                }
+                if (e instanceof Error err) throw new RuntimeException(err);
+                throw e;
             }
+            watch.finish(); // the reply won any race
+            return result;
         } finally {
+            watch.finish();
             progress.unregister(token);
         }
+    }
+
+    private static Exception tripped(int state, long timeoutMs) {
+        return state == CallWatch.CANCELLED
+                ? new java.util.concurrent.CancellationException("MCP tool call cancelled")
+                : new RuntimeException("MCP tool call timed out after " + timeoutMs + "ms without progress");
     }
 
     private static Tool convertTool(String server, McpSchema.Tool def, McpSyncClient client, long timeout,

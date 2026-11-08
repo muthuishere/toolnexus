@@ -493,3 +493,71 @@ async def test_metric_hash_matches_fixture() -> None:
     with pytest.raises(ClassifierError):
         await c.evaluate("s", {"x": RawQuestion("", "y")})
     assert events[-1]["status"] == "error" and events[-1]["questions"] == 1 and events[-1]["questions_hash"]
+
+
+# --------------------------------------------------------------------------- openai decisions (#157)
+
+_DEC = load("openai-decisions.json")
+
+
+def _dec_ok_reply() -> str:
+    return json.dumps(_DEC["replyCases"][0]["reply"])
+
+
+@pytest.mark.parametrize("case", _DEC["requestCases"], ids=lambda c: c["name"])
+async def test_openai_decisions_request_fixture(case: dict[str, Any], fake) -> None:
+    f = fake(lambda n, b: (200, _dec_ok_reply()))
+    kw: dict[str, Any] = {"model": case["model"]} if case.get("model") else {}
+    c = create_classifier(backend="openai", base_url=f.url + "/v1", on_error=no_retry, **kw)
+    await c.evaluate(fixture_state(case["state"]), fixture_questions(_DEC["questions"]))
+    assert f.bodies[0] == case["expect"]["body"]
+    assert f.paths[0] == "/v1/decisions"
+    assert "typesafe-danger-zone-images" not in f.headers[0]
+
+
+@pytest.mark.parametrize("case", _DEC["replyCases"], ids=lambda c: c["name"])
+async def test_openai_decisions_reply_fixture(case: dict[str, Any], fake) -> None:
+    from toolnexus.classifier import _decisions_reply
+
+    qs = fixture_questions(_DEC["questions"])
+    exp = case["expect"]
+    if exp.get("normalized"):
+        assert _decisions_reply(case["reply"], qs).decode() == exp["normalized"]
+    f = fake(lambda n, b: (200, json.dumps(case["reply"])))
+    c = create_classifier(backend="openai", base_url=f.url, on_error=no_retry)
+    if "error" in exp:
+        with pytest.raises(ClassifierError) as e:
+            await c.evaluate("x", qs)
+        assert str(e.value) == exp["error"]
+        return
+    d = await c.evaluate("x", qs)
+    assert d.model == exp["model"] and d.calibrated is exp["calibrated"]
+    for k, v in exp.get("noul", {}).items():
+        assert d.noul(k).noul == v
+    for k, v in exp.get("choice", {}).items():
+        assert d.choice(k).choice == v
+    for k, v in exp.get("score", {}).items():
+        assert d.score(k).score == v
+
+
+@pytest.mark.parametrize("case", _DEC["errorCases"], ids=lambda c: c["name"])
+async def test_openai_decisions_error_fixture(case: dict[str, Any], fake) -> None:
+    f = fake(lambda n, b: (200, _dec_ok_reply()))
+    c = create_classifier(backend="openai", base_url=f.url, on_error=no_retry)
+    with pytest.raises(ClassifierError) as e:
+        await c.evaluate("x", fixture_questions(case["questions"]))
+    assert str(e.value) == case["expect"]["error"]
+    assert isinstance(e.value, ClassifierUnsupported) is bool(case["expect"].get("unsupported"))
+    assert f.bodies == []
+
+
+@pytest.mark.parametrize("case", _DEC["captureCases"], ids=lambda c: c["name"])
+async def test_openai_decisions_capture_fixture(case: dict[str, Any], fake, monkeypatch) -> None:
+    for k, v in case.get("env", {}).items():
+        monkeypatch.setenv(k, v)
+    f = fake(lambda n, b: (200, _dec_ok_reply()))
+    c = create_classifier(
+        backend="openai", base_url=f.url + "/v1", api_key_env=case.get("apiKeyEnv"), on_error=no_retry
+    )
+    await c.evaluate("x", fixture_questions(_DEC["questions"]))
+    assert f.headers[0].get("authorization") == case["expectAuthorization"]

@@ -1,7 +1,7 @@
 package io.github.muthuishere.toolnexus;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 
 import java.net.URI;
@@ -43,7 +43,7 @@ class ServeMcpConformanceTest {
                             .timeout(Duration.ofSeconds(5))
                             .method(rq.get("method").asText(), HttpRequest.BodyPublishers.noBody());
                     if (rq.has("headers")) {
-                        for (Iterator<Map.Entry<String, JsonNode>> it = rq.get("headers").fields(); it.hasNext(); ) {
+                        for (Iterator<Map.Entry<String, JsonNode>> it = rq.get("headers").properties().iterator(); it.hasNext(); ) {
                             Map.Entry<String, JsonNode> e = it.next();
                             b.header(e.getKey(), e.getValue().asText());
                         }
@@ -53,7 +53,7 @@ class ServeMcpConformanceTest {
                     assertEquals(c.get("expect").get("status").asInt(), res.statusCode(), name);
                     JsonNode hs = c.get("expect").get("headers");
                     if (hs != null) {
-                        for (Iterator<Map.Entry<String, JsonNode>> it = hs.fields(); it.hasNext(); ) {
+                        for (Iterator<Map.Entry<String, JsonNode>> it = hs.properties().iterator(); it.hasNext(); ) {
                             Map.Entry<String, JsonNode> e = it.next();
                             assertEquals(e.getValue().asText(), res.headers().firstValue(e.getKey()).orElse(null), name + " " + e.getKey());
                         }

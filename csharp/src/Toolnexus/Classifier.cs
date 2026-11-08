@@ -422,6 +422,10 @@ public enum ClassifierBackend
     /// <summary>A self-hosted System One endpoint. Requires <see cref="ClassifierOptions.BaseUrl"/>
     /// AND <see cref="ClassifierOptions.Supports"/>: the library cannot know what it takes.</summary>
     Custom,
+
+    /// <summary>OpenAI's Decisions API (<c>POST {BaseUrl}/decisions</c>) — <c>gpt-6-luna</c>,
+    /// <c>OPENAI_API_KEY</c>. Its decisions report <c>Calibrated = false</c>.</summary>
+    OpenAI,
 }
 
 public sealed class ClassifierOptions
@@ -1080,7 +1084,8 @@ public sealed partial class Classifier
         // endpoint is what errors name: the CONFIGURED base, ${ENV} unexpanded, so an account id in
         // a templated URL never reaches an error. url is what is dialled, expanded at call time.
         var endpoint = _baseUrl.TrimEnd('/');
-        if (_preset.Wire != ClassifierBackends.WireCloudflare) endpoint += "/systemone";
+        if (_preset.Wire == ClassifierBackends.WireDecisions) endpoint += "/decisions";
+        else if (_preset.Wire != ClassifierBackends.WireCloudflare) endpoint += "/systemone";
         var url = ClassifierBackends.ExpandEnvRefs(endpoint);
         var classify = _opts.OnError ?? (info => info.Retryable ? LlmClient.Tier.Retry : LlmClient.Tier.Fail);
 

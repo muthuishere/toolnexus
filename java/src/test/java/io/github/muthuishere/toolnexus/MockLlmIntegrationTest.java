@@ -193,6 +193,13 @@ class MockLlmIntegrationTest {
     }
 
     @Test
+    void classifierOpenAiDecisions() {
+        assertDecision(Classifier.create(new Classifier.Options()
+                .backend(Classifier.BACKEND_OPENAI).baseUrl(base)
+                .apiKeyEnv("TN_MOCK_UNSET_KEY")));
+    }
+
+    @Test
     void mediaAllVerbs() throws Exception {
         Path f = Files.createTempFile("mock-media-style", ".json");
         try {

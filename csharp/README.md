@@ -93,7 +93,9 @@ Proposed defaults, owner to confirm (`openspec/changes/add-classifier-backends`,
 
 - **Backends** are data: `ClassifierBackends.Table` has `TypeSafe` (default), `OpenRouter`
   (`typesafe/jev-1.14`), `Cloudflare` (`/ai/run` envelope; `${CLOUDFLARE_ACCOUNT_ID}` in the URL
-  expands at call time, and errors name the unexpanded URL), `Vercel` and `Custom` (needs `BaseUrl`
+  expands at call time, and errors name the unexpanded URL), `Vercel`, `OpenAI` (the Decisions API,
+  `POST {BaseUrl}/decisions`, `gpt-6-luna`; decisions report `Calibrated = false`, raw questions
+  are unsupported, a choice needs 2..255 options) and `Custom` (needs `BaseUrl`
   and `Supports`). `Supports = new ClassifierSupports(Images: true)` overrides the image column.
   `WithBackend("name")` parses the wire name.
 - **Images**: put a `ContentPart` image (PNG/JPEG, inline data) anywhere in the state. It is sent

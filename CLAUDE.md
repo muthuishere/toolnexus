@@ -39,7 +39,7 @@ below.
 | `csharp/` | C# port — `Toolnexus` (NuGet), .NET. MCP SDK: `ModelContextProtocol`. |
 | `elixir/` | Elixir port — `toolnexus` (Hex), Elixir ≥ 1.16/OTP 26. MCP client: **in-house** (`Toolnexus.Mcp.*` — no mature Elixir SDK exists); coverage gate ≥ 95%. |
 | `clojure/` | Clojure port — `net.clojars.muthuishere/toolnexus` (Clojars). One `.cljc` source tree for the JVM and cljgo; koine is its only dependency. |
-| `rust/` | Rust port — `toolnexus` (crates.io), edition 2024, tokio. MCP SDK: official `rmcp`. Held to tier **full** (`conformance/options_manifest.json`); remaining gaps (no Gemini client style, Windows unrun) are in `CHANGELOG.md` and `openspec/changes/add-rust-port`. |
+| `rust/` | Rust port — `toolnexus` (crates.io), edition 2024, tokio. MCP: in-house stdio client; official `rmcp` only for remote HTTP/SSE servers and the serve side. Held to tier **full** (`conformance/options_manifest.json`); remaining gaps (no Gemini client style, Windows unrun) are in `CHANGELOG.md` and `openspec/changes/add-rust-port`. |
 | `examples/` | **Shared cross-language fixtures** — `mcp.json` + `skills/hello-world/`. Every port runs against these; outputs must match. |
 | `openspec/` | **Spec-driven change workflow (OpenSpec).** `changes/` = active proposals (`proposal.md` + spec deltas + `tasks.md`), `specs/` = canonical capability specs, `changes/archive/` = shipped changes. Run the `openspec` CLI from the repo root. |
 | `.github/workflows/ci.yml` | Runs all eight suites (JS/Python/Go/Java/C#/Elixir/Clojure/Rust), hermetically (no network, no live LLM). |

@@ -44,6 +44,16 @@
         "typesafe-ai/jev": false
       }
     },
+    "openai": {
+      "baseUrl": "https://api.openai.com/v1",
+      "model": "gpt-6-luna",
+      "apiKeyEnv": "OPENAI_API_KEY",
+      "wire": "decisions",
+      "imagesHeader": false,
+      "supportsImages": {
+        "gpt-6-luna": true
+      }
+    },
     "custom": {
       "baseUrl": null,
       "model": "jev-latest",
@@ -53,6 +63,6 @@
       "supportsImages": null
     }
   },
-  "unknownBackendError": "classifier: unknown backend \"nope\" (want \"typesafe\", \"openrouter\", \"cloudflare\", \"vercel\" or \"custom\")",
+  "unknownBackendError": "classifier: unknown backend \"nope\" (want \"typesafe\", \"openrouter\", \"cloudflare\", \"vercel\", \"openai\" or \"custom\")",
   "customError": "classifier: backend \"custom\" requires baseUrl and supports"
 }

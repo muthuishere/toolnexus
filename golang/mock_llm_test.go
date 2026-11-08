@@ -252,6 +252,7 @@ func TestMockLLMClassifier(t *testing.T) {
 	}{
 		{"custom", ClassifierOptions{Backend: BackendCustom, BaseURL: base, Supports: &ClassifierSupports{}, APIKeyEnv: "TN_MOCK_CLASSIFIER_KEY"}},
 		{"cloudflare", ClassifierOptions{Backend: BackendCloudflare, BaseURL: origin + "/v1/accounts/acc/ai/run", APIKeyEnv: "TN_MOCK_CLASSIFIER_KEY"}},
+		{"openai", ClassifierOptions{Backend: BackendOpenAI, BaseURL: base, APIKeyEnv: "TN_MOCK_CLASSIFIER_KEY"}},
 	}
 	options := map[string]string{
 		"billing": "the ticket is about an invoice or a charge",

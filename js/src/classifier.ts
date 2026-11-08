@@ -34,7 +34,7 @@ export const DEFAULT_BATCH_CONCURRENCY = 16
  * `typesafe/jev-1.14`, and mixing the two is issue #91. `custom` is a self-hosted System One
  * endpoint and requires `baseUrl` + `supports` (SPEC §8B "Backends, images, cache and validation").
  */
-export type ClassifierBackend = "typesafe" | "openrouter" | "cloudflare" | "vercel" | "custom"
+export type ClassifierBackend = "typesafe" | "openrouter" | "cloudflare" | "vercel" | "openai" | "custom"
 
 /** What a backend+model can take. DATA: a fail-fast for what the table says, never a claim about
  * the vendor. Override per classifier with `ClassifierOptions.supports`. */
@@ -48,8 +48,9 @@ export interface ClassifierBackendPreset {
   baseUrl: string
   model: string
   apiKeyEnv: string
-  /** `systemone`: POST {baseUrl}/systemone. `cloudflare`: POST {baseUrl}, `/ai/run` envelope. */
-  wire: "systemone" | "cloudflare"
+  /** `systemone`: POST {baseUrl}/systemone. `cloudflare`: POST {baseUrl}, `/ai/run` envelope.
+   * `decisions`: POST {baseUrl}/decisions, OpenAI's Decisions API (#157). */
+  wire: "systemone" | "cloudflare" | "decisions"
   /** Send `TypeSafe-Danger-Zone-Images: true` when a request carries images. */
   imagesHeader: boolean
   /** The default support for a model on this backend; absent on `custom`. */
@@ -100,6 +101,14 @@ export const CLASSIFIER_BACKENDS: Readonly<Record<ClassifierBackend, Readonly<Cl
     wire: "systemone",
     imagesHeader: true,
     supports: () => ({ images: false }),
+  },
+  openai: {
+    baseUrl: "https://api.openai.com/v1",
+    model: "gpt-6-luna",
+    apiKeyEnv: "OPENAI_API_KEY",
+    wire: "decisions",
+    imagesHeader: false,
+    supports: () => ({ images: true }),
   },
   custom: {
     baseUrl: "",
@@ -690,7 +699,7 @@ export class Classifier {
     this.backend = opts.backend ?? "typesafe"
     if (!Object.prototype.hasOwnProperty.call(CLASSIFIER_BACKENDS, this.backend)) {
       throw new Error(
-        `classifier: unknown backend "${this.backend}" (want "typesafe", "openrouter", "cloudflare", "vercel" or "custom")`,
+        `classifier: unknown backend "${this.backend}" (want "typesafe", "openrouter", "cloudflare", "vercel", "openai" or "custom")`,
       )
     }
     const preset = CLASSIFIER_BACKENDS[this.backend]
@@ -920,7 +929,9 @@ export class Classifier {
     const qs: Record<string, unknown> = {}
     for (const [key, q] of Object.entries(questions)) qs[key] = questionWire(q)
     let body: Record<string, any>
-    if (this.preset.wire === "cloudflare") {
+    if (this.preset.wire === "decisions") {
+      body = { model: this.model, input: decisionsInput(p), questions: decisionsQuestions(this.backend, this.model, questions) }
+    } else if (this.preset.wire === "cloudflare") {
       const input: Record<string, unknown> = { questions: qs, state: p.state }
       if (p.images.length > 0) input.images = p.images.map((im) => `data:image/${im.format};base64,${im.data}`)
       body = { model: this.model, input }
@@ -995,6 +1006,9 @@ export class Classifier {
     if (this.preset.wire === "cloudflare") {
       parsed = unwrapCloudflare(parsed)
       text = canonicalJson(parsed)
+    } else if (this.preset.wire === "decisions") {
+      text = decisionsReply(parsed, questions)
+      parsed = JSON.parse(text)
     }
     const d = decodeDecision(parsed, this.model)
     const verr = validateDecision(questions, d)
@@ -1020,7 +1034,8 @@ export class Classifier {
     // `endpoint` is what errors name: the CONFIGURED base, ${ENV} unexpanded, so an account id in
     // a templated URL never reaches an error. `url` is what is dialled, expanded at call time.
     let endpoint = this.baseUrl.replace(/\/+$/, "")
-    if (this.preset.wire !== "cloudflare") endpoint += "/systemone"
+    if (this.preset.wire === "decisions") endpoint += "/decisions"
+    else if (this.preset.wire !== "cloudflare") endpoint += "/systemone"
     const url = endpoint.includes("${") ? expandEnv(endpoint) : endpoint
     const retries = this.opts.retries ?? 2
     const base = this.opts.retryBaseMs ?? 500
@@ -1558,4 +1573,100 @@ export function chunkQuestions<Q extends AnyQuestion>(questions: Record<string, 
     out.push(Object.fromEntries(keys.slice(i, i + size).map((k) => [k, questions[k]])))
   }
   return out
+}
+
+// ---------------------------------------------------------------- the Decisions wire (#157)
+
+/** The Decisions API's per-request question cap. */
+export const MAX_DECISIONS_QUESTIONS = 400
+
+/**
+ * Maps the question set to the Decisions API list, in ASCII key order. Caller keys are NOT sent
+ * (no `name`): §8B keys are addressing, not content, and answers come back in request order.
+ * Every check fires before any request.
+ */
+function decisionsQuestions(backend: string, model: string, questions: Record<string, AnyQuestion>): unknown[] {
+  const keys = Object.keys(questions).sort()
+  if (keys.length > MAX_DECISIONS_QUESTIONS) {
+    throw new Error(`classifier: the decisions wire takes at most ${MAX_DECISIONS_QUESTIONS} questions, got ${keys.length}`)
+  }
+  return keys.map((k) => {
+    const q = questions[k]
+    if (isRawQuestion(q)) throw new ClassifierUnsupported(backend, model, `raw question type "${q.type}"`)
+    const m = q as Question
+    switch (m.type) {
+      case "noul": {
+        let instructions = m.instructions
+        if (m.criteria !== undefined) instructions += `\n\nTrue means: ${m.criteria.true}\nFalse means: ${m.criteria.false}`
+        return { type: "predicate", instructions }
+      }
+      case "choice": {
+        const ids = Object.keys(m.criteria ?? {}).sort()
+        if (ids.length < 2) {
+          throw new Error(`classifier: question "${k}": the decisions wire needs 2..${MAX_CHOICE_OPTIONS} choice options, got ${ids.length}`)
+        }
+        const choices = ids.map((id) => (m.criteria[id] === "" ? { value: id } : { value: id, description: m.criteria[id] }))
+        return { type: "choice", instructions: m.instructions, choices }
+      }
+      case "score":
+        return { type: "score", instructions: m.instructions, levels: m.criteria.map((label) => ({ label })) }
+    }
+  })
+}
+
+/** The state as sent: a string verbatim, else canonical JSON text; with images, one user message. */
+function decisionsInput(p: PreparedRequest): unknown {
+  const text = typeof p.state === "string" ? p.state : canonicalJson(p.state)
+  if (p.images.length === 0) return text
+  const content: unknown[] = [{ type: "input_text", text }]
+  for (const im of p.images) content.push({ type: "input_image", image_url: `data:image/${im.format};base64,${im.data}` })
+  return [{ role: "user", content }]
+}
+
+/** A choice value or level index as the §8B key: string as written, boolean "true"/"false", number shortest. */
+function decisionsValue(v: unknown): string {
+  return typeof v === "string" ? v : String(v)
+}
+
+/**
+ * Reads a Decisions API reply back into a System One-shaped body (canonical JSON), so decode,
+ * validation and the cache are the one path. `calibrated` is false. Exported for conformance tests.
+ */
+export function decisionsReply(reply: unknown, questions: Record<string, AnyQuestion>): string {
+  const r = reply as any
+  if (r === null || typeof r !== "object" || Array.isArray(r) || !Array.isArray(r.answers)) {
+    throw new Error("classifier: decisions: malformed reply")
+  }
+  const keys = Object.keys(questions).sort()
+  if (r.answers.length !== keys.length) {
+    throw new Error(`classifier: decisions: ${r.answers.length} answers for ${keys.length} questions`)
+  }
+  const num = (v: unknown): number => (typeof v === "number" ? v : 0)
+  const want: Record<string, string> = { noul: "predicate", choice: "choice", score: "score" }
+  const answers: Record<string, unknown> = {}
+  keys.forEach((k, i) => {
+    const a = r.answers[i]
+    if (a === null || typeof a !== "object" || Array.isArray(a)) throw new Error("classifier: decisions: malformed reply")
+    if (a.type === "refusal") throw new Error(`classifier: decisions: question "${k}" was refused`)
+    const q = questions[k]
+    const w = want[q.type] ?? ""
+    if (a.type !== w) throw new Error(`classifier: decisions: answer "${k}" is a ${a.type} answer, not ${w}`)
+    const probs: Record<string, number> = {}
+    for (const p of Array.isArray(a.probabilities) ? a.probabilities : []) probs[decisionsValue(p?.value)] = num(p?.probability)
+    if (q.type === "noul") answers[k] = { type: "noul", noul: num(a.probability) }
+    else if (q.type === "choice") {
+      answers[k] = { type: "choice", choice: decisionsValue(a.choice), probabilities: probs, confidence: num(a.confidence) }
+    } else {
+      const legend: Record<string, string> = {}
+      ;(q as ScoreQuestion).criteria.forEach((l, j) => (legend[String(j)] = l))
+      answers[k] = { type: "score", score: num(a.score), legend, probabilities: probs, confidence: num(a.confidence) }
+    }
+  })
+  const u = r.usage ?? {}
+  return canonicalJson({
+    answers,
+    calibrated: false,
+    model: typeof r.model === "string" ? r.model : "",
+    usage: { input_tokens: num(u.input_tokens), output_tokens: num(u.output_tokens) },
+  })
 }

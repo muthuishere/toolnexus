@@ -1,7 +1,7 @@
 package io.github.muthuishere.toolnexus;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.SerializationFeature;
+import tools.jackson.databind.ObjectMapper;
+import tools.jackson.databind.SerializationFeature;
 
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
@@ -263,8 +263,8 @@ public final class ToolTiers {
     // tool_search text and the token estimate match the reference byte-for-byte.
     // ------------------------------------------------------------------
 
-    private static final ObjectMapper SORTED = new ObjectMapper()
-            .enable(SerializationFeature.ORDER_MAP_ENTRIES_BY_KEYS);
+    private static final ObjectMapper SORTED = Json.builder()
+            .enable(SerializationFeature.ORDER_MAP_ENTRIES_BY_KEYS).build();
 
     static String goJson(Object v) {
         String s;
