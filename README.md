@@ -32,16 +32,16 @@ model: a named, described, schema'd callable (an insight borrowed from
 `Tool` interface, emits the schema in OpenAI / Anthropic / Gemini shape, and drives any model with
 them through one client loop.
 
-## Install (0.28.0)
+## Install (0.29.0)
 
 ```sh
 npm i toolnexus                                   # JavaScript / TypeScript (npm)
 pip install toolnexus                             # Python (PyPI)
 go get github.com/muthuishere/toolnexus/golang    # Go
 dotnet add package Toolnexus                       # C# / .NET (NuGet)
-{:toolnexus, "~> 0.28"}                             # Elixir (mix.exs deps, Hex)
-# Java (Maven Central): io.github.muthuishere:toolnexus:0.28.0
-# Clojure (deps.edn, Clojars): net.clojars.muthuishere/toolnexus {:mvn/version "0.28.0"} (JVM and cljgo)
+{:toolnexus, "~> 0.29"}                             # Elixir (mix.exs deps, Hex)
+# Java (Maven Central): io.github.muthuishere:toolnexus:0.29.0
+# Clojure (deps.edn, Clojars): net.clojars.muthuishere/toolnexus {:mvn/version "0.29.0"} (JVM and cljgo)
 cargo add toolnexus                                # Rust (crates.io)
 ```
 

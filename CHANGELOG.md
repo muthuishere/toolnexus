@@ -8,6 +8,8 @@ GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
 
 ## Unreleased
 
+## 0.29.0 — 2026-11-08
+
 **Images and video through the official Grok, Codex or Google Antigravity CLI.** A preset drives
 the vendor's CLI in its documented headless mode (`grok -p`, `codex exec`, `agy -p`), signed in by
 you, and hands back the file it saved, from the same `createMedia` you already use. Your provider's
