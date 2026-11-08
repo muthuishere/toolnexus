@@ -108,7 +108,8 @@ always has the notes tier on, whatever the persona uses.
 Each pass follows `DREAM_PROMPT`, a fixed text that is the same in every port:
 
 1. **Verify.** Read `MEMORY.md` and the notes it points to, and check each claim against the
-   transcripts. Fix a claim the transcripts contradict. Remove one they no longer support.
+   transcripts. Fix or remove a claim only when the transcripts contradict it. A claim
+   they do not mention stays: transcripts get pruned, and silence is not evidence.
 2. **Demote.** Move detail out of `MEMORY.md` into a note and leave a one-line `[[slug]]`
    pointer, so the index stays short.
 3. **Merge.** Fold duplicate or conflicting notes into one.
@@ -130,11 +131,15 @@ the next session answers differently. The fixture passes in all eight ports.
 - **The dreamer has two tools and no others:** `memory` (over the persona's home) and
   `transcript_search` (read-only). It cannot run shell commands, touch other files, or call the
   persona's own tools.
-- **`memory/log.md` is the audit trail.** Every pass that changes something says what it
-  changed and why. If a dream "tidies" a good note away, the log tells you which one.
+- **`memory/log.md` is the audit trail, and the dreamer can only append to it.** Every pass
+  that changes something says what it changed and why. The dreamer's `memory` tool refuses
+  `replace`/`remove` on `note:log`, so a dream cannot rewrite its own record.
+- **`USER.md` is off-limits to the dreamer.** Every action on target `user` returns an error;
+  the user model only changes in a live session.
 - **Put the home dir in git.** The log tells you what changed; git lets you undo it. A nightly
   commit after the dream gives you a diff of every pass.
-- Memory writes are atomic and serialised per file in one process. Two **processes** writing the
+- Memory writes are atomic and serialised per file in one process (clojure: in place, not
+  atomic, and serialised in-process only). Two **processes** writing the
   same home dir: the last write wins. Run one dreamer per home.
 
 ## When to use it, and when to skip it

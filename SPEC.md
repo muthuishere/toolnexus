@@ -2137,6 +2137,10 @@ yet: its directory resolved, the name appended), so a home reached through a sym
 its real path shares one lock — within one runtime/process (two tools over one home
 in one runtime lose nothing). Across processes the last rename wins (not fixed). On a case-insensitive filesystem
 two spellings of one path may map to two locks — host-dependent, not normalized.
+*Permitted per-port difference:* clojure writes in place (no temp file + rename — `koine.fs`
+has no rename yet) and its per-path lock is an in-process lock only; serialization within one
+runtime and full-file read-modify-write hold, atomicity against a crash mid-write does not.
+Tracked in `openspec/changes/add-memory-hierarchy` (tasks).
 
 **`transcriptSearchTool(store, { maxResults? = 20, snippetChars? = 200, name? = "transcript_search" })`** —
 a read-only `Tool` over a `ConversationStore`. Construction throws
@@ -2180,7 +2184,7 @@ tidies it. One preset, one option — no new verb or loop (ADR 0016/0017 stand).
 ```
 You are dreaming: an offline pass over your own memory. Memory exists so that a future session decides better. MEMORY.md is a short index loaded at the start of every session; notes (memory target "note:<slug>") hold the detail; the transcripts (transcript_search) are the ground truth of what actually happened.
 Work in this order:
-1. Verify: read MEMORY.md and the notes it points to (memory read, memory list) and check each claim against the transcripts. Fix a claim the transcripts contradict; remove one they no longer support.
+1. Verify: read MEMORY.md and the notes it points to (memory read, memory list) and check each claim against the transcripts. Fix or remove a claim only when it is contradicted by the transcripts; a claim they do not mention stays (transcripts may be pruned).
 2. Demote: move detail out of MEMORY.md into a note and leave a one-line [[slug]] pointer, so the index stays short.
 3. Merge: fold duplicate or conflicting notes into one.
 4. Repair links: point every [[slug]] at an existing note or create it; give every note an index line.
@@ -2191,6 +2195,12 @@ If nothing needs changing, write nothing and reply HEARTBEAT_OK.
 **`dreamer(dir, { store, instructions?, name?, model? })`** returns a plain agent:
 - tools **exactly** `[memory (notes on, over dir), transcript_search (over store)]`, in that
   order — never the persona's own tools;
+- the dreamer's `memory` tool is the notes-on tool behind a **dream guard** (same name,
+  description and schema), checked before anything else: `target` `user` (any action) ⇒
+  `isError` `dreamer: USER.md is off-limits`; `target` `note:log` with `action` `replace` or
+  `remove` ⇒ `isError` `dreamer: memory/log.md is append-only`. Nothing is read or written on a
+  refusal. `add`/`read` on `note:log` and every other target behave as the plain tool, so the
+  audit trail can only grow and the user model is never touched by a dream;
 - soul = `## HEARTBEAT.md\n\n` + parts joined by `"\n\n"`, parts = `DREAM_PROMPT`, then
   `<dir>/DREAM.md` (2 MB cap, trimmed, only if non-empty), then `instructions` (trimmed, only if
   non-empty). Because the prompt sits in a `HEARTBEAT.md` section, the ordinary
@@ -2215,7 +2225,9 @@ registered and spawned (byte-identical).
 **`memory/log.md`** — the audit/revert trail. A pass that changes anything appends exactly one
 entry through the memory tool (`add`, target `note:log`, text beginning `dream: `), so the on-disk
 entry is `- dream: <every change and why>\n`. A pass that changes nothing writes nothing. The
-library does not enforce the log or the `[[slug]]` link syntax — `DREAM_PROMPT` asks for them.
+library does not enforce the log's content or the `[[slug]]` link syntax — `DREAM_PROMPT` asks for them —
+but the dream guard (above) makes the log append-only and `USER.md` unreachable for the dreamer.
+No pre-pass snapshot is taken (not done; the log is the trail).
 
 ### Composition, not API
 

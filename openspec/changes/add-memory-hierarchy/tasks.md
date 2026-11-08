@@ -62,3 +62,12 @@ byte-identity test with all options absent.
 
 - [x] Parity drift — python + java fixed (SPEC §7E pinned + fixture cases `replace-first-occurrence-only` / `remove-first-occurrence-only` added; python + java fixes still pending): `replace`/`remove` swap EVERY occurrence in python (`str.replace`) and java (`String.replace`), but only the FIRST in js/golang/rust/elixir/csharp/clojure. Pin "first occurrence" in SPEC §7E + a fixture case (text appearing twice), fix python + java.
 - [ ] (deferred, named in CHANGELOG) clojure: atomic memory write (needs a rename/move in koine.fs first; the port forbids interop/reader conditionals).
+
+## PR #184 review follow-ups (2026-11-08)
+
+- [x] SPEC §7E + delta: DREAM_PROMPT removes only what the transcripts contradict ("contradicted by")
+- [x] SPEC §7E + delta: dream guard — dreamer's `memory` refuses `user` and `replace`/`remove` on `note:log`; fixture `D7_dreamGuard` + `D8` in all 8 ports (js, python, golang, java, csharp, elixir, clojure, rust)
+- [x] SPEC §7E: clojure's in-place write + in-process lock listed as a permitted per-port difference
+- [x] Fixture: ASCII-only case folding (`ÉLITE` vs `élite`); catches a JS `toLowerCase()` mutation
+- [x] elixir: random temp name + exclusive open; java: no silent non-atomic move fallback
+- [ ] (deferred) snapshot before each dream pass

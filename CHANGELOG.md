@@ -23,6 +23,14 @@ without the new options is byte-identical to before.**
 - **`dreamer(dir, { store })`** and **`fromDir(dir, { dream: { everyMs, store } })`**: a built-in
   dream pass that verifies `MEMORY.md` against the transcripts, fixes or prunes claims, and
   records every change in `memory/log.md`. No `HEARTBEAT.md` to write.
+- **A dream cannot delete correct memory without a trace.** The prompt removes a claim only when
+  the transcripts contradict it; a claim they merely do not mention stays, because transcripts get
+  pruned and silence is not evidence. The dreamer's `memory` tool refuses every action on
+  `USER.md` (`dreamer: USER.md is off-limits`) and `replace`/`remove` on `note:log`
+  (`dreamer: memory/log.md is append-only`), so a dream never edits the user model and can only
+  add to its own audit trail. Not done: no snapshot is taken before a pass — keep the home in git.
+- Transcript search folds case for ASCII letters only, now pinned by a fixture case: `É` in a
+  message is not found by `é`. A port using Unicode lowercasing fails it.
 - Memory writes are fsynced and serialised per file within a runtime, so concurrent agents no
   longer lose each other's entries.
 - **`replace`/`remove` now change only the first match in every port.** python and java used to
@@ -45,7 +53,8 @@ without the new options is byte-identical to before.**
 All eight ports; fixtures `examples/memory-hierarchy/` and `examples/dreaming/` (the "Mt. Moon"
 case: a dream pass fixes a wrong note and the next session answers differently). Docs: new
 "Dreaming" page. Not done: no cross-process write locking; no semantic search; clojure writes
-are not atomic (koine has no rename) and its lock is in-process only; clojure's note `list` uses a
+are not atomic (koine has no rename) and its lock is in-process only — SPEC §7E now lists this as a
+permitted per-port difference; clojure's note `list` uses a
 real-path check instead of lstat (koine has none), so a FIFO or socket named `x.md` would be listed; on
 a case-insensitive filesystem two spellings of one path may get two locks; a go `IndexCap` field of 0
 means "use the preset" rather than an error; rust custom conversation stores must override

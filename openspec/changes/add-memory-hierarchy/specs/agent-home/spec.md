@@ -36,7 +36,8 @@ With notes disabled the tool's schema and description SHALL be unchanged.
 Every `memory` write SHALL replace the file atomically (temporary file in the same directory,
 flushed, then renamed over the target). Read-modify-write actions on the same resolved file SHALL
 be serialized within one runtime, and SHALL operate on the full file content, never on the capped
-injection view.
+injection view. Permitted per-port difference: clojure writes in place and its lock is
+in-process only (no atomic rename in `koine.fs` yet).
 
 #### Scenario: Concurrent adds keep every entry
 - **WHEN** two agents in one runtime sharing a home each issue 20 concurrent `memory add` calls to `MEMORY.md`
@@ -68,3 +69,17 @@ one entry to `memory/log.md`.
 #### Scenario: Absent dream option is unchanged
 - **WHEN** `fromDir` is called without `dream`
 - **THEN** no dreamer is started and behaviour is byte-identical to today
+
+### Requirement: Dreamer cannot erase memory without a trace
+The dreamer's prompt SHALL tell it to fix or remove a claim only when the transcripts contradict
+it, never because they do not mention it. The dreamer's `memory` tool SHALL refuse (`isError`,
+nothing read or written) every action on `USER.md` and `replace`/`remove` on `note:log`, so the
+log is append-only for the dreamer.
+
+#### Scenario: Dreamer cannot rewrite its log or the user model
+- **WHEN** the dreamer's `memory` tool is called with `replace` or `remove` on `note:log`, or any action on target `user`
+- **THEN** it returns `isError` with the dream-guard message and `memory/log.md` and `USER.md` are byte-unchanged
+
+#### Scenario: An unmentioned claim is kept
+- **WHEN** the dreamer's prompt is read
+- **THEN** it says to fix or remove a claim only when it is contradicted by the transcripts

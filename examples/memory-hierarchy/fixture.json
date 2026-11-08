@@ -882,6 +882,10 @@
             {
               "role": "assistant",
               "content": "Took the north passage. Mt. Moon exit is north."
+            },
+            {
+              "role": "user",
+              "content": "Badge case: ÉLITE FOUR pass"
             }
           ]
         }
@@ -968,6 +972,27 @@
         },
         "expect": {
           "output": "no matches",
+          "isError": false
+        }
+      },
+      {
+        "name": "ascii-only-folding-non-ascii-not-folded",
+        "note": "SPEC §7E: ASCII-only case folding. 'É' in the text never folds to 'é', so a Unicode toLowerCase() fails this case.",
+        "args": {
+          "query": "élite"
+        },
+        "expect": {
+          "output": "no matches",
+          "isError": false
+        }
+      },
+      {
+        "name": "ascii-only-folding-ascii-still-folded",
+        "args": {
+          "query": "Élite four"
+        },
+        "expect": {
+          "output": "s1#5 user: Badge case: ÉLITE FOUR pass",
           "isError": false
         }
       },
