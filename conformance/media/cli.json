@@ -1181,8 +1181,8 @@
     {
       "name": "agy_quota_is_unavailable",
       "style": "google-agy-cli",
-      "liveVerified": false,
-      "note": "The failure line shape is not live-captured; a non-SUCCESS result whose text mentions quota is unavailable.",
+      "liveVerified": true,
+      "note": "Live 2026-11-08 (agy 1.4.12): when the image model's quota is exhausted agy still ends with result.status SUCCESS and explains it in result.response; no file is saved. A result whose response mentions quota or RESOURCE_EXHAUSTED counts as an error, so with no file the run is unavailable.",
       "config": {
         "gather": {
           "dir": "{dir}"
@@ -1194,14 +1194,13 @@
       },
       "fixture": [
         "{\"event\":\"init\",\"conversation_id\":\"c2\",\"init\":{}}",
-        "{\"event\":\"result\",\"result\":{\"conversation_id\":\"c2\",\"status\":\"ERROR\",\"response\":\"Antigravity Starter Quota exhausted. Try again later.\"}}",
-        "#exit 1"
+        "{\"event\": \"result\", \"result\": {\"conversation_id\": \"c2\", \"status\": \"SUCCESS\", \"response\": \"Image generation failed because the model's quota was exhausted (Error: 429 RESOURCE_EXHAUSTED for `gemini-3.1-flash-image`). No image could be generated or saved.\\n\", \"num_turns\": 1}}"
       ],
       "status": "unavailable",
-      "error": "media: no client available for \"image\": agy: Antigravity Starter Quota exhausted. Try again later.",
+      "error": "media: no client available for \"image\": agy: Image generation failed because the model's quota was exhausted (Error: 429 RESOURCE_EXHAUSTED for `gemini-3.1-flash-image`). No image could be generated or saved.\n",
       "tool": {
         "isError": true,
-        "output": "media: no client available for \"image\": agy: Antigravity Starter Quota exhausted. Try again later."
+        "output": "media: no client available for \"image\": agy: Image generation failed because the model's quota was exhausted (Error: 429 RESOURCE_EXHAUSTED for `gemini-3.1-flash-image`). No image could be generated or saved.\n"
       }
     },
     {

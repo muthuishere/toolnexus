@@ -563,6 +563,11 @@ func newAgyMediaClient(cfg MediaConfig) *CliMediaClient {
 			e.Text, _ = dotGet(l, "result.response").(string)
 			st, _ := dotGet(l, "result.status").(string)
 			e.Status = "result " + st
+			low := strings.ToLower(e.Text)
+			if st == "SUCCESS" && (strings.Contains(low, "quota") || strings.Contains(low, "resource_exhausted")) {
+				// Live: agy reports an exhausted image quota in a SUCCESS result's text.
+				e.Error = e.Text
+			}
 			if st != "SUCCESS" {
 				if m, _ := dotGet(l, "result.error").(string); m != "" {
 					e.Error = m

@@ -2860,11 +2860,12 @@ Parse by `event`: `init` ⇒ session `conversation_id`, status `init`; `step_upd
 `result.conversation_id`, text `result.response`, status `result <status>`, usage from
 `result.usage.input_tokens` / `output_tokens`; when `result.status != "SUCCESS"`, error =
 `result.error` (string), else `result.error.message`, else the text, else the compact sorted JSON of
-`result`; `error` ⇒ error `message`. No event carries the file (agy delegates to an
+`result`; `error` ⇒ error `message`. A `SUCCESS` result whose text contains `quota` or `resource_exhausted`
+(ASCII case-insensitive) also sets error = the text: live, agy reports an exhausted image quota
+that way and saves no file. No event carries the file (agy delegates to an
 `image-generator` subagent); it comes from the text scan, then `folder(conv) =
 <home>/.gemini/antigravity-cli/brain/<conv>`. Unavailable matcher: `quota` or `usage limit` ⇒
-`agy: <error capped 400>` (the failure line shape is not live-captured; its quota is named
-"Antigravity Starter Quota").
+`agy: <error capped 400>` (live-verified 2026-11-08: `429 RESOURCE_EXHAUSTED`).
 
 **Permissions.** Each preset runs headless with no interactive prompt: Grok `--yolo`, agy
 `--dangerously-skip-permissions`, Codex `exec -s workspace-write` (sandboxed: it can write its image
