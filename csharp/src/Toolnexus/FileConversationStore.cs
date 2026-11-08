@@ -32,7 +32,7 @@ public enum FileStoreSync
     None,
 }
 
-public sealed partial class FileConversationStore : IConversationStore
+public sealed partial class FileConversationStore : IListableConversationStore
 {
     private const int Version = 1;
     private readonly string _root;

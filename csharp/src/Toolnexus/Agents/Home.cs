@@ -59,61 +59,259 @@ public static class Home
         return Encoding.UTF8.GetString(bytes, 0, len);
     }
 
+    /// <summary>The preset index cap (SPEC §7E "Memory hierarchy"): 200 lines / 25600 bytes.</summary>
+    public static readonly MemoryIndexCap MemoryIndexCapPreset = new() { MaxLines = 200, MaxBytes = 25600 };
+
+    /// <summary>
+    /// The <c>memoryIndexCap</c> option: a second, smaller injection cap for <c>MEMORY.md</c> only
+    /// (whole lines). <see cref="MemoryIndexCapPreset"/> is the "<c>true</c>" of the other ports;
+    /// a null field takes the preset's value; a value &lt; 1 is a construction error.
+    /// </summary>
+    public sealed record MemoryIndexCap
+    {
+        public int? MaxLines { get; init; }
+        public int? MaxBytes { get; init; }
+    }
+
+    /// <summary>Options for <see cref="ComposeSoul(string, ComposeSoulOptions?)"/>. Absent ⇒ byte-identical soul.</summary>
+    public sealed class ComposeSoulOptions
+    {
+        /// <summary>Cap the injected <c>MEMORY.md</c>; null (default) ⇒ no cap.</summary>
+        public MemoryIndexCap? MemoryIndexCap { get; set; }
+
+        /// <summary>Notes tier on — selects the notice wording that points at <c>note:&lt;slug&gt;</c>.</summary>
+        public bool Notes { get; set; }
+    }
+
+    private static (int MaxLines, int MaxBytes)? ResolveIndexCap(MemoryIndexCap? c)
+    {
+        if (c == null) return null;
+        var lines = c.MaxLines ?? MemoryIndexCapPreset.MaxLines!.Value;
+        var bytes = c.MaxBytes ?? MemoryIndexCapPreset.MaxBytes!.Value;
+        if (lines < 1 || bytes < 1)
+            throw new ArgumentException("memoryIndexCap: maxLines and maxBytes must be integers >= 1");
+        return (lines, bytes);
+    }
+
+    /// <summary>The exact notice appended to a capped <c>MEMORY.md</c> (SPEC §7E).</summary>
+    public static string MemoryIndexNotice(int maxLines, int maxBytes, bool notes)
+    {
+        var tail = notes ? "; move detail into notes (memory target \"note:<slug>\")." : " (keep entries short).";
+        return $"\n\n[MEMORY.md index truncated at {maxLines} lines / {maxBytes} bytes. Keep MEMORY.md a short index{tail}]";
+    }
+
+    /// <summary>
+    /// Apply the index cap to <c>MEMORY.md</c>'s (already 2 MB-capped) content (SPEC §7E, exact):
+    /// split on "\n" (a trailing "\n" starts no line); within both bounds ⇒ unchanged; else keep the
+    /// first <c>maxLines</c> lines, drop trailing lines while over <c>maxBytes</c> (a lone over-long
+    /// line is cut at a code-point boundary), then append <see cref="MemoryIndexNotice"/>.
+    /// </summary>
+    public static string ApplyIndexCap(string content, int maxLines, int maxBytes, bool notes = false)
+    {
+        var lines = content.Split('\n').ToList();
+        if (content.EndsWith('\n')) lines.RemoveAt(lines.Count - 1);
+        if (lines.Count <= maxLines && Encoding.UTF8.GetByteCount(string.Join("\n", lines)) <= maxBytes) return content;
+        var kept = lines.Take(maxLines).ToList();
+        while (kept.Count > 1 && Encoding.UTF8.GetByteCount(string.Join("\n", kept)) > maxBytes) kept.RemoveAt(kept.Count - 1);
+        var text = string.Join("\n", kept);
+        if (Encoding.UTF8.GetByteCount(text) > maxBytes) text = CutUtf8(text, maxBytes);
+        return text + MemoryIndexNotice(maxLines, maxBytes, notes);
+    }
+
+    /// <summary>Cut at the last whole code point whose UTF-8 end is &lt;= <paramref name="max"/>.</summary>
+    private static string CutUtf8(string s, int max)
+    {
+        var sb = new StringBuilder();
+        var bytes = 0;
+        foreach (var r in s.EnumerateRunes())
+        {
+            var n = r.Utf8SequenceLength;
+            if (bytes + n > max) break;
+            sb.Append(r.ToString());
+            bytes += n;
+        }
+        return sb.ToString();
+    }
+
     /// <summary>
     /// Compose the discovered bootstrap files into one soul string (the frozen snapshot). Present
     /// files only, in <see cref="BootstrapOrder"/>, each as a <c>## &lt;file&gt;</c> section.
     /// Returns the soul and the ordered list of files that were found.
     /// </summary>
-    public static (string Soul, List<string> Found) ComposeSoul(string dir)
+    public static (string Soul, List<string> Found) ComposeSoul(string dir) => ComposeSoul(dir, null);
+
+    /// <summary>
+    /// <see cref="ComposeSoul(string)"/> with the memory-hierarchy options: the <c>MEMORY.md</c>
+    /// index cap applies after the 2 MB read cap and before the section trim. Disk is never touched.
+    /// </summary>
+    public static (string Soul, List<string> Found) ComposeSoul(string dir, ComposeSoulOptions? options)
     {
+        var cap = ResolveIndexCap(options?.MemoryIndexCap);
         var sections = new List<string>();
         var found = new List<string>();
         foreach (var f in BootstrapOrder)
         {
             var body = ReadCapped(Path.Combine(dir, f));
             if (body == null) continue;
+            if (cap is { } c && f == "MEMORY.md") body = ApplyIndexCap(body, c.MaxLines, c.MaxBytes, options!.Notes);
             sections.Add($"## {f}\n\n{body.Trim()}");
             found.Add(f);
         }
         return (string.Join("\n\n", sections), found);
     }
 
+    /// <summary>The notes-off <c>memory</c> description (SPEC §7E, byte-exact).</summary>
+    public const string MemoryDescription =
+        "Persist durable memory. action=add appends an entry; replace swaps an existing " +
+        "substring (with); remove deletes one. target=self (MEMORY.md, default) or user (USER.md). " +
+        "Writes persist to disk and load at the START of your NEXT session — they do NOT change " +
+        "your current context.";
+
+    /// <summary>The notes-on <c>memory</c> description (SPEC §7E, byte-exact).</summary>
+    public const string MemoryNotesDescription =
+        "Persist durable memory. MEMORY.md is a short index loaded at the start of every " +
+        "session; put detail in notes (target note:<slug>, stored in memory/<slug>.md, never " +
+        "loaded automatically) and point to them from the index. Record what will change a " +
+        "future decision. action=add appends an entry; replace swaps the first occurrence of " +
+        "an existing substring (with); remove deletes it; read returns a file; list lists the " +
+        "notes. target=self (MEMORY.md, default), user (USER.md) or note:<slug> (slug: " +
+        "lowercase letters, digits, '.', '_', '-'). Writes persist to disk and load at the " +
+        "START of your NEXT session — they do NOT change your current context.";
+
+    /// <summary>A valid note slug: lowercase, digits, '.', '_', '-'; no separators; no "..".</summary>
+    public static bool IsValidNoteSlug(string slug)
+        => System.Text.RegularExpressions.Regex.IsMatch(slug, "^[a-z0-9][a-z0-9._-]{0,63}$")
+           && !slug.Contains("..", StringComparison.Ordinal);
+
+    /// <summary>Per resolved absolute path: one lock, so read-modify-write never interleaves in-process.</summary>
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, object> PathLocks = new(StringComparer.Ordinal);
+
     /// <summary>
     /// The <c>memory</c> builtin (SPEC §7E — file-backed, opt-in). One tool, three actions over
-    /// <c>MEMORY.md</c> (the agent's own notes) and <c>USER.md</c> (its model of the user). Writes
-    /// go to DISK — the frozen snapshot in the live prompt is intentionally NOT updated
-    /// (cache-stable; the next session re-reads). A <c>replace</c>/<c>remove</c> whose substring is
-    /// absent is a loud <c>isError</c>.
+    /// <c>MEMORY.md</c> (the agent's own notes) and <c>USER.md</c> (its model of the user):
+    /// <c>add</c>, <c>replace</c>/<c>remove</c> (first occurrence). Writes go to DISK — the frozen
+    /// snapshot in the live prompt is intentionally NOT updated (cache-stable; the next session
+    /// re-reads). A <c>replace</c>/<c>remove</c> whose substring is absent is a loud <c>isError</c>.
+    /// With <paramref name="notes"/> on, it also takes <c>target: "note:&lt;slug&gt;"</c>
+    /// (<c>&lt;dir&gt;/memory/&lt;slug&gt;.md</c>, never injected) and the <c>read</c>/<c>list</c> actions.
     /// </summary>
-    public static ITool MemoryTool(string dir)
+    public static ITool MemoryTool(string dir, bool notes = false)
     {
-        string FileFor(object? target)
-            => Path.Combine(dir, string.Equals(target?.ToString(), "user", StringComparison.Ordinal) ? "USER.md" : "MEMORY.md");
-
+        if (notes) return NotesMemoryTool(dir);
         var schema = new Dictionary<string, object?>
         {
             ["type"] = "object",
             ["properties"] = new Dictionary<string, object?>
             {
                 ["action"] = new Dictionary<string, object?> { ["type"] = "string", ["enum"] = new List<object?> { "add", "replace", "remove" } },
-                ["target"] = new Dictionary<string, object?> { ["type"] = "string", ["enum"] = new List<object?> { "self", "user" } },
+                ["target"] = new Dictionary<string, object?>
+                {
+                    ["type"] = "string", ["enum"] = new List<object?> { "self", "user" },
+                    ["description"] = "self=MEMORY.md (default), user=USER.md",
+                },
                 ["text"] = new Dictionary<string, object?> { ["type"] = "string", ["description"] = "For add: the entry. For replace/remove: the existing text." },
                 ["with"] = new Dictionary<string, object?> { ["type"] = "string", ["description"] = "For replace: the replacement text." },
             },
             ["required"] = new List<object?> { "action", "text" },
         };
 
-        const string description =
-            "Persist durable memory. action=add appends an entry; replace swaps an existing " +
-            "substring; remove deletes one. target=self (MEMORY.md, default) or user (USER.md). " +
-            "Writes persist to disk and load at the START of your next session — they do NOT change " +
-            "your current context.";
-
-        return NativeTool.Of("memory", description, schema, (IDictionary<string, object?> args) =>
+        return NativeTool.Of("memory", MemoryDescription, schema, (IDictionary<string, object?> args) =>
         {
             var action = args.TryGetValue("action", out var a) ? a?.ToString() ?? "" : "";
             var text = args.TryGetValue("text", out var t) ? t?.ToString() ?? "" : "";
-            var file = FileFor(args.TryGetValue("target", out var tg) ? tg : "self");
+            var file = SelfOrUser(dir, args.TryGetValue("target", out var tg) ? tg?.ToString() : null);
+            var err = ReadModifyWrite(file, action, text, args.TryGetValue("with", out var w) ? w?.ToString() : null);
+            if (err != null) return err;
+            // Plain success string (a miss returns a loud isError above); parity with the JS reference.
+            return (object)$"ok ({action} → {Path.GetFileName(file)}); loads next session";
+        });
+    }
+
+    private static string SelfOrUser(string dir, string? target)
+        => Path.Combine(dir, string.Equals(target, "user", StringComparison.Ordinal) ? "USER.md" : "MEMORY.md");
+
+    private static ITool NotesMemoryTool(string dir)
+    {
+        var notesDir = Path.Combine(dir, "memory");
+        var schema = new Dictionary<string, object?>
+        {
+            ["type"] = "object",
+            ["properties"] = new Dictionary<string, object?>
+            {
+                ["action"] = new Dictionary<string, object?> { ["type"] = "string", ["enum"] = new List<object?> { "add", "replace", "remove", "read", "list" } },
+                ["target"] = new Dictionary<string, object?> { ["type"] = "string", ["description"] = "self=MEMORY.md (default), user=USER.md, note:<slug>=memory/<slug>.md" },
+                ["text"] = new Dictionary<string, object?> { ["type"] = "string", ["description"] = "For add: the entry. For replace/remove: the existing text." },
+                ["with"] = new Dictionary<string, object?> { ["type"] = "string", ["description"] = "For replace: the replacement text." },
+            },
+            ["required"] = new List<object?> { "action" },
+        };
+
+        return NativeTool.Of("memory", MemoryNotesDescription, schema, (IDictionary<string, object?> args) =>
+        {
+            var action = args.TryGetValue("action", out var a) ? a?.ToString() ?? "" : "";
+            if (action == "list") return (object)ListNotes(notesDir);
+            var target = args.TryGetValue("target", out var tg) && tg != null ? tg.ToString()! : "self";
+            string file, label;
+            if (target is "self" or "user")
+            {
+                file = SelfOrUser(dir, target);
+                label = Path.GetFileName(file);
+            }
+            else if (target.StartsWith("note:", StringComparison.Ordinal))
+            {
+                var slug = target[5..];
+                if (!IsValidNoteSlug(slug)) return ToolResult.Error($"invalid note slug: {slug}");
+                file = Path.Combine(notesDir, slug + ".md");
+                label = $"memory/{slug}.md";
+            }
+            else return ToolResult.Error($"unknown target: {target}");
+
+            if (action == "read")
+            {
+                var body = ReadCapped(file);
+                return body == null ? ToolResult.Error($"not found: {target}") : body;
+            }
+            if (action is not ("add" or "replace" or "remove")) return ToolResult.Error($"unknown action: {action}");
+            if (!args.TryGetValue("text", out var t) || t is not string text) return ToolResult.Error("text is required");
+            var err = ReadModifyWrite(file, action, text, args.TryGetValue("with", out var w) ? w?.ToString() : null);
+            if (err != null) return err;
+            return label.StartsWith("memory/", StringComparison.Ordinal)
+                ? $"ok ({action} → {label})"
+                : $"ok ({action} → {label}); loads next session";
+        });
+    }
+
+    /// <summary><c>list</c>: <c>&lt;slug&gt;\t&lt;bytes&gt;</c> per valid note, slug-ascending by explicit ordinal sort.</summary>
+    private static string ListNotes(string notesDir)
+    {
+        var rows = new List<(string Slug, long Bytes)>();
+        if (Directory.Exists(notesDir))
+        {
+            foreach (var path in Directory.EnumerateFileSystemEntries(notesDir))
+            {
+                var name = Path.GetFileName(path);
+                if (!name.EndsWith(".md", StringComparison.Ordinal)) continue;
+                var slug = name[..^3];
+                if (!IsValidNoteSlug(slug) || !File.Exists(path)) continue;
+                var fi = new FileInfo(path);
+                if (fi.Attributes.HasFlag(FileAttributes.Directory)) continue;
+                rows.Add((slug, fi.Length));
+            }
+        }
+        rows.Sort((x, y) => string.CompareOrdinal(x.Slug, y.Slug));
+        return rows.Count == 0 ? "(no notes)" : string.Join("\n", rows.Select(r => $"{r.Slug}\t{r.Bytes}"));
+    }
+
+    /// <summary>
+    /// Read-modify-write over the FULL file (never the capped view), serialized per resolved
+    /// absolute path within this process, finished by an atomic fsynced replace. Returns an error
+    /// result on a miss, else null.
+    /// </summary>
+    private static ToolResult? ReadModifyWrite(string file, string action, string text, string? with)
+    {
+        var key = Path.GetFullPath(file);
+        lock (PathLocks.GetOrAdd(key, _ => new object()))
+        {
             var cur = File.Exists(file) ? File.ReadAllText(file) : "";
             string next;
             switch (action)
@@ -122,32 +320,41 @@ public static class Home
                     next = (cur.TrimEnd() + $"\n- {text}\n").TrimStart();
                     break;
                 case "replace":
-                    if (!cur.Contains(text, StringComparison.Ordinal)) return (object)ToolResult.Error($"not found: {text}");
-                    next = ReplaceFirst(cur, text, args.TryGetValue("with", out var w) ? w?.ToString() ?? "" : "");
+                    if (!cur.Contains(text, StringComparison.Ordinal)) return ToolResult.Error($"not found: {text}");
+                    next = ReplaceFirst(cur, text, with ?? "");
                     break;
                 case "remove":
-                    if (!cur.Contains(text, StringComparison.Ordinal)) return (object)ToolResult.Error($"not found: {text}");
+                    if (!cur.Contains(text, StringComparison.Ordinal)) return ToolResult.Error($"not found: {text}");
                     next = ReplaceFirst(cur, text, "");
                     break;
                 default:
-                    return (object)ToolResult.Error($"unknown action: {action}");
+                    return ToolResult.Error($"unknown action: {action}");
             }
-            Directory.CreateDirectory(Path.GetDirectoryName(file)!);
-            // Atomic: temp file in the same dir, then replace. (Reads above are FULL/uncapped — the
-            // 2 MB cap is a soul-composition cap only, §7E.)
-            var tmp = Path.Combine(Path.GetDirectoryName(file)!, $".{Path.GetFileName(file)}.{Guid.NewGuid():N}.tmp");
-            try
+            AtomicWrite(file, next);
+            return null;
+        }
+    }
+
+    /// <summary>Atomic replace: temp file in the same dir, flushed to disk (fsync), renamed over the
+    /// target; an existing file's permission bits are kept.</summary>
+    private static void AtomicWrite(string file, string data)
+    {
+        var dirName = Path.GetDirectoryName(Path.GetFullPath(file))!;
+        Directory.CreateDirectory(dirName);
+        var tmp = Path.Combine(dirName, $".{Path.GetFileName(file)}.{Environment.ProcessId}.{Guid.NewGuid():N}.tmp");
+        try
+        {
+            using (var fs = new FileStream(tmp, FileMode.CreateNew, FileAccess.Write, FileShare.None))
             {
-                File.WriteAllText(tmp, next); // new file: 0666 & ~umask
-                // Keep an existing file's permission bits (the move would otherwise give it the temp's).
-                if (!OperatingSystem.IsWindows() && File.Exists(file))
-                    File.SetUnixFileMode(tmp, File.GetUnixFileMode(file));
-                File.Move(tmp, file, overwrite: true);
+                var bytes = new UTF8Encoding(false).GetBytes(data);
+                fs.Write(bytes, 0, bytes.Length);
+                fs.Flush(flushToDisk: true);
             }
-            finally { if (File.Exists(tmp)) File.Delete(tmp); }
-            // Plain success string (a miss returns a loud isError above); parity with the JS reference.
-            return (object)$"ok ({action} → {Path.GetFileName(file)}); loads next session";
-        });
+            if (!OperatingSystem.IsWindows() && File.Exists(file))
+                File.SetUnixFileMode(tmp, File.GetUnixFileMode(file));
+            File.Move(tmp, file, overwrite: true);
+        }
+        finally { if (File.Exists(tmp)) File.Delete(tmp); }
     }
 
     /// <summary>First-occurrence substring replace (parity with JS <c>String.replace(string, …)</c>).</summary>
@@ -155,6 +362,19 @@ public static class Home
     {
         var i = haystack.IndexOf(needle, StringComparison.Ordinal);
         return i < 0 ? haystack : haystack[..i] + replacement + haystack[(i + needle.Length)..];
+    }
+
+    /// <summary>Scheduled dreaming for <see cref="FromDir"/> (SPEC §7E "Dreaming").</summary>
+    public sealed class DreamOptions
+    {
+        /// <summary>Dream interval in ms; must be &gt; 0.</summary>
+        public double EveryMs { get; set; }
+
+        /// <summary>The transcripts to verify memory against (must be listable).</summary>
+        public IConversationStore? Store { get; set; }
+
+        /// <summary>Host prose appended after <see cref="DreamPrompt"/>.</summary>
+        public string? Instructions { get; set; }
     }
 
     /// <summary>Options for <see cref="FromDir"/>.</summary>
@@ -174,7 +394,19 @@ public static class Home
 
         /// <summary>Set false to omit the memory tool (a read-only persona).</summary>
         public bool Memory { get; set; } = true;
+
+        /// <summary>Cap the injected <c>MEMORY.md</c> (<see cref="MemoryIndexCapPreset"/> = 200 lines / 25600 bytes). Off by default.</summary>
+        public MemoryIndexCap? MemoryIndexCap { get; set; }
+
+        /// <summary>Turn on the notes tier of the memory tool (<c>note:&lt;slug&gt;</c>, <c>read</c>, <c>list</c>).</summary>
+        public bool Notes { get; set; }
+
+        /// <summary>Dream on a schedule when started with <see cref="StartAgent"/>. Off by default.</summary>
+        public DreamOptions? Dream { get; set; }
     }
+
+    /// <summary>Dream config attached by <c>FromDir(…, {Dream})</c>, read by <see cref="StartAgent"/>.</summary>
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<Agent, Tuple<Agent, double>> Dreams = new();
 
     /// <summary>
     /// The directory IS the agent (SPEC §7E). Discovers bootstrap files → soul (the frozen
@@ -184,16 +416,87 @@ public static class Home
     public static Agent FromDir(string dir, FromDirOptions? opts = null)
     {
         opts ??= new FromDirOptions();
-        var (soul, _) = ComposeSoul(dir);
-        var name = opts.Name ?? Path.GetFileName(dir.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+        var (soul, _) = ComposeSoul(dir, new ComposeSoulOptions { MemoryIndexCap = opts.MemoryIndexCap, Notes = opts.Notes });
+        var name = opts.Name ?? BaseName(dir);
         var tools = new List<ITool>(opts.Tools ?? new List<ITool>());
-        if (opts.Memory) tools.Add(MemoryTool(dir));
-        return new Agent(name, new AgentSpec
+        if (opts.Memory) tools.Add(MemoryTool(dir, opts.Notes));
+        var persona = new Agent(name, new AgentSpec
         {
             Does = opts.Does ?? $"persona agent from {dir}",
             Soul = soul,
             Model = opts.Model ?? "inherit",
             Uses = tools,
+        });
+        if (opts.Dream is { } d)
+        {
+            if (!(d.EveryMs > 0) || double.IsInfinity(d.EveryMs))
+                throw new ArgumentException("fromDir: dream.everyMs must be > 0");
+            var dreamerAgent = Dreamer(dir, new DreamerOptions { Store = d.Store, Instructions = d.Instructions, Name = $"{name}-dreamer" });
+            Dreams.AddOrUpdate(persona, Tuple.Create(dreamerAgent, d.EveryMs));
+        }
+        return persona;
+    }
+
+    private static string BaseName(string dir)
+        => Path.GetFileName(dir.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+
+    /// <summary>The wake prompt each heartbeat sends (SPEC §7E).</summary>
+    public const string HeartbeatPrompt =
+        "Heartbeat. Read your HEARTBEAT.md section and follow it. If nothing needs attention, reply " +
+        HeartbeatOk + ".";
+
+    /// <summary>
+    /// What a dream pass is FOR and the order it works in (SPEC §7E "Dreaming"), byte-identical in
+    /// every port. It becomes the dreamer's <c>## HEARTBEAT.md</c> section, so the ordinary
+    /// <see cref="HeartbeatPrompt"/> wake drives a pass and <see cref="HeartbeatOk"/> keeps an idle pass silent.
+    /// </summary>
+    public static readonly string DreamPrompt = string.Join("\n",
+        "You are dreaming: an offline pass over your own memory. Memory exists so that a future session decides better. MEMORY.md is a short index loaded at the start of every session; notes (memory target \"note:<slug>\") hold the detail; the transcripts (transcript_search) are the ground truth of what actually happened.",
+        "Work in this order:",
+        "1. Verify: read MEMORY.md and the notes it points to (memory read, memory list) and check each claim against the transcripts. Fix a claim the transcripts contradict; remove one they no longer support.",
+        "2. Demote: move detail out of MEMORY.md into a note and leave a one-line [[slug]] pointer, so the index stays short.",
+        "3. Merge: fold duplicate or conflicting notes into one.",
+        "4. Repair links: point every [[slug]] at an existing note or create it; give every note an index line.",
+        "5. Log: if you changed anything, append exactly one entry with memory add, target \"note:log\", text starting \"dream: \" and naming every change and why.",
+        "If nothing needs changing, write nothing and reply HEARTBEAT_OK.");
+
+    /// <summary>Options for <see cref="Dreamer"/>.</summary>
+    public sealed class DreamerOptions
+    {
+        /// <summary>The transcripts to verify memory against — must be listable. Required.</summary>
+        public IConversationStore? Store { get; set; }
+
+        /// <summary>Host prose appended after <see cref="DreamPrompt"/> (and after <c>DREAM.md</c>).</summary>
+        public string? Instructions { get; set; }
+
+        /// <summary>Agent name; default <c>&lt;basename(dir)&gt;-dreamer</c>.</summary>
+        public string? Name { get; set; }
+
+        /// <summary>Model id; default <c>inherit</c> (use a cheap model on the client).</summary>
+        public string? Model { get; set; }
+    }
+
+    /// <summary>
+    /// The built-in dreamer preset (SPEC §7E "Dreaming"): a plain <see cref="Agent"/> whose tools
+    /// are EXACTLY <c>memory</c> (notes on, over <paramref name="dir"/>) and <c>transcript_search</c>
+    /// (over the store). Soul = one <c>## HEARTBEAT.md</c> section: <see cref="DreamPrompt"/>, then
+    /// <c>DREAM.md</c> (trimmed, if non-empty), then the instructions (trimmed, if non-empty).
+    /// </summary>
+    public static Agent Dreamer(string dir, DreamerOptions? opts)
+    {
+        if (opts?.Store == null) throw new ArgumentException("dreamer: store is required");
+        var search = TranscriptSearch.Tool(opts.Store);
+        var parts = new List<string> { DreamPrompt };
+        var dreamMd = ReadCapped(Path.Combine(dir, "DREAM.md"))?.Trim();
+        if (!string.IsNullOrEmpty(dreamMd)) parts.Add(dreamMd);
+        var extra = opts.Instructions?.Trim();
+        if (!string.IsNullOrEmpty(extra)) parts.Add(extra);
+        return new Agent(opts.Name ?? $"{BaseName(dir)}-dreamer", new AgentSpec
+        {
+            Does = $"dreams over the memory in {dir}",
+            Soul = "## HEARTBEAT.md\n\n" + string.Join("\n\n", parts),
+            Model = opts.Model ?? "inherit",
+            Uses = new List<ITool> { MemoryTool(dir, notes: true), search },
         });
     }
 
@@ -205,7 +508,7 @@ public static class Home
     /// </summary>
     public sealed class StartedAgent
     {
-        private readonly ITimer _timer;
+        private readonly List<ITimer> _timers = new();
         private readonly List<Task> _inflight = new();
         private readonly List<string> _beats = new();
         private readonly object _lock = new();
@@ -217,40 +520,49 @@ public static class Home
         /// <summary>Non-silent beats surfaced so far (HEARTBEAT_OK replies never appear here).</summary>
         public IReadOnlyList<string> Beats { get { lock (_lock) return _beats.ToArray(); } }
 
-        internal StartedAgent(AgentRuntime runtime, Handle handle, TimeProvider clock, double everyMs, Action<string>? onBeat)
+        internal StartedAgent(AgentRuntime runtime, Handle handle, TimeProvider clock, double everyMs, Action<string>? onBeat,
+            Handle? dreamHandle = null, double dreamEveryMs = 0)
         {
             Runtime = runtime;
             Handle = handle;
-            const string prompt =
-                "Heartbeat. Read your HEARTBEAT.md section and follow it. If nothing needs attention, reply " +
-                HeartbeatOk + ".";
+            _timers.Add(Heartbeat(clock, handle, everyMs, text =>
+            {
+                lock (_lock) _beats.Add(text);
+                onBeat?.Invoke(text);
+            }));
+            // FromDir(…, {Dream}): the dreamer runs on the SAME runtime on its own interval. Its
+            // replies are housekeeping — they never reach onBeat; what it did is in memory/log.md.
+            if (dreamHandle != null) _timers.Add(Heartbeat(clock, dreamHandle, dreamEveryMs, null));
+        }
+
+        /// <summary>One self-rescheduling heartbeat on <paramref name="h"/>.</summary>
+        private ITimer Heartbeat(TimeProvider clock, Handle h, double everyMs, Action<string>? onText)
+        {
             var every = TimeSpan.FromMilliseconds(everyMs);
+            ITimer? timer = null;
             // One-shot + self-reschedule: the callback re-arms the timer, so a virtual clock fires
             // it deterministically (Advance → tick → re-arm) exactly as the system clock does.
-            _timer = clock.CreateTimer(_ =>
+            timer = clock.CreateTimer(_ =>
             {
                 if (_stopped) return;
                 // Unsolicited rail: the tick lands in the inbox (coalesces); the wake drains it as one turn.
-                Runtime.Post(Handle, new InboxItem("clock", "timer", "tick"));
-                if (Handle.State == "idle")
+                Runtime.Post(h, new InboxItem("clock", "timer", "tick"));
+                if (h.State == "idle")
                 {
-                    var woke = Runtime.Wake(Handle, prompt); // idle→running: drains the tick(s)
+                    var woke = Runtime.Wake(h, HeartbeatPrompt); // idle→running: drains the tick(s)
                     if (woke.Ok)
                     {
-                        var beat = Runtime.WaitAsync(Handle).ContinueWith(tk =>
+                        var beat = Runtime.WaitAsync(h).ContinueWith(tk =>
                         {
                             var r = tk.Result;
-                            if (!r.IsError && !r.Text.Contains(HeartbeatOk, StringComparison.Ordinal))
-                            {
-                                lock (_lock) _beats.Add(r.Text);
-                                onBeat?.Invoke(r.Text);
-                            }
+                            if (!r.IsError && !r.Text.Contains(HeartbeatOk, StringComparison.Ordinal)) onText?.Invoke(r.Text);
                         }, TaskScheduler.Default);
                         lock (_lock) _inflight.Add(beat);
                     }
                 }
-                if (!_stopped) _timer?.Change(every, Timeout.InfiniteTimeSpan);
+                if (!_stopped) timer?.Change(every, Timeout.InfiniteTimeSpan);
             }, null, every, Timeout.InfiniteTimeSpan);
+            return timer;
         }
 
         /// <summary>Await every beat turn kicked off so far (deterministic virtual-clock draining).</summary>
@@ -265,7 +577,7 @@ public static class Home
         public async Task StopAsync()
         {
             _stopped = true;
-            _timer.Dispose();
+            foreach (var t in _timers) t.Dispose();
             await SettleAsync().ConfigureAwait(false);
             await Runtime.CloseAsync(Runtime.Root).ConfigureAwait(false);
         }
@@ -281,10 +593,25 @@ public static class Home
     /// </summary>
     public static StartedAgent StartAgent(Agent agent, RuntimeOptions rtOpts, double everyMs, Action<string>? onBeat = null)
     {
-        var runtime = new AgentRuntime(rtOpts.CloneWithRegistry(agent.Registry()));
+        Dreams.TryGetValue(agent, out var dream);
+        var registry = agent.Registry();
+        if (dream != null)
+        {
+            var merged = dream.Item1.Registry();
+            foreach (var (k, v) in registry) merged[k] = v;
+            registry = merged;
+        }
+        var runtime = new AgentRuntime(rtOpts.CloneWithRegistry(registry));
         var spawned = runtime.Spawn(runtime.Root, agent.Name);
         if (spawned.Error != null) throw new InvalidOperationException(spawned.Error);
+        Handle? dreamHandle = null;
+        if (dream != null)
+        {
+            var ds = runtime.Spawn(runtime.Root, dream.Item1.Name);
+            if (ds.Error != null) throw new InvalidOperationException(ds.Error);
+            dreamHandle = ds.Handle;
+        }
         var clock = rtOpts.Clock ?? TimeProvider.System;
-        return new StartedAgent(runtime, spawned.Handle!, clock, everyMs, onBeat);
+        return new StartedAgent(runtime, spawned.Handle!, clock, everyMs, onBeat, dreamHandle, dream?.Item2 ?? 0);
     }
 }
