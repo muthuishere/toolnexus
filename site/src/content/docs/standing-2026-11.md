@@ -17,9 +17,9 @@ description: >-
 
 ## What we do NOT claim
 
-> - **Not the fastest everywhere.** In the five-round table LangChain4j beats us on the JVM over MCP (2.17 vs
->   2.28 ms p50, and less memory). A separate 7-round sitting after #204 (in-house Java stdio MCP client) put us
->   ahead (1.63 vs 1.84 ms p50); we do not blend the two, and memory was not re-measured there; Eino in Go is level with us, not behind; AutoAgents in Rust uses less memory than we do.
+> - **Not the fastest everywhere.** On the JVM we are level with LangChain4j over MCP, not ahead (2.15 vs
+>   2.17 ms p50, 141 vs 140 MB; we only start faster, 174 vs 259 ms); Eino in Go is level with us, not behind;
+>   AutoAgents in Rust uses less memory than we do.
 >   [MEASURED]
 > - **Not a JavaScript speed-up.** The 0.28.0 candidate is faster than 0.27.0 in Python, Java, C# and Rust, but
 >   our harness shows no JS per-request change (3.43 → 3.40 ms). [MEASURED]
@@ -96,7 +96,11 @@ it is the noisiest column. $0 spent. [MEASURED]
 **This sitting** (2026-11-08, afternoon IST): **five alternating rounds**. In each round toolnexus 0.27.0 (tag
 `v0.27.0`) and `main` at `e5ef449a` (the 0.28.0 candidate) ran back to back, MCP and native, in Python, JS, Go,
 Java, C# and Rust, with the order flipped every round; then every competitor in those six languages ran. Every row
-started only when the 1-minute load average was **below 4** on 18 cores (it was 2.95–3.63 at every start). **Every
+started only when the 1-minute load average was **below 4** on 18 cores (it was 2.95–3.63 at every start).
+**The JVM rows were re-run the same way on released 0.28.0** (`main` at `32c5c17b`, which includes the in-house
+Java stdio MCP client, [#204](https://github.com/muthuishere/toolnexus/pull/204)): five alternating rounds of
+toolnexus Java (MCP, native, full) against every JVM competitor, load below 4 at every start (3.52–3.98), medians,
+`run: "2026-11-08-quiet-0.28-java"`. Those rows replace the pre-#204 JVM rows; the JVM table is that one result. **Every
 number below is the median of the five rounds**; the per-round values are on each row in
 [`results-2026-11.json`](https://github.com/muthuishere/toolnexus/blob/main/benchmarks/results-2026-11.json) under
 `run: "2026-11-08-quiet-0.28"`. Same harness (`benchmarks/run_all.py`) and same keep-alive mock
@@ -122,7 +126,7 @@ loading in Java and C#, and Rust's own stdio MCP client in place of rmcp's. [MEA
 | Python | 21.9 | **19.9** | 1.378 | **0.924** | 61.9 | 61.9 | 0.727 → **0.533** |
 | JavaScript | 19.1 | 17.9 | 3.43 | 3.40 | 125.5 | 126.5 | 3.28 → 3.27 |
 | Go | 13.4 | 13.8 | 0.370 | 0.367 | 16.8 | 16.8 | 0.272 → 0.274 |
-| Java | 361 | **195** | 2.437 | **2.282** | 165.8 | **153.2** | 1.609 → **1.496** (init 100.5 → **24.0**) |
+| Java ¹ | 361 | **195** | 2.437 | **2.282** | 165.8 | **153.2** | 1.609 → **1.496** (init 100.5 → **24.0**) |
 | C# | 89.0 | **61.2** | 0.558 | 0.550 | 73.9 | 75.1 | 0.414 → **0.379** |
 | Rust | 21.1 | **18.2** | 0.376 | **0.342** | 16.6 | 16.8 | 0.295 → 0.300 |
 
@@ -132,6 +136,9 @@ from 89 to 61 ms. Rust's MCP p50 fell 9% on its own stdio client. **Go did not m
 alone). **JavaScript did not move in this harness** (3.43 → 3.40 ms): the CHANGELOG's JS figure (3.28 → ~0.55 ms)
 came from a different setup and does not reproduce here, so we do not claim it. Rust's MCP RSS (16.8 MB) is
 higher than the 13.5 MB of the earlier sitting in both 0.27.0 and `main`, so it is not new on `main`. [MEASURED]
+
+¹ The Java `main` column is the pre-#204 candidate (`e5ef449a`), kept only as the same-sitting delta against
+0.27.0. Released 0.28.0 Java is in the JVM table below (MCP 174 ms init, 2.15 ms p50, 141 MB).
 
 ### Python
 
@@ -196,36 +203,23 @@ lazily, so its init leaves out the MCP connect.
 
 | framework | version | tools | init ms | p50 ms | p95 ms | RSS MB | install |
 |---|---|---|--:|--:|--:|--:|---|
-| **toolnexus** (native) | main | native | **24.0** | **1.50** | 1.98 | **118.5** | 11 MB |
-| LangChain4j | 1.23.0 · mcp 1.23.0-beta33 | MCP | 253.8 | **2.17** | 2.80 | **139.6** | **8.9 MB** |
-| **toolnexus** (full: MCP + `skill` + native) | main | MCP + skill | **173.6** | 2.20 | 2.64 | 155.9 | 11 MB |
-| **toolnexus** | main · MCP Java SDK 2.0.0 | MCP | **195.3** | 2.28 | 2.80 | 153.2 | 11 MB |
-| Spring AI | 2.0.2 · Boot 4.1.2 | MCP | 1224 ⁴ | 3.30 | 4.79 | 567.2 | 123 MB jar |
-| Spring AI + SkillsTool | 2.0.2 · spring-ai-agent-utils 0.13.0 | MCP + skill | 1084 ⁴ | 3.34 | 5.01 | 579.7 | 123 MB jar |
-| Koog (Kotlin) | 1.3.0 | MCP | 279.1 | 4.10 | 5.25 | 178.2 | 36 MB |
-| Google ADK Java | 1.14.0 + LangChain4j bridge ² | MCP | 312.5 ² | 5.01 | 6.55 | 239.3 | 174 MB |
+| **toolnexus** (native) | 0.28.0 | native | **26.7** | **1.74** | 2.56 | **119.1** | 11 MB |
+| **toolnexus** (full: MCP + `skill` + native) | 0.28.0 | MCP + skill | **173.7** | **1.97** | **2.40** | 146.2 | 11 MB |
+| **toolnexus** | 0.28.0 · in-house stdio MCP client (#204) | MCP | 174.2 | **2.15** | 2.54 | 140.9 | 11 MB |
+| LangChain4j | 1.23.0 · mcp 1.23.0-beta33 | MCP | 258.7 | 2.17 | 2.79 | **140.0** | **8.9 MB** |
+| Spring AI + SkillsTool | 2.0.2 · spring-ai-agent-utils 0.13.0 | MCP + skill | 1219 ⁴ | 3.44 | 5.00 | 602.1 | 123 MB jar |
+| Spring AI | 2.0.2 · Boot 4.1.2 | MCP | 1249 ⁴ | 3.52 | 5.27 | 571.2 | 123 MB jar |
+| Koog (Kotlin) | 1.3.0 | MCP | 296.6 | 4.18 | 5.24 | 184.6 | 36 MB |
+| Google ADK Java | 1.14.0 + LangChain4j bridge ² | MCP | 344.0 ² | 5.26 | 7.07 | 259.1 | 174 MB |
 
-**Still behind LangChain4j over MCP on p50 and memory, but the gap shrank** from 37% (2.97 vs 2.16 ms in the
-earlier quiet sitting) to **5%** (2.28 vs 2.17 ms), with the same p95. We now **start faster** than LangChain4j
-(195 vs 254 ms) and are the fastest-starting JVM MCP row; we still use 10% more memory (153 vs 140 MB). We beat
-Spring AI at about 27% of its memory, Koog and ADK Java. **Skills:** our `full` row (MCP + skill + one native
-tool) is lower than Spring AI + SkillsTool (2.20 vs 3.34 ms) at 27% of the memory; both advertise the shared
+**Level with LangChain4j over MCP.** p50 2.15 vs 2.17 ms (1% apart, inside the round-to-round spread: our
+per-round p50s ran 1.91–3.66 ms, LangChain4j's 2.12–2.55 ms), p95 2.54 vs 2.79 ms, memory 141 vs 140 MB. We
+**start faster** (174 vs 259 ms) and are the fastest-starting JVM MCP row. Before #204 this gap was 37% (2.97 vs
+2.16 ms in the earlier quiet sitting). We beat Spring AI at about 25% of its memory, Koog and ADK Java.
+**Skills:** our `full` row (MCP + skill + one native tool) is lower than Spring AI + SkillsTool (1.97 vs 3.44 ms)
+at 24% of the memory; both advertise the shared
 `hello-world` skill and the scenario does not call it. No JVM competitor has a native row. ² ADK Java connects to
 MCP lazily. ⁴ Spring's init is Spring Boot context start including MCP discovery.
-
-**After #204 (separate sitting, not in the table above).** [MEASURED] The in-house Java stdio MCP client
-([#204](https://github.com/muthuishere/toolnexus/pull/204)) landed after the five-round sitting, so the perf lane
-measured it on its own: quiet machine, `run_toolnexus_java` and `run_langchain4j` interleaved, 40 measured runs
-after 10 warmup, **medians of 7 rounds**, "warm" = median of runs 21–40.
-
-| | init ms | p50 ms | warm ms |
-|---|--:|--:|--:|
-| toolnexus Java before #204 | 167 | 1.88 | 1.61 |
-| toolnexus Java after #204 | **137** | **1.63** | **1.42** |
-| LangChain4j MCP | 220 | 1.84 | 1.59 |
-
-In that sitting toolnexus Java is ahead of LangChain4j on init, p50 and warm. Absolute values differ from the
-five-round table (different sitting, more runs), so compare rows within one table only. RSS was not measured.
 
 ### .NET (C#)
 
@@ -320,9 +314,8 @@ All from [`CHANGELOG.md`](https://github.com/muthuishere/toolnexus/blob/main/CHA
    ask. [QUALITATIVE]
 2. **A2A beyond submit→poll.** We have no streaming, push or auth. ADK Python just made A2A stable, and
    LangChain4j, Spring AI and MAF all ship it. This matters most for agent-to-agent interop. [FROM DOCS]
-3. **JVM MCP overhead.** In the five-round table we lose to LangChain4j on the flagship MCP path (2.17 vs
-   2.28 ms p50, 140 vs 153 MB). The separate 7-round sitting after #204 puts us ahead on latency (1.63 vs
-   1.84 ms p50); memory against LangChain4j is still unmeasured after #204, so the gap stays open until a full re-run. Go is level with Eino. [MEASURED]
+3. **JVM MCP overhead.** Level with LangChain4j on the flagship MCP path, not ahead (2.15 vs 2.17 ms p50,
+   141 vs 140 MB), and LangChain4j installs smaller (8.9 vs 11 MB). Go is level with Eino. [MEASURED]
 4. **Rust memory vs AutoAgents** (16.8 vs 13.2 MB RSS over MCP). Latency is now ours (0.342 vs 0.368 ms). [MEASURED]
 5. **JS request path.** The keep-alive change did not show up in this harness; per-request time is where it was. [MEASURED]
 6. **Clojure MCP path** at 6.9–7.8 ms against 1.4–1.8 ms native: the polling read loop in our in-house MCP
