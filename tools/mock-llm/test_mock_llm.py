@@ -147,6 +147,32 @@ class MockTest(unittest.TestCase):
         stops = {m["id"]: m["result"]["stopReason"] for m in out if m.get("id") in (3, 4)}
         self.assertEqual(stops, {3: "end_turn", 4: "cancelled"})
 
+    def test_fake_media_cli_grok_and_codex(self):
+        import subprocess
+        import tempfile
+        d = tempfile.mkdtemp()
+        run = lambda *a, env=None: subprocess.run([sys.executable, str(HERE / "fake_media_cli.py"), *a],
+                                                  capture_output=True, text=True, timeout=20, env=env)
+        g = run("--as", "grok", "-p", "Generate exactly one short video: x", "--cwd", d,
+                "--output-format", "streaming-json", "--yolo", "--no-auto-update")
+        self.assertEqual(g.returncode, 0)
+        ev = [json.loads(x) for x in g.stdout.splitlines() if x.startswith("{")]
+        self.assertEqual([e["type"] for e in ev][-1], "end")
+        self.assertEqual(set(ev[-1]) >= {"stopReason", "sessionId", "usage", "total_cost_usd", "total_cost_usd_ticks"}, True)
+        paths = [e["rawOutput"]["path"] for e in ev if e["type"] == "tool_call_update"]
+        self.assertEqual(open(paths[0], "rb").read(), mock_llm.PNG)
+        self.assertTrue(paths[1].endswith("/videos/1.mp4") and Path(paths[1]).stat().st_size > 0)
+        f = run("--as", "grok", "-p", "[fail]", "--cwd", d)
+        self.assertEqual((f.returncode, json.loads(f.stdout.splitlines()[-1])["type"]), (1, "error"))
+        import os
+        c = run("--as", "codex", "exec", "--json", "--skip-git-repo-check", "-s", "workspace-write", "draw",
+                env=dict(os.environ, CODEX_HOME=d + "/ch"))
+        ev = [json.loads(x) for x in c.stdout.splitlines()]
+        self.assertEqual([e["type"] for e in ev], ["thread.started", "turn.started", "item.completed", "turn.completed"])
+        self.assertEqual(open(ev[2]["item"]["text"], "rb").read(), mock_llm.PNG)
+        cf = run("--as", "codex", "exec", "--json", "[fail]")
+        self.assertEqual((cf.returncode, json.loads(cf.stdout.splitlines()[-1])["type"]), (1, "turn.failed"))
+
 
 if __name__ == "__main__":
     unittest.main()

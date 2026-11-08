@@ -19,7 +19,8 @@ a poll, tiny real PNG/WAV/MP4 files), and injects 429/5xx with `Retry-After` on 
 overrides replies. Sibling fakes cover every other source: an MCP server (stdio and HTTP, on both
 the `server/discover` path and the frozen one), an A2A agent, HTTP tool endpoints, a one-shot CLI
 for `createInProcessClient` and an ACP agent with permission, tool-call updates and
-`session/cancel`. The in-process recipe fakes moved here from `site/recipes/in-process-client/fakes/`.
+`session/cancel`, and a fake Grok/Codex media CLI (`fake_media_cli.py`; nothing on main drives a
+media CLI yet, so it is validated against the unreleased `media-clients` branch). The in-process recipe fakes moved here from `site/recipes/in-process-client/fakes/`.
 Every port now has an integration suite that runs its real client, classifier
 and media engine against it, in its normal test command. Docs: cookbook "Run without a model".
 

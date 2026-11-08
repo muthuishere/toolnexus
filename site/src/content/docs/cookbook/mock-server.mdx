@@ -55,6 +55,22 @@ deterministic.
 | One-shot CLI | `python3 tools/mock-llm/fake_cli.py` | For `createInProcessClient`: asks for `add(19, 23)`, then answers `The sum is 42.` |
 | ACP agent | `python3 tools/mock-llm/fake_acp_agent.py` | Asks permission, reports a tool call, calls `add(17, 25)` on the MCP server you hand it, streams `The sum is 42.` A `[wait]` prompt waits for `session/cancel`. |
 
+### Media CLIs (Grok, Codex)
+
+`tools/mock-llm/fake_media_cli.py --as grok` and `--as codex` stand in for the real `grok` and
+`codex` binaries when they generate images or video. Everything after `--as <cli>` is the real
+CLI's own argv, so a CLI media client runs unchanged with `command: ["python3",
+"tools/mock-llm/fake_media_cli.py", "--as", "grok"]`. The fake prints the same event stream the
+real CLI prints: for Grok, the `tool_call` / `tool_call_update` events and an `end` event with token
+usage and cost; for Codex, `thread.started` … `turn.completed`. It writes tiny real PNG and MP4
+files where the real CLI would. A prompt containing `[fail]` fails the way each CLI does at its
+usage limit, and exits 1.
+
+<Aside type="note">
+No released toolnexus version drives a media CLI yet: media on `main` goes through JSON styles
+over HTTP. The fake matches the CLI media clients on the unreleased `media-clients` branch.
+</Aside>
+
 `mock_llm.py --mcp`, `--cli` and `--acp` run the same fakes from one entry point.
 
 ## Point a client at it

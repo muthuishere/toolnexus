@@ -46,7 +46,8 @@ card name "mockagent", skill "summarize", SendMessage then GetTask: one "working
 then "completed" with the text "A2A mock done: <task>"). POST /v1/tools/add {a, b} ->
 {"sum": a+b} and GET /v1/tools/echo?text=x -> {"echo": "x"} are HTTP tool endpoints.
 The MCP server, the one-shot CLI and the ACP agent are sibling entry points:
-mock_mcp.py (stdio / --http), fake_cli.py, fake_acp_agent.py; or `mock_llm.py --mcp|--cli|--acp`.
+mock_mcp.py (stdio / --http), fake_cli.py, fake_acp_agent.py, fake_media_cli.py
+(--as grok|codex); or `mock_llm.py --mcp|--cli|--acp`.
 
 Media (SPEC 7G): GET /v1/_mock/media-style.json returns a style whose baseUrl is this
 server; it declares all six verbs. image, video and talking are async (one
