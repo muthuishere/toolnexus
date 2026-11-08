@@ -2548,7 +2548,7 @@ one file could race. A host that relied on unlabelled tools running in parallel 
 
 ### Hooks (lifecycle middleware)
 
-`ClientOptions.hooks` — four optional, async-capable callbacks around the loop. Each may
+`ClientOptions.hooks` — five optional, async-capable callbacks around the loop. Each may
 observe; the noted ones may mutate or short-circuit.
 
 - `beforeLLM({ messages, tools, model, turn })` → optionally return `{ messages?, tools? }`
@@ -2578,6 +2578,31 @@ observe; the noted ones may mutate or short-circuit.
   (deny / cache hit / dry-run — the real tool never runs), or `{ args }` to rewrite the call.
 - `afterTool({ name, args, result, id, turn })` → return `{ result }` to transform the output
   (redact, annotate).
+
+- `afterRound({ turn, final, text, messages })` → optionally return `{ inject: [string…] }` (change
+  `add-round-boundary-hook`, issue #192). The **round-boundary** seam: it fires once at the end of
+  each loop round, in run and stream, every style, both entry points:
+  - **non-final round** (the model called tools): after **all** of that round's tool results are
+    appended to the transcript, before the next round's `beforeLLM`. `final: false`, `text: ""`.
+  - **final round** (the model answered with no tool call): only when **a turn remains**
+    (`turn + 1 < maxTurns`). `final: true`, `text` = that round's answer text. If it returns a
+    non-empty `inject`, the loop **continues** — the round's answer stays in the transcript, the
+    stream emits no `usage`/`done` for it, and the next round is requested. Empty/absent ⇒ the run
+    ends exactly as without the hook.
+  - Each `inject` string is appended, in order, as one plain-text **user** message
+    (`{role:"user", content:"<string>"}`, same shape for every style) — the transcript, the
+    `ConversationStore` save and `RunResult.messages` all carry it. Empty strings are skipped.
+  - It does **not** fire on a §10 pending halt or a thrown error. A non-final round fires even when
+    it is the last allowed turn; its injection is appended and the run then ends at `maxTurns`
+    exactly as before (`incomplete` when there is no answer). `turn` is the 0-based round index
+    (same as `beforeLLM`). `messages` is the working transcript (read-only by contract).
+  - A failing `afterRound` propagates like a failing `beforeLLM`: the run/stream fails, no further
+    request is sent. `translate` (§11) never fires it (no round). An ACP model source never fires it — the
+    agent owns its own loop (an in-process model runs the normal loop and does fire it).
+  - Absent ⇒ byte-identical behaviour. Why not `beforeLLM`: `beforeLLM` can replace the transcript
+    but cannot tell a round boundary from the first call, cannot see the round's answer, and cannot
+    keep a loop going once the model stops — the loop has already returned. Todo reminders and
+    sub-agent notices need exactly those two things.
 
 These are what make it programmable as an agent: permissions/guardrails (deny in `beforeTool`),
 caching, arg rewriting, and observability (cost/latency in `afterLLM`).

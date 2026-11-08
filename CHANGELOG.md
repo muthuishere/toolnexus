@@ -8,6 +8,19 @@ GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
 
 ## Unreleased
 
+### Round-boundary hook: append a message between rounds, or keep a stopped loop going (#192)
+
+A new optional hook, `afterRound({ turn, final, text, messages })`, fires at the end of every loop
+round — after the round's tool results are in the transcript and before the next request. Return
+`{ inject: ["…"] }` and each string is appended as a user message: todo reminders, sub-agent
+notices, budget warnings, without rebuilding the transcript in `beforeLLM`.
+
+It also fires when the model **stops** (no tool call) as long as a turn remains: a non-empty
+injection there continues the loop ("you still have 2 open todos"). `maxTurns` still bounds it.
+Without the hook nothing changes. Run and stream, OpenAI and Anthropic styles, and the §7D agent
+path (hooks are forwarded verbatim). It never fires on a pending halt, an error, `translate`, or an
+ACP model source. Spec: SPEC.md §8 Hooks; change `openspec/changes/add-round-boundary-hook`.
+
 ### Memory hierarchy and dreaming
 
 A persona's memory can now stay small and stay true. **Everything is opt-in; a persona built
