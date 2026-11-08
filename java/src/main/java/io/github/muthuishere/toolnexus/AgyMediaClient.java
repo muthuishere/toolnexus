@@ -52,7 +52,10 @@ final class AgyMediaClient extends CliMediaClient {
                 String text = MediaSupport.readPath(e, "result.response") instanceof String s ? s : null;
                 String st = MediaSupport.readPath(e, "result.status") instanceof String s ? s : "";
                 String error = null;
-                if (!"SUCCESS".equals(st)) {
+                String low = text == null ? "" : text.toLowerCase(Locale.ROOT);
+                if ("SUCCESS".equals(st) && (low.contains("quota") || low.contains("resource_exhausted"))) {
+                    error = text; // quota exhaustion reported inside a SUCCESS result
+                } else if (!"SUCCESS".equals(st)) {
                     if (MediaSupport.readPath(e, "result.error") instanceof String m && !m.isEmpty()) error = m;
                     else if (MediaSupport.readPath(e, "result.error.message") instanceof String m && !m.isEmpty()) error = m;
                     else if (text != null && !text.isEmpty()) error = text;

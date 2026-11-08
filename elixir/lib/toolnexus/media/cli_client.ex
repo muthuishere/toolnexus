@@ -639,6 +639,8 @@ defmodule Toolnexus.Media.Agy do
 
     error =
       cond do
+        # Live: agy reports an exhausted image quota in a SUCCESS result's text.
+        status == "SUCCESS" and quota?(text) -> text
         status == "SUCCESS" -> nil
         is_binary(r["error"]) and r["error"] != "" -> r["error"]
         is_binary(get_in(r, ["error", "message"])) -> r["error"]["message"]
@@ -664,6 +666,13 @@ defmodule Toolnexus.Media.Agy do
 
   def parse(%{"event" => "error", "message" => m}, _raw) when is_binary(m), do: %{error: m}
   def parse(_, _raw), do: %{}
+
+  defp quota?(nil), do: false
+
+  defp quota?(text) do
+    low = String.downcase(text)
+    String.contains?(low, "quota") or String.contains?(low, "resource_exhausted")
+  end
 
   defp str(s) when is_binary(s) and s != "", do: s
   defp str(_), do: nil

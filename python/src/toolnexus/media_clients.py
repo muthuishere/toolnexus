@@ -813,7 +813,10 @@ class _AgyMediaClient(CliMediaClient):
                 ev["text"] = text
             st = r.get("status") if isinstance(r.get("status"), str) else ""
             ev["status"] = f"result {st}"
-            if st != "SUCCESS":
+            low = _ascii_lower(text)
+            if st == "SUCCESS" and ("quota" in low or "resource_exhausted" in low):
+                ev["error"] = text  # agy reports quota exhaustion inside a SUCCESS result
+            elif st != "SUCCESS":
                 err = r.get("error")
                 if isinstance(err, str) and err:
                     ev["error"] = err

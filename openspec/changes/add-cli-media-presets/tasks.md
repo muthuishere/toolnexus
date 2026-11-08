@@ -6,15 +6,15 @@
 
 ## 2. Ports (presets, loadMediaStyle(preset, config), verbs(), generateMedia, folding, agy, mocks, harness)
 - [x] 2.1 golang
-- [ ] 2.2 js
-- [ ] 2.3 python
-- [ ] 2.4 java
-- [ ] 2.5 csharp
-- [ ] 2.6 elixir
-- [ ] 2.7 clojure
-- [ ] 2.8 rust
+- [x] 2.2 js
+- [x] 2.3 python
+- [x] 2.4 java
+- [x] 2.5 csharp
+- [x] 2.6 elixir
+- [x] 2.7 clojure
+- [x] 2.8 rust
 
 ## 3. Docs
-- [ ] 3.1 Setup page (install, login, video, ZDR, limits, watermark, permissions, verbs table, mocks)
-- [ ] 3.2 README sections use the preset form
-- [ ] 3.3 CHANGELOG `## Unreleased`
+- [x] 3.1 Setup page (install, login, video, ZDR, limits, watermark, permissions, verbs table, mocks)
+- [x] 3.2 README sections use the preset form
+- [x] 3.3 CHANGELOG `## Unreleased`

@@ -380,7 +380,10 @@ internal sealed class AgyMediaClient : CliMediaClient
                 var text = MediaUtil.ReadPath(obj, "result.response") as string;
                 var status = MediaUtil.ReadPath(obj, "result.status") as string ?? "";
                 string? error = null;
-                if (status != "SUCCESS")
+                // Live: agy reports an exhausted image quota in a SUCCESS result's text.
+                if (status == "SUCCESS" && text != null && MediaHttp.ContainsAny(text, "quota", "resource_exhausted"))
+                    error = text;
+                else if (status != "SUCCESS")
                     error = MediaUtil.ReadPath(obj, "result.error") is string { Length: > 0 } m1 ? m1
                         : MediaUtil.ReadPath(obj, "result.error.message") is string { Length: > 0 } m2 ? m2
                         : !string.IsNullOrEmpty(text) ? text

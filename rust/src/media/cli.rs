@@ -783,6 +783,12 @@ impl CliProfile for AgyProfile {
                 ev.text = dot_str(obj, "result.response").map(str::to_string);
                 let st = dot_str(obj, "result.status").unwrap_or("");
                 ev.status = Some(format!("result {st}"));
+                let low = ev.text.as_deref().unwrap_or("").to_lowercase();
+                if st == "SUCCESS" && (low.contains("quota") || low.contains("resource_exhausted"))
+                {
+                    // Live: agy reports an exhausted image quota in a SUCCESS result's text.
+                    ev.error = ev.text.clone();
+                }
                 if st != "SUCCESS" {
                     let text = ev.text.clone().filter(|t| !t.is_empty());
                     ev.error = Some(

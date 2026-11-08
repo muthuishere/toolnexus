@@ -2123,6 +2123,11 @@ const AGY_SPEC: CliSpec = {
       case "result": {
         const r = o.result as any
         const ev: CliEvent = { session: str(r?.conversation_id), text: str(r?.response), status: `result ${str(r?.status) ?? ""}` }
+        const low = (ev.text ?? "").toLowerCase()
+        if (r?.status === "SUCCESS" && (low.includes("quota") || low.includes("resource_exhausted"))) {
+          // Live: agy reports an exhausted image quota in a SUCCESS result's text.
+          ev.error = ev.text
+        }
         if (r?.status !== "SUCCESS") {
           ev.error = (str(r?.error) || undefined) ?? (str(r?.error?.message) || undefined) ?? (ev.text || undefined)
             ?? JSON.stringify(sortKeys(r ?? null))

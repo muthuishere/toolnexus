@@ -1662,6 +1662,9 @@
                           (cond-> {:status (str "result " st)}
                             (string? sess) (assoc :session sess)
                             (seq txt) (assoc :text txt)
+                            ;; live: agy reports an exhausted image quota in a SUCCESS result's text
+                            (and (= "SUCCESS" st) (or (lower-has? txt "quota") (lower-has? txt "resource_exhausted")))
+                            (assoc :error txt)
                             (not= "SUCCESS" st)
                             (assoc :error (cond (and (string? e) (seq e)) e
                                                 (and (string? em) (seq em)) em
