@@ -691,6 +691,46 @@ func toolNames(ts []tn.Tool) []string {
 	return out
 }
 
+func TestDreamD7Guard(t *testing.T) {
+	fx := loadDream(t)
+	e := obj(fx.exp["D7_dreamGuard"])
+	home := mkHome(t, obj(e["files"]))
+	mem := mustDreamer(t, home, DreamerOptions{Store: newStubStore(t, fx.convs)}).Spec.Tools[0]
+	for _, raw := range arr(e["cases"]) {
+		c := obj(raw)
+		r, _ := mem.Execute(obj(c["args"]), nil)
+		if r.Output != str(c["output"]) || r.IsError != c["isError"].(bool) {
+			t.Errorf("%s: got %q/%v", str(c["name"]), r.Output, r.IsError)
+		}
+	}
+	snap := snapshot(t, home)
+	if len(snap) != len(obj(e["files"])) {
+		t.Errorf("home files: %v", snap)
+	}
+	for f := range obj(e["files"]) {
+		if _, ok := snap[f]; !ok {
+			t.Errorf("missing %s", f)
+		}
+	}
+	for f, body := range obj(e["filesAfter"]) {
+		if snap[f] != str(body) {
+			t.Errorf("%s: %q", f, snap[f])
+		}
+	}
+	p := obj(e["plainToolStillWrites"])
+	r, _ := MemoryToolWith(home, MemoryToolOptions{Notes: true}).Execute(obj(p["args"]), nil)
+	if r.Output != str(p["output"]) || r.IsError != p["isError"].(bool) {
+		t.Errorf("plain tool: %q/%v", r.Output, r.IsError)
+	}
+}
+
+func TestDreamD8PromptKeepsUnmentionedClaims(t *testing.T) {
+	e := obj(loadDream(t).exp["D8_promptKeepsUnmentionedClaims"])
+	if !strings.Contains(DreamPrompt, str(e["dreamPromptContains"])) || strings.Contains(DreamPrompt, str(e["dreamPromptNotContains"])) {
+		t.Error("DreamPrompt must remove only what the transcripts contradict")
+	}
+}
+
 func TestDreamD3ToolsExactly(t *testing.T) {
 	fx := loadDream(t)
 	e := obj(fx.exp["D3_dreamerToolsExactly"])

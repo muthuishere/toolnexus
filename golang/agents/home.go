@@ -566,7 +566,7 @@ func FromDir(dir string, opts FromDirOptions) *Agent {
 // and HEARTBEAT_OK keeps an idle pass silent.
 const DreamPrompt = "You are dreaming: an offline pass over your own memory. Memory exists so that a future session decides better. MEMORY.md is a short index loaded at the start of every session; notes (memory target \"note:<slug>\") hold the detail; the transcripts (transcript_search) are the ground truth of what actually happened.\n" +
 	"Work in this order:\n" +
-	"1. Verify: read MEMORY.md and the notes it points to (memory read, memory list) and check each claim against the transcripts. Fix a claim the transcripts contradict; remove one they no longer support.\n" +
+	"1. Verify: read MEMORY.md and the notes it points to (memory read, memory list) and check each claim against the transcripts. Fix or remove a claim only when it is contradicted by the transcripts; a claim they do not mention stays (transcripts may be pruned).\n" +
 	"2. Demote: move detail out of MEMORY.md into a note and leave a one-line [[slug]] pointer, so the index stays short.\n" +
 	"3. Merge: fold duplicate or conflicting notes into one.\n" +
 	"4. Repair links: point every [[slug]] at an existing note or create it; give every note an index line.\n" +
@@ -620,8 +620,27 @@ func Dreamer(dir string, opts DreamerOptions) (*Agent, error) {
 		Does:  "dreams over the memory in " + dir,
 		Soul:  "## HEARTBEAT.md\n\n" + strings.Join(parts, "\n\n"),
 		Model: model,
-		Tools: []tn.Tool{MemoryToolWith(dir, MemoryToolOptions{Notes: true}), search},
+		Tools: []tn.Tool{dreamGuard(MemoryToolWith(dir, MemoryToolOptions{Notes: true})), search},
 	}), nil
+}
+
+// dreamGuard is the dream guard (§7E "Dreaming"): the dreamer's memory tool refuses every
+// action on USER.md and replace/remove on note:log before anything is read or written, so a
+// dream never touches the user model and its audit trail is append-only.
+func dreamGuard(mem tn.Tool) tn.Tool {
+	inner := mem.Execute
+	mem.Execute = func(args map[string]any, ctx *tn.ToolContext) (tn.ToolResult, error) {
+		target, _ := args["target"].(string)
+		action, _ := args["action"].(string)
+		if target == "user" {
+			return tn.ToolResult{Output: "dreamer: USER.md is off-limits", IsError: true}, nil
+		}
+		if target == "note:log" && (action == "replace" || action == "remove") {
+			return tn.ToolResult{Output: "dreamer: memory/log.md is append-only", IsError: true}, nil
+		}
+		return inner(args, ctx)
+	}
+	return mem
 }
 
 // HeartbeatPrompt is the wake prompt of every heartbeat.
