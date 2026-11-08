@@ -245,6 +245,7 @@ final class StdioMcpClient implements McpSource.McpSession {
      * abandons the request (the interrupt flag stays set, wrapped as the SDK's blocking call did).
      */
     private <T> T request(String method, Object params, long timeoutMs, TypeRef<Reply<T>> type) {
+        abandoned.remove();
         RuntimeException closed = closedErr;
         if (closed != null) throw closed;
         long id = ids.incrementAndGet();
@@ -274,10 +275,32 @@ final class StdioMcpClient implements McpSource.McpSession {
         } catch (java.util.concurrent.TimeoutException e) {
             throw new RuntimeException("MCP request timed out after " + timeoutMs + "ms");
         } catch (InterruptedException e) {
+            abandoned.set(id); // the caller may tell the server why (abandon)
             Thread.currentThread().interrupt();
             throw new RuntimeException(e);
         } finally {
-            pending.remove(id);
+            pending.remove(id); // a late reply to this id is dropped by the reader
+        }
+    }
+
+    /** The id of the last request this thread gave up on (interrupted), for {@link #abandon}. */
+    private final ThreadLocal<Long> abandoned = new ThreadLocal<>();
+
+    /**
+     * Tell the server the request this thread just gave up on is cancelled
+     * ({@code notifications/cancelled {requestId, reason}}), as rust/src/mcp/stdio.rs does on an idle
+     * timeout ({@code "request timeout"}) or caller cancel ({@code "cancelled"}). Best effort.
+     */
+    @Override
+    public void abandon(String reason) {
+        Long id = abandoned.get();
+        abandoned.remove();
+        if (id == null || closedErr != null) return;
+        try {
+            writeLine(mapper.writeValueAsBytes(Map.of("jsonrpc", "2.0", "method", "notifications/cancelled",
+                    "params", Map.of("requestId", id, "reason", reason))));
+        } catch (IOException ignored) {
+            // the child is gone
         }
     }
 

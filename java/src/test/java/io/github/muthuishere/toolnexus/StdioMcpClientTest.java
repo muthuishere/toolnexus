@@ -30,10 +30,14 @@ class StdioMcpClientTest {
     }
 
     private McpSource load(java.util.function.Function<Request, Answer> waitFor) throws Exception {
+        return load(waitFor, 5000);
+    }
+
+    private McpSource load(java.util.function.Function<Request, Answer> waitFor, int timeoutMs) throws Exception {
         Map<String, Object> cfg = new LinkedHashMap<>();
         cfg.put("type", "local");
         cfg.put("command", List.of("python3", fixture()));
-        cfg.put("timeout", 5000);
+        cfg.put("timeout", timeoutMs);
         src = McpSource.load(Map.of("b", cfg), new McpSource.LoadOptions().waitFor(waitFor));
         assertEquals("connected", src.status().get("b"));
         return src;
@@ -51,7 +55,7 @@ class StdioMcpClientTest {
 
     @Test
     void listsEveryTool() {
-        assertEquals(7, src.tools().size());
+        assertEquals(9, src.tools().size());
     }
 
     @Test
@@ -133,5 +137,34 @@ class StdioMcpClientTest {
             c.closeGracefully();
         }
         assertFalse(p.isAlive());
+    }
+
+    @Test
+    void idleTimeoutSendsCancelledAndTheLateReplyIsDropped() throws Exception {
+        src.close();
+        load(null, 300);
+        ToolResult r = tool("hang").execute(Map.of("ms", 700), new ToolContext());
+        assertTrue(r.isError());
+        assertEquals("MCP tool call timed out after 300ms without progress", r.output());
+        Thread.sleep(600); // the late reply arrives for an id nobody waits on
+        String cancels = tool("cancels").execute(Map.of(), new ToolContext()).output();
+        assertTrue(cancels.matches("\\[\\{\"reason\": \"request timeout\", \"requestId\": \\d+}]"), cancels);
+        assertEquals("flooded", tool("flood").execute(Map.of("n", 1), new ToolContext()).output());
+    }
+
+    @Test
+    void callerCancelSendsCancelled() throws Exception {
+        java.util.concurrent.atomic.AtomicBoolean cancelled = new java.util.concurrent.atomic.AtomicBoolean();
+        Thread.ofVirtual().start(() -> {
+            try {
+                Thread.sleep(100);
+            } catch (InterruptedException ignored) {
+            }
+            cancelled.set(true);
+        });
+        ToolResult r = tool("hang").execute(Map.of("ms", 400), new ToolContext(null, cancelled));
+        assertEquals("MCP tool call cancelled", r.output());
+        String cancels = tool("cancels").execute(Map.of(), new ToolContext()).output();
+        assertTrue(cancels.matches("\\[\\{\"reason\": \"cancelled\", \"requestId\": \\d+}]"), cancels);
     }
 }

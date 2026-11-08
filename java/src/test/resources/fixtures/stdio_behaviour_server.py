@@ -10,6 +10,8 @@ Tools:
   roots()         -> roots/list, then echoes the error message the client sent back
   garbage()       -> a non-JSON line and a blank line on stdout, then "clean"
   die()           -> exits without answering
+  hang(ms)        -> sleeps with no progress, then replies (late, after an idle timeout)
+  cancels()       -> the notifications/cancelled params received so far
 Ignores server/discover (answers -32601) so the client takes the frozen path.
 """
 import json
@@ -21,6 +23,7 @@ lock = threading.Lock()
 waiters = {}  # request id -> (event, slot)
 hold = threading.Event()  # set while `pings` writes: the stdin loop must not read
 hold.set()
+cancels = []  # params of every notifications/cancelled received
 
 
 def send(obj):
@@ -92,6 +95,11 @@ def call(rid, name, args, token):
             sys.stdout.write("this is not json\n\n{\"broken\": \n")
             sys.stdout.flush()
         text(rid, "clean")
+    elif name == "hang":
+        time.sleep(int(args.get("ms", 500)) / 1000.0)
+        text(rid, "late")  # a reply the client gave up on: must be dropped quietly
+    elif name == "cancels":
+        text(rid, json.dumps(cancels, sort_keys=True))
     elif name == "die":
         sys.stdout.flush()
         import os
@@ -101,7 +109,7 @@ def call(rid, name, args, token):
 
 
 TOOLS = [{"name": n, "inputSchema": {"type": "object"}} for n in
-         ["flood", "slow", "pings", "ask", "roots", "garbage", "die"]]
+         ["flood", "slow", "pings", "ask", "roots", "garbage", "die", "hang", "cancels"]]
 
 for line in sys.stdin:
     hold.wait()
@@ -111,6 +119,9 @@ for line in sys.stdin:
     msg = json.loads(line)
     method = msg.get("method")
     rid = msg.get("id")
+    if method == "notifications/cancelled":
+        cancels.append(msg.get("params"))
+        continue
     if method is None:  # a reply to one of our requests
         w = waiters.get(rid)
         if w:

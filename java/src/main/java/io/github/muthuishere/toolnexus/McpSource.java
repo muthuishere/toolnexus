@@ -134,6 +134,9 @@ public final class McpSource implements AutoCloseable {
         McpSchema.ReadResourceResult readResource(McpSchema.ReadResourceRequest req);
         void closeGracefully();
 
+        /** The calling thread's last request was abandoned (idle timeout / cancel); tell the server if the client can. */
+        default void abandon(String reason) {}
+
         static McpSession of(McpSyncClient c) {
             return new McpSession() {
                 @Override public McpSchema.ListToolsResult listTools(String cursor) { return c.listTools(cursor); }
@@ -1125,7 +1128,10 @@ public final class McpSource implements AutoCloseable {
                 result = client.callTool(req);
             } catch (RuntimeException | Error e) {
                 int trip = watch.finish();
-                if (trip != CallWatch.RUNNING) throw tripped(trip, timeoutMs);
+                if (trip != CallWatch.RUNNING) {
+                    client.abandon(trip == CallWatch.CANCELLED ? "cancelled" : "request timeout");
+                    throw tripped(trip, timeoutMs);
+                }
                 Throwable c = e;
                 while (c != null && !(c instanceof InterruptedException)) c = c.getCause();
                 if (c instanceof InterruptedException ie) { // an external interrupt of the caller
