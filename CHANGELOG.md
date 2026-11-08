@@ -8,6 +8,28 @@ GitHub Releases `vX.Y.Z` via `release.yml` (see `PUBLISHING.md`).
 
 ## Unreleased
 
+### Memory hierarchy and dreaming (js only so far)
+
+A persona's memory can now stay small and stay true. **Everything is opt-in; a persona built
+without the new options is byte-identical to before.**
+
+- **`memoryIndexCap`** on `fromDir`: injects at most 200 lines / 25600 bytes of `MEMORY.md`
+  (whole lines, a fixed notice when cut) so a diligent persona no longer pays for an ever-growing
+  index on every turn. Disk is untouched.
+- **`notes: true`**: the `memory` tool gains `note:<slug>` targets (`memory/<slug>.md`, never
+  injected), `read` and a sorted `list`. Bad slugs (`../SOUL`, uppercase) are refused with no I/O.
+- **`transcriptSearchTool(store)`**: a read-only tool that searches stored conversations
+  (case-insensitive substring), so an agent can check what it believes against what happened.
+- **`dreamer(dir, { store })`** and **`fromDir(dir, { dream: { everyMs, store } })`**: a built-in
+  dream pass that verifies `MEMORY.md` against the transcripts, fixes or prunes claims, and
+  records every change in `memory/log.md`. No `HEARTBEAT.md` to write.
+- Memory writes are now fsynced, and `replace`/`remove` are pinned to the **first** occurrence
+  in SPEC §7E.
+
+Not done: the other seven ports (tracked in `openspec/changes/add-memory-hierarchy`); python and
+java still replace every occurrence; no cross-process write locking; no semantic search; docs
+page "Dreaming" not written yet.
+
 **Fix: the persona `memory` tool no longer truncates a `MEMORY.md` / `USER.md` larger than 2 MB.**
 The tool read the file through the same 2 MB cap used to build the system prompt, then wrote that
 capped text back. So once the file went over 2 MB, a single `add`, `replace` or `remove` cut it down
