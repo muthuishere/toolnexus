@@ -12,6 +12,9 @@ Tools:
   die()           -> exits without answering
   hang(ms)        -> sleeps with no progress, then replies (late, after an idle timeout)
   cancels()       -> the notifications/cancelled params received so far
+  deaf(ms)        -> stops reading stdin for `ms` (the pipe fills), then "heard"
+  big(n)          -> one reply line carrying n bytes of text
+  spawn()         -> starts a grandchild `sleep 60`, replies with its pid
 Ignores server/discover (answers -32601) so the client takes the frozen path.
 """
 import json
@@ -100,6 +103,17 @@ def call(rid, name, args, token):
         text(rid, "late")  # a reply the client gave up on: must be dropped quietly
     elif name == "cancels":
         text(rid, json.dumps(cancels, sort_keys=True))
+    elif name == "deaf":
+        hold.clear()
+        time.sleep(int(args.get("ms", 1000)) / 1000.0)
+        hold.set()
+        text(rid, "heard")
+    elif name == "big":
+        text(rid, "y" * int(args.get("n", 1000000)))
+    elif name == "spawn":
+        import subprocess
+        child = subprocess.Popen(["sleep", "60"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+        text(rid, str(child.pid))
     elif name == "die":
         sys.stdout.flush()
         import os
@@ -109,7 +123,7 @@ def call(rid, name, args, token):
 
 
 TOOLS = [{"name": n, "inputSchema": {"type": "object"}} for n in
-         ["flood", "slow", "pings", "ask", "roots", "garbage", "die", "hang", "cancels"]]
+         ["flood", "slow", "pings", "ask", "roots", "garbage", "die", "hang", "cancels", "deaf", "big", "spawn"]]
 
 for line in sys.stdin:
     hold.wait()
@@ -137,6 +151,8 @@ for line in sys.stdin:
     elif method == "tools/call":
         p = msg["params"]
         token = (p.get("_meta") or {}).get("progressToken")
+        if p["name"] == "deaf":
+            hold.clear()
         threading.Thread(target=call, args=(rid, p["name"], p.get("arguments") or {}, token), daemon=True).start()
     elif rid is not None:
         send({"jsonrpc": "2.0", "id": rid, "error": {"code": -32601, "message": "Method not found"}})

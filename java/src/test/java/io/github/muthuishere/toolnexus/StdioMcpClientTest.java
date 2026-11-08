@@ -55,7 +55,7 @@ class StdioMcpClientTest {
 
     @Test
     void listsEveryTool() {
-        assertEquals(9, src.tools().size());
+        assertEquals(12, src.tools().size());
     }
 
     @Test
@@ -166,5 +166,58 @@ class StdioMcpClientTest {
         assertEquals("MCP tool call cancelled", r.output());
         String cancels = tool("cancels").execute(Map.of(), new ToolContext()).output();
         assertTrue(cancels.matches("\\[\\{\"reason\": \"cancelled\", \"requestId\": \\d+}]"), cancels);
+    }
+
+    @Test
+    void progressOnlyResetsTheCallWhoseTokenItCarries() throws Exception {
+        // 400 ms idle budget, two calls in flight: `slow` sends progress for 1.2 s on ITS token and
+        // must survive; `hang` sends none and must trip at ~400 ms despite the other's progress.
+        src.close();
+        load(null, 400);
+        CompletableFuture<ToolResult> slow = CompletableFuture.supplyAsync(
+                () -> tool("slow").execute(Map.of("tag", "s", "ms", 1200), new ToolContext()));
+        long t0 = System.nanoTime();
+        ToolResult hung = tool("hang").execute(Map.of("ms", 2000), new ToolContext());
+        long ms = (System.nanoTime() - t0) / 1_000_000;
+        assertEquals("MCP tool call timed out after 400ms without progress", hung.output());
+        assertTrue(ms < 1100, "hang tripped after " + ms + " ms (reset by another call's progress?)");
+        assertEquals("done-s", slow.get(10, TimeUnit.SECONDS).output());
+    }
+
+    @Test
+    void aServerThatStopsReadingStdinStillHonoursTheCallTimeout() throws Exception {
+        // `deaf` stops the server's stdin loop for 4 s; a 2 MB request then fills the pipe. The
+        // caller must not sit in a blocking write: its 400 ms idle budget still trips (rust #187).
+        src.close();
+        load(null, 400);
+        CompletableFuture.runAsync(() -> tool("deaf").execute(Map.of("ms", 4000), new ToolContext()));
+        Thread.sleep(150);
+        // The server's stdin loop is already parked in readline: this small line is what it reads
+        // before it blocks on `deaf`, so the 2 MB line below really lands on a full pipe.
+        CompletableFuture.runAsync(() -> tool("flood").execute(Map.of("n", 1), new ToolContext()));
+        Thread.sleep(150);
+        long t0 = System.nanoTime();
+        ToolResult r = tool("flood").execute(Map.of("n", 1, "pad", "z".repeat(2 * 1024 * 1024)), new ToolContext());
+        long ms = (System.nanoTime() - t0) / 1_000_000;
+        assertTrue(r.isError(), r.output());
+        assertEquals("MCP tool call timed out after 400ms without progress", r.output());
+        assertTrue(ms < 2500, "timed out only after " + ms + " ms");
+    }
+
+    @Test
+    void aReplyLineFarLargerThanTheReadBufferArrivesWhole() {
+        String out = tool("big").execute(Map.of("n", 1_000_000), new ToolContext()).output();
+        assertEquals(1_000_000, out.length());
+    }
+
+    @Test
+    void closeKillsTheServersChildrenToo() throws Exception {
+        long pid = Long.parseLong(tool("spawn").execute(Map.of(), new ToolContext()).output());
+        ProcessHandle grandchild = ProcessHandle.of(pid).orElseThrow();
+        assertTrue(grandchild.isAlive());
+        src.close();
+        src = null;
+        grandchild.onExit().get(5, TimeUnit.SECONDS);
+        assertFalse(grandchild.isAlive());
     }
 }

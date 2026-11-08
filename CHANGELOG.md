@@ -26,7 +26,9 @@ with `requestId` and a reason (`"request timeout"` for an idle timeout, `"cancel
 cancel). A late reply to that id is dropped quietly.
 **Not changed:** remote HTTP/SSE servers and `serve` still use the SDK. 2026-07-28 servers were already
 in-house (`Mcp2026`). One visible difference: a respawned child's stderr now passes through to the host's
-stderr, as the probe child's already did, instead of going to SLF4J. Tracked in
+stderr, as the probe child's already did, instead of going to SLF4J. Requests are written by one
+writer thread, so a server that stops reading stdin can no longer park a caller past its call timeout,
+and `close` also kills the server's children after the server itself has exited. Tracked in
 `openspec/changes/java-inhouse-stdio-mcp`.
 **Change an ACP agent's mode or model without restarting it (#197).** A running ACP client now has
 `setMode(mode)` and `setModel(model)` (Go `SetMode(ctx, mode)` / `SetModel(ctx, model)`, Python

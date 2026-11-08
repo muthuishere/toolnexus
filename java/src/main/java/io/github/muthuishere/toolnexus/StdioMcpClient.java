@@ -59,7 +59,13 @@ final class StdioMcpClient implements McpSource.McpSession {
     private final Process proc;
     private final OutputStream stdin;
     private final McpJsonMapper mapper;
-    private final Object writeLock = new Object();
+    /**
+     * Outbound lines, written by ONE writer thread. Callers only enqueue, so a server that stops
+     * reading stdin (a full pipe) can never park a caller in an uninterruptible write: the caller
+     * always reaches its interruptible wait, and the idle timeout / cancel still fire (rust #187).
+     */
+    private final java.util.concurrent.LinkedBlockingQueue<byte[]> outbox = new java.util.concurrent.LinkedBlockingQueue<>();
+    private static final byte[] STOP = new byte[0];
     private final Map<Long, CompletableFuture<byte[]>> pending = new ConcurrentHashMap<>();
     private final AtomicLong ids = new AtomicLong();
     private final Consumer<Object> onProgress;
@@ -82,6 +88,7 @@ final class StdioMcpClient implements McpSource.McpSession {
                                  Function<Request, Answer> waitFor) {
         StdioMcpClient c = new StdioMcpClient(proc, mapper, onProgress, waitFor);
         Thread.ofPlatform().daemon().name("toolnexus-stdio-reader").start(c::readLoop);
+        Thread.ofPlatform().daemon().name("toolnexus-stdio-writer").start(c::writeLoop);
         return c;
     }
 
@@ -232,11 +239,28 @@ final class StdioMcpClient implements McpSource.McpSession {
 
     // ------------------------------------------------------------------ client → server
 
+    /** Queue one line (Jackson never emits a raw newline). Never blocks on the child. */
     private void writeLine(byte[] line) throws IOException {
-        synchronized (writeLock) {
-            stdin.write(line); // Jackson never emits a raw newline
-            stdin.write('\n');
-            stdin.flush();
+        if (closing) throw new IOException("stdio client closed");
+        outbox.add(line);
+    }
+
+    private void writeLoop() {
+        try {
+            while (true) {
+                byte[] line = outbox.take();
+                if (line == STOP) break;
+                stdin.write(line);
+                stdin.write('\n');
+                if (outbox.isEmpty()) stdin.flush();
+            }
+        } catch (IOException | InterruptedException ignored) {
+            // the child is gone (its reader EOF fails the pending calls) or we are closing
+        }
+        try {
+            stdin.close();
+        } catch (IOException ignored) {
+            // already closed
         }
     }
 
@@ -255,14 +279,13 @@ final class StdioMcpClient implements McpSource.McpSession {
             byte[] tail = mapper.writeValueAsBytes(params == null
                     ? Map.of("method", method) : Map.of("method", method, "params", params));
             byte[] idb = Long.toString(id).getBytes(StandardCharsets.US_ASCII);
-            synchronized (writeLock) {
-                stdin.write(HEAD);
-                stdin.write(idb);
-                stdin.write(',');
-                stdin.write(tail, 1, tail.length - 1); // tail is "{...}": splice after the id
-                stdin.write('\n');
-                stdin.flush();
-            }
+            byte[] line = new byte[HEAD.length + idb.length + tail.length];
+            System.arraycopy(HEAD, 0, line, 0, HEAD.length);
+            System.arraycopy(idb, 0, line, HEAD.length, idb.length);
+            line[HEAD.length + idb.length] = ',';
+            // tail is "{...}": splice its members after the id
+            System.arraycopy(tail, 1, line, HEAD.length + idb.length + 1, tail.length - 1);
+            writeLine(line);
             if (closedErr != null && !f.isDone()) throw closedErr;
             Reply<T> reply = mapper.readValue(timeoutMs > 0 ? f.get(timeoutMs, TimeUnit.MILLISECONDS) : f.get(), type);
             if (reply.error() != null) throw new McpError(reply.error());
@@ -377,18 +400,21 @@ final class StdioMcpClient implements McpSource.McpSession {
     @Override
     public void closeGracefully() {
         if (closing) return;
+        // Snapshot the tree first: once the child exits its own children are re-parented and
+        // proc.descendants() no longer sees them, so they would outlive close.
+        List<ProcessHandle> tree = proc.descendants().toList();
         closing = true;
+        outbox.add(STOP); // the writer drains what is queued, then closes stdin (EOF to the child)
         try {
-            stdin.close();
-        } catch (IOException ignored) {
-            // already closed
-        }
-        try {
-            if (!proc.waitFor(2, TimeUnit.SECONDS)) {
+            if (proc.waitFor(2, TimeUnit.SECONDS)) {
+                tree.forEach(h -> { if (h.isAlive()) h.destroy(); });
+            } else {
                 proc.descendants().forEach(ProcessHandle::destroy);
+                tree.forEach(ProcessHandle::destroy);
                 proc.destroy();
                 if (!proc.waitFor(2, TimeUnit.SECONDS)) {
                     proc.descendants().forEach(ProcessHandle::destroyForcibly);
+                    tree.forEach(ProcessHandle::destroyForcibly);
                     proc.destroyForcibly();
                 }
             }

@@ -46,6 +46,9 @@ Indirect, pulled in by the above: `github.com/google/jsonschema-go`, `github.com
 | `tools.jackson.core:jackson-databind` (via the MCP SDK; with `com.fasterxml.jackson.core:jackson-annotations`) | 3.0.3 | Apache-2.0 |
 | `org.yaml:snakeyaml` | 2.3 | Apache-2.0 |
 
+The stdio MCP client for local servers is in-house (`StdioMcpClient`, plus `Mcp2026` for 2026-07-28
+servers); the MCP SDK is still used for remote HTTP/SSE servers, the serve side and the schema records.
+
 ## csharp — `Toolnexus` (NuGet)
 
 | dependency | version | license |
