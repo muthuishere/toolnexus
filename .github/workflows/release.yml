@@ -145,7 +145,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
-        with: { go-version: "1.23" }
+        with: { go-version: "1.23", cache-dependency-path: golang/go.sum }
       # The live tests SKIP when the key is absent, which is right for a laptop and
       # wrong for this gate: a skipped proof would report green and prove nothing,
       # so the gate would be theatre. Fail loudly instead, before any leg publishes.
