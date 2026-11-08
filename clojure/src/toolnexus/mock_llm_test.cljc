@@ -19,12 +19,15 @@
             [koine.http :as khttp]
             [koine.json :as json]
             [koine.process :as proc]
+            [toolnexus.acp :as acp]
             [toolnexus.classifier :as jev]
             [toolnexus.client :as client]
             [toolnexus.content :as content]
             [toolnexus.core :as tn]
+            [toolnexus.http :as http]
             [toolnexus.media :as media]
             [toolnexus.native :as native]
+            [toolnexus.serve :as serve]
             [toolnexus.shared-examples-test :as te]))
 
 (def ^:private base (atom nil))   ; ".../v1", or nil when skipped
@@ -33,10 +36,17 @@
   (try (= 0 (:exit (proc/sh ["python3" "--version"] {:timeout-ms 10000})))
        (catch Throwable _ false)))
 
-(defn- mock-script []
-  (when-let [ex (te/examples-dir)]
-    (let [p (str ex "/../tools/mock-llm/mock_llm.py")]
-      (when (fs/exists? p) p))))
+(defn- kit-file
+  "A file of the mock kit. TN_MOCK_KIT_DIR (a directory holding mock_llm.py,
+  mock_mcp.py, fake_cli.py, fake_acp_agent.py) wins over the repo's
+  tools/mock-llm/ — the mutation check points it at a broken copy."
+  [f]
+  (let [d (env/get-env "TN_MOCK_KIT_DIR")
+        d (if (seq d) d (when-let [ex (te/examples-dir)] (str ex "/../tools/mock-llm")))
+        p (when d (str d "/" f))]
+    (when (and p (fs/exists? p)) p)))
+
+(defn- mock-script [] (kit-file "mock_llm.py"))
 
 (defn- with-mock [f]
   (let [preset (env/get-env "TN_MOCK_LLM_URL")]
@@ -189,3 +199,147 @@
            (is (some? e))
            (is (str/includes? (str (ex-message e)) "mock: job asked to fail") (ex-message e))))
        (finally (fs/delete-tree! dir))))))
+
+;; ---------------------------------------------------------------------------
+;; round 2 — MCP, HTTP, A2A, skills, one-shot CLI and ACP against the kit
+;; ---------------------------------------------------------------------------
+
+(defn- origin-of [b] (str/replace b #"/v1$" ""))
+
+(defn- spawn-http-mcp
+  "mock_mcp.py --http on a free port: [child url]."
+  [& flags]
+  (let [child (proc/spawn (into ["python3" (kit-file "mock_mcp.py") "--http" "--port" "0"] flags))
+        line  (proc/read-line! child)]
+    [child (second (re-find #"(http://\S+)" (str line)))]))
+
+(defn- mixed-toolkit [b seen http-url legacy-url]
+  (tn/build {:builtins false
+             :skills   [(str (te/examples-dir) "/skills")]
+             :mcp      {:mcpServers {"stdio"  {:command ["python3" (kit-file "mock_mcp.py")] :timeout 10000}
+                                     "web"    {:url http-url :timeout 10000}
+                                     "legacy" {:url legacy-url :timeout 10000}}}
+             :agents   [{:card (str (origin-of b) "/.well-known/agent-card.json")
+                         :timeout 10000 :poll-every 20}]
+             :tools    [(add-tool seen)
+                        (http/http-tool {:name "http_add" :description "Add over HTTP"
+                                         :input-schema {:type "object"
+                                                        :properties {:a {:type "integer"} :b {:type "integer"}}}
+                                         :method :post :url (str b "/tools/add")})]}))
+
+(defn- with-mixed [f]
+  (let [[c1 u1] (spawn-http-mcp)
+        [c2 u2] (spawn-http-mcp "--legacy")]
+    (try
+      (let [seen (atom [])
+            tk   (mixed-toolkit @base seen u1 u2)]
+        (try (f tk seen) (finally (tn/shutdown! tk))))
+      (finally (proc/kill! c1) (proc/kill! c2)))))
+
+(deftest a-mixed-toolkit-runs-a-tool-from-every-source
+  (when-mock
+   (with-mixed
+     (fn [tk seen]
+       (let [names (set (tn/tool-names tk))]
+         (is (every? names ["stdio_add" "stdio_echo" "web_add" "legacy_add" "add" "http_add"
+                            "mockagent_summarize" "skill"])
+             (pr-str (sort names))))
+       (is (= "5" (:output (tn/execute tk "stdio_add" {:a 2 :b 3}))) "MCP stdio, 2026 discover path")
+       (is (= "5" (:output (tn/execute tk "web_add" {:a 2 :b 3}))) "MCP http, 2026 discover path")
+       (is (= "5" (:output (tn/execute tk "legacy_add" {:a 2 :b 3}))) "MCP http, legacy initialize path")
+       (is (= "{\"text\":\"hi\"}" (:output (tn/execute tk "web_echo" {:text "hi"}))) "SPEC §0.4: structuredContent wins")
+       (is (= "5" (:output (tn/execute tk "add" {:a 2 :b 3}))))
+       (is (= [{:a 2 :b 3}] @seen))
+       (is (= {"sum" 5} (json/read-str (:output (tn/execute tk "http_add" {:a 2 :b 3})) {:key-fn str})))
+       (is (= "A2A mock done: x" (:output (tn/execute tk "mockagent_summarize" {:task "x"}))))
+       (let [out (:output (tn/execute tk "skill" {:name "hello-world"}))]
+         (is (str/includes? out "<skill_content name=\"hello-world\">") out))))))
+
+(deftest a-client-run-over-the-mixed-toolkit
+  (when-mock
+   (with-mixed
+     (fn [tk _]
+       (let [c (client/create-client {:base-url @base :style "openai" :model "mock" :api-key "mock-key"})
+             r (client/run c "use a tool" {:toolkit tk})]
+         (is (= 1 (:tool-call-count r)))
+         (is (= "done" (:status r)))
+         (is (str/starts-with? (:text r) "Tool result: ") (:text r))
+         (is (= (str "Tool result: " (str/trim (str (:output (first (:tool-calls r))))))
+                (:text r))
+             (pr-str (first (:tool-calls r)))))))))
+
+;; The one-shot CLI recipe (site/recipes/in-process-client/clojure/one-shot-cli).
+(defn- render [{:keys [messages tools]}]
+  (let [called (atom {})
+        lines  (transient ["You are the model inside a tool-calling loop. Tools you may call:"])]
+    (doseq [{f :function} tools]
+      (conj! lines (str "- " (:name f) ": " (:description f) " args=" (json/write-str (:parameters f)))))
+    (conj! lines "") (conj! lines "Conversation:")
+    (doseq [m messages]
+      (cond
+        (= "tool" (:role m))
+        (conj! lines (str "[tool " (get @called (:tool_call_id m) (:tool_call_id m)) "] " (:content m)))
+        (seq (:tool_calls m))
+        (do (doseq [c (:tool_calls m)] (swap! called assoc (:id c) (get-in c [:function :name])))
+            (conj! lines (str "[assistant called] " (json/write-str (mapv :function (:tool_calls m))))))
+        :else
+        (conj! lines (str "[" (:role m) "] " (if (string? (:content m)) (:content m) (json/write-str (:content m)))))))
+    (conj! lines "")
+    (conj! lines "Reply with ONLY one JSON object: {\"tool_calls\":[{\"name\":\"...\",\"arguments\":{...}}]} to call tools,")
+    (conj! lines "or {\"content\":\"...\"} with the final answer.")
+    (str/join "\n" (persistent! lines))))
+
+(defn- parse-reply [out]
+  (let [r (json/read-str (subs out (str/index-of out "{") (inc (str/last-index-of out "}"))))]
+    (if (seq (:tool_calls r))
+      {:tool-calls (mapv (fn [c] {:name (:name c) :arguments (or (:arguments c) {})}) (:tool_calls r))}
+      {:content (:content r)})))
+
+(deftest a-one-shot-cli-drives-the-loop
+  (if-let [cli (when @base (kit-file "fake_cli.py"))]
+    (let [seen (atom [])
+          c    (client/create-in-process-client
+                {:model "fake-cli"
+                 :generate (fn [req]
+                             (let [r (proc/sh ["python3" cli] {:in (render req) :timeout-ms 30000})]
+                               (is (= 0 (:exit r)) (:err r))
+                               (parse-reply (:out r))))})
+          r    (client/run c "Use the add tool to add 19 and 23." {:toolkit (tn/build {:builtins false
+                                                                                       :tools [(add-tool seen)]})})]
+      (is (= [{:a 19 :b 23}] @seen))
+      (is (= "The sum is 42." (:text r))))
+    (is true "skipped: no python3 / fake_cli.py")))
+
+(defn- acp-run [prompt on-permission]
+  (let [seen   (atom [])
+        server (serve/as-mcp-server (tn/build {:builtins false :tools [(add-tool seen)]}))
+        agent  (acp/connect ["python3" (kit-file "fake_acp_agent.py")]
+                            (cond-> {:mcp-servers [{:type "http" :name "toolnexus" :url (:url server)
+                                                    :headers [{:name "Authorization"
+                                                               :value (str "Bearer " (:token server))}]}]
+                                     :permission-timeout 30000}
+                              on-permission (assoc :on-permission on-permission)))
+        deltas (atom [])]
+    (try
+      (let [c (client/create-in-process-client {:model "fake-acp" :generate-stream (acp/generate-stream agent)})
+            r (client/run c prompt {:toolkit (tn/build {:builtins false})
+                                    :on-event (fn [ev] (when (= "text" (:type ev)) (swap! deltas conj (:delta ev))))})]
+        {:result r :seen @seen :streamed (apply str @deltas)})
+      (finally (acp/close agent) ((:close server))))))
+
+(deftest an-acp-agent-calls-the-served-toolkit
+  (if (and @base (kit-file "fake_acp_agent.py"))
+    (do
+      (testing "permission approved (default: first allow option)"
+        (let [{:keys [result seen streamed]} (acp-run "Use the add tool to add 17 and 25." nil)]
+          (is (= [{:a 17 :b 25}] (mapv #(select-keys % [:a :b]) seen)) "add really ran")
+          (is (= "The sum is 42." streamed))
+          (is (= "The sum is 42." (:text result)))))
+      (testing "permission rejected through :on-permission"
+        (let [{:keys [result seen]} (acp-run "Use the add tool." (fn [_] "no"))]
+          (is (empty? seen))
+          (is (= "Permission denied." (:text result))))))
+    (is true "skipped: no python3 / fake_acp_agent.py")))
+
+;; Case k3 (cancel a "[wait]" prompt) is NOT covered: this port's ACP client has
+;; no session/cancel (issue #170).
