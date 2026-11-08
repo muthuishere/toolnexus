@@ -30,7 +30,7 @@ and media engine against it, in its normal test command. Docs: cookbook "Run wit
   stay as they are. ACP cancel is not exercised in elixir (#169) or clojure (#170), which lack it;
   clojure has no network streaming, so its suite has no streaming case. The benchmark's own mock (`benchmarks/mock_llm.py`) is unchanged.
 
-**Faster requests and cold starts in python, js, java and csharp** (`openspec/changes/speed-up-request-path`).
+**Faster requests and cold starts in python, js, java, csharp and rust** (`openspec/changes/speed-up-request-path`).
 Measured against a no-framework floor, most of our per-request time was waiting, not computing: a new
 TCP connection per LLM call, a thread hand-off per MCP stdio line, an OS proxy lookup per call, and SDK
 code loaded only after the MCP child was up. Fixing those, against the shared benchmark (median p50
