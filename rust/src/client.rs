@@ -12,6 +12,7 @@ mod emit;
 mod inprocess;
 mod metrics;
 mod models;
+mod overflow;
 mod tiers;
 mod translate;
 
@@ -35,6 +36,7 @@ pub use inprocess::{
 };
 pub use metrics::MetricEvent;
 pub use models::{ModelInfo, list_models};
+pub use overflow::{ContextOverflowError, is_context_overflow};
 pub use tiers::{CountTokensFn, ToolTier, ToolTierOptions, UsageCountFn};
 pub use translate::{TranslateRequest, TranslateResult, TranslatedToolCall};
 
@@ -196,6 +198,10 @@ pub struct ClientOptions {
     pub max_part_bytes: usize,
     /// `"error"` | `"text"` | empty (strict for attached parts, placeholder for tool parts).
     pub on_unsupported_part: String,
+    /// Reactive compaction on context overflow (§7F.1): a `before_llm`-shaped
+    /// hook called when the provider rejects the prompt as too long. `None` ⇒
+    /// the overflow surfaces as `ClientError::Provider`, unchanged.
+    pub compact_on_overflow: Option<BeforeLlmHook>,
 }
 
 // ---------------------------------------------------------------------------
@@ -417,6 +423,9 @@ pub enum ClientError {
     /// A durable resume (`run_with_answer` / `ask_with_answer`) was refused.
     #[error("{0}")]
     Resume(String),
+    /// Reactive compaction could not make the prompt fit (§7F.1).
+    #[error("{0}")]
+    ContextOverflow(ContextOverflowError),
 }
 
 /// What a run starts from.
@@ -1981,6 +1990,7 @@ impl Client {
             Style::OpenAI => to_openai(&req_tools),
             Style::Anthropic => to_anthropic(&req_tools),
         };
+        let mut breaker = overflow::OverflowBreaker::default();
         for turn in 0..self.max_turns() {
             st.turns += 1;
             let mut turn_model = self.opts().model.clone();
@@ -2005,9 +2015,29 @@ impl Client {
                     }
                 }
             }
-            let (asst, end) = self
-                .call_model(st, &key, &turn_model, &system, &tools, turn, cancel, tx)
-                .await?;
+            let (asst, end) = loop {
+                match self
+                    .call_model(st, &key, &turn_model, &system, &tools, turn, cancel, tx)
+                    .await
+                {
+                    Ok(r) => {
+                        breaker.ok();
+                        break r;
+                    }
+                    Err(e) => {
+                        st.messages = self
+                            .react_overflow(
+                                &mut breaker,
+                                e,
+                                &st.messages,
+                                &tools,
+                                &turn_model,
+                                turn,
+                            )
+                            .await?;
+                    }
+                }
+            };
             if let Some(a) = asst {
                 st.messages.push(a);
             }
