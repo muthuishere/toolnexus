@@ -6,7 +6,7 @@ use std::sync::Arc;
 use rmcp::model::ReadResourceRequestParams;
 use serde_json::{Map, Value, json};
 
-use super::ServerConn;
+use super::{Conn, ServerConn};
 use crate::tool::{Tool, ToolHints, ToolResult, ToolSource};
 
 fn ro() -> Option<ToolHints> {
@@ -26,6 +26,40 @@ fn conn<'a>(
             servers.keys().cloned().collect::<Vec<_>>().join(", ")
         )
     })
+}
+
+/// Every resource of one server, wire-shaped.
+async fn list_resources(c: &Conn) -> Result<Vec<Value>, String> {
+    match c {
+        Conn::Sdk(peer) => peer
+            .list_all_resources()
+            .await
+            .map(|rs| {
+                rs.iter()
+                    .map(|r| serde_json::to_value(r).unwrap_or_default())
+                    .collect()
+            })
+            .map_err(|e| e.to_string()),
+        Conn::Stdio(s) => s
+            .list_all("resources/list", "resources")
+            .await
+            .map_err(|e| e.to_string()),
+    }
+}
+
+/// `resources/read`, wire-shaped.
+async fn read_resource(c: &Conn, uri: &str) -> Result<Value, String> {
+    match c {
+        Conn::Sdk(peer) => peer
+            .read_resource(ReadResourceRequestParams::new(uri.to_owned()))
+            .await
+            .map(|r| serde_json::to_value(&r).unwrap_or_default())
+            .map_err(|e| e.to_string()),
+        Conn::Stdio(s) => s
+            .request("resources/read", Some(&json!({ "uri": uri })), None, None)
+            .await
+            .map_err(|e| e.to_string()),
+    }
 }
 
 fn s(v: &Value, k: &str) -> String {
@@ -59,7 +93,7 @@ pub(crate) fn resource_tools(servers: BTreeMap<String, ServerConn>) -> Vec<Tool>
                 for name in names {
                     let Ok(c) = conn(&servers, &name) else { continue };
                     let res = tokio::select! {
-                        r = tokio::time::timeout(c.timeout, c.peer.list_all_resources()) => match r {
+                        r = tokio::time::timeout(c.timeout, list_resources(&c.conn)) => match r {
                             Ok(Ok(v)) => Ok(v),
                             Ok(Err(e)) => Err(e.to_string()),
                             Err(_) => Err("context deadline exceeded".to_owned()),
@@ -73,8 +107,7 @@ pub(crate) fn resource_tools(servers: BTreeMap<String, ServerConn>) -> Vec<Tool>
                             continue;
                         }
                     };
-                    for r in resources {
-                        let v = serde_json::to_value(&r).unwrap_or_default();
+                    for v in resources {
                         let (uri, rname, mime, desc) =
                             (s(&v, "uri"), s(&v, "name"), s(&v, "mimeType"), s(&v, "description"));
                         let mut line = format!("{name} {uri}");
@@ -126,7 +159,7 @@ pub(crate) fn resource_tools(servers: BTreeMap<String, ServerConn>) -> Vec<Tool>
                     return ToolResult::error("read_mcp_resource: uri is required");
                 }
                 let res = tokio::select! {
-                    r = tokio::time::timeout(c.timeout, c.peer.read_resource(ReadResourceRequestParams::new(uri.clone()))) => match r {
+                    r = tokio::time::timeout(c.timeout, read_resource(&c.conn, &uri)) => match r {
                         Ok(Ok(v)) => Ok(v),
                         Ok(Err(e)) => Err(e.to_string()),
                         Err(_) => Err("context deadline exceeded".to_owned()),
@@ -137,7 +170,7 @@ pub(crate) fn resource_tools(servers: BTreeMap<String, ServerConn>) -> Vec<Tool>
                     Ok(r) => r,
                     Err(e) => return ToolResult::error(format!("read_mcp_resource: {e}")),
                 };
-                let v = serde_json::to_value(&res).unwrap_or_default();
+                let v = res;
                 let mut parts = Vec::new();
                 for rc in v.get("contents").and_then(Value::as_array).cloned().unwrap_or_default() {
                     if let Some(t) = rc.get("text").and_then(Value::as_str) {

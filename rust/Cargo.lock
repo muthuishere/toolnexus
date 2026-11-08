@@ -1296,7 +1296,6 @@ dependencies = [
  "libc",
  "pastey",
  "pin-project-lite",
- "process-wrap",
  "rand 0.10.3",
  "reqwest",
  "schemars",
