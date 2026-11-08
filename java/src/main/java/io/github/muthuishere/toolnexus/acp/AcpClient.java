@@ -477,8 +477,27 @@ public final class AcpClient implements Closeable, Function<InProcess.Request, I
             throw new IOException("toolnexus: ACP session/prompt timed out after " + timeoutMs
                     + "ms (an unanswered session/request_permission hangs a turn forever)");
         } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new IOException("toolnexus: ACP session/prompt interrupted", e);
+            // Cancellation (SPEC §7 ACP host hooks): the turn's thread was interrupted — the Java
+            // port's cancel seam (LlmClient.CancelToken interrupts the run thread). session/cancel
+            // is a notification (no id); the agent then ends the turn with stopReason
+            // "cancelled". Wait (bounded by timeoutMs) for that reply so the next turn never
+            // lands on a session still busy with this one. Process and session stay warm.
+            Map<String, Object> cancelParams = new LinkedHashMap<>();
+            cancelParams.put("sessionId", sessionId);
+            Map<String, Object> cancel = new LinkedHashMap<>();
+            cancel.put("jsonrpc", "2.0");
+            cancel.put("method", "session/cancel");
+            cancel.put("params", cancelParams);
+            try {
+                writeLine(cancel);
+                future.get(timeoutMs, TimeUnit.MILLISECONDS);
+            } catch (Exception ignored) {
+                // the agent is gone or never ended the turn: nothing more to wait for
+            } finally {
+                pending.remove(id);
+                Thread.currentThread().interrupt();
+            }
+            throw new LlmClient.CancelledException("toolnexus: ACP session/prompt cancelled");
         } catch (ExecutionException e) {
             Throwable c = e.getCause();
             throw new IOException(c != null && c.getMessage() != null ? c.getMessage()

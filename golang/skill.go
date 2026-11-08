@@ -20,6 +20,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"gopkg.in/yaml.v3"
 )
@@ -79,10 +80,35 @@ type SkillSkip struct {
 	Detail string
 }
 
+// SkillWarningReason is why a KEPT skill was flagged (SPEC.md §3, issue #84).
+type SkillWarningReason string
+
+const (
+	// WarnOversizedDescription: description longer than MaxSkillDescriptionChars
+	// Unicode code points. The description is never modified.
+	WarnOversizedDescription SkillWarningReason = "oversized-description"
+)
+
+// MaxSkillDescriptionChars is the published Agent Skills description limit, in
+// Unicode code points. Exactly this many does not warn.
+const MaxSkillDescriptionChars = 1024
+
+// SkillWarning flags a skill that loaded but breaks a published limit. It is a
+// warning, not a skip: the skill stays, byte-identical (SPEC.md §3, issue #84).
+type SkillWarning struct {
+	Location string
+	Reason   SkillWarningReason
+	// Chars is the description length in Unicode code points (not bytes).
+	Chars int
+}
+
 // SkillInventory is the result of a list-only validate pass (S3).
 type SkillInventory struct {
 	Skills  []SkillInfo
 	Skipped []SkillSkip
+	// Warnings flags kept skills over a published limit (unfiltered), in
+	// normative discovery order.
+	Warnings []SkillWarning
 }
 
 // LoadSkillsOptions configures LoadSkillsWith / ListSkills (SPEC.md §3, S1/S2/S5).
@@ -519,9 +545,10 @@ func collectCandidates(opts LoadSkillsOptions) []rawCandidate {
 	return cands
 }
 
-func mergeCandidates(cands []rawCandidate) (map[string]SkillInfo, []SkillSkip) {
+func mergeCandidates(cands []rawCandidate) (map[string]SkillInfo, []SkillSkip, []string) {
 	skills := map[string]SkillInfo{}
 	var skipped []SkillSkip
+	var order []string
 	for _, c := range cands {
 		if c.skip != nil {
 			skipped = append(skipped, *c.skip)
@@ -534,8 +561,30 @@ func mergeCandidates(cands []rawCandidate) (map[string]SkillInfo, []SkillSkip) {
 			continue
 		}
 		skills[info.Name] = *info
+		order = append(order, info.Name)
 	}
-	return skills, skipped
+	return skills, skipped, order
+}
+
+// skillWarnings flags every skill in `skills`, walked in discovery `order`,
+// whose description exceeds MaxSkillDescriptionChars code points, and logs
+// each through the same channel as the duplicate-name warning (never stdout).
+func skillWarnings(skills map[string]SkillInfo, order []string) []SkillWarning {
+	var out []SkillWarning
+	for _, name := range order {
+		info, ok := skills[name]
+		if !ok {
+			continue
+		}
+		n := utf8.RuneCountInString(info.Description)
+		if n <= MaxSkillDescriptionChars {
+			continue
+		}
+		log.Printf("[toolnexus] skill %q (%s) description is %d characters, over the %d limit — kept unmodified",
+			info.Name, info.Location, n, MaxSkillDescriptionChars)
+		out = append(out, SkillWarning{Location: info.Location, Reason: WarnOversizedDescription, Chars: n})
+	}
+	return out
 }
 
 // applySkillsFilter applies the per-agent allowlist (S2): nil/empty ⇒ all; ≥1
@@ -582,6 +631,9 @@ type SkillSource struct {
 	// the loading path reports its own losses (ADR 0028). Unfiltered, like
 	// ListSkills' inventory: the S2 allowlist removes skills, not candidates.
 	Skipped []SkillSkip
+	// Warnings flags EXPOSED skills (after the allowlist) over a published
+	// limit, in discovery order (SPEC.md §3, issue #84).
+	Warnings []SkillWarning
 }
 
 // Prompt returns the markdown catalog for the system prompt.
@@ -614,12 +666,12 @@ func (s *SkillSource) Prompt() string {
 // accepts, returning parsed skills plus typed skip reasons — no toolkit wired
 // (SPEC.md §3, S3). The inventory is UNFILTERED (it authors the S2 allowlist).
 func ListSkills(opts LoadSkillsOptions) *SkillInventory {
-	merged, skipped := mergeCandidates(collectCandidates(opts))
+	merged, skipped, order := mergeCandidates(collectCandidates(opts))
 	skills := make([]SkillInfo, 0, len(merged))
 	for _, info := range merged {
 		skills = append(skills, info)
 	}
-	return &SkillInventory{Skills: skills, Skipped: skipped}
+	return &SkillInventory{Skills: skills, Skipped: skipped, Warnings: skillWarnings(merged, order)}
 }
 
 // LoadSkills discovers skills under one or more roots and builds the `skill`
@@ -631,7 +683,7 @@ func LoadSkills(dirs ...string) *SkillSource {
 
 // LoadSkillsWith discovers skills (dirs and/or data) and builds the `skill` tool.
 func LoadSkillsWith(opts LoadSkillsOptions) *SkillSource {
-	merged, skipped := mergeCandidates(collectCandidates(opts))
+	merged, skipped, order := mergeCandidates(collectCandidates(opts))
 	skills := applySkillsFilter(merged, opts.Filter)
 	sampleLimit := opts.SampleLimit
 
@@ -733,7 +785,7 @@ func LoadSkillsWith(opts LoadSkillsOptions) *SkillSource {
 		},
 	}
 
-	return &SkillSource{Skills: skills, Tool: tool, Skipped: skipped}
+	return &SkillSource{Skills: skills, Tool: tool, Skipped: skipped, Warnings: skillWarnings(skills, order)}
 }
 
 // fileURL renders an absolute directory path as a file:// URL (mirrors Node's

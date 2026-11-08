@@ -558,6 +558,8 @@ defmodule Toolnexus.McpEdgeTest do
   test "a stdio server that never answers a call times out at the server timeout" do
     script =
       ~S"""
+      read discover
+      printf '{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"Method not found"}}\n'
       read init
       printf '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-06-18","capabilities":{},"serverInfo":{"name":"h","version":"0"}}}\n'
       read notif

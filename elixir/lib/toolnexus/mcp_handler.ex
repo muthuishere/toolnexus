@@ -401,7 +401,7 @@ defmodule Toolnexus.McpHandler do
     version = header(conn, "mcp-protocol-version")
 
     cond do
-      version != nil and version not in h.legacy ->
+      version != nil and version not in h.versions ->
         {:halt, text(conn, 400, "Bad Request: unsupported MCP-Protocol-Version")}
 
       h.cfg[:stateless] ->

@@ -17,14 +17,14 @@ Results and full methodology: [`../docs/performance-benchmarks.md`](../docs/perf
 |------|------|
 | `mock_llm.py` | Deterministic OpenAI-compatible `/chat/completions` server. Turn 1 → two `tool_call`s (`get_weather`, `add`); turn 2 → a final answer. Zero network, zero cost. Picks tool names from each framework's advertised tool list (so Spring AI's `spring_ai_mcp_client_*` prefixing works). Handles both `Content-Length` and chunked request bodies. |
 | `mcp_server.py` | The **shared** stdio MCP server (raw JSON-RPC, stdlib-only). Exposes `get_weather` / `add` / `echo`. Used by **every** framework so tool-discovery cost is identical. Echoes the client's requested protocol version so any MCP SDK connects. |
-| `run_toolnexus.py` | toolnexus **Python** runner (`--config mcp` \| `full`). |
+| `run_toolnexus.py` | toolnexus **Python** runner (`--config mcp` \| `full` \| `native`). |
 | `run_langgraph.py` | LangGraph runner (`--config default` \| `session`). |
 | `run_adk.py` | Google ADK runner. |
 | `run_toolnexus_go/` | toolnexus **Go** runner (composite `replace` → local module). |
 | `run_toolnexus_java/` | toolnexus **Java** runner (Gradle composite `includeBuild` → local port). |
-| `run_springai/` | Spring AI runner (Spring Boot + MCP-client starter). |
+| `run_springai/` | Spring AI runner (Spring Boot + MCP-client starter; `BENCH_CONFIG=skills` adds spring-ai-agent-utils `SkillsTool` over `examples/skills`). |
 | `run_langchain4j/` | LangChain4j runner (Gradle; `AiServices` + `langchain4j-mcp` StdioMcpTransport → shared MCP server). |
-| `run_toolnexus_csharp/` | toolnexus **C#** runner (`--config mcp` \| `full`; ProjectReference → local `csharp/` port; official MCP SDK). |
+| `run_toolnexus_csharp/` | toolnexus **C#** runner (`--config mcp` \| `full` \| `native`; ProjectReference → local `csharp/` port; official MCP SDK). |
 | `run_semantic_kernel/` | Microsoft Semantic Kernel runner (OpenAI connector via custom `HttpClient`; **native** KernelFunctions). |
 | `run_ms_extensions_ai/` | Microsoft.Extensions.AI runner (official OpenAI .NET client + `UseFunctionInvocation`; **native** AIFunctions). |
 | `run_toolnexus_clojure/` | toolnexus **Clojure** runner — ONE source file, **both hosts**: Clojure on the JVM (`clojure -M -m bench`, via `deps.edn`) and cljgo as an AOT-compiled Go binary (`cljgo build`, via `build.cljgo`). `src/toolnexus` is a symlink to the local `clojure/src/toolnexus`, the same trick the Go runner's `replace` pulls. |

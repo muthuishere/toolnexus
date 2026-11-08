@@ -76,10 +76,28 @@ class SkillSkip:
     detail: str = ""
 
 
+SkillWarningReason = Literal["oversized-description"]
+
+#: Maximum skill ``description`` length, in Unicode code points, before a warning (SPEC.md §3).
+SKILL_DESCRIPTION_MAX_CHARS = 1024
+
+
+@dataclass
+class SkillWarning:
+    """A KEPT skill that loads unchanged but carries a warning (SPEC.md §3, #84)."""
+
+    location: str
+    reason: SkillWarningReason
+    #: Description length in Unicode CODE POINTS (Python ``len`` on ``str``).
+    chars: int
+
+
 @dataclass
 class SkillInventory:
     skills: list[SkillInfo]
     skipped: list[SkillSkip]
+    #: Kept skills whose description is oversized, in discovery order (#84).
+    warnings: list[SkillWarning] = field(default_factory=list)
 
 
 # A lazy provider of data-supplied skills (sync or async), resolved at build time.
@@ -376,6 +394,24 @@ def _merge_candidates(
     return skills, skipped
 
 
+def _describe_warnings(skills: list[SkillInfo]) -> list[SkillWarning]:
+    """Warn — never modify — oversized descriptions (SPEC.md §3, #84), also on stderr
+    like the duplicate-name warning. Order follows ``skills`` (discovery order)."""
+    out: list[SkillWarning] = []
+    for s in skills:
+        if s.description is None:
+            continue
+        chars = len(s.description)
+        if chars > SKILL_DESCRIPTION_MAX_CHARS:
+            print(
+                f'[toolnexus] skill "{s.name}" ({s.location}) description is {chars} chars, '
+                f"over {SKILL_DESCRIPTION_MAX_CHARS} — kept unmodified",
+                file=sys.stderr,
+            )
+            out.append(SkillWarning(location=s.location, reason="oversized-description", chars=chars))
+    return out
+
+
 def _apply_filter(
     skills: dict[str, SkillInfo], filter: Optional[dict[str, bool]]
 ) -> dict[str, SkillInfo]:
@@ -403,6 +439,9 @@ class SkillSource:
     #: A host must not need ``list_skills`` to learn that 6 of 87 skills vanished.
     #: Empty by default, so a caller that ignores it loads byte-identically.
     skipped: list[SkillSkip] = field(default_factory=list)
+    #: Exposed (post-allowlist) skills whose description exceeds 1024 code points.
+    #: The description is never modified (#84).
+    warnings: list[SkillWarning] = field(default_factory=list)
 
     def prompt(self) -> str:
         """Markdown catalog for the system prompt (mirrors opencode Skill.fmt).
@@ -435,7 +474,8 @@ def list_skills(
     returning parsed skills plus typed skip reasons — no toolkit wired
     (SPEC.md §3, S3). The inventory is UNFILTERED (it authors the S2 allowlist)."""
     merged, skipped = _merge_candidates(_collect_candidates(dirs, skills))
-    return SkillInventory(skills=list(merged.values()), skipped=skipped)
+    kept = list(merged.values())
+    return SkillInventory(skills=kept, skipped=skipped, warnings=_describe_warnings(kept))
 
 
 def load_skills(
@@ -518,4 +558,9 @@ def load_skills(
         execute=execute,
     )
 
-    return SkillSource(skills=resolved, tool=tool, skipped=skipped)
+    return SkillSource(
+        skills=resolved,
+        tool=tool,
+        skipped=skipped,
+        warnings=_describe_warnings(list(resolved.values())),
+    )

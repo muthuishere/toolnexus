@@ -341,3 +341,41 @@ async def test_disable_skills():
     prompt = sk.skills_prompt()
     assert "keep" in prompt
     assert "**drop**" not in prompt
+
+
+# SPEC §3, #84: oversized descriptions are warned, never modified. Shared fixture.
+def test_skill_description_length_warning_shared_fixture():
+    from pathlib import Path
+
+    from toolnexus import list_skills, load_skills
+
+    conf = Path(__file__).resolve().parents[2] / "conformance" / "skill_description"
+    cases = json.loads((conf / "cases.json").read_text(encoding="utf-8"))
+    skills_dir = str(conf / "skills")
+
+    def check(ws):
+        assert len(ws) == len(cases["expect_warnings"])
+        for w, e in zip(ws, cases["expect_warnings"]):
+            assert Path(w.location).as_posix().endswith(e["location_suffix"])
+            assert w.reason == e["reason"]
+            assert w.chars == e["chars"]
+
+    src = load_skills(skills_dir)
+    check(src.warnings)
+    check(list_skills(skills_dir).warnings)
+    prompt = src.prompt()
+    for name, desc in cases["full_descriptions"].items():
+        assert src.skills[name].description == desc
+        assert f"- **{name}**: {desc}" in prompt
+    # An allowlist that excludes the long skill => no loader warning.
+    assert load_skills(skills_dir, filter={"short-desc": True}).warnings == []
+
+
+def test_skill_description_short_no_warnings():
+    from pathlib import Path
+
+    from toolnexus import list_skills, load_skills
+
+    ex = str(Path(__file__).resolve().parents[2] / "examples" / "skills")
+    assert load_skills(ex).warnings == []
+    assert list_skills(ex).warnings == []

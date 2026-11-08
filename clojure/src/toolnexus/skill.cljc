@@ -236,6 +236,27 @@
   [msg]
   (println (str "[toolnexus] " msg)))
 
+(def description-limit
+  "SPEC §3 (#84) — a description longer than this many Unicode CODE POINTS is
+  warned about, never modified. Code points, not `count`: the JVM counts UTF-16
+  units, so a 1024-code-point description with emoji would falsely warn there."
+  1024)
+
+(defn description-warnings
+  "One `{:location :reason \"oversized-description\" :chars n}` per skill whose
+  description exceeds `description-limit` code points, in skill order. Each is
+  also written to stderr (never stdout — a host may own stdout as a protocol)."
+  [skills]
+  (vec (for [s skills
+             :let [d (:description s)]
+             :when (string? d)
+             :let [n (count (tool/code-points d))]
+             :when (> n description-limit)]
+         (do (binding [*out* *err*]
+               (println (str "[toolnexus] skill description is " n " code points (over "
+                             description-limit ") at " (:location s) " — kept unmodified")))
+             {:location (:location s) :reason "oversized-description" :chars n}))))
+
 (def ^:private load-opt-keys
   "The keys that make a map an OPTIONS map rather than a single skill def.
   Mirrors js/src/skill.ts `LoadSkillsOptions`."
@@ -309,11 +330,13 @@
                                        (mapv def->candidate defs)))
         [by-name unmatched] (apply-skills-filter (:by-name merged) (:filter opts))]
     (doseq [nm unmatched] (warn! (str "skill filter name \"" nm "\" matched no skill")))
-    {:skills           (vec (filter (fn [s] (contains? by-name (:name s))) (:skills merged)))
-     :by-name          by-name
-     :skipped          (:skipped merged)
-     :filter-unmatched unmatched
-     :sample-limit     (or (:sample-limit opts) 0)}))
+    (let [skills (vec (filter (fn [s] (contains? by-name (:name s))) (:skills merged)))]
+      {:skills           skills
+       :by-name          by-name
+       :skipped          (:skipped merged)
+       :warnings         (description-warnings skills)
+       :filter-unmatched unmatched
+       :sample-limit     (or (:sample-limit opts) 0)})))
 
 (defn list-skills
   "SPEC §3 S3 — list/validate inventory: `{:skills … :skipped …}`, no toolkit
@@ -324,7 +347,7 @@
   filtering it would be circular."
   [input]
   (let [m (load-skills (dissoc (load-opts input) :filter))]
-    {:skills (:skills m) :skipped (:skipped m)}))
+    {:skills (:skills m) :skipped (:skipped m) :warnings (:warnings m)}))
 
 ;; ---------------------------------------------------------------------------
 ;; The sibling-file sampler

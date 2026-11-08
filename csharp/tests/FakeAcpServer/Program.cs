@@ -201,6 +201,10 @@ void Chunk(string sessionId, string kind, string text) =>
 var stdin = Console.OpenStandardInput();
 using var reader = new StreamReader(stdin, Encoding.UTF8);
 
+object? cancelPendingId = null; // "cancel" scenario: the turn held open until session/cancel
+var cancelCount = 0;
+var cancelHadId = false;
+
 string? line;
 while ((line = await reader.ReadLineAsync().ConfigureAwait(false)) is not null)
 {
@@ -269,7 +273,13 @@ while ((line = await reader.ReadLineAsync().ConfigureAwait(false)) is not null)
                 break;
 
             case "session/cancel":
-                Reply(IdValue(idEl), new Dictionary<string, object?>());
+                cancelCount++;
+                if (hasId) { cancelHadId = true; Reply(IdValue(idEl), new Dictionary<string, object?>()); }
+                if (cancelPendingId is { } held)
+                {
+                    cancelPendingId = null;
+                    Reply(held, new Dictionary<string, object?> { ["stopReason"] = "cancelled" });
+                }
                 break;
 
             case "session/prompt":
@@ -347,6 +357,15 @@ while ((line = await reader.ReadLineAsync().ConfigureAwait(false)) is not null)
                             },
                         });
                         // Deliberately never reply to session/prompt.
+                        break;
+                    case "cancel" when n == 1:
+                        // Hold the turn open until a session/cancel arrives.
+                        Chunk(sessionId, "agent_message_chunk", "working");
+                        cancelPendingId = id;
+                        break;
+                    case "cancel":
+                        Chunk(sessionId, "agent_message_chunk", $"warm:cancels={cancelCount};withId={cancelHadId}");
+                        Reply(id, new Dictionary<string, object?> { ["stopReason"] = "end_turn" });
                         break;
                     case "permission":
                         _ = Task.Run(() => HandlePermissionAsync(id, sessionId, userText));

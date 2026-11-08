@@ -106,14 +106,20 @@ fn type_name(v: &Value) -> &'static str {
     }
 }
 
+/// The tool_result text for a call resolved by a declined Answer — one spelling
+/// for the inline and the durable path (§10, issue #125).
+fn relay_declined_output(name: &str, reason: &str) -> String {
+    let reason = if reason.is_empty() {
+        "declined"
+    } else {
+        reason
+    };
+    format!("relay declined for {name}: {reason}")
+}
+
 fn relay_result_from_answer(name: &str, a: &Answer) -> ToolResult {
     if !a.ok {
-        let reason = if a.reason.is_empty() {
-            "declined"
-        } else {
-            &a.reason
-        };
-        return ToolResult::error(format!("relay declined for {name}: {reason}"));
+        return ToolResult::error(relay_declined_output(name, &a.reason));
     }
     let data = a.data.clone().unwrap_or_default();
     let Some(raw) = data.get(RELAY_OUTPUT_KEY) else {
@@ -424,6 +430,20 @@ pub(crate) fn repair_halted_turn(
         .map(|c| (c.id, c.name))
         .collect();
     let result_for = |i: usize, id: &str| -> RelayResult {
+        // A declined answer (ok:false) resolves EVERY outstanding call with the
+        // host's reason, the same text as the inline relay path (issue #125).
+        if !answer.ok {
+            let name = names
+                .get(id)
+                .filter(|n| !n.is_empty())
+                .cloned()
+                .unwrap_or_else(|| id.to_string());
+            return RelayResult {
+                id: id.into(),
+                output: relay_declined_output(&name, &answer.reason),
+                is_error: true,
+            };
+        }
         if let Some(r) = by_id.get(id) {
             return r.clone();
         }

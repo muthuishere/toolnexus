@@ -23,10 +23,113 @@ clojure's write is not atomic yet (koine has no rename/move, so it needs adding 
 several agents editing the same memory file at once can still lose an update (no per-file lock
 yet). That is tracked in `openspec/changes/add-memory-hierarchy`.
 
+## 0.27.0 — 2026-11-08
+
+**Rust: an ACP turn the agent never ends now fails after `permission_timeout`** (rust only, #124).
+Every other port bounds the whole `session/prompt` turn by the permission timeout, as SPEC §7 says
+("the turn's permission timeout still applies"). Rust bounded only the host's `on_permission`
+callback, so an agent that stalled mid-turn, or never answered, hung the turn forever. It now fails
+with `AcpError::PermissionTimeout` after `permission_timeout` (default 30 s) from the prompt being sent.
+A turn that legitimately runs longer than that needs a larger `permission_timeout`, same as in Go.
+
+**ACP: cancel a running turn in js, python, java and csharp** (#124). Before, only golang and rust could
+stop an ACP turn; the other ports either ignored cancellation or dropped the turn without telling the
+agent, which kept working. Now a cancelled turn sends the `session/cancel` notification, waits up to the
+request timeout for the agent to end the turn, and raises the cancellation error; the process and
+session stay warm for the next turn. Per port: js `generate(request, {signal})` /
+`generateStream(request, emit, {signal})` rejects with an `AbortError`; python
+`generate(request, cancel=event)` (a `threading.Event`) raises the new `ACPCancelledError`; csharp
+honours the `CancellationToken` it already took; java reacts to the thread interrupt that
+`LlmClient` cancellation already uses.
+
+- **java behaviour change:** an interrupted turn now throws `LlmClient.CancelledException` instead of
+  `IOException("...interrupted")`.
+- **Not done:** elixir (#169) and clojure (#170). In js and python, cancelling a run of
+  `createInProcessClient` does not yet reach the ACP turn — pass the signal/event to the ACP client
+  yourself; wiring it through changes the in-process seam in every port and needs an OpenSpec change.
+
+**Tool-scheduling tests are now mutation-checked in every port** (#129). Each scheduler was broken on
+purpose (unsafe calls overlapping, the cap ignored, everything serial, results in completion order) and
+the tests had to fail. Results-in-completion-order went unnoticed outside golang and csharp, so new tests
+finish calls out of order and check each output stays in emitted order. No library behaviour changed.
+Gap: in js the streaming modes are not covered by the reordering mutation.
+
+- **`mcpHandler` with the 2026-07-28 opt-in no longer rejects legacy clients that send the 2026 version
+  header** (issue #150, all eight ports). On a mount listing `2026-07-28` next to legacy versions, a request
+  carrying `MCP-Protocol-Version: 2026-07-28` but no `Mcp-Method` header and no `_meta` version was routed to
+  the 2026 wire and failed with HTTP 400 `-32020`; hosts had to rewrite the header. Such a request is now
+  served by the legacy wire, which accepts that header value when `2026-07-28` is listed. A real 2026 client
+  always sends `Mcp-Method`, so it is unaffected; 2026-only mounts are unchanged. `initialize` still answers
+  the newest listed legacy version when asked for `2026-07-28` (that wire has no `initialize`; use
+  `server/discover`), and SPEC §7C.2 and the Go `ProtocolVersions` doc now say so. No hint is added to the
+  `initialize` result: the `io.modelcontextprotocol/` `_meta` prefix is reserved by MCP.
+
+**Faster cold start for MCP in Java and C#, with no change in behaviour** (Java and C# only). Java no
+longer builds the MCP SDK's default JSON-schema validator (about 220 networknt classes) for every
+client. It is now resolved the first time a tool result is actually validated against an output
+schema. The SDK's Jackson 3 mapper is built on first use of the legacy SDK path, not when `McpSource`
+loads, and a config with only stdio servers no longer builds an OAuth token store. C# now creates
+the shared MCP `HttpClient` on the first remote request, so a host with only stdio servers does not
+load the HTTP/TLS stack at startup. Validation, auth and the wire format are unchanged. The second
+process that the Java and C# stdio probe used to spawn for older servers (the larger cost at startup)
+is gone too: #167 now reuses the probe child (see the entry below). **Not done:** Java still loads two
+Jackson stacks.
+
+- **Benchmarks (harness only, no published numbers changed):** the fake model server
+  (`benchmarks/mock_llm.py`) now speaks HTTP/1.1 keep-alive, so frameworks that pool connections
+  reuse them across LLM calls as they would against a real provider, instead of paying a TCP connect
+  per call. It also lets two frameworks that previously could not run do so: smolagents (tool results
+  arrive as role `user` and the agent stops only on a `final_answer` tool call; the mock now handles
+  both) and AutoAgents (the mock sent `input_tokens` alongside `prompt_tokens`, which AutoAgents rejects
+  as a duplicate field; usage now carries the OpenAI-standard keys only). The standing tables were
+  re-run against it on 2026-11-08 (see the docs entry below).
+**Faster load of pre-2026 stdio MCP servers: one process start instead of two.** Until now, when a
+stdio server answered the `server/discover` probe with an error (every server older than MCP
+2026-07-28 does), the client killed that process and started a second one for the old protocol. A JVM
+server paid that twice (two spawns 152 ms apart in a Java profile; 35–55 ms in C#, ~20 ms in Clojure).
+Now the same process carries on into `initialize`. A server that never answers the probe is still
+killed and restarted after `min(timeout, 5 s)`, as before. Discover-first, the 2026 path and HTTP are
+unchanged; SPEC §2.2a amended. Shared fixture `examples/mcp-2026/legacy-stdio/` counts process starts.
+If a port cannot hand the open process over, it respawns as before (Rust logs a warning on stderr when this happens). Port coverage and any gap: `openspec/changes/reuse-stdio-discover-probe/tasks.md`.
+
 - **Docs:** the docs-site hero video is re-cut for 0.26.0 (80 s, new narrator). It now covers eight
   languages including Rust, typed decisions (`createClassifier`), media generation, and serving the
   toolkit over MCP, A2A and ACP. Its benchmark claims come only from the Nov 2026 standing page: lowest
   in Python, Rust and Elixir, level in JavaScript and .NET, and behind in Go and on the JVM.
+
+- **Faster start in JavaScript, fewer allocations per turn in Go** (javascript and golang only; no
+  behaviour change). Importing `toolnexus` in JavaScript no longer loads code a host may never use: the
+  MCP server transport and `@hono/node-server` load on the first `serve()` with an MCP profile or `asMcpServer()`, the remote MCP
+  transports (streamable-HTTP, SSE) only when a remote server falls back to the SDK path, the
+  MCP 2026 client on the first MCP load, and `yaml` on the first skill parsed. A bare import drops
+  from 377 to 284 modules. Every public signature and export is unchanged (the built `.d.ts` files are
+  byte-identical); `yaml` is loaded with a synchronous `require`, so `listSkills`/`loadSkills` stay
+  synchronous. Not done: `buildMcpServer` is synchronous and returns the SDK `Server`, so the SDK
+  server core still loads at import. In Go, the non-streaming OpenAI and Anthropic loops marshal the
+  tools array once per `Run` instead of once per turn, when no `BeforeLLM` hook or `BodyTransform` can
+  see or change it, and the MCP progress token is built without `fmt`. A test pins the request-body
+  bytes, and they are unchanged. Not done in Go: the request body is still a `map[string]any`, because
+  `BodyTransform` receives that map; the per-call `Metadata` map, the idle timer and the progress token
+  stay, because each is observable (returned to the caller, the §2 idle timeout, and sent on the wire).
+- **Docs / benchmarks:** the Nov 2026 standing page gains native-tool rows for toolnexus in Python,
+  JavaScript, Java and C#, so .NET is finally compared like for like with Microsoft.Extensions.AI and
+  Semantic Kernel (which only run native tools): toolnexus native is lowest at 0.59 ms p50 with the lowest
+  init and RSS, a tie with Semantic Kernel inside noise. It also adds a skills row against Spring AI 2's
+  `SkillsTool` (spring-ai-agent-utils 0.13.0) over the shared `hello-world` skill: a latency tie with our
+  `full` config, at about 30% of Spring's memory. Measured 2026-11-08 on a busy machine and kept apart from
+  the 2026-11-07 rows; the C# MCP figure from that sitting is too noisy to claim. No Python or Java
+  competitor has a native row in the harness yet.
+- **Docs / benchmarks: quiet re-run of the Nov 2026 standing page** (2026-11-08, every row started at
+  1-minute load < 4, keep-alive mock). All per-language tables now come from one sitting of the full suite,
+  with toolnexus `main` (the 0.27.0 candidate) and smolagents and AutoAgents, which run for the first time. A
+  new table puts 0.26.0 and `main` side by side per port: MCP cold init drops 14–20 ms in Python, JS, Go,
+  Elixir, Clojure and Rust and 14 ms in C# (the stdio probe child is reused, #167; JS/Go lazy loading, #166;
+  C# lazy `HttpClient`, #171), and per-request latency is unchanged. Where we still lose: Eino in Go,
+  LangChain4j on the JVM, AutoAgents in Rust (new, by 8%), and C# MCP cold init against Microsoft Agent
+  Framework. Java did not show #171's cold-start gain in this run (init 462 vs 413 ms, one sample per
+  process), so the page does not claim it. .NET MCP is now ahead of Microsoft Agent Framework (0.52 vs
+  0.62 ms). Clojure remains the slowest port; its fix is deferred to issue #168. Raw rows are in
+  `benchmarks/results-2026-11.json` under `run: 2026-11-08-quiet`; earlier sittings are kept.
 
 **Security: the classifier no longer sends a default API key to a host that is not its own** (issue #155).
 Until now the classifier read `TYPESAFE_API_KEY` (or the backend's variable) and sent it as a bearer
@@ -46,6 +149,27 @@ message, redacted and capped like any backend cause) instead of the fixed text, 
 balance is distinguishable from a bad model id. All eight ports; fixture `cloudflare-replies.json`.
 
 Change: `openspec/changes/fix-classifier-key-and-errors`.
+
+**A declined durable resume now tells the model why** (issue #125). Resuming a halted run with
+`answerDeclined(id, reason)` through `runWithAnswer` / `askWithAnswer` used to fill every call's slot
+with "no result supplied on resume for <name>", so the reason the human gave never reached the
+model. Each outstanding call now gets the error result `relay declined for <name>: <reason>` (reason
+defaults to `declined`), the same text the inline `waitFor` path already produced, so an answer means
+the same thing whether the host waited inline or durably. SPEC §10; fixture
+`conformance/resume_decline/cases.json`. Only golang and rust ship the durable resume entry point, so
+only they were affected and fixed; the other six ports have no durable resume yet and must replay the
+same fixture when they add one. Change: `openspec/changes/archive/2026-11-07-fix-resume-decline-reason`.
+
+**Oversized skill descriptions are now reported** (issue #84). The skills catalog sends each
+`description` in full on every turn, and nothing told the author when one was huge: a 4,443-character
+description is cut to ~1,536 by Claude Code but paid in full here. The loader result and the
+`listSkills` inventory now carry `warnings`, next to `skipped`: one
+`{ location, reason: "oversized-description", chars }` per skill whose description is longer than
+1,024 Unicode code points (the published Agent Skills limit; exactly 1,024 does not warn). Each port
+also logs it through the channel it already uses for duplicate skill names, never stdout. Nothing is
+truncated: the catalog and the `skill` tool output are byte-identical to before. All eight ports;
+fixture `conformance/skill_description/`. Not done: the threshold is fixed, not configurable.
+Change: `openspec/changes/archive/2026-11-07-add-skill-description-length-warning`.
 
 **Docs: a new "Where toolnexus stands — Nov 2026" page** (Benchmarks & comparison). It has a feature
 matrix re-checked against official docs on 2026-11-07, covering MCP client/server, MCP 2026-07-28, A2A,

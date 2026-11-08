@@ -79,9 +79,6 @@ defmodule Toolnexus.McpHandler.Wire2026 do
     hv = McpHandler.header(conn, "mcp-protocol-version")
 
     cond do
-      hv == @v2026 ->
-        true
-
       hv != nil and hv in h.legacy ->
         false
 

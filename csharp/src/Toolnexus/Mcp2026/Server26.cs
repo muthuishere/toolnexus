@@ -6,8 +6,13 @@ using System.Text.Json.Nodes;
 
 namespace Toolnexus.Mcp2026;
 
-/// <summary>Signals SPEC §2.2a "fall back to the frozen path" (the server is not a 2026-07-28 server).</summary>
-internal sealed class FallbackException(string message) : Exception(message);
+/// <summary>Signals SPEC §2.2a "fall back to the frozen path" (the server is not a 2026-07-28 server).
+/// <see cref="Replied"/>: the server answered <c>server/discover</c> (error, or a result without 2026-07-28), so a
+/// stdio probe child is reused for the frozen path; <c>false</c> = silence (the probe child is killed, a new one spawned).</summary>
+internal sealed class FallbackException(string message, bool replied = true) : Exception(message)
+{
+    public bool Replied { get; } = replied;
+}
 
 /// <summary>
 /// One MCP server on the 2026-07-28 path (SPEC §2.2–§2.8): discover, tools/list, tools/call with MRTR → §10,
@@ -99,10 +104,11 @@ internal sealed class Server26 : IAsyncDisposable
         catch (WireException e) when (!Conn.IsStdio && e.Message.Contains("neither result nor error")) { throw new FallbackException(e.Message); }
         catch (OperationCanceledException) when (Conn.IsStdio && !ct.IsCancellationRequested)
         {
-            throw new FallbackException("server/discover: no reply"); // older stdio servers may ignore a pre-initialize request
+            throw new FallbackException("server/discover: no reply", replied: false); // older stdio servers may ignore a pre-initialize request
         }
         if (!J.Strings(res["supportedVersions"]).Contains(Wire.ProtocolVersion))
             throw new FallbackException("server/discover: 2026-07-28 not supported");
+        Conn.EndProbe(); // a 2026 server: the stdio reader resumes for the rest of the session
         Discover = res;
     }
 

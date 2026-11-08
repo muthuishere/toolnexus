@@ -965,3 +965,50 @@ async fn run_deadline_breaks_parking() {
         "the park was dropped, not completed"
     );
 }
+
+/// Replays conformance/resume_decline/cases.json (issue #125): a declined
+/// durable resume hands the model the host's reason on every outstanding call.
+#[tokio::test]
+async fn resume_declined_carries_reason() {
+    let raw = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../conformance/resume_decline/cases.json"
+    ))
+    .unwrap();
+    let fx: Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(
+        fx["calls"],
+        json!(["alpha", "beta"]),
+        "fixture calls changed"
+    );
+    for case in fx["cases"].as_array().unwrap() {
+        let reason = case["reason"].as_str().unwrap();
+        let (url, _) = llm(
+            Style::OpenAI,
+            vec![vec![("c1", "alpha", "{}"), ("c2", "beta", "{}")]],
+            "ok",
+        )
+        .await;
+        let c = client(&url, Style::OpenAI, None);
+        let t = tk(vec![rt("alpha"), rt("beta")]).await;
+        let halted = c.run("go", &t).await.unwrap();
+        let p = halted.pending.clone().unwrap();
+        let resumed = c
+            .run_with_answer(
+                CancellationToken::new(),
+                &t,
+                halted.messages,
+                &p,
+                &answer_declined(&p.id, reason),
+            )
+            .await
+            .unwrap();
+        let got: Vec<Value> = resumed
+            .messages
+            .iter()
+            .filter(|m| m["role"] == "tool")
+            .map(|m| m["content"].clone())
+            .collect();
+        assert_eq!(Value::Array(got), case["expect"], "{}", case["name"]);
+    }
+}

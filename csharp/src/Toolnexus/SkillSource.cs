@@ -59,8 +59,21 @@ public sealed partial class SkillSource
         public const string Unreadable = "unreadable";
     }
 
+    /// <summary>
+    /// (SPEC §3, #84) A kept skill the host should look at — today only an oversized description.
+    /// The description itself is never modified; <paramref name="Chars"/> counts Unicode code points.
+    /// </summary>
+    public sealed record SkillWarning(string Location, string Reason, int Chars)
+    {
+        public const string OversizedDescription = "oversized-description";
+    }
+
+    /// <summary>Descriptions longer than this many code points are warned (exactly this many is not).</summary>
+    public const int MaxDescriptionChars = 1024;
+
     /// <summary>Result of a list-only validate pass (S3).</summary>
-    public sealed record SkillInventory(IReadOnlyList<SkillInfo> Skills, IReadOnlyList<SkillSkip> Skipped);
+    public sealed record SkillInventory(IReadOnlyList<SkillInfo> Skills, IReadOnlyList<SkillSkip> Skipped,
+        IReadOnlyList<SkillWarning> Warnings);
 
     /// <summary>Options for <see cref="LoadWith"/> / <see cref="ListSkills"/> (SPEC.md §3, S1/S2/S5).</summary>
     public sealed class LoadOptions
@@ -81,6 +94,7 @@ public sealed partial class SkillSource
     {
         _skills = skills;
         Skipped = skipped ?? Array.Empty<SkillSkip>();
+        Warnings = DescriptionWarnings(skills);
         Tool = new SkillTool(skills, sampleLimit);
     }
 
@@ -228,7 +242,27 @@ public sealed partial class SkillSource
     public static SkillInventory ListSkills(LoadOptions opts)
     {
         var (skills, skipped) = MergeCandidates(CollectCandidates(opts));
-        return new SkillInventory(skills.Values.ToList(), skipped);
+        return new SkillInventory(skills.Values.ToList(), skipped, DescriptionWarnings(skills));
+    }
+
+    /// <summary>
+    /// (#84) One warning per kept skill whose description exceeds <see cref="MaxDescriptionChars"/>
+    /// Unicode code points, in discovery order; each is also written to stderr (the same channel as
+    /// the duplicate-name warning). The description is never touched.
+    /// </summary>
+    private static IReadOnlyList<SkillWarning> DescriptionWarnings(Dictionary<string, SkillInfo> skills)
+    {
+        var out_ = new List<SkillWarning>();
+        foreach (var s in skills.Values)
+        {
+            if (s.Description is null) continue;
+            var chars = s.Description.EnumerateRunes().Count();
+            if (chars <= MaxDescriptionChars) continue;
+            Console.Error.WriteLine(
+                $"[toolnexus] skill \"{s.Name}\" ({s.Location}) description is {chars} characters, over {MaxDescriptionChars}");
+            out_.Add(new SkillWarning(s.Location, SkillWarning.OversizedDescription, chars));
+        }
+        return out_;
     }
 
     /// <summary>(SPEC §2.7) Split a SKILL.md exactly as a directory skill is read: frontmatter fields + body.</summary>
@@ -254,6 +288,9 @@ public sealed partial class SkillSource
     /// from a directory that never had them.
     /// </summary>
     public IReadOnlyList<SkillSkip> Skipped { get; }
+
+    /// <summary>(#84) Warnings over the EXPOSED skills (after the allowlist), in discovery order.</summary>
+    public IReadOnlyList<SkillWarning> Warnings { get; }
 
     private sealed class SkillTool : ITool
     {

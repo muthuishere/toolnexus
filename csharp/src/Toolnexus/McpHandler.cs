@@ -385,7 +385,7 @@ public sealed partial class McpHttpHandler
     private async Task<bool> CheckSessionAsync(McpContext ctx, McpHttpExchange ex)
     {
         var v = ex.Header("MCP-Protocol-Version");
-        if (!string.IsNullOrEmpty(v) && !_legacy.Contains(v))
+        if (!string.IsNullOrEmpty(v) && !_versions.Contains(v))
         {
             await PlainAsync(ex, 400, "Bad Request: unsupported MCP-Protocol-Version").ConfigureAwait(false);
             return false;

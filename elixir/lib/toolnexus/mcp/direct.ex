@@ -14,7 +14,8 @@ defmodule Toolnexus.Mcp.Direct do
 
   @doc """
   Probe one server. Returns `{:modern, client, discover_result}`,
-  `{:fallback, cfg}` (cfg possibly carrying an OAuth bearer header) or
+  `{:fallback, cfg, adopt}` (cfg possibly carrying an OAuth bearer header;
+  `adopt` = the live stdio probe child to continue on, or nil) or
   `{:failed, reason}`.
   """
   def probe(sup, cfg, opts) do
@@ -23,13 +24,18 @@ defmodule Toolnexus.Mcp.Direct do
 
     case client(sup, cfg, timeout, opts) do
       {:ok, c} ->
-        case Client2026.discover(c, wait_for) do
+        case Client2026.probe(c, wait_for) do
           {:modern, r} ->
             {:modern, c, r}
 
-          :fallback ->
+          # §2.2a (amended): a stdio server that ANSWERED discover is reused —
+          # the same child continues into the frozen `initialize`.
+          {:fallback, :reply} when c.stdio != nil ->
+            {:fallback, cfg, c.stdio}
+
+          {:fallback, _} ->
             Client2026.close(c)
-            {:fallback, fallback_cfg(cfg, c)}
+            {:fallback, fallback_cfg(cfg, c), nil}
 
           {:error, e} ->
             Client2026.close(c)
