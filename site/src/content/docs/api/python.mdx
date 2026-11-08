@@ -72,27 +72,40 @@ symbol shown in eight-language synced tabs.
 
 Guide: [Media generation](/toolnexus/media/) · recipe: [Generate images, video and speech](/toolnexus/cookbook/media/) · SPEC §7G.
 
-- `load_media_style(path: str) -> dict` — read one style JSON file.
-- `create_media(styles: dict | list[dict], *, on_progress=None, http_transport: MediaTransport | None = None) -> Media`
-  — a verb resolves to the first style that declares it. `on_progress({"verb", "jobId", "status"})` fires
-  after every poll and may be sync or async. `http_transport` replaces the default
-  `UrllibMediaTransport`; a `MediaTransport` has a blocking
-  `request(method, url, headers, body, timeout) -> (status, body_text)` (run in a worker thread;
-  `timeout` is the time left until the job deadline, and it must not send the style headers across a
-  cross-origin redirect).
-- Verbs (all `async`, return `MediaResult`): `image(prompt, *, width, height, aspect_ratio, seed, provider_options)` ·
-  `video(prompt, *, image, seconds, aspect_ratio, provider_options)` · `speech(text, *, voice, provider_options)` ·
-  `transcribe(audio, *, provider_options)` · `clone_voice(name, samples, *, provider_options)` ·
-  `talking(image, audio, *, provider_options)`. `None` arguments are not sent.
-- `await media.generate(verb, args=None, provider_options=None)` — the raw call; `verb` is the canonical
-  name (`"cloneVoice"`, not `"clone_voice"`).
-- `MediaResult(files: list[MediaFile], text, job_id, status)` · `MediaFile(type, mime_type, url)`;
+- `create_media(clients: MediaClient | list[MediaClient]) -> Media` — a verb goes to the first client whose
+  `supports(verb)` is true; only `MediaUnavailableError` falls through to the next one.
+- Built-in clients, each `X(config: MediaConfig | dict | None = None, **kw)`: `A2EMediaClient` (`A2E_API_KEY`) ·
+  `ElevenLabsMediaClient` (`ELEVENLABS_API_KEY`) · `OpenAIMediaClient` (`OPENAI_API_KEY`) ·
+  `OpenRouterMediaClient` (`OPENROUTER_API_KEY`) · `FalMediaClient` (`FAL_API_KEY`) — and the CLI clients
+  `GrokMediaClient` (`grok`) · `CodexMediaClient` (`codex`).
+- `MediaConfig(model, models: dict[str, str], key, url, command: str | list[str], loop: LoopConfig, gather: GatherConfig, http_client: MediaTransport)`
+  · `LoopConfig(interval_ms, timeout_ms, on_progress)` · `GatherConfig(mode: "url" | "download" | "inline", dir, max_bytes, keep)`
+  — `loop` / `gather` also take dicts (snake_case or camelCase keys). `key` defaults to the env var read at call time;
+  `timeout_ms` 600000; `gather.mode` default `download` (style clients `url`) into `<tmp>/toolnexus-media`, `max_bytes` 100 MiB.
+  `on_progress({"verb", "client", "jobId", "status", "elapsedMs"})` may be sync or async.
+- `MediaTransport` — blocking `request(method, url, headers, body, timeout) -> (status, body[, headers])`, run in a
+  worker thread; it must not follow redirects (the client does, under §7G.8). Default `UrllibMediaTransport`.
+- Verbs (all `async`, return `MediaResult`; each also takes `deadline=`, `progress=`, `provider_options=`):
+  `image(prompt, *, width, height, aspect_ratio, seed)` · `video(prompt, *, image, seconds, aspect_ratio)` ·
+  `speech(text, *, voice)` · `music(prompt, *, seconds, instrumental, lyrics)` · `transcribe(audio, *, language)` ·
+  `clone_voice(name, samples)` · `talk(image, *, audio, text, voice)`. File inputs take a URL or a local path;
+  `None` arguments are not sent.
+- `await media.generate(verb, args=None, provider_options=None, *, deadline=None, progress=None, ctx=None)` — the raw call;
+  `verb` is the canonical name (`"cloneVoice"`, not `"clone_voice"`). `media.supports(verb) -> bool`.
+- `MediaResult(files: list[MediaFile], text, job_id, status)` · `MediaFile(type, mime_type, url, path, data)`;
   `.to_dict()` gives the canonical camelCase shape.
-- `media.tools() -> list[Tool]` (source `"media"`), or `create_toolkit(media=media)`.
-- `RunResult.files` — list of dicts `{type, mimeType, url, from, callId}`, in call order; the same parts are
+- `MediaClient` (protocol): `name`, `supports(verb)`, optional `args(verb) -> [{"name", "required"}]` and
+  `async image(args, ctx)` … `talk(args, ctx)`. `BaseMediaClient` routes all seven to one
+  `async generate(verb, args, ctx: MediaContext)`. `MediaContext(deadline, progress, provider_options)`.
+- `media.tools() -> list[Tool]` — `generate_image` · `generate_video` · `generate_speech` · `generate_music` ·
+  `transcribe_audio` · `clone_voice` · `talking_video` (source `"media"`), one per verb any client supports;
+  or `create_toolkit(media=media)`. Only image parts are sent back to the model.
+- `RunResult.files` — list of dicts `{type, mimeType, url?, data?, from, callId}`, in call order; the same parts are
   on `tool_calls[i]["parts"]`.
-- Errors: the function face raises `MediaError` (`str(e)` is the exact §7G message); a media tool never
-  raises (`is_error=True`). Cancellation is asyncio's: `asyncio.CancelledError` **always propagates**,
-  from the function face and the tool face alike — it is never turned into a `MediaError` or a tool error.
+- Errors: the function face raises `MediaError` (`str(e)` is the exact §7G message; `.status`, `.job_id`);
+  `MediaUnavailableError` is its `unavailable` subclass. A media tool never raises (`is_error=True`).
+  `asyncio.CancelledError` **always propagates**, from the function face and the tool face alike.
+- Advanced: `style_media_client(style, config=None)` / `StyleMediaClient` turn a JSON style into a client;
+  `load_media_style(path) -> dict` reads one.
 - Equivalents: `createMedia` (js) · `CreateMedia` (go) · `Media.create` (java) · `Media.Create` (c#) ·
-  `Toolnexus.Media.new` (elixir) · `toolnexus.media/create-media` (clojure) · `create_media` (rust).
+  `Toolnexus.Media.create` (elixir) · `toolnexus.media/create-media` (clojure) · `create_media` (rust).

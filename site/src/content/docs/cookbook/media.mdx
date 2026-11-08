@@ -1,346 +1,670 @@
 ---
 title: Generate images, video and speech
-description: Load a JSON media style, generate an image, turn it into a video, speak a line — then hand the same verbs to your agent as tools — in all eight languages.
+description: Named media clients and CLI presets (one per media object), the seven typed verbs, media tools for your agent, and a custom MediaClient, in all eight languages.
 ---
 
 import { Tabs, TabItem, Aside } from '@astrojs/starlight/components';
 
 <Aside type="tip" title="Why you need this">
-Every media provider makes you write the same code twice: a start request, then a polling
-loop that waits for the job, then a hunt through the response for the URL. Do it for image,
-video and speech, in every language you ship, and do it again when you switch provider. With
-Toolnexus a provider is a **JSON style file**: you call `image`, `video` and `speech` from your
-code, and your agent gets `generate_image`, `generate_video` and `generate_speech` as tools.
-Same engine, same polling, same results.
+Every media provider makes you write a start request, a polling loop, a hunt through the response
+for the file, and a download before the URL expires, and then do it again when the provider runs
+out of credits. With toolnexus you hand `createMedia` one **named media client** (or a CLI
+preset) and call typed verbs; a client that cannot serve a call right now (no key, no credits, a
+CLI that is missing or blocked) raises one typed `unavailable` error.
 </Aside>
 
-The recipe uses the shipped [a2e](https://a2e.ai) style,
-`examples/media-styles/a2e.json`, which supports `image`, `video` and `speech`. It reads
-`A2E_API_KEY` from the environment when it sends a request, and never logs it. Every a2e
-verb is async: the engine starts the job and polls it for you. Measured live: an image takes
-about 30 s, speech about 30 s, a 5-second video about 4 minutes. Pass `onProgress` if you want
-to show that progress to someone. The full concept is on the
-[Media generation](/toolnexus/media/) page.
+The concepts, the full client table and every config field are on the
+[Media generation](/toolnexus/media/) page. Keys are read from each client's env var
+(`OPENAI_API_KEY`, `FAL_API_KEY`, `ELEVENLABS_API_KEY`, `A2E_API_KEY`, `OPENROUTER_API_KEY`) when
+a request is sent, and never logged. The CLI presets (`xai-grok-cli`, `openai-codex-cli`,
+`google-agy-cli`) drive the vendor's official CLI in its documented headless mode, signed in by you;
+your provider's terms of service apply to how you use its CLI. Setup:
+[Grok CLI, Codex CLI and Antigravity media setup](/toolnexus/cookbook/cli-media-setup/).
 
-<Aside type="caution">
-a2e result URLs **expire** (images after about 3 days, audio after about 30). If you need
-the file later, download it yourself. Toolnexus does not download yet.
-</Aside>
+## 1. Named clients
 
-## 1. Your code: image, then video, then speech
-
-The video takes the image's URL as its starting frame. You chain the two calls by passing a
-URL, nothing more.
+One client per media object. Video comes from the Grok CLI through the `xai-grok-cli` preset
+(setup: [Grok CLI, Codex CLI and Antigravity media setup](/toolnexus/cookbook/cli-media-setup/));
+images come from OpenAI. With `gather` mode `download`, every file is saved locally and you get a
+`path`. If a client cannot serve the call right now (no key, no credits, a CLI that is missing,
+blocked by [Zero Data Retention](/toolnexus/media/#grok-video-zdr) or at its usage limit), you get
+the typed `unavailable` error.
 
 <Tabs syncKey="lang">
 <TabItem label="JavaScript">
-```js
-import { loadMediaStyle, createMedia } from "toolnexus"
+```ts
+import { createMedia, loadMediaStyle, MediaStyle, OpenAIMediaClient, MediaUnavailableError } from "toolnexus"
 
-const media = createMedia(loadMediaStyle("examples/media-styles/a2e.json"), {
-  onProgress: ({ verb, jobId, status }) => console.log(verb, jobId, status),
-})
-
-const img = await media.image({ prompt: "a red fox in fresh snow, golden hour", width: 1024, height: 768 })
-const vid = await media.video({ prompt: "the fox turns its head and blinks", image: img.files[0].url, seconds: 5 })
-const say = await media.speech({ text: "Good morning from the forest." })
-
-console.log(img.files[0].url, vid.files[0].url, say.files[0].url)
+const video = createMedia(loadMediaStyle(MediaStyle.XaiGrokCli, { gather: { dir: "./out" } }))
+const images = createMedia(new OpenAIMediaClient({ gather: { mode: "download", dir: "./out" } }))
+try {
+  const clip = await video.video({ prompt: "a paper boat on a rainy street" })
+  const pic = await images.image({ prompt: "a paper boat, watercolor" })
+  console.log(clip.files[0]?.path, pic.files[0]?.path)
+} catch (e) {
+  if (e instanceof MediaUnavailableError) console.log("unavailable:", e.message)
+  else throw e
+}
 ```
 </TabItem>
 <TabItem label="Python">
 ```python
-from toolnexus import load_media_style, create_media
+from toolnexus import MediaStyle, create_media, load_media_style, OpenAIMediaClient, MediaUnavailableError
 
-media = create_media(
-    load_media_style("examples/media-styles/a2e.json"),
-    on_progress=lambda p: print(p["verb"], p["jobId"], p["status"]),
-)
-
-img = await media.image("a red fox in fresh snow, golden hour", width=1024, height=768)
-vid = await media.video("the fox turns its head and blinks", image=img.files[0].url, seconds=5)
-say = await media.speech("Good morning from the forest.")
-
-print(img.files[0].url, vid.files[0].url, say.files[0].url)
+video = create_media(load_media_style(MediaStyle.XAI_GROK_CLI, {"gather": {"dir": "./out"}}))
+images = create_media(OpenAIMediaClient(gather={"mode": "download", "dir": "./out"}))
+try:
+    clip = await video.video("a paper boat on a rainy street")
+    pic = await images.image("a paper boat, watercolor")
+    print(clip.files[0].path, pic.files[0].path)
+except MediaUnavailableError as e:
+    print("unavailable:", e)
 ```
 </TabItem>
 <TabItem label="Go">
 ```go
-style, err := toolnexus.LoadMediaStyle("examples/media-styles/a2e.json")
-if err != nil { log.Fatal(err) }
-media := toolnexus.CreateMedia([]toolnexus.MediaStyle{style}, toolnexus.MediaOptions{
-    OnProgress: func(p toolnexus.MediaProgress) { fmt.Println(p.Verb, p.JobID, p.Status) },
-})
+cfg := toolnexus.MediaConfig{Gather: toolnexus.MediaGather{Mode: "download", Dir: "out"}}
+grok, err := toolnexus.LoadMediaStyle(toolnexus.MediaStyleXaiGrokCli, cfg)
+if err != nil {
+	log.Fatal(err)
+}
+video := toolnexus.MustCreateMedia(grok)
+images := toolnexus.MustCreateMedia(toolnexus.NewOpenAIMediaClient(cfg)) // OPENAI_API_KEY
 
-img, err := media.Image(ctx, toolnexus.ImageInput{Prompt: "a red fox in fresh snow, golden hour", Width: 1024, Height: 768})
-if err != nil { log.Fatal(err) }
-vid, err := media.Video(ctx, toolnexus.VideoInput{Prompt: "the fox turns its head and blinks", Image: img.Files[0].URL, Seconds: 5})
-if err != nil { log.Fatal(err) }
-say, err := media.Speech(ctx, toolnexus.SpeechInput{Text: "Good morning from the forest."})
-if err != nil { log.Fatal(err) }
+clip, err := video.Video(ctx, toolnexus.VideoInput{Prompt: "a fox running through snow"})
+if errors.Is(err, toolnexus.ErrMediaUnavailable) {
+	log.Fatal("grok cannot serve this right now: ", err)
+} else if err != nil {
+	log.Fatal(err)
+}
+fmt.Println(clip.Files[0].Path) // saved under out/
 
-fmt.Println(img.Files[0].URL, vid.Files[0].URL, say.Files[0].URL)
+pic, err := images.Image(ctx, toolnexus.ImageInput{Prompt: "a red fox", Width: 1024, Height: 1024})
+if err == nil {
+	fmt.Println(pic.Files[0].Path)
+}
 ```
 </TabItem>
 <TabItem label="Java">
 ```java
-Media media = Media.create(Media.loadStyle("examples/media-styles/a2e.json"),
-        new Media.Options().onProgress(p -> System.out.println(p.verb() + " " + p.jobId() + " " + p.status())));
-
-var img = media.image(new Media.ImageInput("a red fox in fresh snow, golden hour", 1024, 768, null, null, null));
-var vid = media.video(new Media.VideoInput("the fox turns its head and blinks", img.files().get(0).url(), 5, null, null));
-var say = media.speech(new Media.SpeechInput("Good morning from the forest."));
-
-System.out.println(img.files().get(0).url() + " " + vid.files().get(0).url() + " " + say.files().get(0).url());
+var cfg = new Media.Config().gather(new Media.Gather().mode("download").dir("out"));
+Media clips = Media.create(Media.loadMediaStyle(MediaStyle.XAI_GROK_CLI, cfg)); // grok CLI
+Media stills = Media.createMedia(new OpenAIMediaClient(cfg));                    // OPENAI_API_KEY
+try {
+    var clip = clips.video(new Media.VideoInput("a paper boat drifting at dusk"));
+    var still = stills.image(new Media.ImageInput("a paper boat, studio light"));
+    System.out.println(clip.files().get(0).path() + " " + still.files().get(0).path());
+} catch (Media.MediaUnavailableException e) { // no CLI, no key or no credit
+    System.err.println("unavailable: " + e.getMessage());
+}
 ```
 </TabItem>
 <TabItem label="C#">
 ```csharp
-var media = Media.Create(MediaStyle.Load("examples/media-styles/a2e.json"), new MediaOptions {
-    OnProgress = p => Console.WriteLine($"{p.Verb} {p.JobId} {p.Status}"),
-});
-
-var img = await media.ImageAsync(new ImageInput("a red fox in fresh snow, golden hour") { Width = 1024, Height = 768 });
-var vid = await media.VideoAsync(new VideoInput("the fox turns its head and blinks") { Image = img.Files[0].Url, Seconds = 5 });
-var say = await media.SpeechAsync(new SpeechInput("Good morning from the forest."));
-
-Console.WriteLine($"{img.Files[0].Url} {vid.Files[0].Url} {say.Files[0].Url}");
+var cfg = new MediaClientConfig { Gather = new MediaGather { Mode = "download", Dir = "out" } };
+var clips = Media.Create(MediaStyle.Load(MediaStyle.XaiGrokCli, cfg)); // grok CLI
+var stills = Media.Create(new OpenAIMediaClient(cfg));                  // OPENAI_API_KEY
+try
+{
+    var clip = await clips.VideoAsync(new VideoInput("a paper boat drifting at dusk"));
+    var still = await stills.ImageAsync(new ImageInput("a paper boat, studio light"));
+    Console.WriteLine($"{clip.Files[0].Path} {still.Files[0].Path}");
+}
+catch (MediaUnavailableException e) // no CLI, no key or no credit
+{
+    Console.Error.WriteLine($"unavailable: {e.Message}");
+}
 ```
 </TabItem>
 <TabItem label="Elixir">
 ```elixir
 alias Toolnexus.Media
 
-{:ok, style} = Media.load_style("examples/media-styles/a2e.json")
-media = Media.new(style, on_progress: fn p -> IO.inspect(p) end)
+{:ok, grok} = Media.load_style(Media.xai_grok_cli(), gather: [dir: "out"])
+video = Media.create!(grok)
+# gather "download" saves every file under out/ (default dir: the temp dir).
+images = Media.create!(Media.openai(gather: [mode: "download", dir: "out"]))
 
-{:ok, img} = Media.image(media, %{prompt: "a red fox in fresh snow, golden hour", width: 1024, height: 768})
-[%{url: img_url}] = img.files
-{:ok, vid} = Media.video(media, %{prompt: "the fox turns its head and blinks", image: img_url, seconds: 5})
-{:ok, say} = Media.speech(media, %{text: "Good morning from the forest."})
-
-IO.puts(Enum.map_join(img.files ++ vid.files ++ say.files, " ", & &1.url))
+for {media, verb, args} <- [{video, :video, [prompt: "a paper boat on a rainy street"]},
+                            {images, :image, [prompt: "a paper boat, studio light"]}] do
+  case Media.generate(media, verb, args) do
+    {:ok, %{files: files}} -> Enum.each(files, &IO.puts(&1.path || &1.url))
+    {:error, %Media.Error{status: :unavailable, message: m}} -> IO.puts("unavailable: " <> m)
+    {:error, %Media.Error{} = e} -> raise e
+  end
+end
 ```
 </TabItem>
 <TabItem label="Clojure">
 ```clojure
 (require '[toolnexus.media :as media])
 
-(def m (media/create-media (media/load-style "examples/media-styles/a2e.json")
-                           {:on-progress (fn [{:keys [verb jobId status]}] (println verb jobId status))}))
+(def video  (media/create-media (media/load-media-style media/xai-grok-cli {:gather {:dir "out"}})))
+;; gather "download" saves every file under out/ (default dir: the temp dir).
+(def images (media/create-media (media/openai-media-client {:gather {:mode "download" :dir "out"}})))
 
-(def img (media/image m {:prompt "a red fox in fresh snow, golden hour" :width 1024 :height 768}))
-(def vid (media/video m {:prompt "the fox turns its head and blinks"
-                         :image (-> img :files first :url) :seconds 5}))
-(def say (media/speech m {:text "Good morning from the forest."}))
-
-(println (map (comp :url first :files) [img vid say]))
+(doseq [[m verb args] [[video "video" {:prompt "a paper boat on a rainy street"}]
+                       [images "image" {:prompt "a paper boat, studio light"}]]]
+  (try
+    (doseq [f (:files (media/generate m verb args))] (println (or (:path f) (:url f))))
+    (catch clojure.lang.ExceptionInfo e
+      (if (media/unavailable? e) (println "unavailable:" (ex-message e)) (throw e)))))
 ```
 </TabItem>
 <TabItem label="Rust">
 ```rust
-use std::sync::Arc;
-use toolnexus::{ImageInput, MediaOptions, SpeechInput, VideoInput, create_media, load_media_style};
+use toolnexus::{GatherMode, ImageInput, MediaClientConfig, MediaGather, MediaStyle, OpenAIMediaClient,
+    VideoInput, create_media, load_media_style_with};
 
-let media = create_media(
-    load_media_style("examples/media-styles/a2e.json")?,
-    MediaOptions {
-        on_progress: Some(Arc::new(|p: &toolnexus::MediaProgress| println!("{} {} {}", p.verb, p.job_id, p.status))),
-        ..Default::default()
-    },
-);
+let cfg = MediaClientConfig { gather: MediaGather { mode: Some(GatherMode::Download),
+    dir: Some("out".into()), ..Default::default() }, ..Default::default() };
+let video = create_media([load_media_style_with(MediaStyle::XAI_GROK_CLI, cfg.clone())?])?;
+let images = create_media([OpenAIMediaClient::new(cfg)])?; // OPENAI_API_KEY
 
-let img = media.image(ImageInput {
-    prompt: "a red fox in fresh snow, golden hour".into(),
-    width: Some(1024), height: Some(768), ..Default::default()
-}).await?;
-let vid = media.video(VideoInput {
-    prompt: "the fox turns its head and blinks".into(),
-    image: Some(img.files[0].url.clone()), seconds: Some(5), ..Default::default()
-}).await?;
-let say = media.speech(SpeechInput { text: "Good morning from the forest.".into(), ..Default::default() }).await?;
-
-println!("{} {} {}", img.files[0].url, vid.files[0].url, say.files[0].url);
+match video.video(VideoInput { prompt: "a fox running through snow".into(), ..Default::default() }).await {
+    Ok(clip) => println!("{}", clip.files[0].path), // saved under out/
+    Err(e) if e.is_unavailable() => eprintln!("grok cannot serve this right now: {e}"),
+    Err(e) => return Err(e.into()),
+}
+let pic = images.image(ImageInput { prompt: "a red fox".into(), width: Some(1024), height: Some(1024), ..Default::default() }).await?;
+println!("{}", pic.files[0].path);
 ```
 </TabItem>
 </Tabs>
 
-Every verb returns the same shape: `files` (each `{type, mimeType, url}`), `status`, plus
-`jobId` for async styles and `text` for `transcribe`. A failure is an error (an exception, a
-`Result::Err`, an `{:error, msg}` tuple), and the message is the same in every language:
-`job 66f… failed: <reason>`, `HTTP 401: <body>`, `image: argument "aspectRatio" not supported
-by this style`.
+## 2. The seven typed verbs
 
-<Aside>
-A style only accepts the arguments it maps. a2e's `image` takes `prompt`, `width`, `height`
-and `seed`, so passing `aspectRatio` is an error **before** any request is made. You never pay
-for a call that would ignore your argument. For a provider parameter the normalised verbs
-don't cover, pass `providerOptions` (`provider_options` in Python and Elixir,
-`:provider-options` in Clojure). Its top-level keys are written over the request body last.
+Image, then a video from that image, then speech, music, a transcript of the speech, and a
+talking-head video from the face and the voice. Each provider gets its own media object: fal for
+image and video, ElevenLabs for speech, music and transcribe, A2E for talk. Outputs chain as
+inputs: a local `path`, a `file://` URL or an `http(s)` URL all work.
+
+<Aside type="note">
+ElevenLabs music and transcribe, fal video and A2E talk are implemented from the providers' docs
+but have not had a live call yet (SPEC §7G.9). On Clojure, raw-byte results (ElevenLabs speech and
+music) and uploads are not byte-exact yet; see the [guide](/toolnexus/media/).
 </Aside>
-
-## 2. Your agent: the same verbs as tools
-
-Give the toolkit the same `media`. The model now sees `generate_image`, `generate_video` and
-`generate_speech`, with schemas that list only the arguments a2e accepts. When it calls
-them, everything they produce lands in `RunResult.files`, in call order and tagged with the
-tool name. The answer text never gets markup for them, so you decide how to show them.
 
 <Tabs syncKey="lang">
 <TabItem label="JavaScript">
-```js
-import { createToolkit, createClient } from "toolnexus"
+```ts
+import { createMedia, FalMediaClient, ElevenLabsMediaClient, A2EMediaClient } from "toolnexus"
 
-const tk = await createToolkit({ media })
-const agent = createClient({ baseUrl: "https://openrouter.ai/api/v1", style: "openai", model: "openai/gpt-4o-mini" })
-
-const res = await agent.run("Make a picture of a fox in snow, then a 5 second video of it blinking.", { toolkit: tk })
-console.log(res.text)
-for (const f of res.files) console.log(f.from, f.mimeType, f.url)
+const fal = createMedia(new FalMediaClient())               // image, video
+const eleven = createMedia(new ElevenLabsMediaClient())     // speech, music, transcribe
+const a2e = createMedia(new A2EMediaClient())               // talk
+const img = await fal.image({ prompt: "a lighthouse keeper, portrait", width: 1024, height: 1024 })
+const face = img.files[0].path ?? img.files[0].url!
+const vid = await fal.video({ prompt: "waves crash below", image: face, seconds: 5 })
+const voice = await eleven.speech({ text: "The light never goes out." })
+const tune = await eleven.music({ prompt: "calm sea shanty", seconds: 20, instrumental: true })
+const audio = voice.files[0].path ?? voice.files[0].url!
+const words = await eleven.transcribe({ audio })
+const talk = await a2e.talk({ image: face, audio })   // a2e needs image + audio
+console.log(vid.status, tune.files.length, words.text, talk.files[0])
 ```
 </TabItem>
 <TabItem label="Python">
 ```python
-from toolnexus import create_toolkit, create_client
+from toolnexus import create_media, FalMediaClient, ElevenLabsMediaClient, A2EMediaClient
 
-tk = await create_toolkit(media=media)
-agent = create_client(base_url="https://openrouter.ai/api/v1", style="openai", model="openai/gpt-4o-mini")
-
-res = await agent.run("Make a picture of a fox in snow, then a 5 second video of it blinking.", tk)
-print(res.text)
-for f in res.files:
-    print(f["from"], f["mimeType"], f["url"])
+fal = create_media(FalMediaClient())              # image, video
+eleven = create_media(ElevenLabsMediaClient())    # speech, music, transcribe
+a2e = create_media(A2EMediaClient())              # talk
+img = await fal.image("a lighthouse keeper, portrait", width=1024, height=1024)
+face = img.files[0].path or img.files[0].url
+vid = await fal.video("waves crash below", image=face, seconds=5)
+voice = await eleven.speech("The light never goes out.")
+tune = await eleven.music("calm sea shanty", seconds=20, instrumental=True)
+audio = voice.files[0].path or voice.files[0].url
+words = await eleven.transcribe(audio)
+talk = await a2e.talk(face, audio=audio)   # a2e needs image + audio
+print(vid.status, len(tune.files), words.text, talk.files[0])
 ```
 </TabItem>
 <TabItem label="Go">
 ```go
-tk, err := toolnexus.CreateToolkit(ctx, toolnexus.Options{Media: media})
-if err != nil { log.Fatal(err) }
-agent := toolnexus.CreateClient(toolnexus.ClientOptions{
-    BaseURL: "https://openrouter.ai/api/v1", Style: toolnexus.StyleOpenAI, Model: "openai/gpt-4o-mini",
-})
+fal := toolnexus.MustCreateMedia(toolnexus.NewFalMediaClient(toolnexus.MediaConfig{}))           // image, video
+eleven := toolnexus.MustCreateMedia(toolnexus.NewElevenLabsMediaClient(toolnexus.MediaConfig{})) // speech, music, transcribe
+a2e := toolnexus.MustCreateMedia(toolnexus.NewA2EMediaClient(toolnexus.MediaConfig{}))           // talk
 
-res, err := agent.Run(ctx, "Make a picture of a fox in snow, then a 5 second video of it blinking.", tk)
-if err != nil { log.Fatal(err) }
-fmt.Println(res.Text)
-for _, f := range res.Files { fmt.Println(f.From, f.MimeType, f.URL) }
+img, _ := fal.Image(ctx, toolnexus.ImageInput{Prompt: "a red fox portrait"})
+face := img.Files[0].Path // a local path (gather download) or a URL both work as input
+vid, _ := fal.Video(ctx, toolnexus.VideoInput{Prompt: "the fox blinks", Image: face, Seconds: 5})
+voice, _ := eleven.Speech(ctx, toolnexus.SpeechInput{Text: "Hello, I am a fox."})
+song, _ := eleven.Music(ctx, toolnexus.MusicInput{Prompt: "calm winter piano", Seconds: 30})
+text, _ := eleven.Transcribe(ctx, toolnexus.TranscribeInput{Audio: voice.Files[0].Path})
+talk, _ := a2e.Talk(ctx, toolnexus.TalkInput{Image: face, Audio: voice.Files[0].Path})
+fmt.Println(vid.Files[0].Path, song.Files[0].Path, text.Text, talk.Files[0].Path)
 ```
 </TabItem>
 <TabItem label="Java">
 ```java
-Toolkit tk = Toolkit.create(new Toolkit.Options().media(media));
-LlmClient agent = LlmClient.create(new LlmClient.Options()
-        .baseUrl("https://openrouter.ai/api/v1").style("openai").model("openai/gpt-4o-mini"));
-
-var res = agent.run("Make a picture of a fox in snow, then a 5 second video of it blinking.", tk);
-System.out.println(res.text);
-for (var f : res.files) System.out.println(f.from() + " " + f.mimeType() + " " + f.url());
+var cfg = new Media.Config().gather(new Media.Gather().mode("url")); // keep provider URLs to chain verbs
+Media fal = Media.createMedia(new FalMediaClient(cfg));               // image, video
+Media eleven = Media.createMedia(new ElevenLabsMediaClient(cfg));     // speech, music, transcribe
+Media a2e = Media.createMedia(new A2EMediaClient(cfg));               // talk
+var face = fal.image(new Media.ImageInput("a friendly robot face, studio portrait"));
+String faceUrl = face.files().get(0).url();
+var clip = fal.video(new Media.VideoInput("the robot blinks", faceUrl, 5, null, null));
+var voice = eleven.speech(new Media.SpeechInput("Hello from toolnexus."));
+var song = eleven.music(new Media.MusicInput("lo-fi beat", 30, true, null, null));
+var heard = eleven.transcribe(new Media.TranscribeInput(voice.files().get(0).url()));
+var talk = a2e.talk(new Media.TalkInput(faceUrl, voice.files().get(0).url()));
+System.out.println(heard.text() + " -> " + talk.files().get(0).url());
 ```
 </TabItem>
 <TabItem label="C#">
 ```csharp
-await using var tk = await Toolkit.CreateAsync(new Toolkit.Options { Media = media });
-var agent = LlmClient.Create(new LlmClient.Options {
-    BaseUrl = "https://openrouter.ai/api/v1", Style = "openai", Model = "openai/gpt-4o-mini",
-});
+var cfg = new MediaClientConfig { Gather = new MediaGather { Mode = "url" } }; // keep provider URLs to chain verbs
+var fal = Media.Create(new FalMediaClient(cfg));               // image, video
+var eleven = Media.Create(new ElevenLabsMediaClient(cfg));     // speech, music, transcribe
+var a2e = Media.Create(new A2EMediaClient(cfg));               // talk
+var face = await fal.ImageAsync(new ImageInput("a friendly robot face, studio portrait"));
+var faceUrl = face.Files[0].Url!;
+var clip = await fal.VideoAsync(new VideoInput("the robot blinks") { Image = faceUrl, Seconds = 5 });
+var voice = await eleven.SpeechAsync(new SpeechInput("Hello from toolnexus."));
+var song = await eleven.MusicAsync(new MusicInput("lo-fi beat") { Seconds = 30, Instrumental = true });
+var heard = await eleven.TranscribeAsync(new TranscribeInput(voice.Files[0].Url!));
+var talk = await a2e.TalkAsync(new TalkInput(faceUrl) { Audio = voice.Files[0].Url });
+Console.WriteLine($"{heard.Text} -> {talk.Files[0].Url}");
+```
+</TabItem>
+<TabItem label="Elixir">
+```elixir
+alias Toolnexus.Media
 
-var res = await agent.RunAsync("Make a picture of a fox in snow, then a 5 second video of it blinking.", tk);
-Console.WriteLine(res.Text);
+fal = Media.create!(Media.fal())               # image, video
+eleven = Media.create!(Media.elevenlabs())     # speech, music, transcribe
+a2e = Media.create!(Media.a2e())               # talk
+
+with {:ok, %{files: [face | _]}} <- Media.image(fal, prompt: "a lighthouse keeper, portrait"),
+     {:ok, _clip} <- Media.video(fal, prompt: "she smiles", image: face.path || face.url, seconds: 4),
+     {:ok, %{files: [voice | _]}} <- Media.speech(eleven, text: "Welcome to the lighthouse."),
+     {:ok, _song} <- Media.music(eleven, prompt: "calm sea shanty", seconds: 30, instrumental: true),
+     {:ok, %{text: words}} <- Media.transcribe(eleven, audio: voice.path || voice.url),
+     {:ok, %{files: [talk | _]}} <- Media.talk(a2e, image: face.url || face.path, audio: voice.url || voice.path) do
+  IO.puts("#{words} -> #{talk.url || talk.path}")
+else
+  {:error, %Media.Error{status: status, message: msg}} -> IO.puts("#{status}: #{msg}")
+end
+```
+</TabItem>
+<TabItem label="Clojure">
+```clojure
+(require '[toolnexus.media :as media])
+
+(def fal    (media/create-media (media/fal-media-client)))          ; image, video
+(def eleven (media/create-media (media/elevenlabs-media-client)))   ; speech, music, transcribe
+(def a2e    (media/create-media (media/a2e-media-client)))          ; talk
+(defn loc [r] (let [f (first (:files r))] (or (:path f) (:url f))))
+
+(try
+  (let [face  (loc (media/image fal {:prompt "a lighthouse keeper, portrait"}))
+        _     (media/video fal {:prompt "she smiles" :image face :seconds 4})
+        voice (loc (media/speech eleven {:text "Welcome to the lighthouse."}))
+        _     (media/music eleven {:prompt "calm sea shanty" :seconds 30 :instrumental true})
+        words (:text (media/transcribe eleven {:audio voice}))
+        talk  (media/talk a2e {:image face :audio voice})]
+    (println words "->" (loc talk)))
+  (catch clojure.lang.ExceptionInfo e (println (:status (ex-data e)) (ex-message e))))
+```
+</TabItem>
+<TabItem label="Rust">
+```rust
+use toolnexus::{A2EMediaClient, ElevenLabsMediaClient, FalMediaClient, ImageInput, MediaClientConfig,
+    MusicInput, SpeechInput, TalkInput, TranscribeInput, VideoInput, create_media};
+
+let cfg = MediaClientConfig::default();
+let fal = create_media([FalMediaClient::new(cfg.clone())])?;           // image, video
+let eleven = create_media([ElevenLabsMediaClient::new(cfg.clone())])?; // speech, music, transcribe
+let a2e = create_media([A2EMediaClient::new(cfg)])?;                   // talk
+let img = fal.image(ImageInput { prompt: "a red fox portrait".into(), ..Default::default() }).await?;
+let face = img.files[0].path.clone(); // a local path (gather download) or a URL both work as input
+let vid = fal.video(VideoInput { prompt: "the fox blinks".into(), image: Some(face.clone()), seconds: Some(5), ..Default::default() }).await?;
+let voice = eleven.speech(SpeechInput { text: "Hello, I am a fox.".into(), ..Default::default() }).await?;
+let song = eleven.music(MusicInput { prompt: "calm winter piano".into(), seconds: Some(30), ..Default::default() }).await?;
+let text = eleven.transcribe(TranscribeInput { audio: voice.files[0].path.clone(), ..Default::default() }).await?;
+let talk = a2e.talk(TalkInput { image: face, audio: Some(voice.files[0].path.clone()), ..Default::default() }).await?;
+println!("{} {} {:?} {}", vid.files[0].path, song.files[0].path, text.text, talk.files[0].path);
+```
+</TabItem>
+</Tabs>
+
+## 3. Your agent: the verbs as tools
+
+Media tools are opt-in. Pass the media object to the toolkit and the agent gets `generate_image`,
+`generate_video`, … for the verbs its client supports. Every file the agent makes lands in
+`RunResult.files`, in call order, with `from` (the tool) and `callId`. Only **image** parts are
+sent back to the model; video and audio stay out of its context, and it sees just the
+`"video ready: <path>"` line.
+
+<Tabs syncKey="lang">
+<TabItem label="JavaScript">
+```ts
+import { createClient, createToolkit, createMedia, OpenAIMediaClient } from "toolnexus"
+
+const media = createMedia(new OpenAIMediaClient())
+const tk = await createToolkit({ media })          // adds generate_image, generate_speech, …
+const agent = createClient({ baseUrl: "https://openrouter.ai/api/v1", style: "openai", model: "openai/gpt-4o-mini" })
+const res = await agent.run("Draw a lighthouse at dusk, then animate it.", { toolkit: tk })
+for (const f of res.files) console.log(f.from, f.mimeType, f.url ?? `(${f.data?.length} b64 chars)`)
+```
+</TabItem>
+<TabItem label="Python">
+```python
+from toolnexus import create_client, create_toolkit, create_media, OpenAIMediaClient
+
+media = create_media(OpenAIMediaClient())
+tk = await create_toolkit(media=media)            # adds generate_image, generate_speech, …
+agent = create_client(base_url="https://openrouter.ai/api/v1", style="openai", model="openai/gpt-4o-mini")
+res = await agent.run("Draw a lighthouse at dusk, then animate it.", tk)
+for f in res.files:
+    print(f["from"], f["mimeType"], f.get("url") or f"({len(f.get('data', ''))} b64 chars)")
+```
+</TabItem>
+<TabItem label="Go">
+```go
+media := toolnexus.MustCreateMedia(toolnexus.NewOpenAIMediaClient(toolnexus.MediaConfig{}))
+tk, err := toolnexus.CreateToolkit(ctx, toolnexus.Options{Media: media}) // generate_image, …
+if err != nil {
+	log.Fatal(err)
+}
+defer tk.Close()
+agent := toolnexus.CreateClient(toolnexus.ClientOptions{
+	BaseURL: "https://api.openai.com/v1", Model: "gpt-4o-mini", // reads OPENAI_API_KEY
+})
+res, err := agent.Run(ctx, "Draw a red fox, then read the line 'hello fox' aloud.", tk)
+if err != nil {
+	log.Fatal(err)
+}
+for _, f := range res.Files { // in call order; only images are shown to the model
+	fmt.Println(f.From, f.Type, f.MimeType, f.URL, f.Name)
+}
+```
+</TabItem>
+<TabItem label="Java">
+```java
+Media media = Media.createMedia(new OpenAIMediaClient());
+Toolkit tk = Toolkit.create(new Toolkit.Options().media(media)); // generate_image, generate_speech, ...
+LlmClient agent = LlmClient.create(new LlmClient.Options()
+        .baseUrl("https://openrouter.ai/api/v1").style("openai")
+        .model("openai/gpt-4o-mini").apiKey(System.getenv("OPENROUTER_API_KEY")));
+LlmClient.RunResult res = agent.run("Draw a paper boat, then animate it.", tk);
+for (LlmClient.RunFile f : res.files) System.out.println(f.from() + " " + f.mimeType() + " " + f.url());
+tk.close();
+```
+</TabItem>
+<TabItem label="C#">
+```csharp
+var media = Media.Create(new OpenAIMediaClient());
+await using var tk = await Toolkit.CreateAsync(new Toolkit.Options().WithMedia(media)); // generate_image, ...
+var agent = LlmClient.Create(new LlmClient.Options
+{
+    BaseUrl = "https://openrouter.ai/api/v1", Style = "openai", Model = "openai/gpt-4o-mini",
+    ApiKey = Environment.GetEnvironmentVariable("OPENROUTER_API_KEY"),
+});
+var res = await agent.RunAsync("Draw a paper boat, then animate it.", tk);
 foreach (var f in res.Files) Console.WriteLine($"{f.From} {f.MimeType} {f.Url}");
 ```
 </TabItem>
 <TabItem label="Elixir">
 ```elixir
-{:ok, tk} = Toolnexus.create_toolkit(media: media)
-client = Toolnexus.Client.create(base_url: "https://openrouter.ai/api/v1", style: "openai", model: "openai/gpt-4o-mini")
+alias Toolnexus.Media
 
-res = Toolnexus.Client.run(client, "Make a picture of a fox in snow, then a 5 second video of it blinking.", tk)
-IO.puts(res.text)
+media = Media.create!(Media.openai())
+# Registers one tool per verb OpenAI supports (generate_image, generate_speech, …).
+{:ok, tk} = Toolnexus.create_toolkit(media: media)
+
+client = Toolnexus.Client.create(base_url: System.get_env("OPENAI_BASE_URL"), style: "openai",
+                                 model: "gpt-4.1", api_key: System.get_env("OPENAI_API_KEY"))
+res = Toolnexus.Client.run(client, "Draw a fox, then animate it.", tk)
+
+# Only image parts are sent back to the model; every file lands here, in call order.
 for f <- res.files, do: IO.puts("#{f.from} #{f.mime_type} #{f[:url]}")
 ```
 </TabItem>
 <TabItem label="Clojure">
 ```clojure
-(require '[toolnexus.core :as tn] '[toolnexus.client :as client])
+(require '[toolnexus.core :as tn] '[toolnexus.client :as client] '[toolnexus.media :as media])
 
+(def m  (media/create-media (media/openai-media-client)))
+;; Registers one tool per verb OpenAI supports (generate_image, generate_speech, …).
 (def tk (tn/build {:media m}))
-(def agent (client/create-client {:base-url "https://openrouter.ai/api/v1" :style "openai"
-                                  :model "openai/gpt-4o-mini"}))
 
-(def res (client/run agent "Make a picture of a fox in snow, then a 5 second video of it blinking."
-                     {:toolkit tk}))
-(println (:text res))
+(def llm (client/create-client {:base-url "https://openrouter.ai/api/v1"
+                                :style "openai" :model "openai/gpt-4o-mini"}))
+(def res (client/run llm "Draw a fox, then animate it." {:toolkit tk}))
+
+;; Only image parts are sent back to the model; every file lands here, in call order.
 (doseq [f (:files res)] (println (:from f) (:mimeType f) (:url f)))
 ```
 </TabItem>
 <TabItem label="Rust">
 ```rust
 use toolnexus::client::{ClientOptions, Style, create_client};
-use toolnexus::{ToolkitOptions, create_toolkit};
+use toolnexus::{MediaClientConfig, OpenAIMediaClient, ToolkitOptions, create_media, create_toolkit};
 
-let tk = create_toolkit(ToolkitOptions { media: Some(media), ..Default::default() }).await?;
+let media = create_media([OpenAIMediaClient::new(MediaClientConfig::default())])?;
+let tk = create_toolkit(ToolkitOptions { media: Some(media), ..Default::default() }).await?; // generate_image, …
 let agent = create_client(ClientOptions {
-    base_url: "https://openrouter.ai/api/v1".into(),
-    style: Style::OpenAI,
-    model: "openai/gpt-4o-mini".into(),
-    ..Default::default()
+    base_url: "https://api.openai.com/v1".into(), // reads OPENAI_API_KEY
+    style: Style::OpenAI, model: "gpt-4o-mini".into(), ..Default::default()
 });
-
-let res = agent.run("Make a picture of a fox in snow, then a 5 second video of it blinking.", &tk).await?;
-println!("{}", res.text);
-for f in &res.files { println!("{} {} {}", f.from, f.mime_type, f.url); }
+let res = agent.run("Draw a red fox, then read the line 'hello fox' aloud.", &tk).await?;
+for f in &res.files { // in call order; only images are shown to the model
+    println!("{} {} {} {} {}", f.from, f.kind, f.mime_type, f.url, f.name);
+}
+tk.close().await;
 ```
 </TabItem>
 </Tabs>
 
-A provider error never crashes the run. The tool returns `isError: true` with the same message
-your code would have got, and the model sees it and can retry or explain. In the live a2e run, a
-missing `negative_prompt` came back as `HTTP 400 …`. The fix was one line in the style's
-`defaults`, with no code change.
+## 4. A custom MediaClient
 
-`createToolkit({ media })` is shorthand for `toolkit.register(...media.tools())`. Media
-tools register after A2A agent tools and before `extraTools`, and the first tool with a name
-wins, as for every other source.
-
-## 3. Show the files
-
-`RunResult.files` is plain data, so each host renders it its own way:
-
-- **Web.** `image/*` goes in an `<img>`, `video/*` in a `<video controls>`, `audio/*` in an `<audio controls>`.
-- **WhatsApp / Telegram.** Send each URL as a media message, using `mimeType` to pick image, video or voice note.
-- **CLI.** Print `from`, `mimeType` and the URL, or download it to disk (do this soon, because a2e URLs expire).
-
-## Run the example
-
-Every port ships one runnable media example: an image through the typed verb, then
-`generate_speech` called straight off `tools()`. Without `A2E_API_KEY` it prints a one-line hint
-and exits 0, so it never touches the network in CI.
+Anything not built in is a small class (or map, or module) with a name, `supports`, and the verbs
+it handles. Signal `unavailable` when it cannot serve a call right now (no key, no quota).
 
 <Tabs syncKey="lang">
 <TabItem label="JavaScript">
-`cd js && npm run build && A2E_API_KEY=... npm run example:media` ([`js/examples/media.ts`](https://github.com/muthuishere/toolnexus/blob/main/js/examples/media.ts))
+```ts
+import { createMedia, MediaUnavailableError, type MediaClient, type MediaResult } from "toolnexus"
+
+const placeholder: MediaClient = {
+  name: "placeholder",
+  supports: (verb) => verb === "image",
+  async image(args): Promise<MediaResult> {
+    if (!process.env.PLACEHOLDER_ON) throw new MediaUnavailableError("placeholder: switched off")
+    const url = `https://placehold.co/600x400?text=${encodeURIComponent(String(args.prompt))}`
+    return { files: [{ type: "image", mimeType: "image/png", url }], status: "completed" }
+  },
+}
+const res = await createMedia(placeholder).image({ prompt: "hello" })
+```
 </TabItem>
 <TabItem label="Python">
-`cd python && A2E_API_KEY=... python examples/media.py` ([`python/examples/media.py`](https://github.com/muthuishere/toolnexus/blob/main/python/examples/media.py))
+```python
+import os
+from urllib.parse import quote
+from toolnexus import create_media, BaseMediaClient, MediaFile, MediaResult, MediaUnavailableError
+
+class Placeholder(BaseMediaClient):
+    name = "placeholder"
+
+    def supports(self, verb): return verb == "image"
+
+    async def generate(self, verb, args, ctx):
+        if not os.environ.get("PLACEHOLDER_ON"):
+            raise MediaUnavailableError("placeholder: switched off")
+        url = f"https://placehold.co/600x400?text={quote(args['prompt'])}"
+        return MediaResult(files=[MediaFile(type="image", mime_type="image/png", url=url)], status="completed")
+
+res = await create_media(Placeholder()).image("hello")
+```
 </TabItem>
 <TabItem label="Go">
-`cd golang && A2E_API_KEY=... go run ./examples/media` ([`golang/examples/media/main.go`](https://github.com/muthuishere/toolnexus/blob/main/golang/examples/media/main.go))
+```go
+type stockImages struct{ toolnexus.UnsupportedMedia } // every other verb fails
+
+func (stockImages) Name() string              { return "stock" }
+func (stockImages) Supports(verb string) bool { return verb == "image" }
+func (stockImages) Image(ctx context.Context, args map[string]any, call toolnexus.MediaCall) (toolnexus.MediaResult, error) {
+	if os.Getenv("STOCK_OFFLINE") != "" {
+		return toolnexus.MediaResult{}, toolnexus.MediaUnavailable("stock: offline") // typed unavailable error
+	}
+	link := "https://images.example.com/search?q=" + url.QueryEscape(args["prompt"].(string))
+	return toolnexus.MediaResult{Status: "completed",
+		Files: []toolnexus.MediaFile{{Type: "image", MimeType: "image/jpeg", URL: link}}}, nil
+}
+
+// media := toolnexus.MustCreateMedia(stockImages{})
+```
 </TabItem>
 <TabItem label="Java">
-`cd java && A2E_API_KEY=... ./gradlew runMedia` ([`MediaExample.java`](https://github.com/muthuishere/toolnexus/blob/main/java/src/main/java/io/github/muthuishere/toolnexus/examples/MediaExample.java))
+```java
+MediaClient mine = new MediaClient() {
+    @Override public String name() { return "mine"; }
+    @Override public boolean supports(String verb) { return verb.equals("image"); }
+    @Override public Media.MediaResult image(Map<String, Object> args, Media.Ctx ctx) {
+        String url = "https://img.example.com/render?q=" + args.get("prompt"); // call your service here
+        return new Media.MediaResult(List.of(Media.MediaFile.ofUrl("image", "image/png", url)), null, null, null);
+    }
+};
+Media media = Media.createMedia(mine);
+System.out.println(media.image(new Media.ImageInput("a lighthouse")).files().get(0).url());
+```
 </TabItem>
 <TabItem label="C#">
-`cd csharp && A2E_API_KEY=... dotnet run --project examples/Toolnexus.Examples -- media` ([`MediaExample.cs`](https://github.com/muthuishere/toolnexus/blob/main/csharp/examples/Toolnexus.Examples/MediaExample.cs))
+```csharp
+var media = Media.Create(new MyImages());
+Console.WriteLine((await media.ImageAsync(new ImageInput("a lighthouse"))).Files[0].Url);
+
+sealed class MyImages : IMediaClient
+{
+    public string Name => "mine";
+    public bool Supports(string verb) => verb == "image";
+    public Task<MediaResult> ImageAsync(IDictionary<string, object?> args, MediaContext ctx) =>
+        Task.FromResult(new MediaResult( // call your service here
+            [new MediaFile("image", "image/png", $"https://img.example.com/render?q={args["prompt"]}")], "completed"));
+}
+```
 </TabItem>
 <TabItem label="Elixir">
-`cd elixir && A2E_API_KEY=... mix run examples/media.exs` ([`elixir/examples/media.exs`](https://github.com/muthuishere/toolnexus/blob/main/elixir/examples/media.exs))
+```elixir
+defmodule PicsumClient do
+  @behaviour Toolnexus.Media.Client
+  def name(_), do: "picsum"
+  def supports?(_, verb), do: verb == "image"
+
+  # Args arrive canonical and string-keyed. When it cannot serve a call, return:
+  #   {:error, %Toolnexus.Media.Error{status: :unavailable, message: "no quota"}}
+  def image(_, args, _ctx) do
+    url = "https://picsum.photos/#{args["width"] || 512}/#{args["height"] || 512}"
+    file = %Toolnexus.Media.MediaFile{type: "image", mime_type: "image/jpeg", url: url}
+    {:ok, %Toolnexus.Media.Result{files: [file]}}
+  end
+end
+
+media = Toolnexus.Media.create!(PicsumClient)
+{:ok, %{files: [f]}} = Toolnexus.Media.image(media, prompt: "anything", width: 640, height: 360)
+IO.puts(f.url)
+```
 </TabItem>
 <TabItem label="Clojure">
-`cd clojure/examples/clj && A2E_API_KEY=... clojure -M -m examples.media`, or on cljgo `cljgo run src/run_media.cljc` ([`examples/media.cljc`](https://github.com/muthuishere/toolnexus/blob/main/clojure/examples/src/examples/media.cljc))
+```clojure
+(require '[toolnexus.media :as media])
+
+;; A MediaClient is a map: :name, :supports, optional :args, and one fn per verb.
+;; Args arrive keyword-keyed; throw (media/media-error msg :unavailable) when it cannot serve a call.
+(def picsum
+  {:name     "picsum"
+   :supports (fn [verb] (= "image" verb))
+   :image    (fn [{:keys [width height]} _ctx]
+               {:files  [{:type "image" :mimeType "image/jpeg"
+                          :url  (str "https://picsum.photos/" (or width 512) "/" (or height 512))}]
+                :status "completed"})})
+
+(def m (media/create-media picsum))
+(println (-> (media/image m {:prompt "anything" :width 640 :height 360}) :files first :url))
+```
 </TabItem>
 <TabItem label="Rust">
-`cd rust && A2E_API_KEY=... cargo run --example media` ([`rust/examples/media.rs`](https://github.com/muthuishere/toolnexus/blob/main/rust/examples/media.rs))
+```rust
+use toolnexus::{MediaArgs, MediaClient, MediaCtx, MediaError, MediaFile, MediaFuture, MediaResult};
+
+struct StockImages; // every verb it does not override fails
+
+impl MediaClient for StockImages {
+    fn name(&self) -> &str { "stock" }
+    fn supports(&self, verb: &str) -> bool { verb == "image" }
+    fn image<'a>(&'a self, args: MediaArgs, _ctx: &'a MediaCtx) -> MediaFuture<'a> {
+        Box::pin(async move {
+            if std::env::var("STOCK_OFFLINE").is_ok() {
+                return Err(MediaError::unavailable("stock: offline")); // typed unavailable error
+            }
+            let q = args.get("prompt").and_then(|v| v.as_str()).unwrap_or_default().replace(' ', "+");
+            let url = format!("https://images.example.com/search?q={q}");
+            let file = MediaFile { kind: "image".into(), mime_type: "image/jpeg".into(), url, ..Default::default() };
+            Ok(MediaResult { files: vec![file], status: "completed".into(), ..Default::default() })
+        })
+    }
+}
+// let media = create_media([StockImages.into_media_client()])?;
+```
 </TabItem>
 </Tabs>
 
-Next: [write your own style](/toolnexus/media/#write-your-own-style) for another provider.
+## Show the files
+
+`RunResult.files` and each `MediaResult.files` entry carry `type` and `mimeType`, so the host
+decides how to show them: `<img>`, `<video controls>` or `<audio controls>` on the web; a media
+message on WhatsApp, Telegram or Slack; a path on a CLI. With the default `gather` mode
+`download` the files are already on disk, so expiring provider URLs are not a problem.
+
+## Run the example
+
+Each port ships a runnable media example. Without any key it prints a hint and exits 0, so it is
+safe to run anywhere.
+
+<Tabs syncKey="lang">
+<TabItem label="JavaScript">
+```sh
+cd js && npm run build && npm run example:media
+```
+</TabItem>
+<TabItem label="Python">
+```sh
+cd python && python examples/media.py
+```
+</TabItem>
+<TabItem label="Go">
+```sh
+cd golang && OPENAI_API_KEY=... go run ./examples/media   # or FAL_API_KEY / A2E_API_KEY / ELEVENLABS_API_KEY
+```
+</TabItem>
+<TabItem label="Java">
+```sh
+cd java && A2E_API_KEY=... FAL_API_KEY=... ./gradlew runMedia
+```
+</TabItem>
+<TabItem label="C#">
+```sh
+cd csharp && A2E_API_KEY=... FAL_API_KEY=... dotnet run --project examples/Toolnexus.Examples -- media
+```
+</TabItem>
+<TabItem label="Elixir">
+```sh
+cd elixir && mix deps.get && A2E_API_KEY=... mix run examples/media.exs
+```
+</TabItem>
+<TabItem label="Clojure">
+```sh
+cd clojure/examples/clj && A2E_API_KEY=... clojure -M -m examples.media
+```
+</TabItem>
+<TabItem label="Rust">
+```sh
+cd rust && FAL_API_KEY=... A2E_API_KEY=... cargo run --example media   # either key alone also works
+```
+</TabItem>
+</Tabs>

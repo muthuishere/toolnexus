@@ -57,8 +57,8 @@ type Options struct {
 	// OpenURL opens the MCP OAuth authorization URL in `auto` mode (§2A.1a).
 	// nil ⇒ the OS opener; tests inject an HTTP GET.
 	OpenURL func(string) error
-	// Media registers the media engine's tools (§7G, source "media") — one per
-	// verb its styles support. Equivalent to tk.Register(media.Tools()...).
+	// Media registers the media router's tools (§7G, source "media") — one per
+	// verb its clients support. Equivalent to tk.Register(media.Tools()...).
 	Media *Media
 }
 

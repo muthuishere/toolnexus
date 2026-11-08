@@ -174,7 +174,7 @@
          path (str dir "/style.json")
          _    (fs/write-file path (:body (khttp/request {:method :get :timeout-ms 10000
                                                          :url (str b "/_mock/media-style.json")})))
-         m    (media/create-media (media/load-style path))
+         m    (media/create-media (media/load-media-style path))
          one  (fn [r] (first (:files r)))]
      (try
        (testing "image"
@@ -185,8 +185,8 @@
          (let [f (one (media/video m {:prompt "the fox blinks"}))]
            (is (str/ends-with? (:url f) "/video.mp4"))
            (is (= "video/mp4" (:mimeType f)))))
-       (testing "talking"
-         (let [f (one (media/talking m {:image "http://x/i.png" :audio "http://x/a.wav"}))]
+       (testing "talk"
+         (let [f (one (media/talk m {:image "http://x/i.png" :audio "http://x/a.wav"}))]
            (is (str/ends-with? (:url f) "/talking.mp4") (:url f))
            (is (= "video/mp4" (:mimeType f)))))
        (testing "speech"

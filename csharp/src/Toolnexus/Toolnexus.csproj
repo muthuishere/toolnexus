@@ -29,6 +29,12 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- SPEC §7G: byte sources embedded verbatim; MediaTests asserts each copy. -->
+    <EmbeddedResource Include="../../../conformance/media/verbs.json" LogicalName="Toolnexus.media.verbs.json" />
+    <EmbeddedResource Include="../../../examples/media-styles/a2e.json" LogicalName="Toolnexus.media-styles.a2e.json" />
+  </ItemGroup>
+
+  <ItemGroup>
     <None Include="../../README.md" Pack="true" PackagePath="\" />
   </ItemGroup>
 

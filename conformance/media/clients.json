@@ -1,0 +1,4365 @@
+{
+  "_doc": "Built-in API client conformance (SPEC §7G.9, §7G.5, §7G.11). A port's harness, per case: starts the fake HTTP server (script[] in order, last repeats; entries {status, body|rawBody|bodyBase64, headers?}), substitutes {server} everywhere (config, args, script bodies and headers, expectations), makes {dir} (passed as gather.dir) and {inputs} (writes inputFiles name->base64 there), sets env and removes unsetEnv, builds the named built-in client (client = a2e|elevenlabs|openai|openrouter|fal) from config, and calls createMedia(client) for verb/args through the function face and then the tool face (fresh script replay, fresh {dir}). Asserts: expectRequests in order (method, path exactly as sent incl. query; body = JSON deep-equal; multipart = parts in order, each {name,value} or {name,filename,contentType,bytesBase64}; headers = subset with exact values; absentHeaders = must not be sent) — when expectRequests is present the request count must match too; expectHeaders on EVERY request; expectProgress; result (files: url/data/type/mimeType exact; saved = file lives directly in {dir}, name matches ^<client>-<verb>-[0-9]+-[0-9]+<ext>$, path absolute, url == 'file://'+path, bytes == bytesBase64) or error (exact) / errorPrefix (startsWith) with status; tool: output exact or outputPattern (regex after substituting {dir} regex-escaped), parts, metadata, noParts = no parts key. liveVerified:false marks a request shape pinned from provider docs, not from a live call. A field absent from a case is not asserted. modelParts (SPEC §7G.6 model visibility): the parts of this tool result that message assembly (§8A) emits to the model — only image parts; video/audio parts stay in RunResult.files and toolCalls[].parts only. Assert with the port's assembly function on a transcript containing this tool result. {inputs} is substituted in expectations too. ctxTimeoutMs (D12): the function face is called with ctx.deadline = now + ctxTimeoutMs (the tool face is not run for such a case); errorPrefix then asserts the message start, maxElapsedMs bounds the call. D9 (SPEC §7G.12): when modelParts is [] the tool-result content the port sends to the model is the plain output string in every message style incl. Anthropic — never an empty content array, never a placeholder; assert it with the same assembly function. D19: a built-in client that does not accept a canonical arg, or lacks a required one, is skipped ⇒ the joined 'media: no client available for …' error naming '<client>: argument \"<k>\" not supported' / '<client>: missing required argument \"<k>\"'; a non-canonical key is the plain '<verb>: argument \"<k>\" not supported'. D20 runFilePath (asserted within the tool face): true ⇒ build RunResult.files from a toolCalls record of this tool result (the port's run-files function) and assert each entry's path equals the corresponding MediaFile.path (absolute, present); false ⇒ no entry has path; parts never hold a path. D21: result.usage exact when present; noUsage:true ⇒ neither the result nor tool metadata has a usage key. D23: expectHeaderPatterns = header name → regex the value must match on EVERY request (start, poll, download). A client/style User-Agent goes on a download only when the download URL is on the client's base-URL origin; any other origin gets the default toolnexus UA (§7G.5, §7G.8). The fake server has one origin, so the cross-origin half is not exercised by a case.",
+  "cases": [
+    {
+      "name": "elevenlabs_speech_default_voice_bytes_download",
+      "client": "elevenlabs",
+      "liveVerified": true,
+      "config": {
+        "key": "FAKE_KEY",
+        "url": "{server}",
+        "gather": {
+          "dir": "{dir}"
+        }
+      },
+      "verb": "speech",
+      "args": {
+        "text": "hello"
+      },
+      "script": [
+        {
+          "status": 200,
+          "bodyBase64": "TVAzQllURVM=",
+          "headers": {
+            "Content-Type": "audio/mpeg",
+            "request-id": "req-1"
+          }
+        }
+      ],
+      "expectRequests": [
+        {
+          "method": "POST",
+          "path": "/v1/text-to-speech/JBFqnCBsd6RMkjVDRZzb?output_format=mp3_22050_32",
+          "body": {
+            "text": "hello",
+            "model_id": "eleven_flash_v2_5"
+          },
+          "headers": {
+            "xi-api-key": "FAKE_KEY",
+            "Content-Type": "application/json"
+          }
+        }
+      ],
+      "result": {
+        "files": [
+          {
+            "type": "audio",
+            "mimeType": "audio/mpeg",
+            "saved": {
+              "ext": ".mp3",
+              "bytesBase64": "TVAzQllURVM="
+            }
+          }
+        ],
+        "jobId": "req-1",
+        "status": "completed"
+      },
+      "tool": {
+        "name": "generate_speech",
+        "isError": false,
+        "outputPattern": "^audio ready: {dir}/elevenlabs-speech-[0-9]+-[0-9]+\\.mp3$",
+        "parts": [
+          {
+            "type": "audio",
+            "mimeType": "audio/mpeg",
+            "data": "TVAzQllURVM="
+          }
+        ],
+        "metadata": {
+          "source": "media",
+          "verb": "speech",
+          "client": "elevenlabs",
+          "jobId": "req-1",
+          "status": "completed"
+        },
+        "modelParts": []
+      },
+      "runFilePath": true,
+      "noUsage": true
+    },
+    {
+      "name": "elevenlabs_speech_voice_by_name_case_insensitive",
+      "client": "elevenlabs",
+      "liveVerified": true,
+      "config": {
+        "key": "FAKE_KEY",
+        "url": "{server}",
+        "gather": {
+          "dir": "{dir}"
+        },
+        "model": "eleven_multilingual_v2"
+      },
+      "verb": "speech",
+      "args": {
+        "text": "hi",
+        "voice": "muthu english"
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {
+            "voices": [
+              {
+                "voice_id": "OTHERVOICE0000000000",
+                "name": "Other"
+              },
+              {
+                "voice_id": "VOICEID1234567890ABC",
+                "name": "Muthu English"
+              }
+            ]
+          }
+        },
+        {
+          "status": 200,
+          "bodyBase64": "TVAzQllURVM=",
+          "headers": {
+            "Content-Type": "audio/mpeg"
+          }
+        }
+      ],
+      "expectRequests": [
+        {
+          "method": "GET",
+          "path": "/v2/voices?page_size=100&search=muthu%20english",
+          "headers": {
+            "xi-api-key": "FAKE_KEY"
+          },
+          "absentHeaders": [
+            "Content-Type"
+          ]
+        },
+        {
+          "method": "POST",
+          "path": "/v1/text-to-speech/VOICEID1234567890ABC?output_format=mp3_22050_32",
+          "body": {
+            "text": "hi",
+            "model_id": "eleven_multilingual_v2"
+          }
+        }
+      ],
+      "result": {
+        "files": [
+          {
+            "type": "audio",
+            "mimeType": "audio/mpeg",
+            "saved": {
+              "ext": ".mp3",
+              "bytesBase64": "TVAzQllURVM="
+            }
+          }
+        ],
+        "status": "completed"
+      }
+    },
+    {
+      "name": "elevenlabs_speech_unknown_20_char_voice_used_as_id",
+      "client": "elevenlabs",
+      "config": {
+        "key": "FAKE_KEY",
+        "url": "{server}",
+        "gather": {
+          "dir": "{dir}",
+          "mode": "inline"
+        }
+      },
+      "verb": "speech",
+      "args": {
+        "text": "hi",
+        "voice": "ABCDEFGHIJ0123456789"
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {
+            "voices": []
+          }
+        },
+        {
+          "status": 200,
+          "bodyBase64": "TVAzQllURVM="
+        }
+      ],
+      "expectRequests": [
+        {
+          "method": "GET",
+          "path": "/v2/voices?page_size=100&search=ABCDEFGHIJ0123456789"
+        },
+        {
+          "method": "POST",
+          "path": "/v1/text-to-speech/ABCDEFGHIJ0123456789?output_format=mp3_22050_32",
+          "body": {
+            "text": "hi",
+            "model_id": "eleven_flash_v2_5"
+          }
+        }
+      ],
+      "result": {
+        "files": [
+          {
+            "type": "audio",
+            "mimeType": "audio/mpeg",
+            "data": "TVAzQllURVM="
+          }
+        ],
+        "status": "completed"
+      },
+      "tool": {
+        "name": "generate_speech",
+        "isError": false,
+        "output": "audio ready: inline audio/mpeg 8 bytes",
+        "parts": [
+          {
+            "type": "audio",
+            "mimeType": "audio/mpeg",
+            "data": "TVAzQllURVM="
+          }
+        ],
+        "metadata": {
+          "source": "media",
+          "verb": "speech",
+          "client": "elevenlabs",
+          "status": "completed"
+        },
+        "modelParts": []
+      }
+    },
+    {
+      "name": "elevenlabs_speech_voice_not_found",
+      "client": "elevenlabs",
+      "config": {
+        "key": "FAKE_KEY",
+        "url": "{server}",
+        "gather": {
+          "dir": "{dir}"
+        }
+      },
+      "verb": "speech",
+      "args": {
+        "text": "hi",
+        "voice": "Nobody Here"
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {
+            "voices": [
+              {
+                "voice_id": "OTHERVOICE0000000000",
+                "name": "Other"
+              }
+            ]
+          }
+        }
+      ],
+      "expectRequests": [
+        {
+          "method": "GET",
+          "path": "/v2/voices?page_size=100&search=Nobody%20Here"
+        }
+      ],
+      "status": "failed",
+      "error": "speech: voice \"Nobody Here\" not found",
+      "tool": {
+        "isError": true,
+        "output": "speech: voice \"Nobody Here\" not found"
+      }
+    },
+    {
+      "name": "elevenlabs_music_instrumental",
+      "client": "elevenlabs",
+      "liveVerified": false,
+      "config": {
+        "key": "FAKE_KEY",
+        "url": "{server}",
+        "gather": {
+          "dir": "{dir}"
+        }
+      },
+      "verb": "music",
+      "args": {
+        "prompt": "lofi beat",
+        "seconds": 12,
+        "instrumental": true
+      },
+      "script": [
+        {
+          "status": 200,
+          "bodyBase64": "TVAzQllURVM="
+        }
+      ],
+      "expectRequests": [
+        {
+          "method": "POST",
+          "path": "/v1/music?output_format=mp3_44100_128",
+          "body": {
+            "prompt": "lofi beat",
+            "music_length_ms": 12000,
+            "force_instrumental": true
+          }
+        }
+      ],
+      "result": {
+        "files": [
+          {
+            "type": "audio",
+            "mimeType": "audio/mpeg",
+            "saved": {
+              "ext": ".mp3",
+              "bytesBase64": "TVAzQllURVM="
+            }
+          }
+        ],
+        "status": "completed"
+      },
+      "tool": {
+        "name": "generate_music",
+        "isError": false,
+        "outputPattern": "^audio ready: {dir}/elevenlabs-music-[0-9]+-[0-9]+\\.mp3$",
+        "parts": [
+          {
+            "type": "audio",
+            "mimeType": "audio/mpeg",
+            "data": "TVAzQllURVM="
+          }
+        ],
+        "metadata": {
+          "source": "media",
+          "verb": "music",
+          "client": "elevenlabs",
+          "status": "completed"
+        },
+        "modelParts": []
+      }
+    },
+    {
+      "name": "elevenlabs_music_default_length_not_instrumental",
+      "client": "elevenlabs",
+      "liveVerified": false,
+      "config": {
+        "key": "FAKE_KEY",
+        "url": "{server}",
+        "gather": {
+          "dir": "{dir}"
+        }
+      },
+      "verb": "music",
+      "args": {
+        "prompt": "jazz",
+        "instrumental": false
+      },
+      "script": [
+        {
+          "status": 200,
+          "bodyBase64": "TVAzQllURVM="
+        }
+      ],
+      "expectRequests": [
+        {
+          "method": "POST",
+          "path": "/v1/music?output_format=mp3_44100_128",
+          "body": {
+            "prompt": "jazz",
+            "music_length_ms": 10000
+          }
+        }
+      ],
+      "result": {
+        "files": [
+          {
+            "type": "audio",
+            "mimeType": "audio/mpeg",
+            "saved": {
+              "ext": ".mp3",
+              "bytesBase64": "TVAzQllURVM="
+            }
+          }
+        ],
+        "status": "completed"
+      }
+    },
+    {
+      "name": "elevenlabs_music_lyrics_not_supported_no_request",
+      "client": "elevenlabs",
+      "config": {
+        "key": "FAKE_KEY",
+        "url": "{server}",
+        "gather": {
+          "dir": "{dir}"
+        }
+      },
+      "verb": "music",
+      "args": {
+        "prompt": "song",
+        "lyrics": "la la"
+      },
+      "script": [
+        {
+          "status": 200,
+          "bodyBase64": "TVAzQllURVM="
+        }
+      ],
+      "expectRequests": [],
+      "status": "unavailable",
+      "error": "media: no client available for \"music\": elevenlabs: argument \"lyrics\" not supported",
+      "tool": {
+        "isError": true,
+        "output": "media: no client available for \"music\": elevenlabs: argument \"lyrics\" not supported"
+      }
+    },
+    {
+      "name": "elevenlabs_transcribe_local_file_multipart",
+      "client": "elevenlabs",
+      "liveVerified": false,
+      "config": {
+        "key": "FAKE_KEY",
+        "url": "{server}",
+        "gather": {
+          "dir": "{dir}"
+        }
+      },
+      "inputFiles": {
+        "clip.mp3": "QVVESU8="
+      },
+      "verb": "transcribe",
+      "args": {
+        "audio": "{inputs}/clip.mp3",
+        "language": "en"
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {
+            "text": "hello world",
+            "language_code": "en"
+          }
+        }
+      ],
+      "expectRequests": [
+        {
+          "method": "POST",
+          "path": "/v1/speech-to-text",
+          "headers": {
+            "xi-api-key": "FAKE_KEY"
+          },
+          "multipart": [
+            {
+              "name": "model_id",
+              "value": "scribe_v1"
+            },
+            {
+              "name": "language_code",
+              "value": "en"
+            },
+            {
+              "name": "file",
+              "filename": "clip.mp3",
+              "contentType": "audio/mpeg",
+              "bytesBase64": "QVVESU8="
+            }
+          ]
+        }
+      ],
+      "result": {
+        "files": [],
+        "text": "hello world",
+        "status": "completed"
+      },
+      "tool": {
+        "name": "transcribe_audio",
+        "isError": false,
+        "output": "hello world",
+        "noParts": true,
+        "metadata": {
+          "source": "media",
+          "verb": "transcribe",
+          "client": "elevenlabs",
+          "status": "completed"
+        }
+      }
+    },
+    {
+      "name": "elevenlabs_transcribe_url_input_fetched_without_key",
+      "client": "elevenlabs",
+      "liveVerified": false,
+      "config": {
+        "key": "FAKE_KEY",
+        "url": "{server}",
+        "gather": {
+          "dir": "{dir}"
+        }
+      },
+      "verb": "transcribe",
+      "args": {
+        "audio": "{server}/in/clip.wav?sig=1"
+      },
+      "script": [
+        {
+          "status": 200,
+          "bodyBase64": "V0FWQllURVM=",
+          "headers": {
+            "Content-Type": "audio/wav"
+          }
+        },
+        {
+          "status": 200,
+          "body": {
+            "text": "ok"
+          }
+        }
+      ],
+      "expectRequests": [
+        {
+          "method": "GET",
+          "path": "/in/clip.wav?sig=1",
+          "absentHeaders": [
+            "xi-api-key",
+            "Authorization"
+          ]
+        },
+        {
+          "method": "POST",
+          "path": "/v1/speech-to-text",
+          "multipart": [
+            {
+              "name": "model_id",
+              "value": "scribe_v1"
+            },
+            {
+              "name": "file",
+              "filename": "clip.wav",
+              "contentType": "audio/wav",
+              "bytesBase64": "V0FWQllURVM="
+            }
+          ]
+        }
+      ],
+      "result": {
+        "files": [],
+        "text": "ok",
+        "status": "completed"
+      }
+    },
+    {
+      "name": "elevenlabs_transcribe_missing_input_no_request",
+      "client": "elevenlabs",
+      "config": {
+        "key": "FAKE_KEY",
+        "url": "{server}",
+        "gather": {
+          "dir": "{dir}"
+        }
+      },
+      "verb": "transcribe",
+      "args": {
+        "audio": "{inputs}/missing.mp3"
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {
+            "text": "x"
+          }
+        }
+      ],
+      "expectRequests": [],
+      "status": "failed",
+      "errorPrefix": "transcribe: cannot read \"{inputs}/missing.mp3\"",
+      "tool": {
+        "isError": true,
+        "outputPrefix": "transcribe: cannot read \"{inputs}/missing.mp3\""
+      }
+    },
+    {
+      "name": "elevenlabs_clone_voice_two_samples",
+      "client": "elevenlabs",
+      "liveVerified": false,
+      "config": {
+        "key": "FAKE_KEY",
+        "url": "{server}",
+        "gather": {
+          "dir": "{dir}"
+        }
+      },
+      "inputFiles": {
+        "a.mp3": "U0FNUExFQQ==",
+        "b.wav": "U0FNUExFQg=="
+      },
+      "verb": "cloneVoice",
+      "args": {
+        "name": "Me",
+        "samples": [
+          "{inputs}/a.mp3",
+          "file://{inputs}/b.wav"
+        ]
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {
+            "voice_id": "newvoice123",
+            "requires_verification": false
+          }
+        }
+      ],
+      "expectRequests": [
+        {
+          "method": "POST",
+          "path": "/v1/voices/add",
+          "multipart": [
+            {
+              "name": "name",
+              "value": "Me"
+            },
+            {
+              "name": "files",
+              "filename": "a.mp3",
+              "contentType": "audio/mpeg",
+              "bytesBase64": "U0FNUExFQQ=="
+            },
+            {
+              "name": "files",
+              "filename": "b.wav",
+              "contentType": "audio/wav",
+              "bytesBase64": "U0FNUExFQg=="
+            }
+          ]
+        }
+      ],
+      "result": {
+        "files": [],
+        "text": "newvoice123",
+        "status": "completed"
+      },
+      "tool": {
+        "name": "clone_voice",
+        "isError": false,
+        "output": "newvoice123",
+        "noParts": true,
+        "metadata": {
+          "source": "media",
+          "verb": "cloneVoice",
+          "client": "elevenlabs",
+          "status": "completed"
+        }
+      }
+    },
+    {
+      "name": "openai_image_b64_download",
+      "client": "openai",
+      "liveVerified": true,
+      "config": {
+        "key": "FAKE_KEY",
+        "url": "{server}/v1/",
+        "gather": {
+          "dir": "{dir}"
+        }
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "cat"
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {
+            "created": 1,
+            "data": [
+              {
+                "b64_json": "UE5HQllURVM="
+              }
+            ],
+            "output_format": "png"
+          }
+        }
+      ],
+      "expectRequests": [
+        {
+          "method": "POST",
+          "path": "/v1/images/generations",
+          "headers": {
+            "Authorization": "Bearer FAKE_KEY",
+            "Content-Type": "application/json"
+          },
+          "body": {
+            "model": "gpt-image-1-mini",
+            "prompt": "cat",
+            "n": 1,
+            "size": "1024x1024",
+            "quality": "low"
+          }
+        }
+      ],
+      "result": {
+        "files": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "saved": {
+              "ext": ".png",
+              "bytesBase64": "UE5HQllURVM="
+            }
+          }
+        ],
+        "status": "completed"
+      },
+      "tool": {
+        "name": "generate_image",
+        "isError": false,
+        "outputPattern": "^image ready: {dir}/openai-image-[0-9]+-[0-9]+\\.png$",
+        "parts": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "data": "UE5HQllURVM="
+          }
+        ],
+        "metadata": {
+          "source": "media",
+          "verb": "image",
+          "client": "openai",
+          "status": "completed"
+        },
+        "modelParts": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "data": "UE5HQllURVM="
+          }
+        ]
+      },
+      "runFilePath": true,
+      "noUsage": true
+    },
+    {
+      "name": "openai_image_b64_url_mode_still_saves",
+      "client": "openai",
+      "note": "SPEC §7G.5: base64 has no URL to keep, so url mode saves it.",
+      "config": {
+        "key": "FAKE_KEY",
+        "url": "{server}/v1",
+        "gather": {
+          "dir": "{dir}",
+          "mode": "url"
+        }
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "cat"
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {
+            "data": [
+              {
+                "b64_json": "SlBFR0JZVEVT"
+              }
+            ],
+            "output_format": "jpeg"
+          }
+        }
+      ],
+      "result": {
+        "files": [
+          {
+            "type": "image",
+            "mimeType": "image/jpeg",
+            "saved": {
+              "ext": ".jpg",
+              "bytesBase64": "SlBFR0JZVEVT"
+            }
+          }
+        ],
+        "status": "completed"
+      },
+      "runFilePath": true
+    },
+    {
+      "name": "openai_image_inline",
+      "client": "openai",
+      "config": {
+        "key": "FAKE_KEY",
+        "url": "{server}/v1",
+        "gather": {
+          "dir": "{dir}",
+          "mode": "inline"
+        }
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "cat"
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {
+            "data": [
+              {
+                "b64_json": "SlBFR0JZVEVT"
+              }
+            ],
+            "output_format": "jpeg"
+          }
+        }
+      ],
+      "result": {
+        "files": [
+          {
+            "type": "image",
+            "mimeType": "image/jpeg",
+            "data": "SlBFR0JZVEVT"
+          }
+        ],
+        "status": "completed"
+      },
+      "tool": {
+        "name": "generate_image",
+        "isError": false,
+        "output": "image ready: inline image/jpeg 9 bytes",
+        "parts": [
+          {
+            "type": "image",
+            "mimeType": "image/jpeg",
+            "data": "SlBFR0JZVEVT"
+          }
+        ],
+        "metadata": {
+          "source": "media",
+          "verb": "image",
+          "client": "openai",
+          "status": "completed"
+        },
+        "modelParts": [
+          {
+            "type": "image",
+            "mimeType": "image/jpeg",
+            "data": "SlBFR0JZVEVT"
+          }
+        ]
+      }
+    },
+    {
+      "name": "openai_image_width_only_other_model_url_result",
+      "client": "openai",
+      "config": {
+        "key": "FAKE_KEY",
+        "url": "{server}/v1",
+        "gather": {
+          "dir": "{dir}",
+          "mode": "url"
+        },
+        "model": "dall-e-3"
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "cat",
+        "width": 512
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {
+            "data": [
+              {
+                "url": "https://cdn.example/x.webp?sig=2"
+              }
+            ]
+          }
+        }
+      ],
+      "expectRequests": [
+        {
+          "method": "POST",
+          "path": "/v1/images/generations",
+          "body": {
+            "model": "dall-e-3",
+            "prompt": "cat",
+            "n": 1,
+            "size": "512x512"
+          }
+        }
+      ],
+      "result": {
+        "files": [
+          {
+            "type": "image",
+            "mimeType": "image/webp",
+            "url": "https://cdn.example/x.webp?sig=2"
+          }
+        ],
+        "status": "completed"
+      },
+      "tool": {
+        "name": "generate_image",
+        "isError": false,
+        "output": "image ready: https://cdn.example/x.webp?sig=2",
+        "parts": [
+          {
+            "type": "image",
+            "mimeType": "image/webp",
+            "url": "https://cdn.example/x.webp?sig=2"
+          }
+        ],
+        "metadata": {
+          "source": "media",
+          "verb": "image",
+          "client": "openai",
+          "status": "completed"
+        },
+        "modelParts": [
+          {
+            "type": "image",
+            "mimeType": "image/webp",
+            "url": "https://cdn.example/x.webp?sig=2"
+          }
+        ]
+      }
+    },
+    {
+      "name": "openai_image_empty_data",
+      "client": "openai",
+      "config": {
+        "key": "FAKE_KEY",
+        "url": "{server}/v1",
+        "gather": {
+          "dir": "{dir}"
+        }
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "cat"
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {
+            "data": []
+          }
+        }
+      ],
+      "status": "failed",
+      "error": "image: no result at data",
+      "tool": {
+        "isError": true,
+        "output": "image: no result at data"
+      }
+    },
+    {
+      "name": "openai_image_seed_not_supported_no_request",
+      "client": "openai",
+      "config": {
+        "key": "FAKE_KEY",
+        "url": "{server}/v1",
+        "gather": {
+          "dir": "{dir}"
+        }
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "cat",
+        "seed": 1,
+        "aspectRatio": "1:1"
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {}
+        }
+      ],
+      "expectRequests": [],
+      "status": "unavailable",
+      "error": "media: no client available for \"image\": openai: argument \"aspectRatio\" not supported",
+      "tool": {
+        "isError": true,
+        "output": "media: no client available for \"image\": openai: argument \"aspectRatio\" not supported"
+      }
+    },
+    {
+      "name": "openai_image_prompt_required_no_request",
+      "client": "openai",
+      "config": {
+        "key": "FAKE_KEY",
+        "url": "{server}/v1",
+        "gather": {
+          "dir": "{dir}"
+        }
+      },
+      "verb": "image",
+      "args": {
+        "width": 64,
+        "prompt": null
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {}
+        }
+      ],
+      "expectRequests": [],
+      "status": "unavailable",
+      "error": "media: no client available for \"image\": openai: missing required argument \"prompt\"",
+      "tool": {
+        "isError": true,
+        "output": "media: no client available for \"image\": openai: missing required argument \"prompt\""
+      }
+    },
+    {
+      "name": "openai_429_quota_is_unavailable",
+      "client": "openai",
+      "config": {
+        "key": "FAKE_KEY",
+        "url": "{server}/v1",
+        "gather": {
+          "dir": "{dir}"
+        }
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "cat"
+      },
+      "script": [
+        {
+          "status": 429,
+          "rawBody": "{\"error\":{\"message\":\"You exceeded your current quota\"}}"
+        }
+      ],
+      "status": "unavailable",
+      "error": "media: no client available for \"image\": openai: HTTP 429: {\"error\":{\"message\":\"You exceeded your current quota\"}}",
+      "tool": {
+        "isError": true,
+        "output": "media: no client available for \"image\": openai: HTTP 429: {\"error\":{\"message\":\"You exceeded your current quota\"}}"
+      }
+    },
+    {
+      "name": "openai_429_rate_limit_is_failed",
+      "client": "openai",
+      "config": {
+        "key": "FAKE_KEY",
+        "url": "{server}/v1",
+        "gather": {
+          "dir": "{dir}"
+        }
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "cat"
+      },
+      "script": [
+        {
+          "status": 429,
+          "rawBody": "Rate limit reached"
+        }
+      ],
+      "status": "failed",
+      "error": "HTTP 429: Rate limit reached",
+      "tool": {
+        "isError": true,
+        "output": "HTTP 429: Rate limit reached"
+      }
+    },
+    {
+      "name": "openai_500_is_failed",
+      "client": "openai",
+      "config": {
+        "key": "FAKE_KEY",
+        "url": "{server}/v1",
+        "gather": {
+          "dir": "{dir}"
+        }
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "cat"
+      },
+      "script": [
+        {
+          "status": 500,
+          "rawBody": "boom"
+        }
+      ],
+      "status": "failed",
+      "error": "HTTP 500: boom",
+      "tool": {
+        "isError": true,
+        "output": "HTTP 500: boom"
+      }
+    },
+    {
+      "name": "openai_non_json",
+      "client": "openai",
+      "config": {
+        "key": "FAKE_KEY",
+        "url": "{server}/v1",
+        "gather": {
+          "dir": "{dir}"
+        }
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "cat"
+      },
+      "script": [
+        {
+          "status": 200,
+          "rawBody": "<html>"
+        }
+      ],
+      "status": "failed",
+      "error": "image: response is not JSON",
+      "tool": {
+        "isError": true,
+        "output": "image: response is not JSON"
+      }
+    },
+    {
+      "name": "openai_missing_key_unavailable_no_request",
+      "client": "openai",
+      "unsetEnv": [
+        "OPENAI_API_KEY"
+      ],
+      "config": {
+        "url": "{server}/v1"
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "cat"
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {}
+        }
+      ],
+      "expectRequests": [],
+      "status": "unavailable",
+      "error": "media: no client available for \"image\": openai: no API key (set OPENAI_API_KEY)",
+      "tool": {
+        "isError": true,
+        "output": "media: no client available for \"image\": openai: no API key (set OPENAI_API_KEY)"
+      }
+    },
+    {
+      "name": "openai_key_from_env_at_call_time",
+      "client": "openai",
+      "env": {
+        "OPENAI_API_KEY": "FAKE_ENV_KEY"
+      },
+      "config": {
+        "url": "{server}/v1",
+        "gather": {
+          "dir": "{dir}"
+        }
+      },
+      "verb": "speech",
+      "args": {
+        "text": "hi",
+        "voice": "nova"
+      },
+      "script": [
+        {
+          "status": 200,
+          "bodyBase64": "TVAzQllURVM="
+        }
+      ],
+      "expectRequests": [
+        {
+          "method": "POST",
+          "path": "/v1/audio/speech",
+          "headers": {
+            "Authorization": "Bearer FAKE_ENV_KEY"
+          },
+          "body": {
+            "model": "gpt-4o-mini-tts",
+            "input": "hi",
+            "voice": "nova"
+          }
+        }
+      ],
+      "result": {
+        "files": [
+          {
+            "type": "audio",
+            "mimeType": "audio/mpeg",
+            "saved": {
+              "ext": ".mp3",
+              "bytesBase64": "TVAzQllURVM="
+            }
+          }
+        ],
+        "status": "completed"
+      }
+    },
+    {
+      "name": "openai_speech_default_voice_models_override",
+      "client": "openai",
+      "liveVerified": false,
+      "config": {
+        "key": "FAKE_KEY",
+        "url": "{server}/v1",
+        "gather": {
+          "dir": "{dir}"
+        },
+        "models": {
+          "speech": "tts-1"
+        }
+      },
+      "verb": "speech",
+      "args": {
+        "text": "hi"
+      },
+      "script": [
+        {
+          "status": 200,
+          "bodyBase64": "TVAzQllURVM="
+        }
+      ],
+      "expectRequests": [
+        {
+          "method": "POST",
+          "path": "/v1/audio/speech",
+          "body": {
+            "model": "tts-1",
+            "input": "hi",
+            "voice": "alloy"
+          }
+        }
+      ],
+      "result": {
+        "files": [
+          {
+            "type": "audio",
+            "mimeType": "audio/mpeg",
+            "saved": {
+              "ext": ".mp3",
+              "bytesBase64": "TVAzQllURVM="
+            }
+          }
+        ],
+        "status": "completed"
+      }
+    },
+    {
+      "name": "openai_transcribe_multipart",
+      "client": "openai",
+      "liveVerified": false,
+      "config": {
+        "key": "FAKE_KEY",
+        "url": "{server}/v1",
+        "gather": {
+          "dir": "{dir}"
+        }
+      },
+      "inputFiles": {
+        "memo.m4a": "TTRB"
+      },
+      "verb": "transcribe",
+      "args": {
+        "audio": "{inputs}/memo.m4a"
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {
+            "text": "note to self"
+          }
+        }
+      ],
+      "expectRequests": [
+        {
+          "method": "POST",
+          "path": "/v1/audio/transcriptions",
+          "headers": {
+            "Authorization": "Bearer FAKE_KEY"
+          },
+          "multipart": [
+            {
+              "name": "model",
+              "value": "gpt-4o-mini-transcribe"
+            },
+            {
+              "name": "file",
+              "filename": "memo.m4a",
+              "contentType": "audio/mp4",
+              "bytesBase64": "TTRB"
+            }
+          ]
+        }
+      ],
+      "result": {
+        "files": [],
+        "text": "note to self",
+        "status": "completed"
+      }
+    },
+    {
+      "name": "openai_video_poll_then_content",
+      "client": "openai",
+      "liveVerified": false,
+      "config": {
+        "key": "FAKE_KEY",
+        "url": "{server}/v1",
+        "gather": {
+          "dir": "{dir}"
+        },
+        "loop": {
+          "intervalMs": 1
+        }
+      },
+      "verb": "video",
+      "args": {
+        "prompt": "waves"
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {
+            "id": "vid_1",
+            "status": "queued"
+          }
+        },
+        {
+          "status": 200,
+          "body": {
+            "id": "vid_1",
+            "status": "in_progress"
+          }
+        },
+        {
+          "status": 200,
+          "body": {
+            "id": "vid_1",
+            "status": "completed"
+          }
+        },
+        {
+          "status": 200,
+          "bodyBase64": "TVA0QllURVM=",
+          "headers": {
+            "Content-Type": "video/mp4"
+          }
+        }
+      ],
+      "expectRequests": [
+        {
+          "method": "POST",
+          "path": "/v1/videos",
+          "body": {
+            "model": "sora-2",
+            "prompt": "waves",
+            "seconds": "4"
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/v1/videos/vid_1",
+          "headers": {
+            "Authorization": "Bearer FAKE_KEY"
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/v1/videos/vid_1"
+        },
+        {
+          "method": "GET",
+          "path": "/v1/videos/vid_1/content"
+        }
+      ],
+      "expectProgress": [
+        "in_progress",
+        "completed"
+      ],
+      "result": {
+        "files": [
+          {
+            "type": "file",
+            "mimeType": "video/mp4",
+            "saved": {
+              "ext": ".mp4",
+              "bytesBase64": "TVA0QllURVM="
+            }
+          }
+        ],
+        "jobId": "vid_1",
+        "status": "completed"
+      },
+      "tool": {
+        "name": "generate_video",
+        "isError": false,
+        "outputPattern": "^video ready: {dir}/openai-video-[0-9]+-[0-9]+\\.mp4$",
+        "parts": [
+          {
+            "type": "file",
+            "mimeType": "video/mp4",
+            "data": "TVA0QllURVM="
+          }
+        ],
+        "metadata": {
+          "source": "media",
+          "verb": "video",
+          "client": "openai",
+          "jobId": "vid_1",
+          "status": "completed"
+        },
+        "modelParts": []
+      }
+    },
+    {
+      "name": "openai_video_failed",
+      "client": "openai",
+      "liveVerified": false,
+      "config": {
+        "key": "FAKE_KEY",
+        "url": "{server}/v1",
+        "gather": {
+          "dir": "{dir}"
+        },
+        "loop": {
+          "intervalMs": 1
+        }
+      },
+      "verb": "video",
+      "args": {
+        "prompt": "waves",
+        "seconds": 8
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {
+            "id": "vid_2"
+          }
+        },
+        {
+          "status": 200,
+          "body": {
+            "status": "failed",
+            "error": {
+              "message": "moderation"
+            }
+          }
+        }
+      ],
+      "expectRequests": [
+        {
+          "method": "POST",
+          "path": "/v1/videos",
+          "body": {
+            "model": "sora-2",
+            "prompt": "waves",
+            "seconds": "8"
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/v1/videos/vid_2"
+        }
+      ],
+      "status": "failed",
+      "error": "job vid_2 failed: moderation",
+      "tool": {
+        "isError": true,
+        "output": "job vid_2 failed: moderation"
+      }
+    },
+    {
+      "name": "openrouter_image_data_url",
+      "client": "openrouter",
+      "liveVerified": true,
+      "config": {
+        "key": "FAKE_KEY",
+        "url": "{server}/api/v1",
+        "gather": {
+          "dir": "{dir}"
+        }
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "cat"
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {
+            "id": "gen-1",
+            "choices": [
+              {
+                "message": {
+                  "role": "assistant",
+                  "content": "Here you go",
+                  "images": [
+                    {
+                      "type": "image_url",
+                      "image_url": {
+                        "url": "data:image/png;base64,UE5HQllURVM="
+                      }
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "expectRequests": [
+        {
+          "method": "POST",
+          "path": "/api/v1/chat/completions",
+          "headers": {
+            "Authorization": "Bearer FAKE_KEY"
+          },
+          "body": {
+            "model": "google/gemini-2.5-flash-image",
+            "modalities": [
+              "image",
+              "text"
+            ],
+            "messages": [
+              {
+                "role": "user",
+                "content": "cat"
+              }
+            ]
+          }
+        }
+      ],
+      "result": {
+        "files": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "saved": {
+              "ext": ".png",
+              "bytesBase64": "UE5HQllURVM="
+            }
+          }
+        ],
+        "text": "Here you go",
+        "jobId": "gen-1",
+        "status": "completed"
+      },
+      "tool": {
+        "name": "generate_image",
+        "isError": false,
+        "outputPattern": "^image ready: {dir}/openrouter-image-[0-9]+-[0-9]+\\.png$",
+        "parts": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "data": "UE5HQllURVM="
+          }
+        ],
+        "metadata": {
+          "source": "media",
+          "verb": "image",
+          "client": "openrouter",
+          "jobId": "gen-1",
+          "status": "completed"
+        },
+        "modelParts": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "data": "UE5HQllURVM="
+          }
+        ]
+      }
+    },
+    {
+      "name": "openrouter_402_is_unavailable",
+      "client": "openrouter",
+      "config": {
+        "key": "FAKE_KEY",
+        "url": "{server}/api/v1",
+        "gather": {
+          "dir": "{dir}"
+        }
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "cat"
+      },
+      "script": [
+        {
+          "status": 402,
+          "rawBody": "{\"error\":{\"message\":\"requires at least $1.00\"}}"
+        }
+      ],
+      "status": "unavailable",
+      "error": "media: no client available for \"image\": openrouter: HTTP 402: {\"error\":{\"message\":\"requires at least $1.00\"}}",
+      "tool": {
+        "isError": true,
+        "output": "media: no client available for \"image\": openrouter: HTTP 402: {\"error\":{\"message\":\"requires at least $1.00\"}}"
+      }
+    },
+    {
+      "name": "openrouter_no_image_names_text",
+      "client": "openrouter",
+      "config": {
+        "key": "FAKE_KEY",
+        "url": "{server}/api/v1",
+        "gather": {
+          "dir": "{dir}"
+        }
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "cat"
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {
+            "id": "gen-2",
+            "choices": [
+              {
+                "message": {
+                  "content": "I cannot draw that"
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "status": "failed",
+      "error": "image: no image in response: I cannot draw that",
+      "tool": {
+        "isError": true,
+        "output": "image: no image in response: I cannot draw that"
+      }
+    },
+    {
+      "name": "fal_image_queue_download",
+      "client": "fal",
+      "liveVerified": true,
+      "config": {
+        "key": "FAKE_KEY",
+        "url": "{server}",
+        "gather": {
+          "dir": "{dir}"
+        },
+        "loop": {
+          "intervalMs": 1
+        }
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "cat"
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {
+            "request_id": "req-1",
+            "status_url": "{server}/fal-ai/flux/requests/req-1/status",
+            "response_url": "{server}/fal-ai/flux/requests/req-1"
+          }
+        },
+        {
+          "status": 200,
+          "body": {
+            "status": "IN_QUEUE"
+          }
+        },
+        {
+          "status": 200,
+          "body": {
+            "status": "IN_PROGRESS"
+          }
+        },
+        {
+          "status": 200,
+          "body": {
+            "status": "COMPLETED"
+          }
+        },
+        {
+          "status": 200,
+          "body": {
+            "images": [
+              {
+                "url": "{server}/files/out.jpg",
+                "content_type": "image/jpeg"
+              }
+            ]
+          }
+        },
+        {
+          "status": 200,
+          "bodyBase64": "SlBFR0JZVEVT",
+          "headers": {
+            "Content-Type": "image/jpeg"
+          }
+        }
+      ],
+      "expectRequests": [
+        {
+          "method": "POST",
+          "path": "/fal-ai/flux/schnell",
+          "headers": {
+            "Authorization": "Key FAKE_KEY"
+          },
+          "body": {
+            "prompt": "cat",
+            "num_images": 1,
+            "image_size": "square",
+            "num_inference_steps": 4
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/fal-ai/flux/requests/req-1/status",
+          "headers": {
+            "Authorization": "Key FAKE_KEY"
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/fal-ai/flux/requests/req-1/status"
+        },
+        {
+          "method": "GET",
+          "path": "/fal-ai/flux/requests/req-1/status"
+        },
+        {
+          "method": "GET",
+          "path": "/fal-ai/flux/requests/req-1",
+          "headers": {
+            "Authorization": "Key FAKE_KEY"
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/files/out.jpg",
+          "absentHeaders": [
+            "Authorization"
+          ]
+        }
+      ],
+      "expectProgress": [
+        "IN_QUEUE",
+        "IN_PROGRESS",
+        "COMPLETED"
+      ],
+      "result": {
+        "files": [
+          {
+            "type": "image",
+            "mimeType": "image/jpeg",
+            "saved": {
+              "ext": ".jpg",
+              "bytesBase64": "SlBFR0JZVEVT"
+            }
+          }
+        ],
+        "jobId": "req-1",
+        "status": "completed"
+      },
+      "tool": {
+        "name": "generate_image",
+        "isError": false,
+        "outputPattern": "^image ready: {dir}/fal-image-[0-9]+-[0-9]+\\.jpg$",
+        "parts": [
+          {
+            "type": "image",
+            "mimeType": "image/jpeg",
+            "data": "SlBFR0JZVEVT"
+          }
+        ],
+        "metadata": {
+          "source": "media",
+          "verb": "image",
+          "client": "fal",
+          "jobId": "req-1",
+          "status": "completed"
+        },
+        "modelParts": [
+          {
+            "type": "image",
+            "mimeType": "image/jpeg",
+            "data": "SlBFR0JZVEVT"
+          }
+        ]
+      }
+    },
+    {
+      "name": "fal_image_url_mode_env_key_size_seed",
+      "client": "fal",
+      "env": {
+        "FAL_API_KEY": "FAKE_ENV_KEY"
+      },
+      "config": {
+        "url": "{server}",
+        "loop": {
+          "intervalMs": 1
+        },
+        "gather": {
+          "mode": "url"
+        }
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "cat",
+        "width": 640,
+        "seed": 7
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {
+            "request_id": "req-1",
+            "status_url": "{server}/fal-ai/flux/requests/req-1/status",
+            "response_url": "{server}/fal-ai/flux/requests/req-1"
+          }
+        },
+        {
+          "status": 200,
+          "body": {
+            "status": "COMPLETED"
+          }
+        },
+        {
+          "status": 200,
+          "body": {
+            "images": [
+              {
+                "url": "https://fal.media/files/a.png"
+              },
+              {
+                "url": "https://fal.media/files/b"
+              }
+            ]
+          }
+        }
+      ],
+      "expectHeaders": {
+        "Authorization": "Key FAKE_ENV_KEY"
+      },
+      "expectRequests": [
+        {
+          "method": "POST",
+          "path": "/fal-ai/flux/schnell",
+          "body": {
+            "prompt": "cat",
+            "num_images": 1,
+            "image_size": {
+              "width": 640,
+              "height": 640
+            },
+            "num_inference_steps": 4,
+            "seed": 7
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/fal-ai/flux/requests/req-1/status"
+        },
+        {
+          "method": "GET",
+          "path": "/fal-ai/flux/requests/req-1"
+        }
+      ],
+      "result": {
+        "files": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "url": "https://fal.media/files/a.png"
+          },
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "url": "https://fal.media/files/b"
+          }
+        ],
+        "jobId": "req-1",
+        "status": "completed"
+      },
+      "tool": {
+        "name": "generate_image",
+        "isError": false,
+        "output": "image ready: https://fal.media/files/a.png\nhttps://fal.media/files/b",
+        "parts": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "url": "https://fal.media/files/a.png"
+          },
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "url": "https://fal.media/files/b"
+          }
+        ],
+        "metadata": {
+          "source": "media",
+          "verb": "image",
+          "client": "fal",
+          "jobId": "req-1",
+          "status": "completed"
+        },
+        "modelParts": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "url": "https://fal.media/files/a.png"
+          },
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "url": "https://fal.media/files/b"
+          }
+        ]
+      },
+      "runFilePath": false,
+      "noUsage": true
+    },
+    {
+      "name": "fal_image_other_model_no_schnell_defaults",
+      "client": "fal",
+      "config": {
+        "key": "FAKE_KEY",
+        "url": "{server}",
+        "gather": {
+          "dir": "{dir}",
+          "mode": "url"
+        },
+        "model": "fal-ai/flux-pro/v1.1",
+        "loop": {
+          "intervalMs": 1
+        }
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "cat"
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {
+            "request_id": "r9",
+            "status_url": "{server}/s",
+            "response_url": "{server}/r"
+          }
+        },
+        {
+          "status": 200,
+          "body": {
+            "status": "COMPLETED"
+          }
+        },
+        {
+          "status": 200,
+          "body": {
+            "image": {
+              "url": "https://fal.media/one.webp"
+            }
+          }
+        }
+      ],
+      "expectRequests": [
+        {
+          "method": "POST",
+          "path": "/fal-ai/flux-pro/v1.1",
+          "body": {
+            "prompt": "cat",
+            "num_images": 1
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/s"
+        },
+        {
+          "method": "GET",
+          "path": "/r"
+        }
+      ],
+      "result": {
+        "files": [
+          {
+            "type": "image",
+            "mimeType": "image/webp",
+            "url": "https://fal.media/one.webp"
+          }
+        ],
+        "jobId": "r9",
+        "status": "completed"
+      }
+    },
+    {
+      "name": "fal_status_error",
+      "client": "fal",
+      "config": {
+        "key": "FAKE_KEY",
+        "url": "{server}",
+        "gather": {
+          "dir": "{dir}"
+        },
+        "loop": {
+          "intervalMs": 1
+        }
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "cat"
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {
+            "request_id": "req-2",
+            "status_url": "{server}/s",
+            "response_url": "{server}/r"
+          }
+        },
+        {
+          "status": 200,
+          "body": {
+            "status": "ERROR",
+            "error": "bad input"
+          }
+        }
+      ],
+      "status": "failed",
+      "error": "job req-2 failed: bad input",
+      "tool": {
+        "isError": true,
+        "output": "job req-2 failed: bad input"
+      }
+    },
+    {
+      "name": "fal_no_result_in_response",
+      "client": "fal",
+      "config": {
+        "key": "FAKE_KEY",
+        "url": "{server}",
+        "gather": {
+          "dir": "{dir}"
+        },
+        "loop": {
+          "intervalMs": 1
+        }
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "cat"
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {
+            "request_id": "req-3",
+            "status_url": "{server}/s",
+            "response_url": "{server}/r"
+          }
+        },
+        {
+          "status": 200,
+          "body": {
+            "status": "COMPLETED"
+          }
+        },
+        {
+          "status": 200,
+          "body": {
+            "has_nsfw_concepts": [
+              true
+            ]
+          }
+        }
+      ],
+      "status": "failed",
+      "error": "image: no result in response",
+      "tool": {
+        "isError": true,
+        "output": "image: no result in response"
+      }
+    },
+    {
+      "name": "fal_video_image_to_video_default_model",
+      "client": "fal",
+      "liveVerified": false,
+      "config": {
+        "key": "FAKE_KEY",
+        "url": "{server}",
+        "gather": {
+          "dir": "{dir}",
+          "mode": "url"
+        },
+        "loop": {
+          "intervalMs": 1
+        }
+      },
+      "verb": "video",
+      "args": {
+        "prompt": "zoom in",
+        "image": "https://x/i.png",
+        "seconds": 6,
+        "aspectRatio": "9:16"
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {
+            "request_id": "v1",
+            "status_url": "{server}/s",
+            "response_url": "{server}/r"
+          }
+        },
+        {
+          "status": 200,
+          "body": {
+            "status": "COMPLETED"
+          }
+        },
+        {
+          "status": 200,
+          "body": {
+            "video": {
+              "url": "https://fal.media/v.mp4"
+            }
+          }
+        }
+      ],
+      "expectRequests": [
+        {
+          "method": "POST",
+          "path": "/fal-ai/kling-video/v2.1/standard/image-to-video",
+          "body": {
+            "prompt": "zoom in",
+            "duration": "6",
+            "image_url": "https://x/i.png",
+            "aspect_ratio": "9:16"
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/s"
+        },
+        {
+          "method": "GET",
+          "path": "/r"
+        }
+      ],
+      "result": {
+        "files": [
+          {
+            "type": "file",
+            "mimeType": "video/mp4",
+            "url": "https://fal.media/v.mp4"
+          }
+        ],
+        "jobId": "v1",
+        "status": "completed"
+      },
+      "tool": {
+        "name": "generate_video",
+        "isError": false,
+        "output": "video ready: https://fal.media/v.mp4",
+        "parts": [
+          {
+            "type": "file",
+            "mimeType": "video/mp4",
+            "url": "https://fal.media/v.mp4"
+          }
+        ],
+        "metadata": {
+          "source": "media",
+          "verb": "video",
+          "client": "fal",
+          "jobId": "v1",
+          "status": "completed"
+        },
+        "modelParts": []
+      }
+    },
+    {
+      "name": "fal_video_text_to_video_models_override",
+      "client": "fal",
+      "liveVerified": false,
+      "config": {
+        "key": "FAKE_KEY",
+        "url": "{server}",
+        "gather": {
+          "dir": "{dir}",
+          "mode": "url"
+        },
+        "loop": {
+          "intervalMs": 1
+        },
+        "models": {
+          "video": "fal-ai/veo3/fast"
+        }
+      },
+      "verb": "video",
+      "args": {
+        "prompt": "waves"
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {
+            "request_id": "v2",
+            "status_url": "{server}/s",
+            "response_url": "{server}/r"
+          }
+        },
+        {
+          "status": 200,
+          "body": {
+            "status": "COMPLETED"
+          }
+        },
+        {
+          "status": 200,
+          "body": {
+            "video": {
+              "url": "https://fal.media/w.mp4"
+            }
+          }
+        }
+      ],
+      "expectRequests": [
+        {
+          "method": "POST",
+          "path": "/fal-ai/veo3/fast",
+          "body": {
+            "prompt": "waves",
+            "duration": "5"
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/s"
+        },
+        {
+          "method": "GET",
+          "path": "/r"
+        }
+      ],
+      "result": {
+        "files": [
+          {
+            "type": "file",
+            "mimeType": "video/mp4",
+            "url": "https://fal.media/w.mp4"
+          }
+        ],
+        "jobId": "v2",
+        "status": "completed"
+      }
+    },
+    {
+      "name": "gather_download_failed",
+      "client": "fal",
+      "config": {
+        "key": "FAKE_KEY",
+        "url": "{server}",
+        "gather": {
+          "dir": "{dir}"
+        },
+        "loop": {
+          "intervalMs": 1
+        }
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "cat"
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {
+            "request_id": "r4",
+            "status_url": "{server}/s",
+            "response_url": "{server}/r"
+          }
+        },
+        {
+          "status": 200,
+          "body": {
+            "status": "COMPLETED"
+          }
+        },
+        {
+          "status": 200,
+          "body": {
+            "images": [
+              {
+                "url": "{server}/files/gone.png"
+              }
+            ]
+          }
+        },
+        {
+          "status": 404,
+          "rawBody": "not found"
+        }
+      ],
+      "status": "failed",
+      "error": "image: download failed: HTTP 404",
+      "tool": {
+        "isError": true,
+        "output": "image: download failed: HTTP 404"
+      }
+    },
+    {
+      "name": "gather_download_mime_from_content_type",
+      "client": "fal",
+      "config": {
+        "key": "FAKE_KEY",
+        "url": "{server}",
+        "gather": {
+          "dir": "{dir}"
+        },
+        "loop": {
+          "intervalMs": 1
+        }
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "cat"
+      },
+      "note": "The URL has no extension; the response Content-Type (parameters stripped) wins.",
+      "script": [
+        {
+          "status": 200,
+          "body": {
+            "request_id": "r5",
+            "status_url": "{server}/s",
+            "response_url": "{server}/r"
+          }
+        },
+        {
+          "status": 200,
+          "body": {
+            "status": "COMPLETED"
+          }
+        },
+        {
+          "status": 200,
+          "body": {
+            "images": [
+              {
+                "url": "{server}/files/blob"
+              }
+            ]
+          }
+        },
+        {
+          "status": 200,
+          "bodyBase64": "V0VCUEJZVEVT",
+          "headers": {
+            "Content-Type": "image/webp; charset=binary"
+          }
+        }
+      ],
+      "result": {
+        "files": [
+          {
+            "type": "image",
+            "mimeType": "image/webp",
+            "saved": {
+              "ext": ".webp",
+              "bytesBase64": "V0VCUEJZVEVT"
+            }
+          }
+        ],
+        "jobId": "r5",
+        "status": "completed"
+      }
+    },
+    {
+      "name": "gather_download_octet_stream_falls_back_to_extension",
+      "client": "fal",
+      "config": {
+        "key": "FAKE_KEY",
+        "url": "{server}",
+        "gather": {
+          "dir": "{dir}"
+        },
+        "loop": {
+          "intervalMs": 1
+        }
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "cat"
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {
+            "request_id": "r6",
+            "status_url": "{server}/s",
+            "response_url": "{server}/r"
+          }
+        },
+        {
+          "status": 200,
+          "body": {
+            "status": "COMPLETED"
+          }
+        },
+        {
+          "status": 200,
+          "body": {
+            "images": [
+              {
+                "url": "{server}/files/x.gif"
+              }
+            ]
+          }
+        },
+        {
+          "status": 200,
+          "bodyBase64": "R0lGQllURVM=",
+          "headers": {
+            "Content-Type": "application/octet-stream"
+          }
+        }
+      ],
+      "result": {
+        "files": [
+          {
+            "type": "image",
+            "mimeType": "image/gif",
+            "saved": {
+              "ext": ".gif",
+              "bytesBase64": "R0lGQllURVM="
+            }
+          }
+        ],
+        "jobId": "r6",
+        "status": "completed"
+      }
+    },
+    {
+      "name": "gather_max_bytes_exceeded",
+      "client": "openai",
+      "config": {
+        "key": "FAKE_KEY",
+        "url": "{server}/v1",
+        "gather": {
+          "dir": "{dir}",
+          "maxBytes": 4
+        }
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "cat"
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {
+            "data": [
+              {
+                "b64_json": "UE5HQllURVM="
+              }
+            ]
+          }
+        }
+      ],
+      "status": "failed",
+      "error": "image: file exceeds gather.maxBytes (4 bytes)",
+      "tool": {
+        "isError": true,
+        "output": "image: file exceeds gather.maxBytes (4 bytes)"
+      }
+    },
+    {
+      "name": "a2e_builtin_image_download",
+      "client": "a2e",
+      "liveVerified": true,
+      "config": {
+        "key": "FAKE_KEY",
+        "url": "{server}",
+        "gather": {
+          "dir": "{dir}"
+        },
+        "loop": {
+          "intervalMs": 1
+        }
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "cat",
+        "width": 512
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {
+            "code": 0,
+            "data": [
+              {
+                "_id": "a1"
+              }
+            ]
+          }
+        },
+        {
+          "status": 200,
+          "body": {
+            "code": 0,
+            "data": {
+              "current_status": "completed",
+              "image_urls": [
+                "{server}/files/a.png"
+              ]
+            }
+          }
+        },
+        {
+          "status": 200,
+          "bodyBase64": "UE5HQllURVM=",
+          "headers": {
+            "Content-Type": "image/png"
+          }
+        }
+      ],
+      "expectRequests": [
+        {
+          "method": "POST",
+          "path": "/v1/userText2Image/start",
+          "headers": {
+            "Authorization": "Bearer FAKE_KEY"
+          },
+          "body": {
+            "name": "toolnexus",
+            "model_type": "a2e",
+            "prompt": "cat",
+            "width": 512
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/v1/userText2Image/a1",
+          "headers": {
+            "Authorization": "Bearer FAKE_KEY"
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/files/a.png",
+          "absentHeaders": [
+            "Authorization"
+          ]
+        }
+      ],
+      "expectProgress": [
+        "completed"
+      ],
+      "result": {
+        "files": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "saved": {
+              "ext": ".png",
+              "bytesBase64": "UE5HQllURVM="
+            }
+          }
+        ],
+        "jobId": "a1",
+        "status": "completed"
+      },
+      "tool": {
+        "name": "generate_image",
+        "isError": false,
+        "outputPattern": "^image ready: {dir}/a2e-image-[0-9]+-[0-9]+\\.png$",
+        "parts": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "data": "UE5HQllURVM="
+          }
+        ],
+        "metadata": {
+          "source": "media",
+          "verb": "image",
+          "client": "a2e",
+          "jobId": "a1",
+          "status": "completed"
+        },
+        "modelParts": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "data": "UE5HQllURVM="
+          }
+        ]
+      },
+      "runFilePath": true,
+      "noUsage": true
+    },
+    {
+      "name": "a2e_builtin_talk_url_mode",
+      "client": "a2e",
+      "liveVerified": false,
+      "config": {
+        "key": "FAKE_KEY",
+        "url": "{server}",
+        "gather": {
+          "dir": "{dir}",
+          "mode": "url"
+        },
+        "loop": {
+          "intervalMs": 1
+        }
+      },
+      "verb": "talk",
+      "args": {
+        "image": "https://x/face.png",
+        "audio": "https://x/a.mp3"
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {
+            "code": 0,
+            "data": {
+              "_id": "t1"
+            }
+          }
+        },
+        {
+          "status": 200,
+          "body": {
+            "code": 0,
+            "data": {
+              "current_status": "processing"
+            }
+          }
+        },
+        {
+          "status": 200,
+          "body": {
+            "code": 0,
+            "data": {
+              "current_status": "completed",
+              "result_url": "https://cdn.a2e.ai/t1.mp4"
+            }
+          }
+        }
+      ],
+      "expectRequests": [
+        {
+          "method": "POST",
+          "path": "/v1/talkingPhoto/start",
+          "body": {
+            "name": "toolnexus",
+            "image_url": "https://x/face.png",
+            "audio_url": "https://x/a.mp3"
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/v1/talkingPhoto/t1"
+        },
+        {
+          "method": "GET",
+          "path": "/v1/talkingPhoto/t1"
+        }
+      ],
+      "expectProgress": [
+        "processing",
+        "completed"
+      ],
+      "result": {
+        "files": [
+          {
+            "type": "file",
+            "mimeType": "video/mp4",
+            "url": "https://cdn.a2e.ai/t1.mp4"
+          }
+        ],
+        "jobId": "t1",
+        "status": "completed"
+      },
+      "tool": {
+        "name": "talking_video",
+        "isError": false,
+        "output": "video ready: https://cdn.a2e.ai/t1.mp4",
+        "parts": [
+          {
+            "type": "file",
+            "mimeType": "video/mp4",
+            "url": "https://cdn.a2e.ai/t1.mp4"
+          }
+        ],
+        "metadata": {
+          "source": "media",
+          "verb": "talk",
+          "client": "a2e",
+          "jobId": "t1",
+          "status": "completed"
+        },
+        "modelParts": []
+      }
+    },
+    {
+      "name": "a2e_builtin_talk_text_not_supported",
+      "client": "a2e",
+      "config": {
+        "key": "FAKE_KEY",
+        "url": "{server}",
+        "gather": {
+          "dir": "{dir}"
+        }
+      },
+      "verb": "talk",
+      "args": {
+        "image": "https://x/face.png",
+        "text": "hello"
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {}
+        }
+      ],
+      "expectRequests": [],
+      "status": "unavailable",
+      "error": "media: no client available for \"talk\": a2e: argument \"text\" not supported",
+      "tool": {
+        "isError": true,
+        "output": "media: no client available for \"talk\": a2e: argument \"text\" not supported"
+      }
+    },
+    {
+      "name": "a2e_builtin_missing_key",
+      "client": "a2e",
+      "unsetEnv": [
+        "A2E_API_KEY"
+      ],
+      "config": {
+        "url": "{server}"
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "cat"
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {}
+        }
+      ],
+      "expectRequests": [],
+      "status": "unavailable",
+      "error": "media: no client available for \"image\": a2e: no API key (set A2E_API_KEY)",
+      "tool": {
+        "isError": true,
+        "output": "media: no client available for \"image\": a2e: no API key (set A2E_API_KEY)"
+      }
+    },
+    {
+      "name": "a2e_builtin_envelope_error",
+      "client": "a2e",
+      "config": {
+        "key": "FAKE_KEY",
+        "url": "{server}",
+        "gather": {
+          "dir": "{dir}"
+        }
+      },
+      "verb": "speech",
+      "args": {
+        "text": "hi"
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {
+            "code": 1001,
+            "message": "insufficient balance"
+          }
+        }
+      ],
+      "status": "failed",
+      "error": "API error 1001: insufficient balance",
+      "tool": {
+        "isError": true,
+        "output": "API error 1001: insufficient balance"
+      }
+    },
+    {
+      "name": "fal_completed_ignores_error_field",
+      "note": "D1: status COMPLETED is done even when error is set.",
+      "client": "fal",
+      "config": {
+        "key": "FAKE_KEY",
+        "url": "{server}",
+        "gather": {
+          "dir": "{dir}",
+          "mode": "url"
+        },
+        "loop": {
+          "intervalMs": 1
+        }
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "cat"
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {
+            "request_id": "req-c",
+            "status_url": "{server}/s",
+            "response_url": "{server}/r"
+          }
+        },
+        {
+          "status": 200,
+          "body": {
+            "status": "COMPLETED",
+            "error": "ignored warning"
+          }
+        },
+        {
+          "status": 200,
+          "body": {
+            "images": [
+              {
+                "url": "https://x/out.png"
+              }
+            ]
+          }
+        }
+      ],
+      "expectProgress": [
+        "COMPLETED"
+      ],
+      "result": {
+        "files": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "url": "https://x/out.png"
+          }
+        ],
+        "jobId": "req-c",
+        "status": "completed"
+      }
+    },
+    {
+      "name": "fal_error_field_while_in_progress_is_failed",
+      "note": "D1: not COMPLETED and a non-empty error ⇒ failed.",
+      "client": "fal",
+      "config": {
+        "key": "FAKE_KEY",
+        "url": "{server}",
+        "gather": {
+          "dir": "{dir}",
+          "mode": "url"
+        },
+        "loop": {
+          "intervalMs": 1
+        }
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "cat"
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {
+            "request_id": "req-e",
+            "status_url": "{server}/s",
+            "response_url": "{server}/r"
+          }
+        },
+        {
+          "status": 200,
+          "body": {
+            "status": "IN_PROGRESS",
+            "error": "worker crashed"
+          }
+        }
+      ],
+      "status": "failed",
+      "error": "job req-e failed: worker crashed",
+      "tool": {
+        "isError": true,
+        "output": "job req-e failed: worker crashed"
+      }
+    },
+    {
+      "name": "openrouter_no_image_text_capped_200",
+      "note": "D4: cap counts code points, … only when truncated.",
+      "client": "openrouter",
+      "config": {
+        "key": "FAKE_KEY",
+        "url": "{server}/api/v1",
+        "gather": {
+          "dir": "{dir}"
+        }
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "cat"
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {
+            "id": "gen-3",
+            "choices": [
+              {
+                "message": {
+                  "content": "ééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé"
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "status": "failed",
+      "error": "image: no image in response: éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé…",
+      "tool": {
+        "isError": true,
+        "output": "image: no image in response: éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé…"
+      }
+    },
+    {
+      "name": "openrouter_no_image_text_exactly_200_not_capped",
+      "note": "D4",
+      "client": "openrouter",
+      "config": {
+        "key": "FAKE_KEY",
+        "url": "{server}/api/v1",
+        "gather": {
+          "dir": "{dir}"
+        }
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "cat"
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {
+            "id": "gen-4",
+            "choices": [
+              {
+                "message": {
+                  "content": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé"
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "status": "failed",
+      "error": "image: no image in response: éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé",
+      "tool": {
+        "isError": true,
+        "output": "image: no image in response: éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé"
+      }
+    },
+    {
+      "name": "download_402_is_failed_not_unavailable",
+      "note": "D5: account-precondition codes only count on the provider's API, not on a result download.",
+      "client": "fal",
+      "config": {
+        "key": "FAKE_KEY",
+        "url": "{server}",
+        "gather": {
+          "dir": "{dir}"
+        },
+        "loop": {
+          "intervalMs": 1
+        }
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "cat"
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {
+            "request_id": "r5",
+            "status_url": "{server}/s",
+            "response_url": "{server}/r"
+          }
+        },
+        {
+          "status": 200,
+          "body": {
+            "status": "COMPLETED"
+          }
+        },
+        {
+          "status": 200,
+          "body": {
+            "images": [
+              {
+                "url": "{server}/files/a.png"
+              }
+            ]
+          }
+        },
+        {
+          "status": 402,
+          "rawBody": "{\"error\":\"no credits\"}"
+        }
+      ],
+      "status": "failed",
+      "error": "image: download failed: HTTP 402",
+      "tool": {
+        "isError": true,
+        "output": "image: download failed: HTTP 402"
+      }
+    },
+    {
+      "name": "download_429_quota_is_failed_not_unavailable",
+      "note": "D5",
+      "client": "fal",
+      "config": {
+        "key": "FAKE_KEY",
+        "url": "{server}",
+        "gather": {
+          "dir": "{dir}"
+        },
+        "loop": {
+          "intervalMs": 1
+        }
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "cat"
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {
+            "request_id": "r6",
+            "status_url": "{server}/s",
+            "response_url": "{server}/r"
+          }
+        },
+        {
+          "status": 200,
+          "body": {
+            "status": "COMPLETED"
+          }
+        },
+        {
+          "status": 200,
+          "body": {
+            "images": [
+              {
+                "url": "{server}/files/a.png"
+              }
+            ]
+          }
+        },
+        {
+          "status": 429,
+          "rawBody": "quota exceeded"
+        }
+      ],
+      "status": "failed",
+      "error": "image: download failed: HTTP 429",
+      "tool": {
+        "isError": true,
+        "output": "image: download failed: HTTP 429"
+      }
+    },
+    {
+      "name": "input_fetch_402_is_failed_not_unavailable",
+      "note": "D5",
+      "client": "elevenlabs",
+      "config": {
+        "key": "FAKE_KEY",
+        "url": "{server}",
+        "gather": {
+          "dir": "{dir}"
+        }
+      },
+      "verb": "transcribe",
+      "args": {
+        "audio": "{server}/in/clip.wav"
+      },
+      "script": [
+        {
+          "status": 402,
+          "rawBody": "payment required"
+        }
+      ],
+      "expectRequests": [
+        {
+          "method": "GET",
+          "path": "/in/clip.wav"
+        }
+      ],
+      "status": "failed",
+      "error": "transcribe: cannot read \"{server}/in/clip.wav\": HTTP 402",
+      "tool": {
+        "isError": true,
+        "output": "transcribe: cannot read \"{server}/in/clip.wav\": HTTP 402"
+      }
+    },
+    {
+      "name": "input_fetch_429_billing_is_failed_not_unavailable",
+      "note": "D5",
+      "client": "openai",
+      "config": {
+        "key": "FAKE_KEY",
+        "url": "{server}/v1",
+        "gather": {
+          "dir": "{dir}"
+        }
+      },
+      "verb": "transcribe",
+      "args": {
+        "audio": "{server}/in/memo.m4a"
+      },
+      "script": [
+        {
+          "status": 429,
+          "rawBody": "billing hard limit"
+        }
+      ],
+      "expectRequests": [
+        {
+          "method": "GET",
+          "path": "/in/memo.m4a"
+        }
+      ],
+      "status": "failed",
+      "error": "transcribe: cannot read \"{server}/in/memo.m4a\": HTTP 429",
+      "tool": {
+        "isError": true,
+        "output": "transcribe: cannot read \"{server}/in/memo.m4a\": HTTP 429"
+      }
+    },
+    {
+      "name": "builtin_client_rejects_non_canonical_arg",
+      "note": "D7",
+      "client": "openai",
+      "config": {
+        "key": "FAKE_KEY",
+        "url": "{server}/v1",
+        "gather": {
+          "dir": "{dir}"
+        }
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "cat",
+        "foo": 1
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {}
+        }
+      ],
+      "expectRequests": [],
+      "status": "failed",
+      "error": "image: argument \"foo\" not supported",
+      "tool": {
+        "isError": true,
+        "output": "image: argument \"foo\" not supported"
+      }
+    },
+    {
+      "name": "fal_missing_status_and_response_url_builds_them",
+      "note": "D10: <url>/<model>/requests/<id>/status and <url>/<model>/requests/<id>; same origin, so the key is sent.",
+      "client": "fal",
+      "config": {
+        "key": "FAKE_KEY",
+        "url": "{server}",
+        "gather": {
+          "dir": "{dir}",
+          "mode": "url"
+        },
+        "loop": {
+          "intervalMs": 1
+        }
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "cat"
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {
+            "request_id": "req-f"
+          }
+        },
+        {
+          "status": 200,
+          "body": {
+            "status": "COMPLETED"
+          }
+        },
+        {
+          "status": 200,
+          "body": {
+            "images": [
+              {
+                "url": "https://x/out.png"
+              }
+            ]
+          }
+        }
+      ],
+      "expectRequests": [
+        {
+          "method": "POST",
+          "path": "/fal-ai/flux/schnell"
+        },
+        {
+          "method": "GET",
+          "path": "/fal-ai/flux/schnell/requests/req-f/status",
+          "headers": {
+            "Authorization": "Key FAKE_KEY"
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/fal-ai/flux/schnell/requests/req-f",
+          "headers": {
+            "Authorization": "Key FAKE_KEY"
+          }
+        }
+      ],
+      "result": {
+        "files": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "url": "https://x/out.png"
+          }
+        ],
+        "jobId": "req-f",
+        "status": "completed"
+      }
+    },
+    {
+      "name": "elevenlabs_transcribe_models_override",
+      "note": "D11",
+      "client": "elevenlabs",
+      "liveVerified": false,
+      "config": {
+        "key": "FAKE_KEY",
+        "url": "{server}",
+        "gather": {
+          "dir": "{dir}"
+        },
+        "models": {
+          "transcribe": "scribe_v2"
+        }
+      },
+      "inputFiles": {
+        "clip.mp3": "QVVESU8="
+      },
+      "verb": "transcribe",
+      "args": {
+        "audio": "{inputs}/clip.mp3"
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {
+            "text": "hi"
+          }
+        }
+      ],
+      "expectRequests": [
+        {
+          "method": "POST",
+          "path": "/v1/speech-to-text",
+          "multipart": [
+            {
+              "name": "model_id",
+              "value": "scribe_v2"
+            },
+            {
+              "name": "file",
+              "filename": "clip.mp3",
+              "contentType": "audio/mpeg",
+              "bytesBase64": "QVVESU8="
+            }
+          ]
+        }
+      ],
+      "result": {
+        "files": [],
+        "text": "hi",
+        "status": "completed"
+      }
+    },
+    {
+      "name": "elevenlabs_speech_models_beats_model",
+      "note": "D11: models.<verb> wins over model.",
+      "client": "elevenlabs",
+      "liveVerified": false,
+      "config": {
+        "key": "FAKE_KEY",
+        "url": "{server}",
+        "gather": {
+          "dir": "{dir}"
+        },
+        "model": "eleven_turbo_v2_5",
+        "models": {
+          "speech": "eleven_multilingual_v2"
+        }
+      },
+      "verb": "speech",
+      "args": {
+        "text": "hi"
+      },
+      "script": [
+        {
+          "status": 200,
+          "bodyBase64": "TVAzQllURVM="
+        }
+      ],
+      "expectRequests": [
+        {
+          "method": "POST",
+          "path": "/v1/text-to-speech/JBFqnCBsd6RMkjVDRZzb?output_format=mp3_22050_32",
+          "body": {
+            "text": "hi",
+            "model_id": "eleven_multilingual_v2"
+          }
+        }
+      ],
+      "result": {
+        "files": [
+          {
+            "type": "audio",
+            "mimeType": "audio/mpeg",
+            "saved": {
+              "ext": ".mp3",
+              "bytesBase64": "TVAzQllURVM="
+            }
+          }
+        ],
+        "status": "completed"
+      }
+    },
+    {
+      "name": "openai_transcribe_models_override",
+      "note": "D11",
+      "client": "openai",
+      "liveVerified": false,
+      "config": {
+        "key": "FAKE_KEY",
+        "url": "{server}/v1",
+        "gather": {
+          "dir": "{dir}"
+        },
+        "models": {
+          "transcribe": "whisper-1"
+        }
+      },
+      "inputFiles": {
+        "memo.m4a": "TTRB"
+      },
+      "verb": "transcribe",
+      "args": {
+        "audio": "{inputs}/memo.m4a"
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {
+            "text": "ok"
+          }
+        }
+      ],
+      "expectRequests": [
+        {
+          "method": "POST",
+          "path": "/v1/audio/transcriptions",
+          "multipart": [
+            {
+              "name": "model",
+              "value": "whisper-1"
+            },
+            {
+              "name": "file",
+              "filename": "memo.m4a",
+              "contentType": "audio/mp4",
+              "bytesBase64": "TTRB"
+            }
+          ]
+        }
+      ],
+      "result": {
+        "files": [],
+        "text": "ok",
+        "status": "completed"
+      }
+    },
+    {
+      "name": "caller_deadline_is_timeout_not_cancelled",
+      "note": "D12: a ctx deadline that expires is status timeout with the job form; only an explicit cancel is cancelled.",
+      "client": "fal",
+      "config": {
+        "key": "FAKE_KEY",
+        "url": "{server}",
+        "gather": {
+          "dir": "{dir}",
+          "mode": "url"
+        },
+        "loop": {
+          "intervalMs": 1,
+          "timeoutMs": 60000
+        }
+      },
+      "ctxTimeoutMs": 300,
+      "maxElapsedMs": 5000,
+      "verb": "image",
+      "args": {
+        "prompt": "cat"
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {
+            "request_id": "req-t",
+            "status_url": "{server}/s",
+            "response_url": "{server}/r"
+          }
+        },
+        {
+          "status": 200,
+          "body": {
+            "status": "IN_PROGRESS"
+          }
+        }
+      ],
+      "status": "timeout",
+      "errorPrefix": "job req-t timed out after "
+    },
+    {
+      "name": "elevenlabs_transcribe_no_text",
+      "note": "D13",
+      "client": "elevenlabs",
+      "config": {
+        "key": "FAKE_KEY",
+        "url": "{server}",
+        "gather": {
+          "dir": "{dir}"
+        }
+      },
+      "inputFiles": {
+        "clip.mp3": "QVVESU8="
+      },
+      "verb": "transcribe",
+      "args": {
+        "audio": "{inputs}/clip.mp3"
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {
+            "language_code": "en"
+          }
+        }
+      ],
+      "status": "failed",
+      "error": "transcribe: no result at text",
+      "tool": {
+        "isError": true,
+        "output": "transcribe: no result at text"
+      }
+    },
+    {
+      "name": "elevenlabs_clone_voice_no_voice_id",
+      "note": "D13",
+      "client": "elevenlabs",
+      "config": {
+        "key": "FAKE_KEY",
+        "url": "{server}",
+        "gather": {
+          "dir": "{dir}"
+        }
+      },
+      "inputFiles": {
+        "a.mp3": "U0FNUExFQQ=="
+      },
+      "verb": "cloneVoice",
+      "args": {
+        "name": "Me",
+        "samples": [
+          "{inputs}/a.mp3"
+        ]
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {
+            "requires_verification": false
+          }
+        }
+      ],
+      "status": "failed",
+      "error": "cloneVoice: no result at voice_id",
+      "tool": {
+        "isError": true,
+        "output": "cloneVoice: no result at voice_id"
+      }
+    },
+    {
+      "name": "openai_transcribe_no_text",
+      "note": "D13",
+      "client": "openai",
+      "config": {
+        "key": "FAKE_KEY",
+        "url": "{server}/v1",
+        "gather": {
+          "dir": "{dir}"
+        }
+      },
+      "inputFiles": {
+        "memo.m4a": "TTRB"
+      },
+      "verb": "transcribe",
+      "args": {
+        "audio": "{inputs}/memo.m4a"
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {}
+        }
+      ],
+      "status": "failed",
+      "error": "transcribe: no result at text",
+      "tool": {
+        "isError": true,
+        "output": "transcribe: no result at text"
+      }
+    },
+    {
+      "name": "openai_video_no_job_id",
+      "note": "D13",
+      "client": "openai",
+      "config": {
+        "key": "FAKE_KEY",
+        "url": "{server}/v1",
+        "gather": {
+          "dir": "{dir}"
+        }
+      },
+      "verb": "video",
+      "args": {
+        "prompt": "waves"
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {
+            "status": "queued"
+          }
+        }
+      ],
+      "status": "failed",
+      "error": "video: no job id at id",
+      "tool": {
+        "isError": true,
+        "output": "video: no job id at id"
+      }
+    },
+    {
+      "name": "fal_no_request_id",
+      "note": "D13",
+      "client": "fal",
+      "config": {
+        "key": "FAKE_KEY",
+        "url": "{server}",
+        "gather": {
+          "dir": "{dir}"
+        },
+        "loop": {
+          "intervalMs": 1
+        }
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "cat"
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {
+            "status_url": "{server}/s"
+          }
+        }
+      ],
+      "status": "failed",
+      "error": "image: no job id at request_id",
+      "tool": {
+        "isError": true,
+        "output": "image: no job id at request_id"
+      }
+    },
+    {
+      "name": "input_file_exceeds_max_bytes_no_request",
+      "note": "D14",
+      "client": "elevenlabs",
+      "config": {
+        "key": "FAKE_KEY",
+        "url": "{server}",
+        "gather": {
+          "dir": "{dir}",
+          "maxBytes": 4
+        }
+      },
+      "inputFiles": {
+        "clip.mp3": "QVVESU8="
+      },
+      "verb": "transcribe",
+      "args": {
+        "audio": "{inputs}/clip.mp3"
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {
+            "text": "x"
+          }
+        }
+      ],
+      "expectRequests": [],
+      "status": "failed",
+      "error": "transcribe: cannot read \"{inputs}/clip.mp3\": file exceeds gather.maxBytes (4 bytes)",
+      "tool": {
+        "isError": true,
+        "output": "transcribe: cannot read \"{inputs}/clip.mp3\": file exceeds gather.maxBytes (4 bytes)"
+      }
+    },
+    {
+      "name": "input_url_exceeds_max_bytes",
+      "note": "D14",
+      "client": "elevenlabs",
+      "config": {
+        "key": "FAKE_KEY",
+        "url": "{server}",
+        "gather": {
+          "dir": "{dir}",
+          "maxBytes": 4
+        }
+      },
+      "verb": "transcribe",
+      "args": {
+        "audio": "{server}/in/big.wav"
+      },
+      "script": [
+        {
+          "status": 200,
+          "bodyBase64": "V0FWQllURVM=",
+          "headers": {
+            "Content-Type": "audio/wav"
+          }
+        }
+      ],
+      "expectRequests": [
+        {
+          "method": "GET",
+          "path": "/in/big.wav"
+        }
+      ],
+      "status": "failed",
+      "error": "transcribe: cannot read \"{server}/in/big.wav\": file exceeds gather.maxBytes (4 bytes)",
+      "tool": {
+        "isError": true,
+        "output": "transcribe: cannot read \"{server}/in/big.wav\": file exceeds gather.maxBytes (4 bytes)"
+      }
+    },
+    {
+      "name": "download_exceeds_max_bytes",
+      "note": "D14",
+      "client": "fal",
+      "config": {
+        "key": "FAKE_KEY",
+        "url": "{server}",
+        "gather": {
+          "dir": "{dir}",
+          "maxBytes": 4
+        },
+        "loop": {
+          "intervalMs": 1
+        }
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "cat"
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {
+            "request_id": "r7",
+            "status_url": "{server}/s",
+            "response_url": "{server}/r"
+          }
+        },
+        {
+          "status": 200,
+          "body": {
+            "status": "COMPLETED"
+          }
+        },
+        {
+          "status": 200,
+          "body": {
+            "images": [
+              {
+                "url": "{server}/files/a.png"
+              }
+            ]
+          }
+        },
+        {
+          "status": 200,
+          "bodyBase64": "UE5HQllURVM=",
+          "headers": {
+            "Content-Type": "image/png"
+          }
+        }
+      ],
+      "status": "failed",
+      "error": "image: download failed: file exceeds gather.maxBytes (4 bytes)",
+      "tool": {
+        "isError": true,
+        "output": "image: download failed: file exceeds gather.maxBytes (4 bytes)"
+      }
+    },
+    {
+      "name": "openai_image_usage",
+      "client": "openai",
+      "liveVerified": true,
+      "config": {
+        "key": "FAKE_KEY",
+        "url": "{server}/v1/",
+        "gather": {
+          "dir": "{dir}"
+        }
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "cat"
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {
+            "created": 1,
+            "data": [
+              {
+                "b64_json": "UE5HQllURVM="
+              }
+            ],
+            "output_format": "png",
+            "usage": {
+              "input_tokens": 9,
+              "output_tokens": 272,
+              "total_tokens": 281,
+              "input_tokens_details": {
+                "text_tokens": 9,
+                "image_tokens": 0
+              }
+            }
+          }
+        }
+      ],
+      "expectRequests": [
+        {
+          "method": "POST",
+          "path": "/v1/images/generations",
+          "headers": {
+            "Authorization": "Bearer FAKE_KEY",
+            "Content-Type": "application/json"
+          },
+          "body": {
+            "model": "gpt-image-1-mini",
+            "prompt": "cat",
+            "n": 1,
+            "size": "1024x1024",
+            "quality": "low"
+          }
+        }
+      ],
+      "result": {
+        "files": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "saved": {
+              "ext": ".png",
+              "bytesBase64": "UE5HQllURVM="
+            }
+          }
+        ],
+        "status": "completed",
+        "usage": {
+          "inputTokens": 9,
+          "outputTokens": 272
+        }
+      },
+      "tool": {
+        "name": "generate_image",
+        "isError": false,
+        "outputPattern": "^image ready: {dir}/openai-image-[0-9]+-[0-9]+\\.png$",
+        "parts": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "data": "UE5HQllURVM="
+          }
+        ],
+        "metadata": {
+          "source": "media",
+          "verb": "image",
+          "client": "openai",
+          "status": "completed",
+          "usage": {
+            "inputTokens": 9,
+            "outputTokens": 272
+          }
+        },
+        "modelParts": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "data": "UE5HQllURVM="
+          }
+        ]
+      },
+      "note": "D21: usage.input_tokens/output_tokens ⇒ inputTokens/outputTokens; no cost from OpenAI."
+    },
+    {
+      "name": "openrouter_image_usage_cost",
+      "client": "openrouter",
+      "liveVerified": true,
+      "config": {
+        "key": "FAKE_KEY",
+        "url": "{server}/api/v1",
+        "gather": {
+          "dir": "{dir}"
+        }
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "cat"
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {
+            "id": "gen-1",
+            "choices": [
+              {
+                "message": {
+                  "role": "assistant",
+                  "content": "Here you go",
+                  "images": [
+                    {
+                      "type": "image_url",
+                      "image_url": {
+                        "url": "data:image/png;base64,UE5HQllURVM="
+                      }
+                    }
+                  ]
+                }
+              }
+            ],
+            "usage": {
+              "prompt_tokens": 7,
+              "completion_tokens": 1290,
+              "total_tokens": 1297,
+              "cost": 0.0387
+            }
+          }
+        }
+      ],
+      "expectRequests": [
+        {
+          "method": "POST",
+          "path": "/api/v1/chat/completions",
+          "headers": {
+            "Authorization": "Bearer FAKE_KEY"
+          },
+          "body": {
+            "model": "google/gemini-2.5-flash-image",
+            "modalities": [
+              "image",
+              "text"
+            ],
+            "messages": [
+              {
+                "role": "user",
+                "content": "cat"
+              }
+            ]
+          }
+        }
+      ],
+      "result": {
+        "files": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "saved": {
+              "ext": ".png",
+              "bytesBase64": "UE5HQllURVM="
+            }
+          }
+        ],
+        "text": "Here you go",
+        "jobId": "gen-1",
+        "status": "completed",
+        "usage": {
+          "inputTokens": 7,
+          "outputTokens": 1290,
+          "costUsd": 0.0387
+        }
+      },
+      "tool": {
+        "name": "generate_image",
+        "isError": false,
+        "outputPattern": "^image ready: {dir}/openrouter-image-[0-9]+-[0-9]+\\.png$",
+        "parts": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "data": "UE5HQllURVM="
+          }
+        ],
+        "metadata": {
+          "source": "media",
+          "verb": "image",
+          "client": "openrouter",
+          "jobId": "gen-1",
+          "status": "completed",
+          "usage": {
+            "inputTokens": 7,
+            "outputTokens": 1290,
+            "costUsd": 0.0387
+          }
+        },
+        "modelParts": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "data": "UE5HQllURVM="
+          }
+        ]
+      },
+      "note": "D21: usage.prompt_tokens/completion_tokens/cost ⇒ inputTokens/outputTokens/costUsd (USD)."
+    },
+    {
+      "name": "download_ext_from_url_extension",
+      "client": "fal",
+      "config": {
+        "key": "FAKE_KEY",
+        "url": "{server}",
+        "gather": {
+          "dir": "{dir}"
+        },
+        "loop": {
+          "intervalMs": 1
+        }
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "cat"
+      },
+      "note": "D22: the URL path extension wins over the mime table (.jpeg, not .jpg); lowercased.",
+      "script": [
+        {
+          "status": 200,
+          "body": {
+            "request_id": "r5",
+            "status_url": "{server}/s",
+            "response_url": "{server}/r"
+          }
+        },
+        {
+          "status": 200,
+          "body": {
+            "status": "COMPLETED"
+          }
+        },
+        {
+          "status": 200,
+          "body": {
+            "images": [
+              {
+                "url": "{server}/files/photo.JPEG"
+              }
+            ]
+          }
+        },
+        {
+          "status": 200,
+          "bodyBase64": "SlBFR0JZVEVT",
+          "headers": {
+            "Content-Type": "image/jpeg"
+          }
+        }
+      ],
+      "result": {
+        "files": [
+          {
+            "type": "image",
+            "mimeType": "image/jpeg",
+            "saved": {
+              "ext": ".jpeg",
+              "bytesBase64": "SlBFR0JZVEVT"
+            }
+          }
+        ],
+        "jobId": "r5",
+        "status": "completed"
+      },
+      "runFilePath": true
+    },
+    {
+      "name": "download_ext_wav_from_x_wav_mime",
+      "client": "fal",
+      "config": {
+        "key": "FAKE_KEY",
+        "url": "{server}",
+        "gather": {
+          "dir": "{dir}"
+        },
+        "loop": {
+          "intervalMs": 1
+        }
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "cat"
+      },
+      "note": "D22: no URL extension; audio/x-wav maps to .wav (JS saved it as .bin).",
+      "script": [
+        {
+          "status": 200,
+          "body": {
+            "request_id": "r5",
+            "status_url": "{server}/s",
+            "response_url": "{server}/r"
+          }
+        },
+        {
+          "status": 200,
+          "body": {
+            "status": "COMPLETED"
+          }
+        },
+        {
+          "status": 200,
+          "body": {
+            "images": [
+              {
+                "url": "{server}/files/blob"
+              }
+            ]
+          }
+        },
+        {
+          "status": 200,
+          "bodyBase64": "V0FWQllURVM=",
+          "headers": {
+            "Content-Type": "audio/x-wav"
+          }
+        }
+      ],
+      "result": {
+        "files": [
+          {
+            "type": "image",
+            "mimeType": "audio/x-wav",
+            "saved": {
+              "ext": ".wav",
+              "bytesBase64": "V0FWQllURVM="
+            }
+          }
+        ],
+        "jobId": "r5",
+        "status": "completed"
+      },
+      "runFilePath": true
+    },
+    {
+      "name": "download_ext_aac_from_mime",
+      "client": "fal",
+      "config": {
+        "key": "FAKE_KEY",
+        "url": "{server}",
+        "gather": {
+          "dir": "{dir}"
+        },
+        "loop": {
+          "intervalMs": 1
+        }
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "cat"
+      },
+      "note": "D22: audio/aac ⇒ .aac.",
+      "script": [
+        {
+          "status": 200,
+          "body": {
+            "request_id": "r5",
+            "status_url": "{server}/s",
+            "response_url": "{server}/r"
+          }
+        },
+        {
+          "status": 200,
+          "body": {
+            "status": "COMPLETED"
+          }
+        },
+        {
+          "status": 200,
+          "body": {
+            "images": [
+              {
+                "url": "{server}/files/blob"
+              }
+            ]
+          }
+        },
+        {
+          "status": 200,
+          "bodyBase64": "QUFDQllURVM=",
+          "headers": {
+            "Content-Type": "audio/aac"
+          }
+        }
+      ],
+      "result": {
+        "files": [
+          {
+            "type": "image",
+            "mimeType": "audio/aac",
+            "saved": {
+              "ext": ".aac",
+              "bytesBase64": "QUFDQllURVM="
+            }
+          }
+        ],
+        "jobId": "r5",
+        "status": "completed"
+      },
+      "runFilePath": true
+    },
+    {
+      "name": "download_ext_unknown_mime_is_bin",
+      "client": "fal",
+      "config": {
+        "key": "FAKE_KEY",
+        "url": "{server}",
+        "gather": {
+          "dir": "{dir}"
+        },
+        "loop": {
+          "intervalMs": 1
+        }
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "cat"
+      },
+      "note": "D22: .bin only for a mime type not in the table and no URL extension.",
+      "script": [
+        {
+          "status": 200,
+          "body": {
+            "request_id": "r5",
+            "status_url": "{server}/s",
+            "response_url": "{server}/r"
+          }
+        },
+        {
+          "status": 200,
+          "body": {
+            "status": "COMPLETED"
+          }
+        },
+        {
+          "status": 200,
+          "body": {
+            "images": [
+              {
+                "url": "{server}/files/blob"
+              }
+            ]
+          }
+        },
+        {
+          "status": 200,
+          "bodyBase64": "QklOQllURVM=",
+          "headers": {
+            "Content-Type": "application/x-thing"
+          }
+        }
+      ],
+      "result": {
+        "files": [
+          {
+            "type": "image",
+            "mimeType": "application/x-thing",
+            "saved": {
+              "ext": ".bin",
+              "bytesBase64": "QklOQllURVM="
+            }
+          }
+        ],
+        "jobId": "r5",
+        "status": "completed"
+      },
+      "runFilePath": true
+    },
+    {
+      "name": "user_agent_on_start_poll_and_download",
+      "client": "a2e",
+      "liveVerified": true,
+      "config": {
+        "key": "FAKE_KEY",
+        "url": "{server}",
+        "gather": {
+          "dir": "{dir}"
+        },
+        "loop": {
+          "intervalMs": 1
+        }
+      },
+      "verb": "image",
+      "args": {
+        "prompt": "cat",
+        "width": 512
+      },
+      "script": [
+        {
+          "status": 200,
+          "body": {
+            "code": 0,
+            "data": [
+              {
+                "_id": "a1"
+              }
+            ]
+          }
+        },
+        {
+          "status": 200,
+          "body": {
+            "code": 0,
+            "data": {
+              "current_status": "completed",
+              "image_urls": [
+                "{server}/files/a.png"
+              ]
+            }
+          }
+        },
+        {
+          "status": 200,
+          "bodyBase64": "UE5HQllURVM=",
+          "headers": {
+            "Content-Type": "image/png"
+          }
+        }
+      ],
+      "expectRequests": [
+        {
+          "method": "POST",
+          "path": "/v1/userText2Image/start",
+          "headers": {
+            "Authorization": "Bearer FAKE_KEY"
+          },
+          "body": {
+            "name": "toolnexus",
+            "model_type": "a2e",
+            "prompt": "cat",
+            "width": 512
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/v1/userText2Image/a1",
+          "headers": {
+            "Authorization": "Bearer FAKE_KEY"
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/files/a.png",
+          "absentHeaders": [
+            "Authorization"
+          ]
+        }
+      ],
+      "expectProgress": [
+        "completed"
+      ],
+      "result": {
+        "files": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "saved": {
+              "ext": ".png",
+              "bytesBase64": "UE5HQllURVM="
+            }
+          }
+        ],
+        "jobId": "a1",
+        "status": "completed"
+      },
+      "tool": {
+        "name": "generate_image",
+        "isError": false,
+        "outputPattern": "^image ready: {dir}/a2e-image-[0-9]+-[0-9]+\\.png$",
+        "parts": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "data": "UE5HQllURVM="
+          }
+        ],
+        "metadata": {
+          "source": "media",
+          "verb": "image",
+          "client": "a2e",
+          "jobId": "a1",
+          "status": "completed"
+        },
+        "modelParts": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "data": "UE5HQllURVM="
+          }
+        ]
+      },
+      "note": "D23: the default User-Agent goes on the start, the poll AND the header-less download (A2E CloudFront answered 403 without one).",
+      "expectHeaderPatterns": {
+        "User-Agent": "^toolnexus/[0-9]+\\.[0-9]+\\.[0-9]+[^ ]* \\((js|python|golang|java|csharp|elixir|clojure|rust)\\)$"
+      }
+    }
+  ]
+}

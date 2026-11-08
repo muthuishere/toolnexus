@@ -148,22 +148,40 @@ cross-process form of delegation this port does ship.
 
 Guide: [Media generation](/toolnexus/media/) · recipe: [Generate images, video and speech](/toolnexus/cookbook/media/) · SPEC §7G.
 
-- `(load-style path)` — one style JSON file, string-keyed.
-- `(create-media styles)` / `(create-media styles opts)` — one style or a seq (string- or keyword-keyed);
-  a verb resolves to the first style that declares it. opts: `:on-progress` (`(fn [{:verb :jobId :status}])`,
-  after every poll) · `:http-client` (`(fn [{:method :url :headers :body}]) -> {:status :body}`; default
-  `koine.http/request` — unlike the LLM client's seam it carries a method, because polls are GETs) ·
-  `:env` (`(fn [name])` for `${VAR}` header expansion).
-- Verbs, each `(verb m args)` / `(verb m args opts)`: `image` (`:prompt :width :height :aspectRatio :seed`) ·
-  `video` (`:prompt :image :seconds :aspectRatio`) · `speech` (`:text :voice`) · `transcribe` (`:audio`) ·
-  `clone-voice` (`:name :samples`) · `talking` (`:image :audio`).
-- `(generate m verb args)` / `(generate m verb args {:provider-options .. :cancel ..})` — the raw call;
-  `verb` is the canonical name (`"cloneVoice"`), `:cancel` an atom or 0-arg fn (truthy ⇒ cancelled).
-- Returns MediaResult `{:files [{:type :mimeType :url}] :text? :jobId? :status}`.
-- `(tools m)` — source `"media"` tools; or `(toolnexus.core/build {:media m ..})`. `(media? x)`.
-- `:files` on the run result — `{:type :mimeType :url :from :callId}`, in call order; the same parts are on
-  each `:tool-calls` entry's `:parts`.
-- Errors: the function face **throws** `ex-info` whose message is the exact §7G string; a media tool never
-  throws (`:isError true`).
+- `(create-media client)` / `(create-media [client ..])` — routes each verb to the first client whose
+  `:supports` is true; falls through to the next **only** on `:unavailable` (dropping args that client
+  does not accept). `[]` ⇒ `media: no clients`. `(media? x)`.
+- Built-in clients, each `([])` / `([config])`: API `a2e-media-client` (image, video, speech, talk;
+  `A2E_API_KEY`) · `elevenlabs-media-client` (speech, music, transcribe, cloneVoice; `ELEVENLABS_API_KEY`) ·
+  `openai-media-client` (image, video, speech, transcribe; `OPENAI_API_KEY`) · `openrouter-media-client`
+  (image; `OPENROUTER_API_KEY`) · `fal-media-client` (image, video; `FAL_API_KEY`); CLI `grok-media-client`
+  (image, video) · `codex-media-client` (image) — `:prompt` only. No key / CLI missing ⇒ `:unavailable`.
+- config: `:model` · `:models` (`{verb model}`) · `:key` (default: the env var, read at call time, never
+  logged) · `:url` · `:command` · `:loop {:interval-ms :timeout-ms :on-progress}` · `:gather {:mode
+  "url"|"download"|"inline" :dir :max-bytes :keep}` (built-ins default `"download"` into the temp dir) ·
+  `:http-client` (`(fn [{:method :url :headers :body}]) -> {:status :headers :body}`; default
+  `koine.http/request`).
+- Verbs, each `(verb m args)` / `(verb m args ctx)`: `image` (`:prompt :width :height :aspectRatio :seed`) ·
+  `video` (`:prompt :image :seconds :aspectRatio`) · `speech` (`:text :voice`) · `music` (`:prompt :seconds
+  :instrumental :lyrics`) · `transcribe` (`:audio :language`) · `clone-voice` (`:name :samples`) · `talk`
+  (`:image :audio :text :voice`). Inputs are `http(s)` URLs, `file://` URLs or local paths. An arg the first
+  client does not accept ⇒ `:failed`.
+- `(generate m verb args ctx)` — any verb (`"cloneVoice"`, `:clone-voice`) · `(supports? m verb)`. ctx:
+  `:cancel` (atom or 0-arg fn; truthy ⇒ cancelled) · `:deadline` (epoch ms) · `:progress`
+  (`(fn [{:verb :client :jobId :status :elapsedMs}])`) · `:provider-options`.
+- Returns MediaResult `{:files [{:type :mimeType :url? :path? :data?}] :text? :jobId? :status}`.
+- MediaClient = a map: `:name`, `:supports (fn [verb])`, optional `:args (fn [verb]) -> [{:name :required}]`,
+  and `(fn [args ctx])` under `:image :video :speech :music :transcribe :clone-voice :talk`; args arrive
+  keyword-keyed. Throw `(media-error msg :unavailable)` to fall through.
+- `(tools m)` — source `"media"`, one per supported verb, schema from the first supporting client; or
+  `(toolnexus.core/build {:media m ..})`.
+- `:files` on the run result — `{:type :mimeType :url|:data :from :callId}`, in call order. Only **image**
+  parts are sent back to the model (`model-parts`).
+- Errors: the verbs **throw** `ex-info`, `(:status (ex-data e))` ∈ `:failed :timeout :cancelled
+  :unavailable`; `(unavailable? e)`. A media tool never throws (`:isError true`).
+- Advanced: `(load-style path)` + `(style-media-client style)` / `(style-media-client style config)`.
+- Known gap: koine carries HTTP bodies as UTF-8 text, so raw binary HTTP bodies (ElevenLabs/OpenAI audio,
+  OpenAI video, `http(s)` downloads, uploaded inputs) are not byte-exact yet; base64, `data:` URL, `"url"`
+  mode and CLI files are.
 - Equivalents: `createMedia` (js) · `create_media` (py) · `CreateMedia` (go) · `Media.create` (java) ·
-  `Media.Create` (c#) · `Toolnexus.Media.new` (elixir) · `create_media` (rust).
+  `Media.Create` (c#) · `Toolnexus.Media.create` (elixir) · `create_media` (rust).

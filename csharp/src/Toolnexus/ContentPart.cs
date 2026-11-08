@@ -53,6 +53,11 @@ public sealed record ContentPart
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? Name { get; init; }
 
+    /// <summary>§7G.12 D20: the absolute local path of the media file this part came from. Carried
+    /// port-internally to <see cref="LlmClient.RunFile.Path"/> only — never serialized, never sent to a model.</summary>
+    [JsonIgnore]
+    internal string? LocalPath { get; init; }
+
     // ------------------------------------------------------------------ media table (§6)
 
     /// <summary>

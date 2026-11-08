@@ -209,7 +209,7 @@ defmodule Toolnexus.MockLlmIntegrationTest do
     on_exit(fn -> File.rm(path) end)
 
     assert {:ok, style} = Media.load_style(path)
-    media = Media.new(style)
+    media = Media.create!(style)
 
     check = fn {:ok, %Media.Result{files: [f]} = r}, suffix, mime ->
       assert String.ends_with?(f.url, suffix), f.url
@@ -222,7 +222,7 @@ defmodule Toolnexus.MockLlmIntegrationTest do
     check.(Media.speech(media, text: "hello", voice: "v"), "/files/speech.wav", "audio/wav")
 
     check.(
-      Media.talking(media, image: base <> "/files/image.png", audio: base <> "/files/speech.wav"),
+      Media.talk(media, image: base <> "/files/image.png", audio: base <> "/files/speech.wav"),
       "talking.mp4",
       "video/mp4"
     )
@@ -237,7 +237,7 @@ defmodule Toolnexus.MockLlmIntegrationTest do
     hash = :crypto.hash(:sha256, "muthu") |> Base.encode16(case: :lower) |> binary_part(0, 8)
     assert v == "voice-" <> hash
 
-    assert {:error, msg} = Media.image(media, prompt: "a cat [fail]")
+    assert {:error, %Media.Error{message: msg}} = Media.image(media, prompt: "a cat [fail]")
     assert msg =~ "mock: job asked to fail"
   end
 

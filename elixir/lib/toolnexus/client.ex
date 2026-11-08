@@ -2189,12 +2189,21 @@ defmodule Toolnexus.Client do
   defp parts_of(%ToolResult{parts: parts}) when is_list(parts), do: parts
   defp parts_of(_), do: []
 
+  @doc false
+  # SPEC §7G.6 model visibility: the parts of a tool result that message assembly (§8A)
+  # emits to the model. For a `source: "media"` result only image parts — video and audio
+  # stay in `tool_calls[].parts` / `RunResult.files`; the model sees just `output`.
+  def model_parts(%ToolResult{metadata: %{source: "media"}} = result),
+    do: Enum.filter(parts_of(result), &(&1.type == "image"))
+
+  def model_parts(result), do: parts_of(result)
+
   # The canonical `tool` message. `parts`/`tool_name` are toolnexus keys, stripped before
   # the request goes out; a result with no parts is byte-identical to pre-0.17.
   defp tool_message(id, name, result) do
     base = %{"role" => "tool", "tool_call_id" => id, "content" => result.output}
 
-    case parts_of(result) do
+    case model_parts(result) do
       [] ->
         base
 
@@ -2230,7 +2239,7 @@ defmodule Toolnexus.Client do
       "is_error" => result.is_error
     }
 
-    case parts_of(result) do
+    case model_parts(result) do
       [] -> base
       parts -> Map.put(base, "parts", Enum.map(parts, &ContentPart.to_map/1))
     end
@@ -2377,24 +2386,42 @@ defmodule Toolnexus.Client do
     # §8: `parts` present iff the ToolResult had parts. `:__call_id` is internal — it
     # feeds RunResult.files (callId) and is stripped before the record is returned.
     case result.parts do
-      [_ | _] = parts -> rec |> Map.put(:parts, parts) |> Map.put(:__call_id, call_id)
-      _ -> rec
+      [_ | _] = parts ->
+        rec
+        |> Map.put(:parts, parts)
+        |> Map.put(:__call_id, call_id)
+        |> Map.put(:__paths, result.paths)
+
+      _ ->
+        rec
     end
   end
 
   # §8 RunResult: strip the internal call id and collect every non-text part, in call order.
   defp finish_calls(tool_calls) do
-    files =
-      for %{parts: parts} = rec <- tool_calls,
-          %{type: type} = p <- parts,
-          type != "text" do
-        %{type: type, mime_type: p.mime_type, from: rec.name, call_id: rec[:__call_id]}
-        |> then(fn f -> if p.url, do: Map.put(f, :url, p.url), else: f end)
-        |> then(fn f -> if p.data, do: Map.put(f, :data, p.data), else: f end)
-        |> then(fn f -> if Map.get(p, :name), do: Map.put(f, :name, p.name), else: f end)
-      end
+    {Enum.map(tool_calls, &Map.drop(&1, [:__call_id, :__paths])), run_files(tool_calls)}
+  end
 
-    {Enum.map(tool_calls, &Map.delete(&1, :__call_id)), files}
+  @doc false
+  # §8 RunResult.files from tool-call records (internal keys still on): every non-text part,
+  # in call order; `path` iff the part came from a media file with a local path (§7G.12 D20).
+  def run_files(tool_calls) do
+    for %{parts: parts} = rec <- tool_calls,
+        {%{type: type} = p, path} <- Enum.zip(parts, paths_for(rec, parts)),
+        type != "text" do
+      %{type: type, mime_type: p.mime_type, from: rec.name, call_id: rec[:__call_id]}
+      |> then(fn f -> if p.url, do: Map.put(f, :url, p.url), else: f end)
+      |> then(fn f -> if p.data, do: Map.put(f, :data, p.data), else: f end)
+      |> then(fn f -> if Map.get(p, :name), do: Map.put(f, :name, p.name), else: f end)
+      |> then(fn f -> if path, do: Map.put(f, :path, path), else: f end)
+    end
+  end
+
+  defp paths_for(rec, parts) do
+    case rec[:__paths] do
+      paths when is_list(paths) and length(paths) == length(parts) -> paths
+      _ -> List.duplicate(nil, length(parts))
+    end
   end
 
   # ---- non-streaming: openai ----

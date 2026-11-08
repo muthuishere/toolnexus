@@ -445,8 +445,10 @@ type RunFile struct {
 	URL      string `json:"url,omitempty"`
 	Data     string `json:"data,omitempty"`
 	Name     string `json:"name,omitempty"`
-	From     string `json:"from"`
-	CallID   string `json:"callId"`
+	// Path is the absolute local file of a media part (§7G.12 D20); empty otherwise.
+	Path   string `json:"path,omitempty"`
+	From   string `json:"from"`
+	CallID string `json:"callId"`
 }
 
 // runFiles collects every non-text part of toolCalls, in call order. Never nil.
@@ -457,7 +459,7 @@ func runFiles(toolCalls []ToolCall) []RunFile {
 			if p.Type == "text" {
 				continue
 			}
-			files = append(files, RunFile{Type: p.Type, MimeType: p.MimeType, URL: p.URL, Data: p.Data, Name: p.Name, From: tc.Name, CallID: tc.callID})
+			files = append(files, RunFile{Type: p.Type, MimeType: p.MimeType, URL: p.URL, Data: p.Data, Name: p.Name, Path: p.path, From: tc.Name, CallID: tc.callID})
 		}
 	}
 	return files
@@ -1519,7 +1521,7 @@ func (c *Client) runOpenAI(ctx context.Context, prompt any, tk *Toolkit, history
 					"role":         "tool",
 					"tool_call_id": tc.ID,
 					"content":      result.Output,
-				}, tc.Function.Name, result.Parts)
+				}, tc.Function.Name, toolPartsForModel(result))
 			})
 		}
 		sched.Wait()
@@ -1851,7 +1853,7 @@ func (c *Client) runAnthropic(ctx context.Context, prompt any, tk *Toolkit, hist
 					"tool_use_id": u.ID,
 					"content":     result.Output,
 					"is_error":    result.IsError,
-				}, u.Name, result.Parts)
+				}, u.Name, toolPartsForModel(result))
 			})
 		}
 		sched.Wait()
@@ -2268,7 +2270,7 @@ func (c *Client) streamOpenAI(ctx context.Context, prompt any, tk *Toolkit, hist
 					return
 				}
 				records[i] = c.toolCallRecord(cc.id, cc.name, args, result)
-				results[i] = withToolParts(map[string]any{"role": "tool", "tool_call_id": cc.id, "content": result.Output}, cc.name, result.Parts)
+				results[i] = withToolParts(map[string]any{"role": "tool", "tool_call_id": cc.id, "content": result.Output}, cc.name, toolPartsForModel(result))
 				events[i] = c.resultEvent(cc.id, cc.name, safeJSONArgs(cc.args), result)
 			})
 		}
@@ -2592,7 +2594,7 @@ func (c *Client) streamAnthropic(ctx context.Context, prompt any, tk *Toolkit, h
 					return
 				}
 				records[i] = c.toolCallRecord(u.id, u.name, args, result)
-				results[i] = withToolParts(map[string]any{"type": "tool_result", "tool_use_id": u.id, "content": result.Output, "is_error": result.IsError}, u.name, result.Parts)
+				results[i] = withToolParts(map[string]any{"type": "tool_result", "tool_use_id": u.id, "content": result.Output, "is_error": result.IsError}, u.name, toolPartsForModel(result))
 				events[i] = c.resultEvent(u.id, u.name, u.input, result)
 			})
 		}

@@ -200,26 +200,90 @@ server the suite uses is test tooling (`tests/common_dev_auth`), not part of the
 
 ## Media generation
 
-Generate images, video and speech (plus transcription, voice cloning and talking-head video)
-from a **JSON style** instead of provider code. Async jobs are started and polled for you. The same
-verbs become agent tools (`generate_image`, `generate_video`, `generate_speech`, …), and whatever
-they produce lands in `RunResult.files`. `examples/media-styles/a2e.json` ships first and reads
-`A2E_API_KEY` at call time. Its result URLs expire in 3–30 days, so save what you keep. SPEC §7G;
-guide: <https://muthuishere.github.io/toolnexus/media/>.
+Images, video, speech, music, transcription, voice cloning and talking-head video, with **one
+client per media object**. The quickest start is a **CLI preset**: `MediaStyle::XAI_GROK_CLI`, `MediaStyle::OPENAI_CODEX_CLI` and `MediaStyle::GOOGLE_AGY_CLI` drive the vendor's
+official CLI (`grok`, `codex`, `agy`) in its documented headless mode (`grok -p`, `codex exec`,
+`agy -p`), signed in by you. Grok does image and video; Codex and Antigravity do image. Each preset
+has a mock twin (`MediaStyle::XAI_GROK_CLI_MOCK`, …) for tests. Your provider's terms of service apply to how you use its CLI.
+Every Grok image carries a small visible **"Grok" mark in the bottom-right corner**; toolnexus does
+not remove it. Install, sign-in, Grok video, limits and models:
+<https://muthuishere.github.io/toolnexus/cookbook/cli-media-setup/>. SPEC §7G; guide: <https://muthuishere.github.io/toolnexus/media/>.
 
 ```rust
-use toolnexus::{ImageInput, MediaOptions, ToolkitOptions, VideoInput, create_media, create_toolkit, load_media_style};
+use toolnexus::{create_media, create_toolkit, generate_media, load_media_style, MediaStyle,
+    ToolkitOptions, VideoInput};
 
-let media = create_media(load_media_style("examples/media-styles/a2e.json")?, MediaOptions::default());
-let img = media.image(ImageInput { prompt: "a red fox in fresh snow".into(),
-    width: Some(1024), height: Some(768), ..Default::default() }).await?;
-let vid = media.video(VideoInput { prompt: "the fox blinks".into(),
-    image: Some(img.files[0].url.clone()), seconds: Some(5), ..Default::default() }).await?;
+// one line
+let mut args = serde_json::Map::new();
+args.insert("prompt".into(), "a red apple".into());
+args.insert("aspectRatio".into(), "16:9".into());
+let r = generate_media(MediaStyle::XAI_GROK_CLI, "image", args, Default::default()).await?;
+println!("{}", r.files[0].path);
 
-let tk = create_toolkit(ToolkitOptions { media: Some(media), ..Default::default() }).await?; // generate_image, …
-let res = agent.run("Draw a fox, then animate it.", &tk).await?;
-for f in &res.files { println!("{} {} {}", f.from, f.mime_type, f.url); }
+// or keep a media object, and give it to your agent
+let media = create_media([load_media_style(MediaStyle::XAI_GROK_CLI)?])?;
+let clip = media.video(VideoInput { prompt: "the apple rolls off the table".into(), ..Default::default() }).await?;
+let tk = create_toolkit(ToolkitOptions { media: Some(media), ..Default::default() }).await?; // generate_image, generate_video
 ```
+
+For an HTTP API, give `create_media([client])` one named client — `OpenAIMediaClient`, `OpenRouterMediaClient`, `FalMediaClient`, `ElevenLabsMediaClient` or `A2EMediaClient`. Each reads its key from its env
+var (`OPENAI_API_KEY`, `FAL_API_KEY`, `ELEVENLABS_API_KEY`, …) at call time and never logs it.
+
+```rust
+use toolnexus::{create_media, FalMediaClient, ImageInput, IntoMediaClient, MediaClientConfig, VideoInput};
+
+let fal = create_media([FalMediaClient::new(MediaClientConfig::default()).into_media_client()])?; // FAL_API_KEY
+let img = match fal.image(ImageInput { prompt: "a red fox in fresh snow".into(), ..Default::default() }).await {
+    Err(e) if e.is_unavailable() => return Err(format!("fal is unavailable: {e}").into()), // no key, no credits
+    r => r?,
+};
+let vid = fal.video(VideoInput { prompt: "the fox blinks".into(), image: Some(img.files[0].path.clone()),
+    seconds: Some(5), ..Default::default() }).await?;
+println!("{}", vid.files[0].path);
+```
+
+The typed verbs are `image`, `video`, `speech`, `music`, `transcribe` (→ `MediaResult.text`),
+`clone_voice` (voice id in `text`) and `talk`; each has a `*_with(input, &CancellationToken)` twin.
+Optional fields are `Option<_>`; `generate(verb, args)` is the raw call.
+
+**Config** — every built-in client takes one `MediaClientConfig { model, models, key, url, command,
+r#loop, gather, http_client }`. `gather.mode` is `GatherMode::Url` (keep provider URLs),
+`Download` (default; save under `dir`, capped by `max_bytes`) or `Inline` (base64 `data`).
+`MediaLoop { interval_ms, timeout_ms, on_progress }` bounds async jobs.
+
+**As agent tools** — put the media object on the toolkit and each supported verb becomes a tool
+(`generate_image`, `generate_video`, `generate_speech`, …). Whatever they produce lands in
+`RunResult.files`; only image parts are shown to the model.
+
+```rust
+let tk = create_toolkit(ToolkitOptions { media: Some(media), ..Default::default() }).await?;
+let res = agent.run("Draw a fox, then animate it.", &tk).await?;
+for f in &res.files { println!("{} {} {} {}", f.from, f.kind, f.mime_type, f.url); }
+```
+
+**Your own provider** — implement `MediaClient` (`name`, `supports`, and only the verbs you serve; the
+rest default to failing). Return `MediaError::unavailable("…")` when it cannot serve a call.
+
+```rust
+struct Stock;
+impl MediaClient for Stock {
+    fn name(&self) -> &str { "stock" }
+    fn supports(&self, verb: &str) -> bool { verb == "image" }
+    fn image<'a>(&'a self, _args: MediaArgs, _ctx: &'a MediaCtx) -> MediaFuture<'a> {
+        Box::pin(async { Ok(MediaResult { status: "completed".into(), files: vec![MediaFile {
+            kind: "image".into(), mime_type: "image/png".into(),
+            url: "https://example.com/fox.png".into(), ..Default::default() }], ..Default::default() }) })
+    }
+}
+```
+
+Advanced: `load_media_style` + `StyleMediaClient::new` drive any HTTP provider from a JSON style.
+Run the example: `cargo run --example media`. It uses, in order, the `grok` / `codex` CLIs when on
+`PATH`, then `ELEVENLABS_API_KEY`, `OPENAI_API_KEY`, `FAL_API_KEY`, `A2E_API_KEY` when set: an image,
+ElevenLabs speech (`MEDIA_VOICE` or the default voice), and the `generate_image` tool; Grok video
+only with `MEDIA_VIDEO=1`, paid video/talk only with `MEDIA_PAID=1`. It prints client, verb,
+path/URL, mime type, size and provider-reported `usage`, exits non-zero if any step fails, and exits
+0 with a hint when no client is available.
 
 ## MCP 2026-07-28 + OAuth
 

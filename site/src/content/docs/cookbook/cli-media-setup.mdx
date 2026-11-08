@@ -1,0 +1,326 @@
+---
+title: Grok CLI, Codex CLI and Antigravity media setup
+description: Make images (and Grok video) by driving a vendor's official CLI — Grok, Codex or Google Antigravity — in its documented headless mode. Install, log in, enable Grok video, limits, the watermark, models, timeouts, file names, mocks and the shell command.
+---
+
+import { Tabs, TabItem, Aside } from '@astrojs/starlight/components';
+
+<Aside type="tip" title="Why you need this">
+If you already use the Grok, Codex or Google Antigravity CLI, toolnexus can drive that official CLI
+in its documented headless mode (`grok -p`, `codex exec`, `agy -p`), signed in by you, on your
+machine. It picks up the file the CLI saved and hands it back to your code or your agent, with the
+same `generateMedia` / `createMedia` API as every other media style.
+
+Your provider's terms of service apply to how you use its CLI.
+</Aside>
+
+Contract: SPEC §7G.10, §7G.10a, §7G.10b · ADR 0042 · `conformance/media/cli.json`.
+
+## The three presets
+
+| preset (shell `--style`) | CLI | verbs | logged-in check | headless flags |
+|---|---|---|---|---|
+| `xai-grok-cli` | `grok` | image, video | `~/.grok/auth.json` exists | `-p … --output-format streaming-json --yolo --no-auto-update` |
+| `openai-codex-cli` | `codex` | image | `$CODEX_HOME/auth.json` (default `~/.codex/auth.json`) exists | `exec --json --skip-git-repo-check -s workspace-write` |
+| `google-agy-cli` | `agy` | image | `~/.gemini/antigravity-cli/antigravity-oauth-token` exists | `-p … --output-format stream-json --dangerously-skip-permissions` |
+
+Each port spells the constants its own way: `MediaStyle.XaiGrokCli` (TypeScript, C#),
+`toolnexus.MediaStyleXaiGrokCli` (Go), `MediaStyle.XAI_GROK_CLI` (Python, Java, Rust),
+`Media.xai_grok_cli()` (Elixir), `media/xai-grok-cli` (Clojure); the same for
+`OpenAICodexCli` and `GoogleAgyCli`. They are plain strings underneath.
+
+Asking a preset for a verb it does not declare fails at once, before any process starts:
+
+```
+media: no style supports "video"
+```
+
+and the agent never gets a tool for it (`openai-codex-cli` and `google-agy-cli` expose only
+`generate_image`; `xai-grok-cli` exposes `generate_image` and `generate_video`). `media.verbs()`
+lists what a media object can do.
+
+## Install and log in
+
+Toolnexus never installs, logs in or changes settings for you. Check each CLI works by hand once:
+
+- **Grok** — `grok login` signs in (`grok --oauth` forces the browser login). `grok usage`
+  prints your plan's usage limit.
+- **Codex** — `codex login`, then `codex login status` should print `Logged in using ChatGPT`.
+- **Antigravity** — run `agy` and sign in when it asks; `agy models` lists the models you can use.
+
+Then ask toolnexus, in a few milliseconds and without generating anything:
+
+```ts
+const s = loadMediaStyle(MediaStyle.XaiGrokCli)
+s.available()  // { installed: true, loggedIn: true, reason: 'grok: installed, logged in (/Users/you/.grok/auth.json present)' }
+```
+
+`available()` checks that the command is on `PATH` and that the CLI's own login file exists. It
+never reads the file. Reasons are byte-exact across ports: `grok: "grok" not found on PATH`,
+`codex: installed, not logged in (/Users/you/.codex/auth.json missing)`, and so on.
+
+## One image, one line
+
+<Tabs syncKey="lang">
+<TabItem label="TypeScript">
+```ts
+import { generateMedia, createMedia, loadMediaStyle, MediaStyle } from "toolnexus"
+
+// one shot
+const r = await generateMedia(MediaStyle.XaiGrokCli, "image", { prompt: "a red apple", aspectRatio: "16:9" })
+console.log(r.files[0].path)
+
+// or keep a media object
+const grok = createMedia(loadMediaStyle(MediaStyle.XaiGrokCli))
+const clip = await grok.video({ prompt: "the apple rolls off the table" })
+const codex = createMedia(loadMediaStyle(MediaStyle.OpenAICodexCli))
+const img = await codex.image({ prompt: "a red apple", aspectRatio: "1:1" })
+```
+</TabItem>
+<TabItem label="Python">
+```python
+from toolnexus import MediaStyle, create_media, load_media_style, generate_media
+
+r = await generate_media(MediaStyle.XAI_GROK_CLI, "image", {"prompt": "a red apple", "aspectRatio": "16:9"})
+print(r.files[0].path)
+
+grok = create_media(load_media_style(MediaStyle.XAI_GROK_CLI))
+clip = await grok.video("the apple rolls off the table")
+codex = create_media(load_media_style(MediaStyle.OPENAI_CODEX_CLI))
+img = await codex.image("a red apple", aspect_ratio="1:1")
+```
+</TabItem>
+<TabItem label="Go">
+```go
+ctx := context.Background()
+r, err := toolnexus.GenerateMedia(ctx, toolnexus.MediaStyleXaiGrokCli, "image",
+	map[string]any{"prompt": "a red apple", "aspectRatio": "16:9"})
+// r.Files[0].Path
+
+style, _ := toolnexus.LoadMediaStyle(toolnexus.MediaStyleXaiGrokCli)
+grok := toolnexus.MustCreateMedia(style)
+clip, err := grok.Video(ctx, toolnexus.VideoInput{Prompt: "the apple rolls off the table"})
+
+codexStyle, _ := toolnexus.LoadMediaStyle(toolnexus.MediaStyleOpenAICodexCli)
+img, err := toolnexus.MustCreateMedia(codexStyle).Image(ctx, toolnexus.ImageInput{Prompt: "a red apple", AspectRatio: "1:1"})
+```
+</TabItem>
+<TabItem label="Java">
+```java
+import io.github.muthuishere.toolnexus.*;
+
+var r = Media.generateMedia(MediaStyle.XAI_GROK_CLI, "image", Map.of("prompt", "a red apple", "aspectRatio", "16:9"));
+
+var grok = Media.create(Media.loadMediaStyle(MediaStyle.XAI_GROK_CLI));
+var clip = grok.video(new Media.VideoInput("the apple rolls off the table"));
+var codex = Media.create(Media.loadMediaStyle(MediaStyle.OPENAI_CODEX_CLI));
+var img = codex.image(new Media.ImageInput("a red apple", null, null, "1:1", null, null));
+```
+</TabItem>
+<TabItem label="C#">
+```csharp
+using Toolnexus;
+
+var r = await Media.GenerateMediaAsync(MediaStyle.XaiGrokCli, "image",
+    new Dictionary<string, object?> { ["prompt"] = "a red apple", ["aspectRatio"] = "16:9" });
+
+var grok = Media.Create(MediaStyle.Load(MediaStyle.XaiGrokCli));
+var clip = await grok.VideoAsync(new VideoInput("the apple rolls off the table"));
+var codex = Media.Create(MediaStyle.Load(MediaStyle.OpenAICodexCli));
+var img = await codex.ImageAsync(new ImageInput("a red apple") { AspectRatio = "1:1" });
+```
+</TabItem>
+<TabItem label="Elixir">
+```elixir
+alias Toolnexus.Media
+
+{:ok, r} = Media.generate_media(Media.xai_grok_cli(), "image", %{"prompt" => "a red apple", "aspectRatio" => "16:9"})
+
+{:ok, style} = Media.load_style(Media.xai_grok_cli())
+grok = Media.create!(style)
+{:ok, clip} = Media.video(grok, %{"prompt" => "the apple rolls off the table"})
+
+{:ok, codex_style} = Media.load_style(Media.openai_codex_cli())
+{:ok, img} = Media.image(Media.create!(codex_style), %{"prompt" => "a red apple", "aspectRatio" => "1:1"})
+```
+</TabItem>
+<TabItem label="Clojure">
+```clojure
+(require '[toolnexus.media :as media])
+
+(def r (media/generate-media media/xai-grok-cli "image" {:prompt "a red apple" :aspectRatio "16:9"}))
+
+(def grok (media/create-media (media/load-media-style media/xai-grok-cli)))
+(def clip (media/video grok {:prompt "the apple rolls off the table"}))
+(def codex (media/create-media (media/load-media-style media/openai-codex-cli)))
+(def img (media/image codex {:prompt "a red apple" :aspectRatio "1:1"}))
+```
+</TabItem>
+<TabItem label="Rust">
+```rust
+use toolnexus::{create_media, generate_media, load_media_style, ImageInput, MediaStyle, VideoInput};
+
+let mut args = serde_json::Map::new();
+args.insert("prompt".into(), "a red apple".into());
+args.insert("aspectRatio".into(), "16:9".into());
+let r = generate_media(MediaStyle::XAI_GROK_CLI, "image", args, Default::default()).await?;
+
+let grok = create_media([load_media_style(MediaStyle::XAI_GROK_CLI)?])?;
+let clip = grok.video(VideoInput { prompt: "the apple rolls off the table".into(), ..Default::default() }).await?;
+let codex = create_media([load_media_style(MediaStyle::OPENAI_CODEX_CLI)?])?;
+let img = codex.image(ImageInput { prompt: "a red apple".into(), aspect_ratio: Some("1:1".into()), ..Default::default() }).await?;
+```
+</TabItem>
+</Tabs>
+
+The same media object gives your agent tools: `createToolkit({ media })` (or
+`toolkit.register(...media.tools())`) registers `generate_image` (and `generate_video` for Grok).
+
+### From the shell
+
+```sh
+toolnexus media image --style xai-grok-cli     --prompt "a red apple" --aspect-ratio 16:9 --out ./out
+toolnexus media video --style xai-grok-cli     --prompt "waves on a beach"
+toolnexus media image --style openai-codex-cli --prompt "a red apple" --name apple
+toolnexus media image --style google-agy-cli   --prompt "a red apple" --model <model>
+```
+
+It prints the path of each saved file, one per line, and exits non-zero with the error on stderr
+(`error: media: no style supports "video"` for `toolnexus media video --style openai-codex-cli`).
+Flags: `--style`, `--prompt`, `--aspect-ratio`, `--width`, `--height`, `--seconds`, `--model`,
+`--out`, `--name`, `--timeout-ms`. `--style` also takes the path of an HTTP style JSON file.
+
+## Size hints become prompt text
+
+A CLI has no `--aspect-ratio` flag, so `width`, `height`, `seconds` and `aspectRatio` are appended
+to your prompt, in that order, inside the preset's fixed instruction:
+
+```
+{prompt: "a red apple", width: 1024, aspectRatio: "16:9"}
+  ⇒ Generate exactly one image with your image generation tool: a red apple (width 1024 px, aspect ratio 16:9). Do not write code. Reply only with the file path.
+```
+
+The model usually honours it (live, all three returned 16:9: Grok 1280×720, Codex 1672×941,
+Antigravity 1376×768) but it is a request, not a guarantee. `seed` cannot be expressed this way
+and is refused: `argument "seed" not supported`.
+
+## Grok video
+
+Toolnexus starts `grok` with `GROK_CONFIG={"features":{"image_gen":true,"video_gen":true}}` so the
+image and video tools are switched on for that run. It never edits your Grok settings.
+
+Grok's video tool obeys your account's **coding-data setting**. Under **Zero Data Retention** it
+refuses, and you get:
+
+```
+grok: video blocked by Zero Data Retention — run /privacy and opt in, or configure ZDR video storage (docs/media#grok-video-zdr)
+```
+
+To fix it: run `grok`, type `/privacy` (Settings › Coding data, retention, and training), choose
+**Opt in**, restart `grok`. Opting in means xAI may retain and train on your CLI coding data;
+decide whether that is acceptable. xAI also documents a ZDR video bucket
+(`[tools.zdr_video_output_s3]` in `~/.grok/managed_config.toml`); it did not work for us on a
+personal account ([details](/toolnexus/media/#grok-video-zdr)). Live after opting in: one video in 58 s.
+
+## Usage limits and quota
+
+Each CLI uses your plan's allowance. When it runs out the error status is `unavailable`:
+
+- Grok: `grok: You have reached your usage limit for today` (check with `grok usage`).
+- Codex: `codex: You've hit your usage limit. Try again later.`
+- Antigravity: anything mentioning `quota` (Antigravity names its allowance the "Antigravity Starter Quota").
+  Live, agy ends the turn normally and explains it (`429 RESOURCE_EXHAUSTED … quota will reset
+  after approximately 167 hours`) with no file; the preset reports that as `unavailable`.
+
+## The Grok watermark
+
+Every Grok image we generated carries a small **"Grok" mark in the bottom-right corner**. Toolnexus
+documents it and does not remove it. If you need clean images, use Codex or Antigravity.
+
+## Models, timeouts, where files go
+
+Pass a config to `loadMediaStyle(preset, config)` / `generateMedia(preset, verb, args, config)`:
+
+- `model` (or `models: { image, video }`) — Grok and Codex get `-m <model>`, Antigravity
+  `--model <model>`. List them with `grok models` or `agy models`. Unset means the CLI's default.
+- `loop.timeoutMs` — default 600000 (10 min). On timeout the CLI process is killed:
+  `grok: timed out after 600000ms`.
+- `gather.dir` — where files are saved (default `<tmp>/toolnexus-media`).
+  `gather.name: "cover"` names them `cover.jpg`, then `cover-2.jpg`, … (anything outside
+  `A-Z a-z 0-9 . _ -` becomes `-`). `gather.mode: "url"` returns the CLI's own file path instead
+  of a copy; `gather.keep: false` deletes the CLI's original after copying.
+- `command` — the argv prefix, if the CLI is not on `PATH` as `grok` / `codex` / `agy`.
+
+Every CLI runs in a fresh temporary working directory, with stdin closed.
+
+Results say who served them: `result.style` is the preset id (`xai-grok-cli`), `result.model`
+the model you configured (absent when you set none). `usage` appears only when the CLI reports it
+(Grok's end event gives tokens and cost; Antigravity gives tokens); a price is never estimated.
+
+## Permissions
+
+Each preset runs headless and never stops for a prompt: Grok with `--yolo`, Antigravity with
+`--dangerously-skip-permissions`, Codex with `exec -s workspace-write`. Codex stays sandboxed
+because writing into its own workspace is enough to save the image.
+
+## Test without a CLI: the mock presets
+
+`XaiGrokCliMock`, `OpenAICodexCliMock`, `GoogleAgyCliMock` (strings `xai-grok-cli-mock`, …) are the
+same presets with the CLI replaced: same verbs, tools, errors and prompt folding, no process, no
+account, no network. Each writes `<gather.dir>/<grok|codex|agy>-mock-<verb>.png|mp4` holding the
+bytes `toolnexus mock <verb>`, then gathers it like a real CLI file (so `result.files[0].path` is the
+gathered copy, e.g. `grok-image-<ts>-1.png`), and the result's `text` is the exact prompt the CLI would have got.
+
+```ts
+// app.ts
+export const makeCover = (style = MediaStyle.XaiGrokCli) =>
+  generateMedia(style, "image", { prompt: "a red apple", aspectRatio: "16:9" })
+
+// app.test.ts
+const r = await makeCover(MediaStyle.XaiGrokCliMock)
+assert.equal(r.text, "Generate exactly one image with your image generation tool: a red apple (aspect ratio 16:9). Do not write code. Reply only with the file path.")
+assert.equal(r.style, "xai-grok-cli-mock")
+await assert.rejects(createMedia(loadMediaStyle(MediaStyle.OpenAICodexCliMock)).video({ prompt: "x" }),
+  /media: no style supports "video"/)
+```
+
+`available()` on a mock is `{installed: true, loggedIn: true}`; set
+`TOOLNEXUS_MEDIA_MOCK_AVAILABLE=0` to test your "not installed" path.
+
+## Test the whole agent offline
+
+The mock model from the [mock kit](/toolnexus/cookbook/mock-server/) (`tools/mock-llm/mock_llm.py`)
+calls the first tool it is offered, with arguments built from its schema. Give it a toolkit whose
+only tool is a mock preset's `generate_image`, and the full path runs with no model, no CLI, no
+key and no network: client loop → `generate_image` call → mock CLI file → `RunResult.files`.
+
+Start the mock first: `python3 tools/mock-llm/mock_llm.py --port 8787` (it prints its base URL).
+
+<Tabs syncKey="lang">
+<TabItem label="TypeScript">
+```ts
+const media = createMedia(loadMediaStyle(MediaStyle.XaiGrokCliMock, { gather: { dir } }))
+const toolkit = await createToolkit({ builtins: false, media })
+const client = createClient({ baseUrl: "http://127.0.0.1:8787/v1", style: "openai", model: "mock-model", apiKey: "mock-key" })
+const r = await client.run("Draw a red apple.", { toolkit })
+assert.equal(r.toolCalls[0].name, "generate_image")
+assert.equal(fs.readFileSync(r.files[0].path!, "utf8"), "toolnexus mock image")
+```
+</TabItem>
+<TabItem label="Go">
+```go
+style, _ := toolnexus.LoadMediaStyle(toolnexus.MediaStyleXaiGrokCliMock,
+	toolnexus.MediaConfig{Gather: toolnexus.MediaGather{Dir: dir}})
+tk, _ := toolnexus.CreateToolkit(ctx, toolnexus.Options{Builtins: false, Media: toolnexus.MustCreateMedia(style)})
+client := toolnexus.CreateClient(toolnexus.ClientOptions{BaseURL: "http://127.0.0.1:8787/v1",
+	Style: toolnexus.StyleOpenAI, Model: "mock-model", APIKey: "mock-key"})
+res, _ := client.Run(ctx, "Draw a red apple.", tk)
+// res.ToolCalls[0].Name == "generate_image"; os.ReadFile(res.Files[0].Path) == "toolnexus mock image"
+```
+</TabItem>
+</Tabs>
+
+These two are runnable tests in the repo (`js/test/mock-llm.test.ts`,
+`golang/mock_llm_test.go` → `TestMockLLMMediaOffline`). The other ports have the same pieces
+(the mock preset, `createToolkit({ media })` and a client pointed at the mock); their offline
+end-to-end test is not written yet.

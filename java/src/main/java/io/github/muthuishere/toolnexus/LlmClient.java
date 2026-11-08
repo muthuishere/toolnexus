@@ -899,7 +899,7 @@ public final class LlmClient {
     private ToolCall toolCallRecord(String name, ToolRun run, String callId) {
         Unwrapped u = unwrapCall(name, run.args());
         return new ToolCall(u.name(), u.args(), run.result().output(), run.result().isError(),
-                run.result().metadata(), run.result().parts(), callId);
+                run.result().metadata(), run.result().parts(), callId, run.result().partPaths());
     }
 
     /** {@code call_tool {name, arguments}} mapped to the real call ({@code wrapped=false} when tiers
@@ -1047,6 +1047,8 @@ public final class LlmClient {
         public final List<ContentPart> parts;
         /** The model's tool-call id for this call (may be null when the model sent none). */
         public final String callId;
+        /** §7G.12 D20: local path behind each part (port-internal; only feeds RunFile.path). */
+        final List<String> partPaths;
 
         ToolCall(String name, Map<String, Object> args,
                  String output, boolean isError, Map<String, Object> metadata) {
@@ -1062,14 +1064,33 @@ public final class LlmClient {
             this.metadata = metadata;
             this.parts = parts == null || parts.isEmpty() ? null : List.copyOf(parts);
             this.callId = callId;
+            this.partPaths = null;
+        }
+
+        ToolCall(String name, Map<String, Object> args, String output, boolean isError,
+                 Map<String, Object> metadata, List<ContentPart> parts, String callId, List<String> partPaths) {
+            this.name = name;
+            this.args = args;
+            this.output = output;
+            this.isError = isError;
+            this.metadata = metadata;
+            this.parts = parts == null || parts.isEmpty() ? null : List.copyOf(parts);
+            this.callId = callId;
+            this.partPaths = this.parts == null || partPaths == null || partPaths.size() != this.parts.size()
+                    ? null : java.util.Collections.unmodifiableList(new ArrayList<>(partPaths));
         }
     }
 
     /** §8 {@code RunResult.files} entry: one non-text part a tool call produced this run. */
     public record RunFile(String type, String mimeType, String url, String data, String from, String callId,
-                          String name) {
+                          String name, String path) {
         public RunFile(String type, String mimeType, String url, String data, String from, String callId) {
-            this(type, mimeType, url, data, from, callId, null);
+            this(type, mimeType, url, data, from, callId, null, null);
+        }
+
+        public RunFile(String type, String mimeType, String url, String data, String from, String callId,
+                       String name) {
+            this(type, mimeType, url, data, from, callId, name, null);
         }
     }
 
@@ -1149,16 +1170,26 @@ public final class LlmClient {
             this.status = status;
             this.pending = pending;
             this.limit = limit;
-            List<RunFile> fs = new ArrayList<>();
-            for (ToolCall c : toolCalls) {
-                if (c.parts == null) continue;
-                for (ContentPart p : c.parts) {
-                    if (ContentPart.TEXT.equals(p.type())) continue;
-                    fs.add(new RunFile(p.type(), p.mimeType(), p.url(), p.data(), c.name, c.callId, p.name()));
-                }
-            }
-            this.files = List.copyOf(fs);
+            this.files = runFiles(toolCalls);
         }
+    }
+
+    /**
+     * §8 {@code RunResult.files}: every non-text part of the given tool calls, in call order; a
+     * media file with a local path carries it as {@code path} (§7G.12 D20).
+     */
+    static List<RunFile> runFiles(List<ToolCall> toolCalls) {
+        List<RunFile> fs = new ArrayList<>();
+        for (ToolCall c : toolCalls) {
+            if (c.parts == null) continue;
+            for (int i = 0; i < c.parts.size(); i++) {
+                ContentPart p = c.parts.get(i);
+                if (ContentPart.TEXT.equals(p.type())) continue;
+                String path = c.partPaths == null ? null : c.partPaths.get(i);
+                fs.add(new RunFile(p.type(), p.mimeType(), p.url(), p.data(), c.name, c.callId, p.name(), path));
+            }
+        }
+        return List.copyOf(fs);
     }
 
     /**
@@ -1514,12 +1545,37 @@ public final class LlmClient {
     }
 
     private static List<ContentPart> partsOfKind(ToolResult r, boolean text) {
+        if (!text) return modelParts(r);
         List<ContentPart> out = new ArrayList<>();
-        if (r.parts() == null) return out;
+        // §7G.12 D8: only image parts of a media result reach the model — text parts included.
+        if (r.parts() == null || (r.metadata() != null && "media".equals(r.metadata().get("source")))) return out;
         for (ContentPart p : r.parts()) {
-            if (ContentPart.TEXT.equals(p.type()) == text) out.add(p);
+            if (ContentPart.TEXT.equals(p.type())) out.add(p);
         }
         return out;
+    }
+
+    /**
+     * §8A + §7G.6 model visibility: the non-text parts of a tool result that message assembly
+     * emits to the model. For a {@code source:"media"} result only {@code image} parts reach the
+     * model — video ({@code file}) and {@code audio} parts stay in {@code toolCalls[].parts} and
+     * {@code RunResult.files} (no placeholder, no warning); the model sees just {@code output}.
+     */
+    static List<ContentPart> modelParts(ToolResult r) {
+        List<ContentPart> out = new ArrayList<>();
+        if (r.parts() == null) return out;
+        boolean media = r.metadata() != null && "media".equals(r.metadata().get("source"));
+        for (ContentPart p : r.parts()) {
+            if (ContentPart.TEXT.equals(p.type())) continue;
+            if (media && !ContentPart.IMAGE.equals(p.type())) continue;
+            out.add(p);
+        }
+        return out;
+    }
+
+    /** The tool-result content this client's style sends for {@code r} (§8A, §7G.12 D9). */
+    Object toolResultContent(ToolResult r) {
+        return "anthropic".equals(opts.style) ? anthropicToolContent(r) : openAIToolContent(r);
     }
 
     /**
@@ -1543,10 +1599,14 @@ public final class LlmClient {
      */
     private Object anthropicToolContent(ToolResult r) {
         if (r.parts() == null) return r.output();  // byte-identical to a text-only result
+        List<ContentPart> texts = partsOfKind(r, true);
+        List<ContentPart> nonText = partsOfKind(r, false);
+        // §7G.6: a media result whose only parts are video/audio reaches the model as its output alone.
+        if (texts.isEmpty() && nonText.isEmpty()) return r.output();
         List<Object> blocks = new ArrayList<>();
         blocks.add(ContentParts.textBlock(r.output()));
-        blocks.addAll(encodeParts(partsOfKind(r, true), false));
-        blocks.addAll(encodeParts(partsOfKind(r, false), false));
+        blocks.addAll(encodeParts(texts, false));
+        blocks.addAll(encodeParts(nonText, false));
         return blocks;
     }
 

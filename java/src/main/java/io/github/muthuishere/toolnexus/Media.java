@@ -1,81 +1,43 @@
 package io.github.muthuishere.toolnexus;
 
-import tools.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.annotation.JsonInclude;
 
 import java.io.IOException;
-import java.math.BigDecimal;
-import java.net.URI;
 import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Base64;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
+import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
 import java.util.function.Function;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 /**
- * §7G Media generation (source {@code "media"}): image, video, speech, transcription, voice
- * cloning and talking-head generation behind one engine with two faces — typed verbs a host
+ * §7G Media generation (source {@code "media"}): image, video, speech, music, transcription,
+ * voice cloning and talking-head video behind one interface with two faces — typed verbs a host
  * calls ({@link #image}, {@link #video}, …, {@link #generate}) and tools an LLM calls
- * ({@link #tools()}). Providers are {@link Style styles}: JSON data, never code.
+ * ({@link #tools()}).
  *
- * <p>Cancellation follows the port's idiom: interrupt the calling thread, or pass a
- * {@link LlmClient.CancelToken}; the engine then throws {@link LlmClient.CancelledException}.
+ * <p>Providers are {@link MediaClient}s: built-in API clients ({@link A2EMediaClient},
+ * {@link ElevenLabsMediaClient}, {@link OpenAIMediaClient}, {@link OpenRouterMediaClient},
+ * {@link FalMediaClient}), CLI clients ({@link GrokMediaClient}, {@link CodexMediaClient}), style
+ * clients ({@link #styleMediaClient}) or your own. {@link #create} routes each call to the first
+ * client that supports the verb and falls through <b>only</b> on
+ * {@link MediaUnavailableException}.
+ *
+ * <p>Cancellation follows the port's idiom: interrupt the calling thread, pass a
+ * {@link LlmClient.CancelToken}, or set {@link Ctx#cancelled}; the call then throws
+ * {@link LlmClient.CancelledException}.
  */
 public final class Media {
-
-    // ------------------------------------------------------------------
-    // The canonical verb table — conformance/media/verbs.json, verbatim.
-    // ------------------------------------------------------------------
-    private static final String VERBS_JSON = """
-            {
-              "verbs": [
-                { "verb": "image", "tool": "generate_image", "description": "Generate an image from a text prompt.",
-                  "args": [
-                    { "name": "prompt", "type": "string", "description": "What to draw.", "required": true },
-                    { "name": "width", "type": "integer", "description": "Width in pixels." },
-                    { "name": "height", "type": "integer", "description": "Height in pixels." },
-                    { "name": "aspectRatio", "type": "string", "description": "Aspect ratio, e.g. 16:9." },
-                    { "name": "seed", "type": "integer", "description": "Seed for reproducible output." } ] },
-                { "verb": "video", "tool": "generate_video", "description": "Generate a short video from a prompt, optionally starting from an image URL. Can take minutes.",
-                  "args": [
-                    { "name": "prompt", "type": "string", "description": "What should happen in the video.", "required": true },
-                    { "name": "image", "type": "string", "description": "URL of the starting image." },
-                    { "name": "seconds", "type": "integer", "description": "Video length in seconds." },
-                    { "name": "aspectRatio", "type": "string", "description": "Aspect ratio, e.g. 9:16." } ] },
-                { "verb": "speech", "tool": "generate_speech", "description": "Speak text aloud and return the audio.",
-                  "args": [
-                    { "name": "text", "type": "string", "description": "The text to speak.", "required": true },
-                    { "name": "voice", "type": "string", "description": "Voice or speaker id." } ] },
-                { "verb": "transcribe", "tool": "transcribe_audio", "description": "Transcribe speech in an audio URL to text.",
-                  "args": [
-                    { "name": "audio", "type": "string", "description": "URL of the audio.", "required": true } ] },
-                { "verb": "cloneVoice", "tool": "clone_voice", "description": "Create a cloned voice from audio sample URLs and return its voice id.",
-                  "args": [
-                    { "name": "name", "type": "string", "description": "Name for the new voice.", "required": true },
-                    { "name": "samples", "type": "array", "items": "string", "description": "URLs of audio samples of the voice.", "required": true } ] },
-                { "verb": "talking", "tool": "talking_video", "description": "Make the person in an image speak the given audio (lip-synced video).",
-                  "args": [
-                    { "name": "image", "type": "string", "description": "URL of the face image.", "required": true },
-                    { "name": "audio", "type": "string", "description": "URL of the speech audio.", "required": true } ] }
-              ]
-            }
-            """;
-
-    @SuppressWarnings("unchecked")
-    private static final List<Map<String, Object>> VERBS =
-            (List<Map<String, Object>>) Json.toMap(VERBS_JSON).get("verbs");
-
-    private static final HttpClient DEFAULT_HTTP = HttpClient.newHttpClient();
 
     /** Env lookup seam (package-private so tests can inject an environment). */
     static Function<String, String> env = System::getenv;
@@ -84,10 +46,216 @@ public final class Media {
     // Public types
     // ------------------------------------------------------------------
 
-    /** A provider style (§7G "Style (JSON)"), held as its parsed JSON object. */
-    public record Style(Map<String, Object> spec) {
-        public Style {
-            Objects.requireNonNull(spec, "style");
+    /** One accepted canonical arg of a verb and whether the client requires it (§7G.2). */
+    public record ArgSpec(String name, boolean required) {
+        public ArgSpec {
+            Objects.requireNonNull(name, "name");
+        }
+    }
+
+    /**
+     * {@code MediaFile = {type, mimeType, url?, path?, data?}} — {@code type} is the §1B part type
+     * ({@code image}, {@code audio}, {@code file} for video); which of url / path / data are set is
+     * decided by gather (§7G.5).
+     */
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record MediaFile(String type, String mimeType, String url, String path, String data) {
+        /** A URL file. */
+        public static MediaFile ofUrl(String type, String mimeType, String url) {
+            return new MediaFile(type, mimeType, url, null, null);
+        }
+    }
+
+    /**
+     * {@code MediaUsage = {inputTokens?, outputTokens?, costUsd?, raw?}} (§7G.12 D21): only what the
+     * provider reported, never estimated. {@code raw} carries provider fields kept verbatim.
+     */
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record MediaUsage(Long inputTokens, Long outputTokens, Double costUsd, Map<String, Object> raw) {
+        /** {@code null} when every field is absent (no {@code usage} key at all). */
+        static MediaUsage ofNullable(Long in, Long out, Double cost, Map<String, Object> raw) {
+            if (in == null && out == null && cost == null && (raw == null || raw.isEmpty())) return null;
+            return new MediaUsage(in, out, cost, raw == null || raw.isEmpty() ? null : raw);
+        }
+
+        /** The JSON shape ({@code tool metadata.usage}). */
+        public Map<String, Object> toMap() {
+            Map<String, Object> m = new LinkedHashMap<>();
+            if (inputTokens != null) m.put("inputTokens", inputTokens);
+            if (outputTokens != null) m.put("outputTokens", outputTokens);
+            if (costUsd != null) m.put("costUsd", costUsd);
+            if (raw != null) m.put("raw", raw);
+            return m;
+        }
+    }
+
+    /**
+     * {@code MediaResult = {files, text?, jobId?, status, usage?, style?, model?}}. {@code files} is
+     * never null. {@code style} is who served the call (preset id, HTTP style name, else client name);
+     * {@code model} the configured model for the verb of a loaded style, never guessed (§7G.10b).
+     */
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record MediaResult(List<MediaFile> files, String text, String jobId, String status, MediaUsage usage,
+                              String style, String model) {
+        public MediaResult {
+            files = files == null ? List.of() : List.copyOf(files);
+            if (status == null) status = "completed";
+            if (style != null && style.isEmpty()) style = null;
+            if (model != null && model.isEmpty()) model = null;
+        }
+
+        public MediaResult(List<MediaFile> files, String text, String jobId, String status, MediaUsage usage) {
+            this(files, text, jobId, status, usage, null, null);
+        }
+
+        public MediaResult(List<MediaFile> files, String text, String jobId, String status) {
+            this(files, text, jobId, status, null);
+        }
+
+        /** This result with {@code style}/{@code model} filled where still absent. */
+        MediaResult withSource(String s, String m) {
+            return new MediaResult(files, text, jobId, status, usage, style != null ? style : s, model != null ? model : m);
+        }
+    }
+
+    /** {@code style.available()} (§7G.10b): {@code {installed, loggedIn, reason}}. */
+    public record Availability(boolean installed, boolean loggedIn, String reason) {}
+
+    /** Env var that, set to {@code 0}, makes every mock preset report unavailable. */
+    public static final String MOCK_AVAILABLE_ENV = "TOOLNEXUS_MEDIA_MOCK_AVAILABLE";
+
+    /** A progress report: {@code {verb, client, jobId?, status, elapsedMs}}. */
+    public record Progress(String verb, String client, String jobId, String status, long elapsedMs) {}
+
+    /**
+     * The media error: the exact §7G message, the media {@code status}
+     * ({@code failed|timeout|cancelled|unavailable}) and the job id when known.
+     */
+    public static class MediaException extends RuntimeException {
+        private final String status;
+        private final String jobId;
+
+        public MediaException(String message) {
+            this(message, "failed", null);
+        }
+
+        public MediaException(String message, String status, String jobId) {
+            super(message);
+            this.status = status == null ? "failed" : status;
+            this.jobId = jobId;
+        }
+
+        public String status() { return status; }
+
+        public String jobId() { return jobId; }
+    }
+
+    /** Status {@code unavailable} (§7G.2): the call was valid but this client cannot serve it now. */
+    public static final class MediaUnavailableException extends MediaException {
+        public MediaUnavailableException(String message) {
+            this(message, null);
+        }
+
+        public MediaUnavailableException(String message, String jobId) {
+            super(message, "unavailable", jobId);
+        }
+    }
+
+    /** Per-call context: cancellation, absolute deadline, progress, provider options. */
+    public static final class Ctx {
+        public BooleanSupplier cancelled;
+        public Instant deadline;
+        public Consumer<Progress> progress;
+        /** Function face only: top-level keys overwrite the JSON body (or multipart fields) last. */
+        public Map<String, Object> providerOptions;
+
+        public Ctx cancelled(BooleanSupplier v) { this.cancelled = v; return this; }
+        public Ctx deadline(Instant v) { this.deadline = v; return this; }
+        public Ctx progress(Consumer<Progress> v) { this.progress = v; return this; }
+        public Ctx providerOptions(Map<String, Object> v) { this.providerOptions = v; return this; }
+    }
+
+    /** {@code loop} config: poll interval, job deadline, progress callback (§7G.4). */
+    public static final class Loop {
+        public Long intervalMs;
+        public Long timeoutMs;
+        public Consumer<Progress> onProgress;
+
+        public Loop intervalMs(long v) { this.intervalMs = v; return this; }
+        public Loop timeoutMs(long v) { this.timeoutMs = v; return this; }
+        public Loop onProgress(Consumer<Progress> v) { this.onProgress = v; return this; }
+    }
+
+    /** {@code gather} config (§7G.5): {@code mode} url|download|inline, {@code dir}, {@code maxBytes}, {@code keep}, {@code name}. */
+    public static final class Gather {
+        public String mode;
+        public String dir;
+        public Long maxBytes;
+        public Boolean keep;
+        public String name;
+
+        public Gather mode(String v) { this.mode = v; return this; }
+        public Gather dir(String v) { this.dir = v; return this; }
+        public Gather maxBytes(long v) { this.maxBytes = v; return this; }
+        public Gather keep(boolean v) { this.keep = v; return this; }
+        /**
+         * Name saved files {@code <name><ext>}, then {@code <name>-2<ext>}, … (first free name).
+         * Sanitised: anything outside {@code [A-Za-z0-9._-]} becomes {@code -}, leading {@code .}
+         * and {@code -} are dropped; empty ⇒ the default naming (§7G.10b).
+         */
+        public Gather name(String v) { this.name = v; return this; }
+    }
+
+    /**
+     * The one client config shape (§7G.4): {@code model, models, key, url, command, loop, gather,
+     * httpClient}. Fields a client does not use are ignored. A key is never logged.
+     */
+    public static final class Config {
+        public String model;
+        public Map<String, String> models;
+        public String key;
+        public String url;
+        public List<String> command;
+        public Loop loop;
+        public Gather gather;
+        public HttpClient httpClient;
+
+        public Config model(String v) { this.model = v; return this; }
+        public Config models(Map<String, String> v) { this.models = v; return this; }
+        public Config key(String v) { this.key = v; return this; }
+        public Config url(String v) { this.url = v; return this; }
+        /** One executable (never shell-split). */
+        public Config command(String v) { this.command = v == null ? null : List.of(v); return this; }
+        public Config command(List<String> v) { this.command = v == null ? null : List.copyOf(v); return this; }
+        public Config loop(Loop v) { this.loop = v; return this; }
+        public Config gather(Gather v) { this.gather = v; return this; }
+        public Config httpClient(HttpClient v) { this.httpClient = v; return this; }
+
+        static Config orEmpty(Config c) {
+            return c == null ? new Config() : c;
+        }
+    }
+
+    /**
+     * A loaded provider style (§7G.7): either an HTTP style held as its parsed JSON object, or a
+     * built-in CLI preset ({@link MediaStyle#XAI_GROK_CLI}, …). A loaded style is itself a
+     * {@link MediaClient}, so {@code Media.create(Media.loadMediaStyle(...))} works; its verb support
+     * comes only from the style's own declaration.
+     */
+    public static final class Style implements MediaClient {
+        private final Map<String, Object> spec;
+        private final String preset;
+        private final Config config;
+        private volatile MediaClient client;
+
+        public Style(Map<String, Object> spec) {
+            this(Objects.requireNonNull(spec, "style"), null, null);
+        }
+
+        private Style(Map<String, Object> spec, String preset, Config config) {
+            this.spec = spec;
+            this.preset = preset;
+            this.config = config;
         }
 
         /** Parse a style from JSON text. */
@@ -99,33 +267,134 @@ public final class Media {
         public static Style of(Map<String, Object> spec) {
             return new Style(spec);
         }
-    }
 
-    /** {@code File = {type, mimeType, url}}. */
-    public record File(String type, String mimeType, String url) {}
+        /** The parsed JSON object ({@code null} for a CLI preset). */
+        public Map<String, Object> spec() { return spec; }
 
-    /** {@code MediaResult = {files, text?, jobId?, status}}. {@code files} is never null. */
-    public record MediaResult(List<File> files, String text, String jobId, String status) {
-        public MediaResult {
-            files = files == null ? List.of() : List.copyOf(files);
+        /** The CLI preset name ({@code "xai-grok-cli"}, …), or {@code null} for an HTTP style. */
+        public String preset() { return preset; }
+
+        Style withConfig(Config c) {
+            return new Style(spec, preset, c);
         }
-    }
 
-    /** Progress event passed to {@link Options#onProgress} after every poll. */
-    public record Progress(String verb, String jobId, String status) {}
+        static Style ofPreset(String preset, Config c) {
+            return new Style(null, preset, c);
+        }
 
-    /** Every engine error (the message is the exact §7G error string). */
-    public static final class MediaException extends RuntimeException {
-        public MediaException(String message) { super(message); }
-    }
+        /** The client behind this style. */
+        MediaClient client() {
+            MediaClient c = client;
+            if (c == null) {
+                if (preset != null) {
+                    CliMediaClient cli = switch (MediaStyle.label(preset)) {
+                        case "grok" -> new GrokMediaClient(config);
+                        case "codex" -> new CodexMediaClient(config);
+                        default -> new AgyMediaClient(config);
+                    };
+                    cli.mock = preset.endsWith("-mock");
+                    c = cli;
+                } else {
+                    c = new StyleMediaClient(this, config);
+                }
+                client = c;
+            }
+            return c;
+        }
 
-    /** Media options: progress callback and the HTTP-client seam (same as the LLM client's). */
-    public static final class Options {
-        public Consumer<Progress> onProgress;
-        public HttpClient httpClient;
+        String styleId() {
+            return spec != null && spec.get("name") instanceof String n && !n.isEmpty() ? n : "style";
+        }
 
-        public Options onProgress(Consumer<Progress> v) { this.onProgress = v; return this; }
-        public Options httpClient(HttpClient v) { this.httpClient = v; return this; }
+        /**
+         * Whether this style can run, in well under a second, generating nothing and reading no
+         * secret (§7G.10b). CLI preset: the command is found and the CLI's own login file exists
+         * (never read). HTTP style: the config key is set, or every {@code ${VAR}} its headers use.
+         */
+        public Availability available() {
+            if (preset == null) {
+                String id = styleId();
+                if (config != null && config.key != null && !config.key.isEmpty()) {
+                    return new Availability(true, true, id + ": key from config");
+                }
+                for (String v : headerVars()) {
+                    String val = env.apply(v);
+                    if (val == null || val.isEmpty()) return new Availability(true, false, id + ": " + v + " is not set");
+                }
+                return new Availability(true, true, id + ": env present");
+            }
+            String label = MediaStyle.label(preset);
+            if (preset.endsWith("-mock")) {
+                if ("0".equals(env.apply(MOCK_AVAILABLE_ENV))) {
+                    return new Availability(false, false, label + ": mock set unavailable by " + MOCK_AVAILABLE_ENV + "=0");
+                }
+                return new Availability(true, true, label + ": mock");
+            }
+            String bin = config != null && config.command != null && !config.command.isEmpty() ? config.command.get(0) : label;
+            if (!onPath(bin)) return new Availability(false, false, label + ": \"" + bin + "\" not found on PATH");
+            Path auth = authFile(label);
+            if (!Files.isRegularFile(auth)) {
+                return new Availability(true, false, label + ": installed, not logged in (" + auth + " missing)");
+            }
+            return new Availability(true, true, label + ": installed, logged in (" + auth + " present)");
+        }
+
+        private List<String> headerVars() {
+            java.util.TreeSet<String> out = new java.util.TreeSet<>();
+            if (spec != null && spec.get("headers") instanceof Map<?, ?> h) {
+                java.util.regex.Matcher m;
+                for (Object v : h.values()) {
+                    if (!(v instanceof String sv)) continue;
+                    m = HEADER_VAR.matcher(sv);
+                    while (m.find()) out.add(m.group(1));
+                }
+            }
+            return new ArrayList<>(out);
+        }
+
+        private static final java.util.regex.Pattern HEADER_VAR =
+                java.util.regex.Pattern.compile("\\$\\{([A-Za-z_][A-Za-z0-9_]*)\\}");
+
+        private static boolean onPath(String bin) {
+            if (bin.contains("/") || bin.contains(java.io.File.separator)) {
+                Path p = Path.of(bin);
+                return Files.isRegularFile(p) && Files.isExecutable(p);
+            }
+            String path = env.apply("PATH");
+            if (path == null) return false;
+            for (String d : path.split(java.io.File.pathSeparator)) {
+                if (d.isEmpty()) d = ".";
+                Path p = Path.of(d, bin);
+                if (Files.isRegularFile(p) && Files.isExecutable(p)) return true;
+            }
+            return false;
+        }
+
+        private static Path authFile(String label) {
+            String home = env.apply("HOME");
+            if (home == null || home.isEmpty()) home = System.getProperty("user.home");
+            return switch (label) {
+                case "grok" -> Path.of(home, ".grok", "auth.json");
+                case "codex" -> {
+                    String ch = env.apply("CODEX_HOME");
+                    yield ch != null && !ch.isEmpty() ? Path.of(ch, "auth.json") : Path.of(home, ".codex", "auth.json");
+                }
+                default -> Path.of(home, ".gemini", "antigravity-cli", "antigravity-oauth-token");
+            };
+        }
+
+        @Override public String name() { return client().name(); }
+        @Override public boolean supports(String verb) { return client().supports(verb); }
+        @Override public List<ArgSpec> args(String verb) { return client().args(verb); }
+        @Override public MediaResult call(String verb, Map<String, Object> args, Ctx ctx) {
+            return client().call(verb, args, ctx);
+        }
+
+        @Override public boolean equals(Object o) {
+            return o instanceof Style s && Objects.equals(spec, s.spec) && Objects.equals(preset, s.preset);
+        }
+
+        @Override public int hashCode() { return Objects.hash(spec, preset); }
     }
 
     // Typed inputs (function face). Null fields are absent; providerOptions may be null.
@@ -143,66 +412,107 @@ public final class Media {
         public SpeechInput(String text) { this(text, null, null); }
     }
 
-    public record TranscribeInput(String audio, Map<String, Object> providerOptions) {
-        public TranscribeInput(String audio) { this(audio, null); }
+    public record MusicInput(String prompt, Integer seconds, Boolean instrumental, String lyrics,
+                             Map<String, Object> providerOptions) {
+        public MusicInput(String prompt) { this(prompt, null, null, null, null); }
+    }
+
+    public record TranscribeInput(String audio, String language, Map<String, Object> providerOptions) {
+        public TranscribeInput(String audio) { this(audio, null, null); }
     }
 
     public record CloneVoiceInput(String name, List<String> samples, Map<String, Object> providerOptions) {
         public CloneVoiceInput(String name, List<String> samples) { this(name, samples, null); }
     }
 
-    public record TalkingInput(String image, String audio, Map<String, Object> providerOptions) {
-        public TalkingInput(String image, String audio) { this(image, audio, null); }
+    public record TalkInput(String image, String audio, String text, String voice,
+                            Map<String, Object> providerOptions) {
+        public TalkInput(String image, String audio) { this(image, audio, null, null, null); }
     }
 
     // ------------------------------------------------------------------
     // Construction
     // ------------------------------------------------------------------
 
-    private final List<Style> styles;
-    private final Options opts;
+    private final List<MediaClient> clients;
 
-    private Media(List<Style> styles, Options opts) {
-        this.styles = List.copyOf(styles);
-        for (Style s : this.styles) validate(s);
-        this.opts = opts == null ? new Options() : opts;
+    private Media(List<MediaClient> clients) {
+        if (clients == null || clients.isEmpty()) throw new MediaException("media: no clients");
+        for (MediaClient c : clients) Objects.requireNonNull(c, "media client");
+        this.clients = List.copyOf(clients);
     }
 
-    /** Load-time style checks: an argument mapped to the empty path is an error (§7G). */
-    @SuppressWarnings("unchecked")
-    private static void validate(Style s) {
-        if (!(s.spec().get("verbs") instanceof Map<?, ?> vs)) return;
-        for (Object v : vs.values()) {
-            if (v instanceof Map<?, ?> vm && vm.get("args") instanceof Map<?, ?> am) {
-                for (Map.Entry<?, ?> e : am.entrySet()) {
-                    if ("".equals(e.getValue())) {
-                        throw new MediaException("style: empty path for argument \"" + e.getKey() + "\"");
-                    }
-                }
-            }
-        }
+    /** {@code createMedia(client | [client])} (§7G.3). An empty list fails: {@code media: no clients}. */
+    public static Media create(MediaClient... clients) {
+        return new Media(clients == null ? List.of() : List.of(clients));
     }
 
-    /** Read one style file (JSON). */
-    public static Style loadStyle(String path) {
+    public static Media create(List<MediaClient> clients) {
+        return new Media(clients == null ? List.of() : clients);
+    }
+
+    /** Alias of {@link #create(MediaClient...)} matching the spec's spelling. */
+    public static Media createMedia(MediaClient... clients) {
+        return create(clients);
+    }
+
+    public static Media createMedia(List<MediaClient> clients) {
+        return create(clients);
+    }
+
+    /**
+     * Load a style: a built-in CLI preset name ({@link MediaStyle#XAI_GROK_CLI}, {@link MediaStyle#OPENAI_CODEX_CLI},
+     * {@link MediaStyle#GOOGLE_AGY_CLI} or a {@code -mock} twin), else one style file (JSON). Unknown
+     * verbs and empty arg paths fail here.
+     */
+    public static Style loadMediaStyle(String pathOrPreset) {
+        return loadMediaStyle(pathOrPreset, null);
+    }
+
+    /** {@link #loadMediaStyle(String)} with the config of the client behind the style (model, command, loop, gather). */
+    public static Style loadMediaStyle(String pathOrPreset, Config config) {
+        if (MediaStyle.isPreset(pathOrPreset)) return Style.ofPreset(pathOrPreset, config);
+        Style s;
         try {
-            return Style.parse(Files.readString(Path.of(path), StandardCharsets.UTF_8));
+            s = Style.parse(Files.readString(Path.of(pathOrPreset), StandardCharsets.UTF_8));
         } catch (IOException e) {
-            throw new MediaException("media: cannot read style " + path + ": " + e.getMessage());
+            throw new MediaException("media: cannot read style " + pathOrPreset + ": " + e.getMessage());
         }
+        StyleMediaClient.validate(s);
+        return config == null ? s : s.withConfig(config);
     }
 
-    public static Media create(Style... styles) {
-        return new Media(List.of(styles), null);
+    /** Alias of {@link #loadMediaStyle(String)}. */
+    public static Style loadStyle(String path) {
+        return loadMediaStyle(path);
     }
 
-    public static Media create(Style style, Options opts) {
-        return new Media(List.of(style), opts);
+    /** Alias of {@link #loadMediaStyle(String, Config)}. */
+    public static Style loadStyle(String path, Config config) {
+        return loadMediaStyle(path, config);
     }
 
-    /** A verb resolves to the FIRST style in the list that declares it. */
-    public static Media create(List<Style> styles, Options opts) {
-        return new Media(styles, opts);
+    /**
+     * One-shot sugar: {@code create(loadMediaStyle(style, config)).generate(verb, args)}.
+     */
+    public static MediaResult generateMedia(String style, String verb, Map<String, Object> args, Config config) {
+        return create(loadMediaStyle(style, config)).generate(verb, args);
+    }
+
+    public static MediaResult generateMedia(String style, String verb, Map<String, Object> args) {
+        return generateMedia(style, verb, args, null);
+    }
+
+    /** A {@link MediaClient} over a parsed style (§7G.7), named {@code style.name ?? "style"}. */
+    public static StyleMediaClient styleMediaClient(Style style) {
+        return styleMediaClient(style, null);
+    }
+
+    public static StyleMediaClient styleMediaClient(Style style, Config config) {
+        if (style.preset() != null) {
+            throw new MediaException("media: " + style.preset() + " is a CLI preset, not an HTTP style");
+        }
+        return new StyleMediaClient(style, config);
     }
 
     // ------------------------------------------------------------------
@@ -232,10 +542,18 @@ public final class Media {
         return generate("speech", a, in.providerOptions(), cancel);
     }
 
+    public MediaResult music(MusicInput in) { return music(in, null); }
+    public MediaResult music(MusicInput in, LlmClient.CancelToken cancel) {
+        Map<String, Object> a = new LinkedHashMap<>();
+        put(a, "prompt", in.prompt()); put(a, "seconds", in.seconds());
+        put(a, "instrumental", in.instrumental()); put(a, "lyrics", in.lyrics());
+        return generate("music", a, in.providerOptions(), cancel);
+    }
+
     public MediaResult transcribe(TranscribeInput in) { return transcribe(in, null); }
     public MediaResult transcribe(TranscribeInput in, LlmClient.CancelToken cancel) {
         Map<String, Object> a = new LinkedHashMap<>();
-        put(a, "audio", in.audio());
+        put(a, "audio", in.audio()); put(a, "language", in.language());
         return generate("transcribe", a, in.providerOptions(), cancel);
     }
 
@@ -246,33 +564,72 @@ public final class Media {
         return generate("cloneVoice", a, in.providerOptions(), cancel);
     }
 
-    public MediaResult talking(TalkingInput in) { return talking(in, null); }
-    public MediaResult talking(TalkingInput in, LlmClient.CancelToken cancel) {
+    public MediaResult talk(TalkInput in) { return talk(in, null); }
+    public MediaResult talk(TalkInput in, LlmClient.CancelToken cancel) {
         Map<String, Object> a = new LinkedHashMap<>();
         put(a, "image", in.image()); put(a, "audio", in.audio());
-        return generate("talking", a, in.providerOptions(), cancel);
+        put(a, "text", in.text()); put(a, "voice", in.voice());
+        return generate("talk", a, in.providerOptions(), cancel);
     }
 
     private static void put(Map<String, Object> m, String k, Object v) {
         if (v != null) m.put(k, v);
     }
 
-    /** Generic entry: run {@code verb} with normalised {@code args}. */
+    /** Whether any client supports {@code verb}. */
+    public boolean supports(String verb) {
+        for (MediaClient c : clients) if (c.supports(verb)) return true;
+        return false;
+    }
+
+    /** Every verb some source supports, in canonical verb order. */
+    public List<String> verbs() {
+        List<String> out = new ArrayList<>();
+        for (Map<String, Object> v : MediaSupport.VERBS) {
+            String verb = (String) v.get("verb");
+            if (supports(verb)) out.add(verb);
+        }
+        return out;
+    }
+
+    /** Who served a call (MediaResult.style). */
+    private static String sourceId(MediaClient c) {
+        if (c instanceof Style s) return s.preset != null ? s.preset : s.styleId();
+        return c.name();
+    }
+
+    /** The configured model for {@code verb} of a loaded style, or null (never guessed). */
+    private static String sourceModel(MediaClient c, String verb) {
+        if (!(c instanceof Style s) || s.config == null) return null;
+        if (s.config.models != null) {
+            String m = s.config.models.get(verb);
+            if (m != null && !m.isEmpty()) return m;
+        }
+        return s.config.model;
+    }
+
+    /** "style" when every source is a loaded style, else "client". */
+    private String noun() {
+        for (MediaClient c : clients) if (!(c instanceof Style)) return "client";
+        return "style";
+    }
+
+    /** Generic entry: run {@code verb} with canonical {@code args}. */
     public MediaResult generate(String verb, Map<String, Object> args) {
-        return generate(verb, args, null, null);
+        return generate(verb, args, (Ctx) null);
     }
 
     /**
-     * Generic entry with {@code providerOptions} (top-level keys overwrite the body last) and an
-     * optional cancel token. Throws {@link MediaException} with the exact §7G message, or
-     * {@link LlmClient.CancelledException} on cancellation (token or thread interrupt).
+     * Generic entry with {@code providerOptions} and an optional cancel token. Throws
+     * {@link MediaException} with the exact §7G message, or {@link LlmClient.CancelledException}.
      */
     public MediaResult generate(String verb, Map<String, Object> args, Map<String, Object> providerOptions,
                                 LlmClient.CancelToken cancel) {
+        Ctx ctx = new Ctx().providerOptions(providerOptions);
+        if (cancel != null) ctx.cancelled(cancel::isCancelled);
         if (cancel != null) cancel.register(Thread.currentThread());
         try {
-            return run(verb, args == null ? Map.of() : args, providerOptions,
-                    cancel == null ? () -> false : cancel::isCancelled);
+            return generate(verb, args, ctx);
         } finally {
             if (cancel != null) {
                 cancel.unregister();
@@ -281,31 +638,109 @@ public final class Media {
         }
     }
 
+    /** Generic entry with a full {@link Ctx}. */
+    public MediaResult generate(String verb, Map<String, Object> args, Ctx ctx) {
+        return route(verb, args, ctx == null ? new Ctx() : ctx).result;
+    }
+
     // ------------------------------------------------------------------
-    // Tool face
+    // Routing (§7G.3)
     // ------------------------------------------------------------------
 
-    /** One {@link Tool} (source {@code "media"}) per supported verb, in canonical order. */
+    private record Served(MediaResult result, String client) {}
+
+    private static List<ArgSpec> specsOf(MediaClient c, String verb) {
+        List<ArgSpec> s = c.args(verb);
+        return s == null ? MediaSupport.canonicalArgs(verb) : s;
+    }
+
+    private static Set<String> accepted(List<ArgSpec> specs) {
+        Set<String> out = new HashSet<>();
+        for (ArgSpec a : specs) out.add(a.name());
+        return out;
+    }
+
+    /** The first required arg (canonical order) absent from {@code args}, or null. */
+    private static String missingRequired(String verb, List<ArgSpec> specs, Map<String, Object> args) {
+        Set<String> required = new HashSet<>();
+        for (ArgSpec a : specs) if (a.required()) required.add(a.name());
+        for (ArgSpec a : MediaSupport.canonicalArgs(verb)) {
+            if (required.contains(a.name()) && !args.containsKey(a.name())) return a.name();
+        }
+        return null;
+    }
+
+    private Served route(String verb, Map<String, Object> rawArgs, Ctx ctx) {
+        List<MediaClient> candidates = new ArrayList<>();
+        if (MediaSupport.isVerb(verb)) for (MediaClient c : clients) if (c.supports(verb)) candidates.add(c);
+        if (candidates.isEmpty()) throw new MediaException("media: no " + noun() + " supports \"" + verb + "\"");
+        Map<String, Object> args = MediaSupport.clean(rawArgs);
+
+        // §7G.3 step 3 (D7/D19): a non-canonical key fails at once, before any client is tried.
+        Set<String> canonical = accepted(MediaSupport.canonicalArgs(verb));
+        List<String> keys = new ArrayList<>(args.keySet());
+        keys.sort(null);
+        for (String k : keys) {
+            if (!canonical.contains(k)) throw new MediaException(verb + ": argument \"" + k + "\" not supported");
+        }
+
+        // §7G.3 step 4 (D19): every candidate, the first included, is skipped when it does not
+        // accept an arg or lacks a required one; a skip counts exactly like unavailable.
+        List<String> reasons = new ArrayList<>();
+        for (MediaClient c : candidates) {
+            List<ArgSpec> cSpecs = specsOf(c, verb);
+            Set<String> acc = accepted(cSpecs);
+            String rejected = null;
+            for (String k : keys) if (!acc.contains(k)) { rejected = k; break; }
+            if (rejected != null) {
+                reasons.add(c.name() + ": argument \"" + rejected + "\" not supported");
+                continue;
+            }
+            String missing = missingRequired(verb, cSpecs, args);
+            if (missing != null) {
+                reasons.add(c.name() + ": missing required argument \"" + missing + "\"");
+                continue;
+            }
+            try {
+                MediaResult r = c.call(verb, new LinkedHashMap<>(args), ctx);
+                if (r != null) r = r.withSource(sourceId(c), sourceModel(c, verb));
+                return new Served(r, c.name());
+            } catch (MediaUnavailableException e) {
+                reasons.add(e.getMessage());
+            }
+        }
+        throw new MediaUnavailableException("media: no client available for \"" + verb + "\": "
+                + String.join("; ", reasons));
+    }
+
+    // ------------------------------------------------------------------
+    // Tool face (§7G.6)
+    // ------------------------------------------------------------------
+
+    /** One {@link Tool} (source {@code "media"}) per verb any client supports, in canonical order. */
     @SuppressWarnings("unchecked")
     public List<Tool> tools() {
         List<Tool> out = new ArrayList<>();
-        for (Map<String, Object> v : VERBS) {
+        for (Map<String, Object> v : MediaSupport.VERBS) {
             String verb = (String) v.get("verb");
-            Resolved r = resolve(verb);
-            if (r == null) continue;
-            Map<String, Object> mapped = r.verb.get("args") instanceof Map
-                    ? (Map<String, Object>) r.verb.get("args") : Map.of();
+            MediaClient first = null;
+            for (MediaClient c : clients) if (c.supports(verb)) { first = c; break; }
+            if (first == null) continue;
+            List<ArgSpec> specs = specsOf(first, verb);
+            Set<String> ok = accepted(specs);
+            Set<String> req = new HashSet<>();
+            for (ArgSpec a : specs) if (a.required()) req.add(a.name());
             Map<String, Object> props = new LinkedHashMap<>();
             List<Object> required = new ArrayList<>();
             for (Map<String, Object> a : (List<Map<String, Object>>) v.get("args")) {
                 String name = (String) a.get("name");
-                if (!mapped.containsKey(name)) continue;
+                if (!ok.contains(name)) continue;
                 Map<String, Object> p = new LinkedHashMap<>();
                 p.put("type", a.get("type"));
                 if ("array".equals(a.get("type"))) p.put("items", new LinkedHashMap<>(Map.of("type", a.get("items"))));
                 p.put("description", a.get("description"));
                 props.put(name, p);
-                if (Boolean.TRUE.equals(a.get("required"))) required.add(name);
+                if (req.contains(name)) required.add(name);
             }
             Map<String, Object> schema = new LinkedHashMap<>();
             schema.put("type", "object");
@@ -329,476 +764,70 @@ public final class Media {
         @Override public String description() { return description; }
         @Override public Map<String, Object> inputSchema() { return schema; }
         @Override public String source() { return "media"; }
-        /** Each call is an independent remote job: always concurrency-safe (§7G, §8 Tool scheduling). */
+        /** Each call is an independent job: always concurrency-safe (§7G.6, §8 Tool scheduling). */
         @Override public boolean concurrencySafe(Map<String, Object> args) { return true; }
 
         @Override
         public ToolResult execute(Map<String, Object> args, ToolContext ctx) {
-            MediaResult res;
+            Served served;
+            List<ContentPart> parts = new ArrayList<>();
+            List<String> paths = new ArrayList<>();
+            List<String> lines = new ArrayList<>();
             try {
-                res = media.run(verb, args == null ? Map.of() : args, null,
-                        ctx == null ? () -> false : ctx::isCancelled);
-            } catch (LlmClient.CancelledException e) {
-                throw e;
+                Ctx c = new Ctx();
+                if (ctx != null) c.cancelled(ctx::isCancelled);
+                served = media.route(verb, args == null ? Map.of() : args, c);
+                if (!"text".equals(MediaSupport.kindOf(verb))) {
+                    for (MediaFile f : served.result.files()) {
+                        lines.add(line(f));
+                        parts.add(part(f));
+                        paths.add(f.path()); // §7G.12 D20: RunFile.path, never in the part
+                    }
+                }
             } catch (RuntimeException e) {
                 return ToolResult.error(e.getMessage() == null ? String.valueOf(e) : e.getMessage());
             }
+            MediaResult res = served.result;
             Map<String, Object> meta = new LinkedHashMap<>();
             meta.put("source", "media");
             meta.put("verb", verb);
+            meta.put("client", served.client);
             if (res.jobId() != null) meta.put("jobId", res.jobId());
             meta.put("status", res.status());
-            String kind = media.kindOf(verb);
-            if ("text".equals(kind)) {
-                return new ToolResult(res.text(), false, meta, null);
+            if (res.usage() != null) meta.put("usage", res.usage().toMap()); // §7G.12 D21
+            if ("text".equals(MediaSupport.kindOf(verb))) {
+                return new ToolResult(res.text() == null ? "" : res.text(), false, meta, null);
             }
-            String word = "video".equals(kind) ? "video" : "audio".equals(kind) ? "audio" : "image";
-            List<String> urls = new ArrayList<>();
-            List<ContentPart> parts = new ArrayList<>();
-            for (File f : res.files()) {
-                urls.add(f.url());
-                parts.add(new ContentPart(f.type(), null, f.mimeType(), null, f.url(), null));
-            }
-            return new ToolResult(word + " ready: " + String.join("\n", urls), false, meta, parts);
+            String kind = res.files().isEmpty() ? MediaSupport.kindOf(verb) : res.files().get(0).type();
+            String word = switch (kind) {
+                case "file", "video" -> "video";
+                case "audio" -> "audio";
+                default -> "image";
+            };
+            return new ToolResult(word + " ready: " + String.join("\n", lines), false, meta, parts, paths);
         }
-    }
 
-    // ------------------------------------------------------------------
-    // Engine
-    // ------------------------------------------------------------------
-
-    private record Resolved(Map<String, Object> style, Map<String, Object> verb) {}
-
-    @SuppressWarnings("unchecked")
-    private Resolved resolve(String verb) {
-        for (Style s : styles) {
-            Object vs = s.spec().get("verbs");
-            if (vs instanceof Map && ((Map<String, Object>) vs).get(verb) instanceof Map) {
-                return new Resolved(s.spec(), (Map<String, Object>) ((Map<String, Object>) vs).get(verb));
-            }
+        private static String line(MediaFile f) {
+            if (f.path() != null) return f.path();
+            if (f.url() != null) return f.url();
+            int n = f.data() == null ? 0 : Base64.getDecoder().decode(f.data()).length;
+            return "inline " + f.mimeType() + " " + n + " bytes";
         }
-        return null;
-    }
 
-    private String kindOf(String verb) {
-        Resolved r = resolve(verb);
-        return r == null ? null : str(r.verb.get("kind"));
-    }
-
-    @SuppressWarnings("unchecked")
-    private MediaResult run(String verb, Map<String, Object> args, Map<String, Object> providerOptions,
-                            java.util.function.BooleanSupplier cancel) {
-        Resolved r = resolve(verb);
-        if (r == null) throw new MediaException("media: no style supports \"" + verb + "\"");
-        Map<String, Object> v = r.verb;
-        Map<String, Object> mapped = v.get("args") instanceof Map ? (Map<String, Object>) v.get("args") : Map.of();
-        // null ⇒ absent; several unsupported ⇒ name the first in code-point order.
-        List<String> keys = new ArrayList<>();
-        for (Map.Entry<String, Object> e : args.entrySet()) if (e.getValue() != null) keys.add(e.getKey());
-        keys.sort(null);
-        for (String k : keys) {
-            if (!mapped.containsKey(k)) {
-                throw new MediaException(verb + ": argument \"" + k + "\" not supported by this style");
+        /** A part never holds a path (§1B): data, an http(s) url, or the local file read now. */
+        private ContentPart part(MediaFile f) {
+            if (f.data() != null) return new ContentPart(f.type(), null, f.mimeType(), f.data(), null, null);
+            if (f.url() != null && MediaSupport.isHttp(f.url())) {
+                return new ContentPart(f.type(), null, f.mimeType(), null, f.url(), null);
+            }
+            String p = f.path() != null ? f.path()
+                    : f.url() != null && f.url().startsWith("file://") ? f.url().substring(7) : f.url();
+            try {
+                byte[] b = Files.readAllBytes(Path.of(p));
+                return new ContentPart(f.type(), null, f.mimeType(), Base64.getEncoder().encodeToString(b), null, null);
+            } catch (IOException | RuntimeException e) {
+                throw new MediaException(verb + ": cannot read \"" + p + "\": " + e.getMessage());
             }
         }
-        // body = deep copy of defaults; args at their dotPaths; providerOptions last.
-        Map<String, Object> body = v.get("defaults") instanceof Map
-                ? deepCopy((Map<String, Object>) v.get("defaults")) : new LinkedHashMap<>();
-        for (Map.Entry<String, Object> e : args.entrySet()) {
-            if (e.getValue() == null) continue;
-            writePath(body, str(mapped.get(e.getKey())), deepCopyValue(e.getValue()));
-        }
-        if (providerOptions != null) {
-            for (Map.Entry<String, Object> e : providerOptions.entrySet()) body.put(e.getKey(), deepCopyValue(e.getValue()));
-        }
-
-        String base = str(r.style.get("baseUrl"));
-        if (base == null) base = "";
-        while (base.endsWith("/")) base = base.substring(0, base.length() - 1);
-        Map<String, String> headers = new LinkedHashMap<>();
-        if (r.style.get("headers") instanceof Map) {
-            for (Map.Entry<String, Object> e : ((Map<String, Object>) r.style.get("headers")).entrySet()) {
-                headers.put(e.getKey(), expandEnv(String.valueOf(e.getValue())));
-            }
-        }
-        Map<String, Object> envelope = r.style.get("errorEnvelope") instanceof Map
-                ? (Map<String, Object>) r.style.get("errorEnvelope") : null;
-
-        Map<String, Object> start = v.get("start") instanceof Map ? (Map<String, Object>) v.get("start") : Map.of();
-        String method = start.get("method") == null ? "POST" : str(start.get("method"));
-        boolean async = "async".equals(str(v.get("mode")));
-        Map<String, Object> poll = v.get("poll") instanceof Map ? (Map<String, Object>) v.get("poll") : Map.of();
-        long timeout = positive(poll.get("timeoutMs"), 600000L);
-        long deadline = System.nanoTime() + timeout * 1_000_000L;
-        String startTimeout = verb + ": timed out after " + timeout + "ms";
-        Object resp = request(verb, method, base + str(start.get("path")), Json.stringify(body), headers, envelope,
-                cancel, deadline, startTimeout);
-
-        String kind = str(v.get("kind"));
-        String status;
-        String jobId = null;
-        if (!async) {
-            status = "completed";
-        } else {
-            String idPath = str(v.get("idPath"));
-            Object id = readPath(resp, idPath);
-            if (id instanceof String sid && !sid.isEmpty()) jobId = sid;
-            else if (id instanceof Number n && isIntegral(n)) jobId = render(n);
-            if (jobId == null) throw new MediaException(verb + ": no job id at " + idPath);
-            long interval = positive(poll.get("intervalMs"), 5000L);
-            String timedOut = "job " + jobId + " timed out after " + timeout + "ms";
-            String pMethod = poll.get("method") == null ? "GET" : str(poll.get("method"));
-            String pUrl = base + str(poll.get("path")).replace("{id}", pctEncode(jobId));
-            List<Object> done = poll.get("done") instanceof List ? (List<Object>) poll.get("done") : List.of();
-            List<Object> failed = poll.get("failed") instanceof List ? (List<Object>) poll.get("failed") : List.of();
-            while (true) {
-                sleep(interval, cancel, deadline, timedOut);
-                resp = request(verb, pMethod, pUrl, null, headers, envelope, cancel, deadline, timedOut);
-                Object st = readPath(resp, str(poll.get("statusPath")));
-                String s = st == null ? "" : render(st);
-                if (opts.onProgress != null) opts.onProgress.accept(new Progress(verb, jobId, s));
-                if (matches(done, s)) { status = s; break; }
-                if (matches(failed, s)) {
-                    Object msg = poll.get("errorPath") == null ? null : readPath(resp, str(poll.get("errorPath")));
-                    String m = msg == null ? "" : (msg instanceof String ? (String) msg : render(msg));
-                    throw new MediaException("job " + jobId + " " + s + (m.isEmpty() ? "" : ": " + m));
-                }
-                if (System.nanoTime() - deadline >= 0) throw new MediaException(timedOut);
-            }
-        }
-
-        String resultPath = str(v.get("resultPath"));
-        Object val = readPath(resp, resultPath);
-        if ("text".equals(kind)) {
-            if (val instanceof String || val instanceof Number) {
-                return new MediaResult(List.of(), val instanceof String ? (String) val : render(val), jobId, status);
-            }
-            throw new MediaException(verb + ": no result at " + resultPath);
-        }
-        List<String> urls = new ArrayList<>();
-        if (val instanceof String s) {
-            if (!s.isEmpty()) urls.add(s);
-        } else if (val instanceof List<?> l) {
-            flatten(l, urls);
-        }
-        if (urls.isEmpty()) throw new MediaException(verb + ": no result at " + resultPath);
-        List<File> files = new ArrayList<>();
-        for (String u : urls) files.add(new File(fileType(kind), mimeOf(u, kind), u));
-        return new MediaResult(files, null, jobId, status);
-    }
-
-    private static void flatten(List<?> l, List<String> out) {
-        for (Object o : l) {
-            if (o instanceof String s) { if (!s.isEmpty()) out.add(s); }
-            else if (o instanceof List<?> inner) flatten(inner, out);
-        }
-    }
-
-    private static boolean matches(List<Object> list, String s) {
-        for (Object o : list) if (o != null && render(o).equals(s)) return true;
-        return false;
-    }
-
-    private static long positive(Object o, long dflt) {
-        return o instanceof Number n && n.doubleValue() > 0 ? n.longValue() : dflt;
-    }
-
-    /** RFC 3986 unreserved kept; everything else %XX (uppercase) of its UTF-8 bytes. */
-    static String pctEncode(String s) {
-        StringBuilder sb = new StringBuilder();
-        for (byte by : s.getBytes(StandardCharsets.UTF_8)) {
-            int c = by & 0xff;
-            if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')
-                    || c == '-' || c == '.' || c == '_' || c == '~') sb.append((char) c);
-            else sb.append('%').append(String.format("%02X", c));
-        }
-        return sb.toString();
-    }
-
-    /** First 1000 code points of an echoed body; "…" appended when truncated. */
-    static String capBody(String text) {
-        if (text.codePointCount(0, text.length()) <= 1000) return text;
-        return text.substring(0, text.offsetByCodePoints(0, 1000)) + "\u2026";
-    }
-
-    private static String origin(URI u) {
-        String scheme = u.getScheme() == null ? "" : u.getScheme().toLowerCase(Locale.ROOT);
-        int port = u.getPort();
-        if (port < 0) port = "https".equals(scheme) ? 443 : "http".equals(scheme) ? 80 : -1;
-        return scheme + "://" + (u.getHost() == null ? "" : u.getHost().toLowerCase(Locale.ROOT)) + ":" + port;
-    }
-
-    private Object request(String verb, String method, String url, String body, Map<String, String> headers,
-                           Map<String, Object> envelope, java.util.function.BooleanSupplier cancel,
-                           long deadline, String timedOut) {
-        checkCancel(cancel);
-        HttpClient http = opts.httpClient != null ? opts.httpClient : DEFAULT_HTTP;
-        URI target = URI.create(url);
-        String startOrigin = origin(target);
-        HttpResponse<String> resp;
-        for (int hops = 0; ; hops++) {
-            // Style headers are never sent to an origin other than the request's start origin (§7G).
-            boolean sameOrigin = origin(target).equals(startOrigin);
-            HttpRequest.Builder b = HttpRequest.newBuilder(target);
-            if (sameOrigin) for (Map.Entry<String, String> h : headers.entrySet()) b.header(h.getKey(), h.getValue());
-            if (body != null) {
-                b.header("Content-Type", "application/json");
-                b.method(method, HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8));
-            } else {
-                b.method(method, HttpRequest.BodyPublishers.noBody());
-            }
-            resp = await(http, b.build(), cancel, deadline, timedOut, verb);
-            int sc = resp.statusCode();
-            String loc = resp.headers().firstValue("Location").orElse(null);
-            if (loc == null || !(sc == 301 || sc == 302 || sc == 303 || sc == 307 || sc == 308)) break;
-            // At most 10 redirects followed (11 requests); the next one is an error (§7G).
-            if (hops >= 10) throw new MediaException(verb + ": too many redirects");
-            target = target.resolve(loc);
-            // 301/302/303 after any non-GET/HEAD request => GET, no body; 307/308 keep method + body.
-            if ((sc == 301 || sc == 302 || sc == 303)
-                    && !"GET".equalsIgnoreCase(method) && !"HEAD".equalsIgnoreCase(method)) {
-                method = "GET";
-                body = null;
-            }
-        }
-        String text = resp.body() == null ? "" : resp.body();
-        if (resp.statusCode() < 200 || resp.statusCode() >= 300) {
-            throw new MediaException("HTTP " + resp.statusCode() + ": " + capBody(text));
-        }
-        Object parsed;
-        try {
-            parsed = Json.MAPPER.readValue(text, new TypeReference<Object>() {});
-        } catch (Exception e) {
-            throw new MediaException(verb + ": response is not JSON");
-        }
-        if (envelope != null) {
-            Object code = readPath(parsed, str(envelope.get("codePath")));
-            if (code != null) {
-                List<?> ok = envelope.get("okValues") instanceof List<?> l ? l : List.of();
-                boolean isOk = false;
-                for (Object o : ok) if (jsonEq(o, code)) { isOk = true; break; }
-                if (!isOk) {
-                    Object msg = envelope.get("messagePath") == null ? null : readPath(parsed, str(envelope.get("messagePath")));
-                    throw new MediaException("API error " + render(code) + ": " + (msg instanceof String s ? s : ""));
-                }
-            }
-        }
-        return parsed;
-    }
-
-    /** Send bounded by the job deadline, polling the cancel flag so a ToolContext flag aborts too. */
-    private static HttpResponse<String> await(HttpClient http, HttpRequest req, java.util.function.BooleanSupplier cancel,
-                                              long deadline, String timedOut, String verb) {
-        java.util.concurrent.CompletableFuture<HttpResponse<String>> f =
-                http.sendAsync(req, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
-        try {
-            while (true) {
-                checkCancel(cancel);
-                long left = deadline - System.nanoTime();
-                if (left <= 0) throw new MediaException(timedOut);
-                try {
-                    return f.get(Math.min(left, 50_000_000L), java.util.concurrent.TimeUnit.NANOSECONDS);
-                } catch (java.util.concurrent.TimeoutException ignored) {
-                    // re-check cancel and deadline
-                }
-            }
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new LlmClient.CancelledException("media cancelled");
-        } catch (java.util.concurrent.ExecutionException e) {
-            Throwable c = e.getCause() == null ? e : e.getCause();
-            if (c instanceof java.net.http.HttpTimeoutException) throw new MediaException(timedOut);
-            throw new MediaException(verb + ": " + (c.getMessage() == null ? c.toString() : c.getMessage()));
-        } finally {
-            if (!f.isDone()) f.cancel(true);
-        }
-    }
-
-    private static void sleep(long ms, java.util.function.BooleanSupplier cancel, long deadline, String timedOut) {
-        long end = System.nanoTime() + Math.max(0, ms) * 1_000_000L;
-        try {
-            while (true) {
-                checkCancel(cancel);
-                long left = end - System.nanoTime();
-                if (left <= 0) return;
-                Thread.sleep(Math.min(left / 1_000_000L + 1, 50));
-            }
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new LlmClient.CancelledException("media cancelled");
-        }
-    }
-
-    private static void checkCancel(java.util.function.BooleanSupplier cancel) {
-        if (cancel.getAsBoolean() || Thread.currentThread().isInterrupted()) {
-            throw new LlmClient.CancelledException("media cancelled");
-        }
-    }
-
-    // ------------------------------------------------------------------
-    // Helpers: dotPath, env, mime, JSON
-    // ------------------------------------------------------------------
-
-    private static final Pattern ENV = Pattern.compile("\\$\\{([^}]*)}");
-
-    static String expandEnv(String s) {
-        Matcher m = ENV.matcher(s);
-        StringBuilder sb = new StringBuilder();
-        while (m.find()) {
-            String val = env.apply(m.group(1));
-            m.appendReplacement(sb, Matcher.quoteReplacement(val == null ? "" : val));
-        }
-        m.appendTail(sb);
-        return sb.toString();
-    }
-
-    private static boolean isIndex(String seg) {
-        return !seg.isEmpty() && seg.chars().allMatch(Character::isDigit);
-    }
-
-    static Object readPath(Object root, String path) {
-        if (path == null) return null;
-        if (path.isEmpty()) return root;
-        Object cur = root;
-        for (String seg : path.split("\\.", -1)) {
-            if (cur instanceof Map<?, ?> m) {
-                cur = m.get(seg);
-            } else if (cur instanceof List<?> l && isIndex(seg)) {
-                int i;
-                try { i = Integer.parseInt(seg); } catch (NumberFormatException e) { return null; }
-                cur = i < l.size() ? l.get(i) : null;
-            } else {
-                return null;
-            }
-            if (cur == null) return null;
-        }
-        return cur;
-    }
-
-    @SuppressWarnings("unchecked")
-    static void writePath(Map<String, Object> root, String path, Object value) {
-        String[] segs = path.split("\\.", -1);
-        Object cur = root;
-        for (int i = 0; i < segs.length; i++) {
-            String seg = segs[i];
-            boolean last = i == segs.length - 1;
-            Object next = last ? value : (isIndex(segs[i + 1]) ? new ArrayList<>() : new LinkedHashMap<>());
-            if (cur instanceof Map) {
-                Map<String, Object> m = (Map<String, Object>) cur;
-                if (last) { m.put(seg, value); return; }
-                Object existing = m.get(seg);
-                if (!(existing instanceof Map) && !(existing instanceof List)
-                        || existing instanceof List && !isIndex(segs[i + 1])) { m.put(seg, next); existing = next; }
-                cur = existing;
-            } else if (cur instanceof List) {
-                List<Object> l = (List<Object>) cur;
-                int idx;
-                try { idx = Integer.parseInt(seg); } catch (NumberFormatException e) { return; }
-                while (l.size() <= idx) l.add(null);
-                if (last) { l.set(idx, value); return; }
-                Object existing = l.get(idx);
-                if (!(existing instanceof Map) && !(existing instanceof List)
-                        || existing instanceof List && !isIndex(segs[i + 1])) { l.set(idx, next); existing = next; }
-                cur = existing;
-            } else {
-                return;
-            }
-        }
-    }
-
-    @SuppressWarnings("unchecked")
-    private static Object deepCopyValue(Object v) {
-        if (v instanceof Map) return deepCopy((Map<String, Object>) v);
-        if (v instanceof List<?> l) {
-            List<Object> out = new ArrayList<>();
-            for (Object o : l) out.add(deepCopyValue(o));
-            return out;
-        }
-        return v;
-    }
-
-    private static Map<String, Object> deepCopy(Map<String, Object> m) {
-        Map<String, Object> out = new LinkedHashMap<>();
-        for (Map.Entry<String, Object> e : m.entrySet()) out.put(e.getKey(), deepCopyValue(e.getValue()));
-        return out;
-    }
-
-    private static String str(Object o) {
-        return o == null ? null : String.valueOf(o);
-    }
-
-    /** String as-is; an integral number as integer text; anything else its JSON text. */
-    private static String render(Object o) {
-        if (o instanceof String s) return s;
-        if (o instanceof Number n) {
-            BigDecimal d = new BigDecimal(n.toString());
-            if (d.signum() == 0 || d.stripTrailingZeros().scale() <= 0) return d.toBigInteger().toString();
-            return n.toString();
-        }
-        return Json.stringify(o);
-    }
-
-    private static boolean isIntegral(Number n) {
-        try {
-            BigDecimal d = new BigDecimal(n.toString());
-            return d.signum() == 0 || d.stripTrailingZeros().scale() <= 0;
-        } catch (NumberFormatException e) {
-            return false;
-        }
-    }
-
-    private static boolean jsonEq(Object a, Object b) {
-        if (a instanceof Number x && b instanceof Number y) {
-            return new BigDecimal(x.toString()).compareTo(new BigDecimal(y.toString())) == 0;
-        }
-        if (a instanceof Map<?, ?> ma && b instanceof Map<?, ?> mb) {
-            if (!ma.keySet().equals(mb.keySet())) return false;
-            for (Object k : ma.keySet()) if (!jsonEq(ma.get(k), mb.get(k))) return false;
-            return true;
-        }
-        if (a instanceof List<?> la && b instanceof List<?> lb) {
-            if (la.size() != lb.size()) return false;
-            for (int i = 0; i < la.size(); i++) if (!jsonEq(la.get(i), lb.get(i))) return false;
-            return true;
-        }
-        return Objects.equals(a, b);
-    }
-
-    private static String fileType(String kind) {
-        return switch (kind == null ? "" : kind) {
-            case "audio" -> "audio";
-            case "video" -> "file";
-            default -> "image";
-        };
-    }
-
-    private static final Map<String, String> MIME = Map.ofEntries(
-            Map.entry("png", "image/png"), Map.entry("jpg", "image/jpeg"), Map.entry("jpeg", "image/jpeg"),
-            Map.entry("webp", "image/webp"), Map.entry("gif", "image/gif"), Map.entry("mp4", "video/mp4"),
-            Map.entry("webm", "video/webm"), Map.entry("mov", "video/quicktime"), Map.entry("mp3", "audio/mpeg"),
-            Map.entry("wav", "audio/wav"), Map.entry("ogg", "audio/ogg"), Map.entry("m4a", "audio/mp4"),
-            Map.entry("flac", "audio/flac"));
-
-    static String mimeOf(String url, String kind) {
-        String u = url;
-        int q = u.indexOf('#'); if (q >= 0) u = u.substring(0, q);
-        q = u.indexOf('?'); if (q >= 0) u = u.substring(0, q);
-        int scheme = u.indexOf("://");
-        String path = u;
-        if (scheme >= 0) {
-            int slash = u.indexOf('/', scheme + 3);
-            path = slash >= 0 ? u.substring(slash) : "";
-        }
-        String last = path.substring(path.lastIndexOf('/') + 1);
-        int dot = last.lastIndexOf('.');
-        if (dot >= 0) {
-            String m = MIME.get(last.substring(dot + 1).toLowerCase(Locale.ROOT));
-            if (m != null) return m;
-        }
-        return switch (kind == null ? "" : kind) {
-            case "video" -> "video/mp4";
-            case "audio" -> "audio/mpeg";
-            default -> "image/png";
-        };
     }
 }

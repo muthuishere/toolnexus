@@ -37,6 +37,7 @@
             [toolnexus.adapter :as adapter]
             [toolnexus.builtin :as builtin]
             [toolnexus.content :as content]
+            [toolnexus.media :as media]
             [toolnexus.tool :as tool]))
 
 ;; ---------------------------------------------------------------------------
@@ -1396,6 +1397,12 @@
     (->> (:content body) (filter #(= "text" (:type %))) (map :text) (str/join))
     (or (get-in body [:choices 0 :message :content]) "")))
 
+(defn- model-parts
+  "§7G.6 model visibility: a media tool result sends only its IMAGE parts to the
+  model; video/audio stay in toolCalls[].parts and RunResult.files."
+  [settled]
+  (media/model-parts (:result settled)))
+
 (defn- tool-result-messages
   "The provider's tool-result shape. THIS is the part the two styles disagree
   about: OpenAI wants one `tool` message per call; Anthropic wants ONE `user`
@@ -1411,13 +1418,13 @@
                                ;; under `:parts`; `toolnexus.content/build-wire`
                                ;; is the only thing that turns them into blocks.
                                ;; `cond->`, so a text-only result is byte-identical.
-                               (seq (:parts (:result s))) (assoc :parts (vec (:parts (:result s))))))
+                               (seq (model-parts s)) (assoc :parts (model-parts s))))
                      settled)}]
     (mapv (fn [s] (cond-> {:role "tool" :tool_call_id (:id s) :content (:output (:result s))}
                     ;; `:name` is carried ONLY when there are parts — the §8A
                     ;; relocation header needs it, and the wire build strips both.
-                    (seq (:parts (:result s))) (assoc :name (str (:name s))
-                                                      :parts (vec (:parts (:result s))))))
+                    (seq (model-parts s)) (assoc :name (str (:name s))
+                                                 :parts (model-parts s))))
           settled)))
 
 (def zero-usage
@@ -1879,7 +1886,9 @@
   (vec (for [c tool-calls
              p (:parts c)
              :when (not= "text" (:type p))]
-         (assoc p :from (:name c) :callId (or (::call-id (meta c)) "")))))
+         (cond-> (assoc p :from (:name c) :callId (or (::call-id (meta c)) ""))
+           ;; §7G.12 D20: a media part's local path, carried in metadata
+           (media/part-path p) (assoc :path (media/part-path p))))))
 
 (defn- run-result [client text messages tool-calls turns usage exhausted?]
   (let [incomplete? (and exhausted? (= "" text))]

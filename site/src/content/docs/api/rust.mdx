@@ -70,26 +70,52 @@ both on by default.
 
 Guide: [Media generation](/toolnexus/media/) · recipe: [Generate images, video and speech](/toolnexus/cookbook/media/) · SPEC §7G.
 
-- `load_media_style(path: impl AsRef<Path>) -> Result<MediaStyle, MediaError>`
-- `create_media(styles: impl Into<Vec<MediaStyle>>, opts: MediaOptions) -> Media` (also `Media::new`) — a verb
-  resolves to the first style that declares it.
-- `MediaOptions { on_progress: Option<OnProgressFn>, http_client: Option<reqwest::Client> }` —
-  `OnProgressFn = Arc<dyn Fn(&MediaProgress) + Send + Sync>`, `MediaProgress { verb, job_id, status }`.
-- Verbs, each `async fn x(&self, input: XInput) -> Result<MediaResult, MediaError>`:
-  `image(ImageInput { prompt, width, height, aspect_ratio, seed, provider_options })` ·
-  `video(VideoInput { prompt, image, seconds, aspect_ratio, provider_options })` ·
-  `speech(SpeechInput { text, voice, provider_options })` · `transcribe(TranscribeInput { audio, provider_options })` ·
-  `clone_voice(CloneVoiceInput { name, samples, provider_options })` ·
-  `talking(TalkingInput { image, audio, provider_options })`. Optional fields are `Option<_>`; inputs derive
-  `Default`.
-- `generate(&self, verb: &str, args: Map<String, Value>)` · `generate_with(&self, verb, args, provider_options: Option<Map<String, Value>>, cancel: &CancellationToken)`
-  — the raw call. Only `generate_with` takes a cancellation token.
+- `create_media<I: IntoIterator<Item: IntoMediaClient>>(clients: I) -> Result<Media, MediaError>` — a verb goes to
+  the first client whose `supports(verb)` is true; it falls through to the next **only** on
+  `MediaError::Unavailable`. Empty list ⇒ `media: no clients`. Mixed client types: `.into_media_client()` each
+  (`IntoMediaClient`, also implemented for `Arc<dyn MediaClient>`). `Media` is cheap to clone.
+- `trait MediaClient: Send + Sync` — `name(&self) -> &str` · `supports(&self, verb) -> bool` · optional
+  `args(&self, verb) -> Option<Vec<MediaArg>>` (`MediaArg::new(name, required)`; `None` ⇒ every canonical arg) ·
+  `image` / `video` / `speech` / `music` / `transcribe` / `clone_voice` / `talk`, each
+  `fn x<'a>(&'a self, args: MediaArgs, ctx: &'a MediaCtx) -> MediaFuture<'a>`; unimplemented verbs default to
+  failing. `MediaArgs = Map<String, Value>` (canonical names).
+- Built-in API clients, each `X::new(cfg: MediaClientConfig)`: `A2EMediaClient` (`A2E_API_KEY`) ·
+  `ElevenLabsMediaClient` (`ELEVENLABS_API_KEY`) · `OpenAIMediaClient` (`OPENAI_API_KEY`) · `OpenRouterMediaClient`
+  (`OPENROUTER_API_KEY`) · `FalMediaClient` (`FAL_API_KEY`). CLI clients: `GrokMediaClient::new` ·
+  `CodexMediaClient::new` (both return `CliMediaClient`); `CliMediaClient::new(profile: impl CliProfile, cfg)` for
+  another CLI.
+- `MediaClientConfig { model, models: BTreeMap<String, String>, key, url, command: Vec<String>, r#loop: MediaLoop,
+  gather: MediaGather, http_client: Option<reqwest::Client> }` — `key: None` ⇒ the client's env var at call time
+  (never logged).
+- `MediaLoop { interval_ms, timeout_ms, on_progress: Option<OnProgressFn> }` (`None` or ≤ 0 ⇒ default) ·
+  `OnProgressFn = Arc<dyn Fn(&MediaProgress) + Send + Sync>` · `MediaProgress { verb, client, job_id, status,
+  elapsed_ms }`.
+- `MediaGather { mode: Option<GatherMode>, dir: Option<PathBuf>, max_bytes: Option<u64>, keep: Option<bool> }` —
+  `GatherMode::{Url, Download, Inline}` (default `Download`; style clients `Url`); `dir` default
+  `<os temp>/toolnexus-media`; `max_bytes` default 100 MiB; `keep` CLI only.
+- Typed verbs on `Media`, each `async fn x(&self, input: XInput) -> Result<MediaResult, MediaError>` plus
+  `x_with(input, &CancellationToken)`: `image(ImageInput { prompt, width, height, aspect_ratio, seed })` ·
+  `video(VideoInput { prompt, image, seconds, aspect_ratio })` · `speech(SpeechInput { text, voice })` ·
+  `music(MusicInput { prompt, seconds, instrumental, lyrics })` · `transcribe(TranscribeInput { audio, language })` ·
+  `clone_voice(CloneVoiceInput { name, samples })` · `talk(TalkInput { image, audio, text, voice })`. Every input
+  has `provider_options`; optional fields are `Option<_>`; inputs derive `Default`. Image/audio inputs take a URL
+  or a local path.
+- `generate(&self, verb, args: MediaArgs)` · `generate_with(&self, verb, args, provider_options, cancel)` ·
+  `generate_ctx(&self, verb, args, ctx: MediaCtx)` — the raw call · `supports(&self, verb) -> bool`.
+- `MediaCtx { cancel: CancellationToken, deadline: Option<Instant>, progress: Option<OnProgressFn>,
+  provider_options: Option<MediaArgs> }`.
 - `MediaResult { files: Vec<MediaFile>, text: Option<String>, job_id: Option<String>, status }` ·
-  `MediaFile { kind, mime_type, url }` (`kind` serialises as `type`).
-- `media.tools() -> Vec<Tool>` (source `"media"`), or `ToolkitOptions.media`.
-- `RunResult.files: Vec<RunFile>` — `{ kind, mime_type, url, data, from, call_id }`, in call order; the same
+  `MediaFile { kind, mime_type, url, path, data }` (`kind` serialises as `type`); which of `url` / `path` / `data`
+  is set follows `gather.mode`.
+- `media.tools() -> Vec<Tool>` (source `"media"`, `generate_image`, `generate_video`, …), or
+  `ToolkitOptions { media: Some(media), .. }`. A media tool never errors (`is_error: true`); only image parts reach
+  the model.
+- `RunResult.files: Vec<RunFile>` — `{ kind, mime_type, url, data, name, from, call_id }`, in call order; the same
   parts are on `tool_calls[i].parts`.
-- Errors: `MediaError::Message(String)` displays the exact §7G string; `MediaError::Cancelled` when the token
-  fires. A media tool never errors (`ToolResult::error`, `is_error: true`).
+- Errors: `MediaError::{Failed { message, job_id }, Timeout { message, job_id }, Unavailable { message },
+  Cancelled}` — `Display` is the exact §7G string; `status()`, `is_unavailable()`, `job_id()`;
+  `MediaError::unavailable(msg)` / `MediaError::failed(msg)` for a custom client.
+- Advanced: `load_media_style(path) -> Result<MediaStyle, MediaError>` + `style_media_client(style, cfg)` /
+  `StyleMediaClient::new` — a client from a JSON style.
 - Equivalents: `createMedia` (js) · `create_media` (py) · `CreateMedia` (go) · `Media.create` (java) ·
-  `Media.Create` (c#) · `Toolnexus.Media.new` (elixir) · `toolnexus.media/create-media` (clojure).
+  `Media.Create` (c#) · `Toolnexus.Media.create` (elixir) · `toolnexus.media/create-media` (clojure).

@@ -93,26 +93,42 @@ ships the **full** elicitation bridge (form *and* URL mode).
 
 Guide: [Media generation](/toolnexus/media/) · recipe: [Generate images, video and speech](/toolnexus/cookbook/media/) · SPEC §7G.
 
-- `Toolnexus.Media.load_style(path) :: {:ok, map()} | {:error, String.t()}`
-- `Toolnexus.Media.new(styles, opts \\ [])` — one style map or a list; a verb resolves to the first style
-  that declares it. Options: `:on_progress` (`fn %{verb, jobId, status} -> any`, after every poll) ·
-  `:transport` (the same injectable seam as `Toolnexus.Client`: `fn request -> {:ok, %{status, headers, body}} | {:error, e}`) ·
-  `:http_options` (extra `Req` options, e.g. `plug:` in tests).
-- Verbs, each `(media, args, opts \\ [])` with `args` a map or keyword list:
-  `image` (`prompt`, `width`, `height`, `aspectRatio`, `seed`) · `video` (`prompt`, `image`, `seconds`,
-  `aspectRatio`) · `speech` (`text`, `voice`) · `transcribe` (`audio`) · `clone_voice` (`name`, `samples`) ·
-  `talking` (`image`, `audio`). Snake-case atom keys work (`:aspect_ratio`); `:provider_options` in `args`
-  overwrites the body last.
-- `Toolnexus.Media.generate(media, verb, args, opts \\ []) :: {:ok, Result.t()} | {:error, String.t()}` —
-  the raw call; `verb` is a string or atom (`"cloneVoice"`, `:clone_voice`). `opts[:signal]` is cooperative
-  cancellation (a pid or zero-arity predicate).
-- `%Toolnexus.Media.Result{files: [ContentPart.t()], text, job_id, status}` — files carry `type`,
-  `mime_type`, `url`.
-- `Toolnexus.Media.tools(media) :: [Tool.t()]` (source `"media"`), or `create_toolkit(media: media)`.
-- `RunResult.files` — maps `%{type, mime_type, url, from, call_id}`, in call order; the same parts are on
-  each `tool_calls` entry's `parts`.
-- Errors: the function face returns `{:error, message}` (exact §7G string) rather than raising; a signalled
-  cancel raises `Toolnexus.Media.Cancelled`. Process-idiom cancellation also works: run in a `Task` and
-  `Task.shutdown/1` it. A media tool never raises (`is_error: true`).
+- `Toolnexus.Media.create(client | [client]) :: {:ok, t()} | {:error, Error.t()}` · `create!/1` — routes
+  each verb to the first client whose `supports?` is true; falls through to the next **only** on
+  `status: :unavailable` (dropping args that client does not accept). `[]` ⇒ `media: no clients`.
+- Built-in clients, each `(config \\ [])`: API `a2e/1` (image, video, speech, talk; `A2E_API_KEY`) ·
+  `elevenlabs/1` (speech, music, transcribe, cloneVoice; `ELEVENLABS_API_KEY`) · `openai/1` (image, video,
+  speech, transcribe; `OPENAI_API_KEY`) · `openrouter/1` (image; `OPENROUTER_API_KEY`) · `fal/1` (image,
+  video; `FAL_API_KEY`); CLI `grok/1` (image, video) · `codex/1` (image) — `prompt` only. No key / CLI
+  missing ⇒ `:unavailable`, no request.
+- Config (`Toolnexus.Media.Config`, keyword list or map): `model` · `models` (`%{verb => model}`) · `key`
+  (default: the env var, read at call time, never logged) · `url` · `command` (CLI argv prefix) ·
+  `loop: [interval_ms, timeout_ms, on_progress]` · `gather: [mode: "url" | "download" | "inline", dir,
+  max_bytes, keep]` (built-ins default `"download"` into the temp dir) · `http_client`
+  (`fn %{method, url, headers, body, receive_timeout} -> {:ok, %{status, headers, body}} | {:error, e}`) ·
+  `http_options` (extra `Req` options).
+- Verbs, each `(media, args, opts \\ [])` with `args` a map or keyword list: `image` (`prompt`, `width`,
+  `height`, `aspectRatio`, `seed`) · `video` (`prompt`, `image`, `seconds`, `aspectRatio`) · `speech`
+  (`text`, `voice`) · `music` (`prompt`, `seconds`, `instrumental`, `lyrics`) · `transcribe` (`audio`,
+  `language`) · `clone_voice` (`name`, `samples`) · `talk` (`image`, `audio`, `text`, `voice`). Inputs are
+  `http(s)` URLs, `file://` URLs or local paths. Snake-case atom keys work (`:aspect_ratio`);
+  `:provider_options` overwrites the body last. An arg the routed-to first client does not accept ⇒ `:failed`.
+- `generate(media, verb, args, opts \\ [])` — any verb (`"cloneVoice"`, `:clone_voice`) · `supports?(media, verb)`.
+  opts: `:signal` (pid or zero-arity predicate) · `:deadline` (monotonic ms) · `:progress`
+  (`fn %{verb, client, job_id, status, elapsed_ms} -> any`) · `:provider_options`.
+- `%Toolnexus.Media.Result{files: [%MediaFile{type, mime_type, url, path, data}], text, job_id, status}` —
+  `text` set for `transcribe` / `clone_voice`.
+- `@behaviour Toolnexus.Media.Client` — `name/1`, `supports?/2`; optional `args/2` and the verb
+  callbacks `image/3` … `clone_voice/3`, `talk/3` taking `(client, string_keyed_args, ctx)`. A client is a
+  struct of that module or the module itself.
+- `Toolnexus.Media.tools(media) :: [Tool.t()]` (source `"media"`, one per supported verb, schema from the
+  first supporting client), or `create_toolkit(media: media)`.
+- `RunResult.files` — `%{type, mime_type, url | data, from, call_id}`, in call order. Only **image** parts
+  are sent back to the model; video and audio stay in `files`.
+- Errors: `{:error, %Toolnexus.Media.Error{message, status: :failed | :timeout | :cancelled | :unavailable,
+  job_id}}`; a signalled cancel raises `Toolnexus.Media.Cancelled`. A media tool never raises
+  (`is_error: true`).
+- Advanced: `load_style(path) :: {:ok, map()} | {:error, Error.t()}` + `style_client(style, config \\ [])`
+  / `style_client!/2` — a JSON style as a client.
 - Equivalents: `createMedia` (js) · `create_media` (py) · `CreateMedia` (go) · `Media.create` (java) ·
   `Media.Create` (c#) · `toolnexus.media/create-media` (clojure) · `create_media` (rust).

@@ -165,23 +165,81 @@ never change mid-session. Runnable: `dotnet run --project examples/Toolnexus.Exa
 
 ## Media generation
 
-Generate images, video and speech (plus transcription, voice cloning and talking-head video)
-from a **JSON style** instead of provider code. Async jobs are started and polled for you. The same
-verbs become agent tools (`generate_image`, `generate_video`, `generate_speech`, …), and whatever
-they produce lands in `RunResult.files`. `examples/media-styles/a2e.json` ships first and reads
-`A2E_API_KEY` at call time. Its result URLs expire in 3–30 days, so save what you keep. SPEC §7G;
-guide: <https://muthuishere.github.io/toolnexus/media/>.
+Images, video, speech, music, transcription, voice cloning and talking-head video, with **one
+client per media object**. The quickest start is a **CLI preset**: `MediaStyle.XaiGrokCli`, `MediaStyle.OpenAICodexCli` and `MediaStyle.GoogleAgyCli` drive the vendor's
+official CLI (`grok`, `codex`, `agy`) in its documented headless mode (`grok -p`, `codex exec`,
+`agy -p`), signed in by you. Grok does image and video; Codex and Antigravity do image. Each preset
+has a mock twin (`MediaStyle.XaiGrokCliMock`, …) for tests. Your provider's terms of service apply to how you use its CLI.
+Every Grok image carries a small visible **"Grok" mark in the bottom-right corner**; toolnexus does
+not remove it. Install, sign-in, Grok video, limits and models:
+<https://muthuishere.github.io/toolnexus/cookbook/cli-media-setup/>. SPEC §7G; guide: <https://muthuishere.github.io/toolnexus/media/>.
 
 ```csharp
-var media = Media.Create(MediaStyle.Load("examples/media-styles/a2e.json"),
-    new MediaOptions { OnProgress = p => Console.WriteLine($"{p.Verb} {p.Status}") });
-var img = await media.ImageAsync(new ImageInput("a red fox in fresh snow") { Width = 1024, Height = 768 });
-var vid = await media.VideoAsync(new VideoInput("the fox blinks") { Image = img.Files[0].Url, Seconds = 5 });
+// one line
+var r = await Media.GenerateMediaAsync(MediaStyle.XaiGrokCli, "image",
+    new Dictionary<string, object?> { ["prompt"] = "a red apple", ["aspectRatio"] = "16:9" });
+Console.WriteLine(r.Files[0].Path);
 
-await using var tk = await Toolkit.CreateAsync(new Toolkit.Options { Media = media }); // generate_image, …
+// or keep a media object, and give it to your agent
+var media = Media.Create(MediaStyle.Load(MediaStyle.XaiGrokCli));
+var clip = await media.VideoAsync(new VideoInput("the apple rolls off the table"));
+await using var tk = await Toolkit.CreateAsync(new Toolkit.Options().WithMedia(media)); // generate_image, generate_video
+```
+
+For an HTTP API, give `Media.Create(client)` one named client — `OpenAIMediaClient`, `OpenRouterMediaClient`, `FalMediaClient`, `ElevenLabsMediaClient` or `A2EMediaClient`. Each reads its key from its env
+var (`OPENAI_API_KEY`, `FAL_API_KEY`, `ELEVENLABS_API_KEY`, …) at call time and never logs it.
+
+```csharp
+var cfg = new MediaClientConfig { Gather = new MediaGather { Mode = "download", Dir = "out" } }; // url | download | inline
+var voice = Media.Create(new ElevenLabsMediaClient(cfg));
+try
+{
+    var mp3 = await voice.SpeechAsync(new SpeechInput("Hello from toolnexus."));
+    Console.WriteLine(mp3.Files[0].Path);
+}
+catch (MediaUnavailableException e) { Console.Error.WriteLine(e.Message); } // no key, no credit
+```
+
+`MediaClientConfig` is one shape for every client: `Model`, `Models` (per verb), `Key`, `Url`,
+`Command` (CLI argv), `Loop` (`IntervalMs`, `TimeoutMs`, `OnProgress`), `Gather` (`Mode`, `Dir`,
+`MaxBytes`, `Keep`) and `HttpClient`. Errors are `MediaException` with `Status`
+`failed | timeout | cancelled | unavailable`; `unavailable` is the subclass `MediaUnavailableException`.
+
+**As agent tools.** `new Toolkit.Options().WithMedia(media)` registers `generate_image`,
+`generate_video`, `generate_speech`, … (one per verb any client supports). Files a run produces land
+in `RunResult.Files`; only image parts are shown to the model, the rest it sees as text.
+
+```csharp
+await using var tk = await Toolkit.CreateAsync(new Toolkit.Options().WithMedia(media));
 var res = await agent.RunAsync("Draw a fox, then animate it.", tk);
 foreach (var f in res.Files) Console.WriteLine($"{f.From} {f.MimeType} {f.Url}");
 ```
+
+**Your own provider.** Implement `IMediaClient`: `Name`, `Supports(verb)` and only the verbs you
+serve (the rest default to unsupported); `Args(verb)` optionally narrows the accepted args.
+
+```csharp
+sealed class MyImages : IMediaClient
+{
+    public string Name => "mine";
+    public bool Supports(string verb) => verb == "image";
+    public Task<MediaResult> ImageAsync(IDictionary<string, object?> args, MediaContext ctx) =>
+        Task.FromResult(new MediaResult([new MediaFile("image", "image/png", "https://img.example.com/fox.png")], "completed"));
+}
+```
+
+Advanced: a provider described in JSON instead of code —
+`new StyleMediaClient(MediaStyle.Load("my-style.json"))`.
+
+Run the example. It uses the Grok and Codex CLIs when they are installed and logged in, ElevenLabs
+for speech when `ELEVENLABS_API_KEY` is set, and OpenAI / fal / A2E (smallest, lowest-quality
+images) only when their keys are set. It makes an image, speech (voice from
+`MEDIA_VOICE`) and a `generate_image` tool call; `MEDIA_VIDEO=1` adds a Grok video and
+`MEDIA_PAID=1` adds paid video / talk. It prints client, verb, path or URL, mime type, size and
+usage; it exits non-zero if any step fails, and exits 0 with a hint when no client is available:
+
+```sh
+ELEVENLABS_API_KEY=... dotnet run --project examples/Toolnexus.Examples -- media
 
 ## Embeddable MCP server (SPEC §7C.1)
 

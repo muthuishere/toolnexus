@@ -161,6 +161,7 @@ pub(crate) fn parts_of(v: &Value) -> Option<Vec<ContentPart>> {
             data: s("data"),
             url: s("url"),
             name: s("name"),
+            ..Default::default()
         });
     }
     Some(out)

@@ -217,7 +217,7 @@ class MockLlmIntegrationTest {
             assertEquals("Mock transcript of " + audio + ".", tr.text());
             Media.MediaResult cv = m.cloneVoice(new Media.CloneVoiceInput("narrator", List.of(audio)));
             assertEquals("voice-" + sha256("narrator").substring(0, 8), cv.text());
-            Media.MediaResult tk = m.talking(new Media.TalkingInput(base + "/files/image.png", audio));
+            Media.MediaResult tk = m.talk(new Media.TalkInput(base + "/files/image.png", audio));
             assertFile(tk, "video/mp4", "talking.mp4");
 
             Media.MediaException ex = assertThrows(Media.MediaException.class,
@@ -230,7 +230,7 @@ class MockLlmIntegrationTest {
 
     private static void assertFile(Media.MediaResult r, String mime, String suffix) {
         assertFalse(r.files().isEmpty(), "no files");
-        Media.File file = r.files().get(0);
+        Media.MediaFile file = r.files().get(0);
         assertEquals(mime, file.mimeType());
         assertTrue(file.url().endsWith(suffix), file.url());
     }

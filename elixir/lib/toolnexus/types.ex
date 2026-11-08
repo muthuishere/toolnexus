@@ -228,16 +228,27 @@ defmodule Toolnexus.ToolResult do
   stays required and remains what the transcript, compaction, token estimation and any
   text-only provider see; a result setting no `parts` is byte-identical to pre-0.17.
 
+  `paths` is port-internal (SPEC §7G.12 D20): when set, a list aligned with `parts` giving
+  each part's absolute local file path (or `nil`). It feeds `RunResult.files[].path` only and
+  is never sent to a model, over A2A, or inside a part.
+
   `structured` is the machine-readable result (MCP `structuredContent`) and `meta` the
   protocol metadata (MCP `_meta`); both `nil` ⇒ the wire is unchanged.
   """
-  defstruct output: "", is_error: false, parts: nil, metadata: nil, structured: nil, meta: nil
+  defstruct output: "",
+            is_error: false,
+            parts: nil,
+            metadata: nil,
+            paths: nil,
+            structured: nil,
+            meta: nil
 
   @type t :: %__MODULE__{
           output: String.t(),
           is_error: boolean(),
           parts: [Toolnexus.ContentPart.t()] | nil,
           metadata: map() | nil,
+          paths: [String.t() | nil] | nil,
           structured: term() | nil,
           meta: map() | nil
         }

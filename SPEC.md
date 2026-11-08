@@ -127,13 +127,16 @@ A new language port is "correct" iff these hold. Run it against the shared
     into ONE user turn when consecutive, `system` hoisted. `finishReason`: any tool call ⇒
     `"tool_calls"`, else length/content_filter/stop. `beforeLLM`/`afterLLM` fire once; tool hooks
     never fire. This is the INBOUND half of the adapters, which are outbound-only.
-14. **Media generation** (§7G): `createMedia(styles)` — one engine, two faces. Typed verbs
-    (`image|video|speech|transcribe|cloneVoice|talking`) return `{files,text?,jobId?,status}`;
-    `media.tools()` exposes `generate_image|generate_video|generate_speech|transcribe_audio|clone_voice|talking_video`
-    (source `"media"`). Styles are JSON (sync or async start→poll→result, dot-paths, `${ENV}` headers);
-    no vendor in the library. Error strings, schemas and tool results are byte-fixed by
-    `conformance/media/`. `RunResult.files` collects every non-text part a run's tools produced
-    (`from`, `callId`), and `toolCalls[].parts` carries them per call.
+14. **Media generation** (§7G): `createMedia(client | [client])` — one interface, two faces.
+    Seven typed verbs (`image|video|speech|music|transcribe|cloneVoice|talk`) return
+    `{files,text?,jobId?,status}`; `media.tools()` exposes `generate_image|generate_video|generate_speech|generate_music|transcribe_audio|clone_voice|talking_video`
+    (source `"media"`). Clients: built-in API clients (a2e, ElevenLabs, OpenAI, OpenRouter, fal),
+    CLI clients (Grok, Codex), style clients (`loadMediaStyle` + `styleMediaClient`, the JSON
+    engine), or a custom `MediaClient`. Routing falls through **only** on status `unavailable`.
+    One config shape (`model, models, key, url, command, loop, gather, httpClient`); `gather`
+    decides url / download / inline. Error strings, schemas, requests and tool results are
+    byte-fixed by `conformance/media/`. `RunResult.files` collects every non-text part a run's
+    tools produced (`from`, `callId`), and `toolCalls[].parts` carries them per call.
 
 That's it. The sections below just expand each point with wire-format detail.
 
@@ -2341,28 +2344,245 @@ the failed attempt. Shared fixture: `conformance/reactive_compaction/cases.json`
 
 ## 7G. Media generation (source: "media")
 
-Image, video, speech, transcription, voice cloning and talking-head generation, behind one engine
-with **two faces**: typed verbs a host calls, and tools an LLM calls. Providers are **styles** —
-JSON data, never code. ADR 0036; spike `spikes/media-a2e/`. Realtime/live conversation is out of
-scope. Conformance: `conformance/media/` (`verbs.json`, `cases.json`, `schemas.json`) — every port
-replays it against an in-process fake server and must match it exactly.
+Image, video, speech, music, transcription, voice cloning and talking-head video behind **one
+interface with two faces**: typed verbs a host calls, and tools an LLM calls. Providers are
+**media clients** — small named classes with one shared config shape (ADR 0037), plus a custom
+`MediaClient` interface for anything not built in. The JSON **style engine** of ADR 0036 stays as
+the way API clients are defined, and `loadMediaStyle` stays public as the advanced path.
+Realtime/live conversation is out of scope. ADRs 0036 + 0037; spikes `spikes/media-a2e/`,
+`spikes/media-clients/`. Conformance: `conformance/media/` — `verbs.json`, `schemas.json`,
+`cases.json` (style engine), `clients.json` (built-in API clients), `cli.json` (CLI clients over
+the fake CLI), `routing.json` (`createMedia` routing and tools). Every port replays all of them
+hermetically (§7G.11) and must match them exactly.
 
-### Style (JSON)
+### 7G.1 Verbs and tools
+
+Seven verbs, fixed. `verbs.json` is the byte source (order, tool names, descriptions, args, types,
+required). Ports embed it verbatim and a test asserts the copy.
+
+| verb | tool | result | canonical args (`*` required) |
+|---|---|---|---|
+| `image` | `generate_image` | image files | `prompt*`, `width`, `height`, `aspectRatio`, `seed` |
+| `video` | `generate_video` | video files | `prompt*`, `image`, `seconds`, `aspectRatio` |
+| `speech` | `generate_speech` | audio files | `text*`, `voice` |
+| `music` | `generate_music` | audio files | `prompt*`, `seconds`, `instrumental` (boolean), `lyrics` |
+| `transcribe` | `transcribe_audio` | `text` | `audio*`, `language` |
+| `cloneVoice` | `clone_voice` | `text` = the new voice id | `name*`, `samples*` (array of string) |
+| `talk` | `talking_video` | video files | `image*`, `audio`, `text`, `voice` |
+
+`talk` replaces ADR 0036's `talking` (verb renamed; tool name `talking_video` unchanged). `music`
+is new. Arg types: `string`, `integer`, `boolean`, `array` (`items: string`).
+
+**Input references.** `image` (video, talk), `audio` (transcribe, talk) and each `samples` entry
+are strings: an `http(s)://` URL, a `file://` URL, or a local path. A client that sends the value
+on (a style, a2e) passes the string as is. A client that must upload bytes resolves it: `http(s)`
+⇒ `GET` with **no** client headers, bounded by the job deadline, capped by `gather.maxBytes`;
+`file://` or a path ⇒ read the file. Failure ⇒ `<verb>: cannot read "<value>"` (a port may append
+`: <reason>`; only the prefix is byte-fixed — except the HTTP and maxBytes reasons, pinned by §7G.12 D5/D14). The upload filename is the last path segment (URL
+query stripped), or `"input"` when empty; its part `Content-Type` comes from the extension table
+(§7G.6), else `application/octet-stream`.
+
+### 7G.2 `MediaClient`
+
+```
+MediaClient = {
+  name:     string                                    // "openai", "grok", "style", or the user's
+  supports(verb) -> bool
+  args?(verb) -> [{ name, required: bool }]           // accepted canonical args; absent ⇒ every
+                                                      //   canonical arg of the verb, canonical required
+  image?(args, ctx)  video?(args, ctx)  speech?(args, ctx)  music?(args, ctx)
+  transcribe?(args, ctx)  cloneVoice?(args, ctx)  talk?(args, ctx)      -> MediaResult
+}
+ctx         = { signal, deadline?, progress?, providerOptions? }
+MediaResult = { files: [MediaFile], text?: string, jobId?: string, status, usage?: MediaUsage }
+MediaFile   = { type, mimeType, url?, path?, data? }
+MediaUsage  = { inputTokens?: int, outputTokens?: int, costUsd?: number, raw?: {…} }   // §7G.12 D21
+status      ∈ "completed" | "failed" | "timeout" | "cancelled" | "unavailable"
+```
+
+- Every verb is optional; `supports(verb)` is the truth. Port shapes: Go interface plus an
+  embeddable `UnsupportedMedia` base; Python `Protocol`; Java / C# interface with default methods;
+  Rust trait with default methods; Elixir behaviour with optional callbacks; Clojure a map of
+  functions (`:name`, `:supports`, `:args`, `:image` …); JS/TS an interface with optional methods.
+- `ctx.signal` is the port's native cancellation (AbortSignal, `context.Context`,
+  `CancellationToken`, …). `ctx.deadline` is absolute; the effective job deadline is the earlier
+  of it and `loop.timeoutMs` from the start. `ctx.progress({verb, client, jobId?, status,
+  elapsedMs})` is called for every progress status; when absent, the client's `loop.onProgress`
+  is called instead (never both).
+- **Errors are typed.** A failed verb raises/returns the port's media error carrying `message`,
+  `status` (`failed|timeout|cancelled|unavailable`), and `jobId` when known. `unavailable` must be
+  testable without string matching: Go `errors.Is(err, ErrMediaUnavailable)`, JS/TS/Python/Java/C#
+  a `MediaUnavailableError` subclass of the media error, Rust `MediaError::Unavailable`, Elixir
+  `{:error, %Toolnexus.Media.Error{status: :unavailable}}`, Clojure `ex-info` with
+  `{:status :unavailable}`. Cancellation keeps §7G.8's native-cancellation rule.
+- `MediaFile.type`, by the **verb's** kind (§7G.12 D3): image ⇒ `image`, audio ⇒ `audio`, video ⇒ `file` (the §1B part types).
+  `url` is an `http(s)` URL or a `file://` URL; `path` is an absolute local path; `data` is
+  standard padded base64 (§1B). Which fields are set is decided by gather (§7G.5).
+
+**Status `unavailable`** means the call was valid but this client cannot serve it now — an account
+precondition, not a bad request. Exactly these cases, nothing else:
+
+| where | condition |
+|---|---|
+| any API client (style or built-in) | HTTP **402**; HTTP **429** whose body contains `quota`, `credit`, `billing` or `balance` (ASCII case-insensitive) |
+| any built-in API client | no key: config `key` absent and the default env var unset or empty — **no request is made** |
+| any CLI client | the command cannot be started (not found, not executable) |
+| Grok CLI | a failed tool result containing `zero data retention` or `usage limit` |
+| Codex CLI | a failed event containing `usage limit` or `quota` |
+
+Message forms: `<client>: HTTP <status>: <body capped per §7G.8>`, `<client>: no API key (set <ENV>)`,
+`<client>: cannot start "<command[0]>"`, `<client>: <tool error capped at 400 code points + "…">`,
+and Grok ZDR's fixed text (§7G.10). A 429 without those words is an ordinary `HTTP 429: <body>`
+failure.
+
+### 7G.3 `createMedia` — routing
+
+`createMedia(client | [client])` returns `media` with the seven verbs (port-idiomatic:
+`media.image({prompt})`, `media.Image(ctx, ImageInput{…})`, `media.image(prompt=…)`), a generic
+`generate(verb, args, ctx?)`, `supports(verb)`, `verbs()` (every verb some source supports, in
+`verbs.json` order) and `tools()`. A loaded style (`loadMediaStyle`, HTTP file or §7G.10a preset)
+is accepted anywhere a client is. Normative order for one call:
+
+1. Empty client list ⇒ error at creation: `media: no clients`.
+2. Candidates = clients whose `supports(verb)` is true, in list order. None ⇒
+   `media: no client supports "<verb>"`, status `failed`, no request — or
+   `media: no style supports "<verb>"` when **every** source given to `createMedia` is a loaded
+   style (§7G.10a). `supports(verb)` is the only verb-support mechanism; no port special-cases a vendor.
+3. **Non-canonical key** (§7G.12 D7/D19): a key that is not a canonical arg of the verb
+   (`verbs.json`) ⇒ `<verb>: argument "<key>" not supported` (first in sorted code-point order),
+   status `failed`, before any client is tried. A null/nil/None value is absent everywhere.
+4. Try candidates in order. Before calling one, check the args against its `args(verb)` (§7G.2; a
+   client without `args` accepts every canonical arg and requires the canonical required ones),
+   before any request, spawn or key check:
+   - a key it does not accept ⇒ the candidate is **skipped** (never called) with reason
+     `<name>: argument "<key>" not supported` (first in sorted code-point order);
+   - else a required arg missing ⇒ **skipped** with reason `<name>: missing required argument
+     "<key>"` (first in canonical order).
+   A skip is treated exactly like an `unavailable` error. This holds for **every** candidate,
+   the first included (§7G.12 D19). Args are never dropped or rewritten for a candidate.
+5. A called candidate's result is returned as is — success **or any error that is not
+   `unavailable`** (bad prompt, HTTP 500, timeout, cancellation: no fall-through). An
+   `unavailable` error moves on to the next candidate.
+6. Every candidate skipped or `unavailable` ⇒ error status `unavailable`, message
+   `media: no client available for "<verb>": ` + each candidate's reason (skip reason or error
+   message), in candidate order, joined by `"; "`. This includes a single-client list.
+
+Example: `createMedia([grok, openai])` with `video({prompt, seconds: 5})` — Grok does not accept
+`seconds`, so it is skipped and OpenAI serves the call; with `foo: 1` the call fails at once with
+`video: argument "foo" not supported`.
+
+### 7G.4 Shared client config
+
+One shape for every built-in client (port-native spelling: `intervalMs` / `interval_ms` /
+`IntervalMs` …). Fields a client does not use are ignored.
+
+| field | type | API clients | CLI clients |
+|---|---|---|---|
+| `model` | string | the model of the client's **primary verb** (table §7G.9) | passed as the CLI's `-m <model>` |
+| `models` | `{verb: string}` | per-verb model override; wins over `model` and the default | – |
+| `key` | string | default: the client's env var, read **at call time** | – |
+| `url` | string | base URL override (trailing `/` trimmed) — any compatible server | – |
+| `command` | string or [string] | – | argv prefix (a string is one executable, never shell-split); default the CLI's name |
+| `loop.intervalMs` | int | poll interval; default per client (§7G.9) | – |
+| `loop.timeoutMs` | int | job deadline from the start; default 600000 | run deadline; default 600000 |
+| `loop.onProgress` | fn | progress callback when `ctx.progress` is absent | same |
+| `gather.mode` | `url\|download\|inline` | default `download` (style clients: `url`) | default `download` |
+| `gather.dir` | string | default `<os temp dir>/toolnexus-media`, created when missing | same |
+| `gather.maxBytes` | int | default 104857600 (100 MiB) | same |
+| `gather.keep` | bool | – | default `true`; `false` deletes the CLI's original after a successful copy |
+| `httpClient` | port seam | the same HTTP-client injection seam as the LLM client | – |
+
+`loop.*` values absent, `<= 0` or not a number ⇒ the default. For a style client, a positive
+`loop.intervalMs` / `loop.timeoutMs` overrides every verb's `poll.intervalMs` / `poll.timeoutMs`.
+A key is never logged and never appears in an error message.
+
+### 7G.5 Gather — turning a provider result into `MediaFile`
+
+A provider returns media in one of five shapes. `gather.mode` decides what the host gets:
+
+| result shape | `url` | `download` | `inline` |
+|---|---|---|---|
+| bytes (HTTP body) | saved, as `download` | saved to `dir`: `path`, `url = "file://"+path` | `data` |
+| base64 string | decoded, saved, as `download` | decoded, saved | `data` |
+| `data:` URL | decoded, saved, as `download` | decoded, saved | `data` |
+| `http(s)` URL | `url` as given | `GET`, saved | `GET`, `data` |
+| local path (CLI) | `url = "file://"+path`, `path` (the CLI's own file) | copied to `dir`; `keep:false` then deletes the original | read, `data` |
+
+- **mimeType.** Bytes: the provider's stated type (pinned per client). URL: extension table on the
+  URL's path, else the kind default. Downloaded URL: the response `Content-Type` (parameters
+  stripped) when present and not `application/octet-stream`, else as for a URL. `data:` URL: its
+  own mime. Local path: extension table.
+- **Saved file name** `<client>-<verb>-<unixMillis>-<seq><ext>`, `seq` a per-process counter from 1;
+  `<ext>` (§7G.12 D22): for a file that came from a URL, the URL path's own extension when it has
+  one (last segment, `.` + 1–5 ASCII letters/digits, lowercased); otherwise from the mime type:
+  image/png `.png`, image/jpeg `.jpg`, image/webp `.webp`, image/gif `.gif`, video/mp4 `.mp4`,
+  video/webm `.webm`, video/quicktime `.mov`, audio/mpeg `.mp3`, audio/wav · audio/x-wav ·
+  audio/wave `.wav`, audio/ogg `.ogg`, audio/mp4 `.m4a`, audio/flac `.flac`, audio/aac `.aac`,
+  text/plain `.txt`; `.bin` only for a mime type not in this table.
+  `path` is absolute; `url` is `file://` + the absolute path, not percent-encoded.
+- **Download** is a `GET` with **no** client headers (no key leaves the provider origin) — only the
+  default `User-Agent` (§7G.12 D23) — follows
+  §7G.8's redirect rules and the job deadline. Non-2xx ⇒ `<verb>: download failed: HTTP <status>`.
+- **maxBytes.** Any saved or inlined file larger than `maxBytes` ⇒
+  `<verb>: file exceeds gather.maxBytes (<maxBytes> bytes)` (a download: `<verb>: download failed: file exceeds …`, §7G.12 D14); a download stops reading at
+  `maxBytes + 1`. `url` mode on a URL never reads it, so never checks.
+- **Inline `data`** is standard padded base64 of the bytes; `url` and `path` are absent.
+
+### 7G.6 Tools (tool face)
+
+`media.tools()` returns one `Tool` (source `"media"`) per verb **any** client supports, in
+`verbs.json` order, named per `verbs.json`. A tool's `inputSchema = {type:"object", properties,
+required}` comes from the **first supporting client** (the one a call tries first): properties =
+the canonical args it accepts, in canonical order where the port's schema type preserves key order;
+`required` = its required args in canonical order (always present, possibly `[]`). Arg schemas:
+`{type, description}`; arrays `{type:"array", items:{type:"string"}, description}`. Expected bytes:
+`schemas.json`, `routing.json`. `createToolkit({ media })` registers them after A2A agent tools and
+before `extraTools`; `toolkit.register(...media.tools())` is equivalent; enable/disable lists apply.
+
+Execute ⇒ the §7G.3 call; never throws. Success:
+`ToolResult{ isError:false, output, parts, metadata:{source:"media", verb, client, jobId?, status} }`
+(`client` = the name of the client that served it; `jobId` only when the result has one;
+`usage` = the result's `MediaUsage` only when it has one, §7G.12 D21).
+
+- Media verbs: `output = "<word> ready: " + lines.join("\n")`, `word` = `image` | `video` |
+  `audio` by the verb's kind (§7G.12 D2); a line is the file's `path`, else its `url`, else
+  `inline <mimeType> <n> bytes` (url mode ⇒ the URL; download ⇒ the saved file's path).
+  `parts` = one §1B part per file: `data` when the file has `data`; else `url` when the url is
+  `http(s)`; else (local file) the file's bytes read now as `data`. A part never holds a path (§1B).
+- **Model visibility.** Only **image** parts of a media tool result reach the model, emitted per
+  §8A as today. Video (`file`) and `audio` parts of a `source:"media"` tool result are **never
+  emitted** to the model (no placeholder, no warning): they go only into `toolCalls[].parts` and
+  `RunResult.files`, and the model sees just `output`. Rationale: a base64 video in context is huge
+  and most models cannot read it. Conformance: each success `tool` expectation's `modelParts`.
+- Text verbs (`transcribe`, `cloneVoice`): `output = text`, no `parts` key.
+- Any error ⇒ `ToolResult{ isError:true, output:<the error message> }`.
+
+**Scheduling.** Every media tool is concurrency-safe for every argument set (§8 *Tool scheduling*).
+
+### 7G.7 Style clients (the JSON style engine)
+
+`loadMediaStyle(path)` reads one style file; `styleMediaClient(style, config?)` (port-native:
+`NewStyleMediaClient`, `StyleMediaClient(...)`, `Toolnexus.Media.style_client/2`,
+`style-media-client`) makes a `MediaClient` named `style.name ?? "style"` from a parsed style. It
+uses `url`, `loop`, `gather` (default mode `url`) and `httpClient` from the config; `key`, when set,
+is what `${<ENV>}` expands to for **every** `${…}` in the style's headers. The style format:
 
 ```
 Style = {
+  name?:          string                    // client name in messages; default "style"
   baseUrl:        string                    // trailing "/" trimmed before joining with a path
   headers?:       { [name]: string }        // "${VAR}" expands from the process env at call time
                                             // (unset ⇒ ""); values are never logged
   errorEnvelope?: { codePath, okValues: [json], messagePath? }
-  verbs:          { [verb]: Verb }          // verb ∈ image|video|speech|transcribe|cloneVoice|talking
+  verbs:          { [verb]: Verb }          // verb ∈ the seven of §7G.1
 }
 Verb = {
   mode:       "sync" | "async"
   kind:       "image" | "video" | "audio" | "text"
   start:      { method?: string = "POST", path: string }
   defaults?:  object                        // deep-copied, then args are written over it
-  args:       { [normalisedArg]: dotPath }  // which normalised args this style accepts, and where they go
+  args:       { [normalisedArg]: dotPath }  // which canonical args this style accepts, and where
+  required?:  [normalisedArg]               // extra required args, beyond canonical ∩ mapped
   idPath?:    dotPath                       // async only
   poll?:      { method?: "GET", path /* contains {id} */, statusPath, done: [string], failed: [string],
                 errorPath?, intervalMs?: 5000, timeoutMs?: 600000 }   // async only
@@ -2370,67 +2590,54 @@ Verb = {
 }
 ```
 
-`loadMediaStyle(path)` reads one style file. `createMedia(styles, opts?)` takes one style or a list;
-a verb resolves to the **first** style in the list that declares it. Options: `onProgress({verb,
-jobId, status})` and the port's HTTP-client injection (the same seam as the LLM client). Vendor
-presets live in `examples/media-styles/` and are loaded by path — the library names no vendor.
+A style client's `args(verb)` = the mapped canonical args; required = (canonical required ∩
+mapped) ∪ `required`. A style that declares a verb outside the seven (e.g. the old `talking`) is a
+style error at load: `style: unknown verb "<verb>"`.
 
 **dotPath.** Segments split on `.`; a segment of only digits indexes an array. *Read*: missing ⇒
 absent. *Write*: creates objects, and arrays when the next segment is numeric (padding with null).
 
-### Verbs (function face)
+**Engine (normative order).**
 
-Fixed verbs with normalised arguments (`verbs.json` is the byte source: order, names, types,
-descriptions, required). Idiomatic per port — `media.image({prompt})`, `media.Image(ctx,
-ImageInput{…})`, `media.image(prompt=…)` — plus a generic `generate(verb, args)`. Every verb
-returns `MediaResult = { files: [File], text?: string, jobId?: string, status: string }`;
-`File = { type, mimeType, url }`. A function-face call may also take `providerOptions` (object),
-whose top-level keys overwrite the request body last; the tool face never exposes it.
-
-### Engine (normative order)
-
-1. No style declares `verb` ⇒ error `media: no style supports "<verb>"`.
-2. Any arg key not in `verb.args` ⇒ error `<verb>: argument "<key>" not supported by this style`.
-   No request is made.
-3. body = deep copy of `defaults`; each present arg is written at its dotPath; `providerOptions` last.
-4. Start request: `start.method` to `baseUrl + start.path`, JSON body, `Content-Type:
+1. Arg checks (§7G.3). With several unsupported args, the error names the first in sorted order.
+2. body = deep copy of `defaults`; each present arg is written at its dotPath; `providerOptions`
+   (function face only, never the tool face) top-level keys overwrite the body last.
+3. Start request: `start.method` to `baseUrl + start.path`, JSON body, `Content-Type:
    application/json`, style headers.
-5. Every response: non-2xx ⇒ error `HTTP <status>: <raw body text>`. Unparseable JSON ⇒
-   `<verb>: response is not JSON`. If `errorEnvelope` is set and the value at `codePath` is present
-   and not JSON-equal to one of `okValues` ⇒ `API error <code>: <message>` (`message` = string at
-   `messagePath`, else empty; a number `code` renders as an integer when integral).
-6. `sync` ⇒ the start response is the final response; `status = "completed"`.
-7. `async` ⇒ jobId = value at `idPath` (string as-is, integral number as integer text); absent ⇒
-   `<verb>: no job id at <idPath>`. Loop: wait `intervalMs`, request `poll.method` to
-   `baseUrl + poll.path` with `{id}` replaced, read the status string at `statusPath` (absent ⇒ ""),
-   call `onProgress`. In `done` ⇒ final response, `status` = it. In `failed` ⇒ error
-   `job <id> <status>: <msg>` where `msg` = string at `errorPath`, or `job <id> <status>` when
-   absent/null/empty. **Any other status keeps polling** (providers emit undocumented ones, e.g.
-   a2e `sent`). After a non-terminal poll, if time since the first wait began ≥ `timeoutMs` ⇒
-   `job <id> timed out after <timeoutMs>ms`. Cancellation (port-native: ctx, AbortSignal,
-   CancellationToken, …) stops the loop with the port's cancellation error.
-8. Result: value at `resultPath`. `kind:"text"` ⇒ a string (or number, rendered) becomes
+4. Every response: HTTP 402, or 429 with `quota`/`credit`/`billing`/`balance` ⇒ `unavailable` (§7G.2,
+   `<name>: HTTP <status>: <body>`). Other non-2xx ⇒ error `HTTP <status>: <raw body text>`.
+   Unparseable JSON ⇒ `<verb>: response is not JSON`. If `errorEnvelope` is set and the value at
+   `codePath` is present and not JSON-equal to one of `okValues` ⇒ `API error <code>: <message>`
+   (`message` = string at `messagePath`, else empty).
+5. `sync` ⇒ the start response is the final response; `status = "completed"`.
+6. `async` ⇒ jobId = value at `idPath`; absent ⇒ `<verb>: no job id at <idPath>`. Loop: wait
+   `intervalMs`, request `poll.method` to `baseUrl + poll.path` with `{id}` replaced, read the
+   status at `statusPath` (absent ⇒ ""), report progress. In `done` ⇒ final response, `status` = it.
+   In `failed` ⇒ error `job <id> <status>: <msg>` (`msg` = string at `errorPath`), or
+   `job <id> <status>` when absent/null/empty. **Any other status keeps polling.** After a
+   non-terminal poll, if time since the first wait began ≥ `timeoutMs` ⇒
+   `job <id> timed out after <timeoutMs>ms`. Cancellation stops the loop with the port's
+   cancellation error.
+7. Result: value at `resultPath`. `kind:"text"` ⇒ a string (or number, rendered) becomes
    `MediaResult.text`, `files = []`. Media kinds ⇒ a string or an array of strings (flattened,
-   empty strings dropped) becomes one `File` each. Nothing found ⇒ `<verb>: no result at <resultPath>`.
-9. File mapping: `type` = `image`→`image`, `audio`→`audio`, `video`→`file`. `mimeType` from the URL's
-   path extension (query and fragment stripped, case-insensitive): png→image/png, jpg|jpeg→image/jpeg,
-   webp→image/webp, gif→image/gif, mp4→video/mp4, webm→video/webm, mov→video/quicktime,
-   mp3→audio/mpeg, wav→audio/wav, ogg→audio/ogg, m4a→audio/mp4, flac→audio/flac; else the kind
-   default image/png, video/mp4, audio/mpeg.
+   empty strings dropped), each a URL result gathered per §7G.5. Nothing found ⇒
+   `<verb>: no result at <resultPath>`.
+8. mimeType for a URL: extension of the URL path (query and fragment stripped, case-insensitive):
+   png→image/png, jpg|jpeg→image/jpeg, webp→image/webp, gif→image/gif, mp4→video/mp4,
+   webm→video/webm, mov→video/quicktime, mp3→audio/mpeg, wav→audio/wav, ogg→audio/ogg,
+   m4a→audio/mp4, flac→audio/flac; else the kind default image/png, video/mp4, audio/mpeg.
 
-### Edge rules (pinned after the first port)
+### 7G.8 Edge rules (pinned after the first port; apply to every API client)
 
-- **Headers** — style headers go on **every** request (start and polls); `Content-Type:
-  application/json` only on requests with a body. Polls send no body.
+- **Headers** — client/style headers go on **every** request (start and polls); `Content-Type:
+  application/json` only on requests with a JSON body. Polls send no body. Every media HTTP request
+  (start, poll, download, input fetch) also sends `User-Agent: toolnexus/<version> (<port>)` unless
+  the client/style headers set `User-Agent` (§7G.12 D23).
 - **Job id** — only a non-empty string or an integral number counts; anything else (incl. `""`) ⇒ `no job id`.
 - **Envelope code** rendering — string as-is, integral number as integer text, anything else JSON-encoded.
 - **Media result** — arrays flatten to any depth; non-string and empty-string entries are dropped.
 - **Text result** — a string (including `""`, e.g. silence) or a number is a result; absent/null/other ⇒ `no result`.
-- **Args** — an arg whose value is null/nil/None is treated as absent. With several unsupported args,
-  the error names the first in sorted (code-point) order.
 - **Absent `done`/`failed`** lists are empty (the job polls until timeout).
-- **Registration order** — `createToolkit({ media })` registers media tools after A2A agent tools
-  and **before** `extraTools`; first name wins as everywhere else.
 - **Number rendering** — a non-integral number (text result, envelope code) uses the shortest
   round-trip decimal form (`1.5`).
 - **dotPath write through a scalar** — an existing non-container value on the path is replaced by
@@ -2445,65 +2652,423 @@ whose top-level keys overwrite the request body last; the tool face never expose
     with no body** (and no `Content-Type`). 307/308 re-issue the **same method and body**.
   - Hop limit: at most **10** redirects are followed (11 requests). A redirect response after that ⇒
     error `<verb>: too many redirects`.
-  - Headers: style headers are **never sent to a different origin** (scheme + host + port) than the
-    origin of the request built from `baseUrl`. A same-origin redirect keeps them; a cross-origin
-    redirect is re-issued **without** them (no `Authorization`, no custom style header).
+  - Headers: client headers are **never sent to a different origin** (scheme + host + port) than the
+    origin of the client's base URL. A same-origin redirect keeps them; a cross-origin redirect —
+    and any absolute URL a provider hands back (fal's `status_url`) on another origin — is
+    requested **without** them.
   - Every hop is bounded by the same job deadline (Per-request timeout below).
   - Gap: a host-injected HTTP client that follows redirects on its own (e.g. a custom JS `fetch`
     that ignores `redirect: "manual"`, or the cljgo host's Go client) is outside these guarantees.
-- **Per-request timeout** — every HTTP request (start and each poll) is bounded by the time
-  remaining until the job deadline: `timeoutMs` measured from the start request for async verbs;
-  sync verbs use the verb's `poll.timeoutMs` if given, else 600000. When the deadline expires the
-  error is `job <id> timed out after <timeoutMs>ms`, or `<verb>: timed out after <timeoutMs>ms` when
-  there is no job id yet (start request, sync verb). No extra create-time timeout option exists.
-- **Interval / timeout defaults** — `intervalMs` or `timeoutMs` absent, `<= 0` or not a number ⇒
-  the default (5000 / 600000).
+- **Per-request timeout** — every HTTP request (start, each poll, each download) is bounded by the
+  time remaining until the job deadline: `timeoutMs` measured from the start request for async
+  verbs; sync verbs use the verb's `poll.timeoutMs` if given, else the loop default. When the
+  deadline expires the error is `job <id> timed out after <timeoutMs>ms`, or
+  `<verb>: timed out after <timeoutMs>ms` when there is no job id yet; status `timeout`.
 - **Poll status rendering** — the value at `statusPath` renders like the envelope code: string
   as-is, integral number as integer text, other number in shortest round-trip form; absent/other ⇒
-  `""`. The rendered text is what `onProgress` reports, what appears in `job <id> <status>` errors,
+  `""`. The rendered text is what progress reports, what appears in `job <id> <status>` errors,
   and what is matched against `done` / `failed`.
-- **Empty dotPath** — `""` addresses the whole value for reads (`idPath`, `resultPath`,
-  `statusPath`, `errorPath`, `codePath`, `messagePath`). An `args` entry mapped to `""` is a style
-  error raised when the media is created/loaded: `style: empty path for argument "<key>"`.
-- **Job id in the poll path** — `{id}` is replaced by the id percent-encoded per RFC 3986: keep
-  `A-Z a-z 0-9 - . _ ~`, encode every other UTF-8 byte as `%XX` (uppercase hex).
+- **Empty dotPath** — `""` addresses the whole value for reads. An `args` entry mapped to `""` is a
+  style error raised when the client is created/loaded: `style: empty path for argument "<key>"`.
+- **Job id in a URL path** — `{id}` (and every id a built-in client puts in a path or query) is
+  percent-encoded per RFC 3986: keep `A-Z a-z 0-9 - . _ ~`, encode every other UTF-8 byte as
+  `%XX` (uppercase hex).
 - **Echoed error bodies** — in `HTTP <status>: <body>` the body is capped at its first 1000 Unicode
   code points; when truncated, `…` (U+2026) is appended.
 - **dotPath write through an array with a non-numeric segment** — the array is replaced by an
-  object (same rule as writing through a scalar); never a crash.
+  object; never a crash.
 - **dotPath write with a numeric segment through an existing object** — the object is kept and the
-  segment is written as an ordinary string key (`"0"`); only a missing (or scalar) container is
-  created as an array for a numeric next segment.
-- **Cancellation** — the function face raises the port's native cancellation error; the tool face
-  returns `isError:true` with that error's message (not byte-fixed across ports) — except **Python**, where
-  `asyncio.CancelledError` must propagate (swallowing it un-cancels the task).
+  segment is written as an ordinary string key (`"0"`).
+- **Cancellation** — the function face raises the port's native cancellation error (status
+  `cancelled`); the tool face returns `isError:true` with that error's message (not byte-fixed) —
+  except **Python**, where `asyncio.CancelledError` must propagate.
 
-### Tools (tool face)
+### 7G.9 Built-in API clients
 
-`media.tools()` returns one `Tool` (source `"media"`) per verb the media supports, in `verbs.json`
-order, named per `verbs.json` (`generate_image`, `generate_video`, `generate_speech`,
-`transcribe_audio`, `clone_voice`, `talking_video`). `inputSchema = {type:"object", properties,
-required}` where properties are the verb's canonical args **the resolved style maps**, in canonical
-order where the port's schema type preserves key order (Go's map does not; contents must still match), and `required` = canonical-required ∩ mapped (always present, possibly `[]`). Array args are
-`{type:"array", items:{type:<items>}, description}`. Expected bytes: `conformance/media/schemas.json`.
-`createToolkit({ media })` registers them; `toolkit.register(...media.tools())` is equivalent.
+Each is code on the API base (§7G.8 rules, gather, unavailable mapping). `<url>` is the config
+`url` or the default. **Live-verified** = one real call succeeded in a spike; everything else is
+**implemented per the provider's docs, unverified** and is listed in the CHANGELOG as such.
 
-Execute ⇒ engine; never throws. Success:
-`ToolResult{ isError:false, output, parts, metadata:{source:"media", verb, jobId? (async only), status} }`
-— media kinds: `output = "<word> ready: " + urls.join("\n")` (`word` = image|video|audio),
-`parts = files` as ContentParts `{type, mimeType, url}`; text kind: `output = text`, no `parts` key.
-Any engine error ⇒ `ToolResult{ isError:true, output:<the error message> }`.
+| client (`name`) | key env, header | default url | verbs | primary model default | interval default |
+|---|---|---|---|---|---|
+| `A2EMediaClient` (`a2e`) | `A2E_API_KEY`, `Authorization: Bearer <key>` | `https://api.a2e.ai/api` | image, video, speech, talk | – | per style verb |
+| `ElevenLabsMediaClient` (`elevenlabs`) | `ELEVENLABS_API_KEY`, `xi-api-key: <key>` | `https://api.elevenlabs.io` | speech, music, transcribe, cloneVoice | speech `eleven_flash_v2_5` | – |
+| `OpenAIMediaClient` (`openai`) | `OPENAI_API_KEY`, `Authorization: Bearer <key>` | `https://api.openai.com/v1` | image, video, speech, transcribe | image `gpt-image-1-mini` | 5000 |
+| `OpenRouterMediaClient` (`openrouter`) | `OPENROUTER_API_KEY`, `Authorization: Bearer <key>` | `https://openrouter.ai/api/v1` | image | image `google/gemini-2.5-flash-image` | – |
+| `FalMediaClient` (`fal`) | `FAL_API_KEY`, `Authorization: Key <key>` | `https://queue.fal.run` | image, video | image `fal-ai/flux/schnell` | 500 |
 
-**Scheduling.** Every media tool is **concurrency-safe** for every argument set: it carries the
-always-safe predicate (`concurrencySafe(args) -> true`, idiomatic name per port) of §8 *Tool
-scheduling*. Each call is an independent remote job, so the media calls of one model response run
-concurrently (up to `maxToolConcurrency`) instead of being serialised as unhinted tools are.
+Accepted args (`*` = required for that client):
 
-### Not in v1
+| client | image | video | speech | music | transcribe | cloneVoice | talk |
+|---|---|---|---|---|---|---|---|
+| a2e | prompt\*, width, height, seed | prompt\*, image, seconds | text\*, voice | – | – | – | image\*, audio\* |
+| elevenlabs | – | – | text\*, voice | prompt\*, seconds, instrumental | audio\*, language | name\*, samples\* | – |
+| openai | prompt\*, width, height | prompt\*, seconds | text\*, voice | – | audio\*, language | – | – |
+| openrouter | prompt\* | – | – | – | – | – | – |
+| fal | prompt\*, width, height, seed | prompt\*, image, seconds, aspectRatio | – | – | – | – | – |
 
-Download of expiring result URLs, provider-side job cancellation, local-file upload flows, ComfyUI graph injection, webhooks,
-price quotes, §10 suspension for long jobs, streaming `file` events. Tracked in
-`openspec/changes/add-media-generation`.
+**A2E** — a style client over the embedded preset `examples/media-styles/a2e.json` (byte source;
+ports embed it verbatim and assert the copy), named `a2e`, with built-in defaults (key env, gather
+`download`). `key` (or `A2E_API_KEY` at call time) fills `${A2E_API_KEY}`; `url` replaces
+`baseUrl`; `model`, when set, is written to the image body's `model_type`. Errors keep the style
+engine's texts. image, video, speech live-verified (PR #123); **talk unverified**
+(`POST /v1/talkingPhoto/start {name:"toolnexus", image_url, audio_url}`, poll
+`/v1/talkingPhoto/{id}`, `data._id`, `data.result_url`).
+
+**ElevenLabs**
+- speech *(live-verified, incl. a cloned voice by name)*: voice absent ⇒ id `JBFqnCBsd6RMkjVDRZzb`.
+  Otherwise first `GET <url>/v2/voices?page_size=100&search=<voice percent-encoded>` ⇒ JSON
+  `{voices:[{voice_id, name}]}` (snake_case); the first entry whose `name` equals `voice` (ASCII
+  case-insensitive) or whose `voice_id` equals it wins; else, when `voice` is 20 characters with no
+  space, it is used as the id; else error `speech: voice "<voice>" not found`. Then
+  `POST <url>/v1/text-to-speech/<id>?output_format=mp3_22050_32` body
+  `{"text": text, "model_id": model}` ⇒ **bytes**, `audio/mpeg`. jobId = the response header
+  `request-id` when present.
+- music *(unverified)*: `POST <url>/v1/music?output_format=mp3_44100_128` body
+  `{"prompt": prompt, "music_length_ms": seconds*1000 (default 10000)}` plus
+  `"force_instrumental": true` when `instrumental` is true ⇒ bytes, `audio/mpeg`.
+- transcribe *(unverified)*: `POST <url>/v1/speech-to-text` multipart: field `model_id=scribe_v1`,
+  then `language_code=<language>` when given, then file part `file` ⇒ JSON `text` ⇒ `MediaResult.text`.
+- cloneVoice *(unverified)*: `POST <url>/v1/voices/add` multipart: field `name`, then one file part
+  `files` per sample in order ⇒ JSON `voice_id` ⇒ `MediaResult.text`.
+
+**OpenAI** (`url` points it at any OpenAI-compatible server)
+- image *(live-verified)*: `POST <url>/images/generations` body `{"model", "prompt", "n": 1,
+  "size": "<w>x<h>"}` — size default `1024x1024`; with only one of width/height the other equals
+  it — plus `"quality": "low"` when the model starts with `gpt-image`. Response `data[]`: an entry's
+  `b64_json` ⇒ base64 result, mime from top-level `output_format` (`png`→image/png,
+  `jpeg`→image/jpeg, `webp`→image/webp, absent/other→image/png); else its `url` ⇒ URL result.
+  Empty or absent `data` ⇒ `image: no result at data`.
+- speech *(unverified)*: `POST <url>/audio/speech` body `{"model": models.speech ??
+  "gpt-4o-mini-tts", "input": text, "voice": voice ?? "alloy"}` ⇒ bytes, `audio/mpeg`.
+- transcribe *(unverified)*: `POST <url>/audio/transcriptions` multipart: `model=<models.transcribe
+  ?? gpt-4o-mini-transcribe>`, `language` when given, file part `file` ⇒ JSON `text`.
+- video *(unverified)*: `POST <url>/videos` body `{"model": models.video ?? "sora-2", "prompt",
+  "seconds": "<seconds ?? 4>"}` (a **string**) ⇒ `{id}` = jobId. Poll `GET <url>/videos/<id>` ⇒
+  `status`: `completed` done; `failed` ⇒ `job <id> failed: <error.message>` (or `job <id> failed`);
+  anything else keeps polling. Then `GET <url>/videos/<id>/content` ⇒ bytes, `video/mp4`.
+
+**OpenRouter** — image *(live-verified)*: `POST <url>/chat/completions` body `{"model",
+"modalities": ["image","text"], "messages": [{"role":"user","content": prompt}]}`. For each
+`choices[]`: `message.content` (string) is appended to `text`; each `message.images[].image_url.url`
+is a `data:` URL result, or a URL result when it is not a data URL. jobId = `id`. `text` is set
+only when non-empty. No image ⇒ `image: no image in response`, plus `: <text capped 200>` when
+text is non-empty. Video/audio are not built in (no spike).
+
+**fal** — the queue API for any hosted model id:
+- Submit `POST <url>/<model>` JSON input ⇒ `{request_id, status_url, response_url}`; jobId =
+  `request_id` (absent URLs are built per §7G.12 D10). Poll `GET <status_url>`: `status == "COMPLETED"` done; a non-empty `error` ⇒
+  `job <request_id> failed: <error>`; anything else (`IN_QUEUE`, `IN_PROGRESS`, …) keeps polling
+  and is reported. Then `GET <response_url>` ⇒ result URLs, in this order: `images[].url`,
+  `image.url`, `video.url`, `audio.url`, `audio_file.url`. None ⇒ `<verb>: no result in response`.
+  `status_url` / `response_url` follow the origin rule of §7G.8.
+- image *(live-verified on `fal-ai/flux/schnell`)*: input `{"prompt", "num_images": 1}`; when the
+  model contains `schnell`, `"image_size": "square", "num_inference_steps": 4`; width/height ⇒
+  `"image_size": {"width", "height"}` (overrides `square`; a missing one equals the other);
+  seed ⇒ `"seed"`.
+- video *(unverified)*: model = `models.video`, else `fal-ai/kling-video/v2.1/standard/image-to-video`
+  when `image` is given, else `fal-ai/kling-video/v2.1/standard/text-to-video`; input
+  `{"prompt", "duration": "<seconds ?? 5>"}` (a string), `image` ⇒ `"image_url"`,
+  aspectRatio ⇒ `"aspect_ratio"`.
+
+`providerOptions` (function face) overwrite the JSON body's top-level keys last, or add/replace
+multipart fields; never on the tool face.
+
+### 7G.10 CLI clients
+
+`CliMediaClient` runs a vendor's official CLI **once**, in its documented headless mode,, reads its JSON-lines stdout,
+and collects files. ACP is not used (ADR 0037). One run, normative:
+
+1. Make a fresh temp dir `cwd`. Spawn `command ++ client argv` with working dir `cwd`, the process
+   env plus the client's fixed env, **stdin closed/empty**, stderr drained and discarded. Spawn
+   failure ⇒ `unavailable` `<client>: cannot start "<command[0]>"`.
+2. Read stdout line by line (lines up to 64 MiB). A line that is not a JSON object is ignored.
+   Each object goes through the client's `parse` ⇒ `{session?, text?, paths[], error?, status?}`:
+   `session` sets jobId (last wins), `text` is appended, `paths` are collected, `error` replaces the
+   last error, `status` is reported as progress.
+3. Cancellation (`ctx.signal`) or the deadline (`loop.timeoutMs`) **kills the process** (the whole
+   process group where the port can) and stops reading: status `cancelled` (native cancellation
+   error) or `timeout` (`<client>: timed out after <timeoutMs>ms`).
+4. After exit, candidate files in order: parsed `paths` (event order); then absolute paths in the
+   collected text matching `/[^\s"'()\[\]]+\.(png|jpe?g|webp|gif|mp4|mov|webm|mp3|wav)`
+   (extension ASCII case-insensitive, scan order); then the client's `folder(session)` entries
+   (non-recursive, sorted by name), when it has one and a session is known. Duplicates (same
+   string) and anything that is not an existing regular file are dropped.
+5. **Wrong-kind guard**: keep only files whose extension-table mime matches the verb (`image` ⇒
+   `image/*`, `video` ⇒ `video/*`). Kept files are gathered as local paths (§7G.5) ⇒ `completed`,
+   regardless of the exit code.
+6. None kept: the last `error` set ⇒ the client's unavailable matcher; match ⇒ `unavailable`,
+   else `failed` `<client>: no <verb>: <error capped at 400 code points + "…">`. No error ⇒
+   `failed` `<client>: no <verb> file in the run (exit code <n>)`, plus `: <text capped 300>` when
+   the text is non-empty.
+7. Remove `cwd` (after any copy-out).
+
+The client's `model` becomes `-m <model>` (agy: `--model <model>`); the prompt is the client's
+template with `{prompt}` replaced by the **folded prompt** below. CLI clients accept: image —
+`prompt*`, `width`, `height`, `aspectRatio`; video — `prompt*`, `seconds`, `aspectRatio`. Any other
+arg (e.g. `seed`) ⇒ the §7G.3 / D19 unsupported-arg skip.
+
+**Size-hint folding** (pinned 2026-11-08, consumer report): a CLI takes no size flags, so the
+hints become prompt text. `folded = prompt`, then, if any hint is present, `" (" + hints.join(", ") + ")"`
+where `hints` are the present args in `verbs.json` order rendered: `width` ⇒ `width <n> px`,
+`height` ⇒ `height <n> px`, `seconds` ⇒ `about <n> seconds long`, `aspectRatio` ⇒
+`aspect ratio <v>` (values as `argText`: string as-is, integral number as integer text). Example:
+`{prompt:"a red apple", width:1024, aspectRatio:"16:9"}` ⇒ `a red apple (width 1024 px, aspect ratio 16:9)`.
+Cases `grok_size_hints_folded_into_prompt`, `grok_video_seconds_and_aspect_folded`, `codex_aspect_folded`.
+
+**Grok** (`GrokMediaClient`, `grok`; image *live-verified*, video *live-verified after opting in*,
+see below). Command default `grok`. Argv: `-p <prompt> --cwd <cwd> --output-format streaming-json
+--yolo --no-auto-update`, then `-m <model>` when set. Fixed env:
+`GROK_CONFIG={"features":{"image_gen":true,"video_gen":true}}`. Templates:
+- image: `Generate exactly one image with your image generation tool: {prompt}. Do not write code. Reply only with the file path.`
+- video: `Generate exactly one short video with your video generation tool, shortest duration available: {prompt}. Do not write code. Reply only with the file path.`
+
+Parse by `type`: `text` ⇒ text `data`; `tool_call` ⇒ status `tool <toolName>`;
+`tool_call_update` with a non-empty string `status` ⇒ status `tool <status>`; when `completed`,
+`rawOutput.path` (non-empty string) is a path; when `failed`, error = `rawOutput.message`, else the
+compact JSON of `rawOutput` with keys sorted (§7G.12 D15); `end` ⇒ session `sessionId`, status `end <stopReason>`, and `usage` from its
+`usage.input_tokens` / `usage.output_tokens` / `total_cost_usd` / `total_cost_usd_ticks` (§7G.12 D21); `error` ⇒ error
+`message`. Unavailable matcher (ASCII case-insensitive): `zero data retention` ⇒ the fixed message
+`grok: <verb> blocked by Zero Data Retention — run /privacy and opt in, or configure ZDR video storage (docs/media#grok-video-zdr)`;
+`usage limit` ⇒ `grok: <error capped 400>`. The client **never edits the user's Grok settings**.
+
+*Grok video and ZDR.* Grok's video tools obey the account's coding-data setting, not the API
+console. Under Zero Data Retention (Opt out in `/privacy`) the video tool fails and Grok often ends
+the turn normally with only a still image — the wrong-kind guard turns that into the `unavailable`
+above, and `createMedia` falls through to the next video client. Fix: run `grok`, `/privacy`, Opt
+in, restart `grok` (xAI may then retain and train on CLI coding data); a user bucket in
+`~/.grok/managed_config.toml` is documented by xAI but did not work on a personal account
+(ADR 0037). The docs media page carries these steps under the anchor `grok-video-zdr`.
+
+**Codex** (`CodexMediaClient`, `codex`; image *live-verified*). Command default `codex`. Argv:
+`exec --json --skip-git-repo-check -s workspace-write`, then `-m <model>` when set, then the
+prompt as the last argument. Template:
+`Generate exactly one image with your built-in image generation tool: {prompt}. Do not write code or use scripts. Reply only with the absolute path where the image was saved.`
+Parse by `type` (every line's `type` is reported as status): `thread.started` ⇒ session
+`thread_id`; `item.completed` with `item.type == "agent_message"` ⇒ text `item.text`; `error` /
+`turn.failed` ⇒ error = `message`, else `error.message`, else the raw line. No event carries the
+file: it comes from the text scan and `folder(thread) = $CODEX_HOME/generated_images/<thread>`
+(`CODEX_HOME` from the process env, default `<home>/.codex`). Unavailable matcher: `usage limit`
+or `quota` ⇒ `codex: <error capped 400>`.
+
+**Google Antigravity** (label `agy`, `agy`; image *live-verified* with agy 1.4.12, 2026-11-08).
+Command default `agy`. Argv: `-p <prompt> --output-format stream-json --dangerously-skip-permissions`,
+then `--model <model>` when set. Template:
+`Generate exactly one image with your image generation tool: {prompt}. Do not write code. Reply only with the absolute path where the image was saved.`
+Parse by `event`: `init` ⇒ session `conversation_id`, status `init`; `step_update` with
+`step_update.tool_name` and `.state` ⇒ status `tool <name> <state>`; `result` ⇒ session
+`result.conversation_id`, text `result.response`, status `result <status>`, usage from
+`result.usage.input_tokens` / `output_tokens`; when `result.status != "SUCCESS"`, error =
+`result.error` (string), else `result.error.message`, else the text, else the compact sorted JSON of
+`result`; `error` ⇒ error `message`. A `SUCCESS` result whose text contains `quota` or `resource_exhausted`
+(ASCII case-insensitive) also sets error = the text: live, agy reports an exhausted image quota
+that way and saves no file. No event carries the file (agy delegates to an
+`image-generator` subagent); it comes from the text scan, then `folder(conv) =
+<home>/.gemini/antigravity-cli/brain/<conv>`. Unavailable matcher: `quota` or `usage limit` ⇒
+`agy: <error capped 400>` (live-verified 2026-11-08: `429 RESOURCE_EXHAUSTED`).
+
+**Permissions.** Each preset runs headless with no interactive prompt: Grok `--yolo`, agy
+`--dangerously-skip-permissions`, Codex `exec -s workspace-write` (sandboxed: it can write its image
+into `$CODEX_HOME`, so no bypass flag is used).
+
+### 7G.10a CLI presets as styles (ADR 0042)
+
+`loadMediaStyle(pathOrPreset, config?)` also takes a **built-in preset** name; the result is a
+style backed by the CLI client above with `config` (§7G.4). Preset names are the byte contract,
+spelled per port as an enum/constant (`MediaStyle.XaiGrokCli`, `MediaStyleXaiGrokCli`,
+`MediaStyle.XAI_GROK_CLI`, …) — an owner-accepted exception to "no vendor names in the public API":
+
+| preset | client | verbs |
+|---|---|---|
+| `xai-grok-cli` | Grok | image, video |
+| `openai-codex-cli` | Codex | image |
+| `google-agy-cli` | Google Antigravity (`agy`) | image |
+| `xai-grok-cli-mock`, `openai-codex-cli-mock`, `google-agy-cli-mock` | the same client, mocked | same as the preset |
+
+A **mock** preset is the same client (label, verbs, args, folding, errors) that never starts a
+process: it writes `<gather.dir or <tmp>/toolnexus-media>/<label>-mock-<verb>.<png|mp4>` (absolute)
+holding the bytes `toolnexus mock <verb>`, gathers it like a CLI file (§7G.5), and returns
+`text` = the exact templated prompt, `jobId` `mock`, status `completed`. Use it to test code
+written against a real preset without a CLI, an account or a network.
+
+`generateMedia(style, verb, args, config?)` is one-shot sugar for
+`createMedia(loadMediaStyle(style, config)).generate(verb, args)` — same results and errors. Its
+shell twin is the Go CLI `toolnexus media <verb> --style <preset|file> --prompt … [--aspect-ratio]
+[--width] [--height] [--seconds] [--model] [--out dir] [--timeout-ms]`, which prints each file's
+path (or URL) per line and exits non-zero with the error on stderr.
+
+Docs and examples use **one** style per `createMedia`. A list still routes as §7G.3 describes, but
+fall-through between CLI presets is not advertised.
+
+Conformance: `cli.json` cases with `style`, `oneShot`, and `verbCases` (verbs, tool names and the
+unsupported-verb error for each preset, mock and an HTTP style mixed with presets).
+
+### 7G.10b Availability, file names, who served it
+
+- **`style.available()`** (idiomatic: `Available(ctx)`, `available()`, `AvailableAsync`) answers
+  `{installed, loggedIn, reason}` in well under a second, generating nothing and reading no
+  secret. CLI preset: `installed` = the command (config `command[0]`, else the CLI name) is found
+  (on `PATH`, or as a path); `loggedIn` = the CLI's own login file **exists** — grok
+  `~/.grok/auth.json`, codex `$CODEX_HOME/auth.json` (default `~/.codex/auth.json`), agy
+  `~/.gemini/antigravity-cli/antigravity-oauth-token`. Reasons, byte-exact:
+  `<label>: "<cmd>" not found on PATH` · `<label>: installed, not logged in (<file> missing)` ·
+  `<label>: installed, logged in (<file> present)`. Mock preset: `{true, true, "<label>: mock"}`,
+  or `{false, false, "<label>: mock set unavailable by TOOLNEXUS_MEDIA_MOCK_AVAILABLE=0"}` when that
+  env var is `0`. HTTP style: `installed` true; `loggedIn` = config `key` set (`<name>: key from
+  config`) or every `${VAR}` in its headers set (`<name>: env present`), else
+  `<name>: <VAR> is not set` (first missing, sorted). `<name>` = the style's `name`, else `style`.
+- **`gather.name`** — when set, saved files are `<slug><ext>`, then `<slug>-2<ext>`, `<slug>-3<ext>`…
+  (the first name not already in the folder). `slug` = the name with every byte outside
+  `[A-Za-z0-9._-]` replaced by `-`, then leading `.` and `-` removed; empty ⇒ the default naming.
+- **`MediaResult.style`** — who served the call: the preset id (`xai-grok-cli`, …) for a preset,
+  the style's `name` (else `style`) for an HTTP style, the client's `name` for any other client.
+  **`MediaResult.model`** — the configured model for the verb (`models[verb]`, else `model`) of a
+  loaded style, when set; omitted otherwise, never guessed. **`usage`** stays exactly what the
+  provider or CLI reported (D21); no price is ever estimated.
+
+### 7G.11 Hermetic conformance
+
+- **API cases** (`cases.json`, `clients.json`, `routing.json`): an in-process fake HTTP server
+  serves `script[]` in order (the last entry repeats). An entry is `{status, body (JSON) |
+  rawBody (text) | bodyBase64 (bytes), headers?}`; `{server}` is substituted in URLs, header
+  values and any JSON string. Every request is recorded (method, path exactly as sent incl. query,
+  JSON body or parsed multipart parts, headers). `{dir}` = a fresh temp dir the harness passes as
+  `gather.dir`; `{inputs}` = a temp dir where the harness first writes `inputFiles`
+  (`name → base64`). `env` is set and `unsetEnv` removed for the case.
+- **CLI cases** (`cli.json`) spawn the portable fake CLI `conformance/media/fake-cli/fake-cli.sh`
+  with **`/bin/sh`** (Linux/macOS; Windows is not run): the client's `command` is
+  `["/bin/sh", "<abs>/fake-cli.sh", "<fixture.jsonl>", "<out>"]`, so the fake needs no env. It
+  records its argv to `<out>/argv.txt` (one per line), its working dir to `<out>/cwd.txt` and
+  `$GROK_CONFIG` to `<out>/env-GROK_CONFIG.txt`, then replays the fixture (see `fake-cli/README.md`).
+  Grok fixture lines use the live headless `streaming-json` shapes; the `end` line is
+  `{"type":"end","stopReason":…,"sessionId":…,"usage":{"input_tokens":N,"output_tokens":N},"num_turns":N,"total_cost_usd":X,"total_cost_usd_ticks":N}`
+  (case `grok_usage_from_end_event`, live-verified).
+- **File results** are asserted as `saved: {bytesBase64, ext}` — the file is under `{dir}`, named
+  `^<client>-<verb>-[0-9]+-[0-9]+<ext>$`, `url == "file://" + path`, and holds exactly those bytes.
+
+### 7G.12 Edge rules (pinned after the first ports)
+
+Pinned 2026-11-03 after seven ports implemented §7G.1–§7G.11 and disagreed where the text was
+silent. Each rule names its case(s); where a rule and an earlier paragraph differ, **this rule
+wins**.
+
+- **D1 fal poll order** — `status == "COMPLETED"` ⇒ done (an `error` field is ignored); else a
+  non-empty `error` ⇒ `job <request_id> failed: <error>`; else keep polling. Cases
+  `fal_completed_ignores_error_field`, `fal_error_field_while_in_progress_is_failed`.
+- **D2 Ready word** — the tool output's `<word> ready:` comes from the **verb's** kind (image ⇒
+  `image`; video, talk ⇒ `video`; speech, music ⇒ `audio`), never from the files' types or mimes.
+- **D3 `MediaFile.type`** comes from the verb's kind (image ⇒ `image`, video/talk ⇒ `file`,
+  speech/music ⇒ `audio`); `mimeType` still comes from the file (§7G.5). Cases
+  `kind_word_and_type_from_verb_not_file`, `speech_kind_audio_from_verb_not_file`.
+- **D4 Every text cap** (OpenRouter text 200, CLI text 300, CLI/tool error 400, echoed bodies 1000)
+  counts Unicode code points and appends `…` (U+2026) **only when it truncated**. Cases
+  `openrouter_no_image_text_capped_200`, `openrouter_no_image_text_exactly_200_not_capped`,
+  `grok_text_capped_300`, `grok_tool_error_capped_400`, `codex_error_exactly_400_not_capped`.
+- **D5 Downloads and input fetches are never `unavailable`.** The 402 / quota-429 rule of §7G.2
+  applies only to the provider's API requests. A result download keeps
+  `<verb>: download failed: HTTP <status>`; an input fetch is `<verb>: cannot read "<ref>": HTTP
+  <status>` (status `failed`). Cases `download_402_is_failed_not_unavailable`,
+  `download_429_quota_is_failed_not_unavailable`, `input_fetch_402_is_failed_not_unavailable`,
+  `input_fetch_429_billing_is_failed_not_unavailable`.
+- **D6 Style `args()`** = only the **canonical** args of the verb that the style maps (plus its
+  `required`). A style may map a non-canonical name (it stays loadable), but that name is not an
+  accepted arg and never appears in a tool schema. Case `style_noncanonical_mapped_arg_is_not_accepted`.
+- **D7 Non-canonical arg keys** (amended by D19) — a key that is not a canonical arg of the verb
+  is accepted by **no** client (a client without `args()` accepts the canonical args only), so it
+  fails the call at once: `<verb>: argument "<key>" not supported`, status `failed`, no client
+  called. A canonical key a client does not accept is D19's skip. Cases
+  `client_without_args_rejects_non_canonical_key`, `builtin_client_rejects_non_canonical_arg`,
+  `non_canonical_key_plain_error_even_with_fallbacks`.
+- **D8 Model visibility** — only `image` parts of a media tool result reach the model; no other
+  part, **text parts included** (§7G.6).
+- **D9 No image parts** — when a media tool result emits no image part, every message style
+  (Anthropic included) sends the plain `output` string as the tool-result content: no empty content
+  array, no placeholder. Asserted where `modelParts` is `[]` (each file's `_doc`).
+- **D10 fal URLs** — when the submit response lacks `status_url` / `response_url`, use
+  `<url>/<model>/requests/<id>/status` and `<url>/<model>/requests/<id>` (id percent-encoded,
+  §7G.8). Case `fal_missing_status_and_response_url_builds_them`.
+- **D11 `models.<verb>`** overrides `model` and the default for that verb on **every** built-in
+  client (ElevenLabs speech/transcribe, OpenAI speech/transcribe/video, fal video, …); defaults
+  are unchanged. Cases `elevenlabs_transcribe_models_override`, `elevenlabs_speech_models_beats_model`,
+  `openai_transcribe_models_override`.
+- **D12 Deadline vs cancel** — the effective deadline (earlier of `ctx.deadline` and
+  `loop.timeoutMs`) expiring is status `timeout`: `job <id> timed out after <ms>ms`, or
+  `<verb>: timed out after <ms>ms` with no job id (CLI: `<client>: timed out after <ms>ms`);
+  `<ms>` is byte-fixed only when it comes from `loop.timeoutMs`. Only an explicit cancel
+  (`ctx.signal`) is `cancelled`. Cases `caller_deadline_is_timeout_not_cancelled`,
+  `grok_caller_deadline_is_timeout`.
+- **D13 Missing-result texts** — every API client says `<verb>: no result at <path>` and
+  `<verb>: no job id at <path>`, `<path>` being the provider field: `transcribe: no result at text`,
+  `cloneVoice: no result at voice_id`, `image: no result at data` (OpenAI), `video: no job id at id`
+  (OpenAI), `<verb>: no job id at request_id` (fal). fal's `<verb>: no result in response` and
+  OpenRouter's `no image in response` stay. Cases `elevenlabs_transcribe_no_text`,
+  `elevenlabs_clone_voice_no_voice_id`, `openai_transcribe_no_text`, `openai_video_no_job_id`,
+  `fal_no_request_id`.
+- **D14 maxBytes texts** — an input over `gather.maxBytes` ⇒ `<verb>: cannot read "<ref>": file
+  exceeds gather.maxBytes (<n> bytes)` (a local file is checked before any request); a download
+  over it ⇒ `<verb>: download failed: file exceeds gather.maxBytes (<n> bytes)`; a saved/inlined
+  provider body keeps `<verb>: file exceeds gather.maxBytes (<n> bytes)`. Enforced **regardless of
+  an injected HTTP client**: read at most `maxBytes + 1` bytes and stop (use `Content-Length` to
+  stop early when present); an oversize body is never accepted. Cases
+  `input_file_exceeds_max_bytes_no_request`, `input_url_exceeds_max_bytes`,
+  `download_exceeds_max_bytes`, `gather_max_bytes_exceeded`.
+- **D15 Grok failed tool, no message** — the error text is `rawOutput` as compact JSON (no
+  whitespace) with object keys sorted by code point at every depth; array order kept. Case
+  `grok_failed_raw_output_keys_sorted`.
+- **D16** — *superseded by D19*: a missing required arg skips **every** candidate, the first
+  included; there is no first-client special case. Cases
+  `fall_through_skips_candidate_missing_required_arg`,
+  `fall_through_missing_required_arg_joins_unavailable`, `client_declared_required_arg`.
+- **D17 CLI working dir** — the dir passed to the CLI (`--cwd`, spawn cwd) is the **realpath** of
+  the temp dir (macOS `/var` ⇒ `/private/var`); `cli.json`'s `{cwd}` compares byte for byte with
+  the fake's `pwd -P`.
+
+- **D19 Fall-through on unsupported args** (pinned 2026-11-04 from live example runs) — a
+  candidate that does not accept a canonical arg, or lacks a required one, is skipped like
+  `unavailable` (never called) with reason `<name>: argument "<key>" not supported` /
+  `<name>: missing required argument "<key>"`; every candidate, the first included (§7G.3). All
+  skipped/unavailable ⇒ `media: no client available for "<verb>": <reasons joined "; ">`, status
+  `unavailable`. A non-canonical key stays D7's plain `failed` error. Replaces the earlier "check
+  the args against the first client" rule, the `… not supported by <client>` / `by this style`
+  texts, the `is required` failed error, and fall-through arg dropping. Cases
+  `first_candidate_rejects_arg_falls_to_next`, `every_candidate_rejects_an_arg_joined`,
+  `skipped_and_unavailable_reasons_join_in_order`, `candidate_not_accepting_arg_is_skipped_after_unavailable`.
+- **D20 Local path on run files** — `MediaFile.path` (absolute) is set whenever gather has a local
+  file (download mode, any saved base64 / bytes / `data:` result, CLI copy-out, CLI url mode). The
+  matching `RunResult.files` entry carries the same `path` in all 8 ports. Parts and anything sent
+  to a model or over A2A never contain a path (§1B). Conformance: `runFilePath` (each file's
+  `_doc`), asserted within the tool face; in `url` mode a CLI file's `path` is the CLI's own
+  absolute file, not under `{dir}`.
+- **D21 Usage** — `MediaResult.usage` and the tool's `metadata.usage` are filled only from what the
+  provider returns, never estimated: OpenAI images `usage.input_tokens` / `usage.output_tokens` ⇒
+  `inputTokens` / `outputTokens`; OpenRouter `usage.prompt_tokens` / `usage.completion_tokens` /
+  `usage.cost` ⇒ `inputTokens` / `outputTokens` / `costUsd`; Grok CLI headless `end` event
+  `usage.input_tokens` / `usage.output_tokens` / `total_cost_usd` ⇒ `inputTokens` / `outputTokens` /
+  `costUsd`, and `total_cost_usd_ticks` (1 tick = 1e-10 USD) ⇒ `raw.total_cost_usd_ticks` verbatim,
+  **never converted** (live-verified: stdout carries no `costUsdTicks`). Every
+  other client: no `usage`. A field the provider omits is absent; no fields ⇒ no `usage` key. There
+  is **no run-level sum** of media usage in v1 (`RunResult.usage` stays LLM tokens only). Cases
+  `openai_image_usage`, `openrouter_image_usage_cost`, `grok_usage_from_end_event`,
+  `usage_passes_through_to_tool_metadata`; `noUsage` elsewhere.
+- **D22 Saved-file extension** — URL path extension first, then the mime table of §7G.5, `.bin`
+  only for an unknown mime. Cases `download_ext_from_url_extension`,
+  `download_ext_wav_from_x_wav_mime`, `download_ext_aac_from_mime`, `download_ext_unknown_mime_is_bin`.
+- **D23 User-Agent** — every media HTTP request (start, poll, download, input fetch) sends
+  `User-Agent: toolnexus/<version> (<port>)`, `<version>` the package version and `<port>` one of
+  `js python golang java csharp elixir clojure rust`, unless the client/style headers set a
+  `User-Agent` (then that value, unchanged). A **download** sends that client/style `User-Agent`
+  only when the download URL is on the client's base-URL origin (scheme + host + port, as §7G.8);
+  a download on any other origin sends the default toolnexus UA, matching §7G.5's no-client-headers
+  rule. CDNs reject requests without one (A2E CloudFront 403).
+  Conformance: `expectHeaderPatterns`. Cases `user_agent_on_start_poll_and_download`,
+  `style_user_agent_default_on_start_and_poll`, `style_user_agent_header_overrides`.
+
+### 7G.13 Not in v1
+
+Provider-side job cancellation, webhooks, price quotes, a run-level sum of media `usage` (§7G.12 D21), §10 suspension for long jobs, streaming
+`file` events, ComfyUI, a generic ACP media client, Replicate (reachable through a custom client),
+Gemini/Grok-API/Seedance/Kling/Runway direct clients, OpenRouter video/audio, image editing.
+Tracked in `openspec/changes/add-media-clients`.
 
 ---
 
@@ -2539,9 +3104,11 @@ RunResult {
   messages:      [...]          // full transcript
   toolCalls:     [{ name, args, output, isError, metadata, parts? }]   // every call + its result;
                                                                       // parts present iff the ToolResult had parts
-  files:         [{ type, mimeType, url?, data?, name?, from, callId }] // every non-text part produced
+  files:         [{ type, mimeType, url?, data?, name?, path?, from, callId }] // every non-text part produced
                  // by tool calls this run (any source: media, MCP, built-in file reads…), in call order;
                  // from = tool name, callId = the model's tool-call id; name present iff the part had one.
+                 // path (absolute) iff the part came from a media file with a local path (§7G.12 D20);
+                 // it is carried port-internally, never inside a part or anything sent to a model.
                  // Always present ([] when none). The final `text` never gets markup for them (§7G).
   toolCallCount: number         // = toolCalls.length
   turns:         number         // LLM round trips

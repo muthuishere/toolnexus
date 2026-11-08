@@ -177,26 +177,66 @@ const rs = await c.states("a", "b").evaluate(judge.noul("q", "…"))      // [{ 
 
 ## Media generation
 
-Generate images, video and speech (plus transcription, voice cloning and talking-head video)
-from a **JSON style** instead of provider code. Async jobs are started and polled for you. The same
-verbs become agent tools (`generate_image`, `generate_video`, `generate_speech`, …), and whatever
-they produce lands in `RunResult.files`. `examples/media-styles/a2e.json` ships first and reads
-`A2E_API_KEY` at call time. Its result URLs expire in 3–30 days, so save what you keep. SPEC §7G;
-guide: <https://muthuishere.github.io/toolnexus/media/>.
+Images, video, speech, music, transcription, voice cloning and talking-head video, with **one
+client per media object**. The quickest start is a **CLI preset**: `MediaStyle.XaiGrokCli`, `MediaStyle.OpenAICodexCli` and `MediaStyle.GoogleAgyCli` drive the vendor's
+official CLI (`grok`, `codex`, `agy`) in its documented headless mode (`grok -p`, `codex exec`,
+`agy -p`), signed in by you. Grok does image and video; Codex and Antigravity do image. Each preset
+has a mock twin (`MediaStyle.XaiGrokCliMock`, …) for tests. Your provider's terms of service apply to how you use its CLI.
+Every Grok image carries a small visible **"Grok" mark in the bottom-right corner**; toolnexus does
+not remove it. Install, sign-in, Grok video, limits and models:
+<https://muthuishere.github.io/toolnexus/cookbook/cli-media-setup/>. SPEC §7G; guide: <https://muthuishere.github.io/toolnexus/media/>.
 
 ```ts
-import { loadMediaStyle, createMedia, createToolkit } from "toolnexus"
+import { generateMedia, createMedia, loadMediaStyle, createToolkit, MediaStyle } from "toolnexus"
 
-const media = createMedia(loadMediaStyle("examples/media-styles/a2e.json"), {
-  onProgress: ({ verb, status }) => console.log(verb, status),
-})
-const img = await media.image({ prompt: "a red fox in fresh snow", width: 1024, height: 768 })
-const vid = await media.video({ prompt: "the fox blinks", image: img.files[0].url, seconds: 5 })
+// one line
+const r = await generateMedia(MediaStyle.XaiGrokCli, "image", { prompt: "a red apple", aspectRatio: "16:9" })
+console.log(r.files[0].path)
 
-const tk = await createToolkit({ media })            // the agent gets generate_image, …
-const res = await agent.run("Draw a fox, then animate it.", { toolkit: tk })
-for (const f of res.files) console.log(f.from, f.mimeType, f.url)
+// or keep a media object, and give it to your agent
+const media = createMedia(loadMediaStyle(MediaStyle.XaiGrokCli))
+const clip = await media.video({ prompt: "the apple rolls off the table" })
+const tk = await createToolkit({ media })   // generate_image, generate_video (source "media")
 ```
+
+For an HTTP API, give `createMedia(client)` one named client — `OpenAIMediaClient`, `OpenRouterMediaClient`, `FalMediaClient`, `ElevenLabsMediaClient` or `A2EMediaClient`. Each reads its key from its env
+var (`OPENAI_API_KEY`, `FAL_API_KEY`, `ELEVENLABS_API_KEY`, …) at call time and never logs it.
+
+```ts
+import { createMedia, ElevenLabsMediaClient } from "toolnexus"
+
+const voice = createMedia(new ElevenLabsMediaClient({ gather: { mode: "url" } }))  // speech, music, transcribe, cloneVoice
+const say = await voice.speech({ text: "Hello from the fox." })
+```
+
+- **Typed verbs** — `image`, `video`, `speech`, `music`, `transcribe`, `cloneVoice`, `talk`, each
+  `(args & { signal?, deadline?, progress?, providerOptions? }) => Promise<MediaResult>`;
+  `generate(verb, args, ctx)` is the raw call. `MediaResult { files, text?, jobId?, status, usage? }`
+  — `usage` (`inputTokens`, `outputTokens`, `costUsd`, `raw`) only as the provider reported it
+  (OpenAI images, OpenRouter, Grok's `raw.costUsdTicks` unconverted), also on the tool's `metadata.usage`.
+  Args are checked per client: a client that does not accept an arg (e.g. `seconds` on
+  the Grok CLI preset, which takes `prompt` and size hints only) or lacks a required one fails with
+  `unavailable`; a key that is not a canonical arg of the verb fails at once.
+- **Config** (every built-in client, one shape): `model`, `models: { [verb]: model }`, `key`, `url`,
+  `command` (CLI), `loop: { intervalMs, timeoutMs, onProgress }` (timeout default 10 min),
+  `gather: { mode: "url" | "download" | "inline", dir, maxBytes, keep }` (default `download` into
+  `<tmp>/toolnexus-media`, 100 MiB cap), `fetch` (injected transport).
+- **Agents** — `createToolkit({ media })` (or `media.tools()`); produced files land in
+  `RunResult.files` (`{ type, mimeType, url?, data?, path?, from, callId }` — `path` is the saved
+  local file; it is never sent to the model). Only **image** parts are sent
+  back to the model; audio/video stay on `RunResult.files`.
+- **Your own provider** — implement `MediaClient` (`name`, `supports(verb)`, optional `args(verb)`,
+  any of the seven verb methods); throw `MediaUnavailableError` when it cannot serve a call (no key, no credits).
+  Advanced: `styleMediaClient(loadMediaStyle("my-style.json"))` turns a JSON style into a client.
+- **Errors** — a typed verb throws `MediaError` (`status`: `failed` | `timeout` | `cancelled` |
+  `unavailable`); a media tool never throws (`isError: true`).
+
+Run it: `npm run build && npm run example:media`. It uses whatever is present, in order: the `grok`
+and `codex` CLIs, `ELEVENLABS_API_KEY`, then `OPENAI_API_KEY`, `FAL_API_KEY`,
+`A2E_API_KEY`; makes an image, ElevenLabs speech (`MEDIA_VOICE` picks the voice) and calls the
+`generate_image` tool; `MEDIA_VIDEO=1` adds a Grok video, `MEDIA_PAID=1` paid video/talk. It prints
+client, verb, path or URL, mime type, size and usage per file, exits non-zero if a step fails, and
+exits 0 with a hint when nothing is available.
 
 ## MCP 2026-07-28 + OAuth
 

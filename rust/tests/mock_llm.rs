@@ -14,9 +14,9 @@ use toolnexus::classifier::{
 };
 use toolnexus::client::{ClientOptions, Style, create_client};
 use toolnexus::{
-    BuiltinsConfig, ClassifierOptions, CloneVoiceInput, ContentPart, ImageInput, MediaOptions,
-    Questions, SpeechInput, TalkingInput, Tool, Toolkit, ToolkitOptions, TranscribeInput,
-    VideoInput, create_classifier, create_media, create_toolkit, define_tool, load_media_style,
+    BuiltinsConfig, ClassifierOptions, CloneVoiceInput, ContentPart, ImageInput, Questions,
+    SpeechInput, TalkInput, Tool, Toolkit, ToolkitOptions, TranscribeInput, VideoInput,
+    create_classifier, create_media, create_toolkit, define_tool, load_media_style,
 };
 
 fn repo() -> PathBuf {
@@ -351,7 +351,7 @@ async fn media_every_verb_and_async_failure() {
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("media-style.json");
     std::fs::write(&path, style.to_string()).unwrap();
-    let media = create_media(load_media_style(&path).unwrap(), MediaOptions::default());
+    let media = create_media([load_media_style(&path).unwrap()]).unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 
     let one = |r: &toolnexus::MediaResult, suffix: &str, mime: &str| {
@@ -410,9 +410,9 @@ async fn media_every_verb_and_async_failure() {
         Some(format!("voice-{}", &h[..8]).as_str())
     );
     let tk = media
-        .talking(TalkingInput {
+        .talk(TalkInput {
             image: img.files[0].url.clone(),
-            audio,
+            audio: Some(audio),
             ..Default::default()
         })
         .await

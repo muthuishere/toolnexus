@@ -77,27 +77,43 @@ shown in eight-language synced tabs.
 
 Guide: [Media generation](/toolnexus/media/) · recipe: [Generate images, video and speech](/toolnexus/cookbook/media/) · SPEC §7G.
 
-- `MediaStyle.Load(string path)` · `MediaStyle.Parse(string json)` · `MediaStyle.FromDictionary(dict)`.
-- `Media.Create(MediaStyle style, MediaOptions? options = null)` ·
-  `Media.Create(IEnumerable<MediaStyle> styles, MediaOptions? options = null)` — a verb resolves to the
-  first style that declares it.
-- `MediaOptions { OnProgress: Action<MediaProgress>?, Progress: IProgress<MediaProgress>?, HttpClient: HttpClient?, HttpHandler: HttpMessageHandler? }`
-  — `MediaProgress(Verb, JobId, Status)` after every poll.
+- `Media.Create(IMediaClient client)` · `Media.Create(params IMediaClient[] clients)` ·
+  `Media.Create(IEnumerable<IMediaClient> clients)` — a verb goes to the first client whose
+  `Supports(verb)` is true and falls through to the next **only** on `MediaUnavailableException`; an empty
+  list throws `media: no clients`.
+- Named clients, each `new XMediaClient(MediaClientConfig? config = null)` — API (key from the env var at
+  call time): `OpenAIMediaClient` (`OPENAI_API_KEY`) · `OpenRouterMediaClient` (`OPENROUTER_API_KEY`) ·
+  `ElevenLabsMediaClient` (`ELEVENLABS_API_KEY`) · `FalMediaClient` (`FAL_API_KEY`) · `A2EMediaClient`
+  (`A2E_API_KEY`); CLI: `GrokMediaClient` · `CodexMediaClient`.
+- `MediaClientConfig { Model, Models: IDictionary<string,string>? (per verb), Key, Url, Command: IReadOnlyList<string>?, Loop: MediaLoop?, Gather: MediaGather?, HttpClient: HttpClient? }`.
+- `MediaLoop { IntervalMs, TimeoutMs, OnProgress: Action<MediaProgress>? }` —
+  `MediaProgress(Verb, Client, JobId, Status, ElapsedMs)`.
+- `MediaGather { Mode: "url" | "download" | "inline", Dir, MaxBytes, Keep }` — sets which of
+  `MediaFile.Url / Path / Data` you get.
 - Verbs, each `Task<MediaResult> XAsync(XInput input, CancellationToken cancellationToken = default)`:
   `ImageAsync(new ImageInput(prompt) { Width, Height, AspectRatio, Seed, ProviderOptions })` ·
   `VideoAsync(new VideoInput(prompt) { Image, Seconds, AspectRatio, ProviderOptions })` ·
   `SpeechAsync(new SpeechInput(text) { Voice, ProviderOptions })` ·
-  `TranscribeAsync(new TranscribeInput(audio) { ProviderOptions })` ·
+  `MusicAsync(new MusicInput(prompt) { Seconds, Instrumental, Lyrics, ProviderOptions })` ·
+  `TranscribeAsync(new TranscribeInput(audio) { Language, ProviderOptions })` ·
   `CloneVoiceAsync(new CloneVoiceInput(name, samples) { ProviderOptions })` ·
-  `TalkingAsync(new TalkingInput(image, audio) { ProviderOptions })`. `null` properties are not sent.
-- `GenerateAsync(string verb, IDictionary<string, object?>? args, IDictionary<string, object?>? providerOptions = null, CancellationToken cancellationToken = default)`
-  — the raw call.
+  `TalkAsync(new TalkInput(image) { Audio, Text, Voice, ProviderOptions })`. `null` properties are not sent.
+- `GenerateAsync(string verb, IDictionary<string, object?>? args, MediaContext? ctx = null)` ·
+  `GenerateAsync(verb, args, CancellationToken)` — the raw call · `Supports(verb)`.
 - `MediaResult(IReadOnlyList<MediaFile> Files, string Status, string? Text = null, string? JobId = null)` ·
-  `MediaFile(Type, MimeType, Url)` (`.ToPart()` → `ContentPart`).
+  `MediaFile(Type, MimeType, Url?, Path?, Data?)` (`.ToPart()` → `ContentPart`).
+- `interface IMediaClient` — implement `Name`, `Supports(string verb)` and the verbs you serve:
+  `ImageAsync | VideoAsync | SpeechAsync | MusicAsync | TranscribeAsync | CloneVoiceAsync | TalkAsync(IDictionary<string, object?> args, MediaContext ctx)`
+  (the rest default to unsupported); optional `Args(verb): IReadOnlyList<MediaArg>?` (`MediaArg(Name, Required)`,
+  `null` = every canonical arg). `MediaContext { CancellationToken, Deadline, Progress, ProviderOptions }`.
 - `media.Tools(): IReadOnlyList<ITool>` (source `"media"`), or `Toolkit.Options.Media` / `.WithMedia(media)`.
-- `RunResult.Files: IReadOnlyList<RunFile>` — `RunFile(Type, MimeType, Url, Data, From, CallId)`, in call
-  order; the same parts are on `ToolCalls[i].Parts`.
-- Errors: the function face throws `MediaException` (message is the exact §7G string); cancellation throws
-  `OperationCanceledException`. A media tool never throws (`IsError`).
-- Equivalents: `createMedia` (js) · `create_media` (py) · `CreateMedia` (go) · `Media.create` (java) ·
-  `Toolnexus.Media.new` (elixir) · `toolnexus.media/create-media` (clojure) · `create_media` (rust).
+- `RunResult.Files: IReadOnlyList<RunFile>` — `RunFile(Type, MimeType, Url, Data, From, CallId, Name)`, in
+  call order. Only image parts are sent to the model; other files reach it as the tool's text output.
+- Errors: `MediaException` (`Status` `failed | timeout | cancelled | unavailable`, `JobId`, message is the
+  exact §7G string) · `MediaUnavailableException` (status `unavailable`; throw it from your own client to
+  trigger fall-through); cancellation throws `OperationCanceledException`. A media tool never throws (`IsError`).
+- Advanced: `new StyleMediaClient(MediaStyle style, MediaClientConfig? config = null)` over
+  `MediaStyle.Load(path)` · `MediaStyle.Parse(json)` · `MediaStyle.FromDictionary(dict)` — a provider
+  described in JSON.
+- Equivalents: `createMedia` (js) · `create_media` (py) · `CreateMedia` (go) · `Media.createMedia` (java) ·
+  `Toolnexus.Media.create` (elixir) · `toolnexus.media/create-media` (clojure) · `create_media` (rust).

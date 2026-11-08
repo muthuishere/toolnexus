@@ -26,9 +26,8 @@ import java.util.function.Function;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
- * SPEC §7G conformance: replays {@code conformance/media/cases.json} and {@code schemas.json}
- * (read from the repo, never copied) against an in-process fake HTTP server, plus cancellation,
- * typed verbs, Toolkit registration and {@code RunResult.files}.
+ * SPEC §7G behaviour beyond the conformance files ({@link MediaConformanceTest}): cancellation,
+ * typed verbs, Toolkit registration, redirects, deadlines and {@code RunResult.files}.
  */
 class MediaTest {
 
@@ -94,170 +93,11 @@ class MediaTest {
         @Override public void close() { server.stop(0); }
     }
 
-    @SuppressWarnings("unchecked")
-    private static Media.Style styleFor(Map<String, Object> c, String serverUrl) {
-        Map<String, Object> style = (Map<String, Object>) normalise(c.get("style"));
-        style.put("baseUrl", ((String) style.get("baseUrl")).replace("{server}", serverUrl));
-        return Media.Style.of(style);
-    }
-
-    private static Map<String, Object> resultMap(Media.MediaResult r) {
-        Map<String, Object> m = new LinkedHashMap<>();
-        List<Object> files = new ArrayList<>();
-        for (Media.File f : r.files()) {
-            Map<String, Object> fm = new LinkedHashMap<>();
-            fm.put("type", f.type()); fm.put("mimeType", f.mimeType()); fm.put("url", f.url());
-            files.add(fm);
-        }
-        m.put("files", files);
-        if (r.text() != null) m.put("text", r.text());
-        if (r.jobId() != null) m.put("jobId", r.jobId());
-        m.put("status", r.status());
-        return m;
-    }
-
-    // ------------------------------------------------------------------
-    // cases.json
-    // ------------------------------------------------------------------
-
-    @TestFactory
-    @SuppressWarnings("unchecked")
-    List<DynamicTest> conformanceCases() throws IOException {
-        List<Map<String, Object>> cases = (List<Map<String, Object>>) readJson("cases.json").get("cases");
-        assertEquals(34, cases.size(), "exact conformance case count");
-        List<DynamicTest> tests = new ArrayList<>();
-        for (Map<String, Object> c : cases) tests.add(DynamicTest.dynamicTest((String) c.get("name"), () -> runCase(c)));
-        return tests;
-    }
-
-    @SuppressWarnings("unchecked")
-    private void runCase(Map<String, Object> c) throws Exception {
-        Map<String, String> env = c.get("env") == null ? Map.of() : (Map<String, String>) c.get("env");
-        Function<String, String> saved = Media.env;
-        Media.env = env::get;
-        try (FakeServer fs = new FakeServer()) {
-            List<Map<String, Object>> script = (List<Map<String, Object>>) c.get("script");
-            List<String> progress = Collections.synchronizedList(new ArrayList<>());
-            if (Boolean.TRUE.equals(c.get("styleError"))) {
-                Media.MediaException se = assertThrows(Media.MediaException.class,
-                        () -> Media.create(styleFor(c, fs.url())));
-                assertEquals(c.get("error"), se.getMessage());
-                assertTrue(fs.requests.isEmpty());
-                return;
-            }
-            Media media = Media.create(styleFor(c, fs.url()), new Media.Options().onProgress(p -> {
-                assertEquals(c.get("verb"), p.verb());
-                progress.add(p.status());
-            }));
-            String verb = (String) c.get("verb");
-            Map<String, Object> args = (Map<String, Object>) c.get("args");
-
-            // --- function face ---
-            fs.reset(script);
-            Media.MediaResult result = null;
-            String error = null;
-            try {
-                result = media.generate(verb, args);
-            } catch (Media.MediaException e) {
-                error = e.getMessage();
-            }
-            if (c.containsKey("error")) {
-                assertNull(result, "expected an error");
-                assertEquals(c.get("error"), error);
-            } else {
-                assertNull(error, "unexpected error");
-                assertEquals(normalise(c.get("result")), normalise(resultMap(result)));
-            }
-            if (c.containsKey("expectProgress")) assertEquals(c.get("expectProgress"), progress);
-            if (c.containsKey("expectRequests")) {
-                List<Map<String, Object>> exp = (List<Map<String, Object>>) c.get("expectRequests");
-                assertEquals(exp.size(), fs.requests.size(), "request count");
-                for (int i = 0; i < exp.size(); i++) {
-                    Map<String, Object> e = exp.get(i);
-                    Recorded r = fs.requests.get(i);
-                    assertEquals(e.get("method"), r.method(), "method #" + i);
-                    assertEquals(e.get("path"), r.path(), "path #" + i);
-                    if (e.containsKey("body")) {
-                        assertEquals(normalise(e.get("body")), Json.MAPPER.readValue(r.body(), Object.class), "body #" + i);
-                        assertEquals("application/json", r.headers().get("content-type"));
-                    } else {
-                        assertNull(r.headers().get("content-type"), "no Content-Type without a body");
-                        assertEquals("", r.body());
-                    }
-                }
-            }
-            if (c.containsKey("expectHeaders")) {
-                assertFalse(fs.requests.isEmpty());
-                for (Recorded r : fs.requests) {
-                    for (Map.Entry<String, String> h : ((Map<String, String>) c.get("expectHeaders")).entrySet()) {
-                        assertEquals(h.getValue(), r.headers().get(h.getKey().toLowerCase()), h.getKey());
-                    }
-                }
-            }
-
-            // --- tool face ---
-            Map<String, Object> tool = (Map<String, Object>) c.get("tool");
-            if (tool == null) {
-                assertTrue(media.tools().stream().noneMatch(x -> x.name().contains(verb)));
-                return;
-            }
-            fs.reset(script);
-            Tool t = media.tools().stream().filter(x -> x.name().equals(tool.get("name"))).findFirst().orElseThrow();
-            assertEquals("media", t.source());
-            ToolResult tr = t.execute(args, new ToolContext());
-            assertEquals(tool.get("isError"), tr.isError());
-            assertEquals(tool.get("output"), tr.output());
-            if (tool.containsKey("parts")) {
-                List<Object> parts = new ArrayList<>();
-                for (ContentPart p : tr.parts()) parts.add(p);
-                assertEquals(normalise(tool.get("parts")), normalise(parts));
-            } else {
-                assertNull(tr.parts());
-            }
-            if (tool.containsKey("metadata")) {
-                assertEquals(normalise(tool.get("metadata")), normalise(tr.metadata()));
-            } else {
-                assertNull(tr.metadata());
-            }
-        } finally {
-            Media.env = saved;
-        }
-    }
-
     @Test
     void unknownVerbHasNoTool() {
-        Media m = Media.create(Media.Style.parse(
-                "{\"baseUrl\":\"http://x\",\"verbs\":{\"image\":{\"mode\":\"sync\",\"kind\":\"image\",\"start\":{\"path\":\"/s\"},\"args\":{\"prompt\":\"p\"},\"resultPath\":\"u\"}}}"));
+        Media m = Media.create(Media.styleMediaClient(Media.Style.parse(
+                "{\"baseUrl\":\"http://x\",\"verbs\":{\"image\":{\"mode\":\"sync\",\"kind\":\"image\",\"start\":{\"path\":\"/s\"},\"args\":{\"prompt\":\"p\"},\"resultPath\":\"u\"}}}")));
         assertEquals(List.of("generate_image"), m.tools().stream().map(Tool::name).toList());
-    }
-
-    // ------------------------------------------------------------------
-    // schemas.json — deep equality AND order
-    // ------------------------------------------------------------------
-
-    @Test
-    @SuppressWarnings("unchecked")
-    void toolSchemasMatchConformance() throws IOException {
-        Map<String, Object> doc = readJson("schemas.json");
-        Media m = Media.create(Media.Style.of((Map<String, Object>) doc.get("style")));
-        List<Map<String, Object>> expected = (List<Map<String, Object>>) doc.get("tools");
-        List<Tool> tools = m.tools();
-        assertEquals(expected.size(), tools.size());
-        for (int i = 0; i < tools.size(); i++) {
-            Tool t = tools.get(i);
-            Map<String, Object> e = expected.get(i);
-            Map<String, Object> actual = new LinkedHashMap<>();
-            actual.put("name", t.name());
-            actual.put("description", t.description());
-            actual.put("source", t.source());
-            actual.put("inputSchema", t.inputSchema());
-            assertEquals(normalise(e), normalise(actual), t.name());
-            // property order and required order are contract too
-            Map<String, Object> eProps = (Map<String, Object>) ((Map<String, Object>) e.get("inputSchema")).get("properties");
-            Map<String, Object> aProps = (Map<String, Object>) t.inputSchema().get("properties");
-            assertEquals(new ArrayList<>(eProps.keySet()), new ArrayList<>(aProps.keySet()));
-            assertEquals(Json.stringify(e.get("inputSchema")), Json.stringify(t.inputSchema()));
-        }
     }
 
     // ------------------------------------------------------------------
@@ -275,9 +115,9 @@ class MediaTest {
                     + "\"kind\":\"audio\",\"start\":{\"path\":\"/s\"},\"args\":{\"text\":\"t\"},\"resultPath\":\"u\"}}}"));
             Path tmp = Files.createTempFile("style", ".json");
             Files.writeString(tmp, Json.stringify(speechOnly.spec()));
-            Media m = Media.create(List.of(Media.loadStyle(tmp.toString()), other), null);
+            Media m = Media.create(List.of(Media.styleMediaClient(Media.loadStyle(tmp.toString())), Media.styleMediaClient(other)));
             Media.MediaResult r = m.speech(new Media.SpeechInput("hi", "alloy", Map.of("fmt", "mp3", "extra", true)));
-            assertEquals(List.of(new Media.File("audio", "audio/mpeg", "https://x/a.mp3")), r.files());
+            assertEquals(List.of(Media.MediaFile.ofUrl("audio", "audio/mpeg", "https://x/a.mp3")), r.files());
             assertEquals("completed", r.status());
             assertNull(r.jobId());
             Recorded req = fs.requests.get(0);
@@ -290,8 +130,8 @@ class MediaTest {
 
     @Test
     void unsupportedArgsNameFirstSortedAndNullIsAbsent() {
-        Media m = Media.create(Media.Style.parse(
-                "{\"baseUrl\":\"http://127.0.0.1:1\",\"verbs\":{\"image\":{\"mode\":\"sync\",\"kind\":\"image\",\"start\":{\"path\":\"/s\"},\"args\":{\"prompt\":\"p\"},\"resultPath\":\"u\"}}}"));
+        Media m = Media.create(Media.styleMediaClient(Media.Style.parse(
+                "{\"baseUrl\":\"http://127.0.0.1:1\",\"verbs\":{\"image\":{\"mode\":\"sync\",\"kind\":\"image\",\"start\":{\"path\":\"/s\"},\"args\":{\"prompt\":\"p\"},\"resultPath\":\"u\"}}}")));
         Map<String, Object> args = new LinkedHashMap<>();
         args.put("prompt", "x");
         args.put("zeta", 1);
@@ -299,13 +139,13 @@ class MediaTest {
         args.put("Width", 3);   // 'W' < 'p' < 's' < 'z' in code-point order
         args.put("aNull", null); // null ⇒ absent, never reported
         Media.MediaException e = assertThrows(Media.MediaException.class, () -> m.generate("image", args));
-        assertEquals("image: argument \"Width\" not supported by this style", e.getMessage());
+        assertEquals("image: argument \"Width\" not supported", e.getMessage());
     }
 
     @Test
     void toolkitMediaOptionRegistersTools() {
-        Media m = Media.create(Media.Style.parse(
-                "{\"baseUrl\":\"http://x\",\"verbs\":{\"transcribe\":{\"mode\":\"sync\",\"kind\":\"text\",\"start\":{\"path\":\"/s\"},\"args\":{\"audio\":\"a\"},\"resultPath\":\"t\"}}}"));
+        Media m = Media.create(Media.styleMediaClient(Media.Style.parse(
+                "{\"baseUrl\":\"http://x\",\"verbs\":{\"transcribe\":{\"mode\":\"sync\",\"kind\":\"text\",\"start\":{\"path\":\"/s\"},\"args\":{\"audio\":\"a\"},\"resultPath\":\"t\"}}}")));
         try (Toolkit tk = Toolkit.create(new Toolkit.Options().builtins(false).media(m))) {
             Tool t = tk.get("transcribe_audio");
             assertNotNull(t);
@@ -315,8 +155,8 @@ class MediaTest {
 
     @Test
     void mediaToolBeatsSameNamedExtraTool() {
-        Media m = Media.create(Media.Style.parse(
-                "{\"baseUrl\":\"http://x\",\"verbs\":{\"image\":{\"mode\":\"sync\",\"kind\":\"image\",\"start\":{\"path\":\"/s\"},\"args\":{\"prompt\":\"p\"},\"resultPath\":\"u\"}}}"));
+        Media m = Media.create(Media.styleMediaClient(Media.Style.parse(
+                "{\"baseUrl\":\"http://x\",\"verbs\":{\"image\":{\"mode\":\"sync\",\"kind\":\"image\",\"start\":{\"path\":\"/s\"},\"args\":{\"prompt\":\"p\"},\"resultPath\":\"u\"}}}")));
         Tool impostor = new Tool() {
             @Override public String name() { return "generate_image"; }
             @Override public String description() { return "impostor"; }
@@ -336,9 +176,9 @@ class MediaTest {
     private static Media pollingForever(FakeServer fs) {
         fs.reset(List.of(Map.of("status", 200, "body", Map.of("id", "j9")),
                 Map.of("status", 200, "body", Map.of("st", "processing"))));
-        return Media.create(Media.Style.parse("{\"baseUrl\":\"" + fs.url() + "\",\"verbs\":{\"video\":{\"mode\":\"async\",\"kind\":\"video\","
+        return Media.create(Media.styleMediaClient(Media.Style.parse("{\"baseUrl\":\"" + fs.url() + "\",\"verbs\":{\"video\":{\"mode\":\"async\",\"kind\":\"video\","
                 + "\"start\":{\"path\":\"/v\"},\"args\":{\"prompt\":\"p\"},\"idPath\":\"id\",\"poll\":{\"path\":\"/v/{id}\",\"statusPath\":\"st\","
-                + "\"done\":[\"ok\"],\"failed\":[\"x\"],\"intervalMs\":5,\"timeoutMs\":60000},\"resultPath\":\"u\"}}}"));
+                + "\"done\":[\"ok\"],\"failed\":[\"x\"],\"intervalMs\":5,\"timeoutMs\":60000},\"resultPath\":\"u\"}}}")));
     }
 
     @Test
@@ -405,9 +245,9 @@ class MediaTest {
         });
         a.start();
         try {
-            Media m = Media.create(Media.Style.parse("{\"baseUrl\":\"http://127.0.0.1:" + a.getAddress().getPort()
+            Media m = Media.create(Media.styleMediaClient(Media.Style.parse("{\"baseUrl\":\"http://127.0.0.1:" + a.getAddress().getPort()
                     + "\",\"headers\":{\"Authorization\":\"Bearer FAKE\",\"X-Style\":\"s\"},\"verbs\":{\"image\":{\"mode\":\"sync\","
-                    + "\"kind\":\"image\",\"start\":{\"path\":\"/gen\"},\"args\":{\"prompt\":\"prompt\"},\"resultPath\":\"u\"}}}"));
+                    + "\"kind\":\"image\",\"start\":{\"path\":\"/gen\"},\"args\":{\"prompt\":\"prompt\"},\"resultPath\":\"u\"}}}")));
             Media.MediaResult r = m.image(new Media.ImageInput("cat"));
             assertEquals("https://x/a.png", r.files().get(0).url());
             assertEquals("Bearer FAKE", aAuth.get(), "origin A gets the style headers");
@@ -432,9 +272,9 @@ class MediaTest {
         });
         hung.start();
         try {
-            Media m = Media.create(Media.Style.parse("{\"baseUrl\":\"http://127.0.0.1:" + hung.getAddress().getPort()
+            Media m = Media.create(Media.styleMediaClient(Media.Style.parse("{\"baseUrl\":\"http://127.0.0.1:" + hung.getAddress().getPort()
                     + "\",\"verbs\":{\"image\":{\"mode\":\"sync\",\"kind\":\"image\",\"poll\":{\"timeoutMs\":1000},"
-                    + "\"start\":{\"path\":\"/gen\"},\"args\":{\"prompt\":\"prompt\"},\"resultPath\":\"u\"}}}"));
+                    + "\"start\":{\"path\":\"/gen\"},\"args\":{\"prompt\":\"prompt\"},\"resultPath\":\"u\"}}}")));
             long t0 = System.nanoTime();
             Media.MediaException e = assertThrows(Media.MediaException.class, () -> m.image(new Media.ImageInput("cat")));
             assertEquals("image: timed out after 1000ms", e.getMessage());
@@ -590,9 +430,9 @@ class MediaTest {
     /** Media tools are concurrency-safe (SPEC §7G, §8 Tool scheduling): each call is an independent remote job. */
     @Test
     void mediaToolsAreConcurrencySafe() throws IOException {
-        Map<String, Object> style = Json.MAPPER.readValue("{\"baseUrl\":\"http://unused\",\"verbs\":{\"image\":{\"mode\":\"sync\",\"kind\":\"image\",\"start\":{\"path\":\"/i\"},\"args\":{\"prompt\":\"p\"},\"resultPath\":\"u\"},\"video\":{\"mode\":\"sync\",\"kind\":\"video\",\"start\":{\"path\":\"/v\"},\"args\":{\"prompt\":\"p\"},\"resultPath\":\"u\"},\"speech\":{\"mode\":\"sync\",\"kind\":\"audio\",\"start\":{\"path\":\"/s\"},\"args\":{\"text\":\"t\"},\"resultPath\":\"u\"},\"transcribe\":{\"mode\":\"sync\",\"kind\":\"text\",\"start\":{\"path\":\"/r\"},\"args\":{\"audio\":\"a\"},\"resultPath\":\"u\"},\"cloneVoice\":{\"mode\":\"sync\",\"kind\":\"text\",\"start\":{\"path\":\"/c\"},\"args\":{\"name\":\"n\"},\"resultPath\":\"id\"},\"talking\":{\"mode\":\"sync\",\"kind\":\"video\",\"start\":{\"path\":\"/t\"},\"args\":{\"image\":\"i\"},\"resultPath\":\"u\"}}}", new TypeReference<Map<String, Object>>() {});
-        List<Tool> tools = Media.create(Media.Style.of(style)).tools();
-        assertEquals(6, tools.size());
+        Map<String, Object> style = Json.MAPPER.readValue("{\"baseUrl\":\"http://unused\",\"verbs\":{\"image\":{\"mode\":\"sync\",\"kind\":\"image\",\"start\":{\"path\":\"/i\"},\"args\":{\"prompt\":\"p\"},\"resultPath\":\"u\"},\"video\":{\"mode\":\"sync\",\"kind\":\"video\",\"start\":{\"path\":\"/v\"},\"args\":{\"prompt\":\"p\"},\"resultPath\":\"u\"},\"speech\":{\"mode\":\"sync\",\"kind\":\"audio\",\"start\":{\"path\":\"/s\"},\"args\":{\"text\":\"t\"},\"resultPath\":\"u\"},\"transcribe\":{\"mode\":\"sync\",\"kind\":\"text\",\"start\":{\"path\":\"/r\"},\"args\":{\"audio\":\"a\"},\"resultPath\":\"u\"},\"cloneVoice\":{\"mode\":\"sync\",\"kind\":\"text\",\"start\":{\"path\":\"/c\"},\"args\":{\"name\":\"n\"},\"resultPath\":\"id\"},\"talk\":{\"mode\":\"sync\",\"kind\":\"video\",\"start\":{\"path\":\"/t\"},\"args\":{\"image\":\"i\"},\"resultPath\":\"u\"},\"music\":{\"mode\":\"sync\",\"kind\":\"audio\",\"start\":{\"path\":\"/m\"},\"args\":{\"prompt\":\"p\"},\"resultPath\":\"u\"}}}", new TypeReference<Map<String, Object>>() {});
+        List<Tool> tools = Media.create(Media.styleMediaClient(Media.Style.of(style))).tools();
+        assertEquals(7, tools.size());
         for (Tool t : tools) assertTrue(ToolScheduler.isConcurrencySafe(t, Map.of()), t.name());
     }
 }

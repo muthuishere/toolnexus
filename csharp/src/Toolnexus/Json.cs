@@ -231,7 +231,7 @@ public static class Json
     /// Normalize CLR values for serialization: pass <see cref="JsonElement"/>/<see cref="JsonNode"/>
     /// through, recurse into dictionaries/enumerables. Anything else serializes natively.
     /// </summary>
-    private static object? Normalize(object? value)
+    internal static object? Normalize(object? value)
     {
         switch (value)
         {

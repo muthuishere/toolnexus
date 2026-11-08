@@ -16,13 +16,12 @@ defmodule Toolnexus.MixProject do
       package: package(),
       docs: docs(),
       test_coverage: [tool: ExCoveralls],
-      preferred_cli_env: [
-        coveralls: :test,
-        "coveralls.html": :test,
-        "coveralls.json": :test
-      ],
       elixirc_paths: elixirc_paths(Mix.env())
     ]
+  end
+
+  def cli do
+    [preferred_envs: [coveralls: :test, "coveralls.html": :test, "coveralls.json": :test]]
   end
 
   def application do
@@ -49,7 +48,7 @@ defmodule Toolnexus.MixProject do
       name: "toolnexus",
       licenses: ["MIT"],
       links: %{"GitHub" => @source_url},
-      files: ~w(lib mix.exs README.md LICENSE)
+      files: ~w(lib priv mix.exs README.md LICENSE)
     ]
   end
 

@@ -42,9 +42,14 @@ pub use classifier::{
 };
 pub use client::{ContextOverflowError, is_context_overflow};
 pub use media::{
-    CloneVoiceInput, ImageInput, Media, MediaError, MediaFile, MediaOptions, MediaProgress,
-    MediaResult, MediaStyle, SpeechInput, TalkingInput, TranscribeInput, VideoInput, create_media,
-    load_media_style,
+    A2EMediaClient, CliEvent, CliMediaClient, CliProfile, CloneVoiceInput, CodexMediaClient,
+    ElevenLabsMediaClient, FalMediaClient, GatherMode, GrokMediaClient, ImageInput,
+    IntoMediaClient, MEDIA_MOCK_AVAILABLE_ENV, Media, MediaArg, MediaArgs, MediaAvailability,
+    MediaClient, MediaClientConfig, MediaCtx, MediaError, MediaFile, MediaFuture, MediaGather,
+    MediaLoop, MediaProgress, MediaResult, MediaStyle, MediaUsage, MusicInput, OpenAIMediaClient,
+    OpenRouterMediaClient, SpeechInput, StyleMediaClient, TalkInput, TranscribeInput, VideoInput,
+    create_media, fold_media_prompt, generate_media, load_media_style, load_media_style_with,
+    style_media_client,
 };
 pub use tool::{
     Answer, ConcurrencySafeFn, ContentPart, DEFAULT_MAX_TOOL_CONCURRENCY, PartError, Request, Tool,

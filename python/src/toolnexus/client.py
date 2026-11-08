@@ -214,7 +214,7 @@ class RunResult:
     # The unresolved suspension — present iff status == "pending" (§10).
     pending: Optional[Request] = None
     # §8/§7G: every non-text part the run's tool calls produced, in call order, each
-    # ``{type, mimeType, url?, data?, from, callId}`` (``from`` = tool name, ``callId`` =
+    # ``{type, mimeType, url?, data?, name?, path?, from, callId}`` (``from`` = tool name, ``callId`` =
     # the model's tool-call id). Always a list ([] when none).
     files: list[dict[str, Any]] = field(default_factory=list)
 
@@ -225,15 +225,19 @@ class _CallRecord(dict):
     key to the entry."""
 
     call_id: Any = None
+    part_paths: Optional[list[Optional[str]]] = None
 
 
 def _run_files(tool_calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for rec in tool_calls:
-        for p in rec.get("parts") or []:
+        paths = getattr(rec, "part_paths", None) or []
+        for i, p in enumerate(rec.get("parts") or []):
             if not isinstance(p, dict) or p.get("type") == "text":
                 continue
             f = dict(p)
+            if i < len(paths) and paths[i]:
+                f["path"] = paths[i]  # §7G.12 D20
             f["from"] = rec.get("name")
             f["callId"] = getattr(rec, "call_id", None)
             out.append(f)
@@ -606,12 +610,17 @@ class UrllibTransport:
         return _open(url, headers, payload, timeout)
 
 
+# §7G.6 model visibility: only image parts of a media tool result reach the model.
+from .media import model_parts as _model_parts  # noqa: E402
+
+
 def _tool_message(call_id: Any, name: str, result: ToolResult) -> dict[str, Any]:
     """The canonical OpenAI-shape tool message. ``parts``/``name`` ride along only when
     the tool returned non-text content — absent ⇒ byte-identical to a pre-0.17 message."""
     msg: dict[str, Any] = {"role": "tool", "tool_call_id": call_id, "content": result.output}
-    if result.parts:
-        msg["parts"] = list(result.parts)
+    parts = _model_parts(result)
+    if parts:
+        msg["parts"] = parts
         msg["name"] = name
     return msg
 
@@ -624,8 +633,9 @@ def _tool_result_block(use_id: Any, result: ToolResult) -> dict[str, Any]:
         "content": result.output,
         "is_error": result.is_error,
     }
-    if result.parts:
-        block["parts"] = list(result.parts)
+    parts = _model_parts(result)
+    if parts:
+        block["parts"] = parts
     return block
 
 
@@ -1726,6 +1736,7 @@ class Client:
         )
         if result.parts:
             rec["parts"] = list(result.parts)
+            rec.part_paths = getattr(result, "part_paths", None)
         rec.call_id = call_id
         return rec
 

@@ -74,24 +74,45 @@ for every symbol shown in eight-language synced tabs.
 
 Guide: [Media generation](/toolnexus/media/) · recipe: [Generate images, video and speech](/toolnexus/cookbook/media/) · SPEC §7G.
 
-- `Media.loadStyle(String path): Media.Style` · `Media.Style.parse(json)` · `Media.Style.of(map)`.
-- `Media.create(Style... styles)` · `Media.create(Style style, Options opts)` ·
-  `Media.create(List<Style> styles, Options opts)` — a verb resolves to the first style that declares it.
-- `new Media.Options().onProgress(Consumer<Progress>).httpClient(HttpClient)` —
-  `Progress(verb, jobId, status)` after every poll; `httpClient` is the injected `java.net.http.HttpClient`.
+- `Media.createMedia(MediaClient... clients)` · `Media.createMedia(List<MediaClient> clients)` (alias
+  `Media.create`) — a verb goes to the first client whose `supports(verb)` is true and falls through to
+  the next **only** on `unavailable`; an empty list throws `media: no clients`.
+- Named clients, each with `()` and `(Media.Config config)` constructors — API (key from the env var at
+  call time): `OpenAIMediaClient` (`OPENAI_API_KEY`) · `OpenRouterMediaClient` (`OPENROUTER_API_KEY`) ·
+  `ElevenLabsMediaClient` (`ELEVENLABS_API_KEY`) · `FalMediaClient` (`FAL_API_KEY`) · `A2EMediaClient`
+  (`A2E_API_KEY`); CLI: `GrokMediaClient` · `CodexMediaClient`.
+- `new Media.Config()` fluent: `.model(String)` · `.models(Map<String,String>)` (per verb) · `.key(String)` ·
+  `.url(String)` · `.command(String | List<String>)` · `.loop(Media.Loop)` · `.gather(Media.Gather)` ·
+  `.httpClient(java.net.http.HttpClient)`.
+- `new Media.Loop().intervalMs(long).timeoutMs(long).onProgress(Consumer<Media.Progress>)` —
+  `Progress(verb, client, jobId, status, elapsedMs)`.
+- `new Media.Gather().mode("url" | "download" | "inline").dir(String).maxBytes(long).keep(boolean)` —
+  sets which of `MediaFile.url / path / data` you get.
 - Verbs (blocking), each `MediaResult x(XInput in)` and `MediaResult x(XInput in, LlmClient.CancelToken cancel)`:
   `image(ImageInput(prompt, width, height, aspectRatio, seed, providerOptions))` ·
   `video(VideoInput(prompt, image, seconds, aspectRatio, providerOptions))` ·
-  `speech(SpeechInput(text, voice, providerOptions))` · `transcribe(TranscribeInput(audio, providerOptions))` ·
-  `cloneVoice(CloneVoiceInput(name, samples, providerOptions))` · `talking(TalkingInput(image, audio, providerOptions))`.
-  Each record has a short constructor with only the required args; `null` fields are not sent.
-- `generate(String verb, Map<String,Object> args)` ·
-  `generate(verb, args, Map<String,Object> providerOptions, LlmClient.CancelToken cancel)` — the raw call.
-- `Media.MediaResult(List<File> files, String text, String jobId, String status)` · `Media.File(type, mimeType, url)`.
+  `speech(SpeechInput(text, voice, providerOptions))` ·
+  `music(MusicInput(prompt, seconds, instrumental, lyrics, providerOptions))` ·
+  `transcribe(TranscribeInput(audio, language, providerOptions))` ·
+  `cloneVoice(CloneVoiceInput(name, samples, providerOptions))` ·
+  `talk(TalkInput(image, audio, text, voice, providerOptions))`. Each record has a short constructor with
+  only the required args; `null` fields are not sent.
+- `generate(String verb, Map<String,Object> args)` · `generate(verb, args, Media.Ctx ctx)` ·
+  `generate(verb, args, Map<String,Object> providerOptions, LlmClient.CancelToken cancel)` · `supports(verb)`.
+- `Media.MediaResult(List<MediaFile> files, String text, String jobId, String status)` ·
+  `Media.MediaFile(type, mimeType, url, path, data)` · `MediaFile.ofUrl(type, mimeType, url)`.
+- `interface MediaClient` — implement `name()`, `supports(String verb)` and the verbs you serve:
+  `image | video | speech | music | transcribe | cloneVoice | talk(Map<String,Object> args, Media.Ctx ctx)`
+  (the rest default to unsupported); optional `args(verb): List<Media.ArgSpec>` (`ArgSpec(name, required)`,
+  `null` = every canonical arg). `Media.Ctx` carries `cancelled`, `deadline`, `progress`, `providerOptions`.
 - `media.tools(): List<Tool>` (source `"media"`), or `Toolkit.Options.media(media)`.
-- `RunResult.files: List<LlmClient.RunFile>` — `RunFile(type, mimeType, url, data, from, callId)`, in call
-  order; the same parts are on `toolCalls.get(i).parts`.
-- Errors: the function face throws `Media.MediaException` (unchecked; message is the exact §7G string); a
-  media tool never throws (`isError`).
+- `RunResult.files: List<LlmClient.RunFile>` — `RunFile(type, mimeType, url, data, from, callId, name)`, in
+  call order. Only image parts are sent to the model; other files reach it as the tool's text output.
+- Errors: `Media.MediaException` (unchecked; `status()` `failed | timeout | cancelled | unavailable`,
+  `jobId()`, message is the exact §7G string) · `Media.MediaUnavailableException` (status `unavailable`;
+  throw it from your own client to trigger fall-through). A media tool never throws (`isError`).
+- Advanced: `Media.styleMediaClient(Media.loadMediaStyle(String path))` /
+  `styleMediaClient(style, Media.Config)` — a provider described in JSON (`Media.Style.parse(json)`,
+  `Media.Style.of(map)`).
 - Equivalents: `createMedia` (js) · `create_media` (py) · `CreateMedia` (go) · `Media.Create` (c#) ·
-  `Toolnexus.Media.new` (elixir) · `toolnexus.media/create-media` (clojure) · `create_media` (rust).
+  `Toolnexus.Media.create` (elixir) · `toolnexus.media/create-media` (clojure) · `create_media` (rust).

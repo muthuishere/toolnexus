@@ -79,26 +79,38 @@ eight-language synced tabs.
 
 Guide: [Media generation](/toolnexus/media/) · recipe: [Generate images, video and speech](/toolnexus/cookbook/media/) · SPEC §7G.
 
-- `loadMediaStyle(path: string): MediaStyle` — read one style JSON file.
-- `createMedia(styles: MediaStyle | MediaStyle[], opts?: MediaOptions): Media` — a verb resolves to
-  the first style that declares it.
-- `MediaOptions { onProgress?: (p: MediaProgress) => void, fetch?: typeof fetch }` —
-  `MediaProgress { verb, jobId, status }` fires after every poll; `fetch` is the injected transport
-  (default: global `fetch`).
+- `createMedia(clients: MediaClient | MediaClient[]): Media` — a verb goes to the first client whose
+  `supports(verb)` is true; only `MediaUnavailableError` falls through to the next one.
+- Built-in clients, each `new X(config?: MediaClientConfig)`: `A2EMediaClient` (`A2E_API_KEY`) ·
+  `ElevenLabsMediaClient` (`ELEVENLABS_API_KEY`) · `OpenAIMediaClient` (`OPENAI_API_KEY`) ·
+  `OpenRouterMediaClient` (`OPENROUTER_API_KEY`) · `FalMediaClient` (`FAL_API_KEY`) — and the CLI clients
+  `GrokMediaClient` (`grok`) · `CodexMediaClient` (`codex`).
+- `MediaClientConfig { model?, models?: Partial<Record<MediaVerb, string>>, key?, url?, command?: string | string[],
+  loop?: { intervalMs?, timeoutMs?, onProgress? }, gather?: { mode?: "url" | "download" | "inline", dir?, maxBytes?, keep? },
+  fetch?: typeof fetch }` — `key` defaults to the env var read at call time; `timeoutMs` 600000;
+  `gather.mode` default `download` (style clients `url`) into `<tmp>/toolnexus-media`, `maxBytes` 100 MiB.
 - Verbs, each `(input: XArgs & MediaCallOptions): Promise<MediaResult>`:
   `image(ImageArgs { prompt, width?, height?, aspectRatio?, seed? })` ·
   `video(VideoArgs { prompt, image?, seconds?, aspectRatio? })` · `speech(SpeechArgs { text, voice? })` ·
-  `transcribe(TranscribeArgs { audio })` · `cloneVoice(CloneVoiceArgs { name, samples })` ·
-  `talking(TalkingArgs { image, audio })`.
-- `MediaCallOptions { providerOptions?, signal?: AbortSignal }` — `providerOptions` top-level keys
-  overwrite the request body last.
-- `generate(verb: MediaVerb | string, args, callOpts?: MediaCallOptions): Promise<MediaResult>` — the raw call.
-- `MediaResult { files: MediaFile[], text?, jobId?, status }` · `MediaFile { type: "image" | "audio" | "file", mimeType, url }`.
-- `media.tools(): Tool[]` — `generate_image` … `talking_video` (source `"media"`), one per supported verb;
-  or pass `createToolkit({ media })`.
+  `music(MusicArgs { prompt, seconds?, instrumental?, lyrics? })` · `transcribe(TranscribeArgs { audio, language? })` ·
+  `cloneVoice(CloneVoiceArgs { name, samples })` · `talk(TalkArgs { image, audio?, text?, voice? })`.
+  File inputs (`image`, `audio`, `samples`) take a URL or a local path.
+- `MediaCallOptions` = `MediaContext { signal?: AbortSignal, deadline?: number | Date, progress?: (p: MediaProgress) => void, providerOptions? }`
+  — `MediaProgress { verb, client, jobId?, status, elapsedMs }`; `providerOptions` top-level keys overwrite the request body last.
+- `generate(verb: MediaVerb | string, args?, ctx?: MediaContext): Promise<MediaResult>` · `supports(verb): boolean`.
+- `MediaResult { files: MediaFile[], text?, jobId?, status }` ·
+  `MediaFile { type: "image" | "audio" | "file", mimeType, url?, path?, data? }` (which are set follows `gather.mode`).
+- `MediaClient { readonly name, supports(verb), args?(verb): MediaArgSpec[], image?(args, ctx) … talk?(args, ctx) }` —
+  implement it for your own provider; every verb is optional.
+- `media.tools(): Tool[]` — `generate_image` · `generate_video` · `generate_speech` · `generate_music` ·
+  `transcribe_audio` · `clone_voice` · `talking_video` (source `"media"`), one per verb any client supports;
+  or `createToolkit({ media })`. Only image parts are sent back to the model.
 - `RunResult.files: RunFile[]` — `{ type, mimeType, url?, data?, name?, from, callId }`, in call order;
   the same parts are on `toolCalls[].parts`.
-- Errors: the function face **throws** `Error` with the exact §7G message; a media tool never throws
-  (`isError: true`, message as output). An aborted `signal` rejects with `signal.reason` (or an `AbortError`). `MEDIA_VERBS` exports the canonical verb table.
+- Errors: the function face **throws** `MediaError { message, status: "failed" | "timeout" | "cancelled" | "unavailable", jobId? }`;
+  `MediaUnavailableError` is its `unavailable` subclass. A media tool never throws (`isError: true`, message as output).
+  An aborted `signal` rejects with `signal.reason` (or an `AbortError`).
+- Advanced: `styleMediaClient(style: MediaStyle, config?)` / `StyleMediaClient` turn a JSON style into a client;
+  `loadMediaStyle(path)` reads one; `A2E_STYLE` is the embedded a2e preset. `MEDIA_VERBS` exports the canonical verb table.
 - Equivalents: `create_media` (py) · `CreateMedia` (go) · `Media.create` (java) · `Media.Create` (c#) ·
-  `Toolnexus.Media.new` (elixir) · `toolnexus.media/create-media` (clojure) · `create_media` (rust).
+  `Toolnexus.Media.create` (elixir) · `toolnexus.media/create-media` (clojure) · `create_media` (rust).

@@ -1,0 +1,1603 @@
+{
+  "_doc": "createMedia routing and tools conformance (SPEC §7G.3, §7G.6). Each case builds test-only custom MediaClients from clients[]: name; supports(verb) = verb in verbs; args(verb) = verbs[verb].args (absent ⇒ the client declares no args(), so every canonical arg is accepted); calling a verb records {client, verb, args} and returns outcome.result, or fails with a media error {message: outcome.error, status: outcome.status} (status unavailable must use the port's typed unavailable error). Assert expectCalls exactly (order, args after nulls removed), then result / error+status, then the tool face (fresh clients). schemaCases: build createMedia(clients).tools() and assert names, order, descriptions, source and inputSchema exactly (Go: key order not asserted). emptyClients: createMedia([]) fails with exactly that message. modelParts (SPEC §7G.6 model visibility): the parts of this tool result that message assembly (§8A) emits to the model — only image parts; video/audio parts stay in RunResult.files and toolCalls[].parts only. Assert with the port's assembly function on a transcript containing this tool result. D9 (SPEC §7G.12): when modelParts is [] the tool-result content the port sends to the model is the plain output string in every message style incl. Anthropic — never an empty content array, never a placeholder; assert it with the same assembly function. D19 (SPEC §7G.3/§7G.12): a candidate whose args() does not accept a canonical arg, or that lacks a required one, is SKIPPED (never called) with reason '<name>: argument \"<k>\" not supported' / '<name>: missing required argument \"<k>\"'; every candidate skipped/unavailable ⇒ the joined unavailable error. A non-canonical key fails at once: '<verb>: argument \"<k>\" not supported'. D21: outcome.result may carry usage; it is returned as is and the tool metadata carries it as usage.",
+  "cases": [
+    {
+      "name": "first_supporting_client_wins",
+      "clients": [
+        {
+          "name": "a",
+          "verbs": {
+            "image": {
+              "args": [
+                {
+                  "name": "prompt",
+                  "required": true
+                }
+              ],
+              "outcome": {
+                "result": {
+                  "files": [
+                    {
+                      "type": "image",
+                      "mimeType": "image/png",
+                      "url": "https://x/a.png"
+                    }
+                  ],
+                  "status": "completed"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "b",
+          "verbs": {
+            "image": {
+              "args": [
+                {
+                  "name": "prompt",
+                  "required": true
+                }
+              ],
+              "outcome": {
+                "result": {
+                  "files": [
+                    {
+                      "type": "image",
+                      "mimeType": "image/png",
+                      "url": "https://x/b.png"
+                    }
+                  ],
+                  "status": "completed"
+                }
+              }
+            }
+          }
+        }
+      ],
+      "verb": "image",
+      "args": {
+        "prompt": "cat"
+      },
+      "expectCalls": [
+        {
+          "client": "a",
+          "verb": "image",
+          "args": {
+            "prompt": "cat"
+          }
+        }
+      ],
+      "result": {
+        "files": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "url": "https://x/a.png"
+          }
+        ],
+        "status": "completed"
+      },
+      "tool": {
+        "name": "generate_image",
+        "isError": false,
+        "output": "image ready: https://x/a.png",
+        "parts": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "url": "https://x/a.png"
+          }
+        ],
+        "metadata": {
+          "source": "media",
+          "verb": "image",
+          "client": "a",
+          "status": "completed"
+        },
+        "modelParts": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "url": "https://x/a.png"
+          }
+        ]
+      }
+    },
+    {
+      "name": "skips_clients_that_do_not_support_the_verb",
+      "clients": [
+        {
+          "name": "a",
+          "verbs": {
+            "speech": {
+              "outcome": {
+                "result": {
+                  "files": [
+                    {
+                      "type": "image",
+                      "mimeType": "image/png",
+                      "url": "https://x/a.png"
+                    }
+                  ],
+                  "status": "completed"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "b",
+          "verbs": {
+            "image": {
+              "args": [
+                {
+                  "name": "prompt",
+                  "required": true
+                }
+              ],
+              "outcome": {
+                "result": {
+                  "files": [
+                    {
+                      "type": "image",
+                      "mimeType": "image/png",
+                      "url": "https://x/b.png"
+                    }
+                  ],
+                  "status": "completed"
+                }
+              }
+            }
+          }
+        }
+      ],
+      "verb": "image",
+      "args": {
+        "prompt": "cat"
+      },
+      "expectCalls": [
+        {
+          "client": "b",
+          "verb": "image",
+          "args": {
+            "prompt": "cat"
+          }
+        }
+      ],
+      "result": {
+        "files": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "url": "https://x/b.png"
+          }
+        ],
+        "status": "completed"
+      }
+    },
+    {
+      "name": "falls_through_on_unavailable",
+      "clients": [
+        {
+          "name": "a",
+          "verbs": {
+            "image": {
+              "args": [
+                {
+                  "name": "prompt",
+                  "required": true
+                }
+              ],
+              "outcome": {
+                "error": "a: HTTP 402: {}",
+                "status": "unavailable"
+              }
+            }
+          }
+        },
+        {
+          "name": "b",
+          "verbs": {
+            "image": {
+              "args": [
+                {
+                  "name": "prompt",
+                  "required": true
+                }
+              ],
+              "outcome": {
+                "result": {
+                  "files": [
+                    {
+                      "type": "image",
+                      "mimeType": "image/png",
+                      "url": "https://x/b.png"
+                    }
+                  ],
+                  "status": "completed",
+                  "jobId": "j9"
+                }
+              }
+            }
+          }
+        }
+      ],
+      "verb": "image",
+      "args": {
+        "prompt": "cat"
+      },
+      "expectCalls": [
+        {
+          "client": "a",
+          "verb": "image",
+          "args": {
+            "prompt": "cat"
+          }
+        },
+        {
+          "client": "b",
+          "verb": "image",
+          "args": {
+            "prompt": "cat"
+          }
+        }
+      ],
+      "result": {
+        "files": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "url": "https://x/b.png"
+          }
+        ],
+        "status": "completed",
+        "jobId": "j9"
+      },
+      "tool": {
+        "name": "generate_image",
+        "isError": false,
+        "output": "image ready: https://x/b.png",
+        "parts": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "url": "https://x/b.png"
+          }
+        ],
+        "metadata": {
+          "source": "media",
+          "verb": "image",
+          "client": "b",
+          "jobId": "j9",
+          "status": "completed"
+        },
+        "modelParts": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "url": "https://x/b.png"
+          }
+        ]
+      }
+    },
+    {
+      "name": "no_fall_through_on_failed",
+      "clients": [
+        {
+          "name": "a",
+          "verbs": {
+            "image": {
+              "args": [
+                {
+                  "name": "prompt",
+                  "required": true
+                }
+              ],
+              "outcome": {
+                "error": "bad prompt",
+                "status": "failed"
+              }
+            }
+          }
+        },
+        {
+          "name": "b",
+          "verbs": {
+            "image": {
+              "args": [
+                {
+                  "name": "prompt",
+                  "required": true
+                }
+              ],
+              "outcome": {
+                "result": {
+                  "files": [
+                    {
+                      "type": "image",
+                      "mimeType": "image/png",
+                      "url": "https://x/b.png"
+                    }
+                  ],
+                  "status": "completed"
+                }
+              }
+            }
+          }
+        }
+      ],
+      "verb": "image",
+      "args": {
+        "prompt": "cat"
+      },
+      "expectCalls": [
+        {
+          "client": "a",
+          "verb": "image",
+          "args": {
+            "prompt": "cat"
+          }
+        }
+      ],
+      "status": "failed",
+      "error": "bad prompt",
+      "tool": {
+        "isError": true,
+        "output": "bad prompt"
+      }
+    },
+    {
+      "name": "no_fall_through_on_timeout",
+      "clients": [
+        {
+          "name": "a",
+          "verbs": {
+            "image": {
+              "args": [
+                {
+                  "name": "prompt",
+                  "required": true
+                }
+              ],
+              "outcome": {
+                "error": "job j1 timed out after 5ms",
+                "status": "timeout"
+              }
+            }
+          }
+        },
+        {
+          "name": "b",
+          "verbs": {
+            "image": {
+              "args": [
+                {
+                  "name": "prompt",
+                  "required": true
+                }
+              ],
+              "outcome": {
+                "result": {
+                  "files": [
+                    {
+                      "type": "image",
+                      "mimeType": "image/png",
+                      "url": "https://x/b.png"
+                    }
+                  ],
+                  "status": "completed"
+                }
+              }
+            }
+          }
+        }
+      ],
+      "verb": "image",
+      "args": {
+        "prompt": "cat"
+      },
+      "expectCalls": [
+        {
+          "client": "a",
+          "verb": "image",
+          "args": {
+            "prompt": "cat"
+          }
+        }
+      ],
+      "status": "timeout",
+      "error": "job j1 timed out after 5ms",
+      "tool": {
+        "isError": true,
+        "output": "job j1 timed out after 5ms"
+      }
+    },
+    {
+      "name": "all_unavailable_joined_in_order",
+      "clients": [
+        {
+          "name": "a",
+          "verbs": {
+            "image": {
+              "args": [
+                {
+                  "name": "prompt",
+                  "required": true
+                }
+              ],
+              "outcome": {
+                "error": "a: no API key (set A_KEY)",
+                "status": "unavailable"
+              }
+            }
+          }
+        },
+        {
+          "name": "x",
+          "verbs": {
+            "speech": {
+              "outcome": {
+                "result": {
+                  "files": [
+                    {
+                      "type": "image",
+                      "mimeType": "image/png",
+                      "url": "https://x/x.png"
+                    }
+                  ],
+                  "status": "completed"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "b",
+          "verbs": {
+            "image": {
+              "args": [
+                {
+                  "name": "prompt",
+                  "required": true
+                }
+              ],
+              "outcome": {
+                "error": "b: HTTP 402: {}",
+                "status": "unavailable"
+              }
+            }
+          }
+        }
+      ],
+      "verb": "image",
+      "args": {
+        "prompt": "cat"
+      },
+      "expectCalls": [
+        {
+          "client": "a",
+          "verb": "image",
+          "args": {
+            "prompt": "cat"
+          }
+        },
+        {
+          "client": "b",
+          "verb": "image",
+          "args": {
+            "prompt": "cat"
+          }
+        }
+      ],
+      "status": "unavailable",
+      "error": "media: no client available for \"image\": a: no API key (set A_KEY); b: HTTP 402: {}",
+      "tool": {
+        "isError": true,
+        "output": "media: no client available for \"image\": a: no API key (set A_KEY); b: HTTP 402: {}"
+      }
+    },
+    {
+      "name": "no_client_supports_the_verb",
+      "clients": [
+        {
+          "name": "a",
+          "verbs": {
+            "image": {
+              "args": [
+                {
+                  "name": "prompt",
+                  "required": true
+                }
+              ],
+              "outcome": {
+                "result": {
+                  "files": [
+                    {
+                      "type": "image",
+                      "mimeType": "image/png",
+                      "url": "https://x/a.png"
+                    }
+                  ],
+                  "status": "completed"
+                }
+              }
+            }
+          }
+        }
+      ],
+      "verb": "video",
+      "args": {
+        "prompt": "x"
+      },
+      "expectCalls": [],
+      "status": "failed",
+      "error": "media: no client supports \"video\""
+    },
+    {
+      "name": "candidate_not_accepting_arg_is_skipped_after_unavailable",
+      "clients": [
+        {
+          "name": "a",
+          "verbs": {
+            "image": {
+              "args": [
+                {
+                  "name": "prompt",
+                  "required": true
+                },
+                {
+                  "name": "seed",
+                  "required": false
+                }
+              ],
+              "outcome": {
+                "error": "a: HTTP 402: {}",
+                "status": "unavailable"
+              }
+            }
+          }
+        },
+        {
+          "name": "b",
+          "verbs": {
+            "image": {
+              "args": [
+                {
+                  "name": "prompt",
+                  "required": true
+                }
+              ],
+              "outcome": {
+                "result": {
+                  "files": [
+                    {
+                      "type": "image",
+                      "mimeType": "image/png",
+                      "url": "https://x/b.png"
+                    }
+                  ],
+                  "status": "completed"
+                }
+              }
+            }
+          }
+        }
+      ],
+      "verb": "image",
+      "args": {
+        "prompt": "cat",
+        "seed": 3
+      },
+      "expectCalls": [
+        {
+          "client": "a",
+          "verb": "image",
+          "args": {
+            "prompt": "cat",
+            "seed": 3
+          }
+        }
+      ],
+      "note": "D19: args are never dropped; b does not accept seed ⇒ skipped; its reason joins.",
+      "tool": {
+        "isError": true,
+        "output": "media: no client available for \"image\": a: HTTP 402: {}; b: argument \"seed\" not supported"
+      },
+      "error": "media: no client available for \"image\": a: HTTP 402: {}; b: argument \"seed\" not supported",
+      "status": "unavailable"
+    },
+    {
+      "name": "every_candidate_rejects_an_arg_joined",
+      "clients": [
+        {
+          "name": "a",
+          "verbs": {
+            "image": {
+              "args": [
+                {
+                  "name": "prompt",
+                  "required": true
+                }
+              ],
+              "outcome": {
+                "result": {
+                  "files": [
+                    {
+                      "type": "image",
+                      "mimeType": "image/png",
+                      "url": "https://x/a.png"
+                    }
+                  ],
+                  "status": "completed"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "b",
+          "verbs": {
+            "image": {
+              "args": [
+                {
+                  "name": "prompt",
+                  "required": true
+                },
+                {
+                  "name": "seed",
+                  "required": false
+                }
+              ],
+              "outcome": {
+                "result": {
+                  "files": [
+                    {
+                      "type": "image",
+                      "mimeType": "image/png",
+                      "url": "https://x/b.png"
+                    }
+                  ],
+                  "status": "completed"
+                }
+              }
+            }
+          }
+        }
+      ],
+      "verb": "image",
+      "args": {
+        "prompt": "cat",
+        "seed": 3,
+        "aspectRatio": "1:1"
+      },
+      "expectCalls": [],
+      "status": "unavailable",
+      "error": "media: no client available for \"image\": a: argument \"aspectRatio\" not supported; b: argument \"aspectRatio\" not supported",
+      "tool": {
+        "isError": true,
+        "output": "media: no client available for \"image\": a: argument \"aspectRatio\" not supported; b: argument \"aspectRatio\" not supported"
+      },
+      "note": "D19: a accepts only prompt, b also seed; neither accepts aspectRatio (canonical, first in sorted order) ⇒ both skipped, never called."
+    },
+    {
+      "name": "client_declared_required_arg",
+      "clients": [
+        {
+          "name": "a",
+          "verbs": {
+            "talk": {
+              "args": [
+                {
+                  "name": "image",
+                  "required": true
+                },
+                {
+                  "name": "audio",
+                  "required": true
+                }
+              ],
+              "outcome": {
+                "result": {
+                  "files": [
+                    {
+                      "type": "image",
+                      "mimeType": "image/png",
+                      "url": "https://x/a.png"
+                    }
+                  ],
+                  "status": "completed"
+                }
+              }
+            }
+          }
+        }
+      ],
+      "verb": "talk",
+      "args": {
+        "image": "https://x/f.png"
+      },
+      "expectCalls": [],
+      "status": "unavailable",
+      "error": "media: no client available for \"talk\": a: missing required argument \"audio\"",
+      "tool": {
+        "isError": true,
+        "output": "media: no client available for \"talk\": a: missing required argument \"audio\""
+      },
+      "note": "D19 (supersedes the D16 first-client case): a missing required arg skips the only candidate."
+    },
+    {
+      "name": "client_without_args_gets_every_arg",
+      "clients": [
+        {
+          "name": "d",
+          "verbs": {
+            "music": {
+              "outcome": {
+                "result": {
+                  "files": [
+                    {
+                      "type": "audio",
+                      "mimeType": "audio/mpeg",
+                      "url": "https://x/m.mp3"
+                    }
+                  ],
+                  "status": "completed"
+                }
+              }
+            }
+          }
+        }
+      ],
+      "verb": "music",
+      "args": {
+        "prompt": "lofi",
+        "lyrics": "la",
+        "instrumental": false
+      },
+      "expectCalls": [
+        {
+          "client": "d",
+          "verb": "music",
+          "args": {
+            "prompt": "lofi",
+            "lyrics": "la",
+            "instrumental": false
+          }
+        }
+      ],
+      "result": {
+        "files": [
+          {
+            "type": "audio",
+            "mimeType": "audio/mpeg",
+            "url": "https://x/m.mp3"
+          }
+        ],
+        "status": "completed"
+      },
+      "tool": {
+        "name": "generate_music",
+        "isError": false,
+        "output": "audio ready: https://x/m.mp3",
+        "parts": [
+          {
+            "type": "audio",
+            "mimeType": "audio/mpeg",
+            "url": "https://x/m.mp3"
+          }
+        ],
+        "metadata": {
+          "source": "media",
+          "verb": "music",
+          "client": "d",
+          "status": "completed"
+        },
+        "modelParts": []
+      }
+    },
+    {
+      "name": "text_result_has_no_parts",
+      "clients": [
+        {
+          "name": "t",
+          "verbs": {
+            "transcribe": {
+              "outcome": {
+                "result": {
+                  "files": [],
+                  "text": "hello",
+                  "status": "completed"
+                }
+              }
+            }
+          }
+        }
+      ],
+      "verb": "transcribe",
+      "args": {
+        "audio": "https://x/a.mp3"
+      },
+      "result": {
+        "files": [],
+        "text": "hello",
+        "status": "completed"
+      },
+      "tool": {
+        "name": "transcribe_audio",
+        "isError": false,
+        "output": "hello",
+        "noParts": true,
+        "metadata": {
+          "source": "media",
+          "verb": "transcribe",
+          "client": "t",
+          "status": "completed"
+        }
+      }
+    },
+    {
+      "name": "client_without_args_rejects_non_canonical_key",
+      "note": "D7/D19: a non-canonical key is accepted by no client ⇒ plain failed error, no client called.",
+      "clients": [
+        {
+          "name": "d",
+          "verbs": {
+            "image": {
+              "outcome": {
+                "result": {
+                  "files": [
+                    {
+                      "type": "image",
+                      "mimeType": "image/png",
+                      "url": "https://x/d.png"
+                    }
+                  ],
+                  "status": "completed"
+                }
+              }
+            }
+          }
+        }
+      ],
+      "verb": "image",
+      "args": {
+        "prompt": "cat",
+        "foo": "bar"
+      },
+      "expectCalls": [],
+      "status": "failed",
+      "error": "image: argument \"foo\" not supported",
+      "tool": {
+        "isError": true,
+        "output": "image: argument \"foo\" not supported"
+      }
+    },
+    {
+      "name": "fall_through_skips_candidate_missing_required_arg",
+      "note": "D19 (was D16): b requires audio, which the call lacks ⇒ b is skipped as unavailable (never called); c serves it.",
+      "clients": [
+        {
+          "name": "a",
+          "verbs": {
+            "talk": {
+              "args": [
+                {
+                  "name": "image",
+                  "required": true
+                }
+              ],
+              "outcome": {
+                "error": "a: HTTP 402: {}",
+                "status": "unavailable"
+              }
+            }
+          }
+        },
+        {
+          "name": "b",
+          "verbs": {
+            "talk": {
+              "args": [
+                {
+                  "name": "image",
+                  "required": true
+                },
+                {
+                  "name": "audio",
+                  "required": true
+                }
+              ],
+              "outcome": {
+                "result": {
+                  "files": [
+                    {
+                      "type": "image",
+                      "mimeType": "image/png",
+                      "url": "https://x/b.png"
+                    }
+                  ],
+                  "status": "completed"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "c",
+          "verbs": {
+            "talk": {
+              "args": [
+                {
+                  "name": "image",
+                  "required": true
+                }
+              ],
+              "outcome": {
+                "result": {
+                  "files": [
+                    {
+                      "type": "file",
+                      "mimeType": "video/mp4",
+                      "url": "https://x/c.mp4"
+                    }
+                  ],
+                  "status": "completed"
+                }
+              }
+            }
+          }
+        }
+      ],
+      "verb": "talk",
+      "args": {
+        "image": "https://x/f.png"
+      },
+      "expectCalls": [
+        {
+          "client": "a",
+          "verb": "talk",
+          "args": {
+            "image": "https://x/f.png"
+          }
+        },
+        {
+          "client": "c",
+          "verb": "talk",
+          "args": {
+            "image": "https://x/f.png"
+          }
+        }
+      ],
+      "result": {
+        "files": [
+          {
+            "type": "file",
+            "mimeType": "video/mp4",
+            "url": "https://x/c.mp4"
+          }
+        ],
+        "status": "completed"
+      },
+      "tool": {
+        "name": "talking_video",
+        "isError": false,
+        "output": "video ready: https://x/c.mp4",
+        "parts": [
+          {
+            "type": "file",
+            "mimeType": "video/mp4",
+            "url": "https://x/c.mp4"
+          }
+        ],
+        "metadata": {
+          "source": "media",
+          "verb": "talk",
+          "client": "c",
+          "status": "completed"
+        },
+        "modelParts": []
+      }
+    },
+    {
+      "name": "fall_through_missing_required_arg_joins_unavailable",
+      "note": "D19 (was D16): the skipped candidate's message joins the all-unavailable error.",
+      "clients": [
+        {
+          "name": "a",
+          "verbs": {
+            "talk": {
+              "args": [
+                {
+                  "name": "image",
+                  "required": true
+                }
+              ],
+              "outcome": {
+                "error": "a: HTTP 402: {}",
+                "status": "unavailable"
+              }
+            }
+          }
+        },
+        {
+          "name": "b",
+          "verbs": {
+            "talk": {
+              "args": [
+                {
+                  "name": "image",
+                  "required": true
+                },
+                {
+                  "name": "audio",
+                  "required": true
+                }
+              ],
+              "outcome": {
+                "result": {
+                  "files": [
+                    {
+                      "type": "image",
+                      "mimeType": "image/png",
+                      "url": "https://x/b.png"
+                    }
+                  ],
+                  "status": "completed"
+                }
+              }
+            }
+          }
+        }
+      ],
+      "verb": "talk",
+      "args": {
+        "image": "https://x/f.png"
+      },
+      "expectCalls": [
+        {
+          "client": "a",
+          "verb": "talk",
+          "args": {
+            "image": "https://x/f.png"
+          }
+        }
+      ],
+      "status": "unavailable",
+      "error": "media: no client available for \"talk\": a: HTTP 402: {}; b: missing required argument \"audio\"",
+      "tool": {
+        "isError": true,
+        "output": "media: no client available for \"talk\": a: HTTP 402: {}; b: missing required argument \"audio\""
+      }
+    },
+    {
+      "name": "first_candidate_rejects_arg_falls_to_next",
+      "note": "D19: a Grok-like first client does not accept seconds ⇒ skipped (never called); the next client serves the call with the args unchanged.",
+      "clients": [
+        {
+          "name": "grok",
+          "verbs": {
+            "video": {
+              "args": [
+                {
+                  "name": "prompt",
+                  "required": true
+                },
+                {
+                  "name": "image",
+                  "required": false
+                }
+              ],
+              "outcome": {
+                "result": {
+                  "files": [
+                    {
+                      "type": "file",
+                      "mimeType": "video/mp4",
+                      "url": "https://x/g.mp4"
+                    }
+                  ],
+                  "status": "completed"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "openai",
+          "verbs": {
+            "video": {
+              "args": [
+                {
+                  "name": "prompt",
+                  "required": true
+                },
+                {
+                  "name": "seconds",
+                  "required": false
+                }
+              ],
+              "outcome": {
+                "result": {
+                  "files": [
+                    {
+                      "type": "file",
+                      "mimeType": "video/mp4",
+                      "url": "https://x/o.mp4"
+                    }
+                  ],
+                  "jobId": "v1",
+                  "status": "completed"
+                }
+              }
+            }
+          }
+        }
+      ],
+      "verb": "video",
+      "args": {
+        "prompt": "a cat",
+        "seconds": 4
+      },
+      "expectCalls": [
+        {
+          "client": "openai",
+          "verb": "video",
+          "args": {
+            "prompt": "a cat",
+            "seconds": 4
+          }
+        }
+      ],
+      "result": {
+        "files": [
+          {
+            "type": "file",
+            "mimeType": "video/mp4",
+            "url": "https://x/o.mp4"
+          }
+        ],
+        "jobId": "v1",
+        "status": "completed"
+      },
+      "tool": {
+        "name": "generate_video",
+        "isError": false,
+        "output": "video ready: https://x/o.mp4",
+        "parts": [
+          {
+            "type": "file",
+            "mimeType": "video/mp4",
+            "url": "https://x/o.mp4"
+          }
+        ],
+        "metadata": {
+          "source": "media",
+          "verb": "video",
+          "client": "openai",
+          "jobId": "v1",
+          "status": "completed"
+        },
+        "modelParts": []
+      }
+    },
+    {
+      "name": "skipped_and_unavailable_reasons_join_in_order",
+      "note": "D19: skip reasons and unavailable messages join in candidate order.",
+      "clients": [
+        {
+          "name": "grok",
+          "verbs": {
+            "video": {
+              "args": [
+                {
+                  "name": "prompt",
+                  "required": true
+                }
+              ],
+              "outcome": {
+                "result": {
+                  "files": [
+                    {
+                      "type": "file",
+                      "mimeType": "video/mp4",
+                      "url": "https://x/g.mp4"
+                    }
+                  ],
+                  "status": "completed"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "fal",
+          "verbs": {
+            "video": {
+              "args": [
+                {
+                  "name": "prompt",
+                  "required": true
+                },
+                {
+                  "name": "seconds",
+                  "required": false
+                }
+              ],
+              "outcome": {
+                "error": "fal: HTTP 402: {}",
+                "status": "unavailable"
+              }
+            }
+          }
+        },
+        {
+          "name": "talky",
+          "verbs": {
+            "video": {
+              "args": [
+                {
+                  "name": "prompt",
+                  "required": true
+                },
+                {
+                  "name": "image",
+                  "required": true
+                },
+                {
+                  "name": "seconds",
+                  "required": false
+                }
+              ],
+              "outcome": {
+                "result": {
+                  "files": [
+                    {
+                      "type": "file",
+                      "mimeType": "video/mp4",
+                      "url": "https://x/t.mp4"
+                    }
+                  ],
+                  "status": "completed"
+                }
+              }
+            }
+          }
+        }
+      ],
+      "verb": "video",
+      "args": {
+        "prompt": "a cat",
+        "seconds": 4
+      },
+      "expectCalls": [
+        {
+          "client": "fal",
+          "verb": "video",
+          "args": {
+            "prompt": "a cat",
+            "seconds": 4
+          }
+        }
+      ],
+      "status": "unavailable",
+      "error": "media: no client available for \"video\": grok: argument \"seconds\" not supported; fal: HTTP 402: {}; talky: missing required argument \"image\"",
+      "tool": {
+        "isError": true,
+        "output": "media: no client available for \"video\": grok: argument \"seconds\" not supported; fal: HTTP 402: {}; talky: missing required argument \"image\""
+      }
+    },
+    {
+      "name": "non_canonical_key_plain_error_even_with_fallbacks",
+      "note": "D7/D19: a non-canonical key (not in verbs.json) fails at once, before any candidate; not a joined error.",
+      "clients": [
+        {
+          "name": "a",
+          "verbs": {
+            "image": {
+              "args": [
+                {
+                  "name": "prompt",
+                  "required": true
+                }
+              ],
+              "outcome": {
+                "result": {
+                  "files": [
+                    {
+                      "type": "image",
+                      "mimeType": "image/png",
+                      "url": "https://x/a.png"
+                    }
+                  ],
+                  "status": "completed"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "b",
+          "verbs": {
+            "image": {
+              "outcome": {
+                "result": {
+                  "files": [
+                    {
+                      "type": "image",
+                      "mimeType": "image/png",
+                      "url": "https://x/b.png"
+                    }
+                  ],
+                  "status": "completed"
+                }
+              }
+            }
+          }
+        }
+      ],
+      "verb": "image",
+      "args": {
+        "prompt": "cat",
+        "seed": 3,
+        "zoom": 2
+      },
+      "expectCalls": [],
+      "status": "failed",
+      "error": "image: argument \"zoom\" not supported",
+      "tool": {
+        "isError": true,
+        "output": "image: argument \"zoom\" not supported"
+      }
+    },
+    {
+      "name": "usage_passes_through_to_tool_metadata",
+      "note": "D21: MediaResult.usage is returned as is; the tool face copies it to metadata.usage.",
+      "clients": [
+        {
+          "name": "u",
+          "verbs": {
+            "image": {
+              "outcome": {
+                "result": {
+                  "files": [
+                    {
+                      "type": "image",
+                      "mimeType": "image/png",
+                      "url": "https://x/u.png"
+                    }
+                  ],
+                  "status": "completed",
+                  "usage": {
+                    "inputTokens": 12,
+                    "outputTokens": 3400,
+                    "costUsd": 0.02
+                  }
+                }
+              }
+            }
+          }
+        }
+      ],
+      "verb": "image",
+      "args": {
+        "prompt": "cat"
+      },
+      "expectCalls": [
+        {
+          "client": "u",
+          "verb": "image",
+          "args": {
+            "prompt": "cat"
+          }
+        }
+      ],
+      "result": {
+        "files": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "url": "https://x/u.png"
+          }
+        ],
+        "status": "completed",
+        "usage": {
+          "inputTokens": 12,
+          "outputTokens": 3400,
+          "costUsd": 0.02
+        }
+      },
+      "tool": {
+        "name": "generate_image",
+        "isError": false,
+        "output": "image ready: https://x/u.png",
+        "parts": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "url": "https://x/u.png"
+          }
+        ],
+        "metadata": {
+          "source": "media",
+          "verb": "image",
+          "client": "u",
+          "status": "completed",
+          "usage": {
+            "inputTokens": 12,
+            "outputTokens": 3400,
+            "costUsd": 0.02
+          }
+        },
+        "modelParts": [
+          {
+            "type": "image",
+            "mimeType": "image/png",
+            "url": "https://x/u.png"
+          }
+        ]
+      }
+    }
+  ],
+  "schemaCases": [
+    {
+      "name": "tools_follow_the_first_supporting_client",
+      "clients": [
+        {
+          "name": "a",
+          "verbs": {
+            "image": {
+              "args": [
+                {
+                  "name": "prompt",
+                  "required": true
+                },
+                {
+                  "name": "width",
+                  "required": false
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "b",
+          "verbs": {
+            "image": {
+              "args": [
+                {
+                  "name": "seed",
+                  "required": false
+                },
+                {
+                  "name": "prompt",
+                  "required": true
+                }
+              ]
+            },
+            "speech": {
+              "args": [
+                {
+                  "name": "voice",
+                  "required": false
+                },
+                {
+                  "name": "text",
+                  "required": true
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "c",
+          "verbs": {
+            "talk": {
+              "args": [
+                {
+                  "name": "image",
+                  "required": true
+                },
+                {
+                  "name": "audio",
+                  "required": true
+                }
+              ]
+            },
+            "transcribe": {}
+          }
+        }
+      ],
+      "tools": [
+        {
+          "name": "generate_image",
+          "description": "Generate an image from a text prompt.",
+          "source": "media",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "prompt": {
+                "type": "string",
+                "description": "What to draw."
+              },
+              "width": {
+                "type": "integer",
+                "description": "Width in pixels."
+              }
+            },
+            "required": [
+              "prompt"
+            ]
+          }
+        },
+        {
+          "name": "generate_speech",
+          "description": "Speak text aloud and return the audio.",
+          "source": "media",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "text": {
+                "type": "string",
+                "description": "The text to speak."
+              },
+              "voice": {
+                "type": "string",
+                "description": "Voice name or id, including a cloned voice."
+              }
+            },
+            "required": [
+              "text"
+            ]
+          }
+        },
+        {
+          "name": "transcribe_audio",
+          "description": "Transcribe speech in an audio file to text.",
+          "source": "media",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "audio": {
+                "type": "string",
+                "description": "URL or local path of the audio."
+              },
+              "language": {
+                "type": "string",
+                "description": "Language of the speech as an ISO 639-1 code, e.g. en."
+              }
+            },
+            "required": [
+              "audio"
+            ]
+          }
+        },
+        {
+          "name": "talking_video",
+          "description": "Make the person in an image speak, from speech audio or from text (lip-synced video).",
+          "source": "media",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "image": {
+                "type": "string",
+                "description": "URL or local path of the face image."
+              },
+              "audio": {
+                "type": "string",
+                "description": "URL or local path of the speech audio."
+              }
+            },
+            "required": [
+              "image",
+              "audio"
+            ]
+          }
+        }
+      ]
+    }
+  ],
+  "emptyClients": {
+    "error": "media: no clients"
+  }
+}

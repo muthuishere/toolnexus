@@ -72,7 +72,7 @@ export function toOpenAIWire(messages: any[], opts: WireOptions = {}): any[] {
       const parts = partsOf(m)
       const { parts: _drop, ...rest } = m ?? {}
       if (!parts) {
-        out.push(m)
+        out.push(m && "parts" in m ? rest : m)
         continue
       }
       const { texts, others } = split(parts)
@@ -109,7 +109,12 @@ export function toAnthropicWire(messages: any[], opts: WireOptions = {}): any[] 
     const content = m.content.map((block: any) => {
       if (block?.type !== "tool_result") return block
       const parts = partsOf(block)
-      if (!parts) return block
+      if (!parts) {
+        if (!("parts" in block)) return block
+        touched = true
+        const { parts: _drop, ...rest } = block
+        return rest
+      }
       touched = true
       const { parts: _drop, ...rest } = block
       return {
@@ -122,6 +127,18 @@ export function toAnthropicWire(messages: any[], opts: WireOptions = {}): any[] 
     })
     return touched ? { ...m, content } : m
   })
+}
+
+/**
+ * The parts of a tool result that reach the model (SPEC §7G.6). A media tool result
+ * (`metadata.source === "media"`) contributes only its **image** parts; its video (`file`) and
+ * `audio` parts stay in `toolCalls[].parts` / `RunResult.files` and the model sees just the
+ * output line. Every other tool result keeps all its parts.
+ */
+export function modelParts(result: { parts?: ContentPart[]; metadata?: Record<string, unknown> }): ContentPart[] {
+  const parts = result.parts ?? []
+  if (result.metadata?.source !== "media") return parts
+  return parts.filter((p) => p.type === "image")
 }
 
 /** Validate every attached part before assembly, so `maxPartBytes` cannot be bypassed. */

@@ -3,6 +3,7 @@
  * ("openai" | "anthropic"), and it runs the tool-calling agent loop against a
  * Toolkit. See ../../SPEC.md §8.
  */
+import { mediaPartPath } from "./media.js"
 import type { Toolkit } from "./toolkit.js"
 import type { Tool, ToolHints, ToolResult, Request, Answer } from "./types.js"
 import { pendingOf } from "./types.js"
@@ -12,7 +13,7 @@ import { buildToolPlan, toolSearch, unwrapCallTool, type ToolPlan, type ToolTier
 import { isRetryableStatus, retryAfterMs } from "./retry.js"
 import { isConcurrencySafe, resolveMaxToolConcurrency, scheduleCalls } from "./toolconcurrency.js"
 import type { ContentPart, PromptInput, UnsupportedPartMode } from "./content.js"
-import { toOpenAIWire, toAnthropicWire, checkPromptParts, type WireOptions } from "./wire.js"
+import { toOpenAIWire, toAnthropicWire, checkPromptParts, modelParts, type WireOptions } from "./wire.js"
 import type { TranslateRequest, TranslateResult, TranslatedToolCall } from "./translate.js"
 import {
   finishReasonFor,
@@ -394,18 +395,20 @@ export interface ToolCallRecord {
 }
 
 /** §8 RunResult.files entry: a non-text part a tool call produced this run. */
-export type RunFile = { type: "image" | "file" | "audio"; mimeType: string; url?: string; data?: string; name?: string; from: string; callId: string }
+export type RunFile = { type: "image" | "file" | "audio"; mimeType: string; url?: string; data?: string; name?: string; path?: string; from: string; callId: string }
 
 /** Model tool-call id of each record, kept off the record itself (§8 shape has no id). */
 const callIds = new WeakMap<ToolCallRecord, string>()
 
 /** RunResult.files: every non-text part of every tool call, in call order (§8). */
-function runFiles(toolCalls: ToolCallRecord[]): RunFile[] {
+export function runFiles(toolCalls: ToolCallRecord[]): RunFile[] {
   const out: RunFile[] = []
   for (const r of toolCalls) {
     for (const p of r.parts ?? []) {
       if (p.type === "text") continue
-      out.push({ ...p, from: r.name, callId: callIds.get(r) ?? "" })
+      // D20: a media file's local path rides on the run file, never on the part.
+      const local = mediaPartPath(p)
+      out.push({ ...p, ...(local !== undefined ? { path: local } : {}), from: r.name, callId: callIds.get(r) ?? "" })
     }
   }
   return out
@@ -2182,9 +2185,10 @@ function objArgs(v: unknown): Record<string, unknown> {
  */
 function toolMessage(id: string | undefined, name: string, result: ToolResult): any {
   const m: any = { role: "tool", tool_call_id: id, content: result.output }
-  if (result.parts?.length) {
+  const parts = modelParts(result)
+  if (parts.length) {
     m.name = name
-    m.parts = result.parts
+    m.parts = parts
   }
   return m
 }
@@ -2192,7 +2196,8 @@ function toolMessage(id: string | undefined, name: string, result: ToolResult): 
 /** A canonical Anthropic `tool_result` block; parts ride along and are emitted natively. */
 function toolResultBlock(id: string | undefined, result: ToolResult): any {
   const b: any = { type: "tool_result", tool_use_id: id, content: result.output, is_error: result.isError }
-  if (result.parts?.length) b.parts = result.parts
+  const parts = modelParts(result)
+  if (parts.length) b.parts = parts
   return b
 }
 

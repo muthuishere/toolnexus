@@ -1,175 +1,323 @@
 ---
 title: Media generation
-description: Images, video, speech, transcription, voice cloning and talking-head video from a JSON style. Typed verbs for your code, tools for your agent, and polling handled for you.
+description: Images, video, speech, music, transcription, voice cloning and talking-head video from named media clients (A2E, ElevenLabs, OpenAI, OpenRouter, fal), CLI presets for the Grok, Codex and Antigravity CLIs, or your own. Typed verbs for your code, opt-in tools for your agent.
 ---
 
-import { Aside } from '@astrojs/starlight/components';
+import { Tabs, TabItem, Aside } from '@astrojs/starlight/components';
 
 <Aside type="tip" title="Why you need this">
-Media providers all work the same way under different JSON: you start a job, poll until it
-finishes, and dig a URL out of the response. Without help you write that loop once per
-endpoint, once per language, and again every time you switch vendor. Toolnexus turns the
-provider into a **style**, a JSON file of endpoints and dot-paths. One engine runs every style.
-Your code calls `image(...)`, and your agent calls `generate_image`. Switching provider means
-loading a different file.
+Every media provider makes you write the same code: start a job, poll it, dig the file out of
+the response, download it before the URL expires, and handle "out of credits" differently from
+"bad prompt". Toolnexus gives you **named media clients** with one small config, one interface
+for all of them, and one typed `unavailable` error when a provider is out of credits, has no
+key, or is blocked by its account. Your code calls `image(...)`; your agent, if you opt
+in, calls `generate_image`.
 </Aside>
 
-Contract: SPEC §7G · ADR 0036 · `conformance/media/`. Every port replays the same 19 cases and
-schema set, so error strings, tool schemas and results are byte-identical across all eight.
-For runnable code in every language, see the cookbook recipe
-[Generate images, video and speech](/toolnexus/cookbook/media/).
+Contract: SPEC §7G · ADR 0036 + ADR 0037 · `conformance/media/`. Every port replays the same six
+conformance files (verbs, schemas, style cases, client cases, CLI cases, routing), so error
+strings, tool schemas and results are byte-identical across all eight languages. Runnable code in
+every language: the cookbook recipe [Generate images, video and speech](/toolnexus/cookbook/media/).
 
-## One engine, two faces
+## The model: `MediaClient`
+
+A **media client** is anything that can do one or more of the seven verbs. Every verb is optional;
+`supports(verb)` says which ones a client does.
 
 ```
-createMedia(style)  ──┬── function face:  image · video · speech · transcribe · cloneVoice · talking · generate(verb, args)
-                      └── tool face:      generate_image · generate_video · generate_speech
-                                          transcribe_audio · clone_voice · talking_video
+MediaClient = {
+  name                                   // "openai", "grok", "style", or yours
+  supports(verb) -> bool
+  args?(verb) -> [{ name, required }]    // which canonical args it accepts
+  image? video? speech? music? transcribe? cloneVoice? talk?   (args, ctx) -> MediaResult
+}
+MediaResult = { files: [MediaFile], text?, jobId?, status }
+MediaFile   = { type, mimeType, url?, path?, data? }
 ```
+
+Each port spells this natively: a TypeScript interface with optional methods, a Python
+`Protocol`, a Go interface with an embeddable `UnsupportedMedia` base, Java/C# interfaces with
+default methods, a Rust trait with default methods, an Elixir behaviour with optional callbacks,
+and a Clojure map of functions.
+
+## The seven verbs
 
 | verb | tool | arguments (required in **bold**) | result |
 |---|---|---|---|
 | `image` | `generate_image` | **prompt**, width, height, aspectRatio, seed | image file(s) |
-| `video` | `generate_video` | **prompt**, image (start-frame URL), seconds, aspectRatio | video file |
-| `speech` | `generate_speech` | **text**, voice | audio file |
-| `transcribe` | `transcribe_audio` | **audio** (URL) | `text` |
-| `cloneVoice` | `clone_voice` | **name**, **samples** (URLs) | `text` (the voice id) |
-| `talking` | `talking_video` | **image**, **audio** (URLs) | video file |
+| `video` | `generate_video` | **prompt**, image (start frame), seconds, aspectRatio | video file |
+| `speech` | `generate_speech` | **text**, voice (name or id, cloned voices included) | audio file |
+| `music` | `generate_music` | **prompt**, seconds, instrumental, lyrics | audio file |
+| `transcribe` | `transcribe_audio` | **audio**, language | `text` |
+| `cloneVoice` | `clone_voice` | **name**, **samples** (array) | `text` = the new voice id |
+| `talk` | `talking_video` | **image**, audio, text, voice | video file |
 
-- **Function face.** Each port uses its own idiom: `media.image({prompt})` in JS,
-  `await media.image(prompt=…)` in Python, `media.Image(ctx, ImageInput{…})` in Go,
-  `media.ImageAsync(new ImageInput(…))` in C#, `Media.image(m, %{prompt: …})` in Elixir. Each
-  verb returns `MediaResult = { files: [{type, mimeType, url}], text?, jobId?, status }`. The
-  function face also takes `providerOptions`, whose top-level keys are written over the request
-  body last. It also takes the port's native cancellation (AbortSignal, `context.Context`,
-  `CancellationToken`, …).
-- **Tool face.** `media.tools()` returns one tool (source `"media"`) for each verb the styles
-  support. Its schema lists **only the arguments the style maps**, so the model is never offered
-  a knob the provider ignores. `createToolkit({ media })` registers them. A tool never throws:
-  on success it returns `"image ready: <url>"` with the files as `parts`, and any failure becomes
-  `isError: true` with the engine's error message.
+`image`, `audio` and each of `samples` may be an `http(s)://` URL, a `file://` URL or a local
+path. A client that has to upload bytes reads the file or fetches the URL (with no API key sent
+to that URL) itself.
 
-You can pass a **list** of styles. Each verb resolves to the first style that declares it, so
-you can, for example, take images from one vendor and speech from another.
+## CLI presets
 
-## Sync vs async
+To drive the Grok, Codex or Google Antigravity CLI, load a **preset** instead of constructing a
+client: `createMedia(loadMediaStyle(MediaStyle.XaiGrokCli))` (or `OpenAICodexCli`,
+`GoogleAgyCli`), or one line with `generateMedia(MediaStyle.XaiGrokCli, "image", { prompt })`. Each
+preset runs the vendor's official CLI in its documented headless mode (`grok -p`, `codex exec`,
+`agy -p`), signed in by you; your provider's terms of service apply to how you use its CLI. Grok
+images carry a small visible "Grok" mark in the bottom-right corner, which toolnexus does not
+remove. Install, sign-in, Grok video, limits, models, mocks and the per-language API:
+[Grok CLI, Codex CLI and Antigravity media setup](/toolnexus/cookbook/cli-media-setup/).
 
-A style marks each verb `sync` or `async`:
+## Named clients
 
-- **sync.** The start response already holds the result. `status` is `"completed"`.
-- **async.** The engine reads a job id at `idPath`, then polls `poll.path` every `intervalMs`
-  (default 5 s) until the status at `statusPath` is in `done` (success) or `failed` (an error:
-  `job <id> <status>: <message>`). After `timeoutMs` (default 10 min) it gives up with
-  `job <id> timed out after <n>ms`. **Any other status keeps polling.** Providers send statuses
-  their docs never mention (a2e sends `sent`). `onProgress({verb, jobId, status})` fires after
-  every poll.
+Five clients talk to HTTP APIs and two drive a local CLI (the CLI presets above load these). Each was built after a
+live spike, but not every verb has had a real call yet: verbs marked *unverified* follow the
+provider's docs and are listed as such in the CHANGELOG.
 
-Measured live against a2e: an image takes about 30 s, speech about 30 s, and a 5-second image-to-video
-about 4 minutes. Pass `onProgress` if a person is waiting.
+| client | name | verbs (live-verified unless marked) | key env | default primary model |
+|---|---|---|---|---|
+| `A2EMediaClient` | `a2e` | image, video, speech, talk *(unverified)* | `A2E_API_KEY` | – |
+| `ElevenLabsMediaClient` | `elevenlabs` | speech (incl. cloned voice by name), music *(unverified)*, transcribe *(unverified)*, cloneVoice *(unverified)* | `ELEVENLABS_API_KEY` | `eleven_flash_v2_5` |
+| `OpenAIMediaClient` | `openai` | image, speech *(unverified)*, transcribe *(unverified)*, video *(unverified)* | `OPENAI_API_KEY` | `gpt-image-1-mini` |
+| `OpenRouterMediaClient` | `openrouter` | image | `OPENROUTER_API_KEY` | `google/gemini-2.5-flash-image` |
+| `FalMediaClient` | `fal` | image, video *(unverified)* | `FAL_API_KEY` | `fal-ai/flux/schnell` |
+| `GrokMediaClient` | `grok` | image, video ([after opting in](#grok-video-zdr)) | – (your `grok` sign-in) | the CLI's |
+| `CodexMediaClient` | `codex` | image | – (your `codex` sign-in) | the CLI's |
 
-## `RunResult.files`: what the agent made
+Which arguments each client accepts:
 
-When an agent calls a media tool, the files appear in `RunResult.files`. They are listed in call
-order, and each is `{type, mimeType, url, from, callId}`, where `from` is the tool name. The
-same parts are on `toolCalls[].parts` for each call. The final answer text **never** gets
-markup for them, so the host decides how to show them:
+| client | image | video | speech | music | transcribe | cloneVoice | talk |
+|---|---|---|---|---|---|---|---|
+| a2e | prompt\*, width, height, seed | prompt\*, image, seconds | text\*, voice | – | – | – | image\*, audio\* |
+| elevenlabs | – | – | text\*, voice | prompt\*, seconds, instrumental | audio\*, language | name\*, samples\* | – |
+| openai | prompt\*, width, height | prompt\*, seconds | text\*, voice | – | audio\*, language | – | – |
+| openrouter | prompt\* | – | – | – | – | – | – |
+| fal | prompt\*, width, height, seed | prompt\*, image, seconds, aspectRatio | – | – | – | – | – |
+| grok, codex | prompt\* | prompt\* (grok) | – | – | – | – | – |
 
-- **Web.** `image/*` goes in `<img>`, `video/*` in `<video controls>`, `audio/*` in `<audio controls>`.
-- **WhatsApp / Telegram / Slack.** Send each URL as a media message, using `mimeType` to choose image, video or voice note.
-- **CLI.** Print the URL or download it. Download soon, because many provider URLs expire.
+An argument a client does not accept is rejected **before** any request is made, so a model is
+never offered a knob the provider would ignore.
 
-`mimeType` comes from the URL's file extension (`.jpg` gives `image/jpeg`, `.wav` gives `audio/wav`). When the
-extension is unknown it falls back to the kind's default: `image/png`, `video/mp4` or `audio/mpeg`.
+- **OpenAI** takes `url`, so it also works against any OpenAI-compatible server.
+- **fal** runs any hosted model by id through its queue API (Kling, Seedance, Veo, Flux…): set
+  `model` for images or `models.video` for video. Without one, video uses Kling 2.1
+  image-to-video when you pass `image`, text-to-video otherwise.
+- **Grok** runs `grok -p … --output-format streaming-json` once, headless, and copies the file
+  out of Grok's session folder. **Codex** runs `codex exec --json` and finds the image in the
+  reply text and `$CODEX_HOME/generated_images/<thread>`. Both are killed on cancel or timeout. A
+  run that ends normally but produced the wrong kind of file (a still image when you asked for
+  video) is a failure, not a success.
 
-## Write your own style
+## `createMedia`
 
-A style is plain JSON. The library contains no vendor names. Presets live in
-`examples/media-styles/` and you load them by path. This is the shape of the shipped a2e `image` verb:
+`createMedia(client)` returns `media` with the seven typed verbs, a generic
+`generate(verb, args)`, `supports(verb)`, `verbs()` and `tools()`. For each call:
 
-```json
-{
-  "baseUrl": "https://api.a2e.ai/api",
-  "headers": { "Authorization": "Bearer ${A2E_API_KEY}" },
-  "verbs": {
-    "image": {
-      "mode": "async",
-      "kind": "image",
-      "start": { "method": "POST", "path": "/v1/userText2Image/start" },
-      "defaults": { "name": "toolnexus", "model_type": "a2e" },
-      "args": { "prompt": "prompt", "width": "width", "height": "height", "seed": "seed" },
-      "idPath": "data.0._id",
-      "poll": {
-        "path": "/v1/userText2Image/{id}",
-        "statusPath": "data.current_status",
-        "done": ["completed"],
-        "failed": ["failed", "blocked", "canceled"],
-        "errorPath": "data.failed_message",
-        "intervalMs": 3000,
-        "timeoutMs": 300000
-      },
-      "resultPath": "data.image_urls"
-    }
-  }
+1. A verb the client does not support ⇒ `media: no client supports "<verb>"`.
+2. The args are checked first: an unknown arg ⇒ `<verb>: argument "<key>" not supported by <client>`;
+   a missing required one ⇒ `<verb>: argument "<key>" is required`. No request is made.
+3. The client's result is returned **as is**: success, or its error.
+
+`unavailable` means "valid call, but this client cannot serve it right now". It covers exactly:
+no API key (no request is made), HTTP 402, HTTP 429 mentioning quota/credit/billing/balance, a
+CLI that cannot be started, Grok's Zero Data Retention or usage-limit refusals, and Codex usage
+limits. It is a typed error you can test without matching strings: `MediaUnavailableError` (JS,
+Python, Java, C#), `errors.Is(err, ErrMediaUnavailable)` (Go), `MediaError::Unavailable`
+(Rust), `%Toolnexus.Media.Error{status: :unavailable}` (Elixir), `ex-info` with
+`{:status :unavailable}` (Clojure).
+
+<Tabs syncKey="lang">
+<TabItem label="JavaScript">
+```ts
+import { createMedia, FalMediaClient, MediaUnavailableError } from "toolnexus"
+
+const media = createMedia(new FalMediaClient({ models: { video: "fal-ai/kling-video/v2.1/standard/text-to-video" } }))
+
+try {
+  const vid = await media.video({ prompt: "a paper boat drifting down a rain gutter" })
+  console.log(vid.status, vid.files[0].path)
+} catch (e) {
+  if (e instanceof MediaUnavailableError) console.log("fal is unavailable:", e.message)
+  else throw e
 }
 ```
+</TabItem>
+<TabItem label="Other languages">
+The same example in all eight languages is in the cookbook:
+[named clients](/toolnexus/cookbook/media/#1-named-clients).
+</TabItem>
+</Tabs>
 
-### Field reference
+## Config: one shape for every client
 
-| field | meaning |
-|---|---|
-| `baseUrl` | Joined with each `path`. A trailing `/` is trimmed. |
-| `headers` | Sent on **every** request, start and polls. `${VAR}` expands from the environment at call time (an unset variable becomes `""`). Values are never logged. |
-| `errorEnvelope` | `{codePath, okValues, messagePath?}` for providers that answer HTTP 200 with an error code. If the code at `codePath` is present and not in `okValues`, the call fails with `API error <code>: <message>`. |
-| `verbs.<verb>.mode` | `"sync"` or `"async"`. |
-| `verbs.<verb>.kind` | `"image"`, `"video"`, `"audio"` or `"text"`. This sets the file `type` (`video` maps to `file`) and the default mime type. |
-| `start` | `{method?: "POST", path}`. The body is JSON. |
-| `defaults` | Copied into the body first, then the args are written over it. Use it for parameters the provider requires but the verbs don't model. |
-| `args` | Maps each normalised arg to a body **dotPath**. An arg not listed here is rejected before any request is made, and it is left out of the tool schema. |
-| `idPath` | async only. The job id: a non-empty string or an integer. |
-| `poll` | async only. `{method?: "GET", path` (contains `{id}`), `statusPath, done, failed, errorPath?, intervalMs?: 5000, timeoutMs?: 600000}`. Polls send no body. If `done` or `failed` is absent it counts as empty. |
-| `resultPath` | Where the result is. For media kinds it is a string or an array of strings (flattened to any depth, with empty entries dropped), one file each. For `text` it is a string or number. |
+Every built-in client takes the same config (port-native spelling: `intervalMs`, `interval_ms`,
+`IntervalMs`, `:interval-ms`…). Fields a client does not use are ignored.
 
-A **dotPath** splits on `.`, and an all-digit segment indexes an array. `references.0.speaker`
-writes `{"references":[{"speaker":…}]}`, creating objects and arrays as it goes. Reading a
-missing path counts as absent.
+| field | API clients | CLI clients (Grok, Codex) |
+|---|---|---|
+| `model` | the model of the client's primary verb | passed as the CLI's `-m <model>` |
+| `models` | `{verb: model}`, per-verb override | – |
+| `key` | defaults to the env var above, read **at call time**; never logged | – |
+| `url` | base URL override (any compatible server) | – |
+| `command` | – | the CLI argv prefix, when it is not on `PATH` as `grok` / `codex` |
+| `loop` | `{intervalMs, timeoutMs, onProgress}`: poll interval, job deadline (default 10 min), progress | `{timeoutMs, onProgress}` |
+| `gather` | `{mode, dir, maxBytes}` | `{mode, dir, maxBytes, keep}` |
+| `httpClient` | the same injection seam as the LLM client (proxy, auth, tests) | – |
+
+Every verb also takes the port's native cancellation, an optional deadline, a per-call progress
+callback, and `providerOptions` (the function face only), whose keys are written over the
+request body last.
+
+### Gather: where the file ends up
+
+Providers return media as raw bytes, base64, a `data:` URL, an `http(s)` URL, or (CLIs) a path
+in their own folder. `gather.mode` decides what you get back:
+
+| mode | you get | default for |
+|---|---|---|
+| `download` | the file saved to `gather.dir` (default `<tmp>/toolnexus-media`): `path` + a `file://` `url` | built-in clients |
+| `url` | the provider's `http(s)` URL as given; bytes/base64/data URLs are still saved | style clients |
+| `inline` | `data`, standard base64, no `path` or `url` | – |
+
+Files are named `<client>-<verb>-<unixMillis>-<seq><ext>`. Anything larger than `gather.maxBytes`
+(default 100 MiB) fails with `<verb>: file exceeds gather.maxBytes (<n> bytes)`. Downloads send no
+API key, follow redirects only within the rules of §7G.8, and honour the job deadline.
+`download` is the default because provider URLs expire (A2E's after 3–30 days). For CLI clients,
+`gather.keep: false` deletes the CLI's own copy after it is copied out.
+
+## The tool face (opt-in)
+
+Tools are **not** registered unless you ask. `media.tools()` returns one tool (source `"media"`)
+for each verb the client supports; pass `media` to `createToolkit` to register them (enable
+and disable lists still apply). Each tool's schema lists only the arguments that client accepts.
+
+- A media tool never throws. Success is `"<image|video|audio> ready: <path or url>"` with the files
+  as `parts` and `metadata {source:"media", verb, client, jobId?, status}`, where `client` names
+  who actually served it. Any failure is `isError: true` with the error message.
+- `transcribe_audio` and `clone_voice` return the text (or voice id) as `output`.
+- Media tools are concurrency-safe, so an agent can make an image and a voice-over in parallel.
+
+### `RunResult.files`, and only images reach the model
+
+When an agent calls a media tool, the files appear in `RunResult.files`, in call order, each
+`{type, mimeType, url, data, name, from, callId}` (`from` is the tool name), and on
+`toolCalls[].parts`. The final answer text never gets markup for them; the host decides how to
+show them (`<img>`/`<video>`/`<audio>` on the web, media messages on WhatsApp or Telegram, a
+path on a CLI).
+
+**Only image parts are sent back to the model**, so it can look at what it made. Video and audio
+parts of a media tool result are never put in the model's context (no placeholder, no warning):
+a base64 video is huge and most models cannot read it. The model sees only the `output` line.
+
+## Write a custom `MediaClient`
+
+For a provider that is not built in, implement the interface: a name, `supports`, and the verbs you
+handle. Return a `MediaResult`; throw the port's `MediaUnavailableError` (or equivalent) when your
+provider is out of credits, so callers get the typed `unavailable` error.
+
+```ts
+import { createMedia, type MediaClient, type MediaResult } from "toolnexus"
+
+const myImages: MediaClient = {
+  name: "myimages",
+  supports: (verb) => verb === "image",
+  async image(args): Promise<MediaResult> {
+    const url = `https://img.example.com/render?q=${encodeURIComponent(String(args.prompt))}`
+    return { status: "completed", files: [{ type: "image", mimeType: "image/png", url }] }
+  },
+}
+const media = createMedia(myImages)
+```
+
+Every language: [a custom MediaClient](/toolnexus/cookbook/media/#4-a-custom-mediaclient).
+
+## Style clients (advanced)
+
+The JSON style engine from ADR 0036 still exists. It is how A2E is defined, and you can use it
+for a provider whose API is "start a job, poll, read a URL". `loadMediaStyle(path)` reads a style
+file; `styleMediaClient(style, config)` turns it into a `MediaClient` named `style.name ?? "style"`.
+Its `gather.mode` defaults to `url`; `key`, when set, fills every `${…}` in the style's headers.
+The shipped preset `examples/media-styles/a2e.json` shows the format: `baseUrl`, `headers`
+(`${ENV}` expanded at call time), and per verb `mode` (`sync`/`async`), `kind`, `start`,
+`defaults`, `args` (canonical arg → body dot-path), `idPath`, `poll {path, statusPath, done,
+failed, errorPath, intervalMs, timeoutMs}` and `resultPath`. Full reference: SPEC §7G.7.
 
 <Aside type="caution" title="Live-smoke every verb">
-Provider docs are often wrong. During the a2e spike, the OpenAPI spec marked `negative_prompt` as
-optional, but the live API rejected video requests without it. The fix was one `defaults` line in
-the style, with no code change, but only a live call found it. Run each verb of a new style
-for real once before you ship it.
+Provider docs are often wrong. During the A2E spike the OpenAPI spec marked `negative_prompt` as
+optional, but the live API rejected video requests without it. Run each verb of a new style or
+custom client for real once before you ship it.
 </Aside>
+
+<a id="grok-video-zdr"></a>
+
+## Grok video and privacy
+
+Grok's video tools obey your account's **coding-data setting**, not the API console:
+
+- `console.x.ai` is the pay-per-call **API** console (keys, credits). It does **not** control the
+  Grok CLI. The CLI uses your own `grok` sign-in; a personal account is a "team of one".
+- Under **Zero Data Retention** the video tool fails ("Video generation tools are unavailable
+  under zero data retention (ZDR)"), and Grok often ends the turn normally with only a still
+  image. The `xai-grok-cli` preset turns that into `unavailable` with
+  `grok: video blocked by Zero Data Retention — run /privacy and opt in, or configure ZDR video storage (docs/media#grok-video-zdr)`.
+
+To make Grok video work:
+
+1. Run `grok`.
+2. Type `/privacy`. It opens **Settings > Coding data, retention, and training**.
+3. Choose **Opt in**. (**Opt out** is ZDR on.) Opting in means xAI may retain and train on your
+   CLI coding data. Decide whether that is acceptable for your account.
+4. **Restart `grok`.**
+
+After opting in we generated a video through the Grok CLI in 53 s (a still image, then
+image-to-video); the `.mp4` path arrives in the completed tool result and toolnexus copies it out
+of `~/.grok/sessions/...`.
+
+<Aside type="caution" title="The ZDR video bucket did not work for us">
+xAI documents a third way: a bucket of your own under `[tools.zdr_video_output_s3]` in
+`~/.grok/managed_config.toml` (docs.x.ai/build/settings/zdr-video-storage). We tried it on a
+personal account with a valid, internet-reachable bucket, in `managed_config.toml` (with
+`features.managed_config = false`, since console sync otherwise rewrites that file) and in
+`config.toml`. Grok 1.0.70 still refused within 0.4 s, so the refusal comes from the account side.
+Others report the same on one-person teams. A bucket only on your machine (a local MinIO) cannot
+work, because xAI uploads to it.
+</Aside>
+
+Toolnexus never edits your Grok settings.
 
 ## Error strings
 
-Every port produces these messages, byte for byte:
+Every port produces these, byte for byte (full list: SPEC §7G.2, §7G.3, §7G.5, §7G.10):
 
 | when | message |
 |---|---|
-| no style declares the verb | `media: no style supports "<verb>"` |
-| an arg the style doesn't map | `<verb>: argument "<key>" not supported by this style` (no request is made) |
-| non-2xx response | `HTTP <status>: <raw body>` |
-| body is not JSON | `<verb>: response is not JSON` |
-| error envelope tripped | `API error <code>: <message>` |
-| no job id | `<verb>: no job id at <idPath>` |
-| job failed | `job <id> <status>: <message>` (or `job <id> <status>` when there is no message) |
-| timeout | `job <id> timed out after <timeoutMs>ms` |
-| nothing at `resultPath` | `<verb>: no result at <resultPath>` |
+| no client supports the verb | `media: no client supports "<verb>"` |
+| an arg the client doesn't accept | `<verb>: argument "<key>" not supported by <client>` (style clients: `… by this style`) |
+| a required arg missing | `<verb>: argument "<key>" is required` |
+| the client is unavailable | `media: no client available for "<verb>": <client message>` |
+| no key | `<client>: no API key (set <ENV>)` |
+| non-2xx | `<client>: HTTP <status>: <body>` |
+| CLI not found | `<client>: cannot start "<command>"` |
+| CLI made no file | `<client>: no <verb> file in the run (exit code <n>)` |
+| file too big | `<verb>: file exceeds gather.maxBytes (<n> bytes)` |
 
-Transport failures (such as a refused connection) read `<verb>: <the port's own message>`. Cancellation
-raises the port's native cancellation error. In Python, `asyncio.CancelledError` always propagates.
+Cancellation raises the port's native cancellation error (in Python, `asyncio.CancelledError`
+always propagates).
+
+<Aside type="note" title="Clojure: binary bodies">
+The Clojure port's HTTP layer (koine) sends and receives bodies as UTF-8 text. Results that
+arrive as raw bytes (ElevenLabs and OpenAI speech, music, OpenAI video), downloaded files and
+uploaded inputs are therefore not byte-exact on Clojure yet. Base64, `data:` URL, URL-mode and
+CLI results are fine. This is pending a koine bytes mode.
+</Aside>
 
 ## Not yet
 
-These are tracked in `openspec/changes/add-media-generation`:
-
-- **Downloading result URLs.** a2e's URLs expire in **3–30 days** (images in about 3, audio in about 30).
-  Save them yourself if you need them later.
-- Uploading local files. Today inputs such as `image`, `audio` and `samples` are URLs.
-- ComfyUI workflow-graph injection.
-- Webhooks instead of polling.
-- Price quotes before a call.
-- Pausing a long job through `waitFor` (§10 suspension).
-- Streaming `file` events.
+- Unverified verbs (marked above) need one live call each; tracked in
+  `openspec/changes/add-media-clients` (task 4.3).
+- OpenRouter video/audio, Gemini direct, the Grok API, Seedance/Kling direct, Runway, ComfyUI.
+  Use a custom client.
+- A generic ACP client (spiked and dropped in ADR 0037).
+- Webhooks instead of polling, price quotes, pausing a long job through `waitFor`, streaming
+  `file` events.
 
 Realtime or live voice conversation is out of scope by design.
