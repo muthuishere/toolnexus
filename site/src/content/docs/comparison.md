@@ -17,7 +17,7 @@ description: >-
 > a managed runtime, or the fullest MCP server, one of the others is the better tool, and we say so
 > below.
 >
-> **This page is a July 2026 snapshot (toolnexus 0.19.0).** For the current picture — toolnexus 0.26.0,
+> **This page is a July 2026 snapshot (toolnexus 0.19.0).** For the current picture — the toolnexus 0.28.0 candidate,
 > eight ports, re-checked features and fresh benchmarks — see
 > [Where toolnexus stands — Nov 2026](/toolnexus/standing-2026-11/).
 

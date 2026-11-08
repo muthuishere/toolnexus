@@ -18,6 +18,14 @@ import SortableTables from '../../components/SortableTables.astro';
 > every competitor library re-resolved. Compare ratios *within* this table, not cells against the
 > old one. Frameworks move fast — re-run before quoting.
 
+<Aside type="note" title="Newer numbers: November 2026">
+The per-language tables below are the August 2026 sitting. The current numbers are the quiet
+2026-11-08 re-run of the 0.28.0 candidate (five interleaved rounds, load < 4) on the
+[Nov 2026 standing page](/toolnexus/standing-2026-11/). In that run toolnexus has the lowest
+per-request overhead over MCP in **Python, JavaScript, C# and Rust**, is **level with Eino in Go**, and is
+**still 5% behind LangChain4j on the JVM** (2.28 vs 2.17 ms p50) while starting faster than it.
+</Aside>
+
 ## TL;DR
 
 Every framework points at the **same local mock LLM** and the **same stdio MCP server**, running
@@ -25,7 +33,8 @@ one fixed tool-calling scenario (2 LLM round-trips + 2 tool calls). We measure o
 own per-request overhead — a real model call (100 ms–seconds) would swamp it. Across **39 framework
 configurations in 7 languages**:
 
-- **toolnexus has the lowest per-request overhead in Python, JavaScript, Go and Java**, and sits
+- **(August sitting; see the November note above for current numbers.)** toolnexus had the lowest
+  per-request overhead in Python, JavaScript, Go and Java, and sat
   within noise of the fastest in C# and Elixir — where a lighter *native-tool* competitor edges it
   by hundredths of a millisecond at the sub-millisecond floor, while toolnexus is doing **real MCP**.
 - **Go publishes a real MCP row for the first time.** The stdio-MCP bug that forced July's
@@ -265,28 +274,29 @@ p50 within 0.4 ms (JVM 5.1–5.5, cljgo 5.6–5.8).
 </Aside>
 </TabItem>
 <TabItem label="Rust">
-The Rust MCP client is **`rmcp`** (used by toolnexus, rig and swiftide). Measured in the Nov 2026
-run (`benchmarks/results-2026-11.json`: 30 runs after 5 warm-up, Apple M5 Pro, rustc 1.99.0,
-toolnexus 0.26.0), not the July runs above. AutoAgents has a runner (`benchmarks/run_autoagents/`)
-but no row in that run.
+Since the 0.28.0 candidate, toolnexus runs stdio MCP servers on **its own client** (rmcp stays for
+remote HTTP servers); rig and swiftide use **`rmcp`**. Measured in the quiet Nov 2026 re-run
+(`benchmarks/results-2026-11.json`, `run: "2026-11-08-quiet-0.28"`: median of five rounds, 25 runs after
+5 warm-up each, Apple M5 Pro, rustc 1.99.0, toolnexus `main` at `e5ef449a`), not the August runs above.
 
-#### Over MCP (`rmcp`)
+#### Over MCP
 
 | Framework | Init (ms) | p50 (ms) | p95 (ms) | mean (ms) | RSS (MB) | Tools | ok |
 |---|--:|--:|--:|--:|--:|--:|:-:|
-| **toolnexus** (+ skill + native) | 27.4 | 0.573 | 0.700 | 0.599 | **16.8** | 5 | ✅ |
-| **toolnexus** | 35.4 | **0.529** | **0.631** | **0.542** | **16.8** | 3 | ✅ |
-| rig | 21.9 | 0.584 | 0.725 | 0.602 | 23.0 | 3 | ✅ |
-| swiftide | **17.7** | 0.668 | 1.018 | 0.709 | 16.9 | 3 | ✅ |
+| **toolnexus** | 18.2 | **0.342** | **0.393** | 0.353 | 16.8 | 3 | ✅ |
+| **toolnexus** (+ skill + native) | **11.7** | 0.363 | 0.460 | 0.375 | 16.8 | 5 | ✅ |
+| AutoAgents | 19.0 | 0.368 | 0.436 | 0.371 | **13.2** | 3 | ✅ |
+| swiftide | 16.2 | 0.436 | 0.551 | 0.438 | 16.9 | 3 | ✅ |
+| rig | 21.7 | 0.437 | 0.511 | 0.433 | 23.0 | 3 | ✅ |
 
 #### Native tools
 
 | Framework | Init (ms) | p50 (ms) | p95 (ms) | mean (ms) | RSS (MB) | Tools | ok |
 |---|--:|--:|--:|--:|--:|--:|:-:|
-| **toolnexus** | 0.1 | 0.436 | 0.494 | 0.441 | 11.2 | 2 | ✅ |
+| **toolnexus** | 0.1 | 0.300 | 0.336 | 0.306 | 11.8 | 2 | ✅ |
 
-**Read this honestly:** toolnexus has the lowest per-run latency and footprint over MCP, but the
-slowest `Init` of the three (35.4 ms vs 21.9 ms for rig and 17.7 ms for swiftide). No Rust
+**Read this honestly:** toolnexus has the lowest per-run latency over MCP, 7% below AutoAgents, but
+AutoAgents uses less memory (13.2 vs 16.8 MB) and swiftide starts a little faster. No Rust
 competitor was measured with native tools.
 </TabItem>
 </Tabs>
@@ -350,8 +360,9 @@ competitor installs in its own isolated venv/module (toolnexus from the local re
 
 ## Verdict
 
-On pure **framework overhead** for a fixed MCP tool-calling scenario, toolnexus is the **lowest**
-in Python, JavaScript, Go and Java, and **within noise of the fastest** in C# and Elixir — where a
+In the **August** sitting, on pure **framework overhead** for a fixed MCP tool-calling scenario, toolnexus was the **lowest**
+in Python, JavaScript, Go and Java (the November re-run puts Java 5% behind LangChain4j and Go level with Eino; see the
+[standing page](/toolnexus/standing-2026-11/)), and **within noise of the fastest** in C# and Elixir — where a
 lighter native-tool competitor edges it by hundredths of a millisecond at a floor where a real
 model call is 100–1000× larger. What holds in **every** language: toolnexus does real MCP, carries
 the **smallest or near-smallest install footprint**, and never falls into the heavy tier (Spring

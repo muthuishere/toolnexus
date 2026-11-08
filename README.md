@@ -66,24 +66,26 @@ sent to the host it belongs to. A local server or proxy needs `apiKey` or `apiKe
 ## What you get
 
 - **MCP, 2026-07-28 and legacy** — client for stdio and streamable-HTTP servers, and a server:
-  expose your toolkit over MCP. Elicitation, OAuth and per-server readiness included. [MCP](https://muthuishere.github.io/toolnexus/mcp/)
+  expose your toolkit over MCP. Elicitation, OAuth and per-server readiness included; Rust runs stdio servers on its own client. [MCP](https://muthuishere.github.io/toolnexus/mcp/)
 - **Agent skills** — the open `SKILL.md` standard, loaded on demand through one `skill` tool. [Skills](https://muthuishere.github.io/toolnexus/skills/)
 - **Native, HTTP and built-in tools** — your functions, remote endpoints, shell/file tools. [Native](https://muthuishere.github.io/toolnexus/native/) · [HTTP](https://muthuishere.github.io/toolnexus/http/) · [Built-ins](https://muthuishere.github.io/toolnexus/builtins/)
 - **A2A** — call remote agents as tools, or serve your toolkit as one. [A2A](https://muthuishere.github.io/toolnexus/a2a/)
-- **ACP and the in-process client** — drive a local coding agent over ACP, or any function, as the client's model. [In-process client](https://muthuishere.github.io/toolnexus/in-process-client/)
-- **Typed decisions** — `createClassifier` and judge adapters: yes/no, pick-one and score answers as typed values. [Typed decisions](https://muthuishere.github.io/toolnexus/judge/)
+- **ACP and the in-process client** — drive a local coding agent over ACP, or any function, as the client's model; tool-call arguments stream as events, and `setMode` / `setModel` switch a running agent without a restart. [In-process client](https://muthuishere.github.io/toolnexus/in-process-client/)
+- **Typed decisions** — `createClassifier` and judge adapters: yes/no, pick-one and score answers as typed values, on any System One endpoint or OpenAI's Decisions API. [Typed decisions](https://muthuishere.github.io/toolnexus/judge/) · [Backends](https://muthuishere.github.io/toolnexus/judge/backends/)
 - **Media generation** — images, video and speech from a JSON style, as typed calls and as agent tools. [Media](https://muthuishere.github.io/toolnexus/media/)
 - **Human in the loop** — any tool can suspend on a `Request`; a `waitFor` host resolves it, or the run returns `pending` and resumes later. [Suspension](https://muthuishere.github.io/toolnexus/suspension/)
-- **The loop** — parallel and chained tool calls, hooks, streaming, memory, retries and resilience, prompt caching and tool tiers, sub-agents, observability. [Streaming](https://muthuishere.github.io/toolnexus/streaming/) · [Memory](https://muthuishere.github.io/toolnexus/memory/) · [Resilience](https://muthuishere.github.io/toolnexus/resilience/) · [Sub-agents](https://muthuishere.github.io/toolnexus/subagents/)
+- **The loop** — parallel and chained tool calls, hooks (including an `afterRound` hook), streaming with retry events, retries and resilience, opt-in model fallback on overload, stop-reason recovery, reactive compaction on context overflow, prompt caching and tool tiers, sub-agents, observability. [Streaming](https://muthuishere.github.io/toolnexus/streaming/) · [Resilience](https://muthuishere.github.io/toolnexus/resilience/) · [Sub-agents](https://muthuishere.github.io/toolnexus/subagents/)
+- **Memory** — a memory hierarchy for persona agents, with built-in dreaming: a pass that checks memory against the transcripts and fixes or prunes it. [Memory](https://muthuishere.github.io/toolnexus/memory/) · [Dreaming](https://muthuishere.github.io/toolnexus/dreaming/)
+- **Run without a model** — a key-free local mock server for every wire toolnexus speaks: chat, streaming, tool calls, classifiers, media and faults. [Mock server](https://muthuishere.github.io/toolnexus/cookbook/mock-server/)
 
 Exact per-port spellings and any port-specific gaps are in [`CHANGELOG.md`](CHANGELOG.md) and each
 port's API reference.
 
 ## Benchmarks
 
-Measured against 21 frameworks on a zero-cost mock model, per language. Honest summary: **fastest in
-some languages, level in some, behind in a couple** (Eino in Go, LangChain4j on the JVM, AutoAgents
-in Rust over MCP). Every row, loss included: [Nov 2026 standing](https://muthuishere.github.io/toolnexus/standing-2026-11/).
+Measured against 21 frameworks on a zero-cost mock model, per language. Honest summary: **lowest
+per-request overhead over MCP in Python, JavaScript, C# and Rust, level with Eino in Go, and still 5%
+behind LangChain4j on the JVM**. Every row, loss included: [Nov 2026 standing](https://muthuishere.github.io/toolnexus/standing-2026-11/).
 
 ## What it is not
 

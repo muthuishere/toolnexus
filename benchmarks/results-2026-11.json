@@ -2396,14 +2396,2328 @@
       "run": "2026-11-08-quiet",
       "versions": "langchain (brainlid) 0.15.8 \u00b7 req 0.7.5",
       "note": "run after the quiet window, 1-min load 5.1"
+    },
+    {
+      "name": "toolnexus-python-mcp",
+      "framework": "toolnexus-python-mcp",
+      "language": "python",
+      "init_ms": 19.9,
+      "tool_count": 3,
+      "mean_ms": 0.937,
+      "p50_ms": 0.924,
+      "p95_ms": 1.038,
+      "n": 25,
+      "final_ok": true,
+      "peak_rss_mb": 61.9,
+      "rounds": 5,
+      "p50_ms_per_round": [
+        1.017,
+        0.996,
+        0.913,
+        0.924,
+        0.894
+      ],
+      "init_ms_per_round": [
+        39.1,
+        19.9,
+        19.1,
+        21.4,
+        19.5
+      ],
+      "load1_at_start": [
+        3.57,
+        3.46,
+        3.53,
+        3.52,
+        3.36
+      ],
+      "run": "2026-11-08-quiet-0.28",
+      "versions": "toolnexus main @ e5ef449a (0.28.0 candidate)"
+    },
+    {
+      "name": "toolnexus-python-mcp@0.27.0",
+      "framework": "toolnexus-python-mcp@0.27.0",
+      "language": "python",
+      "init_ms": 21.9,
+      "tool_count": 3,
+      "mean_ms": 1.385,
+      "p50_ms": 1.378,
+      "p95_ms": 1.557,
+      "n": 25,
+      "final_ok": true,
+      "peak_rss_mb": 61.9,
+      "rounds": 5,
+      "p50_ms_per_round": [
+        1.378,
+        1.365,
+        1.417,
+        1.433,
+        1.24
+      ],
+      "init_ms_per_round": [
+        34.2,
+        20.5,
+        24.0,
+        21.9,
+        19.7
+      ],
+      "load1_at_start": [
+        3.45,
+        3.46,
+        3.41,
+        3.48,
+        3.36
+      ],
+      "run": "2026-11-08-quiet-0.28",
+      "versions": "toolnexus 0.27.0 (tag v0.27.0)",
+      "toolnexus_version": "0.27.0"
+    },
+    {
+      "name": "toolnexus-python-native",
+      "framework": "toolnexus-python-native",
+      "language": "python",
+      "init_ms": 0.1,
+      "tool_count": 2,
+      "mean_ms": 0.538,
+      "p50_ms": 0.533,
+      "p95_ms": 0.604,
+      "n": 25,
+      "final_ok": true,
+      "peak_rss_mb": 60.7,
+      "rounds": 5,
+      "p50_ms_per_round": [
+        0.533,
+        0.552,
+        0.52,
+        0.519,
+        0.533
+      ],
+      "init_ms_per_round": [
+        0.1,
+        0.1,
+        0.1,
+        0.1,
+        0.1
+      ],
+      "load1_at_start": [
+        3.45,
+        3.34,
+        3.41,
+        3.52,
+        3.41
+      ],
+      "run": "2026-11-08-quiet-0.28",
+      "versions": "toolnexus main @ e5ef449a (0.28.0 candidate)"
+    },
+    {
+      "name": "toolnexus-python-native@0.27.0",
+      "framework": "toolnexus-python-native@0.27.0",
+      "language": "python",
+      "init_ms": 0.1,
+      "tool_count": 2,
+      "mean_ms": 0.728,
+      "p50_ms": 0.727,
+      "p95_ms": 0.807,
+      "n": 25,
+      "final_ok": true,
+      "peak_rss_mb": 60.5,
+      "rounds": 5,
+      "p50_ms_per_round": [
+        0.727,
+        0.765,
+        0.69,
+        0.733,
+        0.698
+      ],
+      "init_ms_per_round": [
+        0.1,
+        0.1,
+        0.1,
+        0.1,
+        0.1
+      ],
+      "load1_at_start": [
+        3.45,
+        3.46,
+        3.41,
+        3.52,
+        3.41
+      ],
+      "run": "2026-11-08-quiet-0.28",
+      "versions": "toolnexus 0.27.0 (tag v0.27.0)",
+      "toolnexus_version": "0.27.0"
+    },
+    {
+      "name": "toolnexus-go-mcp",
+      "framework": "toolnexus-go-mcp",
+      "language": "go",
+      "init_ms": 13.8,
+      "tool_count": 3,
+      "mean_ms": 0.362,
+      "p50_ms": 0.367,
+      "p95_ms": 0.429,
+      "n": 25,
+      "final_ok": true,
+      "peak_rss_mb": 16.8,
+      "rounds": 5,
+      "p50_ms_per_round": [
+        0.41,
+        0.367,
+        0.342,
+        0.33,
+        0.376
+      ],
+      "init_ms_per_round": [
+        13.2,
+        15.6,
+        14.4,
+        13.8,
+        13.2
+      ],
+      "load1_at_start": [
+        3.45,
+        3.34,
+        3.41,
+        3.52,
+        3.41
+      ],
+      "run": "2026-11-08-quiet-0.28",
+      "versions": "toolnexus main @ e5ef449a (0.28.0 candidate)"
+    },
+    {
+      "name": "toolnexus-go-mcp@0.27.0",
+      "framework": "toolnexus-go-mcp@0.27.0",
+      "language": "go",
+      "init_ms": 13.4,
+      "tool_count": 3,
+      "mean_ms": 0.378,
+      "p50_ms": 0.37,
+      "p95_ms": 0.426,
+      "n": 25,
+      "final_ok": true,
+      "peak_rss_mb": 16.8,
+      "rounds": 5,
+      "p50_ms_per_round": [
+        0.396,
+        0.39,
+        0.309,
+        0.37,
+        0.332
+      ],
+      "init_ms_per_round": [
+        12.8,
+        13.8,
+        13.4,
+        13.4,
+        13.5
+      ],
+      "load1_at_start": [
+        3.45,
+        3.34,
+        3.41,
+        3.52,
+        3.41
+      ],
+      "run": "2026-11-08-quiet-0.28",
+      "versions": "toolnexus 0.27.0 (tag v0.27.0)",
+      "toolnexus_version": "0.27.0"
+    },
+    {
+      "name": "toolnexus-go-native",
+      "framework": "toolnexus-go-native",
+      "language": "go",
+      "init_ms": 0.0,
+      "tool_count": 2,
+      "mean_ms": 0.278,
+      "p50_ms": 0.274,
+      "p95_ms": 0.308,
+      "n": 25,
+      "final_ok": true,
+      "peak_rss_mb": 14.5,
+      "rounds": 5,
+      "p50_ms_per_round": [
+        0.289,
+        0.268,
+        0.276,
+        0.27,
+        0.274
+      ],
+      "init_ms_per_round": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "load1_at_start": [
+        3.45,
+        3.34,
+        3.41,
+        3.52,
+        3.41
+      ],
+      "run": "2026-11-08-quiet-0.28",
+      "versions": "toolnexus main @ e5ef449a (0.28.0 candidate)"
+    },
+    {
+      "name": "toolnexus-go-native@0.27.0",
+      "framework": "toolnexus-go-native@0.27.0",
+      "language": "go",
+      "init_ms": 0.0,
+      "tool_count": 2,
+      "mean_ms": 0.273,
+      "p50_ms": 0.272,
+      "p95_ms": 0.298,
+      "n": 25,
+      "final_ok": true,
+      "peak_rss_mb": 14.5,
+      "rounds": 5,
+      "p50_ms_per_round": [
+        0.272,
+        0.278,
+        0.269,
+        0.272,
+        0.268
+      ],
+      "init_ms_per_round": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "load1_at_start": [
+        3.45,
+        3.34,
+        3.41,
+        3.52,
+        3.41
+      ],
+      "run": "2026-11-08-quiet-0.28",
+      "versions": "toolnexus 0.27.0 (tag v0.27.0)",
+      "toolnexus_version": "0.27.0"
+    },
+    {
+      "name": "toolnexus-java-mcp",
+      "framework": "toolnexus-java-mcp",
+      "language": "java",
+      "init_ms": 195.3,
+      "tool_count": 3,
+      "mean_ms": 2.288,
+      "p50_ms": 2.282,
+      "p95_ms": 2.803,
+      "n": 25,
+      "final_ok": true,
+      "peak_rss_mb": 153.2,
+      "rounds": 5,
+      "p50_ms_per_round": [
+        2.307,
+        2.282,
+        2.122,
+        2.159,
+        2.305
+      ],
+      "init_ms_per_round": [
+        215.2,
+        195.3,
+        195.9,
+        190.7,
+        190.0
+      ],
+      "load1_at_start": [
+        3.45,
+        3.34,
+        3.41,
+        3.52,
+        3.41
+      ],
+      "run": "2026-11-08-quiet-0.28",
+      "versions": "toolnexus main @ e5ef449a (0.28.0 candidate)"
+    },
+    {
+      "name": "toolnexus-java-mcp@0.27.0",
+      "framework": "toolnexus-java-mcp@0.27.0",
+      "language": "java",
+      "init_ms": 361.2,
+      "tool_count": 3,
+      "mean_ms": 2.461,
+      "p50_ms": 2.437,
+      "p95_ms": 2.927,
+      "n": 25,
+      "final_ok": true,
+      "peak_rss_mb": 165.8,
+      "rounds": 5,
+      "p50_ms_per_round": [
+        2.501,
+        2.585,
+        2.437,
+        2.423,
+        2.419
+      ],
+      "init_ms_per_round": [
+        373.6,
+        375.9,
+        354.2,
+        361.2,
+        356.1
+      ],
+      "load1_at_start": [
+        3.41,
+        3.34,
+        3.41,
+        3.52,
+        3.41
+      ],
+      "run": "2026-11-08-quiet-0.28",
+      "versions": "toolnexus 0.27.0 (tag v0.27.0)",
+      "toolnexus_version": "0.27.0"
+    },
+    {
+      "name": "toolnexus-java-native",
+      "framework": "toolnexus-java-native",
+      "language": "java",
+      "init_ms": 24.0,
+      "tool_count": 2,
+      "mean_ms": 1.524,
+      "p50_ms": 1.496,
+      "p95_ms": 1.975,
+      "n": 25,
+      "final_ok": true,
+      "peak_rss_mb": 118.5,
+      "rounds": 5,
+      "p50_ms_per_round": [
+        1.531,
+        1.549,
+        1.496,
+        1.465,
+        1.496
+      ],
+      "init_ms_per_round": [
+        24.7,
+        24.5,
+        23.9,
+        24.0,
+        23.8
+      ],
+      "load1_at_start": [
+        3.41,
+        3.34,
+        3.41,
+        3.52,
+        3.41
+      ],
+      "run": "2026-11-08-quiet-0.28",
+      "versions": "toolnexus main @ e5ef449a (0.28.0 candidate)"
+    },
+    {
+      "name": "toolnexus-java-native@0.27.0",
+      "framework": "toolnexus-java-native@0.27.0",
+      "language": "java",
+      "init_ms": 100.5,
+      "tool_count": 2,
+      "mean_ms": 1.614,
+      "p50_ms": 1.609,
+      "p95_ms": 2.122,
+      "n": 25,
+      "final_ok": true,
+      "peak_rss_mb": 116.3,
+      "rounds": 5,
+      "p50_ms_per_round": [
+        1.634,
+        1.78,
+        1.609,
+        1.558,
+        1.581
+      ],
+      "init_ms_per_round": [
+        109.3,
+        109.8,
+        97.0,
+        98.1,
+        100.5
+      ],
+      "load1_at_start": [
+        3.41,
+        3.34,
+        3.41,
+        3.52,
+        3.41
+      ],
+      "run": "2026-11-08-quiet-0.28",
+      "versions": "toolnexus 0.27.0 (tag v0.27.0)",
+      "toolnexus_version": "0.27.0"
+    },
+    {
+      "name": "toolnexus-csharp-mcp",
+      "framework": "toolnexus-csharp-mcp",
+      "language": "csharp",
+      "init_ms": 61.2,
+      "tool_count": 3,
+      "mean_ms": 0.569,
+      "p50_ms": 0.55,
+      "p95_ms": 0.635,
+      "n": 25,
+      "final_ok": true,
+      "peak_rss_mb": 75.1,
+      "rounds": 5,
+      "p50_ms_per_round": [
+        0.616,
+        0.547,
+        0.515,
+        0.565,
+        0.55
+      ],
+      "init_ms_per_round": [
+        77.6,
+        58.0,
+        61.2,
+        59.1,
+        67.3
+      ],
+      "load1_at_start": [
+        3.41,
+        3.34,
+        3.41,
+        3.52,
+        3.41
+      ],
+      "run": "2026-11-08-quiet-0.28",
+      "versions": "toolnexus main @ e5ef449a (0.28.0 candidate)"
+    },
+    {
+      "name": "toolnexus-csharp-mcp@0.27.0",
+      "framework": "toolnexus-csharp-mcp@0.27.0",
+      "language": "csharp",
+      "init_ms": 89.0,
+      "tool_count": 3,
+      "mean_ms": 0.566,
+      "p50_ms": 0.558,
+      "p95_ms": 0.671,
+      "n": 25,
+      "final_ok": true,
+      "peak_rss_mb": 73.9,
+      "rounds": 5,
+      "p50_ms_per_round": [
+        0.558,
+        0.576,
+        0.558,
+        0.546,
+        0.546
+      ],
+      "init_ms_per_round": [
+        91.7,
+        108.6,
+        85.0,
+        89.0,
+        87.4
+      ],
+      "load1_at_start": [
+        3.41,
+        3.34,
+        3.41,
+        3.52,
+        3.41
+      ],
+      "run": "2026-11-08-quiet-0.28",
+      "versions": "toolnexus 0.27.0 (tag v0.27.0)",
+      "toolnexus_version": "0.27.0"
+    },
+    {
+      "name": "toolnexus-csharp-native",
+      "framework": "toolnexus-csharp-native",
+      "language": "csharp",
+      "init_ms": 12.2,
+      "tool_count": 2,
+      "mean_ms": 0.388,
+      "p50_ms": 0.379,
+      "p95_ms": 0.445,
+      "n": 25,
+      "final_ok": true,
+      "peak_rss_mb": 63.1,
+      "rounds": 5,
+      "p50_ms_per_round": [
+        0.416,
+        0.378,
+        0.379,
+        0.379,
+        0.349
+      ],
+      "init_ms_per_round": [
+        12.9,
+        12.2,
+        10.8,
+        10.8,
+        16.2
+      ],
+      "load1_at_start": [
+        3.41,
+        3.34,
+        3.41,
+        3.52,
+        3.41
+      ],
+      "run": "2026-11-08-quiet-0.28",
+      "versions": "toolnexus main @ e5ef449a (0.28.0 candidate)"
+    },
+    {
+      "name": "toolnexus-csharp-native@0.27.0",
+      "framework": "toolnexus-csharp-native@0.27.0",
+      "language": "csharp",
+      "init_ms": 10.8,
+      "tool_count": 2,
+      "mean_ms": 0.414,
+      "p50_ms": 0.414,
+      "p95_ms": 0.488,
+      "n": 25,
+      "final_ok": true,
+      "peak_rss_mb": 62.5,
+      "rounds": 5,
+      "p50_ms_per_round": [
+        0.427,
+        0.404,
+        0.414,
+        0.414,
+        0.401
+      ],
+      "init_ms_per_round": [
+        13.4,
+        12.6,
+        10.6,
+        10.8,
+        10.8
+      ],
+      "load1_at_start": [
+        3.41,
+        3.34,
+        3.41,
+        3.52,
+        3.41
+      ],
+      "run": "2026-11-08-quiet-0.28",
+      "versions": "toolnexus 0.27.0 (tag v0.27.0)",
+      "toolnexus_version": "0.27.0"
+    },
+    {
+      "name": "toolnexus-js-mcp",
+      "framework": "toolnexus-js-mcp",
+      "language": "js",
+      "init_ms": 17.9,
+      "tool_count": 3,
+      "mean_ms": 3.39,
+      "p50_ms": 3.4,
+      "p95_ms": 3.6,
+      "n": 25,
+      "final_ok": true,
+      "peak_rss_mb": 126.5,
+      "rounds": 5,
+      "p50_ms_per_round": [
+        3.4,
+        3.34,
+        3.41,
+        3.38,
+        3.44
+      ],
+      "init_ms_per_round": [
+        17.9,
+        17.5,
+        17.4,
+        20.4,
+        19.4
+      ],
+      "load1_at_start": [
+        3.41,
+        3.34,
+        3.41,
+        3.52,
+        3.41
+      ],
+      "run": "2026-11-08-quiet-0.28",
+      "versions": "toolnexus main @ e5ef449a (0.28.0 candidate)"
+    },
+    {
+      "name": "toolnexus-js-mcp@0.27.0",
+      "framework": "toolnexus-js-mcp@0.27.0",
+      "language": "js",
+      "init_ms": 19.1,
+      "tool_count": 3,
+      "mean_ms": 3.31,
+      "p50_ms": 3.43,
+      "p95_ms": 3.6,
+      "n": 25,
+      "final_ok": true,
+      "peak_rss_mb": 125.5,
+      "rounds": 5,
+      "p50_ms_per_round": [
+        3.5,
+        3.37,
+        3.45,
+        3.43,
+        3.37
+      ],
+      "init_ms_per_round": [
+        21.0,
+        19.2,
+        18.4,
+        18.5,
+        19.1
+      ],
+      "load1_at_start": [
+        3.41,
+        3.34,
+        3.41,
+        3.52,
+        3.41
+      ],
+      "run": "2026-11-08-quiet-0.28",
+      "versions": "toolnexus 0.27.0 (tag v0.27.0)",
+      "toolnexus_version": "0.27.0"
+    },
+    {
+      "name": "toolnexus-js-native",
+      "framework": "toolnexus-js-native",
+      "language": "js",
+      "init_ms": 0.2,
+      "tool_count": 2,
+      "mean_ms": 3.19,
+      "p50_ms": 3.27,
+      "p95_ms": 3.4,
+      "n": 25,
+      "final_ok": true,
+      "peak_rss_mb": 124.8,
+      "rounds": 5,
+      "p50_ms_per_round": [
+        3.18,
+        3.2,
+        3.31,
+        3.27,
+        3.28
+      ],
+      "init_ms_per_round": [
+        0.2,
+        0.2,
+        0.2,
+        0.2,
+        0.2
+      ],
+      "load1_at_start": [
+        3.41,
+        3.34,
+        3.14,
+        3.32,
+        3.41
+      ],
+      "run": "2026-11-08-quiet-0.28",
+      "versions": "toolnexus main @ e5ef449a (0.28.0 candidate)"
+    },
+    {
+      "name": "toolnexus-js-native@0.27.0",
+      "framework": "toolnexus-js-native@0.27.0",
+      "language": "js",
+      "init_ms": 0.2,
+      "tool_count": 2,
+      "mean_ms": 3.15,
+      "p50_ms": 3.28,
+      "p95_ms": 3.47,
+      "n": 25,
+      "final_ok": true,
+      "peak_rss_mb": 124.0,
+      "rounds": 5,
+      "p50_ms_per_round": [
+        3.23,
+        3.18,
+        3.28,
+        3.29,
+        3.32
+      ],
+      "init_ms_per_round": [
+        0.2,
+        0.2,
+        0.2,
+        0.2,
+        0.2
+      ],
+      "load1_at_start": [
+        3.41,
+        3.34,
+        3.14,
+        3.52,
+        3.14
+      ],
+      "run": "2026-11-08-quiet-0.28",
+      "versions": "toolnexus 0.27.0 (tag v0.27.0)",
+      "toolnexus_version": "0.27.0"
+    },
+    {
+      "name": "toolnexus-rust-mcp",
+      "framework": "toolnexus-rust-mcp",
+      "language": "rust",
+      "init_ms": 18.2,
+      "tool_count": 3,
+      "mean_ms": 0.354,
+      "p50_ms": 0.342,
+      "p95_ms": 0.393,
+      "n": 25,
+      "final_ok": true,
+      "peak_rss_mb": 16.8,
+      "rounds": 5,
+      "p50_ms_per_round": [
+        0.366,
+        0.342,
+        0.334,
+        0.298,
+        0.349
+      ],
+      "init_ms_per_round": [
+        13.2,
+        18.2,
+        18.6,
+        16.8,
+        18.4
+      ],
+      "load1_at_start": [
+        3.41,
+        3.32,
+        3.14,
+        3.32,
+        3.14
+      ],
+      "run": "2026-11-08-quiet-0.28",
+      "versions": "toolnexus main @ e5ef449a (0.28.0 candidate)"
+    },
+    {
+      "name": "toolnexus-rust-mcp@0.27.0",
+      "framework": "toolnexus-rust-mcp@0.27.0",
+      "language": "rust",
+      "init_ms": 21.1,
+      "tool_count": 3,
+      "mean_ms": 0.38,
+      "p50_ms": 0.376,
+      "p95_ms": 0.426,
+      "n": 25,
+      "final_ok": true,
+      "peak_rss_mb": 16.6,
+      "rounds": 5,
+      "p50_ms_per_round": [
+        0.452,
+        0.393,
+        0.376,
+        0.369,
+        0.363
+      ],
+      "init_ms_per_round": [
+        14.7,
+        23.0,
+        21.1,
+        21.4,
+        19.7
+      ],
+      "load1_at_start": [
+        3.38,
+        3.32,
+        3.14,
+        3.32,
+        3.14
+      ],
+      "run": "2026-11-08-quiet-0.28",
+      "versions": "toolnexus 0.27.0 (tag v0.27.0)",
+      "toolnexus_version": "0.27.0"
+    },
+    {
+      "name": "toolnexus-rust-native",
+      "framework": "toolnexus-rust-native",
+      "language": "rust",
+      "init_ms": 0.1,
+      "tool_count": 2,
+      "mean_ms": 0.306,
+      "p50_ms": 0.3,
+      "p95_ms": 0.336,
+      "n": 25,
+      "final_ok": true,
+      "peak_rss_mb": 11.8,
+      "rounds": 5,
+      "p50_ms_per_round": [
+        0.307,
+        0.308,
+        0.3,
+        0.277,
+        0.292
+      ],
+      "init_ms_per_round": [
+        0.1,
+        0.1,
+        0.1,
+        0.1,
+        0.1
+      ],
+      "load1_at_start": [
+        3.38,
+        3.32,
+        3.14,
+        3.32,
+        3.14
+      ],
+      "run": "2026-11-08-quiet-0.28",
+      "versions": "toolnexus main @ e5ef449a (0.28.0 candidate)"
+    },
+    {
+      "name": "toolnexus-rust-native@0.27.0",
+      "framework": "toolnexus-rust-native@0.27.0",
+      "language": "rust",
+      "init_ms": 0.1,
+      "tool_count": 2,
+      "mean_ms": 0.3,
+      "p50_ms": 0.295,
+      "p95_ms": 0.334,
+      "n": 25,
+      "final_ok": true,
+      "peak_rss_mb": 11.2,
+      "rounds": 5,
+      "p50_ms_per_round": [
+        0.31,
+        0.295,
+        0.298,
+        0.291,
+        0.287
+      ],
+      "init_ms_per_round": [
+        0.1,
+        0.1,
+        0.1,
+        0.1,
+        0.1
+      ],
+      "load1_at_start": [
+        3.38,
+        3.32,
+        3.14,
+        3.32,
+        3.14
+      ],
+      "run": "2026-11-08-quiet-0.28",
+      "versions": "toolnexus 0.27.0 (tag v0.27.0)",
+      "toolnexus_version": "0.27.0"
+    },
+    {
+      "name": "langgraph-default",
+      "framework": "langgraph-python-default",
+      "language": "python",
+      "init_ms": 61.2,
+      "tool_count": 3,
+      "mean_ms": 23.505,
+      "p50_ms": 23.406,
+      "p95_ms": 24.655,
+      "n": 25,
+      "final_ok": true,
+      "peak_rss_mb": 113.7,
+      "rounds": 5,
+      "p50_ms_per_round": [
+        24.997,
+        24.817,
+        23.001,
+        23.406,
+        23.179
+      ],
+      "init_ms_per_round": [
+        74.9,
+        62.4,
+        61.2,
+        53.7,
+        54.4
+      ],
+      "load1_at_start": [
+        3.38,
+        3.32,
+        3.14,
+        3.32,
+        3.14
+      ],
+      "run": "2026-11-08-quiet-0.28",
+      "versions": "langgraph 1.2.20 \u00b7 langchain-mcp-adapters 0.3.2 \u00b7 langchain-openai 1.7.4"
+    },
+    {
+      "name": "langgraph-session",
+      "framework": "langgraph-python-session",
+      "language": "python",
+      "init_ms": 38.5,
+      "tool_count": 3,
+      "mean_ms": 4.955,
+      "p50_ms": 4.949,
+      "p95_ms": 5.242,
+      "n": 25,
+      "final_ok": true,
+      "peak_rss_mb": 114.1,
+      "rounds": 5,
+      "p50_ms_per_round": [
+        5.273,
+        5.486,
+        4.896,
+        4.949,
+        4.852
+      ],
+      "init_ms_per_round": [
+        44.2,
+        41.5,
+        38.2,
+        38.5,
+        38.3
+      ],
+      "load1_at_start": [
+        3.38,
+        3.32,
+        3.14,
+        3.32,
+        3.14
+      ],
+      "run": "2026-11-08-quiet-0.28",
+      "versions": "langgraph 1.2.20 \u00b7 langchain-mcp-adapters 0.3.2 \u00b7 langchain-openai 1.7.4"
+    },
+    {
+      "name": "google-adk",
+      "framework": "google-adk-python",
+      "language": "python",
+      "init_ms": 24.5,
+      "tool_count": 3,
+      "mean_ms": 6.201,
+      "p50_ms": 6.172,
+      "p95_ms": 7.009,
+      "n": 25,
+      "final_ok": true,
+      "peak_rss_mb": 300.9,
+      "rounds": 5,
+      "p50_ms_per_round": [
+        6.759,
+        6.613,
+        6.172,
+        6.158,
+        6.169
+      ],
+      "init_ms_per_round": [
+        24.5,
+        26.3,
+        26.1,
+        23.0,
+        24.3
+      ],
+      "load1_at_start": [
+        3.38,
+        3.32,
+        3.14,
+        3.32,
+        3.14
+      ],
+      "run": "2026-11-08-quiet-0.28",
+      "versions": "google-adk 2.14.0 \u00b7 litellm 1.108.2 \u00b7 mcp 2.3.0"
+    },
+    {
+      "name": "crewai",
+      "framework": "crewai-python",
+      "language": "python",
+      "init_ms": 49.7,
+      "tool_count": 3,
+      "mean_ms": 10.619,
+      "p50_ms": 10.288,
+      "p95_ms": 12.238,
+      "n": 25,
+      "final_ok": true,
+      "peak_rss_mb": 249.1,
+      "rounds": 5,
+      "p50_ms_per_round": [
+        11.603,
+        10.292,
+        10.268,
+        10.194,
+        10.288
+      ],
+      "init_ms_per_round": [
+        51.4,
+        48.6,
+        49.7,
+        82.7,
+        48.5
+      ],
+      "load1_at_start": [
+        3.27,
+        3.29,
+        3.12,
+        3.14,
+        3.52
+      ],
+      "run": "2026-11-08-quiet-0.28",
+      "versions": "crewai 1.15.37 \u00b7 crewai-tools[mcp] 1.15.37 \u00b7 mcpadapt 0.1.19"
+    },
+    {
+      "name": "pydantic-ai",
+      "framework": "pydantic-ai-python",
+      "language": "python",
+      "init_ms": 37.6,
+      "tool_count": 3,
+      "mean_ms": 5.767,
+      "p50_ms": 4.721,
+      "p95_ms": 5.122,
+      "n": 25,
+      "final_ok": true,
+      "peak_rss_mb": 127.6,
+      "rounds": 5,
+      "p50_ms_per_round": [
+        5.505,
+        5.143,
+        4.608,
+        4.653,
+        4.721
+      ],
+      "init_ms_per_round": [
+        43.4,
+        37.9,
+        37.0,
+        37.6,
+        37.0
+      ],
+      "load1_at_start": [
+        3.27,
+        3.29,
+        3.12,
+        3.14,
+        3.52
+      ],
+      "run": "2026-11-08-quiet-0.28",
+      "versions": "pydantic-ai-slim 2.66.0 \u00b7 mcp 2.3.0"
+    },
+    {
+      "name": "openai-agents",
+      "framework": "openai-agents-python",
+      "language": "python",
+      "init_ms": 20.3,
+      "tool_count": 3,
+      "mean_ms": 4.598,
+      "p50_ms": 4.547,
+      "p95_ms": 5.08,
+      "n": 25,
+      "final_ok": true,
+      "peak_rss_mb": 102.5,
+      "rounds": 5,
+      "p50_ms_per_round": [
+        5.204,
+        4.466,
+        4.356,
+        4.584,
+        4.547
+      ],
+      "init_ms_per_round": [
+        21.3,
+        20.8,
+        19.2,
+        20.3,
+        20.0
+      ],
+      "load1_at_start": [
+        3.17,
+        3.29,
+        3.12,
+        3.14,
+        3.52
+      ],
+      "run": "2026-11-08-quiet-0.28",
+      "versions": "openai-agents 0.24.0 \u00b7 mcp 2.3.0"
+    },
+    {
+      "name": "agno",
+      "framework": "agno",
+      "language": "python",
+      "init_ms": 177.7,
+      "tool_count": 3,
+      "mean_ms": 2.835,
+      "p50_ms": 2.847,
+      "p95_ms": 3.037,
+      "n": 25,
+      "final_ok": true,
+      "peak_rss_mb": 116.2,
+      "rounds": 5,
+      "p50_ms_per_round": [
+        3.308,
+        2.909,
+        2.847,
+        2.779,
+        2.74
+      ],
+      "init_ms_per_round": [
+        213.1,
+        191.5,
+        176.7,
+        177.7,
+        172.7
+      ],
+      "load1_at_start": [
+        3.17,
+        3.29,
+        3.12,
+        3.14,
+        3.52
+      ],
+      "run": "2026-11-08-quiet-0.28",
+      "versions": "agno 3.1.12 \u00b7 fastmcp 4.1.6 \u00b7 mcp 2.3.0"
+    },
+    {
+      "name": "smolagents",
+      "framework": "smolagents",
+      "language": "python",
+      "init_ms": 169.2,
+      "tool_count": 3,
+      "mean_ms": 3.159,
+      "p50_ms": 3.137,
+      "p95_ms": 3.31,
+      "n": 25,
+      "final_ok": true,
+      "peak_rss_mb": 99.0,
+      "rounds": 5,
+      "p50_ms_per_round": [
+        3.752,
+        3.112,
+        3.148,
+        3.125,
+        3.137
+      ],
+      "init_ms_per_round": [
+        193.0,
+        169.2,
+        163.3,
+        170.8,
+        163.9
+      ],
+      "load1_at_start": [
+        3.17,
+        3.11,
+        2.95,
+        2.96,
+        3.48
+      ],
+      "run": "2026-11-08-quiet-0.28",
+      "versions": "smolagents 1.26.0"
+    },
+    {
+      "name": "ms-agent-framework-py",
+      "framework": "ms-agent-framework",
+      "language": "python",
+      "init_ms": 209.0,
+      "tool_count": 3,
+      "mean_ms": 2.452,
+      "p50_ms": 2.423,
+      "p95_ms": 2.704,
+      "n": 25,
+      "final_ok": true,
+      "peak_rss_mb": 90.2,
+      "rounds": 5,
+      "p50_ms_per_round": [
+        2.817,
+        2.423,
+        2.382,
+        2.37,
+        2.477
+      ],
+      "init_ms_per_round": [
+        230.6,
+        208.5,
+        201.8,
+        212.5,
+        209.0
+      ],
+      "load1_at_start": [
+        3.17,
+        3.11,
+        2.95,
+        2.96,
+        3.48
+      ],
+      "run": "2026-11-08-quiet-0.28",
+      "versions": "agent-framework-core 1.24.0 \u00b7 agent-framework-openai 1.18.0"
+    },
+    {
+      "name": "spring-ai-java",
+      "framework": "spring-ai-java",
+      "language": "java",
+      "init_ms": 1223.6,
+      "tool_count": 3,
+      "mean_ms": 3.35,
+      "p50_ms": 3.299,
+      "p95_ms": 4.789,
+      "n": 25,
+      "final_ok": true,
+      "peak_rss_mb": 567.2,
+      "rounds": 5,
+      "p50_ms_per_round": [
+        3.637,
+        3.11,
+        4.474,
+        3.292,
+        3.299
+      ],
+      "init_ms_per_round": [
+        1246.4,
+        1188.9,
+        1223.6,
+        1252.2,
+        1169.0
+      ],
+      "load1_at_start": [
+        3.17,
+        3.11,
+        2.95,
+        2.96,
+        3.48
+      ],
+      "run": "2026-11-08-quiet-0.28",
+      "versions": "Spring AI 2.0.2 \u00b7 Spring Boot 4.1.2 \u00b7 MCP Java SDK 2.1.0"
+    },
+    {
+      "name": "spring-ai-java-skills",
+      "framework": "spring-ai-java-skills",
+      "language": "java",
+      "init_ms": 1083.5,
+      "tool_count": 4,
+      "mean_ms": 3.456,
+      "p50_ms": 3.343,
+      "p95_ms": 5.01,
+      "n": 25,
+      "final_ok": true,
+      "peak_rss_mb": 579.7,
+      "rounds": 5,
+      "p50_ms_per_round": [
+        3.417,
+        3.287,
+        3.343,
+        3.639,
+        3.325
+      ],
+      "init_ms_per_round": [
+        1133.1,
+        1062.3,
+        1083.5,
+        1099.5,
+        1048.9
+      ],
+      "load1_at_start": [
+        3.63,
+        3.11,
+        2.95,
+        2.96,
+        3.48
+      ],
+      "run": "2026-11-08-quiet-0.28",
+      "versions": "Spring AI 2.0.2 \u00b7 Spring Boot 4.1.2 \u00b7 MCP Java SDK 2.1.0 \u00b7 spring-ai-agent-utils 0.13.0 (SkillsTool)"
+    },
+    {
+      "name": "langchain4j-mcp",
+      "framework": "langchain4j-mcp",
+      "language": "java",
+      "init_ms": 253.8,
+      "tool_count": 3,
+      "mean_ms": 2.205,
+      "p50_ms": 2.172,
+      "p95_ms": 2.801,
+      "n": 25,
+      "final_ok": true,
+      "peak_rss_mb": 139.6,
+      "rounds": 5,
+      "p50_ms_per_round": [
+        2.218,
+        2.128,
+        2.125,
+        2.206,
+        2.172
+      ],
+      "init_ms_per_round": [
+        260.6,
+        241.9,
+        251.9,
+        253.8,
+        295.8
+      ],
+      "load1_at_start": [
+        3.63,
+        3.58,
+        3.44,
+        3.13,
+        3.42
+      ],
+      "run": "2026-11-08-quiet-0.28",
+      "versions": "langchain4j 1.23.0 \u00b7 langchain4j-mcp 1.23.0-beta33"
+    },
+    {
+      "name": "semantic-kernel",
+      "framework": "semantic-kernel-native",
+      "language": "csharp",
+      "init_ms": 49.8,
+      "tool_count": 2,
+      "mean_ms": 0.467,
+      "p50_ms": 0.458,
+      "p95_ms": 0.582,
+      "n": 25,
+      "final_ok": true,
+      "peak_rss_mb": 76.6,
+      "rounds": 5,
+      "p50_ms_per_round": [
+        0.475,
+        0.458,
+        0.415,
+        0.46,
+        0.458
+      ],
+      "init_ms_per_round": [
+        60.8,
+        51.6,
+        49.6,
+        49.8,
+        47.2
+      ],
+      "load1_at_start": [
+        3.63,
+        3.58,
+        3.44,
+        3.13,
+        3.42
+      ],
+      "run": "2026-11-08-quiet-0.28",
+      "versions": "Microsoft.SemanticKernel 1.82.0"
+    },
+    {
+      "name": "ms-extensions-ai",
+      "framework": "ms-extensions-ai-native",
+      "language": "csharp",
+      "init_ms": 29.9,
+      "tool_count": 2,
+      "mean_ms": 0.501,
+      "p50_ms": 0.488,
+      "p95_ms": 0.584,
+      "n": 25,
+      "final_ok": true,
+      "peak_rss_mb": 74.7,
+      "rounds": 5,
+      "p50_ms_per_round": [
+        0.502,
+        0.469,
+        0.46,
+        0.495,
+        0.488
+      ],
+      "init_ms_per_round": [
+        33.3,
+        32.1,
+        29.8,
+        29.9,
+        29.3
+      ],
+      "load1_at_start": [
+        3.63,
+        3.58,
+        3.44,
+        3.13,
+        3.42
+      ],
+      "run": "2026-11-08-quiet-0.28",
+      "versions": "Microsoft.Extensions.AI 10.11.0 \u00b7 .OpenAI 10.11.0"
+    },
+    {
+      "name": "vercel-ai-mcp",
+      "framework": "vercel-ai-mcp",
+      "language": "js",
+      "init_ms": 16.6,
+      "tool_count": 3,
+      "mean_ms": 3.6,
+      "p50_ms": 3.61,
+      "p95_ms": 3.86,
+      "n": 25,
+      "final_ok": true,
+      "peak_rss_mb": 126.5,
+      "rounds": 5,
+      "p50_ms_per_round": [
+        3.6,
+        3.72,
+        3.69,
+        3.61,
+        3.58
+      ],
+      "init_ms_per_round": [
+        17.6,
+        16.1,
+        18.0,
+        16.6,
+        16.3
+      ],
+      "load1_at_start": [
+        3.5,
+        3.58,
+        3.44,
+        3.13,
+        3.42
+      ],
+      "run": "2026-11-08-quiet-0.28",
+      "versions": "ai 7.0.164 \u00b7 @ai-sdk/openai 4.0.110 \u00b7 @ai-sdk/mcp 2.0.92"
+    },
+    {
+      "name": "vercel-ai-native",
+      "framework": "vercel-ai-native",
+      "language": "js",
+      "init_ms": 0.1,
+      "tool_count": 2,
+      "mean_ms": 3.49,
+      "p50_ms": 3.53,
+      "p95_ms": 3.82,
+      "n": 25,
+      "final_ok": true,
+      "peak_rss_mb": 125.9,
+      "rounds": 5,
+      "p50_ms_per_round": [
+        3.52,
+        3.57,
+        3.51,
+        3.65,
+        3.53
+      ],
+      "init_ms_per_round": [
+        0.1,
+        0.1,
+        0.2,
+        0.1,
+        0.1
+      ],
+      "load1_at_start": [
+        3.5,
+        3.58,
+        3.44,
+        3.13,
+        3.42
+      ],
+      "run": "2026-11-08-quiet-0.28",
+      "versions": "ai 7.0.164 \u00b7 @ai-sdk/openai 4.0.110 \u00b7 @ai-sdk/mcp 2.0.92"
+    },
+    {
+      "name": "langchainjs-mcp",
+      "framework": "langchainjs-mcp",
+      "language": "js",
+      "init_ms": 34.4,
+      "tool_count": 3,
+      "mean_ms": 5.13,
+      "p50_ms": 5.15,
+      "p95_ms": 5.45,
+      "n": 25,
+      "final_ok": true,
+      "peak_rss_mb": 248.7,
+      "rounds": 5,
+      "p50_ms_per_round": [
+        5.15,
+        5.05,
+        5.16,
+        5.03,
+        5.15
+      ],
+      "init_ms_per_round": [
+        36.3,
+        35,
+        33.1,
+        34.4,
+        34.3
+      ],
+      "load1_at_start": [
+        3.5,
+        3.58,
+        3.44,
+        3.13,
+        3.42
+      ],
+      "run": "2026-11-08-quiet-0.28",
+      "versions": "langchain 1.6.3 \u00b7 @langchain/core 1.3.5 \u00b7 @langchain/mcp-adapters 2.0.2"
+    },
+    {
+      "name": "langchainjs-native",
+      "framework": "langchainjs-native",
+      "language": "js",
+      "init_ms": 2.2,
+      "tool_count": 2,
+      "mean_ms": 4.87,
+      "p50_ms": 4.94,
+      "p95_ms": 5.32,
+      "n": 25,
+      "final_ok": true,
+      "peak_rss_mb": 246.0,
+      "rounds": 5,
+      "p50_ms_per_round": [
+        4.82,
+        4.98,
+        4.94,
+        5.01,
+        4.93
+      ],
+      "init_ms_per_round": [
+        2.5,
+        2.0,
+        2.2,
+        2.1,
+        2.2
+      ],
+      "load1_at_start": [
+        3.5,
+        3.58,
+        3.44,
+        3.13,
+        3.42
+      ],
+      "run": "2026-11-08-quiet-0.28",
+      "versions": "langchain 1.6.3 \u00b7 @langchain/core 1.3.5 \u00b7 @langchain/mcp-adapters 2.0.2"
+    },
+    {
+      "name": "mastra-mcp",
+      "framework": "mastra-mcp",
+      "language": "js",
+      "init_ms": 33.8,
+      "tool_count": 3,
+      "mean_ms": 5.97,
+      "p50_ms": 5.85,
+      "p95_ms": 7.03,
+      "n": 25,
+      "final_ok": true,
+      "peak_rss_mb": 251.7,
+      "rounds": 5,
+      "p50_ms_per_round": [
+        5.92,
+        5.79,
+        5.59,
+        5.85,
+        5.99
+      ],
+      "init_ms_per_round": [
+        35.5,
+        33.6,
+        31.7,
+        33.8,
+        35.7
+      ],
+      "load1_at_start": [
+        3.5,
+        3.58,
+        3.44,
+        3.13,
+        3.42
+      ],
+      "run": "2026-11-08-quiet-0.28",
+      "versions": "@mastra/core 1.82.0 \u00b7 @mastra/mcp 2.8.0"
+    },
+    {
+      "name": "mastra-native",
+      "framework": "mastra-native",
+      "language": "js",
+      "init_ms": 0.4,
+      "tool_count": 2,
+      "mean_ms": 5.54,
+      "p50_ms": 5.49,
+      "p95_ms": 6.62,
+      "n": 25,
+      "final_ok": true,
+      "peak_rss_mb": 237.5,
+      "rounds": 5,
+      "p50_ms_per_round": [
+        6.25,
+        5.49,
+        5.42,
+        5.59,
+        5.4
+      ],
+      "init_ms_per_round": [
+        0.4,
+        0.4,
+        0.4,
+        0.4,
+        0.4
+      ],
+      "load1_at_start": [
+        3.5,
+        3.53,
+        3.44,
+        3.13,
+        3.42
+      ],
+      "run": "2026-11-08-quiet-0.28",
+      "versions": "@mastra/core 1.82.0 \u00b7 @mastra/mcp 2.8.0"
+    },
+    {
+      "name": "openai-agents-js-mcp",
+      "framework": "openai-agents-js-mcp",
+      "language": "js",
+      "init_ms": 36.9,
+      "tool_count": 3,
+      "mean_ms": 4.24,
+      "p50_ms": 4.24,
+      "p95_ms": 4.79,
+      "n": 25,
+      "final_ok": true,
+      "peak_rss_mb": 160.6,
+      "rounds": 5,
+      "p50_ms_per_round": [
+        4.23,
+        4.24,
+        4.42,
+        4.21,
+        4.27
+      ],
+      "init_ms_per_round": [
+        36.9,
+        39.9,
+        38.4,
+        33.6,
+        34.0
+      ],
+      "load1_at_start": [
+        3.5,
+        3.53,
+        3.48,
+        3.36,
+        3.42
+      ],
+      "run": "2026-11-08-quiet-0.28",
+      "versions": "@openai/agents 0.21.0 \u00b7 openai 7.53.0"
+    },
+    {
+      "name": "langgraphjs-mcp",
+      "framework": "langgraphjs-mcp",
+      "language": "js",
+      "init_ms": 37,
+      "tool_count": 3,
+      "mean_ms": 4.81,
+      "p50_ms": 4.74,
+      "p95_ms": 6.1,
+      "n": 25,
+      "final_ok": true,
+      "peak_rss_mb": 190.2,
+      "rounds": 5,
+      "p50_ms_per_round": [
+        4.75,
+        5.12,
+        4.73,
+        4.74,
+        4.7
+      ],
+      "init_ms_per_round": [
+        37,
+        37.7,
+        31.9,
+        32.6,
+        37
+      ],
+      "load1_at_start": [
+        3.5,
+        3.53,
+        3.48,
+        3.36,
+        3.31
+      ],
+      "run": "2026-11-08-quiet-0.28",
+      "versions": "@langchain/langgraph 1.7.2 \u00b7 @langchain/mcp-adapters 2.0.2"
+    },
+    {
+      "name": "eino-go-mcp",
+      "framework": "eino-go-mcp",
+      "language": "go",
+      "init_ms": 14.6,
+      "tool_count": 3,
+      "mean_ms": 0.373,
+      "p50_ms": 0.363,
+      "p95_ms": 0.491,
+      "n": 30,
+      "final_ok": true,
+      "peak_rss_mb": 29.0,
+      "rounds": 5,
+      "p50_ms_per_round": [
+        0.379,
+        0.364,
+        0.363,
+        0.352,
+        0.362
+      ],
+      "init_ms_per_round": [
+        14.9,
+        14.7,
+        14.2,
+        13.5,
+        14.6
+      ],
+      "load1_at_start": [
+        3.5,
+        3.53,
+        3.48,
+        3.36,
+        3.31
+      ],
+      "run": "2026-11-08-quiet-0.28",
+      "versions": "eino 0.9.22 \u00b7 eino-ext mcp 0.0.9 \u00b7 mcp-go 1.5.0"
+    },
+    {
+      "name": "langchaingo-go-native",
+      "framework": "langchaingo-go-native",
+      "language": "go",
+      "init_ms": 0.1,
+      "tool_count": 2,
+      "mean_ms": 0.477,
+      "p50_ms": 0.423,
+      "p95_ms": 0.722,
+      "n": 30,
+      "final_ok": true,
+      "peak_rss_mb": 21.1,
+      "rounds": 5,
+      "p50_ms_per_round": [
+        0.446,
+        0.418,
+        0.423,
+        0.39,
+        0.428
+      ],
+      "init_ms_per_round": [
+        0.1,
+        0.1,
+        0.1,
+        0.1,
+        0.1
+      ],
+      "load1_at_start": [
+        3.5,
+        3.53,
+        3.48,
+        3.36,
+        3.31
+      ],
+      "run": "2026-11-08-quiet-0.28",
+      "versions": "langchaingo 0.1.15"
+    },
+    {
+      "name": "adk-go-mcp",
+      "framework": "adk-go-mcp",
+      "language": "go",
+      "init_ms": 0.1,
+      "tool_count": 3,
+      "mean_ms": 0.52,
+      "p50_ms": 0.477,
+      "p95_ms": 0.693,
+      "n": 25,
+      "final_ok": true,
+      "peak_rss_mb": 24.5,
+      "rounds": 5,
+      "p50_ms_per_round": [
+        0.497,
+        0.477,
+        0.473,
+        0.459,
+        0.491
+      ],
+      "init_ms_per_round": [
+        0.2,
+        0.1,
+        0.1,
+        0.1,
+        0.1
+      ],
+      "load1_at_start": [
+        3.5,
+        3.53,
+        3.48,
+        3.36,
+        3.31
+      ],
+      "run": "2026-11-08-quiet-0.28",
+      "versions": "google.golang.org/adk 1.9.0 \u00b7 go-sdk 1.4.1 (custom ~110-line OpenAI model.LLM adapter)"
+    },
+    {
+      "name": "genkit-go-mcp",
+      "framework": "genkit-go-mcp",
+      "language": "go",
+      "init_ms": 33.4,
+      "tool_count": 3,
+      "mean_ms": 2.103,
+      "p50_ms": 2.111,
+      "p95_ms": 2.418,
+      "n": 25,
+      "final_ok": true,
+      "peak_rss_mb": 33.8,
+      "rounds": 5,
+      "p50_ms_per_round": [
+        2.237,
+        2.153,
+        2.067,
+        2.111,
+        2.078
+      ],
+      "init_ms_per_round": [
+        34.8,
+        33.0,
+        33.4,
+        32.2,
+        34.2
+      ],
+      "load1_at_start": [
+        3.5,
+        3.53,
+        3.48,
+        3.36,
+        3.31
+      ],
+      "run": "2026-11-08-quiet-0.28",
+      "versions": "firebase genkit/go 1.14.0 \u00b7 compat_oai \u00b7 plugins/mcp"
+    },
+    {
+      "name": "koog-mcp",
+      "framework": "koog-mcp",
+      "language": "kotlin",
+      "init_ms": 279.1,
+      "tool_count": 3,
+      "mean_ms": 4.247,
+      "p50_ms": 4.104,
+      "p95_ms": 5.245,
+      "n": 25,
+      "final_ok": true,
+      "peak_rss_mb": 178.2,
+      "rounds": 5,
+      "p50_ms_per_round": [
+        4.251,
+        4.671,
+        4.095,
+        4.104,
+        4.101
+      ],
+      "init_ms_per_round": [
+        277.1,
+        279.1,
+        282.0,
+        281.8,
+        273.4
+      ],
+      "load1_at_start": [
+        3.5,
+        3.53,
+        3.48,
+        3.36,
+        3.31
+      ],
+      "run": "2026-11-08-quiet-0.28",
+      "versions": "koog-agents 1.3.0 \u00b7 agents-mcp 1.3.0-beta \u00b7 kotlin-sdk 0.11.1"
+    },
+    {
+      "name": "adk-java-mcp",
+      "framework": "adk-java-mcp",
+      "language": "java",
+      "init_ms": 312.5,
+      "tool_count": 3,
+      "mean_ms": 5.205,
+      "p50_ms": 5.011,
+      "p95_ms": 6.554,
+      "n": 25,
+      "final_ok": true,
+      "peak_rss_mb": 239.3,
+      "rounds": 5,
+      "p50_ms_per_round": [
+        5.44,
+        4.973,
+        4.938,
+        5.091,
+        5.011
+      ],
+      "init_ms_per_round": [
+        338.0,
+        308.8,
+        307.6,
+        312.5,
+        312.9
+      ],
+      "load1_at_start": [
+        3.46,
+        3.53,
+        3.48,
+        3.36,
+        3.31
+      ],
+      "run": "2026-11-08-quiet-0.28",
+      "versions": "google-adk 1.14.0 + google-adk-langchain4j bridge \u00b7 langchain4j-open-ai 1.23.0"
+    },
+    {
+      "name": "ms-agent-framework-csharp-mcp",
+      "framework": "ms-agent-framework-mcp",
+      "language": "csharp",
+      "init_ms": 88.5,
+      "tool_count": 3,
+      "mean_ms": 0.659,
+      "p50_ms": 0.653,
+      "p95_ms": 0.779,
+      "n": 25,
+      "final_ok": true,
+      "peak_rss_mb": 85.7,
+      "rounds": 5,
+      "p50_ms_per_round": [
+        0.685,
+        0.653,
+        0.653,
+        0.621,
+        0.629
+      ],
+      "init_ms_per_round": [
+        100.1,
+        88.5,
+        92.7,
+        84.4,
+        81.0
+      ],
+      "load1_at_start": [
+        3.46,
+        3.53,
+        3.48,
+        3.36,
+        3.31
+      ],
+      "run": "2026-11-08-quiet-0.28",
+      "versions": "Microsoft.Agents.AI 1.28.0 \u00b7 ModelContextProtocol 2.4.0"
+    },
+    {
+      "name": "rig-mcp",
+      "framework": "rig-mcp",
+      "language": "rust",
+      "init_ms": 21.7,
+      "tool_count": 3,
+      "mean_ms": 0.433,
+      "p50_ms": 0.437,
+      "p95_ms": 0.511,
+      "n": 25,
+      "final_ok": true,
+      "peak_rss_mb": 23.0,
+      "rounds": 5,
+      "p50_ms_per_round": [
+        0.506,
+        0.472,
+        0.437,
+        0.426,
+        0.391
+      ],
+      "init_ms_per_round": [
+        16.2,
+        23.0,
+        21.7,
+        21.0,
+        21.8
+      ],
+      "load1_at_start": [
+        3.46,
+        3.53,
+        3.48,
+        3.36,
+        3.31
+      ],
+      "run": "2026-11-08-quiet-0.28",
+      "versions": "rig 0.46.0 (rig-core 0.46.0, feature rmcp) \u00b7 rmcp 3.9.0"
+    },
+    {
+      "name": "swiftide-mcp",
+      "framework": "swiftide-mcp",
+      "language": "rust",
+      "init_ms": 16.2,
+      "tool_count": 3,
+      "mean_ms": 0.438,
+      "p50_ms": 0.436,
+      "p95_ms": 0.551,
+      "n": 25,
+      "final_ok": true,
+      "peak_rss_mb": 16.9,
+      "rounds": 5,
+      "p50_ms_per_round": [
+        0.525,
+        0.458,
+        0.396,
+        0.436,
+        0.383
+      ],
+      "init_ms_per_round": [
+        13.0,
+        18.1,
+        18.5,
+        16.2,
+        15.8
+      ],
+      "load1_at_start": [
+        3.46,
+        3.53,
+        3.48,
+        3.36,
+        3.31
+      ],
+      "run": "2026-11-08-quiet-0.28",
+      "versions": "swiftide / swiftide-agents 0.34.0 \u00b7 rmcp 2.2.0"
+    },
+    {
+      "name": "autoagents-mcp",
+      "framework": "autoagents-mcp",
+      "language": "rust",
+      "init_ms": 19.0,
+      "tool_count": 3,
+      "mean_ms": 0.371,
+      "p50_ms": 0.368,
+      "p95_ms": 0.436,
+      "n": 25,
+      "final_ok": true,
+      "peak_rss_mb": 13.2,
+      "rounds": 5,
+      "p50_ms_per_round": [
+        0.432,
+        0.368,
+        0.357,
+        0.371,
+        0.335
+      ],
+      "init_ms_per_round": [
+        17.4,
+        19.9,
+        20.1,
+        19.0,
+        18.8
+      ],
+      "load1_at_start": [
+        3.46,
+        3.53,
+        3.48,
+        3.36,
+        3.31
+      ],
+      "run": "2026-11-08-quiet-0.28",
+      "versions": "autoagents 0.4.0"
+    },
+    {
+      "name": "toolnexus-python-full",
+      "framework": "toolnexus-python-full",
+      "language": "python",
+      "init_ms": 17.4,
+      "tool_count": 5,
+      "mean_ms": 0.942,
+      "p50_ms": 0.925,
+      "p95_ms": 1.069,
+      "n": 25,
+      "final_ok": true,
+      "peak_rss_mb": 61.9,
+      "rounds": 5,
+      "p50_ms_per_round": [
+        0.917,
+        0.937,
+        0.925,
+        0.921,
+        0.927
+      ],
+      "init_ms_per_round": [
+        21.6,
+        16.9,
+        17.4,
+        17.2,
+        18.0
+      ],
+      "load1_at_start": [
+        2.77,
+        2.77,
+        2.71,
+        2.71,
+        2.71
+      ],
+      "run": "2026-11-08-quiet-0.28",
+      "versions": "toolnexus main @ e5ef449a (0.28.0 candidate)",
+      "note": "full rows ran in five extra rounds right after the main sitting, main only"
+    },
+    {
+      "name": "toolnexus-go-full",
+      "framework": "toolnexus-go-full",
+      "language": "go",
+      "init_ms": 11.6,
+      "tool_count": 5,
+      "mean_ms": 0.386,
+      "p50_ms": 0.379,
+      "p95_ms": 0.427,
+      "n": 25,
+      "final_ok": true,
+      "peak_rss_mb": 16.8,
+      "rounds": 5,
+      "p50_ms_per_round": [
+        0.364,
+        0.383,
+        0.369,
+        0.402,
+        0.379
+      ],
+      "init_ms_per_round": [
+        13.4,
+        11.3,
+        11.6,
+        11.6,
+        11.2
+      ],
+      "load1_at_start": [
+        2.77,
+        2.77,
+        2.71,
+        2.71,
+        2.71
+      ],
+      "run": "2026-11-08-quiet-0.28",
+      "versions": "toolnexus main @ e5ef449a (0.28.0 candidate)",
+      "note": "full rows ran in five extra rounds right after the main sitting, main only"
+    },
+    {
+      "name": "toolnexus-java-full",
+      "framework": "toolnexus-java-full",
+      "language": "java",
+      "init_ms": 173.6,
+      "tool_count": 5,
+      "mean_ms": 2.192,
+      "p50_ms": 2.198,
+      "p95_ms": 2.638,
+      "n": 25,
+      "final_ok": true,
+      "peak_rss_mb": 155.9,
+      "rounds": 5,
+      "p50_ms_per_round": [
+        2.164,
+        2.191,
+        2.295,
+        2.198,
+        2.332
+      ],
+      "init_ms_per_round": [
+        225.2,
+        169.6,
+        174.6,
+        173.6,
+        167.8
+      ],
+      "load1_at_start": [
+        2.77,
+        2.77,
+        2.71,
+        2.71,
+        2.71
+      ],
+      "run": "2026-11-08-quiet-0.28",
+      "versions": "toolnexus main @ e5ef449a (0.28.0 candidate)",
+      "note": "full rows ran in five extra rounds right after the main sitting, main only"
+    },
+    {
+      "name": "toolnexus-csharp-full",
+      "framework": "toolnexus-csharp-full",
+      "language": "csharp",
+      "init_ms": 83.6,
+      "tool_count": 5,
+      "mean_ms": 0.581,
+      "p50_ms": 0.581,
+      "p95_ms": 0.655,
+      "n": 25,
+      "final_ok": true,
+      "peak_rss_mb": 78.9,
+      "rounds": 5,
+      "p50_ms_per_round": [
+        0.57,
+        0.537,
+        0.581,
+        0.587,
+        0.596
+      ],
+      "init_ms_per_round": [
+        87.0,
+        84.3,
+        83.6,
+        82.2,
+        81.5
+      ],
+      "load1_at_start": [
+        2.77,
+        2.77,
+        2.71,
+        2.71,
+        2.71
+      ],
+      "run": "2026-11-08-quiet-0.28",
+      "versions": "toolnexus main @ e5ef449a (0.28.0 candidate)",
+      "note": "full rows ran in five extra rounds right after the main sitting, main only"
+    },
+    {
+      "name": "toolnexus-js-full",
+      "framework": "toolnexus-js-full",
+      "language": "js",
+      "init_ms": 26.1,
+      "tool_count": 5,
+      "mean_ms": 3.45,
+      "p50_ms": 3.46,
+      "p95_ms": 3.65,
+      "n": 25,
+      "final_ok": true,
+      "peak_rss_mb": 129.3,
+      "rounds": 5,
+      "p50_ms_per_round": [
+        3.47,
+        3.45,
+        3.49,
+        3.46,
+        3.45
+      ],
+      "init_ms_per_round": [
+        37.2,
+        27.1,
+        26.1,
+        25.5,
+        24.9
+      ],
+      "load1_at_start": [
+        2.77,
+        2.71,
+        2.71,
+        2.71,
+        2.71
+      ],
+      "run": "2026-11-08-quiet-0.28",
+      "versions": "toolnexus main @ e5ef449a (0.28.0 candidate)",
+      "note": "full rows ran in five extra rounds right after the main sitting, main only"
+    },
+    {
+      "name": "toolnexus-rust-full",
+      "framework": "toolnexus-rust-full",
+      "language": "rust",
+      "init_ms": 11.7,
+      "tool_count": 5,
+      "mean_ms": 0.375,
+      "p50_ms": 0.363,
+      "p95_ms": 0.46,
+      "n": 25,
+      "final_ok": true,
+      "peak_rss_mb": 16.8,
+      "rounds": 5,
+      "p50_ms_per_round": [
+        0.344,
+        0.343,
+        0.37,
+        0.366,
+        0.363
+      ],
+      "init_ms_per_round": [
+        19.4,
+        11.9,
+        11.7,
+        11.6,
+        11.6
+      ],
+      "load1_at_start": [
+        2.77,
+        2.71,
+        2.71,
+        2.71,
+        2.71
+      ],
+      "run": "2026-11-08-quiet-0.28",
+      "versions": "toolnexus main @ e5ef449a (0.28.0 candidate)",
+      "note": "full rows ran in five extra rounds right after the main sitting, main only"
     }
   ],
   "notes": {
     "spring-ai-java": "re-run separately after the main sitting (same day) once the runner was fixed for Spring AI 2.0 (tool loop moved to ChatClient)",
     "run-2026-11-08": "Second sitting 2026-11-08 (N=30, warmup 5, same machine): adds toolnexus native rows for python/java/csharp and spring-ai-java-skills (MCP + spring-ai-agent-utils SkillsTool over examples/skills), and re-runs the directly compared rows (csharp: MEAI, Semantic Kernel, MS Agent Framework, toolnexus mcp/full; js: toolnexus + Vercel; java: toolnexus, LangChain4j, Spring AI; python: toolnexus) in the same sitting. The host was busy (1-min load average ~15 on 18 cores), so absolute numbers are noisier than the 2026-11-07 sitting; compare rows WITHIN a sitting, not across. Rows from this sitting carry \"run\": \"2026-11-08\". No Python or Java competitor ships a native-tools row in this harness.",
-    "run-2026-11-08-quiet": "Third sitting 2026-11-08 04:00-04:20 IST (N=30, warmup 5, same machine), every row started only when the 1-min load average was < 4 (waited ~28 min for it; langchain-elixir-native re-run afterwards at load 5.1 after a deps fix). Keep-alive HTTP/1.1 mock from #165. Full suite: every toolnexus port at main f6edfbeb (mcp/full/native) plus all competitors including smolagents and AutoAgents, and toolnexus 0.26.0 mcp+native rows (name suffix @0.26.0, built from tag v0.26.0 with main's runner sources) interleaved next to main's rows. JS runners start their own in-process mock, so JS absolute numbers differ from the shared-mock rows; compare JS rows with each other. Rows carry run=2026-11-08-quiet and load1_at_start."
+    "run-2026-11-08-quiet": "Third sitting 2026-11-08 04:00-04:20 IST (N=30, warmup 5, same machine), every row started only when the 1-min load average was < 4 (waited ~28 min for it; langchain-elixir-native re-run afterwards at load 5.1 after a deps fix). Keep-alive HTTP/1.1 mock from #165. Full suite: every toolnexus port at main f6edfbeb (mcp/full/native) plus all competitors including smolagents and AutoAgents, and toolnexus 0.26.0 mcp+native rows (name suffix @0.26.0, built from tag v0.26.0 with main's runner sources) interleaved next to main's rows. JS runners start their own in-process mock, so JS absolute numbers differ from the shared-mock rows; compare JS rows with each other. Rows carry run=2026-11-08-quiet and load1_at_start.",
+    "run-2026-11-08-quiet-0.28": "Fourth sitting 2026-11-08 (BENCH_RUNS=25, BENCH_WARMUP=5, same machine, same benchmarks/mock_llm.py keep-alive mock on its own port). Five alternating rounds: in each round toolnexus 0.27.0 (tag v0.27.0) and main @ e5ef449a (0.28.0 candidate) mcp+native rows run back to back for python/js/go/java/csharp/rust (order flips each round), then every competitor in those languages. Each row started only when the 1-min load average was < 4 (observed 2.95-3.63). Every row here is the MEDIAN of the five rounds (init, p50, p95, mean, RSS); per-round p50/init and load are kept on the row. Elixir and Clojure were not re-run (unchanged since 0.27.0); their rows stay under run=2026-11-08-quiet. JS runners start their own in-process mock, so compare JS rows with each other."
   },
   "machine": "Apple Mac17,8 M5 Pro 18c 48GB, macOS 26.4; go1.26.3, OpenJDK 26.0.1 runtime (Java 21 toolchain builds), .NET 10.0.301, Node 24.18.0, CPython 3.11.15, Elixir 1.20.2/OTP 29, rustc 1.99.0, cljgo 0.9.0",
   "skipped_2026_11_08": [],
-  "skipped_2026_11_08_quiet": []
+  "skipped_2026_11_08_quiet": [],
+  "skipped_2026_11_08_quiet_0_28": []
 }
