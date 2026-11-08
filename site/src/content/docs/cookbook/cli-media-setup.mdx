@@ -229,7 +229,8 @@ Each CLI uses your plan's allowance. When it runs out the error status is `unava
 - Grok: `grok: You have reached your usage limit for today` (check with `grok usage`).
 - Codex: `codex: You've hit your usage limit. Try again later.`
 - Antigravity: anything mentioning `quota` (Antigravity names its allowance the "Antigravity Starter Quota").
-  This failure line has not been captured live yet.
+  Live, agy ends the turn normally and explains it (`429 RESOURCE_EXHAUSTED … quota will reset
+  after approximately 167 hours`) with no file; the preset reports that as `unavailable`.
 
 ## The Grok watermark
 

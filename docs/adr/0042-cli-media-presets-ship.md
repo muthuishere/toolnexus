@@ -44,6 +44,6 @@ conformance.
 
 - Three parsers to keep current. A CLI output change breaks one preset; the fake-CLI cases show
   exactly which line moved.
-- The agy failure line (quota) is not live-captured yet; its case is marked `liveVerified:false`.
+- agy reports an exhausted image quota inside a successful result (live-captured 2026-11-08); the preset maps it to `unavailable`.
 - Permissions: Grok `--yolo` and agy `--dangerously-skip-permissions` run with no prompt; Codex
   stays sandboxed (`-s workspace-write`) because that is enough to save its image.

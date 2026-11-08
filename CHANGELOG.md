@@ -48,11 +48,14 @@ const r = await generateMedia(MediaStyle.XaiGrokCli, "image", { prompt: "a red a
 - **Permissions**: each preset runs headless with no prompt: Grok with `--yolo`, Antigravity with
   `--dangerously-skip-permissions`, Codex sandboxed with `-s workspace-write`.
 
-Live-verified on 2026-11-08 through the shell command, at 16:9: Grok image (1280×720, 29 s), Grok
-video (58 s), Codex image (1672×941, 33 s), Antigravity image (1376×768, 55 s, agy 1.4.12), none
-of them stopping for a prompt. **Not verified**: the Antigravity failure output (its quota case is
-pinned from a guessed line shape, marked `liveVerified:false`), Antigravity video (not attempted;
-the preset declares image only), Windows (not run). Contract: SPEC §7G.10, §7G.10a, §7G.10b,
+Live-verified on 2026-11-08 at 16:9, through the Go and TypeScript function faces, the tool face
+and the shell command: Grok image (1280×720, ~25 s) and video (~55 s), Codex image (1672×941,
+~30 s), Antigravity image (1376×768, ~45 s, agy 1.4.12), none of them stopping for a prompt. The
+same day Antigravity's image quota ran out mid-run: agy ends that turn "successfully" with an
+explanation and no file, and the preset now reports it as `unavailable`
+(`agy: Image generation failed because the model's quota was exhausted (Error: 429 RESOURCE_EXHAUSTED …`).
+**Not verified**: Antigravity video (not attempted; the preset declares image only), the other
+six ports against the real CLIs (they replay the same fake-CLI cases), Windows (not run). Contract: SPEC §7G.10, §7G.10a, §7G.10b,
 ADR 0042, `conformance/media/cli.json`; tracked in `openspec/changes/add-cli-media-presets`.
 
 **BREAKING (media, every port) — named clients replace the 0.24 style-only API.** `createMedia`
