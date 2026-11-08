@@ -276,6 +276,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         retryable_statuses: vec![520, 521], // ADDED to the default set
         fallback_models: vec!["backup-model".into()], // next model after 503/529 overload
         timeout_ms: 30_000,                 // whole-run deadline; 0 => none
+        stop_recovery: false,               // opt-in stop_reason recovery (nudge/continue/corrective)
         on_error: Some(Arc::new(|_info| ErrorTier::Retry)),
         http_client: None,                  // Some(reqwest::Client) to bring your own
 

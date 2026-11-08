@@ -104,7 +104,7 @@
 ;; and the count stays above any floor. Comparing `suites` against a constant is
 ;; the only check that can see the vector shrink, because every count derived
 ;; FROM the vector shrinks with it. Adding a suite is meant to be a two-line diff.
-(def expected-suite-count 36)
+(def expected-suite-count 37)
 
 (defn- declared-tests
   "How many deftests a namespace actually holds, read off its interns rather than
