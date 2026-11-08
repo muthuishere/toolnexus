@@ -36,9 +36,34 @@ function toHeaderRecord(h: RequestInit["headers"]): Record<string, string> {
   return { ...(h as Record<string, string>) }
 }
 
+// undici's global dispatcher slot. Node fills it lazily with a default Agent on the first fetch;
+// anything else there (a ProxyAgent, a mock, a tuned Agent) means the host routed fetch on purpose.
+const DISPATCHER = Symbol.for("undici.globalDispatcher.1")
+let knownDefaultDispatcher: unknown
+
+function customDispatcher(): boolean {
+  const d = (globalThis as Record<symbol, unknown>)[DISPATCHER]
+  return d !== undefined && d !== knownDefaultDispatcher
+}
+
+/** Calls the platform fetch; if that call is what created Node's default dispatcher, remember it
+ * so later calls still take the fast path. */
+function platformFetch(input: Parameters<typeof fetch>[0], init?: RequestInit): Promise<Response> {
+  const before = (globalThis as Record<symbol, unknown>)[DISPATCHER]
+  const p = globalThis.fetch(input, init)
+  if (before === undefined) {
+    const after = (globalThis as Record<symbol, unknown>)[DISPATCHER]
+    if (after !== undefined) knownDefaultDispatcher = after
+  }
+  return p
+}
+
+const REDIRECTS = new Set([301, 302, 303, 307, 308])
+
 export const nodeFetch: typeof fetch = (input, init) => {
-  const fallback = () => globalThis.fetch(input, init)
-  if (globalThis.fetch !== nativeFetch || proxyEnv()) return fallback()
+  const fallback = () => platformFetch(input, init)
+  if (globalThis.fetch !== nativeFetch || proxyEnv() || customDispatcher()) return fallback()
+  if (init?.redirect && init.redirect !== "follow") return fallback()
   const url = typeof input === "string" ? input : input instanceof URL ? input.href : undefined
   const body = init?.body
   if (url === undefined || (body != null && typeof body !== "string" && !(body instanceof Uint8Array))) return fallback()
@@ -60,12 +85,25 @@ export const nodeFetch: typeof fetch = (input, init) => {
     }
     const req = mod.request(url, { method: init?.method ?? "GET", headers, agent: isHttps ? httpsAgent : httpAgent }, (res) => {
       const status = res.statusCode ?? 0
-      if (status >= 300 && status < 400 && res.headers.location) {
-        // fetch follows redirects; hand the whole request to it rather than re-implement that.
+      if (REDIRECTS.has(status) && res.headers.location) {
+        // Follow it the way fetch does, from the redirect target: re-sending to the original URL
+        // would reach the server twice. 303, and 301/302 after a POST, become a bodiless GET;
+        // 307/308 repeat the method and body. Further hops are fetch's to follow.
         res.resume()
         signal?.removeEventListener("abort", onAbort)
         settled = true
-        fallback().then(resolve, reject)
+        const target = new URL(res.headers.location, url).href
+        const method = (init?.method ?? "GET").toUpperCase()
+        const toGet = status === 303 ? method !== "HEAD" : (status === 301 || status === 302) && method === "POST"
+        let next: RequestInit | undefined = init
+        if (toGet) {
+          const h = toHeaderRecord(init?.headers)
+          for (const k of Object.keys(h)) {
+            if (/^content-(type|length|encoding|language|location)$/i.test(k)) delete h[k]
+          }
+          next = { ...init, method: "GET", body: undefined, headers: h }
+        }
+        platformFetch(target, next).then(resolve, reject)
         return
       }
       const h = new Headers()
