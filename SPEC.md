@@ -2584,8 +2584,9 @@ Otherwise the loop proceeds exactly as without the option.
 **Carried text.** Text of a truncated response that was continued is carried; the run's final
 `text` (and `done.result.text` in a stream) is the carried text followed by the final response's
 text, concatenated with no separator. The carry resets to empty whenever a response's tools run.
-A stream emits the `text` deltas of every response as they arrive, so its deltas already
-concatenate to the same string.
+A stream emits the `text` deltas of every response as they arrive, so in a run where no tool
+ran its deltas concatenate to the same string (as today, text streamed before a tool turn is not
+part of the final `text`).
 
 **Accounting.** Every recovery call is an ordinary turn: it fires `beforeLLM`/`afterLLM`, counts in
 `turns` and usage, and is bounded by `maxTurns` (a recovery never extends `maxTurns`). A recovery is taken only when a turn remains: on the

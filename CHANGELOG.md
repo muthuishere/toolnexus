@@ -51,6 +51,11 @@ recovery (watch for the pinned text in `beforeLLM`), and the budgets and texts a
 configurable. Fixture: `conformance/stop_recovery/cases.json`; change
 `openspec/changes/add-stop-reason-recovery`.
 
+**Small behaviour change with the option off:** tool arguments that are valid JSON but not an
+object (`[1]`, `"x"`, or an Anthropic `input` that is not an object) now reach the tool as `{}`
+in every port, as malformed text already did. Before, js and python passed the raw value through
+(and the Go Anthropic loop failed the whole response on a non-object `input`).
+
 ### Memory hierarchy and dreaming
 
 A persona's memory can now stay small and stay true. **Everything is opt-in; a persona built
