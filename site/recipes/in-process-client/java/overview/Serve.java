@@ -1,4 +1,4 @@
-// run: java -cp 'lib/*' Serve.java   (lib/ = toolnexus-0.27.0.jar + its runtime deps)
+// run: java -cp 'lib/*' Serve.java   (lib/ = toolnexus-0.28.0.jar + its runtime deps)
 import io.github.muthuishere.toolnexus.McpServe;
 import io.github.muthuishere.toolnexus.NativeTool;
 import io.github.muthuishere.toolnexus.Toolkit;

@@ -15,7 +15,7 @@ byte-identical, also in **JavaScript, Python, Go, Java, C#, Elixir and Rust**.
 
 ```clojure
 ;; deps.edn
-net.clojars.muthuishere/toolnexus {:mvn/version "0.27.0"}   ; this port
+net.clojars.muthuishere/toolnexus {:mvn/version "0.28.0"}   ; this port
 net.clojars.muthuishere/koine     {:mvn/version "0.11.0"}   ; its only dependency
 ```
 

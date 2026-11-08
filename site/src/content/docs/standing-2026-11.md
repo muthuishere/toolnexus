@@ -17,8 +17,9 @@ description: >-
 
 ## What we do NOT claim
 
-> - **Not the fastest everywhere.** LangChain4j still beats us on the JVM over MCP (2.17 vs 2.28 ms p50, and
->   less memory); Eino in Go is level with us, not behind; AutoAgents in Rust uses less memory than we do.
+> - **Not the fastest everywhere.** In the five-round table LangChain4j beats us on the JVM over MCP (2.17 vs
+>   2.28 ms p50, and less memory). A separate 7-round sitting after #204 (in-house Java stdio MCP client) put us
+>   ahead (1.63 vs 1.84 ms p50); we do not blend the two, and memory was not re-measured there; Eino in Go is level with us, not behind; AutoAgents in Rust uses less memory than we do.
 >   [MEASURED]
 > - **Not a JavaScript speed-up.** The 0.28.0 candidate is faster than 0.27.0 in Python, Java, C# and Rust, but
 >   our harness shows no JS per-request change (3.43 → 3.40 ms). [MEASURED]
@@ -212,6 +213,20 @@ tool) is lower than Spring AI + SkillsTool (2.20 vs 3.34 ms) at 27% of the memor
 `hello-world` skill and the scenario does not call it. No JVM competitor has a native row. ² ADK Java connects to
 MCP lazily. ⁴ Spring's init is Spring Boot context start including MCP discovery.
 
+**After #204 (separate sitting, not in the table above).** [MEASURED] The in-house Java stdio MCP client
+([#204](https://github.com/muthuishere/toolnexus/pull/204)) landed after the five-round sitting, so the perf lane
+measured it on its own: quiet machine, `run_toolnexus_java` and `run_langchain4j` interleaved, 40 measured runs
+after 10 warmup, **medians of 7 rounds**, "warm" = median of runs 21–40.
+
+| | init ms | p50 ms | warm ms |
+|---|--:|--:|--:|
+| toolnexus Java before #204 | 167 | 1.88 | 1.61 |
+| toolnexus Java after #204 | **137** | **1.63** | **1.42** |
+| LangChain4j MCP | 220 | 1.84 | 1.59 |
+
+In that sitting toolnexus Java is ahead of LangChain4j on init, p50 and warm. Absolute values differ from the
+five-round table (different sitting, more runs), so compare rows within one table only. RSS was not measured.
+
 ### .NET (C#)
 
 | framework | version | tools | init ms | p50 ms | p95 ms | RSS MB | install |
@@ -305,8 +320,9 @@ All from [`CHANGELOG.md`](https://github.com/muthuishere/toolnexus/blob/main/CHA
    ask. [QUALITATIVE]
 2. **A2A beyond submit→poll.** We have no streaming, push or auth. ADK Python just made A2A stable, and
    LangChain4j, Spring AI and MAF all ship it. This matters most for agent-to-agent interop. [FROM DOCS]
-3. **JVM MCP overhead.** We still lose to LangChain4j on the flagship MCP path (2.17 vs 2.28 ms p50, 140 vs
-   153 MB), though the gap fell from 37% to 5% and we now start faster. Go is level with Eino. [MEASURED]
+3. **JVM MCP overhead.** In the five-round table we lose to LangChain4j on the flagship MCP path (2.17 vs
+   2.28 ms p50, 140 vs 153 MB). The separate 7-round sitting after #204 puts us ahead on latency (1.63 vs
+   1.84 ms p50); memory against LangChain4j is still unmeasured after #204, so the gap stays open until a full re-run. Go is level with Eino. [MEASURED]
 4. **Rust memory vs AutoAgents** (16.8 vs 13.2 MB RSS over MCP). Latency is now ours (0.342 vs 0.368 ms). [MEASURED]
 5. **JS request path.** The keep-alive change did not show up in this harness; per-request time is where it was. [MEASURED]
 6. **Clojure MCP path** at 6.9–7.8 ms against 1.4–1.8 ms native: the polling read loop in our in-house MCP
