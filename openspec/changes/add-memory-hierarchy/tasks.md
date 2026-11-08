@@ -17,7 +17,7 @@
       `memory/log.md` entry format; amend "Composition, not API"
 - [ ] Fixture `examples/dreaming/` — written + passing in js; other 7 ports pending (home with one contradicted line + a transcript store + a
       scripted model) asserting the four "Built-in dreamer preset" scenarios (Mt. Moon = build gate) in all 8 ports
-- [ ] `conformance/options_manifest.json` — `dreamer`, `fromDir.dream`
+- [x] `conformance/options_manifest.json` — `dreamer`, `fromDir.dream`
 
 ## Per-language parity checklist
 
@@ -36,7 +36,7 @@ byte-identity test with all options absent.
 
 ## Conformance
 
-- [ ] `conformance/options_manifest.json` — `memoryIndexCap`, `notes`, `transcriptSearchTool`
+- [x] `conformance/options_manifest.json` — `memoryIndexCap`, `notes`, `transcriptSearchTool`
 - [ ] Cross-port fixture: identical composed soul, `list` output and search output in all 8 ports
 - [x] Concurrency test: N parallel `memory add` on one file in one runtime ⇒ N entries
 - [x] > 2 MB `MEMORY.md` + `add` ⇒ on-disk file grows, nothing truncated (regression for the
@@ -44,14 +44,14 @@ byte-identity test with all options absent.
 
 ## Docs
 
-- [ ] Docs page "Dreaming" (per language) — leads with the `fromDir(dir, { dream })` one-liner, then customisation (`instructions`, `DREAM.md`), per design.md "Dreaming": Karpathy-style layout
+- [x] Docs page "Dreaming" (per language) — leads with the `fromDir(dir, { dream })` one-liner, then customisation (`instructions`, `DREAM.md`), per design.md "Dreaming": Karpathy-style layout
       (`MEMORY.md` index / `memory/<slug>.md` pages with `[[links]]` / `memory/log.md`), shipped
       `HEARTBEAT.md` doing verify → demote → merge → repair links → log, the "when worth running"
       table, cadence guidance, and a "Further reading" link to Anthropic's "The components of agent
       memory" (2026-11-06) and Karpathy's LLM-wiki pattern
-- [ ] Extend site `scenarios/self-improving-agent.mdx` Part 4 (consolidator) to link the Dreaming
+- [x] Extend site `scenarios/self-improving-agent.mdx` Part 4 (consolidator) to link the Dreaming
       recipe as its transcript-verified successor
-- [ ] Per-port README memory section
+- [x] Per-port README memory section (READMEs have no persona section; a Dreaming link was added to each README's docs row)
 
 ## Changelog
 

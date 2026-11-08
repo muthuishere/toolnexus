@@ -1011,6 +1011,42 @@
 			}
 		},
 		{
+			"id": "persona/dreamer",
+			"group": "persona",
+			"member": "dreamer",
+			"title": "dreamer — memory that gets better while it sleeps",
+			"spec": "§7E",
+			"summary": "The built-in dreamer preset: an agent that verifies a persona's memory against its transcripts on a schedule.",
+			"symbols": {
+				"javascript": "dreamer",
+				"python": "dreamer",
+				"golang": "Dreamer",
+				"java": "Agents.dreamer",
+				"csharp": "Home.Dreamer",
+				"elixir": "Toolnexus.Agents.Home.dreamer",
+				"clojure": "toolnexus.agents.home/dreamer",
+				"rust": "dreamer"
+			}
+		},
+		{
+			"id": "persona/transcript-search-tool",
+			"group": "persona",
+			"member": "transcript-search-tool",
+			"title": "transcriptSearchTool — search past conversations",
+			"spec": "§7E",
+			"summary": "A read-only tool that searches past conversation transcripts — the ground truth for memory.",
+			"symbols": {
+				"javascript": "transcriptSearchTool",
+				"python": "transcript_search_tool",
+				"golang": "TranscriptSearchTool",
+				"java": "TranscriptSearch.transcriptSearchTool",
+				"csharp": "TranscriptSearch.Tool",
+				"elixir": "Toolnexus.TranscriptSearch.tool",
+				"clojure": "toolnexus.transcript-search/transcript-search-tool",
+				"rust": "transcript_search_tool"
+			}
+		},
+		{
 			"id": "compaction/compactor",
 			"group": "compaction",
 			"member": "compactor",

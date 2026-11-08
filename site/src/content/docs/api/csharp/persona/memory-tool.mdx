@@ -147,7 +147,51 @@ to "check what you just remembered" in the same turn; it won't be there until th
 |---|---|---|
 | `dir` | `string` | The persona's home directory — the same one passed to `ComposeSoul`/`FromDir`. |
 
+## The notes tier — `notes`
+
+```csharp
+public static ITool Home.MemoryTool(string dir, bool notes = false)
+new Home.FromDirOptions { Notes = true, MemoryIndexCap = new Home.MemoryIndexCap { MaxLines = 200, MaxBytes = 25600 } }
+```
+
+Turn on `notes` (off by default) and the same `memory` tool grows a second tier. `MEMORY.md`
+stays a **short index** loaded every session; the detail lives in **notes** at
+`<dir>/memory/<slug>.md`, which are **never** injected into the prompt and are read only on
+demand. With `notes` off, the tool's schema, description and behaviour are exactly as above.
+
+| Addition | What it does |
+|---|---|
+| `target: "note:<slug>"` | `add` / `replace` / `remove` on `memory/<slug>.md`. `add` to a missing note creates it (and `memory/`). |
+| `action: "read"` | Returns a file's content (`target` required: `self`, `user`, or a note). A missing note is an error. |
+| `action: "list"` | One line per note, `<slug>\t<bytes>`, sorted by slug; `(no notes)` when empty. |
+
+A slug matches `^[a-z0-9][a-z0-9._-]{0,63}$` and may not contain `..`; anything else is an
+error before any file is touched. `replace` and `remove` change only the **first** occurrence of
+the text, in every target. Writes are atomic (temp file, then rename), and writes to the same
+file in one process are serialised, so parallel `add`s never lose an entry. Two processes
+writing the same file: the last write wins.
+
+```csharp
+var memory = Home.MemoryTool("./personas/ava", notes: true);
+
+await memory.ExecuteAsync(new Dictionary<string, object?> { ["action"] = "add", ["target"] = "note:travel", ["text"] = "prefers aisle seats" });
+await memory.ExecuteAsync(new Dictionary<string, object?> { ["action"] = "add", ["text"] = "travel prefs: see [[travel]]" });   // the index line
+
+var list = await memory.ExecuteAsync(new Dictionary<string, object?> { ["action"] = "list" });
+Console.WriteLine(list.Output);   // travel\t22
+var note = await memory.ExecuteAsync(new Dictionary<string, object?> { ["action"] = "read", ["target"] = "note:travel" });
+Console.WriteLine(note.Output);   // - prefers aisle seats
+```
+
+The **2 MB cap** only limits what goes into the prompt. Writes always read and rewrite the
+whole file, so a `MEMORY.md` over 2 MB is never cut short on disk. The separate
+`memoryIndexCap` option on [`fromDir`](/api/csharp/persona/from-dir/) caps the injected index
+to whole lines (`true` = 200 lines / 25600 bytes) and adds a notice telling the model to move
+detail into notes.
+
 ## See also
 
 - [`Home.ComposeSoul`](/api/csharp/persona/compose-soul/) — Build a persona's system prompt from its home directory: identity, memory, skills.
 - [`Home.FromDir`](/api/csharp/persona/from-dir/) — Point at an agent home directory and get a configured agent back.
+- [`dreamer`](/api/csharp/persona/dreamer/) — The built-in agent that keeps notes true against the transcripts.
+- [`transcriptSearchTool`](/api/csharp/persona/transcript-search-tool/) — Read-only search over past conversations.

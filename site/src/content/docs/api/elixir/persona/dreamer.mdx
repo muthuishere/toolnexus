@@ -1,0 +1,131 @@
+---
+title: "Toolnexus.Agents.Home.dreamer"
+description: "The built-in dreamer preset: an agent that verifies a persona's memory against its transcripts on a schedule. — Elixir."
+sidebar:
+  label: "Toolnexus.Agents.Home.dreamer"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<p class="api-crumb">
+<strong>Elixir</strong> · package <code>toolnexus</code> · <a href="https://github.com/muthuishere/toolnexus/blob/main/SPEC.md#7e-agent-home--personas-source-agent-persona-surface">SPEC §7E</a> · <a href="https://github.com/muthuishere/toolnexus/blob/main/elixir/lib/toolnexus/agents/home.ex">elixir/lib/toolnexus/agents/home.ex</a>
+</p>
+
+```elixir
+@spec dreamer(String.t(), keyword() | map()) :: AgentDef.t()
+def dreamer(dir, opts)   # opts: :store (required), :instructions, :name, :model
+
+# the one-line form, on from_dir:
+Home.from_dir(dir, dream: %{every_ms: ..., store: ..., instructions: ...})
+```
+
+`Toolnexus.Agents.Home.dreamer` builds the **dreamer**: a plain agent whose job is to keep a persona's memory true. Its
+tools are **exactly** two — `memory` (with the notes tier on, over `dir`) and
+[`transcript_search`](/api/elixir/persona/transcript-search-tool/) (over your conversation
+store) — never the persona's shell or file tools. Its soul is one `## HEARTBEAT.md` section:
+the SPEC constant `DREAM_PROMPT`, then `DREAM.md` from the home dir (if present), then
+`instructions` (if given). Construction fails without a store, or with a store that cannot
+`list()`.
+
+Each pass works in order: **verify** every index line and note against the transcripts (fix
+what they contradict, drop what they no longer support) → **demote** detail out of `MEMORY.md`
+into a note behind a `[[slug]]` pointer → **merge** duplicate notes → **repair links** → **log**
+one `dream: …` entry to `memory/log.md`. A pass with nothing to change writes nothing and replies
+`HEARTBEAT_OK`, which the heartbeat keeps silent.
+
+## When to use it
+
+Use it for a long-lived persona whose memory is **written by the model** across many sessions:
+a personal assistant, a support agent, an on-call operator. Those memories drift — a wrong fact
+gets recorded once and then re-read every session. The dreamer fixes that offline, against the
+transcripts, so the agent's memory gets better while it sleeps, not worse.
+
+Skip it for one-shot workers, for memory a human curates by hand, or when you keep no
+transcripts (there is nothing to verify against). See the [Dreaming guide](/toolnexus/dreaming/)
+for the full when-to-use table and cadence advice.
+
+## Why this and not the alternative
+
+<Aside type="tip" title="Most of the time, use the dream option on Home.from_dir">
+The one-line form — `Home.from_dir(dir, dream: everyMs + store)` — builds this dreamer and runs it
+on the persona's own runtime when you start the persona with `Home.start_agent`. Call `Toolnexus.Agents.Home.dreamer` directly
+only when **you** own the schedule: a cron job, a CI step, a button, or a test that runs exactly
+one pass.
+</Aside>
+
+A hand-written `HEARTBEAT.md` consolidator (the earlier recipe) can only tidy what memory
+already says. It cannot tell a true note from a wrong one. The dreamer checks claims against the
+transcripts, which are the ground truth, and records every change in `memory/log.md`, so a bad
+"tidy" can be seen and reverted.
+
+## Examples
+
+### 1. The smallest useful call — dream nightly, one line
+
+```elixir
+alias Toolnexus.Agents.Home
+alias Toolnexus.Client.FileConversationStore
+
+store = FileConversationStore.new("./data/conversations")   # your client's transcripts
+
+ava =
+  Home.from_dir("./personas/ava",
+    notes: true,
+    memory_index_cap: true,
+    dream: %{every_ms: 24 * 60 * 60_000, store: store}   # dream nightly
+  )
+
+started = Home.start_agent(ava, rt_opts, every_ms: 30 * 60_000)
+# ... the dreamer runs on the same runtime; Home.stop(started) stops both
+```
+
+### 2. The realistic case — your own schedule
+
+```elixir
+store = FileConversationStore.new("./data/conversations")
+d = Home.dreamer("./personas/ava", store: store)   # a plain AgentDef
+
+# Your schedule: a 6-hourly heartbeat with its own on_beat.
+started =
+  Home.start_agent(d, rt_opts,
+    every_ms: 6 * 60 * 60_000,
+    on_beat: fn summary -> IO.puts("dreamt: #{summary}") end
+  )
+```
+
+### 3. The full surface — goal-focused prose and a single pass on demand
+
+```elixir
+d =
+  Home.dreamer("./personas/ava",
+    store: store,
+    instructions: "Pay special attention to the user's travel preferences.",   # after DREAM.md
+    model: "openai/gpt-4o-mini"
+  )
+
+# One pass, now — from a CI job, a button, or a test.
+r = Toolnexus.Agents.run(d, rt_opts, Home.heartbeat_prompt())
+IO.puts(r.text)   # "HEARTBEAT_OK" when memory already matched the transcripts
+```
+
+Put standing guidance in `DREAM.md` in the home dir (it is read when the dreamer is built);
+use `instructions` for guidance that depends on the host.
+
+## Options
+
+| Option | Default | What it does |
+|---|---|---|
+| store | — (required) | The conversation store to verify against. It must support `list()`. |
+| instructions | none | Host prose appended after `DREAM_PROMPT` and `DREAM.md`. |
+| name | `<basename(dir)>-dreamer` | The agent's name. |
+| model | `inherit` | Model id. `inherit` uses the runtime's model; a cheaper model is usually enough. |
+
+On `Home.from_dir`, the `dream` option takes `everyMs` (must be > 0), `store`, and optional
+`instructions`. Leaving it out changes nothing.
+
+## See also
+
+- [Dreaming guide](/toolnexus/dreaming/) — the memory layout, what a pass does, safety and cadence.
+- [`transcriptSearchTool`](/api/elixir/persona/transcript-search-tool/) — the read-only search the dreamer verifies with.
+- [`memoryTool`](/api/elixir/persona/memory-tool/) — the notes tier (`note:<slug>`, `read`, `list`) the dreamer writes with.
+- [`fromDir`](/api/elixir/persona/from-dir/) — where the one-line `dream` option lives.
