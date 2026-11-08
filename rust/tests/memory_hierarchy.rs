@@ -678,6 +678,43 @@ async fn d2_idle_dreamer_writes_nothing() {
     assert_eq!(snapshot(&home), frozen);
 }
 
+#[tokio::test]
+async fn d7_dream_guard_keeps_user_and_log_safe() {
+    let d = Dream::new();
+    let e = &d.fx["expect"]["D7_dreamGuard"];
+    let home = mk_home(&e["files"]);
+    let dr = d.dreamer(&home);
+    let mem = &dr.spec.tools[0];
+    for c in e["cases"].as_array().unwrap() {
+        assert_eq!(
+            exec(mem, c["args"].clone()).await,
+            json!({"output": c["output"], "isError": c["isError"]}),
+            "{}",
+            s(&c["name"])
+        );
+    }
+    let snap = snapshot(&home);
+    let want: Vec<String> = str_map(&e["files"]).into_keys().collect();
+    assert_eq!(snap.keys().cloned().collect::<Vec<_>>(), want);
+    for (f, body) in str_map(&e["filesAfter"]) {
+        assert_eq!(snap[&f], body, "{f}");
+    }
+    let p = &e["plainToolStillWrites"];
+    let plain = memory_tool_with(&home, MemoryToolOptions { notes: true });
+    assert_eq!(
+        exec(&plain, p["args"].clone()).await,
+        json!({"output": p["output"], "isError": p["isError"]})
+    );
+}
+
+#[test]
+fn d8_dream_prompt_removes_only_contradicted_claims() {
+    let d = Dream::new();
+    let e = &d.fx["expect"]["D8_promptKeepsUnmentionedClaims"];
+    assert!(DREAM_PROMPT.contains(s(&e["dreamPromptContains"])));
+    assert!(!DREAM_PROMPT.contains(s(&e["dreamPromptNotContains"])));
+}
+
 #[test]
 fn d3_dreamer_tools_exactly() {
     let d = Dream::new();

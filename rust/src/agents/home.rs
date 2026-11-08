@@ -609,7 +609,7 @@ pub fn from_dir(dir: impl AsRef<Path>, opts: FromDirOptions) -> Agent {
 /// `HEARTBEAT_OK` keeps an idle pass silent.
 pub const DREAM_PROMPT: &str = "You are dreaming: an offline pass over your own memory. Memory exists so that a future session decides better. MEMORY.md is a short index loaded at the start of every session; notes (memory target \"note:<slug>\") hold the detail; the transcripts (transcript_search) are the ground truth of what actually happened.
 Work in this order:
-1. Verify: read MEMORY.md and the notes it points to (memory read, memory list) and check each claim against the transcripts. Fix a claim the transcripts contradict; remove one they no longer support.
+1. Verify: read MEMORY.md and the notes it points to (memory read, memory list) and check each claim against the transcripts. Fix or remove a claim only when it is contradicted by the transcripts; a claim they do not mention stays (transcripts may be pruned).
 2. Demote: move detail out of MEMORY.md into a note and leave a one-line [[slug]] pointer, so the index stays short.
 3. Merge: fold duplicate or conflicting notes into one.
 4. Repair links: point every [[slug]] at an existing note or create it; give every note an index line.
@@ -668,12 +668,37 @@ pub fn dreamer(dir: impl AsRef<Path>, opts: DreamerOptions) -> Result<Agent, Str
             soul: format!("## HEARTBEAT.md\n\n{}", parts.join("\n\n")),
             model,
             tools: vec![
-                memory_tool_with(dir, MemoryToolOptions { notes: true }),
+                dream_guard(memory_tool_with(dir, MemoryToolOptions { notes: true })),
                 search,
             ],
             ..Default::default()
         },
     ))
+}
+
+/// The dream guard (SPEC §7E "Dreaming"): the dreamer's `memory` tool refuses every action
+/// on `USER.md` and `replace`/`remove` on `note:log` before anything is read or written, so
+/// a dream never touches the user model and its audit trail is append-only.
+fn dream_guard(mem: crate::Tool) -> crate::Tool {
+    let inner = mem.execute.clone();
+    crate::Tool {
+        execute: Arc::new(move |args: Value, ctx| {
+            let target = args.get("target").and_then(Value::as_str);
+            let action = args.get("action").and_then(Value::as_str);
+            let refusal = match (target, action) {
+                (Some("user"), _) => Some("dreamer: USER.md is off-limits"),
+                (Some("note:log"), Some("replace" | "remove")) => {
+                    Some("dreamer: memory/log.md is append-only")
+                }
+                _ => None,
+            };
+            match refusal {
+                Some(msg) => Box::pin(async move { crate::ToolResult::error(msg) }),
+                None => inner(args, ctx),
+            }
+        }),
+        ..mem
+    }
 }
 
 /// The wake prompt of every heartbeat.
