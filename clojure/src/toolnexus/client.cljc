@@ -442,7 +442,8 @@
                     status listed here. Example: a Cloudflare-fronted origin
                     that answers `520`–`527`.
     :hooks          §8 lifecycle middleware — a map of any of
-                    {:before-llm :after-llm :before-tool :after-tool}; see
+                    {:before-llm :after-llm :before-tool :after-tool
+                     :after-round}; see
                     `before-llm!` / `execute-tool`. Absent => nothing changes.
     :wait-for       (fn [request] answer) — the ONE host slot of §10.
     :wait-for-ctx   (fn [ctx request] answer) — `:wait-for` that also receives
@@ -676,6 +677,10 @@
 ;;   :before-tool {:name :args :id :turn}          -> {:result} short-circuits,
 ;;                                                    {:args} rewrites
 ;;   :after-tool  {:name :args :result :id :turn}  -> {:result} replaces
+;;   :after-round {:turn :final :text :messages}   -> {:inject ["..."]} appends
+;;                  user messages at the round boundary (#192); on a final
+;;                  round (only when a turn remains) a non-empty inject
+;;                  continues the loop
 ;;
 ;; The event maps are kebab-case because a hook never crosses the wire; the
 ;; `ToolResult` one carries keeps its pinned `:isError`, because that one does.
@@ -710,6 +715,20 @@
       [(or (:messages ov) messages) (or (:tools ov) tools)
        (if (and (string? m) (not= "" m)) m (:model client))])
     [messages tools (:model client)]))
+
+(defn- round-end
+  "§8 `afterRound` (#192): fire the round-boundary hook and append its non-empty
+  `:inject` strings as user messages. Returns `[appended? messages]`. A final
+  round fires only when a turn remains (`turn + 1 < max-turns`)."
+  [client messages turn final? text max-turns]
+  (let [f (hook-of client :after-round)]
+    (if (or (nil? f) (and final? (>= (inc turn) max-turns)))
+      [false messages]
+      (let [out (f {:turn turn :final final? :text text :messages messages})
+            add (->> (:inject out)
+                     (filter #(and (string? %) (not= "" %)))
+                     (mapv (fn [m] {:role "user" :content m})))]
+        [(boolean (seq add)) (into messages add)]))))
 
 (defn after-llm!
   "§8 `afterLLM` — observe only (logging, cost, tracing). `:response` is the
@@ -1995,9 +2014,14 @@
                          tools (inc turn) turns tool-calls usage turn-model))
 
                 (empty? calls)
-                (let [r (finish! (assoc (run-result client (str (carry) (final-text client body)) messages tool-calls turns usage false) :model turn-model))]
-                  (emit! on-event {:type "done" :result r})
-                  r)
+                (let [text (str (carry) (final-text client body))
+                      [more? messages] (round-end client messages turn true text max-turns)]
+                  (if more?
+                    (do (when recovery (swap! recovery assoc :carry ""))
+                        (recur messages tools (inc turn) turns tool-calls usage turn-model))
+                    (let [r (finish! (assoc (run-result client text messages tool-calls turns usage false) :model turn-model))]
+                      (emit! on-event {:type "done" :result r})
+                      r)))
                 :else
                 (let [_       (when recovery (swap! recovery assoc :carry ""))
                       _       (doseq [c calls]
@@ -2071,7 +2095,8 @@
                     (let [r (run-metric! (assoc (pending-result client halted msgs (into tool-calls records) turns usage) :model turn-model))]
                       (emit! on-event {:type "done" :result r})
                       r)
-                    (recur msgs tools (inc turn) turns (into tool-calls records) usage turn-model)))))))))
+                    (recur (second (round-end client msgs turn false "" max-turns))
+                           tools (inc turn) turns (into tool-calls records) usage turn-model)))))))))
     ;; SPEC §8 "Interrupted turns are saved": an error or a cancellation still
     ;; saves the prompt and every complete message, unanswered tool calls
     ;; closed with an `interrupted` result. The ORIGINAL error is rethrown; a

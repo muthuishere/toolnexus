@@ -41,6 +41,18 @@ before `onError` runs, in `run`, `ask` and `stream`. `onError` still has the fin
 - In-process clients have no wire and emit no retry event.
 
 Spec: `SPEC.md` § Streaming and § Resilience; `openspec/changes/add-retry-stream-event`.
+### Round-boundary hook: append a message between rounds, or keep a stopped loop going (#192)
+
+A new optional hook, `afterRound({ turn, final, text, messages })`, fires at the end of every loop
+round — after the round's tool results are in the transcript and before the next request. Return
+`{ inject: ["…"] }` and each string is appended as a user message: todo reminders, sub-agent
+notices, budget warnings, without rebuilding the transcript in `beforeLLM`.
+
+It also fires when the model **stops** (no tool call) as long as a turn remains: a non-empty
+injection there continues the loop ("you still have 2 open todos"). `maxTurns` still bounds it.
+Without the hook nothing changes. Run and stream, OpenAI and Anthropic styles, and the §7D agent
+path (hooks are forwarded verbatim). It never fires on a pending halt, an error, `translate`, or an
+ACP model source. Spec: SPEC.md §8 Hooks; change `openspec/changes/add-round-boundary-hook`.
 
 **Classifier: an `openai` backend on OpenAI's Decisions API** (issue #157). `createClassifier({backend:
 "openai"})` sends the same noul / choice / score questions to `POST https://api.openai.com/v1/decisions`

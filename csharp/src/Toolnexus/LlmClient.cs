@@ -531,6 +531,35 @@ public sealed partial class LlmClient
         public Action<AfterLLMEvent>? AfterLLM { get; set; }
         public Func<BeforeToolEvent, ToolOverride?>? BeforeTool { get; set; }
         public Func<AfterToolEvent, ToolOverride?>? AfterTool { get; set; }
+        /// <summary>SPEC §8 round boundary (#192): after a round's tool results (Final=false), or when
+        /// the model answered with no tool call and a turn remains (Final=true). Each non-empty
+        /// <c>Inject</c> string is appended as a user message; on a final round that continues the loop.</summary>
+        public Func<AfterRoundEvent, RoundInjection?>? AfterRound { get; set; }
+    }
+
+    /// <summary>The <see cref="Hooks.AfterRound"/> event: 0-based turn, whether the model stopped,
+    /// that answer's text (else ""), and the working transcript.</summary>
+    public sealed record AfterRoundEvent(int Turn, bool Final, string Text, List<object?> Messages);
+    /// <summary>What <see cref="Hooks.AfterRound"/> may return.</summary>
+    public sealed record RoundInjection(IReadOnlyList<string>? Inject = null)
+    {
+        public static RoundInjection Of(params string[] inject) => new(inject);
+    }
+
+    /// <summary>§8 AfterRound: fire the hook and append its injections; true when any appended.
+    /// A final round fires only when a turn remains.</summary>
+    private bool RoundEnd(List<object?> messages, int turn, bool final, string text)
+    {
+        var h = _opts.Hooks?.AfterRound;
+        if (h == null) return false;
+        if (final && turn + 1 >= MaxTurns()) return false;
+        var o = h(new AfterRoundEvent(turn, final, text, messages));
+        var added = false;
+        foreach (var m in o?.Inject ?? Array.Empty<string>())
+        {
+            if (!string.IsNullOrEmpty(m)) { messages.Add(Msg("user", m)); added = true; }
+        }
+        return added;
     }
 
     private async Task<(IDictionary<string, object?> Args, ToolResult Result)> RunToolAsync(
@@ -1390,6 +1419,7 @@ public sealed partial class LlmClient
                 if (calls == null || calls.Count == 0)
                 {
                     var content = message.Get("content");
+                    if (RoundEnd(messages, turn, true, rec.Final(content?.ToString() ?? ""))) { rec.Carry = ""; continue; }
                     return EndRun(runStart, rec.Final(content?.ToString() ?? ""), messages, toolCalls, turns, usage, lastModel);
                 }
                 rec.Carry = "";
@@ -1444,6 +1474,7 @@ public sealed partial class LlmClient
                     }
                 }
                 RecordRelocation(relocated, relocations, messages.Count);
+                RoundEnd(messages, turn, false, "");
             }
             // MaxTurns exhausted while the model was still emitting tool calls (§8 addendum).
             return EndRun(runStart, LastAssistantText(messages), messages, toolCalls, turns, usage, lastModel, "incomplete");
@@ -1518,7 +1549,10 @@ public sealed partial class LlmClient
                         continue;
                     }
                     if (uses.Count == 0)
+                    {
+                        if (RoundEnd(messages, turn, true, rec.Final(text.ToString()))) { rec.Carry = ""; continue; }
                         return EndRun(runStart, rec.Final(text.ToString()), messages, toolCalls, turns, usage, lastModel);
+                    }
                     rec.Carry = "";
                 }
 
@@ -1572,6 +1606,7 @@ public sealed partial class LlmClient
                     }
                 }
                 messages.Add(new Dictionary<string, object?> { ["role"] = "user", ["content"] = resultBlocks });
+                RoundEnd(messages, turn, false, "");
             }
             // MaxTurns exhausted while the model was still emitting tool calls (§8 addendum).
             return EndRun(runStart, "", messages, toolCalls, turns, usage, lastModel, "incomplete");
@@ -1711,6 +1746,7 @@ public sealed partial class LlmClient
                 if (order.Count == 0)
                 {
                     messages.Add(Msg("assistant", content.ToString()));
+                    if (RoundEnd(messages, turn, true, rec.Final(content.ToString()))) { rec.Carry = ""; continue; }
                     onEvent(StreamEvent.UsageEvent(usage.Copy()));
                     var done0 = EndRun(runStart, rec.Final(content.ToString()), messages, toolCalls, turns, usage, lastModel);
                     onEvent(StreamEvent.DoneEvent(done0));
@@ -1784,6 +1820,7 @@ public sealed partial class LlmClient
                     onEvent(ResultEvent(slot[0], slot[1], Json.ParseObjectLoose(slot[2]), rr.Result));
                 }
                 RecordRelocation(relocated, relocations, messages.Count);
+                RoundEnd(messages, turn, false, "");
             }
             // MaxTurns exhausted while the model was still emitting tool calls (§8 addendum).
             var done = EndRun(runStart, LastAssistantText(messages), messages, toolCalls, turns, usage, lastModel, "incomplete");
@@ -1942,6 +1979,7 @@ public sealed partial class LlmClient
                 }
                 if (stopReason != "tool_use" || uses.Count == 0)
                 {
+                    if (RoundEnd(messages, turn, true, rec.Final(textS.ToString()))) { rec.Carry = ""; continue; }
                     onEvent(StreamEvent.UsageEvent(usage.Copy()));
                     var done0 = EndRun(runStart, rec.Final(textS.ToString()), messages, toolCalls, turns, usage, lastModel);
                     onEvent(StreamEvent.DoneEvent(done0));
@@ -2003,6 +2041,7 @@ public sealed partial class LlmClient
                     onEvent(ResultEvent(id, name, u.Get("input") as IDictionary<string, object?> ?? new Dictionary<string, object?>(), r.Result));
                 }
                 messages.Add(new Dictionary<string, object?> { ["role"] = "user", ["content"] = results });
+                RoundEnd(messages, turn, false, "");
             }
             // MaxTurns exhausted while the model was still emitting tool calls (§8 addendum).
             var done = EndRun(runStart, "", messages, toolCalls, turns, usage, lastModel, "incomplete");

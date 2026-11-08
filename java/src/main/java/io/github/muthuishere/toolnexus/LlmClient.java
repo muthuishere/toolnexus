@@ -743,6 +743,19 @@ public final class LlmClient {
         }
     }
 
+    /**
+     * Event passed to {@link Hooks#afterRound} (SPEC §8, #192): fired after a round's tool results
+     * ({@code isFinal=false}, text ""), or when the model answered with no tool call and a turn
+     * remains ({@code isFinal=true}, text = the answer). {@code messages} is the working transcript.
+     */
+    public record AfterRoundEvent(int turn, boolean isFinal, String text, List<Object> messages) {}
+
+    /** Return value of {@link Hooks#afterRound}: each non-empty string becomes a user message;
+     *  a non-empty injection on a final round continues the loop. */
+    public record RoundInjection(List<String> inject) {
+        public static RoundInjection of(String... inject) { return new RoundInjection(List.of(inject)); }
+    }
+
     /** Event passed to {@link Hooks#afterTool}: the call plus the result it produced. */
     public record AfterToolEvent(String name, Map<String, Object> args, ToolResult result,
                                  String id, int turn) {}
@@ -769,11 +782,14 @@ public final class LlmClient {
         public Consumer<AfterLLMEvent> afterLLM;                  // observe only
         public Function<BeforeToolEvent, ToolOverride> beforeTool; // may return null
         public Function<AfterToolEvent, ToolOverride> afterTool;   // may return null
+        /** §8 round boundary (#192): may return null; non-empty inject is appended as user messages. */
+        public Function<AfterRoundEvent, RoundInjection> afterRound;
 
         public Hooks beforeLLM(Function<BeforeLLMEvent, LLMOverride> v) { this.beforeLLM = v; return this; }
         public Hooks afterLLM(Consumer<AfterLLMEvent> v) { this.afterLLM = v; return this; }
         public Hooks beforeTool(Function<BeforeToolEvent, ToolOverride> v) { this.beforeTool = v; return this; }
         public Hooks afterTool(Function<AfterToolEvent, ToolOverride> v) { this.afterTool = v; return this; }
+        public Hooks afterRound(Function<AfterRoundEvent, RoundInjection> v) { this.afterRound = v; return this; }
     }
 
     /** Carries the (possibly rewritten) args and the final result of a {@link #runTool} call. */
@@ -2236,6 +2252,21 @@ public final class LlmClient {
         return u.wrapped() ? ev.viaCallTool(u.name(), null) : ev;
     }
 
+    /** §8 afterRound: fire the hook, append injections as user messages; true when any appended.
+     *  A final round fires only when a turn remains. */
+    private boolean roundEnd(List<Object> messages, int turn, boolean fin, String text) {
+        if (opts.hooks == null || opts.hooks.afterRound == null) return false;
+        if (fin && turn + 1 >= maxTurns()) return false;
+        RoundInjection out = opts.hooks.afterRound.apply(new AfterRoundEvent(turn, fin, text, messages));
+        boolean added = false;
+        if (out != null && out.inject() != null) {
+            for (String m : out.inject()) {
+                if (m != null && !m.isEmpty()) { messages.add(msg("user", m)); added = true; }
+            }
+        }
+        return added;
+    }
+
     private int maxTurns() {
         return opts.maxTurns != null ? opts.maxTurns : 10;
     }
@@ -2360,6 +2391,7 @@ public final class LlmClient {
                     continue;
                 }
                 if (calls == null || calls.isEmpty()) {
+                    if (roundEnd(messages, turn, true, rec.carry + msgText)) { rec.carry = ""; continue; }
                     return endRun(lastModel[0], runStart, rec.carry + msgText,
                             messages, toolCalls, turns, usage);
                 }
@@ -2422,6 +2454,7 @@ public final class LlmClient {
                 if (!relocatedBlocks.isEmpty()) {
                     relocated.put(toolMsgs[n - 1], syntheticUserMessage(relocatedBlocks));
                 }
+                roundEnd(messages, turn, false, "");
             }
             return incompleteRun(lastModel[0], runStart, lastAssistantText(messages), messages, toolCalls, turns, usage);
         } catch (RuntimeException e) {
@@ -2521,6 +2554,7 @@ public final class LlmClient {
                     continue;
                 }
                 if (uses.isEmpty()) {
+                    if (roundEnd(messages, turn, true, rec.carry + text)) { rec.carry = ""; continue; }
                     return endRun(lastModel[0], runStart, rec.carry + text, messages, toolCalls, turns, usage);
                 }
                 rec.carry = "";
@@ -2582,6 +2616,7 @@ public final class LlmClient {
                 if (halted != null) {
                     return pendingRun(lastModel[0], runStart, halted, messages, toolCalls, turns, usage);
                 }
+                roundEnd(messages, turn, false, "");
             }
             return incompleteRun(lastModel[0], runStart, "", messages, toolCalls, turns, usage);
         } catch (RuntimeException e) {
@@ -2730,6 +2765,7 @@ public final class LlmClient {
                 }
                 if (order.isEmpty()) {
                     messages.add(msg("assistant", content.toString()));
+                    if (roundEnd(messages, turn, true, rec.carry + content)) { rec.carry = ""; continue; }
                     onEvent.accept(StreamEvent.usage(copyUsage(usage)));
                     RunResult done = endRun(lastModel[0], runStart, rec.carry + content, messages, toolCalls, turns, usage);
                     onEvent.accept(StreamEvent.done(done));
@@ -2808,6 +2844,7 @@ public final class LlmClient {
                     onEvent.accept(StreamEvent.done(done));
                     return done;
                 }
+                roundEnd(messages, turn, false, "");
             }
             RunResult done = incompleteRun(lastModel[0], runStart, lastAssistantText(messages), messages, toolCalls, turns, usage);
             onEvent.accept(StreamEvent.done(done));
@@ -2981,6 +3018,7 @@ public final class LlmClient {
                     continue;
                 }
                 if (!"tool_use".equals(stopReason[0]) || uses.isEmpty()) {
+                    if (roundEnd(messages, turn, true, rec.carry + text)) { rec.carry = ""; continue; }
                     onEvent.accept(StreamEvent.usage(copyUsage(usage)));
                     RunResult done = endRun(lastModel[0], runStart, rec.carry + text, messages, toolCalls, turns, usage);
                     onEvent.accept(StreamEvent.done(done));
@@ -3044,6 +3082,7 @@ public final class LlmClient {
                     onEvent.accept(StreamEvent.done(done));
                     return done;
                 }
+                roundEnd(messages, turn, false, "");
             }
             RunResult done = incompleteRun(lastModel[0], runStart, "", messages, toolCalls, turns, usage);
             onEvent.accept(StreamEvent.done(done));

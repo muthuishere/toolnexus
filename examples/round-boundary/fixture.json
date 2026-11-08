@@ -1,0 +1,48 @@
+{
+  "$schema": "toolnexus-round-boundary-fixture/v1",
+  "description": "SPEC §8 Hooks `afterRound` (change add-round-boundary-hook, issue #192). Each scenario scripts OpenAI-style assistant replies, a hook rule, and the expected wire behaviour. Every port asserts R1-R5 on run AND stream (OpenAI style), and R2 on the Anthropic run; R6 on the §7D agent path. A tool named `echo` returns its `text` argument.",
+  "scenarios": [
+    {
+      "id": "R1", "name": "inject after tool results",
+      "maxTurns": 10,
+      "replies": [ {"tool_call": {"id": "c1", "name": "echo", "arguments": {"text": "hi"}}}, {"content": "done"} ],
+      "hook": "when final is false return inject ['todo: 2 open']; otherwise return nothing",
+      "expect": { "requests": 2, "text": "done", "secondRequestTail": [ {"role": "tool", "content": "hi"}, {"role": "user", "content": "todo: 2 open"} ],
+                  "hookCalls": [ {"turn": 0, "final": false, "text": ""}, {"turn": 1, "final": true, "text": "done"} ] }
+    },
+    {
+      "id": "R2", "name": "continue when the model stops",
+      "maxTurns": 10,
+      "replies": [ {"content": "first"}, {"content": "second"} ],
+      "hook": "when final is true and turn is 0 return inject ['keep going']; otherwise nothing",
+      "expect": { "requests": 2, "text": "second", "secondRequestTail": [ {"role": "assistant", "content": "first"}, {"role": "user", "content": "keep going"} ],
+                  "hookCalls": [ {"turn": 0, "final": true, "text": "first"}, {"turn": 1, "final": true, "text": "second"} ] }
+    },
+    {
+      "id": "R3", "name": "empty injection ends normally",
+      "maxTurns": 10,
+      "replies": [ {"content": "only"} ],
+      "hook": "return inject [''] (empty strings are skipped)",
+      "expect": { "requests": 1, "text": "only", "status": "done", "hookCalls": [ {"turn": 0, "final": true, "text": "only"} ] }
+    },
+    {
+      "id": "R4", "name": "no continuation past maxTurns",
+      "maxTurns": 1,
+      "replies": [ {"content": "only"} ],
+      "hook": "always return inject ['again']",
+      "expect": { "requests": 1, "text": "only", "hookCalls": [] }
+    },
+    {
+      "id": "R5", "name": "a failing hook stops the run",
+      "maxTurns": 10,
+      "replies": [ {"tool_call": {"id": "c1", "name": "echo", "arguments": {"text": "hi"}}}, {"content": "never"} ],
+      "hook": "throw / return an error 'round-boom'",
+      "expect": { "requests": 1, "error": "round-boom" }
+    },
+    {
+      "id": "R6", "name": "the §7D agent path forwards afterRound",
+      "hook": "runtime hooks.afterRound as R2",
+      "expect": { "requests": 2, "text": "second" }
+    }
+  ]
+}

@@ -305,6 +305,50 @@ type Hooks struct {
 	// AfterTool runs after a tool executes. Return an override with Result set to
 	// replace (redact / annotate) the output.
 	AfterTool func(ctx context.Context, ev AfterToolEvent) (*ToolOverride, error)
+	// AfterRound runs at each round boundary (SPEC §8, #192): after a round's
+	// tool results are appended (Final=false), or when the model answered with a
+	// turn remaining (Final=true, Text = its answer). Each non-empty Inject string
+	// is appended as a {role:"user", content:s} message; a non-empty Inject on a
+	// final round CONTINUES the loop. It never fires on a §10 pending halt.
+	AfterRound func(ctx context.Context, ev AfterRoundEvent) (*RoundInjection, error)
+}
+
+// AfterRoundEvent is passed to Hooks.AfterRound. Messages is the working
+// transcript (read-only by contract).
+type AfterRoundEvent struct {
+	Turn     int
+	Final    bool
+	Text     string
+	Messages []any
+}
+
+// RoundInjection is returned by Hooks.AfterRound. Each non-empty string in
+// Inject becomes one plain-text user message, in order.
+type RoundInjection struct {
+	Inject []string
+}
+
+// roundEnd fires Hooks.AfterRound (SPEC §8 afterRound, #192) and appends its
+// injections as user messages. added reports whether anything was appended. A
+// final round fires only when a turn remains.
+func (c *Client) roundEnd(ctx context.Context, messages []any, turn int, final bool, text string) (out []any, added bool, err error) {
+	if c.opts.Hooks == nil || c.opts.Hooks.AfterRound == nil {
+		return messages, false, nil
+	}
+	if final && turn+1 >= c.maxTurns() {
+		return messages, false, nil
+	}
+	inj, err := c.opts.Hooks.AfterRound(ctx, AfterRoundEvent{Turn: turn, Final: final, Text: text, Messages: messages})
+	if err != nil || inj == nil {
+		return messages, false, err
+	}
+	for _, m := range inj.Inject {
+		if m != "" {
+			messages = append(messages, map[string]any{"role": "user", "content": m})
+			added = true
+		}
+	}
+	return messages, added, nil
 }
 
 // BeforeLLMEvent is passed to Hooks.BeforeLLM.
@@ -1330,6 +1374,13 @@ func (c *Client) runOpenAI(ctx context.Context, prompt any, tk *Toolkit, history
 			continue
 		}
 		if len(msg.ToolCalls) == 0 {
+			var more bool
+			if messages, more, err = c.roundEnd(ctx, messages, turn, true, rec.final(msg.Content)); err != nil {
+				return RunResult{}, err
+			} else if more {
+				rec.carry = ""
+				continue
+			}
 			return c.endRun(lastModel, runStart, rec.final(msg.Content), messages, toolCalls, turns, usage), nil
 		}
 		rec.carry = ""
@@ -1396,6 +1447,9 @@ func (c *Client) runOpenAI(ctx context.Context, prompt any, tk *Toolkit, history
 			if haltedAt[i] != nil {
 				return c.pendingRun(lastModel, runStart, *haltedAt[i], messages, toolCalls, turns, usage), nil
 			}
+		}
+		if messages, _, err = c.roundEnd(ctx, messages, turn, false, ""); err != nil {
+			return RunResult{}, err
 		}
 	}
 	return c.endRunExhausted(lastModel, runStart, lastText(messages), messages, toolCalls, turns, usage), nil
@@ -1635,6 +1689,13 @@ func (c *Client) runAnthropic(ctx context.Context, prompt any, tk *Toolkit, hist
 			continue
 		}
 		if len(uses) == 0 {
+			var more bool
+			if messages, more, err = c.roundEnd(ctx, messages, turn, true, rec.final(strings.Join(textParts, ""))); err != nil {
+				return RunResult{}, err
+			} else if more {
+				rec.carry = ""
+				continue
+			}
 			return c.endRun(lastModel, runStart, rec.final(strings.Join(textParts, "")), messages, toolCalls, turns, usage), nil
 		}
 		rec.carry = ""
@@ -1709,6 +1770,9 @@ func (c *Client) runAnthropic(ctx context.Context, prompt any, tk *Toolkit, hist
 		messages = append(messages, map[string]any{"role": "user", "content": blocks})
 		if haltReq != nil {
 			return c.pendingRun(lastModel, runStart, *haltReq, messages, toolCalls, turns, usage), nil
+		}
+		if messages, _, err = c.roundEnd(ctx, messages, turn, false, ""); err != nil {
+			return RunResult{}, err
 		}
 	}
 	return c.endRunExhausted(lastModel, runStart, "", messages, toolCalls, turns, usage), nil
@@ -2011,6 +2075,13 @@ func (c *Client) streamOpenAI(ctx context.Context, prompt any, tk *Toolkit, hist
 		if len(calls) == 0 {
 			text := content.String()
 			messages = append(messages, map[string]any{"role": "assistant", "content": text})
+			var more bool
+			if messages, more, err = c.roundEnd(ctx, messages, turn, true, rec.final(text)); err != nil {
+				return err
+			} else if more {
+				rec.carry = ""
+				continue
+			}
 			u := usage
 			ch <- StreamEvent{Type: "usage", Usage: &u}
 			res := c.endRun(lastModel, runStart, rec.final(text), messages, toolCalls, turns, usage)
@@ -2101,6 +2172,9 @@ func (c *Client) streamOpenAI(ctx context.Context, prompt any, tk *Toolkit, hist
 				return nil
 			}
 			ch <- events[i]
+		}
+		if messages, _, err = c.roundEnd(ctx, messages, turn, false, ""); err != nil {
+			return err
 		}
 	}
 	res := c.endRunExhausted(lastModel, runStart, lastText(messages), messages, toolCalls, turns, usage)
@@ -2323,6 +2397,13 @@ func (c *Client) streamAnthropic(ctx context.Context, prompt any, tk *Toolkit, h
 		}
 		if stopReason != "tool_use" || len(uses) == 0 {
 			text := rec.final(strings.Join(textParts, ""))
+			var more bool
+			if messages, more, err = c.roundEnd(ctx, messages, turn, true, text); err != nil {
+				return err
+			} else if more {
+				rec.carry = ""
+				continue
+			}
 			u := usage
 			ch <- StreamEvent{Type: "usage", Usage: &u}
 			res := c.endRun(lastModel, runStart, text, messages, toolCalls, turns, usage)
@@ -2399,6 +2480,9 @@ func (c *Client) streamAnthropic(ctx context.Context, prompt any, tk *Toolkit, h
 			ch <- events[i]
 		}
 		messages = append(messages, map[string]any{"role": "user", "content": resultBlocks})
+		if messages, _, err = c.roundEnd(ctx, messages, turn, false, ""); err != nil {
+			return err
+		}
 	}
 	res := c.endRunExhausted(lastModel, runStart, "", messages, toolCalls, turns, usage)
 	u := usage

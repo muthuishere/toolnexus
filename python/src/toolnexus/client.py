@@ -133,6 +133,11 @@ def _is_retryable_status(status: int, extra: Optional[Iterable[int]] = None) -> 
 #       -> {"result": ToolResult} to SHORT-CIRCUIT, or {"args": {...}} to rewrite.
 #   after_tool({"name", "args", "result", "id", "turn"})
 #       -> {"result": ToolResult} to replace the result.
+#   after_round({"turn", "final", "text", "messages"})  (#192)
+#       -> optionally {"inject": [str, ...]}: each non-empty string is appended as a
+#          {"role": "user", "content": s} message. Fires after a round's tool results
+#          (final=False), or when the model answered with a turn remaining (final=True);
+#          a non-empty inject on a final round CONTINUES the loop.
 Hooks = Any
 
 
@@ -1480,6 +1485,24 @@ class Client:
     # ----------------------------------------------------------------------- #
     # §10 Suspension — Pending / wait_for
     # ----------------------------------------------------------------------- #
+    async def _round_end(self, messages: list[dict[str, Any]], turn: int, final: bool, text: str) -> bool:
+        """§8 ``after_round`` (#192): fire the round-boundary hook and append its injections
+        as user messages. Returns True when something was appended. A final round fires
+        only when a turn remains."""
+        hook = _get_hook(self.hooks, "after_round")
+        if hook is None:
+            return False
+        if final and turn + 1 >= self.max_turns:
+            return False
+        out = await _call_hook(hook, {"turn": turn, "final": final, "text": text, "messages": messages})
+        inject = (out.get("inject") if isinstance(out, Mapping) else getattr(out, "inject", None)) if out else None
+        added = False
+        for m in inject or []:
+            if isinstance(m, str) and m != "":
+                messages.append({"role": "user", "content": m})
+                added = True
+        return added
+
     def _pending_run(
         self,
         run_start: float,
@@ -2424,6 +2447,9 @@ class Client:
                     messages.append({"role": "user", "content": fix})
                     continue
                 if not calls:
+                    if await self._round_end(messages, turn, True, rec.carry + (msg.get("content") or "")):
+                        rec.carry = ""
+                        continue
                     return self._end_run(
                         run_start, rec.carry + (msg.get("content") or ""), messages, tool_calls, turns, usage, model=last_model
                     )
@@ -2456,6 +2482,7 @@ class Client:
                     messages.append(_tool_message(call_id, name, result))
                     if halted is not None:
                         return self._pending_run(run_start, halted, messages, tool_calls, turns, usage, model=last_model)
+                await self._round_end(messages, turn, False, "")
 
             return self._end_run(
                 run_start, _last_text(messages), messages, tool_calls, turns, usage, at_limit=True, model=last_model
@@ -2556,6 +2583,9 @@ class Client:
                     messages.append({"role": "user", "content": fix})
                     continue
                 if not uses:
+                    if await self._round_end(messages, turn, True, rec.carry + text):
+                        rec.carry = ""
+                        continue
                     return self._end_run(run_start, rec.carry + text, messages, tool_calls, turns, usage, model=last_model)
                 rec.carry = ""
 
@@ -2586,6 +2616,7 @@ class Client:
                 messages.append({"role": "user", "content": results})
                 if halted is not None:
                     return self._pending_run(run_start, halted, messages, tool_calls, turns, usage, model=last_model)
+                await self._round_end(messages, turn, False, "")
 
             return self._end_run(run_start, "", messages, tool_calls, turns, usage, at_limit=True, model=last_model)
         except Exception as e:
@@ -2725,6 +2756,9 @@ class Client:
                     continue
                 if not calls:
                     messages.append({"role": "assistant", "content": content})
+                    if await self._round_end(messages, turn, True, rec.carry + content):
+                        rec.carry = ""
+                        continue
                     yield {"type": "usage", "usage": usage}
                     yield {"type": "done", "result": self._end_run(run_start, rec.carry + content, messages, tool_calls, turns, usage, model=last_model)}
                     return
@@ -2766,6 +2800,7 @@ class Client:
                     tool_calls.append(self._tool_call_record(c["name"], args, result, c["id"]))
                     messages.append(_tool_message(c["id"], c["name"], result))
                     yield self._result_event(c["id"], c["name"], _safe_json(c["args"]), result)
+                await self._round_end(messages, turn, False, "")
 
             yield {"type": "done", "result": self._end_run(run_start, _last_text(messages), messages, tool_calls, turns, usage, at_limit=True, model=last_model)}
         except Exception as e:
@@ -2920,6 +2955,9 @@ class Client:
                     messages.append({"role": "user", "content": fix})
                     continue
                 if stop_reason != "tool_use" or not uses:
+                    if await self._round_end(messages, turn, True, rec.carry + text):
+                        rec.carry = ""
+                        continue
                     yield {"type": "usage", "usage": usage}
                     yield {"type": "done", "result": self._end_run(run_start, rec.carry + text, messages, tool_calls, turns, usage, model=last_model)}
                     return
@@ -2947,6 +2985,7 @@ class Client:
                         yield {"type": "done", "result": self._pending_run(run_start, halted, messages, tool_calls, turns, usage, model=last_model)}
                         return
                 messages.append({"role": "user", "content": results})
+                await self._round_end(messages, turn, False, "")
 
             yield {"type": "done", "result": self._end_run(run_start, "", messages, tool_calls, turns, usage, at_limit=True, model=last_model)}
         except Exception as e:

@@ -306,6 +306,7 @@ public final class Loop {
             merged.beforeLLM = hooks.beforeLLM;
             merged.afterLLM = hooks.afterLLM;
             merged.afterTool = hooks.afterTool;
+            merged.afterRound = hooks.afterRound;
         }
         merged.beforeTool = ev -> {
             for (Guardrail g : guardrails) {

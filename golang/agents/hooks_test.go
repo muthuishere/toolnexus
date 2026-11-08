@@ -343,3 +343,43 @@ func TestAgentHooks_H7_FailingBeforeLLMIsAnErrorResultAtTheHandleBoundary(t *tes
 		t.Fatalf("no provider request may be sent, got %d", n)
 	}
 }
+
+// R6 (examples/round-boundary/fixture.json, #192): the §7D runtime forwards
+// Hooks.AfterRound verbatim — a final-round injection continues the agent turn.
+func TestAgentHooks_AfterRoundForwarded(t *testing.T) {
+	var mu sync.Mutex
+	n := 0
+	mock := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		mu.Lock()
+		n++
+		k := n
+		mu.Unlock()
+		if k == 1 {
+			return textResp("first"), nil
+		}
+		return textResp("second"), nil
+	})
+	rt := NewRuntime(Options{
+		Transport: mock,
+		Registry:  hooksReg(Def{Name: "a", Does: "x", Soul: "soul-a", Model: "m-a"}),
+		Hooks: &tn.Hooks{AfterRound: func(_ context.Context, ev tn.AfterRoundEvent) (*tn.RoundInjection, error) {
+			if ev.Final && ev.Turn == 0 {
+				return &tn.RoundInjection{Inject: []string{"keep going"}}, nil
+			}
+			return nil, nil
+		}},
+	})
+	defer rt.Close(rt.Root, nil)
+	h, err := rt.Spawn(rt.Root, "a", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := rt.RunTurn(h, "hello")
+	if r.IsError || r.Text != "second" || n != 2 {
+		t.Fatalf("text=%q requests=%d isError=%v", r.Text, n, r.IsError)
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
