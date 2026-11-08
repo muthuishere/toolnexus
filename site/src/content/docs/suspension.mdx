@@ -9,7 +9,7 @@ Your agent is halfway through a task and hits a wall only a person can clear: **
 **log into a bank**, **pick between two options**, **sign off on a risky action**. What should the
 loop do — crash? Block a thread for six hours? Guess?
 
-toolnexus gives you a fourth answer: **suspend**. Any tool can pause the loop, surface a `Request`,
+Toolnexus gives you a fourth answer: **suspend**. Any tool can pause the loop, surface a `Request`,
 and resume once it's answered — the same way in all eight ports.
 
 ## The one decision: can the human answer *now*, or *later*?
@@ -621,7 +621,7 @@ sync-or-durable fork applies. It's how the agent asks *you* something mid-run wi
 ## MCP elicitation bridge
 
 MCP servers can send a reverse request — `elicitation/create` — mid tool-call, asking the client
-to collect input. toolnexus **bridges that onto the same primitive**: a form request maps to
+to collect input. Toolnexus **bridges that onto the same primitive**: a form request maps to
 `kind: "input"` (with the server's schema in `data.schema`), a URL request maps to
 `kind: "authorization"`. Your single `waitFor` answers both your own agent's questions and any MCP
 server's elicitations — one human-in-the-loop surface for everything. The capability is advertised
@@ -639,7 +639,7 @@ to servers only when a `waitFor` is present.
 
 <Aside type="note">
 This layer shipped byte-identical across JavaScript, Python, Go, Java, C#, Elixir, Clojure and Rust. The A2A fulfilment
-path maps a suspended run to the A2A `input-required` state, so a *served* toolnexus agent can ask
+path maps a suspended run to the A2A `input-required` state, so a *served* Toolnexus agent can ask
 its caller a question too.
 </Aside>
 

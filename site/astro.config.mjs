@@ -27,7 +27,7 @@ export default defineConfig({
 	},
 	integrations: [
 		starlight({
-			title: 'toolnexus',
+			title: 'Toolnexus',
 			// Remove the right-hand "On this page" table of contents site-wide.
 			tableOfContents: false,
 			description:
@@ -187,7 +187,32 @@ export default defineConfig({
 					{ exclude: ['index'] },
 				),
 			],
-			customCss: ['@fontsource-variable/inter', './src/styles/deemwar.css'],
+			customCss: [
+				'@fontsource-variable/source-sans-3',
+				'@fontsource-variable/source-serif-4/opsz.css',
+				'@fontsource-variable/jetbrains-mono',
+				'./src/styles/theme.css',
+			],
+			// Code blocks set like plates in a manual: paper/slate ground matched to the
+			// page theme, square corners, the mono face from the theme.
+			expressiveCode: {
+				themes: ['github-dark-default', 'github-light'],
+				styleOverrides: {
+					borderRadius: '2px',
+					borderColor: 'var(--sl-color-hairline)',
+					codeFontFamily: 'var(--sl-font-mono)',
+					uiFontFamily: 'var(--sl-font)',
+					codeFontSize: '0.875rem',
+					codeBackground: ({ theme }) => (theme.type === 'dark' ? '#151c1a' : '#f4f6f5'),
+					frames: {
+						editorTabBarBackground: ({ theme }) => (theme.type === 'dark' ? '#121816' : '#fbfcfb'),
+						editorActiveTabBackground: ({ theme }) => (theme.type === 'dark' ? '#151c1a' : '#f4f6f5'),
+						terminalTitlebarBackground: ({ theme }) => (theme.type === 'dark' ? '#121816' : '#fbfcfb'),
+						terminalBackground: ({ theme }) => (theme.type === 'dark' ? '#151c1a' : '#f4f6f5'),
+						frameBoxShadowCssValue: 'none',
+					},
+				},
+			},
 			social: [
 				{ icon: 'github', label: 'GitHub', href: 'https://github.com/muthuishere/toolnexus' },
 			],

@@ -9,7 +9,7 @@ import { Tabs, TabItem, Aside } from '@astrojs/starlight/components';
 Every media provider makes you write the same code twice: a start request, then a polling
 loop that waits for the job, then a hunt through the response for the URL. Do it for image,
 video and speech, in every language you ship, and do it again when you switch provider. With
-toolnexus a provider is a **JSON style file**: you call `image`, `video` and `speech` from your
+Toolnexus a provider is a **JSON style file**: you call `image`, `video` and `speech` from your
 code, and your agent gets `generate_image`, `generate_video` and `generate_speech` as tools.
 Same engine, same polling, same results.
 </Aside>
@@ -24,7 +24,7 @@ to show that progress to someone. The full concept is on the
 
 <Aside type="caution">
 a2e result URLs **expire** (images after about 3 days, audio after about 30). If you need
-the file later, download it yourself. toolnexus does not download yet.
+the file later, download it yourself. Toolnexus does not download yet.
 </Aside>
 
 ## 1. Your code: image, then video, then speech

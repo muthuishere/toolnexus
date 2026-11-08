@@ -5,7 +5,7 @@ description: Delegate work to in-process sub-agents — agent() + team + the tas
 
 import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
 
-toolnexus already treats every tool *source* as the same thing to an LLM. Sub-agents complete
+Toolnexus already treats every tool *source* as the same thing to an LLM. Sub-agents complete
 that axiom **locally**: **an Agent is a Tool** — a system prompt × a filtered toolkit view × the
 shipped client loop, invocable as a named, described, schema'd callable. One agent can delegate
 to another **in-process**: isolated context, one result back, tokens rolled up.

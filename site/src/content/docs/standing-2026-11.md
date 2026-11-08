@@ -1,5 +1,5 @@
 ---
-title: Where toolnexus stands — Nov 2026
+title: Where Toolnexus stands — Nov 2026
 description: >-
   toolnexus 0.26.0 against 25+ agent frameworks in eight languages: a re-checked feature matrix, fresh fake-model overhead benchmarks with pinned versions, where we lose, and the gaps we should close next.
 ---
@@ -12,8 +12,8 @@ description: >-
 > judgement call. A feature cell we could not confirm from an official source today says
 > **unverified** — that means *not checked*, never *no*.
 >
-> toolnexus **0.26.0** for the feature matrix, eight ports (JS · Python · Go · Java · C# · Elixir · Clojure · Rust).
-> The feature matrix was checked on **2026-11-07**. The performance tables are a quiet re-run on **2026-11-08** (load < 4, five interleaved rounds) of toolnexus `main` (the 0.28.0 candidate) next to 0.27.0 and every competitor. Frameworks ship weekly; re-verify before quoting.
+> Toolnexus **0.26.0** for the feature matrix, eight ports (JS · Python · Go · Java · C# · Elixir · Clojure · Rust).
+> The feature matrix was checked on **2026-11-07**. The performance tables are a quiet re-run on **2026-11-08** (load < 4, five interleaved rounds) of Toolnexus `main` (the 0.28.0 candidate) next to 0.27.0 and every competitor. Frameworks ship weekly; re-verify before quoting.
 
 ## What we do NOT claim
 
@@ -30,20 +30,20 @@ description: >-
 >   ([v0.46.0](https://github.com/0xPlaygrounds/rig/releases/tag/v0.46.0)). [FROM DOCS]
 > - **Agent skills are no longer rare.** Spring AI 2, Google ADK (Py/Go/TS), LangChain4j, OpenAI
 >   Agents, CrewAI, Microsoft Agent Framework, Mastra and Eino all load skills now. [FROM DOCS]
-> - **MCP 2026-07-28 client auth (CIMD + pre-registered clients) as a toolnexus edge is
+> - **MCP 2026-07-28 client auth (CIMD + pre-registered clients) as a Toolnexus edge is
 >   [QUALITATIVE].** We ship it; we could not confirm from official docs whether each competitor does,
 >   so we do not claim they don't.
 > - **Fake-model numbers are framework overhead, not end-to-end latency.** With a real model the
 >   100 ms–seconds model call dominates. These tables show the tax a framework adds on top.
 > - **Not an orchestration engine, not a managed platform.** No graph runtime, no hosted deploy, no
 >   eval product. LangGraph, ADK and Mastra are the better choice for those.
-> - **No RAG, no vector store, no embeddings.** toolnexus has no document loaders, chunking,
+> - **No RAG, no vector store, no embeddings.** Toolnexus has no document loaders, chunking,
 >   embedding models, vector-DB connectors or retrievers. Spring AI (`VectorStore`), LangChain /
 >   LangChain4j (embedding stores), Mastra (`@mastra/rag`), Semantic Kernel, Eino, rig and swiftide
 >   ship that; we don't, by design. Retrieval is our sister project
 >   [citenexus](https://muthuishere.github.io/citenexus/): evidence-first RAG, built S3-first (the
 >   index lives in object storage, no vector database to run; pgvector is also supported), that
->   answers only from cited quotes and abstains when the evidence is weak. Today you plug it into toolnexus as a tool
+>   answers only from cited quotes and abstains when the evidence is weak. Today you plug it into Toolnexus as a tool
 >   (MCP or native), not as a built-in. [QUALITATIVE]
 > - **Smaller and younger** than every framework on this page.
 
@@ -52,12 +52,12 @@ description: >-
 ## Feature matrix (checked 2026-11-07)
 
 Legend: ✅ yes · 🟡 partial / adapter / pre-release · ❌ no · **?** unverified (not checked from an
-official source today). toolnexus cells are from this repo's
+official source today). Toolnexus cells are from this repo's
 [`CHANGELOG.md`](https://github.com/muthuishere/toolnexus/blob/main/CHANGELOG.md) and `SPEC.md`.
 
 | Framework (latest, date) | MCP client | MCP server | MCP 2026-07-28 | A2A | Agent skills | ACP | Typed judge / eval | Media gen | Languages |
 |---|---|---|---|---|---|---|---|---|---|
-| **toolnexus 0.26.0** (2026-11-06) | ✅ stdio + HTTP | 🟡 HTTP only | ✅ client + server, OAuth login (CIMD/pre-registered) | 🟡 subset (no streaming/push) | ✅ byte-exact | ✅ client | ✅ `createClassifier` + judge | ✅ §7G verbs + tools | **8** |
+| **Toolnexus 0.26.0** (2026-11-06) | ✅ stdio + HTTP | 🟡 HTTP only | ✅ client + server, OAuth login (CIMD/pre-registered) | 🟡 subset (no streaming/push) | ✅ byte-exact | ✅ client | ✅ `createClassifier` + judge | ✅ §7G verbs + tools | **8** |
 | Mastra 1.82.0 (11-04) | ✅ | ✅ | ? | ? | ✅ [rel](https://github.com/mastra-ai/mastra/releases/tag/%40mastra%2Fcore%401.82.0) | ✅ [docs](https://mastra.ai/docs/agents/acp) | ✅ `@mastra/evals` | ? | TS |
 | Google ADK py 2.14.0 · java 1.14.0 · go 2.7.1 · ts 2.4.0 | ✅ | ✅ | ? | ✅ stable in py [rel](https://github.com/google/adk-python/releases/tag/v2.14.0) | ✅ py/go/ts [go](https://github.com/google/adk-go/releases/tag/v2.6.0) | ? | ✅ `adk eval` | ? | 4 (parity varies) |
 | Spring AI 2.0.2 GA (2.1.0-RC2) | ✅ | ✅ [docs](https://docs.spring.io/spring-ai/reference/api/mcp/mcp-overview.html) | 🟡 server in RC only [rel](https://github.com/spring-projects/spring-ai/releases/tag/v2.1.0-RC2) | ✅ [blog](https://spring.io/blog/2026/01/29/spring-ai-agentic-patterns-a2a-integration/) | ✅ [blog](https://spring.io/blog/2026/01/13/spring-ai-generic-agent-skills/) | ? | ? | ? | JVM |
@@ -77,8 +77,8 @@ MCP-client cells without a link are [MEASURED]: the framework connected to our s
 in the benchmark below. Streaming is supported by every framework above and is not a differentiator, so
 it has no column. [QUALITATIVE]
 
-**What the matrix says.** [QUALITATIVE] toolnexus covers every column *of this matrix*; the matrix has no RAG column because we have nothing there (see above). For most competitors several
-cells are still unverified, so read this as our coverage, not their absence. toolnexus is the only
+**What the matrix says.** [QUALITATIVE] Toolnexus covers every column *of this matrix*; the matrix has no RAG column because we have nothing there (see above). For most competitors several
+cells are still unverified, so read this as our coverage, not their absence. Toolnexus is the only
 entry in eight languages with one contract. That's the real edge. It is *not* that any single
 column is ours alone: skills, ACP, evals, A2A and media each exist elsewhere now, and LangChain4j is
 the closest match in breadth on one runtime.
@@ -93,7 +93,7 @@ Paris and what is 2+2?"*, which means 2 LLM round-trips and 2 parallel tool call
 warmup**. Peak RSS comes from `/usr/bin/time -l`. Cold init is measured in-process, once per process, so
 it is the noisiest column. $0 spent. [MEASURED]
 
-**This sitting** (2026-11-08, afternoon IST): **five alternating rounds**. In each round toolnexus 0.27.0 (tag
+**This sitting** (2026-11-08, afternoon IST): **five alternating rounds**. In each round Toolnexus 0.27.0 (tag
 `v0.27.0`) and `main` at `e5ef449a` (the 0.28.0 candidate) ran back to back, MCP and native, in Python, JS, Go,
 Java, C# and Rust, with the order flipped every round; then every competitor in those six languages ran. Every row
 started only when the 1-minute load average was **below 4** on 18 cores (it was 2.95–3.63 at every start).
@@ -107,7 +107,7 @@ number below is the median of the five rounds**; the per-round values are on eac
 (`benchmarks/mock_llm.py`) as the earlier sittings. The JS runners start their own in-process mock, so JS absolute
 numbers are higher than the other languages'; compare JS rows with each other. **Elixir and Clojure were not
 re-run** (nothing in them changed since 0.27.0); their tables below are from the earlier quiet sitting
-(`run: "2026-11-08-quiet"`, toolnexus `main` at `f6edfbeb`).
+(`run: "2026-11-08-quiet"`, Toolnexus `main` at `f6edfbeb`).
 
 **Machine:** Apple M5 Pro (18 cores, 48 GB), macOS 26.4 · Go 1.26.3 · OpenJDK 26.0.1 (Java 21 toolchain) ·
 .NET 10.0.301 · Node 24.18.0 · CPython 3.11.15 · Elixir 1.20.2/OTP 29 · rustc 1.99.0 `--release` ·
@@ -144,9 +144,9 @@ higher than the 13.5 MB of the earlier sitting in both 0.27.0 and `main`, so it 
 
 | framework | version | tools | init ms | p50 ms | p95 ms | RSS MB | install |
 |---|---|---|--:|--:|--:|--:|---|
-| **toolnexus** | main · mcp 1.30.0 | native | 0.1 | **0.533** | 0.60 | **60.7** | **33 MB** |
-| **toolnexus** | main · mcp 1.30.0 | MCP | **19.9** | **0.924** | 1.04 | 61.9 | **33 MB** |
-| **toolnexus** (full: MCP + skill + native) | main | MCP + skill | 17.4 | 0.925 | 1.07 | 61.9 | 33 MB |
+| **Toolnexus** | main · mcp 1.30.0 | native | 0.1 | **0.533** | 0.60 | **60.7** | **33 MB** |
+| **Toolnexus** | main · mcp 1.30.0 | MCP | **19.9** | **0.924** | 1.04 | 61.9 | **33 MB** |
+| **Toolnexus** (full: MCP + skill + native) | main | MCP + skill | 17.4 | 0.925 | 1.07 | 61.9 | 33 MB |
 | MS Agent Framework | agent-framework-core 1.24.0 | MCP | 209.0 | 2.42 | 2.70 | 90.2 | 62 MB |
 | Agno | 3.1.12 · fastmcp 4.1.6 | MCP | 177.7 | 2.85 | 3.04 | 116.2 | 125 MB |
 | smolagents | 1.26.0 | MCP | 169.2 | 3.14 | 3.31 | 99.0 | — |
@@ -165,9 +165,9 @@ fastest starter before. No Python competitor has a native-tools row in this harn
 
 | framework | version | tools | init ms | p50 ms | p95 ms | RSS MB | install |
 |---|---|---|--:|--:|--:|--:|---|
-| **toolnexus** | main | native | 0.2 | **3.27** | 3.40 | 124.8 | 1 MB + 51 MB deps |
-| **toolnexus** | main | MCP | 17.9 | **3.40** | 3.60 | 126.5 | 1 MB + 51 MB deps |
-| **toolnexus** (full) | main | MCP + skill | 26.1 | 3.46 | 3.65 | 129.3 | |
+| **Toolnexus** | main | native | 0.2 | **3.27** | 3.40 | 124.8 | 1 MB + 51 MB deps |
+| **Toolnexus** | main | MCP | 17.9 | **3.40** | 3.60 | 126.5 | 1 MB + 51 MB deps |
+| **Toolnexus** (full) | main | MCP + skill | 26.1 | 3.46 | 3.65 | 129.3 | |
 | Vercel AI SDK | ai 7.0.164 | native | **0.1** | 3.53 | 3.82 | 125.9 | **30 MB** |
 | Vercel AI SDK | ai 7.0.164 · @ai-sdk/mcp 2.0.92 | MCP | **16.6** | 3.61 | 3.86 | 126.5 | **30 MB** |
 | OpenAI Agents JS | 0.21.0 | MCP | 36.9 | 4.24 | 4.79 | 160.6 | 83 MB |
@@ -185,10 +185,10 @@ than the rest.
 
 | framework | version | tools | init ms | p50 ms | p95 ms | RSS MB | binary |
 |---|---|---|--:|--:|--:|--:|---|
-| **toolnexus** (native) | main | native | 0.0 | **0.274** | 0.31 | **14.5** | **11.7 MB** |
+| **Toolnexus** (native) | main | native | 0.0 | **0.274** | 0.31 | **14.5** | **11.7 MB** |
 | Eino | 0.9.22 · eino-ext mcp 0.0.9 | MCP | 14.6 | **0.363** | 0.49 | 29.0 | 24.8 MB |
-| **toolnexus** | main · mcp-go 0.48.0 | MCP | **13.8** | 0.367 | **0.43** | **16.8** | **11.7 MB** |
-| **toolnexus** (full) | main | MCP + skill | 11.6 | 0.379 | 0.43 | 16.8 | 11.7 MB |
+| **Toolnexus** | main · mcp-go 0.48.0 | MCP | **13.8** | 0.367 | **0.43** | **16.8** | **11.7 MB** |
+| **Toolnexus** (full) | main | MCP + skill | 11.6 | 0.379 | 0.43 | 16.8 | 11.7 MB |
 | langchaingo | 0.1.15 | native | 0.1 | 0.423 | 0.72 | 21.1 | 16.8 MB |
 | Google ADK Go | adk 1.9.0 · go-sdk 1.4.1 ¹ | MCP | 0.1 ¹ | 0.477 | 0.69 | 24.5 | 22.7 MB |
 | Genkit Go | 1.14.0 | MCP | 33.4 | 2.111 | 2.42 | 33.8 | 28.5 MB |
@@ -203,9 +203,9 @@ lazily, so its init leaves out the MCP connect.
 
 | framework | version | tools | init ms | p50 ms | p95 ms | RSS MB | install |
 |---|---|---|--:|--:|--:|--:|---|
-| **toolnexus** (native) | 0.28.0 | native | **26.7** | **1.74** | 2.56 | **119.1** | 11 MB |
-| **toolnexus** (full: MCP + `skill` + native) | 0.28.0 | MCP + skill | **173.7** | **1.97** | **2.40** | 146.2 | 11 MB |
-| **toolnexus** | 0.28.0 · in-house stdio MCP client (#204) | MCP | 174.2 | **2.15** | 2.54 | 140.9 | 11 MB |
+| **Toolnexus** (native) | 0.28.0 | native | **26.7** | **1.74** | 2.56 | **119.1** | 11 MB |
+| **Toolnexus** (full: MCP + `skill` + native) | 0.28.0 | MCP + skill | **173.7** | **1.97** | **2.40** | 146.2 | 11 MB |
+| **Toolnexus** | 0.28.0 · in-house stdio MCP client (#204) | MCP | 174.2 | **2.15** | 2.54 | 140.9 | 11 MB |
 | LangChain4j | 1.23.0 · mcp 1.23.0-beta33 | MCP | 258.7 | 2.17 | 2.79 | **140.0** | **8.9 MB** |
 | Spring AI + SkillsTool | 2.0.2 · spring-ai-agent-utils 0.13.0 | MCP + skill | 1219 ⁴ | 3.44 | 5.00 | 602.1 | 123 MB jar |
 | Spring AI | 2.0.2 · Boot 4.1.2 | MCP | 1249 ⁴ | 3.52 | 5.27 | 571.2 | 123 MB jar |
@@ -225,11 +225,11 @@ MCP lazily. ⁴ Spring's init is Spring Boot context start including MCP discove
 
 | framework | version | tools | init ms | p50 ms | p95 ms | RSS MB | install |
 |---|---|---|--:|--:|--:|--:|---|
-| **toolnexus** (native) | main | native | **12.2** | **0.379** | **0.45** | **63.1** | **4.0 MB** |
+| **Toolnexus** (native) | main | native | **12.2** | **0.379** | **0.45** | **63.1** | **4.0 MB** |
 | Semantic Kernel | 1.82.0 | native | 49.8 | 0.458 | 0.58 | 76.6 | 9.5 MB |
 | Microsoft.Extensions.AI | 10.11.0 | native | 29.9 | 0.488 | 0.58 | 74.7 | 7.9 MB |
-| **toolnexus** | main · ModelContextProtocol 1.4.0 | MCP | **61.2** | **0.550** | **0.64** | **75.1** | **4.0 MB** |
-| **toolnexus** (full) | main | MCP + skill | 83.6 | 0.581 | 0.66 | 78.9 | 4.0 MB |
+| **Toolnexus** | main · ModelContextProtocol 1.4.0 | MCP | **61.2** | **0.550** | **0.64** | **75.1** | **4.0 MB** |
+| **Toolnexus** (full) | main | MCP + skill | 83.6 | 0.581 | 0.66 | 78.9 | 4.0 MB |
 | MS Agent Framework | Microsoft.Agents.AI 1.28.0 · MCP 2.4.0 | MCP | 88.5 | 0.653 | 0.78 | 85.7 | 12 MB |
 
 **Win on native tools** against Semantic Kernel and MEAI (17% and 22% lower p50, lowest init and RSS), and **a win
@@ -240,22 +240,22 @@ gone:** 61.2 ms against MAF's 88.5 ms (it was 121.6 vs 101.8 ms in the earlier s
 
 | framework | version | tools | init ms | p50 ms | p95 ms | RSS MB |
 |---|---|---|--:|--:|--:|--:|
-| **toolnexus** | main | native | 8.6 | **0.351** | 0.41 | 111.5 |
-| **toolnexus** | main (in-house MCP) | MCP | 29.6 | 0.438 | 0.51 | 114.7 |
+| **Toolnexus** | main | native | 8.6 | **0.351** | 0.41 | 111.5 |
+| **Toolnexus** | main (in-house MCP) | MCP | 29.6 | 0.438 | 0.51 | 114.7 |
 | brainlid/langchain ⁵ | 0.15.8 | native | 0.0 | 0.442 | 0.53 | 111.7 |
 
-**Win.** toolnexus is 21% lower when both run native tools. brainlid/langchain has no MCP client, so it has no
+**Win.** Toolnexus is 21% lower when both run native tools. brainlid/langchain has no MCP client, so it has no
 MCP row. ⁵ re-run after the quiet window at 1-min load 5.1 (its deps needed a fetch).
 
 ### Clojure
 
 | framework | host | tools | init ms | p50 ms | p95 ms | RSS MB |
 |---|---|---|--:|--:|--:|--:|
-| toolnexus main · koine 0.11.0 | cljgo 0.9.0 binary | MCP | 27 | 6.9 | 7.0 | 35.0 |
-| toolnexus main · koine 0.11.0 | cljgo 0.9.0 binary | MCP + skill | 19 | 7.4 | 7.5 | 35.2 |
-| toolnexus main · koine 0.11.0 | JVM (Clojure 1.12.5) | MCP | 25 | 7.8 | 9.6 | 526.5 |
-| toolnexus main | cljgo | native | 0 | 1.4 | 1.5 | 33.6 |
-| toolnexus main | JVM | native | 1 | 1.8 | 3.7 | 679.8 |
+| Toolnexus main · koine 0.11.0 | cljgo 0.9.0 binary | MCP | 27 | 6.9 | 7.0 | 35.0 |
+| Toolnexus main · koine 0.11.0 | cljgo 0.9.0 binary | MCP + skill | 19 | 7.4 | 7.5 | 35.2 |
+| Toolnexus main · koine 0.11.0 | JVM (Clojure 1.12.5) | MCP | 25 | 7.8 | 9.6 | 526.5 |
+| Toolnexus main | cljgo | native | 0 | 1.4 | 1.5 | 33.6 |
+| Toolnexus main | JVM | native | 1 | 1.8 | 3.7 | 679.8 |
 
 **No competitor exists, and this is still our slowest port.** The MCP path costs about 5.5 ms more than native
 tools. The cause is a polling read loop in our in-house MCP client; the fix is deferred and tracked in
@@ -265,9 +265,9 @@ tools. The cause is a polling read loop in our in-house MCP client; the fix is d
 
 | framework | version | tools | init ms | p50 ms | p95 ms | RSS MB | binary |
 |---|---|---|--:|--:|--:|--:|---|
-| **toolnexus** (native) | main | native | 0.1 | **0.300** | 0.34 | **11.8** | 18.3 MB |
-| **toolnexus** | main · own stdio MCP client | MCP | 18.2 | **0.342** | **0.39** | 16.8 | 18.3 MB |
-| **toolnexus** (full) | main | MCP + skill | **11.7** | 0.363 | 0.46 | 16.8 | 18.3 MB |
+| **Toolnexus** (native) | main | native | 0.1 | **0.300** | 0.34 | **11.8** | 18.3 MB |
+| **Toolnexus** | main · own stdio MCP client | MCP | 18.2 | **0.342** | **0.39** | 16.8 | 18.3 MB |
+| **Toolnexus** (full) | main | MCP + skill | **11.7** | 0.363 | 0.46 | 16.8 | 18.3 MB |
 | AutoAgents | 0.4.0 | MCP | 19.0 | 0.368 | 0.44 | **13.2** | — |
 | swiftide | 0.34.0 · rmcp 2.2.0 ³ | MCP | 16.2 | 0.436 | 0.55 | 16.9 | 17.5 MB |
 | rig | rig-core 0.46.0 · rmcp 3.9.0 | MCP | 21.7 | 0.437 | 0.51 | 23.0 | **15.7 MB** |

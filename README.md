@@ -1,4 +1,4 @@
-# toolnexus
+# Toolnexus
 
 **The simplest agent library, and the fastest in most languages we've measured.** Build in the
 language you're comfortable with: JavaScript, Python, Go, Java, C#, Elixir, Clojure or Rust, with the
@@ -28,7 +28,7 @@ Clojure and Rust**, held to one conformance contract ([`SPEC.md`](SPEC.md)) so t
 An MCP server tool, an agent skill, your own function, a remote HTTP endpoint, a built-in
 shell/file tool, a remote A2A agent and an in-process sub-agent are all *the same thing* to a
 model: a named, described, schema'd callable (an insight borrowed from
-[opencode](https://github.com/anomalyco/opencode)). toolnexus puts every one of them behind one
+[opencode](https://github.com/anomalyco/opencode)). Toolnexus puts every one of them behind one
 `Tool` interface, emits the schema in OpenAI / Anthropic / Gemini shape, and drives any model with
 them through one client loop.
 
@@ -77,7 +77,7 @@ sent to the host it belongs to. A local server or proxy needs `apiKey` or `apiKe
 - **Human in the loop** — any tool can suspend on a `Request`; a `waitFor` host resolves it, or the run returns `pending` and resumes later. [Suspension](https://muthuishere.github.io/toolnexus/suspension/)
 - **The loop** — parallel and chained tool calls, hooks (including an `afterRound` hook), streaming with retry events, retries and resilience, opt-in model fallback on overload, stop-reason recovery, reactive compaction on context overflow, prompt caching and tool tiers, sub-agents, observability. [Streaming](https://muthuishere.github.io/toolnexus/streaming/) · [Resilience](https://muthuishere.github.io/toolnexus/resilience/) · [Sub-agents](https://muthuishere.github.io/toolnexus/subagents/)
 - **Memory** — a memory hierarchy for persona agents, with built-in dreaming: a pass that checks memory against the transcripts and fixes or prunes it. [Memory](https://muthuishere.github.io/toolnexus/memory/) · [Dreaming](https://muthuishere.github.io/toolnexus/dreaming/)
-- **Run without a model** — a key-free local mock server for every wire toolnexus speaks: chat, streaming, tool calls, classifiers, media and faults. [Mock server](https://muthuishere.github.io/toolnexus/cookbook/mock-server/)
+- **Run without a model** — a key-free local mock server for every wire Toolnexus speaks: chat, streaming, tool calls, classifiers, media and faults. [Mock server](https://muthuishere.github.io/toolnexus/cookbook/mock-server/)
 
 Exact per-port spellings and any port-specific gaps are in [`CHANGELOG.md`](CHANGELOG.md) and each
 port's API reference.
@@ -108,11 +108,11 @@ per-request overhead over MCP in Python, JavaScript, C# and Rust, level with Ein
 | Clojure | [`net.clojars.muthuishere/toolnexus`](https://clojars.org/net.clojars.muthuishere/toolnexus) | [`clojure/`](clojure/README.md) · [API](https://muthuishere.github.io/toolnexus/api/clojure/) |
 | Rust | [`toolnexus`](https://crates.io/crates/toolnexus) | [`rust/`](rust/README.md) · [API](https://muthuishere.github.io/toolnexus/api/rust/) |
 
-## Built on toolnexus
+## Built on Toolnexus
 
 - **[wfnexus](https://muthuishere.github.io/wfnexus/)**: typed pipelines for coding agents. Each step is a whole agent with scoped tools, a budget, guardrails and a JSON-schema output.
 
-Built something on toolnexus? Open a PR adding one line here.
+Built something on Toolnexus? Open a PR adding one line here.
 
 ## Docs and contract
 

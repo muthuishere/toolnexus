@@ -1,6 +1,6 @@
 ---
 title: "Recipe — one CLI process per turn"
-description: "A complete, copy-pasteable recipe in all eight ports that turns any prompt-in, text-out CLI (claude -p, codex exec, …) into a tool-calling model: render the request, run the process, parse the reply into text or tool calls. toolnexus runs the tools."
+description: "A complete, copy-pasteable recipe in all eight ports that turns any prompt-in, text-out CLI (claude -p, codex exec, …) into a tool-calling model: render the request, run the process, parse the reply into text or tool calls. Toolnexus runs the tools."
 ---
 
 import { Tabs, TabItem, Aside } from '@astrojs/starlight/components';
@@ -9,7 +9,7 @@ import { Tabs, TabItem, Aside } from '@astrojs/starlight/components';
 Some CLIs have no ACP mode, or you do not want a long-lived agent process: you want one answer per
 call, from a subscription you already pay for. Treat the CLI as a plain model. Each turn,
 `generate` writes the whole request (tools + transcript + a reply contract) to the CLI's stdin,
-and parses what comes back into either a final answer or tool calls. **toolnexus runs the tools**,
+and parses what comes back into either a final answer or tool calls. **Toolnexus runs the tools**,
 so the CLI never needs MCP, and its own tools can be switched off entirely.
 </Aside>
 
@@ -22,7 +22,7 @@ so the CLI never needs MCP, and its own tools can be switched off entirely.
 3. **Parse.** Take the outermost `{…}` from the reply. `tool_calls` becomes `toolCalls`, `content`
    becomes the answer, anything else is treated as the answer as-is.
 
-toolnexus then executes the calls and calls `generate` again with the results in the transcript,
+Toolnexus then executes the calls and calls `generate` again with the results in the transcript,
 until the CLI answers with `content`. Every turn is a fresh process, so the CLI holds no state:
 the transcript you render **is** the memory.
 
@@ -860,8 +860,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 | | how |
 |---|---|
-| all eight recipes | compiled and run on toolnexus 0.25.0 against a fake CLI ([`fake_cli.py`](https://github.com/muthuishere/toolnexus/blob/main/tools/mock-llm/fake_cli.py): replies with a `tool_calls` object, then with `content` once it sees `[tool add] …` in the prompt). Each made one `add(19, 23)` call and answered "The sum is 42." The Java prompt was diffed against the JavaScript one: identical |
-| Go, live (0.25.0) | `claude -p` with the lean flags above: called `add(19, 23)` through toolnexus, answered "The sum of 19 and 23 is 42." |
+| all eight recipes | compiled and run on Toolnexus 0.25.0 against a fake CLI ([`fake_cli.py`](https://github.com/muthuishere/toolnexus/blob/main/tools/mock-llm/fake_cli.py): replies with a `tool_calls` object, then with `content` once it sees `[tool add] …` in the prompt). Each made one `add(19, 23)` call and answered "The sum is 42." The Java prompt was diffed against the JavaScript one: identical |
+| Go, live (0.25.0) | `claude -p` with the lean flags above: called `add(19, 23)` through Toolnexus, answered "The sum of 19 and 23 is 42." |
 | JavaScript, Python, live (0.24.0) | `claude -p` with the lean flags above (Claude Code 2.1.318), same call and answer in ~5 s; JavaScript also with `codex exec` (codex-cli 0.160.0): "The sum is 42." in ~15 s |
 
 ## Per-CLI notes
@@ -872,7 +872,7 @@ CLI flags move between releases. Re-check `--help` before relying on these.
 
 | CLI (verified on) | command | flags and what they turn off | what still loads | context per trivial turn |
 |---|---|---|---|---|
-| **Claude Code** (2.1.318) | `claude -p` (prompt on stdin, answer on stdout) | `--disable-slash-commands` (no skills / slash commands), `--strict-mcp-config` (only MCP from `--mcp-config`, here none), `--setting-sources ""` (no user / project / local settings, hooks, plugins), `--no-session-persistence` (nothing written to disk), `--tools ""` (no built-in tools; toolnexus runs yours) | Claude Code's base system prompt; subscription login (keychain) | **36,535** default → **21,076** with the first four flags → **2,959** adding `--tools ""` |
+| **Claude Code** (2.1.318) | `claude -p` (prompt on stdin, answer on stdout) | `--disable-slash-commands` (no skills / slash commands), `--strict-mcp-config` (only MCP from `--mcp-config`, here none), `--setting-sources ""` (no user / project / local settings, hooks, plugins), `--no-session-persistence` (nothing written to disk), `--tools ""` (no built-in tools; Toolnexus runs yours) | Claude Code's base system prompt; subscription login (keychain) | **36,535** default → **21,076** with the first four flags → **2,959** adding `--tools ""` |
 | **Codex** (codex-cli 0.160.0) | `codex exec … -` (prompt on stdin) | `--skip-git-repo-check` (run outside a repo), `--ephemeral` (no session files), `-c mcp_servers={}`, `-c project_doc_max_bytes=0` (no AGENTS.md); also available: `--disable apps --disable plugins --disable hooks`, `-c skills.include_instructions=false`, `-m <model>` | codex's base prompt and its built-in tools (no verified knob removes them); its progress goes to stderr, only the final message to stdout | 26,905 → 17,204 (codex-acp 0.16.0 research, same knobs) |
 
 Any other CLI fits as long as it reads a prompt and prints an answer. If it only takes the prompt

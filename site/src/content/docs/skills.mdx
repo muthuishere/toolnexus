@@ -1,6 +1,6 @@
 ---
 title: Agent skills
-description: What an agent skill is, how toolnexus loads a skills/ folder with progressive disclosure, and what toolnexus adds on top — across eight languages.
+description: What an agent skill is, how Toolnexus loads a skills/ folder with progressive disclosure, and what Toolnexus adds on top — across eight languages.
 ---
 
 import { Aside, Tabs, TabItem, LinkButton } from '@astrojs/starlight/components';
@@ -16,10 +16,10 @@ up front. It first sees only the short `name` + `description` of each available 
 matches, it *loads* that one skill — and only then are the full instructions (and a view of the
 skill's files) pulled into the conversation. Skills scale to hundreds without flooding the context.
 
-## How toolnexus uses skills
+## How Toolnexus uses skills
 
-toolnexus globs a `skills/` folder for every `**/SKILL.md`, and exposes **one** `skill` tool. The
-model calls it with a skill name; toolnexus injects that skill's body plus a sampled list of its
+Toolnexus globs a `skills/` folder for every `**/SKILL.md`, and exposes **one** `skill` tool. The
+model calls it with a skill name; Toolnexus injects that skill's body plus a sampled list of its
 files, resolved against the skill's base directory.
 
 <Tabs syncKey="lang">
@@ -74,7 +74,7 @@ let tk = create_toolkit(ToolkitOptions {
 ## The `SKILL.md` format
 
 A skill is frontmatter + instructions. Resources live next to it and are referenced by relative
-path. This is the shared fixture toolnexus tests every port against:
+path. This is the shared fixture Toolnexus tests every port against:
 
 ```markdown
 ---
@@ -102,12 +102,12 @@ skills/
 
 <Aside type="tip">
 Relative paths in the body (like `scripts/greet.sh`) resolve against the base directory that
-toolnexus prints in the `skill` tool's output — so the model always knows where "here" is.
+Toolnexus prints in the `skill` tool's output — so the model always knows where "here" is.
 </Aside>
 
-## What toolnexus adds on top
+## What Toolnexus adds on top
 
-The skill *format* is simple by design. toolnexus makes it a first-class tool source — the same
+The skill *format* is simple by design. Toolnexus makes it a first-class tool source — the same
 way in eight languages:
 
 - **One `skill` tool, every skill.** No matter how many skills the folder holds, the model sees
