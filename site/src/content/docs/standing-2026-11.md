@@ -39,9 +39,10 @@ description: >-
 > - **No RAG, no vector store, no embeddings.** toolnexus has no document loaders, chunking,
 >   embedding models, vector-DB connectors or retrievers. Spring AI (`VectorStore`), LangChain /
 >   LangChain4j (embedding stores), Mastra (`@mastra/rag`), Semantic Kernel, Eino, rig and swiftide
->   ship that; we don't, by design. Retrieval is our sibling project
->   [citenexus](https://muthuishere.github.io/citenexus/): evidence-first RAG that answers only from
->   cited quotes and abstains when the evidence is weak. Today you plug it into toolnexus as a tool
+>   ship that; we don't, by design. Retrieval is our sister project
+>   [citenexus](https://muthuishere.github.io/citenexus/): evidence-first RAG, built S3-first (the
+>   index lives in object storage, no vector database to run; pgvector is also supported), that
+>   answers only from cited quotes and abstains when the evidence is weak. Today you plug it into toolnexus as a tool
 >   (MCP or native), not as a built-in. [QUALITATIVE]
 > - **Smaller and younger** than every framework on this page.
 
